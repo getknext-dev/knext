@@ -1,0 +1,24 @@
+# Antigravity Rules
+
+## Architectural Standards: Bun Bytecode & NFT
+
+All changes to the `distribution-builder`, `cli`, or `runner` packages must adhere to the **Bun Bytecode & NFT Strategy**.
+
+### Core Principles
+1.  **Single Binary Output**: The final container image must contain a single executable binary.
+2.  **No `node_modules` at Runtime**: Do NOT copy `node_modules` to the final image. Dependencies must be bundled (NFT).
+3.  **Bytecode Compilation**: Always use `bun build --compile --bytecode`.
+4.  **Static Asset Offloading**: `public/` and `.next/static/` must be offloaded to object storage.
+
+### Knowledge Base
+Before modifying the build pipeline, verify alignment with:
+`docs/knowledge/bun-bytecode-strategy.md`
+
+### Divergence Checks
+*   [ ] Verify `bun build` command includes `--bytecode`.
+*   [ ] Verify final Dockerfile (Stage 2) does NOT contain `COPY ... node_modules`.
+*   [ ] Verify `generate-bun-manifest.ts` (or equivalent) is used to trace dependencies.
+
+## Coding Style
+*   **Go**: Standard `gofmt` and `goimports`.
+*   **TypeScript**: Biome linting rules.

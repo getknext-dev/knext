@@ -1,8 +1,8 @@
-import { getDbPool } from '@knative-next/framework';
-
-export const dynamic = 'force-dynamic';
+import { getDbPool } from '@knative-next/lib';
+import { unstable_noStore } from 'next/cache';
 
 async function setupDatabase() {
+  unstable_noStore(); // Prevent static prerendering
   const db = getDbPool();
 
   try {
@@ -10,11 +10,17 @@ async function setupDatabase() {
     await db.query(`
       CREATE TABLE IF NOT EXISTS files (
         id SERIAL PRIMARY KEY,
-        name TEXT NOT NULL,
+        name TEXT NOT NULL UNIQUE,
         size INTEGER NOT NULL,
+        mime_type TEXT,
+        storage_path TEXT,
         uploaded_at TIMESTAMP DEFAULT NOW()
       );
     `);
+
+    // Add missing columns if table exists (migration)
+    await db.query(`ALTER TABLE files ADD COLUMN IF NOT EXISTS mime_type TEXT;`).catch(() => {});
+    await db.query(`ALTER TABLE files ADD COLUMN IF NOT EXISTS storage_path TEXT;`).catch(() => {});
 
     // Create users table
     await db.query(`
@@ -44,7 +50,8 @@ async function setupDatabase() {
         INSERT INTO users (name, email, role) VALUES 
         ('Admin User', 'admin@example.com', 'admin'),
         ('John Doe', 'john@example.com', 'user'),
-        ('Jane Smith', 'jane@example.com', 'editor');
+        ('Jane Smith', 'jane@example.com', 'editor')
+        ON CONFLICT (email) DO NOTHING;
       `);
     }
 

@@ -1,25 +1,19 @@
-FROM node:18-alpine AS base
+# OpenNext Production Dockerfile
+# Uses pre-built .open-next output (built by kn-next CLI)
+# Build from repo root: docker build -f apps/file-manager/Dockerfile .
 
-# Production image, copy all the files and run next
-FROM base AS runner
+FROM node:20-alpine AS runner
 WORKDIR /app
 
 ENV NODE_ENV=production
-ENV NEXT_TELEMETRY_DISABLED=1
+ENV PORT=3000
 
-RUN addgroup --system --gid 1001 nodejs
-RUN adduser --system --uid 1001 nextjs
-
-# Copy the standalone build
-COPY --chown=nextjs:nodejs .next/standalone ./
-COPY --chown=nextjs:nodejs .next/static ./.next/static
-COPY --chown=nextjs:nodejs public ./public
-
-USER nextjs
+# Copy pre-built OpenNext server bundle (built by CLI, not Docker)
+COPY apps/file-manager/.open-next/server-functions/default ./
 
 EXPOSE 3000
 
-ENV PORT=3000
-ENV HOSTNAME="0.0.0.0"
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+    CMD wget --no-verbose --tries=1 --spider http://localhost:3000/api/health || exit 1
 
-CMD ["node", "server.js"]
+CMD ["node", "index.mjs"]

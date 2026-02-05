@@ -1,7 +1,7 @@
 'use server';
 
-import { getDbPool, getMinioClient } from '@knative-next/framework';
-import { revalidatePath } from 'next/cache';
+import { getDbPool, getMinioClient } from '@knative-next/lib';
+import { revalidatePath, revalidateTag } from 'next/cache';
 
 export async function uploadFile(formData: FormData) {
   const file = formData.get('file') as File;
@@ -11,27 +11,38 @@ export async function uploadFile(formData: FormData) {
   }
 
   try {
-    const minio = getMinioClient();
-    const bucketName = 'assets';
+    const db = getDbPool();
 
-    // Ensure bucket exists
-    const bucketExists = await minio.bucketExists(bucketName);
-    if (!bucketExists) {
-      await minio.makeBucket(bucketName, 'us-east-1');
+    // Try to upload to object storage if available
+    let storagePath = null;
+    try {
+      const minio = getMinioClient();
+      const bucketName = 'assets';
+
+      const bucketExists = await minio.bucketExists(bucketName);
+      if (!bucketExists) {
+        await minio.makeBucket(bucketName, 'us-east-1');
+      }
+
+      const buffer = Buffer.from(await file.arrayBuffer());
+      await minio.putObject(bucketName, file.name, buffer, buffer.length);
+      storagePath = `${bucketName}/${file.name}`;
+    } catch (storageError) {
+      console.warn('Object storage unavailable, storing metadata only:', storageError);
     }
 
-    // Upload file
-    const buffer = Buffer.from(await file.arrayBuffer());
-    await minio.putObject(bucketName, file.name, buffer, buffer.length);
-
-    // Store metadata in DB
-    const db = getDbPool();
+    // Store file metadata in database
     await db.query(
-      'INSERT INTO files (name, size, uploaded_at) VALUES ($1, $2, NOW()) ON CONFLICT DO NOTHING',
-      [file.name, file.size],
+      `INSERT INTO files (name, size, mime_type, storage_path, uploaded_at) 
+       VALUES ($1, $2, $3, $4, NOW()) 
+       ON CONFLICT (name) DO UPDATE SET size = $2, uploaded_at = NOW()`,
+      [file.name, file.size, file.type || 'application/octet-stream', storagePath],
     );
 
-    revalidatePath('/');
+    // Invalidate the files cache tag - this refreshes FilesContent
+    revalidateTag('files', 'default'); // Next.js 16 requires profile param
+    revalidatePath('/'); // Also revalidate the path as backup
+
     return { success: true };
   } catch (error) {
     console.error('Upload error:', error);

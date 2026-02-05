@@ -1,12 +1,16 @@
-import { getDbPool } from '@knative-next/framework';
-import { revalidatePath } from 'next/cache';
-
-export const dynamic = 'force-dynamic';
+import { getDbPool } from '@knative-next/lib';
+import { revalidatePath, unstable_noStore } from 'next/cache';
 
 async function getUsers() {
-  const db = getDbPool();
-  const res = await db.query('SELECT * FROM users ORDER BY created_at DESC');
-  return res.rows;
+  unstable_noStore(); // Prevent static prerendering
+  try {
+    const db = getDbPool();
+    const res = await db.query('SELECT * FROM users ORDER BY created_at DESC');
+    return res.rows;
+  } catch (error) {
+    console.error('Error fetching users:', error);
+    return [];
+  }
 }
 
 async function addUser(formData: FormData) {

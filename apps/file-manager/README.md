@@ -1,36 +1,164 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# File Manager - Knative Next.js Demo
 
-## Getting Started
+A demo Next.js 16 application showcasing the Knative Next.js framework with GCS caching, Redis tag invalidation, and real-time observability.
 
-First, run the development server:
+## Features
+
+- 📁 File listing with metadata
+- 📊 Dashboard with statistics
+- 📜 Audit logs with infinite scroll
+- 🔍 Real-time cache monitor
+- ⚡ Tag-based cache invalidation
+
+## Quick Deploy
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+./deploy.sh
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+This command handles everything:
+1. Builds Next.js with `pnpm build`
+2. Runs OpenNext: `npx open-next build`
+3. Syncs static assets to GCS
+4. Builds & pushes Docker image with BUILD_ID tag
+5. Updates `knative-service.yaml`
+6. Deploys to Knative
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Configuration
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+### kn-next.config.ts
 
-## Learn More
+```typescript
+const config: KnativeNextConfig = {
+    name: 'file-manager',
+    storage: {
+        provider: 'gcs',
+        bucket: 'knative-next-assets-banna',
+        publicUrl: 'https://storage.googleapis.com/knative-next-assets-banna',
+    },
+    cache: {
+        provider: 'redis',
+        url: 'redis://redis.default.svc.cluster.local:6379',
+        keyPrefix: 'file-manager',
+    },
+    registry: 'us-central1-docker.pkg.dev/gsw-mcp/knative-next-repo',
+};
+```
 
-To learn more about Next.js, take a look at the following resources:
+### Environment Variables
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+| Variable | Description |
+|----------|-------------|
+| `GCS_BUCKET_NAME` | GCS bucket for ISR cache |
+| `GCS_BUCKET_KEY_PREFIX` | Key prefix (default: app name) |
+| `REDIS_URL` | Redis connection URL |
+| `DATABASE_URL` | PostgreSQL connection string |
+| `GOOGLE_APPLICATION_CREDENTIALS` | Path to GCS service account key |
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+## API Endpoints
 
-## Deploy on Vercel
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/health` | GET | Kubernetes health check |
+| `/api/audit?page=N` | GET | Paginated audit logs (20/page) |
+| `/api/cache-stats` | GET | Cache hit/miss statistics |
+| `/api/cache/events` | GET | SSE stream of cache events |
+| `/api/cache/invalidate` | POST | Invalidate cache by tag |
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+### Cache Invalidation
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+```bash
+# Invalidate all audit-related cache
+curl -X POST http://localhost:3000/api/cache/invalidate \
+  -H "Content-Type: application/json" \
+  -d '{"tag": "audit"}'
+```
+
+### Cache Tags
+
+| Tag | Used By |
+|-----|---------|
+| `audit` | Audit logs API |
+| `audit-logs` | Audit logs API (alias) |
+| `dashboard` | Dashboard page |
+
+## Pages
+
+| Route | Description |
+|-------|-------------|
+| `/` | File listing with upload |
+| `/dashboard` | Statistics overview |
+| `/users` | User management |
+| `/audit` | Audit logs with infinite scroll |
+| `/cache` | Cache monitor (SSE) |
+| `/setup` | Database setup wizard |
+
+## Development
+
+```bash
+# Install dependencies
+pnpm install
+
+# Run development server
+pnpm dev
+
+# Build for production
+pnpm build
+
+# Run OpenNext build
+npx open-next build
+```
+
+## Deployment Files
+
+| File | Purpose |
+|------|---------|
+| `deploy.sh` | Automated deployment script |
+| `knative-service.yaml` | Knative service manifest |
+| `Dockerfile.opennext` | Production Docker image |
+| `open-next.config.ts` | Auto-generated OpenNext config |
+| `kn-next.config.ts` | User configuration |
+| `redis.yaml` | Redis deployment for tag cache |
+
+## Cache Architecture
+
+```
+Browser Request
+      │
+      ▼
+┌─────────────────┐
+│ Knative Service │
+└────────┬────────┘
+         │
+    ┌────┴────┐
+    ▼         ▼
+┌───────┐ ┌───────┐
+│  GCS  │ │ Redis │
+│ Cache │ │ Tags  │
+└───────┘ └───────┘
+```
+
+- **GCS Cache**: Stores ISR data, fetch cache, images
+- **Redis Tags**: Stores tag → keys mapping for invalidation
+
+## Observability
+
+### Cache Monitor (`/cache`)
+
+Real-time visualization of:
+- Cache hits/misses
+- Event timeline
+- Hit rate statistics
+- Tag invalidation testing
+
+### Events API (`/api/cache/events`)
+
+Server-Sent Events stream:
+
+```javascript
+const es = new EventSource('/api/cache/events');
+es.onmessage = (event) => {
+  const data = JSON.parse(event.data);
+  // { type: 'HIT', layer: 'gcs', key: '...', durationMs: 12 }
+};
+```
