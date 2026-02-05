@@ -1,22 +1,27 @@
-import { getDbPool } from '@knative-next/framework';
-
-export const dynamic = 'force-dynamic';
+import { getDbPool } from '@knative-next/lib';
+import { unstable_noStore } from 'next/cache';
 
 async function getStats() {
-  const db = getDbPool();
+  unstable_noStore(); // Prevent static prerendering
+  try {
+    const db = getDbPool();
 
-  const fileStats = await db.query(
-    'SELECT COUNT(*) as count, COALESCE(SUM(size), 0) as total_size FROM files',
-  );
-  const userStats = await db.query('SELECT COUNT(*) as count FROM users');
-  const recentFiles = await db.query('SELECT * FROM files ORDER BY uploaded_at DESC LIMIT 5');
+    const fileStats = await db.query(
+      'SELECT COUNT(*) as count, COALESCE(SUM(size), 0) as total_size FROM files',
+    );
+    const userStats = await db.query('SELECT COUNT(*) as count FROM users');
+    const recentFiles = await db.query('SELECT * FROM files ORDER BY uploaded_at DESC LIMIT 5');
 
-  return {
-    fileCount: fileStats.rows[0].count,
-    totalSize: fileStats.rows[0].total_size,
-    userCount: userStats.rows[0].count,
-    recentFiles: recentFiles.rows,
-  };
+    return {
+      fileCount: fileStats.rows[0].count,
+      totalSize: fileStats.rows[0].total_size,
+      userCount: userStats.rows[0].count,
+      recentFiles: recentFiles.rows,
+    };
+  } catch (error) {
+    console.error('Error fetching dashboard stats:', error);
+    return { fileCount: 0, totalSize: 0, userCount: 0, recentFiles: [] };
+  }
 }
 
 export default async function DashboardPage() {

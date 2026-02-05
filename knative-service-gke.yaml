@@ -1,0 +1,39 @@
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: next-index
+  namespace: default
+spec:
+  template:
+    metadata:
+      annotations:
+        autoscaling.knative.dev/minScale: "1"
+        autoscaling.knative.dev/target: "100"
+        force-update: "1767750000"
+    spec:
+      containers:
+        - image: us-central1-docker.pkg.dev/gsw-mcp/knative-next-repo/file-manager:alpine
+          env:
+            - name: NEXT_HANDLER_PATH
+              value: "/"
+            - name: NEXT_PROJECT_ROOT
+              value: "apps/file-manager"
+            - name: CERBOS_URL
+              value: "cerbos.default.svc.cluster.local:3593"
+            - name: MINIO_ENDPOINT
+              value: "minio.default.svc.cluster.local"
+            - name: MINIO_PORT
+              value: "80"
+            - name: MINIO_USE_SSL
+              value: "false"
+            - name: DATABASE_URL
+              value: "postgresql://postgres:password@postgres.default.svc.cluster.local:5432/filemanager?sslmode=disable"
+            - name: MINIO_ACCESS_KEY
+              value: "minio"
+            - name: MINIO_SECRET_KEY
+              value: "minio123"
+            # OTel disabled for now on GKE until Jaeger is deployed
+            # - name: OTEL_EXPORTER_OTLP_ENDPOINT
+            #   value: "http://jaeger-collector.default.svc.cluster.local:4317"
+          ports:
+            - containerPort: 3000

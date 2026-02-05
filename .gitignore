@@ -1,38 +1,53 @@
 # Dependencies
-node_modules
-.pnp
-.pnp.js
-
-# Testing
-coverage
+node_modules/
+.pnpm-store
 
 # Next.js
 .next/
 out/
-
-# Production
 build/
 dist/
+.open-next/
 
-# Misc
-.DS_Store
-*.pem
+# Generated Artifacts
+dist-assets/
+bundles/
+*.tar.gz
+bootstrap.js
+bootstrap
+server
 
-# Debug
+# Logs
+logs/
+*.log
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
-.pnpm-debug.log*
 
-# Local Env Files
-.env*.local
+# OS
+.DS_Store
+Thumbs.db
+
+# Project Specific
 .env
-
-# Vercel
-.vercel
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
 
 # Turbo
-.turbo
+.turbo/
 
-# Generated Manifests (if they are artifacts)
-manifests/
+# Binaries
+packages/cli/cli-*
+packages/cli/kn-next
+
+# Source Artifacts
+apps/file-manager/server.js
+server.js
+
+# Legacy / Temp
+cors.json
+*.log
+
+package-lock.json

@@ -1,6 +1,6 @@
+import NavLink from '@/components/NavLink';
 import type { Metadata } from 'next';
 import { Geist, Geist_Mono } from 'next/font/google';
-import Link from 'next/link';
 import './globals.css';
 
 const geistSans = Geist({
@@ -41,7 +41,9 @@ export default function RootLayout({
               <NavLink href="/audit">Audit Logs</NavLink>
             </div>
 
-            <div className="pt-4 border-t border-white/10">
+            <div className="pt-4 border-t border-white/10 space-y-2">
+              <NavLink href="/cache">📊 Cache Monitor</NavLink>
+              <NavLink href="/cache-tests">🧪 Cache Tests</NavLink>
               <NavLink href="/setup">⚙️ Setup DB</NavLink>
             </div>
           </nav>
@@ -51,16 +53,5 @@ export default function RootLayout({
         </div>
       </body>
     </html>
-  );
-}
-
-function NavLink({ href, children }: { href: string; children: React.ReactNode }) {
-  return (
-    <Link
-      href={href}
-      className="block px-4 py-2 rounded-lg text-gray-300 hover:bg-white/10 hover:text-white transition-colors"
-    >
-      {children}
-    </Link>
   );
 }
