@@ -31,7 +31,7 @@ import { parseArgs } from 'node:util';
 import { $ } from 'bun';
 import type { KnativeNextConfig } from '../config';
 import { generateInfrastructure } from '../generators/infrastructure';
-import { generateKnativeManifest } from '../generators/knative-manifest';
+import { generateEntrypoint, generateKnativeManifest } from '../generators/knative-manifest';
 import { uploadAssets } from '../utils/asset-upload';
 
 const CONFIG_FILE = 'kn-next.config.ts';
@@ -190,6 +190,12 @@ async function deploy() {
   const imageName = `${config.registry}/${config.name}:${imageTag}`;
 
   console.log(`📌 Image: ${imageName}\n`);
+
+  // Generate entrypoint.sh for bytecode cache PVC permissions fix
+  if (config.bytecodeCache?.enabled) {
+    const outputDir = join(process.cwd(), '.open-next', 'server-functions', 'default');
+    generateEntrypoint({ config, outputDir });
+  }
 
   if (!options.dryRun) {
     const tasks: Promise<void>[] = [];

@@ -1,5 +1,7 @@
 import { NextResponse } from 'next/server';
 import client from 'prom-client';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 
 // Initialize default Node.js metrics (memory, CPU, event loop, etc.)
 const register = new client.Registry();
@@ -8,6 +10,8 @@ client.collectDefaultMetrics({ register });
 // ----- Custom kn-next bytecode cache metrics -----
 
 const appName = process.env.KN_APP_NAME ?? 'unknown';
+const cachePath = process.env.NODE_COMPILE_CACHE ?? '';
+const buildId = cachePath ? path.basename(cachePath) : 'none';
 
 const startupDuration = new client.Histogram({
     name: 'kn_next_startup_duration_seconds',
@@ -45,66 +49,74 @@ const cacheWriteCount = new client.Counter({
     registers: [register],
 });
 
-// ----- Initialize metrics on first import -----
+// ----- Cache scanner: counts V8 compile cache files -----
 
-let initialized = false;
-
-function initMetrics() {
-    if (initialized) return;
-    initialized = true;
-
-    const cachePath = process.env.NODE_COMPILE_CACHE;
-    if (!cachePath) {
-        cacheWarmStart.labels({ app: appName }).set(0);
-        return;
+function scanCacheDir(): { fileCount: number; totalSize: number } {
+    if (!cachePath || !fs.existsSync(cachePath)) {
+        return { fileCount: 0, totalSize: 0 };
     }
 
-    try {
-        const fs = require('node:fs');
-        const path = require('node:path');
+    let fileCount = 0;
+    let totalSize = 0;
 
-        if (!fs.existsSync(cachePath)) {
-            cacheWarmStart.labels({ app: appName }).set(0);
-            return;
-        }
-
-        const files = fs.readdirSync(cachePath, { recursive: true }) as string[];
-        const cacheFiles = files.filter((f: string) => f.endsWith('.cache') || f.endsWith('.blob'));
-        const buildId = path.basename(cachePath);
-
-        let totalSize = 0;
-        for (const file of cacheFiles) {
-            try {
-                const stat = fs.statSync(path.join(cachePath, file));
-                totalSize += stat.size;
-            } catch { /* skip */ }
-        }
-
-        const isWarm = cacheFiles.length > 0;
-        cacheFilesTotal.labels({ app: appName, build_id: buildId }).set(cacheFiles.length);
-        cacheSizeBytes.labels({ app: appName, build_id: buildId }).set(totalSize);
-        cacheWarmStart.labels({ app: appName }).set(isWarm ? 1 : 0);
-
-        // Record startup duration based on process uptime
-        const uptimeSeconds = process.uptime();
-        startupDuration.labels({
-            cache_status: isWarm ? 'warm' : 'cold',
-            app: appName,
-        }).observe(uptimeSeconds);
-
-        console.log(
-            `[kn-next] Metrics initialized: ${isWarm ? '🔥 WARM' : '❄️ COLD'} ` +
-            `(${cacheFiles.length} files, ${(totalSize / 1024).toFixed(1)} KB, ${uptimeSeconds.toFixed(2)}s startup)`
-        );
-    } catch (err) {
-        console.error('[kn-next] Error initializing bytecode metrics:', err);
+    // Recursively walk the cache directory
+    // V8 compile cache uses hex-named files without extensions (e.g. '712488c2')
+    // inside a version-specific subdirectory like v24.13.0-x64-cf738c9d-0
+    function walk(dir: string) {
+        try {
+            const entries = fs.readdirSync(dir, { withFileTypes: true });
+            for (const entry of entries) {
+                const fullPath = path.join(dir, entry.name);
+                if (entry.isFile()) {
+                    fileCount++;
+                    try {
+                        const stat = fs.statSync(fullPath);
+                        totalSize += stat.size;
+                    } catch { /* skip */ }
+                } else if (entry.isDirectory() && entry.name !== 'lost+found') {
+                    walk(fullPath);
+                }
+            }
+        } catch { /* skip unreadable dirs */ }
     }
+
+    walk(cachePath);
+    return { fileCount, totalSize };
 }
 
-// Initialize on first load
-initMetrics();
+// ----- Record startup metrics once -----
+
+let startupRecorded = false;
+
+function recordStartupMetrics() {
+    if (startupRecorded) return;
+    startupRecorded = true;
+
+    const { fileCount } = scanCacheDir();
+    const isWarm = fileCount > 0;
+
+    cacheWarmStart.labels({ app: appName }).set(isWarm ? 1 : 0);
+
+    const uptimeSeconds = process.uptime();
+    startupDuration.labels({
+        cache_status: isWarm ? 'warm' : 'cold',
+        app: appName,
+    }).observe(uptimeSeconds);
+
+    console.log(
+        `[kn-next] Startup: ${isWarm ? '🔥 WARM' : '❄️ COLD'} (${uptimeSeconds.toFixed(2)}s)`
+    );
+}
+
+// Record startup on first import
+recordStartupMetrics();
 
 export async function GET() {
+    // Dynamically scan cache on every scrape so Prometheus gets current file count
+    const { fileCount, totalSize } = scanCacheDir();
+    cacheFilesTotal.labels({ app: appName, build_id: buildId }).set(fileCount);
+    cacheSizeBytes.labels({ app: appName, build_id: buildId }).set(totalSize);
+
     const metrics = await register.metrics();
     return new NextResponse(metrics, {
         headers: { 'Content-Type': register.contentType },
