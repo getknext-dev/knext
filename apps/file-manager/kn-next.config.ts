@@ -36,6 +36,11 @@ const config: KnativeNextConfig = {
   bytecodeCache: {
     enabled: true,
   },
+
+  // Observability (Prometheus metrics + Grafana dashboards)
+  observability: {
+    enabled: true,
+  },
 };
 
 export default config;

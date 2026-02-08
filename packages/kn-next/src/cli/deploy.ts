@@ -220,9 +220,10 @@ async function deploy() {
     console.log('');
   }
 
-  // 5. Deploy infrastructure services (unless skipped)
+  // 5. Deploy infrastructure & observability (unless skipped)
   let infraEnvVars: Record<string, string> = {};
-  if (config.infrastructure && !options.skipInfra && !options.dryRun) {
+  const hasInfra = config.infrastructure || config.observability?.enabled;
+  if (hasInfra && !options.skipInfra && !options.dryRun) {
     console.log('🏗️  Deploying infrastructure services...');
     const outputDir = join(process.cwd(), '.open-next');
     const { manifests, envVars } = generateInfrastructure(config, outputDir);
@@ -231,18 +232,22 @@ async function deploy() {
     for (const manifest of manifests) {
       await $`kubectl apply -f ${manifest} -n ${options.namespace}`;
     }
+
+    if (config.observability?.enabled) {
+      console.log('   📊 Observability: ServiceMonitor + Grafana dashboard deployed');
+    }
     console.log('   ✅ Infrastructure deployed\n');
 
     // Wait for services to be ready
-    if (config.infrastructure.postgres?.enabled) {
+    if (config.infrastructure?.postgres?.enabled) {
       console.log('   Waiting for PostgreSQL...');
       await $`kubectl wait --for=condition=ready pod -l app=${config.name}-postgres -n ${options.namespace} --timeout=120s`.quiet();
     }
-    if (config.infrastructure.redis?.enabled) {
+    if (config.infrastructure?.redis?.enabled) {
       console.log('   Waiting for Redis...');
       await $`kubectl wait --for=condition=ready pod -l app=${config.name}-redis -n ${options.namespace} --timeout=60s`.quiet();
     }
-    if (config.infrastructure.minio?.enabled) {
+    if (config.infrastructure?.minio?.enabled) {
       console.log('   Waiting for MinIO...');
       await $`kubectl wait --for=condition=ready pod -l app=${config.name}-minio -n ${options.namespace} --timeout=120s`.quiet();
     }

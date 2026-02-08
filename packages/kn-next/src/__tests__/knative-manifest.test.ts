@@ -289,3 +289,95 @@ describe('Kafka Eventing Manifest Generator', () => {
     expect(content).toContain('kafka:9092');
   });
 });
+
+describe('Observability', () => {
+  let tempDir: string;
+
+  beforeEach(() => {
+    tempDir = mkdtempSync(join(tmpdir(), 'kn-next-test-'));
+  });
+
+  afterEach(() => {
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it('should include Prometheus annotations when observability is enabled', () => {
+    const config: KnativeNextConfig = {
+      name: 'my-app',
+      storage: { provider: 'gcs', bucket: 'test-bucket' },
+      registry: 'gcr.io/test-project',
+      observability: { enabled: true },
+    };
+
+    generateKnativeManifest({ config, outputDir: tempDir });
+    const content = readFileSync(join(tempDir, 'knative-service.yaml'), 'utf-8');
+
+    expect(content).toContain('prometheus.io/scrape: "true"');
+    expect(content).toContain('prometheus.io/port: "3000"');
+    expect(content).toContain('prometheus.io/path: "/metrics"');
+  });
+
+  it('should NOT include Prometheus annotations when observability is disabled', () => {
+    const config: KnativeNextConfig = {
+      name: 'my-app',
+      storage: { provider: 'gcs', bucket: 'test-bucket' },
+      registry: 'gcr.io/test-project',
+      observability: { enabled: false },
+    };
+
+    generateKnativeManifest({ config, outputDir: tempDir });
+    const content = readFileSync(join(tempDir, 'knative-service.yaml'), 'utf-8');
+
+    expect(content).not.toContain('prometheus.io/scrape');
+  });
+
+  it('should inject KN_APP_NAME env var when observability is enabled', () => {
+    const config: KnativeNextConfig = {
+      name: 'my-app',
+      storage: { provider: 'gcs', bucket: 'test-bucket' },
+      registry: 'gcr.io/test-project',
+      observability: { enabled: true },
+    };
+
+    generateKnativeManifest({ config, outputDir: tempDir });
+    const content = readFileSync(join(tempDir, 'knative-service.yaml'), 'utf-8');
+
+    expect(content).toContain('KN_APP_NAME');
+    expect(content).toContain('my-app');
+  });
+
+  it('should generate ServiceMonitor and Grafana dashboard ConfigMap', async () => {
+    const { generateObservabilityManifest } = await import('../generators/infrastructure');
+
+    const manifest = generateObservabilityManifest('my-app', {
+      enabled: true,
+      prometheus: { scrapeInterval: '30s' },
+    });
+
+    // ServiceMonitor
+    expect(manifest).toContain('kind: ServiceMonitor');
+    expect(manifest).toContain('name: my-app-metrics');
+    expect(manifest).toContain('interval: 30s');
+    expect(manifest).toContain('path: /metrics');
+    expect(manifest).toContain('serving.knative.dev/service: my-app');
+
+    // Grafana ConfigMap
+    expect(manifest).toContain('kind: ConfigMap');
+    expect(manifest).toContain('grafana_dashboard: "1"');
+    expect(manifest).toContain('my-app-grafana-dashboard');
+    expect(manifest).toContain('kn_next_startup_duration_seconds');
+  });
+
+  it('should skip Grafana ConfigMap when grafana.enabled is false', async () => {
+    const { generateObservabilityManifest } = await import('../generators/infrastructure');
+
+    const manifest = generateObservabilityManifest('my-app', {
+      enabled: true,
+      grafana: { enabled: false },
+    });
+
+    expect(manifest).toContain('kind: ServiceMonitor');
+    expect(manifest).not.toContain('kind: ConfigMap');
+    expect(manifest).not.toContain('grafana_dashboard');
+  });
+});

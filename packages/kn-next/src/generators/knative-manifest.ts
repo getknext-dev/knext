@@ -41,6 +41,17 @@ export function generateKnativeManifest(options: GenerateKnativeManifestOptions)
     envVars.NODE_COMPILE_CACHE = `/cache/bytecode/${imageTag}`;
   }
 
+  // Add observability env vars
+  const observabilityEnabled = config.observability?.enabled === true;
+  if (observabilityEnabled) {
+    envVars.KN_APP_NAME = config.name;
+  }
+
+  // Build Prometheus annotations if observability is enabled
+  const prometheusAnnotations = observabilityEnabled
+    ? `\n        prometheus.io/scrape: "true"\n        prometheus.io/port: "3000"\n        prometheus.io/path: "/metrics"`
+    : '';
+
   // Format env vars for YAML (12-space indent for env array items)
   const envVarsYaml = Object.entries(envVars)
     .map(([key, value]) => `            - name: ${key}\n              value: "${value}"`)
@@ -77,7 +88,7 @@ spec:
     metadata:
       annotations:
         autoscaling.knative.dev/min-scale: "${config.scaling?.minScale ?? 0}"
-        autoscaling.knative.dev/max-scale: "${config.scaling?.maxScale ?? 10}"
+        autoscaling.knative.dev/max-scale: "${config.scaling?.maxScale ?? 10}"${prometheusAnnotations}
     spec:
       containerConcurrency: 100
       timeoutSeconds: 300

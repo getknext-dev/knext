@@ -84,6 +84,17 @@ export interface BytecodeCacheConfig {
   storageSize?: string; // PVC size, default: "512Mi"
 }
 
+// Observability — Prometheus metrics + Grafana dashboards
+export interface ObservabilityConfig {
+  enabled: boolean;
+  prometheus?: {
+    scrapeInterval?: string; // Default: "15s"
+  };
+  grafana?: {
+    enabled?: boolean; // Default: true (deploy dashboard ConfigMap)
+  };
+}
+
 // Main Knative-Next config (subset of OpenNext we support)
 export interface KnativeNextConfig {
   name: string;
@@ -94,4 +105,5 @@ export interface KnativeNextConfig {
   infrastructure?: InfrastructureConfig; // Deploy PostgreSQL, Redis, MinIO as Knative services
   scaling?: ScalingConfig; // Knative autoscaling options
   bytecodeCache?: BytecodeCacheConfig; // V8 compile cache for faster cold starts
+  observability?: ObservabilityConfig; // Prometheus metrics + Grafana dashboards
 }
