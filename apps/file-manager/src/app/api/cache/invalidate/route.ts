@@ -48,8 +48,6 @@ export async function GET(request: Request) {
   // Trigger Next.js cache invalidation with stale-while-revalidate
   revalidateTag(tag, 'max');
 
-  console.log(`[Cache Invalidation] Revalidated tag: ${tag}`);
-
   return NextResponse.json({
     success: true,
     message: `Cache invalidated for tag: ${tag}`,

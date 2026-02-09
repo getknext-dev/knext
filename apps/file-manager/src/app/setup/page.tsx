@@ -19,8 +19,8 @@ async function setupDatabase() {
     `);
 
     // Add missing columns if table exists (migration)
-    await db.query(`ALTER TABLE files ADD COLUMN IF NOT EXISTS mime_type TEXT;`).catch(() => {});
-    await db.query(`ALTER TABLE files ADD COLUMN IF NOT EXISTS storage_path TEXT;`).catch(() => {});
+    await db.query('ALTER TABLE files ADD COLUMN IF NOT EXISTS mime_type TEXT;').catch(() => {});
+    await db.query('ALTER TABLE files ADD COLUMN IF NOT EXISTS storage_path TEXT;').catch(() => {});
 
     // Create users table
     await db.query(`

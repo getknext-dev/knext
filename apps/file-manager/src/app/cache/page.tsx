@@ -176,6 +176,7 @@ export default function CacheMonitorPage() {
             className="bg-black/50 border border-white/20 rounded px-3 py-2 w-48"
           />
           <button
+            type="button"
             onClick={handleInvalidate}
             disabled={invalidating}
             className="bg-purple-600 hover:bg-purple-700 disabled:opacity-50 px-4 py-2 rounded font-medium"
@@ -183,12 +184,14 @@ export default function CacheMonitorPage() {
             {invalidating ? 'Invalidating...' : 'Invalidate Tag'}
           </button>
           <button
+            type="button"
             onClick={handleClearEvents}
             className="bg-gray-600 hover:bg-gray-700 px-4 py-2 rounded font-medium"
           >
             Clear Events
           </button>
           <button
+            type="button"
             onClick={fetchEvents}
             className="bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded font-medium"
           >

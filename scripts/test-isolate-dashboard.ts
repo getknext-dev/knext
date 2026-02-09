@@ -1,5 +1,5 @@
-import fs from 'fs';
-import path from 'path';
+import fs from 'node:fs';
+import path from 'node:path';
 
 const PROJECT_ROOT = process.cwd();
 const APP_DIR = path.join(PROJECT_ROOT, 'apps/file-manager');
@@ -18,8 +18,6 @@ fs.mkdirSync(DIST_DIR, { recursive: true });
 
 const nftContent = JSON.parse(fs.readFileSync(NFT_PATH, 'utf-8'));
 const files = nftContent.files;
-
-console.log(`Found ${files.length} files in NFT trace.`);
 
 files.forEach((file) => {
   const srcPath = path.resolve(SOURCE_BASE, file);
@@ -50,7 +48,6 @@ globalPages.forEach((p) => {
   const relToRoot = path.relative(PROJECT_ROOT, src);
   const dest = path.join(DIST_DIR, relToRoot);
   if (fs.existsSync(src)) {
-    console.log(`Copying global page: ${p}`);
     copyDir(src, dest);
   }
 });
@@ -62,7 +59,6 @@ entryFiles.forEach((f) => {
   const relToRoot = path.relative(PROJECT_ROOT, src);
   const dest = path.join(DIST_DIR, relToRoot);
   if (fs.existsSync(src)) {
-    console.log(`Explicitly copying entry file: ${f}`);
     fs.mkdirSync(path.dirname(dest), { recursive: true });
     fs.copyFileSync(src, dest);
   } else {
@@ -79,7 +75,6 @@ if (fs.existsSync(appDir)) {
     if (fs.existsSync(src)) {
       const relToRoot = path.relative(PROJECT_ROOT, src);
       const dest = path.join(DIST_DIR, relToRoot);
-      console.log(`Copying root file: ${f}`);
       fs.mkdirSync(path.dirname(dest), { recursive: true });
       fs.copyFileSync(src, dest);
     }
@@ -99,7 +94,6 @@ if (fs.existsSync(serverSrc)) {
 const serverDirSrc = path.join(APP_DIR, '.next/server');
 const serverDirDest = path.join(DIST_DIR, 'apps/file-manager/.next/server');
 if (fs.existsSync(serverDirSrc)) {
-  console.log(`Copying full server directory from ${serverDirSrc}`);
   fs.mkdirSync(serverDirDest, { recursive: true });
   // Recursive copy of server directory
   fs.cpSync(serverDirSrc, serverDirDest, { recursive: true });
@@ -157,7 +151,6 @@ function copyDir(src: string, dest: string) {
 }
 
 if (fs.existsSync(nextDistSrc)) {
-  console.log('Copying full Next.js runtime...');
   copyDir(nextDistSrc, nextDistDest);
 }
 
@@ -171,7 +164,6 @@ fs.copyFileSync(nextPkgSrc, nextPkgDest);
 const staticSrc = path.join(APP_DIR, '.next/static');
 const staticDest = path.join(DIST_DIR, 'apps/file-manager/.next/static');
 if (fs.existsSync(staticSrc)) {
-  console.log(`Copying static assets from ${staticSrc} to ${staticDest}`);
   fs.mkdirSync(staticDest, { recursive: true });
   fs.cpSync(staticSrc, staticDest, { recursive: true });
 } else {
@@ -182,7 +174,6 @@ if (fs.existsSync(staticSrc)) {
 const styledJsxSrc = path.join(PROJECT_ROOT, 'node_modules/styled-jsx');
 const styledJsxDest = path.join(DIST_DIR, 'apps/file-manager/node_modules/styled-jsx');
 if (fs.existsSync(styledJsxSrc)) {
-  console.log('Copying styled-jsx...');
   copyDir(styledJsxSrc, styledJsxDest);
 }
 
@@ -194,7 +185,6 @@ const standaloneNodeModules = path.join(standaloneBase, 'node_modules');
 const targetNodeModules = path.join(DIST_DIR, 'apps/file-manager/node_modules');
 
 if (fs.existsSync(standaloneNodeModules)) {
-  console.log(`Copying traced node_modules from Standalone build...`);
   // We copy to DIST_DIR/apps/file-manager/node_modules initially to structure it?
   // Wait, the tarball logic zips `DIST_DIR/apps/file-manager/node_modules`.
   // So we copy there.
@@ -215,7 +205,6 @@ const standaloneAppDir = path.join(standaloneBase, 'apps/file-manager');
 const targetAppDir = path.join(DIST_DIR, 'apps/file-manager');
 
 if (fs.existsSync(standaloneAppDir)) {
-  console.log(`Copying application code from Standalone build...`);
   fs.cpSync(standaloneAppDir, targetAppDir, { recursive: true, force: true });
 }
 
@@ -247,5 +236,3 @@ CMD ["bun", "server.js"]
 `;
 
 fs.writeFileSync(path.join(DIST_DIR, 'Dockerfile.prototype'), dockerfileContent.trim());
-
-console.log('Isolation complete. Try running with bun.');

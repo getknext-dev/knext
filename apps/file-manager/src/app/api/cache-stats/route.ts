@@ -26,10 +26,9 @@ export function GET() {
     cache: global.cacheStats,
     hitRate:
       global.cacheStats.hits + global.cacheStats.misses > 0
-        ? (
-            (global.cacheStats.hits / (global.cacheStats.hits + global.cacheStats.misses)) *
-            100
-          ).toFixed(2) + '%'
+        ? `${(
+            (global.cacheStats.hits / (global.cacheStats.hits + global.cacheStats.misses)) * 100
+          ).toFixed(2)}%`
         : 'N/A',
     timestamp: new Date().toISOString(),
   });

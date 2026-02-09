@@ -13,6 +13,7 @@ export default function FileList({ files }: { files: any[] }) {
     <div className="space-y-2">
       {files.map((file, idx) => (
         <div
+          // biome-ignore lint/suspicious/noArrayIndexKey: files lack stable unique id
           key={idx}
           className="bg-white/5 hover:bg-white/10 transition-colors rounded-lg p-4 border border-white/10"
         >
@@ -27,6 +28,7 @@ export default function FileList({ files }: { files: any[] }) {
               stroke="currentColor"
               viewBox="0 0 24 24"
             >
+              <title>File icon</title>
               <path
                 strokeLinecap="round"
                 strokeLinejoin="round"

@@ -1,5 +1,5 @@
-import { spawn } from 'child_process';
-import fs from 'fs';
+import { spawn } from 'node:child_process';
+import fs from 'node:fs';
 import { build } from 'bun';
 
 async function createTarball(srcDir: string, destFile: string) {
@@ -15,10 +15,6 @@ async function createTarball(srcDir: string, destFile: string) {
 }
 
 async function bundle() {
-  console.log('📦 Bundling Assets for GKE deployment...');
-
-  // 1. Runtime Bundle (Wrapper to start server.js)
-  console.log('  Bundling Runtime...');
   const runtimeBuild = await build({
     entrypoints: ['packages/cli/internal/shim/runtime-entry.ts'],
     outdir: 'dist-assets/runtime',
@@ -33,9 +29,6 @@ async function bundle() {
     console.error('Runtime build failed:', runtimeBuild.logs);
     process.exit(1);
   }
-
-  // 2. Page Artifacts (Standalone Output)
-  console.log('  Bundling Page Artifacts (Standalone)...');
   const buildDir = 'apps/file-manager/.next/standalone';
   if (!fs.existsSync(buildDir)) {
     console.error(
@@ -50,17 +43,12 @@ async function bundle() {
   const pages = ['home', 'dashboard', 'users'];
 
   for (const pageName of pages) {
-    console.log(`  Creating artifact for ${pageName}...`);
     const dest = `dist-assets/pages/${pageName}-assets.tar.gz`;
 
     // We tar the CONTENT of .next/standalone
     // This includes node_modules and apps/file-manager/server.js
     await createTarball(buildDir, dest);
-    console.log(`  ✅ Created ${dest}`);
   }
-
-  // 3. Static Assets (Client hydration)
-  console.log('  Bundling Static Assets (Client hydration)...');
   const staticSrc = 'apps/file-manager/.next/static';
   if (fs.existsSync(staticSrc)) {
     const staticDest = 'dist-assets/static';
@@ -72,8 +60,6 @@ async function bundle() {
         else reject(new Error(`cp failed with code ${code}`));
       });
     });
-    console.log(`  ✅ Copied static assets to ${staticDest}`);
-    console.log('     (Upload this folder to gs://BUCKET/_next/static)');
   } else {
     console.warn(`  ⚠️  Static assets not found at ${staticSrc}`);
   }

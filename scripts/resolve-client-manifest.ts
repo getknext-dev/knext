@@ -1,4 +1,4 @@
-import { readFileSync } from 'fs';
+import { readFileSync } from 'node:fs';
 
 const manifestPath = process.argv[2];
 
@@ -13,6 +13,7 @@ globalThis.__RSC_MANIFEST = {};
 try {
   // Read and unsafe eval the manifest file (it's trusted build output)
   const content = readFileSync(manifestPath, 'utf-8');
+  // biome-ignore lint/security/noGlobalEval: intentional eval of trusted build output
   eval(content);
 
   // The key is dynamic (e.g. "/dashboard/page"), so we just grab the first value
@@ -57,8 +58,6 @@ try {
   if (manifest.entryCSSFiles) {
     Object.values(manifest.entryCSSFiles).forEach((list: any) => addChunks(list));
   }
-
-  console.log(JSON.stringify(Array.from(chunks)));
 } catch (err) {
   console.error('Failed to parse manifest:', err);
   process.exit(1);

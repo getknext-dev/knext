@@ -75,7 +75,8 @@ export default function AuditPage() {
   // Initial load
   useEffect(() => {
     fetchLogs(0, false);
-  }, []);
+    // eslint-disable-next-line -- intentional: only run on mount
+  }, [fetchLogs]);
 
   // Infinite scroll observer
   useEffect(() => {
@@ -125,7 +126,11 @@ export default function AuditPage() {
       {error && (
         <div className="bg-red-500/20 text-red-200 p-4 rounded-lg mb-4">
           {error}
-          <button onClick={() => fetchLogs(0, false)} className="ml-4 underline hover:no-underline">
+          <button
+            type="button"
+            onClick={() => fetchLogs(0, false)}
+            className="ml-4 underline hover:no-underline"
+          >
             Retry
           </button>
         </div>
@@ -142,7 +147,7 @@ export default function AuditPage() {
           </thead>
           <tbody>
             {initialLoading ? (
-              // Initial skeleton loading
+              // biome-ignore lint/suspicious/noArrayIndexKey: static skeleton placeholders
               Array.from({ length: 10 }).map((_, i) => <SkeletonRow key={`skeleton-${i}`} />)
             ) : (
               <>
@@ -174,6 +179,7 @@ export default function AuditPage() {
                 {/* Loading more skeleton rows */}
                 {loading &&
                   hasMore &&
+                  // biome-ignore lint/suspicious/noArrayIndexKey: static skeleton placeholders
                   Array.from({ length: 5 }).map((_, i) => <SkeletonRow key={`loading-${i}`} />)}
               </>
             )}

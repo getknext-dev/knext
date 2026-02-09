@@ -65,8 +65,11 @@ export default async function UsersPage() {
             <h3 className="text-xl font-bold mb-4">Add User</h3>
             <form action={addUser} className="space-y-4">
               <div>
-                <label className="block text-sm mb-1">Name</label>
+                <label htmlFor="user-name" className="block text-sm mb-1">
+                  Name
+                </label>
                 <input
+                  id="user-name"
                   name="name"
                   type="text"
                   className="w-full p-2 rounded bg-black/20 border border-white/10"
@@ -74,8 +77,11 @@ export default async function UsersPage() {
                 />
               </div>
               <div>
-                <label className="block text-sm mb-1">Email</label>
+                <label htmlFor="user-email" className="block text-sm mb-1">
+                  Email
+                </label>
                 <input
+                  id="user-email"
                   name="email"
                   type="email"
                   className="w-full p-2 rounded bg-black/20 border border-white/10"

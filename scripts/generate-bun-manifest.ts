@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, writeFileSync } from 'fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 
 /**
  * ARCHITECTURAL NOTE:
@@ -18,12 +18,8 @@ async function main() {
     console.error(`❌ Trace file not found: ${tracePath}. Run bundle-assets.ts first.`);
     process.exit(1);
   }
-
-  console.log(`🔍 Loading trace from ${tracePath}...`);
   const trace = JSON.parse(readFileSync(tracePath, 'utf-8'));
   const files: string[] = trace.files || [];
-
-  console.log(`📦 Embedding ${files.length} dependencies...`);
 
   const importStatements = files
     .filter((f) => {
@@ -68,7 +64,6 @@ Bun.serve({
 `;
 
   writeFileSync(outputFile, entryPointContent);
-  console.log(`✅ Generated Bun manifest entry: ${outputFile}`);
 }
 
 main().catch(console.error);
