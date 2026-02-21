@@ -31,18 +31,18 @@ export class CacheManager {
       const pageSnapshots = metadata.snapshots[this.pageRoute] || [];
 
       if (pageSnapshots.length === 0) {
-        console.log(`[Cache] No snapshots found for ${this.pageRoute}`);
+        console.info(`[Cache] No snapshots found for ${this.pageRoute}`);
         return null;
       }
 
       // Return highest percentage snapshot available
       const best = pageSnapshots.sort((a, b) => b.percentage - a.percentage)[0];
-      console.log(
+      console.info(
         `[Cache] Found snapshot: ${best.percentage}% (${best.modules} modules, ${(best.size / 1024 / 1024).toFixed(2)}MB)`,
       );
       return best;
     } catch (error) {
-      console.log(`[Cache] No cache metadata found:`, error);
+      console.info('[Cache] No cache metadata found:', error);
       return null;
     }
   }
@@ -54,7 +54,7 @@ export class CacheManager {
     const url = `${this.storageUrl}/bytecode-cache/${this.pageRoute}/${snapshot.percentage}pct.snapshot`;
 
     try {
-      console.log(`[Cache] Downloading snapshot from ${url}...`);
+      console.info(`[Cache] Downloading snapshot from ${url}...`);
       const response = await fetch(url);
 
       if (!response.ok) {
@@ -68,9 +68,9 @@ export class CacheManager {
       (globalThis as any).__loaded_modules = state.loadedModules || {};
 
       const moduleCount = Object.keys(state.loadedModules || {}).length;
-      console.log(`[Cache] ✅ Restored ${moduleCount} modules from snapshot`);
+      console.info(`[Cache] ✅ Restored ${moduleCount} modules from snapshot`);
     } catch (error) {
-      console.error(`[Cache] Failed to restore snapshot:`, error);
+      console.error('[Cache] Failed to restore snapshot:', error);
       throw error;
     }
   }
@@ -79,7 +79,7 @@ export class CacheManager {
    * Create a snapshot of current state
    */
   async createSnapshot(percentage: number): Promise<void> {
-    console.log(`[Cache] Creating ${percentage}% snapshot for ${this.pageRoute}...`);
+    console.info(`[Cache] Creating ${percentage}% snapshot for ${this.pageRoute}...`);
 
     try {
       // Serialize current state
@@ -106,9 +106,9 @@ export class CacheManager {
         version: state.version,
       });
 
-      console.log(`[Cache] ✅ Created snapshot: ${(size / 1024 / 1024).toFixed(2)}MB`);
+      console.info(`[Cache] ✅ Created snapshot: ${(size / 1024 / 1024).toFixed(2)}MB`);
     } catch (error) {
-      console.error(`[Cache] Failed to create snapshot:`, error);
+      console.error('[Cache] Failed to create snapshot:', error);
       // Don't throw - caching is non-critical
     }
   }
@@ -130,24 +130,24 @@ export class CacheManager {
   /**
    * Upload snapshot to object storage
    */
-  private async uploadSnapshot(url: string, data: string): Promise<void> {
+  private async uploadSnapshot(url: string, _data: string): Promise<void> {
     // In real implementation, this would use the cloud provider's SDK
     // For now, we'll use a PUT request (works with signed URLs)
-    console.log(`[Cache] Uploading to ${url}...`);
+    console.info(`[Cache] Uploading to ${url}...`);
 
     // This would be handled by the static-offloader or cloud SDK
     // For the MVP, we'll just log it
-    console.log(`[Cache] TODO: Upload snapshot via static-offloader`);
+    console.info('[Cache] TODO: Upload snapshot via static-offloader');
   }
 
   /**
    * Update cache metadata
    */
-  private async updateMetadata(snapshot: Snapshot): Promise<void> {
-    console.log(`[Cache] Updating metadata for ${this.pageRoute}...`);
+  private async updateMetadata(_snapshot: Snapshot): Promise<void> {
+    console.info(`[Cache] Updating metadata for ${this.pageRoute}...`);
 
     // In real implementation, update metadata.json
     // This would be atomic update via cloud SDK
-    console.log(`[Cache] TODO: Update metadata.json with new snapshot`);
+    console.info('[Cache] TODO: Update metadata.json with new snapshot');
   }
 }

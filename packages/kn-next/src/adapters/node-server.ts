@@ -97,13 +97,13 @@ const wrapperHandler = async (
   server.listen(PORT, () => {
     // Record startup duration metric
     recordServerReady();
-    console.log(`[kn-next] Server listening on port ${PORT}`);
-    console.log(`[kn-next] Prometheus metrics at http://localhost:${PORT}/metrics`);
+    console.info(`[kn-next] Server listening on port ${PORT}`);
+    console.info(`[kn-next] Prometheus metrics at http://localhost:${PORT}/metrics`);
   });
 
   // Handle graceful shutdown
   const shutdown = () => {
-    console.log('[kn-next] Shutting down gracefully...');
+    console.info('[kn-next] Shutting down gracefully...');
     server.close(() => {
       process.exit(0);
     });

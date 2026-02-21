@@ -72,7 +72,7 @@ export function logCacheEvent(
     REVALIDATE: '♻️',
   }[type];
 
-  console.log(
+  console.info(
     `[Cache ${emoji}] ${type} | ${source} | ${key}${options?.tag ? ` | tag:${options.tag}` : ''}${options?.durationMs ? ` | ${options.durationMs}ms` : ''}`,
   );
 }

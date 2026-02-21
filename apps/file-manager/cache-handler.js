@@ -37,19 +37,19 @@ function logCacheEvent(type, source, key, options) {
 
   const _emoji =
     {
-      HIT: "✅",
-      MISS: "❌",
-      SET: "💾",
-      DELETE: "🗑️",
-      INVALIDATE: "🔄",
-      REVALIDATE: "♻️",
-    }[type] || "📝";
+      HIT: '✅',
+      MISS: '❌',
+      SET: '💾',
+      DELETE: '🗑️',
+      INVALIDATE: '🔄',
+      REVALIDATE: '♻️',
+    }[type] || '📝';
 }
 
 // ─── Redis Client (lazy, only when REDIS_URL is set) ───
 
 const REDIS_URL = process.env.REDIS_URL;
-const KEY_PREFIX = process.env.REDIS_KEY_PREFIX || "kn-next";
+const KEY_PREFIX = process.env.REDIS_KEY_PREFIX || 'kn-next';
 
 let Redis;
 let redis;
@@ -58,7 +58,7 @@ let useRedis = false;
 
 // Try loading ioredis — gracefully degrade to in-memory if not available
 try {
-  Redis = require("ioredis");
+  Redis = require('ioredis');
   useRedis = !!REDIS_URL;
 } catch {
   useRedis = false;
@@ -79,10 +79,10 @@ function getRedis() {
       retryStrategy: (times) => Math.min(times * 100, 5000),
       connectTimeout: 5000,
     });
-    redis.on("error", (err) => {
-      console.error("[CacheHandler] Redis error:", err.message);
+    redis.on('error', (err) => {
+      console.error('[CacheHandler] Redis error:', err.message);
     });
-    redis.on("connect", () => {});
+    redis.on('connect', () => {});
   }
   return redis;
 }
@@ -91,16 +91,16 @@ async function ensureConnected() {
   if (!useRedis) return null;
   const client = getRedis();
   if (!client) return null;
-  if (client.status === "ready") return client;
+  if (client.status === 'ready') return client;
   if (!connectPromise) {
     connectPromise = client.connect().catch((err) => {
       connectPromise = null;
-      console.error("[CacheHandler] Redis connect failed:", err.message);
+      console.error('[CacheHandler] Redis connect failed:', err.message);
       return null;
     });
   }
   await connectPromise;
-  return client.status === "ready" ? client : null;
+  return client.status === 'ready' ? client : null;
 }
 
 // ─── Key Builders ───
@@ -118,38 +118,37 @@ function tagKey(tag) {
 // that JSON.stringify/parse can't round-trip. These helpers preserve types.
 
 function serializeCacheValue(data) {
-  if (!data || typeof data !== "object") return data;
+  if (!data || typeof data !== 'object') return data;
   const serialized = { ...data };
   // segmentData: Map<string, Buffer> → Array<[string, base64]>
   if (data.segmentData instanceof Map) {
-    serialized.segmentData = Array.from(data.segmentData.entries()).map(
-      ([k, v]) => [k, Buffer.isBuffer(v) ? v.toString("base64") : v],
-    );
+    serialized.segmentData = Array.from(data.segmentData.entries()).map(([k, v]) => [
+      k,
+      Buffer.isBuffer(v) ? v.toString('base64') : v,
+    ]);
     serialized.__segmentDataSerialized = true;
   }
   // rscData: Buffer → base64 string
   if (Buffer.isBuffer(data.rscData)) {
-    serialized.rscData = data.rscData.toString("base64");
+    serialized.rscData = data.rscData.toString('base64');
     serialized.__rscDataSerialized = true;
   }
   return serialized;
 }
 
 function deserializeCacheValue(data) {
-  if (!data || typeof data !== "object") return data;
+  if (!data || typeof data !== 'object') return data;
   // Reconstitute the value inside the cache entry wrapper
   const value = data.value;
-  if (!value || typeof value !== "object") return data;
+  if (!value || typeof value !== 'object') return data;
   // segmentData: Array<[string, base64]> → Map<string, Buffer>
   if (value.__segmentDataSerialized && Array.isArray(value.segmentData)) {
-    value.segmentData = new Map(
-      value.segmentData.map(([k, v]) => [k, Buffer.from(v, "base64")]),
-    );
+    value.segmentData = new Map(value.segmentData.map(([k, v]) => [k, Buffer.from(v, 'base64')]));
     value.__segmentDataSerialized = undefined;
   }
   // rscData: base64 string → Buffer
-  if (value.__rscDataSerialized && typeof value.rscData === "string") {
-    value.rscData = Buffer.from(value.rscData, "base64");
+  if (value.__rscDataSerialized && typeof value.rscData === 'string') {
+    value.rscData = Buffer.from(value.rscData, 'base64');
     value.__rscDataSerialized = undefined;
   }
   return data;
@@ -160,7 +159,7 @@ function deserializeCacheValue(data) {
  * Next.js may mutate cache values after set(), so we need our own copy.
  */
 function cloneCacheValue(data) {
-  if (!data || typeof data !== "object") return data;
+  if (!data || typeof data !== 'object') return data;
   const cloned = { ...data };
   // Deep-clone segmentData Map to preserve type and avoid shared references
   if (data.segmentData instanceof Map) {
@@ -183,7 +182,7 @@ class CacheHandler {
 
   async get(key) {
     const startTime = Date.now();
-    const source = useRedis ? "redis" : "memory";
+    const source = useRedis ? 'redis' : 'memory';
 
     try {
       if (useRedis) {
@@ -191,13 +190,13 @@ class CacheHandler {
         if (client) {
           const data = await client.get(cacheKey(key));
           if (!data) {
-            logCacheEvent("MISS", source, key, {
+            logCacheEvent('MISS', source, key, {
               durationMs: Date.now() - startTime,
             });
             return null;
           }
           const parsed = deserializeCacheValue(JSON.parse(data));
-          logCacheEvent("HIT", source, key, {
+          logCacheEvent('HIT', source, key, {
             durationMs: Date.now() - startTime,
           });
           return parsed;
@@ -207,15 +206,15 @@ class CacheHandler {
       // In-memory fallback
       const entry = memoryCache.get(key);
       if (!entry) {
-        logCacheEvent("MISS", source, key, {
+        logCacheEvent('MISS', source, key, {
           durationMs: Date.now() - startTime,
         });
         return null;
       }
-      logCacheEvent("HIT", source, key, { durationMs: Date.now() - startTime });
+      logCacheEvent('HIT', source, key, { durationMs: Date.now() - startTime });
       return entry;
     } catch (error) {
-      logCacheEvent("MISS", source, key, {
+      logCacheEvent('MISS', source, key, {
         durationMs: Date.now() - startTime,
         details: `Error: ${error.message}`,
       });
@@ -225,7 +224,7 @@ class CacheHandler {
 
   async set(key, data, ctx) {
     const startTime = Date.now();
-    const source = useRedis ? "redis" : "memory";
+    const source = useRedis ? 'redis' : 'memory';
 
     try {
       if (data === null) {
@@ -234,7 +233,7 @@ class CacheHandler {
           if (client) await client.del(cacheKey(key));
         }
         memoryCache.delete(key);
-        logCacheEvent("DELETE", source, key, {
+        logCacheEvent('DELETE', source, key, {
           durationMs: Date.now() - startTime,
         });
         return;
@@ -252,7 +251,7 @@ class CacheHandler {
         const client = await ensureConnected();
         if (client) {
           const pipeline = client.pipeline();
-          pipeline.set(cacheKey(key), JSON.stringify(redisEntry), "EX", ttl);
+          pipeline.set(cacheKey(key), JSON.stringify(redisEntry), 'EX', ttl);
           if (ctx?.tags?.length) {
             for (const tag of ctx.tags) {
               pipeline.sadd(tagKey(tag), key);
@@ -271,19 +270,19 @@ class CacheHandler {
       };
       memoryCache.set(key, memEntry);
 
-      logCacheEvent("SET", source, key, {
+      logCacheEvent('SET', source, key, {
         durationMs: Date.now() - startTime,
-        details: `TTL: ${ttl}s, Tags: [${(ctx?.tags || []).join(", ")}]`,
+        details: `TTL: ${ttl}s, Tags: [${(ctx?.tags || []).join(', ')}]`,
       });
     } catch (error) {
-      console.error("[CacheHandler] Error setting cache:", key, error.message);
+      console.error('[CacheHandler] Error setting cache:', key, error.message);
     }
   }
 
   async revalidateTag(tags) {
     const startTime = Date.now();
     const tagList = Array.isArray(tags) ? tags : [tags];
-    const source = useRedis ? "redis" : "memory";
+    const source = useRedis ? 'redis' : 'memory';
 
     try {
       if (useRedis) {
@@ -298,7 +297,7 @@ class CacheHandler {
               pipeline.del(tKey);
               await pipeline.exec();
             }
-            logCacheEvent("INVALIDATE", source, `tag:${tag}`, {
+            logCacheEvent('INVALIDATE', source, `tag:${tag}`, {
               durationMs: Date.now() - startTime,
               details: `Invalidated ${keys.length} keys`,
               tag,
@@ -317,18 +316,14 @@ class CacheHandler {
             count++;
           }
         }
-        logCacheEvent("INVALIDATE", source, `tag:${tag}`, {
+        logCacheEvent('INVALIDATE', source, `tag:${tag}`, {
           durationMs: Date.now() - startTime,
           details: `Invalidated ${count} keys`,
           tag,
         });
       }
     } catch (error) {
-      console.error(
-        "[CacheHandler] Error revalidating tags:",
-        tagList,
-        error.message,
-      );
+      console.error('[CacheHandler] Error revalidating tags:', tagList, error.message);
     }
   }
 

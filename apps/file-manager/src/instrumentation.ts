@@ -1,7 +1,7 @@
 import { registerOTel } from '@vercel/otel';
 
 export function register() {
-    registerOTel({
-        serviceName: 'file-manager',
-    });
+  registerOTel({
+    serviceName: 'file-manager',
+  });
 }

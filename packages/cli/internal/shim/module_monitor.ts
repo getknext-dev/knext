@@ -20,16 +20,16 @@ export class ModuleMonitor {
 
   constructor(cacheManager: CacheManager) {
     this.cacheManager = cacheManager;
-    console.log('[Monitor] 📊 Observability enabled - tracking all metrics');
+    console.info('[Monitor] 📊 Observability enabled - tracking all metrics');
   }
 
   async loadWithProgress(modules: string[]) {
     this.totalModules += modules.length;
-    console.log(`[Monitor] Loading ${modules.length} modules (total: ${this.totalModules})`);
+    console.info(`[Monitor] Loading ${modules.length} modules (total: ${this.totalModules})`);
 
     for (const url of modules) {
       if (this.loadedUrls.has(url)) {
-        console.log(`[Monitor] Skipping already loaded: ${url}`);
+        console.info(`[Monitor] Skipping already loaded: ${url}`);
         continue;
       }
 
@@ -48,7 +48,7 @@ export class ModuleMonitor {
       if (progress >= this.cacheThresholds[0]) {
         const threshold = this.cacheThresholds.shift();
         if (threshold && threshold > this.lastCached) {
-          console.log(`[Monitor] 🎯 ${threshold}% modules loaded - creating snapshot`);
+          console.info(`[Monitor] 🎯 ${threshold}% modules loaded - creating snapshot`);
           await this.createSnapshot(threshold);
           this.lastCached = threshold;
         }
@@ -58,7 +58,7 @@ export class ModuleMonitor {
 
   async loadModule(url: string): Promise<any> {
     try {
-      console.log(`[Monitor] Fetching ${url}...`);
+      console.info(`[Monitor] Fetching ${url}...`);
       const response = await fetch(url);
       if (!response.ok) throw new Error(`HTTP ${response.status} ${response.statusText}`);
 
@@ -68,7 +68,7 @@ export class ModuleMonitor {
 
       await Bun.write(filePath, await response.blob());
 
-      console.log(`[Monitor] Saved to ${filePath}, importing...`);
+      console.info(`[Monitor] Saved to ${filePath}, importing...`);
 
       // Dynamic import handles ESM/CJS transparently and resolves imports from node_modules
       const mod = await import(filePath);
@@ -80,7 +80,7 @@ export class ModuleMonitor {
 
         // If it has a default export, store that too
         if (mod.default) {
-          (globalThis as any).__loaded_modules[url + '#default'] = mod.default;
+          (globalThis as any).__loaded_modules[`${url}#default`] = mod.default;
         }
       }
 

@@ -8,7 +8,7 @@ export async function start() {
   const port = Number.parseInt(process.env.PORT || '8080');
   const hostname = process.env.HOSTNAME || '0.0.0.0';
 
-  console.log('[Runtime] Starting Next.js server...');
+  console.info('[Runtime] Starting Next.js server...');
 
   try {
     await startServer({
@@ -19,7 +19,7 @@ export async function start() {
       customServer: false,
     });
 
-    console.log(`[Runtime] ✅ Next.js server ready on ${hostname}:${port}`);
+    console.info(`[Runtime] ✅ Next.js server ready on ${hostname}:${port}`);
   } catch (error) {
     console.error('[Runtime] Failed to start:', error);
     throw error;

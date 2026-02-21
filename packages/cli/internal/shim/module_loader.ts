@@ -23,19 +23,19 @@ class ModuleLoader {
     // Check cache first
     const cached = this.cache.get(normalizedRoute);
     if (cached) {
-      console.log(`[ModuleLoader] Cache hit for ${normalizedRoute}`);
+      console.info(`[ModuleLoader] Cache hit for ${normalizedRoute}`);
       return cached.module;
     }
 
     // Check if already loading
     const loading = this.loading.get(normalizedRoute);
     if (loading) {
-      console.log(`[ModuleLoader] Waiting for in-flight load of ${normalizedRoute}`);
+      console.info(`[ModuleLoader] Waiting for in-flight load of ${normalizedRoute}`);
       return loading;
     }
 
     // Load from GCS
-    console.log(`[ModuleLoader] Loading bundle for ${normalizedRoute} from GCS...`);
+    console.info(`[ModuleLoader] Loading bundle for ${normalizedRoute} from GCS...`);
     const loadPromise = this.fetchBundle(normalizedRoute);
     this.loading.set(normalizedRoute, loadPromise);
 
@@ -45,7 +45,7 @@ class ModuleLoader {
         module,
         loadedAt: Date.now(),
       });
-      console.log(`[ModuleLoader] Successfully loaded ${normalizedRoute}`);
+      console.info(`[ModuleLoader] Successfully loaded ${normalizedRoute}`);
       return module;
     } finally {
       this.loading.delete(normalizedRoute);
@@ -96,7 +96,7 @@ class ModuleLoader {
    * Preload bundles for faster subsequent requests
    */
   async preload(routes: string[]): Promise<void> {
-    console.log(`[ModuleLoader] Preloading ${routes.length} bundles...`);
+    console.info(`[ModuleLoader] Preloading ${routes.length} bundles...`);
     await Promise.all(routes.map((route) => this.loadPageBundle(route)));
   }
 
@@ -116,7 +116,7 @@ class ModuleLoader {
    */
   clearCache() {
     this.cache.clear();
-    console.log('[ModuleLoader] Cache cleared');
+    console.info('[ModuleLoader] Cache cleared');
   }
 }
 

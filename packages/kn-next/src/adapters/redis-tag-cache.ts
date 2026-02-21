@@ -149,8 +149,8 @@ const tagCache: OriginalTagCache = {
       const pipeline = redis.pipeline();
 
       for (const { tag, path: pathKey, revalidatedAt } of tags) {
-        const builtTag = buildKey(tag);
-        const builtPath = buildKey(pathKey);
+        const _builtTag = buildKey(tag);
+        const _builtPath = buildKey(pathKey);
 
         // Add path to tag's set
         pipeline.sadd(buildKey(`tag:${tag}`), pathKey);

@@ -106,7 +106,7 @@ export default config;
   const outputPath = path.join(outputDir, 'open-next.config.ts');
   writeFileSync(outputPath, configContent, 'utf-8');
 
-  console.log(`[kn-next] Generated ${outputPath}`);
+  console.info(`[kn-next] Generated ${outputPath}`);
   return outputPath;
 }
 

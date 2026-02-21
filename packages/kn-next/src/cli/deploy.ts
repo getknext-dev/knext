@@ -104,7 +104,7 @@ function patchAssetPrefix(appDir: string, assetPrefix: string): number {
         return JSON.stringify(parsed);
       }
       return null;
-    }
+    },
   );
 
   // 2. Patch server.js (hardcoded config in standalone bundle)
@@ -113,7 +113,8 @@ function patchAssetPrefix(appDir: string, assetPrefix: string): number {
   const patchedPrefix = `"assetPrefix":"${assetPrefix}"`;
   patched += patchFiles(
     findFiles(openNextDir, (name) => name === 'server.js'),
-    (content) => content.includes(emptyPrefix) ? content.replace(emptyPrefix, patchedPrefix) : null
+    (content) =>
+      content.includes(emptyPrefix) ? content.replace(emptyPrefix, patchedPrefix) : null,
   );
 
   // 3. Patch client-reference-manifest.js (rewrite chunk paths to absolute CDN URLs)
@@ -129,7 +130,7 @@ function patchAssetPrefix(appDir: string, assetPrefix: string): number {
   // double-prefixing in the HTML <script> tags.
   patched += patchFiles(
     findFiles(openNextDir, (name) => name.endsWith('_client-reference-manifest.js')),
-    (content) => content.replaceAll('"/_next/static/', `"${assetPrefix}/_next/static/`)
+    (content) => content.replaceAll('"/_next/static/', `"${assetPrefix}/_next/static/`),
   );
 
   // 4. Patch Turbopack runtime chunk (dynamic chunk loading base path)
@@ -141,7 +142,10 @@ function patchAssetPrefix(appDir: string, assetPrefix: string): number {
   const turbopackPatchedBase = `let t="${assetPrefix}/_next/"`;
   patched += patchFiles(
     findFiles(openNextDir, (name) => name.includes('turbopack-') && name.endsWith('.js')),
-    (content) => content.includes(turbopackBase) ? content.replaceAll(turbopackBase, turbopackPatchedBase) : null
+    (content) =>
+      content.includes(turbopackBase)
+        ? content.replaceAll(turbopackBase, turbopackPatchedBase)
+        : null,
   );
 
   // 5. Patch Turbopack SSR runtime (ASSET_PREFIX for RSC flight data)
@@ -153,7 +157,10 @@ function patchAssetPrefix(appDir: string, assetPrefix: string): number {
   const ssrPatchedPrefix = `const ASSET_PREFIX = "${assetPrefix}/_next/"`;
   patched += patchFiles(
     findFiles(openNextDir, (name) => name.includes('[turbopack]_runtime') && name.endsWith('.js')),
-    (content) => content.includes(ssrAssetPrefix) ? content.replaceAll(ssrAssetPrefix, ssrPatchedPrefix) : null
+    (content) =>
+      content.includes(ssrAssetPrefix)
+        ? content.replaceAll(ssrAssetPrefix, ssrPatchedPrefix)
+        : null,
   );
 
   return patched;
@@ -168,7 +175,8 @@ async function patchStandaloneOutput(appDir: string): Promise<void> {
   }
 
   // Find all babel-code-frame directories and ensure sibling babel/code-frame.js exists
-  const result = await $`find ${serverFunctionsDir} -path "*/next/dist/compiled/babel-code-frame" -type d`.text();
+  const result =
+    await $`find ${serverFunctionsDir} -path "*/next/dist/compiled/babel-code-frame" -type d`.text();
   const dirs = result.trim().split('\n').filter(Boolean);
   let patched = 0;
 
@@ -182,7 +190,7 @@ async function patchStandaloneOutput(appDir: string): Promise<void> {
       mkdirSync(redirectDir, { recursive: true });
       writeFileSync(
         redirectFile,
-        "module.exports = require('next/dist/compiled/babel-code-frame');\n"
+        "module.exports = require('next/dist/compiled/babel-code-frame');\n",
       );
       patched++;
     }
@@ -321,10 +329,7 @@ async function loadConfig(): Promise<KnativeNextConfig> {
   return module.default;
 }
 
-function applyOverrides(
-  config: KnativeNextConfig,
-  options: DeployOptions
-): KnativeNextConfig {
+function applyOverrides(config: KnativeNextConfig, options: DeployOptions): KnativeNextConfig {
   const overridden = { ...config };
 
   // Apply CLI/env overrides
@@ -421,7 +426,7 @@ async function deploy() {
         (async () => {
           await uploadAssets(config);
           console.info('   ✅ Assets uploaded');
-        })()
+        })(),
       );
     }
 
@@ -432,7 +437,7 @@ async function deploy() {
         const repoRoot = resolve(process.cwd(), '../..');
         await $`docker buildx build --platform linux/amd64 -f ${process.cwd()}/Dockerfile -t ${imageName} --push ${repoRoot}`;
         console.info('   ✅ Docker image built and pushed');
-      })()
+      })(),
     );
 
     await Promise.all(tasks);

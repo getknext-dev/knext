@@ -136,7 +136,7 @@ const nextDistDest = path.join(DIST_DIR, 'apps/file-manager/node_modules/next/di
 // Recursive copy helper
 function copyDir(src: string, dest: string) {
   fs.mkdirSync(dest, { recursive: true });
-  // console.log(`Copying dir ${src} -> ${dest}`);
+  // console.info(`Copying dir ${src} -> ${dest}`);
   const entries = fs.readdirSync(src, { withFileTypes: true });
   for (const entry of entries) {
     const srcPath = path.join(src, entry.name);
@@ -144,7 +144,7 @@ function copyDir(src: string, dest: string) {
     if (entry.isDirectory()) {
       copyDir(srcPath, destPath);
     } else {
-      // console.log(`Copying file ${entry.name}`);
+      // console.info(`Copying file ${entry.name}`);
       fs.copyFileSync(srcPath, destPath);
     }
   }

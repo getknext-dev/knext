@@ -36,7 +36,7 @@ export function generateInfrastructure(
 
     const pgHost = `${config.name}-postgres.${namespace}.svc.cluster.local`;
     envVars.DATABASE_URL = `postgres://postgres:postgres@${pgHost}:5432/app`;
-    console.log(`[kn-next] Generated ${pgPath}`);
+    console.info(`[kn-next] Generated ${pgPath}`);
   }
 
   // Redis
@@ -48,7 +48,7 @@ export function generateInfrastructure(
 
     const redisHost = `${config.name}-redis.${namespace}.svc.cluster.local`;
     envVars.REDIS_URL = `redis://${redisHost}:6379`;
-    console.log(`[kn-next] Generated ${redisPath}`);
+    console.info(`[kn-next] Generated ${redisPath}`);
   }
 
   // MinIO
@@ -62,7 +62,7 @@ export function generateInfrastructure(
     envVars.MINIO_ENDPOINT = `http://${minioHost}:9000`;
     envVars.MINIO_ACCESS_KEY = infra.minio.accessKey ?? 'minioadmin';
     envVars.MINIO_SECRET_KEY = infra.minio.secretKey ?? 'minioadmin';
-    console.log(`[kn-next] Generated ${minioPath}`);
+    console.info(`[kn-next] Generated ${minioPath}`);
   }
 
   // Observability (Prometheus + Grafana)
@@ -71,7 +71,7 @@ export function generateInfrastructure(
     const obsPath = join(outputDir, 'observability.yaml');
     writeFileSync(obsPath, obsManifest);
     manifests.push(obsPath);
-    console.log(`[kn-next] Generated ${obsPath}`);
+    console.info(`[kn-next] Generated ${obsPath}`);
   }
 
   return { manifests, envVars };
@@ -303,7 +303,10 @@ metadata:
     grafana_dashboard: "1"
 data:
   ${appName}-bytecode.json: |
-${dashboardJson.split('\n').map((line) => `    ${line}`).join('\n')}
+${dashboardJson
+  .split('\n')
+  .map((line) => `    ${line}`)
+  .join('\n')}
 `;
   }
 
@@ -323,106 +326,129 @@ function generateDashboardJson(appName: string): string {
         title: '🚀 Cold Start Duration',
         type: 'timeseries',
         gridPos: { h: 8, w: 12, x: 0, y: 0 },
-        targets: [{
-          expr: `histogram_quantile(0.95, rate(kn_next_startup_duration_seconds_bucket{app="${appName}"}[$__rate_interval]))`,
-          legendFormat: 'p95 ({{cache_status}})',
-        }, {
-          expr: `histogram_quantile(0.50, rate(kn_next_startup_duration_seconds_bucket{app="${appName}"}[$__rate_interval]))`,
-          legendFormat: 'p50 ({{cache_status}})',
-        }],
+        targets: [
+          {
+            expr: `histogram_quantile(0.95, rate(kn_next_startup_duration_seconds_bucket{app="${appName}"}[$__rate_interval]))`,
+            legendFormat: 'p95 ({{cache_status}})',
+          },
+          {
+            expr: `histogram_quantile(0.50, rate(kn_next_startup_duration_seconds_bucket{app="${appName}"}[$__rate_interval]))`,
+            legendFormat: 'p50 ({{cache_status}})',
+          },
+        ],
         fieldConfig: { defaults: { unit: 's' } },
       },
       {
         title: '🔥 Warm vs ❄️ Cold Starts',
         type: 'piechart',
         gridPos: { h: 8, w: 6, x: 12, y: 0 },
-        targets: [{
-          expr: `count(kn_next_bytecode_cache_warm_start{app="${appName}"} == 1)`,
-          legendFormat: 'warm',
-        }, {
-          expr: `count(kn_next_bytecode_cache_warm_start{app="${appName}"} == 0)`,
-          legendFormat: 'cold',
-        }],
+        targets: [
+          {
+            expr: `count(kn_next_bytecode_cache_warm_start{app="${appName}"} == 1)`,
+            legendFormat: 'warm',
+          },
+          {
+            expr: `count(kn_next_bytecode_cache_warm_start{app="${appName}"} == 0)`,
+            legendFormat: 'cold',
+          },
+        ],
       },
       {
         title: '📁 Cached Files',
         type: 'stat',
         gridPos: { h: 4, w: 6, x: 0, y: 8 },
-        targets: [{
-          expr: `kn_next_bytecode_cache_files_total{app="${appName}"}`,
-          legendFormat: '{{build_id}}',
-        }],
+        targets: [
+          {
+            expr: `kn_next_bytecode_cache_files_total{app="${appName}"}`,
+            legendFormat: '{{build_id}}',
+          },
+        ],
       },
       {
         title: '💾 Cache Size',
         type: 'stat',
         gridPos: { h: 4, w: 6, x: 6, y: 8 },
-        targets: [{
-          expr: `kn_next_bytecode_cache_size_bytes{app="${appName}"}`,
-          legendFormat: '{{build_id}}',
-        }],
+        targets: [
+          {
+            expr: `kn_next_bytecode_cache_size_bytes{app="${appName}"}`,
+            legendFormat: '{{build_id}}',
+          },
+        ],
         fieldConfig: { defaults: { unit: 'bytes' } },
       },
       {
         title: '✏️ Cache Writes',
         type: 'timeseries',
         gridPos: { h: 4, w: 6, x: 12, y: 8 },
-        targets: [{
-          expr: `rate(kn_next_bytecode_cache_write_count{app="${appName}"}[$__rate_interval])`,
-          legendFormat: 'writes/s',
-        }],
+        targets: [
+          {
+            expr: `rate(kn_next_bytecode_cache_write_count{app="${appName}"}[$__rate_interval])`,
+            legendFormat: 'writes/s',
+          },
+        ],
         fieldConfig: { defaults: { unit: 'ops' } },
       },
       {
         title: '🧠 Memory (RSS)',
         type: 'timeseries',
         gridPos: { h: 6, w: 12, x: 0, y: 12 },
-        targets: [{
-          expr: `process_resident_memory_bytes{app="${appName}"}`,
-          legendFormat: 'RSS - {{pod}}',
-        }],
+        targets: [
+          {
+            expr: `process_resident_memory_bytes{app="${appName}"}`,
+            legendFormat: 'RSS - {{pod}}',
+          },
+        ],
         fieldConfig: { defaults: { unit: 'bytes' } },
       },
       {
         title: '⚡ Event Loop Lag',
         type: 'timeseries',
         gridPos: { h: 6, w: 12, x: 12, y: 12 },
-        targets: [{
-          expr: `nodejs_eventloop_lag_seconds{app="${appName}"}`,
-          legendFormat: '{{pod}}',
-        }],
+        targets: [
+          {
+            expr: `nodejs_eventloop_lag_seconds{app="${appName}"}`,
+            legendFormat: '{{pod}}',
+          },
+        ],
         fieldConfig: { defaults: { unit: 's' } },
       },
       {
         title: '💻 CPU Usage',
         type: 'timeseries',
         gridPos: { h: 6, w: 8, x: 0, y: 18 },
-        targets: [{
-          expr: `rate(process_cpu_user_seconds_total{app="${appName}"}[$__rate_interval])`,
-          legendFormat: 'User - {{pod}}',
-        }, {
-          expr: `rate(process_cpu_system_seconds_total{app="${appName}"}[$__rate_interval])`,
-          legendFormat: 'System - {{pod}}',
-        }],
+        targets: [
+          {
+            expr: `rate(process_cpu_user_seconds_total{app="${appName}"}[$__rate_interval])`,
+            legendFormat: 'User - {{pod}}',
+          },
+          {
+            expr: `rate(process_cpu_system_seconds_total{app="${appName}"}[$__rate_interval])`,
+            legendFormat: 'System - {{pod}}',
+          },
+        ],
         fieldConfig: { defaults: { unit: 'percentunit' } },
       },
       {
         title: '🚦 Active Requests',
         type: 'timeseries',
         gridPos: { h: 6, w: 8, x: 8, y: 18 },
-        targets: [{
-          expr: `nodejs_active_requests{app="${appName}"}`,
-          legendFormat: 'Requests - {{pod}}',
-        }],
+        targets: [
+          {
+            expr: `nodejs_active_requests{app="${appName}"}`,
+            legendFormat: 'Requests - {{pod}}',
+          },
+        ],
       },
       {
         title: '🎛️ Active Handles',
         type: 'timeseries',
         gridPos: { h: 6, w: 8, x: 16, y: 18 },
-        targets: [{
-          expr: `nodejs_active_handles{app="${appName}"}`,
-          legendFormat: 'Handles - {{pod}}',
-        }],
+        targets: [
+          {
+            expr: `nodejs_active_handles{app="${appName}"}`,
+            legendFormat: 'Handles - {{pod}}',
+          },
+        ],
       },
     ],
     refresh: '10s',

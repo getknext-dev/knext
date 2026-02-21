@@ -109,7 +109,10 @@ const incrementalCache: IncrementalCache = {
         return null;
       }
 
-      const entry: RedisCacheEntry<CacheValue<CacheType>> = JSON.parse(data, jsonReviver as (key: string, value: unknown) => unknown);
+      const entry: RedisCacheEntry<CacheValue<CacheType>> = JSON.parse(
+        data,
+        jsonReviver as (key: string, value: unknown) => unknown,
+      );
 
       logCacheEvent('HIT', 'redis', key, {
         durationMs: Date.now() - startTime,
@@ -146,7 +149,12 @@ const incrementalCache: IncrementalCache = {
       };
 
       // Set with 1 hour TTL by default (can be configured)
-      await redis.set(redisKey, JSON.stringify(entry, jsonReplacer as (key: string, value: unknown) => unknown), 'EX', 3600);
+      await redis.set(
+        redisKey,
+        JSON.stringify(entry, jsonReplacer as (key: string, value: unknown) => unknown),
+        'EX',
+        3600,
+      );
 
       logCacheEvent('SET', 'redis', key, {
         durationMs: Date.now() - startTime,

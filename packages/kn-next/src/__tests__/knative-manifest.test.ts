@@ -118,7 +118,11 @@ describe('Knative Manifest Generator', () => {
     it('should NOT include bytecode cache resources when disabled', () => {
       const config: KnativeNextConfig = {
         name: 'my-app',
-        storage: { provider: 'gcs', bucket: 'test-bucket', publicUrl: 'https://storage.googleapis.com/test-bucket' },
+        storage: {
+          provider: 'gcs',
+          bucket: 'test-bucket',
+          publicUrl: 'https://storage.googleapis.com/test-bucket',
+        },
         registry: 'gcr.io/test-project',
       };
 
@@ -137,7 +141,11 @@ describe('Knative Manifest Generator', () => {
     it('should NOT include bytecode cache when bytecodeCache is undefined', () => {
       const config: KnativeNextConfig = {
         name: 'my-app',
-        storage: { provider: 'gcs', bucket: 'test-bucket', publicUrl: 'https://storage.googleapis.com/test-bucket' },
+        storage: {
+          provider: 'gcs',
+          bucket: 'test-bucket',
+          publicUrl: 'https://storage.googleapis.com/test-bucket',
+        },
         registry: 'gcr.io/test-project',
         bytecodeCache: undefined,
       };
@@ -155,7 +163,11 @@ describe('Knative Manifest Generator', () => {
     it('should include NODE_COMPILE_CACHE env var when enabled', () => {
       const config: KnativeNextConfig = {
         name: 'my-app',
-        storage: { provider: 'gcs', bucket: 'test-bucket', publicUrl: 'https://storage.googleapis.com/test-bucket' },
+        storage: {
+          provider: 'gcs',
+          bucket: 'test-bucket',
+          publicUrl: 'https://storage.googleapis.com/test-bucket',
+        },
         registry: 'gcr.io/test-project',
         bytecodeCache: { enabled: true },
       };
@@ -174,7 +186,11 @@ describe('Knative Manifest Generator', () => {
     it('should include PVC manifest when bytecode cache is enabled', () => {
       const config: KnativeNextConfig = {
         name: 'my-app',
-        storage: { provider: 'gcs', bucket: 'test-bucket', publicUrl: 'https://storage.googleapis.com/test-bucket' },
+        storage: {
+          provider: 'gcs',
+          bucket: 'test-bucket',
+          publicUrl: 'https://storage.googleapis.com/test-bucket',
+        },
         registry: 'gcr.io/test-project',
         bytecodeCache: { enabled: true },
       };
@@ -196,7 +212,11 @@ describe('Knative Manifest Generator', () => {
     it('should use custom storage size for PVC', () => {
       const config: KnativeNextConfig = {
         name: 'my-app',
-        storage: { provider: 'gcs', bucket: 'test-bucket', publicUrl: 'https://storage.googleapis.com/test-bucket' },
+        storage: {
+          provider: 'gcs',
+          bucket: 'test-bucket',
+          publicUrl: 'https://storage.googleapis.com/test-bucket',
+        },
         registry: 'gcr.io/test-project',
         bytecodeCache: { enabled: true, storageSize: '1Gi' },
       };
@@ -213,7 +233,11 @@ describe('Knative Manifest Generator', () => {
     it('should include volume mount on the container', () => {
       const config: KnativeNextConfig = {
         name: 'my-app',
-        storage: { provider: 'gcs', bucket: 'test-bucket', publicUrl: 'https://storage.googleapis.com/test-bucket' },
+        storage: {
+          provider: 'gcs',
+          bucket: 'test-bucket',
+          publicUrl: 'https://storage.googleapis.com/test-bucket',
+        },
         registry: 'gcr.io/test-project',
         bytecodeCache: { enabled: true },
       };
@@ -233,7 +257,11 @@ describe('Knative Manifest Generator', () => {
     it('should key cache path by imageTag', () => {
       const config: KnativeNextConfig = {
         name: 'my-app',
-        storage: { provider: 'gcs', bucket: 'test-bucket', publicUrl: 'https://storage.googleapis.com/test-bucket' },
+        storage: {
+          provider: 'gcs',
+          bucket: 'test-bucket',
+          publicUrl: 'https://storage.googleapis.com/test-bucket',
+        },
         registry: 'gcr.io/test-project',
         bytecodeCache: { enabled: true },
       };
@@ -309,7 +337,11 @@ describe('Observability', () => {
   it('should include Prometheus annotations when observability is enabled', () => {
     const config: KnativeNextConfig = {
       name: 'my-app',
-      storage: { provider: 'gcs', bucket: 'test-bucket', publicUrl: 'https://storage.googleapis.com/test-bucket' },
+      storage: {
+        provider: 'gcs',
+        bucket: 'test-bucket',
+        publicUrl: 'https://storage.googleapis.com/test-bucket',
+      },
       registry: 'gcr.io/test-project',
       observability: { enabled: true },
     };
@@ -325,7 +357,11 @@ describe('Observability', () => {
   it('should NOT include Prometheus annotations when observability is disabled', () => {
     const config: KnativeNextConfig = {
       name: 'my-app',
-      storage: { provider: 'gcs', bucket: 'test-bucket', publicUrl: 'https://storage.googleapis.com/test-bucket' },
+      storage: {
+        provider: 'gcs',
+        bucket: 'test-bucket',
+        publicUrl: 'https://storage.googleapis.com/test-bucket',
+      },
       registry: 'gcr.io/test-project',
       observability: { enabled: false },
     };
@@ -339,7 +375,11 @@ describe('Observability', () => {
   it('should inject KN_APP_NAME env var when observability is enabled', () => {
     const config: KnativeNextConfig = {
       name: 'my-app',
-      storage: { provider: 'gcs', bucket: 'test-bucket', publicUrl: 'https://storage.googleapis.com/test-bucket' },
+      storage: {
+        provider: 'gcs',
+        bucket: 'test-bucket',
+        publicUrl: 'https://storage.googleapis.com/test-bucket',
+      },
       registry: 'gcr.io/test-project',
       observability: { enabled: true },
     };

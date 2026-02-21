@@ -1,4 +1,4 @@
-import { readdirSync, statSync } from 'node:fs';
+import { readdirSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { $ } from 'bun';
 import type { KnativeNextConfig, StorageConfig } from '../config';
@@ -40,7 +40,7 @@ function collectFiles(dir: string, baseDir: string): string[] {
 export async function uploadAssets(config: KnativeNextConfig): Promise<void> {
   const assetsDir = join(process.cwd(), '.open-next', 'assets');
 
-  console.log(`   Syncing to ${config.storage.provider}://${config.storage.bucket}`);
+  console.info(`   Syncing to ${config.storage.provider}://${config.storage.bucket}`);
 
   switch (config.storage.provider) {
     case 'gcs': {
@@ -55,20 +55,22 @@ export async function uploadAssets(config: KnativeNextConfig): Promise<void> {
       const gcsFiles = new Set(
         gcsListResult
           .split('\n')
-          .filter(line => line.startsWith('gs://'))
-          .map(line => line.replace(`gs://${config.storage.bucket}/`, ''))
+          .filter((line) => line.startsWith('gs://'))
+          .map((line) => line.replace(`gs://${config.storage.bucket}/`, '')),
       );
 
-      const missing = localFiles.filter(f => !gcsFiles.has(f));
+      const missing = localFiles.filter((f) => !gcsFiles.has(f));
 
       if (missing.length > 0) {
-        console.log(`   ⚠️  ${missing.length} file(s) missing after bulk upload, retrying individually...`);
+        console.info(
+          `   ⚠️  ${missing.length} file(s) missing after bulk upload, retrying individually...`,
+        );
         for (const file of missing) {
           const localPath = join(assetsDir, file);
           const gcsPath = `gs://${config.storage.bucket}/${file}`;
           await $`gsutil -h "Cache-Control:public, max-age=31536000, immutable" cp ${localPath} ${gcsPath}`.quiet();
         }
-        console.log(`   ✅ Uploaded ${missing.length} missing file(s)`);
+        console.info(`   ✅ Uploaded ${missing.length} missing file(s)`);
       }
       break;
     }

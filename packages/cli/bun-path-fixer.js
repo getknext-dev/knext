@@ -1,5 +1,5 @@
-import fs from 'fs';
-import path from 'path';
+import fs from 'node:fs';
+import path from 'node:path';
 /**
  * Bun Path Fixer Plugin
  *
@@ -12,19 +12,19 @@ import path from 'path';
  */
 import { plugin } from 'bun';
 
-console.log('DEBUG: bun-path-fixer plugin loaded');
+console.info('DEBUG: bun-path-fixer plugin loaded');
 
 // Get the runtime app directory from environment (set in Dockerfile)
-const RUNTIME_APP_DIR = process.env.RUNTIME_APP_DIR || '/app';
+const _RUNTIME_APP_DIR = process.env.RUNTIME_APP_DIR || '/app';
 
 plugin({
   name: 'path-fixer',
   setup(build) {
-    console.log('DEBUG: path-fixer plugin setup called');
+    console.info('DEBUG: path-fixer plugin setup called');
 
     // Transform the bun-runner.ts to use runtime paths
     build.onLoad({ filter: /bun-runner\.ts$/ }, async (args) => {
-      console.log('DEBUG: Transforming bun-runner.ts:', args.path);
+      console.info('DEBUG: Transforming bun-runner.ts:', args.path);
 
       let contents = await Bun.file(args.path).text();
 
@@ -41,7 +41,7 @@ const require = createRequire(process.cwd() + '/package.json');`,
       // Original: const dir = path.join(process.cwd(), relativeAppDir);
       // This should already work since process.cwd() is /app at runtime
 
-      console.log('DEBUG: bun-runner.ts transformed successfully');
+      console.info('DEBUG: bun-runner.ts transformed successfully');
 
       return {
         contents,
@@ -70,7 +70,7 @@ const require = createRequire(process.cwd() + '/package.json');`,
 
       if (fs.existsSync(FLIGHT_DIR)) {
         build.onResolve({ filter: /^react-server-dom-webpack\// }, (args) => {
-          console.log('DEBUG: Resolving react-server-dom-webpack:', args.path);
+          console.info('DEBUG: Resolving react-server-dom-webpack:', args.path);
           const baseName = args.path.replace('react-server-dom-webpack/', '');
           const resolved = path.join(
             FLIGHT_DIR,

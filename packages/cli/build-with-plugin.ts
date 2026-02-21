@@ -8,7 +8,7 @@ if (args.length < 2) {
 const entrypoint = args[0];
 const outputFilename = args[1]; // e.g., "server"
 
-console.log(`🔨 Building and Bundling ${entrypoint} -> ${outputFilename}...`);
+console.info(`🔨 Building and Bundling ${entrypoint} -> ${outputFilename}...`);
 
 // Plugin to wildcard externalize webpack/build dependencies
 const ExternalizeWebpack = {
@@ -16,7 +16,7 @@ const ExternalizeWebpack = {
   setup(build: any) {
     // Filter for webpack related imports or next build internals
     build.onResolve({ filter: /webpack|next\/dist\/build|critters|loader-utils/ }, (args: any) => {
-      // console.log(`   ⛔ Externalizing: ${args.path}`);
+      // console.info(`   ⛔ Externalizing: ${args.path}`);
       return {
         path: args.path,
         external: true,
@@ -50,4 +50,4 @@ await Bun.build({
   },
 });
 
-console.log(`✅ Build Complete: ${outputFilename}`);
+console.info(`✅ Build Complete: ${outputFilename}`);

@@ -2,7 +2,7 @@
 // Launches the Next.js Standalone Server
 
 export async function start() {
-  console.log('[Runtime] Starting Next.js Standalone Server...');
+  console.info('[Runtime] Starting Next.js Standalone Server...');
 
   // Set environment defaults for Knative
   process.env.PORT = process.env.PORT || '8080';
@@ -15,21 +15,21 @@ export async function start() {
   // Note: We use process.cwd() which is /app
   const serverJsPath = `${process.cwd()}/apps/file-manager/server.js`;
 
-  console.log(`[Runtime] Importing ${serverJsPath}...`);
+  console.info(`[Runtime] Importing ${serverJsPath}...`);
 
   try {
     // Dynamic import executes the server script
     await import(serverJsPath);
-    console.log('[Runtime] Server script executed.');
+    console.info('[Runtime] Server script executed.');
   } catch (error) {
     console.error('[Runtime] ❌ Failed to start server.js:', error);
     console.error('Verify that the standalone bundle was extracted correctly.');
     // List files for debugging
     const fs = await import('node:fs');
     if (fs.existsSync(`${process.cwd()}/apps`)) {
-      console.log('Contents of apps:', fs.readdirSync(`${process.cwd()}/apps/file-manager`));
+      console.info('Contents of apps:', fs.readdirSync(`${process.cwd()}/apps/file-manager`));
     } else {
-      console.log('/app/apps does not exist!');
+      console.info('/app/apps does not exist!');
     }
   }
 }

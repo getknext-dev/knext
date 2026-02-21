@@ -66,26 +66,26 @@ async function copyAdapters(outputDir: string, storageProvider: string, cachePro
     const dest = join(adaptersDir, adapter);
     if (existsSync(src)) {
       copyFileSync(src, dest);
-      console.log(`   Copied ${adapter}`);
+      console.info(`   Copied ${adapter}`);
     }
   }
 }
 
 export async function build(options: BuildOptions = {}) {
-  console.log('🔨 kn-next build\n');
+  console.info('🔨 kn-next build\n');
 
   const workDir = process.cwd();
   const outputDir = join(workDir, '.open-next');
 
   // 1. Load config
-  console.log('📋 Loading configuration...');
+  console.info('📋 Loading configuration...');
   const config = await loadConfig();
-  console.log(`   App: ${config.name}`);
-  console.log(`   Storage: ${config.storage.provider} (${config.storage.bucket})`);
-  console.log(`   Cache: ${config.cache?.provider ?? 'none'}\n`);
+  console.info(`   App: ${config.name}`);
+  console.info(`   Storage: ${config.storage.provider} (${config.storage.bucket})`);
+  console.info(`   Cache: ${config.cache?.provider ?? 'none'}\n`);
 
   // 2. Generate open-next.config.ts
-  console.log('⚙️  Generating OpenNext config...');
+  console.info('⚙️  Generating OpenNext config...');
   mkdirSync(outputDir, { recursive: true });
   generateOpenNextConfig({
     config,
@@ -95,27 +95,27 @@ export async function build(options: BuildOptions = {}) {
 
   // 3. Run Next.js build
   if (!options.skipNextBuild) {
-    console.log('📦 Building Next.js...');
+    console.info('📦 Building Next.js...');
     await $`npm run build`.quiet();
-    console.log('   ✅ Next.js build complete\n');
+    console.info('   ✅ Next.js build complete\n');
   }
 
   // 4. Run OpenNext build
-  console.log('⚡ Building OpenNext...');
+  console.info('⚡ Building OpenNext...');
   await $`npx open-next build`.quiet();
-  console.log('   ✅ OpenNext build complete\n');
+  console.info('   ✅ OpenNext build complete\n');
 
   // 5. Upload static assets
-  console.log('☁️  Uploading static assets...');
+  console.info('☁️  Uploading static assets...');
   await uploadAssets(config);
-  console.log('   ✅ Assets uploaded\n');
+  console.info('   ✅ Assets uploaded\n');
 
   // 6. Copy adapters
-  console.log('📂 Copying adapters...');
+  console.info('📂 Copying adapters...');
   await copyAdapters(outputDir, config.storage.provider, config.cache?.provider ?? 'redis');
 
   // 7. Generate Knative manifest
-  console.log('🌐 Generating Knative manifest...');
+  console.info('🌐 Generating Knative manifest...');
   generateKnativeManifest({
     config,
     outputDir,
@@ -123,15 +123,15 @@ export async function build(options: BuildOptions = {}) {
   });
 
   // 7. Show required env vars
-  console.log('\n📝 Required environment variables:');
+  console.info('\n📝 Required environment variables:');
   const envVars = getRequiredEnvVars(config);
   for (const [key, value] of Object.entries(envVars)) {
-    console.log(`   ${key}=${value}`);
+    console.info(`   ${key}=${value}`);
   }
 
-  console.log('\n✨ Build complete!');
-  console.log(`   Output: ${outputDir}`);
-  console.log(`   Manifest: ${join(outputDir, 'knative-service.yaml')}`);
+  console.info('\n✨ Build complete!');
+  console.info(`   Output: ${outputDir}`);
+  console.info(`   Manifest: ${join(outputDir, 'knative-service.yaml')}`);
 }
 
 // Run if executed directly

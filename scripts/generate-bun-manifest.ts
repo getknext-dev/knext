@@ -46,8 +46,8 @@ ${importStatements}
 // Import the runtime handler shim
 import { handler } from "${handlerPath}";
 
-console.log("🚀 Bun Bytecode Server Starting...");
-console.log("📦 VFS dependencies embedded via NFT manifest Ingestion.");
+console.info("🚀 Bun Bytecode Server Starting...");
+console.info("📦 VFS dependencies embedded via NFT manifest Ingestion.");
 
 // Initialize the Bun Server
 Bun.serve({

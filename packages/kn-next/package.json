@@ -31,15 +31,8 @@
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage"
   },
-  "files": [
-    "src"
-  ],
-  "keywords": [
-    "knative",
-    "nextjs",
-    "opennext",
-    "serverless"
-  ],
+  "files": ["src"],
+  "keywords": ["knative", "nextjs", "opennext", "serverless"],
   "license": "MIT",
   "devDependencies": {
     "@opennextjs/aws": "^3.1.2",
