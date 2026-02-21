@@ -51,7 +51,7 @@ export async function uploadAssets(config: KnativeNextConfig): Promise<void> {
 
       // Post-upload verification: ensure all local files exist in GCS
       const localFiles = collectFiles(assetsDir, assetsDir);
-      const gcsListResult = await $`gsutil ls -r gs://${config.storage.bucket}/**`.text();
+      const gcsListResult = await $`gsutil ls -r "gs://${config.storage.bucket}/"`.text();
       const gcsFiles = new Set(
         gcsListResult
           .split('\n')

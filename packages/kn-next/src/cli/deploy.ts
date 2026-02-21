@@ -233,6 +233,22 @@ async function patchStandaloneOutput(appDir: string): Promise<void> {
   if (cachePatched > 0) {
     console.info(`   🔧 Patched ${cachePatched} cache.cjs file(s) to preserve segmentData`);
   }
+
+  // Patch missing Turbopack instrumentation chunks
+  // Next.js standalone tracing natively drops Turbopack chunks dynamically imported by instrumentation.js
+  const srcChunksDir = join(appDir, '.next', 'server', 'chunks');
+  if (existsSync(srcChunksDir)) {
+    try {
+      const destDirs = await $`find ${serverFunctionsDir} -type d -path "*/.next/server/chunks"`.text();
+      const targetDirs = destDirs.trim().split('\n').filter(Boolean);
+
+      for (const targetDir of targetDirs) {
+        await $`cp -n ${srcChunksDir}/*root-of-the-server* ${targetDir}/ 2>/dev/null || true`.quiet();
+        await $`cp -n ${srcChunksDir}/*instrumentation* ${targetDir}/ 2>/dev/null || true`.quiet();
+      }
+      console.info('   🔧 Synced missing Turbopack instrumentation chunks to standalone output');
+    } catch { }
+  }
 }
 
 const CONFIG_FILE = 'kn-next.config.ts';
