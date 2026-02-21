@@ -1,0 +1,110 @@
+{
+  "dashboard": {
+    "id": null,
+    "uid": "kn-next-loadtest",
+    "title": "kn-next: file-manager Load Testing",
+    "tags": ["knative", "nextjs", "load-test"],
+    "timezone": "browser",
+    "schemaVersion": 39,
+    "refresh": "5s",
+    "panels": [
+      {
+        "title": "Active Replicas (Knative Pod Autoscaling)",
+        "type": "stat",
+        "gridPos": { "h": 6, "w": 8, "x": 0, "y": 0 },
+        "targets": [
+          {
+            "expr": "sum(kube_pod_status_phase{namespace=\"default\", phase=\"Running\", pod=~\"file-manager.*\"}) or sum(up{job=\"file-manager\"})",
+            "legendFormat": "Active Pods"
+          }
+        ],
+        "options": {
+          "colorMode": "value",
+          "graphMode": "area",
+          "justifyMode": "auto"
+        }
+      },
+      {
+        "title": "Throughput (RPS)",
+        "type": "timeseries",
+        "gridPos": { "h": 6, "w": 8, "x": 8, "y": 0 },
+        "targets": [
+          {
+            "expr": "sum(rate(http_server_request_duration_seconds_count{service=\"file-manager\"}[15s]))",
+            "legendFormat": "Requests / sec"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "custom": {
+              "drawStyle": "line",
+              "lineInterpolation": "smooth",
+              "fillOpacity": 20,
+              "lineWidth": 2
+            }
+          }
+        }
+      },
+      {
+        "title": "Error Rate (5xx / 4xx)",
+        "type": "timeseries",
+        "gridPos": { "h": 6, "w": 8, "x": 16, "y": 0 },
+        "targets": [
+          {
+            "expr": "sum(rate(http_server_request_duration_seconds_count{service=\"file-manager\", http_response_status_code=~\"5.*\"}[15s]))",
+            "legendFormat": "5xx Errors / sec"
+          },
+          {
+            "expr": "sum(rate(http_server_request_duration_seconds_count{service=\"file-manager\", http_response_status_code=~\"4.*\"}[15s]))",
+            "legendFormat": "4xx Errors / sec"
+          }
+        ]
+      },
+      {
+        "title": "Percentile Latencies (P95, P90, P50)",
+        "type": "timeseries",
+        "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.95, sum(rate(http_server_request_duration_seconds_bucket{service=\"file-manager\"}[15s])) by (le))",
+            "legendFormat": "p95 Latency"
+          },
+          {
+            "expr": "histogram_quantile(0.90, sum(rate(http_server_request_duration_seconds_bucket{service=\"file-manager\"}[15s])) by (le))",
+            "legendFormat": "p90 Latency"
+          },
+          {
+            "expr": "histogram_quantile(0.50, sum(rate(http_server_request_duration_seconds_bucket{service=\"file-manager\"}[15s])) by (le))",
+            "legendFormat": "p50 Latency"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "s",
+            "custom": {
+              "drawStyle": "line"
+            }
+          }
+        }
+      },
+      {
+        "title": "Node.js Event Loop Lag",
+        "type": "timeseries",
+        "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 },
+        "targets": [
+          {
+            "expr": "max(nodejs_eventloop_lag_max_seconds{service=\"file-manager\"}) by (pod)",
+            "legendFormat": "Lag {{pod}}"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "s"
+          }
+        }
+      }
+    ]
+  },
+  "message": "Provisioned by kn-next Assistant",
+  "overwrite": true
+}

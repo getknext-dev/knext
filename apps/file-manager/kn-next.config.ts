@@ -42,6 +42,16 @@ const config: KnativeNextConfig = {
   observability: {
     enabled: true,
   },
+
+  // Kubernetes Native Secrets Binding
+  secrets: {
+    // Inject all key-value pairs from this Secret into the environment
+    envFrom: ['file-manager-credentials'],
+    // Map specific environment variables to specific Secret keys
+    envMap: {
+      API_TOKEN: { name: 'global-tokens', key: 'file_manager_token' },
+    },
+  },
 };
 
 export default config;

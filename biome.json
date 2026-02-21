@@ -1,5 +1,5 @@
 {
-  "$schema": "https://biomejs.dev/schemas/1.9.4/schema.json",
+  "$schema": "https://biomejs.dev/schemas/2.4.4/schema.json",
   "vcs": {
     "enabled": true,
     "clientKind": "git",
@@ -7,15 +7,17 @@
   },
   "files": {
     "ignoreUnknown": false,
-    "ignore": [
-      "**/.next/**",
-      "**/dist/**",
-      "**/node_modules/**",
-      "**/coverage/**",
-      "**/.turbo/**",
-      "**/build/**",
-      "**/.cursor/**",
-      "**/bun.lockb"
+    "includes": [
+      "**",
+      "!**/.next",
+      "!**/dist",
+      "!**/*.css",
+      "!**/node_modules",
+      "!**/coverage",
+      "!**/.turbo",
+      "!**/build",
+      "!**/.cursor",
+      "!**/bun.lockb"
     ]
   },
   "formatter": {
@@ -38,10 +40,10 @@
         "useExhaustiveDependencies": "warn"
       },
       "suspicious": {
-        "noConsoleLog": "warn",
         "noExplicitAny": "off",
         "noDoubleEquals": "error",
-        "noArrayIndexKey": "warn"
+        "noArrayIndexKey": "warn",
+        "noConsole": "off"
       },
       "style": {
         "noNonNullAssertion": "off",
@@ -62,7 +64,5 @@
       "trailingCommas": "all"
     }
   },
-  "organizeImports": {
-    "enabled": true
-  }
+  "assist": { "actions": { "source": { "organizeImports": "on" } } }
 }

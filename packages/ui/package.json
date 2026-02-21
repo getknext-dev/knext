@@ -9,8 +9,7 @@
     "./components/*": "./src/components/*.tsx"
   },
   "scripts": {
-    "test": "vitest",
-    "lint": "eslint"
+    "test": "vitest"
   },
   "dependencies": {
     "class-variance-authority": "^0.7.1",

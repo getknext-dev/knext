@@ -1,8 +1,8 @@
-import FileList from '@/components/FileList';
-import UploadForm from '@/components/UploadForm';
 import { getDbPool } from '@knative-next/lib/clients';
 import { unstable_cache, unstable_noStore } from 'next/cache';
 import { Suspense } from 'react';
+import FileList from '@/components/FileList';
+import UploadForm from '@/components/UploadForm';
 
 // Get files from database with caching and tags
 const getFiles = unstable_cache(

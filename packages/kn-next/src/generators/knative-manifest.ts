@@ -1,15 +1,15 @@
-import { writeFileSync } from 'node:fs';
-import path from 'node:path';
-import type { KnativeNextConfig } from '../config';
-import { getRequiredEnvVars } from './open-next-config';
+import { writeFileSync } from "node:fs";
+import path from "node:path";
+import type { KnativeNextConfig } from "../config";
+import { getRequiredEnvVars } from "./open-next-config";
 
 export interface GenerateKnativeManifestOptions {
-  config: KnativeNextConfig;
-  outputDir: string;
-  imageTag?: string;
-  namespace?: string;
-  enableKafkaQueue?: boolean;
-  additionalEnvVars?: Record<string, string>; // Infrastructure connection vars
+    config: KnativeNextConfig;
+    outputDir: string;
+    imageTag?: string;
+    namespace?: string;
+    enableKafkaQueue?: boolean;
+    additionalEnvVars?: Record<string, string>; // Infrastructure connection vars
 }
 
 /**
@@ -17,76 +17,84 @@ export interface GenerateKnativeManifestOptions {
  * Includes all required environment variables for the adapters.
  * Optionally includes bytecode cache PVC and volume mounts.
  */
-export function generateKnativeManifest(options: GenerateKnativeManifestOptions): string {
-  const {
-    config,
-    outputDir,
-    imageTag = 'latest',
-    namespace = 'default',
-    enableKafkaQueue = false,
-    additionalEnvVars = {},
-  } = options;
+export function generateKnativeManifest(
+    options: GenerateKnativeManifestOptions,
+): string {
+    const {
+        config,
+        outputDir,
+        imageTag = "latest",
+        namespace = "default",
+        enableKafkaQueue = false,
+        additionalEnvVars = {},
+    } = options;
 
-  const envVars = { ...getRequiredEnvVars(config), ...additionalEnvVars };
+    const envVars = { ...getRequiredEnvVars(config), ...additionalEnvVars };
 
-  // Add Kafka env vars if enabled
-  if (enableKafkaQueue) {
-    envVars.KAFKA_BROKER_URL = '${KAFKA_BROKER_URL}';
-    envVars.KAFKA_REVALIDATION_TOPIC = `${config.name}-revalidation`;
-  }
+    // Add Kafka env vars if enabled
+    if (enableKafkaQueue) {
+        // biome-ignore lint/suspicious/noTemplateCurlyInString: required for K8s manifest
+        envVars.KAFKA_BROKER_URL = "${KAFKA_BROKER_URL}";
+        envVars.KAFKA_REVALIDATION_TOPIC = `${config.name}-revalidation`;
+    }
 
-  // Add NODE_COMPILE_CACHE env var if bytecode caching is enabled
-  const bytecodeCacheEnabled = config.bytecodeCache?.enabled === true;
-  if (bytecodeCacheEnabled) {
-    envVars.NODE_COMPILE_CACHE = `/cache/bytecode/${imageTag}`;
-  }
+    // Add NODE_COMPILE_CACHE env var if bytecode caching is enabled
+    const bytecodeCacheEnabled = config.bytecodeCache?.enabled === true;
+    if (bytecodeCacheEnabled) {
+        envVars.NODE_COMPILE_CACHE = `/cache/bytecode/${imageTag}`;
+    }
 
-  // Add observability env vars
-  const observabilityEnabled = config.observability?.enabled === true;
-  if (observabilityEnabled) {
-    envVars.KN_APP_NAME = config.name;
-  }
+    // Add observability env vars
+    const observabilityEnabled = config.observability?.enabled === true;
+    if (observabilityEnabled) {
+        envVars.KN_APP_NAME = config.name;
+    }
 
-  // Build Prometheus annotations if observability is enabled
-  const prometheusAnnotations = observabilityEnabled
-    ? `\n        prometheus.io/scrape: "true"\n        prometheus.io/port: "3000"\n        prometheus.io/path: "/api/metrics"`
-    : '';
+    // Build Prometheus annotations if observability is enabled
+    const prometheusAnnotations = observabilityEnabled
+        ? `\n        prometheus.io/scrape: "true"\n        prometheus.io/port: "3000"\n        prometheus.io/path: "/api/metrics"`
+        : "";
 
-  // Format env vars for YAML (12-space indent for env array items)
-  const envVarsYaml = Object.entries(envVars)
-    .map(([key, value]) => `            - name: ${key}\n              value: "${value}"`)
-    .join('\n');
+    // Format env vars for YAML (12-space indent for env array items)
+    const envVarsYaml = Object.entries(envVars)
+        .map(
+            ([key, value]) =>
+                `            - name: ${key}\n              value: "${value}"`,
+        )
+        .join("\n");
 
-  // Handle mapped secrets (envMap)
-  const envMapEntries = config.secrets?.envMap
-    ? Object.entries(config.secrets.envMap).map(
-        ([envName, ref]) =>
-          `            - name: ${envName}\n              valueFrom:\n                secretKeyRef:\n                  name: ${ref.name}\n                  key: ${ref.key ?? envName}`,
-      )
-    : [];
+    // Handle mapped secrets (envMap)
+    const envMapEntries = config.secrets?.envMap
+        ? Object.entries(config.secrets.envMap).map(
+              ([envName, ref]) =>
+                  `            - name: ${envName}\n              valueFrom:\n                secretKeyRef:\n                  name: ${ref.name}\n                  key: ${ref.key ?? envName}`,
+          )
+        : [];
 
-  const allEnvItems = [envVarsYaml, ...envMapEntries].filter(Boolean).join('\n');
+    const allEnvItems = [envVarsYaml, ...envMapEntries]
+        .filter(Boolean)
+        .join("\n");
 
-  // Handle entire secrets injected as envFrom
-  const envFromYaml = config.secrets?.envFrom?.length
-    ? `\n          envFrom:\n${config.secrets.envFrom.map((secretName) => `            - secretRef:\n                name: ${secretName}`).join('\n')}`
-    : '';
-  const volumeMountYaml = bytecodeCacheEnabled
-    ? `
+    // Handle entire secrets injected as envFrom
+    const envFromYaml = config.secrets?.envFrom?.length
+        ? `\n          envFrom:\n${config.secrets.envFrom.map((secretName) => `            - secretRef:\n                name: ${secretName}`).join("\n")}`
+        : "";
+    const volumeMountYaml = bytecodeCacheEnabled
+        ? `
           volumeMounts:
             - name: bytecode-cache
               mountPath: /cache/bytecode`
-    : '';
+        : "";
 
-  const volumeYaml = bytecodeCacheEnabled
-    ? `
+    const volumeYaml = bytecodeCacheEnabled
+        ? `
       volumes:
         - name: bytecode-cache
           persistentVolumeClaim:
             claimName: ${config.name}-bytecode-cache`
-    : '';
+        : "";
 
-  const manifest = `# AUTO-GENERATED by kn-next build - DO NOT EDIT
+    const manifest = `# AUTO-GENERATED by kn-next build - DO NOT EDIT
 # Source: kn-next.config.ts
 apiVersion: serving.knative.dev/v1
 kind: Service
@@ -104,6 +112,7 @@ spec:
         autoscaling.knative.dev/min-scale: "${config.scaling?.minScale ?? 0}"
         autoscaling.knative.dev/max-scale: "${config.scaling?.maxScale ?? 10}"${prometheusAnnotations}
     spec:
+      serviceAccountName: ${config.name}-sa
       containerConcurrency: 100
       timeoutSeconds: 300
       containers:
@@ -118,28 +127,28 @@ spec:
 ${allEnvItems}${envFromYaml}
           resources:
             requests:
-              cpu: "${config.scaling?.cpuRequest ?? '250m'}"
-              memory: "${config.scaling?.memoryRequest ?? '512Mi'}"
+              cpu: "${config.scaling?.cpuRequest ?? "250m"}"
+              memory: "${config.scaling?.memoryRequest ?? "512Mi"}"
             limits:
-              cpu: "${config.scaling?.cpuLimit ?? '1000m'}"
-              memory: "${config.scaling?.memoryLimit ?? '1Gi'}"${volumeMountYaml}
+              cpu: "${config.scaling?.cpuLimit ?? "1000m"}"
+              memory: "${config.scaling?.memoryLimit ?? "1Gi"}"${volumeMountYaml}
           readinessProbe:
             httpGet:
-              path: ${config.healthCheckPath ?? '/api/health'}
+              path: ${config.healthCheckPath ?? "/api/health"}
               port: 3000
             initialDelaySeconds: 5
             periodSeconds: 10
           livenessProbe:
             httpGet:
-              path: ${config.healthCheckPath ?? '/api/health'}
+              path: ${config.healthCheckPath ?? "/api/health"}
               port: 3000
             initialDelaySeconds: 15
             periodSeconds: 30${volumeYaml}
 `;
 
-  // Generate PVC manifest if bytecode cache is enabled
-  const bytecodePvcManifest = bytecodeCacheEnabled
-    ? `---
+    // Generate PVC manifest if bytecode cache is enabled
+    const bytecodePvcManifest = bytecodeCacheEnabled
+        ? `---
 # Bytecode cache PVC - shared across pods for V8 compile cache
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -154,36 +163,48 @@ spec:
     - ReadWriteOnce
   resources:
     requests:
-      storage: ${config.bytecodeCache?.storageSize ?? '512Mi'}
+      storage: ${config.bytecodeCache?.storageSize ?? "512Mi"}
 `
-    : '';
+        : "";
 
-  const fullManifest = manifest + bytecodePvcManifest;
+    // Generate ServiceAccount manifest for least-privilege RBAC
+    const serviceAccountManifest = `---
+# Least-privilege ServiceAccount to restrict K8s API access
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ${config.name}-sa
+  namespace: ${namespace}
+automountServiceAccountToken: false
+`;
 
-  const outputPath = path.join(outputDir, 'knative-service.yaml');
-  writeFileSync(outputPath, fullManifest, 'utf-8');
+    const fullManifest =
+        manifest + bytecodePvcManifest + serviceAccountManifest;
 
-  console.info(`[kn-next] Generated ${outputPath}`);
-  if (bytecodeCacheEnabled) {
-    console.info(
-      `[kn-next] Bytecode caching enabled (NODE_COMPILE_CACHE=/cache/bytecode/${imageTag})`,
-    );
-  }
-  return outputPath;
+    const outputPath = path.join(outputDir, "knative-service.yaml");
+    writeFileSync(outputPath, fullManifest, "utf-8");
+
+    console.info(`[kn-next] Generated ${outputPath}`);
+    if (bytecodeCacheEnabled) {
+        console.info(
+            `[kn-next] Bytecode caching enabled (NODE_COMPILE_CACHE=/cache/bytecode/${imageTag})`,
+        );
+    }
+    return outputPath;
 }
 
 /**
  * Generates Knative Eventing resources for ISR revalidation via Kafka.
  */
 export function generateKafkaEventingManifest(options: {
-  config: KnativeNextConfig;
-  outputDir: string;
-  kafkaBroker: string;
+    config: KnativeNextConfig;
+    outputDir: string;
+    kafkaBroker: string;
 }): string {
-  const { config, outputDir, kafkaBroker } = options;
-  const topic = `${config.name}-revalidation`;
+    const { config, outputDir, kafkaBroker } = options;
+    const topic = `${config.name}-revalidation`;
 
-  const manifest = `# AUTO-GENERATED by kn-next build - DO NOT EDIT
+    const manifest = `# AUTO-GENERATED by kn-next build - DO NOT EDIT
 # Knative Eventing configuration for ISR revalidation
 apiVersion: sources.knative.dev/v1beta1
 kind: KafkaSource
@@ -215,11 +236,11 @@ spec:
               value: "${config.name}.default.svc.cluster.local"
 `;
 
-  const outputPath = path.join(outputDir, 'knative-eventing.yaml');
-  writeFileSync(outputPath, manifest, 'utf-8');
+    const outputPath = path.join(outputDir, "knative-eventing.yaml");
+    writeFileSync(outputPath, manifest, "utf-8");
 
-  console.info(`[kn-next] Generated ${outputPath}`);
-  return outputPath;
+    console.info(`[kn-next] Generated ${outputPath}`);
+    return outputPath;
 }
 
 /**
@@ -242,12 +263,12 @@ spec:
  * - Use: `ENTRYPOINT ["/entrypoint.sh"]`
  */
 export function generateEntrypoint(options: {
-  config: KnativeNextConfig;
-  outputDir: string;
+    config: KnativeNextConfig;
+    outputDir: string;
 }): string {
-  const { outputDir } = options;
+    const { outputDir } = options;
 
-  const script = `#!/bin/sh
+    const script = `#!/bin/sh
 # AUTO-GENERATED by kn-next build - DO NOT EDIT
 # Fixes PVC ownership for V8 bytecode cache, then drops to node user.
 #
@@ -279,11 +300,11 @@ export HOSTNAME=0.0.0.0
 # Docker build, but Next.js 16 needs write access for prerender cache (.next/cache)
 # and segment files (.next/server/app/*.segments). Without this fix, cache writes
 # fail with EACCES and OpenNext cache adapters never fire.
-NEXT_DIR="\$(pwd)/.next"
-if [ -d "\$NEXT_DIR" ]; then
-  mkdir -p "\$NEXT_DIR/cache" 2>/dev/null || true
-  chown -R node:node "\$NEXT_DIR/cache" 2>/dev/null || true
-  chown -R node:node "\$NEXT_DIR/server" 2>/dev/null || true
+NEXT_DIR="$(pwd)/.next"
+if [ -d "$NEXT_DIR" ]; then
+  mkdir -p "$NEXT_DIR/cache" 2>/dev/null || true
+  chown -R node:node "$NEXT_DIR/cache" 2>/dev/null || true
+  chown -R node:node "$NEXT_DIR/server" 2>/dev/null || true
   echo "[kn-next] Fixed .next cache permissions"
 fi
 
@@ -292,9 +313,11 @@ fi
 exec su-exec node node index.mjs
 `;
 
-  const outputPath = path.join(outputDir, 'entrypoint.sh');
-  writeFileSync(outputPath, script, { encoding: 'utf-8', mode: 0o755 });
+    const outputPath = path.join(outputDir, "entrypoint.sh");
+    writeFileSync(outputPath, script, { encoding: "utf-8", mode: 0o755 });
 
-  console.info('[kn-next] Generated entrypoint.sh (bytecode cache PVC permissions fix)');
-  return outputPath;
+    console.info(
+        "[kn-next] Generated entrypoint.sh (bytecode cache PVC permissions fix)",
+    );
+    return outputPath;
 }

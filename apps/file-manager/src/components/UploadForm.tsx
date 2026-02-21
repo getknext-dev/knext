@@ -1,7 +1,7 @@
 'use client';
 
-import { uploadFile } from '@/app/actions';
 import { useState } from 'react';
+import { uploadFile } from '@/app/actions';
 
 export default function UploadForm() {
   const [uploading, setUploading] = useState(false);

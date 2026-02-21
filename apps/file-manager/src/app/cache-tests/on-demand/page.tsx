@@ -1,5 +1,4 @@
-import { revalidatePath, revalidateTag } from 'next/cache';
-import { unstable_cache } from 'next/cache';
+import { revalidatePath, revalidateTag, unstable_cache } from 'next/cache';
 
 // Allow dynamic for server actions to work
 export const dynamic = 'force-dynamic';

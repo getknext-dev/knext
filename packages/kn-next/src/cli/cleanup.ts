@@ -11,92 +11,94 @@
  *   3. Clear storage bucket
  */
 
-import { existsSync } from 'node:fs';
-import { resolve } from 'node:path';
-import { $ } from 'bun';
-import type { KnativeNextConfig } from '../config';
+import { existsSync } from "node:fs";
+import { resolve } from "node:path";
+import { $ } from "bun";
+import type { KnativeNextConfig } from "../config";
 
-const CONFIG_FILE = 'kn-next.config.ts';
+const CONFIG_FILE = "kn-next.config.ts";
 
 async function loadConfig(): Promise<KnativeNextConfig> {
-  const configPath = resolve(process.cwd(), CONFIG_FILE);
+    const configPath = resolve(process.cwd(), CONFIG_FILE);
 
-  if (!existsSync(configPath)) {
-    throw new Error(`Config file not found: ${configPath}`);
-  }
+    if (!existsSync(configPath)) {
+        throw new Error(`Config file not found: ${configPath}`);
+    }
 
-  const module = await import(configPath);
-  return module.default;
+    const module = await import(configPath);
+    return module.default;
 }
 
 async function cleanup() {
-  console.info('🧹 kn-next cleanup\n');
+    console.info("🧹 kn-next cleanup\n");
 
-  // 1. Load config
-  console.info('📋 Loading configuration...');
-  const config = await loadConfig();
-  console.info(`   App: ${config.name}`);
-  console.info(`   Storage: ${config.storage.provider} (${config.storage.bucket})\n`);
+    // 1. Load config
+    console.info("📋 Loading configuration...");
+    const config = await loadConfig();
+    console.info(`   App: ${config.name}`);
+    console.info(
+        `   Storage: ${config.storage.provider} (${config.storage.bucket})\n`,
+    );
 
-  // 2. Delete Knative service
-  console.info('🗑️  Deleting Knative service...');
-  try {
-    await $`kubectl delete ksvc ${config.name} --ignore-not-found`.quiet();
-    console.info(`   ✅ Deleted ksvc/${config.name}\n`);
-  } catch (_err) {
-    console.info('   ⚠️  Service not found or already deleted\n');
-  }
-
-  // 3. Delete infrastructure services (if configured)
-  if (config.infrastructure) {
-    console.info('🗑️  Deleting infrastructure services...');
-    if (config.infrastructure.postgres?.enabled) {
-      await $`kubectl delete statefulset ${config.name}-postgres --ignore-not-found`.quiet();
-      await $`kubectl delete svc ${config.name}-postgres --ignore-not-found`.quiet();
-      await $`kubectl delete pvc -l app=${config.name}-postgres --ignore-not-found`.quiet();
-      console.info('   ✅ Deleted PostgreSQL');
+    // 2. Delete Knative service
+    console.info("🗑️  Deleting Knative service...");
+    try {
+        await $`kubectl delete ksvc ${config.name} --ignore-not-found`.quiet();
+        console.info(`   ✅ Deleted ksvc/${config.name}\n`);
+    } catch (_err) {
+        console.info("   ⚠️  Service not found or already deleted\n");
     }
-    if (config.infrastructure.redis?.enabled) {
-      await $`kubectl delete deployment ${config.name}-redis --ignore-not-found`.quiet();
-      await $`kubectl delete svc ${config.name}-redis --ignore-not-found`.quiet();
-      console.info('   ✅ Deleted Redis');
-    }
-    if (config.infrastructure.minio?.enabled) {
-      await $`kubectl delete statefulset ${config.name}-minio --ignore-not-found`.quiet();
-      await $`kubectl delete svc ${config.name}-minio --ignore-not-found`.quiet();
-      await $`kubectl delete pvc -l app=${config.name}-minio --ignore-not-found`.quiet();
-      console.info('   ✅ Deleted MinIO');
-    }
-    console.info('');
-  }
 
-  // 4. Clear storage bucket
-  console.info('🗑️  Clearing storage bucket...');
-  await clearStorage(config);
-  console.info(`   ✅ Cleared ${config.storage.bucket}\n`);
+    // 3. Delete infrastructure services (if configured)
+    if (config.infrastructure) {
+        console.info("🗑️  Deleting infrastructure services...");
+        if (config.infrastructure.postgres?.enabled) {
+            await $`kubectl delete statefulset ${config.name}-postgres --ignore-not-found`.quiet();
+            await $`kubectl delete svc ${config.name}-postgres --ignore-not-found`.quiet();
+            await $`kubectl delete pvc -l app=${config.name}-postgres --ignore-not-found`.quiet();
+            console.info("   ✅ Deleted PostgreSQL");
+        }
+        if (config.infrastructure.redis?.enabled) {
+            await $`kubectl delete deployment ${config.name}-redis --ignore-not-found`.quiet();
+            await $`kubectl delete svc ${config.name}-redis --ignore-not-found`.quiet();
+            console.info("   ✅ Deleted Redis");
+        }
+        if (config.infrastructure.minio?.enabled) {
+            await $`kubectl delete statefulset ${config.name}-minio --ignore-not-found`.quiet();
+            await $`kubectl delete svc ${config.name}-minio --ignore-not-found`.quiet();
+            await $`kubectl delete pvc -l app=${config.name}-minio --ignore-not-found`.quiet();
+            console.info("   ✅ Deleted MinIO");
+        }
+        console.info("");
+    }
 
-  console.info('✨ Cleanup complete!');
+    // 4. Clear storage bucket
+    console.info("🗑️  Clearing storage bucket...");
+    await clearStorage(config);
+    console.info(`   ✅ Cleared ${config.storage.bucket}\n`);
+
+    console.info("✨ Cleanup complete!");
 }
 
 async function clearStorage(config: KnativeNextConfig) {
-  switch (config.storage.provider) {
-    case 'gcs':
-      await $`gsutil -m rm -r gs://${config.storage.bucket}/** 2>/dev/null || true`.quiet();
-      break;
-    case 's3':
-      await $`aws s3 rm s3://${config.storage.bucket} --recursive`.quiet();
-      break;
-    case 'minio':
-      await $`mc rm --recursive --force minio/${config.storage.bucket}`.quiet();
-      break;
-    case 'azure':
-      await $`az storage blob delete-batch -s ${config.storage.bucket}`.quiet();
-      break;
-  }
+    switch (config.storage.provider) {
+        case "gcs":
+            await $`gsutil -m rm -r gs://${config.storage.bucket}/** 2>/dev/null || true`.quiet();
+            break;
+        case "s3":
+            await $`aws s3 rm s3://${config.storage.bucket} --recursive`.quiet();
+            break;
+        case "minio":
+            await $`mc rm --recursive --force minio/${config.storage.bucket}`.quiet();
+            break;
+        case "azure":
+            await $`az storage blob delete-batch -s ${config.storage.bucket}`.quiet();
+            break;
+    }
 }
 
 // Run
 cleanup().catch((err) => {
-  console.error('❌ Cleanup failed:', err.message);
-  process.exit(1);
+    console.error("❌ Cleanup failed:", err.message);
+    process.exit(1);
 });

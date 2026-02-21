@@ -45,18 +45,24 @@ try {
   // 1. Entry JS Files (Recursively search the object potentially?)
   // Structure: entryJSFiles: { [path]: [chunks...] }
   if (manifest.entryJSFiles) {
-    Object.values(manifest.entryJSFiles).forEach((list: any) => addChunks(list));
+    Object.values(manifest.entryJSFiles).forEach((list: any) => {
+      addChunks(list);
+    });
   }
 
   // 2. Client Modules
   // Structure: clientModules: { [id]: { chunks: [] } }
   if (manifest.clientModules) {
-    Object.values(manifest.clientModules).forEach((mod: any) => addChunks(mod.chunks));
+    Object.values(manifest.clientModules).forEach((mod: any) => {
+      addChunks(mod.chunks);
+    });
   }
 
   // 3. Entry CSS Files
   if (manifest.entryCSSFiles) {
-    Object.values(manifest.entryCSSFiles).forEach((list: any) => addChunks(list));
+    Object.values(manifest.entryCSSFiles).forEach((list: any) => {
+      addChunks(list);
+    });
   }
 } catch (err) {
   console.error('Failed to parse manifest:', err);

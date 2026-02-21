@@ -1,5 +1,6 @@
 import RedisClient from 'ioredis';
 import { getDbPool } from '../clients';
+import { logger } from '../logger';
 
 export interface HealthStatus {
   status: 'ok' | 'degraded' | 'down';
@@ -49,7 +50,7 @@ export async function checkDeepHealth(): Promise<HealthStatus> {
           await pool.query('SELECT 1 as healthy');
           status.checks.postgres = 'up';
         } catch (error) {
-          console.error('[Health Check] Postgres connection failed:', error);
+          logger.error({ err: error }, '[Health Check] Postgres connection failed');
           status.status = 'degraded';
         }
       })(),
@@ -67,7 +68,7 @@ export async function checkDeepHealth(): Promise<HealthStatus> {
             status.checks.redis = 'up';
           }
         } catch (error) {
-          console.error('[Health Check] Redis connection failed:', error);
+          logger.error({ err: error }, '[Health Check] Redis connection failed');
           status.status = 'degraded';
         }
       })(),
@@ -81,7 +82,7 @@ export async function checkDeepHealth(): Promise<HealthStatus> {
     );
     await Promise.race([Promise.all(checkPromises), timeoutPromise]);
   } catch (error) {
-    console.error('[Health Check] System health verification timed out:', error);
+    logger.error({ err: error }, '[Health Check] System health verification timed out');
     status.status = 'down';
   }
 

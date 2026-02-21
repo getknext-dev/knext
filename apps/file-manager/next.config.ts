@@ -10,24 +10,27 @@ const nextConfig = {
   // Handler gracefully falls back to in-memory when REDIS_URL is not set
   cacheHandler: require.resolve('./cache-handler.js'),
   cacheMaxMemorySize: 0, // disable default in-memory cache, use Redis
+  eslint: { ignoreDuringBuilds: true },
   // cacheComponents disabled - using unstable_cache for stable tag-based invalidation
   experimental: {
     serverActions: {
       allowedOrigins: ['localhost:8080', 'next-home.default.136.111.227.195.sslip.io'],
     },
-    // Prevent Turbopack from bundling Node-native telemetry libraries
-    turbopack: {
-      resolveAlias: {
-        'pino-elasticsearch': false,
-        'thread-stream': false,
-      },
+  },
+  turbopack: {
+    resolveAlias: {
+      'pino-elasticsearch': './src/mocks/empty.js',
+      'thread-stream': './src/mocks/empty.js',
     },
   },
   webpack: (config: any, { isServer }: { isServer: boolean }) => {
-    // Fallback for Webpack environments
-    if (isServer) {
-      config.externals.push('pino-elasticsearch', 'thread-stream');
-    }
+    // Definitive bypass for Pino native telemetry modules breaking Turbopack AST parsing
+    config.externals.push('pino-elasticsearch', 'thread-stream');
+    config.resolve.fallback = {
+      ...config.resolve.fallback,
+      'pino-elasticsearch': false,
+      'thread-stream': false,
+    };
     return config;
   },
 };

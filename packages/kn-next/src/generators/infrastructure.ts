@@ -1,87 +1,96 @@
-import { writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
 import type {
-  KnativeNextConfig,
-  MinioInfraConfig,
-  ObservabilityConfig,
-  PostgresConfig,
-  RedisInfraConfig,
-} from '../config';
+    KnativeNextConfig,
+    MinioInfraConfig,
+    ObservabilityConfig,
+    PostgresConfig,
+    RedisInfraConfig,
+} from "../config";
 
 /**
  * Generates Kubernetes/Knative manifests for infrastructure services
  */
 
 export interface InfrastructureOutput {
-  manifests: string[];
-  envVars: Record<string, string>;
+    manifests: string[];
+    envVars: Record<string, string>;
 }
 
 export function generateInfrastructure(
-  config: KnativeNextConfig,
-  outputDir: string,
+    config: KnativeNextConfig,
+    outputDir: string,
 ): InfrastructureOutput {
-  const manifests: string[] = [];
-  const envVars: Record<string, string> = {};
-  const namespace = 'default';
+    const manifests: string[] = [];
+    const envVars: Record<string, string> = {};
+    const namespace = "default";
 
-  const infra = config.infrastructure;
+    const infra = config.infrastructure;
 
-  // PostgreSQL
-  if (infra?.postgres?.enabled) {
-    const pgManifest = generatePostgresManifest(config.name, infra.postgres);
-    const pgPath = join(outputDir, 'postgres.yaml');
-    writeFileSync(pgPath, pgManifest);
-    manifests.push(pgPath);
+    // PostgreSQL
+    if (infra?.postgres?.enabled) {
+        const pgManifest = generatePostgresManifest(
+            config.name,
+            infra.postgres,
+        );
+        const pgPath = join(outputDir, "postgres.yaml");
+        writeFileSync(pgPath, pgManifest);
+        manifests.push(pgPath);
 
-    const pgHost = `${config.name}-postgres.${namespace}.svc.cluster.local`;
-    envVars.DATABASE_URL = `postgres://postgres:postgres@${pgHost}:5432/app`;
-    console.info(`[kn-next] Generated ${pgPath}`);
-  }
+        const pgHost = `${config.name}-postgres.${namespace}.svc.cluster.local`;
+        envVars.DATABASE_URL = `postgres://postgres:postgres@${pgHost}:5432/app`;
+        console.info(`[kn-next] Generated ${pgPath}`);
+    }
 
-  // Redis
-  if (infra?.redis?.enabled) {
-    const redisManifest = generateRedisManifest(config.name, infra.redis);
-    const redisPath = join(outputDir, 'redis.yaml');
-    writeFileSync(redisPath, redisManifest);
-    manifests.push(redisPath);
+    // Redis
+    if (infra?.redis?.enabled) {
+        const redisManifest = generateRedisManifest(config.name, infra.redis);
+        const redisPath = join(outputDir, "redis.yaml");
+        writeFileSync(redisPath, redisManifest);
+        manifests.push(redisPath);
 
-    const redisHost = `${config.name}-redis.${namespace}.svc.cluster.local`;
-    envVars.REDIS_URL = `redis://${redisHost}:6379`;
-    console.info(`[kn-next] Generated ${redisPath}`);
-  }
+        const redisHost = `${config.name}-redis.${namespace}.svc.cluster.local`;
+        envVars.REDIS_URL = `redis://${redisHost}:6379`;
+        console.info(`[kn-next] Generated ${redisPath}`);
+    }
 
-  // MinIO
-  if (infra?.minio?.enabled) {
-    const minioManifest = generateMinioManifest(config.name, infra.minio);
-    const minioPath = join(outputDir, 'minio.yaml');
-    writeFileSync(minioPath, minioManifest);
-    manifests.push(minioPath);
+    // MinIO
+    if (infra?.minio?.enabled) {
+        const minioManifest = generateMinioManifest(config.name, infra.minio);
+        const minioPath = join(outputDir, "minio.yaml");
+        writeFileSync(minioPath, minioManifest);
+        manifests.push(minioPath);
 
-    const minioHost = `${config.name}-minio.${namespace}.svc.cluster.local`;
-    envVars.MINIO_ENDPOINT = `http://${minioHost}:9000`;
-    envVars.MINIO_ACCESS_KEY = infra.minio.accessKey ?? 'minioadmin';
-    envVars.MINIO_SECRET_KEY = infra.minio.secretKey ?? 'minioadmin';
-    console.info(`[kn-next] Generated ${minioPath}`);
-  }
+        const minioHost = `${config.name}-minio.${namespace}.svc.cluster.local`;
+        envVars.MINIO_ENDPOINT = `http://${minioHost}:9000`;
+        envVars.MINIO_ACCESS_KEY = infra.minio.accessKey ?? "minioadmin";
+        envVars.MINIO_SECRET_KEY = infra.minio.secretKey ?? "minioadmin";
+        console.info(`[kn-next] Generated ${minioPath}`);
+    }
 
-  // Observability (Prometheus + Grafana)
-  if (config.observability?.enabled) {
-    const obsManifest = generateObservabilityManifest(config.name, config.observability);
-    const obsPath = join(outputDir, 'observability.yaml');
-    writeFileSync(obsPath, obsManifest);
-    manifests.push(obsPath);
-    console.info(`[kn-next] Generated ${obsPath}`);
-  }
+    // Observability (Prometheus + Grafana)
+    if (config.observability?.enabled) {
+        const obsManifest = generateObservabilityManifest(
+            config.name,
+            config.observability,
+        );
+        const obsPath = join(outputDir, "observability.yaml");
+        writeFileSync(obsPath, obsManifest);
+        manifests.push(obsPath);
+        console.info(`[kn-next] Generated ${obsPath}`);
+    }
 
-  return { manifests, envVars };
+    return { manifests, envVars };
 }
 
-function generatePostgresManifest(appName: string, config: PostgresConfig): string {
-  const version = config.version ?? '16';
-  const storage = config.storage ?? '1Gi';
+function generatePostgresManifest(
+    appName: string,
+    config: PostgresConfig,
+): string {
+    const version = config.version ?? "16";
+    const storage = config.storage ?? "1Gi";
 
-  return `# PostgreSQL StatefulSet for ${appName}
+    return `# PostgreSQL StatefulSet for ${appName}
 # Generated by kn-next CLI
 apiVersion: v1
 kind: Service
@@ -140,10 +149,13 @@ spec:
 `;
 }
 
-function generateRedisManifest(appName: string, config: RedisInfraConfig): string {
-  const version = config.version ?? '7';
+function generateRedisManifest(
+    appName: string,
+    config: RedisInfraConfig,
+): string {
+    const version = config.version ?? "7";
 
-  return `# Redis Deployment for ${appName}
+    return `# Redis Deployment for ${appName}
 # Generated by kn-next CLI
 apiVersion: v1
 kind: Service
@@ -184,12 +196,15 @@ spec:
 `;
 }
 
-function generateMinioManifest(appName: string, config: MinioInfraConfig): string {
-  const storage = config.storage ?? '10Gi';
-  const accessKey = config.accessKey ?? 'minioadmin';
-  const secretKey = config.secretKey ?? 'minioadmin';
+function generateMinioManifest(
+    appName: string,
+    config: MinioInfraConfig,
+): string {
+    const storage = config.storage ?? "10Gi";
+    const accessKey = config.accessKey ?? "minioadmin";
+    const secretKey = config.secretKey ?? "minioadmin";
 
-  return `# MinIO StatefulSet for ${appName}
+    return `# MinIO StatefulSet for ${appName}
 # Generated by kn-next CLI
 apiVersion: v1
 kind: Service
@@ -259,13 +274,13 @@ spec:
  * The ConfigMap with grafana_dashboard label is auto-provisioned by Grafana's sidecar.
  */
 export function generateObservabilityManifest(
-  appName: string,
-  config: ObservabilityConfig,
+    appName: string,
+    config: ObservabilityConfig,
 ): string {
-  const scrapeInterval = config.prometheus?.scrapeInterval ?? '15s';
-  const grafanaEnabled = config.grafana?.enabled !== false;
+    const scrapeInterval = config.prometheus?.scrapeInterval ?? "15s";
+    const grafanaEnabled = config.grafana?.enabled !== false;
 
-  let manifest = `# Observability resources for ${appName}
+    let manifest = `# Observability resources for ${appName}
 # Generated by kn-next CLI
 
 # ServiceMonitor — tells Prometheus to scrape /metrics from app pods
@@ -286,12 +301,12 @@ spec:
       interval: ${scrapeInterval}
 `;
 
-  // Grafana dashboard ConfigMap (auto-provisioned via sidecar label discovery)
-  if (grafanaEnabled) {
-    // Embed the dashboard JSON inline
-    const dashboardJson = generateDashboardJson(appName);
+    // Grafana dashboard ConfigMap (auto-provisioned via sidecar label discovery)
+    if (grafanaEnabled) {
+        // Embed the dashboard JSON inline
+        const dashboardJson = generateDashboardJson(appName);
 
-    manifest += `---
+        manifest += `---
 # Grafana Dashboard — auto-provisioned via grafana_dashboard label
 apiVersion: v1
 kind: ConfigMap
@@ -304,13 +319,13 @@ metadata:
 data:
   ${appName}-bytecode.json: |
 ${dashboardJson
-  .split('\n')
-  .map((line) => `    ${line}`)
-  .join('\n')}
+    .split("\n")
+    .map((line) => `    ${line}`)
+    .join("\n")}
 `;
-  }
+    }
 
-  return manifest;
+    return manifest;
 }
 
 /**
@@ -318,146 +333,146 @@ ${dashboardJson
  * This is embedded in the ConfigMap for auto-provisioning.
  */
 function generateDashboardJson(appName: string): string {
-  const dashboard = {
-    annotations: { list: [] },
-    editable: true,
-    panels: [
-      {
-        title: '🚀 Cold Start Duration',
-        type: 'timeseries',
-        gridPos: { h: 8, w: 12, x: 0, y: 0 },
-        targets: [
-          {
-            expr: `histogram_quantile(0.95, rate(kn_next_startup_duration_seconds_bucket{app="${appName}"}[$__rate_interval]))`,
-            legendFormat: 'p95 ({{cache_status}})',
-          },
-          {
-            expr: `histogram_quantile(0.50, rate(kn_next_startup_duration_seconds_bucket{app="${appName}"}[$__rate_interval]))`,
-            legendFormat: 'p50 ({{cache_status}})',
-          },
+    const dashboard = {
+        annotations: { list: [] },
+        editable: true,
+        panels: [
+            {
+                title: "🚀 Cold Start Duration",
+                type: "timeseries",
+                gridPos: { h: 8, w: 12, x: 0, y: 0 },
+                targets: [
+                    {
+                        expr: `histogram_quantile(0.95, rate(kn_next_startup_duration_seconds_bucket{app="${appName}"}[$__rate_interval]))`,
+                        legendFormat: "p95 ({{cache_status}})",
+                    },
+                    {
+                        expr: `histogram_quantile(0.50, rate(kn_next_startup_duration_seconds_bucket{app="${appName}"}[$__rate_interval]))`,
+                        legendFormat: "p50 ({{cache_status}})",
+                    },
+                ],
+                fieldConfig: { defaults: { unit: "s" } },
+            },
+            {
+                title: "🔥 Warm vs ❄️ Cold Starts",
+                type: "piechart",
+                gridPos: { h: 8, w: 6, x: 12, y: 0 },
+                targets: [
+                    {
+                        expr: `count(kn_next_bytecode_cache_warm_start{app="${appName}"} == 1)`,
+                        legendFormat: "warm",
+                    },
+                    {
+                        expr: `count(kn_next_bytecode_cache_warm_start{app="${appName}"} == 0)`,
+                        legendFormat: "cold",
+                    },
+                ],
+            },
+            {
+                title: "📁 Cached Files",
+                type: "stat",
+                gridPos: { h: 4, w: 6, x: 0, y: 8 },
+                targets: [
+                    {
+                        expr: `kn_next_bytecode_cache_files_total{app="${appName}"}`,
+                        legendFormat: "{{build_id}}",
+                    },
+                ],
+            },
+            {
+                title: "💾 Cache Size",
+                type: "stat",
+                gridPos: { h: 4, w: 6, x: 6, y: 8 },
+                targets: [
+                    {
+                        expr: `kn_next_bytecode_cache_size_bytes{app="${appName}"}`,
+                        legendFormat: "{{build_id}}",
+                    },
+                ],
+                fieldConfig: { defaults: { unit: "bytes" } },
+            },
+            {
+                title: "✏️ Cache Writes",
+                type: "timeseries",
+                gridPos: { h: 4, w: 6, x: 12, y: 8 },
+                targets: [
+                    {
+                        expr: `rate(kn_next_bytecode_cache_write_count{app="${appName}"}[$__rate_interval])`,
+                        legendFormat: "writes/s",
+                    },
+                ],
+                fieldConfig: { defaults: { unit: "ops" } },
+            },
+            {
+                title: "🧠 Memory (RSS)",
+                type: "timeseries",
+                gridPos: { h: 6, w: 12, x: 0, y: 12 },
+                targets: [
+                    {
+                        expr: `process_resident_memory_bytes{app="${appName}"}`,
+                        legendFormat: "RSS - {{pod}}",
+                    },
+                ],
+                fieldConfig: { defaults: { unit: "bytes" } },
+            },
+            {
+                title: "⚡ Event Loop Lag",
+                type: "timeseries",
+                gridPos: { h: 6, w: 12, x: 12, y: 12 },
+                targets: [
+                    {
+                        expr: `nodejs_eventloop_lag_seconds{app="${appName}"}`,
+                        legendFormat: "{{pod}}",
+                    },
+                ],
+                fieldConfig: { defaults: { unit: "s" } },
+            },
+            {
+                title: "💻 CPU Usage",
+                type: "timeseries",
+                gridPos: { h: 6, w: 8, x: 0, y: 18 },
+                targets: [
+                    {
+                        expr: `rate(process_cpu_user_seconds_total{app="${appName}"}[$__rate_interval])`,
+                        legendFormat: "User - {{pod}}",
+                    },
+                    {
+                        expr: `rate(process_cpu_system_seconds_total{app="${appName}"}[$__rate_interval])`,
+                        legendFormat: "System - {{pod}}",
+                    },
+                ],
+                fieldConfig: { defaults: { unit: "percentunit" } },
+            },
+            {
+                title: "🚦 Active Requests",
+                type: "timeseries",
+                gridPos: { h: 6, w: 8, x: 8, y: 18 },
+                targets: [
+                    {
+                        expr: `nodejs_active_requests{app="${appName}"}`,
+                        legendFormat: "Requests - {{pod}}",
+                    },
+                ],
+            },
+            {
+                title: "🎛️ Active Handles",
+                type: "timeseries",
+                gridPos: { h: 6, w: 8, x: 16, y: 18 },
+                targets: [
+                    {
+                        expr: `nodejs_active_handles{app="${appName}"}`,
+                        legendFormat: "Handles - {{pod}}",
+                    },
+                ],
+            },
         ],
-        fieldConfig: { defaults: { unit: 's' } },
-      },
-      {
-        title: '🔥 Warm vs ❄️ Cold Starts',
-        type: 'piechart',
-        gridPos: { h: 8, w: 6, x: 12, y: 0 },
-        targets: [
-          {
-            expr: `count(kn_next_bytecode_cache_warm_start{app="${appName}"} == 1)`,
-            legendFormat: 'warm',
-          },
-          {
-            expr: `count(kn_next_bytecode_cache_warm_start{app="${appName}"} == 0)`,
-            legendFormat: 'cold',
-          },
-        ],
-      },
-      {
-        title: '📁 Cached Files',
-        type: 'stat',
-        gridPos: { h: 4, w: 6, x: 0, y: 8 },
-        targets: [
-          {
-            expr: `kn_next_bytecode_cache_files_total{app="${appName}"}`,
-            legendFormat: '{{build_id}}',
-          },
-        ],
-      },
-      {
-        title: '💾 Cache Size',
-        type: 'stat',
-        gridPos: { h: 4, w: 6, x: 6, y: 8 },
-        targets: [
-          {
-            expr: `kn_next_bytecode_cache_size_bytes{app="${appName}"}`,
-            legendFormat: '{{build_id}}',
-          },
-        ],
-        fieldConfig: { defaults: { unit: 'bytes' } },
-      },
-      {
-        title: '✏️ Cache Writes',
-        type: 'timeseries',
-        gridPos: { h: 4, w: 6, x: 12, y: 8 },
-        targets: [
-          {
-            expr: `rate(kn_next_bytecode_cache_write_count{app="${appName}"}[$__rate_interval])`,
-            legendFormat: 'writes/s',
-          },
-        ],
-        fieldConfig: { defaults: { unit: 'ops' } },
-      },
-      {
-        title: '🧠 Memory (RSS)',
-        type: 'timeseries',
-        gridPos: { h: 6, w: 12, x: 0, y: 12 },
-        targets: [
-          {
-            expr: `process_resident_memory_bytes{app="${appName}"}`,
-            legendFormat: 'RSS - {{pod}}',
-          },
-        ],
-        fieldConfig: { defaults: { unit: 'bytes' } },
-      },
-      {
-        title: '⚡ Event Loop Lag',
-        type: 'timeseries',
-        gridPos: { h: 6, w: 12, x: 12, y: 12 },
-        targets: [
-          {
-            expr: `nodejs_eventloop_lag_seconds{app="${appName}"}`,
-            legendFormat: '{{pod}}',
-          },
-        ],
-        fieldConfig: { defaults: { unit: 's' } },
-      },
-      {
-        title: '💻 CPU Usage',
-        type: 'timeseries',
-        gridPos: { h: 6, w: 8, x: 0, y: 18 },
-        targets: [
-          {
-            expr: `rate(process_cpu_user_seconds_total{app="${appName}"}[$__rate_interval])`,
-            legendFormat: 'User - {{pod}}',
-          },
-          {
-            expr: `rate(process_cpu_system_seconds_total{app="${appName}"}[$__rate_interval])`,
-            legendFormat: 'System - {{pod}}',
-          },
-        ],
-        fieldConfig: { defaults: { unit: 'percentunit' } },
-      },
-      {
-        title: '🚦 Active Requests',
-        type: 'timeseries',
-        gridPos: { h: 6, w: 8, x: 8, y: 18 },
-        targets: [
-          {
-            expr: `nodejs_active_requests{app="${appName}"}`,
-            legendFormat: 'Requests - {{pod}}',
-          },
-        ],
-      },
-      {
-        title: '🎛️ Active Handles',
-        type: 'timeseries',
-        gridPos: { h: 6, w: 8, x: 16, y: 18 },
-        targets: [
-          {
-            expr: `nodejs_active_handles{app="${appName}"}`,
-            legendFormat: 'Handles - {{pod}}',
-          },
-        ],
-      },
-    ],
-    refresh: '10s',
-    schemaVersion: 39,
-    tags: ['kn-next', 'bytecode', appName],
-    title: `kn-next: ${appName} Bytecode Cache`,
-    uid: `kn-next-${appName}`,
-    version: 1,
-  };
+        refresh: "10s",
+        schemaVersion: 39,
+        tags: ["kn-next", "bytecode", appName],
+        title: `kn-next: ${appName} Bytecode Cache`,
+        uid: `kn-next-${appName}`,
+        version: 1,
+    };
 
-  return JSON.stringify(dashboard, null, 2);
+    return JSON.stringify(dashboard, null, 2);
 }

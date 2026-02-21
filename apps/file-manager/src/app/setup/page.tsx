@@ -82,10 +82,12 @@ export default async function SetupPage() {
       <div className={`p-4 rounded ${result.success ? 'bg-green-800' : 'bg-red-800'}`}>
         {result.message}
       </div>
-      <div className="mt-4">
-        <p>Tables created: files, users, audit_logs</p>
-        <p>Seeded initial data.</p>
-      </div>
+      {result.success && (
+        <div className="mt-4">
+          <p>Tables created: files, users, audit_logs</p>
+          <p>Seeded initial data.</p>
+        </div>
+      )}
     </div>
   );
 }
