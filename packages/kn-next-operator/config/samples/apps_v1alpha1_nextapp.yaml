@@ -1,0 +1,9 @@
+apiVersion: apps.kn-next.dev/v1alpha1
+kind: NextApp
+metadata:
+  labels:
+    app.kubernetes.io/name: kn-next-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: nextapp-sample
+spec:
+  # TODO(user): Add fields here
