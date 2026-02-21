@@ -109,8 +109,10 @@ describe('Knative Manifest Generator', () => {
 
     const content = readFileSync(outputPath, 'utf-8');
     expect(content).toContain('containerPort: 3000');
-    expect(content).toContain('memory: "256Mi"');
-    expect(content).toContain('cpu: "100m"');
+    expect(content).toContain('memory: "512Mi"');
+    expect(content).toContain('cpu: "250m"');
+    expect(content).toContain('memory: "1Gi"');
+    expect(content).toContain('cpu: "1000m"');
   });
 
   // Bytecode cache tests

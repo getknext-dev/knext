@@ -105,22 +105,22 @@ spec:
 ${envVarsYaml}
           resources:
             requests:
-              cpu: "100m"
-              memory: "256Mi"
+              cpu: "${config.scaling?.cpuRequest ?? '250m'}"
+              memory: "${config.scaling?.memoryRequest ?? '512Mi'}"
             limits:
-              cpu: "1000m"
-              memory: "512Mi"${volumeMountYaml}
+              cpu: "${config.scaling?.cpuLimit ?? '1000m'}"
+              memory: "${config.scaling?.memoryLimit ?? '1Gi'}"${volumeMountYaml}
           readinessProbe:
             httpGet:
-              path: /api/health
+              path: ${config.healthCheckPath ?? '/api/health'}
               port: 3000
             initialDelaySeconds: 5
             periodSeconds: 10
           livenessProbe:
             httpGet:
-              path: /api/health
+              path: ${config.healthCheckPath ?? '/api/health'}
               port: 3000
-            initialDelaySeconds: 10
+            initialDelaySeconds: 15
             periodSeconds: 30${volumeYaml}
 `;
 

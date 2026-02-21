@@ -76,6 +76,10 @@ export interface InfrastructureConfig {
 export interface ScalingConfig {
   minScale?: number; // Default: 0 (scale to zero)
   maxScale?: number; // Default: 10
+  cpuRequest?: string; // Default: "250m"
+  memoryRequest?: string; // Default: "512Mi"
+  cpuLimit?: string; // Default: "1000m"
+  memoryLimit?: string; // Default: "1Gi"
 }
 
 // V8 bytecode caching via NODE_COMPILE_CACHE
@@ -106,4 +110,5 @@ export interface KnativeNextConfig {
   scaling?: ScalingConfig; // Knative autoscaling options
   bytecodeCache?: BytecodeCacheConfig; // V8 compile cache for faster cold starts
   observability?: ObservabilityConfig; // Prometheus metrics + Grafana dashboards
+  healthCheckPath?: string; // Default: "/api/health"
 }
