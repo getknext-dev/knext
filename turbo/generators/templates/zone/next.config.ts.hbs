@@ -3,6 +3,8 @@ import type { NextConfig } from "next";
 const nextConfig: NextConfig = {
   // Required for OpenNext to bundle correctly
   output: "standalone",
+  // Next.js Multi-Zone configuration
+  basePath: "/{{ name }}",
   experimental: {
     dynamicIO: true,
   },
