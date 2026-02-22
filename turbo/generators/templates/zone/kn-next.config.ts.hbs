@@ -1,0 +1,17 @@
+import { defineConfig } from "@kn-next/config";
+
+export default defineConfig({
+  // NextApp Operator declarative configuration
+  deploy: {
+    scaling: {
+      minScale: 1,
+      maxScale: 10,
+      containerConcurrency: 100,
+    },
+    cache: {
+      provider: "redis",
+      url: "redis://redis.default.svc.cluster.local:6379",
+      enableBytecodeCache: true,
+    },
+  },
+});

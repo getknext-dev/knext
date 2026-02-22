@@ -1,0 +1,11 @@
+import type { NextConfig } from "next";
+
+const nextConfig: NextConfig = {
+  // Required for OpenNext to bundle correctly
+  output: "standalone",
+  experimental: {
+    dynamicIO: true,
+  },
+};
+
+export default nextConfig;
