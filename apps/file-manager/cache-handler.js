@@ -58,7 +58,7 @@ let useRedis = false;
 
 // Try loading ioredis — gracefully degrade to in-memory if not available
 try {
-  Redis = require('ioredis');
+  Redis = (await import('ioredis')).default;
   useRedis = !!REDIS_URL;
 } catch {
   useRedis = false;

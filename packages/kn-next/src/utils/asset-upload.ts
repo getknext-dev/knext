@@ -38,7 +38,7 @@ function collectFiles(dir: string, baseDir: string): string[] {
  * and verifies all files were uploaded successfully.
  */
 export async function uploadAssets(config: KnativeNextConfig): Promise<void> {
-    const assetsDir = join(process.cwd(), ".open-next", "assets");
+    const assetsDir = join(process.cwd(), "dist", "client");
 
     console.info(
         `   Syncing to ${config.storage.provider}://${config.storage.bucket}`,

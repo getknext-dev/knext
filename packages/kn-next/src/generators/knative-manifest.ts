@@ -1,7 +1,62 @@
 import { writeFileSync } from "node:fs";
 import path from "node:path";
 import type { KnativeNextConfig } from "../config";
-import { getRequiredEnvVars } from "./open-next-config";
+/**
+ * Provider-specific environment variable generators.
+ * Following Open/Closed Principle: add new providers without modifying existing code.
+ */
+type EnvVarGenerator<T> = (
+    config: T,
+    appName: string,
+) => Record<string, string>;
+
+// biome-ignore lint/suspicious/noExplicitAny: intentional
+const storageEnvVarGenerators: Record<string, EnvVarGenerator<any>> = {
+    gcs: (storage, appName) => ({
+        GCS_BUCKET_NAME: storage.bucket,
+        GCS_BUCKET_KEY_PREFIX: appName,
+    }),
+    s3: (storage) => ({
+        CACHE_BUCKET_NAME: storage.bucket,
+        CACHE_BUCKET_REGION: storage.region ?? "us-east-1",
+        ...(storage.endpoint ? { S3_ENDPOINT: storage.endpoint } : {}),
+    }),
+    minio: (storage) => ({
+        CACHE_BUCKET_NAME: storage.bucket,
+        CACHE_BUCKET_REGION: storage.region ?? "us-east-1",
+        ...(storage.endpoint ? { S3_ENDPOINT: storage.endpoint } : {}),
+    }),
+};
+
+// biome-ignore lint/suspicious/noExplicitAny: intentional
+const cacheEnvVarGenerators: Record<string, EnvVarGenerator<any>> = {
+    redis: (cache, appName) => ({
+        REDIS_URL: cache.url,
+        REDIS_KEY_PREFIX: cache.keyPrefix ?? appName,
+    }),
+    dynamodb: (cache) => ({
+        CACHE_DYNAMO_TABLE: cache.tableName,
+        CACHE_BUCKET_REGION: cache.region,
+    }),
+};
+
+/**
+ * Generates environment variables configuration for the adapters.
+ * Uses provider-specific generators for extensibility.
+ */
+export function getRequiredEnvVars(
+    config: KnativeNextConfig,
+): Record<string, string> {
+    const storageGenerator = storageEnvVarGenerators[config.storage.provider];
+    const cacheGenerator = config.cache
+        ? cacheEnvVarGenerators[config.cache.provider]
+        : null;
+
+    return {
+        ...(storageGenerator?.(config.storage, config.name) ?? {}),
+        ...(cacheGenerator?.(config.cache, config.name) ?? {}),
+    };
+}
 
 export interface GenerateKnativeManifestOptions {
     config: KnativeNextConfig;
@@ -308,9 +363,8 @@ if [ -d "$NEXT_DIR" ]; then
   echo "[kn-next] Fixed .next cache permissions"
 fi
 
-# Drop privileges and start the Next.js standalone server
-# (OpenNext produces index.mjs as the default server function entrypoint)
-exec su-exec node node index.mjs
+# Drop privileges and start the Vinext production server
+exec su-exec node node --experimental-strip-types dist/adapters/node-server.ts
 `;
 
     const outputPath = path.join(outputDir, "entrypoint.sh");

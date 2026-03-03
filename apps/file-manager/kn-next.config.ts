@@ -31,6 +31,9 @@ const config: KnativeNextConfig = {
   scaling: {
     minScale: 0, // changed to test bytecode cache
     maxScale: 2, // Scale up to 2 pods max
+    // Thanks to V8 pointer compression, we can safely halve the standard memory limits
+    memoryRequest: '256Mi',
+    memoryLimit: '512Mi',
   },
 
   // V8 bytecode caching for faster cold starts

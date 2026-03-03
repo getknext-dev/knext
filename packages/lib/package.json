@@ -4,10 +4,10 @@
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "exports": {
-    ".": "./src/index.ts",
-    "./logger": "./src/logger/index.ts",
-    "./clients": "./src/clients.ts",
-    "./health": "./src/health/index.ts"
+    ".": "./dist/index.js",
+    "./logger": "./dist/logger/index.js",
+    "./clients": "./dist/clients.js",
+    "./health": "./dist/health/index.js"
   },
   "scripts": {
     "build": "tsc",

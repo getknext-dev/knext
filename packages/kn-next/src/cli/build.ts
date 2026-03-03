@@ -1,18 +1,16 @@
 #!/usr/bin/env bun
 /**
- * kn-next build - Prepares Next.js app for Knative deployment
+ * kn-next build - Prepares Next.js app for Knative deployment using Vinext
  *
  * Usage:
  *   bun run packages/kn-next/src/cli/build.ts
  *
  * Steps:
  *   1. Load kn-next.config.ts
- *   2. Generate open-next.config.ts (internal)
- *   3. Run Next.js build
- *   4. Run OpenNext build
- *   5. Upload static assets to storage (GCS/S3)
- *   6. Copy adapters to .open-next
- *   7. Generate knative-service.yaml
+ *   2. Run Vinext build (via npm run build)
+ *   3. Upload static assets to storage (GCS/S3)
+ *   4. Copy adapters to dist
+ *   5. Generate knative-service.yaml
  */
 
 import { copyFileSync, existsSync, mkdirSync } from "node:fs";
@@ -20,10 +18,6 @@ import { dirname, join, resolve } from "node:path";
 import { $ } from "bun";
 import type { KnativeNextConfig } from "../config";
 import { generateKnativeManifest } from "../generators/knative-manifest";
-import {
-    generateOpenNextConfig,
-    getRequiredEnvVars,
-} from "../generators/open-next-config";
 import { uploadAssets } from "../utils/asset-upload";
 
 const CONFIG_FILE = "kn-next.config.ts";
@@ -55,18 +49,10 @@ async function copyAdapters(
     const sourceDir = resolve(dirname(import.meta.path), "..", "adapters");
 
     // Copy relevant adapters based on config
-    const adaptersToCopy = [];
+    const adaptersToCopy = ["bytecode-metrics.ts"];
 
-    if (storageProvider === "gcs") {
-        adaptersToCopy.push("gcs-cache.ts");
-    }
-
-    if (cacheProvider === "redis") {
-        adaptersToCopy.push("redis-tag-cache.ts");
-    }
-
-    // Always copy node-server wrapper
-    // adaptersToCopy.push("node-server.ts");
+    // Node-server adapter used to intercept requests for /metrics and pass them to Vinext handler
+    adaptersToCopy.push("node-server.ts");
 
     for (const adapter of adaptersToCopy) {
         const src = join(sourceDir, adapter);
@@ -79,10 +65,11 @@ async function copyAdapters(
 }
 
 export async function build(options: BuildOptions = {}) {
-    console.info("🔨 kn-next build\n");
+    console.info("🔨 kn-next build (Vinext)\n");
 
     const workDir = process.cwd();
-    const outputDir = join(workDir, ".open-next");
+    // Vinext output directory is typically dist
+    const outputDir = join(workDir, "dist");
 
     // 1. Load config
     console.info("📋 Loading configuration...");
@@ -93,33 +80,20 @@ export async function build(options: BuildOptions = {}) {
     );
     console.info(`   Cache: ${config.cache?.provider ?? "none"}\n`);
 
-    // 2. Generate open-next.config.ts
-    console.info("⚙️  Generating OpenNext config...");
-    mkdirSync(outputDir, { recursive: true });
-    generateOpenNextConfig({
-        config,
-        outputDir: workDir, // Root of project for open-next to find it
-        enableKafkaQueue: options.enableKafkaQueue,
-    });
-
-    // 3. Run Next.js build
+    // 2. Run Vinext build
     if (!options.skipNextBuild) {
-        console.info("📦 Building Next.js...");
+        console.info("📦 Building Vinext app...");
         await $`npm run build`.quiet();
-        console.info("   ✅ Next.js build complete\n");
+        console.info("   ✅ Vinext build complete\n");
     }
 
-    // 4. Run OpenNext build
-    console.info("⚡ Building OpenNext...");
-    await $`npx open-next build`.quiet();
-    console.info("   ✅ OpenNext build complete\n");
-
-    // 5. Upload static assets
+    // 3. Upload static assets
     console.info("☁️  Uploading static assets...");
+    // We pass dist/client/assets to asset-upload, but we need to verify uploadAssets logic
     await uploadAssets(config);
     console.info("   ✅ Assets uploaded\n");
 
-    // 6. Copy adapters
+    // 4. Copy adapters
     console.info("📂 Copying adapters...");
     await copyAdapters(
         outputDir,
@@ -127,20 +101,13 @@ export async function build(options: BuildOptions = {}) {
         config.cache?.provider ?? "redis",
     );
 
-    // 7. Generate Knative manifest
+    // 5. Generate Knative manifest
     console.info("🌐 Generating Knative manifest...");
     generateKnativeManifest({
         config,
         outputDir,
         enableKafkaQueue: options.enableKafkaQueue,
     });
-
-    // 7. Show required env vars
-    console.info("\n📝 Required environment variables:");
-    const envVars = getRequiredEnvVars(config);
-    for (const [key, value] of Object.entries(envVars)) {
-        console.info(`   ${key}=${value}`);
-    }
 
     console.info("\n✨ Build complete!");
     console.info(`   Output: ${outputDir}`);
