@@ -46,8 +46,8 @@ export default function AuditPage() {
 
   const fetchLogs = useCallback(
     async (pageNum: number, append = true) => {
-      if (loading) return;
-
+      // Don't use 'loading' from state directly in the dependency array
+      // to avoid infinite loops, instead rely on the component flow.
       setLoading(true);
       setError(null);
 
@@ -69,7 +69,7 @@ export default function AuditPage() {
         setInitialLoading(false);
       }
     },
-    [loading],
+    [],
   );
 
   // Initial load
