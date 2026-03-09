@@ -1,6 +1,6 @@
 import { getDbPool } from '@knative-next/lib/clients';
 import { unstable_cache } from 'next/cache';
-import { type NextRequest, NextResponse } from 'next/server';
+import { NextResponse } from 'next/server';
 
 const PAGE_SIZE = 20;
 
@@ -33,9 +33,23 @@ const getAuditLogsCached = unstable_cache(
   },
 );
 
-export async function GET(request: NextRequest) {
-  const searchParams = request.nextUrl.searchParams;
-  const page = Number.parseInt(searchParams.get('page') || '0');
+export async function GET(request: any, context: any) {
+  // Vinext passes route params in context.params.
+  // It turns out Vinext's Request shim sometimes drops the internal Next.js `nextUrl`
+  // property entirely or strips standard properties off when creating the dummy request.
+  // The most bulletproof way to parse the URL in all edge runtimes is to check
+  // both the standard url property and use string splitting as a fallback
+
+  let page = 0;
+  try {
+     // Safe fallback parsing. Some runtimes pass URL string directly or inside strange proxy objects
+     const urlString = request?.url || (request?.nextUrl?.href) || 'http://localhost';
+     const parsedUrl = new URL(urlString);
+     const pageParam = parsedUrl.searchParams?.get('page');
+     page = Number.parseInt(pageParam || '0');
+  } catch (e) {
+     console.warn('Failed to parse URL in audit route:', e);
+  }
 
   try {
     const data = await getAuditLogsCached(page);

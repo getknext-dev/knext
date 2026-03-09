@@ -2,7 +2,7 @@
 
 > **Production-ready framework for deploying Next.js applications on Knative with Fluid Compute characteristics.**
 
-Built on **OpenNext** for serverless compatibility with pluggable adapters for cloud storage (GCS, S3, Azure, MinIO), distributed caching (Redis), and real-time revalidation (Kafka).
+Built on **Vinext** (Vite-based Next.js) for serverless compatibility with distributed caching (Redis).
 
 ---
 
@@ -47,9 +47,9 @@ Built on **OpenNext** for serverless compatibility with pluggable adapters for c
 
 ---
 
-## How It Works: OpenNext Builder
+## How It Works: Vinext Builder
 
-**OpenNext** is an open-source adapter that transforms Next.js build output into a serverless-compatible format. Originally built for AWS Lambda, we extend it to work with Knative containers.
+**Vinext** is a Vite-based reimplementation of the Next.js compiler that transforms Next.js build output into a fast, standard web request handler compatible with Knative containers.
 
 ### Build Pipeline
 
@@ -60,7 +60,7 @@ flowchart LR
     end
     
     subgraph Compiler
-        B["OpenNext<br/>(Compiler)"]
+        B["Vinext<br/>(Vite Compiler)"]
     end
     
     subgraph Output
@@ -81,47 +81,20 @@ flowchart LR
     style F fill:#f59e0b,color:#fff
 ```
 
-### What OpenNext Does
+### What Vinext Does
 
 1. **Extracts static assets** (`_next/static/`) → uploaded to cloud storage
 2. **Bundles server code** (App Router, API routes) → packaged into Docker image
-3. **Enables pluggable caching** → custom adapters replace Lambda's cache
+3. **Enables pluggable caching** → custom Redis cache handler replaces default in-memory cache
 4. **Maintains BUILD_ID sync** → ensures client/server assets match
-
-### OpenNext Configuration
-
-The framework generates `open-next.config.ts` automatically from your `kn-next.config.ts`:
-
-```typescript
-// Generated open-next.config.ts
-const config: OpenNextConfig = {
-  default: {
-    override: {
-      incrementalCache: async () => {
-        const mod = await import('@kn-next/config/adapters/redis-cache');
-        return mod.default;
-      },
-      tagCache: async () => {
-        const mod = await import('@kn-next/config/adapters/redis-tag-cache');
-        return mod.default;
-      },
-      converter: 'node',
-      wrapper: async () => {
-        const mod = await import('@kn-next/config/adapters/node-server');
-        return mod.default;
-      },
-    },
-  },
-};
-```
 
 ---
 
 ## Features
 
-- ✅ **OpenNext Integration** – Compile Next.js for containerized serverless
+- ✅ **Vinext Integration** – Fast Vite-based Next.js compilation for containers
 - ✅ **Fluid Compute** – Scale-to-zero, high concurrency, auto-scaling
-- ✅ **Distributed Caching** – GCS/S3 for ISR data + Redis for tag invalidation
+- ✅ **Distributed Caching** – Redis-backed caching with automatic tag invalidation
 - ✅ **Multi-Cloud** – Deploy to GKE, EKS, AKS, or any Kubernetes
 - ✅ **Cache Monitoring** – Built-in cache event dashboard
 - ✅ **Single-Command Deploy** – Automated build, push, and deploy
@@ -155,7 +128,7 @@ import type { KnativeNextConfig } from '@kn-next/config';
 const config: KnativeNextConfig = {
   name: 'my-app',
   
-  // Storage for static assets and ISR cache
+  // Storage for static assets
   storage: {
     provider: 'gcs',           // 'gcs' | 's3' | 'azure' | 'minio'
     bucket: 'my-assets-bucket',
@@ -194,7 +167,7 @@ npx kn-next deploy
 
 This single command:
 1. Builds Next.js application
-2. Runs OpenNext to generate serverless bundle
+2. Runs Vinext to generate serverless bundle
 3. Syncs static assets to cloud storage
 4. Builds & pushes Docker image (tagged with BUILD_ID)
 5. Generates Knative manifest
@@ -233,7 +206,7 @@ interface KnativeNextConfig {
 
 ### Storage Providers
 
-Configure where static assets and ISR cache data are stored:
+Configure where static assets are stored:
 
 ```typescript
 // Google Cloud Storage
@@ -355,21 +328,18 @@ scaling: {
 flowchart TB
     subgraph Storage["Cloud Storage (GCS/S3/Azure/MinIO)"]
         direction TB
-        S1["ISR page cache (.html, .rsc)"]
-        S2["Fetch cache (API responses)"]
-        S3["Image optimization cache"]
-        S4["Key: {prefix}/{BUILD_ID}/{page-key}.{type}"]
+        S1["Static Assets (JS/CSS)"]
+        S2["Public Files"]
     end
     
-    subgraph Redis["Redis (Tag Cache)"]
+    subgraph Redis["Redis (ISR & Tag Cache)"]
         direction TB
-        R1["tag:{tagName} → Set of page keys"]
-        R2["path:{path}:tags → Set of tags"]
+        R1["ISR page & fetch cache"]
+        R2["tag:{tagName} → Set of keys"]
         R3["Fast O(1) tag-based invalidation"]
-        R4["Key: {prefix}:tag:{tagName}"]
     end
     
-    Storage <-->|"Tag → Keys mapping"| Redis
+    
 
     style Storage fill:#4f46e5,color:#fff
     style Redis fill:#dc2626,color:#fff
@@ -379,12 +349,8 @@ flowchart TB
 
 | Adapter | File | Purpose |
 |---------|------|---------|
-| **GCS Cache** | `gcs-cache.ts` | Store ISR data in Google Cloud Storage |
-| **Redis Cache** | `redis-cache.ts` | Store ISR data in Redis (faster, ephemeral) |
-| **Redis Tag Cache** | `redis-tag-cache.ts` | Tag-based cache invalidation |
-| **Kafka Queue** | `kafka-queue.ts` | Background ISR revalidation queue |
 | **Node Server** | `node-server.ts` | HTTP server wrapper for Knative |
-| **Cache Events** | `cache-events.ts` | Real-time observability (SSE) |
+| **Bytecode Metrics** | `bytecode-metrics.ts` | Prometheus metrics for the node server |
 
 ### Cache Invalidation API
 
@@ -534,7 +500,7 @@ See [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) for detailed diagrams includi
 
 ```mermaid
 flowchart TB
-    A["Next.js App<br/>(App Router)"] --> B["OpenNext<br/>(Compiler)"]
+    A["Next.js App<br/>(App Router)"] --> B["Vinext<br/>(Vite Compiler)"]
     
     B --> C["Static Assets<br/>(Cloud CDN)"]
     B --> D["Server Function<br/>(Docker)"]
@@ -628,7 +594,7 @@ pnpm dev
 npx kn-next deploy
 
 # Or step-by-step
-npx kn-next build       # Build + OpenNext
+npx kn-next build       # Build with Vinext
 npx kn-next deploy      # Deploy to cluster
 npx kn-next cleanup     # Remove from cluster
 ```
@@ -645,7 +611,7 @@ npx kn-next deploy [options]
 | `--bucket <name>` | `-b` | Override storage bucket |
 | `--tag <tag>` | `-t` | Image tag (default: timestamp) |
 | `--namespace <ns>` | `-n` | Kubernetes namespace (default: default) |
-| `--skip-build` | | Skip Next.js/OpenNext build |
+| `--skip-build` | | Skip Vinext build |
 | `--skip-upload` | | Skip asset upload to storage |
 | `--skip-infra` | | Skip infrastructure deployment |
 | `--dry-run` | | Generate manifests without deploying |

@@ -62,6 +62,13 @@ async function copyAdapters(
             console.info(`   Copied ${adapter}`);
         }
     }
+
+    // Copy custom cache handler if it exists
+    const cacheHandlerSrc = join(process.cwd(), "cache-handler.js");
+    if (existsSync(cacheHandlerSrc)) {
+        copyFileSync(cacheHandlerSrc, join(adaptersDir, "cache-handler.js"));
+        console.info(`   Copied cache-handler.js`);
+    }
 }
 
 export async function build(options: BuildOptions = {}) {

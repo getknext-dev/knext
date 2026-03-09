@@ -15,14 +15,14 @@
 
 // ─── Cache Event Logger ───
 
-if (!global.cacheEvents) global.cacheEvents = [];
-if (!global.cacheEventCounter) global.cacheEventCounter = 0;
+if (!globalThis.cacheEvents) globalThis.cacheEvents = [];
+if (!globalThis.cacheEventCounter) globalThis.cacheEventCounter = 0;
 
 const MAX_EVENTS = 200;
 
 function logCacheEvent(type, source, key, options) {
   const event = {
-    id: `evt-${++global.cacheEventCounter}`,
+    id: `evt-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
     timestamp: new Date().toISOString(),
     type,
     source,
@@ -30,9 +30,24 @@ function logCacheEvent(type, source, key, options) {
     ...(options || {}),
   };
 
-  global.cacheEvents.unshift(event);
-  if (global.cacheEvents.length > MAX_EVENTS) {
-    global.cacheEvents = global.cacheEvents.slice(0, MAX_EVENTS);
+  console.log(`[Cache] ${type} ${key} (${source})`);
+
+  if (useRedis) {
+    ensureConnected()
+      .then((client) => {
+        if (client) {
+          const pipeline = client.pipeline();
+          pipeline.lpush(`${KEY_PREFIX}:cache-events`, JSON.stringify(event));
+          pipeline.ltrim(`${KEY_PREFIX}:cache-events`, 0, MAX_EVENTS - 1);
+          pipeline.exec().catch(() => {});
+        }
+      })
+      .catch(() => {});
+  } else {
+    globalThis.cacheEvents.unshift(event);
+    if (globalThis.cacheEvents.length > MAX_EVENTS) {
+      globalThis.cacheEvents = globalThis.cacheEvents.slice(0, MAX_EVENTS);
+    }
   }
 
   const _emoji =
@@ -177,17 +192,16 @@ function cloneCacheValue(data) {
 class CacheHandler {
   constructor(options) {
     this.options = options;
-    if (useRedis) ensureConnected().catch(() => {});
+    ensureConnected().catch(() => {});
   }
 
   async get(key) {
     const startTime = Date.now();
-    const source = useRedis ? 'redis' : 'memory';
+    const client = await ensureConnected();
+    const source = client ? 'redis' : 'memory';
 
     try {
-      if (useRedis) {
-        const client = await ensureConnected();
-        if (client) {
+      if (client) {
           const data = await client.get(cacheKey(key));
           if (!data) {
             logCacheEvent('MISS', source, key, {
@@ -200,7 +214,6 @@ class CacheHandler {
             durationMs: Date.now() - startTime,
           });
           return parsed;
-        }
       }
 
       // In-memory fallback
@@ -224,14 +237,12 @@ class CacheHandler {
 
   async set(key, data, ctx) {
     const startTime = Date.now();
-    const source = useRedis ? 'redis' : 'memory';
+    const client = await ensureConnected();
+    const source = client ? 'redis' : 'memory';
 
     try {
       if (data === null) {
-        if (useRedis) {
-          const client = await ensureConnected();
-          if (client) await client.del(cacheKey(key));
-        }
+        if (client) await client.del(cacheKey(key));
         memoryCache.delete(key);
         logCacheEvent('DELETE', source, key, {
           durationMs: Date.now() - startTime,
@@ -241,15 +252,14 @@ class CacheHandler {
 
       const ttl = ctx?.revalidate || 3600;
 
-      if (useRedis) {
+      if (client) {
         // Redis path: serialize Map/Buffer → JSON-safe types for JSON.stringify
         const redisEntry = {
           value: serializeCacheValue(data),
           lastModified: Date.now(),
           tags: ctx?.tags || [],
         };
-        const client = await ensureConnected();
-        if (client) {
+
           const pipeline = client.pipeline();
           pipeline.set(cacheKey(key), JSON.stringify(redisEntry), 'EX', ttl);
           if (ctx?.tags?.length) {
@@ -258,7 +268,6 @@ class CacheHandler {
             }
           }
           await pipeline.exec();
-        }
       }
 
       // In-memory path: store original data with Map/Buffer types preserved
@@ -282,13 +291,12 @@ class CacheHandler {
   async revalidateTag(tags) {
     const startTime = Date.now();
     const tagList = Array.isArray(tags) ? tags : [tags];
-    const source = useRedis ? 'redis' : 'memory';
+    const client = await ensureConnected();
+    const source = client ? 'redis' : 'memory';
 
     try {
-      if (useRedis) {
-        const client = await ensureConnected();
-        if (client) {
-          for (const tag of tagList) {
+      if (client) {
+        for (const tag of tagList) {
             const tKey = tagKey(tag);
             const keys = await client.smembers(tKey);
             if (keys.length > 0) {
@@ -304,7 +312,6 @@ class CacheHandler {
             });
           }
           return;
-        }
       }
 
       // In-memory fallback: iterate and delete matching entries

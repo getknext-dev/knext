@@ -34,9 +34,15 @@ export async function POST(request: Request) {
  * GET /api/cache/invalidate?tag=files
  * Alternative GET-based invalidation for testing
  */
-export async function GET(request: Request) {
-  const { searchParams } = new URL(request.url);
-  const tag = searchParams.get('tag');
+export async function GET(request: any) {
+  let tag: string | null = null;
+  try {
+    const urlString = request?.url || request?.nextUrl?.href || 'http://localhost';
+    const parsedUrl = new URL(urlString);
+    tag = parsedUrl.searchParams?.get('tag');
+  } catch (e) {
+    console.warn('Failed to parse URL in cache invalidate route:', e);
+  }
 
   if (!tag) {
     return NextResponse.json(

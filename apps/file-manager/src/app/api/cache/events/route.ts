@@ -1,8 +1,10 @@
 import { NextResponse } from 'next/server';
+import Redis from 'ioredis';
+import '../../../../cache-init';
 
 /**
  * Cache Events API
- * Reads from global.cacheEvents populated by the cache-handler.js
+ * Reads from Redis if available, fallback to globalThis.cacheEvents
  *
  * GET /api/cache/events — Returns cache events and stats
  * DELETE /api/cache/events — Clears all events
@@ -19,15 +21,31 @@ interface CacheEvent {
   details?: string;
 }
 
-// Access the global cache events array (populated by cache-handler.js at runtime)
-// Using globalThis to avoid re-declaring the global type
-function getEvents(): CacheEvent[] {
+const REDIS_URL = process.env.REDIS_URL;
+const KEY_PREFIX = process.env.REDIS_KEY_PREFIX || 'kn-next';
+let redisClient: Redis | null = null;
+
+if (REDIS_URL) {
+  redisClient = new Redis(REDIS_URL, {
+    maxRetriesPerRequest: 1,
+    connectTimeout: 2000,
+  });
+}
+
+async function getEvents(): Promise<CacheEvent[]> {
+  if (redisClient) {
+    try {
+      const items = await redisClient.lrange(`${KEY_PREFIX}:cache-events`, 0, 50);
+      return items.map((i) => JSON.parse(i));
+    } catch (e) {
+      console.error('[Cache Events] Error reading from Redis:', e);
+      return [];
+    }
+  }
   return ((globalThis as Record<string, unknown>).cacheEvents as CacheEvent[]) || [];
 }
 
-function getCacheStats() {
-  const events = getEvents();
-
+async function getCacheStats(events: CacheEvent[]) {
   const hits = events.filter((e) => e.type === 'HIT').length;
   const misses = events.filter((e) => e.type === 'MISS').length;
   const sets = events.filter((e) => e.type === 'SET').length;
@@ -51,8 +69,8 @@ function getCacheStats() {
 }
 
 export async function GET() {
-  const events = getEvents();
-  const stats = getCacheStats();
+  const events = await getEvents();
+  const stats = await getCacheStats(events);
 
   return NextResponse.json({
     stats,
@@ -62,8 +80,16 @@ export async function GET() {
 }
 
 export async function DELETE() {
-  (globalThis as Record<string, unknown>).cacheEvents = [];
-  (globalThis as Record<string, unknown>).cacheEventCounter = 0;
+  if (redisClient) {
+    try {
+      await redisClient.del(`${KEY_PREFIX}:cache-events`);
+    } catch (e) {
+      console.error('[Cache Events] Error deleting from Redis:', e);
+    }
+  } else {
+    (globalThis as Record<string, unknown>).cacheEvents = [];
+    (globalThis as Record<string, unknown>).cacheEventCounter = 0;
+  }
 
   return NextResponse.json({
     success: true,

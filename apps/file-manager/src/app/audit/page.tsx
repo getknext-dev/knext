@@ -78,14 +78,19 @@ export default function AuditPage() {
     // eslint-disable-next-line -- intentional: only run on mount
   }, [fetchLogs]);
 
+  // Use refs for latest state values so observer doesn't need to be recreated
+  const stateRefs = useRef({ page, hasMore, loading });
+  useEffect(() => {
+    stateRefs.current = { page, hasMore, loading };
+  }, [page, hasMore, loading]);
+
   // Infinite scroll observer
   useEffect(() => {
-    if (loading || !hasMore) return;
-
     observerRef.current = new IntersectionObserver(
       (entries) => {
-        if (entries[0].isIntersecting && hasMore && !loading) {
-          fetchLogs(page + 1);
+        const { page: currPage, hasMore: currHasMore, loading: currLoading } = stateRefs.current;
+        if (entries[0].isIntersecting && currHasMore && !currLoading) {
+          fetchLogs(currPage + 1);
         }
       },
       { threshold: 0.1 },
@@ -100,7 +105,7 @@ export default function AuditPage() {
         observerRef.current.disconnect();
       }
     };
-  }, [hasMore, loading, page, fetchLogs]);
+  }, [fetchLogs]);
 
   return (
     <div className="p-8 text-white">

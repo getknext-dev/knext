@@ -2,7 +2,7 @@
 
 ## Overview
 
-This framework enables deploying Next.js applications as Knative services on GKE with Fluid Compute characteristics. It uses **OpenNext** to compile Next.js into a standalone server compatible with containerized environments, while providing pluggable adapters for storage, caching, and messaging.
+This framework enables deploying Next.js applications as Knative services on GKE with Fluid Compute characteristics. It uses **Vinext** to compile Next.js into a standalone server compatible with containerized environments, while providing pluggable adapters for storage, caching, and messaging.
 
 ## System Architecture
 
@@ -37,9 +37,9 @@ flowchart TB
 
 ## Key Components
 
-### 1. OpenNext Integration
+### 1. Vinext Integration
 
-OpenNext transforms Next.js build output into a serverless-compatible format:
+Vinext transforms Next.js build output into a serverless-compatible format:
 
 ```text
 ├── assets/                  # Static files → GCS
@@ -68,7 +68,6 @@ kn-next.config.ts           # User configuration
         ↓
     kn-next build
         ↓
-open-next.config.ts         # Auto-generated OpenNext config
 ```
 
 **Example `kn-next.config.ts`:**
@@ -208,7 +207,7 @@ The environment variables depend on your chosen storage and cache providers.
 | Variable | Description | Default |
 | ---------- | ------------- | --------- |
 | `NODE_ENV` | Runtime environment | `production` |
-| `NEXT_BUILD_ID` | From OpenNext build | Auto |
+| `NEXT_BUILD_ID` | From Vinext build | Auto |
 | `DATABASE_URL` | PostgreSQL connection | Required |
 | `NODE_COMPILE_CACHE` | V8 bytecode cache path | Optional |
 
@@ -249,7 +248,6 @@ knative-next-monorepo/
 ├── apps/
 │   └── file-manager/           # Example Next.js 16 application
 │       ├── kn-next.config.ts   # App configuration
-│       ├── open-next.config.ts # Generated OpenNext config
 │       ├── deploy.sh           # Deployment automation
 │       ├── knative-service.yaml
 │       └── src/app/            # App Router pages
@@ -362,7 +360,7 @@ npx kn-next deploy [options]
 | `--bucket <name>` | `-b` | Override storage bucket |
 | `--tag <tag>` | `-t` | Image tag (default: timestamp) |
 | `--namespace <ns>` | `-n` | Kubernetes namespace (default: default) |
-| `--skip-build` | | Skip Next.js/OpenNext build step |
+| `--skip-build` | | Skip Vinext build step |
 | `--skip-upload` | | Skip asset upload to storage |
 | `--skip-infra` | | Skip infrastructure deployment |
 | `--dry-run` | | Generate manifests without deploying |
@@ -496,7 +494,7 @@ Runs the following steps:
 
 1. Generates `open-next.config.ts` from `kn-next.config.ts`
 2. Runs `npm run build` (Next.js build)
-3. Runs `npx open-next build` (OpenNext compilation)
+3. Runs Vinext compilation
 4. Copies adapter files to `.open-next/`
 
 ### Cleanup Command
@@ -542,7 +540,7 @@ Removes deployed resources from the cluster:
 5. **Manual Steps (if needed):**
 
    ```bash
-   # Build Next.js + OpenNext
+   # Build Next.js + Vinext
    cd apps/file-manager
    pnpm build
    npx open-next build

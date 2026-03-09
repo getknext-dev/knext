@@ -25,4 +25,4 @@ Instead of adding heavy Knative Eventing Go-module dependencies to the controlle
 2. **Topic**: Instructs the KafkaSource to consume explicitly from `[app-name]-revalidation`.
 3. **Sink Routing**: Routes all consumed events directly to the `myapp-revalidator` Knative Service.
 
-This process explicitly abstracts the message-broker plumbing away from developers. OpenNext's built-in Kafka queue adapter receives the regeneration signals flawlessly as standard HTTP webhooks, ensuring ISR logic remains fully Serverless and scales correctly from zero.
+This process explicitly abstracts the message-broker plumbing away from developers. The system's built-in Kafka queue adapter receives the regeneration signals flawlessly as standard HTTP webhooks, ensuring ISR logic remains fully Serverless and scales correctly from zero.
