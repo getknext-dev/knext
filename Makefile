@@ -52,39 +52,8 @@ deploy-infra:
 	@echo "Infrastructure deployed!"
 
 deploy-app:
-	@echo "Building File Manager app..."
-	npm run build --workspace=packages/framework
-	npm run build --workspace=apps/file-manager
-	@echo "Preparing runtime files..."
-	cp packages/framework/dist/runtime/cache-handler.js apps/file-manager/cache-handler.js
-	cp packages/framework/dist/runtime/runner.js apps/file-manager/runner.js
-	@echo "Compiling and building images..."
-	node packages/framework/dist/compiler/index.js \
-		--dir apps/file-manager \
-		--output ./manifests \
-		--image dev.local/file-manager:latest
-	rm apps/file-manager/cache-handler.js apps/file-manager/runner.js
-	@if minikube status > /dev/null 2>&1; then \
-		echo "Loading images into Minikube..."; \
-		imgs=$$(docker images --format "{{.Repository}}:{{.Tag}}" | grep "dev.local/file-manager-" || true); \
-		if [ -z "$$imgs" ]; then \
-			echo "No dev.local/file-manager-* images found to load into Minikube. Skipping image load."; \
-		else \
-			for img in $$imgs; do \
-				echo "Loading $$img..."; \
-				minikube image rm $$img 2>/dev/null || true; \
-				minikube image load $$img; \
-			done; \
-		fi; \
-	fi
-	@echo "Deploying to Knative..."
-	@if kubectl cluster-info > /dev/null 2>&1; then \
-		kubectl apply -f ./manifests; \
-		echo "File Manager deployed!"; \
-	else \
-		echo "Kubernetes cluster not reachable. Skipping deployment."; \
-		echo "Manifests are generated in ./manifests"; \
-	fi
+	@echo "Deploying File Manager app..."
+	cd apps/file-manager && npx bun run ../../packages/kn-next/src/cli/deploy.ts
 
 port-forward:
 	@echo "Starting port-forwards..."
@@ -99,8 +68,10 @@ port-forward:
 
 clean:
 	@echo "Cleaning up resources..."
-	kubectl delete -f ./manifests --ignore-not-found=true
-	kubectl delete -f packages/framework/infrastructure/cerbos/ --ignore-not-found=true
-	kubectl delete -f packages/framework/infrastructure/minio/ --ignore-not-found=true
-	helm uninstall postgres --namespace default --ignore-not-found
+	kubectl delete -f ./apps/file-manager/.output/knative-service.yaml --ignore-not-found=true
+	kubectl delete -f ./apps/file-manager/.output/knative-image-cache.yaml --ignore-not-found=true
+	kubectl delete -f ./apps/file-manager/.output/postgres.yaml --ignore-not-found=true
+	kubectl delete -f ./apps/file-manager/.output/redis.yaml --ignore-not-found=true
+	kubectl delete -f ./apps/file-manager/.output/observability.yaml --ignore-not-found=true
+	rm -rf ./apps/file-manager/.output
 	@echo "Cleanup complete!"

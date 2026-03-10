@@ -69,25 +69,22 @@ const KEY_PREFIX = process.env.REDIS_KEY_PREFIX || 'kn-next';
 let Redis;
 let redis;
 let connectPromise;
-let useRedis = false;
-
-// Try loading ioredis — gracefully degrade to in-memory if not available
-try {
-  Redis = (await import('ioredis')).default;
-  useRedis = !!REDIS_URL;
-} catch {
-  useRedis = false;
-}
-
-if (useRedis) {
-} else {
-}
+let useRedis = !!REDIS_URL;
 
 // In-memory fallback
 const memoryCache = new Map();
 
-function getRedis() {
-  if (!redis && Redis && REDIS_URL) {
+async function getRedis() {
+  if (!redis && REDIS_URL) {
+    if (!Redis) {
+      try {
+        const mod = await import('ioredis');
+        Redis = mod.default || mod;
+      } catch {
+        useRedis = false;
+        return null;
+      }
+    }
     redis = new Redis(REDIS_URL, {
       lazyConnect: true,
       maxRetriesPerRequest: 3,
@@ -104,7 +101,7 @@ function getRedis() {
 
 async function ensureConnected() {
   if (!useRedis) return null;
-  const client = getRedis();
+  const client = await getRedis();
   if (!client) return null;
   if (client.status === 'ready') return client;
   if (!connectPromise) {

@@ -143,7 +143,7 @@ async function deploy() {
         const assetPrefix = getAssetPrefix(config.storage);
         process.env.ASSET_PREFIX = assetPrefix;
         console.info(`📦 Building Vinext app with Nitro (assetPrefix: ${assetPrefix})...`);
-        await $`NITRO_PRESET=node-server npm run build`.quiet();
+        await $`NITRO_PRESET=bun npm run build`.quiet();
         console.info("   ✅ Vinext build complete\n");
     }
 
@@ -215,11 +215,12 @@ async function deploy() {
         additionalEnvVars: infraEnvVars,
     });
     const manifestPath = join(outputDir, "knative-service.yaml");
+    const imageCachePath = join(outputDir, "knative-image-cache.yaml");
     console.info(`   📄 Manifest: ${manifestPath}`);
 
     if (!options.dryRun) {
         console.info("   Applying to cluster...");
-        await $`kubectl apply -f ${manifestPath} -n ${options.namespace}`;
+        await $`kubectl apply -f ${manifestPath} -f ${imageCachePath} -n ${options.namespace}`;
         const result =
             await $`kubectl get ksvc ${config.name} -n ${options.namespace} -o jsonpath='{.status.url}'`.text();
         console.info("\n✨ Deployment complete!");

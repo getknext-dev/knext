@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite dev",
-    "build": "NITRO_PRESET=node vite build",
+    "build": "NITRO_PRESET=bun vite build",
     "start": "node .output/server/index.mjs"
   },
   "dependencies": {

@@ -191,14 +191,14 @@ ${allEnvItems}${envFromYaml}
             httpGet:
               path: ${config.healthCheckPath ?? "/api/health"}
               port: 3000
-            initialDelaySeconds: 5
-            periodSeconds: 10
+            initialDelaySeconds: 0
+            periodSeconds: 1
           livenessProbe:
             httpGet:
               path: ${config.healthCheckPath ?? "/api/health"}
               port: 3000
-            initialDelaySeconds: 15
-            periodSeconds: 30${volumeYaml}
+            initialDelaySeconds: 5
+            periodSeconds: 10${volumeYaml}
 `;
 
     // Generate PVC manifest if bytecode cache is enabled
@@ -239,7 +239,24 @@ automountServiceAccountToken: false
     const outputPath = path.join(outputDir, "knative-service.yaml");
     writeFileSync(outputPath, fullManifest, "utf-8");
 
+    // Generate Image cache manifest to pre-pull the docker image on all nodes
+    const imageCacheManifest = `# Image Cache - Pre-pulls the docker image on nodes for faster cold starts
+apiVersion: caching.internal.knative.dev/v1alpha1
+kind: Image
+metadata:
+  name: ${config.name}-image-cache
+  namespace: ${namespace}
+  labels:
+    app: ${config.name}
+    generated-by: kn-next
+spec:
+  image: ${config.registry}/${config.name}:${imageTag}
+`;
+    const imageCachePath = path.join(outputDir, "knative-image-cache.yaml");
+    writeFileSync(imageCachePath, imageCacheManifest, "utf-8");
+
     console.info(`[kn-next] Generated ${outputPath}`);
+    console.info(`[kn-next] Generated ${imageCachePath}`);
     if (bytecodeCacheEnabled) {
         console.info(
             `[kn-next] Bytecode caching enabled (NODE_COMPILE_CACHE=/cache/bytecode/${imageTag})`,

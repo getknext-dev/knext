@@ -38,7 +38,7 @@ const config: KnativeNextConfig = {
 
   // V8 bytecode caching for faster cold starts
   bytecodeCache: {
-    enabled: true,
+    enabled: false,
   },
 
   // Observability (Prometheus metrics + Grafana dashboards)
