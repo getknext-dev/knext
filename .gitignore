@@ -58,3 +58,6 @@ coverage/
 
 # Compiled Bun binaries (output of: bun build --compile)
 apps/*/**/*-server
+
+# Load test results
+load-test-results/

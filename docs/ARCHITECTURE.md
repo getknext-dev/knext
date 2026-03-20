@@ -605,6 +605,53 @@ Removes deployed resources from the cluster:
    kubectl apply -f .open-next/knative-service.yaml
    ```
 
+## Observability & Load Testing
+
+### Deployment
+
+Deploy the full Prometheus + Grafana + kube-state-metrics stack:
+
+```bash
+./scripts/deploy-observability.sh
+```
+
+This creates a `monitoring` namespace with:
+- **Prometheus** — scrapes file-manager pods, kube-state-metrics, and Knative autoscaler
+- **Grafana** — auto-provisioned with 3 dashboards (login: `admin/admin`)
+- **kube-state-metrics** — exposes pod lifecycle, scaling events, and resource metrics
+
+Access Grafana:
+
+```bash
+kubectl port-forward -n monitoring svc/grafana 3001:3000
+open http://localhost:3001
+```
+
+### Dashboards
+
+| Dashboard | Purpose |
+|-----------|---------|
+| **Load Testing** | RPS, latency percentiles (p50-p99), heatmap, error rates, per-pod RPS, CPU/memory |
+| **Bytecode Cache** | Cold/warm start duration, cache file counts, cache size, writes |
+| **Cold Start & Autoscaling** | Pod lifecycle, Knative desired vs actual pods, scale events, startup memory/CPU |
+
+### Load Testing
+
+Run comprehensive load tests:
+
+```bash
+# Run all tests (warm, spike, endpoints, ramp-up)
+./scripts/load-test.sh
+
+# Run a specific test
+./scripts/load-test.sh http://your-service-url cold-start
+./scripts/load-test.sh http://your-service-url soak
+```
+
+Available tests: `cold-start`, `warm`, `spike`, `soak`, `endpoints`, `ramp-up`, `all`
+
+Each test outputs: avg, min, max, p50, p95, p99 latency, RPS, TTFB, error rate.
+
 ## Future Roadmap
 
 - [ ] CLI tool for initialization (`npx kn-next init`)
@@ -615,3 +662,5 @@ Removes deployed resources from the cluster:
 - [x] GitHub Actions workflow examples
 - [x] Bun bytecode compilation for sub-second cold starts
 - [x] Kubernetes Operator (`NextApp` CRD)
+- [x] Prometheus + Grafana observability stack
+- [x] Comprehensive load testing suite
