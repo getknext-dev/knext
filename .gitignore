@@ -56,6 +56,5 @@ package-lock.json
 coverage/
 .nyc_output/
 
-# Compiled Bun binaries
-apps/*/file-manager-server
-*-server
+# Compiled Bun binaries (output of: bun build --compile)
+apps/*/**/*-server
