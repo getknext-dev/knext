@@ -265,16 +265,17 @@ class CacheHandler {
             }
           }
           await pipeline.exec();
+      } else {
+        // In-memory fallback path: store original data with Map/Buffer types preserved
+        // Only used when Redis is NOT available, to avoid unbounded memory growth
+        // and stale entries on revalidateTag (which only clears Redis).
+        const memEntry = {
+          value: cloneCacheValue(data),
+          lastModified: Date.now(),
+          tags: ctx?.tags || [],
+        };
+        memoryCache.set(key, memEntry);
       }
-
-      // In-memory path: store original data with Map/Buffer types preserved
-      // Use a shallow clone to avoid mutations from the caller
-      const memEntry = {
-        value: cloneCacheValue(data),
-        lastModified: Date.now(),
-        tags: ctx?.tags || [],
-      };
-      memoryCache.set(key, memEntry);
 
       logCacheEvent('SET', source, key, {
         durationMs: Date.now() - startTime,
