@@ -100,15 +100,27 @@ export function generateKnativeManifest(
         envVars.NODE_COMPILE_CACHE = `/cache/bytecode/${imageTag}`;
     }
 
-    // Add observability env vars
+    // Add observability + OpenTelemetry env vars
     const observabilityEnabled = config.observability?.enabled === true;
     if (observabilityEnabled) {
         envVars.KN_APP_NAME = config.name;
+        envVars.OTEL_SERVICE_NAME = config.name;
+        envVars.OTEL_EXPORTER_OTLP_ENDPOINT =
+            config.observability?.collectorEndpoint ??
+            "http://otel-collector.monitoring:4317";
+        if (config.observability?.samplingRate !== undefined) {
+            envVars.OTEL_TRACES_SAMPLER_ARG = String(
+                config.observability.samplingRate,
+            );
+        }
+        if (config.observability?.structuredLogs !== false) {
+            envVars.KN_STRUCTURED_LOGS = "true";
+        }
     }
 
     // Build Prometheus annotations if observability is enabled
     const prometheusAnnotations = observabilityEnabled
-        ? `\n        prometheus.io/scrape: "true"\n        prometheus.io/port: "3000"\n        prometheus.io/path: "/api/metrics"`
+        ? `\n        prometheus.io/scrape: "true"\n        prometheus.io/port: "3000"\n        prometheus.io/path: "/metrics"`
         : "";
 
     // Format env vars for YAML (12-space indent for env array items)

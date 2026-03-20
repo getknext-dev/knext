@@ -88,14 +88,28 @@ export interface BytecodeCacheConfig {
     storageSize?: string; // PVC size, default: "512Mi"
 }
 
-// Observability — Prometheus metrics + Grafana dashboards
+// Observability — OpenTelemetry + Prometheus + Grafana (cloud-agnostic)
 export interface ObservabilityConfig {
     enabled: boolean;
+    /** Sampling rate for traces (0.0 - 1.0). Default: 1.0 (dev), 0.1 (prod) */
+    samplingRate?: number;
+    /** OTel Collector OTLP endpoint. Auto-set when using generated infrastructure. */
+    collectorEndpoint?: string;
+    /** Enable structured JSON logging with requestId + traceId. Default: true */
+    structuredLogs?: boolean;
     prometheus?: {
         scrapeInterval?: string; // Default: "15s"
     };
     grafana?: {
         enabled?: boolean; // Default: true (deploy dashboard ConfigMap)
+    };
+    /** Deploy OTel Collector as part of generated infrastructure. Default: true */
+    collector?: {
+        enabled?: boolean;
+        /** Collector image. Default: otel/opentelemetry-collector-contrib */
+        image?: string;
+        /** Collector version. Default: latest */
+        version?: string;
     };
 }
 
