@@ -6,7 +6,10 @@
 import { copyFileSync, existsSync, mkdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import type { KnativeNextConfig } from "../config";
+import { createLogger } from "../utils/logger";
 import { validateConfig } from "./validate";
+
+const log = createLogger({ module: "cli" });
 
 const CONFIG_FILE = "kn-next.config.ts";
 
@@ -40,14 +43,14 @@ export async function copyAdapters(outputDir: string): Promise<void> {
     // Resolve adapter source relative to this file's location
     const sourceDir = resolve(dirname(import.meta.path), "..", "adapters");
 
-    const adaptersToCopy = ["bytecode-metrics.ts", "node-server.ts"];
+    const adaptersToCopy = ["node-server.ts"];
 
     for (const adapter of adaptersToCopy) {
         const src = join(sourceDir, adapter);
         const dest = join(adaptersDir, adapter);
         if (existsSync(src)) {
             copyFileSync(src, dest);
-            console.info(`   Copied ${adapter}`);
+            log.info({ adapter }, "Copied adapter");
         }
     }
 
@@ -55,7 +58,7 @@ export async function copyAdapters(outputDir: string): Promise<void> {
     const cacheHandlerSrc = join(process.cwd(), "cache-handler.js");
     if (existsSync(cacheHandlerSrc)) {
         copyFileSync(cacheHandlerSrc, join(adaptersDir, "cache-handler.js"));
-        console.info("   Copied cache-handler.js");
+        log.info("Copied cache-handler.js");
     }
 }
 

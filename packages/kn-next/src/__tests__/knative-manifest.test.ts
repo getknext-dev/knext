@@ -9,20 +9,87 @@ import {
     generateKnativeManifest,
 } from "../generators/knative-manifest";
 
-/**
- * Helper: parse multi-document YAML file and return array of JS objects.
- */
-function parseYamlDocs(filePath: string): Record<string, any>[] {
-    const raw = readFileSync(filePath, "utf-8");
-    return YAML.parseAllDocuments(raw).map((doc: any) => doc.toJSON());
+/* ------------------------------------------------------------------ */
+/*  Type-safe helpers for parsed YAML manifests                       */
+/* ------------------------------------------------------------------ */
+
+interface EnvEntry {
+    name: string;
+    value?: string;
+    valueFrom?: Record<string, Record<string, string>>;
+}
+
+interface K8sContainer {
+    image: string;
+    ports: { containerPort: number }[];
+    env: EnvEntry[];
+    envFrom?: { secretRef: { name: string } }[];
+    volumeMounts?: { name: string; mountPath: string }[];
+    resources: {
+        requests: Record<string, string>;
+        limits: Record<string, string>;
+    };
+    readinessProbe: {
+        httpGet: { path: string; port: number };
+        initialDelaySeconds: number;
+        periodSeconds: number;
+    };
+    livenessProbe: {
+        httpGet: { path: string; port: number };
+        initialDelaySeconds: number;
+        periodSeconds: number;
+    };
+}
+
+interface K8sDoc {
+    apiVersion: string;
+    kind: string;
+    metadata: { name: string; namespace?: string };
+    spec: Record<string, unknown>;
+}
+
+interface KnativeServiceDoc extends K8sDoc {
+    spec: {
+        template: {
+            metadata: { annotations: Record<string, string> };
+            spec: {
+                containers: K8sContainer[];
+                volumes?: {
+                    name: string;
+                    persistentVolumeClaim?: { claimName: string };
+                }[];
+            };
+        };
+    };
 }
 
 /**
- * Helper: find document by kind in parsed YAML array.
+ * Parse multi-document YAML file into typed documents.
  */
-function findByKind(docs: Record<string, any>[], kind: string) {
-    return docs.find((d) => d?.kind === kind);
+function parseYamlDocs(filePath: string): K8sDoc[] {
+    const raw = readFileSync(filePath, "utf-8");
+    return YAML.parseAllDocuments(raw).map((doc) =>
+        (doc as YAML.Document).toJSON(),
+    ) as K8sDoc[];
 }
+
+function findService(docs: K8sDoc[]): KnativeServiceDoc | undefined {
+    return docs.find((d) => d.kind === "Service") as
+        | KnativeServiceDoc
+        | undefined;
+}
+
+function envNames(env: EnvEntry[]): string[] {
+    return env.map((e) => e.name);
+}
+
+function findEnv(env: EnvEntry[], name: string): EnvEntry | undefined {
+    return env.find((e) => e.name === name);
+}
+
+/* ------------------------------------------------------------------ */
+/*  Tests                                                              */
+/* ------------------------------------------------------------------ */
 
 describe("Knative Manifest Generator", () => {
     let tempDir: string;
@@ -55,12 +122,12 @@ describe("Knative Manifest Generator", () => {
         expect(existsSync(outputPath)).toBe(true);
 
         const docs = parseYamlDocs(outputPath);
-        const ksvc = findByKind(docs, "Service");
+        const ksvc = findService(docs);
 
         expect(ksvc).toBeDefined();
-        expect(ksvc?.apiVersion).toBe("serving.knative.dev/v1");
-        expect(ksvc?.metadata.name).toBe("my-app");
-        expect(ksvc?.spec.template.spec.containers[0].image).toBe(
+        expect(ksvc!.apiVersion).toBe("serving.knative.dev/v1");
+        expect(ksvc!.metadata.name).toBe("my-app");
+        expect(ksvc!.spec.template.spec.containers[0].image).toBe(
             "gcr.io/test-project/my-app:v1.0.0",
         );
     });
@@ -86,12 +153,12 @@ describe("Knative Manifest Generator", () => {
         });
 
         const docs = parseYamlDocs(outputPath);
-        const ksvc = findByKind(docs, "Service");
-        const env = ksvc?.spec.template.spec.containers[0].env;
-        const envNames = env.map((e: any) => e.name);
+        const ksvc = findService(docs);
+        const env = ksvc!.spec.template.spec.containers[0].env;
+        const names = envNames(env);
 
-        expect(envNames).toContain("GCS_BUCKET_NAME");
-        expect(envNames).toContain("REDIS_URL");
+        expect(names).toContain("GCS_BUCKET_NAME");
+        expect(names).toContain("REDIS_URL");
     });
 
     it("should include Kafka env vars when enabled", () => {
@@ -112,12 +179,11 @@ describe("Knative Manifest Generator", () => {
         });
 
         const docs = parseYamlDocs(outputPath);
-        const ksvc = findByKind(docs, "Service");
-        const env = ksvc?.spec.template.spec.containers[0].env;
-        const envNames = env.map((e: any) => e.name);
+        const ksvc = findService(docs);
+        const names = envNames(ksvc!.spec.template.spec.containers[0].env);
 
-        expect(envNames).toContain("KAFKA_BROKER_URL");
-        expect(envNames).toContain("KAFKA_REVALIDATION_TOPIC");
+        expect(names).toContain("KAFKA_BROKER_URL");
+        expect(names).toContain("KAFKA_REVALIDATION_TOPIC");
     });
 
     it("should set correct container resources", () => {
@@ -137,8 +203,7 @@ describe("Knative Manifest Generator", () => {
         });
 
         const docs = parseYamlDocs(outputPath);
-        const ksvc = findByKind(docs, "Service");
-        const container = ksvc?.spec.template.spec.containers[0];
+        const container = findService(docs)!.spec.template.spec.containers[0];
 
         expect(container.ports[0].containerPort).toBe(3000);
         expect(container.resources.requests.memory).toBe("512Mi");
@@ -147,7 +212,7 @@ describe("Knative Manifest Generator", () => {
         expect(container.resources.limits.cpu).toBe("1000m");
     });
 
-    it("should use correct probe values (Fix #3: safer defaults)", () => {
+    it("should use correct probe values (safer defaults)", () => {
         const config: KnativeNextConfig = {
             name: "my-app",
             storage: {
@@ -164,231 +229,12 @@ describe("Knative Manifest Generator", () => {
         });
 
         const docs = parseYamlDocs(outputPath);
-        const ksvc = findByKind(docs, "Service");
-        const container = ksvc?.spec.template.spec.containers[0];
+        const container = findService(docs)!.spec.template.spec.containers[0];
 
         expect(container.readinessProbe.initialDelaySeconds).toBe(2);
         expect(container.readinessProbe.periodSeconds).toBe(3);
         expect(container.livenessProbe.initialDelaySeconds).toBe(5);
         expect(container.livenessProbe.periodSeconds).toBe(10);
-    });
-
-    // Bytecode cache tests
-    describe("bytecode caching", () => {
-        it("should NOT include bytecode cache resources when disabled", () => {
-            const config: KnativeNextConfig = {
-                name: "my-app",
-                storage: {
-                    provider: "gcs",
-                    bucket: "test-bucket",
-                    publicUrl: "https://storage.googleapis.com/test-bucket",
-                },
-                registry: "gcr.io/test-project",
-            };
-
-            const outputPath = generateKnativeManifest({
-                config,
-                outputDir: tempDir,
-            });
-
-            const docs = parseYamlDocs(outputPath);
-            const ksvc = findByKind(docs, "Service");
-            const pvc = findByKind(docs, "PersistentVolumeClaim");
-            const container = ksvc?.spec.template.spec.containers[0];
-            const envNames = container.env.map((e: any) => e.name);
-
-            expect(envNames).not.toContain("NODE_COMPILE_CACHE");
-            expect(container.volumeMounts).toBeUndefined();
-            expect(pvc).toBeUndefined();
-        });
-
-        it("should NOT include bytecode cache when bytecodeCache is undefined", () => {
-            const config: KnativeNextConfig = {
-                name: "my-app",
-                storage: {
-                    provider: "gcs",
-                    bucket: "test-bucket",
-                    publicUrl: "https://storage.googleapis.com/test-bucket",
-                },
-                registry: "gcr.io/test-project",
-                bytecodeCache: undefined,
-            };
-
-            const outputPath = generateKnativeManifest({
-                config,
-                outputDir: tempDir,
-            });
-
-            const docs = parseYamlDocs(outputPath);
-            const pvc = findByKind(docs, "PersistentVolumeClaim");
-            const ksvc = findByKind(docs, "Service");
-            const envNames = ksvc?.spec.template.spec.containers[0].env.map(
-                (e: any) => e.name,
-            );
-
-            expect(envNames).not.toContain("NODE_COMPILE_CACHE");
-            expect(pvc).toBeUndefined();
-        });
-
-        it("should include NODE_COMPILE_CACHE env var when enabled", () => {
-            const config: KnativeNextConfig = {
-                name: "my-app",
-                storage: {
-                    provider: "gcs",
-                    bucket: "test-bucket",
-                    publicUrl: "https://storage.googleapis.com/test-bucket",
-                },
-                registry: "gcr.io/test-project",
-                bytecodeCache: { enabled: true },
-            };
-
-            const outputPath = generateKnativeManifest({
-                config,
-                outputDir: tempDir,
-                imageTag: "v2.0.0",
-            });
-
-            const docs = parseYamlDocs(outputPath);
-            const ksvc = findByKind(docs, "Service");
-            const env = ksvc?.spec.template.spec.containers[0].env;
-            const compileCacheVar = env.find(
-                (e: any) => e.name === "NODE_COMPILE_CACHE",
-            );
-
-            expect(compileCacheVar).toBeDefined();
-            expect(compileCacheVar.value).toBe("/cache/bytecode/v2.0.0");
-        });
-
-        it("should include PVC manifest when bytecode cache is enabled", () => {
-            const config: KnativeNextConfig = {
-                name: "my-app",
-                storage: {
-                    provider: "gcs",
-                    bucket: "test-bucket",
-                    publicUrl: "https://storage.googleapis.com/test-bucket",
-                },
-                registry: "gcr.io/test-project",
-                bytecodeCache: { enabled: true },
-            };
-
-            const outputPath = generateKnativeManifest({
-                config,
-                outputDir: tempDir,
-                namespace: "production",
-            });
-
-            const docs = parseYamlDocs(outputPath);
-            const pvc = findByKind(docs, "PersistentVolumeClaim");
-
-            expect(pvc).toBeDefined();
-            expect(pvc?.metadata.name).toBe("my-app-bytecode-cache");
-            expect(pvc?.metadata.namespace).toBe("production");
-            expect(pvc?.spec.accessModes).toContain("ReadWriteOnce");
-            expect(pvc?.spec.resources.requests.storage).toBe("512Mi");
-        });
-
-        it("should use custom storage size for PVC", () => {
-            const config: KnativeNextConfig = {
-                name: "my-app",
-                storage: {
-                    provider: "gcs",
-                    bucket: "test-bucket",
-                    publicUrl: "https://storage.googleapis.com/test-bucket",
-                },
-                registry: "gcr.io/test-project",
-                bytecodeCache: { enabled: true, storageSize: "1Gi" },
-            };
-
-            const outputPath = generateKnativeManifest({
-                config,
-                outputDir: tempDir,
-            });
-
-            const docs = parseYamlDocs(outputPath);
-            const pvc = findByKind(docs, "PersistentVolumeClaim");
-
-            expect(pvc?.spec.resources.requests.storage).toBe("1Gi");
-        });
-
-        it("should include volume mount on the container", () => {
-            const config: KnativeNextConfig = {
-                name: "my-app",
-                storage: {
-                    provider: "gcs",
-                    bucket: "test-bucket",
-                    publicUrl: "https://storage.googleapis.com/test-bucket",
-                },
-                registry: "gcr.io/test-project",
-                bytecodeCache: { enabled: true },
-            };
-
-            const outputPath = generateKnativeManifest({
-                config,
-                outputDir: tempDir,
-            });
-
-            const docs = parseYamlDocs(outputPath);
-            const ksvc = findByKind(docs, "Service");
-            const container = ksvc?.spec.template.spec.containers[0];
-
-            expect(container.volumeMounts).toEqual(
-                expect.arrayContaining([
-                    expect.objectContaining({
-                        name: "bytecode-cache",
-                        mountPath: "/cache/bytecode",
-                    }),
-                ]),
-            );
-
-            const volumes = ksvc?.spec.template.spec.volumes;
-            expect(volumes).toEqual(
-                expect.arrayContaining([
-                    expect.objectContaining({
-                        name: "bytecode-cache",
-                        persistentVolumeClaim: {
-                            claimName: "my-app-bytecode-cache",
-                        },
-                    }),
-                ]),
-            );
-        });
-
-        it("should key cache path by imageTag", () => {
-            const config: KnativeNextConfig = {
-                name: "my-app",
-                storage: {
-                    provider: "gcs",
-                    bucket: "test-bucket",
-                    publicUrl: "https://storage.googleapis.com/test-bucket",
-                },
-                registry: "gcr.io/test-project",
-                bytecodeCache: { enabled: true },
-            };
-
-            const path1 = generateKnativeManifest({
-                config,
-                outputDir: tempDir,
-                imageTag: "abc123",
-            });
-            const docs1 = parseYamlDocs(path1);
-            const env1 = findByKind(docs1, "Service")?.spec.template.spec
-                .containers[0].env;
-            expect(
-                env1.find((e: any) => e.name === "NODE_COMPILE_CACHE").value,
-            ).toBe("/cache/bytecode/abc123");
-
-            const path2 = generateKnativeManifest({
-                config,
-                outputDir: tempDir,
-                imageTag: "def456",
-            });
-            const docs2 = parseYamlDocs(path2);
-            const env2 = findByKind(docs2, "Service")?.spec.template.spec
-                .containers[0].env;
-            expect(
-                env2.find((e: any) => e.name === "NODE_COMPILE_CACHE").value,
-            ).toBe("/cache/bytecode/def456");
-        });
     });
 
     describe("Image Cache", () => {
@@ -413,7 +259,9 @@ describe("Knative Manifest Generator", () => {
             expect(existsSync(imageCachePath)).toBe(true);
 
             const content = readFileSync(imageCachePath, "utf-8");
-            const doc = YAML.parse(content);
+            const doc = YAML.parse(content) as K8sDoc & {
+                spec: { image: string };
+            };
             expect(doc.kind).toBe("Image");
             expect(doc.spec.image).toBe("gcr.io/test-project/my-app:v1.0.0");
         });
@@ -440,8 +288,8 @@ describe("Knative Manifest Generator", () => {
             });
 
             const docs = parseYamlDocs(outputPath);
-            const ksvc = findByKind(docs, "Service");
-            const container = ksvc?.spec.template.spec.containers[0];
+            const container =
+                findService(docs)!.spec.template.spec.containers[0];
 
             expect(container.envFrom).toEqual([
                 { secretRef: { name: "my-secret-1" } },
@@ -516,8 +364,8 @@ describe("Observability", () => {
             outputDir: tempDir,
         });
         const docs = parseYamlDocs(outputPath);
-        const ksvc = findByKind(docs, "Service");
-        const annotations = ksvc?.spec.template.metadata.annotations;
+        const annotations =
+            findService(docs)!.spec.template.metadata.annotations;
 
         expect(annotations["prometheus.io/scrape"]).toBe("true");
         expect(annotations["prometheus.io/port"]).toBe("9091");
@@ -541,8 +389,8 @@ describe("Observability", () => {
             outputDir: tempDir,
         });
         const docs = parseYamlDocs(outputPath);
-        const ksvc = findByKind(docs, "Service");
-        const annotations = ksvc?.spec.template.metadata.annotations;
+        const annotations =
+            findService(docs)!.spec.template.metadata.annotations;
 
         expect(annotations["prometheus.io/scrape"]).toBeUndefined();
     });
@@ -564,12 +412,11 @@ describe("Observability", () => {
             outputDir: tempDir,
         });
         const docs = parseYamlDocs(outputPath);
-        const ksvc = findByKind(docs, "Service");
-        const env = ksvc?.spec.template.spec.containers[0].env;
-        const appName = env.find((e: any) => e.name === "KN_APP_NAME");
+        const env = findService(docs)!.spec.template.spec.containers[0].env;
+        const appName = findEnv(env, "KN_APP_NAME");
 
         expect(appName).toBeDefined();
-        expect(appName.value).toBe("my-app");
+        expect(appName!.value).toBe("my-app");
     });
 
     it("should generate ServiceMonitor and Grafana dashboard ConfigMap", async () => {
@@ -582,13 +429,11 @@ describe("Observability", () => {
             prometheus: { scrapeInterval: "30s" },
         });
 
-        // ServiceMonitor
         expect(manifest).toContain("ServiceMonitor");
         expect(manifest).toContain("my-app-metrics");
         expect(manifest).toContain("30s");
         expect(manifest).toContain("/metrics");
 
-        // Grafana ConfigMap
         expect(manifest).toContain("ConfigMap");
         expect(manifest).toContain("my-app-grafana-dashboard");
         expect(manifest).toContain("kn_next_startup_duration_seconds");

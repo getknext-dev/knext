@@ -8,6 +8,10 @@
       "recommended": true,
       "complexity": {
         "useLiteralKeys": "error"
+      },
+      "suspicious": {
+        "noExplicitAny": "error",
+        "noConsole": "warn"
       }
     }
   },

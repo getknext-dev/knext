@@ -15,12 +15,12 @@
 
 import { join } from "node:path";
 import { $ } from "bun";
-import {
-    generateEntrypoint,
-    generateKnativeManifest,
-} from "../generators/knative-manifest";
+import { generateKnativeManifest } from "../generators/knative-manifest";
 import { uploadAssets } from "../utils/asset-upload";
+import { createLogger } from "../utils/logger";
 import { copyAdapters, getNitroPreset, loadConfig } from "./shared";
+
+const log = createLogger({ module: "build" });
 
 interface BuildOptions {
     enableKafkaQueue?: boolean;
@@ -28,68 +28,69 @@ interface BuildOptions {
 }
 
 export async function build(options: BuildOptions = {}) {
-    console.info("🔨 kn-next build (Vinext + Nitro)\n");
+    log.info("🔨 kn-next build (Vinext + Nitro)");
 
     const workDir = process.cwd();
-    // Nitro output directory is .output
     const outputDir = join(workDir, ".output");
 
     // 1. Load config (validates at load time)
-    console.info("📋 Loading configuration...");
+    log.info("Loading configuration...");
     const config = await loadConfig();
-    console.info(`   App: ${config.name}`);
-    console.info(
-        `   Storage: ${config.storage.provider} (${config.storage.bucket})`,
+    log.info(
+        {
+            app: config.name,
+            storage: `${config.storage.provider} (${config.storage.bucket})`,
+            cache: config.cache?.provider ?? "none",
+            runtime: config.runtime ?? "bun",
+        },
+        "Configuration loaded",
     );
-    console.info(`   Cache: ${config.cache?.provider ?? "none"}`);
-    console.info(`   Runtime: ${config.runtime ?? "bun"}\n`);
 
     // 2. Run Vinext build with the correct Nitro preset from config
     if (!options.skipNextBuild) {
         const preset = getNitroPreset(config);
-        console.info(
-            `📦 Building Vinext app with Nitro (preset: ${preset})...`,
-        );
+        log.info({ preset }, "Building Vinext app with Nitro");
         await $`NITRO_PRESET=${preset} npm run build`.quiet();
-        console.info("   ✅ Vinext build complete\n");
+        log.info("Vinext build complete");
     }
 
     // 3. Upload static assets
-    console.info("☁️  Uploading static assets...");
+    log.info("Uploading static assets...");
     await uploadAssets(config);
-    console.info("   ✅ Assets uploaded\n");
+    log.info("Assets uploaded");
 
     // 4. Copy adapters
-    console.info("📂 Copying adapters...");
+    log.info("Copying adapters...");
     await copyAdapters(outputDir);
 
     // 5. Generate Knative manifest
-    console.info("🌐 Generating Knative manifest...");
+    log.info("Generating Knative manifest...");
     generateKnativeManifest({
         config,
         outputDir,
         enableKafkaQueue: options.enableKafkaQueue,
     });
 
-    if (config.bytecodeCache?.enabled) {
-        generateEntrypoint({ config, outputDir });
-    }
-
-    console.info("\n✨ Build complete!");
-    console.info(`   Output: ${outputDir}`);
-    console.info(`   Manifest: ${join(outputDir, "knative-service.yaml")}`);
+    log.info(
+        {
+            output: outputDir,
+            manifest: join(outputDir, "knative-service.yaml"),
+        },
+        "✨ Build complete!",
+    );
 }
 
 // Run if executed directly
 if (import.meta.main) {
-    build({
-        // Kafka is the default for Knative ISR, use --no-kafka to disable
-        enableKafkaQueue: process.argv.includes("--no-kafka")
-            ? false
-            : undefined,
-        skipNextBuild: process.argv.includes("--skip-next"),
-    }).catch((err) => {
-        console.error("❌ Build failed:", err.message);
+    try {
+        await build({
+            enableKafkaQueue: process.argv.includes("--no-kafka")
+                ? false
+                : undefined,
+            skipNextBuild: process.argv.includes("--skip-next"),
+        });
+    } catch (err) {
+        log.fatal({ err }, "Build failed");
         process.exit(1);
-    });
+    }
 }

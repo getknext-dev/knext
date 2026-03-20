@@ -15,6 +15,9 @@ import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { $ } from "bun";
 import type { KnativeNextConfig } from "../config";
+import { createLogger } from "../utils/logger";
+
+const log = createLogger({ module: "cleanup" });
 
 const CONFIG_FILE = "kn-next.config.ts";
 
@@ -30,54 +33,56 @@ async function loadConfig(): Promise<KnativeNextConfig> {
 }
 
 async function cleanup() {
-    console.info("🧹 kn-next cleanup\n");
+    log.info("🧹 kn-next cleanup");
 
     // 1. Load config
-    console.info("📋 Loading configuration...");
+    log.info("Loading configuration...");
     const config = await loadConfig();
-    console.info(`   App: ${config.name}`);
-    console.info(
-        `   Storage: ${config.storage.provider} (${config.storage.bucket})\n`,
+    log.info(
+        {
+            app: config.name,
+            storage: `${config.storage.provider} (${config.storage.bucket})`,
+        },
+        "Configuration loaded",
     );
 
     // 2. Delete Knative service
-    console.info("🗑️  Deleting Knative service...");
+    log.info("Deleting Knative service...");
     try {
         await $`kubectl delete ksvc ${config.name} --ignore-not-found`.quiet();
-        console.info(`   ✅ Deleted ksvc/${config.name}\n`);
+        log.info({ service: config.name }, "Deleted Knative service");
     } catch (_err) {
-        console.info("   ⚠️  Service not found or already deleted\n");
+        log.warn("Service not found or already deleted");
     }
 
     // 3. Delete infrastructure services (if configured)
     if (config.infrastructure) {
-        console.info("🗑️  Deleting infrastructure services...");
+        log.info("Deleting infrastructure services...");
         if (config.infrastructure.postgres?.enabled) {
             await $`kubectl delete statefulset ${config.name}-postgres --ignore-not-found`.quiet();
             await $`kubectl delete svc ${config.name}-postgres --ignore-not-found`.quiet();
             await $`kubectl delete pvc -l app=${config.name}-postgres --ignore-not-found`.quiet();
-            console.info("   ✅ Deleted PostgreSQL");
+            log.info("Deleted PostgreSQL");
         }
         if (config.infrastructure.redis?.enabled) {
             await $`kubectl delete deployment ${config.name}-redis --ignore-not-found`.quiet();
             await $`kubectl delete svc ${config.name}-redis --ignore-not-found`.quiet();
-            console.info("   ✅ Deleted Redis");
+            log.info("Deleted Redis");
         }
         if (config.infrastructure.minio?.enabled) {
             await $`kubectl delete statefulset ${config.name}-minio --ignore-not-found`.quiet();
             await $`kubectl delete svc ${config.name}-minio --ignore-not-found`.quiet();
             await $`kubectl delete pvc -l app=${config.name}-minio --ignore-not-found`.quiet();
-            console.info("   ✅ Deleted MinIO");
+            log.info("Deleted MinIO");
         }
-        console.info("");
     }
 
     // 4. Clear storage bucket
-    console.info("🗑️  Clearing storage bucket...");
+    log.info("Clearing storage bucket...");
     await clearStorage(config);
-    console.info(`   ✅ Cleared ${config.storage.bucket}\n`);
+    log.info({ bucket: config.storage.bucket }, "Storage bucket cleared");
 
-    console.info("✨ Cleanup complete!");
+    log.info("✨ Cleanup complete!");
 }
 
 async function clearStorage(config: KnativeNextConfig) {
@@ -98,7 +103,9 @@ async function clearStorage(config: KnativeNextConfig) {
 }
 
 // Run
-cleanup().catch((err) => {
-    console.error("❌ Cleanup failed:", err.message);
+try {
+    await cleanup();
+} catch (err) {
+    log.fatal({ err }, "Cleanup failed");
     process.exit(1);
-});
+}

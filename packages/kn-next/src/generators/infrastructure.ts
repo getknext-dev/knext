@@ -8,6 +8,9 @@ import type {
     PostgresConfig,
     RedisInfraConfig,
 } from "../config";
+import { createLogger } from "../utils/logger";
+
+const log = createLogger({ module: "infrastructure" });
 
 /**
  * Generates Kubernetes/Knative manifests for infrastructure services.
@@ -47,7 +50,7 @@ export function generateInfrastructure(
 
         const pgHost = `${config.name}-postgres.${namespace}.svc.cluster.local`;
         envVars.DATABASE_URL = `postgres://postgres:$(POSTGRES_PASSWORD)@${pgHost}:5432/app`;
-        console.info(`[kn-next] Generated ${pgPath}`);
+        log.info({ path: pgPath }, "Generated PostgreSQL manifest");
     }
 
     // Redis
@@ -59,7 +62,7 @@ export function generateInfrastructure(
 
         const redisHost = `${config.name}-redis.${namespace}.svc.cluster.local`;
         envVars.REDIS_URL = `redis://${redisHost}:6379`;
-        console.info(`[kn-next] Generated ${redisPath}`);
+        log.info({ path: redisPath }, "Generated Redis manifest");
     }
 
     // MinIO
@@ -71,7 +74,7 @@ export function generateInfrastructure(
 
         const minioHost = `${config.name}-minio.${namespace}.svc.cluster.local`;
         envVars.MINIO_ENDPOINT = `http://${minioHost}:9000`;
-        console.info(`[kn-next] Generated ${minioPath}`);
+        log.info({ path: minioPath }, "Generated MinIO manifest");
     }
 
     // Observability (Prometheus + Grafana)
@@ -83,7 +86,7 @@ export function generateInfrastructure(
         const obsPath = join(outputDir, "observability.yaml");
         writeFileSync(obsPath, obsManifest);
         manifests.push(obsPath);
-        console.info(`[kn-next] Generated ${obsPath}`);
+        log.info({ path: obsPath }, "Generated observability manifest");
     }
 
     return { manifests, envVars };
@@ -379,58 +382,20 @@ function generateDashboardJson(appName: string): string {
                 targets: [
                     {
                         expr: `histogram_quantile(0.95, rate(kn_next_startup_duration_seconds_bucket{app="${appName}"}[$__rate_interval]))`,
-                        legendFormat: "p95 ({{cache_status}})",
+                        legendFormat: "p95",
                     },
                     {
                         expr: `histogram_quantile(0.50, rate(kn_next_startup_duration_seconds_bucket{app="${appName}"}[$__rate_interval]))`,
-                        legendFormat: "p50 ({{cache_status}})",
+                        legendFormat: "p50",
                     },
                 ],
                 fieldConfig: { defaults: { unit: "s" } },
             },
-            {
-                title: "🔥 Warm vs ❄️ Cold Starts",
-                type: "piechart",
-                gridPos: { h: 8, w: 6, x: 12, y: 0 },
-                targets: [
-                    {
-                        expr: `count(kn_next_bytecode_cache_warm_start{app="${appName}"} == 1)`,
-                        legendFormat: "warm",
-                    },
-                    {
-                        expr: `count(kn_next_bytecode_cache_warm_start{app="${appName}"} == 0)`,
-                        legendFormat: "cold",
-                    },
-                ],
-            },
-            {
-                title: "📁 Cached Files",
-                type: "stat",
-                gridPos: { h: 4, w: 6, x: 0, y: 8 },
-                targets: [
-                    {
-                        expr: `kn_next_bytecode_cache_files_total{app="${appName}"}`,
-                        legendFormat: "{{build_id}}",
-                    },
-                ],
-            },
-            {
-                title: "💾 Cache Size",
-                type: "stat",
-                gridPos: { h: 4, w: 6, x: 6, y: 8 },
-                targets: [
-                    {
-                        expr: `kn_next_bytecode_cache_size_bytes{app="${appName}"}`,
-                        legendFormat: "{{build_id}}",
-                    },
-                ],
-                fieldConfig: { defaults: { unit: "bytes" } },
-            },
         ],
         refresh: "10s",
         schemaVersion: 39,
-        tags: ["kn-next", "bytecode", appName],
-        title: `kn-next: ${appName} Bytecode Cache`,
+        tags: ["kn-next", appName],
+        title: `kn-next: ${appName} Performance`,
         uid: `kn-next-${appName}`,
         version: 1,
     };

@@ -82,12 +82,6 @@ export interface ScalingConfig {
     memoryLimit?: string; // Default: "1Gi"
 }
 
-// V8 bytecode caching via NODE_COMPILE_CACHE
-export interface BytecodeCacheConfig {
-    enabled: boolean;
-    storageSize?: string; // PVC size, default: "512Mi"
-}
-
 // Observability — Prometheus metrics + Grafana dashboards
 export interface ObservabilityConfig {
     enabled: boolean;
@@ -120,7 +114,6 @@ export interface KnativeNextConfig {
     runtime?: "bun" | "node"; // Nitro preset: 'bun' (default) or 'node' (node-server)
     infrastructure?: InfrastructureConfig; // Deploy PostgreSQL, Redis, MinIO as Knative services
     scaling?: ScalingConfig; // Knative autoscaling options
-    bytecodeCache?: BytecodeCacheConfig; // V8 compile cache for faster cold starts
     observability?: ObservabilityConfig; // Prometheus metrics + Grafana dashboards
     healthCheckPath?: string; // Default: "/api/health"
     secrets?: SecretsConfig; // Kubernetes Native Secrets Binding

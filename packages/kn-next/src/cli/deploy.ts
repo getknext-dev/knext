@@ -11,12 +11,12 @@ import { parseArgs } from "node:util";
 import { $ } from "bun";
 import type { KnativeNextConfig } from "../config";
 import { generateInfrastructure } from "../generators/infrastructure";
-import {
-    generateEntrypoint,
-    generateKnativeManifest,
-} from "../generators/knative-manifest";
+import { generateKnativeManifest } from "../generators/knative-manifest";
 import { getAssetPrefix, uploadAssets } from "../utils/asset-upload";
+import { createLogger } from "../utils/logger";
 import { copyAdapters, getNitroPreset, loadConfig } from "./shared";
+
+const log = createLogger({ module: "deploy" });
 
 interface DeployOptions {
     registry?: string;
@@ -47,7 +47,7 @@ function parseCliArgs(): DeployOptions {
     });
 
     if (values.help) {
-        console.info("Help output omitted for brevity");
+        log.info("Help output omitted for brevity");
         process.exit(0);
     }
 
@@ -89,11 +89,7 @@ function applyOverrides(
 async function deploy() {
     const options = parseCliArgs();
 
-    console.info("🚀 kn-next deploy\n");
-
-    if (options.dryRun) {
-        console.info("⚠️  DRY RUN MODE - No actual deployment\n");
-    }
+    log.info({ dryRun: options.dryRun }, "🚀 kn-next deploy");
 
     // Load config with validation
     const baseConfig = await loadConfig();
@@ -105,11 +101,9 @@ async function deploy() {
         const assetPrefix = getAssetPrefix(config.storage);
         process.env.ASSET_PREFIX = assetPrefix;
         const preset = getNitroPreset(config);
-        console.info(
-            `📦 Building Vinext app with Nitro (preset: ${preset}, assetPrefix: ${assetPrefix})...`,
-        );
+        log.info({ preset, assetPrefix }, "Building Vinext app with Nitro");
         await $`NITRO_PRESET=${preset} npm run build`.quiet();
-        console.info("   ✅ Vinext build complete\n");
+        log.info("Vinext build complete");
     }
 
     // Always copy adapters after build
@@ -118,43 +112,37 @@ async function deploy() {
     const imageTag = options.tag || `${Date.now()}`;
     const imageName = `${config.registry}/${config.name}:${imageTag}`;
 
-    console.info(`📌 Image: ${imageName}\n`);
-
-    if (config.bytecodeCache?.enabled) {
-        generateEntrypoint({ config, outputDir });
-    }
+    log.info({ image: imageName }, "Image tag resolved");
 
     if (!options.dryRun) {
         const tasks: Promise<void>[] = [];
 
         if (!options.skipUpload) {
-            console.info("🔀 Running in parallel:");
-            console.info(`   - Uploading assets to ${config.storage.provider}`);
+            log.info("Running parallel tasks: asset upload + Docker build");
             tasks.push(
                 (async () => {
                     await uploadAssets(config);
-                    console.info("   ✅ Assets uploaded");
+                    log.info("Assets uploaded");
                 })(),
             );
         }
 
-        console.info("   - Building & pushing Docker image\n");
+        log.info("Building & pushing Docker image");
         tasks.push(
             (async () => {
                 const repoRoot = resolve(process.cwd(), "../..");
                 await $`docker buildx build --platform linux/amd64 -f ${process.cwd()}/Dockerfile -t ${imageName} --push ${repoRoot}`;
-                console.info("   ✅ Docker image built and pushed");
+                log.info("Docker image built and pushed");
             })(),
         );
 
         await Promise.all(tasks);
-        console.info("");
     }
 
     let infraEnvVars: Record<string, string> = {};
     const hasInfra = config.infrastructure || config.observability?.enabled;
     if (hasInfra && !options.skipInfra && !options.dryRun) {
-        console.info("🏗️  Deploying infrastructure services...");
+        log.info("Deploying infrastructure services...");
         const { manifests, envVars } = generateInfrastructure(
             config,
             outputDir,
@@ -164,14 +152,14 @@ async function deploy() {
         for (const manifest of manifests) {
             await $`kubectl apply -f ${manifest} -n ${options.namespace}`;
         }
-        console.info("   ✅ Infrastructure deployed\n");
+        log.info("Infrastructure deployed");
     }
 
     if (process.env.KN_DATABASE_URL) {
         infraEnvVars.DATABASE_URL = process.env.KN_DATABASE_URL;
     }
 
-    console.info("🌐 Generating Knative manifest...");
+    log.info("Generating Knative manifest...");
     generateKnativeManifest({
         config,
         outputDir,
@@ -181,21 +169,22 @@ async function deploy() {
     });
     const manifestPath = join(outputDir, "knative-service.yaml");
     const imageCachePath = join(outputDir, "knative-image-cache.yaml");
-    console.info(`   📄 Manifest: ${manifestPath}`);
+    log.info({ manifest: manifestPath }, "Manifest generated");
 
     if (!options.dryRun) {
-        console.info("   Applying to cluster...");
+        log.info("Applying to cluster...");
         await $`kubectl apply -f ${manifestPath} -f ${imageCachePath} -n ${options.namespace}`;
         const result =
             await $`kubectl get ksvc ${config.name} -n ${options.namespace} -o jsonpath='{.status.url}'`.text();
-        console.info("\n✨ Deployment complete!");
-        console.info(`🔗 URL: ${result.replace(/'/g, "")}`);
+        log.info({ url: result.replace(/'/g, "") }, "✨ Deployment complete!");
     } else {
-        console.info("\n✅ Dry run complete - manifest generated");
+        log.info("✅ Dry run complete - manifest generated");
     }
 }
 
-deploy().catch((err) => {
-    console.error("❌ Deployment failed:", err.message);
+try {
+    await deploy();
+} catch (err) {
+    log.fatal({ err }, "Deployment failed");
     process.exit(1);
-});
+}

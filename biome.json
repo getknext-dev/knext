@@ -40,10 +40,10 @@
         "useExhaustiveDependencies": "warn"
       },
       "suspicious": {
-        "noExplicitAny": "off",
+        "noExplicitAny": "warn",
         "noDoubleEquals": "error",
         "noArrayIndexKey": "warn",
-        "noConsole": "off"
+        "noConsole": "warn"
       },
       "style": {
         "noNonNullAssertion": "off",
