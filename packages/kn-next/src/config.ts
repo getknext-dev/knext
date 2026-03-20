@@ -117,6 +117,7 @@ export interface KnativeNextConfig {
     cache?: CacheConfig;
     queue?: QueueConfig; // For ISR revalidation (Kafka for Knative Eventing)
     registry: string;
+    runtime?: "bun" | "node"; // Nitro preset: 'bun' (default) or 'node' (node-server)
     infrastructure?: InfrastructureConfig; // Deploy PostgreSQL, Redis, MinIO as Knative services
     scaling?: ScalingConfig; // Knative autoscaling options
     bytecodeCache?: BytecodeCacheConfig; // V8 compile cache for faster cold starts

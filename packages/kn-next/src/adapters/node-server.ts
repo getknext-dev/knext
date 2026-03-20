@@ -1,50 +1,51 @@
 import http from "node:http";
 import {
-    initBytecodeCacheMetrics,
-    metricsRegistry,
-    recordServerReady,
+	initBytecodeCacheMetrics,
+	metricsRegistry,
+	recordServerReady,
 } from "./bytecode-metrics.ts";
 
+const METRICS_PORT = 9091;
+
 async function main() {
-    initBytecodeCacheMetrics();
+	initBytecodeCacheMetrics();
 
-    // Intercept requests for /metrics before they reach the Nitro server
-    const originalCreateServer = http.createServer;
+	// Start a dedicated metrics server on port 9091.
+	// Clean separation: Nitro owns :3000, metrics owns :9091.
+	// No monkey-patching of http.createServer.
+	const metricsServer = http.createServer(async (req, res) => {
+		if (req.url === "/metrics" && req.method === "GET") {
+			res.setHeader("Content-Type", metricsRegistry.contentType);
+			const metrics = await metricsRegistry.metrics();
+			res.end(metrics);
+			return;
+		}
+		res.writeHead(404);
+		res.end("Not Found");
+	});
 
-    // @ts-expect-error - dynamic override
-    http.createServer = (requestListener?: http.RequestListener) =>
-        originalCreateServer((req, res) => {
-            if (req.url === "/metrics" && req.method === "GET") {
-                res.setHeader("Content-Type", metricsRegistry.contentType);
-                metricsRegistry.metrics().then((metrics) => {
-                    res.end(metrics);
-                });
-                return;
-            }
-            if (requestListener) {
-                return requestListener(req, res);
-            }
-        });
+	metricsServer.listen(METRICS_PORT, () => {
+		console.info(`[kn-next] Prometheus metrics server on :${METRICS_PORT}/metrics`);
+	});
 
-    // Import Nitro server
-    // Nitro's node-server preset automatically starts listening
-    await import("../server/index.mjs");
+	// Import Nitro server — it self-starts on :3000
+	await import("../server/index.mjs");
 
-    recordServerReady();
-    console.info(`[kn-next] Nitro server listening`);
-    console.info(`[kn-next] Prometheus metrics at /metrics`);
+	recordServerReady();
+	console.info("[kn-next] Nitro server listening on :3000");
 
-    // Handle graceful shutdown
-    const shutdown = () => {
-        console.info("[kn-next] Shutting down gracefully...");
-        process.exit(0);
-    };
+	// Handle graceful shutdown
+	const shutdown = () => {
+		console.info("[kn-next] Shutting down gracefully...");
+		metricsServer.close();
+		process.exit(0);
+	};
 
-    process.on("SIGTERM", shutdown);
-    process.on("SIGINT", shutdown);
+	process.on("SIGTERM", shutdown);
+	process.on("SIGINT", shutdown);
 }
 
 main().catch((err) => {
-    console.error("[kn-next] Server startup failed:", err);
-    process.exit(1);
+	console.error("[kn-next] Server startup failed:", err);
+	process.exit(1);
 });

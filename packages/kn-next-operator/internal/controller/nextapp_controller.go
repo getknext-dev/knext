@@ -50,6 +50,7 @@ type NextAppReconciler struct {
 // +kubebuilder:rbac:groups=serving.knative.dev,resources=services,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=persistentvolumeclaims,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=serviceaccounts,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=caching.internal.knative.dev,resources=images,verbs=get;list;watch;create;update;patch;delete
 
 func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := logf.FromContext(ctx)
@@ -115,7 +116,36 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		}
 	}
 
-	// 3. Create/Update Knative Service
+	// 3. Create/Update Image Cache (pre-pull for faster cold starts)
+	imageCache := &unstructured.Unstructured{}
+	imageCache.SetAPIVersion("caching.internal.knative.dev/v1alpha1")
+	imageCache.SetKind("Image")
+	imageCache.SetName(nextApp.Name + "-image-cache")
+	imageCache.SetNamespace(nextApp.Namespace)
+
+	_, err = controllerutil.CreateOrUpdate(ctx, r.Client, imageCache, func() error {
+		imageCache.Object["spec"] = map[string]interface{}{
+			"image": nextApp.Spec.Image,
+		}
+		labels := map[string]string{
+			"app":          nextApp.Name,
+			"generated-by": "kn-next-operator",
+		}
+		imageCache.SetLabels(labels)
+		return ctrl.SetControllerReference(&nextApp, imageCache, r.Scheme)
+	})
+	if err != nil {
+		// Image cache is non-critical — log and continue
+		logger.Info("Could not reconcile Image cache (CRD may not be installed)", "error", err.Error())
+	}
+
+	// Determine health check path
+	healthPath := "/api/health"
+	if nextApp.Spec.HealthCheckPath != "" {
+		healthPath = nextApp.Spec.HealthCheckPath
+	}
+
+	// 4. Create/Update Knative Service
 	ksvc := &servingv1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      nextApp.Name,
@@ -136,6 +166,13 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		if nextApp.Spec.Scaling != nil {
 			annotations["autoscaling.knative.dev/min-scale"] = fmt.Sprintf("%d", nextApp.Spec.Scaling.MinScale)
 			annotations["autoscaling.knative.dev/max-scale"] = fmt.Sprintf("%d", nextApp.Spec.Scaling.MaxScale)
+		}
+
+		// Observability annotations — aligned with CLI
+		if nextApp.Spec.Observability != nil && nextApp.Spec.Observability.Enabled {
+			annotations["prometheus.io/scrape"] = "true"
+			annotations["prometheus.io/port"] = "9091"
+			annotations["prometheus.io/path"] = "/metrics"
 		}
 
 		if nextApp.Spec.Preview != nil && nextApp.Spec.Preview.Enabled {
@@ -169,12 +206,30 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 			envVars = append(envVars, corev1.EnvVar{Name: "KAFKA_REVALIDATION_TOPIC", Value: fmt.Sprintf("%s-revalidation", nextApp.Name)})
 		}
 
+		// Observability env vars — aligned with CLI
+		if nextApp.Spec.Observability != nil && nextApp.Spec.Observability.Enabled {
+			envVars = append(envVars, corev1.EnvVar{Name: "KN_APP_NAME", Value: nextApp.Name})
+		}
+
 		var envFrom []corev1.EnvFromSource
 		if nextApp.Spec.Secrets != nil {
+			// envFrom: inject entire secrets as env vars
 			for _, secretName := range nextApp.Spec.Secrets.EnvFrom {
 				envFrom = append(envFrom, corev1.EnvFromSource{
 					SecretRef: &corev1.SecretEnvSource{
 						LocalObjectReference: corev1.LocalObjectReference{Name: secretName},
+					},
+				})
+			}
+			// envMap: map specific secret keys to env var names — aligned with CLI
+			for envName, entry := range nextApp.Spec.Secrets.EnvMap {
+				envVars = append(envVars, corev1.EnvVar{
+					Name: envName,
+					ValueFrom: &corev1.EnvVarSource{
+						SecretKeyRef: &corev1.SecretKeySelector{
+							LocalObjectReference: corev1.LocalObjectReference{Name: entry.SecretName},
+							Key:                  entry.SecretKey,
+						},
 					},
 				})
 			}
@@ -202,6 +257,30 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 			cc = int64(nextApp.Spec.Scaling.ContainerConcurrency)
 		}
 
+		// Resource limits — aligned with CLI defaults
+		resourceRequests := corev1.ResourceList{
+			corev1.ResourceCPU:    resource.MustParse("250m"),
+			corev1.ResourceMemory: resource.MustParse("512Mi"),
+		}
+		resourceLimits := corev1.ResourceList{
+			corev1.ResourceCPU:    resource.MustParse("1000m"),
+			corev1.ResourceMemory: resource.MustParse("1Gi"),
+		}
+		if nextApp.Spec.Resources != nil {
+			if nextApp.Spec.Resources.CPURequest != "" {
+				resourceRequests[corev1.ResourceCPU] = resource.MustParse(nextApp.Spec.Resources.CPURequest)
+			}
+			if nextApp.Spec.Resources.MemoryRequest != "" {
+				resourceRequests[corev1.ResourceMemory] = resource.MustParse(nextApp.Spec.Resources.MemoryRequest)
+			}
+			if nextApp.Spec.Resources.CPULimit != "" {
+				resourceLimits[corev1.ResourceCPU] = resource.MustParse(nextApp.Spec.Resources.CPULimit)
+			}
+			if nextApp.Spec.Resources.MemoryLimit != "" {
+				resourceLimits[corev1.ResourceMemory] = resource.MustParse(nextApp.Spec.Resources.MemoryLimit)
+			}
+		}
+
 		ksvc.Spec.Template.ObjectMeta.Annotations = annotations
 		ksvc.Spec.Template.Spec.ServiceAccountName = nextApp.Name + "-sa"
 		ksvc.Spec.Template.Spec.ContainerConcurrency = &cc
@@ -214,10 +293,25 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 				Ports: []corev1.ContainerPort{
 					{ContainerPort: 3000},
 				},
+				Resources: corev1.ResourceRequirements{
+					Requests: resourceRequests,
+					Limits:   resourceLimits,
+				},
+				// Probe values aligned with CLI: initialDelay=2, period=3 for readiness
 				ReadinessProbe: &corev1.Probe{
 					ProbeHandler: corev1.ProbeHandler{
 						HTTPGet: &corev1.HTTPGetAction{
-							Path: "/api/health",
+							Path: healthPath,
+							Port: intstr.FromInt(3000),
+						},
+					},
+					InitialDelaySeconds: 2,
+					PeriodSeconds:       3,
+				},
+				LivenessProbe: &corev1.Probe{
+					ProbeHandler: corev1.ProbeHandler{
+						HTTPGet: &corev1.HTTPGetAction{
+							Path: healthPath,
 							Port: intstr.FromInt(3000),
 						},
 					},
@@ -235,7 +329,7 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{}, err
 	}
 
-	// 4. Create/Update KafkaSource if Revalidation is enabled using Unstructured to avoid Eventing proto deps
+	// 5. Create/Update KafkaSource if Revalidation is enabled using Unstructured to avoid Eventing proto deps
 	if nextApp.Spec.Revalidation != nil && nextApp.Spec.Revalidation.Queue == "kafka" {
 		topic := fmt.Sprintf("%s-revalidation", nextApp.Name)
 		kafkaSource := &unstructured.Unstructured{}
@@ -270,7 +364,7 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		}
 	}
 
-	// 5. Update Status
+	// 6. Update Status
 	if ksvc.Status.URL != nil {
 		nextApp.Status.URL = ksvc.Status.URL.String()
 		if err := r.Status().Update(ctx, &nextApp); err != nil {

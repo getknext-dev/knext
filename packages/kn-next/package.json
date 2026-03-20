@@ -1,5 +1,5 @@
 {
-  "name": "@kn-next/config",
+  "name": "@kn-next/core",
   "version": "0.1.0",
   "description": "Knative Next.js configuration and CLI",
   "type": "module",
@@ -13,7 +13,10 @@
     "./loader": "./src/loader.ts",
     "./adapters/node-server": "./src/adapters/node-server.ts",
     "./adapters/bytecode-metrics": "./src/adapters/bytecode-metrics.ts",
-    "./generators/knative-manifest": "./src/generators/knative-manifest.ts"
+    "./adapters/cache-handler": "./src/adapters/cache-handler.js",
+    "./generators/knative-manifest": "./src/generators/knative-manifest.ts",
+    "./cli/validate": "./src/cli/validate.ts",
+    "./cli/shared": "./src/cli/shared.ts"
   },
   "scripts": {
     "build": "bun run ./src/cli/build.ts",
@@ -47,6 +50,7 @@
     "@knative-next/lib": "workspace:^",
     "ioredis": "^5.9.2",
     "kafkajs": "^2.2.4",
-    "prom-client": "^15.1.3"
+    "prom-client": "^15.1.3",
+    "yaml": "^2.7.1"
   }
 }

@@ -38,6 +38,10 @@ type NextAppSpec struct {
 	// +optional
 	Scaling *ScalingSpec `json:"scaling,omitempty"`
 
+	// Container resource requests and limits
+	// +optional
+	Resources *ResourcesSpec `json:"resources,omitempty"`
+
 	// Storage bindings (GCS, S3, or Local)
 	// +optional
 	Storage *StorageSpec `json:"storage,omitempty"`
@@ -53,6 +57,14 @@ type NextAppSpec struct {
 	// External Secrets mapping
 	// +optional
 	Secrets *SecretsSpec `json:"secrets,omitempty"`
+
+	// Observability — Prometheus metrics
+	// +optional
+	Observability *ObservabilitySpec `json:"observability,omitempty"`
+
+	// Custom health check path (default: /api/health)
+	// +optional
+	HealthCheckPath string `json:"healthCheckPath,omitempty"`
 
 	// GitOps Preview Environment configuration
 	// +optional
@@ -88,8 +100,26 @@ type RevalidationSpec struct {
 	KafkaBrokerUrl string `json:"kafkaBrokerUrl,omitempty"`
 }
 
+type ResourcesSpec struct {
+	CPURequest    string `json:"cpuRequest,omitempty"`
+	MemoryRequest string `json:"memoryRequest,omitempty"`
+	CPULimit      string `json:"cpuLimit,omitempty"`
+	MemoryLimit   string `json:"memoryLimit,omitempty"`
+}
+
+type ObservabilitySpec struct {
+	Enabled bool `json:"enabled,omitempty"`
+}
+
+// EnvMapEntry maps an environment variable name to a specific key in a Kubernetes Secret
+type EnvMapEntry struct {
+	SecretName string `json:"secretName"`
+	SecretKey  string `json:"secretKey"`
+}
+
 type SecretsSpec struct {
-	EnvFrom []string `json:"envFrom,omitempty"`
+	EnvFrom []string              `json:"envFrom,omitempty"`
+	EnvMap  map[string]EnvMapEntry `json:"envMap,omitempty"`
 }
 
 // NextAppStatus defines the observed state of NextApp.
