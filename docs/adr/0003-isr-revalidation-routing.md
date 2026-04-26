@@ -110,3 +110,13 @@ export default class CacheHandler {
 ## Revisit triggers
 - If Kafka introduces significant latency or overhead.
 - If Next.js introduces a built-in multi-instance cache propagation mechanism.
+
+## References
+- [Next.js `cacheHandler` config](https://nextjs.org/docs/app/api-reference/config/next-config-js/cacheHandler) — the canonical extension point used by this ADR.
+- [Next.js `revalidateTag`](https://nextjs.org/docs/app/api-reference/functions/revalidateTag) — server-side API that triggers the handler path.
+- [Next.js `revalidatePath`](https://nextjs.org/docs/app/api-reference/functions/revalidatePath) — sibling API; same routing applies.
+- [Issue #11][epic-11] — parent epic; this ADR is part of the vinext-deprecation migration.
+- [ADR-0001](./0001-embed-manifest-strategy.md) — companion ADR (build pipeline).
+- [ADR-0002](./0002-native-module-handling.md) — companion ADR (native modules).
+
+[epic-11]: https://github.com/AhmedElBanna80/knext/issues/11
