@@ -130,7 +130,18 @@ async function main() {
   console.log(`3x concurrent → ${p1.status} ${p2.status} ${p3.status}`);
 
   console.log('');
-  console.log('=== (f) HEALTH CHECK ===');
+  console.log('=== (f) DYNAMIC-STATIC MIX ===');
+  const dsStatic = await get('/cache-tests/dynamic-static/static');
+  const dsDynamic = await get('/cache-tests/dynamic-static/dynamic');
+  console.log(
+    `GET /cache-tests/dynamic-static/static  → HTTP ${dsStatic.status} (prerendered at build)`,
+  );
+  console.log(
+    `GET /cache-tests/dynamic-static/dynamic → HTTP ${dsDynamic.status} (server-rendered on demand)`,
+  );
+
+  console.log('');
+  console.log('=== (g) HEALTH CHECK ===');
   const health = await get('/api/health');
   console.log(`GET /api/health → HTTP ${health.status}: ${health.body.substring(0, 120)}`);
 

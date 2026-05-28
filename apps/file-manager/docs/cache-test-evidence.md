@@ -195,7 +195,15 @@ GET /cache-tests/nested/child-b → HTTP 200 | s-maxage=45
 3x concurrent GET /cache-tests/parallel → 200 200 200
 ```
 
-### (f) Health Check
+### (f) Dynamic-Static Mix
+
+```
+GET /cache-tests/dynamic-static/static  → HTTP 200 (prerendered at build)
+GET /cache-tests/dynamic-static/dynamic → HTTP 200 (server-rendered on demand)
+```
+Same split as Node: static route served from pre-built HTML, dynamic route rendered on-demand by Bun.
+
+### (g) Health Check
 
 ```
 GET /api/health → HTTP 200
@@ -212,6 +220,7 @@ GET /api/health → HTTP 200
 | All cache-test routes | ✅ | ✅ |
 | revalidateTag | ✅ | ✅ |
 | RSC self.__next_f | ✅ | ✅ |
+| dynamic-static split | ✅ | ✅ |
 
 ---
 
@@ -232,6 +241,42 @@ The `start` script sets `NODE_COMPILE_CACHE=.next/compile-cache`. On first start
 
 **Bun:**
 Bun uses the JavaScriptCore JIT which has its own internal warm-up. No external `NODE_COMPILE_CACHE` file is needed or applicable. Bun's cold start is comparably fast (~236ms) without any persistent cache.
+
+## Knative / Fluid Scaling Guidance
+
+These four Fluid pillars map directly to this adapter's design. Configure them via the operator's `ScalingSpec` in `kn-next.config.ts` (or equivalent Knative `Service` annotations).
+
+### 1. `NODE_COMPILE_CACHE` (V8 bytecode cache PVC)
+
+**What:** Set `NODE_COMPILE_CACHE=<path>` when running `node server.js`. V8 serialises compiled bytecode to disk on first startup; subsequent pods skip JS parsing.
+
+**How to wire:** In Kubernetes, mount the cache dir as a `hostPath` or `PersistentVolumeClaim` shared across pods on the same node. The operator's `bytecodeCache` spec field (removed in P1 cleanup since the type didn't support it yet) would configure this PVC mount.
+
+**When it matters:** Every cold start (scale-from-zero, pod replacement). Without this, each new pod re-parses ~10 MB of Next.js JS before serving the first request.
+
+### 2. `containerConcurrency > 1` (in-pod request coalescing)
+
+**What:** Knative's `containerConcurrency` (`ScalingSpec.containerConcurrency` via the operator) controls how many requests a single pod handles simultaneously before the autoscaler adds more pods.
+
+**Why it matters for caching:** With `containerConcurrency=1` (the default), each pod serves one request at a time — perfect isolation, but cold-start latency affects every request that lands on a new pod. With `containerConcurrency>1` (e.g. 10–80), a single warm pod can absorb a burst without triggering scale-out, so the warm V8/JSC JIT state is reused across many requests. The Redis CacheHandler already handles multi-pod cache consistency, so raising concurrency is safe.
+
+**Recommended:** `containerConcurrency: 10` for a Next.js standalone server; tune up if CPU headroom allows.
+
+### 3. `minScale >= 1` (pre-warm to eliminate cold starts)
+
+**What:** `ScalingSpec.minScale` (maps to `autoscaling.knative.dev/min-scale` annotation) keeps at least N pods running at all times.
+
+**Why it matters for caching:** `minScale=0` (scale-to-zero) maximises resource efficiency but guarantees a cold start on every idle-period burst. `minScale=1` keeps one pod warm, meaning the V8/JSC JIT cache is always hot and the Redis CacheHandler connection is already established. For latency-sensitive deployments, `minScale=1` eliminates the 200–400ms startup penalty.
+
+**Recommended:** `minScale: 1` for production; `minScale: 0` for dev/staging where cost matters more than latency.
+
+### 4. `waitUntil` (async post-response work)
+
+**What:** The Next.js request context exposes `waitUntil(promise)` (Vercel Fluid API, available via the instrumentation hook or middleware). Work scheduled with `waitUntil` runs after the HTTP response is sent, without blocking the client.
+
+**Why it matters for cache warm-up:** The `onBuildComplete` upload (P1) runs at build time and is not a `waitUntil` use-case. But at runtime, `waitUntil` is the right hook for: (a) warming ISR cache entries for popular routes after a deployment, (b) async telemetry / cache-event logging without adding latency, (c) deferred Redis writes that don't need to block the response. This is equivalent to Vercel's `waitUntil` in Edge Functions.
+
+**How to use:** In `src/instrumentation.ts` register a `waitUntil` wrapper; or use Next.js's `unstable_after` (Next 15+) for post-response cache priming.
 
 ## Next.js feature caveats found during POC
 
