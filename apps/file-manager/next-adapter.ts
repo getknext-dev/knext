@@ -1,16 +1,23 @@
 /**
- * POC-ADAPTER-P0 — Minimal NextAdapter spike for apps/file-manager.
+ * knext-poc-adapter — NextAdapter for apps/file-manager (POC-ADAPTER-P1).
  *
- * Purpose: prove the official Next.js Adapter API wiring (adapterPath in
- * next.config) fires end-to-end without touching the vinext pipeline.
+ * Hooks:
+ *  - modifyConfig: force output:'standalone' on phase-production-build
+ *  - onBuildComplete:
+ *      1. Log output counts + routing counts
+ *      2. Best-effort upload staticFiles + prerenders to MinIO/S3 keyed by buildId
+ *         (guarded by STORAGE_BUCKET env var; skips cleanly if not set)
  *
- * Scope (this file):
- *  - modifyConfig: guard on phase-production-build, force output:'standalone'
- *  - onBuildComplete: pretty-print output counts and build metadata
+ * Upload uses getMinioClient() from @knative-next/lib/clients.
+ * Files are uploaded under: <buildId>/<pathname> in the configured bucket.
  *
  * Out of scope: request routing, bun --compile, operator changes.
  */
+import { createReadStream, existsSync } from 'node:fs';
+import type { Readable } from 'node:stream';
 import type { NextAdapter } from 'next';
+// AdapterOutputs is not re-exported from the 'next' public barrel; import directly.
+import type { AdapterOutputs } from 'next/dist/build/adapter/build-complete';
 
 const adapter: NextAdapter = {
   name: 'knext-poc-adapter',
@@ -30,7 +37,7 @@ const adapter: NextAdapter = {
     };
   },
 
-  onBuildComplete(ctx) {
+  async onBuildComplete(ctx) {
     const { buildId, distDir, nextVersion, outputs } = ctx;
 
     const counts = {
@@ -67,7 +74,84 @@ const adapter: NextAdapter = {
     for (const [key, count] of Object.entries(routingCounts)) {
       console.log(`    ${key.padEnd(22)}: ${count}`);
     }
+
+    // ── Best-effort artifact upload ─────────────────────────────────────────
+    // Upload staticFiles + prerenders to object storage keyed by buildId.
+    // Guarded by STORAGE_BUCKET env var — skips cleanly when not configured.
+    // This allows local/CI builds to succeed without storage credentials.
+    await uploadBuildArtifacts({ buildId, outputs });
   },
 };
+
+async function uploadBuildArtifacts({
+  buildId,
+  outputs,
+}: {
+  buildId: string;
+  outputs: AdapterOutputs;
+}): Promise<void> {
+  const bucket = process.env.STORAGE_BUCKET;
+
+  if (!bucket) {
+    console.log(
+      '[knext-poc-adapter] upload skipped: STORAGE_BUCKET not set — set STORAGE_BUCKET to enable artifact upload',
+    );
+    return;
+  }
+
+  console.log(
+    `[knext-poc-adapter] starting artifact upload to storage bucket="${bucket}" buildId="${buildId}"`,
+  );
+
+  // Dynamically import the minio client to avoid loading it in non-upload builds.
+  let putObject: (bucket: string, key: string, stream: Readable) => Promise<unknown>;
+  try {
+    const { getMinioClient } = await import('@knative-next/lib/clients');
+    const client = getMinioClient();
+    putObject = (b, k, s) => client.putObject(b, k, s);
+  } catch (err) {
+    console.log(
+      `[knext-poc-adapter] upload skipped: could not load storage client — ${String(err)}`,
+    );
+    return;
+  }
+
+  // PRERENDER type in Next 16.0.3 doesn't have a top-level filePath;
+  // the fallback HTML path is nested under fallback.filePath (optional).
+  type StaticFile = AdapterOutputs['staticFiles'][number];
+  type Prerender = AdapterOutputs['prerenders'][number];
+  const artifacts = [
+    ...outputs.staticFiles.map((f: StaticFile) => ({
+      filePath: f.filePath,
+      key: `${buildId}${f.pathname}`,
+    })),
+    ...outputs.prerenders
+      .filter((f: Prerender) => f.fallback?.filePath)
+      .map((f: Prerender) => ({ filePath: f.fallback!.filePath!, key: `${buildId}/${f.id}` })),
+  ];
+
+  let uploaded = 0;
+  let skipped = 0;
+
+  for (const { filePath, key } of artifacts) {
+    if (!filePath || !existsSync(filePath)) {
+      skipped++;
+      continue;
+    }
+    try {
+      // createReadStream returns fs.ReadStream which extends node:stream Readable
+      const stream = createReadStream(filePath) as unknown as Readable;
+      await putObject(bucket, key, stream);
+      uploaded++;
+    } catch (err) {
+      console.log(`[knext-poc-adapter] upload warning: failed to upload "${key}" — ${String(err)}`);
+      skipped++;
+    }
+  }
+
+  console.log(
+    `[knext-poc-adapter] artifact upload complete: uploaded=${uploaded} skipped=${skipped} total=${artifacts.length}`,
+  );
+}
 
 export default adapter;
