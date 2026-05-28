@@ -88,4 +88,56 @@ describe('next-adapter (POC-ADAPTER-P0 spike)', () => {
 
     consoleSpy.mockRestore();
   });
+
+  it('onBuildComplete logs ctx.routes (routing) counts — headers, redirects, rewrites, dynamicRoutes', async () => {
+    const mod = await import('./next-adapter.js');
+    const adapter: NextAdapter = mod.default;
+
+    const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    const fakeCtx = {
+      buildId: 'routing-test-id',
+      distDir: '/tmp/.next',
+      projectDir: '/tmp/app',
+      repoRoot: '/tmp',
+      nextVersion: '16.0.3',
+      config: { output: 'standalone', cacheMaxMemorySize: 0 } as any,
+      routes: {
+        headers: [{ source: '/api/*' } as any, { source: '/static/*' } as any],
+        redirects: [{ source: '/old', destination: '/new', statusCode: 301 } as any],
+        rewrites: {
+          beforeFiles: [{ source: '/a', destination: '/b' } as any],
+          afterFiles: [],
+          fallback: [],
+        },
+        dynamicRoutes: [{ source: '/blog/[slug]' } as any, { source: '/docs/[id]' } as any],
+      },
+      outputs: {
+        pages: [],
+        middleware: undefined,
+        appPages: [],
+        pagesApi: [],
+        appRoutes: [],
+        prerenders: [],
+        staticFiles: [],
+      },
+    };
+
+    await adapter.onBuildComplete!(fakeCtx);
+
+    const loggedText = consoleSpy.mock.calls.map((c) => c.join(' ')).join('\n');
+
+    // Must log routing section
+    expect(loggedText).toMatch(/routing|routes/i);
+    // headers: 2
+    expect(loggedText).toMatch(/headers.*2|2.*headers/i);
+    // redirects: 1
+    expect(loggedText).toMatch(/redirects.*1|1.*redirects/i);
+    // rewrites (beforeFiles: 1)
+    expect(loggedText).toMatch(/rewrite|1/i);
+    // dynamicRoutes: 2
+    expect(loggedText).toMatch(/dynamic.*2|2.*dynamic/i);
+
+    consoleSpy.mockRestore();
+  });
 });
