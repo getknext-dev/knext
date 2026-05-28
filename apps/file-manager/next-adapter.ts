@@ -43,6 +43,16 @@ const adapter: NextAdapter = {
       middleware: outputs.middleware ? 1 : 0,
     };
 
+    const { routes } = ctx;
+    const routingCounts = {
+      headers: routes.headers.length,
+      redirects: routes.redirects.length,
+      rewritesBeforeFiles: routes.rewrites.beforeFiles.length,
+      rewritesAfterFiles: routes.rewrites.afterFiles.length,
+      rewritesFallback: routes.rewrites.fallback.length,
+      dynamicRoutes: routes.dynamicRoutes.length,
+    };
+
     console.log('[knext-poc-adapter] onBuildComplete fired');
     console.log(`  buildId      : ${buildId}`);
     console.log(`  distDir      : ${distDir}`);
@@ -51,7 +61,11 @@ const adapter: NextAdapter = {
     console.log(`  cacheHandler : ${String(ctx.config.cacheHandler ?? 'not set')}`);
     console.log('  output counts:');
     for (const [key, count] of Object.entries(counts)) {
-      console.log(`    ${key.padEnd(14)}: ${count}`);
+      console.log(`    ${key.padEnd(22)}: ${count}`);
+    }
+    console.log('  routing counts (ctx.routes):');
+    for (const [key, count] of Object.entries(routingCounts)) {
+      console.log(`    ${key.padEnd(22)}: ${count}`);
     }
   },
 };
