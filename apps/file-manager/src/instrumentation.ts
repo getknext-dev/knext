@@ -1,9 +1,11 @@
 import { registerOTel } from '@vercel/otel';
-import { setCacheHandler } from 'next/cache';
-import CacheHandler from '../cache-handler.js';
+
+// NOTE: setCacheHandler is not exported from next/cache in Next.js 16.0.3.
+// The Redis CacheHandler is registered via the `cacheHandler` field in
+// next.config.ts (the correct mechanism for ISR caching).
+// If Next.js adds a runtime setCacheHandler API in future versions, wire it here.
 
 export function register() {
-  setCacheHandler(new CacheHandler());
   registerOTel({
     serviceName: 'file-manager',
   });

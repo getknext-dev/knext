@@ -1,46 +1,17 @@
 import { NextResponse } from 'next/server';
+import { getCacheStats } from './cache-stats';
 
-// Simple in-memory cache stats tracker
-// In production, use Redis or external metrics service
-declare global {
-  var cacheStats: {
-    hits: number;
-    misses: number;
-    lastFetch: string | null;
-    fetchDuration: number | null;
-  };
-}
-
-// Initialize global stats
-if (!global.cacheStats) {
-  global.cacheStats = {
-    hits: 0,
-    misses: 0,
-    lastFetch: null,
-    fetchDuration: null,
-  };
-}
+// Tracker helpers (trackCacheHit, trackCacheMiss) live in cache-stats.ts.
+// Exporting non-HTTP-method names from a route file is a Next.js type error.
 
 export function GET() {
+  const stats = getCacheStats();
   return NextResponse.json({
-    cache: global.cacheStats,
+    cache: stats,
     hitRate:
-      global.cacheStats.hits + global.cacheStats.misses > 0
-        ? `${(
-            (global.cacheStats.hits / (global.cacheStats.hits + global.cacheStats.misses)) * 100
-          ).toFixed(2)}%`
+      stats.hits + stats.misses > 0
+        ? `${((stats.hits / (stats.hits + stats.misses)) * 100).toFixed(2)}%`
         : 'N/A',
     timestamp: new Date().toISOString(),
   });
-}
-
-// Export helper to track stats from other modules
-export function trackCacheHit() {
-  global.cacheStats.hits++;
-}
-
-export function trackCacheMiss(duration: number) {
-  global.cacheStats.misses++;
-  global.cacheStats.lastFetch = new Date().toISOString();
-  global.cacheStats.fetchDuration = duration;
 }

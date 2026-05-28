@@ -36,14 +36,6 @@ const config: KnativeNextConfig = {
     memoryLimit: '512Mi',
   },
 
-  // V8 bytecode caching for faster cold starts.
-  // Disabled: Bun's `--bytecode` flag pre-compiles JS to native bytecode at
-  // build time (Dockerfile stage 2), making runtime NODE_COMPILE_CACHE redundant.
-  // Re-enable only if switching back to a Node.js-based runner without Bun compilation.
-  bytecodeCache: {
-    enabled: false,
-  },
-
   // Observability (Prometheus metrics + Grafana dashboards)
   observability: {
     enabled: true,
