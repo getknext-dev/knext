@@ -1,8 +1,22 @@
+import { resolve } from 'node:path';
 import react from '@vitejs/plugin-react';
 import { defineConfig } from 'vitest/config';
 
+// Resolve @knative-next/lib subpaths to source (not dist) in tests.
+// CI runs `pnpm install` then `vitest` without building lib first, so dist/ is absent.
+// This alias is test-only: `next build` and the standalone runtime still use real dist.
+const LIB_SRC = resolve(import.meta.dirname, 'packages/lib/src');
+
 export default defineConfig({
   plugins: [react()],
+  resolve: {
+    alias: {
+      '@knative-next/lib/clients': resolve(LIB_SRC, 'clients.ts'),
+      '@knative-next/lib/health': resolve(LIB_SRC, 'health/index.ts'),
+      '@knative-next/lib/logger': resolve(LIB_SRC, 'logger/index.ts'),
+      '@knative-next/lib': resolve(LIB_SRC, 'index.ts'),
+    },
+  },
   test: {
     globals: true,
     environment: 'happy-dom',
