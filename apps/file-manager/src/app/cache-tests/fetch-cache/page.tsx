@@ -1,8 +1,7 @@
 // Dynamic rendering: this page fetches from an external API (httpbin.org)
-// which may be unavailable at build time. Render on-demand (ISR revalidation
-// happens at runtime, not during next build).
+// which may be unavailable at build time. Render on-demand.
+// Note: revalidate is dead config alongside force-dynamic — removed (code-review cleanup).
 export const dynamic = 'force-dynamic';
-export const revalidate = 30;
 
 async function fetchWithForceCache() {
   const res = await fetch('https://httpbin.org/uuid', {

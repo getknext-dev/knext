@@ -4,10 +4,9 @@
  *
  * Verifies that starting the standalone server with NODE_COMPILE_CACHE set
  * results in .v8-compile-cache-* files being created in the designated dir.
- * This uses Node's --require hook to run a short-lived probe.
  */
 import { execSync } from 'node:child_process';
-import { mkdirSync, readdirSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -28,23 +27,19 @@ describe('NODE_COMPILE_CACHE proof (POC-ADAPTER-P1)', () => {
 
   it('standalone server.js exists after next build', () => {
     // This test confirms the build produced standalone output.
-    // If it fails, run: cd apps/file-manager && next build
-    const { existsSync } = require('node:fs');
+    // If it fails, run: cd apps/file-manager && next build --webpack
     expect(existsSync(STANDALONE_SERVER)).toBe(true);
   });
 
   it('NODE_COMPILE_CACHE dir is populated when standalone server is required', () => {
     // Probe: require the standalone server module in a child process with
-    // NODE_COMPILE_CACHE set. The process is killed immediately after require
-    // (SIGTERM), but V8 flushes compile cache on exit.
+    // NODE_COMPILE_CACHE set. The process exits immediately after load,
+    // but V8 flushes compile cache on exit.
     const probe = `
-      // Load the standalone server and immediately exit so the test is fast.
-      // NODE_COMPILE_CACHE is set in the env; V8 will flush cache on process exit.
       process.env.HOSTNAME = '127.0.0.1';
       process.env.PORT = '0';
       // Suppress actual server startup by stubbing listen
       const http = require('http');
-      const orig = http.Server.prototype.listen;
       http.Server.prototype.listen = function() { process.exit(0); };
       try { require(${JSON.stringify(STANDALONE_SERVER)}); } catch(e) { process.exit(0); }
     `;
