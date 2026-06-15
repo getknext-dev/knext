@@ -98,3 +98,29 @@ describe('config.ts: runtime field describes standalone, not Nitro preset', () =
     expect(readSrc('config.ts')).not.toMatch(/Nitro preset/i);
   });
 });
+
+// ─── apps/file-manager: no regression on the official adapter ─────────────────
+// The app already uses the official NextAdapter via experimental.adapterPath.
+// Verify the next-adapter.ts and next.config.ts remain on that path.
+
+describe('apps/file-manager: official adapter, not Nitro', () => {
+  const APP_SRC = resolve(TESTS_DIR, '../../../../apps/file-manager');
+
+  function readApp(relPath: string): string {
+    return readFileSync(resolve(APP_SRC, relPath), 'utf-8');
+  }
+
+  it('next-adapter.ts uses official NextAdapter interface (not Nitro)', () => {
+    const src = readApp('next-adapter.ts');
+    // Must import NextAdapter from 'next'
+    expect(src).toMatch(/from\s+['"]next['"]/);
+    // Must not use Nitro-style imports
+    expect(src).not.toContain('index.mjs');
+  });
+
+  it('next.config.ts sets output:standalone and adapterPath (official adapter)', () => {
+    const src = readApp('next.config.ts');
+    expect(src).toContain("output: 'standalone'");
+    expect(src).toContain('adapterPath');
+  });
+});
