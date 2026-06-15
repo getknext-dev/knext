@@ -35,10 +35,12 @@
 
 ## 4. Control plane (ADR-0001)
 - The **Go operator is the single source of truth** for cluster state. The TS CLI must stop
-  generating raw Knative manifests — the live `deploy.ts` path is a **violation** and has drifted
-  (e.g. hardcoded `containerConcurrency`). CLI = build/publish + emit a CR; operator reconciles.
-- Enforce **`:latest` rejection / digest pinning everywhere** (the revalidator sidecar still uses
-  `:latest` — fix).
+  generating raw Knative manifests — `deploy.ts` mutates the cluster directly (`kubectl apply`)
+  and the manifest generator **hardcodes values** (`packages/kn-next/src/generators/knative-manifest.ts:183`
+  → `containerConcurrency: 100`). CLI = build/publish + emit a CR; operator reconciles.
+- Enforce **`:latest` rejection / digest pinning everywhere.** (Verified: the operator already
+  rejects `:latest` in `nextapp_controller.go:66`; the kubebuilder manager image in
+  `config/manager/manager.yaml:66` is still `controller:latest` — fix that placeholder.)
 
 ## 5. Backend / gRPC business-logic layer (opt-in module)
 - Run business logic as **separate, language-agnostic services**; **Next.js stays the HTTP
@@ -82,11 +84,17 @@ defer bucket 1.
 - Real data plane = **GCS + Redis on GKE**; S3/Azure/MinIO are thin shell-outs; DynamoDB/Kafka are
   config/manifest-only — implement+test or trim the schema/docs.
 - **Image optimization missing** (biggest functional gap).
-- `node-server.ts` welded to deprecated Vinext/Nitro (removed by the migration).
+- `packages/kn-next/src/adapters/node-server.ts` **still welded to Nitro** (`.output/server/index.mjs`,
+  lines ~13/30) — **not yet removed** on `main`; retire it to finish the migration.
 - Tests light on core build/deploy/upload/cache paths (manifest gen is covered).
-- Operator gaps: no status `Conditions`, no finalizers, happy-path reconcile, API at `v1alpha1`.
-- **License inconsistency:** root MIT vs operator Apache-2.0 — pick one.
-- Nothing published to npm (blocks `npx kn-next` for outside users).
+- Operator gaps: status `Conditions` field **defined** (`nextapp_types.go:144`) but **not populated**
+  by the reconciler (only `status.url` is set); no finalizer logic; happy-path reconcile;
+  API at `v1alpha1`.
+- **License inconsistency:** README says MIT; operator source headers say Apache-2.0
+  (`nextapp_types.go:4`) — pick one.
+- npm: packages exist (`@kn-next/core`, `@knative-next/lib`) but **scope naming is inconsistent**
+  (`@kn-next` vs `@knative-next`; docs reference `@knext/*`); no npm release confirmed — blocks
+  `npx kn-next` for outside users.
 - Duplicate/dead packages: `packages/cli` (Go) vs `packages/kn-next/src/cli` (TS); `admin`/`knext`
   vs `kn-next` naming drift — audit/remove.
 
