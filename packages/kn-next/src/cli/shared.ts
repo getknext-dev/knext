@@ -8,28 +8,28 @@
  * Adapters are no longer copied to a Nitro .output/ directory.
  */
 
-import { existsSync } from 'node:fs';
-import { resolve } from 'node:path';
-import type { KnativeNextConfig } from '../config';
-import { validateConfig } from './validate';
+import { existsSync } from "node:fs";
+import { resolve } from "node:path";
+import type { KnativeNextConfig } from "../config";
+import { validateConfig } from "./validate";
 
-const CONFIG_FILE = 'kn-next.config.ts';
+const CONFIG_FILE = "kn-next.config.ts";
 
 /**
  * Loads kn-next.config.ts from the current working directory.
  * Runs validation after loading — fails fast with clear error messages.
  */
 export async function loadConfig(): Promise<KnativeNextConfig> {
-  const configPath = resolve(process.cwd(), CONFIG_FILE);
+    const configPath = resolve(process.cwd(), CONFIG_FILE);
 
-  if (!existsSync(configPath)) {
-    throw new Error(`Config file not found: ${configPath}`);
-  }
+    if (!existsSync(configPath)) {
+        throw new Error(`Config file not found: ${configPath}`);
+    }
 
-  const module = await import(configPath);
-  const config: KnativeNextConfig = module.default;
+    const module = await import(configPath);
+    const config: KnativeNextConfig = module.default;
 
-  validateConfig(config);
+    validateConfig(config);
 
-  return config;
+    return config;
 }
