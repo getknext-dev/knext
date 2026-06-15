@@ -1,6 +1,21 @@
-# Migration Plan: OpenNext & Turbopack ➡️ Vinext
+# HISTORICAL / SUPERSEDED — Migration Plan: OpenNext & Turbopack ➡️ Vinext
 
-This document outlines the strategy for migrating the `Knative-open-nextjs` architecture from its current build system (Turbopack + OpenNext) to [Vinext](https://github.com/cloudflare/vinext) (Vite-based Next.js reimplementation).
+> **This document is SUPERSEDED.** The Vinext migration was an intermediate step that
+> has been retired. knext now runs on the **official Next.js Deployment Adapter API**
+> (`experimental.adapterPath`, `NextAdapter`) with `output:'standalone'`. See:
+> - `docs/ARCHITECTURE.md` — current architecture
+> - `docs/adr/` — ADR-0001 (operator), ADR-0002/0003/0004 (gRPC layer)
+> - `apps/file-manager/next-adapter.ts` — reference NextAdapter implementation
+>
+> Retained for historical context only.
+
+---
+
+# Migration Plan: OpenNext & Turbopack ➡️ Vinext (HISTORICAL)
+
+This document outlines the original strategy for migrating the `Knative-open-nextjs`
+architecture from Turbopack + OpenNext to Vinext (Vite-based Next.js reimplementation).
+That path was superseded by the official adapter approach described above.
 
 ## 1. Dependency Updates
 *   **Remove OpenNext:** Uninstall `@opennextjs/aws` from `apps/file-manager` and `packages/kn-next`.

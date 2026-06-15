@@ -2,7 +2,7 @@
 
 ## Overview
 
-This framework enables deploying Next.js applications as Knative services on GKE with Fluid Compute characteristics. It uses **Vinext** to compile Next.js into a standalone server compatible with containerized environments, while providing pluggable adapters for storage, caching, and messaging.
+This framework enables deploying Next.js applications as Knative services on GKE with Fluid Compute characteristics. It uses the **official Next.js Deployment Adapter API** (`experimental.adapterPath`) with `output:'standalone'` to produce a self-contained Node.js server, while providing pluggable adapters for storage, caching, and messaging.
 
 ## System Architecture
 
@@ -20,7 +20,7 @@ flowchart TB
     end
     
     subgraph GCP["Google Cloud Platform"]
-        GCS["Cloud Storage<br/>Static Assets + ISR Cache"]
+        GCS["Cloud Storage<br/>Static Assets"]
         AR["Artifact Registry<br/>Container Images"]
     end
     
@@ -37,18 +37,20 @@ flowchart TB
 
 ## Key Components
 
-### 1. Vinext Integration
+### 1. Official Next.js Adapter (`output:'standalone'`)
 
-Vinext transforms Next.js build output into a serverless-compatible format:
+`next build` with `output:'standalone'` and `experimental.adapterPath` produces:
 
 ```text
-├── assets/                  # Static files → GCS
-│   ├── BUILD_ID             # Unique build identifier
-│   └── _next/static/        # JS, CSS, fonts
-├── server-functions/
-│   └── default/             # Node.js server → Docker image
-└── cache/                   # Pre-rendered pages
+.next/
+├── standalone/          # Self-contained Node.js server (copied to Docker image)
+│   └── server.js        # Entry point — starts the Next.js HTTP server
+├── static/              # Client-side JS/CSS/fonts → uploaded to GCS
+└── cache/               # Build-time pre-rendered pages
 ```
+
+The `next-adapter.ts` (`NextAdapter`) hooks into `modifyConfig` (enforce standalone) and
+`onBuildComplete` (upload static assets to object storage keyed by `buildId`).
 
 ### 2. kn-next Package
 
@@ -165,22 +167,24 @@ The BUILD_ID ensures server and client assets are always in sync:
 
 ```text
 ┌─────────────────────────────────────────────────────┐
-│                     GCS (Data Cache)                │
-│  - ISR page cache                                   │
+│              Redis (ISR / Data Cache)               │
+│  - ISR page cache (cache-handler.js)                │
 │  - Fetch cache                                      │
-│  - Image optimization cache                         │
-│  Keyed by: {prefix}/{BUILD_ID}/{key}.{type}        │
+│  - Tag → Keys mapping for invalidation              │
+│  Keyed by: {prefix}/{key}                           │
 └─────────────────────────────────────────────────────┘
-                          ▲
-                          │ Keys lookup for invalidation
-                          ▼
+
 ┌─────────────────────────────────────────────────────┐
-│                  Redis (Tag Cache)                  │
-│  - Tag → Keys mapping                              │
-│  - Fast O(1) invalidation                          │
-│  Keyed by: {prefix}:tag:{tagName}                  │
+│              GCS (Static Assets only)               │
+│  - _next/static/ (JS, CSS, fonts)                  │
+│  - Uploaded at build time keyed by buildId          │
+│  NOT used for ISR/data cache (that is Redis)        │
 └─────────────────────────────────────────────────────┘
 ```
+
+> **Correction from earlier docs:** GCS holds **static assets only**. The ISR/data cache
+> (`cache-handler.js`) is backed by **Redis**. S3/Azure/MinIO are thin shell-outs;
+> DynamoDB/Kafka are config/manifest-only and not yet implemented end-to-end.
 
 ### Cache Events (Observability)
 
@@ -207,7 +211,7 @@ The environment variables depend on your chosen storage and cache providers.
 | Variable | Description | Default |
 | ---------- | ------------- | --------- |
 | `NODE_ENV` | Runtime environment | `production` |
-| `NEXT_BUILD_ID` | From Vinext build | Auto |
+| `NEXT_BUILD_ID` | From `next build` | Auto |
 | `DATABASE_URL` | PostgreSQL connection | Required |
 | `NODE_COMPILE_CACHE` | V8 bytecode cache path | Optional |
 
@@ -300,7 +304,7 @@ Knative scale-to-zero services incur a cold start cost each time a pod is create
 ```mermaid
 flowchart LR
     subgraph Stage1["Stage 1: Build"]
-        A["node:22-alpine + pnpm"] --> B["Vinext/Nitro<br/>Application Bundle"]
+        A["node:22-alpine + pnpm"] --> B["next build<br/>output:standalone"]
     end
 
     subgraph Stage2["Stage 2: Compile"]
@@ -409,7 +413,7 @@ npx kn-next deploy [options]
 | `--bucket <name>` | `-b` | Override storage bucket |
 | `--tag <tag>` | `-t` | Image tag (default: timestamp) |
 | `--namespace <ns>` | `-n` | Kubernetes namespace (default: default) |
-| `--skip-build` | | Skip Vinext build step |
+| `--skip-build` | | Skip Next.js build step |
 | `--skip-upload` | | Skip asset upload to storage |
 | `--skip-infra` | | Skip infrastructure deployment |
 | `--dry-run` | | Generate manifests without deploying |
@@ -541,10 +545,10 @@ npx kn-next build
 
 Runs the following steps:
 
-1. Generates `open-next.config.ts` from `kn-next.config.ts`
-2. Runs `npm run build` (Next.js build)
-3. Runs Vinext compilation
-4. Copies adapter files to `.open-next/`
+1. Loads `kn-next.config.ts`
+2. Runs `npm run build` (`next build` with `output:'standalone'`)
+3. Uploads static assets to GCS/S3/MinIO
+4. Generates `knative-service.yaml` in `.output/`
 
 ### Cleanup Command
 
@@ -583,26 +587,25 @@ Removes deployed resources from the cluster:
 
    ```bash
    npx kn-next deploy --dry-run
-   cat .open-next/knative-service.yaml
+   cat .output/knative-service.yaml
    ```
 
 5. **Manual Steps (if needed):**
 
    ```bash
-   # Build Next.js + Vinext
+   # Build Next.js with standalone output
    cd apps/file-manager
-   pnpm build
-   npx open-next build
-   
-   # Sync assets
-   gsutil -m rsync -r .open-next/assets gs://bucket
-   
+   pnpm build   # runs next build → .next/standalone/
+
+   # Upload static assets to GCS
+   gsutil -m rsync -r .next/static gs://bucket/_next/static
+
    # Build & push image
    docker buildx build --platform linux/amd64 \
      -t registry/file-manager:tag -f Dockerfile . --push
-   
+
    # Deploy
-   kubectl apply -f .open-next/knative-service.yaml
+   kubectl apply -f .output/knative-service.yaml
    ```
 
 ## Future Roadmap

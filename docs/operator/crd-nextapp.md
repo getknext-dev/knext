@@ -1,6 +1,6 @@
 # The `NextApp` Custom Resource Definition (CRD)
 
-The `NextApp` CRD is the unified interface for deploying Vinext applications onto Knative. It abstracts the underlying Knative Services, PVCs, ServiceAccounts, and Eventing bindings into a single declarative API.
+The `NextApp` CRD is the unified interface for deploying Next.js applications (built with `output:'standalone'` via the official adapter) onto Knative. It abstracts the underlying Knative Services, PVCs, ServiceAccounts, and Eventing bindings into a single declarative API.
 
 ## API Version & Kind
 ```yaml
@@ -13,7 +13,7 @@ kind: NextApp
 The `spec` defines the desired state of the Next.js application.
 
 ### `image` (Required)
-The absolute OCI registry path to the Next.js container image built by Vinext.
+The absolute OCI registry path to the Next.js container image (built from `output:'standalone'`).
 ```yaml
 spec:
   image: ghcr.io/org/repo/app:latest

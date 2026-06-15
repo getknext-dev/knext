@@ -1,6 +1,6 @@
 # Knative Next.js Operator (`kn-next-operator`)
 
-The `kn-next-operator` is a Kubernetes Operator built with Kubebuilder that serves as the control plane for the `kn-next` ecosystem. It transforms standard Kubernetes clusters into a seamless, "Vercel-equivalent" Platform-as-a-Service (PaaS) for Next.js applications deployed on Vinext and Knative.
+The `kn-next-operator` is a Kubernetes Operator built with Kubebuilder that serves as the control plane for the `kn-next` ecosystem. It transforms standard Kubernetes clusters into a seamless, "Vercel-equivalent" Platform-as-a-Service (PaaS) for Next.js applications deployed with the official Next.js Adapter (`output:'standalone'`) on Knative.
 
 ## Architecture & Responsibilities
 

@@ -1,4 +1,4 @@
-# Stage 1: Build Vinext app with Node + pnpm
+# Stage 1: Build Next.js app with standalone output
 FROM node:22-alpine AS builder
 ENV PNPM_HOME="/pnpm"
 ENV PATH="$PNPM_HOME:$PATH"
@@ -6,42 +6,38 @@ RUN npm install -g pnpm
 WORKDIR /app
 COPY . .
 RUN pnpm install --frozen-lockfile
-RUN NITRO_PRESET=bun pnpm --filter file-manager build
+# next build → .next/standalone/ (output:'standalone' set in next.config.ts)
+RUN pnpm --filter file-manager build
 
-# Stage 2: Compile executable using Bun named image (latest 1.x version)
-FROM oven/bun:1.3.10-alpine AS compiler
+# Stage 2: Lean production image using Node.js standalone output
+FROM node:22-alpine AS runner
 WORKDIR /app
-COPY --from=builder /app /app
-WORKDIR /app/apps/file-manager
-# We compile to linux-x64-musl since we'll run on Alpine
-RUN bun build --compile --minify --bytecode --target=bun-linux-x64-musl .output/server/index.mjs --outfile file-manager-server
-
-# Stage 3: Final runner stage using pure alpine
-FROM alpine:latest AS runner
-WORKDIR /app/apps/file-manager
 ENV NODE_ENV=production
 ENV PORT=3000
 
-# Install required network tools and C++ standard libraries needed by the compiled bun executable
-RUN apk add --no-cache ca-certificates wget libstdc++ libgcc
+# Install curl for healthcheck
+RUN apk add --no-cache curl
 
-# Create node user and group
+# Create non-root user
 RUN addgroup -g 1000 node && adduser -u 1000 -G node -s /bin/sh -D node
 
-# Pre-create the Next.js cache directory to avoid permission issues
-RUN mkdir -p .next/cache .next/server && chown -R node:node .next
+# Copy standalone server bundle (includes node_modules trace)
+COPY --from=builder /app/apps/file-manager/.next/standalone ./
+# Copy static assets served locally (non-CDN fallback)
+COPY --from=builder /app/apps/file-manager/.next/static ./apps/file-manager/.next/static
+# Copy public assets
+COPY --from=builder /app/apps/file-manager/public ./apps/file-manager/public
 
-# Copy the compiled executable and public assets from compiler
-COPY --from=compiler /app/apps/file-manager/file-manager-server ./file-manager-server
-COPY --from=compiler /app/apps/file-manager/.output/public ./.output/public
+# Pre-create the compile-cache directory
+RUN mkdir -p apps/file-manager/.next/compile-cache && chown -R node:node apps/file-manager/.next
 
 EXPOSE 3000
 
-HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-    CMD wget --no-verbose --tries=1 --spider http://localhost:3000/api/health || exit 1
+HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
+    CMD curl -f http://localhost:3000/api/health || exit 1
 
 # Drop privileges
 USER node
 
-# Run the single binary executable
-CMD ["./file-manager-server"]
+# NODE_COMPILE_CACHE: V8 bytecode cache for faster subsequent cold starts
+CMD ["sh", "-c", "NODE_COMPILE_CACHE=apps/file-manager/.next/compile-cache node apps/file-manager/server.js"]

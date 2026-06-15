@@ -1,5 +1,10 @@
 # Spike Report: Bun Bytecode Pipeline for Native Next.js Standalone
 
+> **HISTORICAL NOTE:** This spike was conducted during the Vinext/Nitro era as a
+> comparison path. The official Next.js Adapter + `output:'standalone'` is now the
+> knext runtime path. The Bun `--compile --bytecode` approach described here remains
+> a valid cold-start optimization technique but is not the primary deployment path.
+
 ## Status: GO ✅
 
 ## Executive Summary
@@ -31,4 +36,6 @@ The recommended production pipeline is:
 - **Static Assets**: Per the architecture, `.next/static` and `public` folders should NOT be embedded; they should be offloaded to object storage.
 
 ## Conclusion
-The Bun-bytecode pipeline is a viable and superior replacement for the Vinext/Nitro pipeline. It satisfies all security requirements for regulated buyers by providing an audit-clean dependency tree and a single-binary distribution.
+The Bun-bytecode pipeline is a viable cold-start optimization on top of the official
+`output:'standalone'` runtime. It satisfies all security requirements for regulated buyers
+by providing an audit-clean dependency tree and a single-binary distribution.
