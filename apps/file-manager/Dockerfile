@@ -39,5 +39,7 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
 # Drop privileges
 USER node
 
-# NODE_COMPILE_CACHE: V8 bytecode cache for faster subsequent cold starts
-CMD ["sh", "-c", "NODE_COMPILE_CACHE=apps/file-manager/.next/compile-cache node apps/file-manager/server.js"]
+# NODE_COMPILE_CACHE: V8 bytecode cache for faster subsequent cold starts.
+# Use shell assignment idiom so the operator's externally-injected value (PVC path) wins;
+# the Dockerfile only supplies the fallback when the env var is unset at runtime.
+CMD ["sh", "-c", ": \"${NODE_COMPILE_CACHE:=apps/file-manager/.next/compile-cache}\"; exec node apps/file-manager/server.js"]

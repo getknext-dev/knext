@@ -58,8 +58,8 @@ The `@kn-next/config` package provides pluggable adapters:
 
 | Adapter | Purpose | Implementation |
 | --------- | --------- | ---------------- |
-| **GCS Cache** | ISR data cache | `gcs-cache.ts` |
-| **Redis Tag Cache** | Cache invalidation tags | `redis-tag-cache.ts` |
+| **GCS Storage** | Static assets only (NOT ISR) | — |
+| **Redis Cache** | ISR/data cache + tag invalidation | `cache-handler.js` |
 | **Kafka Queue** | Revalidation queue | `kafka-queue.ts` |
 | **Node Server** | HTTP server wrapper | `node-server.ts` |
 
@@ -99,21 +99,21 @@ const config: KnativeNextConfig = {
 sequenceDiagram
     participant Browser
     participant Knative as Knative Service
-    participant GCS as GCS Cache
-    participant Redis as Redis Tags
+    participant Redis as Redis (ISR/Data Cache)
+    participant GCS as GCS (Static Assets)
     participant Next as Next.js Runtime
-    
+
     Browser->>Knative: GET /page
-    Knative->>GCS: Check ISR cache
-    
+    Knative->>Redis: Check ISR cache (cache-handler.js)
+
     alt Cache HIT
-        GCS-->>Knative: Cached HTML + stale-while-revalidate
+        Redis-->>Knative: Cached HTML + stale-while-revalidate
         Knative-->>Browser: 200 OK (cached)
         Note over Knative: Background revalidation if stale
     else Cache MISS
         Knative->>Next: Render page
-        Next->>GCS: Store in cache
-        Next->>Redis: Store tags
+        Next->>Redis: Store rendered page in ISR cache
+        Next->>Redis: Store cache tags
         Knative-->>Browser: 200 OK (fresh)
     end
 ```
@@ -124,14 +124,14 @@ sequenceDiagram
 sequenceDiagram
     participant Admin
     participant API as /api/cache/invalidate
-    participant Redis as Redis Tags
-    participant GCS as GCS Cache
+    participant Redis as Redis (ISR/Data Cache)
+    participant GCS as GCS (Static Assets Only)
     
     Admin->>API: POST /api/cache/invalidate {tag: "products"}
     API->>Redis: Get keys for tag "products"
     Redis-->>API: ["key1", "key2", "key3"]
     loop For each key
-        API->>GCS: Delete cached entry
+        API->>Redis: Delete ISR cache entry (cache-handler.js)
     end
     API->>Redis: Clear tag mapping
     API-->>Admin: 200 OK {invalidated: 3}
