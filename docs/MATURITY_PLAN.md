@@ -1,8 +1,13 @@
-# knext Maturity Plan
+# knext Maturity Plan (detailed exit criteria)
 
-> Consolidated plan to take knext from a working POC to a mature, publishable framework.
-> Source of truth for direction: `.claude/rules/architecture.md`. North star: a **narrow,
-> officially-verified Next.js-on-Knative deployment adapter** — not a general PaaS.
+> **Canonical roadmap + strategy now live in `ROADMAP.md` and `CLAUDE.md`.** This file is the
+> detailed, phase-level exit-criteria companion; its Phases map to the ROADMAP Tiers (see the
+> mapping table at the bottom of `ROADMAP.md`). Architect discipline: `.claude/rules/architecture.md`.
+> North star: a **verified** Next.js-on-Knative deployment adapter (open source + official compat
+> suite + Next.js-docs listing) — a narrow adapter, not a general PaaS.
+>
+> Reconciliation note (2026-06): the **official-adapter migration merged to `main` (PR #29)** —
+> Phase 0 is largely complete; the deprecated Vinext/Nitro runtime is being retired.
 
 ## What "mature" means (definition of done)
 1. **Correctness** — passes the official Next.js adapter compatibility suite; RSC/ISR/streaming
