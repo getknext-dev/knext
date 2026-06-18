@@ -40,6 +40,7 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
 USER node
 
 # NODE_COMPILE_CACHE: V8 bytecode cache for faster subsequent cold starts.
-# Use shell assignment idiom so the operator's externally-injected value (PVC path) wins;
-# the Dockerfile only supplies the fallback when the env var is unset at runtime.
-CMD ["sh", "-c", ": \"${NODE_COMPILE_CACHE:=apps/file-manager/.next/compile-cache}\"; exec node apps/file-manager/server.js"]
+# EXPORT so the value reaches the exec'd node process (a bare `${VAR:=default}` only sets a shell
+# variable, not an env var). The operator's externally-injected value (PVC path) still wins via
+# `:-`; the Dockerfile only supplies the fallback when the env var is unset at runtime.
+CMD ["sh", "-c", "export NODE_COMPILE_CACHE=\"${NODE_COMPILE_CACHE:-apps/file-manager/.next/compile-cache}\"; exec node apps/file-manager/server.js"]
