@@ -69,6 +69,19 @@ type NextAppSpec struct {
 	// GitOps Preview Environment configuration
 	// +optional
 	Preview *PreviewSpec `json:"preview,omitempty"`
+
+	// Runtime selects the process that executes the Next.js standalone server.js.
+	// Valid values: "bun" or "node" (default "node").
+	// Maps from KnativeNextConfig.runtime.
+	// +optional
+	// +kubebuilder:validation:Enum=bun;node
+	Runtime string `json:"runtime,omitempty"`
+
+	// TimeoutSeconds is the maximum number of seconds a request can take before
+	// the Knative Service times it out.  Defaults to 300 (5 min) when unset.
+	// Maps from the knative-manifest hardcoded timeoutSeconds=300.
+	// +optional
+	TimeoutSeconds int32 `json:"timeoutSeconds,omitempty"`
 }
 
 type PreviewSpec struct {
@@ -86,6 +99,12 @@ type ScalingSpec struct {
 type StorageSpec struct {
 	Provider string `json:"provider,omitempty"`
 	Bucket   string `json:"bucket,omitempty"`
+	// Region is used for S3 / S3-compatible providers (e.g. "us-east-1")
+	// +optional
+	Region string `json:"region,omitempty"`
+	// Endpoint overrides the default service endpoint — required for MinIO and S3-compatible stores
+	// +optional
+	Endpoint string `json:"endpoint,omitempty"`
 }
 
 type CacheSpec struct {
@@ -93,6 +112,9 @@ type CacheSpec struct {
 	URL                 string `json:"url,omitempty"`
 	EnableBytecodeCache bool   `json:"enableBytecodeCache,omitempty"`
 	BytecodeCacheSize   string `json:"bytecodeCacheSize,omitempty"`
+	// KeyPrefix is prepended to every cache key — maps from KnativeNextConfig.cache.keyPrefix
+	// +optional
+	KeyPrefix string `json:"keyPrefix,omitempty"`
 }
 
 type RevalidationSpec struct {
@@ -118,7 +140,7 @@ type EnvMapEntry struct {
 }
 
 type SecretsSpec struct {
-	EnvFrom []string              `json:"envFrom,omitempty"`
+	EnvFrom []string               `json:"envFrom,omitempty"`
 	EnvMap  map[string]EnvMapEntry `json:"envMap,omitempty"`
 }
 

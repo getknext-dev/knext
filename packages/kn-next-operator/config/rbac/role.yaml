@@ -44,6 +44,18 @@ rules:
   - patch
   - update
 - apiGroups:
+  - caching.internal.knative.dev
+  resources:
+  - images
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
   - serving.knative.dev
   resources:
   - services

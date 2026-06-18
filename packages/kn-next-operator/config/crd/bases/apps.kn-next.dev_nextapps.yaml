@@ -46,14 +46,27 @@ spec:
                     type: string
                   enableBytecodeCache:
                     type: boolean
+                  keyPrefix:
+                    description: KeyPrefix is prepended to every cache key — maps
+                      from KnativeNextConfig.cache.keyPrefix
+                    type: string
                   provider:
                     type: string
                   url:
                     type: string
                 type: object
+              healthCheckPath:
+                description: 'Custom health check path (default: /api/health)'
+                type: string
               image:
                 description: The OpenNext bundled Next.js image
                 type: string
+              observability:
+                description: Observability — Prometheus metrics
+                properties:
+                  enabled:
+                    type: boolean
+                type: object
               preview:
                 description: GitOps Preview Environment configuration
                 properties:
@@ -64,6 +77,18 @@ spec:
                   prId:
                     type: string
                 type: object
+              resources:
+                description: Container resource requests and limits
+                properties:
+                  cpuLimit:
+                    type: string
+                  cpuRequest:
+                    type: string
+                  memoryLimit:
+                    type: string
+                  memoryRequest:
+                    type: string
+                type: object
               revalidation:
                 description: Revalidation options
                 properties:
@@ -72,6 +97,15 @@ spec:
                   queue:
                     type: string
                 type: object
+              runtime:
+                description: |-
+                  Runtime selects the process that executes the Next.js standalone server.js.
+                  Valid values: "bun" or "node" (default "node").
+                  Maps from KnativeNextConfig.runtime.
+                enum:
+                - bun
+                - node
+                type: string
               scaling:
                 description: How many concurrent Next.js pods should be active
                 properties:
@@ -92,15 +126,44 @@ spec:
                     items:
                       type: string
                     type: array
+                  envMap:
+                    additionalProperties:
+                      description: EnvMapEntry maps an environment variable name to
+                        a specific key in a Kubernetes Secret
+                      properties:
+                        secretKey:
+                          type: string
+                        secretName:
+                          type: string
+                      required:
+                      - secretKey
+                      - secretName
+                      type: object
+                    type: object
                 type: object
               storage:
                 description: Storage bindings (GCS, S3, or Local)
                 properties:
                   bucket:
                     type: string
+                  endpoint:
+                    description: Endpoint overrides the default service endpoint —
+                      required for MinIO and S3-compatible stores
+                    type: string
                   provider:
                     type: string
+                  region:
+                    description: Region is used for S3 / S3-compatible providers (e.g.
+                      "us-east-1")
+                    type: string
                 type: object
+              timeoutSeconds:
+                description: |-
+                  TimeoutSeconds is the maximum number of seconds a request can take before
+                  the Knative Service times it out.  Defaults to 300 (5 min) when unset.
+                  Maps from the knative-manifest hardcoded timeoutSeconds=300.
+                format: int32
+                type: integer
             required:
             - image
             type: object

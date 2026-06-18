@@ -178,7 +178,7 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		if nextApp.Spec.Preview != nil && nextApp.Spec.Preview.Enabled {
 			ksvc.Labels["environment"] = "preview"
 			ksvc.Labels["pr-id"] = nextApp.Spec.Preview.PRID
-			
+
 			// Override max-scale to 1 to save cluster resources on previews
 			annotations["autoscaling.knative.dev/max-scale"] = "1"
 			annotations["autoscaling.knative.dev/min-scale"] = "0"
@@ -193,10 +193,20 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		if nextApp.Spec.Storage != nil && nextApp.Spec.Storage.Provider != "" {
 			envVars = append(envVars, corev1.EnvVar{Name: "STORAGE_PROVIDER", Value: nextApp.Spec.Storage.Provider})
 			envVars = append(envVars, corev1.EnvVar{Name: "GCS_BUCKET_NAME", Value: nextApp.Spec.Storage.Bucket})
+			// S3/MinIO provider fields — aligned with CLI knative-manifest.ts storageEnvVarGenerators
+			if nextApp.Spec.Storage.Region != "" {
+				envVars = append(envVars, corev1.EnvVar{Name: "CACHE_BUCKET_REGION", Value: nextApp.Spec.Storage.Region})
+			}
+			if nextApp.Spec.Storage.Endpoint != "" {
+				envVars = append(envVars, corev1.EnvVar{Name: "S3_ENDPOINT", Value: nextApp.Spec.Storage.Endpoint})
+			}
 		}
 		if nextApp.Spec.Cache != nil && nextApp.Spec.Cache.Provider != "" {
 			envVars = append(envVars, corev1.EnvVar{Name: "CACHE_PROVIDER", Value: nextApp.Spec.Cache.Provider})
 			envVars = append(envVars, corev1.EnvVar{Name: "REDIS_URL", Value: nextApp.Spec.Cache.URL})
+			if nextApp.Spec.Cache.KeyPrefix != "" {
+				envVars = append(envVars, corev1.EnvVar{Name: "REDIS_KEY_PREFIX", Value: nextApp.Spec.Cache.KeyPrefix})
+			}
 			if nextApp.Spec.Cache.EnableBytecodeCache {
 				envVars = append(envVars, corev1.EnvVar{Name: "NODE_COMPILE_CACHE", Value: "/cache/bytecode/latest"})
 			}
@@ -281,12 +291,26 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 			}
 		}
 
+		// TimeoutSeconds: default 300s when unset (matches knative-manifest.ts hardcoded value)
+		timeoutSeconds := int64(300)
+		if nextApp.Spec.TimeoutSeconds > 0 {
+			timeoutSeconds = int64(nextApp.Spec.TimeoutSeconds)
+		}
+
+		// Runtime: select bun or node to exec server.js
+		var containerCommand []string
+		if nextApp.Spec.Runtime == "bun" {
+			containerCommand = []string{"bun", "run", "server.js"}
+		}
+
 		ksvc.Spec.Template.ObjectMeta.Annotations = annotations
 		ksvc.Spec.Template.Spec.ServiceAccountName = nextApp.Name + "-sa"
 		ksvc.Spec.Template.Spec.ContainerConcurrency = &cc
+		ksvc.Spec.Template.Spec.TimeoutSeconds = &timeoutSeconds
 		ksvc.Spec.Template.Spec.Containers = []corev1.Container{
 			{
 				Image:        nextApp.Spec.Image,
+				Command:      containerCommand,
 				Env:          envVars,
 				EnvFrom:      envFrom,
 				VolumeMounts: volumeMounts,
