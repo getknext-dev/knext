@@ -34,6 +34,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
 	appsv1alpha1 "github.com/AhmedElBanna80/knext/packages/kn-next-operator/api/v1alpha1"
+	servingv1 "knative.dev/serving/pkg/apis/serving/v1"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -63,11 +64,19 @@ var _ = BeforeSuite(func() {
 	err = appsv1alpha1.AddToScheme(scheme.Scheme)
 	Expect(err).NotTo(HaveOccurred())
 
+	// Register Knative Serving scheme so the reconciler can create/get ksvc objects.
+	err = servingv1.AddToScheme(scheme.Scheme)
+	Expect(err).NotTo(HaveOccurred())
+
 	// +kubebuilder:scaffold:scheme
 
 	By("bootstrapping test environment")
 	testEnv = &envtest.Environment{
-		CRDDirectoryPaths:     []string{filepath.Join("..", "..", "config", "crd", "bases")},
+		CRDDirectoryPaths: []string{
+			filepath.Join("..", "..", "config", "crd", "bases"),
+			// Minimal Knative Serving CRD fixture required by the reconciler.
+			filepath.Join("..", "..", "config", "testdata", "crds"),
+		},
 		ErrorIfCRDPathMissing: true,
 	}
 

@@ -22,6 +22,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -35,6 +36,16 @@ import (
 
 	appsv1alpha1 "github.com/AhmedElBanna80/knext/packages/kn-next-operator/api/v1alpha1"
 	servingv1 "knative.dev/serving/pkg/apis/serving/v1"
+)
+
+// Condition type constants used across the reconciler.
+const (
+	// ConditionReconciling indicates the operator is actively reconciling the resource.
+	ConditionReconciling = "Reconciling"
+	// ConditionReady indicates the NextApp Knative Service is available.
+	ConditionReady = "Ready"
+	// ConditionDegraded indicates the reconciliation failed or the resource is unhealthy.
+	ConditionDegraded = "Degraded"
 )
 
 // NextAppReconciler reconciles a NextApp object
@@ -62,10 +73,37 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{}, err
 	}
 
+	// Mark Reconciling=True at the start of every reconcile loop.
+	apimeta.SetStatusCondition(&nextApp.Status.Conditions, metav1.Condition{
+		Type:               ConditionReconciling,
+		Status:             metav1.ConditionTrue,
+		ObservedGeneration: nextApp.Generation,
+		Reason:             "Reconciling",
+		Message:            "Reconciliation in progress",
+	})
+	if err := r.Status().Update(ctx, &nextApp); err != nil {
+		return ctrl.Result{}, err
+	}
+
 	// Enforce digest pinning — validateImageRef rejects :latest and tag-only refs.
 	// This was previously a warn-only check; A1-digest promotes it to a hard reject.
 	if err := validateImageRef(nextApp.Spec.Image); err != nil {
 		logger.Error(err, "Rejecting NextApp: image must be digest-pinned")
+		apimeta.SetStatusCondition(&nextApp.Status.Conditions, metav1.Condition{
+			Type:               ConditionDegraded,
+			Status:             metav1.ConditionTrue,
+			ObservedGeneration: nextApp.Generation,
+			Reason:             "InvalidImage",
+			Message:            err.Error(),
+		})
+		apimeta.SetStatusCondition(&nextApp.Status.Conditions, metav1.Condition{
+			Type:               ConditionReady,
+			Status:             metav1.ConditionFalse,
+			ObservedGeneration: nextApp.Generation,
+			Reason:             "InvalidImage",
+			Message:            "Image does not meet digest-pinning requirements",
+		})
+		_ = r.Status().Update(ctx, &nextApp)
 		return ctrl.Result{}, err
 	}
 
@@ -385,12 +423,35 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		}
 	}
 
-	// 6. Update Status
+	// 6. Update Status: URL + conditions
 	if ksvc.Status.URL != nil {
 		nextApp.Status.URL = ksvc.Status.URL.String()
-		if err := r.Status().Update(ctx, &nextApp); err != nil {
-			return ctrl.Result{}, err
-		}
+	}
+
+	// Reconcile succeeded — set Ready=True, Reconciling=False, Degraded=False.
+	apimeta.SetStatusCondition(&nextApp.Status.Conditions, metav1.Condition{
+		Type:               ConditionReady,
+		Status:             metav1.ConditionTrue,
+		ObservedGeneration: nextApp.Generation,
+		Reason:             "ReconcileSuccess",
+		Message:            "NextApp reconciled successfully",
+	})
+	apimeta.SetStatusCondition(&nextApp.Status.Conditions, metav1.Condition{
+		Type:               ConditionReconciling,
+		Status:             metav1.ConditionFalse,
+		ObservedGeneration: nextApp.Generation,
+		Reason:             "ReconcileSuccess",
+		Message:            "Reconciliation complete",
+	})
+	apimeta.SetStatusCondition(&nextApp.Status.Conditions, metav1.Condition{
+		Type:               ConditionDegraded,
+		Status:             metav1.ConditionFalse,
+		ObservedGeneration: nextApp.Generation,
+		Reason:             "ReconcileSuccess",
+		Message:            "No errors detected",
+	})
+	if err := r.Status().Update(ctx, &nextApp); err != nil {
+		return ctrl.Result{}, err
 	}
 
 	logger.Info("Successfully reconciled NextApp", "name", nextApp.Name, "url", nextApp.Status.URL)
