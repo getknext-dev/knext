@@ -27,7 +27,8 @@
     "pg": "^8.16.3",
     "prom-client": "^15.1.3",
     "react": "^19.0.0",
-    "react-dom": "^19.0.0"
+    "react-dom": "^19.0.0",
+    "sharp": "^0.35.2"
   },
   "devDependencies": {
     "@kn-next/core": "workspace:*",

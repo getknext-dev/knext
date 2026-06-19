@@ -18,6 +18,13 @@ const nextConfig: NextConfig = {
   // Handler gracefully falls back to in-memory when REDIS_URL is not set.
   cacheHandler: path.resolve(import.meta.dirname, 'cache-handler.js'),
   cacheMaxMemorySize: 0, // disable default in-memory cache, use Redis
+  // A4-2 / ADR-0006: next/image optimization via sharp (added to deps + runtime image).
+  // Negotiate modern formats; remotePatterns is an EXPLICIT allowlist — empty = local
+  // images only (no open optimizer / SSRF). Add trusted hosts as needed.
+  images: {
+    formats: ['image/avif', 'image/webp'],
+    remotePatterns: [],
+  },
   experimental: {
     // NextAdapter wired in P0; kept here for onBuildComplete reporting.
     adapterPath: path.resolve(import.meta.dirname, 'next-adapter.ts'),
