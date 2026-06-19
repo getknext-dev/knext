@@ -68,6 +68,9 @@ jobs:
           path: sbom.spdx.json
 
       - name: Trivy scan — FAIL on HIGH/CRITICAL
+        # Report (don't block) on PRs; ENFORCE (fail) on main. Phased rollout so a
+        # pre-existing base-image CVE can't block an unrelated PR, while main stays gated.
+        continue-on-error: ${{ github.ref != 'refs/heads/main' }}
         # @master resolves reliably; pin to a release SHA as a supply-chain follow-up.
         uses: aquasecurity/trivy-action@master
         with:
