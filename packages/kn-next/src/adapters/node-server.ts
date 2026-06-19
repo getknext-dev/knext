@@ -20,9 +20,13 @@ import { resolve } from "node:path";
 import { collectDefaultMetrics, Registry } from "prom-client";
 import { createLogger } from "../utils/logger";
 import { buildChildEnv } from "./env";
+import { gracefulShutdown } from "./shutdown";
 
 const log = createLogger({ module: "server" });
 const METRICS_PORT = 9091;
+// Hard cap for draining in-flight requests on SIGTERM. Keep below the pod's
+// terminationGracePeriodSeconds (k8s default 30s) so the child drains in time.
+const SHUTDOWN_GRACE_MS = Number(process.env.SHUTDOWN_GRACE_MS ?? 25_000);
 
 // ── Prometheus metrics server on :9091 ────────────────────────────────────────
 // Clean separation: Next.js standalone owns $PORT (3000), metrics owns 9091.
@@ -71,13 +75,21 @@ nextProc.on("exit", (code, signal) => {
 });
 
 // ── Graceful shutdown ─────────────────────────────────────────────────────────
-const shutdown = (signal: string) => {
-    log.info({ signal }, "Shutting down gracefully...");
-    metricsServer.close();
-    nextProc.kill("SIGTERM");
-    // Give the child process time to drain in-flight requests before we exit.
-    setTimeout(() => process.exit(0), 5000).unref();
+// On SIGTERM/SIGINT: close metrics, forward SIGTERM to the Next child so it
+// drains in-flight requests + runs after(), then exit as soon as it drains
+// (hard cap SHUTDOWN_GRACE_MS). Logic lives in ./shutdown for unit testing.
+const onSignal = (signal: string) => {
+    log.info(
+        { signal, graceMs: SHUTDOWN_GRACE_MS },
+        "Shutting down gracefully...",
+    );
+    gracefulShutdown(signal, {
+        child: nextProc,
+        closables: [metricsServer],
+        graceMs: SHUTDOWN_GRACE_MS,
+        exit: (code) => process.exit(code),
+    });
 };
 
-process.on("SIGTERM", () => shutdown("SIGTERM"));
-process.on("SIGINT", () => shutdown("SIGINT"));
+process.on("SIGTERM", () => onSignal("SIGTERM"));
+process.on("SIGINT", () => onSignal("SIGINT"));
