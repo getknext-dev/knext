@@ -52,7 +52,9 @@ jobs:
           tags: ${{ env.IMAGE }}:${{ github.sha }}
           load: ${{ github.ref != 'refs/heads/main' }}
           push: ${{ github.ref == 'refs/heads/main' }}
-          provenance: true
+          # provenance emits a manifest list the `load` (docker) exporter can't handle,
+          # so only attach it on the push/main path (registry exporter).
+          provenance: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Generate SBOM (syft, SPDX-JSON)
         uses: anchore/sbom-action@v0
