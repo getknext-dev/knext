@@ -64,7 +64,8 @@ jobs:
           path: sbom.spdx.json
 
       - name: Trivy scan — FAIL on HIGH/CRITICAL
-        uses: aquasecurity/trivy-action@0.24.0
+        # @master resolves reliably; pin to a release SHA as a supply-chain follow-up.
+        uses: aquasecurity/trivy-action@master
         with:
           image-ref: ${{ env.IMAGE }}:${{ github.sha }}
           severity: HIGH,CRITICAL
