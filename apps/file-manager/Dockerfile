@@ -8,8 +8,9 @@ COPY . .
 RUN pnpm install --frozen-lockfile
 # Build workspace libs (e.g. @knative-next/lib ships only dist/) BEFORE the app,
 # else `next build` can't resolve @knative-next/lib/* on a clean checkout.
-# `-r` builds every package in topological (dependency) order.
-RUN pnpm -r build
+# `...file-manager` = file-manager AND its dependencies (topo order) — excludes
+# unrelated packages like the spike apps that don't build standalone.
+RUN pnpm --filter "...file-manager" build
 
 # Stage 2: Lean production image using Node.js standalone output
 FROM node:22-alpine AS runner
