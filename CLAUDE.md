@@ -93,8 +93,9 @@ defer bucket 1.
   API at `v1alpha1`.
 - **License inconsistency:** README says MIT; operator source headers say Apache-2.0
   (`nextapp_types.go:4`) — pick one.
-- npm: packages exist (`@kn-next/core`, `@knative-next/lib`) but **scope naming is inconsistent**
-  (`@kn-next` vs `@knative-next`; docs reference `@knext/*`); no npm release confirmed — blocks
+- npm: packages are unified under the **`@knext/*`** scope (`@knext/core`, `@knext/lib`, `@knext/ui`)
+  — the earlier `@kn-next`/`@knative-next` drift is resolved. The `kn-next` CLI bin name is unchanged.
+  **No npm release published yet** — that final `npm publish` step (requires npm auth) still blocks
   `npx kn-next` for outside users.
 - Duplicate/dead packages: `packages/cli` (Go) vs `packages/kn-next/src/cli` (TS); `admin`/`knext`
   vs `kn-next` naming drift — audit/remove.

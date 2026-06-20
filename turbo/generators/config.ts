@@ -30,7 +30,7 @@ export default function generator(plop: PlopTypes.NodePlopAPI): void {
       // Append the new zone into turbo.json or other routing if necessary natively
       function customAction(answers) {
         // You can run custom CLI logic here if needed
-        return `Scaffolded a new Next.js zone at apps/${(answers as any).name}`;
+        return `Scaffolded a new Next.js zone at apps/${(answers as { name: string }).name}`;
       },
     ],
   });
@@ -45,7 +45,9 @@ export default function generator(plop: PlopTypes.NodePlopAPI): void {
         message: 'What is the name of the proto package?',
       },
     ],
-    actions: [(answers) => `Proto generator stub executed for: ${(answers as any).name}`],
+    actions: [
+      (answers) => `Proto generator stub executed for: ${(answers as { name: string }).name}`,
+    ],
   });
 
   // Stub for event generator
@@ -58,6 +60,8 @@ export default function generator(plop: PlopTypes.NodePlopAPI): void {
         message: 'What is the name of the event package?',
       },
     ],
-    actions: [(answers) => `Event generator stub executed for: ${(answers as any).name}`],
+    actions: [
+      (answers) => `Event generator stub executed for: ${(answers as { name: string }).name}`,
+    ],
   });
 }

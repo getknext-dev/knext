@@ -124,7 +124,7 @@ for faster cold-start module evaluation.
   — set STORAGE_BUCKET to enable artifact upload
 ```
 When `STORAGE_BUCKET` is set, the adapter uploads `staticFiles` + `prerenders`
-(keyed by `buildId`) via `getMinioClient().putObject()` from `@knative-next/lib/clients`.
+(keyed by `buildId`) via `getMinioClient().putObject()` from `@knext/lib/clients`.
 Unit test mocks `getMinioClient` and asserts `putObject` is called.
 
 ---

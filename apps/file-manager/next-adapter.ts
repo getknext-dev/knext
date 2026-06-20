@@ -8,7 +8,7 @@
  *      2. Best-effort upload staticFiles + prerenders to MinIO/S3 keyed by buildId
  *         (guarded by STORAGE_BUCKET env var; skips cleanly if not set)
  *
- * Upload uses getMinioClient() from @knative-next/lib/clients.
+ * Upload uses getMinioClient() from @knext/lib/clients.
  * Files are uploaded under: <buildId>/<pathname> in the configured bucket.
  *
  * Out of scope: request routing, bun --compile, operator changes.
@@ -106,7 +106,7 @@ async function uploadBuildArtifacts({
   // Dynamically import the minio client to avoid loading it in non-upload builds.
   let putObject: (bucket: string, key: string, stream: Readable) => Promise<unknown>;
   try {
-    const { getMinioClient } = await import('@knative-next/lib/clients');
+    const { getMinioClient } = await import('@knext/lib/clients');
     const client = getMinioClient();
     putObject = (b, k, s) => client.putObject(b, k, s);
   } catch (err) {

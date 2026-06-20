@@ -1,4 +1,4 @@
-import { getDbPool } from '@knative-next/lib/clients';
+import { getDbPool } from '@knext/lib/clients';
 import { unstable_cache, unstable_noStore } from 'next/cache';
 import { Suspense } from 'react';
 import FileList from '@/components/FileList';

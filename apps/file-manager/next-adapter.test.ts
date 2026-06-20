@@ -235,7 +235,7 @@ describe('next-adapter upload (POC-ADAPTER-P1-rework)', () => {
       stream?.destroy?.();
       return { etag: 'mock-etag' };
     });
-    vi.doMock('@knative-next/lib/clients', () => ({
+    vi.doMock('@knext/lib/clients', () => ({
       getMinioClient: () => ({ putObject: putObjectMock }),
     }));
 
@@ -272,7 +272,7 @@ describe('next-adapter upload (POC-ADAPTER-P1-rework)', () => {
 
     consoleSpy.mockRestore();
     delete process.env.STORAGE_BUCKET;
-    vi.doUnmock('@knative-next/lib/clients');
+    vi.doUnmock('@knext/lib/clients');
   });
 
   it('calls putObject 3 times when prerender has fallback.filePath', async () => {
@@ -280,7 +280,7 @@ describe('next-adapter upload (POC-ADAPTER-P1-rework)', () => {
     process.env.STORAGE_BUCKET = 'test-bucket';
 
     const putObjectMock = vi.fn().mockResolvedValue({ etag: 'mock-etag' });
-    vi.doMock('@knative-next/lib/clients', () => ({
+    vi.doMock('@knext/lib/clients', () => ({
       getMinioClient: () => ({ putObject: putObjectMock }),
     }));
 
@@ -318,6 +318,6 @@ describe('next-adapter upload (POC-ADAPTER-P1-rework)', () => {
 
     consoleSpy.mockRestore();
     delete process.env.STORAGE_BUCKET;
-    vi.doUnmock('@knative-next/lib/clients');
+    vi.doUnmock('@knext/lib/clients');
   });
 });

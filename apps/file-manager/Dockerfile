@@ -6,10 +6,10 @@ RUN npm install -g pnpm
 WORKDIR /app
 COPY . .
 RUN pnpm install --frozen-lockfile
-# Build the workspace lib (@knative-next/lib ships only dist/) BEFORE the app, in a
+# Build the workspace lib (@knext/lib ships only dist/) BEFORE the app, in a
 # SEPARATE step so its dist/ is fully emitted before `next build` resolves it.
 # (A combined recursive build can race the app's build ahead of the lib's emit.)
-RUN pnpm --filter "@knative-next/lib" build
+RUN pnpm --filter "@knext/lib" build
 RUN pnpm --filter file-manager build
 
 # Stage 2: Lean production image using Node.js standalone output

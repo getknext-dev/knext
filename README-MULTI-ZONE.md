@@ -109,7 +109,7 @@ npx vitest run apps/users/
 1. **Parallel Builds**: Turborepo builds zones in parallel
 2. **Turbopack**: Each zone uses `--turbo` for faster builds
 3. **Independent Deployment**: Deploy zones separately
-4. **Shared UI**: Common components via `@knative-next/ui`
+4. **Shared UI**: Common components via `@knext/ui`
 5. **Scalability**: Easy to add new zones
 6. **Isolation**: Changes to one zone don't affect others
 

@@ -10,14 +10,14 @@ Run all from a **clean checkout** (no stale `dist/`/`node_modules`) — clean-st
 known false-green trap in this repo:
 ```bash
 pnpm install --frozen-lockfile
-pnpm -r build            # build workspace libs first; @knative-next/lib ships only dist/,
+pnpm -r build            # build workspace libs first; @knext/lib ships only dist/,
                          # so tests that import it fail on a clean tree if not built
 pnpm run lint            # Biome — repo-wide; CI runs `biome check .` (format diffs FAIL)
 pnpm exec vitest run --coverage
 ```
 Lessons learned (real CI failures this project hit):
 - **`biome check .` fails on format diffs**, not just lint errors — run repo-wide, not scoped.
-- **Tests that import `@knative-next/lib` need it built** (its `exports` map to `dist/`); add a
+- **Tests that import `@knext/lib` need it built** (its `exports` map to `dist/`); add a
   vitest `resolve.alias` to `packages/lib/src`, or build lib in `pretest`.
 - **Machine-coupled tests** (hardcoded paths, a local `bun`) break in CI → gate them with
   `skipIf(bun-missing || build-absent)`; use `import.meta.dirname`, not absolute paths.

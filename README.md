@@ -719,4 +719,6 @@ npx kn-next deploy --dry-run
 
 ## License
 
-MIT
+[Apache License 2.0](./LICENSE) — consistent with the Go operator source headers and the
+Knative/Kubernetes ecosystem this project builds on. The Apache-2.0 patent grant matters for an
+infrastructure project intended for production adoption.

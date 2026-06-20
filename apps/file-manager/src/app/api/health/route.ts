@@ -1,4 +1,4 @@
-import { checkDeepHealth } from '@knative-next/lib/health';
+import { checkDeepHealth } from '@knext/lib/health';
 
 // Health check endpoint for Knative probes
 // Executes deep readiness checks against configured backend services (Postgres/Redis)

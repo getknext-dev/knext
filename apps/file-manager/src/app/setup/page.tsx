@@ -1,4 +1,4 @@
-import { getDbPool } from '@knative-next/lib/clients';
+import { getDbPool } from '@knext/lib/clients';
 import { unstable_noStore } from 'next/cache';
 
 async function setupDatabase() {

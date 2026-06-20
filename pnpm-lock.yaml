@@ -51,10 +51,10 @@ importers:
 
   apps/file-manager:
     dependencies:
-      '@knative-next/lib':
+      '@knext/lib':
         specifier: workspace:*
         version: link:../../packages/lib
-      '@knative-next/ui':
+      '@knext/ui':
         specifier: workspace:*
         version: link:../../packages/ui
       '@opentelemetry/api':
@@ -109,7 +109,7 @@ importers:
         specifier: ^0.35.2
         version: 0.35.2
     devDependencies:
-      '@kn-next/core':
+      '@knext/core':
         specifier: workspace:*
         version: link:../../packages/kn-next
       '@tailwindcss/postcss':
@@ -164,7 +164,7 @@ importers:
       '@google-cloud/storage':
         specifier: ^7.18.0
         version: 7.19.0
-      '@knative-next/lib':
+      '@knext/lib':
         specifier: workspace:^
         version: link:../lib
       ioredis:

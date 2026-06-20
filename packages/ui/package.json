@@ -1,5 +1,5 @@
 {
-  "name": "@knative-next/ui",
+  "name": "@knext/ui",
   "version": "0.1.0",
   "private": true,
   "main": "./src/index.ts",

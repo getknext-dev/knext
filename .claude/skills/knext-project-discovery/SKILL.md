@@ -14,9 +14,9 @@ and `docs/adr/` before non-trivial work.
 ## Package layout (`packages/`)
 | Package | Lang | Role |
 |---|---|---|
-| `kn-next` (`@kn-next/core`) | TS | Framework: adapters, CLI (`src/cli/`), generators, config |
+| `kn-next` (`@knext/core`) | TS | Framework: adapters, CLI (`src/cli/`), generators, config |
 | `kn-next-operator` | Go | Kubebuilder operator — `NextApp` CRD + reconciler (**source of truth**) |
-| `lib` (`@knative-next/lib`) | TS | Shared clients (Postgres/MinIO/Cerbos), health, logger |
+| `lib` (`@knext/lib`) | TS | Shared clients (Postgres/MinIO/Cerbos), health, logger |
 | `ui` | TS | shadcn/ui components |
 | `cli` | Go | Older deploy CLI (overlaps `kn-next/src/cli` — duplication to resolve) |
 | `admin`, `knext` | — | Likely dead/duplicate (naming drift vs `kn-next`) — audit |
