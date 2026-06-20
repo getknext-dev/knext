@@ -7,7 +7,8 @@
     "dev": "next dev",
     "build": "next build --webpack",
     "start": "NODE_COMPILE_CACHE=.next/compile-cache node .next/standalone/apps/file-manager/server.js",
-    "start:bun": "bun .next/standalone/apps/file-manager/server.js"
+    "start:bun": "bun .next/standalone/apps/file-manager/server.js",
+    "compat-smoke": "node scripts/compat-smoke.mjs"
   },
   "dependencies": {
     "@knative-next/lib": "workspace:*",

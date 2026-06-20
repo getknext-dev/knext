@@ -40,6 +40,52 @@ jobs:
           fail_ci_if_error: false
           token: ${{ secrets.CODECOV_TOKEN }}
 
+  compat-smoke:
+    # knext adapter SMOKE suite — NOT the official Next.js compatibility suite (ADR-0007,
+    # option C). Builds apps/file-manager through the knext adapter (output:'standalone'),
+    # boots the standalone server.js on Node and Bun, and asserts real HTTP behaviors.
+    # The official deploy-test harness is a separate scheduled job (A3-2, compat-suite-full).
+    name: knext adapter smoke (NOT official compat suite)
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    strategy:
+      fail-fast: false
+      matrix:
+        runtime: [node, bun]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Bun
+        if: matrix.runtime == 'bun'
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # @knative-next/lib ships only dist/ — it MUST be built before the app.
+      - name: Build @knative-next/lib
+        run: pnpm --filter @knative-next/lib build
+
+      - name: Build file-manager via adapter
+        run: pnpm --filter file-manager build
+
+      - name: Run knext compat-smoke (${{ matrix.runtime }})
+        working-directory: apps/file-manager
+        env:
+          RUNTIME: ${{ matrix.runtime }}
+        run: node scripts/compat-smoke.mjs
+
   no-latest-guard:
     name: No :latest images in operator manifests
     runs-on: ubuntu-latest
