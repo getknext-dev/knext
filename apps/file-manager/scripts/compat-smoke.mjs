@@ -37,8 +37,7 @@ const RUNTIME = (process.env.RUNTIME || 'node').toLowerCase();
 const PORT = Number(process.env.PORT || 3987);
 const HOST = '127.0.0.1';
 const SERVER_PATH =
-  process.env.SERVER_PATH ||
-  path.resolve(APP_DIR, '.next/standalone/apps/file-manager/server.js');
+  process.env.SERVER_PATH || path.resolve(APP_DIR, '.next/standalone/apps/file-manager/server.js');
 // Runtime binary: node | bun. RUNTIME=bun boots the same standalone server.js under Bun.
 const SERVER_CMD = process.env.SERVER_CMD || (RUNTIME === 'bun' ? 'bun' : process.execPath);
 
@@ -231,7 +230,9 @@ async function main() {
     const res = await request(url, { raw: true });
     if (res.status !== 200) {
       // Distinguish "unsupported in this build" from a hard failure.
-      skip(`image optimizer returned ${res.status} (optimization may be unsupported in this build)`);
+      skip(
+        `image optimizer returned ${res.status} (optimization may be unsupported in this build)`,
+      );
     }
     const ct = res.headers['content-type'] || '';
     assert.ok(ct.startsWith('image/'), `content-type not image/*: ${ct}`);
