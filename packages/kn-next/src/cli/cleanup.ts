@@ -11,26 +11,14 @@
  *   3. Clear storage bucket
  */
 
-import { existsSync } from "node:fs";
-import { resolve } from "node:path";
 import { $ } from "bun";
 import type { KnativeNextConfig } from "../config";
 import { createLogger } from "../utils/logger";
+// Single source of truth for config loading — also runs validateConfig,
+// which cleanup's former private copy skipped (CONFIG-LOAD-DEDUP).
+import { loadConfig } from "./shared";
 
 const log = createLogger({ module: "cleanup" });
-
-const CONFIG_FILE = "kn-next.config.ts";
-
-async function loadConfig(): Promise<KnativeNextConfig> {
-    const configPath = resolve(process.cwd(), CONFIG_FILE);
-
-    if (!existsSync(configPath)) {
-        throw new Error(`Config file not found: ${configPath}`);
-    }
-
-    const module = await import(configPath);
-    return module.default;
-}
 
 async function cleanup() {
     log.info("🧹 kn-next cleanup");

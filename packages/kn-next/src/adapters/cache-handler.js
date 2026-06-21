@@ -64,6 +64,18 @@ function logCacheEvent(type, source, key, options) {
 // ─── Redis Client (lazy, only when REDIS_URL is set) ───
 
 const REDIS_URL = process.env.REDIS_URL;
+// REDIS_KEY_PREFIX is set by the deploy path (manifest generator / operator) to the
+// app name, so each app owns an isolated ISR keyspace. If Redis is in use but the var
+// is unset, the fallback below ('kn-next') will NOT match the app-name keyspace other
+// pods read/write — a silent split keyspace = cache misses + cross-app collisions.
+// Surface it loudly rather than diverging quietly (see architecture review #2).
+if (REDIS_URL && !process.env.REDIS_KEY_PREFIX) {
+  console.warn(
+    "[cache-handler] REDIS_KEY_PREFIX is unset while REDIS_URL is set — falling back " +
+      "to 'kn-next'. ISR cache keys may not match the deploy-time prefix (app name); " +
+      'set REDIS_KEY_PREFIX to avoid a split keyspace.',
+  );
+}
 const KEY_PREFIX = process.env.REDIS_KEY_PREFIX || 'kn-next';
 
 let Redis;
