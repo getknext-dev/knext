@@ -1,6 +1,9 @@
 import Redis from 'ioredis';
 import { NextResponse } from 'next/server';
 import '../../../../cache-init';
+// Reuse the single auth helper from the invalidate route — DELETE here is a
+// mutating endpoint (clears cache events) and must not be open (E4-2, security.md).
+import { isAuthorized } from '../invalidate/auth';
 
 /**
  * Cache Events API
@@ -79,7 +82,12 @@ export async function GET() {
   });
 }
 
-export async function DELETE() {
+export async function DELETE(request: Request) {
+  // Mutating: clears all cache events. Requires the same Bearer token as
+  // POST /api/cache/invalidate; fail-closed when CACHE_INVALIDATE_TOKEN is unset.
+  if (!isAuthorized(request.headers.get('authorization'), process.env.CACHE_INVALIDATE_TOKEN)) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  }
   if (redisClient) {
     try {
       await redisClient.del(`${KEY_PREFIX}:cache-events`);
