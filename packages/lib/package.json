@@ -13,6 +13,10 @@
     "build": "tsc",
     "dev": "tsc -w"
   },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
   "dependencies": {
     "@cerbos/grpc": "^0.23.5",
     "ioredis": "^5.9.3",

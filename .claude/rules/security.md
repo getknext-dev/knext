@@ -7,9 +7,10 @@ Complements `.claude/rules/architecture.md`. These run through **every** phase �
 ## Endpoints & auth
 - **No unauthenticated mutating endpoints.** Any route/handler that changes state (cache
   invalidation, deploys, admin actions) must require auth — a signed token and/or an
-  internal-only `NetworkPolicy`. **Known violation to fix:** `POST /api/cache/invalidate`
-  (`apps/file-manager/src/app/api/cache/invalidate/route.ts`) is currently open. Do not repeat
-  the pattern.
+  internal-only `NetworkPolicy`. **(RESOLVED)** `POST /api/cache/invalidate` and
+  `DELETE /api/cache/events` now require a Bearer token (`CACHE_INVALIDATE_TOKEN`, fail-closed);
+  see the audit in `docs/security/mutating-endpoints.md`. Defense-in-depth NetworkPolicy still TODO.
+  Do not reintroduce an open mutating route.
 - **Backends are cluster-local.** `BackendService` Knative services use
   `networking.knative.dev/visibility: cluster-local` — no public ingress (ADR-0004).
 - **Service-to-service authz.** Gateway↔backend calls authenticate (shared signed token → mTLS

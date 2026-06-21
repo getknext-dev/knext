@@ -64,8 +64,10 @@ yet adapter-standardizable) → **Track P** (GitHub org, landing page, docs site
 docs site on knext**). gRPC layer = **design-now / build-later, after correctness.**
 
 ## 7. Security (non-negotiable, every phase)
-- **No unauthenticated mutating endpoints.** Fix `POST /api/cache/invalidate` (signed token /
-  internal-only NetworkPolicy); never repeat the pattern.
+- **No unauthenticated mutating endpoints.** `POST /api/cache/invalidate` and
+  `DELETE /api/cache/events` now require a Bearer token (`CACHE_INVALIDATE_TOKEN`, fail-closed) —
+  the audit lives in `docs/security/mutating-endpoints.md` (E4-2). Remaining: internal-only
+  `NetworkPolicy` for defense-in-depth. Never reintroduce an open mutating route.
 - **Service-to-service mTLS/authz** gateway↔backends; no implicit trust.
 - **Secrets in K8s Secrets only** — never in config files, images, or URLs.
 - **Supply chain:** SBOM per image, Trivy/Grype (fail on high severity), cosign signing,
@@ -101,8 +103,11 @@ defer bucket 1.
   — the earlier `@kn-next`/`@knative-next` drift is resolved. The `kn-next` CLI bin name is unchanged.
   **No npm release published yet** — that final `npm publish` step (requires npm auth) still blocks
   `npx kn-next` for outside users.
-- Duplicate/dead packages: `packages/cli` (Go) vs `packages/kn-next/src/cli` (TS); `admin`/`knext`
-  vs `kn-next` naming drift — audit/remove.
+- **(RESOLVED 2026-06-21)** The `kn-next` **TS CLI in `@knext/core` (`packages/kn-next/src/cli`) is the
+  single CLI of record.** The old Go `packages/cli` and the `admin`/`knext` packages have **no tracked
+  files** (already gone from git) — the "duplicate CLI" was stale local cruft, not repo debt.
+  Caveat: the CLI is **Bun-only** (`#!/usr/bin/env bun`, imports `bun`), so `npx kn-next` requires Bun
+  installed; porting it to run under plain Node is the remaining E1 adoption work.
 
 ## 10. Hard rules (enforce in all work)
 Official adapter API, not Nitro reverse-engineering · operator = single source of truth ·
