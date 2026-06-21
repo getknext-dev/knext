@@ -16,10 +16,11 @@
 
 import { spawn } from "node:child_process";
 import http from "node:http";
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
 import { collectDefaultMetrics, Registry } from "prom-client";
 import { createLogger } from "../utils/logger";
 import { buildChildEnv } from "./env";
+import { startImageCacheSync } from "./image-cache-sync";
 import { gracefulShutdown } from "./shutdown";
 
 const log = createLogger({ module: "server" });
@@ -58,6 +59,26 @@ const serverJs = resolve(
 
 log.info({ serverJs }, "Starting Next.js standalone server");
 
+// ── Optimized-image variant cache sync (ADR-0006) ─────────────────────────────
+// next/image writes optimized variants to `<distDir>/cache/images`, which is
+// pod-local — so every cold pod re-optimizes images another pod already produced,
+// burning the scale-to-zero cold-start budget. Persist those variants in the
+// object store (keyed by Next's per-variant cacheKey = (src,w,q,accept)) so a
+// variant computed once is reused by every later pod. No-op unless STORAGE_BUCKET
+// is set. The standalone server keeps `.next/cache/images` next to server.js, so
+// derive the dir from the server path (override via IMAGE_CACHE_DIR if needed).
+const imageCacheDir =
+    process.env.IMAGE_CACHE_DIR ??
+    resolve(dirname(serverJs), ".next", "cache", "images");
+let stopImageCacheSync: () => void = () => {};
+startImageCacheSync({ ...process.env, IMAGE_CACHE_DIR: imageCacheDir }, { log })
+    .then((handle) => {
+        stopImageCacheSync = handle.stop;
+    })
+    .catch((err) => {
+        log.warn({ err }, "Image cache sync failed to start (non-fatal)");
+    });
+
 const nextProc = spawn(process.execPath, [serverJs], {
     stdio: "inherit",
     env: buildChildEnv(),
@@ -83,6 +104,7 @@ const onSignal = (signal: string) => {
         { signal, graceMs: SHUTDOWN_GRACE_MS },
         "Shutting down gracefully...",
     );
+    stopImageCacheSync();
     gracefulShutdown(signal, {
         child: nextProc,
         closables: [metricsServer],
