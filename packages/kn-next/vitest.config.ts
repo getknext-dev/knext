@@ -8,7 +8,7 @@ export default defineConfig({
     coverage: {
       provider: 'v8',
       reporter: ['text', 'json', 'html'],
-      include: ['src/adapters/**', 'src/generators/**'],
+      include: ['src/adapters/**'],
     },
   },
 });

@@ -13,7 +13,6 @@
     "./loader": "./src/loader.ts",
     "./adapters/node-server": "./src/adapters/node-server.ts",
     "./adapters/cache-handler": "./src/adapters/cache-handler.js",
-    "./generators/knative-manifest": "./src/generators/knative-manifest.ts",
     "./utils/logger": "./src/utils/logger.ts",
     "./cli/validate": "./src/cli/validate.ts",
     "./cli/shared": "./src/cli/shared.ts"
