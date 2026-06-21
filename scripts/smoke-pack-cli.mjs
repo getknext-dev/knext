@@ -1,25 +1,19 @@
 #!/usr/bin/env node
 /**
- * smoke-pack-cli.mjs — E1-1
+ * smoke-pack-cli.mjs — E1-1 / #68
  *
  * Proves the packed @knext/core artifact installs and exposes a working `kn-next` bin
- * for the SUPPORTED runtime (bun). The bin ships raw TS with a `#!/usr/bin/env bun`
- * shebang and imports `bun`, so it can ONLY run under bun — never assume node can run it.
+ * for plain Node (no Bun required — issue #68). Since #68 the bin is bundled, Node-only
+ * JS (`dist/cli/kn-next.js`) with a `#!/usr/bin/env node` shebang, so `node <bin>` runs
+ * it directly. A Bun leg is kept as an OPTIONAL extra check when bun is on PATH.
  *
  * Steps:
- *   1. `npm pack` @knext/core -> tarball.
- *   2. Fresh temp dir, `npm init -y`, `npm i <tarball>`.
- *   3. Run the installed bin's `--help` under bun. Assert exit 0 and that output
+ *   1. `pnpm pack` @knext/lib + @knext/core -> tarballs.
+ *   2. Fresh temp dir, `npm init -y`, `npm i <tarballs>`.
+ *   3. Run the installed bin's `--help` under NODE. Assert exit 0 and that output
  *      mentions "kn-next" or "Usage".
- *
- * Runtime policy:
- *   - bun NOT on PATH -> print SKIP and exit 0 (don't fail a host without bun).
- *   - bun present and `--help` exits non-zero -> FAIL (exit 1).
- *
- * NOTE: at time of writing the bin may not have a dedicated `--help` handler yet
- * (another worker is adding it). This script EXPECTS `--help` to exit 0. If it exits
- * non-zero (e.g. a "no config found" error), that is reported as a FAIL so we can tell
- * the help handler isn't wired — it is NOT worked around.
+ *   4. If bun is present, ALSO run `--help` under bun (optional leg; failure there
+ *      is reported but does not change the primary node result).
  */
 
 import { execFileSync, spawnSync } from 'node:child_process';
@@ -34,7 +28,6 @@ const corePkgDir = join(repoRoot, 'packages', 'kn-next');
 const libPkgDir = join(repoRoot, 'packages', 'lib');
 
 const PASS = 'PASS';
-const SKIP = 'SKIP';
 const FAIL = 'FAIL';
 
 /** Print a final summary line and exit with the matching code. */
@@ -88,6 +81,13 @@ try {
     cwd: repoRoot,
     stdio: ['ignore', 'inherit', 'inherit'],
   });
+  // #68: @knext/core now ships a bundled dist/ bin — build it before packing or the
+  // tarball has no dist/cli/kn-next.js and the bin symlink is broken.
+  console.log('[smoke:cli] building @knext/core (ships dist/ bin) ...');
+  execFileSync('pnpm', ['--filter', '@knext/core', 'build'], {
+    cwd: repoRoot,
+    stdio: ['ignore', 'inherit', 'inherit'],
+  });
   libDest = mkdtempSync(join(tmpdir(), 'knext-pack-lib-'));
   coreDest = mkdtempSync(join(tmpdir(), 'knext-pack-core-'));
   const libTarball = pnpmPack(libPkgDir, libDest, '@knext/lib');
@@ -113,16 +113,9 @@ try {
     finish(FAIL, `installed bin not found at ${binPath}`);
   }
 
-  // --- 3. run --help under bun ----------------------------------------------
-  if (!hasBun()) {
-    finish(
-      SKIP,
-      'bun not on PATH; the kn-next bin is bun-only, so the help check was skipped (host not failed)',
-    );
-  }
-
-  console.log('[smoke:cli] running `bun <bin> --help` ...');
-  const run = spawnSync('bun', [binPath, '--help'], {
+  // --- 3. run --help under NODE (primary — #68) -----------------------------
+  console.log('[smoke:cli] running `node <bin> --help` ...');
+  const run = spawnSync('node', [binPath, '--help'], {
     cwd: workDir,
     encoding: 'utf8',
   });
@@ -134,7 +127,7 @@ try {
   if (run.status !== 0) {
     finish(
       FAIL,
-      `bun kn-next --help exited ${run.status} (expected 0). ` +
+      `node kn-next --help exited ${run.status} (expected 0). ` +
         "If this is a 'no config'-type error, the --help handler is not wired yet.",
     );
   }
@@ -144,7 +137,26 @@ try {
     finish(FAIL, "exit 0 but output did not contain 'kn-next' or 'Usage'");
   }
 
-  finish(PASS, 'packed @knext/core installs and `kn-next --help` works under bun');
+  // --- 4. optional bun leg --------------------------------------------------
+  // Bun is no longer required; run it only as a bonus check when present.
+  if (hasBun()) {
+    console.log('[smoke:cli] (optional) running `bun <bin> --help` ...');
+    const bunRun = spawnSync('bun', [binPath, '--help'], {
+      cwd: workDir,
+      encoding: 'utf8',
+    });
+    if (bunRun.status !== 0) {
+      console.log(
+        `[smoke:cli] WARNING: optional bun leg exited ${bunRun.status} (node leg already passed)`,
+      );
+    } else {
+      console.log('[smoke:cli] optional bun leg also passed');
+    }
+  } else {
+    console.log('[smoke:cli] bun not on PATH — skipping optional bun leg');
+  }
+
+  finish(PASS, 'packed @knext/core installs and `kn-next --help` works under node');
 } catch (err) {
   finish(FAIL, `unexpected error: ${err?.message ? err.message : err}`);
 } finally {

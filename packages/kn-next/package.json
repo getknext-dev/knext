@@ -6,7 +6,7 @@
   "main": "./src/config.ts",
   "types": "./src/config.ts",
   "bin": {
-    "kn-next": "./src/cli/deploy.ts"
+    "kn-next": "./dist/cli/kn-next.js"
   },
   "exports": {
     ".": "./src/config.ts",
@@ -18,8 +18,8 @@
     "./cli/shared": "./src/cli/shared.ts"
   },
   "scripts": {
-    "build": "tsc --noEmit",
-    "deploy": "bun run ./src/cli/deploy.ts",
+    "build": "tsup",
+    "deploy": "node ./dist/cli/kn-next.js",
     "lint": "biome check src/",
     "lint:fix": "biome check --write src/",
     "typecheck": "tsc --noEmit",
@@ -28,7 +28,8 @@
     "test:coverage": "vitest run --coverage"
   },
   "files": [
-    "src"
+    "src",
+    "dist"
   ],
   "keywords": [
     "knative",

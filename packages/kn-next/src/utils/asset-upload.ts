@@ -1,8 +1,17 @@
 import { readdirSync } from "node:fs";
 import { join, relative } from "node:path";
-import { $ } from "bun";
+import { runCapture, runQuiet } from "../cli/exec";
 import type { KnativeNextConfig, StorageConfig } from "../config";
 import { createLogger } from "./logger";
+
+/**
+ * Lists the top-level entries inside a directory as absolute paths. Used to
+ * emulate a former shell glob (`dir/*`) without invoking a shell — each entry
+ * is passed as a discrete argv element (no shell expansion, no injection).
+ */
+function topLevelEntries(dir: string): string[] {
+    return readdirSync(dir).map((name) => join(dir, name));
+}
 
 const log = createLogger({ module: "asset-upload" });
 
@@ -50,15 +59,36 @@ export async function uploadAssets(config: KnativeNextConfig): Promise<void> {
 
     switch (config.storage.provider) {
         case "gcs": {
-            // Upload with cache-control headers for immutable _next/static assets
-            await $`gsutil -m -h "Cache-Control:public, max-age=31536000, immutable" cp -r ${assetsDir}/* gs://${config.storage.bucket}/`.quiet();
+            // Upload with cache-control headers for immutable _next/static assets.
+            // The former shell glob `${assetsDir}/*` is expanded in Node (no shell)
+            // and each top-level entry passed as a discrete argv source.
+            runQuiet([
+                "gsutil",
+                "-m",
+                "-h",
+                "Cache-Control:public, max-age=31536000, immutable",
+                "cp",
+                "-r",
+                ...topLevelEntries(assetsDir),
+                `gs://${config.storage.bucket}/`,
+            ]);
             // Ensure bucket has public read access for browser fetches
-            await $`gsutil iam ch allUsers:objectViewer gs://${config.storage.bucket}`.quiet();
+            runQuiet([
+                "gsutil",
+                "iam",
+                "ch",
+                "allUsers:objectViewer",
+                `gs://${config.storage.bucket}`,
+            ]);
 
             // Post-upload verification: ensure all local files exist in GCS
             const localFiles = collectFiles(assetsDir, assetsDir);
-            const gcsListResult =
-                await $`gsutil ls -r "gs://${config.storage.bucket}/"`.text();
+            const gcsListResult = runCapture([
+                "gsutil",
+                "ls",
+                "-r",
+                `gs://${config.storage.bucket}/`,
+            ]);
             const gcsFiles = new Set(
                 gcsListResult
                     .split("\n")
@@ -78,7 +108,14 @@ export async function uploadAssets(config: KnativeNextConfig): Promise<void> {
                 for (const file of missing) {
                     const localPath = join(assetsDir, file);
                     const gcsPath = `gs://${config.storage.bucket}/${file}`;
-                    await $`gsutil -h "Cache-Control:public, max-age=31536000, immutable" cp ${localPath} ${gcsPath}`.quiet();
+                    runQuiet([
+                        "gsutil",
+                        "-h",
+                        "Cache-Control:public, max-age=31536000, immutable",
+                        "cp",
+                        localPath,
+                        gcsPath,
+                    ]);
                 }
                 log.info(
                     { count: missing.length },
@@ -88,14 +125,38 @@ export async function uploadAssets(config: KnativeNextConfig): Promise<void> {
             break;
         }
         case "s3":
-            await $`aws s3 sync ${assetsDir} s3://${config.storage.bucket} --cache-control "public, max-age=31536000, immutable"`.quiet();
+            runQuiet([
+                "aws",
+                "s3",
+                "sync",
+                assetsDir,
+                `s3://${config.storage.bucket}`,
+                "--cache-control",
+                "public, max-age=31536000, immutable",
+            ]);
             break;
         case "minio":
-            // MinIO uses S3-compatible CLI
-            await $`mc cp --recursive ${assetsDir}/* minio/${config.storage.bucket}/`.quiet();
+            // MinIO uses S3-compatible CLI. Former shell glob `${assetsDir}/*`
+            // expanded in Node so each top-level entry is a discrete argv source.
+            runQuiet([
+                "mc",
+                "cp",
+                "--recursive",
+                ...topLevelEntries(assetsDir),
+                `minio/${config.storage.bucket}/`,
+            ]);
             break;
         case "azure":
-            await $`az storage blob upload-batch -d ${config.storage.bucket} -s ${assetsDir}`.quiet();
+            runQuiet([
+                "az",
+                "storage",
+                "blob",
+                "upload-batch",
+                "-d",
+                config.storage.bucket,
+                "-s",
+                assetsDir,
+            ]);
             break;
         default:
             throw new Error(

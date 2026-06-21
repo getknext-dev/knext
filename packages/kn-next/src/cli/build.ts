@@ -1,4 +1,5 @@
-#!/usr/bin/env bun
+#!/usr/bin/env node
+
 /**
  * kn-next build — Prepares Next.js app for Knative deployment.
  *
@@ -19,9 +20,9 @@
  * reconciles everything from the NextApp CR emitted by `deploy`.
  */
 
-import { $ } from "bun";
 import { uploadAssets } from "../utils/asset-upload";
 import { createLogger } from "../utils/logger";
+import { isEntrypoint, runQuiet } from "./exec";
 import { loadConfig } from "./shared";
 
 const log = createLogger({ module: "build" });
@@ -50,7 +51,7 @@ export async function build(options: BuildOptions = {}) {
     //    The app's next.config.ts must set output:'standalone'.
     if (!options.skipNextBuild) {
         log.info("Running next build (output:standalone)...");
-        await $`npm run build`.quiet();
+        runQuiet(["npm", "run", "build"]);
         log.info(
             "Next.js build complete — standalone output in .next/standalone/",
         );
@@ -66,8 +67,9 @@ export async function build(options: BuildOptions = {}) {
     );
 }
 
-// Run if executed directly
-if (import.meta.main) {
+// Run only when invoked directly as the entry (not when imported, e.g. in tests).
+// Node-correct replacement for Bun's `import.meta.main`.
+if (isEntrypoint(import.meta.url)) {
     try {
         await build({
             skipNextBuild: process.argv.includes("--skip-next"),

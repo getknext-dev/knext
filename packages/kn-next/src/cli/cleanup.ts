@@ -1,4 +1,5 @@
-#!/usr/bin/env bun
+#!/usr/bin/env node
+
 /**
  * kn-next cleanup - Removes Knative services and clears storage
  *
@@ -11,9 +12,9 @@
  *   3. Clear storage bucket
  */
 
-import { $ } from "bun";
 import type { KnativeNextConfig } from "../config";
 import { createLogger } from "../utils/logger";
+import { isEntrypoint, runQuiet, runQuietAllowFail } from "./exec";
 // Single source of truth for config loading — also runs validateConfig,
 // which cleanup's former private copy skipped (CONFIG-LOAD-DEDUP).
 import { loadConfig } from "./shared";
@@ -37,7 +38,13 @@ async function cleanup() {
     // 2. Delete Knative service
     log.info("Deleting Knative service...");
     try {
-        await $`kubectl delete ksvc ${config.name} --ignore-not-found`.quiet();
+        runQuiet([
+            "kubectl",
+            "delete",
+            "ksvc",
+            config.name,
+            "--ignore-not-found",
+        ]);
         log.info({ service: config.name }, "Deleted Knative service");
     } catch (_err) {
         log.warn("Service not found or already deleted");
@@ -47,20 +54,55 @@ async function cleanup() {
     if (config.infrastructure) {
         log.info("Deleting infrastructure services...");
         if (config.infrastructure.postgres?.enabled) {
-            await $`kubectl delete statefulset ${config.name}-postgres --ignore-not-found`.quiet();
-            await $`kubectl delete svc ${config.name}-postgres --ignore-not-found`.quiet();
-            await $`kubectl delete pvc -l app=${config.name}-postgres --ignore-not-found`.quiet();
+            const pg = `${config.name}-postgres`;
+            runQuiet([
+                "kubectl",
+                "delete",
+                "statefulset",
+                pg,
+                "--ignore-not-found",
+            ]);
+            runQuiet(["kubectl", "delete", "svc", pg, "--ignore-not-found"]);
+            runQuiet([
+                "kubectl",
+                "delete",
+                "pvc",
+                "-l",
+                `app=${pg}`,
+                "--ignore-not-found",
+            ]);
             log.info("Deleted PostgreSQL");
         }
         if (config.infrastructure.redis?.enabled) {
-            await $`kubectl delete deployment ${config.name}-redis --ignore-not-found`.quiet();
-            await $`kubectl delete svc ${config.name}-redis --ignore-not-found`.quiet();
+            const redis = `${config.name}-redis`;
+            runQuiet([
+                "kubectl",
+                "delete",
+                "deployment",
+                redis,
+                "--ignore-not-found",
+            ]);
+            runQuiet(["kubectl", "delete", "svc", redis, "--ignore-not-found"]);
             log.info("Deleted Redis");
         }
         if (config.infrastructure.minio?.enabled) {
-            await $`kubectl delete statefulset ${config.name}-minio --ignore-not-found`.quiet();
-            await $`kubectl delete svc ${config.name}-minio --ignore-not-found`.quiet();
-            await $`kubectl delete pvc -l app=${config.name}-minio --ignore-not-found`.quiet();
+            const minio = `${config.name}-minio`;
+            runQuiet([
+                "kubectl",
+                "delete",
+                "statefulset",
+                minio,
+                "--ignore-not-found",
+            ]);
+            runQuiet(["kubectl", "delete", "svc", minio, "--ignore-not-found"]);
+            runQuiet([
+                "kubectl",
+                "delete",
+                "pvc",
+                "-l",
+                `app=${minio}`,
+                "--ignore-not-found",
+            ]);
             log.info("Deleted MinIO");
         }
     }
@@ -76,24 +118,53 @@ async function cleanup() {
 async function clearStorage(config: KnativeNextConfig) {
     switch (config.storage.provider) {
         case "gcs":
-            await $`gsutil -m rm -r gs://${config.storage.bucket}/** 2>/dev/null || true`.quiet();
+            // gsutil expands the `**` wildcard itself (single argv token).
+            // Tolerate a non-zero exit (empty bucket) — the old `|| true` idiom.
+            runQuietAllowFail([
+                "gsutil",
+                "-m",
+                "rm",
+                "-r",
+                `gs://${config.storage.bucket}/**`,
+            ]);
             break;
         case "s3":
-            await $`aws s3 rm s3://${config.storage.bucket} --recursive`.quiet();
+            runQuiet([
+                "aws",
+                "s3",
+                "rm",
+                `s3://${config.storage.bucket}`,
+                "--recursive",
+            ]);
             break;
         case "minio":
-            await $`mc rm --recursive --force minio/${config.storage.bucket}`.quiet();
+            runQuiet([
+                "mc",
+                "rm",
+                "--recursive",
+                "--force",
+                `minio/${config.storage.bucket}`,
+            ]);
             break;
         case "azure":
-            await $`az storage blob delete-batch -s ${config.storage.bucket}`.quiet();
+            runQuiet([
+                "az",
+                "storage",
+                "blob",
+                "delete-batch",
+                "-s",
+                config.storage.bucket,
+            ]);
             break;
     }
 }
 
-// Run
-try {
-    await cleanup();
-} catch (err) {
-    log.fatal({ err }, "Cleanup failed");
-    process.exit(1);
+// Run only when invoked directly as the entry (not when imported, e.g. in tests).
+if (isEntrypoint(import.meta.url)) {
+    try {
+        await cleanup();
+    } catch (err) {
+        log.fatal({ err }, "Cleanup failed");
+        process.exit(1);
+    }
 }

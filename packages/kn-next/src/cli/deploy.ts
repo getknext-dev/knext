@@ -1,4 +1,4 @@
-#!/usr/bin/env bun
+#!/usr/bin/env node
 /**
  * kn-next CLI — Knative Next.js Deployment Automation
  *
@@ -16,9 +16,10 @@
  * The operator reconciles everything from the NextApp CR.
  */
 
+import { readFileSync, writeSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
-import { $ } from "bun";
 import type { KnativeNextConfig } from "../config";
 import { getAssetPrefix, uploadAssets } from "../utils/asset-upload";
 import { createLogger } from "../utils/logger";
@@ -27,6 +28,7 @@ import {
     resolveDigest,
     validateCRImageRef,
 } from "./cr-builder";
+import { isEntrypoint, runCapture, runInherit, runQuiet } from "./exec";
 import { loadConfig } from "./shared";
 
 const log = createLogger({ module: "deploy" });
@@ -41,6 +43,33 @@ interface DeployOptions {
     dryRun: boolean;
 }
 
+/**
+ * Synchronously write to stdout (fd 1). Unlike process.stdout.write (async on a
+ * pipe) this is guaranteed flushed before process.exit(), so `--help`/`--version`
+ * output is never truncated when the bin's stdout is a pipe (issue #68).
+ */
+function writeStdoutSync(text: string): void {
+    writeSync(1, text);
+}
+
+/**
+ * Reads the CLI version from the package manifest. Works from both the source
+ * layout (src/cli/deploy.ts) and the bundled layout (dist/cli/kn-next.js) —
+ * package.json sits two directories up in both cases.
+ */
+function getCliVersion(): string {
+    try {
+        const here = fileURLToPath(import.meta.url);
+        const pkgPath = resolve(here, "..", "..", "..", "package.json");
+        const pkg = JSON.parse(readFileSync(pkgPath, "utf-8")) as {
+            version?: string;
+        };
+        return pkg.version ?? "0.0.0";
+    } catch {
+        return "0.0.0";
+    }
+}
+
 function parseCliArgs(): DeployOptions {
     const { values } = parseArgs({
         options: {
@@ -52,14 +81,27 @@ function parseCliArgs(): DeployOptions {
             "skip-upload": { type: "boolean", default: false },
             "dry-run": { type: "boolean", default: false },
             help: { type: "boolean", short: "h", default: false },
+            version: { type: "boolean", short: "v", default: false },
         },
         strict: true,
         allowPositionals: true,
     });
 
+    if (values.version) {
+        // Resolve version from the package manifest without bundling it inline,
+        // so the published version is always the source of truth.
+        writeStdoutSync(`${getCliVersion()}\n`);
+        process.exit(0);
+    }
+
     if (values.help) {
-        log.info(
-            [
+        // Write help synchronously to fd 1 — NOT via the async pino-pretty
+        // transport (flushed after process.exit, swallowing output) and NOT via
+        // process.stdout.write (async on a pipe, truncated by process.exit).
+        // fs.writeSync(1, …) is guaranteed flushed before exit, so `npx kn-next
+        // --help | cat` works under plain node (issue #68).
+        writeStdoutSync(
+            `${[
                 "kn-next deploy — build → push → apply NextApp CR",
                 "",
                 "Options:",
@@ -71,7 +113,8 @@ function parseCliArgs(): DeployOptions {
                 "  --skip-upload   Skip asset upload step",
                 "  --dry-run       Print the NextApp CR without applying it",
                 "  -h, --help      Show this help",
-            ].join("\n"),
+                "  -v, --version   Print the kn-next version",
+            ].join("\n")}\n`,
         );
         process.exit(0);
     }
@@ -123,7 +166,7 @@ async function deploy() {
         const assetPrefix = getAssetPrefix(config.storage);
         process.env.ASSET_PREFIX = assetPrefix;
         log.info({ assetPrefix }, "Running next build (output:standalone)...");
-        await $`npm run build`.quiet();
+        runQuiet(["npm", "run", "build"]);
         log.info(
             "Next.js build complete — standalone output in .next/standalone/",
         );
@@ -169,7 +212,22 @@ async function deploy() {
             (async () => {
                 const repoRoot = resolve(process.cwd(), "../..");
                 // --metadata-file writes the buildx result JSON (includes containerimage.digest).
-                await $`docker buildx build --platform linux/amd64 -f ${process.cwd()}/Dockerfile -t ${taggedRef} --push --metadata-file ${metadataFilePath} ${repoRoot}`;
+                // ARGV array, no shell — taggedRef etc. arrive as single tokens.
+                runInherit([
+                    "docker",
+                    "buildx",
+                    "build",
+                    "--platform",
+                    "linux/amd64",
+                    "-f",
+                    `${process.cwd()}/Dockerfile`,
+                    "-t",
+                    taggedRef,
+                    "--push",
+                    "--metadata-file",
+                    metadataFilePath,
+                    repoRoot,
+                ]);
                 log.info("Docker image built and pushed");
             })(),
         );
@@ -181,14 +239,11 @@ async function deploy() {
         // FALLBACK: docker inspect --format '{{index .RepoDigests 0}}' (if metadata missing).
         // The operator's validateImageRef rejects any ref without @sha256:.
         log.info({ taggedRef }, "Resolving @sha256: digest...");
-        const { readFileSync } = await import("node:fs");
-        // ExecFn takes an ARGV array — no shell, no injection risk.
-        // Bun.spawn() bypasses sh entirely; each element is a separate argv token.
-        const execFn = async (argv: string[]): Promise<string> => {
-            const proc = Bun.spawn(argv, { stdout: "pipe", stderr: "pipe" });
-            await proc.exited;
-            return new Response(proc.stdout).text();
-        };
+        // ExecFn takes an ARGV array — no shell, no injection risk (CLI-58).
+        // runCapture spawns via execFileSync with shell:false, so each element
+        // is a separate, uninterpreted argv token — never concatenated into sh.
+        const execFn = async (argv: string[]): Promise<string> =>
+            runCapture(argv);
         const readFileFn = (p: string) => readFileSync(p, "utf-8");
         imageRef = await resolveDigest(
             taggedRef,
@@ -222,20 +277,31 @@ async function deploy() {
     writeFileSync(crPath, crYaml, "utf-8");
 
     log.info({ cr: crPath }, "Applying NextApp CR to cluster...");
-    await $`kubectl apply -f ${crPath} -n ${options.namespace}`;
+    runInherit(["kubectl", "apply", "-f", crPath, "-n", options.namespace]);
 
     // Wait briefly for the operator to begin reconciling, then read the URL.
-    const result =
-        await $`kubectl get nextapp ${config.name} -n ${options.namespace} -o jsonpath='{.status.url}'`.text();
+    const result = runCapture([
+        "kubectl",
+        "get",
+        "nextapp",
+        config.name,
+        "-n",
+        options.namespace,
+        "-o",
+        "jsonpath={.status.url}",
+    ]);
     log.info(
         { url: result.replace(/'/g, "") },
         "Deployment submitted — operator is reconciling",
     );
 }
 
-try {
-    await deploy();
-} catch (err) {
-    log.fatal({ err }, "Deployment failed");
-    process.exit(1);
+// Run only when invoked directly as the entry (not when imported, e.g. in tests).
+if (isEntrypoint(import.meta.url)) {
+    try {
+        await deploy();
+    } catch (err) {
+        log.fatal({ err }, "Deployment failed");
+        process.exit(1);
+    }
 }
