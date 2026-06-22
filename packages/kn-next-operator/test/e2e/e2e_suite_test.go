@@ -38,6 +38,11 @@ var (
 	shouldCleanupCertManager = false
 )
 
+// operatorNamespace is where `make deploy` installs the controller-manager.
+// Shared by the e2e_scale specs (#38, #39) so the operator is deployed exactly
+// once for the whole suite (see deployOperatorOnce / undeployOperator below).
+const operatorNamespace = "kn-next-operator-system"
+
 // TestE2E runs the e2e test suite to validate the solution in an isolated environment.
 // The default setup requires Kind and CertManager.
 //
@@ -61,9 +66,18 @@ var _ = BeforeSuite(func() {
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to load the manager image into Kind")
 
 	setupCertManager()
+
+	// Tag-specific extension of the single suite setup. No-op under the plain
+	// `e2e` tag; under `e2e_scale` it deploys the operator ONCE for the whole
+	// suite so the #38 and #39 specs share one controller-manager. Ginkgo allows
+	// only one BeforeSuite, which is why this is a hook, not a second BeforeSuite.
+	extraSuiteSetup()
 })
 
 var _ = AfterSuite(func() {
+	// Mirror of extraSuiteSetup; runs before CertManager teardown so the operator
+	// is removed first. No-op under the plain `e2e` tag.
+	extraSuiteTeardown()
 	teardownCertManager()
 })
 

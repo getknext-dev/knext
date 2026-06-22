@@ -151,6 +151,31 @@ var _ = Describe("NextApp Controller reconcile output", func() {
 			Expect(annotations).To(HaveKeyWithValue("autoscaling.knative.dev/max-scale", "10"))
 		})
 
+		It("renders scale-to-zero-eligible annotations (min-scale 0, max-scale 1) for #39 activation", func() {
+			// A2-3 (#39): the activation path requires the revision to be eligible
+			// to scale to zero (min-scale 0) and to wake on demand. A single-replica
+			// ceiling (max-scale 1) makes the nightly scale-from-zero e2e
+			// deterministic — exactly one pod is woken by the activator. This is the
+			// deterministic per-PR gate that proves the operator maps the CR onto the
+			// autoscaling annotations the activator relies on.
+			nn := reconcileOnce("ksvc-scale-from-zero", appsv1alpha1.NextAppSpec{
+				Image: validImage,
+				Scaling: &appsv1alpha1.ScalingSpec{
+					MinScale: 0,
+					MaxScale: 1,
+				},
+			})
+
+			ksvc := &servingv1.Service{}
+			Expect(k8sClient.Get(ctx, nn, ksvc)).To(Succeed())
+
+			annotations := ksvc.Spec.Template.Annotations
+			Expect(annotations).To(HaveKeyWithValue("autoscaling.knative.dev/min-scale", "0"),
+				"min-scale must be 0 so the revision is eligible to scale to zero")
+			Expect(annotations).To(HaveKeyWithValue("autoscaling.knative.dev/max-scale", "1"),
+				"max-scale must be 1 so exactly one pod is woken on activation")
+		})
+
 		It("stamps the build-id label onto the revision (pod) template when Spec.BuildID is set (#93)", func() {
 			nn := reconcileOnce("ksvc-buildid", appsv1alpha1.NextAppSpec{
 				Image:   validImage,

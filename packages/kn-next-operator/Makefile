@@ -100,7 +100,7 @@ cleanup-test-e2e: ## Tear down the Kind cluster used for e2e tests
 	@$(KIND) delete cluster --name $(KIND_CLUSTER)
 
 .PHONY: test-e2e-scale
-test-e2e-scale: manifests generate fmt vet ## Run the scale-to-zero bytecode-cache e2e (#38). Requires a kind+Knative cluster; NOT run in PR CI. Nightly/dispatch only.
+test-e2e-scale: manifests generate fmt vet ## Run the scale-to-zero e2e suite: bytecode-cache survival (#38) + scale-from-zero activation (#39). Requires a kind+Knative cluster; NOT run in PR CI. Nightly/dispatch only.
 	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) go test -tags=e2e_scale ./test/e2e/ -v -ginkgo.v -run TestE2E
 
 .PHONY: lint

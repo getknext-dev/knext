@@ -63,20 +63,21 @@ spec:
         args:
           - --leader-elect
           - --health-probe-bind-address=:8081
-        # BOOTSTRAP PLACEHOLDER DIGEST (issue #76):
-        # The operator image is built/scanned/signed/pushed to
-        #   ghcr.io/getknext-dev/kn-next-operator
-        # by .github/workflows/operator-supply-chain.yml, but only the FIRST push to
-        # `main` produces a real digest — it cannot exist before that push. Until then
-        # this stays a clearly-fake all-zeros sha256 so the check-no-latest.sh guard
-        # (which only requires a digest, never :latest) still passes.
-        # The release job substitutes the real pushed digest into dist/install.yaml
-        # (see the "Build installer + pin real digest" step in
-        # .github/workflows/operator-supply-chain.yml, which sed-pins the digest into
-        # config/manager/kustomization.yaml then runs `make build-installer`).
-        # To set it manually after a push:
-        #   docker inspect --format='{{index .RepoDigests 0}}' ghcr.io/getknext-dev/kn-next-operator:<tag>
-        image: ghcr.io/getknext-dev/kn-next-operator:v0.1.0@sha256:0000000000000000000000000000000000000000000000000000000000000000
+        # LOGICAL IMAGE NAME (issue #39): this is the bare kustomize logical name
+        # `controller`, NOT a real image ref. config/manager/kustomization.yaml's
+        # `images:` entry (name: controller) rewrites it to the digest-pinned
+        # ghcr.io/getknext-dev/kn-next-operator:v0.1.0@sha256:... in every rendered
+        # bundle, so `make build-installer` stays digest-pinned and check-no-latest.sh
+        # passes. `make deploy IMG=X` runs `kustomize edit set image controller=X`,
+        # which now matches THIS name and actually overrides the deployed image.
+        #
+        # PREVIOUSLY this was the literal `ghcr.io/...@sha256:0000...` placeholder,
+        # whose container image NAME (ghcr.io/getknext-dev/kn-next-operator) did NOT
+        # match the kustomization override name (`controller`) — so `set image
+        # controller=X` was a silent no-op and every deploy used the unpullable
+        # all-zeros digest (ErrImagePull). See kustomization.yaml for the real digest
+        # the bundle resolves to and the bootstrap/release notes for issue #76.
+        image: controller
         name: manager
         ports: []
         securityContext:

@@ -1,13 +1,21 @@
 name: Operator E2E (nightly / dispatch)
 
-# A2-2 (#38) Layer 2: the REAL scale-to-zero bytecode-cache invariant on a live
-# kind + Knative cluster (test/e2e/scale_to_zero_cache_test.go, build tag
-# `e2e_scale`).
+# Layer 2 of the scale-to-zero suite (build tag `e2e_scale`) — the REAL invariants
+# on a live kind + Knative cluster. `make test-e2e-scale` runs ALL e2e_scale
+# specs, so this one job now covers BOTH:
+#   - A2-2 (#38): bytecode cache SURVIVES a scale-to-zero cycle
+#     (test/e2e/scale_to_zero_cache_test.go)
+#   - A2-3 (#39): a minScale:0 app idles to 0 replicas then a request through the
+#     Knative activator wakes a pod and returns 200
+#     (test/e2e/scale_from_zero_test.go)
+# The operator is deployed once for the whole suite (test/e2e/scale_suite_test.go).
 #
 # Deliberately NOT in ci.yml: it needs a persistent kind cluster with Knative
-# Serving (scale-to-zero) + an RWO PVC bound across a scale cycle, and the timing
-# sits within PR-CI noise. The per-PR gate that proves the mechanism is the
-# deterministic vitest test apps/file-manager/bytecode-cache-reuse.test.ts.
+# Serving (scale-to-zero) + (for #38) an RWO PVC bound across a scale cycle, and
+# the timing sits within PR-CI noise. The per-PR gates that prove the mechanisms
+# are deterministic: the vitest test apps/file-manager/bytecode-cache-reuse.test.ts
+# (#38) and the envtest min-scale:0/max-scale:1 assertion in
+# internal/controller/reconcile_output_test.go (#39).
 #
 # Triggers: nightly schedule + manual workflow_dispatch only.
 #
@@ -33,7 +41,7 @@ permissions:
 
 jobs:
   scale-to-zero-cache:
-    name: scale-to-zero bytecode cache (e2e_scale)
+    name: scale-to-zero suite — cache (#38) + activation (#39) (e2e_scale)
     runs-on: ubuntu-latest
     # The real invariant can be flaky on shared runners (Knative install + scale
     # timing); never let a nightly hiccup page anyone. Failures are reviewed, not
@@ -58,8 +66,10 @@ jobs:
         run: kind create cluster --name kn-next-operator-test-e2e --wait 120s
 
       - name: Install Knative Serving (scale-to-zero)
-        # TODO(#39): factor this Knative bootstrap into a shared composite action
-        # once the scale-to-zero regression workflow needs the same steps.
+        # The config-autoscaler patch below (scale-to-zero-pod-retention-period:0s,
+        # short stable-window) is what makes BOTH the #38 cache spec and the #39
+        # activation spec observe a true cold start in this single job — scale
+        # timing is cluster config, not the NextApp CR.
         run: |
           set -euo pipefail
           KNATIVE_VERSION="knative-v1.16.0"
@@ -78,12 +88,40 @@ jobs:
           kubectl wait --for=condition=Available --timeout=300s \
             -n knative-serving deployment/controller deployment/webhook deployment/autoscaler
 
-      - name: Run scale-to-zero bytecode-cache e2e
+      # SCALE_TEST_IMAGE MUST be a real, pullable, digest-pinned file-manager image
+      # that serves /api/health (the #39 activation spec asserts an HTTP 200 from a
+      # woken pod; #38 scrapes /api/metrics). The in-code default in
+      # test/e2e/scale_*_test.go is an all-zeros placeholder digest that is
+      # DELIBERATELY UNPULLABLE — if it ever reaches the cluster the ksvc never
+      # becomes Ready (ErrImagePull) and the specs fail at "ksvc not Ready". So this
+      # step FAILS FAST with a clear message when no image is provided, rather than
+      # burning 5 minutes on a BeforeSuite timeout.
+      #   - workflow_dispatch: pass the digest via the `scale_test_image` input.
+      #   - schedule (nightly): set the repo/org variable `vars.SCALE_TEST_IMAGE`
+      #     to a freshly built+pushed file-manager digest (a publish job should
+      #     update it), or this run is skipped with a clear log line.
+      - name: Resolve SCALE_TEST_IMAGE
+        id: scale_image
+        run: |
+          set -euo pipefail
+          img="${{ inputs.scale_test_image || vars.SCALE_TEST_IMAGE }}"
+          if [ -z "$img" ]; then
+            echo "::warning::No SCALE_TEST_IMAGE provided (dispatch input empty and vars.SCALE_TEST_IMAGE unset)."
+            echo "The scale e2e specs need a real, pullable, digest-pinned file-manager image that serves /api/health."
+            echo "Skipping the scale e2e run for this trigger."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Using SCALE_TEST_IMAGE=$img"
+            echo "image=$img" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run scale-to-zero e2e suite (cache #38 + activation #39)
+        if: steps.scale_image.outputs.skip != 'true'
         working-directory: packages/kn-next-operator
         env:
           KIND_CLUSTER: kn-next-operator-test-e2e
           CERT_MANAGER_INSTALL_SKIP: 'true'
-          SCALE_TEST_IMAGE: ${{ inputs.scale_test_image }}
+          SCALE_TEST_IMAGE: ${{ steps.scale_image.outputs.image }}
         run: make test-e2e-scale
 
       - name: Tear down kind cluster

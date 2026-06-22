@@ -46,35 +46,68 @@ const (
 	staleOwner = "ahmedelbanna80"
 )
 
-// AC: manager.yaml + kustomization.yaml reference the getknext-dev owner.
+// AC: the effective deploy-time image (the kustomization override) references the
+// getknext-dev owner, and no manifest carries the stale owner.
+//
+// NOTE(#39): manager.yaml's container `image:` is now the bare logical kustomize
+// name `controller` (NOT a real ref) — the digest-pinned getknext-dev ref lives in
+// kustomization.yaml, which rewrites `controller` in every rendered bundle. That is
+// what makes `make deploy IMG=X` (kustomize edit set image controller=X) actually
+// override the image; see TestManagerUsesLogicalControllerName below.
 func TestManagerManifestsUseGetknextOwner(t *testing.T) {
+	c := repoFile(t, "config/manager/kustomization.yaml")
+	if !strings.Contains(c, wantOwner) {
+		t.Errorf("kustomization.yaml: expected image owner %q, not found", wantOwner)
+	}
 	for _, rel := range []string{
 		"config/manager/manager.yaml",
 		"config/manager/kustomization.yaml",
 	} {
-		c := repoFile(t, rel)
-		if !strings.Contains(c, wantOwner) {
-			t.Errorf("%s: expected image owner %q, not found", rel, wantOwner)
-		}
-		if strings.Contains(c, staleOwner) {
+		if strings.Contains(repoFile(t, rel), staleOwner) {
 			t.Errorf("%s: stale owner %q must be removed", rel, staleOwner)
 		}
 	}
 }
 
-// AC: the manager image is digest-pinned (@sha256:) and never :latest.
+// AC(#39): manager.yaml's container image is the bare logical kustomize name
+// `controller`, and kustomization.yaml declares an `images:` override under that
+// SAME name. This is the contract that was broken (manager.yaml hardcoded the
+// ghcr ref, whose image name did not match the `controller` override → `kustomize
+// edit set image controller=X` was a silent no-op → every deploy used the
+// unpullable placeholder). The two names MUST stay in lock-step.
+func TestManagerUsesLogicalControllerName(t *testing.T) {
+	mgr := repoFile(t, "config/manager/manager.yaml")
+	imgLine := regexp.MustCompile(`(?m)^\s*image:\s*(\S+)\s*$`)
+	m := imgLine.FindStringSubmatch(mgr)
+	if m == nil {
+		t.Fatalf("manager.yaml: no container image: line found")
+	}
+	if m[1] != "controller" {
+		t.Errorf("manager.yaml container image must be the bare logical name %q so the "+
+			"kustomization override applies, got %q", "controller", m[1])
+	}
+
+	kz := repoFile(t, "config/manager/kustomization.yaml")
+	if !regexp.MustCompile(`(?m)^\s*-?\s*name:\s*controller\s*$`).MatchString(kz) {
+		t.Errorf("kustomization.yaml must declare an images override under name %q "+
+			"(matching the manager container image name)", "controller")
+	}
+}
+
+// AC: the effective deploy-time image (kustomization override) is digest-pinned
+// (@sha256:) and never :latest.
 func TestManagerImageDigestPinned(t *testing.T) {
-	imgLine := regexp.MustCompile(`(?m)^\s*image:\s*ghcr\.io/getknext-dev/kn-next-operator:[^\s]+`)
-	c := repoFile(t, "config/manager/manager.yaml")
-	m := imgLine.FindString(c)
-	if m == "" {
-		t.Fatalf("manager.yaml: no getknext-dev image line found")
+	c := repoFile(t, "config/manager/kustomization.yaml")
+	if strings.Contains(c, ":latest") {
+		t.Errorf("kustomization.yaml image override must not be :latest")
 	}
-	if strings.Contains(m, ":latest") {
-		t.Errorf("manager.yaml image must not be :latest: %q", m)
+	newTag := regexp.MustCompile(`(?m)^\s*newTag:\s*(\S+)`)
+	m := newTag.FindStringSubmatch(c)
+	if m == nil {
+		t.Fatalf("kustomization.yaml: no newTag line found")
 	}
-	if !strings.Contains(m, "@sha256:") {
-		t.Errorf("manager.yaml image must be digest-pinned (@sha256:): %q", m)
+	if !strings.Contains(m[1], "@sha256:") {
+		t.Errorf("kustomization newTag must be digest-pinned (@sha256:): %q", m[1])
 	}
 }
 
