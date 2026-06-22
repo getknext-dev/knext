@@ -3,9 +3,9 @@
 #
 # This is pinned to the knative-serving namespace. When included from
 # config/default (which applies `namespace: kn-next-operator-system` to all
-# resources), the parent must neutralize that transformer for this ConfigMap so the
-# rendered output keeps `namespace: knative-serving` — see config/default's
-# unsetonly namespace transformer config.
+# resources), that namespace would be rewritten — so config/default re-pins this
+# ConfigMap back to `config-network` / `knative-serving` with a PatchTransformer
+# (config_network_repin.yaml) that runs AFTER the namespace/namePrefix transformers.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
