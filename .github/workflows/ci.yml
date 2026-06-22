@@ -86,6 +86,43 @@ jobs:
           RUNTIME: ${{ matrix.runtime }}
         run: node scripts/compat-smoke.mjs
 
+  bytecode-cache-reuse:
+    # A2-2 (#38) Layer 1 per-PR GATE: proves the V8 bytecode cache is REUSED across
+    # cold starts (no recompile). The deterministic proof needs the standalone build,
+    # which is gitignored — so this job BUILDS it first, then runs the vitest spec
+    # with KNEXT_REQUIRE_STANDALONE=1 so a missing build HARD-FAILS instead of
+    # skipping silently (a green check can never mean "skipped").
+    name: Bytecode cache reuse (Layer 1 gate)
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # @knext/lib ships only dist/ — it MUST be built before the app.
+      - name: Build @knext/lib
+        run: pnpm --filter @knext/lib build
+
+      - name: Build file-manager standalone (next build --webpack)
+        run: pnpm --filter file-manager build
+
+      - name: Run bytecode-cache reuse gate (must NOT skip)
+        env:
+          # Converts the skipIf guard into a HARD failure if the build is missing.
+          KNEXT_REQUIRE_STANDALONE: '1'
+        run: pnpm exec vitest run apps/file-manager/bytecode-cache-reuse.test.ts
+
   no-latest-guard:
     name: No :latest images in operator manifests
     runs-on: ubuntu-latest

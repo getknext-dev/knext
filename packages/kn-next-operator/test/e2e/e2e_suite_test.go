@@ -1,5 +1,5 @@
-//go:build e2e
-// +build e2e
+//go:build e2e || e2e_scale
+// +build e2e e2e_scale
 
 /*
 Copyright 2026.

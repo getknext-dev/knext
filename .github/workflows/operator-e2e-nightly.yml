@@ -1,0 +1,91 @@
+name: Operator E2E (nightly / dispatch)
+
+# A2-2 (#38) Layer 2: the REAL scale-to-zero bytecode-cache invariant on a live
+# kind + Knative cluster (test/e2e/scale_to_zero_cache_test.go, build tag
+# `e2e_scale`).
+#
+# Deliberately NOT in ci.yml: it needs a persistent kind cluster with Knative
+# Serving (scale-to-zero) + an RWO PVC bound across a scale cycle, and the timing
+# sits within PR-CI noise. The per-PR gate that proves the mechanism is the
+# deterministic vitest test apps/file-manager/bytecode-cache-reuse.test.ts.
+#
+# Triggers: nightly schedule + manual workflow_dispatch only.
+#
+# NOTE (#59 dependency): the spec's load-bearing assertions (warm_start==1 and a
+# stable PVC file count after cold start) only hold once the operator wires
+# `cache.enableBytecodeCache: true` into a PVC mounted at NODE_COMPILE_CACHE.
+# Until #59 lands, this workflow will run but the scale-to-zero cache assertions
+# are expected to fail — that is why it is nightly/dispatch and gates nothing.
+
+on:
+  schedule:
+    # 03:17 UTC daily — off-peak, avoids top-of-hour runner contention.
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+    inputs:
+      scale_test_image:
+        description: 'Digest-pinned file-manager image to deploy (overrides SCALE_TEST_IMAGE).'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  scale-to-zero-cache:
+    name: scale-to-zero bytecode cache (e2e_scale)
+    runs-on: ubuntu-latest
+    # The real invariant can be flaky on shared runners (Knative install + scale
+    # timing); never let a nightly hiccup page anyone. Failures are reviewed, not
+    # gating.
+    continue-on-error: true
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: packages/kn-next-operator/go.mod
+          cache-dependency-path: packages/kn-next-operator/go.sum
+
+      - name: Install kind
+        uses: helm/kind-action@v1
+        with:
+          install_only: true
+
+      - name: Create kind cluster
+        run: kind create cluster --name kn-next-operator-test-e2e --wait 120s
+
+      - name: Install Knative Serving (scale-to-zero)
+        # TODO(#39): factor this Knative bootstrap into a shared composite action
+        # once the scale-to-zero regression workflow needs the same steps.
+        run: |
+          set -euo pipefail
+          KNATIVE_VERSION="knative-v1.16.0"
+          kubectl apply -f "https://github.com/knative/serving/releases/download/${KNATIVE_VERSION}/serving-crds.yaml"
+          kubectl apply -f "https://github.com/knative/serving/releases/download/${KNATIVE_VERSION}/serving-core.yaml"
+          kubectl apply -f "https://github.com/knative/net-kourier/releases/download/${KNATIVE_VERSION}/kourier.yaml"
+          kubectl patch configmap/config-network \
+            --namespace knative-serving \
+            --type merge \
+            --patch '{"data":{"ingress-class":"kourier.ingress.networking.knative.dev"}}'
+          # scale-to-zero with no retention so the spec observes a true cold start.
+          kubectl patch configmap/config-autoscaler \
+            --namespace knative-serving \
+            --type merge \
+            --patch '{"data":{"scale-to-zero-pod-retention-period":"0s","stable-window":"6s"}}'
+          kubectl wait --for=condition=Available --timeout=300s \
+            -n knative-serving deployment/controller deployment/webhook deployment/autoscaler
+
+      - name: Run scale-to-zero bytecode-cache e2e
+        working-directory: packages/kn-next-operator
+        env:
+          KIND_CLUSTER: kn-next-operator-test-e2e
+          CERT_MANAGER_INSTALL_SKIP: 'true'
+          SCALE_TEST_IMAGE: ${{ inputs.scale_test_image }}
+        run: make test-e2e-scale
+
+      - name: Tear down kind cluster
+        if: always()
+        run: kind delete cluster --name kn-next-operator-test-e2e || true
