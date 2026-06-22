@@ -165,6 +165,22 @@ type CacheSpec struct {
 type RevalidationSpec struct {
 	Queue          string `json:"queue,omitempty"`
 	KafkaBrokerUrl string `json:"kafkaBrokerUrl,omitempty"`
+
+	// ProvisionKafkaSource gates whether the operator provisions a Knative
+	// KafkaSource for `queue: kafka`.
+	//
+	// nil/false (DEFAULT) => no KafkaSource is provisioned. The `{app}-revalidator`
+	// consumer that the source would sink into is design-now/build-later (issue #95):
+	// provisioning the source by default would point eventing at a service that is
+	// never deployed (events delivered nowhere). When kafka is selected but this is
+	// not opted in, the operator surfaces a non-fatal `RevalidationDeferred` status
+	// condition instead.
+	//
+	// true => explicit opt-in. The operator provisions the KafkaSource; setting this
+	// asserts that you have deployed an external revalidator consumer for the
+	// `{app}-revalidation` topic yourself.
+	// +optional
+	ProvisionKafkaSource *bool `json:"provisionKafkaSource,omitempty"`
 }
 
 type ResourcesSpec struct {

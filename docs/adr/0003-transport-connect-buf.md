@@ -44,3 +44,21 @@ HTTP-annotation plumbing and a transcoding layer, and has weaker TS ergonomics.
 - [ ] `buf.gen.yaml` with `connect-go`, `connect-es`, `es` (message types).
 - [ ] Catch-all Connect route-handler generator for the JSON facade.
 - [ ] server-only client-wrapper + Server-Action generators.
+
+## Revalidation status (ISR-over-Kafka routing — DEFERRED, #95)
+
+The Kafka→revalidator routing this ADR's family describes (a domain event lands on Kafka →
+a `{app}-revalidator` service consumes it → it calls `revalidateTag()` to invalidate every pod's
+Redis-backed cache) is **deferred / build-later**. The `{app}-revalidator` consumer service has
+**no tracked implementation** in source, and the ADR-0003 routing PR (**#27**) was **closed
+without merging**.
+
+Decision (issue #95, Option B): the operator **no longer provisions the KafkaSource by default**.
+Provisioning a source whose sink (`{app}-revalidator`) is never deployed would deliver
+revalidation events nowhere — a dangling control-plane→data-plane integration. Provisioning is now
+**gated behind explicit opt-in**: `spec.revalidation.provisionKafkaSource: true` (default nil/false
+⇒ no source). Setting kafka without opting in surfaces a non-fatal `RevalidationDeferred` status
+condition (reason `ConsumerNotProvisioned`); `Ready` stays `True`.
+
+Re-evaluate (build the consumer, Option A) once Tier-A correctness lands; until then this routing
+is design-now/build-later.
