@@ -1,0 +1,182 @@
+name: Operator Supply Chain
+
+# Issue #76: publish + sign the kn-next-operator image and ship an installable bundle.
+#
+# Mirrors .github/workflows/supply-chain.yml (the APP image, #48): SBOM per image ·
+# Trivy scan + FAIL on HIGH/CRITICAL on main (report-only on PRs) · cosign keyless
+# sign + SBOM attestation. Build/scan run on every PR; push + sign only on main
+# (no signing throwaway PR images).
+#
+# Bootstrap (#76): the operator image at ghcr.io/getknext-dev/kn-next-operator does
+# not exist until the FIRST push to main runs this job. Before that, the manager
+# manifests carry a clearly-fake all-zeros placeholder digest (which still passes
+# hack/check-no-latest.sh — that guard rejects :latest, not unreachable digests).
+# After the push, the "Build installer + pin real digest" step rewrites
+# dist/install.yaml with the real pushed digest and attaches it to the GitHub
+# Release tagged `operator-latest`, so the README's
+# releases/latest/download/install.yaml URL resolves.
+#
+# Path discipline (review fix): this job does NOT set a run.working-directory
+# default. A job-level default only applies to `run:` steps, NOT to `uses:` action
+# steps — so an action like anchore/sbom-action would write its output-file to
+# $GITHUB_WORKSPACE (repo root) while a `run:` step (cosign attest) would look in the
+# subdir, and the paths would silently diverge. Instead every `run:` step uses
+# explicit `packages/kn-next-operator/...` paths, and the SBOM output-file is a
+# single repo-root path referenced identically by upload + attest.
+#
+# Required permissions/secrets (documented for operators):
+#   - packages: write  → push to GHCR (uses the built-in GITHUB_TOKEN)
+#   - id-token: write  → cosign keyless signing via OIDC (Sigstore/Fulcio)
+#   - contents: write  → create/update the GitHub Release that carries install.yaml
+#   No extra repo secrets are needed; GITHUB_TOKEN is sufficient for GHCR + OIDC +
+#   Releases.
+
+on:
+  pull_request:
+    paths:
+      - 'packages/kn-next-operator/**'
+      - '.github/workflows/operator-supply-chain.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'packages/kn-next-operator/**'
+      - '.github/workflows/operator-supply-chain.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  operator-image-supply-chain:
+    name: Operator SBOM + Trivy (+ cosign sign on main)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create/update the GitHub Release that carries install.yaml
+      packages: write # push to GHCR on main
+      id-token: write # cosign keyless signing via OIDC
+    steps:
+      - uses: actions/checkout@v4
+
+      # GHCR repository names must be lowercase; the owner can be mixed-case.
+      # ${OWNER,,} lowercases it (mirrors the app job — fixes the #48 casing bug).
+      - name: Compute lowercase image name
+        run: echo "IMAGE=ghcr.io/${OWNER,,}/kn-next-operator" >> "$GITHUB_ENV"
+        env:
+          OWNER: ${{ github.repository_owner }}
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: github.ref == 'refs/heads/main'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # On PRs: build + load locally for scanning (no push).
+      # On main: build + push by digest so we can sign the exact pushed image.
+      - name: Build operator image
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: packages/kn-next-operator
+          file: packages/kn-next-operator/Dockerfile
+          platforms: linux/amd64
+          tags: ${{ env.IMAGE }}:${{ github.sha }}
+          load: ${{ github.ref != 'refs/heads/main' }}
+          push: ${{ github.ref == 'refs/heads/main' }}
+          # provenance emits a manifest list the `load` (docker) exporter can't handle,
+          # so only attach it on the push/main path (registry exporter). (#48 fix.)
+          provenance: ${{ github.ref == 'refs/heads/main' }}
+
+      # output-file is resolved relative to $GITHUB_WORKSPACE (repo root) for a
+      # `uses:` step. This is the single canonical SBOM path; upload + attest below
+      # reference the SAME path so they never diverge.
+      - name: Generate SBOM (syft, SPDX-JSON)
+        uses: anchore/sbom-action@v0
+        with:
+          image: ${{ env.IMAGE }}:${{ github.sha }}
+          format: spdx-json
+          output-file: operator-sbom.spdx.json
+
+      - name: Upload SBOM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: operator-sbom-${{ github.sha }}
+          path: operator-sbom.spdx.json
+
+      - name: Trivy scan — FAIL on HIGH/CRITICAL
+        # Report (don't block) on PRs; ENFORCE (fail) on main. Matches the app-image
+        # policy: a pre-existing base-image CVE can't block an unrelated PR, while
+        # main stays gated.
+        continue-on-error: ${{ github.ref != 'refs/heads/main' }}
+        # @master resolves reliably; pin to a release SHA as a supply-chain follow-up.
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.IMAGE }}:${{ github.sha }}
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+          ignore-unfixed: true
+          format: table
+
+      - name: Install cosign
+        if: github.ref == 'refs/heads/main'
+        uses: sigstore/cosign-installer@v3
+
+      # No working-directory default: this `run:` step executes at repo root, so it
+      # references the SAME operator-sbom.spdx.json that the sbom-action wrote there.
+      - name: Sign image + attest SBOM (keyless)
+        if: github.ref == 'refs/heads/main'
+        env:
+          COSIGN_EXPERIMENTAL: "1"
+        run: |
+          DIGEST="${{ steps.build.outputs.digest }}"
+          cosign sign --yes "${IMAGE}@${DIGEST}"
+          cosign attest --yes --predicate operator-sbom.spdx.json --type spdxjson "${IMAGE}@${DIGEST}"
+
+      # On main only: regenerate dist/install.yaml with the REAL pushed digest. This is
+      # the bootstrap-resolution step — the placeholder all-zeros digest in the
+      # committed manifests is replaced here with the digest cosign just signed.
+      # This `run:` step runs at repo root, so it cd's into the operator package.
+      - name: Build installer + pin real digest (main only)
+        if: github.ref == 'refs/heads/main'
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          cd packages/kn-next-operator
+          # Pin the real digest into the manager kustomization (single combined
+          # newTag form, so hack/check-no-latest.sh stays happy), then render.
+          sed -i -E \
+            "s|(newTag: v[0-9]+\.[0-9]+\.[0-9]+@sha256:)[0-9a-f]{64}|\\1${DIGEST#sha256:}|" \
+            config/manager/kustomization.yaml
+          make build-installer
+          echo "Pinned operator image digest ${DIGEST} into dist/install.yaml:"
+          grep -E 'image: ghcr' dist/install.yaml
+          bash hack/check-no-latest.sh
+
+      # Transient CI artifact (auth-gated) — handy for inspecting the exact bundle a
+      # run produced, but NOT the user-facing install path.
+      - name: Upload install.yaml artifact (main only)
+        if: github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@v4
+        with:
+          name: operator-install-bundle-${{ github.sha }}
+          path: packages/kn-next-operator/dist/install.yaml
+
+      # User-facing install path (review fix): attach the digest-pinned bundle to a
+      # GitHub Release so `releases/latest/download/install.yaml` resolves (the URL the
+      # operator README documents). The tag is a moving `operator-latest` release that
+      # is re-pointed to the current main on every publish; make_latest keeps the
+      # `releases/latest/...` redirect resolving to it.
+      - name: Publish install.yaml as a Release asset (main only)
+        if: github.ref == 'refs/heads/main'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: operator-latest
+          name: kn-next-operator (latest)
+          make_latest: "true"
+          files: packages/kn-next-operator/dist/install.yaml
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
