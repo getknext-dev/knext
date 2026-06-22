@@ -6,13 +6,20 @@
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { NextAdapter } from 'next';
 import { beforeAll, describe, expect, it, vi } from 'vitest';
+
+// NOTE: the adapter now re-exports @knext/core/adapter (#89). We intentionally do
+// NOT annotate `mod.default` with the official `NextAdapter` type here: the app and
+// @knext/core can resolve distinct (peer-deduped) `next` type instances, so a direct
+// assignment compares nominally-incompatible enums (RenderingMode/AdapterOutputType).
+// The adapter shape is validated structurally by the runtime expect(...) assertions
+// below. This mirrors apps/file-manager/next-adapter.ts, which avoids the same
+// cross-instance assignment on the re-exported value.
 
 describe('next-adapter (POC-ADAPTER-P0 spike)', () => {
   it('exports a valid NextAdapter with name, modifyConfig and onBuildComplete', async () => {
     const mod = await import('./next-adapter.js');
-    const adapter: NextAdapter = mod.default;
+    const adapter = mod.default;
 
     expect(adapter).toBeDefined();
     expect(typeof adapter.name).toBe('string');
@@ -23,7 +30,7 @@ describe('next-adapter (POC-ADAPTER-P0 spike)', () => {
 
   it('modifyConfig forces output:standalone and returns config unchanged otherwise', async () => {
     const mod = await import('./next-adapter.js');
-    const adapter: NextAdapter = mod.default;
+    const adapter = mod.default;
 
     const baseConfig = {
       output: undefined,
@@ -40,7 +47,7 @@ describe('next-adapter (POC-ADAPTER-P0 spike)', () => {
 
   it('modifyConfig is a no-op on non-build phases', async () => {
     const mod = await import('./next-adapter.js');
-    const adapter: NextAdapter = mod.default;
+    const adapter = mod.default;
 
     const baseConfig = { output: 'export' } as any;
     const result = await adapter.modifyConfig!(baseConfig, { phase: 'phase-development-server' });
@@ -51,7 +58,7 @@ describe('next-adapter (POC-ADAPTER-P0 spike)', () => {
 
   it('onBuildComplete logs output counts and build metadata without throwing', async () => {
     const mod = await import('./next-adapter.js');
-    const adapter: NextAdapter = mod.default;
+    const adapter = mod.default;
 
     const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
 
@@ -94,7 +101,7 @@ describe('next-adapter (POC-ADAPTER-P0 spike)', () => {
 
   it('onBuildComplete logs ctx.routes (routing) counts — headers, redirects, rewrites, dynamicRoutes', async () => {
     const mod = await import('./next-adapter.js');
-    const adapter: NextAdapter = mod.default;
+    const adapter = mod.default;
 
     const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
 
@@ -212,7 +219,7 @@ describe('next-adapter upload (POC-ADAPTER-P1-rework)', () => {
     delete process.env.STORAGE_BUCKET;
 
     const mod = await import('./next-adapter.js');
-    const adapter: NextAdapter = mod.default;
+    const adapter = mod.default;
     const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
 
     await adapter.onBuildComplete!(makeCtx());
@@ -239,7 +246,7 @@ describe('next-adapter upload (POC-ADAPTER-P1-rework)', () => {
       getMinioClient: () => ({ putObject: putObjectMock }),
     }));
 
-    const { default: adapter } = (await import('./next-adapter.js')) as { default: NextAdapter };
+    const { default: adapter } = await import('./next-adapter.js');
     const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
 
     // 2 staticFiles with real file paths + 1 prerender WITHOUT fallback.filePath
@@ -284,7 +291,7 @@ describe('next-adapter upload (POC-ADAPTER-P1-rework)', () => {
       getMinioClient: () => ({ putObject: putObjectMock }),
     }));
 
-    const { default: adapter } = (await import('./next-adapter.js')) as { default: NextAdapter };
+    const { default: adapter } = await import('./next-adapter.js');
     const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
 
     const ctx = makeCtx({
