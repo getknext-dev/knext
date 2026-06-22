@@ -173,6 +173,75 @@ func GetProjectDir() (string, error) {
 	return wd, nil
 }
 
+// ---------------------------------------------------------------------------
+// Scale-to-zero / metrics helpers (shared by the nightly e2e specs:
+// scale_to_zero_cache_test.go (#38) and the scale-to-zero regression (#39)).
+// These are deliberately generic kubectl/Knative wrappers so #39 can reuse them
+// without depending on #38's spec.
+// ---------------------------------------------------------------------------
+
+// Kubectl runs a kubectl subcommand against the active context and returns its
+// combined output. Thin wrapper over Run for readability in the specs.
+func Kubectl(args ...string) (string, error) {
+	return Run(exec.Command("kubectl", args...))
+}
+
+// KnativeReadyPodCount returns the number of Running pods for a Knative Service
+// in the given namespace (label `serving.knative.dev/service=<svc>`). A return
+// of 0 means the service has scaled to zero.
+func KnativeReadyPodCount(namespace, ksvc string) (int, error) {
+	out, err := Kubectl("get", "pods",
+		"-n", namespace,
+		"-l", fmt.Sprintf("serving.knative.dev/service=%s", ksvc),
+		"--field-selector=status.phase=Running",
+		"-o", "name",
+	)
+	if err != nil {
+		return 0, err
+	}
+	return len(GetNonEmptyLines(out)), nil
+}
+
+// ScrapeAppMetrics curls the app's own `/api/metrics` route (port 3000 inside
+// the app container, NOT the :9091 sidecar) from an ephemeral in-cluster pod and
+// returns the Prometheus exposition text. The app URL is the Knative service's
+// cluster-local address. Used to read `kn_next_bytecode_cache_warm_start`.
+func ScrapeAppMetrics(namespace, ksvc string) (string, error) {
+	url := fmt.Sprintf("http://%s.%s.svc.cluster.local/api/metrics", ksvc, namespace)
+	podName := fmt.Sprintf("scrape-%s", ksvc)
+	// Best-effort cleanup of any prior scrape pod.
+	_, _ = Kubectl("delete", "pod", podName, "-n", namespace, "--ignore-not-found")
+	out, err := Kubectl("run", podName,
+		"-n", namespace,
+		"--restart=Never",
+		"--rm", "-i",
+		"--image=curlimages/curl:8.11.1",
+		"--command", "--",
+		"curl", "-sS", "--max-time", "30", url,
+	)
+	return out, err
+}
+
+// ScrapeAppMetricValue extracts the numeric value of a single-sample metric line
+// whose name (with any label set) matches `metricPrefix` from raw exposition text.
+// Returns the raw string value (e.g. "1") so callers can assert exact equality.
+func ScrapeAppMetricValue(metrics, metricPrefix string) (string, bool) {
+	for _, line := range strings.Split(metrics, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if !strings.HasPrefix(line, metricPrefix) {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) >= 2 {
+			return fields[len(fields)-1], true
+		}
+	}
+	return "", false
+}
+
 // UncommentCode searches for target in the file and remove the comment prefix
 // of the target content. The target content may span multiple lines.
 func UncommentCode(filename, target, prefix string) error {
