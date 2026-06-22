@@ -33,19 +33,32 @@ that emits the preview block, tests around the operator behaviour, and a (gated)
    from that block. New CLI surface: `kn-next preview deploy --pr <n> --branch <ref> [-n <ns>]` and
    `kn-next preview destroy --pr <n> [-n <ns>]`.
 
-2. **Isolation is NAME-DERIVED and therefore automatic.** Every per-app scope in knext is keyed by
-   the `NextApp` name:
+2. **Isolation is uniformly NAME-DERIVED — assets, URL, Redis keyspace, and finalizer all key off
+   the `<app>-pr-<n>` name:**
    - **Assets** — `appKeyPrefix`/`getAssetPrefix`/`appStoragePrefix` are all `<name>/`-scoped
      (ADR-0008), so a preview uploads/serves under an isolated `<app>-pr-<n>/` prefix.
    - **URL** — the Knative Service is named after the `NextApp`, so a preview gets a distinct ksvc
      URL surfaced as `status.url` (which the CLI reads back and prints for the PR comment).
+   - **Redis keyspace** — the asset/URL prefixes are *re-derived* from `name`, but the Redis
+     `cache.keyPrefix` is a *verbatim* value, so it is NOT auto-isolated. `kn-next preview deploy`
+     therefore explicitly overrides `cache.keyPrefix = <app>-pr-<n>` when building the preview config
+     (only when a cache is configured). Without this, a preview would share prod's ISR/data-cache
+     keyspace — reading/writing/poisoning prod's cached data — and, far worse, `preview destroy`
+     would let the finalizer flush prod's keys (see §4 + the destroy-safety note below). The
+     CLI-side override was chosen over an operator-side derive-from-`app.Name` because it is
+     simpler and fully contained in the deploy path; the operator's `CleanupCache` needs no change.
    - **Teardown** — the operator's `apps.kn-next.dev/external-cleanup` finalizer (ADR-0008) reaps
-     exactly that name's prefix + Redis keyspace on delete.
+     exactly that name's asset prefix + Redis keyspace on delete. Because the preview's keyPrefix is
+     `<app>-pr-<n>`, `CleanupCache` can ONLY flush `<app>-pr-<n>:*` — it can never touch prod's keys.
    No operator changes are needed for isolation, GC, or teardown.
 
-3. **A preview is EPHEMERAL and shares nothing stateful with prod — NO database, by default.** It is
-   a throwaway compute environment. Cross-zone data sovereignty (`scs-zones.md`) is preserved
-   trivially because a preview owns its own name-scoped store and connects to nothing of prod's.
+3. **A preview is EPHEMERAL and shares nothing stateful with prod — NO database, and its own
+   name-scoped Redis keyspace, by default.** It is a throwaway compute environment. Cross-zone data
+   sovereignty (`scs-zones.md`) is preserved because a preview owns its own name-scoped object-store
+   prefix AND its own name-scoped Redis keyPrefix, and connects to nothing of prod's. A regression
+   test (`preview-cli.test.ts`) deploys a preview from a prod config with `cache.keyPrefix: "prod"`
+   and asserts the effective keyPrefix is `<app>-pr-<n>`, NOT `prod` — the negative proof that a
+   preview can neither read nor reap prod's cache.
 
 4. **Teardown authority = the PR-close event.** `kn-next preview destroy` deletes ONLY the
    `<app>-pr-<n>` `NextApp` CR (`--ignore-not-found`, idempotent); the finalizer + ownerReference GC

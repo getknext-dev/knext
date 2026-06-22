@@ -119,7 +119,26 @@ export async function runPreviewDeploy(
 
     // Override the config name so the asset prefix, image repo path, ksvc URL, and
     // finalizer scope are all `<app>-pr-<n>`-isolated from prod.
-    const previewConfig: KnativeNextConfig = { ...config, name: previewName };
+    //
+    // CRITICAL (data sovereignty + destroy-safety): also name-scope the Redis
+    // keyPrefix. Asset/URL/finalizer prefixes are re-derived from `name`, but the
+    // Redis `cache.keyPrefix` is a verbatim value — if copied from prod, the
+    // preview would (1) read/write/poison prod's ISR/data cache (violates
+    // scs-zones: a zone owns its data store, no shared database), and far worse
+    // (2) on `preview destroy` the operator's finalizer CleanupCache would flush
+    // `<prod-prefix>:*`, WIPING prod's Redis. Overriding keyPrefix to the preview
+    // name keeps the keyspace isolated and makes teardown only ever touch the
+    // preview's own keys. Only the Redis cache has a (string) keyPrefix the
+    // finalizer flushes by; DynamoDB is keyed by table, so we leave it untouched.
+    const previewCache: KnativeNextConfig["cache"] =
+        config.cache?.provider === "redis"
+            ? { ...config.cache, keyPrefix: previewName }
+            : config.cache;
+    const previewConfig: KnativeNextConfig = {
+        ...config,
+        name: previewName,
+        cache: previewCache,
+    };
 
     const imageRef = await deps.buildAndPush(
         previewName,

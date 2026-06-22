@@ -92,6 +92,74 @@ describe("runPreviewDeploy (#91)", () => {
         expect(captureArgv.join(" ")).toContain("status.url");
     });
 
+    it("NEGATIVE (data sovereignty / destroy-safety): name-scopes the Redis keyPrefix so a preview neither shares nor reaps prod's cache keyspace", async () => {
+        // A prod config with a Redis cache + a prod keyPrefix. If the preview
+        // copied this verbatim, (1) it would read/write/poison prod's ISR cache,
+        // and (2) `preview destroy` -> finalizer CleanupCache would flush
+        // `prod:*`, wiping prod's Redis. The preview MUST get its own
+        // `<app>-pr-<n>` keyPrefix.
+        const prodConfig: KnativeNextConfig = {
+            ...baseConfig,
+            cache: {
+                provider: "redis",
+                url: "redis://prod:6379",
+                keyPrefix: "prod",
+            },
+        };
+
+        const apply = vi.fn((_argv: readonly string[]) => {});
+        const capture = vi.fn((_argv: readonly string[]) => "https://x");
+        const buildAndPush = vi.fn(
+            async (
+                _name: string,
+                _config: KnativeNextConfig,
+                _branch: string,
+            ) => digestImage,
+        );
+
+        await runPreviewDeploy(
+            prodConfig,
+            { prId: "42", branch: "feat/x", namespace: "previews" },
+            { apply, capture, buildAndPush },
+        );
+
+        // The config handed to the build/render step must carry the preview's OWN
+        // name-derived keyPrefix — never prod's.
+        const previewConfig = buildAndPush.mock
+            .calls[0][1] as KnativeNextConfig;
+        expect(previewConfig.cache?.provider).toBe("redis");
+        const cache = previewConfig.cache as Extract<
+            KnativeNextConfig["cache"],
+            { provider: "redis" }
+        >;
+        expect(cache.keyPrefix).toBe("my-app-pr-42");
+        expect(cache.keyPrefix).not.toBe("prod");
+        // The rest of the cache config (url) is preserved.
+        expect(cache.url).toBe("redis://prod:6379");
+    });
+
+    it("leaves cache undefined when prod has no cache configured (no spurious cache block)", async () => {
+        const apply = vi.fn((_argv: readonly string[]) => {});
+        const capture = vi.fn((_argv: readonly string[]) => "https://x");
+        const buildAndPush = vi.fn(
+            async (
+                _name: string,
+                _config: KnativeNextConfig,
+                _branch: string,
+            ) => digestImage,
+        );
+
+        await runPreviewDeploy(
+            baseConfig,
+            { prId: "42", branch: "feat/x", namespace: "previews" },
+            { apply, capture, buildAndPush },
+        );
+
+        const previewConfig = buildAndPush.mock
+            .calls[0][1] as KnativeNextConfig;
+        expect(previewConfig.cache).toBeUndefined();
+    });
+
     it("NEGATIVE (ADR-0001): writes ONLY nextapp — never ksvc/route/kn/service", async () => {
         const apply = vi.fn((_argv: readonly string[]) => {});
         const capture = vi.fn((_argv: readonly string[]) => "https://x");
