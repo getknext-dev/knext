@@ -270,6 +270,50 @@ var _ = Describe("NextApp Controller reconcile output", func() {
 		})
 	})
 
+	Context("RUM env propagation (#94)", func() {
+		It("does NOT set NEXT_PUBLIC_RUM_ENABLED when RUM is off", func() {
+			nn := reconcileOnce("rum-off", appsv1alpha1.NextAppSpec{
+				Image:         validImage,
+				Observability: &appsv1alpha1.ObservabilitySpec{Enabled: true},
+			})
+			ksvc := &servingv1.Service{}
+			Expect(k8sClient.Get(ctx, nn, ksvc)).To(Succeed())
+			env := ksvc.Spec.Template.Spec.Containers[0].Env
+			Expect(envValue(env, "NEXT_PUBLIC_RUM_ENABLED")).To(BeEmpty())
+			Expect(envValue(env, "NEXT_PUBLIC_RUM_SAMPLE_RATE")).To(BeEmpty())
+		})
+
+		It("sets NEXT_PUBLIC_RUM_ENABLED and sample rate when RUM is on", func() {
+			nn := reconcileOnce("rum-on", appsv1alpha1.NextAppSpec{
+				Image: validImage,
+				Observability: &appsv1alpha1.ObservabilitySpec{
+					Enabled: true,
+					Rum:     &appsv1alpha1.RumSpec{Enabled: true, SampleRate: "0.25"},
+				},
+			})
+			ksvc := &servingv1.Service{}
+			Expect(k8sClient.Get(ctx, nn, ksvc)).To(Succeed())
+			env := ksvc.Spec.Template.Spec.Containers[0].Env
+			Expect(envValue(env, "NEXT_PUBLIC_RUM_ENABLED")).To(Equal("true"))
+			Expect(envValue(env, "NEXT_PUBLIC_RUM_SAMPLE_RATE")).To(Equal("0.25"))
+		})
+
+		It("omits the sample-rate env when unset", func() {
+			nn := reconcileOnce("rum-on-nosample", appsv1alpha1.NextAppSpec{
+				Image: validImage,
+				Observability: &appsv1alpha1.ObservabilitySpec{
+					Enabled: true,
+					Rum:     &appsv1alpha1.RumSpec{Enabled: true},
+				},
+			})
+			ksvc := &servingv1.Service{}
+			Expect(k8sClient.Get(ctx, nn, ksvc)).To(Succeed())
+			env := ksvc.Spec.Template.Spec.Containers[0].Env
+			Expect(envValue(env, "NEXT_PUBLIC_RUM_ENABLED")).To(Equal("true"))
+			Expect(envValue(env, "NEXT_PUBLIC_RUM_SAMPLE_RATE")).To(BeEmpty())
+		})
+	})
+
 	Context("KafkaSource", func() {
 		It("is NOT created when Revalidation is unset", func() {
 			nn := reconcileOnce("kafka-off", appsv1alpha1.NextAppSpec{Image: validImage})

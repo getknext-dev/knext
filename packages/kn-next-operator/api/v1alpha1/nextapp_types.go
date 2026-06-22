@@ -192,6 +192,17 @@ type ResourcesSpec struct {
 
 type ObservabilitySpec struct {
 	Enabled bool `json:"enabled,omitempty"`
+	// Rum (#94): self-hosted Web Vitals → Prometheus/Grafana. Default OFF.
+	// When enabled, the operator propagates NEXT_PUBLIC_RUM_ENABLED (and
+	// optionally NEXT_PUBLIC_RUM_SAMPLE_RATE) so the client beacon activates.
+	Rum *RumSpec `json:"rum,omitempty"`
+}
+
+// RumSpec configures the Real User Monitoring (Web Vitals) client beacon.
+type RumSpec struct {
+	Enabled bool `json:"enabled,omitempty"`
+	// SampleRate is the client-side sampling fraction (0..1). Empty → 1 (all).
+	SampleRate string `json:"sampleRate,omitempty"`
 }
 
 // EnvMapEntry maps an environment variable name to a specific key in a Kubernetes Secret

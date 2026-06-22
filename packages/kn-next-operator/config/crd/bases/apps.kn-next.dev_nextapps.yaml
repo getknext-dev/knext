@@ -66,6 +66,19 @@ spec:
                 properties:
                   enabled:
                     type: boolean
+                  rum:
+                    description: |-
+                      Rum (#94): self-hosted Web Vitals → Prometheus/Grafana. Default OFF.
+                      When enabled, the operator propagates NEXT_PUBLIC_RUM_ENABLED (and
+                      optionally NEXT_PUBLIC_RUM_SAMPLE_RATE) so the client beacon activates.
+                    properties:
+                      enabled:
+                        type: boolean
+                      sampleRate:
+                        description: SampleRate is the client-side sampling fraction
+                          (0..1). Empty → 1 (all).
+                        type: string
+                    type: object
                 type: object
               preview:
                 description: GitOps Preview Environment configuration

@@ -91,6 +91,13 @@ export interface ObservabilityConfig {
     grafana?: {
         enabled?: boolean; // Default: true (deploy dashboard ConfigMap)
     };
+    // RUM (#94): self-hosted Web Vitals → Prometheus/Grafana. Default OFF.
+    // When enabled, the operator sets NEXT_PUBLIC_RUM_ENABLED so the client
+    // beacon (WebVitalsReporter) POSTs Core Web Vitals to /api/rum.
+    rum?: {
+        enabled?: boolean; // Default: false
+        sampleRate?: number; // 0..1, default 1 (client-side sampling)
+    };
 }
 
 // Kubernetes Native Secrets Binding

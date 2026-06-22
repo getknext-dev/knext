@@ -111,9 +111,32 @@ export function buildNextAppCRObject(
           }
         : undefined;
 
-    // Observability spec
+    // Observability spec — thread RUM (#94) into spec.observability.rum.
+    // RUM requires observability.enabled; default OFF when no rum block.
     const observability = config.observability?.enabled
-        ? { enabled: true }
+        ? {
+              enabled: true,
+              ...(config.observability.rum?.enabled
+                  ? {
+                        rum: {
+                            enabled: true,
+                            // sampleRate is authored as a number (config.ts) for
+                            // ergonomics, but the NextApp CRD types
+                            // observability.rum.sampleRate as a STRING (env vars
+                            // are strings anyway). Emit it as a string so
+                            // `kubectl apply` passes OpenAPI validation. (#94)
+                            ...(typeof config.observability.rum.sampleRate ===
+                            "number"
+                                ? {
+                                      sampleRate: String(
+                                          config.observability.rum.sampleRate,
+                                      ),
+                                  }
+                                : {}),
+                        },
+                    }
+                  : {}),
+          }
         : undefined;
 
     // Runtime

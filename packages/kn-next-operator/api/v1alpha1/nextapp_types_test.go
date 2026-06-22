@@ -120,3 +120,48 @@ func TestNextAppSpec_FieldMap(t *testing.T) {
 		})
 	}
 }
+
+// TestObservabilitySpec_Rum verifies the RUM (#94) sub-spec round-trips so the
+// operator can propagate NEXT_PUBLIC_RUM_ENABLED / NEXT_PUBLIC_RUM_SAMPLE_RATE.
+func TestObservabilitySpec_Rum(t *testing.T) {
+	app := NextApp{
+		Spec: NextAppSpec{
+			Image: "registry.example.com/app@sha256:abc123",
+			Observability: &ObservabilitySpec{
+				Enabled: true,
+				Rum:     &RumSpec{Enabled: true, SampleRate: "0.5"},
+			},
+		},
+	}
+
+	data, err := json.Marshal(app)
+	if err != nil {
+		t.Fatalf("marshal failed: %v", err)
+	}
+
+	var back NextApp
+	if err := json.Unmarshal(data, &back); err != nil {
+		t.Fatalf("unmarshal failed: %v", err)
+	}
+
+	if back.Spec.Observability.Rum == nil {
+		t.Fatal("Observability.Rum round-tripped to nil")
+	}
+	if !back.Spec.Observability.Rum.Enabled {
+		t.Error("Rum.Enabled: got false, want true")
+	}
+	if got := back.Spec.Observability.Rum.SampleRate; got != "0.5" {
+		t.Errorf("Rum.SampleRate: got %q, want %q", got, "0.5")
+	}
+
+	// Default-off: a NextApp with no Rum block must not synthesize one.
+	off := NextApp{Spec: NextAppSpec{Observability: &ObservabilitySpec{Enabled: true}}}
+	d2, _ := json.Marshal(off)
+	var back2 NextApp
+	if err := json.Unmarshal(d2, &back2); err != nil {
+		t.Fatalf("unmarshal failed: %v", err)
+	}
+	if back2.Spec.Observability.Rum != nil {
+		t.Error("Rum should be nil when not configured (default off)")
+	}
+}

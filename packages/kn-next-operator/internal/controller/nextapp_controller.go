@@ -348,6 +348,16 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 		// Observability env vars — aligned with CLI
 		if nextApp.Spec.Observability != nil && nextApp.Spec.Observability.Enabled {
 			envVars = append(envVars, corev1.EnvVar{Name: "KN_APP_NAME", Value: nextApp.Name})
+
+			// RUM (#94): activate the client Web Vitals beacon. NEXT_PUBLIC_*
+			// vars are baked into the client bundle so the reporter no-ops
+			// unless enabled here. Default OFF (only set when Rum.Enabled).
+			if rum := nextApp.Spec.Observability.Rum; rum != nil && rum.Enabled {
+				envVars = append(envVars, corev1.EnvVar{Name: "NEXT_PUBLIC_RUM_ENABLED", Value: "true"})
+				if rum.SampleRate != "" {
+					envVars = append(envVars, corev1.EnvVar{Name: "NEXT_PUBLIC_RUM_SAMPLE_RATE", Value: rum.SampleRate})
+				}
+			}
 		}
 
 		var envFrom []corev1.EnvFromSource

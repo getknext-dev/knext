@@ -23,6 +23,7 @@ grep -rln 'webhook\|Mutate\|Validate.*admission' packages/kn-next-operator/inter
 |---|---|---|---|---|
 | `/api/cache/invalidate` | POST | Next.js cache (`revalidateTag`) | Bearer token `CACHE_INVALIDATE_TOKEN`, fail-closed (`isAuthorized`) | ✅ authed |
 | `/api/cache/events` | DELETE | clears all cache events (Redis / in-memory) | same Bearer token (reuses the single `isAuthorized` helper) | ✅ authed (E4-2) |
+| `/api/rum` | POST | `observe()` into pre-declared Web Vitals histograms (no storage/cache/state write) | **bounded-aggregator exception** — see "RUM ingest" below (#94) | ✅ justified |
 
 There is intentionally **no `GET /api/cache/invalidate`** handler (#78): invalidation mutates state,
 and a mutating GET is prefetchable/link-triggerable and leaks the Bearer token into URLs and logs.
@@ -107,7 +108,49 @@ network, or readiness probes can fail.
   This is not stood up in PR CI (no kind cluster in CI for this check); it is the documented manual
   verification the issue allows.
 
+## RUM ingest `/api/rum` — justified exception (#94)
+
+`POST /api/rum` receives Web Vitals beacons **from the user's browser**, which cannot carry the
+Bearer secret (it would be exposed in the client bundle / network tab). It is nonetheless **not** an
+"open mutating endpoint" in the sense the invariant forbids: it is a **fixed-schema, lossy metrics
+aggregator**, neutered by four independent layers. It does not write storage, cache, or any
+revalidation — its *only* possible effect is `observe()` on a pre-declared histogram.
+
+1. **Same-origin / cluster-local, no new surface.** The beacon is sent from the already-served page
+   to the same origin. The endpoint is reachable only as broadly as the app already is — the
+   default-on internal-only `NetworkPolicy` above (#90) governs it too. No new external attack
+   surface is introduced.
+2. **Fixed-schema lossy aggregator.** The handler can ONLY call
+   `observeWebVital()` → `histogram.observe()` on one of a **closed set** of pre-declared histograms
+   (`apps/file-manager/src/app/api/_metrics/registry.ts`). It cannot create series, set arbitrary
+   gauge/counter values, write to Redis/GCS, or trigger cache revalidation. The worst an attacker can
+   do is skew aggregate latency percentiles — never read data, mutate state, or exhaust storage.
+3. **Server-enforced bounded label cardinality.** Three labels, each from a **closed allow-list**,
+   enforced server-side in `api/rum/validate.ts` (the client is never trusted for a label):
+   - `metric` ∈ {LCP, INP, CLS, FCP, TTFB};
+   - `route` = a **route template** the server maps the reported pathname to via a closed known-route
+     table; unmatched paths collapse to a single `other` bucket — raw IDs/UUIDs/query strings can
+     **never** become a label;
+   - `rating` ∈ {good, needs-improvement, poor}.
+   `app` comes from `KN_APP_NAME` (server env), never the client. No user/session/IP/raw-URL is ever
+   a label, so Prometheus cardinality stays bounded regardless of input.
+4. **Rate-limit + size cap + strict shape.** An in-process token-bucket limiter (bounded key map,
+   `api/rum/rate-limit.ts`) caps the ingest rate → `429` on flood; a payload-size cap → `413`;
+   strict shape/allow-list validation → `400`. There is intentionally **no GET handler**.
+
+Responses: `204` recorded · `400` malformed/disallowed · `413` oversized · `429` rate-limited.
+
+**Opt-in / default-off.** RUM is off unless `observability.rum.enabled` is set
+(`packages/kn-next/src/config.ts`); the operator then sets `NEXT_PUBLIC_RUM_ENABLED` (and optional
+`NEXT_PUBLIC_RUM_SAMPLE_RATE`) so the client `WebVitalsReporter` activates. With RUM disabled the
+client sends nothing — the endpoint exists but is never exercised.
+
+**Tests:** `api/rum/validate.test.ts`, `api/rum/rate-limit.test.ts`, `api/rum/route.test.ts`
+(records, 400/413/429, `other`-bucket cardinality), and the operator env-propagation envtest
+(`reconcile_output_test.go` → "RUM env propagation").
+
 ## Remaining (defense-in-depth)
 - **CI guard** so a new open mutating handler fails the build. Ready-to-wire check: every file under
   `apps/*/src/app/api` that exports `POST|PUT|DELETE|PATCH` must contain `isAuthorized` (or be listed
-  here as an explicit, justified exception).
+  here as an explicit, justified exception). **`/api/rum` is such an explicit, justified exception**
+  (the bounded-aggregator rationale above) — the guard must allow-list it, not require `isAuthorized`.

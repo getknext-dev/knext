@@ -1,0 +1,254 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": "-- Grafana --",
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "title": "⚡ LCP p75 (Largest Contentful Paint)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "drawStyle": "line", "fillOpacity": 10, "pointSize": 5 },
+          "unit": "ms",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 2500 },
+              { "color": "red", "value": 4000 }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.75, sum by (le, route) (rate(kn_next_web_vitals_lcp_bucket{app=~\"$app\"}[$__rate_interval])))",
+          "legendFormat": "p75 - {{route}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "title": "🖱️ INP p75 (Interaction to Next Paint)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "drawStyle": "line", "fillOpacity": 10, "pointSize": 5 },
+          "unit": "ms",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 200 },
+              { "color": "red", "value": 500 }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.75, sum by (le, route) (rate(kn_next_web_vitals_inp_bucket{app=~\"$app\"}[$__rate_interval])))",
+          "legendFormat": "p75 - {{route}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "title": "📐 CLS p75 (Cumulative Layout Shift)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "drawStyle": "line", "fillOpacity": 10 },
+          "unit": "none",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 0.1 },
+              { "color": "red", "value": 0.25 }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.75, sum by (le, route) (rate(kn_next_web_vitals_cls_bucket{app=~\"$app\"}[$__rate_interval])))",
+          "legendFormat": "p75 - {{route}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "title": "🎨 FCP p75 (First Contentful Paint)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "drawStyle": "line", "fillOpacity": 10 },
+          "unit": "ms"
+        }
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.75, sum by (le, route) (rate(kn_next_web_vitals_fcp_bucket{app=~\"$app\"}[$__rate_interval])))",
+          "legendFormat": "p75 - {{route}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "title": "🌐 TTFB p75 (Time To First Byte)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "drawStyle": "line", "fillOpacity": 10 },
+          "unit": "ms"
+        }
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.75, sum by (le, route) (rate(kn_next_web_vitals_ttfb_bucket{app=~\"$app\"}[$__rate_interval])))",
+          "legendFormat": "p75 - {{route}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "title": "🚦 LCP Rating Distribution (good / needs-improvement / poor)",
+      "type": "piechart",
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "fixed" } },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "good" },
+            "properties": [{ "id": "color", "value": { "fixedColor": "#73BF69", "mode": "fixed" } }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "needs-improvement" },
+            "properties": [{ "id": "color", "value": { "fixedColor": "#FF9830", "mode": "fixed" } }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "poor" },
+            "properties": [{ "id": "color", "value": { "fixedColor": "#F2495C", "mode": "fixed" } }]
+          }
+        ]
+      },
+      "targets": [
+        {
+          "expr": "sum by (rating) (rate(kn_next_web_vitals_lcp_count{app=~\"$app\"}[$__rate_interval]))",
+          "legendFormat": "{{rating}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "title": "📋 Per-Route Web Vitals (p75)",
+      "type": "table",
+      "gridPos": { "h": 8, "w": 16, "x": 8, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "unit": "ms" } },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.75, sum by (le, route) (rate(kn_next_web_vitals_lcp_bucket{app=~\"$app\"}[$__rate_interval])))",
+          "legendFormat": "LCP {{route}}",
+          "format": "table",
+          "instant": true,
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.75, sum by (le, route) (rate(kn_next_web_vitals_inp_bucket{app=~\"$app\"}[$__rate_interval])))",
+          "legendFormat": "INP {{route}}",
+          "format": "table",
+          "instant": true,
+          "refId": "B"
+        },
+        {
+          "expr": "histogram_quantile(0.75, sum by (le, route) (rate(kn_next_web_vitals_cls_bucket{app=~\"$app\"}[$__rate_interval])))",
+          "legendFormat": "CLS {{route}}",
+          "format": "table",
+          "instant": true,
+          "refId": "C"
+        }
+      ]
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "style": "dark",
+  "tags": ["kn-next", "rum", "web-vitals", "knative"],
+  "templating": {
+    "list": [
+      {
+        "current": { "selected": false, "text": "Prometheus", "value": "Prometheus" },
+        "hide": 0,
+        "includeAll": false,
+        "label": "Datasource",
+        "multi": false,
+        "name": "datasource",
+        "options": [],
+        "query": "prometheus",
+        "queryValue": "",
+        "refresh": 1,
+        "regex": "",
+        "skipUrlSync": false,
+        "type": "datasource"
+      },
+      {
+        "allValue": ".*",
+        "current": { "selected": true, "text": "All", "value": "$__all" },
+        "datasource": { "type": "prometheus", "uid": "${datasource}" },
+        "definition": "label_values(kn_next_web_vitals_lcp_count, app)",
+        "hide": 0,
+        "includeAll": true,
+        "label": "Application",
+        "multi": true,
+        "name": "app",
+        "query": "label_values(kn_next_web_vitals_lcp_count, app)",
+        "refresh": 2,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      }
+    ]
+  },
+  "time": { "from": "now-6h", "to": "now" },
+  "timepicker": {},
+  "timezone": "",
+  "title": "kn-next RUM — Web Vitals",
+  "uid": "kn-next-rum-web-vitals",
+  "version": 1,
+  "weekStart": ""
+}

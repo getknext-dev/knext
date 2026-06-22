@@ -1,6 +1,7 @@
 import type { Metadata } from 'next';
 import { Geist, Geist_Mono } from 'next/font/google';
 import NavLink from '@/components/NavLink';
+import WebVitalsReporter from '@/components/WebVitalsReporter';
 import '../cache-init';
 import './globals.css';
 
@@ -27,6 +28,9 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body className={`${geistSans.variable} ${geistMono.variable} antialiased`}>
+        {/* RUM (#94): opt-in client Web Vitals beacon → /api/rum → Prometheus.
+            No-op unless NEXT_PUBLIC_RUM_ENABLED=true. */}
+        <WebVitalsReporter />
         <div className="min-h-screen bg-gradient-to-br from-slate-900 via-purple-900 to-slate-900 flex">
           {/* Sidebar Navigation */}
           <nav className="w-64 bg-black/20 backdrop-blur-xl border-r border-white/10 p-6 flex flex-col">
