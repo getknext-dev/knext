@@ -120,11 +120,17 @@ export function buildNextAppCRObject(
                   ? {
                         rum: {
                             enabled: true,
+                            // sampleRate is authored as a number (config.ts) for
+                            // ergonomics, but the NextApp CRD types
+                            // observability.rum.sampleRate as a STRING (env vars
+                            // are strings anyway). Emit it as a string so
+                            // `kubectl apply` passes OpenAPI validation. (#94)
                             ...(typeof config.observability.rum.sampleRate ===
                             "number"
                                 ? {
-                                      sampleRate:
+                                      sampleRate: String(
                                           config.observability.rum.sampleRate,
+                                      ),
                                   }
                                 : {}),
                         },
