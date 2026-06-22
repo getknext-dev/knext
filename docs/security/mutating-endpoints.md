@@ -81,6 +81,12 @@ A `NetworkPolicy` is only enforced if the cluster CNI supports it (Calico, Ciliu
 non-enforcing CNI the policy is a **no-op** (it is still correct to ship). Document the CNI as a
 deployment prerequisite where this guarantee matters.
 
+**kubelet health probes:** the queue-proxy readiness/liveness probes originate from the **node IP**
+(not a pod), so they are not matched by any ingress peer in this policy. Most CNIs exempt kubelet
+probe traffic from default-deny (Calico failsafe ports, Cilium host traffic), so serving survives —
+but on a CNI with strict host-policy enforcement you may need to additionally allow the node/host
+network, or readiness probes can fail.
+
 ### Verification
 - **envtest (automated, PR CI):** `internal/controller/networkpolicy_test.go` asserts that
   reconciling a `NextApp` (default + explicit-true) creates the policy with the expected podSelector,

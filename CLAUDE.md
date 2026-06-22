@@ -66,8 +66,9 @@ docs site on knext**). gRPC layer = **design-now / build-later, after correctnes
 ## 7. Security (non-negotiable, every phase)
 - **No unauthenticated mutating endpoints.** `POST /api/cache/invalidate` and
   `DELETE /api/cache/events` now require a Bearer token (`CACHE_INVALIDATE_TOKEN`, fail-closed) —
-  the audit lives in `docs/security/mutating-endpoints.md` (E4-2). Remaining: internal-only
-  `NetworkPolicy` for defense-in-depth. Never reintroduce an open mutating route.
+  the audit lives in `docs/security/mutating-endpoints.md` (E4-2). Defense-in-depth: the operator now
+  reconciles a default-on internal-only `NetworkPolicy` from the `NextApp` CR (`spec.security.networkPolicy`, #90).
+  Never reintroduce an open mutating route.
 - **Service-to-service mTLS/authz** gateway↔backends; no implicit trust.
 - **Secrets in K8s Secrets only** — never in config files, images, or URLs.
 - **Supply chain:** SBOM per image, Trivy/Grype (fail on high severity), cosign signing,
