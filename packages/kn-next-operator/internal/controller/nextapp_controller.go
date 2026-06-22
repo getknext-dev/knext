@@ -23,6 +23,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -33,9 +34,11 @@ import (
 	"k8s.io/client-go/tools/record"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	appsv1alpha1 "github.com/AhmedElBanna80/knext/packages/kn-next-operator/api/v1alpha1"
 	"github.com/AhmedElBanna80/knext/packages/kn-next-operator/internal/validation"
@@ -126,6 +129,14 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 		return ctrl.Result{}, err
 	}
 
+	// Snapshot the OBSERVED status so the terminal status write can be skipped
+	// when the freshly-computed desired status is byte-identical (#98). Writing
+	// status on every pass re-triggers the For(&NextApp{}) watch → a ~45/s
+	// self-perpetuating reconcile hot-loop on an idle object. apimeta.
+	// SetStatusCondition preserves LastTransitionTime when a condition is
+	// unchanged, so this DeepEqual is stable for a converged, idle object.
+	observedStatus := nextApp.Status.DeepCopy()
+
 	// --- Finalizer: external-state teardown -------------------------------
 	// The finalizer pauses Kubernetes deletion until the operator clears the
 	// app's EXTERNAL state (object-store prefix + Redis keyspace) — state that
@@ -133,9 +144,14 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 	// In-cluster children (ksvc/SA/PVC) keep using ownerRef GC.
 	if nextApp.DeletionTimestamp.IsZero() {
 		// Live object: ensure the finalizer is present so we get a chance to
-		// run cleanup before the object is GC'd.
+		// run cleanup before the object is GC'd. Use a metadata Patch (not a
+		// full Update) so it does not race the later Status().Update: finalizers
+		// live in metadata, status in the /status subresource — patching one and
+		// updating the other touches disjoint resourceVersions and avoids the
+		// "object has been modified" conflict spam (#98).
+		patch := client.MergeFrom(nextApp.DeepCopy())
 		if controllerutil.AddFinalizer(&nextApp, ExternalCleanupFinalizer) {
-			if err := r.Update(ctx, &nextApp); err != nil {
+			if err := r.Patch(ctx, &nextApp, patch); err != nil {
 				return ctrl.Result{}, err
 			}
 		}
@@ -148,8 +164,11 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 			if err := r.cleanupExternalState(ctx, &nextApp); err != nil {
 				return ctrl.Result{}, err
 			}
+			// Remove the finalizer via a metadata Patch (see the add path above)
+			// to keep the metadata vs status writes on disjoint subresources.
+			patch := client.MergeFrom(nextApp.DeepCopy())
 			controllerutil.RemoveFinalizer(&nextApp, ExternalCleanupFinalizer)
-			if err := r.Update(ctx, &nextApp); err != nil {
+			if err := r.Patch(ctx, &nextApp, patch); err != nil {
 				return ctrl.Result{}, err
 			}
 		}
@@ -157,17 +176,11 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 		return ctrl.Result{}, nil
 	}
 
-	// Mark Reconciling=True at the start of every reconcile loop.
-	apimeta.SetStatusCondition(&nextApp.Status.Conditions, metav1.Condition{
-		Type:               ConditionReconciling,
-		Status:             metav1.ConditionTrue,
-		ObservedGeneration: nextApp.Generation,
-		Reason:             "Reconciling",
-		Message:            "Reconciliation in progress",
-	})
-	if err := r.Status().Update(ctx, &nextApp); err != nil {
-		return ctrl.Result{}, err
-	}
+	// NOTE (#98): we intentionally do NOT write an eager Reconciling=True status
+	// here. That mid-pass write re-triggered this controller's own watch and was
+	// the primary driver of the idle hot-loop. The full desired status (including
+	// Reconciling=False on success) is computed in-memory below and written ONCE,
+	// only when it actually differs from the observed status.
 
 	// Validate the full spec using the SAME function the admission webhook calls
 	// (internal/validation.ValidateNextAppSpec) so the two cannot drift. This
@@ -193,7 +206,11 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 			Reason:             "InvalidSpec",
 			Message:            "Spec does not meet validation requirements",
 		})
-		_ = r.Status().Update(ctx, &nextApp)
+		// Only write when the status actually changed (#98 no-op guard) so a
+		// persistently-invalid CR does not hot-loop on its own status writes.
+		if !apiequality.Semantic.DeepEqual(observedStatus, &nextApp.Status) {
+			_ = r.Status().Update(ctx, &nextApp)
+		}
 		return ctrl.Result{}, err
 	}
 
@@ -607,8 +624,14 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 		})
 	}
 
-	if err := r.Status().Update(ctx, &nextApp); err != nil {
-		return ctrl.Result{}, err
+	// No-op-status guard (#98): only write status when the freshly-computed
+	// desired status differs from what we observed at the top of the pass. On an
+	// idle, converged object every field is identical, so this skips the write
+	// and the watch event it would otherwise generate — settling the loop.
+	if !apiequality.Semantic.DeepEqual(observedStatus, &nextApp.Status) {
+		if err := r.Status().Update(ctx, &nextApp); err != nil {
+			return ctrl.Result{}, err
+		}
 	}
 
 	r.emitEvent(&nextApp, corev1.EventTypeNormal, ReasonReconciled,
@@ -771,7 +794,15 @@ func (r *NextAppReconciler) reconcileNetworkPolicy(ctx context.Context, nextApp 
 
 func (r *NextAppReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&appsv1alpha1.NextApp{}).
+		// GenerationChangedPredicate on the PRIMARY (For) watch only: a
+		// status-only write (metadata.generation is unchanged for status
+		// subresource updates) no longer re-enqueues, which — together with the
+		// no-op-status guard — kills the idle reconcile hot-loop (#98). NOTE: this
+		// also means annotation-only / label-only edits to the NextApp do not
+		// reconcile (generation is bumped only on spec changes). That is the
+		// accepted trade-off. We do NOT filter the Owns(...) watches: drift in an
+		// owned child (ksvc/SA/PVC/NetworkPolicy) must still trigger a reconcile.
+		For(&appsv1alpha1.NextApp{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Owns(&servingv1.Service{}).
 		Owns(&corev1.PersistentVolumeClaim{}).
 		Owns(&corev1.ServiceAccount{}).
