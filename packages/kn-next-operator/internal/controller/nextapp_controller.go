@@ -468,6 +468,11 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 		}
 		ksvc.Spec.Template.Spec.Volumes = volumes
 
+		// Traffic split (issue #92): render the rollback/canary intent from
+		// spec.traffic. nil => clear any prior split so Knative reverts to
+		// 100% latest-ready (no stale pin on transition back).
+		ksvc.Spec.Traffic = buildTrafficTargets(&nextApp)
+
 		return ctrl.SetControllerReference(&nextApp, ksvc, r.Scheme)
 	})
 	if err != nil {
@@ -523,10 +528,11 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 		}
 	}
 
-	// 6. Update Status: URL + conditions
+	// 6. Update Status: URL + conditions + observed traffic split (#92)
 	if ksvc.Status.URL != nil {
 		nextApp.Status.URL = ksvc.Status.URL.String()
 	}
+	nextApp.Status.CurrentTraffic = mapTrafficStatus(ksvc.Status.Traffic)
 
 	// Reconcile succeeded — set Ready=True, Reconciling=False, Degraded=False.
 	apimeta.SetStatusCondition(&nextApp.Status.Conditions, metav1.Condition{
@@ -558,6 +564,68 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 		fmt.Sprintf("NextApp reconciled successfully (image %s)", nextApp.Spec.Image))
 	logger.Info("Successfully reconciled NextApp", "name", nextApp.Name, "url", nextApp.Status.URL)
 	return ctrl.Result{}, nil
+}
+
+// buildTrafficTargets renders the Knative Service spec.traffic block from the
+// NextApp's spec.traffic intent (issue #92 — rollback / canary).
+//
+// Semantics:
+//   - nil Traffic OR empty RevisionName => nil: emit no spec.traffic so Knative
+//     defaults to 100% of the latest-ready revision (byte-identical to pre-#92).
+//   - RevisionName set, CanaryPercent == 0 => one target: 100% to the pinned
+//     revision (a full rollback).
+//   - RevisionName set, CanaryPercent in 1..99 => two targets: (100-p)% to the
+//     pinned revision + p% to the latest-ready revision (a canary back toward
+//     latest). The sum is always 100.
+func buildTrafficTargets(app *appsv1alpha1.NextApp) []servingv1.TrafficTarget {
+	if app.Spec.Traffic == nil || app.Spec.Traffic.RevisionName == "" {
+		return nil
+	}
+	t := app.Spec.Traffic
+	canary := t.CanaryPercent
+	if canary <= 0 || canary >= 100 {
+		// Full pin: 100% to the named revision.
+		return []servingv1.TrafficTarget{
+			{
+				RevisionName:   t.RevisionName,
+				LatestRevision: ptr.To(false),
+				Percent:        ptr.To(int64(100)),
+			},
+		}
+	}
+	// Canary: (100-p)% pinned, p% latest-ready.
+	return []servingv1.TrafficTarget{
+		{
+			RevisionName:   t.RevisionName,
+			LatestRevision: ptr.To(false),
+			Percent:        ptr.To(int64(100 - canary)),
+		},
+		{
+			LatestRevision: ptr.To(true),
+			Percent:        ptr.To(int64(canary)),
+		},
+	}
+}
+
+// mapTrafficStatus mirrors the Knative Service's observed traffic distribution
+// into NextApp.Status.CurrentTraffic, nil-safe on the *Percent / *LatestRevision
+// pointers. Returns nil for an empty input so the status field stays omitted.
+func mapTrafficStatus(targets []servingv1.TrafficTarget) []appsv1alpha1.TrafficStatus {
+	if len(targets) == 0 {
+		return nil
+	}
+	out := make([]appsv1alpha1.TrafficStatus, 0, len(targets))
+	for _, t := range targets {
+		ts := appsv1alpha1.TrafficStatus{RevisionName: t.RevisionName}
+		if t.Percent != nil {
+			ts.Percent = *t.Percent
+		}
+		if t.LatestRevision != nil {
+			ts.LatestRevision = *t.LatestRevision
+		}
+		out = append(out, ts)
+	}
+	return out
 }
 
 // networkPolicyEnabled reports whether the in-cluster NetworkPolicy should be

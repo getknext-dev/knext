@@ -184,6 +184,26 @@ spec:
                   Maps from the knative-manifest hardcoded timeoutSeconds=300.
                 format: int32
                 type: integer
+              traffic:
+                description: |-
+                  Traffic pins which Knative Revision serves traffic (issue #92 — rollback).
+                  nil => serve the latest-ready revision (DEFAULT, byte-identical back-compat).
+                properties:
+                  canaryPercent:
+                    description: |-
+                      CanaryPercent, when 1..99 and RevisionName is set, sends this percentage
+                      of traffic to the LATEST-ready revision and the remainder (100-p) to the
+                      pinned RevisionName — a canary back toward latest. 0 => 100% pinned.
+                    format: int32
+                    maximum: 100
+                    minimum: 0
+                    type: integer
+                  revisionName:
+                    description: |-
+                      RevisionName pins traffic to a specific prior Knative Revision (e.g.
+                      "my-app-00002"). Empty => latest-ready (no pin).
+                    type: string
+                type: object
             required:
             - image
             type: object
@@ -259,6 +279,23 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              currentTraffic:
+                description: |-
+                  CurrentTraffic reports the revision(s) currently serving traffic and their
+                  split, mirrored from the Knative Service status (issue #92).
+                items:
+                  description: TrafficStatus is one entry of the observed Knative
+                    traffic distribution.
+                  properties:
+                    latestRevision:
+                      type: boolean
+                    percent:
+                      format: int64
+                      type: integer
+                    revisionName:
+                      type: string
+                  type: object
+                type: array
               url:
                 type: string
             type: object

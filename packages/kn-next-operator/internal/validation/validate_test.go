@@ -175,6 +175,38 @@ func TestValidateNextAppSpec(t *testing.T) {
 			},
 			wantErr: false,
 		},
+		{
+			name: "canaryPercent without pinned revisionName rejected (#92)",
+			spec: &appsv1alpha1.NextAppSpec{
+				Image:   digestImage,
+				Traffic: &appsv1alpha1.TrafficSpec{CanaryPercent: 50},
+			},
+			wantErr: true,
+			errHas:  "canaryPercent requires",
+		},
+		{
+			name: "canaryPercent with pinned revisionName accepted (#92)",
+			spec: &appsv1alpha1.NextAppSpec{
+				Image:   digestImage,
+				Traffic: &appsv1alpha1.TrafficSpec{RevisionName: "app-00002", CanaryPercent: 50},
+			},
+			wantErr: false,
+		},
+		{
+			name: "pinned revisionName with no canary accepted (#92)",
+			spec: &appsv1alpha1.NextAppSpec{
+				Image:   digestImage,
+				Traffic: &appsv1alpha1.TrafficSpec{RevisionName: "app-00002"},
+			},
+			wantErr: false,
+		},
+		{
+			name: "nil traffic accepted (back-compat #92)",
+			spec: &appsv1alpha1.NextAppSpec{
+				Image: digestImage,
+			},
+			wantErr: false,
+		},
 	}
 
 	for _, tc := range tests {
