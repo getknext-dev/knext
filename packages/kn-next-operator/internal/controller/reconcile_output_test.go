@@ -30,6 +30,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	appsv1alpha1 "github.com/AhmedElBanna80/knext/packages/kn-next-operator/api/v1alpha1"
@@ -280,12 +281,44 @@ var _ = Describe("NextApp Controller reconcile output", func() {
 				"KafkaSource must not exist when revalidation is not configured")
 		})
 
-		It("IS created with the topic/brokers/sink when Revalidation queue is kafka", func() {
-			nn := reconcileOnce("kafka-on", appsv1alpha1.NextAppSpec{
+		It("is NOT created when queue is kafka but ProvisionKafkaSource is unset (consumer deferred, #95)", func() {
+			nn := reconcileOnce("kafka-deferred", appsv1alpha1.NextAppSpec{
 				Image: validImage,
 				Revalidation: &appsv1alpha1.RevalidationSpec{
 					Queue:          "kafka",
 					KafkaBrokerUrl: "kafka-broker:9092",
+				},
+			})
+
+			By("not provisioning a KafkaSource that points at the unbuilt revalidator sink")
+			ks := newKafkaSourceObj()
+			ksName := types.NamespacedName{Name: nn.Name + "-revalidation-source", Namespace: namespace}
+			err := k8sClient.Get(ctx, ksName, ks)
+			Expect(errors.IsNotFound(err)).To(BeTrue(),
+				"KafkaSource must not exist while the revalidator consumer is unbuilt and opt-in is off")
+
+			updated := &appsv1alpha1.NextApp{}
+			Expect(k8sClient.Get(ctx, nn, updated)).To(Succeed())
+
+			By("surfacing a non-fatal RevalidationDeferred condition")
+			deferred := findCondition(updated.Status.Conditions, conditionTypeRevalidationDeferred)
+			Expect(deferred).NotTo(BeNil(), "RevalidationDeferred condition must be set")
+			Expect(deferred.Status).To(Equal(metav1.ConditionTrue))
+			Expect(deferred.Reason).To(Equal("ConsumerNotProvisioned"))
+
+			By("keeping Ready=True (the deferral is non-fatal)")
+			ready := findCondition(updated.Status.Conditions, conditionTypeReady)
+			Expect(ready).NotTo(BeNil())
+			Expect(ready.Status).To(Equal(metav1.ConditionTrue))
+		})
+
+		It("IS created with the topic/brokers/sink when kafka + ProvisionKafkaSource=true", func() {
+			nn := reconcileOnce("kafka-on", appsv1alpha1.NextAppSpec{
+				Image: validImage,
+				Revalidation: &appsv1alpha1.RevalidationSpec{
+					Queue:                "kafka",
+					KafkaBrokerUrl:       "kafka-broker:9092",
+					ProvisionKafkaSource: ptr.To(true),
 				},
 			})
 

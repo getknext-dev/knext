@@ -18,7 +18,12 @@ The credibility gate. Nothing in later tiers ships before this is green.
 - **Graceful shutdown** — drain in-flight requests + run `after()` callbacks on SIGTERM.
 - **Control-plane consolidation (ADR-0001)** — CLI emits a `NextApp` CR only; operator is the
   sole cluster writer; remove `deploy.ts` raw-manifest path + `containerConcurrency` drift;
-  `:latest` rejection / digest pinning everywhere (incl. the revalidator sidecar).
+  `:latest` rejection / digest pinning everywhere.
+  - *Kafka ISR revalidator — DEFERRED / build-later (#95):* the `{app}-revalidator` consumer is
+    unbuilt and PR #27 (ADR-0003 routing) was closed unmerged. The operator no longer provisions a
+    dangling `KafkaSource` by default; it is gated behind `spec.revalidation.provisionKafkaSource`
+    and surfaces a non-fatal `RevalidationDeferred` condition otherwise. Build the consumer
+    (ADR-0003 Option A) after Tier-A correctness.
 *Exit:* compat suite green; image optimization shipped; operator = sole writer; e2e deploy via CR.
 
 ## Tier B — Platform

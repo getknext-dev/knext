@@ -50,6 +50,12 @@ const (
 	ConditionReady = "Ready"
 	// ConditionDegraded indicates the reconciliation failed or the resource is unhealthy.
 	ConditionDegraded = "Degraded"
+	// ConditionRevalidationDeferred indicates that Kafka-based ISR revalidation was
+	// requested (spec.revalidation.queue == "kafka") but the operator did NOT
+	// provision a KafkaSource because the `{app}-revalidator` consumer is not yet
+	// built (issue #95) and opt-in (spec.revalidation.provisionKafkaSource) is off.
+	// It is informational/non-fatal — Ready stays True.
+	ConditionRevalidationDeferred = "RevalidationDeferred"
 )
 
 // Event reason constants — concise, stable strings surfaced via `kubectl describe nextapp`.
@@ -94,6 +100,7 @@ func (r *NextAppReconciler) emitEvent(obj runtime.Object, eventType, reason, mes
 // +kubebuilder:rbac:groups=core,resources=serviceaccounts,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=caching.internal.knative.dev,resources=images,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=sources.knative.dev,resources=kafkasources,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
 func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, retErr error) {
@@ -486,8 +493,19 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 		return ctrl.Result{}, err
 	}
 
-	// 5. Create/Update KafkaSource if Revalidation is enabled using Unstructured to avoid Eventing proto deps
-	if nextApp.Spec.Revalidation != nil && nextApp.Spec.Revalidation.Queue == "kafka" {
+	// 5. Create/Update KafkaSource for ISR revalidation.
+	//
+	// We provision the KafkaSource ONLY when kafka is selected AND the operator is
+	// explicitly opted in via spec.revalidation.provisionKafkaSource=true. The sink
+	// the source targets — the `{app}-revalidator` Knative Service — is not yet built
+	// (design-now/build-later, issue #95). Provisioning by default would wire eventing
+	// to a non-existent service and deliver revalidation events nowhere. When kafka is
+	// requested but opt-in is off, we record a non-fatal RevalidationDeferred condition
+	// (Ready stays True) below instead of creating a dangling source.
+	revalidationDeferred := false
+	if nextApp.Spec.Revalidation != nil && nextApp.Spec.Revalidation.Queue == "kafka" &&
+		nextApp.Spec.Revalidation.ProvisionKafkaSource != nil && *nextApp.Spec.Revalidation.ProvisionKafkaSource {
+		// Unstructured to avoid Eventing proto deps.
 		topic := fmt.Sprintf("%s-revalidation", nextApp.Name)
 		kafkaSource := &unstructured.Unstructured{}
 		kafkaSource.SetAPIVersion("sources.knative.dev/v1beta1")
@@ -521,6 +539,10 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 				fmt.Sprintf("Failed to reconcile KafkaSource: %s", err.Error()))
 			return ctrl.Result{}, err
 		}
+	} else if nextApp.Spec.Revalidation != nil && nextApp.Spec.Revalidation.Queue == "kafka" {
+		// Kafka requested but provisioning not opted in: defer (do not create a
+		// KafkaSource pointing at the unbuilt {app}-revalidator consumer).
+		revalidationDeferred = true
 	}
 
 	// 6. Update Status: URL + conditions
@@ -550,6 +572,29 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 		Reason:             "ReconcileSuccess",
 		Message:            "No errors detected",
 	})
+
+	// Non-fatal RevalidationDeferred condition: surface (but don't fail on) a kafka
+	// revalidation request whose consumer hasn't been provisioned yet (issue #95).
+	if revalidationDeferred {
+		apimeta.SetStatusCondition(&nextApp.Status.Conditions, metav1.Condition{
+			Type:               ConditionRevalidationDeferred,
+			Status:             metav1.ConditionTrue,
+			ObservedGeneration: nextApp.Generation,
+			Reason:             "ConsumerNotProvisioned",
+			Message: "revalidation.queue=kafka requested but no KafkaSource was provisioned: " +
+				"the {app}-revalidator consumer is design-now/build-later (#95). Set " +
+				"spec.revalidation.provisionKafkaSource=true once you deploy an external consumer.",
+		})
+	} else {
+		apimeta.SetStatusCondition(&nextApp.Status.Conditions, metav1.Condition{
+			Type:               ConditionRevalidationDeferred,
+			Status:             metav1.ConditionFalse,
+			ObservedGeneration: nextApp.Generation,
+			Reason:             "NotDeferred",
+			Message:            "Kafka revalidation not deferred",
+		})
+	}
+
 	if err := r.Status().Update(ctx, &nextApp); err != nil {
 		return ctrl.Result{}, err
 	}

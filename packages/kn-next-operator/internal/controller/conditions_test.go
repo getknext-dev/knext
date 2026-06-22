@@ -33,9 +33,10 @@ import (
 
 // conditionType constants mirror the values set in the reconciler.
 const (
-	conditionTypeReconciling = "Reconciling"
-	conditionTypeReady       = "Ready"
-	conditionTypeDegraded    = "Degraded"
+	conditionTypeReconciling          = "Reconciling"
+	conditionTypeReady                = "Ready"
+	conditionTypeDegraded             = "Degraded"
+	conditionTypeRevalidationDeferred = "RevalidationDeferred"
 )
 
 var _ = Describe("NextApp Status Conditions", func() {
