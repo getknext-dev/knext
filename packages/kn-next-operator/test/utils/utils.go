@@ -22,7 +22,9 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2" // nolint:revive,staticcheck
 )
@@ -200,6 +202,79 @@ func KnativeReadyPodCount(namespace, ksvc string) (int, error) {
 		return 0, err
 	}
 	return len(GetNonEmptyLines(out)), nil
+}
+
+// WaitForScaleToZero blocks until the Knative service has 0 Running pods, or
+// returns an error after a 5-minute timeout. Promoted out of #38's spec
+// (was a local `waitForScaleToZero`) so the #39 scale-from-zero regression can
+// reuse it. It only wraps KnativeReadyPodCount.
+func WaitForScaleToZero(namespace, ksvc string) error {
+	deadline := time.Now().Add(5 * time.Minute)
+	for time.Now().Before(deadline) {
+		n, err := KnativeReadyPodCount(namespace, ksvc)
+		if err == nil && n == 0 {
+			return nil
+		}
+		time.Sleep(3 * time.Second)
+	}
+	return fmt.Errorf("service %s/%s did not scale to zero within timeout", namespace, ksvc)
+}
+
+// WaitForScaleFromZero blocks until the Knative service has at least one Running
+// pod (i.e. the activator has woken a replica), or returns an error after a
+// 5-minute timeout. Used by the #39 activation path to assert a scaled-to-zero
+// service comes back up on demand.
+func WaitForScaleFromZero(namespace, ksvc string) error {
+	deadline := time.Now().Add(5 * time.Minute)
+	for time.Now().Before(deadline) {
+		n, err := KnativeReadyPodCount(namespace, ksvc)
+		if err == nil && n >= 1 {
+			return nil
+		}
+		time.Sleep(3 * time.Second)
+	}
+	return fmt.Errorf("service %s/%s did not scale up from zero within timeout", namespace, ksvc)
+}
+
+// ActivateAndGet sends a GET to the cluster-local Knative service at the given
+// path from an ephemeral in-cluster curl pod, and returns the HTTP status code
+// and response body. This is the #39 activation primitive: hitting a
+// scaled-to-zero service routes through the Knative activator, which wakes a
+// pod and proxies the request once it is Ready. Modeled on ScrapeAppMetrics.
+func ActivateAndGet(namespace, ksvc, path string) (int, string, error) {
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+	url := fmt.Sprintf("http://%s.%s.svc.cluster.local%s", ksvc, namespace, path)
+	podName := fmt.Sprintf("activate-%s", ksvc)
+	// Best-effort cleanup of any prior activation pod.
+	_, _ = Kubectl("delete", "pod", podName, "-n", namespace, "--ignore-not-found")
+	// `-w '\n%{http_code}'` appends the status code on its own trailing line so we
+	// can split it off the body without a second request. --max-time covers the
+	// cold-start wake (activator hold) plus the app response.
+	out, err := Kubectl("run", podName,
+		"-n", namespace,
+		"--restart=Never",
+		"--rm", "-i",
+		"--image=curlimages/curl:8.11.1",
+		"--command", "--",
+		"curl", "-sS", "--max-time", "120", "-w", "\\n%{http_code}", url,
+	)
+	if err != nil {
+		return 0, out, err
+	}
+	// The status code is the last non-empty line; everything before it is the body.
+	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
+	if len(lines) == 0 {
+		return 0, out, fmt.Errorf("empty response from %s", url)
+	}
+	codeStr := strings.TrimSpace(lines[len(lines)-1])
+	code, convErr := strconv.Atoi(codeStr)
+	if convErr != nil {
+		return 0, out, fmt.Errorf("could not parse HTTP status %q from response: %w", codeStr, convErr)
+	}
+	body := strings.Join(lines[:len(lines)-1], "\n")
+	return code, body, nil
 }
 
 // ScrapeAppMetrics curls the app's own `/api/metrics` route (port 3000 inside

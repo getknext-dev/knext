@@ -59,8 +59,6 @@ import (
 )
 
 const (
-	// operatorNamespace is where `make deploy` installs the controller-manager.
-	operatorNamespace = "kn-next-operator-system"
 	// scaleAppNamespace is where the NextApp under test is deployed.
 	scaleAppNamespace = "kn-next-scale-test"
 	// scaleAppName is the NextApp / Knative Service name under test.
@@ -76,26 +74,9 @@ var _ = Describe("ScaleToZero bytecode cache (A2-2 / #38)", Ordered, func() {
 	SetDefaultEventuallyPollingInterval(2 * time.Second)
 
 	BeforeAll(func() {
-		// The operator MUST be running, or nothing reconciles the NextApp CR and
-		// the ksvc never becomes Ready. The shared BeforeSuite only builds + loads
-		// the manager image and installs CertManager — it does NOT deploy the
-		// manager — so the scale spec deploys it here before applying the CR.
-		By("installing the operator CRDs")
-		_, err := utils.Run(exec.Command("make", "install"))
-		Expect(err).NotTo(HaveOccurred(), "failed to install CRDs")
-
-		By("deploying the controller-manager")
-		_, err = utils.Run(exec.Command("make", "deploy", fmt.Sprintf("IMG=%s", managerImage)))
-		Expect(err).NotTo(HaveOccurred(), "failed to deploy the controller-manager")
-
-		By("waiting for the controller-manager rollout to complete")
-		Eventually(func(g Gomega) {
-			out, err := utils.Kubectl("rollout", "status",
-				"deployment/kn-next-operator-controller-manager",
-				"-n", operatorNamespace, "--timeout=10s")
-			g.Expect(err).NotTo(HaveOccurred(), out)
-		}).Should(Succeed())
-
+		// The operator is deployed ONCE for the whole e2e_scale suite by the
+		// shared BeforeSuite (scale_suite_test.go); this spec only manages its
+		// OWN namespace + NextApp CR so it can coexist with the #39 spec.
 		By("creating the scale-test namespace")
 		_, _ = utils.Kubectl("create", "ns", scaleAppNamespace)
 
@@ -107,12 +88,6 @@ var _ = Describe("ScaleToZero bytecode cache (A2-2 / #38)", Ordered, func() {
 	AfterAll(func() {
 		By("deleting the scale-test namespace")
 		_, _ = utils.Kubectl("delete", "ns", scaleAppNamespace, "--ignore-not-found")
-
-		By("undeploying the controller-manager")
-		_, _ = utils.Run(exec.Command("make", "undeploy"))
-
-		By("uninstalling the operator CRDs")
-		_, _ = utils.Run(exec.Command("make", "uninstall"))
 	})
 
 	It("reuses the bytecode cache across a scale-to-zero cold start", func() {
@@ -138,7 +113,7 @@ var _ = Describe("ScaleToZero bytecode cache (A2-2 / #38)", Ordered, func() {
 		_, _ = fmt.Fprintf(GinkgoWriter, "warm-up cache files: %s\n", warmupFileCount)
 
 		By("waiting for the service to scale to zero")
-		Expect(waitForScaleToZero(scaleAppNamespace, scaleAppName)).To(Succeed())
+		Expect(utils.WaitForScaleToZero(scaleAppNamespace, scaleAppName)).To(Succeed())
 
 		By("reactivating from cold and scraping the app metrics again")
 		var warmStart, coldStartFileCount string
@@ -195,17 +170,4 @@ func applyManifest(manifest string) error {
 	cmd.Stdin = strings.NewReader(manifest)
 	_, err := utils.Run(cmd)
 	return err
-}
-
-// waitForScaleToZero blocks until the Knative service has 0 Running pods.
-func waitForScaleToZero(namespace, ksvc string) error {
-	deadline := time.Now().Add(5 * time.Minute)
-	for time.Now().Before(deadline) {
-		n, err := utils.KnativeReadyPodCount(namespace, ksvc)
-		if err == nil && n == 0 {
-			return nil
-		}
-		time.Sleep(3 * time.Second)
-	}
-	return fmt.Errorf("service %s/%s did not scale to zero within timeout", namespace, ksvc)
 }

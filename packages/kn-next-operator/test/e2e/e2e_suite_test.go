@@ -38,6 +38,11 @@ var (
 	shouldCleanupCertManager = false
 )
 
+// operatorNamespace is where `make deploy` installs the controller-manager.
+// Shared by the e2e_scale specs (#38, #39) so the operator is deployed exactly
+// once for the whole suite (see deployOperatorOnce / undeployOperator below).
+const operatorNamespace = "kn-next-operator-system"
+
 // TestE2E runs the e2e test suite to validate the solution in an isolated environment.
 // The default setup requires Kind and CertManager.
 //
