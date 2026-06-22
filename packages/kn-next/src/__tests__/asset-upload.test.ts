@@ -32,17 +32,26 @@ vi.mock("../cli/exec", () => ({
 
 import { runCapture, runQuiet } from "../cli/exec";
 import type { KnativeNextConfig, StorageProvider } from "../config";
-import { uploadAssets } from "../utils/asset-upload";
+import {
+    appKeyPrefix,
+    getAssetPrefix,
+    uploadAssets,
+} from "../utils/asset-upload";
 
 const runQuietMock = runQuiet as unknown as Mock;
 const runCaptureMock = runCapture as unknown as Mock;
+
+/** App name used across the namespacing tests. Mirrors `NextApp.metadata.name`. */
+const APP_NAME = "shop";
 
 /** Builds a minimal config for a given provider + bucket. */
 function makeConfig(
     provider: StorageProvider,
     bucket: string,
+    name = APP_NAME,
 ): KnativeNextConfig {
     return {
+        name,
         storage: {
             provider,
             bucket,
@@ -55,16 +64,24 @@ function makeConfig(
  * How each provider renders a remote listing for the mocked `runCapture`,
  * given the set of keys the fake remote "contains". Mirrors the real CLI
  * `ls`-style output that the verification pass parses.
+ *
+ * Objects live under the app-namespaced prefix `<app>/<key>` (#74): the
+ * verification pass strips the SAME `<bucket>/<app>/` prefix and so the parsed
+ * key set must match the local relative file set. The remote rendering therefore
+ * prepends `<app>/` to every key.
  */
 const REMOTE_LISTERS: Record<
     StorageProvider,
-    (bucket: string, keys: string[]) => string
+    (bucket: string, app: string, keys: string[]) => string
 > = {
-    gcs: (bucket, keys) => keys.map((k) => `gs://${bucket}/${k}`).join("\n"),
-    s3: (_bucket, keys) => keys.join("\n"),
-    minio: (bucket, keys) => keys.map((k) => `minio/${bucket}/${k}`).join("\n"),
+    gcs: (bucket, app, keys) =>
+        keys.map((k) => `gs://${bucket}/${app}/${k}`).join("\n"),
+    s3: (_bucket, app, keys) => keys.map((k) => `${app}/${k}`).join("\n"),
+    minio: (bucket, app, keys) =>
+        keys.map((k) => `minio/${bucket}/${app}/${k}`).join("\n"),
     // `az storage blob list --query [].name -o json` → flat array of names.
-    azure: (_bucket, keys) => JSON.stringify(keys),
+    azure: (_bucket, app, keys) =>
+        JSON.stringify(keys.map((k) => `${app}/${k}`)),
 };
 
 describe("uploadAssets data plane", () => {
@@ -112,7 +129,7 @@ describe("uploadAssets data plane", () => {
         it("success path: bulk-uploads then verifies, no re-upload when complete", async () => {
             // Remote contains every local key → verification finds nothing missing.
             runCaptureMock.mockReturnValue(
-                REMOTE_LISTERS[provider](bucket, localKeys),
+                REMOTE_LISTERS[provider](bucket, APP_NAME, localKeys),
             );
 
             await expect(
@@ -143,7 +160,7 @@ describe("uploadAssets data plane", () => {
             // Remote NEVER has the missing key, even after a retry upload →
             // verification must fail the deploy and name the offending key.
             runCaptureMock.mockReturnValue(
-                REMOTE_LISTERS[provider](bucket, presentKeys),
+                REMOTE_LISTERS[provider](bucket, APP_NAME, presentKeys),
             );
 
             await expect(
@@ -157,6 +174,7 @@ describe("uploadAssets data plane", () => {
             runCaptureMock.mockReturnValue(
                 REMOTE_LISTERS[provider](
                     bucket,
+                    APP_NAME,
                     localKeys.slice(0, localKeys.length - 1),
                 ),
             );
@@ -168,7 +186,7 @@ describe("uploadAssets data plane", () => {
 
         it("argv is injection-safe: array tokens, no shell metachars concatenated", async () => {
             runCaptureMock.mockReturnValue(
-                REMOTE_LISTERS[provider](bucket, localKeys),
+                REMOTE_LISTERS[provider](bucket, APP_NAME, localKeys),
             );
             await uploadAssets(makeConfig(provider, bucket));
 
@@ -195,7 +213,7 @@ describe("uploadAssets data plane", () => {
             runQuietMock.mockReset();
             runCaptureMock.mockReset();
             runCaptureMock.mockReturnValue(
-                REMOTE_LISTERS[provider]("b", localKeys),
+                REMOTE_LISTERS[provider]("b", APP_NAME, localKeys),
             );
             await uploadAssets(makeConfig(provider, "b"));
             const bins = [
@@ -213,6 +231,7 @@ describe("uploadAssets data plane", () => {
         runCaptureMock.mockReturnValue(
             REMOTE_LISTERS.s3(
                 "b",
+                APP_NAME,
                 localKeys.filter((k) => k !== missingKey),
             ),
         );
@@ -229,5 +248,61 @@ describe("uploadAssets data plane", () => {
         await expect(uploadAssets(makeConfig("s3", "b"))).rejects.toThrow(
             missingKey,
         );
+    });
+
+    /**
+     * #74 — app-namespacing contract. Objects are uploaded under `<app>/...`
+     * inside the shared bucket, and the served `assetPrefix` resolves to the
+     * SAME `<publicUrl>/<app>` location. This is what makes the operator
+     * finalizer's `<app>/` storage cleanup REAL (it deletes exactly these keys)
+     * AND gives per-app isolation in a shared bucket (data sovereignty).
+     */
+    describe("app-namespaced upload location (#74)", () => {
+        it("appKeyPrefix is `<name>/` — matches the operator finalizer prefix", () => {
+            // This MUST equal the operator's appStoragePrefix() = app.Name+"/".
+            // The two are tied by the shared `<app>/` contract documented here.
+            expect(appKeyPrefix(makeConfig("s3", "bkt", "shop"))).toBe("shop/");
+            expect(appKeyPrefix(makeConfig("gcs", "bkt", "blog"))).toBe(
+                "blog/",
+            );
+        });
+
+        it("served assetPrefix includes /<app> so browsers fetch from the namespaced location", () => {
+            const cfg = makeConfig("gcs", "bkt", "shop");
+            // publicUrl is `https://example.test/bkt` → assetPrefix must be
+            // `https://example.test/bkt/shop` (no trailing slash; Next appends).
+            expect(getAssetPrefix(cfg)).toBe("https://example.test/bkt/shop");
+        });
+
+        it("served assetPrefix tolerates a trailing slash on publicUrl", () => {
+            const cfg = makeConfig("gcs", "bkt", "shop");
+            cfg.storage.publicUrl = "https://example.test/bkt/";
+            expect(getAssetPrefix(cfg)).toBe("https://example.test/bkt/shop");
+        });
+
+        it.each<StorageProvider>([
+            "gcs",
+            "s3",
+            "minio",
+            "azure",
+        ])("provider=%s uploads objects under the `<app>/` prefix (not bucket root)", async (provider) => {
+            const bucket = "shared-bucket";
+            runCaptureMock.mockReturnValue(
+                REMOTE_LISTERS[provider](bucket, APP_NAME, localKeys),
+            );
+            await uploadAssets(makeConfig(provider, bucket, APP_NAME));
+
+            // SOME upload destination token must place objects under
+            // `<app>/` within the bucket — never at the bucket root. We look
+            // for the app prefix in any non-local-path argv token of the
+            // bulk-upload / re-upload commands.
+            const destTokens = runQuietMock.mock.calls
+                .flatMap((c) => c[0] as string[])
+                .filter((t) => !t.startsWith(assetsDir));
+            const namespaced = destTokens.some((t) =>
+                t.includes(`${APP_NAME}/`),
+            );
+            expect(namespaced).toBe(true);
+        });
     });
 });

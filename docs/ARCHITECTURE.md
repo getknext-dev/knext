@@ -158,7 +158,10 @@ flowchart LR
 The BUILD_ID ensures server and client assets are always in sync:
 
 - Docker image tagged: `file-manager:build-{BUILD_ID}`
-- Static assets in GCS: `gs://bucket/_next/static/{BUILD_ID}/`
+- Static assets in GCS: `gs://bucket/{appName}/_next/static/{BUILD_ID}/`
+  (assets are **app-namespaced** under `{appName}/` — #74 — so a shared bucket
+  isolates zones and the operator's deletion finalizer can delete exactly this
+  app's keys; served via `assetPrefix = {publicUrl}/{appName}`)
 - Both reference the same BUILD_ID at runtime
 
 ## Caching Architecture
@@ -597,8 +600,8 @@ Removes deployed resources from the cluster:
    cd apps/file-manager
    pnpm build   # runs next build → .next/standalone/
 
-   # Upload static assets to GCS
-   gsutil -m rsync -r .next/static gs://bucket/_next/static
+   # Upload static assets to GCS (app-namespaced under <appName>/ — #74)
+   gsutil -m rsync -r .next/static gs://bucket/<appName>/_next/static
 
    # Build & push image
    docker buildx build --platform linux/amd64 \

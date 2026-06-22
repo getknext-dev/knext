@@ -163,7 +163,7 @@ async function deploy() {
     const config = applyOverrides(baseConfig, options);
 
     if (!options.skipBuild) {
-        const assetPrefix = getAssetPrefix(config.storage);
+        const assetPrefix = getAssetPrefix(config);
         process.env.ASSET_PREFIX = assetPrefix;
         log.info({ assetPrefix }, "Running next build (output:standalone)...");
         runQuiet(["npm", "run", "build"]);

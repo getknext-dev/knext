@@ -64,7 +64,12 @@ var _ = Describe("NextApp Controller reconcile output", func() {
 			cur := &appsv1alpha1.NextApp{}
 			if err := k8sClient.Get(ctx, nn, cur); err == nil {
 				Expect(k8sClient.Delete(ctx, cur)).To(Succeed())
+				// The external-cleanup finalizer (issue #74) pauses deletion
+				// until the operator reconciles the delete; drive a reconcile so
+				// the finalizer is removed and the object is GC'd.
+				cleanupReconciler := &NextAppReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
 				Eventually(func() bool {
+					_, _ = cleanupReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
 					return errors.IsNotFound(k8sClient.Get(ctx, nn, &appsv1alpha1.NextApp{}))
 				}, 10*time.Second, 100*time.Millisecond).Should(BeTrue())
 			}

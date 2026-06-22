@@ -1,162 +1,68 @@
 #!/usr/bin/env node
 
 /**
- * kn-next cleanup - Removes Knative services and clears storage
+ * kn-next cleanup — tears down a deployed app by deleting its NextApp CR.
  *
  * Usage:
- *   bun run packages/kn-next/src/cli/cleanup.ts
+ *   node packages/kn-next/src/cli/cleanup.ts
  *
- * Steps:
- *   1. Load kn-next.config.ts
- *   2. Delete Knative service
- *   3. Clear storage bucket
+ * ADR-0001 (operator = single source of truth) + issue #74:
+ *   The CLI emits INTENT, it does NOT mutate the cluster out-of-band. Teardown
+ *   issues ONLY `kubectl delete nextapp <name>` — mirroring how deploy.ts applies
+ *   ONLY the CR. Everything else is the operator's job:
+ *     - Owned k8s children (ksvc / ServiceAccount / PVC) are removed by
+ *       ownerReference garbage-collection.
+ *     - External state (object-store prefix + Redis keyspace) is cleared by the
+ *       operator's `apps.kn-next.dev/external-cleanup` finalizer, scoped strictly
+ *       to this app's prefix/keyPrefix (cross-app data-sovereignty safety).
+ *   The CLI therefore NO LONGER deletes ksvc/SA/PVC/statefulset/svc directly, and
+ *   NO LONGER shells out to gsutil/aws/mc/az to clear buckets. Doing so would
+ *   reintroduce the "second cluster writer" violation #33 fixed for deploy.
  */
 
 import type { KnativeNextConfig } from "../config";
 import { createLogger } from "../utils/logger";
-import { isEntrypoint, runQuiet, runQuietAllowFail } from "./exec";
-// Single source of truth for config loading — also runs validateConfig,
-// which cleanup's former private copy skipped (CONFIG-LOAD-DEDUP).
+import { isEntrypoint, runQuiet } from "./exec";
+// Single source of truth for config loading — also runs validateConfig.
 import { loadConfig } from "./shared";
 
 const log = createLogger({ module: "cleanup" });
 
+/**
+ * Exec boundary: an injectable runner so tests can assert the EXACT argv issued
+ * (and that NO storage/child-object deletes are emitted) without shelling out.
+ * Production passes {@link runQuiet} (execFileSync, shell:false — CLI-58).
+ */
+export type CleanupExec = (argv: readonly string[]) => void;
+
+/**
+ * Build and run the teardown. Issues exactly ONE cluster write: deleting the
+ * NextApp CR. The operator's finalizer handles the rest of teardown.
+ *
+ * `--ignore-not-found` keeps re-runs idempotent (no error if already deleted).
+ */
+export function runCleanup(
+    config: KnativeNextConfig,
+    exec: CleanupExec = runQuiet,
+): void {
+    exec(["kubectl", "delete", "nextapp", config.name, "--ignore-not-found"]);
+}
+
 async function cleanup() {
     log.info("🧹 kn-next cleanup");
 
-    // 1. Load config
     log.info("Loading configuration...");
     const config = await loadConfig();
+    log.info({ app: config.name }, "Configuration loaded");
+
+    log.info("Deleting NextApp CR (operator finalizer clears the rest)...");
+    runCleanup(config);
     log.info(
-        {
-            app: config.name,
-            storage: `${config.storage.provider} (${config.storage.bucket})`,
-        },
-        "Configuration loaded",
+        { nextapp: config.name },
+        "Deleted NextApp CR — operator will GC children and clear external state",
     );
 
-    // 2. Delete Knative service
-    log.info("Deleting Knative service...");
-    try {
-        runQuiet([
-            "kubectl",
-            "delete",
-            "ksvc",
-            config.name,
-            "--ignore-not-found",
-        ]);
-        log.info({ service: config.name }, "Deleted Knative service");
-    } catch (_err) {
-        log.warn("Service not found or already deleted");
-    }
-
-    // 3. Delete infrastructure services (if configured)
-    if (config.infrastructure) {
-        log.info("Deleting infrastructure services...");
-        if (config.infrastructure.postgres?.enabled) {
-            const pg = `${config.name}-postgres`;
-            runQuiet([
-                "kubectl",
-                "delete",
-                "statefulset",
-                pg,
-                "--ignore-not-found",
-            ]);
-            runQuiet(["kubectl", "delete", "svc", pg, "--ignore-not-found"]);
-            runQuiet([
-                "kubectl",
-                "delete",
-                "pvc",
-                "-l",
-                `app=${pg}`,
-                "--ignore-not-found",
-            ]);
-            log.info("Deleted PostgreSQL");
-        }
-        if (config.infrastructure.redis?.enabled) {
-            const redis = `${config.name}-redis`;
-            runQuiet([
-                "kubectl",
-                "delete",
-                "deployment",
-                redis,
-                "--ignore-not-found",
-            ]);
-            runQuiet(["kubectl", "delete", "svc", redis, "--ignore-not-found"]);
-            log.info("Deleted Redis");
-        }
-        if (config.infrastructure.minio?.enabled) {
-            const minio = `${config.name}-minio`;
-            runQuiet([
-                "kubectl",
-                "delete",
-                "statefulset",
-                minio,
-                "--ignore-not-found",
-            ]);
-            runQuiet(["kubectl", "delete", "svc", minio, "--ignore-not-found"]);
-            runQuiet([
-                "kubectl",
-                "delete",
-                "pvc",
-                "-l",
-                `app=${minio}`,
-                "--ignore-not-found",
-            ]);
-            log.info("Deleted MinIO");
-        }
-    }
-
-    // 4. Clear storage bucket
-    log.info("Clearing storage bucket...");
-    await clearStorage(config);
-    log.info({ bucket: config.storage.bucket }, "Storage bucket cleared");
-
     log.info("✨ Cleanup complete!");
-}
-
-async function clearStorage(config: KnativeNextConfig) {
-    switch (config.storage.provider) {
-        case "gcs":
-            // gsutil expands the `**` wildcard itself (single argv token).
-            // Tolerate a non-zero exit (empty bucket) — the old `|| true` idiom.
-            runQuietAllowFail([
-                "gsutil",
-                "-m",
-                "rm",
-                "-r",
-                `gs://${config.storage.bucket}/**`,
-            ]);
-            break;
-        case "s3":
-            runQuiet([
-                "aws",
-                "s3",
-                "rm",
-                `s3://${config.storage.bucket}`,
-                "--recursive",
-            ]);
-            break;
-        case "minio":
-            runQuiet([
-                "mc",
-                "rm",
-                "--recursive",
-                "--force",
-                `minio/${config.storage.bucket}`,
-            ]);
-            break;
-        case "azure":
-            runQuiet([
-                "az",
-                "storage",
-                "blob",
-                "delete-batch",
-                "-s",
-                config.storage.bucket,
-            ]);
-            break;
-    }
 }
 
 // Run only when invoked directly as the entry (not when imported, e.g. in tests).
