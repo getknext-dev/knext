@@ -249,31 +249,41 @@ func ActivateAndGet(namespace, ksvc, path string) (int, string, error) {
 	podName := fmt.Sprintf("activate-%s", ksvc)
 	// Best-effort cleanup of any prior activation pod.
 	_, _ = Kubectl("delete", "pod", podName, "-n", namespace, "--ignore-not-found")
-	// `-w '\n%{http_code}'` appends the status code on its own trailing line so we
-	// can split it off the body without a second request. --max-time covers the
-	// cold-start wake (activator hold) plus the app response.
+	// We cannot rely on "the status code is the last line": utils.Run uses
+	// CombinedOutput, so `kubectl run --rm` merges its own `pod "..." deleted`
+	// notice (stderr) into the captured output, which would otherwise be parsed
+	// as the HTTP code. Instead, curl's `-w` wraps the code in unique sentinels
+	// (KNHTTP<code>KNEND) that we extract by marker, ignoring any surrounding
+	// kubectl noise — the same robustness ScrapeAppMetricValue relies on.
+	const codePrefix, codeSuffix = "KNHTTP", "KNEND"
 	out, err := Kubectl("run", podName,
 		"-n", namespace,
 		"--restart=Never",
 		"--rm", "-i",
 		"--image=curlimages/curl:8.11.1",
 		"--command", "--",
-		"curl", "-sS", "--max-time", "120", "-w", "\\n%{http_code}", url,
+		"curl", "-sS", "--max-time", "120",
+		"-w", fmt.Sprintf("\\n%s%%{http_code}%s", codePrefix, codeSuffix), url,
 	)
 	if err != nil {
 		return 0, out, err
 	}
-	// The status code is the last non-empty line; everything before it is the body.
-	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
-	if len(lines) == 0 {
-		return 0, out, fmt.Errorf("empty response from %s", url)
+	start := strings.LastIndex(out, codePrefix)
+	if start < 0 {
+		return 0, out, fmt.Errorf("no HTTP status marker in response from %s: %q", url, out)
 	}
-	codeStr := strings.TrimSpace(lines[len(lines)-1])
+	rest := out[start+len(codePrefix):]
+	end := strings.Index(rest, codeSuffix)
+	if end < 0 {
+		return 0, out, fmt.Errorf("truncated HTTP status marker in response from %s: %q", url, out)
+	}
+	codeStr := strings.TrimSpace(rest[:end])
 	code, convErr := strconv.Atoi(codeStr)
 	if convErr != nil {
 		return 0, out, fmt.Errorf("could not parse HTTP status %q from response: %w", codeStr, convErr)
 	}
-	body := strings.Join(lines[:len(lines)-1], "\n")
+	// The body is everything before the `\n` that precedes the status marker.
+	body := strings.TrimRight(out[:start], "\n")
 	return code, body, nil
 }
 

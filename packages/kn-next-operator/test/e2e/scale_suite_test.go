@@ -26,13 +26,18 @@ limitations under the License.
 // Both specs must NOT each `make deploy` the controller-manager — a second
 // deploy of the same release into the same namespace races the first spec's
 // AfterAll undeploy and flakes the suite. So the operator install/deploy/rollout
-// (and the matching undeploy/uninstall) live here ONCE, in the suite's
-// Before/AfterSuite, and each spec's BeforeAll/AfterAll only applies and deletes
-// its OWN namespace + NextApp CR.
+// (and the matching undeploy/uninstall) run ONCE for the whole suite, and each
+// spec's BeforeAll/AfterAll only applies and deletes its OWN namespace +
+// NextApp CR.
 //
-// This file is only compiled under the `e2e_scale` tag, so it never interferes
-// with the `e2e`-tagged Manager spec (e2e_test.go), which manages its own deploy
-// and runs in a separate `go test -tags=e2e` invocation.
+// Ginkgo allows exactly ONE BeforeSuite and ONE AfterSuite per suite, and the
+// shared e2e_suite_test.go (tag `e2e || e2e_scale`) already owns them. So this
+// file does NOT declare its own suite-setup nodes — a second BeforeSuite would
+// make Ginkgo fail the whole suite before any spec runs. Instead it exposes the
+// deploy/undeploy helpers, which the `e2e_scale`-only build-tagged hook in
+// suite_hooks.go calls from that single BeforeSuite/AfterSuite. Under the plain
+// `e2e` tag the hook is a no-op (e2e_test.go's Manager spec owns its own
+// deploy), so this never interferes with that path.
 package e2e
 
 import (
@@ -44,14 +49,6 @@ import (
 
 	"github.com/AhmedElBanna80/knext/packages/kn-next-operator/test/utils"
 )
-
-var _ = BeforeSuite(func() {
-	deployOperatorOnce()
-})
-
-var _ = AfterSuite(func() {
-	undeployOperator()
-})
 
 // deployOperatorOnce installs the CRDs and deploys the controller-manager, then
 // waits for the rollout. Called exactly once for the whole e2e_scale suite.
