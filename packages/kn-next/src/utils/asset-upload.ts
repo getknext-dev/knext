@@ -1,7 +1,7 @@
 import { readdirSync } from "node:fs";
 import { join, relative } from "node:path";
 import { runCapture, runQuiet } from "../cli/exec";
-import type { KnativeNextConfig, StorageConfig } from "../config";
+import type { KnativeNextConfig } from "../config";
 import { createLogger } from "./logger";
 
 /**
@@ -16,14 +16,40 @@ function topLevelEntries(dir: string): string[] {
 const log = createLogger({ module: "asset-upload" });
 
 /**
- * Returns the asset prefix URL from the storage configuration.
- * This is cloud-agnostic — the user declares `publicUrl` in their config.
+ * The app-scoped object-store key namespace, `<name>/` (#74).
  *
- * Used as Next.js `assetPrefix` so browsers load static assets
- * (_next/static/*) from the user's object storage bucket.
+ * Every asset this app uploads lives under this prefix inside the (possibly
+ * shared) bucket: `<bucket>/<name>/_next/static/...`. Two reasons:
+ *
+ *   1. **Real teardown.** The operator's deletion finalizer deletes objects
+ *      under `app.Name + "/"` (`appStoragePrefix()` in the operator). If uploads
+ *      went to the bucket ROOT, that prefix would match nothing and storage
+ *      cleanup would be a silent no-op. Namespacing here makes #74's storage
+ *      cleanup actually delete this app's objects.
+ *   2. **Per-app isolation / data sovereignty.** Multiple zones can share one
+ *      bucket without colliding or reading each other's keys.
+ *
+ * The app name is a DNS-1123 label (k8s-validated), so it is safe as a single
+ * path segment. MUST stay in lock-step with the operator's `appStoragePrefix`.
  */
-export function getAssetPrefix(storage: StorageConfig): string {
-    return storage.publicUrl;
+export function appKeyPrefix(config: KnativeNextConfig): string {
+    return `${config.name}/`;
+}
+
+/**
+ * Returns the asset prefix URL used as Next.js `assetPrefix` so browsers load
+ * static assets (`_next/static/*`) from the user's object storage.
+ *
+ * Cloud-agnostic — the user declares `publicUrl`; we append the app namespace
+ * (`/<name>`) so the served location matches the app-namespaced UPLOAD location
+ * (`<bucket>/<name>/...`, see {@link appKeyPrefix}). Without this, browsers would
+ * fetch from `<publicUrl>/_next/...` while assets actually live under
+ * `<publicUrl>/<name>/_next/...` → 404. Any trailing slash on `publicUrl` is
+ * normalised; Next appends its own `/` before `_next`.
+ */
+export function getAssetPrefix(config: KnativeNextConfig): string {
+    const base = config.storage.publicUrl.replace(/\/+$/, "");
+    return `${base}/${config.name}`;
 }
 
 /**
@@ -148,6 +174,12 @@ function providerOps(
 ): ProviderOps {
     const { provider, bucket } = config.storage;
     const cacheControl = "public, max-age=31536000, immutable";
+    // App-scoped key namespace, e.g. "shop/" (#74). ALL object keys live under
+    // this prefix so the operator's `<app>/` deletion finalizer actually matches
+    // them (no more silent no-op) and zones sharing a bucket stay isolated. The
+    // listing-strip below uses the SAME prefix so the verify pass sees keys in
+    // the local relative-path space (`_next/static/...`, not `shop/_next/...`).
+    const appPrefix = appKeyPrefix(config); // "<name>/"
 
     switch (provider) {
         case "gcs":
@@ -162,7 +194,7 @@ function providerOps(
                         "cp",
                         "-r",
                         ...topLevelEntries(assetsDir),
-                        `gs://${bucket}/`,
+                        `gs://${bucket}/${appPrefix}`,
                     ]);
                     // Ensure bucket has public read access for browser fetches.
                     runQuiet([
@@ -178,9 +210,9 @@ function providerOps(
                         "gsutil",
                         "ls",
                         "-r",
-                        `gs://${bucket}/`,
+                        `gs://${bucket}/${appPrefix}`,
                     ]);
-                    const prefix = `gs://${bucket}/`;
+                    const prefix = `gs://${bucket}/${appPrefix}`;
                     const keys = new Set<string>();
                     for (const line of out.split("\n")) {
                         const key = stripPrefix(line, prefix);
@@ -195,7 +227,7 @@ function providerOps(
                         `Cache-Control:${cacheControl}`,
                         "cp",
                         join(assetsDir, key),
-                        `gs://${bucket}/${key}`,
+                        `gs://${bucket}/${appPrefix}${key}`,
                     ]);
                 },
             };
@@ -209,29 +241,35 @@ function providerOps(
                         "s3",
                         "sync",
                         assetsDir,
-                        `s3://${bucket}`,
+                        `s3://${bucket}/${appPrefix}`,
                         "--cache-control",
                         cacheControl,
                     ]);
                 },
                 listRemote() {
-                    // `--recursive` prints keys relative to the bucket root.
+                    // List ONLY this app's prefix so the parsed key set is in the
+                    // local relative-path space and the verify diff is accurate.
                     const out = runCapture([
                         "aws",
                         "s3api",
                         "list-objects-v2",
                         "--bucket",
                         bucket,
+                        "--prefix",
+                        appPrefix,
                         "--query",
                         "Contents[].Key",
                         "--output",
                         "text",
                     ]);
                     const keys = new Set<string>();
-                    // `--output text` is whitespace-separated; split on any.
+                    // `--output text` is whitespace-separated; split on any. Keys
+                    // come back as `<app>/<key>` → strip the app prefix.
                     for (const tok of out.split(/\s+/)) {
-                        const key = tok.trim();
-                        if (key && key !== "None") keys.add(key);
+                        const trimmed = tok.trim();
+                        if (!trimmed || trimmed === "None") continue;
+                        const key = stripPrefix(trimmed, appPrefix) ?? trimmed;
+                        keys.add(key);
                     }
                     return keys;
                 },
@@ -241,7 +279,7 @@ function providerOps(
                         "s3",
                         "cp",
                         join(assetsDir, key),
-                        `s3://${bucket}/${key}`,
+                        `s3://${bucket}/${appPrefix}${key}`,
                         "--cache-control",
                         cacheControl,
                     ]);
@@ -257,7 +295,7 @@ function providerOps(
                         "cp",
                         "--recursive",
                         ...topLevelEntries(assetsDir),
-                        `minio/${bucket}/`,
+                        `minio/${bucket}/${appPrefix}`,
                     ]);
                 },
                 listRemote() {
@@ -265,16 +303,16 @@ function providerOps(
                         "mc",
                         "ls",
                         "--recursive",
-                        `minio/${bucket}/`,
+                        `minio/${bucket}/${appPrefix}`,
                     ]);
-                    const prefix = `minio/${bucket}/`;
+                    const prefix = `minio/${bucket}/${appPrefix}`;
                     const keys = new Set<string>();
                     for (const line of out.split("\n")) {
                         const trimmed = line.trim();
                         if (!trimmed) continue;
                         // `mc ls --recursive` may print metadata columns then the
-                        // key; the key is the `minio/<bucket>/<key>` token if
-                        // present, else the last whitespace-delimited field.
+                        // key; the key is the `minio/<bucket>/<app>/<key>` token
+                        // if present, else the last whitespace-delimited field.
                         const token =
                             trimmed
                                 .split(/\s+/)
@@ -292,7 +330,7 @@ function providerOps(
                         "mc",
                         "cp",
                         join(assetsDir, key),
-                        `minio/${bucket}/${key}`,
+                        `minio/${bucket}/${appPrefix}${key}`,
                     ]);
                 },
             };
@@ -310,6 +348,9 @@ function providerOps(
                         bucket,
                         "-s",
                         assetsDir,
+                        // Blob "directory" prefix — objects land under <app>/.
+                        "--destination-path",
+                        appPrefix,
                     ]);
                 },
                 listRemote() {
@@ -320,6 +361,8 @@ function providerOps(
                         "list",
                         "-c",
                         bucket,
+                        "--prefix",
+                        appPrefix,
                         "--query",
                         "[].name",
                         "-o",
@@ -331,7 +374,9 @@ function providerOps(
                         if (Array.isArray(parsed)) {
                             for (const name of parsed) {
                                 if (typeof name === "string" && name) {
-                                    keys.add(name);
+                                    keys.add(
+                                        stripPrefix(name, appPrefix) ?? name,
+                                    );
                                 }
                             }
                         }
@@ -352,7 +397,7 @@ function providerOps(
                         "-f",
                         join(assetsDir, key),
                         "-n",
-                        key,
+                        `${appPrefix}${key}`,
                     ]);
                 },
             };

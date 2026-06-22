@@ -68,10 +68,7 @@ var _ = Describe("NextApp Controller Events & Metrics", func() {
 		})
 
 		AfterEach(func() {
-			resource := &appsv1alpha1.NextApp{}
-			if err := k8sClient.Get(ctx, nn, resource); err == nil {
-				Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
-			}
+			deleteAndFinalize(ctx, nn)
 		})
 
 		It("records a Normal Reconciled event and increments the success counter", func() {
@@ -122,10 +119,7 @@ var _ = Describe("NextApp Controller Events & Metrics", func() {
 		})
 
 		AfterEach(func() {
-			resource := &appsv1alpha1.NextApp{}
-			if err := k8sClient.Get(ctx, nn, resource); err == nil {
-				Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
-			}
+			deleteAndFinalize(ctx, nn)
 		})
 
 		It("records a Warning InvalidImage event and increments the error counter", func() {

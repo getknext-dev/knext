@@ -59,6 +59,9 @@ const (
 	ReasonReconcileFailed = "ReconcileFailed"
 	// ReasonReconciled marks a successful reconcile.
 	ReasonReconciled = "Reconciled"
+	// ReasonCleanupFailed marks a best-effort external cleanup (object-store /
+	// Redis) that failed during finalization but did not block CR deletion.
+	ReasonCleanupFailed = "CleanupFailed"
 )
 
 // NextAppReconciler reconciles a NextApp object
@@ -68,6 +71,11 @@ type NextAppReconciler struct {
 	// Recorder emits Kubernetes Events attached to the NextApp so operators can see
 	// reconcile transitions via `kubectl describe`. May be nil in unit tests.
 	Recorder record.EventRecorder
+	// Cleaner clears the app's EXTERNAL state (object-store prefix + Redis
+	// keyspace) during finalization. Injectable so unit tests can assert the
+	// exact scoped delete and the cross-app safety guard. May be nil (skips
+	// external cleanup) for unit tests of unrelated paths.
+	Cleaner ExternalCleaner
 }
 
 // emitEvent records a Kubernetes Event on the NextApp when a recorder is wired.
@@ -107,6 +115,37 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, err
+	}
+
+	// --- Finalizer: external-state teardown -------------------------------
+	// The finalizer pauses Kubernetes deletion until the operator clears the
+	// app's EXTERNAL state (object-store prefix + Redis keyspace) — state that
+	// has no ownerRef and would otherwise leak across deploy/delete cycles.
+	// In-cluster children (ksvc/SA/PVC) keep using ownerRef GC.
+	if nextApp.DeletionTimestamp.IsZero() {
+		// Live object: ensure the finalizer is present so we get a chance to
+		// run cleanup before the object is GC'd.
+		if controllerutil.AddFinalizer(&nextApp, ExternalCleanupFinalizer) {
+			if err := r.Update(ctx, &nextApp); err != nil {
+				return ctrl.Result{}, err
+			}
+		}
+	} else {
+		// Object is being deleted: run best-effort, bounded external cleanup,
+		// then remove the finalizer so deletion can complete. cleanupExternalState
+		// never returns an error for an unreachable store (it logs + Warning),
+		// so we never wedge the CR in Terminating.
+		if controllerutil.ContainsFinalizer(&nextApp, ExternalCleanupFinalizer) {
+			if err := r.cleanupExternalState(ctx, &nextApp); err != nil {
+				return ctrl.Result{}, err
+			}
+			controllerutil.RemoveFinalizer(&nextApp, ExternalCleanupFinalizer)
+			if err := r.Update(ctx, &nextApp); err != nil {
+				return ctrl.Result{}, err
+			}
+		}
+		// Nothing more to reconcile for a deleting object.
+		return ctrl.Result{}, nil
 	}
 
 	// Mark Reconciling=True at the start of every reconcile loop.

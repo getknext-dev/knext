@@ -61,13 +61,10 @@ var _ = Describe("NextApp Controller", func() {
 		})
 
 		AfterEach(func() {
-			// TODO(user): Cleanup logic after each test, like removing the resource instance.
-			resource := &appsv1alpha1.NextApp{}
-			err := k8sClient.Get(ctx, typeNamespacedName, resource)
-			Expect(err).NotTo(HaveOccurred())
-
 			By("Cleanup the specific resource instance NextApp")
-			Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
+			// deleteAndFinalize drives the delete-reconcile so the external-cleanup
+			// finalizer (issue #74) is removed and the object is GC'd.
+			deleteAndFinalize(ctx, typeNamespacedName)
 		})
 		It("should successfully reconcile the resource", func() {
 			By("Reconciling the created resource")

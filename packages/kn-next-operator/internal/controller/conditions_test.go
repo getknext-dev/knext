@@ -23,6 +23,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -52,10 +53,12 @@ var _ = Describe("NextApp Status Conditions", func() {
 		resource := &appsv1alpha1.NextApp{}
 		if err := k8sClient.Get(ctx, namespacedName, resource); err == nil {
 			Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
-			// Wait for deletion to be processed
+			// The external-cleanup finalizer (issue #74) pauses deletion until
+			// the operator reconciles the delete; drive a reconcile each poll.
+			cleanupReconciler := &NextAppReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
 			Eventually(func() bool {
-				err := k8sClient.Get(ctx, namespacedName, &appsv1alpha1.NextApp{})
-				return err != nil
+				_, _ = cleanupReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: namespacedName})
+				return errors.IsNotFound(k8sClient.Get(ctx, namespacedName, &appsv1alpha1.NextApp{}))
 			}, 10*time.Second, 100*time.Millisecond).Should(BeTrue())
 		}
 	})
