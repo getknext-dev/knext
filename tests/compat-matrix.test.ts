@@ -136,8 +136,10 @@ describe('docs/compat-matrix.md — honesty guard (issue #41)', () => {
       expect(cites.length, `✅ row "${row.feature}" has no evidence`).toBeGreaterThan(0);
 
       const ok = cites.some((cite) => {
-        // (1) compat-smoke check id like "smoke a" / "(a)" / "check a"
-        const idMatch = cite.match(/(?:smoke|check)?\s*\(?([a-g])\)?$/i);
+        // (1) compat-smoke check id like "smoke a" / "smoke (a)" / "check a".
+        // The `smoke`/`check` prefix is REQUIRED so a bare trailing letter on a file
+        // path (e.g. ".../a") can never be misread as a hard smoke-id citation.
+        const idMatch = cite.match(/(?:smoke|check)\s*\(?([a-g])\)?$/i);
         if (idMatch && hardIds.has(idMatch[1].toLowerCase())) return true;
         // (2) the compat-smoke CI job
         if (/compat-smoke/i.test(cite) && hasComptSmokeJob) return true;
