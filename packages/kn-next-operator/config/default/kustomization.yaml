@@ -39,9 +39,13 @@ resources:
 #- ../network-policy
 
 # [KNATIVE] Runs after the built-in namespace/namePrefix transformers to re-pin the
-# config-network ConfigMap to its required name + namespace (issue #45).
+# operator-managed Knative ConfigMaps to their required name + namespace:
+#   - config-network  (issue #45)
+#   - config-features (issue #59) — needs its own transformer; the config-network
+#     target regex (.*config-network) does not match config-features.
 transformers:
 - config_network_repin.yaml
+- config_features_repin.yaml
 
 # Uncomment the patches line if you enable Metrics
 patches:

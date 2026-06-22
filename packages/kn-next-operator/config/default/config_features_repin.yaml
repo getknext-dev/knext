@@ -1,0 +1,29 @@
+# issue #59: namespace/name immunity for the operator-managed config-features ConfigMap.
+#
+# config/default applies `namespace: kn-next-operator-system` and
+# `namePrefix: kn-next-operator-` to EVERY resource. That would rewrite this
+# ConfigMap to `kn-next-operator-config-features` in `kn-next-operator-system`, where
+# Knative Serving would never read it. Knative Serving requires the ConfigMap to be
+# exactly `config-features` in the `knative-serving` namespace.
+#
+# A `transformers:` entry runs AFTER the built-in namespace + namePrefix transformers,
+# so this PatchTransformer can put both fields back. The target regex matches the
+# prefixed name.
+#
+# NOTE: a SEPARATE transformer is required — the existing config_network_repin.yaml
+# targets `.*config-network`, which does NOT match `config-features`. Do not broaden
+# that regex; each operator-managed Knative ConfigMap gets its own re-pin.
+apiVersion: builtin
+kind: PatchTransformer
+metadata:
+  name: config-features-repin
+patch: |-
+  - op: replace
+    path: /metadata/name
+    value: config-features
+  - op: replace
+    path: /metadata/namespace
+    value: knative-serving
+target:
+  kind: ConfigMap
+  name: .*config-features

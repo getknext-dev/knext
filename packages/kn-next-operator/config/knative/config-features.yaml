@@ -1,0 +1,29 @@
+# config-features: operator-managed Knative Serving feature flags (issue #59).
+#
+# The bytecode-cache ksvc (enabled via spec.enableBytecodeCache) mounts a PVC with a
+# WRITABLE mount so the runtime can persist its NODE_COMPILE_CACHE across cold starts.
+# Knative Serving gates PVC-referencing PodSpecs behind two feature flags that are
+# DEFAULT-OFF; without both enabled the admission webhook DENIES the ksvc and reconcile
+# fails with no ksvc created (found by the stage-4 kind integration test).
+#
+#   - kubernetes.podspec-persistent-volume-claim: allow a PVC volume at all.
+#   - kubernetes.podspec-persistent-volume-write : allow a writable (non-readOnly)
+#     PVC mount. Required because the cache mount must be writable.
+#
+# These flags are networking-layer-independent, so this is safe under BOTH net-istio
+# and kourier (unlike the config-network ingress-class fix in #45). A StorageClass /
+# provisioner is still a separate cluster prerequisite (kind ships local-path).
+#
+# Apply with `kubectl apply --server-side` so this merges into any existing
+# config-features owned by the Knative Serving install (it owns other keys).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: config-features
+  namespace: knative-serving
+  labels:
+    app.kubernetes.io/name: knative-serving
+    app.kubernetes.io/component: features
+data:
+  kubernetes.podspec-persistent-volume-claim: enabled
+  kubernetes.podspec-persistent-volume-write: enabled

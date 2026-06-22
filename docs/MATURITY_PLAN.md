@@ -33,6 +33,13 @@
   Now codified declaratively: the operator install bundle ships a `config-network` ConfigMap
   setting `ingress-class: kourier.ingress.networking.knative.dev` (issue #45, ADR-0009),
   replacing the manual `kubectl patch`.
+- **Bytecode-cache PVC feature flags** — the bytecode-cache ksvc mounts a writable PVC, which
+  Knative Serving gates behind two default-off `config-features` flags
+  (`kubernetes.podspec-persistent-volume-claim` + `...-write`); without them the admission webhook
+  denies the ksvc. Previously a manual cluster step; now **bundle-owned**: the operator install
+  bundle ships a `config-features` ConfigMap enabling both flags (issue #59, ADR-0010). These flags
+  are networking-layer-independent (safe under net-istio and kourier); a StorageClass/provisioner
+  is still a separate prerequisite (kind ships `local-path`).
 
 ## Phases (sequential; each gated by exit criteria)
 

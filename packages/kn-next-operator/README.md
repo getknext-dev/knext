@@ -12,7 +12,9 @@ cosign-signed, and pushed to `ghcr.io/getknext-dev/kn-next-operator` by
 [`.github/workflows/operator-supply-chain.yml`](../../.github/workflows/operator-supply-chain.yml).
 Each `main` build also publishes a digest-pinned `install.yaml` bundle (CRDs + RBAC +
 manager Deployment + webhook + cert-manager resources + the Knative `config-network`
-ConfigMap that sets the Kourier ingress-class — issue #45 / ADR-0009).
+ConfigMap that sets the Kourier ingress-class — issue #45 / ADR-0009 — and the
+`config-features` ConfigMap that enables the PVC PodSpec flags for the bytecode-cache
+ksvc — issue #59 / ADR-0010).
 
 Install knext's control plane with a single apply:
 
@@ -20,9 +22,9 @@ Install knext's control plane with a single apply:
 kubectl apply --server-side -f https://github.com/getknext-dev/knext/releases/latest/download/install.yaml
 ```
 
-> Use `--server-side` so the bundle's `config-network` ConfigMap **merges** into the
-> one Knative Serving already owns (which holds other networking keys) instead of
-> clobbering it.
+> Use `--server-side` so the bundle's `config-network` **and** `config-features`
+> ConfigMaps **merge** into the ones Knative Serving already owns (which hold other
+> networking / feature keys) instead of clobbering them.
 >
 > The bundle's manager image is **digest-pinned** (`@sha256:…`); it never uses
 > `:latest` (enforced by `hack/check-no-latest.sh`).
@@ -36,6 +38,15 @@ kubectl apply --server-side -f https://github.com/getknext-dev/knext/releases/la
 >   controller-qualified form. Without it, Serving leaves the ingress-class unset and
 >   never wires routes to Kourier (this was the real cause of the OKE "Kourier broken
 >   on k8s 1.34" symptom — see ADR-0009).
+> - **PVC feature flags** (prerequisite for `spec.enableBytecodeCache`): the bundle
+>   ships a `config-features` ConfigMap (`namespace: knative-serving`) enabling
+>   `kubernetes.podspec-persistent-volume-claim` and
+>   `kubernetes.podspec-persistent-volume-write` (both default-off). The bytecode-cache
+>   ksvc mounts a **writable** PVC; without both flags Knative's admission webhook
+>   denies the ksvc and reconcile fails — see ADR-0010. Unlike the ingress-class, these
+>   flags are networking-layer-independent (safe under net-istio and kourier). A
+>   `StorageClass`/provisioner is still required to bind the PVC (kind ships
+>   `local-path`).
 
 ### Verify the signature (optional)
 

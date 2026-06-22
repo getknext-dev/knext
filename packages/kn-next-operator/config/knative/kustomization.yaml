@@ -1,11 +1,14 @@
-# Operator-managed Knative network config (issue #45): the declarative
-# config-network ConfigMap that sets the Kourier ingress-class.
+# Operator-managed Knative config (issues #45, #59): declarative ConfigMaps for
+# Knative Serving:
+#   - config-network  : Kourier ingress-class (#45).
+#   - config-features : PVC PodSpec feature flags for the bytecode-cache ksvc (#59).
 #
-# This is pinned to the knative-serving namespace. When included from
+# Both are pinned to the knative-serving namespace. When included from
 # config/default (which applies `namespace: kn-next-operator-system` to all
-# resources), that namespace would be rewritten — so config/default re-pins this
-# ConfigMap back to `config-network` / `knative-serving` with a PatchTransformer
-# (config_network_repin.yaml) that runs AFTER the namespace/namePrefix transformers.
+# resources), that namespace would be rewritten — so config/default re-pins each
+# ConfigMap back to its required name / `knative-serving` with a PatchTransformer
+# (config_network_repin.yaml, config_features_repin.yaml) that runs AFTER the
+# namespace/namePrefix transformers.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
@@ -13,3 +16,4 @@ namespace: knative-serving
 
 resources:
 - config-network.yaml
+- config-features.yaml
