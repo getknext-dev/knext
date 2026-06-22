@@ -2,6 +2,7 @@
 
 import { usePathname } from 'next/navigation';
 import { useReportWebVitals } from 'next/web-vitals';
+import { ALLOWED_METRICS } from '../app/api/rum/validate';
 
 /**
  * WebVitalsReporter (#94) — client beacon for Core Web Vitals.
@@ -20,9 +21,9 @@ import { useReportWebVitals } from 'next/web-vitals';
 
 const RUM_ENDPOINT = '/api/rum';
 
-// Only these five Core Web Vitals are reported; anything else is ignored client
-// -side (the server independently enforces the same allow-list).
-const REPORTED_METRICS = new Set(['LCP', 'INP', 'CLS', 'FCP', 'TTFB']);
+// Single source of truth for the metric allow-list lives in ./api/rum/validate
+// (the server independently re-enforces it). Anything else is ignored client-side.
+const REPORTED_METRICS = new Set<string>(ALLOWED_METRICS);
 
 function rumEnabled(): boolean {
   return process.env.NEXT_PUBLIC_RUM_ENABLED === 'true';

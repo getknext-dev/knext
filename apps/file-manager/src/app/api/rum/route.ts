@@ -31,21 +31,16 @@ const MAX_BODY_BYTES = 2_048;
 // In-process limiter. Single shared key: this is a coarse global throttle on
 // the ingest sink (we deliberately do NOT key by client IP — that would be a
 // per-user label-ish signal and an unbounded key space).
-let limiter = createTokenBucketLimiter({
-  capacity: 200,
-  refillPerSecond: 50,
-  maxKeys: 16,
-});
-
+//   capacity 200 = burst ceiling; refill 50/s = sustained rate; maxKeys 16
+//   bounds the bucket map (only LIMITER_KEY is ever used here, so this is slack).
+const LIMITER_OPTS = { capacity: 200, refillPerSecond: 50, maxKeys: 16 } as const;
 const LIMITER_KEY = 'rum';
+
+let limiter = createTokenBucketLimiter(LIMITER_OPTS);
 
 /** Test-only: reset the limiter so rate-limit assertions are deterministic. */
 export function __resetRumLimiterForTests(): void {
-  limiter = createTokenBucketLimiter({
-    capacity: 200,
-    refillPerSecond: 50,
-    maxKeys: 16,
-  });
+  limiter = createTokenBucketLimiter(LIMITER_OPTS);
 }
 
 export async function POST(request: Request): Promise<Response> {
