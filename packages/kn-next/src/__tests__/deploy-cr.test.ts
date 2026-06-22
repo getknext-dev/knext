@@ -63,6 +63,25 @@ describe("renderNextAppCR", () => {
         expect(cr.spec.image).toBe(image);
     });
 
+    it("CR carries spec.buildId when a build id is passed (#93 skew protection)", () => {
+        // The build id (deploy tag) must reach the operator so it can stamp the
+        // `apps.kn-next.dev/build-id` revision label the asset GC resolves against.
+        const yaml = renderNextAppCR(
+            baseConfig,
+            "img@sha256:abc",
+            "default",
+            "20240101120000",
+        );
+        const cr = YAML.parse(yaml) as { spec: { buildId?: string } };
+        expect(cr.spec.buildId).toBe("20240101120000");
+    });
+
+    it("CR omits spec.buildId when no build id is passed (back-compat)", () => {
+        const yaml = renderNextAppCR(baseConfig, "img@sha256:abc", "default");
+        const cr = YAML.parse(yaml) as { spec: Record<string, unknown> };
+        expect(cr.spec.buildId).toBeUndefined();
+    });
+
     it("CR preserves scale-to-zero (minScale: 0)", () => {
         const yaml = renderNextAppCR(baseConfig, "img@sha256:abc", "default");
         const cr = YAML.parse(yaml) as {

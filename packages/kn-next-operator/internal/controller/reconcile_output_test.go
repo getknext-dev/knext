@@ -150,6 +150,30 @@ var _ = Describe("NextApp Controller reconcile output", func() {
 			Expect(annotations).To(HaveKeyWithValue("autoscaling.knative.dev/min-scale", "0"))
 			Expect(annotations).To(HaveKeyWithValue("autoscaling.knative.dev/max-scale", "10"))
 		})
+
+		It("stamps the build-id label onto the revision (pod) template when Spec.BuildID is set (#93)", func() {
+			nn := reconcileOnce("ksvc-buildid", appsv1alpha1.NextAppSpec{
+				Image:   validImage,
+				BuildID: "20240101120000",
+			})
+
+			ksvc := &servingv1.Service{}
+			Expect(k8sClient.Get(ctx, nn, ksvc)).To(Succeed())
+
+			By("placing apps.kn-next.dev/build-id on the template so it propagates to every Revision")
+			Expect(ksvc.Spec.Template.Labels).To(
+				HaveKeyWithValue(appsv1alpha1.BuildIDLabel, "20240101120000"),
+			)
+		})
+
+		It("does NOT stamp the build-id label when Spec.BuildID is empty (back-compat)", func() {
+			nn := reconcileOnce("ksvc-no-buildid", appsv1alpha1.NextAppSpec{Image: validImage})
+
+			ksvc := &servingv1.Service{}
+			Expect(k8sClient.Get(ctx, nn, ksvc)).To(Succeed())
+
+			Expect(ksvc.Spec.Template.Labels).NotTo(HaveKey(appsv1alpha1.BuildIDLabel))
+		})
 	})
 
 	Context("ServiceAccount", func() {

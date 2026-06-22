@@ -59,6 +59,17 @@ function gcsStaticListing(bucket: string, app: string, ids: string[]): string {
         .join("\n");
 }
 
+/**
+ * Azure `az storage blob list --query [].name -o json` of the static dir: a JSON
+ * array of blob names under `<app>/_next/static/<id>/...`. The impl extracts the
+ * build-id segment that follows `_next/static/`.
+ */
+function azureStaticListing(app: string, ids: string[]): string {
+    return JSON.stringify(
+        ids.map((id) => `${app}/_next/static/${id}/chunk.js`),
+    );
+}
+
 describe("pruneOldBuilds", () => {
     beforeEach(() => {
         runCaptureMock.mockReset();
@@ -97,12 +108,11 @@ describe("pruneOldBuilds", () => {
         const ids = ["b1", "b2", "b3", "b4"];
         runCaptureMock.mockReturnValue(gcsStaticListing(bucket, app, ids));
 
-        // b1 is the OLDEST but a live revision is serving it → must be kept.
-        pruneOldBuilds(
-            makeConfig("gcs", bucket, app, 2),
-            ["shop-b1-00009"],
-            "b4",
-        );
+        // b1 is the OLDEST but it is the RESOLVED build-id of a live revision
+        // (deploy.ts resolved revisionName -> `apps.kn-next.dev/build-id` label
+        // == "b1"). Defect-B fix: the live set is exact resolved build-ids, so
+        // "b1" itself is passed (NOT a revision name like "shop-b1-00009").
+        pruneOldBuilds(makeConfig("gcs", bucket, app, 2), ["b1"], "b4");
 
         const deleted = runDeleteMock.mock.calls
             .flatMap((c) => c[0] as string[])
@@ -139,5 +149,34 @@ describe("pruneOldBuilds", () => {
         );
         pruneOldBuilds(makeConfig("gcs", bucket, app, 3), [], "b2");
         expect(runDeleteMock).not.toHaveBeenCalled();
+    });
+
+    it("azure: reaps via `az ... blob delete-batch` scoped to the build prefix, never bare <app>/", () => {
+        const bucket = "c";
+        const app = "shop";
+        runCaptureMock.mockReturnValue(
+            azureStaticListing(app, ["b1", "b2", "b3", "b4"]),
+        );
+        pruneOldBuilds(makeConfig("azure", bucket, app, 2), [], "b4");
+
+        const calls = runDeleteMock.mock.calls.map((c) => c[0] as string[]);
+        // Every delete is the azure CLI delete-batch verb.
+        expect(calls.length).toBeGreaterThan(0);
+        for (const argv of calls) {
+            expect(argv[0]).toBe("az");
+            expect(argv).toContain("delete-batch");
+            // The --pattern is scoped to `<app>/_next/static/<id>/...`, never bare <app>/.
+            const pattern = argv[argv.indexOf("--pattern") + 1];
+            expect(pattern).toContain(`${app}/_next/static/`);
+            expect(pattern).not.toBe(`${app}/`);
+        }
+        const patterns = calls
+            .map((argv) => argv[argv.indexOf("--pattern") + 1])
+            .join("\n");
+        // The two oldest reaped; the two newest retained.
+        expect(patterns).toContain("/_next/static/b1/");
+        expect(patterns).toContain("/_next/static/b2/");
+        expect(patterns).not.toContain("/b3/");
+        expect(patterns).not.toContain("/b4/");
     });
 });
