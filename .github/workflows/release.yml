@@ -2,8 +2,9 @@
 #
 # Gated: no publish occurs until NPM_TOKEN is set as a repo secret (E1-4, user step).
 # Until then this workflow only ever opens/updates the "Version Packages" PR — it never
-# runs `changeset publish`. The publish path is guarded by `if: ${{ secrets.NPM_TOKEN != '' }}`,
-# so on a push to main with no token the workflow does nothing destructive.
+# runs `changeset publish`. The publish gate is computed in a plain `run` step (see
+# "Determine publish gate") rather than a `secrets`-in-`with:` expression, which GitHub
+# rejected during workflow evaluation and produced phantom startup-failure runs.
 #
 # Flow:
 #   1. A normal feature PR includes a changeset (.changeset/*.md).
@@ -33,6 +34,8 @@ jobs:
   release:
     name: Version PR / Publish (gated on NPM_TOKEN)
     runs-on: ubuntu-latest
+    # Belt-and-suspenders: only ever run on the canonical repo (never forks).
+    if: github.repository == 'getknext-dev/knext'
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -53,24 +56,32 @@ jobs:
       - name: Build publishable packages
         run: pnpm --filter @knext/lib build && pnpm --filter @knext/core build
 
+      # Gate the publish command WITHOUT referencing `secrets` inside the action's
+      # `with:` input (that expression caused GitHub startup-failure runs). When
+      # NPM_TOKEN is unset, `publish` is empty → changesets/action can only open the
+      # Version PR (nothing destructive).
+      - name: Determine publish gate
+        id: gate
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -n "${NPM_TOKEN}" ]; then
+            echo "publish=pnpm run release" >> "$GITHUB_OUTPUT"
+            echo "NPM_TOKEN present — publish path enabled."
+          else
+            echo "publish=" >> "$GITHUB_OUTPUT"
+            echo "NPM_TOKEN not set — publish gated off (E1-4, user step). Only the Version PR path will run."
+          fi
+
       # Opens/updates the "Version Packages" PR, OR publishes when there are
-      # already-versioned packages to release AND NPM_TOKEN is present.
-      # `publish` is only set when NPM_TOKEN exists, so without a token the action
-      # can only ever do the version-PR path (nothing destructive).
+      # already-versioned packages to release AND the publish gate is enabled.
       - name: Create Release PR or Publish
         uses: changesets/action@v1
         with:
           version: pnpm run changeset:version
-          publish: ${{ secrets.NPM_TOKEN != '' && 'pnpm run release' || '' }}
+          publish: ${{ steps.gate.outputs.publish }}
           commit: 'chore: version packages'
           title: 'chore: version packages'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-
-      - name: Publish gating notice
-        if: ${{ secrets.NPM_TOKEN == '' }}
-        run: |
-          echo "NPM_TOKEN is not set — publish is gated off (E1-4, user step)."
-          echo "Only the 'Version Packages' PR path ran. No package was published."
