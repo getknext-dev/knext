@@ -15,9 +15,10 @@ export default defineConfig({
     entry: {
         // dist/cli/kn-next.js — the bin (deploy entry)
         "cli/kn-next": "src/cli/deploy.ts",
-        // also ship runnable build/cleanup entries
+        // also ship runnable build/cleanup/rollback entries
         "cli/build": "src/cli/build.ts",
         "cli/cleanup": "src/cli/cleanup.ts",
+        "cli/rollback": "src/cli/rollback.ts",
     },
     format: ["esm"],
     platform: "node",

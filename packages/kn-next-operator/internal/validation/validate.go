@@ -166,6 +166,13 @@ func ValidateNextAppSpec(spec *appsv1alpha1.NextAppSpec) error {
 		}
 	}
 
+	// Traffic (issue #92): a canary split is only meaningful against a pinned
+	// revision (the remainder of traffic goes to RevisionName). A canaryPercent
+	// without a revisionName is ambiguous and rejected.
+	if spec.Traffic != nil && spec.Traffic.CanaryPercent != 0 && spec.Traffic.RevisionName == "" {
+		return fmt.Errorf("spec.traffic.canaryPercent requires a pinned revisionName")
+	}
+
 	return nil
 }
 
