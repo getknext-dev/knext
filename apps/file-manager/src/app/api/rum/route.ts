@@ -1,7 +1,12 @@
 import { NextResponse } from 'next/server';
 import { observeWebVital } from '../_metrics/registry';
-import { createTokenBucketLimiter } from './rate-limit';
+import { allowRumRequest } from './rate-limit';
 import { parseBeacon, routeTemplateFor } from './validate';
+
+// NOTE: an App Router route module may export ONLY HTTP-method handlers and the
+// allowed route-segment config — `next build` type-checks this and rejects any
+// extra export. The limiter singleton + its test-reset helper therefore live in
+// ./rate-limit, not here.
 
 /**
  * POST /api/rum — Web Vitals (RUM) ingest (#94).
@@ -28,24 +33,9 @@ import { parseBeacon, routeTemplateFor } from './validate';
 // Payload cap — a single Web Vitals beacon is tiny; reject anything larger.
 const MAX_BODY_BYTES = 2_048;
 
-// In-process limiter. Single shared key: this is a coarse global throttle on
-// the ingest sink (we deliberately do NOT key by client IP — that would be a
-// per-user label-ish signal and an unbounded key space).
-//   capacity 200 = burst ceiling; refill 50/s = sustained rate; maxKeys 16
-//   bounds the bucket map (only LIMITER_KEY is ever used here, so this is slack).
-const LIMITER_OPTS = { capacity: 200, refillPerSecond: 50, maxKeys: 16 } as const;
-const LIMITER_KEY = 'rum';
-
-let limiter = createTokenBucketLimiter(LIMITER_OPTS);
-
-/** Test-only: reset the limiter so rate-limit assertions are deterministic. */
-export function __resetRumLimiterForTests(): void {
-  limiter = createTokenBucketLimiter(LIMITER_OPTS);
-}
-
 export async function POST(request: Request): Promise<Response> {
   // Layer 4: rate-limit first — cheapest rejection, protects everything below.
-  if (!limiter.allow(LIMITER_KEY)) {
+  if (!allowRumRequest()) {
     return new NextResponse(null, { status: 429 });
   }
 

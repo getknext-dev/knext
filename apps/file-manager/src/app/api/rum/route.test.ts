@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { register } from '../_metrics/registry';
-import { __resetRumLimiterForTests, POST } from './route';
+import { __resetRumLimiterForTests } from './rate-limit';
+import { POST } from './route';
 
 /**
  * #94 RUM ingest route.

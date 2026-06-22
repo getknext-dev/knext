@@ -69,3 +69,34 @@ export function createTokenBucketLimiter(opts: TokenBucketOptions): TokenBucketL
     size: () => buckets.size,
   };
 }
+
+// ----- Shared RUM ingest limiter -----
+//
+// The /api/rum route must export ONLY HTTP-method handlers + the allowed
+// route-segment config (next build type-checks route modules and rejects any
+// other export). So the limiter singleton + its reset helper live here, in a
+// plain module the route imports — not in route.ts.
+//
+// Single shared key: a coarse global throttle on the ingest sink. We
+// deliberately do NOT key by client IP — that would be a per-user, unbounded
+// key space. capacity 200 = burst ceiling; refill 50/s = sustained rate;
+// maxKeys 16 bounds the (single-key) bucket map.
+export const RUM_LIMITER_OPTS: TokenBucketOptions = {
+  capacity: 200,
+  refillPerSecond: 50,
+  maxKeys: 16,
+};
+
+export const RUM_LIMITER_KEY = 'rum';
+
+let rumLimiter = createTokenBucketLimiter(RUM_LIMITER_OPTS);
+
+/** Allow one RUM ingest request, or false when the bucket is empty. */
+export function allowRumRequest(): boolean {
+  return rumLimiter.allow(RUM_LIMITER_KEY);
+}
+
+/** Test-only: reset the shared limiter so rate-limit assertions are deterministic. */
+export function __resetRumLimiterForTests(): void {
+  rumLimiter = createTokenBucketLimiter(RUM_LIMITER_OPTS);
+}
