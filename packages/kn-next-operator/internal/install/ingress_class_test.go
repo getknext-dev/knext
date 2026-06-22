@@ -6,11 +6,8 @@
 package install
 
 import (
-	"path/filepath"
 	"strings"
 	"testing"
-
-	"os"
 
 	"gopkg.in/yaml.v3"
 )
@@ -59,9 +56,7 @@ func TestConfigNetworkManifestSetsKourierIngressClass(t *testing.T) {
 // top-level namespace transformer) with the kourier ingress-class. Skip cleanly when
 // the bundle has not been generated (run `make build-installer`).
 func TestInstallBundleCarriesKourierIngressClass(t *testing.T) {
-	if _, err := os.Stat(filepath.Join("..", "..", "dist", "install.yaml")); err != nil {
-		t.Skip("dist/install.yaml not generated (run `make build-installer`)")
-	}
+	requireBundle(t)
 	raw := repoFile(t, "dist/install.yaml")
 	dec := yaml.NewDecoder(strings.NewReader(raw))
 

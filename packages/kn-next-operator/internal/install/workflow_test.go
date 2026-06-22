@@ -7,8 +7,6 @@
 package install
 
 import (
-	"os"
-	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -120,10 +118,9 @@ func TestReadmeUrlMatchesReleaseTag(t *testing.T) {
 // existing kind e2e harness (test/e2e), which is too heavy to stand up on every PR.
 func TestInstallBundleIsStructurallyValid(t *testing.T) {
 	// dist/install.yaml is a gitignored build artifact (run `make build-installer`).
-	// Skip cleanly on a clean checkout rather than hard-failing.
-	if _, err := os.Stat(filepath.Join("..", "..", "dist", "install.yaml")); err != nil {
-		t.Skip("dist/install.yaml not generated (run `make build-installer`); live-apply covered by test/e2e")
-	}
+	// Skip cleanly on a clean checkout rather than hard-failing — but hard-fail under
+	// KNEXT_REQUIRE_BUNDLE=1 (CI) so a green check can never mean "skipped".
+	requireBundle(t)
 	raw := repoFile(t, "dist/install.yaml")
 	dec := yaml.NewDecoder(strings.NewReader(raw))
 

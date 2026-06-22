@@ -157,3 +157,46 @@ jobs:
             echo "Run 'make generate && make manifests' locally and commit the result."
             exit 1
           fi
+
+  operator-test:
+    # Issue #102: actually RUN the operator Go test suite in CI. `make test`
+    # self-provisions envtest (setup-envtest dep) and excludes /e2e. We build the
+    # install bundle first (make build-installer renders dist/install.yaml) so the
+    # internal/install namespace-immunity tests RUN instead of skipping, and set
+    # KNEXT_REQUIRE_BUNDLE=1 so a missing bundle HARD-FAILS — a green check can never
+    # mean "skipped".
+    name: Operator Go tests (envtest + install bundle)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: packages/kn-next-operator/go.mod
+          cache: true
+          cache-dependency-path: packages/kn-next-operator/go.sum
+      - name: Resolve envtest k8s version
+        working-directory: packages/kn-next-operator
+        run: echo "ENVTEST_K8S_VERSION=$(make print-envtest-version)" >> "$GITHUB_ENV"
+      - name: Cache envtest + tool binaries
+        uses: actions/cache@v4
+        with:
+          path: packages/kn-next-operator/bin
+          key: ${{ runner.os }}-envtest-${{ env.ENVTEST_K8S_VERSION }}-${{ hashFiles('packages/kn-next-operator/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-envtest-
+      - name: Set up envtest binaries
+        working-directory: packages/kn-next-operator
+        run: make setup-envtest
+      - name: Build install bundle (so immunity tests run, not skip)
+        working-directory: packages/kn-next-operator
+        run: make build-installer
+      - name: Run operator Go test suite (envtest)
+        working-directory: packages/kn-next-operator
+        env:
+          # Converts the dist/install.yaml skip guards into a HARD failure if the
+          # bundle is missing — the namespace-immunity contract must be gated.
+          KNEXT_REQUIRE_BUNDLE: '1'
+        run: make test

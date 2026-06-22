@@ -8,11 +8,8 @@
 package install
 
 import (
-	"path/filepath"
 	"strings"
 	"testing"
-
-	"os"
 
 	"gopkg.in/yaml.v3"
 )
@@ -65,9 +62,7 @@ func TestConfigFeaturesManifestEnablesPVCFlags(t *testing.T) {
 // transformer) with both PVC feature flags enabled. Skip cleanly when the bundle has
 // not been generated (run `make build-installer`).
 func TestInstallBundleEnablesPVCFlags(t *testing.T) {
-	if _, err := os.Stat(filepath.Join("..", "..", "dist", "install.yaml")); err != nil {
-		t.Skip("dist/install.yaml not generated (run `make build-installer`)")
-	}
+	requireBundle(t)
 	raw := repoFile(t, "dist/install.yaml")
 	dec := yaml.NewDecoder(strings.NewReader(raw))
 
