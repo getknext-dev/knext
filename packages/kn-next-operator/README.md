@@ -1,8 +1,42 @@
 # kn-next-operator
-// TODO(user): Add simple overview of use/purpose
+
+The knext control plane: a Go/Kubebuilder controller that reconciles `NextApp`
+custom resources into Knative scale-to-zero Services. Per ADR-0001 the operator is
+the **single source of truth** for cluster state — the CLI emits a `NextApp` CR and
+the operator reconciles it.
+
+## Install (one command)
+
+The operator image is built, SBOM'd, Trivy-scanned (fail on HIGH/CRITICAL),
+cosign-signed, and pushed to `ghcr.io/getknext-dev/kn-next-operator` by
+[`.github/workflows/operator-supply-chain.yml`](../../.github/workflows/operator-supply-chain.yml).
+Each `main` build also publishes a digest-pinned `install.yaml` bundle (CRDs + RBAC +
+manager Deployment + webhook + cert-manager resources).
+
+Install knext's control plane with a single apply:
+
+```sh
+kubectl apply -f https://github.com/getknext-dev/knext/releases/latest/download/install.yaml
+```
+
+> The bundle's manager image is **digest-pinned** (`@sha256:…`); it never uses
+> `:latest` (enforced by `hack/check-no-latest.sh`).
+>
+> Prerequisite: [cert-manager](https://cert-manager.io) must be installed in the
+> cluster (the bundle includes the operator's `Issuer`/`Certificate` for its webhook).
+
+### Verify the signature (optional)
+
+```sh
+cosign verify ghcr.io/getknext-dev/kn-next-operator@sha256:<digest> \
+  --certificate-identity-regexp 'https://github.com/getknext-dev/knext/.*' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
 
 ## Description
-// TODO(user): An in-depth paragraph about your project and overview of use
+The operator watches `NextApp` resources and provisions the corresponding Knative
+Service, networking, and cache wiring. See `docs/adr/0001-*` for the control-plane
+contract.
 
 ## Getting Started
 
@@ -81,7 +115,11 @@ make build-installer IMG=<some-registry>/kn-next-operator:tag
 **NOTE:** The makefile target mentioned above generates an 'install.yaml'
 file in the dist directory. This file contains all the resources built
 with Kustomize, which are necessary to install this project without its
-dependencies.
+dependencies. CI (`operator-supply-chain.yml`) runs `make build-installer`
+after pushing the signed image and substitutes the **real published digest**
+into `dist/install.yaml` before uploading it as the release bundle. The
+checked-in `dist/install.yaml` carries a clearly-fake all-zeros bootstrap
+digest until the first `main` push (see issue #76).
 
 2. Using the installer
 
@@ -89,7 +127,7 @@ Users can just run 'kubectl apply -f <URL for YAML BUNDLE>' to install
 the project, i.e.:
 
 ```sh
-kubectl apply -f https://raw.githubusercontent.com/<org>/kn-next-operator/<tag or branch>/dist/install.yaml
+kubectl apply -f https://github.com/getknext-dev/knext/releases/latest/download/install.yaml
 ```
 
 ### By providing a Helm Chart

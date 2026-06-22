@@ -63,12 +63,18 @@ spec:
         args:
           - --leader-elect
           - --health-probe-bind-address=:8081
-        # PLACEHOLDER: replace this digest before any real deployment.
-        # Build the image, push it, then run:
-        #   docker inspect --format='{{index .RepoDigests 0}}' <image>
-        # and substitute the resulting sha256 here.
-        # The check-no-latest.sh CI guard enforces that :latest never reaches main.
-        image: ghcr.io/ahmedelbanna80/kn-next-operator:v0.1.0@sha256:0000000000000000000000000000000000000000000000000000000000000000
+        # BOOTSTRAP PLACEHOLDER DIGEST (issue #76):
+        # The operator image is built/scanned/signed/pushed to
+        #   ghcr.io/getknext-dev/kn-next-operator
+        # by .github/workflows/operator-supply-chain.yml, but only the FIRST push to
+        # `main` produces a real digest — it cannot exist before that push. Until then
+        # this stays a clearly-fake all-zeros sha256 so the check-no-latest.sh guard
+        # (which only requires a digest, never :latest) still passes.
+        # The release job substitutes the real pushed digest into dist/install.yaml
+        # (see Makefile `set-operator-digest` / the workflow's digest-substitution step).
+        # To set it manually after a push:
+        #   docker inspect --format='{{index .RepoDigests 0}}' ghcr.io/getknext-dev/kn-next-operator:<tag>
+        image: ghcr.io/getknext-dev/kn-next-operator:v0.1.0@sha256:0000000000000000000000000000000000000000000000000000000000000000
         name: manager
         ports: []
         securityContext:

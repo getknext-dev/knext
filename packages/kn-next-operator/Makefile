@@ -1,10 +1,14 @@
 # Image URL to use all building/pushing image targets.
-# PLACEHOLDER: set IMG to a real digest-pinned ref before deploying, e.g.:
-#   make docker-build docker-push IMG=ghcr.io/ahmedelbanna80/kn-next-operator:v0.1.0
-#   docker inspect --format='{{index .RepoDigests 0}}' ghcr.io/ahmedelbanna80/kn-next-operator:v0.1.0
-#   make deploy IMG=ghcr.io/ahmedelbanna80/kn-next-operator:v0.1.0@sha256:<real-hash>
+# The operator image is built/scanned/signed/pushed to
+#   ghcr.io/getknext-dev/kn-next-operator
+# by .github/workflows/operator-supply-chain.yml on push to `main`.
+# BOOTSTRAP (issue #76): the all-zeros digest below is a placeholder that only the
+# first `main` push replaces with a real, signed digest. Set it manually with:
+#   make docker-build docker-push IMG=ghcr.io/getknext-dev/kn-next-operator:v0.1.0
+#   docker inspect --format='{{index .RepoDigests 0}}' ghcr.io/getknext-dev/kn-next-operator:v0.1.0
+#   make deploy IMG=ghcr.io/getknext-dev/kn-next-operator:v0.1.0@sha256:<real-hash>
 # The CI check-no-latest guard blocks :latest from reaching main.
-IMG ?= ghcr.io/ahmedelbanna80/kn-next-operator:v0.1.0@sha256:0000000000000000000000000000000000000000000000000000000000000000
+IMG ?= ghcr.io/getknext-dev/kn-next-operator:v0.1.0@sha256:0000000000000000000000000000000000000000000000000000000000000000
 
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
 ifeq (,$(shell go env GOBIN))
@@ -146,9 +150,14 @@ docker-buildx: ## Build and push docker image for the manager for cross-platform
 	rm Dockerfile.cross
 
 .PHONY: build-installer
-build-installer: manifests generate kustomize ## Generate a consolidated YAML with CRDs and deployment.
+build-installer: manifests generate kustomize ## Generate dist/install.yaml (CRDs + RBAC + manager) — the installable bundle.
 	mkdir -p dist
-	cd config/manager && "$(KUSTOMIZE)" edit set image controller=${IMG}
+	# NOTE(#76): we intentionally do NOT run `kustomize edit set image` here. That
+	# command rewrites config/manager/kustomization.yaml into split bare-`newTag:` +
+	# `digest:` fields, which trips hack/check-no-latest.sh. The image is already
+	# digest-pinned in kustomization.yaml as a single `newTag: <tag>@sha256:<hash>`.
+	# The release job substitutes the real published digest into dist/install.yaml
+	# after the operator image is pushed (see operator-supply-chain.yml).
 	"$(KUSTOMIZE)" build config/default > dist/install.yaml
 
 ##@ Deployment

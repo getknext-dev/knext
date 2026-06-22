@@ -4,10 +4,13 @@ apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 images:
 - name: controller
-  newName: ghcr.io/ahmedelbanna80/kn-next-operator
-  # PLACEHOLDER: replace this digest before any real deployment.
-  # After building and pushing the image, run:
-  #   docker inspect --format='{{index .RepoDigests 0}}' <image>
-  # Extract the sha256 hash and update the digest field below.
-  # The check-no-latest.sh CI guard enforces that no bare tag reaches main.
+  newName: ghcr.io/getknext-dev/kn-next-operator
+  # BOOTSTRAP PLACEHOLDER DIGEST (issue #76): all-zeros until the first `main` push
+  # publishes a real digest via operator-supply-chain.yml. The release job rewrites
+  # dist/install.yaml with the real digest. check-no-latest.sh requires a @sha256:
+  # digest (combined newTag form below), so this passes the guard. Keep the tag and
+  # digest in ONE `newTag: <tag>@sha256:<hash>` value — do NOT run `kustomize edit set
+  # image`, which splits it into bare `newTag:`/`digest:` fields the guard rejects.
+  # After a push, read the real digest with:
+  #   docker inspect --format='{{index .RepoDigests 0}}' ghcr.io/getknext-dev/kn-next-operator:<tag>
   newTag: v0.1.0@sha256:0000000000000000000000000000000000000000000000000000000000000000
