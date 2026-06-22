@@ -35,38 +35,8 @@ export async function POST(request: Request) {
   }
 }
 
-/**
- * GET /api/cache/invalidate?tag=files
- * Alternative GET-based invalidation for testing
- */
-export async function GET(request: any) {
-  // GET also mutates (invalidates) — same auth as POST. (A mutating GET is a smell;
-  // retire this handler once callers move to POST.)
-  if (!isAuthorized(request?.headers?.get?.('authorization'), process.env.CACHE_INVALIDATE_TOKEN)) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-  }
-  let tag: string | null = null;
-  try {
-    const urlString = request?.url || request?.nextUrl?.href || 'http://localhost';
-    const parsedUrl = new URL(urlString);
-    tag = parsedUrl.searchParams?.get('tag');
-  } catch (e) {
-    console.warn('Failed to parse URL in cache invalidate route:', e);
-  }
-
-  if (!tag) {
-    return NextResponse.json(
-      { error: 'Missing "tag" query parameter', example: '/api/cache/invalidate?tag=files' },
-      { status: 400 },
-    );
-  }
-
-  // Trigger Next.js cache invalidation with stale-while-revalidate
-  revalidateTag(tag, 'max');
-
-  return NextResponse.json({
-    success: true,
-    message: `Cache invalidated for tag: ${tag}`,
-    timestamp: new Date().toISOString(),
-  });
-}
+// NOTE (#78): there is intentionally NO GET handler. Cache invalidation mutates
+// state, and a mutating GET is a security/operational hazard — prefetchable,
+// link-triggerable, and it leaks the Bearer token into URLs/logs. App Router
+// returns 405 automatically for the unexported GET method. POST is the only
+// invalidation entrypoint.
