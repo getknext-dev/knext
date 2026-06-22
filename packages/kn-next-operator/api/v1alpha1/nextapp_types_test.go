@@ -165,3 +165,56 @@ func TestObservabilitySpec_Rum(t *testing.T) {
 		t.Error("Rum should be nil when not configured (default off)")
 	}
 }
+
+// TestObservabilitySpec_Tracing verifies the OTel tracing (#30) sub-spec
+// round-trips so the operator can propagate OTEL_TRACING_ENABLED /
+// OTEL_EXPORTER_OTLP_ENDPOINT / OTEL_TRACES_SAMPLER_ARG.
+func TestObservabilitySpec_Tracing(t *testing.T) {
+	app := NextApp{
+		Spec: NextAppSpec{
+			Image: "registry.example.com/app@sha256:abc123",
+			Observability: &ObservabilitySpec{
+				Enabled: true,
+				Tracing: &TracingSpec{
+					Enabled:    true,
+					Endpoint:   "http://tempo.monitoring:4317",
+					SampleRate: "0.25",
+				},
+			},
+		},
+	}
+
+	data, err := json.Marshal(app)
+	if err != nil {
+		t.Fatalf("marshal failed: %v", err)
+	}
+
+	var back NextApp
+	if err := json.Unmarshal(data, &back); err != nil {
+		t.Fatalf("unmarshal failed: %v", err)
+	}
+
+	if back.Spec.Observability.Tracing == nil {
+		t.Fatal("Observability.Tracing round-tripped to nil")
+	}
+	if !back.Spec.Observability.Tracing.Enabled {
+		t.Error("Tracing.Enabled: got false, want true")
+	}
+	if got := back.Spec.Observability.Tracing.Endpoint; got != "http://tempo.monitoring:4317" {
+		t.Errorf("Tracing.Endpoint: got %q, want %q", got, "http://tempo.monitoring:4317")
+	}
+	if got := back.Spec.Observability.Tracing.SampleRate; got != "0.25" {
+		t.Errorf("Tracing.SampleRate: got %q, want %q", got, "0.25")
+	}
+
+	// Default-off: a NextApp with no Tracing block must not synthesize one.
+	off := NextApp{Spec: NextAppSpec{Observability: &ObservabilitySpec{Enabled: true}}}
+	d2, _ := json.Marshal(off)
+	var back2 NextApp
+	if err := json.Unmarshal(d2, &back2); err != nil {
+		t.Fatalf("unmarshal failed: %v", err)
+	}
+	if back2.Spec.Observability.Tracing != nil {
+		t.Error("Tracing should be nil when not configured (default off)")
+	}
+}

@@ -212,12 +212,28 @@ type ObservabilitySpec struct {
 	// When enabled, the operator propagates NEXT_PUBLIC_RUM_ENABLED (and
 	// optionally NEXT_PUBLIC_RUM_SAMPLE_RATE) so the client beacon activates.
 	Rum *RumSpec `json:"rum,omitempty"`
+	// Tracing (#30): server-side OTel distributed tracing via OTLP/gRPC → a
+	// self-hostable backend (Tempo/Jaeger, ADR-0012). Default OFF. When enabled,
+	// the operator sets OTEL_TRACING_ENABLED (and optionally
+	// OTEL_EXPORTER_OTLP_ENDPOINT / OTEL_TRACES_SAMPLER_ARG) so the runtime
+	// instrumentation hook initializes the exporter.
+	Tracing *TracingSpec `json:"tracing,omitempty"`
 }
 
 // RumSpec configures the Real User Monitoring (Web Vitals) client beacon.
 type RumSpec struct {
 	Enabled bool `json:"enabled,omitempty"`
 	// SampleRate is the client-side sampling fraction (0..1). Empty → 1 (all).
+	SampleRate string `json:"sampleRate,omitempty"`
+}
+
+// TracingSpec configures server-side OpenTelemetry distributed tracing (#30).
+type TracingSpec struct {
+	Enabled bool `json:"enabled,omitempty"`
+	// Endpoint is the OTLP/gRPC collector endpoint. Empty → the runtime default
+	// (a cluster-local OTLP collector; never a SaaS endpoint — no lock-in).
+	Endpoint string `json:"endpoint,omitempty"`
+	// SampleRate is the head-based trace sampling fraction (0..1). Empty → 1 (all).
 	SampleRate string `json:"sampleRate,omitempty"`
 }
 

@@ -1,4 +1,4 @@
-import { defineConfig } from "tsup";
+import { defineConfig } from 'tsup';
 
 /**
  * tsup build for the kn-next CLI (issue #68).
@@ -12,33 +12,35 @@ import { defineConfig } from "tsup";
  * package's own `dependencies` at install time rather than being inlined.
  */
 export default defineConfig({
-    entry: {
-        // dist/cli/kn-next.js — the bin (deploy entry)
-        "cli/kn-next": "src/cli/deploy.ts",
-        // also ship runnable build/cleanup/rollback entries
-        "cli/build": "src/cli/build.ts",
-        "cli/cleanup": "src/cli/cleanup.ts",
-        "cli/rollback": "src/cli/rollback.ts",
-    },
-    format: ["esm"],
-    platform: "node",
-    target: "node20",
-    outDir: "dist",
-    // The source CLI entries carry `#!/usr/bin/env node`; esbuild preserves it on
-    // the entry output. We deliberately do NOT add a banner shebang here — doing
-    // so would (a) duplicate the entry shebang and (b) wrongly prepend `#!` to the
-    // shared chunk files. Entry shebang only is exactly what a Node bin needs.
-    clean: true,
-    sourcemap: true,
-    // Do not bundle these — resolve from the package's deps at install time.
-    external: [
-        "@knext/lib",
-        "ioredis",
-        "yaml",
-        "pino",
-        "pino-pretty",
-        "prom-client",
-        "kafkajs",
-        "@google-cloud/storage",
-    ],
+  entry: {
+    // dist/cli/kn-next.js — the bin (deploy entry)
+    'cli/kn-next': 'src/cli/deploy.ts',
+    // also ship runnable build/cleanup/rollback entries
+    'cli/build': 'src/cli/build.ts',
+    'cli/cleanup': 'src/cli/cleanup.ts',
+    'cli/rollback': 'src/cli/rollback.ts',
+    // #30: k6 load-test entry (manual/nightly runbook, not a PR gate)
+    'cli/loadtest': 'src/cli/loadtest.ts',
+  },
+  format: ['esm'],
+  platform: 'node',
+  target: 'node20',
+  outDir: 'dist',
+  // The source CLI entries carry `#!/usr/bin/env node`; esbuild preserves it on
+  // the entry output. We deliberately do NOT add a banner shebang here — doing
+  // so would (a) duplicate the entry shebang and (b) wrongly prepend `#!` to the
+  // shared chunk files. Entry shebang only is exactly what a Node bin needs.
+  clean: true,
+  sourcemap: true,
+  // Do not bundle these — resolve from the package's deps at install time.
+  external: [
+    '@knext/lib',
+    'ioredis',
+    'yaml',
+    'pino',
+    'pino-pretty',
+    'prom-client',
+    'kafkajs',
+    '@google-cloud/storage',
+  ],
 });

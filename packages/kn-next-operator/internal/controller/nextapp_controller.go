@@ -375,6 +375,21 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 					envVars = append(envVars, corev1.EnvVar{Name: "NEXT_PUBLIC_RUM_SAMPLE_RATE", Value: rum.SampleRate})
 				}
 			}
+
+			// Tracing (#30): server-side OTel. Default OFF — only set
+			// OTEL_TRACING_ENABLED when Tracing.Enabled, so unconfigured apps
+			// initialize no exporter (the runtime hook returns null). The
+			// endpoint/sampler args are passed through only when set; the runtime
+			// applies a cluster-local default endpoint otherwise (ADR-0012).
+			if tracing := nextApp.Spec.Observability.Tracing; tracing != nil && tracing.Enabled {
+				envVars = append(envVars, corev1.EnvVar{Name: "OTEL_TRACING_ENABLED", Value: "true"})
+				if tracing.Endpoint != "" {
+					envVars = append(envVars, corev1.EnvVar{Name: "OTEL_EXPORTER_OTLP_ENDPOINT", Value: tracing.Endpoint})
+				}
+				if tracing.SampleRate != "" {
+					envVars = append(envVars, corev1.EnvVar{Name: "OTEL_TRACES_SAMPLER_ARG", Value: tracing.SampleRate})
+				}
+			}
 		}
 
 		var envFrom []corev1.EnvFromSource
