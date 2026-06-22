@@ -22,6 +22,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -92,6 +93,7 @@ func (r *NextAppReconciler) emitEvent(obj runtime.Object, eventType, reason, mes
 // +kubebuilder:rbac:groups=core,resources=persistentvolumeclaims,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=serviceaccounts,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=caching.internal.knative.dev,resources=images,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
 func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, retErr error) {
@@ -475,6 +477,15 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 		return ctrl.Result{}, err
 	}
 
+	// 4b. Reconcile the in-cluster-only NetworkPolicy (defense-in-depth for the
+	// mutating cache endpoints). Default-on; toggled off via spec.security.networkPolicy=false.
+	if err := r.reconcileNetworkPolicy(ctx, &nextApp); err != nil {
+		logger.Error(err, "Failed to reconcile NetworkPolicy")
+		r.emitEvent(&nextApp, corev1.EventTypeWarning, ReasonReconcileFailed,
+			fmt.Sprintf("Failed to reconcile NetworkPolicy: %s", err.Error()))
+		return ctrl.Result{}, err
+	}
+
 	// 5. Create/Update KafkaSource if Revalidation is enabled using Unstructured to avoid Eventing proto deps
 	if nextApp.Spec.Revalidation != nil && nextApp.Spec.Revalidation.Queue == "kafka" {
 		topic := fmt.Sprintf("%s-revalidation", nextApp.Name)
@@ -549,12 +560,103 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 	return ctrl.Result{}, nil
 }
 
+// networkPolicyEnabled reports whether the in-cluster NetworkPolicy should be
+// reconciled for this NextApp. Semantics: nil (unset) or true => enabled
+// (DEFAULT-ON); false => disabled.
+func networkPolicyEnabled(nextApp *appsv1alpha1.NextApp) bool {
+	if nextApp.Spec.Security == nil || nextApp.Spec.Security.NetworkPolicy == nil {
+		return true
+	}
+	return *nextApp.Spec.Security.NetworkPolicy
+}
+
+// reconcileNetworkPolicy emits a Kubernetes NetworkPolicy that restricts ingress
+// to the app's pods to in-cluster sources only: the Knative serving system
+// (`knative-serving`), the Kourier gateway (`kourier-system`), and the app's own
+// namespace. This is defense-in-depth for the (already Bearer-authed) mutating
+// cache endpoints (`POST /api/cache/invalidate`, `DELETE /api/cache/events`).
+//
+// IMPORTANT (honesty): a NetworkPolicy is L3/L4 — it filters by source pod/
+// namespace at the network layer, NOT by HTTP path. It therefore CANNOT isolate a
+// specific route; it makes the whole POD unreachable for direct traffic from
+// outside the cluster / disallowed namespaces. True per-path isolation would
+// require a separate internal-only route. Enforcement also depends on the cluster
+// CNI supporting NetworkPolicy (no-op where unsupported).
+//
+// The policy is owner-referenced to the NextApp so it is garbage-collected on
+// delete. When disabled (spec.security.networkPolicy=false), any previously
+// created policy is deleted.
+func (r *NextAppReconciler) reconcileNetworkPolicy(ctx context.Context, nextApp *appsv1alpha1.NextApp) error {
+	np := &networkingv1.NetworkPolicy{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      nextApp.Name + "-allow-ingress",
+			Namespace: nextApp.Namespace,
+		},
+	}
+
+	if !networkPolicyEnabled(nextApp) {
+		// Disabled: best-effort delete of any previously-created policy.
+		if err := r.Delete(ctx, np); err != nil && !errors.IsNotFound(err) {
+			return err
+		}
+		return nil
+	}
+
+	inNamespaceLabels := func(names ...string) networkingv1.NetworkPolicyPeer {
+		return networkingv1.NetworkPolicyPeer{
+			NamespaceSelector: &metav1.LabelSelector{
+				MatchExpressions: []metav1.LabelSelectorRequirement{
+					{
+						Key:      "kubernetes.io/metadata.name",
+						Operator: metav1.LabelSelectorOpIn,
+						Values:   names,
+					},
+				},
+			},
+		}
+	}
+
+	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, np, func() error {
+		if np.Labels == nil {
+			np.Labels = make(map[string]string)
+		}
+		np.Labels["app"] = nextApp.Name
+		np.Labels["generated-by"] = "kn-next-operator"
+
+		// Target the app's Knative serving pods. Knative stamps every revision pod
+		// with `serving.knative.dev/service=<ksvc name>`, which equals the NextApp name.
+		np.Spec.PodSelector = metav1.LabelSelector{
+			MatchLabels: map[string]string{
+				"serving.knative.dev/service": nextApp.Name,
+			},
+		}
+		np.Spec.PolicyTypes = []networkingv1.PolicyType{networkingv1.PolicyTypeIngress}
+		np.Spec.Ingress = []networkingv1.NetworkPolicyIngressRule{
+			{
+				From: []networkingv1.NetworkPolicyPeer{
+					// Knative serving system (activator handles scale-from-zero) and the
+					// Kourier ingress gateway namespace.
+					inNamespaceLabels("knative-serving", "kourier-system"),
+					// Same namespace: an empty PodSelector matches all pods in the
+					// policy's own namespace (NamespaceSelector nil => same namespace).
+					{
+						PodSelector: &metav1.LabelSelector{},
+					},
+				},
+			},
+		}
+		return ctrl.SetControllerReference(nextApp, np, r.Scheme)
+	})
+	return err
+}
+
 func (r *NextAppReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&appsv1alpha1.NextApp{}).
 		Owns(&servingv1.Service{}).
 		Owns(&corev1.PersistentVolumeClaim{}).
 		Owns(&corev1.ServiceAccount{}).
+		Owns(&networkingv1.NetworkPolicy{}).
 		Named("nextapp").
 		Complete(r)
 }

@@ -5,7 +5,7 @@
 > internal-only `NetworkPolicy`. This doc is the audit of record; keep it current when adding
 > any state-changing handler.
 
-Last audited: 2026-06-21.
+Last audited: 2026-06-22.
 
 ## Method
 Enumerated every state-changing HTTP handler and admission webhook:
@@ -41,9 +41,73 @@ here; admission is the operator's mutating surface.
 - Token is provisioned as a K8s Secret → `CACHE_INVALIDATE_TOKEN` env var; never in config/image/URL.
 - Tests: `invalidate/auth.test.ts` (helper) + `events/route.test.ts` (the DELETE guard, 4 cases).
 
+## Network isolation (defense-in-depth) — #90
+
+Auth is one factor; the second is **network isolation**. The operator reconciles a Kubernetes
+`NetworkPolicy` from the `NextApp` CR (per ADR-0001, the operator is the single cluster writer — this
+is **not** a hand-applied or CLI-generated manifest).
+
+- **Object:** `NetworkPolicy` named `<app>-allow-ingress`, owner-referenced to the `NextApp`
+  (garbage-collected on delete). Reconciled in `internal/controller/nextapp_controller.go`
+  (`reconcileNetworkPolicy`), modeled on the operator's existing
+  `config/network-policy/allow-metrics-traffic.yaml`.
+- **podSelector:** `serving.knative.dev/service: <app>` — the label Knative stamps on every revision
+  pod, equal to the NextApp name. The policy therefore targets the app's serving pods.
+- **policyTypes:** `Ingress`.
+- **Ingress rule (from):**
+  1. `namespaceSelector` matching `kubernetes.io/metadata.name in (knative-serving, kourier-system)`
+     — the Knative serving system (the activator handles scale-from-zero) and the Kourier ingress
+     gateway. This keeps scale-from-zero traffic flowing.
+  2. an empty `podSelector` (`{}`) — same-namespace pods (a `NamespaceSelector`-nil peer matches the
+     policy's own namespace).
+
+  Everything else — arbitrary cross-namespace pods and external pod-direct traffic — is denied.
+
+- **Spec flag (default-on, toggleable):** `spec.security.networkPolicy` (`*bool`).
+  - `nil` (unset) or `true` ⇒ the policy is reconciled (**default-on**).
+  - `false` ⇒ the policy is **not** reconciled, and any previously-created one is **deleted** on the
+    next reconcile.
+
+### Honest scope: L3/L4, not L7
+A `NetworkPolicy` filters by **source pod / namespace at the network layer (L3/L4)** — it **cannot**
+target a specific HTTP path (L7). So this does **not** isolate `/api/cache/invalidate` per se; it
+makes the whole **pod** unreachable for direct traffic from outside the cluster / disallowed
+namespaces. That is the defense-in-depth the security rule asks for (a leaked Bearer token is useless
+to an attacker who cannot route to the pod), but it is **not** per-route isolation. True per-path
+isolation would require a separate internal-only route.
+
+### CNI prerequisite
+A `NetworkPolicy` is only enforced if the cluster CNI supports it (Calico, Cilium, etc.). On a
+non-enforcing CNI the policy is a **no-op** (it is still correct to ship). Document the CNI as a
+deployment prerequisite where this guarantee matters.
+
+**kubelet health probes:** the queue-proxy readiness/liveness probes originate from the **node IP**
+(not a pod), so they are not matched by any ingress peer in this policy. Most CNIs exempt kubelet
+probe traffic from default-deny (Calico failsafe ports, Cilium host traffic), so serving survives —
+but on a CNI with strict host-policy enforcement you may need to additionally allow the node/host
+network, or readiness probes can fail.
+
+### Verification
+- **envtest (automated, PR CI):** `internal/controller/networkpolicy_test.go` asserts that
+  reconciling a `NextApp` (default + explicit-true) creates the policy with the expected podSelector,
+  ingress peers, and an ownerReference to the `NextApp`; and that `networkPolicy: false` creates no
+  policy / removes an existing one.
+- **out-of-cluster blocked (manual check, requires an enforcing CNI):** on a kind/real cluster with a
+  NetworkPolicy-enforcing CNI, from a pod in an unlabeled namespace:
+
+  ```bash
+  # In an allowed in-cluster client (same namespace) — succeeds:
+  kubectl run probe-in --rm -it --image=curlimages/curl --restart=Never -n <app-ns> -- \
+    curl -so /dev/null -w '%{http_code}\n' http://<app>.<app-ns>.svc.cluster.local/api/health
+  # From a disallowed namespace, pod-direct to the app pod IP — blocked (connection times out):
+  kubectl run probe-out --rm -it --image=curlimages/curl --restart=Never -n other-ns -- \
+    curl --max-time 5 -so /dev/null -w '%{http_code}\n' http://<app-pod-ip>:3000/api/cache/invalidate
+  ```
+
+  This is not stood up in PR CI (no kind cluster in CI for this check); it is the documented manual
+  verification the issue allows.
+
 ## Remaining (defense-in-depth)
-- **Internal-only `NetworkPolicy`** so these endpoints aren't reachable from outside the namespace even
-  with a leaked token (operator-applied; tracked under E4-1/E4-4).
 - **CI guard** so a new open mutating handler fails the build. Ready-to-wire check: every file under
   `apps/*/src/app/api` that exports `POST|PUT|DELETE|PATCH` must contain `isAuthorized` (or be listed
   here as an explicit, justified exception).

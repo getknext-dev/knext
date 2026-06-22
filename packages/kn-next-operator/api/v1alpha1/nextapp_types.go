@@ -82,6 +82,28 @@ type NextAppSpec struct {
 	// Maps from the knative-manifest hardcoded timeoutSeconds=300.
 	// +optional
 	TimeoutSeconds int32 `json:"timeoutSeconds,omitempty"`
+
+	// Security controls defense-in-depth network/auth hardening for the app.
+	// +optional
+	Security *SecuritySpec `json:"security,omitempty"`
+}
+
+// SecuritySpec holds defense-in-depth controls reconciled by the operator.
+type SecuritySpec struct {
+	// NetworkPolicy toggles the operator-reconciled Kubernetes NetworkPolicy that
+	// restricts ingress to the app's pods to in-cluster sources only (the Knative
+	// serving system, the Kourier gateway, and the app's own namespace), denying
+	// arbitrary cross-namespace / external pod-direct traffic.
+	//
+	// This is L3/L4 (pod-level) network isolation, NOT L7: a NetworkPolicy cannot
+	// target a specific HTTP path, so it hardens the POD's network exposure as
+	// defense-in-depth for the (already Bearer-authed) mutating cache endpoints —
+	// it does not provide per-route isolation.
+	//
+	// Semantics: nil (unset) or true => the policy is reconciled (DEFAULT-ON);
+	// false => the policy is not reconciled and any previously-created one is deleted.
+	// +optional
+	NetworkPolicy *bool `json:"networkPolicy,omitempty"`
 }
 
 type PreviewSpec struct {
