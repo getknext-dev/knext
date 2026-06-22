@@ -338,6 +338,57 @@ var _ = Describe("NextApp Controller reconcile output", func() {
 		})
 	})
 
+	Context("OTel tracing env propagation (#30)", func() {
+		It("does NOT set OTEL_TRACING_ENABLED when tracing is off", func() {
+			nn := reconcileOnce("tracing-off", appsv1alpha1.NextAppSpec{
+				Image:         validImage,
+				Observability: &appsv1alpha1.ObservabilitySpec{Enabled: true},
+			})
+			ksvc := &servingv1.Service{}
+			Expect(k8sClient.Get(ctx, nn, ksvc)).To(Succeed())
+			env := ksvc.Spec.Template.Spec.Containers[0].Env
+			Expect(envValue(env, "OTEL_TRACING_ENABLED")).To(BeEmpty())
+			Expect(envValue(env, "OTEL_EXPORTER_OTLP_ENDPOINT")).To(BeEmpty())
+			Expect(envValue(env, "OTEL_TRACES_SAMPLER_ARG")).To(BeEmpty())
+		})
+
+		It("sets OTEL_TRACING_ENABLED, endpoint, and sampler arg when tracing is on", func() {
+			nn := reconcileOnce("tracing-on", appsv1alpha1.NextAppSpec{
+				Image: validImage,
+				Observability: &appsv1alpha1.ObservabilitySpec{
+					Enabled: true,
+					Tracing: &appsv1alpha1.TracingSpec{
+						Enabled:    true,
+						Endpoint:   "http://tempo.monitoring:4317",
+						SampleRate: "0.25",
+					},
+				},
+			})
+			ksvc := &servingv1.Service{}
+			Expect(k8sClient.Get(ctx, nn, ksvc)).To(Succeed())
+			env := ksvc.Spec.Template.Spec.Containers[0].Env
+			Expect(envValue(env, "OTEL_TRACING_ENABLED")).To(Equal("true"))
+			Expect(envValue(env, "OTEL_EXPORTER_OTLP_ENDPOINT")).To(Equal("http://tempo.monitoring:4317"))
+			Expect(envValue(env, "OTEL_TRACES_SAMPLER_ARG")).To(Equal("0.25"))
+		})
+
+		It("omits endpoint and sampler env when unset, keeping the enable flag", func() {
+			nn := reconcileOnce("tracing-on-defaults", appsv1alpha1.NextAppSpec{
+				Image: validImage,
+				Observability: &appsv1alpha1.ObservabilitySpec{
+					Enabled: true,
+					Tracing: &appsv1alpha1.TracingSpec{Enabled: true},
+				},
+			})
+			ksvc := &servingv1.Service{}
+			Expect(k8sClient.Get(ctx, nn, ksvc)).To(Succeed())
+			env := ksvc.Spec.Template.Spec.Containers[0].Env
+			Expect(envValue(env, "OTEL_TRACING_ENABLED")).To(Equal("true"))
+			Expect(envValue(env, "OTEL_EXPORTER_OTLP_ENDPOINT")).To(BeEmpty())
+			Expect(envValue(env, "OTEL_TRACES_SAMPLER_ARG")).To(BeEmpty())
+		})
+	})
+
 	Context("KafkaSource", func() {
 		It("is NOT created when Revalidation is unset", func() {
 			nn := reconcileOnce("kafka-off", appsv1alpha1.NextAppSpec{Image: validImage})

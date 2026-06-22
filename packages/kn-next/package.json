@@ -15,6 +15,7 @@
     "./adapters/next-adapter": "./src/adapters/next-adapter.ts",
     "./adapters/node-server": "./src/adapters/node-server.ts",
     "./adapters/cache-handler": "./src/adapters/cache-handler.js",
+    "./adapters/otel-config": "./src/adapters/otel-config.ts",
     "./utils/logger": "./src/utils/logger.ts",
     "./cli/validate": "./src/cli/validate.ts",
     "./cli/shared": "./src/cli/shared.ts"

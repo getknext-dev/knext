@@ -137,6 +137,31 @@ export function buildNextAppCRObject(
                         },
                     }
                   : {}),
+              // OTel tracing (#30): same string-sampleRate rule as RUM. The CRD
+              // types observability.tracing.sampleRate as a STRING, so emit it
+              // stringified to pass OpenAPI validation. Default OFF.
+              ...(config.observability.tracing?.enabled
+                  ? {
+                        tracing: {
+                            enabled: true,
+                            ...(config.observability.tracing.endpoint
+                                ? {
+                                      endpoint:
+                                          config.observability.tracing.endpoint,
+                                  }
+                                : {}),
+                            ...(typeof config.observability.tracing
+                                .sampleRate === "number"
+                                ? {
+                                      sampleRate: String(
+                                          config.observability.tracing
+                                              .sampleRate,
+                                      ),
+                                  }
+                                : {}),
+                        },
+                    }
+                  : {}),
           }
         : undefined;
 

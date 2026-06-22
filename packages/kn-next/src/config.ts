@@ -104,6 +104,16 @@ export interface ObservabilityConfig {
         enabled?: boolean; // Default: false
         sampleRate?: number; // 0..1, default 1 (client-side sampling)
     };
+    // OTel tracing (#30): server-side distributed tracing via OTLP/gRPC → a
+    // self-hostable backend (Tempo/Jaeger, ADR-0012). Default OFF. When enabled,
+    // the operator sets OTEL_TRACING_ENABLED so the runtime instrumentation hook
+    // (resolveOtelOptions → registerOTel) initializes the exporter. Zero overhead
+    // when disabled (the hook returns without registering OTel).
+    tracing?: {
+        enabled?: boolean; // Default: false
+        endpoint?: string; // OTLP/gRPC collector endpoint; operator default applies if unset
+        sampleRate?: number; // 0..1, default 1 (head-based trace sampling)
+    };
 }
 
 // Kubernetes Native Secrets Binding
