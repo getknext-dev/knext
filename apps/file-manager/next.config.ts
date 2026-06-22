@@ -9,6 +9,21 @@ const nextConfig: NextConfig = {
   // Asset prefix is injected by kn-next deploy from kn-next.config.ts storage settings.
   // In dev mode (next dev), ASSET_PREFIX is unset → assets serve locally.
   assetPrefix: process.env.ASSET_PREFIX || '',
+  // #93 skew protection (ADR-0011): pin every client to the build it loaded.
+  // `deploymentId` makes Next append `?dpl=<id>` to asset + RSC requests and emit
+  // a deployment-id mismatch signal, so a browser on build A keeps requesting
+  // build A's assets after the server rolls to B. kn-next deploy sets
+  // NEXT_DEPLOYMENT_ID = the deploy tag; unset in `next dev` → no pinning.
+  deploymentId: process.env.NEXT_DEPLOYMENT_ID || undefined,
+  // Defect-A fix (verified vs Next 16 source): `deploymentId` ONLY sets the
+  // `?dpl=` query param — it does NOT name the `_next/static/<BUILD_ID>/` dir,
+  // which is otherwise a RANDOM nanoid. The retention GC keys deletes by the
+  // deploy tag, so the static dir MUST equal that tag or GC matches nothing and
+  // the "just-deployed build is protected" guarantee silently fails. Force
+  // BUILD_ID == NEXT_DEPLOYMENT_ID so `.next/BUILD_ID`, the uploaded
+  // `_next/static/<tag>/` prefix, and `pruneOldBuilds(..., buildId=tag)` all
+  // line up. Returning null in dev falls back to Next's default nanoid.
+  generateBuildId: () => process.env.NEXT_DEPLOYMENT_ID || null,
   output: 'standalone',
   // Ensure native node modules are traced into standalone output (not bundled).
   // pino-elasticsearch and thread-stream are excluded here to avoid Turbopack

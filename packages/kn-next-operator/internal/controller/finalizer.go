@@ -88,6 +88,15 @@ type ExternalCleaner interface {
 // #74 bug: uploads went to the bucket root, so this `<name>/` prefix matched no
 // keys). The shared key scheme is: object key == `<app.Name>/` + relative asset
 // path (e.g. `shop/_next/static/chunks/main.js`).
+//
+// AUTHORITY SPLIT (#93, ADR-0011): this `<app>/` prefix delete is TEARDOWN-ONLY —
+// it runs solely from the deletion finalizer when the whole NextApp is removed.
+// It is NOT, and must never become, a deploy-time prune. Build-id retention
+// (reaping old `<app>/_next/static/<buildId>/` prefixes after a new deploy, while
+// keeping any build still in Status.CurrentTraffic) is owned EXCLUSIVELY by the
+// CLI's pruneOldBuilds (packages/kn-next/src/utils/asset-gc.ts +
+// asset-upload.ts). Keep the two authorities separate so a deploy can never wipe
+// the bare `<app>/` namespace.
 func appStoragePrefix(app *appsv1alpha1.NextApp) string {
 	return app.Name + "/"
 }

@@ -460,6 +460,18 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 		}
 
 		ksvc.Spec.Template.ObjectMeta.Annotations = annotations
+
+		// Skew protection (#93): stamp the deploy's BUILD_ID onto the revision
+		// (pod) template as a label. Knative propagates template labels to every
+		// Revision, so the CLI's deploy-time asset GC can resolve a live revision
+		// back to its build-id (read-only) and never reap a live build's assets.
+		if nextApp.Spec.BuildID != "" {
+			if ksvc.Spec.Template.ObjectMeta.Labels == nil {
+				ksvc.Spec.Template.ObjectMeta.Labels = make(map[string]string)
+			}
+			ksvc.Spec.Template.ObjectMeta.Labels[appsv1alpha1.BuildIDLabel] = nextApp.Spec.BuildID
+		}
+
 		ksvc.Spec.Template.Spec.ServiceAccountName = nextApp.Name + "-sa"
 		ksvc.Spec.Template.Spec.ContainerConcurrency = &cc
 		ksvc.Spec.Template.Spec.TimeoutSeconds = &timeoutSeconds

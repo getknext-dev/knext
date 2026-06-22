@@ -91,7 +91,23 @@ type NextAppSpec struct {
 	// nil => serve the latest-ready revision (DEFAULT, byte-identical back-compat).
 	// +optional
 	Traffic *TrafficSpec `json:"traffic,omitempty"`
+
+	// BuildID is the deploy's Next.js BUILD_ID (issue #93 — skew protection).
+	// The CLI sets NEXT_DEPLOYMENT_ID == this value at build time, so the
+	// `_next/static/<BuildID>/` asset prefix in the object store is named by it.
+	// The operator stamps it onto the Knative Service's revision (pod) template
+	// as the label `apps.kn-next.dev/build-id`, which propagates to every
+	// Revision. The deploy-time asset GC then resolves a live revision back to
+	// its build-id via that label (read-only) so a live revision's assets are
+	// never reaped. Empty => no label stamped (back-compat).
+	// +optional
+	BuildID string `json:"buildId,omitempty"`
 }
+
+// BuildIDLabel is the revision (pod-template) label key carrying the Next.js
+// BUILD_ID for skew-protection asset retention (issue #93). It MUST stay in
+// lock-step with the CLI's resolver in deploy.ts and the GC in asset-gc.ts.
+const BuildIDLabel = "apps.kn-next.dev/build-id"
 
 // TrafficSpec expresses the desired Knative traffic target for rollback /
 // canary. When nil the operator emits no spec.traffic and Knative defaults to

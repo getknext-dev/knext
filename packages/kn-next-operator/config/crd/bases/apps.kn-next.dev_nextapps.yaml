@@ -39,6 +39,17 @@ spec:
           spec:
             description: spec defines the desired state of NextApp
             properties:
+              buildId:
+                description: |-
+                  BuildID is the deploy's Next.js BUILD_ID (issue #93 — skew protection).
+                  The CLI sets NEXT_DEPLOYMENT_ID == this value at build time, so the
+                  `_next/static/<BuildID>/` asset prefix in the object store is named by it.
+                  The operator stamps it onto the Knative Service's revision (pod) template
+                  as the label `apps.kn-next.dev/build-id`, which propagates to every
+                  Revision. The deploy-time asset GC then resolves a live revision back to
+                  its build-id via that label (read-only) so a live revision's assets are
+                  never reaped. Empty => no label stamped (back-compat).
+                type: string
               cache:
                 description: Caching infrastructure
                 properties:

@@ -1,7 +1,8 @@
 import { readdirSync } from "node:fs";
 import { join, relative } from "node:path";
-import { runCapture, runQuiet } from "../cli/exec";
+import { runCapture, runQuiet, runQuietAllowFail } from "../cli/exec";
 import type { KnativeNextConfig } from "../config";
+import { DEFAULT_RETAIN, selectBuildsToDelete } from "./asset-gc";
 import { createLogger } from "./logger";
 
 /**
@@ -429,4 +430,236 @@ export async function uploadAssets(config: KnativeNextConfig): Promise<void> {
 
     ops.bulkUpload();
     verifyAndRetry(ops, localFiles, config.storage.bucket);
+}
+
+/**
+ * The object-store path holding per-build static chunks, RELATIVE to the
+ * app-scoped key prefix: `_next/static/<buildId>/...`. The retention GC operates
+ * ONLY under this sub-namespace; the bare `<app>/` prefix is teardown-only
+ * (ADR-0008) and is never a prune target.
+ */
+const STATIC_NS = "_next/static/";
+
+/**
+ * Lists the build-id "directories" present under `<app>/_next/static/` in the
+ * object store, returning buildId → the recursive-delete URI scoped to exactly
+ * `<app>/_next/static/<buildId>/`. Provider-specific because each CLI renders a
+ * listing differently. The build-id is the first path segment AFTER `_next/static/`.
+ */
+function listRemoteBuildIds(config: KnativeNextConfig): Map<string, string> {
+    const { provider, bucket } = config.storage;
+    const appPrefix = appKeyPrefix(config); // "<name>/"
+    const out = new Map<string, string>();
+
+    /** Extracts the build-id segment that follows `_next/static/` in a key. */
+    const buildIdFrom = (relKey: string): string | null => {
+        const idx = relKey.indexOf(STATIC_NS);
+        if (idx < 0) return null;
+        const seg = relKey.slice(idx + STATIC_NS.length).split("/")[0];
+        return seg || null;
+    };
+
+    switch (provider) {
+        case "gcs": {
+            const base = `gs://${bucket}/${appPrefix}${STATIC_NS}`;
+            const listed = runCapture(["gsutil", "ls", base]);
+            for (const line of listed.split("\n")) {
+                const trimmed = line.trim();
+                if (!trimmed.startsWith(base)) continue;
+                const id = trimmed.slice(base.length).replace(/\/.*/, "");
+                if (id) out.set(id, `${base}${id}/`);
+            }
+            return out;
+        }
+        case "s3": {
+            const listed = runCapture([
+                "aws",
+                "s3api",
+                "list-objects-v2",
+                "--bucket",
+                bucket,
+                "--prefix",
+                `${appPrefix}${STATIC_NS}`,
+                "--query",
+                "Contents[].Key",
+                "--output",
+                "text",
+            ]);
+            for (const tok of listed.split(/\s+/)) {
+                const key = tok.trim();
+                if (!key || key === "None") continue;
+                const id = buildIdFrom(key);
+                if (id)
+                    out.set(
+                        id,
+                        `s3://${bucket}/${appPrefix}${STATIC_NS}${id}/`,
+                    );
+            }
+            return out;
+        }
+        case "minio": {
+            const base = `minio/${bucket}/${appPrefix}${STATIC_NS}`;
+            const listed = runCapture(["mc", "ls", base]);
+            for (const line of listed.split("\n")) {
+                const trimmed = line.trim();
+                if (!trimmed) continue;
+                const last = trimmed.split(/\s+/).pop() ?? "";
+                const id = last.replace(/\/.*$/, "");
+                if (id) out.set(id, `${base}${id}/`);
+            }
+            return out;
+        }
+        case "azure": {
+            const listed = runCapture([
+                "az",
+                "storage",
+                "blob",
+                "list",
+                "-c",
+                bucket,
+                "--prefix",
+                `${appPrefix}${STATIC_NS}`,
+                "--query",
+                "[].name",
+                "-o",
+                "json",
+            ]);
+            try {
+                const parsed = JSON.parse(listed || "[]");
+                if (Array.isArray(parsed)) {
+                    for (const name of parsed) {
+                        if (typeof name !== "string") continue;
+                        const id = buildIdFrom(name);
+                        if (id) out.set(id, `${appPrefix}${STATIC_NS}${id}/`);
+                    }
+                }
+            } catch {
+                // Empty / non-JSON container → no build-ids to prune.
+            }
+            return out;
+        }
+        default:
+            throw new Error(`Unsupported storage provider: ${provider}`);
+    }
+}
+
+/** Issues a best-effort recursive delete of one build-id prefix. */
+function deleteBuildPrefix(
+    config: KnativeNextConfig,
+    buildId: string,
+    deleteUri: string,
+): void {
+    const { provider, bucket } = config.storage;
+    // Hard guard: the delete URI MUST be scoped to the static build-id namespace.
+    // This makes a bare `<app>/` (teardown-only, ADR-0008) prune impossible even
+    // if a listing parser regressed.
+    if (!deleteUri.includes(`${STATIC_NS}${buildId}/`)) {
+        log.warn(
+            { buildId, deleteUri },
+            "Refusing prune: delete URI not scoped to _next/static/<buildId>/",
+        );
+        return;
+    }
+    switch (provider) {
+        case "gcs":
+            runQuietAllowFail(["gsutil", "-m", "rm", "-r", deleteUri]);
+            return;
+        case "s3":
+            runQuietAllowFail(["aws", "s3", "rm", "--recursive", deleteUri]);
+            return;
+        case "minio":
+            runQuietAllowFail([
+                "mc",
+                "rm",
+                "--recursive",
+                "--force",
+                deleteUri,
+            ]);
+            return;
+        case "azure":
+            runQuietAllowFail([
+                "az",
+                "storage",
+                "blob",
+                "delete-batch",
+                "-s",
+                bucket,
+                "--pattern",
+                `${deleteUri}*`,
+            ]);
+            return;
+        default:
+            throw new Error(`Unsupported storage provider: ${provider}`);
+    }
+}
+
+/**
+ * Deploy-time retention GC (#93, ADR-0011). After uploading build `newBuildId`,
+ * reap the static-asset prefixes of builds that are BOTH outside the retain
+ * window AND not in `liveBuildIds` (the live traffic set, sourced READ-ONLY from
+ * `NextApp.Status.CurrentTraffic`, #92). This is the ONLY build-id-pruning
+ * authority; it deletes strictly under `<app>/_next/static/<id>/`, never the
+ * bare `<app>/` prefix.
+ *
+ * Ordering: the remote listing has no reliable per-build timestamp, so we treat
+ * the just-deployed `newBuildId` as the unambiguous newest and order the rest by
+ * their listing position (stable, oldest-first). The window + live set are the
+ * safety properties; the exact age of two equally-old builds does not matter.
+ *
+ * Best-effort: individual deletes tolerate failure (a stuck delete must never
+ * fail a deploy that has already shipped).
+ */
+export function pruneOldBuilds(
+    config: KnativeNextConfig,
+    liveBuildIds: readonly string[],
+    newBuildId: string,
+): void {
+    const retain = config.storage.assetRetention ?? DEFAULT_RETAIN;
+
+    let remote: Map<string, string>;
+    try {
+        remote = listRemoteBuildIds(config);
+    } catch (err) {
+        // A listing failure must never break a successful deploy — just skip GC.
+        const message = err instanceof Error ? err.message : String(err);
+        log.warn(
+            { provider: config.storage.provider, error: message },
+            "Skipping asset GC: could not list remote build-ids",
+        );
+        return;
+    }
+
+    const remoteIds = [...remote.keys()];
+    if (remoteIds.length === 0) return;
+
+    // Monotonic ordering: listing order + force `newBuildId` to the newest slot.
+    const timestamps: Record<string, number> = {};
+    remoteIds.forEach((id, i) => {
+        timestamps[id] = i;
+    });
+    if (newBuildId) timestamps[newBuildId] = remoteIds.length + 1;
+
+    const toDelete = selectBuildsToDelete({
+        remoteBuildIds: remoteIds,
+        timestamps,
+        liveBuildIds,
+        retain,
+    });
+
+    if (toDelete.length === 0) {
+        log.info(
+            { retain, remote: remoteIds.length },
+            "Asset GC: nothing to reap (all builds within window or live)",
+        );
+        return;
+    }
+
+    log.info(
+        { reaping: toDelete, retain, live: liveBuildIds },
+        "Asset GC: reaping old build prefixes (skew-protection retention)",
+    );
+    for (const id of toDelete) {
+        const uri = remote.get(id);
+        if (uri) deleteBuildPrefix(config, id, uri);
+    }
 }

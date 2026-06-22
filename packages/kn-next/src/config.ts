@@ -9,6 +9,12 @@ export interface StorageConfig {
     publicUrl: string; // Public CDN URL where assets are served from (e.g. https://storage.googleapis.com/my-bucket)
     accessKey?: string; // Optional, use IAM when possible
     secretKey?: string;
+    // #93 skew protection (ADR-0011): number of recent BUILD_IDs whose
+    // `_next/static/<buildId>/` prefixes are retained in the object store after a
+    // new deploy. A build still serving traffic (NextApp.Status.CurrentTraffic) is
+    // ALWAYS kept regardless of this window. Default DEFAULT_RETAIN (3). Higher =
+    // safer for long-lived clients, more storage.
+    assetRetention?: number;
 }
 
 // Cache adapters

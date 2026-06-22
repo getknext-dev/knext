@@ -25,6 +25,7 @@ export function buildNextAppCRObject(
     config: KnativeNextConfig,
     image: string,
     namespace: string,
+    buildId?: string,
 ): Record<string, unknown> {
     // Scaling — preserve minScale:0 (scale-to-zero invariant)
     const minScale = config.scaling?.minScale ?? 0;
@@ -155,6 +156,9 @@ export function buildNextAppCRObject(
             ? { healthCheckPath: config.healthCheckPath }
             : {}),
         ...(runtime ? { runtime } : {}),
+        // #93 skew protection: carry the deploy's BUILD_ID so the operator can stamp
+        // the `apps.kn-next.dev/build-id` revision label the asset GC resolves against.
+        ...(buildId ? { buildId } : {}),
     };
 
     return {
@@ -176,8 +180,9 @@ export function renderNextAppCR(
     config: KnativeNextConfig,
     image: string,
     namespace: string,
+    buildId?: string,
 ): string {
-    const crObject = buildNextAppCRObject(config, image, namespace);
+    const crObject = buildNextAppCRObject(config, image, namespace, buildId);
     return YAML.stringify(crObject);
 }
 
