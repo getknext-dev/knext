@@ -44,9 +44,16 @@ const CACHE_DIR = join(tmpdir(), 'knext-bytecode-reuse-test');
 const APP_NAME = 'file-manager-reuse-test';
 
 const serverExists = existsSync(STANDALONE_SERVER);
-const skipReason = serverExists
-  ? null
-  : 'standalone server.js not found — run `next build --webpack` first';
+
+// CI gate: when KNEXT_REQUIRE_STANDALONE=1 the standalone build is MANDATORY, so a
+// missing build is a HARD FAILURE rather than a silent skip. The CI job that builds
+// the standalone output sets this flag — that way a green check can never mean
+// "skipped". Locally (flag unset) the test still skips cleanly without a build.
+const requireStandalone = process.env.KNEXT_REQUIRE_STANDALONE === '1';
+const skipReason =
+  serverExists || requireStandalone
+    ? null
+    : 'standalone server.js not found — run `next build --webpack` first';
 
 /** Snapshot of every regular file under a V8 compile-cache dir. */
 type CacheSnapshot = Map<string, { size: number; mtimeMs: number }>;
@@ -135,18 +142,26 @@ function runServerAndScrapeMetrics(): string {
 
 describe('bytecode cache reuse across cold starts (A2-2 / #38)', () => {
   beforeAll(() => {
-    if (serverExists) {
+    if (skipReason === null) {
       rmSync(CACHE_DIR, { recursive: true, force: true });
       mkdirSync(CACHE_DIR, { recursive: true });
     }
   });
 
   afterAll(() => {
-    if (serverExists) rmSync(CACHE_DIR, { recursive: true, force: true });
+    if (skipReason === null) rmSync(CACHE_DIR, { recursive: true, force: true });
   });
 
   it('standalone server.js exists after next build', () => {
     if (!serverExists) {
+      if (requireStandalone) {
+        // CI flag is set: a missing build is a HARD failure, never a silent skip.
+        throw new Error(
+          'KNEXT_REQUIRE_STANDALONE=1 but no standalone build present — ' +
+            'CI must run `next build --webpack` before this test. A skip here would ' +
+            'falsely report the bytecode-cache reuse gate as passing.',
+        );
+      }
       console.log(`SKIP: ${skipReason}`);
       return;
     }
@@ -161,7 +176,13 @@ describe('bytecode cache reuse across cold starts (A2-2 / #38)', () => {
       const coldSnap = snapshotCacheDir(CACHE_DIR);
       const coldFiles = [...coldSnap.keys()].filter((k) => !k.startsWith('__'));
       expect(coldFiles.length).toBeGreaterThan(0); // V8 wrote bytecode on cold compile
-      // Sanity: the metrics route was reachable on the cold process too.
+      // Sanity ONLY: the metrics route was reachable on the cold process.
+      // NOTE: `kn_next_bytecode_cache_warm_start` is computed at route-module
+      // import (the first request), which on the cold process happens AFTER the
+      // cold run already wrote cache files — so the gauge reads 1 even on the cold
+      // run. This assertion must therefore stay a presence/substring check, NOT
+      // `== 0`. The real reuse proof is the filesystem snapshot below (zero new /
+      // rewritten cache files on the warm run) — do not "strengthen" this line.
       expect(coldMetrics).toContain('kn_next_bytecode_cache_warm_start');
 
       // --- WARM: second start against the SAME dir must REUSE, not recompile ---
