@@ -57,7 +57,15 @@ export default function CacheMonitorPage() {
     setInvalidating(true);
     setMessage(null);
     try {
-      const res = await fetch(`/api/cache/invalidate?tag=${encodeURIComponent(invalidateTag)}`);
+      // Invalidation mutates state — must be POST, never a GET (#78). The
+      // Bearer token is a server-side secret (CACHE_INVALIDATE_TOKEN, K8s
+      // Secret) and is never exposed to the browser; this dev UI relies on an
+      // internal-only NetworkPolicy gating the endpoint.
+      const res = await fetch('/api/cache/invalidate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tag: invalidateTag }),
+      });
       const data = await res.json();
       if (data.success) {
         setMessage(`✅ Invalidated tag: ${invalidateTag}`);

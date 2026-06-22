@@ -22,8 +22,11 @@ grep -rln 'webhook\|Mutate\|Validate.*admission' packages/kn-next-operator/inter
 | Endpoint | Method | Mutates | Auth | Status |
 |---|---|---|---|---|
 | `/api/cache/invalidate` | POST | Next.js cache (`revalidateTag`) | Bearer token `CACHE_INVALIDATE_TOKEN`, fail-closed (`isAuthorized`) | ✅ authed |
-| `/api/cache/invalidate` | GET | same (a mutating GET — flagged smell; retire once callers move to POST) | same Bearer token | ✅ authed |
 | `/api/cache/events` | DELETE | clears all cache events (Redis / in-memory) | same Bearer token (reuses the single `isAuthorized` helper) | ✅ authed (E4-2) |
+
+There is intentionally **no `GET /api/cache/invalidate`** handler (#78): invalidation mutates state,
+and a mutating GET is prefetchable/link-triggerable and leaks the Bearer token into URLs and logs.
+App Router returns 405 for the unexported GET method; POST is the only invalidation entrypoint.
 
 Read-only handlers (no auth required, by design): `GET /api/cache/events`, `GET /api/health`,
 `GET /api/metrics`, `GET /api/audit`, `GET /api/cache-stats`. These disclose operational data only —

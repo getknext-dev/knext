@@ -67,8 +67,10 @@ async function main() {
     `POST /api/cache/invalidate {tag:"products"} → HTTP ${inval1.status}: ${inval1.body}`,
   );
 
-  const inval2 = await get('/api/cache/invalidate?tag=files');
-  console.log(`GET /api/cache/invalidate?tag=files → HTTP ${inval2.status}: ${inval2.body}`);
+  // #78: invalidation is POST-only (a mutating GET is removed). The GET form
+  // would now 405.
+  const inval2 = await post('/api/cache/invalidate', { tag: 'files' });
+  console.log(`POST /api/cache/invalidate {tag:"files"} → HTTP ${inval2.status}: ${inval2.body}`);
 
   const od2 = await get('/cache-tests/on-demand');
   console.log(`GET /cache-tests/on-demand [after invalidation] → HTTP ${od2.status}`);

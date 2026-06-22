@@ -1,0 +1,26 @@
+# Minimal KafkaSource CRD fixture for envtest.
+# This is a stripped-down version of the Knative Eventing Kafka source CRD,
+# used only so the controller unit tests can create/get KafkaSource objects.
+# envtest does not run the Kafka controller, so only the schema must exist.
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: kafkasources.sources.knative.dev
+spec:
+  group: sources.knative.dev
+  names:
+    kind: KafkaSource
+    listKind: KafkaSourceList
+    plural: kafkasources
+    singular: kafkasource
+  scope: Namespaced
+  versions:
+    - name: v1beta1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      schema:
+        openAPIV3Schema:
+          type: object
+          x-kubernetes-preserve-unknown-fields: true

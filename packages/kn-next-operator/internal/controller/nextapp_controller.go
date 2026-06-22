@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -28,6 +29,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/client-go/tools/record"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -49,10 +51,30 @@ const (
 	ConditionDegraded = "Degraded"
 )
 
+// Event reason constants — concise, stable strings surfaced via `kubectl describe nextapp`.
+const (
+	// ReasonInvalidImage marks a NextApp rejected for failing digest-pinning (e.g. :latest).
+	ReasonInvalidImage = "InvalidImage"
+	// ReasonReconcileFailed marks a generic reconcile error (API error, child create/update failure).
+	ReasonReconcileFailed = "ReconcileFailed"
+	// ReasonReconciled marks a successful reconcile.
+	ReasonReconciled = "Reconciled"
+)
+
 // NextAppReconciler reconciles a NextApp object
 type NextAppReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
+	// Recorder emits Kubernetes Events attached to the NextApp so operators can see
+	// reconcile transitions via `kubectl describe`. May be nil in unit tests.
+	Recorder record.EventRecorder
+}
+
+// emitEvent records a Kubernetes Event on the NextApp when a recorder is wired.
+func (r *NextAppReconciler) emitEvent(obj runtime.Object, eventType, reason, message string) {
+	if r.Recorder != nil {
+		r.Recorder.Event(obj, eventType, reason, message)
+	}
 }
 
 // +kubebuilder:rbac:groups=apps.kn-next.dev,resources=nextapps,verbs=get;list;watch;create;update;patch;delete
@@ -62,9 +84,22 @@ type NextAppReconciler struct {
 // +kubebuilder:rbac:groups=core,resources=persistentvolumeclaims,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=serviceaccounts,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=caching.internal.knative.dev,resources=images,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
-func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, retErr error) {
 	logger := logf.FromContext(ctx)
+
+	// Observe reconcile duration and tally the result on every return path.
+	start := time.Now()
+	defer func() {
+		reconcileDuration.Observe(time.Since(start).Seconds())
+		if retErr != nil {
+			reconcileTotal.WithLabelValues("error").Inc()
+			reconcileErrors.Inc()
+		} else {
+			reconcileTotal.WithLabelValues("success").Inc()
+		}
+	}()
 
 	var nextApp appsv1alpha1.NextApp
 	if err := r.Get(ctx, req.NamespacedName, &nextApp); err != nil {
@@ -94,6 +129,8 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	// fail-closed as defense-in-depth for CRs that predate the webhook.
 	if err := validation.ValidateNextAppSpec(&nextApp.Spec); err != nil {
 		logger.Error(err, "Rejecting NextApp: spec failed validation")
+		r.emitEvent(&nextApp, corev1.EventTypeWarning, ReasonInvalidImage,
+			fmt.Sprintf("Spec rejected: %s", err.Error()))
 		apimeta.SetStatusCondition(&nextApp.Status.Conditions, metav1.Condition{
 			Type:               ConditionDegraded,
 			Status:             metav1.ConditionTrue,
@@ -125,6 +162,8 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	})
 	if err != nil {
 		logger.Error(err, "Failed to reconcile ServiceAccount")
+		r.emitEvent(&nextApp, corev1.EventTypeWarning, ReasonReconcileFailed,
+			fmt.Sprintf("Failed to reconcile ServiceAccount: %s", err.Error()))
 		return ctrl.Result{}, err
 	}
 
@@ -152,6 +191,8 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		})
 		if err != nil {
 			logger.Error(err, "Failed to reconcile PVC")
+			r.emitEvent(&nextApp, corev1.EventTypeWarning, ReasonReconcileFailed,
+				fmt.Sprintf("Failed to reconcile bytecode-cache PVC: %s", err.Error()))
 			return ctrl.Result{}, err
 		}
 	}
@@ -390,6 +431,8 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	})
 	if err != nil {
 		logger.Error(err, "Failed to reconcile Knative Service")
+		r.emitEvent(&nextApp, corev1.EventTypeWarning, ReasonReconcileFailed,
+			fmt.Sprintf("Failed to reconcile Knative Service: %s", err.Error()))
 		return ctrl.Result{}, err
 	}
 
@@ -424,6 +467,8 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		})
 		if err != nil {
 			logger.Error(err, "Failed to reconcile KafkaSource")
+			r.emitEvent(&nextApp, corev1.EventTypeWarning, ReasonReconcileFailed,
+				fmt.Sprintf("Failed to reconcile KafkaSource: %s", err.Error()))
 			return ctrl.Result{}, err
 		}
 	}
@@ -459,6 +504,8 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{}, err
 	}
 
+	r.emitEvent(&nextApp, corev1.EventTypeNormal, ReasonReconciled,
+		fmt.Sprintf("NextApp reconciled successfully (image %s)", nextApp.Spec.Image))
 	logger.Info("Successfully reconciled NextApp", "name", nextApp.Name, "url", nextApp.Status.URL)
 	return ctrl.Result{}, nil
 }
