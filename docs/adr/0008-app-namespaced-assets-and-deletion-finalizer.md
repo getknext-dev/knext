@@ -53,6 +53,14 @@ violate data sovereignty (a zone must never touch another zone's data).
   providers and non-Redis caches no-op with a logged warning until implemented.
 - The deletion branch runs **before** spec validation, so even an invalid-image `NextApp` can still
   be deleted (no wedge path).
+- **Reconcile-trigger semantics (#98).** The `For(&NextApp{})` watch carries a
+  `GenerationChangedPredicate`, so a status-only write does not re-enqueue (this killed a ~45/s
+  idle reconcile hot-loop). The trade-off: an **annotation/label-only** edit to a `NextApp` (which
+  does not bump `metadata.generation`) will **not** re-reconcile — including the finalizer-bearing
+  pass. This is acceptable because the reconciler (and this finalizer) key off `spec` and deletion
+  timestamps, not metadata; the four `Owns(...)` watches stay unfiltered so owned-resource drift
+  still reconciles. If a future field is ever read from metadata, switch to
+  `predicate.Or(GenerationChangedPredicate{}, AnnotationChangedPredicate{})`.
 
 ## Action items
 - (Done in #74) finalizer + scoped `ExternalCleaner` + app-namespaced uploads + CLI CR-only teardown.

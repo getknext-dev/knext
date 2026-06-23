@@ -47,6 +47,10 @@ HTTP-annotation plumbing and a transcoding layer, and has weaker TS ergonomics.
 
 ## Revalidation status (ISR-over-Kafka routing — DEFERRED, #95)
 
+> **Promoted to [ADR-0016](0016-async-isr-revalidation.md).** This addendum is retained for history;
+> the async-ISR-revalidation decision (the `provisionKafkaSource` opt-in + `RevalidationDeferred`
+> condition) now lives in its own ADR — edit ADR-0016 going forward.
+
 The Kafka→revalidator routing this ADR's family describes (a domain event lands on Kafka →
 a `{app}-revalidator` service consumes it → it calls `revalidateTag()` to invalidate every pod's
 Redis-backed cache) is **deferred / build-later**. The `{app}-revalidator` consumer service has
