@@ -33,7 +33,8 @@ function exportTargets(): string[] {
     if (typeof pkg.main === "string") targets.push(pkg.main);
     if (typeof pkg.types === "string") targets.push(pkg.types);
     if (typeof pkg.module === "string") targets.push(pkg.module);
-    for (const value of Object.values(pkg.exports ?? {})) {
+    for (const [key, value] of Object.entries(pkg.exports ?? {})) {
+        if (key === "//") continue; // documentation marker, not a file target
         if (typeof value === "string") {
             targets.push(value);
         } else if (value && typeof value === "object") {
@@ -70,17 +71,23 @@ describe("PK1: @knext/core publish surface", () => {
 
     it("declares every library subpath the example app and CLI import", () => {
         const exp = pkg.exports ?? {};
+        // PK5 (#116) split these into a PUBLIC application surface and
+        // INTERNAL framework-wiring subpaths under ./internal/*. Every dist
+        // target the example app and runtime resolve must still be declared.
         for (const subpath of [
+            // public application surface (cache-handler is the app's ISR
+            // cacheHandler wiring point — a local re-export targets this path)
             ".",
-            "./loader",
             "./adapter",
-            "./adapters/next-adapter",
-            "./adapters/node-server",
-            "./adapters/cache-handler",
             "./adapters/otel-config",
-            "./utils/logger",
-            "./cli/validate",
-            "./cli/shared",
+            "./adapters/cache-handler",
+            // internal framework wiring (runtime / CLI / operator)
+            "./internal/next-adapter",
+            "./internal/node-server",
+            "./internal/loader",
+            "./internal/logger",
+            "./internal/cli-validate",
+            "./internal/cli-shared",
         ]) {
             expect(exp, `exports must declare ${subpath}`).toHaveProperty(
                 subpath,
