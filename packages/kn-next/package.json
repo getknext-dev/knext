@@ -15,46 +15,54 @@
       "import": "./dist/config.js",
       "default": "./dist/config.js"
     },
-    "./loader": {
-      "types": "./dist/loader.d.ts",
-      "import": "./dist/loader.js",
-      "default": "./dist/loader.js"
-    },
     "./adapter": {
       "types": "./dist/adapters/next-adapter.d.ts",
       "import": "./dist/adapters/next-adapter.js",
       "default": "./dist/adapters/next-adapter.js"
     },
-    "./adapters/next-adapter": {
-      "types": "./dist/adapters/next-adapter.d.ts",
-      "import": "./dist/adapters/next-adapter.js",
-      "default": "./dist/adapters/next-adapter.js"
-    },
-    "./adapters/node-server": {
-      "types": "./dist/adapters/node-server.d.ts",
-      "import": "./dist/adapters/node-server.js",
-      "default": "./dist/adapters/node-server.js"
-    },
-    "./adapters/cache-handler": "./dist/adapters/cache-handler.js",
     "./adapters/otel-config": {
       "types": "./dist/adapters/otel-config.d.ts",
       "import": "./dist/adapters/otel-config.js",
       "default": "./dist/adapters/otel-config.js"
     },
-    "./utils/logger": {
+    "./internal/next-adapter": {
+      "types": "./dist/adapters/next-adapter.d.ts",
+      "import": "./dist/adapters/next-adapter.js",
+      "default": "./dist/adapters/next-adapter.js"
+    },
+    "./internal/node-server": {
+      "types": "./dist/adapters/node-server.d.ts",
+      "import": "./dist/adapters/node-server.js",
+      "default": "./dist/adapters/node-server.js"
+    },
+    "./internal/cache-handler": "./dist/adapters/cache-handler.js",
+    "./internal/loader": {
+      "types": "./dist/loader.d.ts",
+      "import": "./dist/loader.js",
+      "default": "./dist/loader.js"
+    },
+    "./internal/logger": {
       "types": "./dist/utils/logger.d.ts",
       "import": "./dist/utils/logger.js",
       "default": "./dist/utils/logger.js"
     },
-    "./cli/validate": {
+    "./internal/cli-validate": {
       "types": "./dist/cli/validate.d.ts",
       "import": "./dist/cli/validate.js",
       "default": "./dist/cli/validate.js"
     },
-    "./cli/shared": {
+    "./internal/cli-shared": {
       "types": "./dist/cli/shared.d.ts",
       "import": "./dist/cli/shared.js",
       "default": "./dist/cli/shared.js"
+    }
+  },
+  "knext": {
+    "publicApi": {
+      "doc": "docs/PUBLIC_API.md",
+      "stability": "Public subpaths follow semver; ./internal/* subpaths carry no stability guarantee.",
+      "public": [".", "./adapter", "./adapters/otel-config"],
+      "internalPrefix": "./internal/"
     }
   },
   "scripts": {

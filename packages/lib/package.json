@@ -4,10 +4,39 @@
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "exports": {
-    ".": "./dist/index.js",
-    "./logger": "./dist/logger/index.js",
-    "./clients": "./dist/clients.js",
-    "./health": "./dist/health/index.js"
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./logger": {
+      "types": "./dist/logger/index.d.ts",
+      "import": "./dist/logger/index.js",
+      "default": "./dist/logger/index.js"
+    },
+    "./clients": {
+      "types": "./dist/clients.d.ts",
+      "import": "./dist/clients.js",
+      "default": "./dist/clients.js"
+    },
+    "./health": {
+      "types": "./dist/health/index.d.ts",
+      "import": "./dist/health/index.js",
+      "default": "./dist/health/index.js"
+    }
+  },
+  "knext": {
+    "publicApi": {
+      "doc": "docs/PUBLIC_API.md",
+      "stability": "All @knext/lib subpaths are public and follow semver.",
+      "public": [
+        ".",
+        "./logger",
+        "./clients",
+        "./health"
+      ],
+      "internalPrefix": null
+    }
   },
   "scripts": {
     "build": "tsc",
