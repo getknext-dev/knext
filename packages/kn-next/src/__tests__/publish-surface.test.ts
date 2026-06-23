@@ -75,14 +75,15 @@ describe("PK1: @knext/core publish surface", () => {
         // INTERNAL framework-wiring subpaths under ./internal/*. Every dist
         // target the example app and runtime resolve must still be declared.
         for (const subpath of [
-            // public application surface
+            // public application surface (cache-handler is the app's ISR
+            // cacheHandler wiring point — a local re-export targets this path)
             ".",
             "./adapter",
             "./adapters/otel-config",
+            "./adapters/cache-handler",
             // internal framework wiring (runtime / CLI / operator)
             "./internal/next-adapter",
             "./internal/node-server",
-            "./internal/cache-handler",
             "./internal/loader",
             "./internal/logger",
             "./internal/cli-validate",
@@ -115,9 +116,7 @@ describe("PK1: @knext/core publish surface", () => {
 
     it("emits a .d.ts for each TypeScript-typed subpath", () => {
         const typed = Object.entries(pkg.exports ?? {})
-            .filter(
-                ([sub]) => sub !== "./internal/cache-handler" && sub !== "//",
-            )
+            .filter(([sub]) => sub !== "./adapters/cache-handler")
             .map(([, value]) =>
                 typeof value === "string"
                     ? value

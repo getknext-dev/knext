@@ -40,6 +40,13 @@ const PUBLIC_API_DOC = resolve(repoRoot, "docs/PUBLIC_API.md");
 const PUBLIC_CORE = [".", "./adapter", "./adapters/otel-config"];
 const PUBLIC_LIB = [".", "./logger", "./clients", "./health"];
 
+/**
+ * `@knext/core/adapters/cache-handler` is PUBLIC but plain (untyped) JS — apps
+ * reference it from next.config `cacheHandler` via a thin local re-export. It
+ * resolves to a bare `.js` with no `.d.ts`, so it is verified separately.
+ */
+const PUBLIC_CORE_UNTYPED = ["./adapters/cache-handler"];
+
 function jsTargetOf(value: unknown): string | undefined {
     if (typeof value === "string") return value;
     if (value && typeof value === "object") {
@@ -58,7 +65,7 @@ function dtsTargetOf(value: unknown): string | undefined {
 
 describe("PK5: @knext/core public API surface", () => {
     it("declares every documented public subpath", () => {
-        for (const sub of PUBLIC_CORE) {
+        for (const sub of [...PUBLIC_CORE, ...PUBLIC_CORE_UNTYPED]) {
             expect(
                 corePkg.exports,
                 `core must publicly export ${sub}`,
@@ -66,7 +73,7 @@ describe("PK5: @knext/core public API surface", () => {
         }
     });
 
-    it("resolves each public subpath to real JS + .d.ts in dist", () => {
+    it("resolves each typed public subpath to real JS + .d.ts in dist", () => {
         for (const sub of PUBLIC_CORE) {
             const entry = corePkg.exports[sub];
             const js = jsTargetOf(entry);
@@ -85,17 +92,29 @@ describe("PK5: @knext/core public API surface", () => {
         }
     });
 
+    it("resolves the untyped public cache-handler subpath to real JS in dist", () => {
+        for (const sub of PUBLIC_CORE_UNTYPED) {
+            const js = jsTargetOf(corePkg.exports[sub]);
+            expect(js, `${sub} must declare a JS target`).toBeDefined();
+            expect(
+                existsSync(resolve(corePkgDir, js as string)),
+                `missing built JS for ${sub}: ${js}`,
+            ).toBe(true);
+        }
+    });
+
     it("keeps internal framework-wiring subpaths under ./internal/*", () => {
         // These are framework wiring used by the runtime / CLI / operator —
         // not a stable application import. PK5 segregates them so the boundary
-        // is visible in the exports map itself, not just in prose.
+        // is visible in the exports map itself, not just in prose. (cache-handler
+        // is NOT here — it is a public app wiring point, see PUBLIC_CORE_UNTYPED.)
         const internalConcepts = [
+            "next-adapter",
             "node-server",
-            "cache-handler",
             "loader",
             "cli-shared",
             "cli-validate",
-            "internal-logger",
+            "logger",
         ];
         const internalKeys = Object.keys(corePkg.exports).filter((k) =>
             k.startsWith("./internal/"),
@@ -108,11 +127,13 @@ describe("PK5: @knext/core public API surface", () => {
 
     it("does not expose framework internals in the public namespace", () => {
         // No bare (non-./internal) export may target a known-internal module.
+        // NB: cache-handler is intentionally NOT forbidden — it is the public
+        // ISR cache wiring an app references from next.config `cacheHandler`.
         const forbidden = [
             "node-server",
-            "cache-handler",
             "cli/shared.js",
             "cli/validate.js",
+            "loader.js",
         ];
         for (const [key, value] of Object.entries(corePkg.exports)) {
             if (key.startsWith("./internal/")) continue;
@@ -185,7 +206,7 @@ describe("PK5: Public API reference doc accuracy", () => {
 
     it("documents the public surface for both packages", () => {
         const doc = readFileSync(PUBLIC_API_DOC, "utf8");
-        for (const sub of PUBLIC_CORE) {
+        for (const sub of [...PUBLIC_CORE, ...PUBLIC_CORE_UNTYPED]) {
             const p =
                 sub === "." ? "@knext/core" : `@knext/core${sub.slice(1)}`;
             expect(doc.includes(p), `doc must list ${p}`).toBe(true);

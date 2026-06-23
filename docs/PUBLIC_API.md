@@ -66,6 +66,29 @@ const otel = resolveOtelOptions(); // OtelOptions | null
 Exports: `resolveOtelOptions(): OtelOptions | null`, and the types `OtelOptions`,
 `OtelEnv`.
 
+### `@knext/core/adapters/cache-handler`
+
+The ISR / Redis cache handler. Next.js requires its `cacheHandler` option to be a
+**file path**, so each app ships a thin local `cache-handler.js` that re-exports
+this module — keeping the cache logic in the framework so fixes apply everywhere.
+
+```js
+// cache-handler.js (at your app root)
+export { default } from '@knext/core/adapters/cache-handler';
+```
+
+```ts
+// next.config.ts
+import path from 'node:path';
+
+export default {
+  cacheHandler: path.resolve(import.meta.dirname, 'cache-handler.js'),
+};
+```
+
+This module is plain JavaScript (no `.d.ts`); you reference it by path rather than
+calling it directly, so no type surface is exposed.
+
 ---
 
 ## `@knext/lib`
@@ -143,7 +166,6 @@ in any release, including patch releases.
 | --- | --- |
 | `@knext/core/internal/next-adapter` | The adapter implementation behind `@knext/core/adapter`; import the public alias instead. |
 | `@knext/core/internal/node-server` | The standalone server entry the runtime spawns. |
-| `@knext/core/internal/cache-handler` | The ISR/data cache handler wired in by the framework. |
 | `@knext/core/internal/loader` | Internal config loader. |
 | `@knext/core/internal/logger` | Internal CLI/runtime logger (apps use `@knext/lib/logger`). |
 | `@knext/core/internal/cli-validate` | CLI config validation helpers. |

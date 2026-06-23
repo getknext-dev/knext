@@ -25,6 +25,7 @@
       "import": "./dist/adapters/otel-config.js",
       "default": "./dist/adapters/otel-config.js"
     },
+    "./adapters/cache-handler": "./dist/adapters/cache-handler.js",
     "./internal/next-adapter": {
       "types": "./dist/adapters/next-adapter.d.ts",
       "import": "./dist/adapters/next-adapter.js",
@@ -35,7 +36,6 @@
       "import": "./dist/adapters/node-server.js",
       "default": "./dist/adapters/node-server.js"
     },
-    "./internal/cache-handler": "./dist/adapters/cache-handler.js",
     "./internal/loader": {
       "types": "./dist/loader.d.ts",
       "import": "./dist/loader.js",
@@ -61,7 +61,7 @@
     "publicApi": {
       "doc": "docs/PUBLIC_API.md",
       "stability": "Public subpaths follow semver; ./internal/* subpaths carry no stability guarantee.",
-      "public": [".", "./adapter", "./adapters/otel-config"],
+      "public": [".", "./adapter", "./adapters/otel-config", "./adapters/cache-handler"],
       "internalPrefix": "./internal/"
     }
   },
