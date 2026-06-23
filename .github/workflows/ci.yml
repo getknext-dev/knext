@@ -31,7 +31,13 @@ jobs:
 
       # @knext/core ships only dist/ and its exports resolve to ./dist/* (#114).
       # The publish-surface test asserts every exports subpath exists in dist, so
-      # core MUST be built before vitest runs (same convention as the other jobs).
+      # core MUST be built before vitest runs. @knext/lib must be built first —
+      # core's dts build imports @knext/lib/clients types (next-adapter.ts:122),
+      # so without lib's dist the core build hard-fails (TS2307). Same lib→core
+      # order as the compat-smoke and bytecode jobs.
+      - name: Build @knext/lib
+        run: pnpm --filter @knext/lib build
+
       - name: Build @knext/core
         run: pnpm --filter @knext/core build
 
