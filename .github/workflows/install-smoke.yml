@@ -1,0 +1,60 @@
+name: Install smoke (outside consumer)
+
+# PK2 / #115 — the OUTSIDE-CONSUMER gate. Packs the real @knext/lib + @knext/core
+# tarballs and installs them in a clean dir OUTSIDE the workspace on plain npm + Node,
+# with NO Bun on PATH, then proves BOTH consumer paths work: the `kn-next` CLI runs AND
+# an app can import the public library/adapter surface (resolving to real JS, no raw .ts).
+# This catches PK1 (#114) packaging regressions and exercises exactly the public set
+# PK5 (#116) declared — the gate that makes the first npm publish safe.
+#
+# Trigger note (deliberate): NOT branch-filtered to main. Most knext workflows gate on
+# `pull_request: branches: [main]`, which would never run on the stacked PK-series PRs
+# (their base is the previous PK branch, not main). This smoke runs on ALL PRs + pushes +
+# manual dispatch so it is useful on the very stack that introduces the packaging.
+on:
+  pull_request:
+  push:
+    branches: ['**']
+  workflow_dispatch:
+
+jobs:
+  install-smoke:
+    name: Pack + clean-install + CLI + app-import (plain npm/Node, no Bun)
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # Project Node version (24 — matches ci.yml / release.yml). v1 is single-OS,
+      # single-Node on purpose to keep it cheap; a Node matrix is later hardening.
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      # pnpm is needed ONLY to build + pack (it rewrites @knext/core's `workspace:^`
+      # dep on @knext/lib the same way `changeset publish` does). The INSTALL + RUN
+      # legs use plain npm + node — the outside-consumer experience.
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Install workspace dependencies
+        run: pnpm install --frozen-lockfile
+
+      # Guard the core invariant of this job: there must be NO bun on PATH, so the
+      # clean install/run cannot accidentally lean on Bun's native TS handling.
+      - name: Assert Bun is NOT on PATH
+        run: |
+          if command -v bun >/dev/null 2>&1; then
+            echo "ERROR: bun is on PATH ($(command -v bun)) — this job must prove plain-Node behavior."
+            exit 1
+          fi
+          echo "OK: no bun on PATH"
+
+      # The whole pack -> clean-install (outside workspace) -> CLI -> app-import probe
+      # -> exports-completeness -> negative-guard sequence lives in one committed,
+      # locally-runnable script. It exits non-zero if any public subpath or the CLI
+      # breaks — that non-zero exit is what fails this gate.
+      - name: Run install smoke (pack + clean install + CLI + app-import probe)
+        run: node scripts/install-smoke.mjs

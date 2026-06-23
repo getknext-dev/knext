@@ -16,7 +16,8 @@
     "changeset:version": "changeset version",
     "changeset:status": "changeset status",
     "release": "changeset publish",
-    "smoke:cli": "node scripts/smoke-pack-cli.mjs"
+    "smoke:cli": "node scripts/smoke-pack-cli.mjs",
+    "smoke:install": "node scripts/install-smoke.mjs"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.4.4",
