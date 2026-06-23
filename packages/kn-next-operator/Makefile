@@ -103,6 +103,10 @@ cleanup-test-e2e: ## Tear down the Kind cluster used for e2e tests
 test-e2e-scale: manifests generate fmt vet ## Run the scale-to-zero e2e suite: bytecode-cache survival (#38) + scale-from-zero activation (#39). Requires a kind+Knative cluster; NOT run in PR CI. Nightly/dispatch only.
 	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) go test -tags=e2e_scale ./test/e2e/ -v -ginkgo.v -run TestE2E
 
+.PHONY: test-e2e-bundle
+test-e2e-bundle: manifests generate fmt vet ## Run the install-BUNDLE e2e (#117): builds the operator image locally, loads it into kind, applies dist/install.yaml (manager image overridden to the local image), waits for Available, and asserts a digest-pinned NextApp reconciles to Ready. Requires a kind+cert-manager+Knative cluster; NOT run in PR CI.
+	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) go test -tags=e2e_bundle ./test/e2e/ -v -ginkgo.v -run TestBundleE2E
+
 .PHONY: lint
 lint: golangci-lint ## Run golangci-lint linter
 	"$(GOLANGCI_LINT)" run

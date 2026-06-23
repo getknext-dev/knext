@@ -56,6 +56,19 @@ cosign verify ghcr.io/getknext-dev/kn-next-operator@sha256:<digest> \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```
 
+Or use the reusable helper (same identity/issuer pinning):
+
+```sh
+bash hack/cosign-verify.sh ghcr.io/getknext-dev/kn-next-operator@sha256:<digest>
+```
+
+> **First publish not yet done?** Until the operator image is published on `main`,
+> the bundle pins an all-zeros bootstrap placeholder digest. The one-time maintainer
+> steps to publish + sign the first image and pin the real digest are in
+> [`docs/RUNBOOK-first-publish.md`](docs/RUNBOOK-first-publish.md). The install-bundle
+> path is exercised before that publish by `make test-e2e-bundle` (it builds the
+> operator image locally — see `test/e2e/install_bundle_test.go`).
+
 ## Description
 The operator watches `NextApp` resources and provisions the corresponding Knative
 Service, networking, and cache wiring. See `docs/adr/0001-*` for the control-plane

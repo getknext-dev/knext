@@ -1,0 +1,95 @@
+name: Operator Install-Bundle E2E
+
+# Issue #117: prove the CLIENT install path end-to-end on a clean kind cluster.
+#
+# A client installs the control plane with `kubectl apply -f dist/install.yaml`.
+# This workflow makes that rendered BUNDLE the artifact under test (NOT the
+# kustomize `make deploy` path the light per-PR e2e uses):
+#   1. build the operator image LOCALLY and load it into kind,
+#   2. render dist/install.yaml via `make build-installer`,
+#   3. apply the bundle with the manager image OVERRIDDEN to the local image
+#      (so the unpublished all-zeros placeholder digest is NOT required to exist),
+#   4. wait for the operator Deployment to be Available,
+#   5. apply a DIGEST-PINNED sample NextApp and assert it reconciles to Ready.
+#
+# The image override is what lets this run BEFORE the first GHCR publish: the spec
+# never depends on the placeholder-digest image existing. The first real publish
+# (which replaces the placeholder in dist/install.yaml) is a maintainer step, see
+# packages/kn-next-operator/docs/RUNBOOK-first-publish.md.
+#
+# It needs cert-manager (webhook certs) + Knative Serving + Kourier (the reconciler
+# creates a ksvc and reads ksvc.Status.URL to set Ready), so it is heavier than the
+# per-PR e2e and runs as its own job. It DOES run on PRs that touch the operator so
+# a bundle regression is caught before merge.
+
+on:
+  pull_request:
+    paths:
+      - 'packages/kn-next-operator/**'
+      - '.github/workflows/operator-bundle-e2e.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'packages/kn-next-operator/**'
+      - '.github/workflows/operator-bundle-e2e.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  bundle-e2e:
+    name: Install bundle reconciles a NextApp (e2e_bundle)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: packages/kn-next-operator/go.mod
+          cache-dependency-path: packages/kn-next-operator/go.sum
+
+      - name: Install kind
+        uses: helm/kind-action@v1
+        with:
+          install_only: true
+
+      - name: Create kind cluster
+        run: kind create cluster --name kn-next-operator-test-e2e --wait 120s
+
+      - name: Install cert-manager (operator webhook certs)
+        run: |
+          set -euo pipefail
+          kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.16.2/cert-manager.yaml
+          kubectl wait --for=condition=Available --timeout=300s \
+            -n cert-manager deployment/cert-manager deployment/cert-manager-webhook deployment/cert-manager-cainjector
+
+      - name: Install Knative Serving + Kourier
+        # The reconciler creates a Knative Service and mirrors ksvc.Status.URL into
+        # the NextApp status.url (which drives Ready). Knative assigns that URL before
+        # the app image is pulled, so the bundle e2e reaches Ready without a real app
+        # image — the digest-pinned default in install_bundle_test.go is enough.
+        run: |
+          set -euo pipefail
+          KNATIVE_VERSION="knative-v1.16.0"
+          kubectl apply -f "https://github.com/knative/serving/releases/download/${KNATIVE_VERSION}/serving-crds.yaml"
+          kubectl apply -f "https://github.com/knative/serving/releases/download/${KNATIVE_VERSION}/serving-core.yaml"
+          kubectl apply -f "https://github.com/knative/net-kourier/releases/download/${KNATIVE_VERSION}/kourier.yaml"
+          kubectl patch configmap/config-network \
+            --namespace knative-serving \
+            --type merge \
+            --patch '{"data":{"ingress-class":"kourier.ingress.networking.knative.dev"}}'
+          kubectl wait --for=condition=Available --timeout=300s \
+            -n knative-serving deployment/controller deployment/webhook deployment/autoscaler
+
+      - name: Run install-bundle e2e
+        working-directory: packages/kn-next-operator
+        env:
+          KIND_CLUSTER: kn-next-operator-test-e2e
+        run: make test-e2e-bundle
+
+      - name: Tear down kind cluster
+        if: always()
+        run: kind delete cluster --name kn-next-operator-test-e2e || true

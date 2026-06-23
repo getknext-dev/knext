@@ -135,6 +135,17 @@ jobs:
           cosign sign --yes "${IMAGE}@${DIGEST}"
           cosign attest --yes --predicate operator-sbom.spdx.json --type spdxjson "${IMAGE}@${DIGEST}"
 
+      # Verify the signature we just produced, parameterized by the pushed digest
+      # (issue #117). This proves the keyless identity/issuer round-trips before we
+      # advertise the image as signed, and exercises the same hack/cosign-verify.sh
+      # a client runs. The identity-regexp/issuer default to this repo's signer.
+      - name: Verify operator image signature (cosign verify, main only)
+        if: github.ref == 'refs/heads/main'
+        env:
+          IDENTITY_REGEXP: https://github.com/${{ github.repository }}/.*
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: bash packages/kn-next-operator/hack/cosign-verify.sh "${IMAGE}@${DIGEST}"
+
       # On main only: regenerate dist/install.yaml with the REAL pushed digest. This is
       # the bootstrap-resolution step — the placeholder all-zeros digest in the
       # committed manifests is replaced here with the digest cosign just signed.
@@ -155,6 +166,11 @@ jobs:
           echo "Pinned operator image digest ${DIGEST} into dist/install.yaml:"
           grep -E 'image: ghcr' dist/install.yaml
           bash hack/check-no-latest.sh
+          # PUBLISHED-CONTEXT guard (#117): now that the real digest is pinned, the
+          # all-zeros bootstrap placeholder must be GONE from the rendered bundle.
+          # If the re-pin silently failed we'd otherwise publish a bundle pointing at
+          # a non-existent image — this fails the run instead.
+          bash hack/check-published-digest.sh dist/install.yaml
 
       # Transient CI artifact (auth-gated) — handy for inspecting the exact bundle a
       # run produced, but NOT the user-facing install path.
