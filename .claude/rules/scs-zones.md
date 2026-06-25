@@ -20,6 +20,9 @@ built; treat "knext generates X" as the target and never present an unbuilt gene
   (primary) or `-ro` (replica) service. (Enforced: `protect-zone-data-sovereignty.sh`.)
 - Cross-zone data flows **only** via **async Kafka domain events** (each zone keeps its own copy)
   and via the **browser** (links / UI composition). Transient UI state via BroadcastChannel.
+  These domain events are an **application concern (bring-your-own broker + clients)** — knext's
+  `spec.revalidation.kafka` is ISR-revalidation-only, not a domain-event bus. See the scope
+  boundary in [`docs/operator/kafka-eventing.md`](../../docs/operator/kafka-eventing.md#scope-isr-revalidation-vs-cross-zone-domain-events).
 - A zone reaches **its own** DB via `DATABASE_URL` from a K8s Secret — never a hardcoded host.
 
 ## Scope boundary (sequencing line, not permanent)
