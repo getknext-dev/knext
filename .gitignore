@@ -58,3 +58,18 @@ coverage/
 
 # Compiled Bun binaries (output of: bun build --compile)
 apps/*/**/*-server
+
+# V8 bytecode compile cache (NODE_COMPILE_CACHE output — regenerated on build)
+node-compile-cache/
+**/node-compile-cache/
+
+# Standalone/adapter build output (CRs, server bundles)
+.output/
+**/.output/
+
+# Local scratch / planning artifacts (never part of the repo)
+knext-plan-out/
+.superteam/
+.maturity-brief.md
+.migration-spec.md
+skills-lock.json
