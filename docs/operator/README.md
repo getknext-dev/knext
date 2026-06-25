@@ -16,3 +16,4 @@ Detailed documentation for each of the core subsystems managed by the Operator i
 - **[The Reconciler](./reconciler.md)**: The core Go-based controller loop that manages Knative Services, PVCs, and ServiceAccounts.
 - **[GitOps Preview Environments](./gitops-preview.md)**: Dynamic scale-to-zero capabilities and namespace isolation for Pull Request lifecycles.
 - **[Kafka Eventing & Revalidation](./kafka-eventing.md)**: Asynchronous Incremental Static Regeneration (ISR) bound via `KafkaSource`.
+- **[Per-zone Scaling & Cold-start Tuning](./scaling-cold-start.md)**: When to keep a zone warm (`minScale: 1`) vs scale to zero, bounding database fan-out, and the bytecode-cache / pooler mitigations.
