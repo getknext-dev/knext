@@ -80,10 +80,7 @@ describe('compat-suite workflow pnpm pin (test-e2e-deploy.yml)', () => {
 
   it('every pnpm/action-setup step pins an explicit version', () => {
     pnpmSetupVersions().forEach((version, idx) => {
-      expect(
-        version,
-        `pnpm/action-setup step #${idx + 1} must set with.version`,
-      ).not.toBeNull();
+      expect(version, `pnpm/action-setup step #${idx + 1} must set with.version`).not.toBeNull();
       expect(String(version).trim().length, 'pnpm version must be non-empty').toBeGreaterThan(0);
     });
   });
