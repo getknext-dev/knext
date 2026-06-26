@@ -8,13 +8,40 @@
  *   1. stop accepting connections on the sidecar servers (metrics),
  *   2. FORWARD SIGTERM to the Next.js standalone child so it drains in-flight
  *      requests and runs `after()` callbacks before exiting,
- *   3. exit as soon as the child finishes draining — with a hard cap
- *      (`graceMs`) so a stuck child can't hang the pod past its
+ *   3. once the child has drained, run any registered drain hooks (e.g. closing
+ *      the DB pool so in-flight transactions commit-or-rollback before the
+ *      connections close — PGS-1) and AWAIT them,
+ *   4. exit as soon as the drains finish — with a hard cap (`graceMs`) so a
+ *      stuck child or a hanging drain can't hang the pod past its
  *      terminationGracePeriodSeconds.
  */
 
 export interface Closable {
     close(callback?: () => void): void;
+}
+
+/**
+ * An async resource-drain hook run on SIGTERM after HTTP has drained — e.g. the
+ * DB pool's `end()` so in-flight transactions settle before connections close.
+ * Must resolve (or reject) on its own; `gracefulShutdown` still force-exits at
+ * the grace cap if a hook hangs.
+ */
+export type ShutdownDrain = () => Promise<void>;
+
+// Module-level registry. The runtime (node-server.ts) registers drains here so
+// the @knext/lib pool stays free of any dependency on @knext/kn-next — the
+// runtime, which already depends on both, wires lib's pool into this hook. This
+// keeps the boundary clean and avoids a circular dependency.
+const shutdownDrains: ShutdownDrain[] = [];
+
+/** Register a drain hook to be awaited on SIGTERM (after HTTP drain). */
+export function registerShutdownDrain(drain: ShutdownDrain): void {
+    shutdownDrains.push(drain);
+}
+
+/** Clear all registered drains. Exposed for test isolation. */
+export function clearShutdownDrains(): void {
+    shutdownDrains.length = 0;
 }
 
 export interface ChildLike {
@@ -65,7 +92,20 @@ export function gracefulShutdown(signal: string, opts: ShutdownOptions): void {
         opts.exit(code);
     };
 
-    opts.child.once("exit", () => finish(0));
+    // When the child drains, run+await the registered drain hooks (DB pool, …)
+    // before exiting. If a hook hangs, the grace-cap timer below still forces
+    // exit, so the pod never exceeds terminationGracePeriodSeconds.
+    opts.child.once("exit", () => {
+        if (shutdownDrains.length === 0) {
+            // Nothing to drain — exit synchronously (the common no-DB case).
+            finish(0);
+            return;
+        }
+        runDrains(shutdownDrains).then(
+            () => finish(0),
+            () => finish(0),
+        );
+    });
 
     const timer = (opts.setTimeoutFn ?? setTimeout)(
         () => finish(0),
@@ -77,4 +117,18 @@ export function gracefulShutdown(signal: string, opts: ShutdownOptions): void {
     ) {
         (timer as { unref: () => void }).unref();
     }
+}
+
+/** Run every drain hook, tolerating individual rejections (best-effort). */
+async function runDrains(drains: ShutdownDrain[]): Promise<void> {
+    await Promise.all(
+        drains.map((drain) =>
+            Promise.resolve()
+                .then(drain)
+                .catch(() => {
+                    // A failed drain must not block the others or exit; the
+                    // grace cap is the backstop.
+                }),
+        ),
+    );
 }
