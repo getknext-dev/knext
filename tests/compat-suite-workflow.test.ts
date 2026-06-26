@@ -1,7 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { parse } from 'yaml';
 
 /**
  * GUARD TEST for .github/workflows/test-e2e-deploy.yml (#89 / ADR-0007 A3-2).
@@ -18,31 +17,17 @@ import { parse } from 'yaml';
  * step in the compat-suite workflow must pin an explicit `version`, and that
  * version must match the repo's pinned pnpm (`packageManager` in package.json)
  * so the two never drift.
+ *
+ * Implementation note: this scans the workflow YAML as text rather than parsing
+ * it with a YAML library, so the test adds no new runtime dependency (the repo
+ * has no direct `yaml` dep) and stays trivially portable across CI runners.
  */
 
 const REPO_ROOT = resolve(import.meta.dirname, '..');
 const WORKFLOW_PATH = resolve(REPO_ROOT, '.github/workflows/test-e2e-deploy.yml');
 const ROOT_PKG_PATH = resolve(REPO_ROOT, 'package.json');
 
-interface WorkflowStep {
-  name?: string;
-  uses?: string;
-  with?: Record<string, unknown>;
-}
-
-interface WorkflowJob {
-  steps?: WorkflowStep[];
-}
-
-interface Workflow {
-  jobs?: Record<string, WorkflowJob>;
-}
-
-function loadWorkflow(): Workflow {
-  return parse(readFileSync(WORKFLOW_PATH, 'utf8')) as Workflow;
-}
-
-/** The pnpm version the repo pins via `packageManager` (e.g. "pnpm@10.4.1"). */
+/** The pnpm version the repo pins via `packageManager` (e.g. "10.4.1"). */
 function pinnedPnpmVersion(): string {
   const pkg = JSON.parse(readFileSync(ROOT_PKG_PATH, 'utf8')) as {
     packageManager?: string;
@@ -53,37 +38,63 @@ function pinnedPnpmVersion(): string {
   return (match as RegExpMatchArray)[1];
 }
 
-function pnpmSetupSteps(): WorkflowStep[] {
-  const wf = loadWorkflow();
-  const jobs = wf.jobs ?? {};
-  return Object.values(jobs)
-    .flatMap((job) => job.steps ?? [])
-    .filter((step) => typeof step.uses === 'string' && step.uses.startsWith('pnpm/action-setup'));
+/**
+ * The `version:` declared in each `pnpm/action-setup` step's block, in document
+ * order. A `null` entry means that step pins no version. We locate each
+ * `uses: pnpm/action-setup` line, then scan the lines that belong to the same
+ * step block (more-indented than the `uses:` key, up to the next list item or a
+ * dedent) for a `version:` key — skipping intervening comment lines.
+ */
+function pnpmSetupVersions(): Array<string | null> {
+  const lines = readFileSync(WORKFLOW_PATH, 'utf8').split('\n');
+  const versions: Array<string | null> = [];
+
+  for (let i = 0; i < lines.length; i++) {
+    if (!/^\s*-?\s*uses:\s*pnpm\/action-setup(?:@|\s|$)/.test(lines[i])) continue;
+    const usesIndent = lines[i].search(/\S/);
+    let version: string | null = null;
+
+    for (let j = i + 1; j < lines.length; j++) {
+      const line = lines[j];
+      if (line.trim() === '') continue;
+      const indent = line.search(/\S/);
+      // A new list item ("- ...") at or below the `uses:` indent, or any dedent
+      // below it, ends this step block.
+      if (indent < usesIndent) break;
+      if (indent === usesIndent && /^\s*-\s/.test(line)) break;
+      const m = line.match(/^\s*version:\s*["']?([^"'\s#]+)["']?/);
+      if (m) {
+        version = m[1];
+        break;
+      }
+    }
+    versions.push(version);
+  }
+  return versions;
 }
 
 describe('compat-suite workflow pnpm pin (test-e2e-deploy.yml)', () => {
   it('has at least one pnpm/action-setup step (sanity)', () => {
-    expect(pnpmSetupSteps().length).toBeGreaterThan(0);
+    expect(pnpmSetupVersions().length).toBeGreaterThan(0);
   });
 
   it('every pnpm/action-setup step pins an explicit version', () => {
-    for (const step of pnpmSetupSteps()) {
-      const version = step.with?.version;
+    pnpmSetupVersions().forEach((version, idx) => {
       expect(
         version,
-        `pnpm/action-setup step "${step.name ?? step.uses}" must set with.version`,
-      ).toBeDefined();
+        `pnpm/action-setup step #${idx + 1} must set with.version`,
+      ).not.toBeNull();
       expect(String(version).trim().length, 'pnpm version must be non-empty').toBeGreaterThan(0);
-    }
+    });
   });
 
   it('the pinned pnpm version matches the repo packageManager field', () => {
     const expected = pinnedPnpmVersion();
-    for (const step of pnpmSetupSteps()) {
+    pnpmSetupVersions().forEach((version, idx) => {
       expect(
-        String(step.with?.version),
-        `pnpm version in "${step.name ?? step.uses}" must match packageManager pnpm@${expected}`,
+        version,
+        `pnpm version in step #${idx + 1} must match packageManager pnpm@${expected}`,
       ).toBe(expected);
-    }
+    });
   });
 });
