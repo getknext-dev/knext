@@ -450,7 +450,12 @@ var _ = Describe("NextApp Controller reconcile output", func() {
 			Expect(deferred.Status).To(Equal(metav1.ConditionTrue))
 			Expect(deferred.Reason).To(Equal("ConsumerNotProvisioned"))
 
-			By("keeping Ready=True (the deferral is non-fatal)")
+			By("keeping Ready=True once the child ksvc is Ready (the deferral is non-fatal)")
+			// Honest-Ready: NextApp Ready mirrors the child ksvc's health. envtest runs
+			// no Knative controllers, so stamp the ksvc Ready and re-reconcile, then
+			// confirm the RevalidationDeferred deferral does NOT drag Ready=False.
+			markKsvcReadyAndReconcile(ctx, nn)
+			Expect(k8sClient.Get(ctx, nn, updated)).To(Succeed())
 			ready := findCondition(updated.Status.Conditions, conditionTypeReady)
 			Expect(ready).NotTo(BeNil())
 			Expect(ready.Status).To(Equal(metav1.ConditionTrue))

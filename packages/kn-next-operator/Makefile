@@ -116,8 +116,10 @@ test-e2e-scale: manifests generate fmt vet ## Run the scale-to-zero e2e suite: b
 	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) go test -tags=e2e_scale ./test/e2e/ -v -ginkgo.v -run TestE2E
 
 .PHONY: test-e2e-bundle
-test-e2e-bundle: manifests generate fmt vet ## Run the install-BUNDLE e2e (#117): builds the operator image locally, loads it into kind, applies dist/install.yaml (manager image overridden to the local image), waits for Available, and asserts a digest-pinned NextApp reconciles to Ready. Requires a kind+cert-manager+Knative cluster; NOT run in PR CI.
-	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) go test -tags=e2e_bundle ./test/e2e/ -v -ginkgo.v -run TestBundleE2E
+test-e2e-bundle: manifests generate fmt vet ## Run the install-BUNDLE e2e (#117): builds the operator image locally, loads it into kind, applies dist/install.yaml (manager image overridden to the local image), waits for Available, and asserts the operator reconciles a digest-pinned NextApp with HONEST Ready (placeholder image => Ready=False/KnativeServiceNotReady; set BUNDLE_APP_IMAGE to a real serving digest to assert Ready=True). Requires a kind+cert-manager+Knative cluster.
+	# Explicit -timeout (>> Go's silent 600s default): a genuine assertion failure
+	# must surface as a Ginkgo failure, not a deadline goroutine-dump panic.
+	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) go test -tags=e2e_bundle ./test/e2e/ -v -ginkgo.v -run TestBundleE2E -timeout 30m
 
 .PHONY: lint
 lint: golangci-lint ## Run golangci-lint linter

@@ -31,7 +31,24 @@ limitations under the License.
 //	     (so the all-zeros placeholder digest is NOT required to exist in GHCR),
 //	  4. wait for the operator Deployment to be Available,
 //	  5. apply a DIGEST-PINNED sample NextApp,
-//	  6. assert it reconciles to Ready (status.url set / Ready=True).
+//	  6. assert the operator reconciles it END-TO-END: it creates the child Knative
+//	     Service, mirrors ksvc.Status.URL onto status.url, and reports an HONEST
+//	     Ready condition that reflects the ksvc's REAL health.
+//
+// HONEST READY (why step 6 no longer blanket-asserts Ready=True):
+//
+//	NextApp.status.conditions[Ready] is now gated on the child Knative Service's OWN
+//	Ready condition (Configuration + Route + pod readiness), NOT on the operator
+//	merely having written the ksvc. The default sample image is an all-zeros
+//	placeholder digest that is DELIBERATELY UNPULLABLE in kind, so its ksvc can never
+//	honestly reach Ready — the operator correctly reports Ready=False with
+//	Reason=KnativeServiceNotReady. The previous "Ready=True without a real app image"
+//	expectation was a FALSE-GREEN that depended on the old unconditional Ready=True;
+//	asserting it now would just wait out the suite deadline. So with the placeholder
+//	image this spec asserts the honest NotReady semantics (ksvc created, status.url
+//	mirrored, Ready=False / KnativeServiceNotReady). When CI sets BUNDLE_APP_IMAGE to
+//	a REAL, pullable, digest-pinned serving image, the spec instead proves the full
+//	happy path: the ksvc actually serves and NextApp reaches Ready=True.
 //
 // WHY A SEPARATE BUILD TAG (`e2e_bundle`):
 //
@@ -78,11 +95,14 @@ const (
 	bundleAppName      = "bundle-sample-app"
 
 	// bundleAppImageDefault is a digest-pinned (so it passes admission) but
-	// deliberately lightweight image. The bundle e2e asserts the NextApp reconciles
-	// to Ready — Knative assigns ksvc.Status.URL (which drives status.url + Ready)
-	// before the app image is even pulled, so a real app image is not required for
-	// the reconcile-to-Ready assertion. CI sets BUNDLE_APP_IMAGE to a real
-	// file-manager digest when it wants the pod to actually serve traffic.
+	// DELIBERATELY UNPULLABLE all-zeros placeholder. Knative assigns ksvc.Status.URL
+	// (which the operator mirrors onto status.url) before the app image is pulled, so
+	// status.url is still reachable — but the NextApp's Ready condition is now gated
+	// on the ksvc's REAL readiness, and this image can never make the ksvc Ready (it
+	// ErrImagePulls). So with this default the spec asserts the HONEST NotReady
+	// semantics (Ready=False / KnativeServiceNotReady). CI sets BUNDLE_APP_IMAGE to a
+	// real, pullable, digest-pinned serving image when it wants to prove the full
+	// happy path (ksvc serves → NextApp Ready=True). See bundleWantReady below.
 	bundleAppImageDefault = "ghcr.io/getknext-dev/file-manager@sha256:" +
 		"0000000000000000000000000000000000000000000000000000000000000000"
 )
@@ -136,7 +156,7 @@ var _ = Describe("Install bundle (dist/install.yaml)", Ordered, func() {
 		}
 	})
 
-	It("applies the bundle, the operator goes Available, and a NextApp reconciles to Ready", func() {
+	It("applies the bundle, the operator goes Available, and reconciles a NextApp with HONEST Ready", func() {
 		By("applying the rendered install bundle (kubectl apply --server-side -f)")
 		Expect(applyOrDeleteBundle("apply", renderedBundle)).
 			To(Succeed(), "failed to kubectl apply the install bundle")
@@ -156,23 +176,85 @@ var _ = Describe("Install bundle (dist/install.yaml)", Ordered, func() {
 		By("applying a DIGEST-PINNED sample NextApp")
 		Expect(applyBundleManifest(sampleNextApp())).To(Succeed(), "failed to apply sample NextApp")
 
-		By("waiting for the NextApp to reconcile to Ready=True")
+		By("waiting for the operator to create the child Knative Service (proves reconcile ran)")
+		// The ksvc is named after the NextApp. Its creation is the deterministic,
+		// image-independent proof that the bundle's operator reconciled the CR —
+		// it is written before any pod/image pull, so it appears whether or not the
+		// app image is pullable.
 		Eventually(func(g Gomega) {
-			out, err := utils.Kubectl("get", "nextapp", bundleAppName, "-n", bundleAppNamespace,
-				"-o", "jsonpath={.status.conditions[?(@.type=='Ready')].status}")
+			out, err := utils.Kubectl("get", "ksvc", bundleAppName, "-n", bundleAppNamespace,
+				"-o", "jsonpath={.metadata.name}")
 			g.Expect(err).NotTo(HaveOccurred(), out)
-			g.Expect(out).To(Equal("True"), "NextApp Ready condition not True")
+			g.Expect(strings.TrimSpace(out)).To(Equal(bundleAppName), "child Knative Service not created")
 		}).Should(Succeed())
 
 		By("asserting status.url is populated (the reconciler mirrored the ksvc URL)")
+		// Knative assigns the route URL before the image is pulled, so status.url is
+		// reachable under both the placeholder and the real-image paths.
 		Eventually(func(g Gomega) {
 			out, err := utils.Kubectl("get", "nextapp", bundleAppName, "-n", bundleAppNamespace,
 				"-o", "jsonpath={.status.url}")
 			g.Expect(err).NotTo(HaveOccurred(), out)
 			g.Expect(strings.TrimSpace(out)).NotTo(BeEmpty(), "NextApp status.url is empty")
 		}).Should(Succeed())
+
+		if bundleWantReady() {
+			By("waiting for the NextApp to reconcile to Ready=True (real serving image)")
+			// BUNDLE_APP_IMAGE is a real, pullable, digest-pinned serving image: the
+			// ksvc's pods come up and become Ready, so the HONEST gate lets NextApp
+			// reach Ready=True. This is the full end-to-end happy path.
+			Eventually(func(g Gomega) {
+				out, err := utils.Kubectl("get", "nextapp", bundleAppName, "-n", bundleAppNamespace,
+					"-o", "jsonpath={.status.conditions[?(@.type=='Ready')].status}")
+				g.Expect(err).NotTo(HaveOccurred(), out)
+				g.Expect(out).To(Equal("True"), "NextApp Ready condition not True with a real serving image")
+			}).Should(Succeed())
+			return
+		}
+
+		By("asserting HONEST Ready=False / Reason=KnativeServiceNotReady (placeholder image)")
+		// The default image is an UNPULLABLE all-zeros placeholder, so the ksvc can
+		// never become Ready. The honest gate (PR: gate NextApp Ready on real
+		// Knative Service health) must therefore report Ready=False with
+		// Reason=KnativeServiceNotReady — NOT the old false-green Ready=True. This is
+		// the per-PR proof that the bundle's operator surfaces real ksvc health.
+		Eventually(func(g Gomega) {
+			status, err := utils.Kubectl("get", "nextapp", bundleAppName, "-n", bundleAppNamespace,
+				"-o", "jsonpath={.status.conditions[?(@.type=='Ready')].status}")
+			g.Expect(err).NotTo(HaveOccurred(), status)
+			g.Expect(strings.TrimSpace(status)).To(Equal("False"),
+				"NextApp Ready should be False for an unpullable placeholder image")
+
+			reason, err := utils.Kubectl("get", "nextapp", bundleAppName, "-n", bundleAppNamespace,
+				"-o", "jsonpath={.status.conditions[?(@.type=='Ready')].reason}")
+			g.Expect(err).NotTo(HaveOccurred(), reason)
+			g.Expect(strings.TrimSpace(reason)).To(Equal("KnativeServiceNotReady"),
+				"NextApp Ready reason should be KnativeServiceNotReady")
+		}).Should(Succeed())
+
+		By("asserting NextApp must never report a false-green Ready=True for the placeholder image")
+		// Guard against regressing to the old unconditional Ready=True: hold for a
+		// short window and confirm Ready never flips to True while the image is
+		// unpullable.
+		Consistently(func(g Gomega) {
+			out, err := utils.Kubectl("get", "nextapp", bundleAppName, "-n", bundleAppNamespace,
+				"-o", "jsonpath={.status.conditions[?(@.type=='Ready')].status}")
+			g.Expect(err).NotTo(HaveOccurred(), out)
+			g.Expect(strings.TrimSpace(out)).NotTo(Equal("True"),
+				"NextApp falsely reported Ready=True for an unpullable image (false-green regression)")
+		}, 20*time.Second, 4*time.Second).Should(Succeed())
 	})
 })
+
+// bundleWantReady reports whether the spec should assert the full happy path
+// (NextApp Ready=True). That requires a REAL, pullable, digest-pinned serving image
+// supplied via BUNDLE_APP_IMAGE. With the default unpullable placeholder, the spec
+// instead asserts the HONEST NotReady semantics. This keeps the per-PR gate
+// deterministic and registry-free while still letting a maintainer/nightly run prove
+// real serving by setting BUNDLE_APP_IMAGE.
+func bundleWantReady() bool {
+	return strings.TrimSpace(os.Getenv("BUNDLE_APP_IMAGE")) != ""
+}
 
 // overrideManagerImage renders a copy of dist/install.yaml with the operator
 // manager image line rewritten to `img`, and returns the path of the rewritten

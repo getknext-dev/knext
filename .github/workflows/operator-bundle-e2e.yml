@@ -10,7 +10,13 @@ name: Operator Install-Bundle E2E
 #   3. apply the bundle with the manager image OVERRIDDEN to the local image
 #      (so the unpublished all-zeros placeholder digest is NOT required to exist),
 #   4. wait for the operator Deployment to be Available,
-#   5. apply a DIGEST-PINNED sample NextApp and assert it reconciles to Ready.
+#   5. apply a DIGEST-PINNED sample NextApp and assert the operator reconciles it
+#      with an HONEST Ready condition. NextApp Ready is gated on the child Knative
+#      Service's REAL readiness, so the default (unpullable placeholder) image proves
+#      the deterministic, registry-free path: the operator creates the ksvc, mirrors
+#      status.url, and reports Ready=False / Reason=KnativeServiceNotReady (NOT a
+#      false-green Ready=True). Set BUNDLE_APP_IMAGE to a real, pullable, digest-
+#      pinned serving image to additionally assert the full happy path (Ready=True).
 #
 # The image override is what lets this run BEFORE the first GHCR publish: the spec
 # never depends on the placeholder-digest image existing. The first real publish
@@ -68,9 +74,11 @@ jobs:
 
       - name: Install Knative Serving + Kourier
         # The reconciler creates a Knative Service and mirrors ksvc.Status.URL into
-        # the NextApp status.url (which drives Ready). Knative assigns that URL before
-        # the app image is pulled, so the bundle e2e reaches Ready without a real app
-        # image — the digest-pinned default in install_bundle_test.go is enough.
+        # the NextApp status.url. Knative assigns that URL before the app image is
+        # pulled, so status.url is populated even with the unpullable placeholder
+        # image. NextApp Ready, however, is gated on the ksvc's REAL readiness: with
+        # the placeholder the spec asserts the honest Ready=False/KnativeServiceNotReady
+        # (set BUNDLE_APP_IMAGE to a real serving digest to assert Ready=True instead).
         run: |
           set -euo pipefail
           KNATIVE_VERSION="knative-v1.16.0"

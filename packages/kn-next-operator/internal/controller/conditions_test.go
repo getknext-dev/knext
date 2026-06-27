@@ -65,7 +65,7 @@ var _ = Describe("NextApp Status Conditions", func() {
 	})
 
 	Context("When a NextApp is successfully reconciled", func() {
-		It("should set Reconciling=True then Ready=True conditions", func() {
+		It("should set Reconciling=False and Ready=True conditions after a successful reconcile", func() {
 			By("Creating a NextApp with a valid digest-pinned image")
 			nextApp := &appsv1alpha1.NextApp{
 				ObjectMeta: metav1.ObjectMeta{
@@ -96,14 +96,21 @@ var _ = Describe("NextApp Status Conditions", func() {
 			By("Finding the Reconciling condition")
 			reconcilingCond := findCondition(updated.Status.Conditions, conditionTypeReconciling)
 			Expect(reconcilingCond).NotTo(BeNil(), "Reconciling condition must be present")
+			Expect(reconcilingCond.Status).To(Equal(metav1.ConditionFalse),
+				"Reconciling must be False after a successful (completed) reconcile")
 			Expect(reconcilingCond.ObservedGeneration).To(Equal(updated.Generation),
 				"Reconciling.ObservedGeneration must equal the resource generation")
 
-			By("Finding the Ready condition")
+			By("Finding the Ready condition once the child ksvc reports Ready")
+			// Honest-Ready: NextApp Ready mirrors the child Knative Service's own
+			// readiness, not merely a successful reconcile. envtest runs no Knative
+			// controllers, so stamp the ksvc Ready and re-reconcile, then assert.
+			markKsvcReadyAndReconcile(ctx, namespacedName)
+			Expect(k8sClient.Get(ctx, namespacedName, updated)).To(Succeed())
 			readyCond := findCondition(updated.Status.Conditions, conditionTypeReady)
 			Expect(readyCond).NotTo(BeNil(), "Ready condition must be present")
 			Expect(readyCond.Status).To(Equal(metav1.ConditionTrue),
-				"Ready condition must be True on a successful reconcile")
+				"Ready condition must be True once the child Knative Service is Ready")
 			Expect(readyCond.ObservedGeneration).To(Equal(updated.Generation))
 
 			By("Verifying Degraded condition is absent or False after success")
