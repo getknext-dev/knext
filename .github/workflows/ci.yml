@@ -187,11 +187,19 @@ jobs:
       - name: Build file-manager standalone (next build --webpack)
         run: pnpm --filter file-manager build
 
-      - name: Run SIGTERM-drain shipped-bundle gate (must NOT skip)
+      - name: Run SIGTERM shipped-bundle gates — drain + hard-cap (must NOT skip)
         env:
-          # Converts the skipIf guard into a HARD failure if the build is missing.
+          # Converts the skipIf guard into a HARD failure if the build is missing,
+          # so a green check genuinely proves BOTH the graceful-drain path
+          # (sigterm-drain-e2e) and the force-kill hard-cap safety net
+          # (sigterm-hardcap-e2e). Both boot the shipped runtime entry; the drain
+          # e2e binds the default metrics port 9091 and the hard-cap e2e overrides
+          # METRICS_PORT=9092, so they coexist in one invocation without EADDRINUSE.
           KNEXT_REQUIRE_STANDALONE: '1'
-        run: pnpm exec vitest run apps/file-manager/sigterm-drain-e2e.test.ts
+        run: >-
+          pnpm exec vitest run
+          apps/file-manager/sigterm-drain-e2e.test.ts
+          apps/file-manager/sigterm-hardcap-e2e.test.ts
 
   no-latest-guard:
     name: No :latest images in operator manifests

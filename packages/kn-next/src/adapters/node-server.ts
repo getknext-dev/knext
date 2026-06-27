@@ -25,7 +25,11 @@ import { startImageCacheSync } from "./image-cache-sync";
 import { gracefulShutdown, registerShutdownDrain } from "./shutdown";
 
 const log = createLogger({ module: "server" });
-const METRICS_PORT = 9091;
+// Prometheus metrics port. Defaults to 9091 (no behavior change); overridable via
+// METRICS_PORT so two runtime entries can coexist on one host without colliding on
+// the fixed port (e.g. the sigterm e2es in CI). A metrics port is a legitimate
+// production knob — mirrors the SHUTDOWN_GRACE_MS env pattern below.
+const METRICS_PORT = Number(process.env.METRICS_PORT ?? 9091);
 // Hard cap for draining in-flight requests on SIGTERM. Keep below the pod's
 // terminationGracePeriodSeconds (k8s default 30s) so the child drains in time.
 const SHUTDOWN_GRACE_MS = Number(process.env.SHUTDOWN_GRACE_MS ?? 25_000);
