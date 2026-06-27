@@ -53,6 +53,12 @@ jobs:
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
+        # Pin explicitly: knext is checked out under `path: knext`, so the action
+        # cannot resolve a `packageManager` field at the workspace root and would
+        # die with "No pnpm version is specified" — which skipped the deploy-tests
+        # shards entirely. Keep in sync with `packageManager` in package.json.
+        with:
+          version: 10.4.1
 
       - name: Install knext deps
         working-directory: knext
@@ -125,6 +131,10 @@ jobs:
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
+        # Same pin as build-next: the workspace is the downloaded artifact, with
+        # no resolvable `packageManager` at its root. Keep in sync with package.json.
+        with:
+          version: 10.4.1
 
       - name: Make lifecycle scripts executable
         working-directory: knext

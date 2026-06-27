@@ -17,11 +17,12 @@
 import { spawn } from "node:child_process";
 import http from "node:http";
 import { dirname, resolve } from "node:path";
+import { closeDbPool } from "@knext/lib/clients";
 import { collectDefaultMetrics, Registry } from "prom-client";
 import { createLogger } from "../utils/logger";
 import { buildChildEnv } from "./env";
 import { startImageCacheSync } from "./image-cache-sync";
-import { gracefulShutdown } from "./shutdown";
+import { gracefulShutdown, registerShutdownDrain } from "./shutdown";
 
 const log = createLogger({ module: "server" });
 const METRICS_PORT = 9091;
@@ -95,10 +96,25 @@ nextProc.on("exit", (code, signal) => {
     process.exit(code ?? 0);
 });
 
+// ── DB-pool drain (PGS-1) ─────────────────────────────────────────────────────
+// Register the Postgres pool's drain so that on SIGTERM — after HTTP drains —
+// in-flight transactions commit-or-rollback before connections close, instead of
+// being severed mid-write on scale-down. Wired here (the runtime depends on both
+// @knext/lib and ./shutdown) so the lib pool stays free of any dependency on the
+// runtime — no circular dep. `closeDbPool()` is a no-op if no pool was opened.
+registerShutdownDrain(async () => {
+    try {
+        await closeDbPool();
+    } catch (err) {
+        log.warn({ err }, "DB pool drain failed during shutdown (non-fatal)");
+    }
+});
+
 // ── Graceful shutdown ─────────────────────────────────────────────────────────
 // On SIGTERM/SIGINT: close metrics, forward SIGTERM to the Next child so it
-// drains in-flight requests + runs after(), then exit as soon as it drains
-// (hard cap SHUTDOWN_GRACE_MS). Logic lives in ./shutdown for unit testing.
+// drains in-flight requests + runs after(), await registered drains (DB pool),
+// then exit as soon as they finish (hard cap SHUTDOWN_GRACE_MS). Logic lives in
+// ./shutdown for unit testing.
 const onSignal = (signal: string) => {
     log.info(
         { signal, graceMs: SHUTDOWN_GRACE_MS },

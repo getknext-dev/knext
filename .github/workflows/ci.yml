@@ -201,6 +201,14 @@ jobs:
         uses: actions/checkout@v4
       - name: Check operator manifests are digest-pinned
         run: bash packages/kn-next-operator/hack/check-no-latest.sh --quiet
+      # Base-image-pin guard (refs #117): the operator runtime is distroless/static
+      # + a CGO-disabled Go binary, so the only fixable Trivy HIGH/CRITICAL surface
+      # is the Go stdlib version baked into the binary. A floating `golang:1.25`
+      # builder can leak an unpatched stdlib CVE and fail the supply-chain Trivy
+      # gate on main (blocking the bundle publish). This offline guard keeps the
+      # builder pinned to a patched Go point release on every PR.
+      - name: Check operator builder image is pinned to a patched Go release
+        run: bash packages/kn-next-operator/hack/check-trivy-baseimage.bats.sh
 
   operator-codegen-check:
     name: Operator codegen is up-to-date (make generate + make manifests)
@@ -270,3 +278,70 @@ jobs:
           # bundle is missing — the namespace-immunity contract must be gated.
           KNEXT_REQUIRE_BUNDLE: '1'
         run: make test
+
+  prod-image-optimization:
+    # #66 AC#2 + AC#3: the ONLY job that verifies next/image optimization in the
+    # SHIPPED Alpine production image. It BUILDS apps/file-manager/Dockerfile (musl),
+    # runs the container, and runs scripts/prod-image-probe.mjs — a STRICT, fail-closed
+    # probe (unlike compat-smoke check 'g', which skip()s on non-200 so a no-bucket CI
+    # stays green, and which only ever ran on the ubuntu/glibc standalone server.js).
+    #
+    # AC#3 (sharp present) is also enforced inside the build itself: the Dockerfile runs
+    # `node -e require('sharp')` and `apk add vips`, so a missing musl runtime fails the
+    # image build before this job even reaches the probe.
+    name: Prod image next/image optimization (strict, #66)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js (to run the probe on the host)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      # Cheap regression for the probe's fail-closed logic (no Docker needed):
+      # proves the strict probe FAILS on 500 / wrong content-type / non-shrinking
+      # output and PASSES only when all invariants hold. If this regresses, the
+      # docker probe below could silently stop gating anything.
+      - name: Self-test the strict probe (fail-closed)
+        run: node apps/file-manager/scripts/prod-image-probe.selftest.mjs
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Build the production image. The Dockerfile's `RUN node -e require('sharp')`
+      # verification (AC#3) fails the build here if sharp's musl runtime is missing.
+      - name: Build production Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: apps/file-manager/Dockerfile
+          target: runner
+          tags: knext-file-manager:ci
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Run the production container
+        run: |
+          docker run -d --name knext-prod -p 3000:3000 \
+            -e REDIS_URL="" \
+            knext-file-manager:ci
+          echo "container started"
+
+      # STRICT probe — FAILS (does not skip) unless: HTTP 200 AND content-type is
+      # image/webp|avif AND optimized body < source bytes. (#66 AC#2.)
+      - name: Probe /_next/image (strict, fail-closed)
+        env:
+          BASE_URL: http://127.0.0.1:3000
+        run: node apps/file-manager/scripts/prod-image-probe.mjs
+
+      - name: Container logs (on failure)
+        if: failure()
+        run: docker logs knext-prod || true
+
+      - name: Stop container
+        if: always()
+        run: docker rm -f knext-prod || true

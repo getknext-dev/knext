@@ -70,6 +70,18 @@ vet: ## Run go vet against code.
 test: manifests generate fmt vet setup-envtest ## Run tests.
 	KUBEBUILDER_ASSETS="$(shell "$(ENVTEST)" use $(ENVTEST_K8S_VERSION) --bin-dir "$(LOCALBIN)" -p path)" go test $$(go list ./... | grep -v /e2e) -coverprofile cover.out
 
+.PHONY: check-baseimage-pin
+check-baseimage-pin: ## Assert the Dockerfile builder is pinned to a patched Go point release (refs #117). Offline, no Docker/Trivy DB needed.
+	bash hack/check-trivy-baseimage.bats.sh
+
+# TRIVY ?= local trivy binary. IMG defaults to the Makefile's digest-pinned image,
+# but for a local scan you pass a locally-built tag, e.g.:
+#   make docker-build IMG=kn-next-operator:scan && make trivy-scan IMG=kn-next-operator:scan
+TRIVY ?= trivy
+.PHONY: trivy-scan
+trivy-scan: ## Run the SAME Trivy gate as operator-supply-chain.yml against IMG (HIGH/CRITICAL, fixed-only, exit 1 on findings). Requires a built image + the Trivy DB.
+	$(TRIVY) image --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 --format table ${IMG}
+
 # TODO(user): To use a different vendor for e2e tests, modify the setup under 'tests/e2e'.
 # The default setup assumes Kind is pre-installed and builds/loads the Manager Docker image locally.
 # CertManager is installed by default; skip with:
