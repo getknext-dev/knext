@@ -214,15 +214,46 @@ function buildNextJobBlock(): string {
 }
 
 describe('compat-suite build-next perf guards (test-e2e-deploy.yml, #147)', () => {
-  it('raises the build-next timeout above the 60-minute cold-build cliff', () => {
+  it('raises the build-next timeout to match the reference cold-build ceiling (180 min)', () => {
     const block = buildNextJobBlock();
     const m = block.match(/^\s*timeout-minutes:\s*(\d+)/m);
     expect(m, 'build-next must declare timeout-minutes').not.toBeNull();
     const minutes = Number((m as RegExpMatchArray)[1]);
+    // Round 1 raised this to 120; the full-monorepo cold build still hit that
+    // exact ceiling (run 28285404942 cancelled at +120). The reference deploy
+    // harness (build_reusable.yml) affords 180 min; match it so the first cold
+    // build of the now-narrower scope has real headroom to COMPLETE.
     expect(
       minutes,
-      'build-next timeout must exceed 60 min — a cold next.js build was being cancelled at +60',
-    ).toBeGreaterThan(60);
+      'build-next timeout must be >=180 min — a cold build was cancelled at the 120-min ceiling',
+    ).toBeGreaterThanOrEqual(180);
+  });
+
+  // ── Build-scope guard (#147 step 1, round 2) ──────────────────────────────
+  // The 120-min full-monorepo cold build (`corepack pnpm build` = `turbo run
+  // build` over docs/examples/eslint-plugin-next/create-next-app/etc.) never
+  // finished, so the deploy-tests shards never ran. The deploy tests only need
+  // the `next` package and its workspace dependency closure built — they invoke
+  // `next build` against fixture apps (see scripts/e2e-deploy.sh). The fix
+  // scopes the build with a turbo filter `--filter=next...` (trailing `...`
+  // includes next's workspace deps). This guard prevents a silent regression
+  // back to the unscoped full-monorepo build.
+  it('scopes the next.js build to `next` + its workspace deps (not the whole monorepo)', () => {
+    const block = buildNextJobBlock();
+    // The next.js build step must run turbo's build task scoped to the `next`
+    // package dependency closure, via corepack (per-project pnpm — #137 guard).
+    const hasScopedBuild =
+      /corepack\s+pnpm\s+turbo\s+run\s+build\b[^\n]*--filter[=\s]+next\.\.\./.test(block);
+    expect(
+      hasScopedBuild,
+      'build-next must build a TARGETED scope (`corepack pnpm turbo run build --filter=next...`), not the full monorepo',
+    ).toBe(true);
+    // And it must NOT fall back to the unscoped full-monorepo build, which is
+    // what hit the 120-min timeout.
+    expect(
+      /corepack\s+pnpm\s+build\b/.test(block),
+      'build-next must not run the unscoped `corepack pnpm build` (full-monorepo cold build that timed out)',
+    ).toBe(false);
   });
 
   it('caches the pnpm store and the next.js build, keyed on NEXTJS_REF', () => {
