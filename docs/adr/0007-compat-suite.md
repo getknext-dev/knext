@@ -193,6 +193,29 @@ Port the reference workflow with knext substitutions:
 - Next 16.0.3 in-repo vs 16.2.x harness — the harness ref and our installed `next` should be aligned
   before trusting results.
 
+## Addendum (#147, 2026-06): prebuilt-`next` deviation — architect to confirm
+
+The original sketch above (and rounds 1–3 of #147) had `build-next` **compile `vercel/next.js`
+from source**. That proved **non-convergent** on the standard GitHub runner: even after scoping the
+build to `next` + its workspace deps and adding a GHA-backed turbo remote cache to persist a
+cancelled build incrementally, the build exceeded the 180-min ceiling across two cache-warming
+dispatches, so the deploy-tests shards **never executed** — zero official results.
+
+**Deviation taken:** `build-next` now `npm pack`s the **published `next@<pinned version>`** tarball
+(the built `packages/next` at the same version) and feeds it to the reference harness via
+`NEXT_TEST_PKG_PATHS`, which makes `test/lib/create-next-install.js` skip its source-pack
+(`linkPackages`) step and install the tarball into each fixture app. `@next/swc` still arrives
+prebuilt from the tarball's optionalDependencies; the next.js source checkout is still used for its
+`test/` harness + `run-tests.js`.
+
+**Trade-off:** we now test the adapter against the *published* `next`, not a *source-built* one.
+For an **adapter** compatibility test this is arguably **more correct** — it is the exact artifact
+real users install — but it is a deliberate departure from the reference harness's source-build
+model, so a source-only regression (fixed in the published patch) could in principle be masked.
+Pinning the npm version to the in-repo `next` keeps results attributable. **Open for the architect:**
+accept the prebuilt model as the standing approach, or treat it as interim until larger runners make
+the source build viable (the human lever on #147).
+
 ## Action items
 
 - **A3-1 (per-PR gate, this PR's deliverable):**

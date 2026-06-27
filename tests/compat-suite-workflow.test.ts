@@ -178,31 +178,53 @@ describe('compat-suite workflow pnpm pin (test-e2e-deploy.yml)', () => {
   });
 });
 
-// ── Build-perf regression guard (#147 step 1) ─────────────────────────────────
-// As of the 2026-06-27 dispatch, `build-next` reached the real next.js build but
-// hit the 60-minute job timeout while building next.js v16.0.3 from source and
-// was cancelled, so the 4 deploy-tests shards never executed. The fix raises the
-// build-next timeout to a realistic cold-build ceiling AND caches the pnpm store
-// + next.js build output keyed on NEXTJS_REF so repeat runs are fast. These guards
-// prevent that perf fix from silently regressing.
+// ── Prebuilt-next guard (#147 step 1, round 4 — the prebuilt pivot) ────────────
+// Rounds 1–3 tried to make `build-next` COMPILE next.js v16.0.3 from source within
+// the job window (timeout 60→120→180, build scoping `--filter=next...`, a
+// GHA-backed turbo remote cache). The source build proved NON-CONVERGENT: even
+// the scoped build exceeded the 180-min runner ceiling across two cache-warming
+// dispatches, so the 4 deploy-tests shards NEVER executed.
+//
+// PIVOT: stop compiling `next` from source. The published `next@16.0.3` npm tarball
+// IS the built `packages/next` at the same version, so testing knext's adapter
+// against it is functionally equivalent (arguably MORE correct for an adapter
+// compat test). The reference deploy harness supports this first-class: when
+// `NEXT_TEST_PKG_PATHS` is set (a JSON [[name, tarballPath]] map), `createNextInstall`
+// SKIPS `linkPackages` (the source-pack step) and installs the provided tarball
+// into each fixture app. `@next/swc` still arrives prebuilt via the tarball's
+// optionalDependencies — no Rust build either.
+//
+// These guards lock in the prebuilt path and prevent a regression back to the
+// non-convergent source build.
 
 /**
  * Returns the body of the `build-next` job: every line from the `build-next:`
  * key up to (but not including) the next sibling job key (`deploy-tests:`).
  */
 function buildNextJobBlock(): string {
+  return jobBlock('build-next');
+}
+
+/** Returns the body of the `deploy-tests` job block. */
+function deployTestsJobBlock(): string {
+  return jobBlock('deploy-tests');
+}
+
+/** Returns the lines of a top-level job block by its key (e.g. `build-next`). */
+function jobBlock(jobName: string): string {
   const lines = workflowText().split('\n');
   let start = -1;
   let jobIndent = -1;
+  const keyRe = new RegExp(`^(\\s+)${jobName}:\\s*$`);
   for (let i = 0; i < lines.length; i++) {
-    const m = lines[i].match(/^(\s+)build-next:\s*$/);
+    const m = lines[i].match(keyRe);
     if (m) {
       start = i;
       jobIndent = m[1].length;
       break;
     }
   }
-  expect(start, 'workflow must declare a build-next job').toBeGreaterThanOrEqual(0);
+  expect(start, `workflow must declare a ${jobName} job`).toBeGreaterThanOrEqual(0);
   const out: string[] = [lines[start]];
   for (let i = start + 1; i < lines.length; i++) {
     const indent = lines[i].search(/\S/);
@@ -213,143 +235,70 @@ function buildNextJobBlock(): string {
   return out.join('\n');
 }
 
-describe('compat-suite build-next perf guards (test-e2e-deploy.yml, #147)', () => {
-  it('raises the build-next timeout to match the reference cold-build ceiling (180 min)', () => {
+describe('compat-suite prebuilt-next guards (test-e2e-deploy.yml, #147)', () => {
+  it('acquires the PUBLISHED next (npm pack/install), not a source build', () => {
     const block = buildNextJobBlock();
-    const m = block.match(/^\s*timeout-minutes:\s*(\d+)/m);
-    expect(m, 'build-next must declare timeout-minutes').not.toBeNull();
-    const minutes = Number((m as RegExpMatchArray)[1]);
-    // Round 1 raised this to 120; the full-monorepo cold build still hit that
-    // exact ceiling (run 28285404942 cancelled at +120). The reference deploy
-    // harness (build_reusable.yml) affords 180 min; match it so the first cold
-    // build of the now-narrower scope has real headroom to COMPLETE.
+    // build-next must fetch the published next tarball for the pinned ref. We
+    // accept `npm pack next@<ref>` (the canonical acquisition). The ref is the
+    // numeric version (NEXTJS_REF is a git tag like `v16.0.3`; the npm dist-tag
+    // strips the leading `v`), so we match a published-next acquisition that
+    // references the resolved version env.
+    const hasPublishedAcquire =
+      /npm\s+pack\s+["']?next@/.test(block) || /npm\s+(?:install|i)\s+["']?next@/.test(block);
     expect(
-      minutes,
-      'build-next timeout must be >=180 min — a cold build was cancelled at the 120-min ceiling',
-    ).toBeGreaterThanOrEqual(180);
+      hasPublishedAcquire,
+      'build-next must acquire the PUBLISHED next (e.g. `npm pack next@$NEXT_NPM_VERSION`), not build it from source',
+    ).toBe(true);
   });
 
-  // ── Build-scope guard (#147 step 1, round 2) ──────────────────────────────
-  // The 120-min full-monorepo cold build (`corepack pnpm build` = `turbo run
-  // build` over docs/examples/eslint-plugin-next/create-next-app/etc.) never
-  // finished, so the deploy-tests shards never ran. The deploy tests only need
-  // the `next` package and its workspace dependency closure built — they invoke
-  // `next build` against fixture apps (see scripts/e2e-deploy.sh). The fix
-  // scopes the build with a turbo filter `--filter=next...` (trailing `...`
-  // includes next's workspace deps). This guard prevents a silent regression
-  // back to the unscoped full-monorepo build.
-  it('scopes the next.js build to `next` + its workspace deps (not the whole monorepo)', () => {
+  it('does NOT compile next.js from source (no turbo build of next)', () => {
     const block = buildNextJobBlock();
-    // The next.js build step must run turbo's build task scoped to the `next`
-    // package dependency closure, via corepack (per-project pnpm — #137 guard).
-    const hasScopedBuild =
-      /corepack\s+pnpm\s+turbo\s+run\s+build\b[^\n]*--filter[=\s]+next\.\.\./.test(block);
+    // The non-convergent source build is gone: no `turbo run build` of next
+    // (scoped or unscoped) and no full-monorepo `corepack pnpm build`.
     expect(
-      hasScopedBuild,
-      'build-next must build a TARGETED scope (`corepack pnpm turbo run build --filter=next...`), not the full monorepo',
-    ).toBe(true);
-    // And it must NOT fall back to the unscoped full-monorepo build, which is
-    // what hit the 120-min timeout.
+      /turbo\s+run\s+build\b/.test(block),
+      'build-next must NOT run `turbo run build` — the source build is the non-convergent bottleneck',
+    ).toBe(false);
     expect(
       /corepack\s+pnpm\s+build\b/.test(block),
-      'build-next must not run the unscoped `corepack pnpm build` (full-monorepo cold build that timed out)',
+      'build-next must NOT run the full-monorepo `corepack pnpm build`',
+    ).toBe(false);
+    expect(
+      /--filter[=\s]+next\.\.\./.test(block),
+      'build-next must NOT use the source-build `--filter=next...` scope',
     ).toBe(false);
   });
 
-  // ── Turbo remote-cache guard (#147) ───────────────────────────────────────
-  // ROOT CAUSE: actions/cache only SAVES build output on job SUCCESS, but the
-  // cold next.js build was cancelled at the timeout every run, so the #148
-  // build-output cache never populated (chicken-and-egg) and every run was a
-  // cold ~3h miss. FIX: give turbo a GHA-backed REMOTE cache so each next.js
-  // package's build output uploads INCREMENTALLY as its turbo task completes —
-  // a cancelled run still persists finished tasks, and subsequent runs resume,
-  // until one run completes the build. Turbo has no native GHA-cache backend
-  // (only Vercel/custom remote via TURBO_API/TOKEN/TEAM), so we use the
-  // community action that proxies turbo's remote-cache HTTP API to the GHA
-  // cache. Supply-chain rule: it MUST be pinned by commit SHA.
-  it('wires a GHA-backed turbo remote cache before the next.js build, SHA-pinned', () => {
+  it('does NOT wire the turbo remote-cache (only the source build needed it)', () => {
     const block = buildNextJobBlock();
-
-    // The community turbo remote-cache action must be present and pinned by a
-    // 40-hex commit SHA (NOT a floating tag/branch) — supply-chain rule.
-    const m = block.match(
-      /uses:\s*dtinth\/setup-github-actions-caching-for-turbo@([0-9a-f]{40})\b/,
-    );
+    // The dtinth turbo remote-cache action existed solely to incrementally
+    // persist the source build across runs. With no source build, it is dead
+    // weight (and an extra supply-chain dependency) — drop it.
     expect(
-      m,
-      'build-next must use dtinth/setup-github-actions-caching-for-turbo pinned by a 40-char commit SHA',
-    ).not.toBeNull();
-    const sha = (m as RegExpMatchArray)[1];
-    expect(sha.length, 'turbo cache action must be pinned by a full 40-char SHA').toBe(40);
-
-    // It must NOT be pinned by a floating ref (tag/branch/major like @v1, @main).
-    expect(
-      /setup-github-actions-caching-for-turbo@(?!.{40})\S+/.test(block),
-      'turbo cache action must not be pinned by a floating tag/branch (use a SHA)',
-    ).toBe(false);
-
-    // The remote-cache setup must come BEFORE the build step so the build
-    // inherits the TURBO_API/TURBO_TOKEN/TURBO_TEAM env the action exports.
-    const cacheIdx = block.indexOf('setup-github-actions-caching-for-turbo@');
-    // Match the actual scoped build COMMAND (with --filter), not prose mentions
-    // of `turbo run build` in surrounding comments.
-    const buildIdx = block.search(
-      /corepack\s+pnpm\s+turbo\s+run\s+build\b[^\n]*--filter[=\s]+next\.\.\./,
-    );
-    expect(cacheIdx, 'turbo cache step must exist').toBeGreaterThanOrEqual(0);
-    expect(buildIdx, 'scoped build step must exist').toBeGreaterThanOrEqual(0);
-    expect(
-      cacheIdx < buildIdx,
-      'the turbo remote-cache step must run BEFORE the next.js build so the build inherits TURBO_* env',
-    ).toBe(true);
-
-    // The build must NOT disable the cache (no `--no-cache`/`--force`), or the
-    // incremental remote upload that fixes the chicken-and-egg never happens.
-    const buildLine =
-      block
-        .split('\n')
-        .find((l) =>
-          /corepack\s+pnpm\s+turbo\s+run\s+build\b[^\n]*--filter[=\s]+next\.\.\./.test(l),
-        ) ?? '';
-    expect(
-      /--no-cache\b|--force\b/.test(buildLine),
-      'the next.js build must NOT pass --no-cache/--force (it would defeat the turbo remote cache)',
+      /setup-github-actions-caching-for-turbo/.test(block),
+      'build-next should not wire a turbo remote cache once the source build is gone',
     ).toBe(false);
   });
 
-  it('caches the pnpm store keyed on NEXTJS_REF', () => {
-    const block = buildNextJobBlock();
-    // At least one actions/cache step in build-next (the pnpm content store, so
-    // a repeat run skips re-downloading every next.js dependency).
+  it('passes the prebuilt next tarball to the harness via NEXT_TEST_PKG_PATHS', () => {
+    // The deploy-tests shard step must set NEXT_TEST_PKG_PATHS so the reference
+    // harness (`createNextInstall`) installs the published `next` tarball into
+    // each fixture app instead of packing it from source (`linkPackages`).
+    const block = deployTestsJobBlock();
     expect(
-      /uses:\s*actions\/cache(?:@|\s|$)/.test(block),
-      'build-next must use actions/cache for the pnpm store to avoid re-downloading deps every run',
+      /NEXT_TEST_PKG_PATHS\s*:/.test(block),
+      'deploy-tests must set NEXT_TEST_PKG_PATHS to the prebuilt next tarball so the harness skips the source pack',
     ).toBe(true);
-    // Every concrete cache key in build-next must include NEXTJS_REF so a ref
-    // bump invalidates the cache (the build is only valid for one pinned ref).
-    // We collect inline `key:` values plus the continuation lines under a
-    // `restore-keys: |` block scalar (skipping the `|` line itself).
-    const blockLines = block.split('\n');
-    const keyValues: string[] = [];
-    for (let i = 0; i < blockLines.length; i++) {
-      const inline = blockLines[i].match(/^\s*key:\s*(\S.*)$/);
-      if (inline) keyValues.push(inline[1].trim());
-      if (/^\s*restore-keys:\s*\|\s*$/.test(blockLines[i])) {
-        const baseIndent = blockLines[i].search(/\S/);
-        for (let j = i + 1; j < blockLines.length; j++) {
-          if (blockLines[j].trim() === '') continue;
-          const indent = blockLines[j].search(/\S/);
-          if (indent <= baseIndent) break;
-          keyValues.push(blockLines[j].trim());
-        }
-      }
-    }
-    expect(keyValues.length, 'build-next cache step must declare a key').toBeGreaterThan(0);
-    for (const value of keyValues) {
-      expect(
-        /NEXTJS_REF/.test(value),
-        `cache key must include NEXTJS_REF so a ref bump invalidates it (got: "${value}")`,
-      ).toBe(true);
-    }
+  });
+
+  it('still installs the harness deps via corepack pnpm (next.js per-project pnpm)', () => {
+    // We still need next.js's own deps installed so `run-tests.js` + the source
+    // `test/` harness run — and `@next/swc` arrives prebuilt during that install.
+    // That install must still go through corepack (#137 engine-clash guard).
+    const block = buildNextJobBlock();
+    expect(
+      /corepack\s+pnpm\s+install\b/.test(block),
+      'build-next must still `corepack pnpm install` the next.js harness deps',
+    ).toBe(true);
   });
 });

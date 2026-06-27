@@ -32,35 +32,41 @@ on:
 
 # Pin the Next.js ref so a failure is attributable to knext, not upstream churn.
 # Aligns with the in-repo next@16.0.3 (CLAUDE.md / ADR-0007 version-skew caveat).
+# NEXTJS_REF is the git TAG (kept for the source checkout that supplies the
+# `test/` harness + `run-tests.js`); NEXT_NPM_VERSION is the published npm version
+# (the tag minus the leading `v`) we `npm pack` the PREBUILT `next` from.
 env:
   NEXTJS_REF: ${{ github.event.inputs.nextjsRef || 'v16.0.3' }}
 
 jobs:
   build-next:
-    name: Build vercel/next.js (pinned)
+    name: Prepare prebuilt next + harness
     runs-on: ubuntu-latest
-    # #147 step 1 (round 2) — round 1 raised this 60→120 and scoped nothing, so
-    # the COLD full-monorepo build (the unscoped `turbo run build`
-    # over docs/examples/eslint-plugin-next/create-next-app/turbopack JS bench/…)
-    # hit the 120-min ceiling EXACTLY (run 28285404942: 09:37:29Z→11:37:46Z) and
-    # was cancelled, so the deploy-tests shards never ran. The reference harness
-    # affords 180 min AND leans on a Turbo REMOTE cache (vercel-only) — we have
-    # neither. Compounding: actions/cache only SAVES on job SUCCESS, so a build
-    # that never completes never populates the cache → every run is a cold miss.
+    # #147 step 1 (round 4 — the PREBUILT pivot). Rounds 1–3 tried to make this
+    # job COMPILE next.js v16.0.3 from source within the runner window (timeout
+    # 60→120→180, a build scoped to next + its workspace deps, a GHA-backed turbo
+    # remote cache to incrementally persist a cancelled build). The source build
+    # proved NON-CONVERGENT: even the scoped build exceeded the 180-min ceiling
+    # across two cache-warming dispatches, so the 4 deploy-tests shards NEVER ran.
     #
-    # Fix: build only what the deploy tests need — they invoke `next build`
-    # against fixture apps (scripts/e2e-deploy.sh), which requires the `next`
-    # package and its workspace dependency closure, NOT the whole monorepo. We
-    # scope the build with `turbo run build --filter=next...` (trailing `...`
-    # pulls in next's workspace deps: @next/env, @next/font, the polyfills,
-    # @next/react-refresh-utils). Plus we raise the timeout to the reference's
-    # 180-min ceiling as headroom for the first cold build to COMPLETE and
-    # finally populate the #148 build cache.
+    # PIVOT: stop building `next` from source. The PUBLISHED `next@16.0.3` npm
+    # tarball IS the built `packages/next` at the same version — so testing the
+    # knext adapter against it is functionally equivalent (arguably MORE correct
+    # for an adapter compat test: it's the artifact real users install). The
+    # reference deploy harness supports this FIRST-CLASS: when `NEXT_TEST_PKG_PATHS`
+    # is set (a JSON [[name, tarballPath]] map), `test/lib/create-next-install.js`
+    # SKIPS `linkPackages` (the source-pack step) and installs the provided
+    # tarball into each fixture app. We still check out next.js at the pinned ref
+    # for its `test/` harness + `run-tests.js`, and still `corepack pnpm install`
+    # next.js's own deps so the harness runs — but `next` itself is the prebuilt
+    # tarball, and `@next/swc` arrives prebuilt from that tarball's
+    # optionalDependencies during the per-fixture install. No Rust, no source TS.
     #
-    # Note we do NOT compile @next/swc from Rust source: turbo's `build` task is
-    # JS (`dependsOn: ["^build"]`, no build-native), and the native binary comes
-    # from the prebuilt npm postinstall during install — the same path the
-    # reference takes for deploy tests (skipNativeBuild: yes).
+    # DESIGN DEVIATION (for the architect, ADR-0007): the reference harness builds
+    # `next` from the pinned SOURCE; we test against the PUBLISHED package of the
+    # same version. Flagged in the PR for review.
+    #
+    # The timeout stays generous as headroom, but `npm pack` is now minutes.
     timeout-minutes: 180
     steps:
       - name: Checkout knext
@@ -100,7 +106,24 @@ jobs:
           npm pack
           ls -1 *.tgz
 
-      - name: Checkout vercel/next.js (pinned ref)
+      # #147 (round 4) — derive the published npm VERSION from the git tag ref
+      # (`v16.0.3` → `16.0.3`), then `npm pack` the PREBUILT `next` from the npm
+      # registry. This tarball replaces the source build entirely. We stage it at
+      # a STABLE path (next-prebuilt/next.tgz) under github.workspace so the
+      # downloaded artifact resolves it identically in the shard jobs.
+      - name: Acquire prebuilt next (npm pack)
+        id: prebuilt
+        run: |
+          NEXT_NPM_VERSION="${NEXTJS_REF#v}"
+          echo "Packing published next@${NEXT_NPM_VERSION}"
+          mkdir -p "${GITHUB_WORKSPACE}/next-prebuilt"
+          ( cd "${GITHUB_WORKSPACE}/next-prebuilt" \
+            && TARBALL="$(npm pack "next@${NEXT_NPM_VERSION}" --silent | tail -n1)" \
+            && mv "${TARBALL}" next.tgz )
+          ls -la "${GITHUB_WORKSPACE}/next-prebuilt"
+          echo "version=${NEXT_NPM_VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout vercel/next.js (pinned ref — supplies the test harness)
         uses: actions/checkout@v4
         with:
           repository: vercel/next.js
@@ -121,78 +144,19 @@ jobs:
         working-directory: next.js
         run: corepack enable
 
-      # #147 step 1 — resolve next.js's package store dir so we can persist it
-      # across runs. The reference harness leans on a Turbo REMOTE cache
-      # (vercel-only secret); we have no remote cache, so actions/cache is the
-      # substitute.
-      - name: Resolve package store path
-        id: pnpm-store
-        working-directory: next.js
-        run: echo "path=$(corepack pnpm store path --silent)" >> "$GITHUB_OUTPUT"
-
-      # Cache the pnpm content-addressable store keyed on NEXTJS_REF + the next.js
-      # lockfile, so a REPEAT run skips re-downloading every dependency (incl. the
-      # prebuilt @next/swc native binary). NEXTJS_REF is in the key so a ref bump
-      # invalidates it — the store for v16.0.3 is not valid for a different ref.
-      - name: Cache next.js pnpm store
-        uses: actions/cache@v4
-        with:
-          path: ${{ steps.pnpm-store.outputs.path }}
-          key: nextjs-pnpm-store-${{ env.NEXTJS_REF }}-${{ hashFiles('next.js/pnpm-lock.yaml') }}
-          restore-keys: |
-            nextjs-pnpm-store-${{ env.NEXTJS_REF }}-
-
-      # #147 — GHA-backed Turbo REMOTE cache (the real fix for the cold-build
-      # chicken-and-egg). The prior #148 build-output `actions/cache` only SAVED
-      # on job SUCCESS, but the cold next.js build was cancelled at the timeout
-      # every run, so that cache never populated → every run was a fresh ~3h cold
-      # miss. We REPLACE it with a turbo remote cache: turbo uploads each next.js
-      # package's build output INCREMENTALLY the moment its `build` task finishes,
-      # so a cancelled run still PERSISTS the tasks that completed, the next run
-      # RESUMES from them, and across a few dispatches the cache fills until one
-      # build completes — exactly the property `actions/cache` could not give us.
-      #
-      # Turbo 2.5.5 (next.js's root devDep) has NO native GitHub-Actions cache
-      # backend — it only speaks the Vercel/custom remote-cache HTTP API via
-      # TURBO_API/TURBO_TOKEN/TURBO_TEAM (the reference harness uses Vercel's,
-      # which is not available to us). This community action runs a tiny local
-      # server that proxies that HTTP API to GitHub Actions' built-in cache and
-      # `core.exportVariable`s TURBO_API/TURBO_TOKEN/TURBO_TEAM into $GITHUB_ENV,
-      # so the later `corepack pnpm turbo run build` step inherits them and uses
-      # the remote cache automatically (no --no-cache / no remoteCache disable).
-      #
-      # SUPPLY CHAIN (security.md): pinned by full commit SHA, tag in comment.
-      # NOTE: the GitHub Actions cache is capped at 10 GB/repo with LRU eviction.
-      # If next.js's build artifacts exceed that, eviction may prevent the cache
-      # fully warming across runs; the larger-runner alternative is tracked on
-      # #147 (graduation checklist item 1).
-      - name: Set up GHA-backed Turbo remote cache
-        # dtinth/setup-github-actions-caching-for-turbo v1.3.0
-        uses: dtinth/setup-github-actions-caching-for-turbo@cc723b4600e40a6b8815b65701d8614b91e2669e
-        with:
-          cache-prefix: nextjs-turbo-${{ env.NEXTJS_REF }}-
-
-      - name: Setup Next.js build deps + Playwright
+      # Install next.js's OWN deps so `run-tests.js` + the source `test/` harness
+      # run. We do NOT build `next` here — the prebuilt tarball IS `next`, and the
+      # prebuilt `@next/swc` native binary arrives from that tarball's
+      # optionalDependencies during each fixture app's install (the harness handles
+      # it). This install is the only heavyweight step and is bounded (minutes).
+      - name: Setup Next.js test-harness deps + Playwright
         working-directory: next.js
         run: |
           corepack pnpm install
           corepack pnpm playwright install chromium --with-deps
 
-      # #147 step 1 (round 2) — TARGETED build. The deploy tests only need the
-      # `next` package + its workspace dependency closure (they run `next build`
-      # against fixture apps). `--filter=next...` (trailing `...` = include
-      # next's workspace deps) skips docs, examples, eslint-plugin-next,
-      # create-next-app and the turbopack JS bench packages — the bulk of the
-      # full-monorepo cold build that hit the 120-min timeout. The native
-      # @next/swc binary still arrives via the prebuilt npm postinstall during
-      # install above (we never compile it from Rust here). This step inherits
-      # TURBO_API/TURBO_TOKEN/TURBO_TEAM from the remote-cache step above, so
-      # turbo reads/writes the GHA-backed remote cache per task — no --no-cache.
-      - name: Build Next.js (scoped to `next` + workspace deps)
-        working-directory: next.js
-        run: corepack pnpm turbo run build --filter=next...
-
-      # Cache the prepared knext + next.js trees for the shard jobs.
+      # Cache the prepared knext + next.js trees + the prebuilt next tarball for
+      # the shard jobs.
       - name: Upload workspace
         uses: actions/upload-artifact@v4
         with:
@@ -200,6 +164,7 @@ jobs:
           path: |
             knext
             next.js
+            next-prebuilt
           retention-days: 1
           include-hidden-files: true
 
@@ -249,6 +214,13 @@ jobs:
           # Layer knext's exclude/include ledger on top of Next's deploy-eligible set.
           NEXT_EXTERNAL_TESTS_FILTERS: ${{ github.workspace }}/knext/test/deploy-tests-manifest.knext.json
           KNEXT_RUNTIME: node
+          # #147 (round 4) — the prebuilt pivot. A JSON [[name, tarballPath]] map.
+          # `test/lib/create-next-install.js` reads this and SKIPS `linkPackages`
+          # (the source-pack step), installing the PUBLISHED `next` tarball into
+          # each fixture app instead. This is why build-next no longer compiles
+          # next from source. `@next/swc` resolves from the tarball's
+          # optionalDependencies during that install.
+          NEXT_TEST_PKG_PATHS: '[["next", "${{ github.workspace }}/next-prebuilt/next.tgz"]]'
         # `|| true`: a partial-subset scaffold WILL have failures today; we still
         # want the summary artifact emitted. The matrix row stays ❌ regardless.
         run: |
