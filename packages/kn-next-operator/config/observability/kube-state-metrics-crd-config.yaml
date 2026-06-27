@@ -1,0 +1,63 @@
+# kube-state-metrics CustomResourceStateMetrics config (observability P0).
+#
+# The KnextNextAppDegraded alert in prometheusrule.yaml reads the series
+# `knext_nextapp_condition`, which only exists if kube-state-metrics (KSM) is
+# told to emit CRD conditions. This ConfigMap ships that config as an applyable
+# manifest so the alert is no longer inert once the observability overlay is
+# applied AND KSM is pointed at this config.
+#
+# Wiring KSM to consume it (cluster-dependent, NOT done here so the operator
+# deploy can never depend on KSM being present):
+#   1. Apply this overlay:  kubectl apply -k config/observability
+#   2. Mount this ConfigMap into the kube-state-metrics Deployment and pass
+#        --custom-resource-state-config-file=/etc/ksm/custom-resource-state.yaml
+#      (kube-prometheus-stack: set
+#       `kube-state-metrics.customResourceState.enabled=true` + reference the
+#       `config` key below). KSM also needs RBAC get/list/watch on
+#       nextapps.apps.kn-next.dev.
+#
+# This is intentionally a STANDALONE overlay resource. It is wired into
+# config/observability/kustomization.yaml only, never config/default — applying
+# the operator must not require kube-state-metrics or its CRD-state feature.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: knext-kube-state-metrics-crd-config
+  labels:
+    app.kubernetes.io/name: kn-next-operator
+    app.kubernetes.io/component: observability
+data:
+  # KSM reads this key as its --custom-resource-state-config-file. The emitted
+  # series is metricNamePrefix + "_" + metric name => knext_nextapp_condition.
+  custom-resource-state.yaml: |
+    kind: CustomResourceStateMetrics
+    spec:
+      resources:
+        - groupVersionKind:
+            group: apps.kn-next.dev
+            version: v1alpha1
+            kind: NextApp
+          # Emitted series: knext_nextapp_condition
+          metricNamePrefix: knext_nextapp
+          # Surface namespace/name as labels for the alert's `by (namespace, name)`.
+          labelsFromPath:
+            namespace: [metadata, namespace]
+            name: [metadata, name]
+          metrics:
+            - name: condition
+              help: "NextApp .status.conditions (Ready / Degraded / Reconciling)"
+              each:
+                type: StateSet
+                stateSet:
+                  # status="True|False|Unknown" (verbatim metav1.Condition.Status —
+                  # KSM StateSet matches the extracted value against `list`
+                  # case-sensitively, so these MUST match the capitalized values the
+                  # reconciler writes via apimeta.SetStatusCondition, or every series
+                  # stays 0 and KnextNextAppDegraded never fires);
+                  # type="Ready|Degraded|Reconciling"
+                  labelName: status
+                  labelsFromPath:
+                    type: [type]
+                  path: [status, conditions]
+                  valueFrom: [status]
+                  list: ["True", "False", "Unknown"]

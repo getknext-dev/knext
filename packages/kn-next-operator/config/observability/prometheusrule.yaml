@@ -8,8 +8,11 @@
 #                kn_next_startup_duration_seconds, kn_next_bytecode_cache_warm_start
 #                (apps/file-manager/src/app/api/_metrics/registry.ts)
 #   - condition: knext_nextapp_condition — a kube-state-metrics CRD metric
-#                exposing the NextApp .status.conditions (see slos.md for the KSM
-#                CustomResourceStateMetrics config). The Degraded alert below
+#                exposing the NextApp .status.conditions. The KSM
+#                CustomResourceStateMetrics config now ships as an applyable
+#                ConfigMap (kube-state-metrics-crd-config.yaml, in this overlay),
+#                so KnextNextAppDegraded is live once this overlay is applied and
+#                KSM is pointed at that ConfigMap (no longer inert). The alert
 #                accepts either knext_nextapp_condition or the generic
 #                kube_customresource fallback name.
 #
@@ -62,11 +65,11 @@ spec:
       rules:
         # NextApp Degraded=True — the reconciler now populates status.conditions
         # (Ready / Degraded). kube-state-metrics exposes them as
-        # knext_nextapp_condition{type="Degraded",status="true"}.
+        # knext_nextapp_condition{type="Degraded",status="True"}.
         - alert: KnextNextAppDegraded
           expr: >-
             max by (namespace, name) (
-              knext_nextapp_condition{type="Degraded",status="true"}
+              knext_nextapp_condition{type="Degraded",status="True"}
             ) == 1
           for: 5m
           labels:

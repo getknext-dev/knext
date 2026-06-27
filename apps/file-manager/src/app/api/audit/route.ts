@@ -1,6 +1,7 @@
 import { getDbPool } from '@knext/lib/clients';
 import { unstable_cache } from 'next/cache';
 import { NextResponse } from 'next/server';
+import { withRedMetrics } from '../_metrics/registry';
 
 const PAGE_SIZE = 20;
 
@@ -33,7 +34,10 @@ const getAuditLogsCached = unstable_cache(
   },
 );
 
-export async function GET(request: any, _context: any) {
+// Wrapped in withRedMetrics (observability P0) under route="/api/audit".
+// Behavior-preserving: returns this handler's own Response (incl. its 500-on-DB
+// -error path) so the error-rate SLI sees DB outages on this route.
+export const GET = withRedMetrics('/api/audit', async (request: any, _context: any) => {
   // Vinext passes route params in context.params.
   // It turns out Vinext's Request shim sometimes drops the internal Next.js `nextUrl`
   // property entirely or strips standard properties off when creating the dummy request.
@@ -66,4 +70,4 @@ export async function GET(request: any, _context: any) {
       { status: 500 },
     );
   }
-}
+});

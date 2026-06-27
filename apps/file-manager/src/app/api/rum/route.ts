@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { observeWebVital } from '../_metrics/registry';
+import { observeWebVital, withRedMetrics } from '../_metrics/registry';
 import { allowRumRequest } from './rate-limit';
 import { parseBeacon, routeTemplateFor } from './validate';
 
@@ -33,7 +33,11 @@ import { parseBeacon, routeTemplateFor } from './validate';
 // Payload cap — a single Web Vitals beacon is tiny; reject anything larger.
 const MAX_BODY_BYTES = 2_048;
 
-export async function POST(request: Request): Promise<Response> {
+// Wrapped in withRedMetrics (observability P0): the ingest request is counted
+// into the server-side RED series under the bounded route="/api/rum" label. The
+// wrapper is behavior-preserving — it returns this handler's own Response (the
+// 204/400/413/429 contract is unchanged) and only adds instrumentation.
+export const POST = withRedMetrics('/api/rum', async (request: Request): Promise<Response> => {
   // Layer 4: rate-limit first — cheapest rejection, protects everything below.
   if (!allowRumRequest()) {
     return new NextResponse(null, { status: 429 });
@@ -84,4 +88,4 @@ export async function POST(request: Request): Promise<Response> {
   });
 
   return new NextResponse(null, { status: 204 });
-}
+});

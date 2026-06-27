@@ -3,6 +3,7 @@ import { NextResponse } from 'next/server';
 import '../../../../cache-init';
 // Reuse the single auth helper from the invalidate route — DELETE here is a
 // mutating endpoint (clears cache events) and must not be open (E4-2, security.md).
+import { withRedMetrics } from '../../_metrics/registry';
 import { isAuthorized } from '../invalidate/auth';
 
 /**
@@ -71,7 +72,10 @@ async function getCacheStats(events: CacheEvent[]) {
   };
 }
 
-export async function GET() {
+// Wrapped in withRedMetrics (observability P0) under the bounded
+// route="/api/cache/events" label. Behavior-preserving — returns each handler's
+// own Response; the DELETE auth check is untouched.
+export const GET = withRedMetrics('/api/cache/events', async () => {
   const events = await getEvents();
   const stats = await getCacheStats(events);
 
@@ -80,9 +84,9 @@ export async function GET() {
     events: events.slice(0, 50), // Return last 50 events
     timestamp: new Date().toISOString(),
   });
-}
+});
 
-export async function DELETE(request: Request) {
+export const DELETE = withRedMetrics('/api/cache/events', async (request: Request) => {
   // Mutating: clears all cache events. Requires the same Bearer token as
   // POST /api/cache/invalidate; fail-closed when CACHE_INVALIDATE_TOKEN is unset.
   if (!isAuthorized(request.headers.get('authorization'), process.env.CACHE_INVALIDATE_TOKEN)) {
@@ -104,4 +108,4 @@ export async function DELETE(request: Request) {
     message: 'Cache events cleared',
     timestamp: new Date().toISOString(),
   });
-}
+});
