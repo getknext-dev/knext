@@ -535,6 +535,17 @@ steps:
         az aks get-credentials --resource-group myRG --name myCluster
         cd apps/file-manager
         npx kn-next deploy --tag $(Build.SourceVersion) --namespace production
+```
+
+> **STALE / unverified (#46):** this AKS snippet predates the official-adapter migration
+> and the operator-as-source-of-truth model (ADR-0001). The deploy flow no longer emits
+> a raw `knative-service.yaml` under `.output/` for direct `kubectl apply` — the CLI emits
+> a `NextApp` CR that the Go operator reconciles. AKS is also **not yet verified** end to
+> end; treat this as illustrative. See
+> [Multi-Cloud Portability](operator/multi-cloud-portability.md) for the real per-cloud
+> prerequisites (ingress-class, StorageClass, gateway IP, build-host CLIs).
+
+```yaml
     env:
       KN_REGISTRY: myregistry.azurecr.io
       KN_DATABASE_URL: $(DATABASE_URL)

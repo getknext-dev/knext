@@ -11,6 +11,12 @@
 # The value MUST be the full controller-qualified form below — the short
 # `kourier.knative.dev` form is drift and does not match Kourier's ingress class.
 #
+# This defaults to KOURIER (the default networking layer). Clusters whose Knative
+# uses net-istio or Contour must OVERRIDE the ingress-class (issue #46) — do NOT
+# hand-edit this file; run hack/set-ingress-class.sh on the rendered bundle, e.g.:
+#   make build-installer INGRESS_CLASS=istio.ingress.networking.knative.dev
+# See docs/operator/multi-cloud-portability.md for the per-cloud steps.
+#
 # Apply with `kubectl apply --server-side` so this merges into any existing
 # config-network managed by the Knative Serving install (it owns other keys).
 apiVersion: v1

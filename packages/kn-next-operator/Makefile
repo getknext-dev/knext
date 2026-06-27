@@ -181,6 +181,12 @@ build-installer: manifests generate kustomize ## Generate dist/install.yaml (CRD
 	# The release job substitutes the real published digest into dist/install.yaml
 	# after the operator image is pushed (see operator-supply-chain.yml).
 	"$(KUSTOMIZE)" build config/default > dist/install.yaml
+	# NOTE(#45/#46): the bundle defaults to the Kourier ingress-class. On clusters
+	# whose Knative uses net-istio or Contour, override it (mirrors the digest
+	# substitution above; default is a no-op):
+	#   make build-installer INGRESS_CLASS=istio.ingress.networking.knative.dev
+	# See docs/operator/multi-cloud-portability.md.
+	./hack/set-ingress-class.sh dist/install.yaml $(INGRESS_CLASS)
 
 ##@ Deployment
 

@@ -29,7 +29,7 @@ Built on the **official Next.js Adapter API** with `output: 'standalone'` — no
 
 | Feature | Lambda/Vercel | Knative |
 |---------|--------------|---------|
-| **Portability** | Vendor-locked | Any Kubernetes cluster |
+| **Portability** | Vendor-locked | Any Kubernetes cluster (portable by design; GKE/kind-verified, other clouds tracked in [#46](https://github.com/getknext-dev/knext/issues/46)) |
 | **Scale-to-Zero** | ✅ | ✅ |
 | **Autoscaling** | Managed | Configurable (KPA/HPA) |
 | **Cold Starts** | ~200-500ms | **< 1s** with V8 bytecode cache (`NODE_COMPILE_CACHE`) + Knative caching |
@@ -96,7 +96,7 @@ flowchart LR
 - ✅ **V8 Bytecode Caching** – `NODE_COMPILE_CACHE` on a shared volume for sub-second cold starts (Vercel-Fluid-style)
 - ✅ **Fluid Compute** – Scale-to-zero, high concurrency, auto-scaling
 - ✅ **Distributed Caching** – Redis-backed caching with automatic tag invalidation
-- ✅ **Multi-Cloud** – Deploy to GKE, EKS, AKS, or any Kubernetes
+- 🟡 **Portable by design** – GKE/kind-verified; portable to EKS/AKS/OKE or any Kubernetes by design (2nd-cloud verification tracked in [#46](https://github.com/getknext-dev/knext/issues/46)). See [Multi-Cloud Portability](docs/operator/multi-cloud-portability.md)
 - ✅ **Cache Monitoring** – Built-in cache event dashboard
 - ✅ **Single-Command Deploy** – Automated build, push, and deploy
 - ✅ **Monorepo Ready** – Turborepo for efficient builds
@@ -440,6 +440,15 @@ events.onmessage = (e) => {
 ---
 
 ## Multi-Cloud Deployment
+
+> **Verification status:** knext is **portable by design**, but end-to-end deploys are
+> currently **verified on GKE and kind only**. The EKS/AKS/OKE examples below are
+> design-correct configurations, not yet validated on a live 2nd cloud — that
+> verification is tracked in [#46](https://github.com/getknext-dev/knext/issues/46).
+> Before deploying to a non-GKE cluster, read
+> **[Multi-Cloud Portability](docs/operator/multi-cloud-portability.md)** for the
+> per-cloud prerequisites (ingress-class, StorageClass, LoadBalancer/gateway IP, and
+> build-host CLI tools).
 
 ### Google Cloud (GKE)
 
