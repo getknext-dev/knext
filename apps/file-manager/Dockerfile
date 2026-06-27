@@ -1,5 +1,16 @@
 # Stage 1: Build Next.js app with standalone output
-FROM node:22-alpine AS builder
+#
+# Base image is DIGEST-PINNED (not the floating node:22-alpine tag) so the CVE
+# surface of the image we sign cannot change under us via an unreviewed upstream
+# push. Keep the human-readable tag in the trailing comment; refresh both the
+# digest and the comment together when bumping. Resolve a new digest with:
+#   docker buildx imagetools inspect node:22-alpine
+# Enforced by scripts/check-base-images-pinned.sh (CI: base-image-pin-guard).
+FROM node:22-alpine@sha256:16e22a550f3863206a3f701448c45f7912c6896a62de43add43bb9c86130c3e2 AS builder  # node:22-alpine
+# Reproducible-build input (best effort): the CI supply-chain workflow passes the
+# commit time here. Declared so build-push-action doesn't warn on an unknown ARG.
+# NOT yet a full reproducibility guarantee — see docs/security/threat-model.md.
+ARG SOURCE_DATE_EPOCH
 ENV PNPM_HOME="/pnpm"
 ENV PATH="$PNPM_HOME:$PATH"
 RUN npm install -g pnpm
@@ -44,8 +55,9 @@ RUN mkdir -p /sharp-runtime \
     && npm install --no-audit --no-fund --omit=dev sharp@^0.35.2 \
     && node -e "const s=require('/sharp-runtime/node_modules/sharp');console.log('builder sharp ok: libvips '+s.versions.vips)"
 
-# Stage 2: Lean production image using Node.js standalone output
-FROM node:22-alpine AS runner
+# Stage 2: Lean production image using Node.js standalone output.
+# Digest-pinned (same digest as the builder stage); see the builder FROM above.
+FROM node:22-alpine@sha256:16e22a550f3863206a3f701448c45f7912c6896a62de43add43bb9c86130c3e2 AS runner  # node:22-alpine
 WORKDIR /app
 ENV NODE_ENV=production
 ENV PORT=3000

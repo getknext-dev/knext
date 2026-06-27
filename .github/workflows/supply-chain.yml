@@ -32,6 +32,14 @@ jobs:
 
       - uses: docker/setup-buildx-action@v3
 
+      # Reproducible-build inputs: pin SOURCE_DATE_EPOCH to the commit time so
+      # buildkit can rewrite layer timestamps deterministically (below). This is a
+      # best-effort step toward reproducibility — NOT a full guarantee (npm/pnpm
+      # install ordering and native sharp prebuilts can still vary). The honest
+      # status is documented in docs/security/threat-model.md (supply chain).
+      - name: Compute SOURCE_DATE_EPOCH (commit time)
+        run: echo "SOURCE_DATE_EPOCH=$(git log -1 --pretty=%ct)" >> "$GITHUB_ENV"
+
       - name: Log in to GHCR
         if: github.ref == 'refs/heads/main'
         uses: docker/login-action@v3
@@ -55,6 +63,13 @@ jobs:
           # provenance emits a manifest list the `load` (docker) exporter can't handle,
           # so only attach it on the push/main path (registry exporter).
           provenance: ${{ github.ref == 'refs/heads/main' }}
+          # Reproducible-build best effort: pass SOURCE_DATE_EPOCH (commit time) so a
+          # future timestamp-rewriting build can be deterministic. We deliberately do
+          # NOT yet claim fully reproducible builds — pnpm/npm install ordering and
+          # native sharp prebuilts still vary. Honest status + the path to enabling
+          # buildkit `rewrite-timestamp` is in docs/security/threat-model.md.
+          build-args: |
+            SOURCE_DATE_EPOCH=${{ env.SOURCE_DATE_EPOCH }}
 
       - name: Generate SBOM (syft, SPDX-JSON)
         uses: anchore/sbom-action@v0
@@ -94,3 +109,15 @@ jobs:
           DIGEST="${{ steps.build.outputs.digest }}"
           cosign sign --yes "${IMAGE}@${DIGEST}"
           cosign attest --yes --predicate sbom.spdx.json --type spdxjson "${IMAGE}@${DIGEST}"
+
+      # Verify the signature we just produced, parameterized by the pushed digest.
+      # Mirrors the operator's verify step (operator-supply-chain.yml): it proves the
+      # keyless identity/issuer round-trips before we advertise the app image as
+      # signed, and exercises the same hack/cosign-verify.sh a client would run.
+      # The identity-regexp/issuer default to this repo's signer.
+      - name: Verify app image signature (cosign verify, main only)
+        if: github.ref == 'refs/heads/main'
+        env:
+          IDENTITY_REGEXP: https://github.com/${{ github.repository }}/.*
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: bash apps/file-manager/hack/cosign-verify.sh "${IMAGE}@${DIGEST}"

@@ -209,6 +209,11 @@ jobs:
       # builder pinned to a patched Go point release on every PR.
       - name: Check operator builder image is pinned to a patched Go release
         run: bash packages/kn-next-operator/hack/check-trivy-baseimage.bats.sh
+      # Supply-chain hardening: EVERY Dockerfile FROM (app + operator) must be
+      # pinned by @sha256: digest, not a floating tag — the base images determine
+      # the CVE surface of the images we sign. Analogous to hadolint DL3006/DL3007.
+      - name: Check all Dockerfile base images are digest-pinned
+        run: bash scripts/check-base-images-pinned.sh --quiet
 
   operator-codegen-check:
     name: Operator codegen is up-to-date (make generate + make manifests)
