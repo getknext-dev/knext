@@ -85,16 +85,26 @@ jobs:
           ref: ${{ env.NEXTJS_REF }}
           path: next.js
 
+      # IMPORTANT (the #137 follow-up): next.js v16.0.3 declares its OWN required
+      # pnpm (`packageManager: pnpm@9.6.0`), which CLASHES with the knext pin
+      # (10.4.1) set above via pnpm/action-setup. A single global pnpm cannot
+      # satisfy both — running the next.js install under 10.4.1 fails the engine
+      # check ("Unsupported engine ... wanted pnpm 9.6.0") and SKIPs every shard.
+      # Fix: drive the next.js steps through corepack, which auto-selects pnpm
+      # per-project from next.js's `packageManager` field. We call `corepack
+      # pnpm` explicitly (not bare `pnpm`) so it resolves next.js's 9.6.0 rather
+      # than the action-setup 10.4.1 shim on PATH. The knext build steps above
+      # stay on 10.4.1; never hardcode 9.6.0 here — let corepack honor upstream.
       - name: Setup Next.js build deps + Playwright
         working-directory: next.js
         run: |
           corepack enable
-          pnpm install
-          pnpm playwright install chromium --with-deps
+          corepack pnpm install
+          corepack pnpm playwright install chromium --with-deps
 
       - name: Build Next.js
         working-directory: next.js
-        run: pnpm build
+        run: corepack pnpm build
 
       # Cache the prepared knext + next.js trees for the shard jobs.
       - name: Upload workspace
