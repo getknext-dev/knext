@@ -1,5 +1,15 @@
-# Build the manager binary
-FROM golang:1.25 AS builder
+# Build the manager binary.
+#
+# Pin the builder to a specific patched Go point release (NOT a floating
+# `golang:1.25`). The operator runtime image is distroless/static + this
+# CGO-disabled binary, so the only fixable HIGH/CRITICAL surface Trivy scans
+# (`--ignore-unfixed`) is the Go stdlib version baked into the binary's
+# build-info. A floating minor tag can resolve to an unpatched 1.25.x and leak
+# a fixable Go-stdlib CVE, failing operator-supply-chain.yml's
+# `trivy image --severity HIGH,CRITICAL --exit-code 1` gate on main and blocking
+# the whole bundle publish (refs #117). 1.25.11 is the latest patched 1.25 line.
+# Bump this in lockstep with hack/check-trivy-baseimage.bats.sh (MIN_PATCH).
+FROM golang:1.25.11 AS builder
 ARG TARGETOS
 ARG TARGETARCH
 

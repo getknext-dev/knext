@@ -154,6 +154,14 @@ jobs:
         uses: actions/checkout@v4
       - name: Check operator manifests are digest-pinned
         run: bash packages/kn-next-operator/hack/check-no-latest.sh --quiet
+      # Base-image-pin guard (refs #117): the operator runtime is distroless/static
+      # + a CGO-disabled Go binary, so the only fixable Trivy HIGH/CRITICAL surface
+      # is the Go stdlib version baked into the binary. A floating `golang:1.25`
+      # builder can leak an unpatched stdlib CVE and fail the supply-chain Trivy
+      # gate on main (blocking the bundle publish). This offline guard keeps the
+      # builder pinned to a patched Go point release on every PR.
+      - name: Check operator builder image is pinned to a patched Go release
+        run: bash packages/kn-next-operator/hack/check-trivy-baseimage.bats.sh
 
   operator-codegen-check:
     name: Operator codegen is up-to-date (make generate + make manifests)
