@@ -73,6 +73,37 @@ function pnpmSetupVersions(): Array<string | null> {
   return versions;
 }
 
+/** The raw workflow text. */
+function workflowText(): string {
+  return readFileSync(WORKFLOW_PATH, 'utf8');
+}
+
+/**
+ * Returns the body (the `run:` block and surrounding lines) of every workflow
+ * step whose `working-directory:` is `next.js`. Used to assert that next.js's
+ * own pnpm — not the globally action-setup-pinned knext pnpm — drives the
+ * next.js install/build/playwright steps (engine clash: next.js v16.0.3 wants
+ * pnpm 9.6.0, knext wants 10.4.1; a single global pnpm cannot serve both).
+ *
+ * We split the YAML into step blocks at each `- name:` boundary and keep the
+ * blocks that declare `working-directory: next.js`.
+ */
+function nextJsStepBlocks(): string[] {
+  const lines = workflowText().split('\n');
+  const blocks: string[] = [];
+  let current: string[] = [];
+  const flush = () => {
+    if (current.length) blocks.push(current.join('\n'));
+    current = [];
+  };
+  for (const line of lines) {
+    if (/^\s*-\s+name:/.test(line)) flush();
+    current.push(line);
+  }
+  flush();
+  return blocks.filter((b) => /working-directory:\s*next\.js\b/.test(b));
+}
+
 describe('compat-suite workflow pnpm pin (test-e2e-deploy.yml)', () => {
   it('has at least one pnpm/action-setup step (sanity)', () => {
     expect(pnpmSetupVersions().length).toBeGreaterThan(0);
@@ -93,5 +124,56 @@ describe('compat-suite workflow pnpm pin (test-e2e-deploy.yml)', () => {
         `pnpm version in step #${idx + 1} must match packageManager pnpm@${expected}`,
       ).toBe(expected);
     });
+  });
+
+  // ── Engine-clash regression guard (the #137 follow-up) ──────────────────────
+  // build-next pins action-setup pnpm to 10.4.1 for the knext @knext/lib/core
+  // builds, but next.js v16.0.3 declares `packageManager: pnpm@9.6.0`. A single
+  // global pnpm cannot satisfy both: running `pnpm install` inside next.js under
+  // 10.4.1 fails the engine check and every deploy-tests shard SKIPs. The fix is
+  // to drive the next.js steps through corepack (per-project pnpm) rather than
+  // the globally-pinned action-setup pnpm.
+
+  it('enables corepack so next.js can use its own packageManager pnpm', () => {
+    expect(
+      /corepack\s+enable/.test(workflowText()),
+      'workflow must `corepack enable` so next.js per-project pnpm is honored',
+    ).toBe(true);
+  });
+
+  it('runs next.js install/build via corepack, not the bare (knext-pinned) pnpm', () => {
+    const blocks = nextJsStepBlocks();
+    expect(blocks.length, 'expected at least one next.js working-directory step').toBeGreaterThan(
+      0,
+    );
+
+    for (const block of blocks) {
+      // Collect the shell command lines inside this step's `run:` block.
+      const cmdLines = block
+        .split('\n')
+        .map((l) => l.trim())
+        .filter((l) => /(^|\s)pnpm(\s|$)/.test(l) && !l.startsWith('#'));
+
+      for (const cmd of cmdLines) {
+        // Any pnpm invocation in a next.js step must go through corepack so it
+        // resolves next.js's pinned pnpm@9.6.0, never the knext 10.4.1 shim.
+        expect(
+          /corepack\s+pnpm(\s|$)/.test(cmd) || /corepack\s+enable/.test(cmd),
+          `next.js step must invoke pnpm via corepack (got: "${cmd}")`,
+        ).toBe(true);
+      }
+    }
+  });
+
+  it('does not reuse the knext pnpm pin for next.js by hardcoding 9.6.0', () => {
+    // Honor next.js's pinned pnpm via corepack rather than hardcoding a second
+    // version that would silently drift from upstream's packageManager field.
+    const setups = pnpmSetupVersions();
+    const expected = pinnedPnpmVersion();
+    // Every action-setup step is the knext one; none should pin next.js's 9.6.0.
+    expect(
+      setups.every((v) => v === expected),
+      'no pnpm/action-setup step should pin a second (next.js) pnpm version',
+    ).toBe(true);
   });
 });
