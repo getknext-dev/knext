@@ -61,6 +61,12 @@ const (
 	ConditionRevalidationDeferred = "RevalidationDeferred"
 )
 
+// ksvcNotReadyRequeueAfter bounds how often the reconciler re-checks a child
+// Knative Service that has not yet reported Ready. The Owns(ksvc) watch handles
+// most transitions, but a bounded periodic requeue guarantees NextApp status
+// converges toward the ksvc's real health even if a status event is missed.
+const ksvcNotReadyRequeueAfter = 30 * time.Second
+
 // Event reason constants — concise, stable strings surfaced via `kubectl describe nextapp`.
 const (
 	// ReasonInvalidImage marks a NextApp rejected for failing digest-pinning (e.g. :latest).
@@ -606,14 +612,22 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 	}
 	nextApp.Status.CurrentTraffic = mapTrafficStatus(ksvc.Status.Traffic)
 
-	// Reconcile succeeded — set Ready=True, Reconciling=False, Degraded=False.
-	apimeta.SetStatusCondition(&nextApp.Status.Conditions, metav1.Condition{
-		Type:               ConditionReady,
-		Status:             metav1.ConditionTrue,
-		ObservedGeneration: nextApp.Generation,
-		Reason:             "ReconcileSuccess",
-		Message:            "NextApp reconciled successfully",
-	})
+	// 6a. Honest Ready: gate NextApp Ready on the CHILD Knative Service's OWN
+	// readiness — not on the fact that we successfully wrote the ksvc. Writing the
+	// ksvc spec says nothing about whether its pods actually came up: a NextApp
+	// whose image is CrashLoopBackOff / ImagePullBackOff would otherwise report a
+	// false-green Ready=True, misleading operators and rollback / traffic-split
+	// automation during the exact incident they need to detect.
+	//
+	// We read the ksvc's "Ready" condition (knative's living condition set rolls
+	// Configuration + Route readiness into it) and only mark NextApp Ready=True
+	// when that is True. Otherwise Ready=False / Degraded=True with the ksvc's own
+	// reason+message (the pull/crash detail), and we schedule a bounded RequeueAfter
+	// so status converges toward real health instead of waiting solely on the
+	// Owns(ksvc) watch (which may be quiet between status transitions).
+	ksvcReadyCond := ksvc.Status.GetCondition(servingv1.ServiceConditionReady)
+	ksvcReady := ksvcReadyCond.IsTrue()
+
 	apimeta.SetStatusCondition(&nextApp.Status.Conditions, metav1.Condition{
 		Type:               ConditionReconciling,
 		Status:             metav1.ConditionFalse,
@@ -621,13 +635,53 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 		Reason:             "ReconcileSuccess",
 		Message:            "Reconciliation complete",
 	})
-	apimeta.SetStatusCondition(&nextApp.Status.Conditions, metav1.Condition{
-		Type:               ConditionDegraded,
-		Status:             metav1.ConditionFalse,
-		ObservedGeneration: nextApp.Generation,
-		Reason:             "ReconcileSuccess",
-		Message:            "No errors detected",
-	})
+
+	if ksvcReady {
+		apimeta.SetStatusCondition(&nextApp.Status.Conditions, metav1.Condition{
+			Type:               ConditionReady,
+			Status:             metav1.ConditionTrue,
+			ObservedGeneration: nextApp.Generation,
+			Reason:             "ReconcileSuccess",
+			Message:            "NextApp reconciled successfully; Knative Service is Ready",
+		})
+		apimeta.SetStatusCondition(&nextApp.Status.Conditions, metav1.Condition{
+			Type:               ConditionDegraded,
+			Status:             metav1.ConditionFalse,
+			ObservedGeneration: nextApp.Generation,
+			Reason:             "ReconcileSuccess",
+			Message:            "No errors detected",
+		})
+	} else {
+		// Surface the ksvc's own reason/message so operators see the pull/crash
+		// detail (e.g. ImagePullBackOff / RevisionFailed) directly on the NextApp.
+		ksvcReason := "Pending"
+		ksvcMessage := "Knative Service has not reported Ready yet"
+		if ksvcReadyCond != nil {
+			if ksvcReadyCond.Reason != "" {
+				ksvcReason = ksvcReadyCond.Reason
+			}
+			if ksvcReadyCond.Message != "" {
+				ksvcMessage = ksvcReadyCond.Message
+			}
+		}
+		apimeta.SetStatusCondition(&nextApp.Status.Conditions, metav1.Condition{
+			Type:               ConditionReady,
+			Status:             metav1.ConditionFalse,
+			ObservedGeneration: nextApp.Generation,
+			Reason:             "KnativeServiceNotReady",
+			Message: fmt.Sprintf("Knative Service is not Ready (%s): %s",
+				ksvcReason, ksvcMessage),
+		})
+		apimeta.SetStatusCondition(&nextApp.Status.Conditions, metav1.Condition{
+			Type:               ConditionDegraded,
+			Status:             metav1.ConditionTrue,
+			ObservedGeneration: nextApp.Generation,
+			Reason:             ksvcReason,
+			Message:            ksvcMessage,
+		})
+		// Bounded requeue so status converges toward the ksvc's real health.
+		result.RequeueAfter = ksvcNotReadyRequeueAfter
+	}
 
 	// Non-fatal RevalidationDeferred condition: surface (but don't fail on) a kafka
 	// revalidation request whose consumer hasn't been provisioned yet (issue #95).
@@ -664,7 +718,9 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 	r.emitEvent(&nextApp, corev1.EventTypeNormal, ReasonReconciled,
 		fmt.Sprintf("NextApp reconciled successfully (image %s)", nextApp.Spec.Image))
 	logger.Info("Successfully reconciled NextApp", "name", nextApp.Name, "url", nextApp.Status.URL)
-	return ctrl.Result{}, nil
+	// Preserve any bounded RequeueAfter set while the child Knative Service is
+	// not-yet-Ready (6a) so status converges toward real health.
+	return result, nil
 }
 
 // buildTrafficTargets renders the Knative Service spec.traffic block from the
