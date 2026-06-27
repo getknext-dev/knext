@@ -39,16 +39,29 @@ jobs:
   build-next:
     name: Build vercel/next.js (pinned)
     runs-on: ubuntu-latest
-    # #147 step 1 — a COLD next.js v16.0.3 build (install + `turbo run build`,
-    # plus Playwright/chromium) was being cancelled at exactly +60min on a
-    # standard runner, so the deploy-tests shards never ran. The reference
-    # vercel/next.js deploy harness (build_reusable.yml) gives its build+run job
-    # `timeout_minutes: 180`; we raise ours to a realistic cold-build ceiling.
-    # Note we do NOT compile @next/swc from Rust source: `pnpm build` is just
-    # `turbo run build` (JS, `dependsOn: ["^build"]`, no build-native), and the
-    # native binary comes from the prebuilt npm postinstall during install —
-    # the same path the reference takes for deploy tests (skipNativeBuild: yes).
-    timeout-minutes: 120
+    # #147 step 1 (round 2) — round 1 raised this 60→120 and scoped nothing, so
+    # the COLD full-monorepo build (the unscoped `turbo run build`
+    # over docs/examples/eslint-plugin-next/create-next-app/turbopack JS bench/…)
+    # hit the 120-min ceiling EXACTLY (run 28285404942: 09:37:29Z→11:37:46Z) and
+    # was cancelled, so the deploy-tests shards never ran. The reference harness
+    # affords 180 min AND leans on a Turbo REMOTE cache (vercel-only) — we have
+    # neither. Compounding: actions/cache only SAVES on job SUCCESS, so a build
+    # that never completes never populates the cache → every run is a cold miss.
+    #
+    # Fix: build only what the deploy tests need — they invoke `next build`
+    # against fixture apps (scripts/e2e-deploy.sh), which requires the `next`
+    # package and its workspace dependency closure, NOT the whole monorepo. We
+    # scope the build with `turbo run build --filter=next...` (trailing `...`
+    # pulls in next's workspace deps: @next/env, @next/font, the polyfills,
+    # @next/react-refresh-utils). Plus we raise the timeout to the reference's
+    # 180-min ceiling as headroom for the first cold build to COMPLETE and
+    # finally populate the #148 build cache.
+    #
+    # Note we do NOT compile @next/swc from Rust source: turbo's `build` task is
+    # JS (`dependsOn: ["^build"]`, no build-native), and the native binary comes
+    # from the prebuilt npm postinstall during install — the same path the
+    # reference takes for deploy tests (skipNativeBuild: yes).
+    timeout-minutes: 180
     steps:
       - name: Checkout knext
         uses: actions/checkout@v4
@@ -130,9 +143,14 @@ jobs:
             nextjs-pnpm-store-${{ env.NEXTJS_REF }}-
 
       # Cache the actual next.js BUILD OUTPUT (the `turbo run build` artifacts in
-      # each package's dist + the turbo local cache). On a hit, `corepack pnpm
-      # build` is a near-instant turbo cache replay instead of a cold compile.
-      # Keyed on NEXTJS_REF so the pinned-ref build is reused until the ref bumps.
+      # each package's dist + the turbo local cache). On a hit, the scoped
+      # `turbo run build --filter=next...` is a near-instant turbo cache replay
+      # instead of a cold compile. The `packages/**/dist` + `packages/next/dist`
+      # globs still cover the now-narrower scope (next + its workspace deps all
+      # emit under packages/*/dist). Keyed on NEXTJS_REF so the pinned-ref build
+      # is reused until the ref bumps. NOTE: actions/cache only SAVES on job
+      # SUCCESS — the first COMPLETING build (now within the 180-min ceiling) is
+      # what finally populates this so subsequent runs are fast.
       - name: Cache next.js build output
         uses: actions/cache@v4
         with:
@@ -151,9 +169,17 @@ jobs:
           corepack pnpm install
           corepack pnpm playwright install chromium --with-deps
 
-      - name: Build Next.js
+      # #147 step 1 (round 2) — TARGETED build. The deploy tests only need the
+      # `next` package + its workspace dependency closure (they run `next build`
+      # against fixture apps). `--filter=next...` (trailing `...` = include
+      # next's workspace deps) skips docs, examples, eslint-plugin-next,
+      # create-next-app and the turbopack JS bench packages — the bulk of the
+      # full-monorepo cold build that hit the 120-min timeout. The native
+      # @next/swc binary still arrives via the prebuilt npm postinstall during
+      # install above (we never compile it from Rust here).
+      - name: Build Next.js (scoped to `next` + workspace deps)
         working-directory: next.js
-        run: corepack pnpm build
+        run: corepack pnpm turbo run build --filter=next...
 
       # Cache the prepared knext + next.js trees for the shard jobs.
       - name: Upload workspace
