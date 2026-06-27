@@ -1,0 +1,9 @@
+# knext day-2 alerting. Apply alongside the Prometheus ServiceMonitor
+# (config/prometheus) on a cluster running the Prometheus Operator
+# (monitoring.coreos.com CRDs). Requires kube-state-metrics with the
+# CustomResourceStateMetrics config from docs/observability/slos.md to surface
+# knext_nextapp_condition for the Degraded alert.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - prometheusrule.yaml

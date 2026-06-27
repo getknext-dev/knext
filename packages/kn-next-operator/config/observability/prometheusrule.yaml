@@ -1,0 +1,133 @@
+# knext day-2 alerting rules (observability P0).
+#
+# Wires the SLOs in docs/observability/slos.md to the series this codebase
+# actually exports:
+#   - operator:  knext_nextapp_reconcile_{total,errors_total,duration_seconds}
+#                (packages/kn-next-operator/internal/controller/metrics.go)
+#   - app:       kn_next_http_requests_total, kn_next_http_request_duration_seconds,
+#                kn_next_startup_duration_seconds, kn_next_bytecode_cache_warm_start
+#                (apps/file-manager/src/app/api/_metrics/registry.ts)
+#   - condition: knext_nextapp_condition — a kube-state-metrics CRD metric
+#                exposing the NextApp .status.conditions (see slos.md for the KSM
+#                CustomResourceStateMetrics config). The Degraded alert below
+#                accepts either knext_nextapp_condition or the generic
+#                kube_customresource fallback name.
+#
+# Validate locally with:  promtool check rules prometheusrule.yaml
+# (extract .spec.groups first, or use kube-prometheus's rule unit harness).
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: knext-slo-alerts
+  labels:
+    app.kubernetes.io/name: kn-next-operator
+    app.kubernetes.io/component: observability
+    # Picked up by the kube-prometheus-stack ruleSelector by default.
+    release: prometheus
+spec:
+  groups:
+    - name: knext.operator
+      rules:
+        # SLO: reconcile-error rate. Any reconcile error is a control-plane
+        # signal — the operator is the single source of truth (ADR-0001), so a
+        # failing reconcile means cluster state may diverge from the NextApp CR.
+        - alert: KnextOperatorReconcileErrors
+          expr: increase(knext_nextapp_reconcile_errors_total[10m]) > 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "knext operator is failing NextApp reconciles"
+            description: >-
+              The operator recorded {{ $value }} reconcile error(s) in the last
+              10m. Desired cluster state may not be applied.
+            runbook_url: "https://github.com/getknext-dev/knext/blob/main/docs/runbooks/incident.md#scenario-4-rollback--bad-revision"
+
+        # SLO: reconcile latency. A slow control loop delays scale-up and
+        # rollbacks. p95 over 30s sustained is degraded.
+        - alert: KnextOperatorReconcileSlow
+          expr: >-
+            histogram_quantile(0.95,
+              sum(rate(knext_nextapp_reconcile_duration_seconds_bucket[10m])) by (le)
+            ) > 30
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "knext reconcile p95 latency is high"
+            description: "Reconcile p95 is {{ $value | humanizeDuration }} (>30s)."
+            runbook_url: "https://github.com/getknext-dev/knext/blob/main/docs/runbooks/incident.md#scenario-1-scale-to-zero-stuck"
+
+    - name: knext.nextapp
+      rules:
+        # NextApp Degraded=True — the reconciler now populates status.conditions
+        # (Ready / Degraded). kube-state-metrics exposes them as
+        # knext_nextapp_condition{type="Degraded",status="true"}.
+        - alert: KnextNextAppDegraded
+          expr: >-
+            max by (namespace, name) (
+              knext_nextapp_condition{type="Degraded",status="true"}
+            ) == 1
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "NextApp {{ $labels.namespace }}/{{ $labels.name }} is Degraded"
+            description: >-
+              The NextApp reports Degraded=True. The operator could not bring the
+              Knative Service to the desired revision/traffic state.
+            runbook_url: "https://github.com/getknext-dev/knext/blob/main/docs/runbooks/incident.md#scenario-4-rollback--bad-revision"
+
+    - name: knext.app
+      rules:
+        # SLO: cold-start p95. kn_next_startup_duration_seconds is observed once
+        # per process start with cache_status=cold|warm. A cold-start p95 over
+        # 3s breaches the scale-to-zero UX target (see slos.md).
+        - alert: KnextColdStartLatencyHigh
+          expr: >-
+            histogram_quantile(0.95,
+              sum(rate(kn_next_startup_duration_seconds_bucket{cache_status="cold"}[15m])) by (le, app)
+            ) > 3
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "knext cold-start p95 latency is high for {{ $labels.app }}"
+            description: >-
+              Cold-start p95 is {{ $value | humanizeDuration }} (>3s SLO). Cold
+              starts dominate when the app scales from zero; check bytecode cache
+              warmth (kn_next_bytecode_cache_warm_start).
+            runbook_url: "https://github.com/getknext-dev/knext/blob/main/docs/runbooks/incident.md#scenario-2-cold-start-latency-spike"
+
+        # Availability SLI: server-side 5xx rate from the RED metrics.
+        - alert: KnextHighErrorRate
+          expr: >-
+            sum(rate(kn_next_http_requests_total{status_class="5xx"}[5m])) by (app)
+              /
+            sum(rate(kn_next_http_requests_total[5m])) by (app)
+              > 0.05
+          for: 10m
+          labels:
+            severity: critical
+          annotations:
+            summary: "knext app {{ $labels.app }} 5xx ratio above 5%"
+            description: "Server-side error ratio is {{ $value | humanizePercentage }} over 5m."
+            runbook_url: "https://github.com/getknext-dev/knext/blob/main/docs/runbooks/incident.md#scenario-3-rediscache-down"
+
+        # Cache/Redis unreachable. The /api/health route runs deep readiness
+        # checks against Postgres/Redis and returns 503 when a dependency is
+        # down; that route is wrapped in withRedMetrics, so a Redis outage shows
+        # as a sustained 5xx rate on route="/api/health".
+        - alert: KnextCacheUnreachable
+          expr: >-
+            sum(rate(kn_next_http_requests_total{route="/api/health",status_class="5xx"}[5m])) by (app)
+              > 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "knext app {{ $labels.app }} deep health check failing (Redis/cache?)"
+            description: >-
+              The /api/health deep readiness check is returning 5xx, which means
+              a backing dependency (Redis ISR cache or Postgres) is unreachable.
+            runbook_url: "https://github.com/getknext-dev/knext/blob/main/docs/runbooks/incident.md#scenario-3-rediscache-down"

@@ -59,6 +59,108 @@ export const cacheWriteCount = new client.Counter({
   registers: [register],
 });
 
+// ----- Server-side RED metrics (request Rate / Error / Duration) -----
+//
+// These are the server-observed counterpart to the client RUM histograms.
+// Without them the availability + latency SLIs in docs/observability/slos.md
+// cannot be computed from the scrape (RUM is client-sampled and absent at
+// scale-to-zero / cold start). Cardinality is bounded on purpose:
+//   - `route` is a server-mapped template (e.g. "/dashboard"), never a raw URL
+//   - `status_class` is the HTTP status class ("2xx".."5xx"), never the raw code
+//   - `method` is the HTTP verb
+// No user/session/query labels.
+
+const RED_LABELS = ['method', 'route', 'status_class'] as const;
+
+export const httpRequestsTotal = new client.Counter({
+  name: 'kn_next_http_requests_total',
+  help: 'Total HTTP requests handled by the app, by method/route/status class.',
+  labelNames: RED_LABELS,
+  registers: [register],
+});
+
+export const httpRequestDuration = new client.Histogram({
+  name: 'kn_next_http_request_duration_seconds',
+  help: 'HTTP request handling duration in seconds, by method/route/status class.',
+  labelNames: RED_LABELS,
+  // Web-request latency scale: sub-ms-ish floor up to slow/cold paths.
+  buckets: [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10],
+  registers: [register],
+});
+
+export interface HttpRequestObservation {
+  method: string;
+  route: string;
+  status: number;
+  durationSeconds: number;
+}
+
+/**
+ * Buckets an HTTP status code into its class ("1xx".."5xx"). Anything outside
+ * 100-599 is reported as "other" so a bad value can never create unbounded
+ * series. This is the ONLY status label we emit.
+ */
+export function statusClass(status: number): string {
+  if (status >= 100 && status < 600) {
+    return `${Math.floor(status / 100)}xx`;
+  }
+  return 'other';
+}
+
+/**
+ * Records one server-side request: increments the request counter and observes
+ * the duration histogram against the same bounded label set. This is a
+ * FIXED-SCHEMA aggregator — it can only `inc()`/`observe()` pre-declared
+ * series, never create new ones, and has no side effects on cache/storage.
+ */
+export function observeHttpRequest(obs: HttpRequestObservation): void {
+  const labels = {
+    method: obs.method,
+    route: obs.route,
+    status_class: statusClass(obs.status),
+  };
+  httpRequestsTotal.labels(labels).inc();
+  httpRequestDuration.labels(labels).observe(obs.durationSeconds);
+}
+
+/**
+ * Wraps a Next.js Route Handler so that every invocation records a server-side
+ * RED sample (count + duration + status class) for the given `route` template.
+ * Behavior is fully preserved: the wrapper returns the handler's own Response
+ * (or rethrows), only adding instrumentation. Errors are recorded as 5xx and
+ * re-thrown so the framework's error handling is unchanged.
+ */
+export function withRedMetrics<A extends unknown[]>(
+  route: string,
+  handler: (...args: A) => Response | Promise<Response>,
+): (...args: A) => Promise<Response> {
+  return async (...args: A): Promise<Response> => {
+    const start = process.hrtime.bigint();
+    const method =
+      args[0] && typeof args[0] === 'object' && 'method' in (args[0] as object)
+        ? String((args[0] as { method?: string }).method ?? 'GET')
+        : 'GET';
+    try {
+      const res = await handler(...args);
+      observeHttpRequest({
+        method,
+        route,
+        status: res.status,
+        durationSeconds: Number(process.hrtime.bigint() - start) / 1e9,
+      });
+      return res;
+    } catch (err) {
+      observeHttpRequest({
+        method,
+        route,
+        status: 500,
+        durationSeconds: Number(process.hrtime.bigint() - start) / 1e9,
+      });
+      throw err;
+    }
+  };
+}
+
 // ----- Web Vitals (RUM) histograms (#94) -----
 //
 // One histogram per Core Web Vital — buckets differ by unit:
