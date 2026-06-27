@@ -65,12 +65,14 @@ export const cacheWriteCount = new client.Counter({
 // Without them the availability + latency SLIs in docs/observability/slos.md
 // cannot be computed from the scrape (RUM is client-sampled and absent at
 // scale-to-zero / cold start). Cardinality is bounded on purpose:
+//   - `app` is the server env (KN_APP_NAME), so a Prometheus scraping >1 knext
+//     app can aggregate per-app — the SLO alerts group `... by (app)`.
 //   - `route` is a server-mapped template (e.g. "/dashboard"), never a raw URL
 //   - `status_class` is the HTTP status class ("2xx".."5xx"), never the raw code
 //   - `method` is the HTTP verb
 // No user/session/query labels.
 
-const RED_LABELS = ['method', 'route', 'status_class'] as const;
+const RED_LABELS = ['app', 'method', 'route', 'status_class'] as const;
 
 export const httpRequestsTotal = new client.Counter({
   name: 'kn_next_http_requests_total',
@@ -115,6 +117,7 @@ export function statusClass(status: number): string {
  */
 export function observeHttpRequest(obs: HttpRequestObservation): void {
   const labels = {
+    app: appName,
     method: obs.method,
     route: obs.route,
     status_class: statusClass(obs.status),

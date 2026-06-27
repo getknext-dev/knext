@@ -10,7 +10,7 @@ the 3am response is in [`../runbooks/incident.md`](../runbooks/incident.md).
 
 | Series | Exported by |
 | --- | --- |
-| `kn_next_http_requests_total{method,route,status_class}` | app — `apps/file-manager/src/app/api/_metrics/registry.ts` (`observeHttpRequest` / `withRedMetrics`) |
+| `kn_next_http_requests_total{app,method,route,status_class}` | app — `apps/file-manager/src/app/api/_metrics/registry.ts` (`observeHttpRequest` / `withRedMetrics`) |
 | `kn_next_http_request_duration_seconds_bucket{…}` | app — same registry (RED duration histogram) |
 | `kn_next_startup_duration_seconds_bucket{cache_status,app}` | app — observed once per process start |
 | `kn_next_bytecode_cache_warm_start{app}` | app — 1 if the V8 bytecode cache was warm at boot |

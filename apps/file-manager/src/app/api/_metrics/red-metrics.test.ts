@@ -34,6 +34,11 @@ describe('server-side RED metrics', () => {
     expect(out).toMatch(/kn_next_http_requests_total\{[^}]*status_class="2xx"[^}]*\}/);
     expect(out).toMatch(/method="GET"/);
     expect(out).toMatch(/route="\/dashboard"/);
+    // The `app` label (KN_APP_NAME) MUST be present so the SLO alerts that
+    // aggregate `... by (app)` over this series get a real per-app group
+    // instead of collapsing every knext app into one empty-app group.
+    expect(out).toMatch(/kn_next_http_requests_total\{[^}]*app="[^"]+"[^}]*\}/);
+    expect(out).toMatch(/kn_next_http_request_duration_seconds_count\{[^}]*app="[^"]+"[^}]*\}/);
     // The duration histogram recorded a sample (count series present).
     expect(out).toContain('kn_next_http_request_duration_seconds_count');
   });
