@@ -718,15 +718,38 @@ jobs:
           echo "A33DBG_GITLSFILES=[${A33_TRACKED}]"
           if [ -z "${A33_TRACKED}" ]; then echo "A33DBG_TRACKED=UNTRACKED_LIKELY_BUG"; else echo "A33DBG_TRACKED=TRACKED"; fi
 
-          echo "===== A33DBG_4_SHOWCONFIG ====="
-          node_modules/.bin/jest --showConfig 2>&1 | head -120
+          # NOTE: run 28319496020 showed unbounded `jest --showConfig`/`--listTests`
+          # HANG in this CI env (printed A33DBG_4 then nothing, job ran to the 60min
+          # timeout). EVERY jest call below is now wrapped in `timeout 90` so a hang is
+          # bounded + visible (A33DBG_*_TIMEOUT=<exit>; timeout exits 124).
+          echo "===== A33DBG_4_CONFIGINPUT ====="
+          echo "A33DBG_JESTCONFIG_HEAD:"
+          head -40 jest.config.js 2>&1
+          echo "A33DBG_HAS_NEXT_CONFIG=$(ls next.config.* 2>/dev/null || echo none)"
+
+          echo "===== A33DBG_4b_SHOWCONFIG ====="
+          timeout 90 node_modules/.bin/jest --showConfig 2>&1 | head -150 || echo "A33DBG_SHOWCONFIG_TIMEOUT_OR_ERR=$?"
 
           echo "===== A33DBG_5_LISTTESTS ====="
-          echo "A33DBG_LISTTESTS_COUNT=$(node_modules/.bin/jest --listTests 2>/dev/null | grep -c '\.test\.')"
-          node_modules/.bin/jest --listTests 2>&1 | grep '404-page-router' || echo "A33DBG_LISTTESTS_404=404-page-router NOT in listTests candidate set"
+          A33_LIST=$(timeout 90 node_modules/.bin/jest --listTests 2>&1); A33_LIST_RC=$?
+          if [ $A33_LIST_RC -ne 0 ]; then echo "A33DBG_LISTTESTS_TIMEOUT_OR_ERR=$A33_LIST_RC"; fi
+          echo "A33DBG_LISTTESTS_COUNT=$(echo "$A33_LIST" | grep -c '\.test\.')"
+          echo "$A33_LIST" | grep '404-page-router' || echo "A33DBG_LISTTESTS_404=404-page-router NOT in listTests candidate set"
 
           echo "===== A33DBG_6_LISTTESTS_POSITIONAL ====="
-          node_modules/.bin/jest --listTests 'test/e2e/404-page-router/index.test.ts' 2>&1 | head -5
+          timeout 90 node_modules/.bin/jest --ci --listTests 'test/e2e/404-page-router/index.test.ts' 2>&1 | head -20 || echo "A33DBG_POSITIONAL_TIMEOUT=$?"
+
+          echo "===== A33DBG_6b_LISTTESTS_ABS ====="
+          timeout 90 node_modules/.bin/jest --ci --listTests "$(pwd)/test/e2e/404-page-router/index.test.ts" 2>&1 | head -20 || echo "A33DBG_ABS_TIMEOUT=$?"
+
+          echo "===== A33DBG_6c_MINCONFIG ====="
+          # Isolate next/jest (next.js's own jest.config via next/jest -> async
+          # createJestConfig, which may hang loading next.config) from plain jest
+          # resolution. If THIS resolves the test fast, the upstream config is the cause.
+          cat > /tmp/min.jest.config.js <<'MINEOF'
+          module.exports = { rootDir: process.cwd(), roots: ['<rootDir>/test'], testMatch: ['**/*.test.{js,ts,tsx}'], testEnvironment: 'node' };
+          MINEOF
+          timeout 90 node_modules/.bin/jest --config /tmp/min.jest.config.js --listTests 'test/e2e/404-page-router/index.test.ts' 2>&1 | head -20 || echo "A33DBG_MINCONFIG_TIMEOUT=$?"
 
           echo "===== A33DBG_7_VERSIONS ====="
           echo "A33DBG_JEST_VERSION=$(node -e "console.log(require('jest/package.json').version)" 2>&1)"
