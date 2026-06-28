@@ -43,10 +43,17 @@ export function summarize(runnerOutput, meta) {
 
   // (2) run-tests.js aggregate per-file markers (NEXT_TEST_MODE=deploy). Count
   // DISTINCT test FILES so a test that retries N times is tallied exactly once.
-  const runTestsPassed = countTestFiles(text, /^(\S+\.test\.\S+)\s+finished on retry\s+\d+\/\d+/gm);
+  // The EXACT v16.0.3 format strings (verified at run-tests.js:727 + :754):
+  //   pass:  `Finished ${test.file} on retry ${i}/${n} in ${t}s`  ← "Finished"
+  //          comes FIRST (capitalized), THEN the file path. NOT file-first.
+  //   fail:  `${test.file} failed to pass within ${n} retries`    ← file first.
+  const runTestsPassed = countTestFiles(
+    text,
+    /\bFinished\s+(\S+\.test\.\S+)\s+on retry\s+\d+\/\d+/g,
+  );
   const runTestsFailed = countTestFiles(
     text,
-    /^(\S+\.test\.\S+)\s+failed to pass within\s+\d+\s+retries/gm,
+    /(\S+\.test\.\S+)\s+failed to pass within\s+\d+\s+retries/g,
   );
 
   // Prefer whichever shape actually reported results. The two never co-occur in
