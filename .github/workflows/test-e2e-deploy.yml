@@ -500,6 +500,78 @@ jobs:
             console.log("prebuilt next/dist hydrated: harness imports resolve");
           '
 
+      # #147 / A3-3 — hydrate the @next/* HARNESS LOAD CLOSURE. Run 28316667494:
+      # with the v2 manifest + the next/dist hydrate above (#162), the harness
+      # SELECTED real deploy test files — but every selected test then crashed at
+      # MODULE LOAD with:
+      #   Cannot find module '.../packages/next/node_modules/@next/env/dist/index.js'.
+      #   Please verify that the package.json has a valid "main" entry
+      # → summary stayed {passed:0,failed:0,excluded:N}: real selection, but a
+      # load-crash is neither a pass nor a fail, so jest tallied nothing.
+      #
+      # ROOT CAUSE: the next/dist hydrate above was NOT the full closure. The
+      # harness imports `next/dist/trace` + `next/dist/server/next` at MODULE SCOPE
+      # (test/lib/e2e-utils, next-test-utils) and jest.config.js requires
+      # `next/jest` (→ next/dist/build/jest/jest); all of those transitively
+      # `require('@next/env')` at module scope. `@next/env` is a SEPARATE workspace
+      # package — source dir `packages/next-env`, published to npm as
+      # `@next/env@<ref>` — whose `dist/` is ALSO unbuilt in the prebuilt model, so
+      # the workspace symlink `packages/next/node_modules/@next/env` points at a
+      # dist-less dir (hence the missing `dist/index.js` / invalid "main").
+      #
+      # FIX (honest + cheap, mirrors the next/dist hydrate, NO source/Rust build):
+      # `npm pack` each needed `@next/*` package at the SAME version as next
+      # (`${NEXTJS_REF#v}`, the same derivation build-next uses for `npm pack
+      # next@`), unpack it, and copy its built `dist/` into the matching workspace
+      # source dir so the symlink target resolves. Kept as a LIST (a bash loop) so
+      # the next missing `@next/*` package — if CI surfaces one — is ONE entry.
+      #
+      # The closure verified against vercel/next.js@v16.0.3 + the published tarballs
+      # is exactly `@next/env`: it is the ONLY non-swc `@next/*` the prebuilt
+      # `next/dist` `require`s at module scope. The other runtime `@next/*` (font,
+      # polyfill-module, polyfill-nomodule, react-refresh-utils) are build-time
+      # ASSET paths, never module-scope-required on the harness load path, and
+      # `@next/telemetry` is only a JSDoc @type annotation. If a later run surfaces
+      # another, add `name:source-dir` to the list below.
+      - name: Hydrate @next/* harness load closure from published tarballs (so test modules load)
+        working-directory: next.js
+        run: |
+          set -euo pipefail
+          NEXT_NPM_VERSION="${NEXTJS_REF#v}"
+          # "<npm package name>:<workspace source dir>" — the source dir is where the
+          # workspace symlink target lives (e.g. @next/env's source is packages/next-env).
+          # Add one line here to extend the closure; stay build-free (published dist only).
+          PKGS=(
+            "@next/env:packages/next-env"
+          )
+          for entry in "${PKGS[@]}"; do
+            pkg="${entry%%:*}"
+            src_dir="${entry##*:}"
+            if [ ! -d "$src_dir" ]; then
+              echo "::error::expected next.js source dir $src_dir for $pkg" >&2
+              exit 1
+            fi
+            echo "::group::hydrate ${pkg}@${NEXT_NPM_VERSION} -> ${src_dir}/dist"
+            work="$(mktemp -d)"
+            ( cd "$work" && npm pack "${pkg}@${NEXT_NPM_VERSION}" --silent >/dev/null )
+            tar xzf "$work"/*.tgz -C "$work"
+            if [ ! -d "$work/package/dist" ]; then
+              echo "::error::published ${pkg}@${NEXT_NPM_VERSION} has no dist/ to hydrate" >&2
+              exit 1
+            fi
+            rm -rf "${src_dir}/dist"
+            cp -R "$work/package/dist" "${src_dir}/dist"
+            echo "::endgroup::"
+          done
+          # Sanity: @next/env must now resolve from the workspace next package, i.e.
+          # the exact module the load-crash reported missing.
+          node -e '
+            const path = require("path");
+            const dist = path.resolve("packages/next-env/dist/index.js");
+            require("fs").accessSync(dist);
+            console.log("@next/* load closure hydrated:", dist);
+          '
+
       - name: Run official deploy tests (knext adapter)
         working-directory: next.js
         env:
