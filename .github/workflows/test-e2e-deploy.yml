@@ -198,12 +198,55 @@ jobs:
       # (Caveat noted in the PR: the browser binary installs to ~/.cache/ms-playwright,
       # OUTSIDE the uploaded `next.js` artifact, so the shard jobs still re-install
       # it; wiring it into the shards is a separate follow-up, not this fix.)
+      # #147 (the resilience lever) — the slimmed+cached install STILL ran the
+      # full 180-min job timeout and was CANCELLED (not errored) across 3
+      # dispatches: identical 180:00 even after the root-only slim. That
+      # signature is pnpm HANGING on stuck network requests (this CI env shows
+      # repeated Docker Hub / npm-registry timeouts), NOT a fast network failure.
+      # KEY INSIGHT: pnpm's content-addressable store + the restored actions/cache
+      # PERSIST across re-invocations within the SAME job — so a RETRY LOOP with a
+      # PER-ATTEMPT TIMEOUT makes incremental progress: each attempt resumes from
+      # what the prior attempt already downloaded, until one attempt completes
+      # fast. 4 × 40m = 160m of attempt budget stays safely under the 180-min job
+      # ceiling. The pnpm network hardening (NPM_CONFIG_FETCH_*, lowered
+      # NETWORK_CONCURRENCY) makes a single stuck request fail-fast-and-retry
+      # inside pnpm instead of hanging the whole attempt.
       - name: Setup Next.js test-harness deps + Playwright
         working-directory: next.js
         env:
           NEXT_SKIP_NATIVE_POSTINSTALL: '1'
+          # Network hardening for the flaky CI registry/network. pnpm honors these
+          # NPM_CONFIG_* env vars; they apply to the next.js install below.
+          NPM_CONFIG_FETCH_RETRIES: '5'
+          NPM_CONFIG_FETCH_RETRY_MINTIMEOUT: '20000'
+          NPM_CONFIG_FETCH_RETRY_MAXTIMEOUT: '120000'
+          NPM_CONFIG_FETCH_TIMEOUT: '600000'
+          # Lower the parallel-request fan-out (pnpm default 16) so we don't
+          # overwhelm the flaky network and trigger more stuck sockets.
+          NPM_CONFIG_NETWORK_CONCURRENCY: '8'
         run: |
-          corepack pnpm install --frozen-lockfile --prefer-offline --filter "{.}"
+          # Retry loop with a per-attempt timeout. The pnpm store + restored cache
+          # persist between attempts, so each attempt resumes from the last one's
+          # progress; we succeed on the first exit-0 attempt and only fail the step
+          # if all attempts exhaust.
+          attempts=4
+          installed=0
+          for i in $(seq 1 "$attempts"); do
+            echo "::group::pnpm install attempt $i/$attempts (per-attempt timeout 40m)"
+            if timeout 40m corepack pnpm install --frozen-lockfile --prefer-offline --filter "{.}"; then
+              echo "pnpm install succeeded on attempt $i"
+              installed=1
+              echo "::endgroup::"
+              break
+            fi
+            echo "pnpm install attempt $i failed or timed out; the store keeps the bytes it fetched so the next attempt resumes"
+            echo "::endgroup::"
+            sleep 15
+          done
+          if [ "$installed" -ne 1 ]; then
+            echo "pnpm install did not complete within $attempts attempts" >&2
+            exit 1
+          fi
           corepack pnpm playwright install chromium --with-deps
 
       # Cache the prepared knext + next.js trees + the prebuilt next tarball for
