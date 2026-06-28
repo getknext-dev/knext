@@ -258,16 +258,34 @@ jobs:
             exit 1
           fi
 
-      # Cache the prepared knext + next.js trees + the prebuilt next tarball for
-      # the shard jobs.
+      # Hand off the prepared knext + next.js SOURCE trees + the prebuilt next
+      # tarball to the shard jobs.
+      #
+      # #147 (run 28314500989 — the Upload-workspace OOM): once #160 made the
+      # Prepare install finish in 26s, the NEXT blocker was this upload OOMing with
+      # `FATAL ERROR: ... JavaScript heap out of memory`. Cause: the next.js tree
+      # carries its full node_modules (3345 packages, hundreds of thousands of
+      # files); actions/upload-artifact globs + hashes EVERY file and exhausts the
+      # heap. FIX (Option A — don't ship node_modules): EXCLUDE `**/node_modules`
+      # so the artifact is SOURCE-ONLY (the source trees + next-prebuilt/next.tgz +
+      # the @knext/core adapter .tgz). Each deploy-tests shard then restores the
+      # SAME pnpm-store actions/cache the steps above warmed and RE-RUNS the same
+      # slim, offline, cache-hit install in next.js (seconds) to rebuild
+      # node_modules locally — see the shard's "Re-install next.js harness deps".
+      #
+      # NODE_OPTIONS belt-and-suspenders: even source-only, the upload still hashes
+      # a large tree; raise the old-space size so a borderline case can't OOM.
       - name: Upload workspace
         uses: actions/upload-artifact@v4
+        env:
+          NODE_OPTIONS: --max-old-space-size=4096
         with:
           name: compat-workspace
           path: |
             knext
             next.js
             next-prebuilt
+            !**/node_modules
           retention-days: 1
           include-hidden-files: true
 
@@ -307,6 +325,61 @@ jobs:
       - name: Enable corepack (next.js per-project package manager)
         working-directory: next.js
         run: corepack enable
+
+      # #147 (the Upload-workspace OOM fix, Option A) — the compat-workspace
+      # artifact ships SOURCE ONLY (no node_modules; shipping it OOM'd the upload,
+      # run 28314500989). So the shard rebuilds next.js's node_modules locally.
+      # First restore the SAME pnpm-store actions/cache the Prepare job warmed —
+      # IDENTICAL key (NEXTJS_REF + next.js/pnpm-lock.yaml hash) — so the re-install
+      # below is an OFFLINE cache HIT (seconds), not a cold download.
+      - name: Resolve next.js pnpm store path
+        id: pnpm-store
+        working-directory: next.js
+        run: echo "path=$(corepack pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore next.js pnpm store
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.pnpm-store.outputs.path }}
+          key: nextjs-pnpm-store-${{ env.NEXTJS_REF }}-${{ hashFiles('next.js/pnpm-lock.yaml') }}
+          restore-keys: |
+            nextjs-pnpm-store-${{ env.NEXTJS_REF }}-
+
+      # Re-run the SAME slim, frozen, offline install the Prepare job ran to
+      # rebuild next.js/node_modules (excluded from the artifact). With the store
+      # cache restored this is a cache hit → seconds. PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD
+      # is kept so this re-install does NOT re-trigger the #160 chromium-download
+      # hang — chromium is installed by the dedicated cached/non-fatal step below.
+      - name: Re-install next.js harness deps (offline cache hit; node_modules rebuilt)
+        working-directory: next.js
+        env:
+          NEXT_SKIP_NATIVE_POSTINSTALL: '1'
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
+          PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS: '1'
+          NPM_CONFIG_FETCH_RETRIES: '5'
+          NPM_CONFIG_FETCH_RETRY_MINTIMEOUT: '20000'
+          NPM_CONFIG_FETCH_RETRY_MAXTIMEOUT: '120000'
+          NPM_CONFIG_FETCH_TIMEOUT: '600000'
+          NPM_CONFIG_NETWORK_CONCURRENCY: '8'
+        run: |
+          attempts=4
+          installed=0
+          for i in $(seq 1 "$attempts"); do
+            echo "::group::pnpm install attempt $i/$attempts (per-attempt timeout 40m)"
+            if timeout 40m corepack pnpm install --frozen-lockfile --prefer-offline --filter "{.}"; then
+              echo "pnpm install succeeded on attempt $i"
+              installed=1
+              echo "::endgroup::"
+              break
+            fi
+            echo "pnpm install attempt $i failed or timed out; the restored store keeps the bytes it fetched so the next attempt resumes"
+            echo "::endgroup::"
+            sleep 15
+          done
+          if [ "$installed" -ne 1 ]; then
+            echo "pnpm install did not complete within $attempts attempts" >&2
+            exit 1
+          fi
 
       # #147 — chromium lives HERE, not in the blocking Prepare install. The
       # Prepare install set PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 (the browser download

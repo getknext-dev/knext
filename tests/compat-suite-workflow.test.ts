@@ -611,6 +611,163 @@ describe('compat-suite Playwright browser-download fix (test-e2e-deploy.yml, #14
   });
 });
 
+// ── Workspace-handoff: don't ship node_modules in the artifact (#147 — OOM) ────
+// Run 28314500989: the Prepare install completed in 26 SECONDS (the Playwright
+// browser-download hang from #160 is gone), but the `Upload workspace` step
+// (actions/upload-artifact of knext + next.js + next-prebuilt) FAILED with
+// `FATAL ERROR: ... JavaScript heap out of memory`. Cause: the uploaded next.js
+// tree carries its full node_modules (3345 packages, hundreds of thousands of
+// files); actions/upload-artifact globs + hashes every file and OOMs.
+//
+// FIX (Option A — don't ship node_modules): EXCLUDE `**/node_modules` from the
+// uploaded artifact (upload only the source trees + the prebuilt next.tgz + the
+// @knext/core adapter tarball). Each deploy-tests SHARD then RESTORES the same
+// pnpm-store actions/cache the Prepare job warmed (same key) and RE-RUNS the
+// SAME fast install in next.js — `corepack pnpm install --frozen-lockfile
+// --prefer-offline --filter "{.}"` with PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 — a
+// cache hit, so it finishes in seconds. The artifact stays source-only; each
+// shard rebuilds node_modules locally + fast.
+
+describe('compat-suite workspace handoff excludes node_modules (test-e2e-deploy.yml, #147)', () => {
+  /** The build-next `Upload workspace` step block (the upload-artifact step). */
+  function uploadWorkspaceStep(): string {
+    const lines = buildNextJobBlock().split('\n');
+    const blocks: string[] = [];
+    let current: string[] = [];
+    const flush = () => {
+      if (current.length) blocks.push(current.join('\n'));
+      current = [];
+    };
+    for (const line of lines) {
+      if (/^\s*-\s+name:/.test(line)) flush();
+      current.push(line);
+    }
+    flush();
+    return (
+      blocks.find(
+        (b) => /uses:\s*actions\/upload-artifact@/.test(b) && /compat-workspace/.test(b),
+      ) ?? ''
+    );
+  }
+
+  it('the upload-workspace artifact EXCLUDES node_modules (the OOM cause)', () => {
+    const step = uploadWorkspaceStep();
+    expect(step, 'expected a build-next upload-artifact step for compat-workspace').not.toBe('');
+    // actions/upload-artifact excludes via a `!`-prefixed path line in the `path:`
+    // glob block. Hundreds of thousands of node_modules files are what OOM the
+    // upload — the artifact must explicitly exclude them.
+    expect(
+      /^\s*!.*node_modules/m.test(step),
+      'the upload-workspace step must exclude node_modules (e.g. `!**/node_modules`) — shipping it OOMs actions/upload-artifact',
+    ).toBe(true);
+  });
+
+  it('still uploads the source trees + the prebuilt next tarball + the adapter pack', () => {
+    const step = uploadWorkspaceStep();
+    // The handoff must still carry the knext + next.js source trees and the
+    // next-prebuilt/next.tgz so the shard can resolve NEXT_TEST_PKG_PATHS and the
+    // @knext/core adapter pack — only node_modules is dropped.
+    expect(/(^|\s)knext(\s|$)/m.test(step), 'must still upload the knext tree').toBe(true);
+    expect(/(^|\s)next\.js(\s|$)/m.test(step), 'must still upload the next.js source tree').toBe(
+      true,
+    );
+    expect(
+      /next-prebuilt/.test(step),
+      'must still upload next-prebuilt (the prebuilt next.tgz the harness installs)',
+    ).toBe(true);
+  });
+
+  it('belt-and-suspenders: the upload step raises the Node heap (NODE_OPTIONS)', () => {
+    const step = uploadWorkspaceStep();
+    // Even with node_modules excluded, the upload still hashes a large source
+    // tree; bumping the old-space size guards against a borderline OOM.
+    expect(
+      /NODE_OPTIONS[\s\S]*max-old-space-size/.test(step),
+      'the upload step should set NODE_OPTIONS=--max-old-space-size to harden against OOM',
+    ).toBe(true);
+  });
+
+  it('the shard restores the pnpm store cache with the SAME key the Prepare job warms', () => {
+    const buildBlock = buildNextJobBlock();
+    const shardBlock = deployTestsJobBlock();
+    // The Prepare job warms a pnpm-store actions/cache. The shard must restore the
+    // SAME store (same key) so its re-install is an offline cache HIT (seconds).
+    const buildKey = buildBlock
+      .split('\n')
+      .find((l) => /^\s*key:\s*/.test(l) && /pnpm/.test(l) && /NEXTJS_REF/.test(l));
+    const shardKey = shardBlock
+      .split('\n')
+      .find((l) => /^\s*key:\s*/.test(l) && /pnpm/.test(l) && /NEXTJS_REF/.test(l));
+    expect(buildKey, 'the Prepare job must declare a pnpm-store cache key').toBeTruthy();
+    expect(
+      shardKey,
+      'the shard must restore the pnpm-store cache (same key the Prepare job warms)',
+    ).toBeTruthy();
+    expect(
+      (shardKey ?? '').trim(),
+      'the shard pnpm-store cache key must be IDENTICAL to the Prepare job key',
+    ).toBe((buildKey ?? '').trim());
+    // And it must be the next.js store (lockfile-hashed), not some other cache.
+    expect(
+      /hashFiles\(\s*['"]next\.js\/pnpm-lock\.yaml['"]\s*\)/.test(shardKey ?? ''),
+      'the shard pnpm-store cache key must hashFiles next.js/pnpm-lock.yaml',
+    ).toBe(true);
+  });
+
+  it('the shard re-runs the SAME slim frozen install (node_modules rebuilt locally + fast)', () => {
+    const shardBlock = deployTestsJobBlock();
+    // Because the artifact ships no node_modules, the shard must re-install in
+    // next.js — the SAME slim, cache-hit install the Prepare job ran.
+    const installLine = shardBlock
+      .split('\n')
+      .find((l) => /corepack\s+pnpm\s+install\b/.test(l) && !l.trim().startsWith('#'));
+    expect(
+      installLine,
+      'the shard must re-run `corepack pnpm install` to rebuild next.js node_modules (excluded from the artifact)',
+    ).toBeTruthy();
+    expect(
+      /--frozen-lockfile\b/.test(installLine ?? ''),
+      'the shard re-install must pass --frozen-lockfile',
+    ).toBe(true);
+    expect(
+      /--prefer-offline\b/.test(installLine ?? ''),
+      'the shard re-install must pass --prefer-offline (offline cache hit)',
+    ).toBe(true);
+    expect(
+      /--filter\b/.test(installLine ?? ''),
+      'the shard re-install must --filter to the root project (skip the workspace graph)',
+    ).toBe(true);
+  });
+
+  it('the shard re-install skips the Playwright browser download (the #160 hang)', () => {
+    const shardBlock = deployTestsJobBlock();
+    // The shard re-install must keep PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD set so its
+    // playwright-chromium postinstall does NOT re-trigger the 40-min CDN hang —
+    // chromium is installed by the dedicated (cached, non-fatal) shard step.
+    const lines = shardBlock.split('\n');
+    const blocks: string[] = [];
+    let current: string[] = [];
+    const flush = () => {
+      if (current.length) blocks.push(current.join('\n'));
+      current = [];
+    };
+    for (const line of lines) {
+      if (/^\s*-\s+name:/.test(line)) flush();
+      current.push(line);
+    }
+    flush();
+    const reinstallStep =
+      blocks.find((b) => /corepack\s+pnpm\s+install\b/.test(b) && !/^\s*#/.test(b.trim())) ?? '';
+    expect(reinstallStep, 'expected a shard step that re-runs corepack pnpm install').not.toBe('');
+    const m = reinstallStep.match(/PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD\s*:\s*['"]?([^'"\s#]+)/);
+    expect(
+      m,
+      'the shard re-install step must set PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD so it does not re-trigger the browser-download hang',
+    ).not.toBeNull();
+    expect(['1', 'true']).toContain((m as RegExpMatchArray)[1]);
+  });
+});
+
 // ── Shard chromium-install must be NON-FATAL (#147 step 1 — the milestone fix) ──
 // THE milestone is "the 4 shards EXECUTE, not necessarily pass" (#147 step 1).
 // The shard chromium install hits the SAME throttled Playwright CDN this whole PR
