@@ -751,6 +751,23 @@ jobs:
           MINEOF
           timeout 90 node_modules/.bin/jest --config /tmp/min.jest.config.js --listTests 'test/e2e/404-page-router/index.test.ts' 2>&1 | head -20 || echo "A33DBG_MINCONFIG_TIMEOUT=$?"
 
+          echo "===== A33DBG_8_RUNBYPATH ====="
+          # Run 28321154732: even the MINIMAL config matches 1706 testMatch candidates
+          # but the positional 'test/...index.test.ts' filters to 0 — the textbook
+          # symptom of jest treating the arg as a testPathPattern REGEX that matches 0
+          # of the candidate set, rather than a literal file path. `--runTestsByPath`
+          # treats args as literal file paths. Probe: does it make the test FOUND?
+          echo "A33DBG_8a_RUNBYPATH_MIN:"
+          timeout 90 node_modules/.bin/jest --config /tmp/min.jest.config.js --runTestsByPath --listTests 'test/e2e/404-page-router/index.test.ts' 2>&1 | head -20 || echo "A33DBG_RUNBYPATH_MIN_RC=$?"
+          echo "A33DBG_8a_RUNBYPATH_AUTO:"
+          timeout 90 node_modules/.bin/jest --runTestsByPath --listTests 'test/e2e/404-page-router/index.test.ts' 2>&1 | head -20 || echo "A33DBG_RUNBYPATH_AUTO_RC=$?"
+          # Control: is 404-page-router even AMONG the unfiltered candidate set?
+          # >0 => candidate exists, pattern-matching is the bug (--runTestsByPath is the fix).
+          # 0  => file isn't a candidate at all => deeper haste-crawl issue.
+          echo "A33DBG_8b_INLIST="
+          timeout 90 node_modules/.bin/jest --config /tmp/min.jest.config.js --listTests 2>&1 | grep -c '404-page-router' || echo "A33DBG_INLIST_RC=$?"
+          echo "A33DBG_8_DONE"
+
           echo "===== A33DBG_7_VERSIONS ====="
           echo "A33DBG_JEST_VERSION=$(node -e "console.log(require('jest/package.json').version)" 2>&1)"
           echo "A33DBG_HASTEMAP_VERSION=$(node -e "console.log(require('jest-haste-map/package.json').version)" 2>&1)"
