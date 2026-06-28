@@ -912,3 +912,149 @@ describe('compat-suite runs REAL deploy tests (test-e2e-deploy.yml, #147 A3-3)',
     ).toBe(true);
   });
 });
+
+// ── A3-3: hydrate the @next/* harness LOAD closure (#147) ──────────────────────
+// Run 28316667494: with the v2 manifest + the prebuilt next/dist hydrate (#162),
+// the harness SELECTED real deploy test files — but every selected test crashed at
+// MODULE LOAD with:
+//   Error: Cannot find module '.../packages/next/node_modules/@next/env/dist/index.js'.
+//   Please verify that the package.json has a valid "main" entry
+// → summary stayed `{passed:0,failed:0,excluded:N}`: real selection, but the test
+// modules died before jest could tally them (a load-crash is neither pass nor fail).
+//
+// ROOT CAUSE: hydrating `packages/next/dist` (#162) was NOT the full closure. The
+// harness imports `next/dist/trace` + `next/dist/server/next` at MODULE SCOPE
+// (test/lib/e2e-utils, next-test-utils) and jest.config.js requires `next/jest`
+// (→ `next/dist/build/jest/jest`). All of those transitively `require('@next/env')`
+// at module scope. `@next/env` is a SEPARATE workspace package (source dir
+// `packages/next-env`, published to npm as `@next/env@<ref>`) whose `dist/` is ALSO
+// unbuilt in the prebuilt model — so the workspace symlink
+// `packages/next/node_modules/@next/env` points at a dist-less dir.
+//
+// EVIDENCE (vercel/next.js@v16.0.3, verified against the published tarballs):
+//   • The ONLY non-swc `@next/*` package the prebuilt `next/dist` `require`s at
+//     module scope is `@next/env` (grep of the published next@16.0.3 dist). The
+//     other runtime `@next/*` (font, polyfill-module, polyfill-nomodule,
+//     react-refresh-utils) are referenced as build-time ASSET paths, never
+//     module-scope-required on the harness load path, and `@next/telemetry`
+//     appears only as a JSDoc `@type` annotation in create-next-install.js.
+//   • `packages/next-env/package.json` → name `@next/env`, main `dist/index.js`,
+//     files `["dist"]`; the checked-out source dir has `index.ts` but NO `dist/`.
+//   • The published `@next/env@16.0.3` tarball is exactly `package/dist/index.js`
+//     (+ `index.d.ts`) — copying its `dist/` into `packages/next-env/dist/`
+//     populates the symlink target with no source/Rust build.
+//
+// FIX (honest + cheap, no source build, mirrors the #162 next/dist hydrate): a
+// shard step `npm pack`s each needed `@next/*` package at the pinned version and
+// copies its `dist/` into the matching workspace source dir, BEFORE run-tests.js.
+// Kept as a LIST so the next missing package (if CI surfaces one) is one entry.
+//
+// These guards lock in the load-closure hydrate so a regression cannot silently
+// return to the 0/0 load-crash state.
+
+describe('compat-suite hydrates the @next/* harness load closure (test-e2e-deploy.yml, #147 A3-3)', () => {
+  /** The shard step block that hydrates the @next/* workspace packages. */
+  function nextEnvHydrateStep(): string {
+    const lines = deployTestsJobBlock().split('\n');
+    const blocks: string[] = [];
+    let current: string[] = [];
+    const flush = () => {
+      if (current.length) blocks.push(current.join('\n'));
+      current = [];
+    };
+    for (const line of lines) {
+      if (/^\s*-\s+name:/.test(line)) flush();
+      current.push(line);
+    }
+    flush();
+    // The load-closure hydrate step is the one whose `npm pack` targets the listed
+    // @next/* packages (a `${pkg}` loop). The next/dist hydrate step also mentions
+    // @next/env (in its prose), so disambiguate on the loop's `npm pack "${pkg}`.
+    return blocks.find((b) => /npm\s+pack\s+["']?\$\{?pkg/.test(b)) ?? '';
+  }
+
+  it('hydrates @next/env (the confirmed module-load closure) from its published npm tarball', () => {
+    const step = nextEnvHydrateStep();
+    expect(
+      step,
+      'expected a shard step that hydrates @next/env from its published npm tarball',
+    ).not.toBe('');
+    // The closure must include @next/env — the ONLY non-swc @next/* the prebuilt
+    // next/dist requires at module scope. It is declared in the hydrate list as a
+    // `@next/env:<source-dir>` entry and packed at version by the loop's `npm pack`.
+    expect(
+      /@next\/env:/.test(step),
+      'the hydrate list must include @next/env (the confirmed module-load closure)',
+    ).toBe(true);
+    // It must `npm pack` the listed packages at the pinned version — the cheap,
+    // build-free acquisition (the same model as the prebuilt next tarball).
+    expect(
+      /npm\s+pack\s+["']?\$\{?pkg/.test(step),
+      'the hydrate step must npm pack each listed @next/* package at the pinned version',
+    ).toBe(true);
+  });
+
+  it('pins the @next/* hydrate to the same ref as next (NEXTJS_REF, no leading v)', () => {
+    const step = nextEnvHydrateStep();
+    // The hydrated @next/* dist must match the next version under test. The
+    // workflow derives the npm version from NEXTJS_REF (the git tag) by stripping
+    // the leading `v` (`${NEXTJS_REF#v}`) — the same derivation build-next uses for
+    // `npm pack next@`. Guard that the hydrate is version-pinned, not floating.
+    expect(
+      /NEXTJS_REF#v/.test(step),
+      'the @next/* hydrate must derive the npm version from NEXTJS_REF (strip leading v), matching next',
+    ).toBe(true);
+  });
+
+  it('copies the published dist into the workspace next-env source dir', () => {
+    const step = nextEnvHydrateStep();
+    // `@next/env`'s source dir is packages/next-env (published as @next/env). The
+    // unbuilt source dir has no dist/; the hydrate must copy the published dist/
+    // into packages/next-env/dist so the workspace symlink target resolves.
+    expect(
+      /packages\/next-env\/dist/.test(step),
+      'the hydrate must populate packages/next-env/dist (the @next/env source dir, the symlink target)',
+    ).toBe(true);
+  });
+
+  it('uses a LIST so adding the next @next/* package is one entry (not hardcoded single)', () => {
+    const step = nextEnvHydrateStep();
+    // Keep the hydrate extensible: a bash loop over a package list, so surfacing
+    // the next missing @next/* package is one line, not a copy-pasted step.
+    expect(
+      /\bfor\b/.test(step),
+      'the @next/* hydrate must loop over a package list so adding the next one is one entry',
+    ).toBe(true);
+  });
+
+  it('runs the @next/* hydrate BEFORE run-tests.js (jest loads modules at run time)', () => {
+    const block = deployTestsJobBlock();
+    const envHydrateIdx = block.search(/-\s+name:[^\n]*@next\/[^\n]*/i);
+    const runIdx = block.search(/-\s+name:[^\n]*Run official deploy tests/);
+    expect(
+      envHydrateIdx,
+      'expected an @next/* hydrate step in the shard job',
+    ).toBeGreaterThanOrEqual(0);
+    expect(runIdx, 'expected the run-tests step in the shard job').toBeGreaterThanOrEqual(0);
+    expect(
+      envHydrateIdx < runIdx,
+      'the @next/* load-closure hydrate must come BEFORE run-tests.js',
+    ).toBe(true);
+  });
+
+  it('runs the @next/* hydrate AFTER the next/dist hydrate (both before the run)', () => {
+    // The #162 next/dist hydrate and this @next/* hydrate are complementary: the
+    // workspace next/dist must exist for the @next/env symlink target to matter,
+    // and both must precede run-tests.js. Assert the @next/* step is ordered after
+    // the next/dist hydrate so the two hydrates compose predictably.
+    const block = deployTestsJobBlock();
+    const nextDistIdx = block.search(/-\s+name:[^\n]*[Hh]ydrate[^\n]*next\/dist/);
+    const envHydrateIdx = block.search(/-\s+name:[^\n]*@next\/[^\n]*/i);
+    expect(nextDistIdx, 'expected the next/dist hydrate step').toBeGreaterThanOrEqual(0);
+    expect(envHydrateIdx, 'expected the @next/* hydrate step').toBeGreaterThanOrEqual(0);
+    expect(
+      nextDistIdx < envHydrateIdx,
+      'the @next/* hydrate must come AFTER the next/dist hydrate (#162) and before the run',
+    ).toBe(true);
+  });
+});
