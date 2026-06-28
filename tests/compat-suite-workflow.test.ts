@@ -1058,3 +1058,121 @@ describe('compat-suite hydrates the @next/* harness load closure (test-e2e-deplo
     ).toBe(true);
   });
 });
+
+// ── A3-3: hydrate the prebuilt @next/swc NATIVE binary (#147) ──────────────────
+// Run 28317087611: with the @next/* load closure hydrated (#163), the harness
+// SELECTED + LOADED real deploy test files — but every selected test then crashed
+// at SETUP with `⨯ Failed to load SWC binary for linux/x64`, caused by
+// `Error: Failed to get registry from "pnpm"` → `Command failed: pnpm config get
+// registry` → `Failed to switch pnpm to v9.6.0 ... pnpm CLI is missing`.
+// run-tests.js then aborted each shard on its first test (`exiting with code 1`),
+// so only ONE test ran per shard and all reported `failed with code: 1` → summary
+// stayed 0/0 (the under-count this PR also fixes in e2e-summary.mjs).
+//
+// ROOT CAUSE (a HARNESS-ENV failure, NOT a missing module / NOT a real adapter
+// failure): the workspace + fixture `next build` need `@next/swc` (the native Rust
+// binary), but the prebuilt model sets NEXT_SKIP_NATIVE_POSTINSTALL=1 so no
+// `@next/swc-<platform>` is installed. next then tries its WASM fallback, which
+// resolves the registry via `pnpm config get registry`; that spawn dies because
+// next.js pins pnpm@9.6.0 via corepack and the 9.6.0 binary is absent in the jest
+// child env. SWC never loads → `next build` fails before any assertion runs.
+//
+// FIX (honest + cheap, mirrors the @next/env + next/dist hydrates, NO Rust/source
+// build): `npm pack` the PUBLISHED `@next/swc-<platformArchABI>` at the pinned
+// version, unpack its `next-swc.<triple>.node` into a stable dir, and point next at
+// it via NEXT_TEST_NATIVE_DIR — the harness's first-class "use a local built
+// @next/swc" hook. That env is inherited by both the workspace-next build AND the
+// fixture `next build` the deploy script runs, so neither hits the WASM/registry
+// path. These guards lock the fix in so a regression cannot silently return to the
+// "Failed to load SWC binary" crash.
+
+describe('compat-suite hydrates the prebuilt @next/swc native binary (test-e2e-deploy.yml, #147 A3-3)', () => {
+  /** The shard step block that hydrates the @next/swc native binary. */
+  function swcHydrateStep(): string {
+    const lines = deployTestsJobBlock().split('\n');
+    const blocks: string[] = [];
+    let current: string[] = [];
+    const flush = () => {
+      if (current.length) blocks.push(current.join('\n'));
+      current = [];
+    };
+    for (const line of lines) {
+      if (/^\s*-\s+name:/.test(line)) flush();
+      current.push(line);
+    }
+    flush();
+    // Disambiguate from the @next/env load-closure hydrate (which also npm packs
+    // a `${pkg}` list): the swc step uniquely packs a `@next/swc-<triple>` package.
+    return (
+      blocks.find(
+        (b) => /@next\/swc-[a-z0-9-]+/.test(b) && /npm\s+pack\s+["']?\$\{pkg\}@/.test(b),
+      ) ?? ''
+    );
+  }
+
+  it('hydrates @next/swc-<platform> from its published npm tarball (no Rust build)', () => {
+    const step = swcHydrateStep();
+    expect(
+      step,
+      'expected a shard step that hydrates the @next/swc native binary from its published tarball',
+    ).not.toBe('');
+    // The fix must npm pack the published @next/swc package — the build-free
+    // acquisition, the same model as the prebuilt next tarball + @next/env hydrate.
+    expect(
+      /@next\/swc-linux-x64-gnu/.test(step),
+      'the hydrate must include @next/swc-linux-x64-gnu (the ubuntu-latest runner triple)',
+    ).toBe(true);
+    expect(
+      /npm\s+pack\s+["']?\$\{pkg\}@/.test(step),
+      'the hydrate step must npm pack the listed @next/swc package at the pinned version',
+    ).toBe(true);
+    // It must extract the native .node binary (not a dist/ — swc ships a .node).
+    expect(
+      /next-swc\.[a-z0-9-]+\.node/.test(step),
+      'the hydrate must extract the next-swc.<triple>.node native binary',
+    ).toBe(true);
+  });
+
+  it('pins the @next/swc hydrate to the same ref as next (NEXTJS_REF, no leading v)', () => {
+    const step = swcHydrateStep();
+    expect(
+      /NEXTJS_REF#v/.test(step),
+      'the @next/swc hydrate must derive the npm version from NEXTJS_REF (strip leading v), matching next',
+    ).toBe(true);
+  });
+
+  it('uses a LIST so adding another platform triple is one entry', () => {
+    const step = swcHydrateStep();
+    expect(
+      /\bfor\b/.test(step),
+      'the @next/swc hydrate must loop over a triple list so adding a platform is one entry',
+    ).toBe(true);
+  });
+
+  it('points next at the hydrated binary via NEXT_TEST_NATIVE_DIR on the run step', () => {
+    const block = deployTestsJobBlock();
+    // The harness checks NEXT_TEST_NATIVE_DIR FIRST when loading SWC; the run-tests
+    // step must export it so both workspace + fixture builds skip the WASM/registry
+    // path. It must reference the step output (the hydrated native dir), not a
+    // hardcoded path.
+    expect(
+      /NEXT_TEST_NATIVE_DIR\s*:/.test(block),
+      'the run step must set NEXT_TEST_NATIVE_DIR so next loads the hydrated @next/swc native binary',
+    ).toBe(true);
+    expect(
+      /NEXT_TEST_NATIVE_DIR\s*:[^\n]*steps\.swc\.outputs/.test(block),
+      'NEXT_TEST_NATIVE_DIR must reference the swc-hydrate step output (the native dir), not a hardcoded path',
+    ).toBe(true);
+  });
+
+  it('runs the @next/swc hydrate BEFORE run-tests.js (next loads SWC at build time)', () => {
+    const block = deployTestsJobBlock();
+    const swcIdx = block.search(/-\s+name:[^\n]*@next\/swc[^\n]*/i);
+    const runIdx = block.search(/-\s+name:[^\n]*Run official deploy tests/);
+    expect(swcIdx, 'expected an @next/swc hydrate step in the shard job').toBeGreaterThanOrEqual(0);
+    expect(runIdx, 'expected the run-tests step in the shard job').toBeGreaterThanOrEqual(0);
+    expect(swcIdx < runIdx, 'the @next/swc native hydrate must come BEFORE run-tests.js').toBe(
+      true,
+    );
+  });
+});

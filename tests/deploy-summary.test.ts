@@ -68,3 +68,139 @@ describe('scripts/e2e-summary.mjs — summarize() (#89)', () => {
     expect(Number.isNaN(s.excluded)).toBe(false);
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// A3-3 (#147): in NEXT_TEST_MODE=deploy the aggregate harness is `run-tests.js`,
+// NOT jest's default reporter — so the jest-style `Tests: N passed, N failed`
+// tally line is NEVER emitted. Instead run-tests.js prints PER-FILE result lines:
+//   pass:  "<file> finished on retry <i>/<n> in <t>s"   (run-tests.js:676)
+//   fail:  "<file> failed to pass within <n> retries"   (run-tests.js:703)
+// The earlier parser only matched the jest tally, so a shard where a real deploy
+// test FAILED (build/SWC error → "failed with code: 1") was summarized as
+// {passed:0,failed:0} — a false-green. summarize() must count the run-tests.js
+// per-file markers so real outcomes are honestly tallied (passed+failed > 0).
+// ─────────────────────────────────────────────────────────────────────────────
+
+// A faithful slice of real run-tests.js deploy-mode stdout (run 28317087611):
+// one test that failed all retries (build SWC load failure), plus the run-tests.js
+// abort line. There is NO jest "Tests:" summary line anywhere.
+const SAMPLE_DEPLOY_RUNNER_OUTPUT = `
+total: 179
+Starting test/e2e/app-dir/actions-allowed-origins/app-action-allowed-origins.test.ts retry 0/2
+❌ test/e2e/app-dir/actions-allowed-origins/app-action-allowed-origins.test.ts output:
+ ⨯ Failed to load SWC binary for linux/x64
+Starting test/e2e/app-dir/actions-allowed-origins/app-action-allowed-origins.test.ts retry 1/2
+Starting test/e2e/app-dir/actions-allowed-origins/app-action-allowed-origins.test.ts retry 2/2
+test/e2e/app-dir/actions-allowed-origins/app-action-allowed-origins.test.ts failed due to Error: failed with code: 1
+test/e2e/app-dir/actions-allowed-origins/app-action-allowed-origins.test.ts failed to pass within 2 retries
+exiting with code 1
+`;
+
+// A mixed run-tests.js slice in the REAL v16.0.3 output format: two distinct
+// files PASS, one FAILS. The pass line is run-tests.js:727 verbatim —
+//   `Finished ${test.file} on retry ${i}/${n} in ${t}s`
+// i.e. the literal word "Finished" comes FIRST (capitalized), THEN the file path.
+// (An earlier version of this fixture fabricated a file-first "… finished on
+// retry …" line to match a buggy regex — that masked a real pass-path bug. The
+// strings below are copied from run-tests.js source, NOT reverse-engineered.)
+// One file (app-action-export) passes only on its 2nd retry to exercise de-dup.
+const SAMPLE_DEPLOY_MIXED_OUTPUT = `
+total: 179
+Starting test/e2e/404-page-router/index.test.ts retry 0/2
+Finished test/e2e/404-page-router/index.test.ts on retry 0/2 in 12.3s
+Starting test/e2e/app-dir/actions/app-action-export.test.ts retry 0/2
+Starting test/e2e/app-dir/actions/app-action-export.test.ts retry 1/2
+Finished test/e2e/app-dir/actions/app-action-export.test.ts on retry 1/2 in 8.1s
+Starting test/e2e/app-dir/actions-allowed-origins/app-action-allowed-origins.test.ts retry 0/2
+Starting test/e2e/app-dir/actions-allowed-origins/app-action-allowed-origins.test.ts retry 1/2
+Starting test/e2e/app-dir/actions-allowed-origins/app-action-allowed-origins.test.ts retry 2/2
+test/e2e/app-dir/actions-allowed-origins/app-action-allowed-origins.test.ts failed to pass within 2 retries
+exiting with code 1
+`;
+
+// An all-pass run-tests.js slice (real format) — proves the pass path counts.
+const SAMPLE_DEPLOY_ALL_PASS_OUTPUT = `
+total: 2
+Starting test/e2e/404-page-router/index.test.ts retry 0/2
+Finished test/e2e/404-page-router/index.test.ts on retry 0/2 in 5.0s
+Starting test/e2e/app-dir/actions/app-action-export.test.ts retry 0/2
+Finished test/e2e/app-dir/actions/app-action-export.test.ts on retry 0/2 in 3.2s
+exiting with code 0
+`;
+
+describe('scripts/e2e-summary.mjs — run-tests.js deploy-mode parsing (A3-3, #147)', () => {
+  it('counts a deploy test that failed all retries as failed>0 (no false-green)', () => {
+    const s = summarize(SAMPLE_DEPLOY_RUNNER_OUTPUT, {
+      ref: 'v16.0.3',
+      shard: '1/4',
+      excluded: 32,
+    });
+    // The whole point of A3-3: a "failed with code: 1" test MUST be counted.
+    expect(s.failed).toBe(1);
+    expect(s.passed).toBe(0);
+    expect(s.passed + s.failed).toBeGreaterThan(0);
+  });
+
+  it('counts run-tests.js per-file PASS + FAIL markers in the real format (mixed shard)', () => {
+    const s = summarize(SAMPLE_DEPLOY_MIXED_OUTPUT, {
+      ref: 'v16.0.3',
+      shard: '2/4',
+      excluded: 32,
+    });
+    // Real run-tests.js "Finished <file> on retry …" passes + the "failed to pass
+    // within …" failure must BOTH be counted — passed>0 AND failed>0.
+    expect(s.passed).toBe(2);
+    expect(s.failed).toBe(1);
+    expect(s.passed).toBeGreaterThan(0);
+    expect(s.failed).toBeGreaterThan(0);
+  });
+
+  it('counts an all-pass shard from the real "Finished <file>" format', () => {
+    const s = summarize(SAMPLE_DEPLOY_ALL_PASS_OUTPUT, {
+      ref: 'v16.0.3',
+      shard: '3/4',
+      excluded: 0,
+    });
+    expect(s.passed).toBe(2);
+    expect(s.failed).toBe(0);
+  });
+
+  it('counts each test FILE once, not once per retry line (pass + fail)', () => {
+    // The failing file emits 3 "Starting … retry" lines but is ONE failure; the
+    // app-action-export file emits 2 "Starting" lines + one "Finished" = ONE pass.
+    const fail = summarize(SAMPLE_DEPLOY_RUNNER_OUTPUT, {
+      ref: 'v16.0.3',
+      shard: '1/4',
+      excluded: 0,
+    });
+    expect(fail.failed).toBe(1);
+    const mixed = summarize(SAMPLE_DEPLOY_MIXED_OUTPUT, {
+      ref: 'v16.0.3',
+      shard: '2/4',
+      excluded: 0,
+    });
+    // app-action-export retried then passed → still exactly one pass, not two.
+    expect(mixed.passed).toBe(2);
+  });
+
+  it('does NOT count a file-first "… finished on retry …" line (regex must match the REAL format)', () => {
+    // Regression guard: the bug was a file-first, lowercase-"finished" pass regex.
+    // run-tests.js@v16.0.3 NEVER emits "<file> finished on retry …" — it emits
+    // "Finished <file> on retry …". A fixture in the OLD (wrong) shape must count
+    // as 0 passes, proving the parser is keyed on real output, not the fabrication.
+    const fabricatedFileFirst = `
+Starting test/e2e/x/x.test.ts retry 0/2
+test/e2e/x/x.test.ts finished on retry 0/2 in 1.0s
+exiting with code 0
+`;
+    const s = summarize(fabricatedFileFirst, { ref: 'v16.0.3', shard: '1/4', excluded: 0 });
+    expect(s.passed).toBe(0);
+  });
+
+  it('still parses the jest-style tally when run-tests.js does emit one', () => {
+    // Backward-compat: the jest "Tests:" path must keep working.
+    const s = summarize(SAMPLE_RUNNER_OUTPUT, { ref: 'v16.0.3', shard: '1/4', excluded: 7 });
+    expect(s.passed).toBe(41);
+    expect(s.failed).toBe(3);
+  });
+});

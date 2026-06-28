@@ -572,6 +572,75 @@ jobs:
             console.log("@next/* load closure hydrated:", dist);
           '
 
+      # #147 / A3-3 — hydrate the prebuilt @next/swc NATIVE binary. Run 28317087611:
+      # with the @next/* load closure hydrated (#163), the harness SELECTED + LOADED
+      # real deploy test files — but every selected test then crashed at SETUP with:
+      #   ⨯ Failed to load SWC binary for linux/x64
+      #     ... Error: Failed to get registry from "pnpm".
+      #     [cause]: Command failed: pnpm config get registry
+      #       ERROR Failed to switch pnpm to v9.6.0. ... pnpm CLI is missing ...
+      # → run-tests.js aborted the shard on the first test (`exiting with code 1`),
+      #   so only ONE test ran per shard and all reported `failed with code: 1`.
+      #
+      # ROOT CAUSE (this is diagnosis (ii): a HARNESS-ENV failure, NOT a missing
+      # module and NOT a genuine adapter test failure): the workspace `packages/next`
+      # build needs `@next/swc` (the native Rust binary). In the prebuilt model we
+      # set NEXT_SKIP_NATIVE_POSTINSTALL=1, so NO `@next/swc-<platform>` is installed
+      # in next.js/node_modules. next then tries its WASM fallback, which calls
+      # `getRegistry()` → `pnpm config get registry`; that spawn dies because next.js
+      # pins pnpm@9.6.0 via corepack and the 9.6.0 binary is absent in the jest child
+      # env. So SWC never loads → `next build` fails → the test errors before any
+      # assertion runs.
+      #
+      # FIX (honest + cheap, mirrors the @next/env + next/dist hydrates, NO Rust/
+      # source build): `npm pack` the PUBLISHED `@next/swc-<platformArchABI>` at the
+      # SAME version as next, unpack its `next-swc.<triple>.node` into a stable dir,
+      # and point next at it via NEXT_TEST_NATIVE_DIR (the harness's first-class
+      # "use a local built @next/swc" hook — packages/next/src/build/swc/index.ts).
+      # That env is inherited by both the workspace-next build AND the fixture
+      # `next build` the deploy script runs, so neither hits the WASM/registry path.
+      # Kept as a one-line-extensible LIST so adding the musl triple (or another
+      # platform) is a single entry — same pattern as the @next/* closure above.
+      - name: Hydrate prebuilt @next/swc native binary (so next build skips the WASM/registry path)
+        id: swc
+        working-directory: next.js
+        run: |
+          set -euo pipefail
+          NEXT_NPM_VERSION="${NEXTJS_REF#v}"
+          NATIVE_DIR="${GITHUB_WORKSPACE}/next-swc-native"
+          mkdir -p "${NATIVE_DIR}"
+          # "<npm package name>:<platformArchABI>" — ubuntu-latest runners are
+          # linux-x64 glibc, so linux-x64-gnu is the one next actually loads; the
+          # musl entry is harmless belt-and-suspenders. Add a line to extend.
+          TRIPLES=(
+            "@next/swc-linux-x64-gnu:linux-x64-gnu"
+          )
+          for entry in "${TRIPLES[@]}"; do
+            pkg="${entry%%:*}"
+            triple="${entry##*:}"
+            echo "::group::hydrate ${pkg}@${NEXT_NPM_VERSION} -> ${NATIVE_DIR}/next-swc.${triple}.node"
+            work="$(mktemp -d)"
+            ( cd "$work" && npm pack "${pkg}@${NEXT_NPM_VERSION}" --silent >/dev/null )
+            tar xzf "$work"/*.tgz -C "$work"
+            NODE_FILE="$work/package/next-swc.${triple}.node"
+            if [ ! -f "${NODE_FILE}" ]; then
+              echo "::error::published ${pkg}@${NEXT_NPM_VERSION} has no next-swc.${triple}.node" >&2
+              exit 1
+            fi
+            cp "${NODE_FILE}" "${NATIVE_DIR}/next-swc.${triple}.node"
+            echo "::endgroup::"
+          done
+          echo "dir=${NATIVE_DIR}" >> "$GITHUB_OUTPUT"
+          # Sanity: the native binary the loader requires must now exist + be loadable.
+          node -e '
+            const path = require("path");
+            const f = path.join(process.env.NATIVE_DIR, "next-swc.linux-x64-gnu.node");
+            require("fs").accessSync(f);
+            console.log("@next/swc native hydrated:", f);
+          '
+        env:
+          NATIVE_DIR: ${{ github.workspace }}/next-swc-native
+
       - name: Run official deploy tests (knext adapter)
         working-directory: next.js
         env:
@@ -595,6 +664,12 @@ jobs:
           # next from source. `@next/swc` resolves from the tarball's
           # optionalDependencies during that install.
           NEXT_TEST_PKG_PATHS: '[["next", "${{ github.workspace }}/next-prebuilt/next.tgz"]]'
+          # #147 / A3-3 — point next at the prebuilt @next/swc native binary hydrated
+          # above. The harness checks NEXT_TEST_NATIVE_DIR FIRST when loading SWC
+          # (packages/next/src/build/swc/index.ts), so both the workspace-next build
+          # and the fixture `next build` (deploy script) skip the WASM-download /
+          # `pnpm config get registry` path that failed every test in run 28317087611.
+          NEXT_TEST_NATIVE_DIR: ${{ steps.swc.outputs.dir }}
         # `|| true`: a partial-subset scaffold WILL have failures today; we still
         # want the summary artifact emitted. The matrix row stays ❌ regardless.
         run: |
