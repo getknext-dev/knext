@@ -610,3 +610,66 @@ describe('compat-suite Playwright browser-download fix (test-e2e-deploy.yml, #14
     }
   });
 });
+
+// ── Shard chromium-install must be NON-FATAL (#147 step 1 — the milestone fix) ──
+// THE milestone is "the 4 shards EXECUTE, not necessarily pass" (#147 step 1).
+// The shard chromium install hits the SAME throttled Playwright CDN this whole PR
+// diagnoses, so it can fail all retry attempts. If the install step then hard
+// `exit 1`s on exhaustion, the WHOLE shard job ABORTS at that step — and the
+// ~678/743 tests that DON'T need a browser never run. That defeats the milestone.
+//
+// The actual test-run step two steps later uses `|| true` precisely so a partial
+// scaffold still runs; the chromium install must mirror that resilience. On
+// exhaustion it must WARN and CONTINUE (exit 0) so the shard always proceeds to
+// run-tests.js — only the ~65 browser-driving tests then fail when chromium is
+// genuinely absent.
+
+describe('compat-suite shard chromium install is non-fatal (test-e2e-deploy.yml, #147)', () => {
+  /** The shard step block whose run: body installs the chromium browser. */
+  function shardChromiumStep(): string {
+    const lines = deployTestsJobBlock().split('\n');
+    const blocks: string[] = [];
+    let current: string[] = [];
+    const flush = () => {
+      if (current.length) blocks.push(current.join('\n'));
+      current = [];
+    };
+    for (const line of lines) {
+      if (/^\s*-\s+name:/.test(line)) flush();
+      current.push(line);
+    }
+    flush();
+    return blocks.find((b) => /playwright\s+install\b/.test(b)) ?? '';
+  }
+
+  it('the shard chromium install exists and is retry+timeout wrapped (precondition)', () => {
+    const step = shardChromiumStep();
+    expect(step, 'expected a shard step that runs playwright install').not.toBe('');
+    expect(
+      /timeout\s+\d+m[\s\S]*playwright\s+install\b/.test(step),
+      'the shard chromium install must be wrapped in a per-attempt timeout',
+    ).toBe(true);
+  });
+
+  it('does NOT hard `exit 1` when all chromium-install attempts are exhausted', () => {
+    const step = shardChromiumStep();
+    expect(step, 'expected a shard step that runs playwright install').not.toBe('');
+    // The CDN failing all attempts must NOT abort the shard. A literal `exit 1`
+    // anywhere in this step body would make a failed install fatal, skipping the
+    // ~678 non-browser tests. Forbid it — the step must warn-and-continue.
+    expect(
+      /\bexit\s+1\b/.test(step),
+      'the shard chromium install must be NON-FATAL: no `exit 1` on exhaustion — warn and continue so the non-browser tests still run',
+    ).toBe(false);
+  });
+
+  it('emits a CI warning when chromium is unavailable (so the failure is visible, not silent)', () => {
+    const step = shardChromiumStep();
+    // Non-fatal must not mean silent: surface the exhaustion as a GitHub warning
+    // annotation so the partial run is explained in the job summary.
+    expect(
+      /::warning::/.test(step),
+      'the shard chromium install must `echo "::warning::..."` on exhaustion so the partial run is visible',
+    ).toBe(true);
+  });
+});
