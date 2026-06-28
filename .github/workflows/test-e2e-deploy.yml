@@ -706,15 +706,20 @@ jobs:
       # and we will not patch run-tests.js source.
       #
       # FIX (a jest-BINARY shim, not a source patch): run-tests.js spawns the launcher
-      # `next.js/node_modules/.bin/jest` (a symlink → next.js/node_modules/jest/bin/jest.js).
-      # We move the real jest aside and drop an executable shim at that bin path. The
-      # shim execs the REAL jest, but when the args contain a `.test.` positional file
-      # path it INJECTS `--runTestsByPath` so those positionals run as literal paths.
-      # It only injects when a `.test.` positional is present (so run-tests.js's other
-      # jest invocations, if any, are untouched), passes through ALL original args +
-      # env, and is idempotent (a sentinel guards against double-shimming).
+      # `next.js/node_modules/.bin/jest`. In THIS pnpm layout that .bin entry is NOT a
+      # symlink to jest's JS CLI — it is a cmd-shim SHELL-SCRIPT wrapper (line 2 is
+      # `basedir=$(dirname ...)`). So a previous attempt that `readlink -f`'d + `cp`'d
+      # the .bin entry grabbed the SHELL WRAPPER, and running it through node threw
+      # `SyntaxError: missing ) after argument list` (node parsing shell as JS).
       #
-      # Ordered AFTER the harness-intact verify (the real jest must exist to readlink)
+      # CORRECT FIX: replace the .bin/jest launcher with a fresh regular Node shim that
+      # SELF-RESOLVES jest's real JS CLI at runtime via `require.resolve('jest/bin/jest.js')`
+      # (falling back to `jest-cli/bin/jest.js`) and runs THAT with node — never the
+      # wrapper. The shim INJECTS `--runTestsByPath` only when a `.test.` positional is
+      # present (run-tests.js's other jest calls, if any, are untouched), passes through
+      # ALL original args + env, and is idempotent (re-runs detect the existing shim).
+      #
+      # Ordered AFTER the harness-intact verify (jest must be installed to resolve)
       # and BEFORE run-tests.js (the shim must be in place when the launcher is spawned).
       - name: Install jest --runTestsByPath shim (positional test paths run as literal files)
         working-directory: next.js
@@ -725,30 +730,19 @@ jobs:
             echo "::error::expected the jest launcher at next.js/$BIN" >&2
             exit 1
           fi
-          # Resolve the REAL jest target robustly (the .bin entry is a symlink to
-          # node_modules/jest/bin/jest.js). readlink -f gives the absolute real path.
-          REAL_JEST="$(readlink -f "$BIN")"
-          SENTINEL="node_modules/.bin/jest.real"
-          # Idempotency: if we already shimmed, the saved real binary exists and the
-          # current bin is our shim — don't double-shim (re-runs / matrix re-entry).
-          if [ -e "$SENTINEL" ] && grep -q 'runTestsByPath shim' "$BIN" 2>/dev/null; then
-            echo "jest --runTestsByPath shim already installed -> $(readlink -f "$SENTINEL")"
+          # Idempotency: if we already replaced .bin/jest with our shim, don't re-shim
+          # (matrix re-entry / re-run). Our shim contains this marker string.
+          if grep -q 'runTestsByPath shim' "$BIN" 2>/dev/null; then
+            echo "jest --runTestsByPath shim already installed (skipping)"
             exit 0
           fi
-          # CRITICAL: $BIN is a SYMLINK into node_modules/jest/bin/jest.js. We must
-          # write the shim AS A NEW REGULAR FILE at the .bin path, NOT through the
-          # symlink (a `cat > "$BIN"` would FOLLOW the link and clobber the real jest,
-          # and the shim's `__dirname` would then resolve to jest/bin — where jest.real
-          # does not exist). So: copy the real jest aside to .bin/jest.real, REMOVE the
-          # symlink, and create a fresh regular shim file at .bin/jest. __dirname then
-          # correctly resolves to node_modules/.bin, where jest.real lives.
-          cp "$REAL_JEST" "$SENTINEL"
-          chmod +x "$SENTINEL"
+          # Remove the cmd-shim wrapper and write a fresh REGULAR Node shim in its place.
+          # We do NOT copy the wrapper aside — the shim self-resolves jest's real JS CLI
+          # via require.resolve, so there is nothing to copy and no wrapper to mis-exec.
           rm -f "$BIN"
           # Write the shim via a STRICTLY-QUOTED heredoc ('SHIM') so the shell performs
-          # NO interpolation of $, backticks, or parens. The shim resolves jest.real at
-          # RUNTIME via __dirname (no shell var baked into the JS), so the body needs no
-          # substitution at all. dedent: the heredoc body sits at column 0 below.
+          # NO interpolation of $, backticks, or parens. The shim needs no shell vars
+          # baked in — it resolves jest at RUNTIME. The heredoc body sits at column 0.
           cat > "$BIN" <<'SHIM'
           #!/usr/bin/env node
           // runTestsByPath shim (knext #147 / A3-3): jest treats a positional test path
@@ -757,9 +751,28 @@ jobs:
           // --runTestsByPath makes positionals literal file paths instead. We inject it
           // ONLY when a `.test.` positional is present, so run-tests.js's other jest
           // calls (if any) are untouched. All original args + env pass through.
-          var path = require('path');
+          //
+          // We resolve jest's REAL JS CLI (NOT the cmd-shim shell wrapper at .bin/jest)
+          // via require.resolve, so node always parses JavaScript — never a shell script.
           var spawnSync = require('child_process').spawnSync;
-          var realJest = path.join(__dirname, 'jest.real');
+          function resolveJestJs() {
+            var paths = [process.cwd(), __dirname];
+            try {
+              return require.resolve('jest/bin/jest.js', { paths: paths });
+            } catch (e) {
+              return require.resolve('jest-cli/bin/jest.js', { paths: paths });
+            }
+          }
+          var jestJs = resolveJestJs();
+          // Loud runtime guard: if the resolved entry is missing, fail with a clear
+          // error rather than a silent SyntaxError from running the wrong target.
+          try {
+            require('fs').accessSync(jestJs);
+          } catch (e) {
+            console.error('A33: could not access resolved jest JS entry: ' + jestJs);
+            process.exit(1);
+          }
+          console.error('A33: real jest JS entry -> ' + jestJs);
           var argv = process.argv.slice(2);
           function isTestPositional(a) {
             return a.charAt(0) !== '-' && /\.test\.[cm]?[jt]sx?$/.test(a);
@@ -768,7 +781,7 @@ jobs:
           var alreadyByPath = argv.indexOf('--runTestsByPath') !== -1;
           var finalArgs =
             hasTestPositional && !alreadyByPath ? ['--runTestsByPath'].concat(argv) : argv;
-          var res = spawnSync(process.execPath, [realJest].concat(finalArgs), {
+          var res = spawnSync(process.execPath, [jestJs].concat(finalArgs), {
             stdio: 'inherit',
             env: process.env,
           });
@@ -788,7 +801,7 @@ jobs:
             echo "::error::the written jest shim is NOT valid JS (node --check failed)" >&2
             exit 1
           fi
-          echo "jest --runTestsByPath shim installed + node --check OK -> $REAL_JEST"
+          echo "jest --runTestsByPath shim installed + node --check OK (self-resolves jest via require.resolve)"
 
       - name: Run official deploy tests (knext adapter)
         working-directory: next.js

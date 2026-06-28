@@ -1334,13 +1334,39 @@ describe('compat-suite installs a jest --runTestsByPath shim (test-e2e-deploy.ym
     ).toBe(true);
   });
 
-  it('moves the REAL jest aside (readlink -f) so the shim can exec it', () => {
+  it('self-resolves jest via require.resolve (NOT readlink/cp of the cmd-shim wrapper)', () => {
     const step = shimStep();
-    // The .bin/jest entry is a symlink to node_modules/jest/bin/jest.js; resolve the
-    // real target robustly before replacing the launcher.
+    // In this pnpm layout .bin/jest is a cmd-shim SHELL wrapper, not a symlink to the
+    // JS CLI. Copying that wrapper aside and running it with node throws a SyntaxError
+    // (node parsing shell as JS). The shim must instead resolve jest's REAL JS entry at
+    // runtime via require.resolve('jest/bin/jest.js') (fallback jest-cli/bin/jest.js).
     expect(
-      /readlink\s+-f/.test(step),
-      'the shim step must resolve the real jest target via `readlink -f`',
+      /require\.resolve\(\s*['"]jest\/bin\/jest\.js['"]/.test(step),
+      "the shim must require.resolve('jest/bin/jest.js') to find the real JS CLI",
+    ).toBe(true);
+    expect(
+      /require\.resolve\(\s*['"]jest-cli\/bin\/jest\.js['"]/.test(step),
+      "the shim must fall back to require.resolve('jest-cli/bin/jest.js')",
+    ).toBe(true);
+    // The broken approach (readlink/cp of the .bin entry) must be gone — it grabbed
+    // the shell wrapper and produced the SyntaxError.
+    expect(
+      /readlink\s+-f\s+"?\$BIN"?/.test(step) || /jest\.real/.test(step),
+      'the shim step must NOT readlink/cp the .bin wrapper aside (that grabbed the shell cmd-shim)',
+    ).toBe(false);
+  });
+
+  it('guards the resolved jest entry at runtime (accessSync + loud exit, not a silent SyntaxError)', () => {
+    const step = shimStep();
+    // After resolving, the shim must accessSync the entry and exit 1 with a clear
+    // message if it is missing — so a bad resolve surfaces loudly.
+    expect(
+      /accessSync\(\s*jestJs\s*\)/.test(step),
+      'the shim must accessSync the resolved jest JS entry before spawning',
+    ).toBe(true);
+    expect(
+      /A33:\s*real jest JS entry/.test(step),
+      'the shim must log "A33: real jest JS entry -> <path>" so CI proves it runs the .js, not a wrapper',
     ).toBe(true);
   });
 
@@ -1366,9 +1392,10 @@ describe('compat-suite installs a jest --runTestsByPath shim (test-e2e-deploy.ym
 
   it('is idempotent (does not double-shim on a re-run)', () => {
     const step = shimStep();
-    // A sentinel/guard must prevent re-shimming an already-shimmed launcher.
+    // A marker/guard must prevent re-shimming an already-shimmed launcher (the shim
+    // body contains the `runTestsByPath shim` marker the step greps for).
     expect(
-      /already\s+installed|jest\.real/.test(step),
+      /already\s+installed/.test(step),
       'the shim step must be idempotent (guard against double-shimming)',
     ).toBe(true);
   });
@@ -1381,16 +1408,14 @@ describe('compat-suite installs a jest --runTestsByPath shim (test-e2e-deploy.ym
     ).toBe(true);
   });
 
-  it('removes the symlink before writing a fresh regular shim file (does not clobber real jest)', () => {
+  it('removes the .bin/jest wrapper before writing a fresh regular shim file', () => {
     const step = shimStep();
-    // node_modules/.bin/jest is a SYMLINK into node_modules/jest/bin/jest.js. A
-    // `cat > "$BIN"` would follow the link and overwrite the real jest, and the
-    // shim's __dirname would then resolve to jest/bin where jest.real is absent.
-    // The step must `rm -f` the symlink first so the shim is a fresh regular file
-    // at .bin/jest, with __dirname = .bin (where jest.real lives).
+    // node_modules/.bin/jest is a cmd-shim shell wrapper. The step must `rm -f` it
+    // first so the shim is written as a fresh regular Node file at .bin/jest (a
+    // `cat > "$BIN"` onto a symlink would otherwise follow it and clobber the target).
     expect(
       /rm\s+-f\s+"?\$BIN"?/.test(step),
-      'the shim step must `rm -f "$BIN"` (the symlink) before writing the regular shim file',
+      'the shim step must `rm -f "$BIN"` (the cmd-shim wrapper) before writing the regular shim file',
     ).toBe(true);
   });
 
