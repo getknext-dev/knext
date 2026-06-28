@@ -4,8 +4,19 @@
  * readable summary artifact (#89, ADR-0007 A3-2). Unblocks #41 (publish the matrix
  * honestly): the matrix publisher consumes {passed, failed, excluded, ref, shard}.
  *
- * `node run-tests.js --type e2e` uses a jest reporter; the authoritative line is:
- *     Tests:       3 failed, 41 passed, 2 skipped, 46 total
+ * Two output shapes must be parsed:
+ *
+ *  (1) jest reporter tally (per-suite jest runs):
+ *        Tests:       3 failed, 41 passed, 2 skipped, 46 total
+ *
+ *  (2) run-tests.js AGGREGATE output (NEXT_TEST_MODE=deploy, what this gate runs).
+ *      run-tests.js is NOT jest's default reporter — it spawns jest per test FILE
+ *      and prints its OWN per-file result lines, never a `Tests:` tally:
+ *        pass:  "<file> finished on retry <i>/<n> in <t>s"  (run-tests.js:676)
+ *        fail:  "<file> failed to pass within <n> retries"  (run-tests.js:703)
+ *      A3-3 (#147): the old jest-only parser reported {passed:0,failed:0} for a
+ *      shard where a real deploy test FAILED (build "failed with code: 1") — a
+ *      false-green. We MUST count these per-file markers so failures are honest.
  *
  * Usage (in CI, per shard):
  *   node scripts/e2e-summary.mjs \
@@ -25,8 +36,25 @@ import { readFileSync, writeFileSync } from 'node:fs';
  */
 export function summarize(runnerOutput, meta) {
   const text = String(runnerOutput ?? '');
-  const passed = matchCount(text, /(\d+)\s+passed/);
-  const failed = matchCount(text, /(\d+)\s+failed/);
+
+  // (1) jest reporter tally — authoritative when present (per-suite jest runs).
+  const jestPassed = matchCount(text, /(\d+)\s+passed/);
+  const jestFailed = matchCount(text, /(\d+)\s+failed/);
+
+  // (2) run-tests.js aggregate per-file markers (NEXT_TEST_MODE=deploy). Count
+  // DISTINCT test FILES so a test that retries N times is tallied exactly once.
+  const runTestsPassed = countTestFiles(text, /^(\S+\.test\.\S+)\s+finished on retry\s+\d+\/\d+/gm);
+  const runTestsFailed = countTestFiles(
+    text,
+    /^(\S+\.test\.\S+)\s+failed to pass within\s+\d+\s+retries/gm,
+  );
+
+  // Prefer whichever shape actually reported results. The two never co-occur in
+  // a real run, but if both somehow appear, sum them — never silently drop a
+  // failure (an under-count here is the false-green A3-3 exists to prevent).
+  const passed = jestPassed + runTestsPassed;
+  const failed = jestFailed + runTestsFailed;
+
   return {
     passed,
     failed,
@@ -39,6 +67,15 @@ export function summarize(runnerOutput, meta) {
 function matchCount(text, re) {
   const m = text.match(re);
   return m ? Number(m[1]) : 0;
+}
+
+/** Count UNIQUE test-file paths captured by a global per-file marker regex. */
+function countTestFiles(text, re) {
+  const files = new Set();
+  for (const m of text.matchAll(re)) {
+    if (m[1]) files.add(m[1]);
+  }
+  return files.size;
 }
 
 // ── CLI ───────────────────────────────────────────────────────────────────────
