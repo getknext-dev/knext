@@ -321,3 +321,106 @@ describe('scripts/e2e-summary.mjs — phantom infra-abort vs real failure (A3-3,
     expect(s.notRun).toBe(0);
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// A3-3 (#147, run 28318485456 — the GROUND-TRUTH fixture). The prior phantom
+// detector FAILED on the REAL shard log and still reported {failed:1,notRun:0}.
+// Two real-world properties of the actual run-tests.js deploy stdout broke it,
+// NEITHER of which the synthetic fixtures above exercised:
+//
+//  (1) The jest invocation echo prints `JEST_JUNIT_OUTPUT_NAME=<file>` where the
+//      file path is the UNDERSCORE-joined form (run-tests.js:555,
+//      `test.file.replaceAll('/', '_')`), e.g.
+//        JEST_JUNIT_OUTPUT_NAME=test_e2e_404-page-router_index.test.ts
+//      A naive `\S*\.test\.\w+` scope regex captures THAT underscore form as the
+//      "current file" — which never equals the SLASH-form key the
+//      `<file> failed to pass within N retries` marker uses, so the phantom set and
+//      the failure set never intersect → the phantom is mis-counted as `failed`.
+//
+//  (2) run-tests.js runs the shard CONCURRENTLY, so two files' output INTERLEAVES
+//      (`Starting A`, `Starting B`, then A's `❌ … output` group, then B's). Scope
+//      must follow run-tests.js's OWN group boundaries (`❌ <file> output` …
+//      `end of <file> output`), inside which a file's `No tests found` always sits,
+//      rather than the last-seen `.test.` token on any line.
+//
+// This fixture is a faithful, de-timestamped slice of run 28318485456 shard 1/4:
+// two files, both phantom infra-aborts (jest `No tests found`), interleaved, WITH
+// the underscore JEST_JUNIT echo line. The fix must surface BOTH as notRun, 0 fail.
+const SAMPLE_DEPLOY_REAL_INTERLEAVED_PHANTOM = `
+total: 179
+Starting test/e2e/404-page-router/index.test.ts retry 0/2
+Starting test/e2e/app-dir/actions-allowed-origins/app-action-allowed-origins.test.ts retry 0/2
+❌ test/e2e/404-page-router/index.test.ts output:
+HEADLESS=true NEXT_TELEMETRY_DISABLED=1 CI= JEST_JUNIT_OUTPUT_NAME=test_e2e_404-page-router_index.test.ts JEST_SUITE_NAME=deploy:1/4:e2e:test/e2e/404-page-router/index.test.ts /next.js/node_modules/.bin/jest '--ci' '--runInBand' '--forceExit' '--verbose' 'test/e2e/404-page-router/index.test.ts'
+No tests found, exiting with code 1
+In /home/runner/work/knext/knext/next.js
+  1706 files checked.
+  testMatch: **/*.test.js, **/*.test.ts, **/*.test.jsx, **/*.test.tsx - 1706 matches
+Pattern: test/e2e/404-page-router/index.test.ts - 0 matches
+end of test/e2e/404-page-router/index.test.ts output
+##[group]❌ test/e2e/app-dir/actions-allowed-origins/app-action-allowed-origins.test.ts output
+HEADLESS=true JEST_JUNIT_OUTPUT_NAME=test_e2e_app-dir_actions-allowed-origins_app-action-allowed-origins.test.ts JEST_SUITE_NAME=deploy:1/4:e2e:test/e2e/app-dir/actions-allowed-origins/app-action-allowed-origins.test.ts /next.js/node_modules/.bin/jest '--ci' '--runInBand' '--forceExit' '--verbose' 'test/e2e/app-dir/actions-allowed-origins/app-action-allowed-origins.test.ts'
+No tests found, exiting with code 1
+Pattern: test/e2e/app-dir/actions-allowed-origins/app-action-allowed-origins.test.ts - 0 matches
+end of test/e2e/app-dir/actions-allowed-origins/app-action-allowed-origins.test.ts output
+Starting test/e2e/app-dir/actions-allowed-origins/app-action-allowed-origins.test.ts retry 1/2
+Starting test/e2e/404-page-router/index.test.ts retry 1/2
+##[group]❌ test/e2e/app-dir/actions-allowed-origins/app-action-allowed-origins.test.ts output
+No tests found, exiting with code 1
+Pattern: test/e2e/app-dir/actions-allowed-origins/app-action-allowed-origins.test.ts - 0 matches
+end of test/e2e/app-dir/actions-allowed-origins/app-action-allowed-origins.test.ts output
+##[group]❌ test/e2e/404-page-router/index.test.ts output
+No tests found, exiting with code 1
+Pattern: test/e2e/404-page-router/index.test.ts - 0 matches
+end of test/e2e/404-page-router/index.test.ts output
+Starting test/e2e/app-dir/actions-allowed-origins/app-action-allowed-origins.test.ts retry 2/2
+Starting test/e2e/404-page-router/index.test.ts retry 2/2
+##[group]❌ test/e2e/app-dir/actions-allowed-origins/app-action-allowed-origins.test.ts output
+No tests found, exiting with code 1
+Pattern: test/e2e/app-dir/actions-allowed-origins/app-action-allowed-origins.test.ts - 0 matches
+end of test/e2e/app-dir/actions-allowed-origins/app-action-allowed-origins.test.ts output
+##[group]❌ test/e2e/404-page-router/index.test.ts output
+No tests found, exiting with code 1
+Pattern: test/e2e/404-page-router/index.test.ts - 0 matches
+end of test/e2e/404-page-router/index.test.ts output
+test/e2e/app-dir/actions-allowed-origins/app-action-allowed-origins.test.ts failed due to Error: failed with code: 1
+test/e2e/app-dir/actions-allowed-origins/app-action-allowed-origins.test.ts failed to pass within 2 retries
+test/e2e/404-page-router/index.test.ts failed due to Error: failed with code: 1
+test/e2e/404-page-router/index.test.ts failed to pass within 2 retries
+exiting with code 1
+`;
+
+describe('scripts/e2e-summary.mjs — GROUND-TRUTH real shard log (A3-3, #147 run 28318485456)', () => {
+  it('counts BOTH interleaved "No tests found" aborts as notRun, 0 failed (the false-RED the prior fix missed)', () => {
+    const s = summarize(SAMPLE_DEPLOY_REAL_INTERLEAVED_PHANTOM, {
+      ref: 'v16.0.3',
+      shard: '1/4',
+      excluded: 5,
+    });
+    // Both files are phantom infra-aborts: jest never located them, no next build,
+    // no server boot, no assertion. They must be notRun, NOT failed.
+    expect(s.failed).toBe(0);
+    expect(s.notRun).toBe(2);
+    expect(s.passed).toBe(0);
+  });
+
+  it('is not fooled by the underscore JEST_JUNIT_OUTPUT_NAME echo (scope must use the slash form)', () => {
+    // Single-file slice carrying the exact underscore env-echo line that hijacked
+    // the prior scope tracker. The slash-keyed failure marker must still resolve to
+    // the same file the phantom set keys on.
+    const slice = `
+total: 1
+Starting test/e2e/404-page-router/index.test.ts retry 0/2
+❌ test/e2e/404-page-router/index.test.ts output:
+HEADLESS=true JEST_JUNIT_OUTPUT_NAME=test_e2e_404-page-router_index.test.ts /next.js/node_modules/.bin/jest '--ci' 'test/e2e/404-page-router/index.test.ts'
+No tests found, exiting with code 1
+Pattern: test/e2e/404-page-router/index.test.ts - 0 matches
+end of test/e2e/404-page-router/index.test.ts output
+test/e2e/404-page-router/index.test.ts failed to pass within 2 retries
+exiting with code 1
+`;
+    const s = summarize(slice, { ref: 'v16.0.3', shard: '1/4', excluded: 0 });
+    expect(s.failed).toBe(0);
+    expect(s.notRun).toBe(1);
+  });
+});

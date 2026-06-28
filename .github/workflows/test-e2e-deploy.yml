@@ -641,84 +641,56 @@ jobs:
         env:
           NATIVE_DIR: ${{ github.workspace }}/next-swc-native
 
-      # #147 / A3-3 — RECONCILE jest's rootDir so the SELECTED deploy tests are
-      # actually FOUND. Run 28317739829: with the manifest selecting 179 tests, SWC
-      # loading, and the @next/* closure hydrated, EVERY shard still aborted each
-      # test in ~2s with `No tests found … Pattern: test/e2e/<…>/index.test.ts - 0
-      # matches`, exit 1 — `next build` NEVER ran, scripts/e2e-deploy.sh was NEVER
-      # invoked, and the 5 "failures" were PHANTOM jest aborts, not adapter gaps.
+      # #147 / A3-3 — DO NOT override next.js's jest.config.js.
       #
-      # ROOT CAUSE: run-tests.js globs the test list with `cwd: __dirname`
-      # (run-tests.js:302), so it passes jest a REPO-ROOT-relative positional path
-      # (`test/e2e/<…>/index.test.ts`). It then spawns jest with NO `cwd`, so jest
-      # runs from `next.js/` and auto-discovers `next.js/jest.config.js`, whose
-      # `rootDir` is the `test` SUBDIR. With rootDir at `next.js/test`, jest matches
-      # the positional pattern against candidate paths RELATIVE to rootDir
-      # (`e2e/<…>/…`, no leading `test/`) — so `test/e2e/<…>` matches 0 of the 1706
-      # LOCATED test files (the log's `Pattern: … - 0 matches` with `1706 matches`
-      # for testMatch is the smoking gun: files found, pattern doubled-prefix).
+      # Run 28318485456 DISPROVED the prior theory. The previous step overwrote
+      # `next.js/jest.config.js` to move `rootDir` from `test` to the repo root, on
+      # the theory that the harness's repo-root-relative positional
+      # (`test/e2e/<…>/index.test.ts`) only matched at rootDir=repo-root. That
+      # override SHIPPED and STILL produced `No tests found … Pattern: … - 0 matches`
+      # on every shard — so rootDir was never the variable.
       #
-      # FIX: overwrite `next.js/jest.config.js` with an override that STILL wraps
-      # config via `next/jest` (so the SWC transform + the css/image/server-only
-      # module mocks stay intact) but sets `rootDir` to the next.js REPO ROOT and
-      # rewrites every `<rootDir>/…` path (roots, setupFilesAfterEnv, modulePaths)
-      # to be repo-root-relative. With rootDir at the repo root, the harness's
-      # `test/e2e/<…>` positional path reconciles and jest LOCATES the selected
-      # files → run-tests.js runs them → e2e-deploy.sh executes `next build` + boots
-      # the server for REAL pass/fail. We do NOT touch run-tests.js (a fresh upstream
-      # checkout) and we deliberately do NOT suppress a no-tests-found abort into a
-      # 0-exit (that would be a false-green). The override is a deliberate,
-      # single-file, documented reconciliation — flagged for the architect
-      # (ADR-0007 A3-3).
-      - name: Reconcile jest rootDir to the next.js repo root (so selected tests are found)
+      # GROUND TRUTH (vercel/next.js @ v16.0.3, verified against the real source +
+      # a faithful jest@29.7.0 reproduction):
+      #   • run-tests.js:301-304 globs the test list with `cwd: __dirname` (the next.js
+      #     REPO ROOT), so each `test.file` is the repo-root-relative `test/e2e/<…>`.
+      #   • run-tests.js:520 passes `test.file` as a jest POSITIONAL; :600 spawns jest
+      #     with NO `cwd` (so cwd = next.js/) and NO `--config` (so jest auto-discovers
+      #     next.js/jest.config.js).
+      #   • next.js's UPSTREAM jest.config.js uses `rootDir: 'test'`. jest@29.7.0
+      #     (next.js's pinned jest, pnpm-lock.yaml) matches the positional as a
+      #     case-insensitive RegExp against the ABSOLUTE test path
+      #     (jest SearchSource.js + jest-util/testPathPatternToRegExp). A faithful
+      #     local repro (real next/jest, the real 404-page-router fixture, the full
+      #     packages/next/src haste collisions, CI=1) shows the UPSTREAM config FINDS
+      #     and runs `test/e2e/404-page-router/index.test.ts` — `--listTests` lists it.
+      #     The override (rootDir='.') ALSO matches locally; neither is the lever.
+      #
+      # So the override is UNNECESSARY *and* unproven — next.js itself runs exactly
+      # these deploy tests with the upstream `rootDir: 'test'` config (the
+      # `test-deploy-*` package scripts). We therefore STOP overwriting it and let the
+      # upstream config stand. We keep only a fast sanity check that the harness paths
+      # the deploy tests import are present (a missing checkout is the one remaining
+      # explanation a green run would rule in/out), and a guard that flags it loudly if
+      # upstream ever moves rootDir — without silently rewriting upstream's file.
+      - name: Verify next.js jest harness is intact (do NOT override the upstream config)
         working-directory: next.js
         run: |
           set -euo pipefail
-          # Sanity: the upstream config we are overriding must root at `test` (the
-          # exact mismatch we are fixing). If upstream ever moves rootDir to the
-          # repo root itself, this guard surfaces it instead of silently masking.
-          if ! grep -qE "rootDir:\s*'test'" jest.config.js; then
-            echo "::warning::next.js jest.config.js no longer roots at 'test'; verify the rootDir reconcile is still needed"
-          fi
-          cat > jest.config.js <<'EOF'
-          // GENERATED by knext compat-suite (#147 / ADR-0007 A3-3). Overrides the
-          // upstream next.js test/-rooted jest config so the deploy harness's
-          // repo-root-relative positional path (`test/e2e/<…>/index.test.ts`) is
-          // FOUND. Mirrors next.js's own config but with rootDir at the REPO ROOT.
-          const nextJest = require('next/jest')
-          const createJestConfig = nextJest()
-          /** @type {import('jest').Config} */
-          const customJestConfig = {
-            displayName: process.env.IS_WEBPACK_TEST ? 'webpack' : 'Turbopack',
-            testMatch: ['**/*.test.js', '**/*.test.ts', '**/*.test.jsx', '**/*.test.tsx'],
-            // rootDir at the REPO ROOT (was 'test') so the harness's `test/e2e/…`
-            // positional path reconciles — THIS is the #147 A3-3 fix.
-            rootDir: '.',
-            // Paths below were `<rootDir>/…` against rootDir=test; rebased onto the
-            // repo-root rootDir by prefixing `test/`.
-            setupFilesAfterEnv: ['<rootDir>/test/jest-setup-after-env.ts'],
-            verbose: true,
-            roots: [
-              '<rootDir>/test',
-              '<rootDir>/packages/next/src/',
-              '<rootDir>/packages/next-codemod/',
-              '<rootDir>/packages/eslint-plugin-internal/',
-              '<rootDir>/packages/font/src/',
-            ],
-            modulePathIgnorePatterns: ['/\\.next/'],
-            modulePaths: ['<rootDir>/test/lib'],
-            transformIgnorePatterns: ['/next[/\\\\]dist/', '/\\.next/'],
-            moduleNameMapper: {
-              '@next/font/(.*)': '@next/font/$1',
-            },
-          }
-          module.exports = createJestConfig(customJestConfig)
-          EOF
-          # Sanity: the moved-rootDir paths must exist (or jest silently finds nothing).
+          # The deploy tests + their module-scope imports live here; if the checkout
+          # didn't materialize them, jest legitimately finds nothing (and that is a
+          # checkout bug, not a jest-config bug).
+          test -f jest.config.js
           test -f test/jest-setup-after-env.ts
           test -d test/lib
           test -d test/e2e
-          node -e "require('./jest.config.js'); console.log('jest config override written (rootDir=repo root)')"
+          test -f test/e2e/404-page-router/index.test.ts
+          # Surface (don't mask) an upstream rootDir change: the harness contract above
+          # is reasoned against `rootDir: 'test'`. We do not act on it — purely a signal.
+          if ! grep -qE "rootDir:\s*'test'" jest.config.js; then
+            echo "::warning::next.js jest.config.js no longer roots at 'test'; re-verify the run-tests.js positional-path contract"
+          fi
+          node -e "require('./jest.config.js'); console.log('upstream next.js jest.config.js loads OK (rootDir untouched)')"
 
       - name: Run official deploy tests (knext adapter)
         working-directory: next.js

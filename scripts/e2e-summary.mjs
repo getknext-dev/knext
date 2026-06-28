@@ -108,34 +108,52 @@ export function summarize(runnerOutput, meta) {
  * `No tests found, exiting with code 1` — i.e. jest never located the file, so the
  * "failure" is a phantom infra-abort, not a real deploy-test result.
  *
- * run-tests.js groups each file's output under a `❌ <file> output` header
- * (run-tests.js:624/628). We walk the log, tracking the "current file" from those
- * headers (and from the per-attempt JEST_SUITE_NAME / jest-command echo, which also
- * names the file), and mark a file phantom when a `No tests found` line appears
- * while it is current. Falls back to a whole-log heuristic only when no file scope
- * can be established (so a phantom is never silently reclassified as a real fail).
+ * GROUND TRUTH (run 28318485456 — the fix the prior version got wrong): scope must
+ * follow run-tests.js's OWN output-group boundaries, NOT the last `.test.` token on
+ * any line. run-tests.js (CI, concurrent) interleaves files and brackets each
+ * file's captured child output between:
+ *   open:  `❌ <file> output:`  /  `##[group]❌ <file> output`        (run-tests.js:624/628)
+ *   close: `end of <file> output`                                     (run-tests.js:644/646)
+ * The `<file>` in BOTH boundaries is the SLASH form — the SAME key the
+ * `<file> failed to pass within N retries` failure marker uses. The previous tracker
+ * instead grabbed any `\S*.test.\w+` token, which (a) captured the UNDERSCORE-joined
+ * `JEST_JUNIT_OUTPUT_NAME=test_e2e_…_index.test.ts` echo (run-tests.js:555,
+ * `replaceAll('/','_')`) — a key that never matches the slash-form failure marker,
+ * so the phantom was mis-counted as a real `failed` — and (b) mis-attributed lines
+ * across the concurrent interleave. We now ONLY (re)scope on the group boundaries,
+ * and we credit a `No tests found` line ONLY while a group is OPEN (the abort always
+ * prints inside the failing file's own group), so neither the underscore echo nor
+ * interleaving can corrupt the attribution.
  * @param {string} text
  * @returns {Set<string>}
  */
 function filesWithNoTestsFound(text) {
   const phantom = new Set();
   const lines = text.split('\n');
-  // A line that re-scopes "the current file": the run-tests.js output-group
-  // header, or the per-attempt jest invocation echo / JEST_SUITE_NAME, both of
-  // which carry the `<…>.test.<ext>` path. The leading boundary excludes quotes
-  // and path separators that the jest-command echo wraps the path in (e.g.
-  // `'test/e2e/…/index.test.ts'`) so the captured path NORMALIZES to the same
-  // string the `failed to pass within` marker uses (no surrounding quote).
-  const fileScopeRe = /([\w./-]+\.test\.(?:js|ts|jsx|tsx))\b/;
+  // run-tests.js output-group OPEN header (with or without the GHA ##[group] prefix
+  // and the trailing colon variant). Captures the SLASH-form file path.
+  const groupOpenRe = /❌\s+(\S+\.test\.(?:js|ts|jsx|tsx))\s+output\b/;
+  // run-tests.js output-group CLOSE marker.
+  const groupCloseRe = /^(?:.*\bend of\s+)(\S+\.test\.(?:js|ts|jsx|tsx))\s+output\b/;
   const noTestsRe = /No tests found, exiting with code 1/;
   let current = null;
   for (const line of lines) {
-    if (noTestsRe.test(line)) {
-      if (current) phantom.add(current);
+    // A close marker ends the current scope (after we've had a chance to credit a
+    // No-tests abort inside it). Match close BEFORE open: a single line is never
+    // both, but ordering keeps intent explicit.
+    const close = line.match(groupCloseRe);
+    if (close) {
+      current = null;
       continue;
     }
-    const m = line.match(fileScopeRe);
-    if (m) current = m[1];
+    const open = line.match(groupOpenRe);
+    if (open) {
+      current = open[1];
+      continue;
+    }
+    if (current && noTestsRe.test(line)) {
+      phantom.add(current);
+    }
   }
   return phantom;
 }

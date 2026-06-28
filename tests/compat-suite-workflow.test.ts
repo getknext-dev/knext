@@ -1177,38 +1177,38 @@ describe('compat-suite hydrates the prebuilt @next/swc native binary (test-e2e-d
   });
 });
 
-// ── A3-3: reconcile jest rootDir so the SELECTED deploy tests are actually FOUND
-// (#147, run 28317739829) ──────────────────────────────────────────────────────
+// ── A3-3: the workflow must NOT override next.js's jest.config.js (#147, GROUND
+// TRUTH from run 28318485456) ────────────────────────────────────────────────────
 //
-// THE systemic blocker after #157–#164: the manifest SELECTS 179 real deploy
-// tests, SWC native loads, the @next/* closure hydrates — but jest finds 0 of
-// them and aborts each in ~2s with:
-//   No tests found, exiting with code 1
-//   In /home/runner/work/knext/knext/next.js/test
-//   13883 files checked.
-//   testMatch: **/*.test.js,**/*.test.ts,… - 1706 matches
-//   Pattern: test/e2e/<…>/index.test.ts - 0 matches
-// run-tests.js (run-tests.js:302 `glob({cwd: __dirname})`) passes the test path
-// REPO-ROOT-relative (`test/e2e/…`), then spawns jest with NO cwd → jest runs
-// from `next.js/` and auto-discovers `next.js/jest.config.js`, whose `rootDir` is
-// `test`. With rootDir at `next.js/test`, jest matches the positional path against
-// candidate paths RELATIVE to rootDir (`e2e/…`, no leading `test/`), so the
-// `test/e2e/…` pattern matches 0 of the 1706 located test files. `next build`
-// NEVER runs and scripts/e2e-deploy.sh is NEVER invoked — the 5 reported
-// "failures" are PHANTOM jest aborts, not knext adapter gaps.
+// The PRIOR theory — that jest found 0 tests because next.js's `rootDir: 'test'`
+// made the harness's repo-root-relative positional (`test/e2e/<…>/index.test.ts`)
+// miss — was DISPROVEN. A shard step that overwrote jest.config.js with
+// `rootDir: '.'` SHIPPED and STILL produced `No tests found … - 0 matches` on every
+// shard. So rootDir was never the variable.
 //
-// FIX: a shard step writes an OVERRIDE `next.js/jest.config.js` that still uses
-// `next/jest` (so SWC transform + module mocks are intact) but sets `rootDir` to
-// the next.js REPO ROOT and rewrites the `<rootDir>/…` roots / setup / modulePaths
-// accordingly. With rootDir at the repo root, the harness's `test/e2e/…` positional
-// path reconciles and jest LOCATES the selected files → run-tests.js runs them →
-// scripts/e2e-deploy.sh executes `next build` + boots the server for real pass/fail.
+// GROUND TRUTH (vercel/next.js @ v16.0.3 source + jest@29.7.0 reproduction):
+//   • run-tests.js:301-304 globs with `cwd: __dirname` (next.js repo root) → each
+//     `test.file` is repo-root-relative `test/e2e/<…>`.
+//   • run-tests.js:520 passes it as a jest POSITIONAL; :600 spawns jest with no
+//     `cwd`, no `--config` → jest auto-discovers next.js/jest.config.js.
+//   • jest@29.7.0 matches the positional as a case-insensitive RegExp against the
+//     ABSOLUTE path (SearchSource.js + testPathPatternToRegExp). A faithful repro
+//     (real next/jest, the real 404-page-router fixture, full packages/next/src haste
+//     collisions, CI=1) shows BOTH the UPSTREAM `rootDir: 'test'` config AND the
+//     override `rootDir: '.'` config FIND and run the test — `--listTests` lists it.
+//     Neither rootDir is the lever; the override was unnecessary AND unproven.
+//
+// CORRECTION: stop overwriting upstream's jest.config.js. next.js itself runs exactly
+// these deploy tests with the upstream config (its `test-deploy-*` scripts). The
+// workflow keeps a fast "harness intact" check (the deploy test FILES + module-scope
+// import dirs must be present; a missing checkout is the only remaining honest
+// explanation for 0 tests) but MUST NOT rewrite next.js/jest.config.js.
 // FORBIDDEN (would be a false-green): --passWithNoTests or anything that turns
 // "no tests found" into a 0-exit. The success signal is real `[e2e-deploy]` markers
-// + `next build` in the log, not a suppressed abort.
-describe('compat-suite reconciles jest rootDir so deploy tests are FOUND (test-e2e-deploy.yml, #147 A3-3)', () => {
-  /** The shard step that writes the rootDir-reconciling jest config override. */
-  function rootDirStep(): string {
+// + `next build` in the log, not a suppressed abort or a config rewrite.
+describe('compat-suite does NOT override next.js jest.config.js (test-e2e-deploy.yml, #147 A3-3 ground truth)', () => {
+  /** The shard step that verifies the harness is intact (without rewriting config). */
+  function harnessStep(): string {
     const block = deployTestsJobBlock();
     const lines = block.split('\n');
     const blocks: string[] = [];
@@ -1222,58 +1222,55 @@ describe('compat-suite reconciles jest rootDir so deploy tests are FOUND (test-e
       cur.push(line);
     }
     flush();
-    // Anchor on the step NAME so we don't accidentally pick a sibling step that
-    // merely MENTIONS rootDir/jest.config in a comment.
-    return blocks.find((b) => /-\s+name:[^\n]*[Rr]econcile jest rootDir/.test(b)) ?? '';
+    return blocks.find((b) => /-\s+name:[^\n]*jest harness is intact/i.test(b)) ?? '';
   }
 
-  it('has a shard step that overrides next.js jest.config.js to reconcile rootDir', () => {
-    const step = rootDirStep();
-    expect(step, 'expected a shard step that rewrites the jest config rootDir').not.toBe('');
-    expect(
-      /jest\.config\.js/.test(step),
-      'the reconcile step must target next.js/jest.config.js',
-    ).toBe(true);
+  it('has a shard step that verifies the next.js jest harness is intact', () => {
+    const step = harnessStep();
+    expect(step, 'expected a "jest harness is intact" verification step').not.toBe('');
   });
 
-  it('sets jest rootDir to the next.js repo ROOT (not the test/ subdir)', () => {
-    const step = rootDirStep();
-    // rootDir must move to the repo root so the harness positional path `test/e2e/…`
-    // reconciles. Accept `rootDir: '.'` or an absolute-repo-root assignment.
+  it('does NOT overwrite next.js/jest.config.js (no `cat > jest.config.js` heredoc)', () => {
+    // The smoking gun of the reverted override was a heredoc redirect into the
+    // upstream config. It must be gone from the whole workflow.
     expect(
-      /rootDir\s*:\s*['"]?\.?['"]?/.test(step) || /rootDir.*__dirname/.test(step),
-      'the override must root jest at the next.js repo root',
-    ).toBe(true);
-    // It must NOT re-pin rootDir back to the test/ subdir (the broken state).
-    expect(
-      /rootDir\s*:\s*['"]test['"]/.test(step),
-      'the override must NOT keep rootDir at the test/ subdir',
+      /cat\s*>\s*jest\.config\.js/.test(workflowText()),
+      'the workflow must not rewrite next.js/jest.config.js (upstream rootDir stands)',
     ).toBe(false);
   });
 
-  it('keeps next/jest so SWC transform + module mocks stay intact', () => {
-    const step = rootDirStep();
+  it('does NOT force jest rootDir to the repo root anywhere in the workflow', () => {
+    // No `rootDir: '.'` injection — the prior (disproven) override is fully reverted.
     expect(
-      /next\/jest/.test(step),
-      'the override must still wrap config with next/jest (transform/mocks)',
+      /rootDir\s*:\s*['"]\.['"]/.test(workflowText()),
+      'the workflow must not pin jest rootDir to the repo root',
+    ).toBe(false);
+  });
+
+  it('verifies the selected deploy test FILES are actually present (checkout sanity)', () => {
+    const step = harnessStep();
+    // A missing fixture checkout is the one remaining honest cause of "0 tests";
+    // the step proves the e2e test tree + a representative test file exist.
+    expect(/test\s+-d\s+test\/e2e/.test(step), 'must assert test/e2e exists').toBe(true);
+    expect(
+      /test\s+-f\s+test\/e2e\/[\w./-]+\.test\.ts/.test(step),
+      'must assert a representative deploy test file exists',
     ).toBe(true);
   });
 
   it('NEVER uses --passWithNoTests (that would convert a phantom abort to a false-green)', () => {
-    // Across the WHOLE workflow: a no-tests-found abort must surface honestly,
-    // never be suppressed into a green.
     expect(
       /--passWithNoTests/.test(workflowText()),
       'the harness must not suppress "no tests found" into a pass',
     ).toBe(false);
   });
 
-  it('runs the rootDir reconcile BEFORE run-tests.js (jest reads the config at run time)', () => {
+  it('runs the harness-intact check BEFORE run-tests.js', () => {
     const block = deployTestsJobBlock();
-    const reconcileIdx = block.search(/-\s+name:[^\n]*(rootDir|jest config)[^\n]*/i);
+    const checkIdx = block.search(/-\s+name:[^\n]*jest harness is intact/i);
     const runIdx = block.search(/-\s+name:[^\n]*Run official deploy tests/);
-    expect(reconcileIdx, 'expected a rootDir reconcile step').toBeGreaterThanOrEqual(0);
+    expect(checkIdx, 'expected a harness-intact step').toBeGreaterThanOrEqual(0);
     expect(runIdx, 'expected the run-tests step').toBeGreaterThanOrEqual(0);
-    expect(reconcileIdx < runIdx, 'the rootDir reconcile must come BEFORE run-tests.js').toBe(true);
+    expect(checkIdx < runIdx, 'the harness-intact check must come BEFORE run-tests.js').toBe(true);
   });
 });
