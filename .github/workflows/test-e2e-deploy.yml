@@ -66,8 +66,11 @@ jobs:
     # `next` from the pinned SOURCE; we test against the PUBLISHED package of the
     # same version. Flagged in the PR for review.
     #
-    # The timeout stays generous as headroom, but `npm pack` is now minutes.
-    timeout-minutes: 180
+    # #147 — with the Playwright browser download skipped (the real 40-min hang),
+    # this job is now pnpm RESOLUTION (~seconds) + an `npm pack` of the prebuilt
+    # next (minutes). 60 min is ample headroom; the old 180-min ceiling existed
+    # only to absorb the (now-removed) hanging chromium download.
+    timeout-minutes: 60
     steps:
       - name: Checkout knext
         uses: actions/checkout@v4
@@ -192,29 +195,36 @@ jobs:
       # fetch all 8 @next/swc platform binaries — pure waste in prebuilt mode,
       # where @next/swc arrives from the tarball during each fixture install.
       #
-      # Playwright IS kept: 65 of the 743 e2e test files drive a browser via
-      # `next-webdriver` → `test/lib/browsers/playwright.ts`, and NEXT_TEST_MODE=deploy
-      # does NOT skip the browser, so deploy-eligible browser tests need chromium.
-      # (Caveat noted in the PR: the browser binary installs to ~/.cache/ms-playwright,
-      # OUTSIDE the uploaded `next.js` artifact, so the shard jobs still re-install
-      # it; wiring it into the shards is a separate follow-up, not this fix.)
-      # #147 (the resilience lever) — the slimmed+cached install STILL ran the
-      # full 180-min job timeout and was CANCELLED (not errored) across 3
-      # dispatches: identical 180:00 even after the root-only slim. That
-      # signature is pnpm HANGING on stuck network requests (this CI env shows
-      # repeated Docker Hub / npm-registry timeouts), NOT a fast network failure.
-      # KEY INSIGHT: pnpm's content-addressable store + the restored actions/cache
-      # PERSIST across re-invocations within the SAME job — so a RETRY LOOP with a
-      # PER-ATTEMPT TIMEOUT makes incremental progress: each attempt resumes from
-      # what the prior attempt already downloaded, until one attempt completes
-      # fast. 4 × 40m = 160m of attempt budget stays safely under the 180-min job
-      # ceiling. The pnpm network hardening (NPM_CONFIG_FETCH_*, lowered
-      # NETWORK_CONCURRENCY) makes a single stuck request fail-fast-and-retry
-      # inside pnpm instead of hanging the whole attempt.
-      - name: Setup Next.js test-harness deps + Playwright
+      # #147 (THE root cause — definitive, run 28310661064 install-step log):
+      # `corepack pnpm install` RESOLVES all 3345 packages in ~3 SECONDS
+      # ("resolved 3345, reused 3337, downloaded 0, added 0, done"). The pnpm
+      # install is NOT the bottleneck. Each retry attempt then HUNG for 40 minutes
+      # in the `playwright-chromium` package's POSTINSTALL — downloading the
+      # Chromium browser binary from Playwright's CDN — which timed out (the same
+      # network throttling failing Docker Hub pulls all session), got killed by
+      # the per-attempt timeout, and failed all 4 attempts (`playwright-chromium
+      # install: Failed` / `ELIFECYCLE`). Every prior "infra-bound / 180-min"
+      # conclusion was actually THIS browser download hanging.
+      #
+      # FIX: PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 makes the playwright-chromium
+      # postinstall SKIP the browser fetch, so this install finishes in seconds
+      # (resolution only). The browser binary is only needed when a test actually
+      # drives `next-webdriver`; chromium is therefore installed in the SHARD job
+      # (cached + retry/timeout-wrapped), NOT in this blocking Prepare install.
+      # PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS=1 avoids a host-requirements
+      # probe that can also stall in this CI env.
+      #
+      # The retry loop + pnpm network hardening below STAY as harmless
+      # defense-in-depth (a stuck registry request still fails-fast-and-retries),
+      # but they are no longer the critical path now the browser download is gone.
+      - name: Setup Next.js test-harness deps (skip Playwright browser download)
         working-directory: next.js
         env:
           NEXT_SKIP_NATIVE_POSTINSTALL: '1'
+          # THE fix: skip the playwright-chromium postinstall browser download —
+          # that CDN fetch (not pnpm resolution) is what hung the whole job.
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
+          PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS: '1'
           # Network hardening for the flaky CI registry/network. pnpm honors these
           # NPM_CONFIG_* env vars; they apply to the next.js install below.
           NPM_CONFIG_FETCH_RETRIES: '5'
@@ -225,10 +235,10 @@ jobs:
           # overwhelm the flaky network and trigger more stuck sockets.
           NPM_CONFIG_NETWORK_CONCURRENCY: '8'
         run: |
-          # Retry loop with a per-attempt timeout. The pnpm store + restored cache
-          # persist between attempts, so each attempt resumes from the last one's
-          # progress; we succeed on the first exit-0 attempt and only fail the step
-          # if all attempts exhaust.
+          # Retry loop with a per-attempt timeout. Defense-in-depth only now that
+          # the browser download is skipped — resolution alone finishes in seconds,
+          # but the pnpm store + restored cache persist between attempts so a stuck
+          # registry request still resumes rather than hanging the job.
           attempts=4
           installed=0
           for i in $(seq 1 "$attempts"); do
@@ -247,7 +257,6 @@ jobs:
             echo "pnpm install did not complete within $attempts attempts" >&2
             exit 1
           fi
-          corepack pnpm playwright install chromium --with-deps
 
       # Cache the prepared knext + next.js trees + the prebuilt next tarball for
       # the shard jobs.
@@ -290,6 +299,58 @@ jobs:
         # no resolvable `packageManager` at its root. Keep in sync with package.json.
         with:
           version: 10.4.1
+
+      # #147 — chromium lives HERE, not in the blocking Prepare install. The
+      # Prepare install set PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 (the browser download
+      # was the 40-min hang). The deploy-eligible e2e tests that drive a browser via
+      # `next-webdriver` need chromium, so install it in the shard that uses it —
+      # cached (so the CDN download is not repeated every run) and retry/timeout
+      # wrapped (so a stuck download is bounded + retried, never an open-ended hang).
+      # The cache key is the playwright version resolved from next.js's lockfile.
+      - name: Resolve Playwright version (for the chromium cache key)
+        id: pw
+        working-directory: next.js
+        run: |
+          VERSION="$(corepack pnpm ls playwright-chromium --depth -1 --parseable 2>/dev/null | sed -n 's/.*playwright-chromium@//p' | head -n1)"
+          if [ -z "$VERSION" ]; then
+            VERSION="$(corepack pnpm why playwright-chromium 2>/dev/null | sed -n 's/.*playwright-chromium \([0-9][^ ]*\).*/\1/p' | head -n1)"
+          fi
+          echo "version=${VERSION:-unknown}" >> "$GITHUB_OUTPUT"
+          echo "Resolved playwright-chromium version: ${VERSION:-unknown}"
+
+      - name: Cache Playwright browsers
+        id: pw-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-chromium-${{ runner.os }}-${{ steps.pw.outputs.version }}
+
+      - name: Install Playwright chromium (retry + per-attempt timeout)
+        if: steps.pw-cache.outputs.cache-hit != 'true'
+        working-directory: next.js
+        env:
+          # If the CDN throttles like the rest of this CI env, fail-fast-and-retry
+          # rather than hang: bound each attempt and retry a handful of times.
+          PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS: '1'
+        run: |
+          attempts=4
+          installed=0
+          for i in $(seq 1 "$attempts"); do
+            echo "::group::playwright install chromium attempt $i/$attempts (per-attempt timeout 10m)"
+            if timeout 10m corepack pnpm playwright install chromium --with-deps; then
+              echo "playwright install succeeded on attempt $i"
+              installed=1
+              echo "::endgroup::"
+              break
+            fi
+            echo "playwright install attempt $i failed or timed out; retrying"
+            echo "::endgroup::"
+            sleep 15
+          done
+          if [ "$installed" -ne 1 ]; then
+            echo "playwright install did not complete within $attempts attempts" >&2
+            exit 1
+          fi
 
       - name: Make lifecycle scripts executable
         working-directory: knext
