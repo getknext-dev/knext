@@ -1274,3 +1274,130 @@ describe('compat-suite does NOT override next.js jest.config.js (test-e2e-deploy
     expect(checkIdx < runIdx, 'the harness-intact check must come BEFORE run-tests.js').toBe(true);
   });
 });
+
+// ── A3-3: the jest --runTestsByPath shim (test-e2e-deploy.yml, #147) ────────────
+// GROUND TRUTH (this branch's debug diagnosis): in CI, jest finds 1706 testMatch
+// candidates but the harness's positional pattern `test/e2e/<…>/index.test.ts`
+// matches 0 of them — and this reproduces even with a MINIMAL plain jest config
+// (so it is NOT next-jest / rootDir / config). The file is present + git-tracked.
+// That is the textbook symptom of jest treating the positional as a testPathPattern
+// REGEX over the candidate set rather than a LITERAL file path. jest's own fix is
+// `--runTestsByPath` (positionals = literal paths, bypassing the regex filter).
+// run-tests.js@v16.0.3 spawns the bare jest launcher WITHOUT that flag, and we do
+// NOT patch run-tests.js source.
+//
+// FIX: a jest-BINARY shim injected by the workflow. The launcher run-tests.js calls
+// is next.js/node_modules/.bin/jest (a symlink → node_modules/jest/bin/jest.js). The
+// shim step moves the real jest aside and installs a wrapper at the .bin path that
+// execs the real jest, injecting --runTestsByPath ONLY when a `.test.` positional
+// path is present (so other jest calls are untouched), passing through all args+env,
+// idempotent (no double-shim). These guards lock the shim in.
+describe('compat-suite installs a jest --runTestsByPath shim (test-e2e-deploy.yml, #147 A3-3)', () => {
+  /** The shard step block that installs the jest runTestsByPath shim. */
+  function shimStep(): string {
+    const lines = deployTestsJobBlock().split('\n');
+    const blocks: string[] = [];
+    let current: string[] = [];
+    const flush = () => {
+      if (current.length) blocks.push(current.join('\n'));
+      current = [];
+    };
+    for (const line of lines) {
+      if (/^\s*-\s+name:/.test(line)) flush();
+      current.push(line);
+    }
+    flush();
+    return blocks.find((b) => /-\s+name:[^\n]*runTestsByPath shim/i.test(b)) ?? '';
+  }
+
+  it('has a shard step that installs the jest --runTestsByPath shim', () => {
+    const step = shimStep();
+    expect(step, 'expected a jest --runTestsByPath shim step in the shard job').not.toBe('');
+    // It must reference the flag that is the entire point of the fix.
+    expect(
+      /--runTestsByPath/.test(step),
+      'the shim step must reference jest --runTestsByPath (the literal-path fix)',
+    ).toBe(true);
+  });
+
+  it('installs the shim at the jest launcher run-tests.js calls (node_modules/.bin/jest)', () => {
+    const step = shimStep();
+    // run-tests.js spawns next.js/node_modules/.bin/jest; the shim must take over
+    // exactly that path (in the next.js working directory) so it intercepts the call.
+    expect(
+      /working-directory:\s*next\.js\b/.test(step),
+      'the shim must be installed with working-directory next.js',
+    ).toBe(true);
+    expect(
+      /node_modules\/\.bin\/jest\b/.test(step),
+      'the shim must be installed at node_modules/.bin/jest (the launcher run-tests.js calls)',
+    ).toBe(true);
+  });
+
+  it('moves the REAL jest aside (readlink -f) so the shim can exec it', () => {
+    const step = shimStep();
+    // The .bin/jest entry is a symlink to node_modules/jest/bin/jest.js; resolve the
+    // real target robustly before replacing the launcher.
+    expect(
+      /readlink\s+-f/.test(step),
+      'the shim step must resolve the real jest target via `readlink -f`',
+    ).toBe(true);
+  });
+
+  it('only injects --runTestsByPath for `.test.` positional paths (does not break other jest calls)', () => {
+    const step = shimStep();
+    // The shim must guard the injection on a `.test.` positional file path so
+    // run-tests.js's other jest invocations (if any) are passed through untouched.
+    expect(
+      /\\.test\\./.test(step),
+      'the shim must gate --runTestsByPath injection on a `.test.` positional (not inject unconditionally)',
+    ).toBe(true);
+  });
+
+  it('passes through all original args + env unchanged', () => {
+    const step = shimStep();
+    // The wrapper must forward argv and the process env, only PREPENDING the flag.
+    expect(/process\.argv/.test(step), 'the shim must forward the original argv').toBe(true);
+    expect(
+      /env:\s*process\.env/.test(step),
+      'the shim must pass through the original process env',
+    ).toBe(true);
+  });
+
+  it('is idempotent (does not double-shim on a re-run)', () => {
+    const step = shimStep();
+    // A sentinel/guard must prevent re-shimming an already-shimmed launcher.
+    expect(
+      /already\s+installed|jest\.real/.test(step),
+      'the shim step must be idempotent (guard against double-shimming)',
+    ).toBe(true);
+  });
+
+  it('logs that the shim is active (so CI proves it is installed)', () => {
+    const step = shimStep();
+    expect(
+      /echo\s+["'][^"']*shim installed/.test(step),
+      'the shim step must log a clear "shim installed" line so the CI log proves it is active',
+    ).toBe(true);
+  });
+
+  it('installs the shim AFTER the harness-intact verify (the real jest must exist)', () => {
+    const block = deployTestsJobBlock();
+    const harnessIdx = block.search(/-\s+name:[^\n]*jest harness is intact/i);
+    const shimIdx = block.search(/-\s+name:[^\n]*runTestsByPath shim/i);
+    expect(harnessIdx, 'expected the harness-intact step').toBeGreaterThanOrEqual(0);
+    expect(shimIdx, 'expected the shim step').toBeGreaterThanOrEqual(0);
+    expect(harnessIdx < shimIdx, 'the shim must be installed AFTER the harness-intact verify').toBe(
+      true,
+    );
+  });
+
+  it('installs the shim BEFORE run-tests.js (the launcher must already be shimmed)', () => {
+    const block = deployTestsJobBlock();
+    const shimIdx = block.search(/-\s+name:[^\n]*runTestsByPath shim/i);
+    const runIdx = block.search(/-\s+name:[^\n]*Run official deploy tests/);
+    expect(shimIdx, 'expected the shim step').toBeGreaterThanOrEqual(0);
+    expect(runIdx, 'expected the run-tests step').toBeGreaterThanOrEqual(0);
+    expect(shimIdx < runIdx, 'the shim must be installed BEFORE run-tests.js').toBe(true);
+  });
+});

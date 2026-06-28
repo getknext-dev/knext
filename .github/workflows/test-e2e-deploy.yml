@@ -692,6 +692,85 @@ jobs:
           fi
           node -e "require('./jest.config.js'); console.log('upstream next.js jest.config.js loads OK (rootDir untouched)')"
 
+      # #147 / A3-3 — THE jest test-discovery fix (the runTestsByPath shim).
+      #
+      # GROUND TRUTH (debug runs, this branch's diagnosis): in CI, jest finds 1706
+      # testMatch candidates but the harness's positional pattern
+      # `test/e2e/<…>/index.test.ts` matches 0 of them — and this reproduces even
+      # with a MINIMAL plain jest config (so it is NOT next-jest/rootDir/config).
+      # The file IS present + git-tracked. That is the textbook symptom of jest's
+      # positional pattern being treated as a testPathPattern REGEX filtered over the
+      # candidate set rather than as a LITERAL file path to run. jest's own answer is
+      # the `--runTestsByPath` flag: it makes positionals literal paths, bypassing the
+      # regex filter. But run-tests.js@v16.0.3 invokes the bare jest WITHOUT that flag,
+      # and we will not patch run-tests.js source.
+      #
+      # FIX (a jest-BINARY shim, not a source patch): run-tests.js spawns the launcher
+      # `next.js/node_modules/.bin/jest` (a symlink → next.js/node_modules/jest/bin/jest.js).
+      # We move the real jest aside and drop an executable shim at that bin path. The
+      # shim execs the REAL jest, but when the args contain a `.test.` positional file
+      # path it INJECTS `--runTestsByPath` so those positionals run as literal paths.
+      # It only injects when a `.test.` positional is present (so run-tests.js's other
+      # jest invocations, if any, are untouched), passes through ALL original args +
+      # env, and is idempotent (a sentinel guards against double-shimming).
+      #
+      # Ordered AFTER the harness-intact verify (the real jest must exist to readlink)
+      # and BEFORE run-tests.js (the shim must be in place when the launcher is spawned).
+      - name: Install jest --runTestsByPath shim (positional test paths run as literal files)
+        working-directory: next.js
+        run: |
+          set -euo pipefail
+          BIN="node_modules/.bin/jest"
+          if [ ! -e "$BIN" ]; then
+            echo "::error::expected the jest launcher at next.js/$BIN" >&2
+            exit 1
+          fi
+          # Resolve the REAL jest target robustly (the .bin entry is a symlink to
+          # node_modules/jest/bin/jest.js). readlink -f gives the absolute real path.
+          REAL_JEST="$(readlink -f "$BIN")"
+          # Idempotency: if we already shimmed, the saved real binary exists and the
+          # current bin is our shim — don't double-shim (re-runs / matrix re-entry).
+          SENTINEL="node_modules/.bin/jest.real"
+          if [ -e "$SENTINEL" ] && grep -q 'runTestsByPath shim' "$BIN" 2>/dev/null; then
+            echo "jest --runTestsByPath shim already installed -> $(readlink -f "$SENTINEL")"
+            exit 0
+          fi
+          # Move the real jest launcher aside (preserve the resolved real target path).
+          cp "$REAL_JEST" "$SENTINEL"
+          chmod +x "$SENTINEL"
+          # Install the shim AT the launcher path run-tests.js calls. A node wrapper:
+          # exec the real jest, injecting --runTestsByPath only when a `.test.`
+          # positional file path is present in argv.
+          cat > "$BIN" <<'SHIM'
+          #!/usr/bin/env node
+          // runTestsByPath shim (knext #147 / A3-3): jest treats positional test
+          // paths as a testPathPattern REGEX; in this CI env that regex matches 0 of
+          // the 1706 candidates even for a present, git-tracked file. --runTestsByPath
+          // makes positionals literal file paths instead. We inject it ONLY when a
+          // `.test.` positional is present, so run-tests.js's other jest calls (if
+          // any) are untouched. All original args + env pass through unchanged.
+          const path = require('path');
+          const { spawnSync } = require('child_process');
+          const realJest = path.join(__dirname, 'jest.real');
+          const argv = process.argv.slice(2);
+          const hasTestPathPositional = argv.some(
+            (a) => !a.startsWith('-') && /\.test\.[cm]?[jt]sx?$/.test(a),
+          );
+          const alreadyByPath = argv.includes('--runTestsByPath');
+          const finalArgs =
+            hasTestPathPositional && !alreadyByPath
+              ? ['--runTestsByPath', ...argv]
+              : argv;
+          const res = spawnSync(process.execPath, [realJest, ...finalArgs], {
+            stdio: 'inherit',
+            env: process.env,
+          });
+          if (res.error) throw res.error;
+          process.exit(res.status == null ? 1 : res.status);
+          SHIM
+          chmod +x "$BIN"
+          echo "jest --runTestsByPath shim installed -> $REAL_JEST"
+
       - name: Run official deploy tests (knext adapter)
         working-directory: next.js
         env:
