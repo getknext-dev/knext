@@ -415,3 +415,115 @@ describe('compat-suite lean+cached harness install (test-e2e-deploy.yml, #147)',
     ).toBe(true);
   });
 });
+
+// ── Network-resilient harness install guards (#147 — the resilience lever) ─────
+// The slimmed+cached install (above) STILL ran the full 180-min job timeout and
+// was CANCELLED (not errored) across 3 dispatches — identical 180:00 even after
+// the root-only slim. That signature = pnpm HANGING on stuck network requests
+// (this CI env shows repeated Docker Hub / npm-registry timeouts), NOT a fast
+// network failure. KEY INSIGHT: pnpm's content-addressable store + the restored
+// actions/cache PERSIST across re-invocations within the same job, so a RETRY
+// LOOP with a PER-ATTEMPT TIMEOUT makes incremental progress — each attempt
+// resumes from what the prior attempt downloaded — until one attempt completes.
+//
+// Two complementary fixes, both guarded here:
+//   1. Wrap the next.js install in a bash retry loop with a per-attempt
+//      `timeout` (e.g. up to 4 × 40m = 160m, safely under the 180-min ceiling).
+//      Succeed on the first exit-0 attempt; fail only if all attempts exhaust.
+//   2. Add pnpm network hardening so stuck requests fail-fast-and-retry instead
+//      of hanging: fetch-retries, fetch-retry-min/maxtimeout, fetch-timeout, and
+//      a LOWER network-concurrency. These must apply to the next.js install.
+
+describe('compat-suite network-resilient harness install (test-e2e-deploy.yml, #147)', () => {
+  /** The single build-next step block whose run: body installs the harness. */
+  function harnessInstallStep(): string {
+    return nextJsStepBlocks().find((b) => /corepack\s+pnpm\s+install\b/.test(b)) ?? '';
+  }
+
+  it('wraps the harness install in a retry loop with a per-attempt timeout', () => {
+    const step = harnessInstallStep();
+    expect(step, 'expected a next.js step that runs corepack pnpm install').not.toBe('');
+    // A per-attempt `timeout <N>m corepack pnpm install ...` must guard each try
+    // so a hung attempt is killed and retried rather than running to the job
+    // timeout. The bare value 180 (the job ceiling) is NOT a valid per-attempt
+    // timeout — assert a per-attempt timeout that is comfortably below it.
+    const timeoutInstall = step.match(/timeout\s+(\d+)m\s+corepack\s+pnpm\s+install\b/);
+    expect(
+      timeoutInstall,
+      'the harness install must be wrapped in `timeout <N>m corepack pnpm install` (per-attempt timeout)',
+    ).not.toBeNull();
+    const perAttemptMin = Number((timeoutInstall as RegExpMatchArray)[1]);
+    expect(
+      perAttemptMin,
+      'the per-attempt timeout must be well under the 180-min job ceiling',
+    ).toBeLessThanOrEqual(60);
+
+    // There must be a loop construct that retries the attempt a bounded number
+    // of times (for/while over an attempt counter), so failed/timed-out attempts
+    // are re-run rather than failing the step on the first hang.
+    expect(
+      /\b(for|while)\b/.test(step),
+      'the harness install must use a retry loop (for/while) so a hung attempt is retried',
+    ).toBe(true);
+
+    // The loop must be bounded by a max attempt count, and total budget
+    // (attempts × per-attempt-timeout) must stay under the 180-min job ceiling.
+    const attemptsMatch = step.match(/(?:attempts?|max[_-]?attempts?|tries|ATTEMPTS)\s*=\s*(\d+)/i);
+    expect(
+      attemptsMatch,
+      'the retry loop must declare a bounded attempt count (e.g. attempts=4)',
+    ).not.toBeNull();
+    const attempts = Number((attemptsMatch as RegExpMatchArray)[1]);
+    expect(attempts, 'must allow more than one attempt').toBeGreaterThan(1);
+    expect(
+      attempts * perAttemptMin,
+      `attempts (${attempts}) × per-attempt timeout (${perAttemptMin}m) must stay under the 180-min job ceiling`,
+    ).toBeLessThan(180);
+  });
+
+  it('succeeds as soon as one install attempt exits 0 (does not always exhaust)', () => {
+    const step = harnessInstallStep();
+    // The loop must break/exit-success on a zero exit (e.g. `&& break`, `break`,
+    // or an explicit success flag) — not blindly run all attempts every time.
+    expect(
+      /\bbreak\b/.test(step),
+      'the retry loop must break out on the first successful (exit-0) attempt',
+    ).toBe(true);
+  });
+
+  it('applies pnpm network hardening to the next.js install (retries + timeouts + lower concurrency)', () => {
+    const step = harnessInstallStep();
+    // These must apply to the next.js install. We accept either NPM_CONFIG_* env
+    // vars on the step or a pnpm config written into the next.js dir. Assert the
+    // concrete hardening knobs, not just their presence somewhere generic.
+    const text = step;
+    expect(
+      /(NPM_CONFIG_FETCH_RETRIES|fetch-retries)/i.test(text),
+      'the install must set fetch-retries (more registry retries before giving up)',
+    ).toBe(true);
+    expect(
+      /(NPM_CONFIG_FETCH_RETRY_MINTIMEOUT|fetch-retry-mintimeout)/i.test(text),
+      'the install must set fetch-retry-mintimeout',
+    ).toBe(true);
+    expect(
+      /(NPM_CONFIG_FETCH_RETRY_MAXTIMEOUT|fetch-retry-maxtimeout)/i.test(text),
+      'the install must set fetch-retry-maxtimeout',
+    ).toBe(true);
+    expect(
+      /(NPM_CONFIG_FETCH_TIMEOUT|fetch-timeout)/i.test(text),
+      'the install must set fetch-timeout so a single stuck request fails fast',
+    ).toBe(true);
+    // Lower network-concurrency to avoid overwhelming the flaky network.
+    const concMatch = text.match(
+      /(?:NPM_CONFIG_NETWORK_CONCURRENCY|network-concurrency)\s*[:=]\s*['"]?(\d+)/i,
+    );
+    expect(
+      concMatch,
+      'the install must lower network-concurrency to avoid overwhelming the flaky network',
+    ).not.toBeNull();
+    expect(
+      Number((concMatch as RegExpMatchArray)[1]),
+      'network-concurrency should be lowered (below pnpm default of 16)',
+    ).toBeLessThan(16);
+  });
+});
