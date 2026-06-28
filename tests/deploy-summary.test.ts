@@ -37,7 +37,9 @@ describe('scripts/e2e-summary.mjs — summarize() (#89)', () => {
 
   it('produces a fully-shaped, JSON-serializable summary object', () => {
     const s = summarize(SAMPLE_RUNNER_OUTPUT, { ref: 'v16.0.3', shard: '1/4', excluded: 7 });
-    expect(Object.keys(s).sort()).toEqual(['excluded', 'failed', 'passed', 'ref', 'shard'].sort());
+    expect(Object.keys(s).sort()).toEqual(
+      ['excluded', 'failed', 'notRun', 'passed', 'ref', 'shard'].sort(),
+    );
     // round-trips through JSON (it's an artifact)
     expect(JSON.parse(JSON.stringify(s))).toEqual(s);
   });
@@ -202,5 +204,120 @@ exiting with code 0
     const s = summarize(SAMPLE_RUNNER_OUTPUT, { ref: 'v16.0.3', shard: '1/4', excluded: 7 });
     expect(s.passed).toBe(41);
     expect(s.failed).toBe(3);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// A3-3 (#147, run 28317739829): the INVERSE false-RED. A jest INFRA ABORT — jest
+// could not LOCATE the selected test file, prints `No tests found, exiting with
+// code 1`, run-tests.js retries, gives up, and prints the SAME `<file> failed to
+// pass within N retries` a genuine assertion failure prints. The parser must NOT
+// count that phantom as `failed` (the test never ran: no `next build`, no server
+// boot, no assertion). It surfaces it as a distinct `notRun` counter instead.
+//
+// This is the EXACT shape of every shard in run 28317739829: 5 selected files,
+// each aborting with "No tests found" → the old parser reported failed:5, a
+// misleading false-RED implying knext adapter gaps that do not exist.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// A faithful slice of run 28317739829 shard stdout: run-tests.js scopes each
+// file's output under a `❌ <file> output` group, jest prints `No tests found,
+// exiting with code 1` inside it, then run-tests.js prints the same failure lines
+// a real failure would. NO `next build`, no server boot, no assertion ever ran.
+const SAMPLE_DEPLOY_PHANTOM_ABORT_OUTPUT = `
+total: 2
+Starting test/e2e/404-page-router/index.test.ts retry 0/2
+##[group]❌ test/e2e/404-page-router/index.test.ts output
+HEADLESS=true ... /next.js/node_modules/.bin/jest '--ci' '--runInBand' '--forceExit' '--verbose' 'test/e2e/404-page-router/index.test.ts'
+No tests found, exiting with code 1
+In /home/runner/work/knext/knext/next.js/test
+  13883 files checked.
+Pattern: test/e2e/404-page-router/index.test.ts - 0 matches
+Starting test/e2e/404-page-router/index.test.ts retry 1/2
+Starting test/e2e/404-page-router/index.test.ts retry 2/2
+test/e2e/404-page-router/index.test.ts failed due to Error: failed with code: 1
+test/e2e/404-page-router/index.test.ts failed to pass within 2 retries
+exiting with code 1
+`;
+
+// A MIXED slice: one file is a phantom infra-abort (No tests found), one file
+// genuinely RAN (next build executed) and FAILED an assertion (no "No tests
+// found" in its group). Only the latter is a real `failed`; the former is `notRun`.
+const SAMPLE_DEPLOY_PHANTOM_AND_REAL_OUTPUT = `
+total: 2
+Starting test/e2e/404-page-router/index.test.ts retry 0/2
+##[group]❌ test/e2e/404-page-router/index.test.ts output
+[e2e-deploy] running next build
+No tests found, exiting with code 1
+Pattern: test/e2e/404-page-router/index.test.ts - 0 matches
+test/e2e/404-page-router/index.test.ts failed to pass within 2 retries
+Starting test/e2e/image-optimizer/index.test.ts retry 0/2
+##[group]❌ test/e2e/image-optimizer/index.test.ts output
+[e2e-deploy] running next build
+[e2e-deploy] booting server
+  ● image optimizer › serves webp
+    expect(received).toBe(expected)
+test/e2e/image-optimizer/index.test.ts failed to pass within 2 retries
+exiting with code 1
+`;
+
+describe('scripts/e2e-summary.mjs — phantom infra-abort vs real failure (A3-3, #147)', () => {
+  it('does NOT count a "No tests found" infra-abort as a real failure', () => {
+    const s = summarize(SAMPLE_DEPLOY_PHANTOM_ABORT_OUTPUT, {
+      ref: 'v16.0.3',
+      shard: '1/4',
+      excluded: 32,
+    });
+    // The whole point: a never-ran phantom must NOT be `failed` (false-RED).
+    expect(s.failed).toBe(0);
+    expect(s.passed).toBe(0);
+  });
+
+  it('surfaces the phantom abort under a distinct notRun counter', () => {
+    const s = summarize(SAMPLE_DEPLOY_PHANTOM_ABORT_OUTPUT, {
+      ref: 'v16.0.3',
+      shard: '1/4',
+      excluded: 32,
+    });
+    expect(s.notRun).toBe(1);
+  });
+
+  it('counts a REAL assertion failure as failed but the phantom as notRun (mixed shard)', () => {
+    const s = summarize(SAMPLE_DEPLOY_PHANTOM_AND_REAL_OUTPUT, {
+      ref: 'v16.0.3',
+      shard: '2/4',
+      excluded: 0,
+    });
+    // image-optimizer genuinely ran (next build + server boot) and failed an
+    // assertion → 1 real failure. 404-page-router never ran (No tests found) →
+    // 1 notRun, NOT a failure.
+    expect(s.failed).toBe(1);
+    expect(s.notRun).toBe(1);
+    expect(s.passed).toBe(0);
+  });
+
+  it('does NOT classify a genuine "failed to pass within" (no No-tests-found) as notRun', () => {
+    // The existing real-failure fixture has NO "No tests found" line, so it must
+    // stay a real failure with notRun:0 — the phantom detector must not over-reach.
+    const s = summarize(SAMPLE_DEPLOY_RUNNER_OUTPUT, {
+      ref: 'v16.0.3',
+      shard: '1/4',
+      excluded: 0,
+    });
+    expect(s.failed).toBe(1);
+    expect(s.notRun).toBe(0);
+  });
+
+  it('always includes a numeric notRun field in the artifact shape', () => {
+    const s = summarize(SAMPLE_DEPLOY_ALL_PASS_OUTPUT, {
+      ref: 'v16.0.3',
+      shard: '3/4',
+      excluded: 0,
+    });
+    expect(Object.keys(s).sort()).toEqual(
+      ['excluded', 'failed', 'notRun', 'passed', 'ref', 'shard'].sort(),
+    );
+    expect(typeof s.notRun).toBe('number');
+    expect(s.notRun).toBe(0);
   });
 });
