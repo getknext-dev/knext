@@ -786,9 +786,32 @@ jobs:
       # prebuilt-overlay CI env. Grep the log for A33SMOKE_* markers. Remove before merge.
       - name: A3-3 jest smoke test (TEMPORARY)
         working-directory: next.js
+        env:
+          # Run 28548871586 ROOT CAUSE: next/jest loads the @next/swc native binding
+          # AT CONFIG-RESOLUTION TIME. Without it, config load dies with "Failed to
+          # load SWC binary for linux/x64" -> jest reports "No tests found"/"0 matches"
+          # (and the earlier unbounded --showConfig hang was next trying to DOWNLOAD
+          # the binary into packages/next/next-swc-fallback/ over a throttled network).
+          # The debug/smoke steps previously did NOT have NEXT_TEST_NATIVE_DIR (#164
+          # set it only on the run step) — fix both surfaces here.
+          NEXT_TEST_NATIVE_DIR: ${{ steps.swc.outputs.dir }}
         run: |
           set +e
           echo "===== A33SMOKE_BEGIN ====="
+
+          # 0. Plant the already-hydrated SWC native binary (the `swc` step put it in
+          # ${GITHUB_WORKSPACE}/next-swc-native/next-swc.linux-x64-gnu.node) into
+          # next's OWN fallback probe path, so even contexts that ignore
+          # NEXT_TEST_NATIVE_DIR find it without a network download.
+          echo "A33SWC_HYDRATED_DIR=${NEXT_TEST_NATIVE_DIR:-unset}"
+          ls -la "${NEXT_TEST_NATIVE_DIR}/" 2>&1 || echo "A33SWC_HYDRATED_DIR_MISSING"
+          if [ -f "${NEXT_TEST_NATIVE_DIR}/next-swc.linux-x64-gnu.node" ]; then
+            mkdir -p packages/next/next-swc-fallback/@next/swc-linux-x64-gnu
+            cp "${NEXT_TEST_NATIVE_DIR}/next-swc.linux-x64-gnu.node" packages/next/next-swc-fallback/@next/swc-linux-x64-gnu/next-swc.linux-x64-gnu.node
+            echo "A33SWC_FALLBACK_PLANTED"
+          else
+            echo "A33SWC_FALLBACK_SOURCE_MISSING"
+          fi
 
           # 1. Plant a trivial, dependency-free test we fully control.
           mkdir -p test/e2e/knext-smoke
@@ -816,6 +839,13 @@ jobs:
           module.exports = { rootDir: process.cwd(), roots: ['<rootDir>/test/e2e/knext-smoke'], testMatch: ['**/*.test.{js,ts,tsx}'], testEnvironment: 'node' };
           MINEOF
           timeout 90 node_modules/.bin/jest --config /tmp/min.jest.config.js --runInBand --forceExit --runTestsByPath test/e2e/knext-smoke/knext-smoke.test.ts 2>&1 | tail -15 || echo "A33SMOKE_D_RC=$?"
+
+          # 2e. The REAL deploy test file, auto config, plain positional — exactly how
+          # run-tests.js invokes jest. --listTests suffices: we need discovery, not a
+          # full deploy run. If A passes and this lists the file, SWC-at-config-load
+          # was the whole mystery and the stock invocation works (no shim needed).
+          echo "===== A33SMOKE_E ====="
+          timeout 120 node_modules/.bin/jest --ci --listTests test/e2e/404-page-router/index.test.ts 2>&1 | tail -8 || echo "A33SMOKE_E_RC=$?"
 
           echo "A33SMOKE_SUMMARY_DONE"
           echo "===== A33SMOKE_END ====="
