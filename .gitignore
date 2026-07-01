@@ -1,0 +1,5 @@
+node_modules/
+graphify-out/
+.DS_Store
+*.log
+local/.data/
