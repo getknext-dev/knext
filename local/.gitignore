@@ -1,0 +1,6 @@
+# pageserver_config/ is bind-mounted as the pageserver's data dir (/data/.neon),
+# so the pageserver writes runtime state into it. Track only the two config files;
+# ignore all generated state (pid, tenants/, layer files, ephemeral, metadata).
+pageserver_config/*
+!pageserver_config/pageserver.toml
+!pageserver_config/identity.toml
