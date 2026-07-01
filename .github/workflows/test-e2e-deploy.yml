@@ -821,17 +821,37 @@ jobs:
           echo "A33SMOKE_PLANTED"
           ls -la test/e2e/knext-smoke/ 2>&1
 
-          # 2a. Auto config, pattern form (positional as testPathPattern regex).
-          echo "===== A33SMOKE_A ====="
-          timeout 90 node_modules/.bin/jest --ci --runInBand --forceExit test/e2e/knext-smoke/knext-smoke.test.ts 2>&1 | tail -15 || echo "A33SMOKE_A_RC=$?"
+          # Run 28549511217: with SWC planted, the "Failed to load SWC" error is GONE
+          # from the auto-config probes but they STILL print "No tests found" (minimal
+          # config still passes). So SWC was one masking layer; something in next's
+          # RESOLVED jest config still excludes these files. --showConfig should no
+          # longer hang (the hang WAS the SWC download attempt) — capture the resolved
+          # config + the auto-config candidate inventory directly.
 
-          # 2b. Auto config, --runTestsByPath (positional as literal file path).
-          echo "===== A33SMOKE_B ====="
-          timeout 90 node_modules/.bin/jest --ci --runInBand --forceExit --runTestsByPath test/e2e/knext-smoke/knext-smoke.test.ts 2>&1 | tail -15 || echo "A33SMOKE_B_RC=$?"
+          # 2f. The resolved config, now that SWC loads.
+          echo "===== A33SMOKE_F ====="
+          timeout 120 node_modules/.bin/jest --showConfig 2>&1 | head -200 || echo "A33SMOKE_F_RC=$?"
+          echo "A33SMOKE_F_TARGETED:"
+          timeout 120 node_modules/.bin/jest --showConfig 2>&1 | grep -aE '"(rootDir|roots|testMatch|testRegex|testPathIgnorePatterns|modulePathIgnorePatterns|filter|projects|haste)"' -A6 | head -80 || true
 
-          # 2c. Auto config, --runTestsByPath with ABSOLUTE path.
-          echo "===== A33SMOKE_C ====="
-          timeout 90 node_modules/.bin/jest --ci --runInBand --forceExit --runTestsByPath "$(pwd)/test/e2e/knext-smoke/knext-smoke.test.ts" 2>&1 | tail -15 || echo "A33SMOKE_C_RC=$?"
+          # 2g. The auto-config candidate inventory: what does the resolved config's
+          # candidate set actually contain? If count>0 but smoke/404 absent, the
+          # head/tail sample shows which dirs ARE included (roots resolution clue).
+          echo "===== A33SMOKE_G ====="
+          timeout 120 node_modules/.bin/jest --ci --listTests 2>&1 > /tmp/listtests.txt
+          echo "G_RC=$?"
+          echo "G_COUNT=$(grep -c '\.test\.' /tmp/listtests.txt || true)"
+          echo "G_SMOKE=$(grep -c 'knext-smoke' /tmp/listtests.txt || true)"
+          echo "G_404=$(grep -c '404-page-router' /tmp/listtests.txt || true)"
+          echo "G_HEAD:"
+          head -10 /tmp/listtests.txt
+          echo "G_TAIL:"
+          tail -5 /tmp/listtests.txt
+
+          # 2h. Auto config + explicit rootDir override on the CLI: does forcing
+          # rootDir to the repo root (keeping the rest of next's config) fix matching?
+          echo "===== A33SMOKE_H ====="
+          timeout 120 node_modules/.bin/jest --ci --rootDir . --listTests 'test/e2e/404-page-router/index.test.ts' 2>&1 | tail -8 || echo "A33SMOKE_H_RC=$?"
 
           # 2d. Minimal plain config (rootDir=cwd, roots=smoke dir, node env), --runTestsByPath.
           echo "===== A33SMOKE_D ====="
@@ -842,10 +862,12 @@ jobs:
 
           # 2e. The REAL deploy test file, auto config, plain positional — exactly how
           # run-tests.js invokes jest. --listTests suffices: we need discovery, not a
-          # full deploy run. If A passes and this lists the file, SWC-at-config-load
-          # was the whole mystery and the stock invocation works (no shim needed).
+          # full deploy run. RAW capture (last run's E output didn't survive filtering).
           echo "===== A33SMOKE_E ====="
-          timeout 120 node_modules/.bin/jest --ci --listTests test/e2e/404-page-router/index.test.ts 2>&1 | tail -8 || echo "A33SMOKE_E_RC=$?"
+          timeout 120 node_modules/.bin/jest --ci --listTests test/e2e/404-page-router/index.test.ts > /tmp/e.txt 2>&1
+          echo "E_RC=$?"
+          echo "E_OUT:"
+          cat /tmp/e.txt | head -12
 
           echo "A33SMOKE_SUMMARY_DONE"
           echo "===== A33SMOKE_END ====="
