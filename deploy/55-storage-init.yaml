@@ -1,0 +1,44 @@
+# storage-init: one-shot Job that creates the (fixed) tenant + timeline on the
+# pageserver, so the stateless compute can attach to them. Runs on the neon
+# image because it ships curl; it uses NO jq (fixed IDs => no JSON parsing).
+# Idempotent: safe to re-run; a compute pod kill never re-runs it (storage
+# owns the tenant/timeline durably).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: storage-init
+  namespace: scale-zero-pg
+  labels: { app: storage-init, plane: storage }
+spec:
+  backoffLimit: 30
+  template:
+    metadata:
+      labels: { app: storage-init, plane: storage }
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: init
+          image: neondatabase/neon:8464
+          envFrom:
+            - configMapRef: { name: compute-config } # TENANT_ID, TIMELINE_ID, PG_VERSION, PAGESERVER_HOST
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              PS="http://${PAGESERVER_HOST}:9898"
+              echo "waiting for pageserver HTTP at ${PS} ..."
+              until curl -sf "${PS}/v1/tenant" >/dev/null 2>&1; do sleep 2; done
+              echo "ensuring tenant ${TENANT_ID}"
+              curl -sf -X PUT -H 'Content-Type: application/json' \
+                -d '{"mode":"AttachedSingle","generation":1,"tenant_conf":{}}' \
+                "${PS}/v1/tenant/${TENANT_ID}/location_config" >/dev/null
+              echo "ensuring timeline ${TIMELINE_ID}"
+              if curl -sf "${PS}/v1/tenant/${TENANT_ID}/timeline" | grep -q "${TIMELINE_ID}"; then
+                echo "timeline already exists"
+              else
+                curl -sf -X POST -H 'Content-Type: application/json' \
+                  -d "{\"new_timeline_id\":\"${TIMELINE_ID}\",\"pg_version\":${PG_VERSION}}" \
+                  "${PS}/v1/tenant/${TENANT_ID}/timeline/" >/dev/null
+                echo "timeline created"
+              fi
+              echo "storage-init done"

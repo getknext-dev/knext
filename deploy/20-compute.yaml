@@ -23,16 +23,36 @@ spec:
     metadata:
       labels: { app: compute }
     spec:
-      containers:
-        - name: compute
-          # compute-node-v17:8464 + curl/jq/netcat (built by `make compute-image`);
-          # OrbStack k8s shares the docker daemon, so Never-pull works locally.
-          image: ks-pg-compute:8464
-          imagePullPolicy: Never
-          command: ["/bin/bash", "/compute-files/entrypoint.sh"]
+      # Block startup until the pageserver has the tenant+timeline (created by
+      # the storage-init Job). Runs on the neon image because it ships curl; the
+      # compute image does not. This is what lets the compute image stay stock.
+      initContainers:
+        - name: wait-timeline
+          image: neondatabase/neon:8464
           envFrom:
             - configMapRef:
-                name: compute-config # TENANT_ID, TIMELINE_ID, PAGESERVER_*, SAFEKEEPERS
+                name: compute-config # TENANT_ID, TIMELINE_ID, PAGESERVER_HOST
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              PS="http://${PAGESERVER_HOST}:9898"
+              until curl -sf "${PS}/v1/tenant/${TENANT_ID}/timeline" | grep -q "${TIMELINE_ID}"; do
+                echo "waiting for timeline ${TIMELINE_ID} on tenant ${TENANT_ID} ..."; sleep 2;
+              done
+              echo "timeline ready"
+      containers:
+        - name: compute
+          # Stock Neon compute (native Postgres 17). Stateless — no tools needed
+          # in-image: the slim entrypoint only seds IDs into the spec and execs
+          # compute_ctl. compute-node-v17:latest is pre-pulled; IfNotPresent so
+          # OrbStack's shared docker daemon serves it without a registry hit.
+          image: neondatabase/compute-node-v17:latest
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "/compute-files/entrypoint.sh"]
+          envFrom:
+            - configMapRef:
+                name: compute-config # TENANT_ID, TIMELINE_ID, PG_VERSION, PAGESERVER_HOST
           ports:
             - { name: pg, containerPort: 55433 }
             - { name: compute-http, containerPort: 3080 }
