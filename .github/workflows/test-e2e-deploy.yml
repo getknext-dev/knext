@@ -23,20 +23,33 @@ on:
   workflow_dispatch:
     inputs:
       nextjsRef:
-        description: 'vercel/next.js git ref to test against (pinned tag; do NOT use canary)'
+        description: 'vercel/next.js git ref to test against (pinned tag ≥ v16.2.0; do NOT use canary)'
         required: false
-        default: 'v16.0.3'
+        default: 'v16.2.0'
   schedule:
     # 03:17 UTC nightly — off-peak; the run takes the better part of an hour.
     - cron: '17 3 * * *'
 
 # Pin the Next.js ref so a failure is attributable to knext, not upstream churn.
-# Aligns with the in-repo next@16.0.3 (CLAUDE.md / ADR-0007 version-skew caveat).
 # NEXTJS_REF is the git TAG (kept for the source checkout that supplies the
 # `test/` harness + `run-tests.js`); NEXT_NPM_VERSION is the published npm version
 # (the tag minus the leading `v`) we `npm pack` the PREBUILT `next` from.
+#
+# HARD FLOOR: v16.2.0 (#147 A3-3 triage of run 28552585087). The workflow was
+# previously pinned to v16.0.3 to align with the in-repo next@16.0.3 — but at
+# that ref test/lib/next-modes/next-deploy.ts is HARDCODED to the Vercel CLI:
+# the custom deploy-script contract (NEXT_TEST_DEPLOY_SCRIPT_PATH /
+# NEXT_TEST_DEPLOY_LOGS_SCRIPT_PATH / NEXT_TEST_CLEANUP_SCRIPT_PATH) the run
+# step relies on landed upstream in vercel/next.js#89206 (b19e6d44, cleanup in
+# #90696) and first SHIPPED in the v16.2.0 stable tag. Run 28552585087 proved
+# it: every one of the 8 shard failures was `vercel link` → "No existing
+# credentials found. Please run `vercel login`" — the knext adapter was NEVER
+# invoked, and the 5 "passes" were vacuous skipDeployment placeholders. Below
+# v16.2.0 this suite tests NOTHING knext-related. (The in-repo-next alignment
+# yields to contract existence; the version-skew caveat is recorded in
+# ADR-0007.)
 env:
-  NEXTJS_REF: ${{ github.event.inputs.nextjsRef || 'v16.0.3' }}
+  NEXTJS_REF: ${{ github.event.inputs.nextjsRef || 'v16.2.0' }}
 
 jobs:
   build-next:
@@ -297,9 +310,20 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # MVP: a MODEST 4-way shard (the reference uses 16). Bump deliberately as
-        # the suite stabilizes; 4 keeps the nightly cost honest for the scaffold.
-        shard: ['1/4', '2/4', '3/4', '4/4']
+        # #147 A3-3 — 16-way shard (was 4). With full-shard execution
+        # (NEXT_TEST_CONTINUE_ON_ERROR below) each shard must finish its WHOLE
+        # slice inside the 60-min job timeout. ~715 tests are selected in total;
+        # at 4 shards that is ~179 files/shard, and a REAL deploy test costs a
+        # per-fixture `npm install` + `next build` + server boot (minutes, not
+        # the ~2.5s vacuous skips and ~10s vercel-link fast-failures run
+        # 28552585087 measured) — at concurrency 2 a 179-file slice cannot fit
+        # in 60 min. 16 shards ≈ 45 files/shard and matches the reference
+        # harness's own shard count.
+        shard:
+          [
+            '1/16', '2/16', '3/16', '4/16', '5/16', '6/16', '7/16', '8/16',
+            '9/16', '10/16', '11/16', '12/16', '13/16', '14/16', '15/16', '16/16',
+          ]
     steps:
       - name: Download workspace
         uses: actions/download-artifact@v4
@@ -779,6 +803,31 @@ jobs:
       - name: Clear jest haste cache (fresh crawl against the patched next/jest)
         run: rm -rf /tmp/jest_*
 
+      # #147 A3-3 — the DISCOVERY TRIPWIRE (ADR-0007 addendum). THREE separate
+      # discovery-layer regressions each produced a silent 0-test "green" run in
+      # earlier rounds: (1) the v1 manifest made get-test-filter.js THROW at
+      # module load; (2) the unbuilt workspace-package closure (next/dist,
+      # @next/env, @next/swc) crashed every test module at LOAD; (3) next/jest's
+      # unescaped '/.next/' ignore REGEX matched this runner's '/knext/' path
+      # segment and filtered out every candidate. All three were invisible until
+      # a human read the logs. This gate makes the failure LOUD: after all
+      # discovery patches, jest must list >0 tests for a known-present,
+      # manifest-selected deploy test file — or the shard aborts BEFORE wasting
+      # a run on a vacuous 0-test invocation. Same spawn shape as run-tests.js
+      # (cwd = next.js/, no --config, positional path).
+      - name: Gate — jest --listTests must match >0 (loud-fail, no silent 0-test runs)
+        working-directory: next.js
+        run: |
+          set -euo pipefail
+          PROBE="test/e2e/404-page-router/index.test.ts"
+          LIST="$(node_modules/.bin/jest --listTests "$PROBE" 2>/dev/null || true)"
+          COUNT="$(printf '%s\n' "$LIST" | grep -c '404-page-router' || true)"
+          if [ "${COUNT}" -eq 0 ]; then
+            echo "::error::jest --listTests matched 0 files for ${PROBE} — the 3-layer discovery stack (manifest / hydrate closure / next-jest ignore patch) regressed; aborting before a vacuous 0-test run"
+            exit 1
+          fi
+          echo "jest discovery alive: ${COUNT} match(es) for ${PROBE}"
+
       - name: Run official deploy tests (knext adapter)
         working-directory: next.js
         env:
@@ -790,11 +839,22 @@ jobs:
           # The package dir e2e-deploy.sh `npm pack`s + installs into each temp app.
           ADAPTER_DIR: ${{ github.workspace }}/knext/packages/kn-next
           # knext's v2 deploy-eligible selection: it mirrors Next's own
-          # test/deploy-tests-manifest.json include/exclude base set and adds the
-          # knext architectural exclusions (the harness loads exactly ONE manifest
-          # path — no comma-layering — so this file IS the complete selection).
+          # test/deploy-tests-manifest.json base set (include/exclude AND the
+          # upstream-known-failing `suites` per-case skips, mirrored at the
+          # pinned ref) and adds the knext architectural exclusions. NOTE:
+          # v16.2.0+ get-test-filter.js supports comma-separated manifest
+          # MERGING; we deliberately keep the single-file mirror (ADR-0007
+          # follow-up records the layering option).
           NEXT_EXTERNAL_TESTS_FILTERS: ${{ github.workspace }}/knext/test/deploy-tests-manifest.knext.json
           KNEXT_RUNTIME: node
+          # #147 A3-3 — FULL-SHARD EXECUTION. run-tests.js@v16.0.3 ABORTED the
+          # whole shard on the first post-retry failure (cleanUpAndExit(1))
+          # unless this env was 'true' — run 28552585087 therefore reported
+          # results for only ~2 of ~179 selected tests per shard. v16.2.0
+          # continues past failures by default (hadFailures, exit at the end);
+          # the pin stays as explicit intent + a guard against a ref downgrade:
+          # the exclusion ledger is only meaningful over ALL selected tests.
+          NEXT_TEST_CONTINUE_ON_ERROR: 'true'
           # #147 (round 4) — the prebuilt pivot. A JSON [[name, tarballPath]] map.
           # `test/lib/create-next-install.js` reads this and SKIPS `linkPackages`
           # (the source-pack step), installing the PUBLISHED `next` tarball into

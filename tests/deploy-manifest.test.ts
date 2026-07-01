@@ -183,6 +183,56 @@ describe('test/deploy-tests-manifest.knext.json — harness-compatible v2 select
   });
 });
 
+describe('test/deploy-tests-manifest.knext.json — upstream-known-failing suites mirror (#147 A3-3)', () => {
+  // The #162 review flagged that knext ran per-CASE test cases upstream ITSELF
+  // skips in deploy mode: next.js's own test/deploy-tests-manifest.json carries a
+  // `suites` map (file → {failed, flakey} case-name lists) that get-test-filter.js
+  // applies via jest -t skips. Our manifest replaces upstream's (the harness loads
+  // exactly ONE file), so if we don't mirror `suites` we run upstream-known-failing
+  // cases and book their failures as knext failures — noise, not signal. Mirroring
+  // upstream's OWN skips verbatim is honest: next.js itself does not run them
+  // against ANY deploy target at the pinned ref.
+  it('suites is a non-empty mirror (upstream skips per-case deploy-known-failures)', () => {
+    expect(Object.keys(manifest.suites).length).toBeGreaterThan(0);
+  });
+
+  it('every suites entry is well-formed: {failed?/flakey?} arrays of case-name strings', () => {
+    for (const [file, entry] of Object.entries(manifest.suites)) {
+      expect(
+        file.startsWith('test/') && /\.test\.(t|j)sx?$/.test(file),
+        `suites key must be a test file path, got "${file}"`,
+      ).toBe(true);
+      const lists = [entry.failed, entry.flakey].filter((l) => l !== undefined);
+      expect(lists.length, `suites["${file}"] must carry failed and/or flakey`).toBeGreaterThan(0);
+      for (const list of lists) {
+        expect(Array.isArray(list)).toBe(true);
+        for (const name of list as string[]) {
+          expect(typeof name === 'string' && name.trim().length > 0).toBe(true);
+        }
+      }
+    }
+  });
+
+  it('mirrors representative upstream v16.2.0 suites entries verbatim', () => {
+    // Two stable representatives from vercel/next.js@v16.2.0
+    // test/deploy-tests-manifest.json — if upstream's ref bumps, re-mirror and
+    // update these (the manifest $comment records the provenance ref).
+    expect(
+      manifest.suites['test/e2e/app-dir/app-client-cache/client-cache.defaults.test.ts'],
+    ).toBeTruthy();
+    expect(manifest.suites['test/e2e/app-dir/actions/app-action.test.ts']).toBeTruthy();
+  });
+
+  it('records the upstream provenance (ref + "upstream-known-failing") in the manifest text', () => {
+    const raw = readFileSync(MANIFEST_PATH, 'utf8');
+    expect(
+      /upstream-known-failing/i.test(raw),
+      'the manifest must state the suites entries are upstream-known-failing (not knext debt)',
+    ).toBe(true);
+    expect(/v16\.2\.0/.test(raw), 'the manifest must record the upstream ref mirrored').toBe(true);
+  });
+});
+
 describe('test/deploy-tests-manifest.knext.json — honest exclusion ledger (#89)', () => {
   it('has a $knextExclusions ledger that is neither empty nor all-excluding', () => {
     expect(Array.isArray(manifest.$knextExclusions)).toBe(true);

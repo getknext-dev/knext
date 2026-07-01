@@ -1400,7 +1400,11 @@ describe('compat-suite jest discovery fix (test-e2e-deploy.yml, #147 A3-3)', () 
       'the next/jest patch must run BEFORE run-tests.js (jest resolves its config at run time)',
     ).toBe(true);
     // And after the next/dist hydrate — the patch targets the HYDRATED dist file.
+    // Existence-assert BEFORE the index comparison: search() returns -1 for a
+    // missing step, and -1 < patchIdx is vacuously true — a deleted hydrate step
+    // would otherwise slip through this ordering guard unnoticed.
     const hydrateIdx = block.search(/-\s+name:[^\n]*[Hh]ydrate[^\n]*next\/dist/);
+    expect(hydrateIdx, 'expected the next/dist hydrate step to exist').toBeGreaterThanOrEqual(0);
     expect(
       hydrateIdx < patchIdx,
       'the next/jest patch must run AFTER the next/dist hydrate (it patches the hydrated dist)',
@@ -1456,7 +1460,174 @@ describe('compat-suite jest discovery fix (test-e2e-deploy.yml, #147 A3-3)', () 
     expect(runIdx, 'expected the run-tests step').toBeGreaterThanOrEqual(0);
     expect(clearIdx < runIdx, 'the jest cache clear must come BEFORE run-tests.js').toBe(true);
     // And after the patch step — clearing before the patch would be pointless.
+    // Existence-assert first: search() returns -1 when the step is missing and
+    // -1 < clearIdx would pass vacuously.
     const patchIdx = block.search(/-\s+name:[^\n]*Patch next\/jest/i);
+    expect(patchIdx, 'expected the next/jest patch step to exist').toBeGreaterThanOrEqual(0);
     expect(patchIdx < clearIdx, 'the cache clear must come AFTER the next/jest patch').toBe(true);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// #147 A3-3 triage of run 28552585087 (the first run where shards EXECUTED real
+// tests). Findings this block locks in:
+//
+//  (1) HARNESS-VERSION FLOOR. Every one of the 8 failures across all 4 shards was
+//      the SAME harness-environment error: `vercel link` → "No existing
+//      credentials found. Please run `vercel login`". At v16.0.3,
+//      test/lib/next-modes/next-deploy.ts is HARDCODED to the Vercel CLI — the
+//      custom deploy-script contract (NEXT_TEST_DEPLOY_SCRIPT_PATH /
+//      NEXT_TEST_DEPLOY_LOGS_SCRIPT_PATH / NEXT_TEST_CLEANUP_SCRIPT_PATH) the
+//      knext workflow relies on DOES NOT EXIST at that ref. It landed upstream in
+//      vercel/next.js#89206 (b19e6d44, 2026-01-29; cleanup hook in #90696) and
+//      first shipped in the v16.2.0 stable tag. So with the ref at v16.0.3 the
+//      knext adapter is NEVER invoked: the 5 "passes" were vacuous
+//      skipDeployment placeholders and the 8 failures were Vercel-credential
+//      noise. The pinned ref must stay ≥ v16.2.0 or the suite tests nothing.
+//
+//  (2) FULL-SHARD EXECUTION. run-tests.js@v16.0.3 ABORTS the whole shard on the
+//      first post-retry failure (`cleanUpAndExit(1)`) unless
+//      NEXT_TEST_CONTINUE_ON_ERROR === 'true' — that is why each shard reported
+//      results for only ~2 of its ~179 selected tests. v16.2.0 continues past
+//      failures by default (hadFailures flag, exit at the end), but the env pin
+//      stays as an explicit statement of intent + a guard against a ref
+//      downgrade: the exclusion ledger is only meaningful over ALL selected
+//      tests.
+//
+//  (3) DISCOVERY TRIPWIRE. Three separate discovery-layer regressions each
+//      produced a silent 0-test "green" in earlier rounds (v1 manifest throw,
+//      unbuilt workspace-package closure, the unescaped /.next/ ignore regex).
+//      A cheap post-patch `jest --listTests` gate now fails the shard LOUDLY
+//      before run-tests.js whenever discovery collapses to 0 again.
+// ─────────────────────────────────────────────────────────────────────────────
+describe('compat-suite full-shard execution + harness-version floor (test-e2e-deploy.yml, #147 A3-3 triage)', () => {
+  function deployTestsSteps(): string[] {
+    const lines = deployTestsJobBlock().split('\n');
+    const blocks: string[] = [];
+    let current: string[] = [];
+    const flush = () => {
+      if (current.length) blocks.push(current.join('\n'));
+      current = [];
+    };
+    for (const line of lines) {
+      if (/^\s*-\s+name:/.test(line)) flush();
+      current.push(line);
+    }
+    flush();
+    return blocks;
+  }
+
+  it('pins the default next.js ref at or above the v16.2.0 deploy-script-contract floor', () => {
+    const text = workflowText();
+    // Both the dispatch-input default and the env fallback must carry the floor.
+    // v16.0.x harnesses hardcode the Vercel CLI (run 28552585087: every failure
+    // was "No existing credentials found") — the custom deploy-script hooks the
+    // run step sets are simply unread there. Only the two FUNCTIONAL pins are
+    // checked (dispatch `default:` + the NEXTJS_REF `||` fallback) — comments may
+    // legitimately reference older refs as historical run records.
+    const functionalPins = [
+      text.match(/default:\s*'(v16\.\d+\.\d+)'/),
+      text.match(
+        /NEXTJS_REF:\s*\$\{\{\s*github\.event\.inputs\.nextjsRef\s*\|\|\s*'(v16\.\d+\.\d+)'\s*\}\}/,
+      ),
+    ];
+    const refs = functionalPins.filter((m) => m !== null).map((m) => (m as RegExpMatchArray)[1]);
+    expect(refs.length, 'expected BOTH functional v16.x ref pins in the workflow').toBe(2);
+    for (const ref of refs) {
+      const [, minor] = ref.slice(1).split('.').map(Number);
+      expect(
+        minor >= 2,
+        `pinned ref ${ref} is below the v16.2.0 floor — next-deploy.ts has no ` +
+          'NEXT_TEST_DEPLOY_SCRIPT_PATH support before v16.2.0 (vercel/next.js#89206), ' +
+          'so the knext adapter would never be invoked',
+      ).toBe(true);
+    }
+    expect(
+      /default:\s*'v16\.\d+\.\d+'/.test(text),
+      'dispatch input must default a pinned ref',
+    ).toBe(true);
+    expect(
+      /NEXTJS_REF:\s*\$\{\{\s*github\.event\.inputs\.nextjsRef\s*\|\|\s*'v16\.\d+\.\d+'\s*\}\}/.test(
+        text,
+      ),
+      'NEXTJS_REF env must fall back to the same pinned ref family',
+    ).toBe(true);
+  });
+
+  it('sets NEXT_TEST_CONTINUE_ON_ERROR on the run step (full-shard execution, no first-failure abort)', () => {
+    const runStep = deployTestsSteps().find((b) => /name:[^\n]*Run official deploy tests/.test(b));
+    expect(runStep, 'expected the run-tests step').toBeTruthy();
+    expect(
+      /NEXT_TEST_CONTINUE_ON_ERROR:\s*['"]true['"]/.test(runStep ?? ''),
+      'the run step must set NEXT_TEST_CONTINUE_ON_ERROR: "true" — without it a ' +
+        'v16.0.x run-tests.js aborts the shard on the FIRST failure and the ledger ' +
+        'only ever sees ~2 of ~179 selected tests (run 28552585087)',
+    ).toBe(true);
+  });
+
+  it('shards the deploy tests 16 ways (full-shard runtime budget)', () => {
+    const block = deployTestsJobBlock();
+    // The matrix value is a YAML flow sequence that may wrap across lines —
+    // capture from `shard: [` to the matching `]`.
+    const shardMatch = block.match(/^\s*shard:\s*\n?\s*\[[\s\S]*?\]/m);
+    expect(shardMatch, 'expected a matrix shard: [...] flow sequence').not.toBeNull();
+    const entries = (shardMatch as RegExpMatchArray)[0].match(/'\d+\/\d+'/g) ?? [];
+    // ~715 selected tests total. With full-shard execution each shard must finish
+    // its slice inside the 60-min job timeout; at 4 shards a real-deploy slice
+    // (~179 files × fixture `next build` + boot, concurrency 2) cannot. 16 mirrors
+    // the reference harness's own shard count (~45 files/shard).
+    expect(entries.length, 'expected a 16-way shard matrix').toBe(16);
+    for (const [i, entry] of entries.entries()) {
+      expect(entry).toBe(`'${i + 1}/16'`);
+    }
+  });
+
+  it('has a loud-fail jest --listTests gate between the discovery patches and run-tests.js', () => {
+    const steps = deployTestsSteps();
+    // Select by the step NAME line — a pre-existing comment elsewhere in the job
+    // also mentions `--listTests`, and comments attach to the PREVIOUS step block.
+    const gate = steps.find((b) => /-\s+name:[^\n]*--listTests/.test(b)) ?? '';
+    expect(gate, 'expected a jest --listTests discovery gate step in the shard job').not.toBe('');
+    // Loud-fail: a 0-match discovery must abort the shard (exit 1), never proceed
+    // into a vacuous 0-test run-tests.js invocation.
+    expect(/\bexit\s+1\b/.test(gate), 'the listTests gate must exit 1 on 0 matches').toBe(true);
+    expect(
+      /::error::/.test(gate),
+      'the listTests gate must emit a ::error:: annotation so the regression is visible',
+    ).toBe(true);
+    // It must probe a KNOWN-SELECTED deploy test file, not an arbitrary pattern.
+    expect(
+      /test\/e2e\/[\w./-]+\.test\.ts/.test(gate),
+      'the gate must list a concrete known-present deploy test file',
+    ).toBe(true);
+    // Ordering: after the /.next/ patch + haste-cache clear, before run-tests.js.
+    const block = deployTestsJobBlock();
+    const patchIdx = block.search(/-\s+name:[^\n]*Patch next\/jest/i);
+    const clearIdx = block.search(/rm\s+-rf\s+\/tmp\/jest_\*/);
+    const gateIdx = block.indexOf(gate.trimStart().split('\n')[0]);
+    const runIdx = block.search(/-\s+name:[^\n]*Run official deploy tests/);
+    expect(patchIdx, 'expected the next/jest patch step').toBeGreaterThanOrEqual(0);
+    expect(clearIdx, 'expected the haste-cache clear step').toBeGreaterThanOrEqual(0);
+    expect(gateIdx, 'expected to locate the gate step in the job block').toBeGreaterThanOrEqual(0);
+    expect(runIdx, 'expected the run-tests step').toBeGreaterThanOrEqual(0);
+    expect(patchIdx < gateIdx, 'the gate must run AFTER the next/jest patch').toBe(true);
+    expect(clearIdx < gateIdx, 'the gate must run AFTER the haste-cache clear').toBe(true);
+    expect(gateIdx < runIdx, 'the gate must run BEFORE run-tests.js').toBe(true);
+  });
+
+  it('does NOT patch or fork run-tests.js source (the ref bump is the fix, not a source patch)', () => {
+    // The v16.0.3 Vercel-CLI hardcoding could also have been "fixed" by rewriting
+    // next-deploy.ts / run-tests.js in place — a fork we would then own forever.
+    // The honest fix is the ref bump; keep the workflow free of harness-source
+    // rewrites (the ONE sanctioned dist patch is the /.next/ escape, guarded above).
+    const text = workflowText();
+    expect(
+      /(?:cat|tee)\s*>+\s*(?:\.\/)?run-tests\.js/.test(text),
+      'must not overwrite run-tests.js',
+    ).toBe(false);
+    expect(
+      /(?:cat|tee)\s*>+\s*[^\n]*next-deploy\.ts/.test(text),
+      'must not overwrite next-deploy.ts',
+    ).toBe(false);
   });
 });

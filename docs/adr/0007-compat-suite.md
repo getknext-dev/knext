@@ -162,12 +162,13 @@ Port the reference workflow with knext substitutions:
   (pin — do **not** track `canary`; an upstream break must not look like a knext regression).
 - Build adapter step builds knext's adapter package.
 - `NEXT_EXTERNAL_TESTS_FILTERS: <ws>/test/deploy-tests-manifest.knext.json`
-  — **Correction (#147 A3-3):** the harness (`test/get-test-filter.js`) loads **exactly one**
-  manifest (it `require()`s a single resolved path — there is **no** comma-separated layering of
-  Next's manifest + knext's, as originally drafted here). So `deploy-tests-manifest.knext.json` is
-  the **complete** deploy-eligible selection: it must *mirror* Next's own
-  `test/deploy-tests-manifest.json` include/exclude base set and add knext's architectural
-  exclusions. It must also be **`version: 2`** (string-glob include/exclude) — any other numeric
+  — **Correction (#147 A3-3):** at v16.0.3 the harness (`test/get-test-filter.js`) loaded
+  **exactly one** manifest (a single `require()`d path — no comma-separated layering of Next's
+  manifest + knext's, as originally drafted here). **v16.2.0+ restores comma-merge support**
+  (see the 2026-07 addendum) but we deliberately keep the single-file model. So
+  `deploy-tests-manifest.knext.json` is the **complete** deploy-eligible selection: it must
+  *mirror* Next's own `test/deploy-tests-manifest.json` base set (include/exclude **and** the
+  upstream-known-failing `suites` per-case skips) and add knext's architectural exclusions. It must also be **`version: 2`** (string-glob include/exclude) — any other numeric
   version makes `get-test-filter.js` throw `Unknown manifest version`, which (called at
   `run-tests.js` module load) silently runs **zero** tests. The honest rationale ledger lives in a
   sidecar `$knextExclusions` field the harness ignores.
@@ -225,6 +226,84 @@ Pinning the npm version to the in-repo `next` keeps results attributable. **Open
 accept the prebuilt model as the standing approach, or treat it as interim until larger runners make
 the source build viable (the human lever on #147).
 
+## Addendum (#147 A3-3, 2026-07): run-28552585087 triage — harness-version floor, full-shard execution, discovery tripwire
+
+Run 28552585087 was the first nightly where the shards **executed real jest test files**
+(summaries: `{passed:1,failed:2}` / `{4,2}` / `{0,2}` / `{0,2}` — 5 passes, 8 failures across 4
+shards). Triage of every failure (per-shard `gh run view --log`) produced three standing decisions:
+
+### 1. Harness-version floor: `NEXTJS_REF >= v16.2.0` (the headline finding)
+
+**All 8 failures were the SAME harness-environment error**, not adapter behavior:
+`NextDeployInstance.setup → vercel link → "No existing credentials found. Please run vercel login"`
+(`next-deploy.ts:101` at v16.0.3). At **v16.0.3** `test/lib/next-modes/next-deploy.ts` is
+**hardcoded to the Vercel CLI** — the custom deploy-script contract this workflow sets
+(`NEXT_TEST_DEPLOY_SCRIPT_PATH` / `NEXT_TEST_DEPLOY_LOGS_SCRIPT_PATH` / `NEXT_TEST_CLEANUP_SCRIPT_PATH`)
+**does not exist at that ref**. It landed upstream in vercel/next.js#89206 (`b19e6d44`, 2026-01-29;
+the cleanup hook in #90696) as part of the adapters E2E work, and first shipped in the **v16.2.0**
+stable tag (verified: `v16.1.0` lacks it, `v16.2.0` has all three hooks with exactly the
+stdout-URL / `NEXT_TEST_DIR` contract `scripts/e2e-*.sh` already implement). The 5 "passes" were
+**vacuous** `skipDeployment: true` placeholders ("should skip for deploy") that never deployed
+anything. **Below v16.2.0 the suite exercises zero knext code.** Decision: bump the pinned ref to
+`v16.2.0` and treat v16.2.0 as a hard floor (guard-tested). The earlier "align the harness ref with
+the in-repo `next@16.0.3`" preference (Action items below) **yields to contract existence** —
+version alignment is desirable, a harness that cannot invoke the adapter is useless. No failure
+from this run was classified as a genuine knext adapter gap (the adapter was never invoked), so
+**no exclusions were added and no gap issues filed from this run** — the first meaningful ledger
+input is the first full run at ≥ v16.2.0.
+
+### 2. Full-shard execution: `NEXT_TEST_CONTINUE_ON_ERROR=true` (+ 16-way shard)
+
+Each shard selected ~179 tests but reported results for only ~2: `run-tests.js@v16.0.3` **aborts
+the entire shard on the first post-retry failure** (`cleanUpAndExit(1)`) unless
+`NEXT_TEST_CONTINUE_ON_ERROR === 'true'`. v16.2.0 removed the abort (it tracks `hadFailures` and
+exits non-zero at the end), but the env stays pinned in the run step as explicit intent and as a
+downgrade guard — the exclusion ledger is only meaningful over **all** selected tests. Because a
+full shard now really runs its whole slice (per-fixture `npm install` + `next build` + server
+boot — minutes per file, vs the ~2.5s vacuous skips and ~10s vercel-link fast-failures this run
+measured), the matrix moves 4 → **16 shards** (~45 files/shard, the reference harness's own count)
+to fit the 60-min job timeout.
+
+Related summary fix: the run-tests.js **pass-marker format changed** between refs
+(v16.0.3 `Finished <file> on retry i/n in t s` → v16.2.0 `<file> finished on retry i/n in t s`);
+`scripts/e2e-summary.mjs` now parses both (union of file sets), so the ref bump cannot zero the
+pass count.
+
+### 3. The 3-layer discovery root cause (record) + the `--listTests` tripwire
+
+Three **separate** discovery-layer regressions each produced a silent 0-test "green" before this
+run, and each was invisible until a human read the logs:
+
+1. **Selection** — the v1 manifest made `get-test-filter.js` throw `Unknown manifest version` at
+   `run-tests.js` module load (run 28314927507; fixed by the v2 manifest, #162).
+2. **Load closure** — the prebuilt model shipped no built workspace packages, so every test module
+   crashed at import (`next/dist`, then `@next/env`, then the `@next/swc` native binary + next's
+   own fallback probe path; #162–#165).
+3. **Discovery filter** — next/jest's **unescaped `/.next/` ignore regex** matched the runner's
+   `/knext/` path segment and filtered out **every** candidate test file (run 28551192374; the
+   sanctioned dist patch, #169; upstream bug documented in
+   `docs/compat/upstream-nextjs-jest-ignore-bug.md`).
+
+Standing tripwire (implemented): a shard step after all discovery patches runs
+`jest --listTests <known-selected file>` and **fails the shard loudly (`exit 1` + `::error::`)**
+on 0 matches, so a fourth discovery regression can never again masquerade as a quiet run. The
+vacuous-ordering nit in `tests/compat-suite-workflow.test.ts` (index comparisons against a
+possibly `-1` `search()` result) is fixed with existence asserts.
+
+### Follow-up recorded (not taken now)
+
+`get-test-filter.js@v16.2.0` **supports comma-separated manifest merging** (union of
+suites/include/exclude), so the original "layer Next's manifest + knext's" design works again at
+the new floor. We deliberately keep the **single-file mirror** for now (one reviewable complete
+selection; trivial excluded-count accounting) and mirrored upstream's `suites` per-case
+known-failing skips verbatim (provenance: `vercel/next.js@v16.2.0 test/deploy-tests-manifest.json`,
+"upstream-known-failing at v16.2.0" — next.js itself skips those cases against its own deploy
+target, so they are not knext debt). Re-mirror on every ref bump, or switch to comma-layering the
+upstream file directly.
+
+The compat-matrix official-suite row **stays ❌** — this addendum changes what the nightly can
+observe; only an observed green nightly flips the row.
+
 ## Action items
 
 - **A3-1 (per-PR gate, this PR's deliverable):**
@@ -252,9 +331,11 @@ the source build viable (the human lever on #147).
     `docs/compat-matrix.md` official-suite row **stays ❌** until a green nightly (graduation is a
     separate PR, A3-3). The manifest exclude-list is an **honest ledger** that grows from OBSERVED
     failures, never a pre-emptive fake green.
-  - [ ] **Version-skew caveat:** in-repo `next@16.0.3` vs the harness's typical `16.2.x`. The workflow
-        pins the ref to `v16.0.3` (`nextjsRef` dispatch input / `NEXTJS_REF` env) to keep results
-        attributable to knext; bump deliberately when the in-repo `next` moves.
+  - [x] **Version-skew caveat (RESOLVED by the 2026-07 addendum, inverted):** the workflow now pins
+        `v16.2.0` (`nextjsRef` dispatch input / `NEXTJS_REF` env) — a **hard floor**, because the
+        custom deploy-script contract does not exist before v16.2.0 (the v16.0.3 pin made every
+        deploy hit the hardcoded Vercel CLI). The residual skew is now in-repo `next@16.0.3` vs the
+        harness's 16.2.0; close it by bumping the in-repo `next`, never by downgrading the harness.
 - **A3-2 (publish the matrix, done):**
   - [x] Publish `docs/compat-matrix.md` — an honest, evidence-gated supported/unsupported matrix,
         linked from the README, with a guard test (`tests/compat-matrix.test.ts`) that fails CI on
