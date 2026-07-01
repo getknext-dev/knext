@@ -33,17 +33,17 @@ func (e Env) get(key, def string) string {
 	return def
 }
 
-// EnvFromOS reads the GW_* keys from the process environment.
+// EnvFromOS reads every GW_* variable from the process environment.
+// Deliberately no whitelist: a stale list silently reverts tuning knobs
+// to their compiled-in defaults.
 func EnvFromOS() Env {
-	keys := []string{
-		"GW_COMPUTE_MODE", "GW_TARGET", "GW_TARGET_PORT", "GW_TARGET_TEMPLATE",
-		"GW_K8S_NAMESPACE", "GW_K8S_DEPLOYMENT", "GW_K8S_DEPLOYMENT_TEMPLATE",
-		"GW_WAKE_CMD", "GW_SLEEP_CMD",
-	}
 	e := Env{}
-	for _, k := range keys {
-		if v := os.Getenv(k); v != "" {
-			e[k] = v
+	for _, kv := range os.Environ() {
+		if !strings.HasPrefix(kv, "GW_") {
+			continue
+		}
+		if i := strings.IndexByte(kv, '='); i > 0 && i < len(kv)-1 {
+			e[kv[:i]] = kv[i+1:]
 		}
 	}
 	return e
