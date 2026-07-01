@@ -195,14 +195,14 @@ func TestE2EWakeOnConnectFullLoop(t *testing.T) {
 	defer close(stopPoller)
 
 	env := wake.Env{
-		"GW_COMPUTE_MODE":        "exec",
-		"GW_TARGET":              fmt.Sprintf("127.0.0.1:%d", fc.port),
-		"GW_WAKE_CMD":            "touch " + flag,
-		"GW_SLEEP_CMD":           "rm -f " + flag,
-		"GW_IDLE_MS":             "400",
-		"GW_WAKE_TIMEOUT_MS":     "5000",
-		"GW_CONNECT_TIMEOUT_MS":  "200",
-		"GW_RETRY_MS":            "50",
+		"GW_COMPUTE_MODE":       "exec",
+		"GW_TARGET":             fmt.Sprintf("127.0.0.1:%d", fc.port),
+		"GW_WAKE_CMD":           "touch " + flag,
+		"GW_SLEEP_CMD":          "rm -f " + flag,
+		"GW_IDLE_MS":            "400",
+		"GW_WAKE_TIMEOUT_MS":    "5000",
+		"GW_CONNECT_TIMEOUT_MS": "200",
+		"GW_RETRY_MS":           "50",
 	}
 	gw, err := New(env, func(string) {})
 	if err != nil {
