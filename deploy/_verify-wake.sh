@@ -9,7 +9,10 @@
 set -eu
 NS=scale-zero-pg
 K="kubectl -n $NS"
-DSN="postgres://cloud_admin@pggw:55432/postgres?sslmode=disable"
+# cloud_admin/cloud_admin is the upstream spec's dev default: compute_ctl
+# reconciles roles from config.json on every boot, so ALTER USER does not
+# stick — change the encrypted_password in 54-compute-files.yaml instead.
+DSN="postgres://cloud_admin:cloud_admin@pggw:55432/postgres?sslmode=disable"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 ok() { echo "ok - $*"; }
