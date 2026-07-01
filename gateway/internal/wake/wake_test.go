@@ -76,3 +76,25 @@ func TestUnknownModeThrows(t *testing.T) {
 		t.Fatalf("err = %v, want unknown GW_COMPUTE_MODE", err)
 	}
 }
+
+// EnvFromOS must pass through every GW_* variable — a whitelist here silently
+// reverts tuning knobs (GW_IDLE_MS etc.) to their defaults in production.
+func TestEnvFromOSIncludesAllGWKeys(t *testing.T) {
+	t.Setenv("GW_IDLE_MS", "60000")
+	t.Setenv("GW_WAKE_TIMEOUT_MS", "120000")
+	t.Setenv("GW_CONNECT_TIMEOUT_MS", "1500")
+	t.Setenv("GW_RETRY_MS", "100")
+	t.Setenv("GW_COMPUTE_MODE", "static")
+	env := EnvFromOS()
+	for k, want := range map[string]string{
+		"GW_IDLE_MS":            "60000",
+		"GW_WAKE_TIMEOUT_MS":    "120000",
+		"GW_CONNECT_TIMEOUT_MS": "1500",
+		"GW_RETRY_MS":           "100",
+		"GW_COMPUTE_MODE":       "static",
+	} {
+		if got := env[k]; got != want {
+			t.Errorf("EnvFromOS()[%s] = %q, want %q", k, got, want)
+		}
+	}
+}
