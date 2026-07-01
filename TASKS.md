@@ -1,29 +1,25 @@
-# TASKS — dependency-ordered MVP checklist
+# TASKS — dependency-ordered MVP checklist (rescoped 2026-07-02: single DB, all-on-k8s, Go)
 
-## Phase 0 — storage plane + native Postgres (foundation)
-- [ ] Bring up `local/docker-compose.yml`; confirm MinIO bucket + pageserver/safekeeper healthy.
-- [ ] Run a Neon compute against it; connect with psql; create a table, insert, select.
-- [ ] Kill the compute; reconnect; confirm data intact and cold start is sub-second (no restore).
-- [ ] Repeat on a cluster: install neon-operator (pilot), apply `10-neon-cluster.yaml`.
+## Done
+- [x] Gateway prototype (Node) — superseded, kept in git history as the spec.
+- [x] deploy/: namespace, gateway+RBAC, compute replicas:0, knext Secret, optional KEDA
+      (`deploy/_validate.sh` green against the orbstack cluster).
 
-## Phase 1 — SCS provisioning
-- [ ] Implement `provisioner/src/storage.js` `neon` mode against the storage-controller API.
-- [ ] Move `registry.js` to the shared control-plane Postgres (schema: systems table).
-- [ ] `POST /systems` creates tenant+timeline and (Phase 3) renders the compute template.
-- [ ] Idempotency + validation covered by tests (extend `_smoke.js`).
+## In flight
+- [ ] Gateway in Go (client-go): port all 20 test behaviors, delete Node version, Dockerfile.
+- [ ] Storage plane on k8s: minio + broker + safekeeper + pageserver StatefulSets,
+      init Job → tenant/timeline + `compute-config`/`compute-files` ConfigMaps,
+      `deploy/_verify-storage.sh` proves one-table data survives a compute pod kill.
 
-## Phase 2 — gateway wake-on-connect (on cluster)
-- [ ] Choose wake mechanism: KEDA "activate" trigger vs `GW_COMPUTE_MODE=kubectl` (RBAC included).
-- [ ] Verify: connecting to a slept system wakes its primary and the query succeeds.
-- [ ] Gateway emits per-system wake latency + active-connection metrics (already scaffolded).
+## MVP acceptance (user-defined)
+- [ ] On the local k8s cluster, one-table test DB:
+      compute at 0 → connect via gateway → wake → SELECT returns rows (record wake seconds)
+      → idle → compute back to 0 → reconnect wakes again.
+- [ ] Gateway image built + deployed; `kubectl -n scale-zero-pg get deploy compute` shows 0↔1.
 
-## Phase 3 — scale-to-zero loop
-- [ ] KEDA ScaledObject per system (`30-compute-template.yaml`): idle -> 0 after cooldown.
-- [ ] Confirm a clean 0 -> 1 -> 0 cycle per system under real client traffic.
-- [ ] Alert on "never scales to zero" (phantom keepalive detection).
-
-## Scale validation (Definition of done)
-- [ ] Provision N systems (pick N with target load); most idle, a subset hot.
-- [ ] Load test: fire many simultaneous cold-start connections; assert p99 wake < 1s.
-- [ ] Measure tenant density per storage set; record the ceiling.
-- [ ] Scale the gateway to 2+ replicas; confirm no SPOF and flat latency.
+## After MVP
+- [ ] Docs: README quickstart (cluster-only), knext recipe (Secret + pool sizing), wake-latency
+      numbers; refresh graphify graph.
+- [ ] Harden: 3 safekeepers, secondary pageserver, PVC sizing, TLS in front of gateway.
+- [ ] Un-park SCS: `template` wake mode + per-system compute Deployments + provisioning API.
+- [ ] Scale validation: concurrent cold starts, tenant density, gateway HA, idle-detection audit.
