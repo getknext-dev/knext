@@ -28,7 +28,9 @@ Service with `minScale: 0`.
 - A **cloud storage bucket for static assets** — GCS, S3, or MinIO — that is
   publicly readable, plus its provider CLI authenticated locally (`gsutil` for
   GCS, `aws` for S3, `mc` for MinIO). The deploy step uploads `_next/static`
-  assets there so pods stay stateless.
+  assets there so pods stay stateless. Everything uploaded — including your
+  app's entire `public/` dir — is world-readable (standard Next.js semantics),
+  so never put secrets in `public/`.
 
 ## Step 1 — Install the operator
 
@@ -273,15 +275,16 @@ kubectl get revisions -o wide
 ```
 
 Fix either by making the package public (GitHub → your package →
-Package settings → Change visibility) or by giving the namespace pull
-credentials:
+Package settings → Change visibility) or by adding pull credentials to the
+**app's ServiceAccount** — the operator runs your pods under `<name>-sa`
+(so `hello-knext-sa` here), not the namespace's `default` ServiceAccount:
 
 ```sh
 kubectl create secret docker-registry ghcr-pull \
   --docker-server=ghcr.io \
   --docker-username=<your-user> \
   --docker-password=<a-token-with-read:packages>
-kubectl patch serviceaccount default \
+kubectl patch serviceaccount hello-knext-sa \
   -p '{"imagePullSecrets": [{"name": "ghcr-pull"}]}'
 ```
 
