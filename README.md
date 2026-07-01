@@ -1,50 +1,104 @@
 # scale-zero-pg
 
-MVP starter for a **scale-to-zero PostgreSQL platform** for Self-Contained Systems (SCS): one
-database per system, zero compute when idle, sub-second wake on connect. Native Postgres compute
-on a **self-hosted Neon storage stack** (Apache-2.0), orchestrated by **Knative/KEDA**.
+**Scale-to-zero PostgreSQL on Kubernetes** — a database that consumes zero compute while idle
+and wakes on the first client connection. Native Postgres on Neon's open-source storage stack
+(Apache-2.0); the only custom piece is a small Go gateway. Built to pair with
+[knext](../..//alpheya/pocs/knext) (scale-to-zero Next.js on Knative): app and database both
+sleep at zero and wake on demand.
 
-> New here? Read `CLAUDE.md` (goal, invariants, phased plan) — it's also the kickoff brief for
-> driving the rest of the build with Claude Code.
+> Proven on a local cluster: cold connect → compute wakes 0→1 and serves data (**5.2s** wake,
+> **1–2s** when the pod is merely recreated), 60s idle → back to **0**, reconnect re-wakes —
+> data always intact. See *Verification*.
 
-## Why this shape
-Reuse over reinvention: Neon's storage layer already provides durable WAL (safekeepers),
-page storage + object-storage offload (pageserver), replication, branching, and PITR — so we build
-only the thin glue that makes it scale-to-zero and self-hostable:
-- **gateway** — wake-on-connect Postgres proxy (route by `system_id`, wake compute, pipe bytes)
-- **provisioner** — `system_id` -> Neon tenant/timeline + registry
-- **compute scaling** — KEDA scales each system's primary 0<->1 (Postgres is TCP, hence KEDA not Knative Serving)
+## How it works
+
+```
+client ──pg wire──▶ GATEWAY (Go, always on, stateless)
+                      │  parse startup ▸ compute asleep? ▸ scale 0→1 (client-go)
+                      │  ▸ hold ▸ replay ▸ pipe bytes ▸ idle 60s → scale 1→0
+                      ▼
+                    COMPUTE (Deployment, replicas 0↔1)
+                    native Postgres 17 + neon ext — stateless, no volume
+                      │ WAL out                ▲ GetPage@LSN
+                      ▼                        │
+                    STORAGE (StatefulSets, never scale to zero)
+                    safekeeper (durable WAL) · pageserver (pages) · MinIO (S3)
+```
+
+The compute keeps **no state**: killing its pod loses nothing; a fresh pod attaches to the
+tenant/timeline and lazily fetches pages. Durability, replication, branching and PITR come
+from Neon's storage components — reused, not rebuilt.
 
 ## Layout
+
 ```
-gateway/       Node service — TCP wake-on-connect proxy (stdlib only). Tests: _smoke.js, _e2e.js
-provisioner/   Node service — SCS provisioning API (stdlib only). Test: _smoke.js
-deploy/        Kubernetes manifests (Neon CRDs, gateway+RBAC, provisioner, compute+KEDA template)
-local/         docker-compose Neon storage plane for local dev
-CLAUDE.md      goal + invariants + phased tasks (Claude Code kickoff)
-TASKS.md       dependency-ordered checklist
+gateway/   Go wake-on-connect proxy (client-go; stdlib otherwise). go test ./...
+deploy/    All Kubernetes manifests + verification scripts:
+           00 namespace · 10 gateway+RBAC · 20 compute (replicas:0) · 30 knext Secret
+           40 KEDA (optional) · 50 minio · 51 broker · 52 safekeeper · 53 pageserver
+           54 compute ConfigMaps · 55 storage-init Job
+docs/      knext research + integration notes
 ```
 
-## Quickstart (no cluster needed)
-```
-make check      # syntax-check all sources
-make smoke      # run offline tests: proto parser + provisioner API
-node gateway/src/_e2e.js   # full path: ssl decline -> parse -> wake -> replay -> pipe
-```
-Local storage plane + running the services against it: see `local/README.md`.
-Deploying to a cluster (prereqs + apply order): see `deploy/README.md`.
+## Quickstart (any local k8s: OrbStack, kind, minikube)
 
-## Status
-Working today: gateway core (startup parse, SSL decline, static/template wake, byte-pipe) and the
-provisioner API in mock mode, with green smoke + e2e tests. Stubbed next (see TASKS.md): real
-storage-controller calls, on-cluster wake wiring, per-system compute template rendering.
+```sh
+docker build -t scale-zero-pg/gateway:dev gateway/   # local image, no registry needed
+kubectl apply -f deploy/                              # storage plane + compute(0) + gateway
+sh deploy/_verify-storage.sh                          # data survives a compute kill
+sh deploy/_verify-wake.sh                             # the full 0→1→0 wake loop
+```
 
-## "Works at scale" — definition of done
-The MVP earns the phrase only when four risks are retired with load-test evidence: (1) concurrent
-cold starts stay sub-second, (2) measured tenant density per storage set, (3) gateway is
-horizontally scalable / not a SPOF, (4) idle detection is real (systems truly reach zero).
-See `CLAUDE.md`.
+Connect like any Postgres (`sslmode=disable`; dev creds `cloud_admin`/`cloud_admin`):
+
+```
+postgres://cloud_admin:cloud_admin@pggw.scale-zero-pg.svc:55432/postgres?sslmode=disable
+```
+
+## knext integration
+
+knext apps consume Postgres via a `DATABASE_URL` Secret — nothing else. Apply
+`deploy/30-knext-secret.yaml` into the app namespace and reference it:
+
+```yaml
+# NextApp CR
+spec:
+  secrets:
+    envMap:
+      - env: DATABASE_URL
+        secret: myapp-database
+        key: DATABASE_URL
+```
+
+The app never knows the DB sleeps. Sizing rule: keep the app pool's idle timeout **below**
+the gateway's `GW_IDLE_MS`, or pooled keepalives block scale-to-zero.
+
+## Verification (measured on OrbStack k8s, 2026-07-02)
+
+| Check | Result |
+|---|---|
+| Data survives compute pod kill (no volume, no restore) | ✅ 3/3 rows |
+| Kill-to-first-query (pod recreate in place) | 1–2s |
+| Cold wake 0→1 through gateway (schedule + init + attach) | 5.2s |
+| Idle 60s → compute reaches zero | ✅ |
+| Reconnect after zero re-wakes, data intact | ✅ |
+
+Wake-latency budget & tuning: the 5.2s is dominated by pod scheduling, the wait-timeline
+init container (2s poll), and the 1s readiness probe — not by Neon (compute attach is
+sub-second). Tighten probes/init or pre-pull images to shrink it.
+
+## Operations notes
+
+- **Storage plane must never scale to zero** — it *is* the database.
+- MVP ships 1 safekeeper / 1 pageserver; production = 3 safekeepers across failure domains.
+- Gateway is stateless — scale it horizontally (`replicas: 2+`) for no-SPOF.
+- `deploy/40-keda-scaledobject.yaml.optional` swaps gateway-driven sleep for KEDA if you
+  want fleet-wide policies.
+- Rotate the dev password by changing `roles[].encrypted_password`
+  (md5 of `password+username`) in `deploy/54-compute-files.yaml` — `compute_ctl`
+  re-applies spec roles on every boot, so `ALTER USER` alone won't stick.
 
 ## License note
-Neon's storage + compute are Apache-2.0; Databricks (acquirer) has committed to keeping it open.
-Re-confirm the license on the exact components/versions you deploy.
+
+Neon storage + compute are Apache-2.0. Re-confirm the license on the exact
+components/versions you deploy.
