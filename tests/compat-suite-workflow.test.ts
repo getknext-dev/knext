@@ -1274,3 +1274,189 @@ describe('compat-suite does NOT override next.js jest.config.js (test-e2e-deploy
     expect(checkIdx < runIdx, 'the harness-intact check must come BEFORE run-tests.js').toBe(true);
   });
 });
+
+// ── A3-3: jest DISCOVERY fix — SWC at config-load time + the upstream /.next/
+// regex bug (#147, PROVEN by debug run 28551192374) ─────────────────────────────
+//
+// Three-layer root cause of "Pattern: … - 0 matches" on every shard, proven on
+// the throwaway branch agent/compat-a33-jest-debug:
+//   1. Run 28548871586: next/jest loads the @next/swc native binding AT JEST
+//      CONFIG-RESOLUTION TIME. NEXT_TEST_NATIVE_DIR was set only on the run step
+//      (#164), so any other jest invocation in the job died at config load
+//      ("Failed to load SWC binary for linux/x64" — and the earlier unbounded
+//      --showConfig hang was next trying to DOWNLOAD the binary into its own
+//      fallback dir over the throttled network). FIX: plant the hydrated .node
+//      into next's unconditional fallback probe path AND export
+//      NEXT_TEST_NATIVE_DIR via $GITHUB_ENV so every later step inherits it.
+//   2. Run 28549511217→28551192374: next/jest ITSELF injects
+//      testPathIgnorePatterns ['/node_modules/', '/.next/'] with the dot
+//      UNESCAPED (upstream vercel/next.js bug, packages/next/src/build/jest/
+//      jest.ts:156 at v16.0.3). The entries are REGEXES, so '/.next/' matches
+//      the '/knext/' segment of the runner workspace path
+//      (/home/runner/work/knext/knext/...) and EVERY file is excluded purely
+//      because the repo is named knext. FIX: patch the resolved next/jest dist
+//      to the escaped '/\.next/' form (see
+//      docs/compat/upstream-nextjs-jest-ignore-bug.md).
+//   3. jest caches its crawl under /tmp/jest_* keyed on config contents — a
+//      pre-patch crawl could silently resurrect the 0-matches state. FIX: clear
+//      it right before run-tests.js.
+// With all three in place the debug run showed: smoke `Tests: 1 passed` under
+// the auto config, `--listTests` count=1707, and the real 404-page-router
+// deploy test discovered + executing. These guards lock the production steps in.
+
+describe('compat-suite jest discovery fix (test-e2e-deploy.yml, #147 A3-3)', () => {
+  /** Splits a job block into `- name:`-delimited step blocks. */
+  function stepBlocks(job: string): string[] {
+    const lines = job.split('\n');
+    const blocks: string[] = [];
+    let current: string[] = [];
+    const flush = () => {
+      if (current.length) blocks.push(current.join('\n'));
+      current = [];
+    };
+    for (const line of lines) {
+      if (/^\s*-\s+name:/.test(line)) flush();
+      current.push(line);
+    }
+    flush();
+    return blocks;
+  }
+
+  /** The shard step that hydrates the @next/swc native binary (id: swc). */
+  function swcStep(): string {
+    return (
+      stepBlocks(deployTestsJobBlock()).find(
+        (b) => /@next\/swc-[a-z0-9-]+/.test(b) && /npm\s+pack\s+["']?\$\{pkg\}@/.test(b),
+      ) ?? ''
+    );
+  }
+
+  /** The shard step that patches next/jest's unescaped /.next/ ignore pattern. */
+  function patchStep(): string {
+    return (
+      stepBlocks(deployTestsJobBlock()).find((b) =>
+        /-\s+name:[^\n]*Patch next\/jest[^\n]*\.next/i.test(b),
+      ) ?? ''
+    );
+  }
+
+  it("plants the hydrated SWC binary into next's own fallback probe path", () => {
+    const step = swcStep();
+    expect(step, 'expected the @next/swc hydrate step').not.toBe('');
+    // next/jest loads SWC at jest-config-load time in contexts that may lack
+    // NEXT_TEST_NATIVE_DIR; next probes packages/next/next-swc-fallback/
+    // unconditionally, so the binary must ALSO live there.
+    expect(
+      /next-swc-fallback\/@next\/swc-linux-x64-gnu/.test(step),
+      "the swc step must target next's fallback probe path (packages/next/next-swc-fallback/@next/swc-linux-x64-gnu)",
+    ).toBe(true);
+    // The mkdir may target the literal path or a variable assigned to it above
+    // (the assignment is covered by the fallback-path assertion).
+    expect(
+      /mkdir\s+-p\s+[^\n]*(next-swc-fallback|FALLBACK_DIR)/.test(step),
+      'the swc step must mkdir -p the fallback dir before copying',
+    ).toBe(true);
+    expect(
+      /cp\s+[^\n]*next-swc\.linux-x64-gnu\.node[^\n]*/.test(step),
+      'the swc step must copy the hydrated .node binary into the fallback path',
+    ).toBe(true);
+    // Fail loud if the hydrated source binary is missing — a silent skip would
+    // reintroduce the config-load crash.
+    expect(
+      /\bexit\s+1\b/.test(step),
+      'the swc step must fail loud (exit 1) when the source .node is missing',
+    ).toBe(true);
+  });
+
+  it('exports NEXT_TEST_NATIVE_DIR to $GITHUB_ENV so EVERY later step inherits it', () => {
+    const step = swcStep();
+    // Job-level env cannot reference step outputs, so the swc step must export
+    // the native dir via $GITHUB_ENV — jest can be invoked (config load
+    // included) by any later step, not just the run-tests step.
+    expect(
+      /echo\s+"NEXT_TEST_NATIVE_DIR=[^"]*"\s*>>\s*"?\$GITHUB_ENV"?/.test(step),
+      'the swc step must `echo "NEXT_TEST_NATIVE_DIR=..." >> "$GITHUB_ENV"`',
+    ).toBe(true);
+    // The run step's explicit env reference stays intact (harmless + explicit).
+    const block = deployTestsJobBlock();
+    expect(
+      /NEXT_TEST_NATIVE_DIR\s*:[^\n]*steps\.swc\.outputs/.test(block),
+      'the run step must keep its explicit NEXT_TEST_NATIVE_DIR env reference',
+    ).toBe(true);
+  });
+
+  it('has the next/jest /.next/ patch step, ordered before run-tests.js', () => {
+    const step = patchStep();
+    expect(
+      step,
+      'expected a "Patch next/jest unescaped /.next/ ignore pattern" step in the shard job',
+    ).not.toBe('');
+    const block = deployTestsJobBlock();
+    const patchIdx = block.search(/-\s+name:[^\n]*Patch next\/jest/i);
+    const runIdx = block.search(/-\s+name:[^\n]*Run official deploy tests/);
+    expect(runIdx, 'expected the run-tests step').toBeGreaterThanOrEqual(0);
+    expect(
+      patchIdx < runIdx,
+      'the next/jest patch must run BEFORE run-tests.js (jest resolves its config at run time)',
+    ).toBe(true);
+    // And after the next/dist hydrate — the patch targets the HYDRATED dist file.
+    const hydrateIdx = block.search(/-\s+name:[^\n]*[Hh]ydrate[^\n]*next\/dist/);
+    expect(
+      hydrateIdx < patchIdx,
+      'the next/jest patch must run AFTER the next/dist hydrate (it patches the hydrated dist)',
+    ).toBe(true);
+  });
+
+  it('the patch replaces the unescaped /.next/ literal with the ESCAPED form', () => {
+    const step = patchStep();
+    // The replacement must produce the escaped regex source '/\.next/' — i.e. a
+    // backslash-escaped dot in the written file text. In the workflow YAML that
+    // replacement string carries literal backslashes before `.next`.
+    expect(
+      /\\\\+\.next\//.test(step),
+      'the patch must write the ESCAPED form (backslash before .next) into next/jest dist',
+    ).toBe(true);
+    // It must target the resolved next/jest dist chain, not a hardcoded absolute path.
+    expect(
+      /require\.resolve\(['"]next\/jest['"]/.test(step),
+      'the patch must resolve next/jest from the next.js workspace (require.resolve)',
+    ).toBe(true);
+    expect(
+      /dist\/build\/jest\/jest\.js/.test(step),
+      'the patch must reach packages/next/dist/build/jest/jest.js (where the unescaped literal lives)',
+    ).toBe(true);
+  });
+
+  it('the patch fails loud ONLY when the dist file is missing; NOOP is tolerated', () => {
+    const step = patchStep();
+    // A missing dist file means the next/dist hydrate regressed — fail the step.
+    expect(
+      /process\.exit\(1\)/.test(step),
+      'the patch step must exit 1 when the next/jest dist file cannot be found',
+    ).toBe(true);
+    // But an already-escaped upstream (no unescaped literal) is FINE: print and
+    // continue, never exit non-zero for a NOOP.
+    expect(/NOOP/.test(step), 'the patch step must print NOOP when upstream is already fixed').toBe(
+      true,
+    );
+    expect(
+      /APPLIED/.test(step),
+      'the patch step must print APPLIED (with the file) when it patches',
+    ).toBe(true);
+  });
+
+  it('clears the jest haste cache (/tmp/jest_*) right before run-tests.js', () => {
+    const block = deployTestsJobBlock();
+    const clearIdx = block.search(/rm\s+-rf\s+\/tmp\/jest_\*/);
+    const runIdx = block.search(/-\s+name:[^\n]*Run official deploy tests/);
+    expect(
+      clearIdx,
+      'the shard must `rm -rf /tmp/jest_*` (stale pre-patch crawl cache would resurrect 0-matches)',
+    ).toBeGreaterThanOrEqual(0);
+    expect(runIdx, 'expected the run-tests step').toBeGreaterThanOrEqual(0);
+    expect(clearIdx < runIdx, 'the jest cache clear must come BEFORE run-tests.js').toBe(true);
+    // And after the patch step — clearing before the patch would be pointless.
+    const patchIdx = block.search(/-\s+name:[^\n]*Patch next\/jest/i);
+    expect(patchIdx < clearIdx, 'the cache clear must come AFTER the next/jest patch').toBe(true);
+  });
+});

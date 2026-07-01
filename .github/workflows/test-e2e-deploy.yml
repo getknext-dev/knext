@@ -630,7 +630,28 @@ jobs:
             cp "${NODE_FILE}" "${NATIVE_DIR}/next-swc.${triple}.node"
             echo "::endgroup::"
           done
+          # #147 / A3-3 (run 28548871586) — ALSO plant the binary at next's OWN
+          # fallback probe path. next/jest loads the SWC binding at jest-CONFIG-
+          # LOAD time, in contexts that may lack NEXT_TEST_NATIVE_DIR — and next
+          # probes packages/next/next-swc-fallback/ UNCONDITIONALLY (else it tries
+          # to DOWNLOAD the binary there over this env's throttled network, which
+          # is the unbounded hang earlier debug runs showed). Fail loud if the
+          # hydrated source .node is missing: a silent skip would reintroduce the
+          # "Failed to load SWC binary for linux/x64" config-load crash.
+          if [ ! -f "${NATIVE_DIR}/next-swc.linux-x64-gnu.node" ]; then
+            echo "::error::hydrated @next/swc binary missing: ${NATIVE_DIR}/next-swc.linux-x64-gnu.node" >&2
+            exit 1
+          fi
+          FALLBACK_DIR="packages/next/next-swc-fallback/@next/swc-linux-x64-gnu"
+          mkdir -p "${FALLBACK_DIR}"
+          cp "${NATIVE_DIR}/next-swc.linux-x64-gnu.node" "${FALLBACK_DIR}/next-swc.linux-x64-gnu.node"
+          echo "planted @next/swc into next's fallback probe path: ${FALLBACK_DIR}"
           echo "dir=${NATIVE_DIR}" >> "$GITHUB_OUTPUT"
+          # Export at the JOB scope too: EVERY later step can invoke jest (and
+          # thereby load next/jest's config), but job-level env cannot reference
+          # step outputs — $GITHUB_ENV is the standard escape hatch. The run
+          # step's explicit env reference below stays intact (harmless).
+          echo "NEXT_TEST_NATIVE_DIR=${NATIVE_DIR}" >> "$GITHUB_ENV"
           # Sanity: the native binary the loader requires must now exist + be loadable.
           node -e '
             const path = require("path");
@@ -691,6 +712,72 @@ jobs:
             echo "::warning::next.js jest.config.js no longer roots at 'test'; re-verify the run-tests.js positional-path contract"
           fi
           node -e "require('./jest.config.js'); console.log('upstream next.js jest.config.js loads OK (rootDir untouched)')"
+
+      # #147 / A3-3 — UPSTREAM vercel/next.js BUG (proven in debug run
+      # 28551192374; see docs/compat/upstream-nextjs-jest-ignore-bug.md, which
+      # carries the repro + a ready-to-file upstream issue draft). next/jest
+      # injects testPathIgnorePatterns ['/node_modules/', '/.next/'] with the dot
+      # UNESCAPED (packages/next/src/build/jest/jest.ts:156 at v16.0.3). The
+      # entries are REGEXES, so '/.next/' means "slash, ANY char, 'next', slash"
+      # — which matches ANY `?next/` path segment. This runner's workspace path is
+      # /home/runner/work/knext/knext/... and the '/knext/' segment MATCHES, so
+      # EVERY test file in the checkout was excluded purely because the repo is
+      # named knext — the exact "Pattern: … - 0 matches" every earlier run showed
+      # (a local repro worked only because its clone path had no ?next/ segment).
+      # FIX: patch the RESOLVED next/jest dist chain (the hydrated
+      # packages/next/dist/build/jest/jest.js) to the escaped '/\.next/' form.
+      # A NOOP (upstream escaped it) is fine — print and continue; a MISSING dist
+      # file means the next/dist hydrate regressed — fail loud.
+      - name: Patch next/jest unescaped /.next/ ignore pattern (upstream bug)
+        working-directory: next.js
+        run: |
+          set -euo pipefail
+          node - <<'PATCHEOF'
+          const fs = require('fs');
+          const path = require('path');
+          let entry;
+          try {
+            entry = require.resolve('next/jest', { paths: [process.cwd()] });
+          } catch (e) {
+            console.error('FAIL: cannot resolve next/jest from', process.cwd(), '-', e.message);
+            process.exit(1);
+          }
+          const cands = new Set([entry]);
+          // Follow the entry stub's relative requires
+          // (next/jest.js -> dist/build/jest/jest.js).
+          for (const m of fs.readFileSync(entry, 'utf8').matchAll(/require\(['"](\.[^'"]+)['"]\)/g)) {
+            try { cands.add(require.resolve(path.join(path.dirname(entry), m[1]))); } catch {}
+          }
+          // Belt-and-suspenders: the known dist location relative to the package root.
+          const known = path.join(path.dirname(entry), 'dist/build/jest/jest.js');
+          if (fs.existsSync(known)) cands.add(known);
+          const files = [...cands].filter((f) => fs.existsSync(f));
+          if (!files.some((f) => f.endsWith(path.join('dist', 'build', 'jest', 'jest.js')))) {
+            console.error(
+              'FAIL: next/jest dist (dist/build/jest/jest.js) not found near', entry,
+              '- did the next/dist hydrate step regress?'
+            );
+            process.exit(1);
+          }
+          let applied = false;
+          for (const f of files) {
+            const s = fs.readFileSync(f, 'utf8');
+            // Replace the UNESCAPED string literal '/.next/' (either quote style).
+            // The escaped form '/\\.next/' has file-text backslashes and won't match.
+            const t = s.replace(/(['"])\/\.next\/\1/g, "'/\\\\.next/'");
+            if (t !== s) { fs.writeFileSync(f, t); applied = true; console.log('APPLIED:', f); }
+          }
+          if (!applied) {
+            console.log('NOOP: no unescaped /.next/ literal found (upstream fixed the escape?) in', files.join(', '));
+          }
+          PATCHEOF
+
+      # Cheap insurance: jest caches its file crawl under /tmp/jest_* keyed on
+      # config contents — any earlier jest invocation in this job could have
+      # cached a PRE-patch crawl, silently resurrecting the 0-matches state.
+      # Clear it so run-tests.js gets a fresh crawl against the patched next/jest.
+      - name: Clear jest haste cache (fresh crawl against the patched next/jest)
+        run: rm -rf /tmp/jest_*
 
       - name: Run official deploy tests (knext adapter)
         working-directory: next.js
