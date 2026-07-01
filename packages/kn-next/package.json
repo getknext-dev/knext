@@ -85,6 +85,15 @@
     "serverless"
   ],
   "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/getknext-dev/knext.git",
+    "directory": "packages/kn-next"
+  },
+  "homepage": "https://github.com/getknext-dev/knext#readme",
+  "bugs": {
+    "url": "https://github.com/getknext-dev/knext/issues"
+  },
   "publishConfig": {
     "access": "public",
     "provenance": true

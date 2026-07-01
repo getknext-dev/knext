@@ -1,6 +1,17 @@
 {
   "name": "@knext/lib",
   "version": "0.1.0",
+  "description": "Shared runtime library for knext (logging, clients, health).",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/getknext-dev/knext.git",
+    "directory": "packages/lib"
+  },
+  "homepage": "https://github.com/getknext-dev/knext#readme",
+  "bugs": {
+    "url": "https://github.com/getknext-dev/knext/issues"
+  },
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "exports": {
