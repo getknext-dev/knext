@@ -85,6 +85,9 @@
     "serverless"
   ],
   "license": "Apache-2.0",
+  "engines": {
+    "node": ">=22.18"
+  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/getknext-dev/knext.git",

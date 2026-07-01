@@ -194,11 +194,12 @@ one, `minScale: 0` (the default) is what keeps scale-to-zero on.
 
 ## Step 5 — Build and deploy
 
-Preview first. `--dry-run` runs no builds and touches nothing — it prints the
-`NextApp` resource the CLI would submit:
+Preview first. `--dry-run` skips the asset upload, the image build/push, and
+the cluster apply, and prints the `NextApp` resource the CLI would submit. It
+still runs `next build` — add `--skip-build` to skip that too:
 
 ```sh
-npx kn-next deploy --dry-run
+npx kn-next deploy --dry-run --skip-build
 ```
 
 Then deploy for real:
@@ -258,6 +259,34 @@ curl -i "$(kubectl get nextapp hello-knext -o jsonpath='{.status.url}')"
 
 That round trip — zero pods → request → running pod → response — is the whole
 point.
+
+## Troubleshooting
+
+**Pods stuck in `ImagePullBackOff` on the first deploy.** GitHub Container
+Registry images are **private by default**, and the cluster cannot pull a
+private image without credentials. Check what the operator and the revision
+report:
+
+```sh
+kubectl describe nextapp hello-knext
+kubectl get revisions -o wide
+```
+
+Fix either by making the package public (GitHub → your package →
+Package settings → Change visibility) or by giving the namespace pull
+credentials:
+
+```sh
+kubectl create secret docker-registry ghcr-pull \
+  --docker-server=ghcr.io \
+  --docker-username=<your-user> \
+  --docker-password=<a-token-with-read:packages>
+kubectl patch serviceaccount default \
+  -p '{"imagePullSecrets": [{"name": "ghcr-pull"}]}'
+```
+
+Then re-run `npx kn-next deploy --skip-build --skip-upload` to roll a fresh
+revision.
 
 ## Cleaning up
 
