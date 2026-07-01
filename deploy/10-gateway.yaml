@@ -1,0 +1,95 @@
+# Wake-on-connect gateway: the only always-on component on the connection
+# path. Scales horizontally (stateless); wakes the compute deployment via the
+# scale subresource, so RBAC is the minimum for that one verb pair.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: pggw
+  namespace: scale-zero-pg
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: pggw-scaler
+  namespace: scale-zero-pg
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments/scale"]
+    verbs: ["get", "patch", "update"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: pggw-scaler
+  namespace: scale-zero-pg
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: pggw-scaler
+subjects:
+  - kind: ServiceAccount
+    name: pggw
+    namespace: scale-zero-pg
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pggw
+  namespace: scale-zero-pg
+  labels: { app: pggw }
+spec:
+  replicas: 1 # bump to 2+ for the no-SPOF check; gateway is stateless
+  selector:
+    matchLabels: { app: pggw }
+  template:
+    metadata:
+      labels: { app: pggw }
+    spec:
+      serviceAccountName: pggw
+      containers:
+        - name: gateway
+          image: scale-zero-pg/gateway:dev # built locally; OrbStack k8s shares the docker daemon
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: GW_PORT
+              value: "55432"
+            - name: GW_METRICS_PORT
+              value: "9090"
+            - name: GW_COMPUTE_MODE
+              value: "kubectl" # scales deployments via the API server (in-cluster config)
+            - name: GW_K8S_NAMESPACE
+              value: "scale-zero-pg"
+            - name: GW_K8S_DEPLOYMENT
+              value: "compute"
+            - name: GW_TARGET
+              value: "compute.scale-zero-pg.svc:55433"
+            - name: GW_IDLE_MS
+              value: "60000" # demo-friendly idle window; production: 300000+
+            - name: GW_WAKE_TIMEOUT_MS
+              value: "120000" # first wake on a cluster may pull the compute image
+          ports:
+            - { name: pg, containerPort: 55432 }
+            - { name: metrics, containerPort: 9090 }
+          readinessProbe:
+            httpGet: { path: /healthz, port: metrics }
+            initialDelaySeconds: 1
+            periodSeconds: 5
+          resources:
+            requests: { cpu: 50m, memory: 32Mi }
+            limits: { memory: 128Mi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pggw
+  namespace: scale-zero-pg
+  labels: { app: pggw }
+spec:
+  type: LoadBalancer # OrbStack exposes this on localhost; use ClusterIP in prod
+  selector: { app: pggw }
+  ports:
+    - { name: pg, port: 55432, targetPort: pg }
+    - { name: metrics, port: 9090, targetPort: metrics }

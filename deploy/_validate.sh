@@ -10,9 +10,14 @@ ok() { echo "ok - $*"; }
 
 command -v kubectl >/dev/null || fail "kubectl not found"
 
-# 1. every manifest must dry-run apply cleanly (server-side validation)
+# 1. every manifest must dry-run apply cleanly (server-side validation).
+# The namespace is applied for real first: namespaced dry-runs need it to
+# exist, and this cluster is the demo target anyway.
+kubectl apply -f 00-namespace.yaml >/dev/null || fail "namespace apply failed"
+ok "00-namespace.yaml applied"
 for f in [0-9][0-9]-*.yaml; do
   [ -e "$f" ] || fail "no numbered manifests found in deploy/"
+  [ "$f" = 00-namespace.yaml ] && continue
   kubectl apply --dry-run=server -f "$f" >/dev/null || fail "$f does not validate"
   ok "$f validates (server dry-run)"
 done

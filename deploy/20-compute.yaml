@@ -1,0 +1,63 @@
+# The scale-to-zero unit: one stateless Neon compute (native Postgres).
+# replicas is 0 at rest — the gateway (or KEDA) raises it to 1 on connect and
+# back to 0 after idle. Data lives in the storage plane, never in this pod.
+#
+# The compute needs storage endpoints + tenant/timeline IDs. Those are
+# environment-specific, so they live in the `compute-config` ConfigMap /
+# `compute-files` volume created by wire-local-storage.sh (local dev: points
+# at the docker-compose storage plane via host.orb.internal). A production
+# cluster would point at in-cluster StatefulSets instead.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: compute
+  namespace: scale-zero-pg
+  labels: { app: compute }
+spec:
+  replicas: 0 # at rest; gateway scales 0<->1
+  selector:
+    matchLabels: { app: compute }
+  strategy:
+    type: Recreate # single-writer: never two computes on one timeline during rollout
+  template:
+    metadata:
+      labels: { app: compute }
+    spec:
+      containers:
+        - name: compute
+          image: neondatabase/compute-node-v17:latest # pinned by wire-local-storage.sh kustomize/sed to match local/
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "/compute-files/entrypoint.sh"]
+          envFrom:
+            - configMapRef:
+                name: compute-config # TENANT_ID, TIMELINE_ID, PAGESERVER_*, SAFEKEEPERS
+          ports:
+            - { name: pg, containerPort: 55433 }
+            - { name: compute-http, containerPort: 3080 }
+          volumeMounts:
+            - { name: compute-files, mountPath: /compute-files }
+          readinessProbe:
+            tcpSocket: { port: pg }
+            initialDelaySeconds: 0
+            periodSeconds: 1 # tight: wake latency depends on it
+            failureThreshold: 60
+          resources:
+            requests: { cpu: 250m, memory: 256Mi }
+            limits: { memory: 1Gi }
+      volumes:
+        - name: compute-files
+          configMap:
+            name: compute-files # entrypoint.sh + spec.json template (from local/compute/)
+            optional: true
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: compute
+  namespace: scale-zero-pg
+  labels: { app: compute }
+spec:
+  clusterIP: None # headless: gateway dials the pod directly; no LB warm-up
+  selector: { app: compute }
+  ports:
+    - { name: pg, port: 55433, targetPort: pg }
