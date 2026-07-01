@@ -777,6 +777,51 @@ jobs:
           true
         continue-on-error: true
 
+      # === A3-3 SMOKE (throwaway branch agent/compat-a33-jest-debug) ===
+      # Control experiment: can jest run ANY test in this CI tree, or is "No tests
+      # found" specific to the deploy test files? Plant a trivial dependency-free test
+      # (no next/e2e-utils imports) and run it 4 ways. If it prints "1 passed", jest
+      # discovery+run WORKS and the deploy-harness setup is the culprit; if even this
+      # prints "No tests found", jest discovery is fundamentally broken in this
+      # prebuilt-overlay CI env. Grep the log for A33SMOKE_* markers. Remove before merge.
+      - name: A3-3 jest smoke test (TEMPORARY)
+        working-directory: next.js
+        run: |
+          set +e
+          echo "===== A33SMOKE_BEGIN ====="
+
+          # 1. Plant a trivial, dependency-free test we fully control.
+          mkdir -p test/e2e/knext-smoke
+          cat > test/e2e/knext-smoke/knext-smoke.test.ts <<'SMOKE'
+          it('knext smoke: jest can run a test in this tree', () => { expect(1).toBe(1) })
+          SMOKE
+          echo "A33SMOKE_PLANTED"
+          ls -la test/e2e/knext-smoke/ 2>&1
+
+          # 2a. Auto config, pattern form (positional as testPathPattern regex).
+          echo "===== A33SMOKE_A ====="
+          timeout 90 node_modules/.bin/jest --ci --runInBand --forceExit test/e2e/knext-smoke/knext-smoke.test.ts 2>&1 | tail -15 || echo "A33SMOKE_A_RC=$?"
+
+          # 2b. Auto config, --runTestsByPath (positional as literal file path).
+          echo "===== A33SMOKE_B ====="
+          timeout 90 node_modules/.bin/jest --ci --runInBand --forceExit --runTestsByPath test/e2e/knext-smoke/knext-smoke.test.ts 2>&1 | tail -15 || echo "A33SMOKE_B_RC=$?"
+
+          # 2c. Auto config, --runTestsByPath with ABSOLUTE path.
+          echo "===== A33SMOKE_C ====="
+          timeout 90 node_modules/.bin/jest --ci --runInBand --forceExit --runTestsByPath "$(pwd)/test/e2e/knext-smoke/knext-smoke.test.ts" 2>&1 | tail -15 || echo "A33SMOKE_C_RC=$?"
+
+          # 2d. Minimal plain config (rootDir=cwd, roots=smoke dir, node env), --runTestsByPath.
+          echo "===== A33SMOKE_D ====="
+          cat > /tmp/min.jest.config.js <<'MINEOF'
+          module.exports = { rootDir: process.cwd(), roots: ['<rootDir>/test/e2e/knext-smoke'], testMatch: ['**/*.test.{js,ts,tsx}'], testEnvironment: 'node' };
+          MINEOF
+          timeout 90 node_modules/.bin/jest --config /tmp/min.jest.config.js --runInBand --forceExit --runTestsByPath test/e2e/knext-smoke/knext-smoke.test.ts 2>&1 | tail -15 || echo "A33SMOKE_D_RC=$?"
+
+          echo "A33SMOKE_SUMMARY_DONE"
+          echo "===== A33SMOKE_END ====="
+          true
+        continue-on-error: true
+
       - name: Run official deploy tests (knext adapter)
         working-directory: next.js
         env:
