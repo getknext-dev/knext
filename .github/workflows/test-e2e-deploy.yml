@@ -813,6 +813,18 @@ jobs:
             echo "A33SWC_FALLBACK_SOURCE_MISSING"
           fi
 
+          # Run 28550001508 prime suspect: POISONED JEST HASTE CACHE. Resolved config
+          # is normal (no filter, projects:[], standard ignores) yet auto-config
+          # --listTests yields ZERO candidates (G_COUNT=0, exit 0) while the files
+          # exist on disk. cacheDirectory=/tmp/jest_rt, and the earlier A33DBG step
+          # runs jest with BROKEN SWC (the fallback plant happens here, later) — a
+          # config-load-crashed jest can write a bad/empty haste cache that later
+          # same-config-id invocations REUSE instead of re-crawling. The minimal
+          # config works because its different config id gets a fresh crawl. Clear
+          # the cache, then re-probe.
+          rm -rf /tmp/jest_* 2>/dev/null || true
+          echo "A33CACHE_CLEARED"
+
           # 1. Plant a trivial, dependency-free test we fully control.
           mkdir -p test/e2e/knext-smoke
           cat > test/e2e/knext-smoke/knext-smoke.test.ts <<'SMOKE'
@@ -821,53 +833,35 @@ jobs:
           echo "A33SMOKE_PLANTED"
           ls -la test/e2e/knext-smoke/ 2>&1
 
-          # Run 28549511217: with SWC planted, the "Failed to load SWC" error is GONE
-          # from the auto-config probes but they STILL print "No tests found" (minimal
-          # config still passes). So SWC was one masking layer; something in next's
-          # RESOLVED jest config still excludes these files. --showConfig should no
-          # longer hang (the hang WAS the SWC download attempt) — capture the resolved
-          # config + the auto-config candidate inventory directly.
+          # 2a2. DECISIVE: auto config, plain positional, actually RUN the smoke test
+          # (this exact form printed "No tests found" pre-clear).
+          echo "===== A33SMOKE_A2 ====="
+          timeout 120 node_modules/.bin/jest --ci --runInBand --forceExit test/e2e/knext-smoke/knext-smoke.test.ts 2>&1 | tail -8 || echo "A33SMOKE_A2_RC=$?"
 
-          # 2f. The resolved config, now that SWC loads.
-          echo "===== A33SMOKE_F ====="
-          timeout 120 node_modules/.bin/jest --showConfig 2>&1 | head -200 || echo "A33SMOKE_F_RC=$?"
-          echo "A33SMOKE_F_TARGETED:"
-          timeout 120 node_modules/.bin/jest --showConfig 2>&1 | grep -aE '"(rootDir|roots|testMatch|testRegex|testPathIgnorePatterns|modulePathIgnorePatterns|filter|projects|haste)"' -A6 | head -80 || true
+          # 2a2nc. Control: same but --no-cache (bypasses any cache reuse entirely).
+          echo "===== A33SMOKE_A2NC ====="
+          timeout 120 node_modules/.bin/jest --ci --no-cache --runInBand --forceExit test/e2e/knext-smoke/knext-smoke.test.ts 2>&1 | tail -8 || echo "A33SMOKE_A2NC_RC=$?"
 
-          # 2g. The auto-config candidate inventory: what does the resolved config's
-          # candidate set actually contain? If count>0 but smoke/404 absent, the
-          # head/tail sample shows which dirs ARE included (roots resolution clue).
-          echo "===== A33SMOKE_G ====="
-          timeout 120 node_modules/.bin/jest --ci --listTests 2>&1 > /tmp/listtests.txt
-          echo "G_RC=$?"
-          echo "G_COUNT=$(grep -c '\.test\.' /tmp/listtests.txt || true)"
-          echo "G_SMOKE=$(grep -c 'knext-smoke' /tmp/listtests.txt || true)"
-          echo "G_404=$(grep -c '404-page-router' /tmp/listtests.txt || true)"
-          echo "G_HEAD:"
-          head -10 /tmp/listtests.txt
-          echo "G_TAIL:"
-          tail -5 /tmp/listtests.txt
+          # 2e2. The REAL deploy test file, auto config, plain positional (raw capture).
+          echo "===== A33SMOKE_E2 ====="
+          timeout 120 node_modules/.bin/jest --ci --listTests test/e2e/404-page-router/index.test.ts > /tmp/e2.txt 2>&1
+          echo "E2_RC=$?"
+          echo "E2_OUT:"
+          head -6 /tmp/e2.txt
 
-          # 2h. Auto config + explicit rootDir override on the CLI: does forcing
-          # rootDir to the repo root (keeping the rest of next's config) fix matching?
-          echo "===== A33SMOKE_H ====="
-          timeout 120 node_modules/.bin/jest --ci --rootDir . --listTests 'test/e2e/404-page-router/index.test.ts' 2>&1 | tail -8 || echo "A33SMOKE_H_RC=$?"
+          # 2g2. Auto-config full candidate inventory post-clear.
+          echo "===== A33SMOKE_G2 ====="
+          timeout 120 node_modules/.bin/jest --ci --listTests > /tmp/g2.txt 2>&1
+          echo "G2_RC=$?"
+          echo "G2_COUNT=$(grep -c '\.test\.' /tmp/g2.txt || true)"
+          echo "G2_404=$(grep -c '404-page-router' /tmp/g2.txt || true)"
 
-          # 2d. Minimal plain config (rootDir=cwd, roots=smoke dir, node env), --runTestsByPath.
+          # 2d. Control: minimal plain config (different config id => fresh crawl).
           echo "===== A33SMOKE_D ====="
           cat > /tmp/min.jest.config.js <<'MINEOF'
           module.exports = { rootDir: process.cwd(), roots: ['<rootDir>/test/e2e/knext-smoke'], testMatch: ['**/*.test.{js,ts,tsx}'], testEnvironment: 'node' };
           MINEOF
           timeout 90 node_modules/.bin/jest --config /tmp/min.jest.config.js --runInBand --forceExit --runTestsByPath test/e2e/knext-smoke/knext-smoke.test.ts 2>&1 | tail -15 || echo "A33SMOKE_D_RC=$?"
-
-          # 2e. The REAL deploy test file, auto config, plain positional — exactly how
-          # run-tests.js invokes jest. --listTests suffices: we need discovery, not a
-          # full deploy run. RAW capture (last run's E output didn't survive filtering).
-          echo "===== A33SMOKE_E ====="
-          timeout 120 node_modules/.bin/jest --ci --listTests test/e2e/404-page-router/index.test.ts > /tmp/e.txt 2>&1
-          echo "E_RC=$?"
-          echo "E_OUT:"
-          cat /tmp/e.txt | head -12
 
           echo "A33SMOKE_SUMMARY_DONE"
           echo "===== A33SMOKE_END ====="
