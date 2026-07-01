@@ -161,6 +161,9 @@ On the first request a pod compiles its JavaScript and writes the V8 code cache 
 
 ## Quick Start
 
+> **New to knext?** Follow the step-by-step **[Quickstart guide](./docs/QUICKSTART.md)** —
+> from an empty cluster (operator install included) to a deployed, scale-to-zero app.
+
 ### Prerequisites
 
 - Node.js 20+ or Bun 1.2+
