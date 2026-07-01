@@ -41,6 +41,20 @@ import {
 const runQuietMock = runQuiet as unknown as Mock;
 const runCaptureMock = runCapture as unknown as Mock;
 
+/**
+ * Writes a local asset by its UPLOAD KEY into the standalone-build source
+ * location `uploadAssets` stages from: `_next/static/<k>` comes from
+ * `.next/static/<k>`, everything else from `public/<k>`.
+ */
+async function seedSourceFile(root: string, key: string): Promise<void> {
+    const staticNs = "_next/static/";
+    const full = key.startsWith(staticNs)
+        ? join(root, ".next", "static", key.slice(staticNs.length))
+        : join(root, "public", key);
+    await fs.mkdir(join(full, ".."), { recursive: true });
+    await fs.writeFile(full, `bytes:${key}`);
+}
+
 /** App name used across the namespacing tests. Mirrors `NextApp.metadata.name`. */
 const APP_NAME = "shop";
 
@@ -85,6 +99,7 @@ const REMOTE_LISTERS: Record<
 };
 
 describe("uploadAssets data plane", () => {
+    let root: string;
     let assetsDir: string;
     let prevCwd: string;
     const localKeys = [
@@ -95,13 +110,14 @@ describe("uploadAssets data plane", () => {
 
     beforeEach(async () => {
         prevCwd = process.cwd();
-        const root = await fs.mkdtemp(join(tmpdir(), "knext-assets-"));
+        root = await fs.mkdtemp(join(tmpdir(), "knext-assets-"));
+        // uploadAssets STAGES the standalone-build sources (.next/static +
+        // public/) into .output/public before uploading; assetsDir is that
+        // staged dir — the local path the provider argv references.
         assetsDir = join(root, ".output", "public");
-        // Write the local file set under .output/public/<key>.
+        // Seed the standalone-build sources, keyed by upload key.
         for (const key of localKeys) {
-            const full = join(assetsDir, key);
-            await fs.mkdir(join(full, ".."), { recursive: true });
-            await fs.writeFile(full, `bytes:${key}`);
+            await seedSourceFile(root, key);
         }
         process.chdir(root);
         runQuietMock.mockReset();
@@ -356,11 +372,9 @@ describe("uploadAssets data plane", () => {
                 `_next/static/${buildA}/_buildManifest.js`,
                 `_next/static/chunks/${buildA}/page.js`,
             ];
-            // Re-seed the assets dir with build-id-nested keys.
+            // Re-seed the standalone-build source with build-id-nested keys.
             for (const key of buildKeys) {
-                const full = join(assetsDir, key);
-                await fs.mkdir(join(full, ".."), { recursive: true });
-                await fs.writeFile(full, `bytes:${key}`);
+                await seedSourceFile(root, key);
             }
             const allKeys = [...localKeys, ...buildKeys];
             runCaptureMock.mockReturnValue(

@@ -1,4 +1,4 @@
-import { readdirSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readdirSync, rmSync } from "node:fs";
 import { join, relative } from "node:path";
 import { runCapture, runQuiet, runQuietAllowFail } from "../cli/exec";
 import type { KnativeNextConfig } from "../config";
@@ -417,8 +417,64 @@ function providerOps(
  * or failed upload therefore produces a deploy-time signal instead of an app
  * that 404s its own JS/CSS/images.
  */
+/**
+ * Stages the standalone-build asset sources into a single upload directory and
+ * returns it.
+ *
+ * `next build` with `output: 'standalone'` produces `.next/static/**` (hashed
+ * chunks/CSS, nested under the BUILD_ID) and leaves the app's `public/` dir in
+ * place — it creates NO `.output/public` (that layout was the pre-migration
+ * Nitro output and nothing writes it anymore). uploadAssets used to read
+ * `.output/public` directly, so every real `kn-next deploy` without
+ * `--skip-upload` crashed with ENOENT at the upload step.
+ *
+ * Staging (rather than teaching every provider two source roots) keeps the
+ * provider shell-outs, the verify-and-retry key diff, the retention GC's
+ * `_next/static/<buildId>/` namespace, and the operator's `<app>/` teardown
+ * prefix all keyed off ONE local dir whose relative paths ARE the object keys:
+ *
+ *   .next/static/**  →  <staging>/_next/static/**   (served via assetPrefix
+ *                        `<publicUrl>/<name>/_next/static/...`)
+ *   public/**        →  <staging>/**                (bucket key-space root)
+ *
+ * The staging dir is cleared first so a previous build's files never enter this
+ * build's upload/verify set. Uploads to the BUCKET stay additive — old builds'
+ * remote objects are untouched; only the local staging area is rebuilt.
+ *
+ * @throws when `.next/static` is missing — the user has not run `next build`.
+ */
+export function stageStandaloneAssets(cwd: string = process.cwd()): string {
+    const nextStaticDir = join(cwd, ".next", "static");
+    const publicDir = join(cwd, "public");
+    const stagingDir = join(cwd, ".output", "public");
+
+    if (!existsSync(nextStaticDir)) {
+        throw new Error(
+            `No .next/static directory found in ${cwd} — run \`next build\` ` +
+                "(with output: 'standalone') before deploying, or pass " +
+                "--skip-upload to skip the asset upload.",
+        );
+    }
+
+    // Rebuild the staging area from scratch: stale files from a previous
+    // build must not enter this build's upload/verify set.
+    rmSync(stagingDir, { recursive: true, force: true });
+    mkdirSync(stagingDir, { recursive: true });
+
+    cpSync(nextStaticDir, join(stagingDir, "_next", "static"), {
+        recursive: true,
+    });
+
+    // public/ is optional — not every app has one.
+    if (existsSync(publicDir)) {
+        cpSync(publicDir, stagingDir, { recursive: true });
+    }
+
+    return stagingDir;
+}
+
 export async function uploadAssets(config: KnativeNextConfig): Promise<void> {
-    const assetsDir = join(process.cwd(), ".output", "public");
+    const assetsDir = stageStandaloneAssets(process.cwd());
 
     log.info(
         { provider: config.storage.provider, bucket: config.storage.bucket },

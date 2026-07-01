@@ -40,6 +40,20 @@ import { uploadAssets } from "../utils/asset-upload";
 const runQuietMock = runQuiet as unknown as Mock;
 const runCaptureMock = runCapture as unknown as Mock;
 
+/**
+ * Writes a local asset by its UPLOAD KEY into the standalone-build source
+ * location `uploadAssets` stages from: `_next/static/<k>` comes from
+ * `.next/static/<k>`, everything else from `public/<k>`.
+ */
+async function seedSourceFile(root: string, key: string): Promise<void> {
+    const staticNs = "_next/static/";
+    const full = key.startsWith(staticNs)
+        ? join(root, ".next", "static", key.slice(staticNs.length))
+        : join(root, "public", key);
+    await fs.mkdir(join(full, ".."), { recursive: true });
+    await fs.writeFile(full, `bytes:${key}`);
+}
+
 function makeConfig(): KnativeNextConfig {
     return {
         name: "shop",
@@ -52,7 +66,6 @@ function makeConfig(): KnativeNextConfig {
 }
 
 describe("uploadAssets chaos: object-store loss fails LOUD", () => {
-    let assetsDir: string;
     let prevCwd: string;
     const localKeys = [
         "_next/static/buildX/main.js",
@@ -63,11 +76,10 @@ describe("uploadAssets chaos: object-store loss fails LOUD", () => {
     beforeEach(async () => {
         prevCwd = process.cwd();
         const root = await fs.mkdtemp(join(tmpdir(), "knext-chaos-assets-"));
-        assetsDir = join(root, ".output", "public");
+        // uploadAssets stages the standalone-build sources (.next/static +
+        // public/) into .output/public itself — seed the real sources.
         for (const key of localKeys) {
-            const full = join(assetsDir, key);
-            await fs.mkdir(join(full, ".."), { recursive: true });
-            await fs.writeFile(full, `bytes:${key}`);
+            await seedSourceFile(root, key);
         }
         process.chdir(root);
         runQuietMock.mockReset();
