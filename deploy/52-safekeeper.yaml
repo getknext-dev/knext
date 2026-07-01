@@ -1,0 +1,60 @@
+# Safekeeper: quorum-replicated durable WAL + single-writer authority.
+# MVP: ONE replica (upstream prod guidance: 3 across failure domains).
+# StatefulSet + PVC — this is the durability layer, never scale-to-zero.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: safekeeper1
+  namespace: scale-zero-pg
+  labels: { app: safekeeper1, plane: storage }
+spec:
+  serviceName: safekeeper1
+  replicas: 1
+  selector: { matchLabels: { app: safekeeper1 } }
+  template:
+    metadata:
+      labels: { app: safekeeper1, plane: storage }
+    spec:
+      containers:
+        - name: safekeeper
+          image: neondatabase/neon:8464
+          command: ["/bin/sh", "-c"]
+          # Advertise the Service name: it's what compute-config's
+          # neon.safekeepers points at (kept identical to the compose spec).
+          args:
+            - |
+              exec safekeeper \
+                --listen-pg=0.0.0.0:5454 \
+                --advertise-pg=safekeeper1:5454 \
+                --listen-http=0.0.0.0:7676 \
+                --id=1 \
+                --broker-endpoint=http://storage-broker:50051 \
+                -D /data \
+                --remote-storage="{endpoint='http://minio:9000', bucket_name='neon', bucket_region='eu-north-1', prefix_in_bucket='/safekeeper/'}"
+          env:
+            - { name: AWS_ACCESS_KEY_ID, value: minio }
+            - { name: AWS_SECRET_ACCESS_KEY, value: password }
+          ports:
+            - { name: pg, containerPort: 5454 }
+            - { name: http, containerPort: 7676 }
+          volumeMounts:
+            - { name: data, mountPath: /data }
+          readinessProbe:
+            httpGet: { path: /v1/status, port: http }
+            periodSeconds: 2
+  volumeClaimTemplates:
+    - metadata: { name: data }
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources: { requests: { storage: 2Gi } }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: safekeeper1
+  namespace: scale-zero-pg
+spec:
+  selector: { app: safekeeper1 }
+  ports:
+    - { name: pg, port: 5454, targetPort: pg }
+    - { name: http, port: 7676, targetPort: http }

@@ -1,0 +1,81 @@
+# Pageserver: ingests WAL from safekeepers, materializes pages, offloads to
+# MinIO, serves GetPage@LSN to computes. StatefulSet + PVC (its layer cache
+# and tenant metadata live under /data/.neon). Config from upstream compose,
+# broker renamed storage_broker -> storage-broker (DNS-1035).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pageserver-config
+  namespace: scale-zero-pg
+data:
+  pageserver.toml: |
+    broker_endpoint='http://storage-broker:50051'
+    pg_distrib_dir='/usr/local/'
+    listen_pg_addr='0.0.0.0:6400'
+    listen_http_addr='0.0.0.0:9898'
+    remote_storage={ endpoint='http://minio:9000', bucket_name='neon', bucket_region='eu-north-1', prefix_in_bucket='/pageserver' }
+    control_plane_api='http://0.0.0.0:6666' # no storage controller in the MVP; junk address
+    control_plane_emergency_mode=true
+    virtual_file_io_mode="buffered"
+  identity.toml: |
+    id=1234
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: pageserver
+  namespace: scale-zero-pg
+  labels: { app: pageserver, plane: storage }
+spec:
+  serviceName: pageserver
+  replicas: 1
+  selector: { matchLabels: { app: pageserver } }
+  template:
+    metadata:
+      labels: { app: pageserver, plane: storage }
+    spec:
+      # Config files must live inside the writable data dir (/data/.neon),
+      # so an init container seeds them from the ConfigMap onto the PVC.
+      initContainers:
+        - name: seed-config
+          image: neondatabase/neon:8464
+          command: ["/bin/sh", "-c"]
+          args:
+            - mkdir -p /data/.neon && cp /config/pageserver.toml /config/identity.toml /data/.neon/
+          volumeMounts:
+            - { name: data, mountPath: /data }
+            - { name: config, mountPath: /config }
+      containers:
+        - name: pageserver
+          image: neondatabase/neon:8464
+          command: ["/usr/local/bin/pageserver", "-D", "/data/.neon"] # image default, made explicit
+          env:
+            - { name: AWS_ACCESS_KEY_ID, value: minio }
+            - { name: AWS_SECRET_ACCESS_KEY, value: password }
+          ports:
+            - { name: pg, containerPort: 6400 }
+            - { name: http, containerPort: 9898 }
+          volumeMounts:
+            - { name: data, mountPath: /data }
+          readinessProbe:
+            httpGet: { path: /v1/status, port: http }
+            periodSeconds: 2
+      volumes:
+        - name: config
+          configMap: { name: pageserver-config }
+  volumeClaimTemplates:
+    - metadata: { name: data }
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources: { requests: { storage: 5Gi } }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pageserver
+  namespace: scale-zero-pg
+spec:
+  selector: { app: pageserver }
+  ports:
+    - { name: pg, port: 6400, targetPort: pg }
+    - { name: http, port: 9898, targetPort: http }

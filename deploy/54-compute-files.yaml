@@ -1,0 +1,245 @@
+apiVersion: v1
+data:
+  config.json: |
+    {
+        "spec": {
+            "format_version": 1.0,
+
+            "timestamp": "2022-10-12T18:00:00.000Z",
+            "operation_uuid": "0f657b36-4b0f-4a2d-9c2e-1dcd615e7d8c",
+            "suspend_timeout_seconds": -1,
+
+            "cluster": {
+                "cluster_id": "docker_compose",
+                "name": "docker_compose_test",
+                "state": "restarted",
+                "roles": [
+                    {
+                        "name": "cloud_admin",
+                        "encrypted_password": "b093c0d3b281ba6da1eacc608620abd8",
+                        "options": null
+                    }
+                ],
+                "databases": [
+                ],
+                "settings": [
+                    {
+                        "name": "fsync",
+                        "value": "off",
+                        "vartype": "bool"
+                    },
+                    {
+                        "name": "wal_level",
+                        "value": "logical",
+                        "vartype": "enum"
+                    },
+                    {
+                        "name": "wal_log_hints",
+                        "value": "on",
+                        "vartype": "bool"
+                    },
+                    {
+                        "name": "log_connections",
+                        "value": "on",
+                        "vartype": "bool"
+                    },
+                    {
+                        "name": "port",
+                        "value": "55433",
+                        "vartype": "integer"
+                    },
+                    {
+                        "name": "shared_buffers",
+                        "value": "1MB",
+                        "vartype": "string"
+                    },
+                    {
+                        "name": "max_connections",
+                        "value": "100",
+                        "vartype": "integer"
+                    },
+                    {
+                        "name": "listen_addresses",
+                        "value": "0.0.0.0",
+                        "vartype": "string"
+                    },
+                    {
+                        "name": "max_wal_senders",
+                        "value": "10",
+                        "vartype": "integer"
+                    },
+                    {
+                        "name": "max_replication_slots",
+                        "value": "10",
+                        "vartype": "integer"
+                    },
+                    {
+                        "name": "wal_sender_timeout",
+                        "value": "5s",
+                        "vartype": "string"
+                    },
+                    {
+                        "name": "wal_keep_size",
+                        "value": "0",
+                        "vartype": "integer"
+                    },
+                    {
+                        "name": "password_encryption",
+                        "value": "md5",
+                        "vartype": "enum"
+                    },
+                    {
+                        "name": "restart_after_crash",
+                        "value": "off",
+                        "vartype": "bool"
+                    },
+                    {
+                        "name": "synchronous_standby_names",
+                        "value": "walproposer",
+                        "vartype": "string"
+                    },
+                    {
+                        "name": "shared_preload_libraries",
+                        "value": "neon,pg_cron,timescaledb,pg_stat_statements",
+                        "vartype": "string"
+                    },
+                    {
+                        "name": "neon.safekeepers",
+                        "value": "safekeeper1:5454",
+                        "vartype": "string"
+                    },
+                    {
+                        "name": "neon.timeline_id",
+                        "value": "TIMELINE_ID",
+                        "vartype": "string"
+                    },
+                    {
+                        "name": "neon.tenant_id",
+                        "value": "TENANT_ID",
+                        "vartype": "string"
+                    },
+                    {
+                        "name": "neon.pageserver_connstring",
+                        "value": "host=pageserver port=6400",
+                        "vartype": "string"
+                    },
+                    {
+                        "name": "max_replication_write_lag",
+                        "value": "500MB",
+                        "vartype": "string"
+                    },
+                    {
+                        "name": "max_replication_flush_lag",
+                        "value": "10GB",
+                        "vartype": "string"
+                    },
+                    {
+                        "name": "cron.database",
+                        "value": "postgres",
+                        "vartype": "string"
+                    }
+                ]
+            },
+
+            "delta_operations": [
+            ]
+        },
+        "compute_ctl_config": {
+            "jwks": {
+                "keys": [
+                    {
+                        "use": "sig",
+                        "key_ops": [
+                            "verify"
+                        ],
+                        "alg": "EdDSA",
+                        "kid": "ZGIxMzAzOGY0YWQwODk2ODU1MTk1NzMxMDFkYmUyOWU2NzZkOWNjNjMyMGRkZGJjOWY0MjdjYWVmNzE1MjUyOAo=",
+                        "kty": "OKP",
+                        "crv": "Ed25519",
+                        "x": "MGQ4ZDFhOTdmNTM0NmUwMDc3ZmJkN2Q0MWE0ZmI3M2NhNWE3YjFjOTNkM2IyYzRkZTQzOGM3MjBkZTk3N2E5ZAo="
+                    }
+                ]
+            }
+        }
+    }
+  entrypoint.sh: |
+    #!/usr/bin/env bash
+    # Compute entrypoint — adapted from local/compute_wrapper/shell/compute.sh
+    # (upstream neondatabase/neon compose derivation) for k8s:
+    #   - config template read from the ConfigMap mount (/compute-files)
+    #   - hostnames are k8s Services: pageserver, safekeeper1 (same as compose)
+    #   - discovers-or-creates tenant+timeline on the pageserver, idempotently,
+    #     so scale 0->1 needs no init job and reuses the existing timeline.
+    set -eux
+
+    generate_id() {
+        local -n resvar=${1}
+        printf -v resvar '%08x%08x%08x%08x' ${SRANDOM} ${SRANDOM} ${SRANDOM} ${SRANDOM}
+    }
+
+    PG_VERSION=${PG_VERSION:-17}
+
+    readonly CONFIG_FILE_ORG=/compute-files/config.json
+    readonly CONFIG_FILE=/tmp/config.json
+
+    echo "Waiting for pageserver to become ready."
+    while ! nc -z pageserver 6400; do
+         sleep 1
+    done
+    echo "Pageserver is ready."
+
+    cp "${CONFIG_FILE_ORG}" "${CONFIG_FILE}"
+
+    if [[ -n "${TENANT_ID:-}" && -n "${TIMELINE_ID:-}" ]]; then
+      tenant_id=${TENANT_ID}
+      timeline_id=${TIMELINE_ID}
+    else
+      echo "Check if a tenant is present"
+      tenant_id=$(curl -s -X GET -H "Content-Type: application/json" \
+          "http://pageserver:9898/v1/tenant" | jq -r '.[0].id')
+      if [[ -z "${tenant_id}" || "${tenant_id}" = null ]]; then
+        echo "Create a tenant"
+        generate_id tenant_id
+        curl -s -X PUT -H "Content-Type: application/json" \
+            -d '{"mode": "AttachedSingle", "generation": 1, "tenant_conf": {}}' \
+            "http://pageserver:9898/v1/tenant/${tenant_id}/location_config" | jq .
+      fi
+
+      echo "Check if a timeline is present"
+      timeline_id=$(curl -s -X GET -H "Content-Type: application/json" \
+          "http://pageserver:9898/v1/tenant/${tenant_id}/timeline" | jq -r '.[0].timeline_id')
+      if [[ -z "${timeline_id:-}" || "${timeline_id:-}" = null ]]; then
+        generate_id timeline_id
+        curl -s -X POST -H "Content-Type: application/json" \
+            -d "{\"new_timeline_id\": \"${timeline_id}\", \"pg_version\": ${PG_VERSION}}" \
+            "http://pageserver:9898/v1/tenant/${tenant_id}/timeline/" | jq .
+      fi
+    fi
+
+    echo "Adding pgx_ulid to shared_preload_libraries"
+    shared_libraries=$(jq -r '.spec.cluster.settings[] | select(.name=="shared_preload_libraries").value' ${CONFIG_FILE})
+    sed -i "s|${shared_libraries}|${shared_libraries},pgx_ulid|" ${CONFIG_FILE}
+
+    echo "Write tenant id and timeline id into the spec"
+    sed -i "s|TENANT_ID|${tenant_id}|" ${CONFIG_FILE}
+    sed -i "s|TIMELINE_ID|${timeline_id}|" ${CONFIG_FILE}
+
+    echo "Start compute node"
+    exec /usr/local/bin/compute_ctl --pgdata /var/db/postgres/compute \
+         -C "postgresql://cloud_admin@localhost:55433/postgres" \
+         -b /usr/local/bin/postgres \
+         --compute-id "compute-${RANDOM}" \
+         --config "${CONFIG_FILE}"
+kind: ConfigMap
+metadata:
+  creationTimestamp: null
+  name: compute-files
+  namespace: scale-zero-pg
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: compute-config
+  namespace: scale-zero-pg
+data:
+  PG_VERSION: "17"

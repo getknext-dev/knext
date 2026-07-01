@@ -1,0 +1,35 @@
+# Storage broker: lightweight coordination between safekeepers and
+# pageservers. Stateless. (Compose name storage_broker -> DNS-valid
+# storage-broker; the pageserver.toml + safekeeper args reference the new name.)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: storage-broker
+  namespace: scale-zero-pg
+  labels: { app: storage-broker, plane: storage }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: storage-broker } }
+  template:
+    metadata:
+      labels: { app: storage-broker, plane: storage }
+    spec:
+      containers:
+        - name: storage-broker
+          image: neondatabase/neon:8464 # pinned release, same as compose derivation
+          command: ["storage_broker", "--listen-addr=0.0.0.0:50051"]
+          ports:
+            - { name: grpc, containerPort: 50051 }
+          readinessProbe:
+            tcpSocket: { port: grpc }
+            periodSeconds: 2
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: storage-broker
+  namespace: scale-zero-pg
+spec:
+  selector: { app: storage-broker }
+  ports:
+    - { name: grpc, port: 50051, targetPort: grpc }

@@ -25,9 +25,11 @@ spec:
     spec:
       containers:
         - name: compute
-          image: neondatabase/compute-node-v17:latest # pinned by wire-local-storage.sh kustomize/sed to match local/
-          imagePullPolicy: IfNotPresent
-          command: ["/bin/sh", "/compute-files/entrypoint.sh"]
+          # compute-node-v17:8464 + curl/jq/netcat (built by `make compute-image`);
+          # OrbStack k8s shares the docker daemon, so Never-pull works locally.
+          image: ks-pg-compute:8464
+          imagePullPolicy: Never
+          command: ["/bin/bash", "/compute-files/entrypoint.sh"]
           envFrom:
             - configMapRef:
                 name: compute-config # TENANT_ID, TIMELINE_ID, PAGESERVER_*, SAFEKEEPERS
@@ -47,8 +49,7 @@ spec:
       volumes:
         - name: compute-files
           configMap:
-            name: compute-files # entrypoint.sh + spec.json template (from local/compute/)
-            optional: true
+            name: compute-files # entrypoint.sh + config.json spec template (54-compute-files.yaml)
 ---
 apiVersion: v1
 kind: Service
