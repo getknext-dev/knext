@@ -1929,3 +1929,66 @@ describe('compat-suite hydrates @next/playwright (test-e2e-deploy.yml, #147 A3-3
     ).toBe(true);
   });
 });
+
+// ── A3-3 round 4 (#147): deploy-lane ENV FIDELITY with upstream test-deploy-adapter ──
+// Run 28597872225 (786/2) triage prompted a full settings audit of upstream's own
+// adapter deploy lane (vercel/next.js@v16.2.0 test_e2e_deploy_release.yml,
+// test-deploy-adapter job) against ours:
+//   • per-case timeout: IDENTICAL — 60s HARDCODED (test/lib/e2e-utils/index.ts
+//     `individualTestTimeout = 60 * 1000`, applied via a Proxy-wrapped it/test;
+//     NEXT_E2E_TEST_TIMEOUT does NOT raise it).
+//   • concurrency: IDENTICAL — upstream passes `-c 2` explicitly; run-tests.js
+//     DEFAULT_CONCURRENCY is 2. We make ours explicit so the fidelity is
+//     declared, not incidental.
+//   • runners (ubuntu-latest) + retries (3 attempts): IDENTICAL.
+//   • NEXT_E2E_TEST_TIMEOUT=240000: upstream sets it; we did NOT. It raises the
+//     SETUP timeout (jest.setTimeout — createNext/deploy/build hooks; Linux
+//     default 120s) — a real fidelity gap for slow fixture deploys under shard
+//     load, though NOT the per-case 60s class. Mirror it.
+// Conclusion recorded here so nobody "fixes" the 60s-timeout flake class by
+// diverging from the mirrored lane (e.g. -c 1 or a raised per-case timeout):
+// upstream runs this class at the SAME settings and handles the residual wobble
+// by ledger (its own deploy manifest's flakey/failed suites) — as do we.
+
+describe('compat-suite deploy-lane env fidelity (test-e2e-deploy.yml, #147 A3-3 round 4)', () => {
+  function runTestsStep(): string {
+    const lines = deployTestsJobBlock().split('\n');
+    const blocks: string[] = [];
+    let current: string[] = [];
+    const flush = () => {
+      if (current.length) blocks.push(current.join('\n'));
+      current = [];
+    };
+    for (const line of lines) {
+      if (/^\s*-\s+name:/.test(line)) flush();
+      current.push(line);
+    }
+    flush();
+    return blocks.find((b) => /-\s+name:[^\n]*Run official deploy tests/.test(b)) ?? '';
+  }
+
+  it('mirrors upstream NEXT_E2E_TEST_TIMEOUT=240000 (setup-timeout fidelity)', () => {
+    const step = runTestsStep();
+    expect(step, 'expected the Run official deploy tests step').not.toBe('');
+    const m = step.match(/NEXT_E2E_TEST_TIMEOUT\s*:\s*['"]?(\d+)/);
+    expect(
+      m,
+      'the run step must set NEXT_E2E_TEST_TIMEOUT — upstream test-deploy-adapter sets 240000 (raises the jest SETUP timeout for fixture deploy/build hooks)',
+    ).not.toBeNull();
+    expect((m as RegExpMatchArray)[1]).toBe('240000');
+  });
+
+  it('runs run-tests.js at the EXPLICIT upstream concurrency (-c 2), never -c 1 divergence', () => {
+    const step = runTestsStep();
+    // Upstream deploy lanes pass `-c 2` explicitly. An explicit flag also guards
+    // against a silent run-tests.js default change on a future ref bump.
+    expect(
+      /run-tests\.js[^\n]*(?:-c|--concurrency)[ =]2\b/.test(step),
+      'run-tests.js must be invoked with explicit -c 2 (upstream test-deploy-adapter parity)',
+    ).toBe(true);
+    expect(
+      /run-tests\.js[^\n]*(?:-c|--concurrency)[ =]1\b/.test(step),
+      'must NOT lower to -c 1 — that diverges from the mirrored upstream lane',
+    ).toBe(false);
+  });
+});

@@ -1078,6 +1078,18 @@ jobs:
           # scripts/e2e-deploy.sh. Never set IS_WEBPACK_TEST alongside it —
           # bundler.ts exits(1) on multiple bundler flags.
           IS_TURBOPACK_TEST: '1'
+          # #147 A3-3 round 4 — env fidelity with upstream's test-deploy-adapter
+          # lane, which sets NEXT_E2E_TEST_TIMEOUT=240000. It raises the jest
+          # SETUP timeout (test/lib/e2e-utils/index.ts jest.setTimeout — the
+          # createNext/deploy/build hooks; Linux default was 120s), so a slow
+          # fixture deploy under shard load gets upstream's full setup budget.
+          # HONEST SCOPE NOTE: it does NOT raise the per-CASE 60s timeout — that
+          # is HARDCODED upstream (individualTestTimeout, applied via a
+          # Proxy-wrapped it/test) and identical in both lanes; the residual 60s
+          # runtime-prefetch wobble class is ledgered per-case in the manifest
+          # ($knextQuarantines), exactly as upstream ledgers it in its own
+          # deploy manifest.
+          NEXT_E2E_TEST_TIMEOUT: '240000'
           # knext's lifecycle scripts (the deploy-script contract).
           NEXT_TEST_DEPLOY_SCRIPT_PATH: ${{ github.workspace }}/knext/scripts/e2e-deploy.sh
           NEXT_TEST_DEPLOY_LOGS_SCRIPT_PATH: ${{ github.workspace }}/knext/scripts/e2e-logs.sh
@@ -1130,7 +1142,13 @@ jobs:
         # cancellation, which is not guaranteed to leave room for the tail).
         timeout-minutes: 105
         run: |
-          node run-tests.js --type e2e -g ${{ matrix.shard }} 2>&1 | tee runner.log || true
+          # -c 2: EXPLICIT upstream test-deploy-adapter concurrency (was the
+          # run-tests.js default, 2 — the flag declares the fidelity and pins it
+          # against a silent default change on a ref bump). Deliberately NOT -c 1:
+          # upstream runs this suite at -c 2 on the same ubuntu-latest runners and
+          # ledgers the residual 60s-timeout wobble; diverging would trade
+          # env-parity for an unproven stability hypothesis at ~2x wall time.
+          node run-tests.js --type e2e -c 2 -g ${{ matrix.shard }} 2>&1 | tee runner.log || true
 
       # Fix round 1: `if: always()` on the WHOLE summarize+upload tail — a
       # timed-out or failed shard must still report its partial results, never

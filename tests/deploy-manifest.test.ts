@@ -374,6 +374,38 @@ const OBSERVED_FLAKY_QUARANTINES: Record<string, { cases: string[]; observedRuns
     ],
     observedRuns: ['28578203671', '28596005486', '28590478386'],
   },
+  // Round 4 (run 28597872225, 786/2). Settings audit first (see the workflow
+  // fidelity guards in tests/compat-suite-workflow.test.ts): upstream's
+  // test-deploy-adapter lane runs the SAME per-case 60s timeout (hardcoded
+  // individualTestTimeout in e2e-utils, NOT raised by NEXT_E2E_TEST_TIMEOUT),
+  // the same -c 2 concurrency, the same ubuntu-latest runners and the same 3
+  // attempts — the class is inherently wobbly in deploy mode even at full env
+  // parity, and upstream itself handles it by ledger (prefetch-runtime flakey
+  // + app-client-cache failed entries). So: ledger, don't diverge.
+  //   • client-cache.parallel-routes: pure family signature — alternating 60s
+  //     hangs (att1+att3 're-use the cache…', att2 'should prefetch the full
+  //     page'); passed ALL FOUR prior full runs. Upstream marks the SAME case
+  //     texts failed in this family's defaults/experimental siblings.
+  //   • prefetching: MIXED mechanism, honestly split: the uri-encoded case is
+  //     an ASSERTION diff (un-retried immediate hasElementByCssSelector check
+  //     right after .click() — the substantive %20-reuse assertions PASS);
+  //     the two loading-state cases are family 60s hangs. All wobble across
+  //     identical-code runs (28596005486 fully passed).
+  'test/e2e/app-dir/app-client-cache/client-cache.parallel-routes.test.ts': {
+    cases: [
+      'app dir client cache with parallel routes prefetch={true} should prefetch the full page',
+      'app dir client cache with parallel routes prefetch={true} should re-use the cache for the full page, only for 5 mins',
+    ],
+    observedRuns: ['28597872225'],
+  },
+  'test/e2e/app-dir/app-prefetch/prefetching.test.ts': {
+    cases: [
+      'app dir - prefetching should not unintentionally modify the requested prefetch by escaping the uri encoded query params',
+      'app dir - prefetching should show layout eagerly when prefetched with loading one level down',
+      'app dir - prefetching should immediately render the loading state for a dynamic segment when fetched from higher up in the tree',
+    ],
+    observedRuns: ['28597872225', '28593534713', '28590478386'],
+  },
 };
 
 describe('test/deploy-tests-manifest.knext.json — knext-observed flaky quarantines (#147 A3-3 final mile)', () => {
