@@ -2162,3 +2162,173 @@ describe('compat-suite fail-on-red gate — revocation teeth (test-e2e-deploy.ym
     expect(/\|\| true\b/.test(src)).toBe(true);
   });
 });
+
+// ── #147 item 4: the Bun runtime axis — a SEPARATE, cheaper lane ───────────────
+// The Node nightly (16 shards) is the CREDENTIAL lane; doubling it every night
+// for Bun would be pure cost with no extra credibility. The Bun axis is instead
+// a separate lane inside the SAME workflow (no copy-paste second workflow):
+//   • a `runtime` workflow_dispatch input (choice node|bun, default node), and
+//   • a WEEKLY (Sunday) schedule that runs the bun lane,
+// both funneled through ONE workflow-level `KNEXT_RUNTIME` env that the shard
+// run step plumbs into scripts/e2e-deploy.sh (which already boots the standalone
+// server.js with `bun` when KNEXT_RUNTIME=bun). HONESTY: the compat-matrix Node
+// ✅ (run 28602886003) is a NODE claim — the Bun row stays ❌ until a green Bun
+// run exists (tests/compat-matrix.test.ts holds that row to the same evidence
+// contract), and a red BUN weekly must alert under its OWN lane-named issue,
+// never implying the Node credential went red.
+
+describe('compat-suite Bun runtime axis (test-e2e-deploy.yml, #147 item 4)', () => {
+  const src = workflowText();
+
+  /** The `workflow_dispatch:` inputs block (up to the sibling `schedule:` key). */
+  function dispatchBlock(): string {
+    const m = src.match(/workflow_dispatch:[\s\S]*?(?=\n\s{2}schedule:)/);
+    return m ? m[0] : '';
+  }
+
+  /** The `runtime:` input sub-block inside workflow_dispatch.inputs. */
+  function runtimeInputBlock(): string {
+    const block = dispatchBlock();
+    const m = block.match(/^(\s+)runtime:\s*\n([\s\S]*?)(?=^\1\w|\n*$(?![\s\S]))/m);
+    return m ? m[0] : '';
+  }
+
+  /** All cron strings declared under `schedule:`. */
+  function crons(): string[] {
+    return [...src.matchAll(/cron:\s*'([^']+)'/g)].map((m) => m[1]);
+  }
+
+  it('declares a `runtime` workflow_dispatch input', () => {
+    expect(
+      runtimeInputBlock(),
+      'workflow_dispatch must declare a `runtime` input (the on-demand bun lane)',
+    ).not.toBe('');
+  });
+
+  it('the runtime input is a choice of node|bun and DEFAULTS to node (nightly stays the Node credential lane)', () => {
+    const input = runtimeInputBlock();
+    expect(
+      /type:\s*choice/.test(input),
+      'the runtime input must be type: choice (free-text would allow a typo lane)',
+    ).toBe(true);
+    expect(/default:\s*'?node'?/.test(input), 'the runtime input must default to node').toBe(true);
+    expect(/^\s*-\s*'?node'?\s*$/m.test(input), 'options must include node').toBe(true);
+    expect(/^\s*-\s*'?bun'?\s*$/m.test(input), 'options must include bun').toBe(true);
+  });
+
+  it('keeps the nightly cron AND adds exactly one weekly (Sunday) cron for the bun lane', () => {
+    const all = crons();
+    expect(all, 'the nightly Node cron must stay untouched (the credential lane)').toContain(
+      '17 3 * * *',
+    );
+    const weekly = all.filter((c) => c !== '17 3 * * *');
+    expect(weekly.length, 'exactly ONE extra schedule: the weekly bun lane').toBe(1);
+    expect(
+      /^\S+\s+\S+\s+\*\s+\*\s+(0|7|SUN|sun)$/.test(weekly[0]),
+      `the extra cron must be WEEKLY on Sunday (day-of-week field), got "${weekly[0]}"`,
+    ).toBe(true);
+  });
+
+  it('derives KNEXT_RUNTIME at the workflow level: dispatch input > weekly cron → bun > default node', () => {
+    const envLine = src.split('\n').find((l) => /^\s*KNEXT_RUNTIME:\s*\$\{\{/.test(l));
+    expect(envLine, 'a workflow-level KNEXT_RUNTIME env expression must exist').toBeTruthy();
+    expect(
+      /inputs\.runtime/.test(envLine ?? ''),
+      'the lane must honor the workflow_dispatch runtime input',
+    ).toBe(true);
+    expect(
+      /github\.event\.schedule/.test(envLine ?? ''),
+      'the lane must branch on github.event.schedule (which cron fired)',
+    ).toBe(true);
+    // The cron string the expression compares against must be EXACTLY the weekly
+    // cron declared under schedule: — a drifted string silently runs the weekly
+    // lane on Node forever.
+    const weekly = crons().filter((c) => c !== '17 3 * * *')[0] ?? '';
+    expect(
+      (envLine ?? '').includes(`'${weekly}'`),
+      `the KNEXT_RUNTIME expression must compare github.event.schedule to the weekly cron ('${weekly}')`,
+    ).toBe(true);
+    expect(/'bun'/.test(envLine ?? ''), 'the weekly branch must yield bun').toBe(true);
+    expect(/'node'/.test(envLine ?? ''), 'the fallback must be node').toBe(true);
+  });
+
+  it('plumbs the lane into the shard run step (KNEXT_RUNTIME is no longer hardcoded to node)', () => {
+    const block = deployTestsJobBlock();
+    const line = block.split('\n').find((l) => /^\s*KNEXT_RUNTIME:/.test(l));
+    expect(line, 'the run step must still set KNEXT_RUNTIME explicitly').toBeTruthy();
+    expect(
+      /KNEXT_RUNTIME:\s*\$\{\{\s*env\.KNEXT_RUNTIME\s*\}\}/.test(line ?? ''),
+      `the run step must plumb the workflow-level lane (env.KNEXT_RUNTIME), got: "${(line ?? '').trim()}"`,
+    ).toBe(true);
+    expect(
+      /KNEXT_RUNTIME:\s*'?node'?\s*(#.*)?$/.test(line ?? ''),
+      'KNEXT_RUNTIME must NOT be hardcoded to node — that silently disables the bun lane',
+    ).toBe(false);
+  });
+
+  it('sets up Bun ONLY on the bun lane, via a SHA-pinned oven-sh/setup-bun', () => {
+    const shard = deployTestsJobBlock();
+    // Split the shard job into step blocks and find the setup-bun one.
+    const blocks: string[] = [];
+    let current: string[] = [];
+    for (const line of shard.split('\n')) {
+      if (/^\s*-\s+name:/.test(line)) {
+        if (current.length) blocks.push(current.join('\n'));
+        current = [];
+      }
+      current.push(line);
+    }
+    if (current.length) blocks.push(current.join('\n'));
+    const bunStep = blocks.find((b) => /oven-sh\/setup-bun/.test(b)) ?? '';
+    expect(bunStep, 'the deploy-tests job must have an oven-sh/setup-bun step').not.toBe('');
+    expect(
+      /uses:\s*oven-sh\/setup-bun@[0-9a-f]{40}\b/.test(bunStep),
+      'oven-sh/setup-bun must be pinned to a full commit SHA (supply-chain rule: pin third-party actions)',
+    ).toBe(true);
+    expect(
+      /if:\s*env\.KNEXT_RUNTIME\s*==\s*'bun'/.test(bunStep),
+      'the bun setup must be GATED on the bun lane (the Node nightly must not pay for it)',
+    ).toBe(true);
+  });
+
+  it('passes --runtime to the summary so every artifact is lane-attributable', () => {
+    const summarizeStep =
+      deployTestsJobBlock()
+        .split('\n- name:')
+        .find((b) => /e2e-summary\.mjs/.test(b)) ?? '';
+    expect(summarizeStep, 'expected the Summarize shard result step').not.toBe('');
+    expect(
+      /--runtime\s+"?\$\{?KNEXT_RUNTIME\}?"?/.test(summarizeStep),
+      'the summarize invocation must pass --runtime "${KNEXT_RUNTIME}" (artifacts must say which lane produced them)',
+    ).toBe(true);
+  });
+
+  it('the red alert NAMES the lane: a red bun weekly gets its own title and never implies the Node credential is red', () => {
+    const alertMatch = src.match(
+      /^ {2}nightly-red-alert:\n[\s\S]*?(?=^ {2}[a-z][\w-]*:|\n*$(?![\s\S]))/m,
+    );
+    const job = alertMatch ? alertMatch[0] : '';
+    expect(job, 'expected the nightly-red-alert job').not.toBe('');
+    // Lane-aware: the alert must branch on the runtime lane.
+    expect(
+      /KNEXT_RUNTIME/.test(job),
+      'the alert must read KNEXT_RUNTIME to distinguish lanes',
+    ).toBe(true);
+    // The Node credential title is unchanged (idempotency key for the Node lane).
+    expect(job).toContain('Compat nightly RED');
+    // The bun lane gets a DISTINCT title that names bun — a red bun weekly must
+    // never comment on (or be mistaken for) the Node credential issue.
+    const titles = [...job.matchAll(/title=(['"])(.*?)\1/g)].map((m) => m[2]);
+    const bunTitle = titles.find((t) => /bun/i.test(t));
+    expect(
+      bunTitle,
+      'the alert must assign a bun-lane title (e.g. "Compat weekly RED (bun lane)")',
+    ).toBeTruthy();
+    expect(bunTitle).not.toBe('Compat nightly RED');
+    // And the body must say the Node credential is NOT implicated.
+    expect(
+      /does NOT imply[^\n]*Node/i.test(job) || /Node credential[^\n]*not/i.test(job),
+      'the bun-lane alert body must state it does NOT imply the Node credential lane is red',
+    ).toBe(true);
+  });
+});

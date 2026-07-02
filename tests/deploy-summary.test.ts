@@ -38,7 +38,7 @@ describe('scripts/e2e-summary.mjs — summarize() (#89)', () => {
   it('produces a fully-shaped, JSON-serializable summary object', () => {
     const s = summarize(SAMPLE_RUNNER_OUTPUT, { ref: 'v16.0.3', shard: '1/4', excluded: 7 });
     expect(Object.keys(s).sort()).toEqual(
-      ['excluded', 'failed', 'notRun', 'passed', 'ref', 'shard'].sort(),
+      ['excluded', 'failed', 'notRun', 'passed', 'ref', 'runtime', 'shard'].sort(),
     );
     // round-trips through JSON (it's an artifact)
     expect(JSON.parse(JSON.stringify(s))).toEqual(s);
@@ -345,7 +345,7 @@ describe('scripts/e2e-summary.mjs — phantom infra-abort vs real failure (A3-3,
       excluded: 0,
     });
     expect(Object.keys(s).sort()).toEqual(
-      ['excluded', 'failed', 'notRun', 'passed', 'ref', 'shard'].sort(),
+      ['excluded', 'failed', 'notRun', 'passed', 'ref', 'runtime', 'shard'].sort(),
     );
     expect(typeof s.notRun).toBe('number');
     expect(s.notRun).toBe(0);
@@ -549,5 +549,40 @@ exiting with code 0
     const s = summarize(log, { ref: 'v16.2.0', shard: '5/16', excluded: 0 });
     expect(s.passed).toBe(0);
     expect(s.failed).toBe(0);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// #147 item 4 (the Bun runtime axis): the summary artifact must be LANE-
+// ATTRIBUTABLE. With a Node nightly and a Bun weekly emitting the same
+// compat-suite-summary-*.json shape, a summary that does not carry the runtime
+// would let a Bun result be silently read as Node evidence (or vice versa) —
+// the compat-matrix Node ✅ is a NODE claim, so every artifact must say which
+// lane produced it.
+describe('summarize() runtime attribution (#147 Bun axis)', () => {
+  it('carries the runtime through to the artifact', () => {
+    const s = summarize('Tests: 1 passed, 1 total\n', {
+      ref: 'v16.2.0',
+      shard: '1/16',
+      excluded: 0,
+      runtime: 'bun',
+    });
+    expect(s.runtime).toBe('bun');
+  });
+
+  it('defaults runtime to node when absent (backwards compatible with pre-lane artifacts)', () => {
+    const s = summarize('', { ref: 'v16.2.0', shard: '1/16', excluded: 0 });
+    expect(s.runtime).toBe('node');
+  });
+
+  it('normalizes a non-string runtime to the node default (artifact stays well-typed)', () => {
+    const s = summarize('', {
+      ref: 'v16.2.0',
+      shard: '1/16',
+      excluded: 0,
+      // @ts-expect-error intentionally malformed input from the CLI boundary
+      runtime: 42,
+    });
+    expect(s.runtime).toBe('node');
   });
 });

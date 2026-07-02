@@ -43,8 +43,8 @@ import { readFileSync, writeFileSync } from 'node:fs';
 /**
  * Parse jest-style runner output + run metadata into the summary artifact shape.
  * @param {string} runnerOutput raw stdout from run-tests.js
- * @param {{ref:string, shard:string, excluded:number}} meta
- * @returns {{passed:number, failed:number, notRun:number, excluded:number, ref:string, shard:string}}
+ * @param {{ref:string, shard:string, excluded:number, runtime?:string}} meta
+ * @returns {{passed:number, failed:number, notRun:number, excluded:number, ref:string, shard:string, runtime:string}}
  */
 export function summarize(runnerOutput, meta) {
   const text = String(runnerOutput ?? '');
@@ -112,6 +112,12 @@ export function summarize(runnerOutput, meta) {
     excluded: Number(meta?.excluded ?? 0) || 0,
     ref: String(meta?.ref ?? ''),
     shard: String(meta?.shard ?? ''),
+    // #147 item 4 (Bun runtime axis): the artifact must be LANE-ATTRIBUTABLE —
+    // the Node nightly and the Bun weekly emit the same summary shape, and the
+    // compat-matrix Node ✅ is a NODE claim, so every summary says which lane
+    // produced it. Mirrors e2e-deploy.sh's own KNEXT_RUNTIME semantics: exactly
+    // 'bun' selects bun, anything else (absent, junk) is the node default.
+    runtime: meta?.runtime === 'bun' ? 'bun' : 'node',
   };
 }
 
@@ -212,6 +218,7 @@ function main() {
     ref: args.ref ?? '',
     shard: args.shard ?? '',
     excluded: Number(args.excluded ?? 0),
+    runtime: args.runtime,
   });
   writeFileSync(out, `${JSON.stringify(summary, null, 2)}\n`);
   console.log(`[e2e-summary] wrote ${out}: ${JSON.stringify(summary)}`);
