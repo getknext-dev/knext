@@ -339,6 +339,15 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 		}
 
 		var envVars []corev1.EnvVar
+		// HOSTNAME=0.0.0.0 overrides kubelet's HOSTNAME=<pod-name> so a bare
+		// `next start`/server.js entrypoint binds all interfaces instead of the
+		// pod IP only (Knative's queue-proxy dials 127.0.0.1:USER_PORT).
+		// Verified benign for middleware rewrites (#178): with 0.0.0.0 the
+		// router initUrl and the middleware-visible origin match. The knext
+		// runtime entry (node-server.ts buildChildEnv) now additionally empties
+		// HOSTNAME for its spawned standalone child, making this injection moot
+		// there — kept as defense-in-depth for custom images that run server.js
+		// directly. Do NOT change this to a loopback IP or hostname.
 		envVars = append(envVars, corev1.EnvVar{Name: "HOSTNAME", Value: "0.0.0.0"})
 		envVars = append(envVars, corev1.EnvVar{Name: "NODE_ENV", Value: "production"})
 
