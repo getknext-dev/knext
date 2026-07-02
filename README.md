@@ -37,8 +37,18 @@ deploy/    All Kubernetes manifests + verification scripts:
            00 namespace · 10 gateway+RBAC · 20 compute (replicas:0) · 30 knext Secret
            40 KEDA (optional) · 50 minio · 51 broker · 52 safekeeper · 53 pageserver
            54 compute ConfigMaps · 55 storage-init Job
-docs/      knext research + integration notes
+docs/      user documentation + research + ADRs
 ```
+
+## Documentation
+
+- **[Getting started](docs/getting-started.md)** — zero to a sleeping database in ~5 minutes.
+- **[Connecting your app](docs/connecting.md)** — DSN, pooling rules, knext integration,
+  what cold starts look like from the client, time-series notes.
+- **[Operations](docs/operations.md)** — config reference, monitoring/alerts, durability
+  model, password rotation, troubleshooting, upgrades.
+- [ADR-0001](docs/adr-0001-timescale-and-sharding.md) — TimescaleDB verdict + sharding
+  mechanism. [knext research](docs/knext-research.md) — integration background.
 
 ## Quickstart (any local k8s: OrbStack, kind, minikube)
 
