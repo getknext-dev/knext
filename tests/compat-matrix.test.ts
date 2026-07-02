@@ -214,8 +214,29 @@ describe('docs/compat-matrix.md — honesty guard (issue #41)', () => {
       (r) => /official/i.test(r.feature) || /official/i.test(r.evidence),
     );
 
-    it('exactly one row NAMES the official suite in its feature', () => {
-      expect(rows.filter((r) => /official/i.test(r.feature)).length).toBe(1);
+    it('exactly one row NAMES the official suite (the Node credential row)', () => {
+      // The CREDENTIAL row — "Official Next.js compatibility suite" — must be
+      // unique. The Bun runtime-axis lane row (also /official/i, see below) is
+      // a separate, subordinate claim and is counted separately.
+      expect(
+        rows.filter((r) => /official next\.js compatibility suite/i.test(r.feature)).length,
+      ).toBe(1);
+    });
+
+    it('every official-claiming row is either the credential row or the Bun runtime-axis lane row', () => {
+      // No third row may ride the word "official" into the evidence contract's
+      // blind spot: anything claiming official-suite backing is one of the two
+      // known rows, each individually guarded.
+      const unknown = rows.filter(
+        (r) =>
+          /official/i.test(r.feature) &&
+          !/official next\.js compatibility suite/i.test(r.feature) &&
+          !/bun runtime axis/i.test(r.feature),
+      );
+      expect(
+        unknown.map((r) => r.feature),
+        'unexpected extra official-claiming row(s)',
+      ).toEqual([]);
     });
 
     it('enforces the evidence contract IFF a row is ✅ — an honest ❌ flip-back is always free', () => {
@@ -264,6 +285,62 @@ describe('docs/compat-matrix.md — honesty guard (issue #41)', () => {
         notes: 'nightly went red — row flipped back pending triage',
       };
       expect(officialFlipProblems(regressed)).toEqual([]);
+    });
+  });
+
+  // ── Bun runtime-axis row (#147 item 4) ──────────────────────────────────────
+  //
+  // The Node ✅ above is a NODE claim (run 28602886003, KNEXT_RUNTIME=node). The
+  // workflow now carries a SEPARATE Bun lane (dispatch input + weekly schedule),
+  // but a lane EXISTING is not a lane PASSING: the Bun row must stay honest
+  // (❌ "first green pending") until a green KNEXT_RUNTIME=bun run is observed,
+  // and any future ✅ flip is held to the SAME evidence contract as the Node row
+  // (run ID + pinned ref + "N passed / 0 failed") — plus it must name the bun
+  // lane so a Node run ID can never be laundered into Bun evidence.
+
+  describe('Bun runtime-axis row — separate lane, evidence-gated like the credential row (#147 item 4)', () => {
+    const bunRows = rows.filter((r) => /bun runtime axis/i.test(r.feature));
+
+    it('has exactly one Bun runtime-axis row', () => {
+      expect(bunRows.length).toBe(1);
+    });
+
+    it('the Bun row is captured by the official-suite evidence contract (names "official")', () => {
+      // officialRows above filters on /official/i in feature or evidence; the
+      // Bun row must fall inside that net so a ✅ flip can never dodge the
+      // run-ID + ref + "0 failed" contract.
+      const row = bunRows[0];
+      expect(/official/i.test(row?.feature ?? '') || /official/i.test(row?.evidence ?? '')).toBe(
+        true,
+      );
+    });
+
+    it('a non-✅ Bun row states honestly that the first green run is pending', () => {
+      const row = bunRows[0];
+      if (!row || row.status.includes('✅')) return; // once green, the next test governs
+      expect(
+        /pending|no green|not (yet )?green|never (run|gone green)/i.test(row.notes),
+        'the pre-green Bun row must say the green run is pending (lane exists ≠ lane passes)',
+      ).toBe(true);
+      // And it must not present the Node run's numbers as its own result: the
+      // "N passed / 0 failed" result shape is reserved for a real run of THIS lane.
+      expect(
+        RESULT_RE.test(`${row.evidence} ${row.notes}`),
+        'a non-✅ Bun row must not carry a "N passed / 0 failed" result (that shape claims a green run)',
+      ).toBe(false);
+    });
+
+    it('a ✅ Bun row requires the full evidence contract AND must name the bun lane', () => {
+      const row = bunRows[0];
+      if (!row || !row.status.includes('✅')) return; // enforced IFF ✅ (flip-back stays free)
+      expect(
+        officialFlipProblems(row),
+        'a ✅ Bun row needs run ID + pinned ref + "N passed / 0 failed" like the Node row',
+      ).toEqual([]);
+      expect(
+        /bun/i.test(`${row.evidence} ${row.notes}`),
+        'a ✅ Bun row must name the bun lane (runtime=bun) so the run is attributable',
+      ).toBe(true);
     });
   });
 });

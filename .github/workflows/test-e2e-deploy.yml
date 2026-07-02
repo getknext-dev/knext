@@ -17,6 +17,13 @@ name: Compat suite (official Next.js deploy harness)
 #
 # Deliberately NOT in ci.yml: heavyweight (clones+builds Next.js + Playwright).
 # Nightly + manual dispatch only — the fast per-PR gate is the compat-smoke job.
+#
+# LANES (#147 item 4): the NIGHTLY schedule is the NODE lane — the credential
+# behind the compat-matrix official-suite ✅. The Bun runtime axis runs as a
+# SEPARATE, cheaper lane: `workflow_dispatch` input `runtime=bun` on demand +
+# the WEEKLY Sunday schedule — never a second nightly matrix dimension. The Bun
+# lane's results claim NOTHING for the matrix until a green bun run is observed
+# (docs/compat-matrix.md, the Bun runtime-axis row).
 # ─────────────────────────────────────────────────────────────────────────────
 
 on:
@@ -26,9 +33,27 @@ on:
         description: 'vercel/next.js git ref to test against (pinned tag ≥ v16.2.0; do NOT use canary)'
         required: false
         default: 'v16.2.0'
+      # #147 item 4 — the Bun runtime axis as a SEPARATE lane, not a second
+      # matrix dimension: doubling the 16-shard nightly every night would be
+      # pure cost. On demand, dispatch with runtime=bun; the weekly schedule
+      # below gives bun a regular (cheaper) cadence. Default stays node so a
+      # plain dispatch keeps exercising the credential lane.
+      runtime:
+        description: 'Standalone-server runtime lane (KNEXT_RUNTIME for scripts/e2e-deploy.sh)'
+        required: false
+        type: choice
+        options:
+          - node
+          - bun
+        default: node
   schedule:
     # 03:17 UTC nightly — off-peak; the run takes the better part of an hour.
+    # This is the NODE lane: the compat-matrix credential (docs/compat-matrix.md).
     - cron: '17 3 * * *'
+    # 05:17 UTC SUNDAY — the weekly BUN lane (#147 item 4). Keep this cron string
+    # in sync with the KNEXT_RUNTIME expression below (guard-tested): the env
+    # expression compares github.event.schedule against it to pick the lane.
+    - cron: '17 5 * * 0'
 
 # Pin the Next.js ref so a failure is attributable to knext, not upstream churn.
 # NEXTJS_REF is the git TAG (kept for the source checkout that supplies the
@@ -50,6 +75,13 @@ on:
 # ADR-0007.)
 env:
   NEXTJS_REF: ${{ github.event.inputs.nextjsRef || 'v16.2.0' }}
+  # #147 item 4 — the ONE lane decision, made once at the workflow level:
+  #   dispatch input (node|bun) > the weekly Sunday cron → bun > default node.
+  # github.event.schedule carries the cron string that fired, so the nightly
+  # ('17 3 * * *') and any dispatch without the input stay on node (the
+  # credential lane). Keep the cron literal in sync with the schedule block
+  # above — guard-tested in tests/compat-suite-workflow.test.ts.
+  KNEXT_RUNTIME: ${{ github.event.inputs.runtime || (github.event.schedule == '17 5 * * 0' && 'bun') || 'node' }}
 
 jobs:
   build-next:
@@ -479,6 +511,20 @@ jobs:
       - name: Enable corepack (next.js per-project package manager)
         working-directory: next.js
         run: corepack enable
+
+      # #147 item 4 — the Bun runtime axis. scripts/e2e-deploy.sh already boots
+      # the standalone server.js with `bun -r <preload>` when KNEXT_RUNTIME=bun
+      # (its `case "${RUNTIME}"` picks SERVER_CMD=bun; `-r` is the preload flag
+      # on BOTH runtimes); the ONLY missing piece in CI was bun on PATH. Gated
+      # on the lane so the Node nightly pays nothing; SHA-pinned (v2.2.0) per
+      # the supply-chain rule. Everything else in the shard (jest, run-tests.js,
+      # `next build`) intentionally stays on Node — the axis under test is the
+      # SERVING runtime, not the harness.
+      - name: Setup Bun (bun lane only)
+        if: env.KNEXT_RUNTIME == 'bun'
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: latest
 
       # #147 (the Upload-workspace OOM fix, Option A) — the compat-workspace
       # artifact ships SOURCE ONLY (no node_modules; shipping it OOM'd the upload,
@@ -1125,7 +1171,11 @@ jobs:
           # MERGING; we deliberately keep the single-file mirror (ADR-0007
           # follow-up records the layering option).
           NEXT_EXTERNAL_TESTS_FILTERS: ${{ github.workspace }}/knext/test/deploy-tests-manifest.knext.json
-          KNEXT_RUNTIME: node
+          # #147 item 4 — the lane, decided ONCE at the workflow env level
+          # (dispatch input / weekly bun cron / node default). run-tests.js and
+          # next-deploy.ts spawn children with {...process.env}, so this reaches
+          # scripts/e2e-deploy.sh, which boots server.js on node or bun.
+          KNEXT_RUNTIME: ${{ env.KNEXT_RUNTIME }}
           # #147 A3-3 — FULL-SHARD EXECUTION. run-tests.js@v16.0.3 ABORTED the
           # whole shard on the first post-retry failure (cleanUpAndExit(1))
           # unless this env was 'true' — run 28552585087 therefore reported
@@ -1193,6 +1243,7 @@ jobs:
             --ref "${NEXTJS_REF}" \
             --shard "${{ matrix.shard }}" \
             --excluded "${{ steps.excl.outputs.count }}" \
+            --runtime "${KNEXT_RUNTIME}" \
             --out "compat-suite-summary-${SAFE_SHARD}.json"
 
       - name: Upload summary artifact (consumed by #41 matrix publisher)
@@ -1280,20 +1331,35 @@ jobs:
           NEXTJS_REF_TESTED: ${{ env.NEXTJS_REF }}
         run: |
           set -euo pipefail
-          title='Compat nightly RED'
-          body="The scheduled official Next.js deploy-suite nightly FAILED.
+          # #147 item 4 — NAME the lane. The two schedules share this workflow:
+          # the nightly Node run is the credential lane; the weekly Bun run is a
+          # separate axis. A red BUN weekly must alert under its OWN title —
+          # distinct titles also keep the idempotency keys separate, so a bun
+          # red never comments on (or is mistaken for) the Node credential issue.
+          if [ "${KNEXT_RUNTIME}" = "bun" ]; then
+            title='Compat weekly RED (bun lane)'
+            lane_note="This is the **Bun runtime axis** (weekly, \`KNEXT_RUNTIME=bun\`). A red here does NOT imply the Node credential lane (the nightly, the compat-matrix ✅) is red — the Node lane alerts under its own 'Compat nightly RED' issue. Flip-back policy applies to the BUN matrix row only."
+          else
+            title='Compat nightly RED'
+            lane_note="This is the **Node credential lane** (nightly, \`KNEXT_RUNTIME=node\`) — the lane backing the compat-matrix official-suite ✅."
+          fi
+          body="The scheduled official Next.js deploy-suite run FAILED.
 
           - Run: ${RUN_URL}
+          - Runtime lane: ${KNEXT_RUNTIME}
           - build-next (Prepare): ${BUILD_RESULT}
           - deploy-tests shards: ${SHARDS_RESULT}
           - Pinned ref: ${NEXTJS_REF_TESTED}
 
+          ${lane_note}
+
           **Policy** (docs/compat-matrix.md, Maintenance & honesty): if the red persists,
-          flip the official-suite matrix row back to ❌ citing this red run — the matrix
+          flip this lane's matrix row back to ❌ citing this red run — the matrix
           guard permits an honest flip-back without ceremony. Triage the per-shard logs +
-          \`compat-suite-summary-*.json\` artifacts before touching the quarantine ledger
-          (ADR-0007 graduation addendum, §c: quarantines need a final-post-retry failure
-          plus an env-parity audit, never a red-nightly reflex)."
+          \`compat-suite-summary-*.json\` artifacts (each carries its \"runtime\") before
+          touching the quarantine ledger (ADR-0007 graduation addendum, §c: quarantines
+          need a final-post-retry failure plus an env-parity audit, never a red-nightly
+          reflex)."
           # Idempotency: exactly-one open alert issue. Comment on it if present,
           # create (+ pin, best-effort) only when absent.
           existing="$(gh issue list --repo "${GITHUB_REPOSITORY}" --state open \

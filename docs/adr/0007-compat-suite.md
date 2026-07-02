@@ -511,9 +511,16 @@ guarded by `tests/deploy-manifest.test.ts`):
   - [x] Track the exclude-list shrinking to zero as the public "verified-adapter" scoreboard; surface
         it in docs — the matrix's official-suite row now links the `$knextExclusions` +
         `$knextQuarantines` ledgers as the scoreboard (graduation addendum §c).
-  - [ ] **Bun runtime axis** (still open, #147 item 4): the harness runs `KNEXT_RUNTIME=node` only;
-        add the Bun matrix axis so the full harness covers both targets. (Note: `e2e-deploy.sh` is
-        already the Node variant — the original wording here predated the Node-first MVP.)
+  - [ ] **Bun runtime axis** (#147 item 4 — lane BUILT, first green pending): the workflow now
+        carries a separate Bun lane rather than a second nightly matrix dimension (cost: the Node
+        nightly is 16 shards; doubling it every night buys no extra credibility) — a
+        `workflow_dispatch` `runtime: node|bun` input (default node) + a weekly Sunday cron
+        (`17 5 * * 0`), both funneled through one workflow-level `KNEXT_RUNTIME` env into
+        `scripts/e2e-deploy.sh` (which boots the standalone `server.js` on bun); every summary
+        artifact carries `"runtime"` and a red bun weekly alerts under its own lane-named issue,
+        never the Node credential's. The box stays UNCHECKED until a green `runtime=bun` run is
+        observed — the matrix has a separate, evidence-gated Bun row (docs/compat-matrix.md)
+        that stays ❌ meanwhile.
   - [ ] **Tier-C relocation of Cache-Control normalization (#175/#179 gate-review flag, #180):**
         the default-on `s-maxage` normalization lives in the runtime entry
         (`cache-control-normalize.cjs` preload in `node-server.ts`) because knext has no managed
