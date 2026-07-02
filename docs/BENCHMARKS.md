@@ -14,7 +14,7 @@ k8s on an M-series laptop (decommissioned 2026-07-03); **OKE** = Oracle OKE
 | Cold wake, first-ever boot on node | — | 38s | one-time: 1.3GB compute image pull + cold volume; not steady state |
 | Cold wake before CoreDNS fix | 5.19s | — | headless-Service NXDOMAIN negative-cache masked all pod-side gains |
 | Warm connect (compute already up) | 120–134ms | — | native Postgres latency through the pipe |
-| **Warm-tier wake (gated pod)** | **413ms p50 / 558ms p95 / 206ms best** | re-running | n=20; costs 256Mi reservation while parked |
+| **Warm-tier wake (gated pod)** | **413ms p50 / 558ms p95 / 206ms best** | ✅ drill green (<1.5s bound) | n=20 local; costs 256Mi reservation while parked |
 | compute_ctl attach alone | **123–160ms** | — | Neon's true share; everything else is k8s mechanics |
 | Compose-era cold start (no k8s) | 772ms | — | the floor without pod machinery (historical) |
 
@@ -35,10 +35,10 @@ The engines were never the bottleneck — Kubernetes mechanics were, twice.
 
 | Drill | Local | OKE | What it proves |
 |---|---|---|---|
-| Compute pod kill → data served | 1–6s | 38s* / re-measuring | stateless compute; no volume, no restore (*first-boot pull) |
+| Compute pod kill → data served | 1–6s | 38s first-boot; 2.2–3.0s steady | stateless compute; no volume, no restore (*first-boot pull) |
 | Safekeeper quorum (kill 1 of 3) | writes continue | ✅ passes | 2/3 WAL quorum; member rejoins |
-| Pageserver failover (promote standby, gen+1) | **~7s** | re-running | read-WRITE preserved; SPOF → bounded RTO |
-| Backup → restore in fresh namespace | **~110s** | re-running | rehearsed, not theoretical; restore is read-only on 8464 OSS |
+| Pageserver failover (promote standby, gen+1) | **~7s** | **9s** | read-WRITE preserved; SPOF → bounded RTO |
+| Backup → restore in fresh namespace | **~110s** | **304s** | rehearsed, not theoretical; OKE slower on 50GB-min block-volume provisioning; restore read-only on 8464 OSS |
 | Backup job at ~18GB bucket | green (retry loop exercised live) | — | after minio 512Mi + mc 1Gi sizing fixes |
 | CNPG pod-kill recovery | ~16s | — | comparison point (hibernate resume: ~3.3s) |
 | Alert path (rule → Alertmanager → receiver) | delivered | **delivered** | idempotent drill; unique per-run identity |

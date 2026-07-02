@@ -154,7 +154,7 @@ spec:
     - { name: gate, port: 9091, targetPort: gate }   # warm pod polls this
     - { name: metrics, port: 9090, targetPort: metrics }
 YAML
-sed -i.sedbak \"s|\${IMAGE}|${IMAGE}|\" _tmp-pggw-warm.yaml && rm -f _tmp-pggw-warm.yaml.sedbak
+sed -i.sedbak "s|\${IMAGE}|${IMAGE}|" _tmp-pggw-warm.yaml && rm -f _tmp-pggw-warm.yaml.sedbak
 $K apply -f _tmp-pggw-warm.yaml >/dev/null || fail "test gateway apply failed"
 $K rollout status deploy/pggw-warm --timeout=120s >/dev/null || fail "test gateway not ready"
 ok "test gateway pggw-warm (warmpool mode) ready"
