@@ -6,9 +6,9 @@ and wakes on the first client connection. Native Postgres on Neon's open-source 
 [knext](../..//alpheya/pocs/knext) (scale-to-zero Next.js on Knative): app and database both
 sleep at zero and wake on demand.
 
-> Proven on a local cluster: cold connect → compute wakes 0→1 and serves data (**5.2s** wake,
-> **1–2s** when the pod is merely recreated), 60s idle → back to **0**, reconnect re-wakes —
-> data always intact. See *Verification*.
+> Proven on OKE (Oracle) and locally: cold connect → compute wakes 0→1 and serves data
+> (**~2.5s** cold, **~0.4s** on the opt-in warm tier), 60s idle → back to **0**, reconnect
+> re-wakes — data always intact. Full numbers: [Benchmarks](docs/BENCHMARKS.md).
 
 ## How it works
 
