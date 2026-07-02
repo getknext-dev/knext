@@ -362,8 +362,11 @@ const OBSERVED_FLAKY_QUARANTINES: Record<string, { cases: string[]; observedRuns
       'segment cache (per-page dynamic stale time) reuses dynamic data within the per-page stale time window',
       'segment cache (per-page dynamic stale time) back/forward navigation always reuses BFCache regardless of stale time',
       'segment cache (per-page dynamic stale time) per-page value overrides global staleTimes.dynamic regardless of direction',
+      // #188 bun lane (run 28607626868): NEW sibling case hung while the three
+      // above were correctly pattern-skipped — same runtime-prefetch mechanism.
+      'segment cache (per-page dynamic stale time) two dynamic pages with different stale times behave independently',
     ],
-    observedRuns: ['28578203671', '28596005486'],
+    observedRuns: ['28578203671', '28596005486', '28607626868'],
   },
   'test/e2e/app-dir/segment-cache/vary-params/vary-params.test.ts': {
     cases: [
@@ -371,8 +374,11 @@ const OBSERVED_FLAKY_QUARANTINES: Record<string, { cases: string[]; observedRuns
       'segment cache - vary params renders cached loading state instantly with runtime prefetching',
       'segment cache - vary params does not reuse prefetched segment when page accesses searchParams',
       'segment cache - vary params shares cached segment across all params when none accessed statically (runtime prefetch)',
+      // #188 bun lane (run 28607626868): NEW sibling case hung while the four
+      // above were correctly pattern-skipped — same runtime-prefetch mechanism.
+      'segment cache - vary params tracks metadata param access separately from body (runtime prefetch)',
     ],
-    observedRuns: ['28578203671', '28596005486', '28590478386'],
+    observedRuns: ['28578203671', '28596005486', '28590478386', '28607626868'],
   },
   // Round 4 (run 28597872225, 786/2). Settings audit first (see the workflow
   // fidelity guards in tests/compat-suite-workflow.test.ts): upstream's

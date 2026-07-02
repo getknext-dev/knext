@@ -97,6 +97,8 @@ export default defineConfig([
   {
     entry: {
       'adapters/cache-control-normalize': 'src/adapters/cache-control-normalize.cjs',
+      // #188 — Bun ≤1.3.x keep-alive mitigation (bun lane only; Node-inert).
+      'adapters/bun-keepalive-guard': 'src/adapters/bun-keepalive-guard.cjs',
     },
     format: ['cjs'],
     platform: 'node',

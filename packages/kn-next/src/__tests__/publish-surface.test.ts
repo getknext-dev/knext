@@ -88,6 +88,8 @@ describe("PK1: @knext/core publish surface", () => {
             "./internal/logger",
             "./internal/cli-validate",
             "./internal/cli-shared",
+            // #188 — Bun ≤1.3.x keep-alive mitigation preload (bun lane only)
+            "./internal/bun-keepalive-guard",
         ]) {
             expect(exp, `exports must declare ${subpath}`).toHaveProperty(
                 subpath,

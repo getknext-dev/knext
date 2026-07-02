@@ -202,15 +202,23 @@ EOF
   # #175 (B7b): resolve the deployed-platform Cache-Control preload from the
   # SAME installed package, so the serve below patches exactly what ships.
   KNEXT_CC_PRELOAD="$(node -e 'process.stdout.write(require.resolve("@knext/core/internal/cache-control-normalize"))')"
+  # #188 — Bun ≤1.3.x keep-alive mitigation preload, resolved from the SAME
+  # installed package (only booted with it when RUNTIME=bun, see step 4).
+  KNEXT_BUN_GUARD_PRELOAD="$(node -e 'process.stdout.write(require.resolve("@knext/core/internal/bun-keepalive-guard"))')"
 else
   log "KNEXT_E2E_SKIP_PACK=1 — skipping tarball install (contract-test mode)"
   NEXT_ADAPTER_PATH="${NEXT_ADAPTER_PATH:-}"
-  # Contract-test mode has no installed @knext/core; the preload is plain
-  # dependency-free CJS, so the in-repo SOURCE file is directly loadable.
+  # Contract-test mode has no installed @knext/core; the preloads are plain
+  # dependency-free CJS, so the in-repo SOURCE files are directly loadable.
   KNEXT_CC_PRELOAD="${SCRIPT_DIR}/../packages/kn-next/src/adapters/cache-control-normalize.cjs"
+  KNEXT_BUN_GUARD_PRELOAD="${SCRIPT_DIR}/../packages/kn-next/src/adapters/bun-keepalive-guard.cjs"
 fi
 if [ ! -f "${KNEXT_CC_PRELOAD}" ]; then
   log "ERROR: cache-control normalization preload not found at ${KNEXT_CC_PRELOAD}"
+  exit 1
+fi
+if [ ! -f "${KNEXT_BUN_GUARD_PRELOAD}" ]; then
+  log "ERROR: bun keep-alive guard preload not found at ${KNEXT_BUN_GUARD_PRELOAD}"
   exit 1
 fi
 export NEXT_ADAPTER_PATH
@@ -413,12 +421,26 @@ esac
 # single-replica knext shape, and the header diffs were serving-layer
 # semantics, not cache-handler state (the Redis cacheHandler stays the
 # multi-pod production option).
-log "booting (${RUNTIME}) ${SERVER_JS} on 0.0.0.0:${PORT} (HOSTNAME emptied — see B7a note; preload ${KNEXT_CC_PRELOAD})"
+# #188 (bun-lane fix round 1, triage of run 28607626868): Bun ≤1.3.14 resets a
+# REUSED keep-alive socket when the next request arrives immediately after the
+# previous response completed (plain node:http repro, no Next involved; fixed
+# in Bun canary 1.4.0). The harness client (node-fetch@2 over Node's keep-alive
+# globalAgent) reuses sockets back-to-back → deterministic per-request
+# `socket hang up` on small/fast responses — Bucket 1's 30 files. The
+# cache-control preload was exonerated (KNEXT_CACHE_CONTROL_NORMALIZE=0
+# reproduced identical hang-ups). Mitigation: on RUNTIME=bun ONLY, preload the
+# keep-alive guard (`Connection: close` per response; self-disables on Bun
+# ≥1.4.0). The Node boot line is byte-identical to before.
+SERVER_PRELOAD_ARGS=(-r "${KNEXT_CC_PRELOAD}")
+if [ "${RUNTIME}" = "bun" ]; then
+  SERVER_PRELOAD_ARGS+=(-r "${KNEXT_BUN_GUARD_PRELOAD}")
+fi
+log "booting (${RUNTIME}) ${SERVER_JS} on 0.0.0.0:${PORT} (HOSTNAME emptied — see B7a note; preloads ${SERVER_PRELOAD_ARGS[*]})"
 (
   cd "${STANDALONE_APP_DIR}"
   PORT="${PORT}" HOSTNAME="" NODE_ENV="production" \
     NEXT_DEPLOYMENT_ID="${DEPLOYMENT_ID}" \
-    exec "${SERVER_CMD}" -r "${KNEXT_CC_PRELOAD}" "${SERVER_JS}"
+    exec "${SERVER_CMD}" "${SERVER_PRELOAD_ARGS[@]}" "${SERVER_JS}"
 ) >"${SERVER_LOG}" 2>&1 &
 SERVER_PID=$!
 

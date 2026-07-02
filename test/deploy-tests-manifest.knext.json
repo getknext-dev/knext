@@ -168,7 +168,8 @@
       "flakey": [
         "segment cache (per-page dynamic stale time) reuses dynamic data within the per-page stale time window",
         "segment cache (per-page dynamic stale time) back/forward navigation always reuses BFCache regardless of stale time",
-        "segment cache (per-page dynamic stale time) per-page value overrides global staleTimes.dynamic regardless of direction"
+        "segment cache (per-page dynamic stale time) per-page value overrides global staleTimes.dynamic regardless of direction",
+        "segment cache (per-page dynamic stale time) two dynamic pages with different stale times behave independently"
       ]
     },
     "test/e2e/app-dir/segment-cache/vary-params/vary-params.test.ts": {
@@ -176,7 +177,8 @@
         "segment cache - vary params does not share cached segment when all params accessed statically (runtime prefetch)",
         "segment cache - vary params renders cached loading state instantly with runtime prefetching",
         "segment cache - vary params does not reuse prefetched segment when page accesses searchParams",
-        "segment cache - vary params shares cached segment across all params when none accessed statically (runtime prefetch)"
+        "segment cache - vary params shares cached segment across all params when none accessed statically (runtime prefetch)",
+        "segment cache - vary params tracks metadata param access separately from body (runtime prefetch)"
       ]
     },
     "test/e2e/app-dir/app-client-cache/client-cache.parallel-routes.test.ts": {
@@ -282,10 +284,11 @@
       "cases": [
         "segment cache (per-page dynamic stale time) reuses dynamic data within the per-page stale time window",
         "segment cache (per-page dynamic stale time) back/forward navigation always reuses BFCache regardless of stale time",
-        "segment cache (per-page dynamic stale time) per-page value overrides global staleTimes.dynamic regardless of direction"
+        "segment cache (per-page dynamic stale time) per-page value overrides global staleTimes.dynamic regardless of direction",
+        "segment cache (per-page dynamic stale time) two dynamic pages with different stale times behave independently"
       ],
       "mechanism": "60s jest timeouts in per-page dynamic stale-time flows via createRouterAct, alternating per attempt (run 28578203671: att1 'reuses dynamic data…' + 'back/forward…' hung, att2+att3 'per-page value overrides…' hung while the att1 pair passed) — the family's interleaving-race signature, zero assertion diffs.",
-      "evidence": "run 28578203671: FINAL failure, alternating cases across 3 attempts; run 28596005486: all three cases hung 1 attempt then the file RECOVERED on in-run retry; run 28590478386: 1-attempt wobble then recovered; run 28593534713: file PASSED — cross-run wobble.",
+      "evidence": "run 28578203671: FINAL failure, alternating cases across 3 attempts; run 28596005486: all three cases hung 1 attempt then the file RECOVERED on in-run retry; run 28590478386: 1-attempt wobble then recovered; run 28593534713: file PASSED — cross-run wobble. run 28607626868 (KNEXT_RUNTIME=bun lane, #188): NEW sibling case 'two dynamic pages with different stale times behave independently' hung 60s while the 3 already-quarantined cases were correctly pattern-skipped — same runtime-prefetch mechanism flushed out by Bun's slower per-request scheduling, not a Bucket-1 serving failure.",
       "provenance": "Upstream marks the runtime-prefetch deploy family flakey wholesale (vercel/next.js@v16.2.0 test/deploy-tests-manifest.json, segment-cache/prefetch-runtime.test.ts, incl. its stale-time-handling cases) — same client dynamic-data/staleness scheduling mechanism."
     },
     {
@@ -294,10 +297,11 @@
         "segment cache - vary params does not share cached segment when all params accessed statically (runtime prefetch)",
         "segment cache - vary params renders cached loading state instantly with runtime prefetching",
         "segment cache - vary params does not reuse prefetched segment when page accesses searchParams",
-        "segment cache - vary params shares cached segment across all params when none accessed statically (runtime prefetch)"
+        "segment cache - vary params shares cached segment across all params when none accessed statically (runtime prefetch)",
+        "segment cache - vary params tracks metadata param access separately from body (runtime prefetch)"
       ],
       "mechanism": "60s jest timeouts in runtime-prefetch vary-params flows via createRouterAct, alternating per attempt (run 28578203671: att1+att2 'does not share cached segment… (runtime prefetch)' hung; att3 THREE cases hung incl. two that passed earlier attempts) — the family's interleaving-race signature, zero assertion diffs.",
-      "evidence": "run 28578203671: FINAL failure, alternating cases across 3 attempts; run 28596005486: 2-attempt wobble ('renders cached loading state…', then 'does not share cached segment…') then RECOVERED on in-run retry; run 28590478386: 1-attempt wobble ('does not reuse prefetched segment…' + 'shares cached segment…') then recovered; run 28593534713: file PASSED — cross-run wobble.",
+      "evidence": "run 28578203671: FINAL failure, alternating cases across 3 attempts; run 28596005486: 2-attempt wobble ('renders cached loading state…', then 'does not share cached segment…') then RECOVERED on in-run retry; run 28590478386: 1-attempt wobble ('does not reuse prefetched segment…' + 'shares cached segment…') then recovered; run 28593534713: file PASSED — cross-run wobble. run 28607626868 (KNEXT_RUNTIME=bun lane, #188): NEW sibling case 'tracks metadata param access separately from body (runtime prefetch)' hung 60s while the 4 already-quarantined cases were correctly pattern-skipped — same runtime-prefetch mechanism, bun-lane evidence.",
       "provenance": "Upstream marks the runtime-prefetch deploy family flakey wholesale (vercel/next.js@v16.2.0 test/deploy-tests-manifest.json, segment-cache/prefetch-runtime.test.ts, incl. its 'includes search params, but not dynamic content' cases) — same runtime-prefetch vary/search-params mechanism."
     },
     {
