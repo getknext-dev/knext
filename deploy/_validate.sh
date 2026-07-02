@@ -38,4 +38,45 @@ ok "gateway wake mode configured"
 grep -q 'DATABASE_URL' 30-knext-secret.yaml || fail "knext secret lacks DATABASE_URL"
 ok "knext DATABASE_URL secret present"
 
+# 6. contract: every storage pod must declare a liveness probe (a hung — not
+#    crashed — pageserver/safekeeper must be restarted, not silently stalled).
+for f in 50-minio.yaml 51-storage-broker.yaml 52-safekeeper.yaml 53-pageserver.yaml; do
+  grep -q 'livenessProbe:' "$f" || fail "$f lacks a livenessProbe"
+done
+ok "storage pods declare liveness probes"
+
+# 7. contract: every storage pod must set resource requests AND limits (no
+#    BestEffort QoS on the durability tier — one hog must not evict the plane).
+for f in 50-minio.yaml 51-storage-broker.yaml 52-safekeeper.yaml 53-pageserver.yaml; do
+  grep -q 'requests:' "$f" || fail "$f lacks resource requests"
+  grep -q 'limits:' "$f"   || fail "$f lacks resource limits"
+done
+ok "storage pods set resource requests + limits"
+
+# 8. contract: storage + compute cap ReplicaSet/controller history (no churn).
+for f in 20-compute.yaml 50-minio.yaml 51-storage-broker.yaml 52-safekeeper.yaml 53-pageserver.yaml; do
+  grep -q 'revisionHistoryLimit:' "$f" || fail "$f lacks revisionHistoryLimit"
+done
+ok "compute + storage cap controller revision history"
+
+# 9. contract: storage pods harden the securityContext (drop caps / no priv-esc /
+#    seccomp; neon images run as uid 1000 so runAsNonRoot is safe there).
+for f in 50-minio.yaml 51-storage-broker.yaml 52-safekeeper.yaml 53-pageserver.yaml; do
+  grep -q 'securityContext:' "$f" || fail "$f lacks a securityContext"
+done
+ok "storage pods set a hardened securityContext"
+
+# 10. contract: PodDisruptionBudgets guard the safekeeper quorum + pageserver.
+grep -q 'kind: PodDisruptionBudget' 56-pdb.yaml || fail "56-pdb.yaml missing PDBs"
+grep -q 'minAvailable: 2' 56-pdb.yaml || fail "safekeeper PDB must keep minAvailable: 2 (quorum)"
+ok "56-pdb.yaml guards safekeeper quorum + pageserver"
+
+# 11. contract: a minimal in-cluster Prometheus scrapes the gateway fleet and
+#     ships the review's three alerts (wake failures, wake latency, phantom keepalive).
+grep -q 'prom/prometheus' 60-prometheus.yaml || fail "60-prometheus.yaml lacks a pinned prometheus image"
+grep -q 'pggw_wake_failures_total' 60-prometheus.yaml || fail "60-prometheus.yaml missing wake-failure alert"
+grep -q 'pggw_wake_latency_ms_last' 60-prometheus.yaml || fail "60-prometheus.yaml missing wake-latency alert"
+grep -q 'PhantomKeepalive' 60-prometheus.yaml || fail "60-prometheus.yaml missing phantom-keepalive alert"
+ok "60-prometheus.yaml scrapes pggw + ships the three review alerts"
+
 echo "deploy validation: all checks passed"
