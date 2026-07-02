@@ -1,0 +1,224 @@
+# 62-backup.yaml — backups + rehearsed restore (closes the CRITICAL "no backups
+# anywhere" finding, devops-review F1).
+#
+# WHAT IS THE BACKUP: the durable truth of this platform is the MinIO `neon`
+# bucket (pageserver layer uploads under /pageserver + safekeeper WAL offload
+# under /safekeeper) PLUS the fixed tenant/timeline IDs and storage config. The
+# pageserver PVC is a rebuildable cache; safekeeper PVCs hold only recent WAL
+# (bounded by remote_consistent_lsn). So a faithful backup = a copy of the
+# `neon` bucket + the config (ConfigMaps + storage-s3-creds Secret). A faithful
+# restore = a fresh storage plane attached to a restored bucket copy (proven by
+# deploy/_verify-restore.sh).
+#
+# WHERE IT GOES (MVP): a dedicated second in-cluster MinIO, `backup-store`, on its
+# own PVC. This survives losing the primary MinIO / pageserver PVC but NOT node
+# loss (both PVCs on one node). PRODUCTION: point the mirror at OFF-CLUSTER object
+# storage (real S3 / GCS) with bucket VERSIONING + a LIFECYCLE policy (e.g. keep
+# 30 daily / 12 monthly) — change the `dst` alias in the CronJob to the external
+# endpoint + a separate credentials Secret, and drop the in-cluster backup-store.
+# See docs/operations.md "Backup & disaster recovery".
+#
+# Images pinned (no :latest). mc talks to both MinIOs; a scoped ServiceAccount
+# (get/list on configmaps+secrets in scale-zero-pg ONLY) lets the kubectl step
+# dump the config into the backup store.
+---
+# --- backup-store: the second, independent object store the backup mirrors into
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: backup-store-data
+  namespace: scale-zero-pg
+  labels: { app: backup-store, plane: backup }
+spec:
+  accessModes: ["ReadWriteOnce"]
+  # Sized to hold a full copy of the neon bucket with headroom. Raise for real
+  # data volume; in prod this PVC disappears (mirror goes to external S3).
+  resources: { requests: { storage: 10Gi } }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backup-store
+  namespace: scale-zero-pg
+  labels: { app: backup-store, plane: backup }
+spec:
+  replicas: 1
+  revisionHistoryLimit: 2
+  selector: { matchLabels: { app: backup-store } }
+  strategy: { type: Recreate }
+  template:
+    metadata:
+      labels: { app: backup-store, plane: backup }
+    spec:
+      securityContext:
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: minio
+          image: quay.io/minio/minio:RELEASE.2022-10-20T00-55-09Z # pinned, same as primary
+          args: ["server", "/data", "--address", ":9000"]
+          # Root identity: reuse storage-s3-creds so mc authenticates to both
+          # stores with one keypair (MVP). PROD: a SEPARATE credential for the
+          # off-cluster backup bucket (least privilege / blast-radius).
+          env:
+            - name: MINIO_ROOT_USER
+              valueFrom: { secretKeyRef: { name: storage-s3-creds, key: user } }
+            - name: MINIO_ROOT_PASSWORD
+              valueFrom: { secretKeyRef: { name: storage-s3-creds, key: password } }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+          ports:
+            - { name: s3, containerPort: 9000 }
+          volumeMounts:
+            - { name: data, mountPath: /data }
+          readinessProbe:
+            httpGet: { path: /minio/health/ready, port: s3 }
+            periodSeconds: 2
+          livenessProbe:
+            httpGet: { path: /minio/health/live, port: s3 }
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 6
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            # Serves multi-hundred-MB layer objects during restore; 256Mi can
+            # drop a large read mid-stream.
+            limits: { memory: 512Mi }
+      volumes:
+        - name: data
+          persistentVolumeClaim: { claimName: backup-store-data }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: backup-store
+  namespace: scale-zero-pg
+spec:
+  selector: { app: backup-store }
+  ports:
+    - { name: s3, port: 9000, targetPort: s3 }
+---
+# --- scoped ServiceAccount for the config dump: get/list configmaps+secrets in
+#     scale-zero-pg ONLY. No write, no cluster scope.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: backup-operator
+  namespace: scale-zero-pg
+  labels: { app: backup, plane: backup }
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: backup-config-reader
+  namespace: scale-zero-pg
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps", "secrets"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: backup-operator-config-reader
+  namespace: scale-zero-pg
+subjects:
+  - kind: ServiceAccount
+    name: backup-operator
+    namespace: scale-zero-pg
+roleRef:
+  kind: Role
+  name: backup-config-reader
+  apiGroup: rbac.authorization.k8s.io
+---
+# --- the backup pod template lives on a CronJob (scheduled) and is reused
+#     on-demand by the drill via `kubectl create job --from=cronjob/backup`.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: backup
+  namespace: scale-zero-pg
+  labels: { app: backup, plane: backup }
+spec:
+  schedule: "0 3 * * *" # daily 03:00 — mirror the neon bucket + dump config
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 3
+      template:
+        metadata:
+          labels: { app: backup, plane: backup }
+        spec:
+          serviceAccountName: backup-operator
+          restartPolicy: OnFailure
+          securityContext:
+            seccompProfile: { type: RuntimeDefault }
+          # STEP 1 (initContainer, kubectl, scoped SA): dump the config that the
+          # bucket alone cannot rebuild — tenant/timeline IDs, compute spec,
+          # pageserver config, and the S3 creds — into a shared volume.
+          initContainers:
+            - name: dump-config
+              image: alpine/k8s:1.30.2 # pinned; bundles kubectl + a shell (distroless kubectl has no /bin/sh)
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities: { drop: ["ALL"] }
+              command: ["/bin/sh", "-c"]
+              args:
+                - |
+                  set -eu
+                  mkdir -p /dump
+                  kubectl get configmap compute-config compute-files pageserver-config \
+                    -o yaml > /dump/configmaps.yaml
+                  kubectl get secret storage-s3-creds -o yaml > /dump/storage-s3-creds.yaml
+                  echo "config dump written:"; ls -l /dump
+              volumeMounts:
+                - { name: dump, mountPath: /dump }
+          # STEP 2 (mc): mirror the neon bucket to backup-store and upload the
+          # config dump alongside it.
+          containers:
+            - name: mirror
+              image: minio/mc:RELEASE.2023-01-28T20-29-38Z # pinned
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities: { drop: ["ALL"] }
+              env:
+                # mc writes its config under $MC_CONFIG_DIR (default ~/.mc);
+                # /root is not writable for this image's user, so use /tmp.
+                - name: MC_CONFIG_DIR
+                  value: /tmp/.mc
+                - name: S3_USER
+                  valueFrom: { secretKeyRef: { name: storage-s3-creds, key: user } }
+                - name: S3_PASS
+                  valueFrom: { secretKeyRef: { name: storage-s3-creds, key: password } }
+              command: ["/bin/sh", "-c"]
+              args:
+                - |
+                  set -eu
+                  # mc stores its config under $HOME/.mc; this image's user cannot
+                  # write /root, so anchor HOME at a writable path.
+                  export HOME=/tmp
+                  mkdir -p /tmp/.mc
+                  mc alias set src http://minio:9000 "$S3_USER" "$S3_PASS"
+                  mc alias set dst http://backup-store:9000 "$S3_USER" "$S3_PASS"
+                  mc mb --ignore-existing dst/neon
+                  mc mb --ignore-existing dst/neon-config
+                  echo "mirroring neon bucket -> backup-store ..."
+                  mc mirror --overwrite --remove src/neon dst/neon
+                  echo "uploading config dump ..."
+                  mc cp /dump/configmaps.yaml dst/neon-config/configmaps.yaml
+                  mc cp /dump/storage-s3-creds.yaml dst/neon-config/storage-s3-creds.yaml
+                  echo "backup complete:"; mc du dst/neon; mc ls dst/neon-config
+              volumeMounts:
+                - { name: dump, mountPath: /dump }
+              resources:
+                # mc mirror buffers many parallel object transfers at high
+                # throughput; 256Mi OOMKills mid-copy. 512Mi holds a multi-GB
+                # bucket mirror comfortably.
+                requests: { cpu: 50m, memory: 128Mi }
+                limits: { memory: 512Mi }
+          volumes:
+            - name: dump
+              emptyDir: {}

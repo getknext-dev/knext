@@ -50,7 +50,11 @@ DRILL_GEN=2
 IMG_NEON=neondatabase/neon:8464
 IMG_COMPUTE=neondatabase/compute-node-v17:8464
 IMG_MC=minio/mc:RELEASE.2023-01-28T20-29-38Z
-DRILL_STORAGE=2Gi
+# Drill PVC sizes. The minio store must hold a full copy of the neon bucket
+# (pageserver layers + safekeeper WAL offload, several GB after write activity);
+# pageserver/safekeeper caches are smaller.
+DRILL_MINIO_STORAGE=12Gi
+DRILL_STORAGE=6Gi
 
 K="$KUBECTL -n $SRC_NS $RT"
 KD="$KUBECTL -n $DRILL_NS $RT"
@@ -65,6 +69,12 @@ info() { echo ">> $*"; }
 
 cleanup() {
   code=$?
+  if [ "${KEEP_DRILL:-0}" = "1" ]; then
+    info "cleanup: KEEP_DRILL=1 — leaving namespace $DRILL_NS up for inspection"
+    $K scale deploy/compute --replicas="$RESTORED_COMPUTE_WAS" >/dev/null 2>&1 || true
+    rm -rf "$WORK" 2>/dev/null || true
+    exit $code
+  fi
   info "cleanup: deleting namespace $DRILL_NS (throwaway)"
   $KUBECTL delete ns "$DRILL_NS" --wait=false --ignore-not-found $RT >/dev/null 2>&1 || true
   # Best-effort: drop the drill filler in the live tenant if compute is up, then
@@ -157,11 +167,18 @@ info "  recovering backed-up config from backup-store/neon-config"
 S3_USER="$($K get secret storage-s3-creds -o jsonpath='{.data.user}' | base64 -d)"
 S3_PASS="$($K get secret storage-s3-creds -o jsonpath='{.data.password}' | base64 -d)"
 # Pull the dumped ConfigMaps from the backup store via an mc pod (stdout capture).
-DUMP="$($K run mc-restore-cfg-$$ --rm -i --restart=Never --image="$IMG_MC" --command -- /bin/sh -c "
-  mc alias set b http://backup-store:9000 '$S3_USER' '$S3_PASS' >/dev/null 2>&1
-  mc cat b/neon-config/configmaps.yaml" 2>/dev/null)"
+# Creds go in as env (avoids shell-quoting hazards); HOME=/tmp because this mc
+# image cannot write /root; alias name must be multi-char.
+DUMP="$($K run mc-restore-cfg --rm -i --restart=Never --image="$IMG_MC" \
+  --env=BS_USER="$S3_USER" --env=BS_PASS="$S3_PASS" --command -- /bin/sh -c '
+    export HOME=/tmp
+    mc alias set bak http://backup-store:9000 "$BS_USER" "$BS_PASS" >/dev/null 2>&1 || exit 1
+    mc cat bak/neon-config/configmaps.yaml' 2>/dev/null)"
 echo "$DUMP" | grep -q 'compute-config' || fail "config dump missing compute-config (backup incomplete)"
-ok "config recovered from backup store"
+# Prove the fixed tenant/timeline IDs are actually captured in the backup.
+echo "$DUMP" | grep -q "$TENANT"   || fail "config dump missing TENANT_ID $TENANT"
+echo "$DUMP" | grep -q "$TIMELINE" || fail "config dump missing TIMELINE_ID $TIMELINE"
+ok "config recovered from backup store (compute-config + tenant/timeline IDs present)"
 
 # --- storage-s3-creds Secret in the drill (drill minio root == backup creds) ---
 $KD create secret generic storage-s3-creds \
@@ -197,7 +214,7 @@ spec:
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata: { name: minio-data, namespace: $DRILL_NS }
-spec: { accessModes: ["ReadWriteOnce"], resources: { requests: { storage: $DRILL_STORAGE } } }
+spec: { accessModes: ["ReadWriteOnce"], resources: { requests: { storage: $DRILL_MINIO_STORAGE } } }
 ---
 apiVersion: v1
 kind: Service
@@ -211,12 +228,17 @@ ok "drill minio up"
 
 # --- seed the drill bucket from the backup store (this is the RESTORE) ---
 info "  restoring neon bucket into the drill minio from backup-store"
-$KD run mc-seed --restart=Never --image="$IMG_MC" --command -- /bin/sh -c "
+$KD run mc-seed --restart=Never --image="$IMG_MC" \
+  --env=BS_USER="$S3_USER" --env=BS_PASS="$S3_PASS" --command -- /bin/sh -c "
   set -e
-  mc alias set b http://backup-store.$SRC_NS:9000 '$S3_USER' '$S3_PASS'
-  mc alias set d http://minio:9000 '$S3_USER' '$S3_PASS'
-  mc mb --ignore-existing d/neon
-  mc mirror --overwrite b/neon d/neon
+  export HOME=/tmp
+  # Retry alias set: the freshly-started drill minio may briefly refuse connections.
+  n=0; until mc alias set bak http://backup-store.$SRC_NS:9000 \"\$BS_USER\" \"\$BS_PASS\"; do n=\$((n+1)); [ \$n -gt 30 ] && exit 1; sleep 2; done
+  n=0; until mc alias set dst http://minio:9000 \"\$BS_USER\" \"\$BS_PASS\"; do n=\$((n+1)); [ \$n -gt 30 ] && exit 1; sleep 2; done
+  mc mb --ignore-existing dst/neon
+  # mc mirror is idempotent (skips objects already present); retry to fill any
+  # object dropped mid-stream on a large-layer read.
+  n=0; until mc mirror --overwrite bak/neon dst/neon; do n=\$((n+1)); [ \$n -gt 4 ] && exit 1; echo 'mirror retry '\$n; sleep 3; done
   echo SEED_DONE" >/dev/null
 $KD wait --for=condition=Ready pod/mc-seed --timeout=30s >/dev/null 2>&1 || true
 # wait for the seed pod to finish
@@ -259,15 +281,12 @@ data:
     id=1234
 YAML
 
-# compute-files: derive from deploy/54-compute-files.yaml (single source of the
-# entrypoint + spec), rewriting the 3-safekeeper list to the 1 drill safekeeper.
-# This is the ONLY functional derivation (mission: minimal namespace/size/topology sed).
+# NOTE: the compute-files ConfigMap is derived + applied LATER (after the tenant
+# is re-attached), because the restore compute boots in STATIC (read-only) mode
+# pinned to the pageserver's restored LSN — which is only known post-attach.
 COMPUTE_FILES_SRC="$(dirname "$0")/54-compute-files.yaml"
 [ -f "$COMPUTE_FILES_SRC" ] || fail "missing $COMPUTE_FILES_SRC"
-sed -e "s#safekeeper-0.safekeeper:5454,safekeeper-1.safekeeper:5454,safekeeper-2.safekeeper:5454#safekeeper-0.safekeeper:5454#g" \
-    -e "s/^  namespace: $SRC_NS/  namespace: $DRILL_NS/" \
-    "$COMPUTE_FILES_SRC" | $KD apply -f - >/dev/null
-ok "drill config applied (compute-files safekeepers rewritten to 1 member)"
+ok "drill base config applied (compute-config + pageserver-config)"
 
 # --- broker + 1 safekeeper + pageserver (fresh PVCs; served from restored bucket) ---
 $KD apply -f - >/dev/null <<YAML
@@ -400,7 +419,30 @@ while [ $a -lt 60 ]; do
 done
 ok "tenant re-attached; timeline loaded from the restored bucket"
 
-# --- fresh compute (replicas:1 for the drill), single-safekeeper spec ---
+# --- build the STATIC (read-only) compute spec pinned to the restored LSN ---
+# LEARNED (documented in docs/operations.md): on 8464 OSS, fresh safekeepers can
+# only be bootstrapped at LSN 0 by the walproposer — there is NO safekeeper HTTP
+# API to recreate a timeline at an existing LSN (POST/PUT return 404; only
+# GET/DELETE exist), and no storage controller to drive it. So a read-WRITE
+# restore (which needs safekeeper WAL continuity from the basebackup LSN) aborts
+# with "cannot start in read-write mode from this base backup". The faithful,
+# working restore verification is a STATIC read-only compute that reads pages
+# directly from the restored pageserver at its last durable LSN — no safekeepers.
+STATIC_LSN="$($KD exec sts/pageserver -- curl -s "http://localhost:9898/v1/tenant/$TENANT/timeline/$TIMELINE" 2>/dev/null | tr ',' '\n' | grep '"last_record_lsn"' | head -1 | cut -d'"' -f4)"
+[ -n "$STATIC_LSN" ] || fail "could not read restored pageserver LSN"
+info "  restored pageserver last_record_lsn = $STATIC_LSN (static read LSN)"
+# Derive compute-files from deploy/54 (single source of the spec + entrypoint):
+#  - rewrite the 3-safekeeper list to the 1 drill safekeeper (harmless in static),
+#  - rewrite namespace,
+#  - inject spec.mode = {"Static": "<LSN>"} right after "format_version".
+sed -e "s#safekeeper-0.safekeeper:5454,safekeeper-1.safekeeper:5454,safekeeper-2.safekeeper:5454#safekeeper-0.safekeeper:5454#g" \
+    -e "s/^  namespace: $SRC_NS/  namespace: $DRILL_NS/" \
+    "$COMPUTE_FILES_SRC" \
+  | awk -v lsn="$STATIC_LSN" '{print} /"format_version": 1.0,/{print "            \"mode\": {\"Static\": \"" lsn "\"},"}' \
+  | $KD apply -f - >/dev/null
+ok "drill compute-files applied (static read-only at $STATIC_LSN)"
+
+# --- fresh compute (replicas:1 for the drill), STATIC read-only, no safekeepers ---
 $KD apply -f - >/dev/null <<YAML
 apiVersion: apps/v1
 kind: Deployment

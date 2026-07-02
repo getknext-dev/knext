@@ -51,6 +51,91 @@ Quick look without Prometheus: `sh deploy/_metrics.sh`.
 - **MinIO loss**: running computes keep serving from safekeepers+pageserver; new
   timeline creation and long-term history offload pause. PVC-backed.
 - **Both gateways down**: new connections fail (existing pipes drop); data unaffected.
+- **Node loss / both storage PVCs gone**: recoverable **only** from the off-cluster
+  backup (below). Everything durable lives in the MinIO `neon` bucket; the backup is
+  the copy that survives losing the cluster. See "Backup & disaster recovery".
+
+## Backup & disaster recovery
+
+Closes the standing CRITICAL finding ("no backups anywhere"). Manifests:
+`deploy/62-backup.yaml`; rehearsed drill: `deploy/_verify-restore.sh`.
+
+### What is the backup
+
+The durable truth is the MinIO `neon` bucket — **pageserver layer uploads**
+(`/pageserver`) + **safekeeper WAL offload** (`/safekeeper`) — plus the config the
+bucket alone cannot rebuild: the `compute-config` / `compute-files` /
+`pageserver-config` ConfigMaps (fixed tenant/timeline IDs, compute spec) and the
+`storage-s3-creds` Secret. The pageserver PVC is a rebuildable cache; safekeeper
+PVCs hold only recent WAL. So **a faithful backup = a copy of the bucket + the
+config**, and **a faithful restore = a fresh storage plane attached to a restored
+bucket copy**.
+
+### How it runs
+
+- **`CronJob/backup`** (daily 03:00) mirrors the `neon` bucket into a dedicated
+  second store (`backup-store`, an in-cluster MinIO PVC for the MVP) with pinned
+  `minio/mc`, and dumps the ConfigMaps + Secret alongside it. The config dump runs
+  in an initContainer on a pinned kubectl image under a **scoped ServiceAccount**
+  (`backup-operator`: `get`/`list` on configmaps+secrets in `scale-zero-pg` only).
+- **On demand:** `kubectl -n scale-zero-pg create job backup-now --from=cronjob/backup`.
+
+### The honesty rule (critical)
+
+A backup is only trustworthy for data the **pageserver has already uploaded to the
+bucket** — i.e. `remote_consistent_lsn ≥ the write's LSN`. A restore stands up
+**fresh, empty safekeepers**, so anything still only in safekeeper WAL (not yet in
+a pageserver layer) is **not** restorable. The pageserver flushes+uploads a layer
+after ~`checkpoint_distance` (256 MB) of WAL or on its checkpoint timer. The drill
+forces this and asserts `remote_consistent_lsn` passed the marker LSN before taking
+the backup. Operationally: **do not treat a just-written row as backed up until the
+pageserver has uploaded it** (watch `remote_consistent_lsn` on
+`GET :9898/v1/tenant/<t>/timeline/<tl>`).
+
+### Rehearsed restore drill — `deploy/_verify-restore.sh`
+
+Writes a tagged marker through the live compute, forces it into the bucket, takes a
+backup, then in a **throwaway `restore-drill` namespace** stands up minio (seeded
+from the backup) + broker + 1 safekeeper + pageserver + compute, **reconstructed
+from the backed-up config**, and reads the marker back. Self-cleaning; leaves the
+live compute as found (scaled to 0). **Measured RTO (backup start → first query in
+the rebuilt plane): ~110 s** on orbstack — dominated by two multi-GB bucket copies
++ storage-plane boot, not by Postgres.
+
+### What we learned (tribal knowledge, now written down)
+
+- **Re-attach at a HIGHER generation.** The live tenant/index are at generation 1;
+  the drill re-attaches at **generation 2** (`location_config` `AttachedSingle`,
+  `generation:2`). The pageserver picks the newest `index_part.json-<gen>` with
+  generation ≤ its own, so gen 2 reads the gen-1 index and writes forward at gen 2 —
+  a clean control-plane-style re-attach. Attaching at the **same** generation risks
+  overwriting the index; attaching **lower** would not see the latest index.
+- **A restore is READ-ONLY on 8464 OSS.** A read-write compute needs the safekeepers
+  to confirm WAL continuity from the basebackup LSN; fresh safekeepers report
+  `flush_lsn 0/0`, so Postgres aborts with *"cannot start in read-write mode from
+  this base backup"*. On 8464 there is **no safekeeper HTTP API to (re)create a
+  timeline at an existing LSN** (`GET`/`DELETE` exist; `POST`/`PUT` → 404) and **no
+  storage controller** to drive it — fresh safekeepers can only be bootstrapped at
+  LSN 0 by the compute's walproposer. So the faithful restore is a **STATIC
+  read-only compute** pinned to the restored pageserver LSN
+  (`spec.mode = {"Static":"<lsn>"}`), which reads pages directly from the pageserver
+  and needs **no safekeepers**. This proves durability + readability of the backup.
+- **Promoting a restore to a writable primary** additionally requires re-seeding the
+  safekeepers' WAL from the restored point (import from the backed-up `/safekeeper`
+  prefix, or a storage-controller-driven timeline create). **Not yet automated** —
+  it is the manual follow-on step and the main gap between "data recovered, readable"
+  and "service fully back". Track alongside the second-pageserver work.
+
+### Production hardening (before relying on this)
+
+- **Point the mirror at OFF-CLUSTER object storage** (real S3/GCS) with **bucket
+  versioning + a lifecycle policy** (e.g. keep 30 daily / 12 monthly) and a
+  **separate least-privilege credential**; then drop the in-cluster `backup-store`
+  (change the `dst` alias + creds Secret in `CronJob/backup`). The in-cluster copy
+  survives losing a storage PVC but **not** node loss — off-cluster is what closes
+  the node-loss / `kubectl delete pvc` incident.
+- Alert on backup Job failure (`kube_job_status_failed{job_name=~"backup.*"}`) and on
+  backup age (last successful completion older than ~26 h).
 
 ## Password rotation
 
@@ -114,4 +199,6 @@ kubectl -n scale-zero-pg logs -l app=pggw -f --prefix | grep 'gw]'
 - **Upgrade procedure** (both images): bump both tags in `deploy/` on a throwaway
   cluster, run the full verify battery, then promote. Never `:latest` anywhere.
   The compute is stateless so its rollback is trivial; storage rollback is NOT
-  (layer formats may migrate forward) — snapshot PVCs/bucket before a storage bump.
+  (layer formats may migrate forward) — take an on-demand backup before a storage
+  bump (`kubectl -n scale-zero-pg create job backup-now --from=cronjob/backup`; see
+  "Backup & disaster recovery").
