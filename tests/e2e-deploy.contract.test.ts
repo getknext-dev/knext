@@ -140,6 +140,31 @@ fs.mkdirSync(path.join(nextDir, 'static'), { recursive: true });
 fs.mkdirSync(standalone, { recursive: true });
 fs.writeFileSync(path.join(nextDir, 'BUILD_ID'), 'fixture-build-' + Date.now());
 fs.writeFileSync(path.join(standalone, 'server.js'), ${JSON.stringify(FAKE_SERVER_JS)});
+// #147 A3-3 final-mile: record the argv the BUILD received, so the test can
+// assert the deploy script forwards the fixture package.json build-script args
+// (the harness synthesizes \`build: "next build <buildArgs> && pnpm post-build"\`
+// and Vercel runs that script; trailingslash/revalidate-path-with-rewrites use
+// buildArgs to exclude their cache-components page variant from the build).
+fs.writeFileSync(
+  path.join(nextDir, 'BUILD_ARGS_AT_BUILD'),
+  JSON.stringify(process.argv.slice(3)),
+);
+// #147 A3-3 final-mile (B6): record the experimental-flag build env the harness
+// forwards on its Vercel path (next-deploy.ts@v16.2.0 lines 352-364 map
+// __NEXT_CACHE_COMPONENTS etc. into --build-env NEXT_PRIVATE_EXPERIMENTAL_*);
+// the harness-appended next.config.js snippet reads the NEXT_PRIVATE_* names.
+fs.writeFileSync(
+  path.join(nextDir, 'CACHE_COMPONENTS_AT_BUILD'),
+  String(process.env.NEXT_PRIVATE_EXPERIMENTAL_CACHE_COMPONENTS || ''),
+);
+fs.writeFileSync(
+  path.join(nextDir, 'CACHED_NAVIGATIONS_AT_BUILD'),
+  String(process.env.NEXT_PRIVATE_EXPERIMENTAL_CACHED_NAVIGATIONS || ''),
+);
+fs.writeFileSync(
+  path.join(nextDir, 'SCROLL_HANDLER_AT_BUILD'),
+  String(process.env.NEXT_PRIVATE_EXPERIMENTAL_APP_NEW_SCROLL_HANDLER || ''),
+);
 // B5 (#147 round 2): record what the BUILD process saw, so the test can assert
 // the deploy script exported NEXT_DEPLOYMENT_ID into the build env (Next stamps
 // dpl= asset/image URLs and skew headers from it AT BUILD TIME).
@@ -181,10 +206,28 @@ describe('scripts/e2e-deploy.sh — official deploy-script contract (#89)', () =
   beforeAll(() => {
     appDir = mkdtempSync(join(tmpdir(), 'knext-e2e-app-'));
 
-    // minimal fixture app
+    // minimal fixture app — with the harness-synthesized build script shape
+    // (base.ts@v16.2.0 writes EVERY deploy fixture's package.json as
+    // `build: "<cmd> <buildArgs> && pnpm post-build"`). The buildArgs here are
+    // the REAL ones the trailingslash fixture uses (run 28590478386: dropping
+    // them made `next build` compile the excluded cache-components page and
+    // fail with "To use 'use cache: remote', please enable the feature flag").
     writeFileSync(
       join(appDir, 'package.json'),
-      JSON.stringify({ name: 'fixture-app', version: '0.0.0', private: true }, null, 2),
+      JSON.stringify(
+        {
+          name: 'fixture-app',
+          version: '0.0.0',
+          private: true,
+          scripts: {
+            'post-build': 'node -e \'console.log("BUILD" + "_ID: fixture")\'',
+            build:
+              'next build --debug-build-paths !app/[lang]/cache-components/page.js && pnpm post-build',
+          },
+        },
+        null,
+        2,
+      ),
     );
     writeFileSync(join(appDir, 'next.config.js'), "module.exports = { output: 'standalone' };\n");
 
@@ -212,6 +255,13 @@ describe('scripts/e2e-deploy.sh — official deploy-script contract (#89)', () =
         NEXT_TEST_MODE: 'deploy',
         // Ensure the script derives it rather than inheriting a stale value.
         NEXT_PRIVATE_TEST_MODE: '',
+        // #147 A3-3 final-mile (B6): the jest-process experimental flags the
+        // harness exposes to the deploy script via {...process.env} — the
+        // script must map them to the NEXT_PRIVATE_EXPERIMENTAL_* build-env
+        // names, exactly as next-deploy.ts@v16.2.0 does on its Vercel path.
+        __NEXT_CACHE_COMPONENTS: 'true',
+        __NEXT_EXPERIMENTAL_CACHED_NAVIGATIONS: 'cn-1',
+        __NEXT_EXPERIMENTAL_APP_NEW_SCROLL_HANDLER: 'sh-1',
       },
       encoding: 'utf8',
       timeout: 60000,
@@ -390,6 +440,43 @@ describe('scripts/e2e-deploy.sh — official deploy-script contract (#89)', () =
     expect(seenAtBuild, 'NEXT_PRIVATE_TEST_MODE was not in the next build env').toBe('deploy');
   });
 
+  it('forwards the fixture package.json build-script args to `next build` (#147 final-mile, buildArgs)', () => {
+    // Run 28590478386: trailingslash + revalidate-path-with-rewrites fail at
+    // BUILD because the harness synthesizes the fixture's package.json build
+    // script as `next build <buildArgs> && pnpm post-build` (base.ts@v16.2.0)
+    // and Vercel runs that script — those fixtures pass
+    // `--debug-build-paths !…/cache-components/…` to exclude their
+    // cacheComponents-only page variant. knext invoked a bare `next build`,
+    // compiled the excluded page, and died on the missing feature flag.
+    const raw = readFileSync(join(appDir, '.next', 'BUILD_ARGS_AT_BUILD'), 'utf8');
+    const args = JSON.parse(raw) as string[];
+    expect(args, 'fixture build-script args must reach next build').toContain(
+      '--debug-build-paths',
+    );
+    expect(
+      args,
+      'glob-looking build args must arrive VERBATIM (no shell glob/history expansion)',
+    ).toContain('!app/[lang]/cache-components/page.js');
+    // The `&& pnpm post-build` tail is the harness's Vercel-log hook, not a
+    // build arg — it must never leak into the next invocation.
+    expect(args.join(' ')).not.toMatch(/pnpm|post-build|&&/);
+  });
+
+  it('maps __NEXT_* experimental flags to the NEXT_PRIVATE_EXPERIMENTAL_* build env (B6, #147 final-mile)', () => {
+    // Mirrors next-deploy.ts@v16.2.0 (lines 352-364): the Vercel path forwards
+    // __NEXT_CACHE_COMPONENTS / __NEXT_EXPERIMENTAL_CACHED_NAVIGATIONS /
+    // __NEXT_EXPERIMENTAL_APP_NEW_SCROLL_HANDLER into the build env under the
+    // NEXT_PRIVATE_EXPERIMENTAL_* names the harness-appended next.config.js
+    // snippet reads ("_"-prefixed names are invalid on some deploy platforms).
+    // The custom-script path leaves that mapping to the script — knext must do
+    // the same or every cacheComponents-lane build silently loses the flag
+    // (PR #179's deferred B6 note).
+    const readEnvFile = (name: string) => readFileSync(join(appDir, '.next', name), 'utf8').trim();
+    expect(readEnvFile('CACHE_COMPONENTS_AT_BUILD')).toBe('true');
+    expect(readEnvFile('CACHED_NAVIGATIONS_AT_BUILD')).toBe('cn-1');
+    expect(readEnvFile('SCROLL_HANDLER_AT_BUILD')).toBe('sh-1');
+  });
+
   describe('deployed-platform Cache-Control normalization at the serving layer (#175)', () => {
     // Evidence: compat run 28578203671, prerender.test.ts deploy-mode diffs.
     // The official reference adapter (nextjs/adapter-bun src/runtime/server.ts,
@@ -451,5 +538,62 @@ describe('scripts/e2e-deploy.sh — official deploy-script contract (#89)', () =
     // give SIGTERM a beat to release the socket
     await new Promise((res) => setTimeout(res, 1500));
     expect(await tcpConnects(parsedPort)).toBe(false);
+  });
+});
+
+describe('scripts/e2e-deploy.sh — fixture WITHOUT a build script (#147 final-mile robustness)', () => {
+  // The real harness ALWAYS synthesizes a build script, but the deploy script
+  // must not require one: a script-less package.json (e.g. the contract-smoke
+  // path, or a future harness change) must keep building with no extra args.
+  let bareAppDir = '';
+
+  beforeAll(() => {
+    bareAppDir = mkdtempSync(join(tmpdir(), 'knext-e2e-bare-app-'));
+    writeFileSync(
+      join(bareAppDir, 'package.json'),
+      JSON.stringify({ name: 'bare-fixture-app', version: '0.0.0', private: true }, null, 2),
+    );
+    writeFileSync(
+      join(bareAppDir, 'next.config.js'),
+      "module.exports = { output: 'standalone' };\n",
+    );
+    const nextBin = join(bareAppDir, 'node_modules', '.bin', 'next');
+    mkdirSync(join(bareAppDir, 'node_modules', '.bin'), { recursive: true });
+    writeFileSync(nextBin, fakeNextScript(bareAppDir));
+    chmodSync(nextBin, 0o755);
+  });
+
+  afterAll(() => {
+    if (bareAppDir && existsSync(bareAppDir)) {
+      spawnSync('bash', [CLEANUP_SH], {
+        cwd: bareAppDir,
+        env: { ...process.env },
+        encoding: 'utf8',
+        timeout: 20000,
+      });
+      rmSync(bareAppDir, { recursive: true, force: true });
+    }
+  });
+
+  it('deploys successfully and passes NO extra args to next build', () => {
+    const out = execFileSync('bash', [DEPLOY_SH], {
+      cwd: bareAppDir,
+      env: {
+        ...process.env,
+        KNEXT_E2E_SKIP_PACK: '1',
+        KNEXT_RUNTIME: 'node',
+        NEXT_TEST_MODE: 'deploy',
+        NEXT_PRIVATE_TEST_MODE: '',
+      },
+      encoding: 'utf8',
+      timeout: 60000,
+    });
+    const lines = out.split('\n').filter((l) => l.trim().length > 0);
+    expect(lines.length).toBe(1);
+    expect(new URL(lines[0]).protocol).toBe('http:');
+    const args = JSON.parse(
+      readFileSync(join(bareAppDir, '.next', 'BUILD_ARGS_AT_BUILD'), 'utf8'),
+    ) as string[];
+    expect(args).toEqual([]);
   });
 });

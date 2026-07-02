@@ -231,6 +231,28 @@ if [ -z "${NEXT_PRIVATE_TEST_MODE:-}" ] && [ -n "${NEXT_TEST_MODE:-}" ]; then
   export NEXT_PRIVATE_TEST_MODE="${NEXT_TEST_MODE}"
 fi
 
+# ── B6 (#147 A3-3 final mile — PR #179's deferred note): map the harness's
+# jest-process experimental flags to the NEXT_PRIVATE_EXPERIMENTAL_* names the
+# harness-appended next.config.js snippet reads at config load. This mirrors
+# next-deploy.ts@v16.2.0 (lines 352-364) EXACTLY: its Vercel path forwards
+# __NEXT_CACHE_COMPONENTS / __NEXT_EXPERIMENTAL_CACHED_NAVIGATIONS /
+# __NEXT_EXPERIMENTAL_APP_NEW_SCROLL_HANDLER into `vercel deploy --build-env
+# NEXT_PRIVATE_EXPERIMENTAL_*`; the custom-script path hands us the raw jest
+# process.env and leaves the mapping to the script. Without it, a
+# cacheComponents-lane run would build every `use cache` fixture without the
+# flag and die at build ("To use 'use cache: remote', please enable the
+# feature flag"). Exported (not build-local) so the runtime server sees the
+# same feature surface the build was stamped with.
+if [ -n "${__NEXT_CACHE_COMPONENTS:-}" ]; then
+  export NEXT_PRIVATE_EXPERIMENTAL_CACHE_COMPONENTS="${__NEXT_CACHE_COMPONENTS}"
+fi
+if [ -n "${__NEXT_EXPERIMENTAL_CACHED_NAVIGATIONS:-}" ]; then
+  export NEXT_PRIVATE_EXPERIMENTAL_CACHED_NAVIGATIONS="${__NEXT_EXPERIMENTAL_CACHED_NAVIGATIONS}"
+fi
+if [ -n "${__NEXT_EXPERIMENTAL_APP_NEW_SCROLL_HANDLER:-}" ]; then
+  export NEXT_PRIVATE_EXPERIMENTAL_APP_NEW_SCROLL_HANDLER="${__NEXT_EXPERIMENTAL_APP_NEW_SCROLL_HANDLER}"
+fi
+
 # ── 2. build the fixture app through the knext adapter ────────────────────────
 # #147 A3-3 fix round 1, follow-up (branch run 28561839378): a bare `next build`
 # resolved NOTHING in the harness env — the fixture's node_modules/.bin is NOT on
@@ -289,10 +311,45 @@ if [ -f "${APP_DIR}/next.config.ts" ] || [ -f "${APP_DIR}/next.config.mts" ]; th
   log "next.config.(m)ts detected — passing ${NEXT_BUILD_ARGS} (B2 #173: native TS resolution; TLA-in-config fixtures cannot load via the legacy require path)"
 fi
 
+# ── #147 A3-3 final mile (run 28590478386: trailingslash +
+# revalidate-path-with-rewrites): honor the fixture's build-script args. The
+# harness synthesizes EVERY deploy fixture's package.json build script as
+#   build: "next build <buildArgs> && pnpm post-build"
+# (base.ts@v16.2.0:283-298) and Vercel runs that script; those two fixtures use
+# buildArgs (`--debug-build-paths '!…/cache-components/…'`) to exclude their
+# cacheComponents-only page variant from non-cacheComponents lanes. knext's
+# bare `next build` compiled the excluded page and died on the missing feature
+# flag. Extract the argv tail of the leading `next build` command (the
+# `&& pnpm post-build` tail is the harness's Vercel-log hook — e2e-logs.sh
+# already provides those ids) and forward it to the pinned fixture-local
+# binary. A build script that does not start with `next build` is logged and
+# ignored (the direct pinned-binary invocation stays authoritative).
+FIXTURE_BUILD_SCRIPT="$(node -e 'try{const s=((require(process.cwd()+"/package.json").scripts||{}).build)||"";process.stdout.write(String(s))}catch(_){}')"
+if [ -n "${FIXTURE_BUILD_SCRIPT}" ]; then
+  FIXTURE_BUILD_ARGS="$(node -e '
+    const s = process.argv[1] || "";
+    const first = s.split("&&")[0].trim();
+    const m = first.match(/^next build\s*(.*)$/);
+    process.stdout.write(m ? m[1].trim() : "");
+  ' "${FIXTURE_BUILD_SCRIPT}")"
+  if [ -n "${FIXTURE_BUILD_ARGS}" ]; then
+    log "forwarding fixture build-script args: ${FIXTURE_BUILD_ARGS}"
+    NEXT_BUILD_ARGS="${NEXT_BUILD_ARGS} ${FIXTURE_BUILD_ARGS}"
+  elif ! printf '%s' "${FIXTURE_BUILD_SCRIPT}" | grep -q '^next build'; then
+    log "fixture build script does not start with 'next build' — running the pinned binary without its args: ${FIXTURE_BUILD_SCRIPT}"
+  fi
+fi
+
 log "running next build (output:'standalone') via ${NEXT_BIN} (deployment=${DEPLOYMENT_ID}, build log → ${BUILD_LOG})"
-# NEXT_BUILD_ARGS is deliberately unquoted: empty ⇒ no extra argv entry.
+# NEXT_BUILD_ARGS is deliberately unquoted: empty ⇒ no extra argv entry; the
+# harness joins buildArgs with spaces (base.ts), so space-splitting is the
+# faithful mirror. `set -f` keeps glob-shaped args
+# (`!app/[lang]/cache-components/page.js`) VERBATIM — bash pathname expansion
+# would otherwise be layout-dependent.
+set -f
 # shellcheck disable=SC2086
 "${NEXT_BIN}" build ${NEXT_BUILD_ARGS} 2>&1 | tee "${BUILD_LOG}" >&2
+set +f
 
 # ── 3. locate + stage the standalone server tree ──────────────────────────────
 # output:'standalone' emits server.js under .next/standalone (monorepo fixtures may
