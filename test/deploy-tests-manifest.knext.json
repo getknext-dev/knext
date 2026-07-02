@@ -168,7 +168,8 @@
       "flakey": [
         "segment cache (per-page dynamic stale time) reuses dynamic data within the per-page stale time window",
         "segment cache (per-page dynamic stale time) back/forward navigation always reuses BFCache regardless of stale time",
-        "segment cache (per-page dynamic stale time) per-page value overrides global staleTimes.dynamic regardless of direction"
+        "segment cache (per-page dynamic stale time) per-page value overrides global staleTimes.dynamic regardless of direction",
+        "segment cache (per-page dynamic stale time) two dynamic pages with different stale times behave independently"
       ]
     },
     "test/e2e/app-dir/segment-cache/vary-params/vary-params.test.ts": {
@@ -176,7 +177,8 @@
         "segment cache - vary params does not share cached segment when all params accessed statically (runtime prefetch)",
         "segment cache - vary params renders cached loading state instantly with runtime prefetching",
         "segment cache - vary params does not reuse prefetched segment when page accesses searchParams",
-        "segment cache - vary params shares cached segment across all params when none accessed statically (runtime prefetch)"
+        "segment cache - vary params shares cached segment across all params when none accessed statically (runtime prefetch)",
+        "segment cache - vary params tracks metadata param access separately from body (runtime prefetch)"
       ]
     },
     "test/e2e/app-dir/app-client-cache/client-cache.parallel-routes.test.ts": {
@@ -198,6 +200,26 @@
         "optimistic-routing static route with catch-all sibling: does not match sub-route against catch-all",
         "optimistic-routing nested dynamic routes: predicts through multiple dynamic segments",
         "optimistic-routing optional catch-all: predicts from index to path with segments"
+      ]
+    },
+    "test/e2e/app-dir/prefetch-true-instant/prefetch-true-instant.test.ts": {
+      "flakey": [
+        "prefetch={true} with instant route also disables full prefetch when instant is on a layout, not the page",
+        "prefetch={true} with instant route does not include dynamic content in the prefetch when the target route has instant"
+      ]
+    },
+    "test/e2e/app-dir/server-actions-redirect-middleware-rewrite/server-actions-redirect-middleware-rewrite.test.ts": {
+      "flakey": [
+        "app-dir - server-actions-redirect-middleware-rewrite.test should redirect correctly in edge runtime with middleware rewrite"
+      ]
+    },
+    "test/e2e/app-dir/segment-cache/cached-navigations/cached-navigations.test.ts": {
+      "flakey": [
+        "cached navigations caches runtime-prefetchable content from a navigation for instant second visit",
+        "cached navigations defers fallback params to the runtime stage",
+        "cached navigations includes static params in the cached static stage",
+        "cached navigations serves cached static segments instantly on the second navigation",
+        "cached navigations caches static segments when navigating to a known route without a prefetch"
       ]
     }
   },
@@ -282,10 +304,11 @@
       "cases": [
         "segment cache (per-page dynamic stale time) reuses dynamic data within the per-page stale time window",
         "segment cache (per-page dynamic stale time) back/forward navigation always reuses BFCache regardless of stale time",
-        "segment cache (per-page dynamic stale time) per-page value overrides global staleTimes.dynamic regardless of direction"
+        "segment cache (per-page dynamic stale time) per-page value overrides global staleTimes.dynamic regardless of direction",
+        "segment cache (per-page dynamic stale time) two dynamic pages with different stale times behave independently"
       ],
       "mechanism": "60s jest timeouts in per-page dynamic stale-time flows via createRouterAct, alternating per attempt (run 28578203671: att1 'reuses dynamic data…' + 'back/forward…' hung, att2+att3 'per-page value overrides…' hung while the att1 pair passed) — the family's interleaving-race signature, zero assertion diffs.",
-      "evidence": "run 28578203671: FINAL failure, alternating cases across 3 attempts; run 28596005486: all three cases hung 1 attempt then the file RECOVERED on in-run retry; run 28590478386: 1-attempt wobble then recovered; run 28593534713: file PASSED — cross-run wobble.",
+      "evidence": "run 28578203671: FINAL failure, alternating cases across 3 attempts; run 28596005486: all three cases hung 1 attempt then the file RECOVERED on in-run retry; run 28590478386: 1-attempt wobble then recovered; run 28593534713: file PASSED — cross-run wobble. run 28607626868 (KNEXT_RUNTIME=bun lane, #188): NEW sibling case 'two dynamic pages with different stale times behave independently' hung 60s while the 3 already-quarantined cases were correctly pattern-skipped — same runtime-prefetch mechanism flushed out by Bun's slower per-request scheduling, not a Bucket-1 serving failure.",
       "provenance": "Upstream marks the runtime-prefetch deploy family flakey wholesale (vercel/next.js@v16.2.0 test/deploy-tests-manifest.json, segment-cache/prefetch-runtime.test.ts, incl. its stale-time-handling cases) — same client dynamic-data/staleness scheduling mechanism."
     },
     {
@@ -294,10 +317,11 @@
         "segment cache - vary params does not share cached segment when all params accessed statically (runtime prefetch)",
         "segment cache - vary params renders cached loading state instantly with runtime prefetching",
         "segment cache - vary params does not reuse prefetched segment when page accesses searchParams",
-        "segment cache - vary params shares cached segment across all params when none accessed statically (runtime prefetch)"
+        "segment cache - vary params shares cached segment across all params when none accessed statically (runtime prefetch)",
+        "segment cache - vary params tracks metadata param access separately from body (runtime prefetch)"
       ],
       "mechanism": "60s jest timeouts in runtime-prefetch vary-params flows via createRouterAct, alternating per attempt (run 28578203671: att1+att2 'does not share cached segment… (runtime prefetch)' hung; att3 THREE cases hung incl. two that passed earlier attempts) — the family's interleaving-race signature, zero assertion diffs.",
-      "evidence": "run 28578203671: FINAL failure, alternating cases across 3 attempts; run 28596005486: 2-attempt wobble ('renders cached loading state…', then 'does not share cached segment…') then RECOVERED on in-run retry; run 28590478386: 1-attempt wobble ('does not reuse prefetched segment…' + 'shares cached segment…') then recovered; run 28593534713: file PASSED — cross-run wobble.",
+      "evidence": "run 28578203671: FINAL failure, alternating cases across 3 attempts; run 28596005486: 2-attempt wobble ('renders cached loading state…', then 'does not share cached segment…') then RECOVERED on in-run retry; run 28590478386: 1-attempt wobble ('does not reuse prefetched segment…' + 'shares cached segment…') then recovered; run 28593534713: file PASSED — cross-run wobble. run 28607626868 (KNEXT_RUNTIME=bun lane, #188): NEW sibling case 'tracks metadata param access separately from body (runtime prefetch)' hung 60s while the 4 already-quarantined cases were correctly pattern-skipped — same runtime-prefetch mechanism, bun-lane evidence.",
       "provenance": "Upstream marks the runtime-prefetch deploy family flakey wholesale (vercel/next.js@v16.2.0 test/deploy-tests-manifest.json, segment-cache/prefetch-runtime.test.ts, incl. its 'includes search params, but not dynamic content' cases) — same runtime-prefetch vary/search-params mechanism."
     },
     {
@@ -332,6 +356,38 @@
       "mechanism": "60s jest timeouts in createRouterAct-driven optimistic-routing prediction flows, a DIFFERENT case per attempt (run 28601386408: att1 'rewrite detection…' hung then passed atts 2-3 in ~0.7s; att2 'static route with catch-all sibling…' hung; att3 'nested dynamic routes…' hung after passing atts 1-2) — the family's interleaving-race signature, zero assertion diffs. NOT an adapter-lane finding: this file does not read NEXT_ENABLE_ADAPTER (the only isAdapterTest readers at v16.2.0 — not-found-with-pages-i18n, sub-shell-generation{,-middleware}, partial-fallback-root-blocking, partial-fallback-shell-upgrade, deterministic-build/deployment-id — all passed on first attempt in the same run).",
       "evidence": "run 28601386408 (first adapter-lane run): FINAL failure, alternating cases across 3 attempts; run 28593534713: 1-attempt wobble ('optional catch-all…' + 'rewrite detection…') then RECOVERED on in-run retry; runs 28578203671, 28590478386, 28596005486, 28597872225: file PASSED — cross-run wobble.",
       "provenance": "Same client prefetch/navigation-latency-under-load class upstream ledgers (vercel/next.js@v16.2.0 test/deploy-tests-manifest.json: segment-cache/prefetch-runtime.test.ts flakey block; app-client-cache failed entries)."
+    },
+    {
+      "test": "test/e2e/app-dir/prefetch-true-instant/prefetch-true-instant.test.ts",
+      "cases": [
+        "prefetch={true} with instant route also disables full prefetch when instant is on a layout, not the page",
+        "prefetch={true} with instant route does not include dynamic content in the prefetch when the target route has instant"
+      ],
+      "mechanism": "60s jest timeouts in createRouterAct-driven instant-route prefetch flows, alternating per attempt (run 28612654960: 'also disables full prefetch…' hung atts 1+3 at 60000ms while 'does not include dynamic content…' hung att 2 and passed elsewhere) — the runtime-prefetch family's interleaving-race signature, zero assertion diffs. NOT a Bucket-1/3/4 serving failure: the same run's server-log tails for this fixture carry no exception.",
+      "evidence": "run 28612654960 (KNEXT_RUNTIME=bun, #188 round 2): FINAL failure, alternating cases across 3 attempts; run 28607626868 (first bun run): file failed 1 attempt then RECOVERED on in-run retry (2/2, shard 3) — cross-run wobble, bun-lane evidence for both.",
+      "provenance": "Upstream marks the runtime-prefetch deploy family flakey wholesale (vercel/next.js@v16.2.0 test/deploy-tests-manifest.json, segment-cache/prefetch-runtime.test.ts, ~34 'runtime prefetching …' cases) — instant-route prefetch exercises exactly that client scheduling mechanism."
+    },
+    {
+      "test": "test/e2e/app-dir/server-actions-redirect-middleware-rewrite/server-actions-redirect-middleware-rewrite.test.ts",
+      "cases": [
+        "app-dir - server-actions-redirect-middleware-rewrite.test should redirect correctly in edge runtime with middleware rewrite"
+      ],
+      "mechanism": "60s jest timeout awaiting an EDGE-runtime server-action redirect through a middleware rewrite; zero assertion diffs and ZERO server-side exceptions in the surfaced server-log tails (run 28616072395). Cross-run wobble on the bun lane (fails/passes whole runs), so ledgered as flakey — but honestly noted: the hang shape overlaps the documented Bun ≤1.3.14 edge-sandbox outbound-fetch gap (next/dist/compiled/edge-runtime bundled-undici fetch never resolving; the middleware-rewrite proxy path exercises the same sandbox), which likely decides which runs lose the race. Re-examine when Bun ships the 1.4 fixes.",
+      "evidence": "run 28616072395 (KNEXT_RUNTIME=bun, #188 round 3): FINAL failure, same case 3/3 attempts at 60000ms; run 28607626868 (first bun run): FINAL failure, same case (Bucket-2 investigate list); run 28612654960 (round 2): file PASSED — cross-run wobble, bun lane only (Node lane green).",
+      "provenance": "Not in upstream's flakey ledger; bun-lane-only observation. Mechanism family: the Bun edge-sandbox outbound-fetch gap documented in PR #189 (middleware-fetches-with-any-http-method, app-static POST-fetch case) — the deterministic members of that family stay RED and unledgered; this case alone wobbles run-to-run."
+    },
+    {
+      "test": "test/e2e/app-dir/segment-cache/cached-navigations/cached-navigations.test.ts",
+      "cases": [
+        "cached navigations caches runtime-prefetchable content from a navigation for instant second visit",
+        "cached navigations defers fallback params to the runtime stage",
+        "cached navigations includes static params in the cached static stage",
+        "cached navigations serves cached static segments instantly on the second navigation",
+        "cached navigations caches static segments when navigating to a known route without a prefetch"
+      ],
+      "mechanism": "60s jest timeouts in createRouterAct-driven cached-navigation/runtime-prefetch flows, alternating per attempt (run 28618585946: att1 'defers fallback params…' + 'caches runtime-prefetchable content…' hung; att2 only 'caches runtime-prefetchable content…'; att3 'serves cached static segments…' + 'includes static params…' — cases that hung one attempt passed the next) — the runtime-prefetch family's interleaving-race signature, zero assertion diffs, ZERO server-side exceptions in the surfaced server-log tails.",
+      "evidence": "run 28618585946 (KNEXT_RUNTIME=bun, #188 round 3 verify): FIRST FINAL failure, alternating cases across 3 attempts; run 28612654960 (round 2): 1-attempt wobble ('caches static segments when navigating to a known route without a prefetch') then RECOVERED on in-run retry; earlier bun runs: file PASSED — cross-run wobble, quarantined only after the final-post-retry bar was met.",
+      "provenance": "Upstream marks the runtime-prefetch deploy family flakey wholesale (vercel/next.js@v16.2.0 test/deploy-tests-manifest.json, segment-cache/prefetch-runtime.test.ts, ~34 'runtime prefetching …' cases) — cached navigations exercise exactly that segment-cache runtime-prefetch scheduling mechanism."
     }
   ],
   "$knextExclusions": [

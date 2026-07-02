@@ -19,10 +19,12 @@
  * Out of scope: request routing, bun --compile, operator changes.
  */
 import { createReadStream, existsSync } from "node:fs";
+import { dirname, join } from "node:path";
 import type { Readable } from "node:stream";
 import type { NextAdapter } from "next";
 // AdapterOutputs is not re-exported from the 'next' public barrel; import directly.
 import type { AdapterOutputs } from "next/dist/build/adapter/build-complete";
+import { healBunExportTargets } from "./standalone-bun-exports";
 
 const adapter: NextAdapter = {
     name: "knext-adapter",
@@ -122,6 +124,34 @@ const adapter: NextAdapter = {
         // Guarded by STORAGE_BUCKET env var — skips cleanly when not configured.
         // This allows local/CI builds to succeed without storage credentials.
         await uploadBuildArtifacts({ buildId, outputs });
+
+        // ── Bun-condition export heal (#188 round 2) ────────────────────────────
+        // nft traces under Node, so exports targets behind a "bun" condition
+        // (react-dom/server → server.bun.js) are absent from the standalone tree
+        // while the exports map still points at them — Bun then fails the whole
+        // specifier and every pages-router SSR/API render 500s. Copy the missing
+        // targets (byte-identical, version-checked) from the app's node_modules.
+        // Purely additive: Node resolution never touches these files.
+        const standaloneDir = join(distDir, "standalone");
+        if (existsSync(standaloneDir)) {
+            const healed = healBunExportTargets({
+                projectDir: dirname(distDir),
+                standaloneDir,
+                log: (message) => console.log(message),
+            });
+            console.log(
+                `[knext-adapter] bun-exports heal: ${healed.copied.length} copied, ${healed.skipped.length} skipped`,
+            );
+        } else {
+            // #188 round 3 (run 28616072395): at next@16.2.0 onBuildComplete
+            // fires BEFORE the standalone tree is emitted, so this branch is
+            // the NORMAL path — say so loudly. The reliable heal happens
+            // post-build in scripts/e2e-deploy.sh (and any deploy pipeline
+            // that assembles the standalone output).
+            console.log(
+                `[knext-adapter] bun-exports heal skipped: no standalone dir at ${standaloneDir} yet (onBuildComplete precedes standalone emit at next 16.2) — heal must run post-build`,
+            );
+        }
     },
 };
 

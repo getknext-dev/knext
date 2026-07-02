@@ -27,6 +27,12 @@
     },
     "./adapters/cache-handler": "./dist/adapters/cache-handler.js",
     "./internal/cache-control-normalize": "./dist/adapters/cache-control-normalize.cjs",
+    "./internal/bun-keepalive-guard": "./dist/adapters/bun-keepalive-guard.cjs",
+    "./internal/standalone-bun-exports": {
+      "types": "./dist/adapters/standalone-bun-exports.d.ts",
+      "import": "./dist/adapters/standalone-bun-exports.js",
+      "default": "./dist/adapters/standalone-bun-exports.js"
+    },
     "./internal/next-adapter": {
       "types": "./dist/adapters/next-adapter.d.ts",
       "import": "./dist/adapters/next-adapter.js",

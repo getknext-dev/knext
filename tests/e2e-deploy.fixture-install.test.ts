@@ -111,12 +111,15 @@ describe('scripts/e2e-deploy.sh — fixture-shipped node_modules survive the tar
           // from the installed package — the stub mirrors that surface so the
           // require.resolve is exercised for real.
           './internal/cache-control-normalize': './dist/adapters/cache-control-normalize.cjs',
+          // #188: same for the Bun ≤1.3.x keep-alive guard preload.
+          './internal/bun-keepalive-guard': './dist/adapters/bun-keepalive-guard.cjs',
         },
         dependencies: { '@knext/lib': '0.0.0-test' },
       },
       {
         'dist/adapters/next-adapter.js': 'module.exports = {};\n',
         'dist/adapters/cache-control-normalize.cjs': 'module.exports = {};\n',
+        'dist/adapters/bun-keepalive-guard.cjs': 'module.exports = {};\n',
       },
     );
 

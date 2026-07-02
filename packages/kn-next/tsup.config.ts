@@ -40,6 +40,9 @@ export default defineConfig([
       loader: 'src/loader.ts',
       'adapters/next-adapter': 'src/adapters/next-adapter.ts',
       'adapters/node-server': 'src/adapters/node-server.ts',
+      // #188 round 3 — own dist entry so e2e-deploy.sh can import the heal
+      // POST-build (onBuildComplete fires before .next/standalone exists).
+      'adapters/standalone-bun-exports': 'src/adapters/standalone-bun-exports.ts',
       // cache-handler is plain JS (untyped) — bundled to dist, no .d.ts emitted
       'adapters/cache-handler': 'src/adapters/cache-handler.js',
       'adapters/otel-config': 'src/adapters/otel-config.ts',
@@ -63,6 +66,7 @@ export default defineConfig([
         loader: 'src/loader.ts',
         'adapters/next-adapter': 'src/adapters/next-adapter.ts',
         'adapters/node-server': 'src/adapters/node-server.ts',
+        'adapters/standalone-bun-exports': 'src/adapters/standalone-bun-exports.ts',
         'adapters/otel-config': 'src/adapters/otel-config.ts',
         'utils/logger': 'src/utils/logger.ts',
       },
@@ -97,6 +101,8 @@ export default defineConfig([
   {
     entry: {
       'adapters/cache-control-normalize': 'src/adapters/cache-control-normalize.cjs',
+      // #188 — Bun ≤1.3.x keep-alive mitigation (bun lane only; Node-inert).
+      'adapters/bun-keepalive-guard': 'src/adapters/bun-keepalive-guard.cjs',
     },
     format: ['cjs'],
     platform: 'node',

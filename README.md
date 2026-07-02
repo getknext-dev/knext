@@ -461,6 +461,17 @@ option — `env` is for plain configuration flags only. A Dockerfile
 `ENV KNEXT_CACHE_CONTROL_NORMALIZE=0` also works for per-image settings.)
 Any value other than `0` — including unset — leaves normalization **on**.
 
+### Bun Keep-Alive Guard (`KNEXT_BUN_KEEPALIVE_GUARD`)
+
+On **Bun ≤ 1.3.x only**, the runtime preloads a guard that advertises
+`Connection: close` on every response, working around a Bun `node:http` bug
+that resets reused keep-alive sockets (fixed upstream in Bun ≥ 1.4).
+Tradeoff: clients — including the Knative activator — open a fresh connection
+per request while the guard is active, trading keep-alive reuse for
+correctness on affected Bun versions. It self-disables on fixed Bun versions
+and never loads under Node; set `KNEXT_BUN_KEEPALIVE_GUARD=0` to disable it
+(or `1` to force it on a Bun version the ceiling says is fixed).
+
 ### Cache Invalidation API
 
 ```bash

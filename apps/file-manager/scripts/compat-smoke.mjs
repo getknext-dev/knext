@@ -24,7 +24,7 @@
  *   SERVER_PATH=... override the server.js path
  */
 import assert from 'node:assert';
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { cpSync, existsSync } from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
@@ -40,6 +40,15 @@ const SERVER_PATH =
   process.env.SERVER_PATH || path.resolve(APP_DIR, '.next/standalone/apps/file-manager/server.js');
 // Runtime binary: node | bun. RUNTIME=bun boots the same standalone server.js under Bun.
 const SERVER_CMD = process.env.SERVER_CMD || (RUNTIME === 'bun' ? 'bun' : process.execPath);
+
+// #188 — Bun ≤1.3.x keep-alive mitigation preload (bun runtime only; the Node
+// boot args stay byte-identical). Resolved from the built workspace package,
+// falling back to the in-repo source (both are dependency-free CJS).
+const BUN_GUARD_CANDIDATES = [
+  path.resolve(APP_DIR, '../../packages/kn-next/dist/adapters/bun-keepalive-guard.cjs'),
+  path.resolve(APP_DIR, '../../packages/kn-next/src/adapters/bun-keepalive-guard.cjs'),
+];
+const BUN_GUARD_PRELOAD = BUN_GUARD_CANDIDATES.find((p) => existsSync(p));
 
 // A public asset shipped specifically for the image-optimization check.
 const IMAGE_ASSET = '/knext-smoke.png';
@@ -124,9 +133,13 @@ function startServer() {
     }
   }
 
-  console.log(`[compat-smoke] runtime=${RUNTIME} cmd=${SERVER_CMD}`);
+  // #188: on Bun, preload the keep-alive guard (self-disables on fixed Bun
+  // versions ≥1.4.0). Never added on Node.
+  const serverArgs =
+    RUNTIME === 'bun' && BUN_GUARD_PRELOAD ? ['-r', BUN_GUARD_PRELOAD, SERVER_PATH] : [SERVER_PATH];
+  console.log(`[compat-smoke] runtime=${RUNTIME} cmd=${SERVER_CMD} args=${serverArgs.join(' ')}`);
   console.log(`[compat-smoke] booting ${SERVER_PATH} on ${HOST}:${PORT}`);
-  serverProc = spawn(SERVER_CMD, [SERVER_PATH], {
+  serverProc = spawn(SERVER_CMD, serverArgs, {
     cwd: path.dirname(SERVER_PATH),
     env: {
       ...process.env,
@@ -237,6 +250,58 @@ async function main() {
     const ct = res.headers['content-type'] || '';
     assert.ok(ct.startsWith('image/'), `content-type not image/*: ${ct}`);
     return `200 ${ct} ${res.bytes}B`;
+  });
+
+  // (h) #188 — Bun keep-alive guard contract. Bun ≤1.3.14 resets a reused
+  // keep-alive socket when the next request arrives immediately after the
+  // previous response ("socket hang up" — 30/39 bun-lane compat failures; the
+  // exact race only fires under node-fetch@2's reuse timing, so asserting the
+  // MITIGATION's observable contract is the honest per-PR gate):
+  //   bun (affected version) → every response advertises `Connection: close`
+  //                            (the guard preload is active);
+  //   bun (fixed ≥1.4.0)     → guard self-disables, no requirement;
+  //   node                   → serving stays byte-identical: keep-alive intact,
+  //                            NEVER `Connection: close`.
+  await check('h. bun keep-alive guard contract (#188)', async () => {
+    const agent = new http.Agent({ keepAlive: true, maxSockets: 1 });
+    try {
+      const res = await new Promise((resolve, reject) => {
+        const req = http.get({ hostname: HOST, port: PORT, path: '/api/health', agent }, (r) => {
+          r.resume();
+          r.on('end', () => resolve({ status: r.statusCode, connection: r.headers.connection }));
+          r.on('error', reject);
+        });
+        req.on('error', reject);
+        req.setTimeout(15000, () => req.destroy(new Error('request timeout')));
+      });
+      if (RUNTIME === 'bun') {
+        if (!BUN_GUARD_PRELOAD) {
+          throw new Error('bun-keepalive-guard preload not found in the workspace');
+        }
+        const { createRequire } = await import('node:module');
+        const { shouldInstall } = createRequire(import.meta.url)(BUN_GUARD_PRELOAD);
+        // argv array, shell:false default — no string interpolation into a
+        // shell (CLI-58 injection rule; SERVER_CMD is env-overridable).
+        const bunVersion = execFileSync(SERVER_CMD, ['--version']).toString().trim();
+        if (shouldInstall({}, { bun: bunVersion })) {
+          assert.strictEqual(
+            res.connection,
+            'close',
+            `guard active on bun ${bunVersion} but Connection header is ${JSON.stringify(res.connection)}`,
+          );
+          return `bun ${bunVersion}: guard active, Connection: close`;
+        }
+        return `bun ${bunVersion}: fixed version, guard self-disabled`;
+      }
+      assert.notStrictEqual(
+        res.connection,
+        'close',
+        'Node serving must stay keep-alive — the guard must never load under Node',
+      );
+      return `node: keep-alive intact (connection=${res.connection})`;
+    } finally {
+      agent.destroy();
+    }
   });
 
   // ── report ──────────────────────────────────────────────────────────────

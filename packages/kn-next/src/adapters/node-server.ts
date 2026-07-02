@@ -110,6 +110,30 @@ if (preloadArgs.length === 0) {
     );
 }
 
+// ── Bun ≤1.3.x keep-alive mitigation (#188) ──────────────────────────────────
+// Bun ≤1.3.14 resets a reused keep-alive socket when the next request arrives
+// immediately after the previous response completed (plain node:http repro;
+// fixed in Bun canary 1.4.0) — clients see ECONNRESET ("socket hang up") on
+// small/fast responses. When THIS runtime entry itself runs under Bun, the
+// spawned standalone child is Bun too (process.execPath), so preload the
+// guard: it advertises `Connection: close` on affected Bun versions only and
+// self-disables on fixed ones. Node is never patched — the guard is only
+// appended under Bun, keeping the Node spawn args byte-identical.
+if (process.versions.bun) {
+    const bunKeepaliveGuard = resolve(
+        import.meta.dirname,
+        "bun-keepalive-guard.cjs",
+    );
+    if (existsSync(bunKeepaliveGuard)) {
+        preloadArgs.push("--require", bunKeepaliveGuard);
+    } else {
+        log.warn(
+            { bunKeepaliveGuard },
+            "bun-keepalive-guard preload not found; Bun ≤1.3.x keep-alive reuse may reset sockets",
+        );
+    }
+}
+
 const nextProc = spawn(process.execPath, [...preloadArgs, serverJs], {
     stdio: "inherit",
     env: buildChildEnv(),

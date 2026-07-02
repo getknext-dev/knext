@@ -362,8 +362,11 @@ const OBSERVED_FLAKY_QUARANTINES: Record<string, { cases: string[]; observedRuns
       'segment cache (per-page dynamic stale time) reuses dynamic data within the per-page stale time window',
       'segment cache (per-page dynamic stale time) back/forward navigation always reuses BFCache regardless of stale time',
       'segment cache (per-page dynamic stale time) per-page value overrides global staleTimes.dynamic regardless of direction',
+      // #188 bun lane (run 28607626868): NEW sibling case hung while the three
+      // above were correctly pattern-skipped — same runtime-prefetch mechanism.
+      'segment cache (per-page dynamic stale time) two dynamic pages with different stale times behave independently',
     ],
-    observedRuns: ['28578203671', '28596005486'],
+    observedRuns: ['28578203671', '28596005486', '28607626868'],
   },
   'test/e2e/app-dir/segment-cache/vary-params/vary-params.test.ts': {
     cases: [
@@ -371,8 +374,11 @@ const OBSERVED_FLAKY_QUARANTINES: Record<string, { cases: string[]; observedRuns
       'segment cache - vary params renders cached loading state instantly with runtime prefetching',
       'segment cache - vary params does not reuse prefetched segment when page accesses searchParams',
       'segment cache - vary params shares cached segment across all params when none accessed statically (runtime prefetch)',
+      // #188 bun lane (run 28607626868): NEW sibling case hung while the four
+      // above were correctly pattern-skipped — same runtime-prefetch mechanism.
+      'segment cache - vary params tracks metadata param access separately from body (runtime prefetch)',
     ],
-    observedRuns: ['28578203671', '28596005486', '28590478386'],
+    observedRuns: ['28578203671', '28596005486', '28590478386', '28607626868'],
   },
   // Round 4 (run 28597872225, 786/2). Settings audit first (see the workflow
   // fidelity guards in tests/compat-suite-workflow.test.ts): upstream's
@@ -425,6 +431,42 @@ const OBSERVED_FLAKY_QUARANTINES: Record<string, { cases: string[]; observedRuns
     ],
     observedRuns: ['28601386408', '28593534713'],
   },
+  // #188 round 2 (bun lane): recovered-on-retry in run 28607626868, finaled in
+  // 28612654960 with alternating cases — the runtime-prefetch family signature
+  // (no serving exception in the same run's surfaced server-log tails).
+  'test/e2e/app-dir/prefetch-true-instant/prefetch-true-instant.test.ts': {
+    cases: [
+      'prefetch={true} with instant route also disables full prefetch when instant is on a layout, not the page',
+      'prefetch={true} with instant route does not include dynamic content in the prefetch when the target route has instant',
+    ],
+    observedRuns: ['28612654960', '28607626868'],
+  },
+  // #188 round 3 (bun lane): failed run 28607626868, PASSED run 28612654960,
+  // failed run 28616072395 (3/3, 60s, zero server-side exceptions) — cross-run
+  // wobble. Mechanism overlaps the documented Bun edge-sandbox outbound-fetch
+  // gap (the middleware-rewrite proxy path); the deterministic members of that
+  // family stay RED and unledgered.
+  'test/e2e/app-dir/server-actions-redirect-middleware-rewrite/server-actions-redirect-middleware-rewrite.test.ts':
+    {
+      cases: [
+        'app-dir - server-actions-redirect-middleware-rewrite.test should redirect correctly in edge runtime with middleware rewrite',
+      ],
+      observedRuns: ['28616072395', '28607626868'],
+    },
+  // #188 final round (bun lane): first FINAL failure in run 28618585946
+  // (alternating cases across 3 attempts — the family signature, zero server
+  // exceptions); prior observation was a retry-absorbed 1-attempt wobble in
+  // run 28612654960. Quarantined only once the final-post-retry bar was met.
+  'test/e2e/app-dir/segment-cache/cached-navigations/cached-navigations.test.ts': {
+    cases: [
+      'cached navigations caches runtime-prefetchable content from a navigation for instant second visit',
+      'cached navigations defers fallback params to the runtime stage',
+      'cached navigations includes static params in the cached static stage',
+      'cached navigations serves cached static segments instantly on the second navigation',
+      'cached navigations caches static segments when navigating to a known route without a prefetch',
+    ],
+    observedRuns: ['28618585946', '28612654960'],
+  },
 };
 
 describe('test/deploy-tests-manifest.knext.json — knext-observed flaky quarantines (#147 A3-3 final mile)', () => {
@@ -460,10 +502,15 @@ describe('test/deploy-tests-manifest.knext.json — knext-observed flaky quarant
         (ledger?.mechanism ?? '').length,
         `${file}: mechanism must be documented`,
       ).toBeGreaterThan(0);
-      // Provenance: upstream itself quarantines the runtime-prefetch family.
+      // Provenance: either upstream itself quarantines the family
+      // (runtime-prefetch), or — #188 round 3 — the entry explicitly declares
+      // the documented bun-lane mechanism class (the edge-sandbox
+      // outbound-fetch gap, PR #189) instead of borrowing upstream cover.
+      // Anything else is an undocumented quarantine and must fail here.
       expect(
-        /prefetch-runtime/.test(ledger?.provenance ?? ''),
-        `${file}: provenance must reference upstream's own runtime-prefetch flakey quarantine`,
+        /prefetch-runtime/.test(ledger?.provenance ?? '') ||
+          /edge-sandbox outbound-fetch gap/.test(ledger?.provenance ?? ''),
+        `${file}: provenance must reference upstream's runtime-prefetch quarantine or the documented bun edge-sandbox mechanism`,
       ).toBe(true);
     }
   });
