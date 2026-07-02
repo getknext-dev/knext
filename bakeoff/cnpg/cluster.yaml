@@ -39,3 +39,23 @@ spec:
   # compute's 10s drain. Data is fsync'd to the PVC, so a short window is safe.
   stopDelay: 15
   smartShutdownTimeout: 10
+
+  # WAKE TUNING (iteration-3 evidence A, see bakeoff/TUNING.md).
+  # The un-hibernate wake was dominated NOT by Postgres (it reaches "ready to
+  # accept connections" ~24ms after the process starts, from a clean shutdown)
+  # but by the kubelet PROBE CADENCE: the default startup/readiness probes poll
+  # every 10s, and the CNPG -rw Service only adds the pod as an endpoint once
+  # Ready — so the gateway waited ~a full 10s probe period after PG was already
+  # up. Dropping the period to 1s collapses that gap: measured cold wake
+  # 14.4s p50 -> ~5-6s p50 (n=20; bakeoff/results/cnpg-tuned-*.csv).
+  probes:
+    startup:
+      periodSeconds: 1        # was 10 (default) -> poll every second
+      failureThreshold: 60    # 60s startup budget at 1s period
+      initialDelaySeconds: 0
+      timeoutSeconds: 2
+    readiness:
+      periodSeconds: 1        # was 10 (default)
+      failureThreshold: 3
+      initialDelaySeconds: 0
+      timeoutSeconds: 2
