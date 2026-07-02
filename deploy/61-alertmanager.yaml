@@ -98,14 +98,17 @@ spec:
     metadata:
       labels: { app: alert-sink, plane: observability }
     spec:
+      imagePullSecrets:
+        - name: ocir-pull
       securityContext:
         runAsNonRoot: true
         runAsUser: 65534
         seccompProfile: { type: RuntimeDefault }
       containers:
         - name: sink
-          image: scale-zero-pg/gateway:dev # ships /alertsink alongside /gateway
+          image: me-abudhabi-1.ocir.io/axfqznklsd2t/ks-pg/gateway:v0.3.0 # OCIR (see getting-started for local clusters)
           imagePullPolicy: IfNotPresent
+          # OCIR is private: ocir-pull secret created by deploy/gen-secrets.sh
           command: ["/alertsink"]
           readinessProbe:
             httpGet: { path: /healthz, port: http }

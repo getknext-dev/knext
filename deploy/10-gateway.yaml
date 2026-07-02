@@ -54,11 +54,14 @@ spec:
     metadata:
       labels: { app: pggw }
     spec:
+      imagePullSecrets:
+        - name: ocir-pull
       serviceAccountName: pggw
       containers:
         - name: gateway
-          image: scale-zero-pg/gateway:dev # built locally; OrbStack k8s shares the docker daemon
+          image: me-abudhabi-1.ocir.io/axfqznklsd2t/ks-pg/gateway:v0.3.0 # OCIR (see getting-started for local clusters)
           imagePullPolicy: IfNotPresent
+          # OCIR is private: ocir-pull secret created by deploy/gen-secrets.sh
           env:
             - name: GW_PORT
               value: "55432"

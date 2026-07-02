@@ -1,7 +1,9 @@
 # Getting started
 
-Deploy a scale-to-zero PostgreSQL on any local or single-node Kubernetes cluster
-(OrbStack, kind, minikube, k3s) in about five minutes.
+Deploy a scale-to-zero PostgreSQL on any Kubernetes cluster — the canonical
+deployment runs on OKE (Oracle); local clusters (OrbStack, kind, minikube, k3s)
+work the same way in about five minutes. Note: OCI block volumes have a 50 GB
+minimum, so small PVC requests round up there.
 
 ## Prerequisites
 
@@ -10,11 +12,19 @@ Deploy a scale-to-zero PostgreSQL on any local or single-node Kubernetes cluster
   local image store; on kind use `kind load docker-image` after building.
 - ~6 GiB free disk for images + PVCs. No registry, no Helm, no operators.
 
-## 1. Build the gateway image
+## 1. Gateway image
+
+The manifests reference the canonical image in OCIR
+(`me-abudhabi-1.ocir.io/axfqznklsd2t/ks-pg/gateway:v0.3.0`); private pulls need
+the `ocir-pull` Secret (created by `deploy/gen-secrets.sh` when registry creds
+are available, or `kubectl create secret docker-registry ocir-pull ...`).
+
+For a purely local cluster instead: build and retag —
 
 ```sh
 docker build -t scale-zero-pg/gateway:dev gateway/
-# kind only: kind load docker-image scale-zero-pg/gateway:dev
+# kind: kind load docker-image scale-zero-pg/gateway:dev
+# then point the image fields in deploy/10-gateway.yaml + 61-alertmanager.yaml at it
 ```
 
 ## 2. Deploy everything
