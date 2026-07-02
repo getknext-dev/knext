@@ -409,8 +409,16 @@ exclusions (`$knextExclusions`: edge-runtime module errors, edge middleware, PPR
 Components), minus upstream's own mirrored per-case skips, minus the 9-entry evidence-quarantined
 flaky ledger (`$knextQuarantines`). **Node runtime only** — the Bun axis is still open (#147
 checklist item 4) — and the **nightly stability record starts now** (the cron is live; one green
-dispatch run on main is the graduation bar this ADR set, not yet a longitudinal record). A
-sustained red nightly must flip the matrix row back or annotate it.
+dispatch run on main is the graduation bar this ADR set, not yet a longitudinal record).
+**Revocation is mechanized, not aspirational** (#182 code-gate fix): historically the run step's
+`|| true` meant a shard with real failures still concluded SUCCESS (run 28552585087: 8 real
+failures, green workflow) — now each shard's final "Fail shard on red results" gate reads its own
+summary JSON and **fails the job** on `failed>0`/`notRun>0` (or a missing summary), after the
+`if: always()` summarize/upload ledger has emitted. A red scheduled run therefore fails the
+workflow and fires the `nightly-red-alert` job (pinned "Compat nightly RED" issue, idempotent);
+policy is to flip the matrix row back to ❌ citing the red run — the matrix guard enforces
+evidence IFF ✅, so the honest flip-back is free. Both chain links are guard-tested in
+`tests/compat-suite-workflow.test.ts`.
 
 ### (b) Fixture-environment normalizations + the prebuilt-`next` model ACCEPTED as standing
 

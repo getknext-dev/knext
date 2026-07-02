@@ -2085,3 +2085,80 @@ describe('compat-suite red-nightly alert issue (test-e2e-deploy.yml, #147 A3-3 g
     );
   });
 });
+
+describe('compat-suite fail-on-red gate — revocation teeth (test-e2e-deploy.yml, #182 code gate)', () => {
+  // Run 28552585087 carried 8 REAL test failures yet concluded SUCCESS: the run
+  // step swallows run-tests.js's exit (`|| true`, markers are parsed from
+  // runner.log) and nothing ever failed on `failed > 0` — so the nightly could
+  // NEVER go red on TEST failures, the alert job (gated on job failure) could
+  // never fire for them, and the "red nightly flips the row back" wording was
+  // unenforced. This guard asserts the teeth: a step AFTER summarize/upload
+  // reads the shard's own summary JSON and fails the JOB on failed>0 or
+  // notRun>0. Summarize + upload stay `if: always()` so artifacts always emit
+  // BEFORE the job flips red.
+  const src = readFileSync(WORKFLOW_PATH, 'utf8');
+
+  function stepIndex(nameRe: RegExp): number {
+    return src.search(nameRe);
+  }
+
+  it('has a fail-on-red step in the deploy-tests job', () => {
+    expect(
+      /-\s+name:[^\n]*Fail shard on red results/.test(src),
+      'expected a "Fail shard on red results" step — without it a red shard concludes SUCCESS (run 28552585087)',
+    ).toBe(true);
+  });
+
+  it('orders the gate AFTER summarize and upload (artifacts must emit before the job flips red)', () => {
+    const summarize = stepIndex(/-\s+name:[^\n]*Summarize shard result/);
+    const upload = stepIndex(/-\s+name:[^\n]*Upload summary artifact/);
+    const gate = stepIndex(/-\s+name:[^\n]*Fail shard on red results/);
+    expect(summarize, 'Summarize step must exist').toBeGreaterThan(-1);
+    expect(upload, 'Upload step must exist').toBeGreaterThan(-1);
+    expect(gate, 'fail-on-red step must exist').toBeGreaterThan(-1);
+    expect(gate, 'gate must come AFTER Summarize').toBeGreaterThan(summarize);
+    expect(gate, 'gate must come AFTER Upload — the ledger artifact always lands').toBeGreaterThan(
+      upload,
+    );
+  });
+
+  it('summarize and upload remain if: always() (a red gate must never starve the ledger)', () => {
+    for (const nameRe of [
+      /-\s+name:[^\n]*Summarize shard result[\s\S]*?(?=\n\s*-\s+name:|\n*$)/,
+      /-\s+name:[^\n]*Upload summary artifact[\s\S]*?(?=\n\s*-\s+name:|\n*$)/,
+    ]) {
+      const block = src.match(nameRe)?.[0] ?? '';
+      expect(block, `step block for ${nameRe} must exist`).not.toBe('');
+      expect(/if:\s*always\(\)/.test(block), `step must keep if: always(): ${nameRe}`).toBe(true);
+    }
+  });
+
+  it('the gate fails on failed>0 OR notRun>0 from the summary JSON, and on a MISSING summary', () => {
+    const gate =
+      src.match(
+        /-\s+name:[^\n]*Fail shard on red results[\s\S]*?(?=\n\s*-\s+name:|\n {2}[a-z])/,
+      )?.[0] ?? '';
+    expect(gate).not.toBe('');
+    expect(/if:\s*always\(\)/.test(gate), 'gate must run even after an earlier step failed').toBe(
+      true,
+    );
+    expect(/compat-suite-summary/.test(gate), 'gate must read the shard summary JSON').toBe(true);
+    expect(/\bfailed\b/.test(gate), 'gate must check the failed count').toBe(true);
+    expect(/\bnotRun\b/.test(gate), 'gate must check the notRun (phantom) count').toBe(true);
+    expect(/exit 1|process\.exit\(1\)/.test(gate), 'gate must fail the job on red').toBe(true);
+    expect(
+      /missing|! -f|-f\s+"?\$\{?SUMMARY/.test(gate),
+      'a missing summary is NOT green — the gate must fail on it',
+    ).toBe(true);
+  });
+
+  it('the run step comment no longer claims "matrix row stays ❌ regardless" (stale pre-graduation contract)', () => {
+    expect(
+      src.includes('stays ❌ regardless'),
+      'stale comment: post-graduation the JOB honestly fails on red results — update the || true rationale',
+    ).toBe(false);
+    // the || true itself STAYS (markers are parsed from runner.log); the new
+    // contract must be stated next to it.
+    expect(/\|\| true\b/.test(src)).toBe(true);
+  });
+});

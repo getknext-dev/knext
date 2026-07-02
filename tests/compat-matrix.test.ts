@@ -207,23 +207,30 @@ describe('docs/compat-matrix.md — honesty guard (issue #41)', () => {
   }
 
   describe('official-suite row — evidence-gated ✅ (A3-3 graduation, #147)', () => {
-    const officialRows = rows.filter((r) => /official/i.test(r.feature));
+    // Scan feature AND evidence (like the pre-graduation rule did): a row that
+    // claims official-suite backing via its Evidence cell is held to the same
+    // contract as the row that names the suite in its Feature cell.
+    const officialRows = rows.filter(
+      (r) => /official/i.test(r.feature) || /official/i.test(r.evidence),
+    );
 
-    it('the matrix has exactly one official-suite row', () => {
-      expect(officialRows.length).toBe(1);
+    it('exactly one row NAMES the official suite in its feature', () => {
+      expect(rows.filter((r) => /official/i.test(r.feature)).length).toBe(1);
     });
 
-    it('enforces the evidence contract IFF the row is ✅ — an honest ❌ flip-back is always free', () => {
-      const row = officialRows[0];
-      // NEVER enforce the ✅ itself: if a red nightly makes someone honestly flip
-      // the row back to ❌ (or ⚠️), this guard must pass without ceremony — the
-      // honesty gradient only ever points AWAY from overclaiming. Evidence is
-      // required if-and-only-if the ✅ is claimed.
-      if (!row.status.includes('✅')) return;
-      expect(
-        officialFlipProblems(row),
-        `official-suite ✅ evidence is incomplete: "${row.notes.slice(0, 200)}…"`,
-      ).toEqual([]);
+    it('enforces the evidence contract IFF a row is ✅ — an honest ❌ flip-back is always free', () => {
+      expect(officialRows.length).toBeGreaterThan(0);
+      for (const row of officialRows) {
+        // NEVER enforce the ✅ itself: if a red nightly makes someone honestly flip
+        // the row back to ❌ (or ⚠️), this guard must pass without ceremony — the
+        // honesty gradient only ever points AWAY from overclaiming. Evidence is
+        // required if-and-only-if the ✅ is claimed.
+        if (!row.status.includes('✅')) continue;
+        expect(
+          officialFlipProblems(row),
+          `official-claiming ✅ row "${row.feature}" evidence is incomplete: "${row.notes.slice(0, 200)}…"`,
+        ).toEqual([]);
+      }
     });
 
     it('rejects an evidence-less flip (no run ID, ref, or result cited)', () => {
