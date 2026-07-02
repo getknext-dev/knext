@@ -103,9 +103,10 @@ flowchart LR
 - ✅ **Kubernetes Operator** – Declarative `NextApp` CRD for GitOps-style deployment
 
 > **What Next.js features does knext support?** See the evidence-gated
-> [compatibility matrix](docs/compat-matrix.md) — every ✅ is backed by the per-PR `compat-smoke`
-> gate or test-covered source, and a guard test fails CI on any overclaim. (knext does **not** yet
-> pass the official Next.js compatibility suite; that is tracked separately.)
+> [compatibility matrix](docs/compat-matrix.md) — every ✅ is backed by a red-on-fail check, and a
+> guard test fails CI on any overclaim. knext **passes the official Next.js deploy-test suite**
+> (788 tests, zero failures, Node runtime, against Next.js 16.2) with a small, documented set of
+> exclusions — the matrix has the exact scope and the run evidence.
 
 ---
 
