@@ -47,6 +47,8 @@ docs/      user documentation + research + ADRs
   what cold starts look like from the client, time-series notes.
 - **[Operations](docs/operations.md)** — config reference, monitoring/alerts, durability
   model, password rotation, troubleshooting, upgrades.
+- **[Benchmarks](docs/BENCHMARKS.md)** — every measured number with provenance: wake
+  latencies per environment, the foundation bake-off, drill RTOs, sizing facts.
 - [ADR-0001](docs/adr-0001-timescale-and-sharding.md) — TimescaleDB verdict + sharding
   mechanism. [knext research](docs/knext-research.md) — integration background.
 
