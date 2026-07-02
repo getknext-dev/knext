@@ -23,6 +23,10 @@ spec:
     metadata:
       labels: { app: compute }
     spec:
+      # Fast drain: a Terminating compute holds the timeline (single-writer),
+      # delaying the next wake by its grace period. Data is WAL-safe on the
+      # safekeeper quorum, so a short grace is free.
+      terminationGracePeriodSeconds: 10
       # Block startup until the pageserver has the tenant+timeline (created by
       # the storage-init Job). Runs on the neon image because it ships curl; the
       # compute image does not. This is what lets the compute image stay stock.

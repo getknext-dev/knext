@@ -17,17 +17,35 @@ DSN="postgres://cloud_admin:cloud_admin@pggw:55432/postgres?sslmode=disable"
 fail() { echo "FAIL: $*" >&2; exit 1; }
 ok() { echo "ok - $*"; }
 
-# psql one-shot from a throwaway in-cluster pod (image already on the node)
+# psql one-shot from a throwaway in-cluster pod (image already on the node).
+# No --rm/-i attach (its attach race reports "terminated (Error)" and eats
+# the psql error): create, wait, read logs, delete.
 CLIENT() {
-  $K run pgclient-$$-$1 --image=ks-pg-compute:8464 --image-pull-policy=Never \
-    --restart=Never --rm -i --quiet --command -- \
-    psql "$DSN" -tA -c "$2" 2>&1
+  P=pgclient-$$-$1
+  $K run "$P" --image=ks-pg-compute:8464 --image-pull-policy=Never \
+    --restart=Never --quiet --command -- psql "$DSN" -tA -c "$2" >/dev/null
+  $K wait --for=jsonpath='{.status.phase}'=Succeeded pod/$P --timeout=150s >/dev/null 2>&1 || true
+  OUT=$($K logs "$P" 2>&1)
+  PHASE=$($K get pod "$P" -o jsonpath='{.status.phase}' 2>/dev/null)
+  $K delete pod "$P" --ignore-not-found --wait=false >/dev/null 2>&1
+  [ "$PHASE" = "Succeeded" ] || { echo "client $1 failed ($PHASE): $OUT"; return 1; }
+  echo "$OUT"
 }
-METRIC() {
+# Aggregate a metrics.json field across ALL gateway pods (HA: the Service
+# would sample one random replica; the wake may have landed on any of them).
+# Counters (wakes_total) SUM; gauges (wake_latency_ms_last) take MAX — the
+# idle pod reports 0 and summing a gauge fabricates latency.
+METRIC() { # $1 tag  $2 field  $3 op: sum|max (default sum)
+  IPS=$($K get pods -l app=pggw -o jsonpath='{.items[*].status.podIP}')
   $K run metric-$$-$1 --image=curlimages/curl:8.11.1 --restart=Never --rm -i --quiet \
-    --command -- curl -s "http://pggw:9090/metrics.json" 2>/dev/null | grep -o "\"$2\": *[0-9.]*" | head -1 | grep -o '[0-9.]*$'
+    --command -- sh -c "t=0; for ip in $IPS; do
+        v=\$(curl -s http://\$ip:9090/metrics.json | grep -o '\"$2\": *[0-9.]*' | head -1 | grep -o '[0-9.]*\$'); v=\${v%.*};
+        if [ '${3:-sum}' = max ]; then [ \"\$v\" -gt \"\$t\" ] && t=\$v; else t=\$((t + v)); fi; done; echo \$t" 2>/dev/null
 }
-COMPUTE_PODS() { $K get pods -l app=compute --no-headers 2>/dev/null | grep -c Running || true; }
+# Count ALL compute pod objects (Terminating included): a draining pod still
+# holds the timeline, so "zero" means fully gone — that's the settled state
+# a cold wake is measured from.
+COMPUTE_PODS() { $K get pods -l app=compute --no-headers 2>/dev/null | grep -c . || true; }
 
 # 0. gateway deployed and ready
 $K rollout status deploy/pggw --timeout=120s >/dev/null || fail "gateway not ready"
@@ -53,7 +71,7 @@ T1=$(date +%s)
 [ "$(COMPUTE_PODS)" = "1" ] || fail "compute pod not running after wake"
 W1=$(METRIC w1 wakes_total || echo 0)
 [ "${W1:-0}" -gt "${W0:-0}" ] || fail "gateway wakes_total did not increase ($W0 -> $W1)"
-LAT=$(METRIC lat wake_latency_ms_last || echo '?')
+LAT=$(METRIC lat wake_latency_ms_last max || echo '?')
 ok "cold connect woke compute 0->1 and returned 3 rows in $((T1-T0))s (gateway wake latency: ${LAT}ms)"
 
 # 4. idle -> back to zero (GW_IDLE_MS=60000 in 10-gateway.yaml)
