@@ -207,6 +207,11 @@
         "prefetch={true} with instant route also disables full prefetch when instant is on a layout, not the page",
         "prefetch={true} with instant route does not include dynamic content in the prefetch when the target route has instant"
       ]
+    },
+    "test/e2e/app-dir/server-actions-redirect-middleware-rewrite/server-actions-redirect-middleware-rewrite.test.ts": {
+      "flakey": [
+        "app-dir - server-actions-redirect-middleware-rewrite.test should redirect correctly in edge runtime with middleware rewrite"
+      ]
     }
   },
   "rules": {
@@ -352,6 +357,15 @@
       "mechanism": "60s jest timeouts in createRouterAct-driven instant-route prefetch flows, alternating per attempt (run 28612654960: 'also disables full prefetch…' hung atts 1+3 at 60000ms while 'does not include dynamic content…' hung att 2 and passed elsewhere) — the runtime-prefetch family's interleaving-race signature, zero assertion diffs. NOT a Bucket-1/3/4 serving failure: the same run's server-log tails for this fixture carry no exception.",
       "evidence": "run 28612654960 (KNEXT_RUNTIME=bun, #188 round 2): FINAL failure, alternating cases across 3 attempts; run 28607626868 (first bun run): file failed 1 attempt then RECOVERED on in-run retry (2/2, shard 3) — cross-run wobble, bun-lane evidence for both.",
       "provenance": "Upstream marks the runtime-prefetch deploy family flakey wholesale (vercel/next.js@v16.2.0 test/deploy-tests-manifest.json, segment-cache/prefetch-runtime.test.ts, ~34 'runtime prefetching …' cases) — instant-route prefetch exercises exactly that client scheduling mechanism."
+    },
+    {
+      "test": "test/e2e/app-dir/server-actions-redirect-middleware-rewrite/server-actions-redirect-middleware-rewrite.test.ts",
+      "cases": [
+        "app-dir - server-actions-redirect-middleware-rewrite.test should redirect correctly in edge runtime with middleware rewrite"
+      ],
+      "mechanism": "60s jest timeout awaiting an EDGE-runtime server-action redirect through a middleware rewrite; zero assertion diffs and ZERO server-side exceptions in the surfaced server-log tails (run 28616072395). Cross-run wobble on the bun lane (fails/passes whole runs), so ledgered as flakey — but honestly noted: the hang shape overlaps the documented Bun ≤1.3.14 edge-sandbox outbound-fetch gap (next/dist/compiled/edge-runtime bundled-undici fetch never resolving; the middleware-rewrite proxy path exercises the same sandbox), which likely decides which runs lose the race. Re-examine when Bun ships the 1.4 fixes.",
+      "evidence": "run 28616072395 (KNEXT_RUNTIME=bun, #188 round 3): FINAL failure, same case 3/3 attempts at 60000ms; run 28607626868 (first bun run): FINAL failure, same case (Bucket-2 investigate list); run 28612654960 (round 2): file PASSED — cross-run wobble, bun lane only (Node lane green).",
+      "provenance": "Not in upstream's flakey ledger; bun-lane-only observation. Mechanism family: the Bun edge-sandbox outbound-fetch gap documented in PR #189 (middleware-fetches-with-any-http-method, app-static POST-fetch case) — the deterministic members of that family stay RED and unledgered; this case alone wobbles run-to-run."
     }
   ],
   "$knextExclusions": [

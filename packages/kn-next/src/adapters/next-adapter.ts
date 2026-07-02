@@ -142,6 +142,15 @@ const adapter: NextAdapter = {
             console.log(
                 `[knext-adapter] bun-exports heal: ${healed.copied.length} copied, ${healed.skipped.length} skipped`,
             );
+        } else {
+            // #188 round 3 (run 28616072395): at next@16.2.0 onBuildComplete
+            // fires BEFORE the standalone tree is emitted, so this branch is
+            // the NORMAL path — say so loudly. The reliable heal happens
+            // post-build in scripts/e2e-deploy.sh (and any deploy pipeline
+            // that assembles the standalone output).
+            console.log(
+                `[knext-adapter] bun-exports heal skipped: no standalone dir at ${standaloneDir} yet (onBuildComplete precedes standalone emit at next 16.2) — heal must run post-build`,
+            );
         }
     },
 };

@@ -108,6 +108,20 @@ describe("e2e-deploy.sh — bun-lane keep-alive guard wiring (#188 bucket 1 fix)
             /if \[ "\$\{RUNTIME\}" = "bun" \];[\s\S]{0,900}NEXT_PRIVATE_DEBUG_CACHE=1/,
         );
     });
+
+    it("heals bun-condition export targets AFTER the build, inside a bun-only branch (#188 round 3)", () => {
+        // Round-2 evidence (run 28616072395): the adapter-side heal never ran —
+        // onBuildComplete fires BEFORE next emits .next/standalone. The deploy
+        // script must invoke the heal post-build, where the tree exists.
+        expect(src).toContain("internal/standalone-bun-exports");
+        expect(src).toMatch(
+            /if \[ "\$\{RUNTIME\}" = "bun" \];[\s\S]{0,2500}healBunExportTargets/,
+        );
+        // and the heal must run BEFORE the server boot (order in the script)
+        expect(src.indexOf("healBunExportTargets")).toBeLessThan(
+            src.indexOf("SERVER_PRELOAD_ARGS="),
+        );
+    });
 });
 
 describe("harness scripts stay bash-valid (bash -n)", () => {

@@ -159,11 +159,15 @@ describe("healBunExportTargets — standalone bun-condition export heal (#188)",
 });
 
 describe("adapter wiring", () => {
-    it("next-adapter onBuildComplete invokes the heal", () => {
+    it("next-adapter onBuildComplete invokes the heal AND logs when the standalone dir is absent", () => {
         const src = readFileSync(
             resolve(import.meta.dirname, "../adapters/next-adapter.ts"),
             "utf8",
         );
         expect(src).toContain("healBunExportTargets");
+        // Round-3 evidence (run 28616072395): onBuildComplete fires BEFORE
+        // next emits .next/standalone, so the adapter-side heal silently
+        // no-oped. It must say so — silence cost a CI round.
+        expect(src).toContain("bun-exports heal skipped");
     });
 });

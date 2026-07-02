@@ -90,6 +90,10 @@ describe("PK1: @knext/core publish surface", () => {
             "./internal/cli-shared",
             // #188 — Bun ≤1.3.x keep-alive mitigation preload (bun lane only)
             "./internal/bun-keepalive-guard",
+            // #188 round 3 — bun-condition export heal, invoked by
+            // e2e-deploy.sh POST-build (onBuildComplete fires before
+            // .next/standalone exists — run 28616072395 evidence)
+            "./internal/standalone-bun-exports",
         ]) {
             expect(exp, `exports must declare ${subpath}`).toHaveProperty(
                 subpath,

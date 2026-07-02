@@ -441,6 +441,18 @@ const OBSERVED_FLAKY_QUARANTINES: Record<string, { cases: string[]; observedRuns
     ],
     observedRuns: ['28612654960', '28607626868'],
   },
+  // #188 round 3 (bun lane): failed run 28607626868, PASSED run 28612654960,
+  // failed run 28616072395 (3/3, 60s, zero server-side exceptions) — cross-run
+  // wobble. Mechanism overlaps the documented Bun edge-sandbox outbound-fetch
+  // gap (the middleware-rewrite proxy path); the deterministic members of that
+  // family stay RED and unledgered.
+  'test/e2e/app-dir/server-actions-redirect-middleware-rewrite/server-actions-redirect-middleware-rewrite.test.ts':
+    {
+      cases: [
+        'app-dir - server-actions-redirect-middleware-rewrite.test should redirect correctly in edge runtime with middleware rewrite',
+      ],
+      observedRuns: ['28616072395', '28607626868'],
+    },
 };
 
 describe('test/deploy-tests-manifest.knext.json — knext-observed flaky quarantines (#147 A3-3 final mile)', () => {
@@ -476,10 +488,15 @@ describe('test/deploy-tests-manifest.knext.json — knext-observed flaky quarant
         (ledger?.mechanism ?? '').length,
         `${file}: mechanism must be documented`,
       ).toBeGreaterThan(0);
-      // Provenance: upstream itself quarantines the runtime-prefetch family.
+      // Provenance: either upstream itself quarantines the family
+      // (runtime-prefetch), or — #188 round 3 — the entry explicitly declares
+      // the documented bun-lane mechanism class (the edge-sandbox
+      // outbound-fetch gap, PR #189) instead of borrowing upstream cover.
+      // Anything else is an undocumented quarantine and must fail here.
       expect(
-        /prefetch-runtime/.test(ledger?.provenance ?? ''),
-        `${file}: provenance must reference upstream's own runtime-prefetch flakey quarantine`,
+        /prefetch-runtime/.test(ledger?.provenance ?? '') ||
+          /edge-sandbox outbound-fetch gap/.test(ledger?.provenance ?? ''),
+        `${file}: provenance must reference upstream's runtime-prefetch quarantine or the documented bun edge-sandbox mechanism`,
       ).toBe(true);
     }
   });
