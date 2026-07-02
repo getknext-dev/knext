@@ -1,14 +1,12 @@
 {
     "spec": {
         "format_version": 1.0,
-
         "timestamp": "2022-10-12T18:00:00.000Z",
         "operation_uuid": "0f657b36-4b0f-4a2d-9c2e-1dcd615e7d8c",
         "suspend_timeout_seconds": -1,
-
         "cluster": {
-            "cluster_id": "docker_compose",
-            "name": "docker_compose_test",
+            "cluster_id": "ks-pg",
+            "name": "ks-pg",
             "state": "restarted",
             "roles": [
                 {
@@ -17,8 +15,7 @@
                     "options": null
                 }
             ],
-            "databases": [
-            ],
+            "databases": [],
             "settings": [
                 {
                     "name": "fsync",
@@ -47,7 +44,7 @@
                 },
                 {
                     "name": "shared_buffers",
-                    "value": "1MB",
+                    "value": "256MB",
                     "vartype": "string"
                 },
                 {
@@ -134,12 +131,25 @@
                     "name": "cron.database",
                     "value": "postgres",
                     "vartype": "string"
+                },
+                {
+                    "name": "work_mem",
+                    "value": "8MB",
+                    "vartype": "string"
+                },
+                {
+                    "name": "maintenance_work_mem",
+                    "value": "64MB",
+                    "vartype": "string"
+                },
+                {
+                    "name": "effective_cache_size",
+                    "value": "512MB",
+                    "vartype": "string"
                 }
             ]
         },
-
-        "delta_operations": [
-        ]
+        "delta_operations": []
     },
     "compute_ctl_config": {
         "jwks": {
