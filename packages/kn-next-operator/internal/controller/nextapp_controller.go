@@ -79,6 +79,11 @@ const (
 	// ReasonCleanupFailed marks a best-effort external cleanup (object-store /
 	// Redis) that failed during finalization but did not block CR deletion.
 	ReasonCleanupFailed = "CleanupFailed"
+	// ReasonEnvVarIgnored marks a spec.env entry dropped because its name is
+	// already claimed by operator-managed system env or spec.secrets.envMap
+	// (#186). Warning, not error: the reconcile proceeds, but the user must be
+	// able to see via `kubectl describe nextapp` why their flag didn't land.
+	ReasonEnvVarIgnored = "EnvVarIgnored"
 )
 
 // NextAppReconciler reconciles a NextApp object
@@ -448,23 +453,38 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 		// spec.env (#186): plain NON-SECRET name/value config flags. Appended
 		// LAST and de-duplicated so it can never override operator-injected
 		// system env (HOSTNAME/NODE_ENV/... — the #178/#184 hazard) or a
-		// Secret-backed envMap entry; colliding names are dropped. Reserved
-		// names (HOSTNAME, PORT, K_*) are additionally rejected at admission
-		// by CRD CEL validation. Sorted for deterministic reconcile output.
+		// Secret-backed envMap entry; a colliding name is dropped WITH a
+		// Warning event naming the authoritative source (never silently).
+		// Reserved names (HOSTNAME, PORT, K_*) are additionally rejected at
+		// admission by CRD CEL validation. Sorted for deterministic reconcile
+		// output. NOTE: secrets.envFrom collisions cannot be detected here —
+		// the referenced Secrets' keys are invisible at reconcile time and
+		// kubelet applies envFrom BEFORE env, so a spec.env name matching a
+		// key inside an envFrom Secret shadows it at runtime (documented user
+		// responsibility, docs/operator/crd-nextapp.md).
 		if len(nextApp.Spec.Env) > 0 {
-			taken := make(map[string]struct{}, len(envVars))
+			// name → authoritative source, for the Warning message. Entries
+			// with ValueFrom are the spec.secrets.envMap Secret mappings; all
+			// plain-Value entries before this point are operator-managed.
+			taken := make(map[string]string, len(envVars))
 			for _, ev := range envVars {
-				taken[ev.Name] = struct{}{}
+				if ev.ValueFrom != nil {
+					taken[ev.Name] = "spec.secrets.envMap"
+				} else {
+					taken[ev.Name] = "operator-managed system env"
+				}
 			}
 			names := make([]string, 0, len(nextApp.Spec.Env))
 			for name := range nextApp.Spec.Env {
-				if _, exists := taken[name]; exists {
-					continue
-				}
 				names = append(names, name)
 			}
 			sort.Strings(names)
 			for _, name := range names {
+				if source, exists := taken[name]; exists {
+					r.emitEvent(&nextApp, corev1.EventTypeWarning, ReasonEnvVarIgnored,
+						fmt.Sprintf("spec.env[%s] ignored: name is reserved/managed by %s", name, source))
+					continue
+				}
 				envVars = append(envVars, corev1.EnvVar{Name: name, Value: nextApp.Spec.Env[name]})
 			}
 		}

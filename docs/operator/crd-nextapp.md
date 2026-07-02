@@ -75,8 +75,15 @@ Rules:
 - The reserved names `HOSTNAME`, `PORT`, `K_SERVICE`, `K_REVISION`, and
   `K_CONFIGURATION` are rejected when you apply the resource — they are managed
   by the platform, and overriding them would break request routing.
-- On a name collision, platform-managed variables and `secrets` mappings always
-  win over `env`.
+- If an `env` name collides with a platform-managed variable or with a
+  `secrets.envMap` mapping, the `env` entry is ignored and a Warning event is
+  recorded on the resource (visible in `kubectl describe nextapp <name>`)
+  explaining which side won.
+- **`secrets.envFrom` is different**: it injects every key of a Secret, and the
+  platform cannot see those keys when it builds the container. If an `env` name
+  matches a key inside an `envFrom` Secret, the `env` value **wins at runtime**
+  (Kubernetes applies `envFrom` first, then explicit variables on top). Keeping
+  `env` names and `envFrom` Secret keys disjoint is your responsibility.
 
 ### `secrets` (Optional)
 Maps Kubernetes `Secret` resources directly into the Next.js environment variables.
