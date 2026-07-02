@@ -266,7 +266,27 @@ func (g *Gateway) handshakeUntilReady(conn net.Conn, startupPacket []byte, targe
 		typ, raw, err := proto.ReadBackendMessage(conn)
 		_ = conn.SetReadDeadline(time.Time{})
 		if err != nil {
-			// No parseable first reply: hand whatever arrived to the pipe.
+			if ne, ok := err.(net.Error); ok && ne.Timeout() && len(raw) > 0 {
+				// Slow but alive: hand what arrived to the pipe.
+				return conn, raw, nil
+			}
+			if len(raw) == 0 {
+				// EOF / reset with nothing read: a dying (Terminating) or
+				// restarting backend. Retry like a starting-up backend.
+				_ = conn.Close()
+				if time.Now().After(deadline) {
+					return nil, nil, errors.New("backend kept dropping the handshake past the wake deadline")
+				}
+				time.Sleep(retry)
+				next, _, _, cerr := wake.ConnectWithWake(context.Background(), g.driver, target, g.opts, nil)
+				if cerr != nil {
+					return nil, nil, cerr
+				}
+				conn = next
+				continue
+			}
+			// Partial reply then error: forward what we have; the pipe's
+			// close handling reports the rest.
 			return conn, raw, nil
 		}
 		if typ != 'E' || proto.ErrorCode(raw) != "57P03" {
@@ -349,11 +369,33 @@ func (g *Gateway) scheduleSleep(e *activeEntry, target wake.Target) {
 			}
 		}
 
+		// Final local re-check right before the (slow) scale API call — the
+		// peer check above took time.
+		g.mu.Lock()
+		if e.count > 0 || g.closed {
+			g.mu.Unlock()
+			return
+		}
+		g.mu.Unlock()
+
 		if err := g.driver.Sleep(context.Background(), target); err != nil {
 			g.log("[gw] " + target.Key + ": sleep failed: " + err.Error())
 			return
 		}
 		g.metrics.Sleep()
 		g.log("[gw] " + target.Key + ": idle " + strconv.Itoa(g.idleMs) + "ms -> scaled to zero")
+
+		// TOCTOU heal: a connection may have arrived while Sleep was in
+		// flight. If so, wake the compute right back — the arriving client is
+		// held by its own wake retry loop and recovers seamlessly.
+		g.mu.Lock()
+		arrived := e.count > 0 && !g.closed
+		g.mu.Unlock()
+		if arrived {
+			g.log("[gw] " + target.Key + ": connection arrived during scale-down, waking back")
+			if err := g.driver.Wake(context.Background(), target); err != nil {
+				g.log("[gw] " + target.Key + ": wake-back failed: " + err.Error())
+			}
+		}
 	})
 }
