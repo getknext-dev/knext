@@ -264,8 +264,35 @@ export NEXT_DEPLOYMENT_ID="${DEPLOYMENT_ID}"
 # stdout stays the single URL line. set -o pipefail (top of file) still fails
 # the script when `next build` fails.
 BUILD_LOG="${APP_DIR}/.adapter-next-build.log"
+
+# ── B2 (#173, round 3): enable Node-native TS resolution for next.config.ts/.mts.
+# The 18 `next-config-ts-native-ts`/`-native-mts` failures were NOT adapter
+# packaging (the @knext/core adapter dist is require()-safe — gated by
+# packages/kn-next/src/__tests__/adapter-require-safe.test.ts): every fixture in
+# those families carries a DELIBERATE top-level await in its own next.config.ts,
+# and without native TS resolution `next build` falls back to the legacy
+# swc-transpile path, which requireFromString()s the config → Node throws
+# `require() cannot be used on an ESM graph with top-level await`
+# (ERR_REQUIRE_ASYNC_MODULE) before anything is built. Upstream CI runs those
+# families in dedicated jobs with __NEXT_NODE_NATIVE_TS_LOADER_ENABLED=true
+# exported (next.js build_and_test.yml, test-next-config-ts-native-ts-*); knext's
+# aggregate run has no per-family env, so enable it here via the public CLI flag
+# whenever the fixture's config is TS. Safe for legacy TS-config fixtures: when
+# native import() can't load the config (tsconfig paths aliases, extensionless
+# imports, JSON without attributes) Next warns and falls back to legacy
+# resolution in the same call — verified against next@16.2.0
+# dist/build/next-config-ts/transpile-config.js and reproduced with the
+# import-alias-paths-only fixture (builds green either way).
+NEXT_BUILD_ARGS=""
+if [ -f "${APP_DIR}/next.config.ts" ] || [ -f "${APP_DIR}/next.config.mts" ]; then
+  NEXT_BUILD_ARGS="--experimental-next-config-strip-types"
+  log "next.config.(m)ts detected — passing ${NEXT_BUILD_ARGS} (B2 #173: native TS resolution; TLA-in-config fixtures cannot load via the legacy require path)"
+fi
+
 log "running next build (output:'standalone') via ${NEXT_BIN} (deployment=${DEPLOYMENT_ID}, build log → ${BUILD_LOG})"
-"${NEXT_BIN}" build 2>&1 | tee "${BUILD_LOG}" >&2
+# NEXT_BUILD_ARGS is deliberately unquoted: empty ⇒ no extra argv entry.
+# shellcheck disable=SC2086
+"${NEXT_BIN}" build ${NEXT_BUILD_ARGS} 2>&1 | tee "${BUILD_LOG}" >&2
 
 # ── 3. locate + stage the standalone server tree ──────────────────────────────
 # output:'standalone' emits server.js under .next/standalone (monorepo fixtures may
@@ -298,6 +325,22 @@ case "${RUNTIME}" in
   *)   SERVER_CMD="node" ;;
 esac
 
+# ── B7a (#174, triage of run 28564443662): HOSTNAME must be explicitly EMPTIED,
+# never pinned to 127.0.0.1. In next@16.2.0's standalone server the
+# middleware-visible request origin is ALWAYS http://localhost:<port> (verified
+# via the x-middleware-rewrite response header on the rebuilt upstream
+# middleware-custom-matchers fixture), while the router's initUrl uses the
+# configured hostname VERBATIM (server/lib/router-utils/resolve-routes.js:116).
+# With HOSTNAME=127.0.0.1, getRelativeURL(rewrite, initUrl) saw
+# localhost !== 127.0.0.1, so every SAME-ORIGIN middleware rewrite
+# (NextResponse.rewrite(new URL('/', request.url))) was misclassified as an
+# EXTERNAL rewrite and proxied back to the server itself — 500s locally,
+# proxy-loop timeouts in CI, exactly the 6 middleware-custom-matchers failures.
+# HOSTNAME= (empty) → server.js falls back to 0.0.0.0 and Next normalizes the
+# origin to localhost on BOTH sides → rewrites relativize to '/' and stay
+# internal. Explicit (not merely dropped) because Docker/CI images export
+# HOSTNAME=<container-id>, which would reintroduce the mismatch.
+#
 # #175 (B7b): boot with the deployed-platform Cache-Control preload (`-r` is
 # the require/preload flag on BOTH node and bun). Next's origin emits
 # shared-cache directives (s-maxage / the fallback-shell private value) meant
@@ -313,10 +356,10 @@ esac
 # single-replica knext shape, and the header diffs were serving-layer
 # semantics, not cache-handler state (the Redis cacheHandler stays the
 # multi-pod production option).
-log "booting (${RUNTIME}) ${SERVER_JS} on 127.0.0.1:${PORT} (preload ${KNEXT_CC_PRELOAD})"
+log "booting (${RUNTIME}) ${SERVER_JS} on 0.0.0.0:${PORT} (HOSTNAME emptied — see B7a note; preload ${KNEXT_CC_PRELOAD})"
 (
   cd "${STANDALONE_APP_DIR}"
-  PORT="${PORT}" HOSTNAME="127.0.0.1" NODE_ENV="production" \
+  PORT="${PORT}" HOSTNAME="" NODE_ENV="production" \
     NEXT_DEPLOYMENT_ID="${DEPLOYMENT_ID}" \
     exec "${SERVER_CMD}" -r "${KNEXT_CC_PRELOAD}" "${SERVER_JS}"
 ) >"${SERVER_LOG}" 2>&1 &
