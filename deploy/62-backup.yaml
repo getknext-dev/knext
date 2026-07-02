@@ -224,10 +224,12 @@ spec:
                 - { name: dump, mountPath: /dump }
               resources:
                 # mc mirror buffers many parallel object transfers at high
-                # throughput; 256Mi OOMKills mid-copy. 512Mi holds a multi-GB
-                # bucket mirror comfortably.
+                # throughput; on a large (multi-GB, 256MB-layer) bucket 512Mi
+                # OOMKills the client mid-copy (observed at ~18GB). 1Gi holds a
+                # real production-size mirror — the backup client must survive its
+                # own traffic, same lesson as the 512Mi minio bump.
                 requests: { cpu: 50m, memory: 128Mi }
-                limits: { memory: 512Mi }
+                limits: { memory: 1Gi }
           volumes:
             - name: dump
               emptyDir: {}
