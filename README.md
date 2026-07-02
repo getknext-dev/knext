@@ -78,20 +78,29 @@ the gateway's `GW_IDLE_MS`, or pooled keepalives block scale-to-zero.
 | Check | Result |
 |---|---|
 | Data survives compute pod kill (no volume, no restore) | ✅ 3/3 rows |
-| Kill-to-first-query (pod recreate in place) | 1–2s |
-| Cold wake 0→1 through gateway (schedule + init + attach) | 5.2s |
-| Idle 60s → compute reaches zero | ✅ |
-| Reconnect after zero re-wakes, data intact | ✅ |
+| Cold wake 0→1 through gateway | **2.4–2.5s** (was 5.2s; CoreDNS negative-cache fix) |
+| Neon's own share of that (attach + basebackup) | 123–160ms |
+| Idle 60s → compute reaches zero | ✅ (fleet-wide, peer-aware) |
+| Reconnect after zero re-wakes, data intact | ✅ 3/3 consecutive runs |
+| Writes with one safekeeper down (2/3 quorum) | ✅ member rejoins cleanly |
+| Held connection across idle window, 2 gateways | ✅ no split-brain sleep |
+| Gateway pod killed mid-flight | ✅ fresh connections served (no SPOF) |
+| Client sees "database system is starting up" | Never — gateway absorbs 57P03 and retries |
 
-Wake-latency budget & tuning: the 5.2s is dominated by pod scheduling, the wait-timeline
-init container (2s poll), and the 1s readiness probe — not by Neon (compute attach is
-sub-second). Tighten probes/init or pre-pull images to shrink it.
+Remaining wake budget is k8s pod mechanics (~2s kubelet sandbox + container starts).
+Sub-second requires a warm-standby compute pool (attach-on-wake, as Neon's cloud does) —
+tracked in TASKS.md.
 
 ## Operations notes
 
 - **Storage plane must never scale to zero** — it *is* the database.
-- MVP ships 1 safekeeper / 1 pageserver; production = 3 safekeepers across failure domains.
-- Gateway is stateless — scale it horizontally (`replicas: 2+`) for no-SPOF.
+- Ships **3 safekeepers** (2/3 write quorum, drill-verified) / 1 pageserver; production adds
+  failure-domain spreading + a secondary pageserver (Neon shard-split is the growth lever —
+  see `docs/adr-0001-timescale-and-sharding.md`).
+- Gateway runs **2 replicas** with peer-aware idle: a gateway only sleeps the compute when
+  the *fleet-wide* connection count is zero (RBAC: pods get/list).
+- Time-series apps: `CREATE EXTENSION timescaledb` works today (hypertables, Apache-2 tier);
+  compression/continuous aggregates do not — rationale in ADR-0001.
 - `deploy/40-keda-scaledobject.yaml.optional` swaps gateway-driven sleep for KEDA if you
   want fleet-wide policies.
 - Rotate the dev password by changing `roles[].encrypted_password`

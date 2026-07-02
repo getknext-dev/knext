@@ -23,3 +23,17 @@
 - [ ] Harden: 3 safekeepers, secondary pageserver, PVC sizing, TLS in front of gateway.
 - [ ] Un-park SCS: `template` wake mode + per-system compute Deployments + provisioning API.
 - [ ] Scale validation: concurrent cold starts, tenant density, gateway HA, idle-detection audit.
+
+## Phase 2 — maturity & reliability (done 2026-07-02)
+- [x] Cold wake 5.2s -> 2.4s (CoreDNS negative-cache root cause; ClusterIP + publishNotReadyAddresses).
+- [x] 3-safekeeper WAL quorum; drill: writes survive one member down, member rejoins.
+- [x] Gateway x2, peer-aware idle (no split-brain), no-SPOF drill green (_verify-ha.sh).
+- [x] 57P03 starting-up FATALs absorbed by gateway handshake retry (was an intermittent client error).
+- [x] ADR-0001: TimescaleDB = Apache-2 add-on only (hypertables); sharding = tenant-per-app + Neon shard-split + pg_partman; Citus rejected.
+
+## Phase 3 — next
+- [ ] Warm-standby compute pool for sub-second wake (attach-on-wake).
+- [ ] Secondary pageserver + Neon shard-split exercised; failure-domain spreading.
+- [ ] TLS in front of the gateway; real secret management (rotate cloud_admin).
+- [ ] Un-park SCS: template wake mode + per-system computes + provisioning API.
+- [ ] Load tests: concurrent cold starts p99, tenant density, idle-detection audit.
