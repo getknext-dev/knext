@@ -119,7 +119,32 @@ tracked in TASKS.md.
   (md5 of `password+username`) in `deploy/54-compute-files.yaml` — `compute_ctl`
   re-applies spec roles on every boot, so `ALTER USER` alone won't stick.
 
+## Built on Neon's open source — attribution
+
+This platform's storage and compute planes are **[Neon](https://github.com/neondatabase/neon)**
+(Apache-2.0) — reused, not forked. Specifically:
+
+- **Storage plane**: Neon's `safekeeper`, `pageserver`, and `storage_broker`
+  binaries, run unmodified from the official image
+  [`neondatabase/neon`](https://hub.docker.com/r/neondatabase/neon) (tag 8464).
+- **Compute**: Neon's Postgres build with the `neon` extension and `compute_ctl`,
+  unmodified from [`neondatabase/compute-node-v17`](https://hub.docker.com/r/neondatabase/compute-node-v17).
+- **Derived configuration**: our compute entrypoint and spec template
+  (`deploy/compute-files/`) are adapted from Neon's
+  [docker-compose reference](https://github.com/neondatabase/neon/tree/main/docker-compose).
+
+Everything durable in this system — WAL quorum, page storage, lazy attach,
+branching/PITR mechanics — is Neon's engineering. What this repo adds is the
+Kubernetes glue: the wake-on-connect gateway, scale-to-zero lifecycle, drills,
+and knext integration.
+
+Other open source in the data path: [MinIO](https://github.com/minio/minio)
+(object storage), [Prometheus](https://github.com/prometheus/prometheus) +
+[Alertmanager](https://github.com/prometheus/alertmanager) (observability),
+and [CloudNativePG](https://github.com/cloudnative-pg/cloudnative-pg) (the
+bake-off alternative, `bakeoff/`).
+
 ## License note
 
-Neon storage + compute are Apache-2.0. Re-confirm the license on the exact
-components/versions you deploy.
+Neon storage + compute are Apache-2.0 (license retained in their images).
+Re-confirm the license on the exact components/versions you deploy.
