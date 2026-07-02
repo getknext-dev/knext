@@ -92,6 +92,11 @@ spec:
             requests: { cpu: 50m, memory: 32Mi }
             limits: { memory: 128Mi }
 ---
+# Internal service: the stable in-cluster name every consumer uses —
+# knext apps (DATABASE_URL -> pggw.scale-zero-pg.svc:55432), peer gateways and
+# Prometheus scraping metrics (pggw:9090), and deploy/_metrics.sh. ClusterIP on
+# purpose: metrics (9090) are reachable in-cluster but NEVER via an external
+# LoadBalancer (system-design-review finding #4 — metrics must not leak).
 apiVersion: v1
 kind: Service
 metadata:
@@ -99,8 +104,23 @@ metadata:
   namespace: scale-zero-pg
   labels: { app: pggw }
 spec:
-  type: LoadBalancer # OrbStack exposes this on localhost; use ClusterIP in prod
+  type: ClusterIP
   selector: { app: pggw }
   ports:
     - { name: pg, port: 55432, targetPort: pg }
     - { name: metrics, port: 9090, targetPort: metrics }
+---
+# External front door: exposes ONLY the Postgres wire port. 9090 is deliberately
+# absent so metrics cannot be reached from outside the cluster. OrbStack surfaces
+# this on localhost; in a real cluster front it with TLS termination.
+apiVersion: v1
+kind: Service
+metadata:
+  name: pggw-lb
+  namespace: scale-zero-pg
+  labels: { app: pggw }
+spec:
+  type: LoadBalancer
+  selector: { app: pggw }
+  ports:
+    - { name: pg, port: 55432, targetPort: pg }
