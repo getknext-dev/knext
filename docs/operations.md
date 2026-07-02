@@ -88,6 +88,11 @@ bucket copy**.
   in an initContainer on a pinned kubectl image under a **scoped ServiceAccount**
   (`backup-operator`: `get`/`list` on configmaps+secrets in `scale-zero-pg` only).
 - **On demand:** `kubectl -n scale-zero-pg create job backup-now --from=cronjob/backup`.
+- **Proven envelope:** the in-cluster path is verified green at **~18 GB** bucket
+  size with the shipped sizing (minio 512Mi, mc client 1Gi) — and the retry loop
+  has live evidence (a mid-run backup-store flap converged on retry). For growth
+  beyond that, point the mirror at off-cluster S3 (below) rather than scaling
+  the in-cluster store further.
 
 ### The honesty rule (critical)
 
