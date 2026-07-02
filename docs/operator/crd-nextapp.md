@@ -19,6 +19,15 @@ spec:
   image: ghcr.io/org/repo/app:latest
 ```
 
+### `runtime` (Optional)
+Selects the process that executes the standalone server: `"node"` (default) or `"bun"`.
+```yaml
+spec:
+  runtime: "bun"
+```
+
+> **Warning — runtime flips and bytecode-built images:** an image built by `kn-next build` with `runtime: bun` has its server-side JavaScript precompiled to Bun bytecode and **only boots under Bun**. Setting this field to `node` for such an image makes the pod exit immediately with a `FATAL` message (a deliberate loud failure instead of a silent crash-loop) — switching a bytecode-built app back to Node requires **rebuilding the image** with `runtime: node` (or `KNEXT_BUN_BYTECODE=0`). Images built for `node` run under either runtime.
+
 ### `scaling` (Optional)
 Controls the autoscaling behavior of the underlying Knative Service.
 ```yaml

@@ -89,6 +89,11 @@ type NextAppSpec struct {
 	// Runtime selects the process that executes the Next.js standalone server.js.
 	// Valid values: "bun" or "node" (default "node").
 	// Maps from KnativeNextConfig.runtime.
+	// NOTE: images built by `kn-next build` with runtime "bun" have their
+	// server-side JS precompiled to Bun bytecode and only boot under Bun —
+	// flipping this field to "node" for such an image requires REBUILDING the
+	// image (the entry exits 1 with a FATAL message under Node rather than
+	// crash-looping silently). Images built for "node" run under either runtime.
 	// +optional
 	// +kubebuilder:validation:Enum=bun;node
 	Runtime string `json:"runtime,omitempty"`

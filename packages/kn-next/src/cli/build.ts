@@ -72,9 +72,11 @@ export async function build(options: BuildOptions = {}) {
     //     this tree verbatim). UNCONDITIONAL by design (not gated on
     //     config.runtime): the heal is additive-only, version-checked, and never
     //     throws — on Node it costs a few small file copies and changes nothing
-    //     at runtime — while the runtime is a deploy/serve-time knob (the same
-    //     image may later be booted under Bun), so gating here would leave the
-    //     latent 500 for exactly the users who flip runtimes after building.
+    //     at runtime. Contrast with step 2c below: node→bun flips DO happen
+    //     without a rebuild, and the heal keeps them safe for free — whereas
+    //     the bytecode pass is the one build step that deliberately ENDS
+    //     flippability (bun→node then needs a rebuild), which is why 2c is
+    //     opt-in via config.runtime and guards the entry loudly.
     const standaloneDir = join(process.cwd(), ".next", "standalone");
     if (existsSync(standaloneDir)) {
         const healed = healBunExportTargets({
@@ -98,12 +100,17 @@ export async function build(options: BuildOptions = {}) {
     //     individually (`--external '*'` keeps the require graph untouched)
     //     with a companion .jsc that Bun's runtime consumes on require() —
     //     measured -47% startup on a real next@16.2.4 standalone tree.
-    //     GATED on config.runtime === "bun", unlike the additive heal above:
-    //     the transformed files are Bun-only (they do not load under Node),
-    //     so flipping the runtime to node after this build requires a rebuild.
+    //     GATED on config.runtime === "bun", the inverse of the heal's
+    //     unconditionality: this pass ENDS runtime flippability (transformed
+    //     files are Bun-only and do not load under Node), so it must be an
+    //     explicit build-time commitment — and the pass injects a fail-fast
+    //     guard into the untransformed entry server.js so `node server.js` on
+    //     a bytecode-built image exits 1 with a FATAL message instead of
+    //     CrashLooping silently. Flipping back to node requires a rebuild.
     //     Opt out with KNEXT_BUN_BYTECODE=0. Fail-open: per-file failures skip
     //     that file; a failed capability probe (Bun <1.1.30, no bun binary)
-    //     disables the pass; never throws.
+    //     disables the pass; never throws. Cost: one bun-build spawn per file
+    //     (~12s for a ~970-file tree), paid on every runtime=bun build.
     if (
         (config.runtime ?? "node") === "bun" &&
         process.env.KNEXT_BUN_BYTECODE !== "0" &&
@@ -111,12 +118,20 @@ export async function build(options: BuildOptions = {}) {
     ) {
         const pass = precompileBunBytecode({
             standaloneDir,
-            log: (message) => log.warn(message),
+            log: (message) => log.debug(message),
         });
+        if (pass.skipped.length > 0) {
+            // full per-file reasons at debug so a noisy tree doesn't flood builds
+            log.debug(
+                { skipped: pass.skipped },
+                "Bun bytecode per-file skip reasons",
+            );
+        }
         log.info(
             {
                 compiled: pass.compiled,
                 skipped: pass.skipped.length,
+                guarded: pass.guarded.length,
                 ...(pass.disabled ? { disabled: pass.disabled } : {}),
             },
             "Bun bytecode precompilation (standalone output)",

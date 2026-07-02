@@ -20,19 +20,30 @@
  * spawn → first dynamic-route response): 287ms plain → 152ms with the pass
  * (-47%); the runtime transpiler cache composes on top (145ms warm).
  *
- * HARD CONSTRAINT — BUN-ONLY OUTPUT: the transformed file is a pragma'd CJS
- * wrapper that DOES NOT LOAD UNDER NODE (the wrapper is an expression
- * statement; module.exports is never assigned — a transformed tree never
- * boots under `node server.js`, verified). Callers MUST gate this pass on
- * an explicit bun runtime choice; it is deliberately NOT unconditional like
- * the additive bun-exports heal.
+ * HARD CONSTRAINT — BUN-ONLY OUTPUT, MADE LOUD: a transformed file is a
+ * pragma'd CJS wrapper that DOES NOT LOAD UNDER NODE — and it fails
+ * SILENTLY there (the wrapper is an expression statement; module.exports is
+ * never assigned, so Node "runs" it to empty exports and exits — a mute
+ * CrashLoop in a pod). Two defenses:
+ *   1. ENTRY FILES (server.js with a sibling .next dir) are NEVER
+ *      transformed — their own bytecode win is negligible (~3KB of source);
+ *   2. after a successful pass, each entry gets a fail-fast guard prepended
+ *      so `node server.js` on a bytecode-built image exits 1 with a FATAL
+ *      message naming the fix (boot with bun, or rebuild with
+ *      runtime: node / KNEXT_BUN_BYTECODE=0).
+ * Callers still gate the pass on an explicit bun runtime choice — flipping
+ * a bytecode-built image back to the Node runtime requires a rebuild.
  *
  * COSTS (documented, not hidden): .jsc roughly doubles-to-triples the tree
- * (37MB → 95MB on the minimal app) and is tied to the Bun version that
- * built it — a version mismatch only forfeits the win (source fallback).
+ * (37MB → 95MB on the minimal app); the pass spawns one `bun build` per
+ * file — measured ~11-14s for the 969-file minimal-app tree (Bun 1.3.5,
+ * M-series laptop; a single multi-entry invocation crashes Bun 1.3.5, hence
+ * per-file spawns). Bytecode is tied to the Bun version that built it — a
+ * version mismatch only forfeits the win (source fallback).
  *
- * FAIL-OPEN: any per-file failure leaves that file byte-identical; a failed
- * capability probe (old Bun, missing binary) disables the whole pass; this
+ * FAIL-OPEN: any per-file failure leaves that file byte-identical (reason
+ * reported in `skipped`); a failed capability probe (old Bun, missing
+ * binary) disables the whole pass; temp dirs are always cleaned up; this
  * function never throws.
  */
 
@@ -40,19 +51,23 @@ import { spawnSync } from "node:child_process";
 import {
     copyFileSync,
     existsSync,
+    lstatSync,
     mkdtempSync,
     readdirSync,
-    statSync,
+    readFileSync,
+    rmSync,
     writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, join, sep } from "node:path";
+import { basename, dirname, join, sep } from "node:path";
 
 export interface BytecodePassResult {
     /** files transformed in place (companion .jsc written) */
     compiled: number;
     /** human-readable reasons for per-file skips (fail-open) */
     skipped: string[];
+    /** entry files that received the fail-fast Node guard */
+    guarded: string[];
     /** set when the whole pass was disabled (probe failed / no bun binary) */
     disabled?: string;
 }
@@ -64,24 +79,53 @@ export interface BytecodePassOptions {
     log?: (message: string) => void;
 }
 
+const GUARD_MARKER = "// knext: bun-only build guard";
+const ENTRY_GUARD = `${GUARD_MARKER} (injected by kn-next build)
+if (!process.versions.bun) {
+    console.error(
+        "FATAL: this build was bytecode-compiled for Bun (spec.runtime: bun). " +
+            "Boot with bun, or rebuild with runtime: node / KNEXT_BUN_BYTECODE=0.",
+    );
+    process.exit(1);
+}
+`;
+
 /** `.next/static` is served verbatim to browsers — never transform it. */
 function isStaticAsset(path: string): boolean {
     return path.includes(`${sep}.next${sep}static${sep}`);
 }
 
-function* walkJsFiles(dir: string): Generator<string> {
+/**
+ * A standalone ENTRY (`server.js` beside a `.next` dir — the file
+ * STANDALONE_SERVER_PATH points at, incl. monorepo subpaths). Entries are
+ * never transformed and receive the fail-fast Node guard instead.
+ */
+function isStandaloneEntry(path: string): boolean {
+    return (
+        basename(path) === "server.js" &&
+        existsSync(join(dirname(path), ".next"))
+    );
+}
+
+function* walkJsFiles(
+    dir: string,
+): Generator<{ path: string; entry: boolean }> {
     for (const name of readdirSync(dir)) {
         const path = join(dir, name);
-        let st: ReturnType<typeof statSync>;
+        let st: ReturnType<typeof lstatSync>;
         try {
-            st = statSync(path);
+            // lstat, NOT stat: transforming through a symlink would write
+            // into its target (e.g. the shared pnpm store) — skip links
+            // entirely, files and directories alike.
+            st = lstatSync(path);
         } catch {
             continue;
         }
+        if (st.isSymbolicLink()) continue;
         if (st.isDirectory()) {
             yield* walkJsFiles(path);
         } else if (name.endsWith(".js") && !isStaticAsset(path)) {
-            yield path;
+            yield { path, entry: isStandaloneEntry(path) };
         }
     }
 }
@@ -128,15 +172,26 @@ function buildOne(
  * binary — in which case the whole pass is disabled (fail-open).
  */
 function probe(bunBin: string): string | undefined {
+    let dir: string | undefined;
     try {
-        const dir = mkdtempSync(join(tmpdir(), "knext-bc-probe-"));
+        dir = mkdtempSync(join(tmpdir(), "knext-bc-probe-"));
         const src = join(dir, "probe.js");
         writeFileSync(src, "module.exports = 1;\n");
         buildOne(bunBin, src, join(dir, "out"));
         return undefined;
     } catch (err) {
         return err instanceof Error ? err.message : String(err);
+    } finally {
+        if (dir) rmSync(dir, { recursive: true, force: true });
     }
+}
+
+/** Prepend the fail-fast Node guard to an entry (idempotent). */
+function guardEntry(file: string): boolean {
+    const src = readFileSync(file, "utf8");
+    if (src.startsWith(GUARD_MARKER)) return false;
+    writeFileSync(file, ENTRY_GUARD + src);
+    return true;
 }
 
 export function precompileBunBytecode(
@@ -145,7 +200,11 @@ export function precompileBunBytecode(
     const log = options.log ?? (() => {});
     const bunBin =
         options.bunBin ?? (process.versions.bun ? process.execPath : "bun");
-    const result: BytecodePassResult = { compiled: 0, skipped: [] };
+    const result: BytecodePassResult = {
+        compiled: 0,
+        skipped: [],
+        guarded: [],
+    };
 
     try {
         if (!existsSync(options.standaloneDir)) {
@@ -158,9 +217,17 @@ export function precompileBunBytecode(
             log(result.disabled);
             return result;
         }
-        for (const file of walkJsFiles(options.standaloneDir)) {
+        const entries: string[] = [];
+        for (const { path: file, entry } of walkJsFiles(
+            options.standaloneDir,
+        )) {
+            if (entry) {
+                entries.push(file);
+                continue;
+            }
+            let outDir: string | undefined;
             try {
-                const outDir = mkdtempSync(join(tmpdir(), "knext-bc-"));
+                outDir = mkdtempSync(join(tmpdir(), "knext-bc-"));
                 const built = buildOne(bunBin, file, outDir);
                 // Replace only after BOTH artifacts exist — a failure above
                 // leaves the original byte-identical (fail-open).
@@ -168,9 +235,27 @@ export function precompileBunBytecode(
                 copyFileSync(built.jsc, `${file}.jsc`);
                 result.compiled++;
             } catch (err) {
-                result.skipped.push(
-                    `${file}: ${err instanceof Error ? err.message : String(err)}`,
-                );
+                const reason = `${file}: ${err instanceof Error ? err.message : String(err)}`;
+                result.skipped.push(reason);
+                log(`bytecode skip (fail-open): ${reason}`);
+            } finally {
+                if (outDir) rmSync(outDir, { recursive: true, force: true });
+            }
+        }
+        // The tree is now Bun-only where it matters — make `node server.js`
+        // fail LOUDLY instead of exiting mutely with empty exports. Entries
+        // stay untransformed (guard is plain JS; Bun passes straight through).
+        if (result.compiled > 0) {
+            for (const entry of entries) {
+                try {
+                    if (guardEntry(entry)) result.guarded.push(entry);
+                } catch (err) {
+                    log(
+                        `entry guard failed (non-fatal) for ${entry}: ${
+                            err instanceof Error ? err.message : String(err)
+                        }`,
+                    );
+                }
             }
         }
     } catch (err) {
