@@ -44,6 +44,20 @@ Native Postgres compute on Neon's OSS storage stack, all **on Kubernetes** (no d
                 `_validate.sh` (manifest contracts), `_verify-storage.sh` (survival test).
 - `docs/`     — knext research, recipes.
 
+## The improvement loop (GitHub-native, owner-defined)
+Repo: github.com/getknext-dev/scale-zero-pg (auto-merge + delete-branch enabled).
+1. **Plan** = GitHub issues (one per work item, acceptance criteria in the body).
+2. **Implement** on a branch per issue, TDD commits, PR references the issue
+   ("Closes #N"). User docs + BENCHMARKS.md ship in the same PR (rule 2b).
+3. **Test**: full drill battery on the OKE cluster (context context-ckmva7v7zvq,
+   ns scale-zero-pg) before requesting review.
+4. **Review** = the blind reviewer trio (system designer, DevOps/SRE, architect)
+   reviews THE PR — findings as PR review comments, scorecard (maturity / ease of
+   maintenance / production reliability, 1-10 each) in the review body; verdicts
+   approve or request changes.
+5. **Merge**: auto-merge once reviews pass; issues close; new findings become the
+   next iteration's issues. Scorecard history: docs/SCORECARD.md.
+
 ## Definition of done (MVP)
 On a local k8s cluster, with a one-table test DB:
 1. Compute at 0 → `psql` through the gateway → compute wakes → rows return. Wake time recorded.
