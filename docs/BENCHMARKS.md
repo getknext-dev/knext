@@ -10,7 +10,7 @@ k8s on an M-series laptop (decommissioned 2026-07-03); **OKE** = Oracle OKE
 
 | Metric | Local | OKE | Notes |
 |---|---|---|---|
-| Cold wake p50 (gateway-measured) | **2.43–2.63s** | **2.15–2.82s** | steady state; OKE ≈ laptop despite real cloud scheduling |
+| Cold wake (gateway-measured) | **2.43–2.63s** | **2.0–2.95s** (range, 5 runs) | steady state; real p50/p95 lands with issue #9 (n=20). OKE ≈ laptop |
 | Cold wake, first-ever boot on node | — | 38s | one-time: 1.3GB compute image pull + cold volume; not steady state |
 | Cold wake before CoreDNS fix | 5.19s | — | headless-Service NXDOMAIN negative-cache masked all pod-side gains |
 | Warm connect (compute already up) | 120–134ms | — | native Postgres latency through the pipe |
@@ -52,6 +52,10 @@ The engines were never the bottleneck — Kubernetes mechanics were, twice.
 - MinIO 512Mi + mc client 1Gi: the durability tier and its backup client must
   survive a full-bucket mirror (both OOMed at smaller sizes — observed live).
 - OCI block volumes round small PVCs up to 50GB minimum.
+- ephemeral-storage requests default to **0** when undeclared — under DiskPressure
+  the kubelet evicts such pods first (they are Burstable on cpu/mem but rank
+  worst on disk). Declared everywhere since #11/#12; `_verify-drift.sh` asserts
+  it stays live.
 
 ## Methodology notes
 

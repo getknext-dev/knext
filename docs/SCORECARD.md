@@ -28,9 +28,17 @@ was not separately scored before iteration 2 (marked —).
 | **2** | System designer | **5** | **4** | **4** |
 | **2** | DevOps/SRE | **4** | **5** | **3** |
 | **2** | Architect | **5** | **4** | **4** |
+| **3** | System designer | **6** | **7** | **6** |
+| **3** | DevOps/SRE | **6** | **7** | **5** |
+| **3** | Architect | **7** | **6** | **5** |
 
 **Iteration-1 mean (mapped axes): ease 6.0, reliability 4.7** (round 0: 4.3, 3.7).
 **Iteration-2 mean (explicit metrics): maturity 4.7, ease 4.3, reliability 3.7.**
+**Iteration-3 mean: maturity 6.3, ease 6.7, reliability 5.3** — first row rendered
+as PR reviews (getknext-dev/scale-zero-pg #10/#11); the jump credits the OKE
+migration, 11/11 battery, closed ratification debts, and the GitHub-native loop.
+Reliability stays lowest exactly where issues #2/#3/#4/#5 are open — plan and
+scores agree.
 The apparent dip is a re-basing, not a regression: iteration-2 scores judge the
 RATIFIED Neon-two-tier path against a production bar — pricing in the accepted
 obligations (backups, pageserver SPOF, warm-tier productization, version-pair

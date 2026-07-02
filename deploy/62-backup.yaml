@@ -81,10 +81,10 @@ spec:
             timeoutSeconds: 3
             failureThreshold: 6
           resources:
-            requests: { cpu: 50m, memory: 128Mi }
+            requests: { cpu: 50m, memory: 128Mi, ephemeral-storage: 100Mi }
             # Serves multi-hundred-MB layer objects during restore; 256Mi can
             # drop a large read mid-stream.
-            limits: { memory: 512Mi }
+            limits: { memory: 512Mi, ephemeral-storage: 1Gi }
       volumes:
         - name: data
           persistentVolumeClaim: { claimName: backup-store-data }
@@ -228,8 +228,8 @@ spec:
                 # OOMKills the client mid-copy (observed at ~18GB). 1Gi holds a
                 # real production-size mirror — the backup client must survive its
                 # own traffic, same lesson as the 512Mi minio bump.
-                requests: { cpu: 50m, memory: 128Mi }
-                limits: { memory: 1Gi }
+                requests: { cpu: 50m, memory: 128Mi, ephemeral-storage: 100Mi }
+                limits: { memory: 1Gi, ephemeral-storage: 1Gi }
           volumes:
             - name: dump
               emptyDir: {}
