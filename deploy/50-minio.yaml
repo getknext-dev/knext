@@ -8,12 +8,19 @@ metadata:
   labels: { app: minio, plane: storage }
 spec:
   replicas: 1
+  revisionHistoryLimit: 2 # cap ReplicaSet churn
   selector: { matchLabels: { app: minio } }
   strategy: { type: Recreate }
   template:
     metadata:
       labels: { app: minio, plane: storage }
     spec:
+      # NOTE: this MinIO image defaults to root and the existing PVC data is
+      # root-owned, so we do NOT force runAsNonRoot here (would break on the
+      # bound volume). We still harden: no privilege escalation, drop all caps,
+      # seccomp RuntimeDefault. Prod should move to real S3 / non-root MinIO.
+      securityContext:
+        seccompProfile: { type: RuntimeDefault }
       containers:
         - name: minio
           image: quay.io/minio/minio:RELEASE.2022-10-20T00-55-09Z # pinned as upstream compose
@@ -21,6 +28,9 @@ spec:
           env:
             - { name: MINIO_ROOT_USER, value: minio }
             - { name: MINIO_ROOT_PASSWORD, value: password } # dev creds; secretize for prod
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
           ports:
             - { name: s3, containerPort: 9000 }
             - { name: console, containerPort: 9001 }
@@ -29,6 +39,16 @@ spec:
           readinessProbe:
             httpGet: { path: /minio/health/ready, port: s3 }
             periodSeconds: 2
+          # Liveness: /minio/health/live flips only on a wedged server.
+          livenessProbe:
+            httpGet: { path: /minio/health/live, port: s3 }
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 6
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            limits: { memory: 256Mi }
       volumes:
         - name: data
           persistentVolumeClaim: { claimName: minio-data }

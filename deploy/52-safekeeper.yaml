@@ -12,15 +12,27 @@ metadata:
 spec:
   serviceName: safekeeper
   replicas: 3
+  revisionHistoryLimit: 2 # cap StatefulSet controller-revision churn
   podManagementPolicy: Parallel # members are independent; no ordered start needed
   selector: { matchLabels: { app: safekeeper } }
   template:
     metadata:
       labels: { app: safekeeper, plane: storage }
     spec:
+      # neon:8464 runs as uid 1000 (neon); non-root is the image default, so we
+      # assert it. fsGroup 1000 keeps the PVC writable; seccomp on by default.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile: { type: RuntimeDefault }
       containers:
         - name: safekeeper
           image: neondatabase/neon:8464
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
           command: ["/bin/sh", "-c"]
           # ordinal -> id (safekeeper ids must be unique and stable):
           # safekeeper-0 -> id 1, safekeeper-1 -> id 2, safekeeper-2 -> id 3.
@@ -46,6 +58,17 @@ spec:
           readinessProbe:
             httpGet: { path: /v1/status, port: http }
             periodSeconds: 2
+          # Liveness: restart a member that is up but wedged (not answering the
+          # status endpoint). Generous threshold so a busy WAL flush isn't killed.
+          livenessProbe:
+            httpGet: { path: /v1/status, port: http }
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 6
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            limits: { memory: 512Mi }
   volumeClaimTemplates:
     - metadata: { name: data }
       spec:

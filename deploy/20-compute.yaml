@@ -15,6 +15,7 @@ metadata:
   labels: { app: compute }
 spec:
   replicas: 0 # at rest; gateway scales 0<->1
+  revisionHistoryLimit: 2 # cap ReplicaSet churn from wake/rollout cycles
   selector:
     matchLabels: { app: compute }
   strategy:
@@ -23,6 +24,11 @@ spec:
     metadata:
       labels: { app: compute }
     spec:
+      # Wake-critical path: keep hardening light. The compute image runs as the
+      # non-root `postgres` user by default; we only add seccomp here and leave
+      # uid/caps to the image so compute_ctl boot is never perturbed.
+      securityContext:
+        seccompProfile: { type: RuntimeDefault }
       # Fast drain: a Terminating compute holds the timeline (single-writer),
       # delaying the next wake by its grace period. Data is WAL-safe on the
       # safekeeper quorum, so a short grace is free.

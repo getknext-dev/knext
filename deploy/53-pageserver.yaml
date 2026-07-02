@@ -29,16 +29,28 @@ metadata:
 spec:
   serviceName: pageserver
   replicas: 1
+  revisionHistoryLimit: 2 # cap StatefulSet controller-revision churn
   selector: { matchLabels: { app: pageserver } }
   template:
     metadata:
       labels: { app: pageserver, plane: storage }
     spec:
+      # neon:8464 runs as uid 1000 (neon). fsGroup 1000 keeps /data writable
+      # for both the seed-config initContainer and the pageserver itself.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile: { type: RuntimeDefault }
       # Config files must live inside the writable data dir (/data/.neon),
       # so an init container seeds them from the ConfigMap onto the PVC.
       initContainers:
         - name: seed-config
           image: neondatabase/neon:8464
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
           command: ["/bin/sh", "-c"]
           args:
             - mkdir -p /data/.neon && cp /config/pageserver.toml /config/identity.toml /data/.neon/
@@ -49,6 +61,9 @@ spec:
         - name: pageserver
           image: neondatabase/neon:8464
           command: ["/usr/local/bin/pageserver", "-D", "/data/.neon"] # image default, made explicit
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
           env:
             - { name: AWS_ACCESS_KEY_ID, value: minio }
             - { name: AWS_SECRET_ACCESS_KEY, value: password }
@@ -60,6 +75,19 @@ spec:
           readinessProbe:
             httpGet: { path: /v1/status, port: http }
             periodSeconds: 2
+          # Liveness: the pageserver is the single read SPOF in the MVP — a hung
+          # (not crashed) process must be restarted, not left serving nothing.
+          livenessProbe:
+            httpGet: { path: /v1/status, port: http }
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 6
+          # Memory-hungry: it materializes pages + holds a layer cache. Sized for
+          # a local cluster; raise for real tenant/write volume.
+          resources:
+            requests: { cpu: 100m, memory: 256Mi }
+            limits: { memory: 1Gi }
       volumes:
         - name: config
           configMap: { name: pageserver-config }

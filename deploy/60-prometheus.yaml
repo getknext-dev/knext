@@ -1,0 +1,174 @@
+# Minimal, self-contained Prometheus for the platform — NO operator, NO helm.
+# One Deployment + ConfigMap (config + alert rules) + emptyDir. It discovers the
+# gateway fleet by pod label (app=pggw) and evaluates the three alerts called out
+# in docs/reviews/devops-review.md. ClusterIP only (never exposed externally).
+#
+# This is deliberately ephemeral (emptyDir): it is a live signal + alert
+# evaluator for the MVP, not a long-term metrics store. Point remote_write at a
+# durable backend for production.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: prometheus
+  namespace: scale-zero-pg
+---
+# Least privilege: read-only pod/endpoint/service discovery, scoped to THIS
+# namespace via a Role (not a ClusterRole). Kubernetes SD is likewise pinned to
+# the namespace in the scrape config below.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: prometheus-discovery
+  namespace: scale-zero-pg
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "services", "endpoints"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: prometheus-discovery
+  namespace: scale-zero-pg
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: prometheus-discovery
+subjects:
+  - kind: ServiceAccount
+    name: prometheus
+    namespace: scale-zero-pg
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-config
+  namespace: scale-zero-pg
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 15s
+      evaluation_interval: 15s
+    rule_files:
+      - /etc/prometheus/rules/*.yml
+    scrape_configs:
+      # Discover only the gateway pods, only in this namespace, only their
+      # :9090 metrics port. Everything else is dropped by relabeling.
+      - job_name: pggw
+        kubernetes_sd_configs:
+          - role: pod
+            namespaces:
+              names: [scale-zero-pg]
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_label_app]
+            regex: pggw
+            action: keep
+          - source_labels: [__meta_kubernetes_pod_container_port_number]
+            regex: "9090"
+            action: keep
+          - source_labels: [__meta_kubernetes_pod_name]
+            target_label: pod
+          - source_labels: [__meta_kubernetes_namespace]
+            target_label: namespace
+  rules.yml: |
+    groups:
+      - name: ks-pg-gateway
+        rules:
+          # Cold starts are failing — clients are being told "compute unavailable".
+          - alert: GatewayWakeFailures
+            expr: increase(pggw_wake_failures_total[5m]) > 0
+            for: 1m
+            labels: { severity: critical }
+            annotations:
+              summary: "Gateway wake failures on {{ $labels.pod }}"
+              description: "pggw_wake_failures_total increased in the last 5m — computes are failing to wake."
+          # Wake latency regressed past the review's 5s budget (node image pull,
+          # resource pressure, storage-plane slowness).
+          - alert: GatewayWakeLatencyHigh
+            expr: max(pggw_wake_latency_ms_last) > 5000
+            for: 1m
+            labels: { severity: warning }
+            annotations:
+              summary: "Wake latency > 5s"
+              description: "Last cold-start took {{ $value }}ms (budget 5000ms)."
+          # Phantom keepalive: the fleet has woken the compute more times than it
+          # has slept it (=> compute is currently UP) yet no client connections
+          # are active. Something (usually an app pool holding idle conns) is
+          # blocking scale-to-zero and burning compute for nothing.
+          - alert: ComputePhantomKeepalive
+            expr: (sum(pggw_wakes_total) - sum(pggw_sleeps_total)) > 0 and sum(pggw_active_connections) == 0
+            for: 30m
+            labels: { severity: warning }
+            annotations:
+              summary: "Compute awake 30m+ with zero active connections"
+              description: "Scale-to-zero is blocked — check for an app pool holding idle connections (see docs/connecting.md)."
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prometheus
+  namespace: scale-zero-pg
+  labels: { app: prometheus, plane: observability }
+spec:
+  replicas: 1
+  revisionHistoryLimit: 2
+  selector: { matchLabels: { app: prometheus } }
+  strategy: { type: Recreate }
+  template:
+    metadata:
+      labels: { app: prometheus, plane: observability }
+    spec:
+      serviceAccountName: prometheus
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534 # nobody — prom/prometheus default
+        runAsGroup: 65534
+        fsGroup: 65534
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: prometheus
+          image: prom/prometheus:v2.53.2 # pinned; LTS line
+          args:
+            - --config.file=/etc/prometheus/prometheus.yml
+            - --storage.tsdb.path=/prometheus
+            - --storage.tsdb.retention.time=6h
+            - --web.enable-lifecycle
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+          ports:
+            - { name: web, containerPort: 9090 }
+          readinessProbe:
+            httpGet: { path: /-/ready, port: web }
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /-/healthy, port: web }
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            failureThreshold: 6
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            limits: { memory: 384Mi }
+          volumeMounts:
+            - { name: config, mountPath: /etc/prometheus/prometheus.yml, subPath: prometheus.yml }
+            - { name: rules, mountPath: /etc/prometheus/rules/rules.yml, subPath: rules.yml }
+            - { name: data, mountPath: /prometheus }
+      volumes:
+        - name: config
+          configMap: { name: prometheus-config, items: [{ key: prometheus.yml, path: prometheus.yml }] }
+        - name: rules
+          configMap: { name: prometheus-config, items: [{ key: rules.yml, path: rules.yml }] }
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus
+  namespace: scale-zero-pg
+  labels: { app: prometheus, plane: observability }
+spec:
+  type: ClusterIP # internal only; never exposed
+  selector: { app: prometheus }
+  ports:
+    - { name: web, port: 9090, targetPort: web }
