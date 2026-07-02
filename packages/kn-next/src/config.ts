@@ -149,4 +149,11 @@ export interface KnativeNextConfig {
     observability?: ObservabilityConfig; // Prometheus metrics + Grafana dashboards
     healthCheckPath?: string; // Default: "/api/health"
     secrets?: SecretsConfig; // Kubernetes Native Secrets Binding
+    // Plain, NON-SECRET environment variables (name → value) for the app
+    // container — configuration flags like KNEXT_CACHE_CONTROL_NORMALIZE: "0".
+    // Values are stored verbatim in the NextApp CR; anything sensitive belongs
+    // in `secrets` instead. Reserved names (HOSTNAME, PORT, K_SERVICE,
+    // K_REVISION, K_CONFIGURATION) are rejected by the operator's CRD
+    // validation, and operator-managed system env always wins on collision.
+    env?: Record<string, string>;
 }

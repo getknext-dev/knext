@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"sort"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -441,6 +442,30 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 						},
 					},
 				})
+			}
+		}
+
+		// spec.env (#186): plain NON-SECRET name/value config flags. Appended
+		// LAST and de-duplicated so it can never override operator-injected
+		// system env (HOSTNAME/NODE_ENV/... — the #178/#184 hazard) or a
+		// Secret-backed envMap entry; colliding names are dropped. Reserved
+		// names (HOSTNAME, PORT, K_*) are additionally rejected at admission
+		// by CRD CEL validation. Sorted for deterministic reconcile output.
+		if len(nextApp.Spec.Env) > 0 {
+			taken := make(map[string]struct{}, len(envVars))
+			for _, ev := range envVars {
+				taken[ev.Name] = struct{}{}
+			}
+			names := make([]string, 0, len(nextApp.Spec.Env))
+			for name := range nextApp.Spec.Env {
+				if _, exists := taken[name]; exists {
+					continue
+				}
+				names = append(names, name)
+			}
+			sort.Strings(names)
+			for _, name := range names {
+				envVars = append(envVars, corev1.EnvVar{Name: name, Value: nextApp.Spec.Env[name]})
 			}
 		}
 

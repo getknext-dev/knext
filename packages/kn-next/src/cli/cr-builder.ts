@@ -192,6 +192,13 @@ export function buildNextAppCRObject(
         ...(cache ? { cache } : {}),
         ...(revalidation ? { revalidation } : {}),
         ...(config.secrets ? { secrets } : {}),
+        // #186 plain, NON-SECRET env vars → spec.env. The operator injects
+        // them on the ksvc container; reserved names (HOSTNAME, PORT, K_*)
+        // are rejected by CRD CEL validation at apply time. Secrets stay on
+        // spec.secrets — never put sensitive values here.
+        ...(config.env && Object.keys(config.env).length
+            ? { env: config.env }
+            : {}),
         ...(observability ? { observability } : {}),
         ...(config.healthCheckPath
             ? { healthCheckPath: config.healthCheckPath }
