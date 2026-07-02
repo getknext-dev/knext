@@ -124,9 +124,33 @@ From `docs/knext-research.md`:
 
 ## Decision
 
-**Adopt CloudNativePG-hibernation as the default database foundation for KS-PG. (Proposed.)**
+**RATIFIED (owner, 2026-07-02): adopt Neon, two-tier — cold-zero default (wake p50
+3.7s, true zero) + opt-in warm tier (wake p50 413ms, 256Mi parked reservation).**
 
-Rationale, weighing the evidence above against the architect's kill criteria:
+This SUPERSEDES the reviewer's original proposal below. The proposal recommended
+CNPG on the evidence available at proposal time; the owner requested a further
+evidence round, which produced two new facts that changed the calculus:
+1. **CNPG's tuned floor is ~4–5s** (p50 6.3s after the probe-cadence fix,
+   `bakeoff/TUNING.md`) — pod-recreate hibernation cannot go lower.
+2. **Neon's warm-standby reaches 413ms p50 (floor ~150ms)**
+   (`warmstandby/README.md`) — sub-second wake-on-connect is structural to
+   Neon's stateless compute and unmatchable by any CNPG shape. This is a Neon
+   differentiator that WILL be used (it is the product's headline behavior),
+   answering the "reuse Neon's cost, not its value" objection below.
+
+The obligations this ratification accepts: build the reliability debt down
+(backups/restore, second pageserver, version-pair gate), productize the warm
+tier safely (single-writer gate moves from shell harness to the platform), and
+keep CNPG as the documented simplicity alternative behind the same gateway.
+The kill criteria remain STANDING tripwires on this choice.
+
+---
+
+**Original proposal (of record, superseded): adopt CloudNativePG-hibernation as
+the default database foundation for KS-PG.**
+
+Rationale as proposed, weighing the then-available evidence against the
+architect's kill criteria:
 - Neon's cold-wake advantage is **real but at the architect's decision boundary**: p95
   5.0 s vs 14.8 s ≈ **2.96×** — i.e. *within* the "~3× of CNPG" band the architect set as
   "not decisive enough to justify the ops mass **if** branching stays unused."
