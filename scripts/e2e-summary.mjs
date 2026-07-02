@@ -49,10 +49,6 @@ import { readFileSync, writeFileSync } from 'node:fs';
 export function summarize(runnerOutput, meta) {
   const text = String(runnerOutput ?? '');
 
-  // (1) jest reporter tally — authoritative when present (per-suite jest runs).
-  const jestPassed = matchCount(text, /(\d+)\s+passed/);
-  const jestFailed = matchCount(text, /(\d+)\s+failed/);
-
   // (2) run-tests.js aggregate per-file markers (NEXT_TEST_MODE=deploy). Count
   // DISTINCT test FILES so a test that retries N times is tallied exactly once.
   // The pass-marker format CHANGED between the harness refs this gate has run
@@ -64,13 +60,18 @@ export function summarize(runnerOutput, meta) {
   //   fail (both refs): `${test.file} failed to pass within ${n} retries` ← file first.
   // Parse BOTH pass shapes (union of file sets — a file is one pass regardless of
   // which marker reported it) so a harness-ref bump can never zero the pass count.
+  //
+  // A3-3 fix round 1 (#147, run 28558576615): the file token must be ANCHORED to
+  // run-tests.js's repo-root-relative key shape (`test/…`). The old `\S+\.test\.\S+`
+  // token also matched `}}.test.ts`-style garbage out of JSON content echoed in
+  // output groups — 2 of the 491 reported failures were such phantoms.
   const runTestsPassed = new Set([
-    ...collectTestFiles(text, /\bFinished\s+(\S+\.test\.\S+)\s+on retry\s+\d+\/\d+/g),
-    ...collectTestFiles(text, /(\S+\.test\.\S+)\s+finished on retry\s+\d+\/\d+/g),
+    ...collectTestFiles(text, /\bFinished\s+(test\/\S+\.test\.\w+)\s+on retry\s+\d+\/\d+/g),
+    ...collectTestFiles(text, /(test\/\S+\.test\.\w+)\s+finished on retry\s+\d+\/\d+/g),
   ]);
   const runTestsFailedAll = collectTestFiles(
     text,
-    /(\S+\.test\.\S+)\s+failed to pass within\s+\d+\s+retries/g,
+    /(test\/\S+\.test\.\w+)\s+failed to pass within\s+\d+\s+retries/g,
   );
 
   // HONESTY (A3-3): partition the run-tests.js "failed to pass within …" files
@@ -91,11 +92,17 @@ export function summarize(runnerOutput, meta) {
     }
   }
 
-  // Prefer whichever shape actually reported results. The two never co-occur in
-  // a real run, but if both somehow appear, sum them — never silently drop a
-  // failure (an under-count here is the false-green A3-3 exists to prevent).
-  const passed = jestPassed + runTestsPassed.size;
-  const failed = jestFailed + runTestsFailed.size;
+  // A3-3 fix round 1 (#147, run 28558576615 — the OVERCOUNT bug): when
+  // run-tests.js per-file markers are present they are the ONLY honest ledger.
+  // The old code ADDED the jest `(\d+) failed` first-match on top — but a
+  // captured ❌ output group routinely ECHOES a jest per-file tally
+  // (`Tests: 1 failed, …`), so ~16 failures were double-counted (491 reported
+  // vs 473 real distinct failing files). The jest tally is parsed ONLY when no
+  // per-file marker exists at all (per-suite jest runs — the #164 false-green
+  // path stays covered).
+  const markersPresent = runTestsPassed.size + runTestsFailedAll.size > 0;
+  const passed = markersPresent ? runTestsPassed.size : matchCount(text, /(\d+)\s+passed/);
+  const failed = markersPresent ? runTestsFailed.size : matchCount(text, /(\d+)\s+failed/);
   const notRun = runTestsNotRun.size;
 
   return {
@@ -136,10 +143,12 @@ function filesWithNoTestsFound(text) {
   const phantom = new Set();
   const lines = text.split('\n');
   // run-tests.js output-group OPEN header (with or without the GHA ##[group] prefix
-  // and the trailing colon variant). Captures the SLASH-form file path.
-  const groupOpenRe = /❌\s+(\S+\.test\.(?:js|ts|jsx|tsx))\s+output\b/;
+  // and the trailing colon variant). Captures the SLASH-form file path — anchored
+  // to the repo-root-relative `test/` prefix so group keys always equal the
+  // failure-marker keys (A3-3 fix round 1 tightened both the same way).
+  const groupOpenRe = /❌\s+(test\/\S+\.test\.(?:js|ts|jsx|tsx))\s+output\b/;
   // run-tests.js output-group CLOSE marker.
-  const groupCloseRe = /^(?:.*\bend of\s+)(\S+\.test\.(?:js|ts|jsx|tsx))\s+output\b/;
+  const groupCloseRe = /^(?:.*\bend of\s+)(test\/\S+\.test\.(?:js|ts|jsx|tsx))\s+output\b/;
   const noTestsRe = /No tests found, exiting with code 1/;
   let current = null;
   for (const line of lines) {

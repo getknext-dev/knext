@@ -51,6 +51,7 @@ import {
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { findWorkspaceProtocolDeps } from './lib/workspace-protocol.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(__dirname, '..');
@@ -132,6 +133,34 @@ try {
   coreDest = mkdtempSync(join(tmpdir(), 'knext-pack-core-'));
   const libTarball = pnpmPack(libPkgDir, libDest, '@knext/lib');
   const coreTarball = pnpmPack(corePkgDir, coreDest, '@knext/core');
+
+  // --- 1b. manifest guard: no workspace:-protocol spec may survive packing ----
+  // #147 A3-3 fix round 1 (run 28558576615): the compat suite burned 16 shards
+  // because a tarball packed with `npm pack` (a DIFFERENT pack path this gate
+  // never covered) still shipped `@knext/lib: workspace:^` → EUNSUPPORTEDPROTOCOL
+  // in every fixture install. This gate already pnpm-packs + npm-installs with
+  // full dependency resolution (which would fail on the leak) — the explicit
+  // manifest inspection makes a future regression NAME its cause here instead of
+  // surfacing as a downstream npm error.
+  console.log('[install-smoke] inspecting packed manifests for workspace: protocol leaks ...');
+  for (const [tgz, label] of [
+    [libTarball, '@knext/lib'],
+    [coreTarball, '@knext/core'],
+  ]) {
+    const manifest = JSON.parse(
+      execFileSync('tar', ['-xzOf', tgz, 'package/package.json'], { encoding: 'utf8' }),
+    );
+    const leaks = findWorkspaceProtocolDeps(manifest);
+    if (leaks.length > 0) {
+      const detail = leaks.map((l) => `${l.field}.${l.name}=${l.spec}`).join(', ');
+      finish(
+        FAIL,
+        `packed ${label} tarball still ships workspace: specs (${detail}) — ` +
+          'npm cannot install it (EUNSUPPORTEDPROTOCOL); the pack path must rewrite the workspace protocol',
+      );
+    }
+    console.log(`[install-smoke] ${label} manifest is workspace:-free`);
+  }
 
   // --- 2. fresh consumer project OUTSIDE the workspace + install -------------
   // tmpdir() is outside repoRoot, so there is no pnpm workspace / node_modules to leak

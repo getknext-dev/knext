@@ -80,10 +80,12 @@ jobs:
     # same version. Flagged in the PR for review.
     #
     # #147 — with the Playwright browser download skipped (the real 40-min hang),
-    # this job is now pnpm RESOLUTION (~seconds) + an `npm pack` of the prebuilt
-    # next (minutes). 60 min is ample headroom; the old 180-min ceiling existed
-    # only to absorb the (now-removed) hanging chromium download.
-    timeout-minutes: 60
+    # this job is pnpm RESOLUTION (~seconds) + an `npm pack` of the prebuilt
+    # next (minutes). Fix round 1 re-adds ONE bounded chromium download here (the
+    # cache warm-up, ≤3×15 min worst case on a throttled CDN) so 90 min keeps
+    # honest headroom; the old 180-min ceiling existed only to absorb the
+    # (now-removed) UNbounded hanging download.
+    timeout-minutes: 90
     steps:
       - name: Checkout knext
         uses: actions/checkout@v4
@@ -116,11 +118,34 @@ jobs:
           pnpm --filter @knext/lib build
           pnpm --filter @knext/core build
 
-      - name: Pack @knext/core adapter tarball
-        working-directory: knext/packages/kn-next
+      # #147 A3-3 fix round 1 (triage of run 28558576615 — the ONE bug behind
+      # 472/473 failures): this step used to run a bare `npm pack` of
+      # @knext/core, which ships pnpm's raw `workspace:^` dep on @knext/lib
+      # verbatim (npm does NOT rewrite the workspace protocol on pack — only
+      # `pnpm pack`/`pnpm publish` do). Every fixture's `npm install <tarball>`
+      # then died with EUNSUPPORTEDPROTOCOL and `next build` ran ZERO times.
+      # FIX: `pnpm pack` BOTH @knext/lib and @knext/core (rewrites workspace:^
+      # → the real semver) ONCE here — not per test in e2e-deploy.sh, which also
+      # raced at runner concurrency 2 — staged at a STABLE path that rides the
+      # workspace artifact into every shard (KNEXT_E2E_TARBALLS_DIR).
+      - name: Pack knext adapter tarballs (pnpm pack — npm-installable, once for the whole run)
+        working-directory: knext
         run: |
-          npm pack
-          ls -1 *.tgz
+          set -euo pipefail
+          DEST="${GITHUB_WORKSPACE}/knext-tarballs"
+          mkdir -p "${DEST}"
+          (cd packages/lib && pnpm pack --pack-destination "${DEST}")
+          (cd packages/kn-next && pnpm pack --pack-destination "${DEST}")
+          ls -la "${DEST}"
+
+      # The fail-fast gate that SHOULD have existed before run 28558576615:
+      # npm-install both tarballs into a scratch dir (REAL dependency resolution
+      # — npm satisfies the rewritten @knext/lib@^x dep from the local lib
+      # tarball, since @knext/lib is not on npm yet, #53) and resolve
+      # @knext/core/adapter. A packaging regression aborts HERE, in seconds,
+      # BEFORE 16 shards spawn — never again 472 fake failures.
+      - name: Preflight — packed tarballs must npm-install + adapter must resolve (fail-fast)
+        run: node knext/scripts/e2e-preflight.mjs --tarballs-dir "${GITHUB_WORKSPACE}/knext-tarballs"
 
       # #147 (round 4) — derive the published npm VERSION from the git tag ref
       # (`v16.0.3` → `16.0.3`), then `npm pack` the PREBUILT `next` from the npm
@@ -271,6 +296,60 @@ jobs:
             exit 1
           fi
 
+      # #147 A3-3 fix round 1 — WARM the chromium cache HERE, once, so the 16
+      # shards exact-hit instead of racing 16 concurrent CDN downloads (run
+      # 28558576615: 9/16 shards exhausted 4×10-min timed-out downloads, ~41
+      # wasted minutes each, and ran with NO chromium — a latent mass-failure
+      # for every browser-driving test once deploys work). The version resolve
+      # is the FIXED shape (see the shard step for the leak this replaces).
+      - name: Resolve Playwright version (for the chromium cache key)
+        id: pw
+        working-directory: next.js
+        run: |
+          set -euo pipefail
+          VERSION="$(node -e 'try { console.log(require("playwright-chromium/package.json").version) } catch { console.log("") }')"
+          if ! printf '%s' "${VERSION}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([-.+][0-9A-Za-z.-]+)?$'; then
+            echo "::warning::playwright-chromium version resolve produced a non-version value ('${VERSION}'); cache key falls back to 'unknown'"
+            VERSION="unknown"
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Resolved playwright-chromium version: ${VERSION}"
+
+      - name: Cache Playwright browsers
+        id: pw-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-chromium-${{ runner.os }}-${{ steps.pw.outputs.version }}
+          restore-keys: |
+            playwright-chromium-${{ runner.os }}-
+
+      # Warm install (cache miss only). NON-FATAL: the shards retry themselves;
+      # a throttled CDN here must not kill the whole run's preparation.
+      - name: Install Playwright chromium (warm the cache; retry + timeout, NON-FATAL)
+        if: steps.pw-cache.outputs.cache-hit != 'true'
+        working-directory: next.js
+        env:
+          PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS: '1'
+        run: |
+          attempts=3
+          installed=0
+          for i in $(seq 1 "$attempts"); do
+            echo "::group::playwright install chromium attempt $i/$attempts (per-attempt timeout 15m)"
+            if timeout 15m corepack pnpm playwright install chromium --with-deps; then
+              echo "playwright install succeeded on attempt $i"
+              installed=1
+              echo "::endgroup::"
+              break
+            fi
+            echo "playwright install attempt $i failed or timed out; retrying"
+            echo "::endgroup::"
+            sleep 15
+          done
+          if [ "$installed" -ne 1 ]; then
+            echo "::warning::chromium warm-up failed after $attempts attempts; shards will download individually"
+          fi
+
       # Hand off the prepared knext + next.js SOURCE trees + the prebuilt next
       # tarball to the shard jobs — as ONE TARBALL.
       #
@@ -306,7 +385,7 @@ jobs:
             --exclude='./knext/apps/*/node_modules' \
             --exclude='./knext/packages/*/node_modules' \
             --exclude='./next.js/node_modules' \
-            ./knext ./next.js ./next-prebuilt
+            ./knext ./next.js ./next-prebuilt ./knext-tarballs
           ls -la "${RUNNER_TEMP}/compat-workspace.tgz"
           # Tripwire at the SOURCE side too: the collision-critical fixture
           # symlink must be in the tarball AS a symlink (tar type 'l' listing
@@ -328,7 +407,14 @@ jobs:
     name: Deploy tests (shard ${{ matrix.shard }})
     needs: build-next
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # #147 A3-3 fix round 1 — 120 min (was 60). Run 28558576615 never exceeded
+    # ~46 min ONLY because zero fixtures built (every deploy died at npm
+    # install in ~5s). With the tarball fixed, every file runs a REAL
+    # `npm install` + `next build` + server boot (minutes each, ×3 on retry) at
+    # concurrency 2 over ~50 files/shard — 60 min is a near-certain blowout.
+    # HONESTY: 120 is headroom for the re-baseline, not a measured fit; shard
+    # count/concurrency get tuned from that run's data (sys-design follow-up).
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
@@ -365,6 +451,8 @@ jobs:
           tar xzf compat-workspace.tgz
           rm compat-workspace.tgz
           test -d knext && test -d next.js && test -d next-prebuilt
+          # Fix round 1: the pre-packed adapter tarballs must survive transport.
+          test -d knext-tarballs
           SYMLINK_PROBE="next.js/test/e2e/app-dir/next-condition/fixtures/middleware/sym-linked-packages"
           if [ ! -L "${SYMLINK_PROBE}" ]; then
             echo "::error::${SYMLINK_PROBE} is not a symlink after unpack — the workspace transport materialized symlinks again; jest-haste-map will throw 'Duplicated files or mocks' (v16.2.0 haste.throwOnModuleCollision) and every shard will list 0 tests" >&2
@@ -454,16 +542,28 @@ jobs:
       # cached (so the CDN download is not repeated every run) and retry/timeout
       # wrapped (so a stuck download is bounded + retried, never an open-ended hang).
       # The cache key is the playwright version resolved from next.js's lockfile.
+      # #147 A3-3 fix round 1 — run 28558576615 proved the OLD extraction here
+      # (a sed that stripped everything through "playwright-chromium@" from
+      # `pnpm ls --parseable`) leaked the package PATH into the version: the
+      # parseable output is a .pnpm virtual path
+      # (`…/playwright-chromium@1.58.2/node_modules/playwright-chromium`),
+      # so the key became `playwright-chromium-Linux-1.58.2/node_modules/…` —
+      # exact-hit impossible, every shard fell back to a stale ~2 MB cache and
+      # re-downloaded chromium (9/16 shards timed out 4×10 min). FIX: read the
+      # version from the installed package manifest and GATE it on a fully
+      # anchored version shape so a path can never key the cache again.
       - name: Resolve Playwright version (for the chromium cache key)
         id: pw
         working-directory: next.js
         run: |
-          VERSION="$(corepack pnpm ls playwright-chromium --depth -1 --parseable 2>/dev/null | sed -n 's/.*playwright-chromium@//p' | head -n1)"
-          if [ -z "$VERSION" ]; then
-            VERSION="$(corepack pnpm why playwright-chromium 2>/dev/null | sed -n 's/.*playwright-chromium \([0-9][^ ]*\).*/\1/p' | head -n1)"
+          set -euo pipefail
+          VERSION="$(node -e 'try { console.log(require("playwright-chromium/package.json").version) } catch { console.log("") }')"
+          if ! printf '%s' "${VERSION}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([-.+][0-9A-Za-z.-]+)?$'; then
+            echo "::warning::playwright-chromium version resolve produced a non-version value ('${VERSION}'); cache key falls back to 'unknown'"
+            VERSION="unknown"
           fi
-          echo "version=${VERSION:-unknown}" >> "$GITHUB_OUTPUT"
-          echo "Resolved playwright-chromium version: ${VERSION:-unknown}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Resolved playwright-chromium version: ${VERSION}"
 
       - name: Cache Playwright browsers
         id: pw-cache
@@ -485,11 +585,15 @@ jobs:
           # rather than hang: bound each attempt and retry a handful of times.
           PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS: '1'
         run: |
+          # Fix round 1: per-attempt 15m (was 10m) — run 28558576615 showed the
+          # 167 MiB download crawling to ~100% RIGHT at the 10-min deadline on
+          # 9/16 shards (amplified by 16 concurrent downloads; the build-next
+          # warm cache removes that amplification, this is the safety margin).
           attempts=4
           installed=0
           for i in $(seq 1 "$attempts"); do
-            echo "::group::playwright install chromium attempt $i/$attempts (per-attempt timeout 10m)"
-            if timeout 10m corepack pnpm playwright install chromium --with-deps; then
+            echo "::group::playwright install chromium attempt $i/$attempts (per-attempt timeout 15m)"
+            if timeout 15m corepack pnpm playwright install chromium --with-deps; then
               echo "playwright install succeeded on attempt $i"
               installed=1
               echo "::endgroup::"
@@ -513,6 +617,13 @@ jobs:
       - name: Make lifecycle scripts executable
         working-directory: knext
         run: chmod +x scripts/e2e-deploy.sh scripts/e2e-logs.sh scripts/e2e-cleanup.sh
+
+      # #147 A3-3 fix round 1 — re-run the fail-fast tarball gate AFTER artifact
+      # transport (same gate build-next ran before uploading): a corrupted or
+      # missing tarball aborts the shard HERE in seconds, never as ~50 identical
+      # per-fixture npm-install failures 40 minutes deep.
+      - name: Preflight — adapter tarballs survived transport + still npm-install (fail-fast)
+        run: node knext/scripts/e2e-preflight.mjs --tarballs-dir "${GITHUB_WORKSPACE}/knext-tarballs"
 
       # #147 / A3-3 — THE reason 0 tests ran was TWO-fold; this step fixes the
       # second half. (1) The knext manifest used to `version: 1`, which made
@@ -934,7 +1045,13 @@ jobs:
           NEXT_TEST_DEPLOY_SCRIPT_PATH: ${{ github.workspace }}/knext/scripts/e2e-deploy.sh
           NEXT_TEST_DEPLOY_LOGS_SCRIPT_PATH: ${{ github.workspace }}/knext/scripts/e2e-logs.sh
           NEXT_TEST_CLEANUP_SCRIPT_PATH: ${{ github.workspace }}/knext/scripts/e2e-cleanup.sh
-          # The package dir e2e-deploy.sh `npm pack`s + installs into each temp app.
+          # Fix round 1: the PRE-PACKED (pnpm pack — workspace:^ rewritten),
+          # preflight-gated tarballs e2e-deploy.sh installs into each temp app.
+          # Packed ONCE in build-next; per-test `npm pack` was the 472-failure
+          # bug of run 28558576615 (raw workspace:^ → EUNSUPPORTEDPROTOCOL) AND
+          # a concurrency race. ADAPTER_DIR stays as the script's local-run
+          # fallback identity of the adapter package dir.
+          KNEXT_E2E_TARBALLS_DIR: ${{ github.workspace }}/knext-tarballs
           ADAPTER_DIR: ${{ github.workspace }}/knext/packages/kn-next
           # knext's v2 deploy-eligible selection: it mirrors Next's own
           # test/deploy-tests-manifest.json base set (include/exclude AND the
@@ -968,10 +1085,22 @@ jobs:
           NEXT_TEST_NATIVE_DIR: ${{ steps.swc.outputs.dir }}
         # `|| true`: a partial-subset scaffold WILL have failures today; we still
         # want the summary artifact emitted. The matrix row stays ❌ regardless.
+        #
+        # Fix round 1: the step carries its OWN bound BELOW the 120-min job
+        # timeout — a step-level timeout kills only THIS step, so the
+        # `if: always()` summarize/upload tail below reliably reports the
+        # PARTIAL results from the tee'd runner.log (a job-level timeout is a
+        # cancellation, which is not guaranteed to leave room for the tail).
+        timeout-minutes: 105
         run: |
           node run-tests.js --type e2e -g ${{ matrix.shard }} 2>&1 | tee runner.log || true
 
+      # Fix round 1: `if: always()` on the WHOLE summarize+upload tail — a
+      # timed-out or failed shard must still report its partial results, never
+      # vanish from the ledger (queued sys-design follow-up tunes shards from
+      # exactly these measurements).
       - name: Compute excluded count from manifest
+        if: always()
         id: excl
         working-directory: knext
         run: |
@@ -979,6 +1108,7 @@ jobs:
           echo "count=${COUNT}" >> "$GITHUB_OUTPUT"
 
       - name: Summarize shard result
+        if: always()
         working-directory: knext
         run: |
           SAFE_SHARD="${{ matrix.shard }}"
@@ -991,6 +1121,7 @@ jobs:
             --out "compat-suite-summary-${SAFE_SHARD}.json"
 
       - name: Upload summary artifact (consumed by #41 matrix publisher)
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: compat-suite-summary-${{ strategy.job-index }}

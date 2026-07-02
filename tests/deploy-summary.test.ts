@@ -454,3 +454,100 @@ exiting with code 1
     expect(s.notRun).toBe(1);
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// A3-3 (#147) fix round 1 — the OVERCOUNT bugs (triage of run 28558576615).
+// The baseline run reported 491 failed; the TRUE count of distinct failing files was
+// 473. Two parser bugs made up the difference:
+//
+//  (a) DOUBLE-COUNT: `matchCount(text, /(\d+)\s+failed/)` grabs the FIRST jest
+//      per-file tally line (e.g. `Tests: 1 failed, 1 total`) that a captured
+//      ❌ output group happens to contain, and ADDS it to the per-file marker
+//      count. When run-tests.js per-file markers are present they are the ONLY
+//      honest ledger — the jest tally must NOT be added on top (~16 of the 18
+//      overcounted "failures").
+//
+//  (b) PHANTOM CAPTURES: the marker regexes used `(\S+\.test\.\S+)`, which
+//      matched `}}.test.ts`-style tokens out of JSON content echoed inside
+//      output groups (2 of the 491 were such phantoms). Real run-tests.js file
+//      keys are repo-root-relative and ALWAYS start with `test/` — the token
+//      regex must require that prefix (`test/\S+\.test\.\w+`).
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('scripts/e2e-summary.mjs — overcount fixes (A3-3 #147 fix round 1, run 28558576615)', () => {
+  it('does NOT add a jest per-file tally inside a ❌ output group to the per-file markers', () => {
+    // One real pass + one real fail, and the failing group ECHOES a jest tally
+    // (`Tests: 1 failed, …` and `1 passed`) — the old parser summed both shapes
+    // and reported passed:2/failed:2. Markers are authoritative: 1/1.
+    const log = `
+total: 2
+Starting test/e2e/404-page-router/index.test.ts retry 0/2
+test/e2e/404-page-router/index.test.ts finished on retry 0/2 in 12.3s
+Starting test/e2e/image-optimizer/index.test.ts retry 0/2
+##[group]❌ test/e2e/image-optimizer/index.test.ts output
+[e2e-deploy] running next build
+Tests:       1 failed, 1 total
+Test Suites: 1 failed, 1 total
+end of test/e2e/image-optimizer/index.test.ts output
+test/e2e/image-optimizer/index.test.ts failed to pass within 2 retries
+exiting with code 1
+`;
+    const s = summarize(log, { ref: 'v16.2.0', shard: '1/16', excluded: 32 });
+    expect(s.failed).toBe(1);
+    expect(s.passed).toBe(1);
+  });
+
+  it('does not let an interleaved jest "N passed" tally inflate the pass count either', () => {
+    const log = `
+total: 1
+Starting test/e2e/x/x.test.ts retry 0/2
+##[group]❌ test/e2e/x/x.test.ts output
+Tests:       3 passed, 3 total
+end of test/e2e/x/x.test.ts output
+test/e2e/x/x.test.ts failed to pass within 2 retries
+exiting with code 1
+`;
+    const s = summarize(log, { ref: 'v16.2.0', shard: '2/16', excluded: 0 });
+    expect(s.passed).toBe(0);
+    expect(s.failed).toBe(1);
+  });
+
+  it('still uses the jest tally when NO run-tests.js per-file markers exist at all', () => {
+    // Guard the other direction: the jest path is the only signal for per-suite
+    // jest runs — markers-absent must keep parsing it (no regression of #164).
+    const s = summarize('Tests:       2 failed, 40 passed, 42 total\n', {
+      ref: 'v16.2.0',
+      shard: '3/16',
+      excluded: 0,
+    });
+    expect(s.passed).toBe(40);
+    expect(s.failed).toBe(2);
+  });
+
+  it('ignores phantom non-test/ tokens like `}}.test.ts` captured from JSON content (fail marker)', () => {
+    // Verbatim shape of the 2 phantom captures in run 28558576615: JSON content
+    // inside an output group lines up so `\S+` grabs `}}.test.ts`. A real
+    // run-tests.js key always starts with `test/`.
+    const log = `
+total: 1
+Starting test/e2e/x/x.test.ts retry 0/2
+{"config":{"retries":2}}.test.ts failed to pass within 2 retries
+test/e2e/x/x.test.ts finished on retry 0/2 in 1.0s
+exiting with code 0
+`;
+    const s = summarize(log, { ref: 'v16.2.0', shard: '4/16', excluded: 0 });
+    expect(s.failed).toBe(0);
+    expect(s.passed).toBe(1);
+  });
+
+  it('ignores phantom non-test/ tokens on the pass markers too (both formats)', () => {
+    const log = `
+{"a":1}}.test.ts finished on retry 0/2 in 1.0s
+Finished }}.test.ts on retry 0/2 in 1.0s
+exiting with code 0
+`;
+    const s = summarize(log, { ref: 'v16.2.0', shard: '5/16', excluded: 0 });
+    expect(s.passed).toBe(0);
+    expect(s.failed).toBe(0);
+  });
+});

@@ -73,3 +73,9 @@ knext-plan-out/
 .maturity-brief.md
 .migration-spec.md
 skills-lock.json
+
+# e2e-deploy.sh local pack-once fallback (#147 A3-3 fix round 1) — packed
+# adapter tarballs + the atomic staging dirs must never be committed.
+**/.e2e-tarballs/
+**/.e2e-tarballs.lock/
+**/.e2e-pack.*/

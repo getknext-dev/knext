@@ -570,26 +570,40 @@ describe('compat-suite Playwright browser-download fix (test-e2e-deploy.yml, #14
     ).toContain(value);
   });
 
-  it('does NOT run a blocking explicit browser install in the Prepare job', () => {
+  it('any Prepare-job browser install is BOUNDED, cache-gated and non-fatal (never the old blocking hang)', () => {
+    // HISTORY: the original hang was playwright-chromium's postinstall download
+    // running UNBOUNDED inside the blocking `corepack pnpm install` — this test
+    // used to forbid ANY `playwright install` in build-next. #147 A3-3 fix
+    // round 1 (triage of run 28558576615) deliberately re-adds ONE explicit
+    // install here to WARM the actions/cache so the 16 shards exact-hit instead
+    // of racing 16 concurrent CDN downloads (9/16 shards burned 4×10-min
+    // timeouts and ran with NO chromium). The invariant that must never regress
+    // is the SHAPE, not the absence: bounded per-attempt timeout, retry loop,
+    // gated on a cache miss, and NON-FATAL (a throttled CDN must not kill the
+    // run's preparation).
     const block = buildNextJobBlock();
-    // The redundant `corepack pnpm playwright install chromium ...` that ran in the
-    // blocking Prepare install is exactly what hung; it must be gone from build-next.
+    if (!/playwright\s+install\b/.test(block)) return; // absent is also fine
     expect(
-      /playwright\s+install\b/.test(block),
-      'build-next (Prepare) must NOT run an explicit `playwright install` — that browser download is the hang',
-    ).toBe(false);
+      /timeout\s+\d+m[\s\S]*playwright\s+install\b/.test(block),
+      'the Prepare chromium warm-install must be wrapped in a per-attempt `timeout <N>m`',
+    ).toBe(true);
+    expect(
+      /\b(for|while)\b/.test(block),
+      'the Prepare chromium warm-install must use a retry loop (for/while)',
+    ).toBe(true);
+    expect(
+      /if:\s*steps\.[\w-]+\.outputs\.cache-hit\s*!=\s*'true'/.test(block),
+      'the Prepare chromium warm-install must be gated on a cache miss',
+    ).toBe(true);
+    expect(
+      /::warning::/.test(block),
+      'the Prepare chromium warm-install must be NON-FATAL (warn, never fail the prep)',
+    ).toBe(true);
   });
 
-  it('if chromium is installed at all, it lives in the shard job, retry+timeout-wrapped and cached', () => {
-    const buildBlock = buildNextJobBlock();
+  it('the shard chromium install stays retry+timeout-wrapped and cached', () => {
     const shardBlock = deployTestsJobBlock();
     const shardInstallsBrowser = /playwright\s+install\b/.test(shardBlock);
-    // Prepare must never install the browser (asserted above); the only acceptable
-    // place for a browser install is the shard job that actually drives it.
-    expect(
-      /playwright\s+install\b/.test(buildBlock),
-      'the chromium install must not be in the Prepare job',
-    ).toBe(false);
 
     if (shardInstallsBrowser) {
       // If the shard installs chromium, it must be bounded: a per-attempt timeout,
