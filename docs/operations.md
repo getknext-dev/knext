@@ -18,6 +18,7 @@ behavior, and troubleshooting.
 | `GW_IDLE_MS` | 300000 | idle window before scale-to-zero (deployed: 60000) |
 | `GW_WAKE_TIMEOUT_MS` | 60000 | give up waking after this (deployed: 120000) |
 | `GW_CONNECT_TIMEOUT_MS` / `GW_RETRY_MS` | 1000 / 250 | per-attempt connect timeout / poll interval (deployed retry: 100) |
+| `GW_MAX_CONNS` | 0 (unlimited) | connection cap; excess gets a clean `53300`. Deployed: 90 — MUST stay under compute `max_connections=100` |
 | `GW_PEER_SELECTOR` | — | label selector for sibling gateways (peer-aware idle); empty disables |
 | `GW_POD_NAMESPACE` / `GW_POD_IP` | — | downward API; self-exclusion for the peer check |
 
@@ -35,10 +36,14 @@ Scrape each gateway pod's `:9090/metrics` (Prometheus text) or read `/metrics.js
 | `pggw_sleeps_total` | scale-to-zero events |
 | `pggw_system_*{system=...}` | the same, per database key |
 
-**Alert on:** `wake_failures_total` increasing; a system whose `active_connections`
-is 0 for hours but never sleeps (phantom keepalive — usually a client pool holding
-idle connections; see [connecting](connecting.md#connection-pooling-rules));
-`wake_latency_ms_last` drifting above ~5s (node image/pressure problem).
+**Alerting is deployed and drilled**, not aspirational: Prometheus
+(`deploy/60-prometheus.yaml`, PVC-backed, 15d retention) evaluates three rules —
+wake failures, wake-latency drift >5s, and phantom keepalive (state-based:
+connections never idle for 30m; see [connecting](connecting.md#connection-pooling-rules))
+— and routes via Alertmanager (`61-alertmanager.yaml`) to a logging webhook sink.
+**Swap the sink URL in `alertmanager-config` for Slack/PagerDuty in production.**
+Prove the whole pager path any time: `sh deploy/_verify-alerting.sh` (idempotent,
+safe to re-run).
 
 Quick look without Prometheus: `sh deploy/_metrics.sh`.
 

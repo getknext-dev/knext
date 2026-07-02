@@ -40,13 +40,18 @@ The compute starts at zero. That's correct — it wakes on the first connection.
 ## 3. Verify
 
 ```sh
-sh deploy/_validate.sh        # manifests + contracts
-sh deploy/_verify-storage.sh  # data survives a compute kill; quorum drill
-sh deploy/_verify-wake.sh     # the full 0→1→0 wake loop
-sh deploy/_verify-ha.sh       # 2-gateway no-SPOF / no-split-brain drill
+sh deploy/_validate.sh                    # manifests + contracts (incl. version-pair gate)
+sh deploy/_verify-storage.sh              # data survives a compute kill; safekeeper quorum drill
+sh deploy/_verify-wake.sh                 # the full 0→1→0 wake loop
+sh deploy/_verify-ha.sh                   # 2-gateway no-SPOF / no-split-brain drill
+sh deploy/_verify-alerting.sh             # an alert fires and REACHES the receiver
+sh deploy/_verify-netpol.sh               # network isolation contracts (warns on non-enforcing CNI)
+sh deploy/_verify-restore.sh              # backup -> restore in a throwaway namespace (~110s RTO)
+sh deploy/_verify-pageserver-failover.sh  # pageserver loss -> promoted standby (~7s RTO)
 ```
 
-Expected: all green; wake latency ~2.5s on a warm node.
+Expected: all green; wake latency ~2.5s on a warm node (or ~0.4s on the opt-in
+warm tier — see [connecting](connecting.md#choosing-a-tier-cold-zero-default-vs-warm)).
 
 ## 4. Connect
 

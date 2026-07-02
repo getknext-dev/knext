@@ -27,6 +27,10 @@ Native Postgres compute on Neon's OSS storage stack, all **on Kubernetes** (no d
 ## Hard rules
 1. **Go for everything Kubernetes-native. No JS/TS unless necessary.**
 2. **TDD commits**: test/verification commit first (red), implementation commit second (green).
+2b. **User docs ship WITH the change.** Any change that alters user-visible behavior,
+   config, drills, or measured numbers updates docs/ (getting-started, connecting,
+   operations) in the same commit or the same PR-sized batch. Doc drift found in
+   review counts as a defect.
 3. Single-writer is intrinsic to Neon — no lease/fencing layer. Compute uses `Recreate` strategy.
 4. Storage plane never on Knative, never scale-to-zero. Compute scaling is TCP-triggered
    (gateway/KEDA), not Knative Serving — the activator is HTTP-only.
