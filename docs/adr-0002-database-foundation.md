@@ -1,6 +1,15 @@
 # ADR-0002 — The database foundation: self-hosted Neon vs CloudNativePG-hibernation
 
-- **Status:** Proposed — ratification DEFERRED by owner (2026-07-02): iteration 3 must first measure (a) CNPG wake-tuning headroom (how far below 14.5s can un-hibernate go), (b) Neon warm-standby pool (how far below 3.7s toward sub-second). Decision follows that evidence. (owner ratifies)
+- **Status:** ACCEPTED (owner-ratified 2026-07-02) — **Neon, two-tier.**
+Default tier: cold-zero (wake p50 3.7s, true zero while idle). Opt-in warm tier:
+gated parked compute (wake p50 413ms, floor ~150ms; costs 256Mi reservation while
+parked) for latency-sensitive apps. Deciding evidence beyond this ADR's tables:
+CNPG tuned floor 6.3s p50 / ~4-5s irreducible (probe-cadence fix, bakeoff/TUNING.md)
+vs Neon warm-standby 413ms p50 (warmstandby/README.md) — the sub-second capability
+is structural to Neon's stateless compute and unmatchable by pod-recreate
+hibernation. CNPG remains the documented simplicity alternative; the kill criteria
+below stay STANDING and revisit this decision if triggered (esp. ops toil
+>1 eng-day/month on the storage plane).
 - **Date:** 2026-07-02
 - **Deciders:** architecture owner (ratify), bake-off run by phase-4B
 - **Supersedes the "decided by inheritance" foundation** flagged in `bakeoff/README.md`
