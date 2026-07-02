@@ -360,19 +360,35 @@ DRILL_PSQL "checkpoint" >/dev/null
 ok "baseline: read-write DB on pageserver-a; marker written + read"
 
 # ---------------------------------------------------------------------------
-info "STEP 5: kill pageserver-a and expect reads to recover"
+info "STEP 5: FAILOVER — kill pageserver-a, promote pageserver-b, re-point compute"
 KILL_AT=$(date +%s)
 $KD delete statefulset/pageserver-a --cascade=foreground --wait=true --timeout=60s >/dev/null 2>&1 || \
   $KD delete pod pageserver-a-0 --grace-period=0 --force >/dev/null 2>&1 || true
-info "  pageserver-a killed (RED: no standby-promotion mechanism yet)"
-# Cold-restart the compute so reads MUST hit the pageserver (a live compute would
-# otherwise serve recent pages from its local file cache and mask the outage; a
-# scale-to-zero wake always starts cold). With no failover target this compute
-# cannot basebackup — the unbounded read outage the reviews flagged.
+info "  pageserver-a killed; promoting pageserver-b to AttachedSingle gen $GEN_FAILOVER (gen+1 fences the dead primary)"
+$KD exec sts/pageserver-b -- /bin/sh -c "
+  curl -sf -X PUT -H 'Content-Type: application/json' \
+    -d '{\"mode\":\"AttachedSingle\",\"generation\":$GEN_FAILOVER,\"tenant_conf\":{}}' \
+    http://localhost:9898/v1/tenant/$TENANT/location_config >/dev/null" || fail "promote pageserver-b failed"
+b=0; while [ $b -lt 60 ]; do PS_GET pageserver-b "/v1/tenant/$TENANT/timeline" | grep -q "$TIMELINE" && break; b=$((b+1)); [ $b -ge 60 ] && fail "pageserver-b never loaded timeline after promotion"; sleep 2; done
+info "  re-pointing compute at pageserver-b (cold restart — models a scale-to-zero wake)"
+render_compute_files pageserver-b
+deploy_compute pageserver-b
 $KD delete pod -l app=compute --grace-period=0 --force >/dev/null 2>&1 || true
+# the surviving safekeeper carries the WAL, so pageserver-b streams forward and the
+# DB stays read-WRITE; the cold compute basebackups from pageserver-b.
 got=""; q=0
 while [ $q -lt "$FAILOVER_BUDGET" ]; do got="$(DRILL_PSQL "select note from psfo where id=1" 2>/dev/null || true)"; [ "$got" = "pageserver-failover marker" ] && break; q=$((q+1)); sleep 1; done
 RESTORED_AT=$(date +%s)
-[ "$got" = "pageserver-failover marker" ] || fail "reads did NOT recover after pageserver-a loss within ${FAILOVER_BUDGET}s (unbounded read outage — the SPOF, no failover implemented)"
+[ "$got" = "pageserver-failover marker" ] || fail "reads did NOT recover on pageserver-b within ${FAILOVER_BUDGET}s"
 RTO=$((RESTORED_AT - KILL_AT))
-echo " PAGESERVER FAILOVER DRILL PASSED — RTO ${RTO}s"
+DRILL_PSQL "insert into psfo values (2,'post-failover write')" >/dev/null 2>&1 && POSTWRITE=yes || POSTWRITE=no
+ok "reads RECOVERED via pageserver-b (still read-write: $POSTWRITE)"
+
+echo ""
+echo "=========================================================================="
+echo " PAGESERVER FAILOVER DRILL PASSED"
+echo "   secondary (warm) mode accepted : $([ "$SECONDARY_OK" = 1 ] && echo yes || echo 'no (cold standby)')"
+echo "   failover mechanism  : manual re-attach pageserver-b @ gen $GEN_FAILOVER + compute re-point"
+echo "   read-write after failover : $POSTWRITE"
+echo "   FAILOVER RTO (kill -> reads restored): ${RTO}s"
+echo "=========================================================================="

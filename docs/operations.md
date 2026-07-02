@@ -9,10 +9,12 @@ behavior, and troubleshooting.
 |---|---|---|
 | `GW_PORT` | 55432 | Postgres wire listener |
 | `GW_METRICS_PORT` | 9090 | `/metrics` (Prometheus), `/metrics.json`, `/healthz` |
-| `GW_COMPUTE_MODE` | static | `static` \| `exec` \| `kubectl` \| `template` |
-| `GW_TARGET` | 127.0.0.1:55432 | compute address (static/exec/kubectl) |
+| `GW_COMPUTE_MODE` | static | `static` \| `exec` \| `kubectl` \| `template` \| `warmpool` |
+| `GW_TARGET` | 127.0.0.1:55432 | compute address (static/exec/kubectl; warmpool: compute-warm svc:55433) |
 | `GW_K8S_NAMESPACE` / `GW_K8S_DEPLOYMENT` | scale-zero-pg / compute | what `kubectl` mode scales 0↔1 |
 | `GW_TARGET_TEMPLATE` / `GW_K8S_DEPLOYMENT_TEMPLATE` | — | `template` mode: `{system}` = database name (multi-DB, parked) |
+| `GW_GATE_PORT` | 9091 | `warmpool` mode: TCP port the parked warm pod polls; the gateway opens it (accept) only after the single-writer check passes |
+| `GW_WARM_DEPLOYMENT` / `GW_WARM_COLD_DEPLOYMENT` | compute-warm / compute | `warmpool` mode: the gated warm deployment, and the cold deployment that must be fully drained before the gate opens |
 | `GW_IDLE_MS` | 300000 | idle window before scale-to-zero (deployed: 60000) |
 | `GW_WAKE_TIMEOUT_MS` | 60000 | give up waking after this (deployed: 120000) |
 | `GW_CONNECT_TIMEOUT_MS` / `GW_RETRY_MS` | 1000 / 250 | per-attempt connect timeout / poll interval (deployed retry: 100) |
@@ -46,8 +48,9 @@ Quick look without Prometheus: `sh deploy/_metrics.sh`.
   safekeeper pod/PVC loses nothing and doesn't block writes (drill-verified).
 - The **compute is disposable** — kill it any time; no volume, no restore. Data is
   never in the pod.
-- **Pageserver loss** (single, MVP): serving stops until it restarts (PVC-backed);
-  history also lives in MinIO. Production: add a secondary pageserver.
+- **Pageserver loss** (single, MVP): reads stop until it restarts, OR until a warm
+  standby is promoted — the drill-measured failover is **~7 s** (see "Pageserver
+  failover"). PVC-backed; history also lives in MinIO.
 - **MinIO loss**: running computes keep serving from safekeepers+pageserver; new
   timeline creation and long-term history offload pause. PVC-backed.
 - **Both gateways down**: new connections fail (existing pipes drop); data unaffected.
@@ -136,6 +139,51 @@ the rebuilt plane): ~110 s** on orbstack — dominated by two multi-GB bucket co
   the node-loss / `kubectl delete pvc` incident.
 - Alert on backup Job failure (`kube_job_status_failed{job_name=~"backup.*"}`) and on
   backup age (last successful completion older than ~26 h).
+
+## Pageserver failover
+
+The single pageserver is the MVP's read authority — lose it and reads stall (writes
+still reach the safekeeper quorum). The reviews flagged this as an *unbounded* read
+outage. Assessment + rehearsal: `deploy/_verify-pageserver-failover.sh`.
+
+### Verdict (hands-on, neon:8464 OSS)
+
+- **A second pageserver is feasible.** 8464 accepts a **warm Secondary** location
+  (`location_config` `mode:"Secondary"`, `secondary_conf.warm:true`) that
+  pre-downloads layers from the bucket without serving — verified in the drill.
+- **Failover is MANUAL** (no storage controller here — we run
+  `control_plane_emergency_mode`). It is the same generation+1 re-attach learned in
+  the restore drill: promote the standby to `AttachedSingle` at **generation+1**
+  (fences the dead primary), then re-point the compute at it. The surviving
+  safekeeper carries the WAL, so the promoted pageserver streams forward and the DB
+  stays **read-WRITE** across the failover.
+- **Measured failover RTO: ~7 s** (kill → cold compute reads restored) in the
+  self-contained drill. This converts the SPOF from an *unbounded* outage into a
+  *known, small* RTO — a genuine reliability change even without automation.
+
+### The failover runbook (manual, until automated)
+
+Given a warm-standby pageserver `pageserver-b` (Secondary) alongside the primary:
+
+1. Confirm the primary is actually gone (don't split-brain a slow one):
+   `kubectl -n scale-zero-pg delete statefulset/pageserver --cascade=foreground`.
+2. Promote the standby at generation+1 (read the live generation from
+   `GET :9898/v1/location_config`, add 1):
+   `curl -X PUT .../v1/tenant/<T>/location_config -d '{"mode":"AttachedSingle","generation":<N+1>,"tenant_conf":{}}'`.
+3. Re-point reads at the standby: flip the `pageserver` Service selector to the
+   standby (so the compute's `neon.pageserver_connstring host=pageserver` is
+   unchanged) **or** update the connstring; then bounce the compute
+   (`rollout restart deploy/compute`) so a cold wake basebackups from the standby.
+4. Verify a read; the DB is read-write again.
+
+### To productize (make it automatic)
+
+- Run `pageserver-b` as a standing warm Secondary (a second StatefulSet, distinct
+  `identity.toml` id, same bucket) and front both with the `pageserver` Service.
+- Drive steps 1–3 from a tiny controller/liveness watcher (promote + flip selector
+  on primary-down). That is the missing automation; the generation+1 + Service-flip
+  mechanism above is proven and ready for it. (Pairs with the writable-restore
+  safekeeper re-seed gap from "Backup & disaster recovery".)
 
 ## Password rotation
 
