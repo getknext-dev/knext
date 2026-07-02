@@ -406,6 +406,25 @@ const OBSERVED_FLAKY_QUARANTINES: Record<string, { cases: string[]; observedRuns
     ],
     observedRuns: ['28597872225', '28593534713', '28590478386'],
   },
+  // Round 6 (adapter-lane confirmation run 28601386408, 787/1): the lone
+  // failure classified per the fork discipline — NOT an adapter finding:
+  // optimistic-routing does NOT read NEXT_ENABLE_ADAPTER (verified: the only
+  // isAdapterTest readers at v16.2.0 are not-found-with-pages-i18n,
+  // sub-shell-generation{,-middleware}, partial-fallback-*, deployment-id —
+  // all of which passed on first attempt this run). Pure family signature: a
+  // DIFFERENT case hung 60s each attempt (att1 'rewrite detection…', att2
+  // 'static route with catch-all sibling…', att3 'nested dynamic routes…'),
+  // each passing in the other attempts in <1.5s, zero assertion diffs;
+  // corroborated by a recovered 2-case in-run wobble in 28593534713.
+  'test/e2e/app-dir/optimistic-routing/optimistic-routing.test.ts': {
+    cases: [
+      'optimistic-routing rewrite detection: detects dynamic rewrite when URL does not match route structure',
+      'optimistic-routing static route with catch-all sibling: does not match sub-route against catch-all',
+      'optimistic-routing nested dynamic routes: predicts through multiple dynamic segments',
+      'optimistic-routing optional catch-all: predicts from index to path with segments',
+    ],
+    observedRuns: ['28601386408', '28593534713'],
+  },
 };
 
 describe('test/deploy-tests-manifest.knext.json — knext-observed flaky quarantines (#147 A3-3 final mile)', () => {

@@ -42,10 +42,11 @@
     "at v16.2.0: next.js itself skips them against its OWN deploy target, so running",
     "them against knext books upstream noise as knext failures. Mirroring upstream's",
     "own skips is honest and is NOT knext debt. Re-mirror whenever NEXTJS_REF bumps.",
-    "The eight prefetch-family `flakey` entries (segment-cache: search-params,",
+    "The nine prefetch-family `flakey` entries (segment-cache: search-params,",
     "prefetch-layout-sharing, refresh, stale-time, per-page-dynamic-stale-time,",
-    "vary-params; plus app-client-cache/client-cache.parallel-routes and",
-    "app-prefetch/prefetching) are knext-OBSERVED quarantines — see",
+    "vary-params; plus app-client-cache/client-cache.parallel-routes,",
+    "app-prefetch/prefetching and optimistic-routing) are knext-OBSERVED",
+    "quarantines — see",
     "`$knextQuarantines` for the per-entry mechanism, cross-run evidence and",
     "upstream provenance. Quarantine bar: at least one FINAL (post-retry) file",
     "failure across the full-run record; single-attempt wobbles absorbed by",
@@ -190,6 +191,14 @@
         "app dir - prefetching should show layout eagerly when prefetched with loading one level down",
         "app dir - prefetching should immediately render the loading state for a dynamic segment when fetched from higher up in the tree"
       ]
+    },
+    "test/e2e/app-dir/optimistic-routing/optimistic-routing.test.ts": {
+      "flakey": [
+        "optimistic-routing rewrite detection: detects dynamic rewrite when URL does not match route structure",
+        "optimistic-routing static route with catch-all sibling: does not match sub-route against catch-all",
+        "optimistic-routing nested dynamic routes: predicts through multiple dynamic segments",
+        "optimistic-routing optional catch-all: predicts from index to path with segments"
+      ]
     }
   },
   "rules": {
@@ -311,6 +320,18 @@
       "mechanism": "MIXED, honestly split: the uri-encoded case is an ASSERTION diff — an un-retried, immediate hasElementByCssSelector('#accordion-to-dashboard') check right after .click() (prefetching.test.ts:371) observes false when the client navigation isn't instant under shard load; the SUBSTANTIVE assertions of that test (the %20-encoded prefetch is issued and reused — both wrapped in retry()) PASS, so the encoding behavior itself is verified correct on knext. The two loading-state cases are the family's 60s createRouterAct hangs. Pre-fix run 28578203671 also failed its prefetch-priority cases, which have passed in every post-fix run (excluded from this quarantine).",
       "evidence": "run 28597872225: FINAL failure (uri-encoded case failed identically 3/3; att1 also hung the two loading-state cases); run 28593534713: 2-attempt wobble (uri-encoded + a loading-state case each attempt) then RECOVERED; run 28590478386: 1-attempt wobble (all three cases) then recovered; run 28596005486: file PASSED — cross-run wobble on identical code.",
       "provenance": "Same client prefetch-latency-under-load class upstream ledgers: runtime-prefetch family flakey block (segment-cache/prefetch-runtime.test.ts) and the app-client-cache full-page-prefetch failed entries (vercel/next.js@v16.2.0 test/deploy-tests-manifest.json)."
+    },
+    {
+      "test": "test/e2e/app-dir/optimistic-routing/optimistic-routing.test.ts",
+      "cases": [
+        "optimistic-routing rewrite detection: detects dynamic rewrite when URL does not match route structure",
+        "optimistic-routing static route with catch-all sibling: does not match sub-route against catch-all",
+        "optimistic-routing nested dynamic routes: predicts through multiple dynamic segments",
+        "optimistic-routing optional catch-all: predicts from index to path with segments"
+      ],
+      "mechanism": "60s jest timeouts in createRouterAct-driven optimistic-routing prediction flows, a DIFFERENT case per attempt (run 28601386408: att1 'rewrite detection…' hung then passed atts 2-3 in ~0.7s; att2 'static route with catch-all sibling…' hung; att3 'nested dynamic routes…' hung after passing atts 1-2) — the family's interleaving-race signature, zero assertion diffs. NOT an adapter-lane finding: this file does not read NEXT_ENABLE_ADAPTER (the only isAdapterTest readers at v16.2.0 — not-found-with-pages-i18n, sub-shell-generation{,-middleware}, partial-fallback-root-blocking, partial-fallback-shell-upgrade, deterministic-build/deployment-id — all passed on first attempt in the same run).",
+      "evidence": "run 28601386408 (first adapter-lane run): FINAL failure, alternating cases across 3 attempts; run 28593534713: 1-attempt wobble ('optional catch-all…' + 'rewrite detection…') then RECOVERED on in-run retry; runs 28578203671, 28590478386, 28596005486, 28597872225: file PASSED — cross-run wobble.",
+      "provenance": "Same client prefetch/navigation-latency-under-load class upstream ledgers (vercel/next.js@v16.2.0 test/deploy-tests-manifest.json: segment-cache/prefetch-runtime.test.ts flakey block; app-client-cache failed entries)."
     }
   ],
   "$knextExclusions": [
