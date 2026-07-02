@@ -1,12 +1,14 @@
 #!/bin/sh
 # TLS acceptance for the gateway front door (task 5D).
 #
-#   1. sslmode=require THROUGH the gateway succeeds AND the server reports a live
-#      TLS connection (pg_stat_ssl.ssl = t) -> the wire is actually encrypted.
+#   1. sslmode=require THROUGH the gateway succeeds AND psql reports a live TLS
+#      session (\conninfo "SSL connection ...") -> the CLIENT<->GATEWAY wire is
+#      actually encrypted. (pg_stat_ssl is deliberately NOT used: it reflects the
+#      gateway<->compute backend hop, which is internal plaintext.)
 #   2. sslmode=disable still works -> TLS is optional, not enforced (no regression
 #      for existing plaintext clients / sslmode=disable DSNs).
 #   3. the wake path works over TLS -> a cold connect (compute at 0) with
-#      sslmode=require wakes the compute and returns rows over the encrypted wire.
+#      sslmode=require wakes the compute and establishes an encrypted session.
 #
 # Client runs in-cluster (kubectl run) with the compute-node image (ships psql +
 # openssl). Bounded + self-cleaning like the other drills. Prereq: the pggw-tls
@@ -44,15 +46,13 @@ $K get deploy pggw -o jsonpath='{.spec.template.spec.containers[0].env[*].name}'
 $K get secret pggw-tls >/dev/null 2>&1 || fail "Secret pggw-tls missing — run deploy/gen-tls.sh first"
 ok "gateway ready with TLS configured (pggw-tls mounted)"
 
-# 1. sslmode=require succeeds AND the server confirms a live TLS session.
-#    pg_stat_ssl is a default system view; -tA yields e.g. "t|TLSv1.3".
-PROOF=$(CLIENT require "$DSN_REQUIRE" \
-  "select ssl, version from pg_stat_ssl where pid = pg_backend_pid()" | tail -1) \
-  || fail "sslmode=require could NOT connect through the gateway"
-case "$PROOF" in
-  t\|TLS*) ok "sslmode=require -> SSL connection confirmed: pg_stat_ssl = $PROOF" ;;
-  *) fail "sslmode=require connected but server reports no TLS (pg_stat_ssl = '$PROOF')" ;;
-esac
+# 1. sslmode=require succeeds AND psql confirms a live client-side TLS session.
+#    \conninfo prints "SSL connection (protocol: TLSv1.3, cipher: ...)".
+OUT=$(CLIENT require "$DSN_REQUIRE" '\conninfo') \
+  || fail "sslmode=require could NOT connect through the gateway: $OUT"
+echo "$OUT" | grep -q "SSL connection" \
+  || fail "sslmode=require connected but psql reports no SSL: $OUT"
+ok "sslmode=require -> $(echo "$OUT" | grep -o 'SSL connection.*' | head -1)"
 
 # 2. sslmode=disable still works (TLS optional, no regression).
 [ "$(CLIENT disable "$DSN_DISABLE" 'select 1' | tail -1)" = "1" ] \
@@ -64,11 +64,11 @@ $K scale deploy/compute --replicas=0 >/dev/null
 i=0; while [ "$(COMPUTE_PODS)" != "0" ]; do i=$((i+1)); [ $i -gt 60 ] && fail "compute did not reach 0"; sleep 1; done
 ok "compute at zero (no pods)"
 T0=$(date +%s)
-OUT=$(CLIENT wake "$DSN_REQUIRE" \
-  "select ssl from pg_stat_ssl where pid = pg_backend_pid()" | tail -1) \
-  || fail "cold connect over TLS failed to wake/return"
+OUT=$(CLIENT wake "$DSN_REQUIRE" '\conninfo') \
+  || fail "cold connect over TLS failed to wake/connect: $OUT"
 T1=$(date +%s)
-[ "$OUT" = "t" ] || fail "cold TLS connect did not run over SSL (pg_stat_ssl.ssl = '$OUT')"
+echo "$OUT" | grep -q "SSL connection" \
+  || fail "cold TLS connect did not run over SSL: $OUT"
 [ "$(COMPUTE_PODS)" = "1" ] || fail "compute pod not running after TLS wake"
 ok "cold connect over TLS (sslmode=require) woke compute 0->1 in $((T1-T0))s, session encrypted"
 
