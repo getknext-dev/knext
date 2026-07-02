@@ -1,0 +1,131 @@
+# Alertmanager + a verifiable webhook sink. Alerts that fire must REACH
+# someone: Prometheus (60) evaluates rules; this routes them. The alert-sink
+# is a placeholder receiver that logs every delivery — replace its URL in
+# alertmanager.yml with Slack/PagerDuty for real on-call. The sink also makes
+# the pager path TESTABLE (deploy/_verify-alerting.sh greps its logs).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: alertmanager-config
+  namespace: scale-zero-pg
+data:
+  alertmanager.yml: |
+    route:
+      receiver: webhook-sink
+      group_wait: 5s
+      group_interval: 30s
+      repeat_interval: 4h
+    receivers:
+      - name: webhook-sink
+        webhook_configs:
+          # PLACEHOLDER receiver: swap for slack_configs/pagerduty_configs in prod.
+          - url: http://alert-sink.scale-zero-pg.svc:8080/
+            send_resolved: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: alertmanager
+  namespace: scale-zero-pg
+  labels: { app: alertmanager, plane: observability }
+spec:
+  replicas: 1
+  revisionHistoryLimit: 2
+  selector: { matchLabels: { app: alertmanager } }
+  template:
+    metadata:
+      labels: { app: alertmanager, plane: observability }
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: alertmanager
+          image: prom/alertmanager:v0.27.0 # pinned
+          args:
+            - --config.file=/etc/alertmanager/alertmanager.yml
+            - --storage.path=/alertmanager
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+          ports:
+            - { name: web, containerPort: 9093 }
+          volumeMounts:
+            - { name: config, mountPath: /etc/alertmanager }
+            - { name: data, mountPath: /alertmanager }
+          readinessProbe:
+            httpGet: { path: /-/ready, port: web }
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /-/healthy, port: web }
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            requests: { cpu: 10m, memory: 32Mi }
+            limits: { memory: 64Mi }
+      volumes:
+        - name: config
+          configMap: { name: alertmanager-config }
+        - name: data
+          emptyDir: {} # silences/notification-log only; safe to lose
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: alertmanager
+  namespace: scale-zero-pg
+spec:
+  selector: { app: alertmanager }
+  ports:
+    - { name: web, port: 9093, targetPort: web }
+---
+# Log-everything webhook sink: proves deliveries end-to-end. Busybox nc loop:
+# answers 200 and prints each request (headers+body) to stdout, where
+# _verify-alerting.sh greps for the alert name.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: alert-sink
+  namespace: scale-zero-pg
+  labels: { app: alert-sink, plane: observability }
+spec:
+  replicas: 1
+  revisionHistoryLimit: 2
+  selector: { matchLabels: { app: alert-sink } }
+  template:
+    metadata:
+      labels: { app: alert-sink, plane: observability }
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: sink
+          image: busybox:1.36 # pinned
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              while true; do
+                { printf 'HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n'; } \
+                  | nc -l -p 8080 -w 5
+              done
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+          ports:
+            - { name: http, containerPort: 8080 }
+          resources:
+            requests: { cpu: 10m, memory: 16Mi }
+            limits: { memory: 32Mi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: alert-sink
+  namespace: scale-zero-pg
+spec:
+  selector: { app: alert-sink }
+  ports:
+    - { name: http, port: 8080, targetPort: http }

@@ -1,9 +1,9 @@
 # Minimal, self-contained Prometheus for the platform — NO operator, NO helm.
-# One Deployment + ConfigMap (config + alert rules) + emptyDir. It discovers the
+# One Deployment + ConfigMap (config + alert rules) + PVC. It discovers the
 # gateway fleet by pod label (app=pggw) and evaluates the three alerts called out
 # in docs/reviews/devops-review.md. ClusterIP only (never exposed externally).
 #
-# This is deliberately ephemeral (emptyDir): it is a live signal + alert
+# Data persists on a small PVC (15d retention): capacity trends and incident
 # evaluator for the MVP, not a long-term metrics store. Point remote_write at a
 # durable backend for production.
 apiVersion: v1
@@ -51,6 +51,10 @@ data:
       evaluation_interval: 15s
     rule_files:
       - /etc/prometheus/rules/*.yml
+    alerting:
+      alertmanagers:
+        - static_configs:
+            - targets: ["alertmanager:9093"]
     scrape_configs:
       # Discover only the gateway pods, only in this namespace, only their
       # :9090 metrics port. Everything else is dropped by relabeling.
@@ -120,6 +124,7 @@ spec:
     spec:
       serviceAccountName: prometheus
       securityContext:
+        fsGroup: 65534
         runAsNonRoot: true
         runAsUser: 65534 # nobody — prom/prometheus default
         runAsGroup: 65534
@@ -131,7 +136,7 @@ spec:
           args:
             - --config.file=/etc/prometheus/prometheus.yml
             - --storage.tsdb.path=/prometheus
-            - --storage.tsdb.retention.time=6h
+            - --storage.tsdb.retention.time=15d
             - --web.enable-lifecycle
           securityContext:
             allowPrivilegeEscalation: false
@@ -151,7 +156,10 @@ spec:
             limits: { memory: 384Mi }
           volumeMounts:
             - { name: config, mountPath: /etc/prometheus/prometheus.yml, subPath: prometheus.yml }
-            - { name: rules, mountPath: /etc/prometheus/rules/rules.yml, subPath: rules.yml }
+            # rules mounted as a DIRECTORY on purpose: subPath mounts never see
+            # ConfigMap updates, so rule changes would need a pod restart (this
+            # broke the alert-fire drill before the fix).
+            - { name: rules, mountPath: /etc/prometheus/rules }
             - { name: data, mountPath: /prometheus }
       volumes:
         - name: config
@@ -159,7 +167,7 @@ spec:
         - name: rules
           configMap: { name: prometheus-config, items: [{ key: rules.yml, path: rules.yml }] }
         - name: data
-          emptyDir: {}
+          persistentVolumeClaim: { claimName: prometheus-data }
 ---
 apiVersion: v1
 kind: Service
@@ -172,3 +180,12 @@ spec:
   selector: { app: prometheus }
   ports:
     - { name: web, port: 9090, targetPort: web }
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: prometheus-data
+  namespace: scale-zero-pg
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources: { requests: { storage: 2Gi } }

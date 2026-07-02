@@ -43,13 +43,21 @@ $K create configmap prometheus-config --from-file=rules.yml=/tmp/rules-drill-$$.
 $K get cm prometheus-config -o json | \
   python3 -c "import json,sys; d=json.load(sys.stdin); d['data']['rules.yml']=open('/tmp/rules-drill-$$.yml').read(); print(json.dumps(d))" | \
   $K replace -f - >/dev/null
-$K exec deploy/prometheus -- kill -HUP 1 2>/dev/null || $K rollout restart deploy/prometheus >/dev/null
-ok "drill rule injected (KsPgAlertDrill, vector(1))"
-
-# 3. the alert must arrive at the webhook sink (via alertmanager)
+# ConfigMap volumes propagate on the kubelet sync period (~1min): wait until
+# the file the pod actually sees contains the drill rule, THEN reload.
 i=0
-until $K logs deploy/alert-sink --since=5m 2>/dev/null | grep -q 'KsPgAlertDrill'; do
-  i=$((i+1)); [ $i -gt 60 ] && { restore_rules; fail "drill alert never reached the sink (>120s)"; }
+until $K exec deploy/prometheus -- cat /etc/prometheus/rules/rules.yml 2>/dev/null | grep -q 'KsPgAlertDrill'; do
+  i=$((i+1)); [ $i -gt 60 ] && { restore_rules; fail "drill rule never propagated into the pod (>120s)"; }
+  sleep 2
+done
+$K exec deploy/prometheus -- kill -HUP 1 2>/dev/null || $K rollout restart deploy/prometheus >/dev/null
+ok "drill rule injected + propagated + config reloaded (KsPgAlertDrill)"
+
+# 3. the alert must arrive at the webhook sink (via alertmanager).
+# Budget: evaluation interval (<=1m) + group_wait + delivery.
+i=0
+until $K logs deploy/alert-sink --since=10m 2>/dev/null | grep -q 'KsPgAlertDrill'; do
+  i=$((i+1)); [ $i -gt 120 ] && { restore_rules; fail "drill alert never reached the sink (>240s)"; }
   sleep 2
 done
 ok "drill alert delivered: prometheus -> alertmanager -> webhook sink"
