@@ -52,11 +52,11 @@ spec:
             timeoutSeconds: 3
             failureThreshold: 6
           resources:
-            requests: { cpu: 50m, memory: 256Mi }
+            requests: { cpu: 50m, memory: 256Mi, ephemeral-storage: 100Mi }
             # 512Mi: 256Mi OOMKilled 12x under a legitimate full-bucket backup
             # mirror (observed live at ~18GB). The durability tier must survive
             # its own backup traffic.
-            limits: { memory: 512Mi }
+            limits: { memory: 512Mi, ephemeral-storage: 1Gi }
       volumes:
         - name: data
           persistentVolumeClaim: { claimName: minio-data }

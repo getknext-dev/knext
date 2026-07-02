@@ -109,3 +109,11 @@ for f in 51-storage-broker.yaml 52-safekeeper.yaml 53-pageserver.yaml 55-storage
 done
 [ -n "$CT" ] || fail "could not extract compute tag from 20-compute.yaml"
 ok "compute↔storage version pair consistent (:$CT everywhere)"
+
+# 13. contract: every long-running pod declares ephemeral-storage requests
+#     (incident 2026-07-03: pods without them were kubelet's preferred
+#     eviction targets during DiskPressure - the storage plane died first).
+for f in 10-gateway.yaml 20-compute.yaml 25-compute-warm.yaml 50-minio.yaml 51-storage-broker.yaml 52-safekeeper.yaml 53-pageserver.yaml 60-prometheus.yaml 61-alertmanager.yaml; do
+  grep -q 'ephemeral-storage' "$f" || fail "$f lacks ephemeral-storage requests"
+done
+ok "all long-running pods declare ephemeral-storage requests"

@@ -76,8 +76,8 @@ spec:
             periodSeconds: 1 # tight: wake latency depends on it
             failureThreshold: 60
           resources:
-            requests: { cpu: 250m, memory: 256Mi }
-            limits: { memory: 1Gi }
+            requests: { cpu: 250m, memory: 256Mi, ephemeral-storage: 100Mi }
+            limits: { memory: 1Gi, ephemeral-storage: 1Gi }
       volumes:
         - name: compute-files
           configMap:

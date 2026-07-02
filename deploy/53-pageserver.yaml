@@ -90,8 +90,8 @@ spec:
           # Memory-hungry: it materializes pages + holds a layer cache. Sized for
           # a local cluster; raise for real tenant/write volume.
           resources:
-            requests: { cpu: 100m, memory: 256Mi }
-            limits: { memory: 1Gi }
+            requests: { cpu: 100m, memory: 256Mi, ephemeral-storage: 100Mi }
+            limits: { memory: 1Gi, ephemeral-storage: 1Gi }
       volumes:
         - name: config
           configMap: { name: pageserver-config }

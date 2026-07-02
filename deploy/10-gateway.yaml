@@ -105,8 +105,8 @@ spec:
             initialDelaySeconds: 1
             periodSeconds: 5
           resources:
-            requests: { cpu: 50m, memory: 32Mi }
-            limits: { memory: 128Mi }
+            requests: { cpu: 50m, memory: 32Mi, ephemeral-storage: 100Mi }
+            limits: { memory: 128Mi, ephemeral-storage: 1Gi }
       volumes:
         - name: pggw-tls # self-signed keypair; create with deploy/gen-tls.sh
           secret:

@@ -155,8 +155,8 @@ spec:
             periodSeconds: 10
             failureThreshold: 6
           resources:
-            requests: { cpu: 50m, memory: 128Mi }
-            limits: { memory: 384Mi }
+            requests: { cpu: 50m, memory: 128Mi, ephemeral-storage: 100Mi }
+            limits: { memory: 384Mi, ephemeral-storage: 1Gi }
           volumeMounts:
             - { name: config, mountPath: /etc/prometheus/prometheus.yml, subPath: prometheus.yml }
             # rules mounted as a DIRECTORY on purpose: subPath mounts never see
