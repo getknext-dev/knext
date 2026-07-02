@@ -272,10 +272,25 @@ case "${RUNTIME}" in
   *)   SERVER_CMD="node" ;;
 esac
 
-log "booting (${RUNTIME}) ${SERVER_JS} on 127.0.0.1:${PORT}"
+# ── B7a (#174, triage of run 28564443662): HOSTNAME must be explicitly EMPTIED,
+# never pinned to 127.0.0.1. In next@16.2.0's standalone server the
+# middleware-visible request origin is ALWAYS http://localhost:<port> (verified
+# via the x-middleware-rewrite response header on the rebuilt upstream
+# middleware-custom-matchers fixture), while the router's initUrl uses the
+# configured hostname VERBATIM (server/lib/router-utils/resolve-routes.js:116).
+# With HOSTNAME=127.0.0.1, getRelativeURL(rewrite, initUrl) saw
+# localhost !== 127.0.0.1, so every SAME-ORIGIN middleware rewrite
+# (NextResponse.rewrite(new URL('/', request.url))) was misclassified as an
+# EXTERNAL rewrite and proxied back to the server itself — 500s locally,
+# proxy-loop timeouts in CI, exactly the 6 middleware-custom-matchers failures.
+# HOSTNAME= (empty) → server.js falls back to 0.0.0.0 and Next normalizes the
+# origin to localhost on BOTH sides → rewrites relativize to '/' and stay
+# internal. Explicit (not merely dropped) because Docker/CI images export
+# HOSTNAME=<container-id>, which would reintroduce the mismatch.
+log "booting (${RUNTIME}) ${SERVER_JS} on 0.0.0.0:${PORT} (HOSTNAME emptied — see B7a note)"
 (
   cd "${STANDALONE_APP_DIR}"
-  PORT="${PORT}" HOSTNAME="127.0.0.1" NODE_ENV="production" \
+  PORT="${PORT}" HOSTNAME="" NODE_ENV="production" \
     NEXT_DEPLOYMENT_ID="${DEPLOYMENT_ID}" \
     exec "${SERVER_CMD}" "${SERVER_JS}"
 ) >"${SERVER_LOG}" 2>&1 &

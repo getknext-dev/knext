@@ -44,11 +44,20 @@ let appDir = '';
 let deployStdout = '';
 let parsedPort = 0;
 
-/** A standalone server.js that a fake `next build` would emit: serves HTTP on $PORT. */
+/** A standalone server.js that a fake `next build` would emit: serves HTTP on $PORT.
+ * Mirrors the REAL generated standalone server.js, which reads
+ * `process.env.HOSTNAME || '0.0.0.0'` — and records the HOSTNAME it was booted
+ * with so the test can assert the deploy script's boot env (B7a, #174). */
 const FAKE_SERVER_JS = `
+const fs = require('node:fs');
+const path = require('node:path');
 const http = require('node:http');
 const port = Number(process.env.PORT || 3000);
 const host = process.env.HOSTNAME || '0.0.0.0';
+fs.writeFileSync(
+  path.join(__dirname, 'HOSTNAME_AT_BOOT'),
+  JSON.stringify(process.env.HOSTNAME ?? null),
+);
 http.createServer((req, res) => {
   res.writeHead(200, { 'content-type': 'text/html' });
   res.end('<!doctype html><html><body>knext e2e fixture ok</body></html>');
@@ -260,6 +269,32 @@ describe('scripts/e2e-deploy.sh — official deploy-script contract (#89)', () =
     const firstBuildId = r.stdout.match(/BUILD_ID: (.+)/)?.[1]?.trim();
     const meta = readFileSync(join(appDir, '.adapter-build.log'), 'utf8');
     expect(meta).toContain(`BUILD_ID=${firstBuildId}`);
+  });
+
+  it('boots the server WITHOUT pinning HOSTNAME to 127.0.0.1 (B7a, #174 — middleware rewrites)', () => {
+    // Triage of run 28564443662 → #174 (middleware-custom-matchers, 6 assertion
+    // failures): the deploy script booted the standalone server with
+    // HOSTNAME=127.0.0.1. In next@16.2.0's standalone server the middleware-visible
+    // request origin is ALWAYS http://localhost:<port> (verified via the
+    // x-middleware-rewrite response header), while the router's initUrl uses the
+    // configured hostname VERBATIM (server/lib/router-utils/resolve-routes.js:116).
+    // getRelativeURL(rewrite, initUrl) then sees localhost !== 127.0.0.1, so every
+    // same-origin middleware rewrite (NextResponse.rewrite(new URL('/', request.url)))
+    // is misclassified as an EXTERNAL rewrite and proxied back to the server itself
+    // → 500 locally / proxy-loop timeouts in CI, exactly on the matcher-conditioned
+    // routes (has/missing) whose tests assert the rewritten 200.
+    //
+    // The empirically verified safe boot env (upstream fixture rebuilt through this
+    // script, next@16.2.0): HOSTNAME empty/unset → server binds 0.0.0.0 and Next
+    // normalizes the origin to localhost on BOTH sides → rewrite relativized to '/'
+    // → 200. HOSTNAME must be explicitly EMPTIED (not merely dropped): Docker/CI
+    // images export HOSTNAME=<container-id>, which would reintroduce the mismatch.
+    const recorded = readFileSync(join(appDir, '.next', 'standalone', 'HOSTNAME_AT_BOOT'), 'utf8');
+    const hostnameAtBoot = JSON.parse(recorded) as string | null;
+    expect(
+      hostnameAtBoot,
+      'deploy script must boot server.js with HOSTNAME explicitly emptied (or localhost) — any other value desyncs the middleware-visible origin from the router initUrl and breaks same-origin middleware rewrites (#174)',
+    ).toSatisfy((v: string | null) => v === '' || v === 'localhost');
   });
 
   it('build output stays on stderr during deploy (stdout is the URL contract)', () => {
