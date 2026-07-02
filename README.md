@@ -158,6 +158,8 @@ The Dockerfile uses a **2-stage build** producing a lean distroless Node image:
 
 On the first request a pod compiles its JavaScript and writes the V8 code cache to the volume; subsequent cold-started pods deserialize that cache instead of re-parsing/JIT-compiling — the same approach Vercel Fluid uses. In production the [kn-next operator](./docs/operator/README.md) mounts this cache on a PVC (`spec.cache.enableBytecodeCache`) so it survives scale-to-zero. Combined with Knative's resource caching, this achieves consistent sub-second cold starts even with `minScale: 0`.
 
+**Running on Bun?** When your app is deployed with `runtime: bun`, the same cache volume is used for Bun's runtime transpiler cache (`BUN_RUNTIME_TRANSPILER_CACHE_PATH=/cache/bytecode/bun-transpiler`). Bun doesn't have an on-disk bytecode cache like Node's — instead it persists the *transpiled source* of large modules (roughly 50 KB and up, which covers Next.js's server internals) so a scaled-from-zero pod skips re-transpiling them. Measured on a minimal Next 16.2 app this cuts time-to-first-response by about 20% on a warm cache, and it is fail-open: if the cache directory is missing or unwritable, Bun simply serves without it. Set `BUN_RUNTIME_TRANSPILER_CACHE_PATH=0` to opt out.
+
 ---
 
 ## Quick Start

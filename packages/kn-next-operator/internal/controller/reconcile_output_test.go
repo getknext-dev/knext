@@ -319,6 +319,70 @@ var _ = Describe("NextApp Controller reconcile output", func() {
 		})
 	})
 
+	// Bun analog of NODE_COMPILE_CACHE (measured on next@16.2.4 standalone,
+	// Bun 1.3.5: warm transpiler cache = -56ms / ~20% off time-to-first-response;
+	// `bun build --bytecode` hard-fails on the standalone server, so the runtime
+	// transpiler cache env var is the mechanism). Wired exactly like
+	// NODE_COMPILE_CACHE — same Provider+EnableBytecodeCache gate, same PVC —
+	// plus the runtime=bun gate: the var is meaningless under Node.
+	Context("Bun transpiler cache (runtime=bun)", func() {
+		It("sets BUN_RUNTIME_TRANSPILER_CACHE_PATH on the mounted PVC when runtime is bun", func() {
+			nn := reconcileOnce("bun-tc-on", appsv1alpha1.NextAppSpec{
+				Image:   validImage,
+				Runtime: "bun",
+				Cache: &appsv1alpha1.CacheSpec{
+					Provider:            "redis",
+					URL:                 "redis://cache:6379",
+					EnableBytecodeCache: true,
+				},
+			})
+
+			ksvc := &servingv1.Service{}
+			Expect(k8sClient.Get(ctx, nn, ksvc)).To(Succeed())
+			env := ksvc.Spec.Template.Spec.Containers[0].Env
+
+			By("pointing Bun's runtime transpiler cache into the bytecode-cache PVC")
+			Expect(envValue(env, "BUN_RUNTIME_TRANSPILER_CACHE_PATH")).
+				To(Equal("/cache/bytecode/bun-transpiler"))
+
+			By("keeping NODE_COMPILE_CACHE unchanged (inert under Bun, needed if rebooted under Node)")
+			Expect(envValue(env, "NODE_COMPILE_CACHE")).
+				To(Equal("/cache/bytecode/latest"))
+		})
+
+		It("does NOT set BUN_RUNTIME_TRANSPILER_CACHE_PATH when runtime is node/unset (Node env byte-identical)", func() {
+			nn := reconcileOnce("bun-tc-node", appsv1alpha1.NextAppSpec{
+				Image: validImage,
+				Cache: &appsv1alpha1.CacheSpec{
+					Provider:            "redis",
+					URL:                 "redis://cache:6379",
+					EnableBytecodeCache: true,
+				},
+			})
+
+			ksvc := &servingv1.Service{}
+			Expect(k8sClient.Get(ctx, nn, ksvc)).To(Succeed())
+			Expect(envValue(ksvc.Spec.Template.Spec.Containers[0].Env, "BUN_RUNTIME_TRANSPILER_CACHE_PATH")).
+				To(BeEmpty())
+		})
+
+		It("does NOT set BUN_RUNTIME_TRANSPILER_CACHE_PATH without EnableBytecodeCache (no PVC to write to)", func() {
+			nn := reconcileOnce("bun-tc-nocache", appsv1alpha1.NextAppSpec{
+				Image:   validImage,
+				Runtime: "bun",
+				Cache: &appsv1alpha1.CacheSpec{
+					Provider: "redis",
+					URL:      "redis://cache:6379",
+				},
+			})
+
+			ksvc := &servingv1.Service{}
+			Expect(k8sClient.Get(ctx, nn, ksvc)).To(Succeed())
+			Expect(envValue(ksvc.Spec.Template.Spec.Containers[0].Env, "BUN_RUNTIME_TRANSPILER_CACHE_PATH")).
+				To(BeEmpty())
+		})
+	})
+
 	Context("RUM env propagation (#94)", func() {
 		It("does NOT set NEXT_PUBLIC_RUM_ENABLED when RUM is off", func() {
 			nn := reconcileOnce("rum-off", appsv1alpha1.NextAppSpec{
