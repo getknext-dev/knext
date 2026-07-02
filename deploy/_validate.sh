@@ -97,3 +97,15 @@ grep -q 'Retain' harden-pvs.sh || fail "harden-pvs.sh must set Retain reclaim po
 ok "gen-secrets.sh + harden-pvs.sh present"
 
 echo "deploy validation: all checks passed"
+
+# 12. contract: compute and storage are a VERSION PAIR (ADR-0002 kill-criterion
+#     #3; the pageserver wire protocol has no cross-version guarantee). A tag
+#     drift anywhere fails the build.
+CT=$(grep -o 'neondatabase/compute-node-v[0-9]*:[a-z0-9.]*' 20-compute.yaml | head -1 | cut -d: -f2)
+for f in 51-storage-broker.yaml 52-safekeeper.yaml 53-pageserver.yaml 55-storage-init.yaml; do
+  for st in $(grep -o 'neondatabase/neon:[a-z0-9.]*' "$f" | cut -d: -f2 | sort -u); do
+    [ "$st" = "$CT" ] || fail "version-pair drift: $f uses neon:$st but compute is :$CT"
+  done
+done
+[ -n "$CT" ] || fail "could not extract compute tag from 20-compute.yaml"
+ok "compute↔storage version pair consistent (:$CT everywhere)"
