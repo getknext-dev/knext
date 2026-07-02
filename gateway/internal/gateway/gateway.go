@@ -9,7 +9,9 @@ package gateway
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"strconv"
@@ -43,6 +45,7 @@ type Gateway struct {
 	opts    wake.Opts
 	idleMs  int
 	connSem chan struct{} // nil = unlimited (GW_MAX_CONNS)
+	tlsConf *tls.Config   // nil = TLS unconfigured: SSLRequest gets 'N'
 	log     func(string)
 
 	// Peers guards the idle decision when running 2+ replicas: sleep only
@@ -64,6 +67,10 @@ func New(env wake.Env, log func(string)) (*Gateway, error) {
 	if log == nil {
 		log = func(string) {}
 	}
+	tlsConf, err := loadTLS(env)
+	if err != nil {
+		return nil, err
+	}
 	g := &Gateway{
 		driver:  driver,
 		metrics: metrics.NewMetrics(),
@@ -72,9 +79,13 @@ func New(env wake.Env, log func(string)) (*Gateway, error) {
 			WakeTimeoutMs:    envInt(env, "GW_WAKE_TIMEOUT_MS", 60000),
 			RetryMs:          envInt(env, "GW_RETRY_MS", 250),
 		},
-		idleMs: envInt(env, "GW_IDLE_MS", 300000),
-		log:    log,
-		active: map[string]*activeEntry{},
+		idleMs:  envInt(env, "GW_IDLE_MS", 300000),
+		tlsConf: tlsConf,
+		log:     log,
+		active:  map[string]*activeEntry{},
+	}
+	if tlsConf != nil {
+		log("[gw] TLS enabled on the Postgres wire (SSLRequest -> S); sslmode=disable still accepted")
 	}
 	if n := envInt(env, "GW_MAX_CONNS", 0); n > 0 {
 		g.connSem = make(chan struct{}, n)
@@ -85,6 +96,28 @@ func New(env wake.Env, log func(string)) (*Gateway, error) {
 		wp.AttachMetrics(g.metrics)
 	}
 	return g, nil
+}
+
+// loadTLS builds the front-door TLS config from GW_TLS_CERT_FILE +
+// GW_TLS_KEY_FILE. Both unset -> nil (TLS disabled, SSLRequest gets 'N').
+// Set-but-unloadable or half-configured -> error, so New() fails fast at
+// startup with a clear message rather than silently serving plaintext.
+func loadTLS(env wake.Env) (*tls.Config, error) {
+	cert, key := env["GW_TLS_CERT_FILE"], env["GW_TLS_KEY_FILE"]
+	if cert == "" && key == "" {
+		return nil, nil
+	}
+	if cert == "" || key == "" {
+		return nil, fmt.Errorf("TLS half-configured: set BOTH GW_TLS_CERT_FILE and GW_TLS_KEY_FILE (cert=%q key=%q)", cert, key)
+	}
+	pair, err := tls.LoadX509KeyPair(cert, key)
+	if err != nil {
+		return nil, fmt.Errorf("loading TLS cert/key (GW_TLS_CERT_FILE=%s GW_TLS_KEY_FILE=%s): %w", cert, key, err)
+	}
+	return &tls.Config{
+		Certificates: []tls.Certificate{pair},
+		MinVersion:   tls.VersionTLS12,
+	}, nil
 }
 
 func envInt(env wake.Env, key string, def int) int {
@@ -181,7 +214,37 @@ func (g *Gateway) handle(client net.Conn) {
 				return
 			}
 			switch msg.Type {
-			case proto.TypeSSL, proto.TypeGSSEnc:
+			case proto.TypeSSL:
+				if g.tlsConf != nil {
+					// Accept TLS: reply 'S', wrap the conn, and restart the loop
+					// reading the real StartupMessage over the encrypted channel.
+					// After 'S' the client sends a TLS ClientHello, not plaintext,
+					// so there is no buffered rest to preserve.
+					if _, err := client.Write([]byte("S")); err != nil {
+						_ = client.Close()
+						return
+					}
+					tlsConn := tls.Server(client, g.tlsConf)
+					_ = tlsConn.SetDeadline(time.Now().Add(handshakeTimeout))
+					if err := tlsConn.Handshake(); err != nil {
+						g.log("[gw] TLS handshake failed: " + err.Error())
+						_ = tlsConn.Close()
+						return
+					}
+					_ = tlsConn.SetDeadline(time.Time{})
+					client = tlsConn
+					buf = nil
+					continue // client now sends the real StartupMessage over TLS
+				}
+				// TLS unconfigured: decline like GSSEnc (plaintext continues).
+				buf = append([]byte(nil), rest...) // keep whatever followed
+				if _, err := client.Write([]byte("N")); err != nil {
+					_ = client.Close()
+					return
+				}
+				continue
+			case proto.TypeGSSEnc:
+				// GSS encryption is never offered; always decline.
 				buf = append([]byte(nil), rest...) // keep whatever followed
 				if _, err := client.Write([]byte("N")); err != nil {
 					_ = client.Close()
