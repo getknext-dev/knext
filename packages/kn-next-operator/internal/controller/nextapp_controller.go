@@ -348,6 +348,19 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 		// HOSTNAME for its spawned standalone child, making this injection moot
 		// there — kept as defense-in-depth for custom images that run server.js
 		// directly. Do NOT change this to a loopback IP or hostname.
+		//
+		// Pod identity for tracing (#184): this override clobbers kubelet's
+		// HOSTNAME=<pod-name>, and we can NOT restore it via the downward API —
+		// valueFrom.fieldRef in ksvc env is feature-gated on stock Knative
+		// (`kubernetes.podspec-fieldref`, Disabled by default: serving
+		// pkg/apis/config/features.go; the validation webhook rejects the
+		// Service via EnvVarSourceMask, k8s_validation.go). Requiring a
+		// cluster-wide config-features edit is not acceptable for a default
+		// path. Instead the knext runtime (buildChildEnv) recovers the pod
+		// name from the KERNEL hostname (os.hostname() — kubelet sets the
+		// pod's OS hostname to the pod name; this env override does not touch
+		// it) and exports it as KNEXT_POD_NAME → otel host.name. Do NOT add a
+		// fieldRef env here; it would break deploys on stock Knative.
 		envVars = append(envVars, corev1.EnvVar{Name: "HOSTNAME", Value: "0.0.0.0"})
 		envVars = append(envVars, corev1.EnvVar{Name: "NODE_ENV", Value: "production"})
 

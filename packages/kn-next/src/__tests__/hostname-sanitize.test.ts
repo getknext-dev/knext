@@ -21,12 +21,18 @@
  * (otel host.name) — sanitizing must not silently drop the pod identity.
  */
 
+import { hostname as kernelHostname } from "node:os";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { buildChildEnv } from "../adapters/env";
 import { resolveOtelOptions } from "../adapters/otel-config";
 
 const SAVED: Record<string, string | undefined> = {};
-const KEYS = ["HOSTNAME", "KNEXT_POD_NAME", "PORT"] as const;
+const KEYS = [
+    "HOSTNAME",
+    "KNEXT_POD_NAME",
+    "PORT",
+    "KUBERNETES_SERVICE_HOST",
+] as const;
 
 beforeEach(() => {
     for (const k of KEYS) {
@@ -81,6 +87,32 @@ describe("buildChildEnv: HOSTNAME sanitized for the standalone child (#178)", ()
         expect(buildChildEnv().KNEXT_POD_NAME).toBeUndefined();
     });
 
+    // #184 review nit: the skip-list was only 0.0.0.0/falsy — loopback values
+    // got stashed as KNEXT_POD_NAME and leaked into otel host.name.
+    it.each([
+        "127.0.0.1",
+        "127.0.53.53",
+        "::1",
+        "::",
+        "localhost",
+        "LOCALHOST",
+    ])("does NOT stash bind/loopback HOSTNAME=%s as pod identity (#184)", (value) => {
+        process.env.HOSTNAME = value;
+        expect(buildChildEnv().KNEXT_POD_NAME).toBeUndefined();
+    });
+
+    it("a real pod-name HOSTNAME still passes through as KNEXT_POD_NAME (#184)", () => {
+        process.env.HOSTNAME = "myapp-00001-deployment-7f9c-xk2lp";
+        expect(buildChildEnv().KNEXT_POD_NAME).toBe(
+            "myapp-00001-deployment-7f9c-xk2lp",
+        );
+        // "127." must match as a PREFIX of an IP-shaped value only in spirit —
+        // a name merely starting with "127" and no dot-segment ambiguity is fine,
+        // but anything under 127. is loopback space. Assert the non-loopback name.
+        process.env.HOSTNAME = "pod-127-suffix";
+        expect(buildChildEnv().KNEXT_POD_NAME).toBe("pod-127-suffix");
+    });
+
     it("never clobbers an explicitly-set KNEXT_POD_NAME (e.g. downward-API wiring)", () => {
         process.env.HOSTNAME = "container-id-abcdef";
         process.env.KNEXT_POD_NAME = "myapp-00001-deployment-7f9c-xk2lp";
@@ -100,6 +132,47 @@ describe("buildChildEnv: HOSTNAME sanitized for the standalone child (#178)", ()
         expect(buildChildEnv().PORT).toBe("3000");
         process.env.PORT = "8080";
         expect(buildChildEnv().PORT).toBe("8080");
+    });
+});
+
+describe("buildChildEnv: kernel-hostname fallback on the operator path (#184)", () => {
+    // The operator injects HOSTNAME=0.0.0.0 (bind override, #178) and CANNOT
+    // inject KNEXT_POD_NAME via the downward API: valueFrom.fieldRef in ksvc
+    // env is feature-gated on stock Knative (kubernetes.podspec-fieldref,
+    // Disabled by default — knative serving pkg/apis/config/features.go) and
+    // the validation webhook rejects the Service. The pod identity that DOES
+    // survive is the kernel hostname: kubelet sets the pod's OS hostname to
+    // the pod name, and the env-var override does not touch it. So inside
+    // Kubernetes we fall back to os.hostname().
+    it("falls back to os.hostname() when in k8s and HOSTNAME is a bind address", () => {
+        process.env.KUBERNETES_SERVICE_HOST = "10.96.0.1";
+        process.env.HOSTNAME = "0.0.0.0";
+        expect(buildChildEnv().KNEXT_POD_NAME).toBe(kernelHostname());
+    });
+
+    it("falls back to os.hostname() when in k8s and HOSTNAME is unset", () => {
+        process.env.KUBERNETES_SERVICE_HOST = "10.96.0.1";
+        expect(buildChildEnv().KNEXT_POD_NAME).toBe(kernelHostname());
+    });
+
+    it("does NOT use the kernel hostname outside Kubernetes", () => {
+        process.env.HOSTNAME = "0.0.0.0";
+        expect(buildChildEnv().KNEXT_POD_NAME).toBeUndefined();
+    });
+
+    it("an explicit KNEXT_POD_NAME still wins over the kernel fallback", () => {
+        process.env.KUBERNETES_SERVICE_HOST = "10.96.0.1";
+        process.env.HOSTNAME = "0.0.0.0";
+        process.env.KNEXT_POD_NAME = "wired-pod-name";
+        expect(buildChildEnv().KNEXT_POD_NAME).toBe("wired-pod-name");
+    });
+
+    it("a real pod-name HOSTNAME wins over the kernel fallback (parent env is authoritative)", () => {
+        process.env.KUBERNETES_SERVICE_HOST = "10.96.0.1";
+        process.env.HOSTNAME = "myapp-00001-deployment-7f9c-xk2lp";
+        expect(buildChildEnv().KNEXT_POD_NAME).toBe(
+            "myapp-00001-deployment-7f9c-xk2lp",
+        );
     });
 });
 

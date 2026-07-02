@@ -1,3 +1,23 @@
+import { hostname } from "node:os";
+
+/**
+ * Bind/loopback values that must never be stashed as the pod identity:
+ * they are addresses, not names (#184). `127.` is prefix-matched — the whole
+ * 127.0.0.0/8 block is loopback (e.g. DNS collision sentinels like
+ * 127.0.53.53), and no valid pod name contains a dot anyway.
+ */
+const BIND_OR_LOOPBACK_HOSTNAMES = new Set([
+    "0.0.0.0",
+    "::",
+    "::1",
+    "localhost",
+]);
+
+function isBindOrLoopback(value: string): boolean {
+    const v = value.toLowerCase();
+    return BIND_OR_LOOPBACK_HOSTNAMES.has(v) || v.startsWith("127.");
+}
+
 /**
  * Builds the environment object for the spawned Next.js standalone server.
  *
@@ -30,14 +50,22 @@ export function buildChildEnv(
     overrides: Record<string, string> = {},
 ): NodeJS.ProcessEnv {
     const parentHostname = process.env.HOSTNAME;
-    // Stash the pod identity before sanitizing — but never stash a bind
-    // address (the operator injects HOSTNAME=0.0.0.0), and never clobber an
-    // explicitly-wired KNEXT_POD_NAME (e.g. k8s downward API).
+    // Stash the pod identity before sanitizing — but never stash a bind or
+    // loopback address (the operator injects HOSTNAME=0.0.0.0; compose files
+    // and local runs use loopbacks), and never clobber an explicitly-wired
+    // KNEXT_POD_NAME. On the operator path the env HOSTNAME is always the
+    // 0.0.0.0 override and the downward API is NOT available (Knative gates
+    // valueFrom.fieldRef behind `kubernetes.podspec-fieldref`, Disabled by
+    // default — the webhook rejects such a ksvc on stock Knative), so inside
+    // Kubernetes we recover the pod identity from the kernel hostname:
+    // kubelet sets the pod's OS hostname to the pod name, and the env-var
+    // override does not touch it (#184).
     const podName =
         process.env.KNEXT_POD_NAME ||
-        (parentHostname && parentHostname !== "0.0.0.0"
+        (parentHostname && !isBindOrLoopback(parentHostname)
             ? parentHostname
-            : undefined);
+            : undefined) ||
+        (process.env.KUBERNETES_SERVICE_HOST ? hostname() : undefined);
     return {
         ...process.env,
         // Explicitly emptied (not deleted): documents intent and survives
