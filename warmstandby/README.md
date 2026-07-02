@@ -90,3 +90,75 @@ sh deploy/_verify-wake.sh                                     # prove normal pat
   intrinsic, exec-overhead-free attach cost (the true floor of design A).
 
 <!-- RESULTS_APPENDED_BELOW -->
+
+## Results (run `20260702T202721`, N=20, orbstack)
+
+Raw: [`bakeoff/results/neon-warmstandby-20260702T202721.csv`](../bakeoff/results/neon-warmstandby-20260702T202721.csv).
+Every sample returned `count(*) FROM t = 3` — i.e. a **real lazy page-fetch
+attach**, not just a TCP accept. `ok=20/20`.
+
+### Headline: **sub-second reached — YES.**
+
+| Metric | min | **p50** | p95 | p99 | max |
+|---|---|---|---|---|---|
+| **wake_ms** (gate release → first SELECT, incl. exec+poll overhead) | 206 | **413** | 558 | 586 | 593 |
+| wake_ms − kubectl-exec baseline (115 ms) — est. floor incl. psql poll | — | ~298 | ~443 | — | — |
+| **compute_ctl attach** (`total_startup_ms`, exec-overhead-free) | 110 | **165** | 309 | — | 314 |
+
+Baseline for comparison: production **cold** wake p50 ≈ **3.7 s**
+(`bakeoff/_measure.sh`); a same-session `deploy/_verify-wake.sh` cold wake right
+after this run measured **3420 ms** gateway latency. Warm-standby p50 **413 ms**
+is a **~9× reduction** and comfortably under 1 s at every percentile measured.
+
+### The floor
+
+The intrinsic floor of design A is **`compute_ctl` attach ≈ 150 ms p50**
+(min 110 ms) + the client connect/probe. Everything above that in the 413 ms
+headline is measurement overhead a production trigger would shed:
+- kubectl-exec trigger (~115 ms, one round-trip to touch the gate file),
+- psql poll granularity (0.1 s) + the client's own psql/TLS-decline connect.
+
+So the **practical floor for this design is ~150–300 ms**; a
+gateway-integrated trigger (design B's compute_ctl HTTP `/configure`, no
+`kubectl exec`) would land nearer the ~150 ms attach cost. **Sub-100 ms is not
+reachable** here — `compute_ctl` must still attach to the pageserver, open the
+safekeeper connections, and start Postgres accepting.
+
+## Honest trade-off table
+
+| Axis | Cold scale-to-zero (`deploy/compute`) | **Warm-standby (design A, this dir)** |
+|---|---|---|
+| Wake p50 | ~3.7 s | **~413 ms** (floor ~150 ms) |
+| Wake p95 | ~seconds | **558 ms** |
+| RAM held while "asleep" | **0** (no pod) | **256 MiB reserved** (scheduler request); actual RSS gated ≈ **4.8 MiB** |
+| CPU held while asleep | 0 | 250 m **reserved** (request); actual ≈ idle shell |
+| True scale-to-**zero**? | **yes** | **no** — this is a warm-**RAM** tier |
+| Cost model | pay per wake | pay to keep 1 pod parked 24/7 |
+| Added complexity | none (base case) | +1 deployment, +1 gate mechanism, +arming/draining orchestration |
+| Single-writer risk | low (Recreate, one deployment) | **elevated** — two deployments target one timeline; safe ONLY behind the `assert_single_writer` gate (compute==0 & drained before every release). A bug that releases the gate while `compute` is up = **two writers on one timeline = corruption**. |
+| Multi-tenant future | n/a | design A is single-tenant (pod pre-bound to one tenant/timeline via env). A true pool needs **design B** (empty compute_ctl + attach-on-wake via HTTP). |
+
+### Interpretation for ADR-0002
+
+- Neon's wake is **not fundamentally 3.7 s** — ~3.5 s of it is pod-creation
+  machinery, removable by parking a pod. The disaggregated storage attach itself
+  is **~150 ms**. This is Neon's structural advantage: *size-independent*
+  sub-second attach with no PVC to mount and no data to restore.
+- The cost is a **warm-RAM tier**: 256 MiB + 250 m CPU reserved per parked pod,
+  24/7. That is a genuine spend, not free scale-to-zero. It buys a ~9× faster
+  wake for the *first* connection after idle.
+- **Recommended framing:** offer scale-to-zero (cold, ~3.7 s, RAM=0) as default
+  and warm-standby (~0.4 s, RAM=256 MiB) as an opt-in tier for latency-sensitive
+  consumers — not a replacement. The single-writer gate is non-negotiable and
+  belongs in the gateway if this is productionized.
+- **Next step if pursued:** design B (attach-on-wake to a spec-less running
+  compute_ctl via its `:3080` HTTP API) turns the parked pod into a true
+  *multi-tenant pool* and removes the kubectl-exec trigger — the seam where SCS
+  multi-tenancy returns. Not prototyped here (design A hit sub-second cleanly).
+
+### Reversibility
+
+`_cleanup.sh` deletes `compute-warm`, its ConfigMap, and `warm-client`, and
+leaves `deploy/compute` at 0. Verified post-run: `deploy/_verify-wake.sh` passes
+the full 0→1→0→1 loop (cold wake 3420 ms), so the production path is intact.
+
