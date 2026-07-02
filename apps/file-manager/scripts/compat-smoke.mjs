@@ -24,7 +24,7 @@
  *   SERVER_PATH=... override the server.js path
  */
 import assert from 'node:assert';
-import { execSync, spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { cpSync, existsSync } from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
@@ -280,7 +280,9 @@ async function main() {
         }
         const { createRequire } = await import('node:module');
         const { shouldInstall } = createRequire(import.meta.url)(BUN_GUARD_PRELOAD);
-        const bunVersion = execSync(`${SERVER_CMD} --version`).toString().trim();
+        // argv array, shell:false default — no string interpolation into a
+        // shell (CLI-58 injection rule; SERVER_CMD is env-overridable).
+        const bunVersion = execFileSync(SERVER_CMD, ['--version']).toString().trim();
         if (shouldInstall({}, { bun: bunVersion })) {
           assert.strictEqual(
             res.connection,
