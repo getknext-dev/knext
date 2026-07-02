@@ -42,9 +42,12 @@
     "at v16.2.0: next.js itself skips them against its OWN deploy target, so running",
     "them against knext books upstream noise as knext failures. Mirroring upstream's",
     "own skips is honest and is NOT knext debt. Re-mirror whenever NEXTJS_REF bumps.",
-    "The three segment-cache `flakey` entries (search-params, prefetch-layout-sharing,",
-    "refresh) are knext-OBSERVED quarantines — see `$knextQuarantines` for the",
-    "per-entry mechanism, cross-run evidence and upstream provenance."
+    "The six segment-cache `flakey` entries (search-params, prefetch-layout-sharing,",
+    "refresh, stale-time, per-page-dynamic-stale-time, vary-params) are",
+    "knext-OBSERVED quarantines — see `$knextQuarantines` for the per-entry",
+    "mechanism, cross-run evidence and upstream provenance. Quarantine bar: at",
+    "least one FINAL (post-retry) file failure across the full-run record;",
+    "single-attempt wobbles absorbed by in-run retry stay un-quarantined."
   ],
   "suites": {
     "test/e2e/app-dir/app-client-cache/client-cache.defaults.test.ts": {
@@ -148,6 +151,27 @@
         "segment cache (refresh) Server Action refresh() refreshes dynamic data only, not cached",
         "segment cache (refresh) re-navigation to a fully static page does not overwrite dynamic slots with default content"
       ]
+    },
+    "test/e2e/app-dir/segment-cache/staleness/segment-cache-stale-time.test.ts": {
+      "flakey": [
+        "segment cache (staleness) expires runtime prefetches when their stale time has elapsed",
+        "segment cache (staleness) reuses dynamic data up to the staleTimes.dynamic threshold"
+      ]
+    },
+    "test/e2e/app-dir/segment-cache/staleness/segment-cache-per-page-dynamic-stale-time.test.ts": {
+      "flakey": [
+        "segment cache (per-page dynamic stale time) reuses dynamic data within the per-page stale time window",
+        "segment cache (per-page dynamic stale time) back/forward navigation always reuses BFCache regardless of stale time",
+        "segment cache (per-page dynamic stale time) per-page value overrides global staleTimes.dynamic regardless of direction"
+      ]
+    },
+    "test/e2e/app-dir/segment-cache/vary-params/vary-params.test.ts": {
+      "flakey": [
+        "segment cache - vary params does not share cached segment when all params accessed statically (runtime prefetch)",
+        "segment cache - vary params renders cached loading state instantly with runtime prefetching",
+        "segment cache - vary params does not reuse prefetched segment when page accesses searchParams",
+        "segment cache - vary params shares cached segment across all params when none accessed statically (runtime prefetch)"
+      ]
     }
   },
   "rules": {
@@ -215,6 +239,39 @@
       "mechanism": "60s jest timeouts in dynamic-refresh flows driven by createRouterAct; a DIFFERENT case hung on each in-run attempt (attempt 1+3: 'Server Action refresh()…' at 60001/60000ms while the other case passed in ~1.2s; attempt 2: 're-navigation…' at 60001ms while 'Server Action refresh()…' passed in 692ms) — a classic interleaving race, not a stable assertion diff.",
       "evidence": "run 28593534713: alternating case hung across 3 attempts; runs 28590478386 and 28587476341: file PASSED — cross-run wobble.",
       "provenance": "Same client runtime-prefetch/dynamic-request scheduling family upstream quarantines as flakey (vercel/next.js@v16.2.0 test/deploy-tests-manifest.json, segment-cache/prefetch-runtime.test.ts)."
+    },
+    {
+      "test": "test/e2e/app-dir/segment-cache/staleness/segment-cache-stale-time.test.ts",
+      "cases": [
+        "segment cache (staleness) expires runtime prefetches when their stale time has elapsed",
+        "segment cache (staleness) reuses dynamic data up to the staleTimes.dynamic threshold"
+      ],
+      "mechanism": "60s jest timeouts in runtime-prefetch/dynamic-data flows via createRouterAct, alternating per attempt (run 28596005486: att1 'reuses dynamic data…' hung while 'expires runtime prefetches…' passed in 731ms; att2 BOTH hung; att3 'expires runtime prefetches…' hung while 'reuses dynamic data…' passed in 1077ms) — the family's interleaving-race signature, zero assertion diffs.",
+      "evidence": "run 28596005486: FINAL failure, alternating cases across 3 attempts; run 28590478386: failed 2 attempts ('expires runtime prefetches…') then RECOVERED on in-run retry; runs 28593534713 and 28587476341: file PASSED — cross-run wobble.",
+      "provenance": "Upstream marks the runtime-prefetch deploy family flakey wholesale (vercel/next.js@v16.2.0 test/deploy-tests-manifest.json, segment-cache/prefetch-runtime.test.ts, ~34 'runtime prefetching … stale time handling' cases) — the hanging cases exercise exactly that mechanism (runtime-prefetch stale-time expiry)."
+    },
+    {
+      "test": "test/e2e/app-dir/segment-cache/staleness/segment-cache-per-page-dynamic-stale-time.test.ts",
+      "cases": [
+        "segment cache (per-page dynamic stale time) reuses dynamic data within the per-page stale time window",
+        "segment cache (per-page dynamic stale time) back/forward navigation always reuses BFCache regardless of stale time",
+        "segment cache (per-page dynamic stale time) per-page value overrides global staleTimes.dynamic regardless of direction"
+      ],
+      "mechanism": "60s jest timeouts in per-page dynamic stale-time flows via createRouterAct, alternating per attempt (run 28578203671: att1 'reuses dynamic data…' + 'back/forward…' hung, att2+att3 'per-page value overrides…' hung while the att1 pair passed) — the family's interleaving-race signature, zero assertion diffs.",
+      "evidence": "run 28578203671: FINAL failure, alternating cases across 3 attempts; run 28596005486: all three cases hung 1 attempt then the file RECOVERED on in-run retry; run 28590478386: 1-attempt wobble then recovered; run 28593534713: file PASSED — cross-run wobble.",
+      "provenance": "Upstream marks the runtime-prefetch deploy family flakey wholesale (vercel/next.js@v16.2.0 test/deploy-tests-manifest.json, segment-cache/prefetch-runtime.test.ts, incl. its stale-time-handling cases) — same client dynamic-data/staleness scheduling mechanism."
+    },
+    {
+      "test": "test/e2e/app-dir/segment-cache/vary-params/vary-params.test.ts",
+      "cases": [
+        "segment cache - vary params does not share cached segment when all params accessed statically (runtime prefetch)",
+        "segment cache - vary params renders cached loading state instantly with runtime prefetching",
+        "segment cache - vary params does not reuse prefetched segment when page accesses searchParams",
+        "segment cache - vary params shares cached segment across all params when none accessed statically (runtime prefetch)"
+      ],
+      "mechanism": "60s jest timeouts in runtime-prefetch vary-params flows via createRouterAct, alternating per attempt (run 28578203671: att1+att2 'does not share cached segment… (runtime prefetch)' hung; att3 THREE cases hung incl. two that passed earlier attempts) — the family's interleaving-race signature, zero assertion diffs.",
+      "evidence": "run 28578203671: FINAL failure, alternating cases across 3 attempts; run 28596005486: 2-attempt wobble ('renders cached loading state…', then 'does not share cached segment…') then RECOVERED on in-run retry; run 28590478386: 1-attempt wobble ('does not reuse prefetched segment…' + 'shares cached segment…') then recovered; run 28593534713: file PASSED — cross-run wobble.",
+      "provenance": "Upstream marks the runtime-prefetch deploy family flakey wholesale (vercel/next.js@v16.2.0 test/deploy-tests-manifest.json, segment-cache/prefetch-runtime.test.ts, incl. its 'includes search params, but not dynamic content' cases) — same runtime-prefetch vary/search-params mechanism."
     }
   ],
   "$knextExclusions": [

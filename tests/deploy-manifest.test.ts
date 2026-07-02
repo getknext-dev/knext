@@ -317,17 +317,63 @@ interface KnextQuarantine {
   provenance: string;
 }
 
-const OBSERVED_FLAKY_QUARANTINES: Record<string, string[]> = {
-  'test/e2e/app-dir/segment-cache/search-params/segment-cache-search-params.test.ts': [
-    'segment cache (search params) stores prefetched data by its rewritten search params, not the original ones',
-  ],
-  'test/e2e/app-dir/segment-cache/prefetch-layout-sharing/prefetch-layout-sharing.test.ts': [
-    'layout sharing in non-static prefetches segment-level prefetch config uses a runtime prefetch for sub-pages of runtime-prefetchable layouts if requested',
-  ],
-  'test/e2e/app-dir/segment-cache/refresh/segment-cache-refresh.test.ts': [
-    'segment cache (refresh) Server Action refresh() refreshes dynamic data only, not cached',
-    'segment cache (refresh) re-navigation to a fully static page does not overwrite dynamic slots with default content',
-  ],
+// Round 3 (run 28596005486, 787 passed / 1 failed): three more family members
+// crossed the quarantine bar. The bar is deliberately: at least ONE FINAL
+// (post-retry, 3/3) file failure across the full-run record — single-attempt
+// wobbles that in-run retry tolerance absorbs (metadata, basic,
+// cached-navigations, prefetching, dynamic-on-hover…) are NOT quarantined.
+//   • stale-time: FINAL failure in 28596005486 (att1 'reuses dynamic data…'
+//     hung, att2 BOTH cases hung, att3 'expires runtime prefetches…' hung while
+//     'reuses…' passed in 1077ms); wobbled (recovered) in 28590478386.
+//   • per-page-dynamic-stale-time: FINAL failure in 28578203671 (alternating
+//     cases across attempts); wobbled (recovered) in 28590478386 + 28596005486.
+//   • vary-params: FINAL failure in 28578203671; wobbled (recovered) in
+//     28590478386 + 28596005486. All observed hangs share the family signature:
+//     60s jest timeout, runtime-prefetch flows, zero assertion diffs.
+const OBSERVED_FLAKY_QUARANTINES: Record<string, { cases: string[]; observedRuns: string[] }> = {
+  'test/e2e/app-dir/segment-cache/search-params/segment-cache-search-params.test.ts': {
+    cases: [
+      'segment cache (search params) stores prefetched data by its rewritten search params, not the original ones',
+    ],
+    observedRuns: ['28593534713', '28590478386'],
+  },
+  'test/e2e/app-dir/segment-cache/prefetch-layout-sharing/prefetch-layout-sharing.test.ts': {
+    cases: [
+      'layout sharing in non-static prefetches segment-level prefetch config uses a runtime prefetch for sub-pages of runtime-prefetchable layouts if requested',
+    ],
+    observedRuns: ['28593534713', '28578203671'],
+  },
+  'test/e2e/app-dir/segment-cache/refresh/segment-cache-refresh.test.ts': {
+    cases: [
+      'segment cache (refresh) Server Action refresh() refreshes dynamic data only, not cached',
+      'segment cache (refresh) re-navigation to a fully static page does not overwrite dynamic slots with default content',
+    ],
+    observedRuns: ['28593534713'],
+  },
+  'test/e2e/app-dir/segment-cache/staleness/segment-cache-stale-time.test.ts': {
+    cases: [
+      'segment cache (staleness) expires runtime prefetches when their stale time has elapsed',
+      'segment cache (staleness) reuses dynamic data up to the staleTimes.dynamic threshold',
+    ],
+    observedRuns: ['28596005486', '28590478386'],
+  },
+  'test/e2e/app-dir/segment-cache/staleness/segment-cache-per-page-dynamic-stale-time.test.ts': {
+    cases: [
+      'segment cache (per-page dynamic stale time) reuses dynamic data within the per-page stale time window',
+      'segment cache (per-page dynamic stale time) back/forward navigation always reuses BFCache regardless of stale time',
+      'segment cache (per-page dynamic stale time) per-page value overrides global staleTimes.dynamic regardless of direction',
+    ],
+    observedRuns: ['28578203671', '28596005486'],
+  },
+  'test/e2e/app-dir/segment-cache/vary-params/vary-params.test.ts': {
+    cases: [
+      'segment cache - vary params does not share cached segment when all params accessed statically (runtime prefetch)',
+      'segment cache - vary params renders cached loading state instantly with runtime prefetching',
+      'segment cache - vary params does not reuse prefetched segment when page accesses searchParams',
+      'segment cache - vary params shares cached segment across all params when none accessed statically (runtime prefetch)',
+    ],
+    observedRuns: ['28578203671', '28596005486', '28590478386'],
+  },
 };
 
 describe('test/deploy-tests-manifest.knext.json — knext-observed flaky quarantines (#147 A3-3 final mile)', () => {
@@ -335,7 +381,7 @@ describe('test/deploy-tests-manifest.knext.json — knext-observed flaky quarant
     (manifest as unknown as { $knextQuarantines?: KnextQuarantine[] }).$knextQuarantines ?? [];
 
   it('quarantines EXACTLY the observed hanging cases as flakey (per-case, never whole files)', () => {
-    for (const [file, cases] of Object.entries(OBSERVED_FLAKY_QUARANTINES)) {
+    for (const [file, { cases }] of Object.entries(OBSERVED_FLAKY_QUARANTINES)) {
       const entry = manifest.suites[file];
       expect(entry, `suites must carry a flakey entry for ${file}`).toBeTruthy();
       expect(entry.flakey ?? [], `flakey list for ${file}`).toEqual(cases);
@@ -346,21 +392,19 @@ describe('test/deploy-tests-manifest.knext.json — knext-observed flaky quarant
   });
 
   it('each quarantined file has a $knextQuarantines ledger entry with evidence + mechanism + provenance', () => {
-    for (const [file, cases] of Object.entries(OBSERVED_FLAKY_QUARANTINES)) {
+    for (const [file, { cases, observedRuns }] of Object.entries(OBSERVED_FLAKY_QUARANTINES)) {
       const ledger = quarantines.find((q) => q.test === file);
       expect(ledger, `no $knextQuarantines ledger entry for ${file}`).toBeTruthy();
       expect(ledger?.cases).toEqual(cases);
-      // Evidence must cite the OBSERVED runs (cross-run wobble is the licence to
-      // quarantine) — at least the run that hung and one where the file passed
-      // or recovered.
-      expect(
-        /28593534713/.test(ledger?.evidence ?? ''),
-        `${file}: evidence must cite the observing run 28593534713`,
-      ).toBe(true);
-      expect(
-        /2859047838|2857820367/.test(ledger?.evidence ?? ''),
-        `${file}: evidence must cite a prior run showing the case wobbles (pass/recover)`,
-      ).toBe(true);
+      // Evidence must cite EVERY run in which the hang was observed — the
+      // cross-run record is the licence to quarantine, so it must be auditable
+      // from the ledger alone.
+      for (const runId of observedRuns) {
+        expect(
+          new RegExp(runId).test(ledger?.evidence ?? ''),
+          `${file}: evidence must cite observing run ${runId}`,
+        ).toBe(true);
+      }
       expect(
         (ledger?.mechanism ?? '').length,
         `${file}: mechanism must be documented`,
