@@ -79,4 +79,21 @@ grep -q 'pggw_wake_latency_ms_last' 60-prometheus.yaml || fail "60-prometheus.ya
 grep -q 'PhantomKeepalive' 60-prometheus.yaml || fail "60-prometheus.yaml missing phantom-keepalive alert"
 ok "60-prometheus.yaml scrapes pggw + ships the three review alerts"
 
+# 12. contract: storage S3/root credentials come from a Secret, never plaintext
+#     YAML. No `value: password`/`value: minio` literals; secretKeyRef present.
+for f in 50-minio.yaml 52-safekeeper.yaml 53-pageserver.yaml; do
+  grep -q 'secretKeyRef' "$f" || fail "$f must source S3 creds via secretKeyRef"
+  grep -qE 'value:[[:space:]]*(password|minio)[[:space:]]*(#.*)?$' "$f" \
+    && fail "$f still carries a plaintext S3 credential value"
+done
+grep -q 'storage-s3-creds' 50-minio.yaml || fail "50-minio.yaml must reference the storage-s3-creds Secret"
+ok "storage S3 creds sourced from Secret (no plaintext in 50/52/53)"
+
+# 13. contract: credential-provisioning + PV-hardening scripts exist.
+[ -f gen-secrets.sh ] || fail "gen-secrets.sh missing"
+grep -q 'storage-s3-creds' gen-secrets.sh || fail "gen-secrets.sh must manage the storage-s3-creds Secret"
+[ -f harden-pvs.sh ] || fail "harden-pvs.sh missing"
+grep -q 'Retain' harden-pvs.sh || fail "harden-pvs.sh must set Retain reclaim policy"
+ok "gen-secrets.sh + harden-pvs.sh present"
+
 echo "deploy validation: all checks passed"
