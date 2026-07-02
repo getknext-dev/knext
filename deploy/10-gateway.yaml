@@ -86,6 +86,14 @@ spec:
               valueFrom: { fieldRef: { fieldPath: metadata.namespace } }
             - name: GW_POD_IP
               valueFrom: { fieldRef: { fieldPath: status.podIP } }
+            - name: GW_TLS_CERT_FILE # front-door TLS: answer SSLRequest with 'S'
+              value: "/etc/pggw-tls/tls.crt" # both set+loadable -> TLS on the wire
+            - name: GW_TLS_KEY_FILE # sslmode=require works; sslmode=disable still allowed
+              value: "/etc/pggw-tls/tls.key" # generate the Secret via deploy/gen-tls.sh
+          volumeMounts:
+            - name: pggw-tls
+              mountPath: /etc/pggw-tls
+              readOnly: true
           ports:
             - { name: pg, containerPort: 55432 }
             - { name: metrics, containerPort: 9090 }
@@ -96,6 +104,10 @@ spec:
           resources:
             requests: { cpu: 50m, memory: 32Mi }
             limits: { memory: 128Mi }
+      volumes:
+        - name: pggw-tls # self-signed keypair; create with deploy/gen-tls.sh
+          secret:
+            secretName: pggw-tls
 ---
 # Internal service: the stable in-cluster name every consumer uses —
 # knext apps (DATABASE_URL -> pggw.scale-zero-pg.svc:55432), peer gateways and

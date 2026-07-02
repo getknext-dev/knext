@@ -5,13 +5,20 @@ Your app talks to an ordinary Postgres. It never needs to know the database slee
 ## The DSN
 
 ```
-postgres://cloud_admin:cloud_admin@pggw.scale-zero-pg.svc:55432/<database>?sslmode=disable
+postgres://cloud_admin:cloud_admin@pggw.scale-zero-pg.svc:55432/<database>?sslmode=require
 ```
 
 - **Host is always the gateway** (`pggw`), never the compute. The gateway routes,
   wakes, and holds your connection during cold start.
-- **`sslmode=disable`** — the gateway declines TLS on the Postgres wire; terminate TLS
-  in front of it (ingress/mesh) if you need encryption in transit.
+- **`sslmode=require`** — the gateway now terminates TLS on the Postgres wire itself
+  (TLS 1.2+). The connection is encrypted end-to-end to the gateway; no ingress/mesh
+  TLS layer is needed. The shipped cert is **self-signed** (cluster-local infra), so
+  use `sslmode=require` (encrypt, don't verify the CA) — **not** `verify-full` — until
+  you front the gateway with a real CA. See [operations](operations.md#tls-certificate-rotation).
+- **`sslmode=disable` still works** — TLS is optional, not enforced. Existing plaintext
+  DSNs keep connecting unchanged; enforcing TLS-only is a future flag. If the gateway
+  has no cert configured, it declines TLS (answers `N`) and only `sslmode=disable`
+  connects.
 - **Credentials** — `cloud_admin`/`cloud_admin` is the dev default, enforced by the
   compute spec on every boot. Rotation: see [operations](operations.md#password-rotation).
 

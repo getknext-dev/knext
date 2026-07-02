@@ -21,6 +21,7 @@ behavior, and troubleshooting.
 | `GW_MAX_CONNS` | 0 (unlimited) | connection cap; excess gets a clean `53300`. Deployed: 90 — MUST stay under compute `max_connections=100` |
 | `GW_PEER_SELECTOR` | — | label selector for sibling gateways (peer-aware idle); empty disables |
 | `GW_POD_NAMESPACE` / `GW_POD_IP` | — | downward API; self-exclusion for the peer check |
+| `GW_TLS_CERT_FILE` / `GW_TLS_KEY_FILE` | — | front-door TLS keypair (PEM paths). Both set + loadable → gateway answers `SSLRequest` with `S` and wraps the wire (TLS 1.2+). Set-but-unloadable or half-set → gateway **fails fast at startup**. Unset → `SSLRequest` gets `N` (plaintext only). Deployed: mounted from Secret `pggw-tls` at `/etc/pggw-tls/`. |
 
 Every `GW_*` var passes through verbatim — there is deliberately no whitelist.
 
@@ -201,6 +202,43 @@ roles on every boot. To rotate:
    (the `config.json` key) and `kubectl apply -f deploy/54-compute-files.yaml`.
 3. Update the app Secrets (`30-knext-secret.yaml`) and restart the compute:
    `kubectl -n scale-zero-pg rollout restart deploy/compute`.
+
+## TLS certificate rotation
+
+The gateway terminates TLS on the Postgres wire when `GW_TLS_CERT_FILE` +
+`GW_TLS_KEY_FILE` are set (see the config table). The keypair lives in the Secret
+`pggw-tls`, mounted at `/etc/pggw-tls/`. This closes the "plaintext Postgres on an
+external LoadBalancer" review finding — clients connect with `sslmode=require`.
+
+**Generate it (once):** `sh deploy/gen-tls.sh`. Idempotent — it self-signs a cert
+(CN `pggw.scale-zero-pg.svc`; SANs cover `pggw`, `pggw-lb`, `localhost`, `127.0.0.1`)
+into Secret `pggw-tls` **only if absent**, so it never rotates silently. The pods
+require the Secret to start, so run this **before** `kubectl apply -f deploy/10-gateway.yaml`.
+
+**Self-signed, on purpose.** This is cluster-local infra. Clients use
+`sslmode=require` (encrypt without CA verification) — **not** `verify-full`. Moving
+to `verify-full` needs a cert from a CA the clients trust (cert-manager + an issuer,
+or your org CA); swap the Secret contents and clients can then verify.
+
+**To rotate (deliberate):**
+
+1. Regenerate the keypair (self-signed example):
+   ```
+   kubectl -n scale-zero-pg delete secret pggw-tls
+   sh deploy/gen-tls.sh
+   ```
+   Or `kubectl -n scale-zero-pg create secret tls pggw-tls --cert=… --key=… \
+   --dry-run=client -o yaml | kubectl apply -f -` for a CA-issued pair.
+2. Roll the gateway so it reloads the mount: `kubectl -n scale-zero-pg rollout
+   restart deploy/pggw`. A mounted Secret update also propagates to the file on
+   its own, but the gateway loads the cert once at startup — the restart is what
+   picks it up.
+3. Verify: `sh deploy/_verify-tls.sh` (proves `sslmode=require` is encrypted,
+   `sslmode=disable` still works, and the wake path works over TLS).
+
+**Disabling TLS** (revert to plaintext): unset the two env vars in
+`deploy/10-gateway.yaml` and restart. `SSLRequest` then gets `N` again and only
+`sslmode=disable` clients connect.
 
 ## Network isolation caveat
 
