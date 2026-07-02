@@ -96,7 +96,10 @@ DRILL_PSQL() { $KD exec deploy/compute -c compute -- psql -h localhost -p 55433 
 RCL() { $K exec sts/pageserver -- curl -s "http://localhost:9898/v1/tenant/$TENANT/timeline/$TIMELINE" 2>/dev/null | tr ',' '\n' | grep '"remote_consistent_lsn"' | head -1 | cut -d'"' -f4; }
 
 command -v "$KUBECTL" >/dev/null 2>&1 || fail "kubectl not found"
-[ "$($KUBECTL config current-context 2>/dev/null)" = "orbstack" ] || fail "expected kube-context 'orbstack'"
+# Guard: drills create/destroy namespaces - never run against an unintended
+# cluster. Default = the canonical OKE context; override for local clusters.
+EXPECTED_CTX="${KSPG_CONTEXT:-context-ckmva7v7zvq}"
+[ "$($KUBECTL config current-context 2>/dev/null)" = "$EXPECTED_CTX" ] || fail "expected kube-context '$EXPECTED_CTX' (set KSPG_CONTEXT to override)"
 
 # ---------------------------------------------------------------------------
 info "STEP 0: preflight — scale-zero-pg storage plane healthy"

@@ -16,7 +16,8 @@ set -eu
 cd "$(dirname "$0")"
 NS=scale-zero-pg
 K="kubectl -n $NS"
-IMAGE=scale-zero-pg/gateway:dev
+# Canonical image (override with KSPG_GATEWAY_IMAGE for local clusters)
+IMAGE="${KSPG_GATEWAY_IMAGE:-me-abudhabi-1.ocir.io/axfqznklsd2t/ks-pg/gateway:v0.3.1}"
 WARM_DSN="postgres://cloud_admin:cloud_admin@pggw-warm:55432/postgres?sslmode=disable"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
@@ -109,9 +110,11 @@ spec:
     metadata: { labels: { app: pggw-warm } }
     spec:
       serviceAccountName: pggw
+      imagePullSecrets:
+        - name: ocir-pull # no-op where the Secret doesn't exist
       containers:
         - name: gateway
-          image: scale-zero-pg/gateway:dev
+          image: ${IMAGE}
           imagePullPolicy: IfNotPresent
           env:
             - { name: GW_PORT, value: "55432" }
@@ -151,6 +154,7 @@ spec:
     - { name: gate, port: 9091, targetPort: gate }   # warm pod polls this
     - { name: metrics, port: 9090, targetPort: metrics }
 YAML
+sed -i.sedbak \"s|\${IMAGE}|${IMAGE}|\" _tmp-pggw-warm.yaml && rm -f _tmp-pggw-warm.yaml.sedbak
 $K apply -f _tmp-pggw-warm.yaml >/dev/null || fail "test gateway apply failed"
 $K rollout status deploy/pggw-warm --timeout=120s >/dev/null || fail "test gateway not ready"
 ok "test gateway pggw-warm (warmpool mode) ready"
