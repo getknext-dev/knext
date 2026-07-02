@@ -2011,3 +2011,77 @@ describe('compat-suite deploy-lane env fidelity (test-e2e-deploy.yml, #147 A3-3 
     ).toBe(false);
   });
 });
+
+describe('compat-suite red-nightly alert issue (test-e2e-deploy.yml, #147 A3-3 graduation)', () => {
+  // The graduated compat-matrix ✅ decays SILENTLY if the nightly goes red and
+  // nobody notices — the credential's stability record depends on red nightlies
+  // being loud. This guard asserts the workflow carries an alert job that, on a
+  // failed SCHEDULED run, creates-or-updates a pinned "Compat nightly RED"
+  // issue with the run link (idempotent — never one-issue-per-night spam).
+  // Policy (docs/compat-matrix.md Maintenance): red nightly → alert issue →
+  // flip the row back citing the red run (the matrix guard permits ❌ freely).
+  const src = readFileSync(WORKFLOW_PATH, 'utf8');
+
+  /** The nightly-red-alert job block (from its job key to the next 2-space-indented job key). */
+  function alertJob(): string {
+    const m = src.match(/^ {2}nightly-red-alert:\n[\s\S]*?(?=^ {2}[a-z][\w-]*:|\n*$(?![\s\S]))/m);
+    return m ? m[0] : '';
+  }
+
+  it('has a nightly-red-alert job', () => {
+    expect(alertJob(), 'expected a `nightly-red-alert:` job in test-e2e-deploy.yml').not.toBe('');
+  });
+
+  it('is failure-gated AND scoped to the scheduled nightly (never a red dispatch experiment)', () => {
+    const job = alertJob();
+    expect(
+      /if:[\s\S]*?always\(\)/.test(job),
+      'the alert must run via always() + needs-result checks (an `if: success()`-style default would skip it exactly when needed)',
+    ).toBe(true);
+    expect(
+      /if:[\s\S]*?github\.event_name\s*==\s*'schedule'/.test(job),
+      'the alert must be scoped to the scheduled nightly — a red workflow_dispatch experiment must not page',
+    ).toBe(true);
+    expect(
+      /needs\.build-next\.result\s*==\s*'failure'/.test(job),
+      'must alert when the build-next (Prepare) job fails',
+    ).toBe(true);
+    expect(
+      /needs\.deploy-tests\.result\s*==\s*'failure'/.test(job),
+      'must alert when any deploy-tests shard fails',
+    ).toBe(true);
+  });
+
+  it('depends on both build-next and deploy-tests (a Prepare failure must also page)', () => {
+    const job = alertJob();
+    const needs = job.match(/needs:\s*\[([^\]]*)\]/);
+    expect(needs, 'the alert job must declare needs: [build-next, deploy-tests]').not.toBeNull();
+    const list = (needs as RegExpMatchArray)[1];
+    expect(list).toContain('build-next');
+    expect(list).toContain('deploy-tests');
+  });
+
+  it('has issues: write permission (least-privilege, but enough to create/update the alert)', () => {
+    expect(/permissions:\s*\n\s+issues:\s*write/.test(alertJob())).toBe(true);
+  });
+
+  it('creates-or-updates the "Compat nightly RED" issue idempotently, with the run link', () => {
+    const job = alertJob();
+    expect(job).toContain('Compat nightly RED');
+    // Idempotency: look up the existing open issue first, comment on it if
+    // found, create (and pin) only when absent — never one new issue per night.
+    expect(/gh issue list\b/.test(job), 'must look up the existing open alert issue').toBe(true);
+    expect(/gh issue comment\b/.test(job), 'must UPDATE the existing issue (no spam)').toBe(true);
+    expect(/gh issue create\b/.test(job), 'must create the issue when none is open').toBe(true);
+    expect(
+      /github\.run_id/.test(job),
+      'the alert must carry the red run link (github.run_id)',
+    ).toBe(true);
+  });
+
+  it('states the flip-back policy in the alert body (matrix row ❌ with the red run cited)', () => {
+    expect(/flip/i.test(alertJob()), 'the alert body must state the row flip-back policy').toBe(
+      true,
+    );
+  });
+});

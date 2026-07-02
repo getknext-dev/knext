@@ -1197,3 +1197,66 @@ jobs:
           name: compat-suite-summary-${{ strategy.job-index }}
           path: knext/compat-suite-summary-*.json
           retention-days: 14
+
+  # ── Red-nightly alert (#147 A3-3 graduation follow-up) ─────────────────────
+  # The compat-matrix official-suite ✅ decays SILENTLY if the nightly goes red
+  # and nobody notices. On a failed SCHEDULED run (never a red workflow_dispatch
+  # experiment — those are working sessions), create-or-update ONE pinned
+  # "Compat nightly RED" issue carrying the run link. Idempotent: an already-open
+  # alert issue gets a comment per red night, not a new issue.
+  # Policy (docs/compat-matrix.md, Maintenance & honesty): red nightly → this
+  # issue opens → flip the matrix row back to ❌ citing the red run. The matrix
+  # guard (tests/compat-matrix.test.ts) permits an honest ❌ flip-back freely;
+  # only the ✅ direction needs run evidence.
+  nightly-red-alert:
+    name: Nightly red alert (pinned issue)
+    needs: [build-next, deploy-tests]
+    # always() so this job is not skipped when a needed job fails; the
+    # needs-result checks make it fire ONLY on failure; the event check scopes
+    # it to the nightly schedule.
+    if: >-
+      always() &&
+      github.event_name == 'schedule' &&
+      (needs.build-next.result == 'failure' || needs.deploy-tests.result == 'failure')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      - name: Create or update the "Compat nightly RED" issue (idempotent)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          BUILD_RESULT: ${{ needs.build-next.result }}
+          SHARDS_RESULT: ${{ needs.deploy-tests.result }}
+          NEXTJS_REF_TESTED: ${{ env.NEXTJS_REF }}
+        run: |
+          set -euo pipefail
+          title='Compat nightly RED'
+          body="The scheduled official Next.js deploy-suite nightly FAILED.
+
+          - Run: ${RUN_URL}
+          - build-next (Prepare): ${BUILD_RESULT}
+          - deploy-tests shards: ${SHARDS_RESULT}
+          - Pinned ref: ${NEXTJS_REF_TESTED}
+
+          **Policy** (docs/compat-matrix.md, Maintenance & honesty): if the red persists,
+          flip the official-suite matrix row back to ❌ citing this red run — the matrix
+          guard permits an honest flip-back without ceremony. Triage the per-shard logs +
+          \`compat-suite-summary-*.json\` artifacts before touching the quarantine ledger
+          (ADR-0007 graduation addendum, §c: quarantines need a final-post-retry failure
+          plus an env-parity audit, never a red-nightly reflex)."
+          # Idempotency: exactly-one open alert issue. Comment on it if present,
+          # create (+ pin, best-effort) only when absent.
+          existing="$(gh issue list --repo "${GITHUB_REPOSITORY}" --state open \
+            --json number,title \
+            --jq "[.[] | select(.title == \"${title}\")][0].number // empty")"
+          if [ -n "${existing}" ]; then
+            echo "updating existing alert issue #${existing}"
+            gh issue comment "${existing}" --repo "${GITHUB_REPOSITORY}" --body "${body}"
+          else
+            echo "creating the alert issue"
+            new_url="$(gh issue create --repo "${GITHUB_REPOSITORY}" --title "${title}" --body "${body}")"
+            new_num="${new_url##*/}"
+            gh issue pin "${new_num}" --repo "${GITHUB_REPOSITORY}" || echo "::warning::could not pin issue #${new_num} (non-fatal)"
+          fi

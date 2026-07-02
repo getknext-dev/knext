@@ -15,7 +15,8 @@ import { describe, expect, it } from 'vitest';
  *   - No ✅ row may rely on the `next/image` SKIP check (g) — that check is skip-on-fail.
  *   - The "official" compat suite row may be ✅ ONLY with verifiable run evidence: a GitHub
  *     Actions run ID, the pinned vercel/next.js ref, and an explicit "N passed / 0 failed"
- *     result (A3-3 graduation, #147). An evidence-less flip fails this test.
+ *     result (A3-3 graduation, #147). An evidence-less flip fails this test. The evidence is
+ *     enforced IFF ✅ — an honest regression flip-back to ❌ always passes without ceremony.
  *   - Every Status cell uses exactly one of the 4 legal markers (✅ ⚠️ ❌ ⛔).
  */
 
@@ -212,12 +213,13 @@ describe('docs/compat-matrix.md — honesty guard (issue #41)', () => {
       expect(officialRows.length).toBe(1);
     });
 
-    it('the official-suite row is ✅ (graduated) and cites the green-run evidence', () => {
+    it('enforces the evidence contract IFF the row is ✅ — an honest ❌ flip-back is always free', () => {
       const row = officialRows[0];
-      expect(
-        row.status.includes('✅'),
-        `official-suite row is "${row.status}" — the A3-3 graduation flip is missing`,
-      ).toBe(true);
+      // NEVER enforce the ✅ itself: if a red nightly makes someone honestly flip
+      // the row back to ❌ (or ⚠️), this guard must pass without ceremony — the
+      // honesty gradient only ever points AWAY from overclaiming. Evidence is
+      // required if-and-only-if the ✅ is claimed.
+      if (!row.status.includes('✅')) return;
       expect(
         officialFlipProblems(row),
         `official-suite ✅ evidence is incomplete: "${row.notes.slice(0, 200)}…"`,

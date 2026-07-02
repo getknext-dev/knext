@@ -70,3 +70,9 @@ gate, not the official suite — the official suite has its own row, own workflo
   row back (the guard permits an honest ❌ regression without ceremony) or annotate it. The
   quarantine + exclusion ledgers in `test/deploy-tests-manifest.knext.json` are the public
   scoreboard — shrinking them to zero is the standing goal (ADR-0007 A3-3).
+- **Red-nightly procedure (mechanized).** A failed *scheduled* run makes the workflow's
+  `nightly-red-alert` job create-or-update a pinned **"Compat nightly RED"** issue carrying the run
+  link (idempotent — one open alert issue, a comment per red night; guard-tested in
+  `tests/compat-suite-workflow.test.ts`). Policy: the alert issue opens → triage the shard logs →
+  if the red persists, **flip this row back to ❌ citing the red run**. The matrix guard enforces
+  evidence only in the ✅ direction (evidence IFF ✅), so the honest flip-back is always free.
