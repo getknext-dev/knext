@@ -22,6 +22,7 @@
 
 import { existsSync } from "node:fs";
 import { join } from "node:path";
+import { precompileBunBytecode } from "../adapters/standalone-bun-bytecode";
 import { healBunExportTargets } from "../adapters/standalone-bun-exports";
 import { uploadAssets } from "../utils/asset-upload";
 import { createLogger } from "../utils/logger";
@@ -89,6 +90,36 @@ export async function build(options: BuildOptions = {}) {
         log.warn(
             { standaloneDir },
             "No standalone output found — skipping bun-exports heal (is output:'standalone' set?)",
+        );
+    }
+
+    // 2c. Per-file Bun bytecode precompilation (runtime=bun only).
+    //     Each server-side .js in the standalone tree is transformed
+    //     individually (`--external '*'` keeps the require graph untouched)
+    //     with a companion .jsc that Bun's runtime consumes on require() —
+    //     measured -47% startup on a real next@16.2.4 standalone tree.
+    //     GATED on config.runtime === "bun", unlike the additive heal above:
+    //     the transformed files are Bun-only (they do not load under Node),
+    //     so flipping the runtime to node after this build requires a rebuild.
+    //     Opt out with KNEXT_BUN_BYTECODE=0. Fail-open: per-file failures skip
+    //     that file; a failed capability probe (Bun <1.1.30, no bun binary)
+    //     disables the pass; never throws.
+    if (
+        (config.runtime ?? "node") === "bun" &&
+        process.env.KNEXT_BUN_BYTECODE !== "0" &&
+        existsSync(standaloneDir)
+    ) {
+        const pass = precompileBunBytecode({
+            standaloneDir,
+            log: (message) => log.warn(message),
+        });
+        log.info(
+            {
+                compiled: pass.compiled,
+                skipped: pass.skipped.length,
+                ...(pass.disabled ? { disabled: pass.disabled } : {}),
+            },
+            "Bun bytecode precompilation (standalone output)",
         );
     }
 

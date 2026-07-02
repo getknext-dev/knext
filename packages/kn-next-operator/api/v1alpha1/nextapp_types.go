@@ -185,10 +185,19 @@ type StorageSpec struct {
 }
 
 type CacheSpec struct {
-	Provider            string `json:"provider,omitempty"`
-	URL                 string `json:"url,omitempty"`
-	EnableBytecodeCache bool   `json:"enableBytecodeCache,omitempty"`
-	BytecodeCacheSize   string `json:"bytecodeCacheSize,omitempty"`
+	Provider string `json:"provider,omitempty"`
+	URL      string `json:"url,omitempty"`
+	// EnableBytecodeCache provisions a PVC mounted at /cache/bytecode and wires
+	// the runtime code cache for the selected runtime: NODE_COMPILE_CACHE
+	// (/cache/bytecode/latest) always, plus BUN_RUNTIME_TRANSPILER_CACHE_PATH
+	// (/cache/bytecode/bun-transpiler) when spec.runtime is "bun" — one field
+	// covers BOTH caches. Growth is bounded only by BytecodeCacheSize (no
+	// eviction); both runtimes fail open when the volume is full or unwritable.
+	// +optional
+	EnableBytecodeCache bool `json:"enableBytecodeCache,omitempty"`
+	// BytecodeCacheSize sizes the bytecode-cache PVC (default 512Mi).
+	// +optional
+	BytecodeCacheSize string `json:"bytecodeCacheSize,omitempty"`
 	// KeyPrefix is prepended to every cache key — maps from KnativeNextConfig.cache.keyPrefix
 	// +optional
 	KeyPrefix string `json:"keyPrefix,omitempty"`

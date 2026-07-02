@@ -298,36 +298,32 @@ volumes:
       secretName: gcs-credentials
 ```
 
-## Cold Start Optimization & Bun Bytecode Compilation
+## Cold Start Optimization & Bytecode/Transpiler Caching
 
-Knative scale-to-zero services incur a cold start cost each time a pod is created. The framework eliminates this bottleneck through **Bun bytecode compilation** — producing a single native binary that bypasses V8 JIT compilation entirely.
+Knative scale-to-zero services incur a cold start cost each time a pod is created. The framework reduces the parse/compile share of that cost with a **persistent code cache on a shared volume**, per runtime:
 
-### Architecture: 3-Stage Docker Build
+- **Node (default):** `NODE_COMPILE_CACHE` — the first pod writes the V8 code cache to the mounted volume; later cold-started pods deserialize it instead of re-parsing/JIT-compiling (the mechanism behind Vercel Fluid).
+- **Bun (`runtime: bun`), build time:** `kn-next build` precompiles each server-side .js file in the standalone tree **individually** to JSC bytecode (`bun build <file> --bytecode --external '*'` — the require graph stays untouched); Bun's runtime consumes the companion `.jsc` on `require()`. Measured on a real `next@16.2.4` standalone build: **-47% startup** (287ms → 152ms median, N=12). Hash-validated — a stale, corrupt, or version-mismatched `.jsc` silently falls back to source. Trade-off: the tree grows ~2.5x (37MB → 95MB) and the output is **Bun-only** (it does not load under Node), so the pass is gated on `runtime: "bun"`.
+- **Bun (`runtime: bun`), run time:** `BUN_RUNTIME_TRANSPILER_CACHE_PATH` — Bun persists the *transpiled source* of large modules (≥ ~50KB) to the same volume. Alone: **~20% faster** time-to-first-response warm (287ms → 231ms); composes with the bytecode pass (145ms). Fail-open if the directory is missing or unwritable.
+
+> **Rejected with evidence — compile-to-binary (`bun build --compile --bytecode` on the whole app):** an earlier prototype shipped the app as a single Bun binary with embedded bytecode. Re-tested against the current standalone output, the **bundling** build **hard-fails**: the standalone server dynamically `require()`s dev-only modules pruned from the output and loads route chunks via runtime-computed paths a static bundle cannot capture. The per-file pass above is what survived measurement. See `docs/spikes/0001-bun-bytecode-pipeline.md` (superseded) — do not resurrect the bundle pipeline.
+
+### Architecture: 2-Stage Docker Build
 
 ```mermaid
 flowchart LR
     subgraph Stage1["Stage 1: Build"]
-        A["node:22-alpine + pnpm"] --> B["next build<br/>output:standalone"]
+        A["node:22 + pnpm"] --> B["next build<br/>output:standalone"]
     end
 
-    subgraph Stage2["Stage 2: Compile"]
-        B --> C["oven/bun:1.3.10-alpine"]
-        C --> D["bun build --compile<br/>--bytecode --minify"]
-    end
-
-    subgraph Stage3["Stage 3: Run"]
-        D --> E["alpine:latest<br/>Single Binary (~50MB)"]
+    subgraph Stage2["Stage 2: Run"]
+        B --> C["distroless nodejs<br/>standalone server.js"]
+        C --> D["code cache on<br/>shared volume"]
     end
 
     style Stage1 fill:#3b82f6,color:#fff
-    style Stage2 fill:#8b5cf6,color:#fff
-    style Stage3 fill:#10b981,color:#fff
+    style Stage2 fill:#10b981,color:#fff
 ```
-
-The compiled binary includes the Bun runtime and all application code pre-compiled to bytecode, eliminating:
-- Node.js runtime installation (~150MB saved)
-- `node_modules` directory
-- V8 JIT compilation at startup
 
 ### Performance Benchmarks
 
@@ -377,12 +373,12 @@ seq 1 100000 | xargs -n1 -P100 -I {} curl -s -o /dev/null -w "%{time_total}\n" \
 
 Two factors combine to achieve this:
 
-1. **Bun Bytecode Compilation** — `bun build --compile --bytecode` pre-compiles all JavaScript into native machine code. No V8 parsing or JIT compilation occurs at startup.
+1. **Persistent code caching** — Node: `NODE_COMPILE_CACHE` (V8 code cache on a shared volume); Bun: per-file JSC bytecode baked at build time (-47% measured) plus the runtime transpiler cache. Parse/compile work from earlier pods is reused instead of redone.
 2. **Knative Resource Caching** — Knative pre-caches container images and maintains warm network paths, reducing image pull time to near-zero on subsequent cold starts.
 
-### Optional: V8 Bytecode PVC Caching
+### Cache volume configuration
 
-For deployments using the standard Node.js runtime (without Bun compilation), the framework also supports Node.js 24's `NODE_COMPILE_CACHE` with shared volumes:
+For the standard Node.js runtime, `NODE_COMPILE_CACHE` uses a shared volume:
 
 ```typescript
 const config: KnativeNextConfig = {
@@ -630,5 +626,5 @@ Removes deployed resources from the cluster:
 - [ ] Edge middleware on Cloudflare Workers
 - [x] Automatic Dockerfile generation
 - [x] GitHub Actions workflow examples
-- [x] Bun bytecode compilation for sub-second cold starts
+- [x] Cold-start code caching (Node `NODE_COMPILE_CACHE`; Bun per-file bytecode + transpiler cache — the single-binary compile path was measured infeasible and rejected)
 - [x] Kubernetes Operator (`NextApp` CRD)
