@@ -8,6 +8,7 @@ import {
   rmSync,
   writeFileSync,
 } from 'node:fs';
+import { get as httpGet } from 'node:http';
 import { connect } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -44,10 +45,17 @@ let appDir = '';
 let deployStdout = '';
 let parsedPort = 0;
 
-/** A standalone server.js that a fake `next build` would emit: serves HTTP on $PORT.
- * Mirrors the REAL generated standalone server.js, which reads
+/**
+ * A standalone server.js that a fake `next build` would emit: serves HTTP on
+ * $PORT. Mirrors the REAL generated standalone server.js, which reads
  * `process.env.HOSTNAME || '0.0.0.0'` — and records the HOSTNAME it was booted
- * with so the test can assert the deploy script's boot env (B7a, #174). */
+ * with so the test can assert the deploy script's boot env (B7a, #174). The
+ * extra routes emit the EXACT origin Cache-Control values Next's standalone
+ * server produces (getCacheControlHeader + the pages-router fallback shell),
+ * so the contract test can assert the deploy script's serving layer normalizes
+ * them to the deployed-platform values the official deploy suite expects
+ * (#175, prerender.test.ts caching-header failures).
+ */
 const FAKE_SERVER_JS = `
 const fs = require('node:fs');
 const path = require('node:path');
@@ -59,6 +67,58 @@ fs.writeFileSync(
   JSON.stringify(process.env.HOSTNAME ?? null),
 );
 http.createServer((req, res) => {
+  if (req.url === '/isr') {
+    // Next origin for revalidate:2 pages (prerender.test.ts "revalidate page")
+    res.writeHead(200, {
+      'content-type': 'text/html',
+      'x-nextjs-cache': 'HIT',
+      'cache-control': 's-maxage=2, stale-while-revalidate=31535998',
+    });
+    return res.end('isr');
+  }
+  if (req.url === '/no-revalidate') {
+    // Next origin for revalidate:false pages ("no-revalidate page")
+    res.writeHead(200, {
+      'content-type': 'text/html',
+      'x-nextjs-cache': 'HIT',
+      'cache-control': 's-maxage=31536000',
+    });
+    return res.end('no-revalidate');
+  }
+  if (req.url === '/fallback-shell') {
+    // Next origin for a fallback:true first MISS (HTML shell)
+    res.writeHead(200, {
+      'content-type': 'text/html',
+      'x-nextjs-cache': 'MISS',
+      'cache-control': 'private, no-cache, no-store, max-age=0, must-revalidate',
+    });
+    return res.end('shell');
+  }
+  if (req.url.startsWith('/_next/data/')) {
+    // data requests are never fallback shells — private stays private
+    res.writeHead(200, {
+      'content-type': 'application/json',
+      'x-nextjs-cache': 'MISS',
+      'cache-control': 'private, no-cache, no-store, max-age=0, must-revalidate',
+    });
+    return res.end('{}');
+  }
+  if (req.url === '/dynamic') {
+    // genuinely dynamic SSR (no x-nextjs-cache marker) — must stay private
+    res.writeHead(200, {
+      'content-type': 'text/html',
+      'cache-control': 'private, no-cache, no-store, max-age=0, must-revalidate',
+    });
+    return res.end('dynamic');
+  }
+  if (req.url === '/static-asset') {
+    // immutable static assets must pass through untouched
+    res.writeHead(200, {
+      'content-type': 'application/javascript',
+      'cache-control': 'public, max-age=31536000, immutable',
+    });
+    return res.end(';');
+  }
   res.writeHead(200, { 'content-type': 'text/html' });
   res.end('<!doctype html><html><body>knext e2e fixture ok</body></html>');
 }).listen(port, host, () => {
@@ -86,6 +146,15 @@ fs.writeFileSync(path.join(standalone, 'server.js'), ${JSON.stringify(FAKE_SERVE
 fs.writeFileSync(
   path.join(nextDir, 'DEPLOYMENT_ID_AT_BUILD'),
   String(process.env.NEXT_DEPLOYMENT_ID || ''),
+);
+// #175: record what the BUILD process saw for NEXT_PRIVATE_TEST_MODE. The
+// harness appends a next.config.js snippet that maps it to __NEXT_TEST_MODE,
+// which define-env inlines into the CLIENT bundle — without it the
+// window.__NEXT_HYDRATED test marker is absent and every webdriver hydration
+// wait falls back to a 10s timeout (the lazy-catchall failures).
+fs.writeFileSync(
+  path.join(nextDir, 'TEST_MODE_AT_BUILD'),
+  String(process.env.NEXT_PRIVATE_TEST_MODE || ''),
 );
 // B4 (#147 round 2): build warnings land on both streams in real next builds.
 console.log('[fake-next] FAKE_BUILD_STDOUT_WARNING_MARKER');
@@ -138,6 +207,11 @@ describe('scripts/e2e-deploy.sh — official deploy-script contract (#89)', () =
         ...process.env,
         KNEXT_E2E_SKIP_PACK: '1',
         KNEXT_RUNTIME: 'node',
+        // The harness always runs deploy tests with NEXT_TEST_MODE=deploy in
+        // the deploy-script env (run-tests.js → jest → NextDeployInstance).
+        NEXT_TEST_MODE: 'deploy',
+        // Ensure the script derives it rather than inheriting a stale value.
+        NEXT_PRIVATE_TEST_MODE: '',
       },
       encoding: 'utf8',
       timeout: 60000,
@@ -301,6 +375,68 @@ describe('scripts/e2e-deploy.sh — official deploy-script contract (#89)', () =
     // The B4 capture must not leak build output onto deploy stdout — the
     // harness reads stdout as the deployment URL.
     expect(deployStdout).not.toContain('FAKE_BUILD_STDOUT_WARNING_MARKER');
+  });
+
+  it('exports NEXT_PRIVATE_TEST_MODE into the `next build` env from NEXT_TEST_MODE (#175 lazy-catchall fix)', () => {
+    // Run 28578203671: `should support (nested) lazy catchall route` failed with
+    // received "Hi delayby3s" instead of "fallback" and a ~10.2s test time — the
+    // webdriver hydration wait's 10s fallback timeout. Without
+    // NEXT_PRIVATE_TEST_MODE at build, the harness-appended next.config.js
+    // snippet never sets __NEXT_TEST_MODE, the client bundle lacks the
+    // window.__NEXT_HYDRATED marker, and the 3s-delayed getStaticProps resolves
+    // before the test reads the element. The official reference adapter
+    // (nextjs/adapter-bun scripts/e2e-deploy.sh) exports it the same way.
+    const seenAtBuild = readFileSync(join(appDir, '.next', 'TEST_MODE_AT_BUILD'), 'utf8').trim();
+    expect(seenAtBuild, 'NEXT_PRIVATE_TEST_MODE was not in the next build env').toBe('deploy');
+  });
+
+  describe('deployed-platform Cache-Control normalization at the serving layer (#175)', () => {
+    // Evidence: compat run 28578203671, prerender.test.ts deploy-mode diffs.
+    // The official reference adapter (nextjs/adapter-bun src/runtime/server.ts,
+    // normalizeCacheControlHeader) applies exactly these rules in its serving
+    // layer; knext applies them to the standalone server via a --require preload.
+    const PUBLIC_DEPLOY = 'public, max-age=0, must-revalidate';
+
+    // node:http, NOT fetch — the vitest environment (happy-dom) applies CORS
+    // to fetch; this asserts raw server headers exactly as the harness does.
+    function headerOf(path: string): Promise<string | undefined> {
+      return new Promise((res, rej) => {
+        const req = httpGet(`http://127.0.0.1:${parsedPort}${path}`, (r) => {
+          r.resume(); // drain
+          const value = r.headers['cache-control'];
+          res(Array.isArray(value) ? value.join(', ') : value);
+        });
+        req.on('error', rej);
+      });
+    }
+
+    it('rewrites ISR s-maxage/stale-while-revalidate responses to the deploy value', async () => {
+      expect(await headerOf('/isr')).toBe(PUBLIC_DEPLOY);
+    });
+
+    it('rewrites no-revalidate s-maxage=31536000 responses to the deploy value', async () => {
+      expect(await headerOf('/no-revalidate')).toBe(PUBLIC_DEPLOY);
+    });
+
+    it('rewrites the fallback-shell private response (x-nextjs-cache marker present) to the deploy value', async () => {
+      expect(await headerOf('/fallback-shell')).toBe(PUBLIC_DEPLOY);
+    });
+
+    it('keeps /_next/data/ private responses private', async () => {
+      expect(await headerOf('/_next/data/BUILDID/fallback-true/second.json')).toBe(
+        'private, no-cache, no-store, max-age=0, must-revalidate',
+      );
+    });
+
+    it('keeps marker-less dynamic private responses private', async () => {
+      expect(await headerOf('/dynamic')).toBe(
+        'private, no-cache, no-store, max-age=0, must-revalidate',
+      );
+    });
+
+    it('keeps immutable static-asset responses untouched', async () => {
+      expect(await headerOf('/static-asset')).toBe('public, max-age=31536000, immutable');
+    });
   });
 
   it('e2e-cleanup.sh frees the port (server torn down)', async () => {
