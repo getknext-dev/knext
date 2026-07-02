@@ -750,6 +750,15 @@ jobs:
       # ASSET paths, never module-scope-required on the harness load path, and
       # `@next/telemetry` is only a JSDoc @type annotation. If a later run surfaces
       # another, add `name:source-dir` to the list below.
+      #
+      # #147 A3-3 FINAL MILE (run 28590478386, B9): a later run DID surface one —
+      # instant-navigation-testing-api.test.ts imports `@next/playwright` at module
+      # scope and crashed with `Cannot find module '@next/playwright'`: the
+      # workspace source dir packages/next-playwright ships no dist/ in the
+      # prebuilt model. The published @next/playwright@<ref> (same version line as
+      # next) has `main: dist/index.js` and requires only `./step` at module scope
+      # (its @playwright/test peer is optional), so the ONE list entry below is
+      # the complete fix.
       - name: Hydrate @next/* harness load closure from published tarballs (so test modules load)
         working-directory: next.js
         run: |
@@ -760,6 +769,7 @@ jobs:
           # Add one line here to extend the closure; stay build-free (published dist only).
           PKGS=(
             "@next/env:packages/next-env"
+            "@next/playwright:packages/next-playwright"
           )
           for entry in "${PKGS[@]}"; do
             pkg="${entry%%:*}"
@@ -780,13 +790,20 @@ jobs:
             cp -R "$work/package/dist" "${src_dir}/dist"
             echo "::endgroup::"
           done
-          # Sanity: @next/env must now resolve from the workspace next package, i.e.
-          # the exact module the load-crash reported missing.
+          # Sanity: every hydrated dist entry must now exist — @next/env resolves
+          # from the workspace next package (the exact module the original load
+          # crash reported missing) and @next/playwright resolves for the
+          # instant-navigation-testing-api module-scope import (B9). Fail loud
+          # HERE, never as a per-test module-load crash 20 steps later.
           node -e '
             const path = require("path");
-            const dist = path.resolve("packages/next-env/dist/index.js");
-            require("fs").accessSync(dist);
-            console.log("@next/* load closure hydrated:", dist);
+            for (const dist of [
+              path.resolve("packages/next-env/dist/index.js"),
+              path.resolve("packages/next-playwright/dist/index.js"),
+            ]) {
+              require("fs").accessSync(dist);
+              console.log("@next/* load closure hydrated:", dist);
+            }
           '
 
       # #147 / A3-3 — hydrate the prebuilt @next/swc NATIVE binary. Run 28317087611:
@@ -1041,6 +1058,53 @@ jobs:
         working-directory: next.js
         env:
           NEXT_TEST_MODE: deploy
+          # #147 A3-3 FINAL MILE (run 28590478386, 6 of the last 9 failures):
+          # the harness's bundler-lane flag. Next 16 builds every fixture with
+          # Turbopack (the default), but the jest-side `isTurbopack`
+          # (test/lib/turbo.ts shouldUseTurbopack()) reads THIS env var — unset,
+          # webpack-lane assertions/snapshots ran against Turbopack output
+          # (app-dir/app/index chunk paths, css-chunking's webpack-only test,
+          # esm-externals' webpack expectations, prefetch-inlining's webpack
+          # snapshot). It ALSO fixes the two "Call retries were exceeded" build
+          # aborts (next-config, edge-can-use-wasm-files): bundler.ts
+          # parseBundlerArgs treats IS_TURBOPACK_TEST as an EXPLICIT bundler
+          # choice (TURBOPACK='1', not 'auto'), which disables
+          # turbopack-warning.ts's hard process.exit(1) on fixtures carrying a
+          # `webpack` config. PROVENANCE: upstream's own adapter deploy lane
+          # (v16.2.0 test_e2e_deploy_release.yml, test-deploy-adapter job) runs
+          # `IS_TURBOPACK_TEST=1 … node run-tests.js`; run-tests.js and
+          # next-deploy.ts both spawn children with {...process.env}, so the
+          # flag reaches the tests AND the fixture `next build` in
+          # scripts/e2e-deploy.sh. Never set IS_WEBPACK_TEST alongside it —
+          # bundler.ts exits(1) on multiple bundler flags.
+          IS_TURBOPACK_TEST: '1'
+          # #147 A3-3 round 5 (code-gate advisory on the first all-green run,
+          # 28599745695) — the FOURTH mirror from the same upstream afterBuild
+          # line (test_e2e_deploy_release.yml:209-218, test-deploy-adapter):
+          # NEXT_ENABLE_ADAPTER=1. In-scope e2e files read it as
+          # `isAdapterTest = Boolean(process.env.NEXT_ENABLE_ADAPTER)` and switch
+          # to ADAPTER expectations (not-found-with-pages-i18n,
+          # sub-shell-generation{,-middleware}, partial-fallback-root-blocking,
+          # partial-fallback-shell-upgrade, deterministic-build/deployment-id).
+          # Without it those tests pass under NON-adapter expectations — green
+          # for possibly the wrong reason; the verified-adapter credential
+          # requires the adapter lane's expectations, not just its runtime.
+          # Verified at v16.2.0: no reader inside packages/next (harness-only),
+          # so it flips test expectations without altering the fixture build
+          # (knext already builds through NEXT_ADAPTER_PATH).
+          NEXT_ENABLE_ADAPTER: '1'
+          # #147 A3-3 round 4 — env fidelity with upstream's test-deploy-adapter
+          # lane, which sets NEXT_E2E_TEST_TIMEOUT=240000. It raises the jest
+          # SETUP timeout (test/lib/e2e-utils/index.ts jest.setTimeout — the
+          # createNext/deploy/build hooks; Linux default was 120s), so a slow
+          # fixture deploy under shard load gets upstream's full setup budget.
+          # HONEST SCOPE NOTE: it does NOT raise the per-CASE 60s timeout — that
+          # is HARDCODED upstream (individualTestTimeout, applied via a
+          # Proxy-wrapped it/test) and identical in both lanes; the residual 60s
+          # runtime-prefetch wobble class is ledgered per-case in the manifest
+          # ($knextQuarantines), exactly as upstream ledgers it in its own
+          # deploy manifest.
+          NEXT_E2E_TEST_TIMEOUT: '240000'
           # knext's lifecycle scripts (the deploy-script contract).
           NEXT_TEST_DEPLOY_SCRIPT_PATH: ${{ github.workspace }}/knext/scripts/e2e-deploy.sh
           NEXT_TEST_DEPLOY_LOGS_SCRIPT_PATH: ${{ github.workspace }}/knext/scripts/e2e-logs.sh
@@ -1093,7 +1157,13 @@ jobs:
         # cancellation, which is not guaranteed to leave room for the tail).
         timeout-minutes: 105
         run: |
-          node run-tests.js --type e2e -g ${{ matrix.shard }} 2>&1 | tee runner.log || true
+          # -c 2: EXPLICIT upstream test-deploy-adapter concurrency (was the
+          # run-tests.js default, 2 — the flag declares the fidelity and pins it
+          # against a silent default change on a ref bump). Deliberately NOT -c 1:
+          # upstream runs this suite at -c 2 on the same ubuntu-latest runners and
+          # ledgers the residual 60s-timeout wobble; diverging would trade
+          # env-parity for an unproven stability hypothesis at ~2x wall time.
+          node run-tests.js --type e2e -c 2 -g ${{ matrix.shard }} 2>&1 | tee runner.log || true
 
       # Fix round 1: `if: always()` on the WHOLE summarize+upload tail — a
       # timed-out or failed shard must still report its partial results, never
