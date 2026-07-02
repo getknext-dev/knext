@@ -23,14 +23,15 @@ type sysMetrics struct {
 type Metrics struct {
 	mu sync.Mutex
 
-	ConnectionsTotal  int                    `json:"connections_total"`
-	ActiveConnections int                    `json:"active_connections"`
-	WakesTotal        int                    `json:"wakes_total"`
-	WakeFailuresTotal int                    `json:"wake_failures_total"`
-	SleepsTotal       int                    `json:"sleeps_total"`
-	WakeLatencyMsLast int64                  `json:"wake_latency_ms_last"`
-	WakeLatencyMs     []int64                `json:"wake_latency_ms"`
-	PerSystem         map[string]*sysMetrics `json:"per_system"`
+	ConnectionsTotal         int                    `json:"connections_total"`
+	ActiveConnections        int                    `json:"active_connections"`
+	WakesTotal               int                    `json:"wakes_total"`
+	WakeFailuresTotal        int                    `json:"wake_failures_total"`
+	SleepsTotal              int                    `json:"sleeps_total"`
+	RejectedConnectionsTotal int                    `json:"rejected_connections_total"`
+	WakeLatencyMsLast        int64                  `json:"wake_latency_ms_last"`
+	WakeLatencyMs            []int64                `json:"wake_latency_ms"`
+	PerSystem                map[string]*sysMetrics `json:"per_system"`
 }
 
 // NewMetrics constructs an empty Metrics.
@@ -88,6 +89,13 @@ func (m *Metrics) WakeFailure() {
 	m.WakeFailuresTotal++
 }
 
+// RejectConn counts a connection refused by the GW_MAX_CONNS cap.
+func (m *Metrics) RejectConn() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.RejectedConnectionsTotal++
+}
+
 func (m *Metrics) Sleep() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -100,6 +108,7 @@ func (m *Metrics) Active() int       { m.mu.Lock(); defer m.mu.Unlock(); return 
 func (m *Metrics) Wakes() int        { m.mu.Lock(); defer m.mu.Unlock(); return m.WakesTotal }
 func (m *Metrics) WakeFailures() int { m.mu.Lock(); defer m.mu.Unlock(); return m.WakeFailuresTotal }
 func (m *Metrics) Sleeps() int       { m.mu.Lock(); defer m.mu.Unlock(); return m.SleepsTotal }
+func (m *Metrics) Rejected() int     { m.mu.Lock(); defer m.mu.Unlock(); return m.RejectedConnectionsTotal }
 
 // PromText renders the Prometheus text exposition.
 func (m *Metrics) PromText() string {
@@ -111,6 +120,7 @@ func (m *Metrics) PromText() string {
 		fmt.Sprintf("pggw_wakes_total %d", m.WakesTotal),
 		fmt.Sprintf("pggw_wake_failures_total %d", m.WakeFailuresTotal),
 		fmt.Sprintf("pggw_sleeps_total %d", m.SleepsTotal),
+		fmt.Sprintf("pggw_rejected_connections_total %d", m.RejectedConnectionsTotal),
 		fmt.Sprintf("pggw_wake_latency_ms_last %d", m.WakeLatencyMsLast),
 	}
 	keys := make([]string, 0, len(m.PerSystem))

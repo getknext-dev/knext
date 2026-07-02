@@ -42,6 +42,7 @@ type Gateway struct {
 	metrics *metrics.Metrics
 	opts    wake.Opts
 	idleMs  int
+	connSem chan struct{} // nil = unlimited (GW_MAX_CONNS)
 	log     func(string)
 
 	// Peers guards the idle decision when running 2+ replicas: sleep only
@@ -63,7 +64,7 @@ func New(env wake.Env, log func(string)) (*Gateway, error) {
 	if log == nil {
 		log = func(string) {}
 	}
-	return &Gateway{
+	g := &Gateway{
 		driver:  driver,
 		metrics: metrics.NewMetrics(),
 		opts: wake.Opts{
@@ -74,7 +75,11 @@ func New(env wake.Env, log func(string)) (*Gateway, error) {
 		idleMs: envInt(env, "GW_IDLE_MS", 300000),
 		log:    log,
 		active: map[string]*activeEntry{},
-	}, nil
+	}
+	if n := envInt(env, "GW_MAX_CONNS", 0); n > 0 {
+		g.connSem = make(chan struct{}, n)
+	}
+	return g, nil
 }
 
 func envInt(env wake.Env, key string, def int) int {
@@ -92,12 +97,44 @@ func (g *Gateway) Metrics() *metrics.Metrics { return g.metrics }
 // Driver returns the compute driver.
 func (g *Gateway) Driver() wake.Driver { return g.driver }
 
+// capConn releases its GW_MAX_CONNS slot exactly once, on Close. Every code
+// path (handshake errors, pipe cleanup, timeouts) closes the client conn, so
+// the slot's lifetime is the connection's lifetime — not handle()'s, which
+// returns as soon as the pipe goroutines start.
+type capConn struct {
+	net.Conn
+	release *sync.Once
+	sem     chan struct{}
+}
+
+func (c *capConn) Close() error {
+	c.release.Do(func() { <-c.sem })
+	return c.Conn.Close()
+}
+
 // Serve runs the accept loop until ln is closed.
 func (g *Gateway) Serve(ln net.Listener) {
 	for {
 		client, err := ln.Accept()
 		if err != nil {
 			return
+		}
+		if tcp, ok := client.(*net.TCPConn); ok {
+			_ = tcp.SetNoDelay(true)
+		}
+		if g.connSem != nil {
+			select {
+			case g.connSem <- struct{}{}:
+				client = &capConn{Conn: client, release: &sync.Once{}, sem: g.connSem}
+			default:
+				// At capacity: refuse cleanly instead of unbounded goroutines.
+				g.metrics.RejectConn()
+				go func(c net.Conn) {
+					_, _ = c.Write(proto.BuildErrorResponse("53300", "gateway connection limit reached"))
+					_ = c.Close()
+				}(client)
+				continue
+			}
 		}
 		go g.handle(client)
 	}
@@ -119,9 +156,6 @@ func (g *Gateway) Close() error {
 
 // handle reads the initial packet(s), declines SSL/GSS, then proxies a startup.
 func (g *Gateway) handle(client net.Conn) {
-	if tcp, ok := client.(*net.TCPConn); ok {
-		_ = tcp.SetNoDelay(true)
-	}
 	var buf []byte
 	readBuf := make([]byte, 4096)
 
