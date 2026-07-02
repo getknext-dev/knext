@@ -1886,6 +1886,25 @@ describe('compat-suite Turbopack lane flag (test-e2e-deploy.yml, #147 A3-3 final
       'the run step must not set IS_WEBPACK_TEST alongside IS_TURBOPACK_TEST',
     ).toBe(false);
   });
+
+  it('sets NEXT_ENABLE_ADAPTER=1 on the run step (adapter-lane expectations, not just adapter runtime)', () => {
+    // Code-gate advisory on the first all-green run (28599745695): upstream's
+    // test-deploy-adapter lane sets NEXT_ENABLE_ADAPTER=1 in the SAME afterBuild
+    // env line the other three mirrors came from (test_e2e_deploy_release.yml
+    // :209-218). In-scope e2e files read it as `isAdapterTest` and switch to
+    // ADAPTER expectations (not-found-with-pages-i18n, sub-shell-generation,
+    // partial-fallback-*). Without it, those tests pass under NON-adapter
+    // expectations — green for possibly the wrong reason. Credential integrity
+    // requires the adapter lane's expectations, not just its runtime.
+    const step = runTestsStep();
+    expect(step, 'expected the Run official deploy tests step').not.toBe('');
+    const m = step.match(/NEXT_ENABLE_ADAPTER\s*:\s*['"]?([^'"\s#]+)/);
+    expect(
+      m,
+      'the run step env must set NEXT_ENABLE_ADAPTER — upstream test-deploy-adapter sets it and isAdapterTest branches read it',
+    ).not.toBeNull();
+    expect((m as RegExpMatchArray)[1], 'NEXT_ENABLE_ADAPTER must be truthy').toBe('1');
+  });
 });
 
 describe('compat-suite hydrates @next/playwright (test-e2e-deploy.yml, #147 A3-3 final mile)', () => {

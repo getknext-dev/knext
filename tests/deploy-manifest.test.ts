@@ -470,4 +470,66 @@ describe('test/deploy-tests-manifest.knext.json — knext-observed flaky quarant
       }
     }
   });
+
+  // Code-gate minor on the first all-green run (28599745695): the completeness
+  // checks above only cover files hardcoded in OBSERVED_FLAKY_QUARANTINES — a
+  // future flakey addition that skips BOTH lists would sail through unledgered.
+  // This guard is GENERIC: every suites entry is either part of the upstream
+  // v16.2.0 mirror (the verbatim block re-mirrored on ref bumps) or MUST carry
+  // a $knextQuarantines record covering exactly its flakey cases.
+  const UPSTREAM_MIRROR_SUITES = new Set([
+    'test/e2e/app-dir/app-client-cache/client-cache.defaults.test.ts',
+    'test/e2e/app-dir/app-client-cache/client-cache.experimental.test.ts',
+    'test/e2e/app-dir/segment-cache/prefetch-runtime/prefetch-runtime.test.ts',
+    'test/e2e/app-dir/actions/app-action.test.ts',
+    'test/e2e/app-dir/actions/app-action-node-middleware.test.ts',
+    'test/e2e/app-dir/app-static/app-static.test.ts',
+    'test/e2e/app-dir/metadata/metadata.test.ts',
+    'test/e2e/app-dir/searchparams-reuse-loading/searchparams-reuse-loading.test.ts',
+    'test/e2e/middleware-rewrites/test/index.test.ts',
+  ]);
+
+  it('ANY suites entry outside the upstream mirror MUST have a complete $knextQuarantines record (generic, no hardcoded allowlist)', () => {
+    for (const [file, entry] of Object.entries(manifest.suites)) {
+      if (UPSTREAM_MIRROR_SUITES.has(file)) continue;
+      // A knext-observed entry must be flakey-only (quarantine != known-failing)...
+      expect(
+        entry.failed ?? [],
+        `knext-observed suites["${file}"] must not carry a failed list — quarantines are flakey-only`,
+      ).toEqual([]);
+      expect(
+        (entry.flakey ?? []).length,
+        `suites["${file}"] is neither an upstream mirror entry nor a flakey quarantine`,
+      ).toBeGreaterThan(0);
+      // ...and every one of its cases must be ledgered with evidence.
+      const ledger = quarantines.find((q) => q.test === file);
+      expect(
+        ledger,
+        `suites["${file}"] has flakey cases but NO $knextQuarantines ledger record — unledgered quarantines are forbidden`,
+      ).toBeTruthy();
+      expect(
+        [...(ledger?.cases ?? [])].sort(),
+        `$knextQuarantines record for "${file}" must cover exactly its live flakey cases`,
+      ).toEqual([...(entry.flakey ?? [])].sort());
+      for (const key of ['mechanism', 'evidence', 'provenance'] as const) {
+        expect(
+          typeof ledger?.[key] === 'string' && (ledger?.[key] ?? '').trim().length > 0,
+          `$knextQuarantines record for "${file}" is missing a non-empty "${key}"`,
+        ).toBe(true);
+      }
+    }
+  });
+
+  it('the upstream-mirror set in this guard matches the mirrored suites (re-mirror both on a ref bump)', () => {
+    // If a ref bump re-mirrors upstream suites, this set must be updated in the
+    // same change — otherwise the generic guard above would misclassify a new
+    // upstream mirror entry as an unledgered knext quarantine (fail-loud is the
+    // point, but the fix must be obvious).
+    for (const file of UPSTREAM_MIRROR_SUITES) {
+      expect(
+        manifest.suites[file],
+        `guard's UPSTREAM_MIRROR_SUITES lists "${file}" but the manifest has no such suites entry`,
+      ).toBeTruthy();
+    }
+  });
 });

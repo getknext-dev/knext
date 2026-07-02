@@ -1078,6 +1078,21 @@ jobs:
           # scripts/e2e-deploy.sh. Never set IS_WEBPACK_TEST alongside it —
           # bundler.ts exits(1) on multiple bundler flags.
           IS_TURBOPACK_TEST: '1'
+          # #147 A3-3 round 5 (code-gate advisory on the first all-green run,
+          # 28599745695) — the FOURTH mirror from the same upstream afterBuild
+          # line (test_e2e_deploy_release.yml:209-218, test-deploy-adapter):
+          # NEXT_ENABLE_ADAPTER=1. In-scope e2e files read it as
+          # `isAdapterTest = Boolean(process.env.NEXT_ENABLE_ADAPTER)` and switch
+          # to ADAPTER expectations (not-found-with-pages-i18n,
+          # sub-shell-generation{,-middleware}, partial-fallback-root-blocking,
+          # partial-fallback-shell-upgrade, deterministic-build/deployment-id).
+          # Without it those tests pass under NON-adapter expectations — green
+          # for possibly the wrong reason; the verified-adapter credential
+          # requires the adapter lane's expectations, not just its runtime.
+          # Verified at v16.2.0: no reader inside packages/next (harness-only),
+          # so it flips test expectations without altering the fixture build
+          # (knext already builds through NEXT_ADAPTER_PATH).
+          NEXT_ENABLE_ADAPTER: '1'
           # #147 A3-3 round 4 — env fidelity with upstream's test-deploy-adapter
           # lane, which sets NEXT_E2E_TEST_TIMEOUT=240000. It raises the jest
           # SETUP timeout (test/lib/e2e-utils/index.ts jest.setTimeout — the
