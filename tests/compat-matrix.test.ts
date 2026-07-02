@@ -13,7 +13,10 @@ import { describe, expect, it } from 'vitest';
  *
  * It also enforces the project honesty rules:
  *   - No ✅ row may rely on the `next/image` SKIP check (g) — that check is skip-on-fail.
- *   - No row may claim the "official" compat suite is ✅ while issue #89 is still open.
+ *   - The "official" compat suite row may be ✅ ONLY with verifiable run evidence: a GitHub
+ *     Actions run ID, the pinned vercel/next.js ref, and an explicit "N passed / 0 failed"
+ *     result (A3-3 graduation, #147). An evidence-less flip fails this test. The evidence is
+ *     enforced IFF ✅ — an honest regression flip-back to ❌ always passes without ceremony.
  *   - Every Status cell uses exactly one of the 4 legal markers (✅ ⚠️ ❌ ⛔).
  */
 
@@ -167,14 +170,100 @@ describe('docs/compat-matrix.md — honesty guard (issue #41)', () => {
     expect(hardIds.has('g')).toBe(false);
   });
 
-  it('no row claims the official compat suite is ✅ while #89 is open', () => {
-    for (const row of rows) {
-      if (/official/i.test(row.feature) || /official/i.test(row.evidence)) {
-        expect(
-          row.status.includes('✅'),
-          `row "${row.feature}" claims official suite ✅ — not allowed (issue #89 open)`,
-        ).toBe(false);
-      }
+  // ── Official-suite evidence contract (A3-3 graduation, #147) ──────────────────────────
+  //
+  // The official-suite row graduated ❌ → ✅ on the first observed green run on main
+  // (run 28602886003: 788 passed / 0 failed, 16 shards, vercel/next.js v16.2.0). The old
+  // rule ("no official ✅ while #89 is open") is replaced by an EVIDENCE-FORMAT contract:
+  // the ✅ must cite, in the row itself, (1) a GitHub Actions run ID, (2) the pinned
+  // vercel/next.js ref, and (3) an explicit "N passed / 0 failed" result. Anyone flipping
+  // the row without citing a real run trips this guard — the flip is never free.
+
+  /** A workflow run ID: "run 28602886003" or an actions/runs/<id> URL (9+ digits). */
+  const RUN_ID_RE = /\b(?:run\s+|actions\/runs\/)(\d{9,})\b/i;
+  /** The pinned vercel/next.js ref the run tested against, e.g. "v16.2.0". */
+  const PINNED_REF_RE = /\bv\d+\.\d+\.\d+\b/;
+  /** An explicit result with a zero failure count, e.g. "788 passed / 0 failed". */
+  const RESULT_RE = /\b\d+\s+passed\b[^|]*?\b0\s+failed\b/i;
+
+  /**
+   * Returns the list of evidence problems for an official-suite row marked ✅.
+   * Empty array = the flip is properly evidenced. A ❌/⚠️/⛔ row is never a problem.
+   */
+  function officialFlipProblems(row: MatrixRow): string[] {
+    if (!row.status.includes('✅')) return [];
+    const cell = `${row.evidence} ${row.notes}`;
+    const problems: string[] = [];
+    if (!RUN_ID_RE.test(cell)) {
+      problems.push('missing a workflow run ID (e.g. "run 28602886003")');
     }
+    if (!PINNED_REF_RE.test(cell)) {
+      problems.push('missing the pinned vercel/next.js ref (e.g. "v16.2.0")');
+    }
+    if (!RESULT_RE.test(cell)) {
+      problems.push('missing an explicit "<N> passed / 0 failed" result');
+    }
+    return problems;
+  }
+
+  describe('official-suite row — evidence-gated ✅ (A3-3 graduation, #147)', () => {
+    // Scan feature AND evidence (like the pre-graduation rule did): a row that
+    // claims official-suite backing via its Evidence cell is held to the same
+    // contract as the row that names the suite in its Feature cell.
+    const officialRows = rows.filter(
+      (r) => /official/i.test(r.feature) || /official/i.test(r.evidence),
+    );
+
+    it('exactly one row NAMES the official suite in its feature', () => {
+      expect(rows.filter((r) => /official/i.test(r.feature)).length).toBe(1);
+    });
+
+    it('enforces the evidence contract IFF a row is ✅ — an honest ❌ flip-back is always free', () => {
+      expect(officialRows.length).toBeGreaterThan(0);
+      for (const row of officialRows) {
+        // NEVER enforce the ✅ itself: if a red nightly makes someone honestly flip
+        // the row back to ❌ (or ⚠️), this guard must pass without ceremony — the
+        // honesty gradient only ever points AWAY from overclaiming. Evidence is
+        // required if-and-only-if the ✅ is claimed.
+        if (!row.status.includes('✅')) continue;
+        expect(
+          officialFlipProblems(row),
+          `official-claiming ✅ row "${row.feature}" evidence is incomplete: "${row.notes.slice(0, 200)}…"`,
+        ).toEqual([]);
+      }
+    });
+
+    it('rejects an evidence-less flip (no run ID, ref, or result cited)', () => {
+      const flipped: MatrixRow = {
+        feature: 'Official Next.js compatibility suite',
+        status: '✅',
+        evidence: 'docs/adr/0007-compat-suite.md',
+        notes: 'trust me, it went green',
+      };
+      const problems = officialFlipProblems(flipped);
+      expect(problems.length).toBe(3);
+    });
+
+    it('rejects a flip that cites a run ID but omits the pinned ref or the 0-failed result', () => {
+      const partial: MatrixRow = {
+        feature: 'Official Next.js compatibility suite',
+        status: '✅',
+        evidence: '.github/workflows/test-e2e-deploy.yml',
+        notes: 'green in run 28602886003',
+      };
+      const problems = officialFlipProblems(partial);
+      expect(problems).toContain('missing the pinned vercel/next.js ref (e.g. "v16.2.0")');
+      expect(problems).toContain('missing an explicit "<N> passed / 0 failed" result');
+    });
+
+    it('a non-✅ official row needs no run evidence (regressions may honestly flip back)', () => {
+      const regressed: MatrixRow = {
+        feature: 'Official Next.js compatibility suite',
+        status: '❌',
+        evidence: 'docs/adr/0007-compat-suite.md',
+        notes: 'nightly went red — row flipped back pending triage',
+      };
+      expect(officialFlipProblems(regressed)).toEqual([]);
+    });
   });
 });

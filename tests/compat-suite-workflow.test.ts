@@ -2011,3 +2011,154 @@ describe('compat-suite deploy-lane env fidelity (test-e2e-deploy.yml, #147 A3-3 
     ).toBe(false);
   });
 });
+
+describe('compat-suite red-nightly alert issue (test-e2e-deploy.yml, #147 A3-3 graduation)', () => {
+  // The graduated compat-matrix ✅ decays SILENTLY if the nightly goes red and
+  // nobody notices — the credential's stability record depends on red nightlies
+  // being loud. This guard asserts the workflow carries an alert job that, on a
+  // failed SCHEDULED run, creates-or-updates a pinned "Compat nightly RED"
+  // issue with the run link (idempotent — never one-issue-per-night spam).
+  // Policy (docs/compat-matrix.md Maintenance): red nightly → alert issue →
+  // flip the row back citing the red run (the matrix guard permits ❌ freely).
+  const src = readFileSync(WORKFLOW_PATH, 'utf8');
+
+  /** The nightly-red-alert job block (from its job key to the next 2-space-indented job key). */
+  function alertJob(): string {
+    const m = src.match(/^ {2}nightly-red-alert:\n[\s\S]*?(?=^ {2}[a-z][\w-]*:|\n*$(?![\s\S]))/m);
+    return m ? m[0] : '';
+  }
+
+  it('has a nightly-red-alert job', () => {
+    expect(alertJob(), 'expected a `nightly-red-alert:` job in test-e2e-deploy.yml').not.toBe('');
+  });
+
+  it('is failure-gated AND scoped to the scheduled nightly (never a red dispatch experiment)', () => {
+    const job = alertJob();
+    expect(
+      /if:[\s\S]*?always\(\)/.test(job),
+      'the alert must run via always() + needs-result checks (an `if: success()`-style default would skip it exactly when needed)',
+    ).toBe(true);
+    expect(
+      /if:[\s\S]*?github\.event_name\s*==\s*'schedule'/.test(job),
+      'the alert must be scoped to the scheduled nightly — a red workflow_dispatch experiment must not page',
+    ).toBe(true);
+    expect(
+      /needs\.build-next\.result\s*==\s*'failure'/.test(job),
+      'must alert when the build-next (Prepare) job fails',
+    ).toBe(true);
+    expect(
+      /needs\.deploy-tests\.result\s*==\s*'failure'/.test(job),
+      'must alert when any deploy-tests shard fails',
+    ).toBe(true);
+  });
+
+  it('depends on both build-next and deploy-tests (a Prepare failure must also page)', () => {
+    const job = alertJob();
+    const needs = job.match(/needs:\s*\[([^\]]*)\]/);
+    expect(needs, 'the alert job must declare needs: [build-next, deploy-tests]').not.toBeNull();
+    const list = (needs as RegExpMatchArray)[1];
+    expect(list).toContain('build-next');
+    expect(list).toContain('deploy-tests');
+  });
+
+  it('has issues: write permission (least-privilege, but enough to create/update the alert)', () => {
+    expect(/permissions:\s*\n\s+issues:\s*write/.test(alertJob())).toBe(true);
+  });
+
+  it('creates-or-updates the "Compat nightly RED" issue idempotently, with the run link', () => {
+    const job = alertJob();
+    expect(job).toContain('Compat nightly RED');
+    // Idempotency: look up the existing open issue first, comment on it if
+    // found, create (and pin) only when absent — never one new issue per night.
+    expect(/gh issue list\b/.test(job), 'must look up the existing open alert issue').toBe(true);
+    expect(/gh issue comment\b/.test(job), 'must UPDATE the existing issue (no spam)').toBe(true);
+    expect(/gh issue create\b/.test(job), 'must create the issue when none is open').toBe(true);
+    expect(
+      /github\.run_id/.test(job),
+      'the alert must carry the red run link (github.run_id)',
+    ).toBe(true);
+  });
+
+  it('states the flip-back policy in the alert body (matrix row ❌ with the red run cited)', () => {
+    expect(/flip/i.test(alertJob()), 'the alert body must state the row flip-back policy').toBe(
+      true,
+    );
+  });
+});
+
+describe('compat-suite fail-on-red gate — revocation teeth (test-e2e-deploy.yml, #182 code gate)', () => {
+  // Run 28552585087 carried 8 REAL test failures yet concluded SUCCESS: the run
+  // step swallows run-tests.js's exit (`|| true`, markers are parsed from
+  // runner.log) and nothing ever failed on `failed > 0` — so the nightly could
+  // NEVER go red on TEST failures, the alert job (gated on job failure) could
+  // never fire for them, and the "red nightly flips the row back" wording was
+  // unenforced. This guard asserts the teeth: a step AFTER summarize/upload
+  // reads the shard's own summary JSON and fails the JOB on failed>0 or
+  // notRun>0. Summarize + upload stay `if: always()` so artifacts always emit
+  // BEFORE the job flips red.
+  const src = readFileSync(WORKFLOW_PATH, 'utf8');
+
+  function stepIndex(nameRe: RegExp): number {
+    return src.search(nameRe);
+  }
+
+  it('has a fail-on-red step in the deploy-tests job', () => {
+    expect(
+      /-\s+name:[^\n]*Fail shard on red results/.test(src),
+      'expected a "Fail shard on red results" step — without it a red shard concludes SUCCESS (run 28552585087)',
+    ).toBe(true);
+  });
+
+  it('orders the gate AFTER summarize and upload (artifacts must emit before the job flips red)', () => {
+    const summarize = stepIndex(/-\s+name:[^\n]*Summarize shard result/);
+    const upload = stepIndex(/-\s+name:[^\n]*Upload summary artifact/);
+    const gate = stepIndex(/-\s+name:[^\n]*Fail shard on red results/);
+    expect(summarize, 'Summarize step must exist').toBeGreaterThan(-1);
+    expect(upload, 'Upload step must exist').toBeGreaterThan(-1);
+    expect(gate, 'fail-on-red step must exist').toBeGreaterThan(-1);
+    expect(gate, 'gate must come AFTER Summarize').toBeGreaterThan(summarize);
+    expect(gate, 'gate must come AFTER Upload — the ledger artifact always lands').toBeGreaterThan(
+      upload,
+    );
+  });
+
+  it('summarize and upload remain if: always() (a red gate must never starve the ledger)', () => {
+    for (const nameRe of [
+      /-\s+name:[^\n]*Summarize shard result[\s\S]*?(?=\n\s*-\s+name:|\n*$)/,
+      /-\s+name:[^\n]*Upload summary artifact[\s\S]*?(?=\n\s*-\s+name:|\n*$)/,
+    ]) {
+      const block = src.match(nameRe)?.[0] ?? '';
+      expect(block, `step block for ${nameRe} must exist`).not.toBe('');
+      expect(/if:\s*always\(\)/.test(block), `step must keep if: always(): ${nameRe}`).toBe(true);
+    }
+  });
+
+  it('the gate fails on failed>0 OR notRun>0 from the summary JSON, and on a MISSING summary', () => {
+    const gate =
+      src.match(
+        /-\s+name:[^\n]*Fail shard on red results[\s\S]*?(?=\n\s*-\s+name:|\n {2}[a-z])/,
+      )?.[0] ?? '';
+    expect(gate).not.toBe('');
+    expect(/if:\s*always\(\)/.test(gate), 'gate must run even after an earlier step failed').toBe(
+      true,
+    );
+    expect(/compat-suite-summary/.test(gate), 'gate must read the shard summary JSON').toBe(true);
+    expect(/\bfailed\b/.test(gate), 'gate must check the failed count').toBe(true);
+    expect(/\bnotRun\b/.test(gate), 'gate must check the notRun (phantom) count').toBe(true);
+    expect(/exit 1|process\.exit\(1\)/.test(gate), 'gate must fail the job on red').toBe(true);
+    expect(
+      /missing|! -f|-f\s+"?\$\{?SUMMARY/.test(gate),
+      'a missing summary is NOT green — the gate must fail on it',
+    ).toBe(true);
+  });
+
+  it('the run step comment no longer claims "matrix row stays ❌ regardless" (stale pre-graduation contract)', () => {
+    expect(
+      src.includes('stays ❌ regardless'),
+      'stale comment: post-graduation the JOB honestly fails on red results — update the || true rationale',
+    ).toBe(false);
+    // the || true itself STAYS (markers are parsed from runner.log); the new
+    // contract must be stated next to it.
+    expect(/\|\| true\b/.test(src)).toBe(true);
+  });
+});

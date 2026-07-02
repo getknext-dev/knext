@@ -1147,8 +1147,13 @@ jobs:
           # and the fixture `next build` (deploy script) skip the WASM-download /
           # `pnpm config get registry` path that failed every test in run 28317087611.
           NEXT_TEST_NATIVE_DIR: ${{ steps.swc.outputs.dir }}
-        # `|| true`: a partial-subset scaffold WILL have failures today; we still
-        # want the summary artifact emitted. The matrix row stays ❌ regardless.
+        # `|| true`: the STEP's exit is deliberately swallowed — pass/fail is
+        # parsed from runner.log's run-tests.js markers, and the `if: always()`
+        # summarize/upload tail must always emit the ledger artifact. The JOB,
+        # however, now honestly fails on red results: the "Fail shard on red
+        # results" gate below (post-graduation contract, #182 code gate) exits 1
+        # when the shard summary carries failed>0 or notRun>0 — that is what
+        # turns a red nightly into a failed workflow + the pinned alert issue.
         #
         # Fix round 1: the step carries its OWN bound BELOW the 120-min job
         # timeout — a step-level timeout kills only THIS step, so the
@@ -1197,3 +1202,109 @@ jobs:
           name: compat-suite-summary-${{ strategy.job-index }}
           path: knext/compat-suite-summary-*.json
           retention-days: 14
+
+      # ── Fail-on-red gate (#182 code gate: revocation teeth) ────────────────
+      # Run 28552585087 carried 8 REAL test failures yet the workflow concluded
+      # SUCCESS — the run step swallows run-tests.js's exit (`|| true`, see the
+      # comment there) and nothing failed on `failed > 0`, so the nightly could
+      # never go red on TEST failures and nightly-red-alert could never fire
+      # for them. This step is the teeth: it runs LAST (after the `if: always()`
+      # summarize/upload, so the ledger artifact always lands first), reads the
+      # shard's OWN summary JSON, and fails the JOB when it carries failed
+      # tests (failed>0) or phantom not-run files (notRun>0) — or when the
+      # summary is missing entirely (no results is NOT green). A red shard
+      # fails deploy-tests → on the schedule that fires nightly-red-alert →
+      # the flip-back policy in docs/compat-matrix.md. With the flaky family
+      # quarantined per-case, green is the steady state: a red job is a real
+      # signal, never noise.
+      - name: Fail shard on red results (revocation teeth)
+        if: always()
+        working-directory: knext
+        run: |
+          set -euo pipefail
+          SAFE_SHARD="${{ matrix.shard }}"
+          SAFE_SHARD="${SAFE_SHARD/\//-}"
+          SUMMARY="compat-suite-summary-${SAFE_SHARD}.json"
+          if [ ! -f "${SUMMARY}" ]; then
+            echo "::error::${SUMMARY} is missing — no results is NOT green; the summarize step failed upstream"
+            exit 1
+          fi
+          node -e '
+            const s = require("./" + process.argv[1]);
+            console.log(
+              "shard " + s.shard + ": passed=" + s.passed + " failed=" + s.failed +
+              " notRun=" + s.notRun + " excluded=" + s.excluded + " (ref " + s.ref + ")"
+            );
+            if ((s.failed ?? 0) > 0 || (s.notRun ?? 0) > 0) {
+              console.error(
+                "::error::red shard — failed=" + s.failed + " notRun=" + s.notRun +
+                ". See the runner.log groups above. Policy: docs/compat-matrix.md " +
+                "(Maintenance & honesty, red-nightly procedure) — if the red persists, " +
+                "flip the official-suite row back to ❌ citing this run."
+              );
+              process.exit(1);
+            }
+          ' "${SUMMARY}"
+
+  # ── Red-nightly alert (#147 A3-3 graduation follow-up) ─────────────────────
+  # The compat-matrix official-suite ✅ decays SILENTLY if the nightly goes red
+  # and nobody notices. On a failed SCHEDULED run (never a red workflow_dispatch
+  # experiment — those are working sessions), create-or-update ONE pinned
+  # "Compat nightly RED" issue carrying the run link. Idempotent: an already-open
+  # alert issue gets a comment per red night, not a new issue.
+  # Policy (docs/compat-matrix.md, Maintenance & honesty): red nightly → this
+  # issue opens → flip the matrix row back to ❌ citing the red run. The matrix
+  # guard (tests/compat-matrix.test.ts) permits an honest ❌ flip-back freely;
+  # only the ✅ direction needs run evidence.
+  nightly-red-alert:
+    name: Nightly red alert (pinned issue)
+    needs: [build-next, deploy-tests]
+    # always() so this job is not skipped when a needed job fails; the
+    # needs-result checks make it fire ONLY on failure; the event check scopes
+    # it to the nightly schedule.
+    if: >-
+      always() &&
+      github.event_name == 'schedule' &&
+      (needs.build-next.result == 'failure' || needs.deploy-tests.result == 'failure')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      - name: Create or update the "Compat nightly RED" issue (idempotent)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          BUILD_RESULT: ${{ needs.build-next.result }}
+          SHARDS_RESULT: ${{ needs.deploy-tests.result }}
+          NEXTJS_REF_TESTED: ${{ env.NEXTJS_REF }}
+        run: |
+          set -euo pipefail
+          title='Compat nightly RED'
+          body="The scheduled official Next.js deploy-suite nightly FAILED.
+
+          - Run: ${RUN_URL}
+          - build-next (Prepare): ${BUILD_RESULT}
+          - deploy-tests shards: ${SHARDS_RESULT}
+          - Pinned ref: ${NEXTJS_REF_TESTED}
+
+          **Policy** (docs/compat-matrix.md, Maintenance & honesty): if the red persists,
+          flip the official-suite matrix row back to ❌ citing this red run — the matrix
+          guard permits an honest flip-back without ceremony. Triage the per-shard logs +
+          \`compat-suite-summary-*.json\` artifacts before touching the quarantine ledger
+          (ADR-0007 graduation addendum, §c: quarantines need a final-post-retry failure
+          plus an env-parity audit, never a red-nightly reflex)."
+          # Idempotency: exactly-one open alert issue. Comment on it if present,
+          # create (+ pin, best-effort) only when absent.
+          existing="$(gh issue list --repo "${GITHUB_REPOSITORY}" --state open \
+            --json number,title \
+            --jq "[.[] | select(.title == \"${title}\")][0].number // empty")"
+          if [ -n "${existing}" ]; then
+            echo "updating existing alert issue #${existing}"
+            gh issue comment "${existing}" --repo "${GITHUB_REPOSITORY}" --body "${body}"
+          else
+            echo "creating the alert issue"
+            new_url="$(gh issue create --repo "${GITHUB_REPOSITORY}" --title "${title}" --body "${body}")"
+            new_num="${new_url##*/}"
+            gh issue pin "${new_num}" --repo "${GITHUB_REPOSITORY}" || echo "::warning::could not pin issue #${new_num} (non-fatal)"
+          fi
