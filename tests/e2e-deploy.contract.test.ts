@@ -1,5 +1,13 @@
 import { execFileSync, spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { connect } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -11,8 +19,14 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
  * The official Next.js deploy-test harness invokes our deploy script per fixture app
  * (cwd = the app's temp dir) and reads exactly ONE stdout line — the deployment URL —
  * to drive its e2e tests. This test verifies that contract WITHOUT cloning
- * vercel/next.js, by shimming `next` on PATH so `next build` fabricates a minimal
- * standalone server. It exercises the REAL deploy-script logic: build invocation,
+ * vercel/next.js, by planting a fake `next` at the FIXTURE-LOCAL
+ * node_modules/.bin/next — the exact path the script must resolve — so the build
+ * fabricates a minimal standalone server. (#147 fix round 1 follow-up, branch run
+ * 28561839378: the script used to invoke a bare `next build`, which is NOT on
+ * PATH in the harness env → `next: command not found` (127) in every real test;
+ * an earlier version of this test shimmed `next` on PATH, which masked precisely
+ * that bug. The shim now lives where the harness install puts the real binary,
+ * so a bare-invocation regression fails HERE.) It exercises the REAL deploy-script logic: build invocation,
  * asset staging, server boot on a free port, TCP readiness probe, single-line URL
  * echo, and BUILD_ID/DEPLOYMENT_ID persistence to .adapter-build.log. cleanup then
  * frees the port.
@@ -26,7 +40,6 @@ const DEPLOY_SH = resolve(REPO_ROOT, 'scripts/e2e-deploy.sh');
 const CLEANUP_SH = resolve(REPO_ROOT, 'scripts/e2e-cleanup.sh');
 
 let appDir = '';
-let binDir = '';
 let deployStdout = '';
 let parsedPort = 0;
 
@@ -78,7 +91,6 @@ function tcpConnects(port: number, host = '127.0.0.1', timeoutMs = 3000): Promis
 describe('scripts/e2e-deploy.sh — official deploy-script contract (#89)', () => {
   beforeAll(() => {
     appDir = mkdtempSync(join(tmpdir(), 'knext-e2e-app-'));
-    binDir = mkdtempSync(join(tmpdir(), 'knext-e2e-bin-'));
 
     // minimal fixture app
     writeFileSync(
@@ -87,20 +99,23 @@ describe('scripts/e2e-deploy.sh — official deploy-script contract (#89)', () =
     );
     writeFileSync(join(appDir, 'next.config.js'), "module.exports = { output: 'standalone' };\n");
 
-    // PATH shim for `next`
-    const nextBin = join(binDir, 'next');
+    // Fixture-LOCAL `next` shim — at node_modules/.bin/next, the path the script
+    // resolves explicitly. Deliberately NOT a PATH shim: the harness env has no
+    // `next` on PATH, and a PATH shim here previously masked the bare-`next build`
+    // 127 bug (branch run 28561839378).
+    const nextBin = join(appDir, 'node_modules', '.bin', 'next');
+    mkdirSync(join(appDir, 'node_modules', '.bin'), { recursive: true });
     writeFileSync(nextBin, fakeNextScript(appDir));
     chmodSync(nextBin, 0o755);
 
-    // Run the deploy script with cwd = the fixture app, `next` shimmed on PATH.
-    // KNEXT_E2E_SKIP_PACK lets the contract test bypass the real `npm pack`/install
-    // of the adapter tarball (network + build heavy); the script still does
-    // everything else for real.
+    // Run the deploy script with cwd = the fixture app. KNEXT_E2E_SKIP_PACK lets
+    // the contract test bypass the real tarball install (network + build heavy);
+    // the script still does everything else for real — including resolving the
+    // fixture-local next binary.
     const out = execFileSync('bash', [DEPLOY_SH], {
       cwd: appDir,
       env: {
         ...process.env,
-        PATH: `${binDir}:${process.env.PATH}`,
         KNEXT_E2E_SKIP_PACK: '1',
         KNEXT_RUNTIME: 'node',
       },
@@ -119,7 +134,7 @@ describe('scripts/e2e-deploy.sh — official deploy-script contract (#89)', () =
         timeout: 20000,
       });
     }
-    for (const d of [appDir, binDir]) {
+    for (const d of [appDir]) {
       if (d && existsSync(d)) rmSync(d, { recursive: true, force: true });
     }
   });

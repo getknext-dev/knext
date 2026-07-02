@@ -266,6 +266,26 @@ describe('scripts/e2e-deploy.sh installs an npm-installable dual tarball (#147 f
     expect(deployShText()).toMatch(/KNEXT_E2E_TARBALLS_DIR/);
   });
 
+  it('invokes the FIXTURE-LOCAL next binary (node_modules/.bin/next), never a bare `next build`', () => {
+    // Branch run 28561839378: with the tarball install finally working, EVERY
+    // real test then died with `next: command not found` (127) — the fixture's
+    // node_modules/.bin is NOT on the deploy script's PATH in the harness env
+    // (the harness installs next INTO the fixture dir via NEXT_TEST_PKG_PATHS).
+    // The script must resolve the app-local binary explicitly and refuse a
+    // global fallback (which would build with the wrong next version).
+    const text = deployShText();
+    expect(text).toMatch(/NEXT_BIN="\$\{APP_DIR\}\/node_modules\/\.bin\/next"/);
+    expect(text).toMatch(/"\$\{NEXT_BIN\}" build/);
+    // No executable line may invoke `next build` as a bare command.
+    const bareInvocations = text
+      .split('\n')
+      .filter((l) => !/^\s*#/.test(l))
+      .filter((l) => /(?:^|[;&|]\s*)next\s+build\b/.test(l));
+    expect(bareInvocations).toEqual([]);
+    // And the absence of the binary must fail loud, not fall through.
+    expect(text).toMatch(/-x "\$\{NEXT_BIN\}"/);
+  });
+
   it('guards the local pack-once fallback with a lock (per-test packing raced at concurrency 2)', () => {
     // mkdir-based lock — atomic on POSIX; the exact implementation may evolve but
     // some lock must serialize concurrent packs into the shared stable dir.

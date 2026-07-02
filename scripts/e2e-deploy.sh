@@ -120,8 +120,22 @@ export NEXT_ADAPTER_PATH
 log "NEXT_ADAPTER_PATH=${NEXT_ADAPTER_PATH:-<unset>}"
 
 # ── 2. build the fixture app through the knext adapter ────────────────────────
-log "running next build (output:'standalone')"
-next build >&2
+# #147 A3-3 fix round 1, follow-up (branch run 28561839378): a bare `next build`
+# resolved NOTHING in the harness env — the fixture's node_modules/.bin is NOT on
+# the deploy script's PATH, so every real test died with `next: command not found`
+# (127) right after the tarball install finally succeeded. The harness installs
+# `next` INTO the fixture dir it cd's us into (create-next-install via
+# NEXT_TEST_PKG_PATHS), so the ONLY correct binary is the app-local one. Invoke
+# it by explicit path and fail LOUD if absent — never fall back to a global
+# `next`, which would silently build with an arbitrary version instead of the
+# pinned prebuilt tarball under test.
+NEXT_BIN="${APP_DIR}/node_modules/.bin/next"
+if [ ! -x "${NEXT_BIN}" ]; then
+  log "ERROR: fixture-local next binary not found/executable at ${NEXT_BIN} — the harness install did not provide next (NEXT_TEST_PKG_PATHS); a global fallback is deliberately refused"
+  exit 1
+fi
+log "running next build (output:'standalone') via ${NEXT_BIN}"
+"${NEXT_BIN}" build >&2
 
 # ── 3. locate + stage the standalone server tree ──────────────────────────────
 # output:'standalone' emits server.js under .next/standalone (monorepo fixtures may
