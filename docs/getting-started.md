@@ -15,7 +15,7 @@ minimum, so small PVC requests round up there.
 ## 1. Gateway image
 
 The manifests reference the canonical image in OCIR
-(`me-abudhabi-1.ocir.io/axfqznklsd2t/ks-pg/gateway:v0.3.0`); private pulls need
+(`me-abudhabi-1.ocir.io/axfqznklsd2t/ks-pg/gateway:v0.3.1`); private pulls need
 the `ocir-pull` Secret (created by `deploy/gen-secrets.sh` when registry creds
 are available, or `kubectl create secret docker-registry ocir-pull ...`).
 

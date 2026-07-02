@@ -106,7 +106,7 @@ spec:
         seccompProfile: { type: RuntimeDefault }
       containers:
         - name: sink
-          image: me-abudhabi-1.ocir.io/axfqznklsd2t/ks-pg/gateway:v0.3.0 # OCIR (see getting-started for local clusters)
+          image: me-abudhabi-1.ocir.io/axfqznklsd2t/ks-pg/gateway:v0.3.1 # OCIR (see getting-started for local clusters)
           imagePullPolicy: IfNotPresent
           # OCIR is private: ocir-pull secret created by deploy/gen-secrets.sh
           command: ["/alertsink"]
