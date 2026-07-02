@@ -75,6 +75,8 @@ spec:
               value: "120000" # first wake on a cluster may pull the compute image
             - name: GW_RETRY_MS
               value: "100" # tight connect-poll: shaves ~150ms avg off wake
+            - name: GW_MAX_CONNS
+              value: "500" # storm guard: excess conns get a clean 53300 (fits the 128Mi limit)
             - name: GW_PEER_SELECTOR
               value: "app=pggw" # peer-aware idle: sleep only when fleet-wide zero
             - name: GW_POD_NAMESPACE

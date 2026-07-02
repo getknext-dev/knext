@@ -1,0 +1,50 @@
+name: ci
+on:
+  push: { branches: [main] }
+  pull_request:
+
+jobs:
+  gateway:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version: "1.26", cache-dependency-path: gateway/go.sum }
+      - name: gofmt
+        working-directory: gateway
+        run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+      - name: vet
+        working-directory: gateway
+        run: go vet ./...
+      - name: test
+        working-directory: gateway
+        run: go test ./...
+      - name: build image
+        run: docker build -t scale-zero-pg/gateway:ci gateway/
+
+  manifests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: create kind cluster
+        uses: helm/kind-action@v1
+      - name: validate manifests (server dry-run + contracts)
+        run: sh deploy/_validate.sh
+
+  # Full e2e (storage plane + wake loop) is heavy for CI; run on demand.
+  e2e:
+    if: contains(github.event.head_commit.message, '[e2e]')
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: helm/kind-action@v1
+      - name: build + load gateway image
+        run: |
+          docker build -t scale-zero-pg/gateway:dev gateway/
+          kind load docker-image scale-zero-pg/gateway:dev --name chart-testing
+      - name: deploy + verify
+        run: |
+          kubectl apply -f deploy/
+          sh deploy/_verify-storage.sh
+          sh deploy/_verify-wake.sh
