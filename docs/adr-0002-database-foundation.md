@@ -1,6 +1,6 @@
 # ADR-0002 — The database foundation: self-hosted Neon vs CloudNativePG-hibernation
 
-- **Status:** Proposed (owner ratifies)
+- **Status:** Proposed — ratification DEFERRED by owner (2026-07-02): iteration 3 must first measure (a) CNPG wake-tuning headroom (how far below 14.5s can un-hibernate go), (b) Neon warm-standby pool (how far below 3.7s toward sub-second). Decision follows that evidence. (owner ratifies)
 - **Date:** 2026-07-02
 - **Deciders:** architecture owner (ratify), bake-off run by phase-4B
 - **Supersedes the "decided by inheritance" foundation** flagged in `bakeoff/README.md`
