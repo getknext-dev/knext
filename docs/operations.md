@@ -64,6 +64,16 @@ roles on every boot. To rotate:
 3. Update the app Secrets (`30-knext-secret.yaml`) and restart the compute:
    `kubectl -n scale-zero-pg rollout restart deploy/compute`.
 
+## Network isolation caveat
+
+`deploy/70-networkpolicy.yaml` (default-deny + per-flow allows; compute reachable
+only from the gateway) is declaratively correct but **only enforced if your CNI
+enforces NetworkPolicy**. OrbStack's bundled Kubernetes does NOT — the policies
+are inert there (verified; `deploy/_verify-netpol.sh` warns instead of faking a
+pass). Before relying on isolation in production, run on Calico/Cilium (or any
+enforcing CNI) and re-run `_verify-netpol.sh`, which hard-asserts once
+enforcement is detected.
+
 ## Common operations
 
 ```sh
