@@ -36,8 +36,15 @@ type Metrics struct {
 }
 
 // SetGateOpen records the warm-pool gate state (1 = open/accepting, 0 = closed).
-// STUB.
-func (m *Metrics) SetGateOpen(open bool) {}
+func (m *Metrics) SetGateOpen(open bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if open {
+		m.GateOpen = 1
+	} else {
+		m.GateOpen = 0
+	}
+}
 
 // NewMetrics constructs an empty Metrics.
 func NewMetrics() *Metrics {
@@ -127,6 +134,7 @@ func (m *Metrics) PromText() string {
 		fmt.Sprintf("pggw_sleeps_total %d", m.SleepsTotal),
 		fmt.Sprintf("pggw_rejected_connections_total %d", m.RejectedConnectionsTotal),
 		fmt.Sprintf("pggw_wake_latency_ms_last %d", m.WakeLatencyMsLast),
+		fmt.Sprintf("pggw_gate_open %d", m.GateOpen),
 	}
 	keys := make([]string, 0, len(m.PerSystem))
 	for k := range m.PerSystem {

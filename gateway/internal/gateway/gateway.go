@@ -79,6 +79,11 @@ func New(env wake.Env, log func(string)) (*Gateway, error) {
 	if n := envInt(env, "GW_MAX_CONNS", 0); n > 0 {
 		g.connSem = make(chan struct{}, n)
 	}
+	// Warm-pool driver: surface its gate state on the gauge. Other modes have
+	// no gate, so this is a no-op for them.
+	if wp, ok := driver.(interface{ AttachMetrics(wake.GateStateSink) }); ok {
+		wp.AttachMetrics(g.metrics)
+	}
 	return g, nil
 }
 

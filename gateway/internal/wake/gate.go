@@ -1,7 +1,6 @@
 package wake
 
 import (
-	"errors"
 	"net"
 	"sync"
 )
@@ -32,20 +31,75 @@ type Gate struct {
 // NewGate builds a closed gate that will bind addr (e.g. ":9091") on Open.
 func NewGate(addr string) *Gate { return &Gate{addr: addr} }
 
-var errGateStub = errors.New("gate: not implemented")
+// Open binds the gate listener and starts releasing waiters. Idempotent: a
+// second Open while already open is a no-op (keeps the same bound port).
+func (g *Gate) Open() error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.ln != nil {
+		return nil
+	}
+	ln, err := net.Listen("tcp", g.addr)
+	if err != nil {
+		return err
+	}
+	g.ln = ln
+	if g.onState != nil {
+		g.onState(true)
+	}
+	go g.acceptLoop(ln)
+	return nil
+}
 
-// Open binds the gate listener and starts releasing waiters. Idempotent.
-func (g *Gate) Open() error { return errGateStub }
+// acceptLoop closes every accepted connection immediately: a successful accept
+// is the whole signal (the warm pod's `/dev/tcp` probe just needs the connect
+// to succeed), so no bytes are exchanged. Returns when the listener is closed.
+func (g *Gate) acceptLoop(ln net.Listener) {
+	for {
+		c, err := ln.Accept()
+		if err != nil {
+			return // listener closed
+		}
+		_ = c.Close()
+	}
+}
 
 // Close stops accepting (the port goes to connection-refused). Idempotent.
-func (g *Gate) Close() error { return errGateStub }
+func (g *Gate) Close() error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.ln == nil {
+		return nil
+	}
+	err := g.ln.Close()
+	g.ln = nil
+	if g.onState != nil {
+		g.onState(false)
+	}
+	return err
+}
 
 // IsOpen reports whether the gate is currently accepting.
-func (g *Gate) IsOpen() bool { return false }
+func (g *Gate) IsOpen() bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.ln != nil
+}
 
 // SetOnState registers a callback fired on every open/close transition (metrics).
-func (g *Gate) SetOnState(fn func(bool)) {}
+func (g *Gate) SetOnState(fn func(bool)) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.onState = fn
+}
 
 // Addr returns the bound listener address, or nil while closed. Tests use this
 // to discover the ephemeral port when the gate binds ":0".
-func (g *Gate) Addr() net.Addr { return nil }
+func (g *Gate) Addr() net.Addr {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.ln == nil {
+		return nil
+	}
+	return g.ln.Addr()
+}

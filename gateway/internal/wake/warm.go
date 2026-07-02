@@ -40,18 +40,47 @@ func (d *warmDriver) Mode() string          { return "warmpool" }
 func (d *warmDriver) Resolve(string) Target { return d.t }
 func (d *warmDriver) CanSleep() bool        { return true }
 
-// Wake enforces single-writer, then opens the gate. STUB.
+// Wake enforces the single-writer invariant, then opens the gate so the parked
+// warm pod attaches. The check fails safe: any error, non-zero cold replicas, or
+// any lingering cold pod (Terminating included) REFUSES the gate — never risk two
+// computes attached to one timeline.
 func (d *warmDriver) Wake(ctx context.Context, _ Target) error {
-	return fmt.Errorf("warmpool Wake: not implemented")
+	replicas, err := d.ops.Replicas(ctx, d.namespace, d.coldDeploy)
+	if err != nil {
+		return fmt.Errorf("warmpool single-writer check: reading %s replicas: %w", d.coldDeploy, err)
+	}
+	if replicas != 0 {
+		return fmt.Errorf("warmpool refusing gate (single-writer): cold %s has replicas=%d, must be 0", d.coldDeploy, replicas)
+	}
+	pods, err := d.ops.CountPods(ctx, d.namespace, d.coldSelector)
+	if err != nil {
+		return fmt.Errorf("warmpool single-writer check: listing cold pods (%s): %w", d.coldSelector, err)
+	}
+	if pods != 0 {
+		return fmt.Errorf("warmpool refusing gate (single-writer): %d cold %s pod(s) still present (Terminating holds the timeline)", pods, d.coldDeploy)
+	}
+	return d.gate.Open()
 }
 
-// Sleep closes the gate and deletes the warm pod (re-park). STUB.
+// Sleep closes the gate FIRST (a closed gate re-parks any respawned pod on its
+// next probe, so it is the fail-safe even if the delete errors), then deletes
+// the warm pod so the Deployment respawns a freshly-gated one.
 func (d *warmDriver) Sleep(ctx context.Context, _ Target) error {
-	return fmt.Errorf("warmpool Sleep: not implemented")
+	if err := d.gate.Close(); err != nil {
+		return fmt.Errorf("warmpool closing gate: %w", err)
+	}
+	if _, err := d.ops.DeletePods(ctx, d.namespace, d.warmSelector); err != nil {
+		return fmt.Errorf("warmpool deleting warm pod (%s): %w", d.warmSelector, err)
+	}
+	return nil
 }
 
-// AttachMetrics wires the gate's state gauge. STUB.
-func (d *warmDriver) AttachMetrics(s GateStateSink) {}
+// AttachMetrics wires the gate's open/close transitions to a gauge sink and
+// pushes the current (closed) state immediately.
+func (d *warmDriver) AttachMetrics(s GateStateSink) {
+	d.gate.SetOnState(s.SetGateOpen)
+	s.SetGateOpen(d.gate.IsOpen())
+}
 
 // newWarmDriver builds a warmpool driver from env with injected ops + gate.
 func newWarmDriver(env Env, ops WarmOps, gate gateCtl) *warmDriver {
