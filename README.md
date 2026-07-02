@@ -412,6 +412,53 @@ flowchart TB
 | **Node Server** | `node-server.ts` | HTTP server wrapper for Knative |
 | **Bytecode Metrics** | `bytecode-metrics.ts` | Prometheus metrics for the node server |
 
+### Cache-Control Normalization (`KNEXT_CACHE_CONTROL_NORMALIZE`)
+
+Next.js emits **shared-cache** directives on prerendered/ISR responses (e.g.
+`s-maxage=2, stale-while-revalidate=…`, or `s-maxage=31536000` for pages that
+never revalidate). Those directives are meant to be consumed by a deployment
+platform's cache layer — they are not what a browser should see. On a knext
+deployment, Knative serves clients directly, so the runtime entry
+(`@knext/core/internal/node-server`) normalizes them by default, exactly like
+the official reference adapter does in its serving layer:
+
+- Applies to `GET`/`HEAD` responses only.
+- `immutable` values (hashed static assets) pass through untouched.
+- Any `Cache-Control` containing `s-maxage=` becomes
+  `public, max-age=0, must-revalidate` — browsers always revalidate, and ISR
+  freshness is handled server-side by the incremental cache.
+- The pages-router fallback-shell `private, no-cache, no-store, …` value is
+  normalized the same way, only when the response carries the `x-nextjs-cache`
+  marker and is not a `/_next/data/` request.
+- Everything else (custom headers you set in routes/middleware) is untouched.
+
+**When to disable it:** if you front knext with your **own CDN or shared cache
+that honors `s-maxage`** (Cloudflare, CloudFront, Fastly, Varnish, …), the
+default normalization strips `s-maxage` before your CDN sees it, so the CDN
+stops shared-caching ISR pages. In that setup, disable normalization and let
+your CDN consume the origin directives:
+
+```dockerfile
+# In your app's Dockerfile — simplest, since this is a static per-image flag
+ENV KNEXT_CACHE_CONTROL_NORMALIZE=0
+```
+
+To set it per-deployment instead of per-image, use the `NextApp` resource's
+env mechanism — Secret-backed env injection via `spec.secrets`:
+
+```yaml
+spec:
+  secrets:
+    envMap:
+      KNEXT_CACHE_CONTROL_NORMALIZE:
+        secretName: knext-runtime-flags   # kubectl create secret generic knext-runtime-flags \
+        secretKey: cacheControlNormalize  #   --from-literal=cacheControlNormalize=0
+```
+
+(or list a Secret under `spec.secrets.envFrom` to inject all of its keys; the
+same `secrets.envFrom` / `secrets.envMap` options exist in `kn-next.config.ts`).
+Any value other than `0` — including unset — leaves normalization **on**.
+
 ### Cache Invalidation API
 
 ```bash

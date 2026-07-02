@@ -37,6 +37,11 @@ The credibility gate. Nothing in later tiers ships before this is green.
 ## Tier C — Edge (partly upstream-gated)
 CDN, multi-region, WAF. **Edge Middleware/Proxy and PPR/Cache Components are not yet
 adapter-standardizable** — track upstream, do not force. Lower priority for the fame phase.
+**Cache-Control normalization moves to the edge if a knext CDN tier lands:** today the runtime
+entry normalizes origin `s-maxage` responses to the client-facing value by default (#175/#179,
+opt-out `KNEXT_CACHE_CONTROL_NORMALIZE=0` for user-fronted CDNs). A knext-managed CDN must be
+that consumer — it honors the origin's `s-maxage` and normalization happens at its edge, not in
+the pod (flagged in PR #179's gate review; folded here per #180; details in ADR-0007).
 
 ## Track P — Promotion (parallel, fame-first)
 GitHub org, landing page, **docs site (dogfooded on knext)**, examples, npm publishing

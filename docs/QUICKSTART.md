@@ -303,6 +303,8 @@ The operator tears down the Knative Service and everything it provisioned.
 
 - Full configuration schema (cache, scaling, observability, secrets): see the
   [Configuration Reference](../README.md#configuration-reference).
+- Fronting your deployment with your own CDN that honors `s-maxage`? See
+  [Cache-Control Normalization](../README.md#cache-control-normalization-knext_cache_control_normalize).
 - The `NextApp` resource in depth: [docs/operator/crd-nextapp.md](./operator/crd-nextapp.md).
 - Operator internals and install details:
   [packages/kn-next-operator/README.md](../packages/kn-next-operator/README.md).

@@ -60,12 +60,20 @@ spec:
 
 ### `secrets` (Optional)
 Maps Kubernetes `Secret` resources directly into the Next.js environment variables.
+This is the CR's mechanism for passing environment variables to the app: `envFrom`
+injects every key of a Secret; `envMap` maps a single env var name to a specific
+Secret key (also usable for runtime flags such as `KNEXT_CACHE_CONTROL_NORMALIZE` —
+see the [Configuration Reference](../../README.md#cache-control-normalization-knext_cache_control_normalize)).
 ```yaml
 spec:
   secrets:
     envFrom:
       - "database-credentials"
       - "stripe-api-keys"
+    envMap:
+      KNEXT_CACHE_CONTROL_NORMALIZE:
+        secretName: knext-runtime-flags
+        secretKey: cacheControlNormalize
 ```
 
 ### `preview` (Optional)

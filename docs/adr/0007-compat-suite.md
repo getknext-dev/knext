@@ -514,6 +514,13 @@ guarded by `tests/deploy-manifest.test.ts`):
   - [ ] **Bun runtime axis** (still open, #147 item 4): the harness runs `KNEXT_RUNTIME=node` only;
         add the Bun matrix axis so the full harness covers both targets. (Note: `e2e-deploy.sh` is
         already the Node variant — the original wording here predated the Node-first MVP.)
+  - [ ] **Tier-C relocation of Cache-Control normalization (#175/#179 gate-review flag, #180):**
+        the default-on `s-maxage` normalization lives in the runtime entry
+        (`cache-control-normalize.cjs` preload in `node-server.ts`) because knext has no managed
+        CDN — Knative serves clients directly. If/when a knext CDN tier lands (ROADMAP Tier C),
+        the normalization must move to that edge: the CDN consumes the origin's `s-maxage` and
+        the pod stops rewriting. User-fronted CDNs meanwhile use
+        `KNEXT_CACHE_CONTROL_NORMALIZE=0` (documented in the README configuration reference).
   - [x] Green observed on main (run 28602886003, 788/0, v16.2.0 — graduation addendum §a): docs may
         state the claim **with its row-scoped wording** (exclusions + quarantine ledger + Node-only;
         `docs/compat-matrix.md`). The nightly stability record starts now — a sustained red nightly
