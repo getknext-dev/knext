@@ -29,6 +29,12 @@ type activeEntry struct {
 	target wake.Target
 }
 
+// PeerChecker reports the fleet-wide active connection count across all
+// gateway replicas (excluding this one). Nil means single-replica: no check.
+type PeerChecker interface {
+	ActiveConnections(ctx context.Context) (int, error)
+}
+
 // Gateway accepts client connections, wakes compute, and pipes bytes.
 type Gateway struct {
 	driver  wake.Driver
@@ -36,6 +42,11 @@ type Gateway struct {
 	opts    wake.Opts
 	idleMs  int
 	log     func(string)
+
+	// Peers guards the idle decision when running 2+ replicas: sleep only
+	// when the whole fleet is at zero, not just this pod. Fail-safe: any
+	// peer error postpones sleep rather than risking a live connection.
+	Peers PeerChecker
 
 	mu     sync.Mutex
 	active map[string]*activeEntry
@@ -247,19 +258,46 @@ func (g *Gateway) connEnded(target wake.Target) {
 	}
 	e.count--
 	if e.count <= 0 && g.driver.CanSleep() && g.idleMs > 0 && !g.closed {
-		e.timer = time.AfterFunc(time.Duration(g.idleMs)*time.Millisecond, func() {
-			g.mu.Lock()
-			if e.count > 0 || g.closed {
+		g.scheduleSleep(e, target)
+	}
+}
+
+// scheduleSleep arms the idle timer. Caller must hold g.mu. When the timer
+// fires, sleep proceeds only if this pod still has zero connections AND the
+// peer fleet reports zero; otherwise the timer re-arms for another window.
+func (g *Gateway) scheduleSleep(e *activeEntry, target wake.Target) {
+	e.timer = time.AfterFunc(time.Duration(g.idleMs)*time.Millisecond, func() {
+		g.mu.Lock()
+		if e.count > 0 || g.closed {
+			g.mu.Unlock()
+			return
+		}
+		g.mu.Unlock()
+
+		if g.Peers != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			n, err := g.Peers.ActiveConnections(ctx)
+			cancel()
+			if err != nil || n > 0 {
+				if err != nil {
+					g.log("[gw] " + target.Key + ": peer check failed (" + err.Error() + "), postponing sleep")
+				} else {
+					g.log("[gw] " + target.Key + ": " + strconv.Itoa(n) + " active connection(s) on peer gateways, postponing sleep")
+				}
+				g.mu.Lock()
+				if e.count == 0 && !g.closed {
+					g.scheduleSleep(e, target) // try again next window
+				}
 				g.mu.Unlock()
 				return
 			}
-			g.mu.Unlock()
-			if err := g.driver.Sleep(context.Background(), target); err != nil {
-				g.log("[gw] " + target.Key + ": sleep failed: " + err.Error())
-				return
-			}
-			g.metrics.Sleep()
-			g.log("[gw] " + target.Key + ": idle " + strconv.Itoa(g.idleMs) + "ms -> scaled to zero")
-		})
-	}
+		}
+
+		if err := g.driver.Sleep(context.Background(), target); err != nil {
+			g.log("[gw] " + target.Key + ": sleep failed: " + err.Error())
+			return
+		}
+		g.metrics.Sleep()
+		g.log("[gw] " + target.Key + ": idle " + strconv.Itoa(g.idleMs) + "ms -> scaled to zero")
+	})
 }

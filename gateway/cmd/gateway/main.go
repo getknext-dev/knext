@@ -37,6 +37,19 @@ func main() {
 	port := envInt("GW_PORT", 55432)
 	metricsPort := envInt("GW_METRICS_PORT", 9090)
 
+	// Peer-aware idle: with 2+ replicas, only sleep when the whole fleet is
+	// at zero. Selector/namespace/self-IP come from the Deployment (downward
+	// API); outside a cluster this stays nil and idle behaves single-replica.
+	peers, err := gateway.NewK8sPeers(
+		os.Getenv("GW_POD_NAMESPACE"), os.Getenv("GW_PEER_SELECTOR"), os.Getenv("GW_POD_IP"), metricsPort)
+	if err != nil {
+		logger.Fatalf("[gw] peer checker: %v", err)
+	}
+	if peers != nil {
+		gw.Peers = peers
+		logger.Printf("[gw] peer-aware idle enabled (selector=%s)", os.Getenv("GW_PEER_SELECTOR"))
+	}
+
 	ln, err := net.Listen("tcp", ":"+strconv.Itoa(port))
 	if err != nil {
 		logger.Fatalf("[gw] listen: %v", err)
