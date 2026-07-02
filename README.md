@@ -438,25 +438,27 @@ default normalization strips `s-maxage` before your CDN sees it, so the CDN
 stops shared-caching ISR pages. In that setup, disable normalization and let
 your CDN consume the origin directives:
 
-```dockerfile
-# In your app's Dockerfile — simplest, since this is a static per-image flag
-ENV KNEXT_CACHE_CONTROL_NORMALIZE=0
+```ts
+// kn-next.config.ts — plain, non-secret env vars ride the NextApp resource's env field
+export default {
+    // ...
+    env: {
+        KNEXT_CACHE_CONTROL_NORMALIZE: "0",
+    },
+};
 ```
 
-To set it per-deployment instead of per-image, use the `NextApp` resource's
-env mechanism — Secret-backed env injection via `spec.secrets`:
+or directly on the `NextApp` resource:
 
 ```yaml
 spec:
-  secrets:
-    envMap:
-      KNEXT_CACHE_CONTROL_NORMALIZE:
-        secretName: knext-runtime-flags   # kubectl create secret generic knext-runtime-flags \
-        secretKey: cacheControlNormalize  #   --from-literal=cacheControlNormalize=0
+  env:
+    KNEXT_CACHE_CONTROL_NORMALIZE: "0"
 ```
 
-(or list a Secret under `spec.secrets.envFrom` to inject all of its keys; the
-same `secrets.envFrom` / `secrets.envMap` options exist in `kn-next.config.ts`).
+(Secret-backed values still go through `spec.secrets` / the `secrets` config
+option — `env` is for plain configuration flags only. A Dockerfile
+`ENV KNEXT_CACHE_CONTROL_NORMALIZE=0` also works for per-image settings.)
 Any value other than `0` — including unset — leaves normalization **on**.
 
 ### Cache Invalidation API

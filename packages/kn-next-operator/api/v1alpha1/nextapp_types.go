@@ -58,6 +58,22 @@ type NextAppSpec struct {
 	// +optional
 	Secrets *SecretsSpec `json:"secrets,omitempty"`
 
+	// Env sets plain, NON-SECRET environment variables (name → value) on the
+	// app container — configuration flags like KNEXT_CACHE_CONTROL_NORMALIZE=0.
+	// Secrets do NOT belong here: values are stored verbatim in the CR (visible
+	// to anyone who can read it); use spec.secrets for anything sensitive.
+	//
+	// Names must be C_IDENTIFIERs. Reserved names are rejected at admission:
+	// HOSTNAME (operator-injected 0.0.0.0 bind fix — overriding it resurrects
+	// the pod-IP-bind outage, #178/#184) and PORT / K_SERVICE / K_REVISION /
+	// K_CONFIGURATION (Knative-reserved). Precedence: spec.env never overrides
+	// operator-injected system env or spec.secrets.envMap entries — colliding
+	// names are dropped (issue #186).
+	// +optional
+	// +kubebuilder:validation:XValidation:rule="self.all(k, k.matches('^[A-Za-z_][A-Za-z0-9_]*$'))",message="env var names must be C_IDENTIFIERs ([A-Za-z_][A-Za-z0-9_]*)"
+	// +kubebuilder:validation:XValidation:rule="!('HOSTNAME' in self) && !('PORT' in self) && !('K_SERVICE' in self) && !('K_REVISION' in self) && !('K_CONFIGURATION' in self)",message="env var name is reserved (HOSTNAME, PORT, K_SERVICE, K_REVISION, K_CONFIGURATION are operator/Knative-managed)"
+	Env map[string]string `json:"env,omitempty"`
+
 	// Observability — Prometheus metrics
 	// +optional
 	Observability *ObservabilitySpec `json:"observability,omitempty"`

@@ -147,6 +147,13 @@ func (in *NextAppSpec) DeepCopyInto(out *NextAppSpec) {
 		*out = new(SecretsSpec)
 		(*in).DeepCopyInto(*out)
 	}
+	if in.Env != nil {
+		in, out := &in.Env, &out.Env
+		*out = make(map[string]string, len(*in))
+		for key, val := range *in {
+			(*out)[key] = val
+		}
+	}
 	if in.Observability != nil {
 		in, out := &in.Observability, &out.Observability
 		*out = new(ObservabilitySpec)

@@ -25,6 +25,19 @@ const UNIMPLEMENTED_CACHE_PROVIDERS = ["dynamodb"] as const;
 const SUPPORTED_QUEUE_PROVIDERS = ["kafka", "none"] as const;
 const SUPPORTED_RUNTIMES = ["bun", "node"] as const;
 
+// #186 — config.env local validation, MIRRORING the NextApp CRD's CEL rules
+// (api/v1alpha1/nextapp_types.go). The cluster rejects these at `kubectl
+// apply`; validating here fails fast at validate/deploy time instead.
+// Keep both lists in lock-step with the operator.
+const ENV_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const RESERVED_ENV_NAMES = [
+    "HOSTNAME", // operator-injected 0.0.0.0 bind fix — overriding it resurrects the pod-IP-bind outage (#178/#184)
+    "PORT", // Knative-reserved
+    "K_SERVICE",
+    "K_REVISION",
+    "K_CONFIGURATION",
+] as const;
+
 export class ConfigValidationError extends Error {
     constructor(message: string) {
         super(`[kn-next] Config validation failed: ${message}`);
@@ -149,6 +162,25 @@ export function validateConfig(config: KnativeNextConfig): void {
             errors.push(
                 "'scaling.minScale' cannot be greater than 'scaling.maxScale'",
             );
+        }
+    }
+
+    // Env validation (#186) — plain NON-SECRET env vars. Mirror the operator's
+    // CRD CEL rules so a bad name fails HERE (validate/deploy time) instead of
+    // only at `kubectl apply`.
+    if (config.env) {
+        for (const name of Object.keys(config.env)) {
+            if ((RESERVED_ENV_NAMES as readonly string[]).includes(name)) {
+                errors.push(
+                    `'env.${name}' is a reserved name (managed by the operator/Knative). ` +
+                        `Reserved: ${RESERVED_ENV_NAMES.join(", ")}. The cluster would reject this at apply time.`,
+                );
+            } else if (!ENV_NAME_RE.test(name)) {
+                errors.push(
+                    `'env' name '${name}' is not a valid environment variable name ` +
+                        `(must match ${ENV_NAME_RE.source}). The cluster would reject this at apply time.`,
+                );
+            }
         }
     }
 
