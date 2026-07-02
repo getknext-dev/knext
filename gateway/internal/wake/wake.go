@@ -217,6 +217,17 @@ func MakeDriverWithScaler(env Env, scaler Scaler) (Driver, error) {
 			defPort:   defPort,
 			scaler:    scaler,
 		}, nil
+
+	case "warmpool":
+		// The warm-standby tier (ADR-0002): a gated pod parked on the gateway's
+		// gate port. Needs the richer k8s surface (WarmOps) + the gate listener;
+		// the injected scaler, if it also implements WarmOps, is reused (tests).
+		ops, ok := scaler.(WarmOps)
+		if !ok {
+			ops = newK8sScaler()
+		}
+		gate := NewGate(":" + env.get("GW_GATE_PORT", "9091"))
+		return newWarmDriver(env, ops, gate), nil
 	}
 
 	return nil, fmt.Errorf("unknown GW_COMPUTE_MODE=%s", mode)

@@ -31,8 +31,13 @@ type Metrics struct {
 	RejectedConnectionsTotal int                    `json:"rejected_connections_total"`
 	WakeLatencyMsLast        int64                  `json:"wake_latency_ms_last"`
 	WakeLatencyMs            []int64                `json:"wake_latency_ms"`
+	GateOpen                 int                    `json:"gate_open"`
 	PerSystem                map[string]*sysMetrics `json:"per_system"`
 }
+
+// SetGateOpen records the warm-pool gate state (1 = open/accepting, 0 = closed).
+// STUB.
+func (m *Metrics) SetGateOpen(open bool) {}
 
 // NewMetrics constructs an empty Metrics.
 func NewMetrics() *Metrics {

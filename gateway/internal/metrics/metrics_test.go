@@ -32,6 +32,19 @@ func TestCountersTrackConnectionsWakesSleeps(t *testing.T) {
 	if m.WakeFailures() != 1 {
 		t.Fatalf("wake_failures = %d, want 1", m.WakeFailures())
 	}
+	// Warm-pool gate gauge: 0 by default, 1 when open, surfaced in Prometheus
+	// text so operators can alarm on a stuck-open gate.
+	if !strings.Contains(m.PromText(), "pggw_gate_open 0") {
+		t.Fatalf("PromText missing pggw_gate_open 0:\n%s", m.PromText())
+	}
+	m.SetGateOpen(true)
+	if !strings.Contains(m.PromText(), "pggw_gate_open 1") {
+		t.Fatalf("after SetGateOpen(true), PromText missing pggw_gate_open 1:\n%s", m.PromText())
+	}
+	m.SetGateOpen(false)
+	if !strings.Contains(m.PromText(), "pggw_gate_open 0") {
+		t.Fatalf("after SetGateOpen(false), PromText missing pggw_gate_open 0")
+	}
 }
 
 func TestPromTextHasExpectedSeries(t *testing.T) {

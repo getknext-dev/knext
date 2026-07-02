@@ -10,6 +10,10 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 )
 
+// k8sScaler also satisfies WarmOps: the warmpool driver's single-writer check
+// and re-park both go through the same lazily-built client.
+var _ WarmOps = (*k8sScaler)(nil)
+
 // Scaler scales a Deployment's replica count. Behind an interface so tests can
 // fake it without a cluster.
 type Scaler interface {
@@ -61,4 +65,48 @@ func (k *k8sScaler) Scale(ctx context.Context, namespace, deployment string, rep
 	scale.Spec.Replicas = replicas
 	_, err = k.client.AppsV1().Deployments(namespace).UpdateScale(ctx, deployment, scale, metav1.UpdateOptions{})
 	return err
+}
+
+// Replicas reads a deployment's desired replica count (the single-writer check
+// wants desired, not observed: a just-scaled-up deployment must count as active
+// even before its pod appears).
+func (k *k8sScaler) Replicas(ctx context.Context, namespace, deployment string) (int32, error) {
+	if err := k.init(); err != nil {
+		return 0, err
+	}
+	scale, err := k.client.AppsV1().Deployments(namespace).GetScale(ctx, deployment, metav1.GetOptions{})
+	if err != nil {
+		return 0, err
+	}
+	return scale.Spec.Replicas, nil
+}
+
+// CountPods counts pods matching selector in namespace, in ANY phase — a
+// Terminating pod still holds the timeline, so it must count toward "active".
+func (k *k8sScaler) CountPods(ctx context.Context, namespace, selector string) (int, error) {
+	if err := k.init(); err != nil {
+		return 0, err
+	}
+	list, err := k.client.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{LabelSelector: selector})
+	if err != nil {
+		return 0, err
+	}
+	return len(list.Items), nil
+}
+
+// DeletePods deletes every pod matching selector (re-park: the warm Deployment
+// respawns a fresh pod that blocks on the now-closed gate). Returns the count
+// that existed before deletion.
+func (k *k8sScaler) DeletePods(ctx context.Context, namespace, selector string) (int, error) {
+	if err := k.init(); err != nil {
+		return 0, err
+	}
+	list, err := k.client.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{LabelSelector: selector})
+	if err != nil {
+		return 0, err
+	}
+	if err := k.client.CoreV1().Pods(namespace).DeleteCollection(ctx, metav1.DeleteOptions{}, metav1.ListOptions{LabelSelector: selector}); err != nil {
+		return 0, err
+	}
+	return len(list.Items), nil
 }
