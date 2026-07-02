@@ -15,6 +15,7 @@
  */
 
 import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import http from "node:http";
 import { dirname, resolve } from "node:path";
 import { closeDbPool } from "@knext/lib/clients";
@@ -84,7 +85,32 @@ startImageCacheSync({ ...process.env, IMAGE_CACHE_DIR: imageCacheDir }, { log })
         log.warn({ err }, "Image cache sync failed to start (non-fatal)");
     });
 
-const nextProc = spawn(process.execPath, [serverJs], {
+// ── Deployed-platform Cache-Control normalization (#175) ─────────────────────
+// Next's origin emits shared-cache directives (`s-maxage=…`, the fallback-shell
+// private value) that a deployment platform's cache layer consumes; deployed
+// clients get `public, max-age=0, must-revalidate`. The official reference
+// adapter (nextjs/adapter-bun src/runtime/server.ts) applies exactly these
+// rules in its serving layer; knext applies them to the standalone child via a
+// `--require` preload so the compat suite gates the SAME serving shape users
+// run in production. The preload is a sibling file in both layouts
+// (dist/adapters/ and src/adapters/ — plain dependency-free CJS). Fronting
+// knext with your own s-maxage-honoring shared cache/CDN? Set
+// KNEXT_CACHE_CONTROL_NORMALIZE=0 (the preload no-ops).
+const cacheControlPreload = resolve(
+    import.meta.dirname,
+    "cache-control-normalize.cjs",
+);
+const preloadArgs = existsSync(cacheControlPreload)
+    ? ["--require", cacheControlPreload]
+    : [];
+if (preloadArgs.length === 0) {
+    log.warn(
+        { cacheControlPreload },
+        "cache-control-normalize preload not found; serving origin s-maxage headers to clients",
+    );
+}
+
+const nextProc = spawn(process.execPath, [...preloadArgs, serverJs], {
     stdio: "inherit",
     env: buildChildEnv(),
 });

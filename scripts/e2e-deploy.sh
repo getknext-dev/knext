@@ -23,6 +23,7 @@
 set -euo pipefail
 
 APP_DIR="$(pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOG_FILE="${APP_DIR}/.adapter-build.log"
 SERVER_LOG="${APP_DIR}/.adapter-server.log"
 RUNTIME="${KNEXT_RUNTIME:-node}"   # node (default) | bun  (bun = fast-follow target)
@@ -198,12 +199,37 @@ EOF
 
   # Resolve the installed adapter entry (package export "./adapter").
   NEXT_ADAPTER_PATH="$(node -e 'process.stdout.write(require.resolve("@knext/core/adapter"))')"
+  # #175 (B7b): resolve the deployed-platform Cache-Control preload from the
+  # SAME installed package, so the serve below patches exactly what ships.
+  KNEXT_CC_PRELOAD="$(node -e 'process.stdout.write(require.resolve("@knext/core/internal/cache-control-normalize"))')"
 else
   log "KNEXT_E2E_SKIP_PACK=1 — skipping tarball install (contract-test mode)"
   NEXT_ADAPTER_PATH="${NEXT_ADAPTER_PATH:-}"
+  # Contract-test mode has no installed @knext/core; the preload is plain
+  # dependency-free CJS, so the in-repo SOURCE file is directly loadable.
+  KNEXT_CC_PRELOAD="${SCRIPT_DIR}/../packages/kn-next/src/adapters/cache-control-normalize.cjs"
+fi
+if [ ! -f "${KNEXT_CC_PRELOAD}" ]; then
+  log "ERROR: cache-control normalization preload not found at ${KNEXT_CC_PRELOAD}"
+  exit 1
 fi
 export NEXT_ADAPTER_PATH
 log "NEXT_ADAPTER_PATH=${NEXT_ADAPTER_PATH:-<unset>}"
+log "cache-control preload: ${KNEXT_CC_PRELOAD}"
+
+# ── #175 (B7b, lazy-catchall): mirror the official reference adapter
+# (nextjs/adapter-bun scripts/e2e-deploy.sh). Next's deploy harness appends a
+# next.config.js snippet that aliases NEXT_PRIVATE_TEST_MODE → __NEXT_TEST_MODE
+# ("_" is not a valid env var name on some deploy platforms); define-env then
+# inlines __NEXT_TEST_MODE into the CLIENT bundle, which is what emits the
+# window.__NEXT_HYDRATED test marker. Without it, every webdriver hydration
+# wait falls back to a 10s timeout — long enough for the prerender fixture's
+# 3s-delayed lazy fallback to fully resolve, so the suite saw "Hi delayby3s"
+# where it asserted the "fallback" shell (run 28578203671). Exported HERE so
+# both `next build` (bundle inlining) and the runtime server inherit it.
+if [ -z "${NEXT_PRIVATE_TEST_MODE:-}" ] && [ -n "${NEXT_TEST_MODE:-}" ]; then
+  export NEXT_PRIVATE_TEST_MODE="${NEXT_TEST_MODE}"
+fi
 
 # ── 2. build the fixture app through the knext adapter ────────────────────────
 # #147 A3-3 fix round 1, follow-up (branch run 28561839378): a bare `next build`
@@ -272,12 +298,27 @@ case "${RUNTIME}" in
   *)   SERVER_CMD="node" ;;
 esac
 
-log "booting (${RUNTIME}) ${SERVER_JS} on 127.0.0.1:${PORT}"
+# #175 (B7b): boot with the deployed-platform Cache-Control preload (`-r` is
+# the require/preload flag on BOTH node and bun). Next's origin emits
+# shared-cache directives (s-maxage / the fallback-shell private value) meant
+# for the platform cache; deployed clients see `public, max-age=0,
+# must-revalidate` — the exact deploy-mode expectation of prerender.test.ts,
+# and the exact normalization the reference adapter (nextjs/adapter-bun
+# src/runtime/server.ts) performs in its serving layer. Same preload ships in
+# the production runtime entry (adapters/node-server.ts), so the suite gates
+# the shape users actually get.
+#
+# Cache-handler decision (#175): NO cacheHandler is wired here on purpose —
+# running Next's default file-system incremental cache is the supported
+# single-replica knext shape, and the header diffs were serving-layer
+# semantics, not cache-handler state (the Redis cacheHandler stays the
+# multi-pod production option).
+log "booting (${RUNTIME}) ${SERVER_JS} on 127.0.0.1:${PORT} (preload ${KNEXT_CC_PRELOAD})"
 (
   cd "${STANDALONE_APP_DIR}"
   PORT="${PORT}" HOSTNAME="127.0.0.1" NODE_ENV="production" \
     NEXT_DEPLOYMENT_ID="${DEPLOYMENT_ID}" \
-    exec "${SERVER_CMD}" "${SERVER_JS}"
+    exec "${SERVER_CMD}" -r "${KNEXT_CC_PRELOAD}" "${SERVER_JS}"
 ) >"${SERVER_LOG}" 2>&1 &
 SERVER_PID=$!
 

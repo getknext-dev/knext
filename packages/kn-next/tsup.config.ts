@@ -17,74 +17,92 @@ import { defineConfig } from 'tsup';
  * Runtime + workspace deps are EXTERNALIZED so they resolve from the published
  * package's own `dependencies` at install time rather than being inlined.
  */
-export default defineConfig({
-  entry: {
-    // --- CLI entries -----------------------------------------------------
-    // dist/cli/kn-next.js — the bin (deploy entry)
-    'cli/kn-next': 'src/cli/deploy.ts',
-    // also ship runnable build/cleanup/rollback entries
-    'cli/build': 'src/cli/build.ts',
-    'cli/cleanup': 'src/cli/cleanup.ts',
-    'cli/rollback': 'src/cli/rollback.ts',
-    // #91 per-PR preview environments (deploy/destroy)
-    'cli/preview': 'src/cli/preview.ts',
-    // #30: k6 load-test entry (manual/nightly runbook, not a PR gate)
-    'cli/loadtest': 'src/cli/loadtest.ts',
-    // CLI helpers exported as library subpaths (./cli/validate, ./cli/shared)
-    'cli/validate': 'src/cli/validate.ts',
-    'cli/shared': 'src/cli/shared.ts',
-    // --- Library surface (#114) -----------------------------------------
-    // dist/config.js — the `.` export (KnativeNextConfig type + helpers)
-    config: 'src/config.ts',
-    loader: 'src/loader.ts',
-    'adapters/next-adapter': 'src/adapters/next-adapter.ts',
-    'adapters/node-server': 'src/adapters/node-server.ts',
-    // cache-handler is plain JS (untyped) — bundled to dist, no .d.ts emitted
-    'adapters/cache-handler': 'src/adapters/cache-handler.js',
-    'adapters/otel-config': 'src/adapters/otel-config.ts',
-    'utils/logger': 'src/utils/logger.ts',
-  },
-  // Emit `.d.ts` declarations for the TS library entries so typed consumers
-  // (e.g. `import type { KnativeNextConfig } from '@knext/core'`) work. The
-  // cache-handler is plain untyped JS, so it is omitted from the DTS pass
-  // (TS6504) — its `exports` subpath is a bare `.js` with no `.d.ts`.
-  dts: {
+export default defineConfig([
+  {
     entry: {
+      // --- CLI entries -----------------------------------------------------
+      // dist/cli/kn-next.js — the bin (deploy entry)
       'cli/kn-next': 'src/cli/deploy.ts',
+      // also ship runnable build/cleanup/rollback entries
       'cli/build': 'src/cli/build.ts',
       'cli/cleanup': 'src/cli/cleanup.ts',
       'cli/rollback': 'src/cli/rollback.ts',
+      // #91 per-PR preview environments (deploy/destroy)
       'cli/preview': 'src/cli/preview.ts',
+      // #30: k6 load-test entry (manual/nightly runbook, not a PR gate)
       'cli/loadtest': 'src/cli/loadtest.ts',
+      // CLI helpers exported as library subpaths (./cli/validate, ./cli/shared)
       'cli/validate': 'src/cli/validate.ts',
       'cli/shared': 'src/cli/shared.ts',
+      // --- Library surface (#114) -----------------------------------------
+      // dist/config.js — the `.` export (KnativeNextConfig type + helpers)
       config: 'src/config.ts',
       loader: 'src/loader.ts',
       'adapters/next-adapter': 'src/adapters/next-adapter.ts',
       'adapters/node-server': 'src/adapters/node-server.ts',
+      // cache-handler is plain JS (untyped) — bundled to dist, no .d.ts emitted
+      'adapters/cache-handler': 'src/adapters/cache-handler.js',
       'adapters/otel-config': 'src/adapters/otel-config.ts',
       'utils/logger': 'src/utils/logger.ts',
     },
+    // Emit `.d.ts` declarations for the TS library entries so typed consumers
+    // (e.g. `import type { KnativeNextConfig } from '@knext/core'`) work. The
+    // cache-handler is plain untyped JS, so it is omitted from the DTS pass
+    // (TS6504) — its `exports` subpath is a bare `.js` with no `.d.ts`.
+    dts: {
+      entry: {
+        'cli/kn-next': 'src/cli/deploy.ts',
+        'cli/build': 'src/cli/build.ts',
+        'cli/cleanup': 'src/cli/cleanup.ts',
+        'cli/rollback': 'src/cli/rollback.ts',
+        'cli/preview': 'src/cli/preview.ts',
+        'cli/loadtest': 'src/cli/loadtest.ts',
+        'cli/validate': 'src/cli/validate.ts',
+        'cli/shared': 'src/cli/shared.ts',
+        config: 'src/config.ts',
+        loader: 'src/loader.ts',
+        'adapters/next-adapter': 'src/adapters/next-adapter.ts',
+        'adapters/node-server': 'src/adapters/node-server.ts',
+        'adapters/otel-config': 'src/adapters/otel-config.ts',
+        'utils/logger': 'src/utils/logger.ts',
+      },
+    },
+    format: ['esm'],
+    platform: 'node',
+    target: 'node20',
+    outDir: 'dist',
+    // The source CLI entries carry `#!/usr/bin/env node`; esbuild preserves it on
+    // the entry output. We deliberately do NOT add a banner shebang here — doing
+    // so would (a) duplicate the entry shebang and (b) wrongly prepend `#!` to the
+    // shared chunk files. Entry shebang only is exactly what a Node bin needs.
+    clean: true,
+    sourcemap: true,
+    // Do not bundle these — resolve from the package's deps at install time.
+    external: [
+      '@knext/lib',
+      'ioredis',
+      'yaml',
+      'pino',
+      'pino-pretty',
+      'prom-client',
+      'kafkajs',
+      '@google-cloud/storage',
+    ],
   },
-  format: ['esm'],
-  platform: 'node',
-  target: 'node20',
-  outDir: 'dist',
-  // The source CLI entries carry `#!/usr/bin/env node`; esbuild preserves it on
-  // the entry output. We deliberately do NOT add a banner shebang here — doing
-  // so would (a) duplicate the entry shebang and (b) wrongly prepend `#!` to the
-  // shared chunk files. Entry shebang only is exactly what a Node bin needs.
-  clean: true,
-  sourcemap: true,
-  // Do not bundle these — resolve from the package's deps at install time.
-  external: [
-    '@knext/lib',
-    'ioredis',
-    'yaml',
-    'pino',
-    'pino-pretty',
-    'prom-client',
-    'kafkajs',
-    '@google-cloud/storage',
-  ],
-});
+  // #175 — the deployed-platform Cache-Control preload. It is loaded with
+  // `node --require` / `bun -r` into the standalone server process, so it MUST
+  // be CommonJS (tsup emits `.cjs` for format:cjs under `"type": "module"`).
+  // Dependency-free by design; `clean: false` so this pass does not wipe the
+  // ESM output above.
+  {
+    entry: {
+      'adapters/cache-control-normalize': 'src/adapters/cache-control-normalize.cjs',
+    },
+    format: ['cjs'],
+    platform: 'node',
+    target: 'node20',
+    outDir: 'dist',
+    clean: false,
+    sourcemap: true,
+  },
+]);

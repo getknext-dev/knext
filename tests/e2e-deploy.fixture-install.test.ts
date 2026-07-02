@@ -105,10 +105,19 @@ describe('scripts/e2e-deploy.sh — fixture-shipped node_modules survive the tar
       {
         name: '@knext/core',
         version: '0.0.0-test',
-        exports: { './adapter': './dist/adapters/next-adapter.js' },
+        exports: {
+          './adapter': './dist/adapters/next-adapter.js',
+          // #175: the deploy script also resolves the Cache-Control preload
+          // from the installed package — the stub mirrors that surface so the
+          // require.resolve is exercised for real.
+          './internal/cache-control-normalize': './dist/adapters/cache-control-normalize.cjs',
+        },
         dependencies: { '@knext/lib': '0.0.0-test' },
       },
-      { 'dist/adapters/next-adapter.js': 'module.exports = {};\n' },
+      {
+        'dist/adapters/next-adapter.js': 'module.exports = {};\n',
+        'dist/adapters/cache-control-normalize.cjs': 'module.exports = {};\n',
+      },
     );
 
     // The fixture app, shaped like a harness test dir AFTER fixture-file copy:
