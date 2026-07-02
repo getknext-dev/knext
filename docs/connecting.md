@@ -26,6 +26,40 @@ postgres://cloud_admin:cloud_admin@pggw.scale-zero-pg.svc:55432/<database>?sslmo
 
 Set your client's connect timeout ≥ 10s so cold starts never race it.
 
+## Choosing a tier: cold-zero (default) vs warm
+
+Every database picks one of two tiers. **Nothing in your application changes** —
+same DSN, same driver, same SQL. The only difference is first-connection latency
+after idle, and what it costs while idle.
+
+| | **Cold-zero** (default) | **Warm** (opt-in) |
+|---|---|---|
+| Wake after idle | ~2.5–3.7 s | **~0.4 s** (p50; bound tested < 1.5 s) |
+| RAM/CPU reserved while idle | **0** — no pod exists | **256 MiB + 250 m, 24/7** — one parked pod |
+| Scales to true zero? | yes | no (warm-**RAM** tier) |
+| Cost model | pay per wake | pay to keep one pod parked |
+| What your app sees | first query blocks on the wake | first query blocks ~9× less |
+
+**Default is cold-zero** (ADR-0002): `deploy/25-compute-warm.yaml` ships with
+`replicas: 0`, so no warm RAM is reserved unless you opt a workload in. Cold-zero
+is the right choice for the overwhelming majority of apps — the wake is absorbed
+transparently and costs nothing at rest.
+
+**Choose warm** only for latency-sensitive workloads where a ~2.5 s first-hit
+after idle is unacceptable and you accept paying for 256 MiB reserved around the
+clock. To enable it:
+
+1. Scale up the warm deployment: `kubectl -n scale-zero-pg scale deploy/compute-warm --replicas=1`.
+2. Point it at a gateway running in **warmpool** mode (`GW_COMPUTE_MODE=warmpool`,
+   `GW_GATE_PORT=9091`) via `WARM_GATE_ADDR` on the warm deployment.
+
+The warm compute attaches to the **same** timeline as the cold one, so the
+gateway enforces the single-writer invariant in-band: it opens the warm pod's
+gate **only** after verifying the cold `compute` deployment is fully drained
+(0 replicas, 0 pods). Two computes never attach at once. `deploy/_verify-warmtier.sh`
+drills this (wake latency, the single-writer refusal, and idle re-park) and is
+part of the test battery.
+
 ## Connection pooling rules
 
 Pools + scale-to-zero interact in one important way: **idle pooled connections look

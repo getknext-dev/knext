@@ -19,9 +19,12 @@ rules:
   - apiGroups: ["apps"]
     resources: ["deployments"]
     verbs: ["get", "list"]
-  - apiGroups: [""] # peer-aware idle: find sibling gateway pods
+  - apiGroups: [""] # peer-aware idle: find sibling gateway pods;
+    # list/get for peer + warmpool single-writer check (count cold pods incl
+    # Terminating); delete for warmpool re-park (Sleep deletes the warm pod so
+    # the Deployment respawns a freshly-gated one).
     resources: ["pods"]
-    verbs: ["get", "list"]
+    verbs: ["get", "list", "delete"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

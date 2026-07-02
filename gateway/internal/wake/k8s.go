@@ -94,9 +94,10 @@ func (k *k8sScaler) CountPods(ctx context.Context, namespace, selector string) (
 	return len(list.Items), nil
 }
 
-// DeletePods deletes every pod matching selector (re-park: the warm Deployment
-// respawns a fresh pod that blocks on the now-closed gate). Returns the count
-// that existed before deletion.
+// DeletePods deletes every pod matching selector individually by name (re-park:
+// the warm Deployment respawns a fresh pod that blocks on the now-closed gate).
+// Per-name Delete needs only the `delete` verb — DeleteCollection would demand
+// the broader `deletecollection` verb. Returns the count that existed.
 func (k *k8sScaler) DeletePods(ctx context.Context, namespace, selector string) (int, error) {
 	if err := k.init(); err != nil {
 		return 0, err
@@ -105,8 +106,11 @@ func (k *k8sScaler) DeletePods(ctx context.Context, namespace, selector string) 
 	if err != nil {
 		return 0, err
 	}
-	if err := k.client.CoreV1().Pods(namespace).DeleteCollection(ctx, metav1.DeleteOptions{}, metav1.ListOptions{LabelSelector: selector}); err != nil {
-		return 0, err
+	for i := range list.Items {
+		name := list.Items[i].Name
+		if derr := k.client.CoreV1().Pods(namespace).Delete(ctx, name, metav1.DeleteOptions{}); derr != nil {
+			return 0, derr
+		}
 	}
 	return len(list.Items), nil
 }
