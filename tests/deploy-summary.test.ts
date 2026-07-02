@@ -586,3 +586,66 @@ describe('summarize() runtime attribution (#147 Bun axis)', () => {
     expect(s.runtime).toBe('node');
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// #188 (the bun-version dispatch knob): a canary dispatch's evidence must be
+// VERSION-ATTRIBUTABLE. `runtime: "bun"` alone cannot distinguish a 1.3.14 run
+// from a 1.4.0-canary run — and the whole point of the canary dispatch is to
+// prove the 3 remaining red files are Bun-VERSION-gated. So the summary carries
+// the OBSERVED `bun --version` as `runtimeVersion`. Node lane: the key is
+// ABSENT (documented choice — node's version is pinned by the workflow's
+// setup-node, and omitting the key keeps the node artifact shape byte-stable
+// for existing consumers, e.g. the #41 matrix publisher).
+describe('summarize() runtimeVersion attribution (#188 bun-version knob)', () => {
+  it('carries the observed bun version through to the artifact', () => {
+    const s = summarize('Tests: 1 passed, 1 total\n', {
+      ref: 'v16.2.0',
+      shard: '1/16',
+      excluded: 0,
+      runtime: 'bun',
+      runtimeVersion: '1.4.0-canary.28',
+    });
+    expect(s.runtimeVersion).toBe('1.4.0-canary.28');
+    // Round-trips through JSON (it's an artifact).
+    expect(JSON.parse(JSON.stringify(s)).runtimeVersion).toBe('1.4.0-canary.28');
+  });
+
+  it('OMITS the key when no version was captured (the node lane shape stays unchanged)', () => {
+    const s = summarize('', { ref: 'v16.2.0', shard: '1/16', excluded: 0, runtime: 'node' });
+    expect(Object.keys(s)).not.toContain('runtimeVersion');
+  });
+
+  it('treats an empty/whitespace version as absent (the workflow passes "" on the node lane)', () => {
+    const s = summarize('', {
+      ref: 'v16.2.0',
+      shard: '1/16',
+      excluded: 0,
+      runtime: 'node',
+      runtimeVersion: '  ',
+    });
+    expect(Object.keys(s)).not.toContain('runtimeVersion');
+  });
+
+  it('normalizes a non-string runtimeVersion to absent (artifact stays well-typed)', () => {
+    const s = summarize('', {
+      ref: 'v16.2.0',
+      shard: '1/16',
+      excluded: 0,
+      runtime: 'bun',
+      // @ts-expect-error intentionally malformed input from the CLI boundary
+      runtimeVersion: 1.4,
+    });
+    expect(Object.keys(s)).not.toContain('runtimeVersion');
+  });
+
+  it('trims the captured version (shell command substitution can carry whitespace)', () => {
+    const s = summarize('', {
+      ref: 'v16.2.0',
+      shard: '1/16',
+      excluded: 0,
+      runtime: 'bun',
+      runtimeVersion: '1.3.14\n',
+    });
+    expect(s.runtimeVersion).toBe('1.3.14');
+  });
+});

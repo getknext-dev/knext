@@ -43,8 +43,8 @@ import { readFileSync, writeFileSync } from 'node:fs';
 /**
  * Parse jest-style runner output + run metadata into the summary artifact shape.
  * @param {string} runnerOutput raw stdout from run-tests.js
- * @param {{ref:string, shard:string, excluded:number, runtime?:string}} meta
- * @returns {{passed:number, failed:number, notRun:number, excluded:number, ref:string, shard:string, runtime:string}}
+ * @param {{ref:string, shard:string, excluded:number, runtime?:string, runtimeVersion?:string}} meta
+ * @returns {{passed:number, failed:number, notRun:number, excluded:number, ref:string, shard:string, runtime:string, runtimeVersion?:string}}
  */
 export function summarize(runnerOutput, meta) {
   const text = String(runnerOutput ?? '');
@@ -118,6 +118,18 @@ export function summarize(runnerOutput, meta) {
     // produced it. Mirrors e2e-deploy.sh's own KNEXT_RUNTIME semantics: exactly
     // 'bun' selects bun, anything else (absent, junk) is the node default.
     runtime: meta?.runtime === 'bun' ? 'bun' : 'node',
+    // #188 (the bun-version dispatch knob): the artifact must also be VERSION-
+    // attributable — "runtime": "bun" alone can't distinguish a 1.3.14 run from
+    // a 1.4.0-canary run, and the canary dispatch exists to prove the remaining
+    // red files are Bun-VERSION-gated. `runtimeVersion` carries the OBSERVED
+    // `bun --version` (trimmed; shell command substitution carries whitespace).
+    // DOCUMENTED CHOICE: on the node lane the key is ABSENT (the workflow
+    // passes ""), keeping the node artifact shape byte-stable for existing
+    // consumers (the #41 matrix publisher); node's version is already pinned
+    // by the workflow's setup-node. Non-string/empty input → absent.
+    ...(typeof meta?.runtimeVersion === 'string' && meta.runtimeVersion.trim() !== ''
+      ? { runtimeVersion: meta.runtimeVersion.trim() }
+      : {}),
   };
 }
 
@@ -219,6 +231,9 @@ function main() {
     shard: args.shard ?? '',
     excluded: Number(args.excluded ?? 0),
     runtime: args.runtime,
+    // #188 — the observed serving-runtime version (bun lane only; "" on node
+    // → summarize omits the key). See the shape comment in summarize().
+    runtimeVersion: args['runtime-version'],
   });
   writeFileSync(out, `${JSON.stringify(summary, null, 2)}\n`);
   console.log(`[e2e-summary] wrote ${out}: ${JSON.stringify(summary)}`);

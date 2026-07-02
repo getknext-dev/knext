@@ -2303,6 +2303,104 @@ describe('compat-suite Bun runtime axis (test-e2e-deploy.yml, #147 item 4)', () 
     ).toBe(true);
   });
 
+  // ── #188: the bun-version dispatch knob — prove the remainder is Bun-version-gated ──
+  // Campaign state (#188/PR #189): the bun lane is at 784/788 on Bun 1.3.14 and the
+  // 3 remaining red files (the edge-sandbox fetch gap + the not-found invariant pair)
+  // are documented Bun ≤1.3.x runtime gaps, believed fixed in Bun 1.4.0-canary (the
+  // same release that fixes the keep-alive class the guard works around). A
+  // `bun-version` dispatch input lets us RUN the lane on canary and prove (or
+  // disprove) that attribution with real artifacts — including exercising the
+  // keep-alive guard's ≥1.4 self-disable path in real CI. HONESTY: canary is
+  // dispatch-only experimentation; the WEEKLY schedule stays on `latest` (the
+  // steady-state lane), enforced by the `|| 'latest'` fallback (github.event.inputs
+  // is empty on schedule events).
+
+  /** The `bun-version:` input sub-block inside workflow_dispatch.inputs. */
+  function bunVersionInputBlock(): string {
+    const block = dispatchBlock();
+    const m = block.match(/^(\s+)bun-version:\s*\n([\s\S]*?)(?=^\1[\w-]|\n*$(?![\s\S]))/m);
+    return m ? m[0] : '';
+  }
+
+  /** The oven-sh/setup-bun step block inside the deploy-tests job. */
+  function setupBunStep(): string {
+    const shard = deployTestsJobBlock();
+    const blocks: string[] = [];
+    let current: string[] = [];
+    for (const line of shard.split('\n')) {
+      if (/^\s*-\s+name:/.test(line)) {
+        if (current.length) blocks.push(current.join('\n'));
+        current = [];
+      }
+      current.push(line);
+    }
+    if (current.length) blocks.push(current.join('\n'));
+    return blocks.find((b) => /oven-sh\/setup-bun/.test(b)) ?? '';
+  }
+
+  it('declares a `bun-version` workflow_dispatch input (string, default latest)', () => {
+    const input = bunVersionInputBlock();
+    expect(
+      input,
+      'workflow_dispatch must declare a `bun-version` input (the canary-proof knob, #188)',
+    ).not.toBe('');
+    expect(
+      /default:\s*'?latest'?/.test(input),
+      'the bun-version input must default to latest (a plain dispatch stays the steady-state lane)',
+    ).toBe(true);
+    // Free string, NOT a choice: the whole point is dispatching arbitrary specs
+    // (canary, a pinned 1.4.0-canary.N, a future stable) without a workflow edit.
+    expect(
+      /type:\s*choice/.test(input),
+      'the bun-version input must be a free string (canary / pinned specs), not a choice',
+    ).toBe(false);
+  });
+
+  it('plumbs the bun-version input into setup-bun with a latest fallback (the weekly schedule stays latest)', () => {
+    const bunStep = setupBunStep();
+    expect(bunStep, 'expected the oven-sh/setup-bun step').not.toBe('');
+    const line = bunStep.split('\n').find((l) => /^\s*bun-version:/.test(l)) ?? '';
+    expect(line, 'setup-bun must set with.bun-version').not.toBe('');
+    expect(
+      /bun-version:\s*\$\{\{\s*github\.event\.inputs\.bun-version\s*\|\|\s*'latest'\s*\}\}/.test(
+        line,
+      ),
+      `setup-bun must plumb the dispatch input with a 'latest' fallback (schedule runs have no inputs), got: "${line.trim()}"`,
+    ).toBe(true);
+  });
+
+  it('the lane decision (KNEXT_RUNTIME) is independent of bun-version (version never flips the lane)', () => {
+    const envLine = src.split('\n').find((l) => /^\s*KNEXT_RUNTIME:\s*\$\{\{/.test(l)) ?? '';
+    expect(envLine, 'the workflow-level KNEXT_RUNTIME expression must exist').not.toBe('');
+    expect(
+      /bun-version/.test(envLine),
+      'KNEXT_RUNTIME must not reference bun-version — the version knob must never select the lane',
+    ).toBe(false);
+  });
+
+  it('records the ACTUAL bun version in the shard summary (--runtime-version, bun lane only)', () => {
+    const summarizeStep =
+      deployTestsJobBlock()
+        .split('\n- name:')
+        .find((b) => /e2e-summary\.mjs/.test(b)) ?? '';
+    expect(summarizeStep, 'expected the Summarize shard result step').not.toBe('');
+    // The version must be OBSERVED (`bun --version` from the toolchain setup-bun
+    // actually installed), never the requested input spec — `canary` is not an
+    // attributable version. Gated on the bun lane so node artifacts are unchanged.
+    expect(
+      /bun --version/.test(summarizeStep),
+      'the summarize step must capture the observed `bun --version` (canary evidence must be attributable)',
+    ).toBe(true);
+    expect(
+      /if\s+\[\s+"\$\{?KNEXT_RUNTIME\}?"\s+=\s+"bun"\s+\]/.test(summarizeStep),
+      'the bun --version capture must be gated on the bun lane (node runs unaffected)',
+    ).toBe(true);
+    expect(
+      /--runtime-version\s+"?\$\{?RUNTIME_VERSION\}?"?/.test(summarizeStep),
+      'the summarize invocation must pass --runtime-version "${RUNTIME_VERSION}"',
+    ).toBe(true);
+  });
+
   it('the red alert NAMES the lane: a red bun weekly gets its own title and never implies the Node credential is red', () => {
     const alertMatch = src.match(
       /^ {2}nightly-red-alert:\n[\s\S]*?(?=^ {2}[a-z][\w-]*:|\n*$(?![\s\S]))/m,

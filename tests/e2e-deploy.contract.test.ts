@@ -597,3 +597,44 @@ describe('scripts/e2e-deploy.sh — fixture WITHOUT a build script (#147 final-m
     expect(args).toEqual([]);
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// #188 (the bun-version dispatch knob): the deploy script already persists
+// RUNTIME= into the deployment metadata (.adapter-build.log). A canary dispatch
+// additionally needs the OBSERVED serving-runtime VERSION persisted — `runtime`
+// alone cannot distinguish a Bun 1.3.14 run from a 1.4.0-canary run, and the
+// canary run exists precisely to attribute the 3 remaining red files to the Bun
+// version. Source-contract test (same style as the workflow YAML guards): the
+// bun lane must capture `bun --version` into a RUNTIME_VERSION metadata line,
+// GATED on RUNTIME=bun so the node lane's metadata stays byte-identical
+// (documented choice: node's version is pinned by the CI setup-node, and the
+// behavioral node-lane tests above assert the node metadata shape).
+describe('scripts/e2e-deploy.sh — bun-lane RUNTIME_VERSION metadata (#188)', () => {
+  const src = readFileSync(DEPLOY_SH, 'utf8');
+
+  it('persists the observed `bun --version` as RUNTIME_VERSION on the bun lane', () => {
+    // The capture must be the OBSERVED version (`bun --version`), not an env
+    // echo of the requested spec ("canary" is not an attributable version).
+    expect(
+      /RUNTIME_VERSION=\$\(bun --version/.test(src),
+      'e2e-deploy.sh must capture RUNTIME_VERSION from `bun --version`',
+    ).toBe(true);
+    // ...and it must land in the metadata block as a KEY=VALUE line, like RUNTIME=.
+    expect(
+      /echo "RUNTIME_VERSION=/.test(src),
+      'e2e-deploy.sh must echo a RUNTIME_VERSION= line into the deployment metadata',
+    ).toBe(true);
+  });
+
+  it('gates the RUNTIME_VERSION capture on the bun lane (node metadata unchanged)', () => {
+    // The persistence must live inside a `[ "${RUNTIME}" = "bun" ]` branch so a
+    // node deploy emits NO RUNTIME_VERSION line (byte-identical node metadata).
+    const gated =
+      /if \[ "\$\{RUNTIME\}" = "bun" \];? then\s*\n[^\n]*RUNTIME_VERSION=/.test(src) ||
+      /\[ "\$\{RUNTIME\}" = "bun" \][^\n]*&&[^\n]*RUNTIME_VERSION=/.test(src);
+    expect(
+      gated,
+      'the RUNTIME_VERSION persistence must be gated on RUNTIME=bun (the node lane must not gain a metadata line)',
+    ).toBe(true);
+  });
+});
