@@ -499,6 +499,14 @@ SERVER_PID=$!
   echo "PORT=${PORT}"
   echo "PID=${SERVER_PID}"
   echo "RUNTIME=${RUNTIME}"
+  # #188 (the bun-version dispatch knob): persist the OBSERVED serving-runtime
+  # version so a canary run's evidence is attributable per deployment (RUNTIME=bun
+  # alone can't distinguish 1.3.14 from 1.4.0-canary). BUN LANE ONLY — the node
+  # lane's metadata stays byte-identical (documented choice: node's version is
+  # pinned by CI's setup-node, and existing consumers key on the stable shape).
+  if [ "${RUNTIME}" = "bun" ]; then
+    echo "RUNTIME_VERSION=$(bun --version 2>/dev/null || echo unknown)"
+  fi
   echo "SERVER_JS=${SERVER_JS}"
   echo "SERVER_LOG=${SERVER_LOG}"
   echo "BUILD_LOG=${BUILD_LOG}"
