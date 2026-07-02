@@ -23,20 +23,33 @@ on:
   workflow_dispatch:
     inputs:
       nextjsRef:
-        description: 'vercel/next.js git ref to test against (pinned tag; do NOT use canary)'
+        description: 'vercel/next.js git ref to test against (pinned tag ≥ v16.2.0; do NOT use canary)'
         required: false
-        default: 'v16.0.3'
+        default: 'v16.2.0'
   schedule:
     # 03:17 UTC nightly — off-peak; the run takes the better part of an hour.
     - cron: '17 3 * * *'
 
 # Pin the Next.js ref so a failure is attributable to knext, not upstream churn.
-# Aligns with the in-repo next@16.0.3 (CLAUDE.md / ADR-0007 version-skew caveat).
 # NEXTJS_REF is the git TAG (kept for the source checkout that supplies the
 # `test/` harness + `run-tests.js`); NEXT_NPM_VERSION is the published npm version
 # (the tag minus the leading `v`) we `npm pack` the PREBUILT `next` from.
+#
+# HARD FLOOR: v16.2.0 (#147 A3-3 triage of run 28552585087). The workflow was
+# previously pinned to v16.0.3 to align with the in-repo next@16.0.3 — but at
+# that ref test/lib/next-modes/next-deploy.ts is HARDCODED to the Vercel CLI:
+# the custom deploy-script contract (NEXT_TEST_DEPLOY_SCRIPT_PATH /
+# NEXT_TEST_DEPLOY_LOGS_SCRIPT_PATH / NEXT_TEST_CLEANUP_SCRIPT_PATH) the run
+# step relies on landed upstream in vercel/next.js#89206 (b19e6d44, cleanup in
+# #90696) and first SHIPPED in the v16.2.0 stable tag. Run 28552585087 proved
+# it: every one of the 8 shard failures was `vercel link` → "No existing
+# credentials found. Please run `vercel login`" — the knext adapter was NEVER
+# invoked, and the 5 "passes" were vacuous skipDeployment placeholders. Below
+# v16.2.0 this suite tests NOTHING knext-related. (The in-repo-next alignment
+# yields to contract existence; the version-skew caveat is recorded in
+# ADR-0007.)
 env:
-  NEXTJS_REF: ${{ github.event.inputs.nextjsRef || 'v16.0.3' }}
+  NEXTJS_REF: ${{ github.event.inputs.nextjsRef || 'v16.2.0' }}
 
 jobs:
   build-next:
@@ -259,35 +272,57 @@ jobs:
           fi
 
       # Hand off the prepared knext + next.js SOURCE trees + the prebuilt next
-      # tarball to the shard jobs.
+      # tarball to the shard jobs — as ONE TARBALL.
       #
-      # #147 (run 28314500989 — the Upload-workspace OOM): once #160 made the
-      # Prepare install finish in 26s, the NEXT blocker was this upload OOMing with
-      # `FATAL ERROR: ... JavaScript heap out of memory`. Cause: the next.js tree
-      # carries its full node_modules (3345 packages, hundreds of thousands of
-      # files); actions/upload-artifact globs + hashes EVERY file and exhausts the
-      # heap. FIX (Option A — don't ship node_modules): EXCLUDE `**/node_modules`
-      # so the artifact is SOURCE-ONLY (the source trees + next-prebuilt/next.tgz +
-      # the @knext/core adapter .tgz). Each deploy-tests shard then restores the
-      # SAME pnpm-store actions/cache the steps above warmed and RE-RUNS the same
-      # slim, offline, cache-hit install in next.js (seconds) to rebuild
-      # node_modules locally — see the shard's "Re-install next.js harness deps".
+      # #147 history of this handoff:
+      # • Round 8 (run 28314500989): uploading the raw trees OOM'd
+      #   actions/upload-artifact (it globs + hashes every file; next.js's
+      #   installed node_modules is 3345 packages). Fix then: `!**/node_modules`.
+      # • Round 11 (run 28556241980, REPRODUCED LOCALLY): the zip-based artifact
+      #   MATERIALIZES SYMLINKS into real copies. next.js's test corpus has
+      #   symlinks under jest's crawl roots (4× test/e2e/app-dir/next-condition/
+      #   fixtures/*/sym-linked-packages -> ../../packages); materialized, the
+      #   fixture package `my-cjs-package` exists twice → jest-haste-map "Haste
+      #   module naming collision" → v16.2.0's jest.config.js NEWLY sets
+      #   `haste: { throwOnModuleCollision: true }` (16.0.3 only warned) → jest
+      #   throws `Error: Duplicated files or mocks` ~1s into the crawl → every
+      #   `--listTests` / test run reports 0 tests. The blanket `!**/node_modules`
+      #   exclude ALSO silently dropped test-FIXTURE node_modules (part of the
+      #   corpus — e.g. next-condition's linked packages) — latent fixture
+      #   corruption.
       #
-      # NODE_OPTIONS belt-and-suspenders: even source-only, the upload still hashes
-      # a large tree; raise the old-space size so a borderline case can't OOM.
+      # FIX: tar the workspace. tar preserves symlinks + exec bits (the zip
+      # artifact does neither), one file cannot OOM the upload hasher, and the
+      # node_modules excludes become ANCHORED to the INSTALLED trees only, so
+      # fixture node_modules ride along. .git dirs are kept: run-tests.js runs
+      # `git clean/checkout <testDir>` between retries. The tarball is written
+      # to RUNNER_TEMP (tar-ing into the tree being read races "file changed as
+      # we read it").
+      - name: Pack workspace tarball (preserves symlinks + exec bits; installed node_modules excluded)
+        run: |
+          set -euo pipefail
+          tar czf "${RUNNER_TEMP}/compat-workspace.tgz" \
+            --exclude='./knext/node_modules' \
+            --exclude='./knext/apps/*/node_modules' \
+            --exclude='./knext/packages/*/node_modules' \
+            --exclude='./next.js/node_modules' \
+            ./knext ./next.js ./next-prebuilt
+          ls -la "${RUNNER_TEMP}/compat-workspace.tgz"
+          # Tripwire at the SOURCE side too: the collision-critical fixture
+          # symlink must be in the tarball AS a symlink (tar type 'l' listing
+          # shows '->'). If upstream restructures the fixture, update the probe.
+          if ! tar tvzf "${RUNNER_TEMP}/compat-workspace.tgz" \
+            './next.js/test/e2e/app-dir/next-condition/fixtures/middleware/sym-linked-packages' 2>/dev/null \
+            | grep -q ' -> '; then
+            echo "::warning::expected fixture symlink not found as a symlink in the workspace tarball; if upstream moved it, update the probe (shard tripwire will catch a real regression)"
+          fi
+
       - name: Upload workspace
         uses: actions/upload-artifact@v4
-        env:
-          NODE_OPTIONS: --max-old-space-size=4096
         with:
           name: compat-workspace
-          path: |
-            knext
-            next.js
-            next-prebuilt
-            !**/node_modules
+          path: ${{ runner.temp }}/compat-workspace.tgz
           retention-days: 1
-          include-hidden-files: true
 
   deploy-tests:
     name: Deploy tests (shard ${{ matrix.shard }})
@@ -297,14 +332,45 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # MVP: a MODEST 4-way shard (the reference uses 16). Bump deliberately as
-        # the suite stabilizes; 4 keeps the nightly cost honest for the scaffold.
-        shard: ['1/4', '2/4', '3/4', '4/4']
+        # #147 A3-3 — 16-way shard (was 4). With full-shard execution
+        # (NEXT_TEST_CONTINUE_ON_ERROR below) each shard must finish its WHOLE
+        # slice inside the 60-min job timeout. ~715 tests are selected in total;
+        # at 4 shards that is ~179 files/shard, and a REAL deploy test costs a
+        # per-fixture `npm install` + `next build` + server boot (minutes, not
+        # the ~2.5s vacuous skips and ~10s vercel-link fast-failures run
+        # 28552585087 measured) — at concurrency 2 a 179-file slice cannot fit
+        # in 60 min. 16 shards ≈ 45 files/shard and matches the reference
+        # harness's own shard count.
+        shard:
+          [
+            '1/16', '2/16', '3/16', '4/16', '5/16', '6/16', '7/16', '8/16',
+            '9/16', '10/16', '11/16', '12/16', '13/16', '14/16', '15/16', '16/16',
+          ]
     steps:
       - name: Download workspace
         uses: actions/download-artifact@v4
         with:
           name: compat-workspace
+
+      # #147 Round 11 — the artifact is ONE tarball (see the Pack step): tar
+      # preserves the symlinks + exec bits the zip artifact destroyed. TRIPWIRE:
+      # assert the collision-critical fixture symlink SURVIVED transport — if a
+      # future transport change materializes symlinks again, fail HERE with the
+      # cause named, not 20 steps later as a cryptic 0-test jest-haste-map abort
+      # (`Duplicated files or mocks`, thrown because v16.2.0's jest.config.js
+      # sets haste.throwOnModuleCollision).
+      - name: Unpack workspace tarball (restores symlinks + exec bits)
+        run: |
+          set -euo pipefail
+          tar xzf compat-workspace.tgz
+          rm compat-workspace.tgz
+          test -d knext && test -d next.js && test -d next-prebuilt
+          SYMLINK_PROBE="next.js/test/e2e/app-dir/next-condition/fixtures/middleware/sym-linked-packages"
+          if [ ! -L "${SYMLINK_PROBE}" ]; then
+            echo "::error::${SYMLINK_PROBE} is not a symlink after unpack — the workspace transport materialized symlinks again; jest-haste-map will throw 'Duplicated files or mocks' (v16.2.0 haste.throwOnModuleCollision) and every shard will list 0 tests" >&2
+            exit 1
+          fi
+          echo "workspace unpacked; fixture symlink survived transport: $(readlink "${SYMLINK_PROBE}")"
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -469,6 +535,26 @@ jobs:
       # test and the fixture runtime stay version-consistent. Still NO Rust, no
       # source TS build. (ADR-0007 A3-3 constraint: deploy test FILES require a
       # built workspace `next` to LOAD; the prebuilt tarball satisfies that.)
+      #
+      # #147 A3-3 (run 28553944684 — the v16.2.0 hydrate ENOENT): after
+      # `cp -R SRC/dist PKG/dist` the old sanity check hit ENOENT on
+      # packages/next/dist/trace/index.js on ALL 16 shards — even though the
+      # published next@16.2.0 tarball (byte-identical, 33944550 bytes, to a local
+      # `npm pack next@16.2.0`) DOES contain dist/trace/index.js. This step was
+      # the only hydrate that (a) extracted into the SHARED ${RUNNER_TEMP} (any
+      # earlier tool can leave a package/ there) and (b) did NOT remove a
+      # pre-existing destination — `cp -R src/dist dst/dist` silently NESTS to
+      # dst/dist/dist when dst/dist already exists. Both hazards are now
+      # eliminated unconditionally (fresh mktemp extract dir; rm -rf the dest —
+      # the pattern the @next/env hydrate below always used), the tarball
+      # PAYLOAD is asserted before copying (a future published-layout change
+      # fails HERE, naming the tarball), and the post-copy sanity RESOLVES the
+      # real harness module specifiers via node resolution from the repo root
+      # (next.js's root depends on `next: workspace:*`, so this is the exact
+      # resolution jest performs at run time) instead of hardcoding a
+      # ref-specific file list. Verified at the v16.2.0 tag: jest.config.js
+      # requires next/jest; test/lib/e2e-utils imports next/dist/trace +
+      # next/constants; test/lib/next-test-utils imports next/dist/server/next.
       - name: Hydrate workspace next/dist from the prebuilt tarball (so jest can load tests)
         working-directory: next.js
         run: |
@@ -478,27 +564,47 @@ jobs:
             echo "::error::expected next.js source dir $PKG_DIR (the checked-out packages/next)" >&2
             exit 1
           fi
-          # Unpack the prebuilt tarball (npm tarballs root everything under package/).
-          tar xzf "${GITHUB_WORKSPACE}/next-prebuilt/next.tgz" -C "${RUNNER_TEMP}"
-          SRC="${RUNNER_TEMP}/package"
+          # Unpack the prebuilt tarball into a FRESH dir (npm tarballs root
+          # everything under package/). Never a shared temp path.
+          EXTRACT_DIR="$(mktemp -d)"
+          tar xzf "${GITHUB_WORKSPACE}/next-prebuilt/next.tgz" -C "${EXTRACT_DIR}"
+          SRC="${EXTRACT_DIR}/package"
+          # Assert the tarball payload BEFORE copying: if the published layout
+          # ever changes, fail here with the tarball named — not later as an
+          # opaque jest load crash.
+          for probe in jest.js constants.js dist/server/next.js dist/build/jest/jest.js; do
+            if [ ! -e "${SRC}/${probe}" ]; then
+              echo "::error::published next tarball (next-prebuilt/next.tgz) lacks ${probe} — the prebuilt dist layout changed; update this hydrate" >&2
+              exit 1
+            fi
+          done
           # Overlay the BUILT artifacts the harness imports at module scope. We copy
           # dist/ plus the root JS entrypoints (jest.js, constants.js, etc.) WITHOUT
           # clobbering the checked-out source package.json (its name/version already
-          # match the prebuilt tarball: next@${NEXTJS_REF#v}).
+          # match the prebuilt tarball: next@${NEXTJS_REF#v}). Remove any
+          # pre-existing dist first — cp -R would otherwise nest into it.
+          rm -rf "${PKG_DIR}/dist"
           cp -R "${SRC}/dist" "${PKG_DIR}/dist"
           for f in "${SRC}"/*.js; do
             [ -e "$f" ] || continue
             cp "$f" "${PKG_DIR}/$(basename "$f")"
           done
-          # Sanity: the four module-scope imports the harness needs must now resolve.
-          node -e '
-            const path = require("path");
-            const base = path.resolve("packages/next");
-            for (const m of ["jest.js", "constants.js", "dist/trace/index.js", "dist/server/next.js"]) {
-              require("fs").accessSync(path.join(base, m));
+          # Sanity (ref-agnostic): resolve the REAL module specifiers the harness
+          # imports at module scope, exactly as node/jest will (root
+          # node_modules/next -> the workspace packages/next symlink). On failure,
+          # dump the dist top level so the log pinpoints the residual cause.
+          if ! node -e '
+            const specs = ["next/jest", "next/constants", "next/dist/trace", "next/dist/server/next"];
+            for (const s of specs) {
+              console.log("resolves:", s, "->", require.resolve(s, { paths: [process.cwd()] }));
             }
             console.log("prebuilt next/dist hydrated: harness imports resolve");
-          '
+          '; then
+            echo "::error::harness import resolution failed after the next/dist hydrate; packages/next top level follows" >&2
+            ls -la "${PKG_DIR}" >&2 || true
+            ls "${PKG_DIR}/dist" >&2 || true
+            exit 1
+          fi
 
       # #147 / A3-3 — hydrate the @next/* HARNESS LOAD CLOSURE. Run 28316667494:
       # with the v2 manifest + the next/dist hydrate above (#162), the harness
@@ -779,6 +885,47 @@ jobs:
       - name: Clear jest haste cache (fresh crawl against the patched next/jest)
         run: rm -rf /tmp/jest_*
 
+      # #147 A3-3 — the DISCOVERY TRIPWIRE (ADR-0007 addendum). THREE separate
+      # discovery-layer regressions each produced a silent 0-test "green" run in
+      # earlier rounds: (1) the v1 manifest made get-test-filter.js THROW at
+      # module load; (2) the unbuilt workspace-package closure (next/dist,
+      # @next/env, @next/swc) crashed every test module at LOAD; (3) next/jest's
+      # unescaped '/.next/' ignore REGEX matched this runner's '/knext/' path
+      # segment and filtered out every candidate. All three were invisible until
+      # a human read the logs. This gate makes the failure LOUD: after all
+      # discovery patches, jest must list >0 tests for a known-present,
+      # manifest-selected deploy test file — or the shard aborts BEFORE wasting
+      # a run on a vacuous 0-test invocation. Same spawn shape as run-tests.js
+      # (cwd = next.js/, no --config, positional path).
+      #
+      # Run 28556241980: the gate FIRED (every shard aborted pre-run — working as
+      # designed), but its `2>/dev/null` swallowed jest's stderr, so the log said
+      # "matched 0" without the WHY — a blind CI cycle. The gate now CAPTURES
+      # jest's stderr + exit code and prints both on failure, so the next failing
+      # run carries its own diagnosis.
+      - name: Gate — jest --listTests must match >0 (loud-fail, no silent 0-test runs)
+        working-directory: next.js
+        run: |
+          set -euo pipefail
+          PROBE="test/e2e/404-page-router/index.test.ts"
+          GATE_ERR="$(mktemp)"
+          set +e
+          LIST="$(node_modules/.bin/jest --listTests "$PROBE" 2>"${GATE_ERR}")"
+          JEST_EXIT=$?
+          set -e
+          COUNT="$(printf '%s\n' "$LIST" | grep -c '404-page-router' || true)"
+          if [ "${COUNT}" -eq 0 ]; then
+            echo "::error::jest --listTests matched 0 files for ${PROBE} (jest exit ${JEST_EXIT}) — the discovery stack (manifest / hydrate closure / next-jest ignore patch) regressed; aborting before a vacuous 0-test run. jest stderr follows."
+            echo "::group::jest --listTests stderr (first 60 lines)"
+            head -n 60 "${GATE_ERR}" || true
+            echo "::endgroup::"
+            echo "::group::jest --listTests stdout (first 20 lines)"
+            printf '%s\n' "$LIST" | head -n 20 || true
+            echo "::endgroup::"
+            exit 1
+          fi
+          echo "jest discovery alive: ${COUNT} match(es) for ${PROBE} (jest exit ${JEST_EXIT})"
+
       - name: Run official deploy tests (knext adapter)
         working-directory: next.js
         env:
@@ -790,11 +937,22 @@ jobs:
           # The package dir e2e-deploy.sh `npm pack`s + installs into each temp app.
           ADAPTER_DIR: ${{ github.workspace }}/knext/packages/kn-next
           # knext's v2 deploy-eligible selection: it mirrors Next's own
-          # test/deploy-tests-manifest.json include/exclude base set and adds the
-          # knext architectural exclusions (the harness loads exactly ONE manifest
-          # path — no comma-layering — so this file IS the complete selection).
+          # test/deploy-tests-manifest.json base set (include/exclude AND the
+          # upstream-known-failing `suites` per-case skips, mirrored at the
+          # pinned ref) and adds the knext architectural exclusions. NOTE:
+          # v16.2.0+ get-test-filter.js supports comma-separated manifest
+          # MERGING; we deliberately keep the single-file mirror (ADR-0007
+          # follow-up records the layering option).
           NEXT_EXTERNAL_TESTS_FILTERS: ${{ github.workspace }}/knext/test/deploy-tests-manifest.knext.json
           KNEXT_RUNTIME: node
+          # #147 A3-3 — FULL-SHARD EXECUTION. run-tests.js@v16.0.3 ABORTED the
+          # whole shard on the first post-retry failure (cleanUpAndExit(1))
+          # unless this env was 'true' — run 28552585087 therefore reported
+          # results for only ~2 of ~179 selected tests per shard. v16.2.0
+          # continues past failures by default (hadFailures, exit at the end);
+          # the pin stays as explicit intent + a guard against a ref downgrade:
+          # the exclusion ledger is only meaningful over ALL selected tests.
+          NEXT_TEST_CONTINUE_ON_ERROR: 'true'
           # #147 (round 4) — the prebuilt pivot. A JSON [[name, tarballPath]] map.
           # `test/lib/create-next-install.js` reads this and SKIPS `linkPackages`
           # (the source-pack step), installing the PUBLISHED `next` tarball into

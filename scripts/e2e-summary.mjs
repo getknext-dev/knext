@@ -55,14 +55,19 @@ export function summarize(runnerOutput, meta) {
 
   // (2) run-tests.js aggregate per-file markers (NEXT_TEST_MODE=deploy). Count
   // DISTINCT test FILES so a test that retries N times is tallied exactly once.
-  // The EXACT v16.0.3 format strings (verified at run-tests.js:727 + :754):
-  //   pass:  `Finished ${test.file} on retry ${i}/${n} in ${t}s`  ← "Finished"
-  //          comes FIRST (capitalized), THEN the file path. NOT file-first.
-  //   fail:  `${test.file} failed to pass within ${n} retries`    ← file first.
-  const runTestsPassed = collectTestFiles(
-    text,
-    /\bFinished\s+(\S+\.test\.\S+)\s+on retry\s+\d+\/\d+/g,
-  );
+  // The pass-marker format CHANGED between the harness refs this gate has run
+  // (both verified against run-tests.js source at the tag):
+  //   v16.0.3 (run-tests.js:727): `Finished ${test.file} on retry ${i}/${n} in ${t}s`
+  //           ← "Finished" comes FIRST (capitalized), THEN the file path.
+  //   v16.2.0 (run-tests.js:708-710): `${test.file} finished on retry ${i}/${n} in ${t}s`
+  //           ← file FIRST, lowercase "finished".
+  //   fail (both refs): `${test.file} failed to pass within ${n} retries` ← file first.
+  // Parse BOTH pass shapes (union of file sets — a file is one pass regardless of
+  // which marker reported it) so a harness-ref bump can never zero the pass count.
+  const runTestsPassed = new Set([
+    ...collectTestFiles(text, /\bFinished\s+(\S+\.test\.\S+)\s+on retry\s+\d+\/\d+/g),
+    ...collectTestFiles(text, /(\S+\.test\.\S+)\s+finished on retry\s+\d+\/\d+/g),
+  ]);
   const runTestsFailedAll = collectTestFiles(
     text,
     /(\S+\.test\.\S+)\s+failed to pass within\s+\d+\s+retries/g,

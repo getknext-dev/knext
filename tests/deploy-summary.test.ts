@@ -185,17 +185,47 @@ describe('scripts/e2e-summary.mjs — run-tests.js deploy-mode parsing (A3-3, #1
     expect(mixed.passed).toBe(2);
   });
 
-  it('does NOT count a file-first "… finished on retry …" line (regex must match the REAL format)', () => {
-    // Regression guard: the bug was a file-first, lowercase-"finished" pass regex.
-    // run-tests.js@v16.0.3 NEVER emits "<file> finished on retry …" — it emits
-    // "Finished <file> on retry …". A fixture in the OLD (wrong) shape must count
-    // as 0 passes, proving the parser is keyed on real output, not the fabrication.
-    const fabricatedFileFirst = `
+  it('counts the v16.2.0 file-first "<file> finished on retry …" pass format', () => {
+    // GROUND TRUTH UPDATE (A3-3 triage, run 28552585087 → harness ref bump):
+    // run-tests.js CHANGED its pass marker between the two refs we have run:
+    //   v16.0.3:  `Finished ${test.file} on retry ${i}/${n} in ${t}s`  ("Finished" first)
+    //   v16.2.0:  `${test.file} finished on retry ${i}/${n} in ${t}s` (file first,
+    //             lowercase "finished" — run-tests.js@v16.2.0:708-710, verbatim)
+    // An earlier guard here asserted the file-first form must NOT count, because at
+    // v16.0.3 it was a fabrication. At v16.2.0 it is the REAL format — a parser that
+    // ignores it reports passed:0 for a green shard (a false-red / vacuous summary).
+    const v1620FileFirst = `
 Starting test/e2e/x/x.test.ts retry 0/2
 test/e2e/x/x.test.ts finished on retry 0/2 in 1.0s
 exiting with code 0
 `;
-    const s = summarize(fabricatedFileFirst, { ref: 'v16.0.3', shard: '1/4', excluded: 0 });
+    const s = summarize(v1620FileFirst, { ref: 'v16.2.0', shard: '1/16', excluded: 0 });
+    expect(s.passed).toBe(1);
+    expect(s.failed).toBe(0);
+  });
+
+  it('counts a file seen in BOTH pass formats exactly once (cross-format de-dup)', () => {
+    // Defensive: a mixed log (e.g. a ref bump mid-investigation, or tee'd reruns)
+    // must not double-count one file that appears in both marker shapes.
+    const bothFormats = `
+Finished test/e2e/x/x.test.ts on retry 0/2 in 1.0s
+test/e2e/x/x.test.ts finished on retry 0/2 in 1.0s
+exiting with code 0
+`;
+    const s = summarize(bothFormats, { ref: 'v16.2.0', shard: '1/16', excluded: 0 });
+    expect(s.passed).toBe(1);
+  });
+
+  it('does NOT count a non-marker line that merely contains "finished" (no "on retry")', () => {
+    // The pass markers (both refs) always carry the `on retry <i>/<n>` suffix from
+    // run-tests.js's template literal. Arbitrary prose mentioning a test file and
+    // "finished" (e.g. an app's own log line) must not be tallied.
+    const prose = `
+build finished for test/e2e/x/x.test.ts in 1.0s
+test/e2e/x/x.test.ts finished quickly
+exiting with code 0
+`;
+    const s = summarize(prose, { ref: 'v16.2.0', shard: '1/16', excluded: 0 });
     expect(s.passed).toBe(0);
   });
 

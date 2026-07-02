@@ -611,26 +611,32 @@ describe('compat-suite Playwright browser-download fix (test-e2e-deploy.yml, #14
   });
 });
 
-// ── Workspace-handoff: don't ship node_modules in the artifact (#147 — OOM) ────
-// Run 28314500989: the Prepare install completed in 26 SECONDS (the Playwright
-// browser-download hang from #160 is gone), but the `Upload workspace` step
-// (actions/upload-artifact of knext + next.js + next-prebuilt) FAILED with
-// `FATAL ERROR: ... JavaScript heap out of memory`. Cause: the uploaded next.js
-// tree carries its full node_modules (3345 packages, hundreds of thousands of
-// files); actions/upload-artifact globs + hashes every file and OOMs.
+// ── Workspace-handoff: tar transport (symlinks + exec bits), no installed
+// node_modules (#147 — OOM, then the v16.2.0 haste-collision abort) ───────────
+// Round 8 (run 28314500989): uploading the raw trees OOM'd actions/upload-artifact
+// (it globs + hashes every file); fix was excluding `**/node_modules` and having
+// each shard re-run the slim cached install.
 //
-// FIX (Option A — don't ship node_modules): EXCLUDE `**/node_modules` from the
-// uploaded artifact (upload only the source trees + the prebuilt next.tgz + the
-// @knext/core adapter tarball). Each deploy-tests SHARD then RESTORES the same
-// pnpm-store actions/cache the Prepare job warmed (same key) and RE-RUNS the
-// SAME fast install in next.js — `corepack pnpm install --frozen-lockfile
-// --prefer-offline --filter "{.}"` with PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 — a
-// cache hit, so it finishes in seconds. The artifact stays source-only; each
-// shard rebuilds node_modules locally + fast.
+// Round 11 (run 28556241980, REPRODUCED LOCALLY): the zip-based artifact
+// MATERIALIZES SYMLINKS into real file copies. next.js's test corpus contains
+// symlinks under jest's crawl roots (e.g. 4× `test/e2e/app-dir/next-condition/
+// fixtures/*/sym-linked-packages -> ../../packages`); materialized, the same
+// fixture package.json (`my-cjs-package`) exists twice → jest-haste-map
+// `Haste module naming collision` → and v16.2.0's jest.config.js NEWLY sets
+// `haste: { throwOnModuleCollision: true }` (16.0.3 only warned) → jest throws
+// `Error: Duplicated files or mocks` ~1s into the crawl → `--listTests` lists 0.
+// The blanket `!**/node_modules` exclude ALSO silently dropped test-FIXTURE
+// node_modules (part of the corpus, e.g. next-condition's linked packages) —
+// a latent run-time corruption.
+//
+// FIX: hand off ONE TARBALL. tar preserves symlinks + exec bits (zip artifact
+// does neither), a single file cannot OOM the upload hasher, and the excludes
+// become ANCHORED (only the INSTALLED ./next.js/node_modules + knext's installed
+// node_modules) so fixture node_modules ride along. The shard unpacks and
+// asserts the collision-critical symlink SURVIVED transport (tripwire).
 
-describe('compat-suite workspace handoff excludes node_modules (test-e2e-deploy.yml, #147)', () => {
-  /** The build-next `Upload workspace` step block (the upload-artifact step). */
-  function uploadWorkspaceStep(): string {
+describe('compat-suite workspace handoff is a symlink-preserving tarball (test-e2e-deploy.yml, #147)', () => {
+  function buildNextSteps(): string[] {
     const lines = buildNextJobBlock().split('\n');
     const blocks: string[] = [];
     let current: string[] = [];
@@ -643,48 +649,117 @@ describe('compat-suite workspace handoff excludes node_modules (test-e2e-deploy.
       current.push(line);
     }
     flush();
+    return blocks;
+  }
+
+  /** The build-next step that tars the workspace. */
+  function packWorkspaceStep(): string {
+    return buildNextSteps().find((b) => /tar\s+c[a-z]*f[^\n]*compat-workspace\.tgz/.test(b)) ?? '';
+  }
+
+  /** The build-next `Upload workspace` step block (the upload-artifact step). */
+  function uploadWorkspaceStep(): string {
     return (
-      blocks.find(
+      buildNextSteps().find(
         (b) => /uses:\s*actions\/upload-artifact@/.test(b) && /compat-workspace/.test(b),
       ) ?? ''
     );
   }
 
-  it('the upload-workspace artifact EXCLUDES node_modules (the OOM cause)', () => {
-    const step = uploadWorkspaceStep();
-    expect(step, 'expected a build-next upload-artifact step for compat-workspace').not.toBe('');
-    // actions/upload-artifact excludes via a `!`-prefixed path line in the `path:`
-    // glob block. Hundreds of thousands of node_modules files are what OOM the
-    // upload — the artifact must explicitly exclude them.
+  it('packs the workspace as a tarball (symlinks + exec bits survive; zip materializes symlinks)', () => {
+    const step = packWorkspaceStep();
     expect(
-      /^\s*!.*node_modules/m.test(step),
-      'the upload-workspace step must exclude node_modules (e.g. `!**/node_modules`) — shipping it OOMs actions/upload-artifact',
-    ).toBe(true);
-  });
-
-  it('still uploads the source trees + the prebuilt next tarball + the adapter pack', () => {
-    const step = uploadWorkspaceStep();
-    // The handoff must still carry the knext + next.js source trees and the
-    // next-prebuilt/next.tgz so the shard can resolve NEXT_TEST_PKG_PATHS and the
-    // @knext/core adapter pack — only node_modules is dropped.
-    expect(/(^|\s)knext(\s|$)/m.test(step), 'must still upload the knext tree').toBe(true);
-    expect(/(^|\s)next\.js(\s|$)/m.test(step), 'must still upload the next.js source tree').toBe(
+      step,
+      'expected a build-next step that tars the workspace to compat-workspace.tgz',
+    ).not.toBe('');
+    // It must carry the three trees the shards need.
+    expect(/\.\/knext\b/.test(step), 'the tarball must include the knext tree').toBe(true);
+    expect(/\.\/next\.js\b/.test(step), 'the tarball must include the next.js source tree').toBe(
       true,
     );
     expect(
-      /next-prebuilt/.test(step),
-      'must still upload next-prebuilt (the prebuilt next.tgz the harness installs)',
+      /\.\/next-prebuilt\b/.test(step),
+      'the tarball must include next-prebuilt (the prebuilt next.tgz)',
     ).toBe(true);
   });
 
-  it('belt-and-suspenders: the upload step raises the Node heap (NODE_OPTIONS)', () => {
-    const step = uploadWorkspaceStep();
-    // Even with node_modules excluded, the upload still hashes a large source
-    // tree; bumping the old-space size guards against a borderline OOM.
+  it('excludes only the INSTALLED node_modules (anchored), never the test-fixture ones', () => {
+    const step = packWorkspaceStep();
+    // The OOM cause was the INSTALLED trees (3345 packages). But next.js's test
+    // corpus contains fixture node_modules that must ride along — a blanket
+    // `**/node_modules` exclude silently corrupts fixtures. Excludes must be
+    // ANCHORED to the installed locations.
     expect(
-      /NODE_OPTIONS[\s\S]*max-old-space-size/.test(step),
-      'the upload step should set NODE_OPTIONS=--max-old-space-size to harden against OOM',
+      /--exclude=['"]?\.\/next\.js\/node_modules['"]?/.test(step),
+      'must exclude the INSTALLED ./next.js/node_modules (anchored, top-level only)',
     ).toBe(true);
+    expect(
+      /--exclude=['"]?\.\/knext\/node_modules['"]?/.test(step),
+      'must exclude the installed ./knext/node_modules',
+    ).toBe(true);
+    expect(
+      /--exclude=['"]?\*\*\/node_modules['"]?/.test(step) ||
+        /--exclude=['"]?node_modules['"]?(\s|$)/m.test(step),
+      'must NOT blanket-exclude every node_modules (test fixtures carry node_modules that are part of the corpus)',
+    ).toBe(false);
+  });
+
+  it('uploads ONLY the single tarball (no raw-tree globs; the OOM is structurally impossible)', () => {
+    const step = uploadWorkspaceStep();
+    expect(step, 'expected a build-next upload-artifact step for compat-workspace').not.toBe('');
+    expect(
+      /compat-workspace\.tgz/.test(step),
+      'the artifact payload must be the single compat-workspace.tgz',
+    ).toBe(true);
+    // No raw-tree glob lines: hashing hundreds of thousands of files is what
+    // OOM'd the upload; a `!`-exclude line implies raw-tree globbing is back.
+    expect(
+      /^\s*!.*node_modules/m.test(step),
+      'no `!`-exclude glob lines — the payload is one tarball, not raw trees',
+    ).toBe(false);
+  });
+
+  it('the shard unpacks the tarball and tripwires on the collision-critical symlink', () => {
+    const lines = deployTestsJobBlock().split('\n');
+    const blocks: string[] = [];
+    let current: string[] = [];
+    const flush = () => {
+      if (current.length) blocks.push(current.join('\n'));
+      current = [];
+    };
+    for (const line of lines) {
+      if (/^\s*-\s+name:/.test(line)) flush();
+      current.push(line);
+    }
+    flush();
+    const unpack = blocks.find((b) => /tar\s+x[a-z]*f[^\n]*compat-workspace\.tgz/.test(b)) ?? '';
+    expect(unpack, 'expected a shard step that unpacks compat-workspace.tgz').not.toBe('');
+    // The tripwire: if the transport ever materializes symlinks again, fail HERE
+    // with the cause named — not 20 steps later as a cryptic 0-test jest abort.
+    expect(
+      /next\.js\/test\/e2e\/app-dir\/next-condition\/fixtures\/[\w/-]*sym-linked-packages/.test(
+        unpack,
+      ),
+      'the unpack step must name a concrete known fixture symlink to probe',
+    ).toBe(true);
+    expect(
+      /\[\s+!?\s*-L\s+["']?\$\{?SYMLINK_PROBE\}?["']?\s+\]|test\s+-L\s+/.test(unpack),
+      'the unpack step must assert the probe is still a SYMLINK (-L) after transport',
+    ).toBe(true);
+    expect(
+      /::error::[^\n]*symlink/i.test(unpack) && /\bexit\s+1\b/.test(unpack),
+      'a materialized symlink must fail the shard loudly (::error:: + exit 1)',
+    ).toBe(true);
+    // Ordering: unpack right after download, before any step that uses the trees.
+    const block = deployTestsJobBlock();
+    const downloadIdx = block.search(/uses:\s*actions\/download-artifact@/);
+    const unpackIdx = block.indexOf(unpack.trimStart().split('\n')[0]);
+    expect(downloadIdx, 'expected the download-artifact step').toBeGreaterThanOrEqual(0);
+    expect(unpackIdx, 'expected to locate the unpack step').toBeGreaterThanOrEqual(0);
+    expect(downloadIdx < unpackIdx, 'unpack must come AFTER the artifact download').toBe(true);
+    const reinstallIdx = block.search(/-\s+name:[^\n]*Re-install next\.js harness deps/);
+    expect(reinstallIdx, 'expected the re-install step').toBeGreaterThanOrEqual(0);
+    expect(unpackIdx < reinstallIdx, 'unpack must come BEFORE the next.js re-install').toBe(true);
   });
 
   it('the shard restores the pnpm store cache with the SAME key the Prepare job warms', () => {
@@ -885,6 +960,85 @@ describe('compat-suite runs REAL deploy tests (test-e2e-deploy.yml, #147 A3-3)',
       /packages\/next\/dist/.test(block),
       'the hydrate step must populate packages/next/dist (the absent built artifact)',
     ).toBe(true);
+  });
+
+  /** The shard step block that hydrates workspace next/dist from the prebuilt tarball. */
+  function nextDistHydrateStep(): string {
+    const lines = deployTestsJobBlock().split('\n');
+    const blocks: string[] = [];
+    let current: string[] = [];
+    const flush = () => {
+      if (current.length) blocks.push(current.join('\n'));
+      current = [];
+    };
+    for (const line of lines) {
+      if (/^\s*-\s+name:/.test(line)) flush();
+      current.push(line);
+    }
+    flush();
+    return blocks.find((b) => /-\s+name:[^\n]*Hydrate workspace next\/dist/.test(b)) ?? '';
+  }
+
+  it('the next/dist hydrate is hygienic: fresh extract dir + destination dist removed first', () => {
+    // Run 28553944684 (v16.2.0, all 16 shards): after `cp -R SRC/dist PKG/dist`
+    // the sanity check hit ENOENT on packages/next/dist/trace/index.js even though
+    // the published next@16.2.0 tarball (byte-identical to a local `npm pack`)
+    // DOES contain it. This step was the only hydrate that neither extracted into
+    // a fresh dir nor removed a pre-existing destination — `cp -R src/dist
+    // dst/dist` silently NESTS to dst/dist/dist when dst/dist already exists, and
+    // a shared ${RUNNER_TEMP}/package can be polluted by any earlier tool. Both
+    // hazards are eliminated unconditionally (the @next/env hydrate already
+    // rm -rf's its target first).
+    const step = nextDistHydrateStep();
+    expect(step, 'expected the next/dist hydrate step').not.toBe('');
+    expect(
+      /mktemp -d/.test(step),
+      'the hydrate must extract the tarball into a FRESH mktemp dir (never a shared temp path)',
+    ).toBe(true);
+    expect(
+      /rm\s+-rf\s+"\$\{PKG_DIR\}\/dist"/.test(step),
+      'the hydrate must remove any pre-existing packages/next/dist before cp -R (cp nests into an existing dir)',
+    ).toBe(true);
+  });
+
+  it('the next/dist hydrate asserts the tarball payload BEFORE copying (loud layout-change failure)', () => {
+    // If a future published next ever reshuffles its dist layout, the failure must
+    // name the tarball at the copy source — not surface later as a jest load crash.
+    const step = nextDistHydrateStep();
+    expect(
+      /\$\{SRC\}\/\$\{probe\}/.test(step),
+      'the hydrate must probe the extracted tarball payload before cp',
+    ).toBe(true);
+    expect(
+      /::error::[^\n]*tarball/.test(step),
+      'a payload miss must emit a ::error:: naming the tarball',
+    ).toBe(true);
+  });
+
+  it('the next/dist hydrate sanity check RESOLVES the real harness specifiers (ref-agnostic)', () => {
+    // The old sanity hardcoded file paths ("dist/trace/index.js", …) — a
+    // ref-specific assumption. The harness actually imports MODULE SPECIFIERS
+    // (next/jest via jest.config.js, next/constants + next/dist/trace via
+    // e2e-utils, next/dist/server/next via next-test-utils — verified at the
+    // v16.2.0 tag), and next.js's root depends on `next: workspace:*`, so
+    // `require.resolve(spec, {paths:[repo root]})` exercises the EXACT resolution
+    // jest performs at run time — a future ref bump fails on the true specifier,
+    // not a stale path list.
+    const step = nextDistHydrateStep();
+    expect(
+      /require\.resolve\(\s*s\s*,\s*\{\s*paths:\s*\[process\.cwd\(\)\]\s*\}\s*\)/.test(step),
+      'the sanity check must require.resolve the harness import specifiers from the next.js root',
+    ).toBe(true);
+    for (const spec of [
+      'next/jest',
+      'next/constants',
+      'next/dist/trace',
+      'next/dist/server/next',
+    ]) {
+      expect(step.includes(`"${spec}"`), `sanity must cover the harness specifier ${spec}`).toBe(
+        true,
+      );
+    }
   });
 
   it('the hydrate step runs BEFORE the run-tests step (ordering)', () => {
@@ -1400,7 +1554,11 @@ describe('compat-suite jest discovery fix (test-e2e-deploy.yml, #147 A3-3)', () 
       'the next/jest patch must run BEFORE run-tests.js (jest resolves its config at run time)',
     ).toBe(true);
     // And after the next/dist hydrate — the patch targets the HYDRATED dist file.
+    // Existence-assert BEFORE the index comparison: search() returns -1 for a
+    // missing step, and -1 < patchIdx is vacuously true — a deleted hydrate step
+    // would otherwise slip through this ordering guard unnoticed.
     const hydrateIdx = block.search(/-\s+name:[^\n]*[Hh]ydrate[^\n]*next\/dist/);
+    expect(hydrateIdx, 'expected the next/dist hydrate step to exist').toBeGreaterThanOrEqual(0);
     expect(
       hydrateIdx < patchIdx,
       'the next/jest patch must run AFTER the next/dist hydrate (it patches the hydrated dist)',
@@ -1456,7 +1614,194 @@ describe('compat-suite jest discovery fix (test-e2e-deploy.yml, #147 A3-3)', () 
     expect(runIdx, 'expected the run-tests step').toBeGreaterThanOrEqual(0);
     expect(clearIdx < runIdx, 'the jest cache clear must come BEFORE run-tests.js').toBe(true);
     // And after the patch step — clearing before the patch would be pointless.
+    // Existence-assert first: search() returns -1 when the step is missing and
+    // -1 < clearIdx would pass vacuously.
     const patchIdx = block.search(/-\s+name:[^\n]*Patch next\/jest/i);
+    expect(patchIdx, 'expected the next/jest patch step to exist').toBeGreaterThanOrEqual(0);
     expect(patchIdx < clearIdx, 'the cache clear must come AFTER the next/jest patch').toBe(true);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// #147 A3-3 triage of run 28552585087 (the first run where shards EXECUTED real
+// tests). Findings this block locks in:
+//
+//  (1) HARNESS-VERSION FLOOR. Every one of the 8 failures across all 4 shards was
+//      the SAME harness-environment error: `vercel link` → "No existing
+//      credentials found. Please run `vercel login`". At v16.0.3,
+//      test/lib/next-modes/next-deploy.ts is HARDCODED to the Vercel CLI — the
+//      custom deploy-script contract (NEXT_TEST_DEPLOY_SCRIPT_PATH /
+//      NEXT_TEST_DEPLOY_LOGS_SCRIPT_PATH / NEXT_TEST_CLEANUP_SCRIPT_PATH) the
+//      knext workflow relies on DOES NOT EXIST at that ref. It landed upstream in
+//      vercel/next.js#89206 (b19e6d44, 2026-01-29; cleanup hook in #90696) and
+//      first shipped in the v16.2.0 stable tag. So with the ref at v16.0.3 the
+//      knext adapter is NEVER invoked: the 5 "passes" were vacuous
+//      skipDeployment placeholders and the 8 failures were Vercel-credential
+//      noise. The pinned ref must stay ≥ v16.2.0 or the suite tests nothing.
+//
+//  (2) FULL-SHARD EXECUTION. run-tests.js@v16.0.3 ABORTS the whole shard on the
+//      first post-retry failure (`cleanUpAndExit(1)`) unless
+//      NEXT_TEST_CONTINUE_ON_ERROR === 'true' — that is why each shard reported
+//      results for only ~2 of its ~179 selected tests. v16.2.0 continues past
+//      failures by default (hadFailures flag, exit at the end), but the env pin
+//      stays as an explicit statement of intent + a guard against a ref
+//      downgrade: the exclusion ledger is only meaningful over ALL selected
+//      tests.
+//
+//  (3) DISCOVERY TRIPWIRE. Three separate discovery-layer regressions each
+//      produced a silent 0-test "green" in earlier rounds (v1 manifest throw,
+//      unbuilt workspace-package closure, the unescaped /.next/ ignore regex).
+//      A cheap post-patch `jest --listTests` gate now fails the shard LOUDLY
+//      before run-tests.js whenever discovery collapses to 0 again.
+// ─────────────────────────────────────────────────────────────────────────────
+describe('compat-suite full-shard execution + harness-version floor (test-e2e-deploy.yml, #147 A3-3 triage)', () => {
+  function deployTestsSteps(): string[] {
+    const lines = deployTestsJobBlock().split('\n');
+    const blocks: string[] = [];
+    let current: string[] = [];
+    const flush = () => {
+      if (current.length) blocks.push(current.join('\n'));
+      current = [];
+    };
+    for (const line of lines) {
+      if (/^\s*-\s+name:/.test(line)) flush();
+      current.push(line);
+    }
+    flush();
+    return blocks;
+  }
+
+  it('pins the default next.js ref at or above the v16.2.0 deploy-script-contract floor', () => {
+    const text = workflowText();
+    // Both the dispatch-input default and the env fallback must carry the floor.
+    // v16.0.x harnesses hardcode the Vercel CLI (run 28552585087: every failure
+    // was "No existing credentials found") — the custom deploy-script hooks the
+    // run step sets are simply unread there. Only the two FUNCTIONAL pins are
+    // checked (dispatch `default:` + the NEXTJS_REF `||` fallback) — comments may
+    // legitimately reference older refs as historical run records.
+    const functionalPins = [
+      text.match(/default:\s*'(v16\.\d+\.\d+)'/),
+      text.match(
+        /NEXTJS_REF:\s*\$\{\{\s*github\.event\.inputs\.nextjsRef\s*\|\|\s*'(v16\.\d+\.\d+)'\s*\}\}/,
+      ),
+    ];
+    const refs = functionalPins.filter((m) => m !== null).map((m) => (m as RegExpMatchArray)[1]);
+    expect(refs.length, 'expected BOTH functional v16.x ref pins in the workflow').toBe(2);
+    for (const ref of refs) {
+      const [, minor] = ref.slice(1).split('.').map(Number);
+      expect(
+        minor >= 2,
+        `pinned ref ${ref} is below the v16.2.0 floor — next-deploy.ts has no ` +
+          'NEXT_TEST_DEPLOY_SCRIPT_PATH support before v16.2.0 (vercel/next.js#89206), ' +
+          'so the knext adapter would never be invoked',
+      ).toBe(true);
+    }
+    expect(
+      /default:\s*'v16\.\d+\.\d+'/.test(text),
+      'dispatch input must default a pinned ref',
+    ).toBe(true);
+    expect(
+      /NEXTJS_REF:\s*\$\{\{\s*github\.event\.inputs\.nextjsRef\s*\|\|\s*'v16\.\d+\.\d+'\s*\}\}/.test(
+        text,
+      ),
+      'NEXTJS_REF env must fall back to the same pinned ref family',
+    ).toBe(true);
+  });
+
+  it('sets NEXT_TEST_CONTINUE_ON_ERROR on the run step (full-shard execution, no first-failure abort)', () => {
+    const runStep = deployTestsSteps().find((b) => /name:[^\n]*Run official deploy tests/.test(b));
+    expect(runStep, 'expected the run-tests step').toBeTruthy();
+    expect(
+      /NEXT_TEST_CONTINUE_ON_ERROR:\s*['"]true['"]/.test(runStep ?? ''),
+      'the run step must set NEXT_TEST_CONTINUE_ON_ERROR: "true" — without it a ' +
+        'v16.0.x run-tests.js aborts the shard on the FIRST failure and the ledger ' +
+        'only ever sees ~2 of ~179 selected tests (run 28552585087)',
+    ).toBe(true);
+  });
+
+  it('shards the deploy tests 16 ways (full-shard runtime budget)', () => {
+    const block = deployTestsJobBlock();
+    // The matrix value is a YAML flow sequence that may wrap across lines —
+    // capture from `shard: [` to the matching `]`.
+    const shardMatch = block.match(/^\s*shard:\s*\n?\s*\[[\s\S]*?\]/m);
+    expect(shardMatch, 'expected a matrix shard: [...] flow sequence').not.toBeNull();
+    const entries = (shardMatch as RegExpMatchArray)[0].match(/'\d+\/\d+'/g) ?? [];
+    // ~715 selected tests total. With full-shard execution each shard must finish
+    // its slice inside the 60-min job timeout; at 4 shards a real-deploy slice
+    // (~179 files × fixture `next build` + boot, concurrency 2) cannot. 16 mirrors
+    // the reference harness's own shard count (~45 files/shard).
+    expect(entries.length, 'expected a 16-way shard matrix').toBe(16);
+    for (const [i, entry] of entries.entries()) {
+      expect(entry).toBe(`'${i + 1}/16'`);
+    }
+  });
+
+  it('has a loud-fail jest --listTests gate between the discovery patches and run-tests.js', () => {
+    const steps = deployTestsSteps();
+    // Select by the step NAME line — a pre-existing comment elsewhere in the job
+    // also mentions `--listTests`, and comments attach to the PREVIOUS step block.
+    const gate = steps.find((b) => /-\s+name:[^\n]*--listTests/.test(b)) ?? '';
+    expect(gate, 'expected a jest --listTests discovery gate step in the shard job').not.toBe('');
+    // Loud-fail: a 0-match discovery must abort the shard (exit 1), never proceed
+    // into a vacuous 0-test run-tests.js invocation.
+    expect(/\bexit\s+1\b/.test(gate), 'the listTests gate must exit 1 on 0 matches').toBe(true);
+    expect(
+      /::error::/.test(gate),
+      'the listTests gate must emit a ::error:: annotation so the regression is visible',
+    ).toBe(true);
+    // It must probe a KNOWN-SELECTED deploy test file, not an arbitrary pattern.
+    expect(
+      /test\/e2e\/[\w./-]+\.test\.ts/.test(gate),
+      'the gate must list a concrete known-present deploy test file',
+    ).toBe(true);
+    // Run 28556241980: the gate FIRED correctly, but its `2>/dev/null` swallowed
+    // jest's stderr — the log said "matched 0" without the WHY, costing a blind CI
+    // cycle. The gate must CAPTURE jest's stderr (+ exit code) and print both on
+    // failure, so the very next failing run carries its own diagnosis.
+    expect(
+      /2>\s*\/dev\/null/.test(gate),
+      'the gate must NOT discard jest stderr to /dev/null — capture and print it on failure',
+    ).toBe(false);
+    expect(
+      /2>\s*"?\$\{?GATE_ERR\}?"?/.test(gate),
+      'the gate must capture jest stderr to a file (GATE_ERR) for the failure dump',
+    ).toBe(true);
+    expect(
+      /head\s+-n?\s*\d+\s+"?\$\{?GATE_ERR\}?"?/.test(gate),
+      'on failure the gate must print the captured jest stderr into the log',
+    ).toBe(true);
+    expect(
+      /JEST_EXIT/.test(gate),
+      'the gate must record and report the jest exit code (distinguishes crash vs empty list)',
+    ).toBe(true);
+    // Ordering: after the /.next/ patch + haste-cache clear, before run-tests.js.
+    const block = deployTestsJobBlock();
+    const patchIdx = block.search(/-\s+name:[^\n]*Patch next\/jest/i);
+    const clearIdx = block.search(/rm\s+-rf\s+\/tmp\/jest_\*/);
+    const gateIdx = block.indexOf(gate.trimStart().split('\n')[0]);
+    const runIdx = block.search(/-\s+name:[^\n]*Run official deploy tests/);
+    expect(patchIdx, 'expected the next/jest patch step').toBeGreaterThanOrEqual(0);
+    expect(clearIdx, 'expected the haste-cache clear step').toBeGreaterThanOrEqual(0);
+    expect(gateIdx, 'expected to locate the gate step in the job block').toBeGreaterThanOrEqual(0);
+    expect(runIdx, 'expected the run-tests step').toBeGreaterThanOrEqual(0);
+    expect(patchIdx < gateIdx, 'the gate must run AFTER the next/jest patch').toBe(true);
+    expect(clearIdx < gateIdx, 'the gate must run AFTER the haste-cache clear').toBe(true);
+    expect(gateIdx < runIdx, 'the gate must run BEFORE run-tests.js').toBe(true);
+  });
+
+  it('does NOT patch or fork run-tests.js source (the ref bump is the fix, not a source patch)', () => {
+    // The v16.0.3 Vercel-CLI hardcoding could also have been "fixed" by rewriting
+    // next-deploy.ts / run-tests.js in place — a fork we would then own forever.
+    // The honest fix is the ref bump; keep the workflow free of harness-source
+    // rewrites (the ONE sanctioned dist patch is the /.next/ escape, guarded above).
+    const text = workflowText();
+    expect(
+      /(?:cat|tee)\s*>+\s*(?:\.\/)?run-tests\.js/.test(text),
+      'must not overwrite run-tests.js',
+    ).toBe(false);
+    expect(
+      /(?:cat|tee)\s*>+\s*[^\n]*next-deploy\.ts/.test(text),
+      'must not overwrite next-deploy.ts',
+    ).toBe(false);
   });
 });
