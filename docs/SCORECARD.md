@@ -25,8 +25,17 @@ was not separately scored before iteration 2 (marked —).
 | 1 | System designer | — | **7** (+2) | **5** (+2) |
 | 1 | DevOps/SRE | — | **4** (+1) | **3** (+1) |
 | 1 | Architect | — | **7** *(evolution)* (+2) | **6** *(fitness)* (=) |
+| **2** | System designer | **5** | **4** | **4** |
+| **2** | DevOps/SRE | **4** | **5** | **3** |
+| **2** | Architect | **5** | **4** | **4** |
 
 **Iteration-1 mean (mapped axes): ease 6.0, reliability 4.7** (round 0: 4.3, 3.7).
+**Iteration-2 mean (explicit metrics): maturity 4.7, ease 4.3, reliability 3.7.**
+The apparent dip is a re-basing, not a regression: iteration-2 scores judge the
+RATIFIED Neon-two-tier path against a production bar — pricing in the accepted
+obligations (backups, pageserver SPOF, warm-tier productization, version-pair
+gate) that ratification turned from options into debts. All three reviewers
+independently converged on 4±1 across the board.
 
 ## Reading guide
 
@@ -37,5 +46,4 @@ was not separately scored before iteration 2 (marked —).
 - Convergence between reviewers matters more than any single number: a finding
   two reviewers hit independently is treated as confirmed.
 
-*(Iteration 2 row appended after its review round; from that round on, all
-three metrics are scored explicitly by every reviewer.)*
+*(From iteration 2 on, all three metrics are scored explicitly by every reviewer.)*
