@@ -80,9 +80,10 @@ spec:
   ports:
     - { name: web, port: 9093, targetPort: web }
 ---
-# Log-everything webhook sink: proves deliveries end-to-end. Busybox nc loop:
-# answers 200 and prints each request (headers+body) to stdout, where
-# _verify-alerting.sh greps for the alert name.
+# Log-everything webhook sink: proves deliveries end-to-end. A tiny Go binary
+# (gateway image, /alertsink) that logs every request BODY to stdout, where
+# _verify-alerting.sh greps for the alert name. (Replaced the busybox nc loop,
+# which returned a canned 200 while discarding payloads — devops-r3 CRITICAL.)
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -103,14 +104,12 @@ spec:
         seccompProfile: { type: RuntimeDefault }
       containers:
         - name: sink
-          image: busybox:1.36 # pinned
-          command: ["/bin/sh", "-c"]
-          args:
-            - |
-              while true; do
-                { printf 'HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n'; } \
-                  | nc -l -p 8080 -w 5
-              done
+          image: scale-zero-pg/gateway:dev # ships /alertsink alongside /gateway
+          imagePullPolicy: IfNotPresent
+          command: ["/alertsink"]
+          readinessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 5
           securityContext:
             allowPrivilegeEscalation: false
             capabilities: { drop: ["ALL"] }

@@ -5,7 +5,14 @@
 # webhook sink with a synthetic always-firing drill rule, then cleans up.
 set -eu
 NS=scale-zero-pg
-K="kubectl -n $NS"
+# Every kubectl call is bounded (a hung exec must not hang the operator —
+# devops-r3 had to kill this script), and rules are restored on ANY exit.
+K="kubectl --request-timeout=15s -n $NS"
+
+# Unique per-run alert identity: Alertmanager dedups by labelset, so a fixed
+# drill name is suppressed for repeat_interval (4h) after any prior success —
+# which is exactly how the drill "hung" for a second operator.
+DRILL="KsPgDrill$(date +%s)"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 ok() { echo "ok - $*"; }
@@ -23,16 +30,20 @@ $K get cm prometheus-config -o jsonpath='{.data.prometheus\.yml}' | grep -q 'ale
 ok "prometheus on PVC, alerting block points at alertmanager"
 
 # 2. inject a synthetic always-firing drill rule
+CLEANED=0
 restore_rules() {
+  [ "$CLEANED" = "1" ] && return 0
+  CLEANED=1
   $K get cm prometheus-config -o json | \
     python3 -c "import json,sys; d=json.load(sys.stdin); d['data']['rules.yml']=open('/tmp/rules-backup-$$.yml').read(); print(json.dumps(d))" | \
     $K replace -f - >/dev/null
   $K rollout restart deploy/prometheus >/dev/null
 }
 $K get cm prometheus-config -o jsonpath='{.data.rules\.yml}' > /tmp/rules-backup-$$.yml
+trap restore_rules EXIT INT TERM
 cat /tmp/rules-backup-$$.yml > /tmp/rules-drill-$$.yml
-cat >> /tmp/rules-drill-$$.yml <<'EOF'
-      - alert: KsPgAlertDrill
+cat >> /tmp/rules-drill-$$.yml <<EOF
+      - alert: ${DRILL}
         expr: vector(1)
         labels: { severity: drill }
         annotations: { summary: "synthetic drill alert - safe to ignore" }
@@ -46,17 +57,17 @@ $K get cm prometheus-config -o json | \
 # ConfigMap volumes propagate on the kubelet sync period (~1min): wait until
 # the file the pod actually sees contains the drill rule, THEN reload.
 i=0
-until $K exec deploy/prometheus -- cat /etc/prometheus/rules/rules.yml 2>/dev/null | grep -q 'KsPgAlertDrill'; do
+until $K exec deploy/prometheus -- cat /etc/prometheus/rules/rules.yml 2>/dev/null | grep -q "${DRILL}"; do
   i=$((i+1)); [ $i -gt 60 ] && { restore_rules; fail "drill rule never propagated into the pod (>120s)"; }
   sleep 2
 done
 $K exec deploy/prometheus -- kill -HUP 1 2>/dev/null || $K rollout restart deploy/prometheus >/dev/null
-ok "drill rule injected + propagated + config reloaded (KsPgAlertDrill)"
+ok "drill rule injected + propagated + config reloaded (${DRILL})"
 
 # 3. the alert must arrive at the webhook sink (via alertmanager).
 # Budget: evaluation interval (<=1m) + group_wait + delivery.
 i=0
-until $K logs deploy/alert-sink --since=10m 2>/dev/null | grep -q 'KsPgAlertDrill'; do
+until $K logs deploy/alert-sink --since=10m 2>/dev/null | grep -q "${DRILL}"; do
   i=$((i+1)); [ $i -gt 120 ] && { restore_rules; fail "drill alert never reached the sink (>240s)"; }
   sleep 2
 done

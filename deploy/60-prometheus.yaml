@@ -97,15 +97,18 @@ data:
               description: "Last cold-start took {{ $value }}ms (budget 5000ms)."
           # Phantom keepalive: the fleet has woken the compute more times than it
           # has slept it (=> compute is currently UP) yet no client connections
-          # are active. Something (usually an app pool holding idle conns) is
           # blocking scale-to-zero and burning compute for nothing.
+          # STATE-based on purpose: the old (wakes_total - sleeps_total) form
+          # false-fired at replicas 0 — cumulative counters drift across pod
+          # restarts and never represent current state (devops-r3, live repro
+          # value=41 at zero). "Phantom keepalive" truly means: connections
+          # never drop to zero, so the idle window can never elapse.
           - alert: ComputePhantomKeepalive
-            expr: (sum(pggw_wakes_total) - sum(pggw_sleeps_total)) > 0 and sum(pggw_active_connections) == 0
-            for: 30m
+            expr: min_over_time(sum(pggw_active_connections)[30m:1m]) > 0
             labels: { severity: warning }
             annotations:
-              summary: "Compute awake 30m+ with zero active connections"
-              description: "Scale-to-zero is blocked — check for an app pool holding idle connections (see docs/connecting.md)."
+              summary: "System never idle for 30m — scale-to-zero blocked"
+              description: "Connections held continuously — check for an app pool with no/large idle timeout (see docs/connecting.md sizing rule)."
 ---
 apiVersion: apps/v1
 kind: Deployment

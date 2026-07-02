@@ -7,10 +7,12 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /gateway ./cmd/gateway
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /gateway ./cmd/gateway \
+ && CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /alertsink ./cmd/alertsink
 
 FROM gcr.io/distroless/static:nonroot
 COPY --from=build /gateway /gateway
+COPY --from=build /alertsink /alertsink
 # Postgres wire port + metrics/health port.
 EXPOSE 55432 9090
 USER nonroot:nonroot
