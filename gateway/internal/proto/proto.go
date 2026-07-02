@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"io"
 )
 
 // Wire-protocol magic numbers.
@@ -128,4 +129,44 @@ func BuildErrorResponse(code, message string) []byte {
 	binary.BigEndian.PutUint32(out[1:5], uint32(4+body.Len()))
 	copy(out[5:], body.Bytes())
 	return out
+}
+
+// ReadBackendMessage reads one regular-protocol backend message (type byte +
+// int32 length + body) from r. It returns the message type and the raw bytes
+// exactly as read, so callers can forward them verbatim.
+func ReadBackendMessage(r io.Reader) (typ byte, raw []byte, err error) {
+	head := make([]byte, 5)
+	if _, err = io.ReadFull(r, head); err != nil {
+		return 0, nil, err
+	}
+	n := int(int32(binary.BigEndian.Uint32(head[1:5])))
+	if n < 4 || n > 1<<20 {
+		return head[0], head, fmt.Errorf("bogus backend message length %d", n)
+	}
+	body := make([]byte, n-4)
+	if _, err = io.ReadFull(r, body); err != nil {
+		return head[0], head, err
+	}
+	return head[0], append(head, body...), nil
+}
+
+// ErrorCode extracts the SQLSTATE ('C' field) from a raw ErrorResponse
+// message as returned by ReadBackendMessage. Empty if absent.
+func ErrorCode(raw []byte) string {
+	if len(raw) < 6 || raw[0] != 'E' {
+		return ""
+	}
+	body := raw[5:]
+	for len(body) > 0 && body[0] != 0 {
+		f := body[0]
+		end := bytes.IndexByte(body[1:], 0)
+		if end < 0 {
+			return ""
+		}
+		if f == 'C' {
+			return string(body[1 : 1+end])
+		}
+		body = body[2+end:]
+	}
+	return ""
 }

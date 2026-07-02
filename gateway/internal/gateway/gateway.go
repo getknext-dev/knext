@@ -9,6 +9,7 @@ package gateway
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net"
 	"strconv"
@@ -208,12 +209,29 @@ func (g *Gateway) proxy(client net.Conn, startupPacket, pendingRest []byte, targ
 	if tcp, ok := conn.(*net.TCPConn); ok {
 		_ = tcp.SetNoDelay(true)
 	}
-	if _, err := conn.Write(startupPacket); err != nil {
+
+	// Readiness handshake: a freshly started Postgres accepts TCP before it
+	// can serve and FATALs the startup with 57P03 ("the database system is
+	// starting up"). Absorb those and retry the handshake until the backend
+	// answers for real — the client must never see the transient FATAL.
+	conn, firstReply, err := g.handshakeUntilReady(conn, startupPacket, target)
+	if err != nil {
+		g.metrics.WakeFailure()
 		g.metrics.ConnClose(target.Key)
 		g.connEnded(target)
+		g.log("[gw] " + target.Key + ": " + err.Error())
+		_, _ = client.Write(proto.BuildErrorResponse("57P03", "compute unavailable: "+err.Error()))
 		_ = client.Close()
-		_ = conn.Close()
 		return
+	}
+	if len(firstReply) > 0 {
+		if _, err := client.Write(firstReply); err != nil {
+			g.metrics.ConnClose(target.Key)
+			g.connEnded(target)
+			_ = client.Close()
+			_ = conn.Close()
+			return
+		}
 	}
 	if len(pendingRest) > 0 {
 		_, _ = conn.Write(pendingRest)
@@ -230,6 +248,44 @@ func (g *Gateway) proxy(client net.Conn, startupPacket, pendingRest []byte, targ
 	}
 	go func() { _, _ = io.Copy(conn, client); cleanup() }()
 	go func() { _, _ = io.Copy(client, conn); cleanup() }()
+}
+
+// handshakeUntilReady writes the startup packet and peeks at the backend's
+// first reply. While the reply is FATAL 57P03 (crash recovery / starting up),
+// it reconnects and retries until the wake deadline. On success it returns
+// the (possibly new) backend conn plus the first reply bytes to forward.
+func (g *Gateway) handshakeUntilReady(conn net.Conn, startupPacket []byte, target wake.Target) (net.Conn, []byte, error) {
+	deadline := time.Now().Add(time.Duration(g.opts.WakeTimeoutMs) * time.Millisecond)
+	retry := time.Duration(g.opts.RetryMs) * time.Millisecond
+	for {
+		if _, err := conn.Write(startupPacket); err != nil {
+			_ = conn.Close()
+			return nil, nil, err
+		}
+		_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		typ, raw, err := proto.ReadBackendMessage(conn)
+		_ = conn.SetReadDeadline(time.Time{})
+		if err != nil {
+			// No parseable first reply: hand whatever arrived to the pipe.
+			return conn, raw, nil
+		}
+		if typ != 'E' || proto.ErrorCode(raw) != "57P03" {
+			return conn, raw, nil // genuinely ready (auth request, error, anything)
+		}
+		_ = conn.Close()
+		if time.Now().After(deadline) {
+			return nil, nil, errors.New("backend kept reporting 57P03 (starting up) past the wake deadline")
+		}
+		time.Sleep(retry)
+		next, _, _, err := wake.ConnectWithWake(context.Background(), g.driver, target, g.opts, nil)
+		if err != nil {
+			return nil, nil, err
+		}
+		conn = next
+		if tcp, ok := conn.(*net.TCPConn); ok {
+			_ = tcp.SetNoDelay(true)
+		}
+	}
 }
 
 // connStarted increments the active count and cancels any pending sleep.
