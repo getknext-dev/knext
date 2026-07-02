@@ -38,7 +38,7 @@ spec:
               set -eu
               PS="http://${PAGESERVER_HOST}:9898"
               until curl -sf "${PS}/v1/tenant/${TENANT_ID}/timeline" | grep -q "${TIMELINE_ID}"; do
-                echo "waiting for timeline ${TIMELINE_ID} on tenant ${TENANT_ID} ..."; sleep 2;
+                echo "waiting for timeline ${TIMELINE_ID} on tenant ${TENANT_ID} ..."; sleep 0.5;
               done
               echo "timeline ready"
       containers:
@@ -78,7 +78,11 @@ metadata:
   namespace: scale-zero-pg
   labels: { app: compute }
 spec:
-  clusterIP: None # headless: gateway dials the pod directly; no LB warm-up
+  # ClusterIP (not headless) on purpose: the DNS record exists even at zero
+  # replicas, so the gateway never hits an NXDOMAIN that CoreDNS negative-
+  # caches (~5s) across the whole wake. Connects fail fast until the
+  # endpoint appears, and the gateway's TCP retry is the readiness check.
+  publishNotReadyAddresses: true
   selector: { app: compute }
   ports:
     - { name: pg, port: 55433, targetPort: pg }

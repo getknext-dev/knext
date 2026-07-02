@@ -70,6 +70,8 @@ spec:
               value: "60000" # demo-friendly idle window; production: 300000+
             - name: GW_WAKE_TIMEOUT_MS
               value: "120000" # first wake on a cluster may pull the compute image
+            - name: GW_RETRY_MS
+              value: "100" # tight connect-poll: shaves ~150ms avg off wake
           ports:
             - { name: pg, containerPort: 55432 }
             - { name: metrics, containerPort: 9090 }
