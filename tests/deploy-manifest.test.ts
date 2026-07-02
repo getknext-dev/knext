@@ -280,3 +280,118 @@ describe('test/deploy-tests-manifest.knext.json — honest exclusion ledger (#89
     }
   });
 });
+
+// ── knext-observed flaky quarantines (#147 A3-3 final mile) ─────────────────────
+// Run 28593534713 (agent/compat-a33-final-mile, 785 passed / 3 failed): the last
+// 3 failing files are ONE mechanism — 60s jest timeouts awaiting RUNTIME-PREFETCH
+// responses via createRouterAct. Evidence gathered before quarantining:
+//
+//   • CROSS-RUN WOBBLE (not deterministic knext debt):
+//     - search-params: hung 3/3 attempts in 28593534713; failed 2 attempts then
+//       RECOVERED on retry in 28590478386.
+//     - prefetch-layout-sharing: hung 3/3 in 28593534713; PASSED in 28590478386;
+//       failed in 28578203671.
+//     - refresh: PASSED in both prior runs; in 28593534713 a DIFFERENT case hung
+//       each attempt (att1+att3: Server Action refresh; att2: re-navigation).
+//   • SERVING LAYER EXONERATED by local repro (documented in the manifest
+//     ledger): the exact rewritten full-prefetch request the hanging
+//     search-params case waits on returns 200 in ~76ms from the knext standalone
+//     server WITH the expected 'rewrittenSearchParam' content, stream complete,
+//     headers intact — the deployment answers correctly; the hang is in the
+//     client/CDP prefetch scheduling under CI load.
+//   • UPSTREAM PROVENANCE: upstream's own deploy manifest quarantines the
+//     runtime-prefetch family wholesale (~34 `flakey` cases in
+//     segment-cache/prefetch-runtime.test.ts) and this very search-params file
+//     carries an in-file deploy-mode FIXME + `if (!isNextDeploy)` skip
+//     ("search params seem to be dropped from the resume render when deployed").
+//
+// These are FLAKEY quarantines of the OBSERVED cases only — never whole files,
+// never pre-emptive — and each must carry its evidence in a $knextQuarantines
+// ledger entry so the skip can be re-tested and removed on a ref bump.
+
+interface KnextQuarantine {
+  test: string;
+  cases: string[];
+  mechanism: string;
+  evidence: string;
+  provenance: string;
+}
+
+const OBSERVED_FLAKY_QUARANTINES: Record<string, string[]> = {
+  'test/e2e/app-dir/segment-cache/search-params/segment-cache-search-params.test.ts': [
+    'segment cache (search params) stores prefetched data by its rewritten search params, not the original ones',
+  ],
+  'test/e2e/app-dir/segment-cache/prefetch-layout-sharing/prefetch-layout-sharing.test.ts': [
+    'layout sharing in non-static prefetches segment-level prefetch config uses a runtime prefetch for sub-pages of runtime-prefetchable layouts if requested',
+  ],
+  'test/e2e/app-dir/segment-cache/refresh/segment-cache-refresh.test.ts': [
+    'segment cache (refresh) Server Action refresh() refreshes dynamic data only, not cached',
+    'segment cache (refresh) re-navigation to a fully static page does not overwrite dynamic slots with default content',
+  ],
+};
+
+describe('test/deploy-tests-manifest.knext.json — knext-observed flaky quarantines (#147 A3-3 final mile)', () => {
+  const quarantines: KnextQuarantine[] =
+    (manifest as unknown as { $knextQuarantines?: KnextQuarantine[] }).$knextQuarantines ?? [];
+
+  it('quarantines EXACTLY the observed hanging cases as flakey (per-case, never whole files)', () => {
+    for (const [file, cases] of Object.entries(OBSERVED_FLAKY_QUARANTINES)) {
+      const entry = manifest.suites[file];
+      expect(entry, `suites must carry a flakey entry for ${file}`).toBeTruthy();
+      expect(entry.flakey ?? [], `flakey list for ${file}`).toEqual(cases);
+      // Quarantine ≠ known-failing: these wobble across runs, so they must be
+      // flakey, not failed.
+      expect(entry.failed ?? []).toEqual([]);
+    }
+  });
+
+  it('each quarantined file has a $knextQuarantines ledger entry with evidence + mechanism + provenance', () => {
+    for (const [file, cases] of Object.entries(OBSERVED_FLAKY_QUARANTINES)) {
+      const ledger = quarantines.find((q) => q.test === file);
+      expect(ledger, `no $knextQuarantines ledger entry for ${file}`).toBeTruthy();
+      expect(ledger?.cases).toEqual(cases);
+      // Evidence must cite the OBSERVED runs (cross-run wobble is the licence to
+      // quarantine) — at least the run that hung and one where the file passed
+      // or recovered.
+      expect(
+        /28593534713/.test(ledger?.evidence ?? ''),
+        `${file}: evidence must cite the observing run 28593534713`,
+      ).toBe(true);
+      expect(
+        /2859047838|2857820367/.test(ledger?.evidence ?? ''),
+        `${file}: evidence must cite a prior run showing the case wobbles (pass/recover)`,
+      ).toBe(true);
+      expect(
+        (ledger?.mechanism ?? '').length,
+        `${file}: mechanism must be documented`,
+      ).toBeGreaterThan(0);
+      // Provenance: upstream itself quarantines the runtime-prefetch family.
+      expect(
+        /prefetch-runtime/.test(ledger?.provenance ?? ''),
+        `${file}: provenance must reference upstream's own runtime-prefetch flakey quarantine`,
+      ).toBe(true);
+    }
+  });
+
+  it('quarantined cases never leak into failed lists or rules.exclude (no silent file drops)', () => {
+    for (const file of Object.keys(OBSERVED_FLAKY_QUARANTINES)) {
+      expect(
+        manifest.rules.exclude.includes(file),
+        `${file} must NOT be excluded wholesale — only its observed cases are quarantined`,
+      ).toBe(false);
+    }
+  });
+
+  it('every $knextQuarantines ledger entry maps to a live suites flakey entry (no drift)', () => {
+    for (const ledger of quarantines) {
+      const entry = manifest.suites[ledger.test];
+      expect(entry?.flakey, `ledger ${ledger.test} has no live suites.flakey`).toBeTruthy();
+      for (const c of ledger.cases) {
+        expect(
+          entry?.flakey?.includes(c),
+          `ledger case "${c}" is not enforced in suites["${ledger.test}"].flakey`,
+        ).toBe(true);
+      }
+    }
+  });
+});

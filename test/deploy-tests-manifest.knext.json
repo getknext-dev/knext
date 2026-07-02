@@ -20,9 +20,13 @@
     "",
     "v2 semantics: a test file is RUN iff it matches an `include` glob and matches no",
     "`exclude` glob (or is listed verbatim in `suites`). `suites` maps a file to its",
-    "per-case {failed,flakey} exclusions — populated below ONLY with upstream's own",
-    "mirrored skips; knext-observed per-case skips may be added only from OBSERVED",
-    "failures with rationale, never pre-emptively.",
+    "per-case {failed,flakey} exclusions — populated below with (a) upstream's own",
+    "mirrored skips and (b) knext-OBSERVED flaky quarantines, added only from",
+    "OBSERVED failures with evidence, never pre-emptively. Every knext-observed",
+    "entry MUST have a matching `$knextQuarantines` ledger record (mechanism,",
+    "cross-run evidence, upstream provenance) — guarded by",
+    "tests/deploy-manifest.test.ts — and should be re-tested for removal on every",
+    "NEXTJS_REF bump.",
     "",
     "HONESTY: this is an HONEST LEDGER, NOT a fake green. knext does NOT yet pass the",
     "official suite; the compat-matrix official-suite row stays ❌ until a real",
@@ -33,12 +37,14 @@
     "The exclude list must GROW FROM OBSERVED FAILURES and SHRINK toward zero. Do NOT",
     "pre-emptively exclude tests to manufacture a green run.",
     "",
-    "suites (#147 A3-3 triage): mirrored VERBATIM from vercel/next.js@v16.2.0",
-    "test/deploy-tests-manifest.json — these per-case {failed,flakey} entries are",
-    "upstream-known-failing at v16.2.0: next.js itself skips them against its OWN",
-    "deploy target, so running them against knext books upstream noise as knext",
-    "failures. Mirroring upstream's own skips is honest and is NOT knext debt.",
-    "Re-mirror this block whenever NEXTJS_REF bumps."
+    "suites (#147 A3-3 triage): the `failed` entries are mirrored VERBATIM from",
+    "vercel/next.js@v16.2.0 test/deploy-tests-manifest.json — upstream-known-failing",
+    "at v16.2.0: next.js itself skips them against its OWN deploy target, so running",
+    "them against knext books upstream noise as knext failures. Mirroring upstream's",
+    "own skips is honest and is NOT knext debt. Re-mirror whenever NEXTJS_REF bumps.",
+    "The three segment-cache `flakey` entries (search-params, prefetch-layout-sharing,",
+    "refresh) are knext-OBSERVED quarantines — see `$knextQuarantines` for the",
+    "per-entry mechanism, cross-run evidence and upstream provenance."
   ],
   "suites": {
     "test/e2e/app-dir/app-client-cache/client-cache.defaults.test.ts": {
@@ -126,6 +132,22 @@
     },
     "test/e2e/middleware-rewrites/test/index.test.ts": {
       "failed": ["Middleware Rewrite should handle catch-all rewrite correctly"]
+    },
+    "test/e2e/app-dir/segment-cache/search-params/segment-cache-search-params.test.ts": {
+      "flakey": [
+        "segment cache (search params) stores prefetched data by its rewritten search params, not the original ones"
+      ]
+    },
+    "test/e2e/app-dir/segment-cache/prefetch-layout-sharing/prefetch-layout-sharing.test.ts": {
+      "flakey": [
+        "layout sharing in non-static prefetches segment-level prefetch config uses a runtime prefetch for sub-pages of runtime-prefetchable layouts if requested"
+      ]
+    },
+    "test/e2e/app-dir/segment-cache/refresh/segment-cache-refresh.test.ts": {
+      "flakey": [
+        "segment cache (refresh) Server Action refresh() refreshes dynamic data only, not cached",
+        "segment cache (refresh) re-navigation to a fully static page does not overwrite dynamic slots with default content"
+      ]
     }
   },
   "rules": {
@@ -165,6 +187,36 @@
       "test/e2e/cache-components/**/*"
     ]
   },
+  "$knextQuarantines": [
+    {
+      "test": "test/e2e/app-dir/segment-cache/search-params/segment-cache-search-params.test.ts",
+      "cases": [
+        "segment cache (search params) stores prefetched data by its rewritten search params, not the original ones"
+      ],
+      "mechanism": "60s jest timeout awaiting the middleware-rewritten full-prefetch response via createRouterAct (act includes: 'Search param: rewrittenSearchParam'). Serving layer exonerated by local repro: the exact rewritten full-prefetch request (RSC:1, through the fixture's middleware rewrite) against the real e2e-deploy.sh deployment (published next@16.2.0 + the shipped @knext/core adapter) returns 200 in ~76ms WITH 'rewrittenSearchParam' in the body, stream complete, vary/cache headers intact. The hang is client/CDP runtime-prefetch scheduling under CI shard load, not knext serving.",
+      "evidence": "run 28593534713: hung 3/3 attempts (same case, 60001ms each); run 28590478386: failed 2 attempts then RECOVERED on in-run retry — cross-run wobble, not deterministic debt.",
+      "provenance": "Upstream quarantines the runtime-prefetch deploy family wholesale: vercel/next.js@v16.2.0 test/deploy-tests-manifest.json marks ~34 'runtime prefetching …' cases flakey in segment-cache/prefetch-runtime.test.ts; THIS file additionally carries upstream's own in-file deploy-mode skip ('FIXME: search params seem to be dropped from the resume render when deployed', if (!isNextDeploy))."
+    },
+    {
+      "test": "test/e2e/app-dir/segment-cache/prefetch-layout-sharing/prefetch-layout-sharing.test.ts",
+      "cases": [
+        "layout sharing in non-static prefetches segment-level prefetch config uses a runtime prefetch for sub-pages of runtime-prefetchable layouts if requested"
+      ],
+      "mechanism": "60s jest timeout awaiting a runtime prefetch response via createRouterAct (act includes: 'runtime-prefetchable-content-page'). Same runtime-prefetch client-scheduling mechanism as the search-params quarantine (whose serving-layer repro exonerated the knext deployment).",
+      "evidence": "run 28593534713: hung 3/3 attempts (same case, ~60000ms each); run 28590478386: file PASSED; run 28578203671: file failed — cross-run wobble.",
+      "provenance": "Upstream marks the runtime-prefetch deploy family flakey wholesale (vercel/next.js@v16.2.0 test/deploy-tests-manifest.json, segment-cache/prefetch-runtime.test.ts, ~34 cases) — this case exercises exactly that mechanism (segment-level runtime prefetch config)."
+    },
+    {
+      "test": "test/e2e/app-dir/segment-cache/refresh/segment-cache-refresh.test.ts",
+      "cases": [
+        "segment cache (refresh) Server Action refresh() refreshes dynamic data only, not cached",
+        "segment cache (refresh) re-navigation to a fully static page does not overwrite dynamic slots with default content"
+      ],
+      "mechanism": "60s jest timeouts in dynamic-refresh flows driven by createRouterAct; a DIFFERENT case hung on each in-run attempt (attempt 1+3: 'Server Action refresh()…' at 60001/60000ms while the other case passed in ~1.2s; attempt 2: 're-navigation…' at 60001ms while 'Server Action refresh()…' passed in 692ms) — a classic interleaving race, not a stable assertion diff.",
+      "evidence": "run 28593534713: alternating case hung across 3 attempts; runs 28590478386 and 28587476341: file PASSED — cross-run wobble.",
+      "provenance": "Same client runtime-prefetch/dynamic-request scheduling family upstream quarantines as flakey (vercel/next.js@v16.2.0 test/deploy-tests-manifest.json, segment-cache/prefetch-runtime.test.ts)."
+    }
+  ],
   "$knextExclusions": [
     {
       "test": "test/e2e/app-dir/edge-runtime-module-errors/**/*",
