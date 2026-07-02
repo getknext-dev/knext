@@ -206,7 +206,16 @@ spec:
                   mc mb --ignore-existing dst/neon
                   mc mb --ignore-existing dst/neon-config
                   echo "mirroring neon bucket -> backup-store ..."
-                  mc mirror --overwrite --remove src/neon dst/neon
+                  # Retry the mirror: the live pageserver compacts every ~20s,
+                  # deleting layer files mid-copy -> mc "ContentLength ... Body length"
+                  # read errors on a large/churny bucket. mc mirror is idempotent
+                  # (skips objects already copied), so a re-run fills the gaps and
+                  # converges once compaction settles.
+                  n=0
+                  until mc mirror --overwrite --remove src/neon dst/neon; do
+                    n=$((n+1)); [ "$n" -gt 8 ] && { echo "mirror failed after $n attempts" >&2; exit 1; }
+                    echo "mirror retry $n (transient read race) ..."; sleep 5
+                  done
                   echo "uploading config dump ..."
                   mc cp /dump/configmaps.yaml dst/neon-config/configmaps.yaml
                   mc cp /dump/storage-s3-creds.yaml dst/neon-config/storage-s3-creds.yaml
