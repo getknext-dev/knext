@@ -434,6 +434,15 @@ esac
 SERVER_PRELOAD_ARGS=(-r "${KNEXT_CC_PRELOAD}")
 if [ "${RUNTIME}" = "bun" ]; then
   SERVER_PRELOAD_ARGS+=(-r "${KNEXT_BUN_GUARD_PRELOAD}")
+  # #188 round 2 — Bucket 3 (app-static / parallel-routes-root-param 404→500,
+  # `invariant: cache entry required but not generated`, run 28612654960) is
+  # deterministic in CI but did NOT reproduce locally against the exact
+  # upstream fixture (sequential, concurrent, amd64, full CI env). Turn on
+  # Next's incremental-cache debug logging in the bun lane ONLY so the next
+  # red run's server-log tail (surfaced at teardown by e2e-cleanup.sh) names
+  # the cache get/set decisions around the failing keys. Log-only; the Node
+  # lane env is untouched.
+  export NEXT_PRIVATE_DEBUG_CACHE=1
 fi
 log "booting (${RUNTIME}) ${SERVER_JS} on 0.0.0.0:${PORT} (HOSTNAME emptied — see B7a note; preloads ${SERVER_PRELOAD_ARGS[*]})"
 (

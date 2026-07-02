@@ -201,6 +201,12 @@
         "optimistic-routing nested dynamic routes: predicts through multiple dynamic segments",
         "optimistic-routing optional catch-all: predicts from index to path with segments"
       ]
+    },
+    "test/e2e/app-dir/prefetch-true-instant/prefetch-true-instant.test.ts": {
+      "flakey": [
+        "prefetch={true} with instant route also disables full prefetch when instant is on a layout, not the page",
+        "prefetch={true} with instant route does not include dynamic content in the prefetch when the target route has instant"
+      ]
     }
   },
   "rules": {
@@ -336,6 +342,16 @@
       "mechanism": "60s jest timeouts in createRouterAct-driven optimistic-routing prediction flows, a DIFFERENT case per attempt (run 28601386408: att1 'rewrite detection…' hung then passed atts 2-3 in ~0.7s; att2 'static route with catch-all sibling…' hung; att3 'nested dynamic routes…' hung after passing atts 1-2) — the family's interleaving-race signature, zero assertion diffs. NOT an adapter-lane finding: this file does not read NEXT_ENABLE_ADAPTER (the only isAdapterTest readers at v16.2.0 — not-found-with-pages-i18n, sub-shell-generation{,-middleware}, partial-fallback-root-blocking, partial-fallback-shell-upgrade, deterministic-build/deployment-id — all passed on first attempt in the same run).",
       "evidence": "run 28601386408 (first adapter-lane run): FINAL failure, alternating cases across 3 attempts; run 28593534713: 1-attempt wobble ('optional catch-all…' + 'rewrite detection…') then RECOVERED on in-run retry; runs 28578203671, 28590478386, 28596005486, 28597872225: file PASSED — cross-run wobble.",
       "provenance": "Same client prefetch/navigation-latency-under-load class upstream ledgers (vercel/next.js@v16.2.0 test/deploy-tests-manifest.json: segment-cache/prefetch-runtime.test.ts flakey block; app-client-cache failed entries)."
+    },
+    {
+      "test": "test/e2e/app-dir/prefetch-true-instant/prefetch-true-instant.test.ts",
+      "cases": [
+        "prefetch={true} with instant route also disables full prefetch when instant is on a layout, not the page",
+        "prefetch={true} with instant route does not include dynamic content in the prefetch when the target route has instant"
+      ],
+      "mechanism": "60s jest timeouts in createRouterAct-driven instant-route prefetch flows, alternating per attempt (run 28612654960: 'also disables full prefetch…' hung atts 1+3 at 60000ms while 'does not include dynamic content…' hung att 2 and passed elsewhere) — the runtime-prefetch family's interleaving-race signature, zero assertion diffs. NOT a Bucket-1/3/4 serving failure: the same run's server-log tails for this fixture carry no exception.",
+      "evidence": "run 28612654960 (KNEXT_RUNTIME=bun, #188 round 2): FINAL failure, alternating cases across 3 attempts; run 28607626868 (first bun run): file failed 1 attempt then RECOVERED on in-run retry (2/2, shard 3) — cross-run wobble, bun-lane evidence for both.",
+      "provenance": "Upstream marks the runtime-prefetch deploy family flakey wholesale (vercel/next.js@v16.2.0 test/deploy-tests-manifest.json, segment-cache/prefetch-runtime.test.ts, ~34 'runtime prefetching …' cases) — instant-route prefetch exercises exactly that client scheduling mechanism."
     }
   ],
   "$knextExclusions": [

@@ -102,6 +102,12 @@ describe("e2e-deploy.sh — bun-lane keep-alive guard wiring (#188 bucket 1 fix)
             /SERVER_PRELOAD_ARGS=\(-r "\$\{KNEXT_CC_PRELOAD\}"\)/,
         );
     });
+
+    it("enables incremental-cache debug logging ONLY for RUNTIME=bun (#188 round 2, bucket 3 observability)", () => {
+        expect(src).toMatch(
+            /if \[ "\$\{RUNTIME\}" = "bun" \];[\s\S]{0,900}NEXT_PRIVATE_DEBUG_CACHE=1/,
+        );
+    });
 });
 
 describe("harness scripts stay bash-valid (bash -n)", () => {

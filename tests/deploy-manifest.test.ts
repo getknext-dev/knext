@@ -431,6 +431,16 @@ const OBSERVED_FLAKY_QUARANTINES: Record<string, { cases: string[]; observedRuns
     ],
     observedRuns: ['28601386408', '28593534713'],
   },
+  // #188 round 2 (bun lane): recovered-on-retry in run 28607626868, finaled in
+  // 28612654960 with alternating cases — the runtime-prefetch family signature
+  // (no serving exception in the same run's surfaced server-log tails).
+  'test/e2e/app-dir/prefetch-true-instant/prefetch-true-instant.test.ts': {
+    cases: [
+      'prefetch={true} with instant route also disables full prefetch when instant is on a layout, not the page',
+      'prefetch={true} with instant route does not include dynamic content in the prefetch when the target route has instant',
+    ],
+    observedRuns: ['28612654960', '28607626868'],
+  },
 };
 
 describe('test/deploy-tests-manifest.knext.json — knext-observed flaky quarantines (#147 A3-3 final mile)', () => {
