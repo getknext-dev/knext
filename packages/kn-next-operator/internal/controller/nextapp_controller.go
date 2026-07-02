@@ -389,6 +389,18 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 			}
 			if nextApp.Spec.Cache.EnableBytecodeCache {
 				envVars = append(envVars, corev1.EnvVar{Name: "NODE_COMPILE_CACHE", Value: "/cache/bytecode/latest"})
+				// Bun analog of NODE_COMPILE_CACHE: Bun has no runtime bytecode
+				// cache (`bun build --bytecode` hard-fails on the Next standalone
+				// server), but its runtime transpiler cache persists transpiled
+				// modules ≥ ~50KB across cold starts. Measured on next@16.2.4
+				// standalone (Bun 1.3.5): warm cache ≈ -20% time-to-first-response;
+				// unwritable dir is fail-open. Same PVC as NODE_COMPILE_CACHE
+				// (mounted at /cache/bytecode), sibling dir so the two runtimes'
+				// artifacts never collide. Only meaningful under runtime=bun —
+				// NODE_COMPILE_CACHE stays set regardless (inert under Bun).
+				if nextApp.Spec.Runtime == "bun" {
+					envVars = append(envVars, corev1.EnvVar{Name: "BUN_RUNTIME_TRANSPILER_CACHE_PATH", Value: "/cache/bytecode/bun-transpiler"})
+				}
 			}
 		}
 		if nextApp.Spec.Revalidation != nil && nextApp.Spec.Revalidation.Queue != "" {

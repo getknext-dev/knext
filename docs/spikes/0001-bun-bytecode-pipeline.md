@@ -1,11 +1,32 @@
 # Spike Report: Bun Bytecode Pipeline for Native Next.js Standalone
 
+> **SUPERSEDED (2026-07) — re-measured; pipeline below dead, a different bytecode
+> mechanism shipped.** This spike's GO verdict rested on a proof-of-concept that only
+> read files from the compiled binary's VFS — it never booted the real standalone
+> server from a `--compile --bytecode` binary. Re-tested against a real `next@16.2.4`
+> `output:'standalone'` build (PR #193):
+>
+> - **Bundle/compile pipeline (this spike): NOT viable.** `bun build [--compile]
+>   --bytecode server.js` hard-fails at build time — the standalone output prunes
+>   dev-only modules that `next/dist/server/next.js` still `require()`s
+>   (`./dev/next-dev-server`, `./router-utils/setup-dev-bundler`), Bun's `--external`
+>   does not accept relative paths, and route chunks load via runtime-computed
+>   `require()` a static bundle cannot capture.
+> - **What shipped instead — per-file bytecode, graph untouched:** each server-side
+>   .js transformed individually (`bun build <file> --bytecode --target=bun
+>   --format=cjs --external '*'`), emitting a companion `.jsc` that Bun's runtime
+>   consumes on `require()` (hash-validated; stale/corrupt/version-mismatched `.jsc`
+>   falls back to source). Measured startup 287ms → **152ms median (-47%)**, N=12.
+>   Bun-only output (does not load under Node) → gated on `runtime: "bun"` in
+>   `kn-next build`. Plus Bun's runtime transpiler cache on the bytecode-cache PVC
+>   (`BUN_RUNTIME_TRANSPILER_CACHE_PATH`, ~20% alone, composes to 145ms). Node keeps
+>   `NODE_COMPILE_CACHE`.
+>
 > **HISTORICAL NOTE:** This spike was conducted during the Vinext/Nitro era as a
 > comparison path. The official Next.js Adapter + `output:'standalone'` is now the
-> knext runtime path. The Bun `--compile --bytecode` approach described here remains
-> a valid cold-start optimization technique but is not the primary deployment path.
+> knext runtime path.
 
-## Status: GO ✅
+## Status: ~~GO ✅~~ SUPERSEDED — see banner above
 
 ## Executive Summary
 This spike empirically proves that a Next.js application, built using the native `output: 'standalone'` mode, can be successfully compiled into a single, native binary using Bun's `--compile --bytecode` features. The key to achieving a single binary without a `node_modules` folder in the final image is to use Bun's asset embedding capabilities combined with Node File Trace (NFT).
