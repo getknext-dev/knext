@@ -453,6 +453,20 @@ const OBSERVED_FLAKY_QUARANTINES: Record<string, { cases: string[]; observedRuns
       ],
       observedRuns: ['28616072395', '28607626868'],
     },
+  // #188 final round (bun lane): first FINAL failure in run 28618585946
+  // (alternating cases across 3 attempts — the family signature, zero server
+  // exceptions); prior observation was a retry-absorbed 1-attempt wobble in
+  // run 28612654960. Quarantined only once the final-post-retry bar was met.
+  'test/e2e/app-dir/segment-cache/cached-navigations/cached-navigations.test.ts': {
+    cases: [
+      'cached navigations caches runtime-prefetchable content from a navigation for instant second visit',
+      'cached navigations defers fallback params to the runtime stage',
+      'cached navigations includes static params in the cached static stage',
+      'cached navigations serves cached static segments instantly on the second navigation',
+      'cached navigations caches static segments when navigating to a known route without a prefetch',
+    ],
+    observedRuns: ['28618585946', '28612654960'],
+  },
 };
 
 describe('test/deploy-tests-manifest.knext.json — knext-observed flaky quarantines (#147 A3-3 final mile)', () => {

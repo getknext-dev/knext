@@ -212,6 +212,15 @@
       "flakey": [
         "app-dir - server-actions-redirect-middleware-rewrite.test should redirect correctly in edge runtime with middleware rewrite"
       ]
+    },
+    "test/e2e/app-dir/segment-cache/cached-navigations/cached-navigations.test.ts": {
+      "flakey": [
+        "cached navigations caches runtime-prefetchable content from a navigation for instant second visit",
+        "cached navigations defers fallback params to the runtime stage",
+        "cached navigations includes static params in the cached static stage",
+        "cached navigations serves cached static segments instantly on the second navigation",
+        "cached navigations caches static segments when navigating to a known route without a prefetch"
+      ]
     }
   },
   "rules": {
@@ -366,6 +375,19 @@
       "mechanism": "60s jest timeout awaiting an EDGE-runtime server-action redirect through a middleware rewrite; zero assertion diffs and ZERO server-side exceptions in the surfaced server-log tails (run 28616072395). Cross-run wobble on the bun lane (fails/passes whole runs), so ledgered as flakey — but honestly noted: the hang shape overlaps the documented Bun ≤1.3.14 edge-sandbox outbound-fetch gap (next/dist/compiled/edge-runtime bundled-undici fetch never resolving; the middleware-rewrite proxy path exercises the same sandbox), which likely decides which runs lose the race. Re-examine when Bun ships the 1.4 fixes.",
       "evidence": "run 28616072395 (KNEXT_RUNTIME=bun, #188 round 3): FINAL failure, same case 3/3 attempts at 60000ms; run 28607626868 (first bun run): FINAL failure, same case (Bucket-2 investigate list); run 28612654960 (round 2): file PASSED — cross-run wobble, bun lane only (Node lane green).",
       "provenance": "Not in upstream's flakey ledger; bun-lane-only observation. Mechanism family: the Bun edge-sandbox outbound-fetch gap documented in PR #189 (middleware-fetches-with-any-http-method, app-static POST-fetch case) — the deterministic members of that family stay RED and unledgered; this case alone wobbles run-to-run."
+    },
+    {
+      "test": "test/e2e/app-dir/segment-cache/cached-navigations/cached-navigations.test.ts",
+      "cases": [
+        "cached navigations caches runtime-prefetchable content from a navigation for instant second visit",
+        "cached navigations defers fallback params to the runtime stage",
+        "cached navigations includes static params in the cached static stage",
+        "cached navigations serves cached static segments instantly on the second navigation",
+        "cached navigations caches static segments when navigating to a known route without a prefetch"
+      ],
+      "mechanism": "60s jest timeouts in createRouterAct-driven cached-navigation/runtime-prefetch flows, alternating per attempt (run 28618585946: att1 'defers fallback params…' + 'caches runtime-prefetchable content…' hung; att2 only 'caches runtime-prefetchable content…'; att3 'serves cached static segments…' + 'includes static params…' — cases that hung one attempt passed the next) — the runtime-prefetch family's interleaving-race signature, zero assertion diffs, ZERO server-side exceptions in the surfaced server-log tails.",
+      "evidence": "run 28618585946 (KNEXT_RUNTIME=bun, #188 round 3 verify): FIRST FINAL failure, alternating cases across 3 attempts; run 28612654960 (round 2): 1-attempt wobble ('caches static segments when navigating to a known route without a prefetch') then RECOVERED on in-run retry; earlier bun runs: file PASSED — cross-run wobble, quarantined only after the final-post-retry bar was met.",
+      "provenance": "Upstream marks the runtime-prefetch deploy family flakey wholesale (vercel/next.js@v16.2.0 test/deploy-tests-manifest.json, segment-cache/prefetch-runtime.test.ts, ~34 'runtime prefetching …' cases) — cached navigations exercise exactly that segment-cache runtime-prefetch scheduling mechanism."
     }
   ],
   "$knextExclusions": [
