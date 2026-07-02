@@ -49,9 +49,11 @@ spec:
         - name: compute
           # Stock Neon compute (native Postgres 17). Stateless — no tools needed
           # in-image: the slim entrypoint only seds IDs into the spec and execs
-          # compute_ctl. compute-node-v17:latest is pre-pulled; IfNotPresent so
-          # OrbStack's shared docker daemon serves it without a registry hit.
-          image: neondatabase/compute-node-v17:latest
+          # compute_ctl.
+          # PINNED: the compute must stay wire/format-compatible with the
+          # pinned storage plane (neondatabase/neon:8464) — upgrade them as a
+          # PAIR (see docs/operations.md "Upgrades"). Never :latest here.
+          image: neondatabase/compute-node-v17:8464
           imagePullPolicy: IfNotPresent
           command: ["/bin/sh", "/compute-files/entrypoint.sh"]
           envFrom:

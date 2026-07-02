@@ -22,7 +22,7 @@ ok() { echo "ok - $*"; }
 # the psql error): create, wait, read logs, delete.
 CLIENT() {
   P=pgclient-$$-$1
-  $K run "$P" --image=ks-pg-compute:8464 --image-pull-policy=Never \
+  $K run "$P" --image=neondatabase/compute-node-v17:8464 --image-pull-policy=Never \
     --restart=Never --quiet --command -- psql "$DSN" -tA -c "$2" >/dev/null
   $K wait --for=jsonpath='{.status.phase}'=Succeeded pod/$P --timeout=150s >/dev/null 2>&1 || true
   OUT=$($K logs "$P" 2>&1)

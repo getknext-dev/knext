@@ -97,8 +97,11 @@ kubectl -n scale-zero-pg logs -l app=pggw -f --prefix | grep 'gw]'
 
 - **Gateway**: build a new image, `rollout restart deploy/pggw` — zero client impact
   beyond dropped in-flight pipes (clients reconnect).
-- **Storage plane**: pinned to `neondatabase/neon:8464`. Treat upgrades as a real
-  change: bump the tag in `5X-*.yaml` on a throwaway cluster, run the full verify
-  battery, then promote. Never `:latest` for storage.
-- **Compute**: `neondatabase/compute-node-v17` — same procedure; the compute is
-  stateless so rollback is trivial.
+- **Compute ↔ storage are a version PAIR.** The compute (`compute-node-v17:8464`)
+  and storage plane (`neon:8464`) are built from the same Neon release and must be
+  upgraded together — the pageserver wire protocol and layer formats are internal
+  interfaces with no cross-version guarantee. Supported pair today: **8464 + 8464**.
+- **Upgrade procedure** (both images): bump both tags in `deploy/` on a throwaway
+  cluster, run the full verify battery, then promote. Never `:latest` anywhere.
+  The compute is stateless so its rollback is trivial; storage rollback is NOT
+  (layer formats may migrate forward) — snapshot PVCs/bucket before a storage bump.

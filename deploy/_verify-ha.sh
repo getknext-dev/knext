@@ -24,7 +24,7 @@ $K rollout status deploy/pggw --timeout=120s >/dev/null || fail "gateway not rea
 ok "2 gateway replicas ready"
 
 # 2. hold a connection across the idle window; compute must stay up
-$K run ha-holder --image=ks-pg-compute:8464 --image-pull-policy=Never \
+$K run ha-holder --image=neondatabase/compute-node-v17:8464 --image-pull-policy=Never \
   --restart=Never --quiet --command -- \
   psql "$DSN" -c "select pg_sleep($((IDLE_S + 45)))" >/dev/null &
 HOLDER=$!
@@ -42,7 +42,7 @@ ok "fleet quiet -> compute at zero"
 
 # 4. no SPOF: kill one gateway, connect again
 $K delete pod "$($K get pods -l app=pggw -o jsonpath='{.items[0].metadata.name}')" --wait=false >/dev/null
-OUT=$($K run ha-probe --image=ks-pg-compute:8464 --image-pull-policy=Never \
+OUT=$($K run ha-probe --image=neondatabase/compute-node-v17:8464 --image-pull-policy=Never \
   --restart=Never --rm -i --quiet --command -- psql "$DSN" -tA -c "select count(*) from t" | tail -1)
 [ "$OUT" = "3" ] || fail "connection failed after gateway pod kill (got: $OUT)"
 ok "gateway pod killed mid-flight; fresh connection still served (no SPOF)"
