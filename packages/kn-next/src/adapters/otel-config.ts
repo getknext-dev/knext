@@ -65,7 +65,11 @@ export function resolveOtelOptions(env: OtelEnv): OtelOptions | null {
     if (env.K_CONFIGURATION) {
         resourceAttributes["knative.configuration"] = env.K_CONFIGURATION;
     }
-    if (env.HOSTNAME) resourceAttributes["host.name"] = env.HOSTNAME;
+    // The knext runtime sanitizes the child's HOSTNAME (bind-address hazard,
+    // #178) and preserves the pod identity as KNEXT_POD_NAME — prefer it, so
+    // host.name is the real pod name rather than "" or a bind address.
+    const hostName = env.KNEXT_POD_NAME || env.HOSTNAME;
+    if (hostName) resourceAttributes["host.name"] = hostName;
 
     return { serviceName, endpoint, sampleRate, resourceAttributes };
 }
