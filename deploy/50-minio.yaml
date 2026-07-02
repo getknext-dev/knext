@@ -25,9 +25,14 @@ spec:
         - name: minio
           image: quay.io/minio/minio:RELEASE.2022-10-20T00-55-09Z # pinned as upstream compose
           args: ["server", "/data", "--address", ":9000", "--console-address", ":9001"]
+          # Root identity from the storage-s3-creds Secret (deploy/gen-secrets.sh),
+          # never plaintext YAML. Same creds double as the S3 key for the storage
+          # plane. Rotating requires MinIO's root-rotation flow — see gen-secrets.sh.
           env:
-            - { name: MINIO_ROOT_USER, value: minio }
-            - { name: MINIO_ROOT_PASSWORD, value: password } # dev creds; secretize for prod
+            - name: MINIO_ROOT_USER
+              valueFrom: { secretKeyRef: { name: storage-s3-creds, key: user } }
+            - name: MINIO_ROOT_PASSWORD
+              valueFrom: { secretKeyRef: { name: storage-s3-creds, key: password } }
           securityContext:
             allowPrivilegeEscalation: false
             capabilities: { drop: ["ALL"] }
@@ -87,10 +92,16 @@ spec:
       containers:
         - name: mc
           image: minio/mc
+          # Same Secret as the MinIO server — no plaintext creds in the Job.
+          env:
+            - name: MC_USER
+              valueFrom: { secretKeyRef: { name: storage-s3-creds, key: user } }
+            - name: MC_PASSWORD
+              valueFrom: { secretKeyRef: { name: storage-s3-creds, key: password } }
           command: ["/bin/sh", "-c"]
           args:
             - |
-              until mc alias set minio http://minio:9000 minio password; do
+              until mc alias set minio http://minio:9000 "$MC_USER" "$MC_PASSWORD"; do
                 echo 'waiting for minio...'; sleep 1;
               done
               mc mb --ignore-existing minio/neon --region=eu-north-1

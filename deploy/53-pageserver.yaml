@@ -64,9 +64,13 @@ spec:
           securityContext:
             allowPrivilegeEscalation: false
             capabilities: { drop: ["ALL"] }
+          # S3 creds from the storage-s3-creds Secret (deploy/gen-secrets.sh),
+          # never plaintext YAML.
           env:
-            - { name: AWS_ACCESS_KEY_ID, value: minio }
-            - { name: AWS_SECRET_ACCESS_KEY, value: password }
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom: { secretKeyRef: { name: storage-s3-creds, key: user } }
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom: { secretKeyRef: { name: storage-s3-creds, key: password } }
           ports:
             - { name: pg, containerPort: 6400 }
             - { name: http, containerPort: 9898 }
