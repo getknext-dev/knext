@@ -414,6 +414,43 @@ var _ = Describe("NextApp Controller reconcile output", func() {
 		})
 	})
 
+	Context("pod identity env (#184)", func() {
+		// The HOSTNAME=0.0.0.0 bind override clobbers kubelet's
+		// HOSTNAME=<pod-name>, and the operator can NOT restore the pod name
+		// via the downward API: valueFrom.fieldRef in ksvc env is
+		// feature-gated on stock Knative (`kubernetes.podspec-fieldref`,
+		// Disabled by default — serving pkg/apis/config/features.go), so the
+		// validation webhook would reject the Service on any cluster that
+		// hasn't opted in. The pod identity is instead recovered by the knext
+		// runtime from the kernel hostname (buildChildEnv → KNEXT_POD_NAME →
+		// otel host.name). envtest runs no Knative webhook, so this guard
+		// pins the DECISION: no env var may use valueFrom.
+		It("keeps HOSTNAME=0.0.0.0 and never emits downward-API (valueFrom) env", func() {
+			nn := reconcileOnce("pod-identity-env", appsv1alpha1.NextAppSpec{
+				Image: validImage,
+				Observability: &appsv1alpha1.ObservabilitySpec{
+					Enabled: true,
+					Tracing: &appsv1alpha1.TracingSpec{Enabled: true},
+				},
+			})
+			ksvc := &servingv1.Service{}
+			Expect(k8sClient.Get(ctx, nn, ksvc)).To(Succeed())
+			env := ksvc.Spec.Template.Spec.Containers[0].Env
+
+			By("keeping the HOSTNAME=0.0.0.0 bind override (defense-in-depth, #178)")
+			Expect(envValue(env, "HOSTNAME")).To(Equal("0.0.0.0"))
+
+			By("not injecting KNEXT_POD_NAME as a literal (a static value would lie about pod identity)")
+			Expect(envValue(env, "KNEXT_POD_NAME")).To(BeEmpty())
+
+			By("never using valueFrom/fieldRef — rejected by stock Knative validation")
+			for _, e := range env {
+				Expect(e.ValueFrom).To(BeNil(),
+					"env %q uses valueFrom — kubernetes.podspec-fieldref is Disabled by default on stock Knative; the webhook would reject this ksvc (#184)", e.Name)
+			}
+		})
+	})
+
 	Context("KafkaSource", func() {
 		It("is NOT created when Revalidation is unset", func() {
 			nn := reconcileOnce("kafka-off", appsv1alpha1.NextAppSpec{Image: validImage})
