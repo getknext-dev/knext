@@ -286,3 +286,10 @@ These four Fluid pillars map directly to this adapter's design. Configure them v
 | `fetch-cache/page.tsx` | Fetches `httpbin.org` at build time — fails when network is unavailable. Fixed with `export const dynamic = 'force-dynamic'`. |
 | `setCacheHandler` | Not exported from `next/cache` in 16.0.3. ISR caching uses the `cacheHandler` config field. `src/cache-init.ts` and `src/instrumentation.ts` guarded. |
 | `adapterPath` location | Must be under `experimental.adapterPath` (not root config). |
+
+> **Note (2026-07, next 16.2.10 bump):** the `adapterPath` row above is 16.0.3-era
+> evidence and is now inverted — `adapterPath` **graduated to top-level config at
+> Next.js 16.2** (the loader auto-migrates the old `experimental` key with a
+> warning, and the app's own build type-check rejects it). `next.config.ts` in
+> this app now sets it at the top level. Kept as-is above as a historical record
+> of the 16.0.3 behavior.

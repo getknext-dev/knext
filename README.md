@@ -49,7 +49,7 @@ Built on the **official Next.js Adapter API** with `output: 'standalone'` — no
 
 ## How It Works: Next.js Adapter
 
-kn-next integrates via the **official Next.js Adapter API** (`NextAdapter`), registered through `experimental.adapterPath`. A standard `next build` with `output: 'standalone'` produces a self-contained Node server; the adapter hooks into the build to wire Knative-specific behavior — no custom compiler, no fork of Next.js.
+kn-next integrates via the **official Next.js Adapter API** (`NextAdapter`), registered through the top-level `adapterPath` config (Next.js 16.2+; on 16.0.x–16.1.x it lives under `experimental.adapterPath`). A standard `next build` with `output: 'standalone'` produces a self-contained Node server; the adapter hooks into the build to wire Knative-specific behavior — no custom compiler, no fork of Next.js.
 
 ### Build Pipeline
 

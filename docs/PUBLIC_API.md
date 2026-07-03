@@ -42,12 +42,17 @@ The official Next.js deployment adapter. Wire it into your Next.js config so the
 build produces a knext-deployable output.
 
 ```ts
-import adapter from '@knext/core/adapter';
-
+// next.config.ts — Next.js 16.2+ (adapterPath is top-level config)
 export default {
-  experimental: { adapterPath: '@knext/core/adapter' },
+  adapterPath: '@knext/core/adapter',
 };
 ```
+
+On Next.js 16.0.x–16.1.x the option lives under `experimental` instead
+(`experimental: { adapterPath: '@knext/core/adapter' }`). The 16.2+ config
+loader auto-migrates the old `experimental` key (with a warning), but 16.0.x
+does **not** recognize the top-level form — match the form to your Next.js
+version.
 
 Signature: `default` export — a Next.js deployment adapter object.
 

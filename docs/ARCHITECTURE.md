@@ -2,7 +2,7 @@
 
 ## Overview
 
-This framework enables deploying Next.js applications as Knative services on GKE with Fluid Compute characteristics. It uses the **official Next.js Deployment Adapter API** (`experimental.adapterPath`) with `output:'standalone'` to produce a self-contained Node.js server, while providing pluggable adapters for storage, caching, and messaging.
+This framework enables deploying Next.js applications as Knative services on GKE with Fluid Compute characteristics. It uses the **official Next.js Deployment Adapter API** (top-level `adapterPath` config on Next.js 16.2+; `experimental.adapterPath` on 16.0.x–16.1.x) with `output:'standalone'` to produce a self-contained Node.js server, while providing pluggable adapters for storage, caching, and messaging.
 
 ## System Architecture
 
@@ -39,7 +39,7 @@ flowchart TB
 
 ### 1. Official Next.js Adapter (`output:'standalone'`)
 
-`next build` with `output:'standalone'` and `experimental.adapterPath` produces:
+`next build` with `output:'standalone'` and `adapterPath` (top-level at Next.js 16.2+; under `experimental` on 16.0.x–16.1.x) produces:
 
 ```text
 .next/

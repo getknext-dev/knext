@@ -10,7 +10,8 @@ passes the official compatibility suite + listed in the Next.js docs. **Do not**
 Nitro/Vinext (deprecated epic #11 path).
 
 ## The `NextAdapter` interface
-Registered via `experimental.adapterPath` in `next.config.ts`, or `NEXT_ADAPTER_PATH` env
+Registered via the top-level `adapterPath` in `next.config.ts` (Next.js 16.2+; under
+`experimental` on 16.0.x-16.1.x), or `NEXT_ADAPTER_PATH` env
 (zero-config for platforms). knext's lives at `apps/file-manager/next-adapter.ts`.
 ```ts
 import type { NextAdapter } from 'next';
