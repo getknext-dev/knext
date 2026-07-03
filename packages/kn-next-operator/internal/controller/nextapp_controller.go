@@ -43,6 +43,7 @@ import (
 
 	appsv1alpha1 "github.com/AhmedElBanna80/knext/packages/kn-next-operator/api/v1alpha1"
 	"github.com/AhmedElBanna80/knext/packages/kn-next-operator/internal/validation"
+	"knative.dev/pkg/apis"
 	servingv1 "knative.dev/serving/pkg/apis/serving/v1"
 )
 
@@ -68,6 +69,31 @@ const (
 // converges toward the ksvc's real health even if a status event is missed.
 const ksvcNotReadyRequeueAfter = 30 * time.Second
 
+// Ingress-programming stall detection (#208). When the cluster's configured
+// ingress-class matches NO installed ingress controller (e.g. the short-form
+// drift `kourier.knative.dev` vs the class net-kourier actually serves), Knative
+// Serving leaves the Route's KIngress unreconciled FOREVER — no error, only an
+// Unknown `IngressNotConfigured` condition on the ksvc ("Ingress has not yet
+// been reconciled."). That reads as "wait longer", which is exactly the silent
+// trap. After a bounded window we call it a stall and surface it loudly.
+const (
+	// ingressProgrammingStallWindow is how long IngressNotConfigured may persist
+	// before the operator flags it as a misconfiguration rather than startup
+	// latency. Real ingress programming completes in seconds; two minutes is far
+	// past any healthy path while still tolerating slow controller cold starts.
+	ingressProgrammingStallWindow = 2 * time.Minute
+
+	// ksvcIngressNotConfiguredReason is the exact reason Knative Serving's route
+	// lifecycle sets when no ingress controller has reconciled the KIngress
+	// (serving/pkg/apis/serving/v1/route_lifecycle.go MarkIngressNotConfigured).
+	ksvcIngressNotConfiguredReason = "IngressNotConfigured"
+
+	// kourierServedIngressClass is the class net-kourier's reconciler actually
+	// filters on (net-kourier pkg/reconciler/ingress/config/config.go
+	// KourierIngressClassName). NOT the short `kourier.knative.dev` form.
+	kourierServedIngressClass = "kourier.ingress.networking.knative.dev"
+)
+
 // Event reason constants — concise, stable strings surfaced via `kubectl describe nextapp`.
 const (
 	// ReasonInvalidImage marks a NextApp rejected for failing digest-pinning (e.g. :latest).
@@ -84,6 +110,11 @@ const (
 	// (#186). Warning, not error: the reconcile proceeds, but the user must be
 	// able to see via `kubectl describe nextapp` why their flag didn't land.
 	ReasonEnvVarIgnored = "EnvVarIgnored"
+	// ReasonIngressNotProgrammed marks a NextApp whose route has sat in
+	// IngressNotConfigured past the stall window — i.e. NO ingress controller
+	// reconciles the cluster's configured ingress-class, so the app will never
+	// become reachable without operator action (#208).
+	ReasonIngressNotProgrammed = "IngressNotProgrammed"
 )
 
 // NextAppReconciler reconciles a NextApp object
@@ -98,6 +129,32 @@ type NextAppReconciler struct {
 	// exact scoped delete and the cross-app safety guard. May be nil (skips
 	// external cleanup) for unit tests of unrelated paths.
 	Cleaner ExternalCleaner
+}
+
+// ingressProgrammingStalled reports whether the child Knative Service's route
+// has been waiting on an unreconciled KIngress (reason IngressNotConfigured)
+// for longer than ingressProgrammingStallWindow. It checks RoutesReady first
+// (the condition that directly carries the ingress state) and falls back to the
+// rolled-up Ready condition. Deliberately narrow: it does NOT try to discover
+// which ingress controllers are installed or what class they serve — it only
+// converts Knative's indefinitely-pending state into a bounded, loud signal.
+func ingressProgrammingStalled(ksvc *servingv1.Service, now time.Time) (time.Duration, bool) {
+	for _, condType := range []apis.ConditionType{
+		servingv1.ServiceConditionRoutesReady,
+		servingv1.ServiceConditionReady,
+	} {
+		cond := ksvc.Status.GetCondition(condType)
+		if cond == nil || cond.IsTrue() || cond.Reason != ksvcIngressNotConfiguredReason {
+			continue
+		}
+		if cond.LastTransitionTime.Inner.IsZero() {
+			continue
+		}
+		if elapsed := now.Sub(cond.LastTransitionTime.Inner.Time); elapsed >= ingressProgrammingStallWindow {
+			return elapsed, true
+		}
+	}
+	return 0, false
 }
 
 // emitEvent records a Kubernetes Event on the NextApp when a recorder is wired.
@@ -743,13 +800,45 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 				ksvcMessage = ksvcReadyCond.Message
 			}
 		}
+		readyReason := "KnativeServiceNotReady"
+		readyMessage := fmt.Sprintf("Knative Service is not Ready (%s): %s",
+			ksvcReason, ksvcMessage)
+		// Loud failure on silent ingress stalls (#208): Knative's own message
+		// ("Ingress has not yet been reconciled.") reads as "wait longer" even
+		// when NO ingress controller serves the configured class and the route
+		// will never program. Past the window, replace the opaque pending state
+		// with a specific reason + Warning event naming the likely fix.
+		//
+		// Churn guards: the condition message is STATIC ("for more than <window>")
+		// — embedding the live elapsed would make every 30s requeue produce a new
+		// message, defeating the #98 no-op status guard with a status write +
+		// self-watch echo per requeue. The live elapsed goes in the EVENT only,
+		// and the event fires only on TRANSITION into the stall (the previous
+		// Ready reason wasn't already IngressNotProgrammed), not on every pass.
+		if elapsed, stalled := ingressProgrammingStalled(ksvc, time.Now()); stalled {
+			readyReason = ReasonIngressNotProgrammed
+			ksvcReason = ReasonIngressNotProgrammed
+			readyMessage = fmt.Sprintf(
+				"route programming has stalled: the Knative Route's ingress (KIngress) has been "+
+					"unreconciled for more than %s (%s). This usually means no ingress controller "+
+					"serves the cluster's configured ingress-class — check the `ingress-class` key in "+
+					"the config-network ConfigMap (knative-serving namespace); on Knative-Operator-managed "+
+					"clusters the KnativeServing CR overwrites that ConfigMap, so fix the class in the CR. "+
+					"net-kourier serves %q (NOT the short `kourier.knative.dev` form).",
+				ingressProgrammingStallWindow, ksvcIngressNotConfiguredReason, kourierServedIngressClass)
+			ksvcMessage = readyMessage
+			prevReady := apimeta.FindStatusCondition(nextApp.Status.Conditions, ConditionReady)
+			if prevReady == nil || prevReady.Reason != ReasonIngressNotProgrammed {
+				r.emitEvent(&nextApp, corev1.EventTypeWarning, ReasonIngressNotProgrammed,
+					fmt.Sprintf("%s (stalled for %s)", readyMessage, elapsed.Round(time.Second)))
+			}
+		}
 		apimeta.SetStatusCondition(&nextApp.Status.Conditions, metav1.Condition{
 			Type:               ConditionReady,
 			Status:             metav1.ConditionFalse,
 			ObservedGeneration: nextApp.Generation,
-			Reason:             "KnativeServiceNotReady",
-			Message: fmt.Sprintf("Knative Service is not Ready (%s): %s",
-				ksvcReason, ksvcMessage),
+			Reason:             readyReason,
+			Message:            readyMessage,
 		})
 		apimeta.SetStatusCondition(&nextApp.Status.Conditions, metav1.Condition{
 			Type:               ConditionDegraded,
