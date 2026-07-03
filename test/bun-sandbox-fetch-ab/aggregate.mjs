@@ -45,6 +45,24 @@ function pct(hangs, total) {
   return total === 0 ? 'n/a' : `${hangs}/${total} (${Math.round((hangs / total) * 100)}%)`;
 }
 
+/**
+ * Per-lane outcome tally across ALL probes (#197 gate follow-up): a lane whose
+ * probes fail FAST (client-error, never reaching the 15s timeout) has a 0% hang
+ * rate for the wrong reason — the breakdown makes that visible so the negative
+ * verdict is never read as exoneration without checking WHAT the probes did.
+ */
+function outcomeCounts(data) {
+  const counts = { resolved: 0, 'client-error': 0, timeout: 0, other: 0, total: 0 };
+  for (const trial of data.perTrial) {
+    for (const r of trial.results) {
+      counts.total += 1;
+      if (r.outcome in counts) counts[r.outcome] += 1;
+      else counts.other += 1;
+    }
+  }
+  return counts;
+}
+
 function main() {
   const node = load(arg('node'));
   const bun = load(arg('bun'));
@@ -85,6 +103,25 @@ function main() {
     `| **ALL** | ${pct(totalNode.hangs, totalNode.total)} | ${pct(totalBun.hangs, totalBun.total)} |`,
   );
   lines.push('');
+
+  // Per-lane outcome breakdown (#197 gate follow-up): the hang-rate table alone
+  // can't distinguish "bun never hangs" from "bun's probes error out before they
+  // could hang" — surface every outcome class per lane.
+  const nodeOutcomes = outcomeCounts(node);
+  const bunOutcomes = outcomeCounts(bun);
+  lines.push('### Outcome breakdown (all probes, per lane)');
+  lines.push('');
+  lines.push('| Lane | resolved | client-error | timeout | other | total |');
+  lines.push('|---|---|---|---|---|---|');
+  for (const [lane, c] of [
+    ['node', nodeOutcomes],
+    ['bun', bunOutcomes],
+  ]) {
+    lines.push(
+      `| ${lane} | ${c.resolved} | ${c['client-error']} | ${c.timeout} | ${c.other} | ${c.total} |`,
+    );
+  }
+  lines.push('');
   lines.push('### Discrimination criterion');
   lines.push('');
   lines.push(
@@ -99,6 +136,18 @@ function main() {
       ? '**VERDICT: DISCRIMINATES — bun-hangs/node-clean under controlled conditions. This transcript is the filing evidence (attach it to the [REQUIRED] slot in docs/compat/upstream-bun-sandbox-fetch-bug.md).**'
       : '**VERDICT: DOES NOT DISCRIMINATE — the repro does not attribute the hang to Bun under controlled conditions. Do NOT file; record the result honestly in docs/compat/upstream-bun-sandbox-fetch-bug.md and pursue path 2 (instrument a red CI shard).**',
   );
+  // A negative verdict from a fast-failing lane is NOT exoneration: a probe that
+  // errored in milliseconds never got the chance to hang, so its 0% hang rate
+  // carries no evidence. Qualify the verdict whenever non-timeout errors exist.
+  const errored = (c) => c['client-error'] + c.other;
+  if (!discriminates && (errored(nodeOutcomes) > 0 || errored(bunOutcomes) > 0)) {
+    lines.push('');
+    lines.push(
+      `**CAUTION: ${errored(nodeOutcomes)} node / ${errored(bunOutcomes)} bun probe(s) ` +
+        'errored without reaching the hang timeout — a fast-failing lane can mask a hang. ' +
+        'Inspect the outcome breakdown above before treating this verdict as exoneration.**',
+    );
+  }
   lines.push('');
   console.log(lines.join('\n'));
 }

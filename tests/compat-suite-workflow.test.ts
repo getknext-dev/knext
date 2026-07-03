@@ -2531,15 +2531,20 @@ describe('compat-suite red-alert dedup lookup limits (test-e2e-deploy.yml, #187 
     }
   });
 
-  it('the lookup is parameterized on the lane title, so BOTH lane titles get the hardened lookup (#187 item 6)', () => {
+  it('EVERY lookup is parameterized on the lane title, so BOTH lane titles get the hardened lookup (#187 item 6)', () => {
     const lookups = ghIssueListInvocations();
     // The job selects on the shell `title` variable (set per lane above the
     // lookup) — one hardened invocation serving both 'Compat nightly RED' and
-    // 'Compat weekly RED (bun lane)'. A second, unparameterized lookup would
-    // dodge the limit fix for one lane.
-    expect(
-      lookups.some((cmd) => /\$\{?title\}?/.test(cmd) || /\$\{title\}/.test(alertJob())),
-      'the gh issue list lookup must select on the per-lane ${title} variable',
-    ).toBe(true);
+    // 'Compat weekly RED (bun lane)'. #194 gate follow-up: the old assertion
+    // (`some(...) || ${title} anywhere in the job`) was near-tautological — an
+    // unparameterized SECOND lookup could slip past it. Now every single
+    // gh issue list invocation must itself select on ${title}.
+    expect(lookups.length, 'expected at least one gh issue list lookup').toBeGreaterThan(0);
+    for (const cmd of lookups) {
+      expect(
+        /\$\{title\}/.test(cmd),
+        `every gh issue list lookup must select on the per-lane \${title} variable, got: "${cmd.trim()}"`,
+      ).toBe(true);
+    }
   });
 });

@@ -4,7 +4,7 @@ import { NextResponse } from 'next/server';
 // (test/e2e/middleware-fetches-with-any-http-method at v16.2.0) — see
 // docs/compat/upstream-bun-sandbox-fetch-bug.md. The ONE deliberate change vs
 // the doc's repro app: the echo endpoint is a CONTROLLED LOCAL HTTPS server
-// (run-trials.mjs boots it on 127.0.0.1:8443 with a self-signed CA passed via
+// (run-trials.mjs boots it on 127.0.0.1:8743 with a self-signed CA passed via
 // NODE_EXTRA_CA_CERTS), because the 2026-07-03 local campaign proved the WAN
 // endpoint is a confound. TLS stays in the path (it was implicated in the CI
 // signature); the IP literal avoids a dual-stack localhost-resolution confound.

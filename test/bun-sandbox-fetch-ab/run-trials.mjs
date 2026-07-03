@@ -50,6 +50,12 @@ if (runtime !== 'node' && runtime !== 'bun') {
   console.error(`--runtime must be node|bun, got "${runtime}"`);
   process.exit(2);
 }
+// #197 gate follow-up: a NaN/0 trials value would silently skip the trial loop
+// and write an EMPTY artifact that aggregates to a vacuous verdict. Fail loud.
+if (!Number.isInteger(trials) || trials < 1) {
+  console.error(`--trials must be an integer >= 1, got "${arg('trials', '10')}"`);
+  process.exit(2);
+}
 const scriptDir = resolve(import.meta.dirname);
 const standaloneServer = join(fixtureDir, '.next/standalone/server.js');
 

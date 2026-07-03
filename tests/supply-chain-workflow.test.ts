@@ -209,6 +209,9 @@ describe('supply-chain workflow: nothing is published before the Trivy gate (#19
     const signIdx = stepIndex(SIGN_RE);
     const verifyIdx = stepIndex(VERIFY_RE);
     expect(verifyIdx, 'expected a cosign verify step').toBeGreaterThanOrEqual(0);
+    // #203 gate follow-up (same class as the operator sibling): stepIndex()
+    // returns -1 on a missing step — assert existence before order.
+    expect(signIdx, 'expected a cosign sign step').toBeGreaterThanOrEqual(0);
     expect(signIdx, 'verify must come after sign').toBeLessThan(verifyIdx);
     const verify = stepBlock(VERIFY_RE);
     expect(
@@ -266,9 +269,12 @@ describe('buildkit provenance is restored without weakening the gate (#202)', ()
       /sha256sum\s+(-c|--check)/.test(stripComments(crane)),
       'the crane install must verify the checksum (sha256sum -c) before installing',
     ).toBe(true);
-    expect(stepIndex(/CRANE_VERSION/), 'crane must be installed before the push step').toBeLessThan(
-      stepIndex(PUSH_RE),
-    );
+    // #203 gate follow-up: assert existence before order (-1 passes vacuously).
+    const craneIdx = stepIndex(/CRANE_VERSION/);
+    const pushIdx = stepIndex(PUSH_RE);
+    expect(craneIdx, 'expected a crane install step (CRANE_VERSION)').toBeGreaterThanOrEqual(0);
+    expect(pushIdx, 'expected an explicit push step (crane push)').toBeGreaterThanOrEqual(0);
+    expect(craneIdx, 'crane must be installed before the push step').toBeLessThan(pushIdx);
   });
 
   it('the SBOM is generated from the same OCI layout blobs (oci-dir source), not the docker daemon', () => {
@@ -287,13 +293,16 @@ describe('buildkit provenance is restored without weakening the gate (#202)', ()
       'expected a post-push provenance check step (crane manifest → attestation-manifest)',
     ).not.toBe('');
     const checkIdx = stepIndex(PROV_CHECK_RE);
-    expect(checkIdx, 'the provenance check must come after the push').toBeGreaterThan(
-      stepIndex(PUSH_RE),
-    );
+    // #203 gate follow-up: assert existence before order (-1 passes vacuously).
+    const pushIdx = stepIndex(PUSH_RE);
+    const signIdx = stepIndex(SIGN_RE);
+    expect(pushIdx, 'expected an explicit push step (crane push)').toBeGreaterThanOrEqual(0);
+    expect(signIdx, 'expected a cosign sign step').toBeGreaterThanOrEqual(0);
+    expect(checkIdx, 'the provenance check must come after the push').toBeGreaterThan(pushIdx);
     expect(
       checkIdx,
       'the provenance check must gate signing (sign only provenance-bearing images)',
-    ).toBeLessThan(stepIndex(SIGN_RE));
+    ).toBeLessThan(signIdx);
     const content = stripComments(check);
     expect(
       /if:\s*github\.ref\s*==\s*'refs\/heads\/main'/.test(check),

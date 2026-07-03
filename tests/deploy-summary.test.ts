@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 // The summary generator exposes a pure parse function so it is unit-testable
 // without invoking the workflow. It turns raw `run-tests.js` stdout into the
 // machine-readable summary the compat-matrix publisher (#41) consumes.
@@ -748,5 +748,55 @@ describe('summarize() runtimeVersion attribution (#188 bun-version knob)', () =>
       runtimeVersion: '1.3.14\n',
     });
     expect(s.runtimeVersion).toBe('1.3.14');
+  });
+});
+
+// ── #194 accepted-risk follow-up: warn when truncation detection is disabled ──
+// Truncation protection rests on run-tests.js's `total: N` log header; a future
+// harness ref that renames it FAILS OPEN silently (expectedTotal omitted, no
+// truncated flag, a killed shard can read as green). The smallest honest signal:
+// summarize() WARNS (never fails) when the run-tests path yields no expected
+// total. Per-suite jest runs legitimately have no selection count — no warning.
+describe('summarize() warns when a run-tests-path summary lacks expectedTotal (#194 follow-up)', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  const deployLogNoHeader = `
+Starting test/e2e/a/a.test.ts retry 0/2
+test/e2e/a/a.test.ts finished on retry 0/2 in 1.0s
+`;
+
+  it('WARNS (not fails) when per-file markers are present but no `total:` header / override exists', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const s = summarize(deployLogNoHeader, { ref: 'v16.2.0', shard: '1/16', excluded: 0 });
+    // Fail-open behavior is unchanged (keys omitted), but no longer SILENT.
+    expect(Object.keys(s)).not.toContain('expectedTotal');
+    expect(Object.keys(s)).not.toContain('truncated');
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(warn.mock.calls[0][0])).toMatch(/truncation detection/i);
+  });
+
+  it('does not warn when the `total:` header is present', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    summarize(`total: 1\n${deployLogNoHeader}`, { ref: 'v16.2.0', shard: '1/16', excluded: 0 });
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it('does not warn when an explicit --expected-total override is given', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    summarize(deployLogNoHeader, {
+      ref: 'v16.2.0',
+      shard: '1/16',
+      excluded: 0,
+      expectedTotal: 1,
+    });
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it('does not warn on the per-suite jest-tally path (no selection count exists there)', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    summarize(SAMPLE_RUNNER_OUTPUT, { ref: 'v16.0.3', shard: '1/4', excluded: 7 });
+    expect(warn).not.toHaveBeenCalled();
   });
 });
