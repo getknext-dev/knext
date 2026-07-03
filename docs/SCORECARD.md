@@ -40,13 +40,24 @@ was not separately scored before iteration 2 (marked —).
 | **6** | System designer | **7** | **7** | **6** |
 | **6** | DevOps/SRE | **7** | **7** | **6** |
 | **6** | Architect | **7** | **6** | **7** |
+| **7** | System designer | **7** | **7** | **6** |
+| **7** | DevOps/SRE | **7.5** | **7** | **6.7** |
+| **7** | Architect | **8** | **7** | **7** |
 
 **Iteration-1 mean (mapped axes): ease 6.0, reliability 4.7** (round 0: 4.3, 3.7).
 **Iteration-2 mean (explicit metrics): maturity 4.7, ease 4.3, reliability 3.7.**
 **Iteration-3 mean: maturity 6.3, ease 6.7, reliability 5.3**
 **Iteration-4 mean: maturity 6.3, ease 5.7, reliability 5.7**
 **Iteration-5 mean: maturity 7.0, ease 6.0, reliability 6.0**
-**Iteration-6 mean: maturity 7.0, ease 6.7, reliability 6.3** — all-time high on
+**Iteration-6 mean: maturity 7.0, ease 6.7, reliability 6.3**
+**Iteration-7 mean: maturity 7.5, ease 7.0, reliability 6.6** — the arc-closing
+row. The correctness lap found NO live defect; the DevOps reviewer ran the full
+battery from docs alone (all green) and rendered the milestone verdict: "I would
+carry this pager for real money TODAY for the stated MVP scope." All three
+reviewers ruled GRADUATE: per-iteration reviews end; a blind trio re-convenes on
+release tags, ADR changes, kill-criterion tripwires, or a failing upgrade
+rehearsal (#36). Graduation condition: #60 (alerting dead-man's-switch) closes
+on/around graduation. Owner ratification pending. — all-time high on
 every axis. Observability debt closed (KSM + exact-join rules + presence check,
 paged end-to-end by the reviewer). Named residue: the silent-machinery class is
 ~2/3 closed (#48 KSM self-guard, #49 janitor-stale, #51 readiness) and the
