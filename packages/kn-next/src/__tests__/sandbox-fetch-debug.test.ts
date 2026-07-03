@@ -7,16 +7,19 @@
  * reductions failed to discriminate — path 1 didn't even reproduce (0/80).
  * Path 2 instruments a red shard IN THE FULL HARNESS.
  *
- * Mechanism (verified locally under node 24 AND bun 1.3.x against the
- * published next@16.2.0 tarball): Next's edge sandbox fetch is the undici
- * bundled into next/dist/compiled/@edge-runtime/primitives/fetch.js, which
- * runs HOST-side over require("net")/require("tls") and publishes the standard
- * `undici:request:*` / `undici:client:*` diagnostics channels through the HOST
- * `require("diagnostics_channel")`. A `-r` preload in the standalone server
- * process therefore observes every sandbox fetch's phase transitions
- * (create → beforeConnect → connected → sendHeaders → bodySent → headers →
- * trailers) — under bun too, whose native fetch does NOT publish these
- * channels, so on the bun lane every `undici:*` event IS sandbox traffic.
+ * Mechanism — post-calibration truth (run 28657820369 + the local A/B; full
+ * record in docs/compat/upstream-bun-sandbox-fetch-bug.md, path-2 section):
+ * the module subscribes the standard `undici:request:*` / `undici:client:*`
+ * diagnostics channels via the host `diagnostics_channel`, and the deploy
+ * script CHAIN-BOOTS the standalone server.js THROUGH it (never `bun -r` —
+ * bun's proven bug: preload-graph subscriptions never register for the main
+ * program). UNDER NODE this observes every sandbox fetch phase (create →
+ * beforeConnect → connected → sendHeaders → bodySent → headers → trailers).
+ * UNDER BUN the calibration DISPROVED the original hypothesis: even a
+ * successful sandbox fetch emits ZERO undici events (and zero
+ * BUN_CONFIG_VERBOSE_FETCH output — it is not bun-native fetch either); the
+ * invisibility mechanism is not yet isolated, so on the bun lane this module
+ * delivers the calibrated null, not phase transcripts.
  *
  * Hard constraints tested here:
  *   - strictly opt-in: KNEXT_SANDBOX_FETCH_DEBUG must be EXACTLY '1';
@@ -247,11 +250,34 @@ describe("sandbox-fetch-debug — entry chain-loading (the bun -r quirk workarou
         expect(out).toContain("CHAINED-SERVER-BOOTED");
     });
 
-    it("does NOT chain-require when loaded as a library (require.main is someone else)", () => {
-        // this vitest process HAS the module loaded (see the top of this file)
-        // with no chain target — nothing exploded, and the export surface is
-        // intact. A sentinel env var set now must not trigger a require either
-        // (the chain gate is require.main === module, checked at load time).
-        expect(typeof mod.install).toBe("function");
+    it("does NOT chain-require when loaded as a LIBRARY, even with the chain env set (behavioral)", () => {
+        // Spawn a fresh process whose MAIN module is a driver that require()s the
+        // debug module as a library, with BOTH env vars set. The chain gate is
+        // require.main === module — the driver is main, so the fake server must
+        // NOT boot. (A regression here would double-require server.js whenever
+        // any tooling imports the module in a debug-configured environment.)
+        const { execFileSync } = require("node:child_process");
+        const { mkdtempSync, writeFileSync } = require("node:fs");
+        const { tmpdir } = require("node:os");
+        const { join } = require("node:path");
+        const dir = mkdtempSync(join(tmpdir(), "sandbox-fetch-debug-lib-"));
+        const chained = join(dir, "fake-server.cjs");
+        writeFileSync(chained, "console.log('CHAINED-SERVER-BOOTED');\n");
+        const driver = join(dir, "driver.cjs");
+        writeFileSync(
+            driver,
+            `require(${JSON.stringify(MODULE_PATH)});\nconsole.log('LIBRARY-LOAD-OK');\n`,
+        );
+        const out = execFileSync(process.execPath, [driver], {
+            encoding: "utf8",
+            env: {
+                ...process.env,
+                KNEXT_SANDBOX_FETCH_DEBUG: "1",
+                KNEXT_SANDBOX_FETCH_DEBUG_SERVER_JS: chained,
+            },
+            stdio: ["ignore", "pipe", "pipe"],
+        });
+        expect(out).toContain("LIBRARY-LOAD-OK");
+        expect(out).not.toContain("CHAINED-SERVER-BOOTED");
     });
 });

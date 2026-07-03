@@ -119,7 +119,7 @@ class once the WAN is removed.** Two consequences:
    cheaper intermediate probe: extend the A/B workflow with a WAN-endpoint knob and/or a
    long-lived-server many-request mode to test (a)/(b) directly on the same infra.
 
-## Path 2 (2026-07-03): instrument a red shard IN THE FULL HARNESS — executed; host-realm observation is bun-blocked (a NEW bun bug), sandbox fetch ≠ bun-native fetch
+## Path 2 (2026-07-03): instrument a red shard IN THE FULL HARNESS — executed; host-side observation of the sandbox fetch is bun-blocked (+ a NEW isolated `bun -r` dc bug), sandbox fetch ≠ bun-native fetch
 
 Path 1's clean 0/80 moved the mechanism into whatever the minimal reduction omits
 (WAN endpoint / pool state / harness-scale load). Path 2 therefore instruments the
@@ -132,15 +132,19 @@ weekly bun lane stay byte-identical).
 **What the instrumentation is** (`packages/kn-next/src/adapters/sandbox-fetch-debug.cjs`,
 `@knext/core/internal/sandbox-fetch-debug`):
 
-- Ground truth established against the published `next@16.2.0` tarball: the edge
-  sandbox's `fetch` is the undici bundled into
-  `next/dist/compiled/@edge-runtime/primitives/fetch.js` (~780 KB). That bundle
-  executes **host-side** (the `node:vm` context receives host-created functions),
-  reaches the network through the host's `require("net")`/`require("tls")` —
-  i.e. **bun's node-compat sockets on the bun lane** — and publishes the standard
-  undici diagnostics channels (`undici:request:create|bodySent|headers|trailers|error`,
-  `undici:client:beforeConnect|connected|connectError|sendHeaders`) through the
-  host `require("diagnostics_channel")`.
+- Pre-run ground-truth probe against the published `next@16.2.0` tarball: the
+  edge sandbox's `fetch` is the undici bundled into
+  `next/dist/compiled/@edge-runtime/primitives/fetch.js` (~780 KB), reaching
+  the network through `require("net")`/`require("tls")` — i.e. **bun's
+  node-compat sockets on the bun lane** — and publishing the standard undici
+  diagnostics channels (`undici:request:create|bodySent|headers|trailers|error`,
+  `undici:client:beforeConnect|connected|connectError|sendHeaders`) through
+  `require("diagnostics_channel")`. **SUPERSEDED IN PART by the results below:**
+  the "executes host-side, so a main-graph host subscriber observes it under
+  bun" inference held for a DIRECT require of the primitives bundle, but the
+  REAL server's sandbox fetch proved invisible to that subscriber under bun
+  (conclusions 1–2 in the results section) — the execution-locus claim is
+  downgraded to hypothesis; the channel list and the socket layer stand.
 - The debug module subscribes those channels in the server process and logs one
   timestamped `[sandbox-fetch-debug]` line per phase, plus a watchdog that names
   the **last seen phase** of any request in-flight >20s (pool-queue stall vs
@@ -203,20 +207,28 @@ subscribers and to bun's native-fetch verbosity. Three hard conclusions:
 
 1. **The sandbox fetch under bun is NOT bun's native fetch** (verbose-fetch
    control). It is the undici bundled into next's edge-runtime, running over
-   bun's node-compat `net`/`tls` inside the sandbox realm — that stack is where
-   the CI hang lives, and the keep-alive/pool hypothesis class stays live.
-2. **Bun defect class isolated (new, independently fileable): diagnostics_channel
-   subscriber state is realm-local under bun, process-global under node.** Two
-   observables: (a) the `-r` preload repro above (3 lines, deterministic,
-   bun 1.3.x: `hasSubscribers === false` on the main side for a preload-made
-   subscription, identical module object); (b) publishes from the
-   sandbox-evaluated undici never reach main-realm subscribers, under bun only
-   (mechanism inferred from (a); the observable is the table above).
+   bun's node-compat `net`/`tls` (execution locus — host graph vs sandbox
+   context — not yet pinned; see conclusion 2's scope precision) — that stack
+   is where the CI hang lives, and the keep-alive/pool hypothesis class stays
+   live.
+2. **Bun defect isolated (new, independently fileable): `bun -r` preload-graph
+   `diagnostics_channel` subscriptions never register for the main program**
+   (node: process-global, works). The proven observable is (a): the `-r`
+   repro above — 3 lines, deterministic, bun 1.3.x, `hasSubscribers === false`
+   on the main side for a preload-made subscription, identical module object.
+   **Scope precision (review counter-probe):** a `node:vm`-realm publish (host
+   `require` passed into the context) IS delivered to host subscribers under
+   bun — so the defect is **preload-graph-local, NOT vm-realm-local**; do not
+   overstate it as "realm-local". Observable (b) — publishes from the real
+   server's sandbox fetch never reach main-graph subscribers, under bun only
+   (the table above) — therefore has a **not-yet-isolated mechanism**: it is
+   NOT explained by (a) alone, and the vm counter-probe rules out the simple
+   vm-realm story too.
 3. **Path 2's instrument-from-outside design is structurally blocked under
-   bun** by (2): no host-side preload can ever see the sandbox undici's phases
-   on the runtime where the hang happens. The instrumentation itself is
-   correct — the node lane shows the full lifecycle through the identical
-   wiring.
+   bun** by observable (b): a main-graph host subscriber does not see the
+   sandbox undici's phases on the runtime where the hang happens. The
+   instrumentation itself is correct — the node lane shows the full lifecycle
+   through the identical wiring.
 
 ### Path 3 (what a deeper probe needs)
 
@@ -229,10 +241,14 @@ subscribers and to bun's native-fetch verbosity. Three hard conclusions:
   diagnostics_channel subscriber INSIDE the sandbox realm so the bundled
   undici's phases become visible in-realm and can be logged out through a
   host-side function handle.
-- **Or unblock path 2 upstream first:** file the diagnostics_channel
-  realm-locality bug against oven-sh/bun with the 3-line `-r` repro — it is
-  deterministic, discriminating (node clean), and fixing it would make the
-  existing instrumentation work as designed on the bun lane.
+- **Or file the isolated bun bug upstream:** the **`bun -r` preload-graph
+  diagnostics_channel subscription loss** — lead with the 3-line `-r` repro
+  (deterministic, node-clean, module-identity confirmed) and frame it as
+  preload-graph-local, NOT "realm-local" (the vm counter-probe disproves the
+  broader framing). NOTE the honest limit: fixing it unblocks `-r`-based
+  tooling but does NOT by itself explain observable (b) (the sandbox-fetch
+  invisibility has a separate, unisolated mechanism), so path 3's in-realm
+  instrumentation remains the route to the hang itself.
 
 ## Repro app (the vehicle for a future discriminating attempt)
 
@@ -360,11 +376,12 @@ To become fileable, one of:
 2. **Instrument a red CI shard** (packet capture / `strace` around the hung middleware fetch)
    to name the syscall-level difference. **EXECUTED 2026-07-03 (the path-2 section above,
    run 28657820369): the harness-scale instrumentation worked, the red reproduced (7/7),
-   but host-realm observation is structurally blocked under bun — its diagnostics_channel
-   subscriber state is realm-local (a NEW, independently fileable bun bug with a 3-line
-   repro), and the sandbox fetch is proven NOT to be bun-native fetch. Next: path 3
-   (in-realm instrumentation) and/or file the diagnostics_channel bug to unblock path 2's
-   design.**
+   but host-side observation of the sandbox fetch is structurally blocked under bun
+   (observable (b), mechanism unisolated). Along the way a NEW, independently fileable
+   bun bug was isolated — `bun -r` preload-graph diagnostics_channel subscriptions never
+   register for the main program (3-line repro; preload-graph-local, NOT vm-realm-local
+   per the vm counter-probe) — and the sandbox fetch is proven NOT to be bun-native
+   fetch. Next: path 3 (in-realm instrumentation) and/or file the `-r` bug.**
 3. Failing both, file with **suite-level** evidence only ("Next.js's official e2e deploy tests
    X and Y hang under `bun server.js`, pass under `node server.js`; six-run record") and be
    explicit that the standalone reduction does not yet transfer — weakest option, last resort;

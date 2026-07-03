@@ -1,6 +1,7 @@
 /**
  * #188 path 2 — edge-sandbox fetch instrumentation. A dependency-free
- * CommonJS preload (`node -r` / `bun -r`) for the Next.js standalone server,
+ * CommonJS module the deploy script boots the Next.js standalone server
+ * THROUGH (chain-load entry — never `bun -r`; see MECHANISM below),
  * STRICTLY OPT-IN: it does nothing at all unless KNEXT_SANDBOX_FETCH_DEBUG is
  * exactly '1' (flipped only by the compat workflow's dispatch-only
  * `sandboxFetchDebug` input — never by a schedule).
@@ -13,14 +14,27 @@
  * discriminate; path 1 didn't even reproduce (0/80 hangs). So path 2
  * instruments the red shard IN THE FULL HARNESS.
  *
- * MECHANISM (verified locally under node 24 and bun 1.3.x against the
- * published next@16.2.0 tarball): the edge sandbox's fetch is the undici
- * bundled into next/dist/compiled/@edge-runtime/primitives/fetch.js. That
- * bundle executes HOST-side (the vm context receives host-created functions),
- * uses the host's require("net")/require("tls") (bun's node-compat sockets on
- * the bun lane), and publishes the STANDARD undici diagnostics channels
- * through the host require("diagnostics_channel"). A preload in the server
- * process therefore observes every sandbox fetch phase:
+ * MECHANISM — what is PROVEN vs what the path-2 calibration DISPROVED (run
+ * 28657820369 + the local calibration; full record in
+ * docs/compat/upstream-bun-sandbox-fetch-bug.md, path-2 section):
+ *
+ * - This module subscribes the STANDARD undici diagnostics channels via the
+ *   host diagnostics_channel. Host-side dc subscription works under bun ONLY
+ *   when this module sits in the MAIN require graph — which is why the
+ *   deploy script CHAIN-BOOTS server.js through this file instead of `-r`:
+ *   the proven bun bug is that `bun -r` PRELOAD-GRAPH subscriptions never
+ *   register for the main program (3-line repro in the doc).
+ * - UNDER NODE this observes every sandbox fetch phase (verified end-to-end
+ *   against the real next@16.2.0 standalone server: the full 7-phase
+ *   lifecycle per middleware fetch).
+ * - UNDER BUN it does NOT: the calibration showed that even a SUCCESSFUL
+ *   middleware (sandbox) fetch emits ZERO undici:* events to this subscriber
+ *   — and zero BUN_CONFIG_VERBOSE_FETCH output, so the sandbox fetch is not
+ *   bun-native fetch either. The mechanism of that invisibility is NOT yet
+ *   isolated (a direct require of the primitives fetch bundle DOES publish
+ *   to a main-graph subscriber under bun; the real server's sandbox fetch
+ *   does not — do not restate the pre-finding "a preload observes every
+ *   sandbox fetch phase under bun too" hypothesis as fact).
  *
  *   undici:request:create        dispatcher accepted the request
  *   undici:client:beforeConnect  about to open a TCP/TLS connection
@@ -33,11 +47,11 @@
  *   undici:request:error         request failed
  *
  * The last seen phase of a request that never completes NAMES where the hang
- * lives (pool queue vs connect vs awaiting-response vs body streaming) — the
- * discrimination every reduction so far has missed. Lane asymmetry is a
- * feature: bun's NATIVE fetch does not publish undici:* channels, so on the
- * bun lane every event here is bundled-undici (sandbox) traffic; on the node
- * lane node's own global undici also publishes, and lines are origin-labeled.
+ * lives (pool queue vs connect vs awaiting-response vs body streaming). That
+ * discrimination works on the NODE lane today; on the BUN lane it is blocked
+ * by the invisibility above (path 3 in the doc: in-realm instrumentation),
+ * so this module's bun-lane value is the calibrated null itself plus the
+ * bun-native-fetch exclusion.
  *
  * A watchdog (unref'd — never keeps the process alive) reports requests
  * in-flight beyond STALL_MS with their last phase, plus a rate-limited
