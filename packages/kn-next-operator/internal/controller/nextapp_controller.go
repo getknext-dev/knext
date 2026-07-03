@@ -808,19 +808,30 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 		// when NO ingress controller serves the configured class and the route
 		// will never program. Past the window, replace the opaque pending state
 		// with a specific reason + Warning event naming the likely fix.
+		//
+		// Churn guards: the condition message is STATIC ("for more than <window>")
+		// — embedding the live elapsed would make every 30s requeue produce a new
+		// message, defeating the #98 no-op status guard with a status write +
+		// self-watch echo per requeue. The live elapsed goes in the EVENT only,
+		// and the event fires only on TRANSITION into the stall (the previous
+		// Ready reason wasn't already IngressNotProgrammed), not on every pass.
 		if elapsed, stalled := ingressProgrammingStalled(ksvc, time.Now()); stalled {
 			readyReason = ReasonIngressNotProgrammed
 			ksvcReason = ReasonIngressNotProgrammed
 			readyMessage = fmt.Sprintf(
 				"route programming has stalled: the Knative Route's ingress (KIngress) has been "+
-					"unreconciled for %s (%s). This usually means no ingress controller serves the "+
-					"cluster's configured ingress-class — check the `ingress-class` key in the "+
-					"config-network ConfigMap (knative-serving namespace); on Knative-Operator-managed "+
+					"unreconciled for more than %s (%s). This usually means no ingress controller "+
+					"serves the cluster's configured ingress-class — check the `ingress-class` key in "+
+					"the config-network ConfigMap (knative-serving namespace); on Knative-Operator-managed "+
 					"clusters the KnativeServing CR overwrites that ConfigMap, so fix the class in the CR. "+
 					"net-kourier serves %q (NOT the short `kourier.knative.dev` form).",
-				elapsed.Round(time.Second), ksvcIngressNotConfiguredReason, kourierServedIngressClass)
+				ingressProgrammingStallWindow, ksvcIngressNotConfiguredReason, kourierServedIngressClass)
 			ksvcMessage = readyMessage
-			r.emitEvent(&nextApp, corev1.EventTypeWarning, ReasonIngressNotProgrammed, readyMessage)
+			prevReady := apimeta.FindStatusCondition(nextApp.Status.Conditions, ConditionReady)
+			if prevReady == nil || prevReady.Reason != ReasonIngressNotProgrammed {
+				r.emitEvent(&nextApp, corev1.EventTypeWarning, ReasonIngressNotProgrammed,
+					fmt.Sprintf("%s (stalled for %s)", readyMessage, elapsed.Round(time.Second)))
+			}
 		}
 		apimeta.SetStatusCondition(&nextApp.Status.Conditions, metav1.Condition{
 			Type:               ConditionReady,

@@ -156,6 +156,49 @@ var _ = Describe("NextApp loud failure on stalled ingress programming (#208)", f
 			By("Asserting the bounded requeue is preserved so the stall keeps re-evaluating")
 			Expect(res.RequeueAfter).To(BeNumerically(">", 0))
 		})
+
+		It("does not spam events or churn status on repeated reconciles while stalled", func() {
+			nn := createAndReconcile("ingress-stall-repeat")
+
+			By("Back-dating an IngressNotConfigured stall past the window")
+			markKsvcIngressNotConfigured(nn, ingressProgrammingStallWindow+3*time.Minute)
+
+			recorder := record.NewFakeRecorder(64)
+			r := &NextAppReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Recorder: recorder}
+
+			By("Reconciling twice while the stall persists")
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+
+			afterFirst := &appsv1alpha1.NextApp{}
+			Expect(k8sClient.Get(ctx, nn, afterFirst)).To(Succeed())
+			firstReady := findCondition(afterFirst.Status.Conditions, conditionTypeReady)
+			Expect(firstReady).NotTo(BeNil())
+			Expect(firstReady.Reason).To(Equal(ReasonIngressNotProgrammed))
+
+			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+
+			By("Asserting exactly ONE Warning IngressNotProgrammed event (transition-only, no 30s spam)")
+			stallEvents := 0
+			for _, e := range drainEvents(recorder) {
+				if strings.Contains(e, "Warning") && strings.Contains(e, ReasonIngressNotProgrammed) {
+					stallEvents++
+				}
+			}
+			Expect(stallEvents).To(Equal(1),
+				"the stall alarm must fire on TRANSITION into the stall, not on every requeue")
+
+			By("Asserting the second reconcile performed NO status write (static message, #98 no-op guard holds)")
+			afterSecond := &appsv1alpha1.NextApp{}
+			Expect(k8sClient.Get(ctx, nn, afterSecond)).To(Succeed())
+			secondReady := findCondition(afterSecond.Status.Conditions, conditionTypeReady)
+			Expect(secondReady).NotTo(BeNil())
+			Expect(secondReady.Message).To(Equal(firstReady.Message),
+				"the condition message must be STATIC — a growing elapsed would defeat the no-op guard")
+			Expect(afterSecond.ResourceVersion).To(Equal(afterFirst.ResourceVersion),
+				"a converged stalled object must not be re-written every requeue (self-watch churn)")
+		})
 	})
 
 	Context("when IngressNotConfigured is fresh (within the stall window)", func() {
