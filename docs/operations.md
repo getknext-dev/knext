@@ -468,3 +468,27 @@ kubectl -n scale-zero-pg logs -l app=pggw -f --prefix | grep 'gw]'
   (layer formats may migrate forward) — take an on-demand backup before a storage
   bump (`kubectl -n scale-zero-pg create job backup-now --from=cronjob/backup`; see
   "Backup & disaster recovery").
+- **skctl format coupling — a THIRD version-coupled artifact.** `deploy/skctl.py`
+  hand-writes the safekeeper's on-disk `safekeeper.control` struct (magic
+  `0xcafeceef`, **format version 9**, CRC32C trailer) reverse-engineered from
+  `neon:8464`. Writable restore (`deploy/_restore-writable.sh`) depends on it. The
+  compute↔storage version-pair check cannot see this coupling, so it is guarded
+  separately: `skctl.py` pins `SK_CONTROL_VERSION = 9` and `SK_COMPAT_NEON_TAG =
+  "8464"`, `deploy/_validate.sh` fails CI if that tag ever drifts from the pinned
+  `neon:` tag, and `deploy/test_skctl.py` (CI job `skctl`) proves the serializer
+  round-trips a **real** neon:8464 control file byte-identically.
+  **On any `neon:` tag bump you MUST re-validate this format** as part of the
+  upgrade procedure, or writable restore will silently craft a structurally-wrong
+  control file (a "successful" restore that is subtly corrupt):
+  1. Dump a control file from a safekeeper running the **new** image:
+     `kubectl exec safekeeper-0 -- cat /data/<tenant>/<timeline>/safekeeper.control > new.control`
+     and confirm the version byte still reads 9 — quick check:
+     `python3 deploy/skctl.py checkver --file new.control` (aborts loudly if not v9).
+  2. Refresh the test fixture (`deploy/testdata/safekeeper.control.real`) with the
+     new dump and run `python3 -m unittest discover -s deploy -p 'test_skctl.py'`.
+     If the round-trip still passes, bump `SK_COMPAT_NEON_TAG` to the new tag.
+  3. If the version is **not** 9 (or the round-trip fails), the on-disk struct
+     changed: skctl must be re-reverse-engineered against the new format before the
+     upgrade ships. Prefer adopting neon's first-class safekeeper timeline-import
+     HTTP API (see "Upgrade carrot" above), which retires the hand-rolled serializer
+     entirely.

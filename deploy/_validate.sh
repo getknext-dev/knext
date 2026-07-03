@@ -157,3 +157,17 @@ grep -q 'remote_consistent_lsn' 62-backup.yaml || fail "62 wal-janitor must deri
 grep -q 'partial' 62-backup.yaml || fail "62 wal-janitor must exclude .partial WAL (the live durability tail)"
 grep -q 'index_part.json' 62-backup.yaml || fail "62 backup must verify pageserver index integrity post-mirror (issue #21)"
 ok "wal-janitor bounds safekeeper WAL (issue #19) + backup self-heals torn index (issue #21)"
+
+# 17. contract: skctl.py's safekeeper.control serializer is COUPLED to the neon
+#     on-disk format (magic cafeceef, format v9) reverse-engineered from a
+#     specific neon image (issue #22). The version-pair check above guards the
+#     compute<->storage tag; this guards the SECOND version-coupled artifact the
+#     pair check cannot see. A neon tag bump that does not re-validate
+#     safekeeper.control and update skctl's recorded compat tag MUST fail CI —
+#     otherwise writable restore silently crafts a structurally-wrong control
+#     file, surfacing only in an actual disaster.
+SKTAG=$(grep -oE 'SK_COMPAT_NEON_TAG[[:space:]]*=[[:space:]]*"[a-z0-9.]+"' skctl.py | head -1 | sed -E 's/.*"([a-z0-9.]+)".*/\1/')
+[ -n "$SKTAG" ] || fail "skctl.py missing SK_COMPAT_NEON_TAG (issue #22 format-coupling gate)"
+grep -qE 'SK_CONTROL_VERSION[[:space:]]*=[[:space:]]*9\b' skctl.py || fail "skctl.py SK_CONTROL_VERSION drifted from the reverse-engineered v9"
+[ "$SKTAG" = "$CT" ] || fail "skctl format coupling: skctl.py targets neon:$SKTAG but the plane pins neon:$CT — re-validate safekeeper.control (dump one from neon:$CT, run deploy/test_skctl.py against it) and bump SK_COMPAT_NEON_TAG (docs/operations.md 'skctl format coupling')"
+ok "skctl.py safekeeper.control (v9) coupled to pinned neon:$CT (issue #22)"

@@ -31,6 +31,20 @@ jobs:
       - name: validate manifests (server dry-run + contracts)
         run: sh deploy/_validate.sh
 
+  # skctl.py is the reverse-engineered safekeeper.control (de)serializer that
+  # writable restore depends on. It hand-packs a binary struct (magic cafeceef,
+  # format v9, CRC32C) — a silent regression ships a subtly-corrupt restore.
+  # This job guards byte-identity against a REAL neon:8464 control file plus the
+  # magic/version/crc rejection paths (issues #22, #24). Stdlib only, no cluster.
+  skctl:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - name: skctl serializer round-trip + version-guard tests
+        run: python3 -m unittest discover -s deploy -p 'test_skctl.py' -v
+
   # Full e2e (storage plane + wake loop) is heavy for CI; run on demand.
   e2e:
     if: contains(github.event.head_commit.message, '[e2e]')
