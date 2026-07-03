@@ -6,8 +6,11 @@ on the same tests/infra/endpoint) says something Bun-specific is wrong. But a 20
 local reproduction campaign (details below) could **not** produce a standalone repro that
 discriminates Bun from Node — in the test environment the same middleware fetches
 intermittently hang under Node too. An upstream report whose repro also hangs under Node
-would be dismissed on arrival. Filing is blocked on a discriminating repro; a draft skeleton
-is kept at the bottom. Filing is a maintainer decision — never filed automatically.
+would be dismissed on arrival. A 2026-07-03 GHA-hosted controlled A/B (same runner class as
+the CI evidence, WAN eliminated — see its section below) went further: the minimal repro
+does not hang under EITHER runtime there (0/40 vs 0/40), so the reduction not only fails to
+discriminate, it fails to reproduce. Filing is blocked on a discriminating repro; a draft
+skeleton is kept at the bottom. Filing is a maintainer decision — never filed automatically.
 
 ## The finding (CI-grade evidence)
 
@@ -71,6 +74,50 @@ docker-linux, Next.js 16.2.0 standalone) looked like a clean Bun-only POST-hang 
 
 What this does NOT undermine: the CI A/B above (six runs, two lanes, deterministic red on the
 bun lane only) remains valid — it is simply not yet portable to a standalone repro script.
+
+## GHA-hosted controlled A/B (2026-07-03) — path 1 executed: does NOT discriminate (does not even reproduce)
+
+Path 1 from the verdict section ("move the A/B where the discrimination already exists") was
+executed: `.github/workflows/bun-sandbox-fetch-ab.yml` (dispatch-only investigation tool) runs
+the minimal repro app below on the SAME runner class as the compat lanes (`ubuntu-latest`,
+no docker), `runtime: [node, bun]`, 10 fresh-server-boot trials per runtime × the 4 probe
+shapes, against a **controlled local HTTPS echo** on `127.0.0.1` (self-signed CA via
+`NODE_EXTRA_CA_CERTS` — WAN eliminated, TLS kept in the path; TLS failures would surface as
+500s/client errors, never miscounted as hangs). Probe client, trial driver, and echo server
+always run under node — the serving runtime is the only variable. Fixture pins `next@16.2.0`
+exactly (the version behind the 6/6 CI record); bun lane pinned `1.3.14` (ditto).
+
+Result — run [28650729775](https://github.com/getknext-dev/knext/actions/runs/28650729775)
+(node v24.18.0 vs bun 1.3.14, probe timeout 15s):
+
+| Shape | node hangs | bun hangs |
+|---|---|---|
+| GET normal-fetch | 0/10 (0%) | 0/10 (0%) |
+| POST normal-fetch | 0/10 (0%) | 0/10 (0%) |
+| GET new-request | 0/10 (0%) | 0/10 (0%) |
+| POST new-request | 0/10 (0%) | 0/10 (0%) |
+| **ALL** | **0/40 (0%)** | **0/40 (0%)** |
+
+Every one of the 80 middleware fetches resolved (max 303ms), with the echo's JSON in
+`x-resolved` — the sandboxed fetch genuinely traversed HTTPS to the local endpoint under both
+runtimes. **The discrimination criterion (bun ≥50% hangs on some shape while node ≤5%) is not
+met — and stronger: the minimal repro does not reproduce the hang AT ALL on the CI runner
+class once the WAN is removed.** Two consequences:
+
+1. **Still not fileable.** The oven-sh report stays blocked; the [REQUIRED] repro slot below
+   stays empty. Path 1 is spent.
+2. **The CI-lane divergence needs a different explanation.** The clean 0/80 says the failure
+   mechanism is NOT "bun + Next 16.2.0 edge-sandbox middleware fetch + HTTPS" in isolation.
+   Candidate hypotheses, in order of plausibility given the data: (a) the **WAN echo endpoint**
+   (`next-data-api-endpoint.vercel.app`) interacting with bun's connection handling — the
+   documented bun keep-alive/pool class overlaps this mechanism (see the keep-alive finding +
+   `bun-keepalive-guard.cjs`); a fresh-boot 4-probe pattern never stresses pool reuse the way a
+   long-lived suite server does; (b) **harness-scale conditions** — the deploy harness keeps one
+   server serving hundreds of requests across many test files with concurrent in-flight
+   fetches, vs 4 sequential probes here; (c) the harness's jest/next-test client behavior.
+   Next diagnostic step is the verdict section's **path 2** (instrument a red CI shard); a
+   cheaper intermediate probe: extend the A/B workflow with a WAN-endpoint knob and/or a
+   long-lived-server many-request mode to test (a)/(b) directly on the same infra.
 
 ## Repro app (the vehicle for a future discriminating attempt)
 
@@ -190,11 +237,18 @@ To become fileable, one of:
 1. **Move the A/B where the discrimination already exists:** a minimal GHA workflow (ubuntu
    runner, no docker port-forwarding) booting the repro app N times per runtime and counting
    hangs — if it shows bun-hangs/node-clean there, that transcript IS the filing evidence.
+   **EXECUTED 2026-07-03 (`.github/workflows/bun-sandbox-fetch-ab.yml`, run 28650729775) —
+   it does NOT: 0/40 hangs under bun AND 0/40 under node with the WAN removed** (full table
+   in the GHA-hosted A/B section above). Path spent; the minimal reduction is clean on the
+   CI runner class, so the divergence lives in something the reduction omits (WAN endpoint /
+   pool state, harness-scale load — see the hypotheses above).
 2. **Instrument a red CI shard** (packet capture / `strace` around the hung middleware fetch)
-   to name the syscall-level difference.
+   to name the syscall-level difference. **← now the primary path.**
 3. Failing both, file with **suite-level** evidence only ("Next.js's official e2e deploy tests
    X and Y hang under `bun server.js`, pass under `node server.js`; six-run record") and be
-   explicit that the standalone reduction does not yet transfer — weakest option, last resort.
+   explicit that the standalone reduction does not yet transfer — weakest option, last resort;
+   after path 1's clean 0/80 this option is weaker still, since we now hold controlled
+   evidence that the minimal mechanism is NOT bun-broken in isolation.
 
 ## Issue draft skeleton (oven-sh/bun) — DO NOT FILE until a discriminating repro exists
 
@@ -213,7 +267,9 @@ To become fileable, one of:
 >
 > **Repro:** [REQUIRED — attach the discriminating repro transcript from a controlled
 > environment: repro app + N-runs-per-runtime hang counts showing bun-hangs/node-clean.
-> Until that exists this report must not be filed.]
+> Until that exists this report must not be filed. Path-1 attempt 2026-07-03 (GHA-hosted
+> A/B, local HTTPS echo, run 28650729775) produced 0/40 hangs on BOTH runtimes — the
+> minimal reduction does not reproduce; this slot cannot be filled from it.]
 >
 > **Impact:** Next.js middleware / edge routes that make outbound requests (auth token
 > exchanges, webhooks, revalidation pings) stall when the app is served with Bun.

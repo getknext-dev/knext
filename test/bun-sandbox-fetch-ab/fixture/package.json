@@ -1,0 +1,10 @@
+{
+  "name": "bun-sandbox-fetch-ab-fixture",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "next": "16.2.0",
+    "react": "^19",
+    "react-dom": "^19"
+  }
+}
