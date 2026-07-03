@@ -27,13 +27,6 @@ name: Bun sandbox fetch A/B (investigation)
 # ─────────────────────────────────────────────────────────────────────────────
 
 on:
-  # TEMPORARY bootstrap trigger: GitHub does not register a dispatch-only
-  # workflow that exists only on a feature branch (the dispatch API 404s), so
-  # the first investigation run rides the push event with the input defaults
-  # (10 trials, bun 1.3.14). REMOVED in the next commit — the workflow is
-  # dispatch-only by design.
-  push:
-    branches: [agent/compat-bun-sandbox-fetch-ab]
   workflow_dispatch:
     inputs:
       trials:
