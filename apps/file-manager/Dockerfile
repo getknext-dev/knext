@@ -68,6 +68,18 @@ ENV PORT=3000
 # it as a defensive fallback for any code path that prefers a global libvips. (#66 AC#3.)
 RUN apk add --no-cache curl vips
 
+# Strip the package managers from the RUNTIME image (#199). The standalone server
+# never runs npm/corepack/yarn (the CMD is a bare `node`), and node:alpine's BUNDLED
+# npm ships dependencies Trivy rightly flags in the image we sign — sigstore 3.1.0
+# (CVE-2026-48815, HIGH) and picomatch 4.0.3 (CVE-2026-33671, HIGH) under
+# /usr/local/lib/node_modules/npm. Removing them clears those findings and shrinks
+# the runtime surface without touching the app dependency tree. (The builder stage
+# keeps its npm/pnpm — it never ships.) Guarded by tests/supply-chain-workflow.test.ts.
+RUN rm -rf /usr/local/lib/node_modules/npm \
+    /usr/local/lib/node_modules/corepack \
+    /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack \
+    /opt/yarn* /usr/local/bin/yarn /usr/local/bin/yarnpkg
+
 # node:22-alpine already ships a non-root `node` user/group at uid/gid 1000;
 # recreating it fails ("group 'node' in use"). Reuse the existing user.
 

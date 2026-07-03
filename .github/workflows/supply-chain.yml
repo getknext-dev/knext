@@ -3,6 +3,14 @@ name: Supply Chain
 # B2 (security.md "Supply chain — the open security milestone"):
 # SBOM per image · scan + FAIL on HIGH/CRITICAL · sign (cosign keyless) + SBOM attestation.
 # Build/scan run on every PR; push + sign only on main (no signing throwaway PR images).
+#
+# ORDERING INVARIANT (#199): build (local) → SBOM → Trivy gate → push → sign → verify.
+# The image is built into the LOCAL docker store and scanned there; it is pushed to
+# GHCR only AFTER the Trivy HIGH/CRITICAL gate passes, and cosign signs the digest of
+# the image that was actually pushed. A scan-failed image is therefore never pullable
+# at a stable tag and never signed. (The previous flow pushed on main BEFORE the scan,
+# so a Trivy failure left an unscanned, UNSIGNED digest as the newest published
+# file-manager image.) Guarded by tests/supply-chain-workflow.test.ts.
 
 on:
   pull_request:
@@ -40,17 +48,11 @@ jobs:
       - name: Compute SOURCE_DATE_EPOCH (commit time)
         run: echo "SOURCE_DATE_EPOCH=$(git log -1 --pretty=%ct)" >> "$GITHUB_ENV"
 
-      - name: Log in to GHCR
-        if: github.ref == 'refs/heads/main'
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      # On PRs: build + load locally for scanning (no push).
-      # On main: build + push by digest so we can sign the exact pushed image.
-      - name: Build image
+      # Build into the LOCAL docker store on every ref — never push here. The
+      # Trivy gate below scans this local image; publication (main only) happens
+      # in the explicit push step AFTER the gate. This is what guarantees a
+      # scan-failed image is never pullable at a stable tag (#199).
+      - name: Build image (local only — pushed after the Trivy gate)
         id: build
         uses: docker/build-push-action@v6
         with:
@@ -58,11 +60,14 @@ jobs:
           file: apps/file-manager/Dockerfile
           platforms: linux/amd64
           tags: ${{ env.IMAGE }}:${{ github.sha }}
-          load: ${{ github.ref != 'refs/heads/main' }}
-          push: ${{ github.ref == 'refs/heads/main' }}
-          # provenance emits a manifest list the `load` (docker) exporter can't handle,
-          # so only attach it on the push/main path (registry exporter).
-          provenance: ${{ github.ref == 'refs/heads/main' }}
+          load: true
+          # provenance emits a manifest list the `load` (docker) exporter can't
+          # handle, so the buildkit provenance attestation is dropped in this
+          # scan-before-push flow. Deliberate trade-off: the gate ordering matters
+          # more than the (best-effort) provenance manifest; cosign SBOM
+          # attestation + keyless signing below still cover attestations.
+          # Honest status: docs/security/threat-model.md (Repudiate row).
+          provenance: false
           # Reproducible-build best effort: pass SOURCE_DATE_EPOCH (commit time) so a
           # future timestamp-rewriting build can be deterministic. We deliberately do
           # NOT yet claim fully reproducible builds — pnpm/npm install ordering and
@@ -97,6 +102,34 @@ jobs:
           ignore-unfixed: true
           format: table
 
+      # ── Everything below runs ONLY after the Trivy gate passed ──────────────
+
+      - name: Log in to GHCR
+        if: github.ref == 'refs/heads/main'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Publish the EXACT bytes that were scanned: `docker push` the locally
+      # built + gated image (no rebuild — a rebuild could diverge from what
+      # Trivy approved). Capture the pushed manifest digest as the step output
+      # that parameterizes signing + verification below; fail loud if it can't
+      # be resolved (we must never sign a guessed digest).
+      - name: Push image (main only, after the Trivy gate)
+        if: github.ref == 'refs/heads/main'
+        id: push
+        run: |
+          docker push "${IMAGE}:${GITHUB_SHA}"
+          DIGEST="$(docker inspect --format='{{range .RepoDigests}}{{println .}}{{end}}' "${IMAGE}:${GITHUB_SHA}" | grep "^${IMAGE}@" | head -n1 | cut -d'@' -f2)"
+          if [ -z "${DIGEST}" ]; then
+            echo "::error::could not resolve the pushed digest for ${IMAGE}:${GITHUB_SHA} — refusing to sign"
+            exit 1
+          fi
+          echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
+          echo "Pushed ${IMAGE}@${DIGEST}"
+
       - name: Install cosign
         if: github.ref == 'refs/heads/main'
         uses: sigstore/cosign-installer@v3
@@ -105,8 +138,8 @@ jobs:
         if: github.ref == 'refs/heads/main'
         env:
           COSIGN_EXPERIMENTAL: "1"
+          DIGEST: ${{ steps.push.outputs.digest }}
         run: |
-          DIGEST="${{ steps.build.outputs.digest }}"
           cosign sign --yes "${IMAGE}@${DIGEST}"
           cosign attest --yes --predicate sbom.spdx.json --type spdxjson "${IMAGE}@${DIGEST}"
 
@@ -119,5 +152,5 @@ jobs:
         if: github.ref == 'refs/heads/main'
         env:
           IDENTITY_REGEXP: https://github.com/${{ github.repository }}/.*
-          DIGEST: ${{ steps.build.outputs.digest }}
+          DIGEST: ${{ steps.push.outputs.digest }}
         run: bash apps/file-manager/hack/cosign-verify.sh "${IMAGE}@${DIGEST}"
