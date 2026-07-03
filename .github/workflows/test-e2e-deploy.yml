@@ -64,6 +64,24 @@ on:
         required: false
         type: string
         default: 'latest'
+      # #188 path 2 — the edge-sandbox fetch investigation knob. The bun lane
+      # is deterministically red on middleware-fetches-with-any-http-method
+      # (6/6 runs) while node is green on identical infra, and neither the
+      # local nor the GHA-hosted minimal reduction discriminates (path 1:
+      # 0/80 hangs, run 28650729775). This input instruments a red shard IN
+      # THE FULL HARNESS: scripts/e2e-deploy.sh preloads a diagnostics_channel
+      # subscriber into the standalone server (the sandbox's bundled undici
+      # publishes undici:* through the host diagnostics_channel — verified
+      # under bun) and exports BUN_CONFIG_VERBOSE_FETCH on the bun runtime;
+      # e2e-cleanup.sh ships the instrumentation at teardown. DISPATCH-ONLY
+      # and DEFAULT OFF (guard-tested): the nightly Node credential lane and
+      # the weekly bun lane never run instrumented — github.event.inputs is
+      # empty on schedule events, so the env expression below yields ''.
+      sandboxFetchDebug:
+        description: '#188 path 2 — instrument edge-sandbox fetch (diagnostics_channel preload + BUN_CONFIG_VERBOSE_FETCH). Dispatch-only; schedules never enable it.'
+        required: false
+        type: boolean
+        default: false
   schedule:
     # 03:17 UTC nightly — off-peak; the run takes the better part of an hour.
     # This is the NODE lane: the compat-matrix credential (docs/compat-matrix.md).
@@ -100,6 +118,11 @@ env:
   # credential lane). Keep the cron literal in sync with the schedule block
   # above — guard-tested in tests/compat-suite-workflow.test.ts.
   KNEXT_RUNTIME: ${{ github.event.inputs.runtime || (github.event.schedule == '17 5 * * 0' && 'bun') || 'node' }}
+  # #188 path 2 — dispatch input ONLY, never a schedule branch: on schedule
+  # events github.event.inputs is empty, so this is '' (off) on the nightly
+  # AND the weekly bun lane. '1' is the exact value scripts/e2e-deploy.sh
+  # gates on. Guard-tested in tests/compat-suite-workflow.test.ts.
+  KNEXT_SANDBOX_FETCH_DEBUG: ${{ github.event.inputs.sandboxFetchDebug == 'true' && '1' || '' }}
 
 jobs:
   build-next:
@@ -1209,6 +1232,11 @@ jobs:
           # next-deploy.ts spawn children with {...process.env}, so this reaches
           # scripts/e2e-deploy.sh, which boots server.js on node or bun.
           KNEXT_RUNTIME: ${{ env.KNEXT_RUNTIME }}
+          # #188 path 2 — the opt-in sandbox-fetch instrumentation flag
+          # (dispatch-only input; '' on every schedule). run-tests.js and
+          # next-deploy.ts spawn children with {...process.env}, so this
+          # reaches scripts/e2e-deploy.sh AND scripts/e2e-cleanup.sh.
+          KNEXT_SANDBOX_FETCH_DEBUG: ${{ env.KNEXT_SANDBOX_FETCH_DEBUG }}
           # #147 A3-3 — FULL-SHARD EXECUTION. run-tests.js@v16.0.3 ABORTED the
           # whole shard on the first post-retry failure (cleanUpAndExit(1))
           # unless this env was 'true' — run 28552585087 therefore reported

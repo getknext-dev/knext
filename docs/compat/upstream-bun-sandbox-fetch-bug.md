@@ -119,6 +119,63 @@ class once the WAN is removed.** Two consequences:
    cheaper intermediate probe: extend the A/B workflow with a WAN-endpoint knob and/or a
    long-lived-server many-request mode to test (a)/(b) directly on the same infra.
 
+## Path 2 (2026-07-03): instrument a red shard IN THE FULL HARNESS — instrumentation shipped, dispatch in flight
+
+Path 1's clean 0/80 moved the mechanism into whatever the minimal reduction omits
+(WAN endpoint / pool state / harness-scale load). Path 2 therefore instruments the
+red shard itself: an opt-in debug lane on the compat workflow
+(`workflow_dispatch` input `sandboxFetchDebug`, default off; env
+`KNEXT_SANDBOX_FETCH_DEBUG=1`; **schedules can never enable it** — guard-tested in
+`tests/compat-suite-workflow.test.ts`, so the Node credential nightly and the
+weekly bun lane stay byte-identical).
+
+**What the instrumentation is** (`packages/kn-next/src/adapters/sandbox-fetch-debug.cjs`,
+`@knext/core/internal/sandbox-fetch-debug`):
+
+- Ground truth established against the published `next@16.2.0` tarball: the edge
+  sandbox's `fetch` is the undici bundled into
+  `next/dist/compiled/@edge-runtime/primitives/fetch.js` (~780 KB). That bundle
+  executes **host-side** (the `node:vm` context receives host-created functions),
+  reaches the network through the host's `require("net")`/`require("tls")` —
+  i.e. **bun's node-compat sockets on the bun lane** — and publishes the standard
+  undici diagnostics channels (`undici:request:create|bodySent|headers|trailers|error`,
+  `undici:client:beforeConnect|connected|connectError|sendHeaders`) through the
+  host `require("diagnostics_channel")`.
+- The debug module subscribes those channels in the server process and logs one
+  timestamped `[sandbox-fetch-debug]` line per phase, plus a watchdog that names
+  the **last seen phase** of any request in-flight >20s (pool-queue stall vs
+  connect stall vs awaiting-response-headers vs body-streaming stall — exactly
+  the discrimination every reduction has missed) and takes a rate-limited
+  `ss -tnp` socket snapshot. Verified end-to-end locally under node 24 AND bun
+  1.3.x: all 7 lifecycle events observed for a bundled-undici `fetch`.
+- Lane asymmetry is a feature: bun's **native** fetch publishes no `undici:*`
+  channels, so on the bun lane every `undici:*` line is sandbox (bundled-undici)
+  traffic; `BUN_CONFIG_VERBOSE_FETCH=curl` is additionally exported (bun lane,
+  debug only) so bun-native fetch traffic is visible too — together they say
+  which fetch implementation a request actually traversed.
+- `scripts/e2e-cleanup.sh` ships the `[sandbox-fetch-debug]` lines (bounded) in
+  the teardown output the harness prints inside each failing file's log group.
+
+**Side finding while building this (bun quirk, isolated repro, bun 1.3.x):**
+`diagnostics_channel` subscriptions made from a `bun -r <preload>` module
+**never register for the main program** — the module object is identical
+(`require('node:diagnostics_channel')` compares `===` across preload and main),
+but the main program's publishes see `hasSubscribers === false` and no callback
+fires; the same module required from the main graph works, and node works both
+ways. Workaround shipped: in debug mode `scripts/e2e-deploy.sh` boots the
+**instrumentation module as the entry** and chain-requires the real
+`server.js` (`KNEXT_SANDBOX_FETCH_DEBUG_SERVER_JS`) — never `-r`. (Candidate
+for its own upstream report once minimized further; the three-line repro is in
+the PR discussion.)
+
+**Evidence run:** dispatched `runtime=bun bun-version=1.3.14 sandboxFetchDebug=true`
+on this branch — results to be recorded below when the run completes.
+
+TODO(#188): fill in the instrumented-shard findings for
+`middleware-fetches-with-any-http-method` (where the fetch stalls) once the
+dispatch completes; then decide: fileable repro / knext-side workaround /
+upstream-with-CI-evidence.
+
 ## Repro app (the vehicle for a future discriminating attempt)
 
 The app below is the faithful reduction of the upstream fixture; it is what a controlled

@@ -103,6 +103,9 @@ export default defineConfig([
       'adapters/cache-control-normalize': 'src/adapters/cache-control-normalize.cjs',
       // #188 — Bun ≤1.3.x keep-alive mitigation (bun lane only; Node-inert).
       'adapters/bun-keepalive-guard': 'src/adapters/bun-keepalive-guard.cjs',
+      // #188 path 2 — opt-in edge-sandbox fetch instrumentation (inert unless
+      // KNEXT_SANDBOX_FETCH_DEBUG=1; dispatch-only compat investigation lane).
+      'adapters/sandbox-fetch-debug': 'src/adapters/sandbox-fetch-debug.cjs',
     },
     format: ['cjs'],
     platform: 'node',
