@@ -77,7 +77,9 @@ jobs:
             SOURCE_DATE_EPOCH=${{ env.SOURCE_DATE_EPOCH }}
 
       - name: Generate SBOM (syft, SPDX-JSON)
-        uses: anchore/sbom-action@v0
+        # SHA-pinned (#202): sbom-action runs in a job with packages:write +
+        # id-token:write, so a mutable tag is a supply-chain hole. v0.24.0.
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
         with:
           image: ${{ env.IMAGE }}:${{ github.sha }}
           format: spdx-json
@@ -93,8 +95,10 @@ jobs:
         # Report (don't block) on PRs; ENFORCE (fail) on main. Phased rollout so a
         # pre-existing base-image CVE can't block an unrelated PR, while main stays gated.
         continue-on-error: ${{ github.ref != 'refs/heads/main' }}
-        # @master resolves reliably; pin to a release SHA as a supply-chain follow-up.
-        uses: aquasecurity/trivy-action@master
+        # SHA-pinned (#202): this action is the publish GATE in a job holding
+        # packages:write + id-token:write — a compromised mutable @master could
+        # push/sign with this repo's OIDC identity. v0.36.0.
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: ${{ env.IMAGE }}:${{ github.sha }}
           severity: HIGH,CRITICAL
