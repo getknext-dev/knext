@@ -6,17 +6,36 @@
 # under /safekeeper) PLUS the fixed tenant/timeline IDs and storage config. The
 # pageserver PVC is a rebuildable cache; safekeeper PVCs hold only recent WAL
 # (bounded by remote_consistent_lsn). So a faithful backup = a copy of the
-# `neon` bucket + the config (ConfigMaps + storage-s3-creds Secret). A faithful
-# restore = a fresh storage plane attached to a restored bucket copy (proven by
-# deploy/_verify-restore.sh).
+# `neon` bucket + the config ConfigMaps (tenant/timeline IDs, compute/pageserver
+# spec). A faithful restore = a fresh storage plane attached to a restored bucket
+# copy (proven by deploy/_verify-restore.sh).
+#
+# NO SECRET MATERIAL LEAVES THE CLUSTER (issue #28). The config dump used to
+# `kubectl get secret storage-s3-creds -o yaml` and `mc cp` it into the backup
+# bucket — putting the storage-plane credentials (base64, not encrypted) at rest
+# OFF-cluster, exactly the blast-radius the separate `backup-s3-target` credential
+# exists to avoid. It is now EXCLUDED: `storage-s3-creds` is the MinIO root
+# credential (a knob, not data) and is RE-PROVISIONED on restore by
+# deploy/gen-secrets.sh (fresh MinIO gets fresh roots). The dump carries only
+# ConfigMaps. The scoped Role no longer grants `secrets`.
 #
 # WHERE IT GOES (issue #4): OFF-CLUSTER, into OCI Object Storage over the native
 # S3-compatible endpoint. This is what survives node loss / `kubectl delete pvc`
 # — the whole reason the in-cluster `backup-store` MinIO PVC was retired (see the
 # MIGRATION note below). The destination bucket carries VERSIONING + a LIFECYCLE
-# policy (delete non-current versions > 30d), so `mc mirror --remove` prunes the
-# live set while the lifecycle policy ages out superseded versions — closing the
-# incident where mirror copies accumulated to ~60 GB with no pruning.
+# policy (delete non-current versions > 30d).
+#
+# VERSIONING-AWARE PRUNING (issue #28). `mc mirror --remove` propagates live
+# deletions to the OCI copy (the janitor's intentional WAL trims + pageserver GC),
+# keeping it lean — but a bug/bad-actor emptying the live bucket would propagate
+# into the backup too. Mitigation: --remove is passed ONLY when the destination
+# bucket has VERSIONING enabled, so every propagated deletion becomes a recoverable
+# non-current version (aged out by the 30-day lifecycle, NOT immediately gone). If
+# versioning is somehow off, the mirror falls back to additive (no --remove) and
+# warns, rather than destructively propagating without the safety net. LIMITATION
+# (documented, MVP gap): retention is a mutable 30-day window with NO object-lock /
+# WORM — a bucket admin can still shorten it or purge versions. See docs/operations
+# .md "Backup & disaster recovery" for the deletion-propagation risk + hardening.
 #
 # CREDENTIALS: the `backup-s3-target` Secret (endpoint/access/secret/bucket),
 # provisioned by deploy/gen-secrets.sh from an OCI Customer Secret Key. `src`
@@ -31,11 +50,11 @@
 # See docs/operations.md "Backup & disaster recovery".
 #
 # Images pinned (no :latest). mc talks to the in-cluster MinIO and OCI OS; a
-# scoped ServiceAccount (get/list on configmaps+secrets in scale-zero-pg ONLY)
-# lets the kubectl step dump the config alongside the mirror.
+# scoped ServiceAccount (get/list on configmaps in scale-zero-pg ONLY — NOT
+# secrets, issue #28) lets the kubectl step dump the config alongside the mirror.
 ---
-# --- scoped ServiceAccount for the config dump: get/list configmaps+secrets in
-#     scale-zero-pg ONLY. No write, no cluster scope.
+# --- scoped ServiceAccount for the config dump: get/list CONFIGMAPS in
+#     scale-zero-pg ONLY (no secrets — issue #28). No write, no cluster scope.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -50,7 +69,7 @@ metadata:
   namespace: scale-zero-pg
 rules:
   - apiGroups: [""]
-    resources: ["configmaps", "secrets"]
+    resources: ["configmaps"] # NOT secrets — no secret material leaves the cluster (issue #28)
     verbs: ["get", "list"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -78,7 +97,15 @@ metadata:
 spec:
   schedule: "0 3 * * *" # daily 03:00 — mirror the neon bucket + dump config
   concurrencyPolicy: Forbid
-  successfulJobsHistoryLimit: 3
+  # issue #31: keep 6 SCHEDULED successes (≈a week of 03:00 runs) so an operator can
+  # always point at recent scheduled successes for forensics. NOTE (verified on
+  # k8s 1.34): `kubectl create job --from=cronjob/backup` stamps a controller
+  # ownerReference to THIS CronJob, so a naive on-demand run IS owned — it counts
+  # against this limit and trips `UnexpectedJob`. The documented on-demand recipe
+  # therefore STRIPS ownerReferences so manual runs are standalone (not counted, no
+  # UnexpectedJob) — see docs/operations.md "On demand" + "Confirming the scheduled
+  # 3am backup". The headroom (6) still absorbs the occasional naive manual run.
+  successfulJobsHistoryLimit: 6
   failedJobsHistoryLimit: 3
   jobTemplate:
     spec:
@@ -91,9 +118,12 @@ spec:
           restartPolicy: OnFailure
           securityContext:
             seccompProfile: { type: RuntimeDefault }
-          # STEP 1 (initContainer, kubectl, scoped SA): dump the config that the
+          # STEP 1 (initContainer, kubectl, scoped SA): dump ONLY the ConfigMaps the
           # bucket alone cannot rebuild — tenant/timeline IDs, compute spec,
-          # pageserver config, and the S3 creds — into a shared volume.
+          # pageserver config — into a shared volume. NO SECRET is dumped (issue
+          # #28): storage-s3-creds is the MinIO root credential, re-provisioned on
+          # restore by deploy/gen-secrets.sh; putting it in the bucket only widened
+          # the blast radius. The SA's Role no longer grants `secrets`.
           initContainers:
             - name: dump-config
               image: alpine/k8s:1.30.2 # pinned; bundles kubectl + a shell (distroless kubectl has no /bin/sh)
@@ -107,8 +137,7 @@ spec:
                   mkdir -p /dump
                   kubectl get configmap compute-config compute-files pageserver-config \
                     -o yaml > /dump/configmaps.yaml
-                  kubectl get secret storage-s3-creds -o yaml > /dump/storage-s3-creds.yaml
-                  echo "config dump written:"; ls -l /dump
+                  echo "config dump written (ConfigMaps only — no secret material, issue #28):"; ls -l /dump
               volumeMounts:
                 - { name: dump, mountPath: /dump }
           # STEP 2 (mc): mirror the neon bucket to OCI Object Storage (dst) and
@@ -154,22 +183,36 @@ spec:
                   mc alias set src http://minio:9000 "$S3_USER" "$S3_PASS"
                   # OCI Object Storage S3-compat: signature v4, path-style.
                   mc alias set dst "$BK_ENDPOINT" "$BK_ACCESS" "$BK_SECRET" --api S3v4 --path on
+                  # VERSIONING-AWARE --remove (issue #28). --remove propagates live
+                  # deletions to the OCI copy (the janitor's WAL trims + pageserver
+                  # GC) so it stays lean — but a bug/bad-actor emptying src would
+                  # propagate into the backup too. Guard: only pass --remove when the
+                  # DESTINATION bucket has VERSIONING enabled, so every propagated
+                  # deletion is a recoverable non-current version (30-day lifecycle),
+                  # not an immediate loss. If versioning is off, mirror ADDITIVELY
+                  # (no --remove) and warn — never destructively propagate without the
+                  # version safety net. LIMITATION: retention is a mutable 30d window,
+                  # no object-lock/WORM (known MVP gap; see docs/operations.md).
+                  REMOVE=""
+                  if mc version info "dst/$BK_BUCKET" 2>/dev/null | grep -qi enabled; then
+                    REMOVE="--remove"
+                    echo "dst bucket versioning ENABLED -> --remove is version-recoverable"
+                  else
+                    echo "WARNING: dst bucket versioning NOT enabled -> mirroring ADDITIVELY (no --remove); the OCI copy may accumulate. Enable bucket versioning to restore lean pruning (issue #28)." >&2
+                  fi
                   echo "mirroring neon bucket -> OCI OS (dst/$BK_BUCKET/neon) ..."
                   # Retry the mirror: the live pageserver compacts every ~20s,
                   # deleting layer files mid-copy -> mc "ContentLength ... Body length"
                   # read errors on a large/churny bucket. mc mirror is idempotent
                   # (skips objects already copied), so a re-run fills the gaps and
-                  # converges once compaction settles. --remove prunes the OCI copy
-                  # to match src; superseded versions age out via the bucket
-                  # lifecycle policy (30d).
+                  # converges once compaction settles.
                   n=0
-                  until mc mirror --overwrite --remove src/neon "dst/$BK_BUCKET/neon"; do
+                  until mc mirror --overwrite $REMOVE src/neon "dst/$BK_BUCKET/neon"; do
                     n=$((n+1)); [ "$n" -gt 8 ] && { echo "mirror failed after $n attempts" >&2; exit 1; }
                     echo "mirror retry $n (transient read race) ..."; sleep 5
                   done
-                  echo "uploading config dump ..."
+                  echo "uploading config dump (ConfigMaps only — no secret material, issue #28) ..."
                   mc cp /dump/configmaps.yaml "dst/$BK_BUCKET/neon-config/configmaps.yaml"
-                  mc cp /dump/storage-s3-creds.yaml "dst/$BK_BUCKET/neon-config/storage-s3-creds.yaml"
                   # --- issue #21: index_part.json can be captured mid-compaction
                   # (torn backup). The live pageserver rewrites index_part.json
                   # every ~20s of compaction; if the mirror reads it mid-PUT the

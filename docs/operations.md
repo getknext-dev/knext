@@ -137,6 +137,11 @@ alerts. Now a 0-ready or suspended load-bearing workload fails the drill.
 Closes the standing CRITICAL finding ("no backups anywhere"). Manifests:
 `deploy/62-backup.yaml`; rehearsed drill: `deploy/_verify-restore.sh`.
 
+> **Restoring for real?** The drill above is a *self-cleaning rehearsal* in a
+> throwaway namespace — it proves the mechanism, it is **not** the production
+> procedure. To restore **service into a fresh cluster** during an actual outage,
+> follow **[`runbook-dr.md`](runbook-dr.md)** (copy-paste, operator-facing).
+
 ### What is the backup
 
 The durable truth is the MinIO `neon` bucket — **pageserver layer uploads**
@@ -155,11 +160,37 @@ bucket copy**.
   signature v4, path-style), and dumps the ConfigMaps + Secret alongside it under
   the destination bucket's `neon/` and `neon-config/` prefixes. The config dump
   runs in an initContainer on a pinned kubectl image under a **scoped
-  ServiceAccount** (`backup-operator`: `get`/`list` on configmaps+secrets in
-  `scale-zero-pg` only). `src` (in-cluster MinIO) authenticates with
-  `storage-s3-creds`; `dst` (OCI OS) uses a **separate least-privilege**
-  `backup-s3-target` Secret.
-- **On demand:** `kubectl -n scale-zero-pg create job backup-now --from=cronjob/backup`.
+  ServiceAccount** (`backup-operator`: `get`/`list` on **configmaps only** in
+  `scale-zero-pg` — **not secrets**, issue #28). `src` (in-cluster MinIO)
+  authenticates with `storage-s3-creds`; `dst` (OCI OS) uses a **separate
+  least-privilege** `backup-s3-target` Secret.
+- **No secret material leaves the cluster (issue #28).** The dump carries only
+  ConfigMaps (tenant/timeline IDs, compute/pageserver spec). It used to also
+  `mc cp` the `storage-s3-creds` Secret into the bucket, leaving the storage-plane
+  credentials (base64, not encrypted) at rest **off-cluster** — the exact blast
+  radius the separate `backup-s3-target` credential exists to avoid. That is gone.
+  `storage-s3-creds` is the **MinIO root credential** (a knob, not data): on
+  restore into a fresh cluster you mint a **new** one with `deploy/gen-secrets.sh`,
+  so nothing in the backup depends on the old value. **Rotation:** rotate
+  `storage-s3-creds` by re-running `gen-secrets.sh` with new values and restarting
+  the storage plane; no backup re-dump is needed (the bucket never held it).
+- **On demand (issue #31):** `kubectl create job --from=cronjob/backup` stamps a
+  **controller ownerReference** to the CronJob (verified on k8s 1.34), so a naive
+  manual run **counts against `successfulJobsHistoryLimit` and trips
+  `UnexpectedJob`**. Create the manual run **standalone** — strip the
+  ownerReferences so it is *not* owned by the CronJob:
+
+  ```sh
+  kubectl -n scale-zero-pg create job backup-now-$(date +%s) --from=cronjob/backup \
+    --dry-run=client -o json | jq 'del(.metadata.ownerReferences)' \
+    | kubectl -n scale-zero-pg apply -f -
+  ```
+
+  The `backup-now-` prefix keeps it visually distinct from the controller-created
+  scheduled Jobs (`backup-<unix-ts>`); being unowned, it never evicts the scheduled
+  03:00 history (see "Confirming the scheduled 3am backup" below). The
+  `successfulJobsHistoryLimit: 6` headroom absorbs the occasional *naive* `--from`
+  run that skipped the strip.
 - **The `backup-s3-target` Secret** (endpoint / access / secret / bucket) is
   created by `deploy/gen-secrets.sh` from an **OCI Customer Secret Key** — the
   S3 access/secret pair, minted **once per tenancy** for the API-key user and
@@ -188,17 +219,64 @@ bucket copy**.
   `gen-secrets.sh` is idempotent (won't rotate an existing Secret) and, if the
   Secret is missing **and** no credentials are supplied, prints these steps and
   fails loudly rather than creating a half-empty Secret.
-- **Retention/pruning:** the mirror runs `mc mirror --remove`, so deleting an
-  object in the live `neon` bucket removes it from the OCI copy too; with bucket
-  **versioning** on, that becomes a non-current version which the **lifecycle
-  policy deletes after 30 days**. This closes the incident where un-pruned mirror
-  copies accumulated to ~60 GB. If the lifecycle API is ever unavailable on the
-  compat endpoint, fall back to `mc rm --recursive --force --older-than 30d
-  dst/ks-pg-backup/neon` as a scheduled prune.
+- **Retention/pruning + deletion-propagation risk (issue #28).** The mirror runs
+  `mc mirror --remove`, so deleting an object in the live `neon` bucket removes it
+  from the OCI copy too. This keeps the copy lean (the janitor's intentional WAL
+  trims + pageserver GC propagate) and closed the incident where un-pruned mirror
+  copies accumulated to ~60 GB — **but it is also the risk**: a bug or a bad actor
+  that empties/corrupts the live `neon` bucket would, on the next scheduled mirror,
+  propagate those deletions into the backup.
+  - **Why it is survivable — versioning.** The destination bucket has **versioning**
+    enabled, so a `--remove`-propagated deletion is **not** an immediate loss: the
+    object becomes a **non-current version** recoverable for the lifecycle window.
+    Recover a propagated deletion by listing and restoring prior versions, e.g.
+    `oci --profile DEFAULT os object list-object-versions -ns <ns> -bn ks-pg-backup --prefix neon/...`
+    then `os object restore`/re-copy the wanted version before the lifecycle ages
+    it out. The backup CronJob is now **versioning-aware**: it passes `--remove`
+    **only when the destination bucket reports versioning enabled**, and otherwise
+    mirrors additively (no destructive propagation) and warns.
+  - **Limitation (known MVP gap).** Retention is a **mutable 30-day** window (the
+    lifecycle policy on non-current versions) with **no object-lock / WORM** — a
+    bucket admin can still shorten the window or purge versions, and a deletion older
+    than 30 days is unrecoverable. Enabling OCI **Retention Rules / object
+    immutability** on `ks-pg-backup` would make the backup tamper-proof; until then
+    this is an accepted MVP gap, tracked here.
+  - If the lifecycle API is ever unavailable on the compat endpoint, fall back to
+    `mc rm --recursive --force --older-than 30d dst/ks-pg-backup/neon` as a
+    scheduled prune.
 - **Proven envelope:** the earlier in-cluster path was verified green at **~18 GB**
   bucket size with the shipped mc-client sizing (1Gi); the OCI OS path uses the
   same client and retry loop. The retry loop has live evidence (a mid-run mirror
   read race converged on retry).
+
+### Confirming the scheduled 3am backup (issue #31)
+
+Two independent checks — mechanism vs the specific scheduled run:
+
+- **The mechanism is green (any run):** `BackupStale` alerts if
+  `kube_cronjob_status_last_successful_time{cronjob="backup"}` is older than 26h,
+  and `BackupJobFailed` fires on a failed run. This confirms *a* backup succeeded,
+  not *which*.
+- **The specific 03:00 scheduled run:** when manual runs are created **standalone**
+  (ownerReferences stripped, as above), they are **not owned by the CronJob**, so
+  the only owned Jobs are the controller's own scheduled runs. Distinguish by **name
+  prefix** too — scheduled Jobs are named `backup-<unix-ts>`, manual ones
+  `backup-now-*`. List the scheduled successes, newest last:
+
+  ```sh
+  NS=scale-zero-pg
+  # scheduled runs = owned by cronjob/backup AND name is NOT backup-now-*:
+  kubectl -n $NS get jobs -l app=backup \
+    -o jsonpath='{range .items[?(@.metadata.ownerReferences[0].name=="backup")]}{.metadata.name}{"\t"}{.status.succeeded}{"\t"}{.status.completionTime}{"\n"}{end}' \
+    | grep -v 'backup-now-' | sort -k3
+  # the CronJob's own last-success timestamp:
+  kubectl -n $NS get cronjob backup -o jsonpath='{.status.lastSuccessfulTime}{"\n"}'
+  ```
+
+  With 6 kept scheduled successes an operator can always point at a recent 03:00 run.
+  (A *naive* `--from` manual run IS owned and would appear here as a `backup-now-*`
+  entry — filtered out by the `grep -v` above — and counts against the limit; that's
+  what the 6-deep headroom and the strip recipe protect against.)
 
 ### The honesty rule (critical)
 
@@ -620,6 +698,41 @@ kubectl -n scale-zero-pg logs -l app=pggw -f --prefix | grep 'gw]'
 
 - **Gateway**: build a new image, `rollout restart deploy/pggw` — zero client impact
   beyond dropped in-flight pipes (clients reconnect).
+
+### Releasing an OCIR image — digest pinning (issue #56)
+
+Our own images (`gateway`, and the `pswatcher`/`alertsink` binaries baked into the
+same `ks-pg/gateway` repo) are **pinned by digest** in the manifests
+(`tag@sha256:...`, `deploy/10-gateway.yaml`, `58-pswatcher.yaml`,
+`61-alertmanager.yaml`). The tag is human provenance; the `@sha256` is what
+Kubernetes actually pulls. This is enforced by `deploy/_validate.sh` (contract 22:
+every `ks-pg/*` image must carry `@sha256`) and `deploy/_verify-drift.sh` (asserts
+the **live** running `imageID` digest equals the manifest digest — so a
+rebuilt-but-not-rolled or stale-tag binary can no longer pass drift-green).
+
+**Release procedure — build → push → record digest → bump manifest → roll:**
+
+```sh
+REPO=me-abudhabi-1.ocir.io/axfqznklsd2t/ks-pg/gateway
+TAG=v0.6.0                                   # bump per change
+# 1. build + push by tag
+docker build -t $REPO:$TAG gateway/ && docker push $REPO:$TAG
+# 2. RECORD the digest OCIR assigned (do NOT trust the local build digest):
+oci --profile DEFAULT artifacts container image list \
+    --compartment-id <tenancy-ocid> --repository-name ks-pg/gateway \
+    --query "data.items[?version=='$TAG'].digest" --raw-output
+#    -> sha256:....  (or: docker inspect --format='{{index .RepoDigests 0}}' $REPO:$TAG)
+# 3. bump the manifest image ref to  $REPO:$TAG@sha256:<that-digest>
+#    (edit 10-gateway.yaml / 58-pswatcher.yaml / 61-alertmanager.yaml)
+# 4. validate + apply + roll to the pinned digest:
+sh deploy/_validate.sh                       # contract 22 must pass
+kubectl -n scale-zero-pg apply -f deploy/10-gateway.yaml   # (and 58/61 as changed)
+kubectl -n scale-zero-pg rollout status deploy/pggw
+sh deploy/_verify-drift.sh                   # live imageID digest == manifest digest
+```
+
+Never ship a bare tag: it reopens the `merged ≠ deployed` class the digest pin
+closes. If you rebuild the same tag, you **must** re-record and re-bump the digest.
 
 ### Upgrading the storage plane — posture, triggers, and the rehearsal
 

@@ -231,3 +231,21 @@ SKTAG=$(grep -oE 'SK_COMPAT_NEON_TAG[[:space:]]*=[[:space:]]*"[a-z0-9.]+"' skctl
 grep -qE 'SK_CONTROL_VERSION[[:space:]]*=[[:space:]]*9\b' skctl.py || fail "skctl.py SK_CONTROL_VERSION drifted from the reverse-engineered v9"
 [ "$SKTAG" = "$CT" ] || fail "skctl format coupling: skctl.py targets neon:$SKTAG but the plane pins neon:$CT — re-validate safekeeper.control (dump one from neon:$CT, run deploy/test_skctl.py against it) and bump SK_COMPAT_NEON_TAG (docs/operations.md 'skctl format coupling')"
 ok "skctl.py safekeeper.control (v9) coupled to pinned neon:$CT (issue #22)"
+
+# 22. contract (issue #56): every one of OUR OWN OCIR images (me-abudhabi-1.ocir.io
+#     /.../ks-pg/*) must be pinned by DIGEST — `tag@sha256:<64hex>`, not a mutable
+#     tag alone. A bare tag lets a rebuilt-but-not-rolled, or rolled-but-stale-tag,
+#     binary pass the presence/readiness drift check while running old code — the
+#     last place the merged≠deployed class can hide (the manifests even noted
+#     "same image, distinct binary"). We keep the human :tag for provenance AND
+#     require the @sha256 Kubernetes actually pulls; _verify-drift.sh then asserts
+#     the LIVE running imageID digest equals the manifest digest. Release procedure:
+#     docs/operations.md "Releasing an OCIR image (digest pinning)".
+for ref in $(grep -rhoE 'me-abudhabi-1\.ocir\.io/[^[:space:]"#]+' [0-9][0-9]-*.yaml | sort -u); do
+  case "$ref" in
+    *:*@sha256:*) : ;; # has BOTH a human :tag and an @sha256 digest — good
+    *@sha256:*) fail "OCIR image $ref pins a digest but dropped its human :tag — use tag@sha256:... (issue #56)" ;;
+    *) fail "OCIR image not digest-pinned: $ref — pin as tag@sha256:<64hex> (issue #56)" ;;
+  esac
+done
+ok "our OCIR images are digest-pinned with a human tag (tag@sha256:...) (issue #56)"

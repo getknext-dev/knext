@@ -98,4 +98,31 @@ fi
 COUNT=$(echo "$DECLARED" | grep -c . || true)
 ok "all $COUNT declared Deployments/StatefulSets/CronJobs exist live AND are ready/not-suspended (presence+readiness, issues #27/#51)"
 
-echo "drift verification: live pods match the manifest contract AND every declared workload is deployed and healthy"
+# C. DIGEST provenance (issue #56): presence+readiness prove a pod is UP, not that
+# it runs the code we merged. A mutable tag (v0.5.0) can point at a rebuilt binary
+# that was never rolled, or a rolled pod can still run a superseded layer behind a
+# matching tag. So assert the LIVE running imageID digest of every OUR-OCIR
+# (ks-pg/*) container equals a digest the manifests pin (tag@sha256:...). This
+# closes the final merged≠deployed hiding spot the tag-based check was blind to.
+WANT_DIGESTS=$(grep -rhoE 'me-abudhabi-1\.ocir\.io/[^[:space:]"#]+@sha256:[0-9a-f]{64}' [0-9][0-9]-*.yaml | grep -oE 'sha256:[0-9a-f]{64}' | sort -u)
+[ -n "$WANT_DIGESTS" ] || fail "no digest-pinned OCIR images in deploy/ — manifests must pin tag@sha256 (issue #56; see _validate.sh contract 22)"
+$K get pods -o jsonpath='{range .items[*]}{range .status.containerStatuses[*]}{.image}{" "}{.imageID}{"\n"}{end}{end}' \
+  | grep 'ocir\.io/.*/ks-pg/' > /tmp/drift-imgs-$$.txt 2>/dev/null || true
+while read -r img imgid; do
+  [ -n "$img" ] || continue
+  d=$(printf '%s' "$imgid" | grep -oE 'sha256:[0-9a-f]{64}' | head -1)
+  if [ -z "$d" ]; then
+    echo "  NODIGEST: running $img exposes no resolvable imageID digest"
+  elif ! printf '%s\n' "$WANT_DIGESTS" | grep -q "$d"; then
+    echo "  DIGESTDRIFT: running $img imageID $d is NOT any manifest-pinned digest"
+  fi
+done < /tmp/drift-imgs-$$.txt > /tmp/drift-digest-$$.txt
+rm -f /tmp/drift-imgs-$$.txt
+DIGDRIFT=$(cat /tmp/drift-digest-$$.txt); rm -f /tmp/drift-digest-$$.txt
+if [ -n "$DIGDRIFT" ]; then
+  echo "$DIGDRIFT" >&2
+  fail "live OCIR image digest(s) diverge from the manifests (merged≠deployed behind a matching tag) — see above (issue #56)"
+fi
+ok "every running OCIR (ks-pg) container matches a manifest-pinned digest (provenance, issue #56)"
+
+echo "drift verification: live pods match the manifest contract AND every declared workload is deployed and healthy AND runs the pinned image digest"

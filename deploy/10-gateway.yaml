@@ -59,7 +59,7 @@ spec:
       serviceAccountName: pggw
       containers:
         - name: gateway
-          image: me-abudhabi-1.ocir.io/axfqznklsd2t/ks-pg/gateway:v0.3.1 # OCIR (see getting-started for local clusters)
+          image: me-abudhabi-1.ocir.io/axfqznklsd2t/ks-pg/gateway:v0.3.1@sha256:92c81f61a595aa6b82fd8c5fcd5d10a9eeea25c0982b94ccc8cfb55fcb17f8bd # OCIR, digest-pinned (issue #56; tag kept for provenance)
           imagePullPolicy: IfNotPresent
           # OCIR is private: ocir-pull secret created by deploy/gen-secrets.sh
           env:
