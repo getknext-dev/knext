@@ -150,12 +150,19 @@ Writes a tagged marker through the live compute, forces it into the bucket, take
 backup **to OCI Object Storage**, then in a **throwaway `restore-drill` namespace**
 stands up minio (seeded from the OCI OS backup) + broker + 1 safekeeper +
 pageserver + compute, **reconstructed from the backed-up config**, and reads the
-marker back. Self-cleaning; leaves the live compute as found (scaled to 0).
-**Measured RTO (backup start → first query in the rebuilt plane): ~417 s** on
-OKE (context-ckmva7v7zvq, 2026-07-03) — up from the ~304 s in-cluster path because
-it now adds two cross-internet bucket copies to/from OCI OS (upload the neon
-bucket, then re-download it into the drill minio) on top of the storage-plane
-boot; still not bounded by Postgres. See docs/BENCHMARKS.md.
+marker back. It then **promotes the restore to a read-WRITE primary** (STEP 5,
+`deploy/_restore-writable.sh`) and asserts an INSERT **survives a compute kill +
+fresh re-basebackup** — proving the restore comes back as a *service*, not just
+readable data. Self-cleaning; leaves the live compute as found (scaled to 0).
+**Measured RTO** on OKE (context-ckmva7v7zvq, 2026-07-03): **read-only 942 s**
+(backup start → first drill read) and **writable 1076 s** (backup start → durable
+INSERT) on a large ~5 GB bucket; earlier read-only runs on a smaller bucket were
+~417–525 s. The bulk — and the run-to-run spread — is the two cross-internet
+bucket copies to/from OCI OS (upload the neon bucket, then re-download it into the
+drill minio), which scale with bucket size (WAL accumulation is tracked as a
+separate cleanup). The **read→write promotion delta is only ~134 s** (safekeeper
+WAL re-seed × 2 phases + one pageserver catch-up + the PRIMARY boot) and is
+independent of bucket size. Still not bounded by Postgres. See docs/BENCHMARKS.md.
 
 ### What we learned (tribal knowledge, now written down)
 
@@ -165,21 +172,44 @@ boot; still not bounded by Postgres. See docs/BENCHMARKS.md.
   generation ≤ its own, so gen 2 reads the gen-1 index and writes forward at gen 2 —
   a clean control-plane-style re-attach. Attaching at the **same** generation risks
   overwriting the index; attaching **lower** would not see the latest index.
-- **A restore is READ-ONLY on 8464 OSS.** A read-write compute needs the safekeepers
-  to confirm WAL continuity from the basebackup LSN; fresh safekeepers report
-  `flush_lsn 0/0`, so Postgres aborts with *"cannot start in read-write mode from
-  this base backup"*. On 8464 there is **no safekeeper HTTP API to (re)create a
-  timeline at an existing LSN** (`GET`/`DELETE` exist; `POST`/`PUT` → 404) and **no
-  storage controller** to drive it — fresh safekeepers can only be bootstrapped at
-  LSN 0 by the compute's walproposer. So the faithful restore is a **STATIC
-  read-only compute** pinned to the restored pageserver LSN
+- **Read-only is the first, always-safe proof.** The faithful *readability* check is
+  a **STATIC read-only compute** pinned to the restored pageserver LSN
   (`spec.mode = {"Static":"<lsn>"}`), which reads pages directly from the pageserver
-  and needs **no safekeepers**. This proves durability + readability of the backup.
-- **Promoting a restore to a writable primary** additionally requires re-seeding the
-  safekeepers' WAL from the restored point (import from the backed-up `/safekeeper`
-  prefix, or a storage-controller-driven timeline create). **Not yet automated** —
-  it is the manual follow-on step and the main gap between "data recovered, readable"
-  and "service fully back". Track alongside the second-pageserver work.
+  and needs **no safekeepers**. This proves durability + readability of the backup
+  independently of the writable-promotion machinery, and is the fallback if
+  promotion ever fails.
+- **A restore can now be promoted to READ-WRITE on 8464 OSS** (issue #2,
+  `deploy/_restore-writable.sh`). The blocker was that a read-write compute needs a
+  safekeeper that confirms WAL continuity from the basebackup LSN, and a fresh drill
+  safekeeper reports `flush_lsn 0/0`, so Postgres aborts with *"cannot start in
+  read-write mode from this base backup"*. On 8464 there is **no safekeeper HTTP API
+  to create a timeline at an existing LSN** (`GET`/`DELETE` exist; `POST` timeline
+  and `PUT .../control_file` → 404) and **no storage controller**, so the fix is
+  **on-disk reconstruction**:
+  1. The backup's `/safekeeper` prefix holds the **real offloaded WAL segments**.
+     Seed the fresh safekeeper PVC with those segments plus a **crafted
+     `safekeeper.control`** — a small binary struct (magic `0xcafeceef`, format v9,
+     **CRC32C** trailer) written by `deploy/skctl.py` (format reverse-engineered from
+     a live safekeeper; the serializer round-trips a real control file
+     byte-identically). The safekeeper then reports the correct `flush_lsn`.
+  2. First read-write attempt *still* failed — root cause was the **basebackup
+     emitting `prev LSN 0/0`**: the pageserver loses `prev_record_lsn` on a cold load
+     from remote storage. Fix: seed the safekeeper a couple of segments **past** the
+     pageserver's `last_record_lsn` (Y); the pageserver streams the real WAL delta
+     `Y→Z` and **re-derives `prev_record_lsn`**.
+  3. Re-seed the safekeeper **truncated at exactly Z** (`flush == commit == Z ==`
+     pageserver `last_record`), keep the pageserver up so the re-derived prev
+     persists, then boot the compute as a **plain PRIMARY** (no `Static` mode). It
+     basebackups at Z with a valid prev and comes up **read-write**.
+  The drill asserts an INSERT then **survives a compute kill + fresh re-basebackup**.
+  All inputs are **disaster-available** (bucket WAL + pageserver
+  `initdb_lsn`/`last_record_lsn` + `system_id`/`pg_version`/`wal_seg_size` read from
+  the read-only compute) — **no surviving safekeeper is required**.
+- **Upgrade carrot.** A newer neon release ships a first-class **safekeeper timeline
+  import / HTTP timeline-create** (the `POST /v1/tenant/<t>/timeline/<tl>` this 8464
+  build 404s) and a **storage controller** to drive promotion — adopting it would
+  replace the on-disk `skctl.py` craft with an API call. Until then, the on-disk
+  re-seed above is the working, automated path on 8464 OSS.
 
 ### Production hardening
 
@@ -259,9 +289,10 @@ outage. It is now **automatic**: a standing warm-Secondary standby plus the
 - **Manual fallback** (watcher down): the identical steps run by hand —
   `sh deploy/_verify-pageserver-failover.sh --manual` documents the exact commands
   (kill → `PUT location_config AttachedSingle generation+1` → flip the `pageserver`
-  selector → `rollout restart deploy/compute`). This is the writable path today; the
-  writable-restore safekeeper re-seed gap from "Backup & disaster recovery" is
-  separate and unaffected (failover keeps the same safekeeper, so WAL continuity holds).
+  selector → `rollout restart deploy/compute`). Failover keeps the same safekeeper,
+  so WAL continuity holds and the DB stays read-write. (The sibling **writable-restore**
+  safekeeper re-seed — needed only for a full-plane rebuild from backup, where the
+  safekeepers are fresh — is now also automated; see "Backup & disaster recovery".)
 
 ## Password rotation
 

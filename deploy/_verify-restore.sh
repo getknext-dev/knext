@@ -152,12 +152,49 @@ $K get secret backup-s3-target >/dev/null 2>&1 \
 $K apply -f "$BACKUP_MANIFEST" >/dev/null || fail "could not apply $BACKUP_MANIFEST"
 
 BACKUP_START=$(date +%s)                      # RTO clock starts here
-JOB="backup-now-$(date +%s)"
-$K create job "$JOB" --from=cronjob/backup >/dev/null || fail "could not create on-demand backup Job from cronjob/backup"
-info "  backup Job $JOB running..."
-$K wait --for=condition=complete "job/$JOB" --timeout=600s >/dev/null 2>&1 \
-  || fail "backup Job did not complete; logs: $($K logs job/$JOB --all-containers --tail=40 2>/dev/null)"
-ok "backup Job complete: neon bucket + config mirrored to OCI Object Storage"
+
+# backup_index_intact: the newest pageserver index_part.json in the OFF-CLUSTER
+# copy must be complete JSON. A busy live pageserver rewrites index_part.json
+# during compaction; if the mirror reads it mid-PUT the backup captures a TORN
+# index and the restore later fails to deserialize it. `mc mirror` is idempotent
+# and only re-copies CHANGED objects, so simply re-running the backup Job is a
+# cheap, effective way to pick up a clean index. (The durable fix belongs in the
+# backup path; this keeps the drill honest and self-healing meanwhile.)
+BK_ENDPOINT="$($K get secret backup-s3-target -o jsonpath='{.data.endpoint}' | base64 -d)"
+BK_ACCESS="$($K get secret backup-s3-target -o jsonpath='{.data.access}' | base64 -d)"
+BK_SECRET="$($K get secret backup-s3-target -o jsonpath='{.data.secret}' | base64 -d)"
+BK_BUCKET="$($K get secret backup-s3-target -o jsonpath='{.data.bucket}' | base64 -d)"
+IX_PREFIX="neon/pageserver/tenants/$TENANT/timelines/$TIMELINE"
+backup_index_intact() {
+  $K delete pod mc-ixcheck --ignore-not-found >/dev/null 2>&1 || true
+  out="$($K run mc-ixcheck --rm -i --restart=Never --image="$IMG_MC" \
+    --env=BE="$BK_ENDPOINT" --env=BA="$BK_ACCESS" --env=BS="$BK_SECRET" --env=BB="$BK_BUCKET" --env=IX="$IX_PREFIX" \
+    --command -- /bin/sh -c '
+      export HOME=/tmp
+      mc alias set bak "$BE" "$BA" "$BS" --api S3v4 --path on >/dev/null 2>&1 || { echo NOBAK; exit 0; }
+      f=$(mc ls "bak/$BB/$IX/" 2>/dev/null | grep -o "index_part.json-[0-9]*" | sort | tail -1)
+      [ -z "$f" ] && { echo NOINDEX; exit 0; }
+      last=$(mc cat "bak/$BB/$IX/$f" 2>/dev/null | tail -c 1)
+      [ "$last" = "}" ] && echo "INTACT $f" || echo "TORN $f"' 2>/dev/null)"
+  echo "$out" | grep -q '^INTACT'
+}
+
+JOB=""
+attempt=0
+while [ $attempt -lt 3 ]; do
+  attempt=$((attempt+1))
+  JOB="backup-now-$(date +%s)"
+  $K create job "$JOB" --from=cronjob/backup >/dev/null || fail "could not create on-demand backup Job from cronjob/backup"
+  info "  backup Job $JOB running (attempt $attempt)..."
+  $K wait --for=condition=complete "job/$JOB" --timeout=600s >/dev/null 2>&1 \
+    || fail "backup Job did not complete; logs: $($K logs job/$JOB --all-containers --tail=40 2>/dev/null)"
+  if backup_index_intact; then
+    ok "backup Job complete: neon bucket + config mirrored to OCI Object Storage (index intact)"
+    break
+  fi
+  [ $attempt -ge 3 ] && fail "backed-up pageserver index_part.json is TORN after $attempt backups (live pageserver churning under compaction)"
+  info "  backed-up index was captured mid-rewrite (torn) — re-running the backup to pick up a clean copy"
+done
 
 # ---------------------------------------------------------------------------
 info "STEP 3: stand up the throwaway restore-drill storage plane from the backup"
@@ -260,7 +297,10 @@ s=0; while :; do
   ph="$($KD get pod mc-seed -o jsonpath='{.status.phase}' 2>/dev/null || echo Unknown)"
   [ "$ph" = "Succeeded" ] && break
   [ "$ph" = "Failed" ] && fail "bucket seed failed: $($KD logs mc-seed --tail=30 2>/dev/null)"
-  s=$((s+1)); [ $s -gt 120 ] && fail "bucket seed timed out"
+  # The neon bucket (pageserver layers + accumulated safekeeper WAL offload) grows
+  # over the cluster's life, and this is a cross-internet re-download from OCI OS,
+  # so the seed can legitimately take many minutes — keep the ceiling generous.
+  s=$((s+1)); [ $s -gt 600 ] && fail "bucket seed timed out (>1200s; bucket likely very large)"
   sleep 2
 done
 $KD delete pod mc-seed --ignore-not-found >/dev/null 2>&1 || true
@@ -516,15 +556,87 @@ done
 FIRST_QUERY=$(date +%s)
 [ "$got" = "$MARKER_NOTE" ] || fail "marker row NOT readable in drill (got: '$got')"
 ok "marker row '$MARKER_ID' READ BACK in restore-drill from the restored backup"
+RTO=$((FIRST_QUERY - BACKUP_START))
 
 # ---------------------------------------------------------------------------
-RTO=$((FIRST_QUERY - BACKUP_START))
+# STEP 5: PROMOTE the restored plane to a WRITABLE primary and prove a write
+# survives a rebuild.
+#
+# Data recovered + readable (STEP 4) is only half of disaster recovery — a
+# faithful restore must also come back as a read-WRITE service. The read-only
+# STATIC compute above reads pages straight from the pageserver at its last
+# durable LSN and needs no safekeepers; a writable primary additionally needs the
+# safekeepers to confirm WAL continuity from the basebackup LSN, and a fresh
+# drill safekeeper reports flush_lsn 0/0. Promotion re-seeds that safekeeper WAL
+# from the backed-up /safekeeper prefix (see deploy/_restore-writable.sh) so the
+# compute can boot in read-WRITE mode. This stage asserts an INSERT lands and
+# then SURVIVES a full compute kill + fresh re-basebackup (durability, not just a
+# writable session).
+WRITE_TABLE=writable_restore_proof
+WRITE_ID="wr-$MARKER_ID"
+WRITE_NOTE="writable-restore proof; INSERTed into a rebuilt plane, must survive a compute kill"
+
+info "STEP 5: promote the restored plane to WRITABLE (read-write primary)"
+
+# --- re-seed the fresh drill safekeeper from the backed-up /safekeeper WAL so a
+#     read-write compute can confirm WAL continuity (deploy/_restore-writable.sh;
+#     see docs/operations.md). Without this the PRIMARY boot below aborts with
+#     "cannot start in read-write mode from this base backup". ---
+WRITABLE_HELPER="$(dirname "$0")/_restore-writable.sh"
+[ -f "$WRITABLE_HELPER" ] || fail "missing $WRITABLE_HELPER (writable-promotion mechanism)"
+KUBECTL="$KUBECTL" RT="$RT" DRILL_NS="$DRILL_NS" TENANT="$TENANT" TIMELINE="$TIMELINE" \
+  IMG_MC="$IMG_MC" sh "$WRITABLE_HELPER" || fail "safekeeper WAL re-seed failed"
+
+# --- boot the compute in PRIMARY (read-write) mode: same compute-files as the
+#     Static stage but WITHOUT the spec.mode=Static injection, and pointed at the
+#     single drill safekeeper. On an un-seeded safekeeper this aborts with
+#     "cannot start in read-write mode from this base backup" (the gap this stage
+#     exists to close). ---
+sed -e "s#safekeeper-0.safekeeper:5454,safekeeper-1.safekeeper:5454,safekeeper-2.safekeeper:5454#safekeeper-0.safekeeper:5454#g" \
+    -e "s/^  namespace: $SRC_NS/  namespace: $DRILL_NS/" \
+    "$COMPUTE_FILES_SRC" \
+  | $KD apply -f - >/dev/null
+$KD rollout restart deploy/compute >/dev/null
+$KD rollout status deploy/compute --timeout=180s >/dev/null 2>&1 \
+  || fail "restored compute did not reach a read-WRITE Ready state (logs: $($KD logs deploy/compute -c compute --tail=25 2>/dev/null))"
+[ "$(DRILL_PSQL 'show transaction_read_only' 2>/dev/null)" = "off" ] \
+  || fail "restored compute is still read-only (transaction_read_only != off)"
+ok "restored compute booted in read-WRITE mode"
+
+# --- write a proof row through the writable restore ---
+DRILL_PSQL "create table if not exists $WRITE_TABLE(id text primary key, note text, ts timestamptz default now())" >/dev/null \
+  || fail "could not create proof table (plane not writable)"
+DRILL_PSQL "insert into $WRITE_TABLE(id,note) values ('$WRITE_ID','$WRITE_NOTE')" >/dev/null \
+  || fail "INSERT into the restored plane failed"
+WRITABLE_QUERY=$(date +%s)
+DRILL_PSQL "checkpoint" >/dev/null 2>&1 || true
+ok "INSERT accepted by the restored writable plane (id '$WRITE_ID')"
+
+# --- durability: kill the compute so it re-basebackups fresh, then re-read ---
+info "  killing the restored compute to prove the write is DURABLE (not just in-session)"
+$KD delete pod -l app=compute --wait=true >/dev/null 2>&1 || true
+$KD rollout status deploy/compute --timeout=180s >/dev/null 2>&1 \
+  || fail "restored compute did not come back after the durability kill"
+back=""
+r=0
+while [ $r -lt 60 ]; do
+  back="$(DRILL_PSQL "select note from $WRITE_TABLE where id='$WRITE_ID'" 2>/dev/null || true)"
+  [ -n "$back" ] && break
+  r=$((r+1)); sleep 1
+done
+[ "$back" = "$WRITE_NOTE" ] || fail "proof row NOT durable — lost across the compute kill (got: '$back')"
+ok "proof row '$WRITE_ID' SURVIVED a compute kill + fresh re-basebackup — writable restore is durable"
+WRITABLE_RTO=$((WRITABLE_QUERY - BACKUP_START))
+
+# ---------------------------------------------------------------------------
 echo ""
 echo "=========================================================================="
 echo " RESTORE DRILL PASSED"
-echo "   marker id        : $MARKER_ID"
-echo "   marker WAL LSN    : $MARKER_LSN (verified uploaded to bucket before backup)"
-echo "   re-attach gen     : $DRILL_GEN"
-echo "   RTO (backup start -> first drill query): ${RTO}s"
+echo "   marker id         : $MARKER_ID"
+echo "   marker WAL LSN     : $MARKER_LSN (verified uploaded to bucket before backup)"
+echo "   re-attach gen      : $DRILL_GEN"
+echo "   RTO read-only  (backup start -> first drill read) : ${RTO}s"
+echo "   RTO writable   (backup start -> durable INSERT)   : ${WRITABLE_RTO}s"
+echo "   write proof id     : $WRITE_ID (survived a compute kill + re-basebackup)"
 echo "=========================================================================="
 # cleanup + compute-restore handled by trap

@@ -39,7 +39,8 @@ The engines were never the bottleneck — Kubernetes mechanics were, twice.
 | Safekeeper quorum (kill 1 of 3) | writes continue | ✅ passes | 2/3 WAL quorum; member rejoins |
 | Pageserver failover — MANUAL (promote standby, gen+1) | **~7s** | **9s** | read-WRITE preserved; hand-run mechanism (`--manual`) |
 | Pageserver failover — AUTOMATED (pswatcher, no human step) | — | **8s** | watcher promotes gen+1 + flips Service selector + bounces compute; RTO = kill→cold read on standby (incl. ~3s×1s-poll detection); proof = selector flipped by watcher + gen ledger 1→2 + read served by the fresh cold compute (not old-pod cache) |
-| Backup → restore from OCI Object Storage (fresh ns) | **~110s** (in-cluster, pre-#4) | **417s** (OCI OS, 2026-07-03) | issue #4: backup mirrors OFF-CLUSTER to OCI OS, restore sources from it; +cross-internet upload + re-download vs the ~304s in-cluster OKE path; restore read-only on 8464 OSS |
+| Backup → restore (READ-ONLY) from OCI Object Storage (fresh ns) | **~110s** (in-cluster, pre-#4) | **417–942s** (OCI OS, 2026-07-03) | issue #4: backup mirrors OFF-CLUSTER to OCI OS, restore sources from it; RTO scales with bucket size (cross-internet copy dominates); STATIC read-only proof (reads pages from pageserver, no safekeepers) |
+| Backup → restore promoted to **WRITABLE** primary (fresh ns) | — | **1076s** (OCI OS, 2026-07-03; ~5GB bucket) | issue #2: on-disk safekeeper WAL re-seed from the `/safekeeper` backup + crafted `safekeeper.control` (`deploy/skctl.py`); pageserver re-derives `prev_record_lsn`; INSERT survives a compute kill + fresh re-basebackup. **Promotion delta over read-only ≈ 134s** (bucket-size-independent). No storage controller / no HTTP timeline-create on 8464 |
 | Backup job at ~18GB bucket | green (retry loop exercised live) | — | in-cluster path (pre-#4); OCI OS path uses same mc client 1Gi + retry loop |
 | CNPG pod-kill recovery | ~16s | — | comparison point (hibernate resume: ~3.3s) |
 | Alert path (rule → Alertmanager → receiver) | delivered | **delivered** | idempotent drill; unique per-run identity |
@@ -75,3 +76,9 @@ The engines were never the bottleneck — Kubernetes mechanics were, twice.
   "last latency" gauge across replicas fabricates numbers (learned the hard way).
 - Cold means *settled zero*: no pod objects at all — a Terminating pod still
   holds the timeline and re-wake during drain costs ~2–3s extra.
+- **Writable-restore RTO** is measured from the same backup-start clock as the
+  read-only RTO to the moment the promoted primary's INSERT is confirmed **durable**
+  (after a compute kill + fresh re-basebackup), so it is strictly ≥ the read-only
+  number. The delta over read-only is the safekeeper WAL re-seed (two short
+  `mc cp` seeds of a handful of 16 MiB segments) + one pageserver WAL catch-up +
+  one PRIMARY compute boot; it is not bounded by Postgres.
