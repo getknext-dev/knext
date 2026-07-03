@@ -82,17 +82,55 @@ bucket copy**.
 
 ### How it runs
 
-- **`CronJob/backup`** (daily 03:00) mirrors the `neon` bucket into a dedicated
-  second store (`backup-store`, an in-cluster MinIO PVC for the MVP) with pinned
-  `minio/mc`, and dumps the ConfigMaps + Secret alongside it. The config dump runs
-  in an initContainer on a pinned kubectl image under a **scoped ServiceAccount**
-  (`backup-operator`: `get`/`list` on configmaps+secrets in `scale-zero-pg` only).
+- **`CronJob/backup`** (daily 03:00) mirrors the `neon` bucket **off-cluster to OCI
+  Object Storage** over its native S3-compatible endpoint (pinned `minio/mc`,
+  signature v4, path-style), and dumps the ConfigMaps + Secret alongside it under
+  the destination bucket's `neon/` and `neon-config/` prefixes. The config dump
+  runs in an initContainer on a pinned kubectl image under a **scoped
+  ServiceAccount** (`backup-operator`: `get`/`list` on configmaps+secrets in
+  `scale-zero-pg` only). `src` (in-cluster MinIO) authenticates with
+  `storage-s3-creds`; `dst` (OCI OS) uses a **separate least-privilege**
+  `backup-s3-target` Secret.
 - **On demand:** `kubectl -n scale-zero-pg create job backup-now --from=cronjob/backup`.
-- **Proven envelope:** the in-cluster path is verified green at **~18 GB** bucket
-  size with the shipped sizing (minio 512Mi, mc client 1Gi) — and the retry loop
-  has live evidence (a mid-run backup-store flap converged on retry). For growth
-  beyond that, point the mirror at off-cluster S3 (below) rather than scaling
-  the in-cluster store further.
+- **The `backup-s3-target` Secret** (endpoint / access / secret / bucket) is
+  created by `deploy/gen-secrets.sh` from an **OCI Customer Secret Key** — the
+  S3 access/secret pair, minted **once per tenancy** for the API-key user and
+  shown only at creation. Provision (owner, once):
+
+  ```sh
+  NS=axfqznklsd2t                # OCI Object Storage namespace (oci os ns get)
+  REGION=me-abudhabi-1
+  # 1. bucket with versioning + a 30-day lifecycle on non-current versions:
+  oci --profile DEFAULT os bucket create -ns $NS --name ks-pg-backup \
+      --compartment-id <compartment-ocid> --versioning Enabled
+  oci --profile DEFAULT os object-lifecycle-policy put -ns $NS \
+      --bucket-name ks-pg-backup --from-json file://lifecycle.json --force
+  # (lifecycle.json: DELETE previous-object-versions after 30 DAYS. Requires an
+  #  IAM policy: "Allow service objectstorage-$REGION to manage object-family in
+  #  tenancy" — otherwise the put returns InsufficientServicePermissions.)
+  # 2. the S3 access/secret pair (Customer Secret Key):
+  oci --profile DEFAULT iam customer-secret-key create --user-id <user-ocid> \
+      --display-name ks-pg-backup-s3 --query 'data.{access:id,secret:key}'
+  # 3. the cluster Secret:
+  BACKUP_S3_ENDPOINT=https://$NS.compat.objectstorage.$REGION.oraclecloud.com \
+  BACKUP_S3_ACCESS=<access> BACKUP_S3_SECRET=<secret> BACKUP_S3_BUCKET=ks-pg-backup \
+    sh deploy/gen-secrets.sh
+  ```
+
+  `gen-secrets.sh` is idempotent (won't rotate an existing Secret) and, if the
+  Secret is missing **and** no credentials are supplied, prints these steps and
+  fails loudly rather than creating a half-empty Secret.
+- **Retention/pruning:** the mirror runs `mc mirror --remove`, so deleting an
+  object in the live `neon` bucket removes it from the OCI copy too; with bucket
+  **versioning** on, that becomes a non-current version which the **lifecycle
+  policy deletes after 30 days**. This closes the incident where un-pruned mirror
+  copies accumulated to ~60 GB. If the lifecycle API is ever unavailable on the
+  compat endpoint, fall back to `mc rm --recursive --force --older-than 30d
+  dst/ks-pg-backup/neon` as a scheduled prune.
+- **Proven envelope:** the earlier in-cluster path was verified green at **~18 GB**
+  bucket size with the shipped mc-client sizing (1Gi); the OCI OS path uses the
+  same client and retry loop. The retry loop has live evidence (a mid-run mirror
+  read race converged on retry).
 
 ### The honesty rule (critical)
 
@@ -109,12 +147,15 @@ pageserver has uploaded it** (watch `remote_consistent_lsn` on
 ### Rehearsed restore drill — `deploy/_verify-restore.sh`
 
 Writes a tagged marker through the live compute, forces it into the bucket, takes a
-backup, then in a **throwaway `restore-drill` namespace** stands up minio (seeded
-from the backup) + broker + 1 safekeeper + pageserver + compute, **reconstructed
-from the backed-up config**, and reads the marker back. Self-cleaning; leaves the
-live compute as found (scaled to 0). **Measured RTO (backup start → first query in
-the rebuilt plane): ~110 s** on orbstack — dominated by two multi-GB bucket copies
-+ storage-plane boot, not by Postgres.
+backup **to OCI Object Storage**, then in a **throwaway `restore-drill` namespace**
+stands up minio (seeded from the OCI OS backup) + broker + 1 safekeeper +
+pageserver + compute, **reconstructed from the backed-up config**, and reads the
+marker back. Self-cleaning; leaves the live compute as found (scaled to 0).
+**Measured RTO (backup start → first query in the rebuilt plane): ~417 s** on
+OKE (context-ckmva7v7zvq, 2026-07-03) — up from the ~304 s in-cluster path because
+it now adds two cross-internet bucket copies to/from OCI OS (upload the neon
+bucket, then re-download it into the drill minio) on top of the storage-plane
+boot; still not bounded by Postgres. See docs/BENCHMARKS.md.
 
 ### What we learned (tribal knowledge, now written down)
 
@@ -140,14 +181,18 @@ the rebuilt plane): ~110 s** on orbstack — dominated by two multi-GB bucket co
   it is the manual follow-on step and the main gap between "data recovered, readable"
   and "service fully back". Track alongside the second-pageserver work.
 
-### Production hardening (before relying on this)
+### Production hardening
 
-- **Point the mirror at OFF-CLUSTER object storage** (real S3/GCS) with **bucket
-  versioning + a lifecycle policy** (e.g. keep 30 daily / 12 monthly) and a
-  **separate least-privilege credential**; then drop the in-cluster `backup-store`
-  (change the `dst` alias + creds Secret in `CronJob/backup`). The in-cluster copy
-  survives losing a storage PVC but **not** node loss — off-cluster is what closes
-  the node-loss / `kubectl delete pvc` incident.
+- **Off-cluster target — DONE (issue #4).** The mirror writes to **OCI Object
+  Storage** with **bucket versioning + a 30-day lifecycle policy** on non-current
+  versions and a **separate least-privilege credential** (`backup-s3-target`). The
+  retired in-cluster `backup-store` MinIO PVC survived losing a storage PVC but
+  **not** node loss; the off-cluster copy is what closes the node-loss /
+  `kubectl delete pvc` incident. On a cluster still running the old workload,
+  after the first OCI backup is green:
+  `kubectl -n scale-zero-pg delete deploy/backup-store svc/backup-store pvc/backup-store-data`.
+- **Remaining:** longer-horizon retention tiers (e.g. monthly beyond 30 days) if
+  policy demands; a second region copy for regional durability.
 - Alert on backup Job failure (`kube_job_status_failed{job_name=~"backup.*"}`) and on
   backup age (last successful completion older than ~26 h).
 

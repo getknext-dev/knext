@@ -38,8 +38,8 @@ The engines were never the bottleneck — Kubernetes mechanics were, twice.
 | Compute pod kill → data served | 1–6s | 38s first-boot; 2.2–3.0s steady | stateless compute; no volume, no restore (*first-boot pull) |
 | Safekeeper quorum (kill 1 of 3) | writes continue | ✅ passes | 2/3 WAL quorum; member rejoins |
 | Pageserver failover (promote standby, gen+1) | **~7s** | **9s** | read-WRITE preserved; SPOF → bounded RTO |
-| Backup → restore in fresh namespace | **~110s** | **304s** | rehearsed, not theoretical; OKE slower on 50GB-min block-volume provisioning; restore read-only on 8464 OSS |
-| Backup job at ~18GB bucket | green (retry loop exercised live) | — | after minio 512Mi + mc 1Gi sizing fixes |
+| Backup → restore from OCI Object Storage (fresh ns) | **~110s** (in-cluster, pre-#4) | **417s** (OCI OS, 2026-07-03) | issue #4: backup mirrors OFF-CLUSTER to OCI OS, restore sources from it; +cross-internet upload + re-download vs the ~304s in-cluster OKE path; restore read-only on 8464 OSS |
+| Backup job at ~18GB bucket | green (retry loop exercised live) | — | in-cluster path (pre-#4); OCI OS path uses same mc client 1Gi + retry loop |
 | CNPG pod-kill recovery | ~16s | — | comparison point (hibernate resume: ~3.3s) |
 | Alert path (rule → Alertmanager → receiver) | delivered | **delivered** | idempotent drill; unique per-run identity |
 | Gateway HA (held conn across idle window, pod kill) | ✅ | ✅ | no split-brain sleep; no SPOF |
@@ -52,6 +52,15 @@ The engines were never the bottleneck — Kubernetes mechanics were, twice.
 - MinIO 512Mi + mc client 1Gi: the durability tier and its backup client must
   survive a full-bucket mirror (both OOMed at smaller sizes — observed live).
 - OCI block volumes round small PVCs up to 50GB minimum.
+- Backup target = OCI Object Storage (issue #4), S3-compat endpoint
+  `https://axfqznklsd2t.compat.objectstorage.me-abudhabi-1.oraclecloud.com`,
+  bucket `ks-pg-backup`, **versioning Enabled** + lifecycle **DELETE
+  previous-object-versions after 30 DAYS** (+ abort incomplete multipart after
+  7d). `mc mirror --remove` keeps the live set; lifecycle prunes superseded
+  versions — closes the ~60GB un-pruned-mirror incident. Lifecycle needs an IAM
+  policy: `Allow service objectstorage-me-abudhabi-1 to manage object-family in
+  tenancy`. S3 creds = an OCI **Customer Secret Key** (one per tenancy), stored
+  in the `backup-s3-target` Secret (separate from `storage-s3-creds`).
 - ephemeral-storage requests default to **0** when undeclared — under DiskPressure
   the kubelet evicts such pods first (they are Burstable on cpu/mem but rank
   worst on disk). Declared everywhere since #11/#12; `_verify-drift.sh` asserts

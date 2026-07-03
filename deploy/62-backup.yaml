@@ -10,94 +10,29 @@
 # restore = a fresh storage plane attached to a restored bucket copy (proven by
 # deploy/_verify-restore.sh).
 #
-# WHERE IT GOES (MVP): a dedicated second in-cluster MinIO, `backup-store`, on its
-# own PVC. This survives losing the primary MinIO / pageserver PVC but NOT node
-# loss (both PVCs on one node). PRODUCTION: point the mirror at OFF-CLUSTER object
-# storage (real S3 / GCS) with bucket VERSIONING + a LIFECYCLE policy (e.g. keep
-# 30 daily / 12 monthly) — change the `dst` alias in the CronJob to the external
-# endpoint + a separate credentials Secret, and drop the in-cluster backup-store.
+# WHERE IT GOES (issue #4): OFF-CLUSTER, into OCI Object Storage over the native
+# S3-compatible endpoint. This is what survives node loss / `kubectl delete pvc`
+# — the whole reason the in-cluster `backup-store` MinIO PVC was retired (see the
+# MIGRATION note below). The destination bucket carries VERSIONING + a LIFECYCLE
+# policy (delete non-current versions > 30d), so `mc mirror --remove` prunes the
+# live set while the lifecycle policy ages out superseded versions — closing the
+# incident where mirror copies accumulated to ~60 GB with no pruning.
+#
+# CREDENTIALS: the `backup-s3-target` Secret (endpoint/access/secret/bucket),
+# provisioned by deploy/gen-secrets.sh from an OCI Customer Secret Key. `src`
+# (in-cluster MinIO) still authenticates with storage-s3-creds; `dst` (OCI OS)
+# uses backup-s3-target — a SEPARATE, least-privilege credential (blast-radius).
+#
+# MIGRATION (backup-store retired): the old in-cluster `backup-store` MinIO
+# Deployment/PVC/Service is GONE from this manifest. On a cluster that still runs
+# it, delete the live objects after the first OCI backup is green:
+#     kubectl -n scale-zero-pg delete deploy/backup-store svc/backup-store
+#     kubectl -n scale-zero-pg delete pvc/backup-store-data
 # See docs/operations.md "Backup & disaster recovery".
 #
-# Images pinned (no :latest). mc talks to both MinIOs; a scoped ServiceAccount
-# (get/list on configmaps+secrets in scale-zero-pg ONLY) lets the kubectl step
-# dump the config into the backup store.
----
-# --- backup-store: the second, independent object store the backup mirrors into
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: backup-store-data
-  namespace: scale-zero-pg
-  labels: { app: backup-store, plane: backup }
-spec:
-  accessModes: ["ReadWriteOnce"]
-  # Sized to hold a full copy of the neon bucket with headroom. Raise for real
-  # data volume; in prod this PVC disappears (mirror goes to external S3).
-  resources: { requests: { storage: 10Gi } }
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: backup-store
-  namespace: scale-zero-pg
-  labels: { app: backup-store, plane: backup }
-spec:
-  replicas: 1
-  revisionHistoryLimit: 2
-  selector: { matchLabels: { app: backup-store } }
-  strategy: { type: Recreate }
-  template:
-    metadata:
-      labels: { app: backup-store, plane: backup }
-    spec:
-      securityContext:
-        seccompProfile: { type: RuntimeDefault }
-      containers:
-        - name: minio
-          image: quay.io/minio/minio:RELEASE.2022-10-20T00-55-09Z # pinned, same as primary
-          args: ["server", "/data", "--address", ":9000"]
-          # Root identity: reuse storage-s3-creds so mc authenticates to both
-          # stores with one keypair (MVP). PROD: a SEPARATE credential for the
-          # off-cluster backup bucket (least privilege / blast-radius).
-          env:
-            - name: MINIO_ROOT_USER
-              valueFrom: { secretKeyRef: { name: storage-s3-creds, key: user } }
-            - name: MINIO_ROOT_PASSWORD
-              valueFrom: { secretKeyRef: { name: storage-s3-creds, key: password } }
-          securityContext:
-            allowPrivilegeEscalation: false
-            capabilities: { drop: ["ALL"] }
-          ports:
-            - { name: s3, containerPort: 9000 }
-          volumeMounts:
-            - { name: data, mountPath: /data }
-          readinessProbe:
-            httpGet: { path: /minio/health/ready, port: s3 }
-            periodSeconds: 2
-          livenessProbe:
-            httpGet: { path: /minio/health/live, port: s3 }
-            initialDelaySeconds: 15
-            periodSeconds: 10
-            timeoutSeconds: 3
-            failureThreshold: 6
-          resources:
-            requests: { cpu: 50m, memory: 128Mi, ephemeral-storage: 100Mi }
-            # Serves multi-hundred-MB layer objects during restore; 256Mi can
-            # drop a large read mid-stream.
-            limits: { memory: 512Mi, ephemeral-storage: 1Gi }
-      volumes:
-        - name: data
-          persistentVolumeClaim: { claimName: backup-store-data }
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: backup-store
-  namespace: scale-zero-pg
-spec:
-  selector: { app: backup-store }
-  ports:
-    - { name: s3, port: 9000, targetPort: s3 }
+# Images pinned (no :latest). mc talks to the in-cluster MinIO and OCI OS; a
+# scoped ServiceAccount (get/list on configmaps+secrets in scale-zero-pg ONLY)
+# lets the kubectl step dump the config alongside the mirror.
 ---
 # --- scoped ServiceAccount for the config dump: get/list configmaps+secrets in
 #     scale-zero-pg ONLY. No write, no cluster scope.
@@ -176,8 +111,9 @@ spec:
                   echo "config dump written:"; ls -l /dump
               volumeMounts:
                 - { name: dump, mountPath: /dump }
-          # STEP 2 (mc): mirror the neon bucket to backup-store and upload the
-          # config dump alongside it.
+          # STEP 2 (mc): mirror the neon bucket to OCI Object Storage (dst) and
+          # upload the config dump alongside it, under the destination bucket's
+          # neon/ and neon-config/ prefixes.
           containers:
             - name: mirror
               image: minio/mc:RELEASE.2023-01-28T20-29-38Z # pinned
@@ -189,10 +125,20 @@ spec:
                 # /root is not writable for this image's user, so use /tmp.
                 - name: MC_CONFIG_DIR
                   value: /tmp/.mc
+                # src (in-cluster MinIO) credentials
                 - name: S3_USER
                   valueFrom: { secretKeyRef: { name: storage-s3-creds, key: user } }
                 - name: S3_PASS
                   valueFrom: { secretKeyRef: { name: storage-s3-creds, key: password } }
+                # dst (OCI Object Storage, S3-compat) credentials + target
+                - name: BK_ENDPOINT
+                  valueFrom: { secretKeyRef: { name: backup-s3-target, key: endpoint } }
+                - name: BK_ACCESS
+                  valueFrom: { secretKeyRef: { name: backup-s3-target, key: access } }
+                - name: BK_SECRET
+                  valueFrom: { secretKeyRef: { name: backup-s3-target, key: secret } }
+                - name: BK_BUCKET
+                  valueFrom: { secretKeyRef: { name: backup-s3-target, key: bucket } }
               command: ["/bin/sh", "-c"]
               args:
                 - |
@@ -202,24 +148,25 @@ spec:
                   export HOME=/tmp
                   mkdir -p /tmp/.mc
                   mc alias set src http://minio:9000 "$S3_USER" "$S3_PASS"
-                  mc alias set dst http://backup-store:9000 "$S3_USER" "$S3_PASS"
-                  mc mb --ignore-existing dst/neon
-                  mc mb --ignore-existing dst/neon-config
-                  echo "mirroring neon bucket -> backup-store ..."
+                  # OCI Object Storage S3-compat: signature v4, path-style.
+                  mc alias set dst "$BK_ENDPOINT" "$BK_ACCESS" "$BK_SECRET" --api S3v4 --path on
+                  echo "mirroring neon bucket -> OCI OS (dst/$BK_BUCKET/neon) ..."
                   # Retry the mirror: the live pageserver compacts every ~20s,
                   # deleting layer files mid-copy -> mc "ContentLength ... Body length"
                   # read errors on a large/churny bucket. mc mirror is idempotent
                   # (skips objects already copied), so a re-run fills the gaps and
-                  # converges once compaction settles.
+                  # converges once compaction settles. --remove prunes the OCI copy
+                  # to match src; superseded versions age out via the bucket
+                  # lifecycle policy (30d).
                   n=0
-                  until mc mirror --overwrite --remove src/neon dst/neon; do
+                  until mc mirror --overwrite --remove src/neon "dst/$BK_BUCKET/neon"; do
                     n=$((n+1)); [ "$n" -gt 8 ] && { echo "mirror failed after $n attempts" >&2; exit 1; }
                     echo "mirror retry $n (transient read race) ..."; sleep 5
                   done
                   echo "uploading config dump ..."
-                  mc cp /dump/configmaps.yaml dst/neon-config/configmaps.yaml
-                  mc cp /dump/storage-s3-creds.yaml dst/neon-config/storage-s3-creds.yaml
-                  echo "backup complete:"; mc du dst/neon; mc ls dst/neon-config
+                  mc cp /dump/configmaps.yaml "dst/$BK_BUCKET/neon-config/configmaps.yaml"
+                  mc cp /dump/storage-s3-creds.yaml "dst/$BK_BUCKET/neon-config/storage-s3-creds.yaml"
+                  echo "backup complete:"; mc du "dst/$BK_BUCKET/neon"; mc ls "dst/$BK_BUCKET/neon-config"
               volumeMounts:
                 - { name: dump, mountPath: /dump }
               resources:

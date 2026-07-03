@@ -117,4 +117,15 @@ for f in 10-gateway.yaml 20-compute.yaml 25-compute-warm.yaml 50-minio.yaml 51-s
   # must be under requests: (eviction ordering ranks on requests, not limits)
   grep -E 'requests: \{[^}]*ephemeral-storage' "$f" >/dev/null || fail "$f lacks ephemeral-storage under requests:"
 done
-ok "all long-running pods declare ephemeral-storage REQUESTS (incl. backup-store)"
+ok "all long-running pods declare ephemeral-storage REQUESTS (incl. backup mirror)"
+
+# 14. contract: the backup target is OFF-CLUSTER OCI Object Storage (issue #4),
+#     NOT the retired in-cluster backup-store PVC. The mirror must authenticate
+#     dst from the backup-s3-target Secret and must not reintroduce backup-store.
+grep -q 'backup-s3-target' 62-backup.yaml || fail "62 backup mirror must read the backup-s3-target Secret (off-cluster dst)"
+grep -q 'api S3v4' 62-backup.yaml || fail "62 backup mirror must use S3v4 for the OCI S3-compat endpoint"
+grep -q 'kind: PersistentVolumeClaim' 62-backup.yaml && fail "62 must NOT declare a PVC — backup-store is retired (off-cluster OCI OS)"
+# reintroduction guard: the backup-store WORKLOAD (Service endpoint / resource
+# name), not the migration note that tells operators to delete it.
+grep -qE 'backup-store:9000|name: backup-store' 62-backup.yaml && fail "62 still runs the backup-store workload — it is retired (issue #4)"
+ok "backup target is off-cluster OCI Object Storage (backup-store retired)"

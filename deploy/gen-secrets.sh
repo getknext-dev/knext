@@ -1,5 +1,12 @@
 #!/bin/sh
-# Idempotently ensure the `storage-s3-creds` Secret exists in scale-zero-pg.
+# Idempotently ensure the platform's S3 Secrets exist in scale-zero-pg:
+#   * storage-s3-creds  — MinIO root identity for the in-cluster object store.
+#   * backup-s3-target  — OFF-CLUSTER backup destination (OCI Object Storage,
+#                         S3-compatible). See "backup-s3-target" below.
+#
+# ---------------------------------------------------------------------------
+# storage-s3-creds
+# ---------------------------------------------------------------------------
 #
 # This Secret carries the MinIO root identity, which doubles as the S3 access
 # key the safekeepers + pageserver use to reach the object store. Two keys:
@@ -30,36 +37,116 @@ K="kubectl -n $NS"
 fail() { echo "FAIL: $*" >&2; exit 1; }
 command -v kubectl >/dev/null || fail "kubectl not found"
 
+# NOTE: do NOT `exit 0` on the already-exists path — the backup-s3-target
+# section below must still run. Each Secret is guarded independently.
 if $K get secret "$NAME" >/dev/null 2>&1; then
   echo "ok - Secret $NAME already exists; leaving untouched (no silent rotation)"
+else
+  USER="${STORAGE_S3_USER:-}"
+  PASS="${STORAGE_S3_PASSWORD:-}"
+
+  # Adopt live creds if minio is already running (migration path).
+  if [ -z "$USER" ] && $K get deploy minio >/dev/null 2>&1; then
+    USER=$($K get deploy minio -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="MINIO_ROOT_USER")].value}' 2>/dev/null || true)
+    PASS=$($K get deploy minio -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="MINIO_ROOT_PASSWORD")].value}' 2>/dev/null || true)
+    [ -n "$USER" ] && echo "adopting current live MinIO credentials (PVC already initialized)"
+  fi
+
+  # Fresh cluster: generate.
+  if [ -z "$USER" ]; then
+    USER=minio-admin
+    echo "fresh cluster: generating new MinIO credentials"
+  fi
+  if [ -z "$PASS" ]; then
+    if command -v openssl >/dev/null 2>&1; then
+      PASS=$(openssl rand -hex 16) # 32 hex chars
+    else
+      PASS=$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 32)
+    fi
+  fi
+
+  $K create secret generic "$NAME" \
+    --from-literal=user="$USER" \
+    --from-literal=password="$PASS" >/dev/null \
+    || fail "could not create Secret $NAME"
+  echo "ok - created Secret $NAME (user=$USER, password hidden)"
+fi
+
+# ---------------------------------------------------------------------------
+# backup-s3-target — OFF-CLUSTER backup destination (OCI Object Storage)
+# ---------------------------------------------------------------------------
+# The daily backup CronJob (deploy/62-backup.yaml) mirrors the `neon` bucket to
+# OCI Object Storage over its native S3-compatible endpoint. Three keys the
+# mirror needs:
+#   endpoint -> https://<namespace>.compat.objectstorage.<region>.oraclecloud.com
+#   access   -> the Customer Secret Key ACCESS key id  (AWS_ACCESS_KEY_ID)
+#   secret   -> the Customer Secret Key SECRET          (AWS_SECRET_ACCESS_KEY)
+#   bucket   -> the destination bucket (default: ks-pg-backup)
+#
+# THE ACCESS/SECRET PAIR IS NOT AN OCI API KEY. It is a "Customer Secret Key"
+# minted ONCE PER TENANCY for the API-key user, and shown only at creation time:
+#
+#   oci --profile DEFAULT iam customer-secret-key create \
+#       --user-id <the api-key user OCID> --display-name ks-pg-backup-s3 \
+#       --query 'data.{access:id,secret:key}'
+#
+# The destination bucket must exist first, with versioning + a lifecycle policy:
+#   oci --profile DEFAULT os bucket create -ns <namespace> --name ks-pg-backup \
+#       --compartment-id <compartment> --versioning Enabled
+#   oci --profile DEFAULT os object-lifecycle-policy put -ns <namespace> \
+#       --bucket-name ks-pg-backup --from-json file://lifecycle.json --force
+# (lifecycle.json: DELETE previous-object-versions after 30 DAYS.)
+#
+# Provide the values via env (BACKUP_S3_ENDPOINT / BACKUP_S3_ACCESS /
+# BACKUP_S3_SECRET / BACKUP_S3_BUCKET) or positional args 1..4. Same no-silent-
+# rotation rule: if the Secret already exists, leave it. If it is MISSING and no
+# credentials were supplied, PRINT the provisioning instructions and fail loudly
+# (never create a half-empty Secret silently).
+BNAME=backup-s3-target
+DEFAULT_BUCKET=ks-pg-backup
+
+if $K get secret "$BNAME" >/dev/null 2>&1; then
+  echo "ok - Secret $BNAME already exists; leaving untouched (no silent rotation)"
   exit 0
 fi
 
-USER="${STORAGE_S3_USER:-}"
-PASS="${STORAGE_S3_PASSWORD:-}"
+BK_ENDPOINT="${BACKUP_S3_ENDPOINT:-${1:-}}"
+BK_ACCESS="${BACKUP_S3_ACCESS:-${2:-}}"
+BK_SECRET="${BACKUP_S3_SECRET:-${3:-}}"
+BK_BUCKET="${BACKUP_S3_BUCKET:-${4:-$DEFAULT_BUCKET}}"
 
-# Adopt live creds if minio is already running (migration path).
-if [ -z "$USER" ] && $K get deploy minio >/dev/null 2>&1; then
-  USER=$($K get deploy minio -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="MINIO_ROOT_USER")].value}' 2>/dev/null || true)
-  PASS=$($K get deploy minio -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="MINIO_ROOT_PASSWORD")].value}' 2>/dev/null || true)
-  [ -n "$USER" ] && echo "adopting current live MinIO credentials (PVC already initialized)"
+if [ -z "$BK_ENDPOINT" ] || [ -z "$BK_ACCESS" ] || [ -z "$BK_SECRET" ]; then
+  cat >&2 <<'MSG'
+FAIL: Secret backup-s3-target is MISSING and no credentials were supplied.
+
+The off-cluster backup destination needs an OCI Customer Secret Key (one per
+tenancy). Provision it once, then re-run with the values:
+
+  # 1. destination bucket (versioning + 30d lifecycle) — once per tenancy:
+  oci --profile DEFAULT os bucket create -ns <NAMESPACE> --name ks-pg-backup \
+      --compartment-id <COMPARTMENT_OCID> --versioning Enabled
+
+  # 2. Customer Secret Key for the api-key user (the S3 access/secret pair):
+  oci --profile DEFAULT iam customer-secret-key create \
+      --user-id <USER_OCID> --display-name ks-pg-backup-s3 \
+      --query 'data.{access:id,secret:key}'
+
+  # 3. create the Secret (endpoint has the namespace + region baked in):
+  BACKUP_S3_ENDPOINT=https://<NAMESPACE>.compat.objectstorage.<REGION>.oraclecloud.com \
+  BACKUP_S3_ACCESS=<access> BACKUP_S3_SECRET=<secret> \
+  BACKUP_S3_BUCKET=ks-pg-backup \
+    sh deploy/gen-secrets.sh
+
+  # ...or positionally:
+  sh deploy/gen-secrets.sh <endpoint> <access> <secret> [bucket]
+MSG
+  exit 1
 fi
 
-# Fresh cluster: generate.
-if [ -z "$USER" ]; then
-  USER=minio-admin
-  echo "fresh cluster: generating new MinIO credentials"
-fi
-if [ -z "$PASS" ]; then
-  if command -v openssl >/dev/null 2>&1; then
-    PASS=$(openssl rand -hex 16) # 32 hex chars
-  else
-    PASS=$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 32)
-  fi
-fi
-
-$K create secret generic "$NAME" \
-  --from-literal=user="$USER" \
-  --from-literal=password="$PASS" >/dev/null \
-  || fail "could not create Secret $NAME"
-echo "ok - created Secret $NAME (user=$USER, password hidden)"
+$K create secret generic "$BNAME" \
+  --from-literal=endpoint="$BK_ENDPOINT" \
+  --from-literal=access="$BK_ACCESS" \
+  --from-literal=secret="$BK_SECRET" \
+  --from-literal=bucket="$BK_BUCKET" >/dev/null \
+  || fail "could not create Secret $BNAME"
+echo "ok - created Secret $BNAME (endpoint=$BK_ENDPOINT, bucket=$BK_BUCKET, access/secret hidden)"

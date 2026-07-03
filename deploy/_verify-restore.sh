@@ -10,12 +10,12 @@
 #      object store (remote_consistent_lsn >= marker LSN). This is what makes the
 #      backup HONEST — the marker must live in a bucket layer, not only in the
 #      safekeeper WAL (which fresh drill safekeepers do not carry).
-#   2. Run the backup Job (deploy/62-backup.yaml): mirror the `neon` bucket to the
-#      dedicated `backup-store`, plus dump the config (compute/pageserver
-#      ConfigMaps + storage-s3-creds Secret) into the backup store.
+#   2. Run the backup Job (deploy/62-backup.yaml): mirror the `neon` bucket to
+#      OFF-CLUSTER OCI Object Storage (S3-compat), plus dump the config
+#      (compute/pageserver ConfigMaps + storage-s3-creds Secret) alongside it.
 #   3. In a THROWAWAY namespace `restore-drill`, stand up a fresh storage plane
-#      (minio seeded from the backup + broker + 1 safekeeper + pageserver +
-#      compute), reconstructed from the backed-up config only.
+#      (minio seeded from the OCI OS backup + broker + 1 safekeeper + pageserver
+#      + compute), reconstructed from the backed-up config only.
 #   4. Assert the marker row is readable in the drill namespace.
 #   5. Print RTO (backup start -> first successful drill query) and clean up.
 #
@@ -144,19 +144,20 @@ done
 ok "marker LSN is durable in the object store (remote_consistent_lsn advanced past it)"
 
 # ---------------------------------------------------------------------------
-info "STEP 2: run the backup — mirror the neon bucket + config into backup-store"
+info "STEP 2: run the backup — mirror the neon bucket + config into OCI Object Storage"
 BACKUP_MANIFEST="$(dirname "$0")/62-backup.yaml"
 [ -f "$BACKUP_MANIFEST" ] || fail "backup manifest missing: $BACKUP_MANIFEST (RED until 62-backup.yaml exists)"
+$K get secret backup-s3-target >/dev/null 2>&1 \
+  || fail "Secret backup-s3-target missing — provision the OCI Customer Secret Key + run deploy/gen-secrets.sh first (see docs/operations.md 'Backup & disaster recovery')"
 $K apply -f "$BACKUP_MANIFEST" >/dev/null || fail "could not apply $BACKUP_MANIFEST"
-$K rollout status deploy/backup-store --timeout=180s >/dev/null || fail "backup-store minio not ready"
 
 BACKUP_START=$(date +%s)                      # RTO clock starts here
 JOB="backup-now-$(date +%s)"
 $K create job "$JOB" --from=cronjob/backup >/dev/null || fail "could not create on-demand backup Job from cronjob/backup"
 info "  backup Job $JOB running..."
-$K wait --for=condition=complete "job/$JOB" --timeout=300s >/dev/null 2>&1 \
+$K wait --for=condition=complete "job/$JOB" --timeout=600s >/dev/null 2>&1 \
   || fail "backup Job did not complete; logs: $($K logs job/$JOB --all-containers --tail=40 2>/dev/null)"
-ok "backup Job complete: neon bucket + config mirrored to backup-store"
+ok "backup Job complete: neon bucket + config mirrored to OCI Object Storage"
 
 # ---------------------------------------------------------------------------
 info "STEP 3: stand up the throwaway restore-drill storage plane from the backup"
@@ -165,18 +166,26 @@ $KUBECTL delete ns "$DRILL_NS" --ignore-not-found $RT >/dev/null 2>&1 || true
 j=0; while $KUBECTL get ns "$DRILL_NS" >/dev/null 2>&1; do j=$((j+1)); [ $j -gt 60 ] && fail "old $DRILL_NS ns stuck terminating"; sleep 2; done
 $KUBECTL create ns "$DRILL_NS" >/dev/null
 
-# --- recover the S3 creds + config from the backup store (proves config backup) ---
-info "  recovering backed-up config from backup-store/neon-config"
+# --- recover the S3 creds + config from OCI Object Storage (proves config backup) ---
+info "  recovering backed-up config from OCI Object Storage (bak/<bucket>/neon-config)"
 S3_USER="$($K get secret storage-s3-creds -o jsonpath='{.data.user}' | base64 -d)"
 S3_PASS="$($K get secret storage-s3-creds -o jsonpath='{.data.password}' | base64 -d)"
-# Pull the dumped ConfigMaps from the backup store via an mc pod (stdout capture).
-# Creds go in as env (avoids shell-quoting hazards); HOME=/tmp because this mc
-# image cannot write /root; alias name must be multi-char.
+# OCI backup destination (endpoint/access/secret/bucket) — the SAME Secret the
+# backup CronJob wrote to; the restore reads back from it.
+BK_ENDPOINT="$($K get secret backup-s3-target -o jsonpath='{.data.endpoint}' | base64 -d)"
+BK_ACCESS="$($K get secret backup-s3-target -o jsonpath='{.data.access}' | base64 -d)"
+BK_SECRET="$($K get secret backup-s3-target -o jsonpath='{.data.secret}' | base64 -d)"
+BK_BUCKET="$($K get secret backup-s3-target -o jsonpath='{.data.bucket}' | base64 -d)"
+[ -n "$BK_ENDPOINT" ] && [ -n "$BK_BUCKET" ] || fail "backup-s3-target Secret incomplete"
+# Pull the dumped ConfigMaps from OCI OS via an mc pod (stdout capture). Creds go
+# in as env (avoids shell-quoting hazards); HOME=/tmp because this mc image
+# cannot write /root; alias name must be multi-char; OCI compat needs S3v4+path.
 DUMP="$($K run mc-restore-cfg --rm -i --restart=Never --image="$IMG_MC" \
-  --env=BS_USER="$S3_USER" --env=BS_PASS="$S3_PASS" --command -- /bin/sh -c '
+  --env=BK_ENDPOINT="$BK_ENDPOINT" --env=BK_ACCESS="$BK_ACCESS" --env=BK_SECRET="$BK_SECRET" --env=BK_BUCKET="$BK_BUCKET" \
+  --command -- /bin/sh -c '
     export HOME=/tmp
-    mc alias set bak http://backup-store:9000 "$BS_USER" "$BS_PASS" >/dev/null 2>&1 || exit 1
-    mc cat bak/neon-config/configmaps.yaml' 2>/dev/null)"
+    mc alias set bak "$BK_ENDPOINT" "$BK_ACCESS" "$BK_SECRET" --api S3v4 --path on >/dev/null 2>&1 || exit 1
+    mc cat "bak/$BK_BUCKET/neon-config/configmaps.yaml"' 2>/dev/null)"
 echo "$DUMP" | grep -q 'compute-config' || fail "config dump missing compute-config (backup incomplete)"
 # Prove the fixed tenant/timeline IDs are actually captured in the backup.
 echo "$DUMP" | grep -q "$TENANT"   || fail "config dump missing TENANT_ID $TENANT"
@@ -229,19 +238,21 @@ YAML
 $KD rollout status deploy/minio --timeout=120s >/dev/null || fail "drill minio not ready"
 ok "drill minio up"
 
-# --- seed the drill bucket from the backup store (this is the RESTORE) ---
-info "  restoring neon bucket into the drill minio from backup-store"
+# --- seed the drill bucket from OCI Object Storage (this is the RESTORE) ---
+info "  restoring neon bucket into the drill minio from OCI Object Storage"
 $KD run mc-seed --restart=Never --image="$IMG_MC" \
-  --env=BS_USER="$S3_USER" --env=BS_PASS="$S3_PASS" --command -- /bin/sh -c "
+  --env=BK_ENDPOINT="$BK_ENDPOINT" --env=BK_ACCESS="$BK_ACCESS" --env=BK_SECRET="$BK_SECRET" --env=BK_BUCKET="$BK_BUCKET" \
+  --env=S3_USER="$S3_USER" --env=S3_PASS="$S3_PASS" --command -- /bin/sh -c "
   set -e
   export HOME=/tmp
+  # bak = OCI Object Storage (S3-compat, S3v4 + path-style); dst = fresh drill minio.
+  n=0; until mc alias set bak \"\$BK_ENDPOINT\" \"\$BK_ACCESS\" \"\$BK_SECRET\" --api S3v4 --path on; do n=\$((n+1)); [ \$n -gt 30 ] && exit 1; sleep 2; done
   # Retry alias set: the freshly-started drill minio may briefly refuse connections.
-  n=0; until mc alias set bak http://backup-store.$SRC_NS:9000 \"\$BS_USER\" \"\$BS_PASS\"; do n=\$((n+1)); [ \$n -gt 30 ] && exit 1; sleep 2; done
-  n=0; until mc alias set dst http://minio:9000 \"\$BS_USER\" \"\$BS_PASS\"; do n=\$((n+1)); [ \$n -gt 30 ] && exit 1; sleep 2; done
+  n=0; until mc alias set dst http://minio:9000 \"\$S3_USER\" \"\$S3_PASS\"; do n=\$((n+1)); [ \$n -gt 30 ] && exit 1; sleep 2; done
   mc mb --ignore-existing dst/neon
   # mc mirror is idempotent (skips objects already present); retry to fill any
   # object dropped mid-stream on a large-layer read.
-  n=0; until mc mirror --overwrite bak/neon dst/neon; do n=\$((n+1)); [ \$n -gt 4 ] && exit 1; echo 'mirror retry '\$n; sleep 3; done
+  n=0; until mc mirror --overwrite \"bak/\$BK_BUCKET/neon\" dst/neon; do n=\$((n+1)); [ \$n -gt 4 ] && exit 1; echo 'mirror retry '\$n; sleep 3; done
   echo SEED_DONE" >/dev/null
 $KD wait --for=condition=Ready pod/mc-seed --timeout=30s >/dev/null 2>&1 || true
 # wait for the seed pod to finish
