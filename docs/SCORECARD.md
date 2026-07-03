@@ -31,10 +31,19 @@ was not separately scored before iteration 2 (marked —).
 | **3** | System designer | **6** | **7** | **6** |
 | **3** | DevOps/SRE | **6** | **7** | **5** |
 | **3** | Architect | **7** | **6** | **5** |
+| **4** | System designer | **6** | **5** | **5** |
+| **4** | DevOps/SRE | **6** | **6** | **5** |
+| **4** | Architect | **7** | **6** | **7** |
 
 **Iteration-1 mean (mapped axes): ease 6.0, reliability 4.7** (round 0: 4.3, 3.7).
 **Iteration-2 mean (explicit metrics): maturity 4.7, ease 4.3, reliability 3.7.**
-**Iteration-3 mean: maturity 6.3, ease 6.7, reliability 5.3** — first row rendered
+**Iteration-3 mean: maturity 6.3, ease 6.7, reliability 5.3**
+**Iteration-4 mean: maturity 6.3, ease 5.7, reliability 5.7** — reliability up
+(read-SPOF cleared, off-cluster DR, writable restore; architect ruled ADR-0002
+kill-criterion 6 CLEARED); ease deliberately DOWN: reliability was bought with
+maintenance surface (new watcher + serializer + OCI deps), and the trio
+independently priced that debt (#22/#23/#27/#29). The loop caught its own
+grep-green/prod-red class a third time (#27: merged ≠ deployed) — fixed live. — first row rendered
 as PR reviews (getknext-dev/scale-zero-pg #10/#11); the jump credits the OKE
 migration, 11/11 battery, closed ratification debts, and the GitHub-native loop.
 Reliability stays lowest exactly where issues #2/#3/#4/#5 are open — plan and
