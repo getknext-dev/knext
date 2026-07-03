@@ -2152,6 +2152,26 @@ describe('compat-suite fail-on-red gate — revocation teeth (test-e2e-deploy.ym
     ).toBe(true);
   });
 
+  it('the gate ALSO fails on a truncated summary (#171 follow-up: partial results are never green)', () => {
+    // A shard killed mid-run (step timeout, runner eviction) emits a summary
+    // with fewer results than the run-tests.js selection count. summarize()
+    // marks that `truncated: true` (with `expectedTotal`); the gate must treat
+    // it as red — otherwise a 20-of-45 partial green sails through.
+    const gate =
+      src.match(
+        /-\s+name:[^\n]*Fail shard on red results[\s\S]*?(?=\n\s*-\s+name:|\n {2}[a-z])/,
+      )?.[0] ?? '';
+    expect(gate).not.toBe('');
+    expect(
+      /\btruncated\b/.test(gate),
+      'gate must check the truncated flag — a shard killed mid-run is NOT green',
+    ).toBe(true);
+    expect(
+      /expectedTotal/.test(gate),
+      'gate must surface expectedTotal so the red message names how many results are missing',
+    ).toBe(true);
+  });
+
   it('the run step comment no longer claims "matrix row stays ❌ regardless" (stale pre-graduation contract)', () => {
     expect(
       src.includes('stays ❌ regardless'),
@@ -2356,16 +2376,45 @@ describe('compat-suite Bun runtime axis (test-e2e-deploy.yml, #147 item 4)', () 
     ).toBe(false);
   });
 
-  it('plumbs the bun-version input into setup-bun with a latest fallback (the weekly schedule stays latest)', () => {
+  it('plumbs the bun-version input into setup-bun with a PINNED stable fallback (#187 follow-up: the weekly lane must not float)', () => {
+    // #187 review follow-up: the schedule fallback used to be `latest`, which
+    // FLOATS — a red weekly after a new Bun release could be a brand-new-Bun
+    // regression misattributed to knext (the whole lane exists to attribute
+    // red files to Bun versions). The fallback (what the WEEKLY schedule runs,
+    // since github.event.inputs is empty on schedule events) must be a pinned
+    // stable semver; the dispatch input stays a free string so canary/pinned
+    // experiments need no workflow edit.
     const bunStep = setupBunStep();
     expect(bunStep, 'expected the oven-sh/setup-bun step').not.toBe('');
     const line = bunStep.split('\n').find((l) => /^\s*bun-version:/.test(l)) ?? '';
     expect(line, 'setup-bun must set with.bun-version').not.toBe('');
+    const m = line.match(
+      /bun-version:\s*\$\{\{\s*github\.event\.inputs\.bun-version\s*\|\|\s*'([^']+)'\s*\}\}/,
+    );
     expect(
-      /bun-version:\s*\$\{\{\s*github\.event\.inputs\.bun-version\s*\|\|\s*'latest'\s*\}\}/.test(
-        line,
-      ),
-      `setup-bun must plumb the dispatch input with a 'latest' fallback (schedule runs have no inputs), got: "${line.trim()}"`,
+      m,
+      `setup-bun must plumb the dispatch input with a quoted fallback, got: "${line.trim()}"`,
+    ).not.toBeNull();
+    const fallback = (m as RegExpMatchArray)[1];
+    expect(
+      /^\d+\.\d+\.\d+$/.test(fallback),
+      `the weekly-lane fallback must be a PINNED stable semver (never 'latest'/'canary' — those float), got: "${fallback}"`,
+    ).toBe(true);
+  });
+
+  it('documents the bun pin provenance + deliberate-bump policy next to the setup-bun step', () => {
+    const bunStep = setupBunStep();
+    expect(bunStep, 'expected the oven-sh/setup-bun step').not.toBe('');
+    // The pin must carry its provenance (why this version) and a tracked-bump
+    // note (bumping is deliberate, with a re-baseline) — an unexplained pin
+    // rots into "why is this old?" and gets bumped blindly.
+    expect(
+      /pin/i.test(bunStep),
+      'the setup-bun step comment must explain the pin (provenance)',
+    ).toBe(true);
+    expect(
+      /bump/i.test(bunStep),
+      'the setup-bun step comment must state the deliberate-bump policy',
     ).toBe(true);
   });
 
@@ -2427,6 +2476,70 @@ describe('compat-suite Bun runtime axis (test-e2e-deploy.yml, #147 item 4)', () 
     expect(
       /does NOT imply[^\n]*Node/i.test(job) || /Node credential[^\n]*not/i.test(job),
       'the bun-lane alert body must state it does NOT imply the Node credential lane is red',
+    ).toBe(true);
+  });
+});
+
+// ── #187 review follow-up: the alert-dedup lookup must page past 30 issues ────
+// The idempotency of the red-alert job hinges on `gh issue list` FINDING the
+// already-open alert issue. gh's default --limit is 30: with >30 open issues in
+// the repo, the pinned alert can fall off the first page, the lookup returns
+// empty, and every red night files a NEW issue — the exact spam the dedup
+// exists to prevent. Both lane titles ('Compat nightly RED' and 'Compat weekly
+// RED (bun lane)') go through the SAME parameterized lookup, so hardening that
+// one invocation covers both lanes (#187 item 6).
+
+describe('compat-suite red-alert dedup lookup limits (test-e2e-deploy.yml, #187 follow-up)', () => {
+  const src = workflowText();
+
+  function alertJob(): string {
+    const m = src.match(/^ {2}nightly-red-alert:\n[\s\S]*?(?=^ {2}[a-z][\w-]*:|\n*$(?![\s\S]))/m);
+    return m ? m[0] : '';
+  }
+
+  /**
+   * Logical `gh issue list` invocations in the alert job, with backslash line
+   * continuations joined (the lookup is wrapped across lines in the YAML).
+   */
+  function ghIssueListInvocations(): string[] {
+    const joined = alertJob().replace(/\\\n\s*/g, ' ');
+    return joined.split('\n').filter((l) => /gh issue list\b/.test(l));
+  }
+
+  it('every gh issue list lookup pins an explicit --state open (never an implicit default)', () => {
+    const lookups = ghIssueListInvocations();
+    expect(lookups.length, 'expected at least one gh issue list lookup').toBeGreaterThan(0);
+    for (const cmd of lookups) {
+      expect(
+        /--state\s+open\b/.test(cmd),
+        `the alert lookup must pass --state open explicitly, got: "${cmd.trim()}"`,
+      ).toBe(true);
+    }
+  });
+
+  it('every gh issue list lookup raises --limit to at least 100 (default 30 misses the alert and spams)', () => {
+    for (const cmd of ghIssueListInvocations()) {
+      const m = cmd.match(/--limit\s+(\d+)\b/);
+      expect(
+        m,
+        `the alert lookup must pass an explicit --limit (gh defaults to 30), got: "${cmd.trim()}"`,
+      ).not.toBeNull();
+      expect(
+        Number((m as RegExpMatchArray)[1]),
+        'the lookup limit must cover a busy repo (>=100 open issues before dedup can miss)',
+      ).toBeGreaterThanOrEqual(100);
+    }
+  });
+
+  it('the lookup is parameterized on the lane title, so BOTH lane titles get the hardened lookup (#187 item 6)', () => {
+    const lookups = ghIssueListInvocations();
+    // The job selects on the shell `title` variable (set per lane above the
+    // lookup) — one hardened invocation serving both 'Compat nightly RED' and
+    // 'Compat weekly RED (bun lane)'. A second, unparameterized lookup would
+    // dodge the limit fix for one lane.
+    expect(
+      lookups.some((cmd) => /\$\{?title\}?/.test(cmd) || /\$\{title\}/.test(alertJob())),
+      'the gh issue list lookup must select on the per-lane ${title} variable',
     ).toBe(true);
   });
 });

@@ -609,6 +609,126 @@ describe('scripts/e2e-deploy.sh — fixture WITHOUT a build script (#147 final-m
 // GATED on RUNTIME=bun so the node lane's metadata stays byte-identical
 // (documented choice: node's version is pinned by the CI setup-node, and the
 // behavioral node-lane tests above assert the node metadata shape).
+// ─────────────────────────────────────────────────────────────────────────────
+// #171 sys-design follow-up — the free_port TOCTOU. free_port() picks a port by
+// binding :0 and CLOSING it; the server then re-binds it. At run-tests.js
+// concurrency 2 a SIBLING deploy can grab that freed port in the window, and
+// the old readiness loop TCP-probed the port BEFORE verifying our server pid —
+// so "something accepted on the port" was advertised as OUR deployment even
+// when our server was dead (or never bound): the harness would then run a whole
+// test file against the WRONG app. The fix: pid-liveness is checked FIRST on
+// every probe iteration, and after the probe succeeds the script verifies (via
+// lsof/ss) that SERVER_PID actually OWNS the listening port before printing
+// the URL.
+// ─────────────────────────────────────────────────────────────────────────────
+describe('scripts/e2e-deploy.sh — free_port TOCTOU guard (#171 follow-up)', () => {
+  /** fake `next` whose standalone server.js misbehaves per `serverJs`. */
+  function fakeNextWithServer(targetAppDir: string, serverJs: string): string {
+    return `#!/usr/bin/env node
+const fs = require('node:fs');
+const path = require('node:path');
+if (process.argv[2] !== 'build') { process.exit(0); }
+const app = ${JSON.stringify(targetAppDir)};
+const nextDir = path.join(app, '.next');
+const standalone = path.join(nextDir, 'standalone');
+fs.mkdirSync(path.join(nextDir, 'static'), { recursive: true });
+fs.mkdirSync(standalone, { recursive: true });
+fs.writeFileSync(path.join(nextDir, 'BUILD_ID'), 'toctou-build');
+fs.writeFileSync(path.join(standalone, 'server.js'), ${JSON.stringify(serverJs)});
+console.log('[fake-next] build complete (toctou fixture)');
+`;
+  }
+
+  function makeApp(prefix: string, serverJs: string): string {
+    const dir = mkdtempSync(join(tmpdir(), prefix));
+    writeFileSync(
+      join(dir, 'package.json'),
+      JSON.stringify({ name: 'toctou-fixture', version: '0.0.0', private: true }, null, 2),
+    );
+    writeFileSync(join(dir, 'next.config.js'), "module.exports = { output: 'standalone' };\n");
+    const nextBin = join(dir, 'node_modules', '.bin', 'next');
+    mkdirSync(join(dir, 'node_modules', '.bin'), { recursive: true });
+    writeFileSync(nextBin, fakeNextWithServer(dir, serverJs));
+    chmodSync(nextBin, 0o755);
+    return dir;
+  }
+
+  function runDeploy(dir: string): { status: number; stdout: string; stderr: string } {
+    const r = spawnSync('bash', [DEPLOY_SH], {
+      cwd: dir,
+      env: {
+        ...process.env,
+        KNEXT_E2E_SKIP_PACK: '1',
+        KNEXT_RUNTIME: 'node',
+        NEXT_TEST_MODE: 'deploy',
+        NEXT_PRIVATE_TEST_MODE: '',
+      },
+      encoding: 'utf8',
+      timeout: 90000,
+    });
+    return { status: r.status ?? -1, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
+  }
+
+  const dirs: string[] = [];
+  afterAll(() => {
+    for (const d of dirs) {
+      if (existsSync(d)) {
+        // cleanup kills the persisted PID (best-effort) before removing the dir.
+        spawnSync('bash', [CLEANUP_SH], {
+          cwd: d,
+          env: { ...process.env },
+          encoding: 'utf8',
+          timeout: 20000,
+        });
+        rmSync(d, { recursive: true, force: true });
+      }
+    }
+  });
+
+  it('refuses to advertise a port that answers but is OWNED BY A SIBLING (pid does not own the port)', () => {
+    // The server process stays ALIVE but never binds; a DETACHED "sibling"
+    // (simulating the concurrent deploy that grabbed the freed port) listens on
+    // the assigned PORT instead. A bare TCP probe succeeds — the old script
+    // printed the URL and the harness tested the sibling's app. The script must
+    // instead fail loudly WITHOUT printing a URL.
+    const squatterServerJs = `
+const { spawn } = require('node:child_process');
+const port = Number(process.env.PORT || 3000);
+const squatter = spawn(process.execPath, ['-e',
+  "const p=Number(process.argv[1]);require('node:http').createServer((q,s)=>s.end('squatter')).listen(p,'0.0.0.0');setTimeout(()=>process.exit(0),15000);",
+  String(port)
+], { detached: true, stdio: 'ignore' });
+squatter.unref();
+// stay alive (pid-liveness passes) but never own the port
+setTimeout(() => process.exit(0), 15000);
+`;
+    const dir = makeApp('knext-e2e-toctou-squat-', squatterServerJs);
+    dirs.push(dir);
+    const r = runDeploy(dir);
+    expect(r.status, `deploy must FAIL when the pid does not own the port\n${r.stderr}`).not.toBe(
+      0,
+    );
+    expect(r.stdout).not.toMatch(/^http:\/\/localhost:\d+/m);
+    expect(r.stderr).toMatch(/not owned|TOCTOU|sibling/i);
+  });
+
+  it('fails fast when the server pid dies before becoming ready (never trusts a later probe)', () => {
+    // The pid-death path: server exits immediately without listening. The
+    // readiness loop must bail with the server log surfaced — and must check
+    // pid-liveness BEFORE trusting any probe result.
+    const dyingServerJs = `
+console.error('fixture server: dying before bind');
+process.exit(1);
+`;
+    const dir = makeApp('knext-e2e-toctou-dead-', dyingServerJs);
+    dirs.push(dir);
+    const r = runDeploy(dir);
+    expect(r.status, 'deploy must FAIL when the server pid died pre-ready').not.toBe(0);
+    expect(r.stdout).not.toMatch(/^http:\/\/localhost:\d+/m);
+    expect(r.stderr).toMatch(/exited before becoming ready/);
+  });
+});
+
 describe('scripts/e2e-deploy.sh — bun-lane RUNTIME_VERSION metadata (#188)', () => {
   const src = readFileSync(DEPLOY_SH, 'utf8');
 

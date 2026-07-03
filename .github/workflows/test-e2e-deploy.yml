@@ -53,13 +53,14 @@ on:
       # runtime=bun bun-version=canary PROVES (or disproves) that attribution
       # with real artifacts — and exercises bun-keepalive-guard.cjs's ≥1.4
       # self-disable path in real CI. DISPATCH-ONLY: the weekly schedule always
-      # runs `latest` (the honest steady-state lane) via the `|| 'latest'`
-      # fallback on the setup-bun step (github.event.inputs is empty on
-      # schedule events). A free string, not a choice, so any oven-sh/setup-bun
+      # runs the PINNED stable (see the setup-bun step's fallback + its bump
+      # policy; #187 follow-up — `latest` floated, misattributing new-Bun
+      # regressions to knext) since github.event.inputs is empty on schedule
+      # events. A free string, not a choice, so any oven-sh/setup-bun
       # spec (canary, a pinned 1.4.0-canary.N, a future stable) works without a
       # workflow edit. Only meaningful with runtime=bun; never selects the lane.
       bun-version:
-        description: 'Bun version for the bun lane (oven-sh/setup-bun spec: latest | canary | e.g. 1.3.2). Dispatch-only; the weekly schedule always uses latest.'
+        description: 'Bun version for the bun lane (oven-sh/setup-bun spec: latest | canary | e.g. 1.3.2). Dispatch-only; the weekly schedule uses the pinned stable (setup-bun fallback).'
         required: false
         type: string
         default: 'latest'
@@ -543,11 +544,20 @@ jobs:
         with:
           # #188 — the dispatch-only bun-version knob (e.g. `canary` to prove the
           # remaining red files are Bun-version-gated). On the weekly schedule
-          # github.event.inputs is empty, so the fallback keeps the steady-state
-          # lane on `latest`. The OBSERVED `bun --version` (what this actually
-          # installed) is captured into the shard summary below — the requested
-          # spec here is not attributable evidence on its own.
-          bun-version: ${{ github.event.inputs.bun-version || 'latest' }}
+          # github.event.inputs is empty, so the fallback below IS the weekly
+          # lane's version. #187 review follow-up: that fallback is PINNED to
+          # the current Bun stable (1.3.14 — the version the bun-lane baseline
+          # and the ≤1.3.x keep-alive/edge-sandbox attributions were measured
+          # on). `latest` floated: a red weekly right after a new Bun release
+          # could be a brand-new-Bun regression misattributed to knext. Bump
+          # this pin DELIBERATELY when a new Bun stable ships — dispatch a
+          # runtime=bun bun-version=<new> re-baseline first, then update the
+          # pin citing that run. The dispatch input still accepts any spec
+          # (canary, a pinned 1.4.0-canary.N, a future stable) without a
+          # workflow edit; the OBSERVED `bun --version` is captured into the
+          # shard summary below — the requested spec here is not attributable
+          # evidence on its own.
+          bun-version: ${{ github.event.inputs.bun-version || '1.3.14' }}
 
       # #147 (the Upload-workspace OOM fix, Option A) — the compat-workspace
       # artifact ships SOURCE ONLY (no node_modules; shipping it OOM'd the upload,
@@ -1298,8 +1308,10 @@ jobs:
       # for them. This step is the teeth: it runs LAST (after the `if: always()`
       # summarize/upload, so the ledger artifact always lands first), reads the
       # shard's OWN summary JSON, and fails the JOB when it carries failed
-      # tests (failed>0) or phantom not-run files (notRun>0) — or when the
-      # summary is missing entirely (no results is NOT green). A red shard
+      # tests (failed>0), phantom not-run files (notRun>0), or a TRUNCATED
+      # result set (#171 follow-up: reported < expectedTotal — a shard killed
+      # mid-run must never read as green) — or when the summary is missing
+      # entirely (no results is NOT green). A red shard
       # fails deploy-tests → on the schedule that fires nightly-red-alert →
       # the flip-back policy in docs/compat-matrix.md. With the flaky family
       # quarantined per-case, green is the steady state: a red job is a real
@@ -1320,7 +1332,9 @@ jobs:
             const s = require("./" + process.argv[1]);
             console.log(
               "shard " + s.shard + ": passed=" + s.passed + " failed=" + s.failed +
-              " notRun=" + s.notRun + " excluded=" + s.excluded + " (ref " + s.ref + ")"
+              " notRun=" + s.notRun + " excluded=" + s.excluded +
+              " expectedTotal=" + (s.expectedTotal ?? "n/a") +
+              " truncated=" + (s.truncated ?? false) + " (ref " + s.ref + ")"
             );
             if ((s.failed ?? 0) > 0 || (s.notRun ?? 0) > 0) {
               console.error(
@@ -1328,6 +1342,19 @@ jobs:
                 ". See the runner.log groups above. Policy: docs/compat-matrix.md " +
                 "(Maintenance & honesty, red-nightly procedure) — if the red persists, " +
                 "flip the official-suite row back to ❌ citing this run."
+              );
+              process.exit(1);
+            }
+            // #171 follow-up: a shard killed mid-run reports PARTIAL results —
+            // summarize() marks it truncated (reported < expectedTotal, the
+            // run-tests.js selection count). Partial results are never green.
+            if (s.truncated === true) {
+              const reported = (s.passed ?? 0) + (s.failed ?? 0) + (s.notRun ?? 0);
+              console.error(
+                "::error::truncated shard — only " + reported + " of expectedTotal=" +
+                s.expectedTotal + " selected tests reported a result (shard killed " +
+                "mid-run?). Missing results are NOT green: triage the runner.log tail " +
+                "and re-run the shard."
               );
               process.exit(1);
             }
@@ -1397,8 +1424,13 @@ jobs:
           need a final-post-retry failure plus an env-parity audit, never a red-nightly
           reflex)."
           # Idempotency: exactly-one open alert issue. Comment on it if present,
-          # create (+ pin, best-effort) only when absent.
-          existing="$(gh issue list --repo "${GITHUB_REPOSITORY}" --state open \
+          # create (+ pin, best-effort) only when absent. #187 follow-up:
+          # --limit 100 explicitly — gh defaults to 30, and with >30 open
+          # issues the pinned alert could fall off the first page, the lookup
+          # would return empty, and every red night would file a NEW issue
+          # (the exact spam this dedup exists to prevent). One parameterized
+          # lookup (${title}) serves BOTH lane titles.
+          existing="$(gh issue list --repo "${GITHUB_REPOSITORY}" --state open --limit 100 \
             --json number,title \
             --jq "[.[] | select(.title == \"${title}\")][0].number // empty")"
           if [ -n "${existing}" ]; then

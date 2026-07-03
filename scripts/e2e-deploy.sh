@@ -512,19 +512,50 @@ SERVER_PID=$!
   echo "BUILD_LOG=${BUILD_LOG}"
 } >"${LOG_FILE}"
 
-# ── 6. TCP-probe readiness ────────────────────────────────────────────────────
+# ── 6. readiness: pid-liveness FIRST, TCP-probe second, port-ownership last ──
+# #171 sys-design follow-up (the free_port TOCTOU): free_port() binds :0 and
+# CLOSES it, and the server re-binds the number — at run-tests.js concurrency 2
+# a SIBLING deploy can grab the freed port in that window. The old loop TCP-
+# probed the port BEFORE checking our pid, so "something accepted on the port"
+# was advertised as OUR deployment even when our server was dead — the harness
+# would then run a whole test file against the WRONG app. Order now:
+#   (a) every iteration checks SERVER_PID liveness BEFORE the probe, so a
+#       probe result is never trusted on behalf of a dead server;
+#   (b) after the probe succeeds, verify SERVER_PID actually OWNS the
+#       listening port (lsof, ss fallback) before printing the URL.
+server_died() { # surface the server log and abort (single exit path)
+  log "ERROR: server process ${SERVER_PID} exited before becoming ready"
+  log "---- server log ----"
+  cat "${SERVER_LOG}" >&2 || true
+  exit 1
+}
+
+# Returns 0 when SERVER_PID owns a LISTEN socket on PORT, 1 when the port is
+# provably owned by someone else, 2 when no tooling is available to tell.
+port_owned_by_server() {
+  if command -v lsof >/dev/null 2>&1; then
+    lsof -nP -a -p "${SERVER_PID}" -iTCP:"${PORT}" -sTCP:LISTEN >/dev/null 2>&1
+    return $?
+  fi
+  if command -v ss >/dev/null 2>&1; then
+    if ss -ltnp 2>/dev/null | grep -F ":${PORT} " | grep -q "pid=${SERVER_PID},"; then
+      return 0
+    fi
+    return 1
+  fi
+  return 2
+}
+
 READY=0
 for _ in $(seq 1 100); do
+  # pid FIRST — a dead server invalidates any probe answer (a sibling may be
+  # squatting the freed port).
+  if ! kill -0 "${SERVER_PID}" 2>/dev/null; then
+    server_died
+  fi
   if node -e "require('net').connect(${PORT},'127.0.0.1').on('connect',()=>process.exit(0)).on('error',()=>process.exit(1))" 2>/dev/null; then
     READY=1
     break
-  fi
-  # bail early if the server process already died
-  if ! kill -0 "${SERVER_PID}" 2>/dev/null; then
-    log "ERROR: server process ${SERVER_PID} exited before becoming ready"
-    log "---- server log ----"
-    cat "${SERVER_LOG}" >&2 || true
-    exit 1
   fi
   sleep 0.3
 done
@@ -533,6 +564,24 @@ if [ "${READY}" != "1" ]; then
   log "ERROR: server never became ready on port ${PORT}"
   cat "${SERVER_LOG}" >&2 || true
   exit 1
+fi
+
+# The probe only proves SOMETHING accepted on the port. Re-check liveness and
+# verify ownership before advertising the URL as OUR deployment.
+if ! kill -0 "${SERVER_PID}" 2>/dev/null; then
+  server_died
+fi
+set +e
+port_owned_by_server
+OWNS=$?
+set -e
+if [ "${OWNS}" = "1" ]; then
+  log "ERROR: port ${PORT} answers but is NOT owned by server pid ${SERVER_PID} — a sibling process grabbed the freed port (free_port TOCTOU); refusing to advertise it"
+  log "---- server log ----"
+  cat "${SERVER_LOG}" >&2 || true
+  exit 1
+elif [ "${OWNS}" = "2" ]; then
+  log "WARNING: neither lsof nor ss available — cannot verify pid ${SERVER_PID} owns port ${PORT} (pid-liveness checks still applied)"
 fi
 
 log "deployment ready: build=${BUILD_ID} deployment=${DEPLOYMENT_ID} pid=${SERVER_PID}"

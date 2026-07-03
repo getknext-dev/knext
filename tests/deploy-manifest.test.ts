@@ -315,6 +315,10 @@ interface KnextQuarantine {
   mechanism: string;
   evidence: string;
   provenance: string;
+  /** The NEXTJS_REF the quarantine evidence was observed at (#181/#172 follow-up). */
+  nextjsRef?: string;
+  /** Set when the entry was re-tested (and re-confirmed) at a NEWER workflow ref. */
+  reaudited?: string;
 }
 
 // Round 3 (run 28596005486, 787 passed / 1 failed): three more family members
@@ -596,6 +600,81 @@ describe('test/deploy-tests-manifest.knext.json — knext-observed flaky quarant
         manifest.suites[file],
         `guard's UPSTREAM_MIRROR_SUITES lists "${file}" but the manifest has no such suites entry`,
       ).toBeTruthy();
+    }
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// #181 sys-design + #172 follow-up — quarantine REF-STAMP expiry gate.
+// A quarantine's licence is its evidence, and that evidence was gathered at a
+// specific harness ref. On a NEXTJS_REF bump the evidence goes stale: the
+// upstream fixture/timings the wobble was observed against may have changed,
+// so ADR-0007's graduation addendum requires re-testing every quarantined case
+// at the new ref. That policy used to live only in prose — nothing FAILED when
+// the workflow ref moved while the ledger stayed stamped at the old one. This
+// gate mechanizes it: every $knextQuarantines entry carries the `nextjsRef` it
+// was quarantined at, and a workflow default-ref bump FAILS this suite until
+// each entry is either re-audited (`reaudited: <newref>`) or re-quarantined
+// with fresh evidence.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('$knextQuarantines ref stamps — re-audit on NEXTJS_REF bump (#181/#172 follow-up)', () => {
+  const WORKFLOW_PATH = resolve(REPO_ROOT, '.github/workflows/test-e2e-deploy.yml');
+  const REF_SHAPE = /^v\d+\.\d+\.\d+$/;
+
+  /** The workflow's DEFAULT pinned ref (what scheduled runs actually test). */
+  function workflowDefaultRef(): string {
+    const src = readFileSync(WORKFLOW_PATH, 'utf8');
+    const m = src.match(
+      /NEXTJS_REF:\s*\$\{\{\s*github\.event\.inputs\.nextjsRef\s*\|\|\s*'([^']+)'\s*\}\}/,
+    );
+    expect(m, 'workflow must derive NEXTJS_REF with a pinned quoted default').not.toBeNull();
+    return (m as RegExpMatchArray)[1];
+  }
+
+  const quarantines: KnextQuarantine[] =
+    (manifest as unknown as { $knextQuarantines?: KnextQuarantine[] }).$knextQuarantines ?? [];
+
+  it('has quarantine entries to stamp (sanity)', () => {
+    expect(quarantines.length).toBeGreaterThan(0);
+  });
+
+  it('every quarantine entry is stamped with the NEXTJS_REF its evidence was observed at', () => {
+    for (const q of quarantines) {
+      expect(
+        typeof q.nextjsRef === 'string' && REF_SHAPE.test(q.nextjsRef),
+        `${q.test}: every $knextQuarantines entry must carry a well-formed nextjsRef stamp (vX.Y.Z), got "${String(
+          q.nextjsRef,
+        )}"`,
+      ).toBe(true);
+    }
+  });
+
+  it('FAILS on a workflow ref bump until each entry is re-audited at the new ref', () => {
+    const ref = workflowDefaultRef();
+    for (const q of quarantines) {
+      const covered = q.nextjsRef === ref || q.reaudited === ref;
+      expect(
+        covered,
+        `${q.test}: quarantined at ${String(q.nextjsRef)} but the workflow default NEXTJS_REF is now ${ref}. ` +
+          `Re-run the quarantined cases at ${ref} (dispatch the compat suite) and either stamp ` +
+          `"reaudited": "${ref}" (wobble re-confirmed / still exonerated) or remove the quarantine. ` +
+          `Never bump the workflow ref past a stale quarantine ledger (ADR-0007 graduation addendum §c, mechanized).`,
+      ).toBe(true);
+    }
+  });
+
+  it('a reaudited marker, when present, is a well-formed ref and not older than the stamp', () => {
+    for (const q of quarantines) {
+      if (q.reaudited === undefined) continue;
+      expect(
+        REF_SHAPE.test(q.reaudited),
+        `${q.test}: reaudited must be a vX.Y.Z ref, got "${q.reaudited}"`,
+      ).toBe(true);
+      expect(
+        q.reaudited,
+        `${q.test}: a reaudited stamp equal to the original nextjsRef is meaningless — drop it`,
+      ).not.toBe(q.nextjsRef);
     }
   });
 });

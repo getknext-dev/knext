@@ -30,10 +30,21 @@
  * `notRun` counter — never as `failed`. (Symmetric to the #164 false-green fix:
  * the summary must tell the TRUTH about what actually executed.)
  *
+ * TRUNCATION (#171 sys-design follow-up): a shard KILLED mid-run (step timeout,
+ * runner eviction) reports the partial results its tee'd runner.log accumulated
+ * — indistinguishable from a complete run. run-tests.js prints its selected-
+ * test count as a `total: N` header at run start (verified in the real-run
+ * fixtures this parser is tested against), so the summary derives
+ * `expectedTotal` from it (or from an explicit --expected-total override) and
+ * flags `truncated: true` whenever passed+failed+notRun < expectedTotal. The
+ * fail-on-red workflow gate fails on truncated — partial results are never
+ * green. Both keys are OMITTED when no selection count is derivable (per-suite
+ * jest runs — that artifact shape stays byte-stable).
+ *
  * Usage (in CI, per shard):
  *   node scripts/e2e-summary.mjs \
  *     --runner-log <path> --ref <gitref> --shard <n/m> --excluded <count> \
- *     --out compat-suite-summary.json
+ *     [--expected-total <n>] --out compat-suite-summary.json
  *
  * The pure `summarize()` export is unit-tested in tests/deploy-summary.test.ts.
  */
@@ -43,8 +54,8 @@ import { readFileSync, writeFileSync } from 'node:fs';
 /**
  * Parse jest-style runner output + run metadata into the summary artifact shape.
  * @param {string} runnerOutput raw stdout from run-tests.js
- * @param {{ref:string, shard:string, excluded:number, runtime?:string, runtimeVersion?:string}} meta
- * @returns {{passed:number, failed:number, notRun:number, excluded:number, ref:string, shard:string, runtime:string, runtimeVersion?:string}}
+ * @param {{ref:string, shard:string, excluded:number, runtime?:string, runtimeVersion?:string, expectedTotal?:number}} meta
+ * @returns {{passed:number, failed:number, notRun:number, excluded:number, ref:string, shard:string, runtime:string, runtimeVersion?:string, expectedTotal?:number, truncated?:boolean}}
  */
 export function summarize(runnerOutput, meta) {
   const text = String(runnerOutput ?? '');
@@ -105,6 +116,22 @@ export function summarize(runnerOutput, meta) {
   const failed = markersPresent ? runTestsFailed.size : matchCount(text, /(\d+)\s+failed/);
   const notRun = runTestsNotRun.size;
 
+  // #171 sys-design follow-up — the TRUNCATION marker. The shard's selected-
+  // test count comes from an explicit meta override (CLI --expected-total)
+  // when given, else from run-tests.js's own `total: N` header (printed at run
+  // start, so it survives in a partial log even when the run is killed later;
+  // anchored to line start so a `… 46 total` jest tally can never match). When
+  // neither is available (per-suite jest runs) BOTH keys are omitted and the
+  // legacy artifact shape is byte-stable.
+  const overrideTotal = Number(meta?.expectedTotal);
+  const totalHeader = text.match(/^total:\s*(\d+)\s*$/m);
+  const expectedTotal =
+    Number.isFinite(overrideTotal) && overrideTotal > 0
+      ? Math.floor(overrideTotal)
+      : totalHeader
+        ? Number(totalHeader[1])
+        : undefined;
+
   return {
     passed,
     failed,
@@ -129,6 +156,13 @@ export function summarize(runnerOutput, meta) {
     // by the workflow's setup-node. Non-string/empty input → absent.
     ...(typeof meta?.runtimeVersion === 'string' && meta.runtimeVersion.trim() !== ''
       ? { runtimeVersion: meta.runtimeVersion.trim() }
+      : {}),
+    // #171 — truncated means "fewer results than the shard's selection count
+    // were reported": a killed shard's partial green must never read as green.
+    // failed AND notRun both count as reported results (a fully-reported red
+    // shard is red, not truncated).
+    ...(expectedTotal !== undefined
+      ? { expectedTotal, truncated: passed + failed + notRun < expectedTotal }
       : {}),
   };
 }
@@ -234,6 +268,10 @@ function main() {
     // #188 — the observed serving-runtime version (bun lane only; "" on node
     // → summarize omits the key). See the shape comment in summarize().
     runtimeVersion: args['runtime-version'],
+    // #171 — optional explicit selected-test count; when absent summarize()
+    // derives it from the runner log's `total: N` header.
+    expectedTotal:
+      args['expected-total'] !== undefined ? Number(args['expected-total']) : undefined,
   });
   writeFileSync(out, `${JSON.stringify(summary, null, 2)}\n`);
   console.log(`[e2e-summary] wrote ${out}: ${JSON.stringify(summary)}`);

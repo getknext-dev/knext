@@ -344,11 +344,112 @@ describe('scripts/e2e-summary.mjs — phantom infra-abort vs real failure (A3-3,
       shard: '3/4',
       excluded: 0,
     });
+    // The run-tests.js log carries the `total:` selection header, so the
+    // truncation-marker keys (#171 follow-up) are part of this shape too.
     expect(Object.keys(s).sort()).toEqual(
-      ['excluded', 'failed', 'notRun', 'passed', 'ref', 'runtime', 'shard'].sort(),
+      [
+        'excluded',
+        'expectedTotal',
+        'failed',
+        'notRun',
+        'passed',
+        'ref',
+        'runtime',
+        'shard',
+        'truncated',
+      ].sort(),
     );
     expect(typeof s.notRun).toBe('number');
     expect(s.notRun).toBe(0);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// #171 sys-design follow-up — the TRUNCATION marker. A shard KILLED mid-run
+// (job/step timeout, runner eviction) reports the partial results its tee'd
+// runner.log accumulated — indistinguishable from a complete run: {passed: 20,
+// failed: 0} looks green even when 25 more selected tests never got to report.
+// run-tests.js prints its selected-test count as a `total: N` header at run
+// start (present verbatim in every faithful fixture above), so the summary can
+// carry `expectedTotal` and flag `truncated: true` whenever fewer results than
+// expected were tallied. The fail-on-red gate then fails on truncated — partial
+// results are never green.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('summarize() truncation marker (#171 sys-design follow-up)', () => {
+  it('derives expectedTotal from the run-tests.js `total:` header; a fully-reported shard is truncated:false', () => {
+    const s = summarize(SAMPLE_DEPLOY_ALL_PASS_OUTPUT, {
+      ref: 'v16.2.0',
+      shard: '3/16',
+      excluded: 0,
+    });
+    expect(s.expectedTotal).toBe(2);
+    expect(s.truncated).toBe(false);
+  });
+
+  it('flags truncated:true when fewer results than expectedTotal were reported (shard killed mid-run)', () => {
+    // 3 selected, but the log ends after ONE pass marker — the other two files
+    // never reported (the exact shape a step-timeout kill leaves behind).
+    const killedMidRun = `
+total: 3
+Starting test/e2e/a/a.test.ts retry 0/2
+test/e2e/a/a.test.ts finished on retry 0/2 in 1.0s
+Starting test/e2e/b/b.test.ts retry 0/2
+`;
+    const s = summarize(killedMidRun, { ref: 'v16.2.0', shard: '1/16', excluded: 0 });
+    expect(s.passed).toBe(1);
+    expect(s.expectedTotal).toBe(3);
+    expect(s.truncated).toBe(true);
+  });
+
+  it('counts failed AND notRun toward the expected total (a fully-reported red shard is NOT truncated)', () => {
+    // total: 2 → 1 real failure + 1 phantom notRun = fully accounted for.
+    const s = summarize(SAMPLE_DEPLOY_PHANTOM_AND_REAL_OUTPUT, {
+      ref: 'v16.2.0',
+      shard: '2/16',
+      excluded: 0,
+    });
+    expect(s.failed).toBe(1);
+    expect(s.notRun).toBe(1);
+    expect(s.expectedTotal).toBe(2);
+    expect(s.truncated).toBe(false);
+  });
+
+  it('omits expectedTotal/truncated when no selection count is derivable (per-suite jest runs)', () => {
+    // The jest-tally path (per-suite runs, #164) has no run-tests.js `total:`
+    // header — the artifact shape for those consumers stays byte-stable.
+    const s = summarize(SAMPLE_RUNNER_OUTPUT, { ref: 'v16.2.0', shard: '1/16', excluded: 0 });
+    expect(Object.keys(s)).not.toContain('expectedTotal');
+    expect(Object.keys(s)).not.toContain('truncated');
+  });
+
+  it('honors an explicit meta.expectedTotal override (CLI --expected-total) over the log header', () => {
+    const s = summarize(SAMPLE_DEPLOY_ALL_PASS_OUTPUT, {
+      ref: 'v16.2.0',
+      shard: '3/16',
+      excluded: 0,
+      expectedTotal: 5,
+    });
+    expect(s.expectedTotal).toBe(5);
+    expect(s.truncated).toBe(true);
+  });
+
+  it('an EMPTY runner log with a known expectedTotal is truncated (a vanished shard is never green)', () => {
+    const s = summarize('', { ref: 'v16.2.0', shard: '1/16', excluded: 0, expectedTotal: 10 });
+    expect(s.expectedTotal).toBe(10);
+    expect(s.truncated).toBe(true);
+  });
+
+  it('coerces a malformed expectedTotal override to absent (artifact stays well-typed)', () => {
+    const s = summarize('no total header here\n', {
+      ref: 'v16.2.0',
+      shard: '1/16',
+      excluded: 0,
+      // @ts-expect-error intentionally malformed input from the CLI boundary
+      expectedTotal: 'not-a-number',
+    });
+    expect(Object.keys(s)).not.toContain('expectedTotal');
+    expect(Object.keys(s)).not.toContain('truncated');
   });
 });
 
