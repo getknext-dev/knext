@@ -9,7 +9,7 @@ name: Operator Supply Chain
 #
 # ORDERING INVARIANT (#201, same class as the app fix in #199/#200):
 # build (local) → SBOM → Trivy gate → push → sign → verify → installer pin →
-# release attach. The image is built into the LOCAL docker store and scanned
+# release attach. The image is built into a LOCAL OCI layout and scanned
 # there; it is pushed to GHCR only AFTER the Trivy HIGH/CRITICAL gate passes,
 # cosign signs the digest of the image that was actually pushed, and the
 # dist/install.yaml release asset bakes in that SAME post-gate pushed digest.
@@ -17,6 +17,14 @@ name: Operator Supply Chain
 # never signed, and never referenced by the operator-latest release bundle.
 # (The previous flow pushed on main at BUILD time, before the scan.)
 # Guarded by tests/operator-supply-chain-workflow.test.ts.
+#
+# PROVENANCE RESTORE (#202): the first scan-before-push flow (#203) used the
+# local `docker` exporter (load: true), which cannot carry buildkit's provenance
+# attestation manifest — so provenance was dropped. Now the build exports an OCI
+# layout DIRECTORY (which CAN carry the attestation), Trivy scans that exact
+# layout (--input), and `crane push` publishes it byte-for-byte, preserving the
+# SLSA provenance manifest. A post-push step asserts the attestation actually
+# survived before anything is signed. Same gate, provenance back.
 #
 # Bootstrap (#76): the operator image at ghcr.io/getknext-dev/kn-next-operator does
 # not exist until the FIRST push to main runs this job. Before that, the manager
@@ -77,11 +85,15 @@ jobs:
 
       - uses: docker/setup-buildx-action@v3
 
-      # Build into the LOCAL docker store on every ref — never push here. The
-      # Trivy gate below scans this local image; publication (main only) happens
-      # in the explicit push step AFTER the gate. This is what guarantees a
-      # scan-failed operator image is never pullable at a stable tag (#201).
-      - name: Build operator image (local only — pushed after the Trivy gate)
+      # Build into a LOCAL OCI-layout directory on every ref — never push here.
+      # The Trivy gate below scans this exact layout; publication (main only)
+      # happens in the explicit crane-push step AFTER the gate. This is what
+      # guarantees a scan-failed operator image is never pullable at a stable
+      # tag (#201). The OCI layout — unlike the `docker` exporter used before —
+      # CAN carry buildkit's provenance attestation manifest, which restores the
+      # SLSA provenance dropped in #203 (#202). tar=false because Trivy's
+      # --input accepts an OCI layout directory but not an OCI tarball.
+      - name: Build operator image (local OCI layout — pushed after the Trivy gate)
         id: build
         uses: docker/build-push-action@v6
         with:
@@ -89,15 +101,29 @@ jobs:
           file: packages/kn-next-operator/Dockerfile
           platforms: linux/amd64
           tags: ${{ env.IMAGE }}:${{ github.sha }}
-          load: true
-          # provenance emits a manifest list the `load` (docker) exporter can't
-          # handle, so the buildkit provenance attestation is dropped in this
-          # scan-before-push flow (same deliberate trade-off as the app image in
-          # #200: gate ordering matters more than the best-effort provenance
-          # manifest; cosign SBOM attestation + keyless signing below still
-          # cover attestations). Honest status: docs/security/threat-model.md
-          # (Repudiate row).
-          provenance: false
+          outputs: type=oci,dest=operator-oci,tar=false
+          # mode=max records the full build definition + materials. Safe here:
+          # this build takes no build-args at all, so nothing secret can be
+          # recorded into the attestation.
+          provenance: mode=max
+
+      # syft cannot parse buildx's nested OCI index (the image + attestation
+      # manifests are wrapped in a second index), so give it a flattened VIEW of
+      # the SAME layout: symlinked blobs (identical bytes), the nested index
+      # promoted to index.json with only the attestation entry dropped. The
+      # image-manifest digest is unchanged, so the SBOM provably describes the
+      # same image the gate scans and crane pushes. SBOM-only — the Trivy GATE
+      # scans the real layout directly.
+      - name: Prepare SBOM view of the OCI layout (syft can't parse nested indexes)
+        run: |
+          set -euo pipefail
+          NESTED="$(jq -r '.manifests[0].digest' operator-oci/index.json | cut -d: -f2)"
+          mkdir operator-oci-sbom
+          ln -s "$(pwd)/operator-oci/blobs" operator-oci-sbom/blobs
+          cp operator-oci/oci-layout operator-oci-sbom/
+          jq '{schemaVersion: 2, mediaType: "application/vnd.oci.image.index.v1+json",
+               manifests: [.manifests[] | select(.annotations["vnd.docker.reference.type"] != "attestation-manifest")]}' \
+            "operator-oci/blobs/sha256/${NESTED}" > operator-oci-sbom/index.json
 
       # output-file is resolved relative to $GITHUB_WORKSPACE (repo root) for a
       # `uses:` step. This is the single canonical SBOM path; upload + attest below
@@ -105,9 +131,11 @@ jobs:
       - name: Generate SBOM (syft, SPDX-JSON)
         # SHA-pinned (#202): sbom-action runs in a job with packages:write +
         # id-token:write, so a mutable tag is a supply-chain hole. v0.24.0.
+        # The oci-dir: source is passed verbatim to syft (verified against the
+        # pinned action source) — the image no longer exists in the docker daemon.
         uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
         with:
-          image: ${{ env.IMAGE }}:${{ github.sha }}
+          image: oci-dir:operator-oci-sbom
           format: spdx-json
           output-file: operator-sbom.spdx.json
 
@@ -127,7 +155,7 @@ jobs:
         # push/sign with this repo's OIDC identity. v0.36.0.
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
-          image-ref: ${{ env.IMAGE }}:${{ github.sha }}
+          input: operator-oci
           severity: HIGH,CRITICAL
           exit-code: "1"
           ignore-unfixed: true
@@ -143,24 +171,69 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # Publish the EXACT bytes that were scanned: `docker push` the locally
-      # built + gated image (no rebuild — a rebuild could diverge from what
-      # Trivy approved). Capture the pushed manifest digest as the step output
-      # that parameterizes signing, verification AND the install.yaml digest
-      # pin below; fail loud if it can't be resolved (we must never sign — or
-      # bake into the release bundle — a guessed digest).
+      # crane pushes the OCI layout (docker push can't — the daemon store drops
+      # the attestation manifest). Pinned to an exact version AND a sha256 of
+      # the release tarball: crane is now on the publish path in a job holding
+      # packages:write + id-token:write, the same discipline that SHA-pinned
+      # trivy-action/sbom-action (#202).
+      - name: Install crane (version + checksum pinned)
+        if: github.ref == 'refs/heads/main'
+        env:
+          CRANE_VERSION: v0.21.7
+          # sha256 of go-containerregistry_Linux_x86_64.tar.gz from the v0.21.7
+          # release's checksums.txt (github.com/google/go-containerregistry).
+          CRANE_SHA256: 1a57bc98207fa1c0d04bf760699099e26f8383499bfd55b99c1b919a928a7230
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /tmp/crane.tar.gz \
+            "https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/go-containerregistry_Linux_x86_64.tar.gz"
+          echo "${CRANE_SHA256}  /tmp/crane.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/crane.tar.gz -C /tmp crane
+          sudo install -m 0755 /tmp/crane /usr/local/bin/crane
+          crane version
+
+      # Publish the EXACT bytes that were scanned: `crane push` the gated OCI
+      # layout (no rebuild — a rebuild could diverge from what Trivy approved),
+      # preserving the buildkit provenance manifest the docker store would drop.
+      # crane prints the pushed `ref@digest` on stdout; capture it as the step
+      # output that parameterizes signing, verification AND the install.yaml
+      # digest pin below, and fail loud if it doesn't parse (we must never sign
+      # — or bake into the release bundle — a guessed digest).
       - name: Push operator image (main only, after the Trivy gate)
         if: github.ref == 'refs/heads/main'
         id: push
         run: |
-          docker push "${IMAGE}:${GITHUB_SHA}"
-          DIGEST="$(docker inspect --format='{{range .RepoDigests}}{{println .}}{{end}}' "${IMAGE}:${GITHUB_SHA}" | grep "^${IMAGE}@" | head -n1 | cut -d'@' -f2)"
-          if [ -z "${DIGEST}" ]; then
-            echo "::error::could not resolve the pushed digest for ${IMAGE}:${GITHUB_SHA} — refusing to sign"
+          set -euo pipefail
+          PUSHED_REF="$(crane push operator-oci "${IMAGE}:${GITHUB_SHA}")"
+          DIGEST="${PUSHED_REF##*@}"
+          if ! printf '%s' "${DIGEST}" | grep -Eq '^sha256:[0-9a-f]{64}$'; then
+            echo "::error::could not resolve the pushed digest for ${IMAGE}:${GITHUB_SHA} (crane output: ${PUSHED_REF}) — refusing to sign"
             exit 1
           fi
           echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
           echo "Pushed ${IMAGE}@${DIGEST}"
+
+      # The point of the OCI-layout + crane flow (#202): prove the buildkit
+      # provenance attestation actually survived the push — and only sign
+      # provenance-bearing images. Fails loud if the pushed index carries no
+      # attestation manifest or the attestation has no SLSA provenance predicate.
+      - name: Verify buildkit provenance survived the push (main only)
+        if: github.ref == 'refs/heads/main'
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          set -euo pipefail
+          ATT_DIGEST="$(crane manifest "${IMAGE}@${DIGEST}" \
+            | jq -re '[.manifests[] | select(.annotations["vnd.docker.reference.type"] == "attestation-manifest")][0].digest')" || {
+            echo "::error::pushed image ${IMAGE}@${DIGEST} carries NO buildkit attestation manifest"
+            exit 1
+          }
+          crane manifest "${IMAGE}@${ATT_DIGEST}" \
+            | jq -re '[.layers[] | select(.annotations["in-toto.io/predicate-type"] | test("slsa.dev/provenance"))][0]' > /dev/null || {
+            echo "::error::attestation manifest ${ATT_DIGEST} carries no SLSA provenance predicate"
+            exit 1
+          }
+          echo "Buildkit SLSA provenance present: ${IMAGE}@${ATT_DIGEST}"
 
       - name: Install cosign
         if: github.ref == 'refs/heads/main'

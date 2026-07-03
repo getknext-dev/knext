@@ -82,7 +82,11 @@ function stepBlock(re: RegExp): string {
 
 const BUILD_RE = /uses:\s*docker\/build-push-action/;
 const TRIVY_RE = /uses:\s*aquasecurity\/trivy-action/;
-const PUSH_RE = /docker\s+push\b/;
+// The gate-ordered publish step is a crane push of the scanned OCI layout
+// (#202); `docker push` would mean the flow regressed to the daemon store,
+// which cannot carry the buildkit provenance manifest.
+const PUSH_RE = /crane\s+push\b/;
+const ANY_PUSH_RE = /(?:crane|docker)\s+push\b/;
 const SIGN_RE = /cosign\s+sign\b/;
 const VERIFY_RE = /cosign-verify\.sh/;
 const INSTALLER_RE = /make\s+build-installer/;
@@ -92,36 +96,58 @@ const RELEASE_RE = /uses:\s*softprops\/action-gh-release/;
 // would false-positive on the bare `push:` workflow trigger key).
 const PUSH_INPUT_RE = /^\s*push:[^\S\n]*(?!false\b)\S/m;
 
+/** The OCI-layout directory the build step writes (`outputs: type=oci,dest=…`). */
+function buildLayoutDest(): string {
+  const build = stepBlock(BUILD_RE);
+  const m = stripComments(build).match(/^\s*outputs:\s*type=oci,dest=([^,\s]+)/m);
+  return m?.[1] ?? '';
+}
+
 describe('operator-supply-chain workflow: nothing is published before the Trivy gate (#201)', () => {
-  it('the build step builds LOCALLY only — it never pushes, on any ref', () => {
+  it('the build step builds LOCALLY only — an OCI layout, never a push, on any ref', () => {
     const build = stepBlock(BUILD_RE);
     expect(build, 'expected a docker/build-push-action step').not.toBe('');
-    // The regression: `push: ${{ github.ref == 'refs/heads/main' }}` published
-    // the operator image before the scan. The build step must load into the
-    // local docker store unconditionally and never push.
+    // #202: the local `docker` exporter (load: true) cannot carry the buildkit
+    // provenance manifest — the build must export an OCI layout DIRECTORY
+    // (tar=false: Trivy's --input rejects OCI tarballs) that is scanned in
+    // place and crane-pushed byte-for-byte after the gate.
     expect(
-      /^\s*load:\s*true\s*$/m.test(build),
-      'the build step must `load: true` unconditionally (scan the local image)',
+      /^\s*outputs:\s*type=oci,dest=\S+,tar=false\s*$/m.test(stripComments(build)),
+      'the build step must export an OCI layout directory (outputs: type=oci,dest=…,tar=false)',
     ).toBe(true);
+    expect(
+      /^\s*load:\s*true\s*$/m.test(stripComments(build)),
+      'the build step must not also load into the docker store — the OCI layout is the single scan+push source',
+    ).toBe(false);
     expect(
       PUSH_INPUT_RE.test(stripComments(build)),
       'the build step must not set push (or must set push: false) — publication happens only after the Trivy gate',
     ).toBe(false);
   });
 
-  it('the Trivy gate runs BEFORE any push to the registry', () => {
+  it('the Trivy gate scans the exact OCI layout that gets pushed, BEFORE any push', () => {
     const trivyIdx = stepIndex(TRIVY_RE);
     const pushIdx = stepIndex(PUSH_RE);
     expect(trivyIdx, 'expected a Trivy scan step').toBeGreaterThanOrEqual(0);
-    expect(pushIdx, 'expected an explicit push step (docker push)').toBeGreaterThanOrEqual(0);
+    expect(pushIdx, 'expected an explicit push step (crane push)').toBeGreaterThanOrEqual(0);
     expect(trivyIdx, 'the Trivy gate must come before the push step').toBeLessThan(pushIdx);
-    // Belt-and-braces: no step before the gate may push (docker push or a
-    // build-push-action push: input that is not literally false).
+    // The gate must consume the SAME layout directory the build wrote — that
+    // is the scan-the-bytes-you-push invariant in one line.
+    const dest = buildLayoutDest();
+    expect(dest, 'expected the build step to declare an OCI layout dest').not.toBe('');
+    const trivy = stepBlock(TRIVY_RE);
+    expect(
+      new RegExp(`^\\s*input:\\s*${dest}\\s*$`, 'm').test(stripComments(trivy)),
+      `the Trivy step must scan the build's OCI layout via input: ${dest}`,
+    ).toBe(true);
+    // Belt-and-braces: no step before the gate may push (crane/docker push or
+    // a build-push-action push: input that is not literally false).
     for (const block of stepBlocks().slice(0, trivyIdx)) {
       const content = stripComments(block);
-      expect(PUSH_RE.test(content), 'no step before the Trivy gate may run `docker push`').toBe(
-        false,
-      );
+      expect(
+        ANY_PUSH_RE.test(content),
+        'no step before the Trivy gate may run `crane push`/`docker push`',
+      ).toBe(false);
       expect(
         PUSH_INPUT_RE.test(content),
         'no step before the Trivy gate may enable a registry push',
@@ -144,17 +170,21 @@ describe('operator-supply-chain workflow: nothing is published before the Trivy 
     }
   });
 
-  it('the push step is main-gated, comes after the gate, and captures the PUSHED digest fail-loud', () => {
+  it('the push step is main-gated, crane-pushes the scanned layout, and captures the PUSHED digest fail-loud', () => {
     const push = stepBlock(PUSH_RE);
-    expect(push, 'expected a docker push step').not.toBe('');
+    expect(push, 'expected a crane push step').not.toBe('');
     expect(
       /if:\s*github\.ref\s*==\s*'refs\/heads\/main'/.test(push),
       'the push step must be gated to main',
     ).toBe(true);
     expect(/^\s*id:\s*push\s*$/m.test(push), 'the push step must have id: push').toBe(true);
+    const dest = buildLayoutDest();
     expect(
-      /digest=.*GITHUB_OUTPUT|>>\s*"?\$GITHUB_OUTPUT"?/.test(push) &&
-        /RepoDigests|digest/.test(push),
+      new RegExp(`crane\\s+push\\s+"?${dest}"?\\s`).test(stripComments(push)),
+      `the push step must crane-push the exact layout Trivy scanned (${dest})`,
+    ).toBe(true);
+    expect(
+      /digest=.*GITHUB_OUTPUT|>>\s*"?\$GITHUB_OUTPUT"?/.test(push) && /digest/i.test(push),
       'the push step must expose the pushed digest as a step output',
     ).toBe(true);
     expect(
@@ -237,6 +267,94 @@ describe('operator release asset (install.yaml) is gated behind the Trivy gate +
       /if:\s*github\.ref\s*==\s*'refs\/heads\/main'/.test(release),
       'the release-attach step must be gated to main',
     ).toBe(true);
+  });
+});
+
+// ── #202: buildkit provenance restored via OCI-layout build + crane push ───────
+// PR #203 moved the operator build to the local docker exporter (load: true) so
+// Trivy gates the exact bytes before any publish — but that exporter cannot
+// carry buildkit's provenance attestation manifest, so `provenance: false` was
+// set and the drop documented in docs/security/threat-model.md. The restore
+// path (noted there): export an OCI layout (which CAN carry the attestation),
+// scan the layout in place, and crane-push the layout byte-for-byte after the
+// gate.
+
+// The provenance-check step is the one that runs `crane manifest` AND greps for
+// the attestation manifest (the SBOM-view step also mentions attestation-manifest
+// in its jq filter, so the matcher must require both).
+const PROV_CHECK_RE = /crane\s+manifest[\s\S]*attestation-manifest/;
+
+describe('operator buildkit provenance is restored without weakening the gate (#202)', () => {
+  it('the build step enables provenance (mode=max) — provenance: false is banned', () => {
+    const build = stripComments(stepBlock(BUILD_RE));
+    expect(
+      /^\s*provenance:\s*mode=max\s*$/m.test(build),
+      'the build step must set provenance: mode=max (no secret build-args; max records the full build definition + materials)',
+    ).toBe(true);
+    expect(
+      /^\s*provenance:\s*false\s*$/m.test(stripComments(workflowText())),
+      'provenance: false must be gone from the workflow',
+    ).toBe(false);
+  });
+
+  it('crane is version-pinned AND checksum-verified before it may push (same discipline as the #202 action pins)', () => {
+    const crane = stepBlock(/CRANE_VERSION/);
+    expect(crane, 'expected a crane install step (CRANE_VERSION env)').not.toBe('');
+    expect(
+      /CRANE_VERSION:\s*v\d+\.\d+\.\d+/.test(crane),
+      'crane must be pinned to an exact version',
+    ).toBe(true);
+    expect(
+      /CRANE_SHA256:\s*[0-9a-f]{64}/.test(crane),
+      'the crane tarball must be pinned by sha256',
+    ).toBe(true);
+    expect(
+      /sha256sum\s+(-c|--check)/.test(stripComments(crane)),
+      'the crane install must verify the checksum (sha256sum -c) before installing',
+    ).toBe(true);
+    expect(stepIndex(/CRANE_VERSION/), 'crane must be installed before the push step').toBeLessThan(
+      stepIndex(PUSH_RE),
+    );
+  });
+
+  it('the SBOM is generated from the same OCI layout blobs (oci-dir source), not the docker daemon', () => {
+    const sbom = stepBlock(/uses:\s*anchore\/sbom-action/);
+    expect(sbom, 'expected an anchore/sbom-action step').not.toBe('');
+    expect(
+      /^\s*image:\s*oci-dir:\S+/m.test(stripComments(sbom)),
+      'sbom-action must scan an oci-dir: source (the image no longer exists in the docker daemon)',
+    ).toBe(true);
+  });
+
+  it('a post-push step asserts the provenance attestation SURVIVED the push, fail-loud, before signing', () => {
+    const check = stepBlock(PROV_CHECK_RE);
+    expect(
+      check,
+      'expected a post-push provenance check step (crane manifest → attestation-manifest)',
+    ).not.toBe('');
+    const checkIdx = stepIndex(PROV_CHECK_RE);
+    expect(checkIdx, 'the provenance check must come after the push').toBeGreaterThan(
+      stepIndex(PUSH_RE),
+    );
+    expect(
+      checkIdx,
+      'the provenance check must gate signing (sign only provenance-bearing images)',
+    ).toBeLessThan(stepIndex(SIGN_RE));
+    const content = stripComments(check);
+    expect(
+      /if:\s*github\.ref\s*==\s*'refs\/heads\/main'/.test(check),
+      'the provenance check must be main-gated (nothing was pushed on PRs)',
+    ).toBe(true);
+    expect(
+      /steps\.push\.outputs\.digest/.test(check),
+      'the provenance check must inspect the digest that was actually pushed',
+    ).toBe(true);
+    expect(/crane\s+manifest\b/.test(content), 'must inspect via crane manifest').toBe(true);
+    expect(
+      /slsa\.dev\/provenance/.test(content),
+      'must assert the SLSA provenance predicate is present, not just any attestation manifest',
+    ).toBe(true);
+    expect(/exit\s+1/.test(content), 'the provenance check must fail loud').toBe(true);
   });
 });
 
