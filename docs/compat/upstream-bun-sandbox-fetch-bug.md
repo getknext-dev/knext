@@ -119,7 +119,7 @@ class once the WAN is removed.** Two consequences:
    cheaper intermediate probe: extend the A/B workflow with a WAN-endpoint knob and/or a
    long-lived-server many-request mode to test (a)/(b) directly on the same infra.
 
-## Path 2 (2026-07-03): instrument a red shard IN THE FULL HARNESS — instrumentation shipped, dispatch in flight
+## Path 2 (2026-07-03): instrument a red shard IN THE FULL HARNESS — executed; host-realm observation is bun-blocked (a NEW bun bug), sandbox fetch ≠ bun-native fetch
 
 Path 1's clean 0/80 moved the mechanism into whatever the minimal reduction omits
 (WAN endpoint / pool state / harness-scale load). Path 2 therefore instruments the
@@ -168,13 +168,71 @@ ways. Workaround shipped: in debug mode `scripts/e2e-deploy.sh` boots the
 for its own upstream report once minimized further; the three-line repro is in
 the PR discussion.)
 
-**Evidence run:** dispatched `runtime=bun bun-version=1.3.14 sandboxFetchDebug=true`
-on this branch — results to be recorded below when the run completes.
+### Path 2 results (run [28657820369](https://github.com/getknext-dev/knext/actions/runs/28657820369), bun 1.3.14, `sandboxFetchDebug=true`, 2026-07-03)
 
-TODO(#188): fill in the instrumented-shard findings for
-`middleware-fetches-with-any-http-method` (where the fetch stalls) once the
-dispatch completes; then decide: fileable repro / knext-side workaround /
-upstream-with-CI-evidence.
+The lane executed as designed and the target reproduced: shard 4/16 carried
+`middleware-fetches-with-any-http-method`, both cases hung 60s on all 3
+harness attempts (the record is now **7/7 bun-lane runs red** on this file),
+the server chain-booted through the instrumentation
+(`[sandbox-fetch-debug] installed (runtime=bun 1.3.14 …) — subscribed 9 undici
+channels`), `BUN_CONFIG_VERBOSE_FETCH=curl` was exported, and teardown shipped
+the debug output. The rest of the run matched the known bun baseline (shards
+8/11 = the not-found invariant pair; no perturbation from the debug lane).
+
+**The instrumented result is a calibrated null:** across the ENTIRE run — and
+in the hung fixture's complete server log (it fits whole inside the 16 KiB
+teardown tail) —
+
+- **zero `undici:*` diagnostics events** were observed (0 matches in 22.7k
+  surfaced log lines; 15 `installed` markers prove the subscriptions were
+  live), and
+- **zero `BUN_CONFIG_VERBOSE_FETCH` output** for the middleware fetches.
+
+**Local calibration (same instrumented boot, same next@16.2.0 standalone tree,
+local echo — what makes the null meaningful instead of a shrug):**
+
+| Observation | node 24 | bun 1.3.x |
+|---|---|---|
+| middleware fetch outcome | resolves (200/405 echoed) | resolves (200/405 echoed) |
+| `undici:*` events seen by the host-realm subscriber | **full 7-phase lifecycle per fetch** (create → beforeConnect → connected → sendHeaders → bodySent → headers → trailers) | **ZERO** |
+| `BUN_CONFIG_VERBOSE_FETCH=curl` output for the middleware fetch | n/a | **ZERO** (control: a plain bun-native `fetch()` under the same env prints the full curl transcript) |
+
+So the CI zeros do NOT mean "the fetch never dispatched" — under bun **even a
+successful sandbox fetch is invisible** to host-realm diagnostics_channel
+subscribers and to bun's native-fetch verbosity. Three hard conclusions:
+
+1. **The sandbox fetch under bun is NOT bun's native fetch** (verbose-fetch
+   control). It is the undici bundled into next's edge-runtime, running over
+   bun's node-compat `net`/`tls` inside the sandbox realm — that stack is where
+   the CI hang lives, and the keep-alive/pool hypothesis class stays live.
+2. **Bun defect class isolated (new, independently fileable): diagnostics_channel
+   subscriber state is realm-local under bun, process-global under node.** Two
+   observables: (a) the `-r` preload repro above (3 lines, deterministic,
+   bun 1.3.x: `hasSubscribers === false` on the main side for a preload-made
+   subscription, identical module object); (b) publishes from the
+   sandbox-evaluated undici never reach main-realm subscribers, under bun only
+   (mechanism inferred from (a); the observable is the table above).
+3. **Path 2's instrument-from-outside design is structurally blocked under
+   bun** by (2): no host-side preload can ever see the sandbox undici's phases
+   on the runtime where the hang happens. The instrumentation itself is
+   correct — the node lane shows the full lifecycle through the identical
+   wiring.
+
+### Path 3 (what a deeper probe needs)
+
+- **In-realm instrumentation:** debug-lane-only, patch
+  `next/dist/server/web/sandbox/context.js` at deploy time to (i) wrap the
+  HOST-realm `context.fetch` wrapper (the wrapper function itself is created
+  host-side; only the base `__fetch` lives in the sandbox realm) with
+  entry/settled timestamps — that alone discriminates "stall before dispatch"
+  vs "`__fetch`'s promise never settles"; and (ii) evaluate a
+  diagnostics_channel subscriber INSIDE the sandbox realm so the bundled
+  undici's phases become visible in-realm and can be logged out through a
+  host-side function handle.
+- **Or unblock path 2 upstream first:** file the diagnostics_channel
+  realm-locality bug against oven-sh/bun with the 3-line `-r` repro — it is
+  deterministic, discriminating (node clean), and fixing it would make the
+  existing instrumentation work as designed on the bun lane.
 
 ## Repro app (the vehicle for a future discriminating attempt)
 
@@ -300,7 +358,13 @@ To become fileable, one of:
    CI runner class, so the divergence lives in something the reduction omits (WAN endpoint /
    pool state, harness-scale load — see the hypotheses above).
 2. **Instrument a red CI shard** (packet capture / `strace` around the hung middleware fetch)
-   to name the syscall-level difference. **← now the primary path.**
+   to name the syscall-level difference. **EXECUTED 2026-07-03 (the path-2 section above,
+   run 28657820369): the harness-scale instrumentation worked, the red reproduced (7/7),
+   but host-realm observation is structurally blocked under bun — its diagnostics_channel
+   subscriber state is realm-local (a NEW, independently fileable bun bug with a 3-line
+   repro), and the sandbox fetch is proven NOT to be bun-native fetch. Next: path 3
+   (in-realm instrumentation) and/or file the diagnostics_channel bug to unblock path 2's
+   design.**
 3. Failing both, file with **suite-level** evidence only ("Next.js's official e2e deploy tests
    X and Y hang under `bun server.js`, pass under `node server.js`; six-run record") and be
    explicit that the standalone reduction does not yet transfer — weakest option, last resort;
