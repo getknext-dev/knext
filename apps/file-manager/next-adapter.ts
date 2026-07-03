@@ -4,7 +4,8 @@
  * The adapter implementation moved into @knext/core (#89) so the official Next.js
  * compatibility harness can point arbitrary fixture apps at it via NEXT_ADAPTER_PATH.
  * This file is now a thin re-export — no behavior change. next.config.ts still wires
- * it through experimental.adapterPath.
+ * it through the top-level `adapterPath` config (graduated out of `experimental` at
+ * next 16.2).
  *
  * The `NextAdapter` type reference below keeps the official-adapter contract visible
  * at the app boundary (and satisfies the adapter-migration regression test). It is a

@@ -40,9 +40,11 @@ const nextConfig: NextConfig = {
     formats: ['image/avif', 'image/webp'],
     remotePatterns: [],
   },
+  // NextAdapter wired in P0; kept for onBuildComplete reporting. GRADUATED out of
+  // `experimental` at next 16.2 (the loader auto-migrates experimental.adapterPath
+  // with a warning, but the app's own type-check rejects the old key).
+  adapterPath: path.resolve(import.meta.dirname, 'next-adapter.ts'),
   experimental: {
-    // NextAdapter wired in P0; kept here for onBuildComplete reporting.
-    adapterPath: path.resolve(import.meta.dirname, 'next-adapter.ts'),
     serverActions: {
       allowedOrigins: ['localhost:8080', 'next-home.default.136.111.227.195.sslip.io'],
     },

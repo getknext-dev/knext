@@ -3,7 +3,7 @@ name: knext-app
 description: >-
   Turn a Next.js app into a deployable knext zone by wiring the @knext/core public
   surface: the KnativeNextConfig type for kn-next.config.ts, the official Next.js
-  deployment adapter (@knext/core/adapter via experimental.adapterPath), the ISR
+  deployment adapter (@knext/core/adapter via the top-level adapterPath config), the ISR
   Redis cache handler (@knext/core/adapters/cache-handler via next.config
   cacheHandler), and OpenTelemetry wiring (resolveOtelOptions in
   instrumentation.ts). Use this skill whenever configuring a Next.js app for
@@ -57,14 +57,17 @@ import path from 'node:path';
 
 export default {
   output: 'standalone',                                  // knext runs the standalone server
-  experimental: { adapterPath: '@knext/core/adapter' },  // the official knext adapter
+  adapterPath: '@knext/core/adapter',                    // the official knext adapter (top-level at Next.js 16.2+)
   cacheHandler: path.resolve(import.meta.dirname, 'cache-handler.js'),
   assetPrefix: process.env.ASSET_PREFIX || '',           // injected at deploy (object-store CDN)
 };
 ```
 
-- `@knext/core/adapter` is the official Next.js **deployment adapter**
-  (`experimental.adapterPath`). Do not hand-roll a runtime.
+- `@knext/core/adapter` is the official Next.js **deployment adapter**, wired via
+  the top-level `adapterPath` config. On Next.js 16.0.x–16.1.x the option lives
+  under `experimental` instead (`experimental: { adapterPath: ... }`); 16.2+
+  auto-migrates that old key but 16.0.x does NOT accept the top-level form.
+  Do not hand-roll a runtime.
 - Next.js requires `cacheHandler` to be a **file path**, so ship a thin local
   re-export (next item).
 

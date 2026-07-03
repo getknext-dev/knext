@@ -19,7 +19,7 @@ Recommend an option — don't just enumerate.
 
 ## 4. Established hard rules (north star)
 - **Official Next.js Deployment Adapter API only.** Target `NextAdapter`
-  (`experimental.adapterPath`, `modifyConfig` + `onBuildComplete`). Do NOT reverse-engineer
+  (`adapterPath` — top-level since next 16.2, `experimental.*` on ≤16.1; `modifyConfig` + `onBuildComplete`). Do NOT reverse-engineer
   Nitro/Vinext or hand-roll a runtime. The vinext/`bun --compile` path is **deprecated**.
 - **The Go operator (`packages/kn-next-operator`) is the single source of truth for cluster
   state** (ADR-001). Nothing else may mutate cluster resources out-of-band.

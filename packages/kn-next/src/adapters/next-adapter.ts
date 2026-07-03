@@ -26,6 +26,31 @@ import type { NextAdapter } from "next";
 import type { AdapterOutputs } from "next/dist/build/adapter/build-complete";
 import { healBunExportTargets } from "./standalone-bun-exports";
 
+/** The onBuildComplete ctx as typed by the installed next (16.2.x): carries `routing`. */
+type OnBuildCompleteCtx = Parameters<
+    NonNullable<NextAdapter["onBuildComplete"]>
+>[0];
+
+/**
+ * LEGACY 16.0.x ctx shape (#171 follow-up). peerDependencies.next is >=16.0.0,
+ * so a 16.0.x consumer hands us a ctx with `routes` and NO `routing`. The 16.2
+ * types dropped `routes`, so this documents the legacy field for the runtime
+ * tolerance below. Types-only modernization: the runtime must keep counting
+ * whichever shape is present (guarded by adapter-onbuildcomplete-shape.test.ts).
+ */
+type Legacy160RoutesCtx = {
+    routes?: {
+        headers?: unknown;
+        redirects?: unknown;
+        rewrites?: {
+            beforeFiles?: unknown;
+            afterFiles?: unknown;
+            fallback?: unknown;
+        };
+        dynamicRoutes?: unknown;
+    };
+};
+
 const adapter: NextAdapter = {
     name: "knext-adapter",
 
@@ -60,44 +85,44 @@ const adapter: NextAdapter = {
         };
 
         // Routing DIAGNOSTICS — tolerate both adapter-API ctx shapes (#147 fix
-        // round 1 follow-up). Ground truth, probed against real `next build`s:
+        // round 1 follow-up; typed ctx.routing since the 16.2.x devDep bump).
+        // Ground truth, probed against real `next build`s:
         //   v16.0.3: ctx.routes  { headers, redirects, rewrites:{beforeFiles,
         //            afterFiles, fallback}, dynamicRoutes }
-        //   v16.2.0: ctx.routing { beforeMiddleware, beforeFiles, afterFiles,
-        //            dynamicRoutes, onMatch, fallback, ... } — ctx.routes is GONE.
+        //   v16.2.x: ctx.routing { beforeMiddleware, beforeFiles, afterFiles,
+        //            dynamicRoutes, onMatch, fallback, ... } — ctx.routes is GONE
+        //            (and is now the OFFICIAL typed shape on NextAdapter).
         // The old unconditional `routes.headers.length` crashed EVERY fixture
         // build at 16.2.0 (`TypeError: ... reading 'headers'`), killing the
         // whole compat run. Diagnostics must never kill a build: count whatever
         // shape is present, defensively.
         const len = (v: unknown): number => (Array.isArray(v) ? v.length : 0);
-        const ctxAny = ctx as unknown as {
-            routes?: Record<string, unknown> & {
-                rewrites?: Record<string, unknown>;
-            };
-            routing?: Record<string, unknown>;
-        };
+        // Legacy runtime field — see Legacy160RoutesCtx. The types say `routing`
+        // is always there; on a 16.0.x consumer it isn't, so both reads stay guarded.
+        const legacyRoutes = (ctx as OnBuildCompleteCtx & Legacy160RoutesCtx)
+            .routes;
+        const routing: OnBuildCompleteCtx["routing"] | undefined = ctx.routing;
         const routingCounts: Record<string, number> = {};
-        if (ctxAny.routes) {
-            const routes = ctxAny.routes;
-            routingCounts.headers = len(routes.headers);
-            routingCounts.redirects = len(routes.redirects);
+        if (legacyRoutes) {
+            routingCounts.headers = len(legacyRoutes.headers);
+            routingCounts.redirects = len(legacyRoutes.redirects);
             routingCounts.rewritesBeforeFiles = len(
-                routes.rewrites?.beforeFiles,
+                legacyRoutes.rewrites?.beforeFiles,
             );
-            routingCounts.rewritesAfterFiles = len(routes.rewrites?.afterFiles);
-            routingCounts.rewritesFallback = len(routes.rewrites?.fallback);
-            routingCounts.dynamicRoutes = len(routes.dynamicRoutes);
-        } else if (ctxAny.routing) {
-            for (const key of [
-                "beforeMiddleware",
-                "beforeFiles",
-                "afterFiles",
-                "dynamicRoutes",
-                "onMatch",
-                "fallback",
-            ]) {
-                routingCounts[key] = len(ctxAny.routing[key]);
-            }
+            routingCounts.rewritesAfterFiles = len(
+                legacyRoutes.rewrites?.afterFiles,
+            );
+            routingCounts.rewritesFallback = len(
+                legacyRoutes.rewrites?.fallback,
+            );
+            routingCounts.dynamicRoutes = len(legacyRoutes.dynamicRoutes);
+        } else if (routing) {
+            routingCounts.beforeMiddleware = len(routing.beforeMiddleware);
+            routingCounts.beforeFiles = len(routing.beforeFiles);
+            routingCounts.afterFiles = len(routing.afterFiles);
+            routingCounts.dynamicRoutes = len(routing.dynamicRoutes);
+            routingCounts.onMatch = len(routing.onMatch);
+            routingCounts.fallback = len(routing.fallback);
         }
 
         console.log("[knext-adapter] onBuildComplete fired");
@@ -113,7 +138,7 @@ const adapter: NextAdapter = {
             console.log(`    ${key.padEnd(22)}: ${count}`);
         }
         console.log(
-            `  routing counts (${ctxAny.routes ? "ctx.routes" : ctxAny.routing ? "ctx.routing" : "none present"}):`,
+            `  routing counts (${legacyRoutes ? "ctx.routes" : routing ? "ctx.routing" : "none present"}):`,
         );
         for (const [key, count] of Object.entries(routingCounts)) {
             console.log(`    ${key.padEnd(22)}: ${count}`);

@@ -26,7 +26,7 @@ App: `apps/file-manager/` (demo). Docs: `docs/` (ARCHITECTURE.md is **stale** re
 ## Key files (verified)
 - **Adapter:** `apps/file-manager/next-adapter.ts` — `NextAdapter` with `modifyConfig`
   (forces `output:'standalone'`) + `onBuildComplete` (uploads static/prerenders by `buildId`).
-  Registered via `experimental.adapterPath` in `apps/file-manager/next.config.ts:21-23`.
+  Registered via the top-level `adapterPath` in `apps/file-manager/next.config.ts` (graduated out of `experimental` at next 16.2).
 - **Cache:** `packages/kn-next/src/adapters/cache-handler.js` — **Redis-backed** ISR/data cache
   (in-memory fallback when `REDIS_URL` unset). *ISR cache is Redis, NOT GCS.*
 - **Runtime:** `packages/kn-next/src/adapters/node-server.ts` — **still Nitro-coupled** (legacy;
