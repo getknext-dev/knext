@@ -1,16 +1,26 @@
-# Upstream Bun finding: edge-sandbox outbound `fetch()` hangs under the bun lane (persists on 1.4.0) — NOT yet fileable
+# Upstream Bun finding: edge-sandbox outbound `fetch()` hangs under the bun lane (persists on 1.4.0) — FILEABLE (path 3 found the discriminating repro)
 
-**Status:** **REAL PER CI EVIDENCE, BUT DO NOT FILE YET.** The knext compat suite's controlled
-A/B (bun lane red on exactly these tests across six runs including Bun 1.4.0, node lane green
-on the same tests/infra/endpoint) says something Bun-specific is wrong. But a 2026-07-03
-local reproduction campaign (details below) could **not** produce a standalone repro that
-discriminates Bun from Node — in the test environment the same middleware fetches
-intermittently hang under Node too. An upstream report whose repro also hangs under Node
-would be dismissed on arrival. A 2026-07-03 GHA-hosted controlled A/B (same runner class as
-the CI evidence, WAN eliminated — see its section below) went further: the minimal repro
-does not hang under EITHER runtime there (0/40 vs 0/40), so the reduction not only fails to
-discriminate, it fails to reproduce. Filing is blocked on a discriminating repro; a draft
-skeleton is kept at the bottom. Filing is a maintainer decision — never filed automatically.
+**Status:** **FILEABLE — the hang phase is named and a deterministic, discriminating,
+next-free repro exists (path 3, 2026-07-03; see its section below).** The phase verdict from
+in-realm instrumentation of a red CI shard (run 28661219608): the sandbox fetch does NOT
+stall before dispatch, at connect, at TLS, or awaiting headers — it **resolves with status
+200**; the hang is the **response body**: the socket dies mid-body, the bundled undici
+publishes `undici:request:error`, and the body promise (`text()`) **neither resolves nor
+rejects**. The isolated bug: **real undici JS running over bun's node-compat sockets never
+settles an errored response body** (node rejects `text()` with "terminated"; bun hangs
+forever) — 25 lines, local server, deterministic on bun 1.3.5/1.3.14/1.4.0-canary, no next,
+no vm, no WAN. Filing is a maintainer decision — never filed automatically; the filled draft
+skeleton is at the bottom.
+
+Historical context (why this took three paths): the 2026-07-03 local reproduction campaign
+could not produce a discriminating repro at the app level — in that environment the same
+middleware fetches intermittently hung under Node too. The GHA-hosted controlled A/B (path 1)
+went further: the minimal app-level repro did not hang under EITHER runtime (0/40 vs 0/40).
+Path 2's host-side instrumentation was structurally blind under bun (calibrated null). The
+app-level reductions all failed because they probed the wrong layer: the trigger is a
+mid-body connection death (WAN-endpoint-dependent, hence unreproducible against clean local
+echoes), and the hang is the error-swallow underneath it (runtime-level, hence invisible to
+any reduction that never errored a body).
 
 ## The finding (CI-grade evidence)
 
@@ -19,7 +29,12 @@ server booted on **bun** instead of node, outbound `fetch()` from Next's edge-ru
 (middleware / edge routes run through `next/dist/compiled/edge-runtime` — undici compiled
 into the bundle, executed under `node:vm`, wrapped by `next/dist/server/web/sandbox`)
 **never resolves** for the affected test cases: the middleware awaits forever, the harness
-times out at 60s, and the server log shows **zero** exceptions.
+times out at 60s, and the server log shows **zero** exceptions. (Path-3 precision, 2026-07-03:
+the `fetch()` promise itself RESOLVES — it is the response **body** promise that never
+settles; the middleware's combined `await fetch(...)` + `await response.text()` is what hangs.
+Two other mechanism corrections along the way: the bundled undici executes **host-side**, not
+under `node:vm` — primitives `load()` runs in the host realm and its objects are injected into
+the context — and it reaches the network through bun's node-compat `net`/`tls`.)
 
 Affected files and the evidence trail (#188, PR #189 rounds 1–3):
 
@@ -230,25 +245,148 @@ subscribers and to bun's native-fetch verbosity. Three hard conclusions:
    instrumentation itself is correct — the node lane shows the full lifecycle
    through the identical wiring.
 
-### Path 3 (what a deeper probe needs)
+## Path 3 (2026-07-03): in-realm instrumentation — EXECUTED; the hang phase is named and a discriminating repro exists
 
-- **In-realm instrumentation:** debug-lane-only, patch
-  `next/dist/server/web/sandbox/context.js` at deploy time to (i) wrap the
-  HOST-realm `context.fetch` wrapper (the wrapper function itself is created
-  host-side; only the base `__fetch` lives in the sandbox realm) with
-  entry/settled timestamps — that alone discriminates "stall before dispatch"
-  vs "`__fetch`'s promise never settles"; and (ii) evaluate a
-  diagnostics_channel subscriber INSIDE the sandbox realm so the bundled
-  undici's phases become visible in-realm and can be logged out through a
-  host-side function handle.
-- **Or file the isolated bun bug upstream:** the **`bun -r` preload-graph
-  diagnostics_channel subscription loss** — lead with the 3-line `-r` repro
-  (deterministic, node-clean, module-identity confirmed) and frame it as
-  preload-graph-local, NOT "realm-local" (the vm counter-probe disproves the
-  broader framing). NOTE the honest limit: fixing it unblocks `-r`-based
-  tooling but does NOT by itself explain observable (b) (the sandbox-fetch
-  invisibility has a separate, unisolated mechanism), so path 3's in-realm
-  instrumentation remains the route to the hang itself.
+Executed as PR #207: the debug lane (same dispatch-only `sandboxFetchDebug` input, #206's
+plumbing) additionally patches the FIXTURE's staged standalone
+`next/dist/server/web/sandbox/context.js` (v16.2.0, two verified-unique anchors:
+`const __fetch = context.fetch;` and `return context;` inside `extend`) with a hook that
+loads `@knext/core/internal/sandbox-fetch-realm-debug` and wraps
+
+- next's host-realm `context.fetch` wrapper (entry/settled), and
+- the base primitives `__fetch` (entry/settled + `body.<method>()` start/done),
+
+with per-call timestamps, a stall watchdog naming the **last seen phase** of any call
+in-flight >20s, process-wide `net`/`tls` connect instrumentation (dns/tcp/tls/first-byte/
+error/close per socket), and an `undici:*` diagnostics_channel subscription made from
+**inside next's require graph**. (One mechanism precision over the earlier path-3 sketch:
+the bundled undici does not "live in the sandbox realm" — `@edge-runtime/primitives`
+`load()` executes in the HOST realm inside `next/dist/compiled/edge-runtime` and its objects
+are injected into the vm context, so the whole fetch stack is instrumentable host-side once
+you sit at the right graph position.) Calibrated on a SUCCESS case first (local echo,
+patched real standalone tree): full phase chain under node 24 AND bun 1.3.5; zero output
+with the env off.
+
+### Path 3 results (run [28661219608](https://github.com/getknext-dev/knext/actions/runs/28661219608), bun 1.3.14, `sandboxFetchDebug=true`, 2026-07-03)
+
+The red reproduced (now **8/8 bun-lane runs** on `middleware-fetches-with-any-http-method`;
+both cases, 60s timeouts, all attempts) and the patch applied on every fixture. The in-realm
+transcript for a hanging middleware fetch (labeled excerpt, attempt 1, pid 15703 — all 7
+captured middleware fetches in the file show the identical sequence):
+
+```
+context-fetch#1 call POST https://next-data-api-endpoint.vercel.app/api/echo-headers
+base-fetch#2    call POST https://next-data-api-endpoint.vercel.app/api/echo-headers
+dc undici:request:create POST …/api/echo-headers
+dc undici:client:beforeConnect
+socket#1 tls next-data-api-endpoint.vercel.app:443 connect() called (+0ms)
+socket#1 … dns lookup -> 216.198.79.131 +37ms
+socket#1 … tcp connected +62ms
+socket#1 … tls secureConnect +90ms
+dc undici:client:connected
+dc undici:client:sendHeaders POST …
+dc undici:request:bodySent POST …
+socket#1 … first bytes received (441B) +203ms
+dc undici:request:headers POST …
+dc undici:request:error POST …                      <- undici errors the BODY, post-headers
+base-fetch#2    resolved status=200 +220ms          <- the fetch promise RESOLVED fine
+context-fetch#1 resolved status=200 +221ms
+base-fetch#2    body.text() start
+socket#1 … error aborted +215ms                     <- the socket dies mid-body
+socket#1 … closed hadError=true +216ms
+socket#2 … connect()/connected (replacement socket; idles out 4s later)
+WATCHDOG: STALLED 30s at phase=base-fetch:body.text()
+WATCHDOG: STALLED 60s … 240s at phase=base-fetch:body.text()   <- text() NEVER settles
+```
+
+**The phase verdict:** no stall before dispatch, none at DNS/TCP/TLS, none awaiting headers.
+The fetch **resolves (status 200)**; the socket then errors (`aborted`) right after the
+first response bytes; undici publishes `undici:request:error`; and **`text()` neither
+resolves nor rejects** — the middleware awaits it forever. Zero `rejected` lines in the
+whole run. Corroboration with an internal control: `app-static`'s edge page
+(`/variable-revalidate-edge/post-method-request`, the other documented red) shows 47
+`body.text()` starts, 40 `done`, **7 never settle — every unsettled one preceded by
+`undici:request:error`** (10 total), 0 rejections: the swallow is per-request, and clean
+bodies complete normally in the same process.
+
+Two bun-specific layers separate:
+
+1. **The trigger (unisolated):** under bun, the WAN echo connection dies mid-body
+   (`aborted`, `hadError=true`) right after headers — the node lane on the identical
+   infra/endpoint shows no such aborts (lane green). This overlaps the documented bun
+   keep-alive/socket class. Why bun's socket aborts there is NOT yet isolated and is
+   environment-dependent (clean local echoes never abort — which is exactly why paths 0/1
+   could not reproduce).
+2. **The hang (ISOLATED, deterministic, fileable):** an errored response body never settles
+   its consumer promise — see the repro below. Layer 2 converts layer 1 from a catchable
+   error (node: `text()` rejects "terminated"; middleware would 500) into an infinite hang.
+
+### The discriminating repro (next-free, local, deterministic)
+
+Real undici JS over bun's node-compat sockets, local HTTP server that sends headers plus a
+partial body then destroys the socket. NOTE: `require('undici')` under bun is aliased to
+bun's NATIVE fetch (which rejects, with a bun-branded message) — the bug needs the real
+undici JS, so require the package's entry **file** directly:
+
+```js
+// undici-file-repro.cjs — npm i undici@5 (or @7; both reproduce)
+'use strict';
+const http = require('node:http');
+const { fetch } = require('./node_modules/undici/index.js'); // NOT require('undici'): bun aliases that to native fetch
+
+const server = http.createServer((req, res) => {
+  res.writeHead(200, { 'content-type': 'application/json', 'content-length': '1000' });
+  res.write('{"partial":'); // fewer bytes than content-length
+  setTimeout(() => res.socket.destroy(), 50); // kill the connection mid-body
+});
+
+server.listen(0, '127.0.0.1', async () => {
+  const port = server.address().port;
+  const res = await fetch(`http://127.0.0.1:${port}/`, { method: 'POST' });
+  console.log(`fetch resolved status=${res.status}`);
+  const timer = setTimeout(() => { console.log('VERDICT: text() DID NOT SETTLE in 10s (hang)'); process.exit(2); }, 10_000);
+  try { console.log('VERDICT: text() resolved:', await res.text()); }
+  catch (err) { console.log('VERDICT: text() rejected:', err && err.message); }
+  clearTimeout(timer); process.exit(0);
+});
+```
+
+Verbatim verdict matrix (5/5 deterministic per cell where repeated):
+
+| Runtime | undici under test | VERDICT |
+|---|---|---|
+| node 24.14.0 (darwin-arm64) | next@16.2.0 bundled primitives `load({}).fetch` | `text() rejected: terminated` |
+| node 24.14.0 (darwin-arm64) | undici@5.29.0 (file require) | `text() rejected: terminated` |
+| node 24.14.0 (darwin-arm64) | undici@7.28.0 (file require) | `text() rejected: terminated` |
+| bun 1.3.5 (darwin-arm64) | next@16.2.0 bundled primitives `load({}).fetch` | **`text() DID NOT SETTLE in 10s (hang)`** |
+| bun 1.3.5 (darwin-arm64) | undici@5.29.0 / undici@7.28.0 (file require) | **hang** |
+| bun 1.3.14 (linux docker — the CI pin) | undici@5.29.0 (file require) | **hang** |
+| bun 1.4.0 canary (linux docker) | undici@5.29.0 (file require) | **hang** |
+| bun 1.3.5 | `require('undici')` (bun's alias → native fetch) | rejects with bun's own "socket connection was closed unexpectedly" — control proving the alias is NOT the buggy path |
+
+This is the discrimination criterion the verdict section demanded: bun hangs 100%, node
+rejects 100%, same script, no WAN, no next.
+
+### Path-3 side datapoint: the bun diagnostics_channel invisibility is graph-position-dependent
+
+In the SAME server process (pid 15703), the path-2 host-side subscriber (the chain-boot
+entry module) saw **zero** `undici:*` events — reconfirming the path-2 null — while the
+path-3 in-realm subscriber (required from inside `next/dist`'s graph by the patched
+context.js) received **every** phase of every sandbox fetch, with
+`require('diagnostics_channel') === require('node:diagnostics_channel')` true. So under bun,
+diagnostics_channel delivery depends on the subscriber's REQUIRE-GRAPH POSITION relative to
+the publisher, not on the process: observable (b) from path 2 is now scoped to
+"entry-module-graph subscribers do not receive publishes from `next/dist/compiled`'s graph"
+— sibling of the proven `-r` preload-graph loss, still its own fileable bun bug.
+
+### Run-hygiene note (honesty)
+
+Shards 3 and 7 of run 28661219608 went red as **truncated** (49/50 and 48/49 selected tests
+reported; every reported test passed net of retries — shard 3's `segment-cache-basic`
+recovered on retry 1, a known bun-lane wobble class). Truncation is a shard-kill/time
+failure mode, not a new test red; the instrumented run is slower (verbose logs + 60s hangs ×
+retries), which plausibly contributes. The debug lane is dispatch-only, so the steady-state
+lanes are unaffected; noted so nobody reads shards 3/7 as new regressions.
 
 ## Repro app (the vehicle for a future discriminating attempt)
 
@@ -357,11 +495,23 @@ GET /?kind=new-request: 200 resolved={"url":"/api/echo-headers","he
   (`middleware-fetches-with-any-http-method`, `app-static`'s POST-fetch case). Swapping
   `context.fetch` out from under the sandbox was rejected during the campaign — it would break
   inline-asset fetches (`fetchInlineAsset`).
-- **Not Bun-version-gated away:** still red on the 1.4.0 canary run 28622051531.
+- **Mechanism now named (path 3):** the hang is layer 2 above — an errored response body that
+  never settles under bun. A knext-side workaround CANDIDATE exists but is deliberately not
+  built in this round: a bun-lane-only response-body watchdog (reject the body promise when
+  the underlying socket has errored) would convert the 60s hangs into catchable errors, but it
+  patches deep inside the sandbox fetch path and the correct fix is upstream; revisit only if
+  the bun row must go green before the upstream fix ships.
+- **Not Bun-version-gated away:** still red on the 1.4.0 canary run 28622051531, and the
+  path-3 repro hangs on 1.4.0-canary too.
 - The compat-matrix Bun row (`docs/compat-matrix.md`) carries this as a named reason the row
   stays ❌. Watch: weekly bun lane (Sunday 05:17 UTC).
 
-## Verdict: blocked on a discriminating repro — do not file yet
+## Verdict: FILEABLE — path 3 delivered the discriminating repro (2026-07-03)
+
+The blocking condition below is met by path 3: the phase is named (errored response body
+never settles its consumer promise under bun) and the next-free repro discriminates
+deterministically (bun hangs 100% on 1.3.5/1.3.14/1.4.0-canary; node rejects 100%). Filing
+remains a maintainer decision. The historical path record:
 
 To become fileable, one of:
 
@@ -387,29 +537,40 @@ To become fileable, one of:
    explicit that the standalone reduction does not yet transfer — weakest option, last resort;
    after path 1's clean 0/80 this option is weaker still, since we now hold controlled
    evidence that the minimal mechanism is NOT bun-broken in isolation.
+4. **Path 3 (EXECUTED 2026-07-03, PR #207, run 28661219608): in-realm instrumentation named
+   the phase (body-consumption; fetch resolves, `text()` never settles after a mid-body
+   socket error) and the reduction at THAT layer discriminates: real undici JS (bundled or
+   npm, @5 and @7) over bun's node-compat sockets hangs deterministically where node
+   rejects "terminated" — the repro in the path-3 section fills the [REQUIRED] slot below.**
 
-## Issue draft skeleton (oven-sh/bun) — DO NOT FILE until a discriminating repro exists
+## Issue draft (oven-sh/bun) — repro slot FILLED by path 3; filing is a maintainer decision
 
-**Title:** Outbound `fetch()` from Next.js's edge-runtime sandbox (bundled undici under
-`node:vm`) never resolves under `bun server.js`; same build passes under Node
+**Title:** undici's `fetch()` response body never settles (`text()` hangs forever) when the
+connection dies mid-body under Bun's node-compat sockets; Node rejects with "terminated"
 
-**Body (fill the bracketed evidence before filing):**
+**Body:**
 
-> Running Next.js's official e2e deploy tests against a standalone build served with
-> `bun server.js`, outbound HTTPS `fetch()` calls from edge middleware never resolve —
-> `test/e2e/middleware-fetches-with-any-http-method` (both the plain-`fetch` and
-> `new Request` cases) and an edge-page POST-fetch case in `test/e2e/app-dir/app-static` time
-> out at 60s with no server-side exception. The identical build served with `node server.js`
-> passes every one of these cases on the same infrastructure (six paired CI runs; red on Bun
-> 1.3.14 and on 1.4.0 canary).
+> Real undici JS (npm `undici@5` or `@7`, and the copy bundled into Next.js's edge runtime)
+> running under Bun: when the server closes the connection after the response headers but
+> before the body completes, `fetch()` resolves normally (status 200) but the response body
+> promise (`res.text()`) **neither resolves nor rejects — it hangs forever**. Under Node the
+> same script rejects with `terminated`. Deterministic (5/5 per runtime) on Bun 1.3.5
+> (darwin-arm64), 1.3.14 and 1.4.0-canary (linux, `oven/bun` images); local HTTP server, no
+> TLS, no network dependency. NOTE the repro requires requiring undici's entry **file**
+> (`./node_modules/undici/index.js`) — `require('undici')` is aliased to Bun's native fetch,
+> which handles this case correctly (rejects) and is not the buggy path.
 >
-> **Repro:** [REQUIRED — attach the discriminating repro transcript from a controlled
-> environment: repro app + N-runs-per-runtime hang counts showing bun-hangs/node-clean.
-> Until that exists this report must not be filed. Path-1 attempt 2026-07-03 (GHA-hosted
-> A/B, local HTTPS echo, run 28650729775) produced 0/40 hangs on BOTH runtimes — the
-> minimal reduction does not reproduce; this slot cannot be filled from it.]
+> **Repro:** [the `undici-file-repro.cjs` script in the path-3 section above — paste
+> verbatim, plus the verdict matrix table.]
 >
-> **Impact:** Next.js middleware / edge routes that make outbound requests (auth token
-> exchanges, webhooks, revalidation pings) stall when the app is served with Bun.
+> **Impact (how we found it):** Next.js's official e2e deploy tests served with
+> `bun server.js` — `test/e2e/middleware-fetches-with-any-http-method` (both cases) and an
+> edge-page POST-fetch case in `test/e2e/app-dir/app-static` hang 60s and time out on every
+> bun-lane run (8/8 CI record), pass under `node server.js` on identical infra. In-realm
+> instrumentation of the red shard (GHA run 28661219608) shows the exact sequence: fetch
+> resolves 200 → socket errors (`aborted`) mid-body → undici publishes
+> `undici:request:error` → `text()` never settles. Any Next.js middleware/edge route making
+> outbound requests stalls instead of erroring whenever a connection dies mid-body.
 >
-> **Expected:** the sandboxed `fetch()` resolves or rejects, as under Node.
+> **Expected:** the errored body rejects `text()` (as under Node), so callers can catch and
+> retry instead of hanging.

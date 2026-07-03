@@ -2689,3 +2689,71 @@ describe('compat-suite sandbox-fetch debug knob (test-e2e-deploy.yml, #188 path 
     ).toBe(true);
   });
 });
+
+// ── #188 path 3 — the IN-REALM sandbox-fetch instrumentation (context.js patch) ──
+// Path 2's calibrated null proved a host-realm main-graph diagnostics_channel
+// subscriber cannot see the sandbox fetch under bun; path 3 patches the
+// FIXTURE's staged standalone next/dist/server/web/sandbox/context.js (debug
+// lane only) to wrap the sandbox-realm fetch wiring from INSIDE. These guards
+// pin the containment: the patch is harness-side, applied ONLY inside the
+// dispatch-only KNEXT_SANDBOX_FETCH_DEBUG=1 gate — the steady-state deploy
+// (both scheduled lanes, every default dispatch) never touches the fixture's
+// installed next.
+describe('compat-suite sandbox-fetch REALM debug (path 3 containment, #188)', () => {
+  const deployScript = readFileSync(resolve(REPO_ROOT, 'scripts/e2e-deploy.sh'), 'utf8');
+  /** The body of the `if [ "${KNEXT_SANDBOX_FETCH_DEBUG:-0}" = "1" ]` gate. */
+  function deployDebugGate(): string {
+    const m = deployScript.match(
+      /if \[ "\$\{KNEXT_SANDBOX_FETCH_DEBUG:-0\}" = "1" \];? then([\s\S]*?)\nfi/,
+    );
+    return m ? m[1] : '';
+  }
+
+  it('e2e-deploy.sh patches the fixture context.js ONLY inside the KNEXT_SANDBOX_FETCH_DEBUG=1 gate', () => {
+    const gate = deployDebugGate();
+    expect(gate, 'the debug gate must exist').not.toBe('');
+    expect(
+      /patchSandboxContext/.test(gate),
+      'the gate must invoke the context.js patcher (patchSandboxContext)',
+    ).toBe(true);
+    expect(
+      /export KNEXT_SANDBOX_FETCH_REALM_DEBUG_MODULE=/.test(gate),
+      'the gate must export the realm-debug module path for the patched hook',
+    ).toBe(true);
+    const outside = deployScript.replace(gate, '');
+    expect(
+      /patchSandboxContext/.test(outside),
+      'the patcher must never be invoked outside the env gate (steady state untouched)',
+    ).toBe(false);
+    expect(
+      /export KNEXT_SANDBOX_FETCH_REALM_DEBUG_MODULE=/.test(outside),
+      'the realm-debug module env must never be exported outside the gate',
+    ).toBe(false);
+  });
+
+  it('the realm-debug module resolves from the installed @knext/core tarball (with in-repo fallback)', () => {
+    expect(
+      /@knext\/core\/internal\/sandbox-fetch-realm-debug/.test(deployScript),
+      'the deploy script must resolve the realm-debug module from the installed package',
+    ).toBe(true);
+    expect(
+      /packages\/kn-next\/src\/adapters\/sandbox-fetch-realm-debug\.cjs/.test(deployScript),
+      'contract-test mode must fall back to the in-repo source module',
+    ).toBe(true);
+  });
+
+  it('e2e-cleanup.sh ships the [sandbox-fetch-realm] lines inside its existing debug gate', () => {
+    const cleanup = readFileSync(resolve(REPO_ROOT, 'scripts/e2e-cleanup.sh'), 'utf8');
+    const m = cleanup.match(/if \[ "\$\{KNEXT_SANDBOX_FETCH_DEBUG:-0\}" = "1" \][\s\S]*?\nfi/);
+    expect(m, 'the cleanup debug gate must exist').not.toBeNull();
+    expect(
+      /sandbox-fetch-realm/.test(m?.[0] ?? ''),
+      'the gated teardown block must surface the [sandbox-fetch-realm] server-log lines',
+    ).toBe(true);
+    const outside = cleanup.replace(m?.[0] ?? '', '');
+    expect(
+      /sandbox-fetch-realm/.test(outside),
+      'the realm lines must not be shipped outside the gate',
+    ).toBe(false);
+  });
+});

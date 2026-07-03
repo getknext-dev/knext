@@ -51,16 +51,16 @@ fi
 SERVER_LOG="$(grep -E '^SERVER_LOG=' "${LOG_FILE}" 2>/dev/null | head -n1 | cut -d= -f2- || true)"
 SERVER_LOG="${SERVER_LOG:-${APP_DIR}/.adapter-server.log}"
 
-# ── #188 path 2 — ship the sandbox-fetch instrumentation at teardown ─────────
+# ── #188 paths 2+3 — ship the sandbox-fetch instrumentation at teardown ──────
 # The dispatch-only debug lane (KNEXT_SANDBOX_FETCH_DEBUG=1, see e2e-deploy.sh)
-# writes [sandbox-fetch-debug] phase lines into the server log; the generic
-# 16KiB tail below can crop them on a chatty server, so surface them
-# explicitly (bounded — run-tests.js trims output groups around 64KiB). This
-# block is inert on every scheduled/default run (env unset).
+# writes host-side (path 2) and in-realm (path 3) phase lines into the server
+# log; the generic 16KiB tail below can crop them on a chatty server, so
+# surface them explicitly (bounded — run-tests.js trims output groups around
+# 64KiB). This block is inert on every scheduled/default run (env unset).
 if [ "${KNEXT_SANDBOX_FETCH_DEBUG:-0}" = "1" ] && [ -f "${SERVER_LOG}" ]; then
-  echo "==== sandbox-fetch-debug instrumentation (last 300 lines; KNEXT_SANDBOX_FETCH_DEBUG=1) ====" >&2
-  grep -a "\[sandbox-fetch-debug\]" "${SERVER_LOG}" 2>/dev/null | tail -n 300 >&2 || true
-  echo "==== end of sandbox-fetch-debug instrumentation ====" >&2
+  echo "==== sandbox-fetch instrumentation (last 400 lines; KNEXT_SANDBOX_FETCH_DEBUG=1) ====" >&2
+  grep -aE "\[sandbox-fetch-debug\]|\[sandbox-fetch-realm\]" "${SERVER_LOG}" 2>/dev/null | tail -n 400 >&2 || true
+  echo "==== end of sandbox-fetch instrumentation ====" >&2
 fi
 
 if [ -f "${SERVER_LOG}" ]; then

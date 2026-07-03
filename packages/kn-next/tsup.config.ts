@@ -106,6 +106,9 @@ export default defineConfig([
       // #188 path 2 — opt-in edge-sandbox fetch instrumentation (inert unless
       // KNEXT_SANDBOX_FETCH_DEBUG=1; dispatch-only compat investigation lane).
       'adapters/sandbox-fetch-debug': 'src/adapters/sandbox-fetch-debug.cjs',
+      // #188 path 3 — IN-REALM sandbox-fetch instrumentation: patched into the
+      // fixture's next sandbox context.js by e2e-deploy.sh (same debug gate).
+      'adapters/sandbox-fetch-realm-debug': 'src/adapters/sandbox-fetch-realm-debug.cjs',
     },
     format: ['cjs'],
     platform: 'node',
