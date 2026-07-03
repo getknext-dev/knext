@@ -53,7 +53,11 @@ Alertmanager (`61-alertmanager.yaml`) to a receiver.
 | `ComputePhantomKeepalive` (warn) | connections never idle for 30m (state-based) | An app pool holds connections open — see [connecting](connecting.md#connection-pooling-rules) sizing rule. Blocks scale-to-zero. |
 | `BackupJobFailed` (crit) | a Job owned by the **backup** CronJob failed | The daily off-cluster mirror did not complete — check `kubectl -n scale-zero-pg logs job/<backup-job>`; a restore would be stale. |
 | `WalJanitorJobFailed` (crit) | a Job owned by the **wal-janitor** CronJob failed | The WAL trimmer stalled — `/safekeeper` WAL will regrow and slow restores past 60min (#19/#41). Check pageserver reachability at 02:30. |
+| `WalJanitorStale` (crit) | last successful janitor run >26h old | The janitor **silently stopped** producing runs (no Failed Job) — schedule misses / backlog. `/safekeeper` is regrowing; restore RTO is slipping. Check `kubectl -n scale-zero-pg get cronjob wal-janitor` (suspend? schedule?) and the last `wal-janitor-*` Job. (#49) |
 | `BackupStale` (crit) | last successful backup >26h old | >1 missed daily run — the off-cluster copy is stale. Investigate the CronJob before it becomes a data-loss window. |
+| `BackupStaleAbsent` (crit) | backup has **never** succeeded, or is suspended/deleted | The last-success metric is absent — `BackupStale` is blind here. Treat as **no off-cluster backup at all**: un-suspend / redeploy the CronJob and force a run. (#51) |
+| `WalJanitorStaleAbsent` (crit) | janitor has **never** succeeded, or is suspended/deleted | The last-success metric is absent — `WalJanitorStale` is blind here. `/safekeeper` WAL is unbounded: un-suspend / redeploy the CronJob and force a run. (#49/#51) |
+| `KubeStateMetricsDown` (crit) | `up{job=kube-state-metrics}==0` or absent for 2m | **Sev-1.** KSM (`deploy/59`) is the sole producer for `BackupJobFailed`, `WalJanitorJobFailed`, `BackupStale`, `WalJanitorStale`, `PageserverStandbyNotReady`, `ComputeWakeStuck` — while it is down **all of them are blind**. Restore KSM before trusting any platform alert. (#48) |
 | `PswatcherDown` (crit) | `up{job="pswatcher"}==0` for 2m | The failover authority is down — a primary pageserver death now degrades to the manual runbook (below). Restart pswatcher. |
 | `PswatcherPromotionFired` (crit) | `pswatcher_promotions_total` rose in 10m | A **failover happened** — the promoted standby is now the sole read authority with NO standby behind it. Rebuild a standby. |
 | `PswatcherPrimaryDown` (warn) | `pswatcher_primary_up==0` for 1m | The watcher can't reach the **current read authority**. Pre-failover that's the primary (a promotion may be ~6s away); **post-failover the watcher re-anchors this metric onto the promoted standby** (#25), so it now also covers "the promoted node is the unguarded SPOF and just died." Check the current authority / watcher↔pageserver network. |
@@ -63,6 +67,18 @@ Alertmanager (`61-alertmanager.yaml`) to a receiver.
 CronJob rules match by **exact owner name** (`kube_job_owner{owner_name="backup"}` /
 `"wal-janitor"`), not a loose `backup.*` regex — so a failing `wal-janitor` is
 never missed (the gap that re-opened the #19 DR blocker).
+
+**Every silent failure mode is now covered, not just "a Job ran and Failed":**
+- **silent-stop** — a CronJob that stops *scheduling* (suspend, backlog, missed
+  deadlines) creates no Job, so `*JobFailed` never trips. The `*Stale` rules catch it
+  via the CronJob's own last-success timestamp (#49).
+- **never-succeeded / suspended** — `kube_cronjob_status_last_successful_time` does
+  not exist until the first success and is gone when suspended/deleted, so `*Stale`
+  itself goes blind. The `*StaleAbsent` companions page on `absent(...)` **or**
+  `kube_cronjob_spec_suspend==1` (#51).
+- **dead producer** — every rule above reads kube-state-metrics series; if KSM dies
+  they all go silent. `KubeStateMetricsDown` guards the producer itself, symmetric to
+  `PswatcherDown` (#48).
 
 ### Receiver — testable sink by default, real pager one flip away
 
@@ -85,8 +101,20 @@ Prove the whole pager path any time:
 - `sh deploy/_verify-cronjob-alerting.sh` — a **real failing CronJob** pages via
   kube-state-metrics → the exact owner-name rule → Alertmanager → sink, and
   asserts the KSM + pswatcher scrape targets are UP.
+- `sh deploy/_verify-ksm-down.sh` — scales kube-state-metrics to 0 and asserts
+  `KubeStateMetricsDown` reaches the sink, then restores it (the producer self-guard,
+  #48).
 
 Quick look without Prometheus: `sh deploy/_metrics.sh`.
+
+**Drift drill — "exists" vs "healthy" (issues #27/#51).** `sh deploy/_verify-drift.sh`
+asserts every Deployment/StatefulSet/CronJob declared in `deploy/NN-*.yaml` is not just
+**present** on the cluster (closing merged≠deployed) but **healthy**: for
+Deployments/StatefulSets `readyReplicas == spec.replicas` (which correctly accepts the
+scale-to-zero compute — `0 ready == 0 desired`), and CronJobs are **not suspended**.
+Existence-only was blind to a deployed-yet-CrashLoopBackOff workload — e.g. a
+crash-looping kube-state-metrics would have passed "exists" while blinding five platform
+alerts. Now a 0-ready or suspended load-bearing workload fails the drill.
 
 ## Durability model (what you can lose, and when)
 
@@ -314,12 +342,27 @@ from raw safekeeper WAL.
 daily at **02:30** (30 min before the 03:00 backup, so the next `mc mirror
 --remove` propagates the trim to the OCI copy the same night):
 1. an initContainer reads `remote_consistent_lsn` from the pageserver and writes
-   the threshold segment name (`segno(rcl) − KEEP_SEGMENTS`, as a 24-hex WAL
-   filename) — **fail-closed**: if `remote_consistent_lsn` can't be read the job
+   the **TLI-independent** threshold suffix (`segno(rcl) − KEEP_SEGMENTS` as a 16-hex
+   `LOGID+SEG`) — **fail-closed**: if `remote_consistent_lsn` can't be read the job
    aborts and prunes nothing;
-2. the `mc` container deletes only complete 16 MiB segment objects whose 24-hex
-   name sorts *strictly before* the threshold (fixed-width hex sorts in LSN
-   order), keeping the tail + all partials.
+2. the `mc` container **derives the timeline id(s)** from the segment names actually
+   present (the first 8 hex of each 24-hex name is the TLI) and, per timeline, deletes
+   only complete 16 MiB segments whose name sorts *strictly before* that timeline's
+   threshold (`<TLI> + suffix`; fixed-width hex sorts in LSN order), keeping the tail
+   + all partials. It **fails loud** (exits non-zero → pages via `WalJanitorJobFailed`)
+   if the bucket listing errors or no TLI can be derived — never exit-0-having-pruned-
+   nothing.
+
+> **Why the TLI is derived, not `1` (issue #42).** WAL segment object names are
+> `<TLI><LOGID><SEG>` (24 hex). The janitor used to hardcode `TLI=1`. A neon timeline
+> **promotion** bumps the TLI (`00000002…`); those segments sort *above* a `TLI=1`
+> threshold and would **never** be pruned — the janitor would keep exiting `0` while
+> `/safekeeper` regrew unbounded (silent success, invisible to the Failed-Job alert).
+> Deriving the TLI from the segment set and pruning per-timeline closes that. Today's
+> single-timeline compute has one TLI (`00000001`); the logic now generalises without
+> a code change. The safety direction is unchanged — a wrong/extra TLI only ever keeps
+> **more** WAL, never deletes needed WAL. The runtime drill `deploy/_verify-wal-janitor.sh`
+> proves the invariants against the live plane.
 
 Run it on demand (and preview first with `DRY_RUN`):
 
@@ -342,15 +385,30 @@ A supervised live prune on 2026-07-03 reclaimed **325 of 357 segments (~5.2 GB;
 reads/writes verified healthy immediately after. Tune the horizon by editing
 `KEEP_SEGMENTS` on the `resolve-horizon` initContainer.
 
-**How to tell the janitor has stalled (issue #41).** A scheduled `wal-janitor`
-run that fails (pageserver unreachable at 02:30, etc.) fires the
-`WalJanitorJobFailed` alert (critical) within one missed schedule — the janitor
-is fail-closed, so a persistent failure silently lets `/safekeeper` regrow.
+**How to tell the janitor has stalled (issues #41/#49).** Three alerts, one per
+failure mode — see the [alert table](#alert-rules--what-each-means-and-the-3am-action):
+- a scheduled run that **Fails** (pageserver unreachable at 02:30, listing error, etc.)
+  fires `WalJanitorJobFailed` within one missed schedule (the janitor is fail-closed
+  *and* fail-loud, so a persistent failure never regrows `/safekeeper` silently);
+- a janitor that **silently stops scheduling** (suspend, controller backlog, missed
+  deadlines) produces no Job at all — caught by `WalJanitorStale` (last success >26h);
+- a janitor that has **never once succeeded, or is suspended/deleted** (no last-success
+  metric) — caught by `WalJanitorStaleAbsent`.
+
 Manual check: `kubectl -n scale-zero-pg get jobs -l app` and look at the last
 `wal-janitor-*` Job's status, or query
 `kube_job_status_failed * on(namespace,job_name) group_left(owner_name) kube_job_owner{owner_name="wal-janitor"}`
 in Prometheus. Trend the prefix size from the janitor's own logs (it prints the
 segment count each run).
+
+**Prove the prune logic is safe before a DR event.** `deploy/_verify-wal-janitor.sh`
+runs the *real* janitor against the live plane and asserts: (A) fail-closed — with the
+pageserver unreachable the Job exits non-zero and deletes nothing; (B) it prunes
+**only** complete segments strictly below `segno(rcl) − KEEP_SEGMENTS`, deletes every
+seeded below-horizon segment, and preserves every `.partial` and every at/above-horizon
+segment; (C) it is idempotent (a second run reports "nothing to prune"). This is the
+gate that catches a prune-set off-by-one (hex width, TLI, sort boundary) before it can
+destroy WAL the writable restore needs.
 
 ## Pageserver failover
 

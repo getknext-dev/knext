@@ -156,7 +156,15 @@ grep -q 'KEEP_SEGMENTS' 62-backup.yaml || fail "62 wal-janitor must expose a KEE
 grep -q 'remote_consistent_lsn' 62-backup.yaml || fail "62 wal-janitor must derive its prune threshold from remote_consistent_lsn"
 grep -q 'partial' 62-backup.yaml || fail "62 wal-janitor must exclude .partial WAL (the live durability tail)"
 grep -q 'index_part.json' 62-backup.yaml || fail "62 backup must verify pageserver index integrity post-mirror (issue #21)"
-ok "wal-janitor bounds safekeeper WAL (issue #19) + backup self-heals torn index (issue #21)"
+# issue #42: the prune threshold's TLI must be DERIVED from the segment names, not
+# hardcoded to 1 (a promotion bumps the TLI and a TLI=1 threshold silently stops
+# pruning). Assert the hardcode is gone, the derivation is present, and the janitor
+# fails LOUD (not exit-0-having-pruned-nothing) if the bucket listing errors.
+grep -qE "printf '%08X%08X%08X' 1 " 62-backup.yaml && fail "62 wal-janitor still hardcodes TLI=1 in the prune threshold (issue #42) — derive it from the segment set"
+grep -q 'threshold_suffix' 62-backup.yaml || fail "62 wal-janitor must emit a TLI-independent LOGID+SEG threshold_suffix (issue #42)"
+grep -q 'cut -c1-8' 62-backup.yaml || fail "62 wal-janitor must derive the timeline id(s) from the 24-hex segment names (issue #42)"
+grep -q 'mc ls failed' 62-backup.yaml || fail "62 wal-janitor must fail-LOUD (exit nonzero) when the bucket listing errors, not exit 0 pruning nothing (issue #42)"
+ok "wal-janitor bounds safekeeper WAL (issue #19), derives TLI per-timeline + fails loud (issue #42), backup self-heals torn index (issue #21)"
 
 # 17. contract: kube-state-metrics (59) is the CronJob/Deployment/STS metric
 #     PRODUCER the janitor/backup/failover alerts key off (issues #29/#41/#23).
@@ -187,6 +195,15 @@ grep -q 'alert: PswatcherDown' 60-prometheus.yaml || fail "60 missing PswatcherD
 grep -q 'alert: PswatcherPromotionFired' 60-prometheus.yaml || fail "60 missing promotion-fired alert (#23)"
 grep -q 'alert: PageserverStandbyNotReady' 60-prometheus.yaml || fail "60 missing standby-not-ready alert"
 grep -q 'alert: ComputeWakeStuck' 60-prometheus.yaml || fail "60 missing wake-path-stuck alert"
+# issue #49: wal-janitor STALENESS (silent-stop with zero Failed Jobs), symmetric to BackupStale.
+grep -q 'alert: WalJanitorStale' 60-prometheus.yaml || fail "60 missing WalJanitorStale alert (#49) — a silently-stopped janitor produces no Failed Job"
+# issue #51: absent()/suspend companions so a never-succeeded or suspended CronJob pages instead of passing silently.
+grep -q 'alert: BackupStaleAbsent' 60-prometheus.yaml || fail "60 missing BackupStaleAbsent (absent/suspend guard, #51)"
+grep -q 'alert: WalJanitorStaleAbsent' 60-prometheus.yaml || fail "60 missing WalJanitorStaleAbsent (absent/suspend guard, #49/#51)"
+grep -q 'kube_cronjob_spec_suspend' 60-prometheus.yaml || fail "60 absent-guards must also page on a suspended CronJob (kube_cronjob_spec_suspend==1)"
+# issue #48: SELF-GUARD on kube-state-metrics — the sole producer of every rule above.
+grep -q 'alert: KubeStateMetricsDown' 60-prometheus.yaml || fail "60 missing KubeStateMetricsDown (#48) — a dead KSM silently blinds all platform alerts"
+grep -q 'absent(up{job="kube-state-metrics"})' 60-prometheus.yaml || fail "60 KubeStateMetricsDown must also page when KSM was never scraped (absent up series, #48)"
 # the phantom-keepalive honesty rule must survive (state-based, not counter drift)
 grep -q 'min_over_time(sum(pggw_active_connections)' 60-prometheus.yaml || fail "60 phantom-keepalive honesty rule was lost"
 ok "60 ships the platform alert rules (backup+janitor+staleness+pswatcher+standby+wake) and keeps the phantom honesty rule"

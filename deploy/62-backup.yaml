@@ -298,14 +298,28 @@ spec:
                   keep=$(( segno - KEEP_SEGMENTS ))
                   [ "$keep" -lt 0 ] && keep=0
                   logid=$(( keep / 256 )); seg=$(( keep % 256 ))
-                  printf '%08X%08X%08X' 1 "$logid" "$seg" > /state/keep_from
-                  echo "remote_consistent_lsn=$RCL segno=$segno keep_segments=$KEEP_SEGMENTS threshold=$(cat /state/keep_from)"
+                  # TLI-INDEPENDENT threshold: emit only the LOGID+SEG suffix (16
+                  # hex). The TLI (high 8 hex of a WAL segment name) is NOT hardcoded
+                  # here anymore (issue #42): the prune step derives the actual
+                  # timeline id(s) from the segment names present and applies this
+                  # suffix per-timeline. A promotion bumps the TLI; a hardcoded TLI=1
+                  # threshold would sort BELOW every new-TLI segment and silently
+                  # stop pruning (unbounded regrowth, exit 0 — invisible to the
+                  # Failed-Job alert).
+                  printf '%08X%08X' "$logid" "$seg" > /state/threshold_suffix
+                  echo "remote_consistent_lsn=$RCL segno=$segno keep_segments=$KEEP_SEGMENTS threshold_suffix=$(cat /state/threshold_suffix)"
               volumeMounts:
                 - { name: state, mountPath: /state }
           # STEP 2 (mc): delete every complete /safekeeper WAL segment whose 24-hex
-          # name sorts strictly before the threshold. Excludes .partial (live tail)
-          # by construction (they don't match ^[0-9A-Fa-f]{24}$). DRY_RUN=true lists
-          # only. No awk / no `<` test — busybox-safe (sort + sed boundary).
+          # name sorts strictly before its timeline's threshold. Excludes .partial
+          # (live tail) by construction (they don't match ^[0-9A-Fa-f]{24}$).
+          # DRY_RUN=true lists only. No awk / no `<` test — busybox-safe (sort + sed
+          # boundary). The TIMELINE id(s) are DERIVED from the segment names (first 8
+          # hex = TLI) and pruned PER-timeline against the LOGID+SEG suffix from STEP
+          # 1 — never a hardcoded TLI=1 (issue #42). Fail-LOUD: a bucket listing that
+          # errors, or a segment set from which no TLI can be derived, exits NONZERO
+          # (pages via WalJanitorJobFailed) rather than exiting 0 having pruned
+          # nothing (the silent-success failure mode #42 set out to kill).
           containers:
             - name: prune
               image: minio/mc:RELEASE.2023-01-28T20-29-38Z # pinned
@@ -329,15 +343,38 @@ spec:
                   mkdir -p /tmp/.mc
                   mc alias set src http://minio:9000 "$S3_USER" "$S3_PASS"
                   PFX="src/neon/safekeeper/${TENANT_ID}/${TIMELINE_ID}"
-                  KEEP="$(cat /state/keep_from)"
-                  echo "pruning /safekeeper WAL below segment $KEEP (DRY_RUN=${DRY_RUN})"
-                  # complete 16 MiB segments only (24-hex); .partial excluded by regex.
-                  mc ls "$PFX/" | sed 's/.* //' | grep -E '^[0-9A-Fa-f]{24}$' | sort -u > /tmp/all || true
-                  # names that sort strictly BEFORE the threshold = provably-dead WAL.
-                  { cat /tmp/all; echo "$KEEP"; } | sort -u | sed "/^$KEEP\$/,\$d" > /tmp/todelete
-                  n="$(wc -l < /tmp/todelete | tr -d ' ')"
+                  SUFFIX="$(cat /state/threshold_suffix)"   # 16-hex LOGID+SEG, TLI-independent
+                  echo "pruning /safekeeper WAL below LOGID+SEG suffix $SUFFIX, per-timeline (DRY_RUN=${DRY_RUN})"
+                  # fail-LOUD if the listing itself errors: a silent `mc ls` failure
+                  # must page (WalJanitorJobFailed), never exit 0 having pruned nothing.
+                  if ! mc ls "$PFX/" > /tmp/lsout 2>/tmp/lserr; then
+                    echo "FATAL: could not list $PFX (mc ls failed) — aborting, pruning nothing" >&2
+                    cat /tmp/lserr >&2; exit 1
+                  fi
+                  # complete 16 MiB segments only (24-hex, anchored); .partial excluded by regex.
+                  sed 's/.* //' /tmp/lsout | grep -E '^[0-9A-Fa-f]{24}$' | sort -u > /tmp/all || true
                   total="$(wc -l < /tmp/all | tr -d ' ')"
-                  echo "segments total=$total prunable(below horizon)=$n keep(at/above horizon)+partials retained"
+                  if [ "$total" -eq 0 ]; then echo "no complete WAL segments present — nothing to prune"; exit 0; fi
+                  # DERIVE the timeline id(s) from the segment names (first 8 hex = TLI)
+                  # instead of assuming TLI=1 (issue #42). Segments from a bumped
+                  # timeline (00000002...) get their OWN threshold and are actually pruned.
+                  cut -c1-8 /tmp/all | sort -u > /tmp/tlis
+                  tlicount="$(wc -l < /tmp/tlis | tr -d ' ')"
+                  if [ "$tlicount" -lt 1 ]; then
+                    echo "FATAL: found $total segment(s) but could not derive any timeline id — aborting" >&2; exit 1
+                  fi
+                  echo "timelines present: $(tr '\n' ' ' < /tmp/tlis)"
+                  : > /tmp/todelete
+                  while IFS= read -r tli; do
+                    [ -n "$tli" ] || continue
+                    KEEP="${tli}${SUFFIX}"                    # per-timeline 24-hex threshold
+                    grep "^${tli}" /tmp/all > /tmp/all_tli || true
+                    # names that sort strictly BEFORE this timeline's threshold = dead WAL.
+                    { cat /tmp/all_tli; echo "$KEEP"; } | sort -u | sed "/^$KEEP\$/,\$d" >> /tmp/todelete
+                  done < /tmp/tlis
+                  sort -u /tmp/todelete -o /tmp/todelete
+                  n="$(wc -l < /tmp/todelete | tr -d ' ')"
+                  echo "segments total=$total across $tlicount timeline(s) prunable(below horizon)=$n; keep(at/above horizon)+partials retained"
                   if [ "$n" -gt 0 ]; then echo "  range: $(head -1 /tmp/todelete) .. $(tail -1 /tmp/todelete)"; fi
                   if [ "$n" -eq 0 ]; then echo "nothing to prune — bucket already lean"; exit 0; fi
                   if [ "${DRY_RUN:-false}" = "true" ]; then echo "DRY_RUN=true — listing only, no deletions"; exit 0; fi

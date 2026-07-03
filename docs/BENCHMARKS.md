@@ -146,3 +146,18 @@ narrative: `docs/operations.md` §"Upgrading the storage plane".
   re-adds ~360 MB of safekeeper WAL (the marker-forcing fill); the daily janitor
   re-trims it, so accumulation stays bounded over time rather than growing every
   drill.
+- **WAL-janitor safety drill (issue #37/#42, `deploy/_verify-wal-janitor.sh`,
+  2026-07-03).** The 5.2 GB reclaim above was a one-off manual measurement; it is
+  now a **repeatable gate**. The drill runs the *real* janitor against the live
+  plane and asserts the safety invariants: fail-closed (pageserver unreachable →
+  Job exits non-zero, deletes nothing), below-horizon-only pruning, tail +
+  `.partial` preservation, and idempotence. A representative run derived a single
+  timeline (`00000001`, published `threshold_suffix=000000010000006D` from
+  `remote_consistent_lsn=1/8DF36A00`, `segno=397`, `KEEP_SEGMENTS=32`) and pruned
+  **42 of 74** complete segments (**~672 MiB**, `/safekeeper` → 558 MiB / 35
+  objects), keeping every at/above-horizon segment and all 3 `.partial`s; the
+  second run reported "nothing to prune". **TLI is now derived from the segment
+  names, not hardcoded `1` (issue #42)** — a timeline promotion (`00000002…`) would
+  otherwise sort above a `TLI=1` threshold and silently stop the janitor while it
+  kept exiting `0`. Live check confirmed the plane is single-timeline today, so the
+  fix is a correctness/forward-compat guard, not a behavior change.

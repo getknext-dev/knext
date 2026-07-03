@@ -129,6 +129,21 @@ data:
       # loose `backup.*` regex that would miss `wal-janitor` (#29).
       - name: ks-pg-platform
         rules:
+          # (0) SELF-GUARD on the producer (issue #48). kube-state-metrics is the
+          # SOLE source of the kube_job_*/kube_cronjob_*/kube_*_replicas series that
+          # five rules below evaluate. If KSM dies or is never scraped, those series
+          # go ABSENT and PromQL over absent series produces no samples — every
+          # dependent rule silently stops firing (the "silently-failing load-bearing
+          # machinery" class, relocated into the observability plane). Page on KSM
+          # itself: down (==0) OR never-scraped (absent — a target that never came up
+          # has no `up` series at all). Symmetric to PswatcherDown.
+          - alert: KubeStateMetricsDown
+            expr: up{job="kube-state-metrics"} == 0 or absent(up{job="kube-state-metrics"})
+            for: 2m
+            labels: { severity: critical }
+            annotations:
+              summary: "kube-state-metrics is DOWN — ALL platform alerts are blind"
+              description: "up{job=kube-state-metrics}==0 or absent for 2m. BackupJobFailed, WalJanitorJobFailed, BackupStale, WalJanitorStale, PageserverStandbyNotReady and ComputeWakeStuck all evaluate KSM series and stop firing while it is down. Treat as sev-1: restore KSM (deploy/59) before trusting any platform alert."
           # (a) backup CronJob run failed. Restore depends on a fresh backup;
           # a failing backup is a silent DR regression.
           - alert: BackupJobFailed
@@ -163,6 +178,40 @@ data:
             annotations:
               summary: "backup has not succeeded in >26h"
               description: "Last successful backup is {{ $value | humanizeDuration }} old (>26h). The off-cluster copy is stale — a restore would lose recent data."
+          # (b) wal-janitor staleness (issue #49): last SUCCESSFUL janitor run older
+          # than 26h. Symmetric to BackupStale. This covers the silent-STOP failure
+          # mode WalJanitorJobFailed does NOT: a janitor that stops producing runs
+          # with ZERO Failed Jobs (schedule keeps missing startingDeadlineSeconds,
+          # controller backlog) never trips the Failed-Job rule, yet /safekeeper WAL
+          # regrows unbounded and restore RTO silently slips back past 60min (#41).
+          - alert: WalJanitorStale
+            expr: time() - kube_cronjob_status_last_successful_time{namespace="scale-zero-pg", cronjob="wal-janitor"} > 93600
+            for: 10m
+            labels: { severity: critical }
+            annotations:
+              summary: "wal-janitor has not succeeded in >26h — restore RTO at risk"
+              description: "Last successful WAL prune is {{ $value | humanizeDuration }} old (>26h). /safekeeper WAL is regrowing and restores are slowing back past 60min (#19/#41). See docs/operations.md#bounding-safekeeper-wal-growth."
+          # (b') absent/suspended guards (issues #49/#51). kube_cronjob_status_last_
+          # _successful_time does NOT exist until the FIRST successful run, and is
+          # gone when the CronJob is suspended or deleted/renamed. In every one of
+          # those states BackupStale/WalJanitorStale produce no samples and never
+          # fire — a backup or janitor that NEVER once succeeded, or was fat-fingered
+          # into suspend:true, would pass silently. These companions page on exactly
+          # that: metric absent OR spec.suspend==1.
+          - alert: BackupStaleAbsent
+            expr: absent(kube_cronjob_status_last_successful_time{namespace="scale-zero-pg", cronjob="backup"}) == 1 or kube_cronjob_spec_suspend{namespace="scale-zero-pg", cronjob="backup"} == 1
+            for: 10m
+            labels: { severity: critical }
+            annotations:
+              summary: "backup has NEVER succeeded, or is suspended/absent"
+              description: "No last-successful-time series for the backup CronJob (never succeeded / suspended / deleted). BackupStale is blind in this state — treat as no off-cluster backup at all. Check `kubectl -n scale-zero-pg get cronjob backup`."
+          - alert: WalJanitorStaleAbsent
+            expr: absent(kube_cronjob_status_last_successful_time{namespace="scale-zero-pg", cronjob="wal-janitor"}) == 1 or kube_cronjob_spec_suspend{namespace="scale-zero-pg", cronjob="wal-janitor"} == 1
+            for: 10m
+            labels: { severity: critical }
+            annotations:
+              summary: "wal-janitor has NEVER succeeded, or is suspended/absent"
+              description: "No last-successful-time series for the wal-janitor CronJob (never succeeded / suspended / deleted). WalJanitorStale is blind in this state — /safekeeper WAL will regrow unbounded. Check `kubectl -n scale-zero-pg get cronjob wal-janitor`."
           # (c) pswatcher down: the failover authority is not being scraped.
           # No watcher => no automated pageserver failover (#23).
           - alert: PswatcherDown
