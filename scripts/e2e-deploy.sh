@@ -214,6 +214,10 @@ EOF
   # unless KNEXT_SANDBOX_FETCH_DEBUG=1; only appended under that gate below).
   # Tolerant resolve: an older tarball without the export must not kill deploys.
   KNEXT_SANDBOX_FETCH_DEBUG_PRELOAD="$(node -e 'process.stdout.write(require.resolve("@knext/core/internal/sandbox-fetch-debug"))' 2>/dev/null || true)"
+  # #188 path 3 — the IN-REALM instrumentation module e2e-deploy patches into
+  # the fixture next's sandbox context.js (only under the same debug gate;
+  # tolerant resolve for older tarballs).
+  KNEXT_SANDBOX_FETCH_REALM_DEBUG_PRELOAD="$(node -e 'process.stdout.write(require.resolve("@knext/core/internal/sandbox-fetch-realm-debug"))' 2>/dev/null || true)"
 else
   log "KNEXT_E2E_SKIP_PACK=1 — skipping tarball install (contract-test mode)"
   NEXT_ADAPTER_PATH="${NEXT_ADAPTER_PATH:-}"
@@ -222,6 +226,7 @@ else
   KNEXT_CC_PRELOAD="${SCRIPT_DIR}/../packages/kn-next/src/adapters/cache-control-normalize.cjs"
   KNEXT_BUN_GUARD_PRELOAD="${SCRIPT_DIR}/../packages/kn-next/src/adapters/bun-keepalive-guard.cjs"
   KNEXT_SANDBOX_FETCH_DEBUG_PRELOAD="${SCRIPT_DIR}/../packages/kn-next/src/adapters/sandbox-fetch-debug.cjs"
+  KNEXT_SANDBOX_FETCH_REALM_DEBUG_PRELOAD="${SCRIPT_DIR}/../packages/kn-next/src/adapters/sandbox-fetch-realm-debug.cjs"
   # The heal is TS source in-repo (not directly loadable); contract-test mode
   # never boots bun fixtures, so leave it unset — the bun branch warns+skips.
   KNEXT_BUN_EXPORTS_HEAL="${KNEXT_BUN_EXPORTS_HEAL:-}"
@@ -520,6 +525,31 @@ if [ "${KNEXT_SANDBOX_FETCH_DEBUG:-0}" = "1" ]; then
   if [ "${RUNTIME}" = "bun" ]; then
     export BUN_CONFIG_VERBOSE_FETCH=curl
     log "KNEXT_SANDBOX_FETCH_DEBUG=1 — BUN_CONFIG_VERBOSE_FETCH=curl exported (bun-native fetch verbosity)"
+  fi
+  # ── #188 path 3 — IN-REALM instrumentation: patch the FIXTURE's staged
+  # standalone next sandbox context.js. Path 2's calibrated null proved a
+  # host-realm main-graph diagnostics_channel subscriber cannot see the
+  # sandbox fetch under bun, so this patch wraps the sandbox fetch wiring
+  # from INSIDE next's own extend() (base __fetch + context.fetch wrapper,
+  # per-call phase logs + stall watchdog + net/tls socket phases). The hook
+  # is double-gated: patched only here (debug lane), and the injected code
+  # itself checks KNEXT_SANDBOX_FETCH_DEBUG=1 + the module env below. A
+  # patch failure is LOUD but non-fatal — the run stays comparable to the
+  # baseline, only without in-realm phases.
+  if [ -n "${KNEXT_SANDBOX_FETCH_REALM_DEBUG_PRELOAD:-}" ] && [ -f "${KNEXT_SANDBOX_FETCH_REALM_DEBUG_PRELOAD}" ]; then
+    export KNEXT_SANDBOX_FETCH_REALM_DEBUG_MODULE="${KNEXT_SANDBOX_FETCH_REALM_DEBUG_PRELOAD}"
+    if node -e '
+      const mod = require(process.argv[1]);
+      const r = mod.patchSandboxContext({ appDir: process.argv[2], log: (m) => console.error(m) });
+      if (!r.patched) { console.error("[e2e-deploy] sandbox context patch FAILED: " + r.reason); process.exit(1); }
+      console.error("[e2e-deploy] sandbox context patched" + (r.already ? " (already)" : "") + ": " + r.contextPath);
+    ' "${KNEXT_SANDBOX_FETCH_REALM_DEBUG_PRELOAD}" "${STANDALONE_APP_DIR}" >&2; then
+      log "KNEXT_SANDBOX_FETCH_DEBUG=1 — in-realm sandbox-fetch instrumentation patched into the fixture next (path 3)"
+    else
+      log "WARNING: in-realm sandbox context patch failed — this run has host-side (path 2) instrumentation only"
+    fi
+  else
+    log "WARNING: KNEXT_SANDBOX_FETCH_DEBUG=1 but the realm-debug module is unavailable (${KNEXT_SANDBOX_FETCH_REALM_DEBUG_PRELOAD:-unset}) — no in-realm instrumentation"
   fi
 fi
 log "booting (${RUNTIME}) ${SERVER_BOOT_TARGET} on 0.0.0.0:${PORT} (HOSTNAME emptied — see B7a note; preloads ${SERVER_PRELOAD_ARGS[*]})"
