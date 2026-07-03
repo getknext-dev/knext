@@ -37,12 +37,21 @@ was not separately scored before iteration 2 (marked —).
 | **5** | System designer | **7** | **6** | **6** |
 | **5** | DevOps/SRE | **6** | **6** | **5** |
 | **5** | Architect | **8** | **6** | **7** |
+| **6** | System designer | **7** | **7** | **6** |
+| **6** | DevOps/SRE | **7** | **7** | **6** |
+| **6** | Architect | **7** | **6** | **7** |
 
 **Iteration-1 mean (mapped axes): ease 6.0, reliability 4.7** (round 0: 4.3, 3.7).
 **Iteration-2 mean (explicit metrics): maturity 4.7, ease 4.3, reliability 3.7.**
 **Iteration-3 mean: maturity 6.3, ease 6.7, reliability 5.3**
 **Iteration-4 mean: maturity 6.3, ease 5.7, reliability 5.7**
-**Iteration-5 mean: maturity 7.0, ease 6.0, reliability 6.0** — the arc-capping
+**Iteration-5 mean: maturity 7.0, ease 6.0, reliability 6.0**
+**Iteration-6 mean: maturity 7.0, ease 6.7, reliability 6.3** — all-time high on
+every axis. Observability debt closed (KSM + exact-join rules + presence check,
+paged end-to-end by the reviewer). Named residue: the silent-machinery class is
+~2/3 closed (#48 KSM self-guard, #49 janitor-stale, #51 readiness) and the
+failover authority is instrumented-not-corrected (#25/#26). Architect ruling:
+one final correctness lap, then graduate the loop to on-release cadence (#36). — the arc-capping
 row: every p1 across five iterations closed, the north star demonstrated 5/5
 (and reported honestly: the 13s both-cold finding redirects optimization to the
 app tier). First individual 8 (architect: maturity). Convergent next debt, found
