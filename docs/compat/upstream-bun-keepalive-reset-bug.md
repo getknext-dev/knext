@@ -18,14 +18,19 @@ responses (tiny 404s, draft-mode enables, header dumps, hashed SVGs) lose the ra
 
 Root-cause isolation (bun-lane compat campaign, #188 / PR #189, round 1):
 
-- Baseline run **28607626868** (Bun 1.3.14, linux-x64): 30 of 39 bun-lane failures were
-  per-request TCP aborts (`socket hang up`) from the standalone server.
+- Baseline run
+  [**28607626868**](https://github.com/getknext-dev/knext/actions/runs/28607626868)
+  (Bun 1.3.14, linux-x64): 30 of 39 bun-lane failures were per-request TCP aborts
+  (`socket hang up`) from the standalone server.
 - The one-flag discriminator **exonerated** knext's `cache-control-normalize` preload
   (`KNEXT_CACHE_CONTROL_NORMALIZE=0` reproduced identical hang-ups).
 - Applying `Connection: close` per response (nothing else) flipped ~33 failing files in run
-  **28612654960** — the reset is unreachable once clients stop reusing sockets.
-- Canary run **28622051531** (observed Bun `1.4.0`): guard self-disabled (keep-alive semantics
-  restored) and the hang-up families stayed green → fixed upstream.
+  [**28612654960**](https://github.com/getknext-dev/knext/actions/runs/28612654960) — the
+  reset is unreachable once clients stop reusing sockets.
+- Canary run
+  [**28622051531**](https://github.com/getknext-dev/knext/actions/runs/28622051531)
+  (observed Bun `1.4.0`): guard self-disabled (keep-alive semantics restored) and the hang-up
+  families stayed green → fixed upstream.
 
 The campaign record (`bun-keepalive-guard.cjs` module header, PR #189 body) states the reduced
 plain-`node:http` repro was verified on **linux-x64 and darwin-arm64** at the time (2026-06/07,
@@ -156,8 +161,11 @@ concentrated on small/fast responses.
 > **Client (run with node):** issue back-to-back GETs over
 > `new http.Agent({ keepAlive: true, maxSockets: 1 })` — under load the reused socket is reset.
 > At small scale the race can need harness-level concurrency to trigger; evidence at scale:
-> knext CI runs 28607626868 (fail, 1.3.14) → 28612654960 (green with `Connection: close`) →
-> 28622051531 (green on 1.4.0-canary, workaround off) → `<NEW RUN ID>` (regressed).
+> knext CI runs
+> [28607626868](https://github.com/getknext-dev/knext/actions/runs/28607626868) (fail, 1.3.14) →
+> [28612654960](https://github.com/getknext-dev/knext/actions/runs/28612654960) (green with `Connection: close`) →
+> [28622051531](https://github.com/getknext-dev/knext/actions/runs/28622051531) (green on 1.4.0-canary, workaround off) →
+> `<NEW RUN ID>` (regressed).
 >
 > **Expected:** a keep-alive socket accepted for reuse is either served or closed gracefully
 > (FIN before/instead of RST), as Node behaves.
