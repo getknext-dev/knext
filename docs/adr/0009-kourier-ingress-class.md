@@ -94,6 +94,38 @@ Consequences above: portability is now a declarative build-time choice, not an o
 manual step — keeping ADR-0001 (no out-of-band cluster mutation). The ADR's **Status remains
 Accepted**; option (c) (declarative bundle ConfigMap) is unchanged, now with a portable default.
 
+## Field finding / update (2026-07-03, issue #208)
+
+The mismatch recurred **in the field** during the scale-zero-pg integration on OKE cluster
+`knext2` (getknext-dev/scale-zero-pg#34), and the failure mode is worth recording:
+
+- **Ground truth re-verified at source:** net-kourier's reconciler filters KIngresses on
+  `config.KourierIngressClassName = "kourier.ingress.networking.knative.dev"`
+  (`net-kourier/pkg/reconciler/ingress/config/config.go`). Anything else — including the
+  short `kourier.knative.dev` form — is **silently skipped**: the KIngress is never
+  reconciled, routes never program, and no error is surfaced anywhere. The knext bundle,
+  released `install.yaml`, and `make build-installer` default all already emit the correct
+  full form (this ADR + PR #146); the repo contains **no** occurrence of the short form
+  except warnings against it.
+- **Where the wrong value came from:** the cluster's **`KnativeServing` CR** (Knative
+  Operator install) carried `kourier.knative.dev`. This exposes a gap in option (c): on
+  Knative-Operator-managed clusters the Operator **owns and continuously reconciles**
+  `config-network` from the CR, so the bundle's declarative ConfigMap value is
+  overwritten. The bundle cannot win that fight declaratively — the class must be fixed
+  in the CR. Documented in `docs/operator/multi-cloud-portability.md` and the operator
+  README.
+- **Loud failure added (the durable fix):** the silent skip is the real killer — Knative
+  reports only `IngressNotConfigured / "Ingress has not yet been reconciled."` (Unknown,
+  forever), which reads as "wait longer". The NextApp reconciler now detects when a child
+  ksvc's `RoutesReady`/`Ready` condition has sat in `IngressNotConfigured` past a
+  2-minute stall window and surfaces it as `Ready=False` with reason
+  **`IngressNotProgrammed`**, plus a Warning event, with a message naming the class
+  net-kourier actually serves and pointing at `config-network` / the `KnativeServing` CR.
+  Deliberately proportionate: no ingress-controller discovery — just a bounded, named
+  alarm on the exact pending state Knative emits.
+- The second half of #208 (private GHCR operator image blocking third-party installs) is
+  tracked separately in **#198** — not addressed here.
+
 ## Action items
 
 - [x] `config/knative/config-network.yaml` + `config/knative/kustomization.yaml`.

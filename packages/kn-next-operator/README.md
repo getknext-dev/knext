@@ -37,7 +37,12 @@ kubectl apply --server-side -f https://github.com/getknext-dev/knext/releases/la
 >   `ingress-class: kourier.ingress.networking.knative.dev` — the full
 >   controller-qualified form. Without it, Serving leaves the ingress-class unset and
 >   never wires routes to Kourier (this was the real cause of the OKE "Kourier broken
->   on k8s 1.34" symptom — see ADR-0009).
+>   on k8s 1.34" symptom — see ADR-0009). **Caveat:** on Knative-Operator-managed
+>   clusters the `KnativeServing` CR overwrites `config-network`, so the class must be
+>   set in the CR — and it must be the full form above; the short `kourier.knative.dev`
+>   makes net-kourier silently skip every KIngress (#208). If routes stall unprogrammed
+>   for >2 minutes, the operator reports `Ready=False` / `IngressNotProgrammed` on the
+>   NextApp with the fix in the message.
 > - **PVC feature flags** (prerequisite for `spec.enableBytecodeCache`): the bundle
 >   ships a `config-features` ConfigMap (`namespace: knative-serving`) enabling
 >   `kubernetes.podspec-persistent-volume-claim` and

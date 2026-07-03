@@ -58,6 +58,21 @@ helper is `packages/kn-next-operator/hack/set-ingress-class.sh`.
 > install's other keys. On clusters where you'd rather not let the bundle touch
 > `config-network` at all, build with the matching class anyway so the values agree.
 
+> **Knative-Operator-managed clusters (`KnativeServing` CR) — the bundle's value does NOT
+> stick.** If Knative Serving was installed via the Knative Operator, the Operator
+> continuously reconciles `config-network` from the `KnativeServing` CR — it will
+> overwrite the key the knext bundle applied. Set the class **in the CR** (`spec.ingress`
+> / `spec.config.network.ingress-class`), and use the **full controller-qualified form**:
+> a cluster observed in the field (issue #208) carried the short `kourier.knative.dev`
+> in its `KnativeServing` CR while net-kourier's reconciler only serves
+> `kourier.ingress.networking.knative.dev` — every new KIngress was **silently skipped**
+> (routes never programmed, no error anywhere).
+>
+> The operator now surfaces this failure mode loudly: if a `NextApp`'s route sits in
+> `IngressNotConfigured` for more than 2 minutes, the NextApp reports
+> `Ready=False` with reason **`IngressNotProgrammed`** and emits a Warning event naming
+> the class net-kourier serves — check `kubectl describe nextapp <name>`.
+
 ---
 
 ## 2. StorageClass for the Postgres recipe
