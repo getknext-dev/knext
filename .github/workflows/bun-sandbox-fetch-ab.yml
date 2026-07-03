@@ -77,11 +77,16 @@ jobs:
       # The probe client, the trial driver, and the local HTTPS echo server ALL
       # run under node in BOTH lanes — the serving runtime (node|bun booting the
       # standalone server.js) is the ONLY variable across the matrix.
+      # The dispatch input reaches the shell via env indirection only (GHA
+      # injection hardening — never template untrusted input into run:).
+      # run-trials.mjs validates it as an integer >= 1 and fails loud otherwise.
       - name: Run trials
+        env:
+          TRIALS: ${{ github.event.inputs.trials || '10' }}
         run: |
           node test/bun-sandbox-fetch-ab/run-trials.mjs \
             --runtime "${{ matrix.runtime }}" \
-            --trials "${{ github.event.inputs.trials || '10' }}" \
+            --trials "$TRIALS" \
             --fixture test/bun-sandbox-fetch-ab/fixture \
             --out "ab-results-${{ matrix.runtime }}.json"
 

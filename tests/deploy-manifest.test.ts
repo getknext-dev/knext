@@ -664,7 +664,10 @@ describe('$knextQuarantines ref stamps — re-audit on NEXTJS_REF bump (#181/#17
     }
   });
 
-  it('a reaudited marker, when present, is a well-formed ref and not older than the stamp', () => {
+  // #194 gate follow-up: the old name claimed "not older than the stamp", but
+  // the body only asserts shape + inequality (no version-order comparison) —
+  // the name must not overclaim what is enforced.
+  it('a reaudited marker, when present, is a well-formed ref distinct from the original stamp', () => {
     for (const q of quarantines) {
       if (q.reaudited === undefined) continue;
       expect(

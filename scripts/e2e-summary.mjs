@@ -132,6 +132,19 @@ export function summarize(runnerOutput, meta) {
         ? Number(totalHeader[1])
         : undefined;
 
+  // #194 accepted-risk follow-up: the `total:` header is the ONLY implicit
+  // source of expectedTotal, and a harness ref that renames it fails OPEN
+  // silently (no truncated flag — a killed shard could read as green). On the
+  // run-tests path (per-file markers present) that absence is anomalous, so
+  // WARN — never fail — to keep the fail-open path honest and visible.
+  if (markersPresent && expectedTotal === undefined) {
+    console.warn(
+      '[e2e-summary] WARN: run-tests.js per-file markers present but no expected total ' +
+        '(no `total: N` header in the runner log and no --expected-total override) — ' +
+        'truncation detection is DISABLED for this shard; a killed shard could read as green.',
+    );
+  }
+
   return {
     passed,
     failed,
