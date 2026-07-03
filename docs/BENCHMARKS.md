@@ -40,7 +40,7 @@ The engines were never the bottleneck — Kubernetes mechanics were, twice.
 | Pageserver failover — MANUAL (promote standby, gen+1) | **~7s** | **9s** | read-WRITE preserved; hand-run mechanism (`--manual`) |
 | Pageserver failover — AUTOMATED (pswatcher, no human step) | — | **8s** | watcher promotes gen+1 + flips Service selector + bounces compute; RTO = kill→cold read on standby (incl. ~3s×1s-poll detection); proof = selector flipped by watcher + gen ledger 1→2 + read served by the fresh cold compute (not old-pod cache) |
 | Backup → restore (READ-ONLY) from OCI Object Storage (fresh ns) | **~110s** (in-cluster, pre-#4) | **417–942s** (OCI OS, 2026-07-03) | issue #4: backup mirrors OFF-CLUSTER to OCI OS, restore sources from it; RTO scales with bucket size (cross-internet copy dominates); STATIC read-only proof (reads pages from pageserver, no safekeepers) |
-| Backup → restore promoted to **WRITABLE** primary (fresh ns) | — | **1076s** @~5GB; **>60min @13GiB — unbounded-in-practice** (devops-r4, live bucket) | issue #2: on-disk safekeeper WAL re-seed from the `/safekeeper` backup + crafted `safekeeper.control` (`deploy/skctl.py`); pageserver re-derives `prev_record_lsn`; INSERT survives a compute kill + fresh re-basebackup. **Promotion delta over read-only ≈ 134s** (bucket-size-independent). No storage controller / no HTTP timeline-create on 8464 |
+| Backup → restore promoted to **WRITABLE** primary (fresh ns) | — | **1226s (writable) / 1045s (read-only)** post-WAL-prune, 2026-07-03; was **>60min @13GiB — unbounded-in-practice** (devops-r4) | issue #2: on-disk safekeeper WAL re-seed from the `/safekeeper` backup + crafted `safekeeper.control` (`deploy/skctl.py`); pageserver re-derives `prev_record_lsn`; INSERT survives a compute kill + fresh re-basebackup. **Promotion delta over read-only ≈ 181s** (bucket-size-independent). Issue #19 pruned 5.2 GB of stale safekeeper WAL, taking the restore from **unbounded (>60min)** to a **bounded ~20min**. No storage controller / no HTTP timeline-create on 8464 |
 | Backup job at ~18GB bucket | green (retry loop exercised live) | — | in-cluster path (pre-#4); OCI OS path uses same mc client 1Gi + retry loop |
 | CNPG pod-kill recovery | ~16s | — | comparison point (hibernate resume: ~3.3s) |
 | Alert path (rule → Alertmanager → receiver) | delivered | **delivered** | idempotent drill; unique per-run identity |
@@ -82,3 +82,16 @@ The engines were never the bottleneck — Kubernetes mechanics were, twice.
   number. The delta over read-only is the safekeeper WAL re-seed (two short
   `mc cp` seeds of a handful of 16 MiB segments) + one pageserver WAL catch-up +
   one PRIMARY compute boot; it is not bounded by Postgres.
+- **Safekeeper WAL prune (issue #19, `wal-janitor`)** reclaimed **5.2 GB** of stale
+  `/safekeeper` WAL from the live bucket (5.6 GB → 534 MB, 325 of 357 16-MiB
+  segments; kept a 32-segment / 512-MiB horizon below `remote_consistent_lsn` +
+  all `.partial`). This took the writable restore from **unbounded (>60 min at a
+  13 GiB bucket)** to a **bounded ~1226 s** measured immediately after. **Honest
+  caveat:** the restore RTO is now dominated by the **~11 GiB of pageserver layer
+  files** (real page data + the 7-day PITR history) copied twice across the
+  internet — *not* safekeeper WAL. Pruning removed the unbounded safekeeper
+  growth; the remaining floor tracks the pageserver bucket and would only move
+  with PITR/layer-retention tuning (separate, riskier concern). Each drill run
+  re-adds ~360 MB of safekeeper WAL (the marker-forcing fill); the daily janitor
+  re-trims it, so accumulation stays bounded over time rather than growing every
+  drill.

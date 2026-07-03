@@ -120,6 +120,10 @@ spec:
               securityContext:
                 allowPrivilegeEscalation: false
                 capabilities: { drop: ["ALL"] }
+              # TENANT_ID / TIMELINE_ID / PAGESERVER_HOST for the post-mirror
+              # index-integrity check (issue #21).
+              envFrom:
+                - configMapRef: { name: compute-config }
               env:
                 # mc writes its config under $MC_CONFIG_DIR (default ~/.mc);
                 # /root is not writable for this image's user, so use /tmp.
@@ -166,6 +170,34 @@ spec:
                   echo "uploading config dump ..."
                   mc cp /dump/configmaps.yaml "dst/$BK_BUCKET/neon-config/configmaps.yaml"
                   mc cp /dump/storage-s3-creds.yaml "dst/$BK_BUCKET/neon-config/storage-s3-creds.yaml"
+                  # --- issue #21: index_part.json can be captured mid-compaction
+                  # (torn backup). The live pageserver rewrites index_part.json
+                  # every ~20s of compaction; if the mirror reads it mid-PUT the
+                  # backup carries a truncated index that fails to deserialize on
+                  # restore. Make the backup SELF-HEALING and self-verifying: after
+                  # the mirror, re-read the newest index_part.json-<gen> in the
+                  # OFF-CLUSTER copy; a complete neon index is a JSON object that
+                  # ends with '}'. If torn, re-copy just the index prefix from src
+                  # (mc cp picks up the now-settled object) and re-verify. Fail the
+                  # backup if it is still torn after several tries — a torn index
+                  # must never ship (the drill's retry becomes a safety net, not
+                  # the primary defense).
+                  IX="neon/pageserver/tenants/${TENANT_ID}/timelines/${TIMELINE_ID}"
+                  verify_index() {
+                    f="$(mc ls "dst/$BK_BUCKET/$IX/" 2>/dev/null | sed 's/.* //' | grep -o 'index_part.json-[0-9]*' | sort | tail -1)"
+                    [ -z "$f" ] && { echo "  no index_part.json in backup"; return 1; }
+                    last="$(mc cat "dst/$BK_BUCKET/$IX/$f" 2>/dev/null | tail -c 1)"
+                    [ "$last" = "}" ] && { echo "  index INTACT: $f"; return 0; }
+                    echo "  index TORN (captured mid-rewrite): $f"; return 1
+                  }
+                  echo "verifying pageserver index integrity in the backup (issue #21) ..."
+                  a=0
+                  until verify_index; do
+                    a=$((a+1)); [ "$a" -gt 5 ] && { echo "index still TORN after $a re-copies — failing backup (issue #21)" >&2; exit 1; }
+                    echo "  re-copying index prefix from src (attempt $a) ..."
+                    mc cp --recursive "src/$IX/" "dst/$BK_BUCKET/$IX/" >/dev/null 2>&1 || true
+                    sleep 3
+                  done
                   echo "backup complete:"; mc du "dst/$BK_BUCKET/neon"; mc ls "dst/$BK_BUCKET/neon-config"
               volumeMounts:
                 - { name: dump, mountPath: /dump }
@@ -179,4 +211,148 @@ spec:
                 limits: { memory: 1Gi, ephemeral-storage: 1Gi }
           volumes:
             - name: dump
+              emptyDir: {}
+---
+# ===========================================================================
+# wal-janitor (issue #19) — bound safekeeper WAL accumulation in the live
+# `neon` bucket so restore drills (and backup mirrors) stay lean.
+#
+# WHY THIS EXISTS. Each restore/failover drill fills ~360 MB of WAL through the
+# live compute; the safekeepers offload that WAL to the bucket's /safekeeper
+# prefix as their durability backup. Nothing trims it: the bucket LIFECYCLE
+# policy only ages out non-current VERSIONS (not current accumulation), and
+# neon's pageserver GC (`gc_horizon` / `pitr_interval`) reclaims only PAGESERVER
+# LAYER files — it never touches the /safekeeper prefix (verified: with a 7-day
+# PITR window and <7-day-old data, gc returns 200 and reclaims nothing, and it
+# has no notion of safekeeper WAL). So /safekeeper grew to ~5.6 GB / ~360×16 MiB
+# segments, inflating every cross-internet restore copy.
+#
+# WHAT IS SAFE TO PRUNE. A safekeeper WAL segment is dead weight once it is BOTH
+# (a) below the pageserver's remote_consistent_lsn — i.e. already ingested AND
+# uploaded into pageserver layers (the honesty-rule LSN) — AND (b) outside the
+# window the writable restore re-seeds. deploy/_restore-writable.sh reads only a
+# handful of segments around last_record_lsn ([last_record − 2 seg .. + ~1 seg]),
+# so we keep KEEP_SEGMENTS (default 32 = 512 MiB) BELOW remote_consistent_lsn as
+# the safety horizon — 8× the ~4 segments the restore actually needs and 2× the
+# 256 MB checkpoint_distance. Everything AT or ABOVE the horizon, and every
+# .partial segment (the live durability tail the safekeepers are still writing),
+# is NEVER touched. Fail-closed: if remote_consistent_lsn can't be read the job
+# aborts and prunes nothing.
+#
+# HORIZON MATH. WAL segments are 16 MiB; the object name is the 24-hex
+# `<TLI><LOGID><SEG>` (256 segments per LOGID). Fixed-width hex sorts in LSN
+# order, so the prune set is exactly the segment objects whose 24-hex name sorts
+# strictly before the threshold name (segno(remote_consistent_lsn) − KEEP_SEGMENTS).
+#
+# Prune runs BEFORE the daily backup (02:30 vs 03:00) so the next `mc mirror
+# --remove` propagates the trim to the OCI copy the same night.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: wal-janitor
+  namespace: scale-zero-pg
+  labels: { app: backup, plane: backup }
+spec:
+  schedule: "30 2 * * *" # daily 02:30 — 30m before the backup mirror
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      template:
+        metadata:
+          labels: { app: backup, plane: backup }
+        spec:
+          restartPolicy: OnFailure
+          securityContext:
+            seccompProfile: { type: RuntimeDefault }
+          # STEP 1 (initContainer): read remote_consistent_lsn from the pageserver
+          # and write the prune threshold (24-hex WAL segment name) to /state.
+          # Fail-closed — a missing/zero rcl aborts the job before any deletion.
+          initContainers:
+            - name: resolve-horizon
+              image: alpine/k8s:1.30.2 # bundles curl + bash (hex arithmetic)
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities: { drop: ["ALL"] }
+              envFrom:
+                - configMapRef: { name: compute-config } # TENANT_ID/TIMELINE_ID/PAGESERVER_HOST
+              env:
+                - name: KEEP_SEGMENTS
+                  value: "32" # 512 MiB of WAL kept below remote_consistent_lsn (safety horizon)
+              command: ["/bin/bash", "-c"]
+              args:
+                - |
+                  set -euo pipefail
+                  PS="http://${PAGESERVER_HOST}:9898"
+                  RCL="$(curl -sf "$PS/v1/tenant/${TENANT_ID}/timeline/${TIMELINE_ID}" \
+                        | tr ',' '\n' | grep '"remote_consistent_lsn"' | head -1 | cut -d'"' -f4)"
+                  case "$RCL" in
+                    */*) : ;;
+                    *) echo "FATAL: could not read remote_consistent_lsn (got '$RCL') — aborting, pruning nothing" >&2; exit 1 ;;
+                  esac
+                  hi=$((16#${RCL%/*})); lo=$((16#${RCL#*/}))
+                  full=$(( (hi<<32) | lo ))
+                  segno=$(( full / 16777216 ))            # 16 MiB WAL segments
+                  keep=$(( segno - KEEP_SEGMENTS ))
+                  [ "$keep" -lt 0 ] && keep=0
+                  logid=$(( keep / 256 )); seg=$(( keep % 256 ))
+                  printf '%08X%08X%08X' 1 "$logid" "$seg" > /state/keep_from
+                  echo "remote_consistent_lsn=$RCL segno=$segno keep_segments=$KEEP_SEGMENTS threshold=$(cat /state/keep_from)"
+              volumeMounts:
+                - { name: state, mountPath: /state }
+          # STEP 2 (mc): delete every complete /safekeeper WAL segment whose 24-hex
+          # name sorts strictly before the threshold. Excludes .partial (live tail)
+          # by construction (they don't match ^[0-9A-Fa-f]{24}$). DRY_RUN=true lists
+          # only. No awk / no `<` test — busybox-safe (sort + sed boundary).
+          containers:
+            - name: prune
+              image: minio/mc:RELEASE.2023-01-28T20-29-38Z # pinned
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities: { drop: ["ALL"] }
+              envFrom:
+                - configMapRef: { name: compute-config } # TENANT_ID / TIMELINE_ID
+              env:
+                - name: DRY_RUN
+                  value: "false" # set true for a list-only supervised preview
+                - name: S3_USER
+                  valueFrom: { secretKeyRef: { name: storage-s3-creds, key: user } }
+                - name: S3_PASS
+                  valueFrom: { secretKeyRef: { name: storage-s3-creds, key: password } }
+              command: ["/bin/sh", "-c"]
+              args:
+                - |
+                  set -eu
+                  export HOME=/tmp
+                  mkdir -p /tmp/.mc
+                  mc alias set src http://minio:9000 "$S3_USER" "$S3_PASS"
+                  PFX="src/neon/safekeeper/${TENANT_ID}/${TIMELINE_ID}"
+                  KEEP="$(cat /state/keep_from)"
+                  echo "pruning /safekeeper WAL below segment $KEEP (DRY_RUN=${DRY_RUN})"
+                  # complete 16 MiB segments only (24-hex); .partial excluded by regex.
+                  mc ls "$PFX/" | sed 's/.* //' | grep -E '^[0-9A-Fa-f]{24}$' | sort -u > /tmp/all || true
+                  # names that sort strictly BEFORE the threshold = provably-dead WAL.
+                  { cat /tmp/all; echo "$KEEP"; } | sort -u | sed "/^$KEEP\$/,\$d" > /tmp/todelete
+                  n="$(wc -l < /tmp/todelete | tr -d ' ')"
+                  total="$(wc -l < /tmp/all | tr -d ' ')"
+                  echo "segments total=$total prunable(below horizon)=$n keep(at/above horizon)+partials retained"
+                  if [ "$n" -gt 0 ]; then echo "  range: $(head -1 /tmp/todelete) .. $(tail -1 /tmp/todelete)"; fi
+                  if [ "$n" -eq 0 ]; then echo "nothing to prune — bucket already lean"; exit 0; fi
+                  if [ "${DRY_RUN:-false}" = "true" ]; then echo "DRY_RUN=true — listing only, no deletions"; exit 0; fi
+                  i=0
+                  while IFS= read -r o; do
+                    [ -n "$o" ] || continue
+                    mc rm "$PFX/$o" >/dev/null && i=$((i+1))
+                  done < /tmp/todelete
+                  echo "pruned $i safekeeper WAL segment(s) (~$((i*16)) MiB reclaimed)"
+                  echo "post-prune /safekeeper size:"; mc du "src/neon/safekeeper"
+              volumeMounts:
+                - { name: state, mountPath: /state }
+              resources:
+                requests: { cpu: 50m, memory: 64Mi, ephemeral-storage: 50Mi }
+                limits: { memory: 256Mi, ephemeral-storage: 256Mi }
+          volumes:
+            - name: state
               emptyDir: {}

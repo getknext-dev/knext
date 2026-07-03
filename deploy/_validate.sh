@@ -142,3 +142,18 @@ grep -q 'kind: PersistentVolumeClaim' 62-backup.yaml && fail "62 must NOT declar
 # name), not the migration note that tells operators to delete it.
 grep -qE 'backup-store:9000|name: backup-store' 62-backup.yaml && fail "62 still runs the backup-store workload — it is retired (issue #4)"
 ok "backup target is off-cluster OCI Object Storage (backup-store retired)"
+
+# 16. contract: a WAL janitor bounds safekeeper WAL accumulation (issue #19), and
+#     the backup path self-heals a torn pageserver index (issue #21).
+#     SAFETY: the janitor must prune only WAL strictly BELOW a horizon measured
+#     from remote_consistent_lsn (provably ingested + uploaded), keep a
+#     KEEP_SEGMENTS margin above what the writable restore re-seeds, and must
+#     NEVER delete the live durability tail (.partial segments / segments at or
+#     above the horizon). The backup must verify index_part.json is intact so a
+#     torn index can no longer ship.
+grep -q 'name: wal-janitor' 62-backup.yaml || fail "62 missing the wal-janitor CronJob (issue #19)"
+grep -q 'KEEP_SEGMENTS' 62-backup.yaml || fail "62 wal-janitor must expose a KEEP_SEGMENTS safety horizon"
+grep -q 'remote_consistent_lsn' 62-backup.yaml || fail "62 wal-janitor must derive its prune threshold from remote_consistent_lsn"
+grep -q 'partial' 62-backup.yaml || fail "62 wal-janitor must exclude .partial WAL (the live durability tail)"
+grep -q 'index_part.json' 62-backup.yaml || fail "62 backup must verify pageserver index integrity post-mirror (issue #21)"
+ok "wal-janitor bounds safekeeper WAL (issue #19) + backup self-heals torn index (issue #21)"

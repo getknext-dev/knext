@@ -154,15 +154,18 @@ marker back. It then **promotes the restore to a read-WRITE primary** (STEP 5,
 `deploy/_restore-writable.sh`) and asserts an INSERT **survives a compute kill +
 fresh re-basebackup** — proving the restore comes back as a *service*, not just
 readable data. Self-cleaning; leaves the live compute as found (scaled to 0).
-**Measured RTO** on OKE (context-ckmva7v7zvq, 2026-07-03): **read-only 942 s**
-(backup start → first drill read) and **writable 1076 s** (backup start → durable
-INSERT) on a large ~5 GB bucket; earlier read-only runs on a smaller bucket were
-~417–525 s. The bulk — and the run-to-run spread — is the two cross-internet
-bucket copies to/from OCI OS (upload the neon bucket, then re-download it into the
-drill minio), which scale with bucket size (WAL accumulation is tracked as a
-separate cleanup). The **read→write promotion delta is only ~134 s** (safekeeper
-WAL re-seed × 2 phases + one pageserver catch-up + the PRIMARY boot) and is
-independent of bucket size. Still not bounded by Postgres. See docs/BENCHMARKS.md.
+**Measured RTO** on OKE (context-ckmva7v7zvq, 2026-07-03, **after the issue #19
+WAL prune**): **read-only 1045 s** (backup start → first drill read) and
+**writable 1226 s** (backup start → durable INSERT). The bulk — and the run-to-run
+spread — is the two cross-internet bucket copies to/from OCI OS (upload the neon
+bucket, then re-download it into the drill minio), which scale with bucket size.
+The **read→write promotion delta is only ~181 s** (safekeeper WAL re-seed × 2
+phases + one pageserver catch-up + the PRIMARY boot) and is independent of bucket
+size. Pruning stale safekeeper WAL (below) took this drill from **>60 min
+(unbounded, at a 13 GiB bucket)** to a **bounded ~20 min**; the remaining RTO is
+now dominated by the **~11 GiB of pageserver layer files** (real data + the 7-day
+PITR history), not safekeeper WAL. Still not bounded by Postgres. See
+docs/BENCHMARKS.md.
 
 ### What we learned (tribal knowledge, now written down)
 
@@ -225,6 +228,75 @@ independent of bucket size. Still not bounded by Postgres. See docs/BENCHMARKS.m
   policy demands; a second region copy for regional durability.
 - Alert on backup Job failure (`kube_job_status_failed{job_name=~"backup.*"}`) and on
   backup age (last successful completion older than ~26 h).
+
+### Bounding safekeeper WAL growth — `wal-janitor` (issue #19)
+
+**The problem.** Every restore/failover drill fills ~360 MB of WAL through the
+live compute. The safekeepers offload that WAL to the bucket's `/safekeeper`
+prefix as their durability backup, and **nothing trimmed it**: the bucket
+lifecycle policy ages out only non-current *versions* (not current
+accumulation), and neon's pageserver **GC does not touch safekeeper WAL at all**
+— `gc_horizon` / `pitr_interval` govern only pageserver *layer* reclamation. So
+`/safekeeper` grew unbounded (measured **~5.6 GB / ~360 × 16 MiB segments** on the
+live bucket), and since a restore re-downloads the whole `neon` bucket twice
+across the internet, that bloat directly inflated restore RTO.
+
+**What GC actually reclaims (and does not).** Neon 8464 `PUT
+:9898/v1/tenant/<t>/timeline/<tl>/do_gc` returns `200` but reclaims only
+pageserver layer files older than `max(gc_horizon, pitr_interval)`. With a 7-day
+PITR window and data younger than 7 days it reclaims **nothing**, and it never
+has any notion of the `/safekeeper` prefix. GC is therefore **not** a tool for
+this problem — an explicit janitor is required.
+
+**What is safe to prune.** A safekeeper WAL segment is dead weight once it is
+**both**:
+1. **below the pageserver's `remote_consistent_lsn`** — the honesty-rule LSN,
+   meaning the WAL is already ingested *and* uploaded into pageserver layers, so
+   no pageserver will ever re-stream it; **and**
+2. **outside the window the writable restore re-seeds.** `deploy/_restore-writable.sh`
+   reads only a handful of segments around `last_record_lsn`
+   (`[last_record − 2 seg .. + ~1 seg]`) to reconstruct the safekeeper. We keep a
+   **`KEEP_SEGMENTS` safety horizon (default 32 = 512 MiB) below
+   `remote_consistent_lsn`** — 8× the ~4 segments the restore actually needs and
+   2× the 256 MB `checkpoint_distance`.
+
+Everything **at or above** the horizon, and **every `.partial` segment** (the
+live tail the safekeepers are still writing), is **never** touched. Pruning is
+purely LSN/segment based — it does **not** key off the PITR *time* window,
+because point-in-time reads are served from retained **pageserver layers**, not
+from raw safekeeper WAL.
+
+**The janitor.** A sibling `wal-janitor` CronJob in `deploy/62-backup.yaml` runs
+daily at **02:30** (30 min before the 03:00 backup, so the next `mc mirror
+--remove` propagates the trim to the OCI copy the same night):
+1. an initContainer reads `remote_consistent_lsn` from the pageserver and writes
+   the threshold segment name (`segno(rcl) − KEEP_SEGMENTS`, as a 24-hex WAL
+   filename) — **fail-closed**: if `remote_consistent_lsn` can't be read the job
+   aborts and prunes nothing;
+2. the `mc` container deletes only complete 16 MiB segment objects whose 24-hex
+   name sorts *strictly before* the threshold (fixed-width hex sorts in LSN
+   order), keeping the tail + all partials.
+
+Run it on demand (and preview first with `DRY_RUN`):
+
+```
+# supervised preview — list what WOULD be pruned, delete nothing. Patch the
+# CronJob env first (patching a running Job's pod template has no effect), then
+# create a Job from it.
+kubectl -n scale-zero-pg set env cronjob/wal-janitor --containers=prune DRY_RUN=true
+kubectl -n scale-zero-pg create job wal-janitor-preview --from=cronjob/wal-janitor
+kubectl -n scale-zero-pg logs job/wal-janitor-preview --all-containers   # inspect the range + count
+kubectl -n scale-zero-pg set env cronjob/wal-janitor --containers=prune DRY_RUN=false  # restore default
+
+# real prune (the shipped default, DRY_RUN=false)
+kubectl -n scale-zero-pg create job wal-janitor-now --from=cronjob/wal-janitor
+kubectl -n scale-zero-pg logs job/wal-janitor-now --all-containers
+```
+
+A supervised live prune on 2026-07-03 reclaimed **325 of 357 segments (~5.2 GB;
+`/safekeeper` 5.6 GB → 534 MB)**, keeping 32 segments + 3 partials, with live
+reads/writes verified healthy immediately after. Tune the horizon by editing
+`KEEP_SEGMENTS` on the `resolve-horizon` initContainer.
 
 ## Pageserver failover
 
