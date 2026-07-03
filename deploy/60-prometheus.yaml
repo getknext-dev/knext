@@ -198,20 +198,44 @@ data:
           # fire — a backup or janitor that NEVER once succeeded, or was fat-fingered
           # into suspend:true, would pass silently. These companions page on exactly
           # that: metric absent OR spec.suspend==1.
+          # DAY-0 / POST-DR GUARD (issue #62): kube_cronjob_status_last_successful_time
+          # does not exist until the FIRST successful run. On a freshly deployed or
+          # DR-restored plane the janitor (02:30) and backup (03:00) have no last-success
+          # metric yet, so a bare absent(...)==1 would fire ~10m after apply and page
+          # until the first schedule finally runs (up to ~16h) — guaranteed noise at
+          # exactly the worst moment (right after an incident rebuild). Gate the
+          # never-succeeded/suspended arm on the CronJob having EXISTED > 26h (one full
+          # schedule period, so a run should genuinely have happened). The deleted/renamed
+          # case (the CronJob object itself gone ⇒ kube_cronjob_created absent) is NOT
+          # age-gated — a missing backup/janitor definition is never benign.
           - alert: BackupStaleAbsent
-            expr: absent(kube_cronjob_status_last_successful_time{namespace="scale-zero-pg", cronjob="backup"}) == 1 or kube_cronjob_spec_suspend{namespace="scale-zero-pg", cronjob="backup"} == 1
+            expr: |
+              (
+                ( absent(kube_cronjob_status_last_successful_time{namespace="scale-zero-pg", cronjob="backup"}) == 1
+                  or kube_cronjob_spec_suspend{namespace="scale-zero-pg", cronjob="backup"} == 1 )
+                and on(namespace, cronjob)
+                (time() - kube_cronjob_created{namespace="scale-zero-pg", cronjob="backup"} > 93600)
+              )
+              or absent(kube_cronjob_created{namespace="scale-zero-pg", cronjob="backup"}) == 1
             for: 10m
             labels: { severity: critical }
             annotations:
-              summary: "backup has NEVER succeeded, or is suspended/absent"
-              description: "No last-successful-time series for the backup CronJob (never succeeded / suspended / deleted). BackupStale is blind in this state — treat as no off-cluster backup at all. Check `kubectl -n scale-zero-pg get cronjob backup`."
+              summary: "backup has NEVER succeeded, or is suspended/deleted (plane >26h old)"
+              description: "No last-successful-time series for the backup CronJob (never succeeded / suspended), and the CronJob has existed >26h so a run should have happened — OR the CronJob object is gone (deleted/renamed). BackupStale is blind in this state — treat as no off-cluster backup at all. Check `kubectl -n scale-zero-pg get cronjob backup`. (Fresh/DR-restored planes are suppressed for the first 26h — #62.)"
           - alert: WalJanitorStaleAbsent
-            expr: absent(kube_cronjob_status_last_successful_time{namespace="scale-zero-pg", cronjob="wal-janitor"}) == 1 or kube_cronjob_spec_suspend{namespace="scale-zero-pg", cronjob="wal-janitor"} == 1
+            expr: |
+              (
+                ( absent(kube_cronjob_status_last_successful_time{namespace="scale-zero-pg", cronjob="wal-janitor"}) == 1
+                  or kube_cronjob_spec_suspend{namespace="scale-zero-pg", cronjob="wal-janitor"} == 1 )
+                and on(namespace, cronjob)
+                (time() - kube_cronjob_created{namespace="scale-zero-pg", cronjob="wal-janitor"} > 93600)
+              )
+              or absent(kube_cronjob_created{namespace="scale-zero-pg", cronjob="wal-janitor"}) == 1
             for: 10m
             labels: { severity: critical }
             annotations:
-              summary: "wal-janitor has NEVER succeeded, or is suspended/absent"
-              description: "No last-successful-time series for the wal-janitor CronJob (never succeeded / suspended / deleted). WalJanitorStale is blind in this state — /safekeeper WAL will regrow unbounded. Check `kubectl -n scale-zero-pg get cronjob wal-janitor`."
+              summary: "wal-janitor has NEVER succeeded, or is suspended/deleted (plane >26h old)"
+              description: "No last-successful-time series for the wal-janitor CronJob (never succeeded / suspended), and the CronJob has existed >26h so a run should have happened — OR the CronJob object is gone. WalJanitorStale is blind in this state — /safekeeper WAL will regrow unbounded. Check `kubectl -n scale-zero-pg get cronjob wal-janitor`. (Fresh/DR-restored planes are suppressed for the first 26h — #62.)"
           # (c) pswatcher down: the failover authority is not being scraped.
           # No watcher => no automated pageserver failover (#23).
           - alert: PswatcherDown
@@ -260,6 +284,22 @@ data:
             annotations:
               summary: "clients connected but no compute is ready — wake path stuck"
               description: "pggw_active_connections>0 yet 0 ready compute/compute-warm replicas for >2m — the wake path is failing (attach error, image pull, storage-plane stall). Clients are hanging."
+      # DEAD-MAN'S-SWITCH (issue #60). Every rule above is EVALUATED by Prometheus and
+      # ROUTED by Alertmanager. If either is down/crashlooping/OOM/evicted, NO rule fires
+      # and NO page is sent — including KubeStateMetricsDown and PswatcherDown, the guards
+      # meant to catch silent machinery. Those close the *producer*-death holes but are all
+      # blind to *evaluator/router* death. The standard fix is an always-firing Watchdog
+      # routed to an EXTERNAL receiver (deploy/61 `watchdog`): the off-cluster side alarms
+      # when the heartbeat STOPS arriving. Without it, "all rules green" cannot distinguish
+      # a healthy alerting stack from a dead one.
+      - name: ks-pg-watchdog
+        rules:
+          - alert: Watchdog
+            expr: vector(1)
+            labels: { severity: none }
+            annotations:
+              summary: "Alerting pipeline heartbeat — always firing by design"
+              description: "This alert is ALWAYS firing. Alertmanager routes it to the external `watchdog` receiver on a short repeat_interval; an off-cluster monitor (healthchecks.io / Dead Man's Snitch / cronitor) is configured to ALARM if the ping stops. If you are paged by the EXTERNAL monitor, Prometheus or Alertmanager itself is down — see docs/operations.md#dead-mans-switch-external-heartbeat-60."
 ---
 apiVersion: apps/v1
 kind: Deployment

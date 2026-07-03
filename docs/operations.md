@@ -55,8 +55,9 @@ Alertmanager (`61-alertmanager.yaml`) to a receiver.
 | `WalJanitorJobFailed` (crit) | a Job owned by the **wal-janitor** CronJob failed | The WAL trimmer stalled — `/safekeeper` WAL will regrow and slow restores past 60min (#19/#41). Check pageserver reachability at 02:30. |
 | `WalJanitorStale` (crit) | last successful janitor run >26h old | The janitor **silently stopped** producing runs (no Failed Job) — schedule misses / backlog. `/safekeeper` is regrowing; restore RTO is slipping. Check `kubectl -n scale-zero-pg get cronjob wal-janitor` (suspend? schedule?) and the last `wal-janitor-*` Job. (#49) |
 | `BackupStale` (crit) | last successful backup >26h old | >1 missed daily run — the off-cluster copy is stale. Investigate the CronJob before it becomes a data-loss window. |
-| `BackupStaleAbsent` (crit) | backup has **never** succeeded, or is suspended/deleted | The last-success metric is absent — `BackupStale` is blind here. Treat as **no off-cluster backup at all**: un-suspend / redeploy the CronJob and force a run. (#51) |
-| `WalJanitorStaleAbsent` (crit) | janitor has **never** succeeded, or is suspended/deleted | The last-success metric is absent — `WalJanitorStale` is blind here. `/safekeeper` WAL is unbounded: un-suspend / redeploy the CronJob and force a run. (#49/#51) |
+| `BackupStaleAbsent` (crit) | backup **never** succeeded / suspended **and the CronJob is >26h old**, OR the CronJob object is gone | The last-success metric is absent — `BackupStale` is blind here. Treat as **no off-cluster backup at all**: un-suspend / redeploy the CronJob and force a run. **Age-gated so a fresh / DR-restored plane is not paged for the first 26h** (#62); the deleted/renamed case fires immediately (#51). |
+| `WalJanitorStaleAbsent` (crit) | janitor **never** succeeded / suspended **and the CronJob is >26h old**, OR the CronJob object is gone | The last-success metric is absent — `WalJanitorStale` is blind here. `/safekeeper` WAL is unbounded: un-suspend / redeploy the CronJob and force a run. **Age-gated for 26h on a fresh/DR plane** (#62); deleted/renamed fires immediately (#49/#51). |
+| `Watchdog` (none) | **always firing by design** | The alerting stack's **dead-man's-switch** (#60). You should **never** be paged by this rule directly — it is routed to an *external* heartbeat monitor. If that **external** monitor pages you, Prometheus or Alertmanager itself is down. See [dead-man's-switch](#dead-mans-switch-external-heartbeat-60). |
 | `KubeStateMetricsDown` (crit) | `up{job=kube-state-metrics}==0` or absent for 2m | **Sev-1.** KSM (`deploy/59`) is the sole producer for `BackupJobFailed`, `WalJanitorJobFailed`, `BackupStale`, `WalJanitorStale`, `PageserverStandbyNotReady`, `ComputeWakeStuck` — while it is down **all of them are blind**. Restore KSM before trusting any platform alert. (#48) |
 | `PswatcherDown` (crit) | `up{job="pswatcher"}==0` for 2m | The failover authority is down — a primary pageserver death now degrades to the manual runbook (below). Restart pswatcher. |
 | `PswatcherPromotionFired` (crit) | `pswatcher_promotions_total` rose in 10m | A **failover happened** — the promoted standby is now the sole read authority with NO standby behind it. Rebuild a standby. |
@@ -79,6 +80,13 @@ never missed (the gap that re-opened the #19 DR blocker).
 - **dead producer** — every rule above reads kube-state-metrics series; if KSM dies
   they all go silent. `KubeStateMetricsDown` guards the producer itself, symmetric to
   `PswatcherDown` (#48).
+- **dead evaluator/router** — every rule above (including the producer guards) is
+  *evaluated by Prometheus and routed by Alertmanager*. If either is down/OOM/evicted,
+  nothing fires and nothing on-cluster notices. The `Watchdog` dead-man's-switch closes
+  this last hole from **outside** the cluster (#60, below).
+- **Day-0 / post-DR false page** — the `*StaleAbsent` guards would themselves over-fire
+  on a freshly built plane (no first success yet). They are age-gated to stay quiet for
+  26h so an incident rebuild doesn't hand you two crit pages you can't clear (#62).
 
 ### Receiver — testable sink by default, real pager one flip away
 
@@ -104,6 +112,50 @@ Prove the whole pager path any time:
 - `sh deploy/_verify-ksm-down.sh` — scales kube-state-metrics to 0 and asserts
   `KubeStateMetricsDown` reaches the sink, then restores it (the producer self-guard,
   #48).
+
+### Dead-man's-switch — external heartbeat (#60)
+
+Every alert above is **evaluated by Prometheus and routed by Alertmanager**. If either
+process is down, crash-looping, OOM-killed or evicted, **no rule fires and no page is
+sent** — including `KubeStateMetricsDown` and `PswatcherDown`, the guards meant to catch
+silent machinery. Those close the *producer*-death holes but are all blind to
+*evaluator/router* death. "All 15 rules green" cannot, on its own, tell a healthy
+alerting stack from a dead one.
+
+The fix is the standard **dead-man's-switch**: an always-firing `Watchdog` alert
+(`expr: vector(1)`, `deploy/60`) routed to a **dedicated external receiver** (`watchdog`
+in `deploy/61`) that POSTs a heartbeat to an **off-cluster** monitor on a short
+(~1 min) repeat. The external monitor is configured to **alarm when the heartbeat
+STOPS** — which is exactly what happens if Prometheus/Alertmanager die. The pattern is
+inverted on purpose: on-cluster silence is the failure signal, and only something
+**outside** the cluster can observe it.
+
+**Arm it (operator, once):**
+
+```sh
+# 1. create a check on any heartbeat service and copy its ping URL, e.g.:
+#      healthchecks.io   -> https://hc-ping.com/<uuid>
+#      Dead Man's Snitch -> https://nosnch.in/<token>
+#      cronitor          -> https://cronitor.link/p/<id>/<name>
+#    Set its EXPECTED PERIOD to ~5 min and its grace to a few minutes.
+# 2. scaffold the Secret (same optional alertmanager-receiver Secret as Slack):
+WATCHDOG_HEARTBEAT_URL=https://hc-ping.com/<uuid> sh deploy/gen-secrets.sh
+# 3. reload Alertmanager so it mounts the new key:
+kubectl -n scale-zero-pg rollout restart deploy/alertmanager
+```
+
+The URL is read at send time from the mounted Secret (`url_file`) — never in the
+ConfigMap or in git. Until armed, the in-cluster alert path is unaffected and the
+Watchdog simply has nowhere external to go.
+
+**What silence means.** If the **external** monitor pages you ("heartbeat missed"),
+the alerting stack itself is down: `kubectl -n scale-zero-pg get pods -l plane=observability`,
+check Prometheus/Alertmanager restarts/OOMs, and treat every other alert as **untrustworthy
+until the heartbeat resumes** — during the gap, real incidents were not paging either.
+
+Verify the heartbeat exists any time: `sh deploy/_verify-alerting.sh` asserts the
+`Watchdog` alert is **active in Alertmanager's API** (the pre-condition for the external
+ping) in addition to drilling the normal pager path.
 
 Quick look without Prometheus: `sh deploy/_metrics.sh`.
 
@@ -419,17 +471,20 @@ from raw safekeeper WAL.
 **The janitor.** A sibling `wal-janitor` CronJob in `deploy/62-backup.yaml` runs
 daily at **02:30** (30 min before the 03:00 backup, so the next `mc mirror
 --remove` propagates the trim to the OCI copy the same night):
-1. an initContainer reads `remote_consistent_lsn` from the pageserver and writes
-   the **TLI-independent** threshold suffix (`segno(rcl) − KEEP_SEGMENTS` as a 16-hex
-   `LOGID+SEG`) — **fail-closed**: if `remote_consistent_lsn` can't be read the job
-   aborts and prunes nothing;
-2. the `mc` container **derives the timeline id(s)** from the segment names actually
-   present (the first 8 hex of each 24-hex name is the TLI) and, per timeline, deletes
-   only complete 16 MiB segments whose name sorts *strictly before* that timeline's
-   threshold (`<TLI> + suffix`; fixed-width hex sorts in LSN order), keeping the tail
-   + all partials. It **fails loud** (exits non-zero → pages via `WalJanitorJobFailed`)
-   if the bucket listing errors or no TLI can be derived — never exit-0-having-pruned-
-   nothing.
+1. an initContainer resolves a **per-timeline horizon** (#59): it reads
+   `remote_consistent_lsn` for the configured timeline (**fail-closed** — a missing/zero
+   rcl aborts the whole job and prunes nothing) **and** walks the pageserver's timeline
+   list, writing each timeline's OWN `segno(rcl) − KEEP_SEGMENTS` suffix to
+   `/state/horizons/<timeline_id>`. A timeline whose rcl can't be resolved gets **no**
+   horizon file;
+2. the `mc` container iterates **every timeline prefix** present under
+   `/safekeeper/<tenant>/` and, for each, deletes only complete 16 MiB segments whose
+   24-hex name sorts *strictly before* **that timeline's own** threshold — with the
+   per-8-hex-TLI derivation (#42) applied within each timeline. A timeline with no
+   resolved horizon is **fail-safe-skipped** (never judged against another timeline's
+   horizon — that would over-prune a lagging sibling below its own rcl) and the run
+   **fails loud** (exits non-zero → `WalJanitorJobFailed`). It also fails loud if the
+   bucket listing errors — never exit-0-having-pruned-nothing.
 
 > **Why the TLI is derived, not `1` (issue #42).** WAL segment object names are
 > `<TLI><LOGID><SEG>` (24 hex). The janitor used to hardcode `TLI=1`. A neon timeline
@@ -553,8 +608,26 @@ kubelet's independent view) about the primary pod (`PSW_PRIMARY_SELECTOR`, defau
 | --- | --- | --- |
 | fails ≥ threshold | pod **Running & Ready** | **HOLD** — this is a watcher-side partition, not primary death. No promotion; `pswatcher_suspected_partitions_total` increments; the standby is preserved. |
 | fails ≥ threshold | pod **NotReady** | **PROMOTE** — the primary is genuinely unhealthy. |
-| fails ≥ threshold | pod **absent** (gone) | **PROMOTE** — the primary is genuinely gone. |
+| fails ≥ threshold | pod **absent**, primary **was** seen present before | **PROMOTE** — a pod we were demonstrably watching has vanished. |
+| fails ≥ threshold | pod **absent**, primary was **never** seen present | **HOLD** — `present=false` here is more likely a mis-typed/drifted `PSW_PRIMARY_SELECTOR` (or an RBAC empty list) than a death. `pswatcher_primary_never_seen_total` increments; the standby is preserved (#58). *Exception:* if the generation ledger already shows a prior promotion (`gen > base`), a restarted watcher **resumes** and promotes — an advanced ledger is independent evidence a failover was warranted. |
 | fails ≥ threshold | **API unreachable** | **HOLD** — can't corroborate; refuse to promote on a single vantage (a `tick error` is logged and retried). |
+
+**Seen-present anchor (#58).** `present=false` from the API server means only "zero pods
+match `PSW_PRIMARY_SELECTOR`" — indistinguishable between a genuinely-gone primary and a
+selector that never matched anything. The watcher therefore **anchors**: it must have
+observed the primary pod *present* at least once (on a healthy tick, or as
+NotReady/Ready during an investigation) before it will read a later absence as death.
+Until anchored, an absence **holds** and surfaces `pswatcher_primary_never_seen_total`, so
+a selector misconfiguration fails **safe** (no promotion) and **observable** instead of
+silently degrading the #26 second-vantage back to single-vantage.
+
+> **Node-death RTO regime.** The `~8 s` RTO holds for a **pod-process** death (kubelet
+> marks NotReady fast). A whole-**node** failure is different: the API-server vantage
+> serves the last-known `Ready` status until the node lease expires
+> (`node-monitor-grace-period`, ~40 s default), so `{probe fails, kubelet still Ready}`
+> ⇒ HOLD until the lease lapses. Node-level failover RTO is bounded by that grace period,
+> not `FailThreshold × interval` — shorten the grace on the pageserver pods if you need
+> it tighter (#58).
 
 **Tuning knobs & their partition tolerance.** `PSW_POLL_MS` (2 s) × `PSW_FAIL_THRESHOLD`
 (3) ⇒ the HTTP path must be down ~6 s before the gate is even consulted; the
@@ -570,7 +643,10 @@ one-way action, and two watchers could double-flip. We do **not** add a replica 
 leader-election. Instead the authority is **crash-only**: its entire state lives in the
 cluster (the `pageserver` Service selector + the generation ledger ConfigMap), not in
 memory. A watcher that dies mid-failover **resumes idempotently** on restart —
-- selector already flipped ⇒ it adopts the promoted standby and never re-promotes;
+- selector already flipped ⇒ it adopts the promoted standby and never re-promotes —
+  **and bounces the compute exactly once on adoption** (#57), so a compute still pinned
+  to the dead primary from a crash in the flip→delete window is re-attached (deleting an
+  already-gone pod is a no-op; retried until it lands);
 - ledger advanced but selector not yet flipped ⇒ it drives the failover to completion
   with a **monotonic** generation (still fences the dead primary).
 `strategy: Recreate` guarantees a rollout never runs two watchers at once; a

@@ -66,6 +66,21 @@ type Controller struct {
 
 	failures int
 	done     bool // failover already performed (or adopted) — never re-promote
+
+	// promotedInProcess is set once THIS instance runs failover() itself (which already
+	// bounces the compute). It disambiguates the adopt path (#57): a flipped selector we
+	// did NOT flip ourselves means a prior watcher may have died before bouncing.
+	promotedInProcess bool
+	// adoptBounced records that the compute has been bounced along the ADOPT path
+	// (issue #57). A watcher that crashed in the flip→delete window resumes with the
+	// selector already on the standby but a compute still pinned to the dead primary;
+	// on adoption it must bounce the compute exactly once. Set only after a successful
+	// DeletePods so a transient error is retried on a later tick (crash-only).
+	adoptBounced bool
+	// primarySeenPresent is the #58 anchor: the primary pod (PrimarySelector) has been
+	// observed present at least once. Until it has, a PodReady present=false is treated
+	// as "selector matches nothing" (misconfig), NOT as death — we refuse to promote.
+	primarySeenPresent bool
 }
 
 // NewController wires a Controller. FailThreshold < 1 is clamped to 1. The standby
@@ -100,6 +115,20 @@ func (c *Controller) Tick(ctx context.Context) (bool, error) {
 	c.done = failedOver
 
 	if failedOver {
+		// #57 — adopt-path compute bounce. If this instance did NOT run failover()
+		// itself (which already bounces the compute) but is ADOPTING a flipped selector
+		// from cluster state, a prior watcher may have died in the flip→delete window,
+		// leaving a compute pinned to the dead primary. Bounce it exactly once. Deleting
+		// already-gone pods is a no-op (DeletePods tolerates NotFound), so this is safe
+		// whether or not the bounce already happened. Retry on error (crash-only): only
+		// latch adoptBounced after a successful delete.
+		if !c.promotedInProcess && !c.adoptBounced {
+			if _, err := c.k8s.DeletePods(ctx, c.cfg.ComputeSelector); err != nil {
+				c.metrics.SetFailedOver(true)
+				return false, err
+			}
+			c.adoptBounced = true
+		}
 		// #25 — re-anchor: the promoted standby is now the SOLE read authority. Probe
 		// IT (not the dead old primary) and report ITS true health, so primary_up
 		// cannot read a false "healthy" after our own action. The old primary
@@ -112,6 +141,15 @@ func (c *Controller) Tick(ctx context.Context) (bool, error) {
 	if c.prober.Alive(ctx) {
 		c.failures = 0
 		c.metrics.SetPrimaryUp(true)
+		// #58 — establish the seen-present anchor during healthy operation, so a later
+		// present=false can be trusted to mean "died" rather than "selector never
+		// matched". Only poll the API server while UNANCHORED (normally just the first
+		// healthy tick); once anchored, the healthy path costs nothing extra.
+		if !c.primarySeenPresent {
+			if _, present, err := c.k8s.PodReady(ctx, c.cfg.PrimarySelector); err == nil && present {
+				c.primarySeenPresent = true
+			}
+		}
 		return false, nil
 	}
 
@@ -133,9 +171,28 @@ func (c *Controller) Tick(ctx context.Context) (bool, error) {
 	if err != nil {
 		return false, err
 	}
+	if present {
+		c.primarySeenPresent = true // #58 — positive confirmation we are watching the right pod
+	}
 	if present && ready {
 		c.metrics.SuspectedPartition()
 		return false, nil
+	}
+
+	// #58 — an absence we have NEVER anchored (no pod ever matched PrimarySelector) is
+	// far more likely a misconfigured/drifted selector or an RBAC empty-list than a
+	// genuine death. Refuse to burn the only standby on a vantage we cannot trust —
+	// UNLESS the generation ledger already shows a prior promotion (gen > BaseGeneration),
+	// meaning we are RESUMING a decided failover, not making a fresh one.
+	if !present && !c.primarySeenPresent {
+		advanced, aerr := c.ledgerAdvanced(ctx)
+		if aerr != nil {
+			return false, aerr
+		}
+		if !advanced {
+			c.metrics.PrimaryNeverSeen()
+			return false, nil
+		}
 	}
 
 	if err := c.failover(ctx); err != nil {
@@ -144,10 +201,27 @@ func (c *Controller) Tick(ctx context.Context) (bool, error) {
 		return false, err
 	}
 	c.done = true
+	c.promotedInProcess = true // failover() already bounced the compute — skip the adopt bounce
 	c.failures = 0
 	c.metrics.Promotion()
 	c.metrics.SetFailedOver(true)
 	return true, nil
+}
+
+// ledgerAdvanced reports whether the generation ledger has already been advanced
+// beyond the base generation the primary was attached at — i.e. a prior instance
+// promoted at least once. Used by the #58 anchor to let a restarted watcher RESUME a
+// decided failover even when the primary pod is absent and was never locally
+// anchored (an advanced ledger is independent evidence a promotion was warranted).
+func (c *Controller) ledgerAdvanced(ctx context.Context) (bool, error) {
+	gen, ok, err := c.k8s.GetGeneration(ctx)
+	if err != nil {
+		return false, err
+	}
+	if !ok {
+		return false, nil
+	}
+	return gen > c.cfg.BaseGeneration, nil
 }
 
 // failover runs the proven runbook, in order: promote (fences the dead primary

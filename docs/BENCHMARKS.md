@@ -161,3 +161,30 @@ narrative: `docs/operations.md` §"Upgrading the storage plane".
   otherwise sort above a `TLI=1` threshold and silently stop the janitor while it
   kept exiting `0`. Live check confirmed the plane is single-timeline today, so the
   fix is a correctness/forward-compat guard, not a behavior change.
+- **Iteration-8 pager-trust drill battery (2026-07-03, OKE, all green).** Re-ran the
+  affected drills against the live plane after the #57/#58/#59/#60/#61/#62 changes:
+  - **`_verify-wal-janitor.sh` (per-timeline horizon, #59):** derived
+    `threshold_suffix=0000000100000095` for the single live timeline
+    (`f0…f002`) and pruned **34 of 75** complete segments (**~544 MiB**,
+    `/safekeeper` → 702 MiB / 44 objects), keeping every at/above-horizon segment +
+    all 3 `.partial`s; idempotent second run. **New section D:** seeded a segment
+    under an *unresolvable sibling timeline* (`ffff…ffff`) — the janitor **failed
+    loud** (exit non-zero → `WalJanitorJobFailed`) and the sibling segment
+    **survived** (per-timeline horizon is fail-safe: a lagging sibling is never
+    pruned against another timeline's horizon).
+  - **`_verify-pageserver-failover.sh` (new `#57/#58` image):** automatic promotion
+    of pageserver-b @ gen 2, selector flip, compute bounce, metric re-anchor — reads
+    read-write again in **7 s**, no regression from the adopt-bounce / seen-present
+    anchor changes.
+  - **`_verify-alerting.sh` (#60):** the always-firing `Watchdog` dead-man's-switch
+    is **ACTIVE in Alertmanager's API** (the external heartbeat pre-condition) and
+    the normal pager path (Prometheus → Alertmanager → sink) still delivers.
+  - **`_verify-wake.sh` (#61):** full 0→1→0→1 loop green — cold wake **8 s wall /
+    2131 ms gateway latency** — with the new stderr-diagnostic + bounded first-connect
+    retry.
+  - **`BackupStaleAbsent` companion (#52/#62), verified live by decomposing the rule:**
+    suspending the real backup CronJob drives `kube_cronjob_spec_suspend==1` (arm
+    fires); the full age-gated rule is **empty** at a 21 h-old CronJob (Day-0/post-DR
+    suppression, #62) and evaluates to **1** with the gate lowered to >1 h — proving
+    the suspend arm + age gate fire together once a CronJob has genuinely existed past
+    the horizon. Un-suspended immediately (no scheduled run skipped).

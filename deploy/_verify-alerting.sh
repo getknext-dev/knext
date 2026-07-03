@@ -29,6 +29,17 @@ $K get cm prometheus-config -o jsonpath='{.data.prometheus\.yml}' | grep -q 'ale
   || fail "prometheus config lacks alerting -> alertmanager:9093"
 ok "prometheus on PVC, alerting block points at alertmanager"
 
+# 1b. DEAD-MAN'S-SWITCH (#60): the always-firing Watchdog must be ACTIVE in
+#     Alertmanager — that is the heartbeat the external monitor watches for. If it
+#     is NOT active, the dead-man's-switch is silent and the alerting stack's own
+#     death would go unnoticed. Query Alertmanager's own API (v2) for it.
+i=0
+until $K exec deploy/prometheus -- wget -qO- 'http://alertmanager:9093/api/v2/alerts?active=true' 2>/dev/null | grep -q 'Watchdog'; do
+  i=$((i+1)); [ $i -gt 60 ] && fail "Watchdog dead-man's-switch never became active in Alertmanager (>120s) — is the ks-pg-watchdog rule loaded? (#60)"
+  sleep 2
+done
+ok "Watchdog dead-man's-switch is ACTIVE in Alertmanager (external heartbeat present, #60)"
+
 # 2. inject a synthetic always-firing drill rule
 CLEANED=0
 restore_rules() {

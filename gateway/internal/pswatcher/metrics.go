@@ -17,6 +17,7 @@ type Metrics struct {
 	PrimaryUpVal             int `json:"primary_up"`                 // 1 = the CURRENT read authority (primary, or promoted standby post-failover) is reachable
 	FailedOverVal            int `json:"failed_over"`                // 1 = a failover has happened; primary_up now tracks the promoted standby
 	SuspectedPartitionsTotal int `json:"suspected_partitions_total"` // times a promotion was WITHHELD because the primary was Ready per the API server (our-vantage partition)
+	PrimaryNeverSeenTotal    int `json:"primary_never_seen_total"`   // times a promotion was WITHHELD because the primary pod was NEVER observed present (selector likely misconfigured — issue #58)
 }
 
 // NewMetrics starts with primary assumed up (avoids a spurious 0 before the
@@ -64,6 +65,25 @@ func (m *Metrics) SuspectedPartition() {
 	m.mu.Unlock()
 }
 
+// PrimaryNeverSeen counts one WITHHELD promotion: our HTTP probe failed and the
+// API server reports the primary pod ABSENT, but we have NEVER observed a pod
+// matching PrimarySelector present — so the absence is more likely a
+// misconfigured/drifted selector (or an RBAC empty-list) than a real death. We
+// refuse to promote on an un-anchored vantage rather than burn the only standby
+// (issue #58).
+func (m *Metrics) PrimaryNeverSeen() {
+	m.mu.Lock()
+	m.PrimaryNeverSeenTotal++
+	m.mu.Unlock()
+}
+
+// PrimaryNeverSeenCount returns the never-anchored-absence withheld count (tests).
+func (m *Metrics) PrimaryNeverSeenCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.PrimaryNeverSeenTotal
+}
+
 // Promotions returns the promotion count (used by tests).
 func (m *Metrics) Promotions() int { m.mu.Lock(); defer m.mu.Unlock(); return m.PromotionsTotal }
 
@@ -89,8 +109,9 @@ func (m *Metrics) PromText() string {
 			"pswatcher_checks_total %d\n"+
 			"pswatcher_primary_up %d\n"+
 			"pswatcher_failed_over %d\n"+
-			"pswatcher_suspected_partitions_total %d\n",
-		m.PromotionsTotal, m.ChecksTotal, m.PrimaryUpVal, m.FailedOverVal, m.SuspectedPartitionsTotal,
+			"pswatcher_suspected_partitions_total %d\n"+
+			"pswatcher_primary_never_seen_total %d\n",
+		m.PromotionsTotal, m.ChecksTotal, m.PrimaryUpVal, m.FailedOverVal, m.SuspectedPartitionsTotal, m.PrimaryNeverSeenTotal,
 	)
 }
 

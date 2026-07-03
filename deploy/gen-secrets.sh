@@ -81,24 +81,40 @@ fi
 # `api_url_file`, so the URL never lands in a ConfigMap or in git), then flip
 # `route.receiver` to `slack` in the alertmanager-config ConfigMap.
 #
-# One key: slack-webhook -> the Slack (or Mattermost/compat) incoming-webhook URL.
-# Provide it via env ALERT_SLACK_WEBHOOK_URL. No-silent-rotation, same as above:
-# if the Secret exists, leave it. If MISSING and no URL supplied, this is a
-# NO-OP with a hint (the default sink keeps working) — it does NOT fail the run.
+# Two keys, both optional:
+#   slack-webhook    -> the Slack (or compat) incoming-webhook URL (real pager).
+#                       Provide via env ALERT_SLACK_WEBHOOK_URL.
+#   watchdog-webhook -> the EXTERNAL dead-man's-switch URL (issue #60): a
+#                       healthchecks.io / Dead Man's Snitch / cronitor "ping" URL
+#                       that the always-firing Watchdog alert POSTs to on a short
+#                       repeat_interval. The external side ALARMS when the ping
+#                       STOPS — the only way to catch Prometheus/Alertmanager
+#                       themselves being down (they cannot page for their own death).
+#                       Provide via env WATCHDOG_HEARTBEAT_URL.
+# Both read at send time from the mounted Secret (never in a ConfigMap or git).
+# No-silent-rotation: if the Secret exists, leave it. If MISSING and no URL
+# supplied, NO-OP with a hint (the default sink keeps working) — never fails the run.
 RNAME=alertmanager-receiver
 if $K get secret "$RNAME" >/dev/null 2>&1; then
   echo "ok - Secret $RNAME already exists; leaving untouched (no silent rotation)"
-elif [ -n "${ALERT_SLACK_WEBHOOK_URL:-}" ]; then
-  $K create secret generic "$RNAME" \
-    --from-literal=slack-webhook="$ALERT_SLACK_WEBHOOK_URL" >/dev/null \
-    || fail "could not create Secret $RNAME"
-  echo "ok - created Secret $RNAME (slack-webhook hidden)"
-  echo "    -> now set route.receiver: slack in the alertmanager-config ConfigMap and:"
-  echo "       kubectl -n $NS rollout restart deploy/alertmanager"
+elif [ -n "${ALERT_SLACK_WEBHOOK_URL:-}" ] || [ -n "${WATCHDOG_HEARTBEAT_URL:-}" ]; then
+  set -- create secret generic "$RNAME"
+  [ -n "${ALERT_SLACK_WEBHOOK_URL:-}" ] && set -- "$@" --from-literal=slack-webhook="$ALERT_SLACK_WEBHOOK_URL"
+  [ -n "${WATCHDOG_HEARTBEAT_URL:-}" ] && set -- "$@" --from-literal=watchdog-webhook="$WATCHDOG_HEARTBEAT_URL"
+  $K "$@" >/dev/null || fail "could not create Secret $RNAME"
+  echo "ok - created Secret $RNAME (webhook URL(s) hidden)"
+  [ -n "${ALERT_SLACK_WEBHOOK_URL:-}" ] && {
+    echo "    -> set route.receiver: slack in the alertmanager-config ConfigMap and:"
+    echo "       kubectl -n $NS rollout restart deploy/alertmanager"; }
+  [ -n "${WATCHDOG_HEARTBEAT_URL:-}" ] && {
+    echo "    -> Watchdog dead-man's-switch armed: point your external monitor's"
+    echo "       expected-ping period to ~5m and rollout-restart alertmanager."; }
 else
-  echo "note - Secret $RNAME not set; alerts route to the in-cluster logging sink."
-  echo "       To page a human, mint a Slack incoming webhook and re-run with:"
-  echo "         ALERT_SLACK_WEBHOOK_URL=https://hooks.slack.com/services/XXX sh deploy/gen-secrets.sh"
+  echo "note - Secret $RNAME not set; alerts route to the in-cluster logging sink and"
+  echo "       the Watchdog dead-man's-switch is disarmed (no external heartbeat sink)."
+  echo "       To page a human + arm the dead-man's-switch, re-run with either/both:"
+  echo "         ALERT_SLACK_WEBHOOK_URL=https://hooks.slack.com/services/XXX \\"
+  echo "         WATCHDOG_HEARTBEAT_URL=https://hc-ping.com/<uuid> sh deploy/gen-secrets.sh"
 fi
 
 # ---------------------------------------------------------------------------

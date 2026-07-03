@@ -29,6 +29,7 @@ MCPOD="wjd-mc-${TS}"
 FCJOB="wjd-failclosed-${TS}"
 RUNJOB="wjd-run-${TS}"
 IDJOB="wjd-idem-${TS}"
+SIBJOB="wjd-sibling-${TS}"
 fail() { echo "FAIL: $*" >&2; exit 1; }
 ok() { echo "ok - $*"; }
 # strictly-less string compare (fixed-width hex sorts numerically). POSIX `[` has
@@ -39,6 +40,11 @@ TID=$($K get cm compute-config -o jsonpath='{.data.TENANT_ID}') || fail "cannot 
 TLID=$($K get cm compute-config -o jsonpath='{.data.TIMELINE_ID}') || fail "cannot read TIMELINE_ID"
 [ -n "$TID" ] && [ -n "$TLID" ] || fail "TENANT_ID/TIMELINE_ID empty"
 PFX="src/neon/safekeeper/${TID}/${TLID}"
+# #59 — a synthetic SIBLING timeline prefix (not a real pageserver timeline, so the
+# janitor can resolve NO horizon for it). Section D seeds a below-configured-horizon
+# segment here and asserts the janitor never over-prunes it (fail-safe) and fails loud.
+SIBLING_TLID="ffffffffffffffffffffffffffffffff"
+SPFX="src/neon/safekeeper/${TID}/${SIBLING_TLID}"
 $K get cronjob wal-janitor >/dev/null 2>&1 || fail "wal-janitor CronJob not deployed"
 
 # --- cleanup: remove seeds + all drill Jobs/pods on any exit -----------------
@@ -50,7 +56,9 @@ cleanup() {
   for s in 000000010000000000000001 000000010000000000000002 000000010000000000000003; do
     $K exec "$MCPOD" -- sh -c 'export HOME=/tmp; mkdir -p /tmp/.mc; mc alias set src http://minio:9000 "$S3_USER" "$S3_PASS" >/dev/null 2>&1; mc rm '"$PFX/$s"' >/dev/null 2>&1' >/dev/null 2>&1 || true
   done
-  $K delete job "$FCJOB" "$RUNJOB" "$IDJOB" --ignore-not-found >/dev/null 2>&1 || true
+  # remove the synthetic sibling-timeline seed + prefix (#59 section D)
+  $K exec "$MCPOD" -- sh -c 'export HOME=/tmp; mkdir -p /tmp/.mc; mc alias set src http://minio:9000 "$S3_USER" "$S3_PASS" >/dev/null 2>&1; mc rm --recursive --force '"$SPFX/"' >/dev/null 2>&1' >/dev/null 2>&1 || true
+  $K delete job "$FCJOB" "$RUNJOB" "$IDJOB" "$SIBJOB" --ignore-not-found >/dev/null 2>&1 || true
   $K delete pod "$MCPOD" --ignore-not-found >/dev/null 2>&1 || true
 }
 trap cleanup EXIT INT TERM
@@ -221,5 +229,45 @@ $K logs job/"$IDJOB" -c prune 2>/dev/null | grep -q 'nothing to prune' || \
   fail "idempotence: second run did NOT report 'nothing to prune' on the lean bucket"
 ok "(C) second run is idempotent: nothing to prune, exit 0"
 
+# ===========================================================================
+# D. PER-TIMELINE HORIZON (issue #59) — a SIBLING timeline the janitor can resolve
+#    NO horizon for must be SKIPPED (never over-pruned against the configured
+#    timeline's horizon) and the run must FAIL LOUD so the gap pages.
+# ===========================================================================
+# Seed one below-configured-horizon segment (LOGID=0, SEG=1) under a synthetic
+# sibling timeline prefix. If the janitor wrongly applied the configured timeline's
+# (high) horizon here, this segment would be deleted — the exact #59 over-prune.
+MC "echo drill | mc pipe $SPFX/000000010000000000000001" >/dev/null || fail "could not seed sibling-timeline segment"
+SIB_BEFORE=$($K exec "$MCPOD" -- sh -c 'export HOME=/tmp; mkdir -p /tmp/.mc; mc alias set src http://minio:9000 "$S3_USER" "$S3_PASS" >/dev/null 2>&1; mc ls '"$SPFX/"' | sed "s/.* //" | grep -E "^[0-9A-Fa-f]{24}$" | sort -u' 2>/dev/null || true)
+echo "$SIB_BEFORE" | grep -q '000000010000000000000001' || fail "sibling seed did not land"
+ok "seeded a below-horizon segment under an UNRESOLVABLE sibling timeline ($SIBLING_TLID)"
+
+$K create job "$SIBJOB" --from=cronjob/wal-janitor >/dev/null || fail "could not create sibling-case Job"
+# HARD invariant: the janitor must FAIL (fail-loud on the unresolved sibling), never Complete.
+if wait_job "$SIBJOB" 240; then
+  $K logs job/"$SIBJOB" -c prune 2>/dev/null | tail -20 >&2 || true
+  fail "(D) janitor COMPLETED with an unresolvable sibling present — it must fail loud (#59)"
+elif [ $? -eq 2 ]; then
+  fail "(D) sibling-case Job neither Failed nor Completed within 240s"
+fi
+ok "(D) janitor failed loud with the unresolvable sibling present (WalJanitorJobFailed path)"
+# BEST-EFFORT corroboration: the prune log should name the sibling as UNRESOLVED. A
+# Failed job under backoffLimit churns pods, so `logs job/...` can transiently miss the
+# pod (kubelet EOF) — retry a few times, but do NOT red the drill on a log-read flake:
+# the hard invariants (job Failed + seed survives below) already prove the behavior.
+i=0; SAW=""
+while [ "$i" -lt 8 ]; do
+  if $K logs job/"$SIBJOB" -c prune 2>/dev/null | grep -qi "UNRESOLVED horizon"; then SAW=1; break; fi
+  i=$((i+1)); sleep 3
+done
+[ -n "$SAW" ] && ok "(D) prune log names the sibling UNRESOLVED (fail-safe skip)" \
+             || echo "note - could not read the prune log to confirm the UNRESOLVED line (pod GC/kubelet flake); relying on job-Failed + seed-survival invariants"
+
+# HARD invariant: the sibling seed must SURVIVE — never over-pruned against a foreign horizon.
+SIB_AFTER=$($K exec "$MCPOD" -- sh -c 'export HOME=/tmp; mkdir -p /tmp/.mc; mc alias set src http://minio:9000 "$S3_USER" "$S3_PASS" >/dev/null 2>&1; mc ls '"$SPFX/"' | sed "s/.* //" | grep -E "^[0-9A-Fa-f]{24}$" | sort -u' 2>/dev/null || true)
+echo "$SIB_AFTER" | grep -q '000000010000000000000001' || \
+  fail "(D) OVER-PRUNE: the sibling-timeline segment was deleted against the configured timeline's horizon (#59)"
+ok "(D) sibling-timeline segment survived — per-timeline horizon is fail-safe (#59)"
+
 cleanup
-echo "wal-janitor safety drill PASSED: fail-closed, below-horizon-only prune, tail/partial preserved, idempotent (issues #37/#42)"
+echo "wal-janitor safety drill PASSED: fail-closed, below-horizon-only prune, tail/partial preserved, idempotent, per-timeline fail-safe (issues #37/#42/#59)"

@@ -164,7 +164,11 @@ grep -qE "printf '%08X%08X%08X' 1 " 62-backup.yaml && fail "62 wal-janitor still
 grep -q 'threshold_suffix' 62-backup.yaml || fail "62 wal-janitor must emit a TLI-independent LOGID+SEG threshold_suffix (issue #42)"
 grep -q 'cut -c1-8' 62-backup.yaml || fail "62 wal-janitor must derive the timeline id(s) from the 24-hex segment names (issue #42)"
 grep -q 'mc ls failed' 62-backup.yaml || fail "62 wal-janitor must fail-LOUD (exit nonzero) when the bucket listing errors, not exit 0 pruning nothing (issue #42)"
-ok "wal-janitor bounds safekeeper WAL (issue #19), derives TLI per-timeline + fails loud (issue #42), backup self-heals torn index (issue #21)"
+# issue #59: PER-TIMELINE horizon — each timeline judged against ITS OWN
+# remote_consistent_lsn; an unresolvable sibling is fail-safe-skipped (not pruned).
+grep -q '/state/horizons' 62-backup.yaml || fail "62 wal-janitor must resolve a PER-TIMELINE horizon (each timeline vs its own rcl), not a shared suffix (#59)"
+grep -q 'UNRESOLVED' 62-backup.yaml || fail "62 wal-janitor must fail-safe-SKIP (never over-prune) a timeline whose own rcl it cannot resolve (#59)"
+ok "wal-janitor bounds safekeeper WAL (issue #19), derives TLI per-timeline + fails loud (issue #42), per-timeline horizon fail-safe (issue #59), backup self-heals torn index (issue #21)"
 
 # 17. contract: kube-state-metrics (59) is the CronJob/Deployment/STS metric
 #     PRODUCER the janitor/backup/failover alerts key off (issues #29/#41/#23).
@@ -201,6 +205,12 @@ grep -q 'alert: WalJanitorStale' 60-prometheus.yaml || fail "60 missing WalJanit
 grep -q 'alert: BackupStaleAbsent' 60-prometheus.yaml || fail "60 missing BackupStaleAbsent (absent/suspend guard, #51)"
 grep -q 'alert: WalJanitorStaleAbsent' 60-prometheus.yaml || fail "60 missing WalJanitorStaleAbsent (absent/suspend guard, #49/#51)"
 grep -q 'kube_cronjob_spec_suspend' 60-prometheus.yaml || fail "60 absent-guards must also page on a suspended CronJob (kube_cronjob_spec_suspend==1)"
+# issue #62: the *StaleAbsent guards must be GATED by CronJob age so a fresh/DR-restored
+# plane isn't paged before the first schedule has genuinely been missed (Day-0 noise).
+grep -q 'kube_cronjob_created' 60-prometheus.yaml || fail "60 *StaleAbsent must gate on CronJob age (kube_cronjob_created > 26h) to suppress Day-0/post-DR over-fire (#62)"
+# issue #60: DEAD-MAN'S-SWITCH — an always-firing Watchdog routed to an EXTERNAL receiver.
+grep -q 'alert: Watchdog' 60-prometheus.yaml || fail "60 missing the Watchdog dead-man's-switch alert (#60)"
+grep -q 'vector(1)' 60-prometheus.yaml || fail "60 Watchdog must be always-firing (expr: vector(1)) (#60)"
 # issue #48: SELF-GUARD on kube-state-metrics — the sole producer of every rule above.
 grep -q 'alert: KubeStateMetricsDown' 60-prometheus.yaml || fail "60 missing KubeStateMetricsDown (#48) — a dead KSM silently blinds all platform alerts"
 grep -q 'absent(up{job="kube-state-metrics"})' 60-prometheus.yaml || fail "60 KubeStateMetricsDown must also page when KSM was never scraped (absent up series, #48)"
@@ -216,7 +226,13 @@ grep -q 'slack_configs' 61-alertmanager.yaml || fail "61 must define a real Slac
 grep -q 'api_url_file' 61-alertmanager.yaml || fail "61 real receiver must read the webhook URL from a Secret file (not inline)"
 grep -q 'alertmanager-receiver' 61-alertmanager.yaml || fail "61 must mount the alertmanager-receiver Secret (optional)"
 grep -q 'alertmanager-receiver' gen-secrets.sh || fail "gen-secrets.sh must scaffold the alertmanager-receiver Secret"
-ok "61 keeps the testable sink default + supports a real Slack receiver via Secret file (scaffolded by gen-secrets.sh)"
+# issue #60: DEAD-MAN'S-SWITCH — a dedicated external `watchdog` receiver reading the
+# heartbeat URL from the optional Secret (like slack), routed the Watchdog alert only.
+grep -q 'name: watchdog' 61-alertmanager.yaml || fail "61 missing the external watchdog receiver (dead-man's-switch, #60)"
+grep -q 'watchdog-webhook' 61-alertmanager.yaml || fail "61 watchdog receiver must read the heartbeat URL from the Secret file watchdog-webhook (#60)"
+grep -q 'alertname="Watchdog"' 61-alertmanager.yaml || fail "61 must route the Watchdog alert to the watchdog receiver (#60)"
+grep -q 'watchdog-webhook' gen-secrets.sh || fail "gen-secrets.sh must scaffold the watchdog-webhook heartbeat URL (#60)"
+ok "61 keeps the testable sink default + real Slack receiver + external Watchdog dead-man's-switch (#60), all via Secret files"
 
 # 21. contract: skctl.py's safekeeper.control serializer is COUPLED to the neon
 #     on-disk format (magic cafeceef, format v9) reverse-engineered from a

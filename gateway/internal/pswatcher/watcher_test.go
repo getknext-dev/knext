@@ -180,7 +180,9 @@ func TestNoPromotionBelowThreshold(t *testing.T) {
 func TestPromoteOnSustainedFailure(t *testing.T) {
 	prober := &fakeProber{seq: []bool{false, false, false}, last: false}
 	promoter := &fakePromoter{}
-	k8s := &fakeK8s{selectorApp: "pageserver", gen: 1, genSet: true}
+	// genuine death modelled as pod present-but-NotReady (the kubelet's view of a
+	// dying StatefulSet pod): present anchors the second vantage, NotReady ⇒ death.
+	k8s := &fakeK8s{selectorApp: "pageserver", gen: 1, genSet: true, primaryPresent: true, primaryReady: false}
 	c := newController(prober, promoter, k8s, 3)
 
 	var failedAt int = -1
@@ -221,7 +223,7 @@ func TestPromoteOnSustainedFailure(t *testing.T) {
 func TestFailoverIsSingleShot(t *testing.T) {
 	prober := &fakeProber{seq: []bool{false}, last: false}
 	promoter := &fakePromoter{}
-	k8s := &fakeK8s{selectorApp: "pageserver", gen: 1, genSet: true}
+	k8s := &fakeK8s{selectorApp: "pageserver", gen: 1, genSet: true, primaryPresent: true, primaryReady: false}
 	c := newController(prober, promoter, k8s, 1)
 
 	for i := 0; i < 5; i++ {
@@ -258,7 +260,7 @@ func TestGenerationAdvancesFromConfigMap(t *testing.T) {
 func TestGenerationFallsBackToBase(t *testing.T) {
 	prober := &fakeProber{seq: []bool{false}, last: false}
 	promoter := &fakePromoter{}
-	k8s := &fakeK8s{selectorApp: "pageserver", genSet: false}
+	k8s := &fakeK8s{selectorApp: "pageserver", genSet: false, primaryPresent: true, primaryReady: false}
 	c := newController(prober, promoter, k8s, 1)
 
 	if _, err := c.Tick(context.Background()); err != nil {
@@ -297,7 +299,7 @@ func TestAlreadyFailedOverIsAdopted(t *testing.T) {
 func TestPromoteFailureRetries(t *testing.T) {
 	prober := &fakeProber{seq: []bool{false}, last: false}
 	promoter := &fakePromoter{failFor: 2}
-	k8s := &fakeK8s{selectorApp: "pageserver", gen: 1, genSet: true}
+	k8s := &fakeK8s{selectorApp: "pageserver", gen: 1, genSet: true, primaryPresent: true, primaryReady: false}
 	c := newController(prober, promoter, k8s, 1)
 
 	promoted := false
@@ -326,7 +328,7 @@ func TestPostFailoverReAnchorsToPromotedStandby(t *testing.T) {
 	primary := &toggleProber{alive: true}
 	standby := &toggleProber{alive: true}
 	promoter := &fakePromoter{}
-	k8s := &fakeK8s{selectorApp: "pageserver", gen: 1, genSet: true} // primaryPresent=false ⇒ genuine death
+	k8s := &fakeK8s{selectorApp: "pageserver", gen: 1, genSet: true, primaryPresent: true, primaryReady: false} // pod present-but-NotReady ⇒ genuine death
 	c := newControllerFull(primary, standby, promoter, k8s, 3)
 	ctx := context.Background()
 
@@ -409,7 +411,10 @@ func TestPromotionGatedBySecondVantage(t *testing.T) {
 	}{
 		{"probe fails + pod Running&Ready ⇒ OUR partition ⇒ hold", true, true, false, true},
 		{"probe fails + pod NotReady ⇒ genuine death ⇒ promote", false, true, true, false},
-		{"probe fails + pod absent ⇒ genuine death ⇒ promote", false, false, true, false},
+		// #58: pod absent with NO prior present-anchor (gen==base) is now HOLD, not
+		// promote — absence of a never-seen pod is likely selector misconfig, covered
+		// by the dedicated TestSeenPresentAnchor below.
+		{"probe fails + pod absent + never anchored ⇒ HOLD (selector suspect)", false, false, false, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -499,6 +504,145 @@ func TestCrashOnlyResumeMidFailover(t *testing.T) {
 	if len(promoter.calls) != 1 {
 		t.Fatalf("resume must promote exactly once (no flap), got %v", promoter.calls)
 	}
+}
+
+// #57 — crash in the flip→delete window: a prior watcher promoted and FLIPPED the
+// client Service to the standby, then died before bouncing the compute. On restart
+// the watcher adopts the flipped selector; it must still bounce the compute exactly
+// once (a compute pinned to the dead primary is otherwise never re-attached).
+func TestAdoptBouncesComputeOnResume(t *testing.T) {
+	primary := &toggleProber{alive: false} // old primary dead
+	standby := &toggleProber{alive: true}
+	promoter := &fakePromoter{}
+	// selector ALREADY on the standby (promote+flip completed), compute never bounced.
+	k8s := &fakeK8s{selectorApp: "pageserver-standby", gen: 2, genSet: true}
+	c := newControllerFull(primary, standby, promoter, k8s, 3)
+
+	for i := 0; i < 5; i++ {
+		fo, err := c.Tick(context.Background())
+		if err != nil {
+			t.Fatalf("tick %d: %v", i, err)
+		}
+		if fo {
+			t.Fatalf("tick %d: adopt path must never re-promote", i)
+		}
+	}
+	if len(promoter.calls) != 0 {
+		t.Fatalf("adopt path promoted: %v", promoter.calls)
+	}
+	if len(k8s.deletedFor) != 1 || k8s.deletedFor[0] != "app=compute" {
+		t.Fatalf("adopt path must bounce the compute EXACTLY once, got %v (#57)", k8s.deletedFor)
+	}
+}
+
+// #57 — the adopt-path bounce is crash-only/idempotent: a transient DeletePods
+// error must not permanently skip the bounce; the watcher retries until it lands,
+// still exactly once.
+func TestAdoptBounceRetriesOnError(t *testing.T) {
+	primary := &toggleProber{alive: false}
+	standby := &toggleProber{alive: true}
+	promoter := &fakePromoter{}
+	k8s := &fakeK8s{selectorApp: "pageserver-standby", gen: 2, genSet: true, deleteErr: errors.New("apiserver blip")}
+	c := newControllerFull(primary, standby, promoter, k8s, 3)
+
+	// first tick: adoption detected, bounce attempted but errors → recorded, retried.
+	if _, err := c.Tick(context.Background()); err == nil {
+		t.Fatal("expected the failed adopt-bounce to surface an error")
+	}
+	if len(k8s.deletedFor) != 0 {
+		t.Fatalf("no bounce should be recorded while DeletePods errors: %v", k8s.deletedFor)
+	}
+	k8s.deleteErr = nil // the blip clears
+	for i := 0; i < 4; i++ {
+		if _, err := c.Tick(context.Background()); err != nil {
+			t.Fatalf("tick %d after blip cleared: %v", i, err)
+		}
+	}
+	if len(k8s.deletedFor) != 1 {
+		t.Fatalf("adopt bounce must land exactly once after the blip clears, got %v", k8s.deletedFor)
+	}
+	if len(promoter.calls) != 0 {
+		t.Fatalf("adopt path must never promote: %v", promoter.calls)
+	}
+}
+
+// #58 — seen-present anchor. PodReady present=false is ambiguous: a genuinely dead
+// primary vs. a selector that never matched anything (typo/label drift/RBAC empty
+// list). Only treat absence as death once the pod has been observed present at least
+// once — otherwise HOLD and surface pswatcher_primary_never_seen, rather than burn
+// the only standby on a vantage we can't trust.
+func TestSeenPresentAnchor(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("never anchored + absent + ledger at base ⇒ HOLD", func(t *testing.T) {
+		primary := &toggleProber{alive: false}
+		standby := &toggleProber{alive: true}
+		promoter := &fakePromoter{}
+		// selector never matches ⇒ present=false forever; gen==base ⇒ no prior promotion.
+		k8s := &fakeK8s{selectorApp: "pageserver", gen: 1, genSet: true, primaryPresent: false}
+		c := newControllerFull(primary, standby, promoter, k8s, 1)
+		for i := 0; i < 5; i++ {
+			fo, err := c.Tick(ctx)
+			if err != nil {
+				t.Fatalf("tick %d: %v", i, err)
+			}
+			if fo {
+				t.Fatal("promoted on an absence we never anchored (selector may be misconfigured)")
+			}
+		}
+		if len(promoter.calls) != 0 {
+			t.Fatalf("must not promote on a never-anchored absence: %v", promoter.calls)
+		}
+		if c.Metrics().PrimaryNeverSeenCount() == 0 {
+			t.Fatal("pswatcher_primary_never_seen_total must increment on a never-anchored absence")
+		}
+	})
+
+	t.Run("anchored (seen present) then vanished ⇒ PROMOTE", func(t *testing.T) {
+		primary := &toggleProber{alive: false}
+		standby := &toggleProber{alive: true}
+		promoter := &fakePromoter{}
+		// pod present & Ready per the kubelet ⇒ HOLD (suspected partition) but ANCHORS.
+		k8s := &fakeK8s{selectorApp: "pageserver", gen: 1, genSet: true, primaryPresent: true, primaryReady: true}
+		c := newControllerFull(primary, standby, promoter, k8s, 1)
+		for i := 0; i < 3; i++ {
+			if fo, _ := c.Tick(ctx); fo {
+				t.Fatal("promoted while the pod is Ready per the kubelet")
+			}
+		}
+		if len(promoter.calls) != 0 {
+			t.Fatalf("must hold while the pod is Ready: %v", promoter.calls)
+		}
+		// the anchored pod now vanishes — a trusted absence ⇒ promote.
+		k8s.primaryPresent = false
+		k8s.primaryReady = false
+		promoted := false
+		for i := 0; i < 3 && !promoted; i++ {
+			if fo, _ := c.Tick(ctx); fo {
+				promoted = true
+			}
+		}
+		if !promoted {
+			t.Fatal("an anchored primary that vanished must promote")
+		}
+	})
+
+	t.Run("absent but ledger advanced ⇒ RESUME (promote)", func(t *testing.T) {
+		primary := &toggleProber{alive: false}
+		standby := &toggleProber{alive: true}
+		promoter := &fakePromoter{}
+		// gen>base ⇒ a prior instance already decided a failover; resume trumps the
+		// never-seen guard even though the pod is absent and we never anchored.
+		k8s := &fakeK8s{selectorApp: "pageserver", gen: 2, genSet: true, primaryPresent: false}
+		c := newControllerFull(primary, standby, promoter, k8s, 1)
+		fo, err := c.Tick(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !fo {
+			t.Fatal("an advanced ledger must resume the failover even on an un-anchored absence")
+		}
+	})
 }
 
 func TestMetricsPromText(t *testing.T) {

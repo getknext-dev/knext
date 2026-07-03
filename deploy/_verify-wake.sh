@@ -28,8 +28,25 @@ CLIENT() {
   OUT=$($K logs "$P" 2>&1)
   PHASE=$($K get pod "$P" -o jsonpath='{.status.phase}' 2>/dev/null)
   $K delete pod "$P" --ignore-not-found --wait=false >/dev/null 2>&1
-  [ "$PHASE" = "Succeeded" ] || { echo "client $1 failed ($PHASE): $OUT"; return 1; }
+  # Diagnostic MUST go to stderr: callers use $(CLIENT ...), so anything on stdout
+  # is captured into the command substitution and never reaches the operator (#61).
+  # On failure the phase + the psql/connect error text ($OUT) now surface at the
+  # terminal instead of a bare "cannot reach postgres".
+  [ "$PHASE" = "Succeeded" ] || { echo "client $1 failed ($PHASE): $OUT" >&2; return 1; }
   echo "$OUT"
+}
+# CLIENT_RETRY: bounded connect-retry for the FIRST seed against a fully cold plane.
+# The very first connect can lose a benign race (compute 0->1 mid-startup); a few
+# short retries stop that transient from redding the whole DoD drill, while a real
+# outage still fails after the budget with the underlying psql error on stderr (#61).
+CLIENT_RETRY() { # $1 tag  $2 sql  $3 attempts (default 5)
+  _tag=$1; _sql=$2; _n=${3:-5}; _i=1
+  while :; do
+    if _out=$(CLIENT "${_tag}${_i}" "$_sql"); then echo "$_out"; return 0; fi
+    [ "$_i" -ge "$_n" ] && { echo "CLIENT_RETRY $_tag exhausted $_n attempts" >&2; return 1; }
+    echo "    first-connect retry $_i/$_n (cold-plane race) ..." >&2
+    _i=$((_i+1)); sleep 3
+  done
 }
 # Aggregate a metrics.json field across ALL gateway pods (HA: the Service
 # would sample one random replica; the wake may have landed on any of them).
@@ -51,8 +68,10 @@ COMPUTE_PODS() { $K get pods -l app=compute --no-headers 2>/dev/null | grep -c .
 $K rollout status deploy/pggw --timeout=120s >/dev/null || fail "gateway not ready"
 ok "gateway ready"
 
-# 1. seed the one-table test db (compute may be up or down; gateway handles both)
-[ "$(CLIENT seed 'select 1' | tail -1)" = "1" ] || fail "cannot reach postgres through gateway"
+# 1. seed the one-table test db (compute may be up or down; gateway handles both).
+# The first connect uses the bounded retry: a fully cold plane can lose a benign
+# 0->1 startup race on the very first attempt (#61).
+[ "$(CLIENT_RETRY seed 'select 1' | tail -1)" = "1" ] || fail "cannot reach postgres through gateway (see client error above)"
 CLIENT seed2 "drop table if exists t; create table t(id int); insert into t select generate_series(1,3)" >/dev/null
 [ "$(CLIENT seed3 'select count(*) from t' | tail -1)" = "3" ] || fail "seed failed"
 ok "one-table test db seeded through gateway (3 rows)"

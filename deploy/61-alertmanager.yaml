@@ -20,11 +20,34 @@ data:
       group_wait: 5s
       group_interval: 30s
       repeat_interval: 4h
+      routes:
+        # DEAD-MAN'S-SWITCH (issue #60): the always-firing Watchdog alert (deploy/60)
+        # is routed to its OWN external receiver and NOT to the sink/pager (continue is
+        # implicitly false — the first matching sibling route wins). It repeats on a
+        # short interval so the off-cluster monitor sees a steady heartbeat and alarms
+        # within minutes if Prometheus/Alertmanager die and the pings STOP.
+        - receiver: watchdog
+          matchers:
+            - alertname="Watchdog"
+          group_wait: 0s
+          group_interval: 1m
+          repeat_interval: 1m
     receivers:
       - name: webhook-sink
         webhook_configs:
           # In-cluster logging sink — proves the pager path end-to-end.
           - url: http://alert-sink.scale-zero-pg.svc:8080/
+            send_resolved: false
+      # DEAD-MAN'S-SWITCH external receiver (issue #60). POSTs the always-firing
+      # Watchdog to an EXTERNAL heartbeat URL read at send time from the mounted
+      # Secret (watchdog-webhook key — a healthchecks.io / Dead Man's Snitch /
+      # cronitor ping URL). optional: absent until you arm it (gen-secrets.sh
+      # WATCHDOG_HEARTBEAT_URL=...); the in-cluster alert path is unaffected either
+      # way. The whole point lives OFF cluster: the external monitor alarms when the
+      # ping stops — the only way to detect the alerting stack's own death.
+      - name: watchdog
+        webhook_configs:
+          - url_file: /etc/alertmanager/secrets/watchdog-webhook
             send_resolved: false
       # Real on-call receiver. Slack-compatible: the incoming-webhook URL is
       # read at send time from a FILE mounted from the alertmanager-receiver

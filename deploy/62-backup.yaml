@@ -329,40 +329,81 @@ spec:
                 - |
                   set -euo pipefail
                   PS="http://${PAGESERVER_HOST}:9898"
+                  mkdir -p /state/horizons
+
+                  # rcl_to_suffix "<hi>/<lo>" -> prints the 16-hex LOGID+SEG horizon
+                  # (KEEP_SEGMENTS below remote_consistent_lsn), or returns 1 if the rcl
+                  # is unusable. TLI-INDEPENDENT: only the LOGID+SEG suffix is emitted;
+                  # the TLI (high 8 hex of a segment name) is derived per-segment by the
+                  # prune step (issue #42), never hardcoded here.
+                  rcl_to_suffix() {
+                    local RCL="$1" hi lo full segno keep logid seg
+                    case "$RCL" in */*) : ;; *) return 1 ;; esac
+                    hi=$((16#${RCL%/*})); lo=$((16#${RCL#*/}))
+                    full=$(( (hi<<32) | lo ))
+                    segno=$(( full / 16777216 ))            # 16 MiB WAL segments
+                    keep=$(( segno - KEEP_SEGMENTS ))
+                    [ "$keep" -lt 0 ] && keep=0
+                    logid=$(( keep / 256 )); seg=$(( keep % 256 ))
+                    printf '%08X%08X' "$logid" "$seg"
+                  }
+
+                  # PRIMARY (configured) timeline — fail-CLOSED: a missing/zero rcl aborts
+                  # the whole job before any deletion (unchanged safety invariant).
                   RCL="$(curl -sf "$PS/v1/tenant/${TENANT_ID}/timeline/${TIMELINE_ID}" \
                         | tr ',' '\n' | grep '"remote_consistent_lsn"' | head -1 | cut -d'"' -f4)"
-                  case "$RCL" in
-                    */*) : ;;
-                    *) echo "FATAL: could not read remote_consistent_lsn (got '$RCL') — aborting, pruning nothing" >&2; exit 1 ;;
-                  esac
-                  hi=$((16#${RCL%/*})); lo=$((16#${RCL#*/}))
-                  full=$(( (hi<<32) | lo ))
-                  segno=$(( full / 16777216 ))            # 16 MiB WAL segments
-                  keep=$(( segno - KEEP_SEGMENTS ))
-                  [ "$keep" -lt 0 ] && keep=0
-                  logid=$(( keep / 256 )); seg=$(( keep % 256 ))
-                  # TLI-INDEPENDENT threshold: emit only the LOGID+SEG suffix (16
-                  # hex). The TLI (high 8 hex of a WAL segment name) is NOT hardcoded
-                  # here anymore (issue #42): the prune step derives the actual
-                  # timeline id(s) from the segment names present and applies this
-                  # suffix per-timeline. A promotion bumps the TLI; a hardcoded TLI=1
-                  # threshold would sort BELOW every new-TLI segment and silently
-                  # stop pruning (unbounded regrowth, exit 0 — invisible to the
-                  # Failed-Job alert).
-                  printf '%08X%08X' "$logid" "$seg" > /state/threshold_suffix
-                  echo "remote_consistent_lsn=$RCL segno=$segno keep_segments=$KEEP_SEGMENTS threshold_suffix=$(cat /state/threshold_suffix)"
+                  if ! SUF="$(rcl_to_suffix "$RCL")"; then
+                    echo "FATAL: could not read remote_consistent_lsn (got '$RCL') — aborting, pruning nothing" >&2; exit 1
+                  fi
+                  printf '%s' "$SUF" > /state/threshold_suffix
+                  printf '%s' "$SUF" > "/state/horizons/${TIMELINE_ID}"
+                  echo "remote_consistent_lsn=$RCL keep_segments=$KEEP_SEGMENTS threshold_suffix=$SUF timeline=${TIMELINE_ID}"
+
+                  # PER-TIMELINE horizons (issue #59). Neon branches are real, concurrent
+                  # timelines; a sibling branch BELOW the configured timeline's rcl must be
+                  # judged against ITS OWN remote_consistent_lsn, never the configured one
+                  # (applying a higher horizon to a lagging sibling would over-prune WAL it
+                  # still needs — data-loss class). List every timeline and resolve each
+                  # one's OWN horizon. A timeline whose rcl we cannot resolve gets NO
+                  # horizon file → the prune step fail-safe-SKIPS it and fails loud.
+                  if LIST="$(curl -sf "$PS/v1/tenant/${TENANT_ID}/timeline")"; then
+                    if command -v jq >/dev/null 2>&1; then
+                      echo "$LIST" | jq -r '.[] | "\(.timeline_id) \(.remote_consistent_lsn)"' 2>/dev/null > /state/tl_rcls || : > /state/tl_rcls
+                    else
+                      # jq-free fallback: pair each timeline_id with the next rcl in stream order.
+                      echo "$LIST" | tr ',{}' '\n' \
+                        | grep -E '"(timeline_id|remote_consistent_lsn)"' \
+                        | sed -E 's/.*"(timeline_id|remote_consistent_lsn)" *: *"?([^",]*)"?.*/\1 \2/' > /state/tl_kv || : > /state/tl_kv
+                      : > /state/tl_rcls; tid=""
+                      while read -r k v; do
+                        [ "$k" = "timeline_id" ] && tid="$v"
+                        if [ "$k" = "remote_consistent_lsn" ] && [ -n "$tid" ]; then echo "$tid $v" >> /state/tl_rcls; tid=""; fi
+                      done < /state/tl_kv
+                    fi
+                    while read -r TL RCL2; do
+                      [ -n "$TL" ] || continue
+                      if S2="$(rcl_to_suffix "$RCL2")"; then
+                        printf '%s' "$S2" > "/state/horizons/${TL}"
+                        echo "resolved per-timeline horizon: timeline=$TL rcl=$RCL2 suffix=$S2"
+                      else
+                        echo "WARN: timeline=$TL has no usable remote_consistent_lsn ('$RCL2') — leaving UNRESOLVED (prune fail-safe-skips it)"
+                      fi
+                    done < /state/tl_rcls
+                  else
+                    echo "WARN: could not list timelines at $PS/v1/tenant/${TENANT_ID}/timeline — only the configured timeline is resolved; any sibling in the bucket is fail-safe-skipped and pages (#59)"
+                  fi
               volumeMounts:
                 - { name: state, mountPath: /state }
-          # STEP 2 (mc): delete every complete /safekeeper WAL segment whose 24-hex
-          # name sorts strictly before its timeline's threshold. Excludes .partial
-          # (live tail) by construction (they don't match ^[0-9A-Fa-f]{24}$).
-          # DRY_RUN=true lists only. No awk / no `<` test — busybox-safe (sort + sed
-          # boundary). The TIMELINE id(s) are DERIVED from the segment names (first 8
-          # hex = TLI) and pruned PER-timeline against the LOGID+SEG suffix from STEP
-          # 1 — never a hardcoded TLI=1 (issue #42). Fail-LOUD: a bucket listing that
-          # errors, or a segment set from which no TLI can be derived, exits NONZERO
-          # (pages via WalJanitorJobFailed) rather than exiting 0 having pruned
-          # nothing (the silent-success failure mode #42 set out to kill).
+          # STEP 2 (mc): for EACH timeline prefix present under /safekeeper/<tenant>/,
+          # delete every complete WAL segment whose 24-hex name sorts strictly before
+          # THAT timeline's OWN horizon (issue #59 — never a foreign timeline's), with
+          # the per-8-hex-TLI derivation of issue #42 applied within each timeline.
+          # Excludes .partial (live tail) by construction (they don't match
+          # ^[0-9A-Fa-f]{24}$). DRY_RUN=true lists only. Busybox-safe (sort + sed
+          # boundary, no awk / no `<`). Fail-LOUD (exit nonzero → WalJanitorJobFailed):
+          # a bucket listing that errors, OR a timeline present in the bucket whose own
+          # remote_consistent_lsn STEP 1 could not resolve (skipped fail-safe so it is
+          # never over-pruned, #59). Never exit 0 having silently pruned nothing (#42).
           containers:
             - name: prune
               image: minio/mc:RELEASE.2023-01-28T20-29-38Z # pinned
@@ -385,48 +426,76 @@ spec:
                   export HOME=/tmp
                   mkdir -p /tmp/.mc
                   mc alias set src http://minio:9000 "$S3_USER" "$S3_PASS"
-                  PFX="src/neon/safekeeper/${TENANT_ID}/${TIMELINE_ID}"
-                  SUFFIX="$(cat /state/threshold_suffix)"   # 16-hex LOGID+SEG, TLI-independent
-                  echo "pruning /safekeeper WAL below LOGID+SEG suffix $SUFFIX, per-timeline (DRY_RUN=${DRY_RUN})"
-                  # fail-LOUD if the listing itself errors: a silent `mc ls` failure
-                  # must page (WalJanitorJobFailed), never exit 0 having pruned nothing.
-                  if ! mc ls "$PFX/" > /tmp/lsout 2>/tmp/lserr; then
-                    echo "FATAL: could not list $PFX (mc ls failed) — aborting, pruning nothing" >&2
+                  BASE="src/neon/safekeeper/${TENANT_ID}"
+                  echo "pruning /safekeeper WAL per-timeline, each against ITS OWN horizon (issues #42/#59, DRY_RUN=${DRY_RUN})"
+                  # Enumerate the timeline prefixes present in the bucket. fail-LOUD if the
+                  # listing itself errors: a silent `mc ls` failure must page
+                  # (WalJanitorJobFailed), never exit 0 having pruned nothing.
+                  if ! mc ls "$BASE/" > /tmp/tldirs 2>/tmp/lserr; then
+                    echo "FATAL: could not list $BASE (mc ls failed) — aborting, pruning nothing" >&2
                     cat /tmp/lserr >&2; exit 1
                   fi
-                  # complete 16 MiB segments only (24-hex, anchored); .partial excluded by regex.
-                  sed 's/.* //' /tmp/lsout | grep -E '^[0-9A-Fa-f]{24}$' | sort -u > /tmp/all || true
-                  total="$(wc -l < /tmp/all | tr -d ' ')"
-                  if [ "$total" -eq 0 ]; then echo "no complete WAL segments present — nothing to prune"; exit 0; fi
-                  # DERIVE the timeline id(s) from the segment names (first 8 hex = TLI)
-                  # instead of assuming TLI=1 (issue #42). Segments from a bumped
-                  # timeline (00000002...) get their OWN threshold and are actually pruned.
-                  cut -c1-8 /tmp/all | sort -u > /tmp/tlis
-                  tlicount="$(wc -l < /tmp/tlis | tr -d ' ')"
-                  if [ "$tlicount" -lt 1 ]; then
-                    echo "FATAL: found $total segment(s) but could not derive any timeline id — aborting" >&2; exit 1
+                  sed 's/.* //' /tmp/tldirs | grep '/$' | sed 's:/$::' | sort -u > /tmp/tls || true
+                  tlcount="$(grep -c . /tmp/tls || true)"
+                  if [ "$tlcount" -eq 0 ]; then echo "no timeline prefixes present — nothing to prune"; exit 0; fi
+                  echo "timeline prefixes present: $(tr '\n' ' ' < /tmp/tls)"
+
+                  UNRESOLVED=""; GRAND=0; : > /tmp/anyseg
+                  while IFS= read -r TL; do
+                    [ -n "$TL" ] || continue
+                    PFX="$BASE/$TL"
+                    # #59 — a timeline we could not resolve a horizon for is SKIPPED, never
+                    # judged against another timeline's horizon (fail-safe: no over-prune).
+                    if [ ! -f "/state/horizons/$TL" ]; then
+                      echo "  timeline $TL: UNRESOLVED horizon (its own remote_consistent_lsn is unknown) — SKIP, pruning nothing (fail-safe #59)"
+                      UNRESOLVED="$UNRESOLVED $TL"; continue
+                    fi
+                    SUFFIX="$(cat "/state/horizons/$TL")"
+                    echo "  timeline $TL: horizon suffix=$SUFFIX"
+                    if ! mc ls "$PFX/" > /tmp/lsout 2>/tmp/lserr; then
+                      echo "FATAL: could not list $PFX (mc ls failed) — aborting" >&2; cat /tmp/lserr >&2; exit 1
+                    fi
+                    # complete 16 MiB segments only (24-hex, anchored); .partial excluded by regex.
+                    sed 's/.* //' /tmp/lsout | grep -E '^[0-9A-Fa-f]{24}$' | sort -u > /tmp/all || true
+                    total="$(grep -c . /tmp/all || true)"
+                    [ "$total" -gt 0 ] && echo x >> /tmp/anyseg
+                    if [ "$total" -eq 0 ]; then echo "    no complete WAL segments — nothing to prune for $TL"; continue; fi
+                    # DERIVE the 8-hex TLI(s) present and prune each against THIS timeline's
+                    # suffix (issue #42): a bumped TLI (00000002...) gets its own 24-hex
+                    # threshold and is actually pruned, never latch-skipped.
+                    cut -c1-8 /tmp/all | sort -u > /tmp/tlis
+                    : > /tmp/todelete
+                    while IFS= read -r tli; do
+                      [ -n "$tli" ] || continue
+                      KEEP="${tli}${SUFFIX}"                  # per-(timeline,TLI) 24-hex threshold
+                      grep "^${tli}" /tmp/all > /tmp/all_tli || true
+                      { cat /tmp/all_tli; echo "$KEEP"; } | sort -u | sed "/^$KEEP\$/,\$d" >> /tmp/todelete
+                    done < /tmp/tlis
+                    sort -u /tmp/todelete -o /tmp/todelete
+                    n="$(grep -c . /tmp/todelete || true)"
+                    echo "    segments=$total prunable(below horizon)=$n; keep(at/above)+partials retained"
+                    if [ "$n" -gt 0 ]; then echo "    range: $(head -1 /tmp/todelete) .. $(tail -1 /tmp/todelete)"; fi
+                    if [ "$n" -eq 0 ]; then echo "    nothing to prune — $TL already lean"; continue; fi
+                    if [ "${DRY_RUN:-false}" = "true" ]; then echo "    DRY_RUN=true — listing only, no deletions for $TL"; continue; fi
+                    i=0
+                    while IFS= read -r o; do
+                      [ -n "$o" ] || continue
+                      mc rm "$PFX/$o" >/dev/null && i=$((i+1))
+                    done < /tmp/todelete
+                    echo "    pruned $i segment(s) from $TL (~$((i*16)) MiB reclaimed)"
+                    GRAND=$((GRAND+i))
+                  done < /tmp/tls
+
+                  echo "prune summary: $GRAND segment(s) removed across resolved timeline(s)"
+                  if [ ! -s /tmp/anyseg ]; then echo "no complete WAL segments present — nothing to prune"; fi
+                  if [ "$GRAND" -eq 0 ] && [ -z "$UNRESOLVED" ]; then echo "nothing to prune — bucket already lean"; fi
+                  # FAIL LOUD (#59): any bucket timeline with an unresolved horizon was
+                  # skipped (never over-pruned) — but the gap must page so the missing
+                  # per-timeline rcl is investigated, never silently swallowed.
+                  if [ -n "$UNRESOLVED" ]; then
+                    echo "FATAL: timeline(s) present with UNRESOLVED horizon:$UNRESOLVED — skipped (fail-safe, no over-prune) and failing loud (WalJanitorJobFailed) (#59)" >&2
+                    exit 1
                   fi
-                  echo "timelines present: $(tr '\n' ' ' < /tmp/tlis)"
-                  : > /tmp/todelete
-                  while IFS= read -r tli; do
-                    [ -n "$tli" ] || continue
-                    KEEP="${tli}${SUFFIX}"                    # per-timeline 24-hex threshold
-                    grep "^${tli}" /tmp/all > /tmp/all_tli || true
-                    # names that sort strictly BEFORE this timeline's threshold = dead WAL.
-                    { cat /tmp/all_tli; echo "$KEEP"; } | sort -u | sed "/^$KEEP\$/,\$d" >> /tmp/todelete
-                  done < /tmp/tlis
-                  sort -u /tmp/todelete -o /tmp/todelete
-                  n="$(wc -l < /tmp/todelete | tr -d ' ')"
-                  echo "segments total=$total across $tlicount timeline(s) prunable(below horizon)=$n; keep(at/above horizon)+partials retained"
-                  if [ "$n" -gt 0 ]; then echo "  range: $(head -1 /tmp/todelete) .. $(tail -1 /tmp/todelete)"; fi
-                  if [ "$n" -eq 0 ]; then echo "nothing to prune — bucket already lean"; exit 0; fi
-                  if [ "${DRY_RUN:-false}" = "true" ]; then echo "DRY_RUN=true — listing only, no deletions"; exit 0; fi
-                  i=0
-                  while IFS= read -r o; do
-                    [ -n "$o" ] || continue
-                    mc rm "$PFX/$o" >/dev/null && i=$((i+1))
-                  done < /tmp/todelete
-                  echo "pruned $i safekeeper WAL segment(s) (~$((i*16)) MiB reclaimed)"
                   echo "post-prune /safekeeper size:"; mc du "src/neon/safekeeper"
               volumeMounts:
                 - { name: state, mountPath: /state }
