@@ -80,6 +80,24 @@ The engines were never the bottleneck — Kubernetes mechanics were, twice.
 | Gateway HA (held conn across idle window, pod kill) | ✅ | ✅ | no split-brain sleep; no SPOF |
 | TLS (sslmode=require, incl. cold wake over TLS) | TLS 1.3 | **TLS 1.3** | plaintext preserved as opt-in |
 
+## Upgrade rehearsal (issue #50 — pivot-vs-bump cost is now a known number)
+
+`deploy/_rehearse-upgrade.sh` boots the newest pullable neon/compute pair in a
+throwaway `upgrade-drill` ns from the real manifests, runs storage-init, serves a
+read-write workload, and dumps the new `safekeeper.control` to check its format
+version. Answers: is an upgrade a **manifest bump** (control still v9, skctl
+survives) or a **skctl rewrite** (format diverged, KC1 pivot-class)?
+
+| Rehearsed tag | Booted? | storage-init | R/W served | `safekeeper.control` | Verdict |
+|---|---|---|---|---|---|
+| **`17411840350`** (newest Docker Hub pair, 2025-09-02, > pinned 8464) | ✅ clean, no manifest breakage | ✅ | ✅ marker row | `magic=0xcafeceef` **version=9** | **MANIFEST BUMP** — skctl weld survives; upgrade is cheap, not pivot-class |
+
+Method/caveats: OKE, 2026-07-03; the `8xxx` stable release series tops out at 8464
+for both repos, so the only images newer than 8464 today are run-ID-tagged CI
+builds — `17411840350` is the newest coherent pair. First pull of the multi-GB
+bleeding-edge image took several minutes/node (one-time upgrade cost). Full
+narrative: `docs/operations.md` §"Upgrading the storage plane".
+
 ## Capacity / sizing facts
 
 - Gateway: `GW_MAX_CONNS=90` < compute `max_connections=100`; excess → clean 53300.

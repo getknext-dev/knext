@@ -512,6 +512,74 @@ kubectl -n scale-zero-pg logs -l app=pggw -f --prefix | grep 'gw]'
 
 - **Gateway**: build a new image, `rollout restart deploy/pggw` — zero client impact
   beyond dropped in-flight pipes (clients reconnect).
+
+### Upgrading the storage plane — posture, triggers, and the rehearsal
+
+**Posture (ADR-0002 amendment, issue #50): KS-PG owns `neon:8464`. Moving off it
+is a deliberate PIVOT-CLASS event, not routine maintenance.** The plane is welded
+to 8464 by a **triple pin**, every leg a fail-loud CI gate: the compute↔storage
+**version pair**, the skctl **`safekeeper.control` v9 format weld**, and the
+**`SK_COMPAT_NEON_TAG` compat constant** (see "skctl format coupling" below and
+`deploy/_validate.sh`). A tag bump is not a chore because, *if* the on-disk
+control format has bumped from v9, the upgrade requires re-reverse-engineering the
+struct and rewriting `skctl.py` — exactly the Neon-internals work ADR-0002 **KC1**
+says triggers pivot-to-managed. So an upgrade is a **decision to spend
+pivot-class effort**, gated on KC1/KC3.
+
+**Triggers that would force the decision open** (do not upgrade absent one):
+- a **CVE / security fix** in `neon` or `compute-node-v17` with no 8464 backport
+  — the one routine reason to accept the cost;
+- a **needed capability** only a newer release ships. The one most worth taking:
+  neon's first-class **safekeeper timeline-import / HTTP timeline-create API**
+  (the `POST …/timeline/…` that 8464 404s) + a storage controller — adopting it
+  **retires `skctl.py` entirely** and makes future upgrades routine again;
+- **KC1/KC3/KC4** firing for their own reasons (ops toil, version-treadmill,
+  knext posture change).
+
+**Rehearse before deciding — `deploy/_rehearse-upgrade.sh`.** The drill boots the
+newest pullable neon/compute pair in a throwaway `upgrade-drill` namespace from
+the **real** `deploy/` manifests (only the image tag + namespace are rewritten),
+runs storage-init, serves a read-write workload, then dumps the new safekeeper's
+`safekeeper.control` and runs `skctl checkver` against it. It answers the only
+question that decides pivot-vs-bump: **does the newer image still write a v9
+control file?** It is fully isolated (touches nothing outside `upgrade-drill`) and
+self-cleaning (deletes the namespace + PVCs on exit).
+
+```
+# rehearse the newest pair (default), or pin a tag:
+KSPG_CONTEXT=context-ckmva7v7zvq deploy/_rehearse-upgrade.sh
+KSPG_CONTEXT=context-ckmva7v7zvq deploy/_rehearse-upgrade.sh 8465
+KEEP_DRILL=1 deploy/_rehearse-upgrade.sh   # leave the ns up to inspect
+# exit 0 = control still v9 (upgrade = manifest bump); exit 3 = format diverged
+# (upgrade = skctl rewrite / KC1 pivot); exit 1 = infra failure (inconclusive).
+```
+
+**What the first run found (2026-07-03).** Rehearsed tag **`17411840350`** — the
+newest coherent `neondatabase/neon` + `compute-node-v17` pair on Docker Hub (a CI
+build dated 2025-09-02, **newer than the pinned 8464**; the `8xxx` release series
+tops out at 8464 for both repos, so the only images newer than 8464 today are the
+run-ID-tagged CI builds). Findings, recorded honestly:
+- **Storage plane booted clean** under the new tag — broker, pageserver, and
+  safekeeper all reached Ready from the unmodified manifests. **No manifest/config
+  breakage.** (One benign, pre-existing `kubectl` warning — "spec.SessionAffinity
+  is ignored for headless services" on the safekeeper Service — is emitted under
+  8464 too; not a regression.)
+- **storage-init passed** — the pageserver's HTTP tenant/timeline-create contract
+  is unchanged; our bootstrap Job still works.
+- **Read-write workload served** — compute booted, a marker row was written and
+  read back through the full walproposer→safekeeper→pageserver path.
+- **THE PROBE: `safekeeper.control` is still `magic=0xcafeceef`, `format_version=9`.**
+  `skctl checkver` accepted it. **⇒ An upgrade to `17411840350` would be a MANIFEST
+  BUMP, not a re-RE project** — skctl's format weld survives, writable restore
+  stays intact. The pivot-vs-bump cost is now a *known number* for the nearest
+  newer image: **bump** (cheap), not **rewrite** (pivot-class).
+- **Cost caveat:** the bleeding-edge image is multi-GB and the first pull onto each
+  node took several minutes — a real (if one-time) upgrade cost. Cached runs are fast.
+
+If a future run exits 3 (version ≠ 9), do **not** bump the tag: skctl must be
+re-reverse-engineered against the new struct first, or better, adopt the
+timeline-import API (see the trigger list above and "Upgrade carrot").
+
 - **Compute ↔ storage are a version PAIR.** The compute (`compute-node-v17:8464`)
   and storage plane (`neon:8464`) are built from the same Neon release and must be
   upgraded together — the pageserver wire protocol and layer formats are internal

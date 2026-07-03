@@ -203,6 +203,62 @@ This is small, TDD-shaped, and is a 4C task if CNPG is ratified.
 
 ---
 
+## Upgrade posture (amendment, 2026-07-03 — issue #50)
+
+**Decision: KS-PG owns `neon:8464`. Moving off it is a deliberate PIVOT-CLASS
+event, not routine maintenance.** This states explicitly a position the platform
+was already living implicitly across KC1/KC3, so a future maintainer does not
+attempt a casual tag bump.
+
+**Why the tag is welded (the triple pin).** Three independent, fail-loud gates
+bind the plane to 8464:
+1. **compute↔storage version pair** — the pageserver wire protocol and layer
+   formats are internal interfaces with no cross-version guarantee. `deploy/_validate.sh`
+   fails CI on any tag divergence between `20-compute.yaml` and the storage plane
+   (KC3).
+2. **skctl `safekeeper.control` format weld (v9)** — writable restore
+   (`deploy/_restore-writable.sh`) hand-crafts the safekeeper's on-disk control
+   struct (`deploy/skctl.py`, magic `0xcafeceef`, format version 9, CRC32C),
+   reverse-engineered from a live 8464 safekeeper. `_validate.sh` fails CI if
+   `SK_COMPAT_NEON_TAG` drifts from the pinned tag; `skctl checkver` is a runtime
+   guard in the restore seam.
+3. **compat-tag constant** — `SK_COMPAT_NEON_TAG = "8464"` records the single tag
+   the format was validated against.
+
+**Why an upgrade is pivot-class, not a treadmill.** A tag bump costs manifest
+edits (cheap) + a bake-off re-run (KC2) + — if the on-disk `safekeeper.control`
+format has bumped from v9 — **re-reverse-engineering the struct and rewriting the
+serializer**. That last item is precisely the "Neon-internals work we do not
+staff" that **KC1** names as a trigger to pivot off self-hosting to managed
+(Neon/Aurora Serverless). So the honest posture is: **we hold 8464; an upgrade is
+a decision to spend pivot-class effort, gated on KC1/KC3, not a maintenance
+chore.**
+
+**Trigger conditions that would force the decision open:**
+- **CVE / security fix** in a pinned image (`neon`, `compute-node-v17`) with no
+  backport to 8464 — the one routine reason we would accept the upgrade cost.
+- **A needed capability** that only a newer release ships. The specific carrot:
+  neon's **first-class safekeeper timeline-import / HTTP timeline-create API**
+  (the `POST /v1/tenant/<t>/timeline/<tl>` that 8464 404s) plus a storage
+  controller. Adopting it would replace the hand-rolled `skctl.py` craft with an
+  API call and **retire the format weld entirely** — turning future upgrades from
+  pivot-class back into routine. This is the upgrade most worth taking when it lands.
+- **KC1/KC3/KC4 firing** for their own reasons (ops toil, version-treadmill cost,
+  knext posture change) — the standing tripwires below.
+
+**The path is rehearsed, not theoretical.** `deploy/_rehearse-upgrade.sh`
+(issue #50) boots the newest pullable neon/compute pair in a throwaway
+`upgrade-drill` namespace from the real manifests, runs storage-init, serves a
+read-write workload, and dumps the new safekeeper's `safekeeper.control` to check
+whether it is still v9 (manifest bump) or diverged (skctl rewrite). **First run
+(2026-07-03), tag `17411840350` (newest pair on Docker Hub, > 8464): plane booted
+clean, storage-init passed, read-write served, and the control file was still
+`magic=0xcafeceef version=9` — an upgrade to that tag would be a MANIFEST BUMP,
+not a re-RE project.** Full method + result: `docs/operations.md` §"Upgrading the
+storage plane" and `docs/BENCHMARKS.md`. Re-run the drill before any real upgrade
+decision — the pivot-vs-bump cost is now a known number, not a disaster-time
+discovery.
+
 ## Kill criteria (measurable pivot triggers — adopted from the iteration-1 architect review)
 
 Track these; any one firing re-opens this ADR.
