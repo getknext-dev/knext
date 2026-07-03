@@ -2,9 +2,16 @@
 # primary's liveness via the stable pageserver-primary Service and, on sustained
 # failure, promotes the warm standby at generation+1, flips the client
 # `pageserver` Service selector to the standby, and bounces the compute — the
-# manual runbook, automated. Single replica on purpose: promotion is a
-# once-per-failure action, and the generation ledger (ConfigMap) makes even a
-# restarted watcher safe; a second replica would risk a double flip.
+# manual runbook, automated.
+#
+# Availability posture (issue #23): SINGLE replica on purpose — promotion is the
+# single-writer of a one-way, standby-consuming action; two watchers could double
+# flip. We do NOT add a replica or leader-election. Instead the authority is
+# crash-only: its truth lives in the cluster (the client-Service selector + the
+# generation ledger ConfigMap), so a watcher that dies mid-failover resumes
+# idempotently on restart. `strategy: Recreate` guarantees a rollout never runs two
+# watchers at once; the PodDisruptionBudget below lets node drains proceed (we
+# accept the brief gap — recovery is idempotent) while making the intent explicit.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -57,6 +64,9 @@ metadata:
   labels: { app: pswatcher, plane: storage }
 spec:
   replicas: 1
+  # Recreate (not RollingUpdate): a rollout tears the old watcher down BEFORE the new
+  # one starts, so two watchers never run at once (single-writer of promotions).
+  strategy: { type: Recreate }
   selector:
     matchLabels: { app: pswatcher }
   template:
@@ -76,7 +86,7 @@ spec:
         seccompProfile: { type: RuntimeDefault }
       containers:
         - name: pswatcher
-          image: me-abudhabi-1.ocir.io/axfqznklsd2t/ks-pg/gateway:v0.4.0 # same image, distinct binary
+          image: me-abudhabi-1.ocir.io/axfqznklsd2t/ks-pg/gateway:v0.5.0 # same image, distinct binary
           imagePullPolicy: IfNotPresent
           command: ["/pswatcher"] # override the image's /gateway entrypoint
           securityContext:
@@ -90,6 +100,7 @@ spec:
             - { name: PSW_STANDBY_SELECTOR_APP, value: "pageserver-standby" }
             - { name: PSW_GEN_CONFIGMAP, value: "pageserver-generation" }
             - { name: PSW_COMPUTE_SELECTOR, value: "app=compute" }
+            - { name: PSW_PRIMARY_SELECTOR, value: "app=pageserver" } # #26 second-vantage: the primary pod the API server reports on
             - name: PSW_TENANT_ID
               valueFrom: { configMapKeyRef: { name: compute-config, key: TENANT_ID } }
             - { name: PSW_POLL_MS, value: "2000" } # 2s poll
@@ -123,3 +134,21 @@ spec:
   selector: { app: pswatcher }
   ports:
     - { name: metrics, port: 9091, targetPort: metrics }
+---
+# Availability posture (issue #23). The watcher is a deliberate SINGLE-replica
+# singleton (single-writer of promotions). maxUnavailable:1 makes that intent
+# explicit and lets voluntary disruptions (node drains) proceed — we accept the
+# brief gap because recovery is crash-only idempotent: the restarted watcher reads
+# its truth from the client-Service selector + the generation ledger and resumes
+# any interrupted failover. A rollout can't run two watchers at once (Deployment
+# strategy: Recreate, above), so promotions stay single-writer.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: pswatcher
+  namespace: scale-zero-pg
+  labels: { app: pswatcher, plane: storage }
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels: { app: pswatcher }

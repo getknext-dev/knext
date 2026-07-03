@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strconv"
 
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -73,6 +74,33 @@ func (k *K8sClient) DeletePods(ctx context.Context, selector string) (int, error
 		}
 	}
 	return len(list.Items), nil
+}
+
+// PodReady is the API-server (kubelet) vantage on the primary pageserver's health,
+// independent of the watcher's own HTTP probe. present=true iff at least one pod
+// matches selector; ready=true iff a matching, non-terminating pod is Running with
+// a Ready condition of True. Used to distinguish a watcher-side network partition
+// (probe fails but kubelet says Ready) from a genuine primary death (NotReady/gone).
+func (k *K8sClient) PodReady(ctx context.Context, selector string) (bool, bool, error) {
+	list, err := k.cs.CoreV1().Pods(k.namespace).List(ctx, metav1.ListOptions{LabelSelector: selector})
+	if err != nil {
+		return false, false, err
+	}
+	if len(list.Items) == 0 {
+		return false, false, nil // absent — genuinely gone
+	}
+	for i := range list.Items {
+		p := &list.Items[i]
+		if p.DeletionTimestamp != nil || p.Status.Phase != corev1.PodRunning {
+			continue
+		}
+		for _, cond := range p.Status.Conditions {
+			if cond.Type == corev1.PodReady && cond.Status == corev1.ConditionTrue {
+				return true, true, nil // present & ready per the kubelet
+			}
+		}
+	}
+	return false, true, nil // present but not ready
 }
 
 func (k *K8sClient) GetGeneration(ctx context.Context) (int, bool, error) {

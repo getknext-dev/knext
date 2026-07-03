@@ -43,7 +43,7 @@ IMG_NEON=neondatabase/neon:8464
 IMG_COMPUTE=neondatabase/compute-node-v17:8464
 DRILL_STORAGE=3Gi
 FAILOVER_BUDGET=90    # seconds allowed for reads to come back after the kill
-GW_IMAGE="${GW_IMAGE:-me-abudhabi-1.ocir.io/axfqznklsd2t/ks-pg/gateway:v0.4.0}" # ships /pswatcher
+GW_IMAGE="${GW_IMAGE:-me-abudhabi-1.ocir.io/axfqznklsd2t/ks-pg/gateway:v0.5.0}" # ships /pswatcher
 
 # Default: AUTOMATED failover — deploy the pswatcher (58) into the drill, kill
 # the primary, and assert reads recover with NO manual step (RTO measured).
@@ -479,6 +479,7 @@ spec:
             - { name: PSW_STANDBY_SELECTOR_APP, value: "pageserver-b" }
             - { name: PSW_GEN_CONFIGMAP, value: "pageserver-generation" }
             - { name: PSW_COMPUTE_SELECTOR, value: "app=compute" }
+            - { name: PSW_PRIMARY_SELECTOR, value: "app=pageserver-a" }
             - { name: PSW_TENANT_ID, value: "$TENANT" }
             - { name: PSW_POLL_MS, value: "1000" }
             - { name: PSW_FAIL_THRESHOLD, value: "3" }
@@ -524,7 +525,23 @@ YAML
   # PROOF #3 (fencing): the generation ledger advanced 1 -> 2.
   GEN_NOW=$($KD get configmap pageserver-generation -o jsonpath='{.data.generation}' 2>/dev/null || echo '?')
   [ "$GEN_NOW" = "2" ] || fail "generation ledger did not advance to 2 (got '$GEN_NOW')"
-  MECH="AUTOMATIC — pswatcher promoted pageserver-b @ gen $GEN_NOW, flipped Service selector, bounced compute (no human step)"
+  # PROOF #4 (#25 post-failover TRUTHFULNESS): the watcher must NOT go blind after its
+  # own action. It re-anchors onto the promoted standby (pageserver-b) and reports ITS
+  # health: pswatcher_failed_over=1 and pswatcher_primary_up=1 (the promoted node is up).
+  # Pre-fix the watcher stopped probing and latched primary_up=1 unconditionally — a
+  # metric that lied. Scrape via pageserver-b (neon image ships curl; pswatcher is distroless).
+  PSW_IP=$($KD get pod -l app=pswatcher -o jsonpath='{.items[0].status.podIP}' 2>/dev/null || echo '')
+  [ -n "$PSW_IP" ] || fail "could not resolve pswatcher pod IP for the truthfulness scrape"
+  MET=""; m=0
+  while [ $m -lt 20 ]; do
+    MET="$($KD exec sts/pageserver-b -- curl -s "http://${PSW_IP}:9091/metrics" 2>/dev/null || true)"
+    echo "$MET" | grep -q "pswatcher_failed_over 1" && break
+    m=$((m+1)); sleep 1
+  done
+  echo "$MET" | grep -q "pswatcher_failed_over 1" || fail "watcher did NOT report failed_over=1 after its own failover (blind-after-failover #25); metrics:\n$MET"
+  echo "$MET" | grep -q "pswatcher_primary_up 1" || fail "watcher did NOT re-anchor onto the promoted standby (primary_up should reflect the healthy pageserver-b, got:\n$MET)"
+  ok "post-failover truthfulness: watcher re-anchored to pageserver-b (failed_over=1, primary_up tracks the promoted node) [#25]"
+  MECH="AUTOMATIC — pswatcher promoted pageserver-b @ gen $GEN_NOW, flipped Service selector, bounced compute, re-anchored metrics onto pageserver-b (no human step)"
 fi
 
 # the surviving safekeeper carries the WAL, so pageserver-b streams forward and the

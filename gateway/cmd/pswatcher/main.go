@@ -45,9 +45,11 @@ func main() {
 	standbyBase := env("PSW_STANDBY_BASE_URL", "http://pageserver-standby:9898")
 	clientSvc := env("PSW_CLIENT_SERVICE", "pageserver")
 	standbyApp := env("PSW_STANDBY_SELECTOR_APP", "pageserver-standby")
+	standbyStatusURL := env("PSW_STANDBY_STATUS_URL", standbyBase+"/v1/status")
 	tenant := os.Getenv("PSW_TENANT_ID")
 	genCM := env("PSW_GEN_CONFIGMAP", "pageserver-generation")
 	computeSel := env("PSW_COMPUTE_SELECTOR", "app=compute")
+	primarySel := env("PSW_PRIMARY_SELECTOR", "app=pageserver")
 	pollMs := envInt("PSW_POLL_MS", 2000)
 	threshold := envInt("PSW_FAIL_THRESHOLD", 3)
 	baseGen := envInt("PSW_BASE_GENERATION", 1)
@@ -62,15 +64,19 @@ func main() {
 	if err != nil {
 		logger.Fatalf("[pswatcher] kube client: %v", err)
 	}
-	prober := pswatcher.NewHTTPProber(statusURL, time.Duration(probeTimeoutMs)*time.Millisecond)
+	probeTimeout := time.Duration(probeTimeoutMs) * time.Millisecond
+	prober := pswatcher.NewHTTPProber(statusURL, probeTimeout)
+	// Post-failover the watcher re-anchors onto the promoted standby (issue #25).
+	standbyProber := pswatcher.NewHTTPProber(standbyStatusURL, probeTimeout)
 	promoter := pswatcher.NewHTTPPromoter(standbyBase, 10*time.Second)
 	metrics := pswatcher.NewMetrics()
 
-	ctrl := pswatcher.NewController(prober, promoter, k8s, pswatcher.Config{
+	ctrl := pswatcher.NewController(prober, standbyProber, promoter, k8s, pswatcher.Config{
 		Tenant:          tenant,
 		ClientService:   clientSvc,
 		StandbyApp:      standbyApp,
 		ComputeSelector: computeSel,
+		PrimarySelector: primarySel,
 		FailThreshold:   threshold,
 		BaseGeneration:  baseGen,
 	}, metrics)

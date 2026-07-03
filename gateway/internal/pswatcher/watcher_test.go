@@ -22,6 +22,13 @@ func (p *fakeProber) Alive(_ context.Context) bool {
 	return p.last
 }
 
+// toggleProber returns a liveness value that the test can flip mid-run. Used to
+// model a node whose health changes across the failover lifecycle (a primary that
+// dies and later returns, or a promoted standby that subsequently dies).
+type toggleProber struct{ alive bool }
+
+func (p *toggleProber) Alive(_ context.Context) bool { return p.alive }
+
 // fakePromoter records promotion calls and can inject a failure for the first
 // N calls (models a pageserver that is slow to accept the re-attach).
 type fakePromoter struct {
@@ -53,6 +60,20 @@ type fakeK8s struct {
 	setGenErr   error
 	flipErr     error
 	deleteErr   error
+
+	// Second-vantage (#26): what the API server / kubelet reports for the primary
+	// pod. present=false models an absent pod (genuinely gone); podReadyErr models
+	// an unreachable API server.
+	primaryReady   bool
+	primaryPresent bool
+	podReadyErr    error
+}
+
+func (k *fakeK8s) PodReady(_ context.Context, _ string) (bool, bool, error) {
+	if k.podReadyErr != nil {
+		return false, false, k.podReadyErr
+	}
+	return k.primaryReady, k.primaryPresent, nil
 }
 
 func (k *fakeK8s) ServiceSelectorApp(_ context.Context, _ string) (string, error) {
@@ -87,11 +108,18 @@ func (k *fakeK8s) SetGeneration(_ context.Context, gen int) error {
 }
 
 func newController(p Prober, pr Promoter, k K8sOps, threshold int) *Controller {
-	return NewController(p, pr, k, Config{
+	// Default standby prober is always alive — tests that don't exercise the
+	// post-failover re-anchor don't care about the standby's health.
+	return newControllerFull(p, &toggleProber{alive: true}, pr, k, threshold)
+}
+
+func newControllerFull(p, sb Prober, pr Promoter, k K8sOps, threshold int) *Controller {
+	return NewController(p, sb, pr, k, Config{
 		Tenant:          "f0f0",
 		ClientService:   "pageserver",
 		StandbyApp:      "pageserver-standby",
 		ComputeSelector: "app=compute",
+		PrimarySelector: "app=pageserver",
 		FailThreshold:   threshold,
 		BaseGeneration:  1,
 	}, NewMetrics())
@@ -288,6 +316,188 @@ func TestPromoteFailureRetries(t *testing.T) {
 	// Selector must not flip until the promote actually succeeded.
 	if len(k8s.flippedTo) != 1 {
 		t.Fatalf("selector flipped %d times, want 1 (only after successful promote)", len(k8s.flippedTo))
+	}
+}
+
+// #25 — full failover lifecycle: healthy → primary dies → promote → the watcher
+// RE-ANCHORS to the node it promoted (probes the standby, reports ITS truth), and
+// the old primary returning is never re-adopted or double-attached.
+func TestPostFailoverReAnchorsToPromotedStandby(t *testing.T) {
+	primary := &toggleProber{alive: true}
+	standby := &toggleProber{alive: true}
+	promoter := &fakePromoter{}
+	k8s := &fakeK8s{selectorApp: "pageserver", gen: 1, genSet: true} // primaryPresent=false ⇒ genuine death
+	c := newControllerFull(primary, standby, promoter, k8s, 3)
+	ctx := context.Background()
+
+	// Phase 1 — healthy: no failover, primary_up reflects the (healthy) primary.
+	if fo, _ := c.Tick(ctx); fo {
+		t.Fatal("failed over while primary healthy")
+	}
+	if c.Metrics().PrimaryUp() != 1 || c.Metrics().FailedOver() != 0 {
+		t.Fatalf("healthy: primary_up=%d failed_over=%d, want 1/0", c.Metrics().PrimaryUp(), c.Metrics().FailedOver())
+	}
+
+	// Phase 2 — primary dies: 3 misses ⇒ promote on the 3rd (threshold=3).
+	primary.alive = false
+	promotedAt := -1
+	for i := 0; i < 3; i++ {
+		fo, err := c.Tick(ctx)
+		if err != nil {
+			t.Fatalf("tick %d: %v", i, err)
+		}
+		if fo {
+			promotedAt = i
+		}
+	}
+	if promotedAt != 2 {
+		t.Fatalf("promoted at tick %d, want 2", promotedAt)
+	}
+	if c.Metrics().Promotions() != 1 || c.Metrics().FailedOver() != 1 {
+		t.Fatalf("after promote: promotions=%d failed_over=%d, want 1/1", c.Metrics().Promotions(), c.Metrics().FailedOver())
+	}
+	if len(k8s.flippedTo) != 1 || k8s.flippedTo[0] != "pageserver-standby" {
+		t.Fatalf("selector flip = %v, want [pageserver-standby]", k8s.flippedTo)
+	}
+
+	// Phase 3 — RE-ANCHOR: the watcher now probes the STANDBY. Healthy ⇒ primary_up=1
+	// (truthfully the promoted authority), and it does NOT re-promote.
+	if fo, _ := c.Tick(ctx); fo {
+		t.Fatal("re-promoted after failover")
+	}
+	if c.Metrics().PrimaryUp() != 1 {
+		t.Fatal("primary_up should track the healthy promoted standby")
+	}
+
+	// Phase 3b — the PROMOTED standby dies: the metric must tell the truth (0), not a
+	// blind 1. This is the exact #25 defect: pre-fix, primary_up stayed 1 forever.
+	standby.alive = false
+	if _, err := c.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if c.Metrics().PrimaryUp() != 0 {
+		t.Fatal("primary_up must reflect the DEAD promoted standby, not a hardcoded 1 (#25 blind-after-failover)")
+	}
+
+	// Phase 4 — the OLD primary returns: it must NOT be re-adopted or double-attached.
+	primary.alive = true
+	standby.alive = true
+	for i := 0; i < 3; i++ {
+		if _, err := c.Tick(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if c.Metrics().Promotions() != 1 {
+		t.Fatal("old primary returning must not trigger a second promotion")
+	}
+	if len(k8s.flippedTo) != 1 || k8s.selectorApp != "pageserver-standby" {
+		t.Fatalf("authority must remain the promoted standby (flips=%v selector=%q)", k8s.flippedTo, k8s.selectorApp)
+	}
+	if c.Metrics().PrimaryUp() != 1 {
+		t.Fatal("primary_up should track the (healthy) standby, not the returned old primary")
+	}
+}
+
+// #26 — second-vantage decision table: a failed HTTP probe alone must not promote.
+// The API server (kubelet's view) is the corroborating vantage.
+func TestPromotionGatedBySecondVantage(t *testing.T) {
+	cases := []struct {
+		name                         string
+		primaryReady, primaryPresent bool
+		wantPromote                  bool
+		wantSuspected                bool
+	}{
+		{"probe fails + pod Running&Ready ⇒ OUR partition ⇒ hold", true, true, false, true},
+		{"probe fails + pod NotReady ⇒ genuine death ⇒ promote", false, true, true, false},
+		{"probe fails + pod absent ⇒ genuine death ⇒ promote", false, false, true, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			primary := &toggleProber{alive: false} // our HTTP probe always fails
+			standby := &toggleProber{alive: true}
+			promoter := &fakePromoter{}
+			k8s := &fakeK8s{selectorApp: "pageserver", gen: 1, genSet: true,
+				primaryReady: tc.primaryReady, primaryPresent: tc.primaryPresent}
+			c := newControllerFull(primary, standby, promoter, k8s, 3)
+
+			promoted := false
+			for i := 0; i < 6; i++ {
+				fo, err := c.Tick(context.Background())
+				if err != nil {
+					t.Fatalf("tick %d: %v", i, err)
+				}
+				if fo {
+					promoted = true
+				}
+			}
+			if promoted != tc.wantPromote {
+				t.Fatalf("promoted=%v, want %v", promoted, tc.wantPromote)
+			}
+			if !tc.wantPromote && len(promoter.calls) != 0 {
+				t.Fatalf("promoted despite pod healthy per kubelet: %v", promoter.calls)
+			}
+			gotSuspected := c.Metrics().SuspectedPartitions() > 0
+			if gotSuspected != tc.wantSuspected {
+				t.Fatalf("suspected_partitions>0=%v, want %v (count=%d)", gotSuspected, tc.wantSuspected, c.Metrics().SuspectedPartitions())
+			}
+		})
+	}
+}
+
+// #26 — if the second vantage (API server) is unreachable, the watcher must NOT
+// promote on our probe alone: refuse to burn the only standby under uncertainty.
+func TestPartitionCheckErrorDoesNotPromote(t *testing.T) {
+	primary := &toggleProber{alive: false}
+	standby := &toggleProber{alive: true}
+	promoter := &fakePromoter{}
+	k8s := &fakeK8s{selectorApp: "pageserver", gen: 1, genSet: true, podReadyErr: errors.New("apiserver unreachable")}
+	c := newControllerFull(primary, standby, promoter, k8s, 1)
+
+	sawErr := false
+	for i := 0; i < 5; i++ {
+		if _, err := c.Tick(context.Background()); err != nil {
+			sawErr = true
+		}
+	}
+	if !sawErr {
+		t.Fatal("expected an error while the second-vantage check is unavailable")
+	}
+	if len(promoter.calls) != 0 {
+		t.Fatalf("must not promote when the second vantage is unavailable: %v", promoter.calls)
+	}
+}
+
+// #23 — crash-only resume: a watcher that died AFTER advancing the ledger but BEFORE
+// flipping the client Service resumes on restart and drives the failover to
+// completion from the ledger — idempotently (generation stays monotonic, reads
+// recover on the standby), no split-brain.
+func TestCrashOnlyResumeMidFailover(t *testing.T) {
+	primary := &toggleProber{alive: false} // primary genuinely gone
+	standby := &toggleProber{alive: true}
+	promoter := &fakePromoter{}
+	// Restarted watcher: ledger already at 2 (a prior instance promoted), but the
+	// Service was never flipped (still "pageserver"), and the primary pod is absent.
+	k8s := &fakeK8s{selectorApp: "pageserver", gen: 2, genSet: true, primaryPresent: false}
+	c := newControllerFull(primary, standby, promoter, k8s, 1)
+
+	fo, err := c.Tick(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !fo {
+		t.Fatal("restarted watcher did not resume the interrupted failover")
+	}
+	if k8s.selectorApp != "pageserver-standby" {
+		t.Fatalf("resume did not flip the Service to the standby: %q", k8s.selectorApp)
+	}
+	if len(k8s.deletedFor) != 1 {
+		t.Fatal("resume did not bounce the compute")
+	}
+	if k8s.gen <= 2 {
+		t.Fatalf("generation must stay monotonic on resume (fences the dead primary), got %d", k8s.gen)
+	}
+	if len(promoter.calls) != 1 {
+		t.Fatalf("resume must promote exactly once (no flap), got %v", promoter.calls)
 	}
 }
 

@@ -56,7 +56,7 @@ Alertmanager (`61-alertmanager.yaml`) to a receiver.
 | `BackupStale` (crit) | last successful backup >26h old | >1 missed daily run — the off-cluster copy is stale. Investigate the CronJob before it becomes a data-loss window. |
 | `PswatcherDown` (crit) | `up{job="pswatcher"}==0` for 2m | The failover authority is down — a primary pageserver death now degrades to the manual runbook (below). Restart pswatcher. |
 | `PswatcherPromotionFired` (crit) | `pswatcher_promotions_total` rose in 10m | A **failover happened** — the promoted standby is now the sole read authority with NO standby behind it. Rebuild a standby. |
-| `PswatcherPrimaryDown` (warn) | `pswatcher_primary_up==0` for 1m | The watcher is failing primary probes; a promotion may be ~6s away. Check the primary pageserver / watcher↔primary network. |
+| `PswatcherPrimaryDown` (warn) | `pswatcher_primary_up==0` for 1m | The watcher can't reach the **current read authority**. Pre-failover that's the primary (a promotion may be ~6s away); **post-failover the watcher re-anchors this metric onto the promoted standby** (#25), so it now also covers "the promoted node is the unguarded SPOF and just died." Check the current authority / watcher↔pageserver network. |
 | `PageserverStandbyNotReady` (crit) | `pageserver-standby` <1 ready for 5m | The warm standby that failover promotes into is gone — automated failover has nothing to promote. Rebuild it. |
 | `ComputeWakeStuck` (crit) | connections held but 0 compute/compute-warm ready for 2m | A client is connected but the DB never woke — attach error / image pull / storage stall. Clients are hanging. |
 
@@ -378,7 +378,8 @@ outage. It is now **automatic**: a standing warm-Secondary standby plus the
   client-facing `pageserver` Service.
 - **The watcher (`pswatcher`, 58).** Polls `pageserver-primary:9898/v1/status`
   (`PSW_POLL_MS`, default 2 s). After `PSW_FAIL_THRESHOLD` consecutive misses
-  (default 3 ≈ 6 s — long enough not to split-brain a slow primary) it runs the same
+  (default 3 ≈ 6 s — long enough not to split-brain a slow primary) **and** a
+  second-vantage confirmation (see the decision table below) it runs the same
   runbook the restore drill proved, in order:
   1. **Promote** the standby to `AttachedSingle` at **generation+1** — the higher
      generation fences the dead primary (single-writer is intrinsic to Neon; the
@@ -391,9 +392,56 @@ outage. It is now **automatic**: a standing warm-Secondary standby plus the
   The surviving safekeeper carries the WAL, so the standby streams forward and the DB
   stays **read-WRITE** across the failover. The watcher is single-shot per failover
   and idempotent on restart (if the `pageserver` selector already points at the
-  standby it adopts that state rather than re-promoting). It exposes `/healthz` and
-  `pswatcher_promotions_total` / `pswatcher_primary_up` on `:9091`; RBAC is minimal
+  standby it adopts that state rather than re-promoting).
+  **After it fails over it does not go blind (#25):** every tick it re-derives the
+  current read authority from the `pageserver` Service selector, so once flipped it
+  **probes the promoted standby** and `pswatcher_primary_up` reports *that* node's
+  real health — the metric can no longer read a false "healthy" for a node the watcher
+  stopped watching. The returned old primary is never re-adopted (the selector never
+  flips back). It exposes `/healthz` and
+  `pswatcher_promotions_total` / `pswatcher_primary_up` / `pswatcher_failed_over` /
+  `pswatcher_suspected_partitions_total` on `:9091`; RBAC is minimal
   (services get/patch, configmaps get/update/patch, pods list/delete).
+
+#### Partition tolerance — the promote decision (#26)
+
+An automatic promotion is **irreversible and standby-consuming**: it fences the old
+primary and leaves the platform on a pageserver with no standby behind it. A failed
+HTTP probe reflects only the watcher pod's own network path, so a ~6 s watcher↔primary
+blip (DNS/kube-proxy hiccup) must **not** burn the only standby. Before promoting, the
+watcher corroborates death from a **second vantage** — it asks the API server (the
+kubelet's independent view) about the primary pod (`PSW_PRIMARY_SELECTOR`, default
+`app=pageserver`):
+
+| Our HTTP probe | API server (kubelet) says | Decision |
+| --- | --- | --- |
+| fails ≥ threshold | pod **Running & Ready** | **HOLD** — this is a watcher-side partition, not primary death. No promotion; `pswatcher_suspected_partitions_total` increments; the standby is preserved. |
+| fails ≥ threshold | pod **NotReady** | **PROMOTE** — the primary is genuinely unhealthy. |
+| fails ≥ threshold | pod **absent** (gone) | **PROMOTE** — the primary is genuinely gone. |
+| fails ≥ threshold | **API unreachable** | **HOLD** — can't corroborate; refuse to promote on a single vantage (a `tick error` is logged and retried). |
+
+**Tuning knobs & their partition tolerance.** `PSW_POLL_MS` (2 s) × `PSW_FAIL_THRESHOLD`
+(3) ⇒ the HTTP path must be down ~6 s before the gate is even consulted; the
+second-vantage check then absorbs any watcher-only partition of arbitrary duration
+(the standby is never consumed while the kubelet still sees the primary Ready). Raise
+the threshold to trade failover RTO for more blip tolerance on the *primary's own*
+readiness flaps; the second vantage already covers the watcher-side ones.
+
+#### Availability posture of the authority itself (#23)
+
+The watcher is a deliberate **single replica** — promotion is the single-writer of a
+one-way action, and two watchers could double-flip. We do **not** add a replica or
+leader-election. Instead the authority is **crash-only**: its entire state lives in the
+cluster (the `pageserver` Service selector + the generation ledger ConfigMap), not in
+memory. A watcher that dies mid-failover **resumes idempotently** on restart —
+- selector already flipped ⇒ it adopts the promoted standby and never re-promotes;
+- ledger advanced but selector not yet flipped ⇒ it drives the failover to completion
+  with a **monotonic** generation (still fences the dead primary).
+`strategy: Recreate` guarantees a rollout never runs two watchers at once; a
+`PodDisruptionBudget` (`maxUnavailable: 1`) makes the single-replica intent explicit
+and lets node drains proceed — we accept the brief gap because recovery is idempotent.
+The gap itself is covered by `PswatcherDown` (below), which degrades to the manual
+runbook until the watcher is back.
 - **Measured automated RTO: 8 s on OKE** (kill → reads restored on the promoted
   standby, **no human step**) in the self-contained drill (see `docs/BENCHMARKS.md`).
   This converts the SPOF from an *unbounded* outage into a *known, small, hands-off*
@@ -407,7 +455,9 @@ outage. It is now **automatic**: a standing warm-Secondary standby plus the
 - **Verify hands-off:** `sh deploy/_verify-pageserver-failover.sh` — stands up a
   throwaway 2-pageserver plane + the watcher, kills the primary, and asserts reads
   recover with the `pageserver` Service selector flipped **by the watcher** (proof no
-  human acted) and the generation ledger advanced 1→2.
+  human acted), the generation ledger advanced 1→2, and the watcher's **post-failover
+  truthfulness** (`pswatcher_failed_over=1` and `pswatcher_primary_up` re-anchored onto
+  the promoted standby, not a blind latched 1 — #25).
 - **After a failover:** the standby is now the primary and the ledger holds the new
   generation. To restore redundancy, bring up a fresh warm Secondary (re-seed
   `pageserver-standby` against the now-primary); the watcher adopts the flipped

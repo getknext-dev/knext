@@ -24,7 +24,7 @@ type Promoter interface {
 }
 
 // K8sOps is the Kubernetes surface the watcher drives. Kept minimal so the
-// RBAC stays tight (services patch, configmaps get/update, pods delete).
+// RBAC stays tight (services get/patch, configmaps get/update, pods list/delete).
 type K8sOps interface {
 	// ServiceSelectorApp returns the client Service's current spec.selector["app"].
 	ServiceSelectorApp(ctx context.Context, service string) (string, error)
@@ -36,6 +36,11 @@ type K8sOps interface {
 	GetGeneration(ctx context.Context) (gen int, ok bool, err error)
 	// SetGeneration persists the generation.
 	SetGeneration(ctx context.Context, gen int) error
+	// PodReady is the SECOND vantage on primary liveness (the kubelet's view via the
+	// API server, independent of the watcher's own HTTP path). It reports whether a
+	// pod matching selector is Running & Ready (ready) and whether any such pod
+	// exists at all (present). {present:false} ⇒ the primary pod is genuinely gone.
+	PodReady(ctx context.Context, selector string) (ready, present bool, err error)
 }
 
 // Config is the watcher's static wiring.
@@ -44,6 +49,7 @@ type Config struct {
 	ClientService   string // Service whose selector clients (computes) resolve
 	StandbyApp      string // app label the ClientService flips TO on failover
 	ComputeSelector string // label selector for compute pods to bounce
+	PrimarySelector string // label selector for the primary pageserver pod (second-vantage check)
 	FailThreshold   int    // consecutive failed probes before promoting
 	BaseGeneration  int    // generation the primary was attached at (storage-init: 1)
 }
@@ -51,25 +57,28 @@ type Config struct {
 // Controller runs one Tick per poll interval. It is single-goroutine by design;
 // no internal locking is needed.
 type Controller struct {
-	prober   Prober
-	promoter Promoter
-	k8s      K8sOps
-	cfg      Config
-	metrics  *Metrics
+	prober        Prober // probes the PRIMARY pageserver (pre-failover authority)
+	standbyProber Prober // probes the STANDBY pageserver (post-failover authority)
+	promoter      Promoter
+	k8s           K8sOps
+	cfg           Config
+	metrics       *Metrics
 
 	failures int
 	done     bool // failover already performed (or adopted) — never re-promote
 }
 
-// NewController wires a Controller. FailThreshold < 1 is clamped to 1.
-func NewController(p Prober, pr Promoter, k K8sOps, cfg Config, m *Metrics) *Controller {
+// NewController wires a Controller. FailThreshold < 1 is clamped to 1. The standby
+// prober lets the watcher re-anchor its liveness view onto the node it promoted
+// once the client Service has flipped (issue #25).
+func NewController(p, standby Prober, pr Promoter, k K8sOps, cfg Config, m *Metrics) *Controller {
 	if cfg.FailThreshold < 1 {
 		cfg.FailThreshold = 1
 	}
 	if cfg.BaseGeneration < 1 {
 		cfg.BaseGeneration = 1
 	}
-	return &Controller{prober: p, promoter: pr, k8s: k, cfg: cfg, metrics: m}
+	return &Controller{prober: p, standbyProber: standby, promoter: pr, k8s: k, cfg: cfg, metrics: m}
 }
 
 // Metrics exposes the counter set (promotions, primary_up).
@@ -80,15 +89,23 @@ func (c *Controller) Metrics() *Metrics { return c.metrics }
 func (c *Controller) Tick(ctx context.Context) (bool, error) {
 	c.metrics.Check()
 
-	// Restart / already-failed-over guard: if the client Service already points
-	// at the standby, a failover happened (this or a prior watcher instance).
-	// Adopt that state — the standby is the new authority; re-promoting would
-	// flap the tenant and bounce the compute for nothing.
+	// Re-anchor the authority from the CURRENT Service selector every tick. This is
+	// the crash-only truth source: a restarted watcher (and one that already failed
+	// over in-process) learns from the cluster, not stale memory. Once the client
+	// Service points at the standby, a failover happened — adopt it.
+	failedOver := c.done
 	if app, err := c.k8s.ServiceSelectorApp(ctx, c.cfg.ClientService); err == nil && app == c.cfg.StandbyApp {
-		c.done = true
+		failedOver = true
 	}
-	if c.done {
-		c.metrics.SetPrimaryUp(true) // the promoted standby now serves reads
+	c.done = failedOver
+
+	if failedOver {
+		// #25 — re-anchor: the promoted standby is now the SOLE read authority. Probe
+		// IT (not the dead old primary) and report ITS true health, so primary_up
+		// cannot read a false "healthy" after our own action. The old primary
+		// returning is never re-adopted: we never flip the selector back.
+		c.metrics.SetFailedOver(true)
+		c.metrics.SetPrimaryUp(c.standbyProber.Alive(ctx))
 		return false, nil
 	}
 
@@ -104,6 +121,23 @@ func (c *Controller) Tick(ctx context.Context) (bool, error) {
 		return false, nil // a blip — don't split-brain a slow primary
 	}
 
+	// #26 — second-vantage confirmation before an irreversible, standby-consuming
+	// promotion. Our HTTP probe only reflects OUR network path to the primary. Ask
+	// the API server (the kubelet's independent view):
+	//   probe fails + pod Running&Ready   → a WATCHER-SIDE partition, not primary
+	//                                        death → hold, count it, keep the standby.
+	//   probe fails + pod NotReady/absent  → the primary is genuinely down → promote.
+	//   API unreachable                    → cannot corroborate → refuse to promote
+	//                                        (never burn the only standby on one vantage).
+	ready, present, err := c.k8s.PodReady(ctx, c.cfg.PrimarySelector)
+	if err != nil {
+		return false, err
+	}
+	if present && ready {
+		c.metrics.SuspectedPartition()
+		return false, nil
+	}
+
 	if err := c.failover(ctx); err != nil {
 		// Leave done=false so the next tick retries; the standby may just be
 		// slow to accept the re-attach.
@@ -112,6 +146,7 @@ func (c *Controller) Tick(ctx context.Context) (bool, error) {
 	c.done = true
 	c.failures = 0
 	c.metrics.Promotion()
+	c.metrics.SetFailedOver(true)
 	return true, nil
 }
 
