@@ -57,6 +57,11 @@ Repo: github.com/getknext-dev/scale-zero-pg (auto-merge + delete-branch enabled)
    approve or request changes.
 5. **Merge**: auto-merge once reviews pass; issues close; new findings become the
    next iteration's issues. Scorecard history: docs/SCORECARD.md.
+6. **Cleanup (mandatory, after every successful workflow)**: the finished agent is
+   shut down, its git worktree removed (`git worktree remove` + `prune`), and its
+   cmux/tmux pane closed — verified, not assumed (wedged panes get killed after
+   identification via `tmux capture-pane`). Safe because the repo is the memory:
+   all agent output lives in merged PRs/issues/docs before cleanup starts.
 
 ## Definition of done (MVP)
 On a local k8s cluster, with a one-table test DB:
