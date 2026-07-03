@@ -18,6 +18,39 @@ k8s on an M-series laptop (decommissioned 2026-07-03); **OKE** = Oracle OKE
 | compute_ctl attach alone | **123–160ms** | — | Neon's true share; everything else is k8s mechanics |
 | Compose-era cold start (no k8s) | 772ms | — | the floor without pod machinery (historical) |
 
+## Combined wake (knext demo, issue #8)
+
+The north star, measured end-to-end: a real knext `NextApp` (Knative
+scale-to-zero) bound to scale-zero-pg via a `DATABASE_URL` Secret. Both asleep
+at rest; **one cold HTTP request wakes both** and returns Postgres data; both
+idle back to zero. Drill: `demo/_verify.sh` (TTFB via `curl` from an in-cluster
+pod; DB pre-wake via `psql` through the gateway). OKE `knext2`, 2 nodes,
+2026-07-03, n=5.
+
+| Request class | OKE (mean) | Range (n=5) | What it is |
+|---|---|---|---|
+| **`T_both`** — app + DB both cold | **13.0s** | 7.4 – 16.1s | the headline: one request wakes app **and** DB |
+| `T_appcold` — app cold, DB pre-warmed | **3.9s** | 3.5 – 4.7s | app's Knative cold start alone |
+| `T_warm` — both awake | **23ms** | 19 – 28ms | steady state (Next.js + warm pool) |
+| bare DB cold-connect (no app) | 2.6s | 2 – 3s | DB wake as a bare `psql` client sees it |
+
+Per-iteration `T_both`: 13.2 / 15.2 / 13.1 / 7.4 / 16.1 s. North star proven 5/5
+(HTTP 200 + live visit-counter row every time).
+
+**Honest reading — the DB wake did *not* simply "hide" inside the app cold
+start; the both-cold path costs *more* than the parts summed.** App-only cold
+start is a stable ~3.9s and the DB's bare wake is ~2.6s, yet waking both on one
+request lands at ~13s (range 7–16s), not ~6.5s. So `T_both − T_appcold` (~9s) is
+**not** a clean DB-wake isolate — it's dominated by both-cold cold-start
+mechanics: the app pod schedules + starts (image-cache locality across 2 nodes
+drives the 7→16s spread) *and* its first request blocks on a cold-DB connection
+inside the Knative activation window, while the compute pod schedules in
+parallel. Net: the combined cold hit is a cold-start problem, not a DB-wake
+problem. Mitigations that move it toward `T_warm`: the **warm tier** (~0.4s DB
+wake, `deploy/25-compute-warm.yaml`) and/or `NextApp` `minScale: 1` /
+bytecode-cache for latency-sensitive apps. Steady-state (warm) is 23ms — the DB
+is a transparent pipe once up. Filed back to the platform as a wake-UX finding.
+
 ## Foundation bake-off (ADR-0002 evidence; n=20/cell, same gateway)
 
 | Cell | Neon | CNPG baseline | CNPG tuned (1s probes) |

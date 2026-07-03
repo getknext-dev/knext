@@ -1,0 +1,7 @@
+# Namespace for the knext demo app. This is the demo's own namespace — it is
+# separate from scale-zero-pg (the database platform). The app reaches the DB
+# only across the cluster via the pggw Service; it never touches the DB's ns.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: knext-demo

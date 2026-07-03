@@ -1,0 +1,890 @@
+# kn-next operator install bundle — VENDORED for the scale-zero-pg knext demo (issue #8).
+#
+# PROVENANCE: byte-for-byte copy of the knext operator's published install bundle
+#   knext repo: packages/kn-next-operator/dist/install.yaml
+#   (CRDs + RBAC + manager Deployment + validating webhook + cert-manager wiring
+#    + Knative config-network/config-features repin for Kourier ingress-class)
+# with EXACTLY ONE change: the manager image is repointed from the private
+# ghcr.io/getknext-dev image (needs read:packages) to an amd64 rebuild pushed to
+# our OCIR so the OKE cluster can pull it without a GHCR pull secret:
+#   FROM: ghcr.io/getknext-dev/kn-next-operator:v0.1.0@sha256:db357927...ac9730
+#   TO:   me-abudhabi-1.ocir.io/axfqznklsd2t/kn-next-operator:v0.1.0-demo@sha256:6602656f...c6538
+# Rebuilt from knext packages/kn-next-operator (Dockerfile, unmodified source).
+#
+# Prerequisites on the cluster: Knative Serving + Kourier, and cert-manager
+# (kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.16.2/cert-manager.yaml).
+# Install namespace: kn-next-operator-system.
+#
+# Apply with server-side so the bundled config-network/config-features merge
+# into Knative Serving's existing ConfigMaps:
+#   kubectl apply --server-side -f demo/operator/kn-next-operator-install.yaml
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: kn-next-operator
+    control-plane: controller-manager
+  name: kn-next-operator-system
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.20.1
+  name: nextapps.apps.kn-next.dev
+spec:
+  group: apps.kn-next.dev
+  names:
+    kind: NextApp
+    listKind: NextAppList
+    plural: nextapps
+    singular: nextapp
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.url
+      name: URL
+      type: string
+    - jsonPath: .status.conditions[?(@.type=='Ready')].status
+      name: Ready
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: NextApp is the Schema for the nextapps API
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: spec defines the desired state of NextApp
+            properties:
+              buildId:
+                description: |-
+                  BuildID is the deploy's Next.js BUILD_ID (issue #93 — skew protection).
+                  The CLI sets NEXT_DEPLOYMENT_ID == this value at build time, so the
+                  `_next/static/<BuildID>/` asset prefix in the object store is named by it.
+                  The operator stamps it onto the Knative Service's revision (pod) template
+                  as the label `apps.kn-next.dev/build-id`, which propagates to every
+                  Revision. The deploy-time asset GC then resolves a live revision back to
+                  its build-id via that label (read-only) so a live revision's assets are
+                  never reaped. Empty => no label stamped (back-compat).
+                type: string
+              cache:
+                description: Caching infrastructure
+                properties:
+                  bytecodeCacheSize:
+                    type: string
+                  enableBytecodeCache:
+                    type: boolean
+                  keyPrefix:
+                    description: KeyPrefix is prepended to every cache key — maps
+                      from KnativeNextConfig.cache.keyPrefix
+                    type: string
+                  provider:
+                    type: string
+                  url:
+                    type: string
+                type: object
+              healthCheckPath:
+                description: 'Custom health check path (default: /api/health)'
+                type: string
+              image:
+                description: The OpenNext bundled Next.js image
+                type: string
+              observability:
+                description: Observability — Prometheus metrics
+                properties:
+                  enabled:
+                    type: boolean
+                  rum:
+                    description: |-
+                      Rum (#94): self-hosted Web Vitals → Prometheus/Grafana. Default OFF.
+                      When enabled, the operator propagates NEXT_PUBLIC_RUM_ENABLED (and
+                      optionally NEXT_PUBLIC_RUM_SAMPLE_RATE) so the client beacon activates.
+                    properties:
+                      enabled:
+                        type: boolean
+                      sampleRate:
+                        description: SampleRate is the client-side sampling fraction
+                          (0..1). Empty → 1 (all).
+                        type: string
+                    type: object
+                  tracing:
+                    description: |-
+                      Tracing (#30): server-side OTel distributed tracing via OTLP/gRPC → a
+                      self-hostable backend (Tempo/Jaeger, ADR-0012). Default OFF. When enabled,
+                      the operator sets OTEL_TRACING_ENABLED (and optionally
+                      OTEL_EXPORTER_OTLP_ENDPOINT / OTEL_TRACES_SAMPLER_ARG) so the runtime
+                      instrumentation hook initializes the exporter.
+                    properties:
+                      enabled:
+                        type: boolean
+                      endpoint:
+                        description: |-
+                          Endpoint is the OTLP/gRPC collector endpoint. Empty → the runtime default
+                          (a cluster-local OTLP collector; never a SaaS endpoint — no lock-in).
+                        type: string
+                      sampleRate:
+                        description: SampleRate is the head-based trace sampling fraction
+                          (0..1). Empty → 1 (all).
+                        type: string
+                    type: object
+                type: object
+              preview:
+                description: GitOps Preview Environment configuration
+                properties:
+                  branch:
+                    type: string
+                  enabled:
+                    type: boolean
+                  prId:
+                    type: string
+                type: object
+              resources:
+                description: Container resource requests and limits
+                properties:
+                  cpuLimit:
+                    type: string
+                  cpuRequest:
+                    type: string
+                  memoryLimit:
+                    type: string
+                  memoryRequest:
+                    type: string
+                type: object
+              revalidation:
+                description: Revalidation options
+                properties:
+                  kafkaBrokerUrl:
+                    type: string
+                  provisionKafkaSource:
+                    description: |-
+                      ProvisionKafkaSource gates whether the operator provisions a Knative
+                      KafkaSource for `queue: kafka`.
+
+                      nil/false (DEFAULT) => no KafkaSource is provisioned. The `{app}-revalidator`
+                      consumer that the source would sink into is design-now/build-later (issue #95):
+                      provisioning the source by default would point eventing at a service that is
+                      never deployed (events delivered nowhere). When kafka is selected but this is
+                      not opted in, the operator surfaces a non-fatal `RevalidationDeferred` status
+                      condition instead.
+
+                      true => explicit opt-in. The operator provisions the KafkaSource; setting this
+                      asserts that you have deployed an external revalidator consumer for the
+                      `{app}-revalidation` topic yourself.
+                    type: boolean
+                  queue:
+                    type: string
+                type: object
+              runtime:
+                description: |-
+                  Runtime selects the process that executes the Next.js standalone server.js.
+                  Valid values: "bun" or "node" (default "node").
+                  Maps from KnativeNextConfig.runtime.
+                enum:
+                - bun
+                - node
+                type: string
+              scaling:
+                description: How many concurrent Next.js pods should be active
+                properties:
+                  containerConcurrency:
+                    format: int32
+                    type: integer
+                  maxScale:
+                    format: int32
+                    type: integer
+                  minScale:
+                    format: int32
+                    type: integer
+                type: object
+              secrets:
+                description: External Secrets mapping
+                properties:
+                  envFrom:
+                    items:
+                      type: string
+                    type: array
+                  envMap:
+                    additionalProperties:
+                      description: EnvMapEntry maps an environment variable name to
+                        a specific key in a Kubernetes Secret
+                      properties:
+                        secretKey:
+                          type: string
+                        secretName:
+                          type: string
+                      required:
+                      - secretKey
+                      - secretName
+                      type: object
+                    type: object
+                type: object
+              security:
+                description: Security controls defense-in-depth network/auth hardening
+                  for the app.
+                properties:
+                  networkPolicy:
+                    description: |-
+                      NetworkPolicy toggles the operator-reconciled Kubernetes NetworkPolicy that
+                      restricts ingress to the app's pods to in-cluster sources only (the Knative
+                      serving system, the Kourier gateway, and the app's own namespace), denying
+                      arbitrary cross-namespace / external pod-direct traffic.
+
+                      This is L3/L4 (pod-level) network isolation, NOT L7: a NetworkPolicy cannot
+                      target a specific HTTP path, so it hardens the POD's network exposure as
+                      defense-in-depth for the (already Bearer-authed) mutating cache endpoints —
+                      it does not provide per-route isolation.
+
+                      Semantics: nil (unset) or true => the policy is reconciled (DEFAULT-ON);
+                      false => the policy is not reconciled and any previously-created one is deleted.
+                    type: boolean
+                type: object
+              storage:
+                description: Storage bindings (GCS, S3, or Local)
+                properties:
+                  bucket:
+                    type: string
+                  endpoint:
+                    description: Endpoint overrides the default service endpoint —
+                      required for MinIO and S3-compatible stores
+                    type: string
+                  provider:
+                    type: string
+                  region:
+                    description: Region is used for S3 / S3-compatible providers (e.g.
+                      "us-east-1")
+                    type: string
+                type: object
+              timeoutSeconds:
+                description: |-
+                  TimeoutSeconds is the maximum number of seconds a request can take before
+                  the Knative Service times it out.  Defaults to 300 (5 min) when unset.
+                  Maps from the knative-manifest hardcoded timeoutSeconds=300.
+                format: int32
+                type: integer
+              traffic:
+                description: |-
+                  Traffic pins which Knative Revision serves traffic (issue #92 — rollback).
+                  nil => serve the latest-ready revision (DEFAULT, byte-identical back-compat).
+                properties:
+                  canaryPercent:
+                    description: |-
+                      CanaryPercent, when 1..99 and RevisionName is set, sends this percentage
+                      of traffic to the LATEST-ready revision and the remainder (100-p) to the
+                      pinned RevisionName — a canary back toward latest. 0 => 100% pinned.
+                    format: int32
+                    maximum: 100
+                    minimum: 0
+                    type: integer
+                  revisionName:
+                    description: |-
+                      RevisionName pins traffic to a specific prior Knative Revision (e.g.
+                      "my-app-00002"). Empty => latest-ready (no pin).
+                    type: string
+                type: object
+            required:
+            - image
+            type: object
+          status:
+            description: status defines the observed state of NextApp
+            properties:
+              conditions:
+                description: |-
+                  conditions represent the current state of the NextApp resource.
+                  Each condition has a unique type and reflects the status of a specific aspect of the resource.
+
+                  Standard condition types include:
+                  - "Available": the resource is fully functional
+                  - "Progressing": the resource is being created or updated
+                  - "Degraded": the resource failed to reach or maintain its desired state
+
+                  The status of each condition is one of True, False, or Unknown.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              currentTraffic:
+                description: |-
+                  CurrentTraffic reports the revision(s) currently serving traffic and their
+                  split, mirrored from the Knative Service status (issue #92).
+                items:
+                  description: TrafficStatus is one entry of the observed Knative
+                    traffic distribution.
+                  properties:
+                    latestRevision:
+                      type: boolean
+                    percent:
+                      format: int64
+                      type: integer
+                    revisionName:
+                      type: string
+                  type: object
+                type: array
+              url:
+                type: string
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: kn-next-operator
+  name: kn-next-operator-controller-manager
+  namespace: kn-next-operator-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: kn-next-operator
+  name: kn-next-operator-leader-election-role
+  namespace: kn-next-operator-system
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - configmaps
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+- apiGroups:
+  - coordination.k8s.io
+  resources:
+  - leases
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+- apiGroups:
+  - ""
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kn-next-operator-manager-role
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
+- apiGroups:
+  - ""
+  resources:
+  - persistentvolumeclaims
+  - serviceaccounts
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - apps.kn-next.dev
+  resources:
+  - nextapps
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - apps.kn-next.dev
+  resources:
+  - nextapps/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - apps.kn-next.dev
+  resources:
+  - nextapps/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - caching.internal.knative.dev
+  resources:
+  - images
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - networking.k8s.io
+  resources:
+  - networkpolicies
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - serving.knative.dev
+  resources:
+  - services
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - sources.knative.dev
+  resources:
+  - kafkasources
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kn-next-operator-metrics-auth-role
+rules:
+- apiGroups:
+  - authentication.k8s.io
+  resources:
+  - tokenreviews
+  verbs:
+  - create
+- apiGroups:
+  - authorization.k8s.io
+  resources:
+  - subjectaccessreviews
+  verbs:
+  - create
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kn-next-operator-metrics-reader
+rules:
+- nonResourceURLs:
+  - /metrics
+  verbs:
+  - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: kn-next-operator
+  name: kn-next-operator-nextapp-admin-role
+rules:
+- apiGroups:
+  - apps.kn-next.dev
+  resources:
+  - nextapps
+  verbs:
+  - '*'
+- apiGroups:
+  - apps.kn-next.dev
+  resources:
+  - nextapps/status
+  verbs:
+  - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: kn-next-operator
+  name: kn-next-operator-nextapp-editor-role
+rules:
+- apiGroups:
+  - apps.kn-next.dev
+  resources:
+  - nextapps
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - apps.kn-next.dev
+  resources:
+  - nextapps/status
+  verbs:
+  - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: kn-next-operator
+  name: kn-next-operator-nextapp-viewer-role
+rules:
+- apiGroups:
+  - apps.kn-next.dev
+  resources:
+  - nextapps
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - apps.kn-next.dev
+  resources:
+  - nextapps/status
+  verbs:
+  - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: kn-next-operator
+  name: kn-next-operator-leader-election-rolebinding
+  namespace: kn-next-operator-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: kn-next-operator-leader-election-role
+subjects:
+- kind: ServiceAccount
+  name: kn-next-operator-controller-manager
+  namespace: kn-next-operator-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: kn-next-operator
+  name: kn-next-operator-manager-rolebinding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: kn-next-operator-manager-role
+subjects:
+- kind: ServiceAccount
+  name: kn-next-operator-controller-manager
+  namespace: kn-next-operator-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kn-next-operator-metrics-auth-rolebinding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: kn-next-operator-metrics-auth-role
+subjects:
+- kind: ServiceAccount
+  name: kn-next-operator-controller-manager
+  namespace: kn-next-operator-system
+---
+apiVersion: v1
+data:
+  kubernetes.podspec-persistent-volume-claim: enabled
+  kubernetes.podspec-persistent-volume-write: enabled
+kind: ConfigMap
+metadata:
+  labels:
+    app.kubernetes.io/component: features
+    app.kubernetes.io/name: knative-serving
+  name: config-features
+  namespace: knative-serving
+---
+apiVersion: v1
+data:
+  ingress-class: kourier.ingress.networking.knative.dev
+kind: ConfigMap
+metadata:
+  labels:
+    app.kubernetes.io/component: networking
+    app.kubernetes.io/name: knative-serving
+  name: config-network
+  namespace: knative-serving
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: kn-next-operator
+    control-plane: controller-manager
+  name: kn-next-operator-controller-manager-metrics-service
+  namespace: kn-next-operator-system
+spec:
+  ports:
+  - name: https
+    port: 8443
+    protocol: TCP
+    targetPort: 8443
+  selector:
+    app.kubernetes.io/name: kn-next-operator
+    control-plane: controller-manager
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kn-next-operator-webhook-service
+  namespace: kn-next-operator-system
+spec:
+  ports:
+  - port: 443
+    protocol: TCP
+    targetPort: 9443
+  selector:
+    control-plane: controller-manager
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: kn-next-operator
+    control-plane: controller-manager
+  name: kn-next-operator-controller-manager
+  namespace: kn-next-operator-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kn-next-operator
+      control-plane: controller-manager
+  template:
+    metadata:
+      annotations:
+        kubectl.kubernetes.io/default-container: manager
+      labels:
+        app.kubernetes.io/name: kn-next-operator
+        control-plane: controller-manager
+    spec:
+      containers:
+      - args:
+        - --metrics-bind-address=:8443
+        - --leader-elect
+        - --health-probe-bind-address=:8081
+        - --webhook-cert-path=/tmp/k8s-webhook-server/serving-certs
+        command:
+        - /manager
+        image: me-abudhabi-1.ocir.io/axfqznklsd2t/kn-next-operator:v0.1.0-demo@sha256:6602656f51f25c3ce6c7aa145d369cf765b3d25e17a571d04820c2d11aec6538
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 8081
+          initialDelaySeconds: 15
+          periodSeconds: 20
+        name: manager
+        ports:
+        - containerPort: 9443
+          name: webhook-server
+          protocol: TCP
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: 8081
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        resources:
+          limits:
+            cpu: 500m
+            memory: 128Mi
+          requests:
+            cpu: 10m
+            memory: 64Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+        volumeMounts:
+        - mountPath: /tmp/k8s-webhook-server/serving-certs
+          name: webhook-certs
+          readOnly: true
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      serviceAccountName: kn-next-operator-controller-manager
+      terminationGracePeriodSeconds: 10
+      volumes:
+      - name: webhook-certs
+        secret:
+          secretName: webhook-server-cert
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: kn-next-operator
+  name: kn-next-operator-serving-cert
+  namespace: kn-next-operator-system
+spec:
+  dnsNames:
+  - kn-next-operator-webhook-service.kn-next-operator-system.svc
+  - kn-next-operator-webhook-service.kn-next-operator-system.svc.cluster.local
+  issuerRef:
+    kind: Issuer
+    name: kn-next-operator-selfsigned-issuer
+  secretName: webhook-server-cert
+---
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: kn-next-operator
+  name: kn-next-operator-selfsigned-issuer
+  namespace: kn-next-operator-system
+spec:
+  selfSigned: {}
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  annotations:
+    cert-manager.io/inject-ca-from: kn-next-operator-system/kn-next-operator-serving-cert
+  name: kn-next-operator-validating-webhook-configuration
+webhooks:
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: kn-next-operator-webhook-service
+      namespace: kn-next-operator-system
+      path: /validate-apps-kn-next-dev-v1alpha1-nextapp
+  failurePolicy: Fail
+  name: vnextapp-v1alpha1.kb.io
+  rules:
+  - apiGroups:
+    - apps.kn-next.dev
+    apiVersions:
+    - v1alpha1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - nextapps
+  sideEffects: None

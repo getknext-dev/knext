@@ -81,22 +81,29 @@ like activity** and keep the database awake.
 ## knext apps
 
 knext binds databases via a Secret only. Apply `deploy/30-knext-secret.yaml` (edit
-name/namespace per app), then reference it in the `NextApp` CR:
+name/namespace per app), then reference it in the `NextApp` CR. The operator CRD
+(`apps.kn-next.dev/v1alpha1`, verified on cluster) takes `envMap` as a **map** of
+`ENV_VAR → {secretName, secretKey}`:
 
 ```yaml
 spec:
   secrets:
     envMap:
-      - env: DATABASE_URL
-        secret: myapp-database
-        key: DATABASE_URL
+      DATABASE_URL:
+        secretName: myapp-database
+        secretKey: DATABASE_URL
 ```
 
 `@knext/lib`'s `getDbPool()` reads `DATABASE_URL` and already uses scale-to-zero-sane
-defaults (`DB_POOL_MAX=5`, idle timeout). Sizing rule: `maxScale × DB_POOL_MAX`
+defaults (`DB_POOL_MAX=5`, idle timeout **10s**). Sizing rule: `maxScale × DB_POOL_MAX`
 bounds the connections that can hit the gateway; keep the pool's idle timeout below
 `GW_IDLE_MS`. App and database then sleep and wake together — the app's cold start
 (Knative activator) and the DB's wake overlap, so users mostly pay only one of them.
+
+**A full, runnable end-to-end example** — operator install, a `NextApp` that
+queries Postgres, and a measured drill proving both wake on one cold request —
+lives in [`demo/`](../demo/README.md). Combined-wake numbers:
+[BENCHMARKS](BENCHMARKS.md#combined-wake-knext-demo-issue-8).
 
 ## One database per app
 

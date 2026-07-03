@@ -1,0 +1,28 @@
+# The demo as a knext NextApp. The kn-next operator reconciles this into a
+# Knative Service (scale-to-zero) in the knext-demo namespace, injecting
+# DATABASE_URL from the pg-demo-db Secret via spec.secrets.envMap.
+#
+# minScale: 0  -> the app itself scales to zero when idle (Knative KPA).
+# So at rest BOTH the app (0 pods) and the database (0 compute) are asleep;
+# one cold HTTP request wakes both.
+apiVersion: apps.kn-next.dev/v1alpha1
+kind: NextApp
+metadata:
+  name: pg-demo
+  namespace: knext-demo
+spec:
+  # amd64 image in OCIR (OKE nodes are amd64). Digest-pinned: the operator's
+  # validating webhook rejects tag-only refs (and :latest) for supply-chain safety.
+  image: "me-abudhabi-1.ocir.io/axfqznklsd2t/pg-demo:v1@sha256:6ffc1e1b1f4b7ac682e52443f1041212345792f7942dc005226abb9e3d62c39e"
+  scaling:
+    minScale: 0
+    maxScale: 3
+    containerConcurrency: 80
+  # /api/health does NOT touch Postgres, so Knative probes never wake the DB.
+  healthCheckPath: "/api/health"
+  secrets:
+    # envMap: ENV_VAR_NAME -> { secretName, secretKey }  (operator CRD shape)
+    envMap:
+      DATABASE_URL:
+        secretName: pg-demo-db
+        secretKey: DATABASE_URL
