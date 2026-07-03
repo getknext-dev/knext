@@ -73,6 +73,35 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# alertmanager-receiver — REAL on-call pager (optional; Slack-compatible)
+# ---------------------------------------------------------------------------
+# Alertmanager (deploy/61) ships a default in-cluster logging sink so the pager
+# path is testable with no external creds. To page a human, mount a Slack
+# incoming-webhook URL here (Alertmanager reads it at send time via
+# `api_url_file`, so the URL never lands in a ConfigMap or in git), then flip
+# `route.receiver` to `slack` in the alertmanager-config ConfigMap.
+#
+# One key: slack-webhook -> the Slack (or Mattermost/compat) incoming-webhook URL.
+# Provide it via env ALERT_SLACK_WEBHOOK_URL. No-silent-rotation, same as above:
+# if the Secret exists, leave it. If MISSING and no URL supplied, this is a
+# NO-OP with a hint (the default sink keeps working) — it does NOT fail the run.
+RNAME=alertmanager-receiver
+if $K get secret "$RNAME" >/dev/null 2>&1; then
+  echo "ok - Secret $RNAME already exists; leaving untouched (no silent rotation)"
+elif [ -n "${ALERT_SLACK_WEBHOOK_URL:-}" ]; then
+  $K create secret generic "$RNAME" \
+    --from-literal=slack-webhook="$ALERT_SLACK_WEBHOOK_URL" >/dev/null \
+    || fail "could not create Secret $RNAME"
+  echo "ok - created Secret $RNAME (slack-webhook hidden)"
+  echo "    -> now set route.receiver: slack in the alertmanager-config ConfigMap and:"
+  echo "       kubectl -n $NS rollout restart deploy/alertmanager"
+else
+  echo "note - Secret $RNAME not set; alerts route to the in-cluster logging sink."
+  echo "       To page a human, mint a Slack incoming webhook and re-run with:"
+  echo "         ALERT_SLACK_WEBHOOK_URL=https://hooks.slack.com/services/XXX sh deploy/gen-secrets.sh"
+fi
+
+# ---------------------------------------------------------------------------
 # backup-s3-target — OFF-CLUSTER backup destination (OCI Object Storage)
 # ---------------------------------------------------------------------------
 # The daily backup CronJob (deploy/62-backup.yaml) mirrors the `neon` bucket to

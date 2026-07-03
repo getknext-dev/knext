@@ -113,7 +113,7 @@ ok "compute↔storage version pair consistent (:$CT everywhere)"
 # 13. contract: every long-running pod declares ephemeral-storage requests
 #     (incident 2026-07-03: pods without them were kubelet's preferred
 #     eviction targets during DiskPressure - the storage plane died first).
-for f in 10-gateway.yaml 20-compute.yaml 25-compute-warm.yaml 50-minio.yaml 51-storage-broker.yaml 52-safekeeper.yaml 53-pageserver.yaml 57-pageserver-standby.yaml 58-pswatcher.yaml 60-prometheus.yaml 61-alertmanager.yaml 62-backup.yaml; do
+for f in 10-gateway.yaml 20-compute.yaml 25-compute-warm.yaml 50-minio.yaml 51-storage-broker.yaml 52-safekeeper.yaml 53-pageserver.yaml 57-pageserver-standby.yaml 58-pswatcher.yaml 59-kube-state-metrics.yaml 60-prometheus.yaml 61-alertmanager.yaml 62-backup.yaml; do
   # must be under requests: (eviction ordering ranks on requests, not limits)
   grep -E 'requests: \{[^}]*ephemeral-storage' "$f" >/dev/null || fail "$f lacks ephemeral-storage under requests:"
 done
@@ -158,7 +158,50 @@ grep -q 'partial' 62-backup.yaml || fail "62 wal-janitor must exclude .partial W
 grep -q 'index_part.json' 62-backup.yaml || fail "62 backup must verify pageserver index integrity post-mirror (issue #21)"
 ok "wal-janitor bounds safekeeper WAL (issue #19) + backup self-heals torn index (issue #21)"
 
-# 17. contract: skctl.py's safekeeper.control serializer is COUPLED to the neon
+# 17. contract: kube-state-metrics (59) is the CronJob/Deployment/STS metric
+#     PRODUCER the janitor/backup/failover alerts key off (issues #29/#41/#23).
+#     Minimal: single-namespace scope + only the five collectors we alert on.
+grep -q 'kube-state-metrics/kube-state-metrics' 59-kube-state-metrics.yaml || fail "59 lacks a pinned kube-state-metrics image"
+grep -q 'namespaces=scale-zero-pg' 59-kube-state-metrics.yaml || fail "59 KSM must be namespace-scoped (--namespaces=scale-zero-pg)"
+grep -q 'resources=cronjobs,jobs,deployments,statefulsets,pods' 59-kube-state-metrics.yaml || fail "59 KSM must limit collectors to the five we alert on"
+grep -q 'kind: Role' 59-kube-state-metrics.yaml || fail "59 KSM must use a namespaced Role (least privilege, not ClusterRole)"
+grep -q 'kind: ClusterRole' 59-kube-state-metrics.yaml && fail "59 KSM must NOT use a ClusterRole (namespace-scoped)"
+ok "59 ships a minimal, namespace-scoped kube-state-metrics producer"
+
+# 18. contract: Prometheus (60) scrapes BOTH new producers — KSM and pswatcher —
+#     otherwise the platform alerts have no data (issues #23/#29).
+grep -q 'job_name: kube-state-metrics' 60-prometheus.yaml || fail "60 must scrape kube-state-metrics"
+grep -q 'job_name: pswatcher' 60-prometheus.yaml || fail "60 must scrape pswatcher (:9091 metrics)"
+
+# 19. contract: the platform alert rules exist — a failing backup AND a failing
+#     wal-janitor (matched by EXACT owner_name, not a loose backup.* regex),
+#     backup staleness, pswatcher down / promotion, standby-not-ready, and a
+#     stuck wake path. This is the "silent load-bearing machinery" close (#29/#41).
+grep -q 'owner_name="backup"' 60-prometheus.yaml || fail "60 backup alert must match the CronJob by exact owner_name"
+grep -q 'owner_name="wal-janitor"' 60-prometheus.yaml || fail "60 must alert on wal-janitor failure by exact owner_name (not backup.*)"
+grep -q 'alert: WalJanitorJobFailed' 60-prometheus.yaml || fail "60 missing WalJanitorJobFailed alert (#41)"
+grep -q 'alert: BackupJobFailed' 60-prometheus.yaml || fail "60 missing BackupJobFailed alert"
+grep -q 'alert: BackupStale' 60-prometheus.yaml || fail "60 missing BackupStale (>26h) alert"
+grep -q 'kube_cronjob_status_last_successful_time' 60-prometheus.yaml || fail "60 BackupStale must use the last-successful-time metric"
+grep -q 'alert: PswatcherDown' 60-prometheus.yaml || fail "60 missing PswatcherDown alert (#23)"
+grep -q 'alert: PswatcherPromotionFired' 60-prometheus.yaml || fail "60 missing promotion-fired alert (#23)"
+grep -q 'alert: PageserverStandbyNotReady' 60-prometheus.yaml || fail "60 missing standby-not-ready alert"
+grep -q 'alert: ComputeWakeStuck' 60-prometheus.yaml || fail "60 missing wake-path-stuck alert"
+# the phantom-keepalive honesty rule must survive (state-based, not counter drift)
+grep -q 'min_over_time(sum(pggw_active_connections)' 60-prometheus.yaml || fail "60 phantom-keepalive honesty rule was lost"
+ok "60 ships the platform alert rules (backup+janitor+staleness+pswatcher+standby+wake) and keeps the phantom honesty rule"
+
+# 20. contract: Alertmanager (61) keeps the testable in-cluster sink as default
+#     BUT cleanly supports a real Slack-compatible receiver via a Secret FILE
+#     (api_url_file — no webhook URL ever inlined into the ConfigMap or git).
+grep -q 'receiver: webhook-sink' 61-alertmanager.yaml || fail "61 default route must stay the testable in-cluster sink"
+grep -q 'slack_configs' 61-alertmanager.yaml || fail "61 must define a real Slack-compatible receiver"
+grep -q 'api_url_file' 61-alertmanager.yaml || fail "61 real receiver must read the webhook URL from a Secret file (not inline)"
+grep -q 'alertmanager-receiver' 61-alertmanager.yaml || fail "61 must mount the alertmanager-receiver Secret (optional)"
+grep -q 'alertmanager-receiver' gen-secrets.sh || fail "gen-secrets.sh must scaffold the alertmanager-receiver Secret"
+ok "61 keeps the testable sink default + supports a real Slack receiver via Secret file (scaffolded by gen-secrets.sh)"
+
+# 21. contract: skctl.py's safekeeper.control serializer is COUPLED to the neon
 #     on-disk format (magic cafeceef, format v9) reverse-engineered from a
 #     specific neon image (issue #22). The version-pair check above guards the
 #     compute<->storage tag; this guards the SECOND version-coupled artifact the

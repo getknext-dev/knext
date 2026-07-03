@@ -55,6 +55,8 @@ sh deploy/_verify-storage.sh              # data survives a compute kill; safeke
 sh deploy/_verify-wake.sh                 # the full 0→1→0 wake loop
 sh deploy/_verify-ha.sh                   # 2-gateway no-SPOF / no-split-brain drill
 sh deploy/_verify-alerting.sh             # an alert fires and REACHES the receiver
+sh deploy/_verify-cronjob-alerting.sh     # a failing CronJob pages via KSM; KSM+pswatcher targets UP
+sh deploy/_verify-drift.sh                # live pods match manifests AND every declared workload is deployed
 sh deploy/_verify-netpol.sh               # network isolation contracts (warns on non-enforcing CNI)
 sh deploy/_verify-restore.sh              # backup -> restore in a throwaway namespace (~110s RTO)
 sh deploy/_verify-pageserver-failover.sh  # pageserver loss -> promoted standby (~7s RTO)

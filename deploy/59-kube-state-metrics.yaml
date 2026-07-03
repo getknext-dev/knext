@@ -1,0 +1,107 @@
+# kube-state-metrics — the METRIC PRODUCER that was missing (issues #29/#41/#23).
+# Prometheus (60) already scrapes the gateway's own :9090 metrics, but the
+# CronJob / Deployment / StatefulSet health of the platform had NO producer, so
+# the docs-recommended `kube_job_status_failed` / `kube_cronjob_*` alerts fired
+# into the void — a silently-failing wal-janitor is a silent restore-RTO
+# regression (#41). This ships that producer, minimally.
+#
+# Minimal on purpose: ONE replica, resource-capped, and only the five collectors
+# the platform alerts on (`--resources=cronjobs,jobs,deployments,statefulsets,pods`),
+# scoped to THIS namespace (`--namespaces=scale-zero-pg`). Because every collected
+# resource is namespaced and informers are namespace-pinned, a namespaced Role —
+# not a ClusterRole — is sufficient (same least-privilege posture as prometheus).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kube-state-metrics
+  namespace: scale-zero-pg
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: kube-state-metrics
+  namespace: scale-zero-pg
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["batch"]
+    resources: ["cronjobs", "jobs"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: kube-state-metrics
+  namespace: scale-zero-pg
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: kube-state-metrics
+subjects:
+  - kind: ServiceAccount
+    name: kube-state-metrics
+    namespace: scale-zero-pg
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kube-state-metrics
+  namespace: scale-zero-pg
+  labels: { app: kube-state-metrics, plane: observability }
+spec:
+  replicas: 1
+  revisionHistoryLimit: 2
+  selector: { matchLabels: { app: kube-state-metrics } }
+  strategy: { type: Recreate }
+  template:
+    metadata:
+      labels: { app: kube-state-metrics, plane: observability }
+    spec:
+      serviceAccountName: kube-state-metrics
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: kube-state-metrics
+          image: registry.k8s.io/kube-state-metrics/kube-state-metrics:v2.13.0 # pinned
+          args:
+            - --namespaces=scale-zero-pg
+            - --resources=cronjobs,jobs,deployments,statefulsets,pods
+            - --port=8080
+            - --telemetry-port=8081
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          ports:
+            - { name: http-metrics, containerPort: 8080 }
+            - { name: telemetry, containerPort: 8081 }
+          readinessProbe:
+            httpGet: { path: /readyz, port: telemetry }
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /livez, port: telemetry }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests: { cpu: 10m, memory: 48Mi, ephemeral-storage: 100Mi }
+            limits: { memory: 128Mi, ephemeral-storage: 512Mi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kube-state-metrics
+  namespace: scale-zero-pg
+  labels: { app: kube-state-metrics, plane: observability }
+spec:
+  type: ClusterIP # internal only; never exposed (same rule as pggw/pswatcher)
+  selector: { app: kube-state-metrics }
+  ports:
+    - { name: http-metrics, port: 8080, targetPort: http-metrics }

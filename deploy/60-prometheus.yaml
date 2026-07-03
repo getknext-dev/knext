@@ -74,6 +74,19 @@ data:
             target_label: pod
           - source_labels: [__meta_kubernetes_namespace]
             target_label: namespace
+      # kube-state-metrics (59): the CronJob/Deployment/StatefulSet/Job/Pod
+      # producer the platform alerts key off. Singleton ClusterIP — a static
+      # target is deterministic (no SD race on a one-pod service).
+      - job_name: kube-state-metrics
+        static_configs:
+          - targets: ["kube-state-metrics.scale-zero-pg.svc:8080"]
+      # pswatcher (58): the failover controller publishes promotions/primary_up
+      # on :9091/metrics. Scraping it makes `up{job="pswatcher"}` a
+      # watcher-liveness signal and exposes the promotion counter (issue #23).
+      - job_name: pswatcher
+        static_configs:
+          - targets: ["pswatcher.scale-zero-pg.svc:9091"]
+        metrics_path: /metrics
   rules.yml: |
     groups:
       - name: ks-pg-gateway
@@ -109,6 +122,95 @@ data:
             annotations:
               summary: "System never idle for 30m — scale-to-zero blocked"
               description: "Connections held continuously — check for an app pool with no/large idle timeout (see docs/connecting.md sizing rule)."
+      # Platform control-plane alerts. These fire off kube-state-metrics (59)
+      # and pswatcher (58) — the load-bearing machinery whose failure was
+      # previously SILENT (issues #29/#41/#23). Names are matched EXACTLY via
+      # the kube_job_owner join (owner_name="backup"/"wal-janitor"), never a
+      # loose `backup.*` regex that would miss `wal-janitor` (#29).
+      - name: ks-pg-platform
+        rules:
+          # (a) backup CronJob run failed. Restore depends on a fresh backup;
+          # a failing backup is a silent DR regression.
+          - alert: BackupJobFailed
+            expr: |
+              sum(kube_job_status_failed{namespace="scale-zero-pg"}
+                  * on(namespace, job_name) group_left(owner_name)
+                  kube_job_owner{namespace="scale-zero-pg", owner_name="backup"}) > 0
+            for: 1m
+            labels: { severity: critical }
+            annotations:
+              summary: "backup CronJob run failed"
+              description: "A Job owned by the backup CronJob is in Failed state — the daily off-cluster mirror did not complete. See docs/operations.md#backup--disaster-recovery."
+          # (a) wal-janitor CronJob run failed. The janitor is load-bearing for
+          # restore RTO (#19): if it stops pruning, /safekeeper WAL regrows
+          # unbounded and restores silently slow back past 60min (#41).
+          - alert: WalJanitorJobFailed
+            expr: |
+              sum(kube_job_status_failed{namespace="scale-zero-pg"}
+                  * on(namespace, job_name) group_left(owner_name)
+                  kube_job_owner{namespace="scale-zero-pg", owner_name="wal-janitor"}) > 0
+            for: 1m
+            labels: { severity: critical }
+            annotations:
+              summary: "wal-janitor CronJob run failed — restore RTO at risk"
+              description: "The WAL janitor failed; /safekeeper WAL will regrow unbounded and slow restores. Check pageserver reachability at 02:30. See docs/operations.md#bounding-safekeeper-wal-growth."
+          # (b) backup staleness: last SUCCESSFUL backup older than 26h (>1
+          # missed daily run). Uses the CronJob's own last-success timestamp.
+          - alert: BackupStale
+            expr: time() - kube_cronjob_status_last_successful_time{namespace="scale-zero-pg", cronjob="backup"} > 93600
+            for: 10m
+            labels: { severity: critical }
+            annotations:
+              summary: "backup has not succeeded in >26h"
+              description: "Last successful backup is {{ $value | humanizeDuration }} old (>26h). The off-cluster copy is stale — a restore would lose recent data."
+          # (c) pswatcher down: the failover authority is not being scraped.
+          # No watcher => no automated pageserver failover (#23).
+          - alert: PswatcherDown
+            expr: up{job="pswatcher"} == 0
+            for: 2m
+            labels: { severity: critical }
+            annotations:
+              summary: "pswatcher is DOWN — no automated pageserver failover"
+              description: "Prometheus cannot scrape pswatcher (:9091). While it is down, a primary pageserver death degrades to the manual runbook (docs/operations.md#pageserver-failover)."
+          # (c) promotion counter jumped: a failover actually happened. Page —
+          # the promoted standby is now the unguarded read authority (#25/#23).
+          - alert: PswatcherPromotionFired
+            expr: increase(pswatcher_promotions_total[10m]) > 0
+            labels: { severity: critical }
+            annotations:
+              summary: "pageserver FAILOVER fired — standby promoted"
+              description: "pswatcher promoted the warm standby. The platform is now on a pageserver with NO standby behind it until an operator rebuilds one (docs/operations.md#pageserver-failover)."
+          # (c) primary_up flipped: the watched pageserver is unreachable from
+          # the watcher, sustained. Precedes a promotion.
+          - alert: PswatcherPrimaryDown
+            expr: pswatcher_primary_up == 0
+            for: 1m
+            labels: { severity: warning }
+            annotations:
+              summary: "pswatcher reports the primary pageserver unreachable"
+              description: "pswatcher_primary_up==0 sustained — the watcher is failing probes and may promote the standby (~6s at default threshold)."
+          # (d) pageserver-standby not ready >5m: the warm standby that failover
+          # promotes into is gone. Failover would have nothing to promote.
+          - alert: PageserverStandbyNotReady
+            expr: kube_statefulset_status_replicas_ready{namespace="scale-zero-pg", statefulset="pageserver-standby"} < 1
+            for: 5m
+            labels: { severity: critical }
+            annotations:
+              summary: "pageserver-standby is not ready — failover has no target"
+              description: "The warm standby STS has <1 ready replica for >5m. An automated failover (#3) has nothing to promote; rebuild the standby."
+          # (e) wake-path failure: the gateway reports live client connections
+          # but no compute replica is ready anywhere. A client is connected and
+          # the DB it woke never came up.
+          - alert: ComputeWakeStuck
+            expr: |
+              (sum(pggw_active_connections) > 0)
+              and
+              (sum(kube_deployment_status_replicas_ready{namespace="scale-zero-pg", deployment=~"compute|compute-warm"}) < 1)
+            for: 2m
+            labels: { severity: critical }
+            annotations:
+              summary: "clients connected but no compute is ready — wake path stuck"
+              description: "pggw_active_connections>0 yet 0 ready compute/compute-warm replicas for >2m — the wake path is failing (attach error, image pull, storage-plane stall). Clients are hanging."
 ---
 apiVersion: apps/v1
 kind: Deployment

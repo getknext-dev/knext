@@ -11,6 +11,11 @@ metadata:
 data:
   alertmanager.yml: |
     route:
+      # DEFAULT = the in-cluster logging sink (keeps _verify-alerting.sh testable
+      # with no external creds). To go live: create the alertmanager-receiver
+      # Secret (deploy/gen-secrets.sh scaffolds it) and flip this one line to
+      #   receiver: slack
+      # then `kubectl rollout restart deploy/alertmanager`. Nothing else changes.
       receiver: webhook-sink
       group_wait: 5s
       group_interval: 30s
@@ -18,9 +23,20 @@ data:
     receivers:
       - name: webhook-sink
         webhook_configs:
-          # PLACEHOLDER receiver: swap for slack_configs/pagerduty_configs in prod.
+          # In-cluster logging sink — proves the pager path end-to-end.
           - url: http://alert-sink.scale-zero-pg.svc:8080/
             send_resolved: false
+      # Real on-call receiver. Slack-compatible: the incoming-webhook URL is
+      # read at send time from a FILE mounted from the alertmanager-receiver
+      # Secret (never inlined into this ConfigMap — no secret in git). Unused
+      # until `route.receiver` is set to `slack` above.
+      - name: slack
+        slack_configs:
+          - api_url_file: /etc/alertmanager/secrets/slack-webhook
+            channel: "#ks-pg-alerts"
+            send_resolved: true
+            title: '{{ .CommonLabels.alertname }} ({{ .CommonLabels.severity }})'
+            text: '{{ range .Alerts }}{{ .Annotations.description }}\n{{ end }}'
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -54,6 +70,10 @@ spec:
           volumeMounts:
             - { name: config, mountPath: /etc/alertmanager }
             - { name: data, mountPath: /alertmanager }
+            # Real-receiver webhook URL, read at send time via api_url_file.
+            # optional: alertmanager starts fine before the Secret exists (the
+            # default route uses the in-cluster sink, not this file).
+            - { name: receiver-secret, mountPath: /etc/alertmanager/secrets, readOnly: true }
           readinessProbe:
             httpGet: { path: /-/ready, port: web }
             periodSeconds: 5
@@ -69,6 +89,10 @@ spec:
           configMap: { name: alertmanager-config }
         - name: data
           emptyDir: {} # silences/notification-log only; safe to lose
+        - name: receiver-secret
+          secret:
+            secretName: alertmanager-receiver # scaffolded by deploy/gen-secrets.sh
+            optional: true # absent until you wire a real pager — sink still works
 ---
 apiVersion: v1
 kind: Service

@@ -37,14 +37,54 @@ Scrape each gateway pod's `:9090/metrics` (Prometheus text) or read `/metrics.js
 | `pggw_sleeps_total` | scale-to-zero events |
 | `pggw_system_*{system=...}` | the same, per database key |
 
-**Alerting is deployed and drilled**, not aspirational: Prometheus
-(`deploy/60-prometheus.yaml`, PVC-backed, 15d retention) evaluates three rules —
-wake failures, wake-latency drift >5s, and phantom keepalive (state-based:
-connections never idle for 30m; see [connecting](connecting.md#connection-pooling-rules))
-— and routes via Alertmanager (`61-alertmanager.yaml`) to a logging webhook sink.
-**Swap the sink URL in `alertmanager-config` for Slack/PagerDuty in production.**
-Prove the whole pager path any time: `sh deploy/_verify-alerting.sh` (idempotent,
-safe to re-run).
+**Alerting is deployed and drilled**, not aspirational. Prometheus
+(`deploy/60-prometheus.yaml`, PVC-backed, 15d retention) scrapes three producers
+— the gateway fleet (`:9090`), **kube-state-metrics** (`deploy/59`, the CronJob /
+Deployment / StatefulSet / Job health producer), and **pswatcher** (`deploy/58`,
+the failover controller `:9091`) — evaluates the rules below, and routes via
+Alertmanager (`61-alertmanager.yaml`) to a receiver.
+
+### Alert rules — what each means, and the 3am action
+
+| Alert | Fires when | 3am action |
+|---|---|---|
+| `GatewayWakeFailures` (crit) | `pggw_wake_failures_total` rose in 5m | Cold starts are erroring — check compute events / storage plane reachability. |
+| `GatewayWakeLatencyHigh` (warn) | last wake >5s | Node image-pull or resource pressure — check compute scheduling. |
+| `ComputePhantomKeepalive` (warn) | connections never idle for 30m (state-based) | An app pool holds connections open — see [connecting](connecting.md#connection-pooling-rules) sizing rule. Blocks scale-to-zero. |
+| `BackupJobFailed` (crit) | a Job owned by the **backup** CronJob failed | The daily off-cluster mirror did not complete — check `kubectl -n scale-zero-pg logs job/<backup-job>`; a restore would be stale. |
+| `WalJanitorJobFailed` (crit) | a Job owned by the **wal-janitor** CronJob failed | The WAL trimmer stalled — `/safekeeper` WAL will regrow and slow restores past 60min (#19/#41). Check pageserver reachability at 02:30. |
+| `BackupStale` (crit) | last successful backup >26h old | >1 missed daily run — the off-cluster copy is stale. Investigate the CronJob before it becomes a data-loss window. |
+| `PswatcherDown` (crit) | `up{job="pswatcher"}==0` for 2m | The failover authority is down — a primary pageserver death now degrades to the manual runbook (below). Restart pswatcher. |
+| `PswatcherPromotionFired` (crit) | `pswatcher_promotions_total` rose in 10m | A **failover happened** — the promoted standby is now the sole read authority with NO standby behind it. Rebuild a standby. |
+| `PswatcherPrimaryDown` (warn) | `pswatcher_primary_up==0` for 1m | The watcher is failing primary probes; a promotion may be ~6s away. Check the primary pageserver / watcher↔primary network. |
+| `PageserverStandbyNotReady` (crit) | `pageserver-standby` <1 ready for 5m | The warm standby that failover promotes into is gone — automated failover has nothing to promote. Rebuild it. |
+| `ComputeWakeStuck` (crit) | connections held but 0 compute/compute-warm ready for 2m | A client is connected but the DB never woke — attach error / image pull / storage stall. Clients are hanging. |
+
+CronJob rules match by **exact owner name** (`kube_job_owner{owner_name="backup"}` /
+`"wal-janitor"`), not a loose `backup.*` regex — so a failing `wal-janitor` is
+never missed (the gap that re-opened the #19 DR blocker).
+
+### Receiver — testable sink by default, real pager one flip away
+
+The default route is an in-cluster logging sink (`alert-sink`) so the pager path
+is provable end-to-end with no external credentials. **To page a human:**
+
+```sh
+# 1. mint a Slack (or compat) incoming webhook, then scaffold the Secret:
+ALERT_SLACK_WEBHOOK_URL=https://hooks.slack.com/services/XXX sh deploy/gen-secrets.sh
+# 2. flip the default receiver in the alertmanager-config ConfigMap:
+#      route.receiver: webhook-sink  ->  route.receiver: slack
+kubectl -n scale-zero-pg rollout restart deploy/alertmanager
+```
+
+The webhook URL is read at send time from the mounted Secret (`api_url_file`) —
+it never lands in the ConfigMap or in git.
+
+Prove the whole pager path any time:
+- `sh deploy/_verify-alerting.sh` — synthetic always-firing rule reaches the sink.
+- `sh deploy/_verify-cronjob-alerting.sh` — a **real failing CronJob** pages via
+  kube-state-metrics → the exact owner-name rule → Alertmanager → sink, and
+  asserts the KSM + pswatcher scrape targets are UP.
 
 Quick look without Prometheus: `sh deploy/_metrics.sh`.
 
@@ -226,8 +266,12 @@ docs/BENCHMARKS.md.
   `kubectl -n scale-zero-pg delete deploy/backup-store svc/backup-store pvc/backup-store-data`.
 - **Remaining:** longer-horizon retention tiers (e.g. monthly beyond 30 days) if
   policy demands; a second region copy for regional durability.
-- Alert on backup Job failure (`kube_job_status_failed{job_name=~"backup.*"}`) and on
-  backup age (last successful completion older than ~26 h).
+- **Backup failure + staleness alerting — DONE (issues #29/#41).** kube-state-metrics
+  (`deploy/59`) produces the Job/CronJob metrics; Prometheus ships `BackupJobFailed`,
+  `WalJanitorJobFailed` (both matched by **exact** `owner_name`, not `backup.*`),
+  and `BackupStale` (>26h via `kube_cronjob_status_last_successful_time`). See the
+  [alert table](#alert-rules--what-each-means-and-the-3am-action) above and the
+  drill `deploy/_verify-cronjob-alerting.sh`.
 
 ### Bounding safekeeper WAL growth — `wal-janitor` (issue #19)
 
@@ -297,6 +341,16 @@ A supervised live prune on 2026-07-03 reclaimed **325 of 357 segments (~5.2 GB;
 `/safekeeper` 5.6 GB → 534 MB)**, keeping 32 segments + 3 partials, with live
 reads/writes verified healthy immediately after. Tune the horizon by editing
 `KEEP_SEGMENTS` on the `resolve-horizon` initContainer.
+
+**How to tell the janitor has stalled (issue #41).** A scheduled `wal-janitor`
+run that fails (pageserver unreachable at 02:30, etc.) fires the
+`WalJanitorJobFailed` alert (critical) within one missed schedule — the janitor
+is fail-closed, so a persistent failure silently lets `/safekeeper` regrow.
+Manual check: `kubectl -n scale-zero-pg get jobs -l app` and look at the last
+`wal-janitor-*` Job's status, or query
+`kube_job_status_failed * on(namespace,job_name) group_left(owner_name) kube_job_owner{owner_name="wal-janitor"}`
+in Prometheus. Trend the prefix size from the janitor's own logs (it prints the
+segment count each run).
 
 ## Pageserver failover
 
