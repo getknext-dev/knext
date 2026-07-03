@@ -210,6 +210,10 @@ jobs:
           make build-installer
           echo "Pinned operator image digest ${DIGEST} into dist/install.yaml:"
           grep -E 'image: ghcr' dist/install.yaml
+          # Gate-review advisory (#203): the bundle MUST carry the exact signed
+          # digest — if the sed pattern ever stops matching (kustomization
+          # format drift), a stale previously-pinned digest would ship silently.
+          grep -q "${DIGEST}" dist/install.yaml || { echo "::error::dist/install.yaml does not contain the signed digest ${DIGEST}"; exit 1; }
           bash hack/check-no-latest.sh
           # PUBLISHED-CONTEXT guard (#117): now that the real digest is pinned, the
           # all-zeros bootstrap placeholder must be GONE from the rendered bundle.
