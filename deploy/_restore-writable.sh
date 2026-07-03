@@ -200,6 +200,15 @@ done
 [ -n "$prev" ] && [ "$prev" != "0/0" ] || fail "pageserver prev_record_lsn still 0/0 after catch-up"
 ok "pageserver caught up: last_record_lsn (Z) = $Z, prev_record_lsn = $prev"
 
+# Runtime format guard (#24 AC2): after phase-1 the RUNNING safekeeper has
+# rewritten safekeeper.control itself — parse that neon-written file and abort
+# before phase 2 crafts anything if the live format is not the one skctl speaks.
+$KD exec safekeeper-0 -c safekeeper -- cat "/data/$TENANT/$TIMELINE/safekeeper.control" \
+  > /tmp/skctl-live.control 2>/dev/null || fail "could not read live safekeeper.control for checkver"
+python3 "$SKCTL" checkver --file /tmp/skctl-live.control \
+  || fail "live safekeeper writes a control format skctl does not speak (see operations.md: skctl format coupling)"
+ok "checkver: live neon-written control file matches skctl's format"
+
 # ---------------------------------------------------------------------------
 # 3) PHASE 2 — re-seed truncated at Z so flush==commit==Z (== pageserver last_record).
 info "PHASE 2: re-seed safekeeper truncated at Z=$Z (align flush==commit==pageserver last_record)"
