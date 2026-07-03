@@ -2548,3 +2548,144 @@ describe('compat-suite red-alert dedup lookup limits (test-e2e-deploy.yml, #187 
     }
   });
 });
+
+// ── #188 path 2 — the sandboxFetchDebug knob (edge-sandbox fetch instrumentation) ──
+// The bun lane is deterministically red on `middleware-fetches-with-any-http-method`
+// (6/6 runs) while node is green on identical infra; paths 0/1 (local + GHA-hosted
+// minimal reductions) failed to discriminate. Path 2 instruments a RED SHARD IN THE
+// FULL HARNESS: a dispatch-only input flips KNEXT_SANDBOX_FETCH_DEBUG=1, which makes
+// scripts/e2e-deploy.sh preload a diagnostics_channel subscriber (the sandbox's
+// bundled undici publishes undici:* through the HOST diagnostics_channel — verified
+// under bun) and export BUN_CONFIG_VERBOSE_FETCH on the bun lane. These guards pin
+// the knob to OPT-IN ONLY: schedules (the credential nightly + the weekly bun lane)
+// must never enable it, and the scripts' debug paths must be env-gated.
+describe('compat-suite sandbox-fetch debug knob (test-e2e-deploy.yml, #188 path 2)', () => {
+  const src = workflowText();
+
+  function dispatchBlock(): string {
+    const m = src.match(/workflow_dispatch:[\s\S]*?(?=\n\s{2}schedule:)/);
+    return m ? m[0] : '';
+  }
+
+  /** The `sandboxFetchDebug:` input sub-block inside workflow_dispatch.inputs. */
+  function debugInputBlock(): string {
+    const block = dispatchBlock();
+    const m = block.match(/^(\s+)sandboxFetchDebug:\s*\n([\s\S]*?)(?=^\1[\w-]|\n*$(?![\s\S]))/m);
+    return m ? m[0] : '';
+  }
+
+  it('declares a `sandboxFetchDebug` workflow_dispatch input that DEFAULTS OFF', () => {
+    const input = debugInputBlock();
+    expect(input, 'workflow_dispatch must declare a sandboxFetchDebug input').not.toBe('');
+    expect(/type:\s*boolean/.test(input), 'the sandboxFetchDebug input must be type: boolean').toBe(
+      true,
+    );
+    expect(
+      /default:\s*false/.test(input),
+      'the sandboxFetchDebug input must default to false (steady state untouched)',
+    ).toBe(true);
+  });
+
+  it('derives KNEXT_SANDBOX_FETCH_DEBUG from the dispatch input ONLY — schedules can never enable it', () => {
+    const envLine = src.split('\n').find((l) => /^\s*KNEXT_SANDBOX_FETCH_DEBUG:\s*\$\{\{/.test(l));
+    expect(
+      envLine,
+      'a workflow-level KNEXT_SANDBOX_FETCH_DEBUG env expression must exist',
+    ).toBeTruthy();
+    expect(
+      /inputs\.sandboxFetchDebug/.test(envLine ?? ''),
+      'the debug env must be driven by the sandboxFetchDebug dispatch input',
+    ).toBe(true);
+    expect(
+      /github\.event\.schedule/.test(envLine ?? ''),
+      'the debug env must NOT branch on github.event.schedule — no scheduled lane may ever run instrumented',
+    ).toBe(false);
+    expect(
+      /\|\|\s*''\s*\}\}/.test(envLine ?? ''),
+      'the fallback must be the empty string (schedule events carry no inputs → debug off)',
+    ).toBe(true);
+  });
+
+  it('plumbs KNEXT_SANDBOX_FETCH_DEBUG into the shard run step', () => {
+    const block = deployTestsJobBlock();
+    const line = block.split('\n').find((l) => /^\s*KNEXT_SANDBOX_FETCH_DEBUG:/.test(l));
+    expect(line, 'the run step env must pass KNEXT_SANDBOX_FETCH_DEBUG through').toBeTruthy();
+    expect(
+      /KNEXT_SANDBOX_FETCH_DEBUG:\s*\$\{\{\s*env\.KNEXT_SANDBOX_FETCH_DEBUG\s*\}\}/.test(
+        line ?? '',
+      ),
+      `the run step must plumb the workflow-level env, got: "${(line ?? '').trim()}"`,
+    ).toBe(true);
+  });
+
+  // ── scripts/e2e-deploy.sh: the debug path is env-gated (node lane byte-identical) ──
+  const deployScript = readFileSync(resolve(REPO_ROOT, 'scripts/e2e-deploy.sh'), 'utf8');
+  /** The body of the `if [ "${KNEXT_SANDBOX_FETCH_DEBUG:-0}" = "1" ]` gate. */
+  function deployDebugGate(): string {
+    const m = deployScript.match(
+      /if \[ "\$\{KNEXT_SANDBOX_FETCH_DEBUG:-0\}" = "1" \];? then([\s\S]*?)\nfi/,
+    );
+    return m ? m[1] : '';
+  }
+
+  it('e2e-deploy.sh chain-boots through the instrumentation module ONLY inside the KNEXT_SANDBOX_FETCH_DEBUG=1 gate', () => {
+    const gate = deployDebugGate();
+    expect(gate, 'e2e-deploy.sh must gate the debug path on KNEXT_SANDBOX_FETCH_DEBUG=1').not.toBe(
+      '',
+    );
+    // Chain-boot, NOT `-r`: under bun, diagnostics_channel subscriptions made
+    // from a `-r` preload never register for the main program (verified on an
+    // isolated repro, bun 1.3.x) — the instrumentation module must BE the
+    // entry and chain-require the real server.js.
+    expect(
+      /SERVER_BOOT_TARGET="\$\{KNEXT_SANDBOX_FETCH_DEBUG_PRELOAD\}"/.test(gate),
+      'the gate must swap the boot target to the instrumentation module',
+    ).toBe(true);
+    expect(
+      /export KNEXT_SANDBOX_FETCH_DEBUG_SERVER_JS="\$\{SERVER_JS\}"/.test(gate),
+      'the gate must hand the real server.js to the instrumentation module for chain-loading',
+    ).toBe(true);
+    expect(
+      /-r "\$\{KNEXT_SANDBOX_FETCH_DEBUG_PRELOAD\}"/.test(deployScript),
+      'the instrumentation must NOT be wired as a -r preload (bun drops preload-scope diagnostics_channel subscriptions)',
+    ).toBe(false);
+    // OUTSIDE the gate the boot target must never be the debug module: the
+    // steady-state boot (both lanes) stays byte-identical with the flag off.
+    const outside = deployScript.replace(gate, '');
+    expect(
+      /SERVER_BOOT_TARGET="\$\{KNEXT_SANDBOX_FETCH_DEBUG_PRELOAD\}"/.test(outside),
+      'the debug boot target must not be set outside the env gate',
+    ).toBe(false);
+    expect(
+      /SERVER_BOOT_TARGET="\$\{SERVER_JS\}"/.test(outside),
+      'the default boot target must remain the real server.js',
+    ).toBe(true);
+  });
+
+  it('e2e-deploy.sh exports BUN_CONFIG_VERBOSE_FETCH only inside the gate (and only for the bun runtime)', () => {
+    const gate = deployDebugGate();
+    expect(
+      /BUN_CONFIG_VERBOSE_FETCH/.test(gate),
+      'BUN_CONFIG_VERBOSE_FETCH must be set inside the debug gate',
+    ).toBe(true);
+    const outside = deployScript.replace(gate, '');
+    expect(
+      /BUN_CONFIG_VERBOSE_FETCH/.test(outside),
+      'BUN_CONFIG_VERBOSE_FETCH must not leak outside the debug gate',
+    ).toBe(false);
+    expect(
+      /if \[ "\$\{RUNTIME\}" = "bun" \]/.test(gate),
+      'the bun-native fetch verbosity must be scoped to the bun runtime inside the gate',
+    ).toBe(true);
+  });
+
+  it('e2e-cleanup.sh ships the [sandbox-fetch-debug] lines at teardown, gated on the same env', () => {
+    const cleanup = readFileSync(resolve(REPO_ROOT, 'scripts/e2e-cleanup.sh'), 'utf8');
+    const m = cleanup.match(/if \[ "\$\{KNEXT_SANDBOX_FETCH_DEBUG:-0\}" = "1" \][\s\S]*?\nfi/);
+    expect(m, 'e2e-cleanup.sh must have a KNEXT_SANDBOX_FETCH_DEBUG=1 gated block').not.toBeNull();
+    expect(
+      /sandbox-fetch-debug/.test(m?.[0] ?? ''),
+      'the gated block must surface the [sandbox-fetch-debug] server-log lines',
+    ).toBe(true);
+  });
+});

@@ -50,6 +50,19 @@ fi
 # shutdown-time exceptions are included too.
 SERVER_LOG="$(grep -E '^SERVER_LOG=' "${LOG_FILE}" 2>/dev/null | head -n1 | cut -d= -f2- || true)"
 SERVER_LOG="${SERVER_LOG:-${APP_DIR}/.adapter-server.log}"
+
+# ── #188 path 2 — ship the sandbox-fetch instrumentation at teardown ─────────
+# The dispatch-only debug lane (KNEXT_SANDBOX_FETCH_DEBUG=1, see e2e-deploy.sh)
+# writes [sandbox-fetch-debug] phase lines into the server log; the generic
+# 16KiB tail below can crop them on a chatty server, so surface them
+# explicitly (bounded — run-tests.js trims output groups around 64KiB). This
+# block is inert on every scheduled/default run (env unset).
+if [ "${KNEXT_SANDBOX_FETCH_DEBUG:-0}" = "1" ] && [ -f "${SERVER_LOG}" ]; then
+  echo "==== sandbox-fetch-debug instrumentation (last 300 lines; KNEXT_SANDBOX_FETCH_DEBUG=1) ====" >&2
+  grep -a "\[sandbox-fetch-debug\]" "${SERVER_LOG}" 2>/dev/null | tail -n 300 >&2 || true
+  echo "==== end of sandbox-fetch-debug instrumentation ====" >&2
+fi
+
 if [ -f "${SERVER_LOG}" ]; then
   echo "==== knext standalone server log tail (${SERVER_LOG}; last 16KiB) ====" >&2
   tail -c 16384 "${SERVER_LOG}" >&2 || true

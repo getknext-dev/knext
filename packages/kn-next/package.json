@@ -28,6 +28,7 @@
     "./adapters/cache-handler": "./dist/adapters/cache-handler.js",
     "./internal/cache-control-normalize": "./dist/adapters/cache-control-normalize.cjs",
     "./internal/bun-keepalive-guard": "./dist/adapters/bun-keepalive-guard.cjs",
+    "./internal/sandbox-fetch-debug": "./dist/adapters/sandbox-fetch-debug.cjs",
     "./internal/standalone-bun-exports": {
       "types": "./dist/adapters/standalone-bun-exports.d.ts",
       "import": "./dist/adapters/standalone-bun-exports.js",

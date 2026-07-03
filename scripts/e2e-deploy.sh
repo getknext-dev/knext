@@ -210,6 +210,10 @@ EOF
   # export must not kill Node-lane deploys (the heal is only INVOKED on
   # RUNTIME=bun, post-build — see step 3).
   KNEXT_BUN_EXPORTS_HEAL="$(node -e 'process.stdout.write(require.resolve("@knext/core/internal/standalone-bun-exports"))' 2>/dev/null || true)"
+  # #188 path 2 — opt-in edge-sandbox fetch instrumentation preload (inert
+  # unless KNEXT_SANDBOX_FETCH_DEBUG=1; only appended under that gate below).
+  # Tolerant resolve: an older tarball without the export must not kill deploys.
+  KNEXT_SANDBOX_FETCH_DEBUG_PRELOAD="$(node -e 'process.stdout.write(require.resolve("@knext/core/internal/sandbox-fetch-debug"))' 2>/dev/null || true)"
 else
   log "KNEXT_E2E_SKIP_PACK=1 — skipping tarball install (contract-test mode)"
   NEXT_ADAPTER_PATH="${NEXT_ADAPTER_PATH:-}"
@@ -217,6 +221,7 @@ else
   # dependency-free CJS, so the in-repo SOURCE files are directly loadable.
   KNEXT_CC_PRELOAD="${SCRIPT_DIR}/../packages/kn-next/src/adapters/cache-control-normalize.cjs"
   KNEXT_BUN_GUARD_PRELOAD="${SCRIPT_DIR}/../packages/kn-next/src/adapters/bun-keepalive-guard.cjs"
+  KNEXT_SANDBOX_FETCH_DEBUG_PRELOAD="${SCRIPT_DIR}/../packages/kn-next/src/adapters/sandbox-fetch-debug.cjs"
   # The heal is TS source in-repo (not directly loadable); contract-test mode
   # never boots bun fixtures, so leave it unset — the bun branch warns+skips.
   KNEXT_BUN_EXPORTS_HEAL="${KNEXT_BUN_EXPORTS_HEAL:-}"
@@ -483,12 +488,46 @@ if [ "${RUNTIME}" = "bun" ]; then
   # lane env is untouched.
   export NEXT_PRIVATE_DEBUG_CACHE=1
 fi
-log "booting (${RUNTIME}) ${SERVER_JS} on 0.0.0.0:${PORT} (HOSTNAME emptied — see B7a note; preloads ${SERVER_PRELOAD_ARGS[*]})"
+# ── #188 path 2 — OPT-IN edge-sandbox fetch instrumentation ──────────────────
+# Enabled ONLY by the compat workflow's dispatch-only `sandboxFetchDebug`
+# input (KNEXT_SANDBOX_FETCH_DEBUG=1); the scheduled lanes and every default
+# dispatch never enter this block — the steady-state boot stays byte-identical
+# with the flag off (guard-tested). When on:
+#   (a) boot the server THROUGH the instrumentation module (it chain-requires
+#       the real server.js via KNEXT_SANDBOX_FETCH_DEBUG_SERVER_JS). NOT `-r`:
+#       under bun, diagnostics_channel subscriptions made from a `-r` preload
+#       never register for the main program (verified bun 1.3.x — the
+#       require-chain from the main graph works; node works both ways). The
+#       sandbox's bundled undici (next/dist/compiled/@edge-runtime/primitives/
+#       fetch.js) publishes undici:request:*/undici:client:* through the HOST
+#       diagnostics_channel under BOTH runtimes, so the server log records
+#       each sandbox fetch's phase transitions + a stalled-request watchdog
+#       with an `ss -tnp` socket snapshot;
+#   (b) on the bun runtime, also export bun's verbose-fetch env so any
+#       bun-NATIVE fetch traffic (which does not publish undici channels) is
+#       logged too — the two outputs discriminate which fetch implementation a
+#       request actually traversed.
+# e2e-cleanup.sh ships the [sandbox-fetch-debug] server-log lines at teardown.
+SERVER_BOOT_TARGET="${SERVER_JS}"
+if [ "${KNEXT_SANDBOX_FETCH_DEBUG:-0}" = "1" ]; then
+  if [ -n "${KNEXT_SANDBOX_FETCH_DEBUG_PRELOAD:-}" ] && [ -f "${KNEXT_SANDBOX_FETCH_DEBUG_PRELOAD}" ]; then
+    log "KNEXT_SANDBOX_FETCH_DEBUG=1 — chain-booting through sandbox-fetch instrumentation (${KNEXT_SANDBOX_FETCH_DEBUG_PRELOAD})"
+    export KNEXT_SANDBOX_FETCH_DEBUG_SERVER_JS="${SERVER_JS}"
+    SERVER_BOOT_TARGET="${KNEXT_SANDBOX_FETCH_DEBUG_PRELOAD}"
+  else
+    log "WARNING: KNEXT_SANDBOX_FETCH_DEBUG=1 but the instrumentation module is unavailable (${KNEXT_SANDBOX_FETCH_DEBUG_PRELOAD:-unset}) — sandbox fetches will NOT be instrumented"
+  fi
+  if [ "${RUNTIME}" = "bun" ]; then
+    export BUN_CONFIG_VERBOSE_FETCH=curl
+    log "KNEXT_SANDBOX_FETCH_DEBUG=1 — BUN_CONFIG_VERBOSE_FETCH=curl exported (bun-native fetch verbosity)"
+  fi
+fi
+log "booting (${RUNTIME}) ${SERVER_BOOT_TARGET} on 0.0.0.0:${PORT} (HOSTNAME emptied — see B7a note; preloads ${SERVER_PRELOAD_ARGS[*]})"
 (
   cd "${STANDALONE_APP_DIR}"
   PORT="${PORT}" HOSTNAME="" NODE_ENV="production" \
     NEXT_DEPLOYMENT_ID="${DEPLOYMENT_ID}" \
-    exec "${SERVER_CMD}" "${SERVER_PRELOAD_ARGS[@]}" "${SERVER_JS}"
+    exec "${SERVER_CMD}" "${SERVER_PRELOAD_ARGS[@]}" "${SERVER_BOOT_TARGET}"
 ) >"${SERVER_LOG}" 2>&1 &
 SERVER_PID=$!
 
