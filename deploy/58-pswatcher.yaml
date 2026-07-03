@@ -1,0 +1,125 @@
+# pswatcher: the pageserver auto-failover controller (issue #3). Watches the
+# primary's liveness via the stable pageserver-primary Service and, on sustained
+# failure, promotes the warm standby at generation+1, flips the client
+# `pageserver` Service selector to the standby, and bounces the compute — the
+# manual runbook, automated. Single replica on purpose: promotion is a
+# once-per-failure action, and the generation ledger (ConfigMap) makes even a
+# restarted watcher safe; a second replica would risk a double flip.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: pswatcher
+  namespace: scale-zero-pg
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: pswatcher
+  namespace: scale-zero-pg
+rules:
+  # Read the client Service selector (idempotency guard) and flip it on failover.
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "patch"]
+  # Read + advance the generation ledger.
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "update", "patch"]
+  # Bounce the compute so a cold wake re-attaches to the promoted standby.
+  # Per-name Delete needs only `delete` (not `deletecollection`); list to find them.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["list", "delete"]
+  # Read-only view of the compute Deployment (diagnostics; no scale here).
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: pswatcher
+  namespace: scale-zero-pg
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: pswatcher
+subjects:
+  - kind: ServiceAccount
+    name: pswatcher
+    namespace: scale-zero-pg
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pswatcher
+  namespace: scale-zero-pg
+  labels: { app: pswatcher, plane: storage }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: pswatcher }
+  template:
+    metadata:
+      labels: { app: pswatcher, plane: storage }
+    spec:
+      imagePullSecrets:
+        - name: ocir-pull
+      serviceAccountName: pswatcher
+      # distroless:nonroot ships USER by NAME (nonroot); kubelet cannot verify a
+      # non-numeric user against runAsNonRoot, so pin the numeric uid/gid (65532)
+      # or the pod fails admission with CreateContainerConfigError.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: pswatcher
+          image: me-abudhabi-1.ocir.io/axfqznklsd2t/ks-pg/gateway:v0.4.0 # same image, distinct binary
+          imagePullPolicy: IfNotPresent
+          command: ["/pswatcher"] # override the image's /gateway entrypoint
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+          env:
+            - { name: PSW_NAMESPACE, value: "scale-zero-pg" }
+            - { name: PSW_PRIMARY_STATUS_URL, value: "http://pageserver-primary:9898/v1/status" }
+            - { name: PSW_STANDBY_BASE_URL, value: "http://pageserver-standby:9898" }
+            - { name: PSW_CLIENT_SERVICE, value: "pageserver" } # selector flipped on failover
+            - { name: PSW_STANDBY_SELECTOR_APP, value: "pageserver-standby" }
+            - { name: PSW_GEN_CONFIGMAP, value: "pageserver-generation" }
+            - { name: PSW_COMPUTE_SELECTOR, value: "app=compute" }
+            - name: PSW_TENANT_ID
+              valueFrom: { configMapKeyRef: { name: compute-config, key: TENANT_ID } }
+            - { name: PSW_POLL_MS, value: "2000" } # 2s poll
+            - { name: PSW_FAIL_THRESHOLD, value: "3" } # ~6s of misses before failover (don't split-brain a slow primary)
+            - { name: PSW_BASE_GENERATION, value: "1" } # storage-init attached at gen 1
+            - { name: PSW_HEALTH_ADDR, value: ":9091" }
+          ports:
+            - { name: metrics, containerPort: 9091 }
+          readinessProbe:
+            httpGet: { path: /healthz, port: metrics }
+            initialDelaySeconds: 1
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /healthz, port: metrics }
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          resources:
+            requests: { cpu: 20m, memory: 32Mi, ephemeral-storage: 100Mi }
+            limits: { memory: 64Mi, ephemeral-storage: 1Gi }
+---
+# ClusterIP so Prometheus can scrape pswatcher_promotions_total / _primary_up.
+# Never fronted by a LoadBalancer (metrics must not leak — same rule as pggw).
+apiVersion: v1
+kind: Service
+metadata:
+  name: pswatcher
+  namespace: scale-zero-pg
+  labels: { app: pswatcher }
+spec:
+  type: ClusterIP
+  selector: { app: pswatcher }
+  ports:
+    - { name: metrics, port: 9091, targetPort: metrics }

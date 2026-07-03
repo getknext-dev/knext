@@ -43,6 +43,19 @@ IMG_NEON=neondatabase/neon:8464
 IMG_COMPUTE=neondatabase/compute-node-v17:8464
 DRILL_STORAGE=3Gi
 FAILOVER_BUDGET=90    # seconds allowed for reads to come back after the kill
+GW_IMAGE="${GW_IMAGE:-me-abudhabi-1.ocir.io/axfqznklsd2t/ks-pg/gateway:v0.4.0}" # ships /pswatcher
+
+# Default: AUTOMATED failover — deploy the pswatcher (58) into the drill, kill
+# the primary, and assert reads recover with NO manual step (RTO measured).
+# --manual: the old hand-run path (kept as a fallback / mechanism reference).
+MANUAL=0
+for a in "$@"; do
+  case "$a" in
+    --manual) MANUAL=1 ;;
+    -h|--help) echo "usage: $0 [--manual]"; exit 0 ;;
+    *) echo "unknown arg: $a" >&2; exit 2 ;;
+  esac
+done
 
 KD="$KUBECTL -n $DRILL_NS $RT"
 
@@ -263,6 +276,26 @@ spec:
   ports: [ { name: pg, port: 6400, targetPort: pg }, { name: http, port: 9898, targetPort: http } ]
 YAML
 done
+
+# Client-facing + stable-primary Services (mirror prod 53 + 57 topology):
+#   pageserver         — what the compute resolves (host=pageserver); the
+#                        watcher FLIPS this selector a -> b on failover.
+#   pageserver-primary — stable liveness handle the watcher probes (stays on a).
+$KD apply -f - >/dev/null <<YAML
+apiVersion: v1
+kind: Service
+metadata: { name: pageserver, namespace: $DRILL_NS }
+spec:
+  selector: { app: pageserver-a }
+  ports: [ { name: pg, port: 6400, targetPort: pg }, { name: http, port: 9898, targetPort: http } ]
+---
+apiVersion: v1
+kind: Service
+metadata: { name: pageserver-primary, namespace: $DRILL_NS }
+spec:
+  selector: { app: pageserver-a }
+  ports: [ { name: pg, port: 6400, targetPort: pg }, { name: http, port: 9898, targetPort: http } ]
+YAML
 $KD rollout status statefulset/pageserver-a --timeout=180s >/dev/null || fail "pageserver-a not ready"
 $KD rollout status statefulset/pageserver-b --timeout=180s >/dev/null || fail "pageserver-b not ready"
 $KD rollout status statefulset/safekeeper --timeout=120s >/dev/null || fail "drill safekeeper not ready"
@@ -353,8 +386,12 @@ spec:
       volumes: [ { name: compute-files, configMap: { name: compute-files } } ]
 YAML
 }
-render_compute_files pageserver-a
-deploy_compute pageserver-a
+# AUTOMATED failover re-points reads by flipping the `pageserver` Service, so the
+# compute must resolve via that Service (host=pageserver), never a fixed a/b host.
+# The manual path pins host=pageserver-a and hand-re-points to -b on failover.
+if [ "$MANUAL" = 1 ]; then PRIMARY_HOST=pageserver-a; else PRIMARY_HOST=pageserver; fi
+render_compute_files "$PRIMARY_HOST"
+deploy_compute "$PRIMARY_HOST"
 $KD rollout status deploy/compute --timeout=300s >/dev/null || fail "read/write compute did not come up (logs: $($KD logs deploy/compute -c compute --tail=30 2>/dev/null))"
 DRILL_PSQL "create table psfo(id int primary key, note text)" >/dev/null || fail "cannot create table (not read-write?)"
 DRILL_PSQL "insert into psfo values (1,'pageserver-failover marker')" >/dev/null
@@ -362,27 +399,142 @@ DRILL_PSQL "checkpoint" >/dev/null
 [ "$(DRILL_PSQL "select note from psfo where id=1")" = "pageserver-failover marker" ] || fail "baseline read failed"
 ok "baseline: read-write DB on pageserver-a; marker written + read"
 
-# ---------------------------------------------------------------------------
-info "STEP 5: FAILOVER — kill pageserver-a, promote pageserver-b, re-point compute"
-KILL_AT=$(date +%s)
-$KD delete statefulset/pageserver-a --cascade=foreground --wait=true --timeout=60s >/dev/null 2>&1 || \
-  $KD delete pod pageserver-a-0 --grace-period=0 --force >/dev/null 2>&1 || true
-info "  pageserver-a killed; promoting pageserver-b to AttachedSingle gen $GEN_FAILOVER (gen+1 fences the dead primary)"
-$KD exec sts/pageserver-b -- /bin/sh -c "
-  curl -sf -X PUT -H 'Content-Type: application/json' \
-    -d '{\"mode\":\"AttachedSingle\",\"generation\":$GEN_FAILOVER,\"tenant_conf\":{}}' \
-    http://localhost:9898/v1/tenant/$TENANT/location_config >/dev/null" || fail "promote pageserver-b failed"
-b=0; while [ $b -lt 60 ]; do PS_GET pageserver-b "/v1/tenant/$TENANT/timeline" | grep -q "$TIMELINE" && break; b=$((b+1)); [ $b -ge 60 ] && fail "pageserver-b never loaded timeline after promotion"; sleep 2; done
-info "  re-pointing compute at pageserver-b (cold restart — models a scale-to-zero wake)"
-render_compute_files pageserver-b
-deploy_compute pageserver-b
-$KD delete pod -l app=compute --grace-period=0 --force >/dev/null 2>&1 || true
+if [ "$MANUAL" = 1 ]; then
+  # -------------------------------------------------------------------------
+  info "STEP 5 (--manual): FAILOVER — kill pageserver-a, promote pageserver-b, re-point compute"
+  KILL_AT=$(date +%s)
+  $KD delete statefulset/pageserver-a --cascade=foreground --wait=true --timeout=60s >/dev/null 2>&1 || \
+    $KD delete pod pageserver-a-0 --grace-period=0 --force >/dev/null 2>&1 || true
+  info "  pageserver-a killed; promoting pageserver-b to AttachedSingle gen $GEN_FAILOVER (gen+1 fences the dead primary)"
+  $KD exec sts/pageserver-b -- /bin/sh -c "
+    curl -sf -X PUT -H 'Content-Type: application/json' \
+      -d '{\"mode\":\"AttachedSingle\",\"generation\":$GEN_FAILOVER,\"tenant_conf\":{}}' \
+      http://localhost:9898/v1/tenant/$TENANT/location_config >/dev/null" || fail "promote pageserver-b failed"
+  b=0; while [ $b -lt 60 ]; do PS_GET pageserver-b "/v1/tenant/$TENANT/timeline" | grep -q "$TIMELINE" && break; b=$((b+1)); [ $b -ge 60 ] && fail "pageserver-b never loaded timeline after promotion"; sleep 2; done
+  info "  re-pointing compute at pageserver-b (cold restart — models a scale-to-zero wake)"
+  render_compute_files pageserver-b
+  deploy_compute pageserver-b
+  $KD delete pod -l app=compute --grace-period=0 --force >/dev/null 2>&1 || true
+  MECH="manual re-attach pageserver-b @ gen $GEN_FAILOVER + compute re-point"
+else
+  # -------------------------------------------------------------------------
+  info "STEP 5: deploy the pswatcher (automated failover) into $DRILL_NS"
+  # generation ledger (matches prod 57): storage-init used gen 1.
+  $KD create configmap pageserver-generation --from-literal=generation=1 >/dev/null
+  # let the watcher pull the private OCIR image: copy the pull secret if present.
+  DOCKERCFG=$($KUBECTL -n scale-zero-pg get secret ocir-pull -o jsonpath='{.data.\.dockerconfigjson}' $RT 2>/dev/null || true)
+  if [ -n "$DOCKERCFG" ]; then
+    $KD apply -f - >/dev/null <<YAML
+apiVersion: v1
+kind: Secret
+metadata: { name: ocir-pull, namespace: $DRILL_NS }
+type: kubernetes.io/dockerconfigjson
+data: { .dockerconfigjson: "$DOCKERCFG" }
+YAML
+  fi
+  $KD apply -f - >/dev/null <<YAML
+apiVersion: v1
+kind: ServiceAccount
+metadata: { name: pswatcher, namespace: $DRILL_NS }
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: { name: pswatcher, namespace: $DRILL_NS }
+rules:
+  - { apiGroups: [""], resources: ["services"], verbs: ["get","patch"] }
+  - { apiGroups: [""], resources: ["configmaps"], verbs: ["get","update","patch"] }
+  - { apiGroups: [""], resources: ["pods"], verbs: ["list","delete"] }
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: { name: pswatcher, namespace: $DRILL_NS }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: pswatcher }
+subjects: [ { kind: ServiceAccount, name: pswatcher, namespace: $DRILL_NS } ]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: pswatcher, namespace: $DRILL_NS, labels: { app: pswatcher } }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: pswatcher } }
+  template:
+    metadata: { labels: { app: pswatcher } }
+    spec:
+      imagePullSecrets: [ { name: ocir-pull } ]
+      serviceAccountName: pswatcher
+      # 65532 = distroless:nonroot numeric uid; runAsNonRoot can't verify the
+      # image's non-numeric USER, so pin it (else CreateContainerConfigError).
+      securityContext: { runAsNonRoot: true, runAsUser: 65532, runAsGroup: 65532, seccompProfile: { type: RuntimeDefault } }
+      containers:
+        - name: pswatcher
+          image: $GW_IMAGE
+          imagePullPolicy: IfNotPresent
+          command: ["/pswatcher"]
+          securityContext: { allowPrivilegeEscalation: false, capabilities: { drop: ["ALL"] } }
+          env:
+            - { name: PSW_NAMESPACE, value: "$DRILL_NS" }
+            - { name: PSW_PRIMARY_STATUS_URL, value: "http://pageserver-primary:9898/v1/status" }
+            - { name: PSW_STANDBY_BASE_URL, value: "http://pageserver-b:9898" }
+            - { name: PSW_CLIENT_SERVICE, value: "pageserver" }
+            - { name: PSW_STANDBY_SELECTOR_APP, value: "pageserver-b" }
+            - { name: PSW_GEN_CONFIGMAP, value: "pageserver-generation" }
+            - { name: PSW_COMPUTE_SELECTOR, value: "app=compute" }
+            - { name: PSW_TENANT_ID, value: "$TENANT" }
+            - { name: PSW_POLL_MS, value: "1000" }
+            - { name: PSW_FAIL_THRESHOLD, value: "3" }
+            - { name: PSW_BASE_GENERATION, value: "1" }
+            - { name: PSW_HEALTH_ADDR, value: ":9091" }
+          ports: [ { name: metrics, containerPort: 9091 } ]
+          readinessProbe: { httpGet: { path: /healthz, port: metrics }, periodSeconds: 2 }
+          resources:
+            requests: { cpu: 20m, memory: 32Mi, ephemeral-storage: 100Mi }
+            limits: { memory: 64Mi, ephemeral-storage: 1Gi }
+YAML
+  $KD rollout status deploy/pswatcher --timeout=180s >/dev/null || fail "pswatcher did not come up (logs: $($KD logs deploy/pswatcher --tail=20 2>/dev/null))"
+  ok "pswatcher healthy and watching pageserver-primary"
+
+  info "STEP 5b: KILL pageserver-a — the watcher must fail over with NO manual step"
+  # Capture the live compute pod: the recovery proof must come from the COLD pod
+  # the watcher spawns AFTER failover, not from this one's page cache (the marker
+  # is already in its shared_buffers, so it would "read" fine even with reads dead).
+  OLD_POD=$($KD get pod -l app=compute -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo none)
+  KILL_AT=$(date +%s)
+  $KD delete statefulset/pageserver-a --cascade=foreground --wait=true --timeout=60s >/dev/null 2>&1 || \
+    $KD delete pod pageserver-a-0 --grace-period=0 --force >/dev/null 2>&1 || true
+  # from here on: NOTHING manual. The watcher promotes b @ gen+1, flips the
+  # `pageserver` Service selector a->b, and bounces the compute on its own.
+  # PROOF #1 (the watcher's action): wait for it to flip the client Service a->b.
+  SEL=""; w=0
+  while [ $w -lt "$FAILOVER_BUDGET" ]; do SEL="$($KD get svc pageserver -o jsonpath='{.spec.selector.app}' 2>/dev/null || echo '?')"; [ "$SEL" = "pageserver-b" ] && break; w=$((w+1)); sleep 1; done
+  [ "$SEL" = "pageserver-b" ] || fail "watcher did NOT flip the pageserver Service to pageserver-b within ${FAILOVER_BUDGET}s (selector=$SEL; logs: $($KD logs deploy/pswatcher --tail=30 2>/dev/null))"
+  # PROOF #2 (reads truly served by the promoted standby): the watcher bounced the
+  # compute, so wait for a NEW cold pod and read the marker through it — a cold
+  # compute has empty buffers, so this read must basebackup from pageserver-b.
+  got=""; q=0
+  while [ $q -lt "$FAILOVER_BUDGET" ]; do
+    NEW_POD="$($KD get pod -l app=compute -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+    if [ -n "$NEW_POD" ] && [ "$NEW_POD" != "$OLD_POD" ]; then
+      got="$(DRILL_PSQL "select note from psfo where id=1" 2>/dev/null || true)"
+      [ "$got" = "pageserver-failover marker" ] && break
+    fi
+    q=$((q+1)); sleep 1
+  done
+  RESTORED_AT=$(date +%s)
+  [ "$got" = "pageserver-failover marker" ] || fail "reads did NOT auto-recover on the promoted standby within ${FAILOVER_BUDGET}s (watcher logs: $($KD logs deploy/pswatcher --tail=30 2>/dev/null))"
+  # PROOF #3 (fencing): the generation ledger advanced 1 -> 2.
+  GEN_NOW=$($KD get configmap pageserver-generation -o jsonpath='{.data.generation}' 2>/dev/null || echo '?')
+  [ "$GEN_NOW" = "2" ] || fail "generation ledger did not advance to 2 (got '$GEN_NOW')"
+  MECH="AUTOMATIC — pswatcher promoted pageserver-b @ gen $GEN_NOW, flipped Service selector, bounced compute (no human step)"
+fi
+
 # the surviving safekeeper carries the WAL, so pageserver-b streams forward and the
 # DB stays read-WRITE; the cold compute basebackups from pageserver-b.
-got=""; q=0
-while [ $q -lt "$FAILOVER_BUDGET" ]; do got="$(DRILL_PSQL "select note from psfo where id=1" 2>/dev/null || true)"; [ "$got" = "pageserver-failover marker" ] && break; q=$((q+1)); sleep 1; done
-RESTORED_AT=$(date +%s)
-[ "$got" = "pageserver-failover marker" ] || fail "reads did NOT recover on pageserver-b within ${FAILOVER_BUDGET}s"
+if [ "$MANUAL" = 1 ]; then
+  got=""; q=0
+  while [ $q -lt "$FAILOVER_BUDGET" ]; do got="$(DRILL_PSQL "select note from psfo where id=1" 2>/dev/null || true)"; [ "$got" = "pageserver-failover marker" ] && break; q=$((q+1)); sleep 1; done
+  RESTORED_AT=$(date +%s)
+  [ "$got" = "pageserver-failover marker" ] || fail "reads did NOT recover on pageserver-b within ${FAILOVER_BUDGET}s"
+fi
 RTO=$((RESTORED_AT - KILL_AT))
 DRILL_PSQL "insert into psfo values (2,'post-failover write')" >/dev/null 2>&1 && POSTWRITE=yes || POSTWRITE=no
 ok "reads RECOVERED via pageserver-b (still read-write: $POSTWRITE)"
@@ -390,8 +542,9 @@ ok "reads RECOVERED via pageserver-b (still read-write: $POSTWRITE)"
 echo ""
 echo "=========================================================================="
 echo " PAGESERVER FAILOVER DRILL PASSED"
+echo "   mode                : $([ "$MANUAL" = 1 ] && echo 'manual (--manual)' || echo 'AUTOMATED (pswatcher)')"
 echo "   secondary (warm) mode accepted : $([ "$SECONDARY_OK" = 1 ] && echo yes || echo 'no (cold standby)')"
-echo "   failover mechanism  : manual re-attach pageserver-b @ gen $GEN_FAILOVER + compute re-point"
+echo "   failover mechanism  : $MECH"
 echo "   read-write after failover : $POSTWRITE"
 echo "   FAILOVER RTO (kill -> reads restored): ${RTO}s"
 echo "=========================================================================="

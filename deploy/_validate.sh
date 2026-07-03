@@ -102,7 +102,7 @@ echo "deploy validation: all checks passed"
 #     #3; the pageserver wire protocol has no cross-version guarantee). A tag
 #     drift anywhere fails the build.
 CT=$(grep -o 'neondatabase/compute-node-v[0-9]*:[a-z0-9.]*' 20-compute.yaml | head -1 | cut -d: -f2)
-for f in 51-storage-broker.yaml 52-safekeeper.yaml 53-pageserver.yaml 55-storage-init.yaml; do
+for f in 51-storage-broker.yaml 52-safekeeper.yaml 53-pageserver.yaml 55-storage-init.yaml 57-pageserver-standby.yaml; do
   for st in $(grep -o 'neondatabase/neon:[a-z0-9.]*' "$f" | cut -d: -f2 | sort -u); do
     [ "$st" = "$CT" ] || fail "version-pair drift: $f uses neon:$st but compute is :$CT"
   done
@@ -113,13 +113,26 @@ ok "compute↔storage version pair consistent (:$CT everywhere)"
 # 13. contract: every long-running pod declares ephemeral-storage requests
 #     (incident 2026-07-03: pods without them were kubelet's preferred
 #     eviction targets during DiskPressure - the storage plane died first).
-for f in 10-gateway.yaml 20-compute.yaml 25-compute-warm.yaml 50-minio.yaml 51-storage-broker.yaml 52-safekeeper.yaml 53-pageserver.yaml 60-prometheus.yaml 61-alertmanager.yaml 62-backup.yaml; do
+for f in 10-gateway.yaml 20-compute.yaml 25-compute-warm.yaml 50-minio.yaml 51-storage-broker.yaml 52-safekeeper.yaml 53-pageserver.yaml 57-pageserver-standby.yaml 58-pswatcher.yaml 60-prometheus.yaml 61-alertmanager.yaml 62-backup.yaml; do
   # must be under requests: (eviction ordering ranks on requests, not limits)
   grep -E 'requests: \{[^}]*ephemeral-storage' "$f" >/dev/null || fail "$f lacks ephemeral-storage under requests:"
 done
 ok "all long-running pods declare ephemeral-storage REQUESTS (incl. backup mirror)"
 
-# 14. contract: the backup target is OFF-CLUSTER OCI Object Storage (issue #4),
+# 14. contract: automated pageserver failover (issue #3) — a standing warm
+#     Secondary standby + a watcher that promotes it. The SPOF is only bounded
+#     if BOTH ship: the standby holds warm layers, the watcher drives the flip.
+grep -q 'kind: StatefulSet' 57-pageserver-standby.yaml || fail "57 missing the standby StatefulSet"
+grep -q '"mode":"Secondary"' 57-pageserver-standby.yaml || fail "57 standby-init must register a warm Secondary"
+grep -q 'name: pageserver-primary' 57-pageserver-standby.yaml || fail "57 missing stable pageserver-primary liveness Service"
+grep -q 'name: pageserver-generation' 57-pageserver-standby.yaml || fail "57 missing the generation ledger ConfigMap"
+grep -q '/pswatcher' 58-pswatcher.yaml || fail "58 must run the /pswatcher binary (not /gateway)"
+grep -q 'PSW_STANDBY_SELECTOR_APP' 58-pswatcher.yaml || fail "58 watcher missing the standby selector-flip target"
+# the watcher's RBAC must be able to flip the Service and bounce the compute.
+grep -q 'services' 58-pswatcher.yaml || fail "58 watcher RBAC lacks services (selector flip)"
+ok "automated failover ships: warm-Secondary standby (57) + auto-failover watcher (58)"
+
+# 15. contract: the backup target is OFF-CLUSTER OCI Object Storage (issue #4),
 #     NOT the retired in-cluster backup-store PVC. The mirror must authenticate
 #     dst from the backup-s3-target Secret and must not reintroduce backup-store.
 grep -q 'backup-s3-target' 62-backup.yaml || fail "62 backup mirror must read the backup-s3-target Secret (off-cluster dst)"

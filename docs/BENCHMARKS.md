@@ -37,7 +37,8 @@ The engines were never the bottleneck — Kubernetes mechanics were, twice.
 |---|---|---|---|
 | Compute pod kill → data served | 1–6s | 38s first-boot; 2.2–3.0s steady | stateless compute; no volume, no restore (*first-boot pull) |
 | Safekeeper quorum (kill 1 of 3) | writes continue | ✅ passes | 2/3 WAL quorum; member rejoins |
-| Pageserver failover (promote standby, gen+1) | **~7s** | **9s** | read-WRITE preserved; SPOF → bounded RTO |
+| Pageserver failover — MANUAL (promote standby, gen+1) | **~7s** | **9s** | read-WRITE preserved; hand-run mechanism (`--manual`) |
+| Pageserver failover — AUTOMATED (pswatcher, no human step) | — | **8s** | watcher promotes gen+1 + flips Service selector + bounces compute; RTO = kill→cold read on standby (incl. ~3s×1s-poll detection); proof = selector flipped by watcher + gen ledger 1→2 + read served by the fresh cold compute (not old-pod cache) |
 | Backup → restore from OCI Object Storage (fresh ns) | **~110s** (in-cluster, pre-#4) | **417s** (OCI OS, 2026-07-03) | issue #4: backup mirrors OFF-CLUSTER to OCI OS, restore sources from it; +cross-internet upload + re-download vs the ~304s in-cluster OKE path; restore read-only on 8464 OSS |
 | Backup job at ~18GB bucket | green (retry loop exercised live) | — | in-cluster path (pre-#4); OCI OS path uses same mc client 1Gi + retry loop |
 | CNPG pod-kill recovery | ~16s | — | comparison point (hibernate resume: ~3.3s) |

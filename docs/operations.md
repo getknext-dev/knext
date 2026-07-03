@@ -54,9 +54,9 @@ Quick look without Prometheus: `sh deploy/_metrics.sh`.
   safekeeper pod/PVC loses nothing and doesn't block writes (drill-verified).
 - The **compute is disposable** — kill it any time; no volume, no restore. Data is
   never in the pod.
-- **Pageserver loss** (single, MVP): reads stop until it restarts, OR until a warm
-  standby is promoted — the drill-measured failover is **~7 s** (see "Pageserver
-  failover"). PVC-backed; history also lives in MinIO.
+- **Pageserver loss** (single, MVP): reads stop until it restarts, OR until the warm
+  standby is **automatically** promoted — the drill-measured failover is **~8 s, hands
+  off** (see "Pageserver failover"). PVC-backed; history also lives in MinIO.
 - **MinIO loss**: running computes keep serving from safekeepers+pageserver; new
   timeline creation and long-term history offload pause. PVC-backed.
 - **Both gateways down**: new connections fail (existing pipes drop); data unaffected.
@@ -200,46 +200,68 @@ boot; still not bounded by Postgres. See docs/BENCHMARKS.md.
 
 The single pageserver is the MVP's read authority — lose it and reads stall (writes
 still reach the safekeeper quorum). The reviews flagged this as an *unbounded* read
-outage. Assessment + rehearsal: `deploy/_verify-pageserver-failover.sh`.
+outage. It is now **automatic**: a standing warm-Secondary standby plus the
+`pswatcher` controller promote-and-flip on primary-down, no human step. Manifests:
+`deploy/57-pageserver-standby.yaml` (standby + generation ledger),
+`deploy/58-pswatcher.yaml` (watcher). Rehearsal: `deploy/_verify-pageserver-failover.sh`.
 
-### Verdict (hands-on, neon:8464 OSS)
+### The components
 
-- **A second pageserver is feasible.** 8464 accepts a **warm Secondary** location
-  (`location_config` `mode:"Secondary"`, `secondary_conf.warm:true`) that
-  pre-downloads layers from the bucket without serving — verified in the drill.
-- **Failover is MANUAL** (no storage controller here — we run
-  `control_plane_emergency_mode`). It is the same generation+1 re-attach learned in
-  the restore drill: promote the standby to `AttachedSingle` at **generation+1**
-  (fences the dead primary), then re-point the compute at it. The surviving
-  safekeeper carries the WAL, so the promoted pageserver streams forward and the DB
-  stays **read-WRITE** across the failover.
-- **Measured failover RTO: ~7 s** (kill → cold compute reads restored) in the
-  self-contained drill. This converts the SPOF from an *unbounded* outage into a
-  *known, small* RTO — a genuine reliability change even without automation.
+- **Standby pageserver (`pageserver-standby`, 57).** A second StatefulSet, distinct
+  node identity (`id=1235` vs the primary's `1234`), **same bucket + broker**. Its
+  init Job registers a **warm Secondary** location for the live tenant
+  (`location_config` `mode:"Secondary"`, `secondary_conf.warm:true`) so it
+  pre-downloads layers from MinIO without serving — a promotion is a fast re-attach,
+  not a cold restore.
+- **Generation ledger (`pageserver-generation` ConfigMap).** Holds the last generation
+  the tenant was attached at (seed `1`, matching `storage-init`). Each failover reads
+  it, promotes at **value+1**, and writes the new value back — so repeated failovers
+  stay monotonic and a restarted watcher never re-uses a stale generation.
+- **Stable liveness handle (`pageserver-primary` Service).** Always selects the primary
+  STS, so the watcher probes the *primary's* health even after it flips the
+  client-facing `pageserver` Service.
+- **The watcher (`pswatcher`, 58).** Polls `pageserver-primary:9898/v1/status`
+  (`PSW_POLL_MS`, default 2 s). After `PSW_FAIL_THRESHOLD` consecutive misses
+  (default 3 ≈ 6 s — long enough not to split-brain a slow primary) it runs the same
+  runbook the restore drill proved, in order:
+  1. **Promote** the standby to `AttachedSingle` at **generation+1** — the higher
+     generation fences the dead primary (single-writer is intrinsic to Neon; the
+     pageserver picks the newest `index_part.json-<gen>` ≤ its own).
+  2. **Persist** the advanced generation in the ledger ConfigMap.
+  3. **Flip** the `pageserver` Service selector to the standby, so the compute's
+     unchanged `neon.pageserver_connstring host=pageserver` now resolves to it.
+  4. **Bounce** the compute (delete its pod) so a cold wake basebackups from the
+     promoted standby.
+  The surviving safekeeper carries the WAL, so the standby streams forward and the DB
+  stays **read-WRITE** across the failover. The watcher is single-shot per failover
+  and idempotent on restart (if the `pageserver` selector already points at the
+  standby it adopts that state rather than re-promoting). It exposes `/healthz` and
+  `pswatcher_promotions_total` / `pswatcher_primary_up` on `:9091`; RBAC is minimal
+  (services get/patch, configmaps get/update/patch, pods list/delete).
+- **Measured automated RTO: 8 s on OKE** (kill → reads restored on the promoted
+  standby, **no human step**) in the self-contained drill (see `docs/BENCHMARKS.md`).
+  This converts the SPOF from an *unbounded* outage into a *known, small, hands-off*
+  RTO — on par with the manual mechanism (~9 s) but with zero operator involvement.
 
-### The failover runbook (manual, until automated)
+### Operating it
 
-Given a warm-standby pageserver `pageserver-b` (Secondary) alongside the primary:
-
-1. Confirm the primary is actually gone (don't split-brain a slow one):
-   `kubectl -n scale-zero-pg delete statefulset/pageserver --cascade=foreground`.
-2. Promote the standby at generation+1 (read the live generation from
-   `GET :9898/v1/location_config`, add 1):
-   `curl -X PUT .../v1/tenant/<T>/location_config -d '{"mode":"AttachedSingle","generation":<N+1>,"tenant_conf":{}}'`.
-3. Re-point reads at the standby: flip the `pageserver` Service selector to the
-   standby (so the compute's `neon.pageserver_connstring host=pageserver` is
-   unchanged) **or** update the connstring; then bounce the compute
-   (`rollout restart deploy/compute`) so a cold wake basebackups from the standby.
-4. Verify a read; the DB is read-write again.
-
-### To productize (make it automatic)
-
-- Run `pageserver-b` as a standing warm Secondary (a second StatefulSet, distinct
-  `identity.toml` id, same bucket) and front both with the `pageserver` Service.
-- Drive steps 1–3 from a tiny controller/liveness watcher (promote + flip selector
-  on primary-down). That is the missing automation; the generation+1 + Service-flip
-  mechanism above is proven and ready for it. (Pairs with the writable-restore
-  safekeeper re-seed gap from "Backup & disaster recovery".)
+- **Deploy:** `kubectl apply -f deploy/57-pageserver-standby.yaml -f deploy/58-pswatcher.yaml`
+  (the watcher is the `/pswatcher` binary in the same gateway image). Confirm the
+  standby is a warm Secondary: `kubectl -n scale-zero-pg logs job/pageserver-standby-init`.
+- **Verify hands-off:** `sh deploy/_verify-pageserver-failover.sh` — stands up a
+  throwaway 2-pageserver plane + the watcher, kills the primary, and asserts reads
+  recover with the `pageserver` Service selector flipped **by the watcher** (proof no
+  human acted) and the generation ledger advanced 1→2.
+- **After a failover:** the standby is now the primary and the ledger holds the new
+  generation. To restore redundancy, bring up a fresh warm Secondary (re-seed
+  `pageserver-standby` against the now-primary); the watcher adopts the flipped
+  selector and will not re-promote.
+- **Manual fallback** (watcher down): the identical steps run by hand —
+  `sh deploy/_verify-pageserver-failover.sh --manual` documents the exact commands
+  (kill → `PUT location_config AttachedSingle generation+1` → flip the `pageserver`
+  selector → `rollout restart deploy/compute`). This is the writable path today; the
+  writable-restore safekeeper re-seed gap from "Backup & disaster recovery" is
+  separate and unaffected (failover keeps the same safekeeper, so WAL continuity holds).
 
 ## Password rotation
 
