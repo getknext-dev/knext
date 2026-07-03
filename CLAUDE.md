@@ -46,6 +46,14 @@ Native Postgres compute on Neon's OSS storage stack, all **on Kubernetes** (no d
 
 ## The improvement loop (GitHub-native, owner-defined)
 Repo: github.com/getknext-dev/scale-zero-pg (auto-merge + delete-branch enabled).
+
+**Cadence: GRADUATED (2026-07-03, unanimous iteration-7 trio ruling, issue #36).**
+Per-iteration review rounds have ended. A fresh blind trio re-convenes only on
+TRIGGERS: (a) a release tag, (b) an ADR change or a knext-side change to the
+DATABASE_URL contract, (c) any kill-criterion tripwire firing (mapping:
+docs/operations.md "Kill-criteria tripwires"), (d) `_rehearse-upgrade.sh`
+exit ≠ 0, (e) the dated KC5 review (issue #65, due 2026-10-03). Steps 1–6 below
+still govern any implementation work; only the review cadence changed.
 1. **Plan** = GitHub issues (one per work item, acceptance criteria in the body).
 2. **Implement** on a branch per issue, TDD commits, PR references the issue
    ("Closes #N"). User docs + BENCHMARKS.md ship in the same PR (rule 2b).

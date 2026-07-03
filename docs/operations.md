@@ -810,6 +810,20 @@ sh deploy/_verify-drift.sh                   # live imageID digest == manifest d
 Never ship a bare tag: it reopens the `merged ≠ deployed` class the digest pin
 closes. If you rebuild the same tag, you **must** re-record and re-bump the digest.
 
+### Kill-criteria tripwires — where each one lives (issue #14)
+
+ADR-0002's six standing kill criteria are operationalized; none rely on a human
+remembering to check:
+
+| KC | Criterion | Tripwire (mechanical home) |
+|---|---|---|
+| 1 | Ops toil > ~1 eng-day/month | `docs/OPS-TOIL.md` running ledger; monthly sum is an on-release-gate checklist item |
+| 2 | Wake edge regresses | `GatewayWakeLatencyHigh` alert (p50 gauge > 5s, live) + BENCHMARKS baselines re-measured by `_verify-wake.sh` each battery run. *Caveat:* a hard CI p99 gate needs the formal OKE cold/warm baseline (#9) — until then this criterion detects via alert + drill, not CI-fail |
+| 3 | Version-pair treadmill | `_validate.sh` contract 12 (compute↔storage pair) + contract 22 (skctl `SK_COMPAT_NEON_TAG`) — both run in CI on every PR; `_rehearse-upgrade.sh` exit≠0 re-convenes the review trio |
+| 4 | knext posture shifts | Trigger-gated review: any knext-side ADR/CRD change touching the DATABASE_URL contract re-convenes the trio (see the loop section in CLAUDE.md) |
+| 5 | Justifying capability unused for a quarter | Dated tracked item: issue #65 (due 2026-10-03) |
+| 6 | Reliability floor (read SPOF reached users) | Ruled CLEARED at iteration 4; guarded live by `PswatcherPrimaryDown` / `PswatcherPromotionFired` / `PswatcherDown` + the `Watchdog` dead-man's-switch behind them |
+
 ### Upgrading the storage plane — posture, triggers, and the rehearsal
 
 **Posture (ADR-0002 amendment, issue #50): KS-PG owns `neon:8464`. Moving off it
