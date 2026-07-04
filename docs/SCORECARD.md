@@ -49,6 +49,9 @@ was not separately scored before iteration 2 (marked —).
 | **v0.6.1** | System designer | **7** | **6** | **6** |
 | **v0.6.1** | DevOps/SRE | **7** | **6** | **7** |
 | **v0.6.1** | Architect | **8** | **6** | **7** |
+| **v1.0.0** | System designer | **7** | **6** | **7** |
+| **v1.0.0** | DevOps/SRE | **7** | **6** | **6** |
+| **v1.0.0** | Architect | **8** | **6** | **7** |
 
 **Iteration-1 mean (mapped axes): ease 6.0, reliability 4.7** (round 0: 4.3, 3.7).
 **Iteration-2 mean (explicit metrics): maturity 4.7, ease 4.3, reliability 3.7.**
@@ -119,3 +122,17 @@ independently converged on 4±1 across the board.
   two reviewers hit independently is treated as confirmed.
 
 *(From iteration 2 on, all three metrics are scored explicitly by every reviewer.)*
+
+
+**v1.0.0 GA release review: maturity 7.3, ease 6.0, reliability 6.7.** All three
+reviewers APPROVED v1.0.0 as a legitimate 1.0 for its stated scope; the isolation
+fix (#112/#115) was independently RE-VERIFIED live (not a regression). DevOps GA
+pager verdict: **YES-WITH-LIST** ("carry it for real money on the shipped MinIO
+config"). Architect: "the gate held — the process worked as designed." The v1.0.1
+list (findings that outran live-proven state): operator undeployable-as-shipped
+(#125), object-storage portability half-delivered — backup/janitor still MinIO-
+pinned so the advertised OCI backup path silently breaks (#120), RO pool evicts
+under its own load (#121), manifest-contract gate red vs the live cluster (#126),
+plus #116/#117/#118. Ease held at 6 (Neon ops ceiling + accreting machinery + the
+new backup/live-store config split-brain). None retract the GA; all are the v1.0.1
+hardening lap.
