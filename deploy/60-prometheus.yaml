@@ -300,6 +300,28 @@ data:
             annotations:
               summary: "Alerting pipeline heartbeat — always firing by design"
               description: "This alert is ALWAYS firing. Alertmanager routes it to the external `watchdog` receiver on a short repeat_interval; an off-cluster monitor (healthchecks.io / Dead Man's Snitch / cronitor) is configured to ALARM if the ping stops. If you are paged by the EXTERNAL monitor, Prometheus or Alertmanager itself is down — see docs/operations.md#dead-mans-switch-external-heartbeat-60."
+      # DEMO END-TO-END CANARY (issue #39). The pg-demo NextApp is the only workload
+      # that exercises the FULL visitor->app->gateway->compute cold wake — a synthetic
+      # the gateway :9090 metrics can't be (they see the DB half only, never an app /
+      # DNS / Knative ingress-class regression). The `demo-canary` CronJob
+      # (demo/manifests/30-demo-canary.yaml, in THIS namespace so KSM sees it) fails a
+      # Job when the app can't return DB-backed data within budget; this rule joins on
+      # that Failed Job via the SAME kube_job_owner pattern as backup / wal-janitor.
+      # DORMANT by design: when the demo canary is not deployed there is no
+      # kube_job_owner{owner_name="demo-canary"} series, so the expr yields no samples
+      # and never fires — shipping it in the always-on Prometheus is free.
+      - name: ks-pg-demo-canary
+        rules:
+          - alert: DemoCanaryFailed
+            expr: |
+              sum(kube_job_status_failed{namespace="scale-zero-pg"}
+                  * on(namespace, job_name) group_left(owner_name)
+                  kube_job_owner{namespace="scale-zero-pg", owner_name="demo-canary"}) > 0
+            for: 1m
+            labels: { severity: warning }
+            annotations:
+              summary: "demo end-to-end canary failed — combined app+DB wake broken"
+              description: "A Job owned by the demo-canary CronJob failed: the pg-demo NextApp could not return DB-backed data within the wake budget across all retries. This is the only synthetic exercising the full app->gateway->compute cold path (catches app-side / DNS / Knative ingress-class regressions the gateway metrics cannot see). Warning, not crit — the demo is not a durability path. Dormant unless the demo canary is deployed (demo/manifests/30-demo-canary.yaml). See docs/operations.md#demo-canary and demo/README.md."
 ---
 apiVersion: apps/v1
 kind: Deployment

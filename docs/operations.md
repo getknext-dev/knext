@@ -64,6 +64,7 @@ Alertmanager (`61-alertmanager.yaml`) to a receiver.
 | `PswatcherPrimaryDown` (warn) | `pswatcher_primary_up==0` for 1m | The watcher can't reach the **current read authority**. Pre-failover that's the primary (a promotion may be ~6s away); **post-failover the watcher re-anchors this metric onto the promoted standby** (#25), so it now also covers "the promoted node is the unguarded SPOF and just died." Check the current authority / watcher↔pageserver network. |
 | `PageserverStandbyNotReady` (crit) | `pageserver-standby` <1 ready for 5m | The warm standby that failover promotes into is gone — automated failover has nothing to promote. Rebuild it. |
 | `ComputeWakeStuck` (crit) | connections held but 0 compute/compute-warm ready for 2m | A client is connected but the DB never woke — attach error / image pull / storage stall. Clients are hanging. |
+| `DemoCanaryFailed` (warn) | a Job owned by the **demo-canary** CronJob failed (dormant unless the demo canary is deployed) | The full **visitor→app→gateway→compute** cold path is broken or regressed past budget — the only synthetic that sees app-side / DNS / ingress-class regressions, not just the DB half. **3am:** if the demo is meant to be up, run `demo/_verify.sh` to reproduce; check `kubectl -n knext-demo get ksvc pg-demo` (Ready? ingress-class?), the operator, and the gateway. If the demo is intentionally torn down, delete the `demo-canary` CronJob to silence it. See [demo-canary](#demo-canary). |
 
 CronJob rules match by **exact owner name** (`kube_job_owner{owner_name="backup"}` /
 `"wal-janitor"`), not a loose `backup.*` regex — so a failing `wal-janitor` is
@@ -87,6 +88,43 @@ never missed (the gap that re-opened the #19 DR blocker).
 - **Day-0 / post-DR false page** — the `*StaleAbsent` guards would themselves over-fire
   on a freshly built plane (no first success yet). They are age-gated to stay quiet for
   26h so an incident rebuild doesn't hand you two crit pages you can't clear (#62).
+
+### demo-canary
+
+The alert set above scrapes the gateway, KSM and pswatcher — it sees a DB-side
+regression but is **blind to the app half** of the wake path (an app-side crash,
+a DNS failure, a Knative ingress-class mismatch — the iteration-5 review found
+exactly that class of bug by hand, not by alert). The `pg-demo` NextApp is the
+one workload that exercises the *whole* path, so it doubles as a synthetic
+canary (issue #39).
+
+`demo/manifests/30-demo-canary.yaml` is a `CronJob` that every 15 min hits the
+app cold through the internal Kourier gateway (using the app's cluster-local
+Host header — no LB IP, no RBAC) and asserts a **DB-backed HTTP 200** within a
+per-attempt wake budget (45s, 3 attempts — a real visitor reloads through the
+cold-start race). A run that can't is a **Failed Job**.
+
+The mechanism is deliberately **zero-new-infra**: the CronJob lives in the
+`scale-zero-pg` namespace (not `knext-demo`) precisely because kube-state-metrics
+only watches this namespace, so its Job is visible to the existing alert plane.
+A failure surfaces as `kube_job_status_failed{owner_name="demo-canary"}`, which
+`DemoCanaryFailed` (deploy/60) joins on — the same Failed-Job pattern as backup
+and wal-janitor, no new exporter, pushgateway, or blackbox target. Latency drift
+is covered by the same mechanism: a wake that regresses past the budget fails the
+attempt, so a slow-enough regression trips the alert too.
+
+The rule ships in the always-on Prometheus but is **dormant** — with no canary
+deployed there is no `demo-canary` Job series, so it never fires. Enable the
+canary only when the demo is deployed:
+
+```sh
+kubectl apply -f demo/manifests/30-demo-canary.yaml   # deploy WITH the demo
+kubectl -n scale-zero-pg get cronjob demo-canary
+kubectl delete -f demo/manifests/30-demo-canary.yaml  # remove WITH the demo
+```
+
+Leaving it running after the demo is torn down will (correctly) page that the
+canary path is broken — delete the CronJob when you delete the app.
 
 ### Receiver — testable sink by default, real pager one flip away
 
@@ -735,11 +773,40 @@ or your org CA); swap the Secret contents and clients can then verify.
 
 `deploy/70-networkpolicy.yaml` (default-deny + per-flow allows; compute reachable
 only from the gateway) is declaratively correct but **only enforced if your CNI
-enforces NetworkPolicy**. OrbStack's bundled Kubernetes does NOT — the policies
-are inert there (verified; `deploy/_verify-netpol.sh` warns instead of faking a
-pass). Before relying on isolation in production, run on Calico/Cilium (or any
-enforcing CNI) and re-run `_verify-netpol.sh`, which hard-asserts once
-enforcement is detected.
+enforces NetworkPolicy**.
+
+**Empirically verified on the OKE cluster (`context-ckmva7v7zvq`, issue #5):
+NetworkPolicy is NOT enforced here.** The cluster's pod network is
+**kube-flannel** (overlay) — flannel ships no NetworkPolicy controller, so the
+seven policy objects are *admitted and inert*: nothing evaluates them. The proof
+is behavioural, not by inspection: `deploy/_verify-netpol.sh` runs a pod in a
+throwaway namespace and connects to the gateway pod's `:9090` — a path the
+`gateway-ingress` policy restricts to in-namespace pods only. Under an enforcing
+CNI that cross-namespace connection is refused; here it succeeds, which is only
+possible if the policy is not being enforced. (`kubectl get ds -n kube-system`
+confirms flannel with no Calico/Cilium/kube-router alongside it.)
+
+**What the policies WOULD enforce, given a capable CNI:** a default-deny-ingress
+baseline plus per-flow allows, the load-bearing one being `compute-ingress` —
+the sensitive data path `compute:55433` reachable **only** from the gateway pods
+(`app=pggw`), with everything else in the namespace denied. Metrics `:9090` would
+be in-namespace-only; the storage plane's ports scoped to their real callers.
+
+**To actually enforce isolation on OKE**, pick one before relying on it in
+production:
+- **Calico policy-only add-on** — install Calico in policy-enforcement mode
+  alongside flannel (the "Canal" arrangement: flannel for the data plane, Calico
+  for policy). Calico then evaluates the existing `networking.k8s.io/v1` objects
+  unchanged.
+- **OCI VCN-native pod networking with network policy** — provision the node pool
+  with the OCI VCN-Native Pod Networking CNI and enable its NetworkPolicy support,
+  instead of the flannel overlay.
+
+After enabling either, re-run `deploy/_verify-netpol.sh`. Its enforcement-detection
+probe will now report `enforcement DETECTED`, at which point the drill **hard-asserts**
+that `compute:55433` is unreachable from a non-gateway pod and **fails** (not warns)
+if it is not — so a regression in the policies, or a CNI that only partially enforces,
+is caught instead of passing silently.
 
 ## Common operations
 

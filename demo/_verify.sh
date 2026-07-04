@@ -5,8 +5,9 @@
 # scale-to-zero Postgres both sleep at rest, and ONE cold HTTP request wakes BOTH
 # and returns data from Postgres. Then both idle back to zero. Repeated N times.
 #
-# It also isolates how much of the DB wake is *visible on top of* the app's own
-# cold start, by measuring three request classes:
+# It also separates the both-cold overhead from the app's own cold start by
+# measuring three request classes (the both-cold delta is co-scheduling /
+# image-cache contention, NOT the DB wake — see issue #45 / docs/BENCHMARKS.md):
 #   T_both     both asleep  -> request wakes app + DB      (the headline number)
 #   T_appcold  DB pre-woken  -> request wakes only the app (app cold, DB warm)
 #   T_warm     both awake    -> steady-state request
@@ -23,7 +24,9 @@ set -uo pipefail
 NS_APP=knext-demo
 NS_DB=scale-zero-pg
 APP=pg-demo
-KSVC_HOST="pg-demo.${NS_APP}.51.170.86.139.sslip.io"
+# KSVC_HOST is the Host header Knative routes on. It is DERIVED at runtime
+# (issue #40) — never hardcode a cluster's LB IP. Override with KSVC_HOST=... .
+KSVC_HOST="${KSVC_HOST:-}"
 INGRESS_URL="http://kourier-internal.knative-serving.svc/"
 DSN_HOST="pggw.${NS_DB}.svc.cluster.local"
 DSN_PORT=55432
@@ -36,6 +39,34 @@ DB_DRIVER=demo-driver-db
 
 say() { printf '%s\n' "$*"; }
 hr()  { printf -- '----------------------------------------------------------------\n'; }
+
+# Derive the app's Host header at runtime (issue #40). The ksvc's own advertised
+# URL is authoritative — Knative routes by Host, and the sslip.io domain in that
+# URL may differ from the live Kourier LB IP (the domain config can lag an LB
+# re-provision), so building the host from the LB IP is only a last-resort
+# fallback. Explicit KSVC_HOST=... always wins.
+resolve_ksvc_host() {
+  if [[ -n "$KSVC_HOST" ]]; then say "ksvc host (override): $KSVC_HOST"; return; fi
+  local url host ip
+  url=$(kubectl -n "$NS_APP" get ksvc "$APP" -o jsonpath='{.status.url}' 2>/dev/null)
+  if [[ -n "$url" ]]; then
+    host=${url#*://}; host=${host%%/*}
+    KSVC_HOST="$host"; say "ksvc host (from ksvc .status.url): $KSVC_HOST"; return
+  fi
+  # Fallback: build pg-demo.<ns>.<LB-IP>.sslip.io from the Kourier LB address.
+  ip=$(kubectl -n knative-serving get svc kourier -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null)
+  [[ -z "$ip" ]] && ip=$(kubectl -n knative-serving get svc kourier -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null)
+  if [[ -n "$ip" ]]; then
+    KSVC_HOST="${APP}.${NS_APP}.${ip}.sslip.io"
+    say "ksvc host (fallback, from Kourier LB $ip): $KSVC_HOST"
+    say "  NOTE: assumes the ksvc domain tracks the LB IP; prefer the ksvc URL."
+    return
+  fi
+  say "FATAL: could not resolve the app Host header — ksvc '$APP' has no .status.url"
+  say "  and 'kubectl -n knative-serving get svc kourier' has no load-balancer ingress."
+  say "  Set it explicitly:  KSVC_HOST=pg-demo.knext-demo.<LB-IP>.sslip.io bash demo/_verify.sh"
+  exit 1
+}
 
 cleanup() {
   # Synchronous delete so a following run never races a Terminating driver pod.
@@ -99,6 +130,7 @@ ensure_drivers() {
 }
 
 hr; say "knext demo drill — cluster $(kubectl config current-context)"; hr
+resolve_ksvc_host
 say "ksvc:     $(kubectl -n "$NS_APP" get ksvc "$APP" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null) (Ready)"
 say "operator: $(kubectl -n kn-next-operator-system get deploy kn-next-operator-controller-manager -o jsonpath='{.status.readyReplicas}' 2>/dev/null)/1 ready"
 say "GW_IDLE_MS=$(kubectl -n "$NS_DB" get deploy pggw -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="GW_IDLE_MS")].value}' 2>/dev/null)"
@@ -150,9 +182,12 @@ say "  T_warm     (both warm)     = ${mW}s   n=${#warm[@]}"
 say "  DB cold-connect (bare)     = ${mD}s   n=${#dbonly[@]}"
 if [[ "$mB" != "n/a" && "$mA" != "n/a" ]]; then
   awk -v b="$mB" -v a="$mA" -v d="$mD" 'BEGIN{
-    vis=b-a;
-    printf "  Visible DB-wake on top of app cold start (T_both - T_appcold) = %.3fs\n", vis;
-    if (d!="n/a") printf "  Hidden inside app cold start (bareDB - visible) = %.3fs of the %.3fs bare DB wake\n", d-vis, d;
+    ovh=b-a;
+    # NOT the DB wake: T_both-T_appcold is co-scheduling / image-cache-locality
+    # contention in the both-cold path, and routinely EXCEEDS the bare DB wake (d),
+    # so it cannot be attributed to the DB. See docs/BENCHMARKS.md + issue #45.
+    printf "  combined-cold overhead (T_both - T_appcold) = %.3fs  [both-cold contention, NOT DB wake]\n", ovh;
+    if (d!="n/a") printf "  bare DB cold-connect (reference)             = %.3fs\n", d;
   }'
 fi
 hr

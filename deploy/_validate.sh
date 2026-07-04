@@ -199,6 +199,10 @@ grep -q 'alert: PswatcherDown' 60-prometheus.yaml || fail "60 missing PswatcherD
 grep -q 'alert: PswatcherPromotionFired' 60-prometheus.yaml || fail "60 missing promotion-fired alert (#23)"
 grep -q 'alert: PageserverStandbyNotReady' 60-prometheus.yaml || fail "60 missing standby-not-ready alert"
 grep -q 'alert: ComputeWakeStuck' 60-prometheus.yaml || fail "60 missing wake-path-stuck alert"
+# issue #39: demo end-to-end canary alert — dormant Failed-Job rule joined on the
+# demo-canary CronJob owner_name, same pattern as backup/wal-janitor.
+grep -q 'alert: DemoCanaryFailed' 60-prometheus.yaml || fail "60 missing DemoCanaryFailed alert (#39)"
+grep -q 'owner_name="demo-canary"' 60-prometheus.yaml || fail "60 DemoCanaryFailed must match the canary CronJob by exact owner_name (#39)"
 # issue #49: wal-janitor STALENESS (silent-stop with zero Failed Jobs), symmetric to BackupStale.
 grep -q 'alert: WalJanitorStale' 60-prometheus.yaml || fail "60 missing WalJanitorStale alert (#49) — a silently-stopped janitor produces no Failed Job"
 # issue #51: absent()/suspend companions so a never-succeeded or suspended CronJob pages instead of passing silently.

@@ -26,6 +26,7 @@ pointing at the gateway Service — the entire knext integration contract
 | `manifests/10-database-secret.yaml` | The `DATABASE_URL` Secret → `pggw.scale-zero-pg.svc:55432`. |
 | `manifests/20-nextapp.yaml` | The `NextApp` CR. `minScale: 0` (app scales to zero). Injects `DATABASE_URL` via `spec.secrets.envMap`. |
 | `operator/kn-next-operator-install.yaml` | Vendored kn-next operator install bundle (provenance header inside). |
+| `manifests/30-demo-canary.yaml` | Optional synthetic canary (issue #39): a `CronJob` in the `scale-zero-pg` ns that probes the app cold every 15 min; a failed run trips `DemoCanaryFailed`. See operations.md → [demo-canary](../docs/operations.md#demo-canary). |
 | `_verify.sh` | The measured drill (below). Joins the test battery. |
 
 ## Prerequisites (already true on `knext2` / context `context-ckmva7v7zvq`)
@@ -57,10 +58,17 @@ kubectl -n knext-demo get ksvc pg-demo   # wait for READY=True
 
 # 4. Run the measured drill (creates + cleans up its own helper pods).
 ITERS=5 bash demo/_verify.sh
+
+# 5. (Optional) wire the app up as a scheduled synthetic canary (issue #39).
+#    A failed cold wake then trips DemoCanaryFailed via the existing alert plane.
+kubectl apply -f demo/manifests/30-demo-canary.yaml
 ```
 
 The app URL is `http://pg-demo.knext-demo.<LB-IP>.sslip.io`. Host `curl` isn't
-needed — `_verify.sh` drives HTTP from a pod inside the cluster.
+needed — `_verify.sh` drives HTTP from a pod inside the cluster, and it **derives
+the Host header at runtime** from the ksvc's own `.status.url` (issue #40), so it
+reproduces on any cluster with no hardcoded LB IP. Override with
+`KSVC_HOST=... bash demo/_verify.sh` if you route through a custom domain.
 
 ## The measurement
 
@@ -74,8 +82,11 @@ DB-wake cost is isolated from the app's own Knative cold start:
 | `T_warm` | both awake | steady state |
 | bare DB cold-connect | psql through `pggw`, no app | DB wake as a bare client sees it |
 
-`Visible DB-wake on top of app cold start = T_both − T_appcold`. Numbers and
-analysis: `docs/BENCHMARKS.md` → *Combined wake (knext demo)*.
+`combined-cold overhead = T_both − T_appcold` — this is the extra cost of waking
+**both** at once (co-scheduling / image-cache-locality contention in the
+both-cold path), **not** the DB wake: it routinely exceeds the bare DB
+cold-connect (~2.6s), so it cannot be attributed to the database (issue #45).
+Numbers and analysis: `docs/BENCHMARKS.md` → *Combined wake (knext demo)*.
 
 ## Findings fed back to the platform
 
@@ -89,7 +100,11 @@ aligned. Filed as a knext-side finding.
 ## Cleanup
 
 ```sh
+kubectl delete -f demo/manifests/30-demo-canary.yaml --ignore-not-found  # if the canary was enabled
 kubectl delete -f demo/manifests/20-nextapp.yaml -f demo/manifests/10-database-secret.yaml
 kubectl delete ns knext-demo
 kubectl delete -f demo/operator/kn-next-operator-install.yaml   # removes the operator
 ```
+
+Delete the canary **with** the app — left running without `pg-demo` it will
+correctly page that the wake path is broken.

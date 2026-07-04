@@ -41,7 +41,8 @@ Per-iteration `T_both`: 13.2 / 15.2 / 13.1 / 7.4 / 16.1 s. North star proven 5/5
 start; the both-cold path costs *more* than the parts summed.** App-only cold
 start is a stable ~3.9s and the DB's bare wake is ~2.6s, yet waking both on one
 request lands at ~13s (range 7–16s), not ~6.5s. So `T_both − T_appcold` (~9s) is
-**not** a clean DB-wake isolate — it's dominated by both-cold cold-start
+**not** a clean DB-wake isolate — `_verify.sh` now prints it as *"combined-cold
+overhead … NOT DB wake"* (issue #45) — it's dominated by both-cold cold-start
 mechanics: the app pod schedules + starts (image-cache locality across 2 nodes
 drives the 7→16s spread) *and* its first request blocks on a cold-DB connection
 inside the Knative activation window, while the compute pod schedules in
