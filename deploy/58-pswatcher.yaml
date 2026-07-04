@@ -86,7 +86,7 @@ spec:
         seccompProfile: { type: RuntimeDefault }
       containers:
         - name: pswatcher
-          image: me-abudhabi-1.ocir.io/axfqznklsd2t/ks-pg/gateway:v0.6.0@sha256:9ee6497826aeb6dca620cba488e35d0d56ff19d092d1c75ffeb7eddcd47b5857 # v0.6.0 RELEASE build (issues #78/#82) — supersedes iter8-pswatcher-0386420; same multi-binary image, /pswatcher entrypoint override (line below)
+          image: me-abudhabi-1.ocir.io/axfqznklsd2t/ks-pg/gateway:v0.6.1@sha256:12a735337adcd2470fe834557ad7ab298d20a35e2113b80669211324f28a0ccb # v0.6.0 RELEASE build (issues #78/#82) — supersedes iter8-pswatcher-0386420; same multi-binary image, /pswatcher entrypoint override (line below)
           imagePullPolicy: IfNotPresent
           command: ["/pswatcher"] # override the image's /gateway entrypoint
           securityContext:
