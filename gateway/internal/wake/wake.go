@@ -154,11 +154,18 @@ type templateDriver struct {
 	namespace string
 	targetTpl string
 	depTpl    string
+	servedDB  string
 	defPort   int
 	scaler    Scaler
 }
 
 func (d *templateDriver) Mode() string { return "template" }
+
+// ServedDatabase is the physical database every app branch actually serves
+// (default "postgres", carrying the inherited template schema). The DSN database
+// name only routes to the per-app compute; the gateway rewrites it to this before
+// replaying startup. Empty disables rewriting. Only template mode implements it.
+func (d *templateDriver) ServedDatabase() string { return d.servedDB }
 func (d *templateDriver) Resolve(systemID string) Target {
 	host, port := ParseHostPort(strings.ReplaceAll(d.targetTpl, "{system}", systemID), d.defPort)
 	return Target{Host: host, Port: port, Key: systemID}
@@ -220,10 +227,18 @@ func MakeDriverWithScaler(env Env, scaler Scaler) (Driver, error) {
 		if scaler == nil {
 			scaler = newK8sScaler()
 		}
+		depTpl := env.get("GW_K8S_DEPLOYMENT_TEMPLATE", "compute-{system}")
+		// A deployment template with no {system} placeholder maps every database
+		// onto ONE Deployment — silently collapsing per-app computes and violating
+		// single-writer the moment two apps connect. Fail fast at construction.
+		if !strings.Contains(depTpl, "{system}") {
+			return nil, fmt.Errorf("template mode: GW_K8S_DEPLOYMENT_TEMPLATE=%q must contain {system}", depTpl)
+		}
 		return &templateDriver{
 			namespace: ns,
-			targetTpl: env.get("GW_TARGET_TEMPLATE", fmt.Sprintf("compute-{system}.%s.svc:55432", ns)),
-			depTpl:    env.get("GW_K8S_DEPLOYMENT_TEMPLATE", "compute-{system}"),
+			targetTpl: env.get("GW_TARGET_TEMPLATE", fmt.Sprintf("compute-{system}.%s.svc:55433", ns)),
+			depTpl:    depTpl,
+			servedDB:  env.get("GW_SERVED_DATABASE", "postgres"),
 			defPort:   defPort,
 			scaler:    scaler,
 		}, nil

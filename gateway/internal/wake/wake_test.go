@@ -1,9 +1,59 @@
 package wake
 
 import (
+	"context"
 	"strings"
 	"testing"
 )
+
+// Wake/Sleep in template mode must scale the per-app Deployment (compute-<db>),
+// NOT a single shared Deployment — that is the whole point of branch-per-app.
+// (fakeScaler + scaleCall are defined in ro_test.go, same package.)
+func TestTemplateDriverWakeSleepScalesPerSystemDeployment(t *testing.T) {
+	rec := &fakeScaler{}
+	d, err := MakeDriverWithScaler(Env{
+		"GW_COMPUTE_MODE":            "template",
+		"GW_K8S_NAMESPACE":           "scale-zero-pg",
+		"GW_K8S_DEPLOYMENT_TEMPLATE": "compute-{system}",
+	}, rec)
+	if err != nil {
+		t.Fatalf("MakeDriverWithScaler: %v", err)
+	}
+	tgt := d.Resolve("orders")
+	if err := d.Wake(context.Background(), tgt); err != nil {
+		t.Fatalf("Wake: %v", err)
+	}
+	if err := d.Sleep(context.Background(), tgt); err != nil {
+		t.Fatalf("Sleep: %v", err)
+	}
+	if !d.CanSleep() {
+		t.Fatalf("template driver must be able to sleep per-app computes")
+	}
+	want := []scaleCall{
+		{"scale-zero-pg", "compute-orders", 1},
+		{"scale-zero-pg", "compute-orders", 0},
+	}
+	if len(rec.calls) != len(want) {
+		t.Fatalf("scale calls = %+v, want %+v", rec.calls, want)
+	}
+	for i := range want {
+		if rec.calls[i] != want[i] {
+			t.Fatalf("scale call[%d] = %+v, want %+v", i, rec.calls[i], want[i])
+		}
+	}
+}
+
+// A deployment template with no {system} placeholder collapses every app onto
+// one Deployment — a silent single-writer-violating misconfig. Reject it early.
+func TestTemplateModeRejectsDeploymentTemplateWithoutSystemPlaceholder(t *testing.T) {
+	_, err := MakeDriverWithScaler(Env{
+		"GW_COMPUTE_MODE":            "template",
+		"GW_K8S_DEPLOYMENT_TEMPLATE": "compute", // missing {system}
+	}, &fakeScaler{})
+	if err == nil || !strings.Contains(err.Error(), "{system}") {
+		t.Fatalf("err = %v, want error mentioning {system}", err)
+	}
+}
 
 func TestParseHostPort(t *testing.T) {
 	if h, p := ParseHostPort("db", 5432); h != "db" || p != 5432 {

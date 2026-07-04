@@ -65,6 +65,26 @@ Root causes worth remembering: CNPG's 14.4s was **kubelet probe cadence** (10s
 polls), not the database; Neon's 5.2s was **CoreDNS negative caching**, not Neon.
 The engines were never the bottleneck — Kubernetes mechanics were, twice.
 
+## Branch-per-app provisioning (ADR-0003)
+
+Multi-tenancy = one Neon **branch** (timeline) per app off a shared template, on
+one storage plane (#6 / KC5 #65). Measured on OKE (`context-ckmva7v7zvq`, ns
+`scale-zero-pg`, `neon:8464`), via `deploy/provision-app.sh` + the spike.
+
+| Step | OKE | What it is |
+|---|---|---|
+| **App provision (branch + ConfigMap + Deployment + Service)** | **~4.0s** (3.94 / 4.15s, 2 apps) | `provision-app.sh create <app>`; no initdb, no migration replay |
+| Branch create alone (pageserver ancestor API) | **~1.0s** | `POST /v1/tenant/<t>/timeline/` with `ancestor_timeline_id` + `ancestor_start_lsn` |
+| Branch → **writable** compute Ready (cold, image cached) | **~3.5s** | child compute boots read-write on the branch |
+| Safekeeper craft for a branched timeline | **none** | walproposer auto-inits the branch on a live pageserver (unlike cold restore, which needs `skctl craft`) |
+
+Isolation + independent 0↔1 proven by `deploy/_verify-multitenant.sh` (two apps,
+one plane, all connects through the apps-gateway): each app sees only its own
+writes; scaling one app to zero leaves the other serving; the slept app wakes with
+data intact. Method: branch two throwaway apps, write an app-private row into the
+shared `app_items`, cross-check visibility, force-sleep one, re-wake it. Full
+finding + caveats: [ADR-0003](adr-0003-multi-tenancy.md).
+
 ## Reliability drills (RTO)
 
 | Drill | Local | OKE | What it proves |

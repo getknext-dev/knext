@@ -1,0 +1,102 @@
+# Per-app compute template (branch-per-app multi-tenancy, ADR-0003).
+#
+# This is a TEMPLATE, not an applied manifest: deploy/provision-app.sh substitutes
+# __APP__ / __TENANT_ID__ / __TIMELINE_ID__ / __REPLICAS__ and applies the result.
+# One of these per app. Each app is a Neon TIMELINE (a branch of the shared
+# `apps` template timeline) under the SAME tenant — so N apps share one storage
+# plane (pageserver + safekeeper quorum) but are isolated at the timeline level.
+#
+# It mirrors deploy/20-compute.yaml (the single-DB primary) exactly except that
+# the tenant/timeline come from a per-app ConfigMap and the names carry the app
+# suffix. The compute image, entrypoint, spec (compute-files) and single-writer
+# Recreate strategy are all shared with the primary — nothing app-specific in the
+# image, so a new app costs one branch + one ConfigMap + one Deployment.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: compute-config-__APP__
+  namespace: scale-zero-pg
+  labels: { app: compute-__APP__, tier: apps, plane: compute }
+data:
+  PG_VERSION: "17"
+  PAGESERVER_HOST: "pageserver"
+  TENANT_ID: "__TENANT_ID__"
+  TIMELINE_ID: "__TIMELINE_ID__"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: compute-__APP__
+  namespace: scale-zero-pg
+  labels: { app: compute-__APP__, tier: apps, plane: compute }
+spec:
+  replicas: __REPLICAS__ # at rest 0; the apps-gateway (template mode) scales 0<->1 on connect
+  revisionHistoryLimit: 2
+  selector:
+    matchLabels: { app: compute-__APP__ }
+  strategy:
+    type: Recreate # single-writer: never two computes on one timeline during rollout
+  template:
+    metadata:
+      labels: { app: compute-__APP__, tier: apps, plane: compute }
+    spec:
+      securityContext:
+        seccompProfile: { type: RuntimeDefault }
+      terminationGracePeriodSeconds: 10
+      # Block startup until the pageserver has this app's branched timeline
+      # (created by provision-app.sh via the ancestor API). Same idempotent
+      # wait the primary compute uses.
+      initContainers:
+        - name: wait-timeline
+          image: neondatabase/neon:8464
+          envFrom:
+            - configMapRef: { name: compute-config-__APP__ }
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              PS="http://${PAGESERVER_HOST}:9898"
+              until curl -sf "${PS}/v1/tenant/${TENANT_ID}/timeline" | grep -q "${TIMELINE_ID}"; do
+                echo "waiting for timeline ${TIMELINE_ID} on tenant ${TENANT_ID} ..."; sleep 0.5;
+              done
+              echo "timeline ready"
+      containers:
+        - name: compute
+          image: neondatabase/compute-node-v17:8464 # PINNED pair with storage (ops "Upgrades")
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "/compute-files/entrypoint.sh"]
+          envFrom:
+            - configMapRef: { name: compute-config-__APP__ }
+          ports:
+            - { name: pg, containerPort: 55433 }
+            - { name: compute-http, containerPort: 3080 }
+          volumeMounts:
+            - { name: compute-files, mountPath: /compute-files }
+          readinessProbe:
+            tcpSocket: { port: pg }
+            initialDelaySeconds: 0
+            periodSeconds: 1
+            failureThreshold: 60
+          resources:
+            requests: { cpu: 250m, memory: 256Mi, ephemeral-storage: 100Mi }
+            limits: { memory: 1Gi, ephemeral-storage: 1Gi }
+      volumes:
+        - name: compute-files
+          configMap:
+            name: compute-files # shared spec template (54-compute-files.yaml); IDs come from env
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: compute-__APP__
+  namespace: scale-zero-pg
+  labels: { app: compute-__APP__, tier: apps, plane: compute }
+spec:
+  # publishNotReadyAddresses like the primary: the DNS record exists at zero
+  # replicas so the gateway's TCP retry (not CoreDNS negative-cache) is the
+  # readiness signal. compute-<app>.scale-zero-pg.svc:55433 is what the
+  # apps-gateway GW_TARGET_TEMPLATE resolves to.
+  publishNotReadyAddresses: true
+  selector: { app: compute-__APP__ }
+  ports:
+    - { name: pg, port: 55433, targetPort: pg }

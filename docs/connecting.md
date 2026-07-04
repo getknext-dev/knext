@@ -152,11 +152,48 @@ queries Postgres, and a measured drill proving both wake on one cold request —
 lives in [`demo/`](../demo/README.md). Combined-wake numbers:
 [BENCHMARKS](BENCHMARKS.md#combined-wake-knext-demo-issue-8).
 
-## One database per app
+## Multi-app / branch-per-app
 
-Each application/zone gets its own database (its own Neon tenant + timeline). Don't
-share a database between apps — that's a platform rule (data sovereignty), and it's
-what makes per-app scale-to-zero and future per-app sharding possible.
+Each app gets its own database — a Neon **branch** (timeline) off a shared
+**template**, on one storage plane. N apps, one pageserver + safekeeper quorum,
+each with its own compute that sleeps and wakes independently. This is the
+DB-per-app product promise; the design, evidence and caveats are in
+[ADR-0003](adr-0003-multi-tenancy.md).
+
+**Provision an app** (operator/CI, from `deploy/`):
+
+```sh
+# one-time: create the apps tenant + template timeline + base schema
+./provision-app.sh init-plane --schema testdata/app-base-schema.sql
+# per app: branch the template + stand up a scale-to-zero compute
+./provision-app.sh create orders          # replicas 0 (wakes on first connect)
+./provision-app.sh list                   # show apps tenant timelines
+./provision-app.sh destroy orders --delete-timeline   # tear down (frees the branch pin)
+```
+
+Provisioning an app is one pageserver branch call + one rendered per-app compute
+(`compute-app.template.yaml`) — **~4s** end-to-end
+([BENCHMARKS](BENCHMARKS.md#branch-per-app-provisioning-adr-0003)), no initdb, no
+migration replay: the branch inherits the template schema copy-on-write.
+
+**Connect** through the **apps-gateway** (`deploy/81-apps-gateway.yaml`, a second
+gateway in `template` mode — the primary single-DB `pggw` is untouched):
+
+```
+postgres://cloud_admin:cloud_admin@pggw-apps.scale-zero-pg.svc:55432/<app>?sslmode=disable
+```
+
+The DSN **database name is the app handle**: it routes to `compute-<app>` and wakes
+it. The gateway rewrites the database to the served DB (`postgres`) before
+replaying startup, so every branch serves its inherited schema — you do **not**
+create a database named `<app>` yourself. For knext, set each app's
+`DATABASE_URL` Secret to its own `/<app>` DSN.
+
+**Isolation is at the timeline level, not the tenant level:** app data is isolated
+(proven by `deploy/_verify-multitenant.sh`), but all apps share one pageserver and
+safekeeper quorum — a plane-wide stall hits every app. Dropping an app must delete
+its timeline (`destroy --delete-timeline`) or the branch pins template history.
+Full caveats: [ADR-0003](adr-0003-multi-tenancy.md#consequences--caveats-blast-radius--isolation).
 
 ## Time-series data
 

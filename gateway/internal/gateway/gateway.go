@@ -261,6 +261,12 @@ func (g *Gateway) handle(client net.Conn) {
 				}
 				target := g.driver.Resolve(systemID)
 				startup := append([]byte(nil), packet...)
+				// Branch-per-app: the DSN database routes to the per-app compute,
+				// but every branch serves one physical DB (postgres). Rewrite the
+				// replayed startup so the backend gets a database it actually has.
+				if rw, ok := g.driver.(servedDatabaseRewriter); ok {
+					startup = rewriteStartupDatabase(startup, msg.Params, rw.ServedDatabase())
+				}
 				pending := append([]byte(nil), rest...)
 				_ = client.SetReadDeadline(time.Time{})
 				g.proxy(client, startup, pending, target, msg.Params)

@@ -62,6 +62,7 @@ sh deploy/_verify-drift.sh                # declared workloads exist AND are rea
 sh deploy/_verify-netpol.sh               # network isolation contracts (warns on non-enforcing CNI)
 sh deploy/_verify-restore.sh              # backup -> restore in a throwaway namespace (~110s RTO)
 sh deploy/_verify-pageserver-failover.sh  # pageserver loss -> promoted standby (~7s RTO)
+sh deploy/_verify-multitenant.sh          # branch-per-app: two apps, one plane, isolated + independent 0<->1 (ADR-0003)
 ```
 
 Expected: all green; wake latency ~2.5s on a warm node (or ~0.4s on the opt-in
@@ -84,5 +85,21 @@ connection after that is normal Postgres latency. Watch it happen:
 ```sh
 kubectl -n scale-zero-pg get pods -l app=compute -w
 ```
+
+## 5. (Optional) A database per app
+
+For DB-per-app multi-tenancy — each app its own Neon **branch** on one storage
+plane, sleeping/waking independently — deploy the apps-gateway and provision apps:
+
+```sh
+kubectl apply -f deploy/81-apps-gateway.yaml          # template-mode gateway (pggw-apps)
+cd deploy
+./provision-app.sh init-plane --schema testdata/app-base-schema.sql   # one-time: template
+./provision-app.sh create orders                       # branch + scale-to-zero compute (~4s)
+# connect: postgres://cloud_admin:cloud_admin@pggw-apps.scale-zero-pg.svc:55432/orders?sslmode=disable
+```
+
+Design, evidence and caveats: [ADR-0003](adr-0003-multi-tenancy.md) ·
+[connecting → multi-app](connecting.md#multi-app--branch-per-app).
 
 Next: [connecting your app](connecting.md) · [operations guide](operations.md)

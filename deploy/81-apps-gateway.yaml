@@ -1,0 +1,86 @@
+# apps-gateway: a second wake-on-connect proxy in TEMPLATE mode, for branch-per-app
+# multi-tenancy (ADR-0003, #6). It is deliberately SEPARATE from the primary
+# gateway (deploy/10-gateway.yaml, kubectl mode -> the single `compute`):
+#
+#   - primary gateway  (pggw,      :55432): database=postgres -> `compute`
+#   - apps  gateway    (pggw-apps, :55432): database=<app>    -> `compute-<app>`
+#
+# Keeping them separate means the primary single-DB path (and its blast radius)
+# is untouched by multi-tenancy: the apps-gateway's {system} routing maps the
+# DSN database name to the per-app Deployment/Service that provision-app.sh
+# created. It reuses the pggw ServiceAccount/Role (deployments/scale is namespace
+# -wide), so no new RBAC. TLS is left off here (add the pggw-tls mount like the
+# primary if apps need front-door TLS); sslmode=disable works as-is.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pggw-apps
+  namespace: scale-zero-pg
+  labels: { app: pggw-apps, tier: apps }
+spec:
+  replicas: 2 # no-SPOF; peer-aware idle keeps the sleep decision fleet-safe
+  selector:
+    matchLabels: { app: pggw-apps }
+  template:
+    metadata:
+      labels: { app: pggw-apps, tier: apps }
+    spec:
+      imagePullSecrets:
+        - name: ocir-pull
+      serviceAccountName: pggw # reuse: deployments/scale is namespace-wide
+      containers:
+        - name: gateway
+          # Built from this PR branch (adds the GW_SERVED_DATABASE rewrite hop).
+          # Digest-pinned (contract 22). Rebuild + re-pin on any gateway change.
+          image: me-abudhabi-1.ocir.io/axfqznklsd2t/ks-pg/gateway:iter9-mt-08a772a@sha256:2cb59a61d2d6a713352af415c942d3237ed1cdfe7701d36a55574bdba428d191
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: GW_PORT
+              value: "55432"
+            - name: GW_METRICS_PORT
+              value: "9090"
+            - name: GW_COMPUTE_MODE
+              value: "template" # database=<app> -> compute-<app>, scaled 0<->1 per app
+            - name: GW_K8S_NAMESPACE
+              value: "scale-zero-pg"
+            - name: GW_K8S_DEPLOYMENT_TEMPLATE
+              value: "compute-{system}" # {system} = DSN database name; guarded non-empty in wake.go
+            - name: GW_TARGET_TEMPLATE
+              value: "compute-{system}.scale-zero-pg.svc:55433"
+            - name: GW_IDLE_MS
+              value: "60000" # demo-friendly; production: 300000+
+            - name: GW_WAKE_TIMEOUT_MS
+              value: "120000"
+            - name: GW_RETRY_MS
+              value: "100"
+            - name: GW_MAX_CONNS
+              value: "90" # per compute; each app has its own compute so this is per-app
+            - name: GW_PEER_SELECTOR
+              value: "app=pggw-apps" # peer-aware idle across the apps-gateway fleet only
+            - name: GW_POD_NAMESPACE
+              valueFrom: { fieldRef: { fieldPath: metadata.namespace } }
+            - name: GW_POD_IP
+              valueFrom: { fieldRef: { fieldPath: status.podIP } }
+          ports:
+            - { name: pg, containerPort: 55432 }
+            - { name: metrics, containerPort: 9090 }
+          readinessProbe:
+            httpGet: { path: /healthz, port: metrics }
+            initialDelaySeconds: 1
+            periodSeconds: 5
+          resources:
+            requests: { cpu: 50m, memory: 32Mi, ephemeral-storage: 100Mi }
+            limits: { memory: 128Mi, ephemeral-storage: 1Gi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pggw-apps
+  namespace: scale-zero-pg
+  labels: { app: pggw-apps, tier: apps }
+spec:
+  # knext apps connect DATABASE_URL -> pggw-apps.scale-zero-pg.svc:55432 with the
+  # per-app database name; the gateway routes by {system}=database.
+  selector: { app: pggw-apps }
+  ports:
+    - { name: pg, port: 55432, targetPort: pg }

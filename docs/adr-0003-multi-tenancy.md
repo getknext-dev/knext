@@ -1,0 +1,207 @@
+# ADR-0003 — Multi-tenancy: branch-per-app on a shared storage plane
+
+- **Status:** ACCEPTED (2026-07-04) — **branch-per-app.** Each app is a Neon
+  **timeline** branched from a shared **template** timeline under one "apps"
+  tenant. N apps share one storage plane (pageserver + safekeeper quorum); each
+  has its own stateless compute (Deployment) that scales 0↔1 independently. The
+  apps-gateway (template mode) routes `database=<app>` → `compute-<app>`.
+- **Date:** 2026-07-04
+- **Deciders:** architecture owner (ratify); evidence by the branch-per-app spike
+  + drill on the OKE cluster (context `context-ckmva7v7zvq`, ns `scale-zero-pg`).
+- **Closes:** #6 (multi-tenancy: template mode end-to-end OR single-DB ADR).
+- **Answers:** #65 / ADR-0002 **KC5** (branching unused) — this is the justifying
+  Neon capability, wired and demonstrated on-cluster.
+
+---
+
+## Context
+
+The product promise for knext is **DB-per-app** (each knext app — and eventually
+each PR preview — binds its own `DATABASE_URL`). ADR-0002 chose Neon partly on the
+thesis that a Neon-specific capability (branching / PITR / shared-pageserver
+fan-out) would justify the reuse over the simpler CNPG path. **KC5** makes that a
+kill criterion: if no such capability is *wired and demonstrated on-cluster* by
+2026-10-03 (tracked as #65), the CNPG-pivot discussion re-opens.
+
+Two topologies were on the table:
+
+1. **Tenant-per-app** — a fresh Neon *tenant* (independent history) per app. Full
+   isolation, but each tenant is a separate storage footprint and there is no
+   shared template; provisioning re-runs initdb + migrations per app (slow, no
+   copy-on-write reuse). This is not what Neon branching is for.
+2. **Branch-per-app** — a fresh Neon *timeline* (branch) per app off a shared
+   **template** timeline holding the base schema. Copy-on-write: the branch
+   inherits the template's pages instantly and diverges lazily. One storage plane
+   serves all apps. This is the Neon-native DB-per-app pattern.
+
+The known risk going in (documented in `docs/operations.md` "What we learned" and
+`_restore-writable.sh`): on `neon:8464` OSS the **safekeeper** has no HTTP
+timeline-create API, and a fresh timeline with no safekeeper state historically
+hit the `flush_lsn 0/0` / `prev_record_lsn 0/0` wall that blocks a **writable**
+compute (the whole reason `skctl.py` exists for the cold-restore drill). The open
+question for branch-per-app: **does a branched writable timeline hit that same
+wall?**
+
+---
+
+## Decision
+
+Adopt **branch-per-app on a shared plane**. The seam is exactly the parked
+`template` wake mode ADR-0002 anticipated (`{system}` = database name).
+
+- **Storage:** one "apps" tenant (`a000…001`), one **template** timeline
+  (`a000…010`) seeded with the base schema (`schema_migrations` + sample tables).
+  Each app is a branch (child timeline) created via the **pageserver ancestor
+  API**: `POST /v1/tenant/<t>/timeline/` with `ancestor_timeline_id` +
+  `ancestor_start_lsn` (the template's `last_record_lsn`).
+- **Compute:** one stateless `compute-<app>` Deployment per app (template
+  `deploy/compute-app.template.yaml`), `Recreate` strategy, `replicas: 0` at
+  rest — identical to the single-DB primary except the tenant/timeline come from a
+  per-app ConfigMap. The compute **image, entrypoint and spec are unchanged** — a
+  new app costs one branch + one ConfigMap + one Deployment + one Service.
+- **Routing:** a **separate** apps-gateway (`deploy/81-apps-gateway.yaml`,
+  `GW_COMPUTE_MODE=template`) maps the DSN `database=<app>` to `compute-<app>`,
+  scaling it 0↔1 on connect. The DSN database name is a **logical routing handle**:
+  the gateway rewrites the replayed startup's database to the served DB
+  (`GW_SERVED_DATABASE`, default `postgres`), so every branch serves its inherited
+  `postgres` DB — an app never has to create a database named after itself. The
+  primary single-DB gateway (`pggw`, kubectl mode) is untouched — multi-tenancy is
+  additive, zero blast radius on the existing path.
+  - **Both routing hops are proven live end-to-end.** The apps-gateway image was
+    built from this change (`deploy/81-apps-gateway.yaml` is digest-pinned to it,
+    contract 22) and rolled onto the cluster. `deploy/_verify-multitenant.sh`
+    asserts the full gateway-fronted path: a client connecting `database=<app>`
+    routes to `compute-<app>`, wakes it 0→1, has its database rewritten to the
+    served `postgres` DB (`servedDatabaseRewriter` / `GW_SERVED_DATABASE`), and
+    reads back **its own** data — with isolation still holding through the gateway.
+    Unit tests: `dbrewrite_test.go`, `wake_test.go`. The served DB is always
+    `postgres`; the app-facing database name is purely a routing handle.
+- **Provisioning contract:** `deploy/provision-app.sh {init-plane|create <app>|
+  destroy <app>|list}`. The per-app timeline id is minted fresh (random) on first
+  `create` and persisted in the app's ConfigMap; re-provisioning reads it back
+  (idempotent), and `destroy --delete-timeline` cleans the pageserver **and** all
+  safekeepers (see "Deprovision is the sharp edge" below).
+
+### The safekeeper finding (the thin ice held)
+
+**A branched writable compute needs NO safekeeper craft.** Booting a read-write
+compute on a freshly-branched timeline works out of the box on `neon:8464`:
+
+- The branch is created on a **live** pageserver that already holds the ancestor's
+  full page history and records the branch point (`ancestor_lsn`). The child
+  timeline reports `prev_record_lsn: 0/0` at creation — the same shape that blocks
+  cold restore — **but it does not block here.** When the child compute's
+  walproposer connects, the safekeepers **auto-create** the branch timeline at the
+  branch LSN, and WAL continuity is satisfied by the live pageserver.
+- This is categorically different from `_restore-writable.sh`: that path stands up
+  **fresh, empty** safekeepers from backed-up WAL with **no live plane**, so it
+  must hand-craft `safekeeper.control` (`skctl craft`) to assert continuity. Branch
+  creation never leaves the live plane, so that machinery is not needed.
+
+Net: `skctl.py` stays scoped to disaster restore; branch-per-app rides the normal
+walproposer init path. (If a future upgrade ships a first-class safekeeper
+timeline-import API — the ops "upgrade carrot" — nothing here needs to change.)
+
+**Deprovision is the sharp edge, not provision.** Two findings shaped the
+lifecycle contract:
+
+1. The pageserver `DELETE .../timeline/<id>` does **not** remove the
+   safekeeper-side WAL — `provision-app.sh destroy` must also `DELETE` on the
+   **safekeeper** mgmt API (port 7676, which *does* exist on 8464, unlike
+   POST/PUT) on **all three** safekeepers, or per-app WAL dirs leak as apps churn.
+2. The safekeepers **tombstone** a deleted timeline id and refuse to recreate it
+   (`create timeline: Timeline <id> has been deleted`). So the app→timeline id is
+   **minted fresh (random) on each `create` and persisted in the app ConfigMap** —
+   never derived from the app name — otherwise re-creating a destroyed app name
+   collides with the tombstone and the compute hangs in the walproposer handshake.
+   Re-provisioning an existing app is idempotent (reads the id back from the
+   ConfigMap); a create after destroy gets a new id.
+
+---
+
+## Evidence (on-cluster, neon:8464)
+
+Spike + productized drill on OKE (`context-ckmva7v7zvq`, ns `scale-zero-pg`):
+
+| Step | Measure |
+|------|---------|
+| Branch create (pageserver ancestor API) | ~1.0s |
+| Branch → **writable** compute Ready (cold, image cached) | ~3.5s |
+| Full app provision (branch + ConfigMap + Deployment + Service) | ~4.0s |
+| Template schema inherited by branch | yes — `app_items` seed row visible |
+| Writable on branch (`pg_is_in_recovery()`) | `f` (read-write) |
+| Safekeeper craft needed | **none** (walproposer auto-init) |
+
+Isolation + independent-scale drill (`deploy/_verify-multitenant.sh`), two apps on
+one plane, all connects **through the apps-gateway**:
+
+- Both apps wake on first connect and see the inherited template schema.
+- **Isolation holds:** app A's write is invisible to app B and vice-versa; each
+  sees only its own write (timeline-level isolation).
+- **Independent 0↔1:** scaling app A to zero leaves app B serving; app A wakes
+  again on connect with its data intact.
+
+(Provision-time row also recorded in `docs/BENCHMARKS.md`.)
+
+---
+
+## Consequences & caveats (blast radius / isolation)
+
+- **Isolation is at the timeline level, not the tenant level.** All app branches
+  share one pageserver, one safekeeper quorum, and one tenant. Data is isolated
+  (each timeline is a separate logical DB history — proven), but **noisy-neighbour
+  and availability are shared**: a pageserver stall or safekeeper quorum loss
+  affects every app. The pageserver is a single read SPOF mitigated by the warm
+  standby (`57-pageserver-standby.yaml`); that mitigation now covers all apps at
+  once — an upside (one thing to run) and a risk (one thing to lose).
+- **Branches pin ancestor history.** A child timeline holds the template's history
+  from its branch LSN; the template's WAL/pages cannot be GC'd below the oldest
+  live branch point. `pitr_history_size` on the template grows with the number and
+  age of branches. Dropping an app must **delete its timeline** (`provision-app.sh
+  destroy <app> --delete-timeline`) or the pin leaks. The WAL-janitor / PITR
+  windows (issue #19) are template-wide, not per-app.
+- **Per-app compute cost is real.** Each awake app is one compute pod (250m CPU /
+  256Mi req). Idle apps cost zero compute (scale-to-zero) but each holds a branch
+  (storage) and a Deployment/Service/ConfigMap (control-plane) footprint. This
+  scales to tens/low-hundreds of apps on one plane, not thousands.
+- **Schema template drift.** Apps branch from the template *as it was at their
+  branch LSN*. Rolling out a new base migration to the template does **not**
+  retroactively update existing app branches — they own their schema after
+  branching (that's the point). A migration runner per app is the app's concern
+  (knext owns migrations); the template is a fast-start mold, not a live parent.
+- **`max_connections` is per-app.** `GW_MAX_CONNS=90` on the apps-gateway bounds
+  connections *per app compute* (each app has its own compute), not globally.
+- **Provisioning is imperative today.** `provision-app.sh` is operator/CI tooling,
+  not a controller. A CRD-driven `AppDatabase` operator is the productization path
+  if app churn grows; out of scope for this MVP (single storage plane, tens of
+  apps).
+- **Version coupling unchanged.** App computes use the same pinned
+  `compute-node-v17:8464` / `neon:8464` pair; the triple-pin (ADR-0002 amendment)
+  and `skctl` format weld are unaffected — branch-per-app adds no new
+  version-coupled artifact.
+
+---
+
+## Alternatives considered
+
+- **Tenant-per-app** — rejected: no shared template (no copy-on-write fast start),
+  larger storage footprint, and not what branching exists for. Stronger isolation,
+  but the MVP's isolation need is data-level, which timeline branching meets.
+- **Single-DB only (park multi-tenancy)** — the honest fallback had the spike
+  failed. It did not: branch-per-app is viable on 8464 with no new machinery, so
+  parking it would forfeit the KC5 justifying capability and the DB-per-app product
+  promise. Rejected.
+- **One shared DB, schema-per-app / row-level tenancy** — rejected: no
+  scale-to-zero per app, no independent PITR, and app isolation becomes an
+  application-code concern rather than a storage guarantee.
+
+---
+
+## Follow-ups
+
+- knext contract: DB-per-app `DATABASE_URL` →
+  `postgres://…@pggw-apps.scale-zero-pg.svc:55432/<app>` (see
+  `docs/connecting.md` "Multi-app / branch-per-app").
+- If app churn or PR-preview branches (ADR-0013 on the knext side) push volume
+  up, revisit: (a) a CRD-driven provisioning operator, (b) per-app PITR/GC
+  windows, (c) tenant sharding across multiple pageservers.
