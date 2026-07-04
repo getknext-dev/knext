@@ -205,6 +205,27 @@ interface CacheEvent {
 }
 ```
 
+## Database layer (scale-zero-pg)
+
+knext is **two scale-to-zero layers on one cluster**: the application layer described above
+(Next.js on Knative), and a **database layer** —
+[scale-zero-pg](https://github.com/getknext-dev/scale-zero-pg) (v1.0.0 GA) — that scales
+PostgreSQL to zero and wakes it on the first client connection. An app and its database can
+sleep at zero and **wake together on one visitor request**.
+
+The two layers wake by **different mechanisms, by necessity**: knext apps wake through
+Knative's **HTTP** activator, while databases wake through scale-zero-pg's **TCP**
+wake-on-connect gateway — Knative's activator is HTTP-only and cannot wake on a raw Postgres
+connection, which is precisely why the database layer is a separate, purpose-built component.
+
+The integration seam is **one Secret**: the `DATABASE_URL` above, mapped from a Kubernetes
+Secret via `NextApp.spec.secrets.envMap`. knext builds no database machinery; scale-zero-pg
+ships alongside as cluster infrastructure. See the
+[database-layer guide](guides/database-platform.md) for the full picture, and scale-zero-pg's
+[getting-started](https://github.com/getknext-dev/scale-zero-pg/blob/main/docs/getting-started.md)
+and [connecting](https://github.com/getknext-dev/scale-zero-pg/blob/main/docs/connecting.md)
+for the DSN, tier table, pooling rules, and per-app (branch-per-app) provisioning.
+
 ## Environment Variables
 
 The environment variables depend on your chosen storage and cache providers.
@@ -215,7 +236,7 @@ The environment variables depend on your chosen storage and cache providers.
 | ---------- | ------------- | --------- |
 | `NODE_ENV` | Runtime environment | `production` |
 | `NEXT_BUILD_ID` | From `next build` | Auto |
-| `DATABASE_URL` | PostgreSQL connection | Required |
+| `DATABASE_URL` | PostgreSQL connection (see [Database layer](#database-layer-scale-zero-pg)) | Required |
 | `NODE_COMPILE_CACHE` | V8 bytecode cache path | Optional |
 
 **Cache (Redis):**
