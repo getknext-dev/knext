@@ -1025,6 +1025,23 @@ disappears only once the plane is truly clean). `provision-app.sh reclaim-orphan
 is the independent backstop for residue (e.g. a CR force-deleted while a safekeeper
 was down).
 
+**External-driver API (unified config, #119).** The `AppDatabase` CRD is also the
+stable API the **knext operator** drives to provision + wire a per-app database
+(ADR-0006). The full contract — status fields to wait on (`phase`, `Ready`,
+`status.secretName`, `observedGeneration`), the output Secret keys (incl.
+`DATABASE_URL_RO`, emitted only when `spec.roPool.enabled`), the scoped external
+RBAC (`deploy/84-appdb-external-driver-role.yaml`), and the `v1alpha1` soft-compat
+policy — is in **[docs/appdatabase-api.md](appdatabase-api.md)**.
+
+> **`DATABASE_URL_RO` fails closed.** When `roPool.enabled`, the operator emits a
+> forward-compatible `DATABASE_URL_RO` key pointing at the app's **own** apps-gateway
+> RO port. There is **no per-app RO serving endpoint yet** (a tracked p1
+> read-scaling/gateway follow-up: apps-gateway template-RO listener + per-app RO
+> computes), so the key **refuses to connect** today. By construction (writer DSN
+> with only the port swapped) it can **never** reach the shared primary
+> `compute-ro` pool — that would be cross-tenant exposure. Do not route production
+> reads at `DATABASE_URL_RO` until the endpoint ships; use `DATABASE_URL`.
+
 **Observe / debug:**
 
 ```sh

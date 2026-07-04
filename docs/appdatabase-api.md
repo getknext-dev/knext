@@ -100,18 +100,27 @@ port (`55432` → `55434`); same role, password, host and database. It is
 removed when it flips off — and **`PGPASSWORD` is never touched** (a live app is
 never locked out). The port is operator-configurable via `APPDB_GATEWAY_RO_PORT`.
 
-> ### ⚠️ The per-app RO **serving endpoint** is a tracked follow-up
-> `DATABASE_URL_RO` is the **stable contract key** an external driver injects for
-> reads. Today it points at the apps-gateway RO port, but the apps-gateway does
-> **not yet run a per-app RO lane**: the read-only pool (`compute-ro`, `pggw:55434`)
-> exists only for the **primary** single-DB path (`docs/connecting.md`), attached
-> to the primary timeline. Standing up **per-app** RO serving (an apps-gateway RO
-> listener + per-app RO computes on each app's branch) is a **read-scaling +
-> gateway lane** follow-up. **Until it lands, do not route production reads at
-> `DATABASE_URL_RO`** for a per-app database — the key is provisioned ahead of the
-> endpoint so the config contract is stable and knext needs no change when the
-> endpoint ships. Point read-your-writes and all correctness-critical reads at
-> `DATABASE_URL`.
+> ### ⚠️ The per-app RO **serving endpoint** is a tracked follow-up — the key fails CLOSED
+> `DATABASE_URL_RO` is the **stable, forward-compatible contract key** an external
+> driver injects for reads. It points at the app's **own** apps-gateway on the RO
+> port. The apps-gateway does **not yet run a per-app RO lane**, so today the key
+> **fails closed — a connection is refused.** That is deliberate and safe.
+>
+> **Hard safety guarantee (fail-closed, never the shared pool).** The RO DSN is the
+> writer DSN with **only the port swapped**, so its host is always the app's own
+> apps-gateway (`pggw-apps`). It can therefore **never** resolve to the shared
+> primary read-only pool (`compute-ro`, fronted by the *different* primary gateway
+> `pggw:55434` on the *primary* timeline) — routing a tenant's reads there would be
+> **cross-tenant data exposure**. Refused-until-ready is safe; a cross-tenant leak
+> would be critical. `_verify-operator.sh` asserts the RO DSN **refuses** rather
+> than returns data.
+>
+> Standing up **per-app** RO serving (an apps-gateway template-RO listener +
+> per-app RO computes on each app's branch) is a tracked **read-scaling + gateway**
+> follow-up (filed p1). **Until it lands, do not route production reads at
+> `DATABASE_URL_RO`** — point read-your-writes and all correctness-critical reads at
+> `DATABASE_URL`. The key is provisioned ahead of the endpoint so the Secret
+> contract stays stable and knext needs no change when the endpoint ships.
 
 ---
 

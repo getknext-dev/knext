@@ -276,6 +276,15 @@ func (d *Deps) setCondition(cr *AppDatabase, condType, status, reason, message s
 // password, host and database — it differs only by which gateway port fronts it
 // (docs/connecting.md two-DSN pattern). If the writer DSN does not contain the
 // writer port, it is returned unchanged (defensive — never fabricate an endpoint).
+//
+// SAFETY (fail-closed, non-negotiable): because only the PORT is swapped, the RO
+// DSN's HOST is always the SAME host as the writer — the app's own apps-gateway
+// (pggw-apps). It therefore can NEVER resolve to the shared primary RO pool
+// (compute-ro, which is fronted by the DIFFERENT primary gateway pggw:55434 on the
+// primary timeline) — that would be cross-tenant data exposure. Today pggw-apps
+// runs no RO listener, so the RO DSN fails CLOSED (connection refused) until the
+// per-app RO serving endpoint ships. Refused-until-ready is safe; a leak is not.
+// _verify-operator.sh asserts the RO DSN refuses rather than returns data.
 func roDSN(writerDSN string, writerPort, roPort int) string {
 	from := fmt.Sprintf(":%d/", writerPort)
 	to := fmt.Sprintf(":%d/", roPort)

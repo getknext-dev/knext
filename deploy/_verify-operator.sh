@@ -160,6 +160,31 @@ ok "roPool ON -> DATABASE_URL_RO emitted (app_$APP creds, RO port 55434, port-sw
 echo "    note: per-app RO SERVING endpoint is a tracked read-scaling/gateway follow-up;"
 echo "          this asserts the contract KEY, not a live RO connection (docs/appdatabase-api.md)."
 
+# SAFETY (hard rule): the RO DSN must FAIL CLOSED — refuse to connect — and must
+# NEVER resolve to the shared primary compute-ro pool (cross-tenant exposure). It
+# targets the app's own apps-gateway on the RO port, which runs no RO listener yet,
+# so a connect attempt must NOT succeed. Prove it refuses rather than returns data.
+# First: the host is the app's OWN apps-gateway, never the primary pggw where the
+# shared compute-ro pool lives.
+case "$RO" in
+  *@pggw-apps*:55434/$APP\?*) ;;
+  *) fail "SECURITY: RO DSN host is not the per-app apps-gateway (could reach the shared pool): $RO" ;;
+esac
+ROTRY="opgwro-$$"
+# PGCONNECT_TIMEOUT bounds the connect so a dropped/refused RO port fails fast
+# (pod -> Failed) instead of hanging on TCP retries.
+kubectl --context "$KCTX" -n "$NS" run "$ROTRY" --image=neondatabase/compute-node-v17:8464 --image-pull-policy=Never \
+  --env=PGCONNECT_TIMEOUT=5 --restart=Never --quiet --command -- psql "$RO" -tAw -c 'select current_database()' >/dev/null 2>&1 || true
+rphase=""; i=0
+while [ $i -lt 60 ]; do
+  rphase=$(K get pod "$ROTRY" -o jsonpath='{.status.phase}' 2>/dev/null || true)
+  case "$rphase" in Succeeded|Failed) break;; esac; i=$((i+1)); sleep 1
+done
+rout="$(K logs "$ROTRY" 2>&1 || true)"
+K delete pod "$ROTRY" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+[ "$rphase" != "Succeeded" ] || fail "SECURITY: RO DSN CONNECTED (must fail closed until the per-app RO endpoint exists): $rout"
+ok "RO DSN fails closed (did not connect, phase=$rphase) — never reaches the shared compute-ro pool"
+
 # Turn roPool OFF again -> the key is removed (idempotent toggle, password untouched).
 PW_BEFORE="$(app_pw "$APP")"
 K patch appdatabase "$APP" --type=merge -p '{"spec":{"roPool":{"enabled":false}}}' >/dev/null

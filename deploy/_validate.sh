@@ -18,8 +18,26 @@ ok "00-namespace.yaml applied"
 for f in [0-9][0-9]-*.yaml; do
   [ -e "$f" ] || fail "no numbered manifests found in deploy/"
   [ "$f" = 00-namespace.yaml ] && continue
-  kubectl apply --dry-run=server -f "$f" >/dev/null || fail "$f does not validate"
-  ok "$f validates (server dry-run)"
+  # Capture stderr (stdout discarded). On success this is empty and we move on.
+  if err="$(kubectl apply --dry-run=server -f "$f" 2>&1 >/dev/null)"; then
+    ok "$f validates (server dry-run)"
+    continue
+  fi
+  # #126: server dry-run REJECTS a re-apply that touches an immutable field on an
+  # ALREADY-APPLIED object — e.g. the completed storage-init Job (immutable
+  # spec.template/selector). That is not a manifest defect, but the old `|| fail`
+  # ABORTED the whole loop there, so the later manifests (notably 82/83, the
+  # AppDatabase CRD + operator) were NEVER validated — the guard that should have
+  # caught the #125 placeholder digest. Fall back to CLIENT dry-run (schema
+  # validation) for the immutable case so validation continues and still checks
+  # the YAML is well-formed.
+  if printf '%s' "$err" | grep -qi 'immutable'; then
+    kubectl apply --dry-run=client -f "$f" >/dev/null 2>&1 \
+      || fail "$f does not validate (client dry-run after immutable server-side reject): $err"
+    ok "$f validates (client dry-run; server rejects an immutable field on the live object — #126)"
+    continue
+  fi
+  fail "$f does not validate: $err"
 done
 
 # 2. contract: compute deployment must start at zero replicas
