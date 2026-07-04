@@ -192,6 +192,21 @@ kubectl -n scale-zero-pg get secret app-db-<app> -o jsonpath='{.data.DATABASE_UR
 # postgres://app_<app>:<per-app-password>@pggw-apps.scale-zero-pg.svc:55432/<app>?sslmode=disable
 ```
 
+**No tenant-existence oracle (issue #92).** Every refusal on the apps-gateway —
+a wrong `(user,database)` pair, a reserved name (`tmpl`/`warm`/`ro`), a malformed
+name, **and** a syntactically-valid pair for an app that does **not exist** — is
+collapsed to the byte-identical error `FATAL: password authentication failed for
+user "<user>"` (SQLSTATE `28P01`, the same message Postgres itself gives for a bad
+password). The gateway never returns "deployment not found" or any internal k8s
+object name, so an unauthenticated client on the open front door cannot enumerate
+which apps exist. The real cause is logged **server-side only**. A constant-floor
+delay (`GW_AUTH_FAIL_FLOOR_MS`, default 250 ms) equalises the latency of the
+gateway-side refusals so timing does not separate "unknown app" from "wrong pair".
+*Honest limit:* this closes the message-content oracle and the fast-fail timing
+gap; it does **not** mask the multi-second cold-**wake** latency a real app incurs
+on a wrong password (that path wakes the compute first) — closing that fully would
+mean delaying every refusal by a full wake, a DoS lever we deliberately avoid.
+
 The DSN **database name is the app handle**: it routes to `compute-<app>` and wakes
 it. The gateway rewrites the database to the served DB (`postgres`) before
 replaying startup, so every branch serves its inherited schema — you do **not**

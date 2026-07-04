@@ -78,10 +78,30 @@ func TestAppsGatewayRefusesUnauthorizedStartups(t *testing.T) {
 }
 
 // A legitimate per-app pair (user app_<db>) must pass authorization and proceed
-// to the wake path — so it must NOT get a 28P01 (it gets 57P03 from the
-// unreachable target instead, which is fine — authz let it through).
+// to the wake path. Since issue #92, a wake FAILURE now also returns the uniform
+// 28P01 (so a non-existent app is indistinguishable from a wrong password), so
+// SQLSTATE alone can no longer prove authz let the pair through. Instead we prove
+// it by observing that a wake was ATTEMPTED (the scaler was asked to scale
+// compute-orders) — a refused pair never reaches the scaler.
 func TestAppsGatewayAllowsMatchingAppPair(t *testing.T) {
-	if code := startupResult(t, newAppsGateway(t), "app_orders", "orders"); code == "28P01" {
-		t.Fatalf("matching app pair (app_orders/orders) was refused by authz; it must be allowed")
+	scaler := &notFoundScaler{}
+	_, addr := newAppsGatewayScaled(t, scaler, "10")
+
+	// Refused pair: authz rejects pre-wake, so the scaler is never called.
+	errorResponse(t, addr, "cloud_admin", "orders")
+	if got := scaler.scaledDeployments(); len(got) != 0 {
+		t.Fatalf("refused pair reached the wake path (scaled %v); must be refused pre-wake", got)
+	}
+
+	// Matching pair: authz allows it, so the wake path scales compute-orders.
+	errorResponse(t, addr, "app_orders", "orders")
+	found := false
+	for _, d := range scaler.scaledDeployments() {
+		if d == "compute-orders" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("matching pair (app_orders/orders) did not reach the wake path; scaled=%v", scaler.scaledDeployments())
 	}
 }

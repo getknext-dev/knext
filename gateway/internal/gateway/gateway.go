@@ -55,6 +55,7 @@ type Gateway struct {
 	metrics *metrics.Metrics
 	opts    wake.Opts
 	idleMs  int
+	floorMs int           // GW_AUTH_FAIL_FLOOR_MS: constant-floor delay on refusals
 	connSem chan struct{} // nil = unlimited (GW_MAX_CONNS)
 	tlsConf *tls.Config   // nil = TLS unconfigured: SSLRequest gets 'N'
 	log     func(string)
@@ -91,6 +92,7 @@ func New(env wake.Env, log func(string)) (*Gateway, error) {
 			RetryMs:          envInt(env, "GW_RETRY_MS", 250),
 		},
 		idleMs:  envInt(env, "GW_IDLE_MS", 300000),
+		floorMs: envInt(env, "GW_AUTH_FAIL_FLOOR_MS", 250),
 		tlsConf: tlsConf,
 		log:     log,
 		active:  map[string]*activeEntry{},
@@ -205,6 +207,7 @@ func (g *Gateway) Close() error {
 
 // handle reads the initial packet(s), declines SSL/GSS, then proxies a startup.
 func (g *Gateway) handle(client net.Conn) {
+	start := time.Now()
 	var buf []byte
 	readBuf := make([]byte, 4096)
 
@@ -277,7 +280,11 @@ func (g *Gateway) handle(client net.Conn) {
 				// compute is never woken — no info leak, no side effect.
 				if az, ok := g.driver.(systemAuthorizer); ok {
 					if err := az.Authorize(msg.Params["user"], systemID); err != nil {
-						g.fail(client, "28P01", err.Error())
+						// Uniform refusal + constant-floor delay so a wrong pair /
+						// reserved name is timing- and byte-indistinguishable from
+						// the non-existent-app wake failure below (issue #92).
+						g.authFloor(start)
+						g.fail(client, wake.AuthFailureCode, err.Error())
 						return
 					}
 				}
@@ -291,7 +298,7 @@ func (g *Gateway) handle(client net.Conn) {
 				}
 				pending := append([]byte(nil), rest...)
 				_ = client.SetReadDeadline(time.Time{})
-				g.proxy(client, startup, pending, target, msg.Params)
+				g.proxy(client, startup, pending, target, msg.Params, start)
 				return
 			}
 		}
@@ -314,8 +321,42 @@ func (g *Gateway) fail(client net.Conn, code, message string) {
 	_ = client.Close()
 }
 
+// authFloor blocks until at least floorMs has elapsed since the connection was
+// accepted, but ONLY on the apps-gateway (a systemAuthorizer driver). It gives
+// every gateway-side refusal — a pre-wake authz reject and a fast "app not found"
+// wake failure alike — a common minimum latency, so an attacker cannot use timing
+// to tell "reserved/wrong-pair" (µs) from "valid pair, unknown app" (a few ms of
+// k8s round-trip) apart (issue #92). It does NOT (and cannot cheaply) mask the
+// multi-second cold-wake latency of a REAL app — that channel is documented in
+// docs/connecting.md. Single-DB pggw (no authorizer) is never delayed.
+func (g *Gateway) authFloor(start time.Time) {
+	if _, ok := g.driver.(systemAuthorizer); !ok || g.floorMs <= 0 {
+		return
+	}
+	if rem := time.Duration(g.floorMs)*time.Millisecond - time.Since(start); rem > 0 {
+		time.Sleep(rem)
+	}
+}
+
+// computeUnavailable writes the client-facing error for a wake/resolve failure.
+// On the apps-gateway (template mode) the real cause is logged server-side only
+// and the client gets the SAME uniform 28P01 password-failure used for authz
+// refusals — so a non-existent app is indistinguishable from a wrong password and
+// no internal k8s object name reaches the wire (issue #92). The single-DB pggw
+// (no authorizer, closed NetworkPolicy, one known DB) keeps the descriptive
+// transient message that aids its operators.
+func (g *Gateway) computeUnavailable(client net.Conn, params map[string]string, start time.Time, err error) {
+	if _, ok := g.driver.(systemAuthorizer); ok {
+		g.authFloor(start)
+		_, _ = client.Write(proto.BuildErrorResponse(wake.AuthFailureCode, wake.UniformAuthFailure(params["user"])))
+	} else {
+		_, _ = client.Write(proto.BuildErrorResponse("57P03", "compute unavailable: "+err.Error()))
+	}
+	_ = client.Close()
+}
+
 // proxy wakes the compute, replays the startup packet, then pipes both ways.
-func (g *Gateway) proxy(client net.Conn, startupPacket, pendingRest []byte, target wake.Target, params map[string]string) {
+func (g *Gateway) proxy(client net.Conn, startupPacket, pendingRest []byte, target wake.Target, params map[string]string, start time.Time) {
 	g.connStarted(target)
 	g.metrics.ConnOpen(target.Key)
 
@@ -327,8 +368,7 @@ func (g *Gateway) proxy(client net.Conn, startupPacket, pendingRest []byte, targ
 		g.metrics.ConnClose(target.Key)
 		g.connEnded(target)
 		g.log("[gw] " + target.Key + ": " + err.Error())
-		_, _ = client.Write(proto.BuildErrorResponse("57P03", "compute unavailable: "+err.Error()))
-		_ = client.Close()
+		g.computeUnavailable(client, params, start, err)
 		return
 	}
 	if woke {
@@ -350,8 +390,7 @@ func (g *Gateway) proxy(client net.Conn, startupPacket, pendingRest []byte, targ
 		g.metrics.ConnClose(target.Key)
 		g.connEnded(target)
 		g.log("[gw] " + target.Key + ": " + err.Error())
-		_, _ = client.Write(proto.BuildErrorResponse("57P03", "compute unavailable: "+err.Error()))
-		_ = client.Close()
+		g.computeUnavailable(client, params, start, err)
 		return
 	}
 	if len(firstReply) > 0 {

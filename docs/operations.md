@@ -20,6 +20,7 @@ behavior, and troubleshooting.
 | `GW_CONNECT_TIMEOUT_MS` / `GW_RETRY_MS` | 1000 / 250 | per-attempt connect timeout / poll interval (deployed retry: 100) |
 | `GW_MAX_CONNS` | 0 (unlimited) | connection cap; excess gets a clean `53300`. Deployed: 90 — MUST stay under compute `max_connections=100` |
 | `GW_PEER_SELECTOR` | — | label selector for sibling gateways (peer-aware idle); empty disables |
+| `GW_AUTH_FAIL_FLOOR_MS` | 250 | apps-gateway only: constant-floor delay on refusals so unknown-app and wrong-pair are timing-comparable (issue #92); `0` disables |
 | `GW_POD_NAMESPACE` / `GW_POD_IP` | — | downward API; self-exclusion for the peer check |
 | `GW_TLS_CERT_FILE` / `GW_TLS_KEY_FILE` | — | front-door TLS keypair (PEM paths). Both set + loadable → gateway answers `SSLRequest` with `S` and wraps the wire (TLS 1.2+). Set-but-unloadable or half-set → gateway **fails fast at startup**. Unset → `SSLRequest` gets `N` (plaintext only). Deployed: mounted from Secret `pggw-tls` at `/etc/pggw-tls/`. |
 
@@ -885,6 +886,18 @@ reach another; the shared template/warm/RO computes are unreachable via the
 apps-gateway. Keep `GW_APP_ROLE_PREFIX`/`GW_RESERVED_SYSTEMS` (gateway) in
 lock-step with `APP_ROLE_PREFIX`/`RESERVED_NAMES` (`provision-app.sh`). Drill:
 `deploy/_verify-multitenant.sh` (section 6 denies cross-app + cloud_admin).
+
+**No existence oracle (issue #92).** Every apps-gateway refusal — wrong pair,
+reserved/malformed name, **or a valid pair for a non-existent app** (whose wake
+would fail) — returns the byte-identical `28P01 password authentication failed for
+user "<user>"`. Internal causes (`deployments.apps "compute-<x>" not found`, scale
+errors) are logged **server-side only**, never on the wire, so a client on the
+open front door cannot enumerate apps or harvest object names. `GW_AUTH_FAIL_FLOOR_MS`
+(default 250 ms) equalises refusal latency. Drill section 6b (`_verify-multitenant.sh`)
+asserts unknown-app == wrong-pair == reserved live; `TestAppsGatewayRefusalsAreByteIdentical`
++ `oracle_test.go` assert it in Go. See
+[connecting.md](connecting.md#multi-app--branch-per-app) for the honest timing
+limit (cold-wake latency on the wrong-password path is not masked).
 
 **Per-app idle (issue #75).** Sleep is decided **per app**: the peer-aware idle
 check (2-replica apps-gateway) reads each app's own connection count from the

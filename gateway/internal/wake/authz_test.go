@@ -85,21 +85,47 @@ func TestTemplateAuthorizeConfigurablePrefixAndReserved(t *testing.T) {
 
 // AuthError must NOT leak whether the target app exists: authorization is a pure
 // function of the (user,database) pair and never consults cluster state, so a
-// provisioned and an unprovisioned database yield the SAME generic "authentication
-// failed" refusal — no "database does not exist" oracle for tenant enumeration.
+// provisioned and an unprovisioned database yield the IDENTICAL UniformAuthFailure
+// refusal — no "database does not exist" oracle for tenant enumeration (issue #92).
 func TestAuthErrorDoesNotLeakExistence(t *testing.T) {
 	az := newTemplateAuthorizer(t, Env{})
 	// Same wrong user, one db that could exist and one that clearly does not:
-	// both must refuse with the identical message (no existence signal).
+	// both must refuse with the byte-identical message (no existence signal).
 	e1 := az.Authorize("cloud_admin", "orders")
 	e2 := az.Authorize("cloud_admin", "definitely-not-provisioned")
 	if e1 == nil || e2 == nil {
 		t.Fatal("both should be refused")
 	}
-	const generic = "authentication failed"
-	for _, e := range []error{e1, e2} {
-		if got := e.Error(); len(got) < len(generic) || got[:len(generic)] != generic {
-			t.Fatalf("refusal %q must use the generic %q phrasing (no existence oracle)", got, generic)
+	if e1.Error() != e2.Error() {
+		t.Fatalf("existence oracle: %q != %q", e1.Error(), e2.Error())
+	}
+	if got, want := e1.Error(), UniformAuthFailure("cloud_admin"); got != want {
+		t.Fatalf("refusal = %q, want the uniform %q", got, want)
+	}
+}
+
+// Every refusal class (malformed name, reserved name, wrong pair) must return the
+// IDENTICAL UniformAuthFailure keyed only on the client-supplied user — so an
+// attacker cannot even tell WHICH validation rule tripped, and (with the gateway
+// wake-failure path, tested in package gateway) a non-existent app is
+// indistinguishable from a wrong password (issue #92).
+func TestAuthorizeRefusalsAreUniformByUser(t *testing.T) {
+	az := newTemplateAuthorizer(t, Env{})
+	user := "app_ghost"
+	want := UniformAuthFailure(user)
+	// All three use the SAME user, so all three must be byte-identical.
+	cases := map[string]string{
+		"malformed db": "Bad.Name",
+		"reserved db":  "tmpl",
+		"wrong pair":   "orders", // app_ghost != app_orders
+	}
+	for name, db := range cases {
+		err := az.Authorize(user, db)
+		if err == nil {
+			t.Fatalf("%s: expected refusal", name)
+		}
+		if got := err.Error(); got != want {
+			t.Fatalf("%s: refusal = %q, want uniform %q", name, got, want)
 		}
 	}
 }

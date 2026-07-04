@@ -114,6 +114,26 @@ GDENY() { # $1 tag  $2 user  $3 pass  $4 db
   return 0  # denied — as required
 }
 
+# GERR — a gateway connect that MUST be refused; prints the psql FATAL message
+# line (the client-visible error text) so the caller can assert the apps-gateway
+# leaks NO existence oracle / internal object names (issue #92). Extracts just the
+# `FATAL: ...` tail so unrelated psql connection-noise does not affect the compare.
+GERR() { # $1 tag  $2 user  $3 pass  $4 db
+  local p="mterr-$$-$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+  local dsn="postgres://$2:$3@pggw-apps:55432/$4?sslmode=disable"
+  K run "$p" --image=neondatabase/compute-node-v17:8464 --image-pull-policy=Never \
+    --restart=Never --quiet --command -- psql "$dsn" -tA -w -c 'select 1' >/dev/null 2>&1 || true
+  local phase="" i=0
+  while [ $i -lt 60 ]; do
+    phase=$(K get pod "$p" -o jsonpath='{.status.phase}' 2>/dev/null || true)
+    case "$phase" in Succeeded|Failed) break;; esac; i=$((i+1)); sleep 1
+  done
+  local out; out=$(K logs "$p" 2>&1)
+  K delete pod "$p" --ignore-not-found --wait=false >/dev/null 2>&1
+  # Print the FATAL message tail (everything from the last 'FATAL:'), trimmed.
+  printf '%s\n' "$out" | grep -o 'FATAL:.*' | tail -1
+}
+
 # 0. preconditions
 K rollout status deploy/pggw-apps --timeout=120s >/dev/null || fail "apps-gateway not ready"
 ok "apps-gateway ready"
@@ -182,6 +202,30 @@ GDENY xtmpl "app_tmpl" "whatever" "tmpl" \
   || fail "reserved system 'tmpl' (template compute) was reachable through the gateway"
 ok "reserved system 'tmpl' DENIED (cannot mutate the shared template via the gateway)"
 
+# 6b. NO EXISTENCE ORACLE (issue #92) — the client-visible refusal for a
+#     NON-existent app (valid-syntax pair app_ghost/ghost, no such app) must be
+#     IDENTICAL to a wrong-pair and a reserved refusal, and must leak NO internal
+#     k8s object name ("compute-ghost", "deployments.apps", "not found"). All three
+#     use the SAME user (app_ghost) so the messages must match verbatim.
+echo "==> no tenant-existence oracle (issue #92)"
+E_UNKNOWN="$(GERR unknown app_ghost whatever ghost)"   # valid syntax, app does not exist
+E_WRONG="$(GERR wrongp  app_ghost whatever "$A")"       # app_ghost != app_$A (wrong pair)
+E_RESV="$(GERR resv     app_ghost whatever tmpl)"       # reserved system name
+echo "    unknown-app : $E_UNKNOWN"
+echo "    wrong-pair  : $E_WRONG"
+echo "    reserved    : $E_RESV"
+[ -n "$E_UNKNOWN" ] || fail "unknown-app produced no FATAL message (did it connect?!)"
+[ "$E_UNKNOWN" = "$E_WRONG" ] || fail "existence oracle: unknown-app '$E_UNKNOWN' != wrong-pair '$E_WRONG'"
+[ "$E_UNKNOWN" = "$E_RESV" ]  || fail "existence oracle: unknown-app '$E_UNKNOWN' != reserved '$E_RESV'"
+case "$E_UNKNOWN" in
+  *"password authentication failed for user \"app_ghost\""*) ;;
+  *) fail "refusal is not the uniform 28P01 password message: '$E_UNKNOWN'";;
+esac
+for leak in "compute-ghost" "compute-" "deployments.apps" "not found" "unavailable"; do
+  case "$E_UNKNOWN" in *"$leak"*) fail "refusal LEAKS internal detail '$leak': $E_UNKNOWN";; esac
+done
+ok "no existence oracle: unknown-app == wrong-pair == reserved, uniform 28P01, no k8s names leaked"
+
 # 7. PER-APP IDLE (issue #75) — with B busy on a held connection, idle A must still
 #    scale to zero on schedule. The OLD fleet-global peer check would keep A awake
 #    because SOME app (B) is active; the per-app check lets A sleep. We lower the
@@ -241,4 +285,4 @@ ok "re-create converged on the SAME timeline $CID (no orphan branch)"
 KCTX="$KCTX" NS="$NS" "$PROV" fsck >/dev/null || fail "fsck reported orphan timelines after converged create"
 ok "fsck: plane clean — no orphan timelines"
 
-echo "multi-tenant verification: isolation + tenant access control + per-app 0<->1 idle + crash-safe provisioning — PASSED"
+echo "multi-tenant verification: isolation + tenant access control + no existence oracle (#92) + per-app 0<->1 idle + crash-safe provisioning — PASSED"

@@ -29,12 +29,31 @@ import (
 )
 
 // AuthError is returned by Authorize on refusal. The gateway maps it to a clean
-// FATAL 28P01 (invalid_authorization_specification). The message is deliberately
-// uniform for the authorization cases so it does not reveal whether the target
-// database/app actually exists (no tenant-enumeration oracle).
+// FATAL 28P01. The message is UniformAuthFailure so it does not reveal whether
+// the target database/app actually exists (no tenant-enumeration oracle).
 type AuthError struct{ Msg string }
 
 func (e *AuthError) Error() string { return e.Msg }
+
+// AuthFailureCode is the SQLSTATE emitted for every uniform refusal on the
+// apps-gateway (28P01, invalid_password) — the same code Postgres uses for a bad
+// password, so a gateway-side refusal is indistinguishable from a backend one.
+const AuthFailureCode = "28P01"
+
+// UniformAuthFailure is the SINGLE client-facing refusal message the apps-gateway
+// shows for ANY authentication/authorization failure on a syntactically-parseable
+// startup: a wrong (user,database) pair, a reserved name, a malformed database, OR
+// a syntactically-valid pair whose app does not exist (wake/resolve fails). It is
+// byte-for-byte the message Postgres itself emits for a bad password (paired with
+// AuthFailureCode 28P01), keyed ONLY on the user string the client supplied.
+//
+// Because the message never depends on cluster state, "app absent" and "wrong
+// password" are indistinguishable to the client — this closes the tenant-existence
+// oracle and the internal-object-name disclosure (issue #92). The real cause
+// (k8s object names, scale errors) is logged server-side only, never on the wire.
+func UniformAuthFailure(user string) string {
+	return fmt.Sprintf("password authentication failed for user %q", user)
+}
 
 // rfc1123Label reports whether s is a valid RFC1123 DNS label: lowercase
 // alphanumerics and '-', not starting/ending with '-', 1..63 chars. This is
@@ -61,20 +80,25 @@ func rfc1123Label(s string) bool {
 // Authorize enforces the (user, database) tenant boundary for template mode.
 // Returns nil when the pair is a well-formed per-app pair, else an *AuthError.
 func (d *templateDriver) Authorize(user, database string) error {
+	// Every refusal returns the IDENTICAL UniformAuthFailure message (keyed only
+	// on the client-supplied user) so no branch leaks which class of failure it
+	// was — malformed name, reserved name, wrong pair, or (later, in the gateway)
+	// a valid pair for a non-existent app all look the same on the wire (#92).
 	if !rfc1123Label(database) {
-		// A malformed database name is a client error, not a tenancy oracle:
-		// naming the rule is safe and helps legitimate misconfig.
-		return &AuthError{Msg: fmt.Sprintf("invalid database name %q: must be a lowercase RFC1123 label ([a-z0-9-], not edge '-')", database)}
+		// Malformed name: a pure client syntax error, independent of cluster
+		// state. Still uniform so the front door never varies its message by
+		// input class. The naming rule is documented in docs/connecting.md.
+		return &AuthError{Msg: UniformAuthFailure(user)}
 	}
 	if d.reserved[database] {
 		// Reserved (tmpl/warm/ro/...) route to non-app computes (the shared
 		// template, warm/RO lanes). Uniform refusal — do not confirm they exist.
-		return &AuthError{Msg: fmt.Sprintf("authentication failed for database %q", database)}
+		return &AuthError{Msg: UniformAuthFailure(user)}
 	}
 	if want := d.rolePrefix + database; user != want {
 		// cloud_admin -> any app, or app_A -> db B: the user must be the app's
 		// own role. Uniform refusal (no oracle on which apps/roles exist).
-		return &AuthError{Msg: fmt.Sprintf("authentication failed for user %q on database %q", user, database)}
+		return &AuthError{Msg: UniformAuthFailure(user)}
 	}
 	return nil
 }

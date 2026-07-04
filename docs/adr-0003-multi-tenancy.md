@@ -171,10 +171,16 @@ one plane, all connects **through the apps-gateway**:
   1. **Gateway pre-wake authorization.** The apps-gateway (template mode) refuses
      any startup whose `(user, database)` is not `app_<db>/<db>`, whose database
      is not a valid RFC1123 label, or whose database is a reserved system name
-     (`tmpl`/`warm`/`ro`) — *before* it wakes any compute. Refusal is a clean
-     `28P01` with a generic message (no tenant-existence oracle). This alone stops
+     (`tmpl`/`warm`/`ro`) — *before* it wakes any compute. This alone stops
      cross-app DSN reuse, the `cloud_admin` path, and reaching the template/warm/RO
      computes through the apps-gateway. (`GW_APP_ROLE_PREFIX` / `GW_RESERVED_SYSTEMS`.)
+     Refusal is a clean `28P01`; and to close the tenant-existence oracle the v0.6.1
+     review found (issue #92), a valid-syntax pair for a **non-existent** app — whose
+     wake would otherwise fail with `deployments.apps "compute-<x>" not found` — is
+     mapped to the **byte-identical** `28P01 password authentication failed for user
+     "<user>"`, with the internal cause logged server-side only and a constant-floor
+     delay (`GW_AUTH_FAIL_FLOOR_MS`) equalising refusal latency. So "app absent",
+     "wrong pair", and "wrong password" are indistinguishable on the wire.
   2. **Per-app Postgres credential.** `provision-app.sh` mints a role `app_<app>`
      with a random md5 password into a Secret `app-db-<app>`; `compute_ctl` applies
      that login role from the spec every boot (the documented MVP behavior). So a
