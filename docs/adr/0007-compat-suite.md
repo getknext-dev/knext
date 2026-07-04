@@ -500,7 +500,12 @@ is why it reproduced in the prod flake-detection job on slow containers but almo
 locally."* Upstream additionally **suite-skipped five family files outright** ("too flaky") after
 v16.2.0 — #92163 (segment-cache-refresh), #92198 (prefetch-layout-sharing), #92162
 (per-page-dynamic-stale-time), #92199 (cached-navigations, all cases), #92195
-(client-cache.parallel-routes) — all still skipped at canary as of 2026-07-04.
+(client-cache.parallel-routes). Four are still skipped at canary as of 2026-07-04;
+cached-navigations' skips were **reverted** by #93798 (2026-05-13) and the file is fully live at
+canary — note the revert *predates* the #95301 fix (2026-07-02), and our v16.2.0 pin predates
+both, so the race is un-fixed in our lane and that file's membership rests on the #95301
+mechanism plus knext's own final-post-retry evidence (runs 28618585946, 28612654960), not on a
+live upstream skip.
 
 **Decision.** Files meeting the FAMILY BAR are quarantined at **file level** (a verbatim
 `rules.exclude` entry + a `level: "file"` `$knextQuarantines` record; their stale per-case

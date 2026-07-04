@@ -301,8 +301,12 @@ describe('test/deploy-tests-manifest.knext.json — honest exclusion ledger (#89
 // That is EXACTLY the observed signature. Upstream additionally suite-skipped
 // five family files outright ("too flaky") after v16.2.0: #92163 (refresh),
 // #92198 (prefetch-layout-sharing), #92162 (per-page-dynamic-stale-time),
-// #92199 (cached-navigations, all cases), #92195 (client-cache.parallel-routes)
-// — all still skipped at canary.
+// #92199 (cached-navigations, all cases), #92195 (client-cache.parallel-routes).
+// Four are still skipped at canary; cached-navigations' skips were REVERTED by
+// #93798 (2026-05-13) — the file is fully live at canary, and the revert
+// PREDATES the #95301 fix (2026-07-02), so its membership rests on #95301 plus
+// knext's OWN final-post-retry evidence, with the skip-then-revert history
+// cited honestly (guarded below via `upstreamSkipRevertPR`).
 //
 // POLICY (ADR-0007 graduation addendum §d, amending §c.1): per-case quarantine
 // stopped converging — across runs 28578203671…28701712403 a DIFFERENT family
@@ -337,55 +341,66 @@ interface KnextQuarantine {
  * least one FINAL (post-retry, 3/3) failure with the family signature across
  * the full-run record, and the shared root cause is upstream's client
  * segment-cache race (vercel/next.js#95301, fixed post-v16.2.0).
- * `upstreamSkipPR` marks files upstream ITSELF suite-skipped as "too flaky".
+ * `upstreamSkipPR` marks files upstream ITSELF suite-skipped as "too flaky";
+ * `upstreamSkipRevertPR` marks a later upstream REVERT of that skip (the file is
+ * live again at canary) — the ledger must then cite BOTH, and may not claim the
+ * file is still skipped.
  */
-const FAMILY_FILE_QUARANTINES: Record<string, { observedRuns: string[]; upstreamSkipPR?: number }> =
-  {
-    'test/e2e/app-dir/segment-cache/search-params/segment-cache-search-params.test.ts': {
-      observedRuns: ['28593534713', '28590478386'],
-    },
-    'test/e2e/app-dir/segment-cache/prefetch-layout-sharing/prefetch-layout-sharing.test.ts': {
-      observedRuns: ['28593534713', '28578203671'],
-      upstreamSkipPR: 92198,
-    },
-    'test/e2e/app-dir/segment-cache/refresh/segment-cache-refresh.test.ts': {
-      observedRuns: ['28593534713'],
-      upstreamSkipPR: 92163,
-    },
-    'test/e2e/app-dir/segment-cache/staleness/segment-cache-stale-time.test.ts': {
-      observedRuns: ['28596005486', '28590478386'],
-    },
-    'test/e2e/app-dir/segment-cache/staleness/segment-cache-per-page-dynamic-stale-time.test.ts': {
-      observedRuns: ['28578203671', '28596005486', '28607626868', '28700392845'],
-      upstreamSkipPR: 92162,
-    },
-    'test/e2e/app-dir/segment-cache/vary-params/vary-params.test.ts': {
-      observedRuns: ['28578203671', '28596005486', '28590478386', '28607626868'],
-    },
-    'test/e2e/app-dir/segment-cache/cached-navigations/cached-navigations.test.ts': {
-      observedRuns: ['28618585946', '28612654960'],
-      upstreamSkipPR: 92199,
-    },
-    // #214: the newest member — final-past-retries in run 28701712403 (shard 3/16),
-    // a DIFFERENT case hung 60s on each of the 3 attempts (test.ts:232, :280, :57)
-    // while 9/11 cases passed per attempt.
-    'test/e2e/app-dir/segment-cache/basic/segment-cache-basic.test.ts': {
-      observedRuns: ['28701712403'],
-    },
-    'test/e2e/app-dir/app-client-cache/client-cache.parallel-routes.test.ts': {
-      observedRuns: ['28597872225'],
-      upstreamSkipPR: 92195,
-    },
-    'test/e2e/app-dir/app-prefetch/prefetching.test.ts': {
-      observedRuns: ['28597872225', '28593534713', '28590478386'],
-    },
-    'test/e2e/app-dir/optimistic-routing/optimistic-routing.test.ts': {
-      observedRuns: ['28601386408', '28593534713'],
-    },
-    'test/e2e/app-dir/prefetch-true-instant/prefetch-true-instant.test.ts': {
-      observedRuns: ['28612654960', '28607626868'],
-    },
-  };
+const FAMILY_FILE_QUARANTINES: Record<
+  string,
+  { observedRuns: string[]; upstreamSkipPR?: number; upstreamSkipRevertPR?: number }
+> = {
+  'test/e2e/app-dir/segment-cache/search-params/segment-cache-search-params.test.ts': {
+    observedRuns: ['28593534713', '28590478386'],
+  },
+  'test/e2e/app-dir/segment-cache/prefetch-layout-sharing/prefetch-layout-sharing.test.ts': {
+    observedRuns: ['28593534713', '28578203671'],
+    upstreamSkipPR: 92198,
+  },
+  'test/e2e/app-dir/segment-cache/refresh/segment-cache-refresh.test.ts': {
+    observedRuns: ['28593534713'],
+    upstreamSkipPR: 92163,
+  },
+  'test/e2e/app-dir/segment-cache/staleness/segment-cache-stale-time.test.ts': {
+    observedRuns: ['28596005486', '28590478386'],
+  },
+  'test/e2e/app-dir/segment-cache/staleness/segment-cache-per-page-dynamic-stale-time.test.ts': {
+    observedRuns: ['28578203671', '28596005486', '28607626868', '28700392845'],
+    upstreamSkipPR: 92162,
+  },
+  'test/e2e/app-dir/segment-cache/vary-params/vary-params.test.ts': {
+    observedRuns: ['28578203671', '28596005486', '28590478386', '28607626868'],
+  },
+  // Skip-then-REVERT history: #92199 (2026-04-15) it.skip'd all its cases as
+  // flaky, #93798 (2026-05-13) reverted — live at canary. The revert PREDATES
+  // the #95301 root-cause fix (2026-07-02) and our v16.2.0 pin predates both,
+  // so the race is un-fixed in our lane; membership rests on #95301 + knext's
+  // own final-post-retry evidence.
+  'test/e2e/app-dir/segment-cache/cached-navigations/cached-navigations.test.ts': {
+    observedRuns: ['28618585946', '28612654960'],
+    upstreamSkipPR: 92199,
+    upstreamSkipRevertPR: 93798,
+  },
+  // #214: the newest member — final-past-retries in run 28701712403 (shard 3/16),
+  // a DIFFERENT case hung 60s on each of the 3 attempts (test.ts:232, :280, :57)
+  // while 9/11 cases passed per attempt.
+  'test/e2e/app-dir/segment-cache/basic/segment-cache-basic.test.ts': {
+    observedRuns: ['28701712403'],
+  },
+  'test/e2e/app-dir/app-client-cache/client-cache.parallel-routes.test.ts': {
+    observedRuns: ['28597872225'],
+    upstreamSkipPR: 92195,
+  },
+  'test/e2e/app-dir/app-prefetch/prefetching.test.ts': {
+    observedRuns: ['28597872225', '28593534713', '28590478386'],
+  },
+  'test/e2e/app-dir/optimistic-routing/optimistic-routing.test.ts': {
+    observedRuns: ['28601386408', '28593534713'],
+  },
+  'test/e2e/app-dir/prefetch-true-instant/prefetch-true-instant.test.ts': {
+    observedRuns: ['28612654960', '28607626868'],
+  },
+};
 
 // Per-case quarantines OUTSIDE the family keep the original §c.1 mechanics:
 // exact observed cases only, never whole files.
@@ -449,7 +464,9 @@ describe('deploy-tests-manifest — #214 family-level quarantine (ADR-0007 §d)'
   });
 
   it('family provenance cites the upstream ROOT-CAUSE fix (vercel/next.js#95301) — and the upstream suite-skip PR where one exists', () => {
-    for (const [file, { upstreamSkipPR }] of Object.entries(FAMILY_FILE_QUARANTINES)) {
+    for (const [file, { upstreamSkipPR, upstreamSkipRevertPR }] of Object.entries(
+      FAMILY_FILE_QUARANTINES,
+    )) {
       const ledger = quarantines.find((q) => q.test === file);
       expect(
         /#95301/.test(ledger?.provenance ?? ''),
@@ -461,6 +478,20 @@ describe('deploy-tests-manifest — #214 family-level quarantine (ADR-0007 §d)'
           new RegExp(`#${upstreamSkipPR}`).test(ledger?.provenance ?? ''),
           `${file}: provenance must cite upstream's own suite-skip PR #${upstreamSkipPR}`,
         ).toBe(true);
+      }
+      if (upstreamSkipRevertPR !== undefined) {
+        // Honesty on the citation surface (#215 gate): when upstream REVERTED
+        // its skip, the ledger must cite the revert PR too, and must NOT claim
+        // the file is still skipped upstream — that would be a false citation.
+        expect(
+          new RegExp(`#${upstreamSkipRevertPR}`).test(ledger?.provenance ?? ''),
+          `${file}: upstream reverted its skip — provenance must cite the revert PR #${upstreamSkipRevertPR}`,
+        ).toBe(true);
+        expect(
+          /still skipped at canary/i.test(ledger?.provenance ?? ''),
+          `${file}: provenance claims the file is still skipped at canary, but upstream ` +
+            `reverted the skip in #${upstreamSkipRevertPR} — correct the citation`,
+        ).toBe(false);
       }
     }
   });
