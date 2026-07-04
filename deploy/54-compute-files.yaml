@@ -260,6 +260,22 @@ data:
     sed -e "s|TENANT_ID|${TENANT_ID}|g" -e "s|TIMELINE_ID|${TIMELINE_ID}|g" \
         -e "s|CLOUD_ADMIN_MD5_PLACEHOLDER|${CLOUD_ADMIN_MD5}|g" "$SRC" > "$DST"
 
+    # Per-app connection cap (issue #89, tenant quotas). When PG_MAX_CONNECTIONS is
+    # set (per-app computes get it from compute-config-<app>), override ONLY the
+    # max_connections value in the rendered spec so an operator can bound one
+    # tenant's server-side backends below the 100 default. Additive + surgical:
+    # absent -> the spec is byte-for-byte unchanged (primary single-DB / tmpl / any
+    # compute without the var), and config.json is untouched (warm/ro entrypoints
+    # unaffected). Each app is its own Postgres, so this is the per-app bound; a
+    # runaway app cannot exhaust a neighbour's backends. (The apps-gateway
+    # GW_MAX_CONNS is a separate process-wide goroutine ceiling — see ADR-0003.)
+    if [ -n "${PG_MAX_CONNECTIONS:-}" ]; then
+      echo "Applying per-app max_connections=${PG_MAX_CONNECTIONS}"
+      awk -v mc="${PG_MAX_CONNECTIONS}" '
+        prev ~ /"name": "max_connections"/ && /"value":/ { sub(/"value": "[0-9]+"/, "\"value\": \"" mc "\"") }
+        { print; prev=$0 }' "$DST" > "$DST.tmp" && mv "$DST.tmp" "$DST"
+    fi
+
     # Per-app role (issue #74, branch-per-app tenant isolation). When BOTH APP_ROLE
     # and APP_ROLE_MD5 are set (per-app computes get them from compute-config-<app>
     # and the Secret app-db-<app>), inject an extra LOGIN role into the spec's roles

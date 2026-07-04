@@ -99,6 +99,47 @@ proves, on the OKE plane:
 Per-app credential + role injection add **no measurable** provision-time cost (the
 Secret + one spec role are applied in the same window; provision stays ~4s).
 
+### Branch-per-app scale ceiling (#86) — live-measured 2026-07-04
+
+`deploy/_verify-scale-ceiling.sh` provisioned N apps on **one** shared plane and
+measured what ADR-0003's "tens/low-hundreds" claim rested on but had only asserted
+(prior proof was 2 apps). Two runs on OKE (`context-ckmva7v7zvq`), `neon:8464`:
+
+| Measure | N=30 run | N=20 run | Reading |
+|---|---|---|---|
+| **Apps provisioned on one plane** | **30** ✅ | **20** ✅ | demonstrated ceiling: **tens of apps** |
+| Provision latency (create, replicas 0) | p50 **10.28s** / p95 10.82s | p50 **10.07s** / p95 10.53s | **RTT-bound** from an out-of-region workstation (~8–10 `kubectl`+pageserver round-trips to me-abudhabi-1 per create); the plane-side branch create is still ~1s. In-cluster/CI provisioning is far faster |
+| Template `pitr_history_size` | 2 092 952 → **2 092 952 B** (Δ0) | flat | **FLAT in branch count** — all branches pin the *same* template LSN, so the feared unbounded WAL pin does **not** materialise |
+| Safekeeper apps WAL dirs | 3 → **2** (no growth) | flat | sleeping apps (replicas 0) run no walproposer ⇒ **zero** per-branch safekeeper WAL |
+| Control-plane objects | **30/30/30/30** (Deploy/Svc/CM/Secret) | 20/20/20/20 | **linear** — 1 of each per app |
+| Cold-wake a sampled subset through the gateway | routed to the right branch ✅ | routed ✅ | each app wakes to **its own** branch; a **pooled/retrying** client (like knext) rides through the first-connect role-apply window (bare one-shot `psql` can see a transient `28P01` — see below) |
+
+**Honest ceiling:** **tens of apps on one plane is demonstrated** (30 provisioned,
+footprint flat/linear). Low-hundreds is plausible on plane resources but **not yet
+drilled**; thousands / high-churn per-PR-preview is **out of scope** for the imperative
+path (that regime is what the deferred CRD operator, ADR-0004, is for). The drill is
+self-cleaning (destroys every app + sweeps orphans on exit).
+
+**Cold-wake role-apply race (found by this drill):** a freshly-woken compute opens its
+Postgres port a beat before `compute_ctl` finishes applying the per-app login role, so
+a one-shot first connect can race and see `28P01`. A connection **pool** (knext) or a
+retrying client connects; not a data/availability defect. The drill's wake client
+retries for exactly this reason.
+
+### Per-app tenant quotas (#89) — live-verified 2026-07-04
+
+`deploy/_verify-tenant-quotas.sh`, two apps on one plane, one hostile:
+
+| Property | Result | How |
+|---|---|---|
+| **Per-app `max_connections` enforced + independent** | hostile app capped at **12**, victim unchanged at **100** | `--max-conns` → `PG_MAX_CONNECTIONS` in the app ConfigMap → the compute entrypoint sets it in *that app's* Postgres only |
+| **CPU limit rendered** | hostile compute has a CPU limit (**250m**) | template now renders a CPU *limit* (was absent — the noisy-neighbour hole); a CPU burn is throttled to its allotment |
+| **Noisy-neighbour contained** | victim **wakes + serves** `select 1`/`select 42` through the shared apps-gateway **while** the hostile app floods **20** gateway connections + burns CPU | each app is its own Postgres; the hostile flood is bounded by its own cap (**≤12** backends observed), so the plane is not exhausted |
+
+**Caveat:** the apps-gateway `GW_MAX_CONNS=90` is a **process-wide** goroutine ceiling
+(OOM guard), **not** per-app; a true per-`{system}` gateway slot cap is a fast-follow.
+Per-app Postgres `max_connections` is the enforced per-tenant bound today.
+
 ## Reliability drills (RTO)
 
 | Drill | Local | OKE | What it proves |

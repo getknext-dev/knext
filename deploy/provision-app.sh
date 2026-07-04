@@ -15,7 +15,11 @@
 #
 # Usage:
 #   provision-app.sh init-plane   [--schema FILE]        # one-time: apps tenant + template timeline + base schema
-#   provision-app.sh create  <app> [--replicas N]        # branch the template -> per-app compute (default replicas 0)
+#   provision-app.sh create  <app> [--replicas N] \       # branch the template -> per-app compute (default replicas 0)
+#     [--cpu-request 250m] [--cpu-limit 1000m] \          # per-app quota (issue #89): CPU request/limit,
+#     [--mem-request 256Mi] [--mem-limit 1Gi] \           #   memory request/limit, and Postgres max_connections.
+#     [--max-conns 100]                                    #   Persisted in the ConfigMap; re-create preserves them.
+#   provision-app.sh render  <app> [quota flags]          # print the rendered per-app manifest (no cluster; for tests/preview)
 #   provision-app.sh destroy <app> [--keep-timeline]     # remove k8s objects AND reclaim the timeline BY DEFAULT
 #   provision-app.sh reclaim-orphans                     # reclaim every orphan timeline (no owning ConfigMap) + drain pending SK-deletes
 #   provision-app.sh list                                # list apps tenant timelines
@@ -63,6 +67,19 @@ APP_ROLE_PREFIX="${APP_ROLE_PREFIX:-app_}" # must match the gateway's GW_APP_ROL
 # computes (the shared template / warm / RO lanes). Kept in lock-step with the
 # apps-gateway's GW_RESERVED_SYSTEMS (deploy/81-apps-gateway.yaml).
 RESERVED_NAMES="${RESERVED_NAMES:-tmpl warm ro}"
+
+# Per-app quota defaults (issue #89, tenant quotas). Each app's compute gets a CPU
+# request+limit, a memory request+limit, and a Postgres max_connections cap so one
+# runaway tenant cannot starve the shared node (CPU/mem) or open unbounded backends
+# (connections). Overridable per-app on `create` (--cpu-request/--cpu-limit/
+# --mem-request/--mem-limit/--max-conns) and persisted in the app's ConfigMap so an
+# idempotent re-`create` / `fsck --converge` preserves them (readback below). A CPU
+# LIMIT is now rendered (was absent) — the noisy-neighbour bound ADR-0003 lacked.
+DEF_CPU_REQUEST="${DEF_CPU_REQUEST:-250m}"
+DEF_CPU_LIMIT="${DEF_CPU_LIMIT:-1000m}"
+DEF_MEM_REQUEST="${DEF_MEM_REQUEST:-256Mi}"
+DEF_MEM_LIMIT="${DEF_MEM_LIMIT:-1Gi}"
+DEF_MAX_CONNS="${DEF_MAX_CONNS:-100}" # matches the shared compute default (config.json)
 
 SK_REPLICAS="${SK_REPLICAS:-3}" # safekeeper StatefulSet size (52-safekeeper.yaml)
 # Durable record of safekeeper timeline-DELETEs that failed (a safekeeper down at
@@ -157,12 +174,48 @@ ensure_tenant() {
     "http://localhost:9898/v1/tenant/$APPS_TENANT/location_config" >/dev/null
 }
 
-# Render + apply a per-app compute (ConfigMap + Deployment + Service).
-apply_app_compute() {
+# render_app_compute — substitute the per-app compute template to STDOUT (no
+# cluster). Positional quota args default to the DEF_* knobs so the seed-time tmpl
+# compute and any caller that does not care about quotas render unchanged. This is
+# the pure, testable seam (see `render` subcommand + test_provision-app.sh).
+render_app_compute() {
   local app="$1" tl="$2" replicas="$3"
+  local cpu_req="${4:-$DEF_CPU_REQUEST}" cpu_lim="${5:-$DEF_CPU_LIMIT}"
+  local mem_req="${6:-$DEF_MEM_REQUEST}" mem_lim="${7:-$DEF_MEM_LIMIT}"
+  local max_conns="${8:-$DEF_MAX_CONNS}"
   sed -e "s/__APP__/$app/g" -e "s/__TENANT_ID__/$APPS_TENANT/g" \
       -e "s/__TIMELINE_ID__/$tl/g" -e "s/__REPLICAS__/$replicas/g" \
-      "$HERE/compute-app.template.yaml" | K apply -f -
+      -e "s/__CPU_REQ__/$cpu_req/g" -e "s/__CPU_LIM__/$cpu_lim/g" \
+      -e "s/__MEM_REQ__/$mem_req/g" -e "s/__MEM_LIM__/$mem_lim/g" \
+      -e "s/__MAX_CONNS__/$max_conns/g" \
+      "$HERE/compute-app.template.yaml"
+}
+
+# Render + apply a per-app compute (ConfigMap + Deployment + Service).
+apply_app_compute() { render_app_compute "$@" | K apply -f -; }
+
+# app_cfg <app> <key> — echo a data key from the app's compute-config ConfigMap (or
+# empty). Used to read back persisted quota knobs on an idempotent re-`create`.
+app_cfg() { K get configmap "compute-config-$1" -o jsonpath="{.data.$2}" 2>/dev/null || true; }
+
+# Parse the shared quota flags into Q_CPU_REQ/Q_CPU_LIM/Q_MEM_REQ/Q_MEM_LIM/
+# Q_MAX_CONNS (empty = "not set on the command line", resolved later) and the
+# remaining non-quota args into Q_REST. Sets GLOBALS (must NOT be called in a
+# command-substitution subshell, or the assignments are lost). The caller does:
+#   parse_quota_flags "$@"; set -- $Q_REST
+Q_CPU_REQ="" Q_CPU_LIM="" Q_MEM_REQ="" Q_MEM_LIM="" Q_MAX_CONNS="" Q_REST=""
+parse_quota_flags() {
+  Q_CPU_REQ="" Q_CPU_LIM="" Q_MEM_REQ="" Q_MEM_LIM="" Q_MAX_CONNS="" Q_REST=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --cpu-request) Q_CPU_REQ="$2"; shift 2;;
+      --cpu-limit)   Q_CPU_LIM="$2"; shift 2;;
+      --mem-request) Q_MEM_REQ="$2"; shift 2;;
+      --mem-limit)   Q_MEM_LIM="$2"; shift 2;;
+      --max-conns)   Q_MAX_CONNS="$2"; shift 2;;
+      *) Q_REST="$Q_REST${Q_REST:+ }$1"; shift;;
+    esac
+  done
 }
 
 cmd_init_plane() {
@@ -197,9 +250,23 @@ cmd_init_plane() {
 cmd_create() {
   local app="${1:-}"; shift || true
   local replicas=0
+  # Split quota flags out first (sets Q_* globals + Q_REST), then parse the rest.
+  parse_quota_flags "$@"
+  # shellcheck disable=SC2086
+  set -- $Q_REST
   while [ $# -gt 0 ]; do case "$1" in --replicas) replicas="$2"; shift 2;; *) die "unknown flag $1";; esac; done
   validate_app_name "$app"                # issue #79: fail fast on bad/reserved names
   tl_exists "$TEMPLATE_TL" || die "template timeline missing — run 'init-plane' first"
+
+  # Resolve each quota knob: explicit flag > persisted ConfigMap value (idempotent
+  # re-create / fsck --converge preserves a customized app's limits) > default.
+  local cpu_req cpu_lim mem_req mem_lim max_conns
+  cpu_req="${Q_CPU_REQ:-$(app_cfg "$app" QUOTA_CPU_REQUEST)}"; cpu_req="${cpu_req:-$DEF_CPU_REQUEST}"
+  cpu_lim="${Q_CPU_LIM:-$(app_cfg "$app" QUOTA_CPU_LIMIT)}";   cpu_lim="${cpu_lim:-$DEF_CPU_LIMIT}"
+  mem_req="${Q_MEM_REQ:-$(app_cfg "$app" QUOTA_MEM_REQUEST)}"; mem_req="${mem_req:-$DEF_MEM_REQUEST}"
+  mem_lim="${Q_MEM_LIM:-$(app_cfg "$app" QUOTA_MEM_LIMIT)}";   mem_lim="${mem_lim:-$DEF_MEM_LIMIT}"
+  max_conns="${Q_MAX_CONNS:-$(app_cfg "$app" PG_MAX_CONNECTIONS)}"; max_conns="${max_conns:-$DEF_MAX_CONNS}"
+
   local t0; t0="$(python3 -c 'import time;print(time.time())')"
 
   # 1. Per-app credential (Secret) — idempotent, minted BEFORE the branch so a
@@ -214,8 +281,8 @@ cmd_create() {
   #    owns the branch — BEFORE the pageserver branch call. A Deployment at 0
   #    starts nothing. A crash here leaves a ConfigMap but no branch; re-running
   #    reads the id back and branches the SAME id (converges, no orphan).
-  log "recording intent: compute-config-$app (timeline $tl, role $role) before branch"
-  apply_app_compute "$app" "$tl" 0 >/dev/null
+  log "recording intent: compute-config-$app (timeline $tl, role $role, quota cpu=$cpu_req/$cpu_lim mem=$mem_req/$mem_lim max_conns=$max_conns) before branch"
+  apply_app_compute "$app" "$tl" 0 "$cpu_req" "$cpu_lim" "$mem_req" "$mem_lim" "$max_conns" >/dev/null
 
   # 3. Branch the template (durable on the pageserver). Idempotent on the id.
   if tl_exists "$tl"; then
@@ -544,13 +611,31 @@ cmd_rotate_cred() {
   log "rotation done. Consumers must re-read Secret app-db-$app (new PGPASSWORD/DATABASE_URL)."
 }
 
+# cmd_render prints the rendered per-app compute manifest to stdout WITHOUT touching
+# the cluster (no ConfigMap readback) — the testable seam for the quota substitution
+# (issue #89, test_provision-app.sh). Quota flags resolve to their command-line value
+# or the DEF_* default; the timeline is a visible placeholder.
+cmd_render() {
+  local app="${1:-}"; shift || true
+  parse_quota_flags "$@"
+  # shellcheck disable=SC2086
+  set -- $Q_REST
+  [ $# -eq 0 ] || die "unknown flag $1"
+  validate_app_name "$app"
+  render_app_compute "$app" "00000000000000000000000000000000" 0 \
+    "${Q_CPU_REQ:-$DEF_CPU_REQUEST}" "${Q_CPU_LIM:-$DEF_CPU_LIMIT}" \
+    "${Q_MEM_REQ:-$DEF_MEM_REQUEST}" "${Q_MEM_LIM:-$DEF_MEM_LIMIT}" \
+    "${Q_MAX_CONNS:-$DEF_MAX_CONNS}"
+}
+
 case "${1:-}" in
   init-plane)      shift; cmd_init_plane "$@";;
   create)          shift; cmd_create "$@";;
+  render)          shift; cmd_render "$@";;
   destroy)         shift; cmd_destroy "$@";;
   reclaim-orphans) shift; cmd_reclaim_orphans "$@";;
   list)            shift; cmd_list "$@";;
   fsck)            shift; cmd_fsck "$@";;
   rotate-cred)     shift; cmd_rotate_cred "$@";;
-  *) die "usage: provision-app.sh {init-plane|create <app>|destroy <app> [--keep-timeline]|reclaim-orphans|list|fsck [--converge]|rotate-cred <app> [--bounce]}";;
+  *) die "usage: provision-app.sh {init-plane|create <app> [--replicas N] [--cpu-request R] [--cpu-limit L] [--mem-request R] [--mem-limit L] [--max-conns N]|render <app> [quota flags]|destroy <app> [--keep-timeline]|reclaim-orphans|list|fsck [--converge]|rotate-cred <app> [--bounce]}";;
 esac

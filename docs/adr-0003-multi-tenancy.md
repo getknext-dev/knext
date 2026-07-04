@@ -205,34 +205,71 @@ one plane, all connects **through the apps-gateway**:
   with no owning ConfigMap) and exits non-zero.
 - **Isolation is at the timeline level, not the tenant level.** All app branches
   share one pageserver, one safekeeper quorum, and one tenant. Data is isolated
-  (each timeline is a separate logical DB history — proven), but **noisy-neighbour
-  and availability are shared**: a pageserver stall or safekeeper quorum loss
-  affects every app. The pageserver is a single read SPOF mitigated by the warm
-  standby (`57-pageserver-standby.yaml`); that mitigation now covers all apps at
-  once — an upside (one thing to run) and a risk (one thing to lose).
-- **Branches pin ancestor history.** A child timeline holds the template's history
-  from its branch LSN; the template's WAL/pages cannot be GC'd below the oldest
-  live branch point. `pitr_history_size` on the template grows with the number and
-  age of branches. Dropping an app **deletes its timeline by default**
-  (`provision-app.sh destroy <app>`, #91) so the pin is released on the obvious
-  command; `--keep-timeline` retains it deliberately and leaves a reclaimable orphan
-  (swept by `reclaim-orphans`). The WAL-janitor / PITR windows (issue #19) are
-  template-wide, not per-app.
-- **Per-app compute cost is real.** Each awake app is one compute pod (250m CPU /
-  256Mi req). Idle apps cost zero compute (scale-to-zero) but each holds a branch
-  (storage) and a Deployment/Service/ConfigMap (control-plane) footprint. This
-  scales to tens/low-hundreds of apps on one plane, not thousands.
+  (each timeline is a separate logical DB history — proven), but **availability is
+  shared**: a pageserver stall or safekeeper quorum loss affects every app. The
+  pageserver is a single read SPOF mitigated by the warm standby
+  (`57-pageserver-standby.yaml`); that mitigation now covers all apps at once — an
+  upside (one thing to run) and a risk (one thing to lose). **Noisy-neighbour is now
+  BOUNDED** (issue #89, was unbounded): each app's compute carries a per-app CPU
+  request+limit, memory request+limit, and a per-app Postgres `max_connections` cap
+  (`provision-app.sh create --cpu-limit/--mem-limit/--max-conns …`), so one runaway
+  tenant cannot starve the node or open unbounded backends. Because each app is its
+  own Postgres, the connection bound is per-app by construction. **Note:** the
+  apps-gateway `GW_MAX_CONNS` is a **process-wide** goroutine ceiling shared across
+  all apps (a connection-storm OOM guard), **not** a per-app cap — a per-`{system}`
+  gateway slot cap is a fast-follow. Drill: `_verify-tenant-quotas.sh`.
+- **Branches pin ancestor history — but the pin is FLAT in branch count (measured,
+  #86).** A child timeline holds the template's history from its branch LSN; the
+  template's WAL/pages cannot be GC'd below the oldest live branch point. Crucially,
+  every app branches from the **same** template `last_record_lsn`, so N branches pin
+  the **same** point — the scale-ceiling drill measured the template's
+  `pitr_history_size` **unchanged** across N branches (it grows with branch *age/
+  divergence past distinct LSNs*, not branch *count* at a shared LSN). Sleeping apps
+  also hold **zero** safekeeper WAL (a branch at replicas 0 never runs walproposer).
+  Dropping an app **deletes its timeline by default** (`provision-app.sh destroy
+  <app>`, #91) so any pin is released on the obvious command; `--keep-timeline`
+  retains it deliberately and leaves a reclaimable orphan (swept by
+  `reclaim-orphans`). The WAL-janitor / PITR windows (issue #19) are template-wide.
+- **Per-app compute cost is real; the DEMONSTRATED ceiling is tens of apps on one
+  plane (issue #86).** Each awake app is one compute pod (default 250m/1000m CPU
+  request/limit, 256Mi/1Gi mem). Idle apps cost **zero** compute (scale-to-zero) and
+  zero safekeeper WAL; each holds a branch (storage) and a linear
+  Deployment/Service/ConfigMap/Secret (control-plane) footprint. The scale-ceiling
+  drill (`_verify-scale-ceiling.sh`) **provisioned 30 apps on one shared plane** with
+  flat template WAL pin, flat safekeeper WAL, and linear control-plane growth; cold-
+  wake still routes each app to its own branch (a pooled/retrying client rides
+  through the first-connect role-apply window — see below). The honest bound is
+  therefore **tens of apps on one plane** (low-hundreds plausible on plane resources,
+  not yet drilled); **not thousands / not high-churn per-PR-preview** — that regime is
+  what a CRD operator (ADR-0004) is for. Exact numbers: `docs/BENCHMARKS.md`
+  ("Branch-per-app scale ceiling").
+- **Cold-wake role-apply race (measured, #86).** A freshly-woken compute opens its
+  Postgres port a beat before `compute_ctl` finishes applying the per-app login role,
+  so a **one-shot** client's very first connect can see a transient `28P01`. A knext
+  app (connection **pool**) retries and connects; this is a first-connect timing
+  window, not a data/availability defect. Documented in `docs/operations.md`.
 - **Schema template drift.** Apps branch from the template *as it was at their
   branch LSN*. Rolling out a new base migration to the template does **not**
   retroactively update existing app branches — they own their schema after
   branching (that's the point). A migration runner per app is the app's concern
   (knext owns migrations); the template is a fast-start mold, not a live parent.
-- **`max_connections` is per-app.** `GW_MAX_CONNS=90` on the apps-gateway bounds
-  connections *per app compute* (each app has its own compute), not globally.
-- **Provisioning is imperative today.** `provision-app.sh` is operator/CI tooling,
-  not a controller. A CRD-driven `AppDatabase` operator is the productization path
-  if app churn grows; out of scope for this MVP (single storage plane, tens of
-  apps).
+- **Connection bounds — corrected (issue #89).** Postgres `max_connections` is
+  **per-app** (each app is its own compute/Postgres; default 100, tunable per app via
+  `--max-conns`). The apps-gateway `GW_MAX_CONNS=90`, by contrast, is a
+  **process-wide** goroutine ceiling on `pggw-apps` shared across *all* apps (a
+  128Mi-gateway OOM guard), **not** a per-app cap — an earlier revision of this ADR
+  wrongly called it per-app. A per-`{system}` gateway slot cap is a fast-follow;
+  meanwhile the per-app Postgres cap is the real per-tenant bound, and a hostile
+  flood beyond it is refused fast by that app's own Postgres (drill
+  `_verify-tenant-quotas.sh`).
+- **Provisioning is imperative today — recommended BLESSED for GA (ADR-0004, #96).**
+  `provision-app.sh` is operator/CI tooling, not a controller, but it now carries the
+  operator's load-bearing guarantees (crash-safe idempotent create, bidirectional
+  `fsck` reconcile, safe deprovision + GC, per-app quotas). ADR-0004 recommends
+  **blessing** it as the v1.0 interface at the demonstrated scale (with a scheduled
+  `fsck --converge` as the reconciler) and **deferring** the CRD-driven `AppDatabase`
+  operator behind explicit triggers (app churn / low-hundreds / KC1 ops toil).
+  **Decision pending owner ratification.**
 - **Version coupling unchanged.** App computes use the same pinned
   `compute-node-v17:8464` / `neon:8464` pair; the triple-pin (ADR-0002 amendment)
   and `skctl` format weld are unaffected — branch-per-app adds no new

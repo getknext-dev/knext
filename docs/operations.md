@@ -925,6 +925,85 @@ scale-to-zero when the peer drops), and `TestSleepRaceWakesBackWhenConnectionArr
 (the same-replica TOCTOU heal). **No code fix required** — the peer-aware idle
 already closes the window; this behaviour is regression-locked by the tests above.
 
+### Per-app quotas — noisy-neighbour bound (issue #89)
+
+Branch-per-app apps share one storage plane, so a runaway tenant must not be able to
+starve its neighbours. Each app's compute now carries **per-app limits**, set on
+`create` and persisted in its ConfigMap (an idempotent re-`create` / `fsck --converge`
+reads them back, so a customized app is never silently reset to defaults):
+
+```sh
+cd deploy
+# defaults: cpu 250m/1000m (request/limit), mem 256Mi/1Gi, max_connections 100
+./provision-app.sh create orders \
+  --cpu-request 250m --cpu-limit 1000m \
+  --mem-request 256Mi --mem-limit 1Gi \
+  --max-conns 50            # cap this tenant's Postgres backends at 50
+
+# preview the rendered manifest without touching the cluster (also used by CI):
+./provision-app.sh render orders --max-conns 50 --cpu-limit 500m
+```
+
+What each bound does, and why it contains a hostile neighbour:
+
+- **CPU limit** (new — was **absent**; only a memory limit existed). A busy app is now
+  throttled to its CPU allotment, so a CPU burn cannot starve co-scheduled apps on the
+  node. The **CPU request** drives scheduling/bin-packing at scale.
+- **Memory limit** is the OOM bound (unchanged default 1Gi).
+- **`max_connections`** is a **per-app Postgres** cap (`PG_MAX_CONNECTIONS` in the
+  app's ConfigMap; the compute entrypoint applies it to that app's `postgresql.conf`
+  only). Because **each app is its own Postgres**, one app opening backends up to its
+  cap cannot consume a neighbour's backends — the connection bound is per-app by
+  construction. Default 100 matches the shared compute; lower it for untrusted/free
+  tiers.
+
+> **Caveat — the apps-gateway `GW_MAX_CONNS` is NOT per-app.** `GW_MAX_CONNS` (90) on
+> `pggw-apps` is a **process-wide** goroutine ceiling shared across *all* apps (it
+> guards the 128Mi gateway from a connection-storm OOM). One app opening many gateway
+> connections can transiently consume slots shared with neighbours. The per-app
+> Postgres `max_connections` bounds each app's *server-side* backends (a flood beyond
+> the cap is refused fast by that app's own Postgres, freeing gateway slots quickly),
+> and the drill below confirms a neighbour stays available under a 20-connection
+> hostile flood. A true per-app gateway slot cap (per-`{system}` accounting on the
+> gateway's `active` map) is a **fast-follow** (gateway lane) — until then, run more
+> `pggw-apps` replicas if one plane hosts many high-connection apps.
+
+**Drill:** `deploy/_verify-tenant-quotas.sh` — two apps, one hostile (connection
+flood + CPU burn), asserts the victim's per-app `max_connections` is unchanged (100),
+a CPU limit is rendered, and the victim still wakes/serves through the shared
+apps-gateway while the hostile app floods + burns. Self-cleaning.
+
+### Scale ceiling — branch-per-app at N apps (issue #86)
+
+ADR-0003's "tens/low-hundreds of apps on one plane" is now **measured**, not asserted.
+Run the scale-ceiling drill to reproduce (self-cleaning; destroys every drill app +
+sweeps orphans on exit):
+
+```sh
+cd deploy
+N=30 WAKE_SAMPLE=5 ./_verify-scale-ceiling.sh   # provision N, measure, cold-wake a subset
+```
+
+It records, at N apps on one plane: provision latency p50/p95, control-plane object
+count, template `pitr_history_size` growth vs branch count, safekeeper per-timeline
+WAL-dir count, and cold-wake latency for a sampled subset. The **demonstrated ceiling
++ numbers** live in `docs/BENCHMARKS.md` ("Branch-per-app scale ceiling") and
+ADR-0003 ("Consequences"). Key findings baked into the claim:
+
+- **Template WAL pin does NOT grow with branch count** — every app branches from the
+  *same* template LSN, so `pitr_history_size` is flat across N branches (the feared
+  unbounded-pin does not materialise in steady state).
+- **Sleeping apps cost zero** compute and zero safekeeper WAL (a branch at replicas 0
+  never runs walproposer, so it creates no per-timeline safekeeper WAL dir).
+- **Control-plane footprint is linear** — 1 Deployment + 1 Service + 1 ConfigMap +
+  1 Secret per app.
+- **Cold-wake at scale has a role-apply race:** a fresh compute opens its Postgres
+  port a beat before `compute_ctl` finishes applying the per-app login role, so a
+  *one-shot* client can see a transient `28P01` on the very first connect. A real
+  knext client (a connection **pool**) retries and connects; bare `psql` should retry
+  (the drill's wake client retries for this reason). Not a data or availability
+  defect — a first-connect timing window.
+
 ### Deprovision is safe by default (issue #91)
 
 `destroy <app>` — the obvious command, **no flag** — now DELETEs the app's Neon

@@ -1,7 +1,9 @@
 # Per-app compute template (branch-per-app multi-tenancy, ADR-0003).
 #
 # This is a TEMPLATE, not an applied manifest: deploy/provision-app.sh substitutes
-# __APP__ / __TENANT_ID__ / __TIMELINE_ID__ / __REPLICAS__ and applies the result.
+# __APP__ / __TENANT_ID__ / __TIMELINE_ID__ / __REPLICAS__ and the per-app QUOTA
+# knobs (__CPU_REQ__ / __CPU_LIM__ / __MEM_REQ__ / __MEM_LIM__ / __MAX_CONNS__,
+# issue #89) and applies the result.
 # One of these per app. Each app is a Neon TIMELINE (a branch of the shared
 # `apps` template timeline) under the SAME tenant — so N apps share one storage
 # plane (pageserver + safekeeper quorum) but are isolated at the timeline level.
@@ -26,6 +28,23 @@ data:
   # md5 password comes from the Secret app-db-__APP__ (APP_ROLE_MD5, optional).
   # The apps-gateway only admits user == this role for database __APP__.
   APP_ROLE: "app___APP__"
+  # Per-app connection cap (issue #89, tenant quotas). PG_MAX_CONNECTIONS overrides
+  # the shared compute default (100) so an operator can bound one tenant's
+  # server-side backends below the fleet default — a runaway app cannot open
+  # unbounded backends and OOM/CPU-starve its own (separate) Postgres. Consumed by
+  # the shared entrypoint (compute-files) via envFrom; default 100 = current
+  # behavior. The apps-gateway's GW_MAX_CONNS is a PROCESS-WIDE goroutine ceiling
+  # shared across all apps (see ADR-0003 "noisy-neighbour"); this is the per-app,
+  # Postgres-enforced bound.
+  PG_MAX_CONNECTIONS: "__MAX_CONNS__"
+  # Quota knobs recorded for idempotent re-provision readback (issue #89): a bare
+  # `create <app>` (or `fsck --converge`) reads these back so a customized app's
+  # limits are preserved, not reset to defaults. They ALSO drive the Deployment
+  # resources below (rendered by provision-app.sh from the same values).
+  QUOTA_CPU_REQUEST: "__CPU_REQ__"
+  QUOTA_CPU_LIMIT: "__CPU_LIM__"
+  QUOTA_MEM_REQUEST: "__MEM_REQ__"
+  QUOTA_MEM_LIMIT: "__MEM_LIM__"
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -93,8 +112,15 @@ spec:
             periodSeconds: 1
             failureThreshold: 60
           resources:
-            requests: { cpu: 250m, memory: 256Mi, ephemeral-storage: 100Mi }
-            limits: { memory: 1Gi, ephemeral-storage: 1Gi }
+            # Per-app quota (issue #89, noisy-neighbour bound). A CPU LIMIT is now
+            # rendered (was absent — a busy app could burn unbounded CPU and starve
+            # the node for its neighbours); values come from provision-app.sh
+            # (--cpu-request/--cpu-limit/--mem-request/--mem-limit, defaults
+            # 250m/1000m/256Mi/1Gi). The mem limit is the OOM bound; the CPU limit
+            # caps a hostile CPU burn to its allotment so co-scheduled apps keep
+            # their share.
+            requests: { cpu: __CPU_REQ__, memory: __MEM_REQ__, ephemeral-storage: 100Mi }
+            limits: { cpu: __CPU_LIM__, memory: __MEM_LIM__, ephemeral-storage: 1Gi }
       volumes:
         - name: compute-files
           configMap:

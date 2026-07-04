@@ -92,4 +92,52 @@ case "$out" in
 esac
 pass=$((pass + 1))
 
+# --- issue #89: per-app quota rendering (no cluster) ------------------------
+# `render <app>` prints the substituted per-app manifest without touching the
+# cluster. It is the testable seam for the tenant-quota knobs: CPU request+limit,
+# memory request+limit, and Postgres max_connections. A CPU *limit* MUST now be
+# rendered (it was absent before #89 — the noisy-neighbour hole).
+render() { KCTX=none NS=none "$PROV" render "$@" 2>&1; }
+
+# default render: all five quota knobs present at their defaults.
+out="$(render good-app)" || fail "render good-app failed: $out"
+case "$out" in *'PG_MAX_CONNECTIONS: "100"'*) ;; *) fail "default render missing PG_MAX_CONNECTIONS=100: $out";; esac
+case "$out" in *'cpu: 250m'*)  ;; *) fail "default render missing cpu request 250m: $out";; esac
+case "$out" in *'cpu: 1000m'*) ;; *) fail "default render missing cpu LIMIT 1000m (noisy-neighbour bound, #89): $out";; esac
+case "$out" in *'memory: 256Mi'*) ;; *) fail "default render missing mem request 256Mi: $out";; esac
+case "$out" in *'memory: 1Gi'*)   ;; *) fail "default render missing mem limit 1Gi: $out";; esac
+# The template must carry NO unsubstituted placeholders after render.
+case "$out" in *'__'*) fail "render left an unsubstituted __PLACEHOLDER__: $out";; esac
+echo "ok - render defaults: cpu req+LIMIT, mem req+limit, max_connections=100"
+pass=$((pass + 1))
+
+# a CPU limit AND a CPU request must both appear (the limit is the new bound).
+n_cpu="$(printf '%s\n' "$out" | grep -c 'cpu:')"
+[ "$n_cpu" -ge 2 ] || fail "expected both a cpu request and a cpu limit, found $n_cpu 'cpu:' lines"
+echo "ok - both cpu request and cpu limit rendered (limit bounds a CPU burn)"
+pass=$((pass + 1))
+
+# per-app override: --max-conns bounds one tenant's server-side backends.
+out="$(render good-app --max-conns 25)" || fail "render --max-conns failed: $out"
+case "$out" in *'PG_MAX_CONNECTIONS: "25"'*) ;; *) fail "--max-conns 25 not rendered: $out";; esac
+echo "ok - --max-conns 25 overrides the per-app connection cap"
+pass=$((pass + 1))
+
+# per-app override: CPU/mem limits are tunable per tenant.
+out="$(render good-app --cpu-limit 500m --mem-limit 512Mi --cpu-request 100m --mem-request 128Mi)" \
+  || fail "render cpu/mem override failed: $out"
+for want in 'cpu: 500m' 'memory: 512Mi' 'cpu: 100m' 'memory: 128Mi'; do
+  case "$out" in *"$want"*) ;; *) fail "override render missing '$want': $out";; esac
+done
+echo "ok - per-app cpu/mem request+limit overrides render"
+pass=$((pass + 1))
+
+# render validates the app name too (a bad name never renders an object).
+out="$(render Bad 2>&1)" && fail "render accepted an invalid name"
+case "$out" in *invalid\ app\ name*) echo "ok - render rejects an invalid app name"; pass=$((pass + 1));; *) fail "render: bad name not rejected by validation: $out";; esac
+
+# an unknown flag to render is refused (a typo never silently no-ops).
+out="$(render good-app --bogus 2>&1)" && fail "render accepted an unknown flag"
+case "$out" in *unknown\ flag*) echo "ok - render rejects an unknown flag"; pass=$((pass + 1));; *) fail "render: unknown flag not reported: $out";; esac
+
 echo "provision-app.sh validation: $pass cases — PASSED"
