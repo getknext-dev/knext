@@ -113,6 +113,45 @@ spec:
         secretKey: password
 ```
 
+### `database` (Optional)
+Declares an **inline** [scale-zero-pg](../guides/unified-config-database.md) database
+that the operator auto-provisions and wires into `DATABASE_URL` — the app and its
+database sleep at zero and wake together on one visitor request. This is the
+**unified-config** flagship (ADR-0006). You do **not** hand-write a `DATABASE_URL`
+`envMap` entry: the operator provisions the DB, mirrors its credential Secret into
+your app's namespace, and injects `DATABASE_URL` (and `DATABASE_URL_RO` when
+`readReplicas: true`) for you.
+
+```yaml
+spec:
+  database:
+    enabled: true            # false/absent => bring-your-own via secrets.envMap (below)
+    tier: cold               # cold = scale-to-zero (default) | warm = ~0.4s wake
+    readReplicas: true       # also injects DATABASE_URL_RO
+    quotas:                  # per-app noisy-neighbour bound (all fields optional)
+      cpu: "1000m"
+      cpuRequest: "250m"
+      mem: "1Gi"
+      memRequest: "256Mi"
+      maxConnections: 100
+    keepOnDelete: false      # false => deleting the NextApp reclaims the Neon timeline
+```
+
+- **`appName` is derived, never set by you** — the operator computes a
+  plane-globally-unique name from your NextApp's own `(namespace, name)` and records
+  it on `status.databaseAppName`. This is the security seam: a NextApp can only ever
+  bind the database minted for **its own** identity, never another namespace's DB.
+- **Hard-gate:** the app is **not** deployed (no Knative Service) until its database
+  reports `Ready` (`status.conditions[DatabaseReady]`). A `cold` DB reaches `Ready` in
+  ~seconds. This prevents booting an app that would crash-loop on a missing DSN.
+- **Teardown:** deleting the NextApp deletes the database (and reclaims its Neon
+  timeline) via a finalizer, unless `keepOnDelete: true`.
+- **BYO escape hatch:** omit `database` (or set `enabled: false`) and wire an external
+  or existing database by hand through `secrets.envMap` (above) — fully supported.
+
+See the [unified-config guide](../guides/unified-config-database.md) for the full flow,
+sizing notes, rotation behavior, and required RBAC.
+
 ### `preview` (Optional)
 Enables ephemeral GitOps isolation for Pull Request testing. See [GitOps Previews](./gitops-preview.md).
 ```yaml
