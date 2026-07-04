@@ -98,8 +98,24 @@ spec:
             periodSeconds: 1
             failureThreshold: 60
           resources:
-            requests: { cpu: 250m, memory: 256Mi, ephemeral-storage: 100Mi }
-            limits: { memory: 1Gi, ephemeral-storage: 1Gi }
+            # ephemeral-storage SIZED for a LOADED read replica (issue #121). A
+            # warm RO compute's local working set — the Neon Local File Cache
+            # (LFC, uncapped by default), pg_wal streamed from the tip while
+            # tip-following, temp spill from big read scans, and compute logs —
+            # ALL live on the pod's ephemeral (container) fs. At the old 1Gi limit
+            # the kubelet EVICTED compute-ro pods under exactly the sustained read
+            # load the pool exists to absorb (observed live on the GA cluster under
+            # the #99a load test: "ephemeral local storage usage exceeds the total
+            # limit of containers 1Gi"). Fix: a REALISTIC request (2Gi — protected
+            # from eviction ranking; kubelet evicts on usage-above-REQUEST first, so
+            # a pod under 2Gi is a low-priority target) and a 4Gi hard limit (4× the
+            # evicting ceiling). Measured live under sustained n=3 read load: peak
+            # ephemeral ~2.0Gi (READPOOL_EPHEMERAL peak_mb=2065) — comfortably past
+            # the old 1Gi that evicted, and the 4Gi limit absorbed it with ZERO
+            # evictions. The writer (20) is single and cold, so its
+            # 1Gi is untouched; only the horizontally-scaled RO pool flapped.
+            requests: { cpu: 250m, memory: 256Mi, ephemeral-storage: 2Gi }
+            limits: { memory: 1Gi, ephemeral-storage: 4Gi }
       volumes:
         - name: compute-files
           configMap:

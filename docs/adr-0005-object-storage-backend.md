@@ -95,14 +95,45 @@ was served from object-store-fetched layers. Run against **OCI Object Storage
 S3-compat with NO in-cluster MinIO**, and against MinIO for the baseline.
 Numbers: `docs/BENCHMARKS.md` ("Object-storage backend: OCI vs MinIO").
 
+### Backup + WAL-janitor portability (issue #120, v1.0.1)
+
+The v1.0.0 system-design review found the abstraction was only **half-applied**: the
+live page/WAL store was configurable (above), but `deploy/62-backup.yaml` still
+**hardcoded** `mc alias set src http://minio:9000` in both the nightly backup Job
+and the wal-janitor. On a deployment that runs the live store on an external S3
+(the whole point of this ADR) that meant the backup silently **failed** (no `minio`
+Service to alias → *no backup*) and the janitor could not reach its source
+(*safekeeper WAL leaked unbounded*) — a real split-brain between the page-store
+plane and the backup/retention plane.
+
+**Fixed:** the backup mirror and the wal-janitor prune container now `envFrom` the
+same `storage-objstore` ConfigMap and build their `src` alias from
+`OBJSTORE_ENDPOINT` / `OBJSTORE_BUCKET` (SigV4 + path-style), exactly like the
+pageserver/safekeepers. The off-cluster backup **destination** stays a *separate*
+least-privilege credential (`backup-s3-target`) — src and dst are decoupled, but
+both now resolve from config, none from a hardcoded endpoint.
+
+Evidence: `deploy/_verify-backup-portability.sh` runs the config-driven backup
+mirror **and** wal-janitor prune against **real OCI Object Storage with NO MinIO** —
+pageserver objects + an intact `index_part.json` land in the OCI backup bucket, and
+the janitor reclaims below-horizon WAL from the OCI store while preserving the
+`.partial` tail + at/above-horizon segments. `deploy/_validate.sh` (contract 15b) is
+the standing guard that neither container reintroduces `minio:9000`.
+
+**Deploy note:** because the backup/janitor now `envFrom storage-objstore`, that
+ConfigMap (created by `deploy/gen-secrets.sh`, MinIO-valued by default) is a
+prerequisite for the backup path, same as it already is for the pageserver.
+
 ## Consequences
 
 - **Portability restored.** No hard dependency on an archived project; any
   S3-compatible store works, cloud-native or on-prem.
 - **Backward compatible.** Default is unchanged in-cluster MinIO; an existing
   plane keeps working after `gen-secrets.sh` seeds the (MinIO-valued) ConfigMap.
-- **One durability seam, uniformly applied.** Primary + standby pageserver and the
-  safekeeper quorum all read the same target — no split-brain object store.
+- **One durability seam, uniformly applied.** Primary + standby pageserver, the
+  safekeeper quorum, **and the backup Job + wal-janitor** (issue #120) all read the
+  same `storage-objstore` target — no split-brain object store, no MinIO-pinned
+  retention plane hiding under a portable page store.
 - **Operator responsibility (external).** The external store's durability,
   versioning, and lifecycle are the cloud's/operator's to configure; the platform
   no longer pretends a single MinIO PVC is a durable tier.

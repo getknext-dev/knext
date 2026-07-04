@@ -320,26 +320,36 @@ Closes the standing CRITICAL finding ("no backups anywhere"). Manifests:
 
 ### What is the backup
 
-The durable truth is the MinIO `neon` bucket — **pageserver layer uploads**
-(`/pageserver`) + **safekeeper WAL offload** (`/safekeeper`) — plus the config the
-bucket alone cannot rebuild: the `compute-config` / `compute-files` /
-`pageserver-config` ConfigMaps (fixed tenant/timeline IDs, compute spec) and the
-`storage-s3-creds` Secret. The pageserver PVC is a rebuildable cache; safekeeper
-PVCs hold only recent WAL. So **a faithful backup = a copy of the bucket + the
-config**, and **a faithful restore = a fresh storage plane attached to a restored
-bucket copy**.
+The durable truth is the **live object-store bucket** — the configured
+`storage-objstore` backend (MinIO by default, any external S3 when re-pointed; see
+"Object-storage backend" above): **pageserver layer uploads** (`/pageserver`) +
+**safekeeper WAL offload** (`/safekeeper`) — plus the config the bucket alone
+cannot rebuild: the `compute-config` / `compute-files` / `pageserver-config`
+ConfigMaps (fixed tenant/timeline IDs, compute spec) and the `storage-s3-creds`
+Secret. The pageserver PVC is a rebuildable cache; safekeeper PVCs hold only recent
+WAL. So **a faithful backup = a copy of the bucket + the config**, and **a faithful
+restore = a fresh storage plane attached to a restored bucket copy**.
 
 ### How it runs
 
-- **`CronJob/backup`** (daily 03:00) mirrors the `neon` bucket **off-cluster to OCI
-  Object Storage** over its native S3-compatible endpoint (pinned `minio/mc`,
-  signature v4, path-style), and dumps the ConfigMaps + Secret alongside it under
-  the destination bucket's `neon/` and `neon-config/` prefixes. The config dump
-  runs in an initContainer on a pinned kubectl image under a **scoped
-  ServiceAccount** (`backup-operator`: `get`/`list` on **configmaps only** in
-  `scale-zero-pg` — **not secrets**, issue #28). `src` (in-cluster MinIO)
-  authenticates with `storage-s3-creds`; `dst` (OCI OS) uses a **separate
-  least-privilege** `backup-s3-target` Secret.
+- **`CronJob/backup`** (daily 03:00) mirrors the live object-store bucket
+  **off-cluster to OCI Object Storage** over its native S3-compatible endpoint
+  (pinned `minio/mc`, signature v4, path-style), and dumps the ConfigMaps + Secret
+  alongside it under the destination bucket's `neon/` and `neon-config/` prefixes.
+  The config dump runs in an initContainer on a pinned kubectl image under a
+  **scoped ServiceAccount** (`backup-operator`: `get`/`list` on **configmaps only**
+  in `scale-zero-pg` — **not secrets**, issue #28).
+- **Portable source, off-cluster destination (issue #120).** The mirror's `src` is
+  the **live object store** — its endpoint/bucket come from the `storage-objstore`
+  ConfigMap (the same backend the pageserver + safekeepers offload to, #105/ADR-0005),
+  authenticated with `storage-s3-creds`; the `dst` is the OFF-CLUSTER backup target,
+  a **separate least-privilege** `backup-s3-target` Secret. Before v1.0.1 `src` was
+  **hardcoded** to `http://minio:9000`, so a deployment running the live store on an
+  external S3 (OCI/Ceph/SeaweedFS/Garage) had **no backup** and its safekeeper WAL
+  leaked (the wal-janitor pruned a store that wasn't there). Both the backup Job and
+  the wal-janitor now resolve `src` from `storage-objstore` — so **the ConfigMap is a
+  prerequisite for the backup path** (created by `gen-secrets.sh`, MinIO-valued by
+  default). Proof on a real non-MinIO endpoint: `deploy/_verify-backup-portability.sh`.
 - **No secret material leaves the cluster (issue #28).** The dump carries only
   ConfigMaps (tenant/timeline IDs, compute/pageserver spec). It used to also
   `mc cp` the `storage-s3-creds` Secret into the bucket, leaving the storage-plane
@@ -1373,6 +1383,22 @@ HPA, drives real concurrent read load at the pool Service, **asserts compute-ro
 scales 1→N (N≥2)**, re-checks that writes are still rejected and re-measures
 staleness under load, then drains the load and **asserts it scales back N→1**.
 Numbers: [BENCHMARKS](BENCHMARKS.md#read-only-pool-under-load-hpa-n1-issue-99).
+
+**Ephemeral-storage sizing — no flap under load (issue #121).** A **warm** RO
+compute's local working set lives on the pod's **ephemeral (container) fs**: the
+Neon Local File Cache (LFC, uncapped by default), `pg_wal` streamed from the tip
+while tip-following, temp spill from big read scans, and logs. At the original
+`ephemeral-storage: 1Gi` limit the kubelet **evicted** `compute-ro` pods under
+exactly the sustained read load the pool exists to absorb (`Pod ephemeral local
+storage usage exceeds the total limit of containers 1Gi`), so the read-scaling axis
+**flapped**. `deploy/26-compute-ro.yaml` now sizes it for load — **request `2Gi`**
+(kubelet ranks eviction on usage-above-*request*, so a pod under 2Gi is never a
+candidate) and **limit `4Gi`** (4× the evicting ceiling). Measured live under
+sustained n=3 read load: peak ephemeral **~2.0Gi** (`READPOOL_EPHEMERAL
+peak_mb=2065`) — comfortably past the old 1Gi that evicted, absorbed by the 4Gi
+limit with **zero evictions**. The `_verify-readpool.sh` HPA section sustains real
+load and **asserts zero compute-ro evictions** (`READPOOL_EPHEMERAL evictions=0 …`). If you
+run very large read scans, raise the limit further or cap `neon.max_file_cache_size`.
 
 > Note: the RO gateway lane serves the Postgres wire but does **not** yet export
 > its own Prometheus metrics port (the writer lane owns `:9090`). RO wake/latency

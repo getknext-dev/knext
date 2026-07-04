@@ -372,8 +372,15 @@ spec:
           command: ["/bin/sh","-c"]
           args:
             - |
+              # CPU-heavy (drives the HPA) AND ephemeral-heavy (issue #121): the
+              # ORDER BY on a large generate_series spills temp files to the RO
+              # pod's ephemeral fs, and the repeated big reads grow the Local File
+              # Cache — together exercising exactly the ephemeral-storage pressure
+              # that evicted the pool at the old 1Gi limit. Sustained across N
+              # loaders reconnecting each iteration, this is the load the #121
+              # no-eviction assertion runs against.
               while true; do
-                psql "${RO_DIRECT}" -tAc "select sum(i) from generate_series(1,30000000) i" >/dev/null 2>&1 || sleep 1
+                psql "${RO_DIRECT}" -tAc "set work_mem='4MB'; select sum(i) from (select i from generate_series(1,12000000) i order by i desc) s" >/dev/null 2>&1 || sleep 1
               done
           resources:
             requests: { cpu: 50m, memory: 32Mi }
@@ -396,6 +403,41 @@ YAML
   [ "$PEAK" -ge 2 ] || fail "HPA did NOT scale the pool past 1 under load in ${RO_HPA_UP_TIMEOUT}s (peak=$PEAK) — CPU=$(HPA_TARGET)%"
   ok "HPA SCALED THE POOL UNDER LOAD: compute-ro 1 -> $PEAK (n>1 proven); ready=$(RO_READY)"
   echo "READPOOL_HPA scaled_up=yes base=$BASE_REPLICAS peak=$PEAK loaders=${RO_LOAD_REPLICAS}"
+
+  # 3b. #121 NO-EVICTION UNDER SUSTAINED LOAD. The read pool used to FLAP: at the
+  #     old ephemeral-storage limit of 1Gi the kubelet evicted compute-ro pods
+  #     under exactly this load ("ephemeral local storage usage exceeds ... 1Gi"),
+  #     so the read-scaling axis collapsed under the pressure it exists to absorb.
+  #     With the sized ephemeral-storage (request 2Gi / limit 4Gi, deploy/26) the
+  #     pool must survive a sustained window with ZERO Evicted/errored RO pods.
+  #     Keep the load running for EPH_SUSTAIN_S so the LFC + temp spill actually
+  #     accumulate on the pods' ephemeral fs, poll pod phases for any eviction, and
+  #     sample the peak ephemeral usage on a live RO pod as sizing evidence.
+  EPH_SUSTAIN_S="${EPH_SUSTAIN_S:-120}"
+  echo "== #121: sustaining load ${EPH_SUSTAIN_S}s; asserting NO compute-ro eviction (ephemeral-storage sized) =="
+  EPH_PEAK_MB=0
+  RO_A_POD() { $K get pods -l app=compute-ro --no-headers 2>/dev/null | awk '$3=="Running"{print $1; exit}'; }
+  i=0
+  while [ "$i" -lt "$EPH_SUSTAIN_S" ]; do
+    # Any evicted / ephemeral-killed RO pod = the #121 regression is back.
+    BAD=$($K get pods -l app=compute-ro --no-headers 2>/dev/null | awk '$3=="Evicted"||$3=="Error"||$3=="ContainerStatusUnknown"{print $1}')
+    if [ -n "$BAD" ]; then
+      $K describe pod $BAD 2>/dev/null | grep -iE 'ephemeral|evict|Message:' | head -5 >&2 || true
+      fail "#121 REGRESSION: compute-ro pod(s) evicted/errored under sustained load: $BAD (ephemeral-storage still too tight)"
+    fi
+    # Sample peak ephemeral usage (rootfs working set: LFC + pg_wal + temp) on a
+    # live RO pod. Best-effort — a just-scaled pod may not answer exec yet.
+    POD=$(RO_A_POD)
+    if [ -n "$POD" ]; then
+      MB=$($K exec "$POD" -c compute -- sh -c 'du -sm /var/db /tmp /pgdata 2>/dev/null | awk "{s+=\$1} END{print s+0}"' 2>/dev/null || echo 0)
+      case "$MB" in ''|*[!0-9]*) MB=0 ;; esac
+      [ "$MB" -gt "$EPH_PEAK_MB" ] && EPH_PEAK_MB=$MB
+    fi
+    [ $((i % 30)) -eq 0 ] && echo "    t=${i}s ro_replicas=$(RO_REPLICAS) ready=$(RO_READY) ephemeral_peak~${EPH_PEAK_MB}MB (no evictions)"
+    i=$((i + 15)); sleep 15
+  done
+  ok "#121 NO EVICTION across ${EPH_SUSTAIN_S}s sustained load at n=$(RO_REPLICAS); peak ephemeral sampled ~${EPH_PEAK_MB}MB (limit 4Gi, request 2Gi)"
+  echo "READPOOL_EPHEMERAL sustained_s=${EPH_SUSTAIN_S} evictions=0 peak_mb=${EPH_PEAK_MB} limit_mb=4096 request_mb=2048"
 
   # 4. NEGATIVE under load: a write to the pool is STILL rejected while at n>1.
   #    Retry through TRANSIENT connection errors: the compute-ro Service sets

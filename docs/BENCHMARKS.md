@@ -217,6 +217,26 @@ from (after a full layer-cache wipe), OCI Object Storage's S3 Compatibility API
 with NO in-cluster MinIO** (ADR-0005). Reproduce: `deploy/_verify-objstore.sh`
 (baseline) and the same with `OBJSTORE_ENDPOINT=…` set (OCI).
 
+### Backup + WAL-janitor portability (issue #120, v1.0.1) — live-verified 2026-07-05
+
+The #105 abstraction was only half-applied: `deploy/62-backup.yaml` hardcoded
+`mc alias set src http://minio:9000` in both the backup Job and the wal-janitor, so
+a non-MinIO deployment had **no backup** and leaked safekeeper WAL. Fixed: both now
+resolve `src` from `storage-objstore`. `deploy/_verify-backup-portability.sh` proves
+it against **real OCI Object Storage, NO MinIO**:
+
+| Path | Result | Evidence |
+|---|---|---|
+| Backup **mirror** (src=OCI live store, dst=OCI backup bucket) | ✅ pageserver objects + intact `index_part.json` landed in the OCI backup bucket | `ok - pageserver objects landed in the OCI backup bucket (2 objects …)`; `MIRROR_OK` |
+| WAL-**janitor** prune (config-driven src=OCI) | ✅ below-horizon WAL reclaimed from OCI; `.partial` tail + at/above-horizon segment preserved | `ok - OCI prune correct: below-horizon segment removed; .partial tail + above-horizon segment preserved` |
+
+Method: OKE (`context-ckmva7v7zvq`), throwaway namespace `backup-port-drill`, two
+self-provisioned OCI buckets (`ks-pg-bkpport-src/dst-drill`, torn down on exit),
+endpoint `axfqznklsd2t.compat.objectstorage.me-abudhabi-1.oraclecloud.com` (SigV4,
+path-style, reusing the #4 CSK), drill-only tenant. The container env wiring +
+src/dst resolution mirror the shipped `62-backup.yaml`; `deploy/_validate.sh`
+(contract 15b) is the standing guard that neither container reintroduces `minio:9000`.
+
 ## Upgrade rehearsal (issue #50 — pivot-vs-bump cost is now a known number)
 
 `deploy/_rehearse-upgrade.sh` boots the newest pullable neon/compute pair in a
@@ -327,10 +347,12 @@ back down** when the load stops. Verified **live on OKE, 2026-07-04** by
 `deploy/_verify-readpool.sh` (its `RO_HPA` section, auto-on when a metrics-server
 is present), on the **v0.6.1 release gateway**
 (`v0.6.1@sha256:12a73533…`, `KSPG_SKIP_BUILD=1`, `RO_MODE=Replica`). Load = 4
-concurrent in-cluster loaders each looping a CPU-heavy streaming aggregate
-(`select sum(i) from generate_series(1,30000000) i`) against the `compute-ro`
-Service; `maxReplicas` capped to 3 for the 2-node test cluster (the shipped
-manifest ships `maxReplicas: 5`).
+concurrent in-cluster loaders each looping a CPU-**and-ephemeral**-heavy query
+(`select sum(i) from (select i from generate_series(1,12000000) i order by i desc) s`
+— the `ORDER BY` spills temp files to the pod's ephemeral fs, exercising the #121
+eviction path while still driving the CPU HPA) against the `compute-ro` Service;
+`maxReplicas` capped to 3 for the 2-node test cluster (the shipped manifest ships
+`maxReplicas: 5`).
 
 | Metric | Result | Evidence |
 |---|---|---|
@@ -338,6 +360,7 @@ manifest ships `maxReplicas: 5`).
 | **Writes rejected while at n>1** | ✅ `read-only transaction` at **n=3** | a write on the RO path is refused even under load + at multiple replicas (retried through not-ready-pod routing) |
 | **HPA scale-down after drain** | **`compute-ro` 3 → 1** | load removed → CPU→4% → HPA drained to the `minReplicas: 1` floor over its 120s stabilization; `READPOOL_HPA scaled_down=yes final=1` |
 | Staleness **under load** | not measured this run (honest) | on the 2-node test cluster the cold writer could not wake within the bounded window while N RO pods + N loaders occupied it; the **pre-load contract (~9 s, above) stands** as the guarantee. `READPOOL_HPA_STALENESS … tip_following=unmeasured note=writer-wake-headroom` |
+| **No eviction under sustained load (#121)** | ✅ **0 evictions** at **n=3** over **120 s**; peak ephemeral **~2.0 Gi** | re-run **2026-07-05** with the temp-spilling loader + sized ephemeral-storage (request 2Gi / limit 4Gi): `READPOOL_EPHEMERAL sustained_s=120 evictions=0 peak_mb=2065 limit_mb=4096 request_mb=2048`. At the old **1Gi** limit the kubelet evicted `compute-ro` under exactly this load — peak ~2065MB proves the load genuinely crossed the old ceiling, and the 4Gi limit absorbed it. |
 
 Operational notes surfaced by the drill (all handled in `_verify-readpool.sh`, and
 they are real properties operators must know — see operations.md posture B):

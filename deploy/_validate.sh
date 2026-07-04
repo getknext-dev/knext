@@ -170,6 +170,16 @@ for f in 10-gateway.yaml 20-compute.yaml 25-compute-warm.yaml 26-compute-ro.yaml
 done
 ok "all long-running pods declare ephemeral-storage REQUESTS (incl. backup mirror)"
 
+# 13b. contract: the RO read-pool ephemeral-storage is SIZED for load (issue #121).
+#      At the old 1Gi limit the kubelet evicted compute-ro pods under sustained read
+#      load (LFC + pg_wal + temp spill all live on the pod's ephemeral fs), so the
+#      read-scaling axis flapped. The limit must be raised WELL above 1Gi and the
+#      request set realistically so a loaded pod is not the first eviction target.
+grep -qE 'ephemeral-storage: 1Gi' 26-compute-ro.yaml && fail "26-compute-ro still caps ephemeral-storage at 1Gi — the RO pool evicts under load (issue #121); raise the limit + set a realistic request"
+grep -qE 'limits: \{[^}]*ephemeral-storage: (4|8|16)Gi' 26-compute-ro.yaml || fail "26-compute-ro must raise the ephemeral-storage LIMIT (>=4Gi) so a loaded read replica is not evicted (issue #121)"
+grep -qE 'requests: \{[^}]*ephemeral-storage: (2|4|8)Gi' 26-compute-ro.yaml || fail "26-compute-ro must set a REALISTIC ephemeral-storage REQUEST (>=2Gi) so loaded RO pods aren't the first eviction target (issue #121)"
+ok "RO read-pool ephemeral-storage sized for sustained load (request>=2Gi, limit>=4Gi) — no flap (issue #121)"
+
 # 14. contract: automated pageserver failover (issue #3) — a standing warm
 #     Secondary standby + a watcher that promotes it. The SPOF is only bounded
 #     if BOTH ship: the standby holds warm layers, the watcher drives the flip.
@@ -193,6 +203,22 @@ grep -q 'kind: PersistentVolumeClaim' 62-backup.yaml && fail "62 must NOT declar
 # name), not the migration note that tells operators to delete it.
 grep -qE 'backup-store:9000|name: backup-store' 62-backup.yaml && fail "62 still runs the backup-store workload — it is retired (issue #4)"
 ok "backup target is off-cluster OCI Object Storage (backup-store retired)"
+
+# 15b. contract: the backup SOURCE store is CONFIGURABLE (issue #120), NOT pinned to
+#      minio:9000. GA #105 made the pageserver/safekeeper offload backend swappable
+#      (S3/OCI/Ceph, MinIO optional); the backup Job + wal-janitor MUST follow the
+#      SAME storage-objstore ConfigMap for their `src` alias. Before #120 both
+#      hardcoded `mc alias set src http://minio:9000`, so a non-MinIO deployment had
+#      NO backup (mirror can't reach a `minio` service) AND leaked safekeeper WAL
+#      unbounded (janitor pruned a store that wasn't there) — the #105 portability
+#      claim only half-delivered.
+grep -qE 'mc alias set src[[:space:]]+http://minio:9000' 62-backup.yaml && fail "62 backup/wal-janitor still hardcode 'src http://minio:9000' — parameterize the LIVE store via storage-objstore (issue #120); a non-MinIO backend has no backup + leaks WAL"
+# both the mirror AND the wal-janitor prune container must envFrom storage-objstore
+# (2 references) and build the src alias from OBJSTORE_ENDPOINT.
+[ "$(grep -c 'configMapRef: { name: storage-objstore }' 62-backup.yaml)" -ge 2 ] || fail "62 backup mirror AND wal-janitor must BOTH source the live object store from the storage-objstore ConfigMap (issue #120) — expected >=2 envFrom refs"
+grep -q 'mc alias set src "$OBJSTORE_ENDPOINT"' 62-backup.yaml || fail "62 must build the backup/janitor 'src' alias from OBJSTORE_ENDPOINT (storage-objstore), not a hardcoded endpoint (issue #120)"
+grep -q 'src/$OBJSTORE_BUCKET' 62-backup.yaml || fail "62 must resolve the live-store bucket path from OBJSTORE_BUCKET, not a hardcoded 'neon' bucket (issue #120)"
+ok "backup + wal-janitor SOURCE the live object store from storage-objstore — portable to any S3 backend (issue #120)"
 
 # 16. contract: a WAL janitor bounds safekeeper WAL accumulation (issue #19), and
 #     the backup path self-heals a torn pageserver index (issue #21).
