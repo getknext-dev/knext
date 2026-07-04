@@ -40,6 +40,31 @@ until $K exec deploy/prometheus -- wget -qO- 'http://alertmanager:9093/api/v2/al
 done
 ok "Watchdog dead-man's-switch is ACTIVE in Alertmanager (external heartbeat present, #60)"
 
+# 1c. MULTI-TENANT SCRAPE COVERAGE (#80): the apps-gateway (pggw-apps) must be an UP
+#     Prometheus target — before this it was never scraped, so the whole branch-per-app
+#     plane emitted metrics no rule ever saw. Assert (a) at least one UP target whose
+#     `gateway` label is pggw-apps, and (b) the new multi-tenant/read-pool wake rules are
+#     LOADED in Prometheus (so a crash-looping per-app compute / stuck RO pool can page).
+i=0
+until $K exec deploy/prometheus -- wget -qO- 'http://localhost:9090/api/v1/targets?state=active' 2>/dev/null \
+    | grep -q '"gateway":"pggw-apps"'; do
+  i=$((i+1)); [ $i -gt 30 ] && fail "apps-gateway (pggw-apps) never became an active Prometheus target (>60s) — scrape keep not widened to pggw(-apps)? (#80)"
+  sleep 2
+done
+# require it HEALTHY (up), not merely discovered.
+$K exec deploy/prometheus -- wget -qO- 'http://localhost:9090/api/v1/targets?state=active' 2>/dev/null \
+  | python3 -c 'import json,sys
+d=json.load(sys.stdin)
+apps=[t for t in d["data"]["activeTargets"] if t["labels"].get("gateway")=="pggw-apps"]
+up=[t for t in apps if t.get("health")=="up"]
+sys.exit(0 if up else 1)' || fail "pggw-apps target present but not UP — apps-gateway metrics are not being scraped (#80)"
+ok "apps-gateway (pggw-apps) is an UP Prometheus target — multi-tenant plane is scraped (#80)"
+for a in ComputeWakeStuckApps ComputeRoPoolStuck ComputeStuckNotReady; do
+  $K exec deploy/prometheus -- wget -qO- 'http://localhost:9090/api/v1/rules' 2>/dev/null | grep -q "\"$a\"" \
+    || fail "rule $a is not loaded in Prometheus (#80)"
+done
+ok "multi-tenant/read-pool wake rules loaded (ComputeWakeStuckApps, ComputeRoPoolStuck, ComputeStuckNotReady) (#80)"
+
 # 2. inject a synthetic always-firing drill rule
 CLEANED=0
 restore_rules() {

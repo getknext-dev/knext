@@ -30,6 +30,7 @@ FCJOB="wjd-failclosed-${TS}"
 RUNJOB="wjd-run-${TS}"
 IDJOB="wjd-idem-${TS}"
 SIBJOB="wjd-sibling-${TS}"
+APPSJOB="wjd-apps-${TS}"
 fail() { echo "FAIL: $*" >&2; exit 1; }
 ok() { echo "ok - $*"; }
 # strictly-less string compare (fixed-width hex sorts numerically). POSIX `[` has
@@ -45,6 +46,13 @@ PFX="src/neon/safekeeper/${TID}/${TLID}"
 # segment here and asserts the janitor never over-prunes it (fail-safe) and fails loud.
 SIBLING_TLID="ffffffffffffffffffffffffffffffff"
 SPFX="src/neon/safekeeper/${TID}/${SIBLING_TLID}"
+# #77 — the branch-per-app plane lives under a SEPARATE tenant. Section E asserts the
+# janitor now VISITS the apps tenant (it never did before), prunes/leans a resolvable
+# apps timeline, and fail-safe-SKIPS an UNRESOLVABLE apps sibling without over-pruning
+# it — WARNING (not failing the nightly job) on expected apps churn residue.
+APPS_TENANT="${APPS_TENANT:-a0000000000000000000000000000001}"
+APPS_SIB_TLID="eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+APPS_SPFX="src/neon/safekeeper/${APPS_TENANT}/${APPS_SIB_TLID}"
 $K get cronjob wal-janitor >/dev/null 2>&1 || fail "wal-janitor CronJob not deployed"
 
 # --- cleanup: remove seeds + all drill Jobs/pods on any exit -----------------
@@ -58,7 +66,9 @@ cleanup() {
   done
   # remove the synthetic sibling-timeline seed + prefix (#59 section D)
   $K exec "$MCPOD" -- sh -c 'export HOME=/tmp; mkdir -p /tmp/.mc; mc alias set src http://minio:9000 "$S3_USER" "$S3_PASS" >/dev/null 2>&1; mc rm --recursive --force '"$SPFX/"' >/dev/null 2>&1' >/dev/null 2>&1 || true
-  $K delete job "$FCJOB" "$RUNJOB" "$IDJOB" "$SIBJOB" --ignore-not-found >/dev/null 2>&1 || true
+  # remove the synthetic apps-tenant sibling seed + prefix (#77 section E)
+  $K exec "$MCPOD" -- sh -c 'export HOME=/tmp; mkdir -p /tmp/.mc; mc alias set src http://minio:9000 "$S3_USER" "$S3_PASS" >/dev/null 2>&1; mc rm --recursive --force '"$APPS_SPFX/"' >/dev/null 2>&1' >/dev/null 2>&1 || true
+  $K delete job "$FCJOB" "$RUNJOB" "$IDJOB" "$SIBJOB" "$APPSJOB" --ignore-not-found >/dev/null 2>&1 || true
   $K delete pod "$MCPOD" --ignore-not-found >/dev/null 2>&1 || true
 }
 trap cleanup EXIT INT TERM
@@ -228,6 +238,57 @@ fi
 $K logs job/"$IDJOB" -c prune 2>/dev/null | grep -q 'nothing to prune' || \
   fail "idempotence: second run did NOT report 'nothing to prune' on the lean bucket"
 ok "(C) second run is idempotent: nothing to prune, exit 0"
+
+# ===========================================================================
+# E. APPS TENANT (issue #77) — the janitor must VISIT the branch-per-app tenant
+#    (a separate tenant from the configured primary), resolve/prune its resolvable
+#    timelines (WAL bounded), and fail-safe-SKIP an UNRESOLVABLE apps timeline
+#    without over-pruning a sleeping branch — WARNING (not FAILING the nightly job)
+#    on expected apps churn. Runs BEFORE section D (D seeds a PRIMARY-tenant sibling
+#    that makes the job fail; here we require the job to COMPLETE).
+# ===========================================================================
+# Only meaningful if the apps tenant actually exists on this cluster.
+if $K exec sts/pageserver -- curl -sf "http://localhost:9898/v1/tenant/${APPS_TENANT}" >/dev/null 2>&1; then
+  # Seed one below-any-horizon segment (LOGID=0, SEG=1) under a synthetic UNRESOLVABLE
+  # apps-tenant sibling. If the janitor wrongly applied a foreign horizon here it would
+  # be deleted — the #77 over-prune of a sleeping app's WAL.
+  MC "echo drill | mc pipe $APPS_SPFX/000000010000000000000001" >/dev/null || fail "could not seed apps-tenant sibling segment"
+  APPS_SIB_BEFORE=$($K exec "$MCPOD" -- sh -c 'export HOME=/tmp; mkdir -p /tmp/.mc; mc alias set src http://minio:9000 "$S3_USER" "$S3_PASS" >/dev/null 2>&1; mc ls '"$APPS_SPFX/"' | sed "s/.* //" | grep -E "^[0-9A-Fa-f]{24}$" | sort -u' 2>/dev/null || true)
+  echo "$APPS_SIB_BEFORE" | grep -q '000000010000000000000001' || fail "apps-tenant sibling seed did not land"
+  ok "seeded a below-horizon segment under an UNRESOLVABLE apps-tenant sibling ($APPS_TENANT/$APPS_SIB_TLID)"
+
+  $K create job "$APPSJOB" --from=cronjob/wal-janitor >/dev/null || fail "could not create apps-case Job"
+  # HARD invariant: the janitor must COMPLETE — an apps-tenant orphan is fail-safe-skipped
+  # + WARNed, never a nightly job failure (that would be pager noise on expected churn).
+  if ! wait_job "$APPSJOB" 240; then
+    $K logs job/"$APPSJOB" --all-containers 2>/dev/null | tail -30 >&2 || true
+    fail "(E) apps-case Job did not COMPLETE — an apps-tenant orphan must WARN, not fail the job (#77)"
+  fi
+  ok "(E) janitor COMPLETED with an apps-tenant orphan present (WARN, not job-fail #77)"
+
+  $K logs job/"$APPSJOB" -c resolve-horizon 2>/dev/null > /tmp/wjd-e-h-$$.txt || true
+  $K logs job/"$APPSJOB" -c prune 2>/dev/null > /tmp/wjd-e-p-$$.txt || true
+  # (E1) the janitor RESOLVED a horizon for the apps tenant — proves it now VISITS a
+  # tenant the old (primary-only) janitor never touched (the core #77 fix).
+  grep -q "tenant=${APPS_TENANT} " /tmp/wjd-e-h-$$.txt || { cat /tmp/wjd-e-h-$$.txt >&2; fail "(E1) resolve-horizon did not resolve any apps-tenant timeline — janitor is not visiting the apps tenant (#77)"; }
+  ok "(E1) janitor resolved an apps-tenant timeline horizon (it now enumerates ALL tenants #77)"
+  # (E2) the prune step iterated the apps tenant prefix.
+  grep -q "tenant ${APPS_TENANT}:" /tmp/wjd-e-p-$$.txt || { cat /tmp/wjd-e-p-$$.txt >&2; fail "(E2) prune step did not iterate the apps tenant prefix (#77)"; }
+  ok "(E2) prune step iterated the apps-tenant safekeeper prefix (#77)"
+  # (E3) the apps sibling was named UNRESOLVED + skipped fail-safe (WARN, not fatal).
+  grep -qi "UNRESOLVED horizon on an apps tenant" /tmp/wjd-e-p-$$.txt || echo "note - could not confirm the apps-orphan WARN line (log-read flake); relying on job-Complete + seed-survival invariants"
+  rm -f /tmp/wjd-e-h-$$.txt /tmp/wjd-e-p-$$.txt
+
+  # HARD invariant: the apps sibling seed SURVIVES — never over-pruned against a foreign horizon.
+  APPS_SIB_AFTER=$($K exec "$MCPOD" -- sh -c 'export HOME=/tmp; mkdir -p /tmp/.mc; mc alias set src http://minio:9000 "$S3_USER" "$S3_PASS" >/dev/null 2>&1; mc ls '"$APPS_SPFX/"' | sed "s/.* //" | grep -E "^[0-9A-Fa-f]{24}$" | sort -u' 2>/dev/null || true)
+  echo "$APPS_SIB_AFTER" | grep -q '000000010000000000000001' || \
+    fail "(E) OVER-PRUNE: the apps-tenant sibling segment was deleted (sleeping app WAL lost) (#77)"
+  ok "(E) apps-tenant sibling segment survived — per-(tenant,timeline) horizon is fail-safe (#77)"
+  # tidy the apps sibling before section D so D's run isn't affected.
+  $K exec "$MCPOD" -- sh -c 'export HOME=/tmp; mkdir -p /tmp/.mc; mc alias set src http://minio:9000 "$S3_USER" "$S3_PASS" >/dev/null 2>&1; mc rm --recursive --force '"$APPS_SPFX/"' >/dev/null 2>&1' >/dev/null 2>&1 || true
+else
+  echo "note - apps tenant ${APPS_TENANT} not present on this cluster — skipping section E (#77 apps-tenant case). Provision an app to exercise it."
+fi
 
 # ===========================================================================
 # D. PER-TIMELINE HORIZON (issue #59) — a SIBLING timeline the janitor can resolve

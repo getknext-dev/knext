@@ -8,7 +8,22 @@ same-batch with the intervention, like BENCHMARKS.
 Counts as toil: unplanned safekeeper/pageserver/MinIO surgery, WAL/bucket
 cleanup beyond the janitor, version-pair upgrades, restore executions (real,
 not drills), auth/session babysitting for the plane.
+
+Counts as toil (v0.6.0 multi-tenant surface, ADR-0003):
+- Per-app **provision/deprovision** runs beyond CI automation — especially the
+  deprovision sharp edge: it must `DELETE` the timeline on **all three
+  safekeepers**, plus the tombstone / random-timeline-id footgun (a mis-run leaks
+  safekeeper WAL or hangs a compute in the walproposer handshake).
+- Per-app **compute / ConfigMap / Service drift or cleanup** — orphaned
+  `compute-<app>` / `compute-config-<app>` / `svc/compute-<app>`, and orphaned
+  safekeeper WAL prefixes left by deprovisioned apps.
+- **Read-pool / warm-tier babysitting** — `compute-ro` / `compute-warm` sizing,
+  HPA tuning, RO staleness handling.
+
 Does NOT count: feature work, drills, reviews, gateway/app-tier work.
+
+**Note (enlarged surface):** the monthly KC1 sum now spans this ENLARGED
+multi-tenant surface, so the >1 eng-day/month tripwire matters MORE at N apps.
 
 | Date | What | Time spent | Notes |
 |---|---|---|---|

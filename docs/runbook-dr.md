@@ -230,6 +230,82 @@ oci --profile DEFAULT os object list-object-versions -ns <osnamespace> \
 # restore/re-copy the wanted version, then re-run STEP 3b.
 ```
 
+## 9. Multi-tenant (branch-per-app) restore (ADR-0003)
+
+Sections 1–8 restore the **fixed platform tenant** (`TENANT=f000…001` /
+`TIMELINE=f000…002`). v0.6.0 shipped **branch-per-app** multi-tenancy: N apps are
+Neon **branches** — each its own timeline — living under a **separate apps tenant**
+`a0000000000000000000000000000001`, sharing ONE storage plane and ONE backup bucket
+(see `docs/adr-0003-multi-tenancy.md`). What DR can and cannot do for those apps is
+different from the single-tenant case; read this before you promise anyone a
+per-app rollback.
+
+**9a. Finding an app's timeline id.** Each app's branch is a distinct timeline under
+the apps tenant. To locate a given app's id:
+
+```sh
+APPS_TENANT=a0000000000000000000000000000001
+# (a) LIVE app — its ConfigMap holds the id:
+kubectl -n $NS get cm compute-config-<app> -o jsonpath='{.data.TIMELINE_ID}'
+# (b) DEPROVISIONED app — its ConfigMap is gone; the bucket prefix is the record:
+mc ls "bak/$BK_BUCKET/neon/safekeeper/$APPS_TENANT/"
+mc ls "bak/$BK_BUCKET/neon/pageserver/tenants/$APPS_TENANT/timelines/"
+```
+
+`provision-app.sh` also prints the minted timeline id at creation time. Note the
+honesty: once an app is deprovisioned its `compute-config-<app>` ConfigMap no longer
+exists, so the **bucket prefix is the only surviving record** of its timeline id.
+
+**9b. Restore ONE app vs the whole apps plane — the attach is TENANT-level.** The
+`generation + 1` re-attach in STEP 4 is a **`location_config` on the whole tenant**,
+not on one timeline. Re-attaching the apps tenant `a0000000000000000000000000000001`
+at gen+1 therefore covers **all app branches on that tenant at once** — one attach,
+not one per app:
+
+```sh
+# same STEP 4 mechanism, retargeted at the apps tenant (all its branches ride along):
+GEN=$(mc ls "bak/$BK_BUCKET/neon/pageserver/tenants/$APPS_TENANT/timelines/<app-timeline>/" \
+      | grep -o 'index_part.json-[0-9]*' | sed 's/.*-//' | sort -n | tail -1)
+NEXT=$((GEN + 1))
+kubectl -n $NS exec sts/pageserver -- curl -sf -X PUT \
+  "http://localhost:9898/v1/tenant/$APPS_TENANT/timeline/<app-timeline>/location_config" \
+  -H 'Content-Type: application/json' \
+  -d "{\"mode\":\"AttachedSingle\",\"generation\":$NEXT,\"tenant_conf\":{}}"
+```
+
+A truly **per-branch** restore — roll ONE app back to a point-in-time without
+touching its peers — is **NOT offered by this MVP**. Branches share the tenant's
+single backup history in one bucket; there is **no per-branch PITR**. State that
+plainly to anyone asking for it.
+
+**9c. Blast radius — DR is all-or-nothing across the bucket's restore point.** A
+full-plane (bucket) restore returns **every tenant AND every app branch to the SAME
+backup point-in-time** — one shared bucket, one shared backup schedule. Per-app /
+per-tenant PITR granularity is **not available**. You cannot restore app-A to
+10:00 while leaving app-B at 12:00; the bucket's restore point applies to all. Know
+this before 3am.
+
+**9d. What a per-app restore CAN and CAN'T do (pg 8464).** Unlike a cold single-
+tenant restore (which needs `deploy/_restore-writable.sh` to re-seed safekeeper WAL
+around `last_record_lsn` before a PRIMARY can boot read-write on `neon:8464`), a
+**branch** has a lighter path: on a live pageserver the **walproposer auto-inits**
+the branch timeline on the safekeepers the first time an app's compute connects (no
+`skctl craft` — see `docs/BENCHMARKS.md` and `docs/adr-0003-multi-tenancy.md`).
+
+- **CAN:** bring a single app's branch back to a **writable** state — re-attach the
+  apps tenant (9b) and wake that app's `compute-<app>`; its walproposer re-inits the
+  branch on the safekeepers and it accepts writes.
+- **CAN'T:** independently **rewind one branch to an earlier PITR** than the shared
+  bucket restore point (9b/9c). There is no per-branch backup history to rewind to.
+
+Per-app branch WAL/backup coverage bears directly on what is recoverable here: the
+`wal-janitor` now iterates **all** tenants (primary + apps) per issue **#77** — a
+sleeping app's WAL is retained, and an apps-tenant timeline whose
+`remote_consistent_lsn` cannot be resolved is **fail-safe SKIPPED and WARNed**, not
+pruned. So a deprovisioned app can leave orphaned safekeeper WAL prefixes under
+`neon/safekeeper/$APPS_TENANT/`; those prefixes (9a) are what you enumerate to know
+which branches a bucket restore would actually bring back.
+
 ---
 
 ### Provenance of this runbook

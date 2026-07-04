@@ -16,7 +16,9 @@ set -eu
 cd "$(dirname "$0")"
 NS=scale-zero-pg
 K="kubectl -n $NS"
-IMAGE="${KSPG_GATEWAY_IMAGE:-me-abudhabi-1.ocir.io/axfqznklsd2t/ks-pg/gateway:v0.3.1}"
+# v0.6.0 release image by default (issue #82) so the ephemeral test gateway matches
+# the live/release build; override with KSPG_GATEWAY_IMAGE for a local build.
+IMAGE="${KSPG_GATEWAY_IMAGE:-me-abudhabi-1.ocir.io/axfqznklsd2t/ks-pg/gateway:v0.6.0@sha256:9ee6497826aeb6dca620cba488e35d0d56ff19d092d1c75ffeb7eddcd47b5857}"
 RO_MODE="${RO_MODE:-Replica}"
 W_DSN="postgres://cloud_admin:cloud_admin@pggw-ro:55432/postgres?sslmode=disable"
 RO_DSN="postgres://cloud_admin:cloud_admin@pggw-ro:55434/postgres?sslmode=disable"
@@ -49,6 +51,23 @@ PSQL() { # $1 dsn  $2 sql  $3 label
 COMPUTE_PODS() { $K get pods -l app=compute --no-headers 2>/dev/null | grep -c . || true; }
 RO_REPLICAS() { $K get deploy compute-ro -o jsonpath='{.spec.replicas}' 2>/dev/null || echo 0; }
 RO_MODE_SEEN() { $K logs deploy/compute-ro 2>/dev/null | grep -o 'mode=[A-Za-z]*' | head -1 || true; }
+
+# --- IDEMPOTENCE (issue #83): clear residual state from an interrupted prior run
+# up front so a Ctrl-C'd run can't poison this one. A leftover test gateway,
+# stranded rocli-* one-shot pods, a woken primary, or an old `t` table all had to
+# be swept before the drill's own drop/create + scale-to-0 can assume a clean slate.
+preclean() {
+  echo "== preclean: sweeping residual state from any interrupted prior run (#83) =="
+  $K delete deploy/pggw-ro svc/pggw-ro --ignore-not-found --wait=false >/dev/null 2>&1 || true
+  # stranded one-shot psql pods from a killed PSQL() call (this drill's rocli-* only,
+  # matched by name so a concurrent drill's pods are never touched).
+  for p in $($K get pods --no-headers 2>/dev/null | awk '/^rocli-/{print $1}'); do
+    $K delete pod "$p" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+  done
+  rm -f _tmp-pggw-ro.yaml
+  ok "preclean done (stale test gateway + rocli-* pods removed)"
+}
+preclean
 
 # --- 0. build + deploy the test gateway (writer + RO lanes) -------------------
 # KSPG_SKIP_BUILD=1 when $IMAGE is already published to OCIR (the OKE nodes pull
@@ -160,8 +179,27 @@ echo "== negative: a write on the RO DSN must be rejected =="
 WOUT=$(PSQL "$RO_DSN" "insert into t values (99)" rowrite 2>&1 || true)
 echo "$WOUT" | grep -qi "read-only" || fail "RO write was NOT rejected as read-only: $WOUT"
 ok "RO write cleanly rejected (read-only transaction)"
-[ "$(PSQL "$W_DSN" 'select count(*) from t' negv | tail -1)" = "3" ] || fail "reject leaked a row (count != 3)"
-ok "no row leaked past the RO reject (still 3)"
+# Confirm no row leaked past the reject. Read this back through the RO lane, which is
+# ALREADY AWAKE (step 2) — NOT the writer DSN, which would have to cold-wake the
+# sleeping primary and can return a partial/empty line on a slow wake, producing a
+# FALSE "reject leaked a row" (issue #83: a writer-wake race in the count step, never
+# a data leak). Retry until the count query actually returns a number, and word the
+# failures to distinguish "count query did not return" from "a row actually leaked".
+NEG=""
+i=0
+while [ "$i" -lt 10 ]; do
+  NEG=$(PSQL "$RO_DSN" 'select count(*) from t' "negv$i" | tail -1 || true)
+  case "$NEG" in
+    [0-9]*) break ;;   # got a numeric count — stop retrying
+  esac
+  i=$((i + 1)); sleep 1
+done
+case "$NEG" in
+  [0-9]*) : ;;
+  *) fail "post-reject count query did not return a number after retries (got '$NEG') — RO lane count step failed to respond; NOT necessarily a data leak (#83)" ;;
+esac
+[ "$NEG" = "3" ] || fail "a row actually leaked past the RO reject: count=$NEG want 3"
+ok "no row leaked past the RO reject (RO lane still reports 3)"
 
 # --- 4. staleness (tip-following only) ---------------------------------------
 echo "== staleness: fresh writer commit -> RO catch-up =="

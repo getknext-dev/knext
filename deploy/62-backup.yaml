@@ -348,50 +348,80 @@ spec:
                     printf '%08X%08X' "$logid" "$seg"
                   }
 
-                  # PRIMARY (configured) timeline — fail-CLOSED: a missing/zero rcl aborts
-                  # the whole job before any deletion (unchanged safety invariant).
+                  # resolve_one <tenant> <timeline>: write /state/horizons/<tenant>/<timeline>
+                  # from THAT timeline's OWN remote_consistent_lsn, or WARN + leave it
+                  # UNRESOLVED (the prune step fail-safe-SKIPS an unresolved timeline). This is
+                  # issue #59 (per-timeline horizons) generalized to (tenant, timeline) pairs
+                  # so the branch-per-app plane is covered (issue #77).
+                  resolve_one() {
+                    T="$1"; TL="$2"
+                    RCL="$(curl -sf "$PS/v1/tenant/$T/timeline/$TL" \
+                          | tr ',' '\n' | grep '"remote_consistent_lsn"' | head -1 | cut -d'"' -f4)"
+                    if S="$(rcl_to_suffix "$RCL")"; then
+                      mkdir -p "/state/horizons/$T"
+                      printf '%s' "$S" > "/state/horizons/$T/$TL"
+                      echo "resolved horizon: tenant=$T timeline=$TL rcl=$RCL suffix=$S"
+                      return 0
+                    fi
+                    echo "WARN: tenant=$T timeline=$TL has no usable remote_consistent_lsn ('$RCL') — UNRESOLVED (prune fail-safe-skips it)"
+                    return 1
+                  }
+
+                  # list_timelines <tenant> -> stdout the timeline ids under that tenant.
+                  list_timelines() {
+                    L="$(curl -sf "$PS/v1/tenant/$1/timeline")" || return 1
+                    if command -v jq >/dev/null 2>&1; then
+                      echo "$L" | jq -r '.[].timeline_id' 2>/dev/null
+                    else
+                      echo "$L" | tr ',{}' '\n' | grep '"timeline_id"' \
+                        | sed -E 's/.*"timeline_id" *: *"?([^",]*)"?.*/\1/'
+                    fi
+                  }
+
+                  # PRIMARY (configured) tenant/timeline — fail-CLOSED: a missing/zero rcl on
+                  # the configured timeline aborts the whole job before any deletion (unchanged
+                  # safety invariant). Also seeds the drill-visible threshold_suffix.
                   RCL="$(curl -sf "$PS/v1/tenant/${TENANT_ID}/timeline/${TIMELINE_ID}" \
                         | tr ',' '\n' | grep '"remote_consistent_lsn"' | head -1 | cut -d'"' -f4)"
                   if ! SUF="$(rcl_to_suffix "$RCL")"; then
                     echo "FATAL: could not read remote_consistent_lsn (got '$RCL') — aborting, pruning nothing" >&2; exit 1
                   fi
                   printf '%s' "$SUF" > /state/threshold_suffix
-                  printf '%s' "$SUF" > "/state/horizons/${TIMELINE_ID}"
-                  echo "remote_consistent_lsn=$RCL keep_segments=$KEEP_SEGMENTS threshold_suffix=$SUF timeline=${TIMELINE_ID}"
+                  mkdir -p "/state/horizons/${TENANT_ID}"
+                  printf '%s' "$SUF" > "/state/horizons/${TENANT_ID}/${TIMELINE_ID}"
+                  echo "remote_consistent_lsn=$RCL keep_segments=$KEEP_SEGMENTS threshold_suffix=$SUF tenant=${TENANT_ID} timeline=${TIMELINE_ID}"
 
-                  # PER-TIMELINE horizons (issue #59). Neon branches are real, concurrent
-                  # timelines; a sibling branch BELOW the configured timeline's rcl must be
-                  # judged against ITS OWN remote_consistent_lsn, never the configured one
-                  # (applying a higher horizon to a lagging sibling would over-prune WAL it
-                  # still needs — data-loss class). List every timeline and resolve each
-                  # one's OWN horizon. A timeline whose rcl we cannot resolve gets NO
-                  # horizon file → the prune step fail-safe-SKIPS it and fails loud.
-                  if LIST="$(curl -sf "$PS/v1/tenant/${TENANT_ID}/timeline")"; then
-                    if command -v jq >/dev/null 2>&1; then
-                      echo "$LIST" | jq -r '.[] | "\(.timeline_id) \(.remote_consistent_lsn)"' 2>/dev/null > /state/tl_rcls || : > /state/tl_rcls
-                    else
-                      # jq-free fallback: pair each timeline_id with the next rcl in stream order.
-                      echo "$LIST" | tr ',{}' '\n' \
-                        | grep -E '"(timeline_id|remote_consistent_lsn)"' \
-                        | sed -E 's/.*"(timeline_id|remote_consistent_lsn)" *: *"?([^",]*)"?.*/\1 \2/' > /state/tl_kv || : > /state/tl_kv
-                      : > /state/tl_rcls; tid=""
-                      while read -r k v; do
-                        [ "$k" = "timeline_id" ] && tid="$v"
-                        if [ "$k" = "remote_consistent_lsn" ] && [ -n "$tid" ]; then echo "$tid $v" >> /state/tl_rcls; tid=""; fi
-                      done < /state/tl_kv
-                    fi
-                    while read -r TL RCL2; do
-                      [ -n "$TL" ] || continue
-                      if S2="$(rcl_to_suffix "$RCL2")"; then
-                        printf '%s' "$S2" > "/state/horizons/${TL}"
-                        echo "resolved per-timeline horizon: timeline=$TL rcl=$RCL2 suffix=$S2"
-                      else
-                        echo "WARN: timeline=$TL has no usable remote_consistent_lsn ('$RCL2') — leaving UNRESOLVED (prune fail-safe-skips it)"
-                      fi
-                    done < /state/tl_rcls
+                  # ALL TENANTS (issue #77). The branch-per-app plane lives under a SEPARATE
+                  # tenant (a000…) from the configured primary (f000…). The janitor previously
+                  # read TENANT_ID from compute-config = the primary ONLY, so per-app branch WAL
+                  # on the safekeepers was NEVER pruned (unbounded growth). Enumerate EVERY
+                  # tenant that hosts live timelines from the pageserver, then resolve each
+                  # timeline's OWN horizon (issue #59 semantics, now per (tenant,timeline)).
+                  # A sleeping app's WAL (stable rcl) is retained; a churned app's is reclaimed.
+                  # Anything unresolvable is left with NO horizon file → prune fail-safe-SKIPS
+                  # it and fails loud (never over-pruned against a foreign horizon).
+                  if command -v jq >/dev/null 2>&1; then
+                    TENANTS="$(curl -sf "$PS/v1/tenant" | jq -r '.[].id' 2>/dev/null || true)"
                   else
-                    echo "WARN: could not list timelines at $PS/v1/tenant/${TENANT_ID}/timeline — only the configured timeline is resolved; any sibling in the bucket is fail-safe-skipped and pages (#59)"
+                    TENANTS="$(curl -sf "$PS/v1/tenant" | tr ',{}' '\n' | grep '"id"' \
+                              | sed -E 's/.*"id" *: *"?([^",]*)"?.*/\1/' || true)"
                   fi
+                  if [ -z "$TENANTS" ]; then
+                    echo "WARN: could not enumerate tenants at $PS/v1/tenant — only the configured tenant is resolved; any OTHER tenant present in the bucket is fail-safe-skipped and pages (#77/#59)"
+                    TENANTS="${TENANT_ID}"
+                  fi
+                  echo "tenants to resolve: $(echo $TENANTS | tr '\n' ' ')"
+                  for T in $TENANTS; do
+                    [ -n "$T" ] || continue
+                    if ! TLS="$(list_timelines "$T")" || [ -z "$TLS" ]; then
+                      echo "WARN: could not list timelines for tenant=$T at $PS — its bucket timelines are fail-safe-skipped and page (#77/#59)"
+                      continue
+                    fi
+                    for TL in $TLS; do
+                      [ -n "$TL" ] || continue
+                      resolve_one "$T" "$TL" || true
+                    done
+                  done
               volumeMounts:
                 - { name: state, mountPath: /state }
           # STEP 2 (mc): for EACH timeline prefix present under /safekeeper/<tenant>/,
@@ -426,32 +456,61 @@ spec:
                   export HOME=/tmp
                   mkdir -p /tmp/.mc
                   mc alias set src http://minio:9000 "$S3_USER" "$S3_PASS"
-                  BASE="src/neon/safekeeper/${TENANT_ID}"
-                  echo "pruning /safekeeper WAL per-timeline, each against ITS OWN horizon (issues #42/#59, DRY_RUN=${DRY_RUN})"
-                  # Enumerate the timeline prefixes present in the bucket. fail-LOUD if the
-                  # listing itself errors: a silent `mc ls` failure must page
-                  # (WalJanitorJobFailed), never exit 0 having pruned nothing.
-                  if ! mc ls "$BASE/" > /tmp/tldirs 2>/tmp/lserr; then
-                    echo "FATAL: could not list $BASE (mc ls failed) — aborting, pruning nothing" >&2
+                  SKBASE="src/neon/safekeeper"
+                  echo "pruning /safekeeper WAL across ALL tenants, each timeline against ITS OWN horizon (issues #42/#59/#77, DRY_RUN=${DRY_RUN})"
+                  # ALL TENANTS (issue #77). Enumerate the TENANT prefixes present in the bucket
+                  # (primary f000… + apps a000… + any future), then within each tenant enumerate
+                  # its timeline prefixes. fail-LOUD if any listing errors: a silent `mc ls`
+                  # failure must page (WalJanitorJobFailed), never exit 0 having pruned nothing.
+                  if ! mc ls "$SKBASE/" > /tmp/tenantdirs 2>/tmp/lserr; then
+                    echo "FATAL: could not list $SKBASE (mc ls failed) — aborting, pruning nothing" >&2
                     cat /tmp/lserr >&2; exit 1
                   fi
-                  sed 's/.* //' /tmp/tldirs | grep '/$' | sed 's:/$::' | sort -u > /tmp/tls || true
-                  tlcount="$(grep -c . /tmp/tls || true)"
-                  if [ "$tlcount" -eq 0 ]; then echo "no timeline prefixes present — nothing to prune"; exit 0; fi
-                  echo "timeline prefixes present: $(tr '\n' ' ' < /tmp/tls)"
+                  sed 's/.* //' /tmp/tenantdirs | grep '/$' | sed 's:/$::' | sort -u > /tmp/tenants || true
+                  tncount="$(grep -c . /tmp/tenants || true)"
+                  if [ "$tncount" -eq 0 ]; then echo "no tenant prefixes present under $SKBASE — nothing to prune"; exit 0; fi
+                  echo "tenant prefixes present: $(tr '\n' ' ' < /tmp/tenants)"
 
-                  UNRESOLVED=""; GRAND=0; : > /tmp/anyseg
+                  # UNRESOLVED horizons are split by tenant (issue #77 + #59):
+                  #  - PRIMARY (configured) tenant: an unresolved sibling is an ANOMALY on a
+                  #    single-writer plane with exactly one expected timeline -> FAIL LOUD
+                  #    (WalJanitorJobFailed), unchanged #59 behaviour.
+                  #  - OTHER (apps) tenant(s): the branch-per-app plane is CHURNY — orphaned
+                  #    safekeeper WAL from a deprovisioned app (pageserver 404, no rcl) is
+                  #    expected residue. Skip it fail-safe + WARN LOUDLY (visible in janitor
+                  #    logs), but do NOT fail the nightly job on expected apps churn (that would
+                  #    be pager noise). The safety invariant (never over-prune an unresolved
+                  #    timeline) is preserved either way. Ongoing orphan reclamation is the
+                  #    deprovision path's job (deprovision deletes the safekeeper timeline dir).
+                  UNRESOLVED_PRIMARY=""; UNRESOLVED_APPS=""; GRAND=0; : > /tmp/anyseg
+                  while IFS= read -r TEN; do
+                    [ -n "$TEN" ] || continue
+                    BASE="$SKBASE/$TEN"
+                    if ! mc ls "$BASE/" > /tmp/tldirs 2>/tmp/lserr; then
+                      echo "FATAL: could not list $BASE (mc ls failed) — aborting" >&2; cat /tmp/lserr >&2; exit 1
+                    fi
+                    sed 's/.* //' /tmp/tldirs | grep '/$' | sed 's:/$::' | sort -u > /tmp/tls || true
+                    tlcount="$(grep -c . /tmp/tls || true)"
+                    if [ "$tlcount" -eq 0 ]; then echo "  tenant $TEN: no timeline prefixes — nothing to prune"; continue; fi
+                    echo "  tenant $TEN: timeline prefixes present: $(tr '\n' ' ' < /tmp/tls)"
                   while IFS= read -r TL; do
                     [ -n "$TL" ] || continue
                     PFX="$BASE/$TL"
-                    # #59 — a timeline we could not resolve a horizon for is SKIPPED, never
-                    # judged against another timeline's horizon (fail-safe: no over-prune).
-                    if [ ! -f "/state/horizons/$TL" ]; then
-                      echo "  timeline $TL: UNRESOLVED horizon (its own remote_consistent_lsn is unknown) — SKIP, pruning nothing (fail-safe #59)"
-                      UNRESOLVED="$UNRESOLVED $TL"; continue
+                    # #59/#77 — a (tenant,timeline) we could not resolve a horizon for is
+                    # SKIPPED, never judged against another timeline's horizon (fail-safe: no
+                    # over-prune of a sleeping app's WAL).
+                    if [ ! -f "/state/horizons/$TEN/$TL" ]; then
+                      if [ "$TEN" = "${TENANT_ID}" ]; then
+                        echo "    tenant $TEN timeline $TL: UNRESOLVED horizon on the PRIMARY tenant — SKIP, pruning nothing (fail-safe) and will FAIL LOUD (#59)"
+                        UNRESOLVED_PRIMARY="$UNRESOLVED_PRIMARY $TEN/$TL"
+                      else
+                        echo "    tenant $TEN timeline $TL: UNRESOLVED horizon on an apps tenant (deprovisioned-app WAL residue / in-flight branch) — SKIP, pruning nothing (fail-safe #77); WARN, not job-fail"
+                        UNRESOLVED_APPS="$UNRESOLVED_APPS $TEN/$TL"
+                      fi
+                      continue
                     fi
-                    SUFFIX="$(cat "/state/horizons/$TL")"
-                    echo "  timeline $TL: horizon suffix=$SUFFIX"
+                    SUFFIX="$(cat "/state/horizons/$TEN/$TL")"
+                    echo "    tenant $TEN timeline $TL: horizon suffix=$SUFFIX"
                     if ! mc ls "$PFX/" > /tmp/lsout 2>/tmp/lserr; then
                       echo "FATAL: could not list $PFX (mc ls failed) — aborting" >&2; cat /tmp/lserr >&2; exit 1
                     fi
@@ -459,7 +518,7 @@ spec:
                     sed 's/.* //' /tmp/lsout | grep -E '^[0-9A-Fa-f]{24}$' | sort -u > /tmp/all || true
                     total="$(grep -c . /tmp/all || true)"
                     [ "$total" -gt 0 ] && echo x >> /tmp/anyseg
-                    if [ "$total" -eq 0 ]; then echo "    no complete WAL segments — nothing to prune for $TL"; continue; fi
+                    if [ "$total" -eq 0 ]; then echo "      no complete WAL segments — nothing to prune for $TL"; continue; fi
                     # DERIVE the 8-hex TLI(s) present and prune each against THIS timeline's
                     # suffix (issue #42): a bumped TLI (00000002...) gets its own 24-hex
                     # threshold and is actually pruned, never latch-skipped.
@@ -473,27 +532,33 @@ spec:
                     done < /tmp/tlis
                     sort -u /tmp/todelete -o /tmp/todelete
                     n="$(grep -c . /tmp/todelete || true)"
-                    echo "    segments=$total prunable(below horizon)=$n; keep(at/above)+partials retained"
-                    if [ "$n" -gt 0 ]; then echo "    range: $(head -1 /tmp/todelete) .. $(tail -1 /tmp/todelete)"; fi
-                    if [ "$n" -eq 0 ]; then echo "    nothing to prune — $TL already lean"; continue; fi
-                    if [ "${DRY_RUN:-false}" = "true" ]; then echo "    DRY_RUN=true — listing only, no deletions for $TL"; continue; fi
+                    echo "      segments=$total prunable(below horizon)=$n; keep(at/above)+partials retained"
+                    if [ "$n" -gt 0 ]; then echo "      range: $(head -1 /tmp/todelete) .. $(tail -1 /tmp/todelete)"; fi
+                    if [ "$n" -eq 0 ]; then echo "      nothing to prune — $TEN/$TL already lean"; continue; fi
+                    if [ "${DRY_RUN:-false}" = "true" ]; then echo "      DRY_RUN=true — listing only, no deletions for $TEN/$TL"; continue; fi
                     i=0
                     while IFS= read -r o; do
                       [ -n "$o" ] || continue
                       mc rm "$PFX/$o" >/dev/null && i=$((i+1))
                     done < /tmp/todelete
-                    echo "    pruned $i segment(s) from $TL (~$((i*16)) MiB reclaimed)"
+                    echo "      pruned $i segment(s) from $TEN/$TL (~$((i*16)) MiB reclaimed)"
                     GRAND=$((GRAND+i))
                   done < /tmp/tls
+                  done < /tmp/tenants
 
-                  echo "prune summary: $GRAND segment(s) removed across resolved timeline(s)"
+                  echo "prune summary: $GRAND segment(s) removed across resolved (tenant,timeline) pair(s)"
                   if [ ! -s /tmp/anyseg ]; then echo "no complete WAL segments present — nothing to prune"; fi
-                  if [ "$GRAND" -eq 0 ] && [ -z "$UNRESOLVED" ]; then echo "nothing to prune — bucket already lean"; fi
-                  # FAIL LOUD (#59): any bucket timeline with an unresolved horizon was
-                  # skipped (never over-pruned) — but the gap must page so the missing
-                  # per-timeline rcl is investigated, never silently swallowed.
-                  if [ -n "$UNRESOLVED" ]; then
-                    echo "FATAL: timeline(s) present with UNRESOLVED horizon:$UNRESOLVED — skipped (fail-safe, no over-prune) and failing loud (WalJanitorJobFailed) (#59)" >&2
+                  if [ "$GRAND" -eq 0 ] && [ -z "$UNRESOLVED_PRIMARY" ] && [ -z "$UNRESOLVED_APPS" ]; then echo "nothing to prune — bucket already lean"; fi
+                  # Apps-tenant orphans: skipped fail-safe (never over-pruned), surfaced LOUDLY
+                  # in the log, but NOT a job failure (expected branch-per-app churn residue).
+                  if [ -n "$UNRESOLVED_APPS" ]; then
+                    echo "WARN: apps-tenant (tenant,timeline)(s) with UNRESOLVED horizon (deprovisioned-app WAL residue / in-flight branch):$UNRESOLVED_APPS — SKIPPED fail-safe (no over-prune). Reclaim via the deprovision path (delete the safekeeper timeline dir). (#77)" >&2
+                  fi
+                  # FAIL LOUD (#59): a PRIMARY-tenant sibling with an unresolved horizon is an
+                  # anomaly on the single-writer plane — page so the missing per-timeline rcl is
+                  # investigated, never silently swallowed.
+                  if [ -n "$UNRESOLVED_PRIMARY" ]; then
+                    echo "FATAL: PRIMARY-tenant (tenant,timeline)(s) present with UNRESOLVED horizon:$UNRESOLVED_PRIMARY — skipped (fail-safe, no over-prune) and failing loud (WalJanitorJobFailed) (#59)" >&2
                     exit 1
                   fi
                   echo "post-prune /safekeeper size:"; mc du "src/neon/safekeeper"

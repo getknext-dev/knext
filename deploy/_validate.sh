@@ -79,13 +79,23 @@ grep -q 'kind: PodDisruptionBudget' 56-pdb.yaml || fail "56-pdb.yaml missing PDB
 grep -q 'minAvailable: 2' 56-pdb.yaml || fail "safekeeper PDB must keep minAvailable: 2 (quorum)"
 ok "56-pdb.yaml guards safekeeper quorum + pageserver"
 
-# 11. contract: a minimal in-cluster Prometheus scrapes the gateway fleet and
+# 11. contract: a minimal in-cluster Prometheus scrapes the gateway FAMILY and
 #     ships the review's three alerts (wake failures, wake latency, phantom keepalive).
 grep -q 'prom/prometheus' 60-prometheus.yaml || fail "60-prometheus.yaml lacks a pinned prometheus image"
 grep -q 'pggw_wake_failures_total' 60-prometheus.yaml || fail "60-prometheus.yaml missing wake-failure alert"
 grep -q 'pggw_wake_latency_ms_last' 60-prometheus.yaml || fail "60-prometheus.yaml missing wake-latency alert"
 grep -q 'PhantomKeepalive' 60-prometheus.yaml || fail "60-prometheus.yaml missing phantom-keepalive alert"
-ok "60-prometheus.yaml scrapes pggw + ships the three review alerts"
+# #80: the scrape keep MUST cover the apps-gateway (pggw-apps), not exact `pggw` only —
+# otherwise the entire branch-per-app plane + per-app computes emit metrics no rule sees.
+grep -q 'regex: pggw(-apps)?' 60-prometheus.yaml || fail "60-prometheus.yaml scrape keep must be 'pggw(-apps)?' to cover the apps-gateway (#80)"
+grep -q 'target_label: gateway' 60-prometheus.yaml || fail "60-prometheus.yaml must carry a per-plane 'gateway' label (#80)"
+# #80: multi-tenant / read-pool compute wake alerts must exist.
+for a in ComputeWakeStuckApps ComputeRoPoolStuck ComputeStuckNotReady; do
+  grep -q "alert: $a" 60-prometheus.yaml || fail "60-prometheus.yaml missing $a alert (#80)"
+done
+# ComputeWakeStuck (single-DB) must be scoped to gateway=pggw so apps traffic can't trip it.
+grep -q 'pggw_active_connections{gateway="pggw"}' 60-prometheus.yaml || fail "60 ComputeWakeStuck must scope its connection sum to gateway=\"pggw\" (#80)"
+ok "60-prometheus.yaml scrapes the gateway family (pggw + pggw-apps) + ships the review alerts + multi-tenant/read-pool wake alerts (#80)"
 
 # 12. contract: storage S3/root credentials come from a Secret, never plaintext
 #     YAML. No `value: password`/`value: minio` literals; secretKeyRef present.

@@ -1,11 +1,18 @@
 # CLAUDE.md — kickoff brief for this MVP
 
-## Goal (current, 2026-07-02)
+## Goal (current, updated 2026-07-04)
 Ship a **Knative-ecosystem MVP of scale-to-zero PostgreSQL**: one database that is easy to host,
 easy to maintain, and reliable enough. Idle DB consumes zero compute; a client connection wakes it
 sub-second(ish). Reuse open source (Neon) for everything below the wire; build only the glue.
-**SCS multi-tenancy is parked** — single DB first, multi-system later (the `template` wake mode is
-the seam where it returns).
+
+**Multi-tenancy is UN-PARKED — branch-per-app shipped in v0.6.0 (ADR-0003).** The `template`
+wake-mode seam that was anticipated as the return path has returned and is wired. Honest scope
+bound: **DB-per-app** for tens/low-hundreds of apps on ONE shared storage plane; each app is a
+Neon branch (own timeline) with its own 0↔1 `compute-<app>` Deployment, provisioned
+**imperatively** by `deploy/provision-app.sh` and routed by the apps-gateway — a CRD operator is
+**deferred/post-MVP**. A **read-scaling axis** also shipped (`compute-ro` / `DATABASE_URL_RO`).
+Distinguish clearly: **DB-per-app (branch-per-app) is SHIPPED**; any **SCS multi-SYSTEM /
+full data-sovereignty-zone multi-tenancy** ambition remains **parked / out of scope**.
 
 ## Consumer
 The **knext** platform (`~/alpheya/pocs/knext`) — a scale-to-zero Next.js framework on
@@ -77,3 +84,10 @@ On a local k8s cluster, with a one-table test DB:
 2. Idle window passes → compute back to 0 (verified, no phantom keepalives).
 3. Reconnect wakes it again; data intact (storage plane owns durability).
 4. knext integration documented: Secret + pool-idle-below-GW_IDLE_MS sizing note.
+
+**Shipped beyond the single-DB DoD (v0.6.0, see `docs/adr-0003-multi-tenancy.md`):**
+5. **Multi-tenant axis** — branch-per-app: N apps as Neon branches on one shared plane, each with
+   its own 0↔1 `compute-<app>`, provisioned by `deploy/provision-app.sh`, routed by the
+   apps-gateway (`template` wake mode). Scope bound + deferred CRD operator per the Goal above.
+6. **Read-scaling axis** — read-replica pool `compute-ro` (0↔N) via `DATABASE_URL_RO`, optional
+   warm tier and HPA.

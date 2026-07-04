@@ -160,8 +160,10 @@ table tests (`gateway/internal/wake/ro_test.go`); manifest contracts by
 (RO wakes only the pool, reflects committed data, rejects writes, measures
 staleness).
 
-Verified **pre-merge on OKE, 2026-07-04** (`_verify-readpool.sh`, gateway image
-`iter9-ro-ef543a5@sha256:ab35d2a1…` built + pushed to OCIR, `RO_MODE=Replica`):
+Verified **pre-merge on OKE, 2026-07-04** (`_verify-readpool.sh`, on the live cluster
+running the **v0.6.0 release gateway** `v0.6.0@sha256:9ee6497826…`, `KSPG_SKIP_BUILD=1`,
+`RO_MODE=Replica` — issues #78/#82/#83; the RO lane is now deployed live on `pggw`
+(GW_RO_* env) with `compute-ro` at its 0-replica rest posture):
 
 | Metric | Result | Evidence |
 |---|---|---|
@@ -169,7 +171,7 @@ Verified **pre-merge on OKE, 2026-07-04** (`_verify-readpool.sh`, gateway image
 | RO read wakes only the pool | ✅ primary stayed at **0 pods** through the RO read | drill asserts `compute` pods == 0 during the RO query; pool scaled `0→1` |
 | RO reflects committed data | ✅ 3 seeded rows returned via `DATABASE_URL_RO` | while primary asleep |
 | Write on RO DSN rejected | ✅ `read-only transaction` error; no row leaked | negative assertion |
-| **Staleness (Replica lag)** | **~8 s** writer-commit → RO-visible | a row committed on the writer became visible on the pool within ~8 s (poll granularity + per-poll client-pod spawn inflate this; true replication lag is at/under this bound) |
+| **Staleness (Replica lag)** | **~9 s** writer-commit → RO-visible | a row committed on the writer became visible on the pool within ~9 s (`READPOOL_STALENESS mode=Replica tip_following=yes lag_s=9`; poll granularity + per-poll client-pod spawn inflate this; true replication lag is at/under this bound) |
 
 The pool boots the **tip-following `Replica`** compute mode — compute_ctl 8464
 supports a read-only endpoint that streams WAL from the safekeepers and tracks

@@ -153,7 +153,7 @@ spec:
         seccompProfile: { type: RuntimeDefault }
       containers:
         - name: sink
-          image: me-abudhabi-1.ocir.io/axfqznklsd2t/ks-pg/gateway:v0.3.1@sha256:92c81f61a595aa6b82fd8c5fcd5d10a9eeea25c0982b94ccc8cfb55fcb17f8bd # OCIR, digest-pinned (issue #56; tag kept for provenance)
+          image: me-abudhabi-1.ocir.io/axfqznklsd2t/ks-pg/gateway:v0.6.0@sha256:9ee6497826aeb6dca620cba488e35d0d56ff19d092d1c75ffeb7eddcd47b5857 # v0.6.0 RELEASE build (issues #78/#82) — supersedes v0.3.1; same multi-binary image, /alertsink entrypoint override (line below)
           imagePullPolicy: IfNotPresent
           # OCIR is private: ocir-pull secret created by deploy/gen-secrets.sh
           command: ["/alertsink"]

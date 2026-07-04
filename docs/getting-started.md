@@ -14,8 +14,17 @@ minimum, so small PVC requests round up there.
 
 ## 1. Gateway image
 
-The manifests reference the canonical image in OCIR
-(`me-abudhabi-1.ocir.io/axfqznklsd2t/ks-pg/gateway:v0.3.1`); private pulls need
+The manifests reference the **v0.6.0 release image** in OCIR
+(`me-abudhabi-1.ocir.io/axfqznklsd2t/ks-pg/gateway:v0.6.0@sha256:9ee6497826…` — the
+amd64 image that the `v0.6.0` tag/index `sha256:e6bc0306…` resolves to, which is what
+the kubelet reports as the running imageID; digest-pinned per the #56 scheme). The
+same multi-binary image backs `deploy/10-gateway.yaml`, `58-pswatcher.yaml`
+(`/pswatcher`), and `61-alertmanager.yaml` (`/alertsink`), so live == release ==
+manifests for the single-DB gateway + control plane and `_verify-drift.sh` is green on
+the release digest for those (issue #82). The **apps-gateway** (`81-apps-gateway.yaml`,
+`/gateway` template mode) carries its own security image on the v0.6.1 tenant-security
+lane; its `live == release == manifest` reconciliation lands at the v0.6.1 tag. Private
+pulls need
 the `ocir-pull` Secret (created by `deploy/gen-secrets.sh` when registry creds
 are available, or `kubectl create secret docker-registry ocir-pull ...`).
 

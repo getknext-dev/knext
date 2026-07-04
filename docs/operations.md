@@ -58,12 +58,15 @@ Alertmanager (`61-alertmanager.yaml`) to a receiver.
 | `BackupStaleAbsent` (crit) | backup **never** succeeded / suspended **and the CronJob is >26h old**, OR the CronJob object is gone | The last-success metric is absent — `BackupStale` is blind here. Treat as **no off-cluster backup at all**: un-suspend / redeploy the CronJob and force a run. **Age-gated so a fresh / DR-restored plane is not paged for the first 26h** (#62); the deleted/renamed case fires immediately (#51). |
 | `WalJanitorStaleAbsent` (crit) | janitor **never** succeeded / suspended **and the CronJob is >26h old**, OR the CronJob object is gone | The last-success metric is absent — `WalJanitorStale` is blind here. `/safekeeper` WAL is unbounded: un-suspend / redeploy the CronJob and force a run. **Age-gated for 26h on a fresh/DR plane** (#62); deleted/renamed fires immediately (#49/#51). |
 | `Watchdog` (none) | **always firing by design** | The alerting stack's **dead-man's-switch** (#60). You should **never** be paged by this rule directly — it is routed to an *external* heartbeat monitor. If that **external** monitor pages you, Prometheus or Alertmanager itself is down. See [dead-man's-switch](#dead-mans-switch-external-heartbeat-60). |
-| `KubeStateMetricsDown` (crit) | `up{job=kube-state-metrics}==0` or absent for 2m | **Sev-1.** KSM (`deploy/59`) is the sole producer for `BackupJobFailed`, `WalJanitorJobFailed`, `BackupStale`, `WalJanitorStale`, `PageserverStandbyNotReady`, `ComputeWakeStuck` — while it is down **all of them are blind**. Restore KSM before trusting any platform alert. (#48) |
+| `KubeStateMetricsDown` (crit) | `up{job=kube-state-metrics}==0` or absent for 2m | **Sev-1.** KSM (`deploy/59`) is the sole producer for `BackupJobFailed`, `WalJanitorJobFailed`, `BackupStale`, `WalJanitorStale`, `PageserverStandbyNotReady`, `ComputeWakeStuck`, `ComputeWakeStuckApps`, `ComputeRoPoolStuck`, `ComputeStuckNotReady` — while it is down **all of them are blind**. Restore KSM before trusting any platform alert. (#48) |
 | `PswatcherDown` (crit) | `up{job="pswatcher"}==0` for 2m | The failover authority is down — a primary pageserver death now degrades to the manual runbook (below). Restart pswatcher. |
 | `PswatcherPromotionFired` (crit) | `pswatcher_promotions_total` rose in 10m | A **failover happened** — the promoted standby is now the sole read authority with NO standby behind it. Rebuild a standby. |
 | `PswatcherPrimaryDown` (warn) | `pswatcher_primary_up==0` for 1m | The watcher can't reach the **current read authority**. Pre-failover that's the primary (a promotion may be ~6s away); **post-failover the watcher re-anchors this metric onto the promoted standby** (#25), so it now also covers "the promoted node is the unguarded SPOF and just died." Check the current authority / watcher↔pageserver network. |
 | `PageserverStandbyNotReady` (crit) | `pageserver-standby` <1 ready for 5m | The warm standby that failover promotes into is gone — automated failover has nothing to promote. Rebuild it. |
-| `ComputeWakeStuck` (crit) | connections held but 0 compute/compute-warm ready for 2m | A client is connected but the DB never woke — attach error / image pull / storage stall. Clients are hanging. |
+| `ComputeWakeStuck` (crit) | **single-DB plane**: `pggw` (gateway=pggw) connections held but 0 `compute`/`compute-warm` ready for 2m | A single-DB client is connected but the DB never woke — attach error / image pull / storage stall. Clients are hanging. (Connection sum scoped to `gateway="pggw"` so apps traffic can't mask/trip it — #80.) |
+| `ComputeWakeStuckApps` (crit) | **apps plane**: `pggw-apps` connections held but 0 `compute-<app>` ready anywhere for 2m | The whole branch-per-app wake path is down — apps clients are hanging. Aggregate (fires when 0 per-app computes are ready); a single stuck app among healthy peers is caught by `ComputeStuckNotReady`. Check the apps-gateway, the per-app compute events, and the shared storage plane. (#80) |
+| `ComputeRoPoolStuck` (crit) | read-replica pool `compute-ro` desired ≥1 but 0 ready for 2m | The RO pool was woken under read traffic but no replica became ready (crashloop / attach stall / image pull) — `DATABASE_URL_RO` reads are hanging. Check `kubectl -n scale-zero-pg describe deploy compute-ro` + its pod events. Silent when the pool is at rest (spec 0). (#80/#66) |
+| `ComputeStuckNotReady` (crit) | any `compute*` pod (compute / compute-ro / compute-warm / compute-`<app>`) has Ready=false for 5m | A compute-family pod is crash-looping / attach-stalled — **pages even with NO client waiting** (catches a sleeping app's compute crash-looping that the connection-gated rules miss). `kubectl -n scale-zero-pg get pod {{pod}}` + describe/logs. Healthy cold starts (~5s) never trip the 5m window. (#80) |
 | `DemoCanaryFailed` (warn) | a Job owned by the **demo-canary** CronJob failed (dormant unless the demo canary is deployed) | The full **visitor→app→gateway→compute** cold path is broken or regressed past budget — the only synthetic that sees app-side / DNS / ingress-class regressions, not just the DB half. **3am:** if the demo is meant to be up, run `demo/_verify.sh` to reproduce; check `kubectl -n knext-demo get ksvc pg-demo` (Ready? ingress-class?), the operator, and the gateway. If the demo is intentionally torn down, delete the `demo-canary` CronJob to silence it. See [demo-canary](#demo-canary). |
 
 CronJob rules match by **exact owner name** (`kube_job_owner{owner_name="backup"}` /
@@ -88,6 +91,31 @@ never missed (the gap that re-opened the #19 DR blocker).
 - **Day-0 / post-DR false page** — the `*StaleAbsent` guards would themselves over-fire
   on a freshly built plane (no first success yet). They are age-gated to stay quiet for
   26h so an incident rebuild doesn't hand you two crit pages you can't clear (#62).
+
+### Wake-path & multi-tenant compute alerts
+
+v0.6.0 enlarged the wake surface from one DB to a **branch-per-app** plane plus a
+**read-replica pool** — so the pager was widened to see all of it (#80). Prometheus
+now scrapes the **gateway family** (`pggw` *and* `pggw-apps`, keyed on a `gateway`
+label), not just the single-DB `pggw`, so the apps-gateway's `pggw_*` metrics and
+every per-app compute finally reach a rule:
+
+- **`ComputeWakeStuck`** — single-DB plane, connection sum scoped to `gateway="pggw"`
+  so apps traffic can neither mask nor spuriously trip it.
+- **`ComputeWakeStuckApps`** — apps plane; `gateway="pggw-apps"` connections held but
+  0 ready `compute-<app>`. Aggregate (whole-plane-down); a single stuck app is caught
+  by `ComputeStuckNotReady`.
+- **`ComputeRoPoolStuck`** — `compute-ro` desired ≥1 but 0 ready under read traffic
+  (the read pool couldn't serve). KSM-only; silent when the pool rests at 0.
+- **`ComputeStuckNotReady`** — any `compute*` pod Ready=false >5m, **no client needed**
+  — the catch-all for a sleeping app's compute crash-looping that the connection-gated
+  rules would miss.
+
+All four evaluate kube-state-metrics series, so they are covered by
+`KubeStateMetricsDown` (they go blind if KSM dies). The apps-gateway being an **UP**
+scrape target is asserted by `deploy/_validate.sh` (manifest contract) and
+`deploy/_verify-alerting.sh` (live target-UP + rules-loaded) so the "pager-blind
+apps plane" of #80 stays closed.
 
 ### demo-canary
 

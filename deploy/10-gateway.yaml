@@ -59,7 +59,7 @@ spec:
       serviceAccountName: pggw
       containers:
         - name: gateway
-          image: me-abudhabi-1.ocir.io/axfqznklsd2t/ks-pg/gateway:iter9-ro-ef543a5@sha256:ab35d2a1279f953d06845c3e54c426c6742664ea8be63e0a84ce7a0e02092bcc # OCIR, digest-pinned (issue #56); iter9 RO-pool build (issue #66), verified pre-merge
+          image: me-abudhabi-1.ocir.io/axfqznklsd2t/ks-pg/gateway:v0.6.0@sha256:9ee6497826aeb6dca620cba488e35d0d56ff19d092d1c75ffeb7eddcd47b5857 # OCIR, digest-pinned (issue #56); v0.6.0 RELEASE build (issues #78/#82) — supersedes iter9-ro-ef543a5; includes the RO-pool lane (#66) + branch-per-app (#6)
           imagePullPolicy: IfNotPresent
           # OCIR is private: ocir-pull secret created by deploy/gen-secrets.sh
           env:
