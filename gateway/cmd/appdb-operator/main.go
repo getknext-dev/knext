@@ -66,6 +66,7 @@ func main() {
 	rolePrefix := env("APPDB_ROLE_PREFIX", "app_")
 	gatewayHost := env("APPDB_GATEWAY_HOST", "pggw-apps.scale-zero-pg.svc")
 	gatewayPort := envInt("APPDB_GATEWAY_PORT", 55432)
+	gatewayROPort := envInt("APPDB_GATEWAY_RO_PORT", 55434) // DATABASE_URL_RO port (docs/connecting.md)
 	pageserverURL := env("APPDB_PAGESERVER_URL", "http://pageserver:9898")
 	pageserverHost := env("APPDB_PAGESERVER_HOST", "pageserver")
 	skService := env("APPDB_SAFEKEEPER_SERVICE", "safekeeper")
@@ -101,16 +102,17 @@ func main() {
 	render.InitImage = env("APPDB_INIT_IMAGE", render.InitImage)
 
 	deps := &appdb.Deps{
-		Pageserver:  appdb.NewHTTPPageserver(pageserverURL, httpTimeout),
-		Safekeeper:  appdb.NewHTTPSafekeeper(namespace, skService, skPort, skReplicas, httpTimeout),
-		Cluster:     appdb.NewK8sCluster(cs, dyn, namespace, render, reclaimCM, logger),
-		Tenant:      tenant,
-		Template:    template,
-		PGVersion:   pgVersion,
-		RolePrefix:  rolePrefix,
-		GatewayHost: gatewayHost,
-		GatewayPort: gatewayPort,
-		Namespace:   namespace,
+		Pageserver:    appdb.NewHTTPPageserver(pageserverURL, httpTimeout),
+		Safekeeper:    appdb.NewHTTPSafekeeper(namespace, skService, skPort, skReplicas, httpTimeout),
+		Cluster:       appdb.NewK8sCluster(cs, dyn, namespace, render, reclaimCM, logger),
+		Tenant:        tenant,
+		Template:      template,
+		PGVersion:     pgVersion,
+		RolePrefix:    rolePrefix,
+		GatewayHost:   gatewayHost,
+		GatewayPort:   gatewayPort,
+		GatewayROPort: gatewayROPort,
+		Namespace:     namespace,
 
 		NewTimelineID: func() string { return randHex(16) }, // 32-hex, Neon timeline id
 		NewPassword:   func() string { return randHex(18) },

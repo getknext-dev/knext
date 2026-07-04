@@ -13,6 +13,9 @@
 #   1. apply CR      -> status.phase Ready, status.timelineId set, branch on pageserver
 #   2. child objects -> Deployment + Service + ConfigMap + per-app Secret created,
 #                       finalizer present (delete will run safe deprovision)
+#   2b. ext-driver     -> status.secretName published; DATABASE_URL_RO emission
+#                       lifecycle (absent when roPool off, correct per-app RO DSN
+#                       on port 55434 when toggled on, removed when off; #119)
 #   3. serves data   -> a per-app-role connect THROUGH the apps-gateway wakes the
 #                       compute 0->1 and reads/writes the app's own branch
 #   4. drift heal    -> hand-delete the Deployment; the operator re-creates it
@@ -123,6 +126,51 @@ K get appdatabase "$APP" -o jsonpath='{.metadata.finalizers}' | grep -q 'deprovi
 CPULIM="$(K get deploy "compute-$APP" -o jsonpath='{.spec.template.spec.containers[0].resources.limits.cpu}')"
 [ "$CPULIM" = "1500m" ] || fail "quota not applied: cpu limit=$CPULIM want 1500m"
 ok "Deployment+Service+ConfigMap+Secret created, finalizer set, quota applied (cpu=$CPULIM)"
+
+# 2b. external-driver status contract (#119): status.secretName names the output
+#     Secret so a driver reads it instead of reconstructing "app-db-<app>".
+SECNAME="$(cr_status secretName)"
+[ "$SECNAME" = "app-db-$APP" ] || fail "status.secretName=$SECNAME want app-db-$APP"
+ok "status.secretName published (app-db-$APP) — external-driver contract"
+
+# 2c. DATABASE_URL_RO emission lifecycle (#119). roPool is OFF above, so the output
+#     Secret must NOT carry a DATABASE_URL_RO key (writer-only contract).
+sec_key() { K get secret "app-db-$APP" -o jsonpath="{.data.$1}" 2>/dev/null || true; }
+[ -z "$(sec_key DATABASE_URL_RO)" ] || fail "DATABASE_URL_RO present with roPool OFF (must be omitted)"
+ok "no DATABASE_URL_RO key while roPool is off"
+
+# Turn roPool ON via the spec and wait for the operator to reconcile the key in.
+K patch appdatabase "$APP" --type=merge -p '{"spec":{"roPool":{"enabled":true}}}' >/dev/null
+RO=""; i=0
+while [ $i -lt 60 ]; do
+  RO="$(sec_key DATABASE_URL_RO | base64 -d 2>/dev/null || true)"
+  [ -n "$RO" ] && break
+  i=$((i+1)); sleep 1
+done
+[ -n "$RO" ] || fail "operator did not emit DATABASE_URL_RO after enabling roPool"
+# Contract: same per-app role + db as the writer, on the RO port 55434.
+case "$RO" in
+  postgres://app_$APP:*@*:55434/$APP\?sslmode=disable) ;;
+  *) fail "DATABASE_URL_RO wrong shape: $RO (want postgres://app_$APP:<pw>@<host>:55434/$APP?sslmode=disable)" ;;
+esac
+# It must differ from the writer DSN by exactly the port (55432 -> 55434).
+WRITER="$(sec_key DATABASE_URL | base64 -d)"
+[ "$RO" = "${WRITER/:55432\//:55434/}" ] || fail "DATABASE_URL_RO is not the writer DSN with the RO port: ro=$RO writer=$WRITER"
+ok "roPool ON -> DATABASE_URL_RO emitted (app_$APP creds, RO port 55434, port-swap of writer DSN)"
+echo "    note: per-app RO SERVING endpoint is a tracked read-scaling/gateway follow-up;"
+echo "          this asserts the contract KEY, not a live RO connection (docs/appdatabase-api.md)."
+
+# Turn roPool OFF again -> the key is removed (idempotent toggle, password untouched).
+PW_BEFORE="$(app_pw "$APP")"
+K patch appdatabase "$APP" --type=merge -p '{"spec":{"roPool":{"enabled":false}}}' >/dev/null
+i=0
+while [ $i -lt 60 ]; do
+  [ -z "$(sec_key DATABASE_URL_RO)" ] && break
+  i=$((i+1)); sleep 1
+done
+[ -z "$(sec_key DATABASE_URL_RO)" ] || fail "DATABASE_URL_RO not removed after disabling roPool"
+[ "$(app_pw "$APP")" = "$PW_BEFORE" ] || fail "PGPASSWORD changed during RO toggle (live app would be locked out)"
+ok "roPool OFF -> DATABASE_URL_RO removed; PGPASSWORD unchanged (no lockout)"
 
 # 3. serves data through the apps-gateway (wakes 0->1, reads its own branch)
 [ "$(GCLIENT seed 'select count(*) from schema_migrations' | tail -1)" -ge 1 ] \

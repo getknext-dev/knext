@@ -86,6 +86,19 @@ func (d *Deps) reconcileApply(ctx context.Context, cr *AppDatabase) (bool, error
 		}
 	}
 
+	// 3b. Reconcile the read-only DSN key (DATABASE_URL_RO) on the per-app Secret to
+	//     match the read-replica-pool request (ADR-0006 #119). Emitted only when
+	//     roPool.enabled — which knext maps from NextApp.spec.database.readReplicas.
+	//     Idempotent and password-preserving. This gives an external driver (the
+	//     knext operator) a first-class RO DSN key to inject rather than hand-deriving
+	//     the two-DSN pattern (docs/connecting.md), keeping the contract in one place.
+	//     The RO DSN targets the apps-gateway RO port; standing up the per-app RO
+	//     SERVING endpoint is a tracked read-scaling/gateway follow-up (see the
+	//     AppDatabase API reference) — the key is the stable contract, emitted here.
+	if err := d.Cluster.EnsureSecretROKey(ctx, app, cr.Spec.ROPool.Enabled, d.GatewayPort, d.GatewayROPort); err != nil {
+		return true, fmt.Errorf("reconcile RO secret key: %w", err)
+	}
+
 	// 4. INTENT-FIRST compute apply: ConfigMap (carries TIMELINE_ID) + Deployment +
 	//    Service, at the tier's replica count. Applied BEFORE the branch; a Deployment
 	//    at 0 starts nothing. This also HEALS drift — a hand-deleted Deployment is
@@ -127,13 +140,17 @@ func (d *Deps) reconcileApply(ctx context.Context, cr *AppDatabase) (bool, error
 	}
 	cr.Status.ComputeReady = avail
 	cr.Status.ObservedGeneration = cr.Generation
+	cr.Status.SecretName = "app-db-" + app // external-driver contract: the output Secret name (#119)
 	d.setCondition(cr, CondProvisioned, "True", "Provisioned", "branch + compute objects reconciled")
 
 	roNote := ""
 	if cr.Spec.ROPool.Enabled {
-		// Declarative surface only: per-app RO provisioning is owned by the
-		// read-scaling lane (deploy/26/27). Record intent; do not render RO objects.
-		roNote = " (roPool requested; RO provisioning is handled by the read-scaling lane, deploy/26/27)"
+		// The DATABASE_URL_RO key is emitted into app-db-<app> (step 3b) so an
+		// external driver can wire reads. Standing up the per-app RO SERVING
+		// endpoint (apps-gateway RO listener + per-app RO computes) is owned by the
+		// read-scaling/gateway lanes (deploy/26/27); this operator records intent
+		// and emits the contract key — it does not render RO compute objects.
+		roNote = " (roPool requested; DATABASE_URL_RO emitted — per-app RO serving endpoint is a read-scaling/gateway follow-up)"
 	}
 
 	requeue := false
@@ -252,6 +269,17 @@ func (d *Deps) setCondition(cr *AppDatabase, condType, status, reason, message s
 	cr.Status.Conditions = append(cr.Status.Conditions, Condition{
 		Type: condType, Status: status, Reason: reason, Message: message, LastTransitionTime: &now,
 	})
+}
+
+// roDSN derives the read-only DSN from the writer DSN by swapping ONLY the gateway
+// listener port (writerPort -> roPort). The read-only pool shares the app's role,
+// password, host and database — it differs only by which gateway port fronts it
+// (docs/connecting.md two-DSN pattern). If the writer DSN does not contain the
+// writer port, it is returned unchanged (defensive — never fabricate an endpoint).
+func roDSN(writerDSN string, writerPort, roPort int) string {
+	from := fmt.Sprintf(":%d/", writerPort)
+	to := fmt.Sprintf(":%d/", roPort)
+	return strings.Replace(writerDSN, from, to, 1)
 }
 
 // appMD5 is compute_ctl's encrypted_password: the RAW 32-hex md5(password||rolename)

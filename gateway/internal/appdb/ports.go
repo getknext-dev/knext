@@ -51,6 +51,13 @@ type ClusterOps interface {
 	// CreateSecret mints the per-app credential Secret (role + md5 + DSN). Only
 	// called when SecretExists is false, so a live app is never locked out.
 	CreateSecret(ctx context.Context, app, role, password, md5, dsn string) error
+	// EnsureSecretROKey reconciles the DATABASE_URL_RO key on the per-app Secret
+	// to match the read-replica-pool request (ADR-0006 #119). When enabled it
+	// derives DATABASE_URL_RO from the writer DATABASE_URL (same role/password/
+	// host/database, gateway RO port) and sets it; when disabled it removes the
+	// key. Idempotent (no write when already in the desired state) and it NEVER
+	// touches PGPASSWORD, so a live app is never locked out.
+	EnsureSecretROKey(ctx context.Context, app string, enabled bool, writerPort, roPort int) error
 	// ApplyCompute server-side-applies the ConfigMap + Deployment + Service for the app.
 	ApplyCompute(ctx context.Context, spec ComputeSpec) error
 	// DeleteCompute removes the app's Deployment + Service + ConfigMap + Secret.
@@ -75,16 +82,17 @@ type ClusterOps interface {
 
 // Clock and id/secret generators are injected so tests are deterministic.
 type Deps struct {
-	Pageserver  PageserverOps
-	Safekeeper  SafekeeperOps
-	Cluster     ClusterOps
-	Tenant      string // apps tenant id (APPS_TENANT)
-	Template    string // shared template timeline id (TEMPLATE_TL)
-	PGVersion   int
-	RolePrefix  string // app role prefix, e.g. "app_"
-	GatewayHost string // apps-gateway service DNS for the DSN, e.g. pggw-apps.scale-zero-pg.svc
-	GatewayPort int    // apps-gateway port (55432)
-	Namespace   string
+	Pageserver    PageserverOps
+	Safekeeper    SafekeeperOps
+	Cluster       ClusterOps
+	Tenant        string // apps tenant id (APPS_TENANT)
+	Template      string // shared template timeline id (TEMPLATE_TL)
+	PGVersion     int
+	RolePrefix    string // app role prefix, e.g. "app_"
+	GatewayHost   string // apps-gateway service DNS for the DSN, e.g. pggw-apps.scale-zero-pg.svc
+	GatewayPort   int    // apps-gateway writer port (55432)
+	GatewayROPort int    // apps-gateway read-only pool port (55434) for DATABASE_URL_RO
+	Namespace     string
 
 	// NewTimelineID mints a fresh 32-hex timeline id (crypto/rand in prod; fixed in tests).
 	NewTimelineID func() string

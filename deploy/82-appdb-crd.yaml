@@ -37,6 +37,7 @@ spec:
       additionalPrinterColumns:
         - { name: App, type: string, jsonPath: .spec.appName }
         - { name: Phase, type: string, jsonPath: .status.phase }
+        - { name: Secret, type: string, jsonPath: .status.secretName }
         - { name: Timeline, type: string, jsonPath: .status.timelineId }
         - { name: Ready, type: boolean, jsonPath: .status.computeReady }
         - { name: Tier, type: string, jsonPath: .spec.tier }
@@ -92,10 +93,12 @@ spec:
                 roPool:
                   type: object
                   description: >-
-                    Read-replica pool (read-scaling axis, DATABASE_URL_RO). Declarative
-                    surface; per-app RO provisioning is reconciled by the read-scaling
-                    lane (deploy/26/27) — the operator records intent and reports it in
-                    status. See docs/operations.md.
+                    Read-replica pool (read-scaling axis). When enabled, the operator
+                    emits a DATABASE_URL_RO key into the output Secret (the stable
+                    external-driver contract knext maps from NextApp.spec.database.
+                    readReplicas). The per-app RO SERVING endpoint (apps-gateway RO
+                    listener + per-app RO computes) is a tracked read-scaling/gateway
+                    follow-up — see docs/appdatabase-api.md and docs/operations.md.
                   properties:
                     enabled: { type: boolean, default: false }
                     minReplicas: { type: integer, default: 0, minimum: 0 }
@@ -116,6 +119,13 @@ spec:
                   type: string
                   description: Provisioning | Ready | Failed | Deleting
                   enum: [Provisioning, Ready, Failed, Deleting]
+                secretName:
+                  type: string
+                  description: >-
+                    The output credential Secret an external driver reads/mirrors
+                    (app-db-<appName>): keys PGUSER, PGPASSWORD, APP_ROLE_MD5,
+                    DATABASE_URL, and DATABASE_URL_RO (only when spec.roPool.enabled).
+                    Part of the external-driver contract — see docs/appdatabase-api.md.
                 timelineId:
                   type: string
                   description: The app's Neon timeline id (the durable owner of record). Minted once, fresh per lifecycle.

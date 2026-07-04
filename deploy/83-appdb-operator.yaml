@@ -89,7 +89,7 @@ spec:
         - name: appdb-operator
           # Same multi-binary gateway image; ENTRYPOINT overridden to /appdb-operator.
           # Digest-pinned (contract 22). Rebuild + re-pin on any operator change.
-          image: me-abudhabi-1.ocir.io/axfqznklsd2t/ks-pg/gateway:v0.7.0-appdb@sha256:REPLACE_AFTER_PUSH
+          image: me-abudhabi-1.ocir.io/axfqznklsd2t/ks-pg/gateway:v0.7.0-appdb-119-9bfbd68@sha256:0618ff093373488b1426224f88f55846123bdac967ab5f8d1ee4164d247130eb
           imagePullPolicy: IfNotPresent
           command: ["/appdb-operator"] # override the image's /gateway entrypoint
           securityContext:

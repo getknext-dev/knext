@@ -83,7 +83,11 @@ type ROPool struct {
 
 // AppDatabaseStatus mirrors deploy/82-appdb-crd.yaml .status.
 type AppDatabaseStatus struct {
-	Phase              string      `json:"phase,omitempty"`
+	Phase string `json:"phase,omitempty"`
+	// SecretName is the output credential Secret an external driver reads/mirrors
+	// (app-db-<appName>). Published so consumers wait on + read the name from
+	// status rather than reconstructing it (external-driver contract, #119).
+	SecretName         string      `json:"secretName,omitempty"`
 	TimelineID         string      `json:"timelineId,omitempty"`
 	ComputeReady       bool        `json:"computeReady,omitempty"`
 	Message            string      `json:"message,omitempty"`

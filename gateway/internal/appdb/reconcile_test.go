@@ -60,6 +60,8 @@ func (f *fakeSK) DeleteTimeline(_ context.Context, ord int, _, tl string) error 
 
 type fakeCluster struct {
 	secrets       map[string]bool
+	writerDSN     map[string]string // app -> DATABASE_URL (recorded by CreateSecret)
+	roKeys        map[string]string // app -> DATABASE_URL_RO (set/removed by EnsureSecretROKey)
 	createdSecret []string
 	applied       []ComputeSpec
 	deleted       []string
@@ -72,15 +74,40 @@ type fakeCluster struct {
 }
 
 func newFakeCluster() *fakeCluster {
-	return &fakeCluster{secrets: map[string]bool{}, pending: map[string]string{}}
+	return &fakeCluster{
+		secrets:   map[string]bool{},
+		writerDSN: map[string]string{},
+		roKeys:    map[string]string{},
+		pending:   map[string]string{},
+	}
 }
 
 func (c *fakeCluster) SecretExists(_ context.Context, app string) (bool, error) {
 	return c.secrets[app], nil
 }
-func (c *fakeCluster) CreateSecret(_ context.Context, app, _, _, _, _ string) error {
+func (c *fakeCluster) CreateSecret(_ context.Context, app, _, _, _, dsn string) error {
 	c.secrets[app] = true
+	c.writerDSN[app] = dsn
 	c.createdSecret = append(c.createdSecret, app)
+	return nil
+}
+
+// EnsureSecretROKey mirrors K8sCluster: when enabled, derive DATABASE_URL_RO from
+// the writer DSN by swapping the gateway port; when disabled, drop the key. No-op
+// when the secret does not exist yet (the create path runs first).
+func (c *fakeCluster) EnsureSecretROKey(_ context.Context, app string, enabled bool, writerPort, roPort int) error {
+	if !c.secrets[app] {
+		return nil
+	}
+	if !enabled {
+		delete(c.roKeys, app)
+		return nil
+	}
+	w := c.writerDSN[app]
+	if w == "" {
+		return errors.New("no writer dsn to derive DATABASE_URL_RO from")
+	}
+	c.roKeys[app] = roDSN(w, writerPort, roPort)
 	return nil
 }
 func (c *fakeCluster) ApplyCompute(_ context.Context, spec ComputeSpec) error {
@@ -143,7 +170,8 @@ func newHarness() *harness {
 		Pageserver: ps, Safekeeper: sk, Cluster: cl,
 		Tenant: "a0000000000000000000000000000001", Template: "a0000000000000000000000000000010",
 		PGVersion: 17, RolePrefix: "app_", GatewayHost: "pggw-apps.scale-zero-pg.svc", GatewayPort: 55432,
-		Namespace: "scale-zero-pg",
+		GatewayROPort: 55434,
+		Namespace:     "scale-zero-pg",
 		NewTimelineID: func() string {
 			tlCalls++
 			return "deadbeef000000000000000000000000"[:24] + string(rune('0'+tlCalls)) + "0000000"
@@ -216,6 +244,17 @@ func TestCreateColdPath(t *testing.T) {
 	// Intent-first: timeline id persisted (status update) BEFORE the branch call.
 	if h.cl.statusUpdates < 2 {
 		t.Errorf("expected an intent status update before branch, got %d", h.cl.statusUpdates)
+	}
+}
+
+// The status publishes the output Secret NAME so an external driver reads it from
+// status instead of reconstructing "app-db-<app>" (external-driver contract #119).
+func TestStatusPublishesSecretName(t *testing.T) {
+	h := newHarness()
+	cr := &AppDatabase{Name: "shop", Namespace: "scale-zero-pg", Generation: 1, Spec: AppDatabaseSpec{AppName: "shop"}}
+	mustReconcile(t, h, cr)
+	if cr.Status.SecretName != "app-db-shop" {
+		t.Errorf("status.secretName = %q, want app-db-shop", cr.Status.SecretName)
 	}
 }
 
@@ -399,6 +438,80 @@ func TestInvalidAndReservedNamesFailTerminally(t *testing.T) {
 		if len(h.ps.branchArgs) != 0 || h.cl.finalizerAdds != 0 || len(h.cl.applied) != 0 {
 			t.Errorf("%q: invalid name must not touch the cluster/pageserver", name)
 		}
+	}
+}
+
+// ---- DATABASE_URL_RO emission (ADR-0006 #119, external-driver contract) ------
+
+// roDSN is a pure transform of the writer DSN -> the read-only DSN: same role,
+// password, host and database, only the gateway listener port differs.
+func TestRODSNSwapsOnlyThePort(t *testing.T) {
+	writer := "postgres://app_shop:pw-secret@pggw-apps.scale-zero-pg.svc:55432/shop?sslmode=disable"
+	got := roDSN(writer, 55432, 55434)
+	want := "postgres://app_shop:pw-secret@pggw-apps.scale-zero-pg.svc:55434/shop?sslmode=disable"
+	if got != want {
+		t.Errorf("roDSN\n got=%q\nwant=%q", got, want)
+	}
+	// A writer DSN that does not contain the writer port is returned unchanged
+	// (defensive; never fabricate a bogus RO endpoint).
+	if roDSN("postgres://x", 55432, 55434) != "postgres://x" {
+		t.Errorf("roDSN must leave a non-matching DSN unchanged")
+	}
+}
+
+// When roPool.enabled, the per-app Secret gains DATABASE_URL_RO derived from the
+// writer DSN (app_<app> creds, RO port). This is the key knext injects for reads.
+func TestROKeyEmittedWhenROPoolEnabled(t *testing.T) {
+	h := newHarness()
+	cr := &AppDatabase{Name: "shop", Generation: 1, Spec: AppDatabaseSpec{
+		AppName: "shop",
+		ROPool:  ROPool{Enabled: true},
+	}}
+	mustReconcile(t, h, cr)
+
+	ro, ok := h.cl.roKeys["shop"]
+	if !ok || ro == "" {
+		t.Fatalf("DATABASE_URL_RO not emitted when roPool.enabled: %v", h.cl.roKeys)
+	}
+	want := "postgres://app_shop:pw-fixed-0123456789@pggw-apps.scale-zero-pg.svc:55434/shop?sslmode=disable"
+	if ro != want {
+		t.Errorf("RO DSN\n got=%q\nwant=%q", ro, want)
+	}
+}
+
+// When roPool is off (default), NO DATABASE_URL_RO is emitted — the writer-only
+// contract is unchanged and knext injects only DATABASE_URL.
+func TestNoROKeyWhenROPoolDisabled(t *testing.T) {
+	h := newHarness()
+	cr := &AppDatabase{Name: "plain", Generation: 1, Spec: AppDatabaseSpec{AppName: "plain"}}
+	mustReconcile(t, h, cr)
+
+	if _, ok := h.cl.roKeys["plain"]; ok {
+		t.Errorf("DATABASE_URL_RO must NOT be emitted when roPool is off: %v", h.cl.roKeys)
+	}
+}
+
+// Toggling roPool.enabled false on an already-provisioned app REMOVES the RO key
+// (idempotent reconcile of the Secret), without re-minting the password.
+func TestROKeyRemovedWhenROPoolTurnedOff(t *testing.T) {
+	h := newHarness()
+	// Already provisioned WITH an RO key.
+	h.cl.secrets["shop"] = true
+	h.cl.writerDSN["shop"] = "postgres://app_shop:pw@pggw-apps.scale-zero-pg.svc:55432/shop?sslmode=disable"
+	h.cl.roKeys["shop"] = "postgres://app_shop:pw@pggw-apps.scale-zero-pg.svc:55434/shop?sslmode=disable"
+	h.ps.timelines["cafe0000000000000000000000000009"] = true
+	cr := &AppDatabase{Name: "shop", Generation: 2, Finalizers: []string{Finalizer},
+		Spec:   AppDatabaseSpec{AppName: "shop", ROPool: ROPool{Enabled: false}},
+		Status: AppDatabaseStatus{TimelineID: "cafe0000000000000000000000000009", Phase: PhaseReady}}
+
+	mustReconcile(t, h, cr)
+
+	if _, ok := h.cl.roKeys["shop"]; ok {
+		t.Errorf("DATABASE_URL_RO must be removed when roPool toggled off: %v", h.cl.roKeys)
+	}
+	// Password/secret NOT re-minted (live app never locked out).
+	if len(h.cl.createdSecret) != 0 {
+		t.Errorf("secret must not be re-created on RO toggle: %v", h.cl.createdSecret)
 	}
 }
 

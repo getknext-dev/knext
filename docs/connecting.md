@@ -227,6 +227,26 @@ create a database named `<app>` yourself. For **knext**, wire each app's
 `DATABASE_URL` Secret (`NextApp.spec.secrets.envMap`) straight from `app-db-<app>`
 (same shape as the primary contract) — one Secret per app, isolated by credential.
 
+**Per-app read DSN (`DATABASE_URL_RO`).** When an app requests the read-replica
+pool (`AppDatabase.spec.roPool.enabled`, which knext maps from
+`NextApp.spec.database.readReplicas`), the AppDatabase operator also emits a
+`DATABASE_URL_RO` key into `app-db-<app>` — the same per-app role/password/host/
+database as the writer, on the gateway **RO port** (`55434`):
+
+```sh
+kubectl -n scale-zero-pg get secret app-db-<app> -o jsonpath='{.data.DATABASE_URL_RO}' | base64 -d
+# postgres://app_<app>:<per-app-password>@pggw-apps.scale-zero-pg.svc:55434/<app>?sslmode=disable
+```
+
+⚠️ **The per-app RO *serving endpoint* is not live yet.** The RO pool that exists
+today (the `compute-ro` pool on `pggw:55434`, above) is the **primary** single-DB
+path — it is **not** per-app. `DATABASE_URL_RO` on `app-db-<app>` is emitted ahead
+of the endpoint so the config contract is stable (an external driver can inject it
+now and needs no change when the endpoint ships); standing up **per-app** RO
+serving (an apps-gateway RO listener + per-app RO computes on each branch) is a
+tracked read-scaling/gateway follow-up. **Until then, point per-app reads at
+`DATABASE_URL`.** See [AppDatabase API reference](appdatabase-api.md#3-output-secret-contract).
+
 **Isolation is at two layers.** *Data* isolation is the Neon timeline (each app is
 a separate branch — app A's rows are invisible to app B, proven by
 `deploy/_verify-multitenant.sh`). *Access* isolation is the per-app credential +

@@ -2,6 +2,7 @@ package appdb
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -58,6 +59,47 @@ func (k *K8sCluster) CreateSecret(ctx context.Context, app, role, password, md5,
 	if apierrors.IsAlreadyExists(err) { // idempotent: keep the live password
 		return nil
 	}
+	return err
+}
+
+// EnsureSecretROKey reconciles the DATABASE_URL_RO key on app-db-<app> to match
+// the read-replica-pool request (ADR-0006 #119). When enabled it derives the RO
+// DSN from the live DATABASE_URL (swap the gateway port) and sets the key; when
+// disabled it removes the key. It patches ONLY that one key — PGPASSWORD and the
+// writer DATABASE_URL are never touched, so a live app is never locked out. No-op
+// (no API write) when the secret is absent or already in the desired state.
+func (k *K8sCluster) EnsureSecretROKey(ctx context.Context, app string, enabled bool, writerPort, roPort int) error {
+	secApi := k.cs.CoreV1().Secrets(k.ns)
+	sec, err := secApi.Get(ctx, "app-db-"+app, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return nil // no secret yet; the create path mints it, next pass reconciles the RO key
+	}
+	if err != nil {
+		return err
+	}
+
+	cur := string(sec.Data["DATABASE_URL_RO"]) // "" if the key is absent
+	want := ""
+	if enabled {
+		writer := string(sec.Data["DATABASE_URL"])
+		if writer == "" {
+			return fmt.Errorf("app-db-%s has no DATABASE_URL to derive DATABASE_URL_RO from", app)
+		}
+		want = roDSN(writer, writerPort, roPort)
+	}
+	if cur == want {
+		return nil // already in the desired state — idempotent, no write
+	}
+
+	var patch []byte
+	if want == "" {
+		// merge-patch null removes just the DATABASE_URL_RO key.
+		patch = []byte(`{"data":{"DATABASE_URL_RO":null}}`)
+	} else {
+		enc := base64.StdEncoding.EncodeToString([]byte(want))
+		patch = []byte(fmt.Sprintf(`{"data":{"DATABASE_URL_RO":%q}}`, enc))
+	}
+	_, err = secApi.Patch(ctx, "app-db-"+app, types.MergePatchType, patch, metav1.PatchOptions{})
 	return err
 }
 
