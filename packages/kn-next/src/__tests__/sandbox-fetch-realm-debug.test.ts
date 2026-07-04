@@ -36,6 +36,7 @@ import {
     mkdtempSync,
     readFileSync,
     realpathSync,
+    symlinkSync,
     writeFileSync,
 } from "node:fs";
 import { createRequire } from "node:module";
@@ -442,6 +443,79 @@ describe("sandbox-fetch-realm-debug — the context.js patcher", () => {
         expect(result.patched).toBe(false);
         expect(String(result.reason)).toMatch(/resolve|not found/i);
         expect(readFileSync(decoyCtx, "utf8")).toBe(realContext);
+    });
+
+    it("refuses a node_modules/next SYMLINK that resolves OUTSIDE the staged tree (#216 follow-up)", () => {
+        // Same blast radius as the NODE_PATH escape, different mechanism: the
+        // bounded walk sees appDir/node_modules/next (existsSync follows the
+        // link), but realpathSync resolves to an out-of-tree store — e.g. a
+        // pnpm virtual store shared with the whole checkout. The patcher must
+        // fail loud and leave the store file byte-identical.
+        const storeDir = mkdtempSync(
+            join(realpathSync(tmpdir()), "knext-sfrd-store-"),
+        );
+        const storePkg = join(storeDir, "next");
+        const storeCtx = join(
+            storePkg,
+            "dist",
+            "server",
+            "web",
+            "sandbox",
+            "context.js",
+        );
+        mkdirSync(dirname(storeCtx), { recursive: true });
+        writeFileSync(
+            join(storePkg, "package.json"),
+            JSON.stringify({ name: "next", version: "16.2.0" }),
+        );
+        writeFileSync(storeCtx, realContext);
+        const appDir = mkdtempSync(
+            join(realpathSync(tmpdir()), "knext-sfrd-symlink-"),
+        );
+        mkdirSync(join(appDir, "node_modules"), { recursive: true });
+        symlinkSync(storePkg, join(appDir, "node_modules", "next"), "dir");
+        const result = mod.patchSandboxContext({ appDir, log: () => {} });
+        expect(result.patched).toBe(false);
+        expect(String(result.reason)).toMatch(/resolve|not found|outside/i);
+        expect(readFileSync(storeCtx, "utf8")).toBe(realContext);
+    });
+
+    it("still patches through an IN-TREE pnpm-style node_modules/next symlink", () => {
+        // pnpm-staged standalone trees link node_modules/next into the tree's own
+        // .pnpm virtual store — the containment check must not break that: the
+        // symlink target is inside the staged tree, so the REAL file is patched.
+        const appDir = mkdtempSync(
+            join(realpathSync(tmpdir()), "knext-sfrd-pnpmlink-"),
+        );
+        const storePkg = join(
+            appDir,
+            "node_modules",
+            ".pnpm",
+            "next@16.2.0",
+            "node_modules",
+            "next",
+        );
+        const storeCtx = join(
+            storePkg,
+            "dist",
+            "server",
+            "web",
+            "sandbox",
+            "context.js",
+        );
+        mkdirSync(dirname(storeCtx), { recursive: true });
+        writeFileSync(
+            join(storePkg, "package.json"),
+            JSON.stringify({ name: "next", version: "16.2.0" }),
+        );
+        writeFileSync(storeCtx, realContext);
+        symlinkSync(storePkg, join(appDir, "node_modules", "next"), "dir");
+        const result = mod.patchSandboxContext({ appDir, log: () => {} });
+        expect(result.patched).toBe(true);
+        expect(result.contextPath).toBe(storeCtx);
+        expect(readFileSync(storeCtx, "utf8")).toContain(
+            "knext-sandbox-fetch-realm-debug",
+        );
     });
 
     it("the injected hook stays inert when the debug env is off (steady-state containment)", async () => {

@@ -465,23 +465,31 @@ function countOccurrences(haystack, needle) {
  * @param {string} appDir
  * @returns {string | null}
  */
+/**
+ * The nearest enclosing `.next/standalone` ancestor of `start` (inclusive),
+ * or null. Bounded to the FIRST match walking up: a weirdly-named outer
+ * directory cannot widen the boundary past the nearest standalone root.
+ * @param {string} start absolute path
+ * @returns {string | null}
+ */
+function findStandaloneRoot(start) {
+  const path = require('node:path');
+  for (let dir = start; ; ) {
+    if (path.basename(dir) === 'standalone' && path.basename(path.dirname(dir)) === '.next') {
+      return dir;
+    }
+    const parent = path.dirname(dir);
+    if (parent === dir) return null;
+    dir = parent;
+  }
+}
+
 function resolveSandboxContext(appDir) {
   const { existsSync } = require('node:fs');
   const path = require('node:path');
   const rel = 'next/dist/server/web/sandbox/context.js';
   const start = path.resolve(appDir);
-
-  // The enclosing `.next/standalone` root, if appDir sits inside one.
-  let standaloneRoot = null;
-  for (let dir = start; ; ) {
-    if (path.basename(dir) === 'standalone' && path.basename(path.dirname(dir)) === '.next') {
-      standaloneRoot = dir;
-      break;
-    }
-    const parent = path.dirname(dir);
-    if (parent === dir) break;
-    dir = parent;
-  }
+  const standaloneRoot = findStandaloneRoot(start);
 
   for (let dir = start; ; ) {
     const candidate = path.join(dir, 'node_modules', ...rel.split('/'));
@@ -516,6 +524,27 @@ function patchSandboxContext({ appDir, log = () => {} }) {
   }
   // Never write through a symlink (pnpm-style layouts): patch the real file.
   const contextPath = fs.realpathSync(resolved);
+  // Symlink containment (#216 follow-up): node_modules/next may be a dir
+  // symlink — the bounded walk saw it INSIDE the boundary (existsSync follows
+  // links), but the REAL file can live outside the staged tree (e.g. the
+  // checkout-wide pnpm store). Writing there is the NODE_PATH blast radius
+  // via another mechanism — fail loud (skip + reason; the debug lane is
+  // fail-open at the caller).
+  const startDir = path.resolve(appDir);
+  const boundaries = [fs.realpathSync(startDir)];
+  const standaloneRoot = findStandaloneRoot(startDir);
+  if (standaloneRoot !== null) boundaries.push(fs.realpathSync(standaloneRoot));
+  const inTree = boundaries.some(
+    (root) => contextPath === root || contextPath.startsWith(root + path.sep),
+  );
+  if (!inTree) {
+    return {
+      patched: false,
+      reason:
+        `resolved context.js is OUTSIDE the staged tree (symlink escape): ` +
+        `${contextPath} is not under ${boundaries.join(' or ')} — refusing to patch`,
+    };
+  }
   const source = fs.readFileSync(contextPath, 'utf8');
 
   if (source.includes(MARKER)) {
