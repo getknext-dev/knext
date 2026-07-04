@@ -58,6 +58,19 @@ type NextAppSpec struct {
 	// +optional
 	Secrets *SecretsSpec `json:"secrets,omitempty"`
 
+	// Database declares an INLINE scale-zero-pg database that the knext operator
+	// auto-provisions (via an AppDatabase CR in the scale-zero-pg namespace) and
+	// wires into the app's env as DATABASE_URL (+ DATABASE_URL_RO when
+	// readReplicas). This is the unified-config flagship (ADR-0006, #119): the
+	// author declares an app AND its database in one NextApp, one namespace, and
+	// the two scale-to-zero and wake together.
+	//
+	// Escape hatch (BYO database): leave this nil / enabled=false and wire an
+	// external/existing DB by hand via spec.secrets.envMap — that path is fully
+	// preserved and additive to this one.
+	// +optional
+	Database *DatabaseSpec `json:"database,omitempty"`
+
 	// Env sets plain, NON-SECRET environment variables (name → value) on the
 	// app container — configuration flags like KNEXT_CACHE_CONTROL_NORMALIZE=0.
 	// Secrets do NOT belong here: values are stored verbatim in the CR (visible
@@ -164,6 +177,65 @@ type SecuritySpec struct {
 	// false => the policy is not reconciled and any previously-created one is deleted.
 	// +optional
 	NetworkPolicy *bool `json:"networkPolicy,omitempty"`
+}
+
+// DatabaseSpec is the author-facing surface of an inline scale-zero-pg database
+// (ADR-0006). It exposes the SMALL, author-relevant subset of AppDatabase.spec;
+// the operator derives/defaults the rest (appName, credentials, plane wiring).
+//
+// SECURITY (ADR-0006 §4.4): appName is NEVER surfaced here — it is DERIVED by
+// the operator from the NextApp's own (namespace, name). A NextApp can therefore
+// only ever provision/bind the AppDatabase minted for ITS OWN identity; it can
+// never name an arbitrary existing database in another namespace.
+type DatabaseSpec struct {
+	// Enabled turns on inline provisioning. false/nil => no DB is provisioned
+	// (bring-your-own via spec.secrets.envMap stays the escape hatch).
+	// +optional
+	Enabled bool `json:"enabled,omitempty"`
+
+	// Tier maps 1:1 to AppDatabase.spec.tier. cold = scale-to-zero (default);
+	// warm = one parked replica for ~0.4s wake.
+	// +optional
+	// +kubebuilder:validation:Enum=cold;warm
+	Tier string `json:"tier,omitempty"`
+
+	// ReadReplicas requests the read-only pool. Maps to
+	// AppDatabase.spec.roPool.enabled; when true the operator ALSO injects
+	// DATABASE_URL_RO (tolerating its absence until scale-zero-pg emits the key).
+	// Default false.
+	// +optional
+	ReadReplicas bool `json:"readReplicas,omitempty"`
+
+	// Quotas maps 1:1 to AppDatabase.spec.quotas (per-app noisy-neighbour bound).
+	// Empty fields inherit AppDatabase defaults (1000m/250m CPU, 1Gi/256Mi mem,
+	// 100 conns).
+	// +optional
+	Quotas *DatabaseQuotas `json:"quotas,omitempty"`
+
+	// KeepOnDelete maps to AppDatabase.spec.keepTimelineOnDelete. Default false
+	// (deleting the NextApp reclaims the Neon timeline). true retains it for PITR.
+	// +optional
+	KeepOnDelete bool `json:"keepOnDelete,omitempty"`
+}
+
+// DatabaseQuotas mirrors AppDatabase.spec.quotas (the per-app resource bound).
+type DatabaseQuotas struct {
+	// CPU limit (e.g. "1000m").
+	// +optional
+	CPU string `json:"cpu,omitempty"`
+	// CPURequest is the scheduling floor (e.g. "250m").
+	// +optional
+	CPURequest string `json:"cpuRequest,omitempty"`
+	// Mem limit (OOM bound, e.g. "1Gi").
+	// +optional
+	Mem string `json:"mem,omitempty"`
+	// MemRequest is the scheduling floor (e.g. "256Mi").
+	// +optional
+	MemRequest string `json:"memRequest,omitempty"`
+	// MaxConnections is the app compute's Postgres max_connections.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	MaxConnections int `json:"maxConnections,omitempty"`
 }
 
 type PreviewSpec struct {
@@ -303,6 +375,19 @@ type NextAppStatus struct {
 	// split, mirrored from the Knative Service status (issue #92).
 	// +optional
 	CurrentTraffic []TrafficStatus `json:"currentTraffic,omitempty"`
+
+	// DatabaseAppName is the DERIVED, plane-globally-unique appName the operator
+	// created the AppDatabase under (ADR-0006 §4.4). Surfaced on status so the
+	// derivation is auditable and the security seam (a NextApp can only bind its
+	// OWN derived DB) is observable. Empty when spec.database is not enabled.
+	// +optional
+	DatabaseAppName string `json:"databaseAppName,omitempty"`
+
+	// DatabaseSecretName is the name of the same-namespace mirrored Secret the
+	// operator wrote (ownerRef'd to this NextApp) carrying DATABASE_URL(+_RO).
+	// Empty when spec.database is not enabled.
+	// +optional
+	DatabaseSecretName string `json:"databaseSecretName,omitempty"`
 }
 
 // TrafficStatus is one entry of the observed Knative traffic distribution.

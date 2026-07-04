@@ -85,6 +85,69 @@ spec:
                   url:
                     type: string
                 type: object
+              database:
+                description: |-
+                  Database declares an INLINE scale-zero-pg database that the knext operator
+                  auto-provisions (via an AppDatabase CR in the scale-zero-pg namespace) and
+                  wires into the app's env as DATABASE_URL (+ DATABASE_URL_RO when
+                  readReplicas). This is the unified-config flagship (ADR-0006, #119): the
+                  author declares an app AND its database in one NextApp, one namespace, and
+                  the two scale-to-zero and wake together.
+
+                  Escape hatch (BYO database): leave this nil / enabled=false and wire an
+                  external/existing DB by hand via spec.secrets.envMap — that path is fully
+                  preserved and additive to this one.
+                properties:
+                  enabled:
+                    description: |-
+                      Enabled turns on inline provisioning. false/nil => no DB is provisioned
+                      (bring-your-own via spec.secrets.envMap stays the escape hatch).
+                    type: boolean
+                  keepOnDelete:
+                    description: |-
+                      KeepOnDelete maps to AppDatabase.spec.keepTimelineOnDelete. Default false
+                      (deleting the NextApp reclaims the Neon timeline). true retains it for PITR.
+                    type: boolean
+                  quotas:
+                    description: |-
+                      Quotas maps 1:1 to AppDatabase.spec.quotas (per-app noisy-neighbour bound).
+                      Empty fields inherit AppDatabase defaults (1000m/250m CPU, 1Gi/256Mi mem,
+                      100 conns).
+                    properties:
+                      cpu:
+                        description: CPU limit (e.g. "1000m").
+                        type: string
+                      cpuRequest:
+                        description: CPURequest is the scheduling floor (e.g. "250m").
+                        type: string
+                      maxConnections:
+                        description: MaxConnections is the app compute's Postgres
+                          max_connections.
+                        minimum: 1
+                        type: integer
+                      mem:
+                        description: Mem limit (OOM bound, e.g. "1Gi").
+                        type: string
+                      memRequest:
+                        description: MemRequest is the scheduling floor (e.g. "256Mi").
+                        type: string
+                    type: object
+                  readReplicas:
+                    description: |-
+                      ReadReplicas requests the read-only pool. Maps to
+                      AppDatabase.spec.roPool.enabled; when true the operator ALSO injects
+                      DATABASE_URL_RO (tolerating its absence until scale-zero-pg emits the key).
+                      Default false.
+                    type: boolean
+                  tier:
+                    description: |-
+                      Tier maps 1:1 to AppDatabase.spec.tier. cold = scale-to-zero (default);
+                      warm = one parked replica for ~0.4s wake.
+                    enum:
+                    - cold
+                    - warm
+                    type: string
+                type: object
               env:
                 additionalProperties:
                   type: string
@@ -404,6 +467,19 @@ spec:
                       type: string
                   type: object
                 type: array
+              databaseAppName:
+                description: |-
+                  DatabaseAppName is the DERIVED, plane-globally-unique appName the operator
+                  created the AppDatabase under (ADR-0006 §4.4). Surfaced on status so the
+                  derivation is auditable and the security seam (a NextApp can only bind its
+                  OWN derived DB) is observable. Empty when spec.database is not enabled.
+                type: string
+              databaseSecretName:
+                description: |-
+                  DatabaseSecretName is the name of the same-namespace mirrored Secret the
+                  operator wrote (ownerRef'd to this NextApp) carrying DATABASE_URL(+_RO).
+                  Empty when spec.database is not enabled.
+                type: string
               url:
                 type: string
             type: object
