@@ -918,10 +918,16 @@ scale-to-zero compute per app, each on its own Neon branch. Full design:
 [ADR-0003](adr-0003-multi-tenancy.md); connect contract:
 [connecting.md](connecting.md#multi-app--branch-per-app).
 
+**The v1.0 provisioning interface is the `AppDatabase` CRD + operator**
+([ADR-0004](adr-0004-provisioning-bless-or-build.md)) — see
+[AppDatabase operator runbook](#appdatabase-operator-runbook-96) below. The
+imperative `provision-app.sh` remains as **break-glass / CI** (and is what bootstraps
+the plane); its subcommands:
+
 ```sh
 cd deploy
-./provision-app.sh init-plane --schema testdata/app-base-schema.sql  # one-time
-./provision-app.sh create  orders        # branch + compute + per-app credential
+./provision-app.sh init-plane --schema testdata/app-base-schema.sql  # one-time plane bootstrap
+./provision-app.sh create  orders        # branch + compute + per-app credential (break-glass)
 ./provision-app.sh list                  # apps-tenant timelines
 ./provision-app.sh fsck                  # reconcile branches<->intents (exit≠0 if any); add --converge to auto-repair
 ./provision-app.sh rotate-cred orders --bounce   # rotate the app's password + apply now
@@ -930,6 +936,73 @@ cd deploy
 # read an app's DSN (per-app credential):
 kubectl -n scale-zero-pg get secret app-db-orders -o jsonpath='{.data.DATABASE_URL}' | base64 -d
 ```
+
+### AppDatabase operator runbook (#96)
+
+The `appdb-operator` (`deploy/83-appdb-operator.yaml`, a fourth binary in the
+multi-binary gateway image, `/appdb-operator` entrypoint) reconciles each
+`AppDatabase` (`deploy/82-appdb-crd.yaml`) into a per-app database. It reimplements
+`provision-app.sh`'s proven lifecycle in Go — **it does not shell out to the script**.
+
+**Provision / change / deprovision (declarative):**
+
+```sh
+kubectl apply -f deploy/82-appdb-crd.yaml deploy/83-appdb-operator.yaml   # install once
+kubectl apply -f - <<'EOF'                     # provision (or edit spec to change quotas/tier)
+apiVersion: apps.scale-zero-pg.dev/v1alpha1
+kind: AppDatabase
+metadata: { name: orders, namespace: scale-zero-pg }
+spec:
+  appName: orders
+  tier: cold                                   # cold (scale-to-zero) | warm (keep 1 hot)
+  quotas: { cpu: "1000m", mem: "1Gi", maxConnections: 100 }
+  keepTimelineOnDelete: false                  # false = safe two-sided reclaim on delete
+EOF
+kubectl -n scale-zero-pg get appdatabases      # APP PHASE TIMELINE READY TIER AGE
+kubectl -n scale-zero-pg describe appdatabase orders   # status conditions + Events (Branched/…)
+kubectl delete appdatabase orders              # finalizer runs safe deprovision (no orphan)
+```
+
+**What the operator owns vs the gateway.** The operator owns the per-app
+`Deployment`/`Service`/`ConfigMap`/`Secret` template + quotas, and `status`. The
+**apps-gateway owns `spec.replicas`** (0↔1 wake): the operator preserves the live
+replica count on every reconcile and does **not** hold `deployments/scale`, so the
+two never fight. Continuous reconciliation heals drift (a hand-deleted Deployment
+returns on the next ~15 s resync; a missing branch is re-branched).
+
+**Lifecycle correctness (shared with the script).** Intent-first: the finalizer and
+`status.timelineId` are persisted **before** the pageserver branch, so a crash never
+orphans a branch (a re-reconcile reads the id back and converges). A fresh random
+timeline id is minted per lifecycle (dodges the safekeeper tombstone of a prior
+delete). Deprovision is two-sided (pageserver + all safekeepers); a safekeeper down
+at delete time is recorded to the **shared** `apps-wal-reclaim-pending` ledger and
+the finalizer **keeps the CR** and requeues until reclaim completes (the CR
+disappears only once the plane is truly clean). `provision-app.sh reclaim-orphans`
+is the independent backstop for residue (e.g. a CR force-deleted while a safekeeper
+was down).
+
+**Observe / debug:**
+
+```sh
+kubectl -n scale-zero-pg logs deploy/appdb-operator        # reconcile log
+kubectl -n scale-zero-pg get appdatabase orders -o jsonpath='{.status}' | jq   # phase/conditions
+kubectl -n scale-zero-pg get cm apps-wal-reclaim-pending -o yaml   # pending SK-delete ledger (empty = clean)
+```
+
+- **Stuck in `Provisioning`** → check the operator log: template plane not
+  initialized (`provision-app.sh init-plane`), pageserver unreachable, or (warm tier)
+  the compute has no available replica yet. `Failed` phase + `InvalidAppName` message
+  → the `appName` is not an RFC1123 label or is a reserved name (`tmpl/warm/ro`).
+- **Delete hangs (finalizer)** → a safekeeper is down; the operator is retrying
+  reclaim. Confirm the safekeeper StatefulSet is healthy; the CR clears itself once
+  reclaim completes. To force-drop the CR and reconcile later:
+  `kubectl patch appdatabase orders -p '{"metadata":{"finalizers":[]}}' --type=merge`
+  then `provision-app.sh reclaim-orphans` once the safekeeper recovers.
+- **Read-replica pool (`spec.roPool`)** is a declarative surface only; per-app RO
+  provisioning is handled by the read-scaling lane (`deploy/26/27`). The operator
+  records the request in `status.message` and takes no RO action.
+
+Drill (full lifecycle, live): `sh deploy/_verify-operator.sh`.
 
 **Tenant access control (issue #74).** Each app authenticates as its own role
 `app_<app>` (minted into `app-db-<app>`; applied to the compute spec every boot by

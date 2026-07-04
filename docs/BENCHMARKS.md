@@ -85,6 +85,35 @@ data intact. Method: branch two throwaway apps, write an app-private row into th
 shared `app_items`, cross-check visibility, force-sleep one, re-wake it. Full
 finding + caveats: [ADR-0003](adr-0003-multi-tenancy.md).
 
+### AppDatabase operator provisioning (#96, ADR-0004)
+
+The v1.0 declarative interface: `kubectl apply` an `AppDatabase` → the in-cluster
+`appdb-operator` reconciles it to a full per-app database. Measured by
+`deploy/_verify-operator.sh` (`context-ckmva7v7zvq`, ns `scale-zero-pg`,
+`neon:8464`), CR-apply → `status.phase: Ready`.
+
+| Step | OKE (measured 2026-07-04) | What it is |
+|---|---|---|
+| **`AppDatabase` apply → `status.phase: Ready`** | **3.5s** | branch + ConfigMap + Deployment + Service + Secret + status, driven by one `kubectl apply`; a watch-triggered reconcile fires within ~1s of apply, so this is well under the ~15s resync backstop |
+| Branch create alone (pageserver ancestor API) | **~1.0s** | identical to the script — same pageserver ancestor call |
+| Serve through the apps-gateway | woke compute **0→1**, `schema_migrations`=1 (template inherited, copy-on-write), read back its own write ✅ | the operator-provisioned app is reachable as `app_<app>` through `pggw-apps` |
+| Drift heal (hand-deleted Deployment → re-created) | **~1s** | continuous reconciliation the script does not provide |
+| Deprovision (`kubectl delete` → finalizer) | **~1.2s** (CR gone, child objects gone, pageserver branch reclaimed, `TimelineReclaimed` event; safekeeper WAL swept, `fsck` clean) | two-sided delete (pageserver + all safekeepers) under the finalizer |
+
+Measured live on `context-ckmva7v7zvq` / ns `scale-zero-pg` / `neon:8464` by running
+the operator against the real plane (create → serve → drift-heal → delete → `fsck`
+clean). The `3.5s` create includes an out-of-region workstation→pageserver hop for
+the branch call; **in-cluster the branch is the same ~1s** and the total is lower.
+
+**vs the script.** The operator runs **in-cluster** at steady state, so its branch
+call avoids the ~8–10 out-of-region `kubectl`/pageserver round-trips that made
+`provision-app.sh create` from an out-of-region workstation ~10s (#86, scale-ceiling
+table); the plane-side work is the same ~1s branch. The operator adds continuous
+reconciliation (drift-heal, ~1s) and a finalizer-enforced safe deprovision that the
+imperative path only offers on the correct invocation. Full lifecycle drill:
+`deploy/_verify-operator.sh` (runs against the in-cluster operator once its image is
+built + pinned).
+
 ### v0.6.1 tenant security (issues #74/#75/#76) — live-verified 2026-07-04
 
 `deploy/_verify-multitenant.sh` (apps-gateway image `v0.6.1-tenantsec`) now also

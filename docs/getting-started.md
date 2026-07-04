@@ -124,17 +124,54 @@ kubectl -n scale-zero-pg get pods -l app=compute -w
 ## 5. (Optional) A database per app
 
 For DB-per-app multi-tenancy — each app its own Neon **branch** on one storage
-plane, sleeping/waking independently — deploy the apps-gateway and provision apps:
+plane, sleeping/waking independently — deploy the apps-gateway, the CRD + operator,
+bootstrap the plane once, then declare apps with an `AppDatabase` custom resource:
 
 ```sh
-kubectl apply -f deploy/81-apps-gateway.yaml          # template-mode gateway (pggw-apps)
-cd deploy
-./provision-app.sh init-plane --schema testdata/app-base-schema.sql   # one-time: template
-./provision-app.sh create orders                       # branch + scale-to-zero compute (~4s)
-# connect: postgres://cloud_admin:cloud_admin@pggw-apps.scale-zero-pg.svc:55432/orders?sslmode=disable
+kubectl apply -f deploy/81-apps-gateway.yaml   # template-mode gateway (pggw-apps)
+kubectl apply -f deploy/82-appdb-crd.yaml      # AppDatabase CRD (v1.0 provisioning interface)
+kubectl apply -f deploy/83-appdb-operator.yaml # the appdb-operator (reconciles AppDatabases)
+
+# one-time plane bootstrap (apps tenant + shared template timeline + base schema):
+cd deploy && ./provision-app.sh init-plane --schema testdata/app-base-schema.sql
 ```
 
+**Provision an app declaratively** — `kubectl apply` an `AppDatabase`; the operator
+branches the template, renders the compute, mints the per-app credential Secret, and
+wires the apps-gateway routing:
+
+```sh
+kubectl apply -f - <<'EOF'
+apiVersion: apps.scale-zero-pg.dev/v1alpha1
+kind: AppDatabase
+metadata:
+  name: orders
+  namespace: scale-zero-pg
+spec:
+  appName: orders
+  tier: cold                                   # cold = scale-to-zero at rest (default)
+  quotas: { cpu: "1000m", mem: "1Gi", maxConnections: 100 }
+EOF
+
+kubectl -n scale-zero-pg get appdatabases      # PHASE Ready, TIMELINE set, READY <bool>
+kubectl -n scale-zero-pg get secret app-db-orders -o jsonpath='{.data.DATABASE_URL}' | base64 -d
+# -> postgres://app_orders:<pw>@pggw-apps.scale-zero-pg.svc:55432/orders?sslmode=disable
+```
+
+`kubectl delete appdatabase orders` runs the finalizer's **safe deprovision** (removes
+the k8s objects and reclaims the Neon timeline on the pageserver + all safekeepers —
+no orphan) unless you set `spec.keepTimelineOnDelete: true`. Drift self-heals: a
+hand-deleted Deployment is re-created on the next reconcile. Drill:
+`sh deploy/_verify-operator.sh`.
+
+> The imperative `provision-app.sh create/destroy/…` remains as a **break-glass / CI**
+> tool (and is what `init-plane` uses); the `AppDatabase` CR is the v1.0 interface —
+> see [ADR-0004](adr-0004-provisioning-bless-or-build.md). The DSN contract is
+> identical either way.
+
 Design, evidence and caveats: [ADR-0003](adr-0003-multi-tenancy.md) ·
-[connecting → multi-app](connecting.md#multi-app--branch-per-app).
+[ADR-0004](adr-0004-provisioning-bless-or-build.md) ·
+[connecting → multi-app](connecting.md#multi-app--branch-per-app) ·
+[operations → operator runbook](operations.md#appdatabase-operator-runbook-96).
 
 Next: [connecting your app](connecting.md) · [operations guide](operations.md)

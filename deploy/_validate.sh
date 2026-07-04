@@ -338,3 +338,17 @@ grep -qE 'quay.io/minio/minio:[^ ]*@sha256:[0-9a-f]{64}' 50-minio.yaml \
 grep -q 'name: minio-create-buckets' 50-minio.yaml \
   && fail "50-minio.yaml still carries the minio-only bucket Job — bucket creation moved to storage-init (#105)"
 ok "object-storage backend is configurable via storage-objstore; MinIO optional + digest-pinned (#105)"
+
+# 24. contract (issue #96, ADR-0004): the AppDatabase CRD + operator ship together.
+#     The CRD defines the v1.0 declarative provisioning interface; the operator (a
+#     distinct binary in the SAME multi-binary gateway image, /appdb-operator
+#     entrypoint) reconciles it. The operator must NOT claim the deployments/scale
+#     subresource — the apps-gateway owns spec.replicas (0<->1 wake); the operator
+#     only get/update/patch deployments and preserves the live replica count.
+grep -q 'kind: CustomResourceDefinition' 82-appdb-crd.yaml || fail "82-appdb-crd.yaml missing the CustomResourceDefinition"
+grep -q 'appdatabases.apps.scale-zero-pg.dev' 82-appdb-crd.yaml || fail "82-appdb-crd.yaml wrong CRD name"
+grep -q 'appdatabases/finalizers' 83-appdb-operator.yaml || fail "83-appdb-operator.yaml RBAC lacks appdatabases/finalizers (safe deprovision)"
+grep -q '/appdb-operator' 83-appdb-operator.yaml || fail "83-appdb-operator.yaml must override the entrypoint to /appdb-operator"
+grep -q 'deployments/scale' 83-appdb-operator.yaml && fail "appdb-operator must NOT hold deployments/scale — the apps-gateway owns spec.replicas"
+grep -q 'appdb-operator' ../gateway/Dockerfile || fail "Dockerfile does not build the appdb-operator binary into the image"
+ok "AppDatabase CRD + operator wired (82/83), operator built into the image, does not claim deployments/scale (issue #96)"

@@ -1,0 +1,130 @@
+# appdb-operator: the AppDatabase CRD controller (ADR-0004, #96) — the v1.0
+# declarative provisioning interface for branch-per-app multi-tenancy. It reconciles
+# each AppDatabase (deploy/82-appdb-crd.yaml) into a per-app database: branch the
+# shared apps-template timeline on the pageserver, render the per-app compute
+# (Deployment + Service + ConfigMap), mint the per-app credential Secret, and wire the
+# apps-gateway routing. A finalizer runs safe two-sided deprovision on delete.
+# Reimplements deploy/provision-app.sh in Go; the script stays as break-glass/CI.
+#
+# Availability posture: SINGLE replica on purpose (like pswatcher) — the operator is
+# the single-writer of provisioning actions (branch/reclaim). Two reconcilers could
+# double-mint or race a deprovision. Authority is crash-only: truth lives in the CR
+# (status.timelineId) + the cluster, so a restart resumes idempotently. Recreate
+# strategy guarantees a rollout never runs two operators at once.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: appdb-operator
+  namespace: scale-zero-pg
+---
+# Least-privilege Role, namespace-scoped to scale-zero-pg (issue #96 RBAC bound).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: appdb-operator
+  namespace: scale-zero-pg
+rules:
+  # The CRD it reconciles: watch the desired state, write status + finalizers.
+  - apiGroups: ["apps.scale-zero-pg.dev"]
+    resources: ["appdatabases"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  - apiGroups: ["apps.scale-zero-pg.dev"]
+    resources: ["appdatabases/status"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: ["apps.scale-zero-pg.dev"]
+    resources: ["appdatabases/finalizers"]
+    verbs: ["update"]
+  # Per-app compute: create/heal/delete the Deployment (NOT scale — the apps-gateway
+  # owns spec.replicas; the operator preserves the live count on update).
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "create", "update", "patch", "delete"]
+  # Per-app Service + ConfigMap + credential Secret, and the reclaim-pending ledger.
+  - apiGroups: [""]
+    resources: ["services", "configmaps", "secrets"]
+    verbs: ["get", "list", "create", "update", "patch", "delete"]
+  # Events for kubectl describe / operator observability.
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: appdb-operator
+  namespace: scale-zero-pg
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: appdb-operator
+subjects:
+  - kind: ServiceAccount
+    name: appdb-operator
+    namespace: scale-zero-pg
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: appdb-operator
+  namespace: scale-zero-pg
+  labels: { app: appdb-operator, tier: apps, plane: control }
+spec:
+  replicas: 1
+  strategy: { type: Recreate } # single-writer of provisioning; never two at once
+  selector:
+    matchLabels: { app: appdb-operator }
+  template:
+    metadata:
+      labels: { app: appdb-operator, tier: apps, plane: control }
+    spec:
+      imagePullSecrets:
+        - name: ocir-pull
+      serviceAccountName: appdb-operator
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: appdb-operator
+          # Same multi-binary gateway image; ENTRYPOINT overridden to /appdb-operator.
+          # Digest-pinned (contract 22). Rebuild + re-pin on any operator change.
+          image: me-abudhabi-1.ocir.io/axfqznklsd2t/ks-pg/gateway:v0.7.0-appdb@sha256:REPLACE_AFTER_PUSH
+          imagePullPolicy: IfNotPresent
+          command: ["/appdb-operator"] # override the image's /gateway entrypoint
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+          env:
+            - { name: APPDB_NAMESPACE, value: "scale-zero-pg" }
+            # The apps tenant + shared template timeline (provision-app.sh init-plane
+            # bootstraps these once; the operator provisions apps onto them). Literal,
+            # in lock-step with provision-app.sh APPS_TENANT / TEMPLATE_TL, so the
+            # operator boots even before the template ConfigMap exists.
+            - { name: APPDB_TENANT_ID, value: "a0000000000000000000000000000001" }
+            - { name: APPDB_TEMPLATE_TL, value: "a0000000000000000000000000000010" }
+            - { name: APPDB_PG_VERSION, value: "17" }
+            - { name: APPDB_ROLE_PREFIX, value: "app_" } # lock-step with apps-gateway GW_APP_ROLE_PREFIX
+            - { name: APPDB_GATEWAY_HOST, value: "pggw-apps.scale-zero-pg.svc" }
+            - { name: APPDB_GATEWAY_PORT, value: "55432" }
+            - { name: APPDB_PAGESERVER_URL, value: "http://pageserver:9898" }
+            - { name: APPDB_PAGESERVER_HOST, value: "pageserver" }
+            - { name: APPDB_SAFEKEEPER_SERVICE, value: "safekeeper" }
+            - { name: APPDB_SAFEKEEPER_PORT, value: "7676" }
+            - { name: APPDB_SAFEKEEPER_REPLICAS, value: "3" }
+            - { name: APPDB_RECLAIM_CM, value: "apps-wal-reclaim-pending" } # shared ledger w/ provision-app.sh
+            - { name: APPDB_RESYNC_MS, value: "15000" }
+            - { name: APPDB_HEALTH_ADDR, value: ":9092" }
+          ports:
+            - { name: health, containerPort: 9092 }
+          readinessProbe:
+            httpGet: { path: /readyz, port: health }
+            initialDelaySeconds: 1
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /healthz, port: health }
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          resources:
+            requests: { cpu: 20m, memory: 32Mi, ephemeral-storage: 100Mi }
+            limits: { memory: 96Mi, ephemeral-storage: 1Gi }

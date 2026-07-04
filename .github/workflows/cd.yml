@@ -4,6 +4,10 @@ on:
     branches: [main]
     paths: ["gateway/**", ".github/workflows/cd.yml"]
     tags: ["v*"]
+  # Manual build from any branch (e.g. build+pin an image for a feature PR's live
+  # drill before merge). Pushes the immutable sha-<short> tag; the mutable `edge`
+  # tag is only pushed from main/tags so a feature build never clobbers it.
+  workflow_dispatch: {}
 
 jobs:
   publish:
@@ -21,15 +25,27 @@ jobs:
         id: meta
         run: |
           SHORT=${GITHUB_SHA::7}
-          TAGS="me-abudhabi-1.ocir.io/axfqznklsd2t/ks-pg/gateway:sha-${SHORT},me-abudhabi-1.ocir.io/axfqznklsd2t/ks-pg/gateway:edge"
+          REPO=me-abudhabi-1.ocir.io/axfqznklsd2t/ks-pg/gateway
+          TAGS="$REPO:sha-${SHORT}"
+          # `edge` (mutable "latest main") only from main / a version tag — never
+          # from a feature-branch or manual build, so those don't clobber it.
+          if [[ "$GITHUB_REF" == refs/heads/main || "$GITHUB_REF" == refs/tags/v* ]]; then
+            TAGS="$TAGS,$REPO:edge"
+          fi
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
-            TAGS="$TAGS,me-abudhabi-1.ocir.io/axfqznklsd2t/ks-pg/gateway:${GITHUB_REF#refs/tags/}"
+            TAGS="$TAGS,$REPO:${GITHUB_REF#refs/tags/}"
           fi
           echo "tags=$TAGS" >> "$GITHUB_OUTPUT"
       - name: build + push (amd64 - OKE nodes)
+        id: build
         uses: docker/build-push-action@v6
         with:
           context: gateway
           platforms: linux/amd64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
+      - name: report pushed digest
+        run: |
+          echo "PUSHED_TAGS=${{ steps.meta.outputs.tags }}"
+          echo "PUSHED_DIGEST=${{ steps.build.outputs.digest }}"
+          echo "pin manifests to  sha-${GITHUB_SHA::7}@${{ steps.build.outputs.digest }}"

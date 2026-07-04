@@ -1,17 +1,21 @@
 # ADR-0004 — Provisioning interface: bless the imperative script, or build a CRD operator?
 
-- **Status:** PROPOSED — **DECISION PENDING OWNER RATIFICATION.** This ADR records
-  the evidence and a recommendation; the architecture owner ratifies (or overrides)
-  the decision. It does **not** close #96 on its own.
-- **Recommendation:** **BLESS** the hardened imperative `deploy/provision-app.sh`
-  (with `fsck` as the reconciler) as the v1.0/GA provisioning interface for the
-  demonstrated scale bound; **DEFER** the CRD operator behind explicit triggers.
+- **Status:** **ACCEPTED — DECISION: BUILD** (owner-ratified 2026-07-04). The ADR
+  first recommended BLESS; the architecture owner **overrode to BUILD** the CRD
+  operator as the v1.0 provisioning interface. The evidence + recommendation below
+  are retained for the record; the ratified decision and its rationale are in
+  **"Decision (ratified): BUILD"** at the bottom.
+- **Original recommendation (superseded):** BLESS the hardened imperative
+  `deploy/provision-app.sh` (with `fsck` as the reconciler) and DEFER the operator.
+- **Ratified decision:** **BUILD** the `AppDatabase` CRD + Go reconcile operator
+  (`cmd/appdb-operator`, `deploy/82-appdb-crd.yaml`, `deploy/83-appdb-operator.yaml`).
+  `provision-app.sh` is retained as a **break-glass / CI** tool.
 - **Date:** 2026-07-04
-- **Deciders:** architecture owner (ratify); evidence by the scale-ceiling drill
-  (`deploy/_verify-scale-ceiling.sh`, #86) + the hardening shipped across
+- **Deciders:** architecture owner (ratified BUILD); evidence by the scale-ceiling
+  drill (`deploy/_verify-scale-ceiling.sh`, #86) + the hardening shipped across
   #74/#76/#87/#89/#90/#91/#93.
 - **Relates to:** #96 (GA criterion 1 of #73), ADR-0003 (branch-per-app; "Provisioning
-  is imperative today" + the deferred-operator follow-up), ADR-0002 KC1 (ops toil).
+  is imperative today" + the deferred-operator follow-up — now **returned**), ADR-0002 KC1.
 
 ---
 
@@ -142,3 +146,65 @@ Build the CRD operator when **any** fires:
 - If the owner **overrides to BUILD**, this ADR's capability table + cost estimate is
   the build brief; the script becomes the reference implementation for the reconcile
   logic.
+
+---
+
+## Decision (ratified): BUILD
+
+The architecture owner **overrode the BLESS recommendation and ratified BUILD**
+(2026-07-04). The `AppDatabase` CRD + `appdb-operator` is the v1.0 declarative
+provisioning interface; `provision-app.sh` is retained as a break-glass / CI tool
+(and remains the reference implementation the operator's reconcile logic mirrors).
+
+### Rationale for BUILD over BLESS
+
+The capability table above is honest that at *today's* scale the script already
+carries the load-bearing correctness. BUILD was chosen not because the script is
+inadequate now, but because a **v1.0 tag is a durable API commitment**, and the
+declarative, k8s-native interface is the one we want to commit to before knext's
+per-PR-preview trigger (#73) arrives — building it under calm conditions, with the
+proven script as the executable spec, is lower-risk than building it later under the
+churn that would force it. Concretely, the operator adds over the script:
+
+- **Declarative source of truth.** `kubectl apply` an `AppDatabase`; `kubectl get
+  appdatabases` shows real phase/timeline/ready. GitOps-native, no imperative runbook.
+- **Continuous reconciliation / drift-heal.** A hand-deleted Deployment or a missing
+  branch is repaired on the next resync — always-on, not invoked (`fsck --converge`
+  on demand). The `_verify-operator.sh` drill proves the drift-heal live.
+- **k8s-native lifecycle.** A **finalizer** runs the safe two-sided deprovision
+  (pageserver + all safekeepers, unless `keepTimelineOnDelete`) as part of
+  `kubectl delete` — deprovision-safety is enforced by the platform, not by
+  remembering to pass the right flag. Status **conditions + Events** make provisioning
+  observable via `kubectl describe`.
+- **Per-CR RBAC + audit** as apps grow toward the multi-team, self-service regime.
+
+What it deliberately does **not** re-invent: the Neon lifecycle correctness
+(fresh-timeline-id vs tombstone, two-sided WAL delete, intent-first ordering, reclaim
+ledger) is **reimplemented in Go from the script's proven logic**, and the operator
+**shares the reclaim ledger ConfigMap** (`apps-wal-reclaim-pending`) with the script
+so the two paths interoperate. The operator does **not** claim `deployments/scale`:
+the apps-gateway still owns `spec.replicas` (0↔1 wake); the operator preserves the
+live replica count on every apply, so the two controllers never fight.
+
+### Cost accepted
+
+A single-replica, ~30 MiB Go controller (a fourth binary in the existing multi-binary
+gateway image — no new image treadmill) on the same digest-pin discipline
+(contract 22). Single-writer of provisioning (like pswatcher), crash-only authority
+(truth in the CR `status.timelineId` + the cluster). This is net-new always-on
+surface, accepted as the price of a committable v1.0 interface.
+
+### Migration note: script → CR
+
+- **New apps:** `kubectl apply` an `AppDatabase` (see docs/getting-started.md).
+- **Apps provisioned by `provision-app.sh` before the operator:** they keep working
+  unchanged (same object names, same DSN contract). To bring one under the operator,
+  apply an `AppDatabase` with the same `appName`; the operator adopts the existing
+  ConfigMap/branch idempotently (it reads `status.timelineId`, or re-derives on first
+  reconcile) — **no re-provision, no downtime**. The DSN contract (`connecting.md`)
+  is **unchanged**: role `app_<app>`, host `pggw-apps`, database `<app>`.
+- **Plane bootstrap** (`init-plane`: apps tenant + shared template timeline + base
+  schema) stays a **one-time break-glass step** via `provision-app.sh`; the operator
+  provisions apps onto an initialized plane. `reclaim-orphans` / `fsck` remain the
+  break-glass reconcilers for residue the operator's finalizer could not (e.g. a CR
+  force-deleted with `--wait=false` while a safekeeper was down).
