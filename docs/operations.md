@@ -1498,6 +1498,57 @@ If a future run exits 3 (version ≠ 9), do **not** bump the tag: skctl must be
 re-reverse-engineered against the new struct first, or better, adopt the
 timeline-import API (see the trigger list above and "Upgrade carrot").
 
+**Executed for real — `deploy/_verify-upgrade.sh` (issue #98, GA gate).** The
+rehearsal only boots the new tag clean-slate; this drill proves the thing an
+operator actually needs — that **real data written on the old tag survives a
+rolling image upgrade** — and measures the outage. On a throwaway plane
+(ns `upgrade-exec`, OCI Object Storage as the durability tier per #105, no
+in-cluster MinIO), it: (1) boots the plane at **8464**, (2) seeds a `ledger` table
+and **durably offloads** it (remote_consistent_lsn past the seed marker — safe
+even if every PVC is lost), (3) rolls broker→safekeeper→pageserver→compute images
+to **`17411840350`** together (version pair honored) via `kubectl set image`, and
+(4) asserts the data survived + a new write works + the control file is still v9.
+
+```
+# execute the upgrade drill (throwaway ns; live plane untouched):
+KSPG_CONTEXT=context-ckmva7v7zvq deploy/_verify-upgrade.sh
+# USE_MINIO=1 …            # in-drill MinIO instead of OCI OS
+# OLD_TAG=8464 NEW_TAG=…   # override the tag pair
+# exit 0 = data survived + control still v9 (manifest bump); 3 = survived but format
+#          diverged (skctl-rewrite / KC1 pivot); 1 = failure.
+```
+
+**Executed result (OKE, 2026-07-04):** upgrade **8464 → 17411840350** ran clean.
+All **5000 seeded rows survived with an identical checksum** on the new tag, a new
+write was accepted, and the upgraded safekeeper's `safekeeper.control` was still
+`magic=0xcafeceef version=9` (`skctl checkver` SURVIVES) — **the executed upgrade
+was a MANIFEST BUMP, not an skctl rewrite.** A post-upgrade wake cycle came back in
+4s with data intact. **Client downtime = 2m49s warm / ~7m45s cold**, dominated by
+the per-node multi-GB image pull, not plane mechanics (numbers + the pre-pull
+mitigation are in `docs/BENCHMARKS.md` §"Upgrade EXECUTED").
+
+**Rollback posture (mandatory before any real upgrade).** Neon has **no in-place
+downgrade**: the pageserver may migrate layer/index formats forward, so you cannot
+simply re-pin the old `neon:` tag on a plane that has already served writes on the
+new one. The two legs:
+- **Compute is stateless → its rollback is trivial and safe.** If only the compute
+  misbehaves post-roll, `kubectl set image deploy/compute …=<OLD_TAG>` (matching
+  the storage tag it was paired with) reverts it with no data implications. This
+  leg is proven cheap by design (the compute holds no durable state).
+- **Storage rollback = restore-from-backup at the old tag, NOT downgrade.** Take an
+  **on-demand backup before the storage roll**
+  (`kubectl -n scale-zero-pg create job backup-now --from=cronjob/backup`; see
+  "Backup & disaster recovery"). If the storage plane must go back, stand up a
+  **fresh** plane on the old tag and **restore that backup** into it (the writable
+  restore path, `deploy/_restore-writable.sh`) — you do not roll the live
+  safekeeper/pageserver images backward. Because the executed drill kept the
+  control format at **v9**, the old-tag skctl craft still matches, so a restore is a
+  normal restore (not a re-RE project). **Tested:** the forward upgrade + survival
+  is executed and green (above); the compute-image rollback leg is trivially safe
+  by construction; the **storage restore-from-backup rollback was NOT exercised in
+  this drill** (it is the standard, already-drilled restore path — see
+  `_verify-restore.sh` / `_verify-app-restore.sh` — pointed at an old-tag plane).
+
 - **Compute ↔ storage are a version PAIR.** The compute (`compute-node-v17:8464`)
   and storage plane (`neon:8464`) are built from the same Neon release and must be
   upgraded together — the pageserver wire protocol and layer formats are internal

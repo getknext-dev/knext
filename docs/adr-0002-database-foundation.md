@@ -259,6 +259,26 @@ storage plane" and `docs/BENCHMARKS.md`. Re-run the drill before any real upgrad
 decision — the pivot-vs-bump cost is now a known number, not a disaster-time
 discovery.
 
+**Executed, not just rehearsed (amendment, 2026-07-04 — issue #98).** The rehearsal
+proves the new tag *boots*; the GA gate demanded proof that **real data survives an
+actual rolling upgrade**. `deploy/_verify-upgrade.sh` executes it end to end on a
+throwaway plane (ns `upgrade-exec`, OCI Object Storage as the durability tier per
+ADR-0005/#105 — no in-cluster MinIO): boot at **8464**, seed a `ledger` table and
+**durably offload** it (remote_consistent_lsn past the seed marker), then roll
+broker/safekeeper/pageserver/compute to **`17411840350`** together (version pair
+honored) and assert survival. **Executed result (OKE, 2026-07-04): all 5000 seeded
+rows survived with an identical checksum, a new write worked, and the upgraded
+`safekeeper.control` was still `version=9` (skctl SURVIVES) — the executed upgrade
+was a MANIFEST BUMP.** Client downtime measured **2m49s warm / ~7m45s cold**,
+dominated by per-node multi-GB image pulls (mitigation: pre-pull the target images
+before the window). The triple-pin posture is now *tested*, not asserted: we have
+walked the manifest-bump path with data through it, and a control-format bump
+remains the only thing that turns an upgrade back into a KC1 decision. **Rollback
+stays restore-from-backup at the old tag** (Neon has no in-place downgrade); the
+stateless compute rolls back trivially. Full evidence: `docs/operations.md`
+§"Upgrading the storage plane" (incl. rollback procedure) and `docs/BENCHMARKS.md`
+§"Upgrade EXECUTED".
+
 ## Kill criteria (measurable pivot triggers — adopted from the iteration-1 architect review)
 
 Track these; any one firing re-opens this ADR.

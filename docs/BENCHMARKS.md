@@ -235,6 +235,44 @@ builds — `17411840350` is the newest coherent pair. First pull of the multi-GB
 bleeding-edge image took several minutes/node (one-time upgrade cost). Full
 narrative: `docs/operations.md` §"Upgrading the storage plane".
 
+## Upgrade EXECUTED — data through the upgrade (issue #98, GA gate) — 2026-07-04
+
+`deploy/_verify-upgrade.sh` goes past the rehearsal: it stands up a plane at the
+**current** tag (8464), seeds a real `ledger` table and **durably offloads** it to
+the object store (remote_consistent_lsn past the seed marker), then **rolls every
+image to `17411840350`** in place (`kubectl set image` on broker→safekeeper→
+pageserver→compute, version pair honored), and proves the seeded data survived and
+the plane is still read-write. OKE `context-ckmva7v7zvq`, throwaway ns
+`upgrade-exec`, durability tier = **OCI Object Storage S3-compat** (#105, no
+in-cluster MinIO), dedicated drill bucket + drill-only tenant.
+
+| Property | Result |
+|---|---|
+| Seeded rows, made durable pre-upgrade | **5000** (checksum `sum(amount)=2497500`), offloaded to OCI OS |
+| **Data survived the image roll** | ✅ **5000 rows, checksum identical** on `17411840350` |
+| New write post-upgrade | ✅ accepted + read back (ledger → 5001 rows) |
+| `safekeeper.control` across upgrade | pre **v9** → post **v9** (`magic=0xcafeceef`, `skctl checkver` SURVIVES) ⇒ **manifest bump, not skctl rewrite** |
+| Post-upgrade wake cycle (compute 0→1) | ✅ **4s**, rows intact |
+| version-pair + skctl-coupling contracts | ✅ green |
+
+**Upgrade duration + client downtime** (compute is scaled to 0 first, back to 1
+last; downtime = compute-0 → new-tag compute serves SQL):
+
+| Component roll | Warm (images pre-pulled) | Cold (first pull on node) |
+|---|---|---|
+| storage-broker | 12s | 192s |
+| safekeeper | 63s | 216s |
+| pageserver | 60s | 12s |
+| compute | 32s | 45s |
+| **TOTAL upgrade / downtime window** | **169s (2m49s)** | **~465s (~7m45s)** |
+
+**The dominant upgrade cost is the per-node multi-GB image pull, not the plane
+mechanics.** Cold (a tag never seen on the node) is ~7–8 min of downtime; warm
+(image pre-pulled) is ~2m49s. **Mitigation: pre-pull the target images onto every
+node** (a `DaemonSet` or `crictl pull`) *before* opening the maintenance window —
+that collapses the outage toward the warm number. Full narrative + rollback
+posture: `docs/operations.md` §"Upgrading the storage plane".
+
 ## Vertical in-place resize (issue #67 — Neon-cloud parity spike)
 
 Live-verified on **OKE v1.33.10, 2026-07-04**, using a throwaway `postgres:17-alpine`
