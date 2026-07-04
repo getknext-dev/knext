@@ -46,6 +46,9 @@ was not separately scored before iteration 2 (marked —).
 | **v0.6.0** | System designer | **6** | **6** | **5** |
 | **v0.6.0** | DevOps/SRE | **6** | **6** | **5** |
 | **v0.6.0** | Architect | **8** | **6** | **7** |
+| **v0.6.1** | System designer | **7** | **6** | **6** |
+| **v0.6.1** | DevOps/SRE | **7** | **6** | **7** |
+| **v0.6.1** | Architect | **8** | **6** | **7** |
 
 **Iteration-1 mean (mapped axes): ease 6.0, reliability 4.7** (round 0: 4.3, 3.7).
 **Iteration-2 mean (explicit metrics): maturity 4.7, ease 4.3, reliability 3.7.**
@@ -68,7 +71,16 @@ shift to a multi-tenant platform was RATIFIED (ADR-0003 sound), but the new
 surface re-opened the pager for its own scope (unmonitored tenants/RO pool
 #79-class, cross-tenant access #74, per-app S2Z break under 2-replica gateway
 #75, janitor single-tenant assumption #77, provision orphans #76). Next lap =
-v0.6.1 hardening of exactly that list; the loop's trigger cadence held. — all-time high on
+v0.6.1 hardening of exactly that list; the loop's trigger cadence held.
+**v0.6.1 rematch: maturity 7.3, ease 6.0, reliability 6.7 (all-time reliability
+high). THE SPLIT FLIPS: DevOps pager verdict "YES — conditional (carry it)" for
+the full multi-tenant scope — every v0.6.0 NO-driver closed and drilled live on
+the unified image; defeat attempts held (cloud_admin dead, crafted names refused
+both surfaces, per-app idle held). Architect ruled the 12-fixes-in-a-day "a
+tight loop over well-scoped defects, not stopgaps" and drafted the 9-point
+v1.0/GA criteria (#73, owner ratification pending). Residue: existence oracle
+(#92), orphan-WAL reclaim circularity + PV growth alert gap, drill tooling
+papercuts (#94/#95) — the GA lap's backlog. — all-time high on
 every axis. Observability debt closed (KSM + exact-join rules + presence check,
 paged end-to-end by the reviewer). Named residue: the silent-machinery class is
 ~2/3 closed (#48 KSM self-guard, #49 janitor-stale, #51 readiness) and the
