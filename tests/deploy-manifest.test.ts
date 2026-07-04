@@ -281,33 +281,46 @@ describe('test/deploy-tests-manifest.knext.json — honest exclusion ledger (#89
   });
 });
 
-// ── knext-observed flaky quarantines (#147 A3-3 final mile) ─────────────────────
-// Run 28593534713 (agent/compat-a33-final-mile, 785 passed / 3 failed): the last
-// 3 failing files are ONE mechanism — 60s jest timeouts awaiting RUNTIME-PREFETCH
-// responses via createRouterAct. Evidence gathered before quarantining:
+// ── knext-observed flaky quarantines (#147 A3-3 final mile, #214 family policy) ──
+// The runtime-prefetch/navigation-timing family: 60s jest timeouts (upstream's
+// HARDCODED per-case `individualTestTimeout` in test/lib/e2e-utils — NOT raised
+// by NEXT_E2E_TEST_TIMEOUT, which only lifts the SETUP timeout) thrown from
+// createRouterAct-driven navigation/prefetch waits, a DIFFERENT case per attempt,
+// zero assertion diffs, while the sibling -c 2 slot deploys+tests other fixtures
+// (CPU contention on the 4-core runner). Serving layer exonerated by local repro
+// (the manifest ledger's search-params entry: the exact awaited prefetch answers
+// 200 in ~76ms from the real knext deployment).
 //
-//   • CROSS-RUN WOBBLE (not deterministic knext debt):
-//     - search-params: hung 3/3 attempts in 28593534713; failed 2 attempts then
-//       RECOVERED on retry in 28590478386.
-//     - prefetch-layout-sharing: hung 3/3 in 28593534713; PASSED in 28590478386;
-//       failed in 28578203671.
-//     - refresh: PASSED in both prior runs; in 28593534713 a DIFFERENT case hung
-//       each attempt (att1+att3: Server Action refresh; att2: re-navigation).
-//   • SERVING LAYER EXONERATED by local repro (documented in the manifest
-//     ledger): the exact rewritten full-prefetch request the hanging
-//     search-params case waits on returns 200 in ~76ms from the knext standalone
-//     server WITH the expected 'rewrittenSearchParam' content, stream complete,
-//     headers intact — the deployment answers correctly; the hang is in the
-//     client/CDP prefetch scheduling under CI load.
-//   • UPSTREAM PROVENANCE: upstream's own deploy manifest quarantines the
-//     runtime-prefetch family wholesale (~34 `flakey` cases in
-//     segment-cache/prefetch-runtime.test.ts) and this very search-params file
-//     carries an in-file deploy-mode FIXME + `if (!isNextDeploy)` skip
-//     ("search params seem to be dropped from the resume render when deployed").
+// ROOT CAUSE (the #214 investigation): vercel/next.js#95301 (merged 2026-07-02,
+// AFTER the pinned v16.2.0) fixes a client segment-cache race — a locked
+// navigation reused an in-flight runtime-prefetch entry without tracking it,
+// drained without awaiting it, and read the unresolved shell, so the awaited
+// content never surfaced and the test hit the bare 60s timeout. Upstream's own
+// words: "The race only lost under CPU contention, which is why it reproduced
+// in the prod flake-detection job on slow containers but almost never locally."
+// That is EXACTLY the observed signature. Upstream additionally suite-skipped
+// five family files outright ("too flaky") after v16.2.0: #92163 (refresh),
+// #92198 (prefetch-layout-sharing), #92162 (per-page-dynamic-stale-time),
+// #92199 (cached-navigations, all cases), #92195 (client-cache.parallel-routes).
+// Four are still skipped at canary; cached-navigations' skips were REVERTED by
+// #93798 (2026-05-13) — the file is fully live at canary, and the revert
+// PREDATES the #95301 fix (2026-07-02), so its membership rests on #95301 plus
+// knext's OWN final-post-retry evidence, with the skip-then-revert history
+// cited honestly (guarded below via `upstreamSkipRevertPR`).
 //
-// These are FLAKEY quarantines of the OBSERVED cases only — never whole files,
-// never pre-emptive — and each must carry its evidence in a $knextQuarantines
-// ledger entry so the skip can be re-tested and removed on a ref bump.
+// POLICY (ADR-0007 graduation addendum §d, amending §c.1): per-case quarantine
+// stopped converging — across runs 28578203671…28701712403 a DIFFERENT family
+// member failed final-past-retries nearly every run (new sibling cases inside
+// ledgered files, then a brand-new file). Files meeting the FAMILY BAR are
+// quarantined at FILE level via a verbatim rules.exclude entry:
+//   (i)  ≥1 knext FINAL post-retry failure with the family signature, AND
+//   (ii) upstream provenance: the root-cause fix (vercel/next.js#95301) and,
+//        where one exists, upstream's own suite-skip PR, AND
+//   (iii) a $knextQuarantines ledger record with level:"file" carrying
+//        mechanism/evidence/provenance + the nextjsRef stamp (the expiry gate
+//        below forces re-audit on every ref bump — first candidate for removal
+//        is the first NEXTJS_REF that contains the #95301 fix).
+// Cases OUTSIDE the family stay per-case (never whole files) exactly as before.
 
 interface KnextQuarantine {
   test: string;
@@ -319,143 +332,82 @@ interface KnextQuarantine {
   nextjsRef?: string;
   /** Set when the entry was re-tested (and re-confirmed) at a NEWER workflow ref. */
   reaudited?: string;
+  /** #214: "file" = family-level quarantine (whole file in rules.exclude). Absent = per-case. */
+  level?: 'case' | 'file';
 }
 
-// Round 3 (run 28596005486, 787 passed / 1 failed): three more family members
-// crossed the quarantine bar. The bar is deliberately: at least ONE FINAL
-// (post-retry, 3/3) file failure across the full-run record — single-attempt
-// wobbles that in-run retry tolerance absorbs (metadata, basic,
-// cached-navigations, prefetching, dynamic-on-hover…) are NOT quarantined.
-//   • stale-time: FINAL failure in 28596005486 (att1 'reuses dynamic data…'
-//     hung, att2 BOTH cases hung, att3 'expires runtime prefetches…' hung while
-//     'reuses…' passed in 1077ms); wobbled (recovered) in 28590478386.
-//   • per-page-dynamic-stale-time: FINAL failure in 28578203671 (alternating
-//     cases across attempts); wobbled (recovered) in 28590478386 + 28596005486.
-//   • vary-params: FINAL failure in 28578203671; wobbled (recovered) in
-//     28590478386 + 28596005486. All observed hangs share the family signature:
-//     60s jest timeout, runtime-prefetch flows, zero assertion diffs.
-const OBSERVED_FLAKY_QUARANTINES: Record<string, { cases: string[]; observedRuns: string[] }> = {
+/**
+ * The runtime-prefetch/navigation-timing family (#214): every file here has at
+ * least one FINAL (post-retry, 3/3) failure with the family signature across
+ * the full-run record, and the shared root cause is upstream's client
+ * segment-cache race (vercel/next.js#95301, fixed post-v16.2.0).
+ * `upstreamSkipPR` marks files upstream ITSELF suite-skipped as "too flaky";
+ * `upstreamSkipRevertPR` marks a later upstream REVERT of that skip (the file is
+ * live again at canary) — the ledger must then cite BOTH, and may not claim the
+ * file is still skipped.
+ */
+const FAMILY_FILE_QUARANTINES: Record<
+  string,
+  { observedRuns: string[]; upstreamSkipPR?: number; upstreamSkipRevertPR?: number }
+> = {
   'test/e2e/app-dir/segment-cache/search-params/segment-cache-search-params.test.ts': {
-    cases: [
-      'segment cache (search params) stores prefetched data by its rewritten search params, not the original ones',
-    ],
     observedRuns: ['28593534713', '28590478386'],
   },
   'test/e2e/app-dir/segment-cache/prefetch-layout-sharing/prefetch-layout-sharing.test.ts': {
-    cases: [
-      'layout sharing in non-static prefetches segment-level prefetch config uses a runtime prefetch for sub-pages of runtime-prefetchable layouts if requested',
-    ],
     observedRuns: ['28593534713', '28578203671'],
+    upstreamSkipPR: 92198,
   },
   'test/e2e/app-dir/segment-cache/refresh/segment-cache-refresh.test.ts': {
-    cases: [
-      'segment cache (refresh) Server Action refresh() refreshes dynamic data only, not cached',
-      'segment cache (refresh) re-navigation to a fully static page does not overwrite dynamic slots with default content',
-    ],
     observedRuns: ['28593534713'],
+    upstreamSkipPR: 92163,
   },
   'test/e2e/app-dir/segment-cache/staleness/segment-cache-stale-time.test.ts': {
-    cases: [
-      'segment cache (staleness) expires runtime prefetches when their stale time has elapsed',
-      'segment cache (staleness) reuses dynamic data up to the staleTimes.dynamic threshold',
-    ],
     observedRuns: ['28596005486', '28590478386'],
   },
   'test/e2e/app-dir/segment-cache/staleness/segment-cache-per-page-dynamic-stale-time.test.ts': {
-    cases: [
-      'segment cache (per-page dynamic stale time) reuses dynamic data within the per-page stale time window',
-      'segment cache (per-page dynamic stale time) back/forward navigation always reuses BFCache regardless of stale time',
-      'segment cache (per-page dynamic stale time) per-page value overrides global staleTimes.dynamic regardless of direction',
-      // #188 bun lane (run 28607626868): NEW sibling case hung while the three
-      // above were correctly pattern-skipped — same runtime-prefetch mechanism.
-      'segment cache (per-page dynamic stale time) two dynamic pages with different stale times behave independently',
-      // #212 verification run 28700392845 (node lane): NEW sibling case hung the
-      // identical 60s jest timeout on ALL THREE attempts (final-post-retry) while
-      // the four cases above were correctly pattern-skipped (the skip layer
-      // worked — this is a ledger extension, not a machinery bug). Zero
-      // assertion diffs; same runtime-prefetch staleness mechanism.
-      'segment cache (per-page dynamic stale time) with parallel routes, uses the minimum stale time across all slots',
-    ],
     observedRuns: ['28578203671', '28596005486', '28607626868', '28700392845'],
+    upstreamSkipPR: 92162,
   },
   'test/e2e/app-dir/segment-cache/vary-params/vary-params.test.ts': {
-    cases: [
-      'segment cache - vary params does not share cached segment when all params accessed statically (runtime prefetch)',
-      'segment cache - vary params renders cached loading state instantly with runtime prefetching',
-      'segment cache - vary params does not reuse prefetched segment when page accesses searchParams',
-      'segment cache - vary params shares cached segment across all params when none accessed statically (runtime prefetch)',
-      // #188 bun lane (run 28607626868): NEW sibling case hung while the four
-      // above were correctly pattern-skipped — same runtime-prefetch mechanism.
-      'segment cache - vary params tracks metadata param access separately from body (runtime prefetch)',
-    ],
     observedRuns: ['28578203671', '28596005486', '28590478386', '28607626868'],
   },
-  // Round 4 (run 28597872225, 786/2). Settings audit first (see the workflow
-  // fidelity guards in tests/compat-suite-workflow.test.ts): upstream's
-  // test-deploy-adapter lane runs the SAME per-case 60s timeout (hardcoded
-  // individualTestTimeout in e2e-utils, NOT raised by NEXT_E2E_TEST_TIMEOUT),
-  // the same -c 2 concurrency, the same ubuntu-latest runners and the same 3
-  // attempts — the class is inherently wobbly in deploy mode even at full env
-  // parity, and upstream itself handles it by ledger (prefetch-runtime flakey
-  // + app-client-cache failed entries). So: ledger, don't diverge.
-  //   • client-cache.parallel-routes: pure family signature — alternating 60s
-  //     hangs (att1+att3 're-use the cache…', att2 'should prefetch the full
-  //     page'); passed ALL FOUR prior full runs. Upstream marks the SAME case
-  //     texts failed in this family's defaults/experimental siblings.
-  //   • prefetching: MIXED mechanism, honestly split: the uri-encoded case is
-  //     an ASSERTION diff (un-retried immediate hasElementByCssSelector check
-  //     right after .click() — the substantive %20-reuse assertions PASS);
-  //     the two loading-state cases are family 60s hangs. All wobble across
-  //     identical-code runs (28596005486 fully passed).
+  // Skip-then-REVERT history: #92199 (2026-04-15) it.skip'd all its cases as
+  // flaky, #93798 (2026-05-13) reverted — live at canary. The revert PREDATES
+  // the #95301 root-cause fix (2026-07-02) and our v16.2.0 pin predates both,
+  // so the race is un-fixed in our lane; membership rests on #95301 + knext's
+  // own final-post-retry evidence.
+  'test/e2e/app-dir/segment-cache/cached-navigations/cached-navigations.test.ts': {
+    observedRuns: ['28618585946', '28612654960'],
+    upstreamSkipPR: 92199,
+    upstreamSkipRevertPR: 93798,
+  },
+  // #214: the newest member — final-past-retries in run 28701712403 (shard 3/16),
+  // a DIFFERENT case hung 60s on each of the 3 attempts (test.ts:232, :280, :57)
+  // while 9/11 cases passed per attempt.
+  'test/e2e/app-dir/segment-cache/basic/segment-cache-basic.test.ts': {
+    observedRuns: ['28701712403'],
+  },
   'test/e2e/app-dir/app-client-cache/client-cache.parallel-routes.test.ts': {
-    cases: [
-      'app dir client cache with parallel routes prefetch={true} should prefetch the full page',
-      'app dir client cache with parallel routes prefetch={true} should re-use the cache for the full page, only for 5 mins',
-    ],
     observedRuns: ['28597872225'],
+    upstreamSkipPR: 92195,
   },
   'test/e2e/app-dir/app-prefetch/prefetching.test.ts': {
-    cases: [
-      'app dir - prefetching should not unintentionally modify the requested prefetch by escaping the uri encoded query params',
-      'app dir - prefetching should show layout eagerly when prefetched with loading one level down',
-      'app dir - prefetching should immediately render the loading state for a dynamic segment when fetched from higher up in the tree',
-    ],
     observedRuns: ['28597872225', '28593534713', '28590478386'],
   },
-  // Round 6 (adapter-lane confirmation run 28601386408, 787/1): the lone
-  // failure classified per the fork discipline — NOT an adapter finding:
-  // optimistic-routing does NOT read NEXT_ENABLE_ADAPTER (verified: the only
-  // isAdapterTest readers at v16.2.0 are not-found-with-pages-i18n,
-  // sub-shell-generation{,-middleware}, partial-fallback-*, deployment-id —
-  // all of which passed on first attempt this run). Pure family signature: a
-  // DIFFERENT case hung 60s each attempt (att1 'rewrite detection…', att2
-  // 'static route with catch-all sibling…', att3 'nested dynamic routes…'),
-  // each passing in the other attempts in <1.5s, zero assertion diffs;
-  // corroborated by a recovered 2-case in-run wobble in 28593534713.
   'test/e2e/app-dir/optimistic-routing/optimistic-routing.test.ts': {
-    cases: [
-      'optimistic-routing rewrite detection: detects dynamic rewrite when URL does not match route structure',
-      'optimistic-routing static route with catch-all sibling: does not match sub-route against catch-all',
-      'optimistic-routing nested dynamic routes: predicts through multiple dynamic segments',
-      'optimistic-routing optional catch-all: predicts from index to path with segments',
-    ],
     observedRuns: ['28601386408', '28593534713'],
   },
-  // #188 round 2 (bun lane): recovered-on-retry in run 28607626868, finaled in
-  // 28612654960 with alternating cases — the runtime-prefetch family signature
-  // (no serving exception in the same run's surfaced server-log tails).
   'test/e2e/app-dir/prefetch-true-instant/prefetch-true-instant.test.ts': {
-    cases: [
-      'prefetch={true} with instant route also disables full prefetch when instant is on a layout, not the page',
-      'prefetch={true} with instant route does not include dynamic content in the prefetch when the target route has instant',
-    ],
     observedRuns: ['28612654960', '28607626868'],
   },
-  // #188 round 3 (bun lane): failed run 28607626868, PASSED run 28612654960,
-  // failed run 28616072395 (3/3, 60s, zero server-side exceptions) — cross-run
-  // wobble. Mechanism overlaps the documented Bun edge-sandbox outbound-fetch
-  // gap (the middleware-rewrite proxy path); the deterministic members of that
-  // family stay RED and unledgered.
+};
+
+// Per-case quarantines OUTSIDE the family keep the original §c.1 mechanics:
+// exact observed cases only, never whole files.
+//   • server-actions-redirect-middleware-rewrite: bun-lane wobble whose
+//     mechanism overlaps the documented Bun edge-sandbox outbound-fetch gap
+//     (PR #189) — NOT the runtime-prefetch family; stays per-case.
+const PER_CASE_QUARANTINES: Record<string, { cases: string[]; observedRuns: string[] }> = {
   'test/e2e/app-dir/server-actions-redirect-middleware-rewrite/server-actions-redirect-middleware-rewrite.test.ts':
     {
       cases: [
@@ -463,45 +415,181 @@ const OBSERVED_FLAKY_QUARANTINES: Record<string, { cases: string[]; observedRuns
       ],
       observedRuns: ['28616072395', '28607626868'],
     },
-  // #188 final round (bun lane): first FINAL failure in run 28618585946
-  // (alternating cases across 3 attempts — the family signature, zero server
-  // exceptions); prior observation was a retry-absorbed 1-attempt wobble in
-  // run 28612654960. Quarantined only once the final-post-retry bar was met.
-  'test/e2e/app-dir/segment-cache/cached-navigations/cached-navigations.test.ts': {
-    cases: [
-      'cached navigations caches runtime-prefetchable content from a navigation for instant second visit',
-      'cached navigations defers fallback params to the runtime stage',
-      'cached navigations includes static params in the cached static stage',
-      'cached navigations serves cached static segments instantly on the second navigation',
-      'cached navigations caches static segments when navigating to a known route without a prefetch',
-    ],
-    observedRuns: ['28618585946', '28612654960'],
-  },
 };
 
-describe('test/deploy-tests-manifest.knext.json — knext-observed flaky quarantines (#147 A3-3 final mile)', () => {
+describe('deploy-tests-manifest — #214 family-level quarantine (ADR-0007 §d)', () => {
+  const quarantines: KnextQuarantine[] =
+    (manifest as unknown as { $knextQuarantines?: KnextQuarantine[] }).$knextQuarantines ?? [];
+
+  it('every family file is excluded at FILE level via a verbatim rules.exclude entry', () => {
+    for (const file of Object.keys(FAMILY_FILE_QUARANTINES)) {
+      expect(
+        manifest.rules.exclude.includes(file),
+        `${file} is in the runtime-prefetch flake family and must be file-level excluded`,
+      ).toBe(true);
+    }
+  });
+
+  it('family files carry NO stale per-case suites entry (the file-level exclusion supersedes it)', () => {
+    for (const file of Object.keys(FAMILY_FILE_QUARANTINES)) {
+      expect(
+        manifest.suites[file],
+        `${file} is file-level quarantined — its old per-case suites entry must be removed (dead config)`,
+      ).toBeUndefined();
+    }
+  });
+
+  it('every family file has a level:"file" ledger record with mechanism + run-cited evidence', () => {
+    for (const [file, { observedRuns }] of Object.entries(FAMILY_FILE_QUARANTINES)) {
+      const ledger = quarantines.find((q) => q.test === file);
+      expect(ledger, `no $knextQuarantines ledger entry for family file ${file}`).toBeTruthy();
+      expect(ledger?.level, `${file}: family quarantine must declare level:"file"`).toBe('file');
+      expect(
+        (ledger?.mechanism ?? '').trim().length,
+        `${file}: mechanism must be documented`,
+      ).toBeGreaterThan(0);
+      expect(
+        (ledger?.cases ?? []).length,
+        `${file}: the historically observed cases must be preserved in the ledger`,
+      ).toBeGreaterThan(0);
+      // The cross-run record is the licence — every observing run must be auditable
+      // from the ledger alone.
+      for (const runId of observedRuns) {
+        expect(
+          new RegExp(runId).test(ledger?.evidence ?? ''),
+          `${file}: evidence must cite observing run ${runId}`,
+        ).toBe(true);
+      }
+    }
+  });
+
+  it('family provenance cites the upstream ROOT-CAUSE fix (vercel/next.js#95301) — and the upstream suite-skip PR where one exists', () => {
+    for (const [file, { upstreamSkipPR, upstreamSkipRevertPR }] of Object.entries(
+      FAMILY_FILE_QUARANTINES,
+    )) {
+      const ledger = quarantines.find((q) => q.test === file);
+      expect(
+        /#95301/.test(ledger?.provenance ?? ''),
+        `${file}: family provenance must cite the upstream root-cause fix vercel/next.js#95301 ` +
+          '(the in-flight prefetch-entry reuse race under CPU contention, fixed post-v16.2.0)',
+      ).toBe(true);
+      if (upstreamSkipPR !== undefined) {
+        expect(
+          new RegExp(`#${upstreamSkipPR}`).test(ledger?.provenance ?? ''),
+          `${file}: provenance must cite upstream's own suite-skip PR #${upstreamSkipPR}`,
+        ).toBe(true);
+      }
+      if (upstreamSkipRevertPR !== undefined) {
+        // Honesty on the citation surface (#215 gate): when upstream REVERTED
+        // its skip, the ledger must cite the revert PR too, and must NOT claim
+        // the file is still skipped upstream — that would be a false citation.
+        expect(
+          new RegExp(`#${upstreamSkipRevertPR}`).test(ledger?.provenance ?? ''),
+          `${file}: upstream reverted its skip — provenance must cite the revert PR #${upstreamSkipRevertPR}`,
+        ).toBe(true);
+        expect(
+          /still skipped at canary/i.test(ledger?.provenance ?? ''),
+          `${file}: provenance claims the file is still skipped at canary, but upstream ` +
+            `reverted the skip in #${upstreamSkipRevertPR} — correct the citation`,
+        ).toBe(false);
+      }
+    }
+  });
+
+  it('the family stays BOUNDED (≤ 15 file-level entries) — a growing blanket skip is not a policy', () => {
+    const fileLevel = quarantines.filter((q) => q.level === 'file');
+    expect(fileLevel.length).toBeLessThanOrEqual(15);
+    // And every level:"file" ledger entry must be one of the family files above —
+    // promoting a NEW file requires updating BOTH this table (with its runs +
+    // provenance) and the manifest, keeping the guard and the ledger in lockstep.
+    for (const q of fileLevel) {
+      expect(
+        Object.keys(FAMILY_FILE_QUARANTINES).includes(q.test),
+        `level:"file" ledger entry ${q.test} is not in the guard's family table — ` +
+          'update FAMILY_FILE_QUARANTINES with its observed runs and provenance',
+      ).toBe(true);
+    }
+  });
+
+  it('rules.exclude taxonomy is CLOSED: upstream mirror ∪ architectural ledger ∪ family ledger (no silent file drops)', () => {
+    // The old guard asserted quarantined files never appear in rules.exclude;
+    // §d replaces it with a stronger closure property: EVERY exclude entry must
+    // be attributable — mirrored verbatim from upstream's own manifest, ledgered
+    // architectural ($knextExclusions), or a ledgered level:"file" family
+    // quarantine. Anything else fails loudly.
+    const architectural = new Set(manifest.$knextExclusions.map((e) => e.test));
+    const family = new Set(quarantines.filter((q) => q.level === 'file').map((q) => q.test));
+    for (const entry of manifest.rules.exclude) {
+      const attributed =
+        UPSTREAM_MIRROR_EXCLUDES.has(entry) || architectural.has(entry) || family.has(entry);
+      expect(
+        attributed,
+        `rules.exclude entry "${entry}" is unattributed — it must be an upstream-mirror ` +
+          'exclude, a $knextExclusions architectural glob, or a level:"file" family quarantine',
+      ).toBe(true);
+    }
+  });
+});
+
+/** Upstream v16.2.0 test/deploy-tests-manifest.json rules.exclude, mirrored verbatim
+ * (re-mirror on a NEXTJS_REF bump — these are upstream's own deploy excludes, not knext debt). */
+const UPSTREAM_MIRROR_EXCLUDES = new Set([
+  'test/e2e/cancel-request/stream-cancel.test.ts',
+  'test/e2e/new-link-behavior/material-ui.test.ts',
+  'test/e2e/react-dnd-compile/react-dnd-compile.test.ts',
+  'test/e2e/skip-trailing-slash-redirect/index.test.ts',
+  'test/e2e/app-dir/app-compilation/index.test.ts',
+  'test/e2e/app-dir/rsc-webpack-loader/rsc-webpack-loader.test.ts',
+  'test/e2e/swc-warnings/index.test.ts',
+  'test/e2e/third-parties/index.test.ts',
+  'test/e2e/app-dir/app-routes/app-custom-route-base-path.test.ts',
+  'test/e2e/app-dir/mdx/mdx.test.ts',
+  'test/e2e/app-dir/modularizeimports/modularizeimports.test.ts',
+  'test/e2e/app-dir/third-parties/basic.test.ts',
+  'test/e2e/app-dir/app-static/app-static-custom-handler.test.ts',
+  'test/e2e/app-dir/options-request/options-request.test.ts',
+  'test/e2e/app-dir/revalidate-dynamic/revalidate-dynamic.test.ts',
+  'test/e2e/app-dir/syntax-highlighter-crash/syntax-highlighter-crash.test.ts',
+  'test/e2e/new-link-behavior/stitches.test.ts',
+  'test/e2e/next-image-forward-ref/index.test.ts',
+  'test/e2e/react-compiler/react-compiler.test.ts',
+  'test/e2e/app-dir/i18n-hybrid/i18n-hybrid.test.ts',
+  'test/e2e/app-dir/metadata/metadata.test.ts',
+  'test/e2e/app-dir/rsc-basic/rsc-basic.test.ts',
+  'test/e2e/basepath/basepath.test.ts',
+  'test/e2e/postcss-config-cjs/index.test.ts',
+  'test/e2e/socket-io/index.test.ts',
+  'test/e2e/middleware-matcher/index.test.ts',
+  'test/e2e/next-script/index.test.ts',
+  'test/production/standalone-mode/**/*',
+]);
+
+describe('deploy-tests-manifest — per-case quarantines outside the family (§c.1 mechanics unchanged)', () => {
   const quarantines: KnextQuarantine[] =
     (manifest as unknown as { $knextQuarantines?: KnextQuarantine[] }).$knextQuarantines ?? [];
 
   it('quarantines EXACTLY the observed hanging cases as flakey (per-case, never whole files)', () => {
-    for (const [file, { cases }] of Object.entries(OBSERVED_FLAKY_QUARANTINES)) {
+    for (const [file, { cases }] of Object.entries(PER_CASE_QUARANTINES)) {
       const entry = manifest.suites[file];
       expect(entry, `suites must carry a flakey entry for ${file}`).toBeTruthy();
       expect(entry.flakey ?? [], `flakey list for ${file}`).toEqual(cases);
       // Quarantine ≠ known-failing: these wobble across runs, so they must be
       // flakey, not failed.
       expect(entry.failed ?? []).toEqual([]);
+      // Per-case means per-case: the file itself must NOT be excluded wholesale.
+      expect(
+        manifest.rules.exclude.includes(file),
+        `${file} is a per-case quarantine and must NOT be file-level excluded`,
+      ).toBe(false);
     }
   });
 
-  it('each quarantined file has a $knextQuarantines ledger entry with evidence + mechanism + provenance', () => {
-    for (const [file, { cases, observedRuns }] of Object.entries(OBSERVED_FLAKY_QUARANTINES)) {
+  it('each per-case quarantined file has a ledger entry with evidence + mechanism + provenance', () => {
+    for (const [file, { cases, observedRuns }] of Object.entries(PER_CASE_QUARANTINES)) {
       const ledger = quarantines.find((q) => q.test === file);
       expect(ledger, `no $knextQuarantines ledger entry for ${file}`).toBeTruthy();
+      expect(ledger?.level ?? 'case', `${file} must not claim level:"file"`).not.toBe('file');
       expect(ledger?.cases).toEqual(cases);
-      // Evidence must cite EVERY run in which the hang was observed — the
-      // cross-run record is the licence to quarantine, so it must be auditable
-      // from the ledger alone.
       for (const runId of observedRuns) {
         expect(
           new RegExp(runId).test(ledger?.evidence ?? ''),
@@ -516,7 +604,6 @@ describe('test/deploy-tests-manifest.knext.json — knext-observed flaky quarant
       // (runtime-prefetch), or — #188 round 3 — the entry explicitly declares
       // the documented bun-lane mechanism class (the edge-sandbox
       // outbound-fetch gap, PR #189) instead of borrowing upstream cover.
-      // Anything else is an undocumented quarantine and must fail here.
       expect(
         /prefetch-runtime/.test(ledger?.provenance ?? '') ||
           /edge-sandbox outbound-fetch gap/.test(ledger?.provenance ?? ''),
@@ -525,17 +612,15 @@ describe('test/deploy-tests-manifest.knext.json — knext-observed flaky quarant
     }
   });
 
-  it('quarantined cases never leak into failed lists or rules.exclude (no silent file drops)', () => {
-    for (const file of Object.keys(OBSERVED_FLAKY_QUARANTINES)) {
-      expect(
-        manifest.rules.exclude.includes(file),
-        `${file} must NOT be excluded wholesale — only its observed cases are quarantined`,
-      ).toBe(false);
-    }
-  });
-
-  it('every $knextQuarantines ledger entry maps to a live suites flakey entry (no drift)', () => {
+  it('every PER-CASE ledger entry maps to a live suites flakey entry (no drift); file-level entries map to rules.exclude', () => {
     for (const ledger of quarantines) {
+      if (ledger.level === 'file') {
+        expect(
+          manifest.rules.exclude.includes(ledger.test),
+          `file-level ledger ${ledger.test} is not enforced in rules.exclude`,
+        ).toBe(true);
+        continue;
+      }
       const entry = manifest.suites[ledger.test];
       expect(entry?.flakey, `ledger ${ledger.test} has no live suites.flakey`).toBeTruthy();
       for (const c of ledger.cases) {
@@ -548,11 +633,11 @@ describe('test/deploy-tests-manifest.knext.json — knext-observed flaky quarant
   });
 
   // Code-gate minor on the first all-green run (28599745695): the completeness
-  // checks above only cover files hardcoded in OBSERVED_FLAKY_QUARANTINES — a
-  // future flakey addition that skips BOTH lists would sail through unledgered.
-  // This guard is GENERIC: every suites entry is either part of the upstream
-  // v16.2.0 mirror (the verbatim block re-mirrored on ref bumps) or MUST carry
-  // a $knextQuarantines record covering exactly its flakey cases.
+  // checks above only cover files hardcoded in the tables — a future flakey
+  // addition that skips BOTH lists would sail through unledgered. This guard is
+  // GENERIC: every suites entry is either part of the upstream v16.2.0 mirror
+  // (the verbatim block re-mirrored on ref bumps) or MUST carry a
+  // $knextQuarantines record covering exactly its flakey cases.
   const UPSTREAM_MIRROR_SUITES = new Set([
     'test/e2e/app-dir/app-client-cache/client-cache.defaults.test.ts',
     'test/e2e/app-dir/app-client-cache/client-cache.experimental.test.ts',

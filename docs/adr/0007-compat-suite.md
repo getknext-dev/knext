@@ -452,7 +452,9 @@ guarded by `tests/deploy-manifest.test.ts`):
 
 1. **Per-case only, never whole files.** A quarantine names the exact observed test case(s) via a
    `suites` per-case flakey entry — a file-level `rules.exclude` for flakiness is forbidden (the
-   guard asserts quarantined files never appear in `rules.exclude`).
+   guard asserts quarantined files never appear in `rules.exclude`). *Amended by §(d) below
+   (2026-07, #214): the runtime-prefetch family, and ONLY that family, is quarantined at file
+   level under a stricter evidence bar.*
 2. **The bar: at least one FINAL post-retry failure, observed.** Retry-then-passed wobble does NOT
    qualify — a case is quarantined only when it failed all its retries in a real run. No
    pre-emptive quarantines.
@@ -469,6 +471,66 @@ guarded by `tests/deploy-manifest.test.ts`):
    debt: on a ref bump every entry is re-run and either re-observed (evidence updated) or removed.
    Together with `$knextExclusions`, the ledger is the public scoreboard — shrinking both to zero
    is the standing A3-3 goal.
+
+### (d) 2026-07 amendment (#214): the runtime-prefetch family is quarantined at FILE level
+
+**Context.** §c.1's "per-case only, never whole files" stopped converging for ONE family: across
+runs 28578203671 → 28701712403 a **different** runtime-prefetch/navigation-timing member failed
+final-past-retries nearly every full run — first new sibling cases inside already-ledgered files
+(vary-params and per-page-dynamic-stale-time on the bun lane, per-page again on run 28700392845),
+then a brand-new file (`segment-cache-basic`, run 28701712403: a different case hung 60s on each
+of the 3 attempts — test.ts:232/:280/:57 — with 9/11 cases passing per attempt). The ledger had
+grown to 12 entries dominated by this family; per-case extension was whack-a-mole.
+
+**Mechanism (investigated, not assumed).** The 60s is upstream's **hardcoded** per-case
+`individualTestTimeout` in `test/lib/e2e-utils/index.ts` (applied via the Proxy-wrapped
+`it`/`test`); `NEXT_E2E_TEST_TIMEOUT=240000` raises only the SETUP timeout, and there is **no
+legitimate knob** for the per-case value — patching it would break env-parity with upstream's own
+adapter lane, which runs the identical 60s. The hangs correlate with `-c 2` shard concurrency
+(the sibling slot builds+deploys other fixtures during the wait) and the serving layer is
+exonerated (the ledger's local repro: the exact awaited prefetch answers 200 in ~76ms from the
+real knext deployment).
+
+**Root cause (upstream provenance).** vercel/next.js#95301 (merged 2026-07-02, **after** the
+pinned v16.2.0) fixes a client segment-cache race that produces exactly this signature: a locked
+navigation reused an in-flight runtime-prefetch entry without tracking it, drained without
+awaiting it, and read the unresolved shell — the awaited content never surfaced and the case hit
+the bare test-level timeout. Upstream's own PR: *"The race only lost under CPU contention, which
+is why it reproduced in the prod flake-detection job on slow containers but almost never
+locally."* Upstream additionally **suite-skipped five family files outright** ("too flaky") after
+v16.2.0 — #92163 (segment-cache-refresh), #92198 (prefetch-layout-sharing), #92162
+(per-page-dynamic-stale-time), #92199 (cached-navigations, all cases), #92195
+(client-cache.parallel-routes). Four are still skipped at canary as of 2026-07-04;
+cached-navigations' skips were **reverted** by #93798 (2026-05-13) and the file is fully live at
+canary — note the revert *predates* the #95301 fix (2026-07-02), and our v16.2.0 pin predates
+both, so the race is un-fixed in our lane and that file's membership rests on the #95301
+mechanism plus knext's own final-post-retry evidence (runs 28618585946, 28612654960), not on a
+live upstream skip.
+
+**Decision.** Files meeting the FAMILY BAR are quarantined at **file level** (a verbatim
+`rules.exclude` entry + a `level: "file"` `$knextQuarantines` record; their stale per-case
+`suites` entries are removed). The bar, mechanically guarded by `tests/deploy-manifest.test.ts`:
+(i) at least one knext FINAL post-retry failure with the family signature, **and** (ii) upstream
+provenance — the root-cause fix (#95301) and, where one exists, upstream's own suite-skip PR,
+**and** (iii) a complete ledger record (mechanism, multi-run evidence, provenance, `nextjsRef`
+stamp). The family is **bounded** (guard cap: ≤ 15 file-level entries) and `rules.exclude` is now
+a **closed taxonomy** (upstream mirror ∪ architectural ledger ∪ family ledger — anything else
+fails the guard), which is *stronger* than the old "quarantined files never appear in
+rules.exclude" assertion it replaces. Everything outside the family stays per-case under §c.1
+unchanged (e.g. `server-actions-redirect-middleware-rewrite`, whose mechanism is the bun
+edge-sandbox outbound-fetch gap, not this race).
+
+**Options considered.** (a) Raise the 60s per-case timeout — foreclosed: it is a hardcoded
+upstream const with no env knob; patching the checked-out harness breaks the env-parity the
+credential rests on. (b) Drop to `-c 1` for the affected shard range — rejected: upstream runs
+the suite at `-c 2` on the same runners (parity), ~2x wall time, and #95301 shows the race can
+still lose at any contention level. (c) Family-level quarantine with provenance — **accepted**,
+being what upstream itself does (suite skips + the 33-case wholesale flakey block).
+
+**Expiry.** The `nextjsRef` re-audit gate (§c.5, mechanized) covers file-level entries too: the
+first `NEXTJS_REF` bump to a release containing #95301 must re-run the whole family and drop
+every entry that no longer wobbles. This is a pinned-ref quarantine with a known upstream fix —
+not permanent debt.
 
 ## Action items
 
