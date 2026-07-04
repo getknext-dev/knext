@@ -147,6 +147,42 @@ one plane, all connects **through the apps-gateway**:
 
 ## Consequences & caveats (blast radius / isolation)
 
+- **Access control is the per-app credential + the gateway `(user,database)`
+  refusal (issue #74).** Data isolation (below) is necessary but not sufficient:
+  the apps-gateway is a byte pipe after the handshake and every branch serves a
+  `postgres` DB, so *routing alone* let any client that could reach `pggw-apps`
+  set `database=<other-app>` and connect as the shared `cloud_admin` — full
+  read/write on a neighbour, and `database=tmpl` could mutate the shared template.
+  The fix is two layers:
+  1. **Gateway pre-wake authorization.** The apps-gateway (template mode) refuses
+     any startup whose `(user, database)` is not `app_<db>/<db>`, whose database
+     is not a valid RFC1123 label, or whose database is a reserved system name
+     (`tmpl`/`warm`/`ro`) — *before* it wakes any compute. Refusal is a clean
+     `28P01` with a generic message (no tenant-existence oracle). This alone stops
+     cross-app DSN reuse, the `cloud_admin` path, and reaching the template/warm/RO
+     computes through the apps-gateway. (`GW_APP_ROLE_PREFIX` / `GW_RESERVED_SYSTEMS`.)
+  2. **Per-app Postgres credential.** `provision-app.sh` mints a role `app_<app>`
+     with a random md5 password into a Secret `app-db-<app>`; `compute_ctl` applies
+     that login role from the spec every boot (the documented MVP behavior). So a
+     client that even *names* the right user still needs that app's password, which
+     only its `DATABASE_URL` Secret holds. `cloud_admin` remains the admin, reached
+     **direct-to-compute** only — never through the apps-gateway.
+  Both layers are proven live in `deploy/_verify-multitenant.sh` (app A's DSN is
+  denied against app B; `cloud_admin` is denied through the gateway; the app's own
+  credential to its own db succeeds). **Trust boundary:** `pggw-apps:55432` is the
+  multi-tenant front door — open to knext app pods (they are the tenants), so
+  tenant isolation is *credential-based, not network-based*. The netpols
+  (`70-networkpolicy.yaml`) keep the sensitive path (`compute-<app>:55433`)
+  reachable only from the apps-gateway; a deployment that does not trust its own
+  namespace can additionally restrict ingress to `pggw-apps` with a
+  namespace/pod selector.
+- **Provisioning is crash-safe / intent-first (issue #76).** `create` applies the
+  per-app ConfigMap — the sole durable owner of the branch's `TIMELINE_ID` — *and*
+  the credential Secret **before** the pageserver branch call. A crash between the
+  two leaves a ConfigMap with no branch (harmless: re-run branches the *same* id
+  and converges), never a branch with no owner (the orphan that pins template WAL
+  invisibly). `provision-app.sh fsck` surfaces any pre-existing orphan (a branch
+  with no owning ConfigMap) and exits non-zero.
 - **Isolation is at the timeline level, not the tenant level.** All app branches
   share one pageserver, one safekeeper quorum, and one tenant. Data is isolated
   (each timeline is a separate logical DB history — proven), but **noisy-neighbour
@@ -199,9 +235,11 @@ one plane, all connects **through the apps-gateway**:
 
 ## Follow-ups
 
-- knext contract: DB-per-app `DATABASE_URL` →
-  `postgres://…@pggw-apps.scale-zero-pg.svc:55432/<app>` (see
-  `docs/connecting.md` "Multi-app / branch-per-app").
+- knext contract: DB-per-app `DATABASE_URL` (per-app credential) →
+  `postgres://app_<app>:<per-app-password>@pggw-apps.scale-zero-pg.svc:55432/<app>`,
+  read from the Secret `app-db-<app>` that `provision-app.sh create` mints (see
+  `docs/connecting.md` "Multi-app / branch-per-app"). `cloud_admin` is refused
+  through the apps-gateway.
 - If app churn or PR-preview branches (ADR-0013 on the knext side) push volume
   up, revisit: (a) a CRD-driven provisioning operator, (b) per-app PITR/GC
   windows, (c) tenant sharding across multiple pageservers.

@@ -31,7 +31,9 @@ func TestROEnvMapsToKubectlComputeRODeployment(t *testing.T) {
 		t.Fatalf("RO driver mode = %s, want kubectl", d.Mode())
 	}
 	got := d.Resolve("ignored")
-	want := Target{Host: "compute-ro.scale-zero-pg.svc", Port: 55432, Key: "scale-zero-pg/compute-ro"}
+	// Default RO target must be port 55433 (where compute serves), NOT 55432
+	// (issue #79): pointing the RO lane at 55432 silently dials the wrong port.
+	want := Target{Host: "compute-ro.scale-zero-pg.svc", Port: 55433, Key: "scale-zero-pg/compute-ro"}
 	if got != want {
 		t.Fatalf("RO resolve = %+v, want %+v", got, want)
 	}

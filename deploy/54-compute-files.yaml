@@ -260,6 +260,20 @@ data:
     sed -e "s|TENANT_ID|${TENANT_ID}|g" -e "s|TIMELINE_ID|${TIMELINE_ID}|g" \
         -e "s|CLOUD_ADMIN_MD5_PLACEHOLDER|${CLOUD_ADMIN_MD5}|g" "$SRC" > "$DST"
 
+    # Per-app role (issue #74, branch-per-app tenant isolation). When BOTH APP_ROLE
+    # and APP_ROLE_MD5 are set (per-app computes get them from compute-config-<app>
+    # and the Secret app-db-<app>), inject an extra LOGIN role into the spec's roles
+    # array. compute_ctl applies spec roles on every boot, so the per-app credential
+    # is (re)asserted each wake — the documented MVP behavior. This is ADDITIVE: the
+    # primary single-DB compute and the seed-time tmpl compute set neither var, so the
+    # block is skipped and their spec is byte-for-byte unchanged (zero blast radius).
+    if [ -n "${APP_ROLE:-}" ] && [ -n "${APP_ROLE_MD5:-}" ]; then
+      echo "Injecting per-app login role ${APP_ROLE}"
+      ROLE_JSON="{\"name\": \"${APP_ROLE}\", \"encrypted_password\": \"${APP_ROLE_MD5}\", \"options\": null},"
+      awk -v r="$ROLE_JSON" 'BEGIN{done=0}{print}(done==0 && /"roles": \[/){print "                    " r; done=1}' \
+          "$DST" > "$DST.tmp" && mv "$DST.tmp" "$DST"
+    fi
+
     echo "Starting compute_ctl"
     exec /usr/local/bin/compute_ctl --pgdata /var/db/postgres/compute \
          -C "postgresql://cloud_admin@localhost:55433/postgres" \

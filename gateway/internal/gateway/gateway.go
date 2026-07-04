@@ -32,10 +32,21 @@ type activeEntry struct {
 	target wake.Target
 }
 
-// PeerChecker reports the fleet-wide active connection count across all
-// gateway replicas (excluding this one). Nil means single-replica: no check.
+// PeerChecker reports the active connection count for a specific compute key
+// across all gateway replicas (excluding this one). Keyed PER-APP so one busy
+// app does not pin an unrelated idle app awake (issue #75). Nil means
+// single-replica: no check.
 type PeerChecker interface {
-	ActiveConnections(ctx context.Context) (int, error)
+	ActiveConnections(ctx context.Context, key string) (int, error)
+}
+
+// systemAuthorizer is implemented by drivers (apps-gateway / template mode) that
+// gate which (user, database) pairs may route+wake. The gateway calls Authorize
+// BEFORE waking anything; a non-nil error is turned into a clean auth failure and
+// the compute is never touched. Drivers that don't implement it (the primary
+// single-DB pggw) accept every startup — their path is unchanged (issue #74).
+type systemAuthorizer interface {
+	Authorize(user, database string) error
 }
 
 // Gateway accepts client connections, wakes compute, and pipes bytes.
@@ -259,6 +270,17 @@ func (g *Gateway) handle(client net.Conn) {
 				if systemID == "" {
 					systemID = "postgres"
 				}
+				// Tenant access control (issue #74): in template mode the driver
+				// authorizes the (user, database) pair from the startup packet
+				// BEFORE any wake. An unauthorized pair (cross-app, cloud_admin,
+				// or a reserved/internal system name) gets a clean 28P01 and the
+				// compute is never woken — no info leak, no side effect.
+				if az, ok := g.driver.(systemAuthorizer); ok {
+					if err := az.Authorize(msg.Params["user"], systemID); err != nil {
+						g.fail(client, "28P01", err.Error())
+						return
+					}
+				}
 				target := g.driver.Resolve(systemID)
 				startup := append([]byte(nil), packet...)
 				// Branch-per-app: the DSN database routes to the per-app compute,
@@ -460,7 +482,9 @@ func (g *Gateway) scheduleSleep(e *activeEntry, target wake.Target) {
 
 		if g.Peers != nil {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			n, err := g.Peers.ActiveConnections(ctx)
+			// Per-app (issue #75): ask peers only about THIS compute key, so a
+			// busy neighbouring app never postpones this idle app's sleep.
+			n, err := g.Peers.ActiveConnections(ctx, target.Key)
 			cancel()
 			if err != nil || n > 0 {
 				if err != nil {

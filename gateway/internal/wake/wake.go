@@ -151,12 +151,14 @@ func (d *kubeDriver) CanSleep() bool { return true }
 
 // templateDriver: per-system target/deployment from a {system} template.
 type templateDriver struct {
-	namespace string
-	targetTpl string
-	depTpl    string
-	servedDB  string
-	defPort   int
-	scaler    Scaler
+	namespace  string
+	targetTpl  string
+	depTpl     string
+	servedDB   string
+	defPort    int
+	scaler     Scaler
+	rolePrefix string          // per-app role prefix (GW_APP_ROLE_PREFIX, default "app_")
+	reserved   map[string]bool // system names that must NOT resolve to an app (tmpl/warm/ro)
 }
 
 func (d *templateDriver) Mode() string { return "template" }
@@ -235,12 +237,14 @@ func MakeDriverWithScaler(env Env, scaler Scaler) (Driver, error) {
 			return nil, fmt.Errorf("template mode: GW_K8S_DEPLOYMENT_TEMPLATE=%q must contain {system}", depTpl)
 		}
 		return &templateDriver{
-			namespace: ns,
-			targetTpl: env.get("GW_TARGET_TEMPLATE", fmt.Sprintf("compute-{system}.%s.svc:55433", ns)),
-			depTpl:    depTpl,
-			servedDB:  env.get("GW_SERVED_DATABASE", "postgres"),
-			defPort:   defPort,
-			scaler:    scaler,
+			namespace:  ns,
+			targetTpl:  env.get("GW_TARGET_TEMPLATE", fmt.Sprintf("compute-{system}.%s.svc:55433", ns)),
+			depTpl:     depTpl,
+			servedDB:   env.get("GW_SERVED_DATABASE", "postgres"),
+			defPort:    defPort,
+			scaler:     scaler,
+			rolePrefix: env.get("GW_APP_ROLE_PREFIX", "app_"),
+			reserved:   parseReserved(env.get("GW_RESERVED_SYSTEMS", "tmpl,warm,ro")),
 		}, nil
 
 	case "warmpool":

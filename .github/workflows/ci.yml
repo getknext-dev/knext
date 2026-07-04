@@ -45,6 +45,17 @@ jobs:
       - name: skctl serializer round-trip + version-guard tests
         run: python3 -m unittest discover -s deploy -p 'test_skctl.py' -v
 
+  # provision-app.sh app-name / reserved-name validation (issues #79/#74). No
+  # cluster: validate_app_name runs before any kubectl call, so bad names fail
+  # fast. Guards the tenant-boundary charset check against a locale-collation
+  # regression (the LC_ALL=C fix).
+  provision:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: provision-app.sh name-validation tests
+        run: bash deploy/test_provision-app.sh
+
   # Full e2e (storage plane + wake loop) is heavy for CI; run on demand.
   e2e:
     if: contains(github.event.head_commit.message, '[e2e]')

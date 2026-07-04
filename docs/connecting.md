@@ -174,26 +174,39 @@ DB-per-app product promise; the design, evidence and caveats are in
 Provisioning an app is one pageserver branch call + one rendered per-app compute
 (`compute-app.template.yaml`) — **~4s** end-to-end
 ([BENCHMARKS](BENCHMARKS.md#branch-per-app-provisioning-adr-0003)), no initdb, no
-migration replay: the branch inherits the template schema copy-on-write.
+migration replay: the branch inherits the template schema copy-on-write. `create`
+also mints a **per-app credential** (role `app_<app>` + a random password) into a
+Secret `app-db-<app>` — this is the app's DSN. Re-running `create` is idempotent
+and crash-safe (the timeline id is persisted before the branch call, so an
+interrupted create leaves no orphan; `./provision-app.sh fsck` surfaces any).
 
-**Connect** through the **apps-gateway** (`deploy/81-apps-gateway.yaml`, a second
-gateway in `template` mode — the primary single-DB `pggw` is untouched):
+**Each app has its own credential (issue #74).** The DSN user is the per-app role
+`app_<app>`, and the apps-gateway **refuses** any startup whose `(user, database)`
+is not `app_<app>/<app>` — *before* it wakes anything. So knowing one app's DSN
+does not grant access to another, and `cloud_admin` does **not** work through the
+apps-gateway (admin is direct-to-compute only). Read the DSN from the Secret:
 
-```
-postgres://cloud_admin:cloud_admin@pggw-apps.scale-zero-pg.svc:55432/<app>?sslmode=disable
+```sh
+kubectl -n scale-zero-pg get secret app-db-<app> -o jsonpath='{.data.DATABASE_URL}' | base64 -d
+# postgres://app_<app>:<per-app-password>@pggw-apps.scale-zero-pg.svc:55432/<app>?sslmode=disable
 ```
 
 The DSN **database name is the app handle**: it routes to `compute-<app>` and wakes
 it. The gateway rewrites the database to the served DB (`postgres`) before
 replaying startup, so every branch serves its inherited schema — you do **not**
-create a database named `<app>` yourself. For knext, set each app's
-`DATABASE_URL` Secret to its own `/<app>` DSN.
+create a database named `<app>` yourself. For **knext**, wire each app's
+`DATABASE_URL` Secret (`NextApp.spec.secrets.envMap`) straight from `app-db-<app>`
+(same shape as the primary contract) — one Secret per app, isolated by credential.
 
-**Isolation is at the timeline level, not the tenant level:** app data is isolated
-(proven by `deploy/_verify-multitenant.sh`), but all apps share one pageserver and
-safekeeper quorum — a plane-wide stall hits every app. Dropping an app must delete
-its timeline (`destroy --delete-timeline`) or the branch pins template history.
-Full caveats: [ADR-0003](adr-0003-multi-tenancy.md#consequences--caveats-blast-radius--isolation).
+**Isolation is at two layers.** *Data* isolation is the Neon timeline (each app is
+a separate branch — app A's rows are invisible to app B, proven by
+`deploy/_verify-multitenant.sh`). *Access* isolation is the per-app credential +
+the gateway `(user,database)` refusal (proven by the same drill: app A's DSN is
+denied against app B, and `cloud_admin` is denied through the gateway). What is
+**shared** is availability: all apps ride one pageserver + safekeeper quorum, so a
+plane-wide stall hits every app. Dropping an app must delete its timeline
+(`destroy --delete-timeline`) or the branch pins template history. Full caveats:
+[ADR-0003](adr-0003-multi-tenancy.md#consequences--caveats-blast-radius--isolation).
 
 ## Time-series data
 

@@ -85,6 +85,20 @@ data intact. Method: branch two throwaway apps, write an app-private row into th
 shared `app_items`, cross-check visibility, force-sleep one, re-wake it. Full
 finding + caveats: [ADR-0003](adr-0003-multi-tenancy.md).
 
+### v0.6.1 tenant security (issues #74/#75/#76) — live-verified 2026-07-04
+
+`deploy/_verify-multitenant.sh` (apps-gateway image `v0.6.1-tenantsec`) now also
+proves, on the OKE plane:
+
+| Property | Result | How |
+|---|---|---|
+| **Tenant access control (#74)** | app A's DSN **denied** against app B; `cloud_admin` **denied** through the apps-gateway; reserved `tmpl` **denied** — the app's own per-app credential to its own db **succeeds** | gateway `(user,database)` authz refuses with `28P01` before any wake; per-app role `app_<app>` + md5 password applied by `compute_ctl` each boot |
+| **Per-app idle (#75)** | idle app A **scales to zero on schedule** while busy app B holds an open connection (apps-gateway `GW_IDLE_MS` lowered to 8s for the assertion) | peer-aware idle now reads each app's own `per_system` active count, not the fleet-global scalar |
+| **Crash-safe provisioning (#76)** | a create interrupted after the intent ConfigMap but before the branch **re-converges on the same timeline** (no orphan); `fsck` reports a clean plane | `create` writes the ConfigMap (branch owner) + Secret before the branch call |
+
+Per-app credential + role injection add **no measurable** provision-time cost (the
+Secret + one spec role are applied in the same window; provision stays ~4s).
+
 ## Reliability drills (RTO)
 
 | Drill | Local | OKE | What it proves |

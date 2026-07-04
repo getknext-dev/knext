@@ -162,3 +162,49 @@ spec:
             matchLabels: { app: pageserver }
       ports:
         - { protocol: TCP, port: 50051 }
+---
+# apps-gateway (branch-per-app multi-tenancy, issue #74): the multi-tenant front
+# door on 55432 is OPEN to all sources (knext apps in any namespace connect their
+# per-app DATABASE_URL here) — tenant isolation is NOT network-based, it is the
+# per-app credential + the gateway's (user,database) refusal. 9090 metrics stay
+# in-namespace (peer gateways scrape each other + Prometheus). This mirrors the
+# primary gateway-ingress policy for the app=pggw-apps pods, which default-deny
+# would otherwise block on a strict CNI.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: apps-gateway-ingress
+  namespace: scale-zero-pg
+spec:
+  podSelector:
+    matchLabels: { app: pggw-apps }
+  policyTypes: ["Ingress"]
+  ingress:
+    - ports: # 55432 from anywhere — the multi-tenant front door
+        - { protocol: TCP, port: 55432 }
+    - from:  # 9090 metrics: in-namespace only (peer scrape + Prometheus)
+        - podSelector: {}
+      ports:
+        - { protocol: TCP, port: 9090 }
+---
+# Per-app computes (branch-per-app, issue #74): the sensitive data path
+# (compute-<app>:55433) is reachable ONLY from the apps-gateway pods — the same
+# STRICT posture as the primary compute-ingress. Per-app Deployments carry
+# {tier: apps, plane: compute}, so this one policy covers every app without a
+# per-app rule. (The tmpl seed compute is written via `kubectl exec`, which is
+# API-server exec, not pod-network ingress, so it is unaffected.)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: apps-compute-ingress
+  namespace: scale-zero-pg
+spec:
+  podSelector:
+    matchLabels: { tier: apps, plane: compute }
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: { app: pggw-apps }
+      ports:
+        - { protocol: TCP, port: 55433 }

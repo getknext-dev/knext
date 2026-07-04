@@ -30,9 +30,10 @@ spec:
       serviceAccountName: pggw # reuse: deployments/scale is namespace-wide
       containers:
         - name: gateway
-          # Built from this PR branch (adds the GW_SERVED_DATABASE rewrite hop).
-          # Digest-pinned (contract 22). Rebuild + re-pin on any gateway change.
-          image: me-abudhabi-1.ocir.io/axfqznklsd2t/ks-pg/gateway:iter9-mt-08a772a@sha256:2cb59a61d2d6a713352af415c942d3237ed1cdfe7701d36a55574bdba428d191
+          # Built from this PR branch (v0.6.1 tenant security: (user,database)
+          # authz + per-app peer idle). Digest-pinned (contract 22). Rebuild +
+          # re-pin on any gateway change.
+          image: me-abudhabi-1.ocir.io/axfqznklsd2t/ks-pg/gateway:v0.6.1-tenantsec-b8fc040@sha256:2f83fe0d6fad5884f62eaaee61d5efeabd22969d40776e0dd34c7ac39e720452
           imagePullPolicy: IfNotPresent
           env:
             - name: GW_PORT
@@ -47,6 +48,15 @@ spec:
               value: "compute-{system}" # {system} = DSN database name; guarded non-empty in wake.go
             - name: GW_TARGET_TEMPLATE
               value: "compute-{system}.scale-zero-pg.svc:55433"
+            # Tenant access control (issue #74). The gateway refuses any startup
+            # whose (user, database) is not <prefix><db>/<db>, and any database
+            # that is a reserved system name — BEFORE waking. Keeps cloud_admin and
+            # cross-app DSNs out. MUST stay in lock-step with provision-app.sh
+            # (APP_ROLE_PREFIX / RESERVED_NAMES).
+            - name: GW_APP_ROLE_PREFIX
+              value: "app_"
+            - name: GW_RESERVED_SYSTEMS
+              value: "tmpl,warm,ro"
             - name: GW_IDLE_MS
               value: "60000" # demo-friendly; production: 300000+
             - name: GW_WAKE_TIMEOUT_MS

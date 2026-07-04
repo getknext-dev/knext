@@ -825,6 +825,68 @@ kubectl -n scale-zero-pg get pods -l app=compute -w
 kubectl -n scale-zero-pg logs -l app=pggw -f --prefix | grep 'gw]'
 ```
 
+## Multi-tenant apps — branch-per-app (ADR-0003)
+
+The apps-gateway (`deploy/81-apps-gateway.yaml`, `pggw-apps`) fronts one
+scale-to-zero compute per app, each on its own Neon branch. Full design:
+[ADR-0003](adr-0003-multi-tenancy.md); connect contract:
+[connecting.md](connecting.md#multi-app--branch-per-app).
+
+```sh
+cd deploy
+./provision-app.sh init-plane --schema testdata/app-base-schema.sql  # one-time
+./provision-app.sh create  orders        # branch + compute + per-app credential
+./provision-app.sh list                  # apps-tenant timelines
+./provision-app.sh fsck                  # orphan-timeline check (exit≠0 if any)
+./provision-app.sh destroy orders --delete-timeline
+# read an app's DSN (per-app credential):
+kubectl -n scale-zero-pg get secret app-db-orders -o jsonpath='{.data.DATABASE_URL}' | base64 -d
+```
+
+**Tenant access control (issue #74).** Each app authenticates as its own role
+`app_<app>` (minted into `app-db-<app>`; applied to the compute spec every boot by
+`compute_ctl`). The apps-gateway **refuses**, with a clean `28P01` and **no wake**,
+any startup whose `(user, database)` is not `app_<db>/<db>`, whose database is not
+a lowercase RFC1123 label, or whose database is a reserved system name
+(`GW_RESERVED_SYSTEMS=tmpl,warm,ro`). Consequences: `cloud_admin` does **not** work
+through `pggw-apps` (admin is direct-to-`compute-<app>` only); one app's DSN cannot
+reach another; the shared template/warm/RO computes are unreachable via the
+apps-gateway. Keep `GW_APP_ROLE_PREFIX`/`GW_RESERVED_SYSTEMS` (gateway) in
+lock-step with `APP_ROLE_PREFIX`/`RESERVED_NAMES` (`provision-app.sh`). Drill:
+`deploy/_verify-multitenant.sh` (section 6 denies cross-app + cloud_admin).
+
+**Per-app idle (issue #75).** Sleep is decided **per app**: the peer-aware idle
+check (2-replica apps-gateway) reads each app's own connection count from the
+peers' `per_system` metrics, so one busy app never keeps other idle apps awake.
+Drill section 7 proves an idle app scales to zero while a neighbour holds a
+connection open.
+
+### Orphan timelines — detect and clean (issue #76)
+
+`create` is **intent-first**: the per-app ConfigMap (which records the branch's
+`TIMELINE_ID`) and the credential Secret are applied **before** the pageserver
+branch call, so an interrupted `create` never leaves a branch with no owner — a
+re-run reads the id back and converges. To detect a pre-existing orphan (e.g. from
+an old build, or a hand-deleted ConfigMap):
+
+```sh
+./provision-app.sh fsck    # lists any branch with no owning compute-config-* ConfigMap; exit 1 if found
+```
+
+To clean an orphan `<id>` (no owning ConfigMap, so `destroy` can't find it), delete
+it on the pageserver **and** all safekeepers (the same two-sided delete `destroy`
+does), then re-run `fsck`:
+
+```sh
+kubectl -n scale-zero-pg exec pageserver-0 -c pageserver -- \
+  curl -sf -X DELETE http://localhost:9898/v1/tenant/$APPS_TENANT/timeline/<id>
+for o in 0 1 2; do kubectl -n scale-zero-pg exec safekeeper-$o -- \
+  curl -sf -X DELETE http://localhost:7676/v1/tenant/$APPS_TENANT/timeline/<id> || true; done
+```
+
+Leaving an orphan pins the template's ancestor WAL/pages (`pitr_history_size`
+grows) and leaks safekeeper WAL dirs — the same cost as a forgotten `destroy`.
+
 ## Read-only pool (issue #66)
 
 The read-only pool (`deploy/26-compute-ro.yaml`) is a set of read-only computes

@@ -22,6 +22,10 @@ data:
   PAGESERVER_HOST: "pageserver"
   TENANT_ID: "__TENANT_ID__"
   TIMELINE_ID: "__TIMELINE_ID__"
+  # Per-app role (issue #74): compute_ctl applies this login role every boot; its
+  # md5 password comes from the Secret app-db-__APP__ (APP_ROLE_MD5, optional).
+  # The apps-gateway only admits user == this role for database __APP__.
+  APP_ROLE: "app___APP__"
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -67,6 +71,17 @@ spec:
           command: ["/bin/sh", "/compute-files/entrypoint.sh"]
           envFrom:
             - configMapRef: { name: compute-config-__APP__ }
+          env:
+            # Per-app role password (issue #74). optional:true so the shared
+            # entrypoint stays a no-op for computes without a per-app Secret
+            # (the primary single-DB compute and the seed-time tmpl compute):
+            # absent APP_ROLE_MD5 -> entrypoint injects no extra role.
+            - name: APP_ROLE_MD5
+              valueFrom:
+                secretKeyRef:
+                  name: app-db-__APP__
+                  key: APP_ROLE_MD5
+                  optional: true
           ports:
             - { name: pg, containerPort: 55433 }
             - { name: compute-http, containerPort: 3080 }
