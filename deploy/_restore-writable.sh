@@ -168,8 +168,15 @@ YAML
 # things) — that is expected; one boot is enough to start the stream.
 primary_kick() {
   [ -f "$COMPUTE_FILES_SRC" ] || fail "missing $COMPUTE_FILES_SRC"
+  # 54-compute-files.yaml BUNDLES a compute-config carrying the PRIMARY tenant/timeline
+  # ids (f000…001/002). Rewrite them to $TENANT/$TIMELINE so the kicked PRIMARY boots on
+  # the SAME timeline this re-seed targets. For the platform-tenant restore these default
+  # to f000…001/002 (a no-op); for a branch-per-app (apps tenant) timeline this is what
+  # makes the pageserver walreceiver kick the RIGHT timeline (else it never streams past Y).
   sed -e "s#safekeeper-0.safekeeper:5454,safekeeper-1.safekeeper:5454,safekeeper-2.safekeeper:5454#safekeeper-0.safekeeper:5454#g" \
       -e "s/^  namespace: $SRC_NS/  namespace: $DRILL_NS/" \
+      -e "s/f000f000f000f000f000f000f000f001/$TENANT/g" \
+      -e "s/f000f000f000f000f000f000f000f002/$TIMELINE/g" \
       "$COMPUTE_FILES_SRC" | $KD apply -f - >/dev/null
   $KD rollout restart deploy/compute >/dev/null 2>&1 || true
 }

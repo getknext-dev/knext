@@ -179,6 +179,7 @@ Per-app Postgres `max_connections` is the enforced per-tenant bound today.
 | Pageserver failover — AUTOMATED (pswatcher, no human step) | — | **~8s** (unchanged post-#25/#26/#23) | watcher promotes gen+1 + flips Service selector + bounces compute; RTO = kill→cold read on standby (incl. ~3s×1s-poll detection). Proof = selector flipped by watcher + gen ledger 1→2 + read served by the fresh cold compute (not old-pod cache) + **post-failover truthfulness** (`pswatcher_failed_over=1`, `pswatcher_primary_up` re-anchored onto the promoted standby — #25). A **second-vantage gate** (API-server pod-readiness) now precedes any promotion (#26) to reject watcher-side partitions; it adds a single sub-second API call only on the promotion tick, so RTO is unchanged. Authority is crash-only single-replica (#23). |
 | Backup → restore (READ-ONLY) from OCI Object Storage (fresh ns) | **~110s** (in-cluster, pre-#4) | **417–942s** (OCI OS, 2026-07-03) | issue #4: backup mirrors OFF-CLUSTER to OCI OS, restore sources from it; RTO scales with bucket size (cross-internet copy dominates); STATIC read-only proof (reads pages from pageserver, no safekeepers) |
 | Backup → restore promoted to **WRITABLE** primary (fresh ns) | — | **1226s (writable) / 1045s (read-only)** post-WAL-prune, 2026-07-03; was **>60min @13GiB — unbounded-in-practice** (devops-r4) | issue #2: on-disk safekeeper WAL re-seed from the `/safekeeper` backup + crafted `safekeeper.control` (`deploy/skctl.py`); pageserver re-derives `prev_record_lsn`; INSERT survives a compute kill + fresh re-basebackup. **Promotion delta over read-only ≈ 181s** (bucket-size-independent). Issue #19 pruned 5.2 GB of stale safekeeper WAL, taking the restore from **unbounded (>60min)** to a **bounded ~20min**. No storage controller / no HTTP timeline-create on 8464 |
+| **Per-app (branch) restore** — one app's Neon **branch** restored from OCI OS (#97) | — | **962 s (read-only) / 1210 s (writable)** (OKE, ~14 GiB bucket, 2026-07-04) | `deploy/_verify-app-restore.sh`: provision→mark→backup→**destroy the app's branch**→restore THAT branch in a throwaway ns. Read-only = STATIC compute on the restored branch. **Writable needed the SAME `skctl` craft as the platform tenant** — the cold branch is not "auto-init" (that's live-branching only); promotion delta ≈ **248 s**. Gated on **ancestor (template) durability** — a fresh branch blocks on its un-uploaded template tail (see methodology + `runbook-dr.md` §9d/§9d-bis). Isolation proven both directions; no per-branch PITR |
 | Backup job at ~18GB bucket | green (retry loop exercised live) | — | in-cluster path (pre-#4); OCI OS path uses same mc client 1Gi + retry loop |
 | CNPG pod-kill recovery | ~16s | — | comparison point (hibernate resume: ~3.3s) |
 | Alert path (rule → Alertmanager → receiver) | delivered | **delivered** | idempotent drill; unique per-run identity |
@@ -454,3 +455,33 @@ Notes:
     suppression, #62) and evaluates to **1** with the gate lowered to >1 h — proving
     the suspend arm + age gate fire together once a CronJob has genuinely existed past
     the horizon. Un-suspended immediately (no scheduled run skipped).
+- **Per-app (branch) restore drill (#97, `deploy/_verify-app-restore.sh`, 2026-07-04,
+  OKE).** Executed a REAL branch-per-app disaster recovery — provision two apps
+  (victim + peer), mark, back up off-cluster, **destroy the victim's branch state**,
+  restore THAT branch in a throwaway ns, prove read-only → writable → durable, assert
+  isolation. Three findings, all executed (not asserted):
+  1. **Cold branch restore needs `skctl` craft, same as the platform tenant.** The
+     branch-per-app "walproposer auto-init, no craft" property (ADR-0003) is a
+     **live-branching** property only. On a cold restore the fresh drill safekeeper is
+     `flush_lsn 0/0`, so the branch PRIMARY aborts with *"cannot start in read-write
+     mode from this base backup"* exactly like the platform tenant — it took the same
+     `deploy/_restore-writable.sh` on-disk WAL re-seed (retargeted at the apps
+     tenant + branch timeline) to promote it read-write. So the drill tries the LIGHT
+     path, empirically records that it fails, and the HEAVY path carries it.
+     (`_restore-writable.sh`'s `primary_kick` gained a backward-compatible
+     tenant/timeline rewrite so it kicks the branch's timeline, not the hard-coded
+     platform one — a no-op for the platform-tenant restore.)
+  2. **Ancestor durability is a hard precondition.** A branch basebackup reads
+     unmodified pages from its ANCESTOR (the shared template) at `ancestor_lsn`; a cold
+     restore blocks *"waiting for WAL record … to arrive"* unless the **template's**
+     `remote_consistent_lsn ≥ the branch's ancestor_lsn` is in the bucket. Because
+     `provision-app` branches at the template's `last_record_lsn` (ahead of its
+     `remote_consistent_lsn` by the un-flushed tail), a **freshly-provisioned app is
+     un-cold-restorable in the seconds-to-minutes before the template tail flushes**.
+     The drill reproduced the block and now gates on ancestor durability. 8464's
+     force-checkpoint API is compiled out, so the only levers are WAL-driven or waiting
+     for the periodic upload (details: `docs/runbook-dr.md` §9d-bis).
+  3. **Isolation holds both directions:** destroying/restoring the victim never touched
+     the peer branch on the live plane, and the peer's marker is not visible through the
+     restored victim branch (timeline-scoped). **CAN'T:** per-branch PITR — one bucket,
+     one restore point for every branch. RTO in the "Reliability drills" table above.

@@ -285,18 +285,70 @@ per-tenant PITR granularity is **not available**. You cannot restore app-A to
 10:00 while leaving app-B at 12:00; the bucket's restore point applies to all. Know
 this before 3am.
 
-**9d. What a per-app restore CAN and CAN'T do (pg 8464).** Unlike a cold single-
-tenant restore (which needs `deploy/_restore-writable.sh` to re-seed safekeeper WAL
-around `last_record_lsn` before a PRIMARY can boot read-write on `neon:8464`), a
-**branch** has a lighter path: on a live pageserver the **walproposer auto-inits**
-the branch timeline on the safekeepers the first time an app's compute connects (no
-`skctl craft` — see `docs/BENCHMARKS.md` and `docs/adr-0003-multi-tenancy.md`).
+**9d. What a per-app restore CAN and CAN'T do (pg 8464) — EXECUTED, not asserted.**
+This section is backed by a real, repeatable drill: `deploy/_verify-app-restore.sh`
+provisions two real apps (a victim + an untouched peer), writes marker rows, backs the
+whole `neon` bucket up off-cluster to OCI OS, **destroys the victim's compute AND its
+branch state** (pageserver timeline + all safekeeper WAL), then restores THAT branch in
+a throwaway namespace and proves it read-only, then writable, then durable — measuring
+RTO and asserting isolation at each step. Run it yourself:
+`KSPG_CONTEXT=context-ckmva7v7zvq sh deploy/_verify-app-restore.sh`.
 
-- **CAN:** bring a single app's branch back to a **writable** state — re-attach the
-  apps tenant (9b) and wake that app's `compute-<app>`; its walproposer re-inits the
-  branch on the safekeepers and it accepts writes.
-- **CAN'T:** independently **rewind one branch to an earlier PITR** than the shared
-  bucket restore point (9b/9c). There is no per-branch backup history to rewind to.
+- **CAN — read-only:** bring a single app's branch back to a **queryable** state. A
+  STATIC compute pinned to the restored pageserver LSN reads the branch's pages with no
+  safekeepers. Executed RTO **962 s** (backup start → first branch read, ~14 GiB bucket,
+  OKE `context-ckmva7v7zvq`, 2026-07-04) — the same size-dominated regime as the platform
+  tenant.
+- **CAN — writable:** promote that branch to a read-**write** primary that survives a
+  compute kill. **This corrects an earlier assumption.** The branch-per-app "walproposer
+  auto-init, no `skctl` craft" property (`docs/adr-0003-multi-tenancy.md`) holds ONLY for
+  **live** branching (live pageserver + live safekeepers). On a **COLD restore** a branch
+  behaves **exactly like the platform tenant**: the fresh drill safekeeper reports
+  `flush_lsn 0/0`, so a plain PRIMARY aborts with *"cannot start in read-write mode from
+  this base backup"*. The writable path therefore needs the **same on-disk safekeeper WAL
+  re-seed** (`deploy/_restore-writable.sh`: real `/safekeeper` WAL segments + a crafted
+  `safekeeper.control`, pageserver re-derives `prev_record_lsn`), retargeted at the apps
+  tenant + the branch timeline. Executed RTO **1210 s** (backup start → durable branch
+  INSERT; **promotion delta ≈ 248 s** over read-only, bucket-size-independent): pageserver
+  streamed the branch delta, re-derived `prev_record_lsn`, PHASE 2 aligned, PRIMARY booted
+  read-WRITE, and an INSERT **survived a compute kill + fresh re-basebackup**.
+- **CAN'T — per-branch PITR:** independently **rewind one branch to an earlier
+  point-in-time** than the shared bucket restore point (9b/9c). There is **no per-branch
+  backup history** — one bucket, one schedule, one restore point for every branch.
+
+**9d-bis. THE ANCESTOR-DURABILITY DEPENDENCY (the sharpest per-branch limitation).**
+A branch is not self-contained: its basebackup reads every **unmodified** page from its
+**ANCESTOR** — the shared template timeline — at the branch's `ancestor_lsn`. A cold
+restore can only materialize those pages if the **template's** layers up to that LSN are
+in the bucket, i.e. the **template's `remote_consistent_lsn` ≥ the branch's
+`ancestor_lsn`** at backup time. But `provision-app.sh` branches at the template's
+`last_record_lsn`, which runs **ahead** of the template's `remote_consistent_lsn` by the
+un-flushed WAL tail. So:
+
+- **Risk window.** In the seconds-to-minutes **right after provisioning a new app**, the
+  template tail that the branch depends on may not yet be uploaded. A disaster in that
+  window leaves the branch **un-cold-restorable** — the restored pageserver blocks
+  forever *"waiting for WAL record … to arrive"* on the ancestor. The drill reproduced
+  this exactly and now **gates** on ancestor durability before backup (waits for the
+  template `remote_consistent_lsn` to cover the branch point).
+- **Why it self-heals normally.** On an idle/settled template the pageserver's periodic
+  layer upload catches `remote_consistent_lsn` up to `last_record_lsn` within a few
+  minutes, after which every existing branch point is covered. In steady state this is a
+  non-issue; it only bites the freshly-cut branch.
+- **Mitigation feasibility on 8464.** A *forced* template checkpoint/upload at provision
+  time would shrink the window to ~zero, but the pageserver's force-checkpoint API is
+  **compiled out** on `neon:8464` (`PUT …/checkpoint` → *"pageserver was compiled without
+  testing APIs"*). The only levers on 8464 are **WAL-driven** (push enough template WAL
+  to cross `checkpoint_distance`) or **time** (wait for the periodic upload). Documented
+  limitation, not a shipped mitigation: **do not promise a cold restore of an app in the
+  first few minutes of its life** until the template tail has flushed. (A first-class
+  safekeeper/timeline-import API in a future neon bump — the ops "upgrade carrot" — would
+  remove this entirely.)
+
+- **CAN — isolation (proven both directions):** destroying/​restoring one app does **not**
+  touch its peers. On the live plane the drill destroys the victim's branch and asserts
+  the **peer branch + its data are untouched**; in the restored drill it asserts the
+  peer's marker is **not visible** through the victim branch (branch/timeline-scoped).
 
 Per-app branch WAL/backup coverage bears directly on what is recoverable here: the
 `wal-janitor` now iterates **all** tenants (primary + apps) per issue **#77** — a
@@ -329,3 +381,17 @@ identical and drill-verified. The RTO figures come from `docs/BENCHMARKS.md`;
 > re-basebackup** (writable RTO **1057 s**). The drill re-targets these same commands
 > to a throwaway namespace and self-cleans; this runbook re-targets them to the real
 > `scale-zero-pg` namespace and keeps the result.
+>
+> **Per-app (branch) validation status (2026-07-04, OKE `context-ckmva7v7zvq`):** §9d /
+> §9d-bis are EXECUTED, not asserted. `deploy/_verify-app-restore.sh` provisioned two real
+> apps, backed the bucket up off-cluster, **destroyed the victim app's branch state**
+> (compute + pageserver timeline + all safekeeper WAL), then restored THAT branch in a
+> throwaway `app-restore-drill` namespace: apps tenant re-attached at **gen 2**, victim
+> branch + template ancestor loaded, marker **READ BACK** via a STATIC compute
+> (read-only RTO **962 s**), the writable promotion took the **`skctl` craft path** (the
+> LIGHT walproposer-auto-init path was tried and empirically fell through — a cold branch
+> behaves like the platform tenant), and the INSERT **survived a compute kill +
+> re-basebackup** (writable RTO **1210 s**). Isolation held both directions (peer branch
+> untouched on the live plane; peer marker invisible through the restored victim branch).
+> The drill self-cleans (throwaway ns + both drill apps) and gates on **ancestor
+> durability** first (§9d-bis).
