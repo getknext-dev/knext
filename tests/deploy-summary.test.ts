@@ -751,6 +751,164 @@ describe('summarize() runtimeVersion attribution (#188 bun-version knob)', () =>
   });
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
+// #212 — the #194 truncation-guard FALSE POSITIVE (runs 28699757721 + 28699158428,
+// shards 3/16 + 7/16 on BOTH). Ground truth from the raw shard logs: the harness
+// at v16.2.0 selects REAL scaffold files whose paths contain SPACES —
+//   test/e2e/app-dir/test-template/{{ toFileName name }}/{{ toFileName name }}.test.ts   (shard 3)
+//   test/e2e/test-template/{{ toFileName name }}/{{ toFileName name }}.test.ts           (shard 7)
+// run-tests.js counts them in its `total: N` header AND runs them AND prints the
+// normal pass marker for them ("… finished on retry 0/2 in 20.428s" — verbatim in
+// the shard-3 log). But every summarize() file token was `test/\S+\.test\.\w+`,
+// and `\S+` cannot cross the spaces inside `{{ toFileName name }}` — so the pass
+// was INVISIBLE: reported = expectedTotal - 1 with failed=0 → truncated:true →
+// the guard failed a genuinely green shard. expectedTotal (a count) and the
+// reported tally (parsed markers) MUST measure the same universe: the token has
+// to accept every path run-tests.js can select, spaces included, while staying
+// anchored to the `test/` prefix and the exact marker suffixes (the #147
+// anti-garbage properties, re-asserted by the overcount suite above).
+// NOT the mechanism: retry accounting — PR-run shard 3's failed-first file
+// (segment-cache/prefetch-layout-sharing, pass on retry 2/2) tallies correctly.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Faithful de-timestamped slice of run 28699757721 / 28699158428 shard 3/16,
+// compressed to 4 selected files: a plain pass, the FAILED-FIRST file (two ❌
+// output groups, then a pass on retry 2/2 — the exact PR-run shard-3 shape),
+// the SPACED template file (verbatim path), and a trailing plain pass.
+const SAMPLE_DEPLOY_SHARD3_SPACED_TEMPLATE = `
+total: 4
+Starting test/e2e/app-dir/actions-unused-args/actions-unused-args.test.ts retry 0/2
+test/e2e/app-dir/actions-unused-args/actions-unused-args.test.ts finished on retry 0/2 in 2.202s
+Starting test/e2e/app-dir/segment-cache/prefetch-layout-sharing/prefetch-layout-sharing.test.ts retry 0/2
+##[group]❌ test/e2e/app-dir/segment-cache/prefetch-layout-sharing/prefetch-layout-sharing.test.ts output
+[e2e-deploy] running next build
+  ● segment cache › prefetch layout sharing (timeout)
+end of test/e2e/app-dir/segment-cache/prefetch-layout-sharing/prefetch-layout-sharing.test.ts output
+Starting test/e2e/app-dir/segment-cache/prefetch-layout-sharing/prefetch-layout-sharing.test.ts retry 1/2
+Starting test/e2e/app-dir/test-template/{{ toFileName name }}/{{ toFileName name }}.test.ts retry 0/2
+test/e2e/app-dir/test-template/{{ toFileName name }}/{{ toFileName name }}.test.ts finished on retry 0/2 in 20.428s
+Starting test/e2e/app-dir/segment-cache/prefetch-layout-sharing/prefetch-layout-sharing.test.ts retry 2/2
+test/e2e/app-dir/segment-cache/prefetch-layout-sharing/prefetch-layout-sharing.test.ts finished on retry 2/2 in 24.66s
+Starting test/e2e/children-page/index.test.ts retry 0/2
+test/e2e/children-page/index.test.ts finished on retry 0/2 in 3.0s
+exiting with code 0
+`;
+
+describe('summarize() — spaced harness paths must be accounted (#212 truncation false positive)', () => {
+  it('counts the spaced {{ toFileName name }} template pass — the shard-3/7 shape is NOT truncated', () => {
+    // THE #212 bug: on main this reports passed:3 of expectedTotal:4 with
+    // failed:0 → truncated:true, failing a genuinely green shard.
+    const s = summarize(SAMPLE_DEPLOY_SHARD3_SPACED_TEMPLATE, {
+      ref: 'v16.2.0',
+      shard: '3/16',
+      excluded: 32,
+    });
+    expect(s.passed).toBe(4);
+    expect(s.failed).toBe(0);
+    expect(s.notRun).toBe(0);
+    expect(s.expectedTotal).toBe(4);
+    expect(s.truncated).toBe(false);
+  });
+
+  it('counts the failed-first file exactly once (pass on retry 2/2, ❌ groups from earlier attempts)', () => {
+    // The retry-accounting hypothesis from #210, disproven but pinned: a file
+    // that fails attempts 0/1 (printing ❌ output groups) then passes on retry
+    // 2/2 is ONE pass — never a failure, never double-counted.
+    const s = summarize(SAMPLE_DEPLOY_SHARD3_SPACED_TEMPLATE, {
+      ref: 'v16.2.0',
+      shard: '3/16',
+      excluded: 0,
+    });
+    expect(s.passed).toBe(4);
+    expect(s.failed).toBe(0);
+  });
+
+  it('counts the shard-7 spaced template path (test/e2e/test-template/…) too', () => {
+    const shard7 = `
+total: 2
+Starting test/e2e/app-document/client.test.ts retry 0/2
+test/e2e/app-document/client.test.ts finished on retry 0/2 in 3.1s
+Starting test/e2e/test-template/{{ toFileName name }}/{{ toFileName name }}.test.ts retry 0/2
+test/e2e/test-template/{{ toFileName name }}/{{ toFileName name }}.test.ts finished on retry 0/2 in 24.886s
+exiting with code 0
+`;
+    const s = summarize(shard7, { ref: 'v16.2.0', shard: '7/16', excluded: 32 });
+    expect(s.passed).toBe(2);
+    expect(s.expectedTotal).toBe(2);
+    expect(s.truncated).toBe(false);
+  });
+
+  it('counts a spaced-path FAILURE as failed (marker keys stay consistent across outcomes)', () => {
+    const log = `
+total: 1
+Starting test/e2e/test-template/{{ toFileName name }}/{{ toFileName name }}.test.ts retry 0/2
+##[group]❌ test/e2e/test-template/{{ toFileName name }}/{{ toFileName name }}.test.ts output
+[e2e-deploy] running next build
+  ● template › renders
+end of test/e2e/test-template/{{ toFileName name }}/{{ toFileName name }}.test.ts output
+test/e2e/test-template/{{ toFileName name }}/{{ toFileName name }}.test.ts failed to pass within 2 retries
+exiting with code 1
+`;
+    const s = summarize(log, { ref: 'v16.2.0', shard: '7/16', excluded: 0 });
+    expect(s.failed).toBe(1);
+    expect(s.notRun).toBe(0);
+    expect(s.expectedTotal).toBe(1);
+    expect(s.truncated).toBe(false);
+  });
+
+  it('classifies a spaced-path phantom (No tests found in its own group) as notRun, not failed', () => {
+    // The group open/close boundaries must resolve the SAME spaced key the
+    // failure marker uses, or the phantom partition silently breaks for these files.
+    const log = `
+total: 1
+Starting test/e2e/test-template/{{ toFileName name }}/{{ toFileName name }}.test.ts retry 0/2
+##[group]❌ test/e2e/test-template/{{ toFileName name }}/{{ toFileName name }}.test.ts output
+No tests found, exiting with code 1
+Pattern: test/e2e/test-template/{{ toFileName name }}/{{ toFileName name }}.test.ts - 0 matches
+end of test/e2e/test-template/{{ toFileName name }}/{{ toFileName name }}.test.ts output
+test/e2e/test-template/{{ toFileName name }}/{{ toFileName name }}.test.ts failed to pass within 2 retries
+exiting with code 1
+`;
+    const s = summarize(log, { ref: 'v16.2.0', shard: '7/16', excluded: 0 });
+    expect(s.failed).toBe(0);
+    expect(s.notRun).toBe(1);
+    expect(s.expectedTotal).toBe(1);
+    expect(s.truncated).toBe(false);
+  });
+
+  it('REAL truncation is still caught: a selected file with NO result marker at all flags truncated', () => {
+    // The guard keeps its teeth — a shard killed mid-run (third file started,
+    // never reported; spaced file counted normally) must stay truncated:true.
+    const killed = `
+total: 3
+Starting test/e2e/app-document/client.test.ts retry 0/2
+test/e2e/app-document/client.test.ts finished on retry 0/2 in 3.1s
+Starting test/e2e/test-template/{{ toFileName name }}/{{ toFileName name }}.test.ts retry 0/2
+test/e2e/test-template/{{ toFileName name }}/{{ toFileName name }}.test.ts finished on retry 0/2 in 24.886s
+Starting test/e2e/children-page/index.test.ts retry 0/2
+`;
+    const s = summarize(killed, { ref: 'v16.2.0', shard: '7/16', excluded: 0 });
+    expect(s.passed).toBe(2);
+    expect(s.expectedTotal).toBe(3);
+    expect(s.truncated).toBe(true);
+  });
+
+  it('a spaced pass and a spaced failure of DIFFERENT template files stay distinct keys', () => {
+    // Both real template paths exist in the harness (app-dir + e2e) — the
+    // space-tolerant token must not glue two files on one line universe together.
+    const log = `
+total: 2
+test/e2e/app-dir/test-template/{{ toFileName name }}/{{ toFileName name }}.test.ts finished on retry 0/2 in 20.4s
+test/e2e/test-template/{{ toFileName name }}/{{ toFileName name }}.test.ts failed to pass within 2 retries
+exiting with code 1
+`;
+    const s = summarize(log, { ref: 'v16.2.0', shard: '3/16', excluded: 0 });
+    expect(s.passed).toBe(1);
+    expect(s.failed).toBe(1);
+    expect(s.truncated).toBe(false);
+  });
+});
+
 // ── #194 accepted-risk follow-up: warn when truncation detection is disabled ──
 // Truncation protection rests on run-tests.js's `total: N` log header; a future
 // harness ref that renames it FAILS OPEN silently (expectedTotal omitted, no

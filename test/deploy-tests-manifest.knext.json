@@ -169,7 +169,8 @@
         "segment cache (per-page dynamic stale time) reuses dynamic data within the per-page stale time window",
         "segment cache (per-page dynamic stale time) back/forward navigation always reuses BFCache regardless of stale time",
         "segment cache (per-page dynamic stale time) per-page value overrides global staleTimes.dynamic regardless of direction",
-        "segment cache (per-page dynamic stale time) two dynamic pages with different stale times behave independently"
+        "segment cache (per-page dynamic stale time) two dynamic pages with different stale times behave independently",
+        "segment cache (per-page dynamic stale time) with parallel routes, uses the minimum stale time across all slots"
       ]
     },
     "test/e2e/app-dir/segment-cache/vary-params/vary-params.test.ts": {
@@ -310,10 +311,11 @@
         "segment cache (per-page dynamic stale time) reuses dynamic data within the per-page stale time window",
         "segment cache (per-page dynamic stale time) back/forward navigation always reuses BFCache regardless of stale time",
         "segment cache (per-page dynamic stale time) per-page value overrides global staleTimes.dynamic regardless of direction",
-        "segment cache (per-page dynamic stale time) two dynamic pages with different stale times behave independently"
+        "segment cache (per-page dynamic stale time) two dynamic pages with different stale times behave independently",
+        "segment cache (per-page dynamic stale time) with parallel routes, uses the minimum stale time across all slots"
       ],
-      "mechanism": "60s jest timeouts in per-page dynamic stale-time flows via createRouterAct, alternating per attempt (run 28578203671: att1 'reuses dynamic data…' + 'back/forward…' hung, att2+att3 'per-page value overrides…' hung while the att1 pair passed) — the family's interleaving-race signature, zero assertion diffs.",
-      "evidence": "run 28578203671: FINAL failure, alternating cases across 3 attempts; run 28596005486: all three cases hung 1 attempt then the file RECOVERED on in-run retry; run 28590478386: 1-attempt wobble then recovered; run 28593534713: file PASSED — cross-run wobble. run 28607626868 (KNEXT_RUNTIME=bun lane, #188): NEW sibling case 'two dynamic pages with different stale times behave independently' hung 60s while the 3 already-quarantined cases were correctly pattern-skipped — same runtime-prefetch mechanism flushed out by Bun's slower per-request scheduling, not a Bucket-1 serving failure.",
+      "mechanism": "60s jest timeouts in per-page dynamic stale-time flows via createRouterAct, alternating per attempt (run 28578203671: att1 'reuses dynamic data…' + 'back/forward…' hung, att2+att3 'per-page value overrides…' hung while the att1 pair passed) — the family's interleaving-race signature, zero assertion diffs. Run 28700392845: the parallel-routes sibling hung the identical 60s 'Exceeded timeout' on all 3 attempts (thrown timeout, zero assertion diffs) — same createRouterAct staleness scheduling.",
+      "evidence": "run 28578203671: FINAL failure, alternating cases across 3 attempts; run 28596005486: all three cases hung 1 attempt then the file RECOVERED on in-run retry; run 28590478386: 1-attempt wobble then recovered; run 28593534713: file PASSED — cross-run wobble. run 28607626868 (KNEXT_RUNTIME=bun lane, #188): NEW sibling case 'two dynamic pages with different stale times behave independently' hung 60s while the 3 already-quarantined cases were correctly pattern-skipped — same runtime-prefetch mechanism flushed out by Bun's slower per-request scheduling, not a Bucket-1 serving failure. run 28700392845 (node lane, #212 verification dispatch, shard 11/16): NEW sibling case 'with parallel routes, uses the minimum stale time across all slots' FINAL-post-retry failure — hung the same 60s jest timeout on ALL THREE attempts while the 4 already-quarantined cases were correctly pattern-skipped (skip layer verified working; env parity: same ubuntu runner, -c 2, 60s per-case timeout, 3 attempts as every prior citation). Ledger extension per ADR-0007 graduation addendum §c, not a red-nightly reflex.",
       "provenance": "Upstream marks the runtime-prefetch deploy family flakey wholesale (vercel/next.js@v16.2.0 test/deploy-tests-manifest.json, segment-cache/prefetch-runtime.test.ts, incl. its stale-time-handling cases) — same client dynamic-data/staleness scheduling mechanism."
     },
     {

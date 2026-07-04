@@ -51,6 +51,24 @@
 
 import { readFileSync, writeFileSync } from 'node:fs';
 
+// The run-tests.js test-FILE key token, shared by every marker/boundary regex so
+// all of them resolve the SAME key universe (pass, fail, group open/close).
+//
+// #212 (runs 28699757721 + 28699158428, shards 3/16 + 7/16): the harness selects
+// REAL scaffold files whose paths contain SPACES —
+//   test/e2e/app-dir/test-template/{{ toFileName name }}/{{ toFileName name }}.test.ts
+// run-tests.js counts them in its `total: N` header, runs them, and prints the
+// normal per-file markers for them — but the old `test/\S+\.test\.\w+` token
+// cannot cross a space, so the result was dropped while expectedTotal counted it:
+// reported = expectedTotal - 1 with failed=0 → truncated:true on a genuinely
+// green shard (the #194 guard false positive). The token is therefore LAZY
+// same-line "anything" (`[^\r\n]*?`) between the anchors that carry the honesty
+// guarantees from #147 fix round 1: it must START at the repo-root-relative
+// `test/` prefix and END at `.test.<ext>` immediately before the verbatim
+// run-tests.js marker suffix — so `}}.test.ts`-style JSON garbage (no `test/`
+// prefix reaching a marker suffix) still never matches.
+const FILE_TOKEN = String.raw`test\/[^\r\n]*?\.test\.`;
+
 /**
  * Parse jest-style runner output + run metadata into the summary artifact shape.
  * @param {string} runnerOutput raw stdout from run-tests.js
@@ -76,13 +94,22 @@ export function summarize(runnerOutput, meta) {
   // run-tests.js's repo-root-relative key shape (`test/…`). The old `\S+\.test\.\S+`
   // token also matched `}}.test.ts`-style garbage out of JSON content echoed in
   // output groups — 2 of the 491 reported failures were such phantoms.
+  // #212: the token is the shared space-tolerant FILE_TOKEN (see its comment) —
+  // `\S+` dropped the harness's real `{{ toFileName name }}` template paths and
+  // false-positived the truncation guard.
   const runTestsPassed = new Set([
-    ...collectTestFiles(text, /\bFinished\s+(test\/\S+\.test\.\w+)\s+on retry\s+\d+\/\d+/g),
-    ...collectTestFiles(text, /(test\/\S+\.test\.\w+)\s+finished on retry\s+\d+\/\d+/g),
+    ...collectTestFiles(
+      text,
+      new RegExp(String.raw`\bFinished\s+(${FILE_TOKEN}\w+)\s+on retry\s+\d+\/\d+`, 'g'),
+    ),
+    ...collectTestFiles(
+      text,
+      new RegExp(String.raw`(${FILE_TOKEN}\w+)\s+finished on retry\s+\d+\/\d+`, 'g'),
+    ),
   ]);
   const runTestsFailedAll = collectTestFiles(
     text,
-    /(test\/\S+\.test\.\w+)\s+failed to pass within\s+\d+\s+retries/g,
+    new RegExp(String.raw`(${FILE_TOKEN}\w+)\s+failed to pass within\s+\d+\s+retries`, 'g'),
   );
 
   // HONESTY (A3-3): partition the run-tests.js "failed to pass within …" files
@@ -210,10 +237,13 @@ function filesWithNoTestsFound(text) {
   // run-tests.js output-group OPEN header (with or without the GHA ##[group] prefix
   // and the trailing colon variant). Captures the SLASH-form file path — anchored
   // to the repo-root-relative `test/` prefix so group keys always equal the
-  // failure-marker keys (A3-3 fix round 1 tightened both the same way).
-  const groupOpenRe = /❌\s+(test\/\S+\.test\.(?:js|ts|jsx|tsx))\s+output\b/;
+  // failure-marker keys (A3-3 fix round 1 tightened both the same way; #212 made
+  // the token space-tolerant the same way as the markers — same FILE_TOKEN).
+  const groupOpenRe = new RegExp(String.raw`❌\s+(${FILE_TOKEN}(?:js|ts|jsx|tsx))\s+output\b`);
   // run-tests.js output-group CLOSE marker.
-  const groupCloseRe = /^(?:.*\bend of\s+)(test\/\S+\.test\.(?:js|ts|jsx|tsx))\s+output\b/;
+  const groupCloseRe = new RegExp(
+    String.raw`^(?:.*\bend of\s+)(${FILE_TOKEN}(?:js|ts|jsx|tsx))\s+output\b`,
+  );
   const noTestsRe = /No tests found, exiting with code 1/;
   let current = null;
   for (const line of lines) {

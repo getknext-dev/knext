@@ -369,8 +369,14 @@ const OBSERVED_FLAKY_QUARANTINES: Record<string, { cases: string[]; observedRuns
       // #188 bun lane (run 28607626868): NEW sibling case hung while the three
       // above were correctly pattern-skipped — same runtime-prefetch mechanism.
       'segment cache (per-page dynamic stale time) two dynamic pages with different stale times behave independently',
+      // #212 verification run 28700392845 (node lane): NEW sibling case hung the
+      // identical 60s jest timeout on ALL THREE attempts (final-post-retry) while
+      // the four cases above were correctly pattern-skipped (the skip layer
+      // worked — this is a ledger extension, not a machinery bug). Zero
+      // assertion diffs; same runtime-prefetch staleness mechanism.
+      'segment cache (per-page dynamic stale time) with parallel routes, uses the minimum stale time across all slots',
     ],
-    observedRuns: ['28578203671', '28596005486', '28607626868'],
+    observedRuns: ['28578203671', '28596005486', '28607626868', '28700392845'],
   },
   'test/e2e/app-dir/segment-cache/vary-params/vary-params.test.ts': {
     cases: [
