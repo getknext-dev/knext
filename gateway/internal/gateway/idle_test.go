@@ -81,6 +81,62 @@ func TestIdleSleepIsPerAppNotFleetGlobal(t *testing.T) {
 	}
 }
 
+// Issue #93(c) — cross-replica idle thrash. With the 2-replica apps-gateway and a
+// connection SPLIT across replicas (this pod local-idle, a PEER still holding the
+// app), the app must NOT oscillate 0<->1: the idle timer must keep RE-ARMING and
+// deferring across MANY windows (never a premature 1->0 flap), then scale to zero
+// EXACTLY ONCE when the peer finally drops. This is the direct evidence backing the
+// docs/operations.md "Cross-replica idle thrash" assessment (no code fix required —
+// the peer-aware idle in scheduleSleep already closes the window).
+func TestSplitConnectionsDoNotThrashAcrossWindows(t *testing.T) {
+	gw, err := New(wake.Env{
+		"GW_COMPUTE_MODE": "exec",
+		"GW_TARGET":       "127.0.0.1:1",
+		"GW_WAKE_CMD":     "true",
+		"GW_SLEEP_CMD":    "true",
+		"GW_IDLE_MS":      "25", // several windows elapse inside the assertion below
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rd := &recordingDriver{}
+	gw.driver = rd
+	// A peer replica holds one live connection for appx the whole time.
+	peers := &fakePeers{byKey: map[string]int{"appx": 1}}
+	gw.Peers = peers
+
+	tx := rd.Resolve("appx")
+	gw.connStarted(tx)
+	gw.connEnded(tx) // local count -> 0; idle timer armed, but the peer holds appx
+
+	// Ride out ~12 idle windows: a thrashing gateway would sleep (1->0) here.
+	time.Sleep(300 * time.Millisecond)
+	if got := rd.sleptKeys(); len(got) != 0 {
+		t.Fatalf("appx scaled to zero while a peer still held it — cross-replica thrash (slept=%v)", got)
+	}
+
+	// Peer drops the split connection; the re-armed timer may now sleep — ONCE.
+	peers.byKey["appx"] = 0
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if got := rd.sleptKeys(); len(got) >= 1 {
+			if got[0] != "appx" {
+				t.Fatalf("unexpected key slept: %v", got)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("appx never slept after the peer went quiet")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	// And it must not keep flapping: no second scale-to-zero for the same idle app.
+	time.Sleep(150 * time.Millisecond)
+	if got := rd.sleptKeys(); len(got) != 1 {
+		t.Fatalf("appx slept more than once (0<->1 oscillation): slept=%v", got)
+	}
+}
+
 // fakePeers reports a controllable active connection count. When byKey is set it
 // answers per-app (issue #75); otherwise it returns the flat n for any key and
 // records the last key it was asked about.

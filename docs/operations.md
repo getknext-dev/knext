@@ -865,7 +865,8 @@ cd deploy
 ./provision-app.sh init-plane --schema testdata/app-base-schema.sql  # one-time
 ./provision-app.sh create  orders        # branch + compute + per-app credential
 ./provision-app.sh list                  # apps-tenant timelines
-./provision-app.sh fsck                  # orphan-timeline check (exit≠0 if any)
+./provision-app.sh fsck                  # reconcile branches<->intents (exit≠0 if any); add --converge to auto-repair
+./provision-app.sh rotate-cred orders --bounce   # rotate the app's password + apply now
 ./provision-app.sh destroy orders --delete-timeline
 # read an app's DSN (per-app credential):
 kubectl -n scale-zero-pg get secret app-db-orders -o jsonpath='{.data.DATABASE_URL}' | base64 -d
@@ -889,31 +890,101 @@ peers' `per_system` metrics, so one busy app never keeps other idle apps awake.
 Drill section 7 proves an idle app scales to zero while a neighbour holds a
 connection open.
 
-### Orphan timelines — detect and clean (issue #76)
+**Cross-replica idle thrash — assessment (issue #93c).** *Can two apps-gateway
+replicas oscillate an app `0↔1` when a client's connections are SPLIT across
+them?* **No — not in steady state.** Before any replica scales an app to zero,
+`scheduleSleep` (`gateway/internal/gateway/gateway.go`) requires **both** its own
+local count == 0 **and** the peer fleet's `per_system.active` for *that app* == 0;
+a peer that still holds a connection (or any peer-scrape error) **postpones** the
+sleep and re-arms the timer. So as long as *either* replica holds a live
+connection for app X, X is never scaled down — split long-lived connections keep
+X up. The only residual is a **narrow, self-healing** window: if a fresh
+connection lands on peer B in the sub-second gap between A's peer-check (saw B=0)
+and A's scale-to-zero call, B's own wake-on-connect immediately re-wakes the
+compute and B's client is held by its wake-retry loop until ready — bounded to **at
+most one** scale cycle, never a sustained flap. Evidence (gateway unit tests, run
+in CI): `TestIdleSleepDefersToPeers` (no sleep while a peer is busy; sleeps once
+the fleet is quiet), `TestSplitConnectionsDoNotThrashAcrossWindows` (no `1→0` flap
+across ~12 idle windows while a peer holds the app, then **exactly one** clean
+scale-to-zero when the peer drops), and `TestSleepRaceWakesBackWhenConnectionArrivesMidSleep`
+(the same-replica TOCTOU heal). **No code fix required** — the peer-aware idle
+already closes the window; this behaviour is regression-locked by the tests above.
+
+### fsck: orphans & dangling intents (issues #76, #93a)
 
 `create` is **intent-first**: the per-app ConfigMap (which records the branch's
 `TIMELINE_ID`) and the credential Secret are applied **before** the pageserver
 branch call, so an interrupted `create` never leaves a branch with no owner — a
-re-run reads the id back and converges. To detect a pre-existing orphan (e.g. from
-an old build, or a hand-deleted ConfigMap):
+re-run reads the id back and converges. `fsck` reconciles the plane in **both
+directions** and exits non-zero if anything is off:
 
 ```sh
-./provision-app.sh fsck    # lists any branch with no owning compute-config-* ConfigMap; exit 1 if found
+./provision-app.sh fsck            # report every mismatch (exit 1 if any)
+./provision-app.sh fsck --converge # ALSO auto-repair dangling intents (re-branch)
 ```
 
-To clean an orphan `<id>` (no owning ConfigMap, so `destroy` can't find it), delete
-it on the pageserver **and** all safekeepers (the same two-sided delete `destroy`
-does), then re-run `fsck`:
+1. **Orphan timeline** — a branch on the pageserver with **no owning ConfigMap**
+   (an old pre-fix interrupted `create`, or a hand-deleted ConfigMap).
+   **Report-only:** deleting WAL is high blast-radius, so `fsck` never auto-deletes
+   a branch. Clean the orphan `<id>` by hand — delete it on the pageserver **and**
+   all safekeepers (the same two-sided delete `destroy` does), then re-run `fsck`:
+
+   ```sh
+   kubectl -n scale-zero-pg exec pageserver-0 -c pageserver -- \
+     curl -sf -X DELETE http://localhost:9898/v1/tenant/$APPS_TENANT/timeline/<id>
+   for o in 0 1 2; do kubectl -n scale-zero-pg exec safekeeper-$o -- \
+     curl -sf -X DELETE http://localhost:7676/v1/tenant/$APPS_TENANT/timeline/<id> || true; done
+   ```
+
+   Leaving an orphan pins the template's ancestor WAL/pages (`pitr_history_size`
+   grows) and leaks safekeeper WAL dirs — the same cost as a forgotten `destroy`.
+
+2. **Dangling intent** — the intent-first *failure mode* (issue #93a): a ConfigMap
+   (and/or credential Secret) exists but its recorded timeline **has no branch**,
+   because a crash landed **after** the ConfigMap/Secret apply and **before** the
+   pageserver branch call. The compute can never boot (its `wait-timeline`
+   initContainer blocks forever on the missing branch). `fsck` detects it; with
+   `--converge` it **re-branches the recorded id** via an idempotent `create`,
+   finishing the interrupted provision:
+
+   ```sh
+   ./provision-app.sh fsck --converge   # re-branches each ConfigMap's recorded timeline
+   # equivalently, for one app:  ./provision-app.sh create <app>
+   ```
+
+   A **stray Secret** with no ConfigMap (crash between the Secret and ConfigMap
+   applies) is also reported; resolve with `create <app>` (completes the provision)
+   or `destroy <app>` (removes it).
+
+### Rotating an app credential (issue #93b)
+
+Each app authenticates as `app_<app>` with a per-app password stored in Secret
+`app-db-<app>` (`PGPASSWORD` + `APP_ROLE_MD5` + `DATABASE_URL`). `compute_ctl`
+re-applies the role's md5 **from spec on every boot**, so rotation is: write a new
+md5 into the Secret, then bounce (or wait for the next wake of) the compute.
 
 ```sh
-kubectl -n scale-zero-pg exec pageserver-0 -c pageserver -- \
-  curl -sf -X DELETE http://localhost:9898/v1/tenant/$APPS_TENANT/timeline/<id>
-for o in 0 1 2; do kubectl -n scale-zero-pg exec safekeeper-$o -- \
-  curl -sf -X DELETE http://localhost:7676/v1/tenant/$APPS_TENANT/timeline/<id> || true; done
+cd deploy
+./provision-app.sh rotate-cred orders            # new password into the Secret only
+./provision-app.sh rotate-cred orders --bounce   # + bounce compute-orders NOW to apply it
 ```
 
-Leaving an orphan pins the template's ancestor WAL/pages (`pitr_history_size`
-grows) and leaks safekeeper WAL dirs — the same cost as a forgotten `destroy`.
+- The **DSN contract is unchanged** — same role, host, and database; only the
+  password **value** rotates (see [connecting.md](connecting.md#rotating-an-app-credential-issue-93b)).
+- **Timing / who breaks:** a **running** compute keeps the OLD password valid until
+  it is bounced — `rotate-cred` without `--bounce` only updates the Secret, so live
+  sessions are undisturbed and you apply the change on your own schedule.
+  `--bounce` does a `Recreate` rollout (single-writer-safe) so the new md5 takes
+  effect immediately and the old password stops authenticating. A compute **at 0**
+  (scaled to zero) picks up the new md5 automatically on its next wake — no bounce
+  needed.
+- **Consumers must re-read the Secret.** knext injects `DATABASE_URL` into the app
+  pod's env at pod-start, so a rotated password only reaches the app when its pods
+  restart. Recommended zero-fuss order: `rotate-cred <app>` → roll the consumer
+  Deployment (picks up the new `DATABASE_URL`) → the first new connection wakes/uses
+  the compute with the new md5. If you `--bounce` before rolling consumers, in-flight
+  sessions on the old password get a clean reconnect and re-auth once the consumer
+  pods carry the new Secret.
 
 ## Read-only pool (issue #66)
 

@@ -37,6 +37,13 @@ done
 # destroy validates too (a bad name must not reach kubectl delete).
 expect_reject destroy "Bad.Name" charset
 
+# rotate-cred (issue #93b) validates the name FIRST too — a bad/reserved/empty name
+# must never reach the Secret write.
+expect_reject rotate-cred "Bad" charset
+expect_reject rotate-cred "a_b" charset
+expect_reject rotate-cred "tmpl" reserved
+expect_reject rotate-cred "" required
+
 # A well-formed, non-reserved name must PASS validation. It then proceeds to a
 # cluster call and fails there (no cluster) — but NOT with a validation message.
 out="$(KCTX=none NS=none "$PROV" create "good-app1" 2>&1)"; rc=$?

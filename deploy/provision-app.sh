@@ -18,7 +18,8 @@
 #   provision-app.sh create  <app> [--replicas N]        # branch the template -> per-app compute (default replicas 0)
 #   provision-app.sh destroy <app> [--delete-timeline]   # remove the app's k8s objects (+ optional timeline)
 #   provision-app.sh list                                # list apps tenant timelines
-#   provision-app.sh fsck                                # surface orphan timelines (branch with no owning ConfigMap)
+#   provision-app.sh fsck [--converge]                   # reconcile branches <-> ConfigMaps/Secrets (both directions); --converge re-branches dangling intents
+#   provision-app.sh rotate-cred <app> [--bounce]        # rotate the app's per-app password into its Secret; --bounce applies it now
 #
 # Env: KCTX (kube context, default context-ckmva7v7zvq), NS (default scale-zero-pg).
 #
@@ -264,38 +265,145 @@ cmd_list() {
     | python3 -c 'import sys,json;[print(t["timeline_id"],"ancestor="+str(t.get("ancestor_timeline_id")),"@"+str(t.get("ancestor_lsn"))) for t in json.load(sys.stdin)]'
 }
 
-# cmd_fsck surfaces ORPHAN timelines (issue #76): a branch on the pageserver with
-# NO owning compute-config ConfigMap. With intent-first `create` these can no
-# longer be produced, but a branch left by an OLD (pre-fix) interrupted create, or
-# a hand-deleted ConfigMap, is detectable and cleanable here. Exit 1 if any found
-# (so CI/drills can assert a clean plane).
+# cmd_fsck reconciles the branch-per-app plane in BOTH directions (issues #76, #93):
+#
+#   (1) ORPHAN timeline — a branch on the pageserver with NO owning ConfigMap.
+#       Intent-first `create` can no longer produce these, but an OLD (pre-fix)
+#       interrupted create or a hand-deleted ConfigMap can. Report-only (deleting
+#       WAL is high blast-radius; the operator confirms + cleans by hand).
+#
+#   (2) DANGLING INTENT — a ConfigMap (and/or credential Secret) written with NO
+#       corresponding branch. This is the intent-first FAILURE MODE (issue #93a): a
+#       crash AFTER the ConfigMap/Secret apply but BEFORE the pageserver branch call
+#       leaves durable k8s "intent" the compute can never boot against (its
+#       wait-timeline initContainer blocks forever). fsck detects it and, with
+#       --converge, RE-BRANCHES the recorded timeline id (idempotent `create`),
+#       finishing the interrupted provision. Without --converge it is reported and
+#       fsck exits non-zero so CI/drills can assert a converged plane.
+#
+# Exit 1 if any orphan timeline OR any UNCONVERGED dangling intent remains.
 cmd_fsck() {
-  log "scanning apps tenant $APPS_TENANT for orphan timelines (branch with no owning ConfigMap)"
-  local owned; owned="$(K get configmap -l tier=apps \
-    -o jsonpath='{range .items[*]}{.data.TIMELINE_ID}{"\n"}{end}' 2>/dev/null | grep -v '^$' | sort -u || true)"
+  local converge=0
+  while [ $# -gt 0 ]; do case "$1" in --converge) converge=1; shift;; *) die "unknown flag $1";; esac; done
+
+  log "fsck: reconciling apps tenant $APPS_TENANT (branches <-> ConfigMaps/Secrets)"
+  # Live branches on the pageserver.
   local all; all="$(PS "http://localhost:9898/v1/tenant/$APPS_TENANT/timeline" \
     | python3 -c 'import sys,json;[print(t["timeline_id"]) for t in json.load(sys.stdin)]')"
-  local orphans=0 tl
+  # Owner ConfigMaps as "name timeline" pairs (name = compute-config-<app>).
+  local owned_pairs; owned_pairs="$(K get configmap -l tier=apps \
+    -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.data.TIMELINE_ID}{"\n"}{end}' 2>/dev/null | grep -v '^ *$' || true)"
+  local owned_tls; owned_tls="$(printf '%s\n' "$owned_pairs" | awk '{print $2}' | grep -v '^$' | sort -u || true)"
+
+  local problems=0 tl
+
+  # (1) ORPHAN timelines — branch with no owning ConfigMap.
   for tl in $all; do
     [ "$tl" = "$TEMPLATE_TL" ] && continue                 # the shared template is not an app
-    if printf '%s\n' "$owned" | grep -qx "$tl"; then continue; fi
+    if printf '%s\n' "$owned_tls" | grep -qx "$tl"; then continue; fi
     printf '\033[31m[provision] ORPHAN timeline (no owning ConfigMap): %s\033[0m\n' "$tl"
-    orphans=$((orphans+1))
+    log "  clean with: PS DELETE .../timeline/$tl on pageserver + all $SK_REPLICAS safekeepers"
+    log "  (not auto-converged: deleting WAL is high blast-radius — confirm by hand). See docs/operations.md."
+    problems=$((problems+1))
   done
-  if [ "$orphans" -eq 0 ]; then
-    log "no orphan timelines — plane is clean"
+
+  # (2) DANGLING INTENT — a ConfigMap whose recorded timeline has NO branch (#93a).
+  local cm app
+  while IFS=' ' read -r cm tl; do
+    [ -n "${cm:-}" ] || continue
+    app="${cm#compute-config-}"
+    if [ -z "${tl:-}" ]; then
+      printf '\033[31m[provision] DANGLING INTENT: ConfigMap %s has no TIMELINE_ID\033[0m\n' "$cm"
+      log "  destroy + recreate app '$app' to reset intent (no branch to lose)."
+      problems=$((problems+1)); continue
+    fi
+    if printf '%s\n' "$all" | grep -qx "$tl"; then continue   # branch exists -> healthy
+    fi
+    printf '\033[31m[provision] DANGLING INTENT: app "%s" recorded timeline %s but NO branch exists\033[0m\n' "$app" "$tl"
+    if [ "$converge" = 1 ]; then
+      log "  --converge: re-branching $tl for '$app' (idempotent create finishes the interrupted provision)"
+      cmd_create "$app"        # reads $tl back from the ConfigMap, branches it, converges
+      if tl_exists "$tl"; then
+        log "  converged: branch $tl now exists for '$app'"
+      else
+        printf '\033[31m[provision] converge FAILED for %s (branch %s still missing)\033[0m\n' "$app" "$tl"
+        problems=$((problems+1))
+      fi
+    else
+      log "  converge with: provision-app.sh fsck --converge   (or: provision-app.sh create $app)"
+      problems=$((problems+1))
+    fi
+  done <<EOF
+$owned_pairs
+EOF
+
+  # (3) ORPHAN Secret — credential minted but no owning ConfigMap (crash between the
+  #     Secret and ConfigMap applies). The app has no recorded timeline; the safe
+  #     resolution is destroy (removes the stray Secret) or a fresh create.
+  local sec; for sec in $(K get secret -l tier=apps -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null | grep -v '^$' || true); do
+    app="${sec#app-db-}"
+    if K get configmap "compute-config-$app" >/dev/null 2>&1; then continue; fi
+    printf '\033[31m[provision] ORPHAN Secret %s (no owning ConfigMap for app "%s")\033[0m\n' "$sec" "$app"
+    log "  resolve with: provision-app.sh create $app  (completes provisioning) or destroy $app (removes it)."
+    problems=$((problems+1))
+  done
+
+  if [ "$problems" -eq 0 ]; then
+    log "fsck: plane is clean (no orphan timelines, no dangling intents)"
   else
-    log "$orphans orphan timeline(s). Clean with: PS DELETE .../timeline/<id> on pageserver + all safekeepers,"
-    log "or destroy the owning app if you can recreate the ConfigMap. See docs/operations.md 'Orphan timelines'."
+    log "fsck: $problems problem(s) — see docs/operations.md 'fsck: orphans & dangling intents'."
     return 1
   fi
 }
 
+# cmd_rotate_cred rotates an app's per-app password (issue #93b): mint a fresh
+# password, write its md5 into the app's Secret (app-db-<app>), and let compute_ctl
+# re-apply it from spec on the compute's NEXT boot. The DSN CONTRACT is unchanged
+# (same role app_<app>, same host/db) — only the password VALUE rotates. A running
+# compute keeps the OLD password valid until it is bounced; --bounce applies the new
+# password immediately (Recreate = single-writer-safe), a compute at 0 picks it up on
+# its next wake. See docs/operations.md 'Rotating an app credential'.
+cmd_rotate_cred() {
+  local app="${1:-}"; shift || true
+  local bounce=0
+  while [ $# -gt 0 ]; do case "$1" in --bounce) bounce=1; shift;; *) die "unknown flag $1";; esac; done
+  validate_app_name "$app"
+  K get secret "app-db-$app" >/dev/null 2>&1 || die "app '$app' has no credential Secret (app-db-$app) — run 'create' first"
+  local role="${APP_ROLE_PREFIX}$app"
+  local pw md5 dsn
+  pw="$(python3 -c 'import os;print(os.urandom(18).hex())')"
+  md5="$(app_md5 "$pw" "$role")"
+  dsn="postgres://$role:$pw@pggw-apps.$NS.svc:55432/$app?sslmode=disable"
+  log "rotating credential for '$app' (role $role): new md5 -> Secret app-db-$app"
+  # In-place update (apply, not delete+create) so the Secret never briefly vanishes.
+  K create secret generic "app-db-$app" \
+    --from-literal=PGUSER="$role" \
+    --from-literal=PGPASSWORD="$pw" \
+    --from-literal=APP_ROLE_MD5="$md5" \
+    --from-literal=DATABASE_URL="$dsn" \
+    --dry-run=client -o yaml | K apply -f - >/dev/null
+  K label secret "app-db-$app" app="compute-$app" tier=apps --overwrite >/dev/null 2>&1 || true
+  local reps; reps="$(K get deploy "compute-$app" -o jsonpath='{.spec.replicas}' 2>/dev/null || echo 0)"
+  if [ "$bounce" = 1 ] && [ "${reps:-0}" != "0" ]; then
+    log "bouncing compute-$app to apply the new credential now (Recreate, single-writer-safe)"
+    K rollout restart deploy/compute-"$app" >/dev/null
+    K rollout status deploy/compute-"$app" --timeout=120s
+    log "compute-$app bounced: the new password is live; the old one no longer authenticates."
+  elif [ "${reps:-0}" != "0" ]; then
+    log "compute-$app is running; the OLD password stays valid until its next bounce."
+    log "apply now with: provision-app.sh rotate-cred $app --bounce   (or bounce the compute yourself)."
+  else
+    log "compute-$app is at 0; the new password applies on its next wake."
+  fi
+  log "rotation done. Consumers must re-read Secret app-db-$app (new PGPASSWORD/DATABASE_URL)."
+}
+
 case "${1:-}" in
-  init-plane) shift; cmd_init_plane "$@";;
-  create)     shift; cmd_create "$@";;
-  destroy)    shift; cmd_destroy "$@";;
-  list)       shift; cmd_list "$@";;
-  fsck)       shift; cmd_fsck "$@";;
-  *) die "usage: provision-app.sh {init-plane|create <app>|destroy <app>|list|fsck}";;
+  init-plane)  shift; cmd_init_plane "$@";;
+  create)      shift; cmd_create "$@";;
+  destroy)     shift; cmd_destroy "$@";;
+  list)        shift; cmd_list "$@";;
+  fsck)        shift; cmd_fsck "$@";;
+  rotate-cred) shift; cmd_rotate_cred "$@";;
+  *) die "usage: provision-app.sh {init-plane|create <app>|destroy <app>|list|fsck [--converge]|rotate-cred <app> [--bounce]}";;
 esac

@@ -99,8 +99,34 @@ $K wait --for=condition=Ready pod/"$MCPOD" --timeout=90s >/dev/null || fail "mc 
 ok "mc helper pod ready"
 
 MC() { $K exec "$MCPOD" -- sh -c 'export HOME=/tmp; mkdir -p /tmp/.mc; mc alias set src http://minio:9000 "$S3_USER" "$S3_PASS" >/dev/null 2>&1; '"$1"; }
-list_complete() { MC "mc ls $PFX/" | sed 's/.* //' | grep -E '^[0-9A-Fa-f]{24}$' | sort -u || true; }
-list_partial()  { MC "mc ls $PFX/" | sed 's/.* //' | grep -i 'partial$' | sort -u || true; }
+# --- robust remote read (issue #95) -----------------------------------------
+# A transient `kubectl exec` EOF (kubelet blip, pod GC while a Job backs off, apiserver
+# hiccup) makes a remote `mc ls` come back EMPTY with a success-ish status. Every
+# post-prune listing below turns an empty listing into an "over-prune"/"segment
+# deleted" verdict — a FALSE janitor indictment (the #95 flakiness). mc_read() proves
+# the exec channel actually ran by appending a fixed sentinel AFTER the payload:
+# sentinel present => the listing is authoritative (empty means the bucket is genuinely
+# empty); sentinel absent => the exec transport failed and the empty output must NEVER
+# be read as "bucket empty". Bounded retries ride out a transient blip; a persistently
+# dead channel is a DRILL ERROR (exit 3), never a pruning verdict.
+DRILL_ERROR() { echo "DRILL-ERROR: $*" >&2; exit 3; }
+MC_READ_TRIES=${MC_READ_TRIES:-5}
+mc_read() { # $1 = remote snippet printing the listing to stdout; echoes the payload
+  _snip="$1"; _i=0
+  while [ "$_i" -lt "$MC_READ_TRIES" ]; do
+    _out=$($K exec "$MCPOD" -- sh -c 'export HOME=/tmp; mkdir -p /tmp/.mc; mc alias set src http://minio:9000 "$S3_USER" "$S3_PASS" >/dev/null 2>&1; '"$_snip"'; printf "\n__wjd_exec_ok__\n"' 2>/dev/null) || true
+    case "$_out" in
+      *__wjd_exec_ok__*)
+        # exec channel proven healthy — strip the sentinel + blank padding, return payload
+        printf '%s\n' "$_out" | grep -v -F '__wjd_exec_ok__' | sed '/^[[:space:]]*$/d' || true
+        return 0 ;;
+    esac
+    _i=$((_i+1)); [ "$_i" -lt "$MC_READ_TRIES" ] && sleep 3
+  done
+  DRILL_ERROR "kubectl exec into $MCPOD failed ${_i}x (EOF/transport) while listing the bucket — refusing to treat an unreadable listing as an empty bucket / over-prune (issue #95). snippet: $_snip"
+}
+list_complete() { mc_read "mc ls $PFX/ | sed 's/.* //' | grep -E '^[0-9A-Fa-f]{24}\$' | sort -u"; }
+list_partial()  { mc_read "mc ls $PFX/ | sed 's/.* //' | grep -i 'partial\$' | sort -u"; }
 seed() { for s in "$@"; do MC "echo drill | mc pipe $PFX/$s" >/dev/null || fail "could not seed $s"; done; }
 
 SEEDS="000000010000000000000001 000000010000000000000002 000000010000000000000003"
@@ -253,7 +279,7 @@ if $K exec sts/pageserver -- curl -sf "http://localhost:9898/v1/tenant/${APPS_TE
   # apps-tenant sibling. If the janitor wrongly applied a foreign horizon here it would
   # be deleted — the #77 over-prune of a sleeping app's WAL.
   MC "echo drill | mc pipe $APPS_SPFX/000000010000000000000001" >/dev/null || fail "could not seed apps-tenant sibling segment"
-  APPS_SIB_BEFORE=$($K exec "$MCPOD" -- sh -c 'export HOME=/tmp; mkdir -p /tmp/.mc; mc alias set src http://minio:9000 "$S3_USER" "$S3_PASS" >/dev/null 2>&1; mc ls '"$APPS_SPFX/"' | sed "s/.* //" | grep -E "^[0-9A-Fa-f]{24}$" | sort -u' 2>/dev/null || true)
+  APPS_SIB_BEFORE=$(mc_read "mc ls $APPS_SPFX/ | sed 's/.* //' | grep -E '^[0-9A-Fa-f]{24}\$' | sort -u")
   echo "$APPS_SIB_BEFORE" | grep -q '000000010000000000000001' || fail "apps-tenant sibling seed did not land"
   ok "seeded a below-horizon segment under an UNRESOLVABLE apps-tenant sibling ($APPS_TENANT/$APPS_SIB_TLID)"
 
@@ -280,7 +306,7 @@ if $K exec sts/pageserver -- curl -sf "http://localhost:9898/v1/tenant/${APPS_TE
   rm -f /tmp/wjd-e-h-$$.txt /tmp/wjd-e-p-$$.txt
 
   # HARD invariant: the apps sibling seed SURVIVES — never over-pruned against a foreign horizon.
-  APPS_SIB_AFTER=$($K exec "$MCPOD" -- sh -c 'export HOME=/tmp; mkdir -p /tmp/.mc; mc alias set src http://minio:9000 "$S3_USER" "$S3_PASS" >/dev/null 2>&1; mc ls '"$APPS_SPFX/"' | sed "s/.* //" | grep -E "^[0-9A-Fa-f]{24}$" | sort -u' 2>/dev/null || true)
+  APPS_SIB_AFTER=$(mc_read "mc ls $APPS_SPFX/ | sed 's/.* //' | grep -E '^[0-9A-Fa-f]{24}\$' | sort -u")
   echo "$APPS_SIB_AFTER" | grep -q '000000010000000000000001' || \
     fail "(E) OVER-PRUNE: the apps-tenant sibling segment was deleted (sleeping app WAL lost) (#77)"
   ok "(E) apps-tenant sibling segment survived — per-(tenant,timeline) horizon is fail-safe (#77)"
@@ -299,7 +325,7 @@ fi
 # sibling timeline prefix. If the janitor wrongly applied the configured timeline's
 # (high) horizon here, this segment would be deleted — the exact #59 over-prune.
 MC "echo drill | mc pipe $SPFX/000000010000000000000001" >/dev/null || fail "could not seed sibling-timeline segment"
-SIB_BEFORE=$($K exec "$MCPOD" -- sh -c 'export HOME=/tmp; mkdir -p /tmp/.mc; mc alias set src http://minio:9000 "$S3_USER" "$S3_PASS" >/dev/null 2>&1; mc ls '"$SPFX/"' | sed "s/.* //" | grep -E "^[0-9A-Fa-f]{24}$" | sort -u' 2>/dev/null || true)
+SIB_BEFORE=$(mc_read "mc ls $SPFX/ | sed 's/.* //' | grep -E '^[0-9A-Fa-f]{24}\$' | sort -u")
 echo "$SIB_BEFORE" | grep -q '000000010000000000000001' || fail "sibling seed did not land"
 ok "seeded a below-horizon segment under an UNRESOLVABLE sibling timeline ($SIBLING_TLID)"
 
@@ -325,7 +351,7 @@ done
              || echo "note - could not read the prune log to confirm the UNRESOLVED line (pod GC/kubelet flake); relying on job-Failed + seed-survival invariants"
 
 # HARD invariant: the sibling seed must SURVIVE — never over-pruned against a foreign horizon.
-SIB_AFTER=$($K exec "$MCPOD" -- sh -c 'export HOME=/tmp; mkdir -p /tmp/.mc; mc alias set src http://minio:9000 "$S3_USER" "$S3_PASS" >/dev/null 2>&1; mc ls '"$SPFX/"' | sed "s/.* //" | grep -E "^[0-9A-Fa-f]{24}$" | sort -u' 2>/dev/null || true)
+SIB_AFTER=$(mc_read "mc ls $SPFX/ | sed 's/.* //' | grep -E '^[0-9A-Fa-f]{24}\$' | sort -u")
 echo "$SIB_AFTER" | grep -q '000000010000000000000001' || \
   fail "(D) OVER-PRUNE: the sibling-timeline segment was deleted against the configured timeline's horizon (#59)"
 ok "(D) sibling-timeline segment survived — per-timeline horizon is fail-safe (#59)"

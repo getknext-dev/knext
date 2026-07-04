@@ -16,8 +16,25 @@ set -eu
 cd "$(dirname "$0")"
 NS=scale-zero-pg
 K="kubectl -n $NS"
-# Canonical image (override with KSPG_GATEWAY_IMAGE for local clusters)
-IMAGE="${KSPG_GATEWAY_IMAGE:-me-abudhabi-1.ocir.io/axfqznklsd2t/ks-pg/gateway:v0.3.1}"
+# Gateway image (issue #94): DERIVE from what actually ships so the drill never
+# drifts from the release again (the old hardcoded v0.3.1 default was 3 releases
+# stale). Order of truth:
+#   1. KSPG_GATEWAY_IMAGE  — explicit override (local build / bespoke tag)
+#   2. the live pggw Deployment  — the real running release image
+#   3. the 10-gateway.yaml pin  — source of truth when the cluster isn't up yet
+# A derived image (2 or 3) is already published to OCIR, so the local docker build
+# is skipped automatically; force either way with KSPG_SKIP_BUILD=1/0.
+if [ -n "${KSPG_GATEWAY_IMAGE:-}" ]; then
+  IMAGE="$KSPG_GATEWAY_IMAGE"; IMAGE_SRC="KSPG_GATEWAY_IMAGE override"
+elif IMAGE=$($K get deploy/pggw -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null) && [ -n "$IMAGE" ]; then
+  IMAGE_SRC="live pggw Deployment"
+elif IMAGE=$(grep -oE 'me-abudhabi-1\.ocir\.io/[^[:space:]]*ks-pg/gateway:[^[:space:]]+' 10-gateway.yaml 2>/dev/null | head -1) && [ -n "$IMAGE" ]; then
+  IMAGE_SRC="10-gateway.yaml pin"
+else
+  echo "FAIL: cannot resolve gateway image — pggw Deployment unreachable and no pin in 10-gateway.yaml; set KSPG_GATEWAY_IMAGE" >&2; exit 1
+fi
+# a derived image is already published; only a bare local override defaults to building
+case "$IMAGE_SRC" in *override*) KSPG_SKIP_BUILD="${KSPG_SKIP_BUILD:-0}" ;; *) KSPG_SKIP_BUILD="${KSPG_SKIP_BUILD:-1}" ;; esac
 WARM_DSN="postgres://cloud_admin:cloud_admin@pggw-warm:55432/postgres?sslmode=disable"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
@@ -76,9 +93,16 @@ wait_parked() {
 }
 
 # --- 0. build + deploy the test gateway (warmpool mode) ----------------------
-echo "== building gateway image ($IMAGE) =="
-( cd ../gateway && docker build -q -t "$IMAGE" . >/dev/null ) || fail "gateway image build failed"
-ok "gateway image built"
+# KSPG_SKIP_BUILD=1 when $IMAGE is already published to OCIR (derived from the live
+# release; the OKE nodes pull it) — a digest-pinned ref cannot be `docker build -t`'d
+# anyway. Only a bare local override builds locally (issue #94).
+if [ "${KSPG_SKIP_BUILD:-0}" = "1" ]; then
+  ok "using published gateway image ($IMAGE; source: $IMAGE_SRC) — skipping local build"
+else
+  echo "== building gateway image ($IMAGE) =="
+  ( cd ../gateway && docker build -q -t "$IMAGE" . >/dev/null ) || fail "gateway image build failed"
+  ok "gateway image built"
+fi
 
 # The test gateway reuses the pggw ServiceAccount; ensure its Role can delete
 # pods (warmpool re-park). Source of truth: 10-gateway.yaml — applied here as the

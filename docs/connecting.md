@@ -208,6 +208,24 @@ plane-wide stall hits every app. Dropping an app must delete its timeline
 (`destroy --delete-timeline`) or the branch pins template history. Full caveats:
 [ADR-0003](adr-0003-multi-tenancy.md#consequences--caveats-blast-radius--isolation).
 
+### Rotating an app credential (issue #93b)
+
+The per-app password can be rotated without changing the DSN **shape** — the role
+(`app_<app>`), host, database, and `sslmode` are all unchanged; only the password
+**value** rotates. The operator runs:
+
+```sh
+deploy/provision-app.sh rotate-cred <app>            # new password into Secret app-db-<app>
+deploy/provision-app.sh rotate-cred <app> --bounce   # + apply it to the running compute now
+```
+
+Because your app reads `DATABASE_URL` from the Secret **at pod start**, a rotation
+only reaches the app when its pods restart: after a rotate, **roll your consumer
+Deployment** so it picks up the new `DATABASE_URL`. A compute that was scaled to
+zero applies the new password automatically on its next wake; a running compute
+keeps the old password until it is bounced (`--bounce`, a single-writer-safe
+`Recreate`). Operator runbook: [operations](operations.md#rotating-an-app-credential-issue-93b).
+
 ## Time-series data
 
 `CREATE EXTENSION timescaledb;` works out of the box (Apache-2 tier):
