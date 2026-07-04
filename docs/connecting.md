@@ -168,7 +168,8 @@ DB-per-app product promise; the design, evidence and caveats are in
 # per app: branch the template + stand up a scale-to-zero compute
 ./provision-app.sh create orders          # replicas 0 (wakes on first connect)
 ./provision-app.sh list                   # show apps tenant timelines
-./provision-app.sh destroy orders --delete-timeline   # tear down (frees the branch pin)
+./provision-app.sh destroy orders         # tear down — reclaims the timeline BY DEFAULT (no orphan, #91)
+#   destroy orders --keep-timeline        # explicit opt-out: retain the branch for PITR (prints reclaim cmd)
 ```
 
 Provisioning an app is one pageserver branch call + one rendered per-app compute
@@ -204,8 +205,10 @@ a separate branch — app A's rows are invisible to app B, proven by
 the gateway `(user,database)` refusal (proven by the same drill: app A's DSN is
 denied against app B, and `cloud_admin` is denied through the gateway). What is
 **shared** is availability: all apps ride one pageserver + safekeeper quorum, so a
-plane-wide stall hits every app. Dropping an app must delete its timeline
-(`destroy --delete-timeline`) or the branch pins template history. Full caveats:
+plane-wide stall hits every app. Dropping an app reclaims its timeline **by default**
+(`destroy <app>`, #91) so a routine teardown never pins template history or leaks
+safekeeper WAL; `--keep-timeline` retains it deliberately (and tells you how to
+reclaim later). Full caveats:
 [ADR-0003](adr-0003-multi-tenancy.md#consequences--caveats-blast-radius--isolation).
 
 ### Rotating an app credential (issue #93b)

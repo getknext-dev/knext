@@ -173,6 +173,11 @@ ok "backup target is off-cluster OCI Object Storage (backup-store retired)"
 #     above the horizon). The backup must verify index_part.json is intact so a
 #     torn index can no longer ship.
 grep -q 'name: wal-janitor' 62-backup.yaml || fail "62 missing the wal-janitor CronJob (issue #19)"
+# issues #90/#87: the apps-tenant orphaned-WAL fail-safe must be MONITORED, not just
+# WARNed on. The apps-wal-monitor CronJob measures orphan WAL dirs (safekeeper-present,
+# pageserver-404) + safekeeper /data utilization and fails its Job to surface the alert.
+grep -q 'name: apps-wal-monitor' 62-backup.yaml || fail "62 missing the apps-wal-monitor CronJob (issues #90/#87) — orphan WAL residue + SK PV growth must be monitored"
+grep -q 'df -P /data' 62-backup.yaml || fail "62 apps-wal-monitor must check safekeeper PV utilization (df /data) for ENOSPC early-warning (#90)"
 grep -q 'KEEP_SEGMENTS' 62-backup.yaml || fail "62 wal-janitor must expose a KEEP_SEGMENTS safety horizon"
 grep -q 'remote_consistent_lsn' 62-backup.yaml || fail "62 wal-janitor must derive its prune threshold from remote_consistent_lsn"
 grep -q 'partial' 62-backup.yaml || fail "62 wal-janitor must exclude .partial WAL (the live durability tail)"
@@ -224,6 +229,11 @@ grep -q 'alert: ComputeWakeStuck' 60-prometheus.yaml || fail "60 missing wake-pa
 # demo-canary CronJob owner_name, same pattern as backup/wal-janitor.
 grep -q 'alert: DemoCanaryFailed' 60-prometheus.yaml || fail "60 missing DemoCanaryFailed alert (#39)"
 grep -q 'owner_name="demo-canary"' 60-prometheus.yaml || fail "60 DemoCanaryFailed must match the canary CronJob by exact owner_name (#39)"
+# issues #90/#87: apps-tenant orphaned-WAL residue + safekeeper PV growth — the SIGNAL
+# on the fail-safe the janitor only WARNs on. Distinct from WalJanitorJobFailed, joined
+# on the apps-wal-monitor CronJob via the SAME owner_name pattern.
+grep -q 'alert: SafekeeperWALGrowth' 60-prometheus.yaml || fail "60 missing SafekeeperWALGrowth alert (#90) — orphaned apps WAL + SK PV growth would be unmonitored"
+grep -q 'owner_name="apps-wal-monitor"' 60-prometheus.yaml || fail "60 SafekeeperWALGrowth must match the apps-wal-monitor CronJob by exact owner_name (#90)"
 # issue #49: wal-janitor STALENESS (silent-stop with zero Failed Jobs), symmetric to BackupStale.
 grep -q 'alert: WalJanitorStale' 60-prometheus.yaml || fail "60 missing WalJanitorStale alert (#49) — a silently-stopped janitor produces no Failed Job"
 # issue #51: absent()/suspend companions so a never-succeeded or suspended CronJob pages instead of passing silently.

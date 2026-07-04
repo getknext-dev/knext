@@ -77,10 +77,15 @@ Adopt **branch-per-app on a shared plane**. The seam is exactly the parked
     Unit tests: `dbrewrite_test.go`, `wake_test.go`. The served DB is always
     `postgres`; the app-facing database name is purely a routing handle.
 - **Provisioning contract:** `deploy/provision-app.sh {init-plane|create <app>|
-  destroy <app>|list}`. The per-app timeline id is minted fresh (random) on first
-  `create` and persisted in the app's ConfigMap; re-provisioning reads it back
-  (idempotent), and `destroy --delete-timeline` cleans the pageserver **and** all
-  safekeepers (see "Deprovision is the sharp edge" below).
+  destroy <app> [--keep-timeline]|reclaim-orphans|list|fsck}`. The per-app timeline
+  id is minted fresh (random) on first `create` and persisted in the app's ConfigMap;
+  re-provisioning reads it back (idempotent). **`destroy` reclaims the timeline —
+  pageserver AND all safekeepers — BY DEFAULT** (#91): the safe path is the obvious
+  command. `--keep-timeline` is the explicit PITR/forensics opt-out (it prints the
+  orphan id + reclaim command). `reclaim-orphans` sweeps any orphan branch (no owning
+  ConfigMap) + drains recorded SK-delete failures — the reclamation drill that closes
+  the leak the wal-janitor only WARNs on (#87/#90). See "Deprovision is the sharp
+  edge" below.
 
 ### The safekeeper finding (the thin ice held)
 
@@ -109,6 +114,15 @@ lifecycle contract:
    safekeeper-side WAL — `provision-app.sh destroy` must also `DELETE` on the
    **safekeeper** mgmt API (port 7676, which *does* exist on 8464, unlike
    POST/PUT) on **all three** safekeepers, or per-app WAL dirs leak as apps churn.
+   **This two-sided delete is now the DEFAULT** (#91) — the original contract made it
+   opt-in (`--delete-timeline`), so the *obvious* `destroy` manufactured an orphan on
+   every deprovision (it deleted the owning ConfigMap while keeping the branch). A
+   safekeeper that is **down at destroy time** no longer loses its WAL dir silently
+   (`|| true`): the failed delete is recorded to the `apps-wal-reclaim-pending`
+   ConfigMap and reconciled by `reclaim-orphans`. Ongoing reclaim ownership is the
+   **deprovision path**, not the janitor (which only ever fail-safe-skips, never
+   over-prunes); the `apps-wal-monitor` CronJob + `SafekeeperWALGrowth` alert are the
+   bound/signal that pages if residue accumulates anyway (#90/#87).
 2. The safekeepers **tombstone** a deleted timeline id and refuse to recreate it
    (`create timeline: Timeline <id> has been deleted`). So the app→timeline id is
    **minted fresh (random) on each `create` and persisted in the app ConfigMap** —
@@ -193,9 +207,11 @@ one plane, all connects **through the apps-gateway**:
 - **Branches pin ancestor history.** A child timeline holds the template's history
   from its branch LSN; the template's WAL/pages cannot be GC'd below the oldest
   live branch point. `pitr_history_size` on the template grows with the number and
-  age of branches. Dropping an app must **delete its timeline** (`provision-app.sh
-  destroy <app> --delete-timeline`) or the pin leaks. The WAL-janitor / PITR
-  windows (issue #19) are template-wide, not per-app.
+  age of branches. Dropping an app **deletes its timeline by default**
+  (`provision-app.sh destroy <app>`, #91) so the pin is released on the obvious
+  command; `--keep-timeline` retains it deliberately and leaves a reclaimable orphan
+  (swept by `reclaim-orphans`). The WAL-janitor / PITR windows (issue #19) are
+  template-wide, not per-app.
 - **Per-app compute cost is real.** Each awake app is one compute pod (250m CPU /
   256Mi req). Idle apps cost zero compute (scale-to-zero) but each holds a branch
   (storage) and a Deployment/Service/ConfigMap (control-plane) footprint. This

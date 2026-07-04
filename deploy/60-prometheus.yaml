@@ -247,6 +247,29 @@ data:
             annotations:
               summary: "wal-janitor has NEVER succeeded, or is suspended/deleted (plane >26h old)"
               description: "No last-successful-time series for the wal-janitor CronJob (never succeeded / suspended), and the CronJob has existed >26h so a run should have happened — OR the CronJob object is gone. WalJanitorStale is blind in this state — /safekeeper WAL will regrow unbounded. Check `kubectl -n scale-zero-pg get cronjob wal-janitor`. (Fresh/DR-restored planes are suppressed for the first 26h — #62.)"
+          # (b'') apps-tenant orphaned-WAL residue + safekeeper PV growth (issues
+          # #90/#87). The wal-janitor correctly NEVER over-prunes an unresolvable apps
+          # timeline, but the residue it skips was previously UNMONITORED — no metric,
+          # no alert, no bound — so orphaned per-app safekeeper WAL could grow on the
+          # fixed 2Gi safekeeper PVs until ENOSPC wedged the WHOLE storage plane,
+          # disguised as "expected churn". The apps-wal-monitor CronJob (deploy/62)
+          # measures orphan WAL dirs (safekeeper-present, pageserver-404) AND df /data
+          # on every safekeeper, and FAILS its Job when either crosses threshold. This
+          # rule joins that Failed Job via the SAME kube_job_owner pattern as backup /
+          # wal-janitor. DELIBERATELY severity=warning + distinct from WalJanitorJobFailed:
+          # it stays OFF the primary pager (expected branch-per-app churn) but is no
+          # longer invisible. Reclaim: `provision-app.sh reclaim-orphans`. DORMANT when
+          # the monitor is not deployed (no kube_job_owner series ⇒ no samples).
+          - alert: SafekeeperWALGrowth
+            expr: |
+              sum(kube_job_status_failed{namespace="scale-zero-pg"}
+                  * on(namespace, job_name) group_left(owner_name)
+                  kube_job_owner{namespace="scale-zero-pg", owner_name="apps-wal-monitor"}) > 0
+            for: 1h
+            labels: { severity: warning, plane: apps }
+            annotations:
+              summary: "apps-tenant orphaned WAL residue or safekeeper PV utilization high"
+              description: "The apps-wal-monitor Job failed: orphaned apps-tenant WAL (a deprovisioned app's safekeeper WAL dir, pageserver-404) is accumulating on the fixed-size safekeeper PVs, and/or a safekeeper /data is over its utilization threshold — an unbounded leak that ends in ENOSPC wedging the whole storage plane. Off the primary pager (expected branch-per-app churn) but must be reclaimed. Read the Job log for orphan count vs PV%; reclaim with `provision-app.sh reclaim-orphans`. See docs/operations.md#reclaiming-orphaned-apps-tenant-wal."
           # (c) pswatcher down: the failover authority is not being scraped.
           # No watcher => no automated pageserver failover (#23).
           - alert: PswatcherDown

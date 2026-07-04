@@ -58,7 +58,7 @@ Alertmanager (`61-alertmanager.yaml`) to a receiver.
 | `BackupStaleAbsent` (crit) | backup **never** succeeded / suspended **and the CronJob is >26h old**, OR the CronJob object is gone | The last-success metric is absent — `BackupStale` is blind here. Treat as **no off-cluster backup at all**: un-suspend / redeploy the CronJob and force a run. **Age-gated so a fresh / DR-restored plane is not paged for the first 26h** (#62); the deleted/renamed case fires immediately (#51). |
 | `WalJanitorStaleAbsent` (crit) | janitor **never** succeeded / suspended **and the CronJob is >26h old**, OR the CronJob object is gone | The last-success metric is absent — `WalJanitorStale` is blind here. `/safekeeper` WAL is unbounded: un-suspend / redeploy the CronJob and force a run. **Age-gated for 26h on a fresh/DR plane** (#62); deleted/renamed fires immediately (#49/#51). |
 | `Watchdog` (none) | **always firing by design** | The alerting stack's **dead-man's-switch** (#60). You should **never** be paged by this rule directly — it is routed to an *external* heartbeat monitor. If that **external** monitor pages you, Prometheus or Alertmanager itself is down. See [dead-man's-switch](#dead-mans-switch-external-heartbeat-60). |
-| `KubeStateMetricsDown` (crit) | `up{job=kube-state-metrics}==0` or absent for 2m | **Sev-1.** KSM (`deploy/59`) is the sole producer for `BackupJobFailed`, `WalJanitorJobFailed`, `BackupStale`, `WalJanitorStale`, `PageserverStandbyNotReady`, `ComputeWakeStuck`, `ComputeWakeStuckApps`, `ComputeRoPoolStuck`, `ComputeStuckNotReady` — while it is down **all of them are blind**. Restore KSM before trusting any platform alert. (#48) |
+| `KubeStateMetricsDown` (crit) | `up{job=kube-state-metrics}==0` or absent for 2m | **Sev-1.** KSM (`deploy/59`) is the sole producer for `BackupJobFailed`, `WalJanitorJobFailed`, `BackupStale`, `WalJanitorStale`, `SafekeeperWALGrowth`, `PageserverStandbyNotReady`, `ComputeWakeStuck`, `ComputeWakeStuckApps`, `ComputeRoPoolStuck`, `ComputeStuckNotReady` — while it is down **all of them are blind**. Restore KSM before trusting any platform alert. (#48) |
 | `PswatcherDown` (crit) | `up{job="pswatcher"}==0` for 2m | The failover authority is down — a primary pageserver death now degrades to the manual runbook (below). Restart pswatcher. |
 | `PswatcherPromotionFired` (crit) | `pswatcher_promotions_total` rose in 10m | A **failover happened** — the promoted standby is now the sole read authority with NO standby behind it. Rebuild a standby. |
 | `PswatcherPrimaryDown` (warn) | `pswatcher_primary_up==0` for 1m | The watcher can't reach the **current read authority**. Pre-failover that's the primary (a promotion may be ~6s away); **post-failover the watcher re-anchors this metric onto the promoted standby** (#25), so it now also covers "the promoted node is the unguarded SPOF and just died." Check the current authority / watcher↔pageserver network. |
@@ -68,6 +68,7 @@ Alertmanager (`61-alertmanager.yaml`) to a receiver.
 | `ComputeRoPoolStuck` (crit) | read-replica pool `compute-ro` desired ≥1 but 0 ready for 2m | The RO pool was woken under read traffic but no replica became ready (crashloop / attach stall / image pull) — `DATABASE_URL_RO` reads are hanging. Check `kubectl -n scale-zero-pg describe deploy compute-ro` + its pod events. Silent when the pool is at rest (spec 0). (#80/#66) |
 | `ComputeStuckNotReady` (crit) | any `compute*` pod (compute / compute-ro / compute-warm / compute-`<app>`) has Ready=false for 5m | A compute-family pod is crash-looping / attach-stalled — **pages even with NO client waiting** (catches a sleeping app's compute crash-looping that the connection-gated rules miss). `kubectl -n scale-zero-pg get pod {{pod}}` + describe/logs. Healthy cold starts (~5s) never trip the 5m window. (#80) |
 | `DemoCanaryFailed` (warn) | a Job owned by the **demo-canary** CronJob failed (dormant unless the demo canary is deployed) | The full **visitor→app→gateway→compute** cold path is broken or regressed past budget — the only synthetic that sees app-side / DNS / ingress-class regressions, not just the DB half. **3am:** if the demo is meant to be up, run `demo/_verify.sh` to reproduce; check `kubectl -n knext-demo get ksvc pg-demo` (Ready? ingress-class?), the operator, and the gateway. If the demo is intentionally torn down, delete the `demo-canary` CronJob to silence it. See [demo-canary](#demo-canary). |
+| `SafekeeperWALGrowth` (**warn**) | a Job owned by the **apps-wal-monitor** CronJob failed: orphaned apps-tenant WAL (a deprovisioned app's safekeeper WAL dir, pageserver-404) is accumulating on the fixed **2Gi** safekeeper PVs, **and/or** a safekeeper `/data` is over its utilization threshold (75%) | **Not the primary pager** (expected branch-per-app churn) but must not be ignored — an unbounded leak ends in ENOSPC that wedges the *whole* storage plane. Read the Job log (`kubectl -n scale-zero-pg logs job/<apps-wal-monitor-…>`) for the orphan count vs PV%. Reclaim with `deploy/provision-app.sh reclaim-orphans`. Distinct from `WalJanitorJobFailed` — the janitor is *correct* to skip (never over-prune) an orphan; this is the missing **bound + signal** (#90/#87). Dormant when the monitor isn't deployed. See [Reclaiming orphaned apps-tenant WAL](#reclaiming-orphaned-apps-tenant-wal-9087). |
 
 CronJob rules match by **exact owner name** (`kube_job_owner{owner_name="backup"}` /
 `"wal-janitor"`), not a loose `backup.*` regex — so a failing `wal-janitor` is
@@ -867,7 +868,8 @@ cd deploy
 ./provision-app.sh list                  # apps-tenant timelines
 ./provision-app.sh fsck                  # reconcile branches<->intents (exit≠0 if any); add --converge to auto-repair
 ./provision-app.sh rotate-cred orders --bounce   # rotate the app's password + apply now
-./provision-app.sh destroy orders --delete-timeline
+./provision-app.sh destroy orders        # reclaims the timeline BY DEFAULT — no orphan (#91)
+./provision-app.sh reclaim-orphans       # sweep any orphan branches + drain pending SK-deletes (#87/#90)
 # read an app's DSN (per-app credential):
 kubectl -n scale-zero-pg get secret app-db-orders -o jsonpath='{.data.DATABASE_URL}' | base64 -d
 ```
@@ -910,6 +912,24 @@ scale-to-zero when the peer drops), and `TestSleepRaceWakesBackWhenConnectionArr
 (the same-replica TOCTOU heal). **No code fix required** — the peer-aware idle
 already closes the window; this behaviour is regression-locked by the tests above.
 
+### Deprovision is safe by default (issue #91)
+
+`destroy <app>` — the obvious command, **no flag** — now DELETEs the app's Neon
+timeline (pageserver **and** all three safekeepers) as well as its k8s objects, so a
+routine teardown leaves **no orphan branch and no unbounded safekeeper WAL**. This
+was the #91 defect: the old default *kept* the timeline (only `--delete-timeline`
+reclaimed it), and since it deleted the owning ConfigMap first, every default
+`destroy` manufactured an orphan.
+
+- `destroy <app>` → reclaims the timeline (safe default). Legacy `--delete-timeline`
+  is still accepted as a no-op.
+- `destroy <app> --keep-timeline` → **explicit** opt-out for PITR/forensics. It
+  retains the branch and prints the now-orphaned id **plus** the reclamation command,
+  so retention is a tracked decision, never a silent leak.
+- A safekeeper **down/unreachable** at destroy time no longer drops its WAL dir on
+  the floor (`|| true`): the failed `(timeline → safekeeper ordinals)` is recorded to
+  the durable ConfigMap `apps-wal-reclaim-pending`, and `reclaim-orphans` drains it.
+
 ### fsck: orphans & dangling intents (issues #76, #93a)
 
 `create` is **intent-first**: the per-app ConfigMap (which records the branch's
@@ -924,20 +944,20 @@ directions** and exits non-zero if anything is off:
 ```
 
 1. **Orphan timeline** — a branch on the pageserver with **no owning ConfigMap**
-   (an old pre-fix interrupted `create`, or a hand-deleted ConfigMap).
-   **Report-only:** deleting WAL is high blast-radius, so `fsck` never auto-deletes
-   a branch. Clean the orphan `<id>` by hand — delete it on the pageserver **and**
-   all safekeepers (the same two-sided delete `destroy` does), then re-run `fsck`:
+   (a `--keep-timeline` teardown, an old pre-fix interrupted `create`, or a
+   hand-deleted ConfigMap). **`fsck` is report-only** — deleting WAL is high
+   blast-radius, so it never auto-deletes a branch. Reclaim every orphan (pageserver
+   **and** all safekeepers, plus any safekeeper-only WAL dir whose branch is already
+   404) with the dedicated tool, then re-run `fsck`:
 
    ```sh
-   kubectl -n scale-zero-pg exec pageserver-0 -c pageserver -- \
-     curl -sf -X DELETE http://localhost:9898/v1/tenant/$APPS_TENANT/timeline/<id>
-   for o in 0 1 2; do kubectl -n scale-zero-pg exec safekeeper-$o -- \
-     curl -sf -X DELETE http://localhost:7676/v1/tenant/$APPS_TENANT/timeline/<id> || true; done
+   ./provision-app.sh reclaim-orphans   # two-sided delete of every orphan; exit≠0 if a SK is still down
+   ./provision-app.sh fsck              # confirm clean (exit 0)
    ```
 
    Leaving an orphan pins the template's ancestor WAL/pages (`pitr_history_size`
    grows) and leaks safekeeper WAL dirs — the same cost as a forgotten `destroy`.
+   Full reclamation runbook (+ the `SafekeeperWALGrowth` signal) below.
 
 2. **Dangling intent** — the intent-first *failure mode* (issue #93a): a ConfigMap
    (and/or credential Secret) exists but its recorded timeline **has no branch**,
@@ -985,6 +1005,38 @@ cd deploy
   the compute with the new md5. If you `--bounce` before rolling consumers, in-flight
   sessions on the old password get a clean reconnect and re-auth once the consumer
   pods carry the new Secret.
+
+<a id="reclaiming-orphaned-apps-tenant-wal-9087"></a>
+### Reclaiming orphaned apps-tenant WAL (#90/#87)
+
+Reclamation is the **deprovision path's** job — this closes the circular
+responsibility the reviewer flagged (`destroy` said "the janitor will reclaim"; the
+janitor said "deprovision reclaims"; nobody did). One command reclaims **every**
+orphan — a branch with no owning ConfigMap **and** a safekeeper-only WAL dir whose
+branch is already pageserver-404 — on the pageserver **and** all safekeepers, and
+drains any recorded pending SK-deletes. Safe + idempotent (an orphan has no live app
+and, its branch deleted, no PITR hold):
+
+```sh
+./provision-app.sh reclaim-orphans   # reclaim all orphan branches + SK WAL dirs; exit≠0 if a SK is still down
+./provision-app.sh fsck              # confirm clean (exit 0)
+```
+
+**Run it as a scheduled reclamation drill** (e.g. weekly, or after any batch of
+`--keep-timeline` teardowns / a safekeeper outage). The `apps-wal-monitor` CronJob
+(`deploy/62-backup.yaml`, every 3h) is the **signal** that tells you when to: it
+measures orphan WAL dirs on the safekeeper PVs and each safekeeper's `/data`
+utilization, and fires **`SafekeeperWALGrowth`** (warning) when residue accumulates
+or a PV approaches ENOSPC. The wal-janitor itself never reclaims an orphan — it is
+*correct* to fail-safe-skip (never over-prune) an unresolvable timeline; the missing
+half was this bound + signal + reclaim, not a change to the janitor's prune logic.
+
+Leaving an orphan pins the template's ancestor WAL/pages (`pitr_history_size` grows)
+and leaks safekeeper WAL dirs on the fixed **2Gi** safekeeper PVs — unbounded, it
+ends in ENOSPC that wedges the *whole* storage plane. Proven end-to-end by
+`deploy/_verify-wal-janitor.sh` section F (create → default `destroy` → assert the
+branch is gone from the pageserver, the SK WAL dir is gone on all three safekeepers,
+`fsck` is clean, and re-provisioning the same name mints a fresh timeline id).
 
 ## Read-only pool (issue #66)
 

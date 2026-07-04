@@ -16,10 +16,23 @@
 # Usage:
 #   provision-app.sh init-plane   [--schema FILE]        # one-time: apps tenant + template timeline + base schema
 #   provision-app.sh create  <app> [--replicas N]        # branch the template -> per-app compute (default replicas 0)
-#   provision-app.sh destroy <app> [--delete-timeline]   # remove the app's k8s objects (+ optional timeline)
+#   provision-app.sh destroy <app> [--keep-timeline]     # remove k8s objects AND reclaim the timeline BY DEFAULT
+#   provision-app.sh reclaim-orphans                     # reclaim every orphan timeline (no owning ConfigMap) + drain pending SK-deletes
 #   provision-app.sh list                                # list apps tenant timelines
 #   provision-app.sh fsck [--converge]                   # reconcile branches <-> ConfigMaps/Secrets (both directions); --converge re-branches dangling intents
 #   provision-app.sh rotate-cred <app> [--bounce]        # rotate the app's per-app password into its Secret; --bounce applies it now
+#
+# DEPROVISION IS SAFE BY DEFAULT (issue #91). `destroy <app>` now DELETES the app's
+# Neon timeline (pageserver + all safekeeper WAL dirs) as well as its k8s objects, so
+# the obvious command leaves NO orphan branch and NO unbounded safekeeper WAL. The
+# escape hatch `--keep-timeline` retains the branch for PITR/forensics but prints the
+# now-orphaned timeline id + the exact reclamation command (it is your job to reclaim
+# it later). A safekeeper that is down/unreachable at destroy time is RECORDED to a
+# durable ConfigMap (apps-wal-reclaim-pending) so `reclaim-orphans` can finish the job
+# — never silently swallowed (was best-effort `|| true`). `reclaim-orphans` is the
+# scheduled reclamation drill (docs/operations.md): it reclaims any branch with no
+# owning ConfigMap and drains recorded SK-delete failures — closing the leak the
+# wal-janitor only WARNs on (issues #87/#90).
 #
 # Env: KCTX (kube context, default context-ckmva7v7zvq), NS (default scale-zero-pg).
 #
@@ -52,6 +65,9 @@ APP_ROLE_PREFIX="${APP_ROLE_PREFIX:-app_}" # must match the gateway's GW_APP_ROL
 RESERVED_NAMES="${RESERVED_NAMES:-tmpl warm ro}"
 
 SK_REPLICAS="${SK_REPLICAS:-3}" # safekeeper StatefulSet size (52-safekeeper.yaml)
+# Durable record of safekeeper timeline-DELETEs that failed (a safekeeper down at
+# destroy time). `reclaim-orphans` drains it; nothing is silently swallowed (#91).
+RECLAIM_CM="${RECLAIM_CM:-apps-wal-reclaim-pending}"
 
 K() { kubectl --context "$KCTX" -n "$NS" "$@"; }
 # All pageserver mgmt calls go in-pod (port 9898); host curl is blocked anyway.
@@ -233,31 +249,160 @@ cmd_create() {
 EOF
 }
 
+# reclaim_timeline <timeline> — DELETE a timeline's WAL/pages off the pageserver
+# AND every safekeeper (port 7676). The pageserver DELETE alone leaves per-timeline
+# WAL dirs on the safekeepers (a slow leak as apps churn), so we DELETE on all
+# $SK_REPLICAS too. The safekeepers tombstone the id, which is why `create` mints a
+# FRESH random timeline id rather than reusing the app-name-derived one.
+#
+# A safekeeper that is DOWN/unreachable at reclaim time would drop its WAL dir on the
+# floor forever with the old best-effort `|| true`. Instead we RECORD the failed
+# (timeline -> safekeeper ordinals) to a durable ConfigMap so `reclaim-orphans` (or a
+# re-run) can reconcile it later (issue #91). Returns 0 if fully reclaimed, 1 if any
+# safekeeper DELETE failed (and was recorded).
+reclaim_timeline() {
+  local tl="$1"
+  [ -n "$tl" ] || return 0
+  log "reclaiming timeline $tl (pageserver + all $SK_REPLICAS safekeepers)"
+  # pageserver DELETE: a 404 (already gone) is success for our purposes.
+  PS -X DELETE "http://localhost:9898/v1/tenant/$APPS_TENANT/timeline/$tl" >/dev/null 2>&1 \
+    || log "note: pageserver DELETE of $tl returned non-2xx (already gone / will retry via reclaim-orphans)"
+  local ord=0 failed=""
+  while [ "$ord" -lt "$SK_REPLICAS" ]; do
+    if ! SK "$ord" -X DELETE "http://localhost:7676/v1/tenant/$APPS_TENANT/timeline/$tl" >/dev/null 2>&1; then
+      failed="${failed}${failed:+,}$ord"
+    fi
+    ord=$((ord+1))
+  done
+  if [ -n "$failed" ]; then
+    record_reclaim_pending "$tl" "$failed"
+    log "WARN: safekeeper DELETE of $tl failed on ordinal(s) [$failed] (safekeeper down/unreachable) — RECORDED to ConfigMap $RECLAIM_CM. Reconcile with: provision-app.sh reclaim-orphans"
+    return 1
+  fi
+  # Fully reclaimed — clear any stale pending record for this timeline.
+  clear_reclaim_pending "$tl"
+  return 0
+}
+
+# record_reclaim_pending <timeline> <csv-ordinals> — durably note a safekeeper
+# DELETE that could not complete, so it is never silently lost (issue #91). Keyed
+# by the 32-hex timeline id (a valid ConfigMap data key).
+record_reclaim_pending() {
+  local tl="$1" ords="$2" ts
+  ts="$(date -u +%FT%TZ 2>/dev/null || echo unknown)"
+  K get configmap "$RECLAIM_CM" >/dev/null 2>&1 || K create configmap "$RECLAIM_CM" >/dev/null 2>&1 || true
+  K label configmap "$RECLAIM_CM" tier=apps app=wal-reclaim --overwrite >/dev/null 2>&1 || true
+  K patch configmap "$RECLAIM_CM" --type merge \
+    -p "{\"data\":{\"$tl\":\"safekeepers=$ords recorded=$ts\"}}" >/dev/null 2>&1 || true
+}
+
+# clear_reclaim_pending <timeline> — drop a timeline's pending record once reclaimed.
+clear_reclaim_pending() {
+  local tl="$1"
+  K get configmap "$RECLAIM_CM" >/dev/null 2>&1 || return 0
+  K patch configmap "$RECLAIM_CM" --type json \
+    -p "[{\"op\":\"remove\",\"path\":\"/data/$tl\"}]" >/dev/null 2>&1 || true
+}
+
 cmd_destroy() {
   local app="${1:-}"; shift || true
-  local del_tl=0
-  while [ $# -gt 0 ]; do case "$1" in --delete-timeline) del_tl=1; shift;; *) die "unknown flag $1";; esac; done
+  local keep_tl=0
+  while [ $# -gt 0 ]; do case "$1" in
+    --keep-timeline)   keep_tl=1; shift;;
+    # Deletion is now the DEFAULT (issue #91); accept the old flag as a no-op so
+    # existing scripts/drills that pass it keep working.
+    --delete-timeline) log "note: --delete-timeline is now the DEFAULT and can be omitted"; shift;;
+    *) die "unknown flag $1";;
+  esac; done
   validate_app_name "$app"
   # Read the timeline id from the ConfigMap BEFORE deleting it.
   local tl; tl="$(app_timeline "$app")"
   log "deleting k8s objects for '$app'"
   K delete deploy/compute-"$app" svc/compute-"$app" configmap/compute-config-"$app" \
     secret/app-db-"$app" --ignore-not-found
-  if [ "$del_tl" = 1 ]; then
-    [ -n "$tl" ] || { log "no timeline recorded for '$app' (nothing to delete)"; log "destroy done"; return; }
-    log "deleting timeline $tl (pageserver + all $SK_REPLICAS safekeepers)"
-    PS -X DELETE "http://localhost:9898/v1/tenant/$APPS_TENANT/timeline/$tl" >/dev/null 2>&1 || true
-    # Delete the safekeeper-side timeline on every safekeeper too — the pageserver
-    # DELETE alone leaves per-timeline WAL dirs on the safekeepers (a slow leak as
-    # apps churn). The safekeepers tombstone the id, which is why `create` mints a
-    # FRESH random timeline id rather than reusing the app-name-derived one.
-    local ord=0
+
+  if [ "$keep_tl" = 1 ]; then
+    # Explicit opt-out: retain the branch (PITR / forensics). Deleting the ConfigMap
+    # above just orphaned it — say so LOUDLY and hand the operator the reclaim command
+    # so the retention is a deliberate, tracked decision, not a silent leak (#91).
+    if [ -n "$tl" ]; then
+      log "RETAINED timeline $tl per --keep-timeline. It is now an ORPHAN (no owning ConfigMap)."
+      log "  Reclaim it later with:  provision-app.sh reclaim-orphans"
+      log "  (or DELETE .../timeline/$tl on the pageserver + all $SK_REPLICAS safekeepers by hand)"
+    else
+      log "no timeline recorded for '$app' — nothing retained"
+    fi
+    log "destroy done (timeline retained — remember to reclaim it)"
+    return
+  fi
+
+  # DEFAULT (safe): reclaim the timeline so no orphan branch / unbounded safekeeper
+  # WAL is manufactured on the obvious command (issue #91 — the leak was the default).
+  if [ -z "$tl" ]; then
+    log "no timeline recorded for '$app' (nothing to reclaim)"
+    log "destroy done"
+    return
+  fi
+  if reclaim_timeline "$tl"; then
+    log "destroy done (timeline $tl reclaimed — no orphan)"
+  else
+    log "destroy done (k8s objects removed; timeline $tl reclaim INCOMPLETE — see WARN above, run reclaim-orphans)"
+  fi
+}
+
+# cmd_reclaim_orphans — the scheduled reclamation drill (issues #87/#90/#91). Reclaims
+# EVERY orphan apps-tenant timeline (a branch on the pageserver with NO owning
+# compute-config ConfigMap — residue from a prior --keep-timeline, a hand-deleted
+# ConfigMap, or a pre-fix interrupted create) AND drains any safekeeper-DELETE failures
+# recorded during a prior destroy. Safe + idempotent: an orphan by definition has no
+# live app reading it and (its branch being deleted) no PITR hold. This is what closes
+# the leak the wal-janitor only WARNs on. Exit 1 if any reclaim is left incomplete.
+cmd_reclaim_orphans() {
+  log "reclaiming orphan apps-tenant timelines (no owning ConfigMap) + draining recorded SK-delete failures"
+  local owned all skpresent candidates tl reclaimed=0 incomplete=0
+  owned="$(K get configmap -l tier=apps \
+    -o jsonpath='{range .items[*]}{.data.TIMELINE_ID}{"\n"}{end}' 2>/dev/null | grep -v '^$' | sort -u || true)"
+  # Candidate orphans come from BOTH sides of the plane, unioned, because residue can
+  # outlive one side of a partial delete:
+  #  - pageserver branches with no owning ConfigMap (orphan branch), AND
+  #  - safekeeper WAL dirs (present under /data/<apps-tenant>/) whose branch is already
+  #    404 on the pageserver — SK-only residue a pageserver-only sweep would MISS (the
+  #    exact class apps-wal-monitor flags). safekeeper-0 is representative (quorum).
+  all="$(PS "http://localhost:9898/v1/tenant/$APPS_TENANT/timeline" \
+    | python3 -c 'import sys,json;[print(t["timeline_id"]) for t in json.load(sys.stdin)]' 2>/dev/null || true)"
+  skpresent="$(K exec safekeeper-0 -c safekeeper -- sh -c "ls -1 /data/$APPS_TENANT 2>/dev/null" 2>/dev/null \
+    | grep -E '^[0-9a-fA-F]{32}$' || true)"
+  candidates="$(printf '%s\n%s\n' "$all" "$skpresent" | grep -v '^$' | sort -u || true)"
+  for tl in $candidates; do
+    [ "$tl" = "$TEMPLATE_TL" ] && continue                  # the shared template is not an app
+    if printf '%s\n' "$owned" | grep -qx "$tl"; then continue; fi   # owned by a live app — never touch
+    log "orphan timeline $tl has no owning ConfigMap — reclaiming (pageserver + all safekeepers)"
+    if reclaim_timeline "$tl"; then reclaimed=$((reclaimed+1)); else incomplete=$((incomplete+1)); fi
+  done
+
+  # Drain recorded SK-delete failures (a timeline already gone from the pageserver but
+  # whose safekeeper dirs a prior destroy could not remove). Re-issue the SK DELETE.
+  local pending
+  pending="$(K get configmap "$RECLAIM_CM" -o jsonpath='{range .data}{@}{"\n"}{end}' 2>/dev/null || true)"
+  local keys
+  keys="$(K get configmap "$RECLAIM_CM" -o go-template='{{range $k,$v := .data}}{{$k}}{{"\n"}}{{end}}' 2>/dev/null || true)"
+  for tl in $keys; do
+    [ -n "$tl" ] || continue
+    log "draining recorded SK-delete for timeline $tl"
+    local ord=0 failed=""
     while [ "$ord" -lt "$SK_REPLICAS" ]; do
-      SK "$ord" -X DELETE "http://localhost:7676/v1/tenant/$APPS_TENANT/timeline/$tl" >/dev/null 2>&1 || true
+      SK "$ord" -X DELETE "http://localhost:7676/v1/tenant/$APPS_TENANT/timeline/$tl" >/dev/null 2>&1 || failed="${failed}${failed:+,}$ord"
       ord=$((ord+1))
     done
+    if [ -z "$failed" ]; then clear_reclaim_pending "$tl"; reclaimed=$((reclaimed+1)); else
+      log "WARN: safekeeper(s) [$failed] still unreachable for $tl — left in $RECLAIM_CM"; incomplete=$((incomplete+1)); fi
+  done
+
+  if [ "$incomplete" -gt 0 ]; then
+    log "reclaim-orphans: $reclaimed reclaimed, $incomplete INCOMPLETE (safekeeper still down?) — re-run once it recovers"
+    return 1
   fi
-  log "destroy done"
+  log "reclaim-orphans done: $reclaimed timeline(s) reclaimed, plane clean"
 }
 
 cmd_list() {
@@ -352,6 +497,7 @@ EOF
     log "fsck: plane is clean (no orphan timelines, no dangling intents)"
   else
     log "fsck: $problems problem(s) — see docs/operations.md 'fsck: orphans & dangling intents'."
+    log "  reclaim orphan timelines (pageserver + every safekeeper) with: provision-app.sh reclaim-orphans"
     return 1
   fi
 }
@@ -399,11 +545,12 @@ cmd_rotate_cred() {
 }
 
 case "${1:-}" in
-  init-plane)  shift; cmd_init_plane "$@";;
-  create)      shift; cmd_create "$@";;
-  destroy)     shift; cmd_destroy "$@";;
-  list)        shift; cmd_list "$@";;
-  fsck)        shift; cmd_fsck "$@";;
-  rotate-cred) shift; cmd_rotate_cred "$@";;
-  *) die "usage: provision-app.sh {init-plane|create <app>|destroy <app>|list|fsck [--converge]|rotate-cred <app> [--bounce]}";;
+  init-plane)      shift; cmd_init_plane "$@";;
+  create)          shift; cmd_create "$@";;
+  destroy)         shift; cmd_destroy "$@";;
+  reclaim-orphans) shift; cmd_reclaim_orphans "$@";;
+  list)            shift; cmd_list "$@";;
+  fsck)            shift; cmd_fsck "$@";;
+  rotate-cred)     shift; cmd_rotate_cred "$@";;
+  *) die "usage: provision-app.sh {init-plane|create <app>|destroy <app> [--keep-timeline]|reclaim-orphans|list|fsck [--converge]|rotate-cred <app> [--bounce]}";;
 esac

@@ -570,3 +570,166 @@ spec:
           volumes:
             - name: state
               emptyDir: {}
+---
+# ===========================================================================
+# apps-wal-monitor (issues #90/#87) — the SIGNAL half of the apps-tenant WAL
+# fail-safe. The wal-janitor NEVER over-prunes an unresolvable apps timeline
+# (correct), but before this the residue it skipped was UNMONITORED: no metric,
+# no alert, no bound. Orphaned per-app safekeeper WAL could accumulate on the
+# fixed-size (2Gi) safekeeper PVs with ZERO operational pressure until ENOSPC
+# wedged the ENTIRE storage plane — disguised as "expected churn". This CronJob
+# closes that: it measures, on the ACTUAL safekeeper PVs (not the bucket), BOTH
+#   (a) ORPHAN apps-tenant WAL: a timeline dir present under /data/<apps-tenant>/
+#       on a safekeeper whose branch is GONE from the pageserver (404) — exactly
+#       the residue the janitor skips + the deprovision path should have reclaimed;
+#   (b) safekeeper PV UTILIZATION: `df /data` on every safekeeper — the direct
+#       early-warning before ENOSPC, independent of the janitor.
+# It FAILS its Job (exit 1) when orphan count > ORPHAN_MAX or any PV use% > PV_PCT,
+# which surfaces via the KSM-joined `SafekeeperWALGrowth` alert (deploy/60,
+# WARNING — visible but off the primary pager, distinct from WalJanitorJobFailed).
+# Reclamation is the deprovision path's job: `provision-app.sh reclaim-orphans`
+# (docs/operations.md "Reclaiming orphaned apps-tenant WAL").
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: apps-wal-monitor
+  namespace: scale-zero-pg
+  labels: { app: apps-wal-monitor, plane: observability }
+---
+# Least privilege: read pods + exec into them (df /data, ls the WAL dir) in THIS
+# namespace only. No write, no cluster scope, no secrets.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: apps-wal-monitor
+  namespace: scale-zero-pg
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: apps-wal-monitor
+  namespace: scale-zero-pg
+subjects:
+  - kind: ServiceAccount
+    name: apps-wal-monitor
+    namespace: scale-zero-pg
+roleRef:
+  kind: Role
+  name: apps-wal-monitor
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: apps-wal-monitor
+  namespace: scale-zero-pg
+  labels: { app: apps-wal-monitor, plane: observability }
+spec:
+  schedule: "17 */3 * * *" # every 3h — orphan residue is slow; frequent enough for early warning
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 0 # one shot: a persistent residue must keep the Job Failed (alert stays lit)
+      template:
+        metadata:
+          labels: { app: apps-wal-monitor, plane: observability }
+        spec:
+          serviceAccountName: apps-wal-monitor
+          restartPolicy: Never
+          securityContext:
+            seccompProfile: { type: RuntimeDefault }
+          containers:
+            - name: monitor
+              image: alpine/k8s:1.30.2 # bundles kubectl + curl + coreutils
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities: { drop: ["ALL"] }
+              envFrom:
+                - configMapRef: { name: compute-config } # PAGESERVER_HOST (shared plane)
+              env:
+                - name: APPS_TENANT
+                  value: "a0000000000000000000000000000001" # must match provision-app.sh
+                - name: TEMPLATE_TL
+                  value: "a0000000000000000000000000000010" # the shared template branch (never an orphan)
+                - name: SK_REPLICAS
+                  value: "3"
+                - name: ORPHAN_MAX
+                  value: "0"  # any CONFIRMED orphan (pageserver-404 WAL dir) is a residue signal
+                - name: PV_PCT
+                  value: "75" # safekeeper /data utilization early-warning threshold (before ENOSPC)
+              command: ["/bin/sh", "-c"]
+              args:
+                - |
+                  set -eu
+                  PS="http://${PAGESERVER_HOST}:9898"
+                  echo "apps-wal-monitor: apps_tenant=$APPS_TENANT pageserver=$PS orphan_max=$ORPHAN_MAX pv_pct=$PV_PCT"
+
+                  # LIVE apps-tenant timelines (present on the pageserver). A tenant with
+                  # no timelines yet returns [] (curl -f still 200). If the pageserver is
+                  # unreachable we cannot classify orphans -> fail loud (a blind monitor is
+                  # worse than a noisy one for a durability leak).
+                  if ! LIVE_JSON="$(curl -sf "$PS/v1/tenant/$APPS_TENANT/timeline" 2>/dev/null)"; then
+                    echo "FATAL: cannot reach pageserver at $PS/v1/tenant/$APPS_TENANT/timeline — cannot classify orphans" >&2
+                    exit 1
+                  fi
+                  LIVE="$(printf '%s' "$LIVE_JSON" | tr ',{}' '\n' | grep '"timeline_id"' \
+                        | sed -E 's/.*"timeline_id" *: *"?([^",]*)"?.*/\1/' | sort -u || true)"
+                  echo "live apps timelines on pageserver: $(printf '%s' "$LIVE" | tr '\n' ' ')"
+
+                  # PRESENT timelines on the safekeeper PVs + PV utilization. Read the
+                  # actual /data on each safekeeper (the ENOSPC risk lives HERE, not the
+                  # bucket). Neon lays timelines out at /data/<tenant>/<timeline>/.
+                  ORPHANS=""; ORPHAN_N=0; PV_BAD=""; MEASURED=0
+                  ord=0
+                  while [ "$ord" -lt "$SK_REPLICAS" ]; do
+                    SKPOD="safekeeper-$ord"
+                    # PV utilization (df): Use% of /data.
+                    USEP="$(kubectl exec "$SKPOD" -c safekeeper -- df -P /data 2>/dev/null | awk 'NR==2{gsub(/%/,"",$5);print $5}' || true)"
+                    if [ -n "$USEP" ]; then
+                      MEASURED=1
+                      echo "  $SKPOD: /data utilization ${USEP}%"
+                      if [ "$USEP" -gt "$PV_PCT" ]; then PV_BAD="$PV_BAD $SKPOD=${USEP}%"; fi
+                    else
+                      echo "  $SKPOD: could not read df /data (pod down?)"
+                    fi
+                    ord=$((ord+1))
+                  done
+
+                  # Orphan set: WAL dirs present on safekeeper-0 whose timeline is NOT a
+                  # live pageserver branch and is not the shared template. safekeeper-0 is
+                  # representative (quorum-replicated); if it is unreachable, fall through.
+                  PRESENT="$(kubectl exec safekeeper-0 -c safekeeper -- sh -c "ls -1 /data/$APPS_TENANT 2>/dev/null" 2>/dev/null \
+                            | grep -E '^[0-9a-fA-F]{32}$' | sort -u || true)"
+                  for tl in $PRESENT; do
+                    [ "$tl" = "$TEMPLATE_TL" ] && continue
+                    if printf '%s\n' "$LIVE" | grep -qx "$tl"; then continue; fi   # live branch — fine
+                    ORPHANS="$ORPHANS $tl"; ORPHAN_N=$((ORPHAN_N+1))
+                  done
+                  echo "orphan apps-tenant WAL dirs (present on safekeeper, pageserver-404):$ORPHANS (count=$ORPHAN_N)"
+
+                  RC=0
+                  if [ "$ORPHAN_N" -gt "$ORPHAN_MAX" ]; then
+                    echo "SafekeeperWALGrowth: $ORPHAN_N orphan apps-tenant WAL dir(s) exceed ORPHAN_MAX=$ORPHAN_MAX — deprovisioned-app WAL residue is accumulating on the safekeeper PVs. Reclaim: provision-app.sh reclaim-orphans (docs/operations.md#reclaiming-orphaned-apps-tenant-wal)." >&2
+                    RC=1
+                  fi
+                  if [ -n "$PV_BAD" ]; then
+                    echo "SafekeeperWALGrowth: safekeeper PV utilization over ${PV_PCT}%:$PV_BAD — approaching ENOSPC on a fixed 2Gi PV, which would wedge the WHOLE storage plane. Investigate WAL growth / run reclaim-orphans / grow the PV." >&2
+                    RC=1
+                  fi
+                  if [ "$MEASURED" = 0 ] && [ -z "$PRESENT" ]; then
+                    echo "WARN: could not read df or WAL dirs on ANY safekeeper — monitor is blind this run (check safekeeper pods)." >&2
+                  fi
+                  [ "$RC" = 0 ] && echo "apps-wal-monitor: clean (no orphan residue, all safekeeper PVs under ${PV_PCT}%)"
+                  exit $RC
+              resources:
+                requests: { cpu: 20m, memory: 32Mi, ephemeral-storage: 50Mi }
+                limits: { memory: 128Mi, ephemeral-storage: 128Mi }

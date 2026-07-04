@@ -44,6 +44,44 @@ expect_reject rotate-cred "a_b" charset
 expect_reject rotate-cred "tmpl" reserved
 expect_reject rotate-cred "" required
 
+# --- issue #91: deprovision semantics --------------------------------------
+# A bad flag must be refused by flag parsing (not swallowed).
+out="$(KCTX=none NS=none "$PROV" destroy good --bogus-flag 2>&1)" && \
+  fail "destroy accepted an unknown flag"
+case "$out" in *unknown\ flag*) echo "ok - destroy rejects unknown flag";; *) fail "destroy: unknown flag not reported. Got: $out";; esac
+pass=$((pass + 1))
+
+# --keep-timeline is a recognised flag: it must PARSE (then fail later at the
+# cluster call under KCTX=none), NOT trip 'unknown flag'.
+out="$(KCTX=none NS=none "$PROV" destroy good --keep-timeline 2>&1)"; rc=$?
+[ "$rc" -ne 0 ] || fail "destroy --keep-timeline should fail without a cluster"
+case "$out" in
+  *unknown\ flag*) fail "--keep-timeline wrongly rejected as unknown: $out" ;;
+  *invalid\ app\ name*|*is\ reserved*) fail "valid destroy name wrongly rejected: $out" ;;
+  *) echo "ok - destroy accepts --keep-timeline (parsed; failed later at cluster call)" ;;
+esac
+pass=$((pass + 1))
+
+# --delete-timeline is accepted as a deprecated no-op (default is now delete).
+out="$(KCTX=none NS=none "$PROV" destroy good --delete-timeline 2>&1)"; rc=$?
+[ "$rc" -ne 0 ] || fail "destroy --delete-timeline should fail without a cluster"
+case "$out" in
+  *unknown\ flag*) fail "--delete-timeline wrongly rejected as unknown: $out" ;;
+  *) echo "ok - destroy still accepts legacy --delete-timeline (no-op)" ;;
+esac
+pass=$((pass + 1))
+
+# reclaim-orphans is a real subcommand: it must NOT hit the usage/unknown-command
+# die. It is deliberately tolerant (idempotent, best-effort drain), so with no
+# cluster it finds nothing and reports its start line rather than a usage error.
+out="$(KCTX=none NS=none "$PROV" reclaim-orphans 2>&1)"
+case "$out" in
+  *usage:\ provision-app.sh*) fail "reclaim-orphans not recognised as a subcommand: $out" ;;
+  *reclaiming\ orphan*) echo "ok - reclaim-orphans is a recognised subcommand" ;;
+  *) fail "reclaim-orphans did not run its reclaim path. Got: $out" ;;
+esac
+pass=$((pass + 1))
+
 # A well-formed, non-reserved name must PASS validation. It then proceeds to a
 # cluster call and fails there (no cluster) — but NOT with a validation message.
 out="$(KCTX=none NS=none "$PROV" create "good-app1" 2>&1)"; rc=$?

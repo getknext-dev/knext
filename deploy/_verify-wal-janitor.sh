@@ -31,6 +31,10 @@ RUNJOB="wjd-run-${TS}"
 IDJOB="wjd-idem-${TS}"
 SIBJOB="wjd-sibling-${TS}"
 APPSJOB="wjd-apps-${TS}"
+# Section F (issues #91/#87): a throwaway app for the deprovision-reclaim assertion.
+# RFC1123 label (lowercase alnum), created + default-destroyed to prove no orphan.
+DRILLAPP="reclaimdrill${TS}"
+KCTX_CUR="$(kubectl config current-context 2>/dev/null || echo context-ckmva7v7zvq)"
 fail() { echo "FAIL: $*" >&2; exit 1; }
 ok() { echo "ok - $*"; }
 # strictly-less string compare (fixed-width hex sorts numerically). POSIX `[` has
@@ -70,6 +74,9 @@ cleanup() {
   $K exec "$MCPOD" -- sh -c 'export HOME=/tmp; mkdir -p /tmp/.mc; mc alias set src http://minio:9000 "$S3_USER" "$S3_PASS" >/dev/null 2>&1; mc rm --recursive --force '"$APPS_SPFX/"' >/dev/null 2>&1' >/dev/null 2>&1 || true
   $K delete job "$FCJOB" "$RUNJOB" "$IDJOB" "$SIBJOB" "$APPSJOB" --ignore-not-found >/dev/null 2>&1 || true
   $K delete pod "$MCPOD" --ignore-not-found >/dev/null 2>&1 || true
+  # Section F: make sure the reclaim-drill app is gone even on early exit (default
+  # destroy reclaims its timeline too, so this also cleans the branch/WAL).
+  ./provision-app.sh destroy "$DRILLAPP" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT INT TERM
 
@@ -356,5 +363,61 @@ echo "$SIB_AFTER" | grep -q '000000010000000000000001' || \
   fail "(D) OVER-PRUNE: the sibling-timeline segment was deleted against the configured timeline's horizon (#59)"
 ok "(D) sibling-timeline segment survived — per-timeline horizon is fail-safe (#59)"
 
+# ===========================================================================
+# F. DEPROVISION RECLAIM (issues #91/#87) — the OTHER half of the apps-tenant WAL
+#    fail-safe. The janitor never over-prunes an orphan; the DEPROVISION path must
+#    actually RECLAIM it so residue never accumulates. Prove that a DEFAULT
+#    `destroy` (no flag) leaves NO orphan: the branch is gone from the pageserver,
+#    the safekeeper WAL dir is gone from every safekeeper, and fsck is clean. Then
+#    prove re-provisioning the SAME name still works (fresh timeline id, tombstone
+#    dodged). Gated on the apps tenant + an initialized template plane being present.
+# ===========================================================================
+PROV="./provision-app.sh"
+if [ -x "$PROV" ] \
+   && $K exec sts/pageserver -- curl -sf "http://localhost:9898/v1/tenant/${APPS_TENANT}/timeline/${TEMPLATE_TL:-a0000000000000000000000000000010}" >/dev/null 2>&1; then
+  P() { KCTX="$KCTX_CUR" NS="$NS" "$PROV" "$@"; }
+  echo "--- Section F: deprovision reclaim (create -> default destroy -> assert no orphan) ---"
+  P create "$DRILLAPP" >/dev/null 2>&1 || fail "(F) could not create drill app $DRILLAPP"
+  TL1="$($K get cm "compute-config-$DRILLAPP" -o jsonpath='{.data.TIMELINE_ID}' 2>/dev/null || true)"
+  [ -n "$TL1" ] || fail "(F) drill app has no recorded TIMELINE_ID after create"
+  $K exec sts/pageserver -- curl -sf "http://localhost:9898/v1/tenant/${APPS_TENANT}/timeline/$TL1" >/dev/null 2>&1 \
+    || fail "(F) branch $TL1 not present on the pageserver after create"
+  ok "(F) created drill app $DRILLAPP (timeline $TL1)"
+
+  # DEFAULT destroy — no --delete-timeline. Pre-#91 this manufactured an orphan.
+  P destroy "$DRILLAPP" >/dev/null 2>&1 || fail "(F) default destroy of $DRILLAPP failed"
+
+  # (F1) branch gone from the pageserver (404).
+  if $K exec sts/pageserver -- curl -sf "http://localhost:9898/v1/tenant/${APPS_TENANT}/timeline/$TL1" >/dev/null 2>&1; then
+    fail "(F1) timeline $TL1 SURVIVED a default destroy — deprovision did not reclaim the branch (#91)"
+  fi
+  ok "(F1) default destroy reclaimed the pageserver branch (no orphan timeline)"
+
+  # (F2) safekeeper WAL dir gone on every safekeeper (the leak issue #87 targets).
+  ord=0; SURVIVED=""
+  while [ "$ord" -lt 3 ]; do
+    if $K exec "safekeeper-$ord" -c safekeeper -- sh -c "ls -d /data/${APPS_TENANT}/$TL1 2>/dev/null" >/dev/null 2>&1; then
+      SURVIVED="$SURVIVED safekeeper-$ord"
+    fi
+    ord=$((ord+1))
+  done
+  [ -z "$SURVIVED" ] || fail "(F2) safekeeper WAL dir for $TL1 SURVIVED default destroy on:$SURVIVED — SK-side reclaim leaked (#87)"
+  ok "(F2) safekeeper WAL dir for $TL1 removed on all safekeepers (#87)"
+
+  # (F3) fsck clean — no orphan branch anywhere on the apps plane.
+  P fsck >/dev/null 2>&1 || fail "(F3) fsck reports an orphan after a default destroy (#91/#87)"
+  ok "(F3) fsck clean after default destroy — zero orphan branches"
+
+  # (F4) re-provision the SAME name works with a FRESH timeline id (tombstone dodged).
+  P create "$DRILLAPP" >/dev/null 2>&1 || fail "(F4) re-create of $DRILLAPP after destroy failed (tombstone poisoning?)"
+  TL2="$($K get cm "compute-config-$DRILLAPP" -o jsonpath='{.data.TIMELINE_ID}' 2>/dev/null || true)"
+  [ -n "$TL2" ] && [ "$TL2" != "$TL1" ] || fail "(F4) re-create did not mint a FRESH timeline id (got '$TL2', prior '$TL1')"
+  ok "(F4) re-provision same name works with a fresh timeline id ($TL2 != $TL1)"
+  P destroy "$DRILLAPP" >/dev/null 2>&1 || true   # tidy (cleanup trap also covers this)
+  ok "(F) deprovision reclaim proven: default destroy leaves ZERO orphan WAL/branch (#91/#87)"
+else
+  echo "note - apps tenant ${APPS_TENANT} / template plane not present — skipping section F (#91/#87 deprovision reclaim). Run 'provision-app.sh init-plane' to exercise it."
+fi
+
 cleanup
-echo "wal-janitor safety drill PASSED: fail-closed, below-horizon-only prune, tail/partial preserved, idempotent, per-timeline fail-safe (issues #37/#42/#59)"
+echo "wal-janitor safety drill PASSED: fail-closed, below-horizon-only prune, tail/partial preserved, idempotent, per-timeline fail-safe, deprovision reclaim (issues #37/#42/#59/#77/#91/#87)"
