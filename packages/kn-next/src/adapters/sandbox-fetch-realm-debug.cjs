@@ -452,22 +452,51 @@ function countOccurrences(haystack, needle) {
 
 /**
  * Resolve the staged standalone tree's `next/dist/server/web/sandbox/context.js`.
+ *
+ * STRICTLY appDir-rooted (#216). Never `require.resolve` here: Node consults
+ * the NODE_PATH global folders even with `{ paths: [appDir] }`, and `pnpm exec`
+ * injects NODE_PATH=<repo>/node_modules/.pnpm/node_modules — on CI that
+ * resolved (and patched!) the harness repo's OWN next install from an empty
+ * app dir. Likewise, never walk above the staged tree: the only ascent allowed
+ * is from a nested monorepo app dir (`.next/standalone/<app-path>/`) up to its
+ * enclosing `.next/standalone` root, where `output:'standalone'` puts the
+ * bundled node_modules.
+ *
  * @param {string} appDir
  * @returns {string | null}
  */
-function resolveSandboxContext(appDir) {
-  const rel = 'next/dist/server/web/sandbox/context.js';
-  try {
-    return require.resolve(rel, { paths: [appDir] });
-  } catch {
-    /* fall through to the manual walk */
+/**
+ * The nearest enclosing `.next/standalone` ancestor of `start` (inclusive),
+ * or null. Bounded to the FIRST match walking up: a weirdly-named outer
+ * directory cannot widen the boundary past the nearest standalone root.
+ * @param {string} start absolute path
+ * @returns {string | null}
+ */
+function findStandaloneRoot(start) {
+  const path = require('node:path');
+  for (let dir = start; ; ) {
+    if (path.basename(dir) === 'standalone' && path.basename(path.dirname(dir)) === '.next') {
+      return dir;
+    }
+    const parent = path.dirname(dir);
+    if (parent === dir) return null;
+    dir = parent;
   }
+}
+
+function resolveSandboxContext(appDir) {
   const { existsSync } = require('node:fs');
   const path = require('node:path');
-  let dir = path.resolve(appDir);
-  for (;;) {
+  const rel = 'next/dist/server/web/sandbox/context.js';
+  const start = path.resolve(appDir);
+  const standaloneRoot = findStandaloneRoot(start);
+
+  for (let dir = start; ; ) {
     const candidate = path.join(dir, 'node_modules', ...rel.split('/'));
     if (existsSync(candidate)) return candidate;
+    // Bounded walk: appDir itself, or — inside a standalone tree — up to
+    // (and including) the standalone root. Nothing outside the staged tree.
+    if (standaloneRoot === null || dir === standaloneRoot) return null;
     const parent = path.dirname(dir);
     if (parent === dir) return null;
     dir = parent;
@@ -495,6 +524,27 @@ function patchSandboxContext({ appDir, log = () => {} }) {
   }
   // Never write through a symlink (pnpm-style layouts): patch the real file.
   const contextPath = fs.realpathSync(resolved);
+  // Symlink containment (#216 follow-up): node_modules/next may be a dir
+  // symlink — the bounded walk saw it INSIDE the boundary (existsSync follows
+  // links), but the REAL file can live outside the staged tree (e.g. the
+  // checkout-wide pnpm store). Writing there is the NODE_PATH blast radius
+  // via another mechanism — fail loud (skip + reason; the debug lane is
+  // fail-open at the caller).
+  const startDir = path.resolve(appDir);
+  const boundaries = [fs.realpathSync(startDir)];
+  const standaloneRoot = findStandaloneRoot(startDir);
+  if (standaloneRoot !== null) boundaries.push(fs.realpathSync(standaloneRoot));
+  const inTree = boundaries.some(
+    (root) => contextPath === root || contextPath.startsWith(root + path.sep),
+  );
+  if (!inTree) {
+    return {
+      patched: false,
+      reason:
+        `resolved context.js is OUTSIDE the staged tree (symlink escape): ` +
+        `${contextPath} is not under ${boundaries.join(' or ')} — refusing to patch`,
+    };
+  }
   const source = fs.readFileSync(contextPath, 'utf8');
 
   if (source.includes(MARKER)) {
