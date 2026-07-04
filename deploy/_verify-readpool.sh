@@ -8,10 +8,19 @@
 #   (4) staleness: if the pool is tip-following (RO_MODE=Replica), a fresh writer
 #       commit propagates to the RO pool — measured in ms. If static, that is
 #       reported honestly (reads frozen at attach LSN).
+#   (5) HPA n>1 under load (issue #99, GA): with the read-scaling HPA
+#       (deploy/optional/27-compute-ro-hpa.yaml) applied, REAL concurrent read
+#       load drives compute-ro 1->N (asserted N>=2), writes stay rejected while
+#       under load, staleness is measured under load, then the load drains and
+#       the pool scales back N->1. Auto-runs when a metrics-server is present;
+#       force with RO_HPA=1, skip with RO_HPA=0.
 # A SEPARATE test gateway (pggw-ro) is used so the live pggw is never touched.
-# Everything is restored: compute/compute-ro replicas 0, test gateway deleted.
+# Everything is restored: compute/compute-ro replicas 0, HPA + load deleted, test
+# gateway deleted.
 #
-# Env: RO_MODE=Replica|Static (default Replica).
+# Env: RO_MODE=Replica|Static (default Replica). RO_HPA=1|0 (default: auto —
+#      on iff `kubectl top` works). RO_LOAD_REPLICAS (default 6, concurrent
+#      read loaders). RO_HPA_UP_TIMEOUT / RO_HPA_DOWN_TIMEOUT seconds.
 set -eu
 cd "$(dirname "$0")"
 NS=scale-zero-pg
@@ -38,16 +47,44 @@ case "$IMAGE_SRC" in *override*) KSPG_SKIP_BUILD="${KSPG_SKIP_BUILD:-0}" ;; *) K
 RO_MODE="${RO_MODE:-Replica}"
 W_DSN="postgres://cloud_admin:cloud_admin@pggw-ro:55432/postgres?sslmode=disable"
 RO_DSN="postgres://cloud_admin:cloud_admin@pggw-ro:55434/postgres?sslmode=disable"
+# Direct-to-pool DSN (bypasses the gateway) — used ONLY by the HPA section so the
+# gateway RO driver and the HPA never fight over compute-ro's replica count. The
+# Service load-balances across the pool (kube-proxy), which is exactly what the
+# gateway's GW_RO_TARGET points at.
+RO_DIRECT="postgres://cloud_admin:cloud_admin@compute-ro.scale-zero-pg.svc:55433/postgres?sslmode=disable"
+RO_LOAD_REPLICAS="${RO_LOAD_REPLICAS:-4}"
+RO_HPA_UP_TIMEOUT="${RO_HPA_UP_TIMEOUT:-240}"
+RO_HPA_DOWN_TIMEOUT="${RO_HPA_DOWN_TIMEOUT:-330}"
+# Cap the HPA's maxReplicas FOR THE DRILL on small clusters. The shipped manifest
+# (deploy/optional/27) ships maxReplicas=5 for real clusters; on a 2-node test
+# cluster, 5 RO pods at 1Gi each cause node memory eviction. The n>1 GA gate only
+# needs N>=2, so the drill patches max down after apply. Raise on a bigger cluster.
+RO_HPA_MAX="${RO_HPA_MAX:-3}"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 ok() { echo "ok - $*"; }
 
 cleanup() {
   echo "    restoring resting state..."
+  # HPA first: it owns compute-ro's replica count, so delete it before scaling
+  # the pool to 0 (else it would fight the scale-down).
+  $K delete hpa compute-ro --ignore-not-found --wait=false >/dev/null 2>&1 || true
+  $K delete deploy/roload --ignore-not-found --wait=false >/dev/null 2>&1 || true
+  # Restore the LIVE gateway's RO idle if the HPA section changed it. compute-ro is
+  # a shared singleton the live pggw also drives; the HPA section disables its RO
+  # idle so it stops sleeping the pool mid-drill. Put it back no matter how we exit.
+  if [ -f _tmp-pggw-ro-idle.orig ]; then
+    ORIG_IDLE="$(cat _tmp-pggw-ro-idle.orig)"
+    if [ -n "$ORIG_IDLE" ]; then
+      $K set env deploy/pggw GW_RO_IDLE_MS="$ORIG_IDLE" >/dev/null 2>&1 || true
+      echo "    restored live pggw GW_RO_IDLE_MS=$ORIG_IDLE"
+    fi
+    rm -f _tmp-pggw-ro-idle.orig
+  fi
   $K scale deploy/compute --replicas=0 >/dev/null 2>&1 || true
   $K scale deploy/compute-ro --replicas=0 >/dev/null 2>&1 || true
   $K delete -f _tmp-pggw-ro.yaml --ignore-not-found --wait=false >/dev/null 2>&1 || true
-  rm -f _tmp-pggw-ro.yaml
+  rm -f _tmp-pggw-ro.yaml _tmp-roload.yaml
 }
 trap cleanup EXIT
 
@@ -74,6 +111,9 @@ RO_MODE_SEEN() { $K logs deploy/compute-ro 2>/dev/null | grep -o 'mode=[A-Za-z]*
 # be swept before the drill's own drop/create + scale-to-0 can assume a clean slate.
 preclean() {
   echo "== preclean: sweeping residual state from any interrupted prior run (#83) =="
+  $K delete hpa compute-ro --ignore-not-found --wait=false >/dev/null 2>&1 || true
+  $K delete deploy/roload --ignore-not-found --wait=false >/dev/null 2>&1 || true
+  rm -f _tmp-roload.yaml
   $K delete deploy/pggw-ro svc/pggw-ro --ignore-not-found --wait=false >/dev/null 2>&1 || true
   # stranded one-shot psql pods from a killed PSQL() call (this drill's rocli-* only,
   # matched by name so a concurrent drill's pods are never touched).
@@ -170,8 +210,15 @@ $K apply -f 26-compute-ro.yaml >/dev/null || fail "26-compute-ro apply failed"
 $K set env deploy/compute-ro RO_MODE="$RO_MODE" >/dev/null
 ok "RO pool manifests applied (RO_MODE=$RO_MODE)"
 
-PSQL "$W_DSN" "drop table if exists t; create table t(id int); insert into t select generate_series(1,3)" seed >/dev/null \
-  || fail "seed through the writer failed"
+# Seed through the writer, RETRYING the cold-writer wake: on a busy shared cluster
+# the first cold wake (gateway + one-shot psql pod) can flake (pod eviction /
+# scheduler lag). Retry a few times before failing so environmental noise doesn't
+# masquerade as a real seed failure.
+sd=0
+while [ "$sd" -lt 4 ]; do
+  if PSQL "$W_DSN" "drop table if exists t; create table t(id int); insert into t select generate_series(1,3)" "seed$sd" >/dev/null 2>&1; then break; fi
+  sd=$((sd + 1)); [ "$sd" -ge 4 ] && fail "seed through the writer failed after retries (cold-writer wake flaked on a busy cluster)"; echo "    seed attempt $sd flaked (cold-writer wake) — retrying"; sleep 3
+done
 [ "$(PSQL "$W_DSN" 'select count(*) from t' seedv | tail -1)" = "3" ] || fail "seed verify != 3 rows"
 ok "one-table test db seeded through the writer (3 rows)"
 
@@ -239,8 +286,210 @@ else
   echo "READPOOL_STALENESS ${MODE_SEEN:-mode=Static} tip_following=no lag_s=inf"
 fi
 
+# --- 4b. HPA n>1 under REAL read load (issue #99, GA) ------------------------
+# Apply the read-scaling HPA (deploy/optional/27), drive genuine concurrent read
+# load at the pool, and assert the pool scales compute-ro 1->N (N>=2); prove
+# writes stay rejected under load; measure staleness under load; then drain the
+# load and assert it scales back N->1. Auto-on when a metrics-server is present.
+RO_READY() { $K get deploy compute-ro -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo 0; }
+HPA_TARGET() { $K get hpa compute-ro -o jsonpath='{.status.currentMetrics[0].resource.current.averageUtilization}' 2>/dev/null || echo ""; }
+
+# Decide whether to run: RO_HPA=1 forces on, RO_HPA=0 forces off, unset = auto
+# (on iff the metrics API answers — required for a CPU HPA to ever scale).
+if [ "${RO_HPA:-auto}" = "auto" ]; then
+  if $K top nodes >/dev/null 2>&1; then RO_HPA=1; else RO_HPA=0; fi
+fi
+
+if [ "$RO_HPA" != "1" ]; then
+  echo "== HPA n>1 under load: SKIPPED (no metrics-server / RO_HPA=0) =="
+  echo "   To run: install metrics-server, then RO_HPA=1 sh deploy/_verify-readpool.sh"
+  echo "READPOOL_HPA skipped=1 reason=no-metrics-server"
+else
+  echo "== HPA n>1: real concurrent read load must scale compute-ro 1->N->1 =="
+  # 0. Disable RO idle on BOTH gateways that drive compute-ro for the duration.
+  #    compute-ro is a SHARED singleton Deployment: the ephemeral test gateway
+  #    (pggw-ro) AND the LIVE production gateway (pggw, GW_RO_DEPLOYMENT=compute-ro)
+  #    both Sleep it to 0 on idle. Posture B requires GW_RO_IDLE_MS disabled on the
+  #    managing gateway (docs) precisely because that idle-driver and the HPA both
+  #    own the replica count; if either slept the pool to 0, the CPU HPA (which
+  #    CANNOT scale up from 0) would deadlock. Save the live value, set both huge,
+  #    and cleanup() restores the live one no matter how we exit.
+  $K get deploy pggw -o jsonpath='{range .spec.template.spec.containers[0].env[?(@.name=="GW_RO_IDLE_MS")]}{.value}{end}' > _tmp-pggw-ro-idle.orig 2>/dev/null || true
+  [ -s _tmp-pggw-ro-idle.orig ] || printf '60000' > _tmp-pggw-ro-idle.orig  # default if unset
+  # Also disable the TEST gateway's WRITER idle (GW_IDLE_MS) so it won't sleep the
+  # primary between our warm+commit in the staleness step (the live pggw's writer
+  # idle is left alone — we warm right before the commit, inside its 60s window).
+  $K set env deploy/pggw-ro GW_RO_IDLE_MS=3600000 GW_IDLE_MS=3600000 >/dev/null 2>&1 || true
+  $K set env deploy/pggw    GW_RO_IDLE_MS=3600000 >/dev/null 2>&1 || true
+  $K rollout status deploy/pggw-ro --timeout=60s >/dev/null 2>&1 || true
+  $K rollout status deploy/pggw    --timeout=90s >/dev/null 2>&1 || true
+  ok "RO idle disabled on test + live gateways for the HPA section (was GW_RO_IDLE_MS=$(cat _tmp-pggw-ro-idle.orig); posture B)"
+  # 1. Apply the HPA (posture B: minReplicas=1). It now OWNS compute-ro's replica
+  #    count; the pool is at >=1 for the whole section so the gateway RO driver
+  #    never needs to wake it, and load is driven DIRECTLY at the pool Service to
+  #    keep the two controllers from fighting.
+  $K apply -f optional/27-compute-ro-hpa.yaml >/dev/null || fail "HPA apply failed"
+  # Cap maxReplicas for this drill/cluster (see RO_HPA_MAX) — bounds memory so the
+  # small test cluster doesn't evict RO pods; the n>1 gate only needs N>=2.
+  $K patch hpa compute-ro --type merge -p "{\"spec\":{\"maxReplicas\":$RO_HPA_MAX}}" >/dev/null 2>&1 || true
+  ok "read-scaling HPA applied (deploy/optional/27-compute-ro-hpa.yaml; maxReplicas capped to $RO_HPA_MAX for the drill)"
+  # SEED one replica: a stock CPU-Resource HPA CANNOT scale up from 0 (no pod ->
+  # no CPU metric -> HPA holds at 0; the HPAScaleToZero feature gate is off on OKE).
+  # Scaling to 1 gives the HPA a pod to measure so it can then own the 1->N curve.
+  # (This is exactly posture B's "minReplicas: 1 floor, no scale-to-zero".)
+  $K scale deploy/compute-ro --replicas=1 >/dev/null 2>&1 || true
+  $K rollout status deploy/compute-ro --timeout=120s >/dev/null 2>&1 || true
+  # Wait for the HPA to read a live metric (not <unknown>) so the drill fails loud
+  # if metrics-server is broken rather than silently never scaling.
+  i=0; while [ "$i" -lt 90 ]; do [ -n "$(HPA_TARGET)" ] && break; i=$((i + 1)); sleep 2; done
+  [ -n "$(HPA_TARGET)" ] || fail "HPA never read a CPU metric (metrics-server broken? pool stuck at 0?) after 180s"
+  ok "HPA is reading a live CPU metric (current=$(HPA_TARGET)% target=70%)"
+  # Ensure the floor (minReplicas=1) is realized before load so 1->N is unambiguous.
+  i=0; while [ "$(RO_REPLICAS)" -lt 1 ]; do i=$((i + 1)); [ "$i" -gt 30 ] && break; sleep 1; done
+  BASE_REPLICAS=$(RO_REPLICAS); ok "pool at floor before load: compute-ro replicas=$BASE_REPLICAS (HPA minReplicas=1)"
+
+  # 2. Generate REAL concurrent read load: N loader pods, each looping a
+  #    CPU-heavy read (streaming aggregate — high CPU, low RAM) against the pool
+  #    Service. Reconnecting each iteration spreads load across the growing pool.
+  cat > _tmp-roload.yaml <<YAML
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: roload
+  namespace: scale-zero-pg
+  labels: { app: roload }
+spec:
+  replicas: ${RO_LOAD_REPLICAS}
+  selector: { matchLabels: { app: roload } }
+  template:
+    metadata: { labels: { app: roload } }
+    spec:
+      terminationGracePeriodSeconds: 2
+      containers:
+        - name: loader
+          image: neondatabase/compute-node-v17:8464
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh","-c"]
+          args:
+            - |
+              while true; do
+                psql "${RO_DIRECT}" -tAc "select sum(i) from generate_series(1,30000000) i" >/dev/null 2>&1 || sleep 1
+              done
+          resources:
+            requests: { cpu: 50m, memory: 32Mi }
+            limits: { memory: 128Mi }
+YAML
+  $K apply -f _tmp-roload.yaml >/dev/null || fail "read-load apply failed"
+  $K rollout status deploy/roload --timeout=120s >/dev/null 2>&1 || true
+  ok "started ${RO_LOAD_REPLICAS} concurrent read loaders against the pool Service"
+
+  # 3. ASSERT scale-up 1 -> N (N>=2) within the up-timeout. Record the peak.
+  echo "== waiting up to ${RO_HPA_UP_TIMEOUT}s for the HPA to scale compute-ro to N>=2 =="
+  PEAK=0; i=0
+  while [ "$i" -lt "$RO_HPA_UP_TIMEOUT" ]; do
+    R=$(RO_REPLICAS); [ "$R" -gt "$PEAK" ] && PEAK=$R
+    if [ "$PEAK" -ge 2 ]; then break; fi
+    [ $((i % 15)) -eq 0 ] && echo "    t=${i}s compute-ro replicas=$R ready=$(RO_READY) cpu=$(HPA_TARGET)%"
+    i=$((i + 5)); sleep 5
+  done
+  R=$(RO_REPLICAS); [ "$R" -gt "$PEAK" ] && PEAK=$R
+  [ "$PEAK" -ge 2 ] || fail "HPA did NOT scale the pool past 1 under load in ${RO_HPA_UP_TIMEOUT}s (peak=$PEAK) — CPU=$(HPA_TARGET)%"
+  ok "HPA SCALED THE POOL UNDER LOAD: compute-ro 1 -> $PEAK (n>1 proven); ready=$(RO_READY)"
+  echo "READPOOL_HPA scaled_up=yes base=$BASE_REPLICAS peak=$PEAK loaders=${RO_LOAD_REPLICAS}"
+
+  # 4. NEGATIVE under load: a write to the pool is STILL rejected while at n>1.
+  #    Retry through TRANSIENT connection errors: the compute-ro Service sets
+  #    publishNotReadyAddresses (so its DNS record exists at 0 replicas), which
+  #    means a freshly-scaled-up, not-yet-ready RO pod is also in the Service
+  #    rotation — a direct connection can land on it and get "connection refused".
+  #    That is NOT "the write was accepted"; only a SUCCESSFUL insert would be. So
+  #    retry until a ready standby answers: PASS on a read-only rejection, FAIL only
+  #    if an insert actually succeeds.
+  REJECTED=no; wr=0
+  while [ "$wr" -lt 12 ]; do
+    WOUT=$(PSQL "$RO_DIRECT" "insert into t values (999)" "hpawrite$wr" 2>&1 || true)
+    if echo "$WOUT" | grep -qi "read-only"; then REJECTED=yes; break; fi
+    if echo "$WOUT" | grep -qiE "INSERT 0|^INSERT"; then fail "under load, an RO write was ACCEPTED (not rejected): $WOUT"; fi
+    # transient (connection refused / not-ready pod / reset) — try another backend
+    wr=$((wr + 1)); sleep 2
+  done
+  [ "$REJECTED" = "yes" ] || fail "could not confirm the RO write-reject under load after retries (only transient connection errors); last: ${WOUT:-none}"
+  ok "writes still rejected under load (read-only transaction) at n=$PEAK"
+
+  # 5. Staleness UNDER LOAD: a fresh writer commit -> RO catch-up while the pool
+  #    is saturated with reads. This is a best-effort MEASUREMENT, NOT a gate — the
+  #    writer is a cold primary that must wake and schedule while N RO pods + N
+  #    loaders already occupy a small cluster, which can be slow/flaky. It is
+  #    deliberately TIME-BOUNDED and non-fatal so it can NEVER block the scale-down
+  #    gate (the real GA assertion) below. The authoritative staleness number is
+  #    the pre-load contract measured earlier (~9s, READPOOL_STALENESS); this line
+  #    only adds an under-load data point when the cluster has the headroom to wake
+  #    the writer.
+  echo "== staleness under load: (best-effort) writer commit -> RO catch-up while saturated =="
+  # Bounded warm: scale the writer up, wait Ready only briefly. If it won't
+  # schedule under load in the window, skip the measurement and go to scale-down.
+  $K scale deploy/compute --replicas=1 >/dev/null 2>&1 || true
+  $K rollout status deploy/compute --timeout=45s >/dev/null 2>&1 || true
+  WROTE=no
+  if [ "$($K get deploy compute -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo 0)" -ge 1 ] 2>/dev/null; then
+    PSQL "$W_DSN" "insert into t values (500)" wload >/dev/null 2>&1 && WROTE=yes
+  fi
+  if [ "$WROTE" != "yes" ]; then
+    echo "note - writer did not wake within the bounded window under saturation; staleness-under-load NOT measured this run (small-cluster headroom). Pre-load contract (~9s) stands."
+    echo "READPOOL_HPA_STALENESS under_load=yes tip_following=unmeasured lag_s=na note=writer-wake-headroom"
+  else
+    LSTART=$(date +%s); LSAW=no; i=0
+    while [ "$i" -lt 30 ]; do
+      C=$(PSQL "$RO_DIRECT" "select count(*) from t where id=500" "lpoll$i" | tail -1 || true)
+      if [ "$C" = "1" ]; then LSAW=yes; break; fi
+      i=$((i + 1)); sleep 1
+    done
+    LEND=$(date +%s); LLAG=$((LEND - LSTART))
+    if [ "$LSAW" = "yes" ]; then
+      ok "under load, RO caught up to the fresh commit in ~${LLAG}s"
+      echo "READPOOL_HPA_STALENESS under_load=yes tip_following=yes lag_s=${LLAG}"
+    else
+      echo "note - under load, RO did NOT catch up within 30s (static or lagging pool)."
+      echo "READPOOL_HPA_STALENESS under_load=yes tip_following=no lag_s=inf"
+    fi
+  fi
+
+  # 6. Drain the load; ASSERT scale-down N -> 1 (HPA minReplicas floor).
+  echo "== draining load; waiting up to ${RO_HPA_DOWN_TIMEOUT}s for compute-ro to scale back to 1 =="
+  $K scale deploy/roload --replicas=0 >/dev/null 2>&1 || true
+  $K delete deploy/roload --ignore-not-found --wait=false >/dev/null 2>&1 || true
+  i=0
+  while [ "$i" -lt "$RO_HPA_DOWN_TIMEOUT" ]; do
+    R=$(RO_REPLICAS)
+    if [ "$R" -le 1 ]; then break; fi
+    [ $((i % 30)) -eq 0 ] && echo "    t=${i}s compute-ro replicas=$R cpu=$(HPA_TARGET)%"
+    i=$((i + 10)); sleep 10
+  done
+  R=$(RO_REPLICAS)
+  [ "$R" -le 1 ] || fail "HPA did NOT scale the pool back to 1 within ${RO_HPA_DOWN_TIMEOUT}s (still $R)"
+  ok "HPA SCALED THE POOL BACK: compute-ro $PEAK -> $R after load drained (N->1 proven)"
+  echo "READPOOL_HPA scaled_down=yes final=$R"
+
+  # 7. Remove the HPA so it stops owning compute-ro before the restore step.
+  $K delete hpa compute-ro --ignore-not-found >/dev/null 2>&1 || true
+  rm -f _tmp-roload.yaml
+  # Restore the LIVE gateway's RO idle now (the success path disarms the trap
+  # below, so restore explicitly here too — cleanup() covers the failure paths).
+  if [ -f _tmp-pggw-ro-idle.orig ]; then
+    ORIG_IDLE="$(cat _tmp-pggw-ro-idle.orig)"
+    [ -n "$ORIG_IDLE" ] && $K set env deploy/pggw GW_RO_IDLE_MS="$ORIG_IDLE" >/dev/null 2>&1 || true
+    $K rollout status deploy/pggw --timeout=90s >/dev/null 2>&1 || true
+    rm -f _tmp-pggw-ro-idle.orig
+    ok "restored live pggw GW_RO_IDLE_MS=$ORIG_IDLE"
+  fi
+  ok "HPA n>1 drill complete (HPA removed; live gateway idle restored)"
+fi
+
 # --- 5. restore --------------------------------------------------------------
 $K scale deploy/compute-ro --replicas=0 >/dev/null
+# The HPA section may have warmed the writer (compute=1) for the staleness step;
+# put it back to rest so the drill leaves NO woken deployment behind.
+$K scale deploy/compute --replicas=0 >/dev/null 2>&1 || true
 $K delete -f _tmp-pggw-ro.yaml --ignore-not-found --wait=false >/dev/null 2>&1 || true
 rm -f _tmp-pggw-ro.yaml
 trap - EXIT

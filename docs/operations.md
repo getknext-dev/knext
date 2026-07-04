@@ -1161,15 +1161,28 @@ you actually got.
 
 **Scaling N>1 — the HPA vs scale-to-zero tension.** The gateway RO driver and an
 HPA both want to own `compute-ro`'s replica count, so pick ONE posture
-(`deploy/27-compute-ro-hpa.yaml.optional` documents all three):
+(`deploy/optional/27-compute-ro-hpa.yaml` documents all three):
 
 - **A — gateway-managed 0↔N (default):** no HPA. Full scale-to-zero; wakes to a
-  fixed `GW_RO_WAKE_REPLICAS`. Simplest.
-- **B — HPA-managed 1↔N:** apply `deploy/27`, and set `GW_RO_IDLE_MS=0` so the
+  fixed `GW_RO_WAKE_REPLICAS`. Simplest. This is the **default** posture — the
+  HPA lives under `deploy/optional/` so `kubectl apply -f deploy/` (non-recursive)
+  never applies it, keeping the pool at zero cost at rest.
+- **B — HPA-managed 1↔N (GA'd in #99):** apply
+  `deploy/optional/27-compute-ro-hpa.yaml`, and set `GW_RO_IDLE_MS=0` so the
   gateway never sleeps the pool (the HPA's `minReplicas: 1` floor means **no**
   scale-to-zero — one replica costs RAM 24/7). Load drives N.
+  **Prerequisite: a metrics-server** (the `metrics.k8s.io` API) for the CPU metric
+  to resolve — install with
+  `kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml`.
 - **C — zero-cost AND elastic:** KEDA (`deploy/40` pattern) with a connections
   trigger and `minReplicaCount: 0`. Documented upgrade path.
+
+**GA drill — n>1 under real load.** `deploy/_verify-readpool.sh` auto-runs an HPA
+section (when a metrics-server is present; force with `RO_HPA=1`): it applies the
+HPA, drives real concurrent read load at the pool Service, **asserts compute-ro
+scales 1→N (N≥2)**, re-checks that writes are still rejected and re-measures
+staleness under load, then drains the load and **asserts it scales back N→1**.
+Numbers: [BENCHMARKS](BENCHMARKS.md#read-only-pool-under-load-hpa-n1-issue-99).
 
 > Note: the RO gateway lane serves the Postgres wire but does **not** yet export
 > its own Prometheus metrics port (the writer lane owns `:9090`). RO wake/latency

@@ -219,6 +219,65 @@ supports a read-only endpoint that streams WAL from the safekeepers and tracks
 the timeline tip (not merely a static-at-attach LSN). The `Static` fixed-LSN path
 remains the honest fallback (`RO_MODE=Static`).
 
+## Read-only pool under load (HPA n>1, issue #99)
+
+The GA gate for read-scaling: with the read-scaling HPA
+(`deploy/optional/27-compute-ro-hpa.yaml`, posture B, `minReplicas: 1`) applied,
+**real concurrent read load drives `compute-ro` past one replica and it drains
+back down** when the load stops. Verified **live on OKE, 2026-07-04** by
+`deploy/_verify-readpool.sh` (its `RO_HPA` section, auto-on when a metrics-server
+is present), on the **v0.6.1 release gateway**
+(`v0.6.1@sha256:12a73533…`, `KSPG_SKIP_BUILD=1`, `RO_MODE=Replica`). Load = 4
+concurrent in-cluster loaders each looping a CPU-heavy streaming aggregate
+(`select sum(i) from generate_series(1,30000000) i`) against the `compute-ro`
+Service; `maxReplicas` capped to 3 for the 2-node test cluster (the shipped
+manifest ships `maxReplicas: 5`).
+
+| Metric | Result | Evidence |
+|---|---|---|
+| **HPA scale-up under load** | **`compute-ro` 1 → 3** (n>1) | CPU hit **276%** of the 250m request (target 70%); `READPOOL_HPA scaled_up=yes base=1 peak=3 loaders=4` |
+| **Writes rejected while at n>1** | ✅ `read-only transaction` at **n=3** | a write on the RO path is refused even under load + at multiple replicas (retried through not-ready-pod routing) |
+| **HPA scale-down after drain** | **`compute-ro` 3 → 1** | load removed → CPU→4% → HPA drained to the `minReplicas: 1` floor over its 120s stabilization; `READPOOL_HPA scaled_down=yes final=1` |
+| Staleness **under load** | not measured this run (honest) | on the 2-node test cluster the cold writer could not wake within the bounded window while N RO pods + N loaders occupied it; the **pre-load contract (~9 s, above) stands** as the guarantee. `READPOOL_HPA_STALENESS … tip_following=unmeasured note=writer-wake-headroom` |
+
+Operational notes surfaced by the drill (all handled in `_verify-readpool.sh`, and
+they are real properties operators must know — see operations.md posture B):
+- A stock **CPU Resource HPA cannot scale up from 0** (no pod → no metric); posture
+  B's `minReplicas: 1` floor is load-bearing, and the drill seeds 1 replica first.
+- `compute-ro` is a **shared singleton** Deployment that the **live gateway** also
+  idle-scales; posture B therefore requires `GW_RO_IDLE_MS` disabled on the managing
+  gateway (the drill disables it for the section and restores it after) — otherwise
+  the gateway and the HPA fight over the replica count.
+- The `compute-ro` Service sets `publishNotReadyAddresses`, so a freshly-scaled-up,
+  not-yet-ready RO pod is in the Service rotation — clients (and the write-reject
+  check) must tolerate transient `connection refused` during scale-up.
+
+## Combined wake — demo on a per-app database (branch-per-app, KC5 / #99)
+
+The **"capability in real use"** evidence for ADR-0002 kill-criterion 5 (#65/#73):
+the real **pg-demo `NextApp`** was moved OFF the shared primary onto its OWN
+provisioned per-app database — a Neon **branch** (`timeline 73eeba98…`) under the
+apps tenant, its own role `app_pgdemo`, its own `0↔1 compute-pgdemo`, routed by the
+**apps-gateway** (`pggw-apps`) — via `demo/migrate-to-perapp.sh` (which invokes
+`deploy/provision-app.sh` read-only). Then the standard demo drill
+(`DB_DEPLOY=compute-pgdemo DB_PREWAKE=0 ITERS=3 bash demo/_verify.sh`) proved the
+north star end-to-end on that per-app DB. Measured **live on OKE, 2026-07-04**:
+
+| Class | i1 | i2 | i3 | What it shows |
+|---|---|---|---|---|
+| **`T_both`** (app + per-app DB both asleep → one cold request wakes both) | 25.6 s | 14.8 s | 15.4 s | **all three `db-backed=yes`, HTTP 200** — a real knext app on its own branch-per-app DB, both scaled to zero, woken by a single cold HTTP request, returning rows from Postgres |
+| `T_warm` (both awake) | 0.022 s | 0.025 s | 0.023 s | steady state |
+
+Every iteration started from a **verified resting state** (`app_pods=0 compute-pgdemo=0`,
+both asleep) and returned to it before the next. The combined-cold `T_both` (~15–26 s,
+higher than the shared-primary demo's ~5–9 s) is dominated by the app's Knative cold
+start + the first visitor's `CREATE TABLE IF NOT EXISTS` on a fresh branch + a busy
+2-node cluster — **not** the bare DB wake (branch-per-app provisioning itself is ~6 s,
+[above](#branch-per-app-provisioning-adr-0003)); `DB_PREWAKE=0` skips the shared-gateway
+`T_appcold` isolation because a per-app DB authenticates as `app_<app>`, not `cloud_admin`.
+This is DB-per-app serving a real knext app, sleeping and waking, end-to-end — the KC5
+Neon-capability-in-real-use demonstration.
+
 ## Cold + warm OKE baseline, n=20 (issue #9)
 
 Measured **2026-07-04 on OKE** with `bakeoff/_run-battery.sh`

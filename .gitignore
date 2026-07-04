@@ -3,3 +3,6 @@ graphify-out/
 .DS_Store
 *.log
 local/.data/
+
+# read-pool drill scratch (deploy/_verify-readpool.sh)
+deploy/_tmp-*

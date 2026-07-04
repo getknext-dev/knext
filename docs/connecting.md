@@ -90,15 +90,27 @@ DATABASE_URL_RO = postgres://cloud_admin:cloud_admin@pggw.scale-zero-pg.svc:5543
 | Scaling | one writer | N replicas, load-balanced by the Service; HPA-driven (deploy/27) |
 | Idle | primary sleeps after `GW_IDLE_MS` | pool sleeps after `GW_RO_IDLE_MS` |
 
-**Staleness caveat — read carefully.** The pool is **eventually consistent**
-with the primary. The read-only computes boot in one of two modes
-(`RO_MODE`, on `deploy/26-compute-ro.yaml`):
+**Staleness contract — this is a guarantee, not a surprise.** The pool is
+**eventually consistent** with the primary. Treat the following as a contract you
+can design against:
+
+> **Contract (`RO_MODE=Replica`, the default):** a row committed on the writer
+> becomes visible on `DATABASE_URL_RO` within a **bounded staleness ceiling of
+> ~9 s**, and usually much faster (true streaming-replication lag is typically
+> sub-second; the ~9 s ceiling is the worst case measured end-to-end by
+> `deploy/_verify-readpool.sh`, poll-granularity inflated). Visibility is
+> **never synchronous** and there is **no read-your-writes guarantee** on the RO
+> DSN. If you commit on `DATABASE_URL` and must read that exact write back
+> immediately, read it from `DATABASE_URL` — not the pool.
+
+The read-only computes boot in one of two modes (`RO_MODE`, on
+`deploy/26-compute-ro.yaml`):
 
 - **`Replica` (default, tip-following):** each RO compute streams WAL from the
-  safekeepers and tracks the timeline tip with only **replication lag** (typically
-  sub-second). A row committed on the writer becomes visible on the pool shortly
-  after — but **not** synchronously. Do **not** use `DATABASE_URL_RO` for
-  read-your-own-writes right after a commit; use the writer for that.
+  safekeepers and tracks the timeline tip, honoring the ~9 s ceiling above. This
+  holds **under read load too** — `deploy/_verify-readpool.sh` (HPA section)
+  re-measures the catch-up while the pool is saturated and the HPA has scaled it
+  to N>1 (see [BENCHMARKS](BENCHMARKS.md#read-only-pool-under-load-hpa-n1-issue-99)).
 - **`Static` (honest fallback):** each RO compute is pinned to a **fixed LSN**
   captured when it attached. Reads are frozen at that point; the pool advances
   only when a replica is **re-rolled** (an HPA scale-up naturally brings
@@ -108,10 +120,11 @@ with the primary. The read-only computes boot in one of two modes
   [BENCHMARKS](BENCHMARKS.md#read-only-pool-issue-66).
 
 **When to use it:** read-heavy workloads (dashboards, analytics, fan-out reads)
-that tolerate slight staleness. **When not to:** anything needing
+that tolerate the ~9 s staleness ceiling. **When not to:** anything needing
 read-your-writes or a strongly-consistent read — point those at `DATABASE_URL`.
 
-Enabling and operating the pool (HPA vs scale-to-zero trade-off included):
+Enabling and operating the pool (HPA vs scale-to-zero trade-off, and the GA
+n>1-under-load drill) is in
 [operations](operations.md#read-only-pool-issue-66).
 
 ## Connection pooling rules

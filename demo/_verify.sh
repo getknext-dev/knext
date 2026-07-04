@@ -24,6 +24,16 @@ set -uo pipefail
 NS_APP=knext-demo
 NS_DB=scale-zero-pg
 APP=pg-demo
+# DB_DEPLOY: which scale-to-zero compute the app is bound to — the one we OBSERVE
+# for 0-replica rest. Default `compute` (the shared primary). Set to
+# `compute-<app>` when the demo has been migrated onto a per-app database
+# (branch-per-app, KC5/#99 — see migrate-to-perapp.sh + README).
+DB_DEPLOY="${DB_DEPLOY:-compute}"
+# DB_PREWAKE: run the bare-DB psql cold-connect reference + the T_appcold
+# (app-cold-only) isolation class. Requires reachable cloud_admin creds on the
+# shared gateway — set DB_PREWAKE=0 for a per-app DB (its role is app_<app>, not
+# cloud_admin, and the T_both headline is what the per-app proof needs anyway).
+DB_PREWAKE="${DB_PREWAKE:-1}"
 # KSVC_HOST is the Host header Knative routes on. It is DERIVED at runtime
 # (issue #40) — never hardcode a cluster's LB IP. Override with KSVC_HOST=... .
 KSVC_HOST="${KSVC_HOST:-}"
@@ -76,7 +86,7 @@ cleanup() {
 trap cleanup EXIT
 
 app_pods()   { kubectl -n "$NS_APP" get pod -l serving.knative.dev/service="$APP" --no-headers 2>/dev/null | grep -c Running; }
-db_replicas(){ kubectl -n "$NS_DB" get deploy compute -o jsonpath='{.spec.replicas}' 2>/dev/null; }
+db_replicas(){ kubectl -n "$NS_DB" get deploy "$DB_DEPLOY" -o jsonpath='{.spec.replicas}' 2>/dev/null; }
 
 wait_for_zero() {
   # Wait until BOTH the app (0 running pods) and the DB (0 compute replicas) are asleep.
@@ -134,6 +144,7 @@ resolve_ksvc_host
 say "ksvc:     $(kubectl -n "$NS_APP" get ksvc "$APP" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null) (Ready)"
 say "operator: $(kubectl -n kn-next-operator-system get deploy kn-next-operator-controller-manager -o jsonpath='{.status.readyReplicas}' 2>/dev/null)/1 ready"
 say "GW_IDLE_MS=$(kubectl -n "$NS_DB" get deploy pggw -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="GW_IDLE_MS")].value}' 2>/dev/null)"
+say "DB observed: deploy/$DB_DEPLOY (0-replica rest) — $([[ "$DB_DEPLOY" == compute ]] && echo 'shared primary' || echo 'per-app database, branch-per-app KC5/#99')"
 ensure_drivers
 hr
 
@@ -159,12 +170,18 @@ for ((i=1; i<=ITERS; i++)); do
   wait_for_zero
 
   # --- APP-COLD-ONLY: pre-wake the DB via psql, then hit the cold app ---------
-  dbw=$(db_wake_probe)
-  say "  (bare DB cold-connect via gateway: ${dbw}s)"
-  [[ -n "$dbw" ]] && dbonly+=("$dbw")
-  read -r code3 ttfb3 <<<"$(http_probe)"     # DB already warm, app still cold
-  say "  T_appcold  HTTP $code3  ttfb=${ttfb3}s  (app cold, DB pre-warmed)"
-  [[ "$code3" == "200" ]] && appcold+=("$ttfb3")
+  # Skipped for a per-app DB (DB_PREWAKE=0): the bare psql probe assumes
+  # cloud_admin on the shared gateway; a per-app DB authenticates as app_<app>.
+  if [[ "$DB_PREWAKE" == "1" ]]; then
+    dbw=$(db_wake_probe)
+    say "  (bare DB cold-connect via gateway: ${dbw}s)"
+    [[ -n "$dbw" ]] && dbonly+=("$dbw")
+    read -r code3 ttfb3 <<<"$(http_probe)"     # DB already warm, app still cold
+    say "  T_appcold  HTTP $code3  ttfb=${ttfb3}s  (app cold, DB pre-warmed)"
+    [[ "$code3" == "200" ]] && appcold+=("$ttfb3")
+  else
+    say "  (T_appcold / bare-DB probe skipped: DB_PREWAKE=0, per-app DB '$DB_DEPLOY')"
+  fi
 
   hr
 done

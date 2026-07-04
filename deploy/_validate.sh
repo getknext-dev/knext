@@ -34,6 +34,18 @@ grep -q 'GW_RO_PORT' 10-gateway.yaml || fail "10-gateway.yaml missing GW_RO_PORT
 grep -q 'GW_RO_DEPLOYMENT' 10-gateway.yaml || fail "10-gateway.yaml missing GW_RO_DEPLOYMENT"
 ok "read-only pool starts at zero + gateway RO lane wired (GW_RO_PORT -> compute-ro)"
 
+# 2c. contract: the read-scaling HPA (issue #99 GA) is a real, valid manifest but
+#     lives under deploy/optional/ so the default `kubectl apply -f deploy/`
+#     (non-recursive) never floors compute-ro at 1 — scale-to-zero stays default.
+HPA=optional/27-compute-ro-hpa.yaml
+[ -f "$HPA" ] || fail "$HPA missing (read-scaling HPA must ship as a real .yaml, not .optional)"
+[ -e 27-compute-ro-hpa.yaml.optional ] && fail "stale 27-compute-ro-hpa.yaml.optional present — GA'd file moved to $HPA"
+[ -e 27-compute-ro-hpa.yaml ] && fail "27-compute-ro-hpa.yaml must live under optional/ (else -f deploy/ auto-applies it)"
+kubectl apply --dry-run=server -f "$HPA" >/dev/null || fail "$HPA does not validate"
+grep -q 'name: compute-ro' "$HPA" || fail "$HPA must target the compute-ro deployment"
+grep -q 'minReplicas: 1' "$HPA" || fail "$HPA posture B must set minReplicas: 1"
+ok "read-scaling HPA ships under optional/ (opt-in, valid, targets compute-ro)"
+
 # 3. contract: gateway RBAC may scale deployments (scale subresource)
 grep -q 'deployments/scale' 10-gateway.yaml || fail "gateway RBAC lacks deployments/scale"
 ok "gateway RBAC includes deployments/scale"

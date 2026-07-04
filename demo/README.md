@@ -70,6 +70,37 @@ the Host header at runtime** from the ksvc's own `.status.url` (issue #40), so i
 reproduces on any cluster with no hardcoded LB IP. Override with
 `KSVC_HOST=... bash demo/_verify.sh` if you route through a custom domain.
 
+## Migrate onto a per-app database (branch-per-app, KC5 / #99)
+
+By default the demo binds the **shared primary** (`pggw` → the single
+`compute` writer, database `postgres`). To exercise the **branch-per-app**
+platform for real — the demo as a real knext app on its **own** Neon branch
+(own timeline, own credential `app_pgdemo`, own `0↔1 compute-pgdemo`), routed by
+the **apps-gateway** (`pggw-apps`) — migrate it:
+
+```sh
+# provisions a per-app DB (invokes deploy/provision-app.sh), then rewrites the
+# demo's DATABASE_URL Secret to the minted per-app DSN. App is at 0, so the NEXT
+# cold request picks up the new DSN (operator injects it via secretKeyRef).
+demo/migrate-to-perapp.sh migrate pgdemo
+demo/migrate-to-perapp.sh show pgdemo        # print current vs per-app DSN (pw redacted)
+
+# prove the loop end-to-end on the per-app DB (both app + compute-pgdemo asleep →
+# one cold request wakes both → data returns → idle → both back to 0):
+ITERS=3 bash demo/_verify.sh
+
+# revert to the shared primary:
+demo/migrate-to-perapp.sh restore
+```
+
+After migration the DSN is `postgres://app_pgdemo:<pw>@pggw-apps.scale-zero-pg.svc:55432/pgdemo`
+— note the **apps-gateway** host, the **per-app role** (`app_pgdemo`, not
+`cloud_admin`), and the **database = app name** (`pgdemo`, which routes to
+`compute-pgdemo`). The per-app password is minted at provision time, so it is
+wired at runtime by the helper rather than committed. This is the KC5 "capability
+in real use" evidence (`docs/BENCHMARKS.md` → *Demo on a per-app database*;
+comment on issues #65/#73).
+
 ## The measurement
 
 `_verify.sh` proves the loop N times and separates three request classes so the

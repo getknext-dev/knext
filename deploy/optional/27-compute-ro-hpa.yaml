@@ -1,5 +1,22 @@
-# OPTIONAL — HorizontalPodAutoscaler for the read-only pool (issue #66).
-# Rename to .yaml and `kubectl apply` to let load drive N>1 read replicas.
+# HorizontalPodAutoscaler for the read-only pool (issue #66; GA'd in #99).
+# `kubectl apply` this to let load drive N>1 read replicas. GA status: this is a
+# SUPPORTED, DRILLED posture — `deploy/_verify-readpool.sh` (RO_HPA=1, auto-on
+# when metrics-server is present) proves the pool scales compute-ro 1→N under
+# real concurrent read load and back to 1 when the load drains. Numbers:
+# BENCHMARKS.md "Read-only pool under load (HPA n>1)".
+#
+# PREREQUISITE: a metrics-server (the metrics.k8s.io API) must be installed for
+# the CPU Resource metric below to resolve; without it the HPA reports
+# `<unknown>` targets and never scales. Install:
+#   kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml
+#
+# WHY deploy/optional/ (opt-in, NOT applied by the default install): applying
+# this HPA floors compute-ro at minReplicas=1 — one read replica costs RAM 24/7,
+# which contradicts the platform's scale-to-zero default (connecting.md: the RO
+# pool is "off by default, replicas 0"). Living under deploy/optional/ keeps it
+# OUT of `kubectl apply -f deploy/` (non-recursive), so the default posture stays
+# gateway-managed 0↔N. Enable read-scaling deliberately:
+#   kubectl -n scale-zero-pg apply -f deploy/optional/27-compute-ro-hpa.yaml
 #
 # ── The scale-to-zero vs HPA tension (read this before enabling) ────────────
 # An HPA OWNS the Deployment's replica count between minReplicas and
