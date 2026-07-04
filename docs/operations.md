@@ -825,6 +825,99 @@ kubectl -n scale-zero-pg get pods -l app=compute -w
 kubectl -n scale-zero-pg logs -l app=pggw -f --prefix | grep 'gw]'
 ```
 
+## Read-only pool (issue #66)
+
+The read-only pool (`deploy/26-compute-ro.yaml`) is a set of read-only computes
+on the primary's timeline, fronted by the gateway's second listener
+(`GW_RO_PORT`, default `55434`). Apps reach it via `DATABASE_URL_RO`
+([connecting](connecting.md#scaling-reads-database_url_ro-opt-in-read-only-pool)).
+It is **off by default** (`replicas: 0`) and needs no single-writer ceremony —
+read-only computes coordinate nothing.
+
+**Lifecycle:** a read connection on `GW_RO_PORT` scales `compute-ro`
+`0 → GW_RO_WAKE_REPLICAS`; `GW_RO_IDLE_MS` with no RO connections scales it back
+to `0`. The gateway RO lane is a copy of the writer lane (same wake/idle/peer/TLS
+code) built from `GW_RO_*` env — remove `GW_RO_PORT` to disable it entirely.
+
+```sh
+# enable the pool (bring it online once so it's schedulable), then let idle sleep it
+kubectl -n scale-zero-pg apply -f deploy/26-compute-ro.yaml
+# choose tip-following (default) or the fixed-LSN fallback
+kubectl -n scale-zero-pg set env deploy/compute-ro RO_MODE=Replica   # or Static
+# drill it: RO wakes only the pool, reflects committed data, rejects writes, staleness
+RO_MODE=Replica sh deploy/_verify-readpool.sh
+```
+
+**`RO_MODE`:** `Replica` = tip-following hot standby (goal; reads track the writer
+with replication lag). `Static` = pinned at the LSN the `resolve-lsn` initContainer
+captured at attach (frozen; advances only on pod re-roll). The drill prints
+`READPOOL_STALENESS mode=… tip_following=yes|no lag_s=…` — that line records which
+you actually got.
+
+**Scaling N>1 — the HPA vs scale-to-zero tension.** The gateway RO driver and an
+HPA both want to own `compute-ro`'s replica count, so pick ONE posture
+(`deploy/27-compute-ro-hpa.yaml.optional` documents all three):
+
+- **A — gateway-managed 0↔N (default):** no HPA. Full scale-to-zero; wakes to a
+  fixed `GW_RO_WAKE_REPLICAS`. Simplest.
+- **B — HPA-managed 1↔N:** apply `deploy/27`, and set `GW_RO_IDLE_MS=0` so the
+  gateway never sleeps the pool (the HPA's `minReplicas: 1` floor means **no**
+  scale-to-zero — one replica costs RAM 24/7). Load drives N.
+- **C — zero-cost AND elastic:** KEDA (`deploy/40` pattern) with a connections
+  trigger and `minReplicaCount: 0`. Documented upgrade path.
+
+> Note: the RO gateway lane serves the Postgres wire but does **not** yet export
+> its own Prometheus metrics port (the writer lane owns `:9090`). RO wake/latency
+> metrics are a follow-up; the drill is the current source of truth.
+
+## Vertical resize of the writer — in-place pod resize (issue #67)
+
+Neon-cloud parity: grow/shrink the **running** writer's CPU/RAM without a
+restart, using Kubernetes **in-place pod resize** (`--subresource resize`).
+**Verdict: FEASIBLE on OKE — verified live on v1.33.10, 2026-07-04.** A CPU and a
+memory resize both actuated on a running Postgres pod with `restartCount: 0` and
+an unchanged `pg_postmaster_start_time()` (Postgres never bounced); the container
+cgroup (`cpu.max`, `memory.max`) reflected the new values.
+
+**Recipe (patch cpu and memory SEPARATELY):**
+
+```sh
+# the compute container declares resizePolicy (add to 20-compute.yaml to adopt):
+#   resizePolicy:
+#     - { resourceName: cpu,    restartPolicy: NotRequired }
+#     - { resourceName: memory, restartPolicy: NotRequired }
+
+# CPU up, live, no restart:
+kubectl -n scale-zero-pg patch pod <compute-pod> --subresource resize \
+  --patch '{"spec":{"containers":[{"name":"compute","resources":{"requests":{"cpu":"500m"},"limits":{"cpu":"1"}}}]}}'
+# memory up, live, no restart:
+kubectl -n scale-zero-pg patch pod <compute-pod> --subresource resize \
+  --patch '{"spec":{"containers":[{"name":"compute","resources":{"requests":{"memory":"512Mi"},"limits":{"memory":"1Gi"}}}]}}'
+# confirm actuation (NOT just the spec) + no restart:
+kubectl -n scale-zero-pg get pod <compute-pod> \
+  -o jsonpath='{.status.containerStatuses[0].resources} restarts={.status.containerStatuses[0].restartCount}{"\n"}'
+```
+
+**What resize CAN and CANNOT change without a restart:**
+
+| Knob | Live-resizable? | Notes |
+|---|---|---|
+| CPU request/limit | **yes** | cgroup `cpu.max` updates; Postgres uses more cores immediately |
+| Memory request/limit | **yes** | cgroup `memory.max` updates immediately |
+| `shared_buffers` | **no** | fixed at boot — confirmed `show shared_buffers` unchanged after a memory resize. Growing it needs a compute restart (edit the spec in `54-compute-files.yaml`). |
+| `work_mem`, `effective_cache_size`, etc. | yes (SQL) | runtime GUCs — `ALTER SYSTEM … ; SELECT pg_reload_conf();`, independent of the pod resize |
+
+**Gotchas:**
+- Combining cpu+memory+limits in a **single** `--type merge` patch returned
+  `Forbidden: only cpu and memory resources are mutable` — patch **per resource**
+  (default strategic merge) instead. That is the working recipe above.
+- A resize the node can't fit is **deferred**, not failed:
+  `PodResizePending: Deferred — Node didn't have enough resource: cpu`. The
+  kubelet actuates it when capacity frees up. Check the `PodResizePending`
+  condition before assuming success; size the request to node headroom.
+- A metric-driven auto-resizer (the NeonVM analogue) is a future build — the
+  mechanism above is the manual/scriptable primitive it would use.
+
 ## Troubleshooting
 
 | Symptom | Likely cause / fix |

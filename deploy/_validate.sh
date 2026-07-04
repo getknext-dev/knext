@@ -26,6 +26,14 @@ done
 grep -q 'replicas: 0' 20-compute.yaml || fail "20-compute.yaml must set replicas: 0"
 ok "compute starts at zero"
 
+# 2b. contract: the read-only pool (issue #66) starts at zero and the gateway
+#     serves a second RO DSN lane pointed at it.
+grep -q 'replicas: 0' 26-compute-ro.yaml || fail "26-compute-ro.yaml must set replicas: 0"
+grep -q 'name: compute-ro' 26-compute-ro.yaml || fail "26-compute-ro.yaml missing the compute-ro Service"
+grep -q 'GW_RO_PORT' 10-gateway.yaml || fail "10-gateway.yaml missing GW_RO_PORT (RO pool lane)"
+grep -q 'GW_RO_DEPLOYMENT' 10-gateway.yaml || fail "10-gateway.yaml missing GW_RO_DEPLOYMENT"
+ok "read-only pool starts at zero + gateway RO lane wired (GW_RO_PORT -> compute-ro)"
+
 # 3. contract: gateway RBAC may scale deployments (scale subresource)
 grep -q 'deployments/scale' 10-gateway.yaml || fail "gateway RBAC lacks deployments/scale"
 ok "gateway RBAC includes deployments/scale"
@@ -54,7 +62,7 @@ done
 ok "storage pods set resource requests + limits"
 
 # 8. contract: storage + compute cap ReplicaSet/controller history (no churn).
-for f in 20-compute.yaml 50-minio.yaml 51-storage-broker.yaml 52-safekeeper.yaml 53-pageserver.yaml; do
+for f in 20-compute.yaml 26-compute-ro.yaml 50-minio.yaml 51-storage-broker.yaml 52-safekeeper.yaml 53-pageserver.yaml; do
   grep -q 'revisionHistoryLimit:' "$f" || fail "$f lacks revisionHistoryLimit"
 done
 ok "compute + storage cap controller revision history"
@@ -102,9 +110,12 @@ echo "deploy validation: all checks passed"
 #     #3; the pageserver wire protocol has no cross-version guarantee). A tag
 #     drift anywhere fails the build.
 CT=$(grep -o 'neondatabase/compute-node-v[0-9]*:[a-z0-9.]*' 20-compute.yaml | head -1 | cut -d: -f2)
-for f in 51-storage-broker.yaml 52-safekeeper.yaml 53-pageserver.yaml 55-storage-init.yaml 57-pageserver-standby.yaml; do
+for f in 51-storage-broker.yaml 52-safekeeper.yaml 53-pageserver.yaml 55-storage-init.yaml 57-pageserver-standby.yaml 26-compute-ro.yaml; do
   for st in $(grep -o 'neondatabase/neon:[a-z0-9.]*' "$f" | cut -d: -f2 | sort -u); do
     [ "$st" = "$CT" ] || fail "version-pair drift: $f uses neon:$st but compute is :$CT"
+  done
+  for ct in $(grep -o 'neondatabase/compute-node-v[0-9]*:[a-z0-9.]*' "$f" | cut -d: -f2 | sort -u); do
+    [ "$ct" = "$CT" ] || fail "version-pair drift: $f uses compute-node:$ct but writer is :$CT"
   done
 done
 [ -n "$CT" ] || fail "could not extract compute tag from 20-compute.yaml"
@@ -113,7 +124,7 @@ ok "compute↔storage version pair consistent (:$CT everywhere)"
 # 13. contract: every long-running pod declares ephemeral-storage requests
 #     (incident 2026-07-03: pods without them were kubelet's preferred
 #     eviction targets during DiskPressure - the storage plane died first).
-for f in 10-gateway.yaml 20-compute.yaml 25-compute-warm.yaml 50-minio.yaml 51-storage-broker.yaml 52-safekeeper.yaml 53-pageserver.yaml 57-pageserver-standby.yaml 58-pswatcher.yaml 59-kube-state-metrics.yaml 60-prometheus.yaml 61-alertmanager.yaml 62-backup.yaml; do
+for f in 10-gateway.yaml 20-compute.yaml 25-compute-warm.yaml 26-compute-ro.yaml 50-minio.yaml 51-storage-broker.yaml 52-safekeeper.yaml 53-pageserver.yaml 57-pageserver-standby.yaml 58-pswatcher.yaml 59-kube-state-metrics.yaml 60-prometheus.yaml 61-alertmanager.yaml 62-backup.yaml; do
   # must be under requests: (eviction ordering ranks on requests, not limits)
   grep -E 'requests: \{[^}]*ephemeral-storage' "$f" >/dev/null || fail "$f lacks ephemeral-storage under requests:"
 done

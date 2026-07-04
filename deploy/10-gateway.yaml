@@ -59,7 +59,7 @@ spec:
       serviceAccountName: pggw
       containers:
         - name: gateway
-          image: me-abudhabi-1.ocir.io/axfqznklsd2t/ks-pg/gateway:v0.3.1@sha256:92c81f61a595aa6b82fd8c5fcd5d10a9eeea25c0982b94ccc8cfb55fcb17f8bd # OCIR, digest-pinned (issue #56; tag kept for provenance)
+          image: me-abudhabi-1.ocir.io/axfqznklsd2t/ks-pg/gateway:iter9-ro-ef543a5@sha256:ab35d2a1279f953d06845c3e54c426c6742664ea8be63e0a84ce7a0e02092bcc # OCIR, digest-pinned (issue #56); iter9 RO-pool build (issue #66), verified pre-merge
           imagePullPolicy: IfNotPresent
           # OCIR is private: ocir-pull secret created by deploy/gen-secrets.sh
           env:
@@ -75,6 +75,20 @@ spec:
               value: "compute"
             - name: GW_TARGET
               value: "compute.scale-zero-pg.svc:55433"
+            # Read-only pool lane (issue #66): a second listener that routes the
+            # DATABASE_URL_RO DSN to the compute-ro pool (0->N->0). Reuses the
+            # same RBAC (deployments/scale), TLS, and idle machinery. Remove
+            # GW_RO_PORT to disable the RO lane entirely.
+            - name: GW_RO_PORT
+              value: "55434"
+            - name: GW_RO_DEPLOYMENT
+              value: "compute-ro"
+            - name: GW_RO_TARGET
+              value: "compute-ro.scale-zero-pg.svc:55433"
+            - name: GW_RO_WAKE_REPLICAS
+              value: "1" # wake brings 1 replica online; HPA (deploy/27) grows N under load
+            - name: GW_RO_IDLE_MS
+              value: "60000" # RO pool idle window; set 0 if an HPA owns compute-ro (deploy/27 posture B)
             - name: GW_IDLE_MS
               value: "60000" # demo-friendly idle window; production: 300000+
             - name: GW_WAKE_TIMEOUT_MS
@@ -99,6 +113,7 @@ spec:
               readOnly: true
           ports:
             - { name: pg, containerPort: 55432 }
+            - { name: ro-pg, containerPort: 55434 } # read-only pool DSN (issue #66)
             - { name: metrics, containerPort: 9090 }
           readinessProbe:
             httpGet: { path: /healthz, port: metrics }
@@ -128,6 +143,7 @@ spec:
   selector: { app: pggw }
   ports:
     - { name: pg, port: 55432, targetPort: pg }
+    - { name: ro-pg, port: 55434, targetPort: ro-pg } # DATABASE_URL_RO (issue #66)
     - { name: metrics, port: 9090, targetPort: metrics }
 ---
 # External front door: exposes ONLY the Postgres wire port. 9090 is deliberately
@@ -144,3 +160,4 @@ spec:
   selector: { app: pggw }
   ports:
     - { name: pg, port: 55432, targetPort: pg }
+    - { name: ro-pg, port: 55434, targetPort: ro-pg } # DATABASE_URL_RO (issue #66)

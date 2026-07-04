@@ -126,18 +126,23 @@ func (d *execDriver) Wake(context.Context, Target) error  { return sh(d.wakeCmd)
 func (d *execDriver) Sleep(context.Context, Target) error { return sh(d.sleepCmd) }
 func (d *execDriver) CanSleep() bool                      { return d.sleepCmd != "" }
 
-// kubeDriver: scale a single Deployment 0<->1 via the k8s API.
+// kubeDriver: scale a Deployment 0<->wakeReplicas via the k8s API. The writer
+// keeps wakeReplicas=1 (single-writer); the read-only pool sets it higher to
+// bring N replicas online on wake. When an HPA owns the Deployment it manages
+// the count between wakeReplicas and its own max while traffic flows; Sleep
+// still returns the pool all the way to 0 on idle (see ROEnv + 26-compute-ro).
 type kubeDriver struct {
-	t          Target
-	namespace  string
-	deployment string
-	scaler     Scaler
+	t            Target
+	namespace    string
+	deployment   string
+	wakeReplicas int32
+	scaler       Scaler
 }
 
 func (d *kubeDriver) Mode() string          { return "kubectl" }
 func (d *kubeDriver) Resolve(string) Target { return d.t }
 func (d *kubeDriver) Wake(ctx context.Context, _ Target) error {
-	return d.scaler.Scale(ctx, d.namespace, d.deployment, 1)
+	return d.scaler.Scale(ctx, d.namespace, d.deployment, d.wakeReplicas)
 }
 func (d *kubeDriver) Sleep(ctx context.Context, _ Target) error {
 	return d.scaler.Scale(ctx, d.namespace, d.deployment, 0)
@@ -199,11 +204,16 @@ func MakeDriverWithScaler(env Env, scaler Scaler) (Driver, error) {
 		}
 		deployment := env.get("GW_K8S_DEPLOYMENT", "compute")
 		host, port := ParseHostPort(env.get("GW_TARGET", fmt.Sprintf("%s.%s.svc:55432", deployment, ns)), defPort)
+		wake, err := strconv.Atoi(env.get("GW_WAKE_REPLICAS", "1"))
+		if err != nil || wake < 1 {
+			wake = 1
+		}
 		return &kubeDriver{
-			t:          Target{Host: host, Port: port, Key: ns + "/" + deployment},
-			namespace:  ns,
-			deployment: deployment,
-			scaler:     scaler,
+			t:            Target{Host: host, Port: port, Key: ns + "/" + deployment},
+			namespace:    ns,
+			deployment:   deployment,
+			wakeReplicas: int32(wake),
+			scaler:       scaler,
 		}, nil
 
 	case "template":

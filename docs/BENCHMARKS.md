@@ -10,7 +10,7 @@ k8s on an M-series laptop (decommissioned 2026-07-03); **OKE** = Oracle OKE
 
 | Metric | Local | OKE | Notes |
 |---|---|---|---|
-| Cold wake (gateway-measured) | **2.43–2.63s** | **2.0–2.95s** (range, 5 runs) | steady state; real p50/p95 lands with issue #9 (n=20). OKE ≈ laptop |
+| Cold wake (gateway-measured) | **2.43–2.63s** | **p50 3.72s / p95 4.14s** (n=20, issue #9) | formal OKE baseline landed 2026-07-04 (see "Cold + warm OKE baseline, n=20"); earlier 5-run range was 2.0–2.95s |
 | Cold wake, first-ever boot on node | — | 38s | one-time: 1.3GB compute image pull + cold volume; not steady state |
 | Cold wake before CoreDNS fix | 5.19s | — | headless-Service NXDOMAIN negative-cache masked all pod-side gains |
 | Warm connect (compute already up) | 120–134ms | — | native Postgres latency through the pipe |
@@ -98,6 +98,75 @@ for both repos, so the only images newer than 8464 today are run-ID-tagged CI
 builds — `17411840350` is the newest coherent pair. First pull of the multi-GB
 bleeding-edge image took several minutes/node (one-time upgrade cost). Full
 narrative: `docs/operations.md` §"Upgrading the storage plane".
+
+## Vertical in-place resize (issue #67 — Neon-cloud parity spike)
+
+Live-verified on **OKE v1.33.10, 2026-07-04**, using a throwaway `postgres:17-alpine`
+pod (no shared infra touched). In-place pod resize (`kubectl patch --subresource
+resize`) grows/shrinks a **running** container's CPU/RAM without a restart.
+
+| Resize | Actuated live? | Restart? | Postgres bounced? | Evidence |
+|---|---|---|---|---|
+| CPU 100m→120m req / 250m→300m lim | **yes** | no (`restartCount=0`) | no | cgroup `cpu.max` = `30000 100000` (0.3 CPU) |
+| Memory 128Mi→200Mi req / 256Mi→320Mi lim | **yes** | no (`restartCount=0`) | no | cgroup `memory.max` = `335544320` (320Mi) |
+| `shared_buffers` after memory resize | **no** (by design) | — | — | `show shared_buffers` still `128MB` — fixed at boot |
+| CPU 100m→500m (node too full) | **deferred** | no | no | `PodResizePending: Deferred — Node didn't have enough resource: cpu` — kubelet queues it, not a failure |
+
+`pg_postmaster_start_time()` was **identical before and after** every resize —
+Postgres never restarted. **Verdict: FEASIBLE.** Recipe + caveats (patch cpu and
+memory separately; `shared_buffers` needs a restart; runtime GUCs tune via
+`ALTER SYSTEM`): `docs/operations.md` §"Vertical resize of the writer".
+
+## Read-only pool (issue #66)
+
+The read-only pool (`DATABASE_URL_RO` → `compute-ro`, `RO_MODE=Replica` default)
+scales reads 0→N→0 on the primary's timeline. Gateway routing is covered by Go
+table tests (`gateway/internal/wake/ro_test.go`); manifest contracts by
+`deploy/_validate.sh`; end-to-end behaviour by `deploy/_verify-readpool.sh`
+(RO wakes only the pool, reflects committed data, rejects writes, measures
+staleness).
+
+Verified **pre-merge on OKE, 2026-07-04** (`_verify-readpool.sh`, gateway image
+`iter9-ro-ef543a5@sha256:ab35d2a1…` built + pushed to OCIR, `RO_MODE=Replica`):
+
+| Metric | Result | Evidence |
+|---|---|---|
+| **RO mode achieved** | **Replica — TIP-FOLLOWING** (goal, not the static fallback) | `compute-ro` logs `mode=Replica`; `READPOOL_STALENESS mode=Replica tip_following=yes` |
+| RO read wakes only the pool | ✅ primary stayed at **0 pods** through the RO read | drill asserts `compute` pods == 0 during the RO query; pool scaled `0→1` |
+| RO reflects committed data | ✅ 3 seeded rows returned via `DATABASE_URL_RO` | while primary asleep |
+| Write on RO DSN rejected | ✅ `read-only transaction` error; no row leaked | negative assertion |
+| **Staleness (Replica lag)** | **~8 s** writer-commit → RO-visible | a row committed on the writer became visible on the pool within ~8 s (poll granularity + per-poll client-pod spawn inflate this; true replication lag is at/under this bound) |
+
+The pool boots the **tip-following `Replica`** compute mode — compute_ctl 8464
+supports a read-only endpoint that streams WAL from the safekeepers and tracks
+the timeline tip (not merely a static-at-attach LSN). The `Static` fixed-LSN path
+remains the honest fallback (`RO_MODE=Static`).
+
+## Cold + warm OKE baseline, n=20 (issue #9)
+
+Measured **2026-07-04 on OKE** with `bakeoff/_run-battery.sh`
+(`FOUNDATIONS=neon DIMS="cold warm"`, N=20) — the same client-side methodology as
+the bake-off (one in-cluster psql client, connect + `SELECT count(*)` through the
+live `pggw` gateway; cold is deterministic scale-to-zero, confirmed by
+`spec.replicas==0` AND zero pods). This is the formal OKE reference the KC2
+`GatewayWakeLatencyHigh` alert lacked a documented baseline for. Raw CSVs:
+`bakeoff/results/neon-{cold,warm}-oke-rs-n20.csv`.
+
+| Metric | p50 | p95 | p99 | min | max | n |
+|---|---|---|---|---|---|---|
+| **Cold wake** (cold-zero tier: scale-to-zero → connect + query) | **3719 ms** | 4138 ms | 4316 ms | 2747 | 4361 | 20 |
+| **Warm connect** (compute already up: client connect + query) | **818 ms** | 1027 ms | 1217 ms | 721 | 1265 | 20 |
+
+Notes:
+- **Cold p50 3719 ms** corroborates the bake-off's Neon cold cell (3717 ms) —
+  the two independent runs agree. Use **~3.7 s p50 / ~4.1 s p95** as the OKE
+  cold-wake reference for the `GatewayWakeLatencyHigh` threshold.
+- The **warm connect** row is *compute-already-up* end-to-end client latency
+  (psql process start + connect + query from the in-cluster pod), **not** the
+  gated **warm-TIER** pod. The warm-tier gated-pod wake is **413 ms p50 local**
+  and `deploy/_verify-warmtier.sh` proves it stays **< 1.5 s on OKE** (5-sample
+  bounded drill, green); a dedicated gated-pod n=20 on OKE is the one open
+  follow-up on this issue.
 
 ## Capacity / sizing facts
 

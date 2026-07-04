@@ -67,6 +67,53 @@ gate **only** after verifying the cold `compute` deployment is fully drained
 drills this (wake latency, the single-writer refusal, and idle re-park) and is
 part of the test battery.
 
+## Scaling reads: `DATABASE_URL_RO` (opt-in read-only pool)
+
+The writer DSN above is a single primary (single-writer is intrinsic to Neon).
+To scale **reads** horizontally, KS-PG ships an optional **read-only pool** — a
+separate set of read-only computes on the **same** timeline, fronted by a second
+gateway port. Your app opts in with a **two-DSN** pattern; there is **no SQL
+parsing** and nothing is automatic — you decide which queries are reads.
+
+```
+# writes + read-your-writes  (the primary; unchanged)
+DATABASE_URL    = postgres://cloud_admin:cloud_admin@pggw.scale-zero-pg.svc:55432/<db>?sslmode=require
+# read-only queries          (the pool; port 55434)
+DATABASE_URL_RO = postgres://cloud_admin:cloud_admin@pggw.scale-zero-pg.svc:55434/<db>?sslmode=require
+```
+
+| | `DATABASE_URL` (writer) | `DATABASE_URL_RO` (read pool) |
+|---|---|---|
+| Routes to | the single primary compute | the `compute-ro` pool (0→N→0) |
+| Writes | yes | **rejected** — `ERROR: cannot execute … in a read-only transaction` |
+| Wake | wakes the primary | wakes **only** the pool; the primary stays asleep |
+| Scaling | one writer | N replicas, load-balanced by the Service; HPA-driven (deploy/27) |
+| Idle | primary sleeps after `GW_IDLE_MS` | pool sleeps after `GW_RO_IDLE_MS` |
+
+**Staleness caveat — read carefully.** The pool is **eventually consistent**
+with the primary. The read-only computes boot in one of two modes
+(`RO_MODE`, on `deploy/26-compute-ro.yaml`):
+
+- **`Replica` (default, tip-following):** each RO compute streams WAL from the
+  safekeepers and tracks the timeline tip with only **replication lag** (typically
+  sub-second). A row committed on the writer becomes visible on the pool shortly
+  after — but **not** synchronously. Do **not** use `DATABASE_URL_RO` for
+  read-your-own-writes right after a commit; use the writer for that.
+- **`Static` (honest fallback):** each RO compute is pinned to a **fixed LSN**
+  captured when it attached. Reads are frozen at that point; the pool advances
+  only when a replica is **re-rolled** (an HPA scale-up naturally brings
+  fresh-LSN pods online). Use this only where a bounded, known-stale read is
+  acceptable. Which mode you actually get is confirmed by
+  `deploy/_verify-readpool.sh` and recorded in
+  [BENCHMARKS](BENCHMARKS.md#read-only-pool-issue-66).
+
+**When to use it:** read-heavy workloads (dashboards, analytics, fan-out reads)
+that tolerate slight staleness. **When not to:** anything needing
+read-your-writes or a strongly-consistent read — point those at `DATABASE_URL`.
+
+Enabling and operating the pool (HPA vs scale-to-zero trade-off included):
+[operations](operations.md#read-only-pool-issue-66).
+
 ## Connection pooling rules
 
 Pools + scale-to-zero interact in one important way: **idle pooled connections look

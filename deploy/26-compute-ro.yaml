@@ -1,0 +1,124 @@
+# Read-only pool (read-replica pool, issue #66) — the horizontal read-scaling
+# axis. One or more READ-ONLY computes attached to the SAME tenant/timeline as
+# the cold `compute` writer (deploy/20). They serve the DATABASE_URL_RO DSN via
+# the gateway's second listener (GW_RO_PORT). Because they never attach as the
+# single writer, they need NO gate / generation ceremony — unlike the warm tier.
+#
+# LIFECYCLE (gateway kubectl driver, ROEnv-remapped):
+#   asleep: replicas 0 (no RAM reserved)
+#   wake:   a read connection on GW_RO_PORT scales this 0 -> GW_RO_WAKE_REPLICAS
+#   scale:  the OPTIONAL HPA (deploy/27) grows it past wake under load
+#   idle:   GW_RO_IDLE_MS with no RO connections scales it back to 0
+#
+# MODE (RO_MODE env): Replica = tip-following hot standby (goal); Static = pinned
+# at a fixed LSN captured by the resolve-lsn initContainer (honest fallback).
+# See deploy/compute-files/entrypoint-ro.sh and docs/connecting.md.
+#
+# DEFAULT POSTURE: replicas 0 — no read pool cost unless an app opts in by
+# pointing DATABASE_URL_RO at the gateway RO port.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: compute-ro
+  namespace: scale-zero-pg
+  labels: { app: compute-ro }
+spec:
+  replicas: 0 # gateway RO driver scales 0<->N; HPA (deploy/27) grows N under load
+  revisionHistoryLimit: 2
+  selector:
+    matchLabels: { app: compute-ro }
+  strategy:
+    # RollingUpdate (NOT Recreate): read-only computes are NOT single-writer —
+    # many can attach to one timeline at once. This is the whole point of a pool.
+    type: RollingUpdate
+    rollingUpdate: { maxSurge: 1, maxUnavailable: 0 }
+  template:
+    metadata:
+      labels: { app: compute-ro }
+    spec:
+      securityContext:
+        seccompProfile: { type: RuntimeDefault }
+      terminationGracePeriodSeconds: 10
+      initContainers:
+        # Block until the tenant+timeline exist on the pageserver (same guard as
+        # the writer). Runs on the neon image (ships curl); the compute image
+        # does not.
+        - name: wait-timeline
+          image: neondatabase/neon:8464
+          envFrom:
+            - configMapRef: { name: compute-config }
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              PS="http://${PAGESERVER_HOST}:9898"
+              until curl -sf "${PS}/v1/tenant/${TENANT_ID}/timeline" | grep -q "${TIMELINE_ID}"; do
+                echo "waiting for timeline ${TIMELINE_ID} on tenant ${TENANT_ID} ..."; sleep 0.5;
+              done
+              echo "timeline ready"
+        # Resolve the current tip LSN for the RO_MODE=Static fallback. Cheap
+        # (one curl); its output is ONLY read by entrypoint-ro.sh when
+        # RO_MODE=Static, so it is a harmless no-op in the default Replica mode.
+        - name: resolve-lsn
+          image: neondatabase/neon:8464
+          envFrom:
+            - configMapRef: { name: compute-config }
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              PS="http://${PAGESERVER_HOST}:9898"
+              LSN="$(curl -sf "${PS}/v1/tenant/${TENANT_ID}/timeline/${TIMELINE_ID}" \
+                | tr ',' '\n' | grep '"last_record_lsn"' | head -1 | cut -d'"' -f4)"
+              [ -n "$LSN" ] && echo "$LSN" > /ro-lsn/lsn
+              echo "resolved tip LSN = ${LSN:-<none>}"
+          volumeMounts:
+            - { name: ro-lsn, mountPath: /ro-lsn }
+      containers:
+        - name: compute
+          # PINNED as a pair with the storage plane (see 20-compute.yaml).
+          image: neondatabase/compute-node-v17:8464
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "/compute-files/entrypoint-ro.sh"]
+          envFrom:
+            - configMapRef: { name: compute-config } # TENANT_ID, TIMELINE_ID, PAGESERVER_HOST
+          env:
+            # Replica = tip-following (goal); Static = fixed-LSN fallback.
+            - name: RO_MODE
+              value: "Replica"
+          ports:
+            - { name: pg, containerPort: 55433 }
+            - { name: compute-http, containerPort: 3080 }
+          volumeMounts:
+            - { name: compute-files, mountPath: /compute-files } # config.json + entrypoint-ro.sh
+            - { name: ro-lsn, mountPath: /ro-lsn }
+          readinessProbe:
+            tcpSocket: { port: pg }
+            initialDelaySeconds: 0
+            periodSeconds: 1
+            failureThreshold: 60
+          resources:
+            requests: { cpu: 250m, memory: 256Mi, ephemeral-storage: 100Mi }
+            limits: { memory: 1Gi, ephemeral-storage: 1Gi }
+      volumes:
+        - name: compute-files
+          configMap:
+            name: compute-files # deploy/54: config.json + entrypoint-ro.sh
+        - name: ro-lsn
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: compute-ro
+  namespace: scale-zero-pg
+  labels: { app: compute-ro }
+spec:
+  # ClusterIP with publishNotReadyAddresses (same rationale as deploy/compute):
+  # the DNS record exists at zero replicas so the gateway never hits an
+  # NXDOMAIN that CoreDNS negative-caches. With N>1 replicas kube-proxy
+  # load-balances reads across the pool.
+  publishNotReadyAddresses: true
+  selector: { app: compute-ro }
+  ports:
+    - { name: pg, port: 55433, targetPort: pg }

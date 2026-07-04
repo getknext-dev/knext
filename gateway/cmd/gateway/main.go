@@ -57,6 +57,32 @@ func main() {
 	logger.Printf("[gw] listening on :%d mode=%s idle_ms=%d", port, gw.Driver().Mode(), envInt("GW_IDLE_MS", 300000))
 	go gw.Serve(ln)
 
+	// Read-only pool lane (issue #66): a SECOND listener on GW_RO_PORT routes
+	// the DATABASE_URL_RO DSN to the compute-ro Deployment (0->N->0), reusing
+	// the full wake/idle/TLS machinery via a GW_RO_*-remapped env. Absent
+	// GW_RO_PORT, the RO lane is off and nothing changes for writer-only
+	// deployments. No SQL parsing, no single-writer ceremony — the app opts in
+	// by pointing reads at this port.
+	if roPortStr := os.Getenv("GW_RO_PORT"); roPortStr != "" {
+		roGw, err := gateway.New(wake.ROEnv(env), func(msg string) { logger.Println(msg) })
+		if err != nil {
+			logger.Fatalf("[gw-ro] %v", err)
+		}
+		if peers != nil {
+			roGw.Peers = peers
+		}
+		roPort := envInt("GW_RO_PORT", 55434)
+		roLn, err := net.Listen("tcp", ":"+strconv.Itoa(roPort))
+		if err != nil {
+			logger.Fatalf("[gw-ro] listen: %v", err)
+		}
+		logger.Printf("[gw-ro] read-only pool listening on :%d deploy=%s wake_replicas=%d idle_ms=%d",
+			roPort, os.Getenv("GW_RO_DEPLOYMENT"), envInt("GW_RO_WAKE_REPLICAS", 1),
+			envInt("GW_RO_IDLE_MS", envInt("GW_IDLE_MS", 300000)))
+		go roGw.Serve(roLn)
+		defer func() { _ = roLn.Close(); _ = roGw.Close() }()
+	}
+
 	metricsSrv := &http.Server{Addr: ":" + strconv.Itoa(metricsPort), Handler: gw.Metrics().Handler()}
 	go func() {
 		if err := metricsSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
