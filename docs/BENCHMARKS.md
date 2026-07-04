@@ -156,6 +156,37 @@ Per-app Postgres `max_connections` is the enforced per-tenant bound today.
 | Gateway HA (held conn across idle window, pod kill) | ✅ | ✅ | no split-brain sleep; no SPOF |
 | TLS (sslmode=require, incl. cold wake over TLS) | TLS 1.3 | **TLS 1.3** | plaintext preserved as opt-in |
 
+## Object-storage backend: OCI vs MinIO (issue #105)
+
+`deploy/_verify-objstore.sh` — a throwaway-namespace drill that stands up a
+storage plane whose pageserver + safekeeper offload to a **configured** S3
+endpoint, writes 5000 rows, forces a layer upload (`remote_consistent_lsn`
+advances past the marker), **wipes the pageserver PVC** (empties its layer
+cache), re-attaches, and reads every row back through a STATIC compute — so the
+read is necessarily served from object-store-fetched layers. Same drill, two
+backends:
+
+| Backend | In-cluster MinIO? | Offload latency (checkpoint → rcl past marker) | Read-back RTO (empty-cache re-attach → first read) | Rows |
+|---|---|---|---|---|
+| **In-cluster MinIO** (baseline, digest-pinned) | yes (local default) | **35s** | **25s** | 5000 ✅ |
+| **OCI Object Storage** (S3-compat, path-style, no MinIO) | **none** | **20s** | **16s** | 5000 ✅ |
+
+Method: OKE (context `context-ckmva7v7zvq`, 2026-07-04), neon `8464`, single
+safekeeper + single pageserver, 5000 proof rows + a 300k-row WAL fill over the
+256MB `checkpoint_distance`; OCI endpoint
+`axfqznklsd2t.compat.objectstorage.me-abudhabi-1.oraclecloud.com` (SigV4,
+path-style, reusing the #4 Customer Secret Key), dedicated throwaway bucket.
+
+Reading the numbers honestly: **offload latency is bounded by the pageserver's
+freeze/compaction cadence (~20s), not by network** at this small layer size — so
+OCI came out at/under MinIO here (both are compaction-cadence-bound, and run-to-run
+scheduling variance exceeds the backend delta). A large cross-internet layer upload
+*would* favour in-cluster MinIO; the point of this row is the **verdict**, not a
+network micro-benchmark: **the pageserver offloads pages to, and serves reads back
+from (after a full layer-cache wipe), OCI Object Storage's S3 Compatibility API
+with NO in-cluster MinIO** (ADR-0005). Reproduce: `deploy/_verify-objstore.sh`
+(baseline) and the same with `OBJSTORE_ENDPOINT=…` set (OCI).
+
 ## Upgrade rehearsal (issue #50 — pivot-vs-bump cost is now a known number)
 
 `deploy/_rehearse-upgrade.sh` boots the newest pullable neon/compute pair in a

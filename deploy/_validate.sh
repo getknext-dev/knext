@@ -312,3 +312,29 @@ for ref in $(grep -rhoE 'me-abudhabi-1\.ocir\.io/[^[:space:]"#]+' [0-9][0-9]-*.y
   esac
 done
 ok "our OCIR images are digest-pinned with a human tag (tag@sha256:...) (issue #56)"
+
+# 23. contract (issue #105): the object-storage backend is CONFIGURABLE — the
+#     pageserver page-offload + safekeeper WAL-offload S3 target
+#     (endpoint/bucket/region) is sourced from the `storage-objstore` ConfigMap
+#     (env), NOT hardcoded to in-cluster MinIO. Credentials stay in the
+#     storage-s3-creds Secret. An external endpoint disables MinIO (its bucket
+#     Job moved to endpoint-agnostic storage-init), and MinIO — whose upstream is
+#     archived — is pinned by DIGEST as an OPTIONAL local default.
+for f in 52-safekeeper.yaml 53-pageserver.yaml 57-pageserver-standby.yaml; do
+  grep -q 'configMapRef: { name: storage-objstore }' "$f" \
+    || fail "$f must source the object-store endpoint from the storage-objstore ConfigMap (#105)"
+  grep -q "endpoint='http://minio:9000'" "$f" \
+    && fail "$f still hardcodes the minio S3 endpoint — parameterize via storage-objstore (#105)"
+done
+grep -q 'storage-objstore' gen-secrets.sh \
+  || fail "gen-secrets.sh must manage the storage-objstore ConfigMap (endpoint/bucket/region) (#105)"
+# storage-init must ensure the bucket on the CONFIGURED endpoint (not minio-only).
+grep -q 'OBJSTORE_ENDPOINT' 55-storage-init.yaml \
+  || fail "55-storage-init must ensure the bucket on the CONFIGURED object-store endpoint (#105)"
+# MinIO is now OPTIONAL + digest-pinned; its minio-only bucket Job must be gone
+# (bucket creation is endpoint-agnostic in storage-init).
+grep -qE 'quay.io/minio/minio:[^ ]*@sha256:[0-9a-f]{64}' 50-minio.yaml \
+  || fail "50-minio.yaml must digest-pin MinIO (archived upstream, #105)"
+grep -q 'name: minio-create-buckets' 50-minio.yaml \
+  && fail "50-minio.yaml still carries the minio-only bucket Job — bucket creation moved to storage-init (#105)"
+ok "object-storage backend is configurable via storage-objstore; MinIO optional + digest-pinned (#105)"

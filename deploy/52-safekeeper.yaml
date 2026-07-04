@@ -46,7 +46,12 @@ spec:
                 --id=$((ORD + 1)) \
                 --broker-endpoint=http://storage-broker:50051 \
                 -D /data \
-                --remote-storage="{endpoint='http://minio:9000', bucket_name='neon', bucket_region='eu-north-1', prefix_in_bucket='/safekeeper/'}"
+                --remote-storage="{endpoint='${OBJSTORE_ENDPOINT}', bucket_name='${OBJSTORE_BUCKET}', bucket_region='${OBJSTORE_REGION}', prefix_in_bucket='/safekeeper/'}"
+          # Object-store endpoint/bucket/region are env-driven (#105) from the
+          # storage-objstore ConfigMap (default MinIO; override for external S3).
+          # neon forces path-style automatically when a custom endpoint is set.
+          envFrom:
+            - configMapRef: { name: storage-objstore } # OBJSTORE_ENDPOINT / _BUCKET / _REGION
           # S3 creds from the storage-s3-creds Secret (deploy/gen-secrets.sh),
           # never plaintext YAML.
           env:

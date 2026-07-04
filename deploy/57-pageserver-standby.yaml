@@ -51,12 +51,14 @@ metadata:
   name: pageserver-standby-config
   namespace: scale-zero-pg
 data:
+  # remote_storage is appended by the seed-config init container from the
+  # storage-objstore ConfigMap (#105) — SAME bucket/endpoint as the primary
+  # (the standby must read the identical object store to hold warm layers).
   pageserver.toml: |
     broker_endpoint='http://storage-broker:50051'
     pg_distrib_dir='/usr/local/'
     listen_pg_addr='0.0.0.0:6400'
     listen_http_addr='0.0.0.0:9898'
-    remote_storage={ endpoint='http://minio:9000', bucket_name='neon', bucket_region='eu-north-1', prefix_in_bucket='/pageserver' }
     control_plane_api='http://0.0.0.0:6666' # no storage controller in the MVP; junk address
     control_plane_emergency_mode=true
     virtual_file_io_mode="buffered"
@@ -90,9 +92,19 @@ spec:
           securityContext:
             allowPrivilegeEscalation: false
             capabilities: { drop: ["ALL"] }
+          # Object-store endpoint/bucket/region are env-driven (#105), same as the
+          # primary; cp first, then append exactly one remote_storage line.
+          envFrom:
+            - configMapRef: { name: storage-objstore } # OBJSTORE_ENDPOINT / _BUCKET / _REGION
           command: ["/bin/sh", "-c"]
           args:
-            - mkdir -p /data/.neon && cp /config/pageserver.toml /config/identity.toml /data/.neon/
+            - |
+              set -eu
+              mkdir -p /data/.neon
+              cp /config/pageserver.toml /config/identity.toml /data/.neon/
+              printf "remote_storage={ endpoint='%s', bucket_name='%s', bucket_region='%s', prefix_in_bucket='/pageserver' }\n" \
+                "$OBJSTORE_ENDPOINT" "$OBJSTORE_BUCKET" "$OBJSTORE_REGION" >> /data/.neon/pageserver.toml
+              echo "standby pageserver.toml object-store target: endpoint=$OBJSTORE_ENDPOINT bucket=$OBJSTORE_BUCKET region=$OBJSTORE_REGION"
           volumeMounts:
             - { name: data, mountPath: /data }
             - { name: config, mountPath: /config }

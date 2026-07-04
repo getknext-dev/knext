@@ -236,6 +236,62 @@ Existence-only was blind to a deployed-yet-CrashLoopBackOff workload — e.g. a
 crash-looping kube-state-metrics would have passed "exists" while blinding five platform
 alerts. Now a 0-ready or suspended load-bearing workload fails the drill.
 
+## Object-storage backend (#105)
+
+The storage plane's durable truth is an **S3 object store** (pageserver layer
+uploads under `/pageserver`, safekeeper WAL offload under `/safekeeper`). That
+store is **configurable** — it is NOT hardcoded to bundled MinIO. See
+[ADR-0005](adr-0005-object-storage-backend.md) for the posture.
+
+**How it is wired.** The pageserver (53), standby pageserver (57), and
+safekeepers (52) read `{endpoint, bucket, region}` from the `storage-objstore`
+ConfigMap and their S3 access/secret from the `storage-s3-creds` Secret. Both are
+created by `deploy/gen-secrets.sh` (which must run before `kubectl apply`, same as
+today). The pageserver's `remote_storage` TOML line is appended by its seed-config
+init container from those env vars; the safekeeper builds `--remote-storage`
+inline the same way. **Path-style + SigV4 are automatic** — neon forces path-style
+addressing whenever a custom `endpoint` is set, which is what makes both MinIO and
+OCI's S3 Compatibility API work with no extra flag.
+
+**Default (local/dev): in-cluster MinIO.** `gen-secrets.sh` with no override
+points `storage-objstore` at `http://minio:9000` / bucket `neon`. `50-minio.yaml`
+is the optional local default — **digest-pinned** to the archived last-good build
+(MinIO archived its community repos), and it no longer creates the bucket
+(`55-storage-init`'s `ensure-bucket` initContainer does, against whatever endpoint
+is configured).
+
+**External backend (managed cloud S3, or on-prem SeaweedFS / Ceph RADOS Gateway /
+Garage).** Point `storage-objstore` at it and **do not apply `50-minio.yaml`**:
+
+```sh
+# example: OCI Object Storage S3 Compatibility API. Mint a Customer Secret Key
+# (SigV4 access/secret) for the api-key user (same kind of credential as #4's
+# backup target), then:
+STORAGE_OBJSTORE_ENDPOINT=https://<ns>.compat.objectstorage.<region>.oraclecloud.com \
+STORAGE_OBJSTORE_BUCKET=ks-pg-pages STORAGE_OBJSTORE_REGION=me-abudhabi-1 \
+STORAGE_S3_USER=<access-key> STORAGE_S3_PASSWORD=<secret-key> \
+  sh deploy/gen-secrets.sh
+# apply everything EXCEPT the in-cluster MinIO (documented apply-set):
+ls deploy/[0-9][0-9]-*.yaml | grep -v '50-minio.yaml' | xargs -I{} kubectl apply -f {}
+```
+
+`.oci.customer-oci.com` and `.oraclecloud.com` endpoint variants both work; the
+region is the OCI region. The bucket must be reachable — `ensure-bucket` creates
+it with `mc mb --ignore-existing`, but a managed S3 that denies `CreateBucket`
+requires you to pre-create it (`oci os bucket create ...`).
+
+**Re-pointing an existing plane** is deliberate (no silent rotation): delete the
+ConfigMap and re-run gen-secrets — `kubectl -n scale-zero-pg delete configmap
+storage-objstore`, then `STORAGE_OBJSTORE_* … sh deploy/gen-secrets.sh`. Do this
+only during a planned migration; the pageserver/safekeepers must be restarted to
+pick up a new target, and moving object stores under a live plane means copying
+the `/pageserver` + `/safekeeper` data across first.
+
+**Verify it** — `deploy/_verify-objstore.sh` stands up a throwaway plane against a
+configured endpoint (external OCI OS with no MinIO, or the MinIO baseline), proves
+pages offload and are read back after a full pageserver cache wipe, and prints the
+offload + read-back timings. Numbers: [BENCHMARKS.md](BENCHMARKS.md).
+
 ## Durability model (what you can lose, and when)
 
 - A **committed write is durable once 2/3 safekeepers ack** its WAL. Losing any one

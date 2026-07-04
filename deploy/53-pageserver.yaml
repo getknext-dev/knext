@@ -1,19 +1,31 @@
-# Pageserver: ingests WAL from safekeepers, materializes pages, offloads to
-# MinIO, serves GetPage@LSN to computes. StatefulSet + PVC (its layer cache
-# and tenant metadata live under /data/.neon). Config from upstream compose,
-# broker renamed storage_broker -> storage-broker (DNS-1035).
+# Pageserver: ingests WAL from safekeepers, materializes pages, offloads to the
+# CONFIGURED object store, serves GetPage@LSN to computes. StatefulSet + PVC (its
+# layer cache and tenant metadata live under /data/.neon). Config from upstream
+# compose, broker renamed storage_broker -> storage-broker (DNS-1035).
+#
+# OBJECT-STORAGE BACKEND (#105). The S3 page-offload target is NO LONGER
+# hardcoded to in-cluster MinIO — endpoint/bucket/region come from the
+# `storage-objstore` ConfigMap (deploy/gen-secrets.sh; default = MinIO, override
+# via STORAGE_OBJSTORE_* for OCI Object Storage / SeaweedFS / Ceph RGW / Garage),
+# and the S3 access/secret stay in the `storage-s3-creds` Secret. The
+# `remote_storage` TOML line is APPENDED by the seed-config init container from
+# those env vars (TOML has no env interpolation). NOTE: neon's S3 remote_storage
+# forces PATH-STYLE addressing automatically whenever a custom `endpoint` is set
+# (which it always is here) — no separate force-path-style flag is needed, and
+# this is exactly what makes both MinIO and OCI's S3 Compatibility API work.
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: pageserver-config
   namespace: scale-zero-pg
 data:
+  # remote_storage is intentionally ABSENT here — the seed-config init container
+  # appends it from the storage-objstore ConfigMap (endpoint/bucket/region).
   pageserver.toml: |
     broker_endpoint='http://storage-broker:50051'
     pg_distrib_dir='/usr/local/'
     listen_pg_addr='0.0.0.0:6400'
     listen_http_addr='0.0.0.0:9898'
-    remote_storage={ endpoint='http://minio:9000', bucket_name='neon', bucket_region='eu-north-1', prefix_in_bucket='/pageserver' }
     control_plane_api='http://0.0.0.0:6666' # no storage controller in the MVP; junk address
     control_plane_emergency_mode=true
     virtual_file_io_mode="buffered"
@@ -51,9 +63,20 @@ spec:
           securityContext:
             allowPrivilegeEscalation: false
             capabilities: { drop: ["ALL"] }
+          # Object-store endpoint/bucket/region are env-driven (#105). cp brings a
+          # fresh remote_storage-LESS toml every boot, then we append exactly ONE
+          # remote_storage line built from env — idempotent across restarts.
+          envFrom:
+            - configMapRef: { name: storage-objstore } # OBJSTORE_ENDPOINT / _BUCKET / _REGION
           command: ["/bin/sh", "-c"]
           args:
-            - mkdir -p /data/.neon && cp /config/pageserver.toml /config/identity.toml /data/.neon/
+            - |
+              set -eu
+              mkdir -p /data/.neon
+              cp /config/pageserver.toml /config/identity.toml /data/.neon/
+              printf "remote_storage={ endpoint='%s', bucket_name='%s', bucket_region='%s', prefix_in_bucket='/pageserver' }\n" \
+                "$OBJSTORE_ENDPOINT" "$OBJSTORE_BUCKET" "$OBJSTORE_REGION" >> /data/.neon/pageserver.toml
+              echo "pageserver.toml object-store target: endpoint=$OBJSTORE_ENDPOINT bucket=$OBJSTORE_BUCKET region=$OBJSTORE_REGION (path-style auto)"
           volumeMounts:
             - { name: data, mountPath: /data }
             - { name: config, mountPath: /config }

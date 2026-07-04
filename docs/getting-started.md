@@ -46,15 +46,41 @@ This creates the `scale-zero-pg` namespace with:
 
 | Component | Kind | Purpose |
 |---|---|---|
-| `minio` | Deployment + PVC | S3 object storage (durable history) |
+| `minio` | Deployment + PVC | S3 object storage — **optional** local default (see below) |
 | `storage-broker` | Deployment | safekeeper ↔ pageserver coordination |
 | `safekeeper` ×3 | StatefulSet + PVCs | durable WAL, 2/3 write quorum |
 | `pageserver` | StatefulSet + PVC | page storage, GetPage@LSN |
-| `storage-init` | Job | creates the tenant + timeline (one-shot, idempotent) |
+| `storage-init` | Job | ensures the bucket on the configured store + creates the tenant/timeline (idempotent) |
 | `compute` | Deployment (**replicas: 0**) | native Postgres 17 — your database |
 | `pggw` ×2 | Deployment + Service | wake-on-connect gateway |
 
 The compute starts at zero. That's correct — it wakes on the first connection.
+
+### Choose your object storage (#105)
+
+The durable object store is a **configured S3 endpoint**, not bundled MinIO. Run
+`deploy/gen-secrets.sh` **before** `kubectl apply` — it creates the
+`storage-s3-creds` Secret (S3 access/secret) and the `storage-objstore` ConfigMap
+(`endpoint` / `bucket` / `region`). With no override, it defaults to the
+in-cluster MinIO above — nothing else to do for local/dev.
+
+**External backend (managed cloud S3, or on-prem SeaweedFS / Ceph RADOS Gateway /
+Garage).** Point `storage-objstore` at it and **do not apply `deploy/50-minio.yaml`**:
+
+```sh
+# OCI Object Storage S3-compat example (mint a Customer Secret Key first):
+STORAGE_OBJSTORE_ENDPOINT=https://<ns>.compat.objectstorage.<region>.oraclecloud.com \
+STORAGE_OBJSTORE_BUCKET=ks-pg-pages STORAGE_OBJSTORE_REGION=me-abudhabi-1 \
+STORAGE_S3_USER=<access> STORAGE_S3_PASSWORD=<secret> \
+  sh deploy/gen-secrets.sh
+# apply everything EXCEPT the in-cluster MinIO:
+ls deploy/[0-9][0-9]-*.yaml | grep -v '50-minio.yaml' | xargs -I{} kubectl apply -f {}
+```
+
+Details, alternatives, and the posture rationale: [operations.md — Object-storage
+backend](operations.md#object-storage-backend-105) and
+[ADR-0005](adr-0005-object-storage-backend.md). Path-style + SigV4 are handled
+automatically (neon forces path-style for any custom endpoint).
 
 ## 3. Verify
 

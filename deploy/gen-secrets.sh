@@ -73,6 +73,57 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# storage-objstore — the object-storage BACKEND target (issue #105)
+# ---------------------------------------------------------------------------
+# The pageserver (page offload) + safekeepers (WAL offload) read their S3
+# endpoint/bucket/region from THIS ConfigMap (52/53/57 envFrom it); the S3
+# access/secret stay in storage-s3-creds above. Decoupling these from bundled
+# MinIO is the whole point of #105: MinIO archived its community repos, so the
+# backend must be swappable at the (S3) protocol level.
+#
+#   OBJSTORE_ENDPOINT -> S3 endpoint URL (custom endpoint => neon uses PATH-STYLE
+#                        automatically; no separate force-path-style flag exists)
+#   OBJSTORE_BUCKET   -> bucket name (default: neon)
+#   OBJSTORE_REGION   -> region (default: eu-north-1; set to your S3 region)
+#
+# DEFAULT (no override) = the in-cluster MinIO of deploy/50-minio.yaml —
+# BACKWARD COMPATIBLE, nothing changes for an existing plane. Override via env
+# for an EXTERNAL backend (managed cloud S3, or a maintained on-prem alternative
+# — SeaweedFS / Ceph RADOS Gateway / Garage):
+#
+#   # OCI Object Storage S3 Compatibility API (proven in _verify-objstore.sh).
+#   # Mint a Customer Secret Key (SigV4 access/secret) for the api-key user and
+#   # supply it AS the storage creds (STORAGE_S3_USER/PASSWORD above), plus:
+#   STORAGE_OBJSTORE_ENDPOINT=https://<ns>.compat.objectstorage.<region>.oraclecloud.com \
+#   STORAGE_OBJSTORE_BUCKET=ks-pg-pages STORAGE_OBJSTORE_REGION=me-abudhabi-1 \
+#   STORAGE_S3_USER=<access> STORAGE_S3_PASSWORD=<secret> \
+#     sh deploy/gen-secrets.sh
+#   # ...then apply everything EXCEPT deploy/50-minio.yaml (see docs/operations.md
+#   #    "Object-storage backend").
+#
+# No-silent-repoint: if the ConfigMap already exists, leave it (re-pointing an
+# object store under a live plane is deliberate — delete + re-run to change it).
+CMNAME=storage-objstore
+OBJ_ENDPOINT="${STORAGE_OBJSTORE_ENDPOINT:-http://minio:9000}"
+OBJ_BUCKET="${STORAGE_OBJSTORE_BUCKET:-neon}"
+OBJ_REGION="${STORAGE_OBJSTORE_REGION:-eu-north-1}"
+if $K get configmap "$CMNAME" >/dev/null 2>&1; then
+  echo "ok - ConfigMap $CMNAME already exists; leaving untouched (re-point deliberately: kubectl -n $NS delete configmap $CMNAME, then re-run)"
+else
+  $K create configmap "$CMNAME" \
+    --from-literal=OBJSTORE_ENDPOINT="$OBJ_ENDPOINT" \
+    --from-literal=OBJSTORE_BUCKET="$OBJ_BUCKET" \
+    --from-literal=OBJSTORE_REGION="$OBJ_REGION" >/dev/null \
+    || fail "could not create ConfigMap $CMNAME"
+  echo "ok - created ConfigMap $CMNAME (endpoint=$OBJ_ENDPOINT bucket=$OBJ_BUCKET region=$OBJ_REGION)"
+  case "$OBJ_ENDPOINT" in
+    *minio*) : ;;
+    *) echo "    -> EXTERNAL object store configured: do NOT apply deploy/50-minio.yaml"
+       echo "       (see docs/operations.md 'Object-storage backend')" ;;
+  esac
+fi
+
+# ---------------------------------------------------------------------------
 # alertmanager-receiver — REAL on-call pager (optional; Slack-compatible)
 # ---------------------------------------------------------------------------
 # Alertmanager (deploy/61) ships a default in-cluster logging sink so the pager

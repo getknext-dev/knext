@@ -16,6 +16,45 @@ spec:
       labels: { app: storage-init, plane: storage }
     spec:
       restartPolicy: OnFailure
+      # ensure-bucket (#105): create the tenant bucket on the CONFIGURED object
+      # store (MinIO by default, any external S3 when storage-objstore is
+      # re-pointed), replacing the minio-only bucket Job that used to live in
+      # 50-minio.yaml. Idempotent (mc mb --ignore-existing); tolerates a managed
+      # S3 that PRE-creates the bucket and denies S3 CreateBucket (verifies
+      # reachability instead). mc talks SigV4 + path-style, exactly like neon.
+      initContainers:
+        - name: ensure-bucket
+          image: minio/mc:RELEASE.2023-01-28T20-29-38Z # pinned (matches backup mirror)
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+          envFrom:
+            - configMapRef: { name: storage-objstore } # OBJSTORE_ENDPOINT / _BUCKET / _REGION
+          env:
+            - name: S3_USER
+              valueFrom: { secretKeyRef: { name: storage-s3-creds, key: user } }
+            - name: S3_PASS
+              valueFrom: { secretKeyRef: { name: storage-s3-creds, key: password } }
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              export HOME=/tmp; mkdir -p /tmp/.mc
+              echo "ensuring bucket '${OBJSTORE_BUCKET}' on ${OBJSTORE_ENDPOINT} (region=${OBJSTORE_REGION}, SigV4 + path-style)"
+              n=0
+              until mc alias set obj "${OBJSTORE_ENDPOINT}" "$S3_USER" "$S3_PASS" --api S3v4 --path on; do
+                n=$((n+1)); [ "$n" -gt 60 ] && { echo "object store unreachable at ${OBJSTORE_ENDPOINT}" >&2; exit 1; }
+                echo 'waiting for object store...'; sleep 2
+              done
+              # Create if we can; a managed S3 that denies CreateBucket is fine as
+              # long as the bucket already exists and is reachable.
+              mc mb --ignore-existing "obj/${OBJSTORE_BUCKET}" --region "${OBJSTORE_REGION}" 2>/dev/null || true
+              if mc ls "obj/${OBJSTORE_BUCKET}" >/dev/null 2>&1; then
+                echo "bucket '${OBJSTORE_BUCKET}' present and reachable"
+              else
+                echo "bucket '${OBJSTORE_BUCKET}' missing and could not be created — pre-create it on ${OBJSTORE_ENDPOINT}" >&2
+                exit 1
+              fi
       containers:
         - name: init
           image: neondatabase/neon:8464

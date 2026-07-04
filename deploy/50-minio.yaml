@@ -1,5 +1,25 @@
-# Object storage: bottomless history + basis for branching/PITR. MVP: single
-# MinIO with a PVC; production would use real S3 or distributed MinIO.
+# Object storage: bottomless history + basis for branching/PITR.
+#
+# OPTIONAL — this MinIO is the LOCAL-DEV / ON-PREM DEFAULT, not a hard dependency
+# (#105). The pageserver + safekeepers speak the S3 API and read their endpoint
+# from the `storage-objstore` ConfigMap (deploy/gen-secrets.sh). To run against an
+# EXTERNAL object store (managed cloud S3 or a self-hosted alternative), point
+# storage-objstore at it and DO NOT apply this file — see docs/operations.md
+# "Object-storage backend" and deploy/_verify-objstore.sh. Bucket creation lives
+# in 55-storage-init.yaml so it works against whatever endpoint is configured
+# (this file no longer creates the bucket).
+#
+# WHY OPTIONAL MATTERS: MinIO archived its community repos, so a platform whose
+# goal is "easy to host anywhere" must not be married to it. Maintained on-prem
+# S3 alternatives that speak the same API (all path-style, SigV4): SeaweedFS,
+# Ceph RADOS Gateway, and Garage. On a managed cluster, prefer the cloud's native
+# object store (e.g. OCI Object Storage's S3 Compatibility API — proven in
+# deploy/_verify-objstore.sh).
+#
+# IMAGE IS DIGEST-PINNED: MinIO's community project is archived, so we pin the
+# last-good RELEASE.2022-10-20 build by its immutable sha256 (the exact image the
+# live plane has been running) — a moved/retagged upstream can never change what
+# we pull.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -23,7 +43,7 @@ spec:
         seccompProfile: { type: RuntimeDefault }
       containers:
         - name: minio
-          image: quay.io/minio/minio:RELEASE.2022-10-20T00-55-09Z # pinned as upstream compose
+          image: quay.io/minio/minio:RELEASE.2022-10-20T00-55-09Z@sha256:cc144348ad1e4126766279b042804fa4f130da531cc811e91fdbcb12c6bc8881 # digest-pinned last-good (upstream archived, #105)
           args: ["server", "/data", "--address", ":9000", "--console-address", ":9001"]
           # Root identity from the storage-s3-creds Secret (deploy/gen-secrets.sh),
           # never plaintext YAML. Same creds double as the S3 key for the storage
@@ -80,31 +100,6 @@ spec:
   ports:
     - { name: s3, port: 9000, targetPort: s3 }
     - { name: console, port: 9001, targetPort: console }
----
-# One-shot bucket creation, same as the upstream compose's minio_create_buckets.
-apiVersion: batch/v1
-kind: Job
-metadata:
-  name: minio-create-buckets
-  namespace: scale-zero-pg
-spec:
-  backoffLimit: 20
-  template:
-    spec:
-      restartPolicy: OnFailure
-      containers:
-        - name: mc
-          image: minio/mc
-          # Same Secret as the MinIO server — no plaintext creds in the Job.
-          env:
-            - name: MC_USER
-              valueFrom: { secretKeyRef: { name: storage-s3-creds, key: user } }
-            - name: MC_PASSWORD
-              valueFrom: { secretKeyRef: { name: storage-s3-creds, key: password } }
-          command: ["/bin/sh", "-c"]
-          args:
-            - |
-              until mc alias set minio http://minio:9000 "$MC_USER" "$MC_PASSWORD"; do
-                echo 'waiting for minio...'; sleep 1;
-              done
-              mc mb --ignore-existing minio/neon --region=eu-north-1
+# NOTE (#105): bucket creation used to live here (minio-create-buckets Job). It
+# has moved to 55-storage-init.yaml's ensure-bucket initContainer so the bucket
+# is created on the CONFIGURED endpoint (MinIO or external S3), not minio-only.
