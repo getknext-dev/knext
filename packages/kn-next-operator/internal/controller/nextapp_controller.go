@@ -129,6 +129,10 @@ type NextAppReconciler struct {
 	// exact scoped delete and the cross-app safety guard. May be nil (skips
 	// external cleanup) for unit tests of unrelated paths.
 	Cleaner ExternalCleaner
+	// DatabaseNamespace is where delegated AppDatabases + their app-db-<app>
+	// Secrets live (ADR-0006). Empty => DefaultDatabaseNamespace ("scale-zero-pg").
+	// Injectable so tests can point at a fixture namespace.
+	DatabaseNamespace string
 }
 
 // ingressProgrammingStalled reports whether the child Knative Service's route
@@ -174,6 +178,13 @@ func (r *NextAppReconciler) emitEvent(obj runtime.Object, eventType, reason, mes
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=sources.knative.dev,resources=kafkasources,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
+// Secrets: needed to MIRROR the delegated database DSN (app-db-<app>) into the
+// app's own namespace (ADR-0006 §3b). Cross-ns SecretKeyRef is impossible, so the
+// operator writes a same-ns copy ownerRef'd to the NextApp. The read of the SOURCE
+// Secret in the scale-zero-pg namespace is additionally granted by the scoped Role
+// there (config/rbac/appdb_driver.yaml); the appdatabases verbs live in that same
+// scoped Role (namespaced, NOT cluster-wide) — least privilege, no storage-plane access.
+// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch;delete
 
 func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, retErr error) {
 	logger := logf.FromContext(ctx)
@@ -212,23 +223,39 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 	// has no ownerRef and would otherwise leak across deploy/delete cycles.
 	// In-cluster children (ksvc/SA/PVC) keep using ownerRef GC.
 	if nextApp.DeletionTimestamp.IsZero() {
-		// Live object: ensure the finalizer is present so we get a chance to
+		// Live object: ensure the finalizer(s) are present so we get a chance to
 		// run cleanup before the object is GC'd. Use a metadata Patch (not a
 		// full Update) so it does not race the later Status().Update: finalizers
 		// live in metadata, status in the /status subresource — patching one and
 		// updating the other touches disjoint resourceVersions and avoids the
 		// "object has been modified" conflict spam (#98).
 		patch := client.MergeFrom(nextApp.DeepCopy())
-		if controllerutil.AddFinalizer(&nextApp, ExternalCleanupFinalizer) {
+		changed := controllerutil.AddFinalizer(&nextApp, ExternalCleanupFinalizer)
+		// db-cleanup finalizer only for apps that delegate a database (ADR-0006
+		// §3c): cross-ns AppDatabase teardown cannot ride an ownerRef.
+		if databaseEnabled(&nextApp) {
+			changed = controllerutil.AddFinalizer(&nextApp, DatabaseCleanupFinalizer) || changed
+		}
+		if changed {
 			if err := r.Patch(ctx, &nextApp, patch); err != nil {
 				return ctrl.Result{}, err
 			}
 		}
 	} else {
-		// Object is being deleted: run best-effort, bounded external cleanup,
-		// then remove the finalizer so deletion can complete. cleanupExternalState
-		// never returns an error for an unreachable store (it logs + Warning),
-		// so we never wedge the CR in Terminating.
+		// Object is being deleted: run best-effort, bounded cleanup for each
+		// finalizer, then remove it so deletion can complete. Neither cleanup
+		// returns a hard error for an unreachable dependency (they log + Warning),
+		// so we never wedge the CR in Terminating (ADR-0006 §5).
+		if controllerutil.ContainsFinalizer(&nextApp, DatabaseCleanupFinalizer) {
+			if err := r.cleanupDatabase(ctx, &nextApp); err != nil {
+				return ctrl.Result{}, err
+			}
+			patch := client.MergeFrom(nextApp.DeepCopy())
+			controllerutil.RemoveFinalizer(&nextApp, DatabaseCleanupFinalizer)
+			if err := r.Patch(ctx, &nextApp, patch); err != nil {
+				return ctrl.Result{}, err
+			}
+		}
 		if controllerutil.ContainsFinalizer(&nextApp, ExternalCleanupFinalizer) {
 			if err := r.cleanupExternalState(ctx, &nextApp); err != nil {
 				return ctrl.Result{}, err
@@ -281,6 +308,75 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 			_ = r.Status().Update(ctx, &nextApp)
 		}
 		return ctrl.Result{}, err
+	}
+
+	// 0. Delegated database (ADR-0006, #119). When spec.database.enabled, the
+	// operator provisions an AppDatabase in the scale-zero-pg namespace, HARD-GATES
+	// the app on it reaching Ready, mirrors the DSN Secret into this namespace, and
+	// injects DATABASE_URL(+_RO) into the env below. dbSecretHash carries a
+	// checksum of the DSN so a rotation rolls a new Revision (§4.3).
+	var dbSecretHash string
+	if databaseEnabled(&nextApp) {
+		wiring, dbResult, dbErr := r.reconcileDatabase(ctx, &nextApp)
+		if dbErr != nil {
+			logger.Error(dbErr, "Failed to reconcile delegated database")
+			r.emitEvent(&nextApp, corev1.EventTypeWarning, ReasonReconcileFailed,
+				fmt.Sprintf("Failed to reconcile database: %s", dbErr.Error()))
+			apimeta.SetStatusCondition(&nextApp.Status.Conditions, metav1.Condition{
+				Type:               ConditionDatabaseReady,
+				Status:             metav1.ConditionFalse,
+				ObservedGeneration: nextApp.Generation,
+				Reason:             "DatabaseError",
+				Message:            dbErr.Error(),
+			})
+			if !apiequality.Semantic.DeepEqual(observedStatus, &nextApp.Status) {
+				_ = r.Status().Update(ctx, &nextApp)
+			}
+			return ctrl.Result{}, dbErr
+		}
+		if !wiring.ready {
+			// HARD-GATE (§4.1): do NOT create the Knative Service until the DB is
+			// Ready. Surface DatabaseReady=False + Ready=False and requeue; the
+			// app never boots into a crash-loop on a missing DSN.
+			phaseMsg := wiring.phase
+			if phaseMsg == "" {
+				phaseMsg = "Provisioning"
+			}
+			r.emitEvent(&nextApp, corev1.EventTypeNormal, ReasonDatabaseProvisioning,
+				fmt.Sprintf("Waiting for database %q to become Ready (phase=%s)", nextApp.Status.DatabaseAppName, phaseMsg))
+			apimeta.SetStatusCondition(&nextApp.Status.Conditions, metav1.Condition{
+				Type:               ConditionDatabaseReady,
+				Status:             metav1.ConditionFalse,
+				ObservedGeneration: nextApp.Generation,
+				Reason:             "Provisioning",
+				Message:            fmt.Sprintf("AppDatabase %q is not Ready yet (phase=%s)", nextApp.Status.DatabaseAppName, phaseMsg),
+			})
+			apimeta.SetStatusCondition(&nextApp.Status.Conditions, metav1.Condition{
+				Type:               ConditionReady,
+				Status:             metav1.ConditionFalse,
+				ObservedGeneration: nextApp.Generation,
+				Reason:             "DatabaseProvisioning",
+				Message:            "App deploy is gated on its database becoming Ready",
+			})
+			if !apiequality.Semantic.DeepEqual(observedStatus, &nextApp.Status) {
+				if err := r.Status().Update(ctx, &nextApp); err != nil {
+					return ctrl.Result{}, err
+				}
+			}
+			return dbResult, nil
+		}
+		// Ready: inject DATABASE_URL(+_RO) into the in-memory spec so the existing
+		// envMap → SecretKeyRef wiring below picks it up, and record the DSN
+		// checksum for the pod-template roll annotation.
+		injectDatabaseEnv(&nextApp, wiring)
+		dbSecretHash = wiring.dsnHash
+		apimeta.SetStatusCondition(&nextApp.Status.Conditions, metav1.Condition{
+			Type:               ConditionDatabaseReady,
+			Status:             metav1.ConditionTrue,
+			ObservedGeneration: nextApp.Generation,
+			Reason:             "Provisioned",
+			Message:            fmt.Sprintf("Database %q Ready; DATABASE_URL wired into the app", nextApp.Status.DatabaseAppName),
+		})
 	}
 
 	// 1. Create/Update ServiceAccount
@@ -377,6 +473,13 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 		annotations := map[string]string{
 			"autoscaling.knative.dev/min-scale": "0",
 			"autoscaling.knative.dev/max-scale": "10",
+		}
+		// Rotation roll (ADR-0006 §4.3): stamp a checksum of the delegated
+		// DATABASE_URL so a credential rotation in the source Secret produces a
+		// new pod-template hash → a new Knative Revision → pods re-read the DSN
+		// (secretKeyRef is resolved at pod START only).
+		if dbSecretHash != "" {
+			annotations[databaseSecretHashAnnotation] = dbSecretHash
 		}
 		if nextApp.Spec.Scaling != nil {
 			annotations["autoscaling.knative.dev/min-scale"] = fmt.Sprintf("%d", nextApp.Spec.Scaling.MinScale)
