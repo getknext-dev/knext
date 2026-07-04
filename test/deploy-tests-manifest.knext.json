@@ -53,7 +53,17 @@
     "in-run retry stay un-quarantined. Settings audit (round 4): upstream's",
     "test-deploy-adapter lane runs the IDENTICAL per-case 60s timeout (hardcoded",
     "individualTestTimeout), -c 2, ubuntu-latest, 3 attempts — this class wobbles",
-    "at full env parity and upstream ledgers it the same way."
+    "at full env parity and upstream ledgers it the same way.",
+    "",
+    "#214 / ADR-0007 graduation addendum §d — FAMILY-LEVEL QUARANTINE: the runtime-",
+    "prefetch/navigation-timing flake family (60s hardcoded-individualTestTimeout hangs",
+    "in createRouterAct flows under -c 2 CPU contention; root cause fixed upstream in",
+    "vercel/next.js#95301, post-v16.2.0) is quarantined at FILE level via verbatim",
+    "rules.exclude entries, each backed by a level:\"file\" $knextQuarantines record",
+    "(mechanism + multi-run evidence + upstream provenance). Bar for membership:",
+    ">=1 knext FINAL post-retry failure with the family signature AND upstream",
+    "provenance (#95301 and/or an upstream suite-skip PR). Re-test the whole family",
+    "on the first NEXTJS_REF containing #95301. Everything else stays per-case."
   ],
   "suites": {
     "test/e2e/app-dir/app-client-cache/client-cache.defaults.test.ts": {
@@ -142,85 +152,9 @@
     "test/e2e/middleware-rewrites/test/index.test.ts": {
       "failed": ["Middleware Rewrite should handle catch-all rewrite correctly"]
     },
-    "test/e2e/app-dir/segment-cache/search-params/segment-cache-search-params.test.ts": {
-      "flakey": [
-        "segment cache (search params) stores prefetched data by its rewritten search params, not the original ones"
-      ]
-    },
-    "test/e2e/app-dir/segment-cache/prefetch-layout-sharing/prefetch-layout-sharing.test.ts": {
-      "flakey": [
-        "layout sharing in non-static prefetches segment-level prefetch config uses a runtime prefetch for sub-pages of runtime-prefetchable layouts if requested"
-      ]
-    },
-    "test/e2e/app-dir/segment-cache/refresh/segment-cache-refresh.test.ts": {
-      "flakey": [
-        "segment cache (refresh) Server Action refresh() refreshes dynamic data only, not cached",
-        "segment cache (refresh) re-navigation to a fully static page does not overwrite dynamic slots with default content"
-      ]
-    },
-    "test/e2e/app-dir/segment-cache/staleness/segment-cache-stale-time.test.ts": {
-      "flakey": [
-        "segment cache (staleness) expires runtime prefetches when their stale time has elapsed",
-        "segment cache (staleness) reuses dynamic data up to the staleTimes.dynamic threshold"
-      ]
-    },
-    "test/e2e/app-dir/segment-cache/staleness/segment-cache-per-page-dynamic-stale-time.test.ts": {
-      "flakey": [
-        "segment cache (per-page dynamic stale time) reuses dynamic data within the per-page stale time window",
-        "segment cache (per-page dynamic stale time) back/forward navigation always reuses BFCache regardless of stale time",
-        "segment cache (per-page dynamic stale time) per-page value overrides global staleTimes.dynamic regardless of direction",
-        "segment cache (per-page dynamic stale time) two dynamic pages with different stale times behave independently",
-        "segment cache (per-page dynamic stale time) with parallel routes, uses the minimum stale time across all slots"
-      ]
-    },
-    "test/e2e/app-dir/segment-cache/vary-params/vary-params.test.ts": {
-      "flakey": [
-        "segment cache - vary params does not share cached segment when all params accessed statically (runtime prefetch)",
-        "segment cache - vary params renders cached loading state instantly with runtime prefetching",
-        "segment cache - vary params does not reuse prefetched segment when page accesses searchParams",
-        "segment cache - vary params shares cached segment across all params when none accessed statically (runtime prefetch)",
-        "segment cache - vary params tracks metadata param access separately from body (runtime prefetch)"
-      ]
-    },
-    "test/e2e/app-dir/app-client-cache/client-cache.parallel-routes.test.ts": {
-      "flakey": [
-        "app dir client cache with parallel routes prefetch={true} should prefetch the full page",
-        "app dir client cache with parallel routes prefetch={true} should re-use the cache for the full page, only for 5 mins"
-      ]
-    },
-    "test/e2e/app-dir/app-prefetch/prefetching.test.ts": {
-      "flakey": [
-        "app dir - prefetching should not unintentionally modify the requested prefetch by escaping the uri encoded query params",
-        "app dir - prefetching should show layout eagerly when prefetched with loading one level down",
-        "app dir - prefetching should immediately render the loading state for a dynamic segment when fetched from higher up in the tree"
-      ]
-    },
-    "test/e2e/app-dir/optimistic-routing/optimistic-routing.test.ts": {
-      "flakey": [
-        "optimistic-routing rewrite detection: detects dynamic rewrite when URL does not match route structure",
-        "optimistic-routing static route with catch-all sibling: does not match sub-route against catch-all",
-        "optimistic-routing nested dynamic routes: predicts through multiple dynamic segments",
-        "optimistic-routing optional catch-all: predicts from index to path with segments"
-      ]
-    },
-    "test/e2e/app-dir/prefetch-true-instant/prefetch-true-instant.test.ts": {
-      "flakey": [
-        "prefetch={true} with instant route also disables full prefetch when instant is on a layout, not the page",
-        "prefetch={true} with instant route does not include dynamic content in the prefetch when the target route has instant"
-      ]
-    },
     "test/e2e/app-dir/server-actions-redirect-middleware-rewrite/server-actions-redirect-middleware-rewrite.test.ts": {
       "flakey": [
         "app-dir - server-actions-redirect-middleware-rewrite.test should redirect correctly in edge runtime with middleware rewrite"
-      ]
-    },
-    "test/e2e/app-dir/segment-cache/cached-navigations/cached-navigations.test.ts": {
-      "flakey": [
-        "cached navigations caches runtime-prefetchable content from a navigation for instant second visit",
-        "cached navigations defers fallback params to the runtime stage",
-        "cached navigations includes static params in the cached static stage",
-        "cached navigations serves cached static segments instantly on the second navigation",
-        "cached navigations caches static segments when navigating to a known route without a prefetch"
       ]
     }
   },
@@ -258,7 +192,19 @@
       "test/e2e/app-dir/edge-runtime-module-errors/**/*",
       "test/e2e/middleware-general/**/*",
       "test/e2e/app-dir/ppr-full/**/*",
-      "test/e2e/cache-components/**/*"
+      "test/e2e/cache-components/**/*",
+      "test/e2e/app-dir/segment-cache/search-params/segment-cache-search-params.test.ts",
+      "test/e2e/app-dir/segment-cache/prefetch-layout-sharing/prefetch-layout-sharing.test.ts",
+      "test/e2e/app-dir/segment-cache/refresh/segment-cache-refresh.test.ts",
+      "test/e2e/app-dir/segment-cache/staleness/segment-cache-stale-time.test.ts",
+      "test/e2e/app-dir/segment-cache/staleness/segment-cache-per-page-dynamic-stale-time.test.ts",
+      "test/e2e/app-dir/segment-cache/vary-params/vary-params.test.ts",
+      "test/e2e/app-dir/segment-cache/cached-navigations/cached-navigations.test.ts",
+      "test/e2e/app-dir/segment-cache/basic/segment-cache-basic.test.ts",
+      "test/e2e/app-dir/app-client-cache/client-cache.parallel-routes.test.ts",
+      "test/e2e/app-dir/app-prefetch/prefetching.test.ts",
+      "test/e2e/app-dir/optimistic-routing/optimistic-routing.test.ts",
+      "test/e2e/app-dir/prefetch-true-instant/prefetch-true-instant.test.ts"
     ]
   },
   "$knextQuarantines": [
@@ -270,7 +216,8 @@
       ],
       "mechanism": "60s jest timeout awaiting the middleware-rewritten full-prefetch response via createRouterAct (act includes: 'Search param: rewrittenSearchParam'). Serving layer exonerated by local repro: the exact rewritten full-prefetch request (RSC:1, through the fixture's middleware rewrite) against the real e2e-deploy.sh deployment (published next@16.2.0 + the shipped @knext/core adapter) returns 200 in ~76ms WITH 'rewrittenSearchParam' in the body, stream complete, vary/cache headers intact. The hang is client/CDP runtime-prefetch scheduling under CI shard load, not knext serving.",
       "evidence": "run 28593534713: hung 3/3 attempts (same case, 60001ms each); run 28590478386: failed 2 attempts then RECOVERED on in-run retry — cross-run wobble, not deterministic debt.",
-      "provenance": "Upstream quarantines the runtime-prefetch deploy family wholesale: vercel/next.js@v16.2.0 test/deploy-tests-manifest.json marks ~34 'runtime prefetching …' cases flakey in segment-cache/prefetch-runtime.test.ts; THIS file additionally carries upstream's own in-file deploy-mode skip ('FIXME: search params seem to be dropped from the resume render when deployed', if (!isNextDeploy))."
+      "provenance": "Upstream quarantines the runtime-prefetch deploy family wholesale: vercel/next.js@v16.2.0 test/deploy-tests-manifest.json marks ~34 'runtime prefetching …' cases flakey in segment-cache/prefetch-runtime.test.ts; THIS file additionally carries upstream's own in-file deploy-mode skip ('FIXME: search params seem to be dropped from the resume render when deployed', if (!isNextDeploy)). FAMILY ROOT CAUSE (#214, ADR-0007 §d): vercel/next.js#95301 (merged 2026-07-02, post-v16.2.0) fixes the client segment-cache race behind this exact signature — a locked navigation reused an in-flight runtime-prefetch entry without tracking it, drained without awaiting it, and read the unresolved shell, so the awaited content never surfaced and the case hit the bare 60s timeout; upstream's own PR: 'The race only lost under CPU contention, which is why it reproduced in the prod flake-detection job on slow containers but almost never locally.' Promoted to a file-level quarantine after per-case extension stopped converging (runs 28700392845 + 28701712403: a DIFFERENT family member finaled each run). First removal candidate: the first NEXTJS_REF containing #95301.",
+      "level": "file"
     },
     {
       "test": "test/e2e/app-dir/segment-cache/prefetch-layout-sharing/prefetch-layout-sharing.test.ts",
@@ -280,7 +227,8 @@
       ],
       "mechanism": "60s jest timeout awaiting a runtime prefetch response via createRouterAct (act includes: 'runtime-prefetchable-content-page'). Same runtime-prefetch client-scheduling mechanism as the search-params quarantine (whose serving-layer repro exonerated the knext deployment).",
       "evidence": "run 28593534713: hung 3/3 attempts (same case, ~60000ms each); run 28590478386: file PASSED; run 28578203671: file failed — cross-run wobble.",
-      "provenance": "Upstream marks the runtime-prefetch deploy family flakey wholesale (vercel/next.js@v16.2.0 test/deploy-tests-manifest.json, segment-cache/prefetch-runtime.test.ts, ~34 cases) — this case exercises exactly that mechanism (segment-level runtime prefetch config)."
+      "provenance": "Upstream marks the runtime-prefetch deploy family flakey wholesale (vercel/next.js@v16.2.0 test/deploy-tests-manifest.json, segment-cache/prefetch-runtime.test.ts, ~34 cases) — this case exercises exactly that mechanism (segment-level runtime prefetch config). FAMILY ROOT CAUSE (#214, ADR-0007 §d): vercel/next.js#95301 (merged 2026-07-02, post-v16.2.0) fixes the client segment-cache race behind this exact signature — a locked navigation reused an in-flight runtime-prefetch entry without tracking it, drained without awaiting it, and read the unresolved shell, so the awaited content never surfaced and the case hit the bare 60s timeout; upstream's own PR: 'The race only lost under CPU contention, which is why it reproduced in the prod flake-detection job on slow containers but almost never locally.' Promoted to a file-level quarantine after per-case extension stopped converging (runs 28700392845 + 28701712403: a DIFFERENT family member finaled each run). First removal candidate: the first NEXTJS_REF containing #95301. Upstream ITSELF skipped this file's cases as too flaky post-v16.2.0 (vercel/next.js#92198: describe.skip ('Skipped due to flakiness'); still skipped at canary as of 2026-07-04).",
+      "level": "file"
     },
     {
       "test": "test/e2e/app-dir/segment-cache/refresh/segment-cache-refresh.test.ts",
@@ -291,7 +239,8 @@
       ],
       "mechanism": "60s jest timeouts in dynamic-refresh flows driven by createRouterAct; a DIFFERENT case hung on each in-run attempt (attempt 1+3: 'Server Action refresh()…' at 60001/60000ms while the other case passed in ~1.2s; attempt 2: 're-navigation…' at 60001ms while 'Server Action refresh()…' passed in 692ms) — a classic interleaving race, not a stable assertion diff.",
       "evidence": "run 28593534713: alternating case hung across 3 attempts; runs 28590478386 and 28587476341: file PASSED — cross-run wobble.",
-      "provenance": "Same client runtime-prefetch/dynamic-request scheduling family upstream quarantines as flakey (vercel/next.js@v16.2.0 test/deploy-tests-manifest.json, segment-cache/prefetch-runtime.test.ts)."
+      "provenance": "Same client runtime-prefetch/dynamic-request scheduling family upstream quarantines as flakey (vercel/next.js@v16.2.0 test/deploy-tests-manifest.json, segment-cache/prefetch-runtime.test.ts). FAMILY ROOT CAUSE (#214, ADR-0007 §d): vercel/next.js#95301 (merged 2026-07-02, post-v16.2.0) fixes the client segment-cache race behind this exact signature — a locked navigation reused an in-flight runtime-prefetch entry without tracking it, drained without awaiting it, and read the unresolved shell, so the awaited content never surfaced and the case hit the bare 60s timeout; upstream's own PR: 'The race only lost under CPU contention, which is why it reproduced in the prod flake-detection job on slow containers but almost never locally.' Promoted to a file-level quarantine after per-case extension stopped converging (runs 28700392845 + 28701712403: a DIFFERENT family member finaled each run). First removal candidate: the first NEXTJS_REF containing #95301. Upstream ITSELF skipped this file's cases as too flaky post-v16.2.0 (vercel/next.js#92163: describe.skip ('Disabled because too flaky'); still skipped at canary as of 2026-07-04).",
+      "level": "file"
     },
     {
       "test": "test/e2e/app-dir/segment-cache/staleness/segment-cache-stale-time.test.ts",
@@ -302,7 +251,8 @@
       ],
       "mechanism": "60s jest timeouts in runtime-prefetch/dynamic-data flows via createRouterAct, alternating per attempt (run 28596005486: att1 'reuses dynamic data…' hung while 'expires runtime prefetches…' passed in 731ms; att2 BOTH hung; att3 'expires runtime prefetches…' hung while 'reuses dynamic data…' passed in 1077ms) — the family's interleaving-race signature, zero assertion diffs.",
       "evidence": "run 28596005486: FINAL failure, alternating cases across 3 attempts; run 28590478386: failed 2 attempts ('expires runtime prefetches…') then RECOVERED on in-run retry; runs 28593534713 and 28587476341: file PASSED — cross-run wobble.",
-      "provenance": "Upstream marks the runtime-prefetch deploy family flakey wholesale (vercel/next.js@v16.2.0 test/deploy-tests-manifest.json, segment-cache/prefetch-runtime.test.ts, ~34 'runtime prefetching … stale time handling' cases) — the hanging cases exercise exactly that mechanism (runtime-prefetch stale-time expiry)."
+      "provenance": "Upstream marks the runtime-prefetch deploy family flakey wholesale (vercel/next.js@v16.2.0 test/deploy-tests-manifest.json, segment-cache/prefetch-runtime.test.ts, ~34 'runtime prefetching … stale time handling' cases) — the hanging cases exercise exactly that mechanism (runtime-prefetch stale-time expiry). FAMILY ROOT CAUSE (#214, ADR-0007 §d): vercel/next.js#95301 (merged 2026-07-02, post-v16.2.0) fixes the client segment-cache race behind this exact signature — a locked navigation reused an in-flight runtime-prefetch entry without tracking it, drained without awaiting it, and read the unresolved shell, so the awaited content never surfaced and the case hit the bare 60s timeout; upstream's own PR: 'The race only lost under CPU contention, which is why it reproduced in the prod flake-detection job on slow containers but almost never locally.' Promoted to a file-level quarantine after per-case extension stopped converging (runs 28700392845 + 28701712403: a DIFFERENT family member finaled each run). First removal candidate: the first NEXTJS_REF containing #95301.",
+      "level": "file"
     },
     {
       "test": "test/e2e/app-dir/segment-cache/staleness/segment-cache-per-page-dynamic-stale-time.test.ts",
@@ -316,7 +266,8 @@
       ],
       "mechanism": "60s jest timeouts in per-page dynamic stale-time flows via createRouterAct, alternating per attempt (run 28578203671: att1 'reuses dynamic data…' + 'back/forward…' hung, att2+att3 'per-page value overrides…' hung while the att1 pair passed) — the family's interleaving-race signature, zero assertion diffs. Run 28700392845: the parallel-routes sibling hung the identical 60s 'Exceeded timeout' on all 3 attempts (thrown timeout, zero assertion diffs) — same createRouterAct staleness scheduling.",
       "evidence": "run 28578203671: FINAL failure, alternating cases across 3 attempts; run 28596005486: all three cases hung 1 attempt then the file RECOVERED on in-run retry; run 28590478386: 1-attempt wobble then recovered; run 28593534713: file PASSED — cross-run wobble. run 28607626868 (KNEXT_RUNTIME=bun lane, #188): NEW sibling case 'two dynamic pages with different stale times behave independently' hung 60s while the 3 already-quarantined cases were correctly pattern-skipped — same runtime-prefetch mechanism flushed out by Bun's slower per-request scheduling, not a Bucket-1 serving failure. run 28700392845 (node lane, #212 verification dispatch, shard 11/16): NEW sibling case 'with parallel routes, uses the minimum stale time across all slots' FINAL-post-retry failure — hung the same 60s jest timeout on ALL THREE attempts while the 4 already-quarantined cases were correctly pattern-skipped (skip layer verified working; env parity: same ubuntu runner, -c 2, 60s per-case timeout, 3 attempts as every prior citation). Ledger extension per ADR-0007 graduation addendum §c, not a red-nightly reflex.",
-      "provenance": "Upstream marks the runtime-prefetch deploy family flakey wholesale (vercel/next.js@v16.2.0 test/deploy-tests-manifest.json, segment-cache/prefetch-runtime.test.ts, incl. its stale-time-handling cases) — same client dynamic-data/staleness scheduling mechanism."
+      "provenance": "Upstream marks the runtime-prefetch deploy family flakey wholesale (vercel/next.js@v16.2.0 test/deploy-tests-manifest.json, segment-cache/prefetch-runtime.test.ts, incl. its stale-time-handling cases) — same client dynamic-data/staleness scheduling mechanism. FAMILY ROOT CAUSE (#214, ADR-0007 §d): vercel/next.js#95301 (merged 2026-07-02, post-v16.2.0) fixes the client segment-cache race behind this exact signature — a locked navigation reused an in-flight runtime-prefetch entry without tracking it, drained without awaiting it, and read the unresolved shell, so the awaited content never surfaced and the case hit the bare 60s timeout; upstream's own PR: 'The race only lost under CPU contention, which is why it reproduced in the prod flake-detection job on slow containers but almost never locally.' Promoted to a file-level quarantine after per-case extension stopped converging (runs 28700392845 + 28701712403: a DIFFERENT family member finaled each run). First removal candidate: the first NEXTJS_REF containing #95301. Upstream ITSELF skipped this file's cases as too flaky post-v16.2.0 (vercel/next.js#92162: describe.skip ('Skip unstable_dynamicStaleTime tests due to flakiness'); still skipped at canary as of 2026-07-04).",
+      "level": "file"
     },
     {
       "test": "test/e2e/app-dir/segment-cache/vary-params/vary-params.test.ts",
@@ -330,7 +281,8 @@
       ],
       "mechanism": "60s jest timeouts in runtime-prefetch vary-params flows via createRouterAct, alternating per attempt (run 28578203671: att1+att2 'does not share cached segment… (runtime prefetch)' hung; att3 THREE cases hung incl. two that passed earlier attempts) — the family's interleaving-race signature, zero assertion diffs.",
       "evidence": "run 28578203671: FINAL failure, alternating cases across 3 attempts; run 28596005486: 2-attempt wobble ('renders cached loading state…', then 'does not share cached segment…') then RECOVERED on in-run retry; run 28590478386: 1-attempt wobble ('does not reuse prefetched segment…' + 'shares cached segment…') then recovered; run 28593534713: file PASSED — cross-run wobble. run 28607626868 (KNEXT_RUNTIME=bun lane, #188): NEW sibling case 'tracks metadata param access separately from body (runtime prefetch)' hung 60s while the 4 already-quarantined cases were correctly pattern-skipped — same runtime-prefetch mechanism, bun-lane evidence.",
-      "provenance": "Upstream marks the runtime-prefetch deploy family flakey wholesale (vercel/next.js@v16.2.0 test/deploy-tests-manifest.json, segment-cache/prefetch-runtime.test.ts, incl. its 'includes search params, but not dynamic content' cases) — same runtime-prefetch vary/search-params mechanism."
+      "provenance": "Upstream marks the runtime-prefetch deploy family flakey wholesale (vercel/next.js@v16.2.0 test/deploy-tests-manifest.json, segment-cache/prefetch-runtime.test.ts, incl. its 'includes search params, but not dynamic content' cases) — same runtime-prefetch vary/search-params mechanism. FAMILY ROOT CAUSE (#214, ADR-0007 §d): vercel/next.js#95301 (merged 2026-07-02, post-v16.2.0) fixes the client segment-cache race behind this exact signature — a locked navigation reused an in-flight runtime-prefetch entry without tracking it, drained without awaiting it, and read the unresolved shell, so the awaited content never surfaced and the case hit the bare 60s timeout; upstream's own PR: 'The race only lost under CPU contention, which is why it reproduced in the prod flake-detection job on slow containers but almost never locally.' Promoted to a file-level quarantine after per-case extension stopped converging (runs 28700392845 + 28701712403: a DIFFERENT family member finaled each run). First removal candidate: the first NEXTJS_REF containing #95301.",
+      "level": "file"
     },
     {
       "test": "test/e2e/app-dir/app-client-cache/client-cache.parallel-routes.test.ts",
@@ -341,7 +293,8 @@
       ],
       "mechanism": "60s jest timeouts in full-page prefetch flows, alternating per attempt (run 28597872225: att1+att3 'should re-use the cache…' hung at 60002/60000ms; att2 'should prefetch the full page' hung at 60002ms while the other case ran) — the family's interleaving-race signature, zero assertion diffs. Settings audit: upstream's test-deploy-adapter lane runs the IDENTICAL per-case 60s timeout (hardcoded individualTestTimeout in e2e-utils; NEXT_E2E_TEST_TIMEOUT raises only the setup timeout), -c 2, ubuntu-latest, 3 attempts — the class wobbles at full env parity.",
       "evidence": "run 28597872225: FINAL failure, alternating cases across 3 attempts; runs 28578203671, 28590478386, 28593534713, 28596005486: file PASSED — cross-run wobble (4 clean runs, then a hard failure).",
-      "provenance": "Upstream's own deploy manifest marks the SAME case texts failed in this family's siblings (vercel/next.js@v16.2.0 test/deploy-tests-manifest.json, app-client-cache/client-cache.defaults.test.ts 'prefetch={true} should re-use the cache for the full page, only for 5 mins' + client-cache.experimental.test.ts), plus the runtime-prefetch family flakey block (segment-cache/prefetch-runtime.test.ts)."
+      "provenance": "Upstream's own deploy manifest marks the SAME case texts failed in this family's siblings (vercel/next.js@v16.2.0 test/deploy-tests-manifest.json, app-client-cache/client-cache.defaults.test.ts 'prefetch={true} should re-use the cache for the full page, only for 5 mins' + client-cache.experimental.test.ts), plus the runtime-prefetch family flakey block (segment-cache/prefetch-runtime.test.ts). FAMILY ROOT CAUSE (#214, ADR-0007 §d): vercel/next.js#95301 (merged 2026-07-02, post-v16.2.0) fixes the client segment-cache race behind this exact signature — a locked navigation reused an in-flight runtime-prefetch entry without tracking it, drained without awaiting it, and read the unresolved shell, so the awaited content never surfaced and the case hit the bare 60s timeout; upstream's own PR: 'The race only lost under CPU contention, which is why it reproduced in the prod flake-detection job on slow containers but almost never locally.' Promoted to a file-level quarantine after per-case extension stopped converging (runs 28700392845 + 28701712403: a DIFFERENT family member finaled each run). First removal candidate: the first NEXTJS_REF containing #95301. Upstream ITSELF skipped this file's cases as too flaky post-v16.2.0 (vercel/next.js#92195: describe.skip ('flaky in production and deploy modes'); still skipped at canary as of 2026-07-04).",
+      "level": "file"
     },
     {
       "test": "test/e2e/app-dir/app-prefetch/prefetching.test.ts",
@@ -353,7 +306,8 @@
       ],
       "mechanism": "MIXED, honestly split: the uri-encoded case is an ASSERTION diff — an un-retried, immediate hasElementByCssSelector('#accordion-to-dashboard') check right after .click() (prefetching.test.ts:371) observes false when the client navigation isn't instant under shard load; the SUBSTANTIVE assertions of that test (the %20-encoded prefetch is issued and reused — both wrapped in retry()) PASS, so the encoding behavior itself is verified correct on knext. The two loading-state cases are the family's 60s createRouterAct hangs. Pre-fix run 28578203671 also failed its prefetch-priority cases, which have passed in every post-fix run (excluded from this quarantine).",
       "evidence": "run 28597872225: FINAL failure (uri-encoded case failed identically 3/3; att1 also hung the two loading-state cases); run 28593534713: 2-attempt wobble (uri-encoded + a loading-state case each attempt) then RECOVERED; run 28590478386: 1-attempt wobble (all three cases) then recovered; run 28596005486: file PASSED — cross-run wobble on identical code.",
-      "provenance": "Same client prefetch-latency-under-load class upstream ledgers: runtime-prefetch family flakey block (segment-cache/prefetch-runtime.test.ts) and the app-client-cache full-page-prefetch failed entries (vercel/next.js@v16.2.0 test/deploy-tests-manifest.json)."
+      "provenance": "Same client prefetch-latency-under-load class upstream ledgers: runtime-prefetch family flakey block (segment-cache/prefetch-runtime.test.ts) and the app-client-cache full-page-prefetch failed entries (vercel/next.js@v16.2.0 test/deploy-tests-manifest.json). FAMILY ROOT CAUSE (#214, ADR-0007 §d): vercel/next.js#95301 (merged 2026-07-02, post-v16.2.0) fixes the client segment-cache race behind this exact signature — a locked navigation reused an in-flight runtime-prefetch entry without tracking it, drained without awaiting it, and read the unresolved shell, so the awaited content never surfaced and the case hit the bare 60s timeout; upstream's own PR: 'The race only lost under CPU contention, which is why it reproduced in the prod flake-detection job on slow containers but almost never locally.' Promoted to a file-level quarantine after per-case extension stopped converging (runs 28700392845 + 28701712403: a DIFFERENT family member finaled each run). First removal candidate: the first NEXTJS_REF containing #95301.",
+      "level": "file"
     },
     {
       "test": "test/e2e/app-dir/optimistic-routing/optimistic-routing.test.ts",
@@ -366,7 +320,8 @@
       ],
       "mechanism": "60s jest timeouts in createRouterAct-driven optimistic-routing prediction flows, a DIFFERENT case per attempt (run 28601386408: att1 'rewrite detection…' hung then passed atts 2-3 in ~0.7s; att2 'static route with catch-all sibling…' hung; att3 'nested dynamic routes…' hung after passing atts 1-2) — the family's interleaving-race signature, zero assertion diffs. NOT an adapter-lane finding: this file does not read NEXT_ENABLE_ADAPTER (the only isAdapterTest readers at v16.2.0 — not-found-with-pages-i18n, sub-shell-generation{,-middleware}, partial-fallback-root-blocking, partial-fallback-shell-upgrade, deterministic-build/deployment-id — all passed on first attempt in the same run).",
       "evidence": "run 28601386408 (first adapter-lane run): FINAL failure, alternating cases across 3 attempts; run 28593534713: 1-attempt wobble ('optional catch-all…' + 'rewrite detection…') then RECOVERED on in-run retry; runs 28578203671, 28590478386, 28596005486, 28597872225: file PASSED — cross-run wobble.",
-      "provenance": "Same client prefetch/navigation-latency-under-load class upstream ledgers (vercel/next.js@v16.2.0 test/deploy-tests-manifest.json: segment-cache/prefetch-runtime.test.ts flakey block; app-client-cache failed entries)."
+      "provenance": "Same client prefetch/navigation-latency-under-load class upstream ledgers (vercel/next.js@v16.2.0 test/deploy-tests-manifest.json: segment-cache/prefetch-runtime.test.ts flakey block; app-client-cache failed entries). FAMILY ROOT CAUSE (#214, ADR-0007 §d): vercel/next.js#95301 (merged 2026-07-02, post-v16.2.0) fixes the client segment-cache race behind this exact signature — a locked navigation reused an in-flight runtime-prefetch entry without tracking it, drained without awaiting it, and read the unresolved shell, so the awaited content never surfaced and the case hit the bare 60s timeout; upstream's own PR: 'The race only lost under CPU contention, which is why it reproduced in the prod flake-detection job on slow containers but almost never locally.' Promoted to a file-level quarantine after per-case extension stopped converging (runs 28700392845 + 28701712403: a DIFFERENT family member finaled each run). First removal candidate: the first NEXTJS_REF containing #95301.",
+      "level": "file"
     },
     {
       "test": "test/e2e/app-dir/prefetch-true-instant/prefetch-true-instant.test.ts",
@@ -377,7 +332,8 @@
       ],
       "mechanism": "60s jest timeouts in createRouterAct-driven instant-route prefetch flows, alternating per attempt (run 28612654960: 'also disables full prefetch…' hung atts 1+3 at 60000ms while 'does not include dynamic content…' hung att 2 and passed elsewhere) — the runtime-prefetch family's interleaving-race signature, zero assertion diffs. NOT a Bucket-1/3/4 serving failure: the same run's server-log tails for this fixture carry no exception.",
       "evidence": "run 28612654960 (KNEXT_RUNTIME=bun, #188 round 2): FINAL failure, alternating cases across 3 attempts; run 28607626868 (first bun run): file failed 1 attempt then RECOVERED on in-run retry (2/2, shard 3) — cross-run wobble, bun-lane evidence for both.",
-      "provenance": "Upstream marks the runtime-prefetch deploy family flakey wholesale (vercel/next.js@v16.2.0 test/deploy-tests-manifest.json, segment-cache/prefetch-runtime.test.ts, ~34 'runtime prefetching …' cases) — instant-route prefetch exercises exactly that client scheduling mechanism."
+      "provenance": "Upstream marks the runtime-prefetch deploy family flakey wholesale (vercel/next.js@v16.2.0 test/deploy-tests-manifest.json, segment-cache/prefetch-runtime.test.ts, ~34 'runtime prefetching …' cases) — instant-route prefetch exercises exactly that client scheduling mechanism. FAMILY ROOT CAUSE (#214, ADR-0007 §d): vercel/next.js#95301 (merged 2026-07-02, post-v16.2.0) fixes the client segment-cache race behind this exact signature — a locked navigation reused an in-flight runtime-prefetch entry without tracking it, drained without awaiting it, and read the unresolved shell, so the awaited content never surfaced and the case hit the bare 60s timeout; upstream's own PR: 'The race only lost under CPU contention, which is why it reproduced in the prod flake-detection job on slow containers but almost never locally.' Promoted to a file-level quarantine after per-case extension stopped converging (runs 28700392845 + 28701712403: a DIFFERENT family member finaled each run). First removal candidate: the first NEXTJS_REF containing #95301.",
+      "level": "file"
     },
     {
       "test": "test/e2e/app-dir/server-actions-redirect-middleware-rewrite/server-actions-redirect-middleware-rewrite.test.ts",
@@ -401,7 +357,21 @@
       ],
       "mechanism": "60s jest timeouts in createRouterAct-driven cached-navigation/runtime-prefetch flows, alternating per attempt (run 28618585946: att1 'defers fallback params…' + 'caches runtime-prefetchable content…' hung; att2 only 'caches runtime-prefetchable content…'; att3 'serves cached static segments…' + 'includes static params…' — cases that hung one attempt passed the next) — the runtime-prefetch family's interleaving-race signature, zero assertion diffs, ZERO server-side exceptions in the surfaced server-log tails.",
       "evidence": "run 28618585946 (KNEXT_RUNTIME=bun, #188 round 3 verify): FIRST FINAL failure, alternating cases across 3 attempts; run 28612654960 (round 2): 1-attempt wobble ('caches static segments when navigating to a known route without a prefetch') then RECOVERED on in-run retry; earlier bun runs: file PASSED — cross-run wobble, quarantined only after the final-post-retry bar was met.",
-      "provenance": "Upstream marks the runtime-prefetch deploy family flakey wholesale (vercel/next.js@v16.2.0 test/deploy-tests-manifest.json, segment-cache/prefetch-runtime.test.ts, ~34 'runtime prefetching …' cases) — cached navigations exercise exactly that segment-cache runtime-prefetch scheduling mechanism."
+      "provenance": "Upstream marks the runtime-prefetch deploy family flakey wholesale (vercel/next.js@v16.2.0 test/deploy-tests-manifest.json, segment-cache/prefetch-runtime.test.ts, ~34 'runtime prefetching …' cases) — cached navigations exercise exactly that segment-cache runtime-prefetch scheduling mechanism. FAMILY ROOT CAUSE (#214, ADR-0007 §d): vercel/next.js#95301 (merged 2026-07-02, post-v16.2.0) fixes the client segment-cache race behind this exact signature — a locked navigation reused an in-flight runtime-prefetch entry without tracking it, drained without awaiting it, and read the unresolved shell, so the awaited content never surfaced and the case hit the bare 60s timeout; upstream's own PR: 'The race only lost under CPU contention, which is why it reproduced in the prod flake-detection job on slow containers but almost never locally.' Promoted to a file-level quarantine after per-case extension stopped converging (runs 28700392845 + 28701712403: a DIFFERENT family member finaled each run). First removal candidate: the first NEXTJS_REF containing #95301. Upstream ITSELF skipped this file's cases as too flaky post-v16.2.0 (vercel/next.js#92199: per-case it.skip on ALL its cases; still skipped at canary as of 2026-07-04).",
+      "level": "file"
+    },
+    {
+      "test": "test/e2e/app-dir/segment-cache/basic/segment-cache-basic.test.ts",
+      "nextjsRef": "v16.2.0",
+      "level": "file",
+      "cases": [
+        "segment cache (basic tests) skips static layouts during partially static navigation",
+        "segment cache (basic tests) refreshes page segments when navigating to the exact same URL as the current location",
+        "segment cache (basic tests) navigate with prefetched data"
+      ],
+      "mechanism": "60s jest timeouts (the HARDCODED per-case individualTestTimeout in test/lib/e2e-utils — NEXT_E2E_TEST_TIMEOUT raises only the SETUP timeout) thrown from createRouterAct navigation/prefetch waits. Run 28701712403 shard 3/16: a DIFFERENT case hung on each of the 3 attempts ('skips static layouts…' at basic.test.ts:232, then 'refreshes page segments…' at :280, then 'navigate with prefetched data' at :57), 9/11 cases passing per attempt, zero assertion diffs, while the sibling -c 2 slot deployed+tested ~6 other fixtures during the first attempt (09:26:00–09:29:37) — the family's CPU-contention interleaving signature, not a knext serving failure (serving exonerated by the family's local repro, see the search-params entry).",
+      "evidence": "run 28701712403 (node lane, the #210 closure run, shard 3/16): FINAL failure past retries — 789 passed / 1 failed across all 16 shards, the lone red being this file; the file PASSED in every prior cited full run (28578203671, 28590478386, 28593534713, 28596005486, 28597872225, 28601386408) — cross-run wobble, newest family member.",
+      "provenance": "Upstream marks the runtime-prefetch deploy family flakey wholesale at v16.2.0 (test/deploy-tests-manifest.json, segment-cache/prefetch-runtime.test.ts, 33 cases) and this file already carries upstream's own per-case deploy skip (#90601). FAMILY ROOT CAUSE (#214, ADR-0007 §d): vercel/next.js#95301 (merged 2026-07-02, post-v16.2.0) fixes the client segment-cache race behind this exact signature — a locked navigation reused an in-flight runtime-prefetch entry without tracking it, drained without awaiting it, and read the unresolved shell, so the awaited content never surfaced and the case hit the bare 60s timeout; upstream's own PR: 'The race only lost under CPU contention, which is why it reproduced in the prod flake-detection job on slow containers but almost never locally.' Promoted to a file-level quarantine after per-case extension stopped converging (runs 28700392845 + 28701712403: a DIFFERENT family member finaled each run). First removal candidate: the first NEXTJS_REF containing #95301."
     }
   ],
   "$knextExclusions": [
