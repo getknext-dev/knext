@@ -1,18 +1,31 @@
 # CLAUDE.md — kickoff brief for this MVP
 
-## Goal (current, updated 2026-07-04)
-Ship a **Knative-ecosystem MVP of scale-to-zero PostgreSQL**: one database that is easy to host,
-easy to maintain, and reliable enough. Idle DB consumes zero compute; a client connection wakes it
-sub-second(ish). Reuse open source (Neon) for everything below the wire; build only the glue.
+## Status: v1.0.0 SHIPPED (2026-07-05) — now in open-ended post-1.0 loop
+**v1.0.0 GA released.** All 10 ratified GA criteria met (#73): declarative provisioning
+(AppDatabase CRD + reconcile operator, ADR-0004), per-app restore executed, tenant quotas,
+read-replica-pool GA, storage-plane upgrade executed, KC5 real-knext-use, independent security
+review (a cross-tenant bypass was found + fixed pre-tag, #112/#115), scale ceiling demonstrated
+(30 apps, linear), observability parity, configurable object storage (ADR-0005: OCI/S3/on-prem,
+MinIO optional). The improvement loop is GRADUATED + now OPEN-ENDED (owner: "continue looping
+until I stop"): trigger-gated reviews + owner-directed post-1.0 work.
 
-**Multi-tenancy is UN-PARKED — branch-per-app shipped in v0.6.0 (ADR-0003).** The `template`
-wake-mode seam that was anticipated as the return path has returned and is wired. Honest scope
-bound: **DB-per-app** for tens/low-hundreds of apps on ONE shared storage plane; each app is a
-Neon branch (own timeline) with its own 0↔1 `compute-<app>` Deployment, provisioned
-**imperatively** by `deploy/provision-app.sh` and routed by the apps-gateway — a CRD operator is
-**deferred/post-MVP**. A **read-scaling axis** also shipped (`compute-ro` / `DATABASE_URL_RO`).
-Distinguish clearly: **DB-per-app (branch-per-app) is SHIPPED**; any **SCS multi-SYSTEM /
-full data-sovereignty-zone multi-tenancy** ambition remains **parked / out of scope**.
+## Product vision: UNIFIED knext platform (app layer + database layer)
+**scale-zero-pg and knext are ONE platform, two layers.** knext scales the *applications*
+(Next.js on Knative, HTTP activator); scale-zero-pg scales their *databases* (TCP wake-on-connect
+gateway — deliberately non-Knative, because Knative's activator is HTTP-only). Same cluster,
+both scale-to-zero, joined by a single `DATABASE_URL` Secret (`NextApp.spec.secrets.envMap`).
+The unified pitch: an app and its database sleep at zero and wake together on one visitor request.
+Unified-platform docs live in the knext doc site (getknext-dev/knext `docs/`), positioning
+scale-zero-pg as the knext platform's database layer.
+
+## Original goal (met)
+Ship a **Knative-ecosystem scale-to-zero PostgreSQL**: databases easy to host, maintain, reliable.
+Idle DB → zero compute; a client connection wakes it sub-second(ish). Reuse Neon OSS below the
+wire; build only the glue. Multi-tenancy shipped as **branch-per-app** (DB-per-app, tens/low-
+hundreds of apps on one shared plane; each app a Neon branch + its own 0↔1 compute, now
+provisioned by the **AppDatabase CRD operator**, `provision-app.sh` retained as break-glass).
+Read-scaling axis shipped (`compute-ro` / `DATABASE_URL_RO`). **SCS multi-SYSTEM / full
+data-sovereignty-zone multi-tenancy remains parked / out of scope.**
 
 ## Consumer
 The **knext** platform (`~/alpheya/pocs/knext`) — a scale-to-zero Next.js framework on
