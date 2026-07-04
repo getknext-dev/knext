@@ -452,22 +452,43 @@ function countOccurrences(haystack, needle) {
 
 /**
  * Resolve the staged standalone tree's `next/dist/server/web/sandbox/context.js`.
+ *
+ * STRICTLY appDir-rooted (#216). Never `require.resolve` here: Node consults
+ * the NODE_PATH global folders even with `{ paths: [appDir] }`, and `pnpm exec`
+ * injects NODE_PATH=<repo>/node_modules/.pnpm/node_modules — on CI that
+ * resolved (and patched!) the harness repo's OWN next install from an empty
+ * app dir. Likewise, never walk above the staged tree: the only ascent allowed
+ * is from a nested monorepo app dir (`.next/standalone/<app-path>/`) up to its
+ * enclosing `.next/standalone` root, where `output:'standalone'` puts the
+ * bundled node_modules.
+ *
  * @param {string} appDir
  * @returns {string | null}
  */
 function resolveSandboxContext(appDir) {
-  const rel = 'next/dist/server/web/sandbox/context.js';
-  try {
-    return require.resolve(rel, { paths: [appDir] });
-  } catch {
-    /* fall through to the manual walk */
-  }
   const { existsSync } = require('node:fs');
   const path = require('node:path');
-  let dir = path.resolve(appDir);
-  for (;;) {
+  const rel = 'next/dist/server/web/sandbox/context.js';
+  const start = path.resolve(appDir);
+
+  // The enclosing `.next/standalone` root, if appDir sits inside one.
+  let standaloneRoot = null;
+  for (let dir = start; ; ) {
+    if (path.basename(dir) === 'standalone' && path.basename(path.dirname(dir)) === '.next') {
+      standaloneRoot = dir;
+      break;
+    }
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+
+  for (let dir = start; ; ) {
     const candidate = path.join(dir, 'node_modules', ...rel.split('/'));
     if (existsSync(candidate)) return candidate;
+    // Bounded walk: appDir itself, or — inside a standalone tree — up to
+    // (and including) the standalone root. Nothing outside the staged tree.
+    if (standaloneRoot === null || dir === standaloneRoot) return null;
     const parent = path.dirname(dir);
     if (parent === dir) return null;
     dir = parent;

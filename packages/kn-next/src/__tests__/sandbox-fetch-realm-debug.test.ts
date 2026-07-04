@@ -340,6 +340,110 @@ describe("sandbox-fetch-realm-debug — the context.js patcher", () => {
         expect(String(result.reason)).toMatch(/resolve|not found/i);
     });
 
+    it("ignores a next install in the appDir's ANCESTRY — resolution is appDir-rooted (#216)", () => {
+        // #216: on ubuntu CI the "empty app dir" fixture resolved — and PATCHED —
+        // a next install from OUTSIDE the staged tree. The patcher must never
+        // look above the app dir (except inside a .next/standalone tree, below).
+        const parent = mkdtempSync(
+            join(realpathSync(tmpdir()), "knext-sfrd-ancestor-"),
+        );
+        const decoyPkg = join(parent, "node_modules", "next");
+        const decoyCtx = join(
+            decoyPkg,
+            "dist",
+            "server",
+            "web",
+            "sandbox",
+            "context.js",
+        );
+        mkdirSync(dirname(decoyCtx), { recursive: true });
+        writeFileSync(
+            join(decoyPkg, "package.json"),
+            JSON.stringify({ name: "next", version: "16.2.0" }),
+        );
+        writeFileSync(decoyCtx, realContext);
+        const appDir = join(parent, "app");
+        mkdirSync(appDir, { recursive: true });
+        const result = mod.patchSandboxContext({ appDir, log: () => {} });
+        expect(result.patched).toBe(false);
+        expect(String(result.reason)).toMatch(/resolve|not found/i);
+        // the out-of-tree install must be byte-for-byte untouched
+        expect(readFileSync(decoyCtx, "utf8")).toBe(realContext);
+    });
+
+    it("resolves the standalone-ROOT node_modules for a nested monorepo appDir", () => {
+        // Monorepo `output:'standalone'` nests server.js under
+        // .next/standalone/<app-path>/ with the bundled node_modules at the
+        // standalone ROOT — the walk may ascend to that root, and no further.
+        const root = mkdtempSync(
+            join(realpathSync(tmpdir()), "knext-sfrd-mono-"),
+        );
+        const standaloneRoot = join(root, ".next", "standalone");
+        const pkgDir = join(standaloneRoot, "node_modules", "next");
+        const ctxPath = join(
+            pkgDir,
+            "dist",
+            "server",
+            "web",
+            "sandbox",
+            "context.js",
+        );
+        mkdirSync(dirname(ctxPath), { recursive: true });
+        writeFileSync(
+            join(pkgDir, "package.json"),
+            JSON.stringify({ name: "next", version: "16.2.0" }),
+        );
+        writeFileSync(ctxPath, realContext);
+        const appDir = join(standaloneRoot, "apps", "web");
+        mkdirSync(appDir, { recursive: true });
+        const result = mod.patchSandboxContext({ appDir, log: () => {} });
+        expect(result.patched).toBe(true);
+        expect(result.contextPath).toBe(ctxPath);
+    });
+
+    it("fails LOUD even when NODE_PATH names a real next install — the #216 CI escape", () => {
+        // `pnpm exec` injects NODE_PATH=<repo>/node_modules/.pnpm/node_modules
+        // and Node's require.resolve consults NODE_PATH even with
+        // { paths: [appDir] } — so on CI the patcher resolved (and patched!) the
+        // harness repo's OWN next from an empty app dir. Reproduce hermetically
+        // in a child process with NODE_PATH pointing at a decoy install.
+        const globalDir = mkdtempSync(
+            join(realpathSync(tmpdir()), "knext-sfrd-nodepath-"),
+        );
+        const decoyPkg = join(globalDir, "next");
+        const decoyCtx = join(
+            decoyPkg,
+            "dist",
+            "server",
+            "web",
+            "sandbox",
+            "context.js",
+        );
+        mkdirSync(dirname(decoyCtx), { recursive: true });
+        writeFileSync(
+            join(decoyPkg, "package.json"),
+            JSON.stringify({ name: "next", version: "16.2.0" }),
+        );
+        writeFileSync(decoyCtx, realContext);
+        const appDir = mkdtempSync(join(tmpdir(), "knext-sfrd-empty-np-"));
+        const out = execFileSync(
+            process.execPath,
+            [
+                "-e",
+                "const mod = require(process.argv[1]);" +
+                    "const r = mod.patchSandboxContext({ appDir: process.argv[2], log: () => {} });" +
+                    "process.stdout.write(JSON.stringify(r));",
+                MODULE_PATH,
+                appDir,
+            ],
+            { env: { ...process.env, NODE_PATH: globalDir }, encoding: "utf8" },
+        );
+        const result = JSON.parse(out);
+        expect(result.patched).toBe(false);
+        expect(String(result.reason)).toMatch(/resolve|not found/i);
+        expect(readFileSync(decoyCtx, "utf8")).toBe(realContext);
+    });
+
     it("the injected hook stays inert when the debug env is off (steady-state containment)", async () => {
         const { appDir, contextPath } = makeFakeStandalone(realContext);
         mod.patchSandboxContext({ appDir, log: () => {} });
