@@ -185,17 +185,31 @@ one plane, all connects **through the apps-gateway**:
      with a random md5 password into a Secret `app-db-<app>`; `compute_ctl` applies
      that login role from the spec every boot (the documented MVP behavior). So a
      client that even *names* the right user still needs that app's password, which
-     only its `DATABASE_URL` Secret holds. `cloud_admin` remains the admin, reached
-     **direct-to-compute** only — never through the apps-gateway.
-  Both layers are proven live in `deploy/_verify-multitenant.sh` (app A's DSN is
-  denied against app B; `cloud_admin` is denied through the gateway; the app's own
-  credential to its own db succeeds). **Trust boundary:** `pggw-apps:55432` is the
-  multi-tenant front door — open to knext app pods (they are the tenants), so
-  tenant isolation is *credential-based, not network-based*. The netpols
-  (`70-networkpolicy.yaml`) keep the sensitive path (`compute-<app>:55433`)
-  reachable only from the apps-gateway; a deployment that does not trust its own
-  namespace can additionally restrict ingress to `pggw-apps` with a
-  namespace/pod selector.
+     only its `DATABASE_URL` Secret holds.
+  3. **`cloud_admin` is loopback-only on per-app computes (issue #112, v1.0
+     security).** The v1.0 security audit (#88) found the two gateway layers guard
+     only the *front door*: because flannel enforces no NetworkPolicy, any pod
+     could dial `compute-<app>:55433` **directly**, present the publicly-documented
+     `cloud_admin`/`cloud_admin`, and get cross-tenant superuser — a full bypass.
+     The fix makes the boundary CNI-independent: on every per-app compute the
+     entrypoint (a) refuses the public-default `cloud_admin` md5 (uses the
+     `pg-cloud-admin` Secret or a strong **random** md5), and (b) reconciles
+     `pg_hba.conf` to `host all cloud_admin all reject` **before** the network
+     `md5` catch-all while the loopback lines stay `trust`. So `cloud_admin` works
+     over the pod-local loopback (compute_ctl boot + `provision-app.sh`/drills via
+     `psql -h localhost`) but is **rejected from every off-pod address**; app roles
+     still authenticate over TCP through the apps-gateway. This is now the
+     **enforcing** tenant boundary; the netpols are defense-in-depth.
+  These layers are proven live in `deploy/_verify-multitenant.sh` (app A's DSN is
+  denied against app B; `cloud_admin` is denied through the gateway; an off-localhost
+  `cloud_admin` dial to a real per-app compute is `pg_hba`-rejected with no superuser;
+  the app's own credential to its own db succeeds — over `sslmode=require`).
+  **Trust boundary:** `pggw-apps:55432` is the multi-tenant front door — open to
+  knext app pods (they are the tenants) and now **TLS-encrypted** (issue #113: the
+  shared `pggw-tls` Secret is mounted on `pggw-apps` too, SANs cover it). Tenant
+  isolation is *credential- + pg_hba-based, enforced independent of the CNI*; the
+  netpols (`70-networkpolicy.yaml`) keep `compute-<app>:55433` reachable only from
+  the apps-gateway as an additional layer-3 boundary **when the CNI enforces them**.
 - **Provisioning is crash-safe / intent-first (issue #76).** `create` applies the
   per-app ConfigMap — the sole durable owner of the branch's `TIMELINE_ID` — *and*
   the credential Secret **before** the pageserver branch call. A crash between the

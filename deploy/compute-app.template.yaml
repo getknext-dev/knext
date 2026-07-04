@@ -101,6 +101,18 @@ spec:
                   name: app-db-__APP__
                   key: APP_ROLE_MD5
                   optional: true
+            # cloud_admin md5 (issue #112): optional strong, cluster-known value
+            # from the pg-cloud-admin Secret (deploy/gen-secrets.sh). ABSENT -> the
+            # entrypoint mints a strong RANDOM md5 per boot; the public default is
+            # never used on a per-app compute. cloud_admin is loopback-only either
+            # way (pg_hba rejects it over TCP), so this only affects break-glass
+            # localhost access, not the tenant boundary.
+            - name: CLOUD_ADMIN_MD5
+              valueFrom:
+                secretKeyRef:
+                  name: pg-cloud-admin
+                  key: CLOUD_ADMIN_MD5
+                  optional: true
           ports:
             - { name: pg, containerPort: 55433 }
             - { name: compute-http, containerPort: 3080 }

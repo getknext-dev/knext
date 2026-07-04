@@ -9,8 +9,12 @@
 # is untouched by multi-tenancy: the apps-gateway's {system} routing maps the
 # DSN database name to the per-app Deployment/Service that provision-app.sh
 # created. It reuses the pggw ServiceAccount/Role (deployments/scale is namespace
-# -wide), so no new RBAC. TLS is left off here (add the pggw-tls mount like the
-# primary if apps need front-door TLS); sslmode=disable works as-is.
+# -wide), so no new RBAC. Front-door TLS is ON (issue #113): the shared pggw-tls
+# Secret (deploy/gen-tls.sh, SANs cover pggw-apps too) is mounted and the gateway
+# answers SSLRequest with 'S', so per-tenant traffic — the md5 auth exchange AND
+# every query/result row — is encrypted on the wire. sslmode=require works;
+# sslmode=disable still works (TLS optional, no regression). Rotate the cert the
+# same way as the primary (docs/operations.md "TLS certificate rotation").
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -30,10 +34,15 @@ spec:
       serviceAccountName: pggw # reuse: deployments/scale is namespace-wide
       containers:
         - name: gateway
-          # Built from this PR branch (v0.6.1 tenant security: (user,database)
-          # authz + per-app peer idle). Digest-pinned (contract 22). Rebuild +
-          # re-pin on any gateway change.
-          image: me-abudhabi-1.ocir.io/axfqznklsd2t/ks-pg/gateway:v0.6.1@sha256:12a735337adcd2470fe834557ad7ab298d20a35e2113b80669211324f28a0ccb
+          # apps-gateway image. v0.6.1 tenant security ((user,database) authz +
+          # per-app peer idle) PLUS the #92 existence-oracle fix (uniform 28P01,
+          # no internal k8s names leaked). Digest-pinned (contract 22). NOTE: the
+          # plain `v0.6.1` digest (12a73533) was built BEFORE the #92 fix merged
+          # (6f8728e / #102) — pinning it here re-opened the oracle on the live
+          # apps-gateway. This tag is the merged-#92 build; the primary gateway
+          # (10-gateway.yaml) has no existence-oracle path so it stays on v0.6.1.
+          # Rebuild + re-pin on any gateway change.
+          image: me-abudhabi-1.ocir.io/axfqznklsd2t/ks-pg/gateway:sha-546d069-92@sha256:6767b26eac00577baa184a67578f656a47d510b199e47f44355aed1374e1e5b4
           imagePullPolicy: IfNotPresent
           env:
             - name: GW_PORT
@@ -71,6 +80,14 @@ spec:
               valueFrom: { fieldRef: { fieldPath: metadata.namespace } }
             - name: GW_POD_IP
               valueFrom: { fieldRef: { fieldPath: status.podIP } }
+            - name: GW_TLS_CERT_FILE # front-door TLS (issue #113): answer SSLRequest with 'S'
+              value: "/etc/pggw-tls/tls.crt" # both set+loadable -> TLS on the wire
+            - name: GW_TLS_KEY_FILE # sslmode=require works; sslmode=disable still allowed
+              value: "/etc/pggw-tls/tls.key" # shared pggw-tls Secret (deploy/gen-tls.sh)
+          volumeMounts:
+            - name: pggw-tls
+              mountPath: /etc/pggw-tls
+              readOnly: true
           ports:
             - { name: pg, containerPort: 55432 }
             - { name: metrics, containerPort: 9090 }
@@ -81,6 +98,10 @@ spec:
           resources:
             requests: { cpu: 50m, memory: 32Mi, ephemeral-storage: 100Mi }
             limits: { memory: 128Mi, ephemeral-storage: 1Gi }
+      volumes:
+        - name: pggw-tls # self-signed keypair (deploy/gen-tls.sh); SANs cover pggw-apps
+          secret:
+            secretName: pggw-tls
 ---
 apiVersion: v1
 kind: Service

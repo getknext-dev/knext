@@ -72,6 +72,28 @@ awk '/name: compute-ingress/{f=1} f' "$MF" | grep -q '55433' \
   || fail "compute-ingress does not scope port 55433"
 ok "manifest contract: compute:55433 ingress restricted to app=pggw"
 
+# --- 3b. ENFORCING tenant-isolation control is pg_hba, CNI-INDEPENDENT (#112/#114)
+# On flannel the NetworkPolicies above are inert, so the control that actually
+# stops a co-tenant pod from becoming superuser on a per-app compute is the
+# per-app compute's pg_hba: cloud_admin bound to loopback + REJECTED over TCP,
+# plus the public-default md5 disabled (strong random) on per-app computes. This
+# lives in the ConfigMap-driven entrypoint and is asserted here as a deterministic
+# contract, so it holds regardless of whether the CNI enforces NetworkPolicy. The
+# LIVE attack-closed proof (off-localhost cloud_admin REJECTED) runs in
+# _verify-multitenant.sh against a real per-app compute.
+EP="$HERE/compute-files/entrypoint.sh"
+[ -f "$EP" ] || fail "entrypoint source $EP not found (pg_hba control missing)"
+grep -q 'harden_cloud_admin_hba' "$EP" \
+  || fail "entrypoint has no cloud_admin pg_hba hardening (issue #112 control absent)"
+grep -qE 'cloud_admin[^"]*reject|"host\\tall\\tcloud_admin\\tall\\treject"' "$EP" \
+  || fail "entrypoint does not insert a cloud_admin TCP-reject rule (issue #112)"
+grep -q 'PUBLIC_CLOUD_ADMIN_MD5' "$EP" \
+  || fail "entrypoint does not disable the public cloud_admin default on per-app computes (issue #112)"
+# Same control must be present in the applied ConfigMap manifest (what pods mount).
+grep -q 'harden_cloud_admin_hba' "$HERE/54-compute-files.yaml" \
+  || fail "54-compute-files.yaml ConfigMap is out of sync — missing the pg_hba control (regenerate)"
+ok "pg_hba control present (CNI-independent): per-app cloud_admin loopback-only + public default disabled"
+
 # --- 4. positive path: front door still serves through the gateway (drill a) ----
 DSN="postgres://cloud_admin:cloud_admin@pggw:55432/postgres?sslmode=disable"
 P=netpol-probe-$$

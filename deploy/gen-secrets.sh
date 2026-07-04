@@ -73,6 +73,42 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# pg-cloud-admin — strong per-app cloud_admin credential (issue #112 CRITICAL)
+# ---------------------------------------------------------------------------
+# Per-app computes (compute-<app>) run the superuser `cloud_admin`. It is used
+# ONLY over the pod-local loopback (compute_ctl boot + provision-app/drills via
+# `psql -h localhost`, which pg_hba trusts) and is REJECTED over TCP by the
+# entrypoint's pg_hba hardening — so a co-tenant pod cannot become superuser by
+# dialing compute-<app>:55433 directly. This Secret supplies CLOUD_ADMIN_MD5 (a
+# raw 32-hex md5, NOT the publicly-documented default) that the per-app compute
+# template mounts (optional). If this Secret is ABSENT the entrypoint mints a
+# strong RANDOM md5 per boot instead, so the public default never reaches a
+# per-app compute either way — this Secret just makes cloud_admin's md5 stable
+# and operator-known across boots (e.g. for break-glass loopback access).
+#
+# No-silent-rotation: if it exists, leave it. If missing, generate a strong
+# random md5 (unguessable; there is no matching plaintext by design).
+CANAME=pg-cloud-admin
+PUBLIC_DEFAULT_MD5=b093c0d3b281ba6da1eacc608620abd8
+if $K get secret "$CANAME" >/dev/null 2>&1; then
+  echo "ok - Secret $CANAME already exists; leaving untouched (no silent rotation)"
+else
+  CA_MD5="${PG_CLOUD_ADMIN_MD5:-}"
+  if [ -z "$CA_MD5" ]; then
+    if command -v openssl >/dev/null 2>&1; then
+      CA_MD5=$(openssl rand -hex 16)
+    else
+      CA_MD5=$(LC_ALL=C tr -dc 'a-f0-9' </dev/urandom | head -c 32)
+    fi
+  fi
+  [ "$CA_MD5" = "$PUBLIC_DEFAULT_MD5" ] && fail "refusing to write the public default cloud_admin md5 into $CANAME"
+  $K create secret generic "$CANAME" \
+    --from-literal=CLOUD_ADMIN_MD5="$CA_MD5" >/dev/null \
+    || fail "could not create Secret $CANAME"
+  echo "ok - created Secret $CANAME (strong random cloud_admin md5; per-app computes mount it optionally)"
+fi
+
+# ---------------------------------------------------------------------------
 # storage-objstore — the object-storage BACKEND target (issue #105)
 # ---------------------------------------------------------------------------
 # The pageserver (page offload) + safekeepers (WAL offload) read their S3

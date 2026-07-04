@@ -14,12 +14,16 @@
 #      returns the app's own data (isolation still holds through the gateway)
 #   4. TENANT ACCESS CONTROL (issue #74): the apps-gateway REFUSES cross-tenant and
 #      cloud_admin startups BEFORE any wake — app A's DSN cannot reach app B
+#   4b. GATEWAY-BYPASS ATTACK CLOSED (issue #112): a co-tenant pod dialing
+#      compute-<app>:55433 DIRECTLY as cloud_admin over TCP is REJECTED by pg_hba
+#      (loopback-only cloud_admin), CNI-independent — the enforcing tenant boundary
 #   5. independent 0<->1: sleeping A leaves B serving; A wakes with data intact
+#   5b. APPS-GATEWAY TLS (issue #113): sslmode=require to pggw-apps is encrypted
 #   6. PER-APP IDLE (issue #75): with B busy, idle A still scales to zero on schedule
 #
-# Isolation/schema assertions connect DIRECT to each compute-<app> Service as the
-# cloud_admin superuser (direct-compute access is a separate trust boundary — the
-# gateway's per-app credential boundary is what tenants hit). The gateway-fronted
+# Isolation/schema/admin assertions run over the pod-LOCAL LOOPBACK via
+# `kubectl exec` as cloud_admin (loopback-trust; TCP cloud_admin is rejected since
+# #112 — that dial is the very bypass step 4b proves closed). The gateway-fronted
 # steps use the PER-APP role app_<app> + its Secret password (cloud_admin is
 # refused through the apps-gateway). Requires the apps-gateway image built from
 # this change (tenant authz + per-app peers) — see ADR-0003 "Consequences".
@@ -53,23 +57,56 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# DCLIENT — one-shot psql DIRECT into a per-app compute's postgres DB (compute up).
-DCLIENT() { # $1 tag  $2 app  $3 sql
-  local p="mtdc-$$-$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
-  local dsn="postgres://cloud_admin:cloud_admin@compute-$2.$NS.svc:55433/postgres?sslmode=disable"
+# DCLIENT — admin psql into a per-app compute's postgres DB over the pod-LOCAL
+# LOOPBACK via `kubectl exec` (compute-<app> pod must be Running). cloud_admin is
+# loopback-trust and, since issue #112, REJECTED over TCP — so admin/isolation
+# queries go through the pod (compute_ctl's own path), NOT a network dial. This is
+# ALSO the compute_ctl/provision-app "legit localhost cloud_admin" path, so a green
+# DCLIENT proves that path is intact after the pg_hba hardening.
+DCLIENT() { # $1 tag(unused)  $2 app  $3 sql
+  K exec "deploy/compute-$2" -c compute -- \
+    psql -h localhost -p 55433 -U cloud_admin -d postgres -tA -w -c "$3"
+}
+PODS() { K get pods -l app=compute-"$1" --no-headers 2>/dev/null | grep -c . || true; }
+
+# ATTACK_TCP — simulate a co-tenant / compromised pod (default SA, no special
+# labels) dialing a per-app compute DIRECTLY as cloud_admin over TCP: the exact
+# #112 gateway-bypass. Prints the psql result (expected AFTER the fix: a pg_hba
+# reject, never superuser). compute-<app> must be Running.
+ATTACK_TCP() { # $1 app
+  local p="mtatk-$$-$1"
+  local dsn="postgres://cloud_admin:cloud_admin@compute-$1.$NS.svc:55433/postgres?sslmode=disable&connect_timeout=8"
   K run "$p" --image=neondatabase/compute-node-v17:8464 --image-pull-policy=Never \
-    --restart=Never --quiet --command -- psql "$dsn" -tA -w -c "$3" >/dev/null
+    --restart=Never --quiet --command -- \
+    sh -c "PGPASSWORD=cloud_admin psql \"$dsn\" -tAc 'select rolsuper from pg_roles where rolname=current_user' 2>&1 || true" >/dev/null 2>&1 || true
   local phase="" i=0
-  while [ $i -lt 90 ]; do
+  while [ $i -lt 60 ]; do
     phase=$(K get pod "$p" -o jsonpath='{.status.phase}' 2>/dev/null || true)
     case "$phase" in Succeeded|Failed) break;; esac; i=$((i+1)); sleep 1
   done
   local out; out=$(K logs "$p" 2>&1)
   K delete pod "$p" --ignore-not-found --wait=false >/dev/null 2>&1
-  [ "$phase" = "Succeeded" ] || { echo "direct client $1 (app=$2) failed ($phase): $out" >&2; return 1; }
+  printf '%s\n' "$out"
+}
+
+# TLSCLIENT — one-shot psql THROUGH the apps-gateway as the per-app role with
+# sslmode=require, printing \conninfo (expects "SSL connection ..."). Proves the
+# apps-gateway front door is encrypted (issue #113).
+TLSCLIENT() { # $1 tag  $2 app  $3 pw
+  local p="mttls-$$-$1"
+  local dsn="postgres://app_$2:$3@pggw-apps:55432/$2?sslmode=require"
+  K run "$p" --image=neondatabase/compute-node-v17:8464 --image-pull-policy=Never \
+    --restart=Never --quiet --command -- psql "$dsn" -tA -w -c '\conninfo' >/dev/null 2>&1 || true
+  local phase="" i=0
+  while [ $i -lt 120 ]; do
+    phase=$(K get pod "$p" -o jsonpath='{.status.phase}' 2>/dev/null || true)
+    case "$phase" in Succeeded|Failed) break;; esac; i=$((i+1)); sleep 1
+  done
+  local out; out=$(K logs "$p" 2>&1)
+  K delete pod "$p" --ignore-not-found --wait=false >/dev/null 2>&1
+  [ "$phase" = "Succeeded" ] || { echo "$out"; return 1; }
   echo "$out"
 }
-PODS() { K get pods -l app=compute-"$1" --no-headers 2>/dev/null | grep -c . || true; }
 
 # GCLIENT — one-shot psql THROUGH the apps-gateway as the PER-APP role app_<app>
 # (issue #74: cloud_admin is refused here). Proves the full path: authorize the
@@ -168,6 +205,38 @@ ok "each app wrote a private row into app_items"
   || fail "$A cannot see its own write"
 ok "isolation holds: neither app sees the other's write; each sees its own"
 
+# 4b. GATEWAY-BYPASS ATTACK CLOSED (issue #112 CRITICAL) — the headline fix. A
+#     co-tenant pod that dials a per-app compute DIRECTLY as cloud_admin over TCP
+#     (bypassing the apps-gateway's (user,database) authz) MUST be REJECTED by
+#     pg_hba — regardless of the CNI (flannel enforces no NetworkPolicy). And the
+#     LEGIT paths must still work: (a) loopback cloud_admin (compute_ctl +
+#     provision/drills, proven by every green DCLIENT above), (b) the app path
+#     through pggw-apps (proven in section 5). This is the enforcing tenant boundary.
+echo "==> gateway-bypass attack closed (issue #112 CRITICAL)"
+# The control must be LIVE on the compute (definitive, not timing-dependent):
+K exec "deploy/compute-$A" -c compute -- sh -c \
+  'grep -qiE "^host[[:space:]]+all[[:space:]]+cloud_admin[[:space:]]+all[[:space:]]+reject" /var/db/postgres/compute/pg_hba.conf' \
+  || fail "compute-$A pg_hba missing the cloud_admin TCP-reject — #112 control not live"
+ok "compute-$A pg_hba binds cloud_admin to loopback (rejects it over TCP) — control live"
+# legit loopback cloud_admin still works (compute_ctl / provision-app path):
+[ "$(DCLIENT lb "$A" 'select 1' | tail -1)" = "1" ] \
+  || fail "loopback cloud_admin regressed on compute-$A (compute_ctl/provision path broke)"
+ok "legit path intact: loopback cloud_admin still works on compute-$A"
+# the attack itself: off-localhost cloud_admin over TCP must be REJECTED + no superuser:
+ATK="$(ATTACK_TCP "$A")"
+echo "    attacker (off-localhost cloud_admin -> compute-$A:55433): $(printf '%s' "$ATK" | grep -o 'FATAL:.*\|^t$\|^f$' | head -1)"
+case "$ATK" in
+  *"pg_hba.conf rejects connection"*) ;;
+  *) fail "SECURITY: off-localhost cloud_admin to compute-$A was NOT pg_hba-rejected (bypass OPEN): $ATK";;
+esac
+case "$ATK" in
+  *rolsuper*|*"|t"*) fail "SECURITY: attacker obtained cloud_admin/superuser on compute-$A: $ATK";;
+esac
+# printf 't' alone (a bare superuser row) would also be a breach:
+[ "$(printf '%s' "$ATK" | grep -cE '^t$')" = "0" ] \
+  || fail "SECURITY: attacker got a superuser row from compute-$A"
+ok "ATTACK CLOSED: off-localhost cloud_admin REJECTED by pg_hba on compute-$A (no superuser)"
+
 # 5. independent 0<->1 through the apps-gateway (full path incl. db rewrite)
 K scale deploy/compute-"$A" --replicas=0 >/dev/null
 i=0; while [ "$(PODS "$A")" != "0" ]; do i=$((i+1)); [ $i -gt 60 ] && fail "$A did not reach 0"; sleep 1; done
@@ -184,6 +253,19 @@ ok "apps-gateway routed database=$A -> woke compute-$A 0->1 -> served its data (
 [ "$(GCLIENT reab "$A" "select count(*) from app_items where note='$B-private-write'" | tail -1)" = "0" ] \
   || fail "ISOLATION BREACH via gateway: $A sees $B's write"
 ok "$A woke via the gateway with its data intact + isolation holds — independent 0<->1 confirmed"
+
+# 5b. APPS-GATEWAY FRONT-DOOR TLS (issue #113 HIGH) — the same per-app path over
+#     sslmode=require must establish a real TLS session (psql \conninfo reports
+#     "SSL connection ..."). Before the fix pggw-apps answered SSLRequest with 'N'
+#     and served every query/result row in plaintext; now per-tenant traffic is
+#     encrypted on the wire. (compute-$A is up from section 5.)
+echo "==> apps-gateway front-door TLS (issue #113)"
+ATPW="$(app_pw "$A")"
+TLSOUT="$(TLSCLIENT tlsa "$A" "$ATPW")" || fail "sslmode=require to pggw-apps FAILED (TLS not served?): $TLSOUT"
+echo "    $(echo "$TLSOUT" | grep -o 'SSL connection.*' | head -1)"
+echo "$TLSOUT" | grep -q "SSL connection" \
+  || fail "pggw-apps did NOT negotiate TLS under sslmode=require (still plaintext): $TLSOUT"
+ok "apps-gateway serves TLS: app_$A over sslmode=require established an encrypted session"
 
 # 6. TENANT ACCESS CONTROL (issue #74) — the apps-gateway must REFUSE:
 #    (a) app A's role reaching app B's database (cross-tenant), and

@@ -23,12 +23,21 @@
 #     (unlabeled bucket-init Job). MinIO holds only already-known dev creds and
 #     is never externally exposed.
 #
-# ENFORCEMENT NOTE: OrbStack's bundled k8s (flannel, no netpol controller) does
-# NOT enforce NetworkPolicy — these objects are inert there but declaratively
-# correct and enforced by any compliant CNI (Calico, Cilium). Health/readiness
-# probes originate from the kubelet (node IP); strict CNIs may need a node-CIDR
-# or failsafe allowance for the *:9090/9898/7676/9000 health ports — verify on
-# the target CNI before production.
+# ENFORCEMENT NOTE: OrbStack's bundled k8s AND the OKE GA cluster run flannel
+# (kube-flannel-ds), which ships NO NetworkPolicy controller — these objects are
+# inert there but declaratively correct and enforced by any compliant CNI
+# (Calico, Cilium, OCI VCN-native w/ network policy). Health/readiness probes
+# originate from the kubelet (node IP); strict CNIs may need a node-CIDR or
+# failsafe allowance for the *:9090/9898/7676/9000 health ports — verify on the
+# target CNI before production.
+#
+# TENANT ISOLATION DOES NOT DEPEND ON THIS FILE (issue #112/#114). Because the CNI
+# may not enforce NetworkPolicy, the ENFORCING control that keeps a co-tenant pod
+# from becoming superuser on compute-<app>:55433 is the per-app compute's pg_hba:
+# cloud_admin is bound to loopback and REJECTED over TCP (deploy/compute-files/
+# entrypoint.sh), independent of the CNI. apps-compute-ingress below is DEFENSE-
+# IN-DEPTH that becomes active isolation on a policy-capable CNI. See
+# docs/operations.md "Network isolation caveat" / "Tenant isolation controls".
 #
 # namespaceSelector uses the auto-applied `kubernetes.io/metadata.name` label.
 ---

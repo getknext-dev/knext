@@ -894,6 +894,50 @@ that `compute:55433` is unreachable from a non-gateway pod and **fails** (not wa
 if it is not — so a regression in the policies, or a CNI that only partially enforces,
 is caught instead of passing silently.
 
+## Tenant isolation controls (issue #112 / #113 / #114)
+
+Because NetworkPolicy is **inert on flannel** (above), the tenant boundary must not
+depend on the CNI. Three controls carry it, in order of who does the enforcing:
+
+1. **pg_hba loopback-binding of `cloud_admin` — the ENFORCING control (CNI-independent).**
+   On every **per-app** compute (`compute-<app>`, i.e. any compute whose entrypoint
+   sees `APP_ROLE`), `deploy/compute-files/entrypoint.sh` reconciles `pg_hba.conf`
+   once Postgres is up: it inserts `host all cloud_admin all reject` just **before**
+   the network `md5` catch-all. The initdb loopback lines (`127.0.0.1/32`, `::1/128`
+   → `trust`) come first, so pg_hba's first-match rule keeps `cloud_admin` working
+   over the pod-local loopback (compute_ctl boot + `provision-app.sh`/drills via
+   `psql -h localhost`) while **rejecting it from every other address**. A co-tenant
+   or compromised pod that dials `compute-<app>:55433` directly as `cloud_admin`
+   (the #112 gateway-bypass) gets `FATAL: pg_hba.conf rejects connection` — no
+   superuser, regardless of the CNI. App roles (`app_<app>`) are untouched: they
+   fall through to `md5`, so the apps-gateway path keeps working.
+2. **No public-default `cloud_admin` password on per-app computes.** The publicly
+   documented dev md5 (`md5("cloud_admin"||"cloud_admin")`) is a skeleton key. On a
+   per-app compute the entrypoint refuses it: it uses the `pg-cloud-admin` Secret's
+   `CLOUD_ADMIN_MD5` if present (`deploy/gen-secrets.sh` scaffolds a strong random
+   one), else mints a strong **random** md5 per boot. cloud_admin is loopback-only
+   either way (control 1), so this only affects break-glass localhost access.
+3. **`apps-compute-ingress` NetworkPolicy — defense-in-depth.** On a policy-capable
+   CNI this restricts `compute-<app>:55433` to the `pggw-apps` pods, giving a second,
+   layer-3 boundary. On flannel it is inert (hence controls 1–2 carry the weight).
+
+The **primary single-DB** compute (no `APP_ROLE`) keeps `cloud_admin` reachable over
+TCP through the primary gateway — that is a single tenant, not a cross-tenant
+boundary, and is defended by the NetworkPolicy + operator posture above.
+
+**Transport encryption (issue #113):** both gateways now serve front-door TLS from
+the shared `pggw-tls` Secret — `pggw` (`deploy/10-gateway.yaml`) **and** `pggw-apps`
+(`deploy/81-apps-gateway.yaml`). Per-tenant traffic (the md5 auth exchange and every
+query/result row) is encrypted under `sslmode=require`; `sslmode=disable` still works
+(TLS optional, no regression). Regenerate the cert with `deploy/gen-tls.sh` (its SANs
+now cover `pggw-apps`) and restart both gateways to rotate.
+
+**Drills:** `deploy/_verify-multitenant.sh` proves the attack closed **live** (an
+off-localhost `cloud_admin` dial to a real per-app compute is `pg_hba`-rejected, no
+superuser) plus the legit loopback + gateway + `sslmode=require` paths still work;
+`deploy/_verify-netpol.sh` asserts the pg_hba control exists regardless of CNI;
+`deploy/_verify-tls.sh` asserts both gateways are TLS-configured.
+
 ## Common operations
 
 ```sh

@@ -46,6 +46,19 @@ $K get deploy pggw -o jsonpath='{.spec.template.spec.containers[0].env[*].name}'
 $K get secret pggw-tls >/dev/null 2>&1 || fail "Secret pggw-tls missing — run deploy/gen-tls.sh first"
 ok "gateway ready with TLS configured (pggw-tls mounted)"
 
+# 0b. apps-gateway (pggw-apps) must ALSO serve TLS (issue #113). Config-level
+#     assertion here (mount + env); the LIVE sslmode=require proof to pggw-apps
+#     runs in _verify-multitenant.sh (needs a provisioned per-app credential).
+if $K get deploy pggw-apps >/dev/null 2>&1; then
+  $K get deploy pggw-apps -o jsonpath='{.spec.template.spec.containers[0].env[*].name}' \
+    | grep -q GW_TLS_CERT_FILE || fail "pggw-apps has no GW_TLS_CERT_FILE — apply deploy/81-apps-gateway.yaml (issue #113)"
+  $K get deploy pggw-apps -o jsonpath='{.spec.template.spec.volumes[*].secret.secretName}' \
+    | grep -q pggw-tls || fail "pggw-apps does not mount the pggw-tls Secret (issue #113)"
+  ok "apps-gateway (pggw-apps) configured for front-door TLS (pggw-tls mounted)"
+else
+  echo "note - pggw-apps not deployed; skipping apps-gateway TLS config check"
+fi
+
 # 1. sslmode=require succeeds AND psql confirms a live client-side TLS session.
 #    \conninfo prints "SSL connection (protocol: TLSv1.3, cipher: ...)".
 OUT=$(CLIENT require "$DSN_REQUIRE" '\conninfo') \

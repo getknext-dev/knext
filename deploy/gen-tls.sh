@@ -17,8 +17,12 @@
 #
 # SANs cover every name a client might use:
 #   pggw, pggw.scale-zero-pg, pggw.scale-zero-pg.svc  (in-cluster Service)
+#   pggw-apps, pggw-apps.scale-zero-pg[.svc]          (multi-tenant front door, #113)
 #   pggw-lb                                            (external LoadBalancer)
 #   localhost, 127.0.0.1                               (OrbStack port-forward)
+# The cert is SHARED by the primary (pggw) and apps (pggw-apps) gateways, so both
+# fronts serve TLS from one Secret. sslmode=require needs no SAN match; the extra
+# SANs let a client move to sslmode=verify-full against either front.
 set -eu
 NS=scale-zero-pg
 NAME=pggw-tls
@@ -41,7 +45,7 @@ trap 'rm -rf "$TMP"' EXIT
 openssl req -x509 -newkey rsa:2048 -nodes \
   -keyout "$TMP/tls.key" -out "$TMP/tls.crt" \
   -days 825 -subj "/CN=$CN" \
-  -addext "subjectAltName=DNS:pggw,DNS:pggw.scale-zero-pg,DNS:pggw.scale-zero-pg.svc,DNS:pggw-lb,DNS:pggw-lb.scale-zero-pg,DNS:pggw-lb.scale-zero-pg.svc,DNS:localhost,IP:127.0.0.1" \
+  -addext "subjectAltName=DNS:pggw,DNS:pggw.scale-zero-pg,DNS:pggw.scale-zero-pg.svc,DNS:pggw-apps,DNS:pggw-apps.scale-zero-pg,DNS:pggw-apps.scale-zero-pg.svc,DNS:pggw-lb,DNS:pggw-lb.scale-zero-pg,DNS:pggw-lb.scale-zero-pg.svc,DNS:localhost,IP:127.0.0.1" \
   >/dev/null 2>&1 || fail "openssl could not generate the self-signed cert"
 
 $K create secret tls "$NAME" \

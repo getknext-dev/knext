@@ -43,22 +43,13 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# DCLIENT — one-shot psql DIRECT into a per-app compute's postgres DB (compute up),
-# as cloud_admin (direct-compute is a separate trust boundary from the gateway).
-DCLIENT() { # $1 tag  $2 app  $3 sql
-  local p="qdc-$$-$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
-  local dsn="postgres://cloud_admin:cloud_admin@compute-$2.$NS.svc:55433/postgres?sslmode=disable"
-  K run "$p" --image=neondatabase/compute-node-v17:8464 --image-pull-policy=Never \
-    --restart=Never --quiet --command -- psql "$dsn" -tA -w -c "$3" >/dev/null
-  local phase="" i=0
-  while [ $i -lt 90 ]; do
-    phase=$(K get pod "$p" -o jsonpath='{.status.phase}' 2>/dev/null || true)
-    case "$phase" in Succeeded|Failed) break;; esac; i=$((i+1)); sleep 1
-  done
-  local out; out=$(K logs "$p" 2>&1)
-  K delete pod "$p" --ignore-not-found --wait=false >/dev/null 2>&1
-  [ "$phase" = "Succeeded" ] || { echo "direct client $1 (app=$2) failed ($phase): $out" >&2; return 1; }
-  echo "$out"
+# DCLIENT — admin psql into a per-app compute's postgres DB over the pod-LOCAL
+# LOOPBACK via `kubectl exec` (compute-<app> must be Running). cloud_admin is
+# loopback-trust and, since issue #112, REJECTED over TCP — so admin queries go
+# through the pod, not a network dial (which is the closed gateway-bypass).
+DCLIENT() { # $1 tag(unused)  $2 app  $3 sql
+  K exec "deploy/compute-$2" -c compute -- \
+    psql -h localhost -p 55433 -U cloud_admin -d postgres -tA -w -c "$3"
 }
 
 # GCLIENT — one-shot psql THROUGH the apps-gateway as the per-app role (waits out

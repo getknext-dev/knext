@@ -15,12 +15,74 @@ set -eu
 
 SRC=/compute-files/config.json
 DST=/tmp/config.json
+PGDATA=/var/db/postgres/compute
+# The publicly-documented dev md5 = md5("cloud_admin"||"cloud_admin"). It is a
+# SKELETON KEY (issue #112) and must never reach a compute that holds tenant data.
+PUBLIC_CLOUD_ADMIN_MD5=b093c0d3b281ba6da1eacc608620abd8
 
-# cloud_admin credential: injected from the optional pg-cloud-admin Secret
-# (CLOUD_ADMIN_MD5 = md5 of password+username). Dev fallback is the publicly
-# known default (cloud_admin/cloud_admin) so fresh local clusters just work;
-# production MUST set the Secret. Rotation = update Secret + restart compute.
-CLOUD_ADMIN_MD5="${CLOUD_ADMIN_MD5:-b093c0d3b281ba6da1eacc608620abd8}"
+# cloud_admin credential + trust boundary (issue #112 CRITICAL).
+#
+# On a PER-APP compute (APP_ROLE set) cloud_admin is used EXCLUSIVELY over the
+# pod-local loopback: compute_ctl's own boot connection and provision-app.sh /
+# the drills all `psql -h localhost`, which the initdb pg_hba TRUSTS (see the
+# harden step below). It is NEVER presented over the pod network — apps reach the
+# compute only through the apps-gateway as the per-app role app_<app>. So on a
+# per-app compute we HARD-DISABLE the public default: an unset (or the public)
+# CLOUD_ADMIN_MD5 becomes a strong random, unguessable md5. Combined with the
+# pg_hba loopback-binding below, a co-tenant pod dialing compute-<app>:55433
+# directly can neither guess the password NOR be admitted as cloud_admin.
+#
+# On the PRIMARY single-DB compute (no APP_ROLE) cloud_admin IS the documented
+# credential clients present THROUGH the primary gateway over TCP, so there we
+# keep the dev-default fallback (fresh local clusters just work); that path is a
+# single tenant, not a cross-tenant boundary, and is defended by NetworkPolicy +
+# operator posture (docs/operations.md "Network isolation caveat").
+if [ -n "${APP_ROLE:-}" ]; then
+  if [ -z "${CLOUD_ADMIN_MD5:-}" ] || [ "${CLOUD_ADMIN_MD5}" = "$PUBLIC_CLOUD_ADMIN_MD5" ]; then
+    CLOUD_ADMIN_MD5="$(od -An -tx1 -N16 /dev/urandom | tr -d ' \n')"
+    echo "issue #112: per-app compute cloud_admin uses a strong random md5 (public default disabled)"
+  fi
+else
+  CLOUD_ADMIN_MD5="${CLOUD_ADMIN_MD5:-$PUBLIC_CLOUD_ADMIN_MD5}"
+fi
+
+# harden_cloud_admin_hba (issue #112): once Postgres is accepting loopback
+# connections, insert a `host all cloud_admin all reject` line JUST BEFORE the
+# network catch-all (`host all all all md5`) that compute_ctl appends, then
+# reload. Order matters and is safe: compute_ctl's initdb pg_hba lists the
+# loopback lines (127.0.0.1/32, ::1/128 -> trust) FIRST, so pg_hba's first-match
+# rule keeps cloud_admin working over loopback while rejecting it from every
+# other address. App roles (app_<app>) are untouched — they fall through to the
+# md5 catch-all, so the apps-gateway path keeps working. This is the ENFORCING,
+# CNI-independent tenant boundary (flannel ships no NetworkPolicy controller, so
+# 70-networkpolicy.yaml is defense-in-depth only). Runs in the background so it
+# never delays the wake/readiness path; the strong random md5 above holds the
+# line for the sub-second before the reload lands.
+harden_cloud_admin_hba() {
+  HBA="$PGDATA/pg_hba.conf"
+  PSQL="psql -h localhost -p 55433 -U cloud_admin -d postgres -tAc"
+  i=0
+  while [ $i -lt 600 ]; do
+    $PSQL 'select 1' >/dev/null 2>&1 && break
+    i=$((i+1)); sleep 0.2
+  done
+  [ -f "$HBA" ] || { echo "WARN issue #112: $HBA absent; cloud_admin still protected by strong md5"; return 0; }
+  if grep -qiE '^[[:space:]]*host[[:space:]]+all[[:space:]]+cloud_admin[[:space:]]+all[[:space:]]+reject' "$HBA"; then
+    return 0
+  fi
+  # Insert the reject before the first `host all all all <method>` catch-all.
+  awk '{ if ($1=="host" && $2=="all" && $3=="all" && $4=="all" && !d){ print "host\tall\tcloud_admin\tall\treject"; d=1 } print }' \
+      "$HBA" > "$HBA.harden" 2>/dev/null && cat "$HBA.harden" > "$HBA" && rm -f "$HBA.harden"
+  if grep -qiE '^host[[:space:]]+all[[:space:]]+cloud_admin[[:space:]]+all[[:space:]]+reject' "$HBA"; then
+    if $PSQL 'SELECT pg_reload_conf()' >/dev/null 2>&1; then
+      echo "issue #112: cloud_admin restricted to loopback (rejected over TCP); pg_hba reloaded"
+    else
+      echo "WARN issue #112: pg_hba reload failed; cloud_admin still protected by strong random md5"
+    fi
+  else
+    echo "WARN issue #112: could not locate the network catch-all in pg_hba; cloud_admin still protected by strong random md5"
+  fi
+}
 
 echo "Rendering compute spec (tenant=${TENANT_ID} timeline=${TIMELINE_ID})"
 sed -e "s|TENANT_ID|${TENANT_ID}|g" -e "s|TIMELINE_ID|${TIMELINE_ID}|g" \
@@ -56,8 +118,15 @@ if [ -n "${APP_ROLE:-}" ] && [ -n "${APP_ROLE_MD5:-}" ]; then
       "$DST" > "$DST.tmp" && mv "$DST.tmp" "$DST"
 fi
 
+# Per-app tenant boundary: reconcile pg_hba to loopback-only cloud_admin once
+# Postgres is up (issue #112). Backgrounded before exec so the wake path is never
+# blocked; a no-op on the primary/tmpl-less single-DB compute (no APP_ROLE).
+if [ -n "${APP_ROLE:-}" ]; then
+  harden_cloud_admin_hba &
+fi
+
 echo "Starting compute_ctl"
-exec /usr/local/bin/compute_ctl --pgdata /var/db/postgres/compute \
+exec /usr/local/bin/compute_ctl --pgdata "$PGDATA" \
      -C "postgresql://cloud_admin@localhost:55433/postgres" \
      -b /usr/local/bin/postgres \
      --compute-id "compute-${HOSTNAME:-k8s}" \
