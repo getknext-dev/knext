@@ -57,6 +57,12 @@ let parsedPort = 0;
  * (#175, prerender.test.ts caching-header failures).
  */
 const FAKE_SERVER_JS = `
+// Faithful to the real standalone server: Next retitles the process, and the
+// resulting kernel comm ('next-server (v1' — space + unbalanced paren) is
+// exactly what blinded Linux lsof in the #210 nightly red. Keeping the title
+// here makes this contract test exercise the deploy script's port-ownership
+// check against the real-world process shape on Linux CI.
+process.title = 'next-server (v16.2.0)';
 const fs = require('node:fs');
 const path = require('node:path');
 const http = require('node:http');

@@ -600,17 +600,48 @@ server_died() { # surface the server log and abort (single exit path)
 }
 
 # Returns 0 when SERVER_PID owns a LISTEN socket on PORT, 1 when the port is
-# provably owned by someone else, 2 when no tooling is available to tell.
+# PROVABLY owned by a different pid, 2 when ownership cannot be determined.
+#
+# #210 (nightly run 28697744187, 477 RED): ss must be consulted FIRST, and a
+# bare lsof negative is NEVER proof of foreign ownership. Next.js retitles the
+# standalone server (`process.title = 'next-server (v16.2.0)'`), so the kernel
+# comm becomes `next-server (v1` — an embedded space + unbalanced paren that
+# Linux lsof 4.95 (the ubuntu-24.04 runner build) cannot parse out of
+# /proc/<pid>/stat. lsof then reports NO sockets for the process (even the
+# global -iTCP:<port> query comes back empty; verified in a node:24 container
+# against a real next@16.2.0 standalone build), so the old lsof-first check
+# refused EVERY healthy node-lane deployment. ss reads netlink sock_diag and
+# attributes the socket correctly. The bun lane never hit this (comm `bun`).
+# Refusal (1) therefore requires POSITIVE attribution of the LISTEN socket to
+# a DIFFERENT pid; absence of evidence downgrades to 2 (warn + proceed —
+# pre-#194 behavior, with pid-liveness checks still applied).
+# Guard-tested: tests/e2e-deploy.port-ownership.test.ts.
 port_owned_by_server() {
-  if command -v lsof >/dev/null 2>&1; then
-    lsof -nP -a -p "${SERVER_PID}" -iTCP:"${PORT}" -sTCP:LISTEN >/dev/null 2>&1
-    return $?
-  fi
+  local listeners
   if command -v ss >/dev/null 2>&1; then
-    if ss -ltnp 2>/dev/null | grep -F ":${PORT} " | grep -q "pid=${SERVER_PID},"; then
+    listeners="$(ss -ltnp 2>/dev/null | grep -F ":${PORT} " || true)"
+    if [ -n "${listeners}" ]; then
+      if printf '%s\n' "${listeners}" | grep -q "pid=${SERVER_PID},"; then
+        return 0
+      fi
+      if printf '%s\n' "${listeners}" | grep -q "pid="; then
+        return 1 # attributed to someone else — the real TOCTOU
+      fi
+      return 2 # listener visible but unattributed (no permission for -p info)
+    fi
+    return 2 # no LISTEN row despite an accepted probe — a snapshot race, not proof
+  fi
+  if command -v lsof >/dev/null 2>&1; then
+    if lsof -nP -a -p "${SERVER_PID}" -iTCP:"${PORT}" -sTCP:LISTEN >/dev/null 2>&1; then
       return 0
     fi
-    return 1
+    # Only trust the negative when the GLOBAL port query positively names a
+    # different owner (lsof may be blind to our pid entirely — see above).
+    listeners="$(lsof -nP -iTCP:"${PORT}" -sTCP:LISTEN -Fp 2>/dev/null | grep '^p' || true)"
+    if [ -n "${listeners}" ] && ! printf '%s\n' "${listeners}" | grep -qx "p${SERVER_PID}"; then
+      return 1
+    fi
+    return 2
   fi
   return 2
 }
@@ -650,7 +681,7 @@ if [ "${OWNS}" = "1" ]; then
   cat "${SERVER_LOG}" >&2 || true
   exit 1
 elif [ "${OWNS}" = "2" ]; then
-  log "WARNING: neither lsof nor ss available — cannot verify pid ${SERVER_PID} owns port ${PORT} (pid-liveness checks still applied)"
+  log "WARNING: cannot verify pid ${SERVER_PID} owns port ${PORT} (no tooling, or no positive attribution either way) — proceeding; pid-liveness checks still applied"
 fi
 
 log "deployment ready: build=${BUILD_ID} deployment=${DEPLOYMENT_ID} pid=${SERVER_PID}"
