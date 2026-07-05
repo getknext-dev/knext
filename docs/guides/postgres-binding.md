@@ -103,6 +103,8 @@ database — no duplicate, data intact), or deleting the NextApp (its finalizer
 reclaims the database as usual). Details in the
 [NextApp CRD reference](../operator/crd-nextapp.md#switching-database-modes).
 
+## The connection contract (read this once)
+
 When both your app and its database scale to zero, two timing rules keep the
 first request after idle from failing. They are client-side pool settings — the
 platform cannot set them for you:
