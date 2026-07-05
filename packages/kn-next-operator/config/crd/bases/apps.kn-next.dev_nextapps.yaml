@@ -433,18 +433,6 @@ spec:
             required:
             - image
             type: object
-            x-kubernetes-validations:
-            - message: spec.database and spec.secrets.envMap both define DATABASE_URL
-                — remove one (no silent precedence)
-              rule: '!(has(self.database) && (has(self.database.secretRef) || (has(self.database.enabled)
-                && self.database.enabled)) && has(self.secrets) && has(self.secrets.envMap)
-                && ''DATABASE_URL'' in self.secrets.envMap)'
-            - message: spec.database and spec.secrets.envMap both define DATABASE_URL_RO
-                — remove one (no silent precedence)
-              rule: '!(has(self.database) && (has(self.database.roSecretRef) || (has(self.database.enabled)
-                && self.database.enabled && has(self.database.readReplicas) && self.database.readReplicas))
-                && has(self.secrets) && has(self.secrets.envMap) && ''DATABASE_URL_RO''
-                in self.secrets.envMap)'
           status:
             description: status defines the observed state of NextApp
             properties:
@@ -539,13 +527,18 @@ spec:
                   DatabaseAppName is the DERIVED, plane-globally-unique appName the operator
                   created the AppDatabase under (ADR-0006 §4.4). Surfaced on status so the
                   derivation is auditable and the security seam (a NextApp can only bind its
-                  OWN derived DB) is observable. Empty when spec.database is not enabled.
+                  OWN derived DB) is observable. Managed mode only; deliberately RETAINED
+                  even after spec.database is removed or switched to the BYO binding, so the
+                  delete-time db-cleanup finalizer can still reclaim the (now orphaned)
+                  AppDatabase (ADR-0019 — cleanup-on-mode-switch is follow-up scope).
                 type: string
               databaseSecretName:
                 description: |-
-                  DatabaseSecretName is the name of the same-namespace mirrored Secret the
-                  operator wrote (ownerRef'd to this NextApp) carrying DATABASE_URL(+_RO).
-                  Empty when spec.database is not enabled.
+                  DatabaseSecretName is the name of the same-namespace Secret currently
+                  feeding DATABASE_URL(+_RO), per spec.database mode: in MANAGED mode
+                  (enabled) the operator-written mirror Secret (ownerRef'd to this NextApp);
+                  in BINDING mode (secretRef, ADR-0019) the user-supplied Secret named by
+                  spec.database.secretRef. Cleared when spec.database is removed.
                 type: string
               url:
                 type: string

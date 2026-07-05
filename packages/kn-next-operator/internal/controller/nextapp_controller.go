@@ -367,7 +367,14 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 		}
 		// Ready: inject DATABASE_URL(+_RO) into the in-memory spec so the existing
 		// envMap → SecretKeyRef wiring below picks it up, and record the DSN
-		// checksum for the pod-template roll annotation.
+		// checksum for the pod-template roll annotation. A stored (ratcheted,
+		// ADR-0019) CR that still carries an author envMap DATABASE_URL(_RO)
+		// entry has it overridden by the managed mirror — LOUDLY, via a
+		// Warning naming the ignored entry, never silently.
+		r.warnDatabaseEnvOverride(&nextApp, DefaultDatabaseURLKey)
+		if wiring.injectRO {
+			r.warnDatabaseEnvOverride(&nextApp, DefaultDatabaseURLROKey)
+		}
 		injectDatabaseEnv(&nextApp, wiring)
 		dbSecretHash = wiring.dsnHash
 		apimeta.SetStatusCondition(&nextApp.Status.Conditions, metav1.Condition{
@@ -393,6 +400,15 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 			Reason:             "Bound",
 			Message:            fmt.Sprintf("Bound existing Secret %q as DATABASE_URL", nextApp.Spec.Database.SecretRef.Name),
 		})
+	} else {
+		// 0c. spec.database removed/emptied: the status must stop claiming a
+		// database. Clear the bound/mirrored Secret name and drop the
+		// DatabaseReady condition. Status.DatabaseAppName is deliberately
+		// RETAINED (see its godoc): the delete-time db-cleanup finalizer still
+		// needs it to reclaim an AppDatabase orphaned by a managed→BYO/none
+		// switch (ADR-0019 — cleanup-on-mode-switch is follow-up scope).
+		nextApp.Status.DatabaseSecretName = ""
+		apimeta.RemoveStatusCondition(&nextApp.Status.Conditions, ConditionDatabaseReady)
 	}
 
 	// 1. Create/Update ServiceAccount

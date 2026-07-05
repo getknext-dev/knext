@@ -73,11 +73,7 @@ func (r *NextAppReconciler) injectBoundDatabaseEnv(app *appsv1alpha1.NextApp) {
 		if key == "" {
 			key = defaultKey
 		}
-		if prev, exists := app.Spec.Secrets.EnvMap[envName]; exists {
-			r.emitEvent(app, corev1.EventTypeWarning, ReasonEnvVarIgnored,
-				fmt.Sprintf("spec.secrets.envMap[%s] (secret %q key %q) ignored: %s is managed by spec.database",
-					envName, prev.SecretName, prev.SecretKey, envName))
-		}
+		r.warnDatabaseEnvOverride(app, envName)
 		app.Spec.Secrets.EnvMap[envName] = appsv1alpha1.EnvMapEntry{
 			SecretName: ref.Name, SecretKey: key,
 		}
@@ -87,4 +83,21 @@ func (r *NextAppReconciler) injectBoundDatabaseEnv(app *appsv1alpha1.NextApp) {
 	if db.ROSecretRef != nil {
 		bind(DefaultDatabaseURLROKey, db.ROSecretRef, DefaultDatabaseURLROKey)
 	}
+}
+
+// warnDatabaseEnvOverride emits the #186/#191-style Warning when an author
+// spec.secrets.envMap entry is about to be overridden by spec.database (either
+// mode). Such CRs only exist through validation ratcheting — the webhook
+// rejects NEW collisions — so the override must be loud, never silent.
+func (r *NextAppReconciler) warnDatabaseEnvOverride(app *appsv1alpha1.NextApp, envName string) {
+	if app.Spec.Secrets == nil || app.Spec.Secrets.EnvMap == nil {
+		return
+	}
+	prev, exists := app.Spec.Secrets.EnvMap[envName]
+	if !exists {
+		return
+	}
+	r.emitEvent(app, corev1.EventTypeWarning, ReasonEnvVarIgnored,
+		fmt.Sprintf("spec.secrets.envMap[%s] (secret %q key %q) ignored: %s is managed by spec.database",
+			envName, prev.SecretName, prev.SecretKey, envName))
 }

@@ -25,11 +25,13 @@ import (
 
 // NextAppSpec defines the desired state of NextApp
 //
-// Cross-field rules (ADR-0019): spec.database owns DATABASE_URL / DATABASE_URL_RO
-// when set — a spec.secrets.envMap entry for the same env var is rejected at
-// admission so there is never a silent precedence between the two.
-// +kubebuilder:validation:XValidation:rule="!(has(self.database) && (has(self.database.secretRef) || (has(self.database.enabled) && self.database.enabled)) && has(self.secrets) && has(self.secrets.envMap) && 'DATABASE_URL' in self.secrets.envMap)",message="spec.database and spec.secrets.envMap both define DATABASE_URL — remove one (no silent precedence)"
-// +kubebuilder:validation:XValidation:rule="!(has(self.database) && (has(self.database.roSecretRef) || (has(self.database.enabled) && self.database.enabled && has(self.database.readReplicas) && self.database.readReplicas)) && has(self.secrets) && has(self.secrets.envMap) && 'DATABASE_URL_RO' in self.secrets.envMap)",message="spec.database and spec.secrets.envMap both define DATABASE_URL_RO — remove one (no silent precedence)"
+// Cross-field rule (ADR-0019): spec.database owns DATABASE_URL / DATABASE_URL_RO
+// when set — a spec.secrets.envMap entry for the same env var is rejected by
+// the validating WEBHOOK, not by CRD CEL. The webhook RATCHETS: it rejects the
+// collision on create and on updates that ADD it, while letting CRs stored
+// before the rules keep taking unrelated updates (a spec-root CEL rule would
+// re-fire on ANY spec change and brick them). The reconciler resolves
+// carried-forward collisions loudly: spec.database wins + a Warning event.
 type NextAppSpec struct {
 	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
 	// Important: Run "make" to regenerate code after modifying this file
@@ -431,13 +433,18 @@ type NextAppStatus struct {
 	// DatabaseAppName is the DERIVED, plane-globally-unique appName the operator
 	// created the AppDatabase under (ADR-0006 §4.4). Surfaced on status so the
 	// derivation is auditable and the security seam (a NextApp can only bind its
-	// OWN derived DB) is observable. Empty when spec.database is not enabled.
+	// OWN derived DB) is observable. Managed mode only; deliberately RETAINED
+	// even after spec.database is removed or switched to the BYO binding, so the
+	// delete-time db-cleanup finalizer can still reclaim the (now orphaned)
+	// AppDatabase (ADR-0019 — cleanup-on-mode-switch is follow-up scope).
 	// +optional
 	DatabaseAppName string `json:"databaseAppName,omitempty"`
 
-	// DatabaseSecretName is the name of the same-namespace mirrored Secret the
-	// operator wrote (ownerRef'd to this NextApp) carrying DATABASE_URL(+_RO).
-	// Empty when spec.database is not enabled.
+	// DatabaseSecretName is the name of the same-namespace Secret currently
+	// feeding DATABASE_URL(+_RO), per spec.database mode: in MANAGED mode
+	// (enabled) the operator-written mirror Secret (ownerRef'd to this NextApp);
+	// in BINDING mode (secretRef, ADR-0019) the user-supplied Secret named by
+	// spec.database.secretRef. Cleared when spec.database is removed.
 	// +optional
 	DatabaseSecretName string `json:"databaseSecretName,omitempty"`
 }

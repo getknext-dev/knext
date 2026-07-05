@@ -70,28 +70,47 @@ spec:
   condition `DatabaseReady=True/Bound` is set (auditability parity with the
   managed mode).
 
-### Admission validation (CRD CEL + shared `validation` package)
+### Admission validation
 
-| # | Rule | Outcome |
-|---|------|---------|
-| 1 | `secretRef.name` / `roSecretRef.name` must be a DNS-1123 subdomain (≤253) | REJECT |
-| 2 | `key` omitted | defaults `DATABASE_URL` / `DATABASE_URL_RO` |
-| 3 | `spec.database` defines `DATABASE_URL` (any mode: `secretRef` **or** `enabled: true`) **and** `spec.secrets.envMap` also defines `DATABASE_URL` | REJECT — no silent precedence |
-| 4 | same for `DATABASE_URL_RO` (`roSecretRef` or `enabled+readReplicas` vs envMap) | REJECT |
-| 5 | `enabled: true` together with `secretRef` (managed vs BYO) | REJECT — one mode per app |
-| 6 | `roSecretRef` without `secretRef` | REJECT |
-| 7 | provisioning knobs (`tier`, `readReplicas`, `quotas`, `keepOnDelete`) together with `secretRef` | REJECT — they are managed-mode-only, never silently ignored |
+| # | Rule | Outcome | Enforced by |
+|---|------|---------|-------------|
+| 1 | `secretRef.name` / `roSecretRef.name` must be a DNS-1123 subdomain (≤253) | REJECT | CRD CEL/pattern + shared `validation` pkg |
+| 2 | `key` omitted | defaults `DATABASE_URL` / `DATABASE_URL_RO` | reconciler |
+| 3 | `spec.database` defines `DATABASE_URL` (any mode: `secretRef` **or** `enabled: true`) **and** `spec.secrets.envMap` also defines `DATABASE_URL` | REJECT on create / on updates that ADD it — no silent precedence | **webhook only, ratcheted** |
+| 4 | same for `DATABASE_URL_RO` (`roSecretRef` or `enabled+readReplicas` vs envMap) | REJECT (as rule 3) | **webhook only, ratcheted** |
+| 5 | `enabled: true` together with `secretRef` (managed vs BYO) | REJECT — one mode per app | CRD CEL + shared `validation` pkg |
+| 6 | `roSecretRef` without `secretRef` | REJECT | CRD CEL + shared `validation` pkg |
+| 7 | provisioning knobs (`tier`, `readReplicas`, `quotas`, `keepOnDelete`) together with `secretRef` | REJECT — managed-mode-only, never silently ignored | CRD CEL + shared `validation` pkg |
 
-Rules are enforced twice on purpose: CRD **CEL** (apiserver, works without the
-webhook) and `validation.ValidateNextAppSpec` (webhook + reconciler
-defense-in-depth for CRs that predate the CEL rules). For such pre-existing
-(ratcheted) CRs that reach the reconciler with both sources defined,
-`spec.database` wins and a **Warning event** names the ignored envMap entry
-(the #186/#191 collision-event semantics) — never silent.
+Rules 1/5/6/7 are intra-`spec.database` shape rules: a stored CR either
+satisfies them or was never valid, so they live in both CRD CEL and the shared
+`validation.ValidateNextAppSpec` (run by the webhook AND the fail-closed
+reconciler).
 
-Note rule 3 **tightens ADR-0018**: the managed mode previously overrode an
-author envMap `DATABASE_URL` silently; both modes now reject the ambiguity at
-admission.
+Rules 3/4 (the envMap collision) are different: CRs stored **before** these
+rules existed can legally carry the collision — including ADR-0018 managed-mode
+CRs that combined `enabled: true` with an author `envMap[DATABASE_URL]` (then
+silently overridden). Failing them closed would **brick running apps on
+operator upgrade**, so they are enforced with **true ratcheting** (the
+Kubernetes pattern), chosen over hard-fail-honestly:
+
+- **Webhook** (`ValidateNextAppSpecCreate` / `ValidateNextAppSpecUpdate`):
+  REJECT any collision on CREATE; on UPDATE reject only a collision the update
+  **adds** (compared per env-var name against the old spec). An update that
+  merely carries a pre-existing collision forward — an image bump — is allowed.
+- **Not CRD CEL**: a spec-root CEL rule re-fires on *any* spec change, so a
+  stored collision CR would be rejected on its next unrelated update — the
+  exact harm ratcheting exists to prevent. Collision enforcement is therefore
+  deliberately webhook-only.
+- **Reconciler**: the shared fail-closed `ValidateNextAppSpec` does NOT include
+  rules 3/4. A stored collision CR reconciles normally and `spec.database` wins
+  **deterministically and loudly** — a Warning event (the #186/#191
+  collision-event semantics) names the ignored envMap entry, in BOTH modes.
+  Never `Degraded/InvalidSpec`, never silent.
+
+Net effect vs ADR-0018: the previously *silent* managed-mode override becomes
+(a) an admission error for every NEW configuration and (b) a Warning-evented
+override for grandfathered ones.
 
 ## Options considered
 
@@ -107,14 +126,28 @@ admission.
   `enabled` / BYO `secretRef`), validated at admission — a single author
   surface for "this app has a Postgres".
 - `DATABASE_URL` collisions between `spec.database` and `spec.secrets.envMap`
-  are **admission errors in both modes** (behavioral tightening of ADR-0018's
-  silent override; v1alpha1, acceptable).
+  are **webhook admission errors in both modes for new configurations**, and
+  Warning-evented `spec.database`-wins overrides for CRs grandfathered in by
+  the ratchet (behavioral tightening of ADR-0018's silent override; v1alpha1,
+  acceptable).
+- **Mode removal / switch:** when `spec.database` is removed (or emptied) the
+  reconciler clears `status.databaseSecretName` and drops the `DatabaseReady`
+  condition — status never claims a database that is no longer declared.
+  Switching a MANAGED app to BYO (or to no database) **orphans its
+  `AppDatabase`**: `status.databaseAppName` is deliberately retained so the
+  delete-time `db-cleanup` finalizer can still reclaim it when the NextApp is
+  eventually deleted, but nothing reclaims it at switch time. Cleanup-on-switch
+  is explicitly **follow-up scope**, not implemented here.
 - Rotation semantics differ by mode and are documented: managed mode rolls a
   new Revision on DSN change (checksum annotation); BYO inherits envMap
   semantics (a Secret edit does **not** roll a Revision — redeploy to pick it
   up).
 - The wake/pooling contract (pool idle < gateway idle 60s; connect timeout
   ≥ 10s; T_both ≈ 13s app-dominated) gets a canonical user-facing home:
-  `docs/guides/postgres-binding.md`.
+  `docs/guides/postgres-binding.md`. `@knext/lib`'s `getDbPool()` now also
+  ships a bounded default `connectionTimeoutMillis` of 15s
+  (`DB_POOL_CONNECT_TIMEOUT_MS`): pg's default of 0 waits indefinitely, which
+  survives wakes but hangs forever on a truly-dead DB — bounded failure with
+  ~6x margin over the ~2.5s cold wake is the better product default.
 - `spec.secrets.envMap` remains fully supported for every non-`DATABASE_URL`
   secret and as the escape hatch for exotic layouts.

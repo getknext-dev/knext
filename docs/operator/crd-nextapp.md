@@ -115,7 +115,11 @@ spec:
 
 Note: when `spec.database` is set (either mode below), it **owns**
 `DATABASE_URL`/`DATABASE_URL_RO` — an `envMap` entry for the same name is
-rejected at admission (no silent precedence). Every other env var is fair game.
+rejected by the validating webhook on create and on any update that introduces
+the conflict (no silent precedence). CRs that already carried the conflict
+before this rule are grandfathered (ratcheted): they keep reconciling,
+`spec.database` wins, and the operator records a Warning event naming the
+ignored `envMap` entry. Every other env var is fair game.
 
 ### `database` (Optional)
 Declares the app's Postgres. Two mutually-exclusive modes — **binding**
@@ -143,7 +147,10 @@ spec:
   `CreateContainerConfigError` until it appears (exactly the `envMap` semantics);
   rotating the DSN in-place does **not** roll a new Revision (redeploy to pick it up).
 - `status.databaseSecretName` records the bound Secret; condition
-  `DatabaseReady=True` with reason `Bound`.
+  `DatabaseReady=True` with reason `Bound`. Removing `spec.database` clears
+  both on the next reconcile (for a previously managed app,
+  `status.databaseAppName` is retained so deleting the NextApp can still
+  reclaim the orphaned database).
 - Provisioning knobs (`tier`, `readReplicas`, `quotas`, `keepOnDelete`) are
   rejected alongside `secretRef` (they are managed-mode-only), and `secretRef`
   is rejected alongside `enabled: true` — one mode per app.

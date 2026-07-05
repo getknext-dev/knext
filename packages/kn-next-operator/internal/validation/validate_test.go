@@ -308,38 +308,27 @@ func TestValidateNextAppSpecDatabaseBinding(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name: "secretRef colliding with envMap DATABASE_URL rejected",
+			// Collisions are deliberately NOT part of ValidateNextAppSpec: the
+			// reconciler runs it fail-closed, so a stored (pre-rule) collision
+			// CR would brick on operator upgrade. The webhook enforces them
+			// with true ratcheting — see TestDatabaseEnvMapCollisions below
+			// and the webhook tests.
+			name: "secretRef colliding with envMap DATABASE_URL is NOT a shared-validation error (webhook-only, ratcheted)",
 			spec: &appsv1alpha1.NextAppSpec{
 				Image:    digestImage,
 				Database: &appsv1alpha1.DatabaseSpec{SecretRef: ref("shop-db")},
 				Secrets:  envMapURL,
 			},
-			wantErr: true,
-			errHas:  "DATABASE_URL",
+			wantErr: false,
 		},
 		{
-			name: "managed mode colliding with envMap DATABASE_URL rejected (tightens ADR-0018)",
+			name: "managed mode colliding with envMap DATABASE_URL is NOT a shared-validation error (webhook-only, ratcheted)",
 			spec: &appsv1alpha1.NextAppSpec{
 				Image:    digestImage,
 				Database: &appsv1alpha1.DatabaseSpec{Enabled: true},
 				Secrets:  envMapURL,
 			},
-			wantErr: true,
-			errHas:  "DATABASE_URL",
-		},
-		{
-			name: "roSecretRef colliding with envMap DATABASE_URL_RO rejected",
-			spec: &appsv1alpha1.NextAppSpec{
-				Image:    digestImage,
-				Database: &appsv1alpha1.DatabaseSpec{SecretRef: ref("shop-db"), ROSecretRef: ref("shop-db")},
-				Secrets: &appsv1alpha1.SecretsSpec{
-					EnvMap: map[string]appsv1alpha1.EnvMapEntry{
-						"DATABASE_URL_RO": {SecretName: "other", SecretKey: "ro"},
-					},
-				},
-			},
-			wantErr: true,
-			errHas:  "DATABASE_URL_RO",
+			wantErr: false,
 		},
 		{
 			name: "envMap for OTHER env vars alongside secretRef accepted",
@@ -363,6 +352,96 @@ func TestValidateNextAppSpecDatabaseBinding(t *testing.T) {
 			}
 			if tc.errHas != "" && (err == nil || !strings.Contains(err.Error(), tc.errHas)) {
 				t.Fatalf("ValidateNextAppSpec() err=%v, want substring %q", err, tc.errHas)
+			}
+		})
+	}
+}
+
+// TestDatabaseEnvMapCollisions covers the webhook-side collision detector
+// (ADR-0019 rules 3/4). The webhook applies it unratcheted on CREATE and
+// ratcheted on UPDATE (only NEW collisions rejected).
+func TestDatabaseEnvMapCollisions(t *testing.T) {
+	ref := func(name string) *appsv1alpha1.DatabaseSecretRef {
+		return &appsv1alpha1.DatabaseSecretRef{Name: name}
+	}
+	envMap := func(names ...string) *appsv1alpha1.SecretsSpec {
+		m := map[string]appsv1alpha1.EnvMapEntry{}
+		for _, n := range names {
+			m[n] = appsv1alpha1.EnvMapEntry{SecretName: "other", SecretKey: "k"}
+		}
+		return &appsv1alpha1.SecretsSpec{EnvMap: m}
+	}
+
+	tests := []struct {
+		name string
+		spec *appsv1alpha1.NextAppSpec
+		want []string
+	}{
+		{
+			name: "nil database — none",
+			spec: &appsv1alpha1.NextAppSpec{Secrets: envMap("DATABASE_URL")},
+			want: nil,
+		},
+		{
+			name: "BYO + envMap DATABASE_URL",
+			spec: &appsv1alpha1.NextAppSpec{
+				Database: &appsv1alpha1.DatabaseSpec{SecretRef: ref("shop-db")},
+				Secrets:  envMap("DATABASE_URL"),
+			},
+			want: []string{"DATABASE_URL"},
+		},
+		{
+			name: "managed + envMap DATABASE_URL",
+			spec: &appsv1alpha1.NextAppSpec{
+				Database: &appsv1alpha1.DatabaseSpec{Enabled: true},
+				Secrets:  envMap("DATABASE_URL"),
+			},
+			want: []string{"DATABASE_URL"},
+		},
+		{
+			name: "BYO+RO + both envMap entries",
+			spec: &appsv1alpha1.NextAppSpec{
+				Database: &appsv1alpha1.DatabaseSpec{SecretRef: ref("shop-db"), ROSecretRef: ref("shop-db")},
+				Secrets:  envMap("DATABASE_URL", "DATABASE_URL_RO"),
+			},
+			want: []string{"DATABASE_URL", "DATABASE_URL_RO"},
+		},
+		{
+			name: "managed without readReplicas does not claim RO",
+			spec: &appsv1alpha1.NextAppSpec{
+				Database: &appsv1alpha1.DatabaseSpec{Enabled: true},
+				Secrets:  envMap("DATABASE_URL_RO"),
+			},
+			want: nil,
+		},
+		{
+			name: "managed with readReplicas claims RO",
+			spec: &appsv1alpha1.NextAppSpec{
+				Database: &appsv1alpha1.DatabaseSpec{Enabled: true, ReadReplicas: true},
+				Secrets:  envMap("DATABASE_URL_RO"),
+			},
+			want: []string{"DATABASE_URL_RO"},
+		},
+		{
+			name: "other env vars never collide",
+			spec: &appsv1alpha1.NextAppSpec{
+				Database: &appsv1alpha1.DatabaseSpec{SecretRef: ref("shop-db")},
+				Secrets:  envMap("STRIPE_KEY"),
+			},
+			want: nil,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := DatabaseEnvMapCollisions(tc.spec)
+			if len(got) != len(tc.want) {
+				t.Fatalf("DatabaseEnvMapCollisions() = %v, want %v", got, tc.want)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Fatalf("DatabaseEnvMapCollisions() = %v, want %v", got, tc.want)
+				}
 			}
 		})
 	}

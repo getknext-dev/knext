@@ -193,9 +193,14 @@ func ValidateNextAppSpec(spec *appsv1alpha1.NextAppSpec) error {
 //  3. secretRef/roSecretRef names are DNS-1123 subdomains.
 //  4. Provisioning knobs (tier/readReplicas/quotas/keepOnDelete) are
 //     managed-mode-only — rejected with secretRef, never silently ignored.
-//  5. When spec.database defines DATABASE_URL (either mode), a
-//     spec.secrets.envMap entry for it is rejected — no silent precedence.
-//     Same for DATABASE_URL_RO.
+//
+// DATABASE_URL(_RO) collisions against spec.secrets.envMap are deliberately
+// NOT validated here: this function is shared with the FAIL-CLOSED reconciler,
+// and a stored CR that predates the collision rules must keep reconciling
+// (true ratcheting) — the reconciler resolves such CRs loudly instead
+// (spec.database wins + Warning event). Collisions are enforced by the WEBHOOK
+// only: see DatabaseEnvMapCollisions / ValidateNextAppSpecCreate /
+// ValidateNextAppSpecUpdate.
 func validateDatabase(spec *appsv1alpha1.NextAppSpec) error {
 	db := spec.Database
 	if db == nil {
@@ -222,18 +227,76 @@ func validateDatabase(spec *appsv1alpha1.NextAppSpec) error {
 		}
 	}
 
-	// No silent precedence against the raw envMap path.
-	if spec.Secrets != nil && spec.Secrets.EnvMap != nil {
-		definesURL := db.SecretRef != nil || db.Enabled
-		if _, clash := spec.Secrets.EnvMap["DATABASE_URL"]; clash && definesURL {
-			return fmt.Errorf("spec.database and spec.secrets.envMap both define DATABASE_URL — remove one (no silent precedence)")
-		}
-		definesRO := db.ROSecretRef != nil || (db.Enabled && db.ReadReplicas)
-		if _, clash := spec.Secrets.EnvMap["DATABASE_URL_RO"]; clash && definesRO {
-			return fmt.Errorf("spec.database and spec.secrets.envMap both define DATABASE_URL_RO — remove one (no silent precedence)")
+	return nil
+}
+
+// DatabaseEnvMapCollisions returns, in deterministic order, the env var names
+// that spec.database claims (DATABASE_URL, and DATABASE_URL_RO when applicable)
+// which spec.secrets.envMap ALSO defines (ADR-0019 "no silent precedence").
+// Empty result = no collision.
+func DatabaseEnvMapCollisions(spec *appsv1alpha1.NextAppSpec) []string {
+	db := spec.Database
+	if db == nil || spec.Secrets == nil || spec.Secrets.EnvMap == nil {
+		return nil
+	}
+	var out []string
+	definesURL := db.SecretRef != nil || db.Enabled
+	if _, clash := spec.Secrets.EnvMap["DATABASE_URL"]; clash && definesURL {
+		out = append(out, "DATABASE_URL")
+	}
+	definesRO := db.ROSecretRef != nil || (db.Enabled && db.ReadReplicas)
+	if _, clash := spec.Secrets.EnvMap["DATABASE_URL_RO"]; clash && definesRO {
+		out = append(out, "DATABASE_URL_RO")
+	}
+	return out
+}
+
+// ValidateNextAppSpecCreate is the CREATE-time admission entry point (webhook
+// only): the shared spec validation PLUS an unratcheted rejection of any
+// DATABASE_URL(_RO) collision between spec.database and spec.secrets.envMap.
+func ValidateNextAppSpecCreate(spec *appsv1alpha1.NextAppSpec) error {
+	if err := ValidateNextAppSpec(spec); err != nil {
+		return err
+	}
+	if collisions := DatabaseEnvMapCollisions(spec); len(collisions) > 0 {
+		return fmt.Errorf(
+			"spec.database and spec.secrets.envMap both define %s — remove one (no silent precedence)",
+			strings.Join(collisions, ", "),
+		)
+	}
+	return nil
+}
+
+// ValidateNextAppSpecUpdate is the UPDATE-time admission entry point (webhook
+// only), with TRUE ratcheting on the collision rule: a collision is rejected
+// only when the update ADDS it (per env var name). An update that merely
+// carries a pre-existing collision forward — e.g. an image bump on a CR stored
+// before the rules existed — is allowed; otherwise upgrading the operator
+// would brick running apps on their next unrelated update. The reconciler
+// resolves the carried-forward collision loudly (spec.database wins + Warning
+// event).
+func ValidateNextAppSpecUpdate(oldSpec, newSpec *appsv1alpha1.NextAppSpec) error {
+	if err := ValidateNextAppSpec(newSpec); err != nil {
+		return err
+	}
+	old := map[string]struct{}{}
+	if oldSpec != nil {
+		for _, name := range DatabaseEnvMapCollisions(oldSpec) {
+			old[name] = struct{}{}
 		}
 	}
-
+	var added []string
+	for _, name := range DatabaseEnvMapCollisions(newSpec) {
+		if _, preexisting := old[name]; !preexisting {
+			added = append(added, name)
+		}
+	}
+	if len(added) > 0 {
+		return fmt.Errorf(
+			"spec.database and spec.secrets.envMap both define %s — remove one (no silent precedence)",
+			strings.Join(added, ", "),
+		)
+	}
 	return nil
 }
 

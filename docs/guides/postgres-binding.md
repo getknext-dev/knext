@@ -41,8 +41,11 @@ explicitly when your Secret uses a different layout (e.g. `key: uri`).
 - `secretRef.name` must be a valid Secret name (lowercase DNS-1123) in the
   **app's own namespace** — there is no cross-namespace binding.
 - `spec.database` **owns** `DATABASE_URL`/`DATABASE_URL_RO`: also defining them
-  in `spec.secrets.envMap` is rejected at admission, so there is never a silent
-  winner. Use `envMap` freely for every *other* secret-backed env var.
+  in `spec.secrets.envMap` is rejected when you create the app or add the
+  conflict, so there is never a silent winner. Apps that already carried the
+  conflict before this rule keep deploying — `spec.database` wins and the
+  operator records a Warning event naming the ignored `envMap` entry. Use
+  `envMap` freely for every *other* secret-backed env var.
 - `secretRef` (bind an existing DB) and `enabled: true` (let the platform
   provision one — see the [unified-config guide](./unified-config-database.md))
   are mutually exclusive: one mode per app. Provisioning knobs (`tier`,
@@ -68,8 +71,11 @@ platform cannot set them for you:
    defeating scale-to-zero.
 2. **Connect timeout ≥ 10 s.** A cold database wakes in about **2.5 s**
    (sub-second on the warm tier); the gateway holds your connection open while
-   it wakes. A default 2–5 s connect timeout can give up right before the wake
-   completes — 10 s gives comfortable margin.
+   it wakes. A 2–5 s connect timeout can give up right before the wake
+   completes — 10 s gives comfortable margin. (node-postgres's own default of
+   `0` waits *indefinitely*: that survives wakes too, but a truly-unreachable
+   database then hangs every request forever instead of failing fast — set a
+   bound.)
 
 ```ts
 // e.g. node-postgres
@@ -78,11 +84,12 @@ new Pool({
   max: 5,
   min: 0,
   idleTimeoutMillis: 10_000,        // < the 60s gateway idle window
-  connectionTimeoutMillis: 10_000,  // survives a cold DB wake
+  connectionTimeoutMillis: 15_000,  // bounded: survives a cold DB wake, fails fast when the DB is dead
 });
 ```
 
-`@knext/lib`'s `getDbPool()` ships these defaults already.
+`@knext/lib`'s `getDbPool()` ships exactly these defaults (overridable via
+`DB_POOL_MAX`, `DB_POOL_IDLE_TIMEOUT_MS`, `DB_POOL_CONNECT_TIMEOUT_MS`).
 
 **What to expect on a fully cold start** (app *and* database at zero, measured
 on a live cluster): the database connect happens *inside* the app container's
