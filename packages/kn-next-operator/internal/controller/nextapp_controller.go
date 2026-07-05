@@ -317,6 +317,12 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 	// checksum of the DSN so a rotation rolls a new Revision (§4.3).
 	var dbSecretHash string
 	if databaseEnabled(&nextApp) {
+		// Managed mode (again): a previously-orphaned AppDatabase (managed→BYO/
+		// none→managed round-trip) is rebound below — deriveAppName is
+		// deterministic, so reconcileDatabase's CreateOrUpdate reuses the SAME
+		// AppDatabase. It is no longer orphaned; drop the flag before any
+		// hard-gate early return.
+		apimeta.RemoveStatusCondition(&nextApp.Status.Conditions, ConditionDatabaseOrphaned)
 		wiring, dbResult, dbErr := r.reconcileDatabase(ctx, &nextApp)
 		if dbErr != nil {
 			logger.Error(dbErr, "Failed to reconcile delegated database")
@@ -391,6 +397,11 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 		// no hard-gate (envMap semantics: a missing Secret surfaces on the pod
 		// as CreateContainerConfigError). Mode exclusivity vs enabled is
 		// enforced at admission.
+		//
+		// A managed→BYO switch orphans the previously-provisioned AppDatabase:
+		// it is RETAINED (a spec edit never deletes data — ADR-0019 addendum)
+		// and flagged via DatabaseOrphaned + a Warning until resolved.
+		r.reconcileOrphanedDatabase(ctx, &nextApp)
 		r.injectBoundDatabaseEnv(&nextApp)
 		nextApp.Status.DatabaseSecretName = nextApp.Spec.Database.SecretRef.Name
 		apimeta.SetStatusCondition(&nextApp.Status.Conditions, metav1.Condition{
@@ -403,10 +414,14 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 	} else {
 		// 0c. spec.database removed/emptied: the status must stop claiming a
 		// database. Clear the bound/mirrored Secret name and drop the
-		// DatabaseReady condition. Status.DatabaseAppName is deliberately
-		// RETAINED (see its godoc): the delete-time db-cleanup finalizer still
-		// needs it to reclaim an AppDatabase orphaned by a managed→BYO/none
-		// switch (ADR-0019 — cleanup-on-mode-switch is follow-up scope).
+		// DatabaseReady condition. Status.DatabaseAppName is RETAINED while its
+		// AppDatabase still exists (see its godoc): the delete-time db-cleanup
+		// finalizer needs it to reclaim an AppDatabase orphaned by a
+		// managed→none switch. The orphan itself is retained + flagged
+		// (DatabaseOrphaned) — a spec edit never deletes data (ADR-0019
+		// addendum); reconcileOrphanedDatabase clears the appName once the
+		// AppDatabase is confirmed gone.
+		r.reconcileOrphanedDatabase(ctx, &nextApp)
 		nextApp.Status.DatabaseSecretName = ""
 		apimeta.RemoveStatusCondition(&nextApp.Status.Conditions, ConditionDatabaseReady)
 	}

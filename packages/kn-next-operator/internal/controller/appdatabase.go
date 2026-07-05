@@ -47,6 +47,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -70,6 +71,17 @@ const (
 	// NextApp. False+reason=Provisioning while the AppDatabase is not yet Ready
 	// (the hard-gate); True once the DSN has been mirrored + injected.
 	ConditionDatabaseReady = "DatabaseReady"
+
+	// ConditionDatabaseOrphaned flags a managed AppDatabase whose NextApp no
+	// longer declares managed mode (spec.database switched to secretRef/BYO or
+	// removed — ADR-0019 addendum). The operator NEVER deletes the AppDatabase
+	// on a spec edit (it fronts the user's data, and the new spec cannot even
+	// carry keepOnDelete to authorize deletion); it retains it and raises this
+	// condition + a Warning until the user deletes the AppDatabase manually,
+	// switches back to managed mode (idempotent rebind — deriveAppName is
+	// deterministic, so the SAME AppDatabase is reused), or deletes the NextApp
+	// (the retained status.databaseAppName drives the db-cleanup finalizer).
+	ConditionDatabaseOrphaned = "DatabaseOrphaned"
 
 	// DefaultDatabaseNamespace is where AppDatabases and their app-db-<app>
 	// Secrets live — the shared scale-zero-pg storage-plane namespace.
@@ -113,6 +125,9 @@ const (
 	ReasonDatabaseReady = "DatabaseReady"
 	// ReasonDatabaseCleanup marks a best-effort teardown outcome during finalize.
 	ReasonDatabaseCleanup = "DatabaseCleanup"
+	// ReasonDatabaseOrphaned marks the managed→BYO/none mode-switch Warning: the
+	// previously-provisioned AppDatabase is retained but no longer bound.
+	ReasonDatabaseOrphaned = "DatabaseOrphaned"
 )
 
 // databaseWiring is the result of a database reconcile pass.
@@ -404,6 +419,68 @@ func injectDatabaseEnv(app *appsv1alpha1.NextApp, wiring databaseWiring) {
 			SecretName: wiring.secretName, SecretKey: "DATABASE_URL_RO",
 		}
 	}
+}
+
+// reconcileOrphanedDatabase handles a managed→BYO/none mode switch (ADR-0019
+// addendum). Called on every reconcile of a NextApp that is NOT in managed mode;
+// status.databaseAppName != "" then means a managed AppDatabase was provisioned
+// for this app and is now orphaned by a spec edit.
+//
+// The load-bearing decision (data safety): a spec EDIT never deletes the
+// AppDatabase — it fronts the user's Neon timeline, and the new spec cannot
+// carry keepOnDelete (admission rejects provisioning knobs with secretRef) so
+// there is no author signal that could authorize destruction at switch time.
+// Instead the orphan is surfaced LOUDLY: a DatabaseOrphaned=True condition on
+// every pass, plus a Warning event on the transition only (steady-state
+// reconciles stay quiet). The user resolves it by deleting the AppDatabase
+// manually, switching back to managed mode (rebinds the SAME AppDatabase —
+// deriveAppName is deterministic), or deleting the NextApp (the retained
+// databaseAppName drives the db-cleanup finalizer, which reclaims it; a
+// keepTimelineOnDelete written while managed is still honored downstream by
+// scale-zero-pg's deprovision finalizer).
+//
+// Once the AppDatabase is confirmed gone (NotFound), both the condition and
+// status.databaseAppName are cleared — nothing is left to reclaim, so status
+// must stop claiming it. Any other probe error keeps the flag raised (we know
+// the database was provisioned; only a confirmed absence clears it).
+func (r *NextAppReconciler) reconcileOrphanedDatabase(ctx context.Context, app *appsv1alpha1.NextApp) {
+	appName := app.Status.DatabaseAppName
+	if appName == "" {
+		// Never provisioned (plain BYO / no database) — nothing orphaned.
+		apimeta.RemoveStatusCondition(&app.Status.Conditions, ConditionDatabaseOrphaned)
+		return
+	}
+
+	adb := newAppDatabase(appName, r.databaseNamespace())
+	err := r.Get(ctx, types.NamespacedName{Name: appName, Namespace: r.databaseNamespace()}, adb)
+	if errors.IsNotFound(err) {
+		// Reclaimed (manually, or by an operator/plane action) — clear the flag
+		// AND the retained appName: there is nothing left for the delete-time
+		// finalizer to reclaim, and status must not claim otherwise.
+		app.Status.DatabaseAppName = ""
+		apimeta.RemoveStatusCondition(&app.Status.Conditions, ConditionDatabaseOrphaned)
+		return
+	}
+
+	msg := fmt.Sprintf(
+		"Managed database %q is no longer bound (spec.database switched away from enabled: true). "+
+			"It keeps running and is NOT deleted automatically. To resolve: delete the AppDatabase "+
+			"%s/%s manually, or switch spec.database back to enabled: true to rebind it. "+
+			"It will otherwise be reclaimed when this NextApp is deleted.",
+		appName, r.databaseNamespace(), appName)
+	// Warning on the transition only — a steady-state orphan must not spam events.
+	if !apimeta.IsStatusConditionTrue(app.Status.Conditions, ConditionDatabaseOrphaned) {
+		logf.FromContext(ctx).Info("Managed database orphaned by mode switch; retaining (data safety)",
+			"appName", appName)
+		r.emitEvent(app, corev1.EventTypeWarning, ReasonDatabaseOrphaned, msg)
+	}
+	apimeta.SetStatusCondition(&app.Status.Conditions, metav1.Condition{
+		Type:               ConditionDatabaseOrphaned,
+		Status:             metav1.ConditionTrue,
+		ObservedGeneration: app.Generation,
+		Reason:             "ModeSwitched",
+		Message:            msg,
+	})
 }
 
 // cleanupDatabase is the db-cleanup finalizer body (ADR-0006 §3c). It deletes the

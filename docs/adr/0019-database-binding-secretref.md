@@ -136,8 +136,8 @@ override for grandfathered ones.
   Switching a MANAGED app to BYO (or to no database) **orphans its
   `AppDatabase`**: `status.databaseAppName` is deliberately retained so the
   delete-time `db-cleanup` finalizer can still reclaim it when the NextApp is
-  eventually deleted, but nothing reclaims it at switch time. Cleanup-on-switch
-  is explicitly **follow-up scope**, not implemented here.
+  eventually deleted. Switch-time handling is defined by the **addendum
+  below** (retain + flag; never auto-delete).
 - Rotation semantics differ by mode and are documented: managed mode rolls a
   new Revision on DSN change (checksum annotation); BYO inherits envMap
   semantics (a Secret edit does **not** roll a Revision — redeploy to pick it
@@ -151,3 +151,56 @@ override for grandfathered ones.
   ~6x margin over the ~2.5s cold wake is the better product default.
 - `spec.secrets.envMap` remains fully supported for every non-`DATABASE_URL`
   secret and as the escape hatch for exotic layouts.
+
+## Addendum (2026-07-06) — orphaned AppDatabase on a managed→BYO/none switch
+
+This resolves the follow-up scope named above: what the operator does **at
+switch time** with the `AppDatabase` a managed-mode app had provisioned.
+
+**Decision: retain + flag. A spec edit never deletes data.** On a switch away
+from `enabled: true` the operator does **not** delete (or mark for deletion)
+the `AppDatabase`. Rationale:
+
+- The `AppDatabase` fronts the user's data (the Neon timeline). Deleting a
+  data-bearing resource as a side effect of an *edit* — as opposed to deleting
+  the `NextApp` itself, an explicit destructive act — is the classic
+  irreversible-footgun; the safety bias wins.
+- There is **no author signal that could authorize deletion at switch time**:
+  admission rule 7 (this ADR) rejects `keepOnDelete` (and every other
+  provisioning knob) alongside `secretRef`, so the post-switch spec cannot
+  express a retain/delete preference. Absent a signal, the only safe default
+  is retain.
+- ADR-0018's existing deletion policy (`keepOnDelete`, honored by the
+  delete-time finalizer) is a **NextApp-deletion** policy, not a spec-edit
+  policy; it is left unchanged.
+
+Mechanics (reconciler, every pass while not in managed mode and
+`status.databaseAppName` is set):
+
+- Condition **`DatabaseOrphaned=True`** (reason `ModeSwitched`) names the
+  retained `AppDatabase` and the three resolution paths; a **Warning event**
+  (`DatabaseOrphaned`) fires on the transition only — steady-state reconciles
+  stay quiet.
+- The new BYO binding is unaffected: `DatabaseReady=True/Bound` is set as
+  normal, with the orphan surfaced separately.
+- The operator-mirrored `<name>-db` Secret is also retained (old Revisions
+  pinned by rollback/traffic-split may still reference it); it is GC'd with
+  the NextApp via its ownerRef.
+
+Resolution paths, all spec-tested:
+
+1. **Manual reclaim** — the user deletes the `AppDatabase`. The next reconcile
+   confirms NotFound and clears both `DatabaseOrphaned` and
+   `status.databaseAppName` (nothing left to reclaim; status must not lie).
+2. **Switch back to managed** — `deriveAppName` is deterministic, so
+   `enabled: true` rebinds the **same** `AppDatabase` (CreateOrUpdate; no
+   duplicate provisioning) and the orphan flag is dropped.
+3. **NextApp deletion** — the retained `status.databaseAppName` drives the
+   `db-cleanup` finalizer exactly as before. Note: a `keepOnDelete: true` set
+   while managed is no longer visible in the post-switch spec, but the
+   `keepTimelineOnDelete` it wrote onto the `AppDatabase.spec` **is** still
+   honored by scale-zero-pg's deprovision finalizer — the timeline survives
+   even though the CR is reclaimed.
+
+Only a **confirmed** NotFound clears the flag; a plane-unreachable probe error
+keeps it raised (fail-loud, never fail-silent-clean).

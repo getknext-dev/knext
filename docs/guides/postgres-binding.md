@@ -90,7 +90,18 @@ kn-next db bind shop --secret shop-db --ro-secret shop-db \
 - Rotating the DSN inside the Secret does **not** roll a new revision by
   itself; redeploy (or bump the CR) to pick it up.
 
-## The connection contract (read this once)
+## Switching modes
+
+Moving an app from **managed** (`enabled: true`) to **binding** (`secretRef`)
+— or dropping `spec.database` entirely — is safe for your data: the operator
+**never deletes the managed database because of a spec edit**. It keeps
+running, and the app gets a `DatabaseOrphaned=True` condition plus a one-time
+Warning event naming it. Resolve it by deleting the orphaned database
+manually (`kubectl delete appdatabase <status.databaseAppName> -n
+scale-zero-pg`), switching back to `enabled: true` (which rebinds the **same**
+database — no duplicate, data intact), or deleting the NextApp (its finalizer
+reclaims the database as usual). Details in the
+[NextApp CRD reference](../operator/crd-nextapp.md#switching-database-modes).
 
 When both your app and its database scale to zero, two timing rules keep the
 first request after idle from failing. They are client-side pool settings — the
