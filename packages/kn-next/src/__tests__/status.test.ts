@@ -135,6 +135,42 @@ function sparseCr() {
     return cr;
 }
 
+/** The Degraded-True guidance the operator writes — must reach the user. */
+const DEGRADED_MESSAGE =
+    'container "app" is crash-looping — kubectl logs -l app=web -n default shows the stack trace';
+
+/**
+ * Degraded is ALARM-when-True polarity: Ready can even be True while Degraded
+ * fires. The reason + message must render VERBATIM in the bad state.
+ */
+function degradedOnlyCr() {
+    const cr = healthyCr();
+    cr.status.conditions = (
+        cr.status.conditions as Record<string, unknown>[]
+    ).map((c) =>
+        c.type === "Degraded"
+            ? {
+                  type: "Degraded",
+                  status: "True",
+                  reason: "PodCrashLooping",
+                  message: DEGRADED_MESSAGE,
+                  lastTransitionTime: T_3M_AGO,
+              }
+            : c,
+    );
+    return cr;
+}
+
+/** Malformed CR: status.conditions is not an array (corrupt/foreign object). */
+function garbageConditionsCr() {
+    const cr = baseCr();
+    cr.status = {
+        url: "https://web.default.example.com",
+        conditions: "garbage",
+    };
+    return cr;
+}
+
 /** Stub kubectl keyed on the joined argv (doctor.ts convention). */
 function stubKubectl(
     table: Record<string, { ok: boolean; stdout?: string; stderr?: string }>,
@@ -188,11 +224,20 @@ function makeDeps(
 
 describe("parseStatusArgs", () => {
     it("parses the positional app, -n/--namespace, --json, --watch", () => {
-        const a = parseStatusArgs(["web", "-n", "prod", "--json", "--watch"]);
+        const a = parseStatusArgs(["web", "-n", "prod", "--json"]);
         expect(a.app).toBe("web");
         expect(a.namespace).toBe("prod");
         expect(a.json).toBe(true);
-        expect(a.watch).toBe(true);
+        expect(parseStatusArgs(["web", "--watch"]).watch).toBe(true);
+    });
+
+    it("rejects --watch --json with a clean usage error (documented in --help)", () => {
+        expect(() => parseStatusArgs(["--watch", "--json"])).toThrow(
+            /--json cannot be combined with --watch.*status --help/s,
+        );
+        expect(() => parseStatusArgs(["--json", "--watch"])).toThrow(
+            /--json cannot be combined with --watch/,
+        );
     });
 
     it("defaults: namespace default, no json/watch, 10m watch bound", () => {
@@ -281,6 +326,17 @@ describe("extractStatus", () => {
         expect(m.databaseReady).toBeUndefined();
         expect(m.reconciling).toBeUndefined();
     });
+
+    it("malformed non-array conditions → undefined views, never a crash", () => {
+        const m = extractStatus(garbageConditionsCr());
+        expect(m.url).toBe("https://web.default.example.com");
+        expect(m.ready).toBeUndefined();
+        expect(m.degraded).toBeUndefined();
+        expect(m.databaseReady).toBeUndefined();
+        expect(m.reconciling).toBeUndefined();
+        const text = renderStatusHuman(m, NOW);
+        expect(text).toContain("not reported");
+    });
 });
 
 // ---------------------------------------------------------------------------
@@ -306,15 +362,46 @@ describe("renderStatusHuman", () => {
         expect(text).toContain("2h ago");
     });
 
-    it("degraded: Degraded=True surfaces with its reason", () => {
+    it("degraded: Degraded=True surfaces its reason AND message (True is the ALARM polarity)", () => {
+        // Ready=True here — only Degraded carries the alarm, so the guidance
+        // below can ONLY come from the Degraded line (polarity regression guard).
+        const text = renderStatusHuman(extractStatus(degradedOnlyCr()), NOW);
+        expect(text).toMatch(/Ready\s+True/);
+        expect(text).toMatch(/Degraded\s+True.*PodCrashLooping/);
+        expect(text).toContain(DEGRADED_MESSAGE);
+    });
+
+    it("degraded via ingress stall: reason + message render on the Degraded line too", () => {
         const text = renderStatusHuman(extractStatus(ingressStalledCr()), NOW);
-        expect(text).toMatch(/Degraded\s+True/);
+        const degradedBlock = text.slice(text.indexOf("Degraded"));
+        expect(degradedBlock).toMatch(/Degraded\s+True.*IngressNotProgrammed/);
+        expect(degradedBlock).toContain(INGRESS_STALL_MESSAGE);
     });
 
     it("database-bound: mode + secret name are rendered", () => {
         const text = renderStatusHuman(extractStatus(databaseBoundCr()), NOW);
         expect(text).toMatch(/Database\s+bound/);
         expect(text).toContain("my-db-secret");
+    });
+
+    it("label columns align on the max label width (incl. DatabaseReady)", () => {
+        const text = renderStatusHuman(extractStatus(databaseBoundCr()), NOW);
+        const lines = text.split("\n");
+        const columns = new Set(
+            ["Ready", "Degraded", "Reconciling", "DatabaseReady", "Image"].map(
+                (label) => {
+                    const line = lines.find((l) =>
+                        new RegExp(`^${label}\\s`).test(l),
+                    );
+                    expect(line, label).toBeDefined();
+                    return (
+                        (line as string).slice(label.length).search(/\S/) +
+                        label.length
+                    );
+                },
+            ),
+        );
+        expect([...columns]).toHaveLength(1);
     });
 
     it('old operator: absent conditions render as "not reported", never crash', () => {
@@ -483,5 +570,76 @@ describe("--watch", () => {
         );
         expect(code).toBe(1);
         expect(out.join("")).toMatch(/timed out/i);
+    });
+
+    it("tolerates up to 3 consecutive transient kubectl failures, then recovers", async () => {
+        // `kn-next deploy && kn-next status --watch` as a CI gate must not die
+        // on a single apiserver blip mid-poll.
+        let call = 0;
+        const kubectl: KubectlFn = () => {
+            call++;
+            if (call <= 3) {
+                return {
+                    ok: false,
+                    stdout: "",
+                    stderr: "Unable to connect to the server: net/http: TLS handshake timeout",
+                };
+            }
+            return {
+                ok: true,
+                stdout: JSON.stringify(healthyCr()),
+                stderr: "",
+            };
+        };
+        const { deps, out } = makeDeps(kubectl);
+        const code = await runStatus("web", opts({ watch: true }), deps);
+        expect(code).toBe(0);
+        expect(call).toBe(4);
+        expect(out.join("")).toMatch(/transient/i);
+    });
+
+    it("throws after the 4th consecutive failure (persistent outage is not a blip)", async () => {
+        let call = 0;
+        const kubectl: KubectlFn = () => {
+            call++;
+            return {
+                ok: false,
+                stdout: "",
+                stderr: "The connection to the server 10.0.0.1:6443 was refused - did you specify the right host or port?",
+            };
+        };
+        const { deps } = makeDeps(kubectl);
+        await expect(
+            runStatus("web", opts({ watch: true }), deps),
+        ).rejects.toThrow(/cluster unreachable.*kn-next doctor/s);
+        expect(call).toBe(4);
+    });
+
+    it("a failure streak resets on success (only CONSECUTIVE failures count)", async () => {
+        let call = 0;
+        // fail x3 → not-ready success → fail x3 → ready: must survive both streaks.
+        const script: Array<"fail" | "notready" | "ready"> = [
+            "fail",
+            "fail",
+            "fail",
+            "notready",
+            "fail",
+            "fail",
+            "fail",
+            "ready",
+        ];
+        const kubectl: KubectlFn = () => {
+            const step = script[call] ?? "ready";
+            call++;
+            if (step === "fail") {
+                return { ok: false, stdout: "", stderr: "connection refused" };
+            }
+            const cr = step === "ready" ? healthyCr() : ingressStalledCr();
+            return { ok: true, stdout: JSON.stringify(cr), stderr: "" };
+        };
+        const { deps } = makeDeps(kubectl);
+        const code = await runStatus("web", opts({ watch: true }), deps);
+        expect(code).toBe(0);
+        expect(call).toBe(script.length);
     });
 });

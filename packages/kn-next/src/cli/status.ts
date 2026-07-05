@@ -19,7 +19,12 @@
  * Exit-code contract (CI-usable): exit 1 iff the Ready condition is present
  * with status False; a missing condition (operator predating the honest-Ready
  * work) renders as "not reported" and does NOT fail. --watch polls every 5s
- * until Ready=True, bounded (default 10m), and exits 1 on timeout.
+ * until Ready=True, bounded (default 10m), exits 1 on timeout, and tolerates a
+ * short streak of transient kubectl failures so CI gates survive blips.
+ *
+ * Condition polarity matters: Ready/DatabaseReady alarm when False, but
+ * Degraded/Reconciling alarm when True — the operator's reason + message
+ * render verbatim whenever a condition is in its BAD state.
  */
 
 import { existsSync, writeSync } from "node:fs";
@@ -35,6 +40,12 @@ const log = createLogger({ module: "status" });
 const WATCH_INTERVAL_MS = 5_000;
 /** --watch default bound: 10 minutes. */
 const WATCH_TIMEOUT_MS = 600_000;
+/**
+ * --watch tolerates this many CONSECUTIVE transient kubectl failures before
+ * throwing — a `deploy && status --watch` CI gate must not die on one
+ * apiserver blip mid-poll. The streak resets on any successful read.
+ */
+const WATCH_MAX_TRANSIENT_FAILURES = 3;
 
 export interface StatusOptions {
     /** NextApp name; defaults to the local config's `name`. */
@@ -83,6 +94,14 @@ export function parseStatusArgs(argv: readonly string[]): StatusOptions {
                 `unexpected positional "${a}" — only one <app> positional is accepted (see kn-next status --help)`,
             );
         }
+    }
+    if (out.json && out.watch) {
+        // Rejected rather than silently concatenating JSON documents a parser
+        // would choke on. If NDJSON streaming is ever wanted, it gets designed
+        // deliberately — not implied by a flag combination.
+        throw new Error(
+            "--json cannot be combined with --watch (a 5s poll would emit concatenated JSON documents); poll `kn-next status --json` from your script instead (see kn-next status --help)",
+        );
     }
     return out;
 }
@@ -151,7 +170,12 @@ function conditionView(c: RawCondition | undefined): ConditionView | undefined {
  */
 export function extractStatus(cr: unknown): StatusModel {
     const raw = (cr ?? {}) as RawNextApp;
-    const conditions = raw.status?.conditions ?? [];
+    // A malformed CR (conditions not an array) must degrade to "not reported",
+    // never crash the renderer.
+    const rawConditions = raw.status?.conditions;
+    const conditions: RawCondition[] = Array.isArray(rawConditions)
+        ? rawConditions
+        : [];
     const byType = (t: string) =>
         conditionView(conditions.find((c) => c.type === t));
 
@@ -196,46 +220,79 @@ export function humanizeAge(iso: string, now: Date): string {
 
 const NOT_REPORTED = "not reported (operator predates this condition)";
 
+/** Every label the human table can print — alignment uses the widest one. */
+const LABELS = [
+    "NextApp",
+    "URL",
+    "Ready",
+    "Degraded",
+    "Reconciling",
+    "Database",
+    "DatabaseReady",
+    "Image",
+] as const;
+const LABEL_WIDTH = Math.max(...LABELS.map((l) => l.length));
+
+/**
+ * Condition polarity: the status value that means "something is wrong". Ready
+ * and DatabaseReady alarm when False; Degraded and Reconciling (and any future
+ * DatabaseOrphaned-style condition) alarm when True. The operator's reason +
+ * message render VERBATIM whenever a condition is in its bad state — that
+ * guidance is the whole point of honest status.
+ */
+type BadWhen = "True" | "False";
+
 function conditionLine(
-    label: string,
+    label: (typeof LABELS)[number],
     c: ConditionView | undefined,
     now: Date,
+    badWhen: BadWhen,
 ): string {
     if (!c) {
-        return `${label.padEnd(10)} ${NOT_REPORTED}`;
+        return `${label.padEnd(LABEL_WIDTH)} ${NOT_REPORTED}`;
     }
+    // Unknown is never the healthy state — surface its reason/message too.
+    const bad = c.status === badWhen || c.status === "Unknown";
     const age = c.lastTransitionTime
         ? ` (${humanizeAge(c.lastTransitionTime, now)})`
         : "";
-    let line = `${label.padEnd(10)} ${c.status}${age}`;
-    // Ready=False (or any non-True truth) carries the operator's reason and
-    // guidance VERBATIM — that message is the whole point of honest status.
-    if (c.status !== "True" || label === "Ready") {
-        if (c.reason) line += `  ${c.reason}`;
+    let line = `${label.padEnd(LABEL_WIDTH)} ${c.status}${age}`;
+    // Ready's reason is informative even when healthy; other conditions only
+    // carry a meaningful reason in their bad state.
+    if ((bad || label === "Ready") && c.reason) {
+        line += `  ${c.reason}`;
     }
-    if (c.status !== "True" && c.message) {
-        line += `\n${"".padEnd(11)}${c.message}`;
+    if (bad && c.message) {
+        line += `\n${"".padEnd(LABEL_WIDTH + 1)}${c.message}`;
     }
     return line;
+}
+
+function plainLine(label: (typeof LABELS)[number], value: string): string {
+    return `${label.padEnd(LABEL_WIDTH)} ${value}`;
 }
 
 /** Render the human summary. */
 export function renderStatusHuman(model: StatusModel, now: Date): string {
     const lines: string[] = [];
-    lines.push(`NextApp    ${model.name} (namespace: ${model.namespace})`);
-    lines.push(`URL        ${model.url ?? "not reported"}`);
-    lines.push(conditionLine("Ready", model.ready, now));
-    lines.push(conditionLine("Degraded", model.degraded, now));
-    lines.push(conditionLine("Reconciling", model.reconciling, now));
+    lines.push(
+        plainLine("NextApp", `${model.name} (namespace: ${model.namespace})`),
+    );
+    lines.push(plainLine("URL", model.url ?? "not reported"));
+    lines.push(conditionLine("Ready", model.ready, now, "False"));
+    lines.push(conditionLine("Degraded", model.degraded, now, "True"));
+    lines.push(conditionLine("Reconciling", model.reconciling, now, "True"));
     const dbLabel =
         model.database.mode === "none"
             ? "none"
             : `${model.database.mode}${model.database.secretName ? ` (secret: ${model.database.secretName})` : ""}`;
-    lines.push(`Database   ${dbLabel}`);
+    lines.push(plainLine("Database", dbLabel));
     if (model.database.mode !== "none") {
-        lines.push(conditionLine("DatabaseReady", model.databaseReady, now));
+        lines.push(
+            conditionLine("DatabaseReady", model.databaseReady, now, "False"),
+        );
     }
-    lines.push(`Image      ${model.image ?? "not reported"}`);
+    lines.push(plainLine("Image", model.image ?? "not reported"));
     return `${lines.join("\n")}\n`;
 }
 
@@ -346,11 +403,28 @@ export async function runStatus(
     }
 
     const start = deps.now().getTime();
+    let consecutiveFailures = 0;
     for (;;) {
-        const model = fetchModel(appName, opts.namespace, deps);
-        renderOnce(model, opts, deps);
-        if (model.ready?.status === "True") {
-            return 0;
+        // One blip must not kill a CI gate: tolerate a short streak of
+        // transient kubectl failures; only a persistent outage throws.
+        let model: StatusModel | undefined;
+        try {
+            model = fetchModel(appName, opts.namespace, deps);
+            consecutiveFailures = 0;
+        } catch (err) {
+            consecutiveFailures++;
+            if (consecutiveFailures > WATCH_MAX_TRANSIENT_FAILURES) {
+                throw err;
+            }
+            deps.write(
+                `transient kubectl failure (${consecutiveFailures}/${WATCH_MAX_TRANSIENT_FAILURES} tolerated), retrying in ${WATCH_INTERVAL_MS / 1000}s: ${(err as Error).message}\n`,
+            );
+        }
+        if (model) {
+            renderOnce(model, opts, deps);
+            if (model.ready?.status === "True") {
+                return 0;
+            }
         }
         if (deps.now().getTime() - start >= opts.timeoutMs) {
             deps.write(
@@ -376,8 +450,12 @@ Usage:
 
 Options:
   -n, --namespace <ns>  Kubernetes namespace (default: default)
-  --json                Emit the structured status subset as JSON
-  --watch               Poll every 5s until Ready=True (bounded: 10m, exit 1 on timeout)
+  --json                Emit the structured status subset as JSON (one-shot
+                        only — cannot be combined with --watch; poll --json
+                        from your script instead)
+  --watch               Poll every 5s until Ready=True (bounded: 10m, exit 1 on
+                        timeout; tolerates up to 3 consecutive transient
+                        kubectl failures)
   -h, --help            Show this help
 `;
 
