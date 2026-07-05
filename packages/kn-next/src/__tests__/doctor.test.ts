@@ -24,6 +24,7 @@ import {
     type ManifestProbeFn,
     parseDoctorArgs,
     parseImageRef,
+    probeManifest,
     runDoctor,
 } from "../cli/doctor";
 
@@ -433,5 +434,36 @@ describe("output surface", () => {
     it("parseDoctorArgs understands --json", () => {
         expect(parseDoctorArgs(["--json"]).json).toBe(true);
         expect(parseDoctorArgs([]).json).toBe(false);
+    });
+
+    it("parseDoctorArgs rejects unknown arguments with a usage hint", () => {
+        expect(() => parseDoctorArgs(["--jsno"])).toThrow(
+            /unknown argument "--jsno".*doctor --help/,
+        );
+    });
+});
+
+describe("probeManifest — bounded registry I/O", () => {
+    it("passes an abort signal to every fetch and maps a timeout to 'unreachable' (SKIP path)", async () => {
+        const seenInits: (RequestInit | undefined)[] = [];
+        const fetchSpy = vi
+            .spyOn(globalThis, "fetch")
+            .mockImplementation(async (_url, init) => {
+                seenInits.push(init as RequestInit | undefined);
+                // Simulate a stalling registry: the bounded fetch rejects the
+                // way undici does when AbortSignal.timeout fires.
+                throw new DOMException(
+                    "The operation was aborted due to timeout",
+                    "TimeoutError",
+                );
+            });
+        try {
+            const outcome = await probeManifest("ghcr.io/acme/app:v1");
+            expect(outcome).toBe("unreachable");
+            expect(fetchSpy).toHaveBeenCalledTimes(1);
+            expect(seenInits[0]?.signal).toBeInstanceOf(AbortSignal);
+        } finally {
+            fetchSpy.mockRestore();
+        }
     });
 });

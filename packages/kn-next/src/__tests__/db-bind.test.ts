@@ -77,6 +77,33 @@ describe("parseDbBindArgs", () => {
         expect(o.dsn).toBe("postgres://u:p@h:5432/db");
         expect(o.secretFile).toBe("./secret.yaml");
     });
+
+    it("a value-taking flag as the trailing token errors cleanly (no undefined namespace)", () => {
+        expect(() => parseDbBindArgs(["--secret", "shop-db", "-n"])).toThrow(
+            /-n requires a value/,
+        );
+        expect(() => parseDbBindArgs(["--secret"])).toThrow(
+            /--secret requires a value/,
+        );
+    });
+
+    it("a value-taking flag followed by another flag errors cleanly", () => {
+        expect(() => parseDbBindArgs(["--secret", "--dry-run"])).toThrow(
+            /--secret requires a value/,
+        );
+    });
+
+    it("rejects unknown flags with a usage hint instead of silently ignoring them", () => {
+        expect(() => parseDbBindArgs(["--secert", "shop-db"])).toThrow(
+            /unknown flag "--secert".*db bind --help/,
+        );
+    });
+
+    it("rejects a second positional", () => {
+        expect(() =>
+            parseDbBindArgs(["app-a", "app-b", "--secret", "shop-db"]),
+        ).toThrow(/unexpected positional "app-b"/);
+    });
 });
 
 describe("validateDbBindOptions (arg-level, ADR-0019 rules 1 + 6)", () => {
@@ -262,18 +289,21 @@ describe("runDbBind — CR-only write (ADR-0001)", () => {
         expect(printed).toContain("name: shop-db");
     });
 
-    it("live: reads the CR then issues exactly ONE kubectl patch nextapp --type merge", async () => {
+    it("live: reads the CR, issues exactly ONE kubectl patch nextapp --type merge, then verifies the field stuck", async () => {
         const exec = vi
             .fn()
-            .mockReturnValueOnce(liveCr()) // kubectl get nextapp -o json
-            .mockReturnValueOnce(""); // kubectl patch
+            .mockReturnValueOnce(liveCr()) // kubectl get nextapp -o json (pre-validate)
+            .mockReturnValueOnce("") // kubectl patch
+            .mockReturnValueOnce(
+                liveCr({ database: { secretRef: { name: "shop-db" } } }),
+            ); // kubectl get (post-patch prune guard)
         const write = vi.fn();
         await runDbBind("my-app", opts({ namespace: "prod" }), {
             exec,
             write,
         });
 
-        expect(exec).toHaveBeenCalledTimes(2);
+        expect(exec).toHaveBeenCalledTimes(3);
         const getArgv = exec.mock.calls[0][0] as string[];
         expect(getArgv.slice(0, 3)).toEqual(["kubectl", "get", "nextapp"]);
         expect(getArgv).toContain("my-app");
@@ -287,6 +317,24 @@ describe("runDbBind — CR-only write (ADR-0001)", () => {
         expect(patchArgv[nIdx + 1]).toBe("prod");
         const patch = JSON.parse(patchArgv[patchArgv.indexOf("-p") + 1]);
         expect(patch.spec.database.secretRef.name).toBe("shop-db");
+
+        // The verify step is a READ (still exactly one write in total).
+        const verifyArgv = exec.mock.calls[2][0] as string[];
+        expect(verifyArgv.slice(0, 3)).toEqual(["kubectl", "get", "nextapp"]);
+    });
+
+    it("live: silent-prune guard — a pre-#222 CRD that drops secretRef fails loudly with the upgrade message", async () => {
+        const exec = vi
+            .fn()
+            .mockReturnValueOnce(liveCr()) // pre-validate get
+            .mockReturnValueOnce("") // kubectl patch exits 0…
+            .mockReturnValueOnce(liveCr()); // …but pruning dropped spec.database.secretRef
+        await expect(
+            runDbBind("my-app", opts(), { exec, write: vi.fn() }),
+        ).rejects.toThrow(
+            "operator predates spec.database.secretRef — upgrade the operator bundle (kubectl apply the latest install.yaml), then re-run",
+        );
+        expect(exec).toHaveBeenCalledTimes(3);
     });
 
     it("live: a managed-mode CR blocks the patch (validation runs BEFORE the write)", async () => {

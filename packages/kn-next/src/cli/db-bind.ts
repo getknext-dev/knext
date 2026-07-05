@@ -78,26 +78,46 @@ export interface DbBindOptions {
 /** Parse `kn-next db bind` argv (after the `db bind` words). */
 export function parseDbBindArgs(argv: readonly string[]): DbBindOptions {
     const out: DbBindOptions = { namespace: "default", dryRun: false };
+    // A value-taking flag must actually have a value: a trailing `--secret` /
+    // `-n`, or one followed by another flag, is a usage error — not a silent
+    // `undefined` that detonates later as a TypeError inside kubectl argv.
+    const need = (flag: string, i: number): string => {
+        const v = argv[i];
+        if (v === undefined || v.startsWith("-")) {
+            throw new Error(
+                `${flag} requires a value (see kn-next db bind --help)`,
+            );
+        }
+        return v;
+    };
     for (let i = 0; i < argv.length; i++) {
         const a = argv[i];
         if (a === "--secret") {
-            out.secret = argv[++i];
+            out.secret = need(a, ++i);
         } else if (a === "--key") {
-            out.key = argv[++i];
+            out.key = need(a, ++i);
         } else if (a === "--ro-secret") {
-            out.roSecret = argv[++i];
+            out.roSecret = need(a, ++i);
         } else if (a === "--ro-key") {
-            out.roKey = argv[++i];
+            out.roKey = need(a, ++i);
         } else if (a === "-n" || a === "--namespace") {
-            out.namespace = argv[++i];
+            out.namespace = need(a, ++i);
         } else if (a === "--dry-run") {
             out.dryRun = true;
         } else if (a === "--dsn") {
-            out.dsn = argv[++i];
+            out.dsn = need(a, ++i);
         } else if (a === "--secret-file") {
-            out.secretFile = argv[++i];
-        } else if (!a.startsWith("-") && out.app === undefined) {
+            out.secretFile = need(a, ++i);
+        } else if (a.startsWith("-")) {
+            // Unknown flags fail loudly — a typo like `--secert` must not
+            // silently bind with defaults.
+            throw new Error(`unknown flag "${a}" (see kn-next db bind --help)`);
+        } else if (out.app === undefined) {
             out.app = a;
+        } else {
+            throw new Error(
+                `unexpected positional "${a}" — only one <app> positional is accepted (see kn-next db bind --help)`,
+            );
         }
     }
     return out;
@@ -392,6 +412,29 @@ export async function runDbBind(
         "-p",
         JSON.stringify(patch),
     ]);
+
+    // Silent-prune guard: on a cluster whose operator predates the
+    // spec.database.secretRef schema (pre-#222 CRD), structural-schema pruning
+    // drops the field — `kubectl patch` still exits 0 and NOTHING binds.
+    // Re-read the CR and fail loudly instead of logging a false success.
+    const verifyRaw = deps.exec([
+        "kubectl",
+        "get",
+        "nextapp",
+        appName,
+        "-n",
+        opts.namespace,
+        "-o",
+        "json",
+    ]);
+    const verified = JSON.parse(verifyRaw) as {
+        spec?: { database?: { secretRef?: unknown } };
+    };
+    if (verified.spec?.database?.secretRef === undefined) {
+        throw new Error(
+            "operator predates spec.database.secretRef — upgrade the operator bundle (kubectl apply the latest install.yaml), then re-run",
+        );
+    }
 
     printDsnContract(opts, deps);
 }

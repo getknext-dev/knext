@@ -426,10 +426,13 @@ if (isEntrypoint(import.meta.url)) {
             await deploy();
         }
     } catch (err) {
-        log.fatal(
-            { err },
-            sub === "db" ? "db bind failed" : "Deployment failed",
-        );
+        const label =
+            sub === "db"
+                ? "db bind failed"
+                : sub === "doctor"
+                  ? "doctor failed"
+                  : "Deployment failed";
+        log.fatal({ err }, label);
         process.exit(1);
     }
 }

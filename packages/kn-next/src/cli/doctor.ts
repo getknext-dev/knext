@@ -165,10 +165,15 @@ export async function probeManifest(image: string): Promise<ProbeOutcome> {
         "application/vnd.docker.distribution.manifest.list.v2+json",
         "application/vnd.docker.distribution.manifest.v2+json",
     ].join(", ");
+    // Every fetch is bounded: a stalling registry must degrade to the
+    // "unreachable" SKIP path within 10s, not hang doctor toward undici's
+    // multi-minute defaults. AbortSignal.timeout rejects -> the catch below.
+    const probeTimeoutMs = 10_000;
     try {
         let res = await fetch(manifestUrl, {
             method: "HEAD",
             headers: { Accept: accept },
+            signal: AbortSignal.timeout(probeTimeoutMs),
         });
         if (res.status === 401) {
             // Anonymous token flow (ghcr.io / registry-1.docker.io style).
@@ -177,7 +182,9 @@ export async function probeManifest(image: string): Promise<ProbeOutcome> {
             const service = /service="([^"]+)"/.exec(challenge)?.[1];
             if (realm) {
                 const tokenUrl = `${realm}?${service ? `service=${encodeURIComponent(service)}&` : ""}scope=${encodeURIComponent(`repository:${repository}:pull`)}`;
-                const tokenRes = await fetch(tokenUrl);
+                const tokenRes = await fetch(tokenUrl, {
+                    signal: AbortSignal.timeout(probeTimeoutMs),
+                });
                 if (tokenRes.ok) {
                     const body = (await tokenRes.json()) as {
                         token?: string;
@@ -191,6 +198,7 @@ export async function probeManifest(image: string): Promise<ProbeOutcome> {
                                 Accept: accept,
                                 Authorization: `Bearer ${token}`,
                             },
+                            signal: AbortSignal.timeout(probeTimeoutMs),
                         });
                     }
                 }
@@ -547,6 +555,15 @@ export interface DoctorArgs {
 }
 
 export function parseDoctorArgs(argv: readonly string[]): DoctorArgs {
+    // Unknown flags fail loudly (a typo like `--jsno` must not silently run
+    // the human-table mode a script then fails to parse).
+    for (const a of argv) {
+        if (a !== "--json" && a !== "-h" && a !== "--help") {
+            throw new Error(
+                `unknown argument "${a}" (see kn-next doctor --help)`,
+            );
+        }
+    }
     return {
         json: argv.includes("--json"),
         help: argv.includes("-h") || argv.includes("--help"),
