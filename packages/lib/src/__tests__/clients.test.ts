@@ -20,12 +20,14 @@ describe('getDbPool — bounded pool for scale-to-zero', () => {
     vi.resetModules();
     delete process.env.DB_POOL_MAX;
     delete process.env.DB_POOL_IDLE_TIMEOUT_MS;
+    delete process.env.DB_POOL_CONNECT_TIMEOUT_MS;
     process.env.DATABASE_URL = 'postgres://u:p@localhost:5432/db';
   });
 
   afterEach(() => {
     delete process.env.DB_POOL_MAX;
     delete process.env.DB_POOL_IDLE_TIMEOUT_MS;
+    delete process.env.DB_POOL_CONNECT_TIMEOUT_MS;
   });
 
   it('sets a small bounded default max (5) and a finite idle timeout', async () => {
@@ -54,6 +56,26 @@ describe('getDbPool — bounded pool for scale-to-zero', () => {
     };
     expect(cfg.max).toBe(12);
     expect(cfg.idleTimeoutMillis).toBe(1000);
+  });
+
+  it('bounds the connect wait: default connectionTimeoutMillis 15s, >= 10s to survive a cold DB wake', async () => {
+    // pg's default (0) waits indefinitely — that survives wakes but hangs
+    // forever on a truly-dead DB. 15s fails fast with a clear error while
+    // leaving ~6x margin over the ~2.5s scale-zero-pg cold wake (the
+    // postgres-binding guide's contract: connect timeout >= 10s).
+    const { getDbPool } = await import('../clients');
+    getDbPool();
+    const cfg = poolCtor.mock.calls[0][0] as { connectionTimeoutMillis: number };
+    expect(cfg.connectionTimeoutMillis).toBe(15_000);
+    expect(cfg.connectionTimeoutMillis).toBeGreaterThanOrEqual(10_000);
+  });
+
+  it('lets an env override win for the connect timeout', async () => {
+    process.env.DB_POOL_CONNECT_TIMEOUT_MS = '30000';
+    const { getDbPool } = await import('../clients');
+    getDbPool();
+    const cfg = poolCtor.mock.calls[0][0] as { connectionTimeoutMillis: number };
+    expect(cfg.connectionTimeoutMillis).toBe(30_000);
   });
 
   it('stays a lazy singleton (constructs the pool only once)', async () => {

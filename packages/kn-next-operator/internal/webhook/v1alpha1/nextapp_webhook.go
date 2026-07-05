@@ -53,15 +53,27 @@ type NextAppCustomValidator struct{}
 var _ admission.Validator[*appsv1alpha1.NextApp] = &NextAppCustomValidator{}
 
 // ValidateCreate validates the spec when a NextApp is created.
+// On CREATE the DATABASE_URL(_RO) collision rule (ADR-0019) applies
+// unratcheted: a fresh CR may never define the same env var in both
+// spec.database and spec.secrets.envMap.
 func (v *NextAppCustomValidator) ValidateCreate(_ context.Context, nextApp *appsv1alpha1.NextApp) (admission.Warnings, error) {
 	nextAppLog.Info("Validating NextApp on create", "name", nextApp.GetName())
-	return nil, validation.ValidateNextAppSpec(&nextApp.Spec)
+	return nil, validation.ValidateNextAppSpecCreate(&nextApp.Spec)
 }
 
-// ValidateUpdate validates the spec when a NextApp is updated.
-func (v *NextAppCustomValidator) ValidateUpdate(_ context.Context, _, newApp *appsv1alpha1.NextApp) (admission.Warnings, error) {
+// ValidateUpdate validates the spec when a NextApp is updated. The collision
+// rule is RATCHETED (ADR-0019): only a collision the update ADDS is rejected;
+// a pre-existing one (a CR stored before the rules existed) may be carried
+// forward, so unrelated updates — image bumps — never brick a running app.
+// The reconciler resolves carried-forward collisions loudly (spec.database
+// wins + a Warning event).
+func (v *NextAppCustomValidator) ValidateUpdate(_ context.Context, oldApp, newApp *appsv1alpha1.NextApp) (admission.Warnings, error) {
 	nextAppLog.Info("Validating NextApp on update", "name", newApp.GetName())
-	return nil, validation.ValidateNextAppSpec(&newApp.Spec)
+	var oldSpec *appsv1alpha1.NextAppSpec
+	if oldApp != nil {
+		oldSpec = &oldApp.Spec
+	}
+	return nil, validation.ValidateNextAppSpecUpdate(oldSpec, &newApp.Spec)
 }
 
 // ValidateDelete is a no-op: deletes are always allowed.
