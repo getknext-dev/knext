@@ -25,6 +25,8 @@ import (
 	"fmt"
 	"strings"
 
+	utilvalidation "k8s.io/apimachinery/pkg/util/validation"
+
 	appsv1alpha1 "github.com/AhmedElBanna80/knext/packages/kn-next-operator/api/v1alpha1"
 )
 
@@ -166,11 +168,70 @@ func ValidateNextAppSpec(spec *appsv1alpha1.NextAppSpec) error {
 		}
 	}
 
+	// Database (ADR-0019): mode exclusivity + BYO binding shape + no silent
+	// DATABASE_URL precedence against spec.secrets.envMap. Mirrors the CRD CEL
+	// rules for CRs that predate them (validation ratcheting).
+	if err := validateDatabase(spec); err != nil {
+		return err
+	}
+
 	// Traffic (issue #92): a canary split is only meaningful against a pinned
 	// revision (the remainder of traffic goes to RevisionName). A canaryPercent
 	// without a revisionName is ambiguous and rejected.
 	if spec.Traffic != nil && spec.Traffic.CanaryPercent != 0 && spec.Traffic.RevisionName == "" {
 		return fmt.Errorf("spec.traffic.canaryPercent requires a pinned revisionName")
+	}
+
+	return nil
+}
+
+// validateDatabase enforces the ADR-0019 spec.database rules (matrix mirrored
+// from the CRD CEL validations):
+//
+//  1. enabled (managed) and secretRef (BYO binding) are mutually exclusive.
+//  2. roSecretRef requires secretRef.
+//  3. secretRef/roSecretRef names are DNS-1123 subdomains.
+//  4. Provisioning knobs (tier/readReplicas/quotas/keepOnDelete) are
+//     managed-mode-only — rejected with secretRef, never silently ignored.
+//  5. When spec.database defines DATABASE_URL (either mode), a
+//     spec.secrets.envMap entry for it is rejected — no silent precedence.
+//     Same for DATABASE_URL_RO.
+func validateDatabase(spec *appsv1alpha1.NextAppSpec) error {
+	db := spec.Database
+	if db == nil {
+		return nil
+	}
+
+	if db.Enabled && db.SecretRef != nil {
+		return fmt.Errorf("spec.database.enabled (managed) and spec.database.secretRef (BYO binding) are mutually exclusive — pick one mode")
+	}
+	if db.ROSecretRef != nil && db.SecretRef == nil {
+		return fmt.Errorf("spec.database.roSecretRef requires spec.database.secretRef")
+	}
+	if db.SecretRef != nil {
+		if errs := utilvalidation.IsDNS1123Subdomain(db.SecretRef.Name); len(errs) > 0 {
+			return fmt.Errorf("spec.database.secretRef.name %q is not a valid Secret name: %s", db.SecretRef.Name, strings.Join(errs, "; "))
+		}
+		if db.Tier != "" || db.ReadReplicas || db.Quotas != nil || db.KeepOnDelete {
+			return fmt.Errorf("spec.database tier/readReplicas/quotas/keepOnDelete are managed-mode only and cannot be combined with secretRef")
+		}
+	}
+	if db.ROSecretRef != nil {
+		if errs := utilvalidation.IsDNS1123Subdomain(db.ROSecretRef.Name); len(errs) > 0 {
+			return fmt.Errorf("spec.database.roSecretRef.name %q is not a valid Secret name: %s", db.ROSecretRef.Name, strings.Join(errs, "; "))
+		}
+	}
+
+	// No silent precedence against the raw envMap path.
+	if spec.Secrets != nil && spec.Secrets.EnvMap != nil {
+		definesURL := db.SecretRef != nil || db.Enabled
+		if _, clash := spec.Secrets.EnvMap["DATABASE_URL"]; clash && definesURL {
+			return fmt.Errorf("spec.database and spec.secrets.envMap both define DATABASE_URL — remove one (no silent precedence)")
+		}
+		definesRO := db.ROSecretRef != nil || (db.Enabled && db.ReadReplicas)
+		if _, clash := spec.Secrets.EnvMap["DATABASE_URL_RO"]; clash && definesRO {
+			return fmt.Errorf("spec.database and spec.secrets.envMap both define DATABASE_URL_RO — remove one (no silent precedence)")
+		}
 	}
 
 	return nil

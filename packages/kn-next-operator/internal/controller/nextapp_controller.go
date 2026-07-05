@@ -377,6 +377,22 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 			Reason:             "Provisioned",
 			Message:            fmt.Sprintf("Database %q Ready; DATABASE_URL wired into the app", nextApp.Status.DatabaseAppName),
 		})
+	} else if databaseBound(&nextApp) {
+		// 0b. BYO binding (ADR-0019): spec.database.secretRef maps an EXISTING
+		// same-namespace Secret onto DATABASE_URL(+_RO) through the same
+		// in-memory envMap injection the managed mode uses. No provisioning,
+		// no hard-gate (envMap semantics: a missing Secret surfaces on the pod
+		// as CreateContainerConfigError). Mode exclusivity vs enabled is
+		// enforced at admission.
+		r.injectBoundDatabaseEnv(&nextApp)
+		nextApp.Status.DatabaseSecretName = nextApp.Spec.Database.SecretRef.Name
+		apimeta.SetStatusCondition(&nextApp.Status.Conditions, metav1.Condition{
+			Type:               ConditionDatabaseReady,
+			Status:             metav1.ConditionTrue,
+			ObservedGeneration: nextApp.Generation,
+			Reason:             "Bound",
+			Message:            fmt.Sprintf("Bound existing Secret %q as DATABASE_URL", nextApp.Spec.Database.SecretRef.Name),
+		})
 	}
 
 	// 1. Create/Update ServiceAccount

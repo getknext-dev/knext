@@ -101,7 +101,8 @@ spec:
                   enabled:
                     description: |-
                       Enabled turns on inline provisioning. false/nil => no DB is provisioned
-                      (bring-your-own via spec.secrets.envMap stays the escape hatch).
+                      (bring-your-own via secretRef below, or the raw spec.secrets.envMap
+                      escape hatch).
                     type: boolean
                   keepOnDelete:
                     description: |-
@@ -139,6 +140,49 @@ spec:
                       DATABASE_URL_RO (tolerating its absence until scale-zero-pg emits the key).
                       Default false.
                     type: boolean
+                  roSecretRef:
+                    description: |-
+                      ROSecretRef optionally binds a read-only DSN as DATABASE_URL_RO (BYO
+                      mode). key defaults to "DATABASE_URL_RO", so a single Secret carrying
+                      both keys (the scale-zero-pg layout) binds with roSecretRef: {name: <same>}.
+                      Requires secretRef.
+                    properties:
+                      key:
+                        description: |-
+                          Key inside the Secret holding the DSN. Defaults to "DATABASE_URL" for
+                          secretRef and "DATABASE_URL_RO" for roSecretRef.
+                        minLength: 1
+                        type: string
+                      name:
+                        description: Name of the Secret (DNS-1123 subdomain).
+                        maxLength: 253
+                        minLength: 1
+                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  secretRef:
+                    description: |-
+                      SecretRef binds an EXISTING Secret in the app's namespace as the app's
+                      DATABASE_URL (BYO mode, ADR-0019). key defaults to "DATABASE_URL".
+                      Mutually exclusive with enabled: true.
+                    properties:
+                      key:
+                        description: |-
+                          Key inside the Secret holding the DSN. Defaults to "DATABASE_URL" for
+                          secretRef and "DATABASE_URL_RO" for roSecretRef.
+                        minLength: 1
+                        type: string
+                      name:
+                        description: Name of the Secret (DNS-1123 subdomain).
+                        maxLength: 253
+                        minLength: 1
+                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                        type: string
+                    required:
+                    - name
+                    type: object
                   tier:
                     description: |-
                       Tier maps 1:1 to AppDatabase.spec.tier. cold = scale-to-zero (default);
@@ -148,6 +192,17 @@ spec:
                     - warm
                     type: string
                 type: object
+                x-kubernetes-validations:
+                - message: spec.database.enabled (managed) and spec.database.secretRef
+                    (BYO binding) are mutually exclusive — pick one mode
+                  rule: '!(has(self.enabled) && self.enabled && has(self.secretRef))'
+                - message: spec.database.roSecretRef requires spec.database.secretRef
+                  rule: '!has(self.roSecretRef) || has(self.secretRef)'
+                - message: tier/readReplicas/quotas/keepOnDelete are managed-mode
+                    only and cannot be combined with secretRef
+                  rule: '!(has(self.secretRef) && (has(self.tier) || has(self.quotas)
+                    || (has(self.readReplicas) && self.readReplicas) || (has(self.keepOnDelete)
+                    && self.keepOnDelete)))'
               env:
                 additionalProperties:
                   type: string
@@ -378,6 +433,18 @@ spec:
             required:
             - image
             type: object
+            x-kubernetes-validations:
+            - message: spec.database and spec.secrets.envMap both define DATABASE_URL
+                — remove one (no silent precedence)
+              rule: '!(has(self.database) && (has(self.database.secretRef) || (has(self.database.enabled)
+                && self.database.enabled)) && has(self.secrets) && has(self.secrets.envMap)
+                && ''DATABASE_URL'' in self.secrets.envMap)'
+            - message: spec.database and spec.secrets.envMap both define DATABASE_URL_RO
+                — remove one (no silent precedence)
+              rule: '!(has(self.database) && (has(self.database.roSecretRef) || (has(self.database.enabled)
+                && self.database.enabled && has(self.database.readReplicas) && self.database.readReplicas))
+                && has(self.secrets) && has(self.secrets.envMap) && ''DATABASE_URL_RO''
+                in self.secrets.envMap)'
           status:
             description: status defines the observed state of NextApp
             properties:

@@ -221,3 +221,149 @@ func TestValidateNextAppSpec(t *testing.T) {
 		})
 	}
 }
+
+// ADR-0019 — spec.database binding (BYO) validation mirror. These duplicate the
+// CRD CEL rules as defense-in-depth for the webhook + reconciler (CRs that
+// predate the CEL rules).
+func TestValidateNextAppSpecDatabaseBinding(t *testing.T) {
+	ref := func(name string) *appsv1alpha1.DatabaseSecretRef {
+		return &appsv1alpha1.DatabaseSecretRef{Name: name}
+	}
+	envMapURL := &appsv1alpha1.SecretsSpec{
+		EnvMap: map[string]appsv1alpha1.EnvMapEntry{
+			"DATABASE_URL": {SecretName: "other", SecretKey: "url"},
+		},
+	}
+
+	tests := []struct {
+		name    string
+		spec    *appsv1alpha1.NextAppSpec
+		wantErr bool
+		errHas  string
+	}{
+		{
+			name: "plain secretRef accepted",
+			spec: &appsv1alpha1.NextAppSpec{
+				Image:    digestImage,
+				Database: &appsv1alpha1.DatabaseSpec{SecretRef: ref("shop-db")},
+			},
+		},
+		{
+			name: "secretRef + roSecretRef accepted",
+			spec: &appsv1alpha1.NextAppSpec{
+				Image:    digestImage,
+				Database: &appsv1alpha1.DatabaseSpec{SecretRef: ref("shop-db"), ROSecretRef: ref("shop-db")},
+			},
+		},
+		{
+			name: "non-DNS-1123 secret name rejected",
+			spec: &appsv1alpha1.NextAppSpec{
+				Image:    digestImage,
+				Database: &appsv1alpha1.DatabaseSpec{SecretRef: ref("Not_Valid")},
+			},
+			wantErr: true,
+			errHas:  "secretRef.name",
+		},
+		{
+			name: "empty secretRef name rejected",
+			spec: &appsv1alpha1.NextAppSpec{
+				Image:    digestImage,
+				Database: &appsv1alpha1.DatabaseSpec{SecretRef: ref("")},
+			},
+			wantErr: true,
+		},
+		{
+			name: "non-DNS-1123 roSecretRef name rejected",
+			spec: &appsv1alpha1.NextAppSpec{
+				Image:    digestImage,
+				Database: &appsv1alpha1.DatabaseSpec{SecretRef: ref("shop-db"), ROSecretRef: ref("UPPER")},
+			},
+			wantErr: true,
+			errHas:  "roSecretRef.name",
+		},
+		{
+			name: "enabled + secretRef rejected (one mode per app)",
+			spec: &appsv1alpha1.NextAppSpec{
+				Image:    digestImage,
+				Database: &appsv1alpha1.DatabaseSpec{Enabled: true, SecretRef: ref("shop-db")},
+			},
+			wantErr: true,
+			errHas:  "enabled",
+		},
+		{
+			name: "roSecretRef without secretRef rejected",
+			spec: &appsv1alpha1.NextAppSpec{
+				Image:    digestImage,
+				Database: &appsv1alpha1.DatabaseSpec{ROSecretRef: ref("shop-db")},
+			},
+			wantErr: true,
+			errHas:  "roSecretRef",
+		},
+		{
+			name: "provisioning knobs with secretRef rejected",
+			spec: &appsv1alpha1.NextAppSpec{
+				Image:    digestImage,
+				Database: &appsv1alpha1.DatabaseSpec{SecretRef: ref("shop-db"), ReadReplicas: true},
+			},
+			wantErr: true,
+		},
+		{
+			name: "secretRef colliding with envMap DATABASE_URL rejected",
+			spec: &appsv1alpha1.NextAppSpec{
+				Image:    digestImage,
+				Database: &appsv1alpha1.DatabaseSpec{SecretRef: ref("shop-db")},
+				Secrets:  envMapURL,
+			},
+			wantErr: true,
+			errHas:  "DATABASE_URL",
+		},
+		{
+			name: "managed mode colliding with envMap DATABASE_URL rejected (tightens ADR-0018)",
+			spec: &appsv1alpha1.NextAppSpec{
+				Image:    digestImage,
+				Database: &appsv1alpha1.DatabaseSpec{Enabled: true},
+				Secrets:  envMapURL,
+			},
+			wantErr: true,
+			errHas:  "DATABASE_URL",
+		},
+		{
+			name: "roSecretRef colliding with envMap DATABASE_URL_RO rejected",
+			spec: &appsv1alpha1.NextAppSpec{
+				Image:    digestImage,
+				Database: &appsv1alpha1.DatabaseSpec{SecretRef: ref("shop-db"), ROSecretRef: ref("shop-db")},
+				Secrets: &appsv1alpha1.SecretsSpec{
+					EnvMap: map[string]appsv1alpha1.EnvMapEntry{
+						"DATABASE_URL_RO": {SecretName: "other", SecretKey: "ro"},
+					},
+				},
+			},
+			wantErr: true,
+			errHas:  "DATABASE_URL_RO",
+		},
+		{
+			name: "envMap for OTHER env vars alongside secretRef accepted",
+			spec: &appsv1alpha1.NextAppSpec{
+				Image:    digestImage,
+				Database: &appsv1alpha1.DatabaseSpec{SecretRef: ref("shop-db")},
+				Secrets: &appsv1alpha1.SecretsSpec{
+					EnvMap: map[string]appsv1alpha1.EnvMapEntry{
+						"STRIPE_KEY": {SecretName: "stripe", SecretKey: "key"},
+					},
+				},
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ValidateNextAppSpec(tc.spec)
+			if tc.wantErr != (err != nil) {
+				t.Fatalf("ValidateNextAppSpec() err=%v, wantErr=%v", err, tc.wantErr)
+			}
+			if tc.errHas != "" && (err == nil || !strings.Contains(err.Error(), tc.errHas)) {
+				t.Fatalf("ValidateNextAppSpec() err=%v, want substring %q", err, tc.errHas)
+			}
+		})
+	}
+}
