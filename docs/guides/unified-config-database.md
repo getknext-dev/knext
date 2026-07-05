@@ -59,6 +59,12 @@ reclaimed too (no leaked timeline).
 `status.conditions[DatabaseReady]` reflects the gate: `False`/`Provisioning` while
 the DB comes up, `True` once the DSN is wired.
 
+Switching the app away from managed mode (to `secretRef`, or removing
+`spec.database`) does **not** delete the provisioned database — it is retained
+and flagged via a `DatabaseOrphaned` condition until you delete it, rebind it,
+or delete the NextApp. See
+[switching modes](../operator/crd-nextapp.md#switching-database-modes).
+
 ## Security & isolation
 
 The `appName` is **derived, never author-supplied** — this is the load-bearing

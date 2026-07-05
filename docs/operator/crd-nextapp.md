@@ -148,9 +148,8 @@ spec:
   rotating the DSN in-place does **not** roll a new Revision (redeploy to pick it up).
 - `status.databaseSecretName` records the bound Secret; condition
   `DatabaseReady=True` with reason `Bound`. Removing `spec.database` clears
-  both on the next reconcile (for a previously managed app,
-  `status.databaseAppName` is retained so deleting the NextApp can still
-  reclaim the orphaned database).
+  both on the next reconcile (for a previously managed app, see
+  [switching modes](#switching-database-modes) below).
 - Provisioning knobs (`tier`, `readReplicas`, `quotas`, `keepOnDelete`) are
   rejected alongside `secretRef` (they are managed-mode-only), and `secretRef`
   is rejected alongside `enabled: true` — one mode per app.
@@ -196,6 +195,36 @@ spec:
 
 See the [unified-config guide](../guides/unified-config-database.md) for the full flow,
 sizing notes, rotation behavior, and required RBAC.
+
+#### Switching database modes
+
+**Managed → binding (or removing `spec.database` entirely) never deletes your
+managed database.** A spec edit is not a destruction order: the provisioned
+database (and its data) keeps running, and the operator flags it instead:
+
+- condition `DatabaseOrphaned=True` (reason `ModeSwitched`) names the retained
+  database, plus a one-time `Warning` event (`DatabaseOrphaned`) at switch time;
+- the new `secretRef` binding works immediately and independently
+  (`DatabaseReady=True/Bound`);
+- `status.databaseAppName` stays set so you (and the operator) can still find
+  the orphan.
+
+You resolve the orphan one of three ways:
+
+1. **Delete it manually** — `kubectl delete appdatabase <databaseAppName>
+   -n scale-zero-pg`. The next reconcile clears `DatabaseOrphaned` and
+   `status.databaseAppName`.
+2. **Switch back to managed** (`enabled: true`) — the operator rebinds the
+   **same** database (the name is derived from your app's identity, so no
+   duplicate is provisioned) and drops the flag. Your data is exactly where
+   you left it.
+3. **Delete the NextApp** — the delete-time finalizer reclaims the orphaned
+   database as usual. A `keepOnDelete: true` set while the app was managed is
+   still honored downstream (the underlying timeline is retained even though
+   the database object is reclaimed).
+
+The mirrored `<name>-db` credential Secret is also retained until the NextApp
+is deleted (older Revisions may still reference it).
 
 ### `preview` (Optional)
 Enables ephemeral GitOps isolation for Pull Request testing. See [GitOps Previews](./gitops-preview.md).
