@@ -113,8 +113,52 @@ spec:
         secretKey: password
 ```
 
+Note: when `spec.database` is set (either mode below), it **owns**
+`DATABASE_URL`/`DATABASE_URL_RO` — an `envMap` entry for the same name is
+rejected by the validating webhook on create and on any update that introduces
+the conflict (no silent precedence). CRs that already carried the conflict
+before this rule are grandfathered (ratcheted): they keep reconciling,
+`spec.database` wins, and the operator records a Warning event naming the
+ignored `envMap` entry. Every other env var is fair game.
+
 ### `database` (Optional)
-Declares an **inline** [scale-zero-pg](../guides/unified-config-database.md) database
+Declares the app's Postgres. Two mutually-exclusive modes — **binding**
+(`secretRef`: bring your own DB) and **managed** (`enabled: true`: inline
+provisioning).
+
+**Binding mode (`secretRef`) — ADR-0019.** Binds an *existing* Secret in the
+app's namespace as `DATABASE_URL` (and optionally a read-only DSN as
+`DATABASE_URL_RO`). Typed sugar over the `secrets.envMap` recipe — the operator
+injects through the exact same `SecretKeyRef` machinery, so precedence rules
+are identical:
+
+```yaml
+spec:
+  database:
+    secretRef:               # -> env DATABASE_URL
+      name: shop-db          # Secret in the app's namespace (DNS-1123)
+      # key: DATABASE_URL    # default
+    roSecretRef:             # optional -> env DATABASE_URL_RO
+      name: shop-db          # key defaults to DATABASE_URL_RO, so one Secret
+                             # carrying both keys binds with no key config
+```
+
+- **No provisioning, no hard-gate:** a missing Secret surfaces on the pod as
+  `CreateContainerConfigError` until it appears (exactly the `envMap` semantics);
+  rotating the DSN in-place does **not** roll a new Revision (redeploy to pick it up).
+- `status.databaseSecretName` records the bound Secret; condition
+  `DatabaseReady=True` with reason `Bound`. Removing `spec.database` clears
+  both on the next reconcile (for a previously managed app,
+  `status.databaseAppName` is retained so deleting the NextApp can still
+  reclaim the orphaned database).
+- Provisioning knobs (`tier`, `readReplicas`, `quotas`, `keepOnDelete`) are
+  rejected alongside `secretRef` (they are managed-mode-only), and `secretRef`
+  is rejected alongside `enabled: true` — one mode per app.
+- Pool-timeout contract (pool idle **<** the gateway's 60 s window, connect
+  timeout **≥** 10 s) + the worked scale-zero-pg example: see the
+  [Postgres binding guide](../guides/postgres-binding.md).
+
+**Managed mode (`enabled: true`).** Declares an **inline** [scale-zero-pg](../guides/unified-config-database.md) database
 that the operator auto-provisions and wires into `DATABASE_URL` — the app and its
 database sleep at zero and wake together on one visitor request. This is the
 **unified-config** flagship (ADR-0006). You do **not** hand-write a `DATABASE_URL`
@@ -125,7 +169,7 @@ your app's namespace, and injects `DATABASE_URL` (and `DATABASE_URL_RO` when
 ```yaml
 spec:
   database:
-    enabled: true            # false/absent => bring-your-own via secrets.envMap (below)
+    enabled: true            # false/absent => bring-your-own via secretRef (above)
     tier: cold               # cold = scale-to-zero (default) | warm = ~0.4s wake
     readReplicas: true       # also injects DATABASE_URL_RO
     quotas:                  # per-app noisy-neighbour bound (all fields optional)
@@ -146,8 +190,9 @@ spec:
   ~seconds. This prevents booting an app that would crash-loop on a missing DSN.
 - **Teardown:** deleting the NextApp deletes the database (and reclaims its Neon
   timeline) via a finalizer, unless `keepOnDelete: true`.
-- **BYO escape hatch:** omit `database` (or set `enabled: false`) and wire an external
-  or existing database by hand through `secrets.envMap` (above) — fully supported.
+- **BYO:** use `secretRef` (binding mode, above) to point at an external or existing
+  database; the raw `secrets.envMap` recipe also still works when `spec.database`
+  is fully omitted.
 
 See the [unified-config guide](../guides/unified-config-database.md) for the full flow,
 sizing notes, rotation behavior, and required RBAC.

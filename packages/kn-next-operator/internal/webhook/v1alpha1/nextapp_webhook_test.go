@@ -103,3 +103,86 @@ func TestValidateDeleteIsNoOp(t *testing.T) {
 		t.Fatalf("ValidateDelete() = %v; want nil (no-op)", err)
 	}
 }
+
+// ADR-0019 — DATABASE_URL(_RO) collision enforcement lives HERE (webhook), with
+// TRUE ratcheting: reject on CREATE, reject an UPDATE only when it ADDS a
+// collision; an update that merely carries a pre-existing collision forward
+// must be allowed, or stored CRs from before the rules brick on their next
+// unrelated update (image bump etc.).
+func TestDatabaseCollisionRatchet(t *testing.T) {
+	v := &NextAppCustomValidator{}
+	ctx := context.Background()
+
+	collisionSpec := func() appsv1alpha1.NextAppSpec {
+		return appsv1alpha1.NextAppSpec{
+			Image: digestImage,
+			Database: &appsv1alpha1.DatabaseSpec{
+				SecretRef: &appsv1alpha1.DatabaseSecretRef{Name: "shop-db"},
+			},
+			Secrets: &appsv1alpha1.SecretsSpec{
+				EnvMap: map[string]appsv1alpha1.EnvMapEntry{
+					"DATABASE_URL": {SecretName: "stale", SecretKey: "url"},
+				},
+			},
+		}
+	}
+	cleanSpec := func() appsv1alpha1.NextAppSpec {
+		return appsv1alpha1.NextAppSpec{
+			Image: digestImage,
+			Database: &appsv1alpha1.DatabaseSpec{
+				SecretRef: &appsv1alpha1.DatabaseSecretRef{Name: "shop-db"},
+			},
+		}
+	}
+
+	t.Run("CREATE with a collision is rejected", func(t *testing.T) {
+		_, err := v.ValidateCreate(ctx, newNextApp(collisionSpec()))
+		if err == nil || !strings.Contains(err.Error(), "DATABASE_URL") {
+			t.Fatalf("expected DATABASE_URL collision rejection on create, got err=%v", err)
+		}
+	})
+
+	t.Run("CREATE managed-mode collision is rejected too", func(t *testing.T) {
+		spec := collisionSpec()
+		spec.Database = &appsv1alpha1.DatabaseSpec{Enabled: true}
+		_, err := v.ValidateCreate(ctx, newNextApp(spec))
+		if err == nil || !strings.Contains(err.Error(), "DATABASE_URL") {
+			t.Fatalf("expected DATABASE_URL collision rejection on create, got err=%v", err)
+		}
+	})
+
+	t.Run("UPDATE that ADDS a collision is rejected", func(t *testing.T) {
+		_, err := v.ValidateUpdate(ctx, newNextApp(cleanSpec()), newNextApp(collisionSpec()))
+		if err == nil || !strings.Contains(err.Error(), "DATABASE_URL") {
+			t.Fatalf("expected rejection when the update introduces the collision, got err=%v", err)
+		}
+	})
+
+	t.Run("UPDATE carrying a PRE-EXISTING collision forward is allowed (ratchet)", func(t *testing.T) {
+		oldApp := newNextApp(collisionSpec())
+		newSpec := collisionSpec()
+		newSpec.Image = "registry.example.com/app:v2@sha256:def456abc123" // unrelated change
+		_, err := v.ValidateUpdate(ctx, oldApp, newNextApp(newSpec))
+		if err != nil {
+			t.Fatalf("a stored collision CR must remain updatable (image bump), got err=%v", err)
+		}
+	})
+
+	t.Run("UPDATE that RESOLVES the collision is allowed", func(t *testing.T) {
+		_, err := v.ValidateUpdate(ctx, newNextApp(collisionSpec()), newNextApp(cleanSpec()))
+		if err != nil {
+			t.Fatalf("removing the collision must be allowed, got err=%v", err)
+		}
+	})
+
+	t.Run("UPDATE adding a DATABASE_URL_RO collision to an already-URL-colliding CR is rejected (per-name ratchet)", func(t *testing.T) {
+		oldApp := newNextApp(collisionSpec())
+		newSpec := collisionSpec()
+		newSpec.Database.ROSecretRef = &appsv1alpha1.DatabaseSecretRef{Name: "shop-db"}
+		newSpec.Secrets.EnvMap["DATABASE_URL_RO"] = appsv1alpha1.EnvMapEntry{SecretName: "stale", SecretKey: "ro"}
+		_, err := v.ValidateUpdate(ctx, oldApp, newNextApp(newSpec))
+		if err == nil || !strings.Contains(err.Error(), "DATABASE_URL_RO") {
+			t.Fatalf("the ratchet is per env var name — a NEW RO collision must be rejected, got err=%v", err)
+		}
+	})
+}

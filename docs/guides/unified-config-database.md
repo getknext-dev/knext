@@ -129,6 +129,10 @@ appdb-api lane may ship an equivalent `Role`; applying both is idempotent.)
 
 ## Bring your own database (escape hatch)
 
-Unified config is **additive**, not a replacement. Omit `spec.database` (or set
-`enabled: false`) and wire an external/existing database by hand through
-`spec.secrets.envMap` — that path is unchanged and fully supported.
+Unified config is **additive**, not a replacement. To bind an external/existing
+database, use the typed binding mode on the same block —
+`spec.database.secretRef` (see the [Postgres binding guide](./postgres-binding.md))
+— or omit `spec.database` entirely and hand-wire `spec.secrets.envMap`; both
+paths are fully supported. The two modes are mutually exclusive, and when
+`spec.database` is set it owns `DATABASE_URL` (an `envMap` entry for the same
+name is rejected at admission).

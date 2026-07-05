@@ -101,7 +101,8 @@ spec:
                   enabled:
                     description: |-
                       Enabled turns on inline provisioning. false/nil => no DB is provisioned
-                      (bring-your-own via spec.secrets.envMap stays the escape hatch).
+                      (bring-your-own via secretRef below, or the raw spec.secrets.envMap
+                      escape hatch).
                     type: boolean
                   keepOnDelete:
                     description: |-
@@ -139,6 +140,49 @@ spec:
                       DATABASE_URL_RO (tolerating its absence until scale-zero-pg emits the key).
                       Default false.
                     type: boolean
+                  roSecretRef:
+                    description: |-
+                      ROSecretRef optionally binds a read-only DSN as DATABASE_URL_RO (BYO
+                      mode). key defaults to "DATABASE_URL_RO", so a single Secret carrying
+                      both keys (the scale-zero-pg layout) binds with roSecretRef: {name: <same>}.
+                      Requires secretRef.
+                    properties:
+                      key:
+                        description: |-
+                          Key inside the Secret holding the DSN. Defaults to "DATABASE_URL" for
+                          secretRef and "DATABASE_URL_RO" for roSecretRef.
+                        minLength: 1
+                        type: string
+                      name:
+                        description: Name of the Secret (DNS-1123 subdomain).
+                        maxLength: 253
+                        minLength: 1
+                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  secretRef:
+                    description: |-
+                      SecretRef binds an EXISTING Secret in the app's namespace as the app's
+                      DATABASE_URL (BYO mode, ADR-0019). key defaults to "DATABASE_URL".
+                      Mutually exclusive with enabled: true.
+                    properties:
+                      key:
+                        description: |-
+                          Key inside the Secret holding the DSN. Defaults to "DATABASE_URL" for
+                          secretRef and "DATABASE_URL_RO" for roSecretRef.
+                        minLength: 1
+                        type: string
+                      name:
+                        description: Name of the Secret (DNS-1123 subdomain).
+                        maxLength: 253
+                        minLength: 1
+                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                        type: string
+                    required:
+                    - name
+                    type: object
                   tier:
                     description: |-
                       Tier maps 1:1 to AppDatabase.spec.tier. cold = scale-to-zero (default);
@@ -148,6 +192,17 @@ spec:
                     - warm
                     type: string
                 type: object
+                x-kubernetes-validations:
+                - message: spec.database.enabled (managed) and spec.database.secretRef
+                    (BYO binding) are mutually exclusive — pick one mode
+                  rule: '!(has(self.enabled) && self.enabled && has(self.secretRef))'
+                - message: spec.database.roSecretRef requires spec.database.secretRef
+                  rule: '!has(self.roSecretRef) || has(self.secretRef)'
+                - message: tier/readReplicas/quotas/keepOnDelete are managed-mode
+                    only and cannot be combined with secretRef
+                  rule: '!(has(self.secretRef) && (has(self.tier) || has(self.quotas)
+                    || (has(self.readReplicas) && self.readReplicas) || (has(self.keepOnDelete)
+                    && self.keepOnDelete)))'
               env:
                 additionalProperties:
                   type: string
@@ -472,13 +527,18 @@ spec:
                   DatabaseAppName is the DERIVED, plane-globally-unique appName the operator
                   created the AppDatabase under (ADR-0006 §4.4). Surfaced on status so the
                   derivation is auditable and the security seam (a NextApp can only bind its
-                  OWN derived DB) is observable. Empty when spec.database is not enabled.
+                  OWN derived DB) is observable. Managed mode only; deliberately RETAINED
+                  even after spec.database is removed or switched to the BYO binding, so the
+                  delete-time db-cleanup finalizer can still reclaim the (now orphaned)
+                  AppDatabase (ADR-0019 — cleanup-on-mode-switch is follow-up scope).
                 type: string
               databaseSecretName:
                 description: |-
-                  DatabaseSecretName is the name of the same-namespace mirrored Secret the
-                  operator wrote (ownerRef'd to this NextApp) carrying DATABASE_URL(+_RO).
-                  Empty when spec.database is not enabled.
+                  DatabaseSecretName is the name of the same-namespace Secret currently
+                  feeding DATABASE_URL(+_RO), per spec.database mode: in MANAGED mode
+                  (enabled) the operator-written mirror Secret (ownerRef'd to this NextApp);
+                  in BINDING mode (secretRef, ADR-0019) the user-supplied Secret named by
+                  spec.database.secretRef. Cleared when spec.database is removed.
                 type: string
               url:
                 type: string

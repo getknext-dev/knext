@@ -109,18 +109,19 @@ metadata:
 stringData:
   DATABASE_URL: postgres://cloud_admin:cloud_admin@pggw.scale-zero-pg.svc:55432/postgres?sslmode=require
 ---
-# 2. reference it from the NextApp CR
+# 2. bind it from the NextApp CR (typed sugar over secrets.envMap)
 apiVersion: apps.kn-next.dev/v1alpha1
 kind: NextApp
 metadata:
   name: myapp
 spec:
-  secrets:
-    envMap:
-      DATABASE_URL:
-        secretName: myapp-database
-        secretKey: DATABASE_URL
+  database:
+    secretRef:
+      name: myapp-database     # key defaults to DATABASE_URL
 ```
+
+Full binding reference (defaults, read-only DSNs, validation rules):
+[Postgres binding guide](./postgres-binding.md).
 
 The app talks to an ordinary Postgres and never knows the database sleeps. The host is
 **always the gateway** (`pggw`), never the compute — the gateway routes, wakes, and holds the
@@ -148,7 +149,7 @@ and the tier table are in scale-zero-pg's
 
 **Per-app databases in practice** — declare one with `kubectl apply`; the operator branches the
 shared template, stands up a scale-to-zero compute, and mints a per-app credential Secret whose
-`DATABASE_URL` you wire straight into that app's `NextApp.spec.secrets.envMap`:
+`DATABASE_URL` you bind straight into that app via `NextApp.spec.database.secretRef`:
 
 ```sh
 kubectl apply -f - <<'EOF'

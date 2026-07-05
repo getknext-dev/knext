@@ -40,6 +40,13 @@ export const getMinioClient = () => {
 // scale-to-zero guide.
 const DEFAULT_DB_POOL_MAX = 5;
 const DEFAULT_DB_POOL_IDLE_TIMEOUT_MS = 10_000;
+// pg's default connect timeout is 0 = wait indefinitely: that survives a cold
+// scale-to-zero DB wake, but it also hangs every request forever when the DB
+// is truly unreachable. A bounded 15s fails fast with a clear pool error while
+// leaving ~6x margin over the ~2.5s scale-zero-pg cold wake (the
+// postgres-binding guide's contract: connect timeout >= 10s). Env-overridable
+// per zone (DB_POOL_CONNECT_TIMEOUT_MS).
+const DEFAULT_DB_POOL_CONNECT_TIMEOUT_MS = 15_000;
 
 const toFinitePositiveInt = (raw: string | undefined, fallback: number): number => {
   if (raw === undefined) {
@@ -57,6 +64,10 @@ export const getDbPool = () => {
       idleTimeoutMillis: toFinitePositiveInt(
         process.env.DB_POOL_IDLE_TIMEOUT_MS,
         DEFAULT_DB_POOL_IDLE_TIMEOUT_MS,
+      ),
+      connectionTimeoutMillis: toFinitePositiveInt(
+        process.env.DB_POOL_CONNECT_TIMEOUT_MS,
+        DEFAULT_DB_POOL_CONNECT_TIMEOUT_MS,
       ),
     });
   }

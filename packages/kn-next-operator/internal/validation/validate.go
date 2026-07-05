@@ -25,6 +25,8 @@ import (
 	"fmt"
 	"strings"
 
+	utilvalidation "k8s.io/apimachinery/pkg/util/validation"
+
 	appsv1alpha1 "github.com/AhmedElBanna80/knext/packages/kn-next-operator/api/v1alpha1"
 )
 
@@ -166,6 +168,13 @@ func ValidateNextAppSpec(spec *appsv1alpha1.NextAppSpec) error {
 		}
 	}
 
+	// Database (ADR-0019): mode exclusivity + BYO binding shape + no silent
+	// DATABASE_URL precedence against spec.secrets.envMap. Mirrors the CRD CEL
+	// rules for CRs that predate them (validation ratcheting).
+	if err := validateDatabase(spec); err != nil {
+		return err
+	}
+
 	// Traffic (issue #92): a canary split is only meaningful against a pinned
 	// revision (the remainder of traffic goes to RevisionName). A canaryPercent
 	// without a revisionName is ambiguous and rejected.
@@ -173,6 +182,121 @@ func ValidateNextAppSpec(spec *appsv1alpha1.NextAppSpec) error {
 		return fmt.Errorf("spec.traffic.canaryPercent requires a pinned revisionName")
 	}
 
+	return nil
+}
+
+// validateDatabase enforces the ADR-0019 spec.database rules (matrix mirrored
+// from the CRD CEL validations):
+//
+//  1. enabled (managed) and secretRef (BYO binding) are mutually exclusive.
+//  2. roSecretRef requires secretRef.
+//  3. secretRef/roSecretRef names are DNS-1123 subdomains.
+//  4. Provisioning knobs (tier/readReplicas/quotas/keepOnDelete) are
+//     managed-mode-only — rejected with secretRef, never silently ignored.
+//
+// DATABASE_URL(_RO) collisions against spec.secrets.envMap are deliberately
+// NOT validated here: this function is shared with the FAIL-CLOSED reconciler,
+// and a stored CR that predates the collision rules must keep reconciling
+// (true ratcheting) — the reconciler resolves such CRs loudly instead
+// (spec.database wins + Warning event). Collisions are enforced by the WEBHOOK
+// only: see DatabaseEnvMapCollisions / ValidateNextAppSpecCreate /
+// ValidateNextAppSpecUpdate.
+func validateDatabase(spec *appsv1alpha1.NextAppSpec) error {
+	db := spec.Database
+	if db == nil {
+		return nil
+	}
+
+	if db.Enabled && db.SecretRef != nil {
+		return fmt.Errorf("spec.database.enabled (managed) and spec.database.secretRef (BYO binding) are mutually exclusive — pick one mode")
+	}
+	if db.ROSecretRef != nil && db.SecretRef == nil {
+		return fmt.Errorf("spec.database.roSecretRef requires spec.database.secretRef")
+	}
+	if db.SecretRef != nil {
+		if errs := utilvalidation.IsDNS1123Subdomain(db.SecretRef.Name); len(errs) > 0 {
+			return fmt.Errorf("spec.database.secretRef.name %q is not a valid Secret name: %s", db.SecretRef.Name, strings.Join(errs, "; "))
+		}
+		if db.Tier != "" || db.ReadReplicas || db.Quotas != nil || db.KeepOnDelete {
+			return fmt.Errorf("spec.database tier/readReplicas/quotas/keepOnDelete are managed-mode only and cannot be combined with secretRef")
+		}
+	}
+	if db.ROSecretRef != nil {
+		if errs := utilvalidation.IsDNS1123Subdomain(db.ROSecretRef.Name); len(errs) > 0 {
+			return fmt.Errorf("spec.database.roSecretRef.name %q is not a valid Secret name: %s", db.ROSecretRef.Name, strings.Join(errs, "; "))
+		}
+	}
+
+	return nil
+}
+
+// DatabaseEnvMapCollisions returns, in deterministic order, the env var names
+// that spec.database claims (DATABASE_URL, and DATABASE_URL_RO when applicable)
+// which spec.secrets.envMap ALSO defines (ADR-0019 "no silent precedence").
+// Empty result = no collision.
+func DatabaseEnvMapCollisions(spec *appsv1alpha1.NextAppSpec) []string {
+	db := spec.Database
+	if db == nil || spec.Secrets == nil || spec.Secrets.EnvMap == nil {
+		return nil
+	}
+	var out []string
+	definesURL := db.SecretRef != nil || db.Enabled
+	if _, clash := spec.Secrets.EnvMap["DATABASE_URL"]; clash && definesURL {
+		out = append(out, "DATABASE_URL")
+	}
+	definesRO := db.ROSecretRef != nil || (db.Enabled && db.ReadReplicas)
+	if _, clash := spec.Secrets.EnvMap["DATABASE_URL_RO"]; clash && definesRO {
+		out = append(out, "DATABASE_URL_RO")
+	}
+	return out
+}
+
+// ValidateNextAppSpecCreate is the CREATE-time admission entry point (webhook
+// only): the shared spec validation PLUS an unratcheted rejection of any
+// DATABASE_URL(_RO) collision between spec.database and spec.secrets.envMap.
+func ValidateNextAppSpecCreate(spec *appsv1alpha1.NextAppSpec) error {
+	if err := ValidateNextAppSpec(spec); err != nil {
+		return err
+	}
+	if collisions := DatabaseEnvMapCollisions(spec); len(collisions) > 0 {
+		return fmt.Errorf(
+			"spec.database and spec.secrets.envMap both define %s — remove one (no silent precedence)",
+			strings.Join(collisions, ", "),
+		)
+	}
+	return nil
+}
+
+// ValidateNextAppSpecUpdate is the UPDATE-time admission entry point (webhook
+// only), with TRUE ratcheting on the collision rule: a collision is rejected
+// only when the update ADDS it (per env var name). An update that merely
+// carries a pre-existing collision forward — e.g. an image bump on a CR stored
+// before the rules existed — is allowed; otherwise upgrading the operator
+// would brick running apps on their next unrelated update. The reconciler
+// resolves the carried-forward collision loudly (spec.database wins + Warning
+// event).
+func ValidateNextAppSpecUpdate(oldSpec, newSpec *appsv1alpha1.NextAppSpec) error {
+	if err := ValidateNextAppSpec(newSpec); err != nil {
+		return err
+	}
+	old := map[string]struct{}{}
+	if oldSpec != nil {
+		for _, name := range DatabaseEnvMapCollisions(oldSpec) {
+			old[name] = struct{}{}
+		}
+	}
+	var added []string
+	for _, name := range DatabaseEnvMapCollisions(newSpec) {
+		if _, preexisting := old[name]; !preexisting {
+			added = append(added, name)
+		}
+	}
+	if len(added) > 0 {
+		return fmt.Errorf(
+			"spec.database and spec.secrets.envMap both define %s — remove one (no silent precedence)",
+			strings.Join(added, ", "),
+		)
+	}
 	return nil
 }
 
