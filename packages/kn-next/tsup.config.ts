@@ -31,6 +31,11 @@ export default defineConfig([
       'cli/preview': 'src/cli/preview.ts',
       // #30: k6 load-test entry (manual/nightly runbook, not a PR gate)
       'cli/loadtest': 'src/cli/loadtest.ts',
+      // Workstream C: cluster-prereq preflight + BYO Postgres binding (ADR-0019).
+      // Reached via the bin's subcommand dispatch (`kn-next doctor` / `kn-next
+      // db bind`); own entries so the dynamic imports resolve in dist.
+      'cli/doctor': 'src/cli/doctor.ts',
+      'cli/db-bind': 'src/cli/db-bind.ts',
       // CLI helpers exported as library subpaths (./cli/validate, ./cli/shared)
       'cli/validate': 'src/cli/validate.ts',
       'cli/shared': 'src/cli/shared.ts',
@@ -60,6 +65,8 @@ export default defineConfig([
         'cli/rollback': 'src/cli/rollback.ts',
         'cli/preview': 'src/cli/preview.ts',
         'cli/loadtest': 'src/cli/loadtest.ts',
+        'cli/doctor': 'src/cli/doctor.ts',
+        'cli/db-bind': 'src/cli/db-bind.ts',
         'cli/validate': 'src/cli/validate.ts',
         'cli/shared': 'src/cli/shared.ts',
         config: 'src/config.ts',

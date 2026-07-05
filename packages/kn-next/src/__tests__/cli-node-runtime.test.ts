@@ -212,6 +212,26 @@ describe("built bin (dist/cli/kn-next.js) is Node-runnable", () => {
         expect(r.stdout).toContain("kn-next deploy");
         expect(r.stdout).toContain("--dry-run");
         expect(r.stdout).toContain("-h, --help");
+        // Workstream C subcommands are advertised in the bin's help.
+        expect(r.stdout).toContain("db bind");
+        expect(r.stdout).toContain("doctor");
+    });
+
+    it("`node kn-next.js doctor --help` dispatches and exits 0", () => {
+        const r = run(process.execPath, [distBin, "doctor", "--help"]);
+        expect(r.error).toBeUndefined();
+        expect(r.status).toBe(0);
+        expect(r.stdout).toContain("kn-next doctor");
+        expect(r.stdout).toContain("--json");
+    });
+
+    it("`node kn-next.js db bind --help` dispatches and exits 0", () => {
+        const r = run(process.execPath, [distBin, "db", "bind", "--help"]);
+        expect(r.error).toBeUndefined();
+        expect(r.status).toBe(0);
+        expect(r.stdout).toContain("kn-next db bind");
+        expect(r.stdout).toContain("--secret");
+        expect(r.stdout).toContain("--ro-secret");
     });
 
     it("`node kn-next.js --version` exits 0 and prints a version", () => {
