@@ -251,15 +251,32 @@ Useful flags: `--tag <t>` to name the image tag (default: a timestamp),
 re-submit without rebuilding or re-uploading, `--registry` / `--bucket` to
 override the config.
 
-## Step 6 — Watch it scale to zero (and back)
+## Step 6 — Check your app with `kn-next status`
 
-Get the app's URL and readiness from the `NextApp` resource:
+The operator writes its honest verdict onto the `NextApp` resource — URL,
+`Ready` (with the reason and guidance when something is wrong, e.g. an ingress
+that never programs), `Degraded`, and the database binding. `kn-next status`
+renders it without a `kubectl describe`:
 
 ```sh
-kubectl get nextapp hello-knext
+npx kn-next status
 ```
 
-The `URL` column comes from the resource's `status.url`. Open it in a browser or
+Pass the app name explicitly (`npx kn-next status hello-knext -n default`) when
+you're outside the app directory. Useful flags:
+
+- `--watch` — poll every 5 s until the app is Ready (bounded at 10 minutes).
+- `--json` — emit the structured status for scripts.
+- The exit code is non-zero iff `Ready=False`, so `kn-next deploy &&
+  kn-next status --watch` works as a CI gate.
+
+If the command reports the cluster as unreachable or the app as missing, run
+`kn-next doctor` — it checks the prerequisites the deploy depends on.
+
+## Step 7 — Watch it scale to zero (and back)
+
+Get the app's URL from the status output above (it comes from the resource's
+`status.url`). Open it in a browser or
 curl it — the first request cold-starts a pod:
 
 ```sh

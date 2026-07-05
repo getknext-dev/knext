@@ -113,6 +113,7 @@ function parseCliArgs(): DeployOptions {
                 "  deploy (default)  build → push → apply the NextApp CR",
                 "  db bind           bind an existing Postgres Secret to the NextApp CR",
                 "  doctor            cluster-prereq preflight (read-only; --json)",
+                "  status            show the NextApp's honest conditions (read-only; --json, --watch)",
                 "",
                 "Options:",
                 "  -r, --registry  Container registry (overrides config)",
@@ -410,15 +411,19 @@ async function deploy() {
 }
 
 // Run only when invoked directly as the entry (not when imported, e.g. in tests).
-// The bin doubles as a tiny subcommand dispatcher: `kn-next doctor` and
-// `kn-next db bind` route to their own modules; everything else (including the
-// historical bare `kn-next` / `kn-next deploy`) runs the deploy flow.
+// The bin doubles as a tiny subcommand dispatcher: `kn-next doctor`,
+// `kn-next status` and `kn-next db bind` route to their own modules; everything
+// else (including the historical bare `kn-next` / `kn-next deploy`) runs the
+// deploy flow.
 if (isEntrypoint(import.meta.url)) {
     const sub = process.argv[2];
     try {
         if (sub === "doctor") {
             const { doctorMain } = await import("./doctor");
             process.exit(await doctorMain(process.argv.slice(3)));
+        } else if (sub === "status") {
+            const { statusMain } = await import("./status");
+            process.exit(await statusMain(process.argv.slice(3)));
         } else if (sub === "db") {
             const { dbMain } = await import("./db-bind");
             await dbMain(process.argv.slice(3));
@@ -431,7 +436,9 @@ if (isEntrypoint(import.meta.url)) {
                 ? "db bind failed"
                 : sub === "doctor"
                   ? "doctor failed"
-                  : "Deployment failed";
+                  : sub === "status"
+                    ? "status failed"
+                    : "Deployment failed";
         log.fatal({ err }, label);
         process.exit(1);
     }
