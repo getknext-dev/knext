@@ -36,6 +36,39 @@ The defaults are chosen so a single Secret carrying both keys — the layout
 scale-zero-pg mints — binds with no `key` configuration at all. Set `key`
 explicitly when your Secret uses a different layout (e.g. `key: uri`).
 
+## One command: `kn-next db bind`
+
+You don't have to hand-edit the CR. From your app directory (or with the app
+name as a positional):
+
+```sh
+kn-next db bind --secret shop-db --ro-secret shop-db
+```
+
+The CLI validates the whole rule matrix below **client-side** — DNS-1123 Secret
+names, `DATABASE_URL`/`DATABASE_URL_RO` collisions with `spec.secrets.envMap`,
+and the managed-vs-BYO mutual exclusion — so a conflict fails at your keyboard
+with the exact reason instead of an apiserver rejection. It then issues a
+single merge-patch of the `NextApp` CR's `spec.database` (the operator
+reconciles everything else; the CLI never touches the ksvc or the Secret).
+
+Useful flags:
+
+- `--key` / `--ro-key` — when your Secret uses a non-default key layout
+  (e.g. `--key uri`).
+- `-n, --namespace` — the app's namespace (default `default`).
+- `--dry-run` — print the CR merge-patch YAML without applying anything.
+- `--dsn <dsn>` or `--secret-file <path>` — run the local connection-contract
+  check: warns on `sslmode=disable` and prints the pool rules from
+  [the connection contract](#the-connection-contract-read-this-once). The DSN
+  is read locally only and never sent anywhere.
+
+```sh
+# Preview the patch and check a locally-minted Secret's DSN:
+kn-next db bind shop --secret shop-db --ro-secret shop-db \
+  --secret-file ./shop-db-secret.yaml --dry-run
+```
+
 ## Rules the API enforces for you
 
 - `secretRef.name` must be a valid Secret name (lowercase DNS-1123) in the

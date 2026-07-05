@@ -32,6 +32,28 @@ Service with `minScale: 0`.
   app's entire `public/` dir — is world-readable (standard Next.js semantics),
   so never put secrets in `public/`.
 
+## Step 0 — Preflight the cluster with `kn-next doctor`
+
+Before (and after) installing anything, let the CLI check the cluster for you.
+Once the CLI is available (Step 2 — or just `npx --package @knext/core kn-next
+doctor` without installing), run:
+
+```sh
+npx kn-next doctor
+```
+
+It verifies, read-only, everything the deploy path depends on: Knative Serving
+is installed, the configured ingress-class actually has a reconciler serving it
+(a mismatched class makes routes silently never program), cert-manager is
+present, the NextApp CRD and operator are installed and Ready, and the operator
+image is anonymously pullable by fresh nodes. Each check reports
+`PASS`/`WARN`/`FAIL` (or a clear `SKIP` when the cluster is unreachable), and
+the command exits non-zero only on hard failures. `--json` emits the results
+machine-readably.
+
+On a brand-new cluster the CRD/operator checks will FAIL until Step 1 — run
+doctor again after the install and everything should be green.
+
 ## Step 1 — Install the operator
 
 Every `main` build of the operator publishes a digest-pinned install bundle
