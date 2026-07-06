@@ -157,8 +157,14 @@ type templateDriver struct {
 	servedDB   string
 	defPort    int
 	scaler     Scaler
-	rolePrefix string          // per-app role prefix (GW_APP_ROLE_PREFIX, default "app_")
-	reserved   map[string]bool // system names that must NOT resolve to an app (tmpl/warm/ro)
+	rolePrefix string // per-app role prefix (GW_APP_ROLE_PREFIX, default "app_")
+	// replRolePrefix is the per-zone REPLICATION role prefix (GW_REPL_ROLE_PREFIX,
+	// default "repl_"). A subscriber's walreceiver connecting THROUGH the gateway to
+	// wake a sleeping publisher (ADR-0007 §4c option ii) authenticates as
+	// repl_<zone>, not app_<zone> — the app role has no REPLICATION attribute and
+	// the repl role must not be usable for ordinary tenant traffic.
+	replRolePrefix string
+	reserved       map[string]bool // system names that must NOT resolve to an app (tmpl/warm/ro)
 	// wakeReplicas is how many replicas Wake brings online per system. The WRITER
 	// lane leaves it 1 (single-writer: never two computes on one timeline). The
 	// per-app READ-ONLY lane (ROTemplateEnv, issue #127) sets it from
@@ -250,15 +256,16 @@ func MakeDriverWithScaler(env Env, scaler Scaler) (Driver, error) {
 			wake = 1
 		}
 		return &templateDriver{
-			namespace:    ns,
-			targetTpl:    env.get("GW_TARGET_TEMPLATE", fmt.Sprintf("compute-{system}.%s.svc:55433", ns)),
-			depTpl:       depTpl,
-			servedDB:     env.get("GW_SERVED_DATABASE", "postgres"),
-			defPort:      defPort,
-			scaler:       scaler,
-			rolePrefix:   env.get("GW_APP_ROLE_PREFIX", "app_"),
-			reserved:     parseReserved(env.get("GW_RESERVED_SYSTEMS", "tmpl,warm,ro")),
-			wakeReplicas: int32(wake), //nolint:gosec // small bounded value
+			namespace:      ns,
+			targetTpl:      env.get("GW_TARGET_TEMPLATE", fmt.Sprintf("compute-{system}.%s.svc:55433", ns)),
+			depTpl:         depTpl,
+			servedDB:       env.get("GW_SERVED_DATABASE", "postgres"),
+			defPort:        defPort,
+			scaler:         scaler,
+			rolePrefix:     env.get("GW_APP_ROLE_PREFIX", "app_"),
+			replRolePrefix: env.get("GW_REPL_ROLE_PREFIX", "repl_"),
+			reserved:       parseReserved(env.get("GW_RESERVED_SYSTEMS", "tmpl,warm,ro")),
+			wakeReplicas:   int32(wake), //nolint:gosec // small bounded value
 		}, nil
 
 	case "warmpool":

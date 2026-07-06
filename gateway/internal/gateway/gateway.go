@@ -26,10 +26,16 @@ import (
 const handshakeTimeout = 30 * time.Second
 
 // activeEntry tracks live connections + a pending sleep timer per compute key.
+// replCount is the subset of count that are REPLICATION (walreceiver) streams:
+// an active replication connection means a subscriber is draining this compute as
+// a publisher, so it must stay awake (ADR-0007 §4c). replCount <= count always;
+// it is tracked separately so the "don't sleep while replicating" invariant is
+// explicit and independently observable, not an emergent side effect of count.
 type activeEntry struct {
-	count  int
-	timer  *time.Timer
-	target wake.Target
+	count     int
+	replCount int
+	timer     *time.Timer
+	target    wake.Target
 }
 
 // PeerChecker reports the active connection count for a specific compute key
@@ -47,6 +53,16 @@ type PeerChecker interface {
 // single-DB pggw) accept every startup — their path is unchanged (issue #74).
 type systemAuthorizer interface {
 	Authorize(user, database string) error
+}
+
+// replicationAuthorizer is implemented by drivers that additionally gate
+// REPLICATION (walreceiver) startups — the apps-gateway (template mode) via the
+// per-zone repl_<zone> role (ADR-0007 §4c). A driver that gates ordinary traffic
+// (systemAuthorizer) but does NOT implement this refuses replication rather than
+// letting a walreceiver through unauthorized (see authorizeStartup). Drivers with
+// no authorizer at all (single-DB pggw) accept both paths, unchanged (issue #74).
+type replicationAuthorizer interface {
+	AuthorizeReplication(user, database string) error
 }
 
 // Gateway accepts client connections, wakes compute, and pipes bytes.
@@ -273,20 +289,26 @@ func (g *Gateway) handle(client net.Conn) {
 				if systemID == "" {
 					systemID = "postgres"
 				}
+				// A REPLICATION (walreceiver) startup routes+wakes the SAME
+				// per-zone compute-<zone> as an ordinary connect (ADR-0007 §4c
+				// option ii, gateway-mediated replication-wake): this is what lets
+				// a subscriber wake a sleeping publisher. It differs only in (a)
+				// which role authorizes it (repl_<zone>, not app_<zone>) and (b)
+				// that it holds the compute awake as a live replication stream.
+				replication := proto.IsReplication(msg.Params)
 				// Tenant access control (issue #74): in template mode the driver
 				// authorizes the (user, database) pair from the startup packet
 				// BEFORE any wake. An unauthorized pair (cross-app, cloud_admin,
-				// or a reserved/internal system name) gets a clean 28P01 and the
-				// compute is never woken — no info leak, no side effect.
-				if az, ok := g.driver.(systemAuthorizer); ok {
-					if err := az.Authorize(msg.Params["user"], systemID); err != nil {
-						// Uniform refusal + constant-floor delay so a wrong pair /
-						// reserved name is timing- and byte-indistinguishable from
-						// the non-existent-app wake failure below (issue #92).
-						g.authFloor(start)
-						g.fail(client, wake.AuthFailureCode, err.Error())
-						return
-					}
+				// wrong role for a replication startup, or a reserved/internal
+				// system name) gets a clean 28P01 and the compute is never woken —
+				// no info leak, no side effect.
+				if err := g.authorizeStartup(msg.Params["user"], systemID, replication); err != nil {
+					// Uniform refusal + constant-floor delay so a wrong pair /
+					// reserved name is timing- and byte-indistinguishable from
+					// the non-existent-app wake failure below (issue #92).
+					g.authFloor(start)
+					g.fail(client, wake.AuthFailureCode, err.Error())
+					return
 				}
 				target := g.driver.Resolve(systemID)
 				startup := append([]byte(nil), packet...)
@@ -298,7 +320,7 @@ func (g *Gateway) handle(client net.Conn) {
 				}
 				pending := append([]byte(nil), rest...)
 				_ = client.SetReadDeadline(time.Time{})
-				g.proxy(client, startup, pending, target, msg.Params, start)
+				g.proxy(client, startup, pending, target, msg.Params, replication, start)
 				return
 			}
 		}
@@ -313,6 +335,30 @@ func (g *Gateway) handle(client net.Conn) {
 			return
 		}
 	}
+}
+
+// authorizeStartup enforces the tenant boundary BEFORE any wake. An ordinary
+// startup uses Authorize (app_<zone> role); a REPLICATION startup uses
+// AuthorizeReplication (repl_<zone> role, ADR-0007 §4c). A driver that gates
+// ordinary traffic but does NOT implement replication authz REFUSES replication
+// uniformly rather than silently falling through to an unauthorized wake — so a
+// future authorizer can never accidentally leave the replication port open.
+// Drivers with no authorizer (single-DB pggw, exec) accept both, unchanged.
+func (g *Gateway) authorizeStartup(user, database string, replication bool) error {
+	if replication {
+		if az, ok := g.driver.(replicationAuthorizer); ok {
+			return az.AuthorizeReplication(user, database)
+		}
+		if _, ok := g.driver.(systemAuthorizer); ok {
+			// Tenant-gated gateway with no replication authz: fail closed, uniform.
+			return &wake.AuthError{Msg: wake.UniformAuthFailure(user)}
+		}
+		return nil
+	}
+	if az, ok := g.driver.(systemAuthorizer); ok {
+		return az.Authorize(user, database)
+	}
+	return nil
 }
 
 func (g *Gateway) fail(client net.Conn, code, message string) {
@@ -355,10 +401,19 @@ func (g *Gateway) computeUnavailable(client net.Conn, params map[string]string, 
 	_ = client.Close()
 }
 
-// proxy wakes the compute, replays the startup packet, then pipes both ways.
-func (g *Gateway) proxy(client net.Conn, startupPacket, pendingRest []byte, target wake.Target, params map[string]string, start time.Time) {
-	g.connStarted(target)
+// proxy wakes the compute, replays the startup packet, then pipes both ways. When
+// replication is true the client is a subscriber's walreceiver: the wake target is
+// the same per-zone compute, but the connection is tracked as a live replication
+// stream so the compute (a publisher) is NOT scaled to zero while WAL is flowing
+// (ADR-0007 §4c). Post-handshake the pipe is protocol-agnostic, so the CopyBoth
+// replication stream flows through the same byte pump as ordinary query traffic.
+func (g *Gateway) proxy(client net.Conn, startupPacket, pendingRest []byte, target wake.Target, params map[string]string, replication bool, start time.Time) {
+	g.connStarted(target, replication)
 	g.metrics.ConnOpen(target.Key)
+	if replication {
+		g.metrics.ReplicationConn()
+		g.log("[gw] " + target.Key + ": replication stream opening (db=" + params["database"] + " user=" + params["user"] + ") — holding publisher awake while WAL flows")
+	}
 
 	conn, woke, wakeMs, err := wake.ConnectWithWake(context.Background(), g.driver, target, g.opts, func() {
 		g.log("[gw] " + target.Key + ": compute asleep, waking (db=" + params["database"] + " user=" + params["user"] + ")")
@@ -366,7 +421,7 @@ func (g *Gateway) proxy(client net.Conn, startupPacket, pendingRest []byte, targ
 	if err != nil {
 		g.metrics.WakeFailure()
 		g.metrics.ConnClose(target.Key)
-		g.connEnded(target)
+		g.connEnded(target, replication)
 		g.log("[gw] " + target.Key + ": " + err.Error())
 		g.computeUnavailable(client, params, start, err)
 		return
@@ -388,7 +443,7 @@ func (g *Gateway) proxy(client net.Conn, startupPacket, pendingRest []byte, targ
 	if err != nil {
 		g.metrics.WakeFailure()
 		g.metrics.ConnClose(target.Key)
-		g.connEnded(target)
+		g.connEnded(target, replication)
 		g.log("[gw] " + target.Key + ": " + err.Error())
 		g.computeUnavailable(client, params, start, err)
 		return
@@ -396,7 +451,7 @@ func (g *Gateway) proxy(client net.Conn, startupPacket, pendingRest []byte, targ
 	if len(firstReply) > 0 {
 		if _, err := client.Write(firstReply); err != nil {
 			g.metrics.ConnClose(target.Key)
-			g.connEnded(target)
+			g.connEnded(target, replication)
 			_ = client.Close()
 			_ = conn.Close()
 			return
@@ -410,7 +465,7 @@ func (g *Gateway) proxy(client net.Conn, startupPacket, pendingRest []byte, targ
 	cleanup := func() {
 		once.Do(func() {
 			g.metrics.ConnClose(target.Key)
-			g.connEnded(target)
+			g.connEnded(target, replication)
 			_ = client.Close()
 			_ = conn.Close()
 		})
@@ -477,8 +532,10 @@ func (g *Gateway) handshakeUntilReady(conn net.Conn, startupPacket []byte, targe
 	}
 }
 
-// connStarted increments the active count and cancels any pending sleep.
-func (g *Gateway) connStarted(target wake.Target) {
+// connStarted increments the active count and cancels any pending sleep. When
+// replication is true it also bumps replCount, marking this compute as feeding a
+// live WAL stream to a subscriber (ADR-0007 §4c): such a compute must not sleep.
+func (g *Gateway) connStarted(target wake.Target, replication bool) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	e := g.active[target.Key]
@@ -487,14 +544,21 @@ func (g *Gateway) connStarted(target wake.Target) {
 		g.active[target.Key] = e
 	}
 	e.count++
+	if replication {
+		e.replCount++
+	}
 	if e.timer != nil {
 		e.timer.Stop()
 		e.timer = nil
 	}
 }
 
-// connEnded decrements the active count and, if it hits zero, schedules a sleep.
-func (g *Gateway) connEnded(target wake.Target) {
+// connEnded decrements the active count and, once BOTH the total and the
+// replication counts hit zero, schedules a sleep. The explicit replCount guard
+// makes "never sleep while a replication stream is live" a stated invariant rather
+// than an accident of count bookkeeping — a caught-up-then-disconnected walreceiver
+// releases its replCount, and only then does the publisher become sleep-eligible.
+func (g *Gateway) connEnded(target wake.Target, replication bool) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	e := g.active[target.Key]
@@ -502,7 +566,10 @@ func (g *Gateway) connEnded(target wake.Target) {
 		return
 	}
 	e.count--
-	if e.count <= 0 && g.driver.CanSleep() && g.idleMs > 0 && !g.closed {
+	if replication && e.replCount > 0 {
+		e.replCount--
+	}
+	if e.count <= 0 && e.replCount <= 0 && g.driver.CanSleep() && g.idleMs > 0 && !g.closed {
 		g.scheduleSleep(e, target)
 	}
 }
@@ -513,7 +580,7 @@ func (g *Gateway) connEnded(target wake.Target) {
 func (g *Gateway) scheduleSleep(e *activeEntry, target wake.Target) {
 	e.timer = time.AfterFunc(time.Duration(g.idleMs)*time.Millisecond, func() {
 		g.mu.Lock()
-		if e.count > 0 || g.closed {
+		if e.count > 0 || e.replCount > 0 || g.closed {
 			g.mu.Unlock()
 			return
 		}
@@ -543,7 +610,7 @@ func (g *Gateway) scheduleSleep(e *activeEntry, target wake.Target) {
 		// Final local re-check right before the (slow) scale API call — the
 		// peer check above took time.
 		g.mu.Lock()
-		if e.count > 0 || g.closed {
+		if e.count > 0 || e.replCount > 0 || g.closed {
 			g.mu.Unlock()
 			return
 		}

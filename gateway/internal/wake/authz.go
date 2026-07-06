@@ -103,6 +103,34 @@ func (d *templateDriver) Authorize(user, database string) error {
 	return nil
 }
 
+// AuthorizeReplication enforces the tenant boundary for a REPLICATION (walreceiver)
+// startup on the apps-gateway (ADR-0007 §4c option ii — gateway-mediated
+// replication-wake). It is identical to Authorize EXCEPT the required role is the
+// per-zone REPLICATION role (replRolePrefix+database, default repl_<zone>,
+// ADR-0007 §4b) rather than the per-app app_<zone> role — because:
+//
+//   - app_<zone> has NO REPLICATION attribute, so it cannot drive a subscription;
+//   - repl_<zone> HAS it, so it must never be usable for ordinary tenant traffic
+//     (Authorize refuses it) — role separation keeps a replication credential from
+//     becoming a general tenant credential.
+//
+// Malformed and reserved database names are refused identically, and every refusal
+// returns the SAME UniformAuthFailure keyed only on the user, so the replication
+// front door leaks no more than the ordinary one (issue #92). Returns nil when the
+// pair is a well-formed per-zone replication pair, else an *AuthError.
+func (d *templateDriver) AuthorizeReplication(user, database string) error {
+	if !rfc1123Label(database) {
+		return &AuthError{Msg: UniformAuthFailure(user)}
+	}
+	if d.reserved[database] {
+		return &AuthError{Msg: UniformAuthFailure(user)}
+	}
+	if want := d.replRolePrefix + database; user != want {
+		return &AuthError{Msg: UniformAuthFailure(user)}
+	}
+	return nil
+}
+
 // parseReserved turns "tmpl,warm,ro" into a set, trimming blanks.
 func parseReserved(csv string) map[string]bool {
 	out := map[string]bool{}

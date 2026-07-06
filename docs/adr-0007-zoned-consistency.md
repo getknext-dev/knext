@@ -10,6 +10,18 @@
   **composes** AppDatabase; **intra-cluster first**; consistency = **strong
   in-zone / eventual across-zone / no cross-zone ACID (sagas)**. Build sequenced
   AFTER v1.2 (#127/#103) to keep the gateway lane collision-free.
+- **Wake mechanism: IMPLEMENTED (v2-1, #139, 2026-07-07).** §4c option (ii)
+  gateway-mediated replication-wake is BUILT and LIVE-PROVEN on OKE: the
+  apps-gateway detects a `replication=` startup, authorizes it against the
+  per-zone `repl_<zone>` role (ADR-0007 §4b), wakes a **sleeping** publisher
+  `compute-<zone>` (0→1 in **4.05 s** measured), pipes the CopyBoth stream
+  unchanged, holds the publisher awake for the life of the walreceiver (does NOT
+  sleep while replicating), and lets it sleep once the subscriber disconnects
+  (back to 0 in **12.10 s** after the slot closed). Drill: `deploy/_verify-repl-wake.sh`;
+  numbers in `docs/BENCHMARKS.md`. Option (i) warm-publisher stays a documented
+  fallback but is no longer required — publishers keep full scale-to-zero. This
+  UNBLOCKS the Zone operator lane (which mints `repl_<zone>` + points subscription
+  conninfo at the apps-gateway).
 - **Date:** 2026-07-06
 - **Deciders:** architecture owner (to ratify); design by the scale-zero-pg lane,
   grounded in spike #133 (live evidence on OKE, context `context-ckmva7v7zvq`,
@@ -315,6 +327,33 @@ phase-2 path** to restore scale-to-zero for publishers, since it is the only opt
 that preserves the axis's core premise. (iii) stays a documented fallback for
 low-freshness zones. **This is an OWNER DECISION** — it trades cost vs build vs the
 scale-to-zero promise.
+
+> **IMPLEMENTED (v2-1, #139, 2026-07-07) — option (ii) shipped, no dedicated port.**
+> The gateway path turned out simpler than "add a replication listener": once the
+> startup packet is parsed and authorized, the apps-gateway is already a
+> protocol-agnostic byte pipe, so the CopyBoth replication stream flows through the
+> **same** wake-on-connect proxy the ordinary query path uses — no second listener.
+> Concretely (`gateway/internal`):
+> - `proto.IsReplication` parses the `replication` startup param (`database`=logical,
+>   `true/on/yes/1`=physical) → marks the connection as replication.
+> - `wake.AuthorizeReplication` gates it against `repl_<zone>` (§4b), NOT `app_<zone>`
+>   (which has no `REPLICATION` attr); role separation is enforced both ways and every
+>   refusal is the uniform `28P01` (no tenant-existence oracle, #92). A tenant-gated
+>   driver lacking replication authz **fails closed** — the replication port is never
+>   left open by omission.
+> - the wake target is the same per-zone `compute-<zone>`; the connection is tracked
+>   as a live replication stream (`replCount`) so the idle timer treats it as a held
+>   connection — the publisher **never sleeps while a walreceiver is attached** and
+>   becomes sleep-eligible only after it disconnects.
+> - subscription conninfo points at the apps-gateway (`host=pggw-apps … dbname=<zone>
+>   user=repl_<zone>`), NOT `compute-<zone>` directly — so the walreceiver's connect
+>   IS the wake trigger. The `~3.6 s` wake estimate held (measured 4.05 s cold).
+>
+> Live proof: `deploy/_verify-repl-wake.sh` (throwaway `zpub`/`zsub` zones) — slept
+> publisher woken by a subscriber, 305-row backlog drained, held awake past a
+> shortened idle window with a live insert replicating, then scaled to 0 after the
+> subscription dropped. Metric: `pggw_replication_connections_total`. Config:
+> `GW_REPL_ROLE_PREFIX` (default `repl_`) on `deploy/81-apps-gateway.yaml`.
 
 **(d) Deprovision hygiene — drop sub/pub/slot on the peer before reclaim.**
 ADR-0003's `destroy` reclaims a timeline two-sided (pageserver `DELETE` + safekeeper

@@ -35,12 +35,15 @@ spec:
       containers:
         - name: gateway
           # apps-gateway image. Carries v0.6.1 tenant security ((user,database)
-          # authz + per-app peer idle) + the #92 existence-oracle fix, PLUS the #127
+          # authz + per-app peer idle) + the #92 existence-oracle fix, the #127
           # per-app READ-ONLY lane (template-mode RO routing -> compute-ro-<app>,
-          # tenant-isolated). Digest-pinned (contract 22). Rebuild + re-pin on any
-          # gateway change. The primary gateway (10-gateway.yaml) has no per-app path
-          # and is repinned independently.
-          image: me-abudhabi-1.ocir.io/axfqznklsd2t/ks-pg/gateway:sha-445d19d@sha256:8a7a115d06a09765d329ba65edbcb5697953bd2f94c342149b251d0a3e868c45
+          # tenant-isolated), PLUS #139 v2-1 gateway-mediated replication-wake
+          # (ADR-0007 §4c: a walreceiver connecting through the gateway wakes a
+          # sleeping publisher compute-<zone> and holds it awake while streaming).
+          # Digest-pinned (contract 22). Rebuild + re-pin on any gateway change. The
+          # primary gateway (10-gateway.yaml) has no per-app path and is repinned
+          # independently.
+          image: me-abudhabi-1.ocir.io/axfqznklsd2t/ks-pg/gateway:sha-0913539@sha256:9ccbc6a06279918e38a101bc32c363fc7b774e7afbfa93a3af64cc372fed63e5
           imagePullPolicy: IfNotPresent
           env:
             - name: GW_PORT
@@ -62,6 +65,15 @@ spec:
             # (APP_ROLE_PREFIX / RESERVED_NAMES).
             - name: GW_APP_ROLE_PREFIX
               value: "app_"
+            # Gateway-mediated replication-wake (#139 v2-1, ADR-0007 §4c). A
+            # REPLICATION (walreceiver) startup — a subscriber's slot connecting
+            # THROUGH the gateway to wake + drain a sleeping publisher — authorizes
+            # against the per-zone REPLICATION role repl_<zone> (NOT app_<zone>: the
+            # app role has no REPLICATION attribute; the repl role must not be usable
+            # for ordinary tenant traffic). MUST match the Zone operator's minted
+            # role name (ADR-0007 §4b).
+            - name: GW_REPL_ROLE_PREFIX
+              value: "repl_"
             - name: GW_RESERVED_SYSTEMS
               value: "tmpl,warm,ro"
             - name: GW_IDLE_MS

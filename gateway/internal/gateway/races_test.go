@@ -35,8 +35,8 @@ func TestSleepRaceWakesBackWhenConnectionArrivesMidSleep(t *testing.T) {
 	}
 	target := gw.Driver().Resolve("db")
 
-	gw.connStarted(target)
-	gw.connEnded(target) // arms the idle timer
+	gw.connStarted(target, false)
+	gw.connEnded(target, false) // arms the idle timer
 
 	// wait until the sleep command has started
 	deadline := time.Now().Add(2 * time.Second)
@@ -51,7 +51,7 @@ func TestSleepRaceWakesBackWhenConnectionArrivesMidSleep(t *testing.T) {
 	}
 
 	// a client arrives while Sleep is in flight
-	gw.connStarted(target)
+	gw.connStarted(target, false)
 
 	// after Sleep completes, the gateway must notice and wake back
 	deadline = time.Now().Add(3 * time.Second)

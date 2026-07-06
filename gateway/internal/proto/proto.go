@@ -9,6 +9,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"strings"
 )
 
 // Wire-protocol magic numbers.
@@ -86,6 +87,34 @@ func ParseInitialPacket(packet []byte) (Msg, error) {
 		off = vEnd + 1
 	}
 	return Msg{Type: TypeStartup, Params: params, Raw: packet}, nil
+}
+
+// IsReplication reports whether a StartupMessage's params request a REPLICATION
+// connection (a walsender/walreceiver stream), per the Postgres protocol
+// `replication` parameter:
+//
+//   - "database"                 -> logical replication (a walsender bound to a
+//     database; this is exactly what cross-zone logical pub/sub uses, ADR-0007)
+//   - "true"/"on"/"yes"/"1"      -> physical replication
+//   - "false"/"off"/"no"/"0"/""  -> an ordinary (non-replication) connection
+//   - absent                     -> ordinary
+//
+// The match is case-insensitive and trims surrounding space, mirroring libpq's
+// bool parse and the backend walsender's own check. The gateway uses this to (a)
+// authorize the per-zone REPLICATION role instead of the per-app role, and (b)
+// keep the target compute awake while the replication stream is live so a
+// subscriber's walreceiver can wake and then drain a sleeping publisher.
+func IsReplication(params map[string]string) bool {
+	v, ok := params["replication"]
+	if !ok {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "database", "true", "on", "yes", "1":
+		return true
+	default:
+		return false
+	}
 }
 
 // BuildStartup builds a StartupMessage from params (for tests and health probes).

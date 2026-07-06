@@ -1335,6 +1335,69 @@ ends in ENOSPC that wedges the *whole* storage plane. Proven end-to-end by
 branch is gone from the pageserver, the SK WAL dir is gone on all three safekeepers,
 `fsck` is clean, and re-provisioning the same name mints a fresh timeline id).
 
+## Zone replication-wake — waking a sleeping publisher (v2-1, #139, ADR-0007 §4c)
+
+The zone-scaling axis lets one zone's database subscribe to another's via Postgres
+logical replication while **both keep scale-to-zero**. The load-bearing trick: a
+subscriber's walreceiver connects to the publisher **through the apps-gateway**, not
+to `compute-<zone>` directly — so the connect itself wakes a sleeping publisher (as
+an ordinary client connect does), and the gateway holds it awake for the life of the
+replication stream. No warm-publisher tier is required.
+
+**How the gateway treats a replication connection.** On the startup packet it detects
+`replication=` (`database`=logical, `true/on/yes/1`=physical), authorizes it against
+the per-zone **`repl_<zone>`** role (NOT `app_<zone>`, which has no `REPLICATION`
+attribute — role separation, ADR-0007 §4b), wakes `compute-<zone>` if asleep, and
+pipes the CopyBoth stream through the same byte pump as query traffic. The stream is
+counted as a live connection, so **the publisher never scales to zero while a
+walreceiver is attached**; it becomes sleep-eligible only after the subscriber
+disconnects (unsubscribed or caught-up-then-slept) and the idle window elapses.
+
+**Wiring a subscription (the conninfo MUST point at the apps-gateway):**
+
+```sh
+# On the PUBLISHER zone: a per-zone REPLICATION role + a publication.
+# (The Zone operator mints repl_<zone> into the zone Secret and injects it every
+#  boot, exactly as app_<zone> — ADR-0007 §4b. Break-glass, do it by hand:)
+#   CREATE ROLE repl_<pubzone> WITH LOGIN REPLICATION PASSWORD '<pw>';
+#   CREATE PUBLICATION <pub> FOR TABLE <...>;
+
+# On the SUBSCRIBER zone: CONNECTION points at pggw-apps, user=repl_<pubzone>,
+# dbname=<pubzone>. sslmode=disable -> the gateway declines SSL and pipes plaintext.
+#   CREATE SUBSCRIPTION <sub> CONNECTION
+#     'host=pggw-apps.scale-zero-pg.svc port=55432 user=repl_<pubzone>
+#      password=<pw> dbname=<pubzone> sslmode=disable'
+#     PUBLICATION <pub>;
+```
+
+The role prefix is `GW_REPL_ROLE_PREFIX` (default `repl_`) on `deploy/81-apps-gateway.yaml`
+and MUST match the role the Zone operator mints. A replication startup whose user is
+not `repl_<dbname>` is refused with the same uniform `28P01` as any other bad pair
+(no tenant-existence oracle, #92) — and a tenant-gated gateway with no replication
+authz **fails closed** rather than leaving the replication path open.
+
+**Observability & verification.**
+
+```sh
+# replication streams the gateway has mediated (a counter)
+kubectl -n scale-zero-pg logs -l app=pggw-apps --prefix | grep 'replication stream'
+# curl pggw metrics -> pggw_replication_connections_total
+
+# publisher slot health (retention while a subscriber is asleep)
+#   SELECT slot_name, active, pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn)
+#   FROM pg_replication_slots;
+
+# full live drill (provisions throwaway zpub/zsub, proves wake+hold+sleep, tears down)
+deploy/_verify-repl-wake.sh run        # or: teardown  (restores GW_IDLE_MS, destroys zones)
+```
+
+Live-proven on OKE 2026-07-07: slept publisher woken 0→1 in **4.05 s**, 305-row
+backlog drained, held awake past a 15 s idle window with a live insert replicating,
+then scaled 1→0 in **12.10 s** after the subscription dropped (`docs/BENCHMARKS.md`).
+The publisher retains WAL for an inactive slot while the subscriber sleeps — an
+abandoned slot pins WAL unbounded, so slot hygiene on deprovision matters (ADR-0007
+§4d; the slot-janitor lane owns the reaper).
+
 ## Read-only pool (issue #66)
 
 The read-only pool (`deploy/26-compute-ro.yaml`) is a set of read-only computes

@@ -475,6 +475,40 @@ Notes:
   bounded drill, green); a dedicated gated-pod n=20 on OKE is the one open
   follow-up on this issue.
 
+## Gateway-mediated replication-wake (v2-1, issue #139, ADR-0007 §4c)
+
+The load-bearing metric of the **zone-scaling axis**: a subscriber's walreceiver
+connecting **through** the apps-gateway wakes a **sleeping** publisher — so a
+publishing zone keeps full scale-to-zero (the axis's whole premise) instead of the
+warm-publisher fallback (§4c option i). The subscription's `CONNECTION` points at
+`pggw-apps` (not `compute-<zone>` directly); the gateway detects the `replication=`
+startup (`proto.IsReplication`), authorizes it against the per-zone `repl_<zone>`
+role (`wake.AuthorizeReplication`, ADR-0007 §4b — NOT `app_<zone>`), wakes the
+publisher, and pipes the CopyBoth stream through the **same** byte pump as ordinary
+traffic (no dedicated listener). An active replication stream is tracked
+(`replCount`) so the idle timer never sleeps a publisher while a walreceiver is
+attached. Go tables: `gateway/internal/proto/proto_test.go` (detection matrix),
+`gateway/internal/wake/authz_test.go` (repl-vs-app role separation, uniform `28P01`
+#92), `gateway/internal/gateway/replwake_test.go` (wake-target + hold-awake e2e).
+
+Verified **live on OKE, 2026-07-07** (`deploy/_verify-repl-wake.sh`, throwaway zones
+`zpub`/`zsub`, gateway image `sha-0913539@sha256:9ccbc6a0…`, `DRILL_IDLE_MS=15000`):
+
+| Metric | Result | Evidence |
+|---|---|---|
+| **Slept publisher WOKEN by a subscriber** | ✅ `compute-zpub` scaled **0→1** with **no manual scale** — the walreceiver's connect through the gateway was the sole trigger | **4.05 s** (cold, settled-zero publisher) |
+| Backlog drains after gateway-wake | ✅ subscriber caught up **305 rows** (5 seed + 300 backlog) | **7.45 s** after subscriber wake |
+| **Does NOT sleep while replicating** | ✅ publisher **HELD at 1 replica** across a **27 s** hold (> 15 s idle window) with a live insert (`livemark`) replicating mid-hold | `replCount` holds it awake; live row arrived |
+| Sleep-eligible once the stream closes | ✅ after `DROP SUBSCRIPTION` (walreceiver disconnects) the publisher scaled **1→0** on its own | **12.10 s** after slot closed |
+| Slot retention while subscriber asleep | ✅ publisher retained **82 kB** WAL for the inactive slot (`active=false`) — no data loss across the double-sleep | `pg_replication_slots.restart_lsn` |
+
+The `~3.6 s` wake estimate in ADR-0007 §4c held (4.05 s cold). The walreceiver's
+own retry (`wal_retrieve_retry_interval`) tolerates the wake latency, so no
+subscriber-side tuning was needed. Metric: `pggw_replication_connections_total`.
+Config: `GW_REPL_ROLE_PREFIX` (default `repl_`) on `deploy/81-apps-gateway.yaml`.
+The drill provisions/destroys its own throwaway zones and restores `GW_IDLE_MS` on
+teardown — it never touches live apps.
+
 ## Capacity / sizing facts
 
 - Gateway: `GW_MAX_CONNS=90` < compute `max_connections=100`; excess → clean 53300.

@@ -58,10 +58,10 @@ func TestIdleSleepIsPerAppNotFleetGlobal(t *testing.T) {
 
 	tx := rd.Resolve("appx")
 	ty := rd.Resolve("appy")
-	gw.connStarted(tx)
-	gw.connEnded(tx) // appx idle -> should sleep (no peer holds appx)
-	gw.connStarted(ty)
-	gw.connEnded(ty) // appy idle locally but a peer reports appy active -> hold
+	gw.connStarted(tx, false)
+	gw.connEnded(tx, false) // appx idle -> should sleep (no peer holds appx)
+	gw.connStarted(ty, false)
+	gw.connEnded(ty, false) // appy idle locally but a peer reports appy active -> hold
 
 	deadline := time.Now().Add(2 * time.Second)
 	for {
@@ -106,8 +106,8 @@ func TestSplitConnectionsDoNotThrashAcrossWindows(t *testing.T) {
 	gw.Peers = peers
 
 	tx := rd.Resolve("appx")
-	gw.connStarted(tx)
-	gw.connEnded(tx) // local count -> 0; idle timer armed, but the peer holds appx
+	gw.connStarted(tx, false)
+	gw.connEnded(tx, false) // local count -> 0; idle timer armed, but the peer holds appx
 
 	// Ride out ~12 idle windows: a thrashing gateway would sleep (1->0) here.
 	time.Sleep(300 * time.Millisecond)
@@ -177,8 +177,8 @@ func TestIdleSleepDefersToPeers(t *testing.T) {
 	gw.Peers = peers
 
 	target := gw.Driver().Resolve("testdb")
-	gw.connStarted(target)
-	gw.connEnded(target) // count hits 0 -> idle timer armed
+	gw.connStarted(target, false)
+	gw.connEnded(target, false) // count hits 0 -> idle timer armed
 
 	time.Sleep(300 * time.Millisecond)
 	if _, err := os.Stat(marker); err == nil {

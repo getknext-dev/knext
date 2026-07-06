@@ -116,3 +116,57 @@ func TestErrorResponseWellFormed(t *testing.T) {
 		t.Fatalf("missing message")
 	}
 }
+
+// TestIsReplication is the replication-startup detection matrix for
+// gateway-mediated replication-wake (ADR-0007 §4c). "database" (logical) and the
+// boolean-true forms are replication; false forms, empty, and absent are ordinary.
+func TestIsReplication(t *testing.T) {
+	cases := []struct {
+		name   string
+		params map[string]string
+		want   bool
+	}{
+		{"absent -> ordinary", map[string]string{"user": "u", "database": "d"}, false},
+		{"empty value -> ordinary", map[string]string{"replication": ""}, false},
+		{"database (logical)", map[string]string{"replication": "database"}, true},
+		{"DATABASE upper (logical)", map[string]string{"replication": "DATABASE"}, true},
+		{"padded database", map[string]string{"replication": " database "}, true},
+		{"true (physical)", map[string]string{"replication": "true"}, true},
+		{"True mixed-case", map[string]string{"replication": "True"}, true},
+		{"on", map[string]string{"replication": "on"}, true},
+		{"yes", map[string]string{"replication": "yes"}, true},
+		{"1", map[string]string{"replication": "1"}, true},
+		{"false -> ordinary", map[string]string{"replication": "false"}, false},
+		{"off -> ordinary", map[string]string{"replication": "off"}, false},
+		{"no -> ordinary", map[string]string{"replication": "no"}, false},
+		{"0 -> ordinary", map[string]string{"replication": "0"}, false},
+		{"garbage -> ordinary", map[string]string{"replication": "banana"}, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := IsReplication(c.params); got != c.want {
+				t.Fatalf("IsReplication(%v) = %v, want %v", c.params, got, c.want)
+			}
+		})
+	}
+}
+
+// A replication StartupMessage must round-trip through parse -> IsReplication:
+// the replication param survives BuildStartup/ParseInitialPacket, and the
+// database (wake target) is still readable so the gateway can route it.
+func TestReplicationStartupRoundTrip(t *testing.T) {
+	pkt := BuildStartup(map[string]string{"user": "repl_zone-eu", "database": "zone-eu", "replication": "database"})
+	msg, err := ParseInitialPacket(pkt)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if msg.Type != TypeStartup {
+		t.Fatalf("type = %q, want startup", msg.Type)
+	}
+	if !IsReplication(msg.Params) {
+		t.Fatalf("replication param lost through round-trip: %v", msg.Params)
+	}
+	if msg.Params["database"] != "zone-eu" {
+		t.Fatalf("database = %q, want zone-eu (wake target)", msg.Params["database"])
+	}
+}

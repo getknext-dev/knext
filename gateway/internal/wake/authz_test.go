@@ -129,3 +129,92 @@ func TestAuthorizeRefusalsAreUniformByUser(t *testing.T) {
 		}
 	}
 }
+
+// replAuthorizer is the optional interface template mode implements for
+// gateway-mediated replication-wake (ADR-0007 §4c).
+type replAuthorizer interface {
+	AuthorizeReplication(user, database string) error
+}
+
+func newTemplateReplAuthorizer(t *testing.T, env Env) replAuthorizer {
+	t.Helper()
+	env["GW_COMPUTE_MODE"] = "template"
+	if env["GW_K8S_DEPLOYMENT_TEMPLATE"] == "" {
+		env["GW_K8S_DEPLOYMENT_TEMPLATE"] = "compute-{system}"
+	}
+	d, err := MakeDriverWithScaler(env, &fakeScaler{})
+	if err != nil {
+		t.Fatalf("MakeDriverWithScaler: %v", err)
+	}
+	az, ok := d.(replAuthorizer)
+	if !ok {
+		t.Fatal("template driver must implement AuthorizeReplication (ADR-0007 §4c)")
+	}
+	return az
+}
+
+// A REPLICATION startup authorizes against the per-zone REPLICATION role
+// repl_<zone> (ADR-0007 §4b), NOT the per-app app_<zone> role. The app role
+// (which cannot drive a subscription) is refused on the replication path, and the
+// repl role is refused on the ordinary path — clean role separation.
+func TestTemplateAuthorizeReplicationMatrix(t *testing.T) {
+	replAz := newTemplateReplAuthorizer(t, Env{})
+	ordAz := newTemplateAuthorizer(t, Env{})
+	cases := []struct {
+		name          string
+		user, db      string
+		replAllow     bool
+		ordinaryAllow bool
+	}{
+		{"repl role on its zone", "repl_zone-eu", "zone-eu", true, false},
+		{"app role on replication path", "app_zone-eu", "zone-eu", false, true},
+		{"cloud_admin replication", "cloud_admin", "zone-eu", false, false},
+		{"cross-zone repl role", "repl_zone-us", "zone-eu", false, false},
+		{"reserved zone name (tmpl)", "repl_tmpl", "tmpl", false, false},
+		{"malformed zone name", "repl_Bad.Zone", "Bad.Zone", false, false},
+		{"empty user", "", "zone-eu", false, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if err := replAz.AuthorizeReplication(c.user, c.db); (err == nil) != c.replAllow {
+				t.Fatalf("AuthorizeReplication(%q,%q) allow=%v, want %v (err=%v)", c.user, c.db, err == nil, c.replAllow, err)
+			}
+			if err := ordAz.Authorize(c.user, c.db); (err == nil) != c.ordinaryAllow {
+				t.Fatalf("Authorize(%q,%q) allow=%v, want %v (err=%v)", c.user, c.db, err == nil, c.ordinaryAllow, err)
+			}
+		})
+	}
+}
+
+// The replication role prefix is configurable (GW_REPL_ROLE_PREFIX) so an operator
+// can align it with the Zone operator's minted role name without a code change.
+func TestTemplateAuthorizeReplicationConfigurablePrefix(t *testing.T) {
+	az := newTemplateReplAuthorizer(t, Env{"GW_REPL_ROLE_PREFIX": "wal_"})
+	if err := az.AuthorizeReplication("wal_zone-eu", "zone-eu"); err != nil {
+		t.Fatalf("custom repl prefix pair refused: %v", err)
+	}
+	if err := az.AuthorizeReplication("repl_zone-eu", "zone-eu"); err == nil {
+		t.Fatal("default repl prefix must be refused once prefix is overridden")
+	}
+}
+
+// Replication refusals must be the same UniformAuthFailure as ordinary ones — the
+// replication front door must not become an existence/role oracle (issue #92).
+func TestAuthorizeReplicationRefusalsAreUniform(t *testing.T) {
+	az := newTemplateReplAuthorizer(t, Env{})
+	user := "repl_ghost"
+	want := UniformAuthFailure(user)
+	for name, db := range map[string]string{
+		"malformed":  "Bad.Zone",
+		"reserved":   "tmpl",
+		"wrong zone": "zone-eu", // repl_ghost != repl_zone-eu
+	} {
+		err := az.AuthorizeReplication(user, db)
+		if err == nil {
+			t.Fatalf("%s: expected refusal", name)
+		}
+		if got := err.Error(); got != want {
+			t.Fatalf("%s: refusal = %q, want uniform %q", name, got, want)
+		}
+	}
+}

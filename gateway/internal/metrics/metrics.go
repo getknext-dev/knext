@@ -23,16 +23,21 @@ type sysMetrics struct {
 type Metrics struct {
 	mu sync.Mutex
 
-	ConnectionsTotal         int                    `json:"connections_total"`
-	ActiveConnections        int                    `json:"active_connections"`
-	WakesTotal               int                    `json:"wakes_total"`
-	WakeFailuresTotal        int                    `json:"wake_failures_total"`
-	SleepsTotal              int                    `json:"sleeps_total"`
-	RejectedConnectionsTotal int                    `json:"rejected_connections_total"`
-	WakeLatencyMsLast        int64                  `json:"wake_latency_ms_last"`
-	WakeLatencyMs            []int64                `json:"wake_latency_ms"`
-	GateOpen                 int                    `json:"gate_open"`
-	PerSystem                map[string]*sysMetrics `json:"per_system"`
+	ConnectionsTotal         int `json:"connections_total"`
+	ActiveConnections        int `json:"active_connections"`
+	WakesTotal               int `json:"wakes_total"`
+	WakeFailuresTotal        int `json:"wake_failures_total"`
+	SleepsTotal              int `json:"sleeps_total"`
+	RejectedConnectionsTotal int `json:"rejected_connections_total"`
+	// ReplicationConnectionsTotal counts REPLICATION (walreceiver) streams the
+	// gateway has mediated — a subscriber connecting through the gateway to wake +
+	// drain a publisher (ADR-0007 §4c). A nonzero value on a publisher's gateway is
+	// the signal that a cross-zone slot is (or was) live and held it awake.
+	ReplicationConnectionsTotal int                    `json:"replication_connections_total"`
+	WakeLatencyMsLast           int64                  `json:"wake_latency_ms_last"`
+	WakeLatencyMs               []int64                `json:"wake_latency_ms"`
+	GateOpen                    int                    `json:"gate_open"`
+	PerSystem                   map[string]*sysMetrics `json:"per_system"`
 }
 
 // SetGateOpen records the warm-pool gate state (1 = open/accepting, 0 = closed).
@@ -108,6 +113,15 @@ func (m *Metrics) RejectConn() {
 	m.RejectedConnectionsTotal++
 }
 
+// ReplicationConn counts a REPLICATION (walreceiver) stream mediated by the
+// gateway — a subscriber waking + draining a publisher through the wake-on-connect
+// path (ADR-0007 §4c).
+func (m *Metrics) ReplicationConn() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.ReplicationConnectionsTotal++
+}
+
 func (m *Metrics) Sleep() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -121,6 +135,11 @@ func (m *Metrics) Wakes() int        { m.mu.Lock(); defer m.mu.Unlock(); return 
 func (m *Metrics) WakeFailures() int { m.mu.Lock(); defer m.mu.Unlock(); return m.WakeFailuresTotal }
 func (m *Metrics) Sleeps() int       { m.mu.Lock(); defer m.mu.Unlock(); return m.SleepsTotal }
 func (m *Metrics) Rejected() int     { m.mu.Lock(); defer m.mu.Unlock(); return m.RejectedConnectionsTotal }
+func (m *Metrics) ReplicationConns() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.ReplicationConnectionsTotal
+}
 
 // PromText renders the Prometheus text exposition.
 func (m *Metrics) PromText() string {
@@ -133,6 +152,7 @@ func (m *Metrics) PromText() string {
 		fmt.Sprintf("pggw_wake_failures_total %d", m.WakeFailuresTotal),
 		fmt.Sprintf("pggw_sleeps_total %d", m.SleepsTotal),
 		fmt.Sprintf("pggw_rejected_connections_total %d", m.RejectedConnectionsTotal),
+		fmt.Sprintf("pggw_replication_connections_total %d", m.ReplicationConnectionsTotal),
 		fmt.Sprintf("pggw_wake_latency_ms_last %d", m.WakeLatencyMsLast),
 		fmt.Sprintf("pggw_gate_open %d", m.GateOpen),
 	}
