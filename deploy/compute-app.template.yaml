@@ -118,6 +118,13 @@ spec:
             - { name: compute-http, containerPort: 3080 }
           volumeMounts:
             - { name: compute-files, mountPath: /compute-files }
+          # In-place vertical resize (#67/#103): the writer-autoscaler grows/shrinks
+          # this per-app writer's cpu+memory LIVE (no restart) within its configured
+          # bounds. NotRequired makes the zero-restart contract explicit. The pod
+          # carries plane=compute, so the shared writer-autoscaler selector picks it up.
+          resizePolicy:
+            - { resourceName: cpu, restartPolicy: NotRequired }
+            - { resourceName: memory, restartPolicy: NotRequired }
           readinessProbe:
             tcpSocket: { port: pg }
             initialDelaySeconds: 0

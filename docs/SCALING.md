@@ -22,8 +22,8 @@ states what SHIPPED vs what's PLANNED, evidence-first.
 | | Status |
 |---|---|
 | In-place CPU+mem resize of a running writer (k8s 1.33, zero restart) | ✅ proven (#67) |
-| Automatic writer autoscaler (watch pressure → resize within min/max) | 🔜 #103 (v1.2) |
-| Caveat: `shared_buffers` is boot-fixed → a buffer-cache-bound resize needs one bounce | documented |
+| Automatic writer autoscaler (watch pressure → resize within min/max, per-app aware) | ✅ shipped (#103, v1.2) |
+| Caveat: `shared_buffers` is boot-fixed → a buffer-cache-bound resize needs one bounce | ✅ handled — autoscaler *flags* (annotates) for a maintenance-window bounce, **never bounces a live writer silently** |
 
 Ceiling honesty: one hot database's writes are bounded by the largest single
 compute. Beyond that = shard (per-app / per-zone) or the wrong tool (#86 states
@@ -65,8 +65,10 @@ wake, bounded by publisher WAL retention — interacts with the #19 janitor). Th
 spike is the gate; if 8464 can't, a newer tag is a manifest-bump (#98 proved it).
 
 ## Phased roadmap
-- **v1.2 (read + write axis completion):** #127 per-app read replicas · #103
-  writer autoscaler · #104 write-heavy tuning docs.
+- **v1.2 (read + write axis completion):** #127 per-app read replicas · ✅ #103
+  writer autoscaler (shipped — `writer-autoscaler` controller,
+  `deploy/85-writer-autoscaler.yaml`, runbook in operations.md) · #104 write-heavy
+  tuning docs.
 - **Security & hygiene tail (parallel):** #116 wake side-channel · #117 md5→SCRAM ·
   #118 policy-CNI · #122 operator child ownerRefs · #132 cold-boot role race.
 - **v2 (zone axis — the SCS frontier):** logical-replication spike → ADR-0007

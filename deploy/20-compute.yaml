@@ -11,8 +11,10 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: compute
-  namespace: scale-zero-pg
-  labels: { app: compute }
+  # plane: compute is the WRITER selector the writer-autoscaler (#103) watches; the
+  # read-replica pool (app=compute-ro) deliberately does NOT carry it, so a
+  # plane=compute selector targets exactly the writers.
+  labels: { app: compute, plane: compute }
 spec:
   replicas: 0 # at rest; gateway scales 0<->1
   revisionHistoryLimit: 2 # cap ReplicaSet churn from wake/rollout cycles
@@ -22,7 +24,7 @@ spec:
     type: Recreate # single-writer: never two computes on one timeline during rollout
   template:
     metadata:
-      labels: { app: compute }
+      labels: { app: compute, plane: compute }
     spec:
       # Wake-critical path: keep hardening light. The compute image runs as the
       # non-root `postgres` user by default; we only add seccomp here and leave
@@ -70,14 +72,25 @@ spec:
             - { name: compute-http, containerPort: 3080 }
           volumeMounts:
             - { name: compute-files, mountPath: /compute-files }
+          # In-place vertical resize (#67/#103): cpu+memory actuate LIVE (cgroup
+          # cpu.max/memory.max) with NO restart. Declaring NotRequired makes the
+          # zero-restart contract explicit — the writer-autoscaler patches the
+          # pods/resize subresource within min/max bounds. shared_buffers stays
+          # boot-fixed (not resizable live); the autoscaler never bounces to grow it.
+          resizePolicy:
+            - { resourceName: cpu, restartPolicy: NotRequired }
+            - { resourceName: memory, restartPolicy: NotRequired }
           readinessProbe:
             tcpSocket: { port: pg }
             initialDelaySeconds: 0
             periodSeconds: 1 # tight: wake latency depends on it
             failureThreshold: 60
           resources:
+            # A CPU limit is now declared (was mem-only): the writer-autoscaler grows
+            # the ceiling under load, so the baseline starts modest. cpu 250m→ up to
+            # WAS_MAX_CPU (default 2); memory 256Mi→ up to WAS_MEM_MAX (default 1Gi).
             requests: { cpu: 250m, memory: 256Mi, ephemeral-storage: 100Mi }
-            limits: { memory: 1Gi, ephemeral-storage: 1Gi }
+            limits: { cpu: "1", memory: 1Gi, ephemeral-storage: 1Gi }
       volumes:
         - name: compute-files
           configMap:

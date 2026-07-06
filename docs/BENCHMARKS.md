@@ -311,6 +311,25 @@ Postgres never restarted. **Verdict: FEASIBLE.** Recipe + caveats (patch cpu and
 memory separately; `shared_buffers` needs a restart; runtime GUCs tune via
 `ALTER SYSTEM`): `docs/operations.md` §"Vertical resize of the writer".
 
+## Writer vertical-autoscaler — automated in-place resize (issue #103)
+
+The `writer-autoscaler` controller automates the #67 resize. Live-verified on **OKE
+v1.33.10, 2026-07-05**, driving a real `compute` (primary writer) under CPU load via
+`deploy/_verify-writer-autoscaler.sh` (fast drill cadence: 5s poll, up-hold 2,
+down-hold 3, up≥0.55 / down≤0.40):
+
+| Phase | Action | Actuated? | Restart? | Evidence |
+|---|---|---|---|---|
+| CPU load (3 busy loops, ~1000m on a 1000m limit → ratio ≈1.0) | autoscaler resizes **up** `cpu-limit 1000m→1250m` | **yes, immediately** | **no** (`restartCount=0`) | actuated `status…resources.limits.cpu` = 1250m within one poll |
+| Load dropped, sustained idle | autoscaler resizes **down** `cpu-limit 1250m→1000m` (hysteresis) | **yes** | **no** (`restartCount=0`) | actuated limit back to 1000m after down-hold |
+| memory-bound AT `WAS_MAX_MEM` | **flag** annotation, no resize, **no bounce** | n/a (flagged) | **no** | `writer_autoscaler_needs_bounce_total` +1; `needs-bounce` annotation set |
+
+`restartCount` was **0 throughout** — the Postgres never bounced. Key design point:
+the autoscaler moves the **limit** (cgroup ceiling) and keeps the **request** at the
+manifest baseline, so the resize is **never deferred** for lack of node allocatable
+(the nodes were at 97%/77% CPU-requests during the drill) — it actuates immediately.
+Runbook + config: `docs/operations.md` §"Writer vertical-autoscaler".
+
 ## Read-only pool (issue #66)
 
 The read-only pool (`DATABASE_URL_RO` → `compute-ro`, `RO_MODE=Replica` default)

@@ -1478,8 +1478,97 @@ kubectl -n scale-zero-pg get pod <compute-pod> \
   `PodResizePending: Deferred — Node didn't have enough resource: cpu`. The
   kubelet actuates it when capacity frees up. Check the `PodResizePending`
   condition before assuming success; size the request to node headroom.
-- A metric-driven auto-resizer (the NeonVM analogue) is a future build — the
-  mechanism above is the manual/scriptable primitive it would use.
+- The `writer-autoscaler` (below) automates this recipe — the manual patch above
+  is the break-glass primitive.
+
+## Writer vertical-autoscaler (issue #103, docs/SCALING.md axis 1)
+
+The `writer-autoscaler` controller (`deploy/85-writer-autoscaler.yaml`, binary
+`gateway/cmd/writer-autoscaler` baked into the multi-binary `ks-pg/gateway` image)
+automates the #67 in-place resize. It watches every WRITER compute's CPU+memory
+usage via **metrics-server** and, on sustained pressure, patches the `pods/resize`
+subresource within configured min/max bounds — **the running Postgres never
+restarts** (`restartCount` unchanged, `pg_postmaster_start_time()` unchanged).
+
+**Per-app aware.** The `WAS_SELECTOR=plane=compute` label selector matches the
+primary `compute` and every per-app `compute-<app>` writer in one loop. The
+read-replica pool (`app=compute-ro`, no `plane=compute` label) is deliberately
+excluded — this is a *writer* autoscaler; read scaling is the RO pool's job.
+
+**Limits, not requests (always actuates).** The autoscaler moves the CPU/memory
+**limit** (the cgroup ceiling — burst headroom) and leaves the **request** at the
+manifest baseline. A limit-only in-place resize actuates *immediately* (the kubelet
+writes `cpu.max`/`memory.max`); a **request** increase can be **deferred** on a node
+without spare allocatable (`PodResizePending: Deferred`, see #67). Keeping requests
+fixed means a resize never needs node re-admission and always actuates — even on a
+busy, near-full node. Raising a guaranteed floor is a manifest change (edit the
+`requests:` in `20-compute.yaml` / the per-app quota), not an autoscaler action.
+
+**The resize tiers (what actuates live vs needs a bounce):**
+
+| Tier | Resizable live? | How the autoscaler handles it |
+|---|---|---|
+| CPU limit | **yes** — cgroup `cpu.max` | grows/shrinks in place, no restart, never deferred |
+| Memory limit | **yes** — cgroup `memory.max` | grows/shrinks in place, no restart, never deferred |
+| CPU/memory **request** | (not touched) | stays at the manifest baseline — a manifest change, not autoscaled |
+| `shared_buffers` | **no** — boot-fixed | **never bounced silently.** A writer memory-bound AT its max limit is *flagged*, not bounced (see below) |
+
+**Never-bounce-silently (hard invariant).** Growing the buffer cache means growing
+`shared_buffers`, which is fixed at Postgres boot — it only changes with a compute
+restart. The autoscaler will **never** restart a live writer to grow it. Instead,
+when a writer is memory-bound *and already at* `WAS_MAX_MEM`, the controller
+annotates the pod:
+
+```
+writer-autoscaler.scale-zero-pg/needs-bounce: "memory at max limit under sustained
+  pressure; a larger shared_buffers is boot-fixed and needs a maintenance-window bounce"
+```
+
+and increments `writer_autoscaler_needs_bounce_total`. The operator then, in a
+maintenance window: raise `WAS_MAX_MEM` + the compute's `shared_buffers` (in
+`54-compute-files.yaml`) and `kubectl rollout restart deploy/<compute>` (a
+deliberate, scheduled bounce). Find flagged writers:
+
+```sh
+kubectl -n scale-zero-pg get pods -l plane=compute \
+  -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.metadata.annotations.writer-autoscaler\.scale-zero-pg/needs-bounce}{"\n"}{end}'
+```
+
+**Anti-flap (hysteresis + cooldown).** A resize fires only after `WAS_UP_HOLD`
+(default 3 ≈ 45s at the 15s poll) consecutive over-threshold ticks — or
+`WAS_DOWN_HOLD` (default 8 ≈ 2min) under-threshold ticks; the counter resets on any
+direction flip, so oscillating load never resizes. After any resize, `WAS_COOLDOWN`
+(default 4 ≈ 60s) ticks are suppressed. Scale-down never shrinks the memory limit
+below observed working-set (no OOM). Per-pod state is GC'd on scale-to-zero, so a
+re-woken writer starts fresh at the manifest baseline and re-scales under load.
+
+**Config (env, 12-factor):**
+
+| Env | Default | Meaning |
+|---|---|---|
+| `WAS_SELECTOR` | `plane=compute` | writer pods to watch (RO pool excluded) |
+| `WAS_MIN_CPU` / `WAS_MAX_CPU` | `250m` / `2` | CPU resize envelope |
+| `WAS_CPU_STEP` | `250m` | CPU increment per resize |
+| `WAS_MIN_MEM` / `WAS_MAX_MEM` | `256Mi` / `1Gi` | memory resize envelope |
+| `WAS_MEM_STEP` | `256Mi` | memory increment per resize |
+| `WAS_UP_RATIO` / `WAS_DOWN_RATIO` | `0.80` / `0.30` | usage/limit scale-up / scale-down thresholds |
+| `WAS_UP_HOLD` / `WAS_DOWN_HOLD` | `3` / `8` | consecutive ticks before up / down |
+| `WAS_COOLDOWN` | `4` | ticks suppressed after any resize |
+| `WAS_POLL_MS` | `15000` | control-loop interval |
+
+**Prereqs.** metrics-server installed (`kubectl top pods -n scale-zero-pg`), and
+each writer container declares `resizePolicy: [{cpu,NotRequired},{memory,NotRequired}]`
+plus a **CPU limit** (already set in `20-compute.yaml` / `compute-app.template.yaml`).
+Without a CPU limit the autoscaler treats CPU as unbounded and never resizes it.
+
+**Metrics** (`:9092/metrics`): `writer_autoscaler_checks_total`,
+`writer_autoscaler_resize_total{direction,resource}`,
+`writer_autoscaler_needs_bounce_total`, `writer_autoscaler_errors_total`,
+`writer_autoscaler_writers`.
+
+**Drill:** `deploy/_verify-writer-autoscaler.sh` drives a writer's CPU up, asserts
+an in-place resize with `restartCount` unchanged, then idles it and asserts the
+scale-down under hysteresis.
 
 ## Troubleshooting
 
