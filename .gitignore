@@ -13,6 +13,8 @@ dist/
 dist-assets/
 bundles/
 *.tar.gz
+# scripts/rename-for-ghp.mjs staging output (interim GitHub Packages channel)
+.ghp-staging/
 bootstrap.js
 bootstrap
 server

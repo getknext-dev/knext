@@ -1,0 +1,96 @@
+# Release — interim GitHub Packages channel (@getknext-dev/*)
+#
+# WHY: the canonical release path is npmjs under the `@knext/*` scope
+# (.github/workflows/release.yml + changesets), blocked on a human NPM_TOKEN.
+# Until npmjs goes live, the maintainer directive is "use GitHub Packages for
+# now". GitHub Packages requires the package SCOPE to match the owning org, so
+# this channel republishes the two publishable packages as:
+#     @knext/lib  -> @getknext-dev/lib
+#     @knext/core -> @getknext-dev/core
+# scripts/rename-for-ghp.mjs stages renamed COPIES (never mutating the tree),
+# rewrites the hardcoded `@knext/lib` imports baked into core's externalized
+# dist, resolves `workspace:` deps, and strips `publishConfig.provenance`
+# (provenance needs npmjs/OIDC — it is NOT available on this path).
+#
+# This is manual-only (workflow_dispatch) and relates to — does NOT close — #53.
+# Full runbook: docs/RELEASING.md.
+
+name: Release (GitHub Packages, interim)
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: release-ghp-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  packages: write # publish to npm.pkg.github.com via GITHUB_TOKEN
+  # NOTE: no id-token — the GHP path publishes WITHOUT provenance.
+
+jobs:
+  publish-ghp:
+    name: Publish @getknext-dev/* to GitHub Packages
+    runs-on: ubuntu-latest
+    # Only ever run on the canonical repo (never forks).
+    if: github.repository == 'getknext-dev/knext'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          # Writes an .npmrc scoping @getknext-dev to GitHub Packages and wiring
+          # NODE_AUTH_TOKEN as the auth token for npm.pkg.github.com.
+          registry-url: 'https://npm.pkg.github.com'
+          scope: '@getknext-dev'
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # @knext/lib ships only dist/ — build it first, then @knext/core (which
+      # imports @knext/lib types at build time).
+      - name: Build publishable packages
+        run: pnpm --filter @knext/lib build && pnpm --filter @knext/core build
+
+      # Stage renamed copies into .ghp-staging/{lib,core}. Fails LOUDLY if core's
+      # dist no longer contains the externalized @knext/lib imports (layout drift).
+      - name: Stage packages for GitHub Packages
+        run: node scripts/rename-for-ghp.mjs
+
+      # Publish lib first (core depends on it), then core. Publishing from the
+      # staging dirs — which carry the renamed @getknext-dev/* manifests — so the
+      # scope matches the owning org GHP requires. A re-run of an already-published
+      # version is a hard error (bump via changesets first), not a silent success.
+      - name: Publish to GitHub Packages (lib then core)
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          publish_dir() {
+            local dir="$1"
+            local pkg
+            pkg="$(node -p "require('./$dir/package.json').name + '@' + require('./$dir/package.json').version")"
+            echo "==> Publishing ${pkg} from ${dir}"
+            local out
+            if out="$(cd "$dir" && npm publish --registry https://npm.pkg.github.com 2>&1)"; then
+              echo "$out"
+              echo "==> Published ${pkg}"
+            else
+              echo "$out"
+              if echo "$out" | grep -qiE 'EPUBLISHCONFLICT|409|cannot publish over|previously published|already exists'; then
+                echo "::error::${pkg} is already published to GitHub Packages — bump versions via changesets first (see docs/RELEASING.md)."
+              else
+                echo "::error::npm publish failed for ${pkg}."
+              fi
+              exit 1
+            fi
+          }
+          publish_dir ".ghp-staging/lib"
+          publish_dir ".ghp-staging/core"

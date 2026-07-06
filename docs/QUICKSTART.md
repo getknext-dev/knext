@@ -39,7 +39,7 @@ Once the CLI is available (Step 2 — or just `npx --package @knext/core kn-next
 doctor` without installing), run:
 
 ```sh
-npx kn-next doctor
+npx @knext/core doctor
 ```
 
 It verifies, read-only, everything the deploy path depends on: Knative Serving
@@ -101,12 +101,12 @@ the config types):
 npm install --save-dev @knext/core
 ```
 
-This installs the `kn-next` command, runnable with `npx kn-next`. You can also
+This installs the `kn-next` command, runnable with `npx @knext/core`. You can also
 install it globally (`npm install -g @knext/core`) if you prefer a bare
 `kn-next` on your PATH. Sanity check:
 
 ```sh
-npx kn-next --help
+npx @knext/core --help
 ```
 
 ## Step 3 — Prepare your Next.js app
@@ -223,13 +223,13 @@ the cluster apply, and prints the `NextApp` resource the CLI would submit. It
 still runs `next build` — add `--skip-build` to skip that too:
 
 ```sh
-npx kn-next deploy --dry-run --skip-build
+npx @knext/core deploy --dry-run --skip-build
 ```
 
 Then deploy for real:
 
 ```sh
-npx kn-next deploy
+npx @knext/core deploy
 ```
 
 One command does all of it, in order:
@@ -259,10 +259,10 @@ that never programs), `Degraded`, and the database binding. `kn-next status`
 renders it without a `kubectl describe`:
 
 ```sh
-npx kn-next status
+npx @knext/core status
 ```
 
-Pass the app name explicitly (`npx kn-next status hello-knext -n default`) when
+Pass the app name explicitly (`npx @knext/core status hello-knext -n default`) when
 you're outside the app directory. Useful flags:
 
 - `--watch` — poll every 5 s until the app is Ready (bounded at 10 minutes).
@@ -327,7 +327,7 @@ kubectl patch serviceaccount hello-knext-sa \
   -p '{"imagePullSecrets": [{"name": "ghcr-pull"}]}'
 ```
 
-Then re-run `npx kn-next deploy --skip-build --skip-upload` to roll a fresh
+Then re-run `npx @knext/core deploy --skip-build --skip-upload` to roll a fresh
 revision.
 
 ## Cleaning up

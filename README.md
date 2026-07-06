@@ -228,7 +228,7 @@ export default config;
 ./deploy.sh
 
 # Or using the CLI
-npx kn-next deploy
+npx @knext/core deploy
 ```
 
 This single command:
@@ -725,18 +725,18 @@ pnpm dev
 
 ```bash
 # Full deployment with defaults
-npx kn-next deploy
+npx @knext/core deploy
 
 # Or step-by-step
-npx kn-next build       # next build (standalone) + adapter
-npx kn-next deploy      # Deploy to cluster
-npx kn-next cleanup     # Remove from cluster
+npx @knext/core build       # next build (standalone) + adapter
+npx @knext/core deploy      # Deploy to cluster
+npx @knext/core cleanup     # Remove from cluster
 ```
 
 ### CLI Reference
 
 ```bash
-npx kn-next deploy [options]
+npx @knext/core deploy [options]
 ```
 
 | Option | Short | Description |
@@ -775,14 +775,14 @@ These environment variables can be used instead of CLI flags:
     KN_NAMESPACE: production
     KN_REDIS_URL: ${{ secrets.REDIS_URL }}
     KN_DATABASE_URL: ${{ secrets.DATABASE_URL }}
-  run: npx kn-next deploy
+  run: npx @knext/core deploy
 ```
 
 **GitLab CI:**
 ```yaml
 deploy:
   script:
-    - npx kn-next deploy --tag $CI_COMMIT_SHA --namespace production
+    - npx @knext/core deploy --tag $CI_COMMIT_SHA --namespace production
   variables:
     KN_REGISTRY: gcr.io/my-project
     KN_REDIS_URL: $REDIS_URL
@@ -790,12 +790,12 @@ deploy:
 
 **Production with specific tag:**
 ```bash
-npx kn-next deploy --tag v1.2.3 --namespace production
+npx @knext/core deploy --tag v1.2.3 --namespace production
 ```
 
 **Preview manifest only:**
 ```bash
-npx kn-next deploy --dry-run
+npx @knext/core deploy --dry-run
 ```
 
 ---
