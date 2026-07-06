@@ -58,13 +58,23 @@ func main() {
 	go gw.Serve(ln)
 
 	// Read-only pool lane (issue #66): a SECOND listener on GW_RO_PORT routes
-	// the DATABASE_URL_RO DSN to the compute-ro Deployment (0->N->0), reusing
-	// the full wake/idle/TLS machinery via a GW_RO_*-remapped env. Absent
-	// GW_RO_PORT, the RO lane is off and nothing changes for writer-only
-	// deployments. No SQL parsing, no single-writer ceremony — the app opts in
-	// by pointing reads at this port.
+	// the DATABASE_URL_RO DSN to a read-only compute (0->N->0), reusing the full
+	// wake/idle/TLS machinery via a GW_RO_*-remapped env. Absent GW_RO_PORT, the
+	// RO lane is off and nothing changes for writer-only deployments. No SQL
+	// parsing, no single-writer ceremony — the app opts in by pointing reads here.
+	//
+	// The RO lane MIRRORS the writer lane's mode (issue #127):
+	//   - kubectl base  (primary pggw):  ROEnv         -> single fixed compute-ro.
+	//   - template base (apps  pggw):    ROTemplateEnv -> PER-APP compute-ro-<app>,
+	//     so app A's reads NEVER reach app B's (or the shared primary) pool. Using
+	//     the kubectl ROEnv on the apps-gateway would be a cross-tenant data leak.
 	if roPortStr := os.Getenv("GW_RO_PORT"); roPortStr != "" {
-		roGw, err := gateway.New(wake.ROEnv(env), func(msg string) { logger.Println(msg) })
+		roEnv := wake.ROEnv(env)
+		if os.Getenv("GW_COMPUTE_MODE") == "template" {
+			roEnv = wake.ROTemplateEnv(env)
+			logger.Printf("[gw-ro] template mode: per-app RO routing (compute-ro-<app>), tenant-isolated")
+		}
+		roGw, err := gateway.New(roEnv, func(msg string) { logger.Println(msg) })
 		if err != nil {
 			logger.Fatalf("[gw-ro] %v", err)
 		}

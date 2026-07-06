@@ -33,8 +33,8 @@ the measured envelope).
 | | Status |
 |---|---|
 | RO replica pool on the PRIMARY db, HPA n>1, ~9s tip-following staleness contract | ✅ shipped (#99a) |
-| Per-app RO pool (apps-gateway template-RO listener + per-app RO computes) | 🔜 #127 (v1.2, the near-term gap) |
-| `DATABASE_URL_RO` contract key (fail-closed until #127 lands) | ✅ shipped (unified config) |
+| Per-app RO pool (apps-gateway template-RO listener + per-app RO computes) | ✅ shipped (#127, v1.2) |
+| `DATABASE_URL_RO` contract key (now LIVE → `compute-ro-<app>`, was fail-closed) | ✅ shipped (unified config + #127) |
 
 ### 3. Tenant scaling — HORIZONTAL (across apps)
 | | Status |

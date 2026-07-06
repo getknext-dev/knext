@@ -64,6 +64,8 @@ type fakeCluster struct {
 	roKeys        map[string]string // app -> DATABASE_URL_RO (set/removed by EnsureSecretROKey)
 	createdSecret []string
 	applied       []ComputeSpec
+	roApplied     map[string]ROComputeSpec // app -> RO compute spec (ApplyROCompute)
+	roDeleted     []string                 // apps whose RO compute was deleted
 	deleted       []string
 	depAvailable  bool
 	pending       map[string]string
@@ -112,6 +114,20 @@ func (c *fakeCluster) EnsureSecretROKey(_ context.Context, app string, enabled b
 }
 func (c *fakeCluster) ApplyCompute(_ context.Context, spec ComputeSpec) error {
 	c.applied = append(c.applied, spec)
+	return nil
+}
+func (c *fakeCluster) ApplyROCompute(_ context.Context, spec ROComputeSpec) error {
+	if c.roApplied == nil {
+		c.roApplied = map[string]ROComputeSpec{}
+	}
+	c.roApplied[spec.App] = spec
+	return nil
+}
+func (c *fakeCluster) DeleteROCompute(_ context.Context, app string) error {
+	c.roDeleted = append(c.roDeleted, app)
+	if c.roApplied != nil {
+		delete(c.roApplied, app)
+	}
 	return nil
 }
 func (c *fakeCluster) DeleteCompute(_ context.Context, app string) error {
@@ -512,6 +528,83 @@ func TestROKeyRemovedWhenROPoolTurnedOff(t *testing.T) {
 	// Password/secret NOT re-minted (live app never locked out).
 	if len(h.cl.createdSecret) != 0 {
 		t.Errorf("secret must not be re-created on RO toggle: %v", h.cl.createdSecret)
+	}
+}
+
+// ---- per-app RO compute provisioning (#127) --------------------------------
+
+// When roPool.enabled, the operator provisions THIS app's own RO compute
+// (compute-ro-<app>, attached to the app's OWN timeline) so DATABASE_URL_RO has a
+// real, tenant-isolated serving endpoint — not a stub, not a shared pool.
+func TestROComputeProvisionedWhenEnabled(t *testing.T) {
+	h := newHarness()
+	cr := &AppDatabase{Name: "shop", Generation: 1, Spec: AppDatabaseSpec{
+		AppName: "shop",
+		ROPool:  ROPool{Enabled: true, MinReplicas: 0, MaxReplicas: 4},
+	}}
+	mustReconcile(t, h, cr)
+
+	spec, ok := h.cl.roApplied["shop"]
+	if !ok {
+		t.Fatalf("RO compute not provisioned when roPool.enabled: %v", h.cl.roApplied)
+	}
+	// Attached to the app's OWN timeline (isolation) — the same timeline as the writer.
+	if spec.TimelineID != cr.Status.TimelineID {
+		t.Errorf("RO compute timeline = %q, want the app's own %q", spec.TimelineID, cr.Status.TimelineID)
+	}
+	if spec.TenantID != h.d.Tenant {
+		t.Errorf("RO compute tenant = %q, want apps tenant %q", spec.TenantID, h.d.Tenant)
+	}
+	if spec.MaxReplicas != 4 {
+		t.Errorf("RO maxReplicas = %d, want 4", spec.MaxReplicas)
+	}
+	// The RO DSN contract key is emitted too (already tested), and it is now LIVE.
+	if _, ok := h.cl.roKeys["shop"]; !ok {
+		t.Errorf("DATABASE_URL_RO must still be emitted alongside the RO compute")
+	}
+}
+
+// When roPool is off (default), NO RO compute is provisioned — the writer-only
+// app costs nothing extra.
+func TestNoROComputeWhenDisabled(t *testing.T) {
+	h := newHarness()
+	cr := &AppDatabase{Name: "plain", Generation: 1, Spec: AppDatabaseSpec{AppName: "plain"}}
+	mustReconcile(t, h, cr)
+	if len(h.cl.roApplied) != 0 {
+		t.Errorf("RO compute must not be provisioned when roPool is off: %v", h.cl.roApplied)
+	}
+}
+
+// Toggling roPool off on a provisioned app tears down the RO compute (reclaims the
+// read replicas) without touching the writer.
+func TestROComputeTornDownWhenDisabled(t *testing.T) {
+	h := newHarness()
+	h.cl.secrets["shop"] = true
+	h.cl.writerDSN["shop"] = "postgres://app_shop:pw@pggw-apps.scale-zero-pg.svc:55432/shop?sslmode=disable"
+	h.ps.timelines["cafe0000000000000000000000000009"] = true
+	cr := &AppDatabase{Name: "shop", Generation: 2, Finalizers: []string{Finalizer},
+		Spec:   AppDatabaseSpec{AppName: "shop", ROPool: ROPool{Enabled: false}},
+		Status: AppDatabaseStatus{TimelineID: "cafe0000000000000000000000000009", Phase: PhaseReady}}
+
+	mustReconcile(t, h, cr)
+
+	if len(h.cl.roDeleted) == 0 || h.cl.roDeleted[0] != "shop" {
+		t.Errorf("RO compute must be torn down when roPool toggled off: %v", h.cl.roDeleted)
+	}
+}
+
+// Delete of the app also removes the RO compute (no orphaned read replicas).
+func TestDeleteAlsoRemovesROCompute(t *testing.T) {
+	h := newHarness()
+	now := metav1.NewTime(time.Unix(1700000000, 0))
+	cr := &AppDatabase{Name: "gone", DeletionTimestamp: &now, Finalizers: []string{Finalizer},
+		Spec:   AppDatabaseSpec{AppName: "gone", ROPool: ROPool{Enabled: true}},
+		Status: AppDatabaseStatus{TimelineID: "dead0000000000000000000000000003"}}
+
+	mustReconcile(t, h, cr)
+
+	if len(h.cl.roDeleted) == 0 || h.cl.roDeleted[0] != "gone" {
+		t.Errorf("delete must remove the RO compute too: %v", h.cl.roDeleted)
 	}
 }
 

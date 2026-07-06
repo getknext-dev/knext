@@ -100,27 +100,25 @@ port (`55432` → `55434`); same role, password, host and database. It is
 removed when it flips off — and **`PGPASSWORD` is never touched** (a live app is
 never locked out). The port is operator-configurable via `APPDB_GATEWAY_RO_PORT`.
 
-> ### ⚠️ The per-app RO **serving endpoint** is a tracked follow-up — the key fails CLOSED
-> `DATABASE_URL_RO` is the **stable, forward-compatible contract key** an external
-> driver injects for reads. It points at the app's **own** apps-gateway on the RO
-> port. The apps-gateway does **not yet run a per-app RO lane**, so today the key
-> **fails closed — a connection is refused.** That is deliberate and safe.
+> ### ✅ The per-app RO serving endpoint is LIVE (issue #127) — tenant-isolated
+> `DATABASE_URL_RO` is a real, per-app read endpoint. When `roPool.enabled` the
+> operator also provisions the app's **own** read-only compute (`compute-ro-<app>`,
+> attached to the app's **own** timeline, `0↔N` on connect, own Service, optional
+> per-app HPA when `roPool.maxReplicas>0`), and the apps-gateway runs a second
+> listener on `55434` in **template mode** so `database=<app>` reads route to
+> `compute-ro-<app>`.
 >
-> **Hard safety guarantee (fail-closed, never the shared pool).** The RO DSN is the
-> writer DSN with **only the port swapped**, so its host is always the app's own
-> apps-gateway (`pggw-apps`). It can therefore **never** resolve to the shared
-> primary read-only pool (`compute-ro`, fronted by the *different* primary gateway
-> `pggw:55434` on the *primary* timeline) — routing a tenant's reads there would be
-> **cross-tenant data exposure**. Refused-until-ready is safe; a cross-tenant leak
-> would be critical. `_verify-operator.sh` asserts the RO DSN **refuses** rather
-> than returns data.
+> **Hard isolation guarantee (never another tenant, never the shared pool).** The RO
+> port enforces the identical `(user,database)` authz as the writer port, and each
+> app resolves to a **distinct** `compute-ro-<app>` on its **own** timeline. App A's
+> reads can never reach app B's RO compute (authz-refused + distinct target) or the
+> shared primary `compute-ro` pool (which is fronted by the *different* primary
+> gateway `pggw:55434` on the *primary* timeline). `_verify-perapp-ro.sh` proves it:
+> A reads A, never B (data **and** authz, both directions), writes on the RO DSN are
+> rejected, and staleness is measured (Replica tip-following).
 >
-> Standing up **per-app** RO serving (an apps-gateway template-RO listener +
-> per-app RO computes on each app's branch) is a tracked **read-scaling + gateway**
-> follow-up (filed p1). **Until it lands, do not route production reads at
-> `DATABASE_URL_RO`** — point read-your-writes and all correctness-critical reads at
-> `DATABASE_URL`. The key is provisioned ahead of the endpoint so the Secret
-> contract stays stable and knext needs no change when the endpoint ships.
+> Point per-app reads at `DATABASE_URL_RO` and writes at `DATABASE_URL`. Because the
+> RO endpoint is a hot standby, use `DATABASE_URL` for strict read-your-writes.
 
 ---
 

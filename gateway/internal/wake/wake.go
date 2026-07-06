@@ -159,6 +159,13 @@ type templateDriver struct {
 	scaler     Scaler
 	rolePrefix string          // per-app role prefix (GW_APP_ROLE_PREFIX, default "app_")
 	reserved   map[string]bool // system names that must NOT resolve to an app (tmpl/warm/ro)
+	// wakeReplicas is how many replicas Wake brings online per system. The WRITER
+	// lane leaves it 1 (single-writer: never two computes on one timeline). The
+	// per-app READ-ONLY lane (ROTemplateEnv, issue #127) sets it from
+	// GW_RO_WAKE_REPLICAS so an app's own RO pool wakes to N read replicas; an HPA
+	// then grows it past this. Read-only computes are NOT single-writer, so N>1 is
+	// safe there — but NEVER on the writer lane.
+	wakeReplicas int32
 }
 
 func (d *templateDriver) Mode() string { return "template" }
@@ -173,7 +180,7 @@ func (d *templateDriver) Resolve(systemID string) Target {
 	return Target{Host: host, Port: port, Key: systemID}
 }
 func (d *templateDriver) Wake(ctx context.Context, t Target) error {
-	return d.scaler.Scale(ctx, d.namespace, strings.ReplaceAll(d.depTpl, "{system}", t.Key), 1)
+	return d.scaler.Scale(ctx, d.namespace, strings.ReplaceAll(d.depTpl, "{system}", t.Key), d.wakeReplicas)
 }
 func (d *templateDriver) Sleep(ctx context.Context, t Target) error {
 	return d.scaler.Scale(ctx, d.namespace, strings.ReplaceAll(d.depTpl, "{system}", t.Key), 0)
@@ -236,15 +243,22 @@ func MakeDriverWithScaler(env Env, scaler Scaler) (Driver, error) {
 		if !strings.Contains(depTpl, "{system}") {
 			return nil, fmt.Errorf("template mode: GW_K8S_DEPLOYMENT_TEMPLATE=%q must contain {system}", depTpl)
 		}
+		// Wake replicas: 1 by default (the writer lane, single-writer). The RO lane
+		// (ROTemplateEnv) sets GW_WAKE_REPLICAS from GW_RO_WAKE_REPLICAS to wake N.
+		wake, err := strconv.Atoi(env.get("GW_WAKE_REPLICAS", "1"))
+		if err != nil || wake < 1 {
+			wake = 1
+		}
 		return &templateDriver{
-			namespace:  ns,
-			targetTpl:  env.get("GW_TARGET_TEMPLATE", fmt.Sprintf("compute-{system}.%s.svc:55433", ns)),
-			depTpl:     depTpl,
-			servedDB:   env.get("GW_SERVED_DATABASE", "postgres"),
-			defPort:    defPort,
-			scaler:     scaler,
-			rolePrefix: env.get("GW_APP_ROLE_PREFIX", "app_"),
-			reserved:   parseReserved(env.get("GW_RESERVED_SYSTEMS", "tmpl,warm,ro")),
+			namespace:    ns,
+			targetTpl:    env.get("GW_TARGET_TEMPLATE", fmt.Sprintf("compute-{system}.%s.svc:55433", ns)),
+			depTpl:       depTpl,
+			servedDB:     env.get("GW_SERVED_DATABASE", "postgres"),
+			defPort:      defPort,
+			scaler:       scaler,
+			rolePrefix:   env.get("GW_APP_ROLE_PREFIX", "app_"),
+			reserved:     parseReserved(env.get("GW_RESERVED_SYSTEMS", "tmpl,warm,ro")),
+			wakeReplicas: int32(wake), //nolint:gosec // small bounded value
 		}, nil
 
 	case "warmpool":

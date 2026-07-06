@@ -114,6 +114,27 @@ func (d *Deps) reconcileApply(ctx context.Context, cr *AppDatabase) (bool, error
 		return true, fmt.Errorf("apply compute: %w", err)
 	}
 
+	// 4b. Per-app READ-ONLY compute (issue #127). When roPool.enabled, provision this
+	//     app's OWN read-only compute (compute-ro-<app>) attached to the app's OWN
+	//     timeline — the real, tenant-isolated serving endpoint DATABASE_URL_RO (step
+	//     3b) points at via the apps-gateway RO listener. When disabled, tear any prior
+	//     RO compute down (idempotent). This makes the forward-declared RO contract key
+	//     LIVE without ever collapsing reads onto a shared pool: app A's reads route to
+	//     compute-ro-A, never compute-ro-B or the primary compute-ro.
+	if cr.Spec.ROPool.Enabled {
+		if err := d.Cluster.ApplyROCompute(ctx, ROComputeSpec{
+			App:         app,
+			TenantID:    d.Tenant,
+			TimelineID:  tl,
+			MinReplicas: cr.Spec.ROPool.MinReplicas,
+			MaxReplicas: cr.Spec.ROPool.MaxReplicas,
+		}); err != nil {
+			return true, fmt.Errorf("apply ro compute: %w", err)
+		}
+	} else if err := d.Cluster.DeleteROCompute(ctx, app); err != nil {
+		return true, fmt.Errorf("teardown ro compute: %w", err)
+	}
+
 	// 5. Ensure the branch exists on the pageserver (durable). Idempotent on tl.
 	exists, err := d.Pageserver.TimelineExists(ctx, d.Tenant, tl)
 	if err != nil {
@@ -145,12 +166,10 @@ func (d *Deps) reconcileApply(ctx context.Context, cr *AppDatabase) (bool, error
 
 	roNote := ""
 	if cr.Spec.ROPool.Enabled {
-		// The DATABASE_URL_RO key is emitted into app-db-<app> (step 3b) so an
-		// external driver can wire reads. Standing up the per-app RO SERVING
-		// endpoint (apps-gateway RO listener + per-app RO computes) is owned by the
-		// read-scaling/gateway lanes (deploy/26/27); this operator records intent
-		// and emits the contract key — it does not render RO compute objects.
-		roNote = " (roPool requested; DATABASE_URL_RO emitted — per-app RO serving endpoint is a read-scaling/gateway follow-up)"
+		// The DATABASE_URL_RO key (step 3b) is now LIVE: it points at this app's own
+		// read-only compute (compute-ro-<app>, step 4b) fronted by the apps-gateway RO
+		// listener. Reads route to the app's OWN RO compute — tenant-isolated (#127).
+		roNote = " (roPool enabled; DATABASE_URL_RO live -> compute-ro-" + app + ")"
 	}
 
 	requeue := false
@@ -186,6 +205,12 @@ func (d *Deps) reconcileDelete(ctx context.Context, cr *AppDatabase) (bool, erro
 	app := cr.Spec.AppName
 	cr.Status.Phase = PhaseDeleting
 	_ = d.Cluster.UpdateStatus(ctx, cr) // best-effort; object may be mid-deletion
+
+	// Remove the per-app read-only compute first (Deployment/Service/HPA), so a
+	// deprovisioned app leaves no orphaned read replicas (#127). Idempotent.
+	if err := d.Cluster.DeleteROCompute(ctx, app); err != nil {
+		return true, fmt.Errorf("delete ro compute objects: %w", err)
+	}
 
 	// Remove the k8s objects (Deployment/Service/ConfigMap/Secret), ignore-not-found.
 	if err := d.Cluster.DeleteCompute(ctx, app); err != nil {

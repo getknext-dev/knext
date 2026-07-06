@@ -53,3 +53,49 @@ func ROEnv(base Env) Env {
 	}
 	return out
 }
+
+// ROTemplateEnv derives the PER-APP read-only lane's config from the apps-gateway's
+// TEMPLATE-mode base env (issue #127). It is the multi-tenant sibling of ROEnv:
+//
+//	ROEnv         (kubectl):  one FIXED compute-ro Deployment — the PRIMARY gateway's
+//	                          RO lane (single-DB). Every read hits the same pool.
+//	ROTemplateEnv (template): compute-ro-{system} — the APPS gateway's RO lane. A read
+//	                          on database=<app> routes to THAT app's OWN RO compute.
+//
+// THE ISOLATION GUARANTEE (non-negotiable, #127): using ROEnv (kubectl, one fixed
+// deployment) on the apps-gateway would collapse EVERY app's reads onto a single
+// shared compute-ro that is attached to the PRIMARY timeline — cross-tenant data
+// exposure. ROTemplateEnv stays in template mode, so the same {system} routing +
+// (user,database) authz + servedDatabase rewrite that isolate the WRITER lane also
+// isolate the READ lane. App A can never resolve to, wake, or read app B's RO
+// compute, and neither can reach the shared primary pool.
+//
+//	GW_RO_DEPLOYMENT_TEMPLATE -> GW_K8S_DEPLOYMENT_TEMPLATE (default "compute-ro-{system}")
+//	GW_RO_TARGET_TEMPLATE     -> GW_TARGET_TEMPLATE         (default "compute-ro-{system}.<ns>.svc:55433")
+//	GW_RO_WAKE_REPLICAS       -> GW_WAKE_REPLICAS           (default "1"; a per-app HPA grows past this)
+//	GW_RO_IDLE_MS             -> GW_IDLE_MS                 (default: inherit the writer's)
+//
+// The role prefix (GW_APP_ROLE_PREFIX), reserved-system set (GW_RESERVED_SYSTEMS),
+// served database (GW_SERVED_DATABASE), TLS, timeouts and GW_MAX_CONNS all pass
+// through unchanged, so the RO port enforces the SAME tenant boundary as the writer
+// port. The base is never mutated.
+func ROTemplateEnv(base Env) Env {
+	out := Env{}
+	for k, v := range base {
+		out[k] = v
+	}
+	out["GW_COMPUTE_MODE"] = "template"
+
+	depTpl := base.get("GW_RO_DEPLOYMENT_TEMPLATE", "compute-ro-{system}")
+	out["GW_K8S_DEPLOYMENT_TEMPLATE"] = depTpl
+
+	ns := base.get("GW_K8S_NAMESPACE", "scale-zero-pg")
+	out["GW_TARGET_TEMPLATE"] = base.get("GW_RO_TARGET_TEMPLATE", fmt.Sprintf("compute-ro-{system}.%s.svc:55433", ns))
+
+	out["GW_WAKE_REPLICAS"] = base.get("GW_RO_WAKE_REPLICAS", "1")
+
+	if v := base.get("GW_RO_IDLE_MS", ""); v != "" {
+		out["GW_IDLE_MS"] = v
+	}
+	return out
+}

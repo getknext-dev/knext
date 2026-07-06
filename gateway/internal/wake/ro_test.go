@@ -108,3 +108,146 @@ func TestROEnvIdleOverride(t *testing.T) {
 		t.Fatalf("ROEnv GW_IDLE_MS = %q, want 600000 (RO override)", got["GW_IDLE_MS"])
 	}
 }
+
+// ---- per-app RO lane on the apps-gateway (issue #127) -----------------------
+//
+// The apps-gateway is TEMPLATE mode. Its RO lane must ALSO be template mode so
+// database=<app> reads route to THAT app's OWN read-only compute
+// (compute-ro-<app>), never a single shared pool. ROEnv (kubectl, one fixed
+// compute-ro) is the PRIMARY gateway's RO lane and is the cross-tenant trap here.
+
+// appsBase mirrors the live apps-gateway env (deploy/81) closely enough to build
+// a template driver with per-app authz.
+func appsBase() Env {
+	return Env{
+		"GW_COMPUTE_MODE":            "template",
+		"GW_K8S_NAMESPACE":           "scale-zero-pg",
+		"GW_K8S_DEPLOYMENT_TEMPLATE": "compute-{system}",
+		"GW_TARGET_TEMPLATE":         "compute-{system}.scale-zero-pg.svc:55433",
+		"GW_APP_ROLE_PREFIX":         "app_",
+		"GW_RESERVED_SYSTEMS":        "tmpl,warm,ro",
+		"GW_RO_PORT":                 "55434",
+	}
+}
+
+// ROTemplateEnv must stay in TEMPLATE mode and repoint the deployment/target
+// templates at the per-app RO compute (compute-ro-{system}), so each app's reads
+// land on its own RO compute.
+func TestROTemplateEnvStaysTemplateMode(t *testing.T) {
+	d, err := MakeDriver(ROTemplateEnv(appsBase()))
+	if err != nil {
+		t.Fatalf("MakeDriver(ROTemplateEnv) err=%v", err)
+	}
+	if d.Mode() != "template" {
+		t.Fatalf("RO driver mode = %s, want template (per-app isolation)", d.Mode())
+	}
+}
+
+// THE ISOLATION GUARANTEE (#127): app A's RO connection resolves to compute-ro-A;
+// app B's to compute-ro-B. They NEVER share a target, and NEITHER is the shared
+// primary pool "compute-ro".
+func TestROTemplateEnvResolvesPerAppAndNeverCrosses(t *testing.T) {
+	d, err := MakeDriver(ROTemplateEnv(appsBase()))
+	if err != nil {
+		t.Fatalf("err=%v", err)
+	}
+	a := d.Resolve("appa")
+	b := d.Resolve("appb")
+	if a.Host != "compute-ro-appa.scale-zero-pg.svc" || a.Port != 55433 {
+		t.Fatalf("appa RO resolve = %+v, want compute-ro-appa:55433", a)
+	}
+	if b.Host != "compute-ro-appb.scale-zero-pg.svc" {
+		t.Fatalf("appb RO resolve = %+v, want compute-ro-appb host", b)
+	}
+	if a.Host == b.Host || a.Key == b.Key {
+		t.Fatalf("app A %+v and app B %+v must NOT share an RO target (cross-tenant!)", a, b)
+	}
+	// Never the single shared primary pool.
+	if a.Host == "compute-ro.scale-zero-pg.svc" || b.Host == "compute-ro.scale-zero-pg.svc" {
+		t.Fatalf("per-app RO must never resolve to the shared primary compute-ro pool")
+	}
+}
+
+// The RO lane keeps the SAME (user,database) tenant authz as the writer: app B's
+// role can never read app A's database on the RO port.
+func TestROTemplateEnvEnforcesTenantAuthz(t *testing.T) {
+	d, err := MakeDriver(ROTemplateEnv(appsBase()))
+	if err != nil {
+		t.Fatalf("err=%v", err)
+	}
+	az, ok := d.(interface {
+		Authorize(user, database string) error
+	})
+	if !ok {
+		t.Fatalf("RO template driver must implement Authorize (tenant boundary)")
+	}
+	if err := az.Authorize("app_appa", "appa"); err != nil {
+		t.Fatalf("app A's own role must be authorized on its RO db: %v", err)
+	}
+	if az.Authorize("app_appb", "appa") == nil {
+		t.Fatalf("cross-tenant: app B role reading app A's RO db MUST be refused")
+	}
+	if az.Authorize("cloud_admin", "appa") == nil {
+		t.Fatalf("cloud_admin on the RO port MUST be refused")
+	}
+	if az.Authorize("app_ro", "ro") == nil {
+		t.Fatalf("reserved system 'ro' MUST be refused on the RO port")
+	}
+}
+
+// The RO compute serves the same physical database (postgres) as the writer, so
+// the servedDatabase rewrite must be preserved on the RO lane.
+func TestROTemplateEnvPreservesServedDatabase(t *testing.T) {
+	d, err := MakeDriver(ROTemplateEnv(appsBase()))
+	if err != nil {
+		t.Fatalf("err=%v", err)
+	}
+	sd, ok := d.(interface{ ServedDatabase() string })
+	if !ok || sd.ServedDatabase() != "postgres" {
+		t.Fatalf("RO template driver must serve postgres (got ok=%v)", ok)
+	}
+}
+
+// Wake scales THIS app's RO compute (compute-ro-<app>) to GW_RO_WAKE_REPLICAS,
+// Sleep back to 0 — per-app RO lifecycle. The writer template lane is unaffected.
+func TestROTemplateEnvWakeScalesPerAppROCompute(t *testing.T) {
+	fs := &fakeScaler{}
+	base := appsBase()
+	base["GW_RO_WAKE_REPLICAS"] = "2"
+	d, err := MakeDriverWithScaler(ROTemplateEnv(base), fs)
+	if err != nil {
+		t.Fatalf("err=%v", err)
+	}
+	tgt := d.Resolve("shop")
+	if err := d.Wake(context.Background(), tgt); err != nil {
+		t.Fatalf("Wake err=%v", err)
+	}
+	if err := d.Sleep(context.Background(), tgt); err != nil {
+		t.Fatalf("Sleep err=%v", err)
+	}
+	if len(fs.calls) != 2 {
+		t.Fatalf("scaler calls = %d, want 2", len(fs.calls))
+	}
+	if got := fs.calls[0]; got != (scaleCall{"scale-zero-pg", "compute-ro-shop", 2}) {
+		t.Fatalf("RO wake scale = %+v, want compute-ro-shop=2", got)
+	}
+	if got := fs.calls[1]; got != (scaleCall{"scale-zero-pg", "compute-ro-shop", 0}) {
+		t.Fatalf("RO sleep scale = %+v, want compute-ro-shop=0", got)
+	}
+}
+
+// The writer template lane must remain single-writer: absent GW_WAKE_REPLICAS it
+// wakes to exactly 1, even now that template mode honors the knob.
+func TestTemplateWriterWakesToOneReplica(t *testing.T) {
+	fs := &fakeScaler{}
+	d, err := MakeDriverWithScaler(appsBase(), fs) // writer lane (no GW_WAKE_REPLICAS)
+	if err != nil {
+		t.Fatalf("err=%v", err)
+	}
+	if err := d.Wake(context.Background(), d.Resolve("shop")); err != nil {
+		t.Fatalf("Wake err=%v", err)
+	}
+	if got := fs.calls[0]; got != (scaleCall{"scale-zero-pg", "compute-shop", 1}) {
+		t.Fatalf("writer wake scale = %+v, want compute-shop=1 (single-writer)", got)
+	}
+}

@@ -35,9 +35,15 @@ rules:
     resources: ["appdatabases/finalizers"]
     verbs: ["update"]
   # Per-app compute: create/heal/delete the Deployment (NOT scale — the apps-gateway
-  # owns spec.replicas; the operator preserves the live count on update).
+  # owns spec.replicas; the operator preserves the live count on update). Covers both
+  # the writer (compute-<app>) and the per-app read-only compute (compute-ro-<app>, #127).
   - apiGroups: ["apps"]
     resources: ["deployments"]
+    verbs: ["get", "list", "create", "update", "patch", "delete"]
+  # Per-app read-only HPA (issue #127): the operator renders an optional HPA for
+  # compute-ro-<app> when spec.roPool.maxReplicas>0, and removes it otherwise.
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
     verbs: ["get", "list", "create", "update", "patch", "delete"]
   # Per-app Service + ConfigMap + credential Secret, and the reclaim-pending ledger.
   - apiGroups: [""]
@@ -88,8 +94,10 @@ spec:
       containers:
         - name: appdb-operator
           # Same multi-binary gateway image; ENTRYPOINT overridden to /appdb-operator.
-          # Digest-pinned (contract 22). Rebuild + re-pin on any operator change.
-          image: me-abudhabi-1.ocir.io/axfqznklsd2t/ks-pg/gateway:v0.7.0-appdb-119-9bfbd68@sha256:0618ff093373488b1426224f88f55846123bdac967ab5f8d1ee4164d247130eb
+          # This build adds #127 per-app RO-compute provisioning (compute-ro-<app> +
+          # optional per-app HPA). Digest-pinned (contract 22). Rebuild + re-pin on
+          # any operator change.
+          image: me-abudhabi-1.ocir.io/axfqznklsd2t/ks-pg/gateway:sha-445d19d@sha256:8a7a115d06a09765d329ba65edbcb5697953bd2f94c342149b251d0a3e868c45
           imagePullPolicy: IfNotPresent
           command: ["/appdb-operator"] # override the image's /gateway entrypoint
           securityContext:

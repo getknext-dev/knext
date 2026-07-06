@@ -238,14 +238,18 @@ kubectl -n scale-zero-pg get secret app-db-<app> -o jsonpath='{.data.DATABASE_UR
 # postgres://app_<app>:<per-app-password>@pggw-apps.scale-zero-pg.svc:55434/<app>?sslmode=disable
 ```
 
-⚠️ **The per-app RO *serving endpoint* is not live yet.** The RO pool that exists
-today (the `compute-ro` pool on `pggw:55434`, above) is the **primary** single-DB
-path — it is **not** per-app. `DATABASE_URL_RO` on `app-db-<app>` is emitted ahead
-of the endpoint so the config contract is stable (an external driver can inject it
-now and needs no change when the endpoint ships); standing up **per-app** RO
-serving (an apps-gateway RO listener + per-app RO computes on each branch) is a
-tracked read-scaling/gateway follow-up. **Until then, point per-app reads at
-`DATABASE_URL`.** See [AppDatabase API reference](appdatabase-api.md#3-output-secret-contract).
+✅ **The per-app RO serving endpoint is LIVE (issue #127).** `DATABASE_URL_RO` on
+`app-db-<app>` is a real, tenant-isolated read endpoint: the apps-gateway runs a
+second listener on `55434` in **template mode**, so `database=<app>` reads route to
+**that app's own** read-only compute (`compute-ro-<app>`, attached to the app's own
+timeline), scaled `0↔N` on connect. It is **not** the primary `compute-ro` pool on
+`pggw:55434` (that is the single-DB path). App A's reads can never reach app B's RO
+compute (or the primary pool): the RO port enforces the identical `(user,database)`
+authz as the writer port, and each app resolves to a distinct `compute-ro-<app>`.
+Point per-app reads at `DATABASE_URL_RO` and writes at `DATABASE_URL`. Isolation +
+staleness are proven by `deploy/_verify-perapp-ro.sh` (A reads A, never B, both
+ways; writes rejected on RO). See
+[AppDatabase API reference](appdatabase-api.md#3-output-secret-contract).
 
 **Isolation is at two layers.** *Data* isolation is the Neon timeline (each app is
 a separate branch — app A's rows are invisible to app B, proven by

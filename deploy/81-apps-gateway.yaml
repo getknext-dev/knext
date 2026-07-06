@@ -34,15 +34,13 @@ spec:
       serviceAccountName: pggw # reuse: deployments/scale is namespace-wide
       containers:
         - name: gateway
-          # apps-gateway image. v0.6.1 tenant security ((user,database) authz +
-          # per-app peer idle) PLUS the #92 existence-oracle fix (uniform 28P01,
-          # no internal k8s names leaked). Digest-pinned (contract 22). NOTE: the
-          # plain `v0.6.1` digest (12a73533) was built BEFORE the #92 fix merged
-          # (6f8728e / #102) — pinning it here re-opened the oracle on the live
-          # apps-gateway. This tag is the merged-#92 build; the primary gateway
-          # (10-gateway.yaml) has no existence-oracle path so it stays on v0.6.1.
-          # Rebuild + re-pin on any gateway change.
-          image: me-abudhabi-1.ocir.io/axfqznklsd2t/ks-pg/gateway:sha-546d069-92@sha256:6767b26eac00577baa184a67578f656a47d510b199e47f44355aed1374e1e5b4
+          # apps-gateway image. Carries v0.6.1 tenant security ((user,database)
+          # authz + per-app peer idle) + the #92 existence-oracle fix, PLUS the #127
+          # per-app READ-ONLY lane (template-mode RO routing -> compute-ro-<app>,
+          # tenant-isolated). Digest-pinned (contract 22). Rebuild + re-pin on any
+          # gateway change. The primary gateway (10-gateway.yaml) has no per-app path
+          # and is repinned independently.
+          image: me-abudhabi-1.ocir.io/axfqznklsd2t/ks-pg/gateway:sha-445d19d@sha256:8a7a115d06a09765d329ba65edbcb5697953bd2f94c342149b251d0a3e868c45
           imagePullPolicy: IfNotPresent
           env:
             - name: GW_PORT
@@ -68,6 +66,21 @@ spec:
               value: "tmpl,warm,ro"
             - name: GW_IDLE_MS
               value: "60000" # demo-friendly; production: 300000+
+            # Per-app READ-ONLY lane (issue #127). A SECOND listener on GW_RO_PORT
+            # that — because the base mode is `template` — routes database=<app>
+            # READS to THAT app's OWN read-only compute (compute-ro-<app>), scaled
+            # 0<->N on connect. It reuses the SAME (user,database) authz, reserved
+            # systems, servedDatabase rewrite and TLS as the writer port, so the RO
+            # port enforces the identical tenant boundary. It is NOT the primary
+            # gateway's kubectl RO lane (one shared compute-ro) — that would route
+            # every app's reads to one pool = cross-tenant exposure. DATABASE_URL_RO
+            # (emitted by the appdb-operator when roPool.enabled) points here.
+            - name: GW_RO_PORT
+              value: "55434"
+            - name: GW_RO_WAKE_REPLICAS
+              value: "1" # wake to 1 read replica; a per-app HPA grows N under load
+            - name: GW_RO_IDLE_MS
+              value: "60000" # RO pool sleeps after 60s idle (demo-friendly)
             - name: GW_WAKE_TIMEOUT_MS
               value: "120000"
             - name: GW_RETRY_MS
@@ -90,6 +103,7 @@ spec:
               readOnly: true
           ports:
             - { name: pg, containerPort: 55432 }
+            - { name: pg-ro, containerPort: 55434 } # per-app read-only lane (#127)
             - { name: metrics, containerPort: 9090 }
           readinessProbe:
             httpGet: { path: /healthz, port: metrics }
@@ -115,3 +129,6 @@ spec:
   selector: { app: pggw-apps }
   ports:
     - { name: pg, port: 55432, targetPort: pg }
+    # Per-app read-only lane (#127): DATABASE_URL_RO -> pggw-apps:55434 with the
+    # per-app database name; the gateway routes reads to compute-ro-<app>.
+    - { name: pg-ro, port: 55434, targetPort: pg-ro }

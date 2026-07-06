@@ -1043,14 +1043,15 @@ stable API the **knext operator** drives to provision + wire a per-app database
 RBAC (`deploy/84-appdb-external-driver-role.yaml`), and the `v1alpha1` soft-compat
 policy — is in **[docs/appdatabase-api.md](appdatabase-api.md)**.
 
-> **`DATABASE_URL_RO` fails closed.** When `roPool.enabled`, the operator emits a
-> forward-compatible `DATABASE_URL_RO` key pointing at the app's **own** apps-gateway
-> RO port. There is **no per-app RO serving endpoint yet** (a tracked p1
-> read-scaling/gateway follow-up: apps-gateway template-RO listener + per-app RO
-> computes), so the key **refuses to connect** today. By construction (writer DSN
-> with only the port swapped) it can **never** reach the shared primary
-> `compute-ro` pool — that would be cross-tenant exposure. Do not route production
-> reads at `DATABASE_URL_RO` until the endpoint ships; use `DATABASE_URL`.
+> **`DATABASE_URL_RO` is LIVE and tenant-isolated (issue #127).** When
+> `roPool.enabled`, the operator provisions the app's **own** read-only compute
+> (`compute-ro-<app>`, own timeline, `0↔N`) and emits `DATABASE_URL_RO` pointing at
+> the app's apps-gateway RO port (`55434`). The apps-gateway RO lane is **template
+> mode** (`compute-ro-<app>`), so it enforces the same `(user,database)` authz as the
+> writer and can **never** reach another tenant's RO compute or the shared primary
+> `compute-ro` pool. Point per-app reads at `DATABASE_URL_RO`; use `DATABASE_URL` for
+> strict read-your-writes (the RO endpoint is a hot standby). Proven by
+> `deploy/_verify-perapp-ro.sh`.
 
 **Observe / debug:**
 
@@ -1069,9 +1070,13 @@ kubectl -n scale-zero-pg get cm apps-wal-reclaim-pending -o yaml   # pending SK-
   reclaim completes. To force-drop the CR and reconcile later:
   `kubectl patch appdatabase orders -p '{"metadata":{"finalizers":[]}}' --type=merge`
   then `provision-app.sh reclaim-orphans` once the safekeeper recovers.
-- **Read-replica pool (`spec.roPool`)** is a declarative surface only; per-app RO
-  provisioning is handled by the read-scaling lane (`deploy/26/27`). The operator
-  records the request in `status.message` and takes no RO action.
+- **Read-replica pool (`spec.roPool`)** — when `enabled`, the operator provisions a
+  per-app read-only compute `compute-ro-<app>` (own timeline, RollingUpdate, `0↔N`
+  via the apps-gateway RO lane, ephemeral 2Gi/4Gi per #121) plus an optional per-app
+  HPA when `roPool.maxReplicas>0`, and the `DATABASE_URL_RO` key goes live. Toggling
+  `enabled` off tears the RO compute down (writer untouched); deleting the app
+  removes it too. Debug a per-app RO pool: `kubectl -n scale-zero-pg get deploy
+  compute-ro-<app>` + describe its pods (attach stalls / evictions).
 
 Drill (full lifecycle, live): `sh deploy/_verify-operator.sh`.
 
@@ -1343,6 +1348,30 @@ read-only computes coordinate nothing.
 `0 → GW_RO_WAKE_REPLICAS`; `GW_RO_IDLE_MS` with no RO connections scales it back
 to `0`. The gateway RO lane is a copy of the writer lane (same wake/idle/peer/TLS
 code) built from `GW_RO_*` env — remove `GW_RO_PORT` to disable it entirely.
+
+### Per-app read replicas on the apps-gateway (issue #127)
+
+The **apps-gateway** (`pggw-apps`) runs its OWN RO listener on `GW_RO_PORT=55434`,
+but in **template mode** (not the primary's single-fixed-deployment kubectl mode):
+`database=<app>` reads route to **that app's own** read-only compute
+(`compute-ro-<app>`), scaled `0↔N` on connect. This is the multi-tenant read axis —
+each app's reads are isolated to its own RO compute on its own timeline, enforcing
+the same `(user,database)` authz as the writer lane. A naive kubectl RO lane here
+would route **every** app's reads to one shared pool = cross-tenant exposure; the
+template lane is the fix.
+
+- **Provisioning is declarative:** set `AppDatabase.spec.roPool.enabled: true` (knext
+  maps this from `NextApp.spec.database.readReplicas`). The operator renders
+  `compute-ro-<app>` (Deployment + Service, `RO_MODE=Replica`, ephemeral 2Gi/4Gi per
+  #121) and the `DATABASE_URL_RO` key on `app-db-<app>` goes live. `roPool.maxReplicas>0`
+  also renders a per-app HPA (posture B; see the tension note below). Toggling
+  `enabled` off tears the RO compute down; deleting the app removes it.
+- **Isolation + staleness drill:** `KCTX=… sh deploy/_verify-perapp-ro.sh` — two apps
+  A+B, proves A reads A (never B, data + authz both ways), RO writes rejected,
+  staleness measured, teardown removes `compute-ro-<app>`.
+- **Debug one app's pool:** `kubectl -n scale-zero-pg get deploy compute-ro-<app>` +
+  describe its pods. Same `ComputeStuckNotReady` alert covers `compute-<app>` and its
+  RO sibling (the pod-name pattern includes the app suffix).
 
 ```sh
 # enable the pool (bring it online once so it's schedulable), then let idle sleep it

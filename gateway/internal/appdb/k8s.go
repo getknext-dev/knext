@@ -164,6 +164,97 @@ func (k *K8sCluster) ApplyCompute(ctx context.Context, spec ComputeSpec) error {
 	return nil
 }
 
+// ApplyROCompute upserts the per-app read-only compute (compute-ro-<app> Deployment
+// + Service, and — when MaxReplicas>0 — a per-app HPA), attached to the app's OWN
+// timeline via the shared compute-config-<app> ConfigMap (issue #127). Like
+// ApplyCompute it PRESERVES the Deployment's live spec.replicas so it never fights
+// the apps-gateway RO lane that scales the pool 0<->N on read connections.
+func (k *K8sCluster) ApplyROCompute(ctx context.Context, spec ROComputeSpec) error {
+	svc := k.render.RenderROService(spec)
+	svcApi := k.cs.CoreV1().Services(k.ns)
+	if cur, err := svcApi.Get(ctx, svc.Name, metav1.GetOptions{}); apierrors.IsNotFound(err) {
+		if _, err := svcApi.Create(ctx, svc, metav1.CreateOptions{}); err != nil {
+			return fmt.Errorf("create ro service: %w", err)
+		}
+	} else if err != nil {
+		return err
+	} else {
+		cur.Spec.Selector = svc.Spec.Selector
+		cur.Spec.Ports = svc.Spec.Ports
+		cur.Spec.PublishNotReadyAddresses = svc.Spec.PublishNotReadyAddresses
+		cur.Labels = svc.Labels
+		if _, err := svcApi.Update(ctx, cur, metav1.UpdateOptions{}); err != nil {
+			return fmt.Errorf("update ro service: %w", err)
+		}
+	}
+
+	dep := k.render.RenderRODeployment(spec)
+	depApi := k.cs.AppsV1().Deployments(k.ns)
+	if cur, err := depApi.Get(ctx, dep.Name, metav1.GetOptions{}); apierrors.IsNotFound(err) {
+		if _, err := depApi.Create(ctx, dep, metav1.CreateOptions{}); err != nil {
+			return fmt.Errorf("create ro deployment: %w", err)
+		}
+	} else if err != nil {
+		return err
+	} else {
+		// Heal template drift but PRESERVE the gateway-owned replica count.
+		liveReplicas := cur.Spec.Replicas
+		cur.Spec = dep.Spec
+		cur.Spec.Replicas = liveReplicas
+		cur.Labels = dep.Labels
+		if _, err := depApi.Update(ctx, cur, metav1.UpdateOptions{}); err != nil {
+			return fmt.Errorf("update ro deployment: %w", err)
+		}
+	}
+
+	// Optional per-app HPA (posture B). Rendered only when MaxReplicas>0; otherwise
+	// ensure any stale HPA is removed so the pool reverts to gateway-managed 0<->N.
+	hpaApi := k.cs.AutoscalingV2().HorizontalPodAutoscalers(k.ns)
+	hpa := k.render.RenderROHPA(spec)
+	if hpa == nil {
+		if err := k.cs.AutoscalingV2().HorizontalPodAutoscalers(k.ns).Delete(ctx, "compute-ro-"+spec.App, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
+			return fmt.Errorf("remove ro hpa: %w", err)
+		}
+		return nil
+	}
+	if cur, err := hpaApi.Get(ctx, hpa.Name, metav1.GetOptions{}); apierrors.IsNotFound(err) {
+		if _, err := hpaApi.Create(ctx, hpa, metav1.CreateOptions{}); err != nil {
+			return fmt.Errorf("create ro hpa: %w", err)
+		}
+	} else if err != nil {
+		return err
+	} else {
+		cur.Spec = hpa.Spec
+		cur.Labels = hpa.Labels
+		if _, err := hpaApi.Update(ctx, cur, metav1.UpdateOptions{}); err != nil {
+			return fmt.Errorf("update ro hpa: %w", err)
+		}
+	}
+	return nil
+}
+
+// DeleteROCompute removes the app's read-only compute (Deployment + Service + HPA),
+// ignore-not-found. Called when roPool is disabled or the app is deprovisioned.
+func (k *K8sCluster) DeleteROCompute(ctx context.Context, app string) error {
+	del := metav1.DeleteOptions{}
+	ign := func(err error) error {
+		if err == nil || apierrors.IsNotFound(err) {
+			return nil
+		}
+		return err
+	}
+	if err := ign(k.cs.AutoscalingV2().HorizontalPodAutoscalers(k.ns).Delete(ctx, "compute-ro-"+app, del)); err != nil {
+		return err
+	}
+	if err := ign(k.cs.AppsV1().Deployments(k.ns).Delete(ctx, "compute-ro-"+app, del)); err != nil {
+		return err
+	}
+	if err := ign(k.cs.CoreV1().Services(k.ns).Delete(ctx, "compute-ro-"+app, del)); err != nil {
+		return err
+	}
+	return nil
+}
+
 func (k *K8sCluster) DeleteCompute(ctx context.Context, app string) error {
 	del := metav1.DeleteOptions{}
 	ign := func(err error) error {

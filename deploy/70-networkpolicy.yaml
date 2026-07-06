@@ -189,8 +189,9 @@ spec:
     matchLabels: { app: pggw-apps }
   policyTypes: ["Ingress"]
   ingress:
-    - ports: # 55432 from anywhere — the multi-tenant front door
+    - ports: # 55432 writer + 55434 per-app read-only (#127) — the multi-tenant front door
         - { protocol: TCP, port: 55432 }
+        - { protocol: TCP, port: 55434 }
     - from:  # 9090 metrics: in-namespace only (peer scrape + Prometheus)
         - podSelector: {}
       ports:
@@ -200,8 +201,10 @@ spec:
 # (compute-<app>:55433) is reachable ONLY from the apps-gateway pods — the same
 # STRICT posture as the primary compute-ingress. Per-app Deployments carry
 # {tier: apps, plane: compute}, so this one policy covers every app without a
-# per-app rule. (The tmpl seed compute is written via `kubectl exec`, which is
-# API-server exec, not pod-network ingress, so it is unaffected.)
+# per-app rule — INCLUDING the per-app read-only computes (compute-ro-<app>, #127),
+# which carry the same {tier: apps, plane: compute} labels and so are reachable on
+# 55433 only from the apps-gateway pods. (The tmpl seed compute is written via
+# `kubectl exec`, API-server exec not pod-network ingress, so it is unaffected.)
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:

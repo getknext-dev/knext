@@ -42,6 +42,23 @@ type ComputeSpec struct {
 	Quotas     Quotas
 }
 
+// ROComputeSpec is the fully-resolved input to rendering an app's PER-APP read-only
+// compute (compute-ro-<app>, issue #127). It is attached to the app's OWN timeline
+// (the SAME TenantID/TimelineID as the writer ComputeSpec) so reads reflect the
+// app's committed data and NEVER another tenant's. The RO compute is the read-scaling
+// serving endpoint DATABASE_URL_RO points at (via the apps-gateway RO listener). It
+// mirrors deploy/26-compute-ro.yaml but per-app: own Deployment/Service, ephemeral
+// storage sized for a loaded replica (#121), and an OPTIONAL per-app HPA when
+// MaxReplicas>0. At rest it sits at 0 replicas (the apps-gateway RO lane scales it
+// 0<->N on read connections, like the writer lane scales the writer 0<->1).
+type ROComputeSpec struct {
+	App         string
+	TenantID    string
+	TimelineID  string
+	MinReplicas int // per-app HPA floor (0 = gateway-managed scale-to-zero, no HPA)
+	MaxReplicas int // per-app HPA ceiling (0 = no HPA rendered)
+}
+
 // ClusterOps is everything the reconciler needs from the API server: the per-app
 // child objects (Secret / ConfigMap / Deployment / Service), the reclaim ledger,
 // and the CR's own status/finalizer. All methods are idempotent.
@@ -60,6 +77,14 @@ type ClusterOps interface {
 	EnsureSecretROKey(ctx context.Context, app string, enabled bool, writerPort, roPort int) error
 	// ApplyCompute server-side-applies the ConfigMap + Deployment + Service for the app.
 	ApplyCompute(ctx context.Context, spec ComputeSpec) error
+	// ApplyROCompute upserts the app's PER-APP read-only compute (compute-ro-<app>
+	// Deployment + Service, and an optional per-app HPA when MaxReplicas>0), attached
+	// to the app's OWN timeline (issue #127). Idempotent; preserves the live replica
+	// count (the apps-gateway RO lane owns 0<->N scaling).
+	ApplyROCompute(ctx context.Context, spec ROComputeSpec) error
+	// DeleteROCompute removes the app's read-only compute (Deployment + Service + HPA).
+	// Called when roPool is disabled or the app is deleted. Idempotent (ignore-not-found).
+	DeleteROCompute(ctx context.Context, app string) error
 	// DeleteCompute removes the app's Deployment + Service + ConfigMap + Secret.
 	DeleteCompute(ctx context.Context, app string) error
 	// DeploymentAvailable reports whether compute-<app> has >=1 available replica.

@@ -338,6 +338,36 @@ supports a read-only endpoint that streams WAL from the safekeepers and tracks
 the timeline tip (not merely a static-at-attach LSN). The `Static` fixed-LSN path
 remains the honest fallback (`RO_MODE=Static`).
 
+## Per-app read replicas — tenant isolation + staleness (issue #127)
+
+Per-app read replicas make `DATABASE_URL_RO` a **real, tenant-isolated** endpoint:
+the apps-gateway RO listener (`GW_RO_PORT=55434`, **template mode**) routes
+`database=<app>` reads to that app's OWN `compute-ro-<app>` (0↔N), provisioned by the
+AppDatabase operator when `roPool.enabled`. Gateway routing + authz are covered by Go
+table tests (`gateway/internal/wake/ro_test.go` — per-app resolve, `(user,database)`
+authz on the RO lane, never the shared pool); operator RO provisioning by
+`gateway/internal/appdb/{reconcile,render_ro}_test.go`; manifest contracts by
+`deploy/_validate.sh`; and **isolation end-to-end** by `deploy/_verify-perapp-ro.sh`
+(two apps A+B, each `roPool.enabled`).
+
+Verified **live on OKE, 2026-07-05** (`_verify-perapp-ro.sh`, apps `roa`/`rob`, gateway
++ operator on the #127 image):
+
+| Metric | Result | Evidence |
+|---|---|---|
+| A reads A (per-app RO serving) | ✅ A's `DATABASE_URL_RO` woke `compute-ro-roa` and returned A's own row | **~48 s** first-read incl. **cold** RO wake (0→1); scale-to-zero pool |
+| **A can NOT read B's data** | ✅ A's RO returned **0 rows** for B's marker | timeline isolation (distinct branch) |
+| **A refused on B's RO db** | ✅ `app_roa` on db `rob` (RO port) → `28P01`, and `app_rob` on `roa` → refused | `(user,database)` authz holds on `55434`, **both directions** |
+| Write on RO DSN rejected | ✅ `read-only transaction` error; no row leaked | negative assertion (writer confirms no row) |
+| Staleness (Replica lag) | fresh writer row visible on A's RO (bounded) | **~143 s this run** — but that figure is dominated by scale-to-zero cold-wakes + a **concurrent load lane** (the writer-autoscaler drill on the same 2-node cluster) contending for CPU, **not** replication lag. The warm tip-following contract is the pre-existing **~9 s** (§ Read-only pool #66) — Replica mode is the same code path per-app. |
+| Teardown removes RO compute | ✅ deleting B removed `compute-ro-rob` | no orphaned read replicas |
+
+Verified **live on OKE, 2026-07-05** (`_verify-perapp-ro.sh`, apps `roa`/`rob`, gateway
++ operator on `sha-445d19d@sha256:8a7a115d…`). The **isolation** guarantee — A reads
+A, never B, both data and authz directions — is the headline result and passed
+cleanly across repeated runs; the staleness figure is noisy under the concurrent
+load lane and is recorded honestly rather than cherry-picked.
+
 ## Read-only pool under load (HPA n>1, issue #99)
 
 The GA gate for read-scaling: with the read-scaling HPA
