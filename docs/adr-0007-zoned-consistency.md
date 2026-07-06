@@ -1,9 +1,15 @@
 # ADR-0007 — Zoned consistency: DB-per-zone, strong in-zone, eventual across-zone via logical replication
 
-- **Status: PROPOSED — pending owner approval.** Design record only. This ADR
-  is the design gate for the **zone-scaling axis** (`docs/SCALING.md` §4, the v2
-  frontier). **No zone code is written against it until the owner ratifies** the
-  open decisions below and gives an explicit go on building v2.
+- **Status: ACCEPTED — owner ratified 2026-07-06.** Design gate for the
+  **zone-scaling axis** (`docs/SCALING.md` §4, the v2 frontier). Ratified
+  decisions: **BUILD v2 zones**; **publisher wake = GATEWAY-MEDIATED from the
+  start** (not warm-publisher — the only option keeping publishers fully
+  scale-to-zero: the apps-gateway mediates the replication connection to
+  `compute-<zone>:55433` and wakes a sleeping publisher when a subscriber
+  walreceiver connects, ~3.6s wake, walreceiver retries tolerate it); Zone CRD
+  **composes** AppDatabase; **intra-cluster first**; consistency = **strong
+  in-zone / eventual across-zone / no cross-zone ACID (sagas)**. Build sequenced
+  AFTER v1.2 (#127/#103) to keep the gateway lane collision-free.
 - **Date:** 2026-07-06
 - **Deciders:** architecture owner (to ratify); design by the scale-zero-pg lane,
   grounded in spike #133 (live evidence on OKE, context `context-ckmva7v7zvq`,
