@@ -15,7 +15,7 @@ Next.js on **Knative** with **scale-to-zero**.
 ```bash
 npm i @knext/core
 # or run the CLI directly
-npx kn-next --help
+npx @knext/core --help
 ```
 
 ## Usage
@@ -23,7 +23,7 @@ npx kn-next --help
 Deploy your Next.js app:
 
 ```bash
-npx kn-next deploy
+npx @knext/core deploy
 ```
 
 Reference the adapter and config types from your `next.config` / `kn-next.config`:

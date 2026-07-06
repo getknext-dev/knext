@@ -422,7 +422,7 @@ The `kn-next` CLI provides commands for building and deploying Next.js applicati
 ### Deploy Command
 
 ```bash
-npx kn-next deploy [options]
+npx @knext/core deploy [options]
 ```
 
 #### Options
@@ -497,7 +497,7 @@ jobs:
           KN_NAMESPACE: production
           KN_REDIS_URL: ${{ secrets.REDIS_URL }}
           KN_DATABASE_URL: ${{ secrets.DATABASE_URL }}
-        run: npx kn-next deploy
+        run: npx @knext/core deploy
 ```
 
 #### GitLab CI
@@ -518,7 +518,7 @@ deploy_production:
     - gcloud container clusters get-credentials $GKE_CLUSTER --zone $GKE_ZONE
   script:
     - cd apps/file-manager
-    - npx kn-next deploy --tag $CI_COMMIT_SHA --namespace production
+    - npx @knext/core deploy --tag $CI_COMMIT_SHA --namespace production
   environment:
     name: production
   only:
@@ -551,7 +551,7 @@ steps:
       inlineScript: |
         az aks get-credentials --resource-group myRG --name myCluster
         cd apps/file-manager
-        npx kn-next deploy --tag $(Build.SourceVersion) --namespace production
+        npx @knext/core deploy --tag $(Build.SourceVersion) --namespace production
 ```
 
 > **STALE / unverified (#46):** this AKS snippet predates the official-adapter migration
@@ -571,7 +571,7 @@ steps:
 ### Build Command
 
 ```bash
-npx kn-next build
+npx @knext/core build
 ```
 
 Runs the following steps:
@@ -584,7 +584,7 @@ Runs the following steps:
 ### Cleanup Command
 
 ```bash
-npx kn-next cleanup [--namespace <ns>]
+npx @knext/core cleanup [--namespace <ns>]
 ```
 
 Removes deployed resources from the cluster:
@@ -605,19 +605,19 @@ Removes deployed resources from the cluster:
 
    ```bash
    cd apps/file-manager
-   npx kn-next deploy
+   npx @knext/core deploy
    ```
 
 3. **Deploy to Staging:**
 
    ```bash
-   npx kn-next deploy --namespace staging --tag staging-$(date +%s)
+   npx @knext/core deploy --namespace staging --tag staging-$(date +%s)
    ```
 
 4. **Preview Manifest (Dry Run):**
 
    ```bash
-   npx kn-next deploy --dry-run
+   npx @knext/core deploy --dry-run
    cat .output/knative-service.yaml
    ```
 
@@ -641,7 +641,7 @@ Removes deployed resources from the cluster:
 
 ## Future Roadmap
 
-- [ ] CLI tool for initialization (`npx kn-next init`)
+- [ ] CLI tool for initialization (`npx @knext/core init`)
 - [x] CI/CD parameter support
 - [ ] Multi-zone support with shared cache
 - [ ] Edge middleware on Cloudflare Workers
