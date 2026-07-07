@@ -52,6 +52,9 @@ was not separately scored before iteration 2 (marked —).
 | **v1.0.0** | System designer | **7** | **6** | **7** |
 | **v1.0.0** | DevOps/SRE | **7** | **6** | **6** |
 | **v1.0.0** | Architect | **8** | **6** | **7** |
+| **v2.0.0** | System designer | **6** | **6** | **6** |
+| **v2.0.0** | DevOps/SRE | **6** | **6** | **5** |
+| **v2.0.0** | Architect | **8** | **6** | **6** |
 
 **Iteration-1 mean (mapped axes): ease 6.0, reliability 4.7** (round 0: 4.3, 3.7).
 **Iteration-2 mean (explicit metrics): maturity 4.7, ease 4.3, reliability 3.7.**
@@ -136,3 +139,26 @@ under its own load (#121), manifest-contract gate red vs the live cluster (#126)
 plus #116/#117/#118. Ease held at 6 (Neon ops ceiling + accreting machinery + the
 new backup/live-store config split-brain). None retract the GA; all are the v1.0.1
 hardening lap.
+
+**v2.0.0 zone-axis release review (trigger-gated): maturity 6.7, ease 6.0,
+reliability 5.7.** Architect SIGN-OFF — "architecturally defensible v2 for its
+stated intra-cluster scope"; the 4-axis scaling model is complete and coherent,
+the SCS un-park is done responsibly (coupling declared via both-sides-agree,
+directional + subset-scoped opt-in publishes, eventual BY CONTRACT never a silent
+default, single-writer-per-table, bounded blast radius). No tag retraction. The
+reliability dip is the honest, precedented cost of shipping a new frontier surface
+(v0.6.0 pattern): the single-DB/tenant/read core keeps its pager-YES and is
+untouched (slot-janitor verified inert on the slot-free plane), but the zone axis
+re-opens the pager for its OWN scope. **CONVERGENT top finding, hit independently
+by DevOps + system-designer + live-confirmed: v2-2 (Zone CRD + operator) is NOT
+DEPLOYED on the live cluster** — `_verify-zones.sh` applies 86/87, drills, then
+tears them down on EXIT, so the flagship surface is proven only in throwaway drills
+(the #27/#125 "merged ≠ deployed" class; v2-1 repl-wake + v2-3 WAL-bound ARE live).
+The v2.0.1 hardening list: deploy the zone operator + CRD to live with soak (#151);
+#142 janitor-disarm alert (v2 WIDENS it — the exact class that caused the
+2026-07-06 DiskPressure); self-healing re-sync actuator for an invalidated slot +
+stale `streaming` status (designed-not-built); Zone Degraded/Failed/subscription-
+error alerting; single-writer fail-open on a Zone-lister outage (#147, the invariant
+that keeps "eventual" from "eventually wrong"); cross-zone plaintext creds
+(sslmode=disable — blocker for the §4e cross-cluster future); manifest-contract gate
+doesn't cover the new zone surface. None retract v2.0.0; all are the v2.0.1 lap.
