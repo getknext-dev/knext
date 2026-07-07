@@ -8,6 +8,46 @@ cd "$(dirname "$0")"
 fail() { echo "FAIL: $*" >&2; exit 1; }
 ok() { echo "ok - $*"; }
 
+# Canonical sha256 of the prometheus-config ConfigMap DATA (prometheus.yml + rules.yml)
+# in 60-prometheus.yaml — the SINGLE SOURCE OF TRUTH for the auto-reload config-hash
+# annotation (issue #155). The pod-template annotation ks-pg.dev/prometheus-config-sha256
+# must equal this value; contract 27 enforces it, and `./_validate.sh prom-config-hash`
+# prints it so a human can regenerate the annotation after editing the rules. Offline
+# (no cluster / no pyyaml): extracts the two block-scalar keys with an indent-aware parser
+# and hashes their dedented content in sorted-key order.
+prom_config_hash() {
+  python3 - "$1" <<'PY'
+import hashlib, re, sys
+text = open(sys.argv[1]).read()
+cm = None
+for d in re.split(r'(?m)^---\s*$', text):
+    if re.search(r'(?m)^kind:\s*ConfigMap\s*$', d) and 'name: prometheus-config' in d:
+        cm = d; break
+if cm is None:
+    sys.stderr.write("prom-config-hash: no prometheus-config ConfigMap in 60-prometheus.yaml\n"); sys.exit(3)
+lines = cm.splitlines(); data = {}; i = 0
+while i < len(lines):
+    m = re.match(r'^  ([^\s:]+):\s*\|\s*$', lines[i])  # 2-space key whose value is a literal block
+    if m:
+        key = m.group(1); i += 1; block = []
+        while i < len(lines) and (lines[i].strip() == '' or lines[i].startswith('    ')):
+            block.append(lines[i][4:] if lines[i].startswith('    ') else '')
+            i += 1
+        data[key] = "\n".join(block); continue
+    i += 1
+if not data:
+    sys.stderr.write("prom-config-hash: no data block-scalars found\n"); sys.exit(3)
+canon = "".join("%s\n%s\n" % (k, data[k]) for k in sorted(data))
+sys.stdout.write(hashlib.sha256(canon.encode()).hexdigest())
+PY
+}
+
+# Subcommand: print the prometheus config-hash and exit (offline; regenerates the
+# annotation after a rules edit — `./_validate.sh prom-config-hash`).
+if [ "${1:-}" = "prom-config-hash" ]; then
+  prom_config_hash 60-prometheus.yaml; echo; exit 0
+fi
+
 command -v kubectl >/dev/null || fail "kubectl not found"
 
 # 1. every manifest must dry-run apply cleanly (server-side validation).
@@ -480,3 +520,35 @@ grep -q 'repl-slot-wal-monitor|repl-slot-inactive-monitor' 60-prometheus.yaml ||
 # the KSM `pods` collector is the metric SOURCE — assert it stays enabled (else the rule is inert).
 grep -q 'resources=cronjobs,jobs,deployments,statefulsets,pods' 59-kube-state-metrics.yaml || fail "59 KSM must keep the `pods` collector — JanitorConfigDisarmed reads kube_pod_container_status_waiting_reason from it (#142)"
 ok "janitor-disarm tripwire wired: JanitorConfigDisarmed pages on CreateContainerConfigError for janitor+repl-slot monitors (issue #142)"
+
+# 27. contract (issue #155): the prometheus Deployment POD TEMPLATE carries a config-hash
+#     annotation equal to the sha256 of the prometheus-config ConfigMap data. A rule/scrape
+#     edit changes the hash → the pod template changes → `kubectl apply` rolls the (Recreate)
+#     Deployment → the new pod LOADS the fresh rules at boot (AUTO-RELOAD). WITHOUT it, a
+#     merged+applied ConfigMap change is DARK in the running Prometheus until a manual POST
+#     /-/reload — the 2026-07-06 zone-alerts miss (rules can be applied yet never loaded).
+#     Making a stale annotation a HARD failure guarantees the roll is never forgotten.
+#     Regenerate the value with: ./_validate.sh prom-config-hash
+WANT_PROM_HASH=$(prom_config_hash 60-prometheus.yaml)
+GOT_PROM_HASH=$(grep -oE 'ks-pg\.dev/prometheus-config-sha256:[[:space:]]*"?[0-9a-f]{64}' 60-prometheus.yaml | grep -oE '[0-9a-f]{64}' | head -1)
+[ -n "$GOT_PROM_HASH" ] || fail "60-prometheus.yaml pod template lacks the ks-pg.dev/prometheus-config-sha256 auto-reload annotation (#155) — add it under spec.template.metadata.annotations; value = ./_validate.sh prom-config-hash"
+[ "$WANT_PROM_HASH" = "$GOT_PROM_HASH" ] || fail "60-prometheus.yaml config-hash annotation ($GOT_PROM_HASH) != the ConfigMap data hash ($WANT_PROM_HASH) — the rules/config changed but the pod template was not re-hashed, so \`kubectl apply\` would NOT roll prometheus and the new rules would stay DARK. Regenerate: ./_validate.sh prom-config-hash (#155)"
+# placement: the annotation MUST sit on spec.template.metadata (rolls the pod). A top-level
+# metadata annotation does not change the pod template and would never trigger a roll.
+awk '/^  template:/{t=NR} /prometheus-config-sha256:/{a=NR} END{exit !(t>0 && a>t)}' 60-prometheus.yaml \
+  || fail "60 config-hash annotation must live under spec.template.metadata.annotations (a top-level annotation does NOT roll the pod, so rules would stay DARK) (#155)"
+ok "prometheus pod template carries a config-hash annotation matching the ConfigMap data — a rules edit auto-rolls the pod (#155)"
+
+# 28. contract (issues #155 + #153): the LIVE drift gate (_verify-drift.sh) must
+#     (a) assert every SHIPPED alert rule is LOADED in the running Prometheus (query
+#     /api/v1/rules) — a rule can be merged+applied to the ConfigMap yet DARK until a
+#     reload, which sections A–D were blind to; and (b) in the digest-provenance check
+#     accept the manifest digest carried by a pod's .status.image, not the imageID alone —
+#     an image pushed as an OCI INDEX (docker buildx attestations) reports imageID as the
+#     selected child's CONFIG digest, which never equals the index/manifest digest the
+#     manifest pins, so imageID-alone false-fires on a pod running EXACTLY the pinned
+#     reference (the appdb-operator case). Guard both so a refactor cannot silently drop them.
+grep -q 'api/v1/rules' _verify-drift.sh || fail "_verify-drift.sh must assert shipped rules are LOADED in the running Prometheus via /api/v1/rules — a merged-but-not-reloaded rule is DARK (#155)"
+grep -q 'RULEUNLOADED' _verify-drift.sh || fail "_verify-drift.sh loaded-rules assertion missing (expected the shipped-vs-loaded diff that flags RULEUNLOADED) (#155)"
+grep -q 'status.image' _verify-drift.sh || fail "_verify-drift.sh section C must also accept the manifest digest from .status.image — OCI-index images report imageID as the child CONFIG digest (the appdb-operator false positive, #153)"
+ok "drift gate asserts shipped rules LOADED + tolerates OCI-index imageID via the .status.image digest (#155/#153)"

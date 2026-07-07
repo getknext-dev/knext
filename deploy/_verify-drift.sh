@@ -101,20 +101,39 @@ ok "all $COUNT declared Deployments/StatefulSets/CronJobs exist live AND are rea
 # C. DIGEST provenance (issue #56): presence+readiness prove a pod is UP, not that
 # it runs the code we merged. A mutable tag (v0.5.0) can point at a rebuilt binary
 # that was never rolled, or a rolled pod can still run a superseded layer behind a
-# matching tag. So assert the LIVE running imageID digest of every OUR-OCIR
-# (ks-pg/*) container equals a digest the manifests pin (tag@sha256:...). This
-# closes the final merged≠deployed hiding spot the tag-based check was blind to.
+# matching tag. So assert every OUR-OCIR (ks-pg/*) container is running a digest the
+# manifests pin (tag@sha256:...) — matched against EITHER the pulled reference in
+# .status.image OR the imageID (issue #153: OCI-index images report imageID as the
+# child CONFIG digest, which never equals the pinned index/manifest digest, so an
+# imageID-only check false-fired on the appdb-operator even though it ran exactly the
+# pinned image). This closes the merged≠deployed hiding spot the tag-based check was
+# blind to, without false-firing on index-pushed images.
 WANT_DIGESTS=$(grep -rhoE 'me-abudhabi-1\.ocir\.io/[^[:space:]"#]+@sha256:[0-9a-f]{64}' [0-9][0-9]-*.yaml | grep -oE 'sha256:[0-9a-f]{64}' | sort -u)
 [ -n "$WANT_DIGESTS" ] || fail "no digest-pinned OCIR images in deploy/ — manifests must pin tag@sha256 (issue #56; see _validate.sh contract 22)"
 $K get pods -o jsonpath='{range .items[*]}{range .status.containerStatuses[*]}{.image}{" "}{.imageID}{"\n"}{end}{end}' \
   | grep 'ocir\.io/.*/ks-pg/' > /tmp/drift-imgs-$$.txt 2>/dev/null || true
 while read -r img imgid; do
   [ -n "$img" ] || continue
-  d=$(printf '%s' "$imgid" | grep -oE 'sha256:[0-9a-f]{64}' | head -1)
-  if [ -z "$d" ]; then
-    echo "  NODIGEST: running $img exposes no resolvable imageID digest"
-  elif ! printf '%s\n' "$WANT_DIGESTS" | grep -q "$d"; then
-    echo "  DIGESTDRIFT: running $img imageID $d is NOT any manifest-pinned digest"
+  # imageID is the digest the kubelet recorded for the RUNNING content. For a normal
+  # single-manifest image that equals the manifest digest the manifests pin. BUT an image
+  # pushed as an OCI *index* (docker buildx default attestations/provenance) makes imageID
+  # the SELECTED CHILD's CONFIG digest — which never equals the index/manifest digest — so
+  # imageID-alone false-fires on a pod that is running EXACTLY the pinned reference (the
+  # appdb-operator case, #153: manifest pins @sha256:8a7a1..., imageID is the child config
+  # @sha256:24f22...). The reference the kubelet actually resolved and pulled is carried
+  # digest-and-all in .status.image (`img` here) for a digest-pinned spec — and contract 22
+  # guarantees every ks-pg manifest IS digest-pinned. So accept a container whose EITHER
+  # .status.image digest OR imageID digest is a manifest-pinned digest. A genuinely drifted
+  # pod (bare tag / unpinned content) matches NEITHER and still trips DIGESTDRIFT.
+  dimg=$(printf '%s' "$img"   | grep -oE 'sha256:[0-9a-f]{64}' | head -1)
+  did=$(printf '%s' "$imgid" | grep -oE 'sha256:[0-9a-f]{64}' | head -1)
+  if [ -z "$dimg" ] && [ -z "$did" ]; then
+    echo "  NODIGEST: running $img exposes no resolvable digest (.status.image=none imageID=none)"
+  elif { [ -n "$dimg" ] && printf '%s\n' "$WANT_DIGESTS" | grep -q "$dimg"; } \
+    || { [ -n "$did" ]  && printf '%s\n' "$WANT_DIGESTS" | grep -q "$did"; }; then
+    : # running content matches a manifest-pinned digest (via the pulled reference OR the imageID)
+  else
+    echo "  DIGESTDRIFT: running $img (image-digest ${dimg:-none} / imageID ${did:-none}) matches NO manifest-pinned digest"
   fi
 done < /tmp/drift-imgs-$$.txt > /tmp/drift-digest-$$.txt
 rm -f /tmp/drift-imgs-$$.txt
@@ -149,4 +168,35 @@ fi
   || fail "the zone-operator Deployment is present but not ready (readyReplicas=$ZREADY want=$ZSPEC) — the reconciler is not a sustained healthy deploy (issue #151)."
 ok "zone-operator Deployment is live and ready $ZREADY/$ZSPEC (sustained, not a throwaway drill, issue #151)"
 
-echo "drift verification: live pods match the manifest contract AND every declared workload is deployed and healthy AND runs the pinned image digest AND the zone axis (CRD + operator) is live-present (issue #151)"
+# E. RULES-LOADED (issue #155). Sections A–D prove workloads/images are deployed, but a
+# Prometheus ALERT RULE is a merged≠deployed case they are blind to: a rule can be merged
+# into deploy/60, applied to the prometheus-config ConfigMap, and even present on the pod's
+# mounted rules.yml, yet NOT LOADED by the running Prometheus — ConfigMap volume updates do
+# NOT trigger a reload, so without a pod roll or a POST /-/reload the rule stays DARK (the
+# 2026-07-06 zone-alerts miss: JanitorConfigDisarmed/ZoneDegradedOrFailed applied but
+# unloaded). deploy/60 now carries a config-hash pod annotation so an apply auto-rolls the
+# pod (_validate contract 27), and this gate independently proves the END STATE: every alert
+# rule SHIPPED in the manifest is LOADED in the live Prometheus (/api/v1/rules). A
+# shipped-but-unloaded rule is RED — the exact "applied yet dark" hole.
+SHIPPED_ALERTS=$(grep -oE '^[[:space:]]*- alert:[[:space:]]+[A-Za-z0-9_]+' 60-prometheus.yaml | awk '{print $NF}' | sort -u)
+[ -n "$SHIPPED_ALERTS" ] || fail "no alert rules parsed from 60-prometheus.yaml — parser broken? (issue #155)"
+LOADED=$($K exec deploy/prometheus -- wget -qO- 'http://localhost:9090/api/v1/rules' 2>/dev/null \
+  | python3 -c 'import json,sys
+try:
+    d=json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+print("\n".join(sorted({r["name"] for g in d["data"]["groups"] for r in g["rules"] if r.get("type")=="alerting"})))')
+[ -n "$LOADED" ] || fail "could not read loaded alert rules from the running Prometheus (/api/v1/rules empty or unreachable) — is deploy/prometheus up? (issue #155)"
+UNLOADED=""
+for a in $SHIPPED_ALERTS; do
+  printf '%s\n' "$LOADED" | grep -qx "$a" || UNLOADED="$UNLOADED $a"
+done
+if [ -n "$UNLOADED" ]; then
+  echo "  RULEUNLOADED:$UNLOADED" >&2
+  fail "alert rule(s) shipped in deploy/60 are NOT loaded in the running Prometheus (merged≠loaded — a ConfigMap rule change was applied but the pod never reloaded/rolled). Re-apply deploy/60-prometheus.yaml (the config-hash annotation now rolls the pod) or POST /-/reload — see above (issue #155)"
+fi
+NRULES=$(printf '%s\n' "$SHIPPED_ALERTS" | grep -c .)
+ok "all $NRULES alert rules shipped in deploy/60 are LOADED in the running Prometheus (merged==loaded, issue #155)"
+
+echo "drift verification: live pods match the manifest contract AND every declared workload is deployed and healthy AND runs the pinned image digest AND the zone axis (CRD + operator) is live-present AND every shipped Prometheus alert rule is loaded (issues #151/#155)"

@@ -241,6 +241,37 @@ Existence-only was blind to a deployed-yet-CrashLoopBackOff workload — e.g. a
 crash-looping kube-state-metrics would have passed "exists" while blinding five platform
 alerts. Now a 0-ready or suspended load-bearing workload fails the drill.
 
+The same gate also checks two subtler flavors of merged≠deployed:
+
+- **Image-digest provenance (issues #56/#153).** Every running `ks-pg/*` container must
+  be executing a digest the manifests pin (`tag@sha256:…`) — not just a matching *tag*.
+  The check matches the pinned digest against **either** the reference the kubelet
+  actually pulled (`.status.image`) **or** the recorded `imageID`. Both are checked
+  because an image pushed as an **OCI image index** (docker buildx attestations/provenance
+  — the `appdb-operator` build is one) reports its `imageID` as the *selected child's
+  config digest*, a different `sha256` than the index/manifest digest the manifest pins.
+  An `imageID`-only comparison false-fired `DIGESTDRIFT` on such a pod even though it was
+  running exactly the pinned reference (verified 2026-07-07 with a forced `Always` pull).
+  A genuinely drifted pod — a bare tag, or unpinned content — still matches neither and
+  trips. **Do not "reconcile" that by pinning the `imageID`:** a config digest is not a
+  pullable manifest reference.
+
+- **Prometheus rules LOADED, not merely applied (issue #155).** A rule can be merged into
+  `deploy/60-prometheus.yaml`, applied to the `prometheus-config` ConfigMap, and even
+  present on the pod's mounted `rules.yml`, yet **never loaded** by the running Prometheus
+  — ConfigMap volume updates do **not** trigger a reload, so the rule stays *dark* until a
+  pod roll or a manual `POST /-/reload` (this bit the 2026-07-06 zone alerts). The gate
+  now queries the live Prometheus (`/api/v1/rules`) and fails if **any** alert rule shipped
+  in `deploy/60` is not loaded. It is backed by an **auto-reload** mechanism: the
+  Prometheus Deployment pod template carries a `ks-pg.dev/prometheus-config-sha256`
+  annotation whose value is the sha256 of the ConfigMap data. Editing a rule changes the
+  hash, which changes the pod template, so `kubectl apply` **rolls the (Recreate) pod** and
+  the new pod loads the fresh rules at boot — no manual `/-/reload` needed. **After any
+  edit to the ConfigMap rules/scrape config, regenerate the annotation:**
+  `./deploy/_validate.sh prom-config-hash` (prints the value to paste). `_validate.sh`
+  contract 27 fails CI if the annotation drifts from the ConfigMap, guaranteeing the roll
+  is never forgotten.
+
 ## Object-storage backend (#105)
 
 The storage plane's durable truth is an **S3 object store** (pageserver layer
@@ -1882,8 +1913,12 @@ same `ks-pg/gateway` repo) are **pinned by digest** in the manifests
 `61-alertmanager.yaml`). The tag is human provenance; the `@sha256` is what
 Kubernetes actually pulls. This is enforced by `deploy/_validate.sh` (contract 22:
 every `ks-pg/*` image must carry `@sha256`) and `deploy/_verify-drift.sh` (asserts
-the **live** running `imageID` digest equals the manifest digest — so a
-rebuilt-but-not-rolled or stale-tag binary can no longer pass drift-green).
+the **live** running digest equals a manifest-pinned digest — matched against the
+pulled reference in `.status.image` **or** the `imageID`, so a rebuilt-but-not-rolled
+or stale-tag binary can no longer pass drift-green). Matching either field is what
+keeps **OCI-index** images (docker buildx attestations — e.g. `appdb-operator`) from
+false-firing: their `imageID` is the child *config* digest, a different `sha256` than
+the index/manifest digest the manifest pins (issue #153).
 
 **Release procedure — build → push → record digest → bump manifest → roll:**
 
@@ -1903,7 +1938,7 @@ oci --profile DEFAULT artifacts container image list \
 sh deploy/_validate.sh                       # contract 22 must pass
 kubectl -n scale-zero-pg apply -f deploy/10-gateway.yaml   # (and 58/61 as changed)
 kubectl -n scale-zero-pg rollout status deploy/pggw
-sh deploy/_verify-drift.sh                   # live imageID digest == manifest digest
+sh deploy/_verify-drift.sh                   # live digest (.status.image|imageID) == a manifest-pinned digest
 ```
 
 Never ship a bare tag: it reopens the `merged ≠ deployed` class the digest pin

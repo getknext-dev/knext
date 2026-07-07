@@ -532,6 +532,18 @@ spec:
   template:
     metadata:
       labels: { app: prometheus, plane: observability }
+      annotations:
+        # AUTO-RELOAD (issue #155): sha256 of the prometheus-config ConfigMap data
+        # (prometheus.yml + rules.yml). A rule/scrape edit changes this hash → the pod
+        # template changes → `kubectl apply` rolls this (Recreate) Deployment → the new
+        # pod LOADS the fresh rules at boot. WITHOUT this, a merged+applied ConfigMap
+        # change stays DARK in the running Prometheus until a manual POST /-/reload — the
+        # 2026-07-06 zone-alerts miss (rules mounted-but-never-loaded). REGENERATE after
+        # ANY edit to the ConfigMap above:  ./_validate.sh prom-config-hash
+        # (prints the value to paste here). _validate.sh contract 27 fails if this drifts
+        # from the ConfigMap data; _verify-drift.sh section E independently asserts every
+        # shipped rule is LOADED in the live pod (/api/v1/rules).
+        ks-pg.dev/prometheus-config-sha256: "5a7a24fedea011303b548ebcbc69b7c5ece888ca11840f53484bc71db3edd318"
     spec:
       serviceAccountName: prometheus
       securityContext:
