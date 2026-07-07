@@ -94,19 +94,17 @@ spec:
       containers:
         - name: appdb-operator
           # Same multi-binary gateway image; ENTRYPOINT overridden to /appdb-operator.
-          # This build adds #127 per-app RO-compute provisioning (compute-ro-<app> +
-          # optional per-app HPA). Digest-pinned (contract 22). Rebuild + re-pin on
-          # any operator change.
-          # NOTE (issue #153): this build was pushed as an OCI IMAGE INDEX (buildx
-          # attestations), so the manifest/index digest below (@sha256:8a7a115d…) is what
-          # the manifests pin and what `.status.image` reports, but the kubelet's imageID
-          # is the selected child's CONFIG digest (sha256:24f221f3…) — a DIFFERENT digest
-          # for the SAME image. Verified 2026-07-07: a forced `Always` pull of this exact
-          # reference resolves to that imageID and the operator reconciles AppDatabases
-          # correctly. The pin is CORRECT — do NOT "fix" it to the imageID (24f221f3 is a
-          # config digest, not a pullable manifest reference). _verify-drift.sh section C
-          # accepts the .status.image digest so this no longer false-fires DIGESTDRIFT.
-          image: me-abudhabi-1.ocir.io/axfqznklsd2t/ks-pg/gateway:sha-445d19d@sha256:8a7a115d06a09765d329ba65edbcb5697953bd2f94c342149b251d0a3e868c45
+          # This build (post-#159) mints per-app credentials as SCRAM-SHA-256 verifiers
+          # (#117 — reconcile.go/scram.go/render.go: APP_ROLE_VERIFIER in the Secret +
+          # spec, no md5), on top of the #127 per-app RO-compute provisioning. So a NEW
+          # AppDatabase is SCRAM from creation. Digest-pinned (contract 22). Rebuild +
+          # re-pin on any operator change.
+          # NOTE: verified live 2026-07-07 (#160 rollout) — this build is a SINGLE-manifest
+          # image, so the kubelet's imageID equals the manifest digest pinned below
+          # (@sha256:2e609e60…); it matches _verify-drift.sh section C directly (unlike the
+          # prior sha-445d19d build, which was an OCI index whose imageID was a child CONFIG
+          # digest — #153 — that section C still tolerates via the .status.image digest).
+          image: me-abudhabi-1.ocir.io/axfqznklsd2t/ks-pg/gateway:sha-06dba96@sha256:2e609e608f92c0fdd21c0d41c7f526b650caaf60647d697cbc74e837ad0f6fdf
           imagePullPolicy: IfNotPresent
           command: ["/appdb-operator"] # override the image's /gateway entrypoint
           securityContext:

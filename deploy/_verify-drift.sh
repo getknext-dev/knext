@@ -199,4 +199,29 @@ fi
 NRULES=$(printf '%s\n' "$SHIPPED_ALERTS" | grep -c .)
 ok "all $NRULES alert rules shipped in deploy/60 are LOADED in the running Prometheus (merged==loaded, issue #155)"
 
-echo "drift verification: live pods match the manifest contract AND every declared workload is deployed and healthy AND runs the pinned image digest AND the zone axis (CRD + operator) is live-present AND every shipped Prometheus alert rule is loaded (issues #151/#155)"
+# F. COMPUTE-FILES SCRAM CONTENT (issue #160). The md5→SCRAM migration (#117) lives in
+# the SHARED compute-files ConfigMap: config.json's password_encryption AND the compute
+# entrypoint's pg_hba `md5`→`scram-sha-256` catch-all rewrite + the APP_ROLE_VERIFIER
+# spec-role injection. That ConfigMap only takes effect on the NEXT per-app compute boot,
+# so an "applied the new image/operator but never re-applied deploy/54" (or never-applied)
+# cluster is a merged≠deployed hole A–E are blind to: no workload/image-digest change, yet
+# a cold-waking per-app compute would enforce the OLD `md5` pg_hba and silently lose SCRAM
+# on the wire (or, worse, mid-rollout, meet a scram pg_hba with an unmigrated md5 verifier
+# — the #160 cold-wake-outage hazard). Assert the LIVE compute-files carries the SCRAM
+# migration verbatim so "the entrypoint was never rolled to SCRAM" is RED.
+CF=$($K get configmap compute-files -o jsonpath='{.data.config\.json}{"\n===ENTRYPOINT===\n"}{.data.entrypoint\.sh}' 2>/dev/null || true)
+[ -n "$CF" ] || fail "compute-files ConfigMap absent or unreadable on the live cluster (issue #160)"
+CFERR=""
+printf '%s' "$CF" | grep -A2 '"password_encryption"' | grep -q 'scram-sha-256' \
+  || CFERR="$CFERR password_encryption!=scram-sha-256"
+printf '%s' "$CF" | grep -qE 'host.+all.+all.+all.+scram-sha-256' \
+  || CFERR="$CFERR pg_hba-catch-all-not-scram"
+printf '%s' "$CF" | grep -q 'APP_ROLE_VERIFIER' \
+  || CFERR="$CFERR no-APP_ROLE_VERIFIER-injection"
+if [ -n "$CFERR" ]; then
+  echo "  COMPUTEFILESDRIFT:$CFERR" >&2
+  fail "live compute-files ConfigMap is NOT the SCRAM (#117) manifest — drift:$CFERR. Re-apply deploy/54-compute-files.yaml (the scram entrypoint only takes effect on the NEXT per-app compute boot; existing md5-era apps must be SCRAM-verifier-durable FIRST) — see issue #160."
+fi
+ok "live compute-files carries the SCRAM migration (password_encryption + pg_hba scram rewrite + APP_ROLE_VERIFIER injection) — merged==deployed (issue #160)"
+
+echo "drift verification: live pods match the manifest contract AND every declared workload is deployed and healthy AND runs the pinned image digest AND the zone axis (CRD + operator) is live-present AND every shipped Prometheus alert rule is loaded AND the compute-files SCRAM migration is live (issues #151/#155/#160)"

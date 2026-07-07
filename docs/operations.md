@@ -956,6 +956,80 @@ deliberately built so **no tenant plaintext ever lands on the compute**:
 > (the md5 verifier is for the *same* password; the attacker still needs it), bounded
 > like the #112 window. Tracked in #158.
 
+> **Reading the logs — `method=md5` is the pg_hba KEYWORD, not md5 on the wire (N2, #160).**
+> Postgres' `connection authenticated: identity="app_x" method=…` line reports the
+> **pg_hba line's method keyword**, not the mechanism actually negotiated. When an HBA
+> line says `md5` but the role's stored verifier is `SCRAM-SHA-256$…`, the server
+> **auto-negotiates SCRAM** — it is *incapable* of md5 because there is no md5 verifier
+> to check against — yet the log still prints `method=md5`. So a `method=md5` line is
+> NOT evidence of md5 on the wire; only a role carrying an **md5 verifier** can ever
+> authenticate via md5. On a per-app compute the entrypoint rewrites the catch-all to
+> `scram-sha-256`, so post-migration you will see `method=scram-sha-256`; a lingering
+> `method=md5` (e.g. the #158 cold-wake window, or the primary single-DB compute whose
+> catch-all stays `md5`) does not mean the wire was md5 when the durable verifier is SCRAM.
+
+### Rolling SCRAM out to existing (md5-era) apps — atomic, zero cold-wake outage (issue #160)
+
+Merging #117 does **not** migrate a running cluster (the recurring merged≠deployed
+gap, cf. #151). Existing apps provisioned in the md5 era carry an **md5 verifier** in
+their role catalog and an `APP_ROLE_MD5` key in their Secret; the SCRAM entrypoint
+(`deploy/54-compute-files.yaml`) rewrites the pg_hba catch-all to `scram-sha-256` on
+the **next per-app compute boot**. Applying deploy/54 does **not** touch a compute
+that is scaled to 0 — the flip happens on that app's next cold wake.
+
+**The hazard (why order matters):** pg_hba `md5` **auto-upgrades** to SCRAM when the
+stored verifier is SCRAM, but pg_hba `scram-sha-256` **requires** a SCRAM verifier — a
+role still holding an md5 verifier that lands on the scram catch-all is **rejected on
+the wire** (a self-inflicted outage, not a downgrade). So every existing app must be
+**SCRAM-verifier-durable BEFORE** the scram pg_hba is live for it.
+
+Run this **while the app's compute is at 0** (it is triggered by connections; a demo/
+low-traffic app has no wake mid-window). Preserving the password keeps every
+intermediate state non-outaging — the pre-existing md5 verifier is for the *same*
+password, so the app still auths under the still-`md5` pg_hba until the scram entrypoint
+lands. `NS`/`KCTX` default to `scale-zero-pg` / `context-ckmva7v7zvq`.
+
+1. **Mint the SCRAM verifier into the app Secret, preserving the password** (so no
+   `DATABASE_URL` consumer breaks). Derive it from the app's existing `PGPASSWORD`
+   with the same PBKDF2 the provisioner uses, and add `APP_ROLE_VERIFIER` (leave
+   `APP_ROLE_MD5` in place as a same-password belt during the transition):
+   ```
+   app=pgdemo
+   pw=$(kubectl -n scale-zero-pg get secret app-db-$app -o jsonpath='{.data.PGPASSWORD}' | base64 -d)
+   ver=$(python3 - "$pw" <<'PY'
+   import hashlib,hmac,base64,os,sys
+   pw=sys.argv[1].encode(); salt=os.urandom(16); it=4096
+   s=hashlib.pbkdf2_hmac('sha256',pw,salt,it)
+   ck=hmac.new(s,b'Client Key',hashlib.sha256).digest()
+   sk=hashlib.sha256(ck).digest(); srv=hmac.new(s,b'Server Key',hashlib.sha256).digest()
+   b=lambda x:base64.b64encode(x).decode()
+   print(f"SCRAM-SHA-256${it}:{b(salt)}${b(sk)}:{b(srv)}")
+   PY
+   )
+   kubectl -n scale-zero-pg patch secret app-db-$app --type merge \
+     -p "{\"data\":{\"APP_ROLE_VERIFIER\":\"$(printf %s "$ver" | base64)\"}}"
+   ```
+   (A password *rotation* is also fine — `sh deploy/provision-app.sh rotate-cred $app`
+   writes `APP_ROLE_VERIFIER` too — but it changes `PGPASSWORD`/`DATABASE_URL`, so every
+   consumer must re-read the Secret. Preserve the password unless you *want* to rotate.)
+2. **Re-render the per-app compute** so its Deployment env reads `APP_ROLE_VERIFIER`
+   (the post-#117 template dropped `APP_ROLE_MD5`): `sh deploy/provision-app.sh create
+   $app`. Idempotent — it keeps the timeline, quota, replica count (0), and Secret
+   (`mint_credential` is a no-op when the Secret exists). The `APP_ROLE_VERIFIER` env is
+   `optional:true`, so this step is what makes the SCRAM verifier reach the spec.
+3. **Apply the SCRAM manifests** (now the Secret + Deployment + entrypoint all agree):
+   `kubectl apply -f deploy/54-compute-files.yaml -f deploy/83-appdb-operator.yaml`.
+4. **Verify a controlled cold wake** — connect through the apps-gateway as `app_$app`
+   and confirm SCRAM with no rejection:
+   ```
+   sh deploy/_verify-drift.sh          # section F: live compute-files == SCRAM manifest
+   # cold-wake + auth (any per-app gateway client; e.g. the _verify-multitenant GCLIENT):
+   kubectl -n scale-zero-pg logs deploy/compute-$app -c compute | grep 'connection authenticated'
+   #   -> connection authenticated: identity="app_pgdemo" method=scram-sha-256
+   ```
+   If the app fails to authenticate at any point, **abort** — the durable verifier was
+   not SCRAM before the pg_hba flipped. New apps (SCRAM from creation) need none of this.
+
 ## Password rotation
 
 `ALTER USER ... PASSWORD` does **not** stick — `compute_ctl` re-applies the spec's
