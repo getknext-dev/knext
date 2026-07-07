@@ -944,6 +944,30 @@ deliberately built so **no tenant plaintext ever lands on the compute**:
 - **`DATABASE_URL` is unchanged** — libpq negotiates SCRAM transparently from the
   same plaintext password in the DSN; apps need no change.
 
+> **All three compute tiers enforce the same pg_hba harden (issue #164).** The
+> harden (cloud_admin loopback-only reject #112 + md5→scram-sha-256 catch-all rewrite
+> #117) is a **single shared snippet**, `deploy/compute-files/lib-harden.sh`, sourced by
+> **all three** entrypoints — `entrypoint.sh` (primary / per-app writer),
+> `entrypoint-ro.sh` (read-replica pool), and `entrypoint-warm.sh` (warm tier) — so it
+> can never drift between tiers. Each entrypoint calls it **gated on `APP_ROLE`**,
+> identically: a **per-app** compute (writer, RO replica, or warm — `APP_ROLE` set via
+> `compute-config-<app>`) hardens, so `cloud_admin` is rejected over TCP and only
+> SCRAM app roles authenticate on the wire. On a **per-app RO replica** this Just Works
+> because the app role's SCRAM verifier is **replicated from the primary catalog**
+> (same timeline, streamed via WAL) — the durable verifier is already SCRAM, so
+> `DATABASE_URL_RO` reads negotiate SCRAM with no regression. The **base single-DB
+> tiers** (`compute` / `compute-ro` / `compute-warm`, no `APP_ROLE`) deliberately skip
+> the harden: there `cloud_admin` **is** the documented TCP credential the client
+> presents through the gateway (`DATABASE_URL` / `DATABASE_URL_RO`), a single-tenant
+> path defended by NetworkPolicy + operator posture (see "Network isolation caveat").
+> Before #164 the RO/warm entrypoints lacked the harden entirely (a p2 defense-in-depth
+> + consistency gap — the strong `cloud_admin` Secret password from #115 still held the
+> line, so the trivial #112 bypass did not reproduce). Drilled by
+> `_verify-perapp-ro.sh` (compute-ro-`<app>` pg_hba carries the cloud_admin reject +
+> scram catch-all; cloud_admin rejected over TCP; app role authenticates SCRAM) and
+> `_verify-warmtier.sh` (shared harden mounted + sourced by the live warm entrypoint;
+> base warm correctly un-hardened so the `cloud_admin` `WARM_DSN` path is preserved).
+
 > **Known limitation — cold-wake md5 window (compute_ctl, issue #158).** `compute_ctl`
 > opens the Postgres network socket (~T=.90) **before** it applies the spec roles
 > (~T=.99) — a ~tens-of-ms window on a **cold wake only**. During it the socket

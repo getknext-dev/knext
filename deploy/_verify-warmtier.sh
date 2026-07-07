@@ -248,6 +248,29 @@ NEWUID=$($K get pod "$NEW" -o jsonpath='{.metadata.uid}' 2>/dev/null)
 [ "$OLDUID" != "$NEWUID" ] || fail "warm pod not re-parked (same pod uid) — Sleep did not delete it"
 ok "idle -> gate closed -> warm pod deleted -> fresh gated pod ($OLD -> $NEW)"
 
+# --- 5.5 #164: pg_hba harden wiring + gating on the warm tier -----------------
+# entrypoint-warm.sh now sources the SHARED lib-harden.sh (issue #164) — the same
+# snippet the primary + RO entrypoints use, gated identically on APP_ROLE. The RO
+# drill (_verify-perapp-ro.sh) proves that shared snippet FIRES on a per-app tier
+# (compute-ro-<app>, APP_ROLE set): cloud_admin TCP-reject + scram-sha-256 catch-all
+# + app-role SCRAM. Here we prove, on the LIVE warm tier, that (1) the harden is wired
+# in (lib mounted + sourced) and (2) the base single-DB warm (no APP_ROLE) correctly
+# SKIPS it, so the WARM_DSN cloud_admin-over-TCP path is preserved (no regression;
+# parity with the primary single-DB, which also serves cloud_admin over TCP).
+echo "== #164: warm-tier pg_hba harden wiring + gating =="
+CLIENT_WARM h164 'select 1' >/dev/null || fail "#164: warm wake for harden inspection failed"
+WPOD=$($K get pods -l app=compute-warm -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+[ -n "$WPOD" ] || fail "#164: no compute-warm pod to inspect"
+$K exec "$WPOD" -c compute -- sh -c 'test -r /compute-files/lib-harden.sh && grep -q harden_pg_hba /compute-files/lib-harden.sh' \
+  || fail "#164: lib-harden.sh not mounted/readable in the warm pod"
+$K exec "$WPOD" -c compute -- grep -q '\. /compute-files/lib-harden.sh' /compute-files/entrypoint-warm.sh \
+  || fail "#164: entrypoint-warm.sh does not source lib-harden.sh in the live ConfigMap"
+ok "#164: shared harden (lib-harden.sh) is mounted + sourced by entrypoint-warm.sh on the live warm tier"
+HBA=$($K exec "$WPOD" -c compute -- sh -c 'cat /var/db/postgres/compute/pg_hba.conf' 2>/dev/null || true)
+printf '%s\n' "$HBA" | grep -Eqi '^host[[:space:]]+all[[:space:]]+cloud_admin[[:space:]]+all[[:space:]]+reject' \
+  && fail "#164: base single-DB warm (no APP_ROLE) was hardened — would break the WARM_DSN cloud_admin-over-TCP path"
+ok "#164: base single-DB warm (no APP_ROLE) is intentionally NOT hardened — cloud_admin over TCP (WARM_DSN) preserved (no regression; a per-app warm with APP_ROLE would harden identically to the RO drill)"
+
 # --- 6. restore, then prove the live cold path is still green -----------------
 $K scale deploy/compute-warm --replicas=0 >/dev/null
 $K delete -f _tmp-pggw-warm.yaml --ignore-not-found --wait=false >/dev/null 2>&1 || true

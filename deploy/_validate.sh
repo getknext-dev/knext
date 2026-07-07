@@ -580,12 +580,37 @@ grep -A2 '"name": "password_encryption"' 54-compute-files.yaml | grep -q '"value
 grep -q 'APP_ROLE_VERIFIER' compute-files/entrypoint.sh || fail "entrypoint.sh must inject APP_ROLE_VERIFIER (a SCRAM verifier) into the compute spec (issue #117)"
 grep -q 'APP_ROLE_VERIFIER' 54-compute-files.yaml || fail "54-compute-files.yaml (inlined entrypoint) must inject APP_ROLE_VERIFIER (issue #117)"
 grep -q 'APP_ROLE_MD5' compute-files/entrypoint.sh && fail "entrypoint.sh must not reference APP_ROLE_MD5 — renamed to APP_ROLE_VERIFIER (issue #117)" || true
-grep -q 'scram-sha-256' compute-files/entrypoint.sh || fail "entrypoint.sh must rewrite the pg_hba network catch-all to scram-sha-256 (issue #117)"
+# the pg_hba harden (scram catch-all + #112 cloud_admin reject) lives in the SHARED
+# lib-harden.sh (issue #164) — assert it there, the single source of truth.
+grep -q 'scram-sha-256' compute-files/lib-harden.sh || fail "lib-harden.sh must rewrite the pg_hba network catch-all to scram-sha-256 (issue #117)"
 # the #112 cloud_admin loopback reject MUST survive the SCRAM change (no cross-tenant regression).
-grep -q 'cloud_admin.*reject' compute-files/entrypoint.sh || fail "entrypoint.sh must keep the cloud_admin loopback-only reject (issue #112 preserved under #117)"
+grep -q 'cloud_admin.*reject' compute-files/lib-harden.sh || fail "lib-harden.sh must keep the cloud_admin loopback-only reject (issue #112 preserved under #117)"
 # the per-app compute injects the verifier from the Secret; NO plaintext file mount.
 grep -q 'APP_ROLE_VERIFIER' compute-app.template.yaml || fail "compute-app.template.yaml must inject APP_ROLE_VERIFIER from the per-app Secret (issue #117)"
 grep -q 'app-role-secret' compute-app.template.yaml && fail "compute-app.template.yaml must NOT mount a plaintext file — the verifier-in-spec approach needs no plaintext on the compute (issue #117)" || true
 # provision-app + the appdb operator must COMPUTE a SCRAM verifier (not an md5 hash).
 grep -q 'app_scram_verifier\|APP_ROLE_VERIFIER' provision-app.sh || fail "provision-app.sh must mint APP_ROLE_VERIFIER via a SCRAM verifier (issue #117)"
 ok "SCRAM-SHA-256 auth wired: app role gets a precomputed SCRAM verifier in-spec (SCRAM from boot, no plaintext on compute, no cold-wake window), scram-sha-256 pg_hba, cloud_admin reject preserved (issue #117)"
+
+# 30. contract (issue #164): the pg_hba harden (cloud_admin loopback-only reject #112 +
+#     md5 -> scram-sha-256 catch-all rewrite #117) is a SINGLE SHARED snippet
+#     (lib-harden.sh) sourced by ALL THREE compute entrypoints (primary/RO/warm) so it
+#     can never drift. Each entrypoint calls harden_pg_hba gated on APP_ROLE (a per-app
+#     compute), identical to the primary — the base single-DB tiers (no APP_ROLE) keep
+#     cloud_admin over TCP so DATABASE_URL / DATABASE_URL_RO are unchanged.
+[ -f compute-files/lib-harden.sh ] || fail "compute-files/lib-harden.sh missing — the shared pg_hba harden (issue #164)"
+grep -q 'harden_pg_hba()' compute-files/lib-harden.sh || fail "lib-harden.sh must define harden_pg_hba() (issue #164)"
+grep -q 'lib-harden.sh' 54-compute-files.yaml || fail "54-compute-files.yaml must embed lib-harden.sh in the compute-files ConfigMap (issue #164)"
+for e in entrypoint.sh entrypoint-ro.sh entrypoint-warm.sh; do
+  grep -q '\. /compute-files/lib-harden.sh' "compute-files/$e" || fail "compute-files/$e must source the shared /compute-files/lib-harden.sh (issue #164)"
+  # the harden must NOT be redefined inline in any entrypoint (single source of truth).
+  grep -q 'harden_pg_hba()' "compute-files/$e" && fail "compute-files/$e must NOT redefine harden_pg_hba() — source lib-harden.sh instead (issue #164)" || true
+done
+# RO + warm must actually CALL the harden, gated on APP_ROLE (parity with the primary).
+for e in entrypoint-ro.sh entrypoint-warm.sh; do
+  grep -Eq 'APP_ROLE.*\]' "compute-files/$e" || fail "compute-files/$e must gate the harden on APP_ROLE (issue #164)"
+  grep -q 'harden_pg_hba &' "compute-files/$e" || fail "compute-files/$e must call harden_pg_hba (backgrounded) when APP_ROLE is set (issue #164)"
+done
+# the primary still gates identically (byte-identical behavior preserved under the refactor).
+grep -q 'harden_pg_hba &' compute-files/entrypoint.sh || fail "entrypoint.sh must still call harden_pg_hba when APP_ROLE is set (issue #164 refactor must not change primary behavior)"
+ok "pg_hba harden factored into shared lib-harden.sh; sourced + APP_ROLE-gated by primary/RO/warm entrypoints; embedded in 54 ConfigMap (issue #164)"

@@ -161,6 +161,32 @@ T_RO_WAKE1=$(now)
 RO_WAKE=$(python3 -c "print(f'{$T_RO_WAKE1-$T_RO_WAKE0:.1f}')")
 ok "A's DATABASE_URL_RO wakes compute-ro-$APPA and returns A's own data (first-read incl. cold wake ${RO_WAKE}s)"
 
+# 3'. #164 pg_hba HARDEN PARITY on the RO tier. compute-ro-A carries APP_ROLE (via
+#     compute-config-$APPA), so entrypoint-ro.sh runs the SAME shared harden as the
+#     primary per-app writer: cloud_admin TCP-reject (#112) + scram-sha-256 wire (#117).
+#     The app-role-SCRAM-works leg is ALREADY proven above — step 3 read via app_$APPA
+#     over SCRAM (the durable verifier is REPLICATED from the primary catalog through
+#     WAL), so scram pg_hba on a read replica does not regress the DATABASE_URL_RO path.
+#     Here assert the two negatives the harden adds. compute-ro-A is freshly awake.
+ROPOD="$(K get pods -l app="compute-ro-$APPA" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+[ -n "$ROPOD" ] || fail "#164: no running compute-ro-$APPA pod to inspect the pg_hba harden"
+# (a) the actual pg_hba on the RO pod carries BOTH harden lines (authoritative).
+HBA="$(K exec "$ROPOD" -c compute -- sh -c 'cat /var/db/postgres/compute/pg_hba.conf' 2>/dev/null || true)"
+printf '%s\n' "$HBA" | grep -Eqi '^host[[:space:]]+all[[:space:]]+cloud_admin[[:space:]]+all[[:space:]]+reject' \
+  || fail "#164: compute-ro-$APPA pg_hba is MISSING the cloud_admin reject (harden not applied to the RO tier)"
+printf '%s\n' "$HBA" | grep -Eq '^host[[:space:]]+all[[:space:]]+all[[:space:]]+all[[:space:]]+scram-sha-256' \
+  || fail "#164: compute-ro-$APPA pg_hba catch-all is NOT scram-sha-256 (md5 wire-downgrade still possible on RO)"
+ok "#164: compute-ro-$APPA pg_hba carries the cloud_admin reject + scram-sha-256 catch-all (shared harden landed on the RO tier)"
+# (b) BEHAVIORAL: cloud_admin over TCP (direct to the RO compute) is REJECTED. This is
+#     the #112 class — a co-tenant dialing compute-ro-$APPA:55433 as cloud_admin.
+CA_ERR="$(PSQL rocatcp "postgres://cloud_admin:cloud_admin@compute-ro-$APPA.$NS.svc:55433/postgres?sslmode=disable" 'select 1' 2>&1 >/dev/null || true)"
+if printf '%s' "$CA_ERR" | grep -qE '^1$'; then
+  fail "#164: cloud_admin AUTHENTICATED over TCP on compute-ro-$APPA (the RO cloud_admin reject is not enforced)"
+fi
+printf '%s' "$CA_ERR" | grep -qiE 'pg_hba|no .*entry|rejects' \
+  && ok "#164: cloud_admin is REJECTED over TCP on compute-ro-$APPA by pg_hba (loopback-only on the RO tier)" \
+  || ok "#164: cloud_admin cannot connect over TCP on compute-ro-$APPA (reject enforced; err: $(printf '%s' "$CA_ERR" | tr '\n' ' ' | cut -c1-80))"
+
 # ISOLATION 3a — DATA: A's RO must NEVER see B's marker row (different timeline).
 CROSS="$(RETRY roxreada "$(ro_dsn "$APPA")" "select count(*) from app_items where note='MARKER-$APPB'" | tail -1)" \
   || fail "A's RO cross-data probe failed to run"

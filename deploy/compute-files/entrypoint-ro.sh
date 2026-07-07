@@ -27,6 +27,17 @@ IDS=/tmp/config.ids.json
 DST=/tmp/config.json
 CLOUD_ADMIN_MD5="${CLOUD_ADMIN_MD5:-b093c0d3b281ba6da1eacc608620abd8}"
 
+# pg_hba harden shared with the primary + warm entrypoints (issue #164). See
+# lib-harden.sh: harden_pg_hba inserts the #112 cloud_admin loopback-only reject and
+# rewrites the pg_hba catch-all md5 -> scram-sha-256 (#117). On a per-app RO compute
+# (APP_ROLE set via compute-config-<app>) the app role app_<app> already carries its
+# SCRAM verifier in the REPLICATED catalog (streamed from the primary via WAL — an RO
+# replica reads the same timeline), so app-role auth Just Works over SCRAM after the
+# harden while cloud_admin is rejected over TCP. On the base single-DB RO pool
+# (deploy/26, no APP_ROLE) the harden is skipped so DATABASE_URL_RO's cloud_admin-over-
+# TCP path (mirroring the primary single-DB) keeps working.
+. /compute-files/lib-harden.sh
+
 echo "Rendering RO compute spec (tenant=${TENANT_ID} timeline=${TIMELINE_ID} mode=${RO_MODE})"
 sed -e "s|TENANT_ID|${TENANT_ID}|g" -e "s|TIMELINE_ID|${TIMELINE_ID}|g" \
     -e "s|CLOUD_ADMIN_MD5_PLACEHOLDER|${CLOUD_ADMIN_MD5}|g" "$SRC" > "$IDS"
@@ -50,6 +61,14 @@ esac
 # Inject the read-only mode as a top-level spec field, right after format_version
 # (same seam the restore drill uses for its Static compute).
 awk -v m="$MODE_JSON" '{print} /"format_version": 1.0,/{print "        " m}' "$IDS" > "$DST"
+
+# Per-app tenant boundary + SCRAM wire enforcement (issue #164): reconcile pg_hba
+# (loopback-only cloud_admin #112 + scram-sha-256 wire auth #117) once Postgres is up.
+# Backgrounded before exec so the wake path is never blocked; a no-op on the base
+# single-DB RO pool (no APP_ROLE) so DATABASE_URL_RO's cloud_admin path is unchanged.
+if [ -n "${APP_ROLE:-}" ]; then
+  harden_pg_hba &
+fi
 
 echo "Starting compute_ctl (read-only, mode=${RO_MODE})"
 exec /usr/local/bin/compute_ctl --pgdata /var/db/postgres/compute \

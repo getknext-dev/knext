@@ -1,10 +1,14 @@
 # compute-files: the compute_ctl spec template (config.json, TENANT_ID/TIMELINE_ID
-# placeholders) + entrypoint.sh (cold) + entrypoint-warm.sh (warm tier, ADR-0002).
+# placeholders) + entrypoint.sh (cold/primary) + entrypoint-ro.sh (read-replica pool)
+# + entrypoint-warm.sh (warm tier, ADR-0002) + lib-harden.sh (SHARED pg_hba harden,
+# issue #164 — sourced by all three entrypoints so #112/#117 can't drift).
 # GENERATED from deploy/compute-files/ — edit those files and regenerate with:
 #   kubectl create configmap compute-files -n scale-zero-pg \
 #     --from-file=config.json=deploy/compute-files/config.json \
 #     --from-file=entrypoint.sh=deploy/compute-files/entrypoint.sh \
+#     --from-file=entrypoint-ro.sh=deploy/compute-files/entrypoint-ro.sh \
 #     --from-file=entrypoint-warm.sh=deploy/compute-files/entrypoint-warm.sh \
+#     --from-file=lib-harden.sh=deploy/compute-files/lib-harden.sh \
 #     --dry-run=client -o yaml
 # then re-append the compute-config ConfigMap below (it is env, not file-generated).
 # Rationale for the non-obvious Postgres settings (fsync=off etc.) lives in
@@ -219,6 +223,17 @@ data:
     DST=/tmp/config.json
     CLOUD_ADMIN_MD5="${CLOUD_ADMIN_MD5:-b093c0d3b281ba6da1eacc608620abd8}"
 
+    # pg_hba harden shared with the primary + warm entrypoints (issue #164). See
+    # lib-harden.sh: harden_pg_hba inserts the #112 cloud_admin loopback-only reject and
+    # rewrites the pg_hba catch-all md5 -> scram-sha-256 (#117). On a per-app RO compute
+    # (APP_ROLE set via compute-config-<app>) the app role app_<app> already carries its
+    # SCRAM verifier in the REPLICATED catalog (streamed from the primary via WAL — an RO
+    # replica reads the same timeline), so app-role auth Just Works over SCRAM after the
+    # harden while cloud_admin is rejected over TCP. On the base single-DB RO pool
+    # (deploy/26, no APP_ROLE) the harden is skipped so DATABASE_URL_RO's cloud_admin-over-
+    # TCP path (mirroring the primary single-DB) keeps working.
+    . /compute-files/lib-harden.sh
+
     echo "Rendering RO compute spec (tenant=${TENANT_ID} timeline=${TIMELINE_ID} mode=${RO_MODE})"
     sed -e "s|TENANT_ID|${TENANT_ID}|g" -e "s|TIMELINE_ID|${TIMELINE_ID}|g" \
         -e "s|CLOUD_ADMIN_MD5_PLACEHOLDER|${CLOUD_ADMIN_MD5}|g" "$SRC" > "$IDS"
@@ -242,6 +257,14 @@ data:
     # Inject the read-only mode as a top-level spec field, right after format_version
     # (same seam the restore drill uses for its Static compute).
     awk -v m="$MODE_JSON" '{print} /"format_version": 1.0,/{print "        " m}' "$IDS" > "$DST"
+
+    # Per-app tenant boundary + SCRAM wire enforcement (issue #164): reconcile pg_hba
+    # (loopback-only cloud_admin #112 + scram-sha-256 wire auth #117) once Postgres is up.
+    # Backgrounded before exec so the wake path is never blocked; a no-op on the base
+    # single-DB RO pool (no APP_ROLE) so DATABASE_URL_RO's cloud_admin path is unchanged.
+    if [ -n "${APP_ROLE:-}" ]; then
+      harden_pg_hba &
+    fi
 
     echo "Starting compute_ctl (read-only, mode=${RO_MODE})"
     exec /usr/local/bin/compute_ctl --pgdata /var/db/postgres/compute \
@@ -274,6 +297,14 @@ data:
     DST=/tmp/config.json
     CLOUD_ADMIN_MD5="${CLOUD_ADMIN_MD5:-b093c0d3b281ba6da1eacc608620abd8}"
 
+    # pg_hba harden shared with the primary + RO entrypoints (issue #164). See
+    # lib-harden.sh: harden_pg_hba inserts the #112 cloud_admin loopback-only reject and
+    # rewrites the pg_hba catch-all md5 -> scram-sha-256 (#117). Gated on APP_ROLE (below):
+    # a per-app warm compute hardens exactly like the primary per-app writer, while the base
+    # single-DB warm tier (deploy/25, no APP_ROLE) keeps cloud_admin over TCP so the warm
+    # path (WARM_DSN cloud_admin) mirrors the primary single-DB unchanged.
+    . /compute-files/lib-harden.sh
+
     echo "Rendering compute spec (tenant=${TENANT_ID} timeline=${TIMELINE_ID})"
     sed -e "s|TENANT_ID|${TENANT_ID}|g" -e "s|TIMELINE_ID|${TIMELINE_ID}|g" \
         -e "s|CLOUD_ADMIN_MD5_PLACEHOLDER|${CLOUD_ADMIN_MD5}|g" "$SRC" > "$DST"
@@ -289,6 +320,14 @@ data:
     done
     exec 3>&- 2>/dev/null || true
     echo "WARM_GATE_OPEN — attaching compute_ctl"
+
+    # Per-app tenant boundary + SCRAM wire enforcement (issue #164): reconcile pg_hba
+    # (loopback-only cloud_admin #112 + scram-sha-256 wire auth #117) once Postgres is up.
+    # Backgrounded before exec so the wake path is never blocked; a no-op on the base
+    # single-DB warm tier (no APP_ROLE) so the WARM_DSN cloud_admin-over-TCP path is unchanged.
+    if [ -n "${APP_ROLE:-}" ]; then
+      harden_pg_hba &
+    fi
 
     # From here it is identical to the stock entrypoint's exec line.
     exec /usr/local/bin/compute_ctl --pgdata /var/db/postgres/compute \
@@ -345,52 +384,12 @@ data:
       CLOUD_ADMIN_MD5="${CLOUD_ADMIN_MD5:-$PUBLIC_CLOUD_ADMIN_MD5}"
     fi
 
-    # harden_pg_hba (issues #112 + #117): once Postgres is accepting loopback
-    # connections, (1) insert a `host all cloud_admin all reject` line JUST BEFORE the
-    # network catch-all (issue #112 — cloud_admin loopback-only), and (2) rewrite that
-    # catch-all's method from md5 to `scram-sha-256` (issue #117 — enforce SCRAM on the
-    # wire; an md5-only client, or any role still carrying an md5 verifier, is refused).
-    # The app role itself already carries a SCRAM verifier FROM BOOT (its spec
-    # encrypted_password is the precomputed APP_ROLE_VERIFIER — see the role-injection
-    # block below), so there is NO cold-wake md5 window: even before this reload lands the
-    # md5 catch-all auto-negotiates SCRAM against the SCRAM verifier. Order matters and is
-    # safe: compute_ctl's initdb pg_hba lists the loopback lines (127.0.0.1/32, ::1/128 ->
-    # trust) FIRST, so pg_hba's first-match rule keeps cloud_admin working over loopback
-    # while rejecting it from every other address, and app roles (app_<app>) fall through to
-    # the SCRAM catch-all so the apps-gateway path keeps working. This is the ENFORCING,
-    # CNI-independent tenant boundary (flannel ships no NetworkPolicy controller, so
-    # 70-networkpolicy.yaml is defense-in-depth only). Runs in the background so it never
-    # delays the wake/readiness path.
-    harden_pg_hba() {
-      HBA="$PGDATA/pg_hba.conf"
-      PSQL="psql -h localhost -p 55433 -U cloud_admin -d postgres -tAc"
-      i=0
-      while [ $i -lt 600 ]; do
-        $PSQL 'select 1' >/dev/null 2>&1 && break
-        i=$((i+1)); sleep 0.2
-      done
-      [ -f "$HBA" ] || { echo "WARN issue #112: $HBA absent; cloud_admin still protected by strong md5"; return 0; }
-      # Insert the cloud_admin reject before the first `host all all all <method>`
-      # catch-all AND rewrite that catch-all's method to scram-sha-256 (issue #117).
-      awk '{
-        if ($1=="host" && $2=="all" && $3=="all" && $4=="all" && !d){
-          print "host\tall\tcloud_admin\tall\treject"; d=1
-        }
-        if ($1=="host" && $2=="all" && $3=="all" && $4=="all"){
-          print "host\tall\tall\tall\tscram-sha-256"; next
-        }
-        print
-      }' "$HBA" > "$HBA.harden" 2>/dev/null && cat "$HBA.harden" > "$HBA" && rm -f "$HBA.harden"
-      if grep -qiE '^host[[:space:]]+all[[:space:]]+cloud_admin[[:space:]]+all[[:space:]]+reject' "$HBA"; then
-        if $PSQL 'SELECT pg_reload_conf()' >/dev/null 2>&1; then
-          echo "issue #112/#117: cloud_admin loopback-only + wire auth is scram-sha-256; pg_hba reloaded"
-        else
-          echo "WARN issue #112: pg_hba reload failed; cloud_admin still protected by strong random md5"
-        fi
-      else
-        echo "WARN issue #112: could not locate the network catch-all in pg_hba; cloud_admin still protected by strong random md5"
-      fi
-    }
+    # harden_pg_hba (issues #112 + #117): factored into the SHARED lib-harden.sh so
+    # the primary / RO / warm entrypoints cannot drift (issue #164). It inserts the
+    # cloud_admin loopback-only reject (#112) + rewrites the pg_hba network catch-all
+    # md5 -> scram-sha-256 (#117). Sourced with an absolute path from the mounted
+    # compute-files ConfigMap. See lib-harden.sh for the full rationale.
+    . /compute-files/lib-harden.sh
 
     echo "Rendering compute spec (tenant=${TENANT_ID} timeline=${TIMELINE_ID})"
     sed -e "s|TENANT_ID|${TENANT_ID}|g" -e "s|TIMELINE_ID|${TIMELINE_ID}|g" \
@@ -443,6 +442,72 @@ data:
          -b /usr/local/bin/postgres \
          --compute-id "compute-${HOSTNAME:-k8s}" \
          --config "${DST}"
+  lib-harden.sh: |
+    # shellcheck shell=sh
+    # lib-harden.sh — SINGLE SOURCE OF TRUTH for the compute pg_hba harden (issues
+    # #112 + #117 + #164). Sourced by all three compute entrypoints so the harden can
+    # never drift across tiers:
+    #   - entrypoint.sh       (primary / per-app writer, deploy/54 + operator render)
+    #   - entrypoint-ro.sh    (read-replica pool, deploy/26 base + operator per-app RO)
+    #   - entrypoint-warm.sh  (warm tier, deploy/25, ADR-0002)
+    # POSIX sh (also valid under bash) — no bashisms; only psql/awk/grep/sleep, all of
+    # which the stock compute image (neondatabase/compute-node-v17) ships.
+    #
+    # harden_pg_hba (issues #112 + #117): once Postgres is accepting loopback
+    # connections, (1) insert a `host all cloud_admin all reject` line JUST BEFORE the
+    # network catch-all (issue #112 — cloud_admin loopback-only), and (2) rewrite that
+    # catch-all's method from md5 to `scram-sha-256` (issue #117 — enforce SCRAM on the
+    # wire; an md5-only client, or any role still carrying an md5 verifier, is refused).
+    # The app role itself already carries a SCRAM verifier FROM BOOT (its spec
+    # encrypted_password is the precomputed APP_ROLE_VERIFIER on the primary writer, and
+    # on a READ replica the SAME verifier is REPLICATED from the primary catalog via WAL),
+    # so there is NO cold-wake md5 window: even before this reload lands the md5 catch-all
+    # auto-negotiates SCRAM against the SCRAM verifier. Order matters and is safe:
+    # compute_ctl's initdb pg_hba lists the loopback lines (127.0.0.1/32, ::1/128 -> trust)
+    # FIRST, so pg_hba's first-match rule keeps cloud_admin working over loopback (the pod's
+    # own admin ops connect cloud_admin@localhost:55433) while rejecting it from every other
+    # address, and app roles (app_<app>) fall through to the SCRAM catch-all so the
+    # apps-gateway path keeps working. This is the ENFORCING, CNI-independent tenant boundary
+    # (flannel ships no NetworkPolicy controller, so 70-networkpolicy.yaml is defense-in-depth
+    # only). Runs in the background so it never delays the wake/readiness path.
+    #
+    # Gating (identical across all three entrypoints): call `harden_pg_hba &` ONLY when
+    # APP_ROLE is set (a per-app compute — writer, RO replica, or warm). On the base
+    # single-DB tiers (primary / compute-ro / compute-warm, no APP_ROLE) cloud_admin IS the
+    # documented TCP credential the clients present through the gateway, so the harden is
+    # deliberately SKIPPED there (that single-tenant path is defended by NetworkPolicy +
+    # operator posture, docs/operations.md "Network isolation caveat"). This keeps the base
+    # DATABASE_URL / DATABASE_URL_RO cloud_admin-over-TCP paths working unchanged.
+    harden_pg_hba() {
+      HBA="${PGDATA:-/var/db/postgres/compute}/pg_hba.conf"
+      PSQL="psql -h localhost -p 55433 -U cloud_admin -d postgres -tAc"
+      i=0
+      while [ $i -lt 600 ]; do
+        $PSQL 'select 1' >/dev/null 2>&1 && break
+        i=$((i+1)); sleep 0.2
+      done
+      [ -f "$HBA" ] || { echo "WARN issue #112: $HBA absent; cloud_admin still protected by strong md5"; return 0; }
+      # Insert the cloud_admin reject before the first `host all all all <method>`
+      # catch-all AND rewrite that catch-all's method to scram-sha-256 (issue #117).
+      awk '{
+        if ($1=="host" && $2=="all" && $3=="all" && $4=="all" && !d){
+          print "host\tall\tcloud_admin\tall\treject"; d=1
+        }
+        if ($1=="host" && $2=="all" && $3=="all" && $4=="all"){
+          print "host\tall\tall\tall\tscram-sha-256"; next
+        }
+        print
+      }' "$HBA" > "$HBA.harden" 2>/dev/null && cat "$HBA.harden" > "$HBA" && rm -f "$HBA.harden"
+      if grep -qiE '^host[[:space:]]+all[[:space:]]+cloud_admin[[:space:]]+all[[:space:]]+reject' "$HBA"; then
+        if $PSQL 'SELECT pg_reload_conf()' >/dev/null 2>&1; then
+          echo "issue #112/#117: cloud_admin loopback-only + wire auth is scram-sha-256; pg_hba reloaded"
+        else
+          echo "WARN issue #112: pg_hba reload failed; cloud_admin still protected by strong random md5"
+        fi
+      else
+        echo "WARN issue #112: could not locate the network catch-all in pg_hba; cloud_admin still protected by strong random md5"
+      fi
+    }
 kind: ConfigMap
 metadata:
   creationTimestamp: null
