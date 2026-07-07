@@ -41,7 +41,7 @@ func (k *K8sCluster) SecretExists(ctx context.Context, app string) (bool, error)
 	return err == nil, err
 }
 
-func (k *K8sCluster) CreateSecret(ctx context.Context, app, role, password, md5, dsn string) error {
+func (k *K8sCluster) CreateSecret(ctx context.Context, app, role, password, verifier, dsn string) error {
 	sec := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "app-db-" + app,
@@ -49,10 +49,10 @@ func (k *K8sCluster) CreateSecret(ctx context.Context, app, role, password, md5,
 			Labels:    map[string]string{"app": "compute-" + app, "tier": "apps", "app.kubernetes.io/managed-by": "appdb-operator"},
 		},
 		StringData: map[string]string{
-			"PGUSER":       role,
-			"PGPASSWORD":   password,
-			"APP_ROLE_MD5": md5,
-			"DATABASE_URL": dsn,
+			"PGUSER":            role,
+			"PGPASSWORD":        password,
+			"APP_ROLE_VERIFIER": verifier, // SCRAM-SHA-256 verifier (issue #117; was APP_ROLE_MD5)
+			"DATABASE_URL":      dsn,
 		},
 	}
 	_, err := k.cs.CoreV1().Secrets(k.ns).Create(ctx, sec, metav1.CreateOptions{})

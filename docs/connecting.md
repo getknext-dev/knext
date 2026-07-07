@@ -21,6 +21,14 @@ postgres://cloud_admin:cloud_admin@pggw.scale-zero-pg.svc:55432/<database>?sslmo
   connects.
 - **Credentials** — `cloud_admin`/`cloud_admin` is the dev default, enforced by the
   compute spec on every boot. Rotation: see [operations](operations.md#password-rotation).
+- **Auth is SCRAM-SHA-256** — per-app roles (`app_<app>`) authenticate over the wire
+  with **SCRAM-SHA-256** (issue #117), not md5. Your DSN is unchanged: libpq (and any
+  modern Postgres driver) negotiates SCRAM transparently from the same plaintext
+  password in the URL — no client change needed. The compute stores only a
+  non-reversible SCRAM verifier, never your password. (One caveat: an *existing*
+  md5-era app can still see md5 on the very first connection in a ~tens-of-ms
+  cold-wake window before the compute finishes applying the SCRAM verifier — a
+  `compute_ctl` limitation, tracked in #158; every subsequent connection is SCRAM.)
 
 ## What your app experiences
 
@@ -189,8 +197,9 @@ Provisioning an app is one pageserver branch call + one rendered per-app compute
 (`compute-app.template.yaml`) — **~4s** end-to-end
 ([BENCHMARKS](BENCHMARKS.md#branch-per-app-provisioning-adr-0003)), no initdb, no
 migration replay: the branch inherits the template schema copy-on-write. `create`
-also mints a **per-app credential** (role `app_<app>` + a random password) into a
-Secret `app-db-<app>` — this is the app's DSN. Re-running `create` is idempotent
+also mints a **per-app credential** (role `app_<app>` + a random password, stored as
+a **SCRAM-SHA-256 verifier** the compute injects into its spec — `APP_ROLE_VERIFIER`,
+issue #117) into a Secret `app-db-<app>` — this is the app's DSN. Re-running `create` is idempotent
 and crash-safe (the timeline id is persisted before the branch call, so an
 interrupted create leaves no orphan; `./provision-app.sh fsck` surfaces any).
 

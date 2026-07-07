@@ -65,9 +65,9 @@ type ROComputeSpec struct {
 type ClusterOps interface {
 	// SecretExists reports whether the per-app credential Secret already exists.
 	SecretExists(ctx context.Context, app string) (bool, error)
-	// CreateSecret mints the per-app credential Secret (role + md5 + DSN). Only
-	// called when SecretExists is false, so a live app is never locked out.
-	CreateSecret(ctx context.Context, app, role, password, md5, dsn string) error
+	// CreateSecret mints the per-app credential Secret (role + SCRAM verifier + DSN).
+	// Only called when SecretExists is false, so a live app is never locked out.
+	CreateSecret(ctx context.Context, app, role, password, verifier, dsn string) error
 	// EnsureSecretROKey reconciles the DATABASE_URL_RO key on the per-app Secret
 	// to match the read-replica-pool request (ADR-0006 #119). When enabled it
 	// derives DATABASE_URL_RO from the writer DATABASE_URL (same role/password/

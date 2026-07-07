@@ -111,8 +111,8 @@ func (s *DynSQL) readyPod(ctx context.Context, zone string) (string, error) {
 	return "", fmt.Errorf("no ready compute-%s pod (compute not awake?)", zone)
 }
 
-func (s *DynSQL) EnsureReplRole(ctx context.Context, zone, role, md5hex string) error {
-	return s.exec(ctx, zone, buildEnsureReplRole(role, md5hex))
+func (s *DynSQL) EnsureReplRole(ctx context.Context, zone, role, password string) error {
+	return s.exec(ctx, zone, buildEnsureReplRole(role, password))
 }
 
 func (s *DynSQL) EnsurePublication(ctx context.Context, zone, pub, replRole string, tables []string) error {

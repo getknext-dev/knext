@@ -42,9 +42,11 @@ type ComposeSpec struct {
 // loopback-only). Every method ensures the target compute is awake first. All are
 // idempotent.
 type SQLOps interface {
-	// EnsureReplRole (re)asserts the per-zone repl_<zone> role (LOGIN REPLICATION,
-	// md5 password) on the zone's own compute. Durable on the timeline.
-	EnsureReplRole(ctx context.Context, zone, role, md5hex string) error
+	// EnsureReplRole (re)asserts the per-zone repl_<zone> role (LOGIN REPLICATION)
+	// on the zone's own compute, setting its PLAINTEXT password under
+	// password_encryption=scram-sha-256 so Postgres stores a SCRAM-SHA-256 verifier
+	// (issue #117; no precomputed md5). Durable on the timeline.
+	EnsureReplRole(ctx context.Context, zone, role, password string) error
 	// EnsurePublication (re)creates a publication for the tables + grants the repl
 	// role SELECT, on the zone's own compute.
 	EnsurePublication(ctx context.Context, zone, pub, replRole string, tables []string) error

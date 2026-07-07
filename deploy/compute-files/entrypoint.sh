@@ -46,19 +46,23 @@ else
   CLOUD_ADMIN_MD5="${CLOUD_ADMIN_MD5:-$PUBLIC_CLOUD_ADMIN_MD5}"
 fi
 
-# harden_cloud_admin_hba (issue #112): once Postgres is accepting loopback
-# connections, insert a `host all cloud_admin all reject` line JUST BEFORE the
-# network catch-all (`host all all all md5`) that compute_ctl appends, then
-# reload. Order matters and is safe: compute_ctl's initdb pg_hba lists the
-# loopback lines (127.0.0.1/32, ::1/128 -> trust) FIRST, so pg_hba's first-match
-# rule keeps cloud_admin working over loopback while rejecting it from every
-# other address. App roles (app_<app>) are untouched — they fall through to the
-# md5 catch-all, so the apps-gateway path keeps working. This is the ENFORCING,
+# harden_pg_hba (issues #112 + #117): once Postgres is accepting loopback
+# connections, (1) insert a `host all cloud_admin all reject` line JUST BEFORE the
+# network catch-all (issue #112 — cloud_admin loopback-only), and (2) rewrite that
+# catch-all's method from md5 to `scram-sha-256` (issue #117 — enforce SCRAM on the
+# wire; an md5-only client, or any role still carrying an md5 verifier, is refused).
+# The app role itself already carries a SCRAM verifier FROM BOOT (its spec
+# encrypted_password is the precomputed APP_ROLE_VERIFIER — see the role-injection
+# block below), so there is NO cold-wake md5 window: even before this reload lands the
+# md5 catch-all auto-negotiates SCRAM against the SCRAM verifier. Order matters and is
+# safe: compute_ctl's initdb pg_hba lists the loopback lines (127.0.0.1/32, ::1/128 ->
+# trust) FIRST, so pg_hba's first-match rule keeps cloud_admin working over loopback
+# while rejecting it from every other address, and app roles (app_<app>) fall through to
+# the SCRAM catch-all so the apps-gateway path keeps working. This is the ENFORCING,
 # CNI-independent tenant boundary (flannel ships no NetworkPolicy controller, so
-# 70-networkpolicy.yaml is defense-in-depth only). Runs in the background so it
-# never delays the wake/readiness path; the strong random md5 above holds the
-# line for the sub-second before the reload lands.
-harden_cloud_admin_hba() {
+# 70-networkpolicy.yaml is defense-in-depth only). Runs in the background so it never
+# delays the wake/readiness path.
+harden_pg_hba() {
   HBA="$PGDATA/pg_hba.conf"
   PSQL="psql -h localhost -p 55433 -U cloud_admin -d postgres -tAc"
   i=0
@@ -67,15 +71,20 @@ harden_cloud_admin_hba() {
     i=$((i+1)); sleep 0.2
   done
   [ -f "$HBA" ] || { echo "WARN issue #112: $HBA absent; cloud_admin still protected by strong md5"; return 0; }
-  if grep -qiE '^[[:space:]]*host[[:space:]]+all[[:space:]]+cloud_admin[[:space:]]+all[[:space:]]+reject' "$HBA"; then
-    return 0
-  fi
-  # Insert the reject before the first `host all all all <method>` catch-all.
-  awk '{ if ($1=="host" && $2=="all" && $3=="all" && $4=="all" && !d){ print "host\tall\tcloud_admin\tall\treject"; d=1 } print }' \
-      "$HBA" > "$HBA.harden" 2>/dev/null && cat "$HBA.harden" > "$HBA" && rm -f "$HBA.harden"
+  # Insert the cloud_admin reject before the first `host all all all <method>`
+  # catch-all AND rewrite that catch-all's method to scram-sha-256 (issue #117).
+  awk '{
+    if ($1=="host" && $2=="all" && $3=="all" && $4=="all" && !d){
+      print "host\tall\tcloud_admin\tall\treject"; d=1
+    }
+    if ($1=="host" && $2=="all" && $3=="all" && $4=="all"){
+      print "host\tall\tall\tall\tscram-sha-256"; next
+    }
+    print
+  }' "$HBA" > "$HBA.harden" 2>/dev/null && cat "$HBA.harden" > "$HBA" && rm -f "$HBA.harden"
   if grep -qiE '^host[[:space:]]+all[[:space:]]+cloud_admin[[:space:]]+all[[:space:]]+reject' "$HBA"; then
     if $PSQL 'SELECT pg_reload_conf()' >/dev/null 2>&1; then
-      echo "issue #112: cloud_admin restricted to loopback (rejected over TCP); pg_hba reloaded"
+      echo "issue #112/#117: cloud_admin loopback-only + wire auth is scram-sha-256; pg_hba reloaded"
     else
       echo "WARN issue #112: pg_hba reload failed; cloud_admin still protected by strong random md5"
     fi
@@ -104,25 +113,29 @@ if [ -n "${PG_MAX_CONNECTIONS:-}" ]; then
     { print; prev=$0 }' "$DST" > "$DST.tmp" && mv "$DST.tmp" "$DST"
 fi
 
-# Per-app role (issue #74, branch-per-app tenant isolation). When BOTH APP_ROLE
-# and APP_ROLE_MD5 are set (per-app computes get them from compute-config-<app>
-# and the Secret app-db-<app>), inject an extra LOGIN role into the spec's roles
-# array. compute_ctl applies spec roles on every boot, so the per-app credential
-# is (re)asserted each wake — the documented MVP behavior. This is ADDITIVE: the
-# primary single-DB compute and the seed-time tmpl compute set neither var, so the
-# block is skipped and their spec is byte-for-byte unchanged (zero blast radius).
-if [ -n "${APP_ROLE:-}" ] && [ -n "${APP_ROLE_MD5:-}" ]; then
-  echo "Injecting per-app login role ${APP_ROLE}"
-  ROLE_JSON="{\"name\": \"${APP_ROLE}\", \"encrypted_password\": \"${APP_ROLE_MD5}\", \"options\": null},"
+# Per-app role (issue #74, branch-per-app tenant isolation; SCRAM under issue #117).
+# When BOTH APP_ROLE and APP_ROLE_VERIFIER are set (per-app computes get them from
+# compute-config-<app> and the Secret app-db-<app>), inject an extra LOGIN role into the
+# spec's roles array. APP_ROLE_VERIFIER is a PRECOMPUTED SCRAM-SHA-256 verifier
+# (SCRAM-SHA-256$...); compute_ctl stores a recognised verifier VERBATIM as the role's
+# encrypted_password (only a bare md5-hex value gets the "md5" prefix), so the app role
+# is SCRAM FROM BOOT with NO tenant plaintext on the compute. compute_ctl applies spec
+# roles on every boot, so the credential is (re)asserted each wake. This is ADDITIVE: the
+# primary single-DB compute and the seed-time tmpl compute set neither var, so the block
+# is skipped and their spec is byte-for-byte unchanged (zero blast radius).
+if [ -n "${APP_ROLE:-}" ] && [ -n "${APP_ROLE_VERIFIER:-}" ]; then
+  echo "Injecting per-app login role ${APP_ROLE} (SCRAM verifier)"
+  ROLE_JSON="{\"name\": \"${APP_ROLE}\", \"encrypted_password\": \"${APP_ROLE_VERIFIER}\", \"options\": null},"
   awk -v r="$ROLE_JSON" 'BEGIN{done=0}{print}(done==0 && /"roles": \[/){print "                    " r; done=1}' \
       "$DST" > "$DST.tmp" && mv "$DST.tmp" "$DST"
 fi
 
-# Per-app tenant boundary: reconcile pg_hba to loopback-only cloud_admin once
-# Postgres is up (issue #112). Backgrounded before exec so the wake path is never
-# blocked; a no-op on the primary/tmpl-less single-DB compute (no APP_ROLE).
+# Per-app tenant boundary + SCRAM wire enforcement: reconcile pg_hba (loopback-only
+# cloud_admin #112 + scram-sha-256 wire auth #117) once Postgres is up. Backgrounded
+# before exec so the wake path is never blocked; a no-op on the primary/tmpl-less
+# single-DB compute (no APP_ROLE).
 if [ -n "${APP_ROLE:-}" ]; then
-  harden_cloud_admin_hba &
+  harden_pg_hba &
 fi
 
 echo "Starting compute_ctl"

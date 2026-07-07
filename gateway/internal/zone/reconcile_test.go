@@ -72,8 +72,8 @@ func (f *fakeSQL) ResyncSubscription(_ context.Context, zone, sub, _ string, _ [
 	f.resynced = append(f.resynced, zone+"/"+sub)
 	return nil
 }
-func (f *fakeSQL) EnsureReplRole(_ context.Context, zone, _, md5 string) error {
-	f.replRoles[zone] = md5
+func (f *fakeSQL) EnsureReplRole(_ context.Context, zone, _, password string) error {
+	f.replRoles[zone] = password
 	return nil
 }
 func (f *fakeSQL) EnsurePublication(_ context.Context, zone, pub, _ string, tables []string) error {

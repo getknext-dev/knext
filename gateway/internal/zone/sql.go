@@ -108,16 +108,22 @@ func fdwSchema(fromZone string) string { return "zone_" + slotSafe(fromZone) }
 // operator-SQL-managed rather than entrypoint-injected (ADR-0007 §4b, as-built).
 // The role is durable on the timeline, so it survives scale-to-zero; the operator
 // re-asserts it every reconcile as the "applied every boot" guarantee.
-func buildEnsureReplRole(role, md5hex string) string {
+func buildEnsureReplRole(role, password string) string {
 	rq := quoteIdent(role)
-	return fmt.Sprintf(`DO $$
+	pw := quoteLiteral(password) // plaintext, single-quote-escaped
+	// issue #117: set the PLAINTEXT password under password_encryption=scram-sha-256
+	// so Postgres computes a SCRAM-SHA-256 verifier (no precomputed md5). The SET is
+	// session-local and belt-and-suspenders — config.json already defaults it to
+	// scram-sha-256 — so the verifier is SCRAM even if a session GUC drifted.
+	return fmt.Sprintf(`SET password_encryption='scram-sha-256';
+DO $$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = %s) THEN
-    CREATE ROLE %s WITH LOGIN REPLICATION PASSWORD 'md5%s';
+    CREATE ROLE %s WITH LOGIN REPLICATION PASSWORD %s;
   ELSE
-    ALTER ROLE %s WITH LOGIN REPLICATION PASSWORD 'md5%s';
+    ALTER ROLE %s WITH LOGIN REPLICATION PASSWORD %s;
   END IF;
-END $$;`, quoteLiteral(role), rq, md5hex, rq, md5hex)
+END $$;`, quoteLiteral(role), rq, pw, rq, pw)
 }
 
 // buildEnsurePublication ensures a publication for exactly the declared tables and
@@ -328,9 +334,10 @@ func buildDropFederation(fromZone string) string {
 		quoteIdent(fdwServer(fromZone)), quoteIdent(fdwSchema(fromZone)))
 }
 
-// zoneMD5 is compute_ctl's encrypted_password format WITHOUT the "md5" prefix (the
-// callers add "md5" where Postgres wants it): raw md5(password||rolename). Matches
-// provision-app.sh app_md5 and the appdb operator.
+// zoneMD5 computes raw md5(password||rolename), 32-hex, no "md5" prefix. Retained only
+// for the zone-repl Secret's REPL_ROLE_MD5 field (peer-readable metadata); the repl
+// ROLE itself is set with a SCRAM verifier via buildEnsureReplRole (issue #117), so this
+// hash no longer drives authentication.
 func zoneMD5(password, role string) string {
 	sum := md5.Sum([]byte(password + role)) //nolint:gosec // format required by Neon compute_ctl
 	return hex.EncodeToString(sum[:])

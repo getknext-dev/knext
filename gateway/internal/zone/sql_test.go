@@ -139,12 +139,23 @@ func TestBuildDropReplicationSlotOnlyWhenInactive(t *testing.T) {
 	}
 }
 
-func TestBuildEnsureReplRoleAssertsReplicationAndPassword(t *testing.T) {
-	sql := buildEnsureReplRole("repl_za", "deadbeef")
-	for _, want := range []string{"CREATE ROLE \"repl_za\" WITH LOGIN REPLICATION", "ALTER ROLE \"repl_za\" WITH LOGIN REPLICATION", "PASSWORD 'md5deadbeef'"} {
+func TestBuildEnsureReplRoleAssertsReplicationAndScramPassword(t *testing.T) {
+	// issue #117: the repl role is set with its PLAINTEXT password under
+	// password_encryption=scram-sha-256 so Postgres computes a SCRAM verifier
+	// (no precomputed md5). The literal is single-quote-escaped.
+	sql := buildEnsureReplRole("repl_za", "s3cr'et")
+	for _, want := range []string{
+		"SET password_encryption='scram-sha-256'",
+		"CREATE ROLE \"repl_za\" WITH LOGIN REPLICATION",
+		"ALTER ROLE \"repl_za\" WITH LOGIN REPLICATION",
+		"PASSWORD 's3cr''et'", // quoteLiteral-escaped plaintext, NOT an md5 hash
+	} {
 		if !strings.Contains(sql, want) {
 			t.Errorf("repl-role SQL missing %q: %s", want, sql)
 		}
+	}
+	if strings.Contains(sql, "md5") {
+		t.Errorf("repl-role SQL must not carry an md5 verifier under SCRAM: %s", sql)
 	}
 }
 

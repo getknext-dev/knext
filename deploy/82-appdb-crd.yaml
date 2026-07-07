@@ -123,7 +123,7 @@ spec:
                   type: string
                   description: >-
                     The output credential Secret an external driver reads/mirrors
-                    (app-db-<appName>): keys PGUSER, PGPASSWORD, APP_ROLE_MD5,
+                    (app-db-<appName>): keys PGUSER, PGPASSWORD, APP_ROLE_VERIFIER,
                     DATABASE_URL, and DATABASE_URL_RO (only when spec.roPool.enabled).
                     Part of the external-driver contract — see docs/appdatabase-api.md.
                 timelineId:

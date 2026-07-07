@@ -84,7 +84,7 @@
                 },
                 {
                     "name": "password_encryption",
-                    "value": "md5",
+                    "value": "scram-sha-256",
                     "vartype": "enum"
                 },
                 {

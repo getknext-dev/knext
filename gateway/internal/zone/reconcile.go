@@ -192,11 +192,15 @@ func (d *Deps) reconcileApply(ctx context.Context, cr *Zone) (bool, error) {
 	//      wake) is ensured here too so peers can always read this zone's credential.
 	if genChanged {
 		if cr.needsReplication() {
-			_, replMD5, serr := d.Cluster.EnsureReplSecret(ctx, cr.Name, replRole, d.NewPassword)
+			replPw, _, serr := d.Cluster.EnsureReplSecret(ctx, cr.Name, replRole, d.NewPassword)
 			if serr != nil {
 				return true, fmt.Errorf("ensure repl secret: %w", serr)
 			}
-			if err := d.SQL.EnsureReplRole(ctx, cr.Name, replRole, replMD5); err != nil {
+			// issue #117: hand the PLAINTEXT to the role setter so Postgres computes a
+			// SCRAM-SHA-256 verifier (the Secret still carries REPL_ROLE_MD5 for peers
+			// that read it, but the role's on-disk verifier is SCRAM). The plaintext
+			// reaches psql only over the pod-local exec stdin (never argv/env).
+			if err := d.SQL.EnsureReplRole(ctx, cr.Name, replRole, replPw); err != nil {
 				return true, fmt.Errorf("ensure repl role: %w", err)
 			}
 		}

@@ -90,7 +90,7 @@ The operator mints one Secret per app, named by `status.secretName`
 |---|---|---|
 | `PGUSER` | yes | the per-app role, `app_<app>` |
 | `PGPASSWORD` | yes | the per-app random password |
-| `APP_ROLE_MD5` | yes | `md5(password‖role)` (Neon `compute_ctl` encrypted_password) |
+| `APP_ROLE_VERIFIER` | yes | the role's **SCRAM-SHA-256 verifier** (`SCRAM-SHA-256$…`), injected verbatim as the Neon `compute_ctl` `encrypted_password` (issue #117; renamed from `APP_ROLE_MD5`). Non-reversible — never the plaintext. |
 | `DATABASE_URL` | yes | `postgres://app_<app>:<pw>@pggw-apps.scale-zero-pg.svc:55432/<app>?sslmode=disable` |
 | `DATABASE_URL_RO` | **only when `roPool.enabled`** | the writer DSN with the gateway **RO port** (`55434`) |
 

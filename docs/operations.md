@@ -918,17 +918,61 @@ runbook until the watcher is back.
   safekeeper re-seed — needed only for a full-plane rebuild from backup, where the
   safekeepers are fresh — is now also automated; see "Backup & disaster recovery".)
 
+## Password authentication: SCRAM-SHA-256 (issue #117)
+
+Per-app roles (`app_<app>`) and cross-zone replication roles (`repl_<zone>`)
+authenticate over the wire with **SCRAM-SHA-256**, not md5. The migration is
+deliberately built so **no tenant plaintext ever lands on the compute**:
+
+- **App roles** — `provision-app.sh` (and the AppDatabase operator) precompute a
+  **SCRAM-SHA-256 verifier** from the app password (PBKDF2-HMAC-SHA256, 4096 iters,
+  random per-role salt — Python `hashlib.pbkdf2_hmac` / Go stdlib `crypto/pbkdf2`)
+  and store it in the app Secret as `APP_ROLE_VERIFIER`. The compute spec injects it
+  verbatim as the role's `encrypted_password` (`compute_ctl` stores a recognised
+  `SCRAM-SHA-256$…` verifier as-is; only a bare md5-hex value gets the `md5` prefix),
+  so the role is SCRAM **from boot** and the compute only ever sees the
+  non-reversible verifier — never the password.
+- **Repl roles** — the zone operator sets them via loopback SQL under
+  `password_encryption=scram-sha-256` (they need the `REPLICATION` attribute the
+  spec-role format lacks); the plaintext reaches `psql` only over the pod-local
+  `exec` stdin, never argv/env.
+- **Wire enforcement** — the entrypoint rewrites the pg_hba network catch-all from
+  `md5` to `scram-sha-256` (a role still carrying an md5 verifier, or an md5-only
+  client, is refused), while preserving the #112 `cloud_admin` loopback-only reject.
+- **`DATABASE_URL` is unchanged** — libpq negotiates SCRAM transparently from the
+  same plaintext password in the DSN; apps need no change.
+
+> **Known limitation — cold-wake md5 window (compute_ctl, issue #158).** `compute_ctl`
+> opens the Postgres network socket (~T=.90) **before** it applies the spec roles
+> (~T=.99) — a ~tens-of-ms window on a **cold wake only**. During it the socket
+> serves the **boot-time durable** verifier under the still-`md5` pg_hba. For a
+> **newly provisioned** app the durable verifier is SCRAM, so the window serves SCRAM
+> (md5 is never offered). For an **existing app migrated from the md5 era**, whose
+> durable verifier is still md5, that first post-cold-wake connection can authenticate
+> via **md5** until `apply_config` lands the SCRAM verifier a few ms later; every warm
+> / steady-state connection is SCRAM. This is a `compute_ctl` architectural property
+> (the OSS `ComputeSpec` exposes no boot-time pg_hba field, and we do not patch the
+> reused Neon binary — hard rule 5). It is a hash **downgrade**, not an auth bypass
+> (the md5 verifier is for the *same* password; the attacker still needs it), bounded
+> like the #112 window. Tracked in #158.
+
 ## Password rotation
 
 `ALTER USER ... PASSWORD` does **not** stick — `compute_ctl` re-applies the spec's
-roles on every boot. To rotate:
+roles on every boot. Rotate by role class:
 
-1. Compute the hash: `md5` of `password + username`, e.g.
-   `printf 'NEWPASScloud_admin' | md5`.
-2. Put it in `roles[].encrypted_password` inside `deploy/54-compute-files.yaml`
-   (the `config.json` key) and `kubectl apply -f deploy/54-compute-files.yaml`.
-3. Update the app Secrets (`30-knext-secret.yaml`) and restart the compute:
-   `kubectl -n scale-zero-pg rollout restart deploy/compute`.
+- **Per-app role** (`app_<app>`, SCRAM) — `sh deploy/provision-app.sh rotate-cred
+  <app> [--bounce]`. It mints a fresh password, writes its **SCRAM verifier** into
+  `APP_ROLE_VERIFIER` (Secret `app-db-<app>`), and the compute re-applies it on its
+  next wake (`--bounce` applies it now via a single-writer-safe `Recreate`).
+  Consumers re-read `PGPASSWORD`/`DATABASE_URL` from the Secret.
+- **`cloud_admin`** (loopback-only superuser, #112) — still an md5-format
+  `encrypted_password` because it authenticates only over the pod-local loopback
+  (which pg_hba `trust`s) and is TCP-rejected on per-app computes, so its verifier
+  format is auth-irrelevant. To rotate on the primary single-DB compute: compute
+  `md5` of `password + username` (`printf 'NEWPASScloud_admin' | md5`), put it in
+  `roles[].encrypted_password` in `deploy/54-compute-files.yaml`, `kubectl apply` it,
+  update `30-knext-secret.yaml`, and `kubectl -n scale-zero-pg rollout restart deploy/compute`.
 
 ## TLS certificate rotation
 
@@ -1022,7 +1066,9 @@ depend on the CNI. Three controls carry it, in order of who does the enforcing:
    or compromised pod that dials `compute-<app>:55433` directly as `cloud_admin`
    (the #112 gateway-bypass) gets `FATAL: pg_hba.conf rejects connection` — no
    superuser, regardless of the CNI. App roles (`app_<app>`) are untouched: they
-   fall through to `md5`, so the apps-gateway path keeps working.
+   fall through to the network catch-all, which the same reconcile rewrites from
+   `md5` to **`scram-sha-256`** (issue #117), so the apps-gateway path keeps working
+   over SCRAM (see "Password authentication: SCRAM-SHA-256"; cold-wake caveat #158).
 2. **No public-default `cloud_admin` password on per-app computes.** The publicly
    documented dev md5 (`md5("cloud_admin"||"cloud_admin")`) is a skeleton key. On a
    per-app compute the entrypoint refuses it: it uses the `pg-cloud-admin` Secret's
@@ -1378,9 +1424,10 @@ directions** and exits non-zero if anything is off:
 ### Rotating an app credential (issue #93b)
 
 Each app authenticates as `app_<app>` with a per-app password stored in Secret
-`app-db-<app>` (`PGPASSWORD` + `APP_ROLE_MD5` + `DATABASE_URL`). `compute_ctl`
-re-applies the role's md5 **from spec on every boot**, so rotation is: write a new
-md5 into the Secret, then bounce (or wait for the next wake of) the compute.
+`app-db-<app>` (`PGPASSWORD` + `APP_ROLE_VERIFIER` + `DATABASE_URL`). `compute_ctl`
+re-applies the role's **SCRAM-SHA-256 verifier** (issue #117) **from spec on every
+boot**, so rotation is: write a new verifier into the Secret, then bounce (or wait
+for the next wake of) the compute — `rotate-cred` does exactly this.
 
 ```sh
 cd deploy

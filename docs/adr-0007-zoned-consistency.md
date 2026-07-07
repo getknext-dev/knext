@@ -348,7 +348,7 @@ mechanism as `APP_ROLE`** — `entrypoint.sh` already appends the per-app login 
 to the compute spec's `roles[]` array on every wake (`compute_ctl` re-applies spec
 roles each boot). Add a second injected role when `REPL_ROLE`/`REPL_ROLE_MD5` are
 set (from `compute-config-<zone>` + the zone Secret, exactly as `APP_ROLE`/
-`APP_ROLE_MD5` flow today via `render.go` `RenderConfigMap` + the Secret
+`APP_ROLE_VERIFIER` flow today via `render.go` `RenderConfigMap` + the Secret
 `SecretKeyRef`). Zero blast radius on non-zone computes (vars unset → block skipped).
 **TLS note:** spike traffic was plaintext over the pod network; cross-zone
 replication should move to `sslmode=require` on the publisher front (the `pggw-tls`

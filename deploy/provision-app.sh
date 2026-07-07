@@ -133,29 +133,44 @@ validate_app_name() {
   return 0
 }
 
-# app_md5 computes the compute_ctl encrypted_password: the RAW 32-hex
-# md5(password||rolename), WITHOUT a "md5" prefix — the exact format Neon's
-# compute_ctl expects (matches the cloud_admin CLOUD_ADMIN_MD5 verifier).
-app_md5() { python3 -c "import hashlib,sys;print(hashlib.md5((sys.argv[1]+sys.argv[2]).encode()).hexdigest())" "$1" "$2"; }
+# app_scram_verifier computes the compute_ctl encrypted_password as a PostgreSQL
+# SCRAM-SHA-256 verifier (issue #117): SCRAM-SHA-256$4096:<salt>$<StoredKey>:<ServerKey>.
+# compute_ctl stores a recognised verifier VERBATIM (only a bare md5-hex gets the "md5"
+# prefix), so the app role is SCRAM from boot — no md5, and NO plaintext on the compute.
+# PBKDF2 is the Python stdlib hashlib.pbkdf2_hmac (not hand-rolled); a random per-role
+# salt is drawn once here and baked into the (stable, no-silent-rotation) Secret.
+app_scram_verifier() {
+  python3 - "$1" <<'PY'
+import hashlib, hmac, base64, os, sys
+pw = sys.argv[1].encode(); salt = os.urandom(16); it = 4096
+salted = hashlib.pbkdf2_hmac('sha256', pw, salt, it)
+ck = hmac.new(salted, b'Client Key', hashlib.sha256).digest()
+sk = hashlib.sha256(ck).digest()
+srv = hmac.new(salted, b'Server Key', hashlib.sha256).digest()
+b = lambda x: base64.b64encode(x).decode()
+print(f"SCRAM-SHA-256${it}:{b(salt)}${b(sk)}:{b(srv)}")
+PY
+}
 
 # mint_credential ensures the per-app Secret app-db-<app> exists (idempotent:
 # re-provisioning keeps the SAME password so live apps are not locked out). Echoes
 # the app role name. The Secret mirrors the knext DATABASE_URL contract: PGUSER,
-# PGPASSWORD, DATABASE_URL (through the apps-gateway) + APP_ROLE_MD5 (consumed by
-# the compute spec). Written BEFORE the branch so credentials survive a crash.
+# PGPASSWORD, DATABASE_URL (through the apps-gateway) + APP_ROLE_VERIFIER (a SCRAM
+# verifier consumed by the compute spec). Written BEFORE the branch so credentials
+# survive a crash.
 mint_credential() {
   local app="$1" role="${APP_ROLE_PREFIX}$1"
   if K get secret "app-db-$app" >/dev/null 2>&1; then
     echo "$role"; return 0
   fi
-  local pw md5 dsn
+  local pw verifier dsn
   pw="$(python3 -c 'import os;print(os.urandom(18).hex())')"
-  md5="$(app_md5 "$pw" "$role")"
+  verifier="$(app_scram_verifier "$pw")"
   dsn="postgres://$role:$pw@pggw-apps.$NS.svc:55432/$app?sslmode=disable"
   K create secret generic "app-db-$app" \
     --from-literal=PGUSER="$role" \
     --from-literal=PGPASSWORD="$pw" \
-    --from-literal=APP_ROLE_MD5="$md5" \
+    --from-literal=APP_ROLE_VERIFIER="$verifier" \
     --from-literal=DATABASE_URL="$dsn" >/dev/null
   K label secret "app-db-$app" app="compute-$app" tier=apps --overwrite >/dev/null 2>&1 || true
   echo "$role"
@@ -570,8 +585,8 @@ EOF
 }
 
 # cmd_rotate_cred rotates an app's per-app password (issue #93b): mint a fresh
-# password, write its md5 into the app's Secret (app-db-<app>), and let compute_ctl
-# re-apply it from spec on the compute's NEXT boot. The DSN CONTRACT is unchanged
+# password, write its SCRAM verifier into the app's Secret (app-db-<app>), and let
+# compute_ctl re-apply it from spec on the compute's NEXT boot. The DSN CONTRACT is unchanged
 # (same role app_<app>, same host/db) — only the password VALUE rotates. A running
 # compute keeps the OLD password valid until it is bounced; --bounce applies the new
 # password immediately (Recreate = single-writer-safe), a compute at 0 picks it up on
@@ -583,16 +598,16 @@ cmd_rotate_cred() {
   validate_app_name "$app"
   K get secret "app-db-$app" >/dev/null 2>&1 || die "app '$app' has no credential Secret (app-db-$app) — run 'create' first"
   local role="${APP_ROLE_PREFIX}$app"
-  local pw md5 dsn
+  local pw verifier dsn
   pw="$(python3 -c 'import os;print(os.urandom(18).hex())')"
-  md5="$(app_md5 "$pw" "$role")"
+  verifier="$(app_scram_verifier "$pw")"
   dsn="postgres://$role:$pw@pggw-apps.$NS.svc:55432/$app?sslmode=disable"
-  log "rotating credential for '$app' (role $role): new md5 -> Secret app-db-$app"
+  log "rotating credential for '$app' (role $role): new SCRAM verifier -> Secret app-db-$app"
   # In-place update (apply, not delete+create) so the Secret never briefly vanishes.
   K create secret generic "app-db-$app" \
     --from-literal=PGUSER="$role" \
     --from-literal=PGPASSWORD="$pw" \
-    --from-literal=APP_ROLE_MD5="$md5" \
+    --from-literal=APP_ROLE_VERIFIER="$verifier" \
     --from-literal=DATABASE_URL="$dsn" \
     --dry-run=client -o yaml | K apply -f - >/dev/null
   K label secret "app-db-$app" app="compute-$app" tier=apps --overwrite >/dev/null 2>&1 || true

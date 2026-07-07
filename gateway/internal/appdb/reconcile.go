@@ -2,8 +2,6 @@ package appdb
 
 import (
 	"context"
-	"crypto/md5" //nolint:gosec // md5(password||role) is Neon compute_ctl's encrypted_password format, not a security hash
-	"encoding/hex"
 	"fmt"
 	"strconv"
 	"strings"
@@ -79,9 +77,14 @@ func (d *Deps) reconcileApply(ctx context.Context, cr *AppDatabase) (bool, error
 	}
 	if !secExists {
 		pw := d.NewPassword()
-		sum := appMD5(pw, role)
+		// issue #117: precompute a SCRAM-SHA-256 verifier (non-reversible) for the spec's
+		// encrypted_password — the app role is SCRAM from boot, no plaintext on the compute.
+		verifier, verr := scramSHA256Verifier(pw)
+		if verr != nil {
+			return true, fmt.Errorf("scram verifier: %w", verr)
+		}
 		dsn := fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=disable", role, pw, d.GatewayHost, d.GatewayPort, app)
-		if err := d.Cluster.CreateSecret(ctx, app, role, pw, sum, dsn); err != nil {
+		if err := d.Cluster.CreateSecret(ctx, app, role, pw, verifier, dsn); err != nil {
 			return true, fmt.Errorf("mint credential: %w", err)
 		}
 	}
@@ -314,13 +317,6 @@ func roDSN(writerDSN string, writerPort, roPort int) string {
 	from := fmt.Sprintf(":%d/", writerPort)
 	to := fmt.Sprintf(":%d/", roPort)
 	return strings.Replace(writerDSN, from, to, 1)
-}
-
-// appMD5 is compute_ctl's encrypted_password: the RAW 32-hex md5(password||rolename)
-// with NO "md5" prefix (matches provision-app.sh app_md5 and the cloud_admin verifier).
-func appMD5(password, role string) string {
-	sum := md5.Sum([]byte(password + role)) //nolint:gosec // format required by Neon compute_ctl
-	return hex.EncodeToString(sum[:])
 }
 
 // validateAppName enforces an RFC1123 DNS label and rejects reserved system names

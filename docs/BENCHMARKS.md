@@ -17,6 +17,7 @@ k8s on an M-series laptop (decommissioned 2026-07-03); **OKE** = Oracle OKE
 | **Warm-tier wake (gated pod)** | **413ms p50 / 558ms p95 / 206ms best** | ✅ drill green (<1.5s bound) | n=20 local; costs 256Mi reservation while parked |
 | compute_ctl attach alone | **123–160ms** | — | Neon's true share; everything else is k8s mechanics |
 | Compose-era cold start (no k8s) | 772ms | — | the floor without pod machinery (historical) |
+| SCRAM-SHA-256 auth (issue #117) | no measurable regression | ✅ verified on OKE | wire auth is now SCRAM (was md5). The SCRAM handshake adds one client↔server round-trip vs md5 (sub-ms on the in-cluster LAN, swamped by the seconds-scale cold-wake); cold-wake wall-time was indistinguishable from the md5 baseline. The app-role verifier is precomputed at provision time (PBKDF2 4096 iters, ~ms, off the wake path). Cold-wake caveat: an existing md5-era app can still auth via md5 in the ~tens-of-ms window before `apply_config` lands the SCRAM verifier (#158). |
 
 ## Combined wake (knext demo, issue #8)
 

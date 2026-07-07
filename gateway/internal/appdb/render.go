@@ -83,7 +83,7 @@ func (c RenderConfig) RenderService(s ComputeSpec) *corev1.Service {
 
 // RenderDeployment builds compute-<app> (mirrors the template Deployment exactly:
 // wait-timeline initContainer, shared entrypoint, Recreate single-writer strategy,
-// per-app quota resources, APP_ROLE_MD5 from the optional per-app Secret).
+// per-app quota resources, APP_ROLE_VERIFIER from the optional per-app Secret).
 func (c RenderConfig) RenderDeployment(s ComputeSpec) *appsv1.Deployment {
 	q := s.Quotas.resolved()
 	replicas := int32(s.Replicas) //nolint:gosec // small bounded value
@@ -124,10 +124,15 @@ echo "timeline ready"`
 						Command:         []string{"/bin/sh", "/compute-files/entrypoint.sh"},
 						EnvFrom:         []corev1.EnvFromSource{{ConfigMapRef: &corev1.ConfigMapEnvSource{LocalObjectReference: corev1.LocalObjectReference{Name: "compute-config-" + s.App}}}},
 						Env: []corev1.EnvVar{{
-							Name: "APP_ROLE_MD5",
+							// issue #117: a precomputed SCRAM-SHA-256 verifier (non-reversible)
+							// that compute_ctl injects verbatim into the spec's encrypted_password
+							// — the app role is SCRAM from boot, and no tenant plaintext reaches
+							// the compute. optional:true so the tmpl/primary computes (no per-app
+							// Secret) inject no extra role.
+							Name: "APP_ROLE_VERIFIER",
 							ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
 								LocalObjectReference: corev1.LocalObjectReference{Name: "app-db-" + s.App},
-								Key:                  "APP_ROLE_MD5", Optional: &optional,
+								Key:                  "APP_ROLE_VERIFIER", Optional: &optional,
 							}},
 						}},
 						Ports: []corev1.ContainerPort{

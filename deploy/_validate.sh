@@ -552,3 +552,34 @@ grep -q 'api/v1/rules' _verify-drift.sh || fail "_verify-drift.sh must assert sh
 grep -q 'RULEUNLOADED' _verify-drift.sh || fail "_verify-drift.sh loaded-rules assertion missing (expected the shipped-vs-loaded diff that flags RULEUNLOADED) (#155)"
 grep -q 'status.image' _verify-drift.sh || fail "_verify-drift.sh section C must also accept the manifest digest from .status.image — OCI-index images report imageID as the child CONFIG digest (the appdb-operator false positive, #153)"
 ok "drift gate asserts shipped rules LOADED + tolerates OCI-index imageID via the .status.image digest (#155/#153)"
+
+# 29. contract (issue #117): SCRAM-SHA-256 password auth (was md5). The app role gets a
+#     PRECOMPUTED SCRAM verifier injected into the compute spec (compute_ctl stores a
+#     recognised SCRAM-SHA-256$... verifier verbatim), so the role is SCRAM FROM BOOT —
+#     no cold-wake md5 window, and ZERO tenant plaintext on the compute (the verifier is
+#     non-reversible). Legs:
+#     (a) password_encryption=scram-sha-256 (source spec + inlined 54) — belt for the
+#         zone repl role's plaintext ALTER path;
+#     (b) the per-app writer entrypoint (APP_ROLE) injects APP_ROLE_VERIFIER into the
+#         spec's encrypted_password, and rewrites the pg_hba network catch-all
+#         md5 -> scram-sha-256 (reject md5-only clients) while KEEPING the #112
+#         cloud_admin loopback-only reject;
+#     (c) the per-app Secret carries APP_ROLE_VERIFIER (a SCRAM verifier), delivered as
+#         an env var (a verifier is safe to env; there is no plaintext to protect) — and
+#         there is NO plaintext file mount and NO md5 key.
+grep -q '"name": "password_encryption"' compute-files/config.json || fail "config.json must set password_encryption (issue #117)"
+grep -A2 '"name": "password_encryption"' compute-files/config.json | grep -q '"value": "scram-sha-256"' || fail "config.json password_encryption must be scram-sha-256, not md5 (issue #117)"
+grep -A2 '"name": "password_encryption"' 54-compute-files.yaml | grep -q '"value": "scram-sha-256"' || fail "54-compute-files.yaml (inlined spec) password_encryption must be scram-sha-256 (issue #117)"
+# entrypoint (source + inlined) injects the SCRAM VERIFIER into the spec + enforces SCRAM in pg_hba.
+grep -q 'APP_ROLE_VERIFIER' compute-files/entrypoint.sh || fail "entrypoint.sh must inject APP_ROLE_VERIFIER (a SCRAM verifier) into the compute spec (issue #117)"
+grep -q 'APP_ROLE_VERIFIER' 54-compute-files.yaml || fail "54-compute-files.yaml (inlined entrypoint) must inject APP_ROLE_VERIFIER (issue #117)"
+grep -q 'APP_ROLE_MD5' compute-files/entrypoint.sh && fail "entrypoint.sh must not reference APP_ROLE_MD5 — renamed to APP_ROLE_VERIFIER (issue #117)" || true
+grep -q 'scram-sha-256' compute-files/entrypoint.sh || fail "entrypoint.sh must rewrite the pg_hba network catch-all to scram-sha-256 (issue #117)"
+# the #112 cloud_admin loopback reject MUST survive the SCRAM change (no cross-tenant regression).
+grep -q 'cloud_admin.*reject' compute-files/entrypoint.sh || fail "entrypoint.sh must keep the cloud_admin loopback-only reject (issue #112 preserved under #117)"
+# the per-app compute injects the verifier from the Secret; NO plaintext file mount.
+grep -q 'APP_ROLE_VERIFIER' compute-app.template.yaml || fail "compute-app.template.yaml must inject APP_ROLE_VERIFIER from the per-app Secret (issue #117)"
+grep -q 'app-role-secret' compute-app.template.yaml && fail "compute-app.template.yaml must NOT mount a plaintext file — the verifier-in-spec approach needs no plaintext on the compute (issue #117)" || true
+# provision-app + the appdb operator must COMPUTE a SCRAM verifier (not an md5 hash).
+grep -q 'app_scram_verifier\|APP_ROLE_VERIFIER' provision-app.sh || fail "provision-app.sh must mint APP_ROLE_VERIFIER via a SCRAM verifier (issue #117)"
+ok "SCRAM-SHA-256 auth wired: app role gets a precomputed SCRAM verifier in-spec (SCRAM from boot, no plaintext on compute, no cold-wake window), scram-sha-256 pg_hba, cloud_admin reject preserved (issue #117)"

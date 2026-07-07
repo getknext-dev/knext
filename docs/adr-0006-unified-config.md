@@ -54,7 +54,7 @@ touches.
 - **Finalizer:** `apps.scale-zero-pg.dev/deprovision` — runs the safe two-sided Neon
   timeline delete before the object is removed.
 - **Output Secret:** `app-db-<appName>` in the **`scale-zero-pg`** namespace, keys:
-  `PGUSER`, `PGPASSWORD`, `APP_ROLE_MD5`, `DATABASE_URL`
+  `PGUSER`, `PGPASSWORD`, `APP_ROLE_VERIFIER` (SCRAM verifier, #117; was `APP_ROLE_MD5`), `DATABASE_URL`
   (`postgres://app_<app>:<pw>@pggw-apps.scale-zero-pg.svc:55432/<app>?sslmode=disable`).
   ⚠️ **There is no `DATABASE_URL_RO` key today** — the read-only pool is a separate,
   documented **two-DSN** pattern (gateway port `55434`, `docs/connecting.md`) and is
@@ -381,7 +381,7 @@ So GC is **finalizer-driven**, not ownerRef-driven:
 
 - **The `AppDatabase` Secret + status is now a public API.** scale-zero-pg must treat
   the Secret name (`app-db-<appName>`), its keys (`DATABASE_URL`, `PGUSER`,
-  `PGPASSWORD`, `APP_ROLE_MD5`), and `status.phase`/`conditions[Ready]` as a **stable
+  `PGPASSWORD`, `APP_ROLE_VERIFIER` — SCRAM verifier, #117; was `APP_ROLE_MD5`), and `status.phase`/`conditions[Ready]` as a **stable
   external-driver contract** — documented, and changed only with versioning care. A
   new **"external driver contract"** doc section in scale-zero-pg is an action item.
 - **`DATABASE_URL_RO` gap.** For knext to inject `DATABASE_URL_RO`, scale-zero-pg
@@ -439,6 +439,6 @@ So GC is **finalizer-driven**, not ownerRef-driven:
   confirmed (a sample uses `namespace: default`). The `appName` derivation is designed
   to be safe **either** way, but the collision-hash detail (Open decision 4) depends on it.
 - `DATABASE_URL_RO` is **not** emitted by the current appdb operator (verified in
-  `k8s.go` `CreateSecret` — keys are `PGUSER`/`PGPASSWORD`/`APP_ROLE_MD5`/`DATABASE_URL`
+  `k8s.go` `CreateSecret` — keys are `PGUSER`/`PGPASSWORD`/`APP_ROLE_VERIFIER`/`DATABASE_URL`
   only); the two-DSN RO pattern is documented in `docs/connecting.md`. Injecting `_RO`
   requires the API-hardening item in Open decision 2.
