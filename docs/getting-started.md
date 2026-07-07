@@ -174,19 +174,28 @@ Design, evidence and caveats: [ADR-0003](adr-0003-multi-tenancy.md) ·
 [connecting → multi-app](connecting.md#multi-app--branch-per-app) ·
 [operations → operator runbook](operations.md#appdatabase-operator-runbook-96).
 
-## 6. (Optional) Zones — one logical system across consistency boundaries
+## 6. Zones — one logical system across consistency boundaries
 
-For a multi-zone system that **shares a declared subset of data** across zones (the
-SCS use case — e.g. an EU zone and a US zone that each own their writes but see an
-eventually-consistent view of each other's data), deploy the Zone CRD + operator on
-top of the apps-gateway + appdb-operator:
+The **Zone CRD + zone-operator ship as STANDARD cluster infrastructure** —
+`deploy/86-zone-crd.yaml` + `deploy/87-zone-operator.yaml`, so the standard deploy
+glob in step 2 (`ls deploy/[0-9][0-9]-*.yaml | ... | kubectl apply`) already installs
+them alongside the apps-gateway + appdb-operator. `deploy/_verify-drift.sh` asserts
+their live presence (the `zones` CRD installed + the zone-operator ready 1/1), so a
+cluster where they were never applied fails the drift gate rather than passing
+silently (issue #151 — the flagship must not be drill-only). **Authoring Zone CRs is
+the opt-in part**; the reconciler that makes them work is always present.
+
+To install (or re-apply) just the zone axis on an existing cluster:
 
 ```sh
 kubectl apply -f deploy/86-zone-crd.yaml        # Zone CRD (zones.scale-zero-pg.dev)
-kubectl apply -f deploy/87-zone-operator.yaml   # the zone-operator
+kubectl apply -f deploy/87-zone-operator.yaml   # the zone-operator (runs 1/1, sustained)
 ```
 
-A `Zone` COMPOSES an `AppDatabase` (its strong-consistency in-zone DB) and adds the
+A multi-zone system **shares a declared subset of data** across zones (the SCS use
+case — e.g. an EU zone and a US zone that each own their writes but see an
+eventually-consistent view of each other's data). A `Zone` COMPOSES an `AppDatabase`
+(its strong-consistency in-zone DB) and adds the
 cross-zone fabric. A zone **exports nothing by default** — `spec.publishes` is the
 opt-in export boundary; `spec.dataDependencies` declares what it imports from peers:
 

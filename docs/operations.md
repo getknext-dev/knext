@@ -58,6 +58,7 @@ Alertmanager (`61-alertmanager.yaml`) to a receiver.
 | `BackupStale` (crit) | last successful backup >26h old | >1 missed daily run — the off-cluster copy is stale. Investigate the CronJob before it becomes a data-loss window. |
 | `BackupStaleAbsent` (crit) | backup **never** succeeded / suspended **and the CronJob is >26h old**, OR the CronJob object is gone | The last-success metric is absent — `BackupStale` is blind here. Treat as **no off-cluster backup at all**: un-suspend / redeploy the CronJob and force a run. **Age-gated so a fresh / DR-restored plane is not paged for the first 26h** (#62); the deleted/renamed case fires immediately (#51). |
 | `WalJanitorStaleAbsent` (crit) | janitor **never** succeeded / suspended **and the CronJob is >26h old**, OR the CronJob object is gone | The last-success metric is absent — `WalJanitorStale` is blind here. `/safekeeper` WAL is unbounded: un-suspend / redeploy the CronJob and force a run. **Age-gated for 26h on a fresh/DR plane** (#62); deleted/renamed fires immediately (#49/#51). |
+| `JanitorConfigDisarmed` (crit) | a **wal-janitor / repl-slot-monitor / apps-wal-monitor / backup** pod is stuck in `CreateContainerConfigError` (or an image-pull fault) for 2m | The **janitor is DISARMED**: a janitor-critical ConfigMap/Secret is missing (e.g. `storage-objstore` deleted as drill residue), so the pod's container **never starts** → no Failed Job → `WalJanitorJobFailed`/`ReplicationSlot*`/`SafekeeperWALGrowth` all stay silent and `/safekeeper` WAL accumulates toward node **DiskPressure** (the 2026-07-06 incident). This pages the **same cycle**, not 26h later via `WalJanitorStale`. `kubectl -n scale-zero-pg describe pod {{pod}}` names the missing config; re-derive `storage-objstore` via `deploy/gen-secrets.sh`. Covers the nightly janitor **and** the zone repl-slot monitors (#142). |
 | `Watchdog` (none) | **always firing by design** | The alerting stack's **dead-man's-switch** (#60). You should **never** be paged by this rule directly — it is routed to an *external* heartbeat monitor. If that **external** monitor pages you, Prometheus or Alertmanager itself is down. See [dead-man's-switch](#dead-mans-switch-external-heartbeat-60). |
 | `KubeStateMetricsDown` (crit) | `up{job=kube-state-metrics}==0` or absent for 2m | **Sev-1.** KSM (`deploy/59`) is the sole producer for `BackupJobFailed`, `WalJanitorJobFailed`, `BackupStale`, `WalJanitorStale`, `SafekeeperWALGrowth`, `ReplicationSlotWALGrowth`, `ReplicationSlotInactive`, `PageserverStandbyNotReady`, `ComputeWakeStuck`, `ComputeWakeStuckApps`, `ComputeRoPoolStuck`, `ComputeStuckNotReady` — while it is down **all of them are blind**. Restore KSM before trusting any platform alert. (#48) |
 | `PswatcherDown` (crit) | `up{job="pswatcher"}==0` for 2m | The failover authority is down — a primary pageserver death now degrades to the manual runbook (below). Restart pswatcher. |
@@ -1476,6 +1477,20 @@ delegation) and the operator is the **sole author** of the cross-zone SQL. It ru
 that SQL as `cloud_admin` over pod-local loopback via `pods/exec` inside the compute
 pod (the distroless operator ships no psql; `cloud_admin` is rejected over TCP, #112).
 
+**Deployment posture — STANDARD, not drill-only (issue #151).** The Zone CRD (86) and
+zone-operator (87) are **standard cluster infrastructure**: they match the standard
+deploy glob (`ls deploy/[0-9][0-9]-*.yaml | … | kubectl apply`), so a normal deploy
+installs them alongside the apps-gateway + appdb-operator, and the operator runs **1/1,
+sustained** (like `appdb-operator`/`pswatcher`). `deploy/_verify-drift.sh` (section D)
+asserts their **live presence** — the `zones.zones.scale-zero-pg.dev` CRD is installed
+and the `zone-operator` Deployment is ready `1/1` — so a cluster that never applied them
+**fails the drift gate** instead of passing silently (the v1.3.0 convergent finding: the
+flagship shipped drill-only because `_verify-zones.sh` applies 86/87 then tears them down
+on exit; `_verify-zones.sh` remains the throwaway *fabric* drill, but the operator itself
+is now a persistent deploy). Applying the zone manifests is **idempotent** — it does not
+disturb existing `AppDatabase`s. Prove the sustained deploy live with
+`deploy/_verify-zone-deploy.sh zone`.
+
 **Scale-to-zero contract (steady-state gate):** the operator re-asserts the in-DB
 fabric **only on a spec change** — a Ready zone whose `metadata.generation` equals
 `status.observedGeneration` short-circuits the reconcile and runs **no** SQL, so it
@@ -1830,6 +1845,22 @@ remembering to check:
 | 4 | knext posture shifts | Trigger-gated review: any knext-side ADR/CRD change touching the DATABASE_URL contract re-convenes the trio (see the loop section in CLAUDE.md) |
 | 5 | Justifying capability unused for a quarter | Dated tracked item: issue #65 (due 2026-10-03) |
 | 6 | Reliability floor (read SPOF reached users) | Ruled CLEARED at iteration 4; guarded live by `PswatcherPrimaryDown` / `PswatcherPromotionFired` / `PswatcherDown` + the `Watchdog` dead-man's-switch behind them |
+
+**Janitor-disarm tripwire (issue #142).** The WAL-bound alerts above
+(`WalJanitorJobFailed`, `WalJanitorStale`, `SafekeeperWALGrowth`, `ReplicationSlot*`)
+all key off a **Failed Job** — but a janitor/monitor whose container **never starts**
+(a janitor-critical ConfigMap like `storage-objstore` was deleted, e.g. as residue
+from a throwaway drill in the main namespace → `CreateContainerConfigError`) produces
+**no** Failed Job, so every one of them stays silent and the only backstop was
+`WalJanitorStale` at **>26h** — long enough for `/safekeeper` WAL to accumulate toward
+a node **DiskPressure** (the 2026-07-06 incident). `JanitorConfigDisarmed`
+(`deploy/60`) closes that at the source: it reads the **pod's** waiting-reason from
+kube-state-metrics directly and pages **within one cycle**, for the nightly wal-janitor
+**and** the zone repl-slot monitors (same shared-config/exec coupling class). Proven
+live by `deploy/_verify-zone-deploy.sh disarm` (a simulated missing ConfigMap makes the
+alert fire in one cycle, not 26h). This is a *durability* tripwire under KC-class
+"restore RTO / disk" — it does not add a new KC row; it removes a silent hole beneath
+the existing WAL-bound criteria.
 
 ### Upgrading the storage plane — posture, triggers, and the rehearsal
 

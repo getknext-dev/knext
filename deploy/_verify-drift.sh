@@ -125,4 +125,28 @@ if [ -n "$DIGDRIFT" ]; then
 fi
 ok "every running OCIR (ks-pg) container matches a manifest-pinned digest (provenance, issue #56)"
 
-echo "drift verification: live pods match the manifest contract AND every declared workload is deployed and healthy AND runs the pinned image digest"
+# D. ZONE AXIS LIVE-PRESENCE (issue #151). The generic presence check (B) already
+# asserts the zone-operator DEPLOYMENT exists+ready (it is one of the parsed
+# Deployments), but the CRD it reconciles is a CustomResourceDefinition — NOT in B's
+# {Deployment,StatefulSet,CronJob} set — so a live cluster missing the `zones` CRD (a
+# user cannot create a Zone) would pass B silently. This is exactly the convergent
+# v1.3.0 finding: the flagship shipped drill-only (_verify-zones.sh applied 86/87 then
+# tore them down on exit). Assert BOTH halves explicitly so 'merged ≠ deployed / drill-
+# only-again' cannot recur: (1) the zones CRD is installed and serves v1alpha1;
+# (2) the zone-operator Deployment is present AND ready 1/1 (a sustained deploy, not a
+# throwaway drill). Named-explicit, so the failure message points straight at #151.
+ZCRD=zones.zones.scale-zero-pg.dev
+if ! $K get crd "$ZCRD" >/dev/null 2>&1; then
+  fail "the Zone CRD ($ZCRD) is NOT installed on the live cluster — a user cannot create a Zone; the flagship (ADR-0007 v2-2) is drill-only. Apply deploy/86-zone-crd.yaml as part of the STANDARD deploy (issue #151)."
+fi
+ok "Zone CRD ($ZCRD) is installed on the live cluster (not drill-only, issue #151)"
+ZREADY=$($K get deploy zone-operator -o jsonpath='{.status.readyReplicas}' 2>/dev/null); ZREADY=${ZREADY:-0}
+ZSPEC=$($K get deploy zone-operator -o jsonpath='{.spec.replicas}' 2>/dev/null); ZSPEC=${ZSPEC:-0}
+if ! $K get deploy zone-operator >/dev/null 2>&1; then
+  fail "the zone-operator Deployment is NOT present on the live cluster — Zone CRs would never reconcile. Apply deploy/87-zone-operator.yaml as part of the STANDARD deploy (issue #151)."
+fi
+[ "$ZREADY" = "$ZSPEC" ] && [ "$ZSPEC" -ge 1 ] 2>/dev/null \
+  || fail "the zone-operator Deployment is present but not ready (readyReplicas=$ZREADY want=$ZSPEC) — the reconciler is not a sustained healthy deploy (issue #151)."
+ok "zone-operator Deployment is live and ready $ZREADY/$ZSPEC (sustained, not a throwaway drill, issue #151)"
+
+echo "drift verification: live pods match the manifest contract AND every declared workload is deployed and healthy AND runs the pinned image digest AND the zone axis (CRD + operator) is live-present (issue #151)"

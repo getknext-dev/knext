@@ -429,3 +429,42 @@ grep -q '/appdb-operator' 83-appdb-operator.yaml || fail "83-appdb-operator.yaml
 grep -q 'deployments/scale' 83-appdb-operator.yaml && fail "appdb-operator must NOT hold deployments/scale — the apps-gateway owns spec.replicas"
 grep -q 'appdb-operator' ../gateway/Dockerfile || fail "Dockerfile does not build the appdb-operator binary into the image"
 ok "AppDatabase CRD + operator wired (82/83), operator built into the image, does not claim deployments/scale (issue #96)"
+
+# 25. contract (issue #151, ADR-0007 v2-2): the Zone CRD + zone-operator ship together
+#     and are STANDARD deploy artifacts, not drill-only. Same "merged ≠ deployed" class
+#     the loop has caught 3× (#27/#125/#126): the flagship was proven only in
+#     _verify-zones.sh, which applied 86/87 then TORE THEM DOWN on exit — so the live
+#     cluster never carried the CRD or the operator. These grep-contracts guard the
+#     MANIFESTS; _verify-drift.sh (section D) asserts the LIVE presence + readiness so a
+#     regression to drill-only-again cannot pass silently.
+grep -q 'kind: CustomResourceDefinition' 86-zone-crd.yaml || fail "86-zone-crd.yaml missing the CustomResourceDefinition"
+grep -q 'zones.zones.scale-zero-pg.dev' 86-zone-crd.yaml || fail "86-zone-crd.yaml wrong CRD name (want zones.zones.scale-zero-pg.dev)"
+grep -q 'group: zones.scale-zero-pg.dev' 86-zone-crd.yaml || fail "86-zone-crd.yaml wrong API group"
+grep -q 'kind: Deployment' 87-zone-operator.yaml || fail "87-zone-operator.yaml missing the zone-operator Deployment"
+grep -q 'name: zone-operator' 87-zone-operator.yaml || fail "87-zone-operator.yaml missing the zone-operator name"
+grep -q '/zone-operator' 87-zone-operator.yaml || fail "87-zone-operator.yaml must override the entrypoint to /zone-operator"
+grep -q 'zones/finalizers' 87-zone-operator.yaml || fail "87-zone-operator.yaml RBAC lacks zones/finalizers (cross-zone deprovision hygiene, ADR-0007 §4d)"
+grep -q 'zone-operator' ../gateway/Dockerfile || fail "Dockerfile does not build the zone-operator binary into the image"
+# STANDARD-DEPLOY guard: 86/87 must be picked up by the documented deploy glob
+# (deploy/[0-9][0-9]-*.yaml). They already match by number; assert docs present them as
+# standard (not an opt-in aside) so a future reader does not treat the flagship as optional.
+grep -q '86-zone-crd.yaml' ../docs/getting-started.md || fail "getting-started.md must document 86-zone-crd as a standard deploy artifact (#151)"
+grep -q '87-zone-operator.yaml' ../docs/getting-started.md || fail "getting-started.md must document 87-zone-operator as a standard deploy artifact (#151)"
+ok "Zone CRD + operator wired (86/87), operator built into the image, standard-deploy documented (issue #151)"
+
+# 26. contract (issue #142): the janitor-disarm tripwire. A missing janitor-critical
+#     ConfigMap (storage-objstore/compute-config, or the repl-slot monitors' script CM)
+#     puts the next scheduled pod in CreateContainerConfigError — the container never
+#     starts, so no Failed Job → WalJanitorJobFailed/ReplicationSlot*/SafekeeperWALGrowth
+#     stay SILENT and the only backstop was WalJanitorStale at 26h (the WAL then
+#     accumulates toward DiskPressure — the 2026-07-06 incident). JanitorConfigDisarmed
+#     reads the POD's waiting-reason directly (KSM `pods` collector, deploy/59) so it
+#     PAGES within one cycle. Must cover BOTH the wal-janitor AND the zone repl-slot
+#     monitors (same shared-config/exec coupling class).
+grep -q 'alert: JanitorConfigDisarmed' 60-prometheus.yaml || fail "60 missing JanitorConfigDisarmed alert (#142) — a missing janitor-critical ConfigMap would silently disarm the janitor for up to 26h"
+grep -q 'kube_pod_container_status_waiting_reason' 60-prometheus.yaml || fail "60 JanitorConfigDisarmed must read kube_pod_container_status_waiting_reason off the POD (Failed-Job joins are blind to a never-starting container) (#142)"
+grep -q 'CreateContainerConfigError' 60-prometheus.yaml || fail "60 JanitorConfigDisarmed must match CreateContainerConfigError (config-missing = janitor disarmed) (#142)"
+grep -q 'repl-slot-wal-monitor|repl-slot-inactive-monitor' 60-prometheus.yaml || fail "60 JanitorConfigDisarmed must ALSO cover the zone repl-slot monitors (same config/exec coupling class) (#142)"
+# the KSM `pods` collector is the metric SOURCE — assert it stays enabled (else the rule is inert).
+grep -q 'resources=cronjobs,jobs,deployments,statefulsets,pods' 59-kube-state-metrics.yaml || fail "59 KSM must keep the `pods` collector — JanitorConfigDisarmed reads kube_pod_container_status_waiting_reason from it (#142)"
+ok "janitor-disarm tripwire wired: JanitorConfigDisarmed pages on CreateContainerConfigError for janitor+repl-slot monitors (issue #142)"

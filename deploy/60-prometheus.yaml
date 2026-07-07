@@ -247,6 +247,40 @@ data:
             annotations:
               summary: "wal-janitor has NEVER succeeded, or is suspended/deleted (plane >26h old)"
               description: "No last-successful-time series for the wal-janitor CronJob (never succeeded / suspended), and the CronJob has existed >26h so a run should have happened — OR the CronJob object is gone. WalJanitorStale is blind in this state — /safekeeper WAL will regrow unbounded. Check `kubectl -n scale-zero-pg get cronjob wal-janitor`. (Fresh/DR-restored planes are suppressed for the first 26h — #62.)"
+          # (b''') JANITOR/MONITOR DISARMED BY MISSING CONFIG (issue #142). The silent
+          # hole WalJanitorStale (26h) is far too slow for: a janitor-critical ConfigMap
+          # (storage-objstore / compute-config, or the repl-slot monitors' script CM) is
+          # deleted — e.g. residue from a throwaway drill in the main ns — so the next
+          # scheduled pod's container CANNOT be created (envFrom/volume references a
+          # ConfigMap that is gone → CreateContainerConfigError). The container NEVER
+          # STARTS, so the pod never becomes a Failed Job → WalJanitorJobFailed /
+          # ReplicationSlot* / SafekeeperWALGrowth (all kube_job_status_failed joins)
+          # NEVER fire. The ONLY backstop was WalJanitorStale at >26h — by which time
+          # /safekeeper WAL has already accumulated toward a node DiskPressure (the
+          # 2026-07-06 incident). This rule closes it at the SOURCE: page within one
+          # evaluation window when a janitor/monitor/backup POD is stuck unable to start
+          # its container (config-missing = the job is DISARMED; also image-pull faults).
+          # It reads kube_pod_container_status_waiting_reason (KSM `pods` collector,
+          # deploy/59) directly off the POD — no Failed-Job dependency, so it sees the
+          # exact never-starts case the owner-join rules are blind to. Covers BOTH the
+          # nightly wal-janitor AND the zone repl-slot monitors (same shared-config/exec
+          # coupling class), plus backup + apps-wal-monitor. `for: 2m` tolerates a normal
+          # brief image pull; a stuck-config pod persists (kubelet retries in place) so it
+          # crosses 2m and pages the SAME night, not 26h later.
+          - alert: JanitorConfigDisarmed
+            expr: |
+              max by (namespace, pod, container, reason) (
+                kube_pod_container_status_waiting_reason{
+                  namespace="scale-zero-pg",
+                  reason=~"CreateContainerConfigError|CreateContainerError|InvalidImageName|ImagePullBackOff|ErrImagePull|ErrImageNeverPull",
+                  pod=~"(wal-janitor|repl-slot-wal-monitor|repl-slot-inactive-monitor|apps-wal-monitor|backup)-.+"
+                }
+              ) > 0
+            for: 2m
+            labels: { severity: critical }
+            annotations:
+              summary: "a janitor/monitor pod is DISARMED — its container cannot start ({{ $labels.pod }}: {{ $labels.reason }})"
+              description: "Pod {{ $labels.pod }} container {{ $labels.container }} is stuck in {{ $labels.reason }} — a janitor-critical ConfigMap/Secret is missing (config-missing = the job is DISARMED, e.g. storage-objstore deleted as drill residue) or an image cannot be pulled. The container NEVER starts, so no Failed Job is produced and WalJanitorJobFailed / ReplicationSlot* / SafekeeperWALGrowth stay silent — /safekeeper WAL then accumulates unbounded toward node DiskPressure (the 2026-07-06 incident). This fires the SAME cycle instead of waiting 26h for WalJanitorStale. Restore the missing config (`kubectl -n scale-zero-pg describe pod {{ $labels.pod }}` names it; re-derive storage-objstore via deploy/gen-secrets.sh) — see docs/operations.md 'Kill-criteria tripwires' → janitor-disarm."
           # (b'') apps-tenant orphaned-WAL residue + safekeeper PV growth (issues
           # #90/#87). The wal-janitor correctly NEVER over-prunes an unresolvable apps
           # timeline, but the residue it skips was previously UNMONITORED — no metric,
