@@ -68,6 +68,7 @@ func main() {
 	resyncMs := envInt("ZONE_RESYNC_MS", 15000)
 	wakeTimeoutSec := envInt("ZONE_WAKE_TIMEOUT_SEC", 120)
 	healthAddr := env("ZONE_HEALTH_ADDR", ":9093")
+	autoResync := env("ZONE_AUTO_RESYNC", "true") != "false" // auto-actuate re-sync on an invalidated slot (ADR-0007 §4a)
 
 	cfg, err := restConfig()
 	if err != nil {
@@ -93,6 +94,7 @@ func main() {
 		GatewayHost:    gatewayHost,
 		GatewayPort:    gatewayPort,
 		ReplRolePrefix: replRolePrefix,
+		AutoResync:     autoResync,
 
 		NewPassword: func() string { return randHex(18) },
 		Now:         func() metav1.Time { return metav1.Now() },

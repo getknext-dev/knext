@@ -289,7 +289,24 @@ slot's `restart_lsn` (never breaks live replication) and surfaces INACTIVE slots
 `repl-slot-monitor` CronJobs (`deploy/63`) source the `ReplicationSlotWALGrowth` /
 `ReplicationSlotInactive` alerts (`deploy/60`). Proven live by `deploy/_verify-slot-janitor.sh`
 (bound-invalidation, alerts fire, active-slot-not-pruned). See
-`docs/operations.md#zoned-replication-slot-monitoring-adr-0007`. Design (unchanged):
+`docs/operations.md#zoned-replication-slot-monitoring-adr-0007`.
+
+> **IMPLEMENTED (v1.3.1) — the RE-SYNC ACTUATOR + zone alerting close the degrade
+> loop.** The bound made invalidation *bounded*; these make it *self-healing +
+> observable*. (1) **Re-sync actuator** — a settled Ready zone polls each streaming
+> replicate dependency for `wal_status=lost` and, on detection, flips the misleading
+> `streaming` to a truthful `needs_resync` and auto-actuates `DROP`+`CREATE
+> SUBSCRIPTION … copy_data`. The poll reads the peer slot **only when the peer is
+> already awake** (a non-waking read), so a settled healthy zone is never force-woken
+> and still rests at zero — it does NOT reintroduce the #145 force-wake. `ZONE_AUTO_RESYNC`
+> toggles auto vs runbook-only. (2) **Zone alerting** — the `zone-status-monitor`
+> CronJobs (`deploy/64`) PAGE (`ZoneDegradedOrFailed` / `ZoneSubscriptionBroken`,
+> severity critical) on a Failed/Degraded Zone or an error/denied/needs_resync
+> subscription. (`gateway/internal/zone/reconcile.go` `pollDependencyHealth`; tests
+> `TestReconcile_InvalidatedSlotAutoResyncs` / `…FlipsToNeedsResyncWhenResyncFails` /
+> `…SettledZoneWithSleepingPeerDoesNotWakeOrRead`.)
+
+Design (unchanged):
 The risk: on this build `max_slot_wal_keep_size = -1` (unbounded) and
 `idle_replication_slot_timeout` **does not exist** (PG17.5/neon —
 `unrecognized configuration parameter`). So an **inactive** logical slot (subscriber
@@ -400,6 +417,18 @@ recorded to a pending-reclaim ConfigMap and reconciled, mirroring ADR-0003's
 `apps-wal-reclaim-pending` pattern for a down safekeeper). **Leaving a slot on a
 live peer re-creates the unbounded-pin risk of §4a** — so this step is mandatory,
 not best-effort.
+
+> **IMPLEMENTED (v1.3.1, #146) — pending-reclaim, peer-gone vs transient.** The
+> finalizer now DISTINGUISHES a genuinely-absent peer (its `compute-<peer>`
+> Deployment is gone → the slot was reclaimed with its timeline; nothing to drop)
+> from a peer that is **live but transiently unwakeable**. In the transient case it
+> records a **pending-reclaim** (a `Fabric` status condition `PendingSlotReclaim` +
+> a Warning event) and **requeues WITHOUT removing the finalizer** — so the Zone
+> persists and every resync **retries the peer-side slot drop until the peer is
+> reachable**. It never conflates the two and never silently strands a slot on a
+> live peer. The §4a WAL bound remains the backstop; correctness no longer relies on
+> it (`gateway/internal/zone/reconcile.go` `reconcileDelete`; test
+> `TestReconcile_DeprovisionRetriesLivePeerNotStrand` / `…AbsentPeerCompletes`).
 
 **(e) Cross-cluster is a FOLLOW-UP spike — not claimed here.**
 Spike #133 was **two branches on ONE storage plane** (intra-cluster). True SCS

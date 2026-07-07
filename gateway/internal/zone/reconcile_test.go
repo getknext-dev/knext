@@ -44,10 +44,33 @@ type fakeSQL struct {
 	droppedSlots []string // "peer/slot"
 	federated    []string // "zone/fromZone"
 	droppedFed   []string
+	slotInvalid  map[string]bool // "peer/slot" -> wal_status lost (invalidated)
+	slotReadErr  map[string]bool // "peer/slot" -> SlotInvalidatedOnPeer returns an error (peer not ready)
+	resynced     []string        // "zone/sub"
+	resyncErr    bool            // ResyncSubscription fails (auto-resync could not heal)
+	reads        []string        // "peer/slot" every SlotInvalidatedOnPeer read (proves no-wake gating)
 }
 
 func newFakeSQL() *fakeSQL {
-	return &fakeSQL{replRoles: map[string]string{}, publications: map[string][]string{}, subs: map[string]string{}}
+	return &fakeSQL{
+		replRoles: map[string]string{}, publications: map[string][]string{}, subs: map[string]string{},
+		slotInvalid: map[string]bool{}, slotReadErr: map[string]bool{},
+	}
+}
+func (f *fakeSQL) SlotInvalidatedOnPeer(_ context.Context, peer, slot string) (bool, error) {
+	key := peer + "/" + slot
+	f.reads = append(f.reads, key)
+	if f.slotReadErr[key] {
+		return false, context.DeadlineExceeded
+	}
+	return f.slotInvalid[key], nil
+}
+func (f *fakeSQL) ResyncSubscription(_ context.Context, zone, sub, _ string, _ []string) error {
+	if f.resyncErr {
+		return context.DeadlineExceeded
+	}
+	f.resynced = append(f.resynced, zone+"/"+sub)
+	return nil
 }
 func (f *fakeSQL) EnsureReplRole(_ context.Context, zone, _, md5 string) error {
 	f.replRoles[zone] = md5
@@ -85,6 +108,8 @@ func (f *fakeSQL) DropFederation(_ context.Context, zone, fromZone string) error
 type fakeCluster struct {
 	replSecrets   map[string]string // zone -> password
 	computeGone   map[string]bool   // zone -> compute deployment absent
+	asleep        map[string]bool   // zone -> ComputeAwake returns false (default: awake)
+	wakeErr       map[string]bool   // zone -> WakeCompute returns an error (live but unwakeable)
 	woken         []string
 	statusUpdates int
 	finalAdd      int
@@ -93,7 +118,10 @@ type fakeCluster struct {
 }
 
 func newFakeCluster() *fakeCluster {
-	return &fakeCluster{replSecrets: map[string]string{}, computeGone: map[string]bool{}}
+	return &fakeCluster{
+		replSecrets: map[string]string{}, computeGone: map[string]bool{},
+		asleep: map[string]bool{}, wakeErr: map[string]bool{},
+	}
 }
 
 func (c *fakeCluster) EnsureReplSecret(_ context.Context, zone, role string, newPw func() string) (string, string, error) {
@@ -121,8 +149,13 @@ func (c *fakeCluster) ComputeExists(_ context.Context, zone string) (bool, error
 	}
 	return true, nil
 }
-func (c *fakeCluster) ComputeAwake(_ context.Context, _ string) (bool, error) { return true, nil }
+func (c *fakeCluster) ComputeAwake(_ context.Context, zone string) (bool, error) {
+	return !c.asleep[zone], nil
+}
 func (c *fakeCluster) WakeCompute(_ context.Context, zone string) error {
+	if c.wakeErr[zone] {
+		return context.DeadlineExceeded
+	}
 	c.woken = append(c.woken, zone)
 	return nil
 }
@@ -139,9 +172,17 @@ func (c *fakeCluster) RemoveFinalizer(_ context.Context, cr *Zone) error {
 }
 func (c *fakeCluster) Event(_ *Zone, _, reason, _ string) { c.events = append(c.events, reason) }
 
-type fakeLister struct{ zones []*Zone }
+type fakeLister struct {
+	zones []*Zone
+	err   error // when set, ListZones fails (a transient lister outage)
+}
 
-func (l *fakeLister) ListZones(_ context.Context) ([]*Zone, error) { return l.zones, nil }
+func (l *fakeLister) ListZones(_ context.Context) ([]*Zone, error) {
+	if l.err != nil {
+		return nil, l.err
+	}
+	return l.zones, nil
+}
 
 // ---- harness ---------------------------------------------------------------
 
@@ -152,6 +193,7 @@ func newDeps(lister *fakeLister) (*Deps, *fakeAppDB, *fakeSQL, *fakeCluster) {
 		AppDB: adb, SQL: sql, Cluster: cl, Zones: lister,
 		Namespace: "scale-zero-pg", GatewayHost: "pggw-apps.scale-zero-pg.svc", GatewayPort: 55432,
 		ReplRolePrefix: "repl_",
+		AutoResync:     true,
 		NewPassword:    func() string { seq++; return "pw" },
 		Now:            func() metav1.Time { return metav1.Now() },
 	}
@@ -330,6 +372,255 @@ func TestReconcile_SteadyStateReadyDoesNotExecOrWake(t *testing.T) {
 	}
 	if len(sql.publications) == 0 {
 		t.Error("a generation bump must re-assert the publication (drift-heal on spec change)")
+	}
+}
+
+// #147 — FAIL CLOSED on a transient Zone-lister outage. A publisher whose spec would
+// create publications must NOT be admitted while the peer set is unreadable (the
+// single-writer guard cannot run) — the operator requeues instead of creating fabric,
+// and never marks the zone terminally Failed.
+func TestReconcile_ListErrorFailsClosed(t *testing.T) {
+	cr := &Zone{
+		Name: "za", Namespace: "scale-zero-pg", Generation: 1, Finalizers: []string{Finalizer},
+		Spec: ZoneSpec{Publishes: []Publication{{Name: "orders_pub", Tables: []string{"orders"}}}},
+	}
+	lister := &fakeLister{zones: []*Zone{cr}, err: context.DeadlineExceeded}
+	d, adb, sql, cl := newDeps(lister)
+	adb.ready["za"] = true
+
+	requeue, err := d.Reconcile(context.Background(), cr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !requeue {
+		t.Error("a transient lister outage must REQUEUE (retry), not proceed")
+	}
+	if len(sql.publications) != 0 || len(sql.replRoles) != 0 {
+		t.Errorf("fail-closed: MUST NOT create fabric while the zone list is unreadable: pubs=%v roles=%v", sql.publications, sql.replRoles)
+	}
+	if cr.Status.Phase == PhaseFailed {
+		t.Error("a transient lister outage must NOT terminally Fail the zone")
+	}
+	found := false
+	for _, e := range cl.events {
+		if e == "ZoneListUnavailable" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("must emit a ZoneListUnavailable event: %v", cl.events)
+	}
+}
+
+// #147 — a DELETE proceeds even while the lister is momentarily down (teardown needs
+// no single-writer guard).
+func TestReconcile_ListErrorStillAllowsDelete(t *testing.T) {
+	now := metav1.Now()
+	zb := &Zone{Name: "zb", Generation: 1, Finalizers: []string{Finalizer}, DeletionTimestamp: &now}
+	lister := &fakeLister{zones: []*Zone{zb}, err: context.DeadlineExceeded}
+	d, _, _, cl := newDeps(lister)
+	if _, err := d.Reconcile(context.Background(), zb); err != nil {
+		t.Fatal(err)
+	}
+	if cl.finalRm != 1 {
+		t.Errorf("delete must complete despite the lister outage (finalRm=%d)", cl.finalRm)
+	}
+}
+
+// #146 — deprovision must RETRY (not strand) a slot on a LIVE but transiently-unwakeable
+// peer: the reconcile requeues without removing the finalizer, so the next pass retries.
+func TestReconcile_DeprovisionRetriesLivePeerNotStrand(t *testing.T) {
+	now := metav1.Now()
+	zb := &Zone{
+		Name: "zb", Generation: 1, Finalizers: []string{Finalizer}, DeletionTimestamp: &now,
+		Spec:   ZoneSpec{DataDependencies: []DataDependency{{FromZone: "za", Tables: []string{"orders"}, Mode: ModeReplicate}}},
+		Status: ZoneStatus{Subscriptions: []SubscriptionStatus{{FromZone: "za", State: SubStreaming}}},
+	}
+	lister := &fakeLister{zones: []*Zone{zb}}
+	d, _, sql, cl := newDeps(lister)
+	cl.wakeErr["za"] = true // peer EXISTS (computeGone not set) but wake fails transiently
+
+	requeue, err := d.Reconcile(context.Background(), zb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !requeue {
+		t.Error("a live-but-unwakeable peer must REQUEUE (retry), never give up")
+	}
+	if cl.finalRm != 0 {
+		t.Error("finalizer must NOT be removed while a live peer still carries our slot (no strand)")
+	}
+	if len(sql.droppedSlots) != 0 {
+		t.Errorf("slot not droppable this pass; must not claim it was: %v", sql.droppedSlots)
+	}
+	sawPending := false
+	for _, e := range cl.events {
+		if e == "PendingSlotReclaim" {
+			sawPending = true
+		}
+	}
+	if !sawPending {
+		t.Errorf("must record a pending-reclaim event: %v", cl.events)
+	}
+}
+
+// #146 — a GENUINELY-ABSENT peer (compute Deployment gone) is NOT a strand: its slot went
+// with its timeline, so deprovision completes without waking anything.
+func TestReconcile_DeprovisionAbsentPeerCompletes(t *testing.T) {
+	now := metav1.Now()
+	zb := &Zone{
+		Name: "zb", Generation: 1, Finalizers: []string{Finalizer}, DeletionTimestamp: &now,
+		Spec:   ZoneSpec{DataDependencies: []DataDependency{{FromZone: "za", Tables: []string{"orders"}, Mode: ModeReplicate}}},
+		Status: ZoneStatus{Subscriptions: []SubscriptionStatus{{FromZone: "za", State: SubStreaming}}},
+	}
+	lister := &fakeLister{zones: []*Zone{zb}}
+	d, _, sql, cl := newDeps(lister)
+	cl.computeGone["za"] = true // peer genuinely deprovisioned
+
+	requeue, err := d.Reconcile(context.Background(), zb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if requeue {
+		t.Error("an absent peer has no slot to drop — deprovision should complete")
+	}
+	if len(cl.woken) != 0 {
+		t.Errorf("must not wake an absent peer: %v", cl.woken)
+	}
+	if len(sql.droppedSlots) != 0 {
+		t.Errorf("no slot on an absent peer: %v", sql.droppedSlots)
+	}
+	if cl.finalRm != 1 {
+		t.Errorf("finalizer must be removed (rm=%d)", cl.finalRm)
+	}
+}
+
+// RE-SYNC ACTUATOR — a settled Ready zone whose peer slot was INVALIDATED (wal_status=lost)
+// auto re-syncs: the operator reads the peer slot (peer awake), detects lost, and DROP+
+// CREATE SUBSCRIPTIONs with copy_data — flipping the misleading `streaming` truthfully.
+func TestReconcile_InvalidatedSlotAutoResyncs(t *testing.T) {
+	zb := &Zone{
+		Name: "zb", Generation: 2, Finalizers: []string{Finalizer},
+		Spec: ZoneSpec{DataDependencies: []DataDependency{{FromZone: "za", Tables: []string{"orders"}, Mode: ModeReplicate}}},
+		Status: ZoneStatus{
+			Phase: PhaseReady, ObservedGeneration: 2,
+			Subscriptions: []SubscriptionStatus{{FromZone: "za", Name: "zone_sub_za", Mode: ModeReplicate, State: SubStreaming}},
+		},
+	}
+	za := &Zone{Name: "za", Generation: 1, Finalizers: []string{Finalizer},
+		Spec: ZoneSpec{Publishes: []Publication{{Name: "orders_pub", Tables: []string{"orders"}}}}}
+	lister := &fakeLister{zones: []*Zone{za, zb}}
+	d, adb, sql, cl := newDeps(lister)
+	adb.ready["zb"], adb.ready["za"] = true, true
+	cl.replSecrets["za"] = "pw"              // peer cred present (for the re-sync conn)
+	sql.slotInvalid["za/zone_sub_za"] = true // the slot went lost
+
+	requeue, err := d.Reconcile(context.Background(), zb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sql.resynced) != 1 || sql.resynced[0] != "zb/zone_sub_za" {
+		t.Errorf("must auto re-sync the invalidated subscription: %v", sql.resynced)
+	}
+	if zb.Status.Subscriptions[0].State != SubStreaming {
+		t.Errorf("after a successful re-sync the state returns to streaming: %+v", zb.Status.Subscriptions)
+	}
+	_ = requeue
+}
+
+// RE-SYNC ACTUATOR (truthful status) — when auto-resync CANNOT heal, the status flips to
+// NeedsResync (never a misleading `streaming`) and the zone requeues.
+func TestReconcile_InvalidatedSlotFlipsToNeedsResyncWhenResyncFails(t *testing.T) {
+	zb := &Zone{
+		Name: "zb", Generation: 2, Finalizers: []string{Finalizer},
+		Spec: ZoneSpec{DataDependencies: []DataDependency{{FromZone: "za", Tables: []string{"orders"}, Mode: ModeReplicate}}},
+		Status: ZoneStatus{
+			Phase: PhaseReady, ObservedGeneration: 2,
+			Subscriptions: []SubscriptionStatus{{FromZone: "za", Name: "zone_sub_za", Mode: ModeReplicate, State: SubStreaming}},
+		},
+	}
+	za := &Zone{Name: "za", Generation: 1, Finalizers: []string{Finalizer},
+		Spec: ZoneSpec{Publishes: []Publication{{Name: "orders_pub", Tables: []string{"orders"}}}}}
+	lister := &fakeLister{zones: []*Zone{za, zb}}
+	d, adb, sql, cl := newDeps(lister)
+	adb.ready["zb"], adb.ready["za"] = true, true
+	cl.replSecrets["za"] = "pw"
+	sql.slotInvalid["za/zone_sub_za"] = true
+	sql.resyncErr = true // the re-sync cannot complete this pass
+
+	requeue, err := d.Reconcile(context.Background(), zb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if zb.Status.Subscriptions[0].State != SubNeedsResync {
+		t.Errorf("a failed re-sync must leave a TRUTHFUL needs_resync state, never streaming: %+v", zb.Status.Subscriptions)
+	}
+	if !requeue {
+		t.Error("a still-broken subscription must requeue")
+	}
+}
+
+// RE-SYNC ACTUATOR — the SCALE-TO-ZERO GUARD (#145): a settled Ready zone whose peer is
+// ASLEEP must NOT be read at all (no force-wake) and must NOT requeue — it rests at zero.
+func TestReconcile_SettledZoneWithSleepingPeerDoesNotWakeOrRead(t *testing.T) {
+	zb := &Zone{
+		Name: "zb", Generation: 2, Finalizers: []string{Finalizer},
+		Spec: ZoneSpec{DataDependencies: []DataDependency{{FromZone: "za", Tables: []string{"orders"}, Mode: ModeReplicate}}},
+		Status: ZoneStatus{
+			Phase: PhaseReady, ObservedGeneration: 2,
+			Subscriptions: []SubscriptionStatus{{FromZone: "za", Name: "zone_sub_za", Mode: ModeReplicate, State: SubStreaming}},
+		},
+	}
+	lister := &fakeLister{zones: []*Zone{zb}}
+	d, adb, sql, cl := newDeps(lister)
+	adb.ready["zb"] = true
+	cl.asleep["za"] = true // the peer publisher is at rest
+
+	requeue, err := d.Reconcile(context.Background(), zb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if requeue {
+		t.Error("a settled zone with a sleeping peer must rest (no requeue)")
+	}
+	if len(sql.reads) != 0 {
+		t.Errorf("MUST NOT read a sleeping peer's slot (would force-wake it, #145): %v", sql.reads)
+	}
+	if len(cl.woken) != 0 {
+		t.Errorf("MUST NOT wake a sleeping peer: %v", cl.woken)
+	}
+	if len(sql.resynced) != 0 {
+		t.Errorf("no re-sync when peer asleep: %v", sql.resynced)
+	}
+}
+
+// RE-SYNC ACTUATOR — a HEALTHY settled zone (peer awake, slot valid) polls once and stays
+// asleep-eligible: no re-sync, no requeue, no status churn.
+func TestReconcile_SettledHealthyZonePollsCleanNoResync(t *testing.T) {
+	zb := &Zone{
+		Name: "zb", Generation: 2, Finalizers: []string{Finalizer},
+		Spec: ZoneSpec{DataDependencies: []DataDependency{{FromZone: "za", Tables: []string{"orders"}, Mode: ModeReplicate}}},
+		Status: ZoneStatus{
+			Phase: PhaseReady, ObservedGeneration: 2,
+			Subscriptions: []SubscriptionStatus{{FromZone: "za", Name: "zone_sub_za", Mode: ModeReplicate, State: SubStreaming}},
+		},
+	}
+	lister := &fakeLister{zones: []*Zone{zb}}
+	d, adb, sql, _ := newDeps(lister)
+	adb.ready["zb"] = true // peer awake (default), slot valid (default not invalid)
+
+	requeue, err := d.Reconcile(context.Background(), zb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if requeue {
+		t.Error("a healthy settled zone should not requeue")
+	}
+	if len(sql.reads) != 1 {
+		t.Errorf("should read the peer slot exactly once: %v", sql.reads)
+	}
+	if len(sql.resynced) != 0 {
+		t.Errorf("no re-sync for a healthy slot: %v", sql.resynced)
 	}
 }
 

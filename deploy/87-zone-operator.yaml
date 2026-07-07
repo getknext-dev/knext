@@ -107,7 +107,7 @@ spec:
         - name: zone-operator
           # Same multi-binary gateway image; ENTRYPOINT overridden to /zone-operator.
           # Digest-pinned (contract 22). Rebuild + re-pin on any operator change.
-          image: me-abudhabi-1.ocir.io/axfqznklsd2t/ks-pg/gateway:sha-fec345e@sha256:5abb86fcf2cde7d065c8593f1844498f72e91fb43aa4d9619564e7fbde0175ce
+          image: me-abudhabi-1.ocir.io/axfqznklsd2t/ks-pg/gateway:sha-zonerel-0f43d94@sha256:2b30dcd42626754e4f068cfa91714c8efe87dd32c65ce167aaf1c37339a9b3e4
           imagePullPolicy: IfNotPresent
           command: ["/zone-operator"] # override the image's /gateway entrypoint
           securityContext:

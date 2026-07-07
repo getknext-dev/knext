@@ -59,6 +59,19 @@ type SQLOps interface {
 	// DropReplicationSlot drops an INACTIVE slot on a PEER publisher's compute
 	// (deprovision hygiene, ADR-0007 §4d). The peer must be awake (caller wakes it).
 	DropReplicationSlot(ctx context.Context, peerZone, slot string) error
+	// SlotInvalidatedOnPeer reports whether the named slot on peerZone's compute has
+	// been invalidated (wal_status in lost/unreserved — the #143 max_slot_wal_keep_size
+	// degrade). Reads pg_replication_slots on the PEER WITHOUT waking it: the caller
+	// MUST gate on the peer already being awake (ComputeAwake) so a settled healthy
+	// publisher is never force-woken just to poll (the #145 scale-to-zero invariant).
+	// A not-ready peer surfaces as an error the caller treats as transient (retry).
+	SlotInvalidatedOnPeer(ctx context.Context, peerZone, slot string) (bool, error)
+	// ResyncSubscription DROPs and re-CREATEs a subscription WITH copy_data on THIS
+	// zone's compute — the designed recovery from an invalidated slot (ADR-0007 §4a
+	// "degrade to re-sync"). The CREATE's initial COPY connects the walreceiver through
+	// the apps-gateway, which wakes the (real-signal-driven) publisher; this is a
+	// recovery action, NOT a per-tick poll, so it does not violate scale-to-zero.
+	ResyncSubscription(ctx context.Context, zone, sub, conn string, publications []string) error
 	// EnsureFederation provisions postgres_fdw foreign tables on THIS zone's compute
 	// for a mode:federate dependency.
 	EnsureFederation(ctx context.Context, zone, fromZone, conn, replRole, password string, tables []string) error
@@ -114,6 +127,11 @@ type Deps struct {
 	GatewayHost    string // apps-gateway service DNS (pggw-apps.scale-zero-pg.svc)
 	GatewayPort    int    // apps-gateway writer/replication port (55432)
 	ReplRolePrefix string // "repl_" — lock-step with the apps-gateway GW_REPL_ROLE_PREFIX (#140)
+
+	// AutoResync, when true, makes the operator auto-actuate the re-sync (DROP+CREATE
+	// SUBSCRIPTION copy_data) on an invalidated slot. When false, the operator only
+	// flips status to NeedsResync + surfaces the one-command runbook (operator choice).
+	AutoResync bool
 
 	NewPassword func() string
 	Now         func() metav1.Time

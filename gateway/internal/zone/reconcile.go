@@ -2,10 +2,16 @@ package zone
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
 )
+
+// errZonesUnavailable wraps a transient Zone-lister outage. It is NOT a spec error:
+// the operator must FAIL CLOSED (do not admit/alter the fabric while the peer set is
+// unreadable — #147) and RETRY, never mark the zone terminally Failed.
+var errZonesUnavailable = errors.New("zone list unavailable")
 
 // ReservedNames must never be provisioned as zones — they collide with non-zone
 // computes (template / warm / RO lanes) the apps-gateway routes specially. Same set
@@ -18,6 +24,20 @@ var ReservedNames = map[string]bool{"tmpl": true, "warm": true, "ro": true}
 // A spec validation failure is terminal (no requeue): the spec must change.
 func (d *Deps) Reconcile(ctx context.Context, cr *Zone) (requeue bool, err error) {
 	if verr := d.validate(ctx, cr); verr != nil {
+		// FAIL CLOSED on a transient lister outage (#147): the single-writer guard
+		// could not run, so we MUST NOT create/alter publications or subscriptions —
+		// admitting a spec whose single-writer safety is unverifiable is exactly how
+		// "eventual" becomes "eventually wrong". Requeue and retry; never mark Failed.
+		if errors.Is(verr, errZonesUnavailable) {
+			// A DELETE never needs the guard (teardown creates no fabric), so let it
+			// proceed even while the lister is momentarily down.
+			if cr.deleting() {
+				return d.reconcileDelete(ctx, cr)
+			}
+			d.Cluster.Event(cr, "Warning", "ZoneListUnavailable",
+				"single-writer guard deferred (zone list unreadable); not admitting fabric, will retry: "+verr.Error())
+			return true, nil // requeue — fail CLOSED, no external effect this pass
+		}
 		cr.Status.Phase = PhaseFailed
 		cr.Status.Message = verr.Error()
 		cr.Status.ObservedGeneration = cr.Generation
@@ -81,12 +101,12 @@ func (d *Deps) validate(ctx context.Context, cr *Zone) error {
 	// Single-writer-per-replicated-table (§5) — cross-zone, so it needs the peer set.
 	zones, err := d.Zones.ListZones(ctx)
 	if err != nil {
-		// Transient list failure: don't fail the spec (fail-open for this pass; the
-		// next resync re-checks). This is a small fail-open window tracked in #147 —
-		// a persistent lister outage would let a single-writer violation slip until it
-		// recovers. Acceptable given the lister is the same in-cluster API the whole
-		// operator depends on; #147 tracks hardening it (e.g. cache-backed check).
-		return nil
+		// FAIL CLOSED (#147): the single-writer guard is "the invariant that keeps
+		// eventual from eventually-wrong". If the peer set is momentarily unreadable we
+		// CANNOT prove a table has a single publisher, so we refuse to admit the spec
+		// this pass (the caller requeues + retries) rather than let a possible
+		// single-writer violation slip through on a transient lister blip.
+		return fmt.Errorf("%w: %v", errZonesUnavailable, err)
 	}
 	if v := checkSingleWriter(cr, ensureSelf(zones, cr)); v != "" {
 		return fmt.Errorf("%s", v)
@@ -149,7 +169,14 @@ func (d *Deps) reconcileApply(ctx context.Context, cr *Zone) (bool, error) {
 	// each tick — detecting live DB drift would itself require a wake; a spec edit is
 	// the re-sync trigger.
 	if cr.Status.Phase == PhaseReady && cr.Status.ObservedGeneration == cr.Generation {
-		return false, nil
+		// One narrow exception to "do nothing when settled": poll the health of any
+		// STREAMING replicate dependency for slot invalidation (the #143 wal_status=lost
+		// degrade), so a broken subscription self-heals instead of leaving a misleading
+		// `streaming` status forever. The poll NEVER force-wakes a settled healthy peer
+		// (it reads the peer slot only when the peer is already awake) — see
+		// pollDependencyHealth — so a Ready zone with no invalidated slot still rests at
+		// zero (the #145 invariant).
+		return d.pollDependencyHealth(ctx, cr)
 	}
 
 	// genChanged gates the compute-WAKING SQL. The publisher-side fabric (repl role +
@@ -336,6 +363,130 @@ func (d *Deps) reconcileDependency(ctx context.Context, cr *Zone, dep DataDepend
 	}
 }
 
+// pollDependencyHealth is the ONLY work a settled Ready zone does (RE-SYNC ACTUATOR,
+// SRE F3 + sysdesign F2). For each STREAMING replicate dependency it checks whether the
+// peer slot was invalidated (wal_status=lost — the #143 max_slot_wal_keep_size degrade)
+// and, if so, flips the subscription to a TRUTHFUL NeedsResync (never leaves a
+// misleading `streaming`) and — when AutoResync is on — auto-actuates the re-sync
+// (DROP+CREATE SUBSCRIPTION copy_data, ADR-0007 §4a).
+//
+// SCALE-TO-ZERO GUARD (the #145 invariant): the peer slot is read ONLY when the peer is
+// ALREADY awake (ComputeAwake) and via a NON-waking read (SlotInvalidatedOnPeer), so a
+// settled healthy publisher/subscriber is NEVER force-woken just to poll. A sleeping
+// peer is skipped; the check re-runs when it next wakes on real traffic. Phase stays
+// Ready (obsGeneration unchanged) so this self-heal poll keeps running each resync; the
+// truth of a persistent break lives in the subscription state + the Fabric condition +
+// the Warning event + the Zone*/SubscriptionBroken alerts.
+func (d *Deps) pollDependencyHealth(ctx context.Context, cr *Zone) (bool, error) {
+	var streaming []int
+	for i := range cr.Status.Subscriptions {
+		if cr.Status.Subscriptions[i].State == SubStreaming {
+			streaming = append(streaming, i)
+		}
+	}
+	if len(streaming) == 0 {
+		return false, nil // no live replicate subscription → nothing to poll; stay asleep
+	}
+	depByZone := map[string]DataDependency{}
+	for _, dep := range cr.Spec.DataDependencies {
+		depByZone[dep.FromZone] = dep
+	}
+
+	var byName map[string]*Zone // lazily listed only if an invalidation is actually found
+	requeue, changed, stillBroken := false, false, false
+	for _, i := range streaming {
+		sub := &cr.Status.Subscriptions[i]
+		dep, ok := depByZone[sub.FromZone]
+		if !ok || dep.Mode != ModeReplicate {
+			continue
+		}
+		awake, err := d.Cluster.ComputeAwake(ctx, sub.FromZone)
+		if err != nil {
+			requeue = true
+			continue
+		}
+		if !awake {
+			continue // NEVER force-wake a settled healthy peer just to poll (#145)
+		}
+		invalid, err := d.SQL.SlotInvalidatedOnPeer(ctx, sub.FromZone, subName(sub.FromZone))
+		if err != nil {
+			requeue = true // peer not ready / transient read failure — retry next resync
+			continue
+		}
+		if !invalid {
+			continue
+		}
+		// The slot was invalidated: the local copy is stale. Truthful status first.
+		changed = true
+		if byName == nil {
+			zones, lerr := d.Zones.ListZones(ctx)
+			if lerr != nil {
+				sub.State, sub.Message = SubNeedsResync, "slot invalidated (wal_status=lost); zone list unavailable, cannot re-sync yet — retrying"
+				d.Cluster.Event(cr, "Warning", "SubscriptionNeedsResync", "dependency on "+sub.FromZone+": slot invalidated — needs re-sync")
+				stillBroken, requeue = true, true
+				continue
+			}
+			byName = indexZones(zones)
+		}
+		conn, pubs, cok, why := d.peerConn(ctx, dep, byName[sub.FromZone])
+		if d.AutoResync && cok {
+			if rerr := d.SQL.ResyncSubscription(ctx, cr.Name, subName(sub.FromZone), conn, pubs); rerr == nil {
+				sub.State = SubStreaming
+				sub.Message = "re-synced after slot invalidation (DROP+CREATE SUBSCRIPTION copy_data, ADR-0007 §4a)"
+				d.Cluster.Event(cr, "Normal", "SubscriptionResynced",
+					fmt.Sprintf("dependency on %s auto re-synced after slot invalidation", sub.FromZone))
+				continue
+			} else {
+				sub.State = SubNeedsResync
+				sub.Message = fmt.Sprintf("slot invalidated (wal_status=lost); auto re-sync FAILED: %v — runbook: docs/operations.md#zone-re-sync", rerr)
+			}
+		} else {
+			reason := "auto-resync disabled"
+			if !cok {
+				reason = why
+			}
+			sub.State = SubNeedsResync
+			sub.Message = fmt.Sprintf("slot invalidated (wal_status=lost) — the local copy is stale; re-sync required (%s). Runbook: docs/operations.md#zone-re-sync", reason)
+		}
+		d.Cluster.Event(cr, "Warning", "SubscriptionNeedsResync",
+			fmt.Sprintf("dependency on %s: slot invalidated (wal_status=lost) — needs re-sync", sub.FromZone))
+		stillBroken, requeue = true, true
+	}
+
+	if changed {
+		if stillBroken {
+			cr.Status.Message = "a replicated dependency's slot was invalidated (wal_status=lost) — re-sync required (see status.subscriptions)"
+			d.setCondition(cr, CondFabric, "False", "SlotInvalidated", cr.Status.Message)
+		} else {
+			cr.Status.Message = "zone ready; a dependency was auto re-synced after slot invalidation"
+			d.setCondition(cr, CondFabric, "True", "Wired", "all dataDependencies reconciled (auto re-synced)")
+		}
+		if err := d.Cluster.UpdateStatus(ctx, cr); err != nil {
+			return true, nil
+		}
+	}
+	return requeue, nil
+}
+
+// peerConn resolves the gateway-mediated conninfo + covering publications for a
+// re-sync of dep against peer (nil-safe). ok=false (with a reason) when the peer no
+// longer exists, no longer covers the tables, or its repl credential is unreadable.
+func (d *Deps) peerConn(ctx context.Context, dep DataDependency, peer *Zone) (conn string, pubs []string, ok bool, reason string) {
+	if peer == nil {
+		return "", nil, false, "peer zone no longer exists"
+	}
+	pubs = pubsCovering(peer, dep.Tables)
+	if len(pubs) == 0 {
+		return "", nil, false, "peer no longer publishes the requested tables"
+	}
+	pw, _, present, err := d.Cluster.ReplSecret(ctx, dep.FromZone)
+	if err != nil || !present {
+		return "", nil, false, "peer replication credential unavailable"
+	}
+	role := replRoleName(d.ReplRolePrefix, dep.FromZone)
+	return conninfo(d.GatewayHost, d.GatewayPort, dep.FromZone, role, pw), pubs, true, ""
+}
+
 // reconcileDelete runs cross-zone deprovision hygiene under the finalizer, in the
 // mandated order (ADR-0007 §4d): drop THIS zone's subscriptions (subscriber side
 // first, so peer slots stop being re-pinned) → drop the orphaned slots on each peer
@@ -373,23 +524,60 @@ func (d *Deps) reconcileDelete(ctx context.Context, cr *Zone) (bool, error) {
 	}
 
 	// 2. Peer side: drop the orphaned slot on each replicate peer that we ACTUALLY
-	//    wired (status shows a streaming subscription). A slot left on a live peer
+	//    wired (status shows a streaming subscription). A slot left on a LIVE peer
 	//    re-creates the unbounded-pin risk (§4a) — mandatory. Skip peers we never wired
-	//    (pending/denied): there is no slot on them, so waking them would be pointless.
+	//    (pending/denied): there is no slot on them.
+	//
+	//    #146 — DISTINGUISH a genuinely-absent peer from a transiently-unreachable one.
+	//    Conflating them (the old "wake failed → give up") could STRAND a slot on a LIVE
+	//    peer whose wake merely timed out. So: if the peer's compute Deployment is GONE
+	//    the peer was deprovisioned and its slot went with its timeline (nothing to drop
+	//    — continue). If the peer STILL EXISTS but we cannot wake/drop, record a
+	//    pending-reclaim (status condition + event) and REQUEUE — retry every resync
+	//    until the peer is reachable. The #143 WAL bound is only the backstop; we do NOT
+	//    rely on it for correctness (ADR-0007 §4d).
 	wired := wiredPeers(cr.Status.Subscriptions)
+	pendingReclaim := false
 	for _, dep := range cr.Spec.DataDependencies {
 		if dep.Mode == ModeFederate || !wired[dep.FromZone] {
 			continue
 		}
-		if err := d.Cluster.WakeCompute(ctx, dep.FromZone); err != nil {
-			// Peer gone/unreachable: nothing to pin a slot on. Log + continue.
-			d.Cluster.Event(cr, "Warning", "PeerWakeFailed",
-				fmt.Sprintf("could not wake peer %s to drop slot %s: %v (peer may be deprovisioned)", dep.FromZone, subName(dep.FromZone), err))
+		slot := subName(dep.FromZone)
+		exists, err := d.Cluster.ComputeExists(ctx, dep.FromZone)
+		if err != nil {
+			return true, fmt.Errorf("check peer %s compute exists: %w", dep.FromZone, err)
+		}
+		if !exists {
+			// Peer genuinely deprovisioned — the slot was reclaimed with its timeline.
+			d.Cluster.Event(cr, "Normal", "PeerGone",
+				fmt.Sprintf("peer %s compute absent; slot %s reclaimed with its timeline (nothing to drop)", dep.FromZone, slot))
 			continue
 		}
-		if err := d.SQL.DropReplicationSlot(ctx, dep.FromZone, subName(dep.FromZone)); err != nil {
-			return true, fmt.Errorf("drop slot %s on peer %s: %w", subName(dep.FromZone), dep.FromZone, err)
+		// Peer EXISTS → its slot is on a LIVE peer and MUST be dropped. Never strand it.
+		if err := d.Cluster.WakeCompute(ctx, dep.FromZone); err != nil {
+			d.setCondition(cr, CondFabric, "False", "PendingSlotReclaim",
+				fmt.Sprintf("peer %s reachable but wake failed; retrying drop of slot %s: %v", dep.FromZone, slot, err))
+			d.Cluster.Event(cr, "Warning", "PendingSlotReclaim",
+				fmt.Sprintf("peer %s live but unwakeable; slot %s reclaim PENDING, will retry (ADR-0007 §4d)", dep.FromZone, slot))
+			pendingReclaim = true
+			continue
 		}
+		if err := d.SQL.DropReplicationSlot(ctx, dep.FromZone, slot); err != nil {
+			d.setCondition(cr, CondFabric, "False", "PendingSlotReclaim",
+				fmt.Sprintf("peer %s awake but slot %s drop failed; retrying: %v", dep.FromZone, slot, err))
+			d.Cluster.Event(cr, "Warning", "PendingSlotReclaim",
+				fmt.Sprintf("peer %s slot %s drop failed; reclaim PENDING, will retry (ADR-0007 §4d)", dep.FromZone, slot))
+			pendingReclaim = true
+			continue
+		}
+	}
+	if pendingReclaim {
+		// Do NOT proceed to drop our publications / delete the AppDatabase / remove the
+		// finalizer while a LIVE peer still carries our slot — the finalizer keeps this
+		// Zone alive so the next resync retries the reclaim (never a silent give-up).
+		cr.Status.Message = "waiting to reclaim replication slot(s) on live peer(s); retrying (ADR-0007 §4d, #146)"
+		_ = d.Cluster.UpdateStatus(ctx, cr)
+		return true, nil
 	}
 
 	// 3. Drop this zone's own publications (consumers' subscriptions break by design;

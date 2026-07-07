@@ -141,11 +141,12 @@ type SubscriptionStatus struct {
 
 // Subscription states.
 const (
-	SubStreaming = "streaming"
-	SubPending   = "pending"
-	SubFederated = "federated"
-	SubDenied    = "denied" // governance: peer does not publish the requested tables / single-writer violation
-	SubError     = "error"
+	SubStreaming   = "streaming"
+	SubPending     = "pending"
+	SubFederated   = "federated"
+	SubDenied      = "denied" // governance: peer does not publish the requested tables / single-writer violation
+	SubError       = "error"
+	SubNeedsResync = "needs_resync" // slot invalidated on the peer (wal_status=lost, the #143 degrade) — the copy is stale; a re-sync (DROP+CREATE SUBSCRIPTION copy_data) is required. Truthful replacement for a misleading "streaming".
 )
 
 // Condition is a minimal k8s-style status condition (same shape as appdb).

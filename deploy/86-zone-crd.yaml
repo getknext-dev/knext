@@ -159,7 +159,14 @@ spec:
                       mode: { type: string }
                       state:
                         type: string
-                        description: streaming | pending | federated | denied | error
+                        description: >-
+                          streaming | pending | federated | denied | error |
+                          needs_resync. needs_resync = the peer slot was invalidated
+                          (wal_status=lost, the #143 max_slot_wal_keep_size degrade); the
+                          local copy is stale and a re-sync (DROP+CREATE SUBSCRIPTION
+                          copy_data) is required — the operator auto-actuates it unless
+                          ZONE_AUTO_RESYNC=false. A truthful replacement for a misleading
+                          `streaming` (ADR-0007 §4a).
                       message: { type: string }
                 message:
                   type: string

@@ -340,7 +340,19 @@ grep -q 'alert: ReplicationSlotWALGrowth' 60-prometheus.yaml || fail "60 missing
 grep -q 'alert: ReplicationSlotInactive' 60-prometheus.yaml || fail "60 missing ReplicationSlotInactive alert (#139) — a leaked slot from a dead subscriber would be unmonitored"
 grep -q 'owner_name="repl-slot-wal-monitor"' 60-prometheus.yaml || fail "60 ReplicationSlotWALGrowth must match the repl-slot-wal-monitor CronJob by exact owner_name (#139)"
 grep -q 'owner_name="repl-slot-inactive-monitor"' 60-prometheus.yaml || fail "60 ReplicationSlotInactive must match the repl-slot-inactive-monitor CronJob by exact owner_name (#139)"
-ok "60 ships the platform alert rules (backup+janitor+staleness+pswatcher+standby+wake+slot) and keeps the phantom honesty rule"
+# ADR-0007 v2-2 (SRE F2): ZONE STATUS alerts — a Failed/Degraded Zone or a broken
+# subscription must PAGE (severity critical), sourced from the zone-status-monitor
+# CronJobs (deploy/64) joined by exact owner_name, same Failed-Job pattern.
+grep -q 'alert: ZoneDegradedOrFailed' 60-prometheus.yaml || fail "60 missing ZoneDegradedOrFailed alert (ADR-0007) — a Failed/Degraded Zone would be unmonitored"
+grep -q 'alert: ZoneSubscriptionBroken' 60-prometheus.yaml || fail "60 missing ZoneSubscriptionBroken alert (ADR-0007) — a broken cross-zone subscription would be unmonitored"
+grep -q 'owner_name="zone-phase-monitor"' 60-prometheus.yaml || fail "60 ZoneDegradedOrFailed must match the zone-phase-monitor CronJob by exact owner_name (ADR-0007)"
+grep -q 'owner_name="zone-subscription-monitor"' 60-prometheus.yaml || fail "60 ZoneSubscriptionBroken must match the zone-subscription-monitor CronJob by exact owner_name (ADR-0007)"
+grep -Eq 'alert: Zone(DegradedOrFailed|SubscriptionBroken)' 60-prometheus.yaml && grep -q 'severity: critical, plane: zones' 60-prometheus.yaml || fail "60 zone-status alerts must PAGE (severity: critical, plane: zones)"
+[ -f 64-zone-status-monitor.yaml ] || fail "deploy/64-zone-status-monitor.yaml missing (zone-status paging monitor, ADR-0007 SRE F2)"
+grep -q 'name: zone-phase-monitor' 64-zone-status-monitor.yaml || fail "64 missing zone-phase-monitor CronJob (ZoneDegradedOrFailed source)"
+grep -q 'name: zone-subscription-monitor' 64-zone-status-monitor.yaml || fail "64 missing zone-subscription-monitor CronJob (ZoneSubscriptionBroken source)"
+grep -q 'kubectl get zones' 64-zone-status-monitor.yaml || fail "64 zone-status monitor must read the Zone CRs"
+ok "60 ships the platform alert rules (backup+janitor+staleness+pswatcher+standby+wake+slot+zone) and keeps the phantom honesty rule"
 
 # 20. contract: Alertmanager (61) keeps the testable in-cluster sink as default
 #     BUT cleanly supports a real Slack-compatible receiver via a Secret FILE

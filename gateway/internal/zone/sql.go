@@ -218,6 +218,64 @@ END $$;
 DROP SUBSCRIPTION IF EXISTS %s;`, quoteLiteral(sub), q, q, q)
 }
 
+// buildResyncSubscription is the re-sync recovery (ADR-0007 §4a "degrade to re-sync"):
+// DISABLE, then DROP the (broken) subscription — dropping the invalidated peer slot WITH
+// it (the publisher is reachable: the operator's poll confirmed it awake immediately
+// before) — then re-CREATE the subscription WITH copy_data + create_slot so the initial
+// COPY re-snapshots the peer publication from scratch on a FRESH slot. This is the only
+// recovery once the peer slot was invalidated (wal_status=lost); unlike
+// buildEnsureSubscription (create-if-absent) it is UNCONDITIONAL — the subscription row
+// still exists after invalidation, so a plain "ensure" would no-op and never heal.
+//
+// CRITICAL vs buildDropSubscription: we deliberately do NOT set slot_name = NONE here.
+// Detaching would ORPHAN the (lost) slot under its deterministic name, so the subsequent
+// create_slot=true would collide ("replication slot already exists"). Dropping the
+// subscription while attached drops the remote slot, freeing the name. If the publisher
+// is unreachable at drop time the DROP errors → the operator retries next resync (the
+// subscription stays needs_resync), which is the correct fail-safe. CREATE SUBSCRIPTION
+// cannot run in a transaction, so DISABLE is guarded in a DO block and DROP/CREATE run as
+// bare statements after it.
+func buildResyncSubscription(sub, conn string, publications []string) (string, error) {
+	if !validSimpleIdent(sub) {
+		return "", fmt.Errorf("invalid subscription name %q", sub)
+	}
+	if len(publications) == 0 {
+		return "", fmt.Errorf("subscription %q references no publications", sub)
+	}
+	for _, p := range publications {
+		if !validSimpleIdent(p) {
+			return "", fmt.Errorf("invalid publication name %q", p)
+		}
+	}
+	q := quoteIdent(sub)
+	pubList := strings.Join(publications, ", ")
+	return fmt.Sprintf(`DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_subscription WHERE subname = %s) THEN
+    ALTER SUBSCRIPTION %s DISABLE;
+  END IF;
+END $$;
+DROP SUBSCRIPTION IF EXISTS %s;
+CREATE SUBSCRIPTION %s CONNECTION %s PUBLICATION %s WITH (copy_data = true, create_slot = true);`,
+		quoteLiteral(sub), q, q, q, quoteLiteral(conn), pubList), nil
+}
+
+// buildSlotStatusQuery reads a single slot's wal_status on a publisher — the
+// authoritative invalidation signal (lost/unreserved ⇒ the #143 bound fired). Emits
+// exactly one line (the wal_status text) or nothing when the slot is absent.
+func buildSlotStatusQuery(slot string) string {
+	return fmt.Sprintf(
+		"SELECT coalesce(wal_status,'') FROM pg_replication_slots WHERE slot_name = %s;",
+		quoteLiteral(slot))
+}
+
+// slotStatusInvalid reports whether a wal_status value means the slot was invalidated
+// by the max_slot_wal_keep_size bound (the subscriber must re-sync).
+func slotStatusInvalid(walStatus string) bool {
+	s := strings.ToLower(strings.TrimSpace(walStatus))
+	return s == "lost" || s == "unreserved"
+}
+
 // buildDropReplicationSlot drops an inactive logical slot on a peer publisher
 // (ADR-0007 §4d — after the subscriber side is gone, so it cannot be re-pinned).
 // Guarded on inactivity: a still-active slot is skipped (never forcibly killed).

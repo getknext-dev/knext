@@ -154,7 +154,7 @@ data:
             labels: { severity: critical }
             annotations:
               summary: "kube-state-metrics is DOWN — ALL platform alerts are blind"
-              description: "up{job=kube-state-metrics}==0 or absent for 2m. BackupJobFailed, WalJanitorJobFailed, BackupStale, WalJanitorStale, PageserverStandbyNotReady, ComputeWakeStuck, ComputeWakeStuckApps, ComputeRoPoolStuck, ComputeStuckNotReady, SafekeeperWALGrowth, ReplicationSlotWALGrowth and ReplicationSlotInactive all evaluate KSM series and stop firing while it is down. Treat as sev-1: restore KSM (deploy/59) before trusting any platform alert."
+              description: "up{job=kube-state-metrics}==0 or absent for 2m. BackupJobFailed, WalJanitorJobFailed, BackupStale, WalJanitorStale, PageserverStandbyNotReady, ComputeWakeStuck, ComputeWakeStuckApps, ComputeRoPoolStuck, ComputeStuckNotReady, SafekeeperWALGrowth, ReplicationSlotWALGrowth, ReplicationSlotInactive, ZoneDegradedOrFailed and ZoneSubscriptionBroken all evaluate KSM series and stop firing while it is down. Treat as sev-1: restore KSM (deploy/59) before trusting any platform alert."
           # (a) backup CronJob run failed. Restore depends on a fresh backup;
           # a failing backup is a silent DR regression.
           - alert: BackupJobFailed
@@ -482,6 +482,41 @@ data:
             annotations:
               summary: "a replication slot has been inactive too long — likely a leaked slot"
               description: "The repl-slot-inactive-monitor Job failed: a logical replication slot has been inactive for longer than the threshold (24h) — very likely a LEAKED slot from a dead or deprovisioned cross-zone subscriber, still pinning publisher WAL. Drop it (pg_drop_replication_slot on the publisher) or run the Zone deprovision hygiene (ADR-0007 §4d). Read the Job log for the offending slot(s). See docs/operations.md#zoned-replication-slot-monitoring-adr-0007."
+      # ZONE STATUS alerts (ADR-0007, #139 v2-2; SRE F2 v1.3.0 review). Cross-zone
+      # breakage — a Zone in Failed/Degraded phase, or a dataDependency in
+      # error/denied/needs_resync — is invisible to the slot-WAL monitors above (which
+      # only see publisher WAL). The zone-status-monitor CronJobs (deploy/64) read the
+      # Zone CRs and FAIL their Job on a breach; these rules join that Failed Job via the
+      # SAME kube_job_owner pattern. DELIBERATELY severity=critical + plane=zones: unlike
+      # the slot WAL warnings (early-warning, off the primary pager), a broken cross-zone
+      # dependency is a live data-freshness failure and must PAGE. DORMANT until the
+      # monitors are deployed AND a Zone is Failed/Degraded (no kube_job_owner series ⇒ no
+      # samples), so shipping them is free. `for` debounces transient reconcile windows.
+      - name: ks-pg-zones
+        rules:
+          # (a) a Zone is Failed (invalid spec) or Degraded (denied dep / wiring error /
+          # an invalidated slot awaiting re-sync).
+          - alert: ZoneDegradedOrFailed
+            expr: |
+              sum(kube_job_status_failed{namespace="scale-zero-pg"}
+                  * on(namespace, job_name) group_left(owner_name)
+                  kube_job_owner{namespace="scale-zero-pg", owner_name="zone-phase-monitor"}) > 0
+            for: 15m
+            labels: { severity: critical, plane: zones }
+            annotations:
+              summary: "a Zone is Failed or Degraded — cross-zone fabric is broken"
+              description: "The zone-phase-monitor Job failed: one or more Zone CRs are phase=Failed (an invalid spec — terminal until corrected) or phase=Degraded (a dataDependency the operator could not wire: governance denial, a wiring error, or a replication slot invalidated by the max_slot_wal_keep_size bound and awaiting re-sync). A cross-zone data dependency is not delivering. Read the Job log and `kubectl get zone -o yaml` for the offending zone + status.message. See docs/operations.md#zone-alerts--re-sync-runbook."
+          # (b) a dataDependency subscription in error / denied / needs_resync.
+          - alert: ZoneSubscriptionBroken
+            expr: |
+              sum(kube_job_status_failed{namespace="scale-zero-pg"}
+                  * on(namespace, job_name) group_left(owner_name)
+                  kube_job_owner{namespace="scale-zero-pg", owner_name="zone-subscription-monitor"}) > 0
+            for: 15m
+            labels: { severity: critical, plane: zones }
+            annotations:
+              summary: "a cross-zone subscription is error/denied/needs_resync"
+              description: "The zone-subscription-monitor Job failed: one or more cross-zone subscriptions are state=error (a wiring failure), denied (governance — the peer does not publish the requested tables; declare them in the peer's spec.publishes to grant), or needs_resync (the peer slot was invalidated, wal_status=lost — the local copy is stale; the operator auto-actuates DROP+CREATE SUBSCRIPTION copy_data unless ZONE_AUTO_RESYNC=false). Read the Job log for the offending zone->peer pairs + subscription message. See docs/operations.md#zone-alerts--re-sync-runbook."
 ---
 apiVersion: apps/v1
 kind: Deployment

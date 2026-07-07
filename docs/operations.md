@@ -73,6 +73,8 @@ Alertmanager (`61-alertmanager.yaml`) to a receiver.
 | `SafekeeperWALGrowth` (**warn**) | a Job owned by the **apps-wal-monitor** CronJob failed: orphaned apps-tenant WAL (a deprovisioned app's safekeeper WAL dir, pageserver-404) is accumulating on the fixed **2Gi** safekeeper PVs, **and/or** a safekeeper `/data` is over its utilization threshold (75%) | **Not the primary pager** (expected branch-per-app churn) but must not be ignored — an unbounded leak ends in ENOSPC that wedges the *whole* storage plane. Read the Job log (`kubectl -n scale-zero-pg logs job/<apps-wal-monitor-…>`) for the orphan count vs PV%. Reclaim with `deploy/provision-app.sh reclaim-orphans`. Distinct from `WalJanitorJobFailed` — the janitor is *correct* to skip (never over-prune) an orphan; this is the missing **bound + signal** (#90/#87). Dormant when the monitor isn't deployed. See [Reclaiming orphaned apps-tenant WAL](#reclaiming-orphaned-apps-tenant-wal-9087). |
 | `ReplicationSlotWALGrowth` (**warn**) | a Job owned by the **repl-slot-wal-monitor** CronJob failed: a cross-zone logical replication slot on an awake publisher is retaining WAL past **75%** of the `max_slot_wal_keep_size` bound (512MB), or was already **invalidated** by it (`wal_status=lost`) | **Not the primary pager** — the bound is the hard backstop. A subscriber is falling behind or a slot is leaking; past the bound Postgres invalidates the slot and the subscriber must **re-sync** (drop+recreate subscription with `copy_data`) — the designed **degrade-to-re-sync, never plane-fill**. Read the Job log for the offending slot; if it is a live subscriber, wake/heal it; if leaked, drop the slot. Dormant until the monitors are deployed and a slot exists (#139). See [Zoned-replication slot monitoring](#zoned-replication-slot-monitoring-adr-0007). |
 | `ReplicationSlotInactive` (**warn**) | a Job owned by the **repl-slot-inactive-monitor** CronJob failed: a replication slot has been **inactive >24h** | Very likely a **leaked** slot from a dead/deprovisioned cross-zone subscriber, still pinning publisher WAL toward the bound. Drop it (`SELECT pg_drop_replication_slot('<slot>')` on the publisher) or run the Zone deprovision hygiene (ADR-0007 §4d). A briefly-sleeping subscriber is short and expected — 24h means abandoned. Dormant until deployed + a slot exists (#139). See [Zoned-replication slot monitoring](#zoned-replication-slot-monitoring-adr-0007). |
+| `ZoneDegradedOrFailed` (**crit**) | a Job owned by the **zone-phase-monitor** CronJob failed: a Zone CR is `phase=Failed` (invalid spec) or `phase=Degraded` (a dependency the operator could not wire, or a slot invalidated → awaiting re-sync) | **Pages** — a cross-zone data dependency is not delivering. `kubectl -n scale-zero-pg get zone -o wide` finds the phase; `kubectl get zone <z> -o yaml` → `.status.message` + `.status.conditions` say why. Failed = fix the spec (terminal until corrected); Degraded = see the subscription state below. Dormant until the monitor is deployed and a Zone breaks (ADR-0007). See [Zone alerts & re-sync runbook](#zone-alerts--re-sync-runbook). |
+| `ZoneSubscriptionBroken` (**crit**) | a Job owned by the **zone-subscription-monitor** CronJob failed: a `dataDependency` subscription is `state=error` / `denied` / `needs_resync` | **Pages.** `error` = a wiring failure (read the Job log + `.status.subscriptions[].message`). `denied` = **governance** — the peer does not `publish` a requested table; declare it in the peer's `spec.publishes` to grant. `needs_resync` = the peer slot was **invalidated** (`wal_status=lost`); the local copy is stale — the operator **auto re-syncs** (DROP+CREATE SUBSCRIPTION `copy_data`) unless `ZONE_AUTO_RESYNC=false`, in which case run the manual re-sync below. Dormant until deployed + a Zone breaks. See [Zone alerts & re-sync runbook](#zone-alerts--re-sync-runbook). |
 
 CronJob rules match by **exact owner name** (`kube_job_owner{owner_name="backup"}` /
 `"wal-janitor"`), not a loose `backup.*` regex — so a failing `wal-janitor` is
@@ -1538,12 +1540,87 @@ slot-janitor lane monitors that as defense-in-depth, but clean deprovision is th
 first line. Single replica on purpose (Recreate): the operator is the single-writer
 of cross-zone fabric actions.
 
+**Peer-gone vs transiently-unreachable (#146).** Dropping the peer slot distinguishes a
+peer that is **genuinely deprovisioned** (its `compute-<peer>` Deployment is gone → the
+slot went with its timeline; nothing to drop, deprovision continues) from a peer that is
+**live but momentarily unwakeable** (wake/drop failed transiently). In the transient
+case the operator records a **pending-reclaim** (`Fabric` condition `PendingSlotReclaim`
++ a Warning event) and **requeues without removing the finalizer** — the Zone stays and
+the next resync retries the slot drop, **until the peer is reachable**. It never silently
+gives up and strands a slot on a live peer; the #143 WAL bound is only the backstop,
+never relied on for correctness.
+
 Live-proven on OKE 2026-07-07 (`docs/BENCHMARKS.md`): live cross-zone lag **1.81 s**;
 with the **operator scaled to 0**, `compute-za` stayed truly at rest at 0 for 20 s
 (not force-woken — the steady-state gate), then the subscriber woke it **0→1 in
 5.30 s** through the gateway (unambiguously the #140 path), 56-row backlog drained
 **6.73 s**; sovereignty upheld (unpublished table withheld); clean deprovision (no
 orphan slot, both timelines reclaimed).
+
+### Zone alerts & re-sync runbook
+
+**Alerts (both PAGE — severity critical, plane=zones; sourced from the
+`zone-status-monitor` CronJobs, `deploy/64`):**
+
+- **`ZoneDegradedOrFailed`** — a Zone is `phase=Failed` (invalid spec — terminal until
+  corrected) or `phase=Degraded` (a dependency the operator could not wire, or a slot
+  invalidated awaiting re-sync). Triage: `kubectl -n scale-zero-pg get zone -o wide`
+  then `kubectl get zone <z> -o yaml` → `.status.message` + `.status.conditions`.
+- **`ZoneSubscriptionBroken`** — a `dataDependency` subscription is `error` / `denied` /
+  `needs_resync` (see the states below).
+
+**Truthful subscription states (`.status.subscriptions[].state`):**
+
+| State | Meaning | Action |
+|---|---|---|
+| `streaming` | logical-replication copy live | — |
+| `federated` | `postgres_fdw` foreign tables live (no copy) | — |
+| `pending` | peer not publishing yet / repl cred not ready | self-heals when the peer reconciles |
+| `denied` | **governance**: the peer does not `publish` a requested table | declare the table in the **peer's** `spec.publishes` to grant |
+| `error` | a wiring failure (bad conninfo / exec error) | read `.message` + the operator log |
+| `needs_resync` | the peer slot was **invalidated** (`wal_status=lost`, the #143 degrade) — the local copy is **stale** | auto re-synced by the operator (below); manual only if `ZONE_AUTO_RESYNC=false` or auto-resync keeps failing |
+
+**Re-sync — self-healing (default).** A settled Ready zone polls each streaming
+replicate dependency for slot invalidation on **every resync**, and when it finds
+`wal_status=lost` it flips the subscription to `needs_resync` and **auto-actuates** the
+recovery: `DROP` + `CREATE SUBSCRIPTION … WITH (copy_data = true)` on the subscriber,
+re-snapshotting the peer publication from scratch. It reads the peer slot **only when
+the peer is already awake** (a non-waking read) so a settled healthy zone is **never
+force-woken to poll** and still rests at zero (the scale-to-zero invariant). Watch it:
+
+```sh
+kubectl -n scale-zero-pg get zone <subscriber> -o jsonpath='{.status.subscriptions}'
+kubectl -n scale-zero-pg logs deploy/zone-operator | grep -E 'Resync|NeedsResync'
+```
+
+**Re-sync — manual (only when `ZONE_AUTO_RESYNC=false`, or auto-resync cannot heal).**
+On the **subscriber** compute (as `cloud_admin` over pod-local loopback), drop and
+recreate the subscription with a fresh copy (the peer publisher wakes via the gateway on
+the initial COPY connect):
+
+```sh
+POD=$(kubectl -n scale-zero-pg get pod -l app=compute-<subscriber> \
+  --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}')
+kubectl -n scale-zero-pg exec -i "$POD" -c compute -- \
+  env PGPASSWORD=cloud_admin psql -h localhost -p 55433 -U cloud_admin -d postgres <<'SQL'
+DO $$ BEGIN
+  IF EXISTS (SELECT 1 FROM pg_subscription WHERE subname = 'zone_sub_<peer>') THEN
+    ALTER SUBSCRIPTION "zone_sub_<peer>" DISABLE;
+  END IF;
+END $$;
+-- DROP (not detach) so the invalidated remote slot is dropped too, freeing the name;
+-- the peer publisher must be reachable (it wakes via the gateway on the COPY below).
+DROP SUBSCRIPTION IF EXISTS "zone_sub_<peer>";
+CREATE SUBSCRIPTION "zone_sub_<peer>"
+  CONNECTION 'host=pggw-apps.scale-zero-pg.svc port=55432 user=repl_<peer> password=<pw> dbname=<peer> sslmode=disable'
+  PUBLICATION <peer_pub> WITH (copy_data = true, create_slot = true);
+SQL
+```
+
+(`<pw>` is the peer's `zone-repl-<peer>` Secret `REPL_PASSWORD`.) This is exactly what
+the operator's auto-resync emits. Verify the fresh publisher slot with
+`SELECT slot_name, wal_status FROM pg_replication_slots` on the peer (a new
+`zone_sub_<peer>`, `wal_status` reserved/extended — not `lost`).
 
 ## Read-only pool (issue #66)
 

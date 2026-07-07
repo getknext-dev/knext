@@ -70,6 +70,53 @@ func TestBuildEnsureSubscriptionUsesGatewayConninfo(t *testing.T) {
 	}
 }
 
+func TestBuildResyncSubscriptionDropsThenRecreatesWithCopy(t *testing.T) {
+	conn := conninfo("pggw-apps.scale-zero-pg.svc", 55432, "za", "repl_za", "s3cr3t")
+	sql, err := buildResyncSubscription("zone_sub_za", conn, []string{"orders_pub"})
+	if err != nil {
+		t.Fatalf("resync: %v", err)
+	}
+	// Re-sync MUST DISABLE, then DROP (dropping the remote lost slot with it) THEN
+	// recreate with copy_data + a fresh slot — unlike ensure-subscription, unconditional.
+	iDisable := strings.Index(sql, "DISABLE")
+	iDrop := strings.Index(sql, "DROP SUBSCRIPTION")
+	iCreate := strings.Index(sql, "CREATE SUBSCRIPTION")
+	if !(iDisable >= 0 && iDrop > iDisable && iCreate > iDrop) {
+		t.Errorf("resync must DISABLE -> DROP -> CREATE: %s", sql)
+	}
+	if !strings.Contains(sql, "copy_data = true") || !strings.Contains(sql, "create_slot = true") {
+		t.Errorf("resync must copy_data + create a fresh slot: %s", sql)
+	}
+	// MUST NOT detach the slot: slot_name = NONE would orphan the lost slot under its
+	// deterministic name and make create_slot collide. The DROP must free the name.
+	if strings.Contains(sql, "slot_name = NONE") {
+		t.Errorf("resync must NOT detach (slot_name = NONE) — it must drop the remote slot to free the name: %s", sql)
+	}
+	if strings.Contains(sql, `\if`) {
+		t.Errorf("resync create must be UNCONDITIONAL (no existence guard): %s", sql)
+	}
+	if _, err := buildResyncSubscription("bad;name", conn, []string{"p"}); err == nil {
+		t.Error("resync must reject an unsafe subscription name")
+	}
+}
+
+func TestSlotStatusInvalid(t *testing.T) {
+	for _, s := range []string{"lost", "LOST", " unreserved ", "unreserved"} {
+		if !slotStatusInvalid(s) {
+			t.Errorf("%q should be invalid", s)
+		}
+	}
+	for _, s := range []string{"reserved", "extended", "", "streaming"} {
+		if slotStatusInvalid(s) {
+			t.Errorf("%q should NOT be invalid", s)
+		}
+	}
+	q := buildSlotStatusQuery("zone_sub_za")
+	if !strings.Contains(q, "pg_replication_slots") || !strings.Contains(q, "'zone_sub_za'") {
+		t.Errorf("slot-status query wrong: %s", q)
+	}
+}
+
 func TestBuildDropSubscriptionDetachesSlotFirst(t *testing.T) {
 	sql := buildDropSubscription("zone_sub_za")
 	// The DISABLE + SET slot_name=NONE must precede DROP so a local drop never blocks

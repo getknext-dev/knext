@@ -553,6 +553,30 @@ TABLE`, never drop+recreate); subscriptions are created **once** (a `\gset`/`\if
 guard) so no re-COPY/slot-thrash on the 15 s resync. The drill provisions/destroys
 its own throwaway zones — it never touches live apps.
 
+## Zone reliability — re-sync actuator + no-force-wake + alerting (v1.3.1, #146/#147, ADR-0007)
+
+Verified **live on OKE, 2026-07-07** (`deploy/_verify-zones.sh run` + `alerts`,
+throwaway `za`/`zb`/`zbadfail`, zone-operator image
+`sha-zonerel-0f43d94@sha256:2b30dcd4…` — rebuilt with these fixes). The full v2-2
+drill above still passes on the new image (wake **5.40 s**, backlog-56 **6.78 s**,
+clean deprovision); the new reliability proofs:
+
+| Metric | Result | Evidence |
+|---|---|---|
+| **Scale-to-zero regression guard (#145 NOT reintroduced)** | ✅ with the **zone-operator RUNNING 1/1** and reconciling every 15 s, `compute-za` (Ready+healthy publisher) **rested at 0 for 60 s** — the re-sync health poll reads a peer slot ONLY when the peer is already awake, so it never force-wakes a settled zone | `kubectl get deploy compute-za` replicas polled 12× over 60 s, operator up |
+| **Slot invalidation → self-heal (RE-SYNC ACTUATOR, ADR-0007 §4a)** | ✅ shrinking `max_slot_wal_keep_size` to 1 MB + WAL while the subscriber slept **invalidated** `zone_sub_za` (`wal_status=unreserved`); the running operator detected it and **auto re-synced** (`DROP`+`CREATE SUBSCRIPTION copy_data`) — subscription back to **streaming** on a **fresh** slot (`wal_status=reserved`) | operator poll + `pg_replication_slots` before/after |
+| **Post-resync correctness (checksum)** | ✅ a fresh live insert on za replicated to zb; `orders` row counts **match** after re-sync (**za=57, zb=57**) | `select count(*)` both sides |
+| **Zone alerting pages (SRE F2)** | ✅ an invalid-spec Zone (`zbadfail`, self-dependency) reached `phase=Failed`; the on-demand `zone-phase-monitor` Job **FAILED** → `ZoneDegradedOrFailed` fires via `kube_job_owner` (critical, `plane=zones`) | `kubectl create job --from=cronjob/zone-phase-monitor` → Job `failed=1` |
+
+The auto re-sync healed fast enough that the transient `needs_resync` status was not
+caught by the 2 s drill poll (the truthful-status flip + the runbook-only path when
+`ZONE_AUTO_RESYNC=false` are unit-covered:
+`gateway/internal/zone/reconcile_test.go`). Fail-closed on a Zone-lister outage
+(#147 — no publication created while the peer set is unreadable) and deprovision
+retry-not-strand on a live-but-unwakeable peer (#146) are unit-proven
+(`TestReconcile_ListErrorFailsClosed`, `…DeprovisionRetriesLivePeerNotStrand`) —
+they cannot be safely forced on the live plane without breaking operator RBAC.
+
 ## Capacity / sizing facts
 
 - Gateway: `GW_MAX_CONNS=90` < compute `max_connections=100`; excess → clean 53300.

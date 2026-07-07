@@ -64,6 +64,8 @@ since() { python3 -c "print(f'{$(now)-$1:.2f}s')"; }
 
 teardown() {
   log "TEARDOWN: deleting throwaway zones $ZA / $ZB (finalizer runs cross-zone hygiene)"
+  K delete job zbad-phasecheck --ignore-not-found >/dev/null 2>&1 || true
+  K delete zone zbadfail --ignore-not-found --timeout=60s >/dev/null 2>&1 || true
   K delete zone "$ZB" --timeout=180s 2>&1 | tail -1 || true
   K delete zone "$ZA" --timeout=180s 2>&1 | tail -1 || true
   # Backstop: reclaim any leftover throwaway AppDatabases/branches.
@@ -188,11 +190,31 @@ SQL
   [ "$leaked" = "0" ] && ok "SOVEREIGNTY: unpublished secret_t did NOT reach $ZB (no such table)" \
     || { bad "SOVEREIGNTY BREACH: secret_t present on $ZB"; exit 1; }
 
+  # 6b. SCALE-TO-ZERO REGRESSION GUARD (the #145 invariant, WITH the operator RUNNING).
+  #     The re-sync health poll must NEVER force-wake a settled healthy publisher. Sleep
+  #     the subscriber (its walreceiver releases $ZA), sleep $ZA, and — with the operator
+  #     up 1/1 and reconciling every 15s — assert $ZA stays at 0 replicas for 60s. If the
+  #     poll re-read a healthy peer's slot each tick it would wake $ZA; it must not.
+  log "STEP 6b REGRESSION GUARD: operator UP — a Ready+healthy publisher must rest at 0 for 60s"
+  [ "$(K get deploy zone-operator -o jsonpath='{.status.readyReplicas}')" = "1" ] \
+    || { bad "STEP 6b zone-operator not 1/1 — cannot prove the no-force-wake guard"; exit 1; }
+  sleep0 "$ZB"; sleep0 "$ZA"
+  local rewoke=""
+  for _ in $(seq 1 12); do
+    local ra; ra="$(replicas_of "$ZA")"
+    [ "$ra" != "0" ] && { rewoke="$ra"; break; }
+    sleep 5
+  done
+  [ -z "$rewoke" ] \
+    && ok "STEP 6b publisher compute-$ZA rested at 0 for 60s with the operator RUNNING — poll does NOT force-wake a healthy peer (#145 not reintroduced)" \
+    || { bad "STEP 6b compute-$ZA re-woke to $rewoke replicas with the operator up — the health poll is force-waking a healthy peer (#145 REGRESSION)"; K logs deploy/zone-operator --tail=30; exit 1; }
+
   # 7. PUBLISHER-WOKEN-FOR-REPLICATION (the #140 mechanism, end-to-end). Sleep the
   #    subscriber (walreceiver disconnects), backlog the publisher, sleep the publisher
   #    to ZERO, then wake ONLY the subscriber — its walreceiver connects THROUGH the
   #    gateway, which wakes the sleeping publisher. We never scale the publisher.
   sleep0 "$ZB"
+  wake1 "$ZA" # STEP 6b left $ZA asleep; wake it to write the backlog (then sleep it below)
   psqla "$ZA" "INSERT INTO orders(item) SELECT 'backlog-'||g FROM generate_series(1,50) g" >/dev/null
   sleep0 "$ZA"
   # CLEAN ATTRIBUTION: scale the zone-operator to 0 for the measurement so the ONLY
@@ -225,6 +247,58 @@ SQL
   K scale deploy/zone-operator --replicas=1 >/dev/null
   K rollout status deploy/zone-operator --timeout=120s >/dev/null
 
+  # 7b. RE-SYNC ACTUATOR (ADR-0007 §4a). Invalidate $ZA's slot (tiny max_slot_wal_keep_size
+  #     + WAL while the subscriber sleeps → wal_status=lost). The RUNNING operator must
+  #     detect it (peer awake), flip $ZB's subscription to a truthful needs_resync, and
+  #     AUTO re-sync (DROP+CREATE SUBSCRIPTION copy_data) — restoring streaming with a
+  #     fresh slot and a matching checksum. Fill WAL via an UNpublished table so the
+  #     re-copy stays cheap and orders counts stay comparable.
+  log "STEP 7b RE-SYNC ACTUATOR: invalidate $ZA's slot; operator must flip needs_resync -> auto re-sync"
+  wake1 "$ZA"; wake1 "$ZB"
+  psqla_f "$ZA" <<SQL
+CREATE TABLE IF NOT EXISTS wal_filler(id serial primary key, payload text);
+SQL
+  sleep0 "$ZB" # subscriber asleep -> its slot on $ZA goes inactive and starts to lag
+  psqla "$ZA" "ALTER SYSTEM SET max_slot_wal_keep_size='1MB'" >/dev/null
+  psqla "$ZA" "SELECT pg_reload_conf()" >/dev/null
+  local ws=""
+  for _ in $(seq 1 40); do
+    psqla "$ZA" "INSERT INTO wal_filler(payload) SELECT repeat('x',1000) FROM generate_series(1,20000) g" >/dev/null
+    psqla "$ZA" "SELECT pg_switch_wal()" >/dev/null 2>&1 || true
+    ws="$(psqla "$ZA" "select coalesce(wal_status,'') from pg_replication_slots where slot_name='zone_sub_${ZA}'" 2>/dev/null)"
+    case "$ws" in lost|unreserved) break;; esac
+    sleep 1
+  done
+  { [ "$ws" = "lost" ] || [ "$ws" = "unreserved" ]; } \
+    && ok "STEP 7b slot zone_sub_${ZA} INVALIDATED on $ZA (wal_status=$ws) — the #143 degrade" \
+    || { bad "STEP 7b slot never invalidated (wal_status=$ws)"; exit 1; }
+  # restore the real bound so the fresh slot behaves normally
+  psqla "$ZA" "ALTER SYSTEM SET max_slot_wal_keep_size='512MB'" >/dev/null
+  psqla "$ZA" "SELECT pg_reload_conf()" >/dev/null
+  # The operator polls every 15s: peer $ZA must be AWAKE for detection (ComputeAwake gate),
+  # so keep it awake while we wait for the auto re-sync to land.
+  local seen_nr="" healed="" freshws=""
+  for _ in $(seq 1 60); do
+    wake1 "$ZA" >/dev/null 2>&1 || true
+    [ "$(sub_state "$ZB")" = "needs_resync" ] && seen_nr=1
+    freshws="$(psqla "$ZA" "select coalesce(wal_status,'(none)') from pg_replication_slots where slot_name='zone_sub_${ZA}'" 2>/dev/null)"
+    if [ "$(sub_state "$ZB")" = "streaming" ] && [ "$freshws" != "lost" ] && [ "$freshws" != "unreserved" ] && [ "$freshws" != "(none)" ]; then healed=1; break; fi
+    sleep 2
+  done
+  [ -n "$healed" ] \
+    && ok "STEP 7b operator AUTO RE-SYNCED: $ZB subscription streaming again on a FRESH slot (wal_status=$freshws; observed needs_resync=${seen_nr:-not-caught})" \
+    || { bad "STEP 7b operator did NOT re-sync (sub_state=$(sub_state "$ZB"), slot wal_status=$freshws)"; K logs deploy/zone-operator --tail=40; exit 1; }
+  # CHECKSUM: a fresh insert on $ZA must replicate (streaming truly restored) + counts match.
+  wake1 "$ZB"
+  psqla "$ZA" "INSERT INTO orders(item) VALUES('post-resync-canary')" >/dev/null
+  local canary=""
+  for _ in $(seq 1 60); do canary="$(psqla "$ZB" "select count(*) from orders where item='post-resync-canary'" 2>/dev/null)"; [ "$canary" = "1" ] && break; sleep 1; done
+  [ "$canary" = "1" ] && ok "STEP 7b post-resync live insert replicated $ZA -> $ZB (streaming restored)" \
+    || { bad "STEP 7b post-resync replication broken (canary not on $ZB)"; exit 1; }
+  local cza czb; cza="$(psqla "$ZA" 'select count(*) from orders')"; czb="$(psqla "$ZB" 'select count(*) from orders')"
+  [ "$cza" = "$czb" ] && ok "STEP 7b CHECKSUM: orders row counts match after re-sync ($ZA=$cza $ZB=$czb)" \
+    || { bad "STEP 7b row-count mismatch after re-sync ($ZA=$cza $ZB=$czb)"; exit 1; }
+
   # 8. DEPROVISION HYGIENE: delete zb -> finalizer drops the subscription on zb + the
   #    slot on za; delete za -> drops the publication + reclaims. No orphan slot.
   log "STEP 8 deleting $ZB (finalizer must drop its subscription + the slot on $ZA)"
@@ -246,8 +320,46 @@ SQL
   log "SUMMARY: gateway-wake-for-replication(0->1)=${woke} backlog-catchup(56 rows)=${caught}"
 }
 
+# ALERTING PROOF (SRE F2): a Failed zone must fire ZoneDegradedOrFailed. Self-contained
+# + cheap — an INVALID-spec zone (self-dependency) reaches phase=Failed in validate()
+# WITHOUT composing an AppDatabase (no branch/compute), then the zone-phase-monitor Job
+# must FAIL (exit 1 -> Job Failed -> the kube_job_owner alert fires + PAGES).
+alerts() {
+  log "ALERTING PROOF: a Failed zone must fail the zone-phase-monitor Job (-> ZoneDegradedOrFailed page)"
+  K apply -f "$HERE/86-zone-crd.yaml" >/dev/null
+  K apply -f "$HERE/64-zone-status-monitor.yaml" >/dev/null
+  cat <<YAML | K apply -f - >/dev/null
+apiVersion: zones.scale-zero-pg.dev/v1alpha1
+kind: Zone
+metadata: { name: zbadfail }
+spec:
+  dataDependencies:
+    - { fromZone: zbadfail, tables: [x], mode: replicate }
+YAML
+  local ph=""; for _ in $(seq 1 30); do ph="$(zone_phase zbadfail)"; [ "$ph" = "Failed" ] && break; sleep 2; done
+  [ "$ph" = "Failed" ] \
+    && ok "zbadfail reached phase=Failed (invalid self-dependency spec — no compose)" \
+    || { bad "zbadfail not Failed (phase=$ph)"; K delete zone zbadfail --ignore-not-found >/dev/null 2>&1; exit 1; }
+  K delete job zbad-phasecheck --ignore-not-found >/dev/null 2>&1 || true
+  K create job zbad-phasecheck --from=cronjob/zone-phase-monitor >/dev/null
+  local jr=""
+  for _ in $(seq 1 60); do
+    [ "$(K get job zbad-phasecheck -o jsonpath='{.status.failed}' 2>/dev/null)" = "1" ] && { jr=fail; break; }
+    [ "$(K get job zbad-phasecheck -o jsonpath='{.status.succeeded}' 2>/dev/null)" = "1" ] && { jr=ok; break; }
+    sleep 2
+  done
+  [ "$jr" = "fail" ] \
+    && ok "ALERTING: zone-phase-monitor Job FAILED on the Failed zone -> ZoneDegradedOrFailed PAGES (kube_job_owner join)" \
+    || { bad "ALERTING: zone-phase-monitor did not fail (jr=$jr) — a Failed zone would NOT page"; K logs job/zbad-phasecheck 2>/dev/null | tail -20; }
+  log "ALERTING cleanup: removing zbadfail + the on-demand Job"
+  K delete job zbad-phasecheck --ignore-not-found >/dev/null 2>&1 || true
+  K delete zone zbadfail --ignore-not-found --timeout=60s >/dev/null 2>&1 || true
+  [ "$jr" = "fail" ] && ok "ALERTING proof GREEN" || exit 1
+}
+
 case "${1:-run}" in
   run)      run;;
+  alerts)   alerts;;
   teardown) teardown;;
-  *) echo "usage: _verify-zones.sh {run|teardown}"; exit 1;;
+  *) echo "usage: _verify-zones.sh {run|alerts|teardown}"; exit 1;;
 esac
