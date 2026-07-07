@@ -76,6 +76,11 @@ type Gateway struct {
 	tlsConf *tls.Config   // nil = TLS unconfigured: SSLRequest gets 'N'
 	log     func(string)
 
+	// wakeLimiter enforces the per-app wake budget (issue #116, ADR-0008). nil =
+	// budget off (GW_WAKE_BUDGET unset/0) — the wake path is unchanged. When set,
+	// g.opts.WakeGuard consults it before every 0->1 scale.
+	wakeLimiter *wake.WakeLimiter
+
 	// Peers guards the idle decision when running 2+ replicas: sleep only
 	// when the whole fleet is at zero, not just this pod. Fail-safe: any
 	// peer error postpones sleep rather than risking a live connection.
@@ -118,6 +123,21 @@ func New(env wake.Env, log func(string)) (*Gateway, error) {
 	}
 	if n := envInt(env, "GW_MAX_CONNS", 0); n > 0 {
 		g.connSem = make(chan struct{}, n)
+	}
+	// Per-app wake budget (issue #116, ADR-0008): a token-bucket on the WAKE
+	// primitive. When set, the WakeGuard refuses a 0->1 scale for any app that has
+	// burned its budget — a foreign/unauth pod can wake a sleeping app but cannot
+	// force unbounded churn. Keyed on the compute Target.Key, which is per-app in
+	// template mode (compute-<app>) — so the budget is genuinely per-tenant.
+	if g.wakeLimiter = wake.NewWakeLimiterFromEnv(env); g.wakeLimiter != nil {
+		g.opts.WakeGuard = func(key string) error {
+			if g.wakeLimiter.Allow(key) {
+				return nil
+			}
+			return wake.ErrWakeBudgetExceeded
+		}
+		log(fmt.Sprintf("[gw] per-app wake budget enabled (GW_WAKE_BUDGET=%d over GW_WAKE_WINDOW_MS=%d) — over-budget wakes refused (issue #116)",
+			envInt(env, "GW_WAKE_BUDGET", 0), envInt(env, "GW_WAKE_WINDOW_MS", 60000)))
 	}
 	// Warm-pool driver: surface its gate state on the gauge. Other modes have
 	// no gate, so this is a no-op for them.
@@ -401,6 +421,24 @@ func (g *Gateway) computeUnavailable(client net.Conn, params map[string]string, 
 	_ = client.Close()
 }
 
+// wakeBudgetSQLSTATE is the SQLSTATE returned when a wake is refused because the
+// app burned its per-app wake budget (issue #116). 53400 (configuration_limit_
+// _exceeded) marks it as a transient, retryable limit — distinct from a 28P01 auth
+// refusal and a 57P03/28P01 wake failure — so a legitimate client that momentarily
+// exceeds the budget backs off and retries, while the compute is never scaled.
+const wakeBudgetSQLSTATE = "53400"
+
+// wakeBudgetRefused writes the clean wake-budget refusal. It shares the apps-gateway
+// constant-floor delay (authFloor) so its timing matches every other gateway-side
+// refusal. The message is deliberately generic ("wake rate limit"): it names no
+// tenant/app and reveals nothing an over-budget caller does not already know (its
+// own burst just tripped the limit on a database it is already targeting).
+func (g *Gateway) wakeBudgetRefused(client net.Conn, start time.Time) {
+	g.authFloor(start)
+	_, _ = client.Write(proto.BuildErrorResponse(wakeBudgetSQLSTATE, "wake rate limit exceeded for this database; retry shortly"))
+	_ = client.Close()
+}
+
 // proxy wakes the compute, replays the startup packet, then pipes both ways. When
 // replication is true the client is a subscriber's walreceiver: the wake target is
 // the same per-zone compute, but the connection is tracked as a live replication
@@ -419,9 +457,19 @@ func (g *Gateway) proxy(client net.Conn, startupPacket, pendingRest []byte, targ
 		g.log("[gw] " + target.Key + ": compute asleep, waking (db=" + params["database"] + " user=" + params["user"] + ")")
 	})
 	if err != nil {
-		g.metrics.WakeFailure()
 		g.metrics.ConnClose(target.Key)
 		g.connEnded(target, replication)
+		// Wake budget exhausted (issue #116): a DELIBERATE refusal to scale, NOT a
+		// cold-start failure. Count it separately (so it never trips the wake-failure
+		// pager) and return a clean, transient refusal the client can retry — the
+		// compute was never touched.
+		if errors.Is(err, wake.ErrWakeBudgetExceeded) {
+			g.metrics.WakeBudgetExceeded(target.Key)
+			g.log("[gw] " + target.Key + ": wake budget exceeded — refusing to scale (issue #116; db=" + params["database"] + " user=" + params["user"] + ")")
+			g.wakeBudgetRefused(client, start)
+			return
+		}
+		g.metrics.WakeFailure()
 		g.log("[gw] " + target.Key + ": " + err.Error())
 		g.computeUnavailable(client, params, start, err)
 		return
@@ -481,6 +529,12 @@ func (g *Gateway) proxy(client net.Conn, startupPacket, pendingRest []byte, targ
 func (g *Gateway) handshakeUntilReady(conn net.Conn, startupPacket []byte, target wake.Target) (net.Conn, []byte, error) {
 	deadline := time.Now().Add(time.Duration(g.opts.WakeTimeoutMs) * time.Millisecond)
 	retry := time.Duration(g.opts.RetryMs) * time.Millisecond
+	// Readiness reconnects belong to an ALREADY-authorized, already-budgeted wake
+	// (the token was spent when proxy first woke this compute). Re-checking the
+	// budget here would let a slow cold start burn a second token and could refuse
+	// a legitimate in-flight wake mid-handshake — so these retries skip the guard.
+	retryOpts := g.opts
+	retryOpts.WakeGuard = nil
 	for {
 		if _, err := conn.Write(startupPacket); err != nil {
 			_ = conn.Close()
@@ -502,7 +556,7 @@ func (g *Gateway) handshakeUntilReady(conn net.Conn, startupPacket []byte, targe
 					return nil, nil, errors.New("backend kept dropping the handshake past the wake deadline")
 				}
 				time.Sleep(retry)
-				next, _, _, cerr := wake.ConnectWithWake(context.Background(), g.driver, target, g.opts, nil)
+				next, _, _, cerr := wake.ConnectWithWake(context.Background(), g.driver, target, retryOpts, nil)
 				if cerr != nil {
 					return nil, nil, cerr
 				}
@@ -521,7 +575,7 @@ func (g *Gateway) handshakeUntilReady(conn net.Conn, startupPacket []byte, targe
 			return nil, nil, errors.New("backend kept reporting 57P03 (starting up) past the wake deadline")
 		}
 		time.Sleep(retry)
-		next, _, _, err := wake.ConnectWithWake(context.Background(), g.driver, target, g.opts, nil)
+		next, _, _, err := wake.ConnectWithWake(context.Background(), g.driver, target, retryOpts, nil)
 		if err != nil {
 			return nil, nil, err
 		}

@@ -165,7 +165,13 @@ for a in ComputeWakeStuckApps ComputeRoPoolStuck ComputeStuckNotReady; do
 done
 # ComputeWakeStuck (single-DB) must be scoped to gateway=pggw so apps traffic can't trip it.
 grep -q 'pggw_active_connections{gateway="pggw"}' 60-prometheus.yaml || fail "60 ComputeWakeStuck must scope its connection sum to gateway=\"pggw\" (#80)"
-ok "60-prometheus.yaml scrapes the gateway family (pggw + pggw-apps) + ships the review alerts + multi-tenant/read-pool wake alerts (#80)"
+# #116/ADR-0008: the per-app WAKE budget must be configured on the apps-gateway AND
+# alerted on. The budget caps the unauthenticated wake side-channel; a missing env or
+# alert re-opens the cost/DoS vector silently.
+grep -q 'GW_WAKE_BUDGET' 81-apps-gateway.yaml || fail "81-apps-gateway.yaml must set GW_WAKE_BUDGET — the #116 per-app wake budget (ADR-0008)"
+grep -q 'alert: WakeBudgetExceeded' 60-prometheus.yaml || fail "60-prometheus.yaml missing WakeBudgetExceeded alert (#116) — the wake side-channel would be unmonitored"
+grep -q 'pggw_wake_budget_exceeded_total{gateway="pggw-apps"}' 60-prometheus.yaml || fail "60 WakeBudgetExceeded must scope to gateway=\"pggw-apps\" (the single-DB gateway runs no budget)"
+ok "60-prometheus.yaml scrapes the gateway family (pggw + pggw-apps) + ships the review alerts + multi-tenant/read-pool wake alerts (#80) + the #116 wake-budget alert"
 
 # 12. contract: storage S3/root credentials come from a Secret, never plaintext
 #     YAML. No `value: password`/`value: minio` literals; secretKeyRef present.

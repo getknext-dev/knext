@@ -19,6 +19,8 @@ behavior, and troubleshooting.
 | `GW_WAKE_TIMEOUT_MS` | 60000 | give up waking after this (deployed: 120000) |
 | `GW_CONNECT_TIMEOUT_MS` / `GW_RETRY_MS` | 1000 / 250 | per-attempt connect timeout / poll interval (deployed retry: 100) |
 | `GW_MAX_CONNS` | 0 (unlimited) | connection cap; excess gets a clean `53300`. Deployed: 90 — MUST stay under compute `max_connections=100` |
+| `GW_WAKE_BUDGET` | 0 (off) | per-app **wake** budget: burst 0→1 wakes an app may trigger, refilling over `GW_WAKE_WINDOW_MS`. `0`/unset = no budget (wake path unchanged). Excess wakes are refused `53400` **without scaling**. Deployed on `pggw-apps`: 15. See [Wake budget & wake side-channel (#116)](#wake-budget--wake-side-channel-issue-116). |
+| `GW_WAKE_WINDOW_MS` | 60000 | refill window for `GW_WAKE_BUDGET` (a full budget refills over this window). |
 | `GW_PEER_SELECTOR` | — | label selector for sibling gateways (peer-aware idle); empty disables |
 | `GW_AUTH_FAIL_FLOOR_MS` | 250 | apps-gateway only: constant-floor delay on refusals so unknown-app and wrong-pair are timing-comparable (issue #92); `0` disables |
 | `GW_POD_NAMESPACE` / `GW_POD_IP` | — | downward API; self-exclusion for the peer check |
@@ -1169,6 +1171,71 @@ off-localhost `cloud_admin` dial to a real per-app compute is `pg_hba`-rejected,
 superuser) plus the legit loopback + gateway + `sslmode=require` paths still work;
 `deploy/_verify-netpol.sh` asserts the pg_hba control exists regardless of CNI;
 `deploy/_verify-tls.sh` asserts both gateways are TLS-configured.
+
+### Wake budget & wake side-channel (issue #116)
+
+**What it defends.** The apps-gateway holds **no tenant credentials by design** (it
+is a byte pipe after the handshake; the compute verifies SCRAM — see "Password
+authentication"). So a **syntactically-valid** startup — `user=app_<app>`,
+`database=<app>` — passes the `(user,database)` pre-wake authz (#74) **before any
+password is checked**, and that alone is enough to scale `compute-<app>` 0→1. An
+unauthenticated in-cluster pod can therefore **force-wake any tenant's compute**.
+Post-#112 (the `cloud_admin` pg_hba reject, control 1 above) this is a **cost/DoS
+side-channel, not a data breach** — the woken compute still enforces auth — but "any
+pod can wake any tenant" must be bounded and observable. Full detail + the rejected
+"pre-authenticate before wake" option: **ADR-0008**.
+
+**The control (CNI-independent).** A **per-app token-bucket** on the wake primitive
+(`GW_WAKE_BUDGET` burst wakes refilling over `GW_WAKE_WINDOW_MS`, deployed **15 /
+60 s** on `pggw-apps`):
+
+- keyed on `compute-<app>` → genuinely **per-tenant**; one hostile app cannot drain
+  another's budget;
+- consulted **only when the compute is asleep** — a warm app is never gated, so
+  cold-wake UX and latency are unchanged for legitimate traffic;
+- an app that **exceeds its budget** gets a clean, transient **`53400`** ("wake rate
+  limit exceeded; retry shortly") and the compute is **not scaled** — a burst cannot
+  force unbounded 0→1 churn;
+- refusals are counted: `pggw_wake_budget_exceeded_total` (fleet) and
+  `pggw_system_wake_budget_exceeded_total{system=<app>}` (**names the offending
+  app**).
+
+**Alert.** `WakeBudgetExceeded` (deploy/60, `plane: apps`,
+`increase(pggw_wake_budget_exceeded_total{gateway="pggw-apps"}[5m]) > 0` for 1m) —
+**pages** on a sustained per-app breach.
+
+**3am action (WakeBudgetExceeded firing):**
+1. Name the source app: `sum by (system) (increase(pggw_system_wake_budget_exceeded_total[15m]))`
+   in Prometheus — the `system` label is the app being force-woken.
+2. Confirm whether that app has a **legitimate** cause (a pod restart / reconnect
+   storm, or a client mis-sized far below `GW_IDLE_MS` — see the connecting.md sizing
+   rule). If legit and recurring, **raise** `GW_WAKE_BUDGET` on `pggw-apps`
+   (`kubectl -n scale-zero-pg set env deploy/pggw-apps GW_WAKE_BUDGET=…`).
+3. If **not** legit, you have an in-cluster actor exercising the wake side-channel:
+   identify the source pod (the burst is unauthenticated, so it will also show
+   `28P01`/`53400` noise in the gateway logs — `kubectl -n scale-zero-pg logs -l
+   app=pggw-apps | grep 'wake budget exceeded'`), and, on a **policy-capable CNI**,
+   close reachability with the NetworkPolicy layer (**#118** — the network second
+   layer of ADR-0008; inert on flannel, so the budget is the live control until #118
+   lands). The budget is already **refusing** the excess wakes, so this is
+   investigate-not-outage.
+
+**Tuning.** `GW_WAKE_BUDGET` / `GW_WAKE_WINDOW_MS` are per-plane. A real app wakes
+**once** then stays warm `GW_IDLE_MS`, so its sustained wake rate is far below one per
+window; 15/60 s leaves headroom for a reconnect storm while capping abuse to ~1
+wake/4 s. `0`/unset disables the budget (the single-DB `pggw` runs no budget — one
+tenant, no cross-tenant wake concern).
+
+> **Per-replica budget.** The bucket is **per gateway pod** (in-memory, no cross-fleet
+> coordination), and connections load-balance across replicas — so the effective
+> per-app ceiling before refusals begin is `GW_WAKE_BUDGET × replicas` (30 at 15×2
+> today). Still a hard bound, just size it against the replica count. A fleet-shared
+> bucket is a deliberate non-goal (ADR-0008 Consequences).
+
+**Drill:** `deploy/_verify-wake-guard.sh` proves it **live** — a legitimate single
+wake still works (no regression), an unauthenticated over-budget burst is capped
+(`53400`, compute never exceeds one replica), and the `WakeBudgetExceeded` alert
+fires.
 
 ## Common operations
 

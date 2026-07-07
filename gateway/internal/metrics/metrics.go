@@ -17,6 +17,12 @@ type sysMetrics struct {
 	Active      int   `json:"active"`
 	Wakes       int   `json:"wakes"`
 	LastWakeMs  int64 `json:"last_wake_ms"`
+	// WakeBudgetExceeded counts wakes REFUSED for this app because it burned its
+	// per-app wake budget (issue #116, ADR-0008). A nonzero value means a caller is
+	// force-waking this app faster than GW_WAKE_BUDGET/GW_WAKE_WINDOW_MS allows and
+	// the gateway declined to scale — a possible unauthenticated wake side-channel /
+	// noisy-neighbour DoS. Per-app so the source tenant is identifiable.
+	WakeBudgetExceeded int `json:"wake_budget_exceeded"`
 }
 
 // Metrics holds gateway counters, safe for concurrent use.
@@ -29,6 +35,11 @@ type Metrics struct {
 	WakeFailuresTotal        int `json:"wake_failures_total"`
 	SleepsTotal              int `json:"sleeps_total"`
 	RejectedConnectionsTotal int `json:"rejected_connections_total"`
+	// WakeBudgetExceededTotal counts wakes REFUSED across all apps because the
+	// requesting app had exhausted its per-app wake budget (issue #116, ADR-0008).
+	// It is NOT a wake FAILURE (a real cold-start error, WakeFailuresTotal) — it is a
+	// deliberate refusal to scale, so the two never share an alert.
+	WakeBudgetExceededTotal int `json:"wake_budget_exceeded_total"`
 	// ReplicationConnectionsTotal counts REPLICATION (walreceiver) streams the
 	// gateway has mediated — a subscriber connecting through the gateway to wake +
 	// drain a publisher (ADR-0007 §4c). A nonzero value on a publisher's gateway is
@@ -113,6 +124,16 @@ func (m *Metrics) RejectConn() {
 	m.RejectedConnectionsTotal++
 }
 
+// WakeBudgetExceeded counts a wake REFUSED because the app (key) had exhausted its
+// per-app wake budget (issue #116, ADR-0008). Bumps both the fleet total and the
+// per-app counter so an alert can page and an operator can name the offending app.
+func (m *Metrics) WakeBudgetExceeded(key string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.WakeBudgetExceededTotal++
+	m.sys(key).WakeBudgetExceeded++
+}
+
 // ReplicationConn counts a REPLICATION (walreceiver) stream mediated by the
 // gateway — a subscriber waking + draining a publisher through the wake-on-connect
 // path (ADR-0007 §4c).
@@ -135,6 +156,11 @@ func (m *Metrics) Wakes() int        { m.mu.Lock(); defer m.mu.Unlock(); return 
 func (m *Metrics) WakeFailures() int { m.mu.Lock(); defer m.mu.Unlock(); return m.WakeFailuresTotal }
 func (m *Metrics) Sleeps() int       { m.mu.Lock(); defer m.mu.Unlock(); return m.SleepsTotal }
 func (m *Metrics) Rejected() int     { m.mu.Lock(); defer m.mu.Unlock(); return m.RejectedConnectionsTotal }
+func (m *Metrics) WakeBudgetExceededCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.WakeBudgetExceededTotal
+}
 func (m *Metrics) ReplicationConns() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -152,6 +178,7 @@ func (m *Metrics) PromText() string {
 		fmt.Sprintf("pggw_wake_failures_total %d", m.WakeFailuresTotal),
 		fmt.Sprintf("pggw_sleeps_total %d", m.SleepsTotal),
 		fmt.Sprintf("pggw_rejected_connections_total %d", m.RejectedConnectionsTotal),
+		fmt.Sprintf("pggw_wake_budget_exceeded_total %d", m.WakeBudgetExceededTotal),
 		fmt.Sprintf("pggw_replication_connections_total %d", m.ReplicationConnectionsTotal),
 		fmt.Sprintf("pggw_wake_latency_ms_last %d", m.WakeLatencyMsLast),
 		fmt.Sprintf("pggw_gate_open %d", m.GateOpen),
@@ -167,6 +194,7 @@ func (m *Metrics) PromText() string {
 			fmt.Sprintf("pggw_system_active_connections{system=%q} %d", k, s.Active),
 			fmt.Sprintf("pggw_system_wakes_total{system=%q} %d", k, s.Wakes),
 			fmt.Sprintf("pggw_system_last_wake_ms{system=%q} %d", k, s.LastWakeMs),
+			fmt.Sprintf("pggw_system_wake_budget_exceeded_total{system=%q} %d", k, s.WakeBudgetExceeded),
 		)
 	}
 	return strings.Join(lines, "\n") + "\n"

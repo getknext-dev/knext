@@ -578,6 +578,26 @@ retry-not-strand on a live-but-unwakeable peer (#146) are unit-proven
 (`TestReconcile_ListErrorFailsClosed`, `…DeprovisionRetriesLivePeerNotStrand`) —
 they cannot be safely forced on the live plane without breaking operator RBAC.
 
+## Wake-primitive security — per-app wake budget (issue #116, ADR-0008)
+
+Verified **live on OKE, 2026-07-07** (`deploy/_verify-wake-guard.sh run`, throwaway
+`wgapp`, apps-gateway image `sha-e140408@sha256:f6f6abf9…` — the wake-budget build).
+`pggw-apps` runs `GW_WAKE_BUDGET=15` / `GW_WAKE_WINDOW_MS=60000`, 2 replicas.
+
+| Metric | Result | Evidence |
+|---|---|---|
+| **No regression — legit single wake** | ✅ an app connecting with valid creds through `pggw-apps` after scale-to-zero still cold-started its compute and returned a row | drill step 2 (`select 42`) |
+| **Unauth burst budget-capped** | ✅ **42** unauthenticated parallel startups for one sleeping app (budget 15 × 2 replicas + 12) were capped: **12/42 refused** with clean `53400`; the gateway logged **13** refusals server-side | drill step 3 (client `53400` count + `kubectl logs -l app=pggw-apps \| grep 'wake budget exceeded'`) |
+| **Churn bounded** | ✅ `compute-wgapp` never exceeded **1 replica** under the burst — single-writer wake is 0→1 only, not unbounded | `kubectl get deploy compute-wgapp` spec.replicas |
+| **Observable — metric rises** | ✅ `pggw_wake_budget_exceeded_total{gateway="pggw-apps"}` rose during the burst | Prometheus instant query |
+| **Observable — alert fires** | ✅ `WakeBudgetExceeded` (plane=apps) reached **firing** in alertmanager after the 1m `for` | `alertmanager /api/v2/alerts?active=true` |
+
+Note: the budget is enforced **per gateway replica** (in-memory token bucket), so the
+effective per-app ceiling before refusals begin is `GW_WAKE_BUDGET × replicas` (30 at
+15×2). Still a hard bound; a fleet-shared bucket is a deliberate non-goal (ADR-0008).
+Wake **latency** is unchanged (a warm app is never gated; the budget is consulted only
+when the compute is asleep) — no cold-wake regression.
+
 ## Capacity / sizing facts
 
 - Gateway: `GW_MAX_CONNS=90` < compute `max_connections=100`; excess → clean 53300.

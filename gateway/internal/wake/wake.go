@@ -61,6 +61,14 @@ type Opts struct {
 	ConnectTimeoutMs int
 	WakeTimeoutMs    int
 	RetryMs          int
+	// WakeGuard, if non-nil, is consulted BEFORE a 0->1 wake is issued — and ONLY
+	// when the compute is actually asleep (a live compute answers TryConnect and is
+	// never gated, so the wake-on-connect UX is untouched for warm apps). A non-nil
+	// return aborts the wake WITHOUT scaling and surfaces that error to the caller.
+	// The gateway uses it to enforce the per-app wake budget (issue #116, ADR-0008):
+	// the guard returns ErrWakeBudgetExceeded when a key has burned its budget. nil
+	// leaves the wake path exactly as it was (no budget).
+	WakeGuard func(key string) error
 }
 
 // Driver is the mode-agnostic compute interface.
@@ -297,6 +305,16 @@ func ConnectWithWake(ctx context.Context, driver Driver, t Target, opts Opts, on
 
 	if c, e := TryConnect(t, connectTimeout); e == nil {
 		return c, false, 0, nil
+	}
+
+	// The compute is asleep: this connect would trigger a 0->1 scale. Consult the
+	// wake budget FIRST (issue #116) — an over-budget key is refused here, before
+	// onWake logs "waking" and before driver.Wake touches the scale API, so a burst
+	// cannot force unbounded churn.
+	if opts.WakeGuard != nil {
+		if e := opts.WakeGuard(t.Key); e != nil {
+			return nil, false, 0, e
+		}
 	}
 
 	wakeStart := time.Now()
