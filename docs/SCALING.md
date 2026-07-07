@@ -52,10 +52,23 @@ single-writers. Scales as long as writes partition by app/tenant.
 The frontier. Un-parks the original SCS ambition with a concrete mechanism.
 | | Status |
 |---|---|
-| DB-per-zone, each own writer + read replicas (strong WITHIN zone) | (composes axes 1-3) |
-| Cross-zone EVENTUAL consistency via **logical replication** (WAL-decoding: publish a table subset → subscribe) | 🔬 spike + ADR-0007 |
-| Cross-zone LIVE reads via `postgres_fdw` foreign tables | 🔬 ADR-0007 |
-| Declared data-dependencies (`Zone.spec.dataDependencies`) as the coupling contract | 🔬 ADR-0007 |
+| DB-per-zone, each own writer + read replicas (strong WITHIN zone) | ✅ Zone CRD **composes** an AppDatabase (v2-2, #139) |
+| Cross-zone EVENTUAL consistency via **logical replication** (WAL-decoding: publish a table subset → subscribe) | ✅ shipping — `zone-operator` authors pub/sub (v2-2, #139) |
+| Publisher scale-to-zero preserved: gateway-mediated replication-wake | ✅ v2-1 (#140); wired into subscriptions (v2-2) |
+| Cross-zone LIVE reads via `postgres_fdw` foreign tables | ✅ `mode: federate` (v2-2, #139) |
+| Declared data-dependencies (`Zone.spec.dataDependencies`) as the coupling contract | ✅ both-sides-agree governance gate (v2-2, #139) |
+
+The zone axis **ships** (v2). A `Zone` CR (`deploy/86-zone-crd.yaml`,
+`zones.scale-zero-pg.dev/v1alpha1`) composes an in-zone `AppDatabase` and declares
+`publishes[]` (the opt-in export boundary) + `dataDependencies[]` (`{fromZone,
+tables, mode: replicate|federate}`). The `zone-operator`
+(`deploy/87-zone-operator.yaml`) is the sole author of the cross-zone fabric: the
+per-zone `repl_<zone>` role, publications, and — per dependency — a logical-
+replication subscription (conninfo → apps-gateway, so a sleeping publisher is woken
+by the subscriber, #140) or `postgres_fdw` foreign tables. A dependency is wired only
+when **both sides agree** (requested tables ∈ the peer's `publishes`), and a table may
+be published by **at most one zone** (single-writer-per-replicated-table). Live e2e:
+`deploy/_verify-zones.sh`; numbers in `docs/BENCHMARKS.md`.
 
 Consistency model: **strong in-zone, eventual across-zone.** No cross-zone
 transactions (sagas/compensation instead). The make-or-break unknown: does
@@ -71,9 +84,12 @@ spike is the gate; if 8464 can't, a newer tag is a manifest-bump (#98 proved it)
   tuning docs.
 - **Security & hygiene tail (parallel):** #116 wake side-channel · #117 md5→SCRAM ·
   #118 policy-CNI · #122 operator child ownerRefs · #132 cold-boot role race.
-- **v2 (zone axis — the SCS frontier):** logical-replication spike → ADR-0007
-  zoned-consistency → zoned databases + FDW federation + declared dependencies.
-  Also: pageserver sharding for the tenant-count ceiling.
+- **v2 (zone axis — the SCS frontier):** ✅ logical-replication spike (#133) →
+  ADR-0007 zoned-consistency → v2-1 gateway-mediated replication-wake (#140) → v2-2
+  Zone CRD + operator (#139: compose AppDatabase, publish, subscribe/federate,
+  governance guards, deprovision hygiene) — SHIPPED. Remaining v2: cross-cluster /
+  multi-region replication (a further spike, ADR-0007 §4e — intra-cluster only for
+  now). Also: pageserver sharding for the tenant-count ceiling.
 
 ## Standing decision points
 - Writer autoscaler stays a v1.x feature, not a GA gate (perf, not correctness).

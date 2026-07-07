@@ -1,0 +1,179 @@
+# Zone CRD — the zone-scaling axis (ADR-0007, #139 v2-2, docs/SCALING.md §4).
+#
+# A Zone is a higher-altitude controller that COMPOSES an AppDatabase (its
+# strong-consistency in-zone DB + RO pool — ADR-0006 delegation) and layers the
+# cross-zone fabric on top: a per-zone REPLICATION role, publications (the declared
+# export boundary — a zone exports NOTHING by default, the sovereignty contract), and
+# per declared dataDependency either a logical-replication subscription (mode:
+# replicate — a local, eventually-consistent copy, whose conninfo points at the
+# apps-gateway so the merged #140 replication-wake wakes a sleeping publisher) or a
+# postgres_fdw foreign table (mode: federate — a live cross-zone read, no copy).
+#
+# Consistency: STRONG in-zone / EVENTUAL across-zone / NO cross-zone ACID (sagas),
+# ADR-0007 §5. Cross-zone data flow is NEVER implicit — a zone imports a peer's data
+# only by declaring it, and the operator wires a dependency ONLY when both sides agree
+# (requested tables ∈ the peer's spec.publishes). A table may be published by at most
+# one zone (single-writer-per-replicated-table, §5).
+#
+# Lifecycle: `kubectl apply` a Zone -> operator composes the AppDatabase + wires the
+# fabric (phase Ready); `kubectl delete zone <name>` -> the finalizer runs cross-zone
+# deprovision hygiene (drop sub/pub/slot on peers, §4d) BEFORE the composed
+# AppDatabase reclaims the timeline. See deploy/87-zone-operator.yaml.
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: zones.zones.scale-zero-pg.dev
+  labels: { tier: apps, plane: control }
+spec:
+  group: zones.scale-zero-pg.dev
+  scope: Namespaced
+  names:
+    kind: Zone
+    listKind: ZoneList
+    plural: zones
+    singular: zone
+    shortNames: [zone]
+    categories: [all]
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - { name: Phase, type: string, jsonPath: .status.phase }
+        - { name: DB, type: string, jsonPath: .status.zoneDB }
+        - { name: Tier, type: string, jsonPath: .spec.database.tier }
+        - { name: Age, type: date, jsonPath: .metadata.creationTimestamp }
+      schema:
+        openAPIV3Schema:
+          type: object
+          required: [spec]
+          properties:
+            spec:
+              type: object
+              properties:
+                database:
+                  type: object
+                  description: >-
+                    The in-zone AppDatabase this Zone composes (delegated 1:1). These
+                    are the fields the Zone passes through to its AppDatabase.
+                  properties:
+                    tier:
+                      type: string
+                      description: cold = scale-to-zero at rest; warm = keep one replica hot.
+                      enum: [cold, warm]
+                      default: cold
+                    quotas:
+                      type: object
+                      description: Per-zone noisy-neighbour bound (mirrors AppDatabase.spec.quotas).
+                      properties:
+                        cpu: { type: string, default: "1000m" }
+                        cpuRequest: { type: string, default: "250m" }
+                        mem: { type: string, default: "1Gi" }
+                        memRequest: { type: string, default: "256Mi" }
+                        maxConnections: { type: integer, default: 100, minimum: 1 }
+                      default: {}
+                    readReplicas:
+                      type: boolean
+                      description: When true, the composed AppDatabase enables its read-replica pool (axis 2).
+                      default: false
+                  default: {}
+                publishes:
+                  type: array
+                  description: >-
+                    The table subset this zone EXPORTS (opt-in). Each entry becomes a
+                    CREATE PUBLICATION on this zone's compute. Empty (the default) =
+                    the zone exports nothing — the sovereignty-first contract (§3).
+                  items:
+                    type: object
+                    required: [name, tables]
+                    properties:
+                      name:
+                        type: string
+                        description: Publication name (a plain SQL identifier).
+                        pattern: '^[a-zA-Z_][a-zA-Z0-9_]*$'
+                        maxLength: 63
+                      tables:
+                        type: array
+                        minItems: 1
+                        items:
+                          type: string
+                          description: Plain (optionally schema-qualified) table identifier.
+                          pattern: '^[a-zA-Z_][a-zA-Z0-9_]*(\.[a-zA-Z_][a-zA-Z0-9_]*)?$'
+                          maxLength: 127
+                  default: []
+                dataDependencies:
+                  type: array
+                  description: >-
+                    The tables this zone IMPORTS from named peer zones. The operator
+                    wires each ONLY when the peer publishes every requested table
+                    (both-sides-agree, §3). mode: replicate keeps a local eventually-
+                    consistent copy (logical replication); mode: federate reads live
+                    via postgres_fdw (no copy).
+                  items:
+                    type: object
+                    required: [fromZone, tables, mode]
+                    properties:
+                      fromZone:
+                        type: string
+                        description: The peer Zone this dependency imports from (an RFC1123 label).
+                        pattern: '^[a-z0-9]([a-z0-9-]*[a-z0-9])?$'
+                        maxLength: 63
+                      tables:
+                        type: array
+                        minItems: 1
+                        items:
+                          type: string
+                          pattern: '^[a-zA-Z_][a-zA-Z0-9_]*(\.[a-zA-Z_][a-zA-Z0-9_]*)?$'
+                          maxLength: 127
+                      mode:
+                        type: string
+                        enum: [replicate, federate]
+                        default: replicate
+                  default: []
+            status:
+              type: object
+              properties:
+                phase:
+                  type: string
+                  description: Composing | Ready | Degraded | Failed | Deleting
+                  enum: [Composing, Ready, Degraded, Failed, Deleting]
+                zoneDB:
+                  type: string
+                  description: The composed AppDatabase name (== zone name).
+                publications:
+                  type: array
+                  items: { type: string }
+                replicationSlots:
+                  type: array
+                  description: The slots this zone's subscriptions pin on their peer publishers.
+                  items: { type: string }
+                subscriptions:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      fromZone: { type: string }
+                      name: { type: string }
+                      mode: { type: string }
+                      state:
+                        type: string
+                        description: streaming | pending | federated | denied | error
+                      message: { type: string }
+                message:
+                  type: string
+                observedGeneration:
+                  type: integer
+                  format: int64
+                conditions:
+                  type: array
+                  items:
+                    type: object
+                    required: [type, status]
+                    properties:
+                      type: { type: string }
+                      status: { type: string, enum: ["True", "False", "Unknown"] }
+                      reason: { type: string }
+                      message: { type: string }
+                      lastTransitionTime: { type: string, format: date-time }

@@ -510,6 +510,49 @@ Config: `GW_REPL_ROLE_PREFIX` (default `repl_`) on `deploy/81-apps-gateway.yaml`
 The drill provisions/destroys its own throwaway zones and restores `GW_IDLE_MS` on
 teardown — it never touches live apps.
 
+## Zone operator — cross-zone replication end-to-end (v2-2, issue #139, ADR-0007)
+
+The payoff of the zone-scaling axis, driven ENTIRELY through `Zone` CRs + the
+`zone-operator` (no manual pub/sub SQL — the operator is the sole author). A
+publisher zone `za` declares `publishes: [{orders_pub, [orders]}]`; a consumer zone
+`zb` declares `dataDependencies: [{fromZone: za, tables: [orders], mode: replicate}]`.
+The operator composes both `AppDatabase`s, mints `repl_za` (LOGIN REPLICATION),
+creates the publication on za, and the subscription on zb whose `CONNECTION` points
+at `pggw-apps` — so the v2-1 replication-wake (#140) wakes a sleeping publisher for
+the subscriber. Governance: the subscription is wired only because za publishes the
+requested table (**both-sides-agree**), and za's UNpublished `secret_t` is never
+exported (**sovereignty**).
+
+Verified **live on OKE, 2026-07-07** (`deploy/_verify-zones.sh`, throwaway zones
+`za`/`zb`, gateway image `sha-fec345e@sha256:5abb86fc…`):
+
+| Metric | Result | Evidence |
+|---|---|---|
+| Compose + wire (operator-authored) | ✅ both AppDatabases Ready; `repl_za` (REPLICATION attr), `orders_pub`, and `zone_sub_za` (streaming) all created by the operator | `kubectl get zone`, `pg_publication`/`pg_roles`/`pg_subscription` |
+| Publisher compute labeled `plane=compute` | ✅ so the slot-janitor (#143) floors its prune horizon at active slots | `kubectl get deploy compute-za` labels |
+| Initial COPY (cross-zone) | ✅ 5 seed rows replicated `za → zb` | subscription initial snapshot |
+| **Live cross-zone lag** | ✅ a live insert on za appeared on zb | **1.81 s** |
+| **SOVEREIGNTY** | ✅ za's UNpublished `secret_t` did **not** reach zb (no such table) — opt-in export only | `information_schema.tables` on zb |
+| **Publisher TRULY rests at zero** | ✅ with the **zone-operator scaled to 0**, `compute-za` stayed at **0 replicas for 20 s** — the steady-state gate means a Ready zone is never force-woken by the resync (ADR-0007 §4c scale-to-zero contract) | `kubectl get deploy compute-za` replicas, operator down |
+| **PUBLISHER WOKEN FOR REPLICATION** | ✅ waking ONLY the subscriber (operator still down) woke sleeping `compute-za` **0→1** — unambiguously zb's walreceiver through the gateway (#140), NOT the operator | **5.30 s** |
+| Backlog drains after publisher-wake | ✅ zb caught up **56 rows** (6 live + 50 backlog) | **6.73 s** after subscriber wake |
+| **Deprovision hygiene (§4d)** | ✅ deleting zb dropped its subscription + the slot on za (**no orphan slot**); deleting za dropped the publication; **both timelines reclaimed** | `pg_replication_slots` on za empty; `kubectl get appdatabase` gone |
+
+The **publisher-truly-at-rest** row is the load-bearing correction from PR #145's
+code review: the operator re-asserts the (durable) repl role / publication /
+subscription **only on a spec change** (a steady-state gate keyed on
+`generation == observedGeneration`), so it never wakes a Ready zone's compute on the
+15 s resync — otherwise a publishing zone could never scale to zero and the
+gateway-mediated wake (#140) would be moot. The measurement scales the operator to 0
+during the wake so the `0→1` is attributable ONLY to the subscriber path.
+
+The subscription's create is gated on the peer's `status.publications` so the
+initial COPY never snapshots an empty publication (it captures pre-existing rows).
+Publications reconcile non-disruptively (`CREATE`-if-absent + `ALTER PUBLICATION SET
+TABLE`, never drop+recreate); subscriptions are created **once** (a `\gset`/`\if`
+guard) so no re-COPY/slot-thrash on the 15 s resync. The drill provisions/destroys
+its own throwaway zones — it never touches live apps.
+
 ## Capacity / sizing facts
 
 - Gateway: `GW_MAX_CONNS=90` < compute `max_connections=100`; excess → clean 53300.

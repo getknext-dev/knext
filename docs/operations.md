@@ -1466,6 +1466,70 @@ The publisher retains WAL for an inactive slot while the subscriber sleeps — a
 abandoned slot pins WAL unbounded, so slot hygiene on deprovision matters (ADR-0007
 §4d; the slot-janitor lane owns the reaper).
 
+## Zone operator — cross-zone fabric (v2-2, #139)
+
+The `zone-operator` (`deploy/87-zone-operator.yaml`) reconciles `Zone` CRs
+(`deploy/86-zone-crd.yaml`) into the zone-scaling axis (`docs/SCALING.md` §4,
+[ADR-0007](adr-0007-zoned-consistency.md)). A Zone COMPOSES an `AppDatabase` (its
+in-zone DB — the operator owns the AppDatabase via an ownerReference, ADR-0006
+delegation) and the operator is the **sole author** of the cross-zone SQL. It runs
+that SQL as `cloud_admin` over pod-local loopback via `pods/exec` inside the compute
+pod (the distroless operator ships no psql; `cloud_admin` is rejected over TCP, #112).
+
+**Scale-to-zero contract (steady-state gate):** the operator re-asserts the in-DB
+fabric **only on a spec change** — a Ready zone whose `metadata.generation` equals
+`status.observedGeneration` short-circuits the reconcile and runs **no** SQL, so it
+never execs into (and therefore never wakes) the compute on the 15 s resync. The repl
+role, publications, and subscriptions are durable on the timeline, so nothing needs
+re-applying every tick; a real spec edit bumps the generation and re-opens the gate
+(drift on a genuine change still heals). This is what lets a publishing/subscribing
+zone actually rest at zero — the whole point of the gateway-mediated wake (#140). A
+Degraded/pending zone re-evaluates its dependencies each resync but only wakes a
+compute to wire a newly-grantable dependency, never to re-affirm a settled one.
+
+What it authors, on a spec change / first reconcile (idempotent, drift-healing):
+- **repl role** — `repl_<zone>` (LOGIN REPLICATION), md5 from `zone-repl-<zone>`
+  Secret, re-asserted every pass (durable on the timeline). Lock-step with the
+  apps-gateway `GW_REPL_ROLE_PREFIX` (#140) so replication startups authorize.
+- **publications** — `spec.publishes[]` → `CREATE PUBLICATION`-if-absent + `ALTER
+  PUBLICATION … SET TABLE` (never drop+recreate — that would tear down live
+  streaming). A zone exports **nothing** by default (sovereignty).
+- **subscriptions / FDW** — per `spec.dataDependencies[]`, gated by **both-sides-
+  agree** (the peer must publish every requested table, else `state: denied` in
+  status) and by the peer's `status.publications` (so the initial COPY captures
+  existing rows). `mode: replicate` → `CREATE SUBSCRIPTION` (once) whose connection
+  points at `pggw-apps` (the #140 wake handles a sleeping publisher); `mode:
+  federate` → `postgres_fdw` foreign tables in schema `zone_<peer>`.
+
+```sh
+kubectl -n scale-zero-pg get zones                  # PHASE, DB, TIER
+kubectl -n scale-zero-pg get zone zone-eu -o jsonpath='{.status.subscriptions}'
+#   [] state per dependency: streaming | pending | federated | denied | error
+kubectl -n scale-zero-pg logs deploy/zone-operator | grep reconcile
+
+# full live drill (throwaway za/zb: compose + publish + subscribe + sovereignty +
+# publisher-woken-for-replication + clean deprovision)
+deploy/_verify-zones.sh run        # or: teardown   (KEEP_OPERATOR=1 keeps CRD+operator)
+```
+
+**Deprovision (`kubectl delete zone <name>`)** runs the finalizer's cross-zone
+hygiene in the mandated order (ADR-0007 §4d): drop this zone's subscriptions
+(subscriber side first), wake each replicate peer and drop the orphaned slot
+(`pg_drop_replication_slot`, guarded on `NOT active`), drop this zone's publications,
+then delete the composed AppDatabase (its own finalizer reclaims the timeline two-
+sided). If the compute is already gone the in-DB drops are skipped so the finalizer
+never wedges. **A slot left on a live peer pins WAL unbounded** (§4a) — the
+slot-janitor lane monitors that as defense-in-depth, but clean deprovision is the
+first line. Single replica on purpose (Recreate): the operator is the single-writer
+of cross-zone fabric actions.
+
+Live-proven on OKE 2026-07-07 (`docs/BENCHMARKS.md`): live cross-zone lag **1.81 s**;
+with the **operator scaled to 0**, `compute-za` stayed truly at rest at 0 for 20 s
+(not force-woken — the steady-state gate), then the subscriber woke it **0→1 in
+5.30 s** through the gateway (unambiguously the #140 path), 56-row backlog drained
+**6.73 s**; sovereignty upheld (unpublished table withheld); clean deprovision (no
+orphan slot, both timelines reclaimed).
+
 ## Read-only pool (issue #66)
 
 The read-only pool (`deploy/26-compute-ro.yaml`) is a set of read-only computes

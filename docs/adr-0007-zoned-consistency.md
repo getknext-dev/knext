@@ -22,6 +22,29 @@
   fallback but is no longer required — publishers keep full scale-to-zero. This
   UNBLOCKS the Zone operator lane (which mints `repl_<zone>` + points subscription
   conninfo at the apps-gateway).
+- **Topology + fabric: IMPLEMENTED (v2-2, #139, 2026-07-07).** §1 (Zone CRD that
+  COMPOSES an AppDatabase), §2 (replicate + federate), §3 (the declared-dependency
+  both-sides-agree governance gate), §4b (the per-zone `repl_<zone>` role), §4d
+  (deprovision hygiene: drop sub/pub/slot on peers before the timeline reclaim), and
+  §5 (single-writer-per-replicated-table) are BUILT and LIVE-PROVEN on OKE. The
+  `Zone` CRD (`deploy/86-zone-crd.yaml`) + `zone-operator` (`gateway/cmd/zone-operator`,
+  `internal/zone`, `deploy/87-zone-operator.yaml`) reconcile a Zone by composing an
+  AppDatabase (ADR-0006 delegation — the operator never touches appdb internals),
+  minting the repl role, authoring publications (opt-in export), and per
+  dataDependency creating a logical-replication subscription (conninfo → `pggw-apps`,
+  so the v2-1 wake handles the sleeping publisher) or `postgres_fdw` foreign tables.
+  **As-built deviation from §4b:** the repl role is **operator-SQL-managed** (an
+  idempotent `CREATE/ALTER ROLE … REPLICATION`, durable on the timeline, re-asserted
+  every reconcile) rather than entrypoint-spec-injected — because the compute_ctl
+  spec-role format carries only per-role GUCs, not the `REPLICATION` *attribute*, and
+  because injecting it would couple the appdb render layer the ADR deliberately keeps
+  separate (§1). Same every-boot guarantee, zero appdb coupling. Live proof:
+  `deploy/_verify-zones.sh` (throwaway `za`/`zb`) — compose + publish + subscribe
+  (both-sides-agree) + sovereignty (unpublished table withheld) + publisher-woken-
+  for-replication (sleeping `compute-za` woken 0→1 in 5.34 s via zb's subscriber,
+  56-row backlog drained 6.86 s, live lag 1.39 s) + clean deprovision (no orphan
+  slot). Numbers in `docs/BENCHMARKS.md`. Cross-cluster (§4e) remains a FOLLOW-UP
+  spike — intra-cluster only.
 - **Date:** 2026-07-06
 - **Deciders:** architecture owner (to ratify); design by the scale-zero-pg lane,
   grounded in spike #133 (live evidence on OKE, context `context-ckmva7v7zvq`,

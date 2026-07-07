@@ -1,0 +1,137 @@
+# zone-operator: the Zone CRD controller (ADR-0007, #139 v2-2) — the zone-scaling
+# axis (docs/SCALING.md §4). It reconciles each Zone (deploy/86-zone-crd.yaml) by
+# COMPOSING an AppDatabase (its strong-consistency in-zone DB + RO pool, ADR-0006
+# delegation) and layering the cross-zone fabric on top: a per-zone REPLICATION role,
+# publications (the declared export boundary), and per declared dataDependency either
+# a logical-replication subscription (mode: replicate — conninfo points at the
+# apps-gateway so the merged #140 replication-wake wakes a sleeping publisher) or a
+# postgres_fdw foreign table (mode: federate). A finalizer runs cross-zone deprovision
+# hygiene (drop sub/pub/slot on peers) before the composed AppDatabase reclaims the
+# timeline.
+#
+# Availability posture: SINGLE replica on purpose (like appdb-operator/pswatcher) —
+# the operator is the single-writer of cross-zone fabric actions (pub/sub/slot). Two
+# reconcilers could race a subscription or a deprovision. Authority is crash-only:
+# truth lives in the Zone CR + the cluster, so a restart resumes idempotently.
+# Recreate strategy guarantees a rollout never runs two operators at once.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: zone-operator
+  namespace: scale-zero-pg
+---
+# Least-privilege Role, namespace-scoped to scale-zero-pg.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: zone-operator
+  namespace: scale-zero-pg
+rules:
+  # The Zone CRD it reconciles: watch desired state, write status + finalizers.
+  - apiGroups: ["zones.scale-zero-pg.dev"]
+    resources: ["zones"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  - apiGroups: ["zones.scale-zero-pg.dev"]
+    resources: ["zones/status"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: ["zones.scale-zero-pg.dev"]
+    resources: ["zones/finalizers"]
+    verbs: ["update"]
+  # COMPOSE: create/own/delete the per-zone AppDatabase (ADR-0006 delegation). The
+  # appdb-operator (its own least-priv Role) reconciles it into compute + timeline.
+  - apiGroups: ["apps.scale-zero-pg.dev"]
+    resources: ["appdatabases"]
+    verbs: ["get", "list", "create", "update", "patch", "delete"]
+  # Admin SQL (pub/sub/slot/repl-role/FDW) runs as cloud_admin over pod-local
+  # loopback via the exec subresource inside the compute pod (the distroless operator
+  # ships no psql; cloud_admin is rejected over TCP, #112). READ pods to find the
+  # ready compute pod; CREATE pods/exec to run psql on it.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create"]
+  # WakeCompute nudges compute-<zone> 0->1 to apply SQL (patch replicas only; the
+  # apps-gateway still owns steady-state 0<->1). GET to observe readiness.
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "patch"]
+  # Per-zone repl credential Secret (zone-repl-<zone>).
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "create", "update", "patch", "delete"]
+  # Events for kubectl describe / operator observability.
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: zone-operator
+  namespace: scale-zero-pg
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: zone-operator
+subjects:
+  - kind: ServiceAccount
+    name: zone-operator
+    namespace: scale-zero-pg
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: zone-operator
+  namespace: scale-zero-pg
+  labels: { app: zone-operator, tier: apps, plane: control }
+spec:
+  replicas: 1
+  strategy: { type: Recreate } # single-writer of cross-zone fabric; never two at once
+  selector:
+    matchLabels: { app: zone-operator }
+  template:
+    metadata:
+      labels: { app: zone-operator, tier: apps, plane: control }
+    spec:
+      imagePullSecrets:
+        - name: ocir-pull
+      serviceAccountName: zone-operator
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: zone-operator
+          # Same multi-binary gateway image; ENTRYPOINT overridden to /zone-operator.
+          # Digest-pinned (contract 22). Rebuild + re-pin on any operator change.
+          image: me-abudhabi-1.ocir.io/axfqznklsd2t/ks-pg/gateway:sha-fec345e@sha256:5abb86fcf2cde7d065c8593f1844498f72e91fb43aa4d9619564e7fbde0175ce
+          imagePullPolicy: IfNotPresent
+          command: ["/zone-operator"] # override the image's /gateway entrypoint
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+          env:
+            - { name: ZONE_NAMESPACE, value: "scale-zero-pg" }
+            - { name: ZONE_GATEWAY_HOST, value: "pggw-apps.scale-zero-pg.svc" }
+            - { name: ZONE_GATEWAY_PORT, value: "55432" }
+            # lock-step with the apps-gateway GW_REPL_ROLE_PREFIX (#140).
+            - { name: ZONE_REPL_ROLE_PREFIX, value: "repl_" }
+            - { name: ZONE_RESYNC_MS, value: "15000" }
+            - { name: ZONE_WAKE_TIMEOUT_SEC, value: "120" }
+            - { name: ZONE_HEALTH_ADDR, value: ":9093" }
+          ports:
+            - { name: health, containerPort: 9093 }
+          readinessProbe:
+            httpGet: { path: /readyz, port: health }
+            initialDelaySeconds: 1
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /healthz, port: health }
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          resources:
+            requests: { cpu: 20m, memory: 32Mi, ephemeral-storage: 100Mi }
+            limits: { memory: 96Mi, ephemeral-storage: 1Gi }

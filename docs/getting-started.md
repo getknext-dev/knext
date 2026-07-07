@@ -174,4 +174,51 @@ Design, evidence and caveats: [ADR-0003](adr-0003-multi-tenancy.md) ·
 [connecting → multi-app](connecting.md#multi-app--branch-per-app) ·
 [operations → operator runbook](operations.md#appdatabase-operator-runbook-96).
 
+## 6. (Optional) Zones — one logical system across consistency boundaries
+
+For a multi-zone system that **shares a declared subset of data** across zones (the
+SCS use case — e.g. an EU zone and a US zone that each own their writes but see an
+eventually-consistent view of each other's data), deploy the Zone CRD + operator on
+top of the apps-gateway + appdb-operator:
+
+```sh
+kubectl apply -f deploy/86-zone-crd.yaml        # Zone CRD (zones.scale-zero-pg.dev)
+kubectl apply -f deploy/87-zone-operator.yaml   # the zone-operator
+```
+
+A `Zone` COMPOSES an `AppDatabase` (its strong-consistency in-zone DB) and adds the
+cross-zone fabric. A zone **exports nothing by default** — `spec.publishes` is the
+opt-in export boundary; `spec.dataDependencies` declares what it imports from peers:
+
+```sh
+kubectl apply -f - <<'EOF'
+apiVersion: zones.scale-zero-pg.dev/v1alpha1
+kind: Zone
+metadata: { name: zone-eu, namespace: scale-zero-pg }
+spec:
+  database: { tier: cold, readReplicas: true }
+  publishes:
+    - { name: orders_pub, tables: [orders, order_lines] }   # what THIS zone exports
+  dataDependencies:
+    - { fromZone: zone-us, tables: [customers], mode: replicate }  # imported copy (eventual)
+    # mode: federate  ->  live postgres_fdw read instead of a maintained copy
+EOF
+
+kubectl -n scale-zero-pg get zones   # PHASE Ready, DB (composed AppDatabase), plus
+                                     # status.subscriptions[].state = streaming|federated|denied
+```
+
+The operator is the **sole author** of the cross-zone SQL: the per-zone
+`repl_<zone>` role, the publications, and each subscription (whose connection points
+at the apps-gateway, so a sleeping publisher is woken on demand). A dependency is
+wired **only when both sides agree** — the peer must `publishes` every requested
+table, else it shows `state: denied` in status (never a silent grant). A table may be
+published by **at most one zone** (single-writer-per-replicated-table). `kubectl
+delete zone zone-eu` runs the finalizer's cross-zone hygiene (drops the
+subscription + the slot on each peer, then the composed AppDatabase reclaims the
+timeline). Consistency is **strong in-zone, eventual across-zone, no cross-zone
+ACID** (use sagas). Design + evidence: [ADR-0007](adr-0007-zoned-consistency.md);
+live drill `deploy/_verify-zones.sh`; runbook
+[operations → zone operator](operations.md#zone-operator--cross-zone-fabric-v2-2-139).
+
 Next: [connecting your app](connecting.md) · [operations guide](operations.md)
