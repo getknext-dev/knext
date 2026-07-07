@@ -252,6 +252,33 @@ grep -q '/state/horizons' 62-backup.yaml || fail "62 wal-janitor must resolve a 
 grep -q 'UNRESOLVED' 62-backup.yaml || fail "62 wal-janitor must fail-safe-SKIP (never over-prune) a timeline whose own rcl it cannot resolve (#59)"
 ok "wal-janitor bounds safekeeper WAL (issue #19), derives TLI per-timeline + fails loud (issue #42), per-timeline horizon fail-safe (issue #59), backup self-heals torn index (issue #21)"
 
+# 16b. contract: SLOT-AWARE janitor + bounded WAL retention (issue #139, ADR-0007 §4a).
+#      The zone axis introduces logical-replication slots that pin publisher WAL; the
+#      janitor must NEVER prune an ACTIVE slot's WAL (break live replication), and an
+#      inactive/leaked slot must be bounded by max_slot_wal_keep_size (degrade-to-re-sync,
+#      never plane-fill) and surfaced by a slot-aware monitor.
+grep -q '"max_slot_wal_keep_size"' compute-files/config.json || fail "config.json must set a BOUNDED max_slot_wal_keep_size (issue #139) — default -1 pins WAL unbounded for an inactive slot"
+# the DEPLOYED ConfigMap (54, inlined) must carry the same knob — that is what boots
+grep -q '"max_slot_wal_keep_size"' 54-compute-files.yaml || fail "54-compute-files.yaml (the applied ConfigMap) must also carry max_slot_wal_keep_size — config.json is inlined here (issue #139)"
+grep -A2 '"max_slot_wal_keep_size"' compute-files/config.json | grep -q '"value": "-1"' && fail "config.json max_slot_wal_keep_size must not be -1 (unbounded) (issue #139)"
+grep -q 'name: resolve-slot-floors' 62-backup.yaml || fail "62 wal-janitor must have a resolve-slot-floors initContainer (slot-aware prune floor, issue #139)"
+grep -q '/state/slotfloors' 62-backup.yaml || fail "62 wal-janitor must floor pruning at ACTIVE slots' restart_lsn via /state/slotfloors (issue #139)"
+grep -q '/state/protect' 62-backup.yaml || fail "62 wal-janitor must fail-safe-SKIP (PROTECT) a timeline whose awake compute's Postgres it cannot read (issue #139)"
+grep -q 'pg_replication_slots' 62-backup.yaml || fail "62 wal-janitor slot-floor pass must read pg_replication_slots (issue #139)"
+grep -q 'SLOT-FLOOR' 62-backup.yaml || fail "62 prune step must apply the active-slot floor (SLOT-FLOOR, issue #139)"
+grep -q 'serviceAccountName: wal-janitor' 62-backup.yaml || fail "62 wal-janitor must run under a scoped ServiceAccount to exec computes (issue #139)"
+ok "wal-janitor is SLOT-AWARE — bounded retention + active-slot floor, never breaks live replication (issue #139)"
+
+# 16c. contract: the slot-aware MONITOR (deploy/63) — two CronJobs that read
+#      pg_replication_slots on awake writers and fail their Job on a growing / leaked
+#      slot, sourcing the ReplicationSlotWALGrowth / ReplicationSlotInactive alerts.
+[ -f 63-repl-slot-monitor.yaml ] || fail "deploy/63-repl-slot-monitor.yaml missing (slot-aware early-warning monitor, issue #139)"
+grep -q 'name: repl-slot-wal-monitor' 63-repl-slot-monitor.yaml || fail "63 missing repl-slot-wal-monitor CronJob (ReplicationSlotWALGrowth source, #139)"
+grep -q 'name: repl-slot-inactive-monitor' 63-repl-slot-monitor.yaml || fail "63 missing repl-slot-inactive-monitor CronJob (ReplicationSlotInactive source, #139)"
+grep -q 'pg_replication_slots' 63-repl-slot-monitor.yaml || fail "63 slot monitor must read pg_replication_slots (#139)"
+grep -q 'MAX_SLOT_WAL_KEEP_MB' 63-repl-slot-monitor.yaml || fail "63 growth monitor must compare retained WAL to the max_slot_wal_keep_size bound (#139)"
+ok "63 ships the slot-aware early-warning monitor (growth + inactive/leaked), owner_name-joined like apps-wal-monitor (#139)"
+
 # 17. contract: kube-state-metrics (59) is the CronJob/Deployment/STS metric
 #     PRODUCER the janitor/backup/failover alerts key off (issues #29/#41/#23).
 #     Minimal: single-namespace scope + only the five collectors we alert on.
@@ -307,7 +334,13 @@ grep -q 'alert: KubeStateMetricsDown' 60-prometheus.yaml || fail "60 missing Kub
 grep -q 'absent(up{job="kube-state-metrics"})' 60-prometheus.yaml || fail "60 KubeStateMetricsDown must also page when KSM was never scraped (absent up series, #48)"
 # the phantom-keepalive honesty rule must survive (state-based, not counter drift)
 grep -q 'min_over_time(sum(pggw_active_connections)' 60-prometheus.yaml || fail "60 phantom-keepalive honesty rule was lost"
-ok "60 ships the platform alert rules (backup+janitor+staleness+pswatcher+standby+wake) and keeps the phantom honesty rule"
+# issue #139: zoned-replication slot alerts — dormant Failed-Job rules joined on the
+# repl-slot-monitor CronJobs (deploy/63) by exact owner_name, same pattern as apps-wal-monitor.
+grep -q 'alert: ReplicationSlotWALGrowth' 60-prometheus.yaml || fail "60 missing ReplicationSlotWALGrowth alert (#139) — a slot nearing the WAL bound would be unmonitored"
+grep -q 'alert: ReplicationSlotInactive' 60-prometheus.yaml || fail "60 missing ReplicationSlotInactive alert (#139) — a leaked slot from a dead subscriber would be unmonitored"
+grep -q 'owner_name="repl-slot-wal-monitor"' 60-prometheus.yaml || fail "60 ReplicationSlotWALGrowth must match the repl-slot-wal-monitor CronJob by exact owner_name (#139)"
+grep -q 'owner_name="repl-slot-inactive-monitor"' 60-prometheus.yaml || fail "60 ReplicationSlotInactive must match the repl-slot-inactive-monitor CronJob by exact owner_name (#139)"
+ok "60 ships the platform alert rules (backup+janitor+staleness+pswatcher+standby+wake+slot) and keeps the phantom honesty rule"
 
 # 20. contract: Alertmanager (61) keeps the testable in-cluster sink as default
 #     BUT cleanly supports a real Slack-compatible receiver via a Secret FILE

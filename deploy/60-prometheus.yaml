@@ -154,7 +154,7 @@ data:
             labels: { severity: critical }
             annotations:
               summary: "kube-state-metrics is DOWN — ALL platform alerts are blind"
-              description: "up{job=kube-state-metrics}==0 or absent for 2m. BackupJobFailed, WalJanitorJobFailed, BackupStale, WalJanitorStale, PageserverStandbyNotReady, ComputeWakeStuck, ComputeWakeStuckApps, ComputeRoPoolStuck and ComputeStuckNotReady all evaluate KSM series and stop firing while it is down. Treat as sev-1: restore KSM (deploy/59) before trusting any platform alert."
+              description: "up{job=kube-state-metrics}==0 or absent for 2m. BackupJobFailed, WalJanitorJobFailed, BackupStale, WalJanitorStale, PageserverStandbyNotReady, ComputeWakeStuck, ComputeWakeStuckApps, ComputeRoPoolStuck, ComputeStuckNotReady, SafekeeperWALGrowth, ReplicationSlotWALGrowth and ReplicationSlotInactive all evaluate KSM series and stop firing while it is down. Treat as sev-1: restore KSM (deploy/59) before trusting any platform alert."
           # (a) backup CronJob run failed. Restore depends on a fresh backup;
           # a failing backup is a silent DR regression.
           - alert: BackupJobFailed
@@ -410,6 +410,44 @@ data:
             annotations:
               summary: "demo end-to-end canary failed — combined app+DB wake broken"
               description: "A Job owned by the demo-canary CronJob failed: the pg-demo NextApp could not return DB-backed data within the wake budget across all retries. This is the only synthetic exercising the full app->gateway->compute cold path (catches app-side / DNS / Knative ingress-class regressions the gateway metrics cannot see). Warning, not crit — the demo is not a durability path. Dormant unless the demo canary is deployed (demo/manifests/30-demo-canary.yaml). See docs/operations.md#demo-canary and demo/README.md."
+      # ZONED-REPLICATION SLOT alerts (issue #139, ADR-0007 §4a). Cross-zone logical
+      # replication grows a per-subscriber replication slot on the publisher; an
+      # inactive/leaked slot pins publisher WAL toward the max_slot_wal_keep_size bound
+      # (deploy/compute-files/config.json) and, unbounded, would ENOSPC-wedge the shared
+      # 2Gi safekeeper PVs. The repl-slot-monitor CronJobs (deploy/63) read
+      # pg_replication_slots on every awake writer and FAIL their Job on a breach; these
+      # rules join that Failed Job via the SAME kube_job_owner pattern as backup /
+      # wal-janitor / apps-wal-monitor. DELIBERATELY severity=warning + plane=zones: the
+      # WAL bound is the hard backstop (degrade-to-re-sync, never plane-fill) — these are
+      # the EARLY WARNING, off the primary pager. DORMANT until the monitors are deployed
+      # AND a slot exists (no kube_job_owner series ⇒ no samples), so shipping them is free.
+      - name: ks-pg-replication
+        rules:
+          # (a) a slot's retained WAL is approaching the max_slot_wal_keep_size bound
+          # (>75%) OR was already invalidated by it — a subscriber falling behind / a
+          # leaked slot; unaddressed it degrades that dependency to a re-sync.
+          - alert: ReplicationSlotWALGrowth
+            expr: |
+              sum(kube_job_status_failed{namespace="scale-zero-pg"}
+                  * on(namespace, job_name) group_left(owner_name)
+                  kube_job_owner{namespace="scale-zero-pg", owner_name="repl-slot-wal-monitor"}) > 0
+            for: 1h
+            labels: { severity: warning, plane: zones }
+            annotations:
+              summary: "a replication slot's retained WAL is approaching the max_slot_wal_keep_size bound"
+              description: "The repl-slot-wal-monitor Job failed: a logical replication slot on an awake publisher is retaining WAL past 75% of the 512MB max_slot_wal_keep_size bound (or was already invalidated by it, wal_status=lost). A cross-zone subscriber is falling behind or a slot is leaked; past the bound Postgres invalidates the slot and the subscriber must re-sync (drop+recreate subscription with copy_data) — the designed degrade, never a plane-fill. Read the Job log for the offending slot(s). See docs/operations.md#zoned-replication-slot-monitoring-adr-0007."
+          # (b) a slot inactive longer than the threshold — a LEAKED slot from a dead or
+          # deprovisioned subscriber, still pinning publisher WAL. Reclaim it.
+          - alert: ReplicationSlotInactive
+            expr: |
+              sum(kube_job_status_failed{namespace="scale-zero-pg"}
+                  * on(namespace, job_name) group_left(owner_name)
+                  kube_job_owner{namespace="scale-zero-pg", owner_name="repl-slot-inactive-monitor"}) > 0
+            for: 1h
+            labels: { severity: warning, plane: zones }
+            annotations:
+              summary: "a replication slot has been inactive too long — likely a leaked slot"
+              description: "The repl-slot-inactive-monitor Job failed: a logical replication slot has been inactive for longer than the threshold (24h) — very likely a LEAKED slot from a dead or deprovisioned cross-zone subscriber, still pinning publisher WAL. Drop it (pg_drop_replication_slot on the publisher) or run the Zone deprovision hygiene (ADR-0007 §4d). Read the Job log for the offending slot(s). See docs/operations.md#zoned-replication-slot-monitoring-adr-0007."
 ---
 apiVersion: apps/v1
 kind: Deployment

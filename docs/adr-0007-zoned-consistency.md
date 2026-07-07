@@ -258,7 +258,15 @@ by declaring it, and the declaration IS the specification that drives the fabric
 
 Each is a hard requirement from spike #133 §"WAL-retention" and §"Other findings".
 
-**(a) Bounded WAL retention + a SLOT-AWARE janitor/monitor.**
+**(a) Bounded WAL retention + a SLOT-AWARE janitor/monitor. — ✅ IMPLEMENTED (#139, v2-3).**
+Shipped ahead of the Zone operator (it is inert on the slot-free plane): `max_slot_wal_keep_size = 512MB`
+in `deploy/compute-files/config.json` (the hard backstop → invalidate-not-pin → re-sync);
+the `wal-janitor` (`deploy/62`) `resolve-slot-floors` pass floors pruning at every ACTIVE
+slot's `restart_lsn` (never breaks live replication) and surfaces INACTIVE slots; two
+`repl-slot-monitor` CronJobs (`deploy/63`) source the `ReplicationSlotWALGrowth` /
+`ReplicationSlotInactive` alerts (`deploy/60`). Proven live by `deploy/_verify-slot-janitor.sh`
+(bound-invalidation, alerts fire, active-slot-not-pruned). See
+`docs/operations.md#zoned-replication-slot-monitoring-adr-0007`. Design (unchanged):
 The risk: on this build `max_slot_wal_keep_size = -1` (unbounded) and
 `idle_replication_slot_timeout` **does not exist** (PG17.5/neon —
 `unrecognized configuration parameter`). So an **inactive** logical slot (subscriber
@@ -469,9 +477,11 @@ corruption or a plane-fill.
 - **New controller surface:** a `Zone` CRD + operator (composing `AppDatabase`).
   Additive; the appdb operator and apps-gateway are unchanged except the phase-2
   gateway replication-wake path (Open decision 2, if chosen).
-- **The wal-janitor / apps-wal-monitor become slot-aware** (§4a) — a real change to
-  #19 machinery, gated on this ADR shipping. Until then, no logical slots exist and
-  the collision is inert (spike §risk).
+- **The wal-janitor / apps-wal-monitor become slot-aware** (§4a) — ✅ **DONE (#139, v2-3):**
+  bounded `max_slot_wal_keep_size`, a `resolve-slot-floors` prune floor on the wal-janitor,
+  and two `repl-slot-monitor` CronJobs sourcing `ReplicationSlotWALGrowth` /
+  `ReplicationSlotInactive`. Shipped ahead of the Zone operator; **inert on the slot-free
+  plane** (identical janitor behaviour until zones create slots).
 - **A publishing zone carries a standing compute cost** under the recommended
   phase-1 wake path (§4c option i) — bounded to zones that export, but real.
 - **Cross-cluster reach is unproven** — a follow-up spike (§4e) gates any

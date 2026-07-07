@@ -321,6 +321,50 @@ spec:
 #
 # Prune runs BEFORE the daily backup (02:30 vs 03:00) so the next `mc mirror
 # --remove` propagates the trim to the OCI copy the same night.
+# --- SLOT-AWARE janitor RBAC (issue #139, ADR-0007 §4a). The janitor must never
+#     prune WAL an ACTIVE replication slot still needs (breaking live cross-zone
+#     replication). Its resolve-slot-floors initContainer reads pg_replication_slots
+#     on each AWAKE writer compute (psql over pod-local loopback — the only path
+#     cloud_admin is admitted, #112) to floor pruning at active slots' restart_lsn.
+#     Least privilege: read pods + exec into them + read the per-compute ConfigMap,
+#     in THIS namespace only. No write, no cluster scope, no secrets.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: wal-janitor
+  namespace: scale-zero-pg
+  labels: { app: backup, plane: backup }
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: wal-janitor-slot-reader
+  namespace: scale-zero-pg
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["configmaps"] # map an awake compute pod → its (tenant,timeline) for the floor
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: wal-janitor-slot-reader
+  namespace: scale-zero-pg
+subjects:
+  - kind: ServiceAccount
+    name: wal-janitor
+    namespace: scale-zero-pg
+roleRef:
+  kind: Role
+  name: wal-janitor-slot-reader
+  apiGroup: rbac.authorization.k8s.io
+---
 apiVersion: batch/v1
 kind: CronJob
 metadata:
@@ -339,6 +383,7 @@ spec:
         metadata:
           labels: { app: backup, plane: backup }
         spec:
+          serviceAccountName: wal-janitor # #139: exec into awake computes to read slots
           restartPolicy: OnFailure
           securityContext:
             seccompProfile: { type: RuntimeDefault }
@@ -456,6 +501,93 @@ spec:
                   done
               volumeMounts:
                 - { name: state, mountPath: /state }
+            # STEP 1b (initContainer, #139/ADR-0007 §4a): SLOT-AWARE prune floor. For
+            # every AWAKE writer compute (a pod exists ⇒ it can hold a live walsender),
+            # read pg_replication_slots. An ACTIVE slot's restart_lsn is WAL a LIVE
+            # cross-zone subscriber still needs: write a floor so the prune step NEVER
+            # crosses it → never breaks live replication. INACTIVE slots are only
+            # SURFACED (WARN): their WAL may be reclaimed (degrade-to-re-sync), with
+            # max_slot_wal_keep_size (config.json) as the hard backstop. An awake compute
+            # whose Postgres we cannot read is PROTECTED (its timeline skip-marked) —
+            # fail-safe: never risk pruning a possibly-live slot's WAL. NON-FATAL overall:
+            # on today's slot-free plane this pass finds nothing and is a pure no-op
+            # (identical janitor behaviour), so it can never regress the load-bearing prune.
+            - name: resolve-slot-floors
+              image: alpine/k8s:1.30.2 # bundles kubectl + a shell; execs psql INSIDE the compute pod
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities: { drop: ["ALL"] }
+              env:
+                - name: KEEP_SEGMENTS
+                  value: "32" # same safety margin the horizon uses, applied BELOW the slot restart_lsn
+              command: ["/bin/sh", "-c"]
+              args:
+                - |
+                  set -eu
+                  mkdir -p /state/slotfloors /state/protect
+                  KEEP_SEGMENTS="${KEEP_SEGMENTS:-32}"
+                  # "hi/lo" restart_lsn -> 16-hex LOGID+SEG suffix, KEEP_SEGMENTS below it
+                  # (an EXTRA safety margin under the slot's own floor). Same math as
+                  # resolve-horizon's rcl_to_suffix so the two are directly comparable.
+                  lsn_to_suffix() {
+                    L="$1"; case "$L" in */*) : ;; *) return 1 ;; esac
+                    hi=$((16#${L%/*})); lo=$((16#${L#*/}))
+                    full=$(( (hi<<32) | lo )); segno=$(( full / 16777216 ))
+                    keep=$(( segno - KEEP_SEGMENTS )); [ "$keep" -lt 0 ] && keep=0
+                    logid=$(( keep / 256 )); seg=$(( keep % 256 ))
+                    printf '%08X%08X' "$logid" "$seg"
+                  }
+                  # Awake WRITER computes (plane=compute = single-DB + per-app publishers;
+                  # the RO pool omits plane=compute). Emit "pod|configmap-name" so we can
+                  # map each to its (tenant,timeline) even if psql is unreadable.
+                  PODS="$(kubectl get pods -l plane=compute --field-selector=status.phase=Running \
+                          -o jsonpath='{range .items[*]}{.metadata.name}|{.spec.containers[?(@.name=="compute")].envFrom[0].configMapRef.name}{"\n"}{end}' 2>/dev/null || true)"
+                  if [ -z "$PODS" ]; then
+                    echo "slot-floor: no awake writer compute pods — no live slots to protect (no-op)"; exit 0
+                  fi
+                  printf '%s\n' "$PODS" | while IFS='|' read -r pod cm; do
+                    [ -n "$pod" ] || continue
+                    TEN="$(kubectl get cm "$cm" -o jsonpath='{.data.TENANT_ID}' 2>/dev/null || true)"
+                    TL="$(kubectl get cm "$cm" -o jsonpath='{.data.TIMELINE_ID}' 2>/dev/null || true)"
+                    if [ -z "$TEN" ] || [ -z "$TL" ]; then
+                      echo "slot-floor: $pod (cm=$cm) has no TENANT_ID/TIMELINE_ID — cannot map, skipping"; continue
+                    fi
+                    # emit active as a literal t/f via CASE — `||active||` renders the
+                    # boolean as `true`/`false` in text-concat, breaking the $2=="t" test.
+                    Q="SELECT slot_name||' '||(case when active then 't' else 'f' end)||' '||coalesce(restart_lsn::text,'-')||' '||coalesce(wal_status,'') FROM pg_replication_slots ORDER BY restart_lsn ASC NULLS LAST"
+                    ROWS=""; okread=""
+                    i=0
+                    while [ "$i" -lt 3 ]; do
+                      if ROWS="$(kubectl exec "$pod" -c compute </dev/null -- \
+                                 env PGPASSWORD=cloud_admin psql -h localhost -p 55433 -U cloud_admin -d postgres -tAc "$Q" 2>/dev/null)"; then okread=1; break; fi
+                      i=$((i+1)); sleep 2
+                    done
+                    if [ -z "$okread" ]; then
+                      echo "slot-floor: $pod tenant=$TEN timeline=$TL — Postgres UNREADABLE after retries; PROTECT (prune step will SKIP this timeline, fail-safe)"
+                      mkdir -p "/state/protect/$TEN"; : > "/state/protect/$TEN/$TL"; continue
+                    fi
+                    [ -z "$ROWS" ] && { echo "slot-floor: $pod tenant=$TEN timeline=$TL — no replication slots"; continue; }
+                    printf '%s\n' "$ROWS" > /tmp/slots
+                    # rows are restart_lsn-ascending: the first ACTIVE row with a real
+                    # restart_lsn is the minimum a live subscriber needs = the floor.
+                    FLOOR_LSN="$(awk '$2=="t" && $3!="-" {print $3; exit}' /tmp/slots)"
+                    ACT="$(awk '$2=="t"{c++} END{print c+0}' /tmp/slots)"
+                    INACT="$(awk '$2=="f"{c++} END{print c+0}' /tmp/slots)"
+                    echo "slot-floor: $pod tenant=$TEN timeline=$TL active=$ACT inactive=$INACT"
+                    [ "$INACT" -gt 0 ] && echo "slot-floor: WARN tenant=$TEN timeline=$TL has $INACT INACTIVE slot(s) — their WAL is reclaimable (degrade-to-re-sync); max_slot_wal_keep_size is the backstop (#139)"
+                    if [ -n "$FLOOR_LSN" ] && SUF="$(lsn_to_suffix "$FLOOR_LSN")"; then
+                      mkdir -p "/state/slotfloors/$TEN"
+                      printf '%s' "$SUF" > "/state/slotfloors/$TEN/$TL"
+                      echo "slot-floor: tenant=$TEN timeline=$TL ACTIVE-slot floor restart_lsn=$FLOOR_LSN suffix=$SUF — prune will NOT cross this (never break live replication) (#139)"
+                    fi
+                    rm -f /tmp/slots
+                  done || true
+                  # NON-FATAL by design: this early-protection pass must NEVER fail the
+                  # load-bearing janitor. The prune step is fail-safe without it (the WAL
+                  # bound is the backstop); a hiccup here at worst leaves a floor unwritten.
+                  echo "slot-floor: pass complete"
+              volumeMounts:
+                - { name: state, mountPath: /state }
           # STEP 2 (mc): for EACH timeline prefix present under /safekeeper/<tenant>/,
           # delete every complete WAL segment whose 24-hex name sorts strictly before
           # THAT timeline's OWN horizon (issue #59 — never a foreign timeline's), with
@@ -548,6 +680,29 @@ spec:
                     fi
                     SUFFIX="$(cat "/state/horizons/$TEN/$TL")"
                     echo "    tenant $TEN timeline $TL: horizon suffix=$SUFFIX"
+                    # SLOT-AWARE (#139/ADR-0007 §4a). resolve-slot-floors ran first:
+                    #  - PROTECT marker: an AWAKE compute for this timeline had unreadable
+                    #    Postgres — we could not confirm it holds no live slot, so SKIP
+                    #    pruning it entirely (fail-safe: never risk a live slot's WAL).
+                    #  - slot floor: an ACTIVE slot's restart_lsn floor. Take the OLDER
+                    #    (lexicographically smaller, fixed-width hex) of the rcl horizon and
+                    #    the slot floor, so the prune NEVER crosses a live slot's restart_lsn.
+                    #    INACTIVE slots set NO floor → their far-behind WAL is reclaimable
+                    #    (degrade-to-re-sync), bounded by max_slot_wal_keep_size.
+                    if [ -f "/state/protect/$TEN/$TL" ]; then
+                      echo "      SLOT-PROTECT: an awake compute for $TEN/$TL had unreadable Postgres — SKIP pruning this timeline (fail-safe, never risk a live slot's WAL) (#139)"
+                      continue
+                    fi
+                    if [ -f "/state/slotfloors/$TEN/$TL" ]; then
+                      SFLOOR="$(cat "/state/slotfloors/$TEN/$TL")"
+                      LOWER="$(printf '%s\n%s\n' "$SUFFIX" "$SFLOOR" | LC_ALL=C sort | head -1)"
+                      if [ "$LOWER" != "$SUFFIX" ]; then
+                        echo "      SLOT-FLOOR: active replication slot floor $SFLOOR is below the rcl horizon $SUFFIX — lowering the prune horizon to $SFLOOR (never crosses a live slot's restart_lsn) (#139)"
+                        SUFFIX="$LOWER"
+                      else
+                        echo "      SLOT-FLOOR: active replication slot floor $SFLOOR is at/above the rcl horizon $SUFFIX — rcl horizon already safe, no change (#139)"
+                      fi
+                    fi
                     if ! mc ls "$PFX/" > /tmp/lsout 2>/tmp/lserr; then
                       echo "FATAL: could not list $PFX (mc ls failed) — aborting" >&2; cat /tmp/lserr >&2; exit 1
                     fi

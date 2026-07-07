@@ -59,7 +59,7 @@ Alertmanager (`61-alertmanager.yaml`) to a receiver.
 | `BackupStaleAbsent` (crit) | backup **never** succeeded / suspended **and the CronJob is >26h old**, OR the CronJob object is gone | The last-success metric is absent — `BackupStale` is blind here. Treat as **no off-cluster backup at all**: un-suspend / redeploy the CronJob and force a run. **Age-gated so a fresh / DR-restored plane is not paged for the first 26h** (#62); the deleted/renamed case fires immediately (#51). |
 | `WalJanitorStaleAbsent` (crit) | janitor **never** succeeded / suspended **and the CronJob is >26h old**, OR the CronJob object is gone | The last-success metric is absent — `WalJanitorStale` is blind here. `/safekeeper` WAL is unbounded: un-suspend / redeploy the CronJob and force a run. **Age-gated for 26h on a fresh/DR plane** (#62); deleted/renamed fires immediately (#49/#51). |
 | `Watchdog` (none) | **always firing by design** | The alerting stack's **dead-man's-switch** (#60). You should **never** be paged by this rule directly — it is routed to an *external* heartbeat monitor. If that **external** monitor pages you, Prometheus or Alertmanager itself is down. See [dead-man's-switch](#dead-mans-switch-external-heartbeat-60). |
-| `KubeStateMetricsDown` (crit) | `up{job=kube-state-metrics}==0` or absent for 2m | **Sev-1.** KSM (`deploy/59`) is the sole producer for `BackupJobFailed`, `WalJanitorJobFailed`, `BackupStale`, `WalJanitorStale`, `SafekeeperWALGrowth`, `PageserverStandbyNotReady`, `ComputeWakeStuck`, `ComputeWakeStuckApps`, `ComputeRoPoolStuck`, `ComputeStuckNotReady` — while it is down **all of them are blind**. Restore KSM before trusting any platform alert. (#48) |
+| `KubeStateMetricsDown` (crit) | `up{job=kube-state-metrics}==0` or absent for 2m | **Sev-1.** KSM (`deploy/59`) is the sole producer for `BackupJobFailed`, `WalJanitorJobFailed`, `BackupStale`, `WalJanitorStale`, `SafekeeperWALGrowth`, `ReplicationSlotWALGrowth`, `ReplicationSlotInactive`, `PageserverStandbyNotReady`, `ComputeWakeStuck`, `ComputeWakeStuckApps`, `ComputeRoPoolStuck`, `ComputeStuckNotReady` — while it is down **all of them are blind**. Restore KSM before trusting any platform alert. (#48) |
 | `PswatcherDown` (crit) | `up{job="pswatcher"}==0` for 2m | The failover authority is down — a primary pageserver death now degrades to the manual runbook (below). Restart pswatcher. |
 | `PswatcherPromotionFired` (crit) | `pswatcher_promotions_total` rose in 10m | A **failover happened** — the promoted standby is now the sole read authority with NO standby behind it. Rebuild a standby. |
 | `PswatcherPrimaryDown` (warn) | `pswatcher_primary_up==0` for 1m | The watcher can't reach the **current read authority**. Pre-failover that's the primary (a promotion may be ~6s away); **post-failover the watcher re-anchors this metric onto the promoted standby** (#25), so it now also covers "the promoted node is the unguarded SPOF and just died." Check the current authority / watcher↔pageserver network. |
@@ -70,6 +70,8 @@ Alertmanager (`61-alertmanager.yaml`) to a receiver.
 | `ComputeStuckNotReady` (crit) | any `compute*` pod (compute / compute-ro / compute-warm / compute-`<app>`) has Ready=false for 5m | A compute-family pod is crash-looping / attach-stalled — **pages even with NO client waiting** (catches a sleeping app's compute crash-looping that the connection-gated rules miss). `kubectl -n scale-zero-pg get pod {{pod}}` + describe/logs. Healthy cold starts (~5s) never trip the 5m window. (#80) |
 | `DemoCanaryFailed` (warn) | a Job owned by the **demo-canary** CronJob failed (dormant unless the demo canary is deployed) | The full **visitor→app→gateway→compute** cold path is broken or regressed past budget — the only synthetic that sees app-side / DNS / ingress-class regressions, not just the DB half. **3am:** if the demo is meant to be up, run `demo/_verify.sh` to reproduce; check `kubectl -n knext-demo get ksvc pg-demo` (Ready? ingress-class?), the operator, and the gateway. If the demo is intentionally torn down, delete the `demo-canary` CronJob to silence it. See [demo-canary](#demo-canary). |
 | `SafekeeperWALGrowth` (**warn**) | a Job owned by the **apps-wal-monitor** CronJob failed: orphaned apps-tenant WAL (a deprovisioned app's safekeeper WAL dir, pageserver-404) is accumulating on the fixed **2Gi** safekeeper PVs, **and/or** a safekeeper `/data` is over its utilization threshold (75%) | **Not the primary pager** (expected branch-per-app churn) but must not be ignored — an unbounded leak ends in ENOSPC that wedges the *whole* storage plane. Read the Job log (`kubectl -n scale-zero-pg logs job/<apps-wal-monitor-…>`) for the orphan count vs PV%. Reclaim with `deploy/provision-app.sh reclaim-orphans`. Distinct from `WalJanitorJobFailed` — the janitor is *correct* to skip (never over-prune) an orphan; this is the missing **bound + signal** (#90/#87). Dormant when the monitor isn't deployed. See [Reclaiming orphaned apps-tenant WAL](#reclaiming-orphaned-apps-tenant-wal-9087). |
+| `ReplicationSlotWALGrowth` (**warn**) | a Job owned by the **repl-slot-wal-monitor** CronJob failed: a cross-zone logical replication slot on an awake publisher is retaining WAL past **75%** of the `max_slot_wal_keep_size` bound (512MB), or was already **invalidated** by it (`wal_status=lost`) | **Not the primary pager** — the bound is the hard backstop. A subscriber is falling behind or a slot is leaking; past the bound Postgres invalidates the slot and the subscriber must **re-sync** (drop+recreate subscription with `copy_data`) — the designed **degrade-to-re-sync, never plane-fill**. Read the Job log for the offending slot; if it is a live subscriber, wake/heal it; if leaked, drop the slot. Dormant until the monitors are deployed and a slot exists (#139). See [Zoned-replication slot monitoring](#zoned-replication-slot-monitoring-adr-0007). |
+| `ReplicationSlotInactive` (**warn**) | a Job owned by the **repl-slot-inactive-monitor** CronJob failed: a replication slot has been **inactive >24h** | Very likely a **leaked** slot from a dead/deprovisioned cross-zone subscriber, still pinning publisher WAL toward the bound. Drop it (`SELECT pg_drop_replication_slot('<slot>')` on the publisher) or run the Zone deprovision hygiene (ADR-0007 §4d). A briefly-sleeping subscriber is short and expected — 24h means abandoned. Dormant until deployed + a slot exists (#139). See [Zoned-replication slot monitoring](#zoned-replication-slot-monitoring-adr-0007). |
 
 CronJob rules match by **exact owner name** (`kube_job_owner{owner_name="backup"}` /
 `"wal-janitor"`), not a loose `backup.*` regex — so a failing `wal-janitor` is
@@ -676,6 +678,72 @@ seeded below-horizon segment, and preserves every `.partial` and every at/above-
 segment; (C) it is idempotent (a second run reports "nothing to prune"). This is the
 gate that catches a prune-set off-by-one (hex width, TLI, sort boundary) before it can
 destroy WAL the writable restore needs.
+
+### Zoned-replication slot monitoring (ADR-0007)
+
+**Only relevant once the zone axis (ADR-0007) is in use.** Cross-zone logical
+replication grows a **replication slot per subscriber** on the publisher's compute.
+A slot pins the publisher's WAL from its `restart_lsn` forward — and on this
+`neon:8464` build the two guards you'd reach for are missing: `max_slot_wal_keep_size`
+defaulted to **-1 (unbounded)** and `idle_replication_slot_timeout` **does not exist**
+(spike #133). So an **inactive** slot (a sleeping or dead subscriber) would pin
+publisher WAL **forever** — a slow ENOSPC that wedges the shared **2Gi** safekeeper PVs,
+invisible to the (slot-unaware) `wal-janitor`. Three mechanisms close this (#139):
+
+**1. The hard backstop — bounded WAL retention.** `deploy/compute-files/config.json`
+sets `max_slot_wal_keep_size = 512MB`. Past that cap Postgres **invalidates** the slot
+(`wal_status=lost`) and the subscriber must **re-sync** from a fresh snapshot
+(`DROP SUBSCRIPTION` + recreate `WITH (copy_data = true)`). This turns the failure mode
+from an **unbounded pin → plane-fill** into a **bounded degrade → re-sync**:
+bounded-and-recoverable, never catastrophic — *"degrade to re-sync, never plane-fill."*
+
+> **The 512MB trade-off.** Larger = more tolerance for a lagging/sleeping subscriber
+> before a forced re-sync; smaller = tighter safety for the shared plane. 512MB is
+> ~1.7M spike-rows of backlog headroom yet only 25% of a 2Gi safekeeper PV, so even
+> several leaked slots degrade to re-sync well before ENOSPC. It is a single operator
+> knob — lower it on a constrained plane. The alert warns at **75%** of it.
+
+**2. The early warning — slot-aware monitors.** `deploy/63-repl-slot-monitor.yaml` ships
+two CronJobs (the same *fail-the-Job → Prometheus alert via `kube_job_owner`* pattern as
+`apps-wal-monitor`, #90). They `kubectl exec` psql into every **awake writer** compute
+(a slot only accrues WAL while its publisher is awake) and read `pg_replication_slots`:
+
+- **`repl-slot-wal-monitor`** (hourly) fails → **`ReplicationSlotWALGrowth`** when a slot
+  is retaining WAL past **75%** of the bound, or was already invalidated by it.
+- **`repl-slot-inactive-monitor`** (every 3h) fails → **`ReplicationSlotInactive`** when a
+  slot has been inactive **>24h** — a **leaked** slot from a dead/deprovisioned subscriber.
+
+Both are **warning** (the bound is the hard backstop) and **dormant** until deployed *and*
+a slot exists, so shipping them always-on is free.
+
+**3. Janitor awareness — never break live replication.** The `wal-janitor` (`deploy/62`)
+gains a `resolve-slot-floors` initContainer (under a scoped `wal-janitor` ServiceAccount
+that can `exec` computes). It reads `pg_replication_slots` on every awake writer and:
+
+- **ACTIVE slot** → writes a **floor** at its `restart_lsn`. The prune step takes the
+  **older** of the rcl horizon and the slot floor, so it **never** prunes WAL a live
+  subscriber still needs. An active slot means a live walsender, which means the
+  publisher is awake and readable — so this floor is always determinable.
+- **INACTIVE slot** → **surfaced (WARN) only**, no floor: its far-behind WAL is
+  reclaimable (the janitor's normal `rcl − KEEP_SEGMENTS` prune degrades it to a re-sync),
+  bounded by `max_slot_wal_keep_size`. This is the *"surface + optionally reclaim inactive"*
+  half of the requirement.
+- **awake compute, Postgres unreadable** → the timeline is **PROTECT-skipped** that run
+  (fail-safe: never risk a live slot's WAL). Transient and safe (the WAL bound still backs
+  it); the next run reclaims once the compute is readable.
+
+On today's **slot-free** plane the pass finds nothing and the janitor behaves **identically**
+— zero regression to the load-bearing prune; the slot-awareness only activates when zones
+create slots.
+
+**Prove it before relying on it.** `deploy/_verify-slot-janitor.sh` stands up a throwaway
+publisher+subscriber, wires real logical replication, and proves on the live plane:
+(1) **BOUND** — WAL past the cap **invalidates** the slot (`wal_status=lost`), retention is
+**bounded** and the safekeeper PV does not fill, then a re-sync recovers; (2) **ALERT** —
+the monitors **fail their Job** on the growing/leaked slot (the alerts fire); (3)
+**ACTIVE-NOT-PRUNED** — with an active slot deliberately behind, the janitor **floors** at
+its `restart_lsn` and the subscriber then catches up with a **matching checksum** (live
+replication intact). It only touches its own `slotpub`/`slotsub` branches and tears them down.
 
 ## Pageserver failover
 

@@ -78,6 +78,11 @@
                     "vartype": "integer"
                 },
                 {
+                    "name": "max_slot_wal_keep_size",
+                    "value": "512MB",
+                    "vartype": "string"
+                },
+                {
                     "name": "password_encryption",
                     "value": "md5",
                     "vartype": "enum"
