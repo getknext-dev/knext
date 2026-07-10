@@ -11,8 +11,12 @@
 knext's publishable packages are `@knext/core` (`packages/kn-next`) and
 `@knext/lib` (`packages/lib`). The canonical publish path — Changesets →
 `.github/workflows/release.yml` → registry.npmjs.org with provenance — is fully
-built and verified (end-to-end against a local Verdaccio registry), but it is
-blocked on an irreducible **human** step: claiming the npm org `knext` and
+built and verified: the in-repo harness is `scripts/install-smoke.mjs`
+(pnpm-pack tarballs → clean `npm install` outside the workspace, run in CI),
+and a one-off end-to-end rehearsal against a throwaway local Verdaccio registry
+(2026-07-07, not a repo artifact) confirmed the full `changeset publish` flow
+including the `workspace:^` rewrite. It is blocked on an irreducible **human**
+step: claiming the npm org `knext` and
 setting an `NPM_TOKEN` repo secret. Until that happens, no outside user can
 install knext at all, which blocks `npx @knext/core`, the Next.js-docs listing
 submission, and real-world adoption feedback.
@@ -56,13 +60,14 @@ Two channels, with an explicit hierarchy and a dated exit:
 | --- | --- | --- | --- | --- |
 | Wait for npmjs (#53) | no | npm token (human) | yes, once live | canonical |
 | **GHP interim + dated deprecation (chosen)** | **yes** | **none** | no (token required) | explicitly temporary |
-| Local/self-hosted registry (Verdaccio) | verification only | n/a | no | not a distribution channel |
+| Local/self-hosted registry (e.g. Verdaccio) | rehearsal only | n/a | no | not a distribution channel |
 | Publish `@knext/*` from a personal npm account | yes | personal token | yes | scope squatting risk; migration pain — rejected |
 
 The personal-account option was rejected because the `@knext` scope must belong
 to the project org from its first public version; a later ownership migration
-is worse than a short installability gap. Verdaccio stays what it is: the
-release-path verification harness, not a channel.
+is worse than a short installability gap. A local registry stays what it is —
+a rehearsal tool (the standing in-repo verification is `scripts/install-smoke.mjs`),
+not a channel.
 
 ## Consequences
 
