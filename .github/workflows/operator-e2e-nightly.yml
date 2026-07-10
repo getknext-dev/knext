@@ -127,3 +127,88 @@ jobs:
       - name: Tear down kind cluster
         if: always()
         run: kind delete cluster --name kn-next-operator-test-e2e || true
+
+  # CLI e2e (build tag `e2e_cli`): the REAL built kn-next CLI (plain Node — no
+  # Bun) runs `doctor`, `db bind`, and `status` against a live kind + Knative +
+  # operator cluster (test/e2e/cli_e2e_test.go). This is the first non-hermetic
+  # exercise of the CLI's cluster-facing commands: the unit suites stub kubectl,
+  # so until this job NOTHING proved the doctor checks, the db-bind merge-patch +
+  # silent-prune verify-read, or the status exit-code contract against a real
+  # apiserver/CRD schema.
+  #
+  # INDEPENDENT of the scale suite (own kind cluster, own job) so a scale flake
+  # never blocks it. Deliberately NO continue-on-error: unlike the scale suite it
+  # has no cold-start timing sensitivity — the app image is a deterministic
+  # unpullable placeholder and every assertion is state-based, so a failure here
+  # is signal, not noise.
+  cli-e2e:
+    name: kn-next CLI doctor/db bind/status against kind (e2e_cli)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: packages/kn-next-operator/go.mod
+          cache-dependency-path: packages/kn-next-operator/go.sum
+
+      # The suite shells out to the built CLI with plain `node` and builds it
+      # via `pnpm --filter @knext/core build` — so the job needs Node + pnpm
+      # (version pinned by `packageManager` in package.json) + workspace deps.
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Install workspace dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Install kind
+        uses: helm/kind-action@v1
+        with:
+          install_only: true
+
+      - name: Create kind cluster
+        run: kind create cluster --name kn-next-operator-test-e2e --wait 120s
+
+      - name: Install cert-manager (operator webhook certs)
+        run: |
+          set -euo pipefail
+          kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.16.2/cert-manager.yaml
+          kubectl wait --for=condition=Available --timeout=300s \
+            -n cert-manager deployment/cert-manager deployment/cert-manager-webhook deployment/cert-manager-cainjector
+
+      - name: Install Knative Serving + Kourier
+        # The config-network ingress-class patch matters twice here: it is what
+        # lets routes program at all AND it is the exact misconfiguration the
+        # doctor #208 check exists to catch — patched correctly, the suite
+        # asserts doctor reports the ingress check as healthy.
+        run: |
+          set -euo pipefail
+          KNATIVE_VERSION="knative-v1.16.0"
+          kubectl apply -f "https://github.com/knative/serving/releases/download/${KNATIVE_VERSION}/serving-crds.yaml"
+          kubectl apply -f "https://github.com/knative/serving/releases/download/${KNATIVE_VERSION}/serving-core.yaml"
+          kubectl apply -f "https://github.com/knative/net-kourier/releases/download/${KNATIVE_VERSION}/kourier.yaml"
+          kubectl patch configmap/config-network \
+            --namespace knative-serving \
+            --type merge \
+            --patch '{"data":{"ingress-class":"kourier.ingress.networking.knative.dev"}}'
+          kubectl wait --for=condition=Available --timeout=300s \
+            -n knative-serving deployment/controller deployment/webhook deployment/autoscaler
+          kubectl wait --for=condition=Available --timeout=300s \
+            -n knative-serving deployment/net-kourier-controller
+
+      - name: Run CLI e2e suite (doctor / db bind / status)
+        working-directory: packages/kn-next-operator
+        env:
+          KIND_CLUSTER: kn-next-operator-test-e2e
+        run: make test-e2e-cli
+
+      - name: Tear down kind cluster
+        if: always()
+        run: kind delete cluster --name kn-next-operator-test-e2e || true

@@ -121,6 +121,12 @@ test-e2e-bundle: manifests generate fmt vet ## Run the install-BUNDLE e2e (#117)
 	# must surface as a Ginkgo failure, not a deadline goroutine-dump panic.
 	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) go test -tags=e2e_bundle ./test/e2e/ -v -ginkgo.v -run TestBundleE2E -timeout 30m
 
+.PHONY: test-e2e-cli
+test-e2e-cli: manifests generate fmt vet ## Run the CLI e2e suite: the REAL built kn-next CLI (plain Node) runs doctor / db bind / status against a live cluster. Default mode builds+installs the operator on kind — requires a kind+cert-manager+Knative+Kourier cluster AND `pnpm install --frozen-lockfile` at the repo root (the suite builds the CLI itself). Set KNEXT_E2E_KUBE_CONTEXT=<context> to instead run READ-ONLY against an EXISTING cluster's already-installed operator (no install; all writes confined to one fresh throwaway namespace).
+	# Explicit -timeout (>> Go's silent 600s default): a genuine assertion failure
+	# must surface as a Ginkgo failure, not a deadline goroutine-dump panic.
+	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) go test -tags=e2e_cli ./test/e2e/ -v -ginkgo.v -run TestCLIE2E -timeout 30m
+
 .PHONY: lint
 lint: golangci-lint ## Run golangci-lint linter
 	"$(GOLANGCI_LINT)" run
