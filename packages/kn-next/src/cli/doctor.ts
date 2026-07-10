@@ -20,9 +20,22 @@
  *   (f) Knative Serving installed
  *
  * READ-ONLY by construction (ADR-0001): every kubectl call is a `get`; the
- * registry probe is an HTTP manifest HEAD. Exit code is 1 only on hard FAILs;
- * WARN/SKIP never fail the preflight, and an unreachable cluster degrades all
- * checks to a clear SKIP.
+ * registry probe is an HTTP manifest HEAD.
+ *
+ * Exit-code contract:
+ *   - 1 on hard FAILs (a cluster-state fact is wrong) AND on probe ERRORs
+ *     (#230: the apiserver answered the reachability gate but an individual
+ *     probe then failed for network/TLS/credential reasons — the preflight
+ *     could not verify the cluster, so it must not report green).
+ *   - WARN/SKIP never fail the preflight; a fully-unreachable cluster keeps
+ *     the documented degrade path (gate WARNs, every check SKIPs, exit 0).
+ *
+ * #230: probe-infrastructure failures (network timeout, TLS handshake,
+ * expired exec credentials) are classified BEFORE mapping to a check result —
+ * they surface as a distinct ERROR ("probe failed"), never as a false
+ * "not found" cluster-state fact. The classifier is deliberately
+ * conservative: only clearly-infrastructural stderr signatures reclassify;
+ * anything ambiguous keeps the legacy behavior.
  */
 
 import { spawnSync } from "node:child_process";
@@ -57,18 +70,28 @@ export type ProbeOutcome = "ok" | "auth-required" | "not-found" | "unreachable";
 
 export type ManifestProbeFn = (image: string) => Promise<ProbeOutcome>;
 
-export type CheckStatus = "pass" | "warn" | "fail" | "skip";
+/**
+ * "error" (#230) = the probe itself failed (network/TLS/credentials), NOT a
+ * cluster-state fact — distinct from "fail" so consumers (human + --json) can
+ * tell "the CRD is missing" apart from "the probe could not reach the CRD".
+ */
+export type CheckStatus = "pass" | "warn" | "fail" | "skip" | "error";
 
 export interface CheckResult {
     id: string;
     title: string;
     status: CheckStatus;
     detail: string;
+    /** One-line repair hint (e.g. "credentials failed — re-authenticate and retry"). */
+    hint?: string;
 }
 
 export interface DoctorReport {
     checks: CheckResult[];
-    /** 1 iff any check hard-FAILed; WARN/SKIP never fail the preflight. */
+    /**
+     * 1 iff any check hard-FAILed or ERRORed (#230: an errored probe means the
+     * preflight could not verify the cluster). WARN/SKIP never fail it.
+     */
     exitCode: 0 | 1;
 }
 
@@ -90,6 +113,73 @@ export function kubectlRunner(args: readonly string[]): KubectlResult {
         stdout: (r.stdout ?? "").toString(),
         stderr: (r.stderr ?? "").toString(),
     };
+}
+
+/**
+ * Classification of a failed kubectl invocation (#230).
+ *
+ * "not-found"  — the apiserver answered and said the resource is absent: a
+ *                cluster-state FACT, kept as today's FAIL path.
+ * "network"    — the probe never got an answer (refused / TLS / i/o timeout).
+ * "auth"       — credentials failed (exec plugin, expired token, Unauthorized).
+ * "unknown"    — anything ambiguous: callers keep today's behavior.
+ */
+export type KubectlFailureClass = "not-found" | "network" | "auth" | "unknown";
+
+// Deliberately conservative signature lists — over-matching across kubectl
+// versions would misreport real cluster-state facts as probe errors.
+const NOT_FOUND_SIGNATURES = [
+    /\(NotFound\)/,
+    /\bnot found\b/i,
+    /doesn't have a resource type/,
+];
+const NETWORK_SIGNATURES = [
+    /connection refused/i,
+    /connection to the server .* was refused/i,
+    /TLS handshake/i,
+    /i\/o timeout/i,
+];
+const AUTH_SIGNATURES = [
+    /getting credentials: exec/,
+    /\(Unauthorized\)/,
+    /You must be logged in to the server/,
+];
+
+/** Classify a failed kubectl call's stderr. Ambiguity → "unknown". */
+export function classifyKubectlFailure(stderr: string): KubectlFailureClass {
+    // A NotFound answer implies the apiserver responded — it wins so genuine
+    // cluster-state facts are never reclassified as probe errors.
+    if (NOT_FOUND_SIGNATURES.some((re) => re.test(stderr))) return "not-found";
+    if (AUTH_SIGNATURES.some((re) => re.test(stderr))) return "auth";
+    if (NETWORK_SIGNATURES.some((re) => re.test(stderr))) return "network";
+    return "unknown";
+}
+
+interface InfraFailure {
+    /** Detail line: failure class + a bounded stderr excerpt. */
+    detail: string;
+    /** One-line repair hint for the human table / JSON consumers. */
+    hint: string;
+}
+
+/**
+ * Map a failed kubectl result to an ERROR payload when (and only when) the
+ * stderr carries a clearly-infrastructural signature; undefined otherwise so
+ * the caller keeps its legacy (not-found / warn) branch.
+ */
+function infraFailure(r: KubectlResult): InfraFailure | undefined {
+    const cls = classifyKubectlFailure(r.stderr);
+    if (cls !== "network" && cls !== "auth") return undefined;
+    const excerpt = r.stderr.trim().replace(/\s+/g, " ").slice(0, 160);
+    return cls === "auth"
+        ? {
+              detail: `probe failed (auth): ${excerpt}`,
+              hint: "credentials failed — re-authenticate (refresh your kubeconfig token) and retry",
+          }
+        : {
+              detail: `probe failed (network): ${excerpt}`,
+              hint: "cluster connection flaked — check network/VPN and retry",
+          };
 }
 
 function safeJson<T>(raw: string): T | undefined {
@@ -223,9 +313,13 @@ export async function runDoctor(deps: DoctorDeps): Promise<DoctorReport> {
         title: string,
         status: CheckStatus,
         detail: string,
-    ) => checks.push({ id, title, status, detail });
+        hint?: string,
+    ) => checks.push({ id, title, status, detail, ...(hint ? { hint } : {}) });
 
-    // Gate: is the apiserver reachable at all?
+    // Gate: is the apiserver reachable at all? A failed gate keeps the
+    // documented degrade path (WARN + all checks SKIP, exit 0) — but #230:
+    // when the failure is clearly credentials, say so instead of leaving the
+    // user to guess from "unreachable".
     const version = deps.kubectl(["kubectl", "get", "--raw", "/version"]);
     const reachable = version.ok;
     if (reachable) {
@@ -236,6 +330,7 @@ export async function runDoctor(deps: DoctorDeps): Promise<DoctorReport> {
             "Cluster reachable",
             "warn",
             `apiserver unreachable (${version.stderr.trim().slice(0, 120) || "no kubectl context?"}) — all cluster checks skipped`,
+            infraFailure(version)?.hint,
         );
     }
     const skipAll = !reachable;
@@ -252,7 +347,10 @@ export async function runDoctor(deps: DoctorDeps): Promise<DoctorReport> {
             "-o",
             "json",
         ]);
-        if (!crd.ok) {
+        const crdInfra = crd.ok ? undefined : infraFailure(crd);
+        if (crdInfra) {
+            push("crd", "NextApp CRD", "error", crdInfra.detail, crdInfra.hint);
+        } else if (!crd.ok) {
             push(
                 "crd",
                 "NextApp CRD",
@@ -302,7 +400,16 @@ export async function runDoctor(deps: DoctorDeps): Promise<DoctorReport> {
             ? (safeJson<{ items?: DeploymentJson[] }>(deps_.stdout)?.items ??
               [])
             : [];
-        if (!deps_.ok || items.length === 0) {
+        const opInfra = deps_.ok ? undefined : infraFailure(deps_);
+        if (opInfra) {
+            push(
+                "operator",
+                "Operator deployment",
+                "error",
+                opInfra.detail,
+                opInfra.hint,
+            );
+        } else if (!deps_.ok || items.length === 0) {
             push(
                 "operator",
                 "Operator deployment",
@@ -348,7 +455,16 @@ export async function runDoctor(deps: DoctorDeps): Promise<DoctorReport> {
             "-o",
             "json",
         ]);
-        if (!cm.ok) {
+        const cmInfra = cm.ok ? undefined : infraFailure(cm);
+        if (cmInfra) {
+            push(
+                "cert-manager",
+                "cert-manager webhook",
+                "error",
+                cmInfra.detail,
+                cmInfra.hint,
+            );
+        } else if (!cm.ok) {
             push(
                 "cert-manager",
                 "cert-manager webhook",
@@ -386,7 +502,16 @@ export async function runDoctor(deps: DoctorDeps): Promise<DoctorReport> {
             "-o",
             "json",
         ]);
-        if (!cm.ok) {
+        const cnInfra = cm.ok ? undefined : infraFailure(cm);
+        if (cnInfra) {
+            push(
+                "ingress",
+                "Knative ingress-class",
+                "error",
+                cnInfra.detail,
+                cnInfra.hint,
+            );
+        } else if (!cm.ok) {
             push(
                 "ingress",
                 "Knative ingress-class",
@@ -403,24 +528,38 @@ export async function runDoctor(deps: DoctorDeps): Promise<DoctorReport> {
                 "istio.ingress.networking.knative.dev";
 
             // Does a kourier reconciler exist? (controller ships in
-            // knative-serving on current installs, kourier-system on older ones)
-            const kourierReady = ["knative-serving", "kourier-system"].some(
-                (ns) => {
-                    const d = deps.kubectl([
-                        "kubectl",
-                        "get",
-                        "deployment",
-                        "net-kourier-controller",
-                        "-n",
-                        ns,
-                        "-o",
-                        "json",
-                    ]);
-                    return d.ok && isReady(safeJson<DeploymentJson>(d.stdout));
-                },
-            );
+            // knative-serving on current installs, kourier-system on older
+            // ones). #230: a probe-infra failure here must not be read as
+            // "no reconciler exists" — track it and error out below.
+            let kourierReady = false;
+            let kourierInfra: InfraFailure | undefined;
+            for (const ns of ["knative-serving", "kourier-system"]) {
+                const d = deps.kubectl([
+                    "kubectl",
+                    "get",
+                    "deployment",
+                    "net-kourier-controller",
+                    "-n",
+                    ns,
+                    "-o",
+                    "json",
+                ]);
+                if (d.ok && isReady(safeJson<DeploymentJson>(d.stdout))) {
+                    kourierReady = true;
+                    break;
+                }
+                if (!d.ok) kourierInfra ??= infraFailure(d);
+            }
 
-            if (ingressClass === KOURIER_INGRESS_CLASS && kourierReady) {
+            if (!kourierReady && kourierInfra) {
+                push(
+                    "ingress",
+                    "Knative ingress-class",
+                    "error",
+                    `${kourierInfra.detail} — kourier-reconciler presence could not be verified`,
+                    kourierInfra.hint,
+                );
+            } else if (ingressClass === KOURIER_INGRESS_CLASS && kourierReady) {
                 push(
                     "ingress",
                     "Knative ingress-class",
@@ -511,12 +650,21 @@ export async function runDoctor(deps: DoctorDeps): Promise<DoctorReport> {
             "-o",
             "json",
         ]);
+        const ksvcInfra = ksvc.ok ? undefined : infraFailure(ksvc);
         if (ksvc.ok) {
             push(
                 "knative",
                 "Knative Serving",
                 "pass",
                 `${KSVC_CRD} CRD present`,
+            );
+        } else if (ksvcInfra) {
+            push(
+                "knative",
+                "Knative Serving",
+                "error",
+                ksvcInfra.detail,
+                ksvcInfra.hint,
             );
         } else {
             push(
@@ -528,7 +676,13 @@ export async function runDoctor(deps: DoctorDeps): Promise<DoctorReport> {
         }
     }
 
-    const exitCode = checks.some((c) => c.status === "fail") ? 1 : 0;
+    // ERRORs exit nonzero like FAILs (#230): an errored probe means the
+    // preflight could NOT verify the cluster — reporting green would be a lie.
+    const exitCode = checks.some(
+        (c) => c.status === "fail" || c.status === "error",
+    )
+        ? 1
+        : 0;
     return { checks, exitCode };
 }
 
@@ -537,14 +691,15 @@ const STATUS_LABEL: Record<CheckStatus, string> = {
     warn: "WARN",
     fail: "FAIL",
     skip: "SKIP",
+    error: "ERROR",
 };
 
-/** Render the human table (one status-tagged row per check). */
+/** Render the human table (one status-tagged row per check, + repair hint). */
 export function formatDoctorTable(checks: readonly CheckResult[]): string {
     const titleWidth = Math.max(...checks.map((c) => c.title.length), 5);
     const rows = checks.map(
         (c) =>
-            `${STATUS_LABEL[c.status]}  ${c.title.padEnd(titleWidth)}  ${c.detail}`,
+            `${STATUS_LABEL[c.status]}  ${c.title.padEnd(titleWidth)}  ${c.detail}${c.hint ? ` (hint: ${c.hint})` : ""}`,
     );
     return `${rows.join("\n")}\n`;
 }
@@ -574,7 +729,9 @@ const DOCTOR_HELP = `kn-next doctor — cluster-prereq preflight (read-only)
 
 Checks: NextApp CRD, operator readiness, cert-manager webhook, Knative
 ingress-class vs its reconciler (#208), operator-image pullability (#198),
-Knative Serving. Exit 1 only on hard FAILs; unreachable clusters SKIP.
+Knative Serving. Exit 1 on hard FAILs and on probe ERRORs (a check's kubectl
+probe hit a network/TLS/credential failure — the cluster state could not be
+verified); WARN/SKIP never fail, and a fully unreachable cluster SKIPs (exit 0).
 
 Options:
   --json      Emit the check results as JSON
