@@ -58,6 +58,11 @@ ok "00-namespace.yaml applied"
 for f in [0-9][0-9]-*.yaml; do
   [ -e "$f" ] || fail "no numbered manifests found in deploy/"
   [ "$f" = 00-namespace.yaml ] && continue
+  # Doc-only manifests carry ONLY comments (no k8s objects) — e.g. 30-knext-secret.yaml,
+  # whose base DATABASE_URL Secret is now owned by gen-secrets.sh (issue #168). A
+  # server dry-run of a comment-only file errors "no objects passed to apply"; that is
+  # not a defect, so skip cleanly when the file declares no apiVersion.
+  grep -q '^apiVersion:' "$f" || { ok "$f is doc-only (no k8s objects; owned by gen-secrets.sh)"; continue; }
   # Capture stderr (stdout discarded). On success this is empty and we move on.
   if err="$(kubectl apply --dry-run=server -f "$f" 2>&1 >/dev/null)"; then
     ok "$f validates (server dry-run)"
@@ -614,3 +619,32 @@ done
 # the primary still gates identically (byte-identical behavior preserved under the refactor).
 grep -q 'harden_pg_hba &' compute-files/entrypoint.sh || fail "entrypoint.sh must still call harden_pg_hba when APP_ROLE is set (issue #164 refactor must not change primary behavior)"
 ok "pg_hba harden factored into shared lib-harden.sh; sourced + APP_ROLE-gated by primary/RO/warm entrypoints; embedded in 54 ConfigMap (issue #164)"
+
+# 31. contract (issue #168): the BASE single-DB tiers must NOT ship the PUBLIC
+#     DEFAULT cloud_admin:cloud_admin as their only TCP defense. The base tiers
+#     (compute / compute-ro / compute-warm) run cloud_admin as the documented
+#     DATABASE_URL[_RO] credential over TCP (no APP_ROLE → the pg_hba harden is
+#     deliberately skipped), so — unlike a per-app compute — they cannot rely on
+#     the loopback-only reject. Instead they carry a STRONG cloud_admin md5 minted
+#     by gen-secrets.sh (Secret pg-base-admin) and injected as a REQUIRED env, so
+#     a base compute can never boot on the public default (fail-closed). The
+#     matching strong PLAINTEXT lives in the base DATABASE_URL[_RO] Secret, also
+#     gen-secrets-owned. See docs/operations.md "Base-tier cloud_admin".
+#
+# (a) deploy/30 must be DOC-ONLY: it must NOT ship the literal public default.
+grep -Eq 'cloud_admin:cloud_admin@' 30-knext-secret.yaml && fail "30-knext-secret.yaml must NOT ship the public default cloud_admin:cloud_admin (issue #168 — gen-secrets.sh owns the strong base DATABASE_URL Secret)" || true
+# (b) each base compute manifest must inject CLOUD_ADMIN_MD5 from pg-base-admin,
+#     REQUIRED (no optional:true) so the pod fails closed without the strong Secret.
+for m in 20-compute.yaml 25-compute-warm.yaml 26-compute-ro.yaml; do
+  grep -q 'CLOUD_ADMIN_MD5' "$m" || fail "$m must inject CLOUD_ADMIN_MD5 from the pg-base-admin Secret (issue #168)"
+  grep -q 'pg-base-admin' "$m" || fail "$m must reference the pg-base-admin Secret for the strong base cloud_admin md5 (issue #168)"
+  # the block that mounts pg-base-admin's CLOUD_ADMIN_MD5 must be fail-closed
+  # (no optional:true anywhere in the manifest — base tiers never boot on the default).
+  grep -Eq 'optional:[[:space:]]*true' "$m" && fail "$m must NOT mark the pg-base-admin CLOUD_ADMIN_MD5 secretKeyRef optional:true — base compute must fail closed (issue #168)" || true
+done
+# (c) gen-secrets.sh must mint pg-base-admin (strong plaintext + its md5) AND own
+#     the base DATABASE_URL[_RO] Secret derived from it.
+grep -q 'pg-base-admin' gen-secrets.sh || fail "gen-secrets.sh must mint the pg-base-admin Secret (issue #168)"
+grep -q 'CLOUD_ADMIN_MD5' gen-secrets.sh || fail "gen-secrets.sh must compute CLOUD_ADMIN_MD5=md5(password||cloud_admin) for pg-base-admin (issue #168)"
+grep -q 'myapp-database' gen-secrets.sh || fail "gen-secrets.sh must own the base DATABASE_URL Secret myapp-database, derived from pg-base-admin (issue #168)"
+ok "base tiers carry a STRONG cloud_admin md5 (pg-base-admin, fail-closed) — the public default is never shipped (issue #168)"

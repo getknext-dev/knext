@@ -45,8 +45,10 @@ fi
 # a derived image is already published; only a bare local override defaults to building
 case "$IMAGE_SRC" in *override*) KSPG_SKIP_BUILD="${KSPG_SKIP_BUILD:-0}" ;; *) KSPG_SKIP_BUILD="${KSPG_SKIP_BUILD:-1}" ;; esac
 RO_MODE="${RO_MODE:-Replica}"
-W_DSN="postgres://cloud_admin:cloud_admin@pggw-ro:55432/postgres?sslmode=disable"
-RO_DSN="postgres://cloud_admin:cloud_admin@pggw-ro:55434/postgres?sslmode=disable"
+# Base cloud_admin credential (issue #168): from the DATABASE_URL Secret, not the default.
+CA_CRED=$(kubectl -n scale-zero-pg get secret myapp-database -o jsonpath='{.data.DATABASE_URL}' 2>/dev/null | base64 -d 2>/dev/null | sed -E 's#^postgres://([^@]+)@.*#\1#'); [ -n "$CA_CRED" ] || CA_CRED="cloud_admin:cloud_admin"
+W_DSN="postgres://${CA_CRED}@pggw-ro:55432/postgres?sslmode=disable"
+RO_DSN="postgres://${CA_CRED}@pggw-ro:55434/postgres?sslmode=disable"
 # Direct-to-pool DSN (bypasses the gateway) — used ONLY by the HPA section so the
 # gateway RO driver and the HPA never fight over compute-ro's replica count. The
 # Service load-balances across the pool (kube-proxy), which is exactly what the

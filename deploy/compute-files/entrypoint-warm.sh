@@ -27,7 +27,9 @@ CLOUD_ADMIN_MD5="${CLOUD_ADMIN_MD5:-b093c0d3b281ba6da1eacc608620abd8}"
 # rewrites the pg_hba catch-all md5 -> scram-sha-256 (#117). Gated on APP_ROLE (below):
 # a per-app warm compute hardens exactly like the primary per-app writer, while the base
 # single-DB warm tier (deploy/25, no APP_ROLE) keeps cloud_admin over TCP so the warm
-# path (WARM_DSN cloud_admin) mirrors the primary single-DB unchanged.
+# path (WARM_DSN cloud_admin) mirrors the primary single-DB unchanged — but with a
+# STRONG cloud_admin md5 injected from pg-base-admin (issue #168), so the public default
+# is rejected over TCP even here. The fallback below is only for a BARE local run.
 . /compute-files/lib-harden.sh
 
 echo "Rendering compute spec (tenant=${TENANT_ID} timeline=${TIMELINE_ID})"

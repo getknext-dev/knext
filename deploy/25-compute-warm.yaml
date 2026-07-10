@@ -66,6 +66,13 @@ spec:
             # gate. The drill overrides it to its test gateway (pggw-warm:9091).
             - name: WARM_GATE_ADDR
               value: "pggw.scale-zero-pg.svc:9091"
+            # STRONG base cloud_admin md5 (issue #168) — REQUIRED, fail-closed. The
+            # base warm tier serves cloud_admin over TCP (WARM_DSN, no APP_ROLE →
+            # harden skipped), so it carries the strong md5 from pg-base-admin
+            # (deploy/gen-secrets.sh) and never the public default. See 20-compute.yaml.
+            - name: CLOUD_ADMIN_MD5
+              valueFrom:
+                secretKeyRef: { name: pg-base-admin, key: CLOUD_ADMIN_MD5 }
           ports:
             - { name: pg, containerPort: 55433 }
             - { name: compute-http, containerPort: 3080 }

@@ -86,6 +86,13 @@ spec:
             # Replica = tip-following (goal); Static = fixed-LSN fallback.
             - name: RO_MODE
               value: "Replica"
+            # STRONG base cloud_admin md5 (issue #168) — REQUIRED, fail-closed. The
+            # base RO pool serves cloud_admin over TCP (DATABASE_URL_RO, no APP_ROLE
+            # → harden skipped), so it carries the strong md5 from pg-base-admin
+            # (deploy/gen-secrets.sh) and never the public default. See 20-compute.yaml.
+            - name: CLOUD_ADMIN_MD5
+              valueFrom:
+                secretKeyRef: { name: pg-base-admin, key: CLOUD_ADMIN_MD5 }
           ports:
             - { name: pg, containerPort: 55433 }
             - { name: compute-http, containerPort: 3080 }

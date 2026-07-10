@@ -958,8 +958,12 @@ deliberately built so **no tenant plaintext ever lands on the compute**:
 > `DATABASE_URL_RO` reads negotiate SCRAM with no regression. The **base single-DB
 > tiers** (`compute` / `compute-ro` / `compute-warm`, no `APP_ROLE`) deliberately skip
 > the harden: there `cloud_admin` **is** the documented TCP credential the client
-> presents through the gateway (`DATABASE_URL` / `DATABASE_URL_RO`), a single-tenant
-> path defended by NetworkPolicy + operator posture (see "Network isolation caveat").
+> presents through the gateway (`DATABASE_URL` / `DATABASE_URL_RO`), so it must stay
+> TCP-reachable — but it now carries a **strong generated md5** (Secret `pg-base-admin`,
+> injected as a **required** env into `deploy/20/25/26`), so the **public default**
+> `cloud_admin:cloud_admin` is **rejected over TCP** on the base tier too (issue #168 —
+> see "Base-tier cloud_admin" below). Additional defense: NetworkPolicy + operator
+> posture (see "Network isolation caveat").
 > Before #164 the RO/warm entrypoints lacked the harden entirely (a p2 defense-in-depth
 > + consistency gap — the strong `cloud_admin` Secret password from #115 still held the
 > line, so the trivial #112 bypass did not reproduce). Drilled by
@@ -967,6 +971,55 @@ deliberately built so **no tenant plaintext ever lands on the compute**:
 > scram catch-all; cloud_admin rejected over TCP; app role authenticates SCRAM) and
 > `_verify-warmtier.sh` (shared harden mounted + sourced by the live warm entrypoint;
 > base warm correctly un-hardened so the `cloud_admin` `WARM_DSN` path is preserved).
+
+#### Base-tier `cloud_admin` — strong credential, never the public default (issue #168)
+
+The base single-DB tiers (`compute` / `compute-ro` / `compute-warm`, fronted by
+`pggw`) run `cloud_admin` as the **documented `DATABASE_URL[_RO]` credential over
+TCP**. They set no `APP_ROLE`, so the pg_hba harden is deliberately skipped
+(`cloud_admin` MUST stay TCP-reachable — it *is* the app credential) and they cannot
+use the per-app loopback-only reject. In a **pure** single-DB cluster that is fine
+(one tenant; `cloud_admin` is not a cross-tenant boundary). But when the base tier is
+**co-resident with the multi-tenant plane** on a CNI without NetworkPolicy (flannel),
+shipping the literal public default `cloud_admin:cloud_admin` would let any in-cluster
+pod wake `pggw → compute` (or direct-dial `compute:55433` after a wake) and become
+**superuser on the base DB** (the #112 vector on the base tier; blast radius = the base
+DB's own data, not the multi-tenant apps).
+
+**Fix.** `deploy/gen-secrets.sh` mints Secret **`pg-base-admin`** carrying a strong
+random `cloud_admin` credential — `password` (a strong plaintext) and
+`CLOUD_ADMIN_MD5` = `md5(password‖"cloud_admin")`. The base compute manifests
+(`deploy/20/25/26`) mount `CLOUD_ADMIN_MD5` as a **required** env (no `optional: true`),
+so a base compute **fails closed** — it cannot boot on the public default. The same
+run derives the base **`DATABASE_URL[_RO]`** Secret (`myapp-database`) from
+`pg-base-admin.password`, so the app credential and the compute's stored md5 always
+match. Result: `cloud_admin:cloud_admin` is **rejected over TCP** on every base tier;
+the strong `DATABASE_URL[_RO]` path wakes and serves unchanged. `deploy/30` is now
+doc-only (it no longer ships the literal default). Proven live by
+`_verify-base-admin.sh`. This is defense-in-depth and does **not** depend on #118
+(NetworkPolicy would also block the direct dial).
+
+> **Rotating base `cloud_admin` (a COORDINATED change for a CONSUMED single-DB app).**
+> `pg-base-admin` is **no-silent-rotation** (re-running `gen-secrets.sh` reuses the
+> existing password and reconciles `myapp-database` to match — idempotent). To
+> deliberately rotate, ORDER MATTERS because the app's `DATABASE_URL` copy and the
+> compute's stored md5 must move in lock-step:
+>
+> 1. `kubectl -n scale-zero-pg delete secret pg-base-admin` then re-run
+>    `sh deploy/gen-secrets.sh` (mints a fresh password + md5, reconciles
+>    `myapp-database`).
+> 2. `kubectl apply -f deploy/20-compute.yaml -f deploy/25-compute-warm.yaml -f
+>    deploy/26-compute-ro.yaml` (Secret-first is already done; the computes pick up the
+>    new md5 on their **next wake** — a compute at 0/0 changes nothing until then).
+> 3. Copy the new `DATABASE_URL[_RO]` from `myapp-database` into **every consuming
+>    app's namespace** (the `NextApp.spec.secrets.envMap` target) and roll the apps.
+> 4. Force a fresh wake and run `sh deploy/_verify-base-admin.sh`.
+>
+> If you rotate the compute md5 (steps 1–2) **before** updating the app's
+> `DATABASE_URL` copy (step 3), that app authenticates with the OLD password against
+> the NEW md5 → auth failure on its next cold connect. On **this** cluster the base
+> tier is unconsumed, so the rollout has no app-facing outage; on a **consumed**
+> single-DB deployment, do steps 3–4 in the same change window.
 
 > **Known limitation — cold-wake md5 window (compute_ctl, issue #158).** `compute_ctl`
 > opens the Postgres network socket (~T=.90) **before** it applies the spec roles

@@ -35,7 +35,9 @@ CLOUD_ADMIN_MD5="${CLOUD_ADMIN_MD5:-b093c0d3b281ba6da1eacc608620abd8}"
 # replica reads the same timeline), so app-role auth Just Works over SCRAM after the
 # harden while cloud_admin is rejected over TCP. On the base single-DB RO pool
 # (deploy/26, no APP_ROLE) the harden is skipped so DATABASE_URL_RO's cloud_admin-over-
-# TCP path (mirroring the primary single-DB) keeps working.
+# TCP path (mirroring the primary single-DB) keeps working — but with a STRONG
+# cloud_admin md5 injected from pg-base-admin (issue #168), so the public default is
+# rejected over TCP even here. The fallback below is only for a BARE local run.
 . /compute-files/lib-harden.sh
 
 echo "Rendering RO compute spec (tenant=${TENANT_ID} timeline=${TIMELINE_ID} mode=${RO_MODE})"

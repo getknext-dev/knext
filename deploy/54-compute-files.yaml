@@ -231,7 +231,9 @@ data:
     # replica reads the same timeline), so app-role auth Just Works over SCRAM after the
     # harden while cloud_admin is rejected over TCP. On the base single-DB RO pool
     # (deploy/26, no APP_ROLE) the harden is skipped so DATABASE_URL_RO's cloud_admin-over-
-    # TCP path (mirroring the primary single-DB) keeps working.
+    # TCP path (mirroring the primary single-DB) keeps working — but with a STRONG
+    # cloud_admin md5 injected from pg-base-admin (issue #168), so the public default is
+    # rejected over TCP even here. The fallback below is only for a BARE local run.
     . /compute-files/lib-harden.sh
 
     echo "Rendering RO compute spec (tenant=${TENANT_ID} timeline=${TIMELINE_ID} mode=${RO_MODE})"
@@ -302,7 +304,9 @@ data:
     # rewrites the pg_hba catch-all md5 -> scram-sha-256 (#117). Gated on APP_ROLE (below):
     # a per-app warm compute hardens exactly like the primary per-app writer, while the base
     # single-DB warm tier (deploy/25, no APP_ROLE) keeps cloud_admin over TCP so the warm
-    # path (WARM_DSN cloud_admin) mirrors the primary single-DB unchanged.
+    # path (WARM_DSN cloud_admin) mirrors the primary single-DB unchanged — but with a
+    # STRONG cloud_admin md5 injected from pg-base-admin (issue #168), so the public default
+    # is rejected over TCP even here. The fallback below is only for a BARE local run.
     . /compute-files/lib-harden.sh
 
     echo "Rendering compute spec (tenant=${TENANT_ID} timeline=${TIMELINE_ID})"
@@ -371,10 +375,14 @@ data:
     # directly can neither guess the password NOR be admitted as cloud_admin.
     #
     # On the PRIMARY single-DB compute (no APP_ROLE) cloud_admin IS the documented
-    # credential clients present THROUGH the primary gateway over TCP, so there we
-    # keep the dev-default fallback (fresh local clusters just work); that path is a
-    # single tenant, not a cross-tenant boundary, and is defended by NetworkPolicy +
-    # operator posture (docs/operations.md "Network isolation caveat").
+    # credential clients present THROUGH the primary gateway over TCP. In a PRODUCT
+    # deployment the base compute manifest (deploy/20) injects CLOUD_ADMIN_MD5 from the
+    # STRONG pg-base-admin Secret (deploy/gen-secrets.sh, matching the DATABASE_URL Secret
+    # plaintext), so the public default cloud_admin:cloud_admin is rejected over TCP even
+    # on the base tier (issue #168). The dev-default fallback below only applies to a BARE
+    # local run with no pg-base-admin Secret — a pure single-tenant path defended by
+    # NetworkPolicy + operator posture (docs/operations.md "Network isolation caveat" +
+    # "Base-tier cloud_admin").
     if [ -n "${APP_ROLE:-}" ]; then
       if [ -z "${CLOUD_ADMIN_MD5:-}" ] || [ "${CLOUD_ADMIN_MD5}" = "$PUBLIC_CLOUD_ADMIN_MD5" ]; then
         CLOUD_ADMIN_MD5="$(od -An -tx1 -N16 /dev/urandom | tr -d ' \n')"

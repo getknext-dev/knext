@@ -11,7 +11,10 @@
 set -eu
 NS=scale-zero-pg
 K="kubectl -n $NS"
-DSN="postgres://cloud_admin:cloud_admin@pggw:55432/postgres?sslmode=disable"
+# Base cloud_admin credential (issue #168): read from the DATABASE_URL Secret
+# (gen-secrets.sh owns it; no longer the public default). Bare fallback only.
+CA_CRED=$(kubectl -n scale-zero-pg get secret myapp-database -o jsonpath='{.data.DATABASE_URL}' 2>/dev/null | base64 -d 2>/dev/null | sed -E 's#^postgres://([^@]+)@.*#\1#'); [ -n "$CA_CRED" ] || CA_CRED="cloud_admin:cloud_admin"
+DSN="postgres://${CA_CRED}@pggw:55432/postgres?sslmode=disable"
 IDLE_S=60 # must match GW_IDLE_MS in 10-gateway.yaml
 
 fail() { echo "FAIL: $*" >&2; exit 1; }

@@ -12,7 +12,10 @@ K="kubectl -n $NS"
 # cloud_admin/cloud_admin is the upstream spec's dev default: compute_ctl
 # reconciles roles from config.json on every boot, so ALTER USER does not
 # stick — change the encrypted_password in 54-compute-files.yaml instead.
-DSN="postgres://cloud_admin:cloud_admin@pggw:55432/postgres?sslmode=disable"
+# Base cloud_admin credential (issue #168): read from the DATABASE_URL Secret
+# (gen-secrets.sh owns it; the strong password, not the public default). Bare fallback only.
+CA_CRED=$($K get secret myapp-database -o jsonpath='{.data.DATABASE_URL}' 2>/dev/null | base64 -d 2>/dev/null | sed -E 's#^postgres://([^@]+)@.*#\1#'); [ -n "$CA_CRED" ] || CA_CRED="cloud_admin:cloud_admin"
+DSN="postgres://${CA_CRED}@pggw:55432/postgres?sslmode=disable"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 ok() { echo "ok - $*"; }

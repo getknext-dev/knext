@@ -64,6 +64,16 @@ The durable object store is a **configured S3 endpoint**, not bundled MinIO. Run
 (`endpoint` / `bucket` / `region`). With no override, it defaults to the
 in-cluster MinIO above — nothing else to do for local/dev.
 
+> **`gen-secrets.sh` also mints the base `cloud_admin` credential (issue #168).** It
+> creates Secret `pg-base-admin` (a **strong random** `cloud_admin` password + its
+> md5) and derives the base `DATABASE_URL[_RO]` Secret `myapp-database` from it — so
+> the base tier never ships the literal public default `cloud_admin:cloud_admin`. The
+> base compute manifests mount `pg-base-admin`'s md5 as a **required** env, so
+> **`gen-secrets.sh` must run before `kubectl apply`** or a base `compute` will not
+> start (fail-closed). Read your app's `DATABASE_URL` from `myapp-database`, never a
+> hard-coded default. Details + rotation: [operations.md — Base-tier
+> `cloud_admin`](operations.md#base-tier-cloud_admin--strong-credential-never-the-public-default-issue-168).
+
 **External backend (managed cloud S3, or on-prem SeaweedFS / Ceph RADOS Gateway /
 Garage).** Point `storage-objstore` at it and **do not apply `deploy/50-minio.yaml`**:
 

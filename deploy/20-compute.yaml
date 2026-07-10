@@ -67,6 +67,19 @@ spec:
           envFrom:
             - configMapRef:
                 name: compute-config # TENANT_ID, TIMELINE_ID, PG_VERSION, PAGESERVER_HOST
+          env:
+            # STRONG base cloud_admin md5 (issue #168). This base single-DB writer
+            # runs cloud_admin as the documented DATABASE_URL credential over TCP
+            # (no APP_ROLE → the entrypoint pg_hba harden is deliberately skipped),
+            # so it cannot rely on the loopback-only reject. Injecting the strong
+            # md5 from pg-base-admin (minted by deploy/gen-secrets.sh, matching the
+            # strong plaintext in the DATABASE_URL Secret) means the public default
+            # cloud_admin:cloud_admin is rejected over TCP. REQUIRED (the
+            # secretKeyRef is NOT marked optional) → fail-closed: the pod will not
+            # start without the Secret, so a base compute can never boot on the default.
+            - name: CLOUD_ADMIN_MD5
+              valueFrom:
+                secretKeyRef: { name: pg-base-admin, key: CLOUD_ADMIN_MD5 }
           ports:
             - { name: pg, containerPort: 55433 }
             - { name: compute-http, containerPort: 3080 }

@@ -95,7 +95,9 @@ grep -q 'harden_cloud_admin_hba' "$HERE/54-compute-files.yaml" \
 ok "pg_hba control present (CNI-independent): per-app cloud_admin loopback-only + public default disabled"
 
 # --- 4. positive path: front door still serves through the gateway (drill a) ----
-DSN="postgres://cloud_admin:cloud_admin@pggw:55432/postgres?sslmode=disable"
+# Base cloud_admin credential (issue #168): from the DATABASE_URL Secret, not the default.
+CA_CRED=$(kubectl -n scale-zero-pg get secret myapp-database -o jsonpath='{.data.DATABASE_URL}' 2>/dev/null | base64 -d 2>/dev/null | sed -E 's#^postgres://([^@]+)@.*#\1#'); [ -n "$CA_CRED" ] || CA_CRED="cloud_admin:cloud_admin"
+DSN="postgres://${CA_CRED}@pggw:55432/postgres?sslmode=disable"
 P=netpol-probe-$$
 $K run "$P" --image="$CLIENT_IMG" --image-pull-policy=IfNotPresent \
   --restart=Never --quiet --command -- psql "$DSN" -tA -c "select 1" >/dev/null 2>&1 || true

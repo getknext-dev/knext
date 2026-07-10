@@ -109,6 +109,79 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# pg-base-admin — strong cloud_admin credential for the BASE single-DB tiers (issue #168)
+# ---------------------------------------------------------------------------
+# The BASE single-DB tiers (compute / compute-ro / compute-warm, deploy/20/25/26)
+# run cloud_admin as the DOCUMENTED DATABASE_URL[_RO] credential presented over TCP
+# through pggw. They set NO APP_ROLE, so the entrypoint pg_hba harden is deliberately
+# SKIPPED (cloud_admin MUST stay TCP-reachable — it IS the app credential). That is
+# fine for a PURE single-DB cluster, but when the base tier is CO-RESIDENT with the
+# multi-tenant plane on a CNI without NetworkPolicy (flannel), shipping the literal
+# public default cloud_admin:cloud_admin makes any in-cluster pod a superuser on the
+# base DB (the #112 vector on the base tier). So the base tier gets a STRONG cloud_admin
+# credential here. Unlike pg-cloud-admin (a plaintext-LESS random md5 for loopback-only
+# per-app computes), the base tier needs a KNOWN PLAINTEXT — libpq needs it in the DSN.
+# Two keys:
+#   password        -> a strong random PLAINTEXT (goes into DATABASE_URL[_RO] below)
+#   CLOUD_ADMIN_MD5 -> md5(password || "cloud_admin"), the bare md5 body compute_ctl
+#                      stores as cloud_admin's encrypted_password (config.json). The
+#                      base compute manifests mount it as a REQUIRED env (fail-closed:
+#                      a base compute can never boot on the public default).
+#
+# No-silent-rotation: if it exists, leave it (and REUSE its password to keep the
+# DATABASE_URL Secret below in sync). Rotating base cloud_admin is deliberate; for a
+# CONSUMED single-DB deployment it is a COORDINATED rotation (rotate this Secret ->
+# re-apply base compute -> next wake picks up the new md5; the app's DATABASE_URL copy
+# must move in lock-step) — see docs/operations.md "Base-tier cloud_admin".
+# md5 helper: bare 32-hex md5 of the argument, POSIX-portable (openssl | md5sum | md5).
+md5hex() {
+  if command -v openssl >/dev/null 2>&1; then printf '%s' "$1" | openssl md5 | awk '{print $NF}'
+  elif command -v md5sum >/dev/null 2>&1; then printf '%s' "$1" | md5sum | awk '{print $1}'
+  elif command -v md5 >/dev/null 2>&1; then printf '%s' "$1" | md5 -q
+  else fail "need one of openssl/md5sum/md5 to compute the base cloud_admin md5"; fi
+}
+BANAME=pg-base-admin
+if $K get secret "$BANAME" >/dev/null 2>&1; then
+  echo "ok - Secret $BANAME already exists; leaving untouched (no silent rotation)"
+  BA_PASS=$($K get secret "$BANAME" -o jsonpath='{.data.password}' | base64 -d)
+  [ -n "$BA_PASS" ] || fail "$BANAME exists but has no 'password' key — delete + re-run to regenerate"
+else
+  BA_PASS="${PG_BASE_ADMIN_PASSWORD:-}"
+  if [ -z "$BA_PASS" ]; then
+    if command -v openssl >/dev/null 2>&1; then
+      BA_PASS=$(openssl rand -hex 16) # 32 hex chars, strong + unguessable
+    else
+      BA_PASS=$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 32)
+    fi
+  fi
+  [ "$BA_PASS" = "cloud_admin" ] && fail "refusing to write the public default cloud_admin password into $BANAME"
+  BA_MD5=$(md5hex "${BA_PASS}cloud_admin")
+  [ "$BA_MD5" = "$PUBLIC_DEFAULT_MD5" ] && fail "refusing to write the public default cloud_admin md5 into $BANAME"
+  $K create secret generic "$BANAME" \
+    --from-literal=password="$BA_PASS" \
+    --from-literal=CLOUD_ADMIN_MD5="$BA_MD5" >/dev/null \
+    || fail "could not create Secret $BANAME"
+  echo "ok - created Secret $BANAME (strong base cloud_admin: plaintext + md5, both hidden)"
+fi
+
+# base DATABASE_URL[_RO] Secret — DERIVED from pg-base-admin.password (issue #168).
+# This replaces the old static deploy/30 that shipped cloud_admin:cloud_admin. It is
+# RECONCILED (not no-rotate): the credential is stable (pg-base-admin above never
+# rotates silently), so re-running always yields the SAME URLs — idempotent, and it
+# self-heals a hand-edited/stale copy. In real use, COPY this Secret into the app's
+# namespace (NextApp.spec.secrets.envMap.DATABASE_URL); see deploy/30-knext-secret.yaml.
+DBNAME=myapp-database
+DBHOST=pggw.scale-zero-pg.svc.cluster.local
+DB_URL="postgres://cloud_admin:${BA_PASS}@${DBHOST}:55432/postgres?sslmode=disable"
+DB_RO_URL="postgres://cloud_admin:${BA_PASS}@${DBHOST}:55434/postgres?sslmode=disable"
+$K create secret generic "$DBNAME" \
+  --from-literal=DATABASE_URL="$DB_URL" \
+  --from-literal=DATABASE_URL_RO="$DB_RO_URL" \
+  --dry-run=client -o yaml | $K apply -f - >/dev/null \
+  || fail "could not create/reconcile Secret $DBNAME"
+echo "ok - reconciled Secret $DBNAME (base DATABASE_URL[_RO]; strong cloud_admin plaintext hidden)"
+
+# ---------------------------------------------------------------------------
 # storage-objstore — the object-storage BACKEND target (issue #105)
 # ---------------------------------------------------------------------------
 # The pageserver (page offload) + safekeepers (WAL offload) read their S3

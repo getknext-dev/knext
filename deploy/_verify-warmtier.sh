@@ -35,7 +35,9 @@ else
 fi
 # a derived image is already published; only a bare local override defaults to building
 case "$IMAGE_SRC" in *override*) KSPG_SKIP_BUILD="${KSPG_SKIP_BUILD:-0}" ;; *) KSPG_SKIP_BUILD="${KSPG_SKIP_BUILD:-1}" ;; esac
-WARM_DSN="postgres://cloud_admin:cloud_admin@pggw-warm:55432/postgres?sslmode=disable"
+# Base cloud_admin credential (issue #168): from the DATABASE_URL Secret, not the default.
+CA_CRED=$(kubectl -n scale-zero-pg get secret myapp-database -o jsonpath='{.data.DATABASE_URL}' 2>/dev/null | base64 -d 2>/dev/null | sed -E 's#^postgres://([^@]+)@.*#\1#'); [ -n "$CA_CRED" ] || CA_CRED="cloud_admin:cloud_admin"
+WARM_DSN="postgres://${CA_CRED}@pggw-warm:55432/postgres?sslmode=disable"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 ok() { echo "ok - $*"; }

@@ -17,7 +17,9 @@
 set -eu
 NS=scale-zero-pg
 K="kubectl -n $NS"
-BASE="cloud_admin:cloud_admin@pggw:55432/postgres"
+# Base cloud_admin credential (issue #168): from the DATABASE_URL Secret, not the default.
+CA_CRED=$($K get secret myapp-database -o jsonpath='{.data.DATABASE_URL}' 2>/dev/null | base64 -d 2>/dev/null | sed -E 's#^postgres://([^@]+)@.*#\1#'); [ -n "$CA_CRED" ] || CA_CRED="cloud_admin:cloud_admin"
+BASE="${CA_CRED}@pggw:55432/postgres"
 DSN_REQUIRE="postgres://$BASE?sslmode=require"
 DSN_DISABLE="postgres://$BASE?sslmode=disable"
 

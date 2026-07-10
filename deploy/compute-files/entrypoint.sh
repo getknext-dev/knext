@@ -33,10 +33,15 @@ PUBLIC_CLOUD_ADMIN_MD5=b093c0d3b281ba6da1eacc608620abd8
 # directly can neither guess the password NOR be admitted as cloud_admin.
 #
 # On the PRIMARY single-DB compute (no APP_ROLE) cloud_admin IS the documented
-# credential clients present THROUGH the primary gateway over TCP, so there we
-# keep the dev-default fallback (fresh local clusters just work); that path is a
-# single tenant, not a cross-tenant boundary, and is defended by NetworkPolicy +
-# operator posture (docs/operations.md "Network isolation caveat").
+# credential clients present THROUGH the primary gateway over TCP. In a PRODUCT
+# deployment the base compute manifest (deploy/20) injects CLOUD_ADMIN_MD5 from the
+# STRONG pg-base-admin Secret (minted by deploy/gen-secrets.sh, matching the strong
+# plaintext in the DATABASE_URL Secret), so the public default cloud_admin:cloud_admin
+# is rejected over TCP even on the base tier (issue #168 — a base tier co-resident with
+# the multi-tenant plane must never ship the literal default). The dev-default fallback
+# below only applies to a BARE local run with no pg-base-admin Secret (a pure single-
+# tenant path, defended by NetworkPolicy + operator posture, docs/operations.md
+# "Network isolation caveat" + "Base-tier cloud_admin").
 if [ -n "${APP_ROLE:-}" ]; then
   if [ -z "${CLOUD_ADMIN_MD5:-}" ] || [ "${CLOUD_ADMIN_MD5}" = "$PUBLIC_CLOUD_ADMIN_MD5" ]; then
     CLOUD_ADMIN_MD5="$(od -An -tx1 -N16 /dev/urandom | tr -d ' \n')"
