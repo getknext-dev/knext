@@ -114,6 +114,7 @@ function parseCliArgs(): DeployOptions {
                 "  db bind           bind an existing Postgres Secret to the NextApp CR",
                 "  doctor            cluster-prereq preflight (read-only; --json)",
                 "  status            show the NextApp's honest conditions (read-only; --json, --watch)",
+                "  rollback          pin traffic to a prior Knative Revision (--to, --canary)",
                 "",
                 "Options:",
                 "  -r, --registry  Container registry (overrides config)",
@@ -427,6 +428,9 @@ if (isEntrypoint(import.meta.url)) {
         } else if (sub === "db") {
             const { dbMain } = await import("./db-bind");
             await dbMain(process.argv.slice(3));
+        } else if (sub === "rollback") {
+            const { rollbackMain } = await import("./rollback");
+            process.exit(await rollbackMain(process.argv.slice(3)));
         } else {
             await deploy();
         }
@@ -438,7 +442,9 @@ if (isEntrypoint(import.meta.url)) {
                   ? "doctor failed"
                   : sub === "status"
                     ? "status failed"
-                    : "Deployment failed";
+                    : sub === "rollback"
+                      ? "rollback failed"
+                      : "Deployment failed";
         log.fatal({ err }, label);
         process.exit(1);
     }

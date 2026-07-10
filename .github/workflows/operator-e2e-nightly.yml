@@ -212,3 +212,89 @@ jobs:
       - name: Tear down kind cluster
         if: always()
         run: kind delete cluster --name kn-next-operator-test-e2e || true
+
+  # Rollback e2e (build tag `e2e_rollback`): the ROADMAP Tier-B exit criterion
+  # "rollback demoed", proven end-to-end (test/e2e/rollback_e2e_test.go). The
+  # REAL built kn-next CLI patches ONLY the NextApp CR's spec.traffic
+  # (ADR-0001) and the suite asserts the operator reconciles the ksvc split —
+  # pin to revision-1, a 75/25 canary, and the bare-rollback clear — with REAL
+  # HTTP proving WHICH revision serves. Unlike cli-e2e the app image is a
+  # real, servable, public digest-pinned image (ghcr.io/knative/helloworld-go,
+  # multi-arch), so the ksvc genuinely becomes Ready with two revisions — no
+  # SCALE_TEST_IMAGE repo variable required.
+  #
+  # INDEPENDENT job (own kind cluster) so a scale/cli flake never blocks it.
+  # Deliberately NO continue-on-error: every assertion is state-based
+  # (programmed traffic splits, CR fields, revision conditions), so a failure
+  # here is signal, not noise.
+  rollback-e2e:
+    name: kn-next rollback pin/canary/clear against kind (e2e_rollback)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: packages/kn-next-operator/go.mod
+          cache-dependency-path: packages/kn-next-operator/go.sum
+
+      # The suite shells out to the built CLI with plain `node` and builds it
+      # via `pnpm --filter @knext/core build` — so the job needs Node + pnpm
+      # (version pinned by `packageManager` in package.json) + workspace deps.
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Install workspace dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Install kind
+        uses: helm/kind-action@v1
+        with:
+          install_only: true
+
+      - name: Create kind cluster
+        run: kind create cluster --name kn-next-operator-test-e2e --wait 120s
+
+      - name: Install cert-manager (operator webhook certs)
+        run: |
+          set -euo pipefail
+          kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.16.2/cert-manager.yaml
+          kubectl wait --for=condition=Available --timeout=300s \
+            -n cert-manager deployment/cert-manager deployment/cert-manager-webhook deployment/cert-manager-cainjector
+
+      - name: Install Knative Serving + Kourier
+        # Kourier is load-bearing here (not just doctor hygiene): the suite's
+        # HTTP assertions route through the ksvc's cluster-local address, which
+        # an ExternalName Service points at kourier-internal — no programmed
+        # ingress, no routed requests, no rollback proof.
+        run: |
+          set -euo pipefail
+          KNATIVE_VERSION="knative-v1.16.0"
+          kubectl apply -f "https://github.com/knative/serving/releases/download/${KNATIVE_VERSION}/serving-crds.yaml"
+          kubectl apply -f "https://github.com/knative/serving/releases/download/${KNATIVE_VERSION}/serving-core.yaml"
+          kubectl apply -f "https://github.com/knative/net-kourier/releases/download/${KNATIVE_VERSION}/kourier.yaml"
+          kubectl patch configmap/config-network \
+            --namespace knative-serving \
+            --type merge \
+            --patch '{"data":{"ingress-class":"kourier.ingress.networking.knative.dev"}}'
+          kubectl wait --for=condition=Available --timeout=300s \
+            -n knative-serving deployment/controller deployment/webhook deployment/autoscaler
+          kubectl wait --for=condition=Available --timeout=300s \
+            -n knative-serving deployment/net-kourier-controller
+
+      - name: Run rollback e2e suite (pin / canary / clear)
+        working-directory: packages/kn-next-operator
+        env:
+          KIND_CLUSTER: kn-next-operator-test-e2e
+        run: make test-e2e-rollback
+
+      - name: Tear down kind cluster
+        if: always()
+        run: kind delete cluster --name kn-next-operator-test-e2e || true

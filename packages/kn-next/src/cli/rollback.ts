@@ -105,10 +105,43 @@ export function parseRollbackArgs(argv: readonly string[]): RollbackArgs {
     return out;
 }
 
-async function rollback() {
+const ROLLBACK_HELP = `kn-next rollback — shift serving traffic to a prior Knative Revision
+
+Patches ONLY the NextApp CR's spec.traffic (one kubectl merge-patch); the
+operator reconciles the ksvc traffic split (ADR-0001). Uploaded assets are
+untouched, so the rolled-away revision remains serviceable (#93 skew note).
+
+Usage:
+  kn-next rollback [<app>] --to <revision> [--canary <n>] [options]
+  kn-next rollback [<app>]                  # clear the pin (back to latest-ready)
+
+Options:
+  --to <revision>       Prior Knative Revision to pin (e.g. my-app-00001).
+                        Omit to clear any pin and revert to latest-ready.
+  --canary <n>          With --to: send n% (1-99) of traffic to latest-ready,
+                        (100-n)% to the pinned revision
+  -n, --namespace <ns>  Kubernetes namespace (default: default)
+  -h, --help            Show this help
+`;
+
+/** Entry for \`kn-next rollback\`. Returns the process exit code. */
+export async function rollbackMain(argv: readonly string[]): Promise<number> {
+    if (argv.includes("-h") || argv.includes("--help")) {
+        // Written synchronously to fd 1 (not via the async pino transport) so
+        // `kn-next rollback --help | cat` is never truncated — same contract as
+        // the status/doctor help paths.
+        const { writeSync } = await import("node:fs");
+        writeSync(1, ROLLBACK_HELP);
+        return 0;
+    }
+    await rollback(argv);
+    return 0;
+}
+
+async function rollback(argv: readonly string[]) {
     log.info("⏪ kn-next rollback");
 
-    const args = parseRollbackArgs(process.argv.slice(2));
+    const args = parseRollbackArgs(argv);
 
     // Resolve the app name: positional arg wins, else the config's name.
     let appName = args.app;
@@ -145,10 +178,11 @@ async function rollback() {
     log.info("✨ Rollback complete!");
 }
 
-// Run only when invoked directly as the entry (not when imported, e.g. in tests).
+// Run only when invoked directly as the entry (not when imported by tests or
+// the kn-next bin dispatcher).
 if (isEntrypoint(import.meta.url)) {
     try {
-        await rollback();
+        process.exit(await rollbackMain(process.argv.slice(2)));
     } catch (err) {
         log.fatal({ err }, "Rollback failed");
         process.exit(1);

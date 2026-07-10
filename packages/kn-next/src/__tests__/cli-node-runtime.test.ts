@@ -216,6 +216,21 @@ describe("built bin (dist/cli/kn-next.js) is Node-runnable", () => {
         expect(r.stdout).toContain("db bind");
         expect(r.stdout).toContain("doctor");
         expect(r.stdout).toContain("status");
+        // #92 rollback is a first-class bin subcommand (Tier-B "rollback demoed").
+        expect(r.stdout).toContain("rollback");
+    });
+
+    it("`node kn-next.js rollback --help` dispatches and exits 0", () => {
+        // The bin must route `rollback` to rollbackMain — NOT fall through to the
+        // deploy flow (which would try to build+deploy). The e2e_rollback suite
+        // (test/e2e/rollback_e2e_test.go) exercises the real traffic patch; this
+        // hermetic test pins the dispatch + help contract.
+        const r = run(process.execPath, [distBin, "rollback", "--help"]);
+        expect(r.error).toBeUndefined();
+        expect(r.status).toBe(0);
+        expect(r.stdout).toContain("kn-next rollback");
+        expect(r.stdout).toContain("--to");
+        expect(r.stdout).toContain("--canary");
     });
 
     it("`node kn-next.js status --help` dispatches and exits 0", () => {

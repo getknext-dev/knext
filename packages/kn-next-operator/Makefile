@@ -127,6 +127,15 @@ test-e2e-cli: manifests generate fmt vet ## Run the CLI e2e suite: the REAL buil
 	# must surface as a Ginkgo failure, not a deadline goroutine-dump panic.
 	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) go test -tags=e2e_cli ./test/e2e/ -v -ginkgo.v -run TestCLIE2E -timeout 30m
 
+.PHONY: test-e2e-rollback
+test-e2e-rollback: manifests generate fmt vet ## Run the ROLLBACK e2e suite (#92 / Tier-B "rollback demoed"): the REAL built kn-next CLI pins/canaries/clears spec.traffic on a live NextApp with a SERVABLE public digest-pinned image (2 real revisions), and the suite asserts the operator reconciles the ksvc split + real HTTP routes to the pinned revision. Default mode builds+installs the operator on kind (cluster created via setup-test-e2e if missing) — requires cert-manager+Knative+Kourier on the cluster AND `pnpm install --frozen-lockfile` at the repo root (the suite builds the CLI itself). Set KNEXT_E2E_KUBE_CONTEXT=<context> to run against an EXISTING cluster's operator (no install, no kind; all writes confined to one fresh throwaway namespace — NOTE: unlike test-e2e-cli, real app pods DO run there).
+	# kind-mode only: create the kind cluster if missing (idempotent). In
+	# existing-cluster mode no kind cluster is wanted at all.
+	@if [ -z "$$KNEXT_E2E_KUBE_CONTEXT" ]; then $(MAKE) setup-test-e2e; fi
+	# Explicit -timeout (>> Go's silent 600s default): a genuine assertion failure
+	# must surface as a Ginkgo failure, not a deadline goroutine-dump panic.
+	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) go test -tags=e2e_rollback ./test/e2e/ -v -ginkgo.v -run TestRollbackE2E -timeout 40m
+
 .PHONY: lint
 lint: golangci-lint ## Run golangci-lint linter
 	"$(GOLANGCI_LINT)" run

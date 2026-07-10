@@ -41,6 +41,18 @@ func warnError(err error) {
 	_, _ = fmt.Fprintf(GinkgoWriter, "warning: %v\n", err)
 }
 
+// CurlImage returns the in-cluster curl image used by the ephemeral HTTP-probe
+// pods (ActivateAndGet / ScrapeAppMetrics). Defaults to the Docker Hub
+// curlimages/curl pin; KNEXT_E2E_CURL_IMAGE overrides it for environments
+// where docker.io is unreachable/throttled (the curl project publishes the
+// same image at quay.io/curl/curl).
+func CurlImage() string {
+	if v := strings.TrimSpace(os.Getenv("KNEXT_E2E_CURL_IMAGE")); v != "" {
+		return v
+	}
+	return "curlimages/curl:8.11.1"
+}
+
 // Run executes the provided command within this context
 func Run(cmd *exec.Cmd) (string, error) {
 	dir, _ := GetProjectDir()
@@ -260,7 +272,7 @@ func ActivateAndGet(namespace, ksvc, path string) (int, string, error) {
 		"-n", namespace,
 		"--restart=Never",
 		"--rm", "-i",
-		"--image=curlimages/curl:8.11.1",
+		"--image="+CurlImage(),
 		"--command", "--",
 		"curl", "-sS", "--max-time", "120",
 		"-w", fmt.Sprintf("\\n%s%%{http_code}%s", codePrefix, codeSuffix), url,
@@ -300,7 +312,7 @@ func ScrapeAppMetrics(namespace, ksvc string) (string, error) {
 		"-n", namespace,
 		"--restart=Never",
 		"--rm", "-i",
-		"--image=curlimages/curl:8.11.1",
+		"--image="+CurlImage(),
 		"--command", "--",
 		"curl", "-sS", "--max-time", "30", url,
 	)
