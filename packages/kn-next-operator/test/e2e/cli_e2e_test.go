@@ -211,9 +211,15 @@ func runCLI(args ...string) cliResult {
 // that property. A DETERMINISTIC misbehavior keeps failing every attempt and
 // surfaces as the Eventually's final, real failure — nothing is weakened, and
 // on a local/CI kind cluster every block passes on its first attempt.
+//
+// The budget is sized for doctor's worst case on a LOSSY remote link: one
+// doctor attempt makes ~10 sequential kubectl calls (each exec'ing the cloud
+// credential plugin) and needs ALL of them to connect; measured live against
+// OKE at a 10–30%% per-call drop rate, a fully-connected attempt can take
+// several tries.
 const (
-	cliAssertTimeout = 3 * time.Minute
-	cliAssertPoll    = 15 * time.Second
+	cliAssertTimeout = 8 * time.Minute
+	cliAssertPoll    = 5 * time.Second
 )
 
 // kubectlEventuallyCreates runs an idempotent kubectl create-style command,
