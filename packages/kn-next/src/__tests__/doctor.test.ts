@@ -18,6 +18,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
     type CheckResult,
+    classifyKubectlFailure,
     formatDoctorTable,
     KOURIER_INGRESS_CLASS,
     type KubectlFn,
@@ -382,6 +383,174 @@ describe("runDoctor — check (f) Knative Serving", () => {
     });
 });
 
+// #230: kubectl probe failures caused by the PROBE PATH (network, TLS, expired
+// credentials) must never be diagnosed as cluster-state facts ("not found").
+// Field-learned on OKE over a flaky WAN: an expired session token made doctor
+// report a healthy cluster as missing its operator.
+const TLS_TIMEOUT_STDERR =
+    "Unable to connect to the server: net/http: TLS handshake timeout";
+const CRED_EXEC_STDERR =
+    "Unable to connect to the server: getting credentials: exec: executable oci failed with exit code 1";
+const NOTFOUND_CRD_STDERR =
+    'Error from server (NotFound): customresourcedefinitions.apiextensions.k8s.io "nextapps.apps.kn-next.dev" not found';
+
+describe("classifyKubectlFailure (#230) — conservative stderr classifier", () => {
+    it("maps NotFound-style stderr to not-found (today's behavior)", () => {
+        expect(classifyKubectlFailure(NOTFOUND_CRD_STDERR)).toBe("not-found");
+        expect(
+            classifyKubectlFailure(
+                'namespaces "kn-next-operator-system" not found',
+            ),
+        ).toBe("not-found");
+        expect(
+            classifyKubectlFailure(
+                'error: the server doesn\'t have a resource type "nextapps"',
+            ),
+        ).toBe("not-found");
+    });
+
+    it("maps clearly-infrastructural network signatures to network", () => {
+        expect(classifyKubectlFailure(TLS_TIMEOUT_STDERR)).toBe("network");
+        expect(
+            classifyKubectlFailure(
+                "The connection to the server 10.0.0.1:6443 was refused - did you specify the right host or port?",
+            ),
+        ).toBe("network");
+        expect(
+            classifyKubectlFailure(
+                "Unable to connect to the server: dial tcp 10.0.0.1:6443: i/o timeout",
+            ),
+        ).toBe("network");
+    });
+
+    it("maps credential/authn signatures to auth", () => {
+        expect(classifyKubectlFailure(CRED_EXEC_STDERR)).toBe("auth");
+        expect(
+            classifyKubectlFailure(
+                "error: You must be logged in to the server (Unauthorized)",
+            ),
+        ).toBe("auth");
+    });
+
+    it("keeps anything ambiguous as unknown (falls back to today's behavior)", () => {
+        expect(classifyKubectlFailure("")).toBe("unknown");
+        expect(classifyKubectlFailure("some novel kubectl error")).toBe(
+            "unknown",
+        );
+    });
+});
+
+describe("runDoctor — probe-infra errors are not 'not found' (#230)", () => {
+    /** Run doctor with the crd probe replaced by the given failure. */
+    async function crdCheckWith(stderr: string): Promise<{
+        crd: CheckResult;
+        exitCode: 0 | 1;
+    }> {
+        const stubs = healthyStubs();
+        stubs["kubectl get crd nextapps.apps.kn-next.dev -o json"] = {
+            ok: false,
+            stderr,
+        };
+        const report = await runDoctor({
+            kubectl: stubKubectl(stubs),
+            probeImage: okProbe,
+        });
+        return { crd: byId(report.checks).crd, exitCode: report.exitCode };
+    }
+
+    it("(a) NotFound stderr stays a not-found FAIL", async () => {
+        const { crd } = await crdCheckWith(NOTFOUND_CRD_STDERR);
+        expect(crd.status).toBe("fail");
+        expect(crd.detail).toMatch(/not found/i);
+    });
+
+    it("(b) TLS-timeout stderr becomes a distinct ERROR carrying the stderr excerpt, not a not-found (exit 1)", async () => {
+        const { crd, exitCode } = await crdCheckWith(TLS_TIMEOUT_STDERR);
+        expect(crd.status).toBe("error");
+        expect(crd.detail).not.toMatch(/not found/i);
+        expect(crd.detail).toContain("TLS handshake timeout");
+        expect(crd.hint).toBeTruthy();
+        // The preflight could not verify the cluster — that is not a green run.
+        expect(exitCode).toBe(1);
+    });
+
+    it("(c) credential-exec-failure stderr becomes an auth ERROR with a re-authenticate hint", async () => {
+        const { crd } = await crdCheckWith(CRED_EXEC_STDERR);
+        expect(crd.status).toBe("error");
+        expect(crd.detail).not.toMatch(/not found/i);
+        expect(crd.detail).toContain("getting credentials: exec");
+        expect(crd.hint).toMatch(/re-authenticate/i);
+    });
+
+    it("ambiguous stderr keeps today's not-found FAIL behavior", async () => {
+        const { crd } = await crdCheckWith("some novel kubectl error");
+        expect(crd.status).toBe("fail");
+        expect(crd.detail).toMatch(/not found/i);
+    });
+
+    it("cert-manager probe infra failure is an ERROR, not the not-installed WARN", async () => {
+        const stubs = healthyStubs();
+        stubs[
+            "kubectl get deployment cert-manager-webhook -n cert-manager -o json"
+        ] = { ok: false, stderr: TLS_TIMEOUT_STDERR };
+        const report = await runDoctor({
+            kubectl: stubKubectl(stubs),
+            probeImage: okProbe,
+        });
+        const cm = byId(report.checks)["cert-manager"];
+        expect(cm.status).toBe("error");
+        expect(cm.detail).not.toMatch(/not found/i);
+    });
+
+    it("operator-deployment probe infra failure is an ERROR and still skips the image probe", async () => {
+        const stubs = healthyStubs();
+        stubs["kubectl get deployments -n kn-next-operator-system -o json"] = {
+            ok: false,
+            stderr: CRED_EXEC_STDERR,
+        };
+        const probe = vi.fn(okProbe);
+        const report = await runDoctor({
+            kubectl: stubKubectl(stubs),
+            probeImage: probe,
+        });
+        const checks = byId(report.checks);
+        expect(checks.operator.status).toBe("error");
+        expect(checks.image.status).toBe("skip");
+        expect(probe).toHaveBeenCalledTimes(0);
+    });
+
+    it("kourier-reconciler probe infra failure is an ERROR, not a missing-reconciler FAIL", async () => {
+        const stubs = healthyStubs();
+        stubs[
+            "kubectl get deployment net-kourier-controller -n knative-serving -o json"
+        ] = { ok: false, stderr: TLS_TIMEOUT_STDERR };
+        stubs[
+            "kubectl get deployment net-kourier-controller -n kourier-system -o json"
+        ] = { ok: false, stderr: TLS_TIMEOUT_STDERR };
+        const report = await runDoctor({
+            kubectl: stubKubectl(stubs),
+            probeImage: okProbe,
+        });
+        const ingress = byId(report.checks).ingress;
+        expect(ingress.status).toBe("error");
+        expect(ingress.detail).not.toMatch(/no Ready net-kourier/i);
+    });
+
+    it("gate failure keeps the documented warn+SKIP (exit 0) contract but surfaces the auth hint", async () => {
+        const kubectl: KubectlFn = () => ({
+            ok: false,
+            stdout: "",
+            stderr: CRED_EXEC_STDERR,
+        });
+        const report = await runDoctor({ kubectl, probeImage: okProbe });
+        const checks = byId(report.checks);
+        expect(checks.cluster.status).toBe("warn");
+        expect(checks.cluster.hint).toMatch(/re-authenticate/i);
+        expect(checks.crd.status).toBe("skip");
+        expect(report.exitCode).toBe(0);
+    });
+});
+
 describe("parseImageRef", () => {
     it("splits registry / repository / reference for a digest-pinned ghcr ref", () => {
         expect(parseImageRef(OPERATOR_IMAGE)).toEqual({
@@ -429,6 +598,20 @@ describe("output surface", () => {
         expect(table).toContain("FAIL");
         expect(table).toContain("SKIP");
         expect(table).toContain("NextApp CRD");
+    });
+
+    it("formatDoctorTable renders ERROR rows with the one-line hint (#230)", () => {
+        const table = formatDoctorTable([
+            {
+                id: "crd",
+                title: "NextApp CRD",
+                status: "error",
+                detail: "probe failed (auth): getting credentials: exec …",
+                hint: "credentials failed — re-authenticate and retry",
+            },
+        ]);
+        expect(table).toContain("ERROR");
+        expect(table).toMatch(/re-authenticate and retry/);
     });
 
     it("parseDoctorArgs understands --json", () => {
