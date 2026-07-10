@@ -107,7 +107,9 @@ The normal flow after the first publish:
 2. Merging that PR to `main` makes `changesets/action` open (or update) a **"Version Packages"**
    PR that applies the version bumps and updates changelogs.
 3. Merging the **"Version Packages"** PR (a second push to `main`) runs `changeset publish` and
-   publishes the bumped versions.
+   publishes the bumped versions. The workflow also creates one **GitHub Release** per published
+   package (`createGithubReleases: true`), tagged `@knext/<pkg>@x.y.z` — the hand-made `v0.1.0`
+   release used a different tag format, so the formats never collide.
 
 ## Interim channel — GitHub Packages (`@getknext-dev/*`)
 
@@ -170,6 +172,28 @@ npx @getknext-dev/core --help    # runs the kn-next bin from the GHP package
 > Caveat: anonymous installs get a `401` — the auth line above is mandatory. Once the npmjs
 > release goes live, migrate consumers back to `npx @knext/core` / `@knext/*`; the GHP scope is
 > interim only.
+
+### Deprecation plan for `@getknext-dev/*` (execute when npmjs goes live)
+
+Decided 2026-07 (architect sign-off on the interim channel): the GHP scope is **deprecated the
+day `@knext/*` publishes to npmjs** (issue #53). When that happens, a maintainer should:
+
+1. Publish one final `@getknext-dev/*` patch whose README/description points at `@knext/*` on
+   npmjs, **or** simply mark the existing GHP versions deprecated:
+
+   ```sh
+   npm deprecate @getknext-dev/core "moved to @knext/core on registry.npmjs.org" \
+     --registry=https://npm.pkg.github.com
+   npm deprecate @getknext-dev/lib "moved to @knext/lib on registry.npmjs.org" \
+     --registry=https://npm.pkg.github.com
+   ```
+
+2. Stop dispatching `release-ghp.yml` (leave the workflow in place for history; it is manual-only
+   so it cannot fire accidentally).
+3. Update this doc and any consumer `.npmrc` snippets to the `@knext/*` install path.
+
+Do **not** unpublish the GHP versions — existing consumers keep working; deprecation warns them
+to migrate.
 
 ## Troubleshooting
 

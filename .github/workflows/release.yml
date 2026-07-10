@@ -82,6 +82,10 @@ jobs:
           publish: ${{ steps.gate.outputs.publish }}
           commit: 'chore: version packages'
           title: 'chore: version packages'
+          # On publish, create one GitHub Release per published package, tagged
+          # `@knext/<pkg>@x.y.z`. The hand-made `v0.1.0` release predates this and
+          # uses a different tag format, so there is no tag collision.
+          createGithubReleases: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
