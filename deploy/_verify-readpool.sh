@@ -25,6 +25,12 @@ set -eu
 cd "$(dirname "$0")"
 NS=scale-zero-pg
 K="kubectl -n $NS"
+# Throwaway psql CLIENT pods use a small, ALWAYS-PULLABLE psql image (issue #171):
+# the neon compute image is pre-pulled on only SOME nodes, so a client pod pinned
+# to it with imagePullPolicy=Never intermittently hits ErrImageNeverPull (and its
+# 150s pod-wait then expires). postgres:17-alpine ships a v17 psql, is public +
+# ~80MB, and schedules on ANY node with a normal pull policy. Override via PSQL_IMG.
+PSQL_IMG="${PSQL_IMG:-postgres:17-alpine}"
 # Gateway image (issue #94): DERIVE from what actually ships so the drill never
 # drifts from the release again (the old hardcoded v0.6.0@9ee649 default rotted).
 # Order of truth:
@@ -46,7 +52,7 @@ fi
 case "$IMAGE_SRC" in *override*) KSPG_SKIP_BUILD="${KSPG_SKIP_BUILD:-0}" ;; *) KSPG_SKIP_BUILD="${KSPG_SKIP_BUILD:-1}" ;; esac
 RO_MODE="${RO_MODE:-Replica}"
 # Base cloud_admin credential (issue #168): from the DATABASE_URL Secret, not the default.
-CA_CRED=$(kubectl -n scale-zero-pg get secret myapp-database -o jsonpath='{.data.DATABASE_URL}' 2>/dev/null | base64 -d 2>/dev/null | sed -E 's#^postgres://([^@]+)@.*#\1#'); [ -n "$CA_CRED" ] || CA_CRED="cloud_admin:cloud_admin"
+CA_CRED=$(kubectl -n scale-zero-pg get secret myapp-database -o jsonpath='{.data.DATABASE_URL}' 2>/dev/null | base64 -d 2>/dev/null | sed -E 's#^postgres://(.*)@[^@]*#\1#'); [ -n "$CA_CRED" ] || CA_CRED="cloud_admin:cloud_admin"
 W_DSN="postgres://${CA_CRED}@pggw-ro:55432/postgres?sslmode=disable"
 RO_DSN="postgres://${CA_CRED}@pggw-ro:55434/postgres?sslmode=disable"
 # Direct-to-pool DSN (bypasses the gateway) — used ONLY by the HPA section so the
@@ -93,7 +99,7 @@ trap cleanup EXIT
 # one-shot in-cluster psql against DSN $1, sql $2, label $3.
 PSQL() { # $1 dsn  $2 sql  $3 label
   P=rocli-$$-$3
-  $K run "$P" --image=neondatabase/compute-node-v17:8464 --image-pull-policy=IfNotPresent \
+  $K run "$P" --image="$PSQL_IMG" --image-pull-policy=IfNotPresent \
     --restart=Never --quiet --command -- psql "$1" -tA -c "$2" >/dev/null 2>&1 || true
   $K wait --for=jsonpath='{.status.phase}'=Succeeded pod/"$P" --timeout=120s >/dev/null 2>&1 || true
   OUT=$($K logs "$P" 2>&1 || true)
@@ -369,7 +375,7 @@ spec:
       terminationGracePeriodSeconds: 2
       containers:
         - name: loader
-          image: neondatabase/compute-node-v17:8464
+          image: ${PSQL_IMG}
           imagePullPolicy: IfNotPresent
           command: ["/bin/sh","-c"]
           args:

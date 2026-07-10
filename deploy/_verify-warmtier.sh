@@ -16,6 +16,12 @@ set -eu
 cd "$(dirname "$0")"
 NS=scale-zero-pg
 K="kubectl -n $NS"
+# Throwaway psql CLIENT pods use a small, ALWAYS-PULLABLE psql image (issue #171):
+# the neon compute image is pre-pulled on only SOME nodes, so a client pod pinned
+# to it with imagePullPolicy=Never intermittently hits ErrImageNeverPull (and its
+# 150s pod-wait then expires). postgres:17-alpine ships a v17 psql, is public +
+# ~80MB, and schedules on ANY node with a normal pull policy. Override via PSQL_IMG.
+PSQL_IMG="${PSQL_IMG:-postgres:17-alpine}"
 # Gateway image (issue #94): DERIVE from what actually ships so the drill never
 # drifts from the release again (the old hardcoded v0.3.1 default was 3 releases
 # stale). Order of truth:
@@ -36,7 +42,7 @@ fi
 # a derived image is already published; only a bare local override defaults to building
 case "$IMAGE_SRC" in *override*) KSPG_SKIP_BUILD="${KSPG_SKIP_BUILD:-0}" ;; *) KSPG_SKIP_BUILD="${KSPG_SKIP_BUILD:-1}" ;; esac
 # Base cloud_admin credential (issue #168): from the DATABASE_URL Secret, not the default.
-CA_CRED=$(kubectl -n scale-zero-pg get secret myapp-database -o jsonpath='{.data.DATABASE_URL}' 2>/dev/null | base64 -d 2>/dev/null | sed -E 's#^postgres://([^@]+)@.*#\1#'); [ -n "$CA_CRED" ] || CA_CRED="cloud_admin:cloud_admin"
+CA_CRED=$(kubectl -n scale-zero-pg get secret myapp-database -o jsonpath='{.data.DATABASE_URL}' 2>/dev/null | base64 -d 2>/dev/null | sed -E 's#^postgres://(.*)@[^@]*#\1#'); [ -n "$CA_CRED" ] || CA_CRED="cloud_admin:cloud_admin"
 WARM_DSN="postgres://${CA_CRED}@pggw-warm:55432/postgres?sslmode=disable"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
@@ -55,7 +61,7 @@ trap cleanup EXIT
 # one-shot in-cluster psql (create/wait/logs/delete — no attach race).
 CLIENT_WARM() {
   P=warmcli-$$-$1
-  $K run "$P" --image=neondatabase/compute-node-v17:8464 --image-pull-policy=Never \
+  $K run "$P" --image="$PSQL_IMG" --image-pull-policy=IfNotPresent \
     --restart=Never --quiet --command -- psql "$WARM_DSN" -tA -c "$2" >/dev/null 2>&1 || true
   $K wait --for=jsonpath='{.status.phase}'=Succeeded pod/"$P" --timeout=120s >/dev/null 2>&1 || true
   OUT=$($K logs "$P" 2>&1 || true)

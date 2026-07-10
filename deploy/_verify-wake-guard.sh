@@ -33,7 +33,7 @@ NS="${NS:-scale-zero-pg}"
 APP="${APP:-wgapp}"
 EXCESS="${EXCESS:-12}"
 MIN_REFUSALS="${MIN_REFUSALS:-4}"
-ATK_IMAGE="${ATK_IMAGE:-neondatabase/compute-node-v17:8464}"
+ATK_IMAGE="${ATK_IMAGE:-${PSQL_IMG:-postgres:17-alpine}}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 PROV="$HERE/provision-app.sh"
 
@@ -95,7 +95,7 @@ log "regression check: legit wake-on-connect (valid creds) after scale-to-zero"
 sleep0
 [ "$(replicas_of "$APP")" = "0" ] || fail "$APP compute did not scale to 0"
 LEGIT_POD="wg-legit-$$"
-K run "$LEGIT_POD" --image="$ATK_IMAGE" --image-pull-policy=Never --restart=Never \
+K run "$LEGIT_POD" --image="$ATK_IMAGE" --image-pull-policy=IfNotPresent --restart=Never \
   --labels=wakeguard-drill=1 --quiet --command -- \
   psql "postgres://app_$APP:$PW@pggw-apps:55432/$APP?sslmode=disable&connect_timeout=90" \
   -tAc 'select 42 as woke' >/dev/null 2>&1 || true
@@ -123,7 +123,7 @@ BURST_POD="wg-burst-$$"
 # One pod fires N psql in parallel (bogus password) so they all hit the gateway
 # near-simultaneously WHILE the compute is at 0 — every attempt reaches the wake
 # path and consults the budget. The refusal text is the gateway's 53400 message.
-K run "$BURST_POD" --image="$ATK_IMAGE" --image-pull-policy=Never --restart=Never \
+K run "$BURST_POD" --image="$ATK_IMAGE" --image-pull-policy=IfNotPresent --restart=Never \
   --labels=wakeguard-drill=1 --quiet --command -- sh -c "
     for n in \$(seq 1 $ATTEMPTS); do
       PGPASSWORD=not-the-password psql \

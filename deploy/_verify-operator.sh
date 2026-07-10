@@ -32,6 +32,12 @@ KCTX="${KCTX:-context-ckmva7v7zvq}"
 NS="${NS:-scale-zero-pg}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 PROV="$HERE/provision-app.sh"
+# Throwaway psql CLIENT pods use a small, ALWAYS-PULLABLE psql image (issue #171):
+# the neon compute image is pre-pulled on only SOME nodes, so a client pod pinned
+# to it with imagePullPolicy=Never intermittently hits ErrImageNeverPull (and its
+# 150s pod-wait then expires). postgres:17-alpine ships a v17 psql, is public +
+# ~80MB, and schedules on ANY node with a normal pull policy. Override via PSQL_IMG.
+PSQL_IMG="${PSQL_IMG:-postgres:17-alpine}"
 APP="${APP:-opdrill}"
 
 K() { kubectl --context "$KCTX" -n "$NS" "$@"; }
@@ -57,7 +63,7 @@ GCLIENT() { # $1 tag  $2 sql
   local p="opgw-$$-$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
   local pw; pw="$(app_pw "$APP")"
   local dsn="postgres://app_$APP:$pw@pggw-apps:55432/$APP?sslmode=disable"
-  K run "$p" --image=neondatabase/compute-node-v17:8464 --image-pull-policy=Never \
+  K run "$p" --image="$PSQL_IMG" --image-pull-policy=IfNotPresent \
     --restart=Never --quiet --command -- psql "$dsn" -tA -w -c "$2" >/dev/null
   local phase="" i=0
   while [ $i -lt 120 ]; do

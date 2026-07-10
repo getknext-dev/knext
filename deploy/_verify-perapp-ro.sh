@@ -33,7 +33,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 PROV="$HERE/provision-app.sh"
 APPA="${APPA:-roa}"
 APPB="${APPB:-rob}"
-IMG="neondatabase/compute-node-v17:8464"
+IMG="${PSQL_IMG:-postgres:17-alpine}"
 
 K() { kubectl --context "$KCTX" -n "$NS" "$@"; }
 fail() { echo "FAIL: $*" >&2; exit 1; }
@@ -63,7 +63,7 @@ cr_status() { K get appdatabase "$1" -o jsonpath="{.status.$2}" 2>/dev/null || t
 PSQL() {
   local tag="$1" dsn="$2" sql="$3"
   local p; p="roq-$$-$(printf '%s' "$tag" | tr '[:upper:]_' '[:lower:]-' | tr -cd 'a-z0-9-')"
-  K run "$p" --image="$IMG" --image-pull-policy=Never --env=PGCONNECT_TIMEOUT=10 \
+  K run "$p" --image="$IMG" --image-pull-policy=IfNotPresent --env=PGCONNECT_TIMEOUT=10 \
     --restart=Never --quiet --command -- psql "$dsn" -tAw -c "$sql" >/dev/null 2>&1 || true
   local phase="" i=0
   while [ $i -lt 150 ]; do

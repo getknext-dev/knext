@@ -9,12 +9,18 @@
 set -eu
 NS=scale-zero-pg
 K="kubectl -n $NS"
+# Throwaway psql CLIENT pods use a small, ALWAYS-PULLABLE psql image (issue #171):
+# the neon compute image is pre-pulled on only SOME nodes, so a client pod pinned
+# to it with imagePullPolicy=Never intermittently hits ErrImageNeverPull (and its
+# 150s pod-wait then expires). postgres:17-alpine ships a v17 psql, is public +
+# ~80MB, and schedules on ANY node with a normal pull policy. Override via PSQL_IMG.
+PSQL_IMG="${PSQL_IMG:-postgres:17-alpine}"
 # cloud_admin/cloud_admin is the upstream spec's dev default: compute_ctl
 # reconciles roles from config.json on every boot, so ALTER USER does not
 # stick — change the encrypted_password in 54-compute-files.yaml instead.
 # Base cloud_admin credential (issue #168): read from the DATABASE_URL Secret
 # (gen-secrets.sh owns it; the strong password, not the public default). Bare fallback only.
-CA_CRED=$($K get secret myapp-database -o jsonpath='{.data.DATABASE_URL}' 2>/dev/null | base64 -d 2>/dev/null | sed -E 's#^postgres://([^@]+)@.*#\1#'); [ -n "$CA_CRED" ] || CA_CRED="cloud_admin:cloud_admin"
+CA_CRED=$($K get secret myapp-database -o jsonpath='{.data.DATABASE_URL}' 2>/dev/null | base64 -d 2>/dev/null | sed -E 's#^postgres://(.*)@[^@]*#\1#'); [ -n "$CA_CRED" ] || CA_CRED="cloud_admin:cloud_admin"
 DSN="postgres://${CA_CRED}@pggw:55432/postgres?sslmode=disable"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
@@ -25,7 +31,7 @@ ok() { echo "ok - $*"; }
 # the psql error): create, wait, read logs, delete.
 CLIENT() {
   P=pgclient-$$-$1
-  $K run "$P" --image=neondatabase/compute-node-v17:8464 --image-pull-policy=Never \
+  $K run "$P" --image="$PSQL_IMG" --image-pull-policy=IfNotPresent \
     --restart=Never --quiet --command -- psql "$DSN" -tA -c "$2" >/dev/null
   $K wait --for=jsonpath='{.status.phase}'=Succeeded pod/$P --timeout=150s >/dev/null 2>&1 || true
   OUT=$($K logs "$P" 2>&1)

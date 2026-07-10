@@ -11,9 +11,15 @@
 set -eu
 NS=scale-zero-pg
 K="kubectl -n $NS"
+# Throwaway psql CLIENT pods use a small, ALWAYS-PULLABLE psql image (issue #171):
+# the neon compute image is pre-pulled on only SOME nodes, so a client pod pinned
+# to it with imagePullPolicy=Never intermittently hits ErrImageNeverPull (and its
+# 150s pod-wait then expires). postgres:17-alpine ships a v17 psql, is public +
+# ~80MB, and schedules on ANY node with a normal pull policy. Override via PSQL_IMG.
+PSQL_IMG="${PSQL_IMG:-postgres:17-alpine}"
 # Base cloud_admin credential (issue #168): read from the DATABASE_URL Secret
 # (gen-secrets.sh owns it; no longer the public default). Bare fallback only.
-CA_CRED=$(kubectl -n scale-zero-pg get secret myapp-database -o jsonpath='{.data.DATABASE_URL}' 2>/dev/null | base64 -d 2>/dev/null | sed -E 's#^postgres://([^@]+)@.*#\1#'); [ -n "$CA_CRED" ] || CA_CRED="cloud_admin:cloud_admin"
+CA_CRED=$(kubectl -n scale-zero-pg get secret myapp-database -o jsonpath='{.data.DATABASE_URL}' 2>/dev/null | base64 -d 2>/dev/null | sed -E 's#^postgres://(.*)@[^@]*#\1#'); [ -n "$CA_CRED" ] || CA_CRED="cloud_admin:cloud_admin"
 DSN="postgres://${CA_CRED}@pggw:55432/postgres?sslmode=disable"
 IDLE_S=60 # must match GW_IDLE_MS in 10-gateway.yaml
 
@@ -27,7 +33,7 @@ $K rollout status deploy/pggw --timeout=120s >/dev/null || fail "gateway not rea
 ok "2 gateway replicas ready"
 
 # 2. hold a connection across the idle window; compute must stay up
-$K run ha-holder --image=neondatabase/compute-node-v17:8464 --image-pull-policy=Never \
+$K run ha-holder --image="$PSQL_IMG" --image-pull-policy=IfNotPresent \
   --restart=Never --quiet --command -- \
   psql "$DSN" -c "select pg_sleep($((IDLE_S + 45)))" >/dev/null &
 HOLDER=$!
@@ -45,7 +51,7 @@ ok "fleet quiet -> compute at zero"
 
 # 4. no SPOF: kill one gateway, connect again
 $K delete pod "$($K get pods -l app=pggw -o jsonpath='{.items[0].metadata.name}')" --wait=false >/dev/null
-OUT=$($K run ha-probe --image=neondatabase/compute-node-v17:8464 --image-pull-policy=Never \
+OUT=$($K run ha-probe --image="$PSQL_IMG" --image-pull-policy=IfNotPresent \
   --restart=Never --rm -i --quiet --command -- psql "$DSN" -tA -c "select count(*) from t" | tail -1)
 [ "$OUT" = "3" ] || fail "connection failed after gateway pod kill (got: $OUT)"
 ok "gateway pod killed mid-flight; fresh connection still served (no SPOF)"

@@ -23,6 +23,12 @@ KCTX="${KCTX:-context-ckmva7v7zvq}"
 NS="${NS:-scale-zero-pg}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 PROV="$HERE/provision-app.sh"
+# Throwaway psql CLIENT pods use a small, ALWAYS-PULLABLE psql image (issue #171):
+# the neon compute image is pre-pulled on only SOME nodes, so a client pod pinned
+# to it with imagePullPolicy=Never intermittently hits ErrImageNeverPull (and its
+# 150s pod-wait then expires). postgres:17-alpine ships a v17 psql, is public +
+# ~80MB, and schedules on ANY node with a normal pull policy. Override via PSQL_IMG.
+PSQL_IMG="${PSQL_IMG:-postgres:17-alpine}"
 N="${N:-30}"
 WAKE_SAMPLE="${WAKE_SAMPLE:-5}"
 WAKE_BUDGET_S="${WAKE_BUDGET_S:-240}"   # per-app cold-wake budget; slow boots are reported, not failed
@@ -130,7 +136,7 @@ for j in $(seq 1 "$SAMPLE"); do
   # psql): a COLD wake opens the Postgres port a beat before compute_ctl finishes
   # applying the per-app login role, so the first connect can race and see 28P01.
   # A bounded retry closes that window and measures true wake-to-serve latency.
-  K run "$p" --image=neondatabase/compute-node-v17:8464 --image-pull-policy=Never \
+  K run "$p" --image="$PSQL_IMG" --image-pull-policy=IfNotPresent \
     --restart=Never --quiet --command -- \
     sh -c "for k in \$(seq 1 40); do psql 'postgres://app_$app:$pw@pggw-apps:55432/$app?sslmode=disable' -tAw -c 'select 1' 2>/dev/null && exit 0; sleep 2; done; exit 1" >/dev/null 2>&1 || true
   phase=""; i=0

@@ -34,6 +34,12 @@ KCTX="${KCTX:-context-ckmva7v7zvq}"
 NS="${NS:-scale-zero-pg}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 PROV="$HERE/provision-app.sh"
+# Throwaway psql CLIENT pods use a small, ALWAYS-PULLABLE psql image (issue #171):
+# the neon compute image is pre-pulled on only SOME nodes, so a client pod pinned
+# to it with imagePullPolicy=Never intermittently hits ErrImageNeverPull (and its
+# 150s pod-wait then expires). postgres:17-alpine ships a v17 psql, is public +
+# ~80MB, and schedules on ANY node with a normal pull policy. Override via PSQL_IMG.
+PSQL_IMG="${PSQL_IMG:-postgres:17-alpine}"
 A=mta
 B=mtb
 C=mtc  # crash-safety drill app (issue #76)
@@ -76,7 +82,7 @@ PODS() { K get pods -l app=compute-"$1" --no-headers 2>/dev/null | grep -c . || 
 ATTACK_TCP() { # $1 app
   local p="mtatk-$$-$1"
   local dsn="postgres://cloud_admin:cloud_admin@compute-$1.$NS.svc:55433/postgres?sslmode=disable&connect_timeout=8"
-  K run "$p" --image=neondatabase/compute-node-v17:8464 --image-pull-policy=Never \
+  K run "$p" --image="$PSQL_IMG" --image-pull-policy=IfNotPresent \
     --restart=Never --quiet --command -- \
     sh -c "PGPASSWORD=cloud_admin psql \"$dsn\" -tAc 'select rolsuper from pg_roles where rolname=current_user' 2>&1 || true" >/dev/null 2>&1 || true
   local phase="" i=0
@@ -95,7 +101,7 @@ ATTACK_TCP() { # $1 app
 TLSCLIENT() { # $1 tag  $2 app  $3 pw
   local p="mttls-$$-$1"
   local dsn="postgres://app_$2:$3@pggw-apps:55432/$2?sslmode=require"
-  K run "$p" --image=neondatabase/compute-node-v17:8464 --image-pull-policy=Never \
+  K run "$p" --image="$PSQL_IMG" --image-pull-policy=IfNotPresent \
     --restart=Never --quiet --command -- psql "$dsn" -tA -w -c '\conninfo' >/dev/null 2>&1 || true
   local phase="" i=0
   while [ $i -lt 120 ]; do
@@ -116,7 +122,7 @@ GCLIENT() { # $1 tag  $2 app  $3 sql
   local p="mtgw-$$-$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
   local pw; pw="$(app_pw "$2")"
   local dsn="postgres://app_$2:$pw@pggw-apps:55432/$2?sslmode=disable"
-  K run "$p" --image=neondatabase/compute-node-v17:8464 --image-pull-policy=Never \
+  K run "$p" --image="$PSQL_IMG" --image-pull-policy=IfNotPresent \
     --restart=Never --quiet --command -- psql "$dsn" -tA -w -c "$3" >/dev/null
   local phase="" i=0
   while [ $i -lt 120 ]; do
@@ -135,7 +141,7 @@ GCLIENT() { # $1 tag  $2 app  $3 sql
 GDENY() { # $1 tag  $2 user  $3 pass  $4 db
   local p="mtdeny-$$-$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
   local dsn="postgres://$2:$3@pggw-apps:55432/$4?sslmode=disable"
-  K run "$p" --image=neondatabase/compute-node-v17:8464 --image-pull-policy=Never \
+  K run "$p" --image="$PSQL_IMG" --image-pull-policy=IfNotPresent \
     --restart=Never --quiet --command -- psql "$dsn" -tA -w -c 'select 1' >/dev/null 2>&1 || true
   local phase="" i=0
   while [ $i -lt 60 ]; do
@@ -158,7 +164,7 @@ GDENY() { # $1 tag  $2 user  $3 pass  $4 db
 GERR() { # $1 tag  $2 user  $3 pass  $4 db
   local p="mterr-$$-$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
   local dsn="postgres://$2:$3@pggw-apps:55432/$4?sslmode=disable"
-  K run "$p" --image=neondatabase/compute-node-v17:8464 --image-pull-policy=Never \
+  K run "$p" --image="$PSQL_IMG" --image-pull-policy=IfNotPresent \
     --restart=Never --quiet --command -- psql "$dsn" -tA -w -c 'select 1' >/dev/null 2>&1 || true
   local phase="" i=0
   while [ $i -lt 60 ]; do
@@ -319,7 +325,7 @@ K rollout status deploy/pggw-apps --timeout=120s >/dev/null || fail "apps-gatewa
 # the gateway (keeps B active on some replica for the whole idle window).
 GCLIENT warmb "$B" 'select 1' >/dev/null || fail "could not pre-wake $B"
 BPW="$(app_pw "$B")"
-K run "mthold-$$" --image=neondatabase/compute-node-v17:8464 --image-pull-policy=Never \
+K run "mthold-$$" --image="$PSQL_IMG" --image-pull-policy=IfNotPresent \
   --labels="mtdrill=hold" --restart=Never --quiet --command -- \
   psql "postgres://app_$B:$BPW@pggw-apps:55432/$B?sslmode=disable" -tA -w \
   -c "select pg_sleep(60)" >/dev/null 2>&1 &

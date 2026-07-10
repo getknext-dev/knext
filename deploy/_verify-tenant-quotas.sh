@@ -24,6 +24,12 @@ KCTX="${KCTX:-context-ckmva7v7zvq}"
 NS="${NS:-scale-zero-pg}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 PROV="$HERE/provision-app.sh"
+# Throwaway psql CLIENT pods use a small, ALWAYS-PULLABLE psql image (issue #171):
+# the neon compute image is pre-pulled on only SOME nodes, so a client pod pinned
+# to it with imagePullPolicy=Never intermittently hits ErrImageNeverPull (and its
+# 150s pod-wait then expires). postgres:17-alpine ships a v17 psql, is public +
+# ~80MB, and schedules on ANY node with a normal pull policy. Override via PSQL_IMG.
+PSQL_IMG="${PSQL_IMG:-postgres:17-alpine}"
 V=qv              # victim app (default quota)
 H=qh              # hostile app (low conn cap, low cpu limit)
 HOSTILE_MAXCONNS="${HOSTILE_MAXCONNS:-12}"
@@ -58,7 +64,7 @@ GCLIENT() { # $1 tag  $2 app  $3 sql
   local p="qgw-$$-$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
   local pw; pw="$(app_pw "$2")"
   local dsn="postgres://app_$2:$pw@pggw-apps:55432/$2?sslmode=disable"
-  K run "$p" --image=neondatabase/compute-node-v17:8464 --image-pull-policy=Never \
+  K run "$p" --image="$PSQL_IMG" --image-pull-policy=IfNotPresent \
     --restart=Never --quiet --command -- psql "$dsn" -tA -w -c "$3" >/dev/null
   local phase="" i=0
   while [ $i -lt 120 ]; do
@@ -103,7 +109,7 @@ echo "==> hostile flood: $FLOOD gateway connections (cap $HOSTILE_MAXCONNS) + a 
 HPW="$(app_pw "$H")"
 # One flood pod fires FLOOD background psql, each holding a long pg_sleep, and also
 # a CPU burn. Connections beyond the hostile cap are refused by ITS Postgres.
-K run "qflood-$$" --image=neondatabase/compute-node-v17:8464 --image-pull-policy=Never \
+K run "qflood-$$" --image="$PSQL_IMG" --image-pull-policy=IfNotPresent \
   --labels="qdrill=flood" --restart=Never --quiet --command -- \
   sh -c "for i in \$(seq 1 $FLOOD); do psql 'postgres://app_$H:$HPW@pggw-apps:55432/$H?sslmode=disable' -tAw -c 'select pg_sleep(45)' >/dev/null 2>&1 & done; \
          psql 'postgres://app_$H:$HPW@pggw-apps:55432/$H?sslmode=disable' -tAw -c 'select count(*) from generate_series(1,80000000)' >/dev/null 2>&1 & \

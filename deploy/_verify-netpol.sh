@@ -28,7 +28,7 @@ set -eu
 NS=scale-zero-pg
 K="kubectl -n $NS"
 HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-CLIENT_IMG=neondatabase/compute-node-v17:8464
+CLIENT_IMG="${PSQL_IMG:-postgres:17-alpine}"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 ok() { echo "ok - $*"; }
@@ -96,7 +96,7 @@ ok "pg_hba control present (CNI-independent): per-app cloud_admin loopback-only 
 
 # --- 4. positive path: front door still serves through the gateway (drill a) ----
 # Base cloud_admin credential (issue #168): from the DATABASE_URL Secret, not the default.
-CA_CRED=$(kubectl -n scale-zero-pg get secret myapp-database -o jsonpath='{.data.DATABASE_URL}' 2>/dev/null | base64 -d 2>/dev/null | sed -E 's#^postgres://([^@]+)@.*#\1#'); [ -n "$CA_CRED" ] || CA_CRED="cloud_admin:cloud_admin"
+CA_CRED=$(kubectl -n scale-zero-pg get secret myapp-database -o jsonpath='{.data.DATABASE_URL}' 2>/dev/null | base64 -d 2>/dev/null | sed -E 's#^postgres://(.*)@[^@]*#\1#'); [ -n "$CA_CRED" ] || CA_CRED="cloud_admin:cloud_admin"
 DSN="postgres://${CA_CRED}@pggw:55432/postgres?sslmode=disable"
 P=netpol-probe-$$
 $K run "$P" --image="$CLIENT_IMG" --image-pull-policy=IfNotPresent \

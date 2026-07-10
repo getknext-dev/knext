@@ -999,6 +999,23 @@ doc-only (it no longer ships the literal default). Proven live by
 `_verify-base-admin.sh`. This is defense-in-depth and does **not** depend on #118
 (NetworkPolicy would also block the direct dial).
 
+> **Drill client image + password-override notes (issues #171/#172).** The
+> `_verify-*.sh` suite's throwaway psql **client** pods now run a small,
+> always-pullable psql image (`postgres:17-alpine`, override with
+> `PSQL_IMG=...`) under a normal pull policy, so they schedule on **any** node —
+> the neon compute image is pre-pulled on only some nodes, so the old
+> `imagePullPolicy=Never` client pods intermittently hit `ErrImageNeverPull`
+> (a stray failure that could masquerade as a wake failure or, on a reject
+> probe, silently pass). The real compute/storage **server** pods some drills
+> stand up still use the pinned neon image (they must). Auth/reject probes
+> pre-warm the target compute (via a real strong-credential connection) **before**
+> the reject, **sequentially** — the base plane has room for one compute tier at a
+> time. If you override `PG_BASE_ADMIN_PASSWORD` (base `cloud_admin`), keep it
+> URL-safe or **URL-encode any `@`** in the resulting `DATABASE_URL`: the drills
+> now parse the DSN credential robustly (greedy to the last `@`), but an
+> unencoded `@` still makes the DSN itself ambiguous for libpq. The generated
+> hex/alnum default needs no encoding.
+
 > **Rotating base `cloud_admin` (a COORDINATED change for a CONSUMED single-DB app).**
 > `pg-base-admin` is **no-silent-rotation** (re-running `gen-secrets.sh` reuses the
 > existing password and reconciles `myapp-database` to match — idempotent). To
