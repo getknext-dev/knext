@@ -307,6 +307,18 @@ var _ = Describe("kn-next CLI against a live cluster", Ordered, func() {
 		kubectlEventuallyCreates("create the app namespace",
 			"create", "ns", cliAppNamespace)
 
+		By("waiting for the validating webhook to actually serve (Available ≠ webhook ready, #233)")
+		// In kind mode the bundle was applied moments ago and the webhook server
+		// (cert mount + TLS bind + caBundle injection) can lag the Deployment's
+		// Available condition — the first NextApp apply must not race it. The
+		// probe is a server-side DRY-RUN (pure read, nothing persisted), so it is
+		// also run in existing-cluster mode, where the long-running operator's
+		// webhook answers on the first attempt — harmless, and it still guards a
+		// freshly rescheduled webhook pod. A genuine admission rejection counts
+		// as ready (the webhook answered) — no admission assertion is weakened.
+		Expect(utils.WaitForWebhookReady(cliAppNamespace)).To(Succeed(),
+			"operator validating webhook never became reachable after Deployment Available")
+
 		By("creating the BYO Postgres Secret (DATABASE_URL key) — ADR-0019 binding target")
 		// The DSN is inert (never dialed) and names a host in the suite's OWN
 		// throwaway namespace — deliberately not any existing zone's database.
