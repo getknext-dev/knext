@@ -55,6 +55,35 @@ func TestTemplateModeRejectsDeploymentTemplateWithoutSystemPlaceholder(t *testin
 	}
 }
 
+// Equal app/repl role prefixes collapse the per-app auth role (app_<db>) and the
+// per-zone REPLICATION role (repl_<db>) into ONE name — a replication credential
+// would then satisfy an ordinary tenant connection and vice versa, destroying the
+// role separation authz.go relies on. Defaults differ (app_/repl_), but an
+// operator misconfig must fail loud at startup, not silently collapse (#141).
+func TestTemplateModeRejectsEqualAppAndReplRolePrefixes(t *testing.T) {
+	_, err := MakeDriverWithScaler(Env{
+		"GW_COMPUTE_MODE":            "template",
+		"GW_K8S_DEPLOYMENT_TEMPLATE": "compute-{system}",
+		"GW_APP_ROLE_PREFIX":         "role_",
+		"GW_REPL_ROLE_PREFIX":        "role_", // equal -> must be rejected
+	}, &fakeScaler{})
+	if err == nil || !strings.Contains(err.Error(), "GW_APP_ROLE_PREFIX") ||
+		!strings.Contains(err.Error(), "GW_REPL_ROLE_PREFIX") {
+		t.Fatalf("err = %v, want error naming both role prefix env vars", err)
+	}
+}
+
+// The safe defaults (app_ vs repl_) — and any other distinct pair — must still
+// construct cleanly, so the guard never rejects a well-formed config.
+func TestTemplateModeAcceptsDistinctRolePrefixes(t *testing.T) {
+	if _, err := MakeDriverWithScaler(Env{
+		"GW_COMPUTE_MODE":            "template",
+		"GW_K8S_DEPLOYMENT_TEMPLATE": "compute-{system}",
+	}, &fakeScaler{}); err != nil {
+		t.Fatalf("default distinct prefixes must construct: %v", err)
+	}
+}
+
 func TestParseHostPort(t *testing.T) {
 	if h, p := ParseHostPort("db", 5432); h != "db" || p != 5432 {
 		t.Fatalf("ParseHostPort(db) = %s:%d, want db:5432", h, p)

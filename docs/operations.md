@@ -32,6 +32,7 @@ behavior, and troubleshooting.
 | `GW_STATUS_TIMEOUT_MS` | 0 (full wake budget) | cap on the deterministic poll before falling back to the bounded settle; `0` = use the whole `GW_WAKE_TIMEOUT_MS`. Set smaller (e.g. `2000`) so a misconfigured/unreachable `/status` degrades to the settle quickly. Never extends past `GW_WAKE_TIMEOUT_MS`. |
 | `GW_POD_NAMESPACE` / `GW_POD_IP` | — | downward API; self-exclusion for the peer check |
 | `GW_TLS_CERT_FILE` / `GW_TLS_KEY_FILE` | — | front-door TLS keypair (PEM paths). Both set + loadable → gateway answers `SSLRequest` with `S` and wraps the wire (TLS 1.2+). Set-but-unloadable or half-set → gateway **fails fast at startup**. Unset → `SSLRequest` gets `N` (plaintext only). Deployed: mounted from Secret `pggw-tls` at `/etc/pggw-tls/`. |
+| `GW_APP_ROLE_PREFIX` / `GW_REPL_ROLE_PREFIX` | `app_` / `repl_` | `template` mode: the per-app auth role (`app_<db>`, ordinary tenant traffic) and per-zone REPLICATION role (`repl_<db>`, walreceiver) prefixes. **They MUST differ** — equal prefixes merge the two roles into one name so a replication credential could satisfy an ordinary connection (and vice versa), collapsing app/repl separation. An equal-prefix misconfig **fails fast at startup** (mirrors the TLS half-config guard). Defaults are safe. |
 
 Every `GW_*` var passes through verbatim — there is deliberately no whitelist.
 

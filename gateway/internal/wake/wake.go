@@ -263,6 +263,18 @@ func MakeDriverWithScaler(env Env, scaler Scaler) (Driver, error) {
 		if err != nil || wake < 1 {
 			wake = 1
 		}
+		// The per-app auth role (app_<db>) and the per-zone REPLICATION role
+		// (repl_<db>) MUST use distinct prefixes: authz.go relies on app_<db> having
+		// NO REPLICATION attribute and repl_<db> having it, so a replication
+		// credential can never become an ordinary tenant credential (and vice versa).
+		// Equal prefixes collapse both roles into one name, silently destroying that
+		// separation. Defaults differ (app_/repl_); a misconfig must fail fast at
+		// startup, mirroring the half-config-TLS guard (#141).
+		appRolePrefix := env.get("GW_APP_ROLE_PREFIX", "app_")
+		replRolePrefix := env.get("GW_REPL_ROLE_PREFIX", "repl_")
+		if appRolePrefix == replRolePrefix {
+			return nil, fmt.Errorf("role prefixes collapsed: GW_APP_ROLE_PREFIX and GW_REPL_ROLE_PREFIX must differ (both=%q) — equal prefixes merge the per-app and per-zone REPLICATION roles and break app/repl separation", appRolePrefix)
+		}
 		return &templateDriver{
 			namespace:      ns,
 			targetTpl:      env.get("GW_TARGET_TEMPLATE", fmt.Sprintf("compute-{system}.%s.svc:55433", ns)),
@@ -270,8 +282,8 @@ func MakeDriverWithScaler(env Env, scaler Scaler) (Driver, error) {
 			servedDB:       env.get("GW_SERVED_DATABASE", "postgres"),
 			defPort:        defPort,
 			scaler:         scaler,
-			rolePrefix:     env.get("GW_APP_ROLE_PREFIX", "app_"),
-			replRolePrefix: env.get("GW_REPL_ROLE_PREFIX", "repl_"),
+			rolePrefix:     appRolePrefix,
+			replRolePrefix: replRolePrefix,
 			reserved:       parseReserved(env.get("GW_RESERVED_SYSTEMS", "tmpl,warm,ro")),
 			wakeReplicas:   int32(wake), //nolint:gosec // small bounded value
 		}, nil

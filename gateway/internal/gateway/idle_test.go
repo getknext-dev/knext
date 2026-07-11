@@ -116,7 +116,7 @@ func TestSplitConnectionsDoNotThrashAcrossWindows(t *testing.T) {
 	}
 
 	// Peer drops the split connection; the re-armed timer may now sleep — ONCE.
-	peers.byKey["appx"] = 0
+	peers.setByKey("appx", 0)
 	deadline := time.Now().Add(2 * time.Second)
 	for {
 		if got := rd.sleptKeys(); len(got) >= 1 {
@@ -140,18 +140,43 @@ func TestSplitConnectionsDoNotThrashAcrossWindows(t *testing.T) {
 // fakePeers reports a controllable active connection count. When byKey is set it
 // answers per-app (issue #75); otherwise it returns the flat n for any key and
 // records the last key it was asked about.
+//
+// ActiveConnections runs on the gateway's idle-timer goroutine while a test
+// goroutine may concurrently flip the fleet count (e.g. peers.setN(0) once the
+// fleet goes quiet). Guard the mutable fields with mu so `go test -race` is clean
+// (#141 — test-mock only; production PeerChecker impls are already race-free).
 type fakePeers struct {
+	mu      sync.Mutex
 	n       int
 	byKey   map[string]int
 	lastKey string
 }
 
 func (f *fakePeers) ActiveConnections(_ context.Context, key string) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.lastKey = key
 	if f.byKey != nil {
 		return f.byKey[key], nil
 	}
 	return f.n, nil
+}
+
+// setN updates the flat fleet count under the lock, so a test goroutine can flip
+// it while the idle-timer goroutine is reading via ActiveConnections.
+func (f *fakePeers) setN(v int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.n = v
+}
+
+// setByKey updates a per-app count under the lock, so a test goroutine can drop a
+// peer's connection while the idle-timer goroutine reads byKey via
+// ActiveConnections.
+func (f *fakePeers) setByKey(key string, v int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.byKey[key] = v
 }
 
 // Running 2+ gateway replicas must not split-brain the idle decision: a
@@ -185,7 +210,7 @@ func TestIdleSleepDefersToPeers(t *testing.T) {
 		t.Fatal("slept while peers had active connections (split-brain)")
 	}
 
-	peers.n = 0 // fleet went quiet; the rescheduled timer may now sleep
+	peers.setN(0) // fleet went quiet; the rescheduled timer may now sleep
 	deadline := time.Now().Add(2 * time.Second)
 	for {
 		if _, err := os.Stat(marker); err == nil {
