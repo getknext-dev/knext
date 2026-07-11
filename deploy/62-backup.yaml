@@ -509,7 +509,11 @@ spec:
             # SURFACED (WARN): their WAL may be reclaimed (degrade-to-re-sync), with
             # max_slot_wal_keep_size (config.json) as the hard backstop. An awake compute
             # whose Postgres we cannot read is PROTECTED (its timeline skip-marked) —
-            # fail-safe: never risk pruning a possibly-live slot's WAL. NON-FATAL overall:
+            # fail-safe: never risk pruning a possibly-live slot's WAL. An awake compute
+            # whose ConfigMap is UNREADABLE (can't even map tenant/timeline — the #142
+            # hazard, #144) writes a GLOBAL marker (/state/protect/.unmapped-compute) that
+            # makes the prune SKIP ALL pruning + PAGE (WalJanitorJobFailed): we can't scope
+            # which timeline's WAL is at risk, so fail-CLOSED for the whole pass. NON-FATAL overall:
             # on today's slot-free plane this pass finds nothing and is a pure no-op
             # (identical janitor behaviour), so it can never regress the load-bearing prune.
             - name: resolve-slot-floors
@@ -549,9 +553,25 @@ spec:
                     [ -n "$pod" ] || continue
                     TEN="$(kubectl get cm "$cm" -o jsonpath='{.data.TENANT_ID}' 2>/dev/null || true)"
                     TL="$(kubectl get cm "$cm" -o jsonpath='{.data.TIMELINE_ID}' 2>/dev/null || true)"
+                    # >>> #144 unmap-branch
                     if [ -z "$TEN" ] || [ -z "$TL" ]; then
-                      echo "slot-floor: $pod (cm=$cm) has no TENANT_ID/TIMELINE_ID — cannot map, skipping"; continue
+                      # #144 FAIL-SAFE: an AWAKE writer compute whose ConfigMap is
+                      # unreadable (the #142 CM-deletion hazard) cannot be mapped to a
+                      # (tenant,timeline), so we CANNOT scope a per-timeline PROTECT —
+                      # we do not know which timeline's active-slot WAL is at risk.
+                      # Before #144 this branch silently `continue`d (no floor, no
+                      # PROTECT) → the prune pruned that timeline against the rcl horizon
+                      # (fail-OPEN, backstopped only by the KEEP_SEGMENTS==max_slot_wal_keep_size
+                      # numeric alignment). Now: write a GLOBAL protect marker recording
+                      # the offending pod/cm; the prune step SKIPS ALL pruning this pass
+                      # and FAILS LOUD (WalJanitorJobFailed) so an operator restores the
+                      # config. Fail-CLOSED beats pruning around a live writer we can't see.
+                      echo "slot-floor: $pod (cm=$cm) UNMAPPABLE — TENANT_ID/TIMELINE_ID unreadable (CM missing/corrupt, #142/#144); writing a GLOBAL protect marker so the prune SKIPS ALL pruning this pass (fail-safe) and PAGES (WalJanitorJobFailed)" >&2
+                      mkdir -p /state/protect
+                      printf '%s\n' "$pod (cm=$cm)" >> /state/protect/.unmapped-compute
+                      continue
                     fi
+                    # <<< #144 unmap-branch
                     # emit active as a literal t/f via CASE — `||active||` renders the
                     # boolean as `true`/`false` in text-concat, breaking the $2=="t" test.
                     Q="SELECT slot_name||' '||(case when active then 't' else 'f' end)||' '||coalesce(restart_lsn::text,'-')||' '||coalesce(wal_status,'') FROM pg_replication_slots ORDER BY restart_lsn ASC NULLS LAST"
@@ -620,6 +640,23 @@ spec:
                   set -eu
                   export HOME=/tmp
                   mkdir -p /tmp/.mc
+                  # #144 FAIL-CLOSED GUARD (runs BEFORE any mc listing). resolve-slot-floors
+                  # ran first; if it found an AWAKE writer compute it could not map to a
+                  # (tenant,timeline) — its ConfigMap was unreadable (the #142 CM-deletion
+                  # hazard) — it wrote /state/protect/.unmapped-compute. We cannot know WHICH
+                  # timeline's active-slot WAL that live writer needs, so we CANNOT scope a
+                  # per-timeline PROTECT. The only sound response is to SKIP THE ENTIRE PRUNE
+                  # this pass (prune nothing) and FAIL LOUD (WalJanitorJobFailed) so an
+                  # operator restores the compute config. Never fail-OPEN by pruning around
+                  # an unmappable live writer.
+                  # >>> #144 unmapped-compute-guard
+                  if [ -f /state/protect/.unmapped-compute ]; then
+                    echo "FATAL: resolve-slot-floors found AWAKE writer compute(s) it could NOT map to a (tenant,timeline) — ConfigMap unreadable (#142/#144):" >&2
+                    cat /state/protect/.unmapped-compute >&2
+                    echo "SKIPPING ALL PRUNING this pass (fail-safe: cannot scope which timeline's active-slot WAL is at risk) and failing loud (WalJanitorJobFailed). Restore the compute config (kubectl -n scale-zero-pg get cm) — see docs/operations.md slot-janitor 'fail-safe on an unreadable compute config'." >&2
+                    exit 1
+                  fi
+                  # <<< #144 unmapped-compute-guard
                   # src = the LIVE object store (config-driven, #120): the janitor
                   # MUST prune the SAME store the safekeepers offload WAL to, or a
                   # non-MinIO deployment leaks safekeeper WAL unbounded. SigV4 +

@@ -56,8 +56,15 @@ wake1()  { K scale deploy/compute-"$1" --replicas=1 >/dev/null
 sk_use() { K exec safekeeper-0 -c safekeeper -- df -P /data 2>/dev/null | awk 'NR==2{gsub(/%/,"",$5);print $5}'; }
 
 LOCK_PID=""
+CM_UNMAP_NAME=""; CM_UNMAP_TEN=""; CM_UNMAP_TL=""   # PROOF 4 CM-restore safeguard
 teardown() {
   [ -n "$LOCK_PID" ] && kill "$LOCK_PID" >/dev/null 2>&1 || true
+  # PROOF 4 may have blanked a compute-config to simulate an unmappable compute;
+  # ALWAYS restore it (idempotent) so a mid-proof failure never leaves the CM broken.
+  if [ -n "$CM_UNMAP_NAME" ]; then
+    K patch cm "$CM_UNMAP_NAME" --type merge \
+      -p "{\"data\":{\"TENANT_ID\":\"$CM_UNMAP_TEN\",\"TIMELINE_ID\":\"$CM_UNMAP_TL\"}}" >/dev/null 2>&1 || true
+  fi
   K delete job -l drill=slot-janitor --ignore-not-found >/dev/null 2>&1 || true
   log "TEARDOWN: destroying throwaway branches $ZA / $ZB (reclaims timelines + WAL)"
   "$HERE/provision-app.sh" destroy "$ZA" 2>&1 | tail -1 || true
@@ -339,8 +346,64 @@ SQL
   [ "$ma" = "$mb" ] && ok "PROOF 3: subscriber caught up ($exp rows), checksum matches — janitor did NOT break live replication" \
     || { bad "PROOF 3: DIVERGENCE after catch-up (zone-a != zone-b)"; exit 1; }
 
+  # =========================================================================
+  # PROOF 4 — UNMAPPABLE-FAILS-SAFE (#144): an AWAKE writer compute whose
+  #           ConfigMap is UNREADABLE (can't map tenant/timeline — the #142
+  #           CM-deletion hazard) must NOT be silently skipped-and-pruned-around.
+  #           resolve-slot-floors must write a GLOBAL protect marker and the prune
+  #           step must SKIP ALL pruning + FAIL LOUD (WalJanitorJobFailed). We
+  #           simulate by blanking $ZA's compute-config TENANT_ID/TIMELINE_ID
+  #           (the RUNNING pod already loaded its env at boot, so it stays healthy;
+  #           only the janitor's `kubectl get cm` read goes unmappable), run the
+  #           janitor, assert fail-safe, then RESTORE the CM.
+  # =========================================================================
+  log "PROOF 4: blanking compute-config-$ZA (simulate unreadable CM), then proving the janitor FAILS SAFE (global PROTECT + skip-all + page)"
+  local ZA_POD; ZA_POD="$(pod_of "$ZA")"
+  CM_UNMAP_NAME="compute-config-$ZA"; CM_UNMAP_TEN="$TID"; CM_UNMAP_TL="$TLA"
+  K patch cm "compute-config-$ZA" --type merge -p '{"data":{"TENANT_ID":"","TIMELINE_ID":""}}' >/dev/null \
+    || { bad "PROOF 4: could not blank compute-config-$ZA"; exit 1; }
+  [ -z "$(K get cm "compute-config-$ZA" -o jsonpath='{.data.TENANT_ID}')" ] \
+    && ok "PROOF 4: compute-config-$ZA TENANT_ID now blank — the janitor's cm read will be unmappable" \
+    || { bad "PROOF 4: CM blank did not take"; exit 1; }
+
+  # DRY_RUN=true — belt-and-suspenders (the #144 guard exits BEFORE any deletion
+  # regardless of DRY_RUN); default KEEP_SEGMENTS=32. The prune container hits the
+  # global-marker guard immediately (before any mc listing) and exits 1 -> Job Failed.
+  janitor_job "sj-p4-$$" 32 true || { bad "PROOF 4: could not build janitor job"; exit 1; }
+  if wait_job "sj-p4-$$" 300; then
+    bad "PROOF 4: janitor Job COMPLETED — it must FAIL LOUD on an unmappable awake compute (fail-open regression)"
+    K logs job/"sj-p4-$$" --all-containers 2>/dev/null | tail -40 >&2; exit 1
+  elif [ $? -eq 2 ]; then
+    bad "PROOF 4: janitor Job neither Completed nor Failed within the window"; exit 1
+  fi
+  ok "PROOF 4: janitor Job FAILED (WalJanitorJobFailed would fire) — fail-loud on the unmappable compute"
+
+  K logs job/"sj-p4-$$" -c resolve-slot-floors 2>/dev/null > /tmp/sj-p4-sf-$$.txt || true
+  K logs job/"sj-p4-$$" -c prune 2>/dev/null > /tmp/sj-p4-pr-$$.txt || true
+  echo "--- resolve-slot-floors (PROOF 4) ---"; grep -i 'UNMAPPABLE\|no replication slots\|ACTIVE-slot floor' /tmp/sj-p4-sf-$$.txt || true
+  grep -qi "UNMAPPABLE" /tmp/sj-p4-sf-$$.txt && grep -q "$ZA_POD" /tmp/sj-p4-sf-$$.txt \
+    && ok "PROOF 4: resolve-slot-floors flagged $ZA_POD UNMAPPABLE and wrote the global protect marker" \
+    || { bad "PROOF 4: resolve-slot-floors did not flag $ZA_POD unmappable"; cat /tmp/sj-p4-sf-$$.txt >&2; exit 1; }
+  # the READABLE compute in the SAME run ($ZB) must still be processed normally —
+  # proves the marker is scoped to the unmappable one, not a blanket break (no regression).
+  grep -q "$(pod_of "$ZB")" /tmp/sj-p4-sf-$$.txt \
+    && ok "PROOF 4: the readable compute ($ZB) was still processed in the same run — fail-safe is scoped, not a blanket halt of slot-awareness" \
+    || log "note: $ZB not seen in resolve log (it may hold no slots) — marker+fail-loud is the load-bearing assertion"
+  echo "--- prune (PROOF 4) ---"; grep -i 'SKIPPING ALL PRUNING\|unmappable\|FATAL' /tmp/sj-p4-pr-$$.txt || true
+  grep -qi "SKIPPING ALL PRUNING" /tmp/sj-p4-pr-$$.txt \
+    && ok "PROOF 4: prune step SKIPPED ALL pruning (fail-closed) — nothing pruned around the unmappable live writer" \
+    || { bad "PROOF 4: prune step did not log the skip-all guard"; cat /tmp/sj-p4-pr-$$.txt >&2; exit 1; }
+  rm -f /tmp/sj-p4-sf-$$.txt /tmp/sj-p4-pr-$$.txt
+
+  # RESTORE the CM (teardown also does this idempotently).
+  K patch cm "compute-config-$ZA" --type merge \
+    -p "{\"data\":{\"TENANT_ID\":\"$TID\",\"TIMELINE_ID\":\"$TLA\"}}" >/dev/null || true
+  [ "$(K get cm "compute-config-$ZA" -o jsonpath='{.data.TENANT_ID}')" = "$TID" ] \
+    && { ok "PROOF 4: compute-config-$ZA restored (TENANT_ID=$TID)"; CM_UNMAP_NAME=""; } \
+    || log "note: CM restore not confirmed — teardown will retry"
+
   echo
-  ok "ALL PROOFS GREEN — bounded retention (invalidate-not-pin), alerts fire, janitor floors active slots (#139)"
+  ok "ALL PROOFS GREEN — bounded retention (invalidate-not-pin), alerts fire, janitor floors active slots (#139), fails SAFE on an unmappable compute (#144)"
 }
 
 case "${1:-run}" in

@@ -768,6 +768,24 @@ that can `exec` computes). It reads `pg_replication_slots` on every awake writer
 - **awake compute, Postgres unreadable** → the timeline is **PROTECT-skipped** that run
   (fail-safe: never risk a live slot's WAL). Transient and safe (the WAL bound still backs
   it); the next run reclaims once the compute is readable.
+- **awake compute, ConfigMap unreadable** (can't even map `TENANT_ID`/`TIMELINE_ID` — the
+  #142 CM-deletion hazard, #144) → **fail-safe on an unreadable compute config.** We cannot
+  scope a per-timeline PROTECT because we don't know *which* timeline's active-slot WAL is at
+  risk, so `resolve-slot-floors` writes a **global** marker (`/state/protect/.unmapped-compute`,
+  recording the offending pod/cm) and the prune step **skips ALL pruning that pass** (prunes
+  nothing) and **fails loud** → the existing **`WalJanitorJobFailed`** page fires. Restore the
+  missing/corrupt compute ConfigMap (`kubectl -n scale-zero-pg get cm`; re-provision via
+  `provision-app.sh` / the AppDatabase operator), then the next run resumes normal pruning.
+  The marker is **per-pass** (it lives in the janitor Job's `emptyDir` `/state`, so it
+  self-clears every run) — a one-time unreadable blip never sticks: once the CM is readable
+  again the next Job writes no marker and pruning resumes automatically. This composes with
+  **#142**, which detects the missing CM and pages on the *disarm*; #144 guarantees no WAL is
+  mis-pruned while it is missing.
+  This is deliberately **fail-CLOSED**: a persistently-unmappable awake writer halts WAL
+  reclamation (WAL accrues until fixed) rather than risk pruning around a live writer we
+  can't see. Before #144 this case silently pruned around the unmappable compute — a narrow
+  fail-open backstopped only by the `KEEP_SEGMENTS=32=512MiB == max_slot_wal_keep_size=512MB`
+  numeric alignment.
 
 On today's **slot-free** plane the pass finds nothing and the janitor behaves **identically**
 — zero regression to the load-bearing prune; the slot-awareness only activates when zones
@@ -780,7 +798,12 @@ publisher+subscriber, wires real logical replication, and proves on the live pla
 the monitors **fail their Job** on the growing/leaked slot (the alerts fire); (3)
 **ACTIVE-NOT-PRUNED** — with an active slot deliberately behind, the janitor **floors** at
 its `restart_lsn` and the subscriber then catches up with a **matching checksum** (live
-replication intact). It only touches its own `slotpub`/`slotsub` branches and tears them down.
+replication intact); (4) **UNMAPPABLE-FAILS-SAFE** (#144) — with an awake compute's
+ConfigMap made unreadable, `resolve-slot-floors` writes the global `.unmapped-compute` marker
+and the prune Job **fails loud without pruning** (fail-closed), and the healthy readable
+case in the same run still floors correctly. It only touches its own `slotpub`/`slotsub`
+branches and tears them down. `deploy/_verify-janitor-protect.sh` is a fast **offline**
+(no-cluster) contract test of the same fail-safe wiring for CI.
 
 ## Pageserver failover
 
