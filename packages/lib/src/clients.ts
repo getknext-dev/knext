@@ -6,6 +6,7 @@ import { Pool } from 'pg';
 let cerbosClient: Cerbos | null = null;
 let minioClient: Minio.Client | null = null;
 let pgPool: Pool | null = null;
+let pgPoolRO: Pool | null = null;
 
 export const getCerbosClient = () => {
   if (!cerbosClient) {
@@ -87,5 +88,59 @@ export const closeDbPool = async (): Promise<void> => {
   }
   const pool = pgPool;
   pgPool = null;
+  await pool.end();
+};
+
+/**
+ * Read-only pool over `DATABASE_URL_RO` — the scale-zero-pg RO gateway
+ * (port 55434), a **bounded-staleness** endpoint (~9s ceiling, NO
+ * read-your-writes). Reads are a deliberate, explicit opt-in: nothing is
+ * auto-routed (scale-zero-pg `docs/connecting.md`), so the writer pool
+ * (`getDbPool`) and this reader stay two distinct singletons and the caller
+ * picks which one a query uses.
+ *
+ * Returns `null` when `DATABASE_URL_RO` is unset — an app without a read
+ * replica simply has no RO pool (callers such as `@knext/db`'s `getDbRO()`
+ * fall back to the writer). Otherwise mirrors the writer pool's scale-to-zero
+ * contract (ADR-0019): small `max` (many small pools under `maxScale`), idle
+ * timeout < the gateway's 60s idle (no dead sockets), connect timeout >= 10s
+ * (tolerates the ~2.5s cold wake). Independently tunable via `DB_POOL_RO_MAX`,
+ * `DB_POOL_RO_IDLE_TIMEOUT_MS`, `DB_POOL_RO_CONNECT_TIMEOUT_MS`.
+ */
+export const getDbPoolRO = (): Pool | null => {
+  const connectionString = process.env.DATABASE_URL_RO;
+  if (!connectionString) {
+    return null;
+  }
+  if (!pgPoolRO) {
+    pgPoolRO = new Pool({
+      connectionString,
+      max: toFinitePositiveInt(process.env.DB_POOL_RO_MAX, DEFAULT_DB_POOL_MAX),
+      idleTimeoutMillis: toFinitePositiveInt(
+        process.env.DB_POOL_RO_IDLE_TIMEOUT_MS,
+        DEFAULT_DB_POOL_IDLE_TIMEOUT_MS,
+      ),
+      connectionTimeoutMillis: toFinitePositiveInt(
+        process.env.DB_POOL_RO_CONNECT_TIMEOUT_MS,
+        DEFAULT_DB_POOL_CONNECT_TIMEOUT_MS,
+      ),
+    });
+  }
+  return pgPoolRO;
+};
+
+/**
+ * Drain and close the singleton read-only Postgres pool, mirroring
+ * `closeDbPool`. Safe to call when no RO pool was ever created (no-op) — e.g.
+ * when `DATABASE_URL_RO` was unset. The runtime's SIGTERM drain closes this
+ * alongside the writer pool. Resets the singleton so a later `getDbPoolRO()`
+ * reconnects.
+ */
+export const closeDbPoolRO = async (): Promise<void> => {
+  if (!pgPoolRO) {
+    return;
+  }
+  const pool = pgPoolRO;
+  pgPoolRO = null;
   await pool.end();
 };
