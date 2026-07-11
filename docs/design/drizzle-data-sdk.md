@@ -1,8 +1,16 @@
 # Design — `@knext/db`, the knext Drizzle data SDK
 
 Companion to **ADR-0021**. This doc holds the concrete API sketches, package shape,
-and the request/migration flows. It is a *design* artifact (no code yet); the ADR
-holds the decisions + open questions. Snippets are illustrative, not final.
+and the request/migration flows. The ADR holds the decisions + open questions.
+Snippets are illustrative, not final.
+
+> **Status — core landed (#238/#236/#237).** `packages/db` (`@knext/db`) is
+> scaffolded and the two client accessors are shipped: `getDb()` (writer) +
+> `getDbRO()` (reader, with writer fallback + one-time warning), over a new
+> `@knext/lib` read-only pool (`getDbPoolRO`/`closeDbPoolRO`). The re-exported
+> drizzle query surface (`§6`) is live. **Still to land:** `@knext/db/schema`
+> primitives + extension helpers (#239–#241) and the `@knext/db/migrate` runner
+> (#242) — those subpaths are reserved but not yet exported.
 
 ## 1. Where it fits
 
