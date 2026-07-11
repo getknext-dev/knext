@@ -34,20 +34,21 @@ export { relations, sql } from 'drizzle-orm';
 export * from 'drizzle-orm/pg-core';
 
 /*
- * ── Extension helper seam (reserved) ────────────────────────────────────────
+ * ── Extension helpers ───────────────────────────────────────────────────────
  *
  * The platform's Postgres extensions add knext-specific schema ergonomics ON TOP
- * of the drizzle surface above, without changing it:
+ * of the drizzle surface above, without changing it. They are migration SQL
+ * emitters (drizzle-kit can't model these) — the app self-enables the extension
+ * over its own DATABASE_URL and both survive scale-to-zero (scale-zero-pg
+ * docs/connecting.md). Adding these `export`s grows the surface; nothing above changes.
  *
  *   • TimescaleDB (#240) — `hypertable(table, { by, chunkInterval })` +
- *     retention (`dropChunksPolicy`) migration helpers. Bound: no columnar
- *     compression / continuous aggregates on a scale-to-zero compute
- *     (scale-zero-pg ADR-0001).
- *   • pgvector (#241, gated on scale-zero-pg #178) — similarity operators
- *     (`cosineDistance`/`l2Distance`) + `hnsw`/`ivfflat` index helpers over the
+ *     one-shot `dropChunks()` retention. Bound: hypertables + `drop_chunks()`
+ *     only (Apache-2 tier); NO columnar compression / continuous aggregates on a
+ *     scale-to-zero compute (scale-zero-pg adr-0001).
+ *   • pgvector (#241) — distance operators (`cosineDistance` `<=>` / `l2Distance`
+ *     `<->` / `innerProduct` `<#>`) + `hnsw`/`ivfflat` index DDL helpers over the
  *     `vector` column already re-exported above.
- *
- * Those land as additional `export … from './extensions/…'` lines here, so
- * apps keep importing everything from `@knext/db/schema` and the surface only
- * grows. Nothing to configure today.
  */
+export * from './extensions/pgvector';
+export * from './extensions/timescaledb';
