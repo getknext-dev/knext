@@ -74,13 +74,10 @@ limitations under the License.
 package e2e
 
 import (
-	"bytes"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -148,58 +145,19 @@ func TestCLIE2E(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// CLI process harness
+// CLI process harness — the tag-independent mechanics live in test/utils
+// (shared with e2e_rollback); these wrappers only add this suite's Gomega
+// policy on spawn failures.
 // ---------------------------------------------------------------------------
 
-// repoRoot returns the monorepo root (two levels above the operator package,
-// which is what utils.GetProjectDir resolves).
-func repoRoot() string {
-	dir, err := utils.GetProjectDir()
-	Expect(err).NotTo(HaveOccurred())
-	return filepath.Clean(filepath.Join(dir, "..", ".."))
-}
-
-// cliBin is the built CLI entry — the SAME file package.json's bin maps to.
-// Invoked with plain `node`: the CLI must not require Bun (#68).
-func cliBin() string {
-	return filepath.Join(repoRoot(), "packages", "kn-next", "dist", "cli", "kn-next.js")
-}
-
-// cliResult carries everything a spec asserts about one CLI invocation.
-type cliResult struct {
-	stdout   string
-	stderr   string
-	exitCode int
-}
-
-// runCLI invokes the REAL built CLI with plain node from the repo root.
-// A non-zero exit is NOT an error here — the exit code is part of the CLI's
-// contract and the specs assert it explicitly.
-func runCLI(args ...string) cliResult {
-	cmd := exec.Command("node", append([]string{cliBin()}, args...)...)
-	cmd.Dir = repoRoot()
-	// NODE_OPTIONS is cleared deliberately: the CLI must run on a bare Node,
-	// and an inherited preload (dev machines) must not skew the e2e. KUBECONFIG
-	// (set by the suite in existing-cluster mode) is inherited via os.Environ.
-	cmd.Env = append(os.Environ(), "NODE_OPTIONS=")
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	_, _ = fmt.Fprintf(GinkgoWriter, "running CLI: node %s %s\n", cliBin(), strings.Join(args, " "))
-	err := cmd.Run()
-	code := 0
-	if err != nil {
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
-			code = exitErr.ExitCode()
-		} else {
-			Expect(err).NotTo(HaveOccurred(),
-				"failed to spawn the CLI at all (is node installed and the CLI built?)")
-		}
-	}
-	_, _ = fmt.Fprintf(GinkgoWriter, "CLI exit=%d\nstdout:\n%s\nstderr:\n%s\n",
-		code, stdout.String(), stderr.String())
-	return cliResult{stdout: stdout.String(), stderr: stderr.String(), exitCode: code}
+// runCLI invokes the REAL built CLI with plain node from the repo root
+// (utils.RunCLI). A non-zero exit is NOT an error — the exit code is part of
+// the CLI's contract and the specs assert it explicitly.
+func runCLI(args ...string) utils.CLIResult {
+	res, err := utils.RunCLI(args...)
+	Expect(err).NotTo(HaveOccurred(),
+		"failed to spawn the CLI at all (is node installed and the CLI built?)")
+	return res
 }
 
 // cliAssertTimeout / cliAssertPoll bound the Eventually blocks that wrap each
@@ -223,49 +181,18 @@ const (
 )
 
 // kubectlEventuallyCreates runs an idempotent kubectl create-style command,
-// retrying transient failures (WAN blips against a remote cluster) and treating
-// "already exists" as success — the retry after a half-committed create must
-// not fail the suite.
+// retrying transient failures (WAN blips against a remote cluster) via
+// utils.KubectlCreateIgnoreExists ("already exists" == success).
 func kubectlEventuallyCreates(desc string, args ...string) {
 	Eventually(func(g Gomega) {
-		out, err := utils.Kubectl(args...)
-		if err != nil && strings.Contains(out, "already exists") {
-			return
-		}
-		g.Expect(err).NotTo(HaveOccurred(), out)
+		g.Expect(utils.KubectlCreateIgnoreExists(args...)).To(Succeed())
 	}, 2*time.Minute, 10*time.Second).Should(Succeed(), "failed to %s", desc)
 }
 
-// runAtRepoRoot runs a toolchain command (pnpm) from the monorepo root.
-// utils.Run cannot be used here: it force-overrides cmd.Dir to the operator dir.
-func runAtRepoRoot(name string, args ...string) (string, error) {
-	cmd := exec.Command(name, args...)
-	cmd.Dir = repoRoot()
-	cmd.Env = append(os.Environ(), "NODE_OPTIONS=")
-	_, _ = fmt.Fprintf(GinkgoWriter, "running (repo root): %s %s\n", name, strings.Join(args, " "))
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return string(out), fmt.Errorf("%s %s failed: %w\n%s", name, strings.Join(args, " "), err, out)
-	}
-	return string(out), nil
-}
-
-// pinKubeContext renders a minified, self-contained kubeconfig for the given
-// context and exports KUBECONFIG so EVERY subprocess (the Go harness's kubectl
-// AND the CLI under test) targets exactly that cluster — without ever touching
-// the user's global current-context. Credential exec plugins (e.g. OCI's
-// security_token auth) keep working because --raw preserves the users section
-// and env vars like OCI_CLI_PROFILE/OCI_CLI_AUTH pass through os.Environ.
+// pinKubeContext exports a rendered, minified KUBECONFIG for the given context
+// (utils.PinKubeContext) so every subprocess targets exactly that cluster.
 func pinKubeContext(ctx string) {
-	out, err := utils.Run(exec.Command("kubectl", "config", "view",
-		"--minify", "--raw", "--flatten", fmt.Sprintf("--context=%s", ctx), "-o", "yaml"))
-	Expect(err).NotTo(HaveOccurred(), "failed to render a kubeconfig for context %q", ctx)
-
-	dir := GinkgoT().TempDir()
-	path := filepath.Join(dir, "kubeconfig")
-	Expect(os.WriteFile(path, []byte(out), 0o600)).To(Succeed())
-	Expect(os.Setenv("KUBECONFIG", path)).To(Succeed())
-	_, _ = fmt.Fprintf(GinkgoWriter, "pinned KUBECONFIG for context %q at %s\n", ctx, path)
+	Expect(utils.PinKubeContext(ctx, GinkgoT().TempDir())).To(Succeed())
 }
 
 // extractJSON pulls the outermost JSON object out of a stdout that may carry
@@ -330,10 +257,12 @@ var _ = Describe("kn-next CLI against a live cluster", Ordered, func() {
 		// The `...` filter suffix builds @knext/core's WORKSPACE DEPENDENCIES
 		// first (@knext/lib ships only dist/, and core's dts build imports
 		// @knext/lib/clients — on a clean checkout the bare filter fails TS2307).
-		_, err := runAtRepoRoot("pnpm", "--filter", "@knext/core...", "build")
+		_, err := utils.RunAtRepoRoot("pnpm", "--filter", "@knext/core...", "build")
 		Expect(err).NotTo(HaveOccurred(),
 			"failed to build the CLI — run `pnpm install --frozen-lockfile` at the repo root first")
-		Expect(cliBin()).To(BeAnExistingFile(), "CLI build produced no dist/cli/kn-next.js")
+		bin, err := utils.CLIBin()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(bin).To(BeAnExistingFile(), "CLI build produced no dist/cli/kn-next.js")
 
 		if existing != "" {
 			By(fmt.Sprintf("EXISTING-CLUSTER mode: pinning kube context %q (no operator install)", existing))
@@ -353,10 +282,11 @@ var _ = Describe("kn-next CLI against a live cluster", Ordered, func() {
 			Expect(err).NotTo(HaveOccurred(), "failed to render dist/install.yaml")
 
 			By("overriding the manager image in the rendered bundle to the local image")
-			renderedBundle = cliOverrideManagerImage(cliOperatorImage)
+			renderedBundle, err = utils.OverrideManagerImage(cliOperatorImage, "install.cli-e2e.yaml")
+			Expect(err).NotTo(HaveOccurred(), "failed to render the image-overridden bundle")
 
 			By("applying the rendered install bundle (kubectl apply --server-side -f)")
-			Expect(cliApplyOrDeleteBundle("apply", renderedBundle)).
+			Expect(utils.ApplyOrDeleteBundle("apply", renderedBundle)).
 				To(Succeed(), "failed to kubectl apply the install bundle")
 		}
 
@@ -388,7 +318,7 @@ var _ = Describe("kn-next CLI against a live cluster", Ordered, func() {
 
 		By("applying a DIGEST-PINNED NextApp (unpullable placeholder image)")
 		Eventually(func(g Gomega) {
-			g.Expect(cliApplyManifest(cliSampleNextApp())).To(Succeed(), "failed to apply NextApp")
+			g.Expect(utils.ApplyManifest(cliSampleNextApp())).To(Succeed(), "failed to apply NextApp")
 		}, 2*time.Minute, 10*time.Second).Should(Succeed())
 
 		By("waiting for the operator to create the child Knative Service (reconcile proof)")
@@ -420,17 +350,13 @@ var _ = Describe("kn-next CLI against a live cluster", Ordered, func() {
 		// Eventually-wrapped with a confirmed-NotFound read so a WAN blip can
 		// never fake a completed cleanup on a shared cluster.
 		Eventually(func(g Gomega) {
-			_, _ = utils.Kubectl("delete", "ns", cliAppNamespace, "--ignore-not-found", "--timeout=5m")
-			out, err := utils.Kubectl("get", "ns", cliAppNamespace)
-			g.Expect(err).To(HaveOccurred(), "namespace still exists:\n%s", out)
-			g.Expect(out).To(ContainSubstring("NotFound"),
-				"namespace deletion not confirmed (transient error, not NotFound):\n%s", out)
+			g.Expect(utils.NamespaceDeletedConfirmed(cliAppNamespace)).To(Succeed())
 		}, 10*time.Minute, 5*time.Second).Should(Succeed(),
 			"failed to fully delete the dedicated namespace %s", cliAppNamespace)
 
 		if existing == "" {
 			By("deleting the rendered bundle from the cluster")
-			_ = cliApplyOrDeleteBundle("delete", renderedBundle)
+			_ = utils.ApplyOrDeleteBundle("delete", renderedBundle)
 			if renderedBundle != "" {
 				_ = os.Remove(renderedBundle)
 			}
@@ -440,13 +366,13 @@ var _ = Describe("kn-next CLI against a live cluster", Ordered, func() {
 	It("kn-next doctor: exit 0 on a provisioned cluster, every check honest", func() {
 		Eventually(func(g Gomega) {
 			res := runCLI("doctor", "--json")
-			g.Expect(res.exitCode).To(Equal(0),
+			g.Expect(res.ExitCode).To(Equal(0),
 				"doctor must exit 0 on a correctly provisioned cluster\nstdout:\n%s\nstderr:\n%s",
-				res.stdout, res.stderr)
+				res.Stdout, res.Stderr)
 
 			var report doctorReport
-			g.Expect(json.Unmarshal([]byte(extractJSON(g, res.stdout)), &report)).To(Succeed(),
-				"doctor --json stdout is not parseable JSON:\n%s", res.stdout)
+			g.Expect(json.Unmarshal([]byte(extractJSON(g, res.Stdout)), &report)).To(Succeed(),
+				"doctor --json stdout is not parseable JSON:\n%s", res.Stdout)
 			g.Expect(report.ExitCode).To(Equal(0), "report.exitCode must match the process exit code")
 
 			byID := map[string]doctorCheck{}
@@ -458,7 +384,7 @@ var _ = Describe("kn-next CLI against a live cluster", Ordered, func() {
 			// Knative Serving installed. These must be PASS, not merely non-fail.
 			for _, id := range []string{"cluster", "crd", "operator", "knative"} {
 				c, ok := byID[id]
-				g.Expect(ok).To(BeTrue(), "doctor report missing check %q:\n%s", id, res.stdout)
+				g.Expect(ok).To(BeTrue(), "doctor report missing check %q:\n%s", id, res.Stdout)
 				g.Expect(c.Status).To(Equal("pass"), "check %q should PASS on this cluster: %s", id, c.Detail)
 			}
 
@@ -493,9 +419,9 @@ var _ = Describe("kn-next CLI against a live cluster", Ordered, func() {
 		By("kn-next doctor (human): same verdict rendered as the PASS/WARN table")
 		Eventually(func(g Gomega) {
 			human := runCLI("doctor")
-			g.Expect(human.exitCode).To(Equal(0), "doctor (human mode) exit code\nstdout:\n%s\nstderr:\n%s",
-				human.stdout, human.stderr)
-			g.Expect(human.stdout).To(ContainSubstring("PASS"), "human table should render PASS rows")
+			g.Expect(human.ExitCode).To(Equal(0), "doctor (human mode) exit code\nstdout:\n%s\nstderr:\n%s",
+				human.Stdout, human.Stderr)
+			g.Expect(human.Stdout).To(ContainSubstring("PASS"), "human table should render PASS rows")
 		}, cliAssertTimeout, cliAssertPoll).Should(Succeed())
 	})
 
@@ -512,11 +438,11 @@ var _ = Describe("kn-next CLI against a live cluster", Ordered, func() {
 				"--secret", cliDBSecretName,
 				"--key", cliDBSecretKey,
 				"-n", cliAppNamespace)
-			g.Expect(res.exitCode).To(Equal(0),
+			g.Expect(res.ExitCode).To(Equal(0),
 				"db bind must exit 0 (patch + verify-read). A persistent failure here "+
 					"on an existing cluster can mean the installed operator predates the "+
 					"spec.database.secretRef schema (#222) — an honest finding.\nstdout:\n%s\nstderr:\n%s",
-				res.stdout, res.stderr)
+				res.Stdout, res.Stderr)
 		}, cliAssertTimeout, cliAssertPoll).Should(Succeed())
 
 		By("asserting the LIVE CR carries spec.database.secretRef (kubectl get -o json)")
@@ -573,13 +499,13 @@ var _ = Describe("kn-next CLI against a live cluster", Ordered, func() {
 		By("kn-next status --json: exit 1 + the operator's conditions verbatim")
 		Eventually(func(g Gomega) {
 			res := runCLI("status", cliAppName, "-n", cliAppNamespace, "--json")
-			g.Expect(res.exitCode).To(Equal(1),
+			g.Expect(res.ExitCode).To(Equal(1),
 				"status must exit 1 when Ready=False (the CI-gate contract)\nstdout:\n%s\nstderr:\n%s",
-				res.stdout, res.stderr)
+				res.Stdout, res.Stderr)
 
 			var report statusReport
-			g.Expect(json.Unmarshal([]byte(extractJSON(g, res.stdout)), &report)).To(Succeed(),
-				"status --json stdout is not parseable JSON:\n%s", res.stdout)
+			g.Expect(json.Unmarshal([]byte(extractJSON(g, res.Stdout)), &report)).To(Succeed(),
+				"status --json stdout is not parseable JSON:\n%s", res.Stdout)
 			g.Expect(report.Name).To(Equal(cliAppName))
 			g.Expect(report.Namespace).To(Equal(cliAppNamespace))
 			g.Expect(report.URL).NotTo(BeNil(), "status must surface the mirrored status.url")
@@ -599,70 +525,12 @@ var _ = Describe("kn-next CLI against a live cluster", Ordered, func() {
 		By("kn-next status (human): same exit code, honest reason in the rendering")
 		Eventually(func(g Gomega) {
 			human := runCLI("status", cliAppName, "-n", cliAppNamespace)
-			g.Expect(human.exitCode).To(Equal(1), "human mode must honor the same exit-code contract")
-			g.Expect(human.stdout).To(ContainSubstring("KnativeServiceNotReady"),
-				"the human rendering must carry the operator's honest Ready reason:\n%s", human.stdout)
+			g.Expect(human.ExitCode).To(Equal(1), "human mode must honor the same exit-code contract")
+			g.Expect(human.Stdout).To(ContainSubstring("KnativeServiceNotReady"),
+				"the human rendering must carry the operator's honest Ready reason:\n%s", human.Stdout)
 		}, cliAssertTimeout, cliAssertPoll).Should(Succeed())
 	})
 })
-
-// ---------------------------------------------------------------------------
-// Bundle-install helpers (e2e_cli-tagged copies — the bundle suite's versions
-// live behind e2e_bundle and cross-tag symbol sharing is deliberately avoided,
-// same as applyBundleManifest's precedent).
-// ---------------------------------------------------------------------------
-
-// cliOverrideManagerImage renders a copy of dist/install.yaml with the operator
-// manager image line rewritten to `img`, returning the rewritten bundle's path.
-func cliOverrideManagerImage(img string) string {
-	src, err := os.ReadFile(filepath.Join("dist", "install.yaml"))
-	Expect(err).NotTo(HaveOccurred(), "failed to read rendered dist/install.yaml")
-
-	var b strings.Builder
-	replaced := false
-	for _, line := range strings.Split(string(src), "\n") {
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "image:") &&
-			strings.Contains(line, "ghcr.io/getknext-dev/kn-next-operator") {
-			indent := line[:strings.Index(line, "image:")]
-			b.WriteString(indent + "image: " + img + "\n")
-			replaced = true
-			continue
-		}
-		b.WriteString(line + "\n")
-	}
-	Expect(replaced).To(BeTrue(),
-		"did not find the operator manager image line in dist/install.yaml")
-
-	dst := filepath.Join("dist", "install.cli-e2e.yaml")
-	Expect(os.WriteFile(dst, []byte(b.String()), 0o644)).To(Succeed())
-	return dst
-}
-
-// cliApplyOrDeleteBundle runs `kubectl <apply|delete> --server-side -f <bundle>`.
-func cliApplyOrDeleteBundle(verb, bundle string) error {
-	if bundle == "" {
-		return nil
-	}
-	args := []string{verb}
-	if verb == "apply" {
-		args = append(args, "--server-side")
-	} else {
-		args = append(args, "--ignore-not-found")
-	}
-	args = append(args, "-f", bundle)
-	cmd := exec.Command("kubectl", args...)
-	_, err := utils.Run(cmd)
-	return err
-}
-
-// cliApplyManifest pipes a YAML manifest into `kubectl apply -f -`.
-func cliApplyManifest(manifest string) error {
-	cmd := exec.Command("kubectl", "apply", "-f", "-")
-	cmd.Stdin = strings.NewReader(manifest)
-	_, err := utils.Run(cmd)
-	return err
-}
 
 // cliSampleNextApp renders the minimal, DIGEST-PINNED NextApp CR under test.
 func cliSampleNextApp() string {
