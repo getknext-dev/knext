@@ -1,9 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import {
-  DEFAULT_MIGRATIONS_DIR,
-  DEFAULT_SCHEMA_PATH,
-  defineDrizzleConfig,
-} from '../migrate';
+import { DEFAULT_MIGRATIONS_DIR, DEFAULT_SCHEMA_PATH, defineDrizzleConfig } from '../migrate';
 
 // `defineDrizzleConfig()` produces the `drizzle.config.ts` a NextApp uses to
 // generate + apply migrations. Per ADR-0021 §3/§5, migrations are WRITER-ONLY:

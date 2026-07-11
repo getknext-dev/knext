@@ -19,14 +19,26 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js",
       "default": "./dist/index.js"
+    },
+    "./schema": {
+      "types": "./dist/schema.d.ts",
+      "import": "./dist/schema.js",
+      "default": "./dist/schema.js"
+    },
+    "./migrate": {
+      "types": "./dist/migrate.d.ts",
+      "import": "./dist/migrate.js",
+      "default": "./dist/migrate.js"
     }
   },
   "knext": {
     "publicApi": {
       "doc": "docs/PUBLIC_API.md",
-      "stability": "The @knext/db `.` subpath is public and follows semver. `./schema` and `./migrate` are reserved for follow-up work (#239, #242).",
+      "stability": "The @knext/db `.`, `./schema`, and `./migrate` subpaths are public and follow semver. `./schema` re-exports drizzle's pg-core builders; `./migrate` ships `defineDrizzleConfig()` (the `kn-next db migrate` runner lands on it in #242).",
       "public": [
-        "."
+        ".",
+        "./schema",
+        "./migrate"
       ],
       "internalPrefix": null
     }
@@ -47,9 +59,13 @@
     "drizzle-orm": "^0.45.2"
   },
   "peerDependencies": {
+    "drizzle-kit": "^0.31.0",
     "drizzle-orm": "^0.45.2"
   },
   "peerDependenciesMeta": {
+    "drizzle-kit": {
+      "optional": true
+    },
     "drizzle-orm": {
       "optional": true
     }
@@ -57,6 +73,7 @@
   "devDependencies": {
     "@types/node": "^20.8.0",
     "@types/pg": "^8.15.6",
+    "drizzle-kit": "^0.31.0",
     "pg": "^8.16.3",
     "typescript": "^5.2.2"
   }

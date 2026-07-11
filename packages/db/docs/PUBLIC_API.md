@@ -8,6 +8,8 @@ not listed is internal and may change without a major bump.
 | Subpath | Status | Exports |
 |---|---|---|
 | `@knext/db` (`.`) | **public** | `getDb`, `getDbRO`, and the re-exported drizzle-orm query surface (`eq`, `and`, `or`, `sql`, the query builder, …). |
+| `@knext/db/schema` | **public** | drizzle `pg-core` primitives (`pgTable`, column + index + constraint builders) plus `relations`/`sql`, re-exported from one place. |
+| `@knext/db/migrate` | **public** | `defineDrizzleConfig()` + `DEFAULT_SCHEMA_PATH` / `DEFAULT_MIGRATIONS_DIR`. |
 
 ### `@knext/db` (`.`)
 
@@ -24,20 +26,34 @@ not listed is internal and may change without a major bump.
   docs govern these; `@knext/db` pins a compatible range and also declares it an
   (optional) peer so an app may supply its own compatible drizzle.
 
-## Reserved (not yet public)
+### `@knext/db/schema`
 
-The following subpaths are declared in ADR-0021 and reserved for follow-up work.
-They are **not exported yet** — importing them will fail until the corresponding
-PR lands:
+- The one place an app imports its table/column vocabulary from — a thin re-export
+  of drizzle-orm's `pg-core` (`pgTable`, the column builders incl. `vector`,
+  `index`/`uniqueIndex`, `primaryKey`/`foreignKey`, `pgEnum`/`pgSchema`, …) plus
+  `relations` and `sql` from the drizzle-orm root. No bespoke DSL — drizzle's docs
+  apply directly.
+- The TimescaleDB (#240) and pgvector (#241) extension helpers slot in **on top of**
+  this surface without changing it; that seam is documented in `src/schema.ts`.
 
-| Subpath | Tracking | Will export |
-|---|---|---|
-| `@knext/db/schema` | #239 (+ #240 TimescaleDB, #241 pgvector) | drizzle `pg-core` primitives re-exported from one place, plus `hypertable`/retention + `vector`/`hnsw` extension helpers. |
-| `@knext/db/migrate` | #242 | `defineDrizzleConfig()` + the `kn-next db migrate` one-shot runner (writer-only). |
+### `@knext/db/migrate`
+
+- **`defineDrizzleConfig(options?): Config`** — builds a valid `drizzle.config.ts`
+  for a NextApp: dialect `postgresql`, the **writer** DSN (`process.env.DATABASE_URL`
+  or an explicit `url`; never the RO replica), and the knext path conventions.
+  `options`: `{ schema?, out?, url? }`.
+- **`DEFAULT_SCHEMA_PATH`** (`./src/db/schema.ts`) and **`DEFAULT_MIGRATIONS_DIR`**
+  (`./drizzle`) — the conventional defaults.
+- The `kn-next db migrate` one-shot runner lands on this same subpath in #242.
+- `drizzle-kit` is a **type-only** dependency (an optional peer) — `defineDrizzleConfig()`
+  returns a plain object typed as its `Config`; no drizzle-kit code is imported at
+  runtime.
 
 ## Stability policy
 
-- The `.` subpath is covered by semver; breaking changes to `getDb`/`getDbRO`
-  signatures or the fallback behaviour require a major bump.
-- The re-exported drizzle surface tracks the pinned `drizzle-orm` range; a
-  drizzle major bump that changes those exports is a `@knext/db` major bump.
+- The `.`, `./schema`, and `./migrate` subpaths are covered by semver; breaking
+  changes to `getDb`/`getDbRO`/`defineDrizzleConfig` signatures, the fallback
+  behaviour, or the path defaults require a major bump.
+- The re-exported drizzle surface (root query operators + `./schema` builders)
+  tracks the pinned `drizzle-orm` range; a drizzle major bump that changes those
+  exports is a `@knext/db` major bump.
