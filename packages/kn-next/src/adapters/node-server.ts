@@ -18,12 +18,12 @@ import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import http from "node:http";
 import { dirname, resolve } from "node:path";
-import { closeDbPool } from "@knext/lib/clients";
 import { collectDefaultMetrics, Registry } from "prom-client";
 import { createLogger } from "../utils/logger";
+import { registerDbPoolDrain } from "./db-drain";
 import { buildChildEnv } from "./env";
 import { startImageCacheSync } from "./image-cache-sync";
-import { gracefulShutdown, registerShutdownDrain } from "./shutdown";
+import { gracefulShutdown } from "./shutdown";
 
 const log = createLogger({ module: "server" });
 // Prometheus metrics port. Defaults to 9091 (no behavior change); overridable via
@@ -151,18 +151,14 @@ nextProc.on("exit", (code, signal) => {
 });
 
 // ── DB-pool drain (PGS-1) ─────────────────────────────────────────────────────
-// Register the Postgres pool's drain so that on SIGTERM — after HTTP drains —
+// Register the Postgres pools' drain so that on SIGTERM — after HTTP drains —
 // in-flight transactions commit-or-rollback before connections close, instead of
-// being severed mid-write on scale-down. Wired here (the runtime depends on both
-// @knext/lib and ./shutdown) so the lib pool stays free of any dependency on the
-// runtime — no circular dep. `closeDbPool()` is a no-op if no pool was opened.
-registerShutdownDrain(async () => {
-    try {
-        await closeDbPool();
-    } catch (err) {
-        log.warn({ err }, "DB pool drain failed during shutdown (non-fatal)");
-    }
-});
+// being severed mid-write on scale-down, and a scaling-down replica releases its
+// gateway connections cleanly (no leaked sockets holding a scale-to-zero compute
+// awake). Closes BOTH the writer pool AND the read-only pool (#246); each close
+// is a no-op when its pool was never opened. Extracted to ./db-drain so the lib
+// pools stay free of any dependency on the runtime — no circular dep.
+registerDbPoolDrain();
 
 // ── Graceful shutdown ─────────────────────────────────────────────────────────
 // On SIGTERM/SIGINT: close metrics, forward SIGTERM to the Next child so it

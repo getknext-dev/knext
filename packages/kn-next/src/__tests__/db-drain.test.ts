@@ -20,11 +20,8 @@ vi.mock("@knext/lib/clients", () => ({
     closeDbPoolRO: (...args: unknown[]) => closeDbPoolRO(...args),
 }));
 
-import {
-    clearShutdownDrains,
-    gracefulShutdown,
-} from "../adapters/shutdown";
 import { drainDbPools, registerDbPoolDrain } from "../adapters/db-drain";
+import { clearShutdownDrains, gracefulShutdown } from "../adapters/shutdown";
 
 // Minimal child-process double: records signal forwarding + lets the test fire "exit".
 function makeChild() {
