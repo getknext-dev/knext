@@ -100,6 +100,16 @@ spec:
               value: "120000"
             - name: GW_RETRY_MS
               value: "100"
+            # Cold-boot role-apply race (#132): compute_ctl opens the socket a beat
+            # before it (re)applies the per-app spec role on every boot, so the FIRST
+            # connect during a 0->1 cold wake could transiently 28P01 and self-heal
+            # next request. On a GENUINE cold wake the gateway holds the client this
+            # long BEFORE the auth attempt so the role is applied first (~85ms apply
+            # window observed on OKE; 250ms gives margin). NOT an auth retry — a wrong
+            # password still fast-fails; warm connects are never delayed; clamped to
+            # GW_WAKE_TIMEOUT_MS. Set to "0" to disable (accept the rare transient).
+            - name: GW_ROLE_APPLY_SETTLE_MS
+              value: "250"
             - name: GW_MAX_CONNS
               value: "90" # per compute; each app has its own compute so this is per-app
             # Per-app WAKE budget (issue #116, ADR-0008): a token-bucket on the 0->1

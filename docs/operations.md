@@ -23,6 +23,7 @@ behavior, and troubleshooting.
 | `GW_WAKE_WINDOW_MS` | 60000 | refill window for `GW_WAKE_BUDGET` (a full budget refills over this window). |
 | `GW_PEER_SELECTOR` | — | label selector for sibling gateways (peer-aware idle); empty disables |
 | `GW_AUTH_FAIL_FLOOR_MS` | 250 | apps-gateway only: constant-floor delay on refusals so unknown-app and wrong-pair are timing-comparable (issue #92); `0` disables |
+| `GW_ROLE_APPLY_SETTLE_MS` | 250 | apps-gateway (per-app) only: on a **genuine cold wake** hold the client this long before the auth attempt so `compute_ctl` applies the per-app role first, absorbing the cold-boot `28P01` role-apply race (issue #132). NOT an auth retry — a wrong password still fast-fails; warm connects + base single-DB path are never delayed; clamped to `GW_WAKE_TIMEOUT_MS`. `0` disables |
 | `GW_POD_NAMESPACE` / `GW_POD_IP` | — | downward API; self-exclusion for the peer check |
 | `GW_TLS_CERT_FILE` / `GW_TLS_KEY_FILE` | — | front-door TLS keypair (PEM paths). Both set + loadable → gateway answers `SSLRequest` with `S` and wraps the wire (TLS 1.2+). Set-but-unloadable or half-set → gateway **fails fast at startup**. Unset → `SSLRequest` gets `N` (plaintext only). Deployed: mounted from Secret `pggw-tls` at `/etc/pggw-tls/`. |
 
@@ -1051,6 +1052,26 @@ doc-only (it no longer ships the literal default). Proven live by
 > reused Neon binary — hard rule 5). It is a hash **downgrade**, not an auth bypass
 > (the md5 verifier is for the *same* password; the attacker still needs it), bounded
 > like the #112 window. Tracked in #158.
+
+> **Cold-wake role-apply reliability — the gateway absorbs the race (issue #132).**
+> The same `compute_ctl` property (socket open ~T=.90 **before** the spec role/password
+> is (re)applied ~T=.99) means the **very first** connection during a 0→1 cold wake could
+> transiently see `28P01` ("password authentication failed") and self-heal on the next
+> request — a rare, self-healing wart that pooled/retrying clients rode through, but a
+> single non-pooled first request could surface. The **apps-gateway now absorbs it**: on
+> a **genuine cold wake** (it just triggered the 0→1 scale) of a per-app front door it
+> holds the client for a bounded **role-apply settle window** (`GW_ROLE_APPLY_SETTLE_MS`,
+> default **250 ms** — comfortably longer than the ~85 ms apply window observed on OKE)
+> **before** replaying the startup, so `compute_ctl` has applied the role by the time the
+> single auth attempt runs. This is **not** an auth retry: a genuine **wrong password
+> still fails immediately** on that one attempt (never masked or slow-failed), and **warm
+> / steady-state** connects and the **base single-DB** (`cloud_admin`) path are never
+> delayed. The settle is clamped to the remaining `GW_WAKE_TIMEOUT_MS` budget, so it can
+> never push a connection past the wake deadline. This makes the race **negligible**
+> (settle ≫ the apply window), **not deterministically zero** — the deterministic fix (a
+> `compute_ctl` `/status` readiness gate, which needs a JWT + port-3080 exposure) is
+> tracked as **#174**. Drill: `deploy/_verify-coldboot.sh`. Set
+> `GW_ROLE_APPLY_SETTLE_MS=0` to disable the gate (accepts the rare transient).
 
 > **Reading the logs — `method=md5` is the pg_hba KEYWORD, not md5 on the wire (N2, #160).**
 > Postgres' `connection authenticated: identity="app_x" method=…` line reports the

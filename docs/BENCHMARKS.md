@@ -18,6 +18,28 @@ k8s on an M-series laptop (decommissioned 2026-07-03); **OKE** = Oracle OKE
 | compute_ctl attach alone | **123–160ms** | — | Neon's true share; everything else is k8s mechanics |
 | Compose-era cold start (no k8s) | 772ms | — | the floor without pod machinery (historical) |
 | SCRAM-SHA-256 auth (issue #117) | no measurable regression | ✅ verified on OKE | wire auth is now SCRAM (was md5). The SCRAM handshake adds one client↔server round-trip vs md5 (sub-ms on the in-cluster LAN, swamped by the seconds-scale cold-wake); cold-wake wall-time was indistinguishable from the md5 baseline. The app-role verifier is precomputed at provision time (PBKDF2 4096 iters, ~ms, off the wake path). Cold-wake caveat: an existing md5-era app can still auth via md5 in the ~tens-of-ms window before `apply_config` lands the SCRAM verifier (#158). |
+| **Cold-boot role-apply settle (#132)** | — | **+250 ms deterministic** on per-app cold wake | `GW_ROLE_APPLY_SETTLE_MS` (default 250). The gateway holds the client 250 ms on a **genuine cold wake** of a per-app front door before the auth attempt, absorbing the cold-boot `28P01` role-apply race. Fires ONLY on cold wake (gateway log `cold wake — settling 250ms`, once per wake — no retry loop); warm connects + base single-DB path add **0**. ≈7 % of the p50 3.72 s cold-wake baseline; clamped to `GW_WAKE_TIMEOUT_MS`. |
+
+### Cold-boot role-apply settle gate (#132) — OKE drill, 2026-07-11
+
+`deploy/_verify-coldboot.sh` (app=pgdemo, CYCLES=8, settle build sha-55edfaa on the
+apps-gateway, `postgres:17-alpine` client pods per #171):
+
+| Property | Result | Provenance |
+|---|---|---|
+| First connect, valid creds, N cold cycles | **8/8 — NEVER a transient 28P01** | drill assertion (scans client output for `28P01`/`password authentication failed`) |
+| Wrong password, cold path | **fast-fails with `28P01`, not masked** | drill: psql exits non-zero + `28P01` in output; the gate settles once then the single auth attempt rejects |
+| Settle-gate engagement | fired **once per cold wake** (`cold wake — settling 250ms`) | apps-gateway logs — no repeated settle ⇒ no auth-retry loop |
+| Gateway-measured wake (excl. settle) | **1.6–2.9 s** | apps-gateway `awake in Xms` logs (consistent with the OKE cold-wake baseline) |
+| Settle cost (before/after) | **+250 ms deterministic** on the cold path only | the gate sleeps exactly `GW_ROLE_APPLY_SETTLE_MS`, clamped to the wake deadline |
+
+Note on method: the drill's **end-to-end** per-connect times (10–60 s; wrong-pw ~112 s)
+are dominated by client-pod scheduling + image pull + OKE API flakiness and are **not**
+a usable signal for the 250 ms settle — the settle cost is taken from the deterministic
+gate value corroborated by the gateway `awake in` / `settling` logs, not from pod
+wall-clock. The race is made **negligible** (settle ≫ the ~85 ms apply window, #158),
+**not deterministically zero**; the deterministic `compute_ctl` `/status` readiness gate
+is tracked as **#174**.
 
 ## Combined wake (knext demo, issue #8)
 

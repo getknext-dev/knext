@@ -71,10 +71,25 @@ type Gateway struct {
 	metrics *metrics.Metrics
 	opts    wake.Opts
 	idleMs  int
-	floorMs int           // GW_AUTH_FAIL_FLOOR_MS: constant-floor delay on refusals
-	connSem chan struct{} // nil = unlimited (GW_MAX_CONNS)
-	tlsConf *tls.Config   // nil = TLS unconfigured: SSLRequest gets 'N'
-	log     func(string)
+	floorMs int // GW_AUTH_FAIL_FLOOR_MS: constant-floor delay on refusals
+	// roleApplySettleMs (GW_ROLE_APPLY_SETTLE_MS) closes the cold-boot role-apply
+	// race (#132). compute_ctl opens the Postgres socket a beat BEFORE it (re)applies
+	// the per-app spec roles/passwords on every boot, so the very first connection
+	// during a 0->1 cold wake can transiently see 28P01 (it self-heals next request).
+	// On a GENUINE cold wake of a per-app front door (a systemAuthorizer driver — the
+	// path where compute_ctl re-applies per-app roles), the gateway holds the client
+	// for this bounded window BEFORE replaying the startup, so the role is applied by
+	// the time the single auth attempt runs. It is NOT an auth retry: a wrong password
+	// still fails on that one attempt (no masking). Default 250ms >> the ~85ms apply
+	// window observed live on OKE (#158); clamped to the wake deadline. Warm connects
+	// (woke==false) and the base single-DB cloud_admin path skip it entirely, so steady
+	// state is byte-for-byte unchanged. 0 disables the gate. NOTE: this makes the race
+	// NEGLIGIBLE (settle >> the apply window), not deterministically zero — the
+	// deterministic compute_ctl-/status readiness gate is tracked as #174.
+	roleApplySettleMs int
+	connSem           chan struct{} // nil = unlimited (GW_MAX_CONNS)
+	tlsConf           *tls.Config   // nil = TLS unconfigured: SSLRequest gets 'N'
+	log               func(string)
 
 	// wakeLimiter enforces the per-app wake budget (issue #116, ADR-0008). nil =
 	// budget off (GW_WAKE_BUDGET unset/0) — the wake path is unchanged. When set,
@@ -112,11 +127,12 @@ func New(env wake.Env, log func(string)) (*Gateway, error) {
 			WakeTimeoutMs:    envInt(env, "GW_WAKE_TIMEOUT_MS", 60000),
 			RetryMs:          envInt(env, "GW_RETRY_MS", 250),
 		},
-		idleMs:  envInt(env, "GW_IDLE_MS", 300000),
-		floorMs: envInt(env, "GW_AUTH_FAIL_FLOOR_MS", 250),
-		tlsConf: tlsConf,
-		log:     log,
-		active:  map[string]*activeEntry{},
+		idleMs:            envInt(env, "GW_IDLE_MS", 300000),
+		floorMs:           envInt(env, "GW_AUTH_FAIL_FLOOR_MS", 250),
+		roleApplySettleMs: envInt(env, "GW_ROLE_APPLY_SETTLE_MS", 250),
+		tlsConf:           tlsConf,
+		log:               log,
+		active:            map[string]*activeEntry{},
 	}
 	if tlsConf != nil {
 		log("[gw] TLS enabled on the Postgres wire (SSLRequest -> S); sslmode=disable still accepted")
@@ -404,6 +420,37 @@ func (g *Gateway) authFloor(start time.Time) {
 	}
 }
 
+// settleColdWake closes the cold-boot role-apply race (#132) by holding the client
+// for the role-apply settle window when, and ONLY when, this was a genuine 0->1 cold
+// wake (woke) of a per-app front door — a systemAuthorizer driver, the path where
+// compute_ctl re-applies the per-app spec role on every boot a beat after the socket
+// opens. compute_ctl opens the port BEFORE it applies the role, so the first
+// connection can transiently 28P01; a bounded pause here lets the role land before
+// the single auth attempt runs. It is NOT an auth retry — a wrong password still
+// fails promptly on that one attempt, so a genuine credential failure is never
+// masked. The base single-DB cloud_admin path (no authorizer) and every warm connect
+// (woke==false) are never delayed, so steady state is byte-for-byte unchanged. The
+// wait is clamped to the remaining wake-deadline budget so it can never push a
+// connection past GW_WAKE_TIMEOUT_MS.
+func (g *Gateway) settleColdWake(woke bool, target wake.Target, start time.Time) {
+	if !woke || g.roleApplySettleMs <= 0 {
+		return
+	}
+	if _, ok := g.driver.(systemAuthorizer); !ok {
+		return
+	}
+	settle := time.Duration(g.roleApplySettleMs) * time.Millisecond
+	rem := time.Duration(g.opts.WakeTimeoutMs)*time.Millisecond - time.Since(start)
+	if rem <= 0 {
+		return // deadline already spent — never delay further
+	}
+	if rem < settle {
+		settle = rem // clamp so settle + wake never exceeds the wake deadline
+	}
+	g.log("[gw] " + target.Key + ": cold wake — settling " + strconv.FormatInt(settle.Milliseconds(), 10) + "ms for per-app role apply (#132)")
+	time.Sleep(settle)
+}
+
 // computeUnavailable writes the client-facing error for a wake/resolve failure.
 // On the apps-gateway (template mode) the real cause is logged server-side only
 // and the client gets the SAME uniform 28P01 password-failure used for authz
@@ -478,6 +525,12 @@ func (g *Gateway) proxy(client net.Conn, startupPacket, pendingRest []byte, targ
 		g.metrics.Wake(target.Key, wakeMs)
 		g.log("[gw] " + target.Key + ": awake in " + strconv.FormatInt(wakeMs, 10) + "ms")
 	}
+
+	// Cold-boot role-apply race (#132): on a genuine cold wake of a per-app front
+	// door, hold the client for the bounded settle window BEFORE replaying the
+	// startup, so compute_ctl has (re)applied the per-app role by the time the
+	// single auth attempt below runs. No-op on warm connects and the base path.
+	g.settleColdWake(woke, target, start)
 
 	if tcp, ok := conn.(*net.TCPConn); ok {
 		_ = tcp.SetNoDelay(true)
