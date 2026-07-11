@@ -185,10 +185,11 @@ jobs:
 
       # Build the runtime + the adapter package so `npm pack @knext/core` ships a
       # working adapter for NEXT_ADAPTER_PATH.
-      - name: Build @knext/lib + @knext/core
+      - name: Build @knext/lib + @knext/db + @knext/core
         working-directory: knext
         run: |
           pnpm --filter @knext/lib build
+          pnpm --filter @knext/db build
           pnpm --filter @knext/core build
 
       # #147 A3-3 fix round 1 (triage of run 28558576615 — the ONE bug behind
