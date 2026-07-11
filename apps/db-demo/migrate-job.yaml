@@ -1,0 +1,34 @@
+# migrate-job.yaml — apply db-demo's migrations once per deploy (ADR-0021 §3).
+#
+# Writer-only, one-shot: `restartPolicy: Never` + `backoffLimit: 2` fail the Job
+# loudly on a bad migration (never ship a half-applied schema). Connecting wakes
+# the scale-to-zero writer a single time. Apply it AFTER the database is Ready and
+# BEFORE app pods serve — this is a deploy step, NOT a live-applied platform manifest.
+#
+#   kubectl wait --for=condition=Ready appdatabase/db-demo -n my-apps --timeout=120s
+#   kubectl apply -f migrate-job.yaml -n my-apps
+#   kubectl wait --for=condition=Complete job/db-demo-migrate -n my-apps --timeout=300s
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: db-demo-migrate
+  namespace: my-apps
+spec:
+  backoffLimit: 2 # fail loud after a few retries
+  ttlSecondsAfterFinished: 300 # reap the finished Job automatically
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: migrate
+          # Same image + digest as the db-demo deploy so the migrations match the code.
+          image: registry.example/db-demo:<same-digest-as-the-deploy>
+          command: ['kn-next', 'db', 'migrate']
+          env:
+            # The WRITER DSN — the same Secret the operator injects into the app.
+            # Writer only: never wire DATABASE_URL_RO here (the runner refuses it).
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: db-demo-db # the AppDatabase-provisioned (or BYO) Secret
+                  key: DATABASE_URL

@@ -63,6 +63,43 @@ importers:
         specifier: ^4.0.16
         version: 4.0.18(@opentelemetry/api@1.9.0)(@types/node@25.3.0)(@vitest/ui@4.0.18)(happy-dom@20.5.0)(jiti@2.6.1)(jsdom@27.4.0)(lightningcss@1.30.2)(terser@5.46.0)(tsx@4.23.0)(yaml@2.8.2)
 
+  apps/db-demo:
+    dependencies:
+      '@knext/db':
+        specifier: workspace:*
+        version: link:../../packages/db
+      '@knext/lib':
+        specifier: workspace:*
+        version: link:../../packages/lib
+      next:
+        specifier: 16.2.10
+        version: 16.2.10(@babel/core@7.29.0)(@opentelemetry/api@1.9.0)(react-dom@19.2.5(react@19.2.5))(react@19.2.5)
+      react:
+        specifier: ^19.0.0
+        version: 19.2.5
+      react-dom:
+        specifier: ^19.0.0
+        version: 19.2.5(react@19.2.5)
+    devDependencies:
+      '@knext/core':
+        specifier: workspace:*
+        version: link:../../packages/kn-next
+      '@types/node':
+        specifier: ^20
+        version: 20.19.33
+      '@types/react':
+        specifier: ^19
+        version: 19.2.13
+      '@types/react-dom':
+        specifier: ^19
+        version: 19.2.3(@types/react@19.2.13)
+      drizzle-kit:
+        specifier: ^0.31.0
+        version: 0.31.10
+      typescript:
+        specifier: ^5.9.3
+        version: 5.9.3
+
   apps/file-manager:
     dependencies:
       '@knext/lib':

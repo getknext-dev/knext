@@ -1,0 +1,29 @@
+{
+  "name": "db-demo",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build --webpack",
+    "start": "node .next/standalone/apps/db-demo/server.js",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "kn-next db migrate",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@knext/db": "workspace:*",
+    "@knext/lib": "workspace:*",
+    "next": "16.2.10",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@knext/core": "workspace:*",
+    "@types/node": "^20",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "drizzle-kit": "^0.31.0",
+    "typescript": "^5.9.3"
+  }
+}
