@@ -636,13 +636,21 @@ effective per-app ceiling before refusals begin is `GW_WAKE_BUDGET × replicas` 
 Wake **latency** is unchanged (a warm app is never gated; the budget is consulted only
 when the compute is asleep) — no cold-wake regression.
 
-> **Update (issue #166):** the `WakeBudgetExceeded` alert was **debounced** — `for: 1m`
-> over a `[5m]` window → **`for: 3m`** over a `[2m]` window — so a single self-clearing
-> burst no longer pages (only a *sustained* breach does). The 2026-07-07 "alert fires"
-> row above was recorded under the pre-#166 config (single burst → 1 m `for`). The drill
-> (`_verify-wake-guard.sh`) now **sustains** the over-budget breach for ~5 min past the
-> `for:` before asserting firing; a fresh live OKE run is needed to re-record the
-> debounced firing time (pending at the sign-off gate's drill battery).
+> **Update (issue #166), re-verified live on OKE 2026-07-11:** the `WakeBudgetExceeded`
+> alert was **debounced** — `for: 1m` over a `[5m]` window → **`for: 3m`** over a `[2m]`
+> window — so a single self-clearing burst no longer pages (only a *sustained* breach
+> does). The reworked drill (`_verify-wake-guard.sh run`) now **sustains** the over-budget
+> breach (~5 min, past the 3m `for:`) before asserting firing.
+>
+> **2026-07-11 live re-record** (post-#184 deploy; `pggw-apps` `GW_WAKE_BUDGET=15` × 2
+> replicas ⇒ ~30 ceiling; prometheus rule confirmed live at `for: 3m` / `increase(...[2m])`):
+> full drill **PASS** — no-regression legit wake returned a row; unauth burst of **42**
+> attempts **capped at 12/42 refused** (`53400`), `compute-wgapp` bounded to **≤1 replica**;
+> `pggw_wake_budget_exceeded_total{gateway="pggw-apps"}` rose **0 → 12**; and
+> **`WakeBudgetExceeded` (plane=apps) reached FIRING under the sustained breach** — while a
+> single self-clearing burst is debounced away. Confirms the #166 debounce pages on a
+> genuine sustained side-channel and suppresses only transient noise. (The 2026-07-07 row
+> above remains the pre-#166 `for: 1m` single-burst record.)
 
 ## Platform extensions — TimescaleDB + pgvector self-enable + scale-to-zero survival (issues #177/#178, ADR-0001)
 
