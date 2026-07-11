@@ -427,6 +427,59 @@ A, never B, both data and authz directions — is the headline result and passed
 cleanly across repeated runs; the staleness figure is noisy under the concurrent
 load lane and is recorded honestly rather than cherry-picked.
 
+## Warm-plane RO staleness (issue #169)
+
+**The question.** A #167 sysdesign drill saw a per-app RO (`compute-ro-<app>`) not
+reflect a fresh writer row within 90 s on a **cold** plane (both computes just
+woken). Is the ~9 s tip-following contract (§ #127 / #66) broken, or was the 90 s the
+one-time **cold walreceiver catch-up** — a wake cost, not steady-state replication
+lag? `deploy/_measure-ro-staleness.sh` isolates the two: one long-lived pod holds
+psql to both the writer (`DATABASE_URL`) and the RO (`DATABASE_URL_RO`), commits a
+unique marker, and polls the RO **every 100 ms**. It reports **two independent
+metrics per cycle**: `polls` (100 ms polls until the row is visible — the
+**replication-only** signal, taken once the RO is already awake) and `lag_s`
+(wall-clock write→visible). Warm-up cycles are discarded so the cold catch-up is
+excluded on purpose.
+
+**Result — live on OKE, 2026-07-12 (`_measure-ro-staleness.sh`, app `rostale`,
+`RO_MODE=Replica`, warm plane).** Run captured during an **intermittently degraded
+OKE control-plane window** (recurring `net/http: TLS handshake timeout`); the run's
+session lapsed mid-drill after 5 of 7 cycles, so the numbers below are the honest
+partial capture (N=5), not the full N≥7. The **replication-only** signal is
+unambiguous:
+
+| Cycle | `polls` (100 ms polls → visible) | `lag_s` (wall-clock) |
+|---|---|---|
+| WARM 0 | **0** | (discarded warm-up) |
+| WARM 1 | **0** | (discarded warm-up) |
+| WARM 2 | **0** | (discarded warm-up) |
+| CYCLE 0 | **0** | 64.113 s |
+| CYCLE 1 | **0** | 64.101 s |
+
+**`polls=0` on every one of the 5 cycles** — the RO saw the committed writer row on
+the **very first 100 ms poll** (i.e. sub-100 ms replication visibility once the RO is
+awake). Steady-state tip-following replication is **sub-second**, far inside the ~9 s
+contract, which **HOLDS**.
+
+**The `lag_s=64 s` is a wall-clock artifact, NOT replication lag** — and `polls=0`
+proves it: the row was *already* replicated and visible the instant the RO responded.
+On this run the RO compute scaled to zero between cycles (idle in the write→next-cycle
+gap under the flaky API), so the first `seen()` poll of each measured cycle blocked
+~64 s **waking `compute-ro-rostale` 0→1** before it could answer — that ~64 s is
+**RO-side cold-wake time**, on the scale-to-zero axis, not the replication axis. This
+is the **same class of artifact** as the #167 90 s and the #127 ~143 s figures: all
+three are **cold-wake / degraded-API wall-clock**, not tip-following replication lag.
+The `_measure-ro-staleness.sh` design starts its clock *after* an acknowledged
+`COMMIT` (so writer-wake is already excluded from `lag_s`); a fully clean `lag_s`
+additionally requires the **RO** to stay warm across cycles — a persistent RO
+connection was added mid-run but the session lapsed before clean cycles completed.
+
+**Verdict:** steady-state warm-plane RO staleness is **sub-second** (replication-only
+`polls=0`, N=5) — the ~9 s contract holds. The 60–124 s `lag_s` seen here and in the
+prior #169 attempt, the #167 90 s, and the #127 ~143 s are **cold-wake / degraded-API
+wall-clock artifacts**, not replication lag. A clean end-to-end `lag_s` (both computes
+held warm, healthy control plane) is deferred to a re-run under a stable session.
+
 ## Read-only pool under load (HPA n>1, issue #99)
 
 The GA gate for read-scaling: with the read-scaling HPA

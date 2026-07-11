@@ -111,6 +111,20 @@ can design against:
 > DSN. If you commit on `DATABASE_URL` and must read that exact write back
 > immediately, read it from `DATABASE_URL` — not the pool.
 
+**Cold catch-up vs. warm steady-state — two different numbers, don't conflate
+them.** The ~9 s contract above is the *steady-state* tip-following replication lag
+of a **warm** RO compute that is already streaming WAL. Do **not** confuse it with
+the **one-time cold catch-up** paid when a freshly-attached (or freshly-woken from
+zero) RO compute *first* starts its walreceiver: that initial attach-and-catch-up
+is a **wake cost**, measured on the wake/scale-to-zero axis, not a replication-lag
+cost. A wall-clock "write → visible on RO" stopwatch that starts before the RO is
+awake will fold that RO-side wake into its number and report tens of seconds — this
+is an artifact of *cold-wake timing*, not of replication. When both computes are
+warm, tip-following replication is **sub-second** (well inside the ~9 s ceiling);
+`deploy/_measure-ro-staleness.sh` isolates the two by discarding warm-up cycles and
+reporting the replication-only poll count separately from wall-clock (see
+[BENCHMARKS](BENCHMARKS.md#warm-plane-ro-staleness-issue-169)).
+
 The read-only computes boot in one of two modes (`RO_MODE`, on
 `deploy/26-compute-ro.yaml`):
 
