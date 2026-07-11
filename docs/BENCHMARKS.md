@@ -620,6 +620,29 @@ effective per-app ceiling before refusals begin is `GW_WAKE_BUDGET × replicas` 
 Wake **latency** is unchanged (a warm app is never gated; the budget is consulted only
 when the compute is asleep) — no cold-wake regression.
 
+## Platform extensions — TimescaleDB + pgvector self-enable + scale-to-zero survival (issues #177/#178, ADR-0001)
+
+Verified **live on OKE, 2026-07-11** on `compute-node-v17:8464`. Mechanics first probed on
+the `pgdemo` app DB, then codified + re-run end-to-end via `deploy/_verify-extensions.sh`
+(throwaway app `extdrill`, provisioned through the AppDatabase CRD).
+
+| Claim | Result | Evidence |
+|---|---|---|
+| **Both bundled + trusted** | ✅ `timescaledb 2.17.1` and `vector 0.8.0` in `pg_available_extensions`; both control files `trusted = true` | `pg_available_extensions` + `*.control` on the compute |
+| **pgvector needs NO preload / image bump** | ✅ `CREATE EXTENSION vector` works with the stock compute config (not in `shared_preload_libraries`); already in 8464 | spike, no manifest change |
+| **App SELF-enables (no cloud_admin)** | ✅ `app_extdrill` ran `CREATE EXTENSION timescaledb; CREATE EXTENSION vector;` over its own `DATABASE_URL`. Before the template `GRANT CREATE ON DATABASE … TO PUBLIC`: *"permission denied … Must have CREATE privilege on current database"*; after: succeeds | drill step 2 |
+| **TimescaleDB hypertable live** | ✅ `create_hypertable` + 60 rows + `time_bucket('15 min')` → 5 buckets | drill step 3 |
+| **pgvector hnsw ANN live** | ✅ `vector(3)` column + `hnsw (vector_l2_ops)` index + `<->` nearest-neighbour: top hit is the query vector itself (dist 0) | drill step 4 |
+| **Survives scale-to-zero** | ✅ scale `compute-extdrill` → 0, wake on reconnect: hypertable (60 rows), `time_bucket`, vector `<->`, the `ext_vec_hnsw` index, and both `pg_extension` rows all intact | drill steps 5–6 |
+
+Methodology: extension objects + data live on the pageserver (per-branch catalog + tables),
+so scale-to-zero is a compute restart, not data loss — the same durability the base wake drill
+proves. TimescaleDB is offered at the **Apache-2 tier only** (no columnar compression /
+continuous aggregates: those are TSL background-worker jobs that cannot run on a compute that
+sleeps — ADR-0001 Q1). pgvector has no such caveat (no background worker). Drill runtime on the
+flaky OKE control plane is dominated by throwaway-psql-pod scheduling + occasional TLS-handshake
+retries, not by Postgres — every positive assertion is wrapped in a 6× `RETRY`.
+
 ## Capacity / sizing facts
 
 - Gateway: `GW_MAX_CONNS=90` < compute `max_connections=100`; excess → clean 53300.

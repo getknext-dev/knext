@@ -290,10 +290,73 @@ zero applies the new password automatically on its next wake; a running compute
 keeps the old password until it is bounced (`--bounce`, a single-writer-safe
 `Recreate`). Operator runbook: [operations](operations.md#rotating-an-app-credential-issue-93b).
 
-## Time-series data
+## Enabling extensions (TimescaleDB, pgvector)
 
-`CREATE EXTENSION timescaledb;` works out of the box (Apache-2 tier):
-hypertables, chunk pruning, and `drop_chunks()` retention. Columnar compression and
-continuous aggregates are **not** available on this platform — background policy jobs
-can't run on a compute that scales to zero. Details: `adr-0001-timescale-and-sharding.md`.
-Big regular tables: `pg_partman` is also preinstalled.
+Two Postgres extensions ship in the compute image and are **opt-in, self-service**: your
+app enables them **itself** over its own `DATABASE_URL` — no operator, no superuser. Both
+are marked `trusted`, and each app database grants its login `CREATE` on its own database
+(the app is its own isolated Neon branch), so a single `CREATE EXTENSION` line is all it
+takes. Extensions and their data live on the pageserver, so **they survive scale-to-zero**:
+scale to 0, wake on the next connection, and your hypertables / vectors / indexes are still
+there. The whole path is proven by `deploy/_verify-extensions.sh`.
+
+```sql
+-- run once per app database, through your DATABASE_URL (as app_<app>):
+CREATE EXTENSION IF NOT EXISTS timescaledb;   -- 2.17.1
+CREATE EXTENSION IF NOT EXISTS vector;        -- pgvector 0.8.0
+```
+
+### TimescaleDB (time-series)
+
+`CREATE EXTENSION timescaledb;` gives you the **Apache-2 tier**: hypertables,
+`time_bucket()`, chunk pruning, and `drop_chunks()` retention.
+
+```sql
+CREATE EXTENSION IF NOT EXISTS timescaledb;
+CREATE TABLE readings (ts timestamptz NOT NULL, sensor int, val double precision);
+SELECT create_hypertable('readings', 'ts');
+INSERT INTO readings VALUES (now(), 1, 42.0);
+SELECT time_bucket('15 minutes', ts) AS bucket, avg(val)
+FROM readings GROUP BY bucket ORDER BY bucket;
+```
+
+Columnar **compression** and **continuous aggregates** are **not** available on this
+platform — they are TSL features driven by background policy jobs, which cannot run on a
+compute that scales to zero (see `adr-0001-timescale-and-sharding.md`). For big regular
+tables, `pg_partman` is also preinstalled.
+
+### pgvector (embeddings / semantic search)
+
+`CREATE EXTENSION vector;` gives you the `vector` type plus `ivfflat` and `hnsw` index
+access methods and the `<->` (L2), `<#>` (inner product), `<=>` (cosine) operators.
+
+```sql
+CREATE EXTENSION IF NOT EXISTS vector;
+CREATE TABLE docs (id bigserial PRIMARY KEY, body text, embedding vector(1536));
+-- INSERT your embeddings (e.g. from an embedding model), then index for ANN search:
+CREATE INDEX ON docs USING hnsw (embedding vector_l2_ops);
+-- nearest neighbours to a query embedding:
+SELECT id, body FROM docs ORDER BY embedding <-> $1 LIMIT 5;
+```
+
+Build the `hnsw`/`ivfflat` index while the compute is awake (index builds run on your own
+per-app compute). The index and vectors persist across scale-to-zero like any other table.
+
+### Already-provisioned apps (created before this feature)
+
+Apps branched **before** the self-service grant shipped won't have `CREATE` on their
+database yet, so `CREATE EXTENSION` returns *"must have CREATE privilege on current
+database"*. Fix it once, as the platform operator (loopback cloud_admin on the app's
+compute) — either grant self-service, or just install the extension centrally:
+
+```bash
+POD=$(kubectl -n scale-zero-pg get pod -l app=compute-<app> -o jsonpath='{.items[0].metadata.name}')
+# either enable self-service for the app going forward:
+kubectl -n scale-zero-pg exec "$POD" -c compute -- env PGPASSWORD=cloud_admin \
+  psql -h localhost -p 55433 -U cloud_admin -d postgres -c 'GRANT CREATE ON DATABASE postgres TO PUBLIC;'
+# …or install the extension centrally in one shot:
+kubectl -n scale-zero-pg exec "$POD" -c compute -- env PGPASSWORD=cloud_admin \
+  psql -h localhost -p 55433 -U cloud_admin -d postgres -c 'CREATE EXTENSION IF NOT EXISTS vector;'
+```
+
+New apps (branched from the template after this change) get the grant automatically.

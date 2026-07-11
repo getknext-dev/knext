@@ -184,6 +184,20 @@ Design, evidence and caveats: [ADR-0003](adr-0003-multi-tenancy.md) ·
 [connecting → multi-app](connecting.md#multi-app--branch-per-app) ·
 [operations → operator runbook](operations.md#appdatabase-operator-runbook-96).
 
+### Extensions (TimescaleDB, pgvector)
+
+Each app can **self-enable** two trusted extensions over its own `DATABASE_URL` — no
+operator, no superuser — and they survive scale-to-zero:
+
+```sql
+CREATE EXTENSION IF NOT EXISTS timescaledb;   -- hypertables, time_bucket, drop_chunks (Apache-2 tier)
+CREATE EXTENSION IF NOT EXISTS vector;        -- pgvector: vector type + ivfflat/hnsw ANN indexes
+```
+
+Recipes, the scale-to-zero note, and the fix for apps provisioned before this feature:
+[connecting → Enabling extensions](connecting.md#enabling-extensions-timescaledb-pgvector).
+Drill: `sh deploy/_verify-extensions.sh`.
+
 ## 6. Zones — one logical system across consistency boundaries
 
 The **Zone CRD + zone-operator ship as STANDARD cluster infrastructure** —

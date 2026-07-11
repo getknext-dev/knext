@@ -30,3 +30,21 @@ GRANT ALL ON ALL TABLES IN SCHEMA public TO PUBLIC;
 GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO PUBLIC;
 ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO PUBLIC;
 ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO PUBLIC;
+
+-- Self-service TRUSTED extensions (issues #177 timescaledb / #178 pgvector,
+-- ADR-0001 "Accepted"). timescaledb (2.17.1) and vector (0.8.0) both ship in
+-- neondatabase/compute-node-v17 with `trusted = true` in their control file. A
+-- trusted extension can be installed by any role that holds CREATE on the current
+-- DATABASE (not just the schema) — Postgres does NOT require superuser. So we grant
+-- CREATE on the app's OWN database to PUBLIC, which lets a per-app login run
+-- `CREATE EXTENSION timescaledb;` / `CREATE EXTENSION vector;` itself through its
+-- DATABASE_URL — opt-in, no operator action, no per-app code. Safe because isolation
+-- is at the Neon TIMELINE level: each app is its own branch + its own Postgres +
+-- loopback-only cloud_admin, so PUBLIC here == only this app's own role(s), and a
+-- DB-level CREATE grant only lets an app create schemas/extensions in ITS OWN
+-- branch — never cross-tenant (same rationale as the schema grants above:
+-- intra-DB privileges are open; the credential is auth, not the isolation boundary).
+-- Operators who prefer central control can instead enable extensions as cloud_admin
+-- at provision time (docs/connecting.md "Enabling extensions"); this grant only
+-- makes the app-self-service path possible, it does not install anything.
+GRANT CREATE ON DATABASE postgres TO PUBLIC;

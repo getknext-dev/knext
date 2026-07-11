@@ -1,12 +1,24 @@
-# ADR-0001 — TimescaleDB option & sharding mechanism
+# ADR-0001 — Platform extensions (TimescaleDB, pgvector) & sharding mechanism
 
-- **Status:** Proposed
-- **Date:** 2026-07-02
+- **Status:** Accepted (2026-07-11) — was Proposed 2026-07-02.
+- **Date:** 2026-07-02 (Q1/Q2); **2026-07-11** (Accepted + Q3 pgvector + enablement mechanism).
 - **Context of decision:** next-phase planning (maturity / reliability / performance) for the
   scale-to-zero Postgres MVP (Neon OSS storage plane + Go wake gateway; one DB per knext app/zone).
 - **Evidence base:** empirical checks on `neondatabase/compute-node-v17:latest`,
-  `neondatabase/neon:8464`, and the live `scale-zero-pg` cluster (2026-07-02), plus vendor docs.
-  Commands and raw output are reproducible via the image + `kubectl exec` on `deploy/compute`.
+  `neondatabase/neon:8464`, and the live `scale-zero-pg` cluster (2026-07-02; re-verified
+  2026-07-11 on `compute-node-v17:8464`), plus vendor docs. Commands and raw output are
+  reproducible via the image + `kubectl exec` on `deploy/compute`, and codified in
+  `deploy/_verify-extensions.sh` (issues #177/#178).
+
+---
+
+## Acceptance note (2026-07-11)
+
+This ADR is promoted **Proposed → Accepted**. The platform **offers TimescaleDB (Apache-2 tier)
+and pgvector as opt-in, self-service trusted extensions** on any app database (Q1 + the new Q3
+below). The **sharding half (Q2) stays as-is** — a documented set of growth levers, not wired
+work; nothing about it changes with this acceptance. See "Q3 — pgvector" and "Enablement
+mechanism" below for the 2026-07-11 additions.
 
 ---
 
@@ -68,6 +80,71 @@ in 2.14** (2024-02-08); 2.17.1 is single-node only. It is not a scale-out option
 - *Uncertain / untested:* whether adding `timescaledb.license=timescale` to our compute spec is
   even accepted by Neon's build, and whether any TSL job would survive a wake cycle. Not worth
   validating unless (b)-escalation is on the table.
+
+---
+
+## Q3 — pgvector (added 2026-07-11, issue #178)
+
+### Evidence (measured, `compute-node-v17:8464`, live plane 2026-07-11)
+- **Bundled.** `vector` **0.8.0** appears in `pg_available_extensions`. `vector.control` ships in
+  the image (`/usr/local/share/extension/vector.control`) with `relocatable = true` and
+  **`trusted = true`**, comment "vector data type and ivfflat and hnsw access methods".
+- **No preload needed.** Unlike timescaledb, pgvector is a plain data-type + index-AM extension —
+  it is NOT in `shared_preload_libraries` and does not need to be. `CREATE EXTENSION vector`
+  succeeds with the stock compute config; **zero manifest / compute-spec change**.
+- **Fully functional on our plane** (`deploy/_verify-extensions.sh`): a `vector(3)` column, an
+  **hnsw** index (`vector_l2_ops`), and a `<->` (L2) nearest-neighbour query all work; the top hit
+  for a query vector is the vector itself at distance 0. `ivfflat` is also present.
+- **Survives scale-to-zero.** After scaling the app's compute to 0 and waking it, the extension,
+  the vector rows, and the hnsw index are all intact — pgvector state lives in the app's tables +
+  catalog on the pageserver, exactly like any other Postgres object. No background worker, no
+  policy scheduler (contrast timescaledb TSL) — so the scale-to-zero mismatch that gates TSL in Q1
+  **does not apply to pgvector**. It is a first-class fit for this plane.
+
+### Decision (Q3)
+- **OFFER pgvector as an opt-in, self-service trusted extension.** Same enablement path as
+  timescaledb (below): the app runs `CREATE EXTENSION vector` over its own `DATABASE_URL`. No image
+  bump (it is already in 8464), no preload, no operator action. Document an embeddings recipe
+  (`docs/connecting.md`).
+
+### Consequences
+- knext apps get semantic-search / embeddings storage with **zero new components** and full
+  scale-to-zero. ✅
+- ivfflat/hnsw index builds run on the app's own compute while it is awake — no idle-time work to
+  strand. ✅
+
+---
+
+## Enablement mechanism (both extensions, 2026-07-11)
+
+**Both `timescaledb` (2.17.1) and `vector` (0.8.0) are `trusted = true`.** Postgres lets a
+**non-superuser** install a trusted extension **iff that role holds `CREATE` on the current
+DATABASE** (not merely on a schema) — no superuser required. Our per-app role `app_<app>` already
+had `CREATE` on `schema public` (issue #74) but **not** on the database, so a bare
+`CREATE EXTENSION` over `DATABASE_URL` returned *"permission denied … Must have CREATE privilege on
+current database"* (measured 2026-07-11).
+
+**Decision — self-service via a database-level grant (lowest operational surface).** The template
+base schema (`deploy/testdata/app-base-schema.sql`, inherited copy-on-write by every branched app)
+now also runs `GRANT CREATE ON DATABASE postgres TO PUBLIC`. An app can then enable either extension
+**itself**, opt-in, with a single documented line over its own `DATABASE_URL` — no operator step, no
+per-app code, no CRD field. This was chosen over (a) a template that pre-installs the extensions for
+every app (not opt-in; pays the cost for apps that never use them) and (b) an `AppDatabase.spec`
+`extensions:` list reconciled by the operator as cloud_admin (more code + a new API surface + an
+operator round-trip, for a capability the *trusted* flag was designed to make self-service).
+
+**Why the grant is safe.** Isolation on this platform is at the **Neon timeline** level: each app is
+its own branch + its own Postgres + a loopback-only `cloud_admin` (issue #112). Inside one app's
+database, `PUBLIC` == only that app's own role(s); a DB-level `CREATE` grant lets an app create
+schemas/extensions **only in its own branch**, never cross-tenant. This is the same posture the
+existing schema-level grants already take ("intra-DB privileges can be open: a credential is
+authentication, not the isolation boundary", app-base-schema.sql). Operators who want central
+control can instead pre-install extensions as `cloud_admin` at provision time and omit/withhold the
+grant; the grant only *enables* the self-service path, it installs nothing.
+
+**Rollout.** New apps branched after the template re-seed inherit the grant automatically. Apps
+provisioned **before** it need a one-time `GRANT CREATE ON DATABASE postgres TO PUBLIC` (or an
+operator-run `CREATE EXTENSION …`) as cloud_admin — documented in `docs/connecting.md`.
 
 ---
 
