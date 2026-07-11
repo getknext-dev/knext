@@ -20,6 +20,7 @@
  *   serviceable.
  */
 
+import { writeSync } from "node:fs";
 import { createLogger } from "../utils/logger";
 import { isEntrypoint, runQuiet } from "./exec";
 // Single source of truth for config loading — also runs validateConfig.
@@ -87,20 +88,59 @@ interface RollbackArgs {
     canaryPercent?: number;
 }
 
-/** Parse argv into rollback options. Positional <app> is optional. */
+/**
+ * Parse argv into rollback options. Positional <app> is optional.
+ *
+ * STRICT by design (PR #232 review): rollback is a MUTATING command whose
+ * bare form (`kn-next rollback <app>`) clears the traffic pin — so a dangling
+ * `--to` or a typo'd flag must be a hard error, never a silent fall-through
+ * to the OPPOSITE mutation (un-pinning when the user asked to pin).
+ */
 export function parseRollbackArgs(argv: readonly string[]): RollbackArgs {
     const out: RollbackArgs = { namespace: "default" };
+    const takeValue = (flag: string, i: number): string => {
+        const v = argv[i];
+        if (v === undefined || v.startsWith("-")) {
+            throw new Error(
+                `${flag} requires a value (see kn-next rollback --help)`,
+            );
+        }
+        return v;
+    };
     for (let i = 0; i < argv.length; i++) {
         const a = argv[i];
         if (a === "--to") {
-            out.toRevision = argv[++i];
+            out.toRevision = takeValue("--to", ++i);
         } else if (a === "--canary") {
-            out.canaryPercent = Number(argv[++i]);
+            const raw = takeValue("--canary", ++i);
+            const n = Number(raw);
+            // Integer 1–99 only — matches the help text. 0 is NOT "no canary"
+            // (omit the flag for that) and 100 would send everything back to
+            // latest-ready, i.e. not a rollback at all.
+            if (!Number.isInteger(n) || n < 1 || n > 99) {
+                throw new Error(
+                    `--canary must be an integer between 1 and 99 (got ${JSON.stringify(raw)})`,
+                );
+            }
+            out.canaryPercent = n;
         } else if (a === "-n" || a === "--namespace") {
-            out.namespace = argv[++i];
-        } else if (!a.startsWith("-") && out.app === undefined) {
+            out.namespace = takeValue(a, ++i);
+        } else if (a.startsWith("-")) {
+            throw new Error(
+                `unknown flag "${a}" (see kn-next rollback --help)`,
+            );
+        } else if (out.app === undefined) {
             out.app = a;
+        } else {
+            throw new Error(
+                `unexpected positional ${JSON.stringify(a)} — only one <app> positional is accepted (see kn-next rollback --help)`,
+            );
         }
+    }
+    if (out.canaryPercent !== undefined && out.toRevision === undefined) {
+        throw new Error(
+            "--canary requires --to <revision> (see kn-next rollback --help)",
+        );
     }
     return out;
 }
@@ -130,7 +170,6 @@ export async function rollbackMain(argv: readonly string[]): Promise<number> {
         // Written synchronously to fd 1 (not via the async pino transport) so
         // `kn-next rollback --help | cat` is never truncated — same contract as
         // the status/doctor help paths.
-        const { writeSync } = await import("node:fs");
         writeSync(1, ROLLBACK_HELP);
         return 0;
     }
@@ -144,19 +183,12 @@ async function rollback(argv: readonly string[]) {
     const args = parseRollbackArgs(argv);
 
     // Resolve the app name: positional arg wins, else the config's name.
+    // (Canary/flag validation already happened in parseRollbackArgs — strict,
+    // integer 1–99, no unknown flags.)
     let appName = args.app;
     if (!appName) {
         const config = await loadConfig();
         appName = config.name;
-    }
-
-    if (
-        args.canaryPercent !== undefined &&
-        (Number.isNaN(args.canaryPercent) ||
-            args.canaryPercent < 0 ||
-            args.canaryPercent > 100)
-    ) {
-        throw new Error("--canary must be an integer between 0 and 100");
     }
 
     log.info(
@@ -176,6 +208,20 @@ async function rollback(argv: readonly string[]) {
         "Patched NextApp CR — operator will shift Knative revision traffic",
     );
     log.info("✨ Rollback complete!");
+
+    // Synchronous one-line confirmation on fd 1: pino's transport is async and
+    // a process.exit right after can swallow the log lines above — a SUCCESSFUL
+    // mutation must always print what it did (same writeSync contract as help).
+    writeSync(
+        1,
+        args.toRevision
+            ? `rollback: pinned ${appName} (ns ${args.namespace}) spec.traffic to ${args.toRevision}` +
+                  (args.canaryPercent !== undefined
+                      ? ` with canary ${args.canaryPercent}% to latest-ready`
+                      : "") +
+                  " — operator reconciles the ksvc split\n"
+            : `rollback: cleared ${appName} (ns ${args.namespace}) spec.traffic pin — back to latest-ready\n`,
+    );
 }
 
 // Run only when invoked directly as the entry (not when imported by tests or

@@ -413,9 +413,9 @@ async function deploy() {
 
 // Run only when invoked directly as the entry (not when imported, e.g. in tests).
 // The bin doubles as a tiny subcommand dispatcher: `kn-next doctor`,
-// `kn-next status` and `kn-next db bind` route to their own modules; everything
-// else (including the historical bare `kn-next` / `kn-next deploy`) runs the
-// deploy flow.
+// `kn-next status`, `kn-next db bind` and `kn-next rollback` route to their own
+// modules; everything else (including the historical bare `kn-next` /
+// `kn-next deploy`) runs the deploy flow.
 if (isEntrypoint(import.meta.url)) {
     const sub = process.argv[2];
     try {

@@ -231,6 +231,11 @@ describe("built bin (dist/cli/kn-next.js) is Node-runnable", () => {
         expect(r.stdout).toContain("kn-next rollback");
         expect(r.stdout).toContain("--to");
         expect(r.stdout).toContain("--canary");
+        // Rollback-ONLY discriminators: these strings exist in rollback's help
+        // and nowhere in deploy's usage text, so removing the dispatch branch
+        // (falling through to deploy's help/flow) cannot false-pass this test.
+        expect(r.stdout).toContain("spec.traffic");
+        expect(r.stdout).toContain("Patches ONLY the NextApp CR");
     });
 
     it("`node kn-next.js status --help` dispatches and exits 0", () => {
