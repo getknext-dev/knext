@@ -375,6 +375,15 @@ The defaults already satisfy both — you rarely tune them. Override the writer 
 `DB_POOL_*` and the reader with `DB_POOL_RO_*` if you must. Because the connect
 timeout already tolerates the cold wake, **no app-side wake retry is needed**.
 
+**Graceful drain on scale-down.** On `SIGTERM` (Knative scaling a replica down),
+the runtime drains **both** pools — the writer *and* the RO pool — after in-flight
+HTTP requests finish, so a terminating replica releases its gateway connections
+cleanly instead of severing them mid-write or leaking idle sockets that hold a
+scale-to-zero compute awake. Each close is idempotent and a no-op when its pool was
+never opened (e.g. an app with no `DATABASE_URL_RO`), and the whole drain is bounded
+by the shutdown grace cap so a slow/unreachable database can never wedge shutdown.
+You get this for free — nothing to wire in app code.
+
 This is the payoff of the unified platform: the app scales to zero on Knative, its
 database scales to zero on scale-zero-pg, and **the first visitor request wakes both**
 — the app pod, then (on the pool's first connection) its Postgres compute.
