@@ -1,5 +1,9 @@
 # @knext/db — Public API
 
+> **Status:** finalized for the shipped surface (ADR-0021, epic #235 complete —
+> clients #245, schema #247, migrate runner #242/#248, extensions #240/#241/#249).
+> The user guide is [`docs/guides/drizzle-sdk.md`](../../../docs/guides/drizzle-sdk.md).
+
 `@knext/db` follows semver. Only the subpaths listed below are public; anything
 not listed is internal and may change without a major bump.
 
@@ -41,14 +45,16 @@ not listed is internal and may change without a major bump.
     migrateData? }): string` (emits `create_hypertable`), `dropChunks(table, {
     olderThan }): string` (emits a **one-shot** `drop_chunks()` — not a background
     policy), and `createTimescaleExtension(): string` / `CREATE_TIMESCALEDB_EXTENSION`.
-    Apache-2 tier only: no columnar compression / continuous aggregates on
-    scale-to-zero (scale-zero-pg `adr-0001`).
+    The `TableRef` type (a `pgTable` or a bare name) and the `HypertableOptions` /
+    `DropChunksOptions` option types are exported too. Apache-2 tier only: no columnar
+    compression / continuous aggregates on scale-to-zero (scale-zero-pg `adr-0001`).
   - **pgvector (#241)** — `hnsw(name, column, { ops?, m?, efConstruction?,
     ifNotExists?, concurrently? }): string` and `ivfflat(name, column, { ops?, lists?,
     … }): string` (emit `CREATE INDEX … USING …`), `createVectorExtension(): string` /
-    `CREATE_VECTOR_EXTENSION`, the `VectorOpClass` type, and the distance-operator
-    query builders re-exported from drizzle: `cosineDistance` (`<=>`), `l2Distance`
-    (`<->`), `innerProduct` (`<#>`). Requires scale-zero-pg ≥ v1.4.0.
+    `CREATE_VECTOR_EXTENSION`, the `VectorOpClass` / `HnswIndexOptions` /
+    `IvfflatIndexOptions` types, and the distance-operator query builders re-exported
+    from drizzle: `cosineDistance` (`<=>`), `l2Distance` (`<->`), `innerProduct`
+    (`<#>`). Requires scale-zero-pg ≥ v1.4.0.
 
 ### `@knext/db/migrate`
 
@@ -62,8 +68,11 @@ not listed is internal and may change without a major bump.
   **writer-only** migration runner behind `kn-next db migrate` (ADR-0021 §3). Resolves
   + guards the writer DSN (see below), applies drizzle-kit-generated migrations via
   drizzle-orm's migrator, always closes the connection, and **rejects on failure**
-  (fail loud). Idempotent (drizzle tracks applied migrations). `deps` injects the
-  pg/drizzle boundary for tests. `options`: `{ url?, migrationsFolder?, roUrl? }`.
+  (fail loud). Idempotent (drizzle tracks applied migrations). `deps`
+  (`RunMigrationsDeps` — `connect`/`migrate`, with `defaultMigrateDeps()` the
+  production wiring) injects the pg/drizzle boundary for tests. Types `RunMigrationsOptions`
+  / `RunMigrationsResult` / `MigrationConnection` are exported. `options`: `{ url?,
+  migrationsFolder?, roUrl? }`.
 - **`resolveWriterDsn(options?): string`** — resolves `url ?? DATABASE_URL` and
   **refuses** a read-replica DSN (an exact `DATABASE_URL_RO`, or one on the RO gateway
   port). Throws (fail loud) when no writer DSN is available.
