@@ -1,0 +1,63 @@
+{
+  "name": "@knext/db",
+  "version": "0.1.0",
+  "description": "Typed data SDK for knext apps — drizzle-orm over the scale-to-zero Postgres pools (getDb / getDbRO).",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/getknext-dev/knext.git",
+    "directory": "packages/db"
+  },
+  "homepage": "https://github.com/getknext-dev/knext#readme",
+  "bugs": {
+    "url": "https://github.com/getknext-dev/knext/issues"
+  },
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "knext": {
+    "publicApi": {
+      "doc": "docs/PUBLIC_API.md",
+      "stability": "The @knext/db `.` subpath is public and follows semver. `./schema` and `./migrate` are reserved for follow-up work (#239, #242).",
+      "public": [
+        "."
+      ],
+      "internalPrefix": null
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc -w"
+  },
+  "files": [
+    "dist"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "dependencies": {
+    "@knext/lib": "workspace:^",
+    "drizzle-orm": "^0.45.2"
+  },
+  "peerDependencies": {
+    "drizzle-orm": "^0.45.2"
+  },
+  "peerDependenciesMeta": {
+    "drizzle-orm": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@types/node": "^20.8.0",
+    "@types/pg": "^8.15.6",
+    "pg": "^8.16.3",
+    "typescript": "^5.2.2"
+  }
+}
