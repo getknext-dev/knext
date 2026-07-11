@@ -23,7 +23,13 @@ behavior, and troubleshooting.
 | `GW_WAKE_WINDOW_MS` | 60000 | refill window for `GW_WAKE_BUDGET` (a full budget refills over this window). |
 | `GW_PEER_SELECTOR` | — | label selector for sibling gateways (peer-aware idle); empty disables |
 | `GW_AUTH_FAIL_FLOOR_MS` | 250 | apps-gateway only: constant-floor delay on refusals so unknown-app and wrong-pair are timing-comparable (issue #92); `0` disables |
-| `GW_ROLE_APPLY_SETTLE_MS` | 250 | apps-gateway (per-app) only: on a **genuine cold wake** hold the client this long before the auth attempt so `compute_ctl` applies the per-app role first, absorbing the cold-boot `28P01` role-apply race (issue #132). NOT an auth retry — a wrong password still fast-fails; warm connects + base single-DB path are never delayed; clamped to `GW_WAKE_TIMEOUT_MS`. `0` disables |
+| `GW_ROLE_APPLY_SETTLE_MS` | 250 | apps-gateway (per-app) only: on a **genuine cold wake** hold the client this long before the auth attempt so `compute_ctl` applies the per-app role first, absorbing the cold-boot `28P01` role-apply race (issue #132). NOT an auth retry — a wrong password still fast-fails; warm connects + base single-DB path are never delayed; clamped to `GW_WAKE_TIMEOUT_MS`. `0` disables. **When the deterministic `/status` gate (below) is configured this is the bounded fallback**, used only if `/status` is unreachable/rejected. |
+| `GW_STATUS_PORT` | 0 (off) | **opt-in DETERMINISTIC cold-boot gate (issue #174).** `compute_ctl` HTTP port (3080). When set (and a token is provided) the apps-gateway, on a genuine cold wake of a per-app front door, **polls `http://<compute>:<port>/status` until `compute_ctl` reports `running` (spec/role apply DONE)** instead of blindly sleeping `GW_ROLE_APPLY_SETTLE_MS` — race-free, and proceeds the instant the apply is provably complete. Bounded by `GW_WAKE_TIMEOUT_MS`. `0`/unset = gate disabled → the `#132` settle is used (default). **Enabling requires also exposing 3080 on the compute Service + NetworkPolicy — see [Cold-wake role-apply reliability](#cold-wake-role-apply-reliability).** |
+| `GW_STATUS_TOKEN` / `GW_STATUS_TOKEN_FILE` | — | the `compute_ctl` JWT for `/status` (Bearer). `/status` is JWT-gated. `_FILE` (a mounted Secret path) is preferred so the JWT never lands in the pod env. **Required** for the gate — `GW_STATUS_PORT` without a token leaves the gate disabled. |
+| `GW_STATUS_READY` | `running` | the `compute_ctl` `/status` value that means "spec applied / ready" |
+| `GW_STATUS_POLL_MS` | 50 | poll interval between `/status` reads |
+| `GW_STATUS_REQ_TIMEOUT_MS` | 1000 | per-request timeout for a single `/status` read (bounds a hung endpoint) |
+| `GW_STATUS_TIMEOUT_MS` | 0 (full wake budget) | cap on the deterministic poll before falling back to the bounded settle; `0` = use the whole `GW_WAKE_TIMEOUT_MS`. Set smaller (e.g. `2000`) so a misconfigured/unreachable `/status` degrades to the settle quickly. Never extends past `GW_WAKE_TIMEOUT_MS`. |
 | `GW_POD_NAMESPACE` / `GW_POD_IP` | — | downward API; self-exclusion for the peer check |
 | `GW_TLS_CERT_FILE` / `GW_TLS_KEY_FILE` | — | front-door TLS keypair (PEM paths). Both set + loadable → gateway answers `SSLRequest` with `S` and wraps the wire (TLS 1.2+). Set-but-unloadable or half-set → gateway **fails fast at startup**. Unset → `SSLRequest` gets `N` (plaintext only). Deployed: mounted from Secret `pggw-tls` at `/etc/pggw-tls/`. |
 
@@ -1127,10 +1133,41 @@ doc-only (it no longer ships the literal default). Proven live by
 > / steady-state** connects and the **base single-DB** (`cloud_admin`) path are never
 > delayed. The settle is clamped to the remaining `GW_WAKE_TIMEOUT_MS` budget, so it can
 > never push a connection past the wake deadline. This makes the race **negligible**
-> (settle ≫ the apply window), **not deterministically zero** — the deterministic fix (a
-> `compute_ctl` `/status` readiness gate, which needs a JWT + port-3080 exposure) is
-> tracked as **#174**. Drill: `deploy/_verify-coldboot.sh`. Set
-> `GW_ROLE_APPLY_SETTLE_MS=0` to disable the gate (accepts the rare transient).
+> (settle ≫ the apply window), **not deterministically zero**. Drill:
+> `deploy/_verify-coldboot.sh`. Set `GW_ROLE_APPLY_SETTLE_MS=0` to disable the gate
+> (accepts the rare transient).
+>
+> **Deterministic upgrade — the `compute_ctl` `/status` readiness gate (issue #174, OPT-IN).**
+> The settle above is a *heuristic* time buffer: if the apply window ever exceeds the
+> settle (e.g. heavy load) the transient `28P01` could recur. `compute_ctl` exposes an
+> HTTP `/status` endpoint (port **3080**) whose `status` field flips to **`running`** only
+> once the compute has fully applied its spec — the exact per-app role/password the settle
+> waits a fixed 250 ms for. When configured, the apps-gateway **polls `/status` until
+> `running`** on a cold wake instead of sleeping — deterministic and race-free, and it
+> proceeds the *instant* the apply is provably done. It obeys **every `#132` invariant**:
+> it fires ONLY on `woke==true` of a per-app front door (a `systemAuthorizer`), runs
+> BEFORE the single startup replay (never an auth retry — a wrong password still
+> fast-fails), and its total wait is clamped to `GW_WAKE_TIMEOUT_MS` (a hung/never-ready
+> `/status` falls back to the bounded settle rather than wedging the wake). It is
+> **belt-and-suspenders**: deterministic when `/status` answers, the bounded settle as a
+> floor when `/status` is unreachable or rejects the token.
+>
+> The gate is **disabled by default** and is **not enabled in the shipped deployment** —
+> the compute `Service` exposes only `55433/pg` and the `compute-ingress` NetworkPolicy
+> denies `3080`, so `/status` is not reachable from the gateway today (the `#132` settle
+> remains the shipped mechanism). **To enable it** (do this if the settle proves
+> insufficient in practice — watch for recurring cold-wake `28P01` in ops):
+> 1. Mount a `compute_ctl` JWT into the apps-gateway and set `GW_STATUS_TOKEN_FILE`
+>    (preferred) or `GW_STATUS_TOKEN`; `/status` is JWT-gated.
+> 2. Set `GW_STATUS_PORT=3080` (and optionally `GW_STATUS_TIMEOUT_MS`, e.g. `2000`, so a
+>    misconfig degrades to the settle fast).
+> 3. Expose `3080` on the compute `Service` (`deploy/20-compute.yaml`, the operator-
+>    rendered `deploy/compute-app.template.yaml`, and `deploy/25-compute-warm.yaml`) and
+>    allow `3080` from `app: pggw` in the `compute-ingress` NetworkPolicy
+>    (`deploy/70-networkpolicy.yaml`).
+>
+> The probe hits `compute_ctl:3080` with a dedicated `compute_ctl` JWT — it opens **no new
+> surface to `cloud_admin`**, which stays loopback-only (#112/#168). Refs #132, #158.
 
 > **Reading the logs — `method=md5` is the pg_hba KEYWORD, not md5 on the wire (N2, #160).**
 > Postgres' `connection authenticated: identity="app_x" method=…` line reports the

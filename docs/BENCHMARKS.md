@@ -39,7 +39,23 @@ a usable signal for the 250 ms settle — the settle cost is taken from the dete
 gate value corroborated by the gateway `awake in` / `settling` logs, not from pod
 wall-clock. The race is made **negligible** (settle ≫ the ~85 ms apply window, #158),
 **not deterministically zero**; the deterministic `compute_ctl` `/status` readiness gate
-is tracked as **#174**.
+lands in **#174**.
+
+### Deterministic `/status` readiness gate (#174) — mechanism only, gate OFF in the shipped build
+
+#174 adds the OPT-IN deterministic upgrade: on a cold wake the apps-gateway can poll
+`compute_ctl` `/status` (port 3080) until `status:"running"` and proceed the instant the
+role apply is provably done, instead of the fixed 250 ms settle. **The shipped deployment
+is unchanged** — the gate is disabled by default (`GW_STATUS_PORT` unset; 3080 is neither
+Service-exposed nor NetworkPolicy-allowed), so the cold-wake numbers above **still stand**
+(the #132 settle remains the shipped mechanism). No new OKE wake number is claimed for
+#174: enabling the gate (expose 3080 + wire the JWT) is a deferred ops step, and its
+end-to-end effect is **≤ the current +250 ms** (deterministic proceed when the apply
+completes sooner; bounded by `GW_WAKE_TIMEOUT_MS` when it doesn't). Verified by the Go
+suite (`internal/gateway/statusgate_test.go`: proceeds-when-ready, respects-deadline,
+token-reject-fast, unreachable-bounded, fires-only-on-cold-wake, settle-fallback); a live
+OKE drill is deferred until the gate is enabled in a deploy. See
+`docs/operations.md` → "Deterministic upgrade — the `compute_ctl` `/status` readiness gate".
 
 ## Combined wake (knext demo, issue #8)
 

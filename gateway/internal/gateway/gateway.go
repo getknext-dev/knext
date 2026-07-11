@@ -87,9 +87,15 @@ type Gateway struct {
 	// NEGLIGIBLE (settle >> the apply window), not deterministically zero — the
 	// deterministic compute_ctl-/status readiness gate is tracked as #174.
 	roleApplySettleMs int
-	connSem           chan struct{} // nil = unlimited (GW_MAX_CONNS)
-	tlsConf           *tls.Config   // nil = TLS unconfigured: SSLRequest gets 'N'
-	log               func(string)
+	// statusProbe (issue #174) is the OPT-IN deterministic upgrade to the #132
+	// settle: when configured (GW_STATUS_PORT + a JWT) it polls compute_ctl's
+	// /status endpoint on a cold wake until the compute reports "running" (spec
+	// applied) instead of sleeping a fixed roleApplySettleMs. nil = not configured
+	// (the default/current deployment) — the bounded settle is used, unchanged.
+	statusProbe *statusProbe
+	connSem     chan struct{} // nil = unlimited (GW_MAX_CONNS)
+	tlsConf     *tls.Config   // nil = TLS unconfigured: SSLRequest gets 'N'
+	log         func(string)
 
 	// wakeLimiter enforces the per-app wake budget (issue #116, ADR-0008). nil =
 	// budget off (GW_WAKE_BUDGET unset/0) — the wake path is unchanged. When set,
@@ -130,9 +136,15 @@ func New(env wake.Env, log func(string)) (*Gateway, error) {
 		idleMs:            envInt(env, "GW_IDLE_MS", 300000),
 		floorMs:           envInt(env, "GW_AUTH_FAIL_FLOOR_MS", 250),
 		roleApplySettleMs: envInt(env, "GW_ROLE_APPLY_SETTLE_MS", 250),
+		statusProbe:       newStatusProbeFromEnv(env),
 		tlsConf:           tlsConf,
 		log:               log,
 		active:            map[string]*activeEntry{},
+	}
+	if g.statusProbe != nil {
+		log("[gw] cold-boot readiness: deterministic compute_ctl /status gate ENABLED (port " +
+			strconv.Itoa(g.statusProbe.port) + ", ready=\"" + g.statusProbe.ready +
+			"\"); GW_ROLE_APPLY_SETTLE_MS is the bounded fallback (#174)")
 	}
 	if tlsConf != nil {
 		log("[gw] TLS enabled on the Postgres wire (SSLRequest -> S); sslmode=disable still accepted")
@@ -526,11 +538,12 @@ func (g *Gateway) proxy(client net.Conn, startupPacket, pendingRest []byte, targ
 		g.log("[gw] " + target.Key + ": awake in " + strconv.FormatInt(wakeMs, 10) + "ms")
 	}
 
-	// Cold-boot role-apply race (#132): on a genuine cold wake of a per-app front
-	// door, hold the client for the bounded settle window BEFORE replaying the
-	// startup, so compute_ctl has (re)applied the per-app role by the time the
-	// single auth attempt below runs. No-op on warm connects and the base path.
-	g.settleColdWake(woke, target, start)
+	// Cold-boot role-apply race (#132/#174): on a genuine cold wake of a per-app
+	// front door, gate the startup replay on compute_ctl readiness so the per-app
+	// role is applied by the time the single auth attempt below runs. Deterministic
+	// when the /status probe is configured (poll until "running"), else the bounded
+	// time-settle. No-op on warm connects and the base single-DB path.
+	g.gateColdWake(woke, target, start)
 
 	if tcp, ok := conn.(*net.TCPConn); ok {
 		_ = tcp.SetNoDelay(true)
