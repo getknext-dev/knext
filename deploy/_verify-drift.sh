@@ -15,9 +15,76 @@
 set -eu
 cd "$(dirname "$0")"
 NS=scale-zero-pg
-K="kubectl --request-timeout=15s -n $NS"
+
+# ---- args / env (issues #157, #162) --------------------------------------
+# --context <ctx> / DRIFT_CONTEXT : run against an EXPLICIT kube-context (CI).
+#                                   Default: kubectl's current-context (interactive) —
+#                                   but §0 below ASSERTS its identity either way.
+# EXPECTED_CLUSTER <ctx-name>     : if set, current-context MUST equal it (CI hard-pin).
+# --deep / DRIFT_DEEP=1           : also run §G, the per-app DURABLE-SCRAM sample
+#                                   (needs a compute WAKE — opt-in, off by default).
+DRIFT_CONTEXT="${DRIFT_CONTEXT:-}"
+EXPECTED_CLUSTER="${EXPECTED_CLUSTER:-}"
+DEEP="${DRIFT_DEEP:-0}"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --context) DRIFT_CONTEXT="${2:?--context needs a value}"; shift 2;;
+    --context=*) DRIFT_CONTEXT="${1#*=}"; shift;;
+    --deep) DEEP=1; shift;;
+    -h|--help) echo "usage: _verify-drift.sh [--context <kube-context>] [--deep]"; exit 0;;
+    *) echo "FAIL: unknown arg: $1" >&2; exit 1;;
+  esac
+done
+CTX=""
+[ -n "$DRIFT_CONTEXT" ] && CTX="--context $DRIFT_CONTEXT"
+K="kubectl $CTX --request-timeout=15s -n $NS"
+KC="kubectl $CTX --request-timeout=15s"   # cluster-scoped (nodes, crds, current-context)
 fail() { echo "FAIL: $*" >&2; exit 1; }
 ok() { echo "ok - $*"; }
+
+# 0. TARGET-CLUSTER IDENTITY GUARD (issue #157). The whole drift gate is only meaningful
+# against the OKE plane. This tool historically ran against kubectl's CURRENT-context with
+# NO identity assertion — and on operator machines a kubectl wrapper self-RESETS the
+# current-context to local orbstack. Net effect: the gate could run fully GREEN against the
+# WRONG cluster (orbstack/kind) while the real OKE plane drifted — a META merged≠deployed:
+# the gate itself silently checking the wrong target (the #157 false-green). So BEFORE any
+# check, prove we point at OKE and FAIL LOUD otherwise. An explicit --context /
+# EXPECTED_CLUSTER pins the target for CI; interactively we assert whatever current-context
+# resolves to.
+# Read the EFFECTIVE (explicit-or-ambient) context — the SAME source the fingerprint
+# check below honors. `kubectl config current-context` IGNORES --context (it always
+# reports the raw AMBIENT context), so on a machine whose ambient self-reset to orbstack,
+# CI passing --context <oke> must NOT hit the orbstack fast-reject and false-RED — that
+# would defeat the very #157 explicit-context remedy this error message advertises
+# (PR #180 code-review, BLOCKING). When --context/DRIFT_CONTEXT is set it IS the target;
+# otherwise fall back to the ambient current-context (interactive).
+CURCTX="${DRIFT_CONTEXT:-$($KC config current-context 2>/dev/null || echo '<none>')}"
+# fast, obvious reject: a well-known LOCAL/dev context is never the OKE plane.
+case "$CURCTX" in
+  orbstack|docker-desktop|minikube|kind-*|k3d-*|colima*|rancher-desktop)
+    fail "WRONG CLUSTER: kube-context '$CURCTX' is a LOCAL/dev cluster, not the OKE plane. The drift gate must target OKE (e.g. context-ckmva7v7zvq). Run 'kubectl config use-context context-ckmva7v7zvq' or pass --context — refusing to FALSE-GREEN against '$CURCTX' (issue #157).";;
+esac
+# CI hard-pin: if EXPECTED_CLUSTER is set, current-context MUST equal it.
+if [ -n "$EXPECTED_CLUSTER" ] && [ "$CURCTX" != "$EXPECTED_CLUSTER" ]; then
+  fail "WRONG CLUSTER: kube-context '$CURCTX' != EXPECTED_CLUSTER '$EXPECTED_CLUSTER' (issue #157)."
+fi
+# positive OKE fingerprint (the real guard — survives a renamed / self-reset context): an
+# OKE cluster carries the OCI node-management CRD and the known OKE nodes; a silently
+# retargeted orbstack/kind matches NEITHER. Retry a few times so a flaky API TLS timeout
+# fails LOUD-but-retried, never silently skips the identity assertion.
+OKE_CRD=nodeoperationrules.oci.oraclecloud.com
+OKE_NODES="10.0.1.253 10.0.1.78"
+fp_ok() {
+  $KC get crd "$OKE_CRD" >/dev/null 2>&1 && { echo "OCI CRD $OKE_CRD"; return 0; }
+  for n in $OKE_NODES; do
+    $KC get node "$n" >/dev/null 2>&1 && { echo "OKE node $n"; return 0; }
+  done
+  return 1
+}
+FP=""; i=0
+while [ $i -lt 3 ]; do FP="$(fp_ok)" && break; i=$((i+1)); sleep 2; done
+[ -n "$FP" ] || fail "WRONG/UNVERIFIED CLUSTER: kube-context '$CURCTX' exposes NO OKE fingerprint (missing OCI CRD $OKE_CRD AND known OKE nodes $OKE_NODES). The kubectl wrapper self-resets to orbstack — refusing to run the drift gate against an unverified target and FALSE-GREEN (issue #157). Set the OKE current-context, pass --context, or set EXPECTED_CLUSTER for CI."
+ok "target cluster identity: OKE fingerprint present ($FP), context '$CURCTX' (issue #157)"
 
 # A. field drift: running pods must carry the ephemeral-storage request.
 BAD=$($K get pods --field-selector=status.phase=Running -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.spec.containers[0].resources.requests.ephemeral-storage}{"\n"}{end}' | awk '$2=="" {print $1}' | grep -v '^pgclient\|^metric-\|^verify-\|^wmetric-\|^alertq-\|^alert-drill-' || true)
@@ -209,7 +276,13 @@ ok "all $NRULES alert rules shipped in deploy/60 are LOADED in the running Prome
 # on the wire (or, worse, mid-rollout, meet a scram pg_hba with an unmigrated md5 verifier
 # — the #160 cold-wake-outage hazard). Assert the LIVE compute-files carries the SCRAM
 # migration verbatim so "the entrypoint was never rolled to SCRAM" is RED.
-CF=$($K get configmap compute-files -o jsonpath='{.data.config\.json}{"\n===ENTRYPOINT===\n"}{.data.entrypoint\.sh}' 2>/dev/null || true)
+# NOTE (convergent fix, issue #162 lane): the pg_hba `md5`→`scram-sha-256` catch-all
+# rewrite (`harden_pg_hba`) was FACTORED OUT of entrypoint.sh into the SOURCED lib-harden.sh
+# by the #164/#167 RO/warm-parity refactor — AFTER §F shipped (#160). §F still only read
+# config.json+entrypoint.sh, so it FALSE-FIRED `pg_hba-catch-all-not-scram` on a live cluster
+# that is actually correct (the rewrite simply moved keys). Read lib-harden.sh too so §F
+# tracks where the rewrite LIVES, restoring the guarantee without weakening it.
+CF=$($K get configmap compute-files -o jsonpath='{.data.config\.json}{"\n===ENTRYPOINT===\n"}{.data.entrypoint\.sh}{"\n===LIBHARDEN===\n"}{.data.lib-harden\.sh}' 2>/dev/null || true)
 [ -n "$CF" ] || fail "compute-files ConfigMap absent or unreadable on the live cluster (issue #160)"
 CFERR=""
 printf '%s' "$CF" | grep -A2 '"password_encryption"' | grep -q 'scram-sha-256' \
@@ -224,4 +297,104 @@ if [ -n "$CFERR" ]; then
 fi
 ok "live compute-files carries the SCRAM migration (password_encryption + pg_hba scram rewrite + APP_ROLE_VERIFIER injection) — merged==deployed (issue #160)"
 
-echo "drift verification: live pods match the manifest contract AND every declared workload is deployed and healthy AND runs the pinned image digest AND the zone axis (CRD + operator) is live-present AND every shipped Prometheus alert rule is loaded AND the compute-files SCRAM migration is live (issues #151/#155/#160)"
+# G. PER-APP DURABLE SCRAM VERIFIER SAMPLE (issue #162; OPT-IN via --deep / DRIFT_DEEP=1).
+# §F proves the SHARED compute-files ConfigMap is the SCRAM manifest, but it CANNOT prove a
+# given md5-era app's DURABLE catalog verifier (pg_authid.rolpassword) is actually SCRAM: a
+# SCRAM verifier cannot be re-derived from a manifest without the app's plaintext, so it can
+# only be READ off a LIVE compute. That leaves a hole §F is blind to — a HALF-MIGRATED app
+# (SCRAM pg_hba live via §F/#160, but its own durable verifier still md5) which cold-wake
+# REJECTS on the wire (the #160 atomic-rollout hazard: scram pg_hba vs md5 verifier = self-
+# inflicted outage). This check wakes a BOUNDED SAMPLE of per-app computes and asserts each
+# app role's pg_authid.rolpassword begins 'SCRAM-SHA-256' (not md5), catching a half-migrated
+# app BEFORE a visitor's cold wake does. It needs a compute WAKE, so it is OPT-IN and bounded
+# (default 2 apps; DRIFT_SAMPLE overrides). The reserved template (compute-tmpl / app_tmpl —
+# not a tenant) is excluded, and every woken compute is RESTORED to its prior replica count.
+if [ "$DEEP" = "1" ]; then
+  SAMPLE_N="${DRIFT_SAMPLE:-2}"
+  # per-app computes carry tier=apps,plane=compute and are named compute-<app>; drop the
+  # reserved template (compute-tmpl / app_tmpl).
+  APPS=$($K get deploy -l tier=apps,plane=compute -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null \
+        | sed -n 's/^compute-//p' | grep -v '^tmpl$' | sort | head -n "$SAMPLE_N")
+  if [ -z "$APPS" ]; then
+    ok "no per-app computes on the cluster to sample — §G vacuously passes (issue #162)"
+  else
+    # read_pref <app> <role>: print the durable verifier prefix; exit 0 on a clean read,
+    # non-zero on a TRANSIENT read error (psql/exec failed). Retries a few times because a
+    # compute can report Ready before compute_ctl finishes accepting loopback psql. This
+    # separation is why a transient/connection failure is NOT mislabelled as an md5 verifier.
+    read_pref() {
+      _out=""; _rc=1; _i=0
+      while [ $_i -lt 3 ]; do
+        if _out=$($K exec "deploy/compute-$1" -c compute -- \
+              psql -h localhost -p 55433 -U cloud_admin -d postgres -tAw \
+              -c "select left(rolpassword,13) from pg_authid where rolname='$2'" 2>/dev/null); then
+          _rc=0; break
+        fi
+        _i=$((_i+1)); sleep 3
+      done
+      printf '%s' "$_out" | tr -d '[:space:]'
+      return $_rc
+    }
+    SCRAMERR=""    # CONFIRMED durable drift (md5 / missing verifier row)
+    TRANSERR=""    # transient read/connect error — NOT a confirmed md5 (re-run)
+    RESTOREERR=""  # a woken sample compute we FAILED to scale back (leaked, burns budget)
+    for app in $APPS; do
+      role=$($K get configmap "compute-config-$app" -o jsonpath='{.data.APP_ROLE}' 2>/dev/null)
+      role="${role:-app_$app}"
+      # remember prior replicas so an at-rest (0) app is returned to 0 afterward.
+      pr=$($K get deploy "compute-$app" -o jsonpath='{.spec.replicas}' 2>/dev/null); pr=${pr:-0}
+      woke=0
+      if [ "$pr" = "0" ]; then
+        $K scale deploy "compute-$app" --replicas=1 >/dev/null 2>&1 || true
+        woke=1
+      fi
+      if ! $K rollout status deploy "compute-$app" --timeout=150s >/dev/null 2>&1; then
+        # could not wake the sampled compute — a transient/infra condition, not a verifier
+        # verdict (we never read the catalog). Restore, and surface it as transient.
+        TRANSERR="$TRANSERR $app(wake-failed)"
+        if [ "$woke" = "1" ]; then
+          $K scale deploy "compute-$app" --replicas="$pr" >/dev/null 2>&1 || RESTOREERR="$RESTOREERR compute-$app(->$pr)"
+        fi
+        continue
+      fi
+      # read the DURABLE verifier prefix over the pod-LOCAL LOOPBACK as cloud_admin
+      # (loopback-trust; TCP cloud_admin is rejected since #112). pg_authid needs superuser;
+      # 'SCRAM-SHA-256' is 13 chars, an md5 verifier begins 'md5'.
+      if pref=$(read_pref "$app" "$role"); then
+        case "$pref" in
+          SCRAM-SHA-256) ok "app '$app' role '$role' durable verifier is SCRAM-SHA-256 (issue #162)";;
+          "")            SCRAMERR="$SCRAMERR $app($role:no-verifier-row)";;
+          md5*)          SCRAMERR="$SCRAMERR $app($role:$pref)";;
+          *)             SCRAMERR="$SCRAMERR $app($role:unexpected[$pref])";;
+        esac
+      else
+        # exec/psql itself failed after retries — a connection/transient error, NOT proof
+        # the verifier is md5. Bucket separately so it never reads as a false PERAPPSCRAMDRIFT.
+        TRANSERR="$TRANSERR $app($role:verifier-read-error)"
+      fi
+      # restore prior replica count (an at-rest app returns to 0); a FAILED restore is a
+      # leaked awake compute — surface it loud, do NOT swallow it.
+      if [ "$woke" = "1" ]; then
+        $K scale deploy "compute-$app" --replicas="$pr" >/dev/null 2>&1 || RESTOREERR="$RESTOREERR compute-$app(->$pr)"
+      fi
+    done
+    if [ -n "$SCRAMERR$TRANSERR$RESTOREERR" ]; then
+      [ -n "$SCRAMERR" ]   && echo "  PERAPPSCRAMDRIFT:$SCRAMERR" >&2 || true
+      [ -n "$TRANSERR" ]   && echo "  VERIFIER-READ-TRANSIENT (NOT a confirmed md5 — re-run):$TRANSERR" >&2 || true
+      [ -n "$RESTOREERR" ] && echo "  RESTOREFAILED (leaked AWAKE compute — scale it to 0):$RESTOREERR" >&2 || true
+      if [ -n "$SCRAMERR" ]; then
+        fail "per-app DURABLE SCRAM verifier drift (a half-migrated app cold-wake-REJECTS vs the scram pg_hba, #160):$SCRAMERR. Mint a SCRAM verifier + re-render each flagged app BEFORE the scram pg_hba is enforced — see operations.md 'Migrating an existing app to SCRAM' (issue #162). (Also review any TRANSIENT / RESTORE lines above.)"
+      elif [ -n "$RESTOREERR" ]; then
+        fail "§G left a sampled compute AWAKE — failed to restore replicas:$RESTOREERR. A leaked compute burns budget (#116); scale it to 0. No SCRAM drift was detected (issue #162)."
+      else
+        fail "§G could NOT read the durable verifier — TRANSIENT/connection error, NOT a confirmed md5:$TRANSERR. The compute may still be booting or the API flaked; re-run '_verify-drift.sh --deep' (issue #162)."
+      fi
+    fi
+    ok "sampled per-app durable SCRAM verifiers (≤$SAMPLE_N apps): all begin SCRAM-SHA-256 (no half-migrated app, issue #162)"
+  fi
+else
+  ok "per-app durable SCRAM verifier sample SKIPPED — needs a compute wake; run '_verify-drift.sh --deep' (or DRIFT_DEEP=1) to enable (issue #162)"
+fi
+
+if [ "$DEEP" = "1" ]; then DSUM=" AND sampled per-app durable SCRAM verifiers are SCRAM-SHA-256 (issue #162)"; else DSUM=""; fi
+echo "drift verification: TARGET CLUSTER identity asserted (OKE, not orbstack/kind — issue #157) AND live pods match the manifest contract AND every declared workload is deployed and healthy AND runs the pinned image digest AND the zone axis (CRD + operator) is live-present AND every shipped Prometheus alert rule is loaded AND the compute-files SCRAM migration is live${DSUM} (issues #151/#155/#157/#160/#162)"

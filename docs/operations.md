@@ -235,6 +235,20 @@ ping) in addition to drilling the normal pager path.
 
 Quick look without Prometheus: `sh deploy/_metrics.sh`.
 
+**Target-cluster identity guard — no false-green (issue #157).** Before *any* check,
+`_verify-drift.sh` now asserts it is pointed at the **OKE plane** and `exit 1`s loudly
+otherwise. This closes a *meta* merged≠deployed: the gate ran against kubectl's
+**current-context** with no identity check, and an operator-machine kubectl wrapper
+**self-resets current-context to local orbstack** — so the whole drill could run fully
+GREEN against the WRONG cluster (orbstack/kind) while the real OKE plane drifted. The
+guard (a) fast-rejects well-known local contexts (`orbstack`, `kind-*`, `docker-desktop`,
+`minikube`, …); (b) asserts a **positive OKE fingerprint** — the OCI CRD
+`nodeoperationrules.oci.oraclecloud.com` or a known OKE node (`10.0.1.253`/`10.0.1.78`) —
+which survives a *renamed* / self-reset context that a name check alone would miss; and
+(c) accepts an explicit **`--context <ctx>`** (or `DRIFT_CONTEXT`) for CI vs interactive,
+plus an optional **`EXPECTED_CLUSTER`** hard-pin (current-context must equal it). If none
+of the OKE signals resolve, the gate refuses to run rather than false-green.
+
 **Drift drill — "exists" vs "healthy" (issues #27/#51).** `sh deploy/_verify-drift.sh`
 asserts every Deployment/StatefulSet/CronJob declared in `deploy/NN-*.yaml` is not just
 **present** on the cluster (closing merged≠deployed) but **healthy**: for
@@ -274,6 +288,28 @@ The same gate also checks two subtler flavors of merged≠deployed:
   `./deploy/_validate.sh prom-config-hash` (prints the value to paste). `_validate.sh`
   contract 27 fails CI if the annotation drifts from the ConfigMap, guaranteeing the roll
   is never forgotten.
+
+- **compute-files SCRAM content, LIVE (issues #160/#162).** §F asserts the shared
+  `compute-files` ConfigMap on the cluster carries the md5→SCRAM migration verbatim:
+  `config.json`'s `password_encryption=scram-sha-256`, the pg_hba catch-all rewrite to
+  `scram-sha-256`, and the `APP_ROLE_VERIFIER` spec-role injection. *Note:* the pg_hba
+  rewrite (`harden_pg_hba`) was factored out of `entrypoint.sh` into the sourced
+  **`lib-harden.sh`** by the #164/#167 RO/warm-parity refactor, so §F now reads
+  `lib-harden.sh` too — before this it false-fired `pg_hba-catch-all-not-scram` on a live
+  cluster that was actually correct (the rewrite had simply moved keys).
+
+- **Per-app DURABLE SCRAM verifiers — opt-in `--deep` (issue #162).** §F proves the shared
+  ConfigMap is SCRAM, but it **cannot** prove a given app's *durable catalog* verifier
+  (`pg_authid.rolpassword`) is SCRAM — a SCRAM verifier can't be re-derived from a manifest
+  without the app's plaintext, so it must be **read off a live compute**. A half-migrated
+  app (SCRAM pg_hba live, but its own verifier still md5) **cold-wake-rejects on the wire**
+  (the #160 atomic-rollout hazard). Because this needs a compute **wake**, it is opt-in:
+  `sh deploy/_verify-drift.sh --deep` (or `DRIFT_DEEP=1`) wakes a **bounded sample** of
+  per-app computes (default 2, `DRIFT_SAMPLE` overrides; the reserved `tmpl` template is
+  excluded) and asserts each app role's `pg_authid.rolpassword` begins `SCRAM-SHA-256`,
+  restoring each compute to its prior replica count afterward. A verifier beginning `md5`
+  fails as `PERAPPSCRAMDRIFT` — catching the half-migrated app **before** a visitor's cold
+  wake does. Run it after any SCRAM rollout / new-app onboarding batch.
 
 ## Object-storage backend (#105)
 
@@ -1163,6 +1199,7 @@ lands. `NS`/`KCTX` default to `scale-zero-pg` / `context-ckmva7v7zvq`.
    and confirm SCRAM with no rejection:
    ```
    sh deploy/_verify-drift.sh          # section F: live compute-files == SCRAM manifest
+   sh deploy/_verify-drift.sh --deep   # section G (#162): the app's DURABLE verifier is SCRAM
    # cold-wake + auth (any per-app gateway client; e.g. the _verify-multitenant GCLIENT):
    kubectl -n scale-zero-pg logs deploy/compute-$app -c compute | grep 'connection authenticated'
    #   -> connection authenticated: identity="app_pgdemo" method=scram-sha-256
