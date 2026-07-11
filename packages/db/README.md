@@ -11,9 +11,9 @@ own docs and lose no power.
 
 > **Shipped:** the client accessors below (`getDb` / `getDbRO`) + the re-exported
 > drizzle query operators (`.`), the schema surface (`@knext/db/schema`), the
-> TimescaleDB + pgvector extension helpers on that surface (#240/#241), and the
-> `drizzle.config.ts` helper (`@knext/db/migrate` → `defineDrizzleConfig`). The
-> `kn-next db migrate` runner (#242) lands in follow-up work.
+> TimescaleDB + pgvector extension helpers on that surface (#240/#241), the
+> `drizzle.config.ts` helper (`@knext/db/migrate` → `defineDrizzleConfig`), and the
+> one-shot `kn-next db migrate` runner (`@knext/db/migrate` → `runMigrations`).
 
 ## Install
 
@@ -208,18 +208,110 @@ export default defineDrizzleConfig({
 });
 ```
 
-Then generate and commit SQL at dev time, and apply per deploy:
+Generate and commit SQL at dev time:
 
 ```bash
 npx drizzle-kit generate   # diff schema → ./drizzle/*.sql (commit these)
-npx drizzle-kit migrate    # apply against the writer DATABASE_URL
 ```
 
 `defineDrizzleConfig()` never uses `DATABASE_URL_RO` — migrations always run once,
 against the single writer (ADR-0021 §3). `drizzle-kit generate` needs no live
-database (an unset `DATABASE_URL` yields an empty DSN and still generates SQL);
-`migrate`/`push` require the writer DSN. The forthcoming `kn-next db migrate`
-runner (#242) wraps `migrate` as a one-shot per-deploy step.
+database (an unset `DATABASE_URL` yields an empty DSN and still generates SQL).
+
+## Migrations — `kn-next db migrate` (the one-shot runner)
+
+Apply the committed migrations with **`kn-next db migrate`** — a one-shot runner
+that connects on the **writer** `DATABASE_URL`, applies pending migrations, and
+exits. It is the k8s-idiomatic answer to *"who migrates a single-writer,
+scale-to-zero database?"*:
+
+```bash
+kn-next db migrate            # apply ./drizzle against the writer DATABASE_URL
+kn-next db migrate --dir ./migrations   # custom migrations directory
+kn-next db migrate --url "$WRITER_DSN"  # explicit writer DSN override
+```
+
+- **Writer-only.** It resolves `DATABASE_URL` (the operator injects it) and
+  **refuses** a read-replica DSN — an exact `DATABASE_URL_RO`, or any DSN on the
+  RO gateway port `55434`. Single-writer forbids writes on the replica (ADR-0021
+  §3).
+- **Once per deploy, out of the request path.** Run it as a CI step or a
+  pre-deploy k8s Job — **not** on every pod boot (that races N migrators and
+  penalises cold start) and **not** by the operator (migrating app *data* is not
+  a cluster-resource mutation; the operator owns ksvc/Secrets, not your schema).
+- **Idempotent + fail loud.** drizzle records applied migrations in
+  `__drizzle_migrations`, so a re-run is a no-op. A migration error exits
+  **non-zero** so a Job fails loudly instead of a half-applied schema going live.
+- **Wakes the writer once.** Connecting wakes a scale-to-zero compute — a
+  deliberate one-shot. The runner uses a cold-wake-tolerant connect timeout
+  (15s ≥ the ~2.5s wake, per ADR-0019).
+
+Programmatic use (e.g. a custom script) is available too:
+
+```ts
+import { runMigrations } from '@knext/db/migrate';
+await runMigrations({ migrationsFolder: './drizzle' }); // writer DATABASE_URL; throws on failure
+```
+
+### Running migrations for a NextApp (the flow)
+
+A NextApp's database is provisioned by an `AppDatabase` (managed mode) or bound
+to a BYO Secret; either way the app gets a writer `DATABASE_URL`. Migrations then
+run against it **after** the database is `Ready` and **before** app pods serve:
+
+```
+AppDatabase provisions branch (template schema, ~4s) ──▶ Ready
+                                                            │
+        kn-next db migrate (CI / Job, writer, once) ◀───────┘
+                                                            │
+        app pods boot; getDb()/getDbRO() serve traffic ◀────┘
+```
+
+### Job recipe — migrate once per deploy
+
+Run the migration as a one-shot Kubernetes `Job` against the same image and
+`DATABASE_URL` Secret your NextApp uses. `restartPolicy: Never` +
+`backoffLimit: 2` mean a failed migration fails the Job loudly; the `Job`
+connecting wakes the scale-to-zero writer a single time.
+
+```yaml
+# migrate-job.yaml — apply once per deploy (e.g. `kubectl apply -f` in CI,
+# gated on the AppDatabase being Ready). Not a live-applied platform manifest.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: shop-migrate
+  namespace: my-apps
+spec:
+  backoffLimit: 2 # fail loud after a few retries — never ship a half-applied schema
+  ttlSecondsAfterFinished: 300 # reap the finished Job automatically
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: migrate
+          image: registry.example/shop:<same-digest-as-the-deploy>
+          command: ['kn-next', 'db', 'migrate']
+          env:
+            # The writer DSN — the SAME Secret the operator injects into the app.
+            # Writer only: never wire DATABASE_URL_RO here (the runner refuses it).
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: shop-db # the AppDatabase-provisioned (or BYO) Secret
+                  key: DATABASE_URL
+```
+
+Sequence it after the database is `Ready`:
+
+```bash
+kubectl wait --for=condition=Ready appdatabase/shop -n my-apps --timeout=120s
+kubectl apply -f migrate-job.yaml -n my-apps
+kubectl wait --for=condition=Complete job/shop-migrate -n my-apps --timeout=300s
+```
+
+`kubectl wait --for=condition=Complete` returns non-zero if the Job fails — wire
+it into your deploy pipeline so a failed migration blocks the rollout.
 
 ## Pooling
 

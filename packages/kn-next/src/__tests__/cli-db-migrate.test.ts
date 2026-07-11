@@ -47,7 +47,9 @@ describe("parseDbMigrateArgs", () => {
     });
 
     it("rejects unknown flags (a typo must not silently migrate with defaults)", () => {
-        expect(() => parseDbMigrateArgs(["--dsn", "x"])).toThrow(/unknown flag/);
+        expect(() => parseDbMigrateArgs(["--dsn", "x"])).toThrow(
+            /unknown flag/,
+        );
     });
 
     it("rejects stray positionals", () => {
@@ -58,7 +60,10 @@ describe("parseDbMigrateArgs", () => {
 describe("runDbMigrate", () => {
     function deps(runImpl?: MigrateRunner) {
         const run = vi.fn<MigrateRunner>(
-            runImpl ?? (async (o) => ({ migrationsFolder: o.migrationsFolder ?? "./drizzle" })),
+            runImpl ??
+                (async (o) => ({
+                    migrationsFolder: o.migrationsFolder ?? "./drizzle",
+                })),
         );
         const written: string[] = [];
         const write = (t: string) => {
@@ -86,9 +91,7 @@ describe("runDbMigrate", () => {
         const { run, write } = deps(async () => {
             throw boom;
         });
-        await expect(
-            runDbMigrate([], run, write),
-        ).rejects.toThrow(boom);
+        await expect(runDbMigrate([], run, write)).rejects.toThrow(boom);
     });
 
     it("prints help and does not run when -h is passed", async () => {

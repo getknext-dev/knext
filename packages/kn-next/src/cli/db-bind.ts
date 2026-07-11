@@ -456,16 +456,34 @@ Options:
   -h, --help            Show this help
 `;
 
+/** Top-level `kn-next db` help — lists the subcommand family. */
+const DB_HELP = `kn-next db — database subcommands
+
+Subcommands:
+  bind      Bind an existing Postgres Secret to the NextApp CR (ADR-0019)
+  migrate   Apply pending migrations against the writer, once (ADR-0021 §3)
+
+Run \`kn-next db <subcommand> --help\` for subcommand options.
+`;
+
 /** Entry for the `kn-next db …` subcommand family. */
 export async function dbMain(argv: readonly string[]): Promise<void> {
     const [sub, ...rest] = argv;
     if (sub === undefined || sub === "-h" || sub === "--help") {
-        writeSync(1, DB_BIND_HELP);
+        writeSync(1, DB_HELP);
+        return;
+    }
+    if (sub === "migrate") {
+        // The one-shot, writer-only migration runner (ADR-0021 §3) — its own
+        // module so the dynamic import resolves in dist and stays out of the
+        // bind path.
+        const { runDbMigrate } = await import("./db-migrate");
+        await runDbMigrate(rest);
         return;
     }
     if (sub !== "bind") {
         throw new Error(
-            `unknown db subcommand "${sub}" — available: bind (kn-next db bind --help)`,
+            `unknown db subcommand "${sub}" — available: bind, migrate (kn-next db --help)`,
         );
     }
     if (rest.includes("-h") || rest.includes("--help")) {

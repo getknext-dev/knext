@@ -8,9 +8,10 @@ Snippets are illustrative, not final.
 > scaffolded and the two client accessors are shipped: `getDb()` (writer) +
 > `getDbRO()` (reader, with writer fallback + one-time warning), over a new
 > `@knext/lib` read-only pool (`getDbPoolRO`/`closeDbPoolRO`). The re-exported
-> drizzle query surface (`§6`) is live. **Still to land:** `@knext/db/schema`
-> primitives + extension helpers (#239–#241) and the `@knext/db/migrate` runner
-> (#242) — those subpaths are reserved but not yet exported.
+> drizzle query surface (`§6`) is live. The `@knext/db/migrate` runner (#242) has
+> landed: `runMigrations()` + the `kn-next db migrate` one-shot subcommand + the Job
+> recipe (writer-only, idempotent, fail-loud). **Still to land:** the TimescaleDB /
+> pgvector extension helpers (#240/#241).
 
 ## 1. Where it fits
 

@@ -34,7 +34,7 @@
   "knext": {
     "publicApi": {
       "doc": "docs/PUBLIC_API.md",
-      "stability": "The @knext/db `.`, `./schema`, and `./migrate` subpaths are public and follow semver. `./schema` re-exports drizzle's pg-core builders; `./migrate` ships `defineDrizzleConfig()` (the `kn-next db migrate` runner lands on it in #242).",
+      "stability": "The @knext/db `.`, `./schema`, and `./migrate` subpaths are public and follow semver. `./schema` re-exports drizzle's pg-core builders; `./migrate` ships `defineDrizzleConfig()` plus the one-shot writer-only migration runner `runMigrations()` (behind `kn-next db migrate`).",
       "public": [
         ".",
         "./schema",
@@ -56,7 +56,8 @@
   },
   "dependencies": {
     "@knext/lib": "workspace:^",
-    "drizzle-orm": "^0.45.2"
+    "drizzle-orm": "^0.45.2",
+    "pg": "^8.16.3"
   },
   "peerDependencies": {
     "drizzle-kit": "^0.31.0",
@@ -74,7 +75,6 @@
     "@types/node": "^20.8.0",
     "@types/pg": "^8.15.6",
     "drizzle-kit": "^0.31.0",
-    "pg": "^8.16.3",
     "typescript": "^5.2.2"
   }
 }
