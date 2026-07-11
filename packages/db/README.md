@@ -10,10 +10,10 @@ resource — it is an **app-side client library** (ADR-0021). Apps keep drizzle'
 own docs and lose no power.
 
 > **Shipped:** the client accessors below (`getDb` / `getDbRO`) + the re-exported
-> drizzle query operators (`.`), the schema surface (`@knext/db/schema`), and the
+> drizzle query operators (`.`), the schema surface (`@knext/db/schema`), the
+> TimescaleDB + pgvector extension helpers on that surface (#240/#241), and the
 > `drizzle.config.ts` helper (`@knext/db/migrate` → `defineDrizzleConfig`). The
-> TimescaleDB/pgvector extension helpers (#240/#241) and the `kn-next db migrate`
-> runner (#242) land in follow-up work.
+> `kn-next db migrate` runner (#242) lands in follow-up work.
 
 ## Install
 
@@ -88,8 +88,99 @@ export type NewOrder = typeof orders.$inferInsert; // insert shape
 `@knext/db/schema` re-exports `pgTable`, the column builders (`serial`/`text`/
 `integer`/`timestamp`/`jsonb`/`uuid`/`vector`/…), `index`/`uniqueIndex`,
 `primaryKey`/`foreignKey`, `pgEnum`/`pgSchema`, and `relations`/`sql`. The
-platform's TimescaleDB (#240) and pgvector (#241) helpers will slot in **on top
-of** this surface without changing it.
+platform's TimescaleDB and pgvector helpers (below) slot in **on top of** this
+surface without changing it.
+
+## Extensions — TimescaleDB & pgvector
+
+The scale-to-zero Postgres ships two extensions in its compute image, both **opt-in
+and self-service**: your app enables the one it needs **itself**, once, over its own
+`DATABASE_URL` — no operator, no superuser. Both are `trusted`, so a single
+`CREATE EXTENSION IF NOT EXISTS …` is all it takes, and their data + indexes live on
+the pageserver, so **they survive scale-to-zero** (see scale-zero-pg
+[`docs/connecting.md`](https://github.com/getknext-dev/scale-zero-pg/blob/main/docs/connecting.md)).
+
+`@knext/db/schema` adds the ergonomics drizzle-kit can't model — the helpers below
+are **migration SQL emitters**: put their output in the migration that creates the
+table. `createTimescaleExtension()` / `createVectorExtension()` return the enable
+statement; run it at the top of that migration.
+
+### TimescaleDB (time-series) — #240
+
+```ts
+import {
+  pgTable, timestamp, text, doublePrecision,
+  hypertable, dropChunks, createTimescaleExtension,
+} from '@knext/db/schema';
+
+export const metrics = pgTable('metrics', {
+  ts: timestamp('ts', { withTimezone: true }).notNull(),
+  device: text('device').notNull(),
+  value: doublePrecision('value').notNull(),
+});
+
+// Emit these into your migration (drizzle-kit won't generate them):
+createTimescaleExtension();
+// → CREATE EXTENSION IF NOT EXISTS timescaledb;
+hypertable(metrics, { by: 'ts', chunkInterval: '7 days' });
+// → SELECT create_hypertable('metrics', 'ts',
+//     chunk_time_interval => INTERVAL '7 days', if_not_exists => TRUE);
+
+// Retention — a ONE-SHOT drop, run by your migration/CI on a schedule you own:
+dropChunks(metrics, { olderThan: '30 days' });
+// → SELECT drop_chunks('metrics', INTERVAL '30 days');
+```
+
+> **Honest bound (Apache-2 tier only).** You get hypertables, `time_bucket()`, chunk
+> pruning, and one-shot `drop_chunks()` retention. Columnar **compression** and
+> **continuous aggregates** are **not** available here, and retention is
+> `dropChunks()` rather than `add_retention_policy()` — both of those rely on
+> *background policy jobs*, which cannot run on a compute that scales to zero
+> (scale-zero-pg `adr-0001`). Run `dropChunks()` from a CI cron / a `kn-next` job.
+
+### pgvector (embeddings / semantic search) — #241
+
+```ts
+import {
+  pgTable, serial, text, vector,
+  hnsw, ivfflat, createVectorExtension,
+} from '@knext/db/schema';
+
+export const docs = pgTable('docs', {
+  id: serial('id').primaryKey(),
+  body: text('body').notNull(),
+  embedding: vector('embedding', { dimensions: 1536 }),
+});
+
+// Emit into your migration:
+createVectorExtension();
+// → CREATE EXTENSION IF NOT EXISTS vector;
+hnsw('docs_embedding_idx', docs.embedding, { m: 16, efConstruction: 64 });
+// → CREATE INDEX IF NOT EXISTS "docs_embedding_idx" ON "docs"
+//     USING hnsw ("embedding" vector_cosine_ops) WITH (m = 16, ef_construction = 64);
+
+// IVFFlat is the alternative access method (faster build, tune `lists` to row count):
+ivfflat('docs_embedding_ivf', docs.embedding, { ops: 'vector_l2_ops', lists: 100 });
+```
+
+Query with the distance operators (re-exported from drizzle). **Match the operator
+to the index's ops class**: `cosineDistance` (`<=>`) ⇄ `vector_cosine_ops`,
+`l2Distance` (`<->`) ⇄ `vector_l2_ops`, `innerProduct` (`<#>`) ⇄ `vector_ip_ops`.
+
+```ts
+import { getDbRO, cosineDistance } from '@knext/db';
+import { docs } from '@/db/schema';
+
+const nearest = await getDbRO({ docs })
+  .select()
+  .from(docs)
+  .orderBy(cosineDistance(docs.embedding, queryEmbedding))
+  .limit(5);
+```
+
+Build the index while the compute is awake (index builds run on your own per-app
+compute); it persists across scale-to-zero like any other table. pgvector 0.8.0 —
+requires scale-zero-pg ≥ v1.4.0.
 
 ## Migrations — the `drizzle.config.ts` helper
 

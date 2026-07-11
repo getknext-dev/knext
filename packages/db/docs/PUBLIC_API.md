@@ -8,7 +8,7 @@ not listed is internal and may change without a major bump.
 | Subpath | Status | Exports |
 |---|---|---|
 | `@knext/db` (`.`) | **public** | `getDb`, `getDbRO`, and the re-exported drizzle-orm query surface (`eq`, `and`, `or`, `sql`, the query builder, …). |
-| `@knext/db/schema` | **public** | drizzle `pg-core` primitives (`pgTable`, column + index + constraint builders) plus `relations`/`sql`, re-exported from one place. |
+| `@knext/db/schema` | **public** | drizzle `pg-core` primitives (`pgTable`, column + index + constraint builders) plus `relations`/`sql`, re-exported from one place, **and** the TimescaleDB + pgvector extension helpers (`hypertable`/`dropChunks`/`createTimescaleExtension`, `hnsw`/`ivfflat`/`createVectorExtension`, `cosineDistance`/`l2Distance`/`innerProduct`). |
 | `@knext/db/migrate` | **public** | `defineDrizzleConfig()` + `DEFAULT_SCHEMA_PATH` / `DEFAULT_MIGRATIONS_DIR`. |
 
 ### `@knext/db` (`.`)
@@ -33,8 +33,22 @@ not listed is internal and may change without a major bump.
   `index`/`uniqueIndex`, `primaryKey`/`foreignKey`, `pgEnum`/`pgSchema`, …) plus
   `relations` and `sql` from the drizzle-orm root. No bespoke DSL — drizzle's docs
   apply directly.
-- The TimescaleDB (#240) and pgvector (#241) extension helpers slot in **on top of**
-  this surface without changing it; that seam is documented in `src/schema.ts`.
+- **Extension helpers** slot in **on top of** this surface without changing it —
+  they are migration **SQL emitters** (strings), since drizzle-kit does not model
+  these. All are exported from `@knext/db/schema` (and the distance operators from
+  the package root too):
+  - **TimescaleDB (#240)** — `hypertable(table, { by, chunkInterval?, ifNotExists?,
+    migrateData? }): string` (emits `create_hypertable`), `dropChunks(table, {
+    olderThan }): string` (emits a **one-shot** `drop_chunks()` — not a background
+    policy), and `createTimescaleExtension(): string` / `CREATE_TIMESCALEDB_EXTENSION`.
+    Apache-2 tier only: no columnar compression / continuous aggregates on
+    scale-to-zero (scale-zero-pg `adr-0001`).
+  - **pgvector (#241)** — `hnsw(name, column, { ops?, m?, efConstruction?,
+    ifNotExists?, concurrently? }): string` and `ivfflat(name, column, { ops?, lists?,
+    … }): string` (emit `CREATE INDEX … USING …`), `createVectorExtension(): string` /
+    `CREATE_VECTOR_EXTENSION`, the `VectorOpClass` type, and the distance-operator
+    query builders re-exported from drizzle: `cosineDistance` (`<=>`), `l2Distance`
+    (`<->`), `innerProduct` (`<#>`). Requires scale-zero-pg ≥ v1.4.0.
 
 ### `@knext/db/migrate`
 
