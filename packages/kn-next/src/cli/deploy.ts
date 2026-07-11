@@ -112,6 +112,7 @@ function parseCliArgs(): DeployOptions {
                 "Commands:",
                 "  deploy (default)  build → push → apply the NextApp CR",
                 "  db bind           bind an existing Postgres Secret to the NextApp CR",
+                "  db migrate        apply pending migrations against the writer, once",
                 "  doctor            cluster-prereq preflight (read-only; --json)",
                 "  status            show the NextApp's honest conditions (read-only; --json, --watch)",
                 "  rollback          pin traffic to a prior Knative Revision (--to, --canary)",
@@ -437,7 +438,7 @@ if (isEntrypoint(import.meta.url)) {
     } catch (err) {
         const label =
             sub === "db"
-                ? "db bind failed"
+                ? "db command failed"
                 : sub === "doctor"
                   ? "doctor failed"
                   : sub === "status"

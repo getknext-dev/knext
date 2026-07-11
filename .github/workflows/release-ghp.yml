@@ -54,10 +54,11 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      # @knext/lib ships only dist/ — build it first, then @knext/core (which
-      # imports @knext/lib types at build time).
+      # Build in dependency order: @knext/lib, then @knext/db (depends on lib;
+      # holds the `kn-next db migrate` runner, #242), then @knext/core (which
+      # type-imports both @knext/lib and @knext/db at build time).
       - name: Build publishable packages
-        run: pnpm --filter @knext/lib build && pnpm --filter @knext/core build
+        run: pnpm --filter @knext/lib build && pnpm --filter @knext/db build && pnpm --filter @knext/core build
 
       # Stage renamed copies into .ghp-staging/{lib,core}. Fails LOUDLY if core's
       # dist no longer contains the externalized @knext/lib imports (layout drift).

@@ -26,6 +26,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(__dirname, '..');
 const corePkgDir = join(repoRoot, 'packages', 'kn-next');
 const libPkgDir = join(repoRoot, 'packages', 'lib');
+const dbPkgDir = join(repoRoot, 'packages', 'db');
 
 const PASS = 'PASS';
 const FAIL = 'FAIL';
@@ -68,16 +69,25 @@ function pnpmPack(pkgDir, dest, label) {
 
 let workDir;
 let libDest;
+let dbDest;
 let coreDest;
 try {
-  // --- 1. pack @knext/lib then @knext/core ----------------------------------
-  // Pack BOTH: @knext/core declares `@knext/lib` as a (rewritten) versioned dep, but
-  // nothing is published to npm yet (E1-4 — publish is gated until NPM_TOKEN is set).
-  // Installing both tarballs together lets the local dep resolve without hitting npm,
-  // so the smoke proves the packed CLI artifact works pre-publish.
-  // @knext/lib ships only dist/ — build it before packing or the tarball is empty.
+  // --- 1. pack @knext/lib → @knext/db → @knext/core -------------------------
+  // Pack ALL THREE: @knext/core declares `@knext/lib` AND `@knext/db` as (rewritten)
+  // versioned deps, and @knext/db declares `@knext/lib` — but nothing is published to
+  // npm yet (E1-4 — publish is gated until NPM_TOKEN is set). Installing the tarballs
+  // together lets the local deps resolve without hitting npm, so the smoke proves the
+  // packed CLI artifact works pre-publish.
+  // @knext/lib + @knext/db ship only dist/ — build before packing or the tarball is
+  // empty. Order lib → db → core: @knext/db imports @knext/lib types, and @knext/core's
+  // build imports both (the `kn-next db migrate` runner lives in @knext/db/migrate, #242).
   console.log('[smoke:cli] building @knext/lib (ships dist/ only) ...');
   execFileSync('pnpm', ['--filter', '@knext/lib', 'build'], {
+    cwd: repoRoot,
+    stdio: ['ignore', 'inherit', 'inherit'],
+  });
+  console.log('[smoke:cli] building @knext/db (ships dist/ only) ...');
+  execFileSync('pnpm', ['--filter', '@knext/db', 'build'], {
     cwd: repoRoot,
     stdio: ['ignore', 'inherit', 'inherit'],
   });
@@ -89,10 +99,13 @@ try {
     stdio: ['ignore', 'inherit', 'inherit'],
   });
   libDest = mkdtempSync(join(tmpdir(), 'knext-pack-lib-'));
+  dbDest = mkdtempSync(join(tmpdir(), 'knext-pack-db-'));
   coreDest = mkdtempSync(join(tmpdir(), 'knext-pack-core-'));
   const libTarball = pnpmPack(libPkgDir, libDest, '@knext/lib');
+  const dbTarball = pnpmPack(dbPkgDir, dbDest, '@knext/db');
   const coreTarball = pnpmPack(corePkgDir, coreDest, '@knext/core');
   console.log(`[smoke:cli] core tarball: ${coreTarball}`);
+  console.log(`[smoke:cli] db   tarball: ${dbTarball}`);
   console.log(`[smoke:cli] lib  tarball: ${libTarball}`);
 
   // --- 2. fresh project + install -------------------------------------------
@@ -102,8 +115,8 @@ try {
     cwd: workDir,
     stdio: ['ignore', 'inherit', 'inherit'],
   });
-  console.log('[smoke:cli] installing tarballs (@knext/lib + @knext/core) ...');
-  execFileSync('npm', ['install', libTarball, coreTarball], {
+  console.log('[smoke:cli] installing tarballs (@knext/lib + @knext/db + @knext/core) ...');
+  execFileSync('npm', ['install', libTarball, dbTarball, coreTarball], {
     cwd: workDir,
     stdio: ['ignore', 'inherit', 'inherit'],
   });

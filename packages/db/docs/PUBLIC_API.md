@@ -9,7 +9,7 @@ not listed is internal and may change without a major bump.
 |---|---|---|
 | `@knext/db` (`.`) | **public** | `getDb`, `getDbRO`, and the re-exported drizzle-orm query surface (`eq`, `and`, `or`, `sql`, the query builder, …). |
 | `@knext/db/schema` | **public** | drizzle `pg-core` primitives (`pgTable`, column + index + constraint builders) plus `relations`/`sql`, re-exported from one place, **and** the TimescaleDB + pgvector extension helpers (`hypertable`/`dropChunks`/`createTimescaleExtension`, `hnsw`/`ivfflat`/`createVectorExtension`, `cosineDistance`/`l2Distance`/`innerProduct`). |
-| `@knext/db/migrate` | **public** | `defineDrizzleConfig()` + `DEFAULT_SCHEMA_PATH` / `DEFAULT_MIGRATIONS_DIR`. |
+| `@knext/db/migrate` | **public** | `defineDrizzleConfig()`, the one-shot writer-only runner `runMigrations()` / `resolveWriterDsn()`, `RO_GATEWAY_PORT`, and `DEFAULT_SCHEMA_PATH` / `DEFAULT_MIGRATIONS_DIR`. |
 
 ### `@knext/db` (`.`)
 
@@ -58,10 +58,20 @@ not listed is internal and may change without a major bump.
   `options`: `{ schema?, out?, url? }`.
 - **`DEFAULT_SCHEMA_PATH`** (`./src/db/schema.ts`) and **`DEFAULT_MIGRATIONS_DIR`**
   (`./drizzle`) — the conventional defaults.
-- The `kn-next db migrate` one-shot runner lands on this same subpath in #242.
+- **`runMigrations(options?, deps?): Promise<{ migrationsFolder }>`** — the one-shot,
+  **writer-only** migration runner behind `kn-next db migrate` (ADR-0021 §3). Resolves
+  + guards the writer DSN (see below), applies drizzle-kit-generated migrations via
+  drizzle-orm's migrator, always closes the connection, and **rejects on failure**
+  (fail loud). Idempotent (drizzle tracks applied migrations). `deps` injects the
+  pg/drizzle boundary for tests. `options`: `{ url?, migrationsFolder?, roUrl? }`.
+- **`resolveWriterDsn(options?): string`** — resolves `url ?? DATABASE_URL` and
+  **refuses** a read-replica DSN (an exact `DATABASE_URL_RO`, or one on the RO gateway
+  port). Throws (fail loud) when no writer DSN is available.
+- **`RO_GATEWAY_PORT`** (`'55434'`) — the scale-zero-pg RO gateway port migrations
+  must never target.
 - `drizzle-kit` is a **type-only** dependency (an optional peer) — `defineDrizzleConfig()`
   returns a plain object typed as its `Config`; no drizzle-kit code is imported at
-  runtime.
+  runtime. `runMigrations()` uses drizzle-**orm**'s migrator + `pg` (runtime).
 
 ## Stability policy
 

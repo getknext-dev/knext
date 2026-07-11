@@ -52,9 +52,11 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      # @knext/lib ships only dist/ — build it first, then @knext/core depends on it.
+      # Build in dependency order: @knext/lib, then @knext/db (depends on lib and
+      # holds the `kn-next db migrate` runner, #242), then @knext/core (type-imports
+      # both). @knext/lib/@knext/db ship only dist/, so they must build first.
       - name: Build publishable packages
-        run: pnpm --filter @knext/lib build && pnpm --filter @knext/core build
+        run: pnpm --filter @knext/lib build && pnpm --filter @knext/db build && pnpm --filter @knext/core build
 
       # Gate the publish command WITHOUT referencing `secrets` inside the action's
       # `with:` input (that expression caused GitHub startup-failure runs). When

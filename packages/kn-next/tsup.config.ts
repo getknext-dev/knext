@@ -36,6 +36,10 @@ export default defineConfig([
       // db bind`); own entries so the dynamic imports resolve in dist.
       'cli/doctor': 'src/cli/doctor.ts',
       'cli/db-bind': 'src/cli/db-bind.ts',
+      // #242 the one-shot writer-only migration runner (ADR-0021 §3), reached via
+      // `kn-next db migrate`'s subcommand dispatch; own entry so the dynamic
+      // import resolves in dist.
+      'cli/db-migrate': 'src/cli/db-migrate.ts',
       // CLI helpers exported as library subpaths (./cli/validate, ./cli/shared)
       'cli/validate': 'src/cli/validate.ts',
       'cli/shared': 'src/cli/shared.ts',
@@ -67,6 +71,7 @@ export default defineConfig([
         'cli/loadtest': 'src/cli/loadtest.ts',
         'cli/doctor': 'src/cli/doctor.ts',
         'cli/db-bind': 'src/cli/db-bind.ts',
+        'cli/db-migrate': 'src/cli/db-migrate.ts',
         'cli/validate': 'src/cli/validate.ts',
         'cli/shared': 'src/cli/shared.ts',
         config: 'src/config.ts',
@@ -90,6 +95,7 @@ export default defineConfig([
     sourcemap: true,
     // Do not bundle these — resolve from the package's deps at install time.
     external: [
+      '@knext/db',
       '@knext/lib',
       'ioredis',
       'yaml',

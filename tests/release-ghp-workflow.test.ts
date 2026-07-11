@@ -47,9 +47,11 @@ describe('.github/workflows/release-ghp.yml', () => {
     expect(text).not.toMatch(/id-token:\s*write/);
   });
 
-  it('builds lib before core', () => {
+  it('builds lib and db before core', () => {
     const text = workflowText();
-    expect(text).toContain('pnpm --filter @knext/lib build && pnpm --filter @knext/core build');
+    expect(text).toContain(
+      'pnpm --filter @knext/lib build && pnpm --filter @knext/db build && pnpm --filter @knext/core build',
+    );
   });
 
   it('runs the rename-for-ghp staging script before publishing', () => {

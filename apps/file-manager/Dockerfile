@@ -22,10 +22,14 @@ RUN pnpm install --frozen-lockfile
 # SEPARATE step so its dist/ is fully emitted before `next build` resolves it.
 # (A combined recursive build can race the app's build ahead of the lib's emit.)
 RUN pnpm --filter "@knext/lib" build
+# @knext/db ships only dist/ and depends on @knext/lib; @knext/core type-imports it
+# (the `kn-next db migrate` runner lives in @knext/db/migrate, #242), so db must be
+# built after lib and before core or core's dts build hard-fails (TS2307).
+RUN pnpm --filter "@knext/db" build
 # @knext/core also ships only dist/ and its exports resolve to ./dist/* (#114);
 # file-manager imports @knext/core (adapter + KnativeNextConfig), so core must be
-# built (after lib, whose types core's build needs) BEFORE `next build` resolves
-# it from dist. Order: lib → core → file-manager.
+# built (after lib + db, whose types core's build needs) BEFORE `next build`
+# resolves it from dist. Order: lib → db → core → file-manager.
 RUN pnpm --filter "@knext/core" build
 RUN pnpm --filter file-manager build
 

@@ -38,6 +38,12 @@ jobs:
       - name: Build @knext/lib
         run: pnpm --filter @knext/lib build
 
+      # @knext/core type-imports @knext/db (the `kn-next db migrate` runner lives
+      # in @knext/db/migrate, #242), so without db's dist the core build hard-fails
+      # (TS2307). db depends on lib, so the order is lib→db→core.
+      - name: Build @knext/db
+        run: pnpm --filter @knext/db build
+
       - name: Build @knext/core
         run: pnpm --filter @knext/core build
 
@@ -92,6 +98,12 @@ jobs:
       - name: Build @knext/lib
         run: pnpm --filter @knext/lib build
 
+      # @knext/core type-imports @knext/db (the `kn-next db migrate` runner lives
+      # in @knext/db/migrate, #242), so without db's dist the core build hard-fails
+      # (TS2307). db depends on lib, so the order is lib→db→core.
+      - name: Build @knext/db
+        run: pnpm --filter @knext/db build
+
       - name: Build @knext/core
         run: pnpm --filter @knext/core build
 
@@ -133,6 +145,12 @@ jobs:
       # file-manager imports it, so a missing core build breaks `next build`.
       - name: Build @knext/lib
         run: pnpm --filter @knext/lib build
+
+      # @knext/core type-imports @knext/db (the `kn-next db migrate` runner lives
+      # in @knext/db/migrate, #242), so without db's dist the core build hard-fails
+      # (TS2307). db depends on lib, so the order is lib→db→core.
+      - name: Build @knext/db
+        run: pnpm --filter @knext/db build
 
       - name: Build @knext/core
         run: pnpm --filter @knext/core build
@@ -180,6 +198,12 @@ jobs:
       # app; the test also `pnpm deploy`s @knext/core (needs its dist present).
       - name: Build @knext/lib
         run: pnpm --filter @knext/lib build
+
+      # @knext/core type-imports @knext/db (the `kn-next db migrate` runner lives
+      # in @knext/db/migrate, #242), so without db's dist the core build hard-fails
+      # (TS2307). db depends on lib, so the order is lib→db→core.
+      - name: Build @knext/db
+        run: pnpm --filter @knext/db build
 
       - name: Build @knext/core
         run: pnpm --filter @knext/core build

@@ -87,6 +87,7 @@ jobs:
       - name: Build CLI (dist/cli/preview.js)
         run: |
           pnpm --filter @knext/lib build
+          pnpm --filter @knext/db build
           pnpm --filter @knext/core build
 
       - name: Configure cluster + registry access
@@ -156,6 +157,7 @@ jobs:
       - name: Build CLI (dist/cli/preview.js)
         run: |
           pnpm --filter @knext/lib build
+          pnpm --filter @knext/db build
           pnpm --filter @knext/core build
 
       - name: Configure cluster access

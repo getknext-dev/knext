@@ -196,5 +196,5 @@ the RO compute. Both drain on SIGTERM. The 15s connect timeout already tolerates
 - [ ] Schema surface + `drizzle-kit` config helper (issue: schema).
 - [ ] TimescaleDB `hypertable`/retention helpers + bounds docs (issue: timescale).
 - [ ] pgvector column/index/similarity helpers, gated on #178 (issue: pgvector).
-- [ ] `kn-next db migrate` runner + Job recipe (issue: migrations).
+- [x] `kn-next db migrate` runner + Job recipe (issue: migrations, #242).
 - [ ] `docs/guides/drizzle-sdk.md` + port the example app (issue: docs+example).

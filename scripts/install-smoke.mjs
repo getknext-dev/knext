@@ -11,17 +11,18 @@
  * (a raw-`.ts` export, a missing dist file, a broken bin) BEFORE the first publish.
  *
  * Why the install is plain `npm` but the PACK uses `pnpm`:
- *   - @knext/core depends on @knext/lib via `workspace:^` (package.json). `npm pack`
- *     leaves that verbatim, which fails to install (EUNSUPPORTEDPROTOCOL). `pnpm pack`
- *     REWRITES `workspace:^` to a real version range — EXACTLY what `changeset publish`
- *     does (release.yml runs under pnpm). So we pack the way we publish, then install +
- *     run the way a CONSUMER would: plain `npm install`, plain `node`, outside the repo.
- *   - Nothing is published to npm yet, so the rewritten `@knext/lib` dep is satisfied by
- *     installing BOTH tarballs together in the fresh consumer dir.
+ *   - @knext/core depends on @knext/lib AND @knext/db via `workspace:^` (package.json),
+ *     and @knext/db depends on @knext/lib. `npm pack` leaves those verbatim, which fails
+ *     to install (EUNSUPPORTEDPROTOCOL). `pnpm pack` REWRITES `workspace:^` to a real
+ *     version range — EXACTLY what `changeset publish` does (release.yml runs under
+ *     pnpm). So we pack the way we publish, then install + run the way a CONSUMER would:
+ *     plain `npm install`, plain `node`, outside the repo.
+ *   - Nothing is published to npm yet, so the rewritten `@knext/lib` + `@knext/db` deps
+ *     are satisfied by installing ALL THREE tarballs together in the fresh consumer dir.
  *
  * Steps:
- *   1. Build (lib then core — core's build/types need lib's dist) and `pnpm pack` both.
- *   2. Fresh temp dir OUTSIDE the workspace. `npm init -y`, `npm install <both tarballs>`.
+ *   1. Build (lib → db → core — each build/types need the prior's dist) and `pnpm pack` all.
+ *   2. Fresh temp dir OUTSIDE the workspace. `npm init -y`, `npm install <all tarballs>`.
  *   3. CLI checks:  `node <bin> --help` (exit 0 + expected output) AND drive the config
  *      `validate` path via the public-ish `./internal/cli-validate` export — a VALID
  *      fixture passes and an INVALID one is rejected. The bin is also confirmed present.
@@ -57,6 +58,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(__dirname, '..');
 const corePkgDir = join(repoRoot, 'packages', 'kn-next');
 const libPkgDir = join(repoRoot, 'packages', 'lib');
+const dbPkgDir = join(repoRoot, 'packages', 'db');
 const probeSrc = join(__dirname, 'install-smoke-probe.mjs');
 
 const PASS = 'PASS';
@@ -64,12 +66,13 @@ const FAIL = 'FAIL';
 
 let workDir;
 let libDest;
+let dbDest;
 let coreDest;
 
 /** Print a final summary line, clean up temp dirs, and exit with the matching code. */
 function finish(status, message) {
   console.log(`\n[install-smoke] ${status}: ${message}`);
-  for (const dir of [workDir, libDest, coreDest]) {
+  for (const dir of [workDir, libDest, dbDest, coreDest]) {
     try {
       if (dir && existsSync(dir)) rmSync(dir, { recursive: true, force: true });
     } catch {
@@ -116,11 +119,18 @@ function publishedEntrypoints(pkgDir) {
 }
 
 try {
-  // --- 1. build (lib then core) + pack both ---------------------------------
-  // @knext/lib ships dist/ only — build before packing or the tarball is empty.
-  // @knext/core's build (and its .d.ts) import @knext/lib types, so lib must be first.
-  console.log('[install-smoke] building @knext/lib then @knext/core ...');
+  // --- 1. build (lib → db → core) + pack all three --------------------------
+  // @knext/lib + @knext/db ship dist/ only — build before packing or the tarball
+  // is empty. Dependency order: @knext/db imports @knext/lib types, and
+  // @knext/core's build (and its .d.ts) import BOTH @knext/lib and @knext/db types
+  // (the `kn-next db migrate` runner lives in @knext/db/migrate, #242), so the
+  // order is lib → db → core.
+  console.log('[install-smoke] building @knext/lib then @knext/db then @knext/core ...');
   execFileSync('pnpm', ['--filter', '@knext/lib', 'build'], {
+    cwd: repoRoot,
+    stdio: ['ignore', 'inherit', 'inherit'],
+  });
+  execFileSync('pnpm', ['--filter', '@knext/db', 'build'], {
     cwd: repoRoot,
     stdio: ['ignore', 'inherit', 'inherit'],
   });
@@ -130,8 +140,10 @@ try {
   });
 
   libDest = mkdtempSync(join(tmpdir(), 'knext-pack-lib-'));
+  dbDest = mkdtempSync(join(tmpdir(), 'knext-pack-db-'));
   coreDest = mkdtempSync(join(tmpdir(), 'knext-pack-core-'));
   const libTarball = pnpmPack(libPkgDir, libDest, '@knext/lib');
+  const dbTarball = pnpmPack(dbPkgDir, dbDest, '@knext/db');
   const coreTarball = pnpmPack(corePkgDir, coreDest, '@knext/core');
 
   // --- 1b. manifest guard: no workspace:-protocol spec may survive packing ----
@@ -145,6 +157,7 @@ try {
   console.log('[install-smoke] inspecting packed manifests for workspace: protocol leaks ...');
   for (const [tgz, label] of [
     [libTarball, '@knext/lib'],
+    [dbTarball, '@knext/db'],
     [coreTarball, '@knext/core'],
   ]) {
     const manifest = JSON.parse(
@@ -180,11 +193,19 @@ try {
   consumerPkg.type = 'module';
   writeFileSync(consumerPkgPath, `${JSON.stringify(consumerPkg, null, 2)}\n`);
 
-  console.log('[install-smoke] npm install <lib.tgz> <core.tgz> (plain npm, no bun) ...');
-  const install = run('npm', ['install', '--no-audit', '--no-fund', libTarball, coreTarball], {
-    cwd: workDir,
-    stdio: ['ignore', 'inherit', 'inherit'],
-  });
+  // Install all three tarballs together: @knext/core's rewritten `@knext/db` +
+  // `@knext/lib` deps (and @knext/db's rewritten `@knext/lib` dep) are unpublished,
+  // so the local tarballs satisfy them; drizzle-orm/pg (@knext/db's real deps) come
+  // from the registry.
+  console.log('[install-smoke] npm install <lib.tgz> <db.tgz> <core.tgz> (plain npm, no bun) ...');
+  const install = run(
+    'npm',
+    ['install', '--no-audit', '--no-fund', libTarball, dbTarball, coreTarball],
+    {
+      cwd: workDir,
+      stdio: ['ignore', 'inherit', 'inherit'],
+    },
+  );
   if (install.status !== 0) finish(FAIL, `npm install of tarballs exited ${install.status}`);
 
   // --- 3a. CLI: bin present + `--help` runs under plain node ----------------
@@ -265,7 +286,10 @@ try {
   // --- 5. exports-completeness: every exports subpath + bin resolves ---------
   const coreEntry = publishedEntrypoints(corePkgDir);
   const libEntry = publishedEntrypoints(libPkgDir);
-  const allSubpaths = [...coreEntry.subpaths, ...libEntry.subpaths];
+  const dbEntry = publishedEntrypoints(dbPkgDir);
+  // @knext/db's subpaths include ./migrate — this proves `@knext/db/migrate` (the
+  // `kn-next db migrate` runner) resolves to real JS in a clean install.
+  const allSubpaths = [...coreEntry.subpaths, ...libEntry.subpaths, ...dbEntry.subpaths];
   console.log(`[install-smoke] resolving ${allSubpaths.length} exports subpaths ...`);
   const resolveCheck = run(
     'node',
@@ -298,7 +322,7 @@ try {
   }
   // bins: kn-next was already proven runnable above; assert any other declared bin
   // at least has a .bin symlink.
-  for (const bin of [...coreEntry.bins, ...libEntry.bins]) {
+  for (const bin of [...coreEntry.bins, ...libEntry.bins, ...dbEntry.bins]) {
     if (!existsSync(join(workDir, 'node_modules', '.bin', bin))) {
       finish(FAIL, `declared bin '${bin}' is missing from node_modules/.bin`);
     }
@@ -328,8 +352,8 @@ try {
 
   finish(
     PASS,
-    'packed @knext/core + @knext/lib install on plain npm/Node; CLI runs and every ' +
-      'public app-import subpath resolves to real JS outside the workspace',
+    'packed @knext/core + @knext/lib + @knext/db install on plain npm/Node; CLI runs ' +
+      'and every public app-import subpath resolves to real JS outside the workspace',
   );
 } catch (err) {
   finish(FAIL, `unexpected error: ${err?.message ?? err}`);

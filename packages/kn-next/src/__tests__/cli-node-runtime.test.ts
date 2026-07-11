@@ -182,7 +182,7 @@ describe("built bin (dist/cli/kn-next.js) is Node-runnable", () => {
         if (!existsSync(distBin)) {
             throw new Error(
                 `${distBin} missing — build @knext/core before vitest ` +
-                    "(pnpm --filter @knext/lib build && pnpm --filter @knext/core build), " +
+                    "(pnpm --filter @knext/lib build && pnpm --filter @knext/db build && pnpm --filter @knext/core build), " +
                     "same contract as publish-surface.test.ts / ci.yml.",
             );
         }
