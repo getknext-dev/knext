@@ -1414,8 +1414,16 @@ pod can wake any tenant" must be bounded and observable. Full detail + the rejec
   app**).
 
 **Alert.** `WakeBudgetExceeded` (deploy/60, `plane: apps`,
-`increase(pggw_wake_budget_exceeded_total{gateway="pggw-apps"}[5m]) > 0` for 1m) —
-**pages** on a sustained per-app breach.
+`increase(pggw_wake_budget_exceeded_total{gateway="pggw-apps"}[2m]) > 0` **for 3m**) —
+**pages** on a *sustained* per-app breach. The `for: 3m` over a 2 m rate window
+**debounces** a single self-clearing burst (issue #166): one misconfigured client
+that reconnects a few times then gives up holds the expr true for only ~2 m — under
+the 3 m `for:` — so it does **not** page (the excess wakes are already refused, so it
+is bounded noise, not an incident). A genuinely sustained breach keeps the counter
+climbing, holds the expr true continuously, and pages after 3 m. `for:` (3 m) is
+deliberately **>** the rate window (2 m) so the suppression is robust, not
+boundary-dependent; the trade-off is ~2 m extra detection latency on a real
+side-channel, acceptable because the wake churn is already capped.
 
 **3am action (WakeBudgetExceeded firing):**
 1. Name the source app: `sum by (system) (increase(pggw_system_wake_budget_exceeded_total[15m]))`
@@ -1448,7 +1456,9 @@ tenant, no cross-tenant wake concern).
 **Drill:** `deploy/_verify-wake-guard.sh` proves it **live** — a legitimate single
 wake still works (no regression), an unauthenticated over-budget burst is capped
 (`53400`, compute never exceeds one replica), and the `WakeBudgetExceeded` alert
-fires.
+fires. Because the alert is now debounced (3 m `for:`), the drill **sustains** the
+over-budget breach for ~5 min (past the `for:`) before asserting the alert reaches
+firing — a single burst is expected NOT to page.
 
 ## Common operations
 

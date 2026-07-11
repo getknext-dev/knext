@@ -11,7 +11,10 @@
 #      for one app wakes it at most GW_WAKE_BUDGET times, then the gateway REFUSES the
 #      excess with a clean 53400 (compute NOT scaled past 1) and counts them.
 #   3. OBSERVABLE — pggw_wake_budget_exceeded_total rises and the WakeBudgetExceeded
-#      alert goes firing in alertmanager (plane=apps).
+#      alert goes firing in alertmanager (plane=apps) under a SUSTAINED breach. The
+#      alert is DEBOUNCED (issue #166: 3m for: over a 2m rate window) so a single
+#      self-clearing burst does NOT page; the drill therefore sustains the breach
+#      past the 3m for: to prove a genuine sustained side-channel still fires.
 #
 # It stands up ONE throwaway per-app branch (wgapp) via provision-app.sh and NEVER
 # touches the live plane's real apps. It does NOT patch the live gateway env: it
@@ -156,8 +159,14 @@ GWLOG="$(K logs -l app=pggw-apps --tail=2000 --since=4m 2>/dev/null | grep -c 'w
 [ "$GWLOG" -ge 1 ] || fail "apps-gateway logs show no 'wake budget exceeded' line — refusal not server-confirmed"
 ok "apps-gateway logged $GWLOG wake-budget refusals (server-side confirmation)"
 
-# 4. OBSERVABLE — metric rose + alert fires ---------------------------------
-log "observability: waiting for pggw_wake_budget_exceeded_total to rise and the alert to fire"
+# 4. OBSERVABLE — metric rose + the alert fires on a SUSTAINED breach --------
+# The WakeBudgetExceeded alert is DEBOUNCED (issue #166): a single self-clearing
+# burst of refusals no longer pages — increase[2m] holds the expr true for only
+# ~2m, UNDER the 3m for:. A GENUINE sustained breach must still page. So after the
+# section-3 burst rose the metric, we keep re-issuing over-budget bursts in the
+# background (each round forces compute back to 0 so every attempt hits the wake
+# path and the excess is refused) for longer than the 3m for:, and poll for firing.
+log "observability: waiting for pggw_wake_budget_exceeded_total to rise"
 AFTER=""; i=0
 while [ $i -lt 30 ]; do
   AFTER="$(prom "http://localhost:9090/api/v1/query?query=sum(pggw_wake_budget_exceeded_total%7Bgateway%3D%22pggw-apps%22%7D)" \
@@ -170,19 +179,46 @@ awk "BEGIN{exit !($AFTER > $BEFORE)}" \
   || fail "pggw_wake_budget_exceeded_total did not rise in prometheus (before=$BEFORE after=$AFTER)"
 ok "metric rose: pggw_wake_budget_exceeded_total{gateway=pggw-apps} $BEFORE -> $AFTER"
 
-# the WakeBudgetExceeded rule must be loaded, and go firing (for: 1m).
+# the WakeBudgetExceeded rule must be loaded, then go firing after the 3m 'for'.
 prom "http://localhost:9090/api/v1/rules" | grep -q 'WakeBudgetExceeded' \
   || fail "WakeBudgetExceeded rule not loaded in prometheus (apply deploy/60-prometheus.yaml + reload)"
-log "WakeBudgetExceeded rule loaded; polling alertmanager for it to fire (up to ~3.5min for the 1m 'for')"
+
+# Sustain the breach in the background for ~5min (> the 3m for:) so increase[2m]
+# stays continuously > 0. Each round: force compute to 0, fire ATTEMPTS unauth
+# startups (excess refused => counter climbs), pause, reap finished pods. Cleaned
+# up by the teardown trap (label wakeguard-drill=1) regardless of how we exit.
+log "sustaining an over-budget breach (~5min) to drive the debounced 3m-for alert to firing"
+SUSTAIN_UNTIL=$(( $(date +%s) + 300 ))
+(
+  set +e
+  r=0
+  while [ "$(date +%s)" -lt "$SUSTAIN_UNTIL" ]; do
+    K scale deploy/"compute-$APP" --replicas=0 >/dev/null 2>&1
+    sleep 2
+    K run "wg-sustain-$$-$r" --image="$ATK_IMAGE" --image-pull-policy=IfNotPresent \
+      --restart=Never --labels=wakeguard-drill=1 --quiet --command -- sh -c "
+        for n in \$(seq 1 $ATTEMPTS); do
+          PGPASSWORD=x psql \"postgres://app_$APP:x@pggw-apps:55432/$APP?sslmode=disable&connect_timeout=15\" -tAc 'select 1' 2>&1 &
+        done; wait" >/dev/null 2>&1
+    r=$((r+1))
+    sleep 20
+    K delete pod -l wakeguard-drill=1 --field-selector=status.phase=Succeeded --ignore-not-found --wait=false >/dev/null 2>&1
+  done
+) &
+SUSTAIN_PID=$!
+
+log "polling alertmanager for WakeBudgetExceeded to fire (up to ~6min for the 3m 'for' + sustain)"
 FIRED=""; i=0
-while [ $i -lt 42 ]; do
+while [ $i -lt 72 ]; do
   if prom "http://localhost:9090/api/v1/alerts" | grep -o '"alertname":"WakeBudgetExceeded"[^}]*"state":"firing"' | grep -q firing \
      || K exec deploy/prometheus -- wget -qO- 'http://alertmanager:9093/api/v2/alerts?active=true' 2>/dev/null | grep -q 'WakeBudgetExceeded'; then
     FIRED=1; break
   fi
   i=$((i+1)); sleep 5
 done
-[ -n "$FIRED" ] || fail "WakeBudgetExceeded did not reach firing/active within the window (metric rose, but the alert did not fire)"
-ok "WakeBudgetExceeded alert is FIRING (plane=apps) — the wake side-channel is observable + pages"
+kill "$SUSTAIN_PID" >/dev/null 2>&1 || true
+wait "$SUSTAIN_PID" 2>/dev/null || true
+[ -n "$FIRED" ] || fail "WakeBudgetExceeded did not reach firing/active within the window (metric rose, but the alert did not fire under a sustained breach)"
+ok "WakeBudgetExceeded alert is FIRING (plane=apps) under a SUSTAINED breach — the side-channel is observable + pages, while a single self-clearing burst is debounced (issue #166)"
 
 ok "ALL WAKE-GUARD CHECKS PASSED (#116): legit wake intact, unauth burst budget-capped, alert fires"

@@ -142,13 +142,21 @@ data:
           # in-cluster pod force-waking a tenant for cost/DoS). Scoped to pggw-apps: the
           # single-DB gateway runs no budget. The offending app is in the per-system
           # series pggw_system_wake_budget_exceeded_total{system=...}.
+          #
+          # DEBOUNCE (issue #166): a SINGLE momentary burst of refusals (one misconfigured
+          # client that reconnects a few times, then gives up) must NOT page — that is
+          # bounded + self-clearing noise, not an incident. The 2m rate window makes such
+          # a burst hold the expr true for only ~2m, which is UNDER the 3m `for:`, so it
+          # never fires. A GENUINELY sustained breach keeps incrementing the counter, holds
+          # the expr true continuously, and pages after 3m. `for:` (3m) is deliberately >
+          # the rate window (2m) so the suppression is robust, not boundary-dependent.
           - alert: WakeBudgetExceeded
-            expr: increase(pggw_wake_budget_exceeded_total{gateway="pggw-apps"}[5m]) > 0
-            for: 1m
+            expr: increase(pggw_wake_budget_exceeded_total{gateway="pggw-apps"}[2m]) > 0
+            for: 3m
             labels: { severity: warning, plane: apps }
             annotations:
               summary: "Per-app wake budget exceeded on the apps-gateway — possible wake side-channel"
-              description: "pggw_wake_budget_exceeded_total{gateway=pggw-apps} increased over 5m — a caller is force-waking a per-app compute past its budget and the gateway is REFUSING the excess wakes (compute NOT scaled). Bounded + handled, but the signature of the unauthenticated wake side-channel (#116): identify the source pod (per-app: pggw_system_wake_budget_exceeded_total{system=...}) and confirm it is an authorized tenant. See docs/operations.md#wake-budget--wake-side-channel-issue-116."
+              description: "pggw_wake_budget_exceeded_total{gateway=pggw-apps} kept rising for >=3m — a caller is force-waking a per-app compute past its budget and the gateway is REFUSING the excess wakes (compute NOT scaled). Bounded + handled, but a SUSTAINED breach (not a single self-clearing burst, which is debounced by the 3m for:) is the signature of the unauthenticated wake side-channel (#116): identify the source pod (per-app: pggw_system_wake_budget_exceeded_total{system=...}) and confirm it is an authorized tenant. See docs/operations.md#wake-budget--wake-side-channel-issue-116."
       # Platform control-plane alerts. These fire off kube-state-metrics (59)
       # and pswatcher (58) — the load-bearing machinery whose failure was
       # previously SILENT (issues #29/#41/#23). Names are matched EXACTLY via
@@ -559,7 +567,7 @@ spec:
         # (prints the value to paste here). _validate.sh contract 27 fails if this drifts
         # from the ConfigMap data; _verify-drift.sh section E independently asserts every
         # shipped rule is LOADED in the live pod (/api/v1/rules).
-        ks-pg.dev/prometheus-config-sha256: "d6fc1cdad52725c6f256c7632b31462051d1118a0861a0773813ed7d632e69ca"
+        ks-pg.dev/prometheus-config-sha256: "ee37e0b843fa77ecd1965afad047a00325d1eafb31ef59b54f66628bc736750d"
     spec:
       serviceAccountName: prometheus
       securityContext:

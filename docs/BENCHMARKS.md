@@ -636,6 +636,14 @@ effective per-app ceiling before refusals begin is `GW_WAKE_BUDGET × replicas` 
 Wake **latency** is unchanged (a warm app is never gated; the budget is consulted only
 when the compute is asleep) — no cold-wake regression.
 
+> **Update (issue #166):** the `WakeBudgetExceeded` alert was **debounced** — `for: 1m`
+> over a `[5m]` window → **`for: 3m`** over a `[2m]` window — so a single self-clearing
+> burst no longer pages (only a *sustained* breach does). The 2026-07-07 "alert fires"
+> row above was recorded under the pre-#166 config (single burst → 1 m `for`). The drill
+> (`_verify-wake-guard.sh`) now **sustains** the over-budget breach for ~5 min past the
+> `for:` before asserting firing; a fresh live OKE run is needed to re-record the
+> debounced firing time (pending at the sign-off gate's drill battery).
+
 ## Platform extensions — TimescaleDB + pgvector self-enable + scale-to-zero survival (issues #177/#178, ADR-0001)
 
 Verified **live on OKE, 2026-07-11** on `compute-node-v17:8464`. Mechanics first probed on
