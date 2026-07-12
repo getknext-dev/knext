@@ -75,6 +75,7 @@ package e2e
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -303,9 +304,22 @@ var _ = Describe("kn-next CLI against a live cluster", Ordered, func() {
 		// REMOTE existing cluster a single TLS-handshake blip must retry, not
 		// abort the suite (observed live against OKE). Each call is idempotent
 		// under retry ("already exists" after a half-committed create = done).
-		By(fmt.Sprintf("creating the fresh, dedicated app namespace %q", cliAppNamespace))
-		kubectlEventuallyCreates("create the app namespace",
-			"create", "ns", cliAppNamespace)
+		By(fmt.Sprintf("creating the fresh, dedicated app namespace %q (ownership label stamped at creation)", cliAppNamespace))
+		// utils.CreateOwnedNamespace stamps kn-next.dev/e2e-owned=true IN the
+		// create call — the teardown guard's authorization. A pre-existing
+		// namespace is never adopted: an "already exists" collision is only
+		// success when the namespace ALREADY carries the label, otherwise the
+		// suite fails fast RIGHT HERE (ErrForeignNamespace) — a
+		// KNEXT_E2E_NAMESPACE typo pointing at a foreign namespace on a shared
+		// cluster must not even be run in, let alone torn down.
+		Eventually(func(g Gomega) {
+			err := utils.CreateOwnedNamespace(cliAppNamespace)
+			if errors.Is(err, utils.ErrForeignNamespace) {
+				StopTrying("ownership guard refused to run in a pre-existing, unowned namespace").
+					Wrap(err).Now()
+			}
+			g.Expect(err).NotTo(HaveOccurred())
+		}, 2*time.Minute, 10*time.Second).Should(Succeed(), "failed to create the app namespace")
 
 		By("waiting for the validating webhook to actually serve (Available ≠ webhook ready, #233)")
 		// In kind mode the bundle was applied moments ago and the webhook server
@@ -360,9 +374,17 @@ var _ = Describe("kn-next CLI against a live cluster", Ordered, func() {
 		// a --wait=false here hung the first local run's AfterAll for 25m.)
 		// Existing-cluster mode needs the full wait anyway: leave NOTHING behind.
 		// Eventually-wrapped with a confirmed-NotFound read so a WAN blip can
-		// never fake a completed cleanup on a shared cluster.
+		// never fake a completed cleanup on a shared cluster. The delete is
+		// OWNERSHIP-GUARDED (plan P5): a guard refusal is deterministic, so it
+		// fails FAST and LOUD via StopTrying instead of burning the retry
+		// budget — see utils.NamespaceTeardownAuthorized.
 		Eventually(func(g Gomega) {
-			g.Expect(utils.NamespaceDeletedConfirmed(cliAppNamespace)).To(Succeed())
+			err := utils.NamespaceDeletedConfirmed(cliAppNamespace)
+			if errors.Is(err, utils.ErrTeardownRefused) {
+				StopTrying("teardown ownership guard refused the namespace deletion").
+					Wrap(err).Now()
+			}
+			g.Expect(err).NotTo(HaveOccurred())
 		}, 10*time.Minute, 5*time.Second).Should(Succeed(),
 			"failed to fully delete the dedicated namespace %s", cliAppNamespace)
 

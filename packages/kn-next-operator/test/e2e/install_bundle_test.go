@@ -145,8 +145,16 @@ var _ = Describe("Install bundle (dist/install.yaml)", Ordered, func() {
 	})
 
 	AfterAll(func() {
-		By("deleting the sample app namespace")
-		_, _ = utils.Kubectl("delete", "ns", bundleAppNamespace, "--ignore-not-found")
+		By("deleting the sample app namespace (ownership-guarded, confirmed)")
+		// OWNERSHIP-GUARDED delete (plan P5): utils.NamespaceDeletedConfirmed
+		// only deletes a namespace this run's create stamped with the
+		// kn-next.dev/e2e-owned=true label (never a pre-existing one), and it
+		// must complete BEFORE the bundle delete below — tearing down the
+		// operator/CRD while a NextApp is still finalizing in a terminating
+		// namespace deadlocks the CRD's instance-cleanup finalizer. The error
+		// is asserted AFTER the bundle cleanup so a refusal is loud but never
+		// leaves the rendered bundle behind on the kind cluster.
+		nsErr := utils.NamespaceDeletedConfirmed(bundleAppNamespace)
 
 		By("deleting the rendered bundle from the cluster")
 		_ = applyOrDeleteBundle("delete", renderedBundle)
@@ -154,6 +162,9 @@ var _ = Describe("Install bundle (dist/install.yaml)", Ordered, func() {
 		if renderedBundle != "" {
 			_ = os.Remove(renderedBundle)
 		}
+
+		Expect(nsErr).NotTo(HaveOccurred(),
+			"namespace teardown failed or was refused by the ownership guard")
 	})
 
 	It("applies the bundle, the operator goes Available, and reconciles a NextApp with HONEST Ready", func() {
@@ -170,8 +181,15 @@ var _ = Describe("Install bundle (dist/install.yaml)", Ordered, func() {
 			g.Expect(out).To(Equal("True"), "operator Deployment not Available")
 		}).Should(Succeed())
 
-		By("creating the sample app namespace")
-		_, _ = utils.Kubectl("create", "ns", bundleAppNamespace)
+		By("creating the sample app namespace (ownership label stamped at creation)")
+		// utils.CreateOwnedNamespace stamps kn-next.dev/e2e-owned=true IN the
+		// create call — the AfterAll teardown guard's authorization (plan P5).
+		// "already exists" is tolerated ONLY when the collided namespace
+		// already carries the label (idempotent re-run on the same kind
+		// cluster); an unlabeled pre-existing namespace is never adopted —
+		// the create fails fast with ErrForeignNamespace instead.
+		Expect(utils.CreateOwnedNamespace(bundleAppNamespace)).To(Succeed(),
+			"failed to create the sample app namespace")
 
 		By("waiting for the validating webhook to actually serve (Available ≠ webhook ready, #233)")
 		// Deployment Available does NOT imply the webhook server inside the pod

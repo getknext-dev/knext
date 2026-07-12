@@ -234,7 +234,17 @@ func KubectlCreateIgnoreExists(args ...string) error {
 // finalizing in a terminating namespace deadlocks the CRD's instance-cleanup
 // finalizer (observed live: a --wait=false hung an AfterAll for 25m), so the
 // namespace MUST be fully gone before any bundle delete.
+//
+// OWNERSHIP GUARD (plan P5): the delete is issued ONLY if
+// NamespaceTeardownAuthorized allows it — the namespace must carry the
+// creation-stamped kn-next.dev/e2e-owned=true label (or, in self-contained
+// kind mode only, match the generated e2e-* prefix; or the human
+// KNEXT_E2E_FORCE_TEARDOWN override). A refusal wraps ErrTeardownRefused —
+// callers' Eventually loops should StopTrying on it, not retry.
 func NamespaceDeletedConfirmed(ns string) error {
+	if err := NamespaceTeardownAuthorized(ns); err != nil {
+		return err
+	}
 	_, _ = Kubectl("delete", "ns", ns, "--ignore-not-found", "--timeout=5m")
 	out, err := Kubectl("get", "ns", ns)
 	if err == nil {

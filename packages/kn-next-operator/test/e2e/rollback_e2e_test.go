@@ -71,6 +71,7 @@ package e2e
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -299,9 +300,18 @@ var _ = Describe("kn-next rollback against a live cluster (#92)", Ordered, func(
 			g.Expect(out).To(Equal("True"), "operator Deployment not Available")
 		}).Should(Succeed())
 
-		By(fmt.Sprintf("creating the fresh, dedicated app namespace %q", rbAppNamespace))
+		By(fmt.Sprintf("creating the fresh, dedicated app namespace %q (ownership label stamped at creation)", rbAppNamespace))
+		// The create stamps kn-next.dev/e2e-owned=true — the teardown guard's
+		// authorization; a pre-existing namespace is never adopted: an
+		// unlabeled "already exists" collision fails fast right here
+		// (ErrForeignNamespace), before anything is deployed into it (plan P5).
 		Eventually(func(g Gomega) {
-			g.Expect(utils.KubectlCreateIgnoreExists("create", "ns", rbAppNamespace)).To(Succeed())
+			err := utils.CreateOwnedNamespace(rbAppNamespace)
+			if errors.Is(err, utils.ErrForeignNamespace) {
+				StopTrying("ownership guard refused to run in a pre-existing, unowned namespace").
+					Wrap(err).Now()
+			}
+			g.Expect(err).NotTo(HaveOccurred())
 		}, 2*time.Minute, 10*time.Second).Should(Succeed())
 
 		By("waiting for the validating webhook to actually serve (Available ≠ webhook ready, #233)")
@@ -328,9 +338,16 @@ var _ = Describe("kn-next rollback against a live cluster (#92)", Ordered, func(
 		// Namespace deletion is confirmed (NotFound) BEFORE the bundle delete —
 		// tearing the operator/CRD down while a NextApp is still finalizing in a
 		// terminating namespace deadlocks the CRD's instance-cleanup finalizer.
-		// See utils.NamespaceDeletedConfirmed.
+		// See utils.NamespaceDeletedConfirmed — the delete is OWNERSHIP-GUARDED
+		// (plan P5); a deterministic guard refusal fails FAST and LOUD via
+		// StopTrying instead of burning the retry budget.
 		Eventually(func(g Gomega) {
-			g.Expect(utils.NamespaceDeletedConfirmed(rbAppNamespace)).To(Succeed())
+			err := utils.NamespaceDeletedConfirmed(rbAppNamespace)
+			if errors.Is(err, utils.ErrTeardownRefused) {
+				StopTrying("teardown ownership guard refused the namespace deletion").
+					Wrap(err).Now()
+			}
+			g.Expect(err).NotTo(HaveOccurred())
 		}, 10*time.Minute, 5*time.Second).Should(Succeed(),
 			"failed to fully delete the dedicated namespace %s", rbAppNamespace)
 
