@@ -11,7 +11,9 @@
 #   2. On merge to main, changesets/action opens a "Version Packages" PR (version bump + changelog).
 #   3. Merging that PR (a second push to main) runs `changeset publish` IF NPM_TOKEN exists.
 #
-# Publishable packages: @knext/core (packages/kn-next), @knext/lib (packages/lib).
+# Publishable packages: @knext/core (packages/kn-next), @knext/lib (packages/lib),
+# @knext/db (packages/db) — core depends on lib AND db, db depends on lib; all
+# three must ship together or consumers 404 on the missing member (#255/#256).
 # Provenance is enabled via each package's publishConfig.provenance + id-token permission.
 
 name: Release

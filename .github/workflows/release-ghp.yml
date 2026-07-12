@@ -4,12 +4,16 @@
 # (.github/workflows/release.yml + changesets), blocked on a human NPM_TOKEN.
 # Until npmjs goes live, the maintainer directive is "use GitHub Packages for
 # now". GitHub Packages requires the package SCOPE to match the owning org, so
-# this channel republishes the two publishable packages as:
+# this channel republishes the three publishable packages as:
 #     @knext/lib  -> @getknext-dev/lib
+#     @knext/db   -> @getknext-dev/db
 #     @knext/core -> @getknext-dev/core
+# (#255/#256: @knext/core depends on @knext/db — a lib+core-only publish set
+# shipped an @getknext-dev/core that 404'd on install.)
 # scripts/rename-for-ghp.mjs stages renamed COPIES (never mutating the tree),
-# rewrites the hardcoded `@knext/lib` imports baked into core's externalized
-# dist, resolves `workspace:` deps, and strips `publishConfig.provenance`
+# rewrites the hardcoded `@knext/lib` + `@knext/db` imports baked into the
+# externalized dists (core hardcodes both; db hardcodes @knext/lib), resolves
+# `workspace:` deps, and strips `publishConfig.provenance`
 # (provenance needs npmjs/OIDC — it is NOT available on this path).
 #
 # This is manual-only (workflow_dispatch) and relates to — does NOT close — #53.
@@ -60,16 +64,19 @@ jobs:
       - name: Build publishable packages
         run: pnpm --filter @knext/lib build && pnpm --filter @knext/db build && pnpm --filter @knext/core build
 
-      # Stage renamed copies into .ghp-staging/{lib,core}. Fails LOUDLY if core's
-      # dist no longer contains the externalized @knext/lib imports (layout drift).
+      # Stage renamed copies into .ghp-staging/{lib,db,core}. Fails LOUDLY if any
+      # staged package's dist no longer contains the externalized imports for one
+      # of its @knext/* deps (per-dependency layout-drift guard), or if a staged
+      # package depends on an @knext/* package outside the publish set.
       - name: Stage packages for GitHub Packages
         run: node scripts/rename-for-ghp.mjs
 
-      # Publish lib first (core depends on it), then core. Publishing from the
-      # staging dirs — which carry the renamed @getknext-dev/* manifests — so the
-      # scope matches the owning org GHP requires. A re-run of an already-published
-      # version is a hard error (bump via changesets first), not a silent success.
-      - name: Publish to GitHub Packages (lib then core)
+      # Publish in dependency order: lib first, then db (depends on lib), then
+      # core (depends on both). Publishing from the staging dirs — which carry the
+      # renamed @getknext-dev/* manifests — so the scope matches the owning org
+      # GHP requires. A re-run of an already-published version is a hard error
+      # (bump via changesets first), not a silent success.
+      - name: Publish to GitHub Packages (lib, then db, then core)
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -94,4 +101,5 @@ jobs:
             fi
           }
           publish_dir ".ghp-staging/lib"
+          publish_dir ".ghp-staging/db"
           publish_dir ".ghp-staging/core"

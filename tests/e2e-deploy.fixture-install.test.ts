@@ -99,6 +99,13 @@ describe('scripts/e2e-deploy.sh — fixture-shipped node_modules survive the tar
       { name: '@knext/lib', version: '0.0.0-test', main: 'index.js' },
       { 'index.js': 'module.exports = {};\n' },
     );
+    // #255/#256: the script now requires + installs the @knext/db tarball too.
+    packStub(
+      stageDir,
+      tarballsDir,
+      { name: '@knext/db', version: '0.0.0-test', main: 'index.js' },
+      { 'index.js': 'module.exports = {};\n' },
+    );
     packStub(
       stageDir,
       tarballsDir,

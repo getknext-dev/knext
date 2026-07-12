@@ -93,12 +93,15 @@ function findStep(job: string, namePattern: RegExp): string {
 }
 
 describe('compat-suite installable adapter tarball — pack once with pnpm pack (#147 fix round 1)', () => {
-  it('build-next packs BOTH @knext/lib and @knext/core with `pnpm pack` into a stable knext-tarballs dir', () => {
+  it('build-next packs @knext/lib, @knext/db AND @knext/core with `pnpm pack` into a stable knext-tarballs dir', () => {
+    // #255/#256: @knext/core depends on @knext/db (workspace:^ → ^0.1.0 on pack);
+    // @knext/db is unpublished, so a lib+core-only pack set 404s every install.
     const job = jobBlock('build-next');
     const pack = findStep(job, /[Pp]ack .*(tarball|adapter)/);
     expect(pack).toMatch(/pnpm pack/);
     expect(pack).toMatch(/--pack-destination/);
     expect(pack).toMatch(/packages\/lib/);
+    expect(pack).toMatch(/packages\/db/);
     expect(pack).toMatch(/packages\/kn-next/);
     expect(pack).toMatch(/knext-tarballs/);
   });
@@ -140,6 +143,9 @@ describe('compat-suite fail-fast preflight gate (#147 fix round 1)', () => {
     // The gate must do a REAL dependency-resolving npm install + a resolve smoke.
     expect(text).toMatch(/npm/);
     expect(text).toMatch(/@knext\/core\/adapter/);
+    // #255/#256: the db probe targets the EXACT subpath `kn-next db migrate`
+    // dynamically imports (db-migrate.ts: `await import("@knext/db/migrate")`).
+    expect(text).toMatch(/@knext\/db\/migrate/);
     expect(text).toMatch(/::error::/);
   });
 
@@ -253,12 +259,22 @@ describe('scripts/e2e-deploy.sh installs an npm-installable dual tarball (#147 f
     expect(deployShText()).toMatch(/pnpm pack/);
   });
 
-  it('installs the lib AND core tarballs in ONE npm install (npm satisfies @knext/lib from the local tarball)', () => {
+  it('the local fallback + missing-tarball guard cover the @knext/db tarball (#255/#256)', () => {
+    const text = deployShText();
+    expect(text).toMatch(/find_tarball "\$\{TARBALLS_DIR\}" knext-db/);
+    expect(text).toMatch(/knext-db-\*\.tgz/);
+  });
+
+  it('installs the lib, db AND core tarballs in ONE npm install (npm satisfies @knext/lib + @knext/db from the local tarballs)', () => {
+    // #255/#256: @knext/core's packed manifest carries `@knext/db@^0.1.0`
+    // (unpublished) — without the db tarball in the SAME install, every
+    // fixture install 404s exactly like the lib bug of run 28558576615.
     const line = deployShText()
       .split('\n')
       .find((l) => /^\s*npm install\b/.test(l));
     expect(line, 'an npm install line must exist').toBeDefined();
     expect(line).toMatch(/LIB_TGZ/);
+    expect(line).toMatch(/DB_TGZ/);
     expect(line).toMatch(/CORE_TGZ/);
   });
 

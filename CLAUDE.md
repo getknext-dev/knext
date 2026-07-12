@@ -97,9 +97,10 @@ defer bucket 1.
   The only remaining `nitro/runtime` references are **untracked local cruft** (`packages/admin/…`,
   a stray `apps/file-manager/src/server/plugins/knext.ts`) — not in git, nothing to delete from the repo.
 - Tests light on core build/deploy/upload/cache paths (manifest gen is covered).
-- Operator gaps: status `Conditions` field **defined** (`nextapp_types.go:144`) but **not populated**
-  by the reconciler (only `status.url` is set); no finalizer logic; happy-path reconcile;
-  API at `v1alpha1`.
+- **(RESOLVED 2026-07-12, stale-doc fix)** Operator status `Conditions` ARE populated (16+
+  `SetStatusCondition` sites across the reconcilers, `conditions_test.go`) and finalizer logic
+  EXISTS (`internal/controller/finalizer.go` + envtest coverage) — the earlier "not populated /
+  no finalizer" note was stale. Still true: API at `v1alpha1`.
 - **License inconsistency:** README says MIT; operator source headers say Apache-2.0
   (`nextapp_types.go:4`) — pick one.
 - npm: packages are unified under the **`@knext/*`** scope (`@knext/core`, `@knext/lib`, `@knext/ui`)

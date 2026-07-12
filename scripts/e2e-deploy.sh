@@ -8,8 +8,9 @@
 #
 # Contract (mirrors the reference adapter-bun e2e-deploy.sh, adapted to knext's
 # output:'standalone' runtime):
-#   1. (unless KNEXT_E2E_SKIP_PACK=1) install the @knext/lib + @knext/core tarballs
-#      into the temp app, so NEXT_ADAPTER_PATH resolves the package-shipped adapter.
+#   1. (unless KNEXT_E2E_SKIP_PACK=1) install the @knext/lib + @knext/db +
+#      @knext/core tarballs into the temp app, so NEXT_ADAPTER_PATH resolves the
+#      package-shipped adapter.
 #   2. NEXT_ADAPTER_PATH = the knext adapter; run `next build` (output:'standalone').
 #   3. Stage .next/static + public/ into the standalone tree (standalone does NOT copy
 #      them — same as the Dockerfile / compat-smoke.mjs).
@@ -45,12 +46,14 @@ free_port() {
 # ZERO times. Per-test packing ALSO raced: run-tests.js (concurrency 2, retries)
 # packed into the same tarball path simultaneously.
 #
-# Now: BOTH @knext/lib and @knext/core are packed with `pnpm pack` ONCE — in CI
-# by the workflow (handed down via KNEXT_E2E_TARBALLS_DIR, preflight-gated by
-# scripts/e2e-preflight.mjs), locally by a lock-guarded pack-once fallback — and
-# BOTH tarballs are installed in ONE `npm install`, so npm satisfies the
-# rewritten `@knext/lib@^x` dep from the local lib tarball (@knext/lib is not on
-# npm yet — #53 is human-blocked).
+# Now: @knext/lib, @knext/db AND @knext/core are packed with `pnpm pack` ONCE —
+# in CI by the workflow (handed down via KNEXT_E2E_TARBALLS_DIR, preflight-gated
+# by scripts/e2e-preflight.mjs), locally by a lock-guarded pack-once fallback —
+# and ALL tarballs are installed in ONE `npm install`, so npm satisfies the
+# rewritten `@knext/lib@^x` + `@knext/db@^x` deps from the local tarballs (the
+# @knext scope is not on npm yet — #53 is human-blocked). #255/#256: core gained
+# a workspace dep on @knext/db (`kn-next db migrate`); a lib+core-only set 404s
+# on the unpublished @knext/db in EVERY fixture install.
 find_tarball() { # <dir> <name-prefix> → newest matching tarball path (or empty)
   # `|| true`: under `set -euo pipefail` a failing pipeline (ls: no match) would
   # otherwise kill the script AT the caller's `VAR="$(find_tarball ...)"`
@@ -75,8 +78,9 @@ if [ "${KNEXT_E2E_SKIP_PACK:-0}" != "1" ]; then
       exit 1
     fi
     LIB_PKG_DIR="${KNEXT_LIB_DIR:-${ADAPTER_PKG_DIR}/../lib}"
+    DB_PKG_DIR="${KNEXT_DB_DIR:-${ADAPTER_PKG_DIR}/../db}"
     TARBALLS_DIR="${ADAPTER_PKG_DIR}/.e2e-tarballs"
-    if [ -z "$(find_tarball "${TARBALLS_DIR}" knext-lib)" ] || [ -z "$(find_tarball "${TARBALLS_DIR}" knext-core)" ]; then
+    if [ -z "$(find_tarball "${TARBALLS_DIR}" knext-lib)" ] || [ -z "$(find_tarball "${TARBALLS_DIR}" knext-db)" ] || [ -z "$(find_tarball "${TARBALLS_DIR}" knext-core)" ]; then
       LOCK_DIR="${TARBALLS_DIR}.lock"
       acquired=0
       for _ in $(seq 1 600); do
@@ -92,10 +96,11 @@ if [ "${KNEXT_E2E_SKIP_PACK:-0}" != "1" ]; then
       fi
       trap 'rmdir "${LOCK_DIR}" 2>/dev/null || true' EXIT
       # Re-check under the lock — another deploy may have packed while we waited.
-      if [ -z "$(find_tarball "${TARBALLS_DIR}" knext-lib)" ] || [ -z "$(find_tarball "${TARBALLS_DIR}" knext-core)" ]; then
-        log "packing @knext/lib + @knext/core with pnpm pack (rewrites workspace:^ so npm can install)"
+      if [ -z "$(find_tarball "${TARBALLS_DIR}" knext-lib)" ] || [ -z "$(find_tarball "${TARBALLS_DIR}" knext-db)" ] || [ -z "$(find_tarball "${TARBALLS_DIR}" knext-core)" ]; then
+        log "packing @knext/lib + @knext/db + @knext/core with pnpm pack (rewrites workspace:^ so npm can install)"
         STAGE_DIR="$(mktemp -d "${ADAPTER_PKG_DIR}/.e2e-pack.XXXXXX")"
         (cd "${LIB_PKG_DIR}" && pnpm pack --pack-destination "${STAGE_DIR}") >&2
+        (cd "${DB_PKG_DIR}" && pnpm pack --pack-destination "${STAGE_DIR}") >&2
         (cd "${ADAPTER_PKG_DIR}" && pnpm pack --pack-destination "${STAGE_DIR}") >&2
         mkdir -p "${TARBALLS_DIR}"
         # Same filesystem as STAGE_DIR → mv is an atomic rename per tarball.
@@ -107,9 +112,10 @@ if [ "${KNEXT_E2E_SKIP_PACK:-0}" != "1" ]; then
     fi
   fi
   LIB_TGZ="$(find_tarball "${TARBALLS_DIR}" knext-lib)"
+  DB_TGZ="$(find_tarball "${TARBALLS_DIR}" knext-db)"
   CORE_TGZ="$(find_tarball "${TARBALLS_DIR}" knext-core)"
-  if [ -z "${LIB_TGZ}" ] || [ -z "${CORE_TGZ}" ]; then
-    log "ERROR: adapter tarballs missing in ${TARBALLS_DIR} (need knext-lib-*.tgz + knext-core-*.tgz; pack with pnpm pack)"
+  if [ -z "${LIB_TGZ}" ] || [ -z "${DB_TGZ}" ] || [ -z "${CORE_TGZ}" ]; then
+    log "ERROR: adapter tarballs missing in ${TARBALLS_DIR} (need knext-lib-*.tgz + knext-db-*.tgz + knext-core-*.tgz; pack with pnpm pack)"
     exit 1
   fi
 
@@ -174,13 +180,13 @@ ${NM_ENTRIES}
 EOF
   fi
 
-  log "installing adapter tarballs ${LIB_TGZ} + ${CORE_TGZ}${TS_PIN:+ + ${TS_PIN}} into ${APP_DIR}"
-  # ONE install with BOTH tarballs (+ the TS pin when needed): npm resolves
-  # @knext/core's @knext/lib dep from the local lib tarball instead of the
-  # (not-yet-published) registry, and a single reify keeps the snapshot/restore
-  # window minimal.
+  log "installing adapter tarballs ${LIB_TGZ} + ${DB_TGZ} + ${CORE_TGZ}${TS_PIN:+ + ${TS_PIN}} into ${APP_DIR}"
+  # ONE install with ALL tarballs (+ the TS pin when needed): npm resolves
+  # @knext/core's @knext/lib + @knext/db deps from the local tarballs instead of
+  # the (not-yet-published) registry, and a single reify keeps the
+  # snapshot/restore window minimal.
   # shellcheck disable=SC2086
-  npm install --no-save --no-audit --no-fund "${LIB_TGZ}" "${CORE_TGZ}" ${TS_PIN} >&2
+  npm install --no-save --no-audit --no-fund "${LIB_TGZ}" "${DB_TGZ}" "${CORE_TGZ}" ${TS_PIN} >&2
 
   # Restore fixture-shipped packages the reify pruned (B3).
   if [ -n "${NM_SNAP}" ]; then

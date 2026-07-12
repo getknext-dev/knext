@@ -11,7 +11,8 @@ import { describe, expect, it } from 'vitest';
  *   - Scoped to the canonical repo (never forks).
  *   - `packages: write` but NO `id-token` — the GHP path publishes WITHOUT
  *     provenance (provenance needs npmjs/OIDC).
- *   - Builds + publishes lib BEFORE core (core depends on lib).
+ *   - Builds + publishes lib BEFORE db BEFORE core (core depends on both;
+ *     db depends on lib) — #255/#256 added @knext/db to the publish set.
  *   - Runs the rename script so publishes carry the @getknext-dev scope.
  *   - Does NOT touch the clean npmjs release.yml.
  *
@@ -62,12 +63,16 @@ describe('.github/workflows/release-ghp.yml', () => {
     expect(publishIdx).toBeGreaterThan(renameIdx);
   });
 
-  it('publishes lib staging dir before core staging dir', () => {
+  it('publishes lib, then db, then core staging dirs (dependency order)', () => {
+    // #255/#256: @knext/core depends on @knext/db (which depends on @knext/lib)
+    // — publishing without db shipped an uninstallable @getknext-dev/core.
     const text = workflowText();
     const libIdx = text.indexOf('.ghp-staging/lib');
+    const dbIdx = text.indexOf('.ghp-staging/db');
     const coreIdx = text.indexOf('.ghp-staging/core');
     expect(libIdx).toBeGreaterThan(-1);
-    expect(coreIdx).toBeGreaterThan(libIdx);
+    expect(dbIdx).toBeGreaterThan(libIdx);
+    expect(coreIdx).toBeGreaterThan(dbIdx);
   });
 
   it('publishes to the GitHub Packages registry with GITHUB_TOKEN auth', () => {
