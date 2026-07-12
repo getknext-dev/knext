@@ -25,8 +25,8 @@
  * Exit-code contract:
  *   - 1 on hard FAILs (a cluster-state fact is wrong) AND on probe ERRORs
  *     (#230: the apiserver answered the reachability gate but an individual
- *     probe then failed for network/TLS/credential reasons — the preflight
- *     could not verify the cluster, so it must not report green).
+ *     probe then failed for network/TLS/credential/RBAC reasons — the
+ *     preflight could not verify the cluster, so it must not report green).
  *   - WARN/SKIP never fail the preflight; a fully-unreachable cluster keeps
  *     the documented degrade path (gate WARNs, every check SKIPs, exit 0).
  *
@@ -194,9 +194,14 @@ function infraFailure(r: KubectlResult): InfraFailure | undefined {
     if (cls === "forbidden") {
         // The apiserver names the denied resource in its Status message
         // (`<resource> is forbidden: …`); fall back to a generic phrase when
-        // the stderr carries only the bare (Forbidden) marker.
+        // the stderr carries only the bare (Forbidden) marker. The token comes
+        // from raw stderr, so sanitize it before embedding: strip
+        // non-printables (ANSI escapes etc.) and cap the length — a garbled
+        // stderr must never produce an escape-laden or unbounded hint line.
+        const rawToken = /(\S+) is forbidden:/.exec(r.stderr)?.[1] ?? "";
         const resource =
-            /(\S+) is forbidden:/.exec(r.stderr)?.[1] ?? "the probed resource";
+            rawToken.replace(/[^\x21-\x7e]/g, "").slice(0, 80) ||
+            "the probed resource";
         return {
             detail: `probe failed (rbac): ${excerpt}`,
             hint: `insufficient RBAC — ask a cluster admin for get/list on ${resource}`,
@@ -761,8 +766,8 @@ const DOCTOR_HELP = `kn-next doctor — cluster-prereq preflight (read-only)
 Checks: NextApp CRD, operator readiness, cert-manager webhook, Knative
 ingress-class vs its reconciler (#208), operator-image pullability (#198),
 Knative Serving. Exit 1 on hard FAILs and on probe ERRORs (a check's kubectl
-probe hit a network/TLS/credential failure — the cluster state could not be
-verified); WARN/SKIP never fail, and a fully unreachable cluster SKIPs (exit 0).
+probe hit a network/TLS/credential/RBAC failure — the cluster state could not
+be verified); WARN/SKIP never fail; a fully unreachable cluster SKIPs (exit 0).
 
 Options:
   --json      Emit the check results as JSON

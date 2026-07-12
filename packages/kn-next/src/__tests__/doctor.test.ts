@@ -639,6 +639,29 @@ describe("runDoctor — RBAC-denied probes are not 'not found' (P3)", () => {
         expect(crd.status).toBe("fail");
         expect(crd.detail).toMatch(/not found/i);
     });
+
+    it("caps and sanitizes the resource token embedded in the RBAC hint (garbled stderr)", async () => {
+        // A garbled/hostile stderr token: an ANSI ESC + 200 chars. The hint
+        // must never carry control characters or an unbounded token.
+        const junkToken = `\u001b${"a".repeat(200)}`;
+        const { crd } = await crdCheckWith(
+            `Error from server (Forbidden): ${junkToken} is forbidden: User "x" cannot list it`,
+        );
+        expect(crd.status).toBe("error");
+        expect(crd.hint).not.toContain("\u001b");
+        const resource = crd.hint.split("get/list on ")[1];
+        expect(resource).toBe("a".repeat(80));
+    });
+
+    it("falls back to the generic phrase when the resource token sanitizes to nothing", async () => {
+        // The token is nothing but control characters (BEL+BS) — sanitization
+        // empties it, and the hint must not end in a dangling empty resource.
+        const { crd } = await crdCheckWith(
+            `Error from server (Forbidden): \u0007\u0008 is forbidden: User "x" cannot list it`,
+        );
+        expect(crd.status).toBe("error");
+        expect(crd.hint).toMatch(/the probed resource/);
+    });
 });
 
 // P3: the 160-char stderr excerpt cap + whitespace collapse in infraFailure
