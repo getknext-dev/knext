@@ -320,6 +320,47 @@ small `max`, idle timeout **< the gateway's 60s idle** (no dead sockets), connec
 timeout **≥ 10s** (tolerates the ~2.5s cold wake). Tune the writer with
 `DB_POOL_*` and the reader with `DB_POOL_RO_*`.
 
+## Development — the live-Postgres integration lane
+
+The SDK's product claims (migrations apply + are idempotent, writer
+read-your-writes, RO fallback/routing, the `kn-next db migrate` runner) are
+verified against a real Postgres by
+`packages/db/src/__tests__/integration/live-postgres.test.ts`. The suite is
+**env-gated** — the default `pnpm test` run stays hermetic and skips it — and
+runs in CI against a `postgres:16` service container (`db-live-integration`).
+
+Run it locally against a throwaway Docker Postgres:
+
+```bash
+# start a throwaway postgres:16 (auto-removed on stop)
+docker run --rm -d --name knext-db-live \
+  -e POSTGRES_USER=knext -e POSTGRES_PASSWORD=knext -e POSTGRES_DB=knext \
+  -p 55432:5432 postgres:16
+
+# run the live lane (both env vars are required; otherwise it skips cleanly)
+KNEXT_DB_LIVE=1 DATABASE_URL=postgres://knext:knext@127.0.0.1:55432/knext \
+  pnpm exec vitest run packages/db/src/__tests__/integration/live-postgres.test.ts
+
+# teardown
+docker rm -f knext-db-live
+```
+
+Safety: before opening any connection the suite **refuses** a `DATABASE_URL`
+whose host is not loopback (`localhost` / `127.0.0.0/8` / `::1`) or the CI
+service hostname `postgres` — it creates, writes to, and drops databases, so a
+typo'd real DSN must never receive test traffic. To deliberately target another
+throwaway host, set `KNEXT_DB_LIVE_UNSAFE_HOST=1`.
+
+Notes:
+
+- The RO specs point `DATABASE_URL_RO` at the **same** container via a second
+  DSN — they prove pool **routing**, not scale-zero-pg's bounded-staleness
+  semantics (vanilla PG cannot reproduce those).
+- The TimescaleDB `hypertable()` spec is skip-gated (plain `postgres:16` lacks
+  the extension): run a `timescale/timescaledb:latest-pg16` container instead
+  and set `KNEXT_DB_LIVE_TIMESCALE=1`. The pgvector spec stays skipped pending
+  the scale-zero-pg image gate (ADR-0021, open decision 4).
+
 ## Documentation
 
 Full guides and configuration reference: <https://knext.dev>

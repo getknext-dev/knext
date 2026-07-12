@@ -382,3 +382,60 @@ jobs:
       - name: Stop container
         if: always()
         run: docker rm -f knext-prod || true
+
+  db-live-integration:
+    # Plan P2 (ADR-0021): the @knext/db live-Postgres lane — the first place the
+    # SDK's product claims (migrations apply + idempotent, read-your-writes, RO
+    # routing, the one-shot CLI runner) touch a REAL database.
+    #
+    # SAFETY BY CONSTRUCTION: DATABASE_URL below is a HARDCODED, inline,
+    # throwaway credential for the ephemeral service container — deliberately
+    # NOT a secret. This job must reference NO `secrets.*` for the DSN
+    # (tests/db-live-workflow.test.ts enforces it), so no real database DSN can
+    # ever enter this lane; the suite's own host guard (live-dsn-guard.ts)
+    # additionally refuses any non-loopback host before connecting.
+    name: '@knext/db live Postgres integration'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: knext
+          POSTGRES_PASSWORD: knext-ci-throwaway
+          POSTGRES_DB: knext
+        ports:
+          - 5432:5432
+        # Job start is gated on pg_isready-style container health — the suite
+        # never races a booting Postgres (the plan's readiness-flake risk).
+        options: >-
+          --health-cmd "pg_isready -U knext -d knext"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      KNEXT_DB_LIVE: '1'
+      # Inline throwaway DSN on loopback (the runner maps the service port).
+      DATABASE_URL: postgres://knext:knext-ci-throwaway@127.0.0.1:5432/knext
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # The live suite + its hermetic guards (DSN host guard, workflow contract).
+      - name: Run the live @knext/db suite
+        run: >-
+          pnpm exec vitest run
+          packages/db/src/__tests__/integration/live-postgres.test.ts
+          packages/db/src/__tests__/live-dsn-guard.test.ts
+          tests/db-live-workflow.test.ts
