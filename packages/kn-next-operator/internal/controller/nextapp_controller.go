@@ -115,7 +115,53 @@ const (
 	// reconciles the cluster's configured ingress-class, so the app will never
 	// become reachable without operator action (#208).
 	ReasonIngressNotProgrammed = "IngressNotProgrammed"
+	// ReasonPinnedRevisionNotFound marks a NextApp whose spec.traffic.revisionName
+	// pins a Knative Revision that no longer exists (e.g. GC'd), so the declared
+	// rollback/canary can never resolve — Knative keeps serving the last-good
+	// route with only an opaque RevisionMissing condition (ADR-0014 follow-up).
+	ReasonPinnedRevisionNotFound = "PinnedRevisionNotFound"
 )
+
+// pinnedRevisionStallWindow is how long the child ksvc's RoutesReady/Ready
+// condition may sit non-True (per Knative's own lastTransitionTime) before a
+// NotFound pinned revision is judged a real ghost pin rather than a normal
+// deploy window still creating the revision. Stateless by design: the window
+// derives from Knative condition timestamps, never from in-memory grace passes
+// or annotations, so it survives operator restarts and leader failover.
+const pinnedRevisionStallWindow = 2 * time.Minute
+
+// pinnedRevisionMissingStalled reports whether a pinned-but-NotFound revision
+// should be surfaced as PinnedRevisionNotFound. revisionNotFound is the result
+// of the operator's own authoritative Revision GET (true only on a real
+// apierrors.IsNotFound — transient errors must not reach here as true). The
+// race guard: fire only when, additionally, the ksvc's RoutesReady (or, as a
+// fallback, rolled-up Ready) condition has been non-True for at least
+// pinnedRevisionStallWindow. A fresh transition (deploy in progress) or a
+// still-True route (Knative hasn't reacted to the pin yet) is NOT a stall.
+// Unlike ingressProgrammingStalled this is deliberately reason-agnostic: the
+// NotFound GET is the primary signal; the condition age is only the
+// progress/race guard.
+func pinnedRevisionMissingStalled(revisionNotFound bool, ksvc *servingv1.Service, now time.Time) (time.Duration, bool) {
+	if !revisionNotFound {
+		return 0, false
+	}
+	for _, condType := range []apis.ConditionType{
+		servingv1.ServiceConditionRoutesReady,
+		servingv1.ServiceConditionReady,
+	} {
+		cond := ksvc.Status.GetCondition(condType)
+		if cond == nil || cond.IsTrue() {
+			continue
+		}
+		if cond.LastTransitionTime.Inner.IsZero() {
+			continue
+		}
+		if elapsed := now.Sub(cond.LastTransitionTime.Inner.Time); elapsed >= pinnedRevisionStallWindow {
+			return elapsed, true
+		}
+	}
+	return 0, false
+}
 
 // NextAppReconciler reconciles a NextApp object
 type NextAppReconciler struct {
@@ -172,6 +218,9 @@ func (r *NextAppReconciler) emitEvent(obj runtime.Object, eventType, reason, mes
 // +kubebuilder:rbac:groups=apps.kn-next.dev,resources=nextapps/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=apps.kn-next.dev,resources=nextapps/finalizers,verbs=update
 // +kubebuilder:rbac:groups=serving.knative.dev,resources=services,verbs=get;list;watch;create;update;patch;delete
+// Revisions: READ-ONLY — the reconciler GETs the spec.traffic.revisionName pin to
+// surface a GC'd revision as PinnedRevisionNotFound (ADR-0014). Never written.
+// +kubebuilder:rbac:groups=serving.knative.dev,resources=revisions,verbs=get;list;watch
 // +kubebuilder:rbac:groups=core,resources=persistentvolumeclaims,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=serviceaccounts,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=caching.internal.knative.dev,resources=images,verbs=get;list;watch;create;update;patch;delete
@@ -898,6 +947,34 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 	}
 	nextApp.Status.CurrentTraffic = mapTrafficStatus(ksvc.Status.Traffic)
 
+	// Pinned-revision existence check (ADR-0014 follow-up). When spec.traffic
+	// pins a revision, GET it so a GC'd pin surfaces as a first-class
+	// PinnedRevisionNotFound instead of only Knative's opaque RevisionMissing.
+	// The declared traffic intent was ALREADY rendered into the ksvc above —
+	// this check only informs status; it never changes what we write (Knative
+	// keeps failing safe on the route, serving the last-good split).
+	//
+	// Three-valued outcome: exists / NotFound / unknown. Only a real NotFound
+	// may degrade (after the stall-window race guard below); a transient GET
+	// error is NOT evidence the revision is gone, so we keep the prior verdict
+	// rather than flip-flopping the condition on API hiccups.
+	pinnedRevisionNotFound := false
+	pinnedRevisionCheckUnknown := false
+	if nextApp.Spec.Traffic != nil && nextApp.Spec.Traffic.RevisionName != "" {
+		rev := &servingv1.Revision{}
+		revKey := client.ObjectKey{Namespace: nextApp.Namespace, Name: nextApp.Spec.Traffic.RevisionName}
+		switch getErr := r.Get(ctx, revKey, rev); {
+		case getErr == nil:
+			// Pinned revision exists — nothing to surface.
+		case errors.IsNotFound(getErr):
+			pinnedRevisionNotFound = true
+		default:
+			pinnedRevisionCheckUnknown = true
+			logger.Info("pinned revision existence check inconclusive; keeping prior verdict",
+				"revision", nextApp.Spec.Traffic.RevisionName, "error", getErr.Error())
+		}
+	}
+
 	// 6a. Honest Ready: gate NextApp Ready on the CHILD Knative Service's OWN
 	// readiness — not on the fact that we successfully wrote the ksvc. Writing the
 	// ksvc spec says nothing about whether its pods actually came up: a NextApp
@@ -965,7 +1042,44 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 		// self-watch echo per requeue. The live elapsed goes in the EVENT only,
 		// and the event fires only on TRANSITION into the stall (the previous
 		// Ready reason wasn't already IngressNotProgrammed), not on every pass.
-		if elapsed, stalled := ingressProgrammingStalled(ksvc, time.Now()); stalled {
+		// Pinned-revision verdict (ADR-0014) — takes precedence over the generic
+		// ingress-stall check because it is the more specific, more actionable
+		// diagnosis. Same churn discipline as the ingress stall: STATIC message
+		// (derived only from spec fields, so the #98 no-op guard holds), Warning
+		// event on TRANSITION only, elapsed time in the event, never the condition.
+		pinnedHandled := false
+		if pinnedRevisionCheckUnknown {
+			// Inconclusive check: keep a prior PinnedRevisionNotFound verdict
+			// verbatim (same static reason+message => status write is a no-op)
+			// instead of flip-flopping to the generic reason on an API hiccup.
+			// Without a prior verdict there is nothing to keep — fall through.
+			prevReady := apimeta.FindStatusCondition(nextApp.Status.Conditions, ConditionReady)
+			if prevReady != nil && prevReady.Reason == ReasonPinnedRevisionNotFound {
+				readyReason = ReasonPinnedRevisionNotFound
+				readyMessage = prevReady.Message
+				ksvcReason = ReasonPinnedRevisionNotFound
+				ksvcMessage = prevReady.Message
+				pinnedHandled = true
+			}
+		} else if elapsed, stalled := pinnedRevisionMissingStalled(pinnedRevisionNotFound, ksvc, time.Now()); stalled {
+			readyReason = ReasonPinnedRevisionNotFound
+			ksvcReason = ReasonPinnedRevisionNotFound
+			readyMessage = fmt.Sprintf(
+				"pinned revision %q does not exist in namespace %q — it may have been "+
+					"garbage-collected, so the declared traffic pin can never resolve and Knative keeps "+
+					"serving the last-good route. Run `kubectl get revisions -n %s` to list surviving "+
+					"revisions, then re-pin via `kn-next rollback %s --to <existing-revision>` or clear "+
+					"spec.traffic to return to latest-ready.",
+				nextApp.Spec.Traffic.RevisionName, nextApp.Namespace, nextApp.Namespace, nextApp.Name)
+			ksvcMessage = readyMessage
+			prevReady := apimeta.FindStatusCondition(nextApp.Status.Conditions, ConditionReady)
+			if prevReady == nil || prevReady.Reason != ReasonPinnedRevisionNotFound {
+				r.emitEvent(&nextApp, corev1.EventTypeWarning, ReasonPinnedRevisionNotFound,
+					fmt.Sprintf("%s (pin unresolved for %s)", readyMessage, elapsed.Round(time.Second)))
+			}
+			pinnedHandled = true
+		}
+		if elapsed, stalled := ingressProgrammingStalled(ksvc, time.Now()); !pinnedHandled && stalled {
 			readyReason = ReasonIngressNotProgrammed
 			ksvcReason = ReasonIngressNotProgrammed
 			readyMessage = fmt.Sprintf(
@@ -998,6 +1112,15 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 			Message:            ksvcMessage,
 		})
 		// Bounded requeue so status converges toward the ksvc's real health.
+		result.RequeueAfter = ksvcNotReadyRequeueAfter
+	}
+
+	// A ghost pin can momentarily coexist with a still-True ksvc Ready (Knative
+	// hasn't processed the new spec.traffic yet). We deliberately don't degrade
+	// in that window — pinnedRevisionMissingStalled waits for a non-True route
+	// condition — but we must keep re-evaluating even if the Owns(ksvc) watch is
+	// quiet, so the stall window is eventually judged.
+	if pinnedRevisionNotFound && result.RequeueAfter == 0 {
 		result.RequeueAfter = ksvcNotReadyRequeueAfter
 	}
 

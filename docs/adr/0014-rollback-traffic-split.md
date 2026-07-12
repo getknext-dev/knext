@@ -47,11 +47,35 @@ blue/green controller, no out-of-band mutation.
   revision must keep serving its own assets, so the build-id-aware GC treats any revision in
   `status.currentTraffic` as live and never reaps its assets.
 - A pinned `revisionName` that Knative has garbage-collected yields an unresolvable target
-  (`RoutesReady=False`); the operator does not yet surface this as a `Degraded` condition — a known
-  follow-up (the reconciler could detect the unresolvable-revision case and mark `Degraded`).
+  (`RoutesReady=False`, Knative keeps serving the last-good route). The operator now surfaces this
+  as a first-class `Ready=False` / `Degraded=True` with reason **`PinnedRevisionNotFound`** and an
+  actionable message (list revisions, re-pin via `kn-next rollback --to <existing>`, or clear the
+  pin), plus a transition-only Warning event. The check GETs the pinned Revision each reconcile;
+  a **stateless race guard** (NotFound **and** the ksvc's `RoutesReady`/`Ready` non-True for longer
+  than a bounded window derived from Knative's own `lastTransitionTime`) prevents false positives
+  during a normal deploy window, and a transient (non-NotFound) GET error keeps the prior verdict
+  instead of flip-flopping. Reason strings only — no CRD schema change (ADR-0017), and the message
+  is static so the no-op status guard (#98) holds. The declared traffic intent is still rendered
+  into the ksvc unchanged (no second-writer semantics change; Knative continues to fail safe on
+  the route).
+
+## Verification evidence
+
+- **Rollback demoed end-to-end** (PR #232): the kind-based `e2e_rollback` suite (GitHub Actions run
+  29131055845) deploys, rolls back via `kn-next rollback --to`, and asserts the pinned split is
+  observed in `status.currentTraffic` — the CLI patches only the `NextApp` CR, per this ADR.
+- **CLI strict-parse contract** (from #232's fix round): `kn-next status` treats unparseable
+  `kubectl ... -o json` output as a hard, actionable error (`status.ts:362–370`) rather than
+  silently rendering nothing — rollback verification cannot false-green on malformed status JSON.
+  The same round fixed the CLI rollback dispatch so the verb reaches the CR-patch path.
+- `PinnedRevisionNotFound` is covered by envtest (`pinned_revision_envtest_test.go`: ghost pin
+  degrades with one Warning; re-pin clears; converged object performs no status writes;
+  deploy-race and transient-GET-error cases do not degrade) plus unit tests for the pure
+  stall-window helper.
 
 ## Action items
 
 - [x] `TrafficSpec` + `status.currentTraffic` on the CRD; `buildTrafficTargets` in the reconciler.
 - [x] `kn-next rollback` CLI (CR-only patch, shell:false argv).
-- [ ] Surface an unresolvable pinned revision as `Degraded` in status (follow-up).
+- [x] Surface an unresolvable pinned revision as `Degraded` in status (`PinnedRevisionNotFound`,
+      stateless stall-window guard — `nextapp_controller.go`).

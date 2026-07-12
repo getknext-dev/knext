@@ -88,7 +88,9 @@ defer bucket 1.
 - ISR/data cache is **Redis** (`cache-handler.js`), **not GCS** — `docs/ARCHITECTURE.md` is stale.
 - Real data plane = **GCS + Redis on GKE**; S3/Azure/MinIO are thin shell-outs; DynamoDB/Kafka are
   config/manifest-only — implement+test or trim the schema/docs.
-- **Image optimization missing** (biggest functional gap).
+- **(RESOLVED)** Image optimization is **implemented** per ADR-0006
+  (`packages/kn-next/src/adapters/image-cache-sync.ts` + tests) — the earlier "missing / biggest
+  functional gap" note is stale; don't re-propose it as a work item.
 - **(RESOLVED 2026-06-20)** `packages/kn-next/src/adapters/node-server.ts` is **Nitro-free** — it
   spawns the standalone `server.js` (`STANDALONE_SERVER_PATH`, default `.next/standalone/server.js`),
   no `.output/server`/`index.mjs`. Enforced by `adapter-migration.test.ts` (asserts no `.output/server`).
