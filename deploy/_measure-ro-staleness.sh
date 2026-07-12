@@ -44,6 +44,11 @@ NS="${NS:-scale-zero-pg}"
 APP="${APP:-rostale}"
 WARMUP="${WARMUP:-3}"
 CYCLES="${CYCLES:-6}"
+# RO_MINREPLICAS (default 0): the roPool floor. Set to 1 for a CLEAN warm-plane lag_s run
+# (#188) — with the floor at 1 the operator holds compute-ro-<app> at >=1 for the WHOLE
+# run, so NO measured cycle can pay an RO cold-wake and wall-clock lag_s equals real
+# replication (lag_s ~= polls*0.1). At the default 0, compute-ro scales 0<->N as normal.
+RO_MINREPLICAS="${RO_MINREPLICAS:-0}"
 MEAS_IMG="${MEAS_IMG:-postgres:17}"
 PSQL_IMG="${PSQL_IMG:-postgres:17-alpine}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -63,6 +68,29 @@ stats() {
       if (n % 2) med = v[(n-1)/2]; else med = (v[n/2 - 1] + v[n/2]) / 2.0
       printf "min=%.3f median=%.3f max=%.3f mean=%.3f n=%d\n", v[0], med, v[n-1], s/n, n
     }'
+}
+
+# poll_class <median_polls> — classify the POLLS-based contract verdict (#188).
+#
+# WHY POLLS, NOT lag_s (the #187 sysdesign nit): `polls` is the count of 100ms RO
+# polls the warm pod issued before the committed row became visible. It is measured
+# INSIDE the poll loop, so it reflects REPLICATION visibility only. A RO cold-wake, by
+# contrast, blocks a SINGLE seen() query (the gateway holds the connection while it
+# scales compute-ro 0->1) and is absorbed entirely into wall-clock lag_s while `polls`
+# stays 0. Keying the verdict off lag_s therefore false-flags a cold-wake as a "contract
+# concern" that polls=0 refutes; keying it off polls reflects replication, not cold-wake.
+#
+# Thresholds (100ms poll interval): <=POLL_SUBSEC polls => sub-second; <=POLL_CONTRACT
+# polls => within the ~9s DATABASE_URL_RO tip-following contract; otherwise a real concern.
+# Echoes exactly one of SUBSECOND | HOLDS | CONCERN | NODATA. Pure -> selftest covers it.
+POLL_SUBSEC="${POLL_SUBSEC:-10}"      # <=10 polls (~1.0s) => sub-second replication
+POLL_CONTRACT="${POLL_CONTRACT:-90}"  # <=90 polls (~9.0s) => ~9s contract holds
+poll_class() {
+  local med="$1"
+  case "$med" in ''|na) echo "NODATA"; return;; esac
+  if awk "BEGIN{exit !($med <= $POLL_SUBSEC)}"; then echo "SUBSECOND"; return; fi
+  if awk "BEGIN{exit !($med <= $POLL_CONTRACT)}"; then echo "HOLDS"; return; fi
+  echo "CONCERN"
 }
 
 # --- cluster-free unit test (TDD) --------------------------------------------
@@ -86,6 +114,19 @@ if [ "${1:-}" = "selftest" ]; then
   # sub-second fractional lags (the expected warm regime)
   got=$(printf '0.4\n0.2\n0.9\n' | stats)
   check "fractional sub-second" "$got" "min=0.200 median=0.400 max=0.900 mean=0.500 n=3"
+  # --- polls-based contract verdict (#188) ---------------------------------
+  # poll_class <median_polls> classifies REPLICATION visibility (100ms polls), NOT
+  # wall-clock lag_s. This is the contract-verdict signal: a RO cold-wake blocks a
+  # single seen() query and lands entirely in lag_s while polls stays 0, so keying the
+  # verdict off polls refuses to false-flag a cold-wake as replication lag (the #187 nit).
+  check "poll_class 0 -> SUBSECOND"       "$(poll_class 0)"       "SUBSECOND"
+  check "poll_class 10 boundary SUBSEC"   "$(poll_class 10)"      "SUBSECOND"
+  check "poll_class 11 -> HOLDS"          "$(poll_class 11)"      "HOLDS"
+  check "poll_class 90 boundary HOLDS"    "$(poll_class 90)"      "HOLDS"
+  check "poll_class 91 -> CONCERN"        "$(poll_class 91)"      "CONCERN"
+  check "poll_class fractional 0.000"     "$(poll_class 0.000)"   "SUBSECOND"
+  check "poll_class na -> NODATA"         "$(poll_class na)"      "NODATA"
+  check "poll_class empty -> NODATA"      "$(poll_class '')"      "NODATA"
   if [ "$fails" -eq 0 ]; then echo "selftest PASSED"; exit 0; else echo "selftest FAILED ($fails)"; exit 1; fi
 fi
 
@@ -100,8 +141,9 @@ ok() { echo "ok - $*"; }
 retry_ok() { local n="$1"; shift; local i=0; while [ $i -lt "$n" ]; do if "$@"; then return 0; fi; i=$((i+1)); sleep 4; done; return 1; }
 
 cleanup() {
-  echo "    cleanup: deleting AppDatabase/$APP + reclaiming residue"
+  echo "    cleanup: deleting AppDatabase/$APP + keepalive + reclaiming residue"
   K delete pod "meas-$APP" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+  K delete pod "ka-$APP"  --ignore-not-found --wait=false >/dev/null 2>&1 || true
   K delete appdatabase "$APP" --ignore-not-found --wait=false >/dev/null 2>&1 || true
   local i=0; while K get appdatabase "$APP" >/dev/null 2>&1 && [ $i -lt 30 ]; do i=$((i+1)); sleep 1; done
   KCTX="$KCTX" NS="$NS" "$PROV" destroy "$APP" >/dev/null 2>&1 || true
@@ -154,7 +196,7 @@ K delete appdatabase "$APP" --ignore-not-found --wait=true --timeout=60s >/dev/n
 KCTX="$KCTX" NS="$NS" "$PROV" destroy "$APP" >/dev/null 2>&1 || true
 
 # 1. provision the throwaway app with roPool enabled
-echo "==> applying AppDatabase/$APP (roPool.enabled)"
+echo "==> applying AppDatabase/$APP (roPool.enabled, roPool.minReplicas=$RO_MINREPLICAS)"
 MANIFEST="$(mktemp)"; trap 'rm -f "$MANIFEST"' RETURN 2>/dev/null || true
 cat > "$MANIFEST" <<EOF
 apiVersion: apps.scale-zero-pg.dev/v1alpha1
@@ -163,7 +205,7 @@ metadata: { name: $APP, namespace: $NS }
 spec:
   appName: $APP
   tier: cold
-  roPool: { enabled: true, minReplicas: 0, maxReplicas: 3 }
+  roPool: { enabled: true, minReplicas: $RO_MINREPLICAS, maxReplicas: 3 }
 EOF
 retry_ok 4 K apply -f "$MANIFEST" >/dev/null || fail "AppDatabase/$APP apply failed"
 rm -f "$MANIFEST"
@@ -192,6 +234,44 @@ ok "marker table app_items present on the writer (replicates to compute-ro-$APP)
 RETRY warmw "$(writer_dsn "$APP")" "select 1" >/dev/null || fail "warm writer failed"
 RETRY warmr "$(ro_dsn "$APP")" "select 1" >/dev/null || fail "warm RO failed"
 ok "writer + compute-ro-$APP both awake (0->1); walreceiver warm-up follows in-pod"
+
+# 3b. RO KEEPALIVE (#188): hold the RO (compute-ro-$APP) warm for the WHOLE run so NO
+#     measured cycle pays an RO cold-wake and wall-clock lag_s equals real replication
+#     (lag_s ~= polls*0.1). The writer cold-wake per cycle is EXCLUDED from lag_s (t0 starts
+#     after an acknowledged COMMIT), so ONLY the RO needs holding for a clean lag_s.
+#     WHY A KEEPALIVE (not just roPool.minReplicas): the roPool floor is enforced via an
+#     HPA, but on a cluster whose metrics-server has no pod metrics the HPA errors out
+#     ("no metrics returned") and does NOT hold the floor, while the gateway independently
+#     idle-scales compute-ro 0<-1 between cycles. A single persistent RO connection is the
+#     reliable warm-hold: the gateway never idle-scales a compute with an open connection.
+#
+#     DO NOT hold the WRITER warm with a persistent server-side query. FINDING (#188, live
+#     on OKE): a long-lived `pg_sleep` connection on the PRIMARY stalls the per-app RO's WAL
+#     replay — the RO booted in mode=Replica but `pg_stat_wal_receiver` was empty and
+#     `pg_last_wal_replay_lsn()` stayed frozen at the boot LSN, so writer commits never
+#     became visible (WARM cycle "NOT-VISIBLE-in-150s"). Reproduced twice (writer-keepalive
+#     ON) and refuted twice (writer-keepalive OFF -> RO saw the row on the first 100ms poll).
+#     Root cause left to a follow-up; the drill simply never holds the writer this way. The
+#     writer is re-woken transiently by each cycle's commit (fast when CPU is free), which is
+#     the correct, replication-safe way to drive it.
+if [ "${KEEPALIVE_RO:-0}" = "1" ]; then
+  echo "==> launching RO keepalive pod ka-$APP (holds compute-ro-$APP warm for the run)"
+  K delete pod "ka-$APP" --ignore-not-found --wait=true --timeout=30s >/dev/null 2>&1 || true
+  retry_ok 4 K run "ka-$APP" --image="$MEAS_IMG" --image-pull-policy=IfNotPresent --restart=Never --quiet \
+    --env="RO_DSN=$(ro_dsn "$APP")" \
+    --command -- sh -c 'while true; do psql "$RO_DSN" -tAqc "select pg_sleep(3600)" >/dev/null 2>&1 || true; sleep 0.5; done' \
+    >/dev/null || fail "could not launch RO keepalive pod"
+  # wait until the keepalive pod is Running AND has re-woken compute-ro to >=1 available
+  kaok=0; i=0
+  while [ $i -lt 180 ]; do
+    ph=$(K get pod "ka-$APP" -o jsonpath='{.status.phase}' 2>/dev/null || true)
+    rr=$(K get deploy "compute-ro-$APP" -o jsonpath='{.status.availableReplicas}' 2>/dev/null || true)
+    [ "$ph" = "Running" ] && [ "${rr:-0}" -ge 1 ] 2>/dev/null && { kaok=1; break; }
+    i=$((i+1)); sleep 1
+  done
+  [ "$kaok" = "1" ] && ok "RO keepalive holding compute-ro-$APP at >=1 available" \
+    || echo "WARN: RO keepalive not confirmed warm within 180s (compute-ro may still cold-wake)" >&2
+fi
 
 # 4. the measurement pod: ONE long-lived pod, both DSNs, 100ms poll, GNU date +%N.
 #    Base64 the body so nested SQL single-quotes survive the kubectl argv boundary.
@@ -266,21 +346,48 @@ echo "-------------------------------"
 [ "$PHASE" = "Succeeded" ] || fail "measurement pod did not Succeed (phase=$PHASE)"
 echo "$LOG" | grep -q "MEAS-POD-DONE" || fail "measurement pod did not complete all cycles"
 
-# 5. compute + report warm-plane steady-state stats
-LAGS="$(echo "$LOG" | sed -n 's/^CYCLE [0-9]* lag_s=\([0-9.]*\).*/\1/p')"
+# 5. compute + report warm-plane steady-state stats — TWO signals per MEASURED cycle:
+#    * polls  = 100ms RO-poll count until the committed row was visible. Measured INSIDE
+#      the warm pod's poll loop -> reflects REPLICATION visibility only. THIS drives the
+#      contract verdict (see poll_class): a RO cold-wake blocks one seen() query and lands
+#      entirely in wall-clock lag_s while polls stays 0, so a lag_s-median verdict would
+#      false-flag a cold-wake as replication lag — exactly the #187 sysdesign nit.
+#    * lag_s  = wall-clock t0(commit-ack)->t1(RO-visible). Reported as the benchmark
+#      number; trustworthy as a *replication* figure ONLY on a clean warm cycle where
+#      lag_s ~= polls*0.1 (i.e. no RO cold-wake was absorbed into a seen() call).
+# NOTE on N: NMEAS counts MEASURED steady-state cycles only (the WARMUP cycles are
+# discarded from the stats — but they ALSO showed sub-100ms visibility, i.e. they carried
+# the same conclusive proof; their polls are echoed below for the record). The >=5 gate is
+# a MEASURED-cycle gate, so with the defaults (WARMUP=3, CYCLES=6) a run does 9 total
+# cycles and reports N=6 measured.
+LAGS="$(echo "$LOG"  | sed -n 's/^CYCLE [0-9]* lag_s=\([0-9.]*\) polls=[0-9]*.*/\1/p')"
+POLLS="$(echo "$LOG" | sed -n 's/^CYCLE [0-9]* lag_s=[0-9.]* polls=\([0-9]*\).*/\1/p')"
+WPOLLS="$(echo "$LOG" | sed -n 's/^WARM [0-9]* visible polls=\([0-9]*\).*/\1/p')"
 NMEAS=$(printf '%s\n' "$LAGS" | grep -c . || true)
-[ "$NMEAS" -ge 5 ] || fail "fewer than 5 measured cycles (got $NMEAS) — re-run (set CYCLES>=5)"
-STATS="$(printf '%s\n' "$LAGS" | stats)"
-ok "warm-plane per-app RO staleness over $NMEAS steady-state cycles: $STATS"
-echo "RO_STALENESS_WARM app=$APP mode=Replica plane=warm $STATS raw=[$(printf '%s' "$LAGS" | tr '\n' ' ' | sed 's/ $//')]"
+[ "$NMEAS" -ge 5 ] || fail "fewer than 5 MEASURED steady-state cycles (got $NMEAS; WARMUP cycles are discarded) — re-run (set CYCLES>=5)"
+LSTATS="$(printf '%s\n' "$LAGS"  | stats)"
+PSTATS="$(printf '%s\n' "$POLLS" | stats)"
+ok "warm-plane per-app RO staleness over $NMEAS MEASURED steady-state cycles ($WARMUP warm-up cycles discarded):"
+ok "  RO polls (100ms, REPLICATION signal) : $PSTATS"
+ok "  wall-clock lag_s (benchmark number)  : $LSTATS"
+[ -n "$WPOLLS" ] && ok "  warm-up cycle polls (discarded, for the record): [$(printf '%s' "$WPOLLS" | tr '\n' ' ' | sed 's/ $//')]"
+echo "RO_STALENESS_WARM app=$APP mode=Replica plane=warm polls{$PSTATS} lag_s{$LSTATS} raw_polls=[$(printf '%s' "$POLLS" | tr '\n' ' ' | sed 's/ $//')] raw_lag=[$(printf '%s' "$LAGS" | tr '\n' ' ' | sed 's/ $//')]"
 
-# verdict
-MED=$(printf '%s' "$STATS" | sed -n 's/.*median=\([0-9.]*\).*/\1/p')
-if awk "BEGIN{exit !($MED <= 9.0)}"; then
-  ok "VERDICT: steady-state median ${MED}s <= ~9s contract HOLDS — the #167 90s was COLD-plane initial catch-up"
-else
-  echo "VERDICT: steady-state median ${MED}s EXCEEDS ~9s — real contract concern, root-cause required" >&2
-fi
+# verdict — POLLS-based (replication), NOT the lag_s median (which can carry an RO
+# cold-wake). This is the #188 fix: the pass/fail is driven by the polls metric.
+PMED=$(printf '%s' "$PSTATS" | sed -n 's/.*median=\([0-9.]*\).*/\1/p')
+PSEC=$(awk "BEGIN{printf \"%.1f\", ${PMED:-0}*0.1}")
+case "$(poll_class "$PMED")" in
+  SUBSECOND) ok "VERDICT (polls-based): median ${PMED} polls (~${PSEC}s) => SUB-SECOND replication; the ~9s DATABASE_URL_RO contract HOLDS with wide margin — the #167 90s was COLD-plane initial walreceiver catch-up, not steady-state lag." ;;
+  HOLDS)     ok "VERDICT (polls-based): median ${PMED} polls (~${PSEC}s) <= ~9s tip-following contract — HOLDS." ;;
+  NODATA)    echo "VERDICT (polls-based): no polls parsed — cannot rule on the contract" >&2 ;;
+  *)         echo "VERDICT (polls-based): median ${PMED} polls (~${PSEC}s) EXCEEDS the ~9s contract — real concern, root-cause required" >&2 ;;
+esac
+# wall-clock cross-check (informational only): lag_s is a trustworthy replication figure
+# ONLY when lag_s ~= polls*0.1; a materially larger lag_s means an RO cold-wake was
+# absorbed into a seen() call and is NOT replication lag (do not verdict off it).
+LMED=$(printf '%s' "$LSTATS" | sed -n 's/.*median=\([0-9.]*\).*/\1/p')
+echo "    (wall-clock lag_s median=${LMED}s — replication-trustworthy only when ~= polls*0.1 = ~${PSEC}s; a larger value = an RO cold-wake absorbed into a seen() call, not replication lag)"
 
 trap - EXIT
 cleanup

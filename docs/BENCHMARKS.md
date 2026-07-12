@@ -480,6 +480,29 @@ prior #169 attempt, the #167 90 s, and the #127 ~143 s are **cold-wake / degrade
 wall-clock artifacts**, not replication lag. A clean end-to-end `lag_s` (both computes
 held warm, healthy control plane) is deferred to a re-run under a stable session.
 
+**Update (#188, 2026-07-12) — drill verdict fixed; clean `lag_s` infra-deferred.**
+Two changes. (1) **`_measure-ro-staleness.sh` now derives its pass/fail verdict from
+the `polls` metric** (sub-second = visible within ~1 poll → HOLDS; only a genuinely
+slow *replication* signal → CONCERN), not the `lag_s` median — which previously
+**false-flagged** a contract concern on any RO cold-wake cycle that `polls=0` refutes.
+The `selftest` covers the classifier (SUBSEC/HOLDS/CONCERN/NODATA boundaries). (2) A
+clean end-to-end `lag_s` (both computes held warm) was re-attempted on the current
+**2-node** OKE cluster and is **still deferred — for an infrastructure, not a
+replication, reason**: node CPU-**request** allocatable is only **1830m per node** on
+these small (~2 vCPU) nodes, and most of it is already reserved by the resident storage
++ control-plane footprint (safekeeper / pageserver / MinIO / gateways / prometheus /
+operator requests — even though *actual* CPU usage is only ~5%). So co-scheduling a
+second warm compute (default request **250m** — `deploy/26-compute-ro.yaml`, `appdb`
+`DefaultQuotas.CPURequest`) *plus* the drill's measurement + keepalive pods exceeds the
+remaining unreserved allocatable, and the second compute lands `Pending` with
+`0/2 nodes available: Insufficient cpu` (node-allocatable pressure on **requests**, not
+a large per-compute request — same 2-node request-contention noted for the #127 ~143 s
+figure). A clean `lag_s` needs a larger/less-loaded drill cluster (or scaling the
+resident footprint down for the run).
+This is a benchmark nicety only: **the contract is already answered** — `polls=0`
+(#187, N=5) conclusively proves sub-second tip-following replication. The drill gained
+`RO_MINREPLICAS`/RO-keepalive knobs to hold the RO warm for a future clean run.
+
 ## Read-only pool under load (HPA n>1, issue #99)
 
 The GA gate for read-scaling: with the read-scaling HPA
