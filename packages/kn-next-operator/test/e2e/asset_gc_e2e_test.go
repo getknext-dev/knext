@@ -92,6 +92,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -477,9 +478,11 @@ var _ = Describe("asset retention GC against a live cluster (ADR-0011)", Ordered
 			g.Expect(out).To(Equal("True"), "operator Deployment not Available")
 		}).Should(Succeed())
 
-		By(fmt.Sprintf("creating the fresh, dedicated app namespace %q", gcAppNamespace))
+		By(fmt.Sprintf("creating the fresh, dedicated app namespace %q (ownership label stamped at creation)", gcAppNamespace))
+		// The create stamps kn-next.dev/e2e-owned=true — the teardown guard's
+		// authorization; a pre-existing namespace is never adopted (plan P5).
 		Eventually(func(g Gomega) {
-			g.Expect(utils.KubectlCreateIgnoreExists("create", "ns", gcAppNamespace)).To(Succeed())
+			g.Expect(utils.CreateOwnedNamespace(gcAppNamespace)).To(Succeed())
 		}, 2*time.Minute, 10*time.Second).Should(Succeed())
 
 		By("waiting for the validating webhook to actually serve (Available ≠ webhook ready, #233)")
@@ -579,8 +582,16 @@ var _ = Describe("asset retention GC against a live cluster (ADR-0011)", Ordered
 		}
 
 		By(fmt.Sprintf("deleting the dedicated app namespace %q (full cleanup — MinIO + app go with it)", gcAppNamespace))
+		// OWNERSHIP-GUARDED delete (plan P5): a deterministic guard refusal
+		// fails FAST and LOUD via StopTrying instead of burning the retry
+		// budget — see utils.NamespaceTeardownAuthorized.
 		Eventually(func(g Gomega) {
-			g.Expect(utils.NamespaceDeletedConfirmed(gcAppNamespace)).To(Succeed())
+			err := utils.NamespaceDeletedConfirmed(gcAppNamespace)
+			if errors.Is(err, utils.ErrTeardownRefused) {
+				StopTrying("teardown ownership guard refused the namespace deletion").
+					Wrap(err).Now()
+			}
+			g.Expect(err).NotTo(HaveOccurred())
 		}, 10*time.Minute, gcAssertPoll).Should(Succeed(),
 			"failed to fully delete the dedicated namespace %s", gcAppNamespace)
 
