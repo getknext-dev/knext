@@ -12,15 +12,20 @@
 ## What publishes
 
 Publishing is driven by [Changesets](https://github.com/changesets/changesets) and the
-`.github/workflows/release.yml` workflow. Only two packages are published to the public npm
+`.github/workflows/release.yml` workflow. Only three packages are published to the public npm
 registry:
 
 | Package       | Path               | Public? | Provenance |
 | ------------- | ------------------ | ------- | ---------- |
 | `@knext/core` | `packages/kn-next` | yes     | yes        |
 | `@knext/lib`  | `packages/lib`     | yes     | yes        |
+| `@knext/db`   | `packages/db`      | yes     | yes        |
 
-Both carry `"publishConfig": { "access": "public", "provenance": true }`, so `changeset publish`
+`@knext/core` depends on **both** `@knext/lib` and `@knext/db` (and `@knext/db` depends on
+`@knext/lib`), so the three must always ship as a set — publishing core without db is exactly
+the #255/#256 incident (every consumer install 404s on the missing member).
+
+All three carry `"publishConfig": { "access": "public", "provenance": true }`, so `changeset publish`
 publishes them publicly and CI attaches a signed provenance attestation (via the workflow's
 `id-token: write` permission).
 
@@ -127,28 +132,33 @@ override a package name or a dependency name. So this channel republishes under 
 | ----------------- | ------------------------- |
 | `@knext/core`     | `@getknext-dev/core`      |
 | `@knext/lib`      | `@getknext-dev/lib`       |
+| `@knext/db`       | `@getknext-dev/db`        |
 
 The rename is done by `scripts/rename-for-ghp.mjs`, which stages **copies** (it never mutates the
 working tree) and rewrites:
 
 - each package `name` → `@getknext-dev/*`;
-- core's inter-package dependency key `@knext/lib` → `@getknext-dev/lib`, and any `workspace:`
-  specifier → a concrete version range (since `npm publish` from a staging dir cannot rewrite the
-  pnpm `workspace:` protocol like `pnpm publish` would);
+- the inter-package dependency keys (`@knext/lib`, `@knext/db`) → `@getknext-dev/*`, and any
+  `workspace:` specifier → a concrete version range (since `npm publish` from a staging dir
+  cannot rewrite the pnpm `workspace:` protocol like `pnpm publish` would);
 - **every hardcoded `@knext/` import string inside the staged `dist/**`** — this is the critical
-  hazard: `@knext/lib` is externalized in `packages/kn-next/tsup.config.ts`, so core's compiled
-  output (`dist/adapters/node-server.js`, `dist/adapters/next-adapter.js`) contains literal
-  `@knext/lib/clients` imports. Renaming only `package.json` would publish an `@getknext-dev/core`
-  whose runtime imports the never-published `@knext/lib`. The script **fails loudly** if core's
-  dist contains zero `@knext/` occurrences (a signal the externalization layout changed);
+  hazard: `@knext/lib` **and `@knext/db`** are externalized in
+  `packages/kn-next/tsup.config.ts` (and `@knext/db`'s plain-tsc build preserves its
+  `@knext/lib` imports), so the compiled outputs (`dist/adapters/node-server.js`,
+  `dist/cli/db-migrate.js`, `packages/db/dist/index.js`) contain literal `@knext/lib/...` +
+  `@knext/db/...` imports. Renaming only `package.json` would publish packages whose runtime
+  imports the never-published `@knext/*` names. The script **fails loudly, per dependency**: for
+  every `@knext/*` dep a staged package declares, its dist must contain at least one occurrence
+  of that exact specifier (a zero signals the externalization layout changed). It also refuses
+  any `@knext/*` dependency that is not itself in the publish set;
 - `publishConfig.provenance` is **stripped** — provenance needs npmjs/OIDC and fails on GHP.
 
 ### Publishing
 
 Run the **Release (GitHub Packages, interim)** workflow manually
-(**Actions → Release (GitHub Packages, interim) → Run workflow**). It builds `@knext/lib` then
-`@knext/core`, stages the renamed copies, and publishes **lib before core** to
-`npm.pkg.github.com` using the built-in `GITHUB_TOKEN` (`packages: write`, no id-token). Re-running
+(**Actions → Release (GitHub Packages, interim) → Run workflow**). It builds `@knext/lib`, then
+`@knext/db`, then `@knext/core`, stages the renamed copies, and publishes **lib, then db, then
+core** to `npm.pkg.github.com` using the built-in `GITHUB_TOKEN` (`packages: write`, no id-token). Re-running
 with an unchanged version fails with a clear "already published — bump versions via changesets
 first" message; bump versions before re-releasing.
 
@@ -165,7 +175,7 @@ GHP requires auth for installs **even for public packages**. In the consuming pr
 where `GITHUB_TOKEN` is a personal access token with the `read:packages` scope. Then:
 
 ```sh
-npm install @getknext-dev/core @getknext-dev/lib
+npm install @getknext-dev/core @getknext-dev/lib @getknext-dev/db
 npx @getknext-dev/core --help    # runs the kn-next bin from the GHP package
 ```
 

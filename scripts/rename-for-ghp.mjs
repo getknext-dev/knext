@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * scripts/rename-for-ghp.mjs — stage the two publishable packages for the interim
+ * scripts/rename-for-ghp.mjs — stage the publishable packages for the interim
  * GitHub Packages (npm.pkg.github.com) release channel.
  *
  * WHY THIS EXISTS
@@ -13,16 +13,21 @@
  * org (`getknext-dev`), and `publishConfig` CANNOT override a package name or a
  * dependency name. So we must physically rewrite `@knext/*` → `@getknext-dev/*`.
  *
- * THE DIST HAZARD (do not remove the loud-failure guard below)
- * ------------------------------------------------------------
- * `@knext/lib` is EXTERNALIZED in packages/kn-next/tsup.config.ts, so the
- * COMPILED output hardcodes `@knext/lib/...` import specifiers
- * (dist/adapters/node-server.js, dist/adapters/next-adapter.js, ...). Renaming
- * only package.json would publish an `@getknext-dev/core` whose runtime code
- * still imports the never-published `@knext/lib`. So we ALSO rewrite every
- * `@knext/` string occurrence inside staged dist files. If a future build
- * layout stops externalizing lib (zero occurrences), this script FAILS LOUDLY
- * rather than silently shipping a broken or mis-renamed package.
+ * THE DIST HAZARD (do not remove the loud-failure guards below)
+ * -------------------------------------------------------------
+ * `@knext/lib` AND `@knext/db` are EXTERNALIZED in packages/kn-next/
+ * tsup.config.ts (and @knext/db's plain-tsc build preserves its `@knext/lib`
+ * imports verbatim), so the COMPILED outputs hardcode `@knext/lib/...` +
+ * `@knext/db/...` import specifiers (dist/adapters/node-server.js,
+ * dist/cli/db-migrate.js, packages/db/dist/index.js, ...). Renaming only
+ * package.json would publish a package whose runtime code still imports the
+ * never-published `@knext/*` names — #255/#256 was exactly this class of hole
+ * for @knext/db. So we ALSO rewrite every `@knext/` string occurrence inside
+ * staged dist files, and we guard PER DEPENDENCY: for every `@knext/*` dep a
+ * staged package declares, its dist MUST contain ≥1 occurrence of that exact
+ * specifier ("lib rewritten but the db chunk vanished" fails too). A closure
+ * check additionally refuses any `@knext/*` dependency that is not itself in
+ * the publish set.
  *
  * SAFETY: this script NEVER mutates the working tree. It copies the publish-
  * relevant files (package.json, dist/, LICENSE, README*) into a staging dir and
@@ -44,6 +49,7 @@ import {
 } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { knextDepsOf } from './lib/knext-closure.mjs';
 
 /** The old (npmjs, canonical) scope prefix and the interim GHP org scope. */
 export const OLD_SCOPE = '@knext/';
@@ -54,10 +60,15 @@ export const GHP_REGISTRY = 'https://npm.pkg.github.com';
 /** dist file extensions whose contents may contain a hardcoded `@knext/` import. */
 const REWRITABLE_DIST_SUFFIXES = ['.js', '.cjs', '.mjs', '.d.ts', '.d.cts', '.d.mts', '.map'];
 
-/** The publish set. `requireDistRewrites` guards the externalization hazard. */
+/**
+ * The publish set, in dependency (publish) order: lib → db → core. The
+ * per-dependency dist-rewrite guard is DERIVED from each package's manifest
+ * (its `@knext/*` dep keys), not configured here — see stagePackage().
+ */
 export const DEFAULT_PACKAGES = [
-  { name: '@knext/lib', dir: 'packages/lib', requireDistRewrites: false },
-  { name: '@knext/core', dir: 'packages/kn-next', requireDistRewrites: true },
+  { name: '@knext/lib', dir: 'packages/lib' },
+  { name: '@knext/db', dir: 'packages/db' },
+  { name: '@knext/core', dir: 'packages/kn-next' },
 ];
 
 /**
@@ -166,7 +177,7 @@ function isRewritableDistFile(path) {
  */
 function stagePackage(pkg, rootDir, stagingRoot, versionByName) {
   const srcDir = join(rootDir, pkg.dir);
-  const shortName = basename(pkg.name); // 'lib' | 'core'
+  const shortName = basename(pkg.name); // 'lib' | 'db' | 'core'
   const stagingDir = join(stagingRoot, shortName);
 
   rmSync(stagingDir, { recursive: true, force: true });
@@ -194,12 +205,18 @@ function stagePackage(pkg, rootDir, stagingRoot, versionByName) {
     if (existsSync(from)) cpSync(from, join(stagingDir, name));
   }
 
-  // 4. Rewrite hardcoded @knext/ import strings inside staged dist files.
+  // 4. Rewrite hardcoded @knext/ import strings inside staged dist files,
+  // counting occurrences PER @knext/* dependency specifier (for the guard in 5).
+  const requiredSpecifiers = knextDepsOf(manifest);
+  const occurrencesBySpecifier = Object.fromEntries(requiredSpecifiers.map((s) => [s, 0]));
   let distOccurrences = 0;
   let distFilesRewritten = 0;
   for (const file of walkFiles(stagedDist)) {
     if (!isRewritableDistFile(file)) continue;
     const original = readFileSync(file, 'utf8');
+    for (const spec of requiredSpecifiers) {
+      occurrencesBySpecifier[spec] += original.split(spec).length - 1;
+    }
     const { content, count } = rewriteScopeString(original);
     if (count > 0) {
       writeFileSync(file, content);
@@ -208,16 +225,21 @@ function stagePackage(pkg, rootDir, stagingRoot, versionByName) {
     }
   }
 
-  // 5. Loud guard: core externalizes @knext/lib, so its dist MUST contain
-  // occurrences. Zero means the build layout changed and this script is silently
-  // obsolete — refuse to ship a possibly-broken package.
-  if (pkg.requireDistRewrites && distOccurrences === 0) {
+  // 5. Loud PER-DEPENDENCY guard: this package externalizes its @knext/* deps
+  // (tsup `external` for core; plain tsc for db), so for EVERY @knext/* dep its
+  // compiled dist MUST hardcode that exact specifier. Zero occurrences of ONE
+  // dep — even while others rewrote fine — means the build layout drifted and
+  // this script would silently ship a package whose runtime imports a
+  // never-published @knext/* name (the #255/#256 hole). Refuse.
+  const missing = requiredSpecifiers.filter((s) => occurrencesBySpecifier[s] === 0);
+  if (missing.length > 0) {
     throw new Error(
-      `[rename-for-ghp] ${pkg.name}: found ZERO ${OLD_SCOPE} occurrences in dist/ to rewrite. ` +
-        `This package externalizes ${OLD_SCOPE}lib in its build, so its compiled output MUST ` +
-        `hardcode ${OLD_SCOPE}lib imports. Zero occurrences means the externalization layout ` +
-        `changed and this script is out of date — publishing now would ship a broken package. ` +
-        `Aborting.`,
+      `[rename-for-ghp] ${pkg.name}: found ZERO occurrences of ${missing.join(', ')} in dist/ ` +
+        `to rewrite, but the manifest declares ${missing.join(', ')} as @knext/* ` +
+        `dependencies. This package externalizes its @knext/* deps in its build, so its ` +
+        `compiled output MUST hardcode those imports. Zero occurrences means the ` +
+        `externalization layout changed and this script is out of date — publishing now ` +
+        `would ship a broken package. Aborting.`,
     );
   }
 
@@ -227,6 +249,7 @@ function stagePackage(pkg, rootDir, stagingRoot, versionByName) {
     stagingDir,
     distFilesRewritten,
     distOccurrences,
+    occurrencesBySpecifier,
     provenanceStripped: manifest.publishConfig?.provenance === true,
   };
 }
@@ -242,9 +265,29 @@ export function stageForGhp({ rootDir, stagingRoot, packages = DEFAULT_PACKAGES 
   // Collect in-repo versions first so `workspace:` deps can be resolved to a
   // concrete range (keyed by the ORIGINAL @knext/* name).
   const versionByName = {};
+  const manifestByName = {};
   for (const pkg of packages) {
     const manifest = JSON.parse(readFileSync(join(rootDir, pkg.dir, 'package.json'), 'utf8'));
     versionByName[pkg.name] = manifest.version;
+    manifestByName[pkg.name] = manifest;
+  }
+
+  // Closure check: every @knext/* dependency of a staged package must itself be
+  // in the publish set. A plain-semver pin on an unpublished @knext/x would
+  // otherwise ship silently (resolveWorkspaceSpec only throws on workspace:
+  // specs) and 404 for every consumer — the #255/#256 failure mode.
+  const publishSet = new Set(packages.map((p) => p.name));
+  for (const pkg of packages) {
+    const outside = knextDepsOf(manifestByName[pkg.name]).filter((dep) => !publishSet.has(dep));
+    if (outside.length > 0) {
+      throw new Error(
+        `[rename-for-ghp] ${pkg.name} depends on ${outside.join(', ')}, which ${
+          outside.length === 1 ? 'is' : 'are'
+        } NOT in the GHP publish set (${[...publishSet].join(', ')}). Add the missing ` +
+          `package(s) to DEFAULT_PACKAGES (in dependency order) or drop the dependency — ` +
+          `publishing now would ship a manifest that 404s for every consumer.`,
+      );
+    }
   }
 
   const staged = {};
@@ -259,7 +302,7 @@ export function stageForGhp({ rootDir, stagingRoot, packages = DEFAULT_PACKAGES 
 // ---------------------------------------------------------------------------
 // CLI entry: stage into <repoRoot>/.ghp-staging and print a machine-readable
 // report the release-ghp.yml workflow consumes (it publishes from each
-// staging dir, lib before core).
+// staging dir in dependency order: lib, then db, then core).
 // ---------------------------------------------------------------------------
 function main() {
   const here = dirname(fileURLToPath(import.meta.url));
@@ -278,7 +321,7 @@ function main() {
         `(dist rewrites: ${r.distOccurrences} occurrence(s) in ${r.distFilesRewritten} file(s))`,
     );
   }
-  // Emit the ordered staging dirs so the workflow can publish lib then core.
+  // Emit the ordered staging dirs so the workflow can publish lib, db, core.
   const stagingDirs = report.order.map((name) => report.staged[name].stagingDir);
   writeFileSync(
     join(stagingRoot, 'staging-order.json'),

@@ -1,15 +1,18 @@
 # ADR-0020 — Release channels: npmjs `@knext/*` canonical, GitHub Packages `@getknext-dev/*` interim
 
-- **Status:** Accepted
+- **Status:** Accepted (amended 2026-07-12: `@knext/db` joins the package set)
 - **Date:** 2026-07-10
 - **Relates to:** the E1 adoption workstream (issue #53 — first npm publish, the
   #1 adoption blocker), PR #226 (interim GitHub Packages channel), PR #227
-  (auto GitHub Releases + dated deprecation plan).
+  (auto GitHub Releases + dated deprecation plan), #255/#256 (the @knext/db
+  packaging incident that forced the 2026-07-12 amendment).
 
 ## Context
 
-knext's publishable packages are `@knext/core` (`packages/kn-next`) and
-`@knext/lib` (`packages/lib`). The canonical publish path — Changesets →
+knext's publishable packages are `@knext/core` (`packages/kn-next`),
+`@knext/lib` (`packages/lib`) and — since the 2026-07-12 amendment —
+`@knext/db` (`packages/db`, the ADR-0021 data SDK that `@knext/core` depends
+on via `workspace:^` for `kn-next db migrate`). The canonical publish path — Changesets →
 `.github/workflows/release.yml` → registry.npmjs.org with provenance — is fully
 built and verified: the in-repo harness is `scripts/install-smoke.mjs`
 (pnpm-pack tarballs → clean `npm install` outside the workspace, run in CI),
@@ -26,10 +29,12 @@ Packages so the packages are installable *now*, without waiting on the npmjs
 step. GitHub Packages imposes two constraints that shaped the design:
 
 1. The package **scope must match the owning org** → the interim packages are
-   `@getknext-dev/core` / `@getknext-dev/lib`, renamed at publish time by
-   `scripts/rename-for-ghp.mjs` (which also rewrites the hardcoded `@knext/lib`
-   import strings in the compiled `dist/**` — `@knext/lib` is tsup-externalized,
-   so a name-only rename would ship a runtime-broken package).
+   `@getknext-dev/core` / `@getknext-dev/lib` / `@getknext-dev/db`, renamed at
+   publish time by `scripts/rename-for-ghp.mjs` (which also rewrites the
+   hardcoded `@knext/lib` + `@knext/db` import strings in the compiled
+   `dist/**` — both are tsup-externalized in core, and db's tsc build preserves
+   its `@knext/lib` imports, so a name-only rename would ship runtime-broken
+   packages).
 2. Installs require auth **even for public packages** → consumers need a GitHub
    token with `read:packages`; anonymous `npx` remains impossible on this
    channel.
@@ -54,6 +59,30 @@ Two channels, with an explicit hierarchy and a dated exit:
   versions are **never unpublished** — existing consumers keep resolving.
   The executable runbook lives in `docs/RELEASING.md`.
 
+## Amendment (2026-07-12) — `@knext/db` joins the package set on BOTH channels
+
+`@knext/core@0.1.0` gained a `@knext/db: workspace:^` dependency (ADR-0021;
+`kn-next db migrate` dynamically imports `@knext/db/migrate`). Because
+`pnpm pack`/`changeset publish` rewrite `workspace:^` to `^0.1.0` and
+`@knext/db` was published on NEITHER channel, every consumer install of the
+packed/published `@knext/core` 404'd — the compat credential lanes went red at
+"Prepare" (#255 node nightly, #256 bun weekly) and the GHP interim channel
+shipped an uninstallable `@getknext-dev/core`. The channel package set is
+therefore **{core, lib, db}** on both channels:
+
+- **npmjs canonical:** `@knext/db` publishes via changesets alongside the other
+  two (`publishConfig.access: public, provenance: true`; it was never in
+  `.changeset/config.json`'s `ignore` list — the correction is to the workflow
+  header/docs that claimed a two-package set).
+- **GHP interim:** `release-ghp.yml` stages/publishes `@getknext-dev/db`
+  BETWEEN lib and core (dependency order lib → db → core), and
+  `scripts/rename-for-ghp.mjs` guards the rewrite PER `@knext/*` dependency
+  (each staged package's dist must contain ≥1 occurrence of each declared
+  `@knext/*` dep specifier) plus a publish-set closure check.
+- **Deprecation plan scope grows accordingly:** when #53 lands, `npm deprecate`
+  ALL THREE `@getknext-dev/*` packages (`core`, `lib`, `db`) — not just the
+  original two.
+
 ## Options considered
 
 | Option | Installable now? | Human secrets | Anonymous `npx` | Long-term fit |
@@ -72,7 +101,9 @@ not a channel.
 ## Consequences
 
 - knext is installable today (`@getknext-dev/{core,lib}@0.1.0`, published
-  2026-07-06) with zero human secrets spent.
+  2026-07-06; `@getknext-dev/db` joins per the 2026-07-12 amendment — until it
+  is published, the already-published `@getknext-dev/core@0.1.0` is
+  uninstallable) with zero human secrets spent.
 - Two package identities exist temporarily; every GHP-facing doc must carry the
   "interim — canonical home is `@knext/*`" framing so no consumer mistakes the
   stopgap for the product. The rename script fails loudly if the dist layout
@@ -86,5 +117,9 @@ not a channel.
 
 - [x] Interim channel shipped and published (PR #226, run 28829862963).
 - [x] Auto GitHub Releases + deprecation runbook (PR #227).
-- [ ] On #53: execute the deprecation plan in `docs/RELEASING.md` (dry-run
+- [ ] On #53: execute the deprecation plan in `docs/RELEASING.md` for ALL
+      THREE `@getknext-dev/*` packages — core, lib, db (dry-run
       `npm deprecate` first — GHP's support for it is historically flaky).
+- [ ] Dispatch `release-ghp.yml` after the 2026-07-12 amendment merges so
+      `@getknext-dev/db` exists and `@getknext-dev/core` becomes installable
+      again (needs a version bump via changesets if 0.1.0 conflicts).
