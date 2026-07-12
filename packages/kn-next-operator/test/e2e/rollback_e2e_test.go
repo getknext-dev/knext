@@ -304,6 +304,18 @@ var _ = Describe("kn-next rollback against a live cluster (#92)", Ordered, func(
 			g.Expect(utils.KubectlCreateIgnoreExists("create", "ns", rbAppNamespace)).To(Succeed())
 		}, 2*time.Minute, 10*time.Second).Should(Succeed())
 
+		By("waiting for the validating webhook to actually serve (Available ≠ webhook ready, #233)")
+		// In kind mode the bundle was applied moments ago and the webhook server
+		// (cert mount + TLS bind + caBundle injection) can lag the Deployment's
+		// Available condition — the first NextApp apply must not race it. The
+		// probe is a server-side DRY-RUN (pure read, nothing persisted), so it is
+		// also run in existing-cluster mode, where the long-running operator's
+		// webhook answers on the first attempt — harmless. A genuine admission
+		// rejection counts as ready (the webhook answered) — no admission
+		// assertion is weakened.
+		Expect(utils.WaitForWebhookReady(rbAppNamespace)).To(Succeed(),
+			"operator validating webhook never became reachable after Deployment Available")
+
 		By("applying the SERVABLE, digest-pinned NextApp (TARGET=rev1)")
 		Eventually(func(g Gomega) {
 			g.Expect(utils.ApplyManifest(rbNextAppManifest("rev1"))).To(Succeed(),

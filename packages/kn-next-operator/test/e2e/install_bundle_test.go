@@ -173,8 +173,31 @@ var _ = Describe("Install bundle (dist/install.yaml)", Ordered, func() {
 		By("creating the sample app namespace")
 		_, _ = utils.Kubectl("create", "ns", bundleAppNamespace)
 
+		By("waiting for the validating webhook to actually serve (Available ≠ webhook ready, #233)")
+		// Deployment Available does NOT imply the webhook server inside the pod
+		// accepts TLS connections (serving-cert mount + bind + caBundle injection
+		// lag it). On a slow runner the first apply landed entirely in that gap
+		// and failed with `failed calling webhook ... connection refused`. The
+		// helper dry-run-applies a valid NextApp until the webhook ANSWERS —
+		// a genuine admission rejection also counts as ready and returns
+		// immediately, so no admission assertion is weakened.
+		Expect(utils.WaitForWebhookReady(bundleAppNamespace)).To(Succeed(),
+			"operator validating webhook never became reachable after Deployment Available")
+
 		By("applying a DIGEST-PINNED sample NextApp")
-		Expect(applyBundleManifest(sampleNextApp())).To(Succeed(), "failed to apply sample NextApp")
+		// Defense in depth (#233): even after WaitForWebhookReady, retry ONLY the
+		// webhook-unreachability class (e.g. the webhook pod got rescheduled
+		// between the probe and this apply). Any other failure — in particular a
+		// GENUINE admission rejection — aborts immediately via StopTrying, so a
+		// real CEL/:latest/immutability bug still fails fast, never a timeout.
+		Eventually(func(g Gomega) {
+			err := applyBundleManifest(sampleNextApp())
+			if err != nil && utils.ClassifyWebhookApplyError(err.Error()) != utils.WebhookUnreachable {
+				StopTrying("sample NextApp apply failed outside the webhook-unreachability class").
+					Wrap(err).Now()
+			}
+			g.Expect(err).NotTo(HaveOccurred(), "failed to apply sample NextApp")
+		}, 2*time.Minute, 5*time.Second).Should(Succeed(), "failed to apply sample NextApp")
 
 		By("waiting for the operator to create the child Knative Service (proves reconcile ran)")
 		// The ksvc is named after the NextApp. Its creation is the deterministic,
