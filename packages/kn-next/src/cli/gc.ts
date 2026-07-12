@@ -29,7 +29,7 @@ import type { KnativeNextConfig } from "../config";
 import { parseLiveRevisionNames, resolveLiveBuildIds } from "../utils/asset-gc";
 import { pruneOldBuilds } from "../utils/asset-upload";
 import { createLogger } from "../utils/logger";
-import { isEntrypoint, runCapture } from "./exec";
+import { runCapture } from "./exec";
 // Single source of truth for config loading — also runs validateConfig.
 import { loadConfig } from "./shared";
 
@@ -206,13 +206,11 @@ export async function gcMain(argv: readonly string[]): Promise<number> {
     return 0;
 }
 
-// Run only when invoked directly as the entry (not when imported by tests or
-// the kn-next bin dispatcher).
-if (isEntrypoint(import.meta.url)) {
-    try {
-        process.exit(await gcMain(process.argv.slice(2)));
-    } catch (err) {
-        log.fatal({ err }, "gc failed");
-        process.exit(1);
-    }
-}
+// NO self-entry block here, DELIBERATELY (unlike rollback.ts/cleanup.ts).
+// deploy.ts imports runAssetGC STATICALLY; if this module also carried an
+// `isEntrypoint(import.meta.url)` entry block, any bundling change that
+// inlines it into the bin (where import.meta.url == the bin's URL) would
+// fire gcMain at module load and hijack every subcommand — observed live
+// when the dispatcher's dynamic `import("./gc")` was the only thing keeping
+// tsup from inlining this module. The `kn-next gc` dispatcher branch is this
+// module's ONLY entry (pinned hermetically by cli-node-runtime.test.ts).

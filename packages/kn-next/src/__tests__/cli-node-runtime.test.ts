@@ -218,6 +218,10 @@ describe("built bin (dist/cli/kn-next.js) is Node-runnable", () => {
         expect(r.stdout).toContain("status");
         // #92 rollback is a first-class bin subcommand (Tier-B "rollback demoed").
         expect(r.stdout).toContain("rollback");
+        // #93/ADR-0011 gc is a first-class bin subcommand (P4): assert the
+        // actual Commands-list entry, not a bare "gc" substring.
+        expect(r.stdout).toMatch(/^\s+gc\s+/m);
+        expect(r.stdout).toContain("reap old _next/static/<build-id>/");
     });
 
     it("`node kn-next.js rollback --help` dispatches and exits 0", () => {
@@ -236,6 +240,36 @@ describe("built bin (dist/cli/kn-next.js) is Node-runnable", () => {
         // (falling through to deploy's help/flow) cannot false-pass this test.
         expect(r.stdout).toContain("spec.traffic");
         expect(r.stdout).toContain("Patches ONLY the NextApp CR");
+    });
+
+    it("`node kn-next.js gc --help` dispatches and exits 0", () => {
+        // The bin must route `gc` to gcMain — NOT fall through to the deploy
+        // flow (which would build + push + mutate the cluster). The e2e_gc
+        // suite (test/e2e/asset_gc_e2e_test.go) exercises the real prune;
+        // this hermetic test pins the dispatch + help contract.
+        const r = run(process.execPath, [distBin, "gc", "--help"]);
+        expect(r.error).toBeUndefined();
+        expect(r.status).toBe(0);
+        expect(r.stdout).toContain("kn-next gc");
+        expect(r.stdout).toContain("--build-id");
+        // gc-ONLY discriminators: these strings exist in gc's help and
+        // nowhere in deploy's usage text (deploy's Commands list only carries
+        // the short "reap old _next/static/<build-id>/ asset prefixes" line),
+        // so removing the dispatch branch (falling through to deploy's
+        // help/flow) cannot false-pass this test.
+        expect(r.stdout).toContain("over-keep, never over-delete");
+        expect(r.stdout).toContain("assetRetention");
+        expect(r.stdout).toContain("teardown-only");
+    });
+
+    it("`node kn-next.js gc --unknown-flag` exits non-zero (strict parser through the real dispatch)", () => {
+        // gc DELETES object-store prefixes: a typo'd flag must be a hard
+        // error, never a silent fall-through with different retention
+        // semantics. (Exit code only — the fatal log rides pino's async
+        // transport and is not guaranteed flushed before exit.)
+        const r = run(process.execPath, [distBin, "gc", "--unknown-flag"]);
+        expect(r.error).toBeUndefined();
+        expect(r.status).toBe(1);
     });
 
     it("`node kn-next.js status --help` dispatches and exits 0", () => {
