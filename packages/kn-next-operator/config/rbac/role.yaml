@@ -78,6 +78,14 @@ rules:
 - apiGroups:
   - serving.knative.dev
   resources:
+  - revisions
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - serving.knative.dev
+  resources:
   - services
   verbs:
   - create
