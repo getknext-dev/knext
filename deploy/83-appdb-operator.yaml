@@ -99,12 +99,14 @@ spec:
           # spec, no md5), on top of the #127 per-app RO-compute provisioning. So a NEW
           # AppDatabase is SCRAM from creation. Digest-pinned (contract 22). Rebuild +
           # re-pin on any operator change.
-          # NOTE: verified live 2026-07-07 (#160 rollout) — this build is a SINGLE-manifest
-          # image, so the kubelet's imageID equals the manifest digest pinned below
-          # (@sha256:2e609e60…); it matches _verify-drift.sh section C directly (unlike the
-          # prior sha-445d19d build, which was an OCI index whose imageID was a child CONFIG
-          # digest — #153 — that section C still tolerates via the .status.image digest).
-          image: me-abudhabi-1.ocir.io/axfqznklsd2t/ks-pg/gateway:sha-06dba96@sha256:2e609e608f92c0fdd21c0d41c7f526b650caaf60647d697cbc74e837ad0f6fdf
+          # NOTE: single-manifest amd64 build, so the kubelet's imageID equals the manifest
+          # digest pinned below (@sha256:f875ec57…); it matches _verify-drift.sh section C
+          # directly (unlike an OCI-index build whose imageID would be a child CONFIG digest —
+          # #153 — which section C still tolerates via the .status.image digest).
+          # sha-f3c3c00 (#122): reconciler now stamps controller ownerReferences on every
+          # child (native cascade-GC), on top of #117 SCRAM + #127 per-app RO provisioning.
+          # Rebuild + re-pin on any operator change (contract 22).
+          image: me-abudhabi-1.ocir.io/axfqznklsd2t/ks-pg/gateway:sha-f3c3c00@sha256:f875ec57690dea510acb2ba2494a1ef1213dd300d06ea872bb6cb8d70e6c1b7f
           imagePullPolicy: IfNotPresent
           command: ["/appdb-operator"] # override the image's /gateway entrypoint
           securityContext:
