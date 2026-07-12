@@ -41,7 +41,18 @@ func (k *K8sCluster) SecretExists(ctx context.Context, app string) (bool, error)
 	return err == nil, err
 }
 
-func (k *K8sCluster) CreateSecret(ctx context.Context, app, role, password, verifier, dsn string) error {
+// setOwnerRef stamps owner as the sole controller ownerReference on meta, so k8s
+// cascade-GC reaps the child when the AppDatabase is deleted (#122). A nil owner is
+// a no-op (the CR has no UID yet) — never write an empty-UID ownerReference, which
+// the GC controller would treat as dangling and delete the child.
+func setOwnerRef(meta *metav1.ObjectMeta, owner *metav1.OwnerReference) {
+	if owner == nil {
+		return
+	}
+	meta.OwnerReferences = []metav1.OwnerReference{*owner}
+}
+
+func (k *K8sCluster) CreateSecret(ctx context.Context, app, role, password, verifier, dsn string, owner *metav1.OwnerReference) error {
 	sec := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "app-db-" + app,
@@ -55,10 +66,37 @@ func (k *K8sCluster) CreateSecret(ctx context.Context, app, role, password, veri
 			"DATABASE_URL":      dsn,
 		},
 	}
+	setOwnerRef(&sec.ObjectMeta, owner)
 	_, err := k.cs.CoreV1().Secrets(k.ns).Create(ctx, sec, metav1.CreateOptions{})
 	if apierrors.IsAlreadyExists(err) { // idempotent: keep the live password
 		return nil
 	}
+	return err
+}
+
+// EnsureSecretOwnerRef back-fills the controller ownerReference on an existing
+// per-app Secret (#122). Read-modify-write so it only writes when the ref is missing;
+// it never touches secret data (PGPASSWORD/DATABASE_URL), so a live app is never
+// disturbed. No-op when owner is nil or the secret does not exist.
+func (k *K8sCluster) EnsureSecretOwnerRef(ctx context.Context, app string, owner *metav1.OwnerReference) error {
+	if owner == nil {
+		return nil
+	}
+	secApi := k.cs.CoreV1().Secrets(k.ns)
+	sec, err := secApi.Get(ctx, "app-db-"+app, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return nil // create path mints it with the ref; nothing to back-fill yet
+	}
+	if err != nil {
+		return err
+	}
+	for _, r := range sec.OwnerReferences {
+		if r.UID == owner.UID && r.Kind == owner.Kind && r.APIVersion == owner.APIVersion {
+			return nil // already owned — idempotent, no write
+		}
+	}
+	setOwnerRef(&sec.ObjectMeta, owner)
+	_, err = secApi.Update(ctx, sec, metav1.UpdateOptions{})
 	return err
 }
 
@@ -109,6 +147,7 @@ func (k *K8sCluster) EnsureSecretROKey(ctx context.Context, app string, enabled 
 // owns the replica count.
 func (k *K8sCluster) ApplyCompute(ctx context.Context, spec ComputeSpec) error {
 	cm := k.render.RenderConfigMap(spec)
+	setOwnerRef(&cm.ObjectMeta, spec.OwnerRef)
 	cmApi := k.cs.CoreV1().ConfigMaps(k.ns)
 	if cur, err := cmApi.Get(ctx, cm.Name, metav1.GetOptions{}); apierrors.IsNotFound(err) {
 		if _, err := cmApi.Create(ctx, cm, metav1.CreateOptions{}); err != nil {
@@ -119,12 +158,14 @@ func (k *K8sCluster) ApplyCompute(ctx context.Context, spec ComputeSpec) error {
 	} else {
 		cur.Data = cm.Data
 		cur.Labels = cm.Labels
+		setOwnerRef(&cur.ObjectMeta, spec.OwnerRef) // back-fill on existing children
 		if _, err := cmApi.Update(ctx, cur, metav1.UpdateOptions{}); err != nil {
 			return fmt.Errorf("update configmap: %w", err)
 		}
 	}
 
 	svc := k.render.RenderService(spec)
+	setOwnerRef(&svc.ObjectMeta, spec.OwnerRef)
 	svcApi := k.cs.CoreV1().Services(k.ns)
 	if cur, err := svcApi.Get(ctx, svc.Name, metav1.GetOptions{}); apierrors.IsNotFound(err) {
 		if _, err := svcApi.Create(ctx, svc, metav1.CreateOptions{}); err != nil {
@@ -138,12 +179,14 @@ func (k *K8sCluster) ApplyCompute(ctx context.Context, spec ComputeSpec) error {
 		cur.Spec.Ports = svc.Spec.Ports
 		cur.Spec.PublishNotReadyAddresses = svc.Spec.PublishNotReadyAddresses
 		cur.Labels = svc.Labels
+		setOwnerRef(&cur.ObjectMeta, spec.OwnerRef)
 		if _, err := svcApi.Update(ctx, cur, metav1.UpdateOptions{}); err != nil {
 			return fmt.Errorf("update service: %w", err)
 		}
 	}
 
 	dep := k.render.RenderDeployment(spec)
+	setOwnerRef(&dep.ObjectMeta, spec.OwnerRef)
 	depApi := k.cs.AppsV1().Deployments(k.ns)
 	if cur, err := depApi.Get(ctx, dep.Name, metav1.GetOptions{}); apierrors.IsNotFound(err) {
 		if _, err := depApi.Create(ctx, dep, metav1.CreateOptions{}); err != nil {
@@ -157,6 +200,7 @@ func (k *K8sCluster) ApplyCompute(ctx context.Context, spec ComputeSpec) error {
 		cur.Spec = dep.Spec
 		cur.Spec.Replicas = liveReplicas
 		cur.Labels = dep.Labels
+		setOwnerRef(&cur.ObjectMeta, spec.OwnerRef)
 		if _, err := depApi.Update(ctx, cur, metav1.UpdateOptions{}); err != nil {
 			return fmt.Errorf("update deployment: %w", err)
 		}
@@ -171,6 +215,7 @@ func (k *K8sCluster) ApplyCompute(ctx context.Context, spec ComputeSpec) error {
 // the apps-gateway RO lane that scales the pool 0<->N on read connections.
 func (k *K8sCluster) ApplyROCompute(ctx context.Context, spec ROComputeSpec) error {
 	svc := k.render.RenderROService(spec)
+	setOwnerRef(&svc.ObjectMeta, spec.OwnerRef)
 	svcApi := k.cs.CoreV1().Services(k.ns)
 	if cur, err := svcApi.Get(ctx, svc.Name, metav1.GetOptions{}); apierrors.IsNotFound(err) {
 		if _, err := svcApi.Create(ctx, svc, metav1.CreateOptions{}); err != nil {
@@ -183,12 +228,14 @@ func (k *K8sCluster) ApplyROCompute(ctx context.Context, spec ROComputeSpec) err
 		cur.Spec.Ports = svc.Spec.Ports
 		cur.Spec.PublishNotReadyAddresses = svc.Spec.PublishNotReadyAddresses
 		cur.Labels = svc.Labels
+		setOwnerRef(&cur.ObjectMeta, spec.OwnerRef)
 		if _, err := svcApi.Update(ctx, cur, metav1.UpdateOptions{}); err != nil {
 			return fmt.Errorf("update ro service: %w", err)
 		}
 	}
 
 	dep := k.render.RenderRODeployment(spec)
+	setOwnerRef(&dep.ObjectMeta, spec.OwnerRef)
 	depApi := k.cs.AppsV1().Deployments(k.ns)
 	if cur, err := depApi.Get(ctx, dep.Name, metav1.GetOptions{}); apierrors.IsNotFound(err) {
 		if _, err := depApi.Create(ctx, dep, metav1.CreateOptions{}); err != nil {
@@ -202,6 +249,7 @@ func (k *K8sCluster) ApplyROCompute(ctx context.Context, spec ROComputeSpec) err
 		cur.Spec = dep.Spec
 		cur.Spec.Replicas = liveReplicas
 		cur.Labels = dep.Labels
+		setOwnerRef(&cur.ObjectMeta, spec.OwnerRef)
 		if _, err := depApi.Update(ctx, cur, metav1.UpdateOptions{}); err != nil {
 			return fmt.Errorf("update ro deployment: %w", err)
 		}
@@ -217,6 +265,7 @@ func (k *K8sCluster) ApplyROCompute(ctx context.Context, spec ROComputeSpec) err
 		}
 		return nil
 	}
+	setOwnerRef(&hpa.ObjectMeta, spec.OwnerRef)
 	if cur, err := hpaApi.Get(ctx, hpa.Name, metav1.GetOptions{}); apierrors.IsNotFound(err) {
 		if _, err := hpaApi.Create(ctx, hpa, metav1.CreateOptions{}); err != nil {
 			return fmt.Errorf("create ro hpa: %w", err)
@@ -226,6 +275,7 @@ func (k *K8sCluster) ApplyROCompute(ctx context.Context, spec ROComputeSpec) err
 	} else {
 		cur.Spec = hpa.Spec
 		cur.Labels = hpa.Labels
+		setOwnerRef(&cur.ObjectMeta, spec.OwnerRef)
 		if _, err := hpaApi.Update(ctx, cur, metav1.UpdateOptions{}); err != nil {
 			return fmt.Errorf("update ro hpa: %w", err)
 		}

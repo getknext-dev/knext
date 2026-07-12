@@ -42,6 +42,11 @@ func (d *Deps) reconcileApply(ctx context.Context, cr *AppDatabase) (bool, error
 	app := cr.Spec.AppName
 	role := d.RolePrefix + app
 
+	// Controller ownerReference stamped on every child so k8s cascade-GC reaps them on
+	// CR delete (defense-in-depth over the finalizer, #122). Nil when the CR has no UID
+	// (dangling-owner guard); each apply then leaves ownerReferences untouched.
+	owner := cr.ownerRef()
+
 	// 1. Finalizer FIRST — before any external resource exists, so delete always
 	//    runs safe deprovision (issue #91). Persisted on the object, not status.
 	if !cr.hasFinalizer() {
@@ -84,9 +89,16 @@ func (d *Deps) reconcileApply(ctx context.Context, cr *AppDatabase) (bool, error
 			return true, fmt.Errorf("scram verifier: %w", verr)
 		}
 		dsn := fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=disable", role, pw, d.GatewayHost, d.GatewayPort, app)
-		if err := d.Cluster.CreateSecret(ctx, app, role, pw, verifier, dsn); err != nil {
+		if err := d.Cluster.CreateSecret(ctx, app, role, pw, verifier, dsn, owner); err != nil {
 			return true, fmt.Errorf("mint credential: %w", err)
 		}
+	}
+
+	// 3a. Back-fill the ownerReference on an already-existing Secret (live apps minted
+	//     before ownerRefs, or by provision-app.sh) so k8s cascade-GC covers them too
+	//     (#122). Idempotent; never touches PGPASSWORD/DATABASE_URL.
+	if err := d.Cluster.EnsureSecretOwnerRef(ctx, app, owner); err != nil {
+		return true, fmt.Errorf("ensure secret ownerRef: %w", err)
 	}
 
 	// 3b. Reconcile the read-only DSN key (DATABASE_URL_RO) on the per-app Secret to
@@ -113,6 +125,7 @@ func (d *Deps) reconcileApply(ctx context.Context, cr *AppDatabase) (bool, error
 		TimelineID: tl,
 		Replicas:   cr.desiredReplicas(),
 		Quotas:     quotas,
+		OwnerRef:   owner,
 	}); err != nil {
 		return true, fmt.Errorf("apply compute: %w", err)
 	}
@@ -131,6 +144,7 @@ func (d *Deps) reconcileApply(ctx context.Context, cr *AppDatabase) (bool, error
 			TimelineID:  tl,
 			MinReplicas: cr.Spec.ROPool.MinReplicas,
 			MaxReplicas: cr.Spec.ROPool.MaxReplicas,
+			OwnerRef:    owner,
 		}); err != nil {
 			return true, fmt.Errorf("apply ro compute: %w", err)
 		}

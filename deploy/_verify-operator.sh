@@ -133,6 +133,20 @@ CPULIM="$(K get deploy "compute-$APP" -o jsonpath='{.spec.template.spec.containe
 [ "$CPULIM" = "1500m" ] || fail "quota not applied: cpu limit=$CPULIM want 1500m"
 ok "Deployment+Service+ConfigMap+Secret created, finalizer set, quota applied (cpu=$CPULIM)"
 
+# 2a. controller ownerReferences on the children (#122): native cascade-GC covers
+#     deletion even if the finalizer is force-removed while the operator is down.
+CRUID="$(K get appdatabase "$APP" -o jsonpath='{.metadata.uid}')"
+[ -n "$CRUID" ] || fail "AppDatabase has no UID (cannot own children)"
+owned_by() { # owned_by <kind> <name>
+  K get "$1" "$2" -o jsonpath="{.metadata.ownerReferences[?(@.uid=='$CRUID')].controller}" 2>/dev/null || true
+}
+for pair in "deploy/compute-$APP" "svc/compute-$APP" "configmap/compute-config-$APP" "secret/app-db-$APP"; do
+  kind="${pair%%/*}"; name="${pair#*/}"
+  [ "$(owned_by "$kind" "$name")" = "true" ] \
+    || fail "$kind/$name lacks a controller ownerReference to AppDatabase $APP (uid=$CRUID)"
+done
+ok "children carry a controller ownerReference to the AppDatabase (native cascade-GC, #122)"
+
 # 2b. external-driver status contract (#119): status.secretName names the output
 #     Secret so a driver reads it instead of reconstructing "app-db-<app>".
 SECNAME="$(cr_status secretName)"

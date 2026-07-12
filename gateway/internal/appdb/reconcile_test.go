@@ -64,8 +64,9 @@ type fakeCluster struct {
 	roKeys        map[string]string // app -> DATABASE_URL_RO (set/removed by EnsureSecretROKey)
 	createdSecret []string
 	applied       []ComputeSpec
-	roApplied     map[string]ROComputeSpec // app -> RO compute spec (ApplyROCompute)
-	roDeleted     []string                 // apps whose RO compute was deleted
+	roApplied     map[string]ROComputeSpec          // app -> RO compute spec (ApplyROCompute)
+	roDeleted     []string                          // apps whose RO compute was deleted
+	secretOwner   map[string]*metav1.OwnerReference // app -> ownerRef back-filled onto the Secret (#122)
 	deleted       []string
 	depAvailable  bool
 	pending       map[string]string
@@ -87,10 +88,16 @@ func newFakeCluster() *fakeCluster {
 func (c *fakeCluster) SecretExists(_ context.Context, app string) (bool, error) {
 	return c.secrets[app], nil
 }
-func (c *fakeCluster) CreateSecret(_ context.Context, app, _, _, _, dsn string) error {
+func (c *fakeCluster) CreateSecret(_ context.Context, app, _, _, _, dsn string, owner *metav1.OwnerReference) error {
 	c.secrets[app] = true
 	c.writerDSN[app] = dsn
 	c.createdSecret = append(c.createdSecret, app)
+	if owner != nil {
+		if c.secretOwner == nil {
+			c.secretOwner = map[string]*metav1.OwnerReference{}
+		}
+		c.secretOwner[app] = owner
+	}
 	return nil
 }
 
@@ -114,6 +121,20 @@ func (c *fakeCluster) EnsureSecretROKey(_ context.Context, app string, enabled b
 }
 func (c *fakeCluster) ApplyCompute(_ context.Context, spec ComputeSpec) error {
 	c.applied = append(c.applied, spec)
+	return nil
+}
+
+// EnsureSecretOwnerRef records the controller ownerRef the reconciler wants
+// back-filled onto the per-app Secret (native cascade-GC, #122). A nil owner is a
+// no-op (the CR has no UID yet), mirroring K8sCluster.
+func (c *fakeCluster) EnsureSecretOwnerRef(_ context.Context, app string, owner *metav1.OwnerReference) error {
+	if c.secretOwner == nil {
+		c.secretOwner = map[string]*metav1.OwnerReference{}
+	}
+	if owner == nil {
+		return nil
+	}
+	c.secretOwner[app] = owner
 	return nil
 }
 func (c *fakeCluster) ApplyROCompute(_ context.Context, spec ROComputeSpec) error {

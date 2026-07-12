@@ -40,6 +40,10 @@ type ComputeSpec struct {
 	TimelineID string
 	Replicas   int
 	Quotas     Quotas
+	// OwnerRef is the controller ownerReference to the owning AppDatabase, stamped on
+	// the rendered children so k8s cascade-GC reaps them on CR delete (#122). Nil when
+	// the CR has no UID yet — the apply then leaves ownerReferences untouched.
+	OwnerRef *metav1.OwnerReference
 }
 
 // ROComputeSpec is the fully-resolved input to rendering an app's PER-APP read-only
@@ -57,6 +61,8 @@ type ROComputeSpec struct {
 	TimelineID  string
 	MinReplicas int // per-app HPA floor (0 = gateway-managed scale-to-zero, no HPA)
 	MaxReplicas int // per-app HPA ceiling (0 = no HPA rendered)
+	// OwnerRef is the controller ownerReference to the owning AppDatabase (#122).
+	OwnerRef *metav1.OwnerReference
 }
 
 // ClusterOps is everything the reconciler needs from the API server: the per-app
@@ -66,8 +72,14 @@ type ClusterOps interface {
 	// SecretExists reports whether the per-app credential Secret already exists.
 	SecretExists(ctx context.Context, app string) (bool, error)
 	// CreateSecret mints the per-app credential Secret (role + SCRAM verifier + DSN).
-	// Only called when SecretExists is false, so a live app is never locked out.
-	CreateSecret(ctx context.Context, app, role, password, verifier, dsn string) error
+	// Only called when SecretExists is false, so a live app is never locked out. owner
+	// (nil-safe) is the controller ownerReference to the AppDatabase (#122).
+	CreateSecret(ctx context.Context, app, role, password, verifier, dsn string, owner *metav1.OwnerReference) error
+	// EnsureSecretOwnerRef back-fills the controller ownerReference on an EXISTING
+	// per-app Secret so live apps provisioned before ownerRefs (or by provision-app.sh)
+	// converge on the next reconcile (#122). Idempotent: no-op when owner is nil, the
+	// secret is absent, or the ref is already present. Never touches secret data.
+	EnsureSecretOwnerRef(ctx context.Context, app string, owner *metav1.OwnerReference) error
 	// EnsureSecretROKey reconciles the DATABASE_URL_RO key on the per-app Secret
 	// to match the read-replica-pool request (ADR-0006 #119). When enabled it
 	// derives DATABASE_URL_RO from the writer DATABASE_URL (same role/password/

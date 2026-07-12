@@ -1547,6 +1547,26 @@ disappears only once the plane is truly clean). `provision-app.sh reclaim-orphan
 is the independent backstop for residue (e.g. a CR force-deleted while a safekeeper
 was down).
 
+**Native cascade-GC on the children (owner references, #122).** Every child the
+operator creates — the per-app `Secret`, `ConfigMap`, writer `Deployment`+`Service`,
+and (when `roPool.enabled`) the RO `Deployment`/`Service`/`HPA` — carries a
+**controller `ownerReference` to its `AppDatabase`**. So on `kubectl delete
+appdatabase <app>`, Kubernetes garbage-collects the children **natively** (background
+cascade), independent of the operator's own reconcile-on-delete cleanup. This is
+defense-in-depth: if the finalizer is force-removed while the operator is **down**,
+the Deployment/Service/ConfigMap/Secret still reap via GC rather than orphaning (the
+Neon **branch** is separate — its safe two-sided reclaim still runs through the
+finalizer/`reclaim-orphans` path above). The refs are set on **both** create and
+reconcile, so live apps provisioned before this change (or by `provision-app.sh`)
+are **back-filled** on the next ~15 s resync — verify with `kubectl get deploy
+compute-<app> -o jsonpath='{.metadata.ownerReferences}'`. `blockOwnerDeletion` is
+left **false** on purpose (background delete does not need it, and it avoids an extra
+`appdatabases/finalizers` RBAC dependency); a CR with no UID never stamps a ref
+(an empty-UID owner would be treated as dangling and reaped). **Deploy note:** the
+operator runs from the multi-binary gateway image — after this merges, **roll the
+`appdb-operator` Deployment** to pick up the change; the first reconcile then
+back-fills existing apps. Merged ≠ deployed.
+
 **External-driver API (unified config, #119).** The `AppDatabase` CRD is also the
 stable API the **knext operator** drives to provision + wire a per-app database
 (ADR-0006). The full contract — status fields to wait on (`phase`, `Ready`,

@@ -10,6 +10,7 @@ package appdb
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 )
 
 // Group/Version/Resource for the AppDatabase CRD (deploy/82-appdb-crd.yaml).
@@ -147,6 +148,38 @@ func (a *AppDatabase) hasFinalizer() bool {
 
 // deleting reports whether the CR is pending deletion.
 func (a *AppDatabase) deleting() bool { return a.DeletionTimestamp != nil }
+
+// ownerRef returns a controller owner reference to this AppDatabase for the child
+// objects the operator creates (Secret / ConfigMap / Deployment / Service / HPA), so
+// k8s garbage-collects them NATIVELY when the CR is deleted — defense-in-depth over
+// the finalizer deprovision path: if the finalizer is force-removed while the
+// operator is down, the children still reap via ownerReference cascade GC (issue #122).
+//
+// Returns nil when the CR has no UID (a hand-built object in a test, or a CR not yet
+// persisted): an ownerReference with an EMPTY UID is dangerous — the GC controller
+// treats it as a dangling owner and would DELETE the child. Omitting it is the safe
+// default; the next reconcile of a persisted CR (UID populated) back-fills the ref.
+//
+// blockOwnerDeletion is false on purpose. Setting it true makes the
+// OwnerReferencesPermissionEnforcement admission plugin require the operator
+// ServiceAccount to hold `update` on the appdatabases/finalizers subresource — an
+// extra RBAC grant. Background cascade delete (the default when an AppDatabase is
+// deleted) reclaims the children without it, so we keep RBAC unchanged.
+func (a *AppDatabase) ownerRef() *metav1.OwnerReference {
+	if a.UID == "" {
+		return nil
+	}
+	controller := true
+	blockOwnerDeletion := false
+	return &metav1.OwnerReference{
+		APIVersion:         Group + "/" + Version,
+		Kind:               Kind,
+		Name:               a.Name,
+		UID:                types.UID(a.UID),
+		Controller:         &controller,
+		BlockOwnerDeletion: &blockOwnerDeletion,
+	}
+}
 
 // desiredReplicas is 1 for the warm tier, 0 (scale-to-zero) otherwise.
 func (a *AppDatabase) desiredReplicas() int {
