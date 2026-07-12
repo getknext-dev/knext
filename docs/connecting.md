@@ -243,12 +243,39 @@ gap; it does **not** mask the multi-second cold-**wake** latency a real app incu
 on a wrong password (that path wakes the compute first) — closing that fully would
 mean delaying every refusal by a full wake, a DoS lever we deliberately avoid.
 
-The DSN **database name is the app handle**: it routes to `compute-<app>` and wakes
-it. The gateway rewrites the database to the served DB (`postgres`) before
-replaying startup, so every branch serves its inherited schema — you do **not**
-create a database named `<app>` yourself. For **knext**, wire each app's
+The DSN **database name is the app handle, not a physical database (issue #123).**
+The `/<app>` path component in `DATABASE_URL` is a **routing handle**: it selects
+`compute-<app>` and wakes it, but it does **not** name a database you can open. Each
+app is its own **Neon branch (timeline)**, and every branch carries only the databases
+it inherited from the template — `postgres`, `template0`, `template1`. There is no
+database named `<app>`. Before replaying the startup packet, the apps-gateway
+**rewrites the requested database to the served DB** (`postgres`, configurable via
+`GW_SERVED_DATABASE`), so every connection lands on that branch's `postgres` database
+regardless of the `/<app>` you asked for. You do **not** create a database named
+`<app>` yourself.
+
+Concretely, on a connection through the apps-gateway:
+
+- `SELECT current_database()` returns **`postgres`**, *not* `<app>`.
+- `psql \conninfo` prints "connected to database `<app>`" — this echoes the name the
+  **client** requested and is cosmetic; it does **not** reflect the served database.
+- Anything that trusts the DSN dbname as a real, distinct database will surprise you:
+  `\c <app>`, `CREATE DATABASE <app>`, dbname-scoped connection assertions, and a few
+  ORMs/migration tools that verify `current_database()` against the URL. **Do not rely
+  on `/<app>` meaning a separate database** — treat it purely as the app's wake handle
+  and put your schema in the branch's `postgres` database (the default; it already
+  carries the inherited template schema).
+
+**This is intended behavior, and tenant isolation is unaffected.** Isolation is by
+**timeline/branch** — each app is a distinct Neon branch with its own credential
+(`app_<app>`) and its own `compute-<app>` — **not** by database name. App A can never
+read app B's data even though both serve a database called `postgres` on their own
+branches. (The apps-gateway also refuses any startup whose `(user, database)` pair is
+not `app_<app>/<app>` *before* it wakes anything — the handle still authenticates as
+`<app>`; only the *served* database is rewritten.) For **knext**, wire each app's
 `DATABASE_URL` Secret (`NextApp.spec.secrets.envMap`) straight from `app-db-<app>`
-(same shape as the primary contract) — one Secret per app, isolated by credential.
+(same shape as the primary contract) — one Secret per app, isolated by credential —
+knext uses the URL opaquely, so the dbname mapping is transparent to it.
 
 **Per-app read DSN (`DATABASE_URL_RO`).** When an app requests the read-replica
 pool (`AppDatabase.spec.roPool.enabled`, which knext maps from
