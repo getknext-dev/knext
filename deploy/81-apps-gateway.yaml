@@ -46,7 +46,7 @@ spec:
           # Digest-pinned (contract 22). Rebuild + re-pin on any gateway change. The
           # primary gateway (10-gateway.yaml) has no per-app path and is repinned
           # independently.
-          image: me-abudhabi-1.ocir.io/axfqznklsd2t/ks-pg/gateway:sha-d27a81e@sha256:d822630352f6a7b73fa276b7db54ded42ffe68b4b6d8247be98cc97ea0e244f2
+          image: me-abudhabi-1.ocir.io/axfqznklsd2t/ks-pg/gateway:sha-45dbec3@sha256:75b169364aada7f88e692626fc063907bfe4a51f3a8949fe0cb90e9d6624e6e6
           imagePullPolicy: IfNotPresent
           env:
             - name: GW_PORT
