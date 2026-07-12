@@ -116,15 +116,29 @@ export function kubectlRunner(args: readonly string[]): KubectlResult {
 }
 
 /**
- * Classification of a failed kubectl invocation (#230).
+ * Classification of a failed kubectl invocation (#230, P3).
  *
  * "not-found"  — the apiserver answered and said the resource is absent: a
  *                cluster-state FACT, kept as today's FAIL path.
  * "network"    — the probe never got an answer (refused / TLS / i/o timeout).
  * "auth"       — credentials failed (exec plugin, expired token, Unauthorized).
+ * "forbidden"  — authenticated but authorization denied (RBAC): the apiserver
+ *                answered, the resource may well exist — reporting "not found"
+ *                here would lie to a restricted user who merely lacks get/list.
  * "unknown"    — anything ambiguous: callers keep today's behavior.
+ *
+ * Known residual (accepted): RBAC that denies *discovery* surfaces as
+ * `error: the server doesn't have a resource type "<kind>"` — byte-identical
+ * to a genuinely absent CRD — so it still classifies "not-found". Conservative
+ * stderr matching cannot distinguish the two from stderr alone; fixing it
+ * would need an out-of-band probe (e.g. `kubectl auth can-i`).
  */
-export type KubectlFailureClass = "not-found" | "network" | "auth" | "unknown";
+export type KubectlFailureClass =
+    | "not-found"
+    | "network"
+    | "auth"
+    | "forbidden"
+    | "unknown";
 
 // Deliberately conservative signature lists — over-matching across kubectl
 // versions would misreport real cluster-state facts as probe errors.
@@ -144,12 +158,17 @@ const AUTH_SIGNATURES = [
     /\(Unauthorized\)/,
     /You must be logged in to the server/,
 ];
+// kubectl/apiserver literals only: `Error from server (Forbidden): …` and the
+// apiserver Status message `<resource> is forbidden: User "u" cannot …`.
+// Loose prose containing "forbidden" deliberately stays "unknown".
+const FORBIDDEN_SIGNATURES = [/\(Forbidden\)/, /forbidden: User/];
 
 /** Classify a failed kubectl call's stderr. Ambiguity → "unknown". */
 export function classifyKubectlFailure(stderr: string): KubectlFailureClass {
     // A NotFound answer implies the apiserver responded — it wins so genuine
     // cluster-state facts are never reclassified as probe errors.
     if (NOT_FOUND_SIGNATURES.some((re) => re.test(stderr))) return "not-found";
+    if (FORBIDDEN_SIGNATURES.some((re) => re.test(stderr))) return "forbidden";
     if (AUTH_SIGNATURES.some((re) => re.test(stderr))) return "auth";
     if (NETWORK_SIGNATURES.some((re) => re.test(stderr))) return "network";
     return "unknown";
@@ -169,8 +188,20 @@ interface InfraFailure {
  */
 function infraFailure(r: KubectlResult): InfraFailure | undefined {
     const cls = classifyKubectlFailure(r.stderr);
-    if (cls !== "network" && cls !== "auth") return undefined;
+    if (cls !== "network" && cls !== "auth" && cls !== "forbidden")
+        return undefined;
     const excerpt = r.stderr.trim().replace(/\s+/g, " ").slice(0, 160);
+    if (cls === "forbidden") {
+        // The apiserver names the denied resource in its Status message
+        // (`<resource> is forbidden: …`); fall back to a generic phrase when
+        // the stderr carries only the bare (Forbidden) marker.
+        const resource =
+            /(\S+) is forbidden:/.exec(r.stderr)?.[1] ?? "the probed resource";
+        return {
+            detail: `probe failed (rbac): ${excerpt}`,
+            hint: `insufficient RBAC — ask a cluster admin for get/list on ${resource}`,
+        };
+    }
     return cls === "auth"
         ? {
               detail: `probe failed (auth): ${excerpt}`,
