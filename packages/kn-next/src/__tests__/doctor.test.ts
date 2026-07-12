@@ -551,6 +551,174 @@ describe("runDoctor — probe-infra errors are not 'not found' (#230)", () => {
     });
 });
 
+// P3: RBAC-denied probes. A restricted user (`kubectl auth can-i list nextapps`
+// → no) gets `Error from server (Forbidden): …` — the apiserver ANSWERED, but
+// doctor must not report the operator/CRD as "not found" when the user merely
+// lacks get/list. Signatures are deliberately only the kubectl/apiserver
+// literals `(Forbidden)` and `forbidden: User` (conservative-matching stance).
+const FORBIDDEN_LIST_STDERR =
+    'Error from server (Forbidden): nextapps.apps.kn-next.dev is forbidden: User "system:serviceaccount:dev:restricted" cannot list resource "nextapps" in API group "apps.kn-next.dev" at the cluster scope';
+const FORBIDDEN_PLAIN_STDERR =
+    'Error from server (Forbidden): User "restricted" cannot get path "/apis/apiextensions.k8s.io/v1/customresourcedefinitions"';
+
+describe("classifyKubectlFailure (P3) — RBAC Forbidden", () => {
+    it("maps the full apiserver forbidden: User form to forbidden", () => {
+        expect(classifyKubectlFailure(FORBIDDEN_LIST_STDERR)).toBe("forbidden");
+    });
+
+    it("maps the plain (Forbidden) form to forbidden", () => {
+        expect(classifyKubectlFailure(FORBIDDEN_PLAIN_STDERR)).toBe(
+            "forbidden",
+        );
+    });
+
+    it("NotFound still wins when both markers are present (cluster-state facts first)", () => {
+        expect(
+            classifyKubectlFailure(
+                'Error from server (NotFound): nextapps.apps.kn-next.dev not found; earlier attempt was forbidden: User "x"',
+            ),
+        ).toBe("not-found");
+    });
+
+    it("does NOT match loose prose mentions of forbidden (stays unknown)", () => {
+        expect(
+            classifyKubectlFailure("the operation is forbidden by policy"),
+        ).toBe("unknown");
+    });
+
+    it("documented residual: discovery-denied RBAC surfaces as doesn't-have-a-resource-type and still classifies not-found", () => {
+        // Conservative stderr matching cannot distinguish this from a
+        // genuinely absent CRD — accepted residual, see the classifier doc.
+        expect(
+            classifyKubectlFailure(
+                'error: the server doesn\'t have a resource type "nextapps"',
+            ),
+        ).toBe("not-found");
+    });
+});
+
+describe("runDoctor — RBAC-denied probes are not 'not found' (P3)", () => {
+    async function crdCheckWith(stderr: string): Promise<{
+        crd: CheckResult;
+        exitCode: 0 | 1;
+    }> {
+        const stubs = healthyStubs();
+        stubs["kubectl get crd nextapps.apps.kn-next.dev -o json"] = {
+            ok: false,
+            stderr,
+        };
+        const report = await runDoctor({
+            kubectl: stubKubectl(stubs),
+            probeImage: okProbe,
+        });
+        return { crd: byId(report.checks).crd, exitCode: report.exitCode };
+    }
+
+    it("full forbidden: User stderr becomes an rbac ERROR naming the resource, not a not-found FAIL (exit 1)", async () => {
+        const { crd, exitCode } = await crdCheckWith(FORBIDDEN_LIST_STDERR);
+        expect(crd.status).toBe("error");
+        expect(crd.detail).not.toMatch(/not found/i);
+        expect(crd.detail).toContain("rbac");
+        expect(crd.hint).toMatch(/insufficient RBAC/);
+        expect(crd.hint).toMatch(/cluster admin/);
+        expect(crd.hint).toMatch(/get\/list/);
+        expect(crd.hint).toContain("nextapps.apps.kn-next.dev");
+        expect(exitCode).toBe(1);
+    });
+
+    it("plain (Forbidden) stderr becomes an rbac ERROR with the generic-resource hint", async () => {
+        const { crd } = await crdCheckWith(FORBIDDEN_PLAIN_STDERR);
+        expect(crd.status).toBe("error");
+        expect(crd.detail).not.toMatch(/not found/i);
+        expect(crd.hint).toMatch(/insufficient RBAC/);
+        expect(crd.hint).toMatch(/the probed resource/);
+    });
+
+    it("ambiguous stderr still keeps today's not-found FAIL behavior", async () => {
+        const { crd } = await crdCheckWith("some novel kubectl error");
+        expect(crd.status).toBe("fail");
+        expect(crd.detail).toMatch(/not found/i);
+    });
+
+    it("caps and sanitizes the resource token embedded in the RBAC hint (garbled stderr)", async () => {
+        // A garbled/hostile stderr token: an ANSI ESC + 200 chars. The hint
+        // must never carry control characters or an unbounded token.
+        const junkToken = `\u001b${"a".repeat(200)}`;
+        const { crd } = await crdCheckWith(
+            `Error from server (Forbidden): ${junkToken} is forbidden: User "x" cannot list it`,
+        );
+        expect(crd.status).toBe("error");
+        expect(crd.hint).not.toContain("\u001b");
+        const resource = crd.hint.split("get/list on ")[1];
+        expect(resource).toBe("a".repeat(80));
+    });
+
+    it("falls back to the generic phrase when the resource token sanitizes to nothing", async () => {
+        // The token is nothing but control characters (BEL+BS) — sanitization
+        // empties it, and the hint must not end in a dangling empty resource.
+        const { crd } = await crdCheckWith(
+            `Error from server (Forbidden): \u0007\u0008 is forbidden: User "x" cannot list it`,
+        );
+        expect(crd.status).toBe("error");
+        expect(crd.hint).toMatch(/the probed resource/);
+    });
+});
+
+// P3: the 160-char stderr excerpt cap + whitespace collapse in infraFailure
+// (flagged untested by the #231 sysdesign gate). Exercised through runDoctor —
+// the detail line is `probe failed (<class>): <excerpt>`.
+describe("runDoctor — infra-failure stderr excerpt bounds (P3)", () => {
+    const DETAIL_PREFIX = "probe failed (network): ";
+
+    async function crdDetailFor(stderr: string): Promise<string> {
+        const stubs = healthyStubs();
+        stubs["kubectl get crd nextapps.apps.kn-next.dev -o json"] = {
+            ok: false,
+            stderr,
+        };
+        const report = await runDoctor({
+            kubectl: stubKubectl(stubs),
+            probeImage: okProbe,
+        });
+        return byId(report.checks).crd.detail;
+    }
+
+    // "connection refused " (19 chars) + 141 filler = exactly 160 collapsed.
+    const exact160 = `connection refused ${"x".repeat(141)}`;
+
+    it("an exactly-160-char excerpt survives intact (no off-by-one truncation)", async () => {
+        expect(exact160).toHaveLength(160);
+        const detail = await crdDetailFor(exact160);
+        expect(detail).toBe(`${DETAIL_PREFIX}${exact160}`);
+    });
+
+    it("chars beyond 160 are dropped, keeping exactly the first 160", async () => {
+        const detail = await crdDetailFor(`${exact160}OVERFLOW`);
+        expect(detail).toBe(`${DETAIL_PREFIX}${exact160}`);
+        expect(detail).not.toContain("OVERFLOW");
+    });
+
+    it("collapses runs of whitespace (newlines/tabs) to single spaces and trims", async () => {
+        // NB: the signature must stay contiguous in the RAW stderr —
+        // classification happens before the excerpt collapse.
+        const detail = await crdDetailFor(
+            "  connection refused\n\tto   the server   10.0.0.1:6443  ",
+        );
+        expect(detail).toBe(
+            `${DETAIL_PREFIX}connection refused to the server 10.0.0.1:6443`,
+        );
+    });
+
+    it("caps AFTER collapsing, so whitespace never inflates the excerpt budget", async () => {
+        // 100 "y␠␠\n" groups collapse from 400 raw chars to 200 → cap at 160.
+        const raw = "connection refused ".concat("y  \n".repeat(100));
+        const collapsed = raw.trim().replace(/\s+/g, " ");
+        expect(collapsed.length).toBeGreaterThan(160);
+        const detail = await crdDetailFor(raw);
+        expect(detail).toBe(`${DETAIL_PREFIX}${collapsed.slice(0, 160)}`);
+    });
+});
+
 describe("parseImageRef", () => {
     it("splits registry / repository / reference for a digest-pinned ghcr ref", () => {
         expect(parseImageRef(OPERATOR_IMAGE)).toEqual({
