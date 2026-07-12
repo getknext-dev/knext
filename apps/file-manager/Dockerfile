@@ -45,6 +45,30 @@ RUN pnpm --filter file-manager build
 # node_modules/@knext/core, so the package specifier resolves with its deps.
 RUN pnpm --filter "@knext/core" --prod deploy --legacy /knext-core-runtime
 
+# Prune BUILD TOOLING that `pnpm deploy --prod` wrongly carries into the runtime
+# package. @knext/db declares drizzle-kit as an OPTIONAL peerDependency and pnpm
+# resolves it from the workspace (it is db's devDependency), so the deployed
+# "prod" tree ships drizzle-kit's dependency graph: @esbuild-kit/esm-loader →
+# esbuild@0.18.20 (a Go 1.20.7-built binary — 20 HIGH/CRITICAL Go-stdlib
+# findings, 2 CRITICAL), drizzle-kit's own esbuild@0.25.12 (Go 1.23.12 — 15
+# findings), tsx → esbuild@0.28.0, and @drizzle-team/brocli. None of it is
+# runtime code: this image's CMD only boots @knext/core/internal/node-server
+# (prom-client + pino); `kn-next db migrate` runs CLI-side in the app's own
+# tree, never inside this image. Same discipline as the npm/corepack strip in
+# the runner stage below (#199): remove what we don't run, don't suppress the
+# scanner. Guarded by tests/supply-chain-workflow.test.ts. The trailing
+# `! find …` is a self-check: fail the build if any esbuild binary survives.
+RUN rm -rf /knext-core-runtime/node_modules/.pnpm/esbuild@* \
+    /knext-core-runtime/node_modules/.pnpm/@esbuild+* \
+    /knext-core-runtime/node_modules/.pnpm/@esbuild-kit+* \
+    /knext-core-runtime/node_modules/.pnpm/tsx@* \
+    /knext-core-runtime/node_modules/.pnpm/drizzle-kit@* \
+    /knext-core-runtime/node_modules/.pnpm/@drizzle-team+* \
+    /knext-core-runtime/node_modules/.bin/tsx \
+    /knext-core-runtime/node_modules/.bin/esbuild \
+    /knext-core-runtime/node_modules/.bin/drizzle-kit \
+    && ! find /knext-core-runtime -type f -name esbuild -path '*bin*' | grep -q .
+
 # Build a clean, flat, production-only sharp install for THIS platform (musl) that
 # the runner stage can copy verbatim into the app's node_modules. We do NOT rely on
 # Next's standalone trace to carry sharp: Next's image optimizer require()s sharp
@@ -70,7 +94,14 @@ ENV PORT=3000
 # Install curl for healthcheck. sharp 0.35's musl prebuilt (@img/sharp-linuxmusl-*)
 # bundles its own libvips, so the `vips` apk package is NOT strictly required; we keep
 # it as a defensive fallback for any code path that prefers a global libvips. (#66 AC#3.)
-RUN apk add --no-cache curl vips
+#
+# `apk upgrade --no-cache` first: the digest-pinned base freezes the provenance of
+# the base bytes, but apk security fixes published AFTER that digest (e.g. c-ares
+# 1.34.8-r0 for CVE-2026-33630, pulled in via libcurl) would otherwise trip the
+# Trivy HIGH/CRITICAL gate until the next digest bump. The upgrade only pulls
+# published fixes from the SAME pinned alpine stable branch — it cannot float
+# the base to a different alpine release.
+RUN apk upgrade --no-cache && apk add --no-cache curl vips
 
 # Strip the package managers from the RUNTIME image (#199). The standalone server
 # never runs npm/corepack/yarn (the CMD is a bare `node`), and node:alpine's BUNDLED
