@@ -86,18 +86,29 @@ spec:
           capabilities:
             drop:
             - "ALL"
+        # Liveness stays a plain Ping (/healthz) — a pod waiting on
+        # cert-manager's cert mount is alive; it must be NotReady, never
+        # restarted. Do NOT point liveness at the webhook (#252).
         livenessProbe:
           httpGet:
             path: /healthz
             port: 8081
           initialDelaySeconds: 15
           periodSeconds: 20
+        # /readyz gates on the webhook server's TLS listener (StartedChecker
+        # in cmd/main.go, #252): the pod stays NotReady — and the Deployment
+        # un-Available — until the failurePolicy=Fail validating webhook can
+        # actually admit NextApps (#233 install race). Readiness failures
+        # never restart the pod, so slow cert issuance just delays Ready;
+        # keep the timing conservative anyway.
         readinessProbe:
           httpGet:
             path: /readyz
             port: 8081
           initialDelaySeconds: 5
           periodSeconds: 10
+          failureThreshold: 3
+          timeoutSeconds: 5
         # TODO(user): Configure the resources accordingly based on the project requirements.
         # More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
         resources:
