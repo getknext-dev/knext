@@ -1122,6 +1122,60 @@ doc-only (it no longer ships the literal default). Proven live by
 > (the md5 verifier is for the *same* password; the attacker still needs it), bounded
 > like the #112 window. Tracked in #158.
 
+#### Accepted residual: md5 cold-wake downgrade window (#158)
+
+**Decision: ACCEPT & document (2026-07-12).** This is an OWNED accepted risk, not a
+future "discovery." Both advisors (architect + system-designer, forward assessment)
+ruled the severity genuinely **LOW** and recommended accept-and-document over a patch:
+we do **not** patch `compute_ctl` (hard rule 5 — don't modify the reused Neon binary)
+and we do **not** build gateway-side pre-authentication (rejected in ADR-0008, Option A).
+
+**Mechanism (the detail above, restated for the register).** On a **genuine cold
+wake** of a per-app compute, `compute_ctl` opens the Postgres socket (~T=.90s) a few
+ms **before** `apply_config` lands the per-app SCRAM verifier (~T=.99s) — a **~85 ms
+window** measured live on OKE (`compute-node-v17:8464`). During it the pg_hba
+catch-all is still `compute_ctl`'s hardcoded `host all all all md5`, and the role
+carries its **boot-time durable verifier**. For an **md5-era** app (durable verifier
+still md5), the **first** post-cold-wake handshake landing in that window can negotiate
+**md5** (`method=md5` observed). This is rooted in a `compute_ctl` boot property we do
+not patch (hard rule 5): the OSS `ComputeSpec` exposes **no** boot-time pg_hba-method
+field, so there is no in-spec way to make the socket serve `scram-sha-256` at open.
+
+**Why the severity is LOW.**
+- It is a hash **DOWNGRADE** (md5 vs SCRAM) for the **same** password — **not** an
+  auth bypass. The attacker still needs the correct secret; a wake alone grants no
+  access.
+- **Cold-wake-only.** Every warm / steady-state connection negotiates SCRAM.
+- **md5-era-apps only.** **NEW** apps are provisioned SCRAM-durable (SCRAM verifier
+  from creation) and are **never** affected — a SCRAM durable verifier auto-negotiates
+  SCRAM even against the md5 pg_hba catch-all, so md5 is never offered.
+- The **cross-tenant direct-dial** step that would make a downgrade reachable off-path
+  is already closed: **#112**'s `cloud_admin` loopback-reject means a foreign pod
+  cannot dial `compute:55433` as superuser after a wake.
+- It is therefore the **same accepted class** as the documented #112 window — bounded,
+  observable, single-password, no new confidentiality break.
+
+**Forward path (track, don't gold-plate).**
+- **Very likely closed incidentally by the opt-in deterministic `/status` gate
+  (#174 design / #181 shipped / #182 live-enable, OPEN).** Once **LIVE-ENABLED**, the
+  gateway waits for `compute_ctl` `/status` = `"running"` (which is **post-`apply_config`**)
+  before replaying the client startup — so the first handshake no longer lands on the
+  pre-apply socket and should negotiate **SCRAM**. This is **to be VALIDATED in the
+  #182 enablement drill**: assert the first post-cold-wake connection is
+  `method=scram-sha-256`, **never** md5. Until #182 lands and that assertion is green,
+  the window stands as an accepted residual (the shipped default is the #132 bounded
+  settle, which does not itself close the downgrade).
+- **Belt-and-suspenders source fix (unsolved, tracked):** an operator-driven **durable
+  SCRAM-verifier re-mint** for md5-era apps — make each app's SCRAM verifier the
+  durable boot-time catalog state so the socket serves SCRAM even in the pre-apply
+  window. This is blocked on an **unsolved persistence problem**: the reporter's
+  `CHECKPOINT` + WAL-switch attempt did **not** survive `compute_ctl`'s per-boot
+  re-apply of the spec role.
+- **True fix is upstream:** a `compute_ctl` boot-time **pg_hba-method spec field**
+  (set `scram-sha-256` at socket-open). Out of scope here (hard rule 5).
+
+Cross-referenced in the accepted-risks register below (Kill-criteria tripwires §).
+
 > **Cold-wake role-apply reliability — the gateway absorbs the race (issue #132).**
 > The same `compute_ctl` property (socket open ~T=.90 **before** the spec role/password
 > is (re)applied ~T=.99) means the **very first** connection during a 0→1 cold wake could
@@ -2444,6 +2498,15 @@ live by `deploy/_verify-zone-deploy.sh disarm` (a simulated missing ConfigMap ma
 alert fire in one cycle, not 26h). This is a *durability* tripwire under KC-class
 "restore RTO / disk" — it does not add a new KC row; it removes a silent hole beneath
 the existing WAL-bound criteria.
+
+**Accepted security residuals (OWNED, not KC rows).** Bounded, documented risks the
+owner has explicitly **accepted** (severity LOW, no in-repo fix warranted) — recorded
+here so they are owned decisions, not future "discoveries":
+
+| Residual | Class | Bound | Fix posture |
+|---|---|---|---|
+| **md5 cold-wake downgrade window (#158)** | hash downgrade, not bypass | ~85 ms, **cold-wake-only**, **md5-era apps only**; new apps SCRAM-durable & never affected; #112 closes the cross-tenant direct-dial step | Accept & document (2026-07-12). No `compute_ctl` patch (hard rule 5), no gateway pre-auth (ADR-0008 Option A rejected). Likely closed incidentally by the `/status` gate (#181 shipped / #182 live-enable) — **to be validated in the #182 drill**; true fix upstream. See "Accepted residual: md5 cold-wake downgrade window (#158)" above. |
+| **Wake is triggerable, not pre-authenticated (#116 / ADR-0008)** | denial/cost side-channel | per-app wake budget + `53400` refusal + `WakeBudgetExceeded` alert; reachability-removal deferred to #118 (CNI) | Accept (B now + C via #118). ADR-0008 (ACCEPTED 2026-07-12). |
 
 ### Upgrading the storage plane — posture, triggers, and the rehearsal
 

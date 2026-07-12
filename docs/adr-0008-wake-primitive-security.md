@@ -1,7 +1,15 @@
 # ADR-0008 — Wake-primitive security: the wake is a bounded, observable shared-plane property, not a pre-authenticated one
 
-- **Status: PROPOSED — owner to ratify.** Closes the design half of issue #116
-  (unauthenticated wake side-channel). Decides HOW the wake primitive is secured
+- **Status: ACCEPTED — owner-ratified 2026-07-12** (was PROPOSED 2026-07-07). The
+  layered model (B ship-now rate-limit/budget/alert + C NetworkPolicy via #118) is
+  the ratified wake-primitive tenant-isolation answer; Option A (pre-auth) stays
+  rejected. **Ratification note:** the entire consequence set has SHIPPED — the
+  per-app wake budget + `53400` refusal + `WakeBudgetExceeded` alert (#116), the
+  wake-budget review (#165), the alert debounce (#184), and the residual accepted &
+  documented (#158, the md5 cold-wake downgrade window — see docs/operations.md
+  "Accepted residual: md5 cold-wake downgrade window (#158)"). This flip ratifies
+  what already shipped; the decision below is unchanged. Closes the design half of
+  issue #116 (unauthenticated wake side-channel). Decides HOW the wake primitive is secured
   now that the #112 data-plane superuser bypass is fixed: **not** by making the
   gateway authenticate before waking (rejected — see §Decision), but by a
   **layered control** — a per-app wake **rate-limit + budget + alert** shipped now
@@ -24,7 +32,11 @@
 
 ---
 
-## OPEN DECISION FOR THE OWNER (read first)
+## THE DECISION (RATIFIED 2026-07-12 — read first)
+
+> **RATIFIED.** The owner accepted the layered model on 2026-07-12; the text below
+> is retained as the decision record. Everything it decided has shipped (#116/#165/#184)
+> and the residual is accepted & documented (#158).
 
 **Ratify the layered model as the wake-primitive tenant-isolation answer — vs
 demanding full pre-authentication before wake.**
@@ -52,9 +64,8 @@ property, not a defect — the alternative (pre-auth, Option A below) trades a
 *confidentiality* property the platform does not need here for the *denial/cost*
 property it does, at the cost of the gateway's no-credentials design.
 
-**Owner call:** accept (B now + C via #118) as the wake-primitive isolation model,
-**or** direct the lane to build full pre-authentication (Option A) despite its
-cost. No further wake-primitive work should proceed until this is ratified.
+**Owner call (settled 2026-07-12):** accepted (B now + C via #118) as the
+wake-primitive isolation model; Option A (full pre-authentication) stays rejected.
 
 ---
 
