@@ -19,6 +19,7 @@ package main
 import (
 	"crypto/tls"
 	"flag"
+	"fmt"
 	"os"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
@@ -211,12 +212,8 @@ func main() {
 	}
 	// +kubebuilder:scaffold:builder
 
-	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
-		setupLog.Error(err, "Failed to set up health check")
-		os.Exit(1)
-	}
-	if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
-		setupLog.Error(err, "Failed to set up ready check")
+	if err := setupHealthChecks(mgr, len(webhookCertPath) > 0); err != nil {
+		setupLog.Error(err, "Failed to set up health/ready checks")
 		os.Exit(1)
 	}
 
@@ -225,4 +222,36 @@ func main() {
 		setupLog.Error(err, "Failed to run manager")
 		os.Exit(1)
 	}
+}
+
+// setupHealthChecks wires the manager's health/readiness endpoints (#252).
+//
+// Liveness (/healthz) is ALWAYS a plain Ping: a pod waiting on cert-manager's
+// cert mount is alive and must stay NotReady — never crash-loop.
+//
+// Readiness (/readyz) additionally gates on the webhook server's TLS listener
+// (controller-runtime's StartedChecker, which TLS-dials the serving port) when
+// the webhook is configured. The NextApp validating webhook has
+// failurePolicy=Fail, so a Ready pod whose webhook is not yet serving blocks
+// ALL NextApp writes with "connection refused" (#233). With this check,
+// Deployment Available ⇒ webhook admission works, which makes every
+// installer's natural `kubectl wait --for=condition=Available` sufficient.
+//
+// webhookEnabled MUST mirror the webhook-registration condition in main():
+// mgr.GetWebhookServer() registers the server as a manager runnable, so
+// calling it on a cert-less local run (`make run`) would make the manager try
+// — and fail — to serve TLS.
+func setupHealthChecks(mgr ctrl.Manager, webhookEnabled bool) error {
+	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
+		return fmt.Errorf("failed to set up health check: %w", err)
+	}
+	if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
+		return fmt.Errorf("failed to set up ready check: %w", err)
+	}
+	if webhookEnabled {
+		if err := mgr.AddReadyzCheck("webhook-started", mgr.GetWebhookServer().StartedChecker()); err != nil {
+			return fmt.Errorf("failed to set up webhook ready check: %w", err)
+		}
+	}
+	return nil
 }
