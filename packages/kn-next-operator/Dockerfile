@@ -7,7 +7,8 @@
 # build-info. A floating minor tag can resolve to an unpatched 1.25.x and leak
 # a fixable Go-stdlib CVE, failing operator-supply-chain.yml's
 # `trivy image --severity HIGH,CRITICAL --exit-code 1` gate on main and blocking
-# the whole bundle publish (refs #117). 1.25.11 is the latest patched 1.25 line.
+# the whole bundle publish (refs #117). 1.25.12 is the latest patched 1.25 line
+# (fixes CVE-2026-39822, os.Root symlink following, HIGH).
 # Bump this in lockstep with hack/check-trivy-baseimage.bats.sh (MIN_PATCH).
 #
 # DIGEST-PINNED in addition to the patched point release: the tag fixes the Go
@@ -16,9 +17,9 @@
 # image we build + sign. The tag is kept in this comment block (Docker rejects
 # trailing/inline comments on a FROM line); refresh the digest and this comment
 # together when bumping. Resolve with:
-#   docker buildx imagetools inspect golang:1.25.11
+#   docker buildx imagetools inspect golang:1.25.12
 # Enforced by scripts/check-base-images-pinned.sh (CI: base-image-pin-guard).
-FROM golang:1.25.11@sha256:995e25c0e1868fa30a57236d5d8c2252b94b8716e53eae5895cd70dcce532cf0 AS builder
+FROM golang:1.25.12@sha256:d7912cedddfa15b2900a8dfb7187df0af5ec2cb424a371139b5b352fd3e6b740 AS builder
 ARG TARGETOS
 ARG TARGETARCH
 

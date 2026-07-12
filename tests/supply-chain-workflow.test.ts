@@ -397,3 +397,54 @@ describe('file-manager image CVE remediation (#199)', () => {
     }
   });
 });
+
+// ── Build tooling must not ship in the runtime image (P3 v2, main runs
+// 29201513652 et al.) ─────────────────────────────────────────────────────────
+// `pnpm --filter @knext/core --prod deploy --legacy /knext-core-runtime`
+// resolves @knext/db's OPTIONAL peer drizzle-kit from the workspace (it is db's
+// devDependency), so the deployed prod tree carries drizzle-kit's dependency
+// graph: @esbuild-kit/esm-loader → esbuild@0.18.20 (a Go 1.20.7 binary — 20
+// HIGH/CRITICAL stdlib findings), esbuild@0.25.12 (Go 1.23.12 — 15 findings),
+// tsx → esbuild@0.28.0, @drizzle-team/brocli. None of it is runtime code: the
+// image CMD only boots @knext/core/internal/node-server (prom-client + pino);
+// `kn-next db migrate` runs CLI-side in the app's own tree, never in this
+// image. The remediation (same discipline as the npm/corepack strip above):
+// prune the build-tool graph from /knext-core-runtime in the BUILDER stage,
+// right after `pnpm deploy`, so the runner COPY never ships a Go-built
+// bundler binary Trivy has to scan.
+describe('file-manager image ships no esbuild-class build tooling (P3 v2)', () => {
+  const buildToolGlobs = ['esbuild', '@esbuild', '@esbuild-kit', 'tsx', 'drizzle'];
+
+  it('the builder stage prunes the drizzle-kit/esbuild graph from /knext-core-runtime after pnpm deploy', () => {
+    const dockerfile = readFileSync(DOCKERFILE_PATH, 'utf8').replace(/\\\n/g, ' ');
+    const deployIdx = dockerfile.search(/pnpm[^\n]*--prod deploy[^\n]*\/knext-core-runtime/);
+    expect(deployIdx, 'the builder must still pnpm-deploy @knext/core').toBeGreaterThan(-1);
+
+    const pruneMatch = dockerfile
+      .slice(deployIdx)
+      .match(/rm\s+-rf[^\n]*\/knext-core-runtime\/node_modules[^\n]*/);
+    expect(
+      pruneMatch,
+      'after pnpm deploy, the builder must rm -rf the build-tool packages from /knext-core-runtime/node_modules',
+    ).toBeTruthy();
+    const prune = (pruneMatch as RegExpMatchArray)[0];
+    for (const glob of buildToolGlobs) {
+      expect(
+        prune.includes(glob),
+        `the prune must cover "${glob}" (ships a Trivy-flagged Go binary or its dependents)`,
+      ).toBe(true);
+    }
+  });
+
+  it('the prune runs in the builder stage, before the runner COPYs /knext-core-runtime', () => {
+    const dockerfile = readFileSync(DOCKERFILE_PATH, 'utf8').replace(/\\\n/g, ' ');
+    const pruneIdx = dockerfile.search(/rm\s+-rf[^\n]*\/knext-core-runtime\/node_modules/);
+    const copyIdx = dockerfile.search(/COPY\s+--from=builder\s+\/knext-core-runtime/);
+    expect(pruneIdx, 'prune step must exist').toBeGreaterThan(-1);
+    expect(copyIdx, 'the runner must COPY /knext-core-runtime').toBeGreaterThan(-1);
+    expect(
+      pruneIdx < copyIdx,
+      'the prune must happen in the builder BEFORE the runner stage copies the runtime package',
+    ).toBe(true);
+  });
+});

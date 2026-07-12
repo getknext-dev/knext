@@ -40,7 +40,8 @@ FAILS=0
 
 # Minimum patched Go point release the builder must use. Bump this when a newer
 # Go stdlib CVE lands; it is the single knob that keeps the binary patched.
-MIN_PATCH=11
+# 12: CVE-2026-39822 (os.Root symlink following, HIGH) fixed in 1.25.12.
+MIN_PATCH=12
 
 assert() { # <desc> <cmd...>
   local desc="$1"; shift
