@@ -480,9 +480,16 @@ var _ = Describe("asset retention GC against a live cluster (ADR-0011)", Ordered
 
 		By(fmt.Sprintf("creating the fresh, dedicated app namespace %q (ownership label stamped at creation)", gcAppNamespace))
 		// The create stamps kn-next.dev/e2e-owned=true — the teardown guard's
-		// authorization; a pre-existing namespace is never adopted (plan P5).
+		// authorization; a pre-existing namespace is never adopted: an
+		// unlabeled "already exists" collision fails fast right here
+		// (ErrForeignNamespace), before MinIO/the app is deployed into it (plan P5).
 		Eventually(func(g Gomega) {
-			g.Expect(utils.CreateOwnedNamespace(gcAppNamespace)).To(Succeed())
+			err := utils.CreateOwnedNamespace(gcAppNamespace)
+			if errors.Is(err, utils.ErrForeignNamespace) {
+				StopTrying("ownership guard refused to run in a pre-existing, unowned namespace").
+					Wrap(err).Now()
+			}
+			g.Expect(err).NotTo(HaveOccurred())
 		}, 2*time.Minute, 10*time.Second).Should(Succeed())
 
 		By("waiting for the validating webhook to actually serve (Available ≠ webhook ready, #233)")

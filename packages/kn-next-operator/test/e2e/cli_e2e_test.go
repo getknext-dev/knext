@@ -307,11 +307,18 @@ var _ = Describe("kn-next CLI against a live cluster", Ordered, func() {
 		By(fmt.Sprintf("creating the fresh, dedicated app namespace %q (ownership label stamped at creation)", cliAppNamespace))
 		// utils.CreateOwnedNamespace stamps kn-next.dev/e2e-owned=true IN the
 		// create call — the teardown guard's authorization. A pre-existing
-		// namespace is never adopted ("already exists" leaves it untouched),
-		// so a KNEXT_E2E_NAMESPACE typo pointing at a foreign namespace on a
-		// shared cluster cannot be destroyed by the AfterAll below.
+		// namespace is never adopted: an "already exists" collision is only
+		// success when the namespace ALREADY carries the label, otherwise the
+		// suite fails fast RIGHT HERE (ErrForeignNamespace) — a
+		// KNEXT_E2E_NAMESPACE typo pointing at a foreign namespace on a shared
+		// cluster must not even be run in, let alone torn down.
 		Eventually(func(g Gomega) {
-			g.Expect(utils.CreateOwnedNamespace(cliAppNamespace)).To(Succeed())
+			err := utils.CreateOwnedNamespace(cliAppNamespace)
+			if errors.Is(err, utils.ErrForeignNamespace) {
+				StopTrying("ownership guard refused to run in a pre-existing, unowned namespace").
+					Wrap(err).Now()
+			}
+			g.Expect(err).NotTo(HaveOccurred())
 		}, 2*time.Minute, 10*time.Second).Should(Succeed(), "failed to create the app namespace")
 
 		By("waiting for the validating webhook to actually serve (Available ≠ webhook ready, #233)")

@@ -184,8 +184,10 @@ var _ = Describe("Install bundle (dist/install.yaml)", Ordered, func() {
 		By("creating the sample app namespace (ownership label stamped at creation)")
 		// utils.CreateOwnedNamespace stamps kn-next.dev/e2e-owned=true IN the
 		// create call — the AfterAll teardown guard's authorization (plan P5).
-		// "already exists" is tolerated (idempotent re-run on the same kind
-		// cluster), but a pre-existing namespace is never adopted/labeled.
+		// "already exists" is tolerated ONLY when the collided namespace
+		// already carries the label (idempotent re-run on the same kind
+		// cluster); an unlabeled pre-existing namespace is never adopted —
+		// the create fails fast with ErrForeignNamespace instead.
 		Expect(utils.CreateOwnedNamespace(bundleAppNamespace)).To(Succeed(),
 			"failed to create the sample app namespace")
 

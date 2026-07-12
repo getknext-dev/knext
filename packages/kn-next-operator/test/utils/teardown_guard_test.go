@@ -258,6 +258,57 @@ func TestOwnedNamespaceManifestStampsLabel(t *testing.T) {
 	}
 }
 
+// Creation-collision decision: "already exists" may only be treated as
+// idempotent-success when the collided namespace carries the ownership label
+// (a previous run's owned leftover / a retry after a half-committed create).
+// An UNLABELED collision means the suite is pointed at a foreign namespace
+// (KNEXT_E2E_NAMESPACE typo) and must fail fast AT CREATION — before any
+// Secret/NextApp/MinIO is deployed into it — not only at teardown.
+func TestDecideCreationCollision(t *testing.T) {
+	t.Run("labeled collision proceeds (idempotent retry / owned leftover)", func(t *testing.T) {
+		warning, err := DecideCreationCollision("e2e-cli-abc123", E2EOwnershipLabelValue, false)
+		if err != nil {
+			t.Fatalf("labeled collision must proceed, got: %v", err)
+		}
+		if warning != "" {
+			t.Fatalf("unexpected warning on the labeled path: %q", warning)
+		}
+	})
+
+	t.Run("unlabeled collision REFUSES at creation, loudly and actionably", func(t *testing.T) {
+		_, err := DecideCreationCollision("default", "", false)
+		if err == nil {
+			t.Fatal("unlabeled collision must be refused at creation")
+		}
+		if !errors.Is(err, ErrForeignNamespace) {
+			t.Fatalf("refusal must wrap ErrForeignNamespace (callers fail fast on it), got: %v", err)
+		}
+		msg := err.Error()
+		for _, want := range []string{"default", E2EOwnershipLabel, E2EForceTeardownEnv} {
+			if !strings.Contains(msg, want) {
+				t.Errorf("creation refusal must mention %q, got:\n%s", want, msg)
+			}
+		}
+	})
+
+	t.Run("wrong label value is still a refusal", func(t *testing.T) {
+		_, err := DecideCreationCollision("e2e-foo", "false", false)
+		if !errors.Is(err, ErrForeignNamespace) {
+			t.Fatalf("expected ErrForeignNamespace, got: %v", err)
+		}
+	})
+
+	t.Run("force override proceeds with a loud warning (deliberate reclaim of a pre-guard namespace)", func(t *testing.T) {
+		warning, err := DecideCreationCollision("e2e-aborted-old-run", "", true)
+		if err != nil {
+			t.Fatalf("force override must proceed, got: %v", err)
+		}
+		if warning == "" {
+			t.Fatal("force-override path must return a loud warning for the caller to log")
+		}
+	})
+}
+
 // Env parsing for the override: only explicit truthy values enable it.
 func TestForceTeardownEnvParsing(t *testing.T) {
 	for _, tc := range []struct {

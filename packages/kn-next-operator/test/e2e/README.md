@@ -81,13 +81,15 @@ not these Go suites.)
 These suites are explicitly designed to be runnable against shared clusters, so
 the guardrails are part of the contract, not decoration:
 
-1. **Teardown ownership guard (`test/utils/teardown_guard.go`).** The label
-   `kn-next.dev/e2e-owned=true` **is** the teardown authorization. It is stamped
-   only when a suite *creates* its namespace (`utils.CreateOwnedNamespace`, a
-   single `kubectl create` — a pre-existing namespace collides with
-   AlreadyExists and is **never adopted or labeled**). Every namespace deletion
-   goes through `utils.NamespaceDeletedConfirmed`, which consults the guard
-   first:
+1. **Namespace ownership guard (`test/utils/teardown_guard.go`).** The label
+   `kn-next.dev/e2e-owned=true` **is** the authorization. It is stamped only
+   when a suite *creates* its namespace (`utils.CreateOwnedNamespace`, a single
+   `kubectl create` — a pre-existing namespace is **never adopted or labeled**:
+   an AlreadyExists collision is only treated as idempotent success when the
+   namespace already carries the label, otherwise the suite **fails fast at
+   creation**, before deploying anything into it). The bundle/cli/rollback/gc
+   app-namespace deletions go through `utils.NamespaceDeletedConfirmed`, which
+   consults the guard first:
    - **existing-cluster mode requires the label** — name prefixes never
      authorize teardown there (a teammate's hand-made `e2e-foo` namespace on a
      shared cluster must survive a `KNEXT_E2E_NAMESPACE` typo);
@@ -96,8 +98,17 @@ the guardrails are part of the contract, not decoration:
    - refusal is loud (names the namespace, the missing label, and the
      override) and deterministic — the suites fail fast on it instead of
      retrying; `KNEXT_E2E_FORCE_TEARDOWN=1` is the explicit human escape hatch.
-   The decision is a pure function (`DecideTeardown`) with table tests in
+   The decisions are pure functions (`DecideTeardown`,
+   `DecideCreationCollision`) with table tests in
    `test/utils/teardown_guard_test.go`.
+   Honest scope note: the three legacy kind-only suites delete their fixed-name
+   namespaces directly, outside the guard (`e2e_test.go` →
+   `kn-next-operator-system`, `scale_to_zero_cache_test.go` →
+   `kn-next-scale-test`, `scale_from_zero_test.go` →
+   `kn-next-scalefromzero-test`). They never read `KNEXT_E2E_KUBE_CONTEXT` or
+   `KNEXT_E2E_NAMESPACE`, so the shared-cluster footgun the guard closes does
+   not apply to them; wiring them in is a possible follow-up, not a claim made
+   here.
 2. **Confirmed namespace deletion.** `NamespaceDeletedConfirmed` requires a
    NotFound read after the delete — a transient error can never fake a completed
    cleanup — and the namespace must be fully gone **before** any operator-bundle

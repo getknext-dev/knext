@@ -28,7 +28,12 @@ package utils
 //   - CreateOwnedNamespace stamps `kn-next.dev/e2e-owned=true` at namespace
 //     CREATION only. It uses `kubectl create` (never apply/label), so a
 //     pre-existing namespace is NEVER adopted — creation collides with
-//     AlreadyExists, the label stays absent, and teardown refuses.
+//     AlreadyExists, and the suite FAILS FAST right there unless the collided
+//     namespace already carries the label (an owned leftover / retried
+//     half-committed create). Failing at creation matters: without it a
+//     KNEXT_E2E_NAMESPACE typo would silently RUN the suite inside a foreign
+//     namespace (deploying its Secret/NextApp/MinIO there) and only trip the
+//     guard at teardown, leaving debris behind.
 //   - In existing-cluster mode the label is REQUIRED. Prefix-matching never
 //     authorizes teardown there: a teammate's hand-made `e2e-foo` namespace
 //     on a shared cluster is exactly the thing the guard protects.
@@ -78,6 +83,12 @@ const (
 // DETERMINISTIC (env + label state), so callers should fail fast on it
 // (ginkgo StopTrying) rather than retry.
 var ErrTeardownRefused = errors.New("e2e namespace teardown refused")
+
+// ErrForeignNamespace is wrapped when namespace CREATION collides with a
+// pre-existing namespace that does not carry the ownership label — the suite
+// must not run inside a namespace this infrastructure did not create. Like
+// ErrTeardownRefused it is deterministic: callers should fail fast on it.
+var ErrForeignNamespace = errors.New("e2e namespace is not owned by this test infrastructure")
 
 // dns1123Label is the K8s namespace-name shape. Anything else is refused
 // outright (also keeps shell-arg smuggling out of the kubectl calls).
@@ -169,12 +180,63 @@ metadata:
 `, ns, E2EOwnershipLabel, E2EOwnershipLabelValue)
 }
 
+// DecideCreationCollision is the PURE decision for an AlreadyExists collision
+// on CreateOwnedNamespace: nil error means the collision is benign (the
+// namespace carries the ownership label — a retried half-committed create or
+// an owned leftover being reclaimed) and the suite may proceed. An unlabeled
+// collision wraps ErrForeignNamespace: the suite is pointed at a namespace
+// this infrastructure did not create (KNEXT_E2E_NAMESPACE typo) and must fail
+// fast BEFORE deploying anything into it. Force (the same explicit human
+// override as teardown) proceeds with a loud warning the caller MUST log —
+// it is the deliberate-reclaim path for namespaces that predate the label.
+func DecideCreationCollision(ns, ownedLabel string, force bool) (warning string, err error) {
+	if ownedLabel == E2EOwnershipLabelValue {
+		return "", nil
+	}
+	if force {
+		return fmt.Sprintf(
+			"CREATION-COLLISION OVERRIDE: %s is set — running the suite in pre-existing namespace %q WITHOUT ownership authorization (label %s=%q is missing). This must be a deliberate human reclaim.",
+			E2EForceTeardownEnv, ns, E2EOwnershipLabel, E2EOwnershipLabelValue), nil
+	}
+	return "", fmt.Errorf(
+		"%w: namespace %q already exists and does not carry the ownership label %s=%q — refusing to run the suite inside a namespace this test infrastructure did not create (is KNEXT_E2E_NAMESPACE pointing at the wrong namespace?). If reclaiming it is deliberate, re-run with %s=1.",
+		ErrForeignNamespace, ns, E2EOwnershipLabel, E2EOwnershipLabelValue, E2EForceTeardownEnv)
+}
+
+// readNamespaceOwnership fetches the namespace and returns whether it exists
+// and the live value of the ownership label. Full-JSON read + Go-side parse
+// (NOT jsonpath): label keys with dots need jsonpath escaping that differs
+// across kubectl versions — encoding/json is deterministic everywhere.
+// A transient error (neither success nor NotFound) is returned as-is for the
+// caller's retry loop.
+func readNamespaceOwnership(ns string) (exists bool, ownedLabel string, err error) {
+	out, err := Kubectl("get", "ns", ns, "-o", "json")
+	switch {
+	case err == nil:
+		var obj struct {
+			Metadata struct {
+				Labels map[string]string `json:"labels"`
+			} `json:"metadata"`
+		}
+		if jerr := json.Unmarshal([]byte(out), &obj); jerr != nil {
+			return false, "", fmt.Errorf("could not parse namespace %s ownership read: %w", ns, jerr)
+		}
+		return true, obj.Metadata.Labels[E2EOwnershipLabel], nil
+	case strings.Contains(out, "NotFound"):
+		return false, "", nil
+	default:
+		return false, "", fmt.Errorf("could not read namespace %s ownership: %w", ns, err)
+	}
+}
+
 // CreateOwnedNamespace creates the namespace WITH the ownership label in one
-// `kubectl create` call. "already exists" is treated as success so the
-// callers' Eventually retry loops stay idempotent (a half-committed create on
-// a WAN blip already carried the label) — but a namespace that pre-existed
-// this run was NOT created here, keeps whatever labels it had, and is
-// therefore never adopted: its teardown will be refused by the guard.
+// `kubectl create` call. On an AlreadyExists collision it VERIFIES the
+// collided namespace carries the label before treating the collision as
+// idempotent success (a half-committed create on a WAN blip already carried
+// the label; an owned leftover may be reclaimed). An UNLABELED collision
+// fails fast with ErrForeignNamespace — the suite must never run inside a
+// namespace this infrastructure did not create (KNEXT_E2E_NAMESPACE typo),
+// not even up to teardown. KNEXT_E2E_FORCE_TEARDOWN=1 overrides, loudly.
 func CreateOwnedNamespace(ns string) error {
 	if !dns1123Label.MatchString(ns) || len(ns) > 63 {
 		return fmt.Errorf("invalid namespace name %q", ns)
@@ -182,10 +244,33 @@ func CreateOwnedNamespace(ns string) error {
 	cmd := exec.Command("kubectl", "create", "-f", "-")
 	cmd.Stdin = strings.NewReader(ownedNamespaceManifest(ns))
 	out, err := Run(cmd)
-	if err != nil && strings.Contains(out, "already exists") {
+	if err == nil {
 		return nil
 	}
-	return err
+	if !strings.Contains(out, "already exists") {
+		return err
+	}
+
+	// AlreadyExists: only an ownership-labeled namespace makes this benign.
+	exists, ownedLabel, rerr := readNamespaceOwnership(ns)
+	if rerr != nil {
+		return rerr // transient — caller's Eventually retries
+	}
+	if !exists {
+		// Vanished between the collision and the read (e.g. a Terminating
+		// namespace finished deleting): retryable — the next create attempt
+		// will stamp a fresh, owned namespace.
+		return fmt.Errorf("namespace %s vanished after a create collision; retry the create", ns)
+	}
+	warning, derr := DecideCreationCollision(ns, ownedLabel, forceTeardownEnabled())
+	if derr != nil {
+		return derr
+	}
+	if warning != "" {
+		_, _ = fmt.Fprintf(GinkgoWriter, "%s\n", warning)
+		_, _ = fmt.Fprintf(os.Stderr, "%s\n", warning)
+	}
+	return nil
 }
 
 // NamespaceTeardownAuthorized assembles the live TeardownRequest (namespace
@@ -208,30 +293,15 @@ func NamespaceTeardownAuthorized(ns string) error {
 		return err
 	}
 
-	// Full-JSON read + Go-side parse (NOT jsonpath): label keys with dots need
-	// jsonpath escaping that differs across kubectl versions — encoding/json
-	// is deterministic everywhere.
-	out, err := Kubectl("get", "ns", ns, "-o", "json")
-	switch {
-	case err == nil:
-		var obj struct {
-			Metadata struct {
-				Labels map[string]string `json:"labels"`
-			} `json:"metadata"`
-		}
-		if jerr := json.Unmarshal([]byte(out), &obj); jerr != nil {
-			// Unparseable read: NOT a refusal — surface it for retry.
-			return fmt.Errorf("could not parse namespace %s to authorize teardown: %w", ns, jerr)
-		}
-		req.NamespaceExists = true
-		req.OwnedLabel = obj.Metadata.Labels[E2EOwnershipLabel]
-	case strings.Contains(out, "NotFound"):
-		req.NamespaceExists = false
-	default:
-		// Transient (WAN blip / API hiccup): NOT a refusal — surface it so the
-		// caller's Eventually retries the read.
-		return fmt.Errorf("could not read namespace %s to authorize teardown: %w", ns, err)
+	// Live ownership read; a transient error (WAN blip / API hiccup /
+	// unparseable output) is NOT a refusal — it surfaces as-is so the
+	// caller's Eventually retries the read.
+	exists, ownedLabel, err := readNamespaceOwnership(ns)
+	if err != nil {
+		return fmt.Errorf("could not authorize teardown: %w", err)
 	}
+	req.NamespaceExists = exists
+	req.OwnedLabel = ownedLabel
 
 	warning, err := DecideTeardown(req)
 	if err != nil {
