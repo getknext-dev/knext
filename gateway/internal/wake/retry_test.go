@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -140,6 +141,86 @@ func TestWakeWithRetryInvokesOnWakeRetryPerRetry(t *testing.T) {
 	}
 	if len(retryAttempts) != 2 {
 		t.Fatalf("OnWakeRetry fired %d times (%v), want 2 (the two failed attempts)", len(retryAttempts), retryAttempts)
+	}
+}
+
+// ---- #192 polish: deadline-box, cancel-metric guard, exact retry count ------
+
+// A scaler whose Scale call HANGS (honoring its ctx) must be cancelled at the
+// wake deadline so the overall wake still fails BOUNDED within GW_WAKE_TIMEOUT_MS.
+// Before #192 the in-flight wakeFn ran under the un-deadlined client ctx, so a
+// single hung GetScale/UpdateScale could hang the client past the whole budget.
+func TestWakeWithRetryDeadlineBoxesHangingWakeFn(t *testing.T) {
+	// wakeFn blocks until its per-attempt ctx is cancelled — i.e. it HONORS the
+	// context, exactly as client-go's GetScale/UpdateScale do.
+	fn := func(c context.Context) error {
+		<-c.Done()
+		return c.Err()
+	}
+	budget := 200 * time.Millisecond
+	opts := Opts{WakeTimeoutMs: int(budget / time.Millisecond), WakeRetryBaseMs: 20}
+	deadline := time.Now().Add(budget)
+	done := make(chan error, 1)
+	go func() {
+		_, err := wakeWithRetry(context.Background(), opts, deadline, Target{Key: "orders"}, fn)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatalf("a hung wake must fail bounded, not succeed")
+		}
+	case <-time.After(budget + 2*time.Second):
+		t.Fatalf("hung wake was NOT deadline-boxed: wakeWithRetry did not return within budget %v", budget)
+	}
+}
+
+// A client hang-up (ctx cancel) DURING backoff must NOT bump the retry metric:
+// OnWakeRetry counts genuine retries, and a cancel is a cancel — not a retry.
+func TestWakeWithRetryClientCancelDoesNotCountAsRetry(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var retryCalls int32
+	fn := func(context.Context) error {
+		// Fail transiently, then cancel the client ctx so the loop bails in backoff.
+		cancel()
+		return transientErr
+	}
+	opts := Opts{
+		WakeTimeoutMs:   5000,
+		WakeRetryBaseMs: 50, // long enough that the ctx cancel wins the backoff select
+		OnWakeRetry: func(_ Target, _ int, _ error) {
+			atomic.AddInt32(&retryCalls, 1)
+		},
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	if _, err := wakeWithRetry(ctx, opts, deadline, Target{Key: "orders"}, fn); err == nil {
+		t.Fatalf("a cancelled wake must fail")
+	}
+	if n := atomic.LoadInt32(&retryCalls); n != 0 {
+		t.Fatalf("OnWakeRetry fired %d times on a client cancel, want 0 (cancel is not a retry)", n)
+	}
+}
+
+// The returned retry count must be EXACT — equal to (total wakeFn calls - 1) —
+// including the path where the deadline passes during the final backoff. Before
+// #192 that path returned `attempt` (off by one) instead of `attempt - 1`.
+func TestWakeWithRetryReportsExactRetryCountAtDeadline(t *testing.T) {
+	var calls int32
+	fn := func(context.Context) error {
+		atomic.AddInt32(&calls, 1)
+		return transientErr
+	}
+	budget := 200 * time.Millisecond
+	opts := Opts{WakeTimeoutMs: int(budget / time.Millisecond), WakeRetryBaseMs: 30, WakeMaxAttempts: 100}
+	deadline := time.Now().Add(budget)
+	retries, err := wakeWithRetry(context.Background(), opts, deadline, Target{Key: "orders"}, fn)
+	if err == nil {
+		t.Fatalf("a permanent transient failure must fail")
+	}
+	total := int(atomic.LoadInt32(&calls))
+	if retries != total-1 {
+		t.Fatalf("reported retries = %d, want total_calls-1 = %d (off-by-one in the deadline path)", retries, total-1)
 	}
 }
 

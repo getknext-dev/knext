@@ -2412,10 +2412,17 @@ exponential backoff + jitter**:
 - **Bounded by the wake budget.** Total retry time is clamped to
   `GW_WAKE_TIMEOUT_MS`; a genuinely-down apiserver still fails **bounded** — no
   hang past the timeout. `GW_WAKE_MAX_ATTEMPTS` is a belt-and-braces attempt cap.
+  Since #192 **each individual scale attempt is also deadline-boxed** at the same
+  budget (a `context.WithDeadline` threaded into the client-go call), so even a
+  single `GetScale`/`UpdateScale` that *hangs* is cancelled at the deadline rather
+  than consuming the client past the budget. No new knob — derived from
+  `GW_WAKE_TIMEOUT_MS`.
 - **Healthy path unchanged.** Retry fires only on error, so a normal wake pays
   zero added latency.
-- **Observability.** Each retried blip bumps `pggw_wake_retries_total` and logs
-  `transient wake scale error (attempt N), retrying within wake budget`. A rising
+- **Observability.** Each **genuine** retried blip bumps `pggw_wake_retries_total`
+  and logs `transient wake scale error (attempt N), retrying within wake budget`.
+  Since #192 a client hang-up (ctx cancel) *during* backoff no longer counts as a
+  retry — the metric reflects only attempts the gateway actually re-issued. A rising
   `pggw_wake_retries_total` with a flat `pggw_wake_failures_total` is
   *retried-then-succeeded*; rising alongside `pggw_wake_failures_total` is
   *failed-after-retries* (sustained outage). Tune with `GW_WAKE_RETRY_BASE_MS` /

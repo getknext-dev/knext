@@ -71,7 +71,15 @@ func wakeWithRetry(ctx context.Context, opts Opts, deadline time.Time, t Target,
 
 	backoff := base
 	for attempt := 1; ; attempt++ {
-		err = wakeFn(ctx)
+		// Deadline-box each attempt at the wake budget so a single HUNG scale call
+		// (a GetScale/UpdateScale that never returns) is itself cancelled at the
+		// deadline instead of consuming the client indefinitely — the overall wake
+		// then still fails BOUNDED within GW_WAKE_TIMEOUT_MS. The scaler HONORS this
+		// ctx (client-go GetScale/UpdateScale take it), so cancellation is real; the
+		// remaining budget is time.Until(deadline), which the fixed deadline captures.
+		attemptCtx, cancel := context.WithDeadline(ctx, deadline)
+		err = wakeFn(attemptCtx)
+		cancel()
 		if err == nil {
 			return attempt - 1, nil
 		}
@@ -92,16 +100,23 @@ func wakeWithRetry(ctx context.Context, opts Opts, deadline time.Time, t Target,
 		if sleep > remaining {
 			sleep = remaining
 		}
-		if opts.OnWakeRetry != nil {
-			opts.OnWakeRetry(t, attempt, err)
-		}
 		select {
 		case <-ctx.Done():
+			// A client hang-up (or overall-budget cancel) during backoff is a CANCEL,
+			// not a retry: return WITHOUT firing OnWakeRetry so pggw_wake_retries_total
+			// is not spuriously bumped for a connection that went away.
 			return attempt - 1, fmt.Errorf("wake scale call cancelled after %d attempts: %w", attempt, err)
 		case <-time.After(sleep):
 		}
 		if !time.Now().Before(deadline) {
-			return attempt, fmt.Errorf("wake scale call failed within budget after %d attempts: %w", attempt, err)
+			// Backoff consumed the remaining budget: stop without another attempt.
+			// Retries performed = attempt - 1 (the initial try plus attempt-1 retries).
+			return attempt - 1, fmt.Errorf("wake scale call failed within budget after %d attempts: %w", attempt, err)
+		}
+		// Committed to another attempt (survived the ctx-cancel and deadline checks):
+		// this is a GENUINE retry — count it now so the metric matches reality.
+		if opts.OnWakeRetry != nil {
+			opts.OnWakeRetry(t, attempt, err)
 		}
 		if backoff = backoff * 2; backoff > maxWakeBackoff {
 			backoff = maxWakeBackoff
