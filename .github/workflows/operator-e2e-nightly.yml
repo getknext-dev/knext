@@ -298,3 +298,99 @@ jobs:
       - name: Tear down kind cluster
         if: always()
         run: kind delete cluster --name kn-next-operator-test-e2e || true
+
+  # Asset-GC e2e (build tag `e2e_gc`, plan P4): proves the ADR-0011 live-set
+  # guarantee — "never reap a pinned/live revision's assets" — END TO END
+  # (test/e2e/asset_gc_e2e_test.go). The suite deploys a digest-pinned MinIO
+  # inside its throwaway namespace, seeds the exact ADR-0008
+  # `<app>/_next/static/<build-id>/` layout via the S3 API (the approved
+  # budget shortcut — no 4× `next build`; the suite documents what that does
+  # NOT prove), rolls real labeled revisions (spec.buildId → the operator's
+  # `apps.kn-next.dev/build-id` revision label), pins the OLDEST via the REAL
+  # `kn-next rollback --to`, and drives the REAL `kn-next gc` — the exact
+  # runAssetGC wiring `kn-next deploy` runs after shipping. Assertions:
+  # pinned + newest-retain prefixes SURVIVE, unpinned-old prefixes REAPED,
+  # reserved chunks/css/media + bare `<app>/` untouched, and the fail-safe
+  # over-keep skip fires when a live revision lacks the build-id label.
+  # SAFETY GATE: before ANY delete the suite proves its S3 endpoint is the
+  # loopback port-forward to the in-cluster test MinIO (endpoint-canary found
+  # in the pod's /data via kubectl exec) — a mis-wired endpoint can never
+  # reach a real bucket.
+  #
+  # NIGHTLY/DISPATCH ONLY, never PR-gating (plan gate). INDEPENDENT job (own
+  # kind cluster) so a scale/cli/rollback flake never blocks it. Deliberately
+  # NO continue-on-error: every assertion is state-based (object listings,
+  # revision labels, CR status), so a failure here is signal, not noise —
+  # and a failure in THIS suite means a GC bug that deletes user data.
+  gc-e2e:
+    name: kn-next asset-GC live-set guarantee against kind (e2e_gc)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: packages/kn-next-operator/go.mod
+          cache-dependency-path: packages/kn-next-operator/go.sum
+
+      # The suite shells out to the built CLI with plain `node` and builds it
+      # via `pnpm --filter @knext/core build` — so the job needs Node + pnpm
+      # (version pinned by `packageManager` in package.json) + workspace deps.
+      # The `aws` CLI (the s3 storage provider's data plane) is preinstalled
+      # on ubuntu-latest runners and honors AWS_ENDPOINT_URL (v2.13+).
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Install workspace dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Install kind
+        uses: helm/kind-action@v1
+        with:
+          install_only: true
+
+      - name: Create kind cluster
+        run: kind create cluster --name kn-next-operator-test-e2e --wait 120s
+
+      - name: Install cert-manager (operator webhook certs)
+        run: |
+          set -euo pipefail
+          kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.16.2/cert-manager.yaml
+          kubectl wait --for=condition=Available --timeout=300s \
+            -n cert-manager deployment/cert-manager deployment/cert-manager-webhook deployment/cert-manager-cainjector
+
+      - name: Install Knative Serving + Kourier
+        # Kourier is load-bearing: without a programmed ingress the ksvc never
+        # becomes Ready, status.currentTraffic stays empty, and the GC's input
+        # (the live traffic set) never materializes.
+        run: |
+          set -euo pipefail
+          KNATIVE_VERSION="knative-v1.16.0"
+          kubectl apply -f "https://github.com/knative/serving/releases/download/${KNATIVE_VERSION}/serving-crds.yaml"
+          kubectl apply -f "https://github.com/knative/serving/releases/download/${KNATIVE_VERSION}/serving-core.yaml"
+          kubectl apply -f "https://github.com/knative/net-kourier/releases/download/${KNATIVE_VERSION}/kourier.yaml"
+          kubectl patch configmap/config-network \
+            --namespace knative-serving \
+            --type merge \
+            --patch '{"data":{"ingress-class":"kourier.ingress.networking.knative.dev"}}'
+          kubectl wait --for=condition=Available --timeout=300s \
+            -n knative-serving deployment/controller deployment/webhook deployment/autoscaler
+          kubectl wait --for=condition=Available --timeout=300s \
+            -n knative-serving deployment/net-kourier-controller
+
+      - name: Run asset-GC e2e suite (live-set guarantee / fail-safe skip)
+        working-directory: packages/kn-next-operator
+        env:
+          KIND_CLUSTER: kn-next-operator-test-e2e
+        run: make test-e2e-gc
+
+      - name: Tear down kind cluster
+        if: always()
+        run: kind delete cluster --name kn-next-operator-test-e2e || true

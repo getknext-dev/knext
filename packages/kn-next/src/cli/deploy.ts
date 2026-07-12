@@ -21,12 +21,7 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import type { KnativeNextConfig } from "../config";
-import { parseLiveRevisionNames, resolveLiveBuildIds } from "../utils/asset-gc";
-import {
-    getAssetPrefix,
-    pruneOldBuilds,
-    uploadAssets,
-} from "../utils/asset-upload";
+import { getAssetPrefix, uploadAssets } from "../utils/asset-upload";
 import { createLogger } from "../utils/logger";
 import {
     renderNextAppCR,
@@ -34,6 +29,7 @@ import {
     validateCRImageRef,
 } from "./cr-builder";
 import { isEntrypoint, runCapture, runInherit, runQuiet } from "./exec";
+import { runAssetGC } from "./gc";
 import { loadConfig } from "./shared";
 
 const log = createLogger({ module: "deploy" });
@@ -116,6 +112,7 @@ function parseCliArgs(): DeployOptions {
                 "  doctor            cluster-prereq preflight (read-only; --json)",
                 "  status            show the NextApp's honest conditions (read-only; --json, --watch)",
                 "  rollback          pin traffic to a prior Knative Revision (--to, --canary)",
+                "  gc                reap old _next/static/<build-id>/ asset prefixes (skew-protection GC)",
                 "",
                 "Options:",
                 "  -r, --registry  Container registry (overrides config)",
@@ -358,51 +355,18 @@ async function deploy() {
 
     // #93 skew-protection retention GC (ADR-0011). Reap old `_next/static/<id>/`
     // prefixes that are outside the retain window AND not currently serving
-    // traffic. Everything below is READ-ONLY (ADR-0001: the CLI never mutates the
-    // cluster). Defect-B fix: the live set is the RESOLVED build-id of each live
-    // revision, looked up from the `apps.kn-next.dev/build-id` label the operator
-    // stamps onto every revision — NOT a substring of the revision name (which
-    // does not contain the build-id; the image is digest-pinned). FAIL-SAFE: if
-    // any live revision cannot be resolved to a build-id, we SKIP the GC entirely
-    // (over-keep, never over-delete). Best-effort: a GC failure never fails a
-    // deploy that has already shipped.
+    // traffic. The whole chain (status.currentTraffic → resolve each live
+    // revision's `apps.kn-next.dev/build-id` label → live set, with the
+    // fail-safe over-keep skip) lives in runAssetGC — shared verbatim with the
+    // standalone `kn-next gc` subcommand so the e2e_gc suite proves THIS exact
+    // wiring. Everything against the cluster is READ-ONLY (ADR-0001).
+    // Best-effort: a GC failure never fails a deploy that has already shipped.
     if (!options.skipUpload) {
         try {
-            const trafficJson = runCapture([
-                "kubectl",
-                "get",
-                "nextapp",
-                config.name,
-                "-n",
-                options.namespace,
-                "-o",
-                "jsonpath={.status.currentTraffic}",
-            ]);
-            const liveRevisions = parseLiveRevisionNames(
-                trafficJson.replace(/^'|'$/g, ""),
-            );
-            // Resolve each live revision to its build-id via the operator-stamped
-            // label (read-only). The single-token jsonpath escapes the dotted/slashed
-            // label key. A missing label yields '' → resolveLiveBuildIds fails safe.
-            const resolved = resolveLiveBuildIds(liveRevisions, (rev) =>
-                runCapture([
-                    "kubectl",
-                    "get",
-                    "revision",
-                    rev,
-                    "-n",
-                    options.namespace,
-                    "-o",
-                    "jsonpath={.metadata.labels.apps\\.kn-next\\.dev/build-id}",
-                ])
-                    .replace(/^'|'$/g, "")
-                    .trim(),
-            );
-            if (resolved.ok) {
-                pruneOldBuilds(config, resolved.buildIds, buildId);
-            } else {
+            const res = runAssetGC(config, options.namespace, buildId);
+            if (!res.pruned) {
                 log.warn(
-                    { liveRevisions },
+                    { liveRevisions: res.liveRevisions },
                     "Asset retention GC skipped: a live revision has no resolvable build-id (fail-safe, over-keep)",
                 );
             }
@@ -432,6 +396,9 @@ if (isEntrypoint(import.meta.url)) {
         } else if (sub === "rollback") {
             const { rollbackMain } = await import("./rollback");
             process.exit(await rollbackMain(process.argv.slice(3)));
+        } else if (sub === "gc") {
+            const { gcMain } = await import("./gc");
+            process.exit(await gcMain(process.argv.slice(3)));
         } else {
             await deploy();
         }
@@ -445,7 +412,9 @@ if (isEntrypoint(import.meta.url)) {
                     ? "status failed"
                     : sub === "rollback"
                       ? "rollback failed"
-                      : "Deployment failed";
+                      : sub === "gc"
+                        ? "gc failed"
+                        : "Deployment failed";
         log.fatal({ err }, label);
         process.exit(1);
     }

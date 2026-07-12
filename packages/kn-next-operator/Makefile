@@ -136,6 +136,15 @@ test-e2e-rollback: manifests generate fmt vet ## Run the ROLLBACK e2e suite (#92
 	# must surface as a Ginkgo failure, not a deadline goroutine-dump panic.
 	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) go test -tags=e2e_rollback ./test/e2e/ -v -ginkgo.v -run TestRollbackE2E -timeout 40m
 
+.PHONY: test-e2e-gc
+test-e2e-gc: manifests generate fmt vet ## Run the ASSET-GC e2e suite (plan P4 / ADR-0011 live-set guarantee): deploys an in-cluster digest-pinned MinIO, seeds the exact ADR-0008 `<app>/_next/static/<build-id>/` layout via the S3 API, rolls labeled revisions (spec.buildId → operator-stamped `apps.kn-next.dev/build-id`), pins the OLDEST via the REAL `kn-next rollback --to`, and drives the REAL `kn-next gc` (the exact runAssetGC wiring deploy runs): pinned + newest prefixes survive, unpinned-old reaped, reserved chunks/css/media + bare `<app>/` untouched, fail-safe over-keep skip proven first. NIGHTLY/DISPATCH ONLY — never PR-gating. Default mode builds+installs the operator on kind (cluster created via setup-test-e2e if missing) — requires cert-manager+Knative+Kourier on the cluster, the aws CLI, AND `pnpm install --frozen-lockfile` at the repo root (the suite builds the CLI itself). Set KNEXT_E2E_KUBE_CONTEXT=<context> to run against an EXISTING cluster's operator (all writes confined to one fresh throwaway namespace; MinIO runs inside it).
+	# kind-mode only: create the kind cluster if missing (idempotent). In
+	# existing-cluster mode no kind cluster is wanted at all.
+	@if [ -z "$$KNEXT_E2E_KUBE_CONTEXT" ]; then $(MAKE) setup-test-e2e; fi
+	# Explicit -timeout (>> Go's silent 600s default): a genuine assertion failure
+	# must surface as a Ginkgo failure, not a deadline goroutine-dump panic.
+	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) go test -tags=e2e_gc ./test/e2e/ -v -ginkgo.v -run TestAssetGCE2E -timeout 40m
+
 .PHONY: lint
 lint: golangci-lint ## Run golangci-lint linter
 	"$(GOLANGCI_LINT)" run
