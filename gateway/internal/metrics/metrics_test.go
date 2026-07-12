@@ -32,6 +32,15 @@ func TestCountersTrackConnectionsWakesSleeps(t *testing.T) {
 	if m.WakeFailures() != 1 {
 		t.Fatalf("wake_failures = %d, want 1", m.WakeFailures())
 	}
+	// Wake-scale retry counter (issue #190): each retried transient blip bumps it.
+	m.WakeRetry()
+	m.WakeRetry()
+	if m.WakeRetries() != 2 {
+		t.Fatalf("wake_retries = %d, want 2", m.WakeRetries())
+	}
+	if !strings.Contains(m.PromText(), "pggw_wake_retries_total 2") {
+		t.Fatalf("PromText missing pggw_wake_retries_total 2:\n%s", m.PromText())
+	}
 	// Warm-pool gate gauge: 0 by default, 1 when open, surfaced in Prometheus
 	// text so operators can alarm on a stuck-open gate.
 	if !strings.Contains(m.PromText(), "pggw_gate_open 0") {
@@ -57,6 +66,7 @@ func TestPromTextHasExpectedSeries(t *testing.T) {
 		"pggw_active_connections 1",
 		"pggw_wakes_total 1",
 		"pggw_wake_failures_total 0",
+		"pggw_wake_retries_total 0",
 		"pggw_sleeps_total 0",
 		"pggw_wake_latency_ms_last 300",
 		`pggw_system_active_connections{system="db/compute"} 1`,

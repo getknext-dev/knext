@@ -21,6 +21,8 @@ behavior, and troubleshooting.
 | `GW_MAX_CONNS` | 0 (unlimited) | connection cap; excess gets a clean `53300`. Deployed: 90 — MUST stay under compute `max_connections=100` |
 | `GW_WAKE_BUDGET` | 0 (off) | per-app **wake** budget: burst 0→1 wakes an app may trigger, refilling over `GW_WAKE_WINDOW_MS`. `0`/unset = no budget (wake path unchanged). Excess wakes are refused `53400` **without scaling**. Deployed on `pggw-apps`: 15. See [Wake budget & wake side-channel (#116)](#wake-budget--wake-side-channel-issue-116). |
 | `GW_WAKE_WINDOW_MS` | 60000 | refill window for `GW_WAKE_BUDGET` (a full budget refills over this window). |
+| `GW_WAKE_RETRY_BASE_MS` | 200 | base exponential-backoff step (with jitter) for the **bounded idempotent retry** around the 0→1 scale call (issue #190). A **transient** apiserver blip (TLS handshake timeout, 5xx, throttle, `Conflict`, context deadline) is retried instead of failing the client's cold wake. `GetScale`→`UpdateScale` is idempotent so retry is safe. Total retry time is clamped to `GW_WAKE_TIMEOUT_MS` — a genuinely-down apiserver still fails **bounded** (no hang). A **terminal** error (`NotFound`/`Forbidden`/`Unauthorized`/…) fails loud immediately, no retry. Healthy wake is unchanged (retry fires only on error). See [Transient apiserver blips on the wake scale call (#190)](#transient-apiserver-blips-on-the-wake-scale-call-issue-190). |
+| `GW_WAKE_MAX_ATTEMPTS` | 8 | belt-and-braces cap on total scale attempts (first try + retries) for the `#190` retry; the wake deadline (`GW_WAKE_TIMEOUT_MS`) is the real ceiling. |
 | `GW_PEER_SELECTOR` | — | label selector for sibling gateways (peer-aware idle); empty disables |
 | `GW_AUTH_FAIL_FLOOR_MS` | 250 | apps-gateway only: constant-floor delay on refusals so unknown-app and wrong-pair are timing-comparable (issue #92); `0` disables |
 | `GW_ROLE_APPLY_SETTLE_MS` | 250 | apps-gateway (per-app) only: on a **genuine cold wake** hold the client this long before the auth attempt so `compute_ctl` applies the per-app role first, absorbing the cold-boot `28P01` role-apply race (issue #132). NOT an auth retry — a wrong password still fast-fails; warm connects + base single-DB path are never delayed; clamped to `GW_WAKE_TIMEOUT_MS`. `0` disables. **When the deterministic `/status` gate (below) is configured this is the bounded fallback**, used only if `/status` is unreachable/rejected. |
@@ -43,6 +45,7 @@ Scrape each gateway pod's `:9090/metrics` (Prometheus text) or read `/metrics.js
 | Metric | Meaning |
 |---|---|
 | `pggw_wakes_total` / `pggw_wake_failures_total` | cold starts triggered / failed |
+| `pggw_wake_retries_total` | transient scale-call blips **retried** and absorbed (issue #190). Rising while `pggw_wake_failures_total` stays flat = retries are silently rescuing wakes the old path would have failed (*retried-then-succeeded*). Rising **together with** `pggw_wake_failures_total` = a sustained apiserver outage — retries are exhausting (*failed-after-retries*). Each retry also logs `transient wake scale error (attempt N), retrying within wake budget`. |
 | `pggw_wake_latency_ms_last` | last wake duration (per pod — take max across pods, don't sum) |
 | `pggw_active_connections` | live client connections (per pod — sum across pods) |
 | `pggw_sleeps_total` | scale-to-zero events |
@@ -2324,12 +2327,49 @@ scale-down under hysteresis.
 | Symptom | Likely cause / fix |
 |---|---|
 | Client: `compute unavailable` after ~2 min | Wake timed out. `kubectl -n scale-zero-pg describe pod -l app=compute` — image pull? Pending (resources)? `wait-timeline` init stuck (pageserver down or storage-init never ran)? |
+| Intermittent cold-wake failures coinciding with apiserver load / `pggw_wake_retries_total` climbing | A **transient** apiserver blip on the 0→1 scale call. Since #190 these are retried within the wake budget (bounded by `GW_WAKE_TIMEOUT_MS`) instead of failing the client. If `pggw_wake_retries_total` rises but `pggw_wake_failures_total` stays flat, retries are absorbing the blips — no action. If **both** rise, the apiserver is out for longer than the budget: check control-plane health. See [Transient apiserver blips on the wake scale call (#190)](#transient-apiserver-blips-on-the-wake-scale-call-issue-190). |
 | Compute crashloops with `TENANT_ID ... must set` | `compute-config` ConfigMap missing/edited — re-apply `54-compute-files.yaml`, re-run `55-storage-init.yaml`. |
 | Compute Running but clients hang | Check pageserver/safekeeper pods; `kubectl logs deploy/compute -c compute` (look at `total_startup_ms` line — healthy is ~150ms). |
 | DB never scales to zero | An app pool is holding idle connections (`pggw_active_connections` > 0), or a peer gateway is unreachable (peer check fails ⇒ sleep is postponed by design — see gateway logs "postponing sleep"). |
 | First query after idle is slow | That's the wake (~2.5s). Only sub-second option today: keep it awake (`replicas: 1` + `GW_IDLE_MS=0`) or wait for the warm-standby pool (TASKS.md phase 3). |
 | `password authentication failed` after redeploy | The spec reset the role password (by design). See rotation above. |
 | Verify scripts fail on a fresh cluster | Order matters only the first time: storage pods Ready → `storage-init` Complete → everything else is self-healing. |
+
+### Transient apiserver blips on the wake scale call (issue #190)
+
+The gateway wakes a compute by scaling its Deployment 0→1 through the Kubernetes
+API (`GetScale`→`UpdateScale`). On a flaky control plane (the recurring OKE
+symptom that wedged live drills), a **single** transient error on that scale call
+— a TLS handshake timeout, a 5xx, a throttle (`429`), an optimistic-concurrency
+`Conflict`, a context deadline — used to surface immediately as a **client**
+cold-wake failure (`pggw_wake_failures_total`).
+
+Since #190 the scale call is wrapped in **bounded idempotent retry with
+exponential backoff + jitter**:
+
+- **Idempotent, so retry is safe.** `GetScale`→`UpdateScale` only converges the
+  replica count to the wake target; re-issuing it can never over-scale (single-writer
+  is intrinsic to Neon — never two writer computes on one timeline).
+- **Transient → retry; terminal → fail loud.** Retryable: apiserver
+  timeout/5xx/throttle/`Conflict`/`Internal`, network errors, context deadlines.
+  Terminal (immediate fail, **no** retry, no budget burn): `NotFound` (the
+  Deployment doesn't exist — a misconfig), `Forbidden`/`Unauthorized` (RBAC),
+  `Invalid`/`BadRequest`, `Gone`, and a wake-budget refusal (#116).
+- **Bounded by the wake budget.** Total retry time is clamped to
+  `GW_WAKE_TIMEOUT_MS`; a genuinely-down apiserver still fails **bounded** — no
+  hang past the timeout. `GW_WAKE_MAX_ATTEMPTS` is a belt-and-braces attempt cap.
+- **Healthy path unchanged.** Retry fires only on error, so a normal wake pays
+  zero added latency.
+- **Observability.** Each retried blip bumps `pggw_wake_retries_total` and logs
+  `transient wake scale error (attempt N), retrying within wake budget`. A rising
+  `pggw_wake_retries_total` with a flat `pggw_wake_failures_total` is
+  *retried-then-succeeded*; rising alongside `pggw_wake_failures_total` is
+  *failed-after-retries* (sustained outage). Tune with `GW_WAKE_RETRY_BASE_MS` /
+  `GW_WAKE_MAX_ATTEMPTS`.
+
+The same retry covers the mid-handshake re-wake path (a backend that drops the
+startup during a slow cold start), since that also routes through the wrapped
+scale call.
 
 ## Upgrades
 

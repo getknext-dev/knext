@@ -29,10 +29,19 @@ type sysMetrics struct {
 type Metrics struct {
 	mu sync.Mutex
 
-	ConnectionsTotal         int `json:"connections_total"`
-	ActiveConnections        int `json:"active_connections"`
-	WakesTotal               int `json:"wakes_total"`
-	WakeFailuresTotal        int `json:"wake_failures_total"`
+	ConnectionsTotal  int `json:"connections_total"`
+	ActiveConnections int `json:"active_connections"`
+	WakesTotal        int `json:"wakes_total"`
+	WakeFailuresTotal int `json:"wake_failures_total"`
+	// WakeRetriesTotal counts transient scale-call attempts that were RETRIED
+	// (issue #190): an OKE apiserver blip (TLS handshake timeout / 5xx / throttle /
+	// conflict) that the bounded backoff absorbed instead of failing the client's
+	// cold wake. A rising WakeRetriesTotal with a flat WakeFailuresTotal is the
+	// signal that retries are silently rescuing wakes the old path would have failed;
+	// a rising WakeRetriesTotal that DOES drag WakeFailuresTotal up means the retries
+	// are exhausting (a sustained apiserver outage) — the two together distinguish
+	// 'retried-then-succeeded' from 'failed-after-retries'.
+	WakeRetriesTotal         int `json:"wake_retries_total"`
 	SleepsTotal              int `json:"sleeps_total"`
 	RejectedConnectionsTotal int `json:"rejected_connections_total"`
 	// WakeBudgetExceededTotal counts wakes REFUSED across all apps because the
@@ -117,6 +126,13 @@ func (m *Metrics) WakeFailure() {
 	m.WakeFailuresTotal++
 }
 
+// WakeRetry counts one retried transient scale-call attempt (issue #190).
+func (m *Metrics) WakeRetry() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.WakeRetriesTotal++
+}
+
 // RejectConn counts a connection refused by the GW_MAX_CONNS cap.
 func (m *Metrics) RejectConn() {
 	m.mu.Lock()
@@ -154,6 +170,7 @@ func (m *Metrics) Connections() int  { m.mu.Lock(); defer m.mu.Unlock(); return 
 func (m *Metrics) Active() int       { m.mu.Lock(); defer m.mu.Unlock(); return m.ActiveConnections }
 func (m *Metrics) Wakes() int        { m.mu.Lock(); defer m.mu.Unlock(); return m.WakesTotal }
 func (m *Metrics) WakeFailures() int { m.mu.Lock(); defer m.mu.Unlock(); return m.WakeFailuresTotal }
+func (m *Metrics) WakeRetries() int  { m.mu.Lock(); defer m.mu.Unlock(); return m.WakeRetriesTotal }
 func (m *Metrics) Sleeps() int       { m.mu.Lock(); defer m.mu.Unlock(); return m.SleepsTotal }
 func (m *Metrics) Rejected() int     { m.mu.Lock(); defer m.mu.Unlock(); return m.RejectedConnectionsTotal }
 func (m *Metrics) WakeBudgetExceededCount() int {
@@ -176,6 +193,7 @@ func (m *Metrics) PromText() string {
 		fmt.Sprintf("pggw_active_connections %d", m.ActiveConnections),
 		fmt.Sprintf("pggw_wakes_total %d", m.WakesTotal),
 		fmt.Sprintf("pggw_wake_failures_total %d", m.WakeFailuresTotal),
+		fmt.Sprintf("pggw_wake_retries_total %d", m.WakeRetriesTotal),
 		fmt.Sprintf("pggw_sleeps_total %d", m.SleepsTotal),
 		fmt.Sprintf("pggw_rejected_connections_total %d", m.RejectedConnectionsTotal),
 		fmt.Sprintf("pggw_wake_budget_exceeded_total %d", m.WakeBudgetExceededTotal),

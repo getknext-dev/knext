@@ -3,11 +3,13 @@ package gateway
 import (
 	"bytes"
 	"context"
-	"fmt"
 	"net"
 	"sync"
 	"testing"
 	"time"
+
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 
 	"github.com/alpheya/scale-zero-pg/gateway/internal/proto"
 	"github.com/alpheya/scale-zero-pg/gateway/internal/wake"
@@ -27,7 +29,13 @@ func (s *notFoundScaler) Scale(_ context.Context, _, dep string, _ int32) error 
 	s.mu.Lock()
 	s.scaled = append(s.scaled, dep)
 	s.mu.Unlock()
-	return fmt.Errorf("deployments.apps %q not found", dep)
+	// A REAL missing Deployment surfaces a typed *StatusError from client-go, not a
+	// plain error — its .Error() renders the identical text (deployments.apps
+	// "<dep>" not found) the #92 leak test pins, but IsNotFound(err) is true so the
+	// bounded wake retry (#190) treats it as TERMINAL (fail loud, no retry churn),
+	// exactly as production does. A plain fmt.Errorf here would be indistinguishable
+	// from a transient apiserver blip and (correctly) get retried within the budget.
+	return k8serrors.NewNotFound(schema.GroupResource{Group: "apps", Resource: "deployments"}, dep)
 }
 
 func (s *notFoundScaler) scaledDeployments() []string {

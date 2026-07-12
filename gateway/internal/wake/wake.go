@@ -69,6 +69,20 @@ type Opts struct {
 	// the guard returns ErrWakeBudgetExceeded when a key has burned its budget. nil
 	// leaves the wake path exactly as it was (no budget).
 	WakeGuard func(key string) error
+
+	// WakeRetryBaseMs is the base exponential-backoff step (with jitter) for the
+	// bounded retry around a TRANSIENT scale-call error (issue #190). 0 uses the
+	// compiled-in default (defaultWakeRetryBaseMs).
+	WakeRetryBaseMs int
+	// WakeMaxAttempts caps total Scale attempts (first try + retries) as a
+	// belt-and-braces bound; the wake DEADLINE (WakeTimeoutMs) is the real ceiling.
+	// 0 uses the compiled-in default (defaultWakeMaxAttempts).
+	WakeMaxAttempts int
+	// OnWakeRetry, if set, is invoked once per FAILED transient scale attempt that
+	// is about to be retried (attempt is the 1-based number of the attempt that just
+	// failed, err its transient error). The gateway wires it to a log line + the
+	// pggw_wake_retries_total metric so 'retried' events are observable. nil = silent.
+	OnWakeRetry func(t Target, attempt int, err error)
 }
 
 // Driver is the mode-agnostic compute interface.
@@ -333,7 +347,15 @@ func ConnectWithWake(ctx context.Context, driver Driver, t Target, opts Opts, on
 	if onWake != nil {
 		onWake()
 	}
-	if e := driver.Wake(ctx, t); e != nil {
+	// Bounded idempotent retry/backoff around the scale call (issue #190): a single
+	// transient apiserver blip (TLS handshake timeout, 5xx, throttle, conflict,
+	// context deadline) must NOT surface as a client cold-wake failure. GetScale→
+	// UpdateScale is idempotent, so retry is safe; the retry deadline is the wake
+	// budget, so a genuinely-down apiserver still fails BOUNDED (no hang). A terminal
+	// error (NotFound/Forbidden/…) fails loud immediately.
+	if _, e := wakeWithRetry(ctx, opts, deadline, t, func(c context.Context) error {
+		return driver.Wake(c, t)
+	}); e != nil {
 		return nil, false, 0, e
 	}
 	for {

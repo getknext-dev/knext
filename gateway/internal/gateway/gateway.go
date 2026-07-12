@@ -132,6 +132,12 @@ func New(env wake.Env, log func(string)) (*Gateway, error) {
 			ConnectTimeoutMs: envInt(env, "GW_CONNECT_TIMEOUT_MS", 1000),
 			WakeTimeoutMs:    envInt(env, "GW_WAKE_TIMEOUT_MS", 60000),
 			RetryMs:          envInt(env, "GW_RETRY_MS", 250),
+			// Bounded idempotent retry/backoff around the 0->1 scale call (issue #190):
+			// a transient apiserver blip is retried within the wake budget instead of
+			// failing the client's cold wake. Base backoff + attempt cap are tunable;
+			// the wake deadline (GW_WAKE_TIMEOUT_MS) is the hard ceiling regardless.
+			WakeRetryBaseMs: envInt(env, "GW_WAKE_RETRY_BASE_MS", 200),
+			WakeMaxAttempts: envInt(env, "GW_WAKE_MAX_ATTEMPTS", 8),
 		},
 		idleMs:            envInt(env, "GW_IDLE_MS", 300000),
 		floorMs:           envInt(env, "GW_AUTH_FAIL_FLOOR_MS", 250),
@@ -140,6 +146,16 @@ func New(env wake.Env, log func(string)) (*Gateway, error) {
 		tlsConf:           tlsConf,
 		log:               log,
 		active:            map[string]*activeEntry{},
+	}
+	// Observability for the wake-scale retry (issue #190): each retried transient
+	// blip bumps pggw_wake_retries_total and logs the target + attempt, so a
+	// 'retried-then-succeeded' wake is visible (retries rise, failures flat) and
+	// distinguishable from a 'failed-after-retries' wake (the final error is logged
+	// + pggw_wake_failures_total rises). Shared, stateless — safe across connections.
+	g.opts.OnWakeRetry = func(t wake.Target, attempt int, err error) {
+		g.metrics.WakeRetry()
+		g.log("[gw] " + t.Key + ": transient wake scale error (attempt " + strconv.Itoa(attempt) +
+			"), retrying within wake budget: " + err.Error())
 	}
 	if g.statusProbe != nil {
 		log("[gw] cold-boot readiness: deterministic compute_ctl /status gate ENABLED (port " +
