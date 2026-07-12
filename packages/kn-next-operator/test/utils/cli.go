@@ -71,16 +71,23 @@ type CLIResult struct {
 // only when the process could not be spawned at all (node missing / CLI not
 // built).
 func RunCLI(args ...string) (CLIResult, error) {
-	bin, err := CLIBin()
-	if err != nil {
-		return CLIResult{}, err
-	}
 	root, err := RepoRoot()
 	if err != nil {
 		return CLIResult{}, err
 	}
+	return RunCLIInDir(root, args...)
+}
+
+// RunCLIInDir is RunCLI with an explicit working directory — needed by the
+// e2e_gc suite because `kn-next gc` loads kn-next.config.ts from the CURRENT
+// directory (the suite renders a throwaway app dir with the test config).
+func RunCLIInDir(dir string, args ...string) (CLIResult, error) {
+	bin, err := CLIBin()
+	if err != nil {
+		return CLIResult{}, err
+	}
 	cmd := exec.Command("node", append([]string{bin}, args...)...)
-	cmd.Dir = root
+	cmd.Dir = dir
 	// NODE_OPTIONS is cleared deliberately: the CLI must run on a bare Node,
 	// and an inherited preload (dev machines) must not skew the e2e. KUBECONFIG
 	// (set by the suite in existing-cluster mode) is inherited via os.Environ.

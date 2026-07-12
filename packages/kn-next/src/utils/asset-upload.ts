@@ -497,10 +497,29 @@ export async function uploadAssets(config: KnativeNextConfig): Promise<void> {
 const STATIC_NS = "_next/static/";
 
 /**
+ * First-level directories under `.next/static/` that `next build` emits but
+ * that are NOT build-id prefixes: content-hashed `chunks/`, `css/`, `media/`
+ * shared by the pages of EVERY build (plus dev-mode `webpack/` and
+ * `development/`). They MUST be excluded from the prune-candidate set — a
+ * naive first-segment listing classifies them as "build-ids", and once they
+ * fall outside the retain window the GC would reap them, 404ing the CURRENT
+ * build's own JS/CSS (over-delete; found while building the e2e_gc suite).
+ * Never add a real build-id shape here: deploy tags are user-chosen.
+ */
+const RESERVED_STATIC_DIRS: ReadonlySet<string> = new Set([
+    "chunks",
+    "css",
+    "media",
+    "webpack",
+    "development",
+]);
+
+/**
  * Lists the build-id "directories" present under `<app>/_next/static/` in the
  * object store, returning buildId → the recursive-delete URI scoped to exactly
  * `<app>/_next/static/<buildId>/`. Provider-specific because each CLI renders a
- * listing differently. The build-id is the first path segment AFTER `_next/static/`.
+ * listing differently. The build-id is the first path segment AFTER `_next/static/`,
+ * excluding {@link RESERVED_STATIC_DIRS} (never prunable build-id candidates).
  */
 function listRemoteBuildIds(config: KnativeNextConfig): Map<string, string> {
     const { provider, bucket } = config.storage;
@@ -512,7 +531,8 @@ function listRemoteBuildIds(config: KnativeNextConfig): Map<string, string> {
         const idx = relKey.indexOf(STATIC_NS);
         if (idx < 0) return null;
         const seg = relKey.slice(idx + STATIC_NS.length).split("/")[0];
-        return seg || null;
+        if (!seg || RESERVED_STATIC_DIRS.has(seg)) return null;
+        return seg;
     };
 
     switch (provider) {
@@ -523,7 +543,8 @@ function listRemoteBuildIds(config: KnativeNextConfig): Map<string, string> {
                 const trimmed = line.trim();
                 if (!trimmed.startsWith(base)) continue;
                 const id = trimmed.slice(base.length).replace(/\/.*/, "");
-                if (id) out.set(id, `${base}${id}/`);
+                if (id && !RESERVED_STATIC_DIRS.has(id))
+                    out.set(id, `${base}${id}/`);
             }
             return out;
         }
@@ -561,7 +582,8 @@ function listRemoteBuildIds(config: KnativeNextConfig): Map<string, string> {
                 if (!trimmed) continue;
                 const last = trimmed.split(/\s+/).pop() ?? "";
                 const id = last.replace(/\/.*$/, "");
-                if (id) out.set(id, `${base}${id}/`);
+                if (id && !RESERVED_STATIC_DIRS.has(id))
+                    out.set(id, `${base}${id}/`);
             }
             return out;
         }

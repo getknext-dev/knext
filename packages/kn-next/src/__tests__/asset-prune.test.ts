@@ -151,6 +151,39 @@ describe("pruneOldBuilds", () => {
         expect(runDeleteMock).not.toHaveBeenCalled();
     });
 
+    it("NEVER treats Next's reserved static dirs (chunks/css/media) as prunable build-ids", () => {
+        // Real `next build` output puts MORE than build-id dirs under
+        // `.next/static/` (staged to `<app>/_next/static/`): content-hashed
+        // `chunks/`, `css/`, `media/` shared by the pages of EVERY build. A
+        // naive first-segment listing classifies those as "build-ids"; once
+        // they fall outside the retain window they would be REAPED — 404ing
+        // the CURRENT build's own JS/CSS. They must be excluded from the
+        // prune-candidate set entirely (P4 pre-verify finding, ADR-0011).
+        const bucket = "b";
+        const app = "shop";
+        // Lexicographic listing order, as a real S3/GCS listing returns it:
+        // numeric deploy tags sort BEFORE the reserved alphabetic dirs, so the
+        // reserved dirs land in the "newest" positional slots and (without the
+        // exclusion) crowd the real builds out of the retain window.
+        const ids = ["1001", "1002", "1003", "chunks", "css", "media"];
+        runCaptureMock.mockReturnValue(gcsStaticListing(bucket, app, ids));
+
+        pruneOldBuilds(makeConfig("gcs", bucket, app, 1), [], "1003");
+
+        const deleted = runDeleteMock.mock.calls
+            .flatMap((c) => c[0] as string[])
+            .join("\n");
+        // Reserved dirs are NEVER deleted…
+        expect(deleted).not.toContain("/chunks/");
+        expect(deleted).not.toContain("/css/");
+        expect(deleted).not.toContain("/media/");
+        // …and the retain window applies to REAL build-ids only: retain=1
+        // keeps the just-deployed 1003; 1001 + 1002 are reaped.
+        expect(deleted).toContain("/_next/static/1001/");
+        expect(deleted).toContain("/_next/static/1002/");
+        expect(deleted).not.toContain("/1003/");
+    });
+
     it("azure: reaps via `az ... blob delete-batch` scoped to the build prefix, never bare <app>/", () => {
         const bucket = "c";
         const app = "shop";

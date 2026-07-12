@@ -118,3 +118,19 @@ build, so a query-string/`deploymentId` mechanism was missing.
 - **Deferred to nightly e2e (#89/#38 harness), NOT a PR gate:** actually serving an old client's
   chunks during a *live* canary in a real browser — that requires a cluster + browser and cannot be
   asserted in a unit test. This ADR does not claim that path is verified by the unit suite.
+- **(DONE, plan P4)** Live-set guarantee proven END-TO-END by the nightly `e2e_gc` suite
+  (`test/e2e/asset_gc_e2e_test.go`, `make test-e2e-gc`, `operator-e2e-nightly.yml` job `gc-e2e`):
+  on a real kind + Knative + operator + in-cluster MinIO stack, the REAL `kn-next gc` (the exact
+  `runAssetGC` wiring `kn-next deploy` runs — extracted to `packages/kn-next/src/cli/gc.ts`)
+  keeps a `kn-next rollback --to`-pinned OLDEST revision's prefix on the live-set rule alone
+  (retain=1), reaps unpinned out-of-window prefixes, never touches the bare `<app>/` namespace,
+  and the fail-safe over-keep skip is proven with an unlabeled live revision. Seeding is via the
+  S3 API in the exact layout — it does NOT re-prove that `next build`+upload produces that layout
+  (covered by the upload unit suites + the deploy-time BUILD_ID lock-step guard).
+- **(FIXED, found while building the e2e)** `listRemoteBuildIds` classified EVERY first segment
+  under `<app>/_next/static/` as a prunable build-id — but real `next build` output also places
+  the shared, content-hashed `chunks/`, `css/`, `media/` dirs there; outside the retain window
+  the GC would have REAPED them, 404ing the current build's own JS/CSS. These reserved segments
+  (`chunks`, `css`, `media`, `webpack`, `development`) are now excluded from the candidate set
+  across all four providers (regression: asset-prune.test.ts; live: the e2e_gc suite seeds and
+  asserts them untouched).
