@@ -22,6 +22,10 @@ func NewHTTPPageserver(baseURL string, timeout time.Duration) *HTTPPageserver {
 	return &HTTPPageserver{BaseURL: baseURL, Client: &http.Client{Timeout: timeout}}
 }
 
+// do issues one JSON request against the pageserver mgmt API and returns the status
+// code + raw body (never auto-erroring on non-2xx — each caller decides which codes are
+// benign, e.g. 404-as-already-gone for reclaim). Uses the ctx-bound request so the
+// client Timeout and the reconcile deadline both apply.
 func (p *HTTPPageserver) do(ctx context.Context, method, url string, body []byte) (int, []byte, error) {
 	var r io.Reader
 	if body != nil {
@@ -43,6 +47,9 @@ func (p *HTTPPageserver) do(ctx context.Context, method, url string, body []byte
 	return resp.StatusCode, data, nil
 }
 
+// TimelineExists lists the tenant's timelines and reports whether tl is among them —
+// the idempotency guard that makes the branch step (reconcileApply step 5) safe to
+// re-run: a branch is only created when its timeline is absent.
 func (p *HTTPPageserver) TimelineExists(ctx context.Context, tenant, tl string) (bool, error) {
 	code, data, err := p.do(ctx, http.MethodGet, fmt.Sprintf("%s/v1/tenant/%s/timeline", p.BaseURL, tenant), nil)
 	if err != nil {
@@ -65,6 +72,10 @@ func (p *HTTPPageserver) TimelineExists(ctx context.Context, tenant, tl string) 
 	return false, nil
 }
 
+// TemplateLastLSN reads the shared template timeline's last_record_lsn — the exact WAL
+// position a new app branches from, so every app starts as a copy-on-write clone of the
+// seeded template. An empty result means the plane was never initialized (see the
+// reconciler's "run provision-app.sh init-plane" hint).
 func (p *HTTPPageserver) TemplateLastLSN(ctx context.Context, tenant, template string) (string, error) {
 	code, data, err := p.do(ctx, http.MethodGet, fmt.Sprintf("%s/v1/tenant/%s/timeline/%s", p.BaseURL, tenant, template), nil)
 	if err != nil {
@@ -82,6 +93,10 @@ func (p *HTTPPageserver) TemplateLastLSN(ctx context.Context, tenant, template s
 	return t.LastRecordLSN, nil
 }
 
+// Branch creates timeline tl as a copy-on-write child of the template timeline at lsn —
+// the Neon primitive that gives each app its own isolated database near-instantly and
+// cheaply (no data copy). Called only after TimelineExists reports absent, so it is
+// idempotent at the reconcile level.
 func (p *HTTPPageserver) Branch(ctx context.Context, tenant, tl, template, lsn string, pgVersion int) error {
 	body, _ := json.Marshal(map[string]any{
 		"new_timeline_id":      tl,
@@ -99,6 +114,9 @@ func (p *HTTPPageserver) Branch(ctx context.Context, tenant, tl, template, lsn s
 	return nil
 }
 
+// DeleteTimeline removes the app's pages/WAL from the pageserver during deprovision.
+// A 404 is treated as success — "already gone" is the desired end state, which keeps
+// reclaim idempotent and safe to retry after a partial failure (issue #91).
 func (p *HTTPPageserver) DeleteTimeline(ctx context.Context, tenant, tl string) error {
 	code, data, err := p.do(ctx, http.MethodDelete, fmt.Sprintf("%s/v1/tenant/%s/timeline/%s", p.BaseURL, tenant, tl), nil)
 	if err != nil {
@@ -129,8 +147,15 @@ func NewHTTPSafekeeper(namespace, service string, port, nReplicas int, timeout t
 	return &HTTPSafekeeper{Namespace: namespace, Service: service, Port: port, NReplicas: nReplicas, Client: &http.Client{Timeout: timeout}}
 }
 
+// Replicas is the safekeeper StatefulSet size — reclaimTimeline iterates 0..Replicas()-1
+// so it DELETEs the WAL on every safekeeper pod (two-sided reclaim, issue #91).
 func (s *HTTPSafekeeper) Replicas() int { return s.NReplicas }
 
+// DeleteTimeline removes tl's WAL directory on one safekeeper pod, addressed directly by
+// stable ordinal via the headless Service DNS (safekeeper-<ord>...:7676) rather than the
+// load-balanced Service — reclaim must hit EVERY replica, not a random one. A 404 means
+// this safekeeper never held the timeline, which counts as success; any other non-2xx is
+// an error the caller records to the reclaim ledger.
 func (s *HTTPSafekeeper) DeleteTimeline(ctx context.Context, ordinal int, tenant, tl string) error {
 	url := fmt.Sprintf("http://%s-%d.%s.%s.svc:%d/v1/tenant/%s/timeline/%s",
 		s.Service, ordinal, s.Service, s.Namespace, s.Port, tenant, tl)
