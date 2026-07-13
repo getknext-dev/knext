@@ -86,19 +86,25 @@ const STATIC_LISTERS: Record<
     StorageProvider,
     (bucket: string, app: string, prefixes: SeededPrefix[]) => string
 > = {
-    // `gsutil ls -r` prints directory-header lines (`.../<id>/:`) followed by
-    // full object URIs, with blank separator lines.
+    // `gsutil ls -r` prints a TOP-LEVEL header for the listed dir itself
+    // (`gs://<bucket>/<app>/_next/static/:`), then per-directory header lines
+    // (`.../<id>/:`) followed by full object URIs, with blank separator lines.
+    // The top-level header is real-gsutil fidelity (#264 review finding): a
+    // naive parser folds it into a phantom ":" prefix that pollutes the loud
+    // over-keep output on every clean GCS run.
     gcs: (bucket, app, prefixes) =>
-        prefixes
-            .map(({ id, marker }) => {
+        [
+            `gs://${bucket}/${app}/_next/static/:`,
+            "",
+            ...prefixes.map(({ id, marker }) => {
                 const base = `gs://${bucket}/${app}/_next/static/${id}`;
                 const files = [
                     ...PREFIX_FILES.map((f) => `${base}/${f}`),
                     ...(marker ? [`${base}/${MARKER}`] : []),
                 ];
                 return [`${base}/:`, ...files, ""].join("\n");
-            })
-            .join("\n"),
+            }),
+        ].join("\n"),
     // `aws s3api list-objects-v2 --output text` → whitespace-separated keys.
     s3: (_bucket, app, prefixes) =>
         prefixes

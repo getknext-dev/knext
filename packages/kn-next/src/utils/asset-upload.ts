@@ -626,7 +626,13 @@ function listRemoteBuildIds(
             for (const line of listed.split("\n")) {
                 const trimmed = line.trim();
                 if (!trimmed.startsWith(base)) continue;
-                record(trimmed.slice(base.length), (id) => `${base}${id}/`);
+                const rel = trimmed.slice(base.length);
+                // `gsutil ls -r` prints a header for the listed dir ITSELF
+                // (`<base>:` → rel ":") — not a prefix; folding it in would
+                // report a phantom unmarked prefix ":" on every clean run.
+                // Per-id headers (`<id>/:`) are handled fine by `record`.
+                if (rel === ":") continue;
+                record(rel, (id) => `${base}${id}/`);
             }
             return out;
         }
