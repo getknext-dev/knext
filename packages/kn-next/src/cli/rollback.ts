@@ -22,7 +22,7 @@
 
 import { writeSync } from "node:fs";
 import { createLogger } from "../utils/logger";
-import { isEntrypoint, runQuiet } from "./exec";
+import { runQuiet } from "./exec";
 // Single source of truth for config loading — also runs validateConfig.
 import { loadConfig } from "./shared";
 
@@ -224,13 +224,7 @@ async function rollback(argv: readonly string[]) {
     );
 }
 
-// Run only when invoked directly as the entry (not when imported by tests or
-// the kn-next bin dispatcher).
-if (isEntrypoint(import.meta.url)) {
-    try {
-        process.exit(await rollbackMain(process.argv.slice(2)));
-    } catch (err) {
-        log.fatal({ err }, "Rollback failed");
-        process.exit(1);
-    }
-}
+// NO self-entry block here, DELIBERATELY — this module is reached ONLY via
+// the kn-next bin's subcommand dispatch (see the hazard note atop deploy.ts's
+// dispatcher: an isEntrypoint block in a bin-dispatched module re-arms the
+// tsup-inlining hijack, #263).

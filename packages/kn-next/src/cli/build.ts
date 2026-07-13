@@ -149,6 +149,10 @@ export async function build(options: BuildOptions = {}) {
 }
 
 // Run only when invoked directly as the entry (not when imported, e.g. in tests).
+// SANCTIONED self-entry (#263): this is a DOCUMENTED directly-runnable entry
+// (docs-site cli.mdx "Directly runnable entries") with its own tsup entry, so
+// it is never inlined into the bin. See the hazard note atop deploy.ts's
+// dispatcher before adding self-entry blocks anywhere else.
 // Node-correct replacement for Bun's `import.meta.main`.
 if (isEntrypoint(import.meta.url)) {
     try {

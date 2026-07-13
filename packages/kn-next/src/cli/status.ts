@@ -29,12 +29,8 @@
 
 import { existsSync, writeSync } from "node:fs";
 import type { KnativeNextConfig } from "../config";
-import { createLogger } from "../utils/logger";
 import { type KubectlFn, kubectlRunner } from "./doctor";
-import { isEntrypoint } from "./exec";
 import { loadConfig } from "./shared";
-
-const log = createLogger({ module: "status" });
 
 /** --watch poll interval. */
 const WATCH_INTERVAL_MS = 5_000;
@@ -488,13 +484,7 @@ export async function statusMain(argv: readonly string[]): Promise<number> {
     });
 }
 
-// Run only when invoked directly as the entry (not when imported by tests or
-// the kn-next bin dispatcher).
-if (isEntrypoint(import.meta.url)) {
-    try {
-        process.exit(await statusMain(process.argv.slice(2)));
-    } catch (err) {
-        log.fatal({ err }, "status failed");
-        process.exit(1);
-    }
-}
+// NO self-entry block here, DELIBERATELY — this module is reached ONLY via
+// the kn-next bin's subcommand dispatch (see the hazard note atop deploy.ts's
+// dispatcher: an isEntrypoint block in a bin-dispatched module re-arms the
+// tsup-inlining hijack, #263).

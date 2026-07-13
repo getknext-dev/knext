@@ -23,9 +23,12 @@ export default defineConfig([
       // --- CLI entries -----------------------------------------------------
       // dist/cli/kn-next.js — the bin (deploy entry)
       'cli/kn-next': 'src/cli/deploy.ts',
-      // also ship runnable build/cleanup/rollback entries
+      // also ship the DOCUMENTED directly-runnable build/cleanup entries
+      // (docs-site cli.mdx "Directly runnable entries")
       'cli/build': 'src/cli/build.ts',
       'cli/cleanup': 'src/cli/cleanup.ts',
+      // rollback is bin-dispatched only (#263 — no self-entry block); its own
+      // entry exists so the dispatcher's dynamic import resolves in dist.
       'cli/rollback': 'src/cli/rollback.ts',
       // #91 per-PR preview environments (deploy/destroy)
       'cli/preview': 'src/cli/preview.ts',

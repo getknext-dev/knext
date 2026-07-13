@@ -40,10 +40,6 @@
 
 import { spawnSync } from "node:child_process";
 import { writeSync } from "node:fs";
-import { createLogger } from "../utils/logger";
-import { isEntrypoint } from "./exec";
-
-const log = createLogger({ module: "doctor" });
 
 /** The ingress class net-kourier actually registers a reconciler for (#208). */
 export const KOURIER_INGRESS_CLASS = "kourier.ingress.networking.knative.dev";
@@ -793,13 +789,7 @@ export async function doctorMain(argv: readonly string[]): Promise<number> {
     return report.exitCode;
 }
 
-// Run only when invoked directly as the entry (not when imported by tests or
-// the kn-next bin dispatcher).
-if (isEntrypoint(import.meta.url)) {
-    try {
-        process.exit(await doctorMain(process.argv.slice(2)));
-    } catch (err) {
-        log.fatal({ err }, "doctor failed");
-        process.exit(1);
-    }
-}
+// NO self-entry block here, DELIBERATELY — this module is reached ONLY via
+// the kn-next bin's subcommand dispatch (see the hazard note atop deploy.ts's
+// dispatcher: an isEntrypoint block in a bin-dispatched module re-arms the
+// tsup-inlining hijack, #263).
