@@ -66,6 +66,10 @@ async function cleanup() {
 }
 
 // Run only when invoked directly as the entry (not when imported, e.g. in tests).
+// SANCTIONED self-entry (#263): this is a DOCUMENTED directly-runnable entry
+// (docs-site cli.mdx "Directly runnable entries") with its own tsup entry, so
+// it is never inlined into the bin. See the hazard note atop deploy.ts's
+// dispatcher before adding self-entry blocks anywhere else.
 if (isEntrypoint(import.meta.url)) {
     try {
         await cleanup();

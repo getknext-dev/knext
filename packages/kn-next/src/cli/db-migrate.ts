@@ -27,7 +27,6 @@
 
 import { writeSync } from "node:fs";
 import { createLogger } from "../utils/logger";
-import { isEntrypoint } from "./exec";
 
 const log = createLogger({ module: "db-migrate" });
 
@@ -139,13 +138,7 @@ export async function runDbMigrate(
     log.info({ dir: result.migrationsFolder }, "Migrations applied");
 }
 
-// Run only when invoked directly (not when imported by tests or the bin
-// dispatcher, which routes `kn-next db migrate` here via db-bind's dbMain).
-if (isEntrypoint(import.meta.url)) {
-    try {
-        await runDbMigrate(process.argv.slice(2));
-    } catch (err) {
-        log.fatal({ err }, "db migrate failed");
-        process.exit(1);
-    }
-}
+// NO self-entry block here, DELIBERATELY — this module is reached ONLY via
+// the kn-next bin's subcommand dispatch (see the hazard note atop deploy.ts's
+// dispatcher: an isEntrypoint block in a bin-dispatched module re-arms the
+// tsup-inlining hijack, #263).

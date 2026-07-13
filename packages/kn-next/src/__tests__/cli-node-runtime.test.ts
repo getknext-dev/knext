@@ -177,6 +177,58 @@ describe("CLI sources are Bun-free (static closure guard)", () => {
     });
 });
 
+describe("self-entry blocks exist ONLY in sanctioned entry modules (#263)", () => {
+    // #263 Option A: `isEntrypoint(import.meta.url)` self-entry blocks are a
+    // latent bundling hazard — if tsup ever inlines a module into the bin,
+    // `import.meta.url` equals the bin's URL and the block fires at module
+    // load, hijacking every subcommand (observed live with gc.ts, PR #262).
+    // The ONLY modules allowed to carry one are:
+    //   - deploy.ts   — the published bin entry (the subcommand dispatcher)
+    //   - build.ts / cleanup.ts / preview.ts — documented directly-runnable
+    //     entries (docs-site cli.mdx "Directly runnable entries";
+    //     .github/workflows/preview.yml invokes dist/cli/preview.js directly)
+    //     with their OWN tsup entries, so they emit as separate files and are
+    //     never inlined into the bin.
+    // Every other CLI module is reached exclusively through the bin dispatch
+    // and must NOT self-execute. (loadtest.ts uses its own argv check and its
+    // own tsup entry — scripts/load-test.sh runs dist/cli/loadtest.js.)
+    const SANCTIONED = new Set([
+        "deploy.ts",
+        "build.ts",
+        "cleanup.ts",
+        "preview.ts",
+    ]);
+
+    it("no non-sanctioned CLI module carries an isEntrypoint self-entry block", () => {
+        const offenders: string[] = [];
+        for (const entry of readdirSync(cliSrcDir).filter((f) =>
+            f.endsWith(".ts"),
+        )) {
+            if (SANCTIONED.has(entry) || entry === "exec.ts") {
+                continue; // exec.ts DEFINES isEntrypoint
+            }
+            const content = readFileSync(join(cliSrcDir, entry), "utf8");
+            if (/isEntrypoint\(import\.meta\.url\)/.test(content)) {
+                offenders.push(entry);
+            }
+        }
+        expect(offenders).toEqual([]);
+    });
+
+    it("every sanctioned self-entry module has its own tsup entry (never inlined into the bin)", () => {
+        // The sanctioned blocks are safe ONLY because each module emits as its
+        // own dist file — pin that: dist/cli/<name>.js must exist for each.
+        for (const entry of SANCTIONED) {
+            const name = entry.replace(/\.ts$/, "");
+            const distFile =
+                name === "deploy"
+                    ? join(pkgRoot, "dist", "cli", "kn-next.js")
+                    : join(pkgRoot, "dist", "cli", `${name}.js`);
+            expect(existsSync(distFile), distFile).toBe(true);
+        }
+    });
+});
+
 describe("built bin (dist/cli/kn-next.js) is Node-runnable", () => {
     beforeAll(() => {
         if (!existsSync(distBin)) {

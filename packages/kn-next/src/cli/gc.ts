@@ -422,11 +422,8 @@ export async function gcMain(argv: readonly string[]): Promise<number> {
     return 0;
 }
 
-// NO self-entry block here, DELIBERATELY (unlike rollback.ts/cleanup.ts).
-// deploy.ts imports runAssetGC STATICALLY; if this module also carried an
-// `isEntrypoint(import.meta.url)` entry block, any bundling change that
-// inlines it into the bin (where import.meta.url == the bin's URL) would
-// fire gcMain at module load and hijack every subcommand — observed live
-// when the dispatcher's dynamic `import("./gc")` was the only thing keeping
-// tsup from inlining this module. The `kn-next gc` dispatcher branch is this
-// module's ONLY entry (pinned hermetically by cli-node-runtime.test.ts).
+// NO self-entry block here, DELIBERATELY — this module is reached ONLY via
+// the kn-next bin's subcommand dispatch (see the hazard note atop deploy.ts's
+// dispatcher: an isEntrypoint block in a bin-dispatched module re-arms the
+// tsup-inlining hijack, #263 — observed live with THIS module in PR #262,
+// deploy.ts imports runAssetGC statically).

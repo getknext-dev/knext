@@ -385,6 +385,20 @@ async function deploy() {
 // `kn-next status`, `kn-next db bind` and `kn-next rollback` route to their own
 // modules; everything else (including the historical bare `kn-next` /
 // `kn-next deploy`) runs the deploy flow.
+//
+// SELF-ENTRY HAZARD (#263, canonical note — observed live in PR #262 with gc.ts):
+// this dispatcher is the ONLY sanctioned `isEntrypoint(import.meta.url)` entry
+// for bin-dispatched modules. If a dispatched module carries its own self-entry
+// block and any bundling change inlines it into this bin (e.g. a dynamic import
+// becoming static, or a tsup entry-list edit), `import.meta.url` inside the
+// inlined module equals the BIN's URL — the block fires at module load and
+// hijacks every subcommand. Therefore: bin-dispatched modules (status, doctor,
+// db-bind, db-migrate, rollback, gc) must NOT carry self-entry blocks. The only
+// other sanctioned self-entry modules are the documented directly-runnable
+// entries (build/cleanup/preview — docs-site cli.mdx; preview.yml runs
+// dist/cli/preview.js), each with its OWN tsup entry so it is never inlined
+// here. Enforced by cli-node-runtime.test.ts ("self-entry blocks exist ONLY in
+// sanctioned entry modules").
 if (isEntrypoint(import.meta.url)) {
     const sub = process.argv[2];
     try {

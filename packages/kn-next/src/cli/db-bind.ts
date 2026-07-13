@@ -34,7 +34,7 @@ import { existsSync, readFileSync, writeSync } from "node:fs";
 import YAML from "yaml";
 import type { KnativeNextConfig } from "../config";
 import { createLogger } from "../utils/logger";
-import { isEntrypoint, runCapture } from "./exec";
+import { runCapture } from "./exec";
 import { loadConfig } from "./shared";
 
 const log = createLogger({ module: "db-bind" });
@@ -526,13 +526,7 @@ export async function dbMain(argv: readonly string[]): Promise<void> {
     }
 }
 
-// Run only when invoked directly as the entry (not when imported by tests or
-// the kn-next bin dispatcher).
-if (isEntrypoint(import.meta.url)) {
-    try {
-        await dbMain(process.argv.slice(2));
-    } catch (err) {
-        log.fatal({ err }, "db bind failed");
-        process.exit(1);
-    }
-}
+// NO self-entry block here, DELIBERATELY — this module is reached ONLY via
+// the kn-next bin's subcommand dispatch (see the hazard note atop deploy.ts's
+// dispatcher: an isEntrypoint block in a bin-dispatched module re-arms the
+// tsup-inlining hijack, #263).
