@@ -123,6 +123,13 @@ var _ = Describe("Install bundle (dist/install.yaml)", Ordered, func() {
 	var renderedBundle string
 
 	BeforeAll(func() {
+		// This suite is kind-only (no existing-cluster mode): pin the kind
+		// context for the whole run BEFORE any cluster operation, refusing a
+		// non-kind ambient context (#271, plan-v2 P6c).
+		By("KIND-only suite: pinning the kind kube context (#271 — refusing a non-kind ambient context)")
+		Expect(utils.EnsureKindContext(GinkgoT().TempDir())).To(Succeed(),
+			"could not pin the kind context — no cluster operation was attempted")
+
 		By("building the operator image LOCALLY (never the placeholder-digest image)")
 		_, err := utils.Run(exec.Command("make", "docker-build",
 			fmt.Sprintf("IMG=%s", bundleOperatorImage)))

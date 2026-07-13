@@ -108,6 +108,14 @@ type TeardownRequest struct {
 	// ExistingCluster is true when KNEXT_E2E_KUBE_CONTEXT selects
 	// existing-cluster mode (shared cluster: the label is REQUIRED).
 	ExistingCluster bool
+	// KindContext is true ONLY when the resolved current kube context was
+	// read successfully AND is positively a kind context (`kind-*`). The
+	// generated-prefix fallback below requires it: "no KNEXT_E2E_KUBE_CONTEXT"
+	// alone does not prove the ambient context is a throwaway kind cluster
+	// (#271 — two local runs hit an ambient OKE context in "kind mode").
+	// FAIL CLOSED: an unreadable or non-kind context leaves this false, which
+	// gives the request existing-cluster semantics (label required).
+	KindContext bool
 	// Force is the explicit human override (KNEXT_E2E_FORCE_TEARDOWN).
 	Force bool
 }
@@ -145,14 +153,20 @@ func DecideTeardown(req TeardownRequest) (warning string, err error) {
 
 	// Kind self-contained mode only: the generated e2e-* prefix may reclaim a
 	// pre-guard run's namespace. NEVER in existing-cluster mode — a shared
-	// cluster can hold a teammate's identically-prefixed namespace.
-	if !req.ExistingCluster && strings.HasPrefix(req.Namespace, e2eGeneratedPrefix) {
+	// cluster can hold a teammate's identically-prefixed namespace. And ONLY
+	// with a POSITIVELY-verified kind current-context (P6c / #271): "no
+	// KNEXT_E2E_KUBE_CONTEXT" alone does not prove the ambient context is a
+	// throwaway kind cluster. FAIL CLOSED — an unreadable or non-kind context
+	// gets existing-cluster semantics (the label is required).
+	if !req.ExistingCluster && req.KindContext && strings.HasPrefix(req.Namespace, e2eGeneratedPrefix) {
 		return "", nil
 	}
 
 	mode := "self-contained kind mode (and the name does not match the generated e2e-* prefix)"
 	if req.ExistingCluster {
 		mode = fmt.Sprintf("existing-cluster mode (%s is set), where prefix-matching NEVER authorizes teardown", existingClusterEnv)
+	} else if !req.KindContext {
+		mode = fmt.Sprintf("kind-default mode WITHOUT a positively-verified kind-* current-context (fail closed: the ambient context may be a real, shared cluster), where prefix-matching never authorizes teardown — the label is required, exactly as if %s were set", existingClusterEnv)
 	}
 	return "", fmt.Errorf(
 		"%w: refusing to delete namespace %q — it does not carry the ownership label %s=%q (stamped only when THIS test infrastructure creates a namespace; a pre-existing namespace is never adopted), and the run is in %s. If reclaiming this namespace is deliberate, re-run with %s=1.",
@@ -280,10 +294,17 @@ func CreateOwnedNamespace(ns string) error {
 // StopTrying). The force-override warning is logged loudly to BOTH
 // GinkgoWriter and stderr.
 func NamespaceTeardownAuthorized(ns string) error {
+	existingCluster := strings.TrimSpace(os.Getenv(existingClusterEnv)) != ""
 	req := TeardownRequest{
 		Namespace:       ns,
-		ExistingCluster: strings.TrimSpace(os.Getenv(existingClusterEnv)) != "",
-		Force:           forceTeardownEnabled(),
+		ExistingCluster: existingCluster,
+		// Positive verification, fail closed (P6c / #271): only read the
+		// current context in kind-default mode; an unreadable or non-kind-*
+		// context leaves this false → existing-cluster semantics. With the
+		// suites pinning via EnsureKindContext, the pinned KUBECONFIG's
+		// current-context IS the kind context, so this read is consistent.
+		KindContext: !existingCluster && CurrentContextIsKind(),
+		Force:       forceTeardownEnabled(),
 	}
 
 	// Validate the name BEFORE touching the cluster — an invalid name is a

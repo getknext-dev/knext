@@ -84,13 +84,55 @@ func TestDecideTeardown(t *testing.T) {
 		{
 			// Self-contained kind mode: the generated e2e-* names from runs
 			// that predate the ownership label may still be reclaimed by
-			// prefix — the whole cluster is throwaway.
-			name: "unlabeled e2e-prefixed namespace in kind mode: allowed (prefix fallback)",
+			// prefix — the whole cluster is throwaway. The fallback now also
+			// requires the POSITIVE kind-context check (P6c / #271).
+			name: "unlabeled e2e-prefixed namespace in kind mode with a VERIFIED kind context: allowed (prefix fallback)",
 			req: TeardownRequest{
 				Namespace:       "e2e-rollback-1a2b3c",
 				NamespaceExists: true,
 				OwnedLabel:      "",
 				ExistingCluster: false,
+				KindContext:     true,
+			},
+			wantAllow: true,
+		},
+		{
+			// FAIL CLOSED (P6c gate ruling / #271): "no KNEXT_E2E_KUBE_CONTEXT"
+			// does not prove the ambient context is a throwaway kind cluster —
+			// it can be an OKE/GKE context. Without the positive kind-*
+			// verification the request gets existing-cluster semantics: the
+			// ownership label is REQUIRED, the prefix never authorizes.
+			name: "unlabeled e2e-prefixed namespace in kind mode with an UNVERIFIED (non-kind/unreadable) context: REFUSED",
+			req: TeardownRequest{
+				Namespace:       "e2e-rollback-1a2b3c",
+				NamespaceExists: true,
+				OwnedLabel:      "",
+				ExistingCluster: false,
+				KindContext:     false,
+			},
+			wantAllow: false,
+		},
+		{
+			name: "force override still allows the unverified-context case, with warning",
+			req: TeardownRequest{
+				Namespace:       "e2e-rollback-1a2b3c",
+				NamespaceExists: true,
+				OwnedLabel:      "",
+				ExistingCluster: false,
+				KindContext:     false,
+				Force:           true,
+			},
+			wantAllow:   true,
+			wantWarning: true,
+		},
+		{
+			name: "ownership label always authorizes, even with an unverified context",
+			req: TeardownRequest{
+				Namespace:       "e2e-cli-abc123",
+				NamespaceExists: true,
+				OwnedLabel:      E2EOwnershipLabelValue,
+				ExistingCluster: false,
+				KindContext:     false,
 			},
 			wantAllow: true,
 		},
@@ -101,6 +143,7 @@ func TestDecideTeardown(t *testing.T) {
 				NamespaceExists: true,
 				OwnedLabel:      "",
 				ExistingCluster: false,
+				KindContext:     true,
 			},
 			wantAllow: false,
 		},

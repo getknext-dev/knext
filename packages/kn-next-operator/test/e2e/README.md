@@ -37,7 +37,11 @@ override, webhook-readiness wait, namespace creation/teardown) live in
   bundle/cli/rollback/gc additionally require cert-manager + Knative (+ Kourier
   for cli/rollback/gc) on the cluster — the CI workflows show the exact install
   steps. The cli/rollback/gc suites also build the CLI themselves, so run
-  `pnpm install --frozen-lockfile` at the repo root first.
+  `pnpm install --frozen-lockfile` at the repo root first. Before ANY cluster
+  operation the suite pins the run to the `kind-$KIND_CLUSTER` kube context
+  (`utils.EnsureKindContext`) and **refuses to fall back to the ambient
+  current-context** when that kind context is absent — an ambient OKE/GKE
+  context must never receive the suite's namespace/apply operations (#271).
 - **Existing-cluster mode (`KNEXT_E2E_KUBE_CONTEXT=<context>`).** cli, rollback
   and gc only. No install: the suite pins a rendered, minified `KUBECONFIG` for
   that context (`utils.PinKubeContext` — the user's global current-context is
@@ -53,7 +57,7 @@ override, webhook-readiness wait, namespace creation/teardown) live in
 |---|---|---|
 | `KNEXT_E2E_KUBE_CONTEXT` | cli / rollback / gc | Non-empty selects existing-cluster mode against that kube context. |
 | `KNEXT_E2E_NAMESPACE` | cli / rollback / gc | Overrides the generated `e2e-<suite>-<hex>` app namespace — the reclaim path for a namespace an aborted run left behind. Teardown of it is subject to the ownership guard below. |
-| `KNEXT_E2E_FORCE_TEARDOWN` | all namespace teardowns (`test/utils/teardown_guard.go`) | `1`/`true`: explicit **human** override of the teardown ownership guard, for deliberate reclaim of a namespace the guard would refuse (e.g. one created before the ownership label existed). Loud (warning on stderr); never set in CI. |
+| `KNEXT_E2E_FORCE_TEARDOWN` | all namespace teardowns AND namespace-creation collisions (`test/utils/teardown_guard.go`) | `1`/`true`: explicit **human** override of the namespace ownership guard, for deliberate reclaim of a namespace the guard would refuse (e.g. one created before the ownership label existed). It governs BOTH sides: teardown of an unlabeled namespace and the creation-collision path (running the suite inside a pre-existing unlabeled namespace when `KNEXT_E2E_NAMESPACE` points at one). Loud (warning on stderr); never set in CI. |
 | `KNEXT_E2E_CURL_IMAGE` | scale (+ any in-cluster HTTP probe pod via `utils.CurlImage`) | Overrides the pinned `curlimages/curl` probe image when docker.io is unreachable/throttled. |
 | `SCALE_TEST_IMAGE` | scale | Digest-pinned app image for the scale-to-zero specs (CI resolves it; `:latest` is rejected by the operator). |
 | `ROLLBACK_TEST_IMAGE` | rollback | Overrides the digest-pinned `helloworld-go` default; must honor `PORT` and `TARGET` the same way. |

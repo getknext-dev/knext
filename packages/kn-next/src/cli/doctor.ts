@@ -190,7 +190,16 @@ function infraFailure(r: KubectlResult): InfraFailure | undefined {
     const cls = classifyKubectlFailure(r.stderr);
     if (cls !== "network" && cls !== "auth" && cls !== "forbidden")
         return undefined;
-    const excerpt = r.stderr.trim().replace(/\s+/g, " ").slice(0, 160);
+    // Scrub → collapse → cap. The excerpt comes from raw kubectl stderr, so it
+    // gets the same printable-ASCII whitelist as the RBAC resource token below
+    // (P6c nit): drop control bytes (ANSI escapes, BEL, ...) BEFORE collapsing
+    // whitespace and capping, so a detail line never re-emits terminal escape
+    // sequences and control bytes never eat the 160-char budget.
+    const excerpt = r.stderr
+        .replace(/[^\x20-\x7e\s]/g, "")
+        .trim()
+        .replace(/\s+/g, " ")
+        .slice(0, 160);
     if (cls === "forbidden") {
         // The apiserver names the denied resource in its Status message
         // (`<resource> is forbidden: …`); fall back to a generic phrase when
