@@ -149,7 +149,13 @@ describe("image-cache-sync", () => {
         const list = vi.spyOn(store, "list");
 
         const handle = await startImageCacheSync(
-            { IMAGE_CACHE_DIR: cacheDir }, // no STORAGE_BUCKET
+            // Type-level cast (#261): Next augments ProcessEnv with a REQUIRED
+            // NODE_ENV; this env double deliberately carries no STORAGE_BUCKET
+            // (and no NODE_ENV — the sync only reads STORAGE_BUCKET and the
+            // IMAGE_CACHE_* keys).
+            {
+                IMAGE_CACHE_DIR: cacheDir,
+            } as Partial<NodeJS.ProcessEnv> as NodeJS.ProcessEnv,
             { store, log: SILENT },
         );
 

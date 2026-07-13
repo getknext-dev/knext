@@ -649,7 +649,7 @@ describe("runDoctor — RBAC-denied probes are not 'not found' (P3)", () => {
         );
         expect(crd.status).toBe("error");
         expect(crd.hint).not.toContain("\u001b");
-        const resource = crd.hint.split("get/list on ")[1];
+        const resource = crd.hint?.split("get/list on ")[1];
         expect(resource).toBe("a".repeat(80));
     });
 
