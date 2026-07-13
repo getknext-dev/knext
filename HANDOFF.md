@@ -4,7 +4,10 @@ Portable handoff for a **fresh Claude Code agent / another account** to resume t
 project. You do **not** resume old chat sessions — the repo IS the memory. Clone the
 repo, provision the credentials below, read this + `CLAUDE.md` + `docs/`, and continue.
 
-_Last updated: 2026-07-07, at tag **v1.3.5**._
+_Last updated: 2026-07-13. Latest tag **v1.4.0**; a large post-v1.4.0 reliability arc
+is merged-but-untagged (the **v1.4.x tag + blind-trio scorecard review is pending owner
+approval** — see §3). Platform health: green, 0 open PRs, full test battery passed with
+zero product regressions._
 
 ## 1. What this project is
 A **Knative-ecosystem scale-to-zero PostgreSQL platform** — idle databases cost zero
@@ -14,45 +17,80 @@ Go **wake-on-connect gateway** (`gateway/`). Consumer = the **knext** platform
 (`~/alpheya/pocs/knext`), bound by one `DATABASE_URL` Secret. Full brief: `CLAUDE.md`
 (repo root) — read it in full. Architecture is fixed; see the "Hard rules" there.
 
-## 2. Current state (as of v1.3.5)
+## 2. Current state (v1.4.0 + untagged reliability arc)
 **All four scaling axes shipped + live** (`docs/SCALING.md`):
 write=vertical, read=horizontal, tenant=horizontal (branch-per-app), zone=eventual.
+Through v1.3.5 the zone axis + SCRAM auth + wake-budget shipped (history in git tags).
 
-Release line this session (each through the sign-off gate):
-- **v1.3.0** — Zone axis / SCS (ADR-0007): gateway-mediated replication-wake (#140),
-  slot-aware janitor + 512MB WAL bound (#143), Zone CRD + operator (#145).
-- **v1.3.1** — zone operator deployed live + janitor-disarm alert (#151/#142).
-- **v1.3.2** — zone reliability: fail-closed single-writer, re-sync actuator, zone
-  alerting (#146/#147/#154).
-- **v1.3.3** — deploy-integrity: OCI-index-aware drift gate + Prometheus auto-reload
-  (#153/#155/#156).
-- **v1.3.4** — **md5 → SCRAM-SHA-256 auth**, live-enforced, zero-outage rollout
-  (#117/#159/#160/#161).
-- **v1.3.5** — per-app **wake budget** closing the unauthenticated wake side-channel
-  (#116) + **ADR-0008** (PROPOSED).
+**Shipped SINCE v1.3.5 (each through the 3-sign-off gate; several deployed live):**
+- **v1.4.0 — platform extensions (#179):** TimescaleDB + pgvector self-enable per app
+  over its own `DATABASE_URL` (trusted, timeline-scoped, Apache-2 tier bound — no
+  compression/continuous-aggregates on scale-to-zero). `docs/adr-0001` accepted.
+- **Reliability arc (post-v1.4.0, untagged):** cold-boot settle-gate **#132** (deployed);
+  janitor fail-safe **#144** (deployed); drift-gate hardening **#180**; deterministic
+  `/status` cold-boot gate **#181** (opt-in, default-OFF; live-enable deferred → **#182**);
+  role-prefix fail-fast + test-race + fail-closed test **#183**; wake-budget alert debounce
+  **#184** (deployed + drilled); RO-staleness **#187**; bounded **wake-retry #190** +
+  polish **#192** (both DEPLOYED to pggw-apps); operator **ownerReferences #122/#189**
+  (deployed + live-verified — native cascade-GC); ADR-0008 **RATIFIED** + #158
+  accept-and-document (**#193**); RO-staleness drill-verdict + honest deferral **#195/#188**;
+  DATABASE_URL dbname doc **#196/#123**; drill-battery robustness **#198/#199**.
+- **Drizzle data SDK (`@knext/db`)** — complete on the **knext** side (getknext-dev/knext):
+  `getDb`/`getDbRO`, writer-only `kn-next db migrate`, TimescaleDB/pgvector helpers, guide +
+  `apps/db-demo`, SIGTERM RO-drain. ADR-0021.
+- **Infra:** OCI-session **auto-refresh** installed (`~/.oci/knext-session-refresh.sh` +
+  launchd `com.knext.oci-session-refresh`, every 25 min) — reduces manual re-auth during
+  active use; a FULL expiry (overnight sleep) still needs one `oci session authenticate`.
 
-Repo is clean (0 uncommitted). Blind-trio scorecard history: `docs/SCORECARD.md`
-(v1.3.0 round = 6.7 / 6.0 / 5.7; architect SIGN-OFF).
+**Full test battery run 2026-07-13** (load/scaling/observability): **ZERO product
+regressions**; HPA read-scaling scale-up verified under real CPU load (1→2→1); 30-app
+scale-ceiling linear (ADR-0003 holds); observability pager path honest end-to-end. Report
+in the session transcript; drill-harness gaps fixed in #198/#199.
 
-## 3. OPEN DECISION for the owner
-- **ADR-0008 (`docs/adr-0008-wake-primitive-security.md`) is PROPOSED, awaiting owner
-  ratification.** It rules the wake primitive a bounded shared-plane property (rate-limit
-  now + NetworkPolicy via #118) rather than adding gateway pre-auth. Ratify (→ ACCEPTED)
-  or request full pre-auth. Gates further wake-hardening work.
+**⚠ Notable infra observation:** cold-wake latency is elevated on the live cluster
+(**~14s mean / 19s max, p95 ~50s** under load) vs the historical ~2–5s — **NOT a code
+regression** (node CPU *usage* 7–16%); it's scheduling/attach latency from the **2-node
+cluster's CPU-REQUEST pressure** (allocatable ~1830m/node, ~88–93% reserved by the
+resident platform; each compute requests 250m). Same 2-node ceiling **blocks clean
+multi-compute drills** (co-scheduling writer+RO warm) — see #188/#197 dispositions. A
+larger/roomier drill cluster restores ~2–5s wakes and unblocks those.
+
+Repo clean (0 uncommitted, 0 open PRs). Scorecard history: `docs/SCORECARD.md`
+(last tagged round v1.3.0 = 6.7 / 6.0 / 5.7).
+
+## 3. OPEN DECISIONS for the owner (nothing else is autonomously blocked)
+- **Tag `v1.4.x` + convene the blind-trio scorecard review** — the whole reliability arc
+  above merged UNBLESSED since v1.3.0; the loop's own release-tag trigger review is overdue.
+- **Docs site PR #11** (getknext-dev/docs) — reviewed, builds (35 pages), accurate; awaiting
+  **merge + OKE redeploy** (public-facing publish).
+- **#182** — expose compute_ctl `:3080` + a JWT to **live-enable the `/status` gate**
+  (also validates #158's closure; drill: assert first post-cold-wake conn = scram, never md5).
+- **#118** — policy-capable CNI (makes `apps-compute-ingress` NetworkPolicy enforce);
+  **infra-risk** (swaps CNI on the live 2-node cluster) — assess first.
+- **`pggw`** (single-DB gateway, `10-gateway.yaml`) is **frozen on the v0.6.1 release**
+  and has NOT received recent gateway hardening (settle-gate, SCRAM, wake-retry) — decide
+  **maintain vs. declare legacy**. `pggw-apps` (the primary multi-tenant path) IS current.
+- **Close stale v2.0.0-mistag artifacts** #148/#149/#150 + epic #139 (the zone axis shipped
+  additively as v1.3.0; these imply a v2.0.0 review that isn't happening — v2.0.0 reserved
+  for a genuine DATABASE_URL/cross-cluster breaking change).
+- **Research candidate — `microsoft/pg_durable`** (in-DB durable execution): on-strategy
+  ("compute close to data"), state durable-by-Neon-for-free, but its **background-worker
+  execution conflicts with scale-to-zero** (same class as pg_cron/continuous-aggregates).
+  Fits only with a **wake-on-scheduled-step** primitive (family of #35 / repl-wake).
+  Worth a research ADR before any adoption.
 
 ## 4. Open backlog (github.com/getknext-dev/scale-zero-pg/issues)
-Security tail (next up):
-- **#118** (p3) policy-capable CNI → makes `apps-compute-ingress` NetworkPolicy enforce.
-  **Infra-risk** (swaps flannel on the live 2-node cluster) — assess before touching.
-  This is the "Option C" pairing for ADR-0008.
-- **#164** (p2) RO/warm computes lack the scram pg_hba + #112 `cloud_admin` reject
-  (defense-in-depth; strong password still holds — assessed NOT p1, see the issue).
-- **#158** cold-wake md5 downgrade window (a `compute_ctl` limitation; rule-5-bounded).
-
-Follow-ups / hygiene: #166, #162, #157, #144, #141, #132, #123, #122, #104, #35, #7.
-Process audit: **#163** (a lane self-merged #161 before the gate completed — see §6).
-`#139` = the v2 zone epic (tracking, effectively delivered). `#148-150` = v1.3.0 blind
-reviews (keep for reference).
+Autonomously-doable (no owner decision, no cluster-capacity block):
+- **#104** — docs: write-heavy tuning guide (batch/COPY, pooling, async commit, RO offload).
+Owner-/infra-gated: **#182**, **#118** (see §3), **#185** (deferred /status live steps).
+Feature/design (want owner steer): **#35** (wake-ahead: Knative-activation → gateway
+pre-warm), **#7** (in-process CNPG hibernate driver).
+Cluster-capacity-gated (need ≥3 nodes): a clean multi-compute `lag_s` re-run; the #197
+discriminator experiment (closed as drill-artifact, reopen only if a clean repro appears).
+Reference/stale: #163 (process record — #161 gate-bypass, memory-hardened), #148/#149/#150,
+#139, #73.
+Closed this arc: #122 #123 #132 #141 #144 #157 #158 #162 #166 #179 #180 #181 #183 #184
+#186 #187 #188 #189 #190 #192 #193 #195 #196 #197 #198 (via their PRs).
 
 ## 5. The workflow (MANDATORY — owner-reaffirmed)
 Every change: **plan (issue) → TDD (red→green) → test on the OKE cluster → code review →
@@ -86,10 +124,16 @@ session tokens. All ephemeral/machine-local. A fresh agent rebuilds context from
 doc + `CLAUDE.md` + `docs/` + the issues/PRs/ADRs.
 
 ## 8. First moves for the new agent
-1. `git clone` the repo; read `CLAUDE.md`, `docs/SCALING.md`, `docs/SCORECARD.md`, and the
-   ADR ledger `docs/adr-0001..0008`.
+1. `git clone` the repo; read `CLAUDE.md`, `docs/SCALING.md`, `docs/SCORECARD.md`,
+   `docs/BENCHMARKS.md`, and the ADR ledger `docs/adr-0001..0008` (0008 now **ACCEPTED**).
 2. Provision the §6 credentials; verify cluster reachability
    (`kubectl config use-context context-ckmva7v7zvq && kubectl -n scale-zero-pg get deploy`).
-3. Ask the owner to ratify **ADR-0008** (§3).
-4. Continue the security tail: **#118** (assess infra risk first), **#164**, then the
-   hygiene backlog — each through the full sign-off gate (§5).
+   If the OCI session lapsed: `oci session authenticate --profile-name knext --region me-abudhabi-1`
+   (browser SSO — human-only). The launchd auto-refresh keeps it alive during active use.
+3. **Surface the §3 owner decisions** (v1.4.x tag + trio; docs #11 publish; #182; #118;
+   pggw maintain-vs-legacy; close #148-150/#139). None is autonomously unblocked.
+4. Meanwhile, the one clean autonomous item is **#104** (write-heavy tuning guide) — do it
+   through the full sign-off gate (§5). Larger feature items (#35, #7) want owner steer.
+5. **Working discipline (owner directive 2026-07-13):** after EACH step of work, update the
+   relevant `docs/` AND this `HANDOFF.md` so the project handover to another agent stays
+   current — the repo is the memory; keep it truthful and live.

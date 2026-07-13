@@ -1,6 +1,7 @@
 # CLAUDE.md — kickoff brief for this MVP
 
-## Status: v1.0.0 SHIPPED (2026-07-05) — now in open-ended post-1.0 loop
+## Status: v1.0.0 GA (2026-07-05); latest tag **v1.4.0** + untagged reliability arc — open-ended post-1.0 loop
+_Current state, open owner-decisions, and full backlog live in **`HANDOFF.md`** (kept current after each step). Since GA: all 4 scaling axes, SCRAM auth, wake-budget, zones (v1.3.x), platform extensions (v1.4.0), the Drizzle SDK, and a large reliability arc (wake-retry/#190, /status gate, operator ownerReferences, ADR-0008 ratified, drill-harness robustness). A v1.4.x tag + blind-trio review is pending owner approval._
 **v1.0.0 GA released.** All 10 ratified GA criteria met (#73): declarative provisioning
 (AppDatabase CRD + reconcile operator, ADR-0004), per-app restore executed, tenant quotas,
 read-replica-pool GA, storage-plane upgrade executed, KC5 real-knext-use, independent security
