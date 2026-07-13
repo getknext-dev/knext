@@ -412,9 +412,11 @@ const FAMILY_FILE_QUARANTINES: Record<
 //     the documented Bun ≤1.3.x errored-body-never-settles gap); bun-lane-only
 //     final-post-retry failure in run 29276122186. LANE-SCOPING NOTE: the
 //     manifest is lane-BLIND (both lanes load the same
-//     NEXT_EXTERNAL_TESTS_FILTERS file), so this skip also drops the two cases
-//     on the NODE lane where they pass — the same accepted cost as the
-//     server-actions precedent entry, documented in the ledger record.
+//     NEXT_EXTERNAL_TESTS_FILTERS file), so the two cases are jest-deselected
+//     on the NODE lane too, where they pass; the FILE still runs and reports
+//     green on node and the 778 file-count total is unchanged (suites entries
+//     are per-case deselections, not file exclusions) — the same accepted
+//     cost as the server-actions precedent entry, documented in the ledger.
 const PER_CASE_QUARANTINES: Record<string, { cases: string[]; observedRuns: string[] }> = {
   'test/e2e/app-dir/server-actions-redirect-middleware-rewrite/server-actions-redirect-middleware-rewrite.test.ts':
     {
