@@ -91,11 +91,13 @@ build `--platform linux/amd64`, push to OCIR `…/knext-docs`, ensure the `ocir-
 - **Close stale v2.0.0-mistag artifacts** #148/#149/#150 + epic #139 (the zone axis shipped
   additively as v1.3.0; these imply a v2.0.0 review that isn't happening — v2.0.0 reserved
   for a genuine DATABASE_URL/cross-cluster breaking change).
-- **Research candidate — `microsoft/pg_durable`** (in-DB durable execution): on-strategy
-  ("compute close to data"), state durable-by-Neon-for-free, but its **background-worker
-  execution conflicts with scale-to-zero** (same class as pg_cron/continuous-aggregates).
-  Fits only with a **wake-on-scheduled-step** primitive (family of #35 / repl-wake).
-  Worth a research ADR before any adoption.
+- **Research candidate — `microsoft/pg_durable`** (in-DB durable execution): analysis now
+  captured as **`docs/adr-0009-durable-execution-pg-durable.md`** (Status: PROPOSED — research
+  note). On-strategy ("compute close to data", durable-by-Neon-for-free) but its
+  **background-worker execution conflicts with scale-to-zero** (same class as
+  pg_cron/continuous-aggregates). Recommendation: **do not adopt now**; the real prerequisite
+  is a **wake-on-scheduled-step** primitive (repl-wake #139/#140 / #35 family), which would
+  also unblock pg_cron + continuous aggregates. Owner to accept/reject the ADR.
 
 ## 4. Open backlog (github.com/getknext-dev/scale-zero-pg/issues)
 Autonomously-doable (no owner decision, no cluster-capacity block):

@@ -463,8 +463,9 @@ Where to read for depth:
 - `docs/runbook-dr.md` — disaster recovery (restore the real plane into a fresh cluster).
 - `docs/knext-research.md` — the consumer platform integration notes.
 
-**The ADR ledger** (`docs/adr-0001` … `docs/adr-0008`, all ACCEPTED). Read the one that governs
-the area you're changing — an ADR change is a review trigger.
+**The ADR ledger** (`docs/adr-0001` … `docs/adr-0008` ACCEPTED; `docs/adr-0009` PROPOSED —
+research note). Read the one that governs the area you're changing — an ADR change is a review
+trigger.
 
 | ADR | Decides |
 |---|---|
@@ -476,6 +477,7 @@ the area you're changing — an ADR change is a review trigger.
 | 0006 | Unified config: `NextApp.spec.database` auto-provisions + wires the DB cross-repo (knext declares inline; scale-zero-pg composes the AppDatabase + injects the Secret). |
 | 0007 | Zoned consistency: DB-per-zone, strong in-zone, eventual across-zone via logical replication; gateway-mediated replication-wake; Zone composes AppDatabase. |
 | 0008 | Wake-primitive security: the wake is a **bounded, observable shared-plane property, not pre-authenticated** — layered control (per-app rate-limit/budget/alert now + NetworkPolicy via #118). |
+| 0009 | *(PROPOSED — research)* In-DB durable execution (`pg_durable`): on-strategy but blocked by scale-to-zero (background-worker conflict, same class as pg_cron); adopt only behind a **wake-on-scheduled-step** primitive. No code. |
 
 ---
 
