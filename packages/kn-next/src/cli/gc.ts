@@ -55,10 +55,14 @@ export interface AssetGCResult {
     /** The revision names observed in status.currentTraffic (diagnostics). */
     liveRevisions: string[];
     /** Which fail-safe fired (only set when `pruned` is false). */
-    skipReason?: "unresolvable-live-build-id" | "pinned-with-empty-status";
+    skipReason?:
+        | "unresolvable-live-build-id"
+        | "pinned-with-empty-status"
+        | "pinned-not-resolvable";
     /**
-     * The `spec.traffic.revisionName` pin observed while status.currentTraffic
-     * was empty (#264 fail-safe), or "(unreadable)" when the probe threw.
+     * The `spec.traffic.revisionName` pin observed by the UNCONDITIONAL spec
+     * probe (#272 residual — set on both pin fail-safes), or "(unreadable)"
+     * when the probe threw.
      */
     pinnedRevision?: string;
     /** What the prune did (only set when `pruned` is true). */
@@ -105,38 +109,44 @@ export function runAssetGC(
     const liveRevisions = parseLiveRevisionNames(
         trafficJson.replace(/^'|'$/g, ""),
     );
+    // Spec-pin probe — UNCONDITIONAL (#272 sysdesign-gate residual, folded
+    // into #254): status.currentTraffic is the operator's OBSERVATION and can
+    // LAG the spec — a fresh `kn-next rollback --to revA` pin may not be
+    // reflected in a still-populated (or wiped) status yet. The pin is
+    // therefore read on EVERY run (READ-ONLY): an empty status with a pin
+    // skips (#264 fail-safe below); a populated status has the pin's build-id
+    // unioned into the protected set after live resolution. A failed probe is
+    // treated as "cannot prove there is no pin" — over-keep, never over-delete.
+    let pinnedRevision = "";
+    let pinProbeFailed = false;
+    try {
+        pinnedRevision = exec([
+            "kubectl",
+            "get",
+            "nextapp",
+            config.name,
+            "-n",
+            namespace,
+            "-o",
+            "jsonpath={.spec.traffic.revisionName}",
+        ])
+            .replace(/^'|'$/g, "")
+            .trim();
+    } catch {
+        pinProbeFailed = true;
+        pinnedRevision = "(unreadable)";
+    }
     // #264 fail-safe: an EMPTY status.currentTraffic while the CR PINS a
     // revision (spec.traffic.revisionName set — a #92 rollback) means the
     // status was wiped or is lagging. A window-only prune here could reap the
-    // pinned build's assets. Probe the spec (READ-ONLY) and skip loudly; a
-    // failed probe also skips (we cannot prove there is no pin — over-keep,
-    // never over-delete).
-    if (liveRevisions.length === 0) {
-        let pinned: string;
-        try {
-            pinned = exec([
-                "kubectl",
-                "get",
-                "nextapp",
-                config.name,
-                "-n",
-                namespace,
-                "-o",
-                "jsonpath={.spec.traffic.revisionName}",
-            ])
-                .replace(/^'|'$/g, "")
-                .trim();
-        } catch {
-            pinned = "(unreadable)";
-        }
-        if (pinned) {
-            return {
-                pruned: false,
-                liveRevisions,
-                skipReason: "pinned-with-empty-status",
-                pinnedRevision: pinned,
-            };
-        }
+    // pinned build's assets — skip loudly (a failed probe lands here too).
+    if (liveRevisions.length === 0 && pinnedRevision) {
+        return {
+            pruned: false,
+            liveRevisions,
+            skipReason: "pinned-with-empty-status",
+            pinnedRevision,
+        };
     }
     // Resolve each live revision to its build-id via the operator-stamped
     // label (read-only). The single-token jsonpath escapes the dotted/slashed
@@ -162,7 +172,52 @@ export function runAssetGC(
             skipReason: "unresolvable-live-build-id",
         };
     }
-    const summary = prune(config, resolved.buildIds, newBuildId, { dryRun });
+    // #272 residual: with a NON-empty (possibly lagging) status, the spec pin
+    // must still be protected. A failed probe means we cannot prove there is
+    // no pin — fail-safe skip. A pin outside currentTraffic is resolved via
+    // the SAME operator-stamped label read the live revisions use and its
+    // build-id unioned into the protected set; an unresolvable pin (revision
+    // gone / label missing / read failed) fail-safe skips.
+    if (pinProbeFailed) {
+        return {
+            pruned: false,
+            liveRevisions,
+            skipReason: "pinned-not-resolvable",
+            pinnedRevision,
+        };
+    }
+    let liveBuildIds = resolved.buildIds;
+    if (pinnedRevision && !liveRevisions.includes(pinnedRevision)) {
+        let pinnedBuildId = "";
+        try {
+            pinnedBuildId = exec([
+                "kubectl",
+                "get",
+                "revision",
+                pinnedRevision,
+                "-n",
+                namespace,
+                "-o",
+                "jsonpath={.metadata.labels.apps\\.kn-next\\.dev/build-id}",
+            ])
+                .replace(/^'|'$/g, "")
+                .trim();
+        } catch {
+            pinnedBuildId = "";
+        }
+        if (!pinnedBuildId) {
+            return {
+                pruned: false,
+                liveRevisions,
+                skipReason: "pinned-not-resolvable",
+                pinnedRevision,
+            };
+        }
+        if (!liveBuildIds.includes(pinnedBuildId)) {
+            liveBuildIds = [...liveBuildIds, pinnedBuildId];
+        }
+    }
+    const summary = prune(config, liveBuildIds, newBuildId, { dryRun });
     return { pruned: true, liveRevisions, summary };
 }
 
@@ -220,10 +275,12 @@ Runs the SAME retention GC \`kn-next deploy\` runs after shipping (ADR-0011):
 keeps the newest \`storage.assetRetention\` build-ids (default 3) PLUS every
 build-id currently serving traffic (resolved read-only from the NextApp's
 status.currentTraffic via the operator-stamped \`apps.kn-next.dev/build-id\`
-revision label) — a pinned/canary/rolled-back revision's assets are NEVER
-reaped. FAIL-SAFE: if any live revision has no resolvable build-id, or the CR
-pins a revision (spec.traffic.revisionName) while status.currentTraffic is
-empty (status wiped/lagging), the GC is skipped entirely
+revision label) PLUS the build of any \`spec.traffic.revisionName\` pin (read
+unconditionally — a populated status can LAG a fresh rollback pin) — a
+pinned/canary/rolled-back revision's assets are NEVER reaped. FAIL-SAFE: if
+any live revision has no resolvable build-id, if the CR pins a revision while
+status.currentTraffic is empty (status wiped/lagging), or if the pin itself
+cannot be resolved to a build-id, the GC is skipped entirely
 (over-keep, never over-delete). The bare \`<app>/\` prefix is teardown-only
 (ADR-0008) and never touched.
 
@@ -271,6 +328,16 @@ export function renderGcReport(
                 `(spec.traffic.revisionName) but status.currentTraffic is empty ` +
                 `(status wiped or lagging); a window-only prune could reap the ` +
                 `pinned build. Nothing was deleted.\n`
+            );
+        }
+        if (res.skipReason === "pinned-not-resolvable") {
+            return (
+                `gc: SKIPPED (fail-safe over-keep) [pinned-not-resolvable] — ` +
+                `${appName} pins revision "${res.pinnedRevision}" ` +
+                `(spec.traffic.revisionName) but the pin's build-id could not ` +
+                `be resolved (revision missing, build-id label absent, or the ` +
+                `read failed), so the pinned build cannot be proven protected. ` +
+                `Nothing was deleted.\n`
             );
         }
         return (
