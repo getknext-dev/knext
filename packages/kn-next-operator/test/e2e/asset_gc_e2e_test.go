@@ -140,19 +140,28 @@ const (
 		"c2b7412fbea6f1ef24a0cac60698e88df7ae3c4278e42d0cb34fe7d4b2641bba"
 )
 
-// The four seeded build-ids. Lexicographic order == age order (mirrors real
+// The seeded build-ids. Lexicographic order == age order (mirrors real
 // numeric deploy tags, which also list oldest-first in an S3 listing):
-//   - gcBidPinned: the OLDEST build — its revision gets pinned via the real
-//     `kn-next rollback --to`, so the live-set rule (NOT the retain window,
-//     assetRetention=1) is the only thing protecting it.
-//   - gcBidReapA/B: unpinned, out-of-window — MUST be reaped.
+//   - gcBidUnmarked: the very oldest prefix, seeded WITHOUT the `.knext-build`
+//     marker object (#264 marker inversion) — a pre-marker upload / unknown
+//     future dir. Out of window, not live: it MUST survive (loud SKIP), the
+//     new negative spec.
+//   - gcBidPinned: the OLDEST marked build — its revision gets pinned via the
+//     real `kn-next rollback --to`, so the live-set rule (NOT the retain
+//     window, assetRetention=1) is the only thing protecting it.
+//   - gcBidReapA/B: marked, unpinned, out-of-window — MUST be reaped.
 //   - gcBidNew: the "just deployed" build (passed as `--build-id`) — kept by
 //     the retain window.
 const (
-	gcBidPinned = "bid-01-pinned"
-	gcBidReapA  = "bid-02-reap"
-	gcBidReapB  = "bid-03-reap"
-	gcBidNew    = "bid-04-new"
+	gcBidUnmarked = "bid-00-unmarked"
+	gcBidPinned   = "bid-01-pinned"
+	gcBidReapA    = "bid-02-reap"
+	gcBidReapB    = "bid-03-reap"
+	gcBidNew      = "bid-04-new"
+
+	// gcMarkerFile is the ADR-0011 marker object name (#264): the pruner only
+	// ever reaps prefixes carrying `<app>/_next/static/<id>/.knext-build`.
+	gcMarkerFile = ".knext-build"
 )
 
 // gcAppNamespace is fresh and randomly-suffixed per run (same hygiene
@@ -626,17 +635,25 @@ var _ = Describe("asset retention GC against a live cluster (ADR-0011)", Ordered
 		}, gcAssertTimeout, gcAssertPoll).Should(Succeed())
 
 		By("seeding the object store in the EXACT ADR-0008/ADR-0011 layout via the S3 API")
-		// Per-build-id prefixes (`<app>/_next/static/<id>/…`) + the shared
-		// non-build-id dirs real `next build` also emits under `_next/static/`
-		// (chunks/css/media — the GC must NEVER classify these as prunable
-		// build-ids) + bare-`<app>/` root keys (teardown-only, ADR-0008).
+		// Per-build-id prefixes (`<app>/_next/static/<id>/…`, each carrying
+		// the `.knext-build` marker a real knext upload writes, #264) + ONE
+		// deliberately UNMARKED prefix (pre-marker upload / unknown future dir
+		// — must survive every prune, the marker-inversion negative spec) +
+		// the shared non-build-id dirs real `next build` also emits under
+		// `_next/static/` (chunks/css/media — the GC must NEVER classify these
+		// as prunable build-ids) + bare-`<app>/` root keys (teardown-only,
+		// ADR-0008).
 		// NOTE (evidence boundary): seeding proves the pruner against this
 		// layout; it does NOT prove a real `next build`+upload produces it —
 		// see the package comment.
 		for _, bid := range []string{gcBidPinned, gcBidReapA, gcBidReapB, gcBidNew} {
-			for _, f := range []string{"_buildManifest.js", "_ssgManifest.js"} {
+			for _, f := range []string{"_buildManifest.js", "_ssgManifest.js", gcMarkerFile} {
 				Expect(gcSeedObject(gcStaticPrefix(bid) + f)).To(Succeed())
 			}
+		}
+		// The unmarked prefix: real files, NO marker object.
+		for _, f := range []string{"_buildManifest.js", "_ssgManifest.js"} {
+			Expect(gcSeedObject(gcStaticPrefix(gcBidUnmarked) + f)).To(Succeed())
 		}
 		for _, key := range []string{
 			gcAppName + "/_next/static/chunks/main-app-deadbeef.js",
@@ -648,10 +665,11 @@ var _ = Describe("asset retention GC against a live cluster (ADR-0011)", Ordered
 			Expect(gcSeedObject(key)).To(Succeed())
 		}
 
+		// 4 marked prefixes × 3 objects + 1 unmarked × 2 + 3 reserved + 2 root.
 		seededBefore := 0
 		Eventually(func(g Gomega) {
 			keys := gcListAppKeys(g)
-			g.Expect(len(keys)).To(BeNumerically(">=", 13), "seeding incomplete: %v", keys)
+			g.Expect(len(keys)).To(BeNumerically(">=", 19), "seeding incomplete: %v", keys)
 			seededBefore = len(keys)
 		}).Should(Succeed())
 
@@ -671,7 +689,7 @@ var _ = Describe("asset retention GC against a live cluster (ADR-0011)", Ordered
 		keys := gcListAppKeys(Default)
 		Expect(keys).To(HaveLen(seededBefore),
 			"the fail-safe skip must not delete a single object; got %v", keys)
-		for _, bid := range []string{gcBidPinned, gcBidReapA, gcBidReapB, gcBidNew} {
+		for _, bid := range []string{gcBidUnmarked, gcBidPinned, gcBidReapA, gcBidReapB, gcBidNew} {
 			Expect(gcKeysWithPrefix(keys, gcStaticPrefix(bid))).NotTo(BeEmpty(),
 				"build prefix %s must be untouched by the skipped GC", bid)
 		}
@@ -737,18 +755,28 @@ var _ = Describe("asset retention GC against a live cluster (ADR-0011)", Ordered
 
 		By("asserting the ADR-0011 outcome on the store")
 		keys := gcListAppKeys(Default)
-		// The pinned revision's build — OLDEST, outside the retain window
-		// (assetRetention=1) — survives on the live-set rule ALONE.
-		Expect(gcKeysWithPrefix(keys, gcStaticPrefix(gcBidPinned))).To(HaveLen(2),
+		// The pinned revision's build — OLDEST marked, outside the retain
+		// window (assetRetention=1) — survives on the live-set rule ALONE.
+		// (2 files + the .knext-build marker.)
+		Expect(gcKeysWithPrefix(keys, gcStaticPrefix(gcBidPinned))).To(HaveLen(3),
 			"the PINNED revision's asset prefix must survive intact (the guarantee rollback rests on)")
 		// The just-deployed build survives on the retain window.
-		Expect(gcKeysWithPrefix(keys, gcStaticPrefix(gcBidNew))).To(HaveLen(2),
+		Expect(gcKeysWithPrefix(keys, gcStaticPrefix(gcBidNew))).To(HaveLen(3),
 			"the newest build's prefix must survive (retain window)")
-		// The unpinned, out-of-window builds are REAPED — the GC actually GCs.
+		// The unpinned, out-of-window builds are REAPED — the GC actually GCs
+		// (and marker-carrying prefixes are still real candidates, #264).
 		Expect(gcKeysWithPrefix(keys, gcStaticPrefix(gcBidReapA))).To(BeEmpty(),
 			"unpinned out-of-window build %s must be reaped", gcBidReapA)
 		Expect(gcKeysWithPrefix(keys, gcStaticPrefix(gcBidReapB))).To(BeEmpty(),
 			"unpinned out-of-window build %s must be reaped", gcBidReapB)
+		// #264 marker inversion — the NEGATIVE spec: the unmarked prefix
+		// (pre-marker upload / unknown future dir) is out-of-window, not live,
+		// and NOT reserved — under the old deny-list-only rule it would have
+		// been reaped. It must survive intact, SKIPPED loudly by name.
+		Expect(gcKeysWithPrefix(keys, gcStaticPrefix(gcBidUnmarked))).To(HaveLen(2),
+			"the UNMARKED prefix %s (no %s marker) must be SKIPPED, never reaped", gcBidUnmarked, gcMarkerFile)
+		Expect(res.Stdout).To(ContainSubstring(gcBidUnmarked),
+			"the gc output must NAME the unmarked prefix it kept (loud over-keep)")
 		// Next's shared non-build-id static dirs are NEVER prune candidates.
 		for _, seg := range []string{"chunks", "css", "media"} {
 			Expect(gcKeysWithPrefix(keys, gcStaticPrefix(seg))).NotTo(BeEmpty(),

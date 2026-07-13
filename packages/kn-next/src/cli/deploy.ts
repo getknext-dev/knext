@@ -366,8 +366,12 @@ async function deploy() {
             const res = runAssetGC(config, options.namespace, buildId);
             if (!res.pruned) {
                 log.warn(
-                    { liveRevisions: res.liveRevisions },
-                    "Asset retention GC skipped: a live revision has no resolvable build-id (fail-safe, over-keep)",
+                    {
+                        liveRevisions: res.liveRevisions,
+                        skipReason: res.skipReason,
+                        pinnedRevision: res.pinnedRevision,
+                    },
+                    "Asset retention GC skipped (fail-safe, over-keep — see skipReason)",
                 );
             }
         } catch (err) {

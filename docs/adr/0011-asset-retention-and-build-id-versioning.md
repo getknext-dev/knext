@@ -1,11 +1,12 @@
 # ADR-0011: Build-id-versioned assets, retention GC, and client→build pinning (skew protection)
 
-- Status: Accepted
+- Status: Accepted (amended 2026-07-13: marker-object inversion + pin-with-empty-status fail-safe, #264)
 - Date: 2026-06-22
 - Deciders: knext architect
 - Related: ADR-0001 (operator = single source of truth), ADR-0006 (object-store data plane),
   ADR-0008 (app-namespaced assets + deletion finalizer), issue #93 (skew protection),
-  issue #92 (rollback / traffic pinning), issue #75 (asset-upload verification)
+  issue #92 (rollback / traffic pinning), issue #75 (asset-upload verification),
+  issue #264 (GC hardening: marker inversion)
 
 ## Context
 
@@ -134,3 +135,62 @@ build, so a query-string/`deploymentId` mechanism was missing.
   (`chunks`, `css`, `media`, `webpack`, `development`) are now excluded from the candidate set
   across all four providers (regression: asset-prune.test.ts; live: the e2e_gc suite seeds and
   asserts them untouched).
+
+## Amendment (2026-07-13, #264): marker-object inversion + pin-with-empty-status fail-safe
+
+### Context
+
+The reserved-dir deny-list above fixes the *known* shared dirs, but its failure direction was
+still DELETION: a FUTURE Next version emitting a NEW shared dir under `.next/static/` (not in the
+list, no build-id shape) would re-enter the candidate set and be reaped once it aged out of the
+retain window — a data-loss failure on a Next upgrade that nothing in CI would catch. Separately,
+the GC treated an EMPTY `status.currentTraffic` as "nothing live ⇒ window-only prune", but if the
+CR pins a revision (`spec.traffic.revisionName`, a #92 rollback) while the status is wiped or
+lagging, a window-only prune can reap the pinned build.
+
+### Decision
+
+1. **Marker-object inversion.** Every knext upload stages a marker object
+   `<app>/_next/static/<BUILD_ID>/.knext-build` (`BUILD_MARKER_FILENAME`, content = the build-id).
+   It is written into the staging dir (`stageStandaloneAssets`, BUILD_ID from `.next/BUILD_ID`),
+   so it rides each provider's existing bulk upload AND the #75 verify-and-retry pass on ALL four
+   providers (GCS, S3, MinIO, Azure) — a deploy whose marker did not land remotely **fails
+   loudly**. The pruner (`listRemoteBuildIds`, now listing recursively so markers are visible)
+   feeds ONLY marker-carrying prefixes to `selectBuildsToDelete`; every non-marker prefix defaults
+   to **KEEP** and is skipped loudly, named in the `kn-next gc` output and the returned
+   `PruneSummary.keptUnmarked`. The keep rule is now:
+
+   > **reap iff** (carries `.knext-build`) AND (outside the newest `retain` window) AND (not in
+   > the live set). Unknown ⇒ KEEP.
+
+2. **The reserved-dir deny-list STAYS, permanently, as defense-in-depth** (gate ruling). Deleting
+   the shared `chunks/` dir is the max-blast-radius failure (404s the CURRENT build's own JS);
+   `RESERVED_STATIC_DIRS` keeps those segments out of the candidate set even if a hostile or
+   accidental `.knext-build` object appears inside one (regression-tested).
+
+3. **Pin-with-empty-status fail-safe.** When `status.currentTraffic` is empty, `runAssetGC` probes
+   `spec.traffic.revisionName` (READ-ONLY). If a pin is set — or the probe itself fails — the GC
+   is **skipped entirely** with a loud line naming the pinned revision; it never falls back to a
+   window-only prune. Only "status empty AND spec not pinned" proceeds window-only.
+
+### Transition & reclaim (documented over-keep)
+
+- **Mixed buckets:** builds uploaded by a pre-marker knext carry no marker and are **over-kept
+  until a marker-carrying re-upload** rotates them out of relevance; each GC run names them.
+- **Permanent over-keep for retired apps:** an app that never deploys again never gets markers,
+  so its pre-marker prefixes are **never reaped automatically — by design** (the failure direction
+  is KEEP). The reclaim path is manual: delete `<app>/_next/static/<id>/` prefixes by hand, or
+  delete the `NextApp` CR — the ADR-0008 teardown finalizer wipes the whole `<app>/` namespace.
+
+### Consequences
+
+- The GC's failure direction on unknown input is now uniformly KEEP: unknown dirs, pre-marker
+  uploads, listing/parse failures, unresolvable live revisions, and pinned-but-status-empty all
+  over-keep, never over-delete. Storage boundedness now depends on uploads writing markers (a
+  marker regression surfaces as unbounded keeps + loud per-run naming, not data loss).
+- Coverage: marker staging + remote verification per provider (asset-upload.test.ts), marker-gated
+  reap / unmarked-keep / hostile-marker-in-reserved-dir per provider (asset-prune.test.ts), the
+  pin fail-safe (gc-cli.test.ts), and the nightly e2e_gc suite seeds markers and asserts one
+  deliberately unmarked prefix survives a real prune.
+- `kn-next gc --dry-run` and the canary-pin e2e leg are the second half of #264, tracked
+  separately (not in this change).

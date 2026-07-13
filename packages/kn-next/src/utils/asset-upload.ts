@@ -1,4 +1,12 @@
-import { cpSync, existsSync, mkdirSync, readdirSync, rmSync } from "node:fs";
+import {
+    cpSync,
+    existsSync,
+    mkdirSync,
+    readdirSync,
+    readFileSync,
+    rmSync,
+    writeFileSync,
+} from "node:fs";
 import { join, relative } from "node:path";
 import { runCapture, runQuiet, runQuietAllowFail } from "../cli/exec";
 import type { KnativeNextConfig } from "../config";
@@ -470,6 +478,35 @@ export function stageStandaloneAssets(cwd: string = process.cwd()): string {
         cpSync(publicDir, stagingDir, { recursive: true });
     }
 
+    // #264 marker inversion (ADR-0011): stage the `.knext-build` marker object
+    // into this build's `_next/static/<BUILD_ID>/` prefix. It rides the normal
+    // provider bulk upload AND the #75 verify-and-retry pass (it is part of the
+    // staged file set), so every provider both writes it and PROVES it landed
+    // remotely — a build whose marker is missing fails the deploy loudly. The
+    // pruner deletes ONLY marker-carrying prefixes; a build uploaded without a
+    // marker is permanently over-kept (documented transition/reclaim story).
+    const buildIdFile = join(cwd, ".next", "BUILD_ID");
+    if (existsSync(buildIdFile)) {
+        const buildId = readFileSync(buildIdFile, "utf8").trim();
+        // A reserved segment can never be a build-id (deny-list stays as
+        // defense-in-depth) and an empty id would scope to the static root.
+        if (buildId && !RESERVED_STATIC_DIRS.has(buildId)) {
+            const markerDir = join(stagingDir, "_next", "static", buildId);
+            mkdirSync(markerDir, { recursive: true });
+            writeFileSync(
+                join(markerDir, BUILD_MARKER_FILENAME),
+                `${buildId}\n`,
+            );
+        }
+    } else {
+        log.warn(
+            { buildIdFile },
+            "No .next/BUILD_ID — the .knext-build marker was not staged; " +
+                "this build's asset prefix will be over-kept by the GC " +
+                "(never reaped) until a marker-carrying re-upload",
+        );
+    }
+
     return stagingDir;
 }
 
@@ -515,36 +552,81 @@ const RESERVED_STATIC_DIRS: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * Lists the build-id "directories" present under `<app>/_next/static/` in the
- * object store, returning buildId → the recursive-delete URI scoped to exactly
- * `<app>/_next/static/<buildId>/`. Provider-specific because each CLI renders a
- * listing differently. The build-id is the first path segment AFTER `_next/static/`,
- * excluding {@link RESERVED_STATIC_DIRS} (never prunable build-id candidates).
+ * The marker OBJECT every knext upload writes at
+ * `<app>/_next/static/<buildId>/.knext-build` (#264, ADR-0011). The pruner
+ * deletes ONLY prefixes that carry this marker — proof the prefix was uploaded
+ * by knext as a build. Everything else (a FUTURE Next shared dir, a pre-marker
+ * upload, anything a human placed there) defaults to KEEP. This inverts the
+ * old deny-list-only direction, whose failure mode on a Next upgrade was
+ * DELETION of a new shared dir; {@link RESERVED_STATIC_DIRS} stays permanently
+ * as defense-in-depth on top (reaping `chunks/` is the max-blast-radius
+ * failure and must stay impossible even if a marker appears inside it).
  */
-function listRemoteBuildIds(config: KnativeNextConfig): Map<string, string> {
+export const BUILD_MARKER_FILENAME = ".knext-build";
+
+/** One first-level prefix under `<app>/_next/static/` observed remotely. */
+interface RemoteStaticPrefix {
+    /** Recursive-delete URI scoped to exactly `<app>/_next/static/<id>/`. */
+    deleteUri: string;
+    /** true ⇒ `<id>/.knext-build` exists — the prefix is a knext build. */
+    hasMarker: boolean;
+}
+
+/**
+ * Lists the first-level "directories" present under `<app>/_next/static/` in
+ * the object store, returning id → { delete URI, marker presence } (#264).
+ * Provider-specific because each CLI renders a listing differently; every
+ * provider lists RECURSIVELY so the `.knext-build` marker objects are visible.
+ * The id is the first path segment AFTER `_next/static/`, excluding
+ * {@link RESERVED_STATIC_DIRS} (never prunable candidates, marker or not).
+ */
+function listRemoteBuildIds(
+    config: KnativeNextConfig,
+): Map<string, RemoteStaticPrefix> {
     const { provider, bucket } = config.storage;
     const appPrefix = appKeyPrefix(config); // "<name>/"
-    const out = new Map<string, string>();
+    const out = new Map<string, RemoteStaticPrefix>();
 
-    /** Extracts the build-id segment that follows `_next/static/` in a key. */
-    const buildIdFrom = (relKey: string): string | null => {
-        const idx = relKey.indexOf(STATIC_NS);
+    /**
+     * Folds one key path RELATIVE to `_next/static/` (e.g.
+     * `bid-1/.knext-build`, `bid-1/_buildManifest.js`, `bid-1/:` for a gsutil
+     * directory-header line) into the result map.
+     */
+    const record = (
+        relAfterStatic: string,
+        deleteUriFor: (id: string) => string,
+    ): void => {
+        const segs = relAfterStatic.split("/");
+        const id = segs[0];
+        if (!id || RESERVED_STATIC_DIRS.has(id)) return;
+        const entry = out.get(id) ?? {
+            deleteUri: deleteUriFor(id),
+            hasMarker: false,
+        };
+        // The marker is the DIRECT child `<id>/.knext-build` — never deeper.
+        if (segs.length === 2 && segs[1] === BUILD_MARKER_FILENAME) {
+            entry.hasMarker = true;
+        }
+        out.set(id, entry);
+    };
+
+    /** Extracts the path RELATIVE to `_next/static/` from a full key, if any. */
+    const relFrom = (key: string): string | null => {
+        const idx = key.indexOf(STATIC_NS);
         if (idx < 0) return null;
-        const seg = relKey.slice(idx + STATIC_NS.length).split("/")[0];
-        if (!seg || RESERVED_STATIC_DIRS.has(seg)) return null;
-        return seg;
+        return key.slice(idx + STATIC_NS.length);
     };
 
     switch (provider) {
         case "gcs": {
             const base = `gs://${bucket}/${appPrefix}${STATIC_NS}`;
-            const listed = runCapture(["gsutil", "ls", base]);
+            // Recursive: object URIs (and `<dir>/:` header lines) — the marker
+            // objects are visible, unlike the old single-level `gsutil ls`.
+            const listed = runCapture(["gsutil", "ls", "-r", base]);
             for (const line of listed.split("\n")) {
                 const trimmed = line.trim();
                 if (!trimmed.startsWith(base)) continue;
-                const id = trimmed.slice(base.length).replace(/\/.*/, "");
-                if (id && !RESERVED_STATIC_DIRS.has(id))
-                    out.set(id, `${base}${id}/`);
+                record(trimmed.slice(base.length), (id) => `${base}${id}/`);
             }
             return out;
         }
@@ -565,25 +647,31 @@ function listRemoteBuildIds(config: KnativeNextConfig): Map<string, string> {
             for (const tok of listed.split(/\s+/)) {
                 const key = tok.trim();
                 if (!key || key === "None") continue;
-                const id = buildIdFrom(key);
-                if (id)
-                    out.set(
-                        id,
-                        `s3://${bucket}/${appPrefix}${STATIC_NS}${id}/`,
+                const rel = relFrom(key);
+                if (rel !== null)
+                    record(
+                        rel,
+                        (id) => `s3://${bucket}/${appPrefix}${STATIC_NS}${id}/`,
                     );
             }
             return out;
         }
         case "minio": {
             const base = `minio/${bucket}/${appPrefix}${STATIC_NS}`;
-            const listed = runCapture(["mc", "ls", base]);
+            // Recursive so the per-build `.knext-build` objects are listed.
+            const listed = runCapture(["mc", "ls", "--recursive", base]);
             for (const line of listed.split("\n")) {
                 const trimmed = line.trim();
                 if (!trimmed) continue;
-                const last = trimmed.split(/\s+/).pop() ?? "";
-                const id = last.replace(/\/.*$/, "");
-                if (id && !RESERVED_STATIC_DIRS.has(id))
-                    out.set(id, `${base}${id}/`);
+                // `mc ls --recursive` prints metadata columns then the key —
+                // either the full `minio/<bucket>/...` token or a path
+                // RELATIVE to the listed prefix as the last field.
+                const token =
+                    trimmed.split(/\s+/).find((t) => t.startsWith(base)) ??
+                    trimmed.split(/\s+/).pop();
+                if (!token) continue;
+                const rel = stripPrefix(token, base) ?? token;
+                record(rel, (id) => `${base}${id}/`);
             }
             return out;
         }
@@ -607,8 +695,12 @@ function listRemoteBuildIds(config: KnativeNextConfig): Map<string, string> {
                 if (Array.isArray(parsed)) {
                     for (const name of parsed) {
                         if (typeof name !== "string") continue;
-                        const id = buildIdFrom(name);
-                        if (id) out.set(id, `${appPrefix}${STATIC_NS}${id}/`);
+                        const rel = relFrom(name);
+                        if (rel !== null)
+                            record(
+                                rel,
+                                (id) => `${appPrefix}${STATIC_NS}${id}/`,
+                            );
                     }
                 }
             } catch {
@@ -672,17 +764,36 @@ function deleteBuildPrefix(
 }
 
 /**
+ * What one {@link pruneOldBuilds} run did — returned so callers (`kn-next gc`)
+ * can report it SYNCHRONOUSLY on stdout (a command that deletes objects must
+ * always say what it did, and what it refused to touch).
+ */
+export interface PruneSummary {
+    /** Build-ids whose prefixes were reaped (delete issued), oldest-first. */
+    reaped: string[];
+    /**
+     * First-level prefixes KEPT because they carry no `.knext-build` marker
+     * (#264): pre-marker uploads or unknown/future shared dirs. Over-keep by
+     * design — named loudly so a human can reclaim them manually (ADR-0011).
+     */
+    keptUnmarked: string[];
+}
+
+/**
  * Deploy-time retention GC (#93, ADR-0011). After uploading build `newBuildId`,
- * reap the static-asset prefixes of builds that are BOTH outside the retain
- * window AND not in `liveBuildIds` (the live traffic set, sourced READ-ONLY from
- * `NextApp.Status.CurrentTraffic`, #92). This is the ONLY build-id-pruning
- * authority; it deletes strictly under `<app>/_next/static/<id>/`, never the
- * bare `<app>/` prefix.
+ * reap the static-asset prefixes of builds that are outside the retain window
+ * AND not in `liveBuildIds` (the live traffic set, sourced READ-ONLY from
+ * `NextApp.Status.CurrentTraffic`, #92) AND carry the `.knext-build` marker
+ * object (#264 — only prefixes knext itself uploaded are ever candidates;
+ * unmarked prefixes are kept and named loudly). This is the ONLY
+ * build-id-pruning authority; it deletes strictly under
+ * `<app>/_next/static/<id>/`, never the bare `<app>/` prefix.
  *
  * Ordering: the remote listing has no reliable per-build timestamp, so we treat
  * the just-deployed `newBuildId` as the unambiguous newest and order the rest by
- * their listing position (stable, oldest-first). The window + live set are the
- * safety properties; the exact age of two equally-old builds does not matter.
+ * their listing position (stable, oldest-first). The window + live set + marker
+ * are the safety properties; the exact age of two equally-old builds does not
+ * matter.
  *
  * Best-effort: individual deletes tolerate failure (a stuck delete must never
  * fail a deploy that has already shipped).
@@ -691,10 +802,11 @@ export function pruneOldBuilds(
     config: KnativeNextConfig,
     liveBuildIds: readonly string[],
     newBuildId: string,
-): void {
+): PruneSummary {
     const retain = config.storage.assetRetention ?? DEFAULT_RETAIN;
+    const summary: PruneSummary = { reaped: [], keptUnmarked: [] };
 
-    let remote: Map<string, string>;
+    let remote: Map<string, RemoteStaticPrefix>;
     try {
         remote = listRemoteBuildIds(config);
     } catch (err) {
@@ -704,21 +816,35 @@ export function pruneOldBuilds(
             { provider: config.storage.provider, error: message },
             "Skipping asset GC: could not list remote build-ids",
         );
-        return;
+        return summary;
     }
 
-    const remoteIds = [...remote.keys()];
-    if (remoteIds.length === 0) return;
+    // #264 marker inversion: ONLY marker-carrying prefixes are candidates.
+    // Everything else defaults to KEEP and is skipped LOUDLY, by name.
+    const markedIds: string[] = [];
+    for (const [id, entry] of remote) {
+        if (entry.hasMarker) markedIds.push(id);
+        else summary.keptUnmarked.push(id);
+    }
+    if (summary.keptUnmarked.length > 0) {
+        log.warn(
+            { kept: summary.keptUnmarked, marker: BUILD_MARKER_FILENAME },
+            "Asset GC: keeping unmarked _next/static/ prefixes (no " +
+                ".knext-build marker — pre-marker upload or unknown dir; " +
+                "over-keep, never over-delete)",
+        );
+    }
+    if (markedIds.length === 0) return summary;
 
     // Monotonic ordering: listing order + force `newBuildId` to the newest slot.
     const timestamps: Record<string, number> = {};
-    remoteIds.forEach((id, i) => {
+    markedIds.forEach((id, i) => {
         timestamps[id] = i;
     });
-    if (newBuildId) timestamps[newBuildId] = remoteIds.length + 1;
+    if (newBuildId) timestamps[newBuildId] = markedIds.length + 1;
 
     const toDelete = selectBuildsToDelete({
-        remoteBuildIds: remoteIds,
+        remoteBuildIds: markedIds,
         timestamps,
         liveBuildIds,
         retain,
@@ -726,10 +852,10 @@ export function pruneOldBuilds(
 
     if (toDelete.length === 0) {
         log.info(
-            { retain, remote: remoteIds.length },
+            { retain, remote: markedIds.length },
             "Asset GC: nothing to reap (all builds within window or live)",
         );
-        return;
+        return summary;
     }
 
     log.info(
@@ -737,7 +863,11 @@ export function pruneOldBuilds(
         "Asset GC: reaping old build prefixes (skew-protection retention)",
     );
     for (const id of toDelete) {
-        const uri = remote.get(id);
-        if (uri) deleteBuildPrefix(config, id, uri);
+        const entry = remote.get(id);
+        if (entry) {
+            deleteBuildPrefix(config, id, entry.deleteUri);
+            summary.reaped.push(id);
+        }
     }
+    return summary;
 }

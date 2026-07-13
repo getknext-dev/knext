@@ -1,4 +1,4 @@
-import { promises as fs } from "node:fs";
+import { existsSync, promises as fs } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -319,6 +319,79 @@ describe("uploadAssets data plane", () => {
                 t.includes(`${APP_NAME}/`),
             );
             expect(namespaced).toBe(true);
+        });
+    });
+
+    /**
+     * #264 — marker-object inversion (ADR-0011). `uploadAssets` writes a
+     * `.knext-build` marker object into `_next/static/<BUILD_ID>/` for EVERY
+     * uploaded build; the pruner deletes ONLY marker-carrying prefixes. The
+     * marker is staged as a regular file, so it rides each provider's bulk
+     * upload AND the #75 verify-and-retry pass — a build whose marker did not
+     * land remotely fails the deploy loudly. The marker object name is a
+     * LOCKED contract, hardcoded here.
+     */
+    describe("build marker object (#264, marker inversion)", () => {
+        const BUILD_ID = "bid-mark-1";
+        const markerKey = `_next/static/${BUILD_ID}/.knext-build`;
+
+        beforeEach(async () => {
+            // `next build` wrote its BUILD_ID (deploy.ts pins it to the tag).
+            await fs.writeFile(
+                join(root, ".next", "BUILD_ID"),
+                `${BUILD_ID}\n`,
+            );
+        });
+
+        it.each(
+            providers,
+        )("provider=%s: stages the marker into _next/static/<BUILD_ID>/ and verifies it remotely", async (provider) => {
+            const bucket = "b";
+            runCaptureMock.mockReturnValue(
+                REMOTE_LISTERS[provider](bucket, APP_NAME, [
+                    ...localKeys,
+                    markerKey,
+                ]),
+            );
+
+            await expect(
+                uploadAssets(makeConfig(provider, bucket)),
+            ).resolves.toBeUndefined();
+
+            // The marker file is part of the staged upload set — it rides
+            // the provider's bulk upload of the staging dir.
+            const staged = await fs.readFile(
+                join(assetsDir, markerKey),
+                "utf8",
+            );
+            expect(staged).toContain(BUILD_ID);
+        });
+
+        it.each(
+            providers,
+        )("provider=%s: a marker missing REMOTELY fails the deploy loudly, naming the marker key", async (provider) => {
+            const bucket = "b";
+            // Remote has every asset EXCEPT the marker (even after retry).
+            runCaptureMock.mockReturnValue(
+                REMOTE_LISTERS[provider](bucket, APP_NAME, localKeys),
+            );
+
+            await expect(
+                uploadAssets(makeConfig(provider, bucket)),
+            ).rejects.toThrow(".knext-build");
+        });
+
+        it("no .next/BUILD_ID ⇒ no marker staged (pre-marker behaviour: that build is over-kept)", async () => {
+            await fs.rm(join(root, ".next", "BUILD_ID"));
+            runCaptureMock.mockReturnValue(
+                REMOTE_LISTERS.s3("b", APP_NAME, localKeys),
+            );
+            await expect(
+                uploadAssets(makeConfig("s3", "b")),
+            ).resolves.toBeUndefined();
+            expect(
+                existsSync(join(assetsDir, "_next", "static", BUILD_ID)),
+            ).toBe(false);
         });
     });
 
