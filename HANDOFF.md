@@ -4,10 +4,13 @@ Portable handoff for a **fresh Claude Code agent / another account** to resume t
 project. You do **not** resume old chat sessions — the repo IS the memory. Clone the
 repo, provision the credentials below, read this + `CLAUDE.md` + `docs/`, and continue.
 
-_Last updated: 2026-07-13. Latest tag **v1.4.0**; a large post-v1.4.0 reliability arc
+_Last updated: 2026-07-14. Latest tag **v1.4.0**; a large post-v1.4.0 reliability arc
 is merged-but-untagged (the **v1.4.x tag + blind-trio scorecard review is pending owner
 approval** — see §3). Platform health: green, 0 open PRs, full test battery passed with
-zero product regressions._
+zero product regressions. **Code-documentation hardening arc complete** (#200–#205):
+every control-plane Go binary now carries thorough godoc — gateway + wake, AppDatabase
+operator, and the zone operator (ADR-0007) — plus `docs/ARCHITECTURE.md`, `docs/DRILLS.md`,
+`docs/tuning-write-heavy.md` for the next agent._
 
 ## 1. What this project is
 A **Knative-ecosystem scale-to-zero PostgreSQL platform** — idle databases cost zero
