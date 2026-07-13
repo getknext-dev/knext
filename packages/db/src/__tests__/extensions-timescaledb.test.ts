@@ -31,31 +31,48 @@ describe('@knext/db timescaledb — CREATE EXTENSION guidance', () => {
 });
 
 describe('@knext/db timescaledb — hypertable()', () => {
-  it('emits create_hypertable with the time column + chunk interval', () => {
+  // #259: the emitter targets the MODERN dimension-builder interface —
+  // `create_hypertable(<table>, by_range('<col>'[, INTERVAL]))` — stable since
+  // TimescaleDB 2.13 and the ONLY interface on 2.24+ (the legacy
+  // `create_hypertable(regclass, name, ...)` signature was removed there and
+  // hard-errors). No legacy fork: minimum supported TimescaleDB is 2.13.
+  it('emits create_hypertable with a by_range dimension + partition interval', () => {
     expect(hypertable(metrics, { by: 'ts', chunkInterval: '7 days' })).toBe(
-      "SELECT create_hypertable('metrics', 'ts', " +
-        "chunk_time_interval => INTERVAL '7 days', if_not_exists => TRUE);",
+      "SELECT create_hypertable('metrics', by_range('ts', INTERVAL '7 days'), " +
+        'if_not_exists => TRUE);',
     );
   });
 
   it('accepts a bare table name string', () => {
     expect(hypertable('readings', { by: 'ts' })).toBe(
-      "SELECT create_hypertable('readings', 'ts', if_not_exists => TRUE);",
+      "SELECT create_hypertable('readings', by_range('ts'), if_not_exists => TRUE);",
     );
   });
 
-  it('omits chunk_time_interval when no interval is given', () => {
-    expect(hypertable(metrics, { by: 'ts' })).not.toContain('chunk_time_interval');
+  it('omits the interval inside by_range when none is given', () => {
+    expect(hypertable(metrics, { by: 'ts' })).toContain("by_range('ts')");
+    expect(hypertable(metrics, { by: 'ts' })).not.toContain('INTERVAL');
+  });
+
+  it('never emits the legacy bare-column-name second argument (removed in 2.24)', () => {
+    expect(hypertable(metrics, { by: 'ts', chunkInterval: '7 days' })).not.toContain(
+      "'metrics', 'ts'",
+    );
+    expect(hypertable(metrics, { by: 'ts', chunkInterval: '7 days' })).not.toContain(
+      'chunk_time_interval',
+    );
   });
 
   it('can opt out of if_not_exists for a strict first migration', () => {
     expect(hypertable(metrics, { by: 'ts', ifNotExists: false })).toBe(
-      "SELECT create_hypertable('metrics', 'ts');",
+      "SELECT create_hypertable('metrics', by_range('ts'));",
     );
   });
 
   it('emits migrate_data => TRUE only when converting a populated table', () => {
-    expect(hypertable(metrics, { by: 'ts', migrateData: true })).toContain('migrate_data => TRUE');
+    expect(hypertable(metrics, { by: 'ts', migrateData: true })).toBe(
+      "SELECT create_hypertable('metrics', by_range('ts'), migrate_data => TRUE, if_not_exists => TRUE);",
+    );
     expect(hypertable(metrics, { by: 'ts' })).not.toContain('migrate_data');
   });
 });

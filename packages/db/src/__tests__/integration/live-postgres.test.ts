@@ -6,7 +6,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest
 // dispatch path, not a mock runner.
 import { runDbMigrate } from '../../../../kn-next/src/cli/db-migrate';
 import { createVectorExtension, hnsw } from '../../extensions/pgvector';
-import { createTimescaleExtension, hypertable } from '../../extensions/timescaledb';
+import { createTimescaleExtension, dropChunks, hypertable } from '../../extensions/timescaledb';
 import { runMigrations } from '../../migrate';
 import { pgTable, serial, vector } from '../../schema';
 import { checkLiveDbDsn } from './live-dsn-guard';
@@ -332,16 +332,11 @@ describe.skipIf(!LIVE)(
     // neither extension). The specs are real: swap in an extension-enabled
     // image and flip the env to run them.
     //
-    // KNOWN FINDING (2026-07-12, this lane's first opportunistic run against
-    // timescale/timescaledb latest-pg15-oss = TimescaleDB 2.24.0): the
-    // `hypertable()` emitter targets the LEGACY
-    // `create_hypertable(regclass, name, ...)` interface, which TimescaleDB
-    // 2.24 removed in favor of the dimension-based
-    // `create_hypertable(regclass, by_range(...))` form — the spec below
-    // fails there with "function create_hypertable(unknown, unknown, ...)
-    // does not exist". Flipping this gate on in CI requires either pinning a
-    // pre-2.24 image or updating the emitter (an SDK output change — its own
-    // follow-up, not this lane's).
+    // #259 (RESOLVED): `hypertable()` now emits the modern dimension-builder
+    // form `create_hypertable(<table>, by_range('<col>'[, INTERVAL]))` —
+    // stable since TimescaleDB 2.13 and the ONLY interface on 2.24+ (the
+    // legacy `create_hypertable(regclass, name, ...)` signature was removed
+    // there and hard-errored this spec). Minimum supported TimescaleDB: 2.13.
     // ------------------------------------------------------------------
 
     describe.skipIf(process.env.KNEXT_DB_LIVE_TIMESCALE !== '1')(
@@ -367,6 +362,15 @@ describe.skipIf(!LIVE)(
             await pool.query("INSERT INTO metrics VALUES (now(), 'dev-1', 42.0)");
             const rows = await pool.query("SELECT value FROM metrics WHERE device = 'dev-1'");
             expect(rows.rows).toEqual([{ value: 42 }]);
+
+            // #259 AC: the one-shot retention helper applies against the live
+            // hypertable (old chunk dropped, recent data intact).
+            await pool.query(
+              "INSERT INTO metrics VALUES (now() - INTERVAL '90 days', 'dev-old', 1.0)",
+            );
+            await pool.query(dropChunks('metrics', { olderThan: '30 days' }));
+            const after = await pool.query('SELECT device FROM metrics ORDER BY device');
+            expect(after.rows).toEqual([{ device: 'dev-1' }]);
           } finally {
             await pool.end();
           }

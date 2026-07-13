@@ -123,13 +123,19 @@ export const metrics = pgTable('metrics', {
 createTimescaleExtension();
 // → CREATE EXTENSION IF NOT EXISTS timescaledb;
 hypertable(metrics, { by: 'ts', chunkInterval: '7 days' });
-// → SELECT create_hypertable('metrics', 'ts',
-//     chunk_time_interval => INTERVAL '7 days', if_not_exists => TRUE);
+// → SELECT create_hypertable('metrics', by_range('ts', INTERVAL '7 days'),
+//     if_not_exists => TRUE);
 
 // Retention — a ONE-SHOT drop, run by your migration/CI on a schedule you own:
 dropChunks(metrics, { olderThan: '30 days' });
 // → SELECT drop_chunks('metrics', INTERVAL '30 days');
 ```
+
+> **Minimum TimescaleDB version: 2.13.** `hypertable()` emits the modern
+> dimension-builder form (`create_hypertable(<table>, by_range('<col>'[, INTERVAL]))`),
+> introduced in TimescaleDB 2.13 and the **only** interface on 2.24+ — the legacy
+> `create_hypertable(regclass, name, ...)` signature was removed there. There is no
+> legacy emitter for pre-2.13 servers.
 
 > **Honest bound (Apache-2 tier only).** You get hypertables, `time_bucket()`, chunk
 > pruning, and one-shot `drop_chunks()` retention. Columnar **compression** and
