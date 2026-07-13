@@ -1,6 +1,6 @@
 {
   "name": "@knext/db",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Typed data SDK for knext apps — drizzle-orm over the scale-to-zero Postgres pools (getDb / getDbRO).",
   "license": "Apache-2.0",
   "repository": {
