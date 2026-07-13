@@ -98,18 +98,77 @@ func CurrentContextIsKind() bool {
 	return strings.HasPrefix(CurrentKubeContext(), kindContextPrefix)
 }
 
+// ResolveKindOnlyContext is the PURE decision for the KIND-ONLY,
+// CLUSTER-MUTATING suites (the base e2e/e2e_scale suite installs/uninstalls
+// cert-manager and `make deploy/undeploy`s the operator; the bundle suite
+// applies dist/install.yaml). These suites have NO existing-cluster mode, so a
+// set KNEXT_E2E_KUBE_CONTEXT is NEVER silently ignored (plan-v3 P2 — the
+// pre-P2 footgun was exactly that: the env looked honored but the suite kept
+// mutating the ambient context). envCtx is its value ("" when unset):
+//
+//   - unset ⇒ kind-default mode, delegating to ResolveKindContext: pin the
+//     expected `kind-<cluster>` context or refuse, naming both contexts.
+//   - set ⇒ it must be a kind-* context, equal the ambient current-context,
+//     AND equal the expected `kind-<KIND_CLUSTER>` context — the same
+//     cluster-name variable LoadImageToKindClusterWithName targets, because a
+//     name/context mismatch loads the manager image into one cluster and
+//     deploys to another (a flake source). Anything else hard-fails BEFORE
+//     any cluster operation, naming both contexts.
+func ResolveKindOnlyContext(envCtx, expected, current string, contexts []string) (string, error) {
+	if envCtx == "" {
+		return ResolveKindContext(expected, current, contexts)
+	}
+	displayCurrent := current
+	if strings.TrimSpace(displayCurrent) == "" {
+		displayCurrent = "(none)"
+	}
+	if !strings.HasPrefix(envCtx, kindContextPrefix) {
+		return "", fmt.Errorf(
+			"this suite is kind-only (it installs/uninstalls cert-manager and deploys/undeploys the "+
+				"operator on the TARGET cluster): %s=%q is not a %s* context (ambient current-context: %q). "+
+				"Refusing to mutate a possibly shared cluster. Unset %s to run in self-contained kind mode, "+
+				"or use the cli/rollback/gc suites for existing-cluster runs.",
+			existingClusterEnv, envCtx, kindContextPrefix, displayCurrent, existingClusterEnv)
+	}
+	if envCtx != current {
+		return "", fmt.Errorf(
+			"this suite is kind-only and refuses to run while %s=%q differs from the ambient "+
+				"current-context %q — the two must agree so the run cannot straddle clusters. "+
+				"Switch contexts (kubectl config use-context %s) or unset %s.",
+			existingClusterEnv, envCtx, displayCurrent, envCtx, existingClusterEnv)
+	}
+	if envCtx != expected {
+		return "", fmt.Errorf(
+			"this suite is kind-only and derives its target from KIND_CLUSTER: %s=%q does not match the "+
+				"expected context %q (`kind-<KIND_CLUSTER>`, the cluster `kind load` targets) — a mismatch "+
+				"would load the manager image into one kind cluster and deploy to another. "+
+				"Set KIND_CLUSTER=%s or unset %s.",
+			existingClusterEnv, envCtx, expected,
+			strings.TrimPrefix(envCtx, kindContextPrefix), existingClusterEnv)
+	}
+	return ResolveKindContext(expected, current, contexts)
+}
+
 // EnsureKindContext pins the whole run to the expected kind cluster for the
-// suites' kind-default mode: it resolves the expected `kind-<cluster>` context
-// against the kubeconfig and renders a minified, pinned KUBECONFIG for it
-// (PinKubeContext) — or fails BEFORE any cluster operation, naming both the
-// ambient and the expected context. `dir` should be a per-run temp dir (e.g.
-// GinkgoT().TempDir()).
+// kind-only suites: it resolves the expected `kind-<cluster>` context against
+// the kubeconfig (honoring a set KNEXT_E2E_KUBE_CONTEXT per
+// ResolveKindOnlyContext — never silently ignored) and renders a minified,
+// pinned KUBECONFIG for it (PinKubeContext) — or fails BEFORE any cluster
+// operation, naming both the ambient and the expected context. Because
+// PinKubeContext exports KUBECONFIG for the whole test PROCESS, everything
+// after the pin — including AfterSuite teardown hours later — inherits it.
+// `dir` should be a per-run temp dir (e.g. GinkgoT().TempDir(); its
+// DeferCleanup runs after AfterSuite, so the pinned kubeconfig outlives
+// teardown). Suites WITH an existing-cluster mode (cli/rollback/gc) handle
+// KNEXT_E2E_KUBE_CONTEXT themselves via PinKubeContext and only call this in
+// their kind-default branch.
 func EnsureKindContext(dir string) error {
 	out, err := Run(exec.Command("kubectl", "config", "get-contexts", "-o", "name"))
 	if err != nil {
 		return fmt.Errorf("could not list kubeconfig contexts to verify the kind context: %w", err)
 	}
-	ctx, err := ResolveKindContext(ExpectedKindContext(), CurrentKubeContext(), GetNonEmptyLines(out))
+	ctx, err := ResolveKindOnlyContext(
+		os.Getenv(existingClusterEnv), ExpectedKindContext(), CurrentKubeContext(), GetNonEmptyLines(out))
 	if err != nil {
 		return err
 	}

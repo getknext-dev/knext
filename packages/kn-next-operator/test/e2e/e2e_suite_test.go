@@ -54,6 +54,18 @@ func TestE2E(t *testing.T) {
 }
 
 var _ = BeforeSuite(func() {
+	// FIRST statement, before ANY cluster read or mutation (plan-v3 P2 /
+	// #271): this suite is CLUSTER-MUTATING and kind-only — it installs and,
+	// in AfterSuite, UNINSTALLS cert-manager, and under e2e_scale runs `make
+	// install/deploy/undeploy/uninstall`. EnsureKindContext pins a rendered
+	// KUBECONFIG for the `kind-$KIND_CLUSTER` context (the same cluster-name
+	// variable `kind load` targets) for the whole test process — AfterSuite
+	// inherits the pin — and hard-fails otherwise, naming both contexts. A
+	// set KNEXT_E2E_KUBE_CONTEXT is validated, never silently ignored: an
+	// ambient prod context must never receive this suite's teardown.
+	Expect(utils.EnsureKindContext(GinkgoT().TempDir())).To(Succeed(),
+		"refusing to run the cluster-mutating e2e suite — no cluster operation was attempted")
+
 	By("building the manager image")
 	cmd := exec.Command("make", "docker-build", fmt.Sprintf("IMG=%s", managerImage))
 	_, err := utils.Run(cmd)

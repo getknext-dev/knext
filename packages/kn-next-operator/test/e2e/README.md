@@ -42,6 +42,19 @@ override, webhook-readiness wait, namespace creation/teardown) live in
   (`utils.EnsureKindContext`) and **refuses to fall back to the ambient
   current-context** when that kind context is absent — an ambient OKE/GKE
   context must never receive the suite's namespace/apply operations (#271).
+  This includes the base `e2e`/`e2e_scale` suite: the guard is the **first
+  statement of its `BeforeSuite`** (pinned by
+  `test/utils/suite_guard_pin_test.go`), before the cert-manager presence
+  read, docker-build, kind-load and `make deploy` — that suite is
+  cluster-mutating (its `AfterSuite` *uninstalls* cert-manager), so an
+  ambient prod context is exactly the cluster it must never see. The pin
+  exports a rendered `KUBECONFIG` for the whole test process, so `AfterSuite`
+  inherits it. **Known residual:** the guard verifies once at suite start;
+  the hours-later `AfterSuite` trusts that pinned process state. Switching
+  your kubeconfig's current-context mid-run cannot redirect the suite (the
+  pin is a self-contained rendered copy), but deleting the kind cluster
+  mid-run and pointing the same endpoint/credentials at another cluster is
+  not re-verified at teardown time.
 - **Existing-cluster mode (`KNEXT_E2E_KUBE_CONTEXT=<context>`).** cli, rollback
   and gc only. No install: the suite pins a rendered, minified `KUBECONFIG` for
   that context (`utils.PinKubeContext` — the user's global current-context is
@@ -55,7 +68,7 @@ override, webhook-readiness wait, namespace creation/teardown) live in
 
 | Variable | Consumed by | Meaning |
 |---|---|---|
-| `KNEXT_E2E_KUBE_CONTEXT` | cli / rollback / gc | Non-empty selects existing-cluster mode against that kube context. |
+| `KNEXT_E2E_KUBE_CONTEXT` | cli / rollback / gc; **validated (never silently ignored)** by the kind-only suites (`e2e`/`e2e_scale`, bundle) | Non-empty selects existing-cluster mode against that kube context (cli/rollback/gc only). The kind-only suites have no existing-cluster mode: a set value must equal the ambient current-context AND the expected `kind-$KIND_CLUSTER` context, else the suite hard-fails "this suite is kind-only" naming both contexts (`utils.ResolveKindOnlyContext`, plan-v3 P2). |
 | `KNEXT_E2E_NAMESPACE` | cli / rollback / gc | Overrides the generated `e2e-<suite>-<hex>` app namespace — the reclaim path for a namespace an aborted run left behind. Teardown of it is subject to the ownership guard below. |
 | `KNEXT_E2E_FORCE_TEARDOWN` | all namespace teardowns AND namespace-creation collisions (`test/utils/teardown_guard.go`) | `1`/`true`: explicit **human** override of the namespace ownership guard, for deliberate reclaim of a namespace the guard would refuse (e.g. one created before the ownership label existed). It governs BOTH sides: teardown of an unlabeled namespace and the creation-collision path (running the suite inside a pre-existing unlabeled namespace when `KNEXT_E2E_NAMESPACE` points at one). Loud (warning on stderr); never set in CI. |
 | `KNEXT_E2E_CURL_IMAGE` | scale (+ any in-cluster HTTP probe pod via `utils.CurlImage`) | Overrides the pinned `curlimages/curl` probe image when docker.io is unreachable/throttled. |

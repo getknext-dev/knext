@@ -2,9 +2,6 @@ resources:
 - manager.yaml
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
-images:
-- name: controller
-  newName: ghcr.io/getknext-dev/kn-next-operator
   # REAL PUBLISHED DIGEST (issue #117): the operator image is published +
   # cosign-signed (operator-supply-chain.yml succeeded on `main`), so this is the
   # real v0.1.0 digest — `kubectl apply -f dist/install.yaml` pulls a real image.
@@ -14,4 +11,7 @@ images:
   # `newTag:`/`digest:` fields the guard rejects.
   # Each future operator release must re-pin this (read the new digest with):
   #   docker inspect --format='{{index .RepoDigests 0}}' ghcr.io/getknext-dev/kn-next-operator:<tag>
-  newTag: v0.1.0@sha256:db357927ca4ab5532489d1b8356d63adb7e4a369280108ab314d7a1356ac9730
+images:
+- name: controller
+  newName: example.com/kn-next-operator
+  newTag: v0.0.1
