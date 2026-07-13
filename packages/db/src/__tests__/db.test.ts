@@ -23,7 +23,9 @@ const drizzle = vi.fn((pool: unknown, opts?: { schema?: unknown }) => ({
   schema: opts?.schema,
 }));
 vi.mock('drizzle-orm/node-postgres', () => ({
-  drizzle: (p: unknown, o: unknown) => drizzle(p, o),
+  // The param type matches the spy above (type-only, #261) — the wrapper
+  // still forwards whatever it receives, unchanged.
+  drizzle: (p: unknown, o?: { schema?: unknown }) => drizzle(p, o),
 }));
 
 describe('@knext/db — client accessors over the @knext/lib pools', () => {

@@ -12,8 +12,10 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const closeDbPool = vi.fn(async () => {});
-const closeDbPoolRO = vi.fn(async () => {});
+// The rest params are type-only (#261): the mock factory below forwards
+// `...args`, so the spies must ACCEPT args for TS2556 — they still ignore them.
+const closeDbPool = vi.fn(async (..._args: unknown[]) => {});
+const closeDbPoolRO = vi.fn(async (..._args: unknown[]) => {});
 
 vi.mock("@knext/lib/clients", () => ({
     closeDbPool: (...args: unknown[]) => closeDbPool(...args),

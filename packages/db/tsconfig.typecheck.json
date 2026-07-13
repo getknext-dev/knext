@@ -1,0 +1,20 @@
+{
+  // #261 typecheck-gate config: unlike tsconfig.json (the build config, which
+  // EXCLUDES tests so they never reach dist/), this pulls the test files into
+  // strict typecheck scope. CI runs `pnpm --filter @knext/db typecheck`.
+  //
+  // module/moduleResolution are overridden to bundler semantics because the
+  // vitest suites are loaded by vite (extensionless relative imports,
+  // import.meta, cross-package src imports) — checking them under the build's
+  // Node16/CJS settings produces config-artifact errors (TS2835/TS1479) that
+  // do not reflect how the tests actually resolve. The shipping src/ files are
+  // still enforced under Node16 by `tsc` in the build step.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "module": "ESNext",
+    "moduleResolution": "bundler"
+  },
+  "include": ["src/**/*"],
+  "exclude": ["node_modules", "dist"]
+}

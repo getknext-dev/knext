@@ -148,6 +148,18 @@ export function runAssetGC(
             pinnedRevision,
         };
     }
+    // #272 residual: with a NON-empty (possibly lagging) status, the spec pin
+    // must still be protected. A failed probe means we cannot prove there is
+    // no pin — fail-safe skip BEFORE the per-revision label reads below (the
+    // skip is already decided, so the N reads would be pointless work).
+    if (pinProbeFailed) {
+        return {
+            pruned: false,
+            liveRevisions,
+            skipReason: "pinned-not-resolvable",
+            pinnedRevision,
+        };
+    }
     // Resolve each live revision to its build-id via the operator-stamped
     // label (read-only). The single-token jsonpath escapes the dotted/slashed
     // label key. A missing label yields '' → resolveLiveBuildIds fails safe.
@@ -172,20 +184,10 @@ export function runAssetGC(
             skipReason: "unresolvable-live-build-id",
         };
     }
-    // #272 residual: with a NON-empty (possibly lagging) status, the spec pin
-    // must still be protected. A failed probe means we cannot prove there is
-    // no pin — fail-safe skip. A pin outside currentTraffic is resolved via
-    // the SAME operator-stamped label read the live revisions use and its
-    // build-id unioned into the protected set; an unresolvable pin (revision
-    // gone / label missing / read failed) fail-safe skips.
-    if (pinProbeFailed) {
-        return {
-            pruned: false,
-            liveRevisions,
-            skipReason: "pinned-not-resolvable",
-            pinnedRevision,
-        };
-    }
+    // A pin outside currentTraffic is resolved via the SAME operator-stamped
+    // label read the live revisions use and its build-id unioned into the
+    // protected set; an unresolvable pin (revision gone / label missing /
+    // read failed) fail-safe skips.
     let liveBuildIds = resolved.buildIds;
     if (pinnedRevision && !liveRevisions.includes(pinnedRevision)) {
         let pinnedBuildId = "";

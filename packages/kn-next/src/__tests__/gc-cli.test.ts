@@ -362,7 +362,9 @@ describe("runAssetGC", () => {
     });
 
     it("FAIL-SAFE: a THROWING pin probe with NON-empty status ⇒ NO prune, [pinned-not-resolvable] (cannot prove there is no pin)", () => {
+        const calls: string[][] = [];
         const exec = (argv: readonly string[]): string => {
+            calls.push([...argv]);
             if (argv.some((a) => a.includes(".status.currentTraffic")))
                 return trafficJson(["shop-00008"]);
             if (argv.some((a) => a.includes(".spec.traffic.revisionName")))
@@ -377,6 +379,12 @@ describe("runAssetGC", () => {
         expect(res.skipReason).toBe("pinned-not-resolvable");
         expect(res.pinnedRevision).toBe("(unreadable)");
         expect(prune).not.toHaveBeenCalled();
+        // The skip fires BEFORE any live-revision label resolution: a failed
+        // probe already forces the fail-safe, so the N per-revision reads are
+        // pointless work (#261 ride-along, from the #273 gates). Exactly the
+        // status read + the pin probe — no `kubectl get revision` calls.
+        expect(calls).toHaveLength(2);
+        expect(calls.some((argv) => argv.includes("revision"))).toBe(false);
     });
 });
 

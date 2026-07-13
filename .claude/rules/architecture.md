@@ -28,6 +28,8 @@ Recommend an option — don't just enumerate.
   north star; unverified parity is not "done."
 - **No unauthenticated mutating endpoints.** Applies to app routes, operator webhooks, and
   service-to-service calls. Backend services are `cluster-local` by default.
+- **New honest-status conditions/events/requeues go in `computeStatusVerdict`
+  (status_verdict.go), never as new branches in Reconcile.**
 
 ## 5. Honesty about scope and fit
 Positioning is a **narrow, verified Next.js-on-Knative adapter — not a general PaaS**, on a

@@ -17,7 +17,14 @@ function baseConfig(env?: Record<string, string>): KnativeNextConfig {
     return {
         name: "app",
         registry: "registry",
-        storage: { provider: "gcs", bucket: "bucket" },
+        // publicUrl is required by StorageConfig but NOT read by the CR
+        // builder (it maps provider/bucket/region/endpoint only) — supplying
+        // it satisfies the type without touching the built CR (#261).
+        storage: {
+            provider: "gcs",
+            bucket: "bucket",
+            publicUrl: "https://storage.googleapis.com/bucket",
+        },
         ...(env ? { env } : {}),
     };
 }

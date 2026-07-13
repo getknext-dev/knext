@@ -215,10 +215,16 @@ describe.skipIf(!LIVE)(
 
       /** The routing proof: which server-side application_name served this client? */
       async function appNameSeenBy(
-        db: { execute: (q: unknown) => Promise<{ rows: Array<Record<string, unknown>> }> },
+        // `unknown` + a local cast (type-only, #261): drizzle's
+        // `execute(q: SQLWrapper | string)` is contravariantly incompatible
+        // with a structural `(q: unknown)` param; the runtime call is identical.
+        db: unknown,
         sql: SqlTag,
       ): Promise<unknown> {
-        const res = await db.execute(sql`SELECT current_setting('application_name') AS app`);
+        const client = db as {
+          execute: (q: unknown) => Promise<{ rows: Array<Record<string, unknown>> }>;
+        };
+        const res = await client.execute(sql`SELECT current_setting('application_name') AS app`);
         return res.rows[0].app;
       }
 

@@ -44,12 +44,17 @@ describe('checkLiveDbDsn — live-lane DSN host guard', () => {
     ])('refuses %s', (dsn) => {
       const res = checkLiveDbDsn(dsn);
       expect(res.ok).toBe(false);
+      // Narrowing guard (type-only, #261): `reason` only exists on the
+      // refusal arm of LiveDsnCheck; the assertion above already proved it.
+      if (res.ok) throw new Error('unreachable: guard accepted an unsafe DSN');
       expect(res.reason).toMatch(/KNEXT_DB_LIVE_UNSAFE_HOST/);
     });
 
     it('fails closed on an unparseable DSN (e.g. libpq key=value form)', () => {
       const res = checkLiveDbDsn('host=db.prod.example.com port=5432 dbname=app');
       expect(res.ok).toBe(false);
+      // Narrowing guard (type-only, #261) — see above.
+      if (res.ok) throw new Error('unreachable: guard accepted an unsafe DSN');
       expect(res.reason).toMatch(/parse/i);
     });
 
