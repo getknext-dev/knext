@@ -386,6 +386,30 @@ describe("runAssetGC", () => {
         expect(calls).toHaveLength(2);
         expect(calls.some((argv) => argv.includes("revision"))).toBe(false);
     });
+
+    it("TOKEN PRECEDENCE (#274 gate): pin probe throws AND the live label would be unresolvable ⇒ [pinned-not-resolvable], never [unresolvable-live-build-id]", () => {
+        // Both fail-safes are armed at once: the spec-pin probe throws AND the
+        // live revision's build-id label read would come back empty. The
+        // pin-probe skip is decided FIRST (before any label resolution), so
+        // the machine-greppable token an operator alerts on must be
+        // pinned-not-resolvable — a re-ordering of the fail-safes would
+        // silently change the token and break dashboards/runbooks keyed on it.
+        const exec = (argv: readonly string[]): string => {
+            if (argv.some((a) => a.includes(".status.currentTraffic")))
+                return trafficJson(["shop-00008"]);
+            if (argv.some((a) => a.includes(".spec.traffic.revisionName")))
+                throw new Error("kubectl blew up reading the spec");
+            return ""; // live label unresolvable — must never be reached/win
+        };
+        const prune = vi.fn();
+
+        const res = runAssetGC(makeConfig(), "prod", "bid-d", exec, prune);
+
+        expect(res.pruned).toBe(false);
+        expect(res.skipReason).toBe("pinned-not-resolvable");
+        expect(res.pinnedRevision).toBe("(unreadable)");
+        expect(prune).not.toHaveBeenCalled();
+    });
 });
 
 describe("parseGcArgs", () => {

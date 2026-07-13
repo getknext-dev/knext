@@ -717,6 +717,33 @@ describe("runDoctor — infra-failure stderr excerpt bounds (P3)", () => {
         const detail = await crdDetailFor(raw);
         expect(detail).toBe(`${DETAIL_PREFIX}${collapsed.slice(0, 160)}`);
     });
+
+    // P6c nit: the excerpt path gets the SAME printable-ASCII scrub the RBAC
+    // resource token already had — kubectl stderr can carry ANSI color escapes
+    // and stray control bytes, and a doctor detail line must never re-emit
+    // terminal escape sequences to the operator's console (or a JSON consumer).
+    it("scrubs control chars / ANSI escape bytes from the excerpt (printable ASCII only)", async () => {
+        const detail = await crdDetailFor(
+            "\u001b[31mconnection refused\u001b[0m to the server \u0007\u0008 10.0.0.1:6443",
+        );
+        // Only printable ASCII survives (the ESC/BEL/BS bytes go; the readable
+        // "[31m" tail of a color sequence is harmless printable text).
+        expect(detail).toMatch(/^[\x20-\x7e]*$/);
+        expect(detail).toContain("connection refused");
+        expect(detail).toContain("10.0.0.1:6443");
+        expect(detail).not.toContain("\u001b");
+    });
+
+    it("scrub happens BEFORE the cap, so control bytes never eat the 160-char budget", async () => {
+        // 160 printable chars, the filler interleaved with control bytes
+        // (the "connection refused" signature must stay contiguous in the RAW
+        // stderr — classification runs before the scrub): after the scrub the
+        // collapsed excerpt is exactly the printable 160.
+        const printable = `connection refused ${"z".repeat(141)}`;
+        const raw = `connection refused ${"\u0001z".repeat(141)}`;
+        const detail = await crdDetailFor(raw);
+        expect(detail).toBe(`${DETAIL_PREFIX}${printable}`);
+    });
 });
 
 describe("parseImageRef", () => {

@@ -504,6 +504,10 @@ var _ = Describe("asset retention GC against a live cluster (ADR-0011)", Ordered
 			By(fmt.Sprintf("EXISTING-CLUSTER mode: pinning kube context %q (no operator install)", existing))
 			Expect(utils.PinKubeContext(existing, GinkgoT().TempDir())).To(Succeed())
 		} else {
+			By("KIND-default mode: pinning the kind kube context (#271 — refusing a non-kind ambient context)")
+			Expect(utils.EnsureKindContext(GinkgoT().TempDir())).To(Succeed(),
+				"kind-default mode could not pin the kind context — no cluster operation was attempted")
+
 			By("building the operator image LOCALLY (never a published image)")
 			_, err = utils.Run(exec.Command("make", "docker-build",
 				fmt.Sprintf("IMG=%s", gcOperatorImage)))

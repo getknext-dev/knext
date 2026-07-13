@@ -269,6 +269,10 @@ var _ = Describe("kn-next CLI against a live cluster", Ordered, func() {
 			By(fmt.Sprintf("EXISTING-CLUSTER mode: pinning kube context %q (no operator install)", existing))
 			pinKubeContext(existing)
 		} else {
+			By("KIND-default mode: pinning the kind kube context (#271 — refusing a non-kind ambient context)")
+			Expect(utils.EnsureKindContext(GinkgoT().TempDir())).To(Succeed(),
+				"kind-default mode could not pin the kind context — no cluster operation was attempted")
+
 			By("building the operator image LOCALLY (never a published image)")
 			_, err = utils.Run(exec.Command("make", "docker-build",
 				fmt.Sprintf("IMG=%s", cliOperatorImage)))

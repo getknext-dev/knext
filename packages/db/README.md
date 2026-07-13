@@ -355,7 +355,11 @@ Safety: before opening any connection the suite **refuses** a `DATABASE_URL`
 whose host is not loopback (`localhost` / `127.0.0.0/8` / `::1`) or the CI
 service hostname `postgres` — it creates, writes to, and drops databases, so a
 typo'd real DSN must never receive test traffic. To deliberately target another
-throwaway host, set `KNEXT_DB_LIVE_UNSAFE_HOST=1`.
+throwaway host, set `KNEXT_DB_LIVE_UNSAFE_HOST=1`. **Caveat: loopback ≠
+throwaway** — a real primary reached through a port-forward or SSH tunnel
+(`kubectl port-forward` → `127.0.0.1:<port>`) passes the DSN guard, and the
+suite will create, write to, and DROP databases on it. Never point the lane at
+a forwarded production database.
 
 Notes:
 

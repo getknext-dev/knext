@@ -118,15 +118,22 @@ describe.skipIf(!LIVE)(
     }, 60_000);
 
     afterAll(async () => {
-      for (const name of createdDbs.splice(0)) {
-        await admin.query(`DROP DATABASE IF EXISTS ${name} WITH (FORCE)`);
-      }
-      await admin.end();
-      process.env.DATABASE_URL = savedEnv.url;
-      if (savedEnv.ro === undefined) {
-        delete process.env.DATABASE_URL_RO;
-      } else {
-        process.env.DATABASE_URL_RO = savedEnv.ro;
+      // try/finally (P6c nit): a failed DROP (e.g. a lingering connection the
+      // FORCE cannot evict, or the container already gone) must not leak the
+      // admin pool or leave the process env pointing at a test database —
+      // pool teardown and env restore always run.
+      try {
+        for (const name of createdDbs.splice(0)) {
+          await admin.query(`DROP DATABASE IF EXISTS ${name} WITH (FORCE)`);
+        }
+      } finally {
+        await admin.end();
+        process.env.DATABASE_URL = savedEnv.url;
+        if (savedEnv.ro === undefined) {
+          delete process.env.DATABASE_URL_RO;
+        } else {
+          process.env.DATABASE_URL_RO = savedEnv.ro;
+        }
       }
     }, 60_000);
 
