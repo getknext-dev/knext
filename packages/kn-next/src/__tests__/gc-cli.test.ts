@@ -42,11 +42,14 @@ function trafficJson(revisions: string[]): string {
 }
 
 describe("runAssetGC", () => {
-    it("reads status.currentTraffic then each live revision's build-id label — READ-ONLY argv, exact shape", () => {
+    it("reads status.currentTraffic, the spec pin, then each live revision's build-id label — READ-ONLY argv, exact shape", () => {
         const calls: string[][] = [];
         const exec = (argv: readonly string[]): string => {
             calls.push([...argv]);
-            if (argv.includes("nextapp")) return trafficJson(["shop-00002"]);
+            if (argv.some((a) => a.includes(".status.currentTraffic")))
+                return trafficJson(["shop-00002"]);
+            if (argv.some((a) => a.includes(".spec.traffic.revisionName")))
+                return ""; // no pin
             return "bid-a";
         };
         const prune = vi.fn();
@@ -65,9 +68,21 @@ describe("runAssetGC", () => {
             "-o",
             "jsonpath={.status.currentTraffic}",
         ]);
-        // Second read: the revision's operator-stamped build-id label. The
-        // dotted/slashed key is escaped as ONE jsonpath token.
+        // Second read: the spec pin, UNCONDITIONALLY (#272 residual — a
+        // populated status can lag a fresh rollback pin).
         expect(calls[1]).toEqual([
+            "kubectl",
+            "get",
+            "nextapp",
+            "shop",
+            "-n",
+            "prod",
+            "-o",
+            "jsonpath={.spec.traffic.revisionName}",
+        ]);
+        // Third read: the revision's operator-stamped build-id label. The
+        // dotted/slashed key is escaped as ONE jsonpath token.
+        expect(calls[2]).toEqual([
             "kubectl",
             "get",
             "revision",
@@ -78,7 +93,7 @@ describe("runAssetGC", () => {
             "jsonpath={.metadata.labels.apps\\.kn-next\\.dev/build-id}",
         ]);
         // NOTHING else was exec'd through the kubectl boundary (no writes).
-        expect(calls).toHaveLength(2);
+        expect(calls).toHaveLength(3);
         expect(prune).toHaveBeenCalledWith(
             expect.anything(),
             ["bid-a"],
@@ -91,7 +106,10 @@ describe("runAssetGC", () => {
         const calls: string[][] = [];
         const exec = (argv: readonly string[]): string => {
             calls.push([...argv]);
-            if (argv.includes("nextapp")) return trafficJson(["shop-00002"]);
+            if (argv.some((a) => a.includes(".status.currentTraffic")))
+                return trafficJson(["shop-00002"]);
+            if (argv.some((a) => a.includes(".spec.traffic.revisionName")))
+                return ""; // no pin
             return "bid-a";
         };
         const prune = vi.fn();
@@ -107,7 +125,7 @@ describe("runAssetGC", () => {
 
         expect(res.pruned).toBe(true);
         // The read-only resolution is IDENTICAL under dry-run (same argv).
-        expect(calls).toHaveLength(2);
+        expect(calls).toHaveLength(3);
         expect(prune).toHaveBeenCalledWith(
             expect.anything(),
             ["bid-a"],
@@ -219,22 +237,146 @@ describe("runAssetGC", () => {
         expect(prune).not.toHaveBeenCalled();
     });
 
-    it("non-empty currentTraffic ⇒ NO spec-pin probe (status is authoritative when populated)", () => {
+    // #272 sysdesign-gate residual (folded into #254): a populated
+    // status.currentTraffic is NOT authoritative — it can LAG the spec (a
+    // rollback pin applied but not yet re-observed by the operator). The pin
+    // is therefore read UNCONDITIONALLY and its build-id unioned into the
+    // protected set; an unresolvable pin fail-safe-skips (over-keep).
+    it("PIN PROTECTION (#272 residual): spec pin with a LAGGING non-empty status ⇒ the pin's build-id is unioned into the protected set", () => {
         const calls: string[][] = [];
         const exec = (argv: readonly string[]): string => {
             calls.push([...argv]);
-            if (argv.includes("nextapp")) return trafficJson(["shop-00002"]);
+            if (argv.some((a) => a.includes(".status.currentTraffic")))
+                return trafficJson(["shop-00008"]);
+            if (argv.some((a) => a.includes(".spec.traffic.revisionName")))
+                return "shop-00007"; // the lagging pin — NOT in currentTraffic
+            if (argv.includes("shop-00008")) return "bid-new";
+            if (argv.includes("shop-00007")) return "bid-old";
+            throw new Error("unexpected read");
+        };
+        const prune = vi.fn();
+
+        const res = runAssetGC(makeConfig(), "prod", "bid-d", exec, prune);
+
+        expect(res.pruned).toBe(true);
+        // The pin's build resolves through the SAME operator-stamped label
+        // read the live revisions use.
+        expect(calls).toContainEqual([
+            "kubectl",
+            "get",
+            "revision",
+            "shop-00007",
+            "-n",
+            "prod",
+            "-o",
+            "jsonpath={.metadata.labels.apps\\.kn-next\\.dev/build-id}",
+        ]);
+        expect(prune).toHaveBeenCalledWith(
+            expect.anything(),
+            ["bid-new", "bid-old"],
+            "bid-d",
+            { dryRun: false },
+        );
+    });
+
+    it("PIN PROTECTION: a pin already in currentTraffic needs NO extra label read (already protected)", () => {
+        const calls: string[][] = [];
+        const exec = (argv: readonly string[]): string => {
+            calls.push([...argv]);
+            if (argv.some((a) => a.includes(".status.currentTraffic")))
+                return trafficJson(["shop-00007"]);
+            if (argv.some((a) => a.includes(".spec.traffic.revisionName")))
+                return "shop-00007";
             return "bid-a";
         };
-        const res = runAssetGC(makeConfig(), "prod", "bid-d", exec, vi.fn());
+        const prune = vi.fn();
+
+        const res = runAssetGC(makeConfig(), "prod", "bid-d", exec, prune);
+
         expect(res.pruned).toBe(true);
-        // status read + one revision-label read; NO extra spec read.
-        expect(calls).toHaveLength(2);
-        expect(
-            calls.some((argv) =>
-                argv.some((a) => a.includes(".spec.traffic.revisionName")),
-            ),
-        ).toBe(false);
+        // status + pin probe + ONE revision-label read (the live one).
+        expect(calls).toHaveLength(3);
+        expect(prune).toHaveBeenCalledWith(
+            expect.anything(),
+            ["bid-a"],
+            "bid-d",
+            { dryRun: false },
+        );
+    });
+
+    it("PIN PROTECTION: a pin resolving to an already-protected build-id is not duplicated (union, not append)", () => {
+        const exec = (argv: readonly string[]): string => {
+            if (argv.some((a) => a.includes(".status.currentTraffic")))
+                return trafficJson(["shop-00008"]);
+            if (argv.some((a) => a.includes(".spec.traffic.revisionName")))
+                return "shop-00007";
+            return "bid-x"; // both revisions carry the same build
+        };
+        const prune = vi.fn();
+
+        runAssetGC(makeConfig(), "prod", "bid-d", exec, prune);
+
+        expect(prune).toHaveBeenCalledWith(
+            expect.anything(),
+            ["bid-x"],
+            "bid-d",
+            { dryRun: false },
+        );
+    });
+
+    it("FAIL-SAFE: a pin whose build-id label is missing ⇒ NO prune, [pinned-not-resolvable]", () => {
+        const exec = (argv: readonly string[]): string => {
+            if (argv.some((a) => a.includes(".status.currentTraffic")))
+                return trafficJson(["shop-00008"]);
+            if (argv.some((a) => a.includes(".spec.traffic.revisionName")))
+                return "shop-00007";
+            // live revision resolves; the pinned one has NO label (or is gone).
+            return argv.includes("shop-00008") ? "bid-new" : "";
+        };
+        const prune = vi.fn();
+
+        const res = runAssetGC(makeConfig(), "prod", "bid-d", exec, prune);
+
+        expect(res.pruned).toBe(false);
+        expect(res.skipReason).toBe("pinned-not-resolvable");
+        expect(res.pinnedRevision).toBe("shop-00007");
+        expect(prune).not.toHaveBeenCalled();
+    });
+
+    it("FAIL-SAFE: a THROWING pin label read ⇒ NO prune, [pinned-not-resolvable] (over-keep, no throw)", () => {
+        const exec = (argv: readonly string[]): string => {
+            if (argv.some((a) => a.includes(".status.currentTraffic")))
+                return trafficJson(["shop-00008"]);
+            if (argv.some((a) => a.includes(".spec.traffic.revisionName")))
+                return "shop-00007";
+            if (argv.includes("shop-00008")) return "bid-new";
+            throw new Error("kubectl blew up on the pinned revision");
+        };
+        const prune = vi.fn();
+
+        const res = runAssetGC(makeConfig(), "prod", "bid-d", exec, prune);
+
+        expect(res.pruned).toBe(false);
+        expect(res.skipReason).toBe("pinned-not-resolvable");
+        expect(prune).not.toHaveBeenCalled();
+    });
+
+    it("FAIL-SAFE: a THROWING pin probe with NON-empty status ⇒ NO prune, [pinned-not-resolvable] (cannot prove there is no pin)", () => {
+        const exec = (argv: readonly string[]): string => {
+            if (argv.some((a) => a.includes(".status.currentTraffic")))
+                return trafficJson(["shop-00008"]);
+            if (argv.some((a) => a.includes(".spec.traffic.revisionName")))
+                throw new Error("kubectl blew up reading the spec");
+            return "bid-new";
+        };
+        const prune = vi.fn();
+
+        const res = runAssetGC(makeConfig(), "prod", "bid-d", exec, prune);
+
+        expect(res.pruned).toBe(false);
+        expect(res.skipReason).toBe("pinned-not-resolvable");
+        expect(res.pinnedRevision).toBe("(unreadable)");
+        expect(prune).not.toHaveBeenCalled();
     });
 });
 
@@ -351,5 +493,17 @@ describe("renderGcReport (#264 part 2 — the synchronous fd-1 outcome line)", (
         expect(unresolvable).toContain("SKIPPED (fail-safe over-keep)");
         expect(unresolvable).toContain("unresolvable-live-build-id");
         expect(unresolvable).toContain("shop-00002");
+
+        // #272 residual: the unresolvable-PIN skip has its own token.
+        const pinUnresolvable = renderGcReport("shop", "prod", {
+            pruned: false,
+            liveRevisions: ["shop-00008"],
+            skipReason: "pinned-not-resolvable",
+            pinnedRevision: "shop-00007",
+        });
+        expect(pinUnresolvable).toContain("SKIPPED (fail-safe over-keep)");
+        expect(pinUnresolvable).toContain("[pinned-not-resolvable]");
+        expect(pinUnresolvable).toContain("shop-00007");
+        expect(pinUnresolvable).toContain("Nothing was deleted");
     });
 });
