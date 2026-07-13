@@ -26,6 +26,8 @@ import (
 // Env is injected config (GW_* keys) so tests never mutate the process env.
 type Env map[string]string
 
+// get returns the value for key, or def when the key is absent or set to the empty
+// string — so an env var present-but-blank behaves the same as unset.
 func (e Env) get(key, def string) string {
 	if v, ok := e[key]; ok && v != "" {
 		return v
@@ -322,8 +324,14 @@ func TryConnect(t Target, timeout time.Duration) (net.Conn, error) {
 	return net.DialTimeout("tcp", fmt.Sprintf("%s:%d", t.Host, t.Port), timeout)
 }
 
-// ConnectWithWake connects to the target, waking the compute if needed. The wake
-// is issued exactly once, then we poll every RetryMs until the wake deadline.
+// ConnectWithWake connects to the target, waking the compute if it is asleep. A
+// live compute answers the first TryConnect and returns immediately (woke=false,
+// wakeMs=0) — the warm-connect fast path, never gated or retried. Otherwise it
+// consults the WakeGuard (wake budget, #116), issues the 0->1 scale via the
+// bounded idempotent retry (wakeWithRetry, #190), then polls every RetryMs until
+// TryConnect succeeds or the wake deadline (WakeTimeoutMs) elapses. On a woken
+// connect it returns woke=true and wakeMs = time from wake-issued to TCP-accept,
+// which the gateway records as the observed cold-wake latency.
 func ConnectWithWake(ctx context.Context, driver Driver, t Target, opts Opts, onWake func()) (conn net.Conn, woke bool, wakeMs int64, err error) {
 	connectTimeout := time.Duration(opts.ConnectTimeoutMs) * time.Millisecond
 	retry := time.Duration(opts.RetryMs) * time.Millisecond

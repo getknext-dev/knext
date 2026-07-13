@@ -213,6 +213,9 @@ func loadTLS(env wake.Env) (*tls.Config, error) {
 	}, nil
 }
 
+// envInt reads an integer GW_* knob from the injected env, returning def when the
+// key is absent, empty, or unparseable — so a malformed override degrades to the
+// compiled-in default rather than failing startup.
 func envInt(env wake.Env, key string, def int) int {
 	if v, ok := env[key]; ok && v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
@@ -425,6 +428,9 @@ func (g *Gateway) authorizeStartup(user, database string, replication bool) erro
 	return nil
 }
 
+// fail writes a single Postgres ErrorResponse (the given SQLSTATE + message) to the
+// client and closes the connection. Used for pre-wake startup errors (protocol
+// parse failures, authz refusals) — the compute is never touched on this path.
 func (g *Gateway) fail(client net.Conn, code, message string) {
 	g.log("[gw] startup error: " + message)
 	_, _ = client.Write(proto.BuildErrorResponse(code, message))

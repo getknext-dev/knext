@@ -32,6 +32,10 @@ type k8sScaler struct {
 
 func newK8sScaler() *k8sScaler { return &k8sScaler{} }
 
+// init lazily builds the client-go clientset exactly once (sync.Once), preferring
+// in-cluster config and falling back to the default kubeconfig loading rules. The
+// result (client or error) is memoised, so every Scale/Replicas/Count/DeletePods
+// call after the first is cheap and construction never touches a cluster.
 func (k *k8sScaler) init() error {
 	k.once.Do(func() {
 		cfg, err := rest.InClusterConfig()
@@ -54,6 +58,13 @@ func (k *k8sScaler) init() error {
 	return k.err
 }
 
+// Scale drives a Deployment's desired replicas to the given count via the scale
+// subresource (GetScale then UpdateScale). This read-modify-write is IDEMPOTENT —
+// it only asserts the desired state, converging replicas to `replicas` — which is
+// precisely what lets ConnectWithWake/wakeWithRetry (#190) retry a transient
+// apiserver blip safely: a re-issued Scale can only re-assert the same target, so
+// a retry never double-scales. It honours ctx, so wakeWithRetry's per-attempt
+// deadline actually cancels a hung GetScale/UpdateScale.
 func (k *k8sScaler) Scale(ctx context.Context, namespace, deployment string, replicas int32) error {
 	if err := k.init(); err != nil {
 		return err
