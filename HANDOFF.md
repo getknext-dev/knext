@@ -167,8 +167,12 @@ session tokens. All ephemeral/machine-local. A fresh agent rebuilds context from
 doc + `CLAUDE.md` + `docs/` + the issues/PRs/ADRs.
 
 ## 8. First moves for the new agent
-1. `git clone` the repo; read `CLAUDE.md`, `docs/SCALING.md`, `docs/SCORECARD.md`,
-   `docs/BENCHMARKS.md`, and the ADR ledger `docs/adr-0001..0008` (0008 now **ACCEPTED**).
+1. `git clone` the repo; read **`docs/ARCHITECTURE.md` FIRST** — the code-map that tells you
+   what lives where and how the wake flow / drivers / operator / security model actually work
+   (verified accurate to file:line; the source packages carry thorough godoc). Then `CLAUDE.md`,
+   `docs/SCALING.md`, `docs/SCORECARD.md`, `docs/BENCHMARKS.md`, and the ADR ledger
+   `docs/adr-0001..0008` (0008 now **ACCEPTED**). A local graphify knowledge graph is at
+   `graphify-out/` (gitignored; `graphify update` to refresh) for navigating the code.
 2. Provision the §6 credentials; verify cluster reachability
    (`kubectl config use-context context-ckmva7v7zvq && kubectl -n scale-zero-pg get deploy`).
    If the OCI session lapsed: `oci session authenticate --profile-name knext --region me-abudhabi-1`
