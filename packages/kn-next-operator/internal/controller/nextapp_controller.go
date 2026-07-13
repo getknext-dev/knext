@@ -363,9 +363,14 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 	// operator provisions an AppDatabase in the scale-zero-pg namespace, HARD-GATES
 	// the app on it reaching Ready, mirrors the DSN Secret into this namespace, and
 	// injects DATABASE_URL(+_RO) into the env below. dbSecretHash carries a
-	// checksum of the DSN so a rotation rolls a new Revision (§4.3).
+	// checksum of the DSN so a rotation rolls a new Revision (§4.3). The
+	// DatabaseReady/Ready composition for every db state lives in
+	// computeStatusVerdict (#254); this block only does the imperative work and
+	// records the outcome in db.
 	var dbSecretHash string
+	db := databaseCheckState{mode: databaseModeNone}
 	if databaseEnabled(&nextApp) {
+		db.mode = databaseModeManaged
 		// Managed mode (again): a previously-orphaned AppDatabase (managed→BYO/
 		// none→managed round-trip) is rebound below — deriveAppName is
 		// deterministic, so reconcileDatabase's CreateOrUpdate reuses the SAME
@@ -373,52 +378,24 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 		// hard-gate early return.
 		apimeta.RemoveStatusCondition(&nextApp.Status.Conditions, ConditionDatabaseOrphaned)
 		wiring, dbResult, dbErr := r.reconcileDatabase(ctx, &nextApp)
+		db.phase = wiring.phase
 		if dbErr != nil {
 			logger.Error(dbErr, "Failed to reconcile delegated database")
-			r.emitEvent(&nextApp, corev1.EventTypeWarning, ReasonReconcileFailed,
-				fmt.Sprintf("Failed to reconcile database: %s", dbErr.Error()))
-			apimeta.SetStatusCondition(&nextApp.Status.Conditions, metav1.Condition{
-				Type:               ConditionDatabaseReady,
-				Status:             metav1.ConditionFalse,
-				ObservedGeneration: nextApp.Generation,
-				Reason:             "DatabaseError",
-				Message:            dbErr.Error(),
-			})
-			if !apiequality.Semantic.DeepEqual(observedStatus, &nextApp.Status) {
-				_ = r.Status().Update(ctx, &nextApp)
-			}
+			db.err = dbErr
+			_ = r.applyStatusVerdict(ctx, &nextApp, observedStatus,
+				computeStatusVerdict(&nextApp, nil, db, revisionCheck{}, time.Now()))
 			return ctrl.Result{}, dbErr
 		}
 		if !wiring.ready {
-			// HARD-GATE (§4.1): do NOT create the Knative Service until the DB is
-			// Ready. Surface DatabaseReady=False + Ready=False and requeue; the
-			// app never boots into a crash-loop on a missing DSN.
-			phaseMsg := wiring.phase
-			if phaseMsg == "" {
-				phaseMsg = "Provisioning"
+			// HARD-GATE (§4.1): the verdict surfaces DatabaseReady=False +
+			// Ready=False and requeues; the app never boots into a crash-loop
+			// on a missing DSN.
+			db.requeueAfter = dbResult.RequeueAfter
+			verdict := computeStatusVerdict(&nextApp, nil, db, revisionCheck{}, time.Now())
+			if err := r.applyStatusVerdict(ctx, &nextApp, observedStatus, verdict); err != nil {
+				return ctrl.Result{}, err
 			}
-			r.emitEvent(&nextApp, corev1.EventTypeNormal, ReasonDatabaseProvisioning,
-				fmt.Sprintf("Waiting for database %q to become Ready (phase=%s)", nextApp.Status.DatabaseAppName, phaseMsg))
-			apimeta.SetStatusCondition(&nextApp.Status.Conditions, metav1.Condition{
-				Type:               ConditionDatabaseReady,
-				Status:             metav1.ConditionFalse,
-				ObservedGeneration: nextApp.Generation,
-				Reason:             "Provisioning",
-				Message:            fmt.Sprintf("AppDatabase %q is not Ready yet (phase=%s)", nextApp.Status.DatabaseAppName, phaseMsg),
-			})
-			apimeta.SetStatusCondition(&nextApp.Status.Conditions, metav1.Condition{
-				Type:               ConditionReady,
-				Status:             metav1.ConditionFalse,
-				ObservedGeneration: nextApp.Generation,
-				Reason:             "DatabaseProvisioning",
-				Message:            "App deploy is gated on its database becoming Ready",
-			})
-			if !apiequality.Semantic.DeepEqual(observedStatus, &nextApp.Status) {
-				if err := r.Status().Update(ctx, &nextApp); err != nil {
-					return ctrl.Result{}, err
-				}
-			}
-			return dbResult, nil
+			return ctrl.Result{RequeueAfter: verdict.requeueAfter}, nil
 		}
 		// Ready: inject DATABASE_URL(+_RO) into the in-memory spec so the existing
 		// envMap → SecretKeyRef wiring below picks it up, and record the DSN
@@ -426,19 +403,13 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 		// ADR-0019) CR that still carries an author envMap DATABASE_URL(_RO)
 		// entry has it overridden by the managed mirror — LOUDLY, via a
 		// Warning naming the ignored entry, never silently.
+		db.ready = true
 		r.warnDatabaseEnvOverride(&nextApp, DefaultDatabaseURLKey)
 		if wiring.injectRO {
 			r.warnDatabaseEnvOverride(&nextApp, DefaultDatabaseURLROKey)
 		}
 		injectDatabaseEnv(&nextApp, wiring)
 		dbSecretHash = wiring.dsnHash
-		apimeta.SetStatusCondition(&nextApp.Status.Conditions, metav1.Condition{
-			Type:               ConditionDatabaseReady,
-			Status:             metav1.ConditionTrue,
-			ObservedGeneration: nextApp.Generation,
-			Reason:             "Provisioned",
-			Message:            fmt.Sprintf("Database %q Ready; DATABASE_URL wired into the app", nextApp.Status.DatabaseAppName),
-		})
 	} else if databaseBound(&nextApp) {
 		// 0b. BYO binding (ADR-0019): spec.database.secretRef maps an EXISTING
 		// same-namespace Secret onto DATABASE_URL(+_RO) through the same
@@ -450,19 +421,13 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 		// A managed→BYO switch orphans the previously-provisioned AppDatabase:
 		// it is RETAINED (a spec edit never deletes data — ADR-0019 addendum)
 		// and flagged via DatabaseOrphaned + a Warning until resolved.
+		db.mode = databaseModeBound
 		r.reconcileOrphanedDatabase(ctx, &nextApp)
 		r.injectBoundDatabaseEnv(&nextApp)
 		nextApp.Status.DatabaseSecretName = nextApp.Spec.Database.SecretRef.Name
-		apimeta.SetStatusCondition(&nextApp.Status.Conditions, metav1.Condition{
-			Type:               ConditionDatabaseReady,
-			Status:             metav1.ConditionTrue,
-			ObservedGeneration: nextApp.Generation,
-			Reason:             "Bound",
-			Message:            fmt.Sprintf("Bound existing Secret %q as DATABASE_URL", nextApp.Spec.Database.SecretRef.Name),
-		})
 	} else {
 		// 0c. spec.database removed/emptied: the status must stop claiming a
-		// database. Clear the bound/mirrored Secret name and drop the
+		// database. Clear the bound/mirrored Secret name; the verdict drops the
 		// DatabaseReady condition. Status.DatabaseAppName is RETAINED while its
 		// AppDatabase still exists (see its godoc): the delete-time db-cleanup
 		// finalizer needs it to reclaim an AppDatabase orphaned by a
@@ -472,7 +437,6 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 		// AppDatabase is confirmed gone.
 		r.reconcileOrphanedDatabase(ctx, &nextApp)
 		nextApp.Status.DatabaseSecretName = ""
-		apimeta.RemoveStatusCondition(&nextApp.Status.Conditions, ConditionDatabaseReady)
 	}
 
 	// 1. Create/Update ServiceAccount
@@ -903,8 +867,7 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 	// requested but opt-in is off, we record a non-fatal RevalidationDeferred condition
 	// (Ready stays True) below instead of creating a dangling source.
 	kafkaRequested := nextApp.Spec.Revalidation != nil && nextApp.Spec.Revalidation.Queue == "kafka"
-	revalidationDeferred := kafkaRequested && !ptr.Deref(nextApp.Spec.Revalidation.ProvisionKafkaSource, false)
-	if kafkaRequested && !revalidationDeferred {
+	if kafkaRequested && !revalidationDeferred(&nextApp) {
 		// Unstructured to avoid Eventing proto deps.
 		topic := fmt.Sprintf("%s-revalidation", nextApp.Name)
 		kafkaSource := &unstructured.Unstructured{}
@@ -955,11 +918,10 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 	// keeps failing safe on the route, serving the last-good split).
 	//
 	// Three-valued outcome: exists / NotFound / unknown. Only a real NotFound
-	// may degrade (after the stall-window race guard below); a transient GET
-	// error is NOT evidence the revision is gone, so we keep the prior verdict
-	// rather than flip-flopping the condition on API hiccups.
-	pinnedRevisionNotFound := false
-	pinnedRevisionCheckUnknown := false
+	// may degrade (after the stall-window race guard in computeStatusVerdict);
+	// a transient GET error is NOT evidence the revision is gone, so the verdict
+	// keeps the prior state rather than flip-flopping the condition on API hiccups.
+	var revCheck revisionCheck
 	if nextApp.Spec.Traffic != nil && nextApp.Spec.Traffic.RevisionName != "" {
 		rev := &servingv1.Revision{}
 		revKey := client.ObjectKey{Namespace: nextApp.Namespace, Name: nextApp.Spec.Traffic.RevisionName}
@@ -967,194 +929,23 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 		case getErr == nil:
 			// Pinned revision exists — nothing to surface.
 		case errors.IsNotFound(getErr):
-			pinnedRevisionNotFound = true
+			revCheck.notFound = true
 		default:
-			pinnedRevisionCheckUnknown = true
+			revCheck.unknown = true
 			logger.Info("pinned revision existence check inconclusive; keeping prior verdict",
 				"revision", nextApp.Spec.Traffic.RevisionName, "error", getErr.Error())
 		}
 	}
 
-	// 6a. Honest Ready: gate NextApp Ready on the CHILD Knative Service's OWN
-	// readiness — not on the fact that we successfully wrote the ksvc. Writing the
-	// ksvc spec says nothing about whether its pods actually came up: a NextApp
-	// whose image is CrashLoopBackOff / ImagePullBackOff would otherwise report a
-	// false-green Ready=True, misleading operators and rollback / traffic-split
-	// automation during the exact incident they need to detect.
-	//
-	// We read the ksvc's "Ready" condition (knative's living condition set rolls
-	// Configuration + Route readiness into it) and only mark NextApp Ready=True
-	// when that is True. Otherwise Ready=False / Degraded=True with the ksvc's own
-	// reason+message (the pull/crash detail), and we schedule a bounded RequeueAfter
-	// so status converges toward real health instead of waiting solely on the
-	// Owns(ksvc) watch (which may be quiet between status transitions).
-	ksvcReadyCond := ksvc.Status.GetCondition(servingv1.ServiceConditionReady)
-	ksvcReady := ksvcReadyCond.IsTrue()
-
-	apimeta.SetStatusCondition(&nextApp.Status.Conditions, metav1.Condition{
-		Type:               ConditionReconciling,
-		Status:             metav1.ConditionFalse,
-		ObservedGeneration: nextApp.Generation,
-		Reason:             "ReconcileSuccess",
-		Message:            "Reconciliation complete",
-	})
-
-	if ksvcReady {
-		apimeta.SetStatusCondition(&nextApp.Status.Conditions, metav1.Condition{
-			Type:               ConditionReady,
-			Status:             metav1.ConditionTrue,
-			ObservedGeneration: nextApp.Generation,
-			Reason:             "ReconcileSuccess",
-			Message:            "NextApp reconciled successfully; Knative Service is Ready",
-		})
-		apimeta.SetStatusCondition(&nextApp.Status.Conditions, metav1.Condition{
-			Type:               ConditionDegraded,
-			Status:             metav1.ConditionFalse,
-			ObservedGeneration: nextApp.Generation,
-			Reason:             "ReconcileSuccess",
-			Message:            "No errors detected",
-		})
-	} else {
-		// Surface the ksvc's own reason/message so operators see the pull/crash
-		// detail (e.g. ImagePullBackOff / RevisionFailed) directly on the NextApp.
-		ksvcReason := "Pending"
-		ksvcMessage := "Knative Service has not reported Ready yet"
-		if ksvcReadyCond != nil {
-			if ksvcReadyCond.Reason != "" {
-				ksvcReason = ksvcReadyCond.Reason
-			}
-			if ksvcReadyCond.Message != "" {
-				ksvcMessage = ksvcReadyCond.Message
-			}
-		}
-		readyReason := "KnativeServiceNotReady"
-		readyMessage := fmt.Sprintf("Knative Service is not Ready (%s): %s",
-			ksvcReason, ksvcMessage)
-		// Loud failure on silent ingress stalls (#208): Knative's own message
-		// ("Ingress has not yet been reconciled.") reads as "wait longer" even
-		// when NO ingress controller serves the configured class and the route
-		// will never program. Past the window, replace the opaque pending state
-		// with a specific reason + Warning event naming the likely fix.
-		//
-		// Churn guards: the condition message is STATIC ("for more than <window>")
-		// — embedding the live elapsed would make every 30s requeue produce a new
-		// message, defeating the #98 no-op status guard with a status write +
-		// self-watch echo per requeue. The live elapsed goes in the EVENT only,
-		// and the event fires only on TRANSITION into the stall (the previous
-		// Ready reason wasn't already IngressNotProgrammed), not on every pass.
-		// Pinned-revision verdict (ADR-0014) — takes precedence over the generic
-		// ingress-stall check because it is the more specific, more actionable
-		// diagnosis. Same churn discipline as the ingress stall: STATIC message
-		// (derived only from spec fields, so the #98 no-op guard holds), Warning
-		// event on TRANSITION only, elapsed time in the event, never the condition.
-		pinnedHandled := false
-		if pinnedRevisionCheckUnknown {
-			// Inconclusive check: keep a prior PinnedRevisionNotFound verdict
-			// verbatim (same static reason+message => status write is a no-op)
-			// instead of flip-flopping to the generic reason on an API hiccup.
-			// Without a prior verdict there is nothing to keep — fall through.
-			prevReady := apimeta.FindStatusCondition(nextApp.Status.Conditions, ConditionReady)
-			if prevReady != nil && prevReady.Reason == ReasonPinnedRevisionNotFound {
-				readyReason = ReasonPinnedRevisionNotFound
-				readyMessage = prevReady.Message
-				ksvcReason = ReasonPinnedRevisionNotFound
-				ksvcMessage = prevReady.Message
-				pinnedHandled = true
-			}
-		} else if elapsed, stalled := pinnedRevisionMissingStalled(pinnedRevisionNotFound, ksvc, time.Now()); stalled {
-			readyReason = ReasonPinnedRevisionNotFound
-			ksvcReason = ReasonPinnedRevisionNotFound
-			readyMessage = fmt.Sprintf(
-				"pinned revision %q does not exist in namespace %q — it may have been "+
-					"garbage-collected, so the declared traffic pin can never resolve and Knative keeps "+
-					"serving the last-good route. Run `kubectl get revisions -n %s` to list surviving "+
-					"revisions, then re-pin via `kn-next rollback %s --to <existing-revision>` or clear "+
-					"spec.traffic to return to latest-ready.",
-				nextApp.Spec.Traffic.RevisionName, nextApp.Namespace, nextApp.Namespace, nextApp.Name)
-			ksvcMessage = readyMessage
-			prevReady := apimeta.FindStatusCondition(nextApp.Status.Conditions, ConditionReady)
-			if prevReady == nil || prevReady.Reason != ReasonPinnedRevisionNotFound {
-				r.emitEvent(&nextApp, corev1.EventTypeWarning, ReasonPinnedRevisionNotFound,
-					fmt.Sprintf("%s (pin unresolved for %s)", readyMessage, elapsed.Round(time.Second)))
-			}
-			pinnedHandled = true
-		}
-		if elapsed, stalled := ingressProgrammingStalled(ksvc, time.Now()); !pinnedHandled && stalled {
-			readyReason = ReasonIngressNotProgrammed
-			ksvcReason = ReasonIngressNotProgrammed
-			readyMessage = fmt.Sprintf(
-				"route programming has stalled: the Knative Route's ingress (KIngress) has been "+
-					"unreconciled for more than %s (%s). This usually means no ingress controller "+
-					"serves the cluster's configured ingress-class — check the `ingress-class` key in "+
-					"the config-network ConfigMap (knative-serving namespace); on Knative-Operator-managed "+
-					"clusters the KnativeServing CR overwrites that ConfigMap, so fix the class in the CR. "+
-					"net-kourier serves %q (NOT the short `kourier.knative.dev` form).",
-				ingressProgrammingStallWindow, ksvcIngressNotConfiguredReason, kourierServedIngressClass)
-			ksvcMessage = readyMessage
-			prevReady := apimeta.FindStatusCondition(nextApp.Status.Conditions, ConditionReady)
-			if prevReady == nil || prevReady.Reason != ReasonIngressNotProgrammed {
-				r.emitEvent(&nextApp, corev1.EventTypeWarning, ReasonIngressNotProgrammed,
-					fmt.Sprintf("%s (stalled for %s)", readyMessage, elapsed.Round(time.Second)))
-			}
-		}
-		apimeta.SetStatusCondition(&nextApp.Status.Conditions, metav1.Condition{
-			Type:               ConditionReady,
-			Status:             metav1.ConditionFalse,
-			ObservedGeneration: nextApp.Generation,
-			Reason:             readyReason,
-			Message:            readyMessage,
-		})
-		apimeta.SetStatusCondition(&nextApp.Status.Conditions, metav1.Condition{
-			Type:               ConditionDegraded,
-			Status:             metav1.ConditionTrue,
-			ObservedGeneration: nextApp.Generation,
-			Reason:             ksvcReason,
-			Message:            ksvcMessage,
-		})
-		// Bounded requeue so status converges toward the ksvc's real health.
-		result.RequeueAfter = ksvcNotReadyRequeueAfter
+	// 6a. Compute the full status verdict (honest-Ready roll-up, pinned-revision
+	// verdict, ingress-stall detection, RevalidationDeferred, requeue) in ONE
+	// pure function (#254) and apply it: conditions in order, transition-gated
+	// events, and the #98 no-op-guarded status write.
+	verdict := computeStatusVerdict(&nextApp, ksvc, db, revCheck, time.Now())
+	if err := r.applyStatusVerdict(ctx, &nextApp, observedStatus, verdict); err != nil {
+		return ctrl.Result{}, err
 	}
-
-	// A ghost pin can momentarily coexist with a still-True ksvc Ready (Knative
-	// hasn't processed the new spec.traffic yet). We deliberately don't degrade
-	// in that window — pinnedRevisionMissingStalled waits for a non-True route
-	// condition — but we must keep re-evaluating even if the Owns(ksvc) watch is
-	// quiet, so the stall window is eventually judged.
-	if pinnedRevisionNotFound && result.RequeueAfter == 0 {
-		result.RequeueAfter = ksvcNotReadyRequeueAfter
-	}
-
-	// Non-fatal RevalidationDeferred condition: surface (but don't fail on) a kafka
-	// revalidation request whose consumer hasn't been provisioned yet (issue #95).
-	if revalidationDeferred {
-		apimeta.SetStatusCondition(&nextApp.Status.Conditions, metav1.Condition{
-			Type:               ConditionRevalidationDeferred,
-			Status:             metav1.ConditionTrue,
-			ObservedGeneration: nextApp.Generation,
-			Reason:             "ConsumerNotProvisioned",
-			Message: "revalidation.queue=kafka requested but no KafkaSource was provisioned: " +
-				"the {app}-revalidator consumer is design-now/build-later (#95). Set " +
-				"spec.revalidation.provisionKafkaSource=true once you deploy an external consumer.",
-		})
-	} else {
-		apimeta.SetStatusCondition(&nextApp.Status.Conditions, metav1.Condition{
-			Type:               ConditionRevalidationDeferred,
-			Status:             metav1.ConditionFalse,
-			ObservedGeneration: nextApp.Generation,
-			Reason:             "NotDeferred",
-			Message:            "Kafka revalidation not deferred",
-		})
-	}
-
-	// No-op-status guard (#98): only write status when the freshly-computed
-	// desired status differs from what we observed at the top of the pass. On an
-	// idle, converged object every field is identical, so this skips the write
-	// and the watch event it would otherwise generate — settling the loop.
-	if !apiequality.Semantic.DeepEqual(observedStatus, &nextApp.Status) {
-		if err := r.Status().Update(ctx, &nextApp); err != nil {
-			return ctrl.Result{}, err
-		}
-	}
+	result.RequeueAfter = verdict.requeueAfter
 
 	r.emitEvent(&nextApp, corev1.EventTypeNormal, ReasonReconciled,
 		fmt.Sprintf("NextApp reconciled successfully (image %s)", nextApp.Spec.Image))
@@ -1162,6 +953,37 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 	// Preserve any bounded RequeueAfter set while the child Knative Service is
 	// not-yet-Ready (6a) so status converges toward real health.
 	return result, nil
+}
+
+// applyStatusVerdict is the impure half of the compute→apply split (#254): it
+// emits the verdict's (already transition-filtered) events, applies the
+// condition removals then sets IN ORDER (append order is part of the #98
+// contract — see statusVerdict), and writes status ONLY when it differs from
+// what was observed at the top of the pass.
+//
+// No-op-status guard (#98): only write status when the freshly-computed
+// desired status differs from what we observed at the top of the pass. On an
+// idle, converged object every field is identical, so this skips the write
+// and the watch event it would otherwise generate — settling the loop.
+func (r *NextAppReconciler) applyStatusVerdict(
+	ctx context.Context,
+	app *appsv1alpha1.NextApp,
+	observedStatus *appsv1alpha1.NextAppStatus,
+	verdict statusVerdict,
+) error {
+	for _, ev := range verdict.events {
+		r.emitEvent(app, ev.eventType, ev.reason, ev.message)
+	}
+	for _, condType := range verdict.removeConditions {
+		apimeta.RemoveStatusCondition(&app.Status.Conditions, condType)
+	}
+	for _, cond := range verdict.conditions {
+		apimeta.SetStatusCondition(&app.Status.Conditions, cond)
+	}
+	if !apiequality.Semantic.DeepEqual(observedStatus, &app.Status) {
+		return r.Status().Update(ctx, app)
+	}
+	return nil
 }
 
 // buildTrafficTargets renders the Knative Service spec.traffic block from the
