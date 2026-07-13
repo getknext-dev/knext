@@ -111,6 +111,12 @@ func (s *DynSQL) readyPod(ctx context.Context, zone string) (string, error) {
 	return "", fmt.Errorf("no ready compute-%s pod (compute not awake?)", zone)
 }
 
+// ---- SQLOps surface --------------------------------------------------------
+// Each method is a thin adapter: it builds the wire SQL with the PURE, table-tested
+// builder in sql.go (identifier validation + quoting happens there) and runs it via
+// exec (wakes the compute) — except SlotInvalidatedOnPeer, which uses readOnly (no
+// wake). See the SQLOps interface in ports.go for the per-method contract.
+
 func (s *DynSQL) EnsureReplRole(ctx context.Context, zone, role, password string) error {
 	return s.exec(ctx, zone, buildEnsureReplRole(role, password))
 }

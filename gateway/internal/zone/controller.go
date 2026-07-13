@@ -31,6 +31,11 @@ func NewController(dyn dynamic.Interface, deps *Deps, ns string, resync time.Dur
 }
 
 // Run blocks until ctx is cancelled, reconciling on resync ticks and watch events.
+// The two triggers are complementary: the ticker guarantees eventual convergence
+// even if the watch drops (the resync covers any missed event), while the watch makes
+// the operator react promptly to a Zone create/update/delete without waiting a full
+// tick. A watch event debounces 200ms then drains the trigger channel so a burst of
+// events (e.g. an apply touching several fields) collapses into one reconcileAll pass.
 func (c *Controller) Run(ctx context.Context) error {
 	trigger := make(chan struct{}, 1)
 	go c.watch(ctx, trigger)
@@ -47,13 +52,19 @@ func (c *Controller) Run(ctx context.Context) error {
 		case <-ticker.C:
 			c.reconcileAll(ctx)
 		case <-trigger:
-			time.Sleep(200 * time.Millisecond)
+			time.Sleep(200 * time.Millisecond) // debounce a burst of watch events
 			drain(trigger)
 			c.reconcileAll(ctx)
 		}
 	}
 }
 
+// watch tails the Zone CR collection and pings trigger on any event. It is
+// best-effort: a watch error (or a closed ResultChan, e.g. an API-server rollout)
+// just re-establishes the watch after a short backoff — the resync ticker covers any
+// events missed in the gap, so no event is ever load-bearing on its own. The
+// non-blocking send keeps a single pending trigger (the buffered channel) rather than
+// blocking the watch loop.
 func (c *Controller) watch(ctx context.Context, trigger chan<- struct{}) {
 	for ctx.Err() == nil {
 		w, err := c.dyn.Resource(GVR).Namespace(c.ns).Watch(ctx, metav1.ListOptions{})
@@ -72,6 +83,10 @@ func (c *Controller) watch(ctx context.Context, trigger chan<- struct{}) {
 	}
 }
 
+// reconcileAll lists every Zone in the namespace and reconciles each one. A list
+// failure or a per-CR decode/reconcile error is logged and does not abort the pass
+// (the other Zones still reconcile); the next tick/event retries. lastSync/lastErr
+// feed Healthy() for the /healthz probe.
 func (c *Controller) reconcileAll(ctx context.Context) {
 	list, err := c.dyn.Resource(GVR).Namespace(c.ns).List(ctx, metav1.ListOptions{})
 	if err != nil {
@@ -100,7 +115,10 @@ func (c *Controller) reconcileAll(ctx context.Context) {
 	c.lastErr = nil
 }
 
-// Healthy reports whether a recent successful sync completed.
+// Healthy reports whether a recent successful sync completed — the liveness signal
+// behind /healthz. It tolerates up to 3 missed resync intervals before reporting
+// unhealthy (a transient list blip shouldn't flap the probe); before the first sync
+// it reports healthy so a slow start isn't killed.
 func (c *Controller) Healthy() bool {
 	if c.lastSync.IsZero() {
 		return true
@@ -108,6 +126,8 @@ func (c *Controller) Healthy() bool {
 	return c.deps.Now().Time.Sub(c.lastSync) < 3*c.resync
 }
 
+// drain empties the trigger channel non-blockingly so a debounced burst of watch
+// events collapses into the single reconcileAll pass that follows.
 func drain(ch <-chan struct{}) {
 	for {
 		select {

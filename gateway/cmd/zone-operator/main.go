@@ -58,6 +58,15 @@ func randHex(n int) string {
 	return hex.EncodeToString(b)
 }
 
+// main wires the operator: resolve ZONE_* config → build the typed + dynamic
+// client-go clients → assemble the reconciler's Deps (the real AppDatabase/SQL/
+// cluster/zone-lister port implementations from internal/zone) → run the reconcile
+// Controller alongside a health server, until SIGINT/SIGTERM.
+//
+// Note GatewayHost/GatewayPort thread through to BOTH the SQL layer (embedded in
+// subscription/FDW conninfo so replication routes through the apps-gateway wake path,
+// #140) and Deps, and ReplRolePrefix must stay lock-step with the apps-gateway's
+// GW_REPL_ROLE_PREFIX or the gateway won't authorize the operator-minted repl role.
 func main() {
 	logger := log.New(os.Stdout, "", log.LstdFlags|log.Lmicroseconds|log.LUTC)
 

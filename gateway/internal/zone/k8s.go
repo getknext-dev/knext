@@ -32,6 +32,9 @@ func NewK8sCluster(cs kubernetes.Interface, dyn dynamic.Interface, ns string, wa
 	return &K8sCluster{cs: cs, dyn: dyn, ns: ns, wakeTOsec: wakeTimeoutSec, log: logger}
 }
 
+// replSecretName is the per-zone repl-credential Secret (holds REPL_ROLE /
+// REPL_PASSWORD / REPL_ROLE_MD5). Deterministic so a consumer can read a peer's
+// credential by zone name to build its subscription conninfo.
 func replSecretName(zone string) string { return "zone-repl-" + zone }
 
 // EnsureReplSecret mints zone-repl-<zone> if absent (preserving a live password on
@@ -171,13 +174,22 @@ func (k *K8sCluster) UpdateStatus(ctx context.Context, cr *Zone) error {
 	return nil
 }
 
+// AddFinalizer ensures the deprovision finalizer is present so a Zone delete always
+// runs cross-zone hygiene (ADR-0007 §4d) before the object is removed.
 func (k *K8sCluster) AddFinalizer(ctx context.Context, cr *Zone) error {
 	return k.patchFinalizers(ctx, cr, true)
 }
+
+// RemoveFinalizer strips the deprovision finalizer — the LAST step of reconcileDelete,
+// letting the API server actually delete the Zone once all peer-side cleanup is done.
 func (k *K8sCluster) RemoveFinalizer(ctx context.Context, cr *Zone) error {
 	return k.patchFinalizers(ctx, cr, false)
 }
 
+// patchFinalizers adds or removes Finalizer via a read-modify-write Update, then
+// syncs the live finalizer list + resourceVersion back onto cr so a following
+// UpdateStatus in the same pass doesn't conflict. Ignore-not-found: a Zone deleted
+// out from under us is a no-op.
 func (k *K8sCluster) patchFinalizers(ctx context.Context, cr *Zone, add bool) error {
 	res := k.dyn.Resource(GVR).Namespace(cr.Namespace)
 	obj, err := res.Get(ctx, cr.Name, metav1.GetOptions{})
@@ -286,6 +298,8 @@ func FromUnstructured(u *unstructured.Unstructured) (*Zone, error) {
 	}, nil
 }
 
+// toMap round-trips a value through JSON into a map[string]any — the shape the
+// dynamic client's unstructured status subresource requires.
 func toMap(v any) (map[string]any, error) {
 	b, err := json.Marshal(v)
 	if err != nil {
