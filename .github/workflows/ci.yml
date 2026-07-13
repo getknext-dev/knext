@@ -47,6 +47,22 @@ jobs:
       - name: Build @knext/core
         run: pnpm --filter @knext/core build
 
+      # Typecheck gate (#261): per-package `tsc --noEmit` so the strict-mode
+      # baseline can never regrow silently. Runs AFTER the lib→db→core builds
+      # above because the checks are dist-dependent (core's cli/db-migrate.ts
+      # imports @knext/db/migrate, next-adapter.ts imports @knext/lib/clients —
+      # both TS2307 without the upstream dist). lib/db typecheck through
+      # tsconfig.typecheck.json, which (unlike their build tsconfigs) pulls the
+      # test files into scope — the exact gap this gate closes.
+      - name: Typecheck @knext/lib (tsc --noEmit, tests in scope)
+        run: pnpm --filter @knext/lib typecheck
+
+      - name: Typecheck @knext/db (tsc --noEmit, tests in scope)
+        run: pnpm --filter @knext/db typecheck
+
+      - name: Typecheck @knext/core (tsc --noEmit, tests in scope)
+        run: pnpm --filter @knext/core typecheck
+
       - name: Run tests
         run: pnpm exec vitest run --coverage
       

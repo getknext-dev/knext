@@ -1,0 +1,11 @@
+{
+  // #261 typecheck-gate config: unlike tsconfig.json (the build config, which
+  // EXCLUDES tests so they never reach dist/), this pulls the test files into
+  // strict typecheck scope. CI runs `pnpm --filter @knext/lib typecheck`.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true
+  },
+  "include": ["src/**/*"],
+  "exclude": ["node_modules", "dist"]
+}
