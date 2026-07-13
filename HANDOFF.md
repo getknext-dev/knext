@@ -180,8 +180,11 @@ doc + `CLAUDE.md` + `docs/` + the issues/PRs/ADRs.
    what lives where and how the wake flow / drivers / operator / security model actually work
    (verified accurate to file:line; the source packages carry thorough godoc). Then `CLAUDE.md`,
    `docs/SCALING.md`, `docs/SCORECARD.md`, `docs/BENCHMARKS.md`, and the ADR ledger
-   `docs/adr-0001..0008` (0008 now **ACCEPTED**). A local graphify knowledge graph is at
-   `graphify-out/` (gitignored; `graphify update` to refresh) for navigating the code.
+   `docs/adr-0001..0008` (0008 now **ACCEPTED**). To VERIFY the system or run a trigger-review
+   battery, read **`docs/DRILLS.md`** (what each `deploy/_verify-*.sh` proves + how to run +
+   how to read the results). A local graphify knowledge graph is at `graphify-out/` (gitignored;
+   `graphify update` to refresh) for navigating the code. The gateway + operator source carry
+   thorough godoc.
 2. Provision the §6 credentials; verify cluster reachability
    (`kubectl config use-context context-ckmva7v7zvq && kubectl -n scale-zero-pg get deploy`).
    If the OCI session lapsed: `oci session authenticate --profile-name knext --region me-abudhabi-1`
