@@ -49,6 +49,10 @@ docs/      user documentation + research + ADRs
   pooling, `synchronous_commit`, read offload, and the single-writer limits.
 - **[Operations](docs/operations.md)** — config reference, monitoring/alerts, durability
   model, password rotation, troubleshooting, upgrades.
+- **[Architecture](docs/ARCHITECTURE.md)** — the code map: the three planes, the wake
+  gateway, the operators, repo layout — orientation for a new contributor or agent.
+- **[Drills](docs/DRILLS.md)** — the verification drill-battery guide: how to run each
+  drill, what it proves, the `WAKE_BUDGET_MS` knob, and signal-vs-noise FAIL triage.
 - **[Benchmarks](docs/BENCHMARKS.md)** — every measured number with provenance: wake
   latencies per environment, the foundation bake-off, drill RTOs, sizing facts.
 - [ADR-0001](docs/adr-0001-timescale-and-sharding.md) — TimescaleDB verdict + sharding
