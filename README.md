@@ -45,6 +45,8 @@ docs/      user documentation + research + ADRs
 - **[Getting started](docs/getting-started.md)** — zero to a sleeping database in ~5 minutes.
 - **[Connecting your app](docs/connecting.md)** — DSN, pooling rules, knext integration,
   what cold starts look like from the client, time-series notes.
+- **[Tuning write-heavy workloads](docs/tuning-write-heavy.md)** — batch/`COPY`,
+  pooling, `synchronous_commit`, read offload, and the single-writer limits.
 - **[Operations](docs/operations.md)** — config reference, monitoring/alerts, durability
   model, password rotation, troubleshooting, upgrades.
 - **[Benchmarks](docs/BENCHMARKS.md)** — every measured number with provenance: wake

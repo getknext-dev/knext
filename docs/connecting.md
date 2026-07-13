@@ -158,7 +158,13 @@ like activity** and keep the database awake.
    holds idle connections forever, the DB never sleeps — that's the #1 cause of
    "never scales to zero".
 2. Keep `min_connections`/`minIdle` at **0** for apps that should let the DB sleep.
-3. Size the pool normally otherwise; the gateway doesn't cap connections.
+3. Size the pool normally otherwise; the gateway doesn't cap connections by default
+   (the deployed writer gateway sets `GW_MAX_CONNS=90`, under the compute's
+   `max_connections=100` — see [operations](operations.md#gateway-configuration-env-on-deploypggw)).
+
+Running a **write-heavy** workload (bulk load, event ingestion, high-frequency
+inserts)? See the [write-heavy tuning guide](tuning-write-heavy.md) for batching,
+`COPY`, `synchronous_commit`, and read-offload guidance.
 
 ## knext apps
 
