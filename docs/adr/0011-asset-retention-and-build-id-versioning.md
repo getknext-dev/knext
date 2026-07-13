@@ -192,5 +192,15 @@ lagging, a window-only prune can reap the pinned build.
   reap / unmarked-keep / hostile-marker-in-reserved-dir per provider (asset-prune.test.ts), the
   pin fail-safe (gc-cli.test.ts), and the nightly e2e_gc suite seeds markers and asserts one
   deliberately unmarked prefix survives a real prune.
-- `kn-next gc --dry-run` and the canary-pin e2e leg are the second half of #264, tracked
-  separately (not in this change).
+- **(DONE, #264 part 2)** `kn-next gc --dry-run` (the full reap/keep plan — would-reap,
+  window-kept, live-kept, unmarked-kept, reserved-excluded — computed through the SAME
+  `classifyBuilds` path a wet run takes, with an argv-pinned zero-delete proof), the canary-pin
+  e2e leg (two-target `status.currentTraffic` protects BOTH the pinned and latest-ready builds
+  through a real prune), and the live pin+wiped-status e2e spec (a NextApp pinning a nonexistent
+  revision — the PinnedRevisionNotFound/ADR-0014 state — proves the fail-safe skip on a real
+  cluster) landed as the second half of #264.
+- **Known TOCTOU (named, not fixed):** the GC's status/spec reads and its delete execution are
+  not atomic — a pin applied in that narrow window is unprotected for the in-flight run.
+  Pre-existing and seconds-narrow; fixing it would need conditional-write/compare-and-delete
+  semantics the four object stores do not offer uniformly (documented at `runAssetGC` in
+  `packages/kn-next/src/cli/gc.ts`).

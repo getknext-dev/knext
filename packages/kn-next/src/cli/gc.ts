@@ -70,6 +70,19 @@ export interface AssetGCResult {
  * best-effort) and `kn-next gc` (standalone). Throws only when the
  * status.currentTraffic read itself fails — deploy wraps that in its
  * best-effort catch; `kn-next gc` lets it surface as a non-zero exit.
+ *
+ * With `dryRun` (#264 part 2) the cluster reads and the plan computation are
+ * IDENTICAL; only the deletes are withheld (see pruneOldBuilds).
+ *
+ * TOCTOU (documented, NOT fixed — #264 part 2, sysdesign note): the
+ * status/spec reads here and the prune's delete execution are not atomic. A
+ * pin (`kn-next rollback --to`) applied in the narrow window BETWEEN the
+ * status read and the delete is invisible to this run's live set, so an
+ * in-flight GC can still reap the freshly-pinned build's prefix. This is
+ * pre-existing (the deploy-tail GC always had it), seconds-narrow, and not
+ * fixable at this layer: it would need conditional-write/compare-and-delete
+ * semantics the four object stores (GCS/S3/MinIO/Azure) do not offer
+ * uniformly. Named so the fail-safes above are not mistaken for atomicity.
  */
 export function runAssetGC(
     config: KnativeNextConfig,
@@ -77,6 +90,7 @@ export function runAssetGC(
     newBuildId: string,
     exec: GcExec = runCapture,
     prune: GcPrune = pruneOldBuilds,
+    dryRun = false,
 ): AssetGCResult {
     const trafficJson = exec([
         "kubectl",
@@ -148,7 +162,7 @@ export function runAssetGC(
             skipReason: "unresolvable-live-build-id",
         };
     }
-    const summary = prune(config, resolved.buildIds, newBuildId);
+    const summary = prune(config, resolved.buildIds, newBuildId, { dryRun });
     return { pruned: true, liveRevisions, summary };
 }
 
@@ -160,6 +174,11 @@ export interface GcArgs {
      * listing order alone.
      */
     buildId: string;
+    /**
+     * `--dry-run` (#264 part 2): compute + print the full reap/keep plan,
+     * issue ZERO deletes. Composes with --build-id/-n.
+     */
+    dryRun: boolean;
 }
 
 /**
@@ -168,7 +187,7 @@ export interface GcArgs {
  * never a silent fall-through with different retention semantics.
  */
 export function parseGcArgs(argv: readonly string[]): GcArgs {
-    const out: GcArgs = { namespace: "default", buildId: "" };
+    const out: GcArgs = { namespace: "default", buildId: "", dryRun: false };
     const takeValue = (flag: string, i: number): string => {
         const v = argv[i];
         if (v === undefined || v.startsWith("-")) {
@@ -182,6 +201,8 @@ export function parseGcArgs(argv: readonly string[]): GcArgs {
             out.buildId = takeValue("--build-id", ++i);
         } else if (a === "-n" || a === "--namespace") {
             out.namespace = takeValue(a, ++i);
+        } else if (a === "--dry-run") {
+            out.dryRun = true;
         } else if (a.startsWith("-")) {
             throw new Error(`unknown flag "${a}" (see kn-next gc --help)`);
         } else {
@@ -217,14 +238,80 @@ whose teardown finalizer wipes the whole \`<app>/\` namespace).
 The app + storage come from kn-next.config.ts in the current directory.
 
 Usage:
-  kn-next gc [--build-id <id>] [-n <namespace>]
+  kn-next gc [--build-id <id>] [-n <namespace>] [--dry-run]
 
 Options:
   --build-id <id>       Build-id to treat as the newest (e.g. the tag just
                         deployed). Omit to order by the remote listing alone.
   -n, --namespace <ns>  Kubernetes namespace of the NextApp (default: default)
+  --dry-run             Print the FULL reap/keep plan (would-reap candidates,
+                        window-kept, live-kept, unmarked-kept, reserved
+                        shared dirs) and issue ZERO deletes. The cluster reads
+                        and the plan are identical to a real run.
   -h, --help            Show this help
 `;
+
+/**
+ * Renders the synchronous fd-1 outcome report for one {@link runAssetGC}
+ * result — pure so the exact output contract (including the `--dry-run` full
+ * plan and the machine-greppable skip-reason tokens) is unit-testable. A
+ * command that may have DELETED objects must always print what it did;
+ * gcMain writes this via writeSync (never the async pino transport).
+ */
+export function renderGcReport(
+    appName: string,
+    namespace: string,
+    res: AssetGCResult,
+): string {
+    if (!res.pruned) {
+        if (res.skipReason === "pinned-with-empty-status") {
+            return (
+                `gc: SKIPPED (fail-safe over-keep) [pinned-with-empty-status] — ` +
+                `${appName} pins revision "${res.pinnedRevision}" ` +
+                `(spec.traffic.revisionName) but status.currentTraffic is empty ` +
+                `(status wiped or lagging); a window-only prune could reap the ` +
+                `pinned build. Nothing was deleted.\n`
+            );
+        }
+        return (
+            `gc: SKIPPED (fail-safe over-keep) [unresolvable-live-build-id] — ` +
+            `a live revision of ${appName} has no resolvable build-id label; ` +
+            `nothing was deleted. ` +
+            `live revisions: [${res.liveRevisions.join(", ")}]\n`
+        );
+    }
+
+    const s = res.summary;
+    if (s?.dryRun) {
+        // #264 part 2: the FULL reap/keep plan, every bucket named, and an
+        // explicit statement that no delete was issued.
+        return [
+            `gc: DRY-RUN for ${appName} (ns ${namespace}) — plan only, nothing was deleted.`,
+            `  would reap:                        [${s.reaped.join(", ")}]`,
+            `  kept (retain window):              [${s.keptWindow.join(", ")}]`,
+            `  kept (live traffic):               [${s.keptLive.join(", ")}]`,
+            `  kept (unmarked, no ${BUILD_MARKER_FILENAME}):  [${s.keptUnmarked.join(", ")}]`,
+            `  excluded (reserved shared dirs):   [${s.reservedExcluded.join(", ")}]`,
+            `  live revisions protected:          [${res.liveRevisions.join(", ")}]`,
+            "",
+        ].join("\n");
+    }
+
+    // Unmarked prefixes were skipped LOUDLY, by name (#264 marker
+    // inversion — pre-marker uploads / unknown dirs are over-kept).
+    const keptUnmarked = s?.keptUnmarked ?? [];
+    const unmarkedNote =
+        keptUnmarked.length > 0
+            ? `; unmarked prefixes kept (no ${BUILD_MARKER_FILENAME} marker — ` +
+              `pre-marker upload or unknown dir): [${keptUnmarked.join(", ")}]`
+            : "";
+    return (
+        `gc: completed for ${appName} (ns ${namespace}) — ` +
+        `live revisions protected: [${res.liveRevisions.join(", ")}]` +
+        `; reaped: [${(s?.reaped ?? []).join(", ")}]` +
+        `${unmarkedNote}\n`
+    );
+}
 
 /** Entry for \`kn-next gc\`. Returns the process exit code. */
 export async function gcMain(argv: readonly string[]): Promise<number> {
@@ -240,47 +327,29 @@ export async function gcMain(argv: readonly string[]): Promise<number> {
     const config = await loadConfig();
 
     log.info(
-        { app: config.name, namespace: args.namespace, buildId: args.buildId },
+        {
+            app: config.name,
+            namespace: args.namespace,
+            buildId: args.buildId,
+            dryRun: args.dryRun,
+        },
         "Running asset retention GC (read-only against the cluster)...",
     );
 
-    const res = runAssetGC(config, args.namespace, args.buildId);
+    const res = runAssetGC(
+        config,
+        args.namespace,
+        args.buildId,
+        runCapture,
+        pruneOldBuilds,
+        args.dryRun,
+    );
 
-    // Synchronous outcome line on fd 1: pino's transport is async and a
+    // Synchronous outcome report on fd 1: pino's transport is async and a
     // process.exit right after can swallow it — a command that may have
-    // DELETED objects must always print what it did.
-    if (res.pruned) {
-        // Unmarked prefixes were skipped LOUDLY, by name (#264 marker
-        // inversion — pre-marker uploads / unknown dirs are over-kept).
-        const keptUnmarked = res.summary?.keptUnmarked ?? [];
-        const unmarkedNote =
-            keptUnmarked.length > 0
-                ? `; unmarked prefixes kept (no ${BUILD_MARKER_FILENAME} marker — ` +
-                  `pre-marker upload or unknown dir): [${keptUnmarked.join(", ")}]`
-                : "";
-        writeSync(
-            1,
-            `gc: completed for ${config.name} (ns ${args.namespace}) — ` +
-                `live revisions protected: [${res.liveRevisions.join(", ")}]` +
-                `; reaped: [${(res.summary?.reaped ?? []).join(", ")}]` +
-                `${unmarkedNote}\n`,
-        );
-    } else if (res.skipReason === "pinned-with-empty-status") {
-        writeSync(
-            1,
-            `gc: SKIPPED (fail-safe over-keep) — ${config.name} pins revision ` +
-                `"${res.pinnedRevision}" (spec.traffic.revisionName) but ` +
-                `status.currentTraffic is empty (status wiped or lagging); a ` +
-                `window-only prune could reap the pinned build. Nothing was deleted.\n`,
-        );
-    } else {
-        writeSync(
-            1,
-            `gc: SKIPPED (fail-safe over-keep) — a live revision of ${config.name} ` +
-                `has no resolvable build-id label; nothing was deleted. ` +
-                `live revisions: [${res.liveRevisions.join(", ")}]\n`,
-        );
-    }
+    // DELETED objects must always print what it did (or, under --dry-run,
+    // the full plan of what it WOULD do).
+    writeSync(1, renderGcReport(config.name, args.namespace, res));
     return 0;
 }
 

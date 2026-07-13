@@ -10,7 +10,7 @@ import {
 import { join, relative } from "node:path";
 import { runCapture, runQuiet, runQuietAllowFail } from "../cli/exec";
 import type { KnativeNextConfig } from "../config";
-import { DEFAULT_RETAIN, selectBuildsToDelete } from "./asset-gc";
+import { classifyBuilds, DEFAULT_RETAIN } from "./asset-gc";
 import { createLogger } from "./logger";
 
 /**
@@ -572,20 +572,36 @@ interface RemoteStaticPrefix {
     hasMarker: boolean;
 }
 
+/** What one remote listing observed under `<app>/_next/static/` (#264). */
+interface RemoteStaticListing {
+    /** Candidate id → { delete URI, marker presence }. */
+    prefixes: Map<string, RemoteStaticPrefix>;
+    /**
+     * {@link RESERVED_STATIC_DIRS} segments actually PRESENT remotely, sorted.
+     * Never candidates (marker or not) — surfaced so the `--dry-run` plan can
+     * name what the deny-list excluded (#264 part 2).
+     */
+    reservedExcluded: string[];
+}
+
 /**
  * Lists the first-level "directories" present under `<app>/_next/static/` in
  * the object store, returning id → { delete URI, marker presence } (#264).
  * Provider-specific because each CLI renders a listing differently; every
  * provider lists RECURSIVELY so the `.knext-build` marker objects are visible.
  * The id is the first path segment AFTER `_next/static/`, excluding
- * {@link RESERVED_STATIC_DIRS} (never prunable candidates, marker or not).
+ * {@link RESERVED_STATIC_DIRS} (never prunable candidates, marker or not —
+ * reported separately in `reservedExcluded`).
  */
-function listRemoteBuildIds(
-    config: KnativeNextConfig,
-): Map<string, RemoteStaticPrefix> {
+function listRemoteBuildIds(config: KnativeNextConfig): RemoteStaticListing {
     const { provider, bucket } = config.storage;
     const appPrefix = appKeyPrefix(config); // "<name>/"
     const out = new Map<string, RemoteStaticPrefix>();
+    const reservedSeen = new Set<string>();
+    const listing = (): RemoteStaticListing => ({
+        prefixes: out,
+        reservedExcluded: [...reservedSeen].sort(),
+    });
 
     /**
      * Folds one key path RELATIVE to `_next/static/` (e.g.
@@ -598,7 +614,11 @@ function listRemoteBuildIds(
     ): void => {
         const segs = relAfterStatic.split("/");
         const id = segs[0];
-        if (!id || RESERVED_STATIC_DIRS.has(id)) return;
+        if (!id) return;
+        if (RESERVED_STATIC_DIRS.has(id)) {
+            reservedSeen.add(id);
+            return;
+        }
         const entry = out.get(id) ?? {
             deleteUri: deleteUriFor(id),
             hasMarker: false,
@@ -634,7 +654,7 @@ function listRemoteBuildIds(
                 if (rel === ":") continue;
                 record(rel, (id) => `${base}${id}/`);
             }
-            return out;
+            return listing();
         }
         case "s3": {
             const listed = runCapture([
@@ -660,7 +680,7 @@ function listRemoteBuildIds(
                         (id) => `s3://${bucket}/${appPrefix}${STATIC_NS}${id}/`,
                     );
             }
-            return out;
+            return listing();
         }
         case "minio": {
             const base = `minio/${bucket}/${appPrefix}${STATIC_NS}`;
@@ -679,7 +699,7 @@ function listRemoteBuildIds(
                 const rel = stripPrefix(token, base) ?? token;
                 record(rel, (id) => `${base}${id}/`);
             }
-            return out;
+            return listing();
         }
         case "azure": {
             const listed = runCapture([
@@ -712,7 +732,7 @@ function listRemoteBuildIds(
             } catch {
                 // Empty / non-JSON container → no build-ids to prune.
             }
-            return out;
+            return listing();
         }
         default:
             throw new Error(`Unsupported storage provider: ${provider}`);
@@ -775,7 +795,11 @@ function deleteBuildPrefix(
  * always say what it did, and what it refused to touch).
  */
 export interface PruneSummary {
-    /** Build-ids whose prefixes were reaped (delete issued), oldest-first. */
+    /**
+     * Build-ids whose prefixes were reaped (delete issued), oldest-first.
+     * Under `dryRun` these are the candidates that WOULD be reaped — no
+     * delete was issued (`dryRun: true` makes the distinction unambiguous).
+     */
     reaped: string[];
     /**
      * First-level prefixes KEPT because they carry no `.knext-build` marker
@@ -783,6 +807,14 @@ export interface PruneSummary {
      * design — named loudly so a human can reclaim them manually (ADR-0011).
      */
     keptUnmarked: string[];
+    /** Build-ids kept by the retain window (newest-first), #264 part 2. */
+    keptWindow: string[];
+    /** Build-ids kept ONLY by the live-set rule (outside the window). */
+    keptLive: string[];
+    /** Reserved shared dirs (chunks/css/…) observed remotely — never candidates. */
+    reservedExcluded: string[];
+    /** true ⇒ this was a `--dry-run`: the plan above was computed, nothing deleted. */
+    dryRun: boolean;
 }
 
 /**
@@ -803,18 +835,35 @@ export interface PruneSummary {
  *
  * Best-effort: individual deletes tolerate failure (a stuck delete must never
  * fail a deploy that has already shipped).
+ *
+ * `--dry-run` (#264 part 2): with `opts.dryRun` the ENTIRE plan is computed
+ * through the same listing + marker filter + {@link classifyBuilds} path a wet
+ * run takes (no parallel implementation to drift), but no delete is ever
+ * issued — `summary.reaped` holds the would-reap candidates and
+ * `summary.dryRun` is true.
  */
 export function pruneOldBuilds(
     config: KnativeNextConfig,
     liveBuildIds: readonly string[],
     newBuildId: string,
+    opts: { dryRun?: boolean } = {},
 ): PruneSummary {
+    const dryRun = opts.dryRun === true;
     const retain = config.storage.assetRetention ?? DEFAULT_RETAIN;
-    const summary: PruneSummary = { reaped: [], keptUnmarked: [] };
+    const summary: PruneSummary = {
+        reaped: [],
+        keptUnmarked: [],
+        keptWindow: [],
+        keptLive: [],
+        reservedExcluded: [],
+        dryRun,
+    };
 
     let remote: Map<string, RemoteStaticPrefix>;
     try {
-        remote = listRemoteBuildIds(config);
+        const listed = listRemoteBuildIds(config);
+        remote = listed.prefixes;
+        summary.reservedExcluded = listed.reservedExcluded;
     } catch (err) {
         // A listing failure must never break a successful deploy — just skip GC.
         const message = err instanceof Error ? err.message : String(err);
@@ -849,12 +898,33 @@ export function pruneOldBuilds(
     });
     if (newBuildId) timestamps[newBuildId] = markedIds.length + 1;
 
-    const toDelete = selectBuildsToDelete({
+    const plan = classifyBuilds({
         remoteBuildIds: markedIds,
         timestamps,
         liveBuildIds,
         retain,
     });
+    summary.keptWindow = plan.keptWindow;
+    summary.keptLive = plan.keptLive;
+    const toDelete = plan.reap;
+
+    if (dryRun) {
+        // #264 part 2: the identical plan, ZERO deletes issued. `reaped`
+        // carries the would-reap candidates; the caller prints the full plan.
+        summary.reaped = [...toDelete];
+        log.info(
+            {
+                wouldReap: toDelete,
+                keptWindow: plan.keptWindow,
+                keptLive: plan.keptLive,
+                keptUnmarked: summary.keptUnmarked,
+                reservedExcluded: summary.reservedExcluded,
+                retain,
+            },
+            "Asset GC DRY-RUN: plan computed, nothing deleted",
+        );
+        return summary;
+    }
 
     if (toDelete.length === 0) {
         log.info(

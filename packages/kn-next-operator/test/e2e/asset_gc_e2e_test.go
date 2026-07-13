@@ -159,9 +159,28 @@ const (
 	gcBidReapB    = "bid-03-reap"
 	gcBidNew      = "bid-04-new"
 
+	// gcBidCanaryReap is seeded FRESH for the canary-pin leg (#264 part 2):
+	// marked, unpinned, out-of-window — the reap that proves the two-target
+	// prune actually pruned (the live-set protection is not a no-op).
+	gcBidCanaryReap = "bid-05-canary-reap"
+
 	// gcMarkerFile is the ADR-0011 marker object name (#264): the pruner only
 	// ever reaps prefixes carrying `<app>/_next/static/<id>/.knext-build`.
 	gcMarkerFile = ".knext-build"
+
+	// gcPinnedAppName is the SECOND NextApp of the pin+wiped-status leg
+	// (#264 part 2) — its own app-scoped object-store prefix, so the skip
+	// proof cannot interfere with the main app's assertions.
+	gcPinnedAppName = "gc-e2e-pinned"
+)
+
+// The pinned-with-empty-status leg's seeded build-ids: all marked, so with
+// assetRetention=1 a window-only prune WOULD reap the two oldest — the skip
+// assertion has teeth.
+const (
+	gcPinnedBidOld1 = "bid-p1"
+	gcPinnedBidOld2 = "bid-p2"
+	gcPinnedBidNew  = "bid-p3"
 )
 
 // gcAppNamespace is fresh and randomly-suffixed per run (same hygiene
@@ -222,11 +241,11 @@ func gcSeedObject(key string) error {
 	return err
 }
 
-// gcListAppKeys returns every key under the app prefix, as a set.
-func gcListAppKeys(g Gomega) map[string]bool {
+// gcListKeysUnder returns every key under the given app prefix, as a set.
+func gcListKeysUnder(g Gomega, appName string) map[string]bool {
 	out, err := gcAWS("s3api", "list-objects-v2",
 		"--bucket", gcBucket,
-		"--prefix", gcAppName+"/",
+		"--prefix", appName+"/",
 		"--query", "Contents[].Key",
 		"--output", "text")
 	g.Expect(err).NotTo(HaveOccurred(), out)
@@ -238,6 +257,11 @@ func gcListAppKeys(g Gomega) map[string]bool {
 		keys[tok] = true
 	}
 	return keys
+}
+
+// gcListAppKeys returns every key under the main app's prefix, as a set.
+func gcListAppKeys(g Gomega) map[string]bool {
+	return gcListKeysUnder(g, gcAppName)
 }
 
 // gcKeysWithPrefix filters a key set down to those under prefix.
@@ -319,6 +343,30 @@ spec:
     minScale: 0
     maxScale: 2
 `, gcAppName, gcAppNamespace, gcAppImage, buildIDLine, target)
+}
+
+// gcPinnedAppManifest renders the SECOND NextApp of the pin+wiped-status leg
+// (#264 part 2): spec.traffic.revisionName set at CREATION, pointing at a
+// revision that does not exist. See the spec body for why this is the honest,
+// deterministic way to hold "spec pins a revision while status.currentTraffic
+// is empty" on a real cluster.
+func gcPinnedAppManifest(pinnedRevision string) string {
+	return fmt.Sprintf(`apiVersion: apps.kn-next.dev/v1alpha1
+kind: NextApp
+metadata:
+  name: %s
+  namespace: %s
+spec:
+  image: %q
+  healthCheckPath: /
+  env:
+    TARGET: "pinned"
+  scaling:
+    minScale: 0
+    maxScale: 2
+  traffic:
+    revisionName: %q
+`, gcPinnedAppName, gcAppNamespace, gcAppImage, pinnedRevision)
 }
 
 // gcMinioManifest renders the in-cluster MinIO stack: creds in a K8s Secret
@@ -790,6 +838,173 @@ var _ = Describe("asset retention GC against a live cluster (ADR-0011)", Ordered
 			gcAppName + "/endpoint-canary.txt",
 		} {
 			Expect(keys).To(HaveKey(key), "bare <app>/ key %s must never be touched by the GC", key)
+		}
+	})
+
+	It("canary pin (#264 part 2): a TWO-target status.currentTraffic protects BOTH revisions' builds through a real prune — with --dry-run proven first", func() {
+		By("seeding a fresh marked, unpinned, out-of-window build prefix so the canary-run prune has something REAL to reap")
+		for _, f := range []string{"_buildManifest.js", "_ssgManifest.js", gcMarkerFile} {
+			Expect(gcSeedObject(gcStaticPrefix(gcBidCanaryReap) + f)).To(Succeed())
+		}
+
+		By("splitting traffic via the REAL CLI: kn-next rollback --to " + gcBidPinned + "'s revision --canary 40")
+		Eventually(func(g Gomega) {
+			res := gcRunCLI("rollback", gcAppName,
+				"--to", rev2Name, "--canary", "40", "-n", gcAppNamespace)
+			g.Expect(res.ExitCode).To(Equal(0),
+				"rollback --canary must exit 0\nstdout:\n%s\nstderr:\n%s", res.Stdout, res.Stderr)
+		}, gcAssertTimeout, gcAssertPoll).Should(Succeed())
+
+		By("waiting until status.currentTraffic carries EXACTLY the two targets: pinned 60% + latest-ready 40%")
+		// Load-bearing for the leg's whole point: the GC's live set must be
+		// resolved from a MULTI-target status, not the single-pin case the
+		// previous spec already proved.
+		Eventually(func(g Gomega) {
+			targets := gcCurrentTraffic(g)
+			g.Expect(targets).To(HaveLen(2), "expected a two-target canary split, got %+v", targets)
+			byRev := map[string]int64{}
+			for _, t := range targets {
+				byRev[t.RevisionName] = t.Percent
+			}
+			g.Expect(byRev).To(HaveKeyWithValue(rev2Name, int64(60)),
+				"the pinned revision must hold 100-canary percent")
+			g.Expect(byRev).To(HaveKeyWithValue(rev3Name, int64(40)),
+				"latest-ready must hold the canary percent")
+		}, gcAssertTimeout, gcAssertPoll).Should(Succeed())
+
+		assertEndpointIsTestMinIO()
+
+		By("DRY-RUN first: kn-next gc --dry-run prints the full plan and deletes NOTHING")
+		keysBefore := gcListAppKeys(Default)
+		res := gcRunCLI("gc", "--dry-run", "--build-id", gcBidNew, "-n", gcAppNamespace)
+		Expect(res.ExitCode).To(Equal(0),
+			"gc --dry-run must exit 0\nstdout:\n%s\nstderr:\n%s", res.Stdout, res.Stderr)
+		Expect(res.Stdout).To(ContainSubstring("DRY-RUN"),
+			"gc --dry-run must announce itself")
+		Expect(res.Stdout).To(ContainSubstring("nothing was deleted"))
+		Expect(res.Stdout).To(ContainSubstring(gcBidCanaryReap),
+			"the dry-run plan must NAME the would-reap candidate")
+		keysAfterDry := gcListAppKeys(Default)
+		Expect(keysAfterDry).To(HaveLen(len(keysBefore)),
+			"gc --dry-run must not delete a single object")
+		Expect(gcKeysWithPrefix(keysAfterDry, gcStaticPrefix(gcBidCanaryReap))).To(HaveLen(3),
+			"the would-reap candidate must be untouched by --dry-run")
+
+		By("running the REAL CLI: kn-next gc --build-id " + gcBidNew + " under the two-target split")
+		res = gcRunCLI("gc", "--build-id", gcBidNew, "-n", gcAppNamespace)
+		Expect(res.ExitCode).To(Equal(0),
+			"gc must exit 0\nstdout:\n%s\nstderr:\n%s", res.Stdout, res.Stderr)
+		Expect(res.Stdout).To(ContainSubstring("gc: completed"),
+			"gc must report a completed prune")
+		// The completion report must name BOTH protected live revisions.
+		Expect(res.Stdout).To(ContainSubstring(rev2Name))
+		Expect(res.Stdout).To(ContainSubstring(rev3Name))
+
+		By("asserting BOTH live builds survive AND the unpinned candidate was reaped (the prune was real)")
+		keys := gcListAppKeys(Default)
+		Expect(gcKeysWithPrefix(keys, gcStaticPrefix(gcBidPinned))).To(HaveLen(3),
+			"the canary-PINNED old revision's build must survive the two-target live set")
+		Expect(gcKeysWithPrefix(keys, gcStaticPrefix(gcBidNew))).To(HaveLen(3),
+			"the latest-ready revision's build must survive (window + live)")
+		Expect(gcKeysWithPrefix(keys, gcStaticPrefix(gcBidCanaryReap))).To(BeEmpty(),
+			"the unpinned out-of-window candidate must be reaped — proving the live-set protection held through a REAL prune, not a no-op")
+		// The marker-inversion + reserved-dir guarantees keep holding.
+		Expect(gcKeysWithPrefix(keys, gcStaticPrefix(gcBidUnmarked))).To(HaveLen(2),
+			"the unmarked prefix must keep surviving every prune")
+		for _, seg := range []string{"chunks", "css", "media"} {
+			Expect(gcKeysWithPrefix(keys, gcStaticPrefix(seg))).NotTo(BeEmpty(),
+				"reserved _next/static/%s/ must never be reaped", seg)
+		}
+	})
+
+	It("live pin+wiped-status (#264 part 2): a NextApp pinning a revision while status.currentTraffic is empty ⇒ gc SKIPS loudly, ZERO deletions", func() {
+		// MECHANISM (the least-artificial way to hold this state on a real
+		// cluster, deliberately chosen):  create a SECOND NextApp whose
+		// spec.traffic.revisionName points at a revision that does not exist.
+		// That is a REAL, user-reachable state the operator itself names
+		// (ADR-0014 PinnedRevisionNotFound — "the pin outlives the revision"):
+		// e.g. a GitOps re-apply of a pinned CR, where the status subresource
+		// is never persisted in Git and the recreated ksvc's revisions get NEW
+		// names, so the old pin can never resolve. Knative keeps the route
+		// unprogrammed (RevisionMissing) ⇒ ksvc status.traffic stays empty ⇒
+		// the operator reconciles status with an EMPTY currentTraffic while
+		// the spec pin stands — deterministically, for as long as the spec
+		// needs. Alternatives rejected: patching the status subresource with
+		// the suite's admin rights RACES the operator's reconcile loop (it
+		// re-populates status on the very watch event the patch fires) and
+		// proves an artificial state; scaling the operator down to freeze
+		// status mutates cluster state OUTSIDE the throwaway namespace,
+		// violating the suite's blast-radius contract in existing-cluster mode.
+		pinnedRevision := gcPinnedAppName + "-00042" // never created
+		pinnedStatic := func(seg string) string {
+			return gcPinnedAppName + "/_next/static/" + seg + "/"
+		}
+
+		By("rendering a second throwaway app dir for " + gcPinnedAppName)
+		pinnedDir, err := os.MkdirTemp("", "gc-e2e-pinned-*")
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(func() { _ = os.RemoveAll(pinnedDir) })
+		pinnedConfig := fmt.Sprintf(`export default {
+    name: %q,
+    registry: "registry.invalid/gc-e2e",
+    storage: {
+        provider: "s3",
+        bucket: %q,
+        publicUrl: %q,
+        assetRetention: 1,
+    },
+};
+`, gcPinnedAppName, gcBucket, endpointURL+"/"+gcBucket)
+		Expect(os.WriteFile(filepath.Join(pinnedDir, "kn-next.config.ts"), []byte(pinnedConfig), 0o644)).
+			To(Succeed())
+
+		By("seeding MARKED build prefixes a window-only prune WOULD reap (retain=1) — the skip assertion has teeth")
+		for _, bid := range []string{gcPinnedBidOld1, gcPinnedBidOld2, gcPinnedBidNew} {
+			for _, f := range []string{"_buildManifest.js", "_ssgManifest.js", gcMarkerFile} {
+				Expect(gcSeedObject(pinnedStatic(bid) + f)).To(Succeed())
+			}
+		}
+
+		By("creating the NextApp with spec.traffic.revisionName pinned to the nonexistent " + pinnedRevision)
+		Eventually(func(g Gomega) {
+			g.Expect(utils.ApplyManifest(gcPinnedAppManifest(pinnedRevision))).To(Succeed())
+		}, 2*time.Minute, 10*time.Second).Should(Succeed())
+
+		By("waiting until the operator HAS reconciled it (Ready condition written) — the empty currentTraffic is the operator's observed truth, not a not-yet-reconciled blank")
+		Eventually(func(g Gomega) {
+			out, err := utils.Kubectl("get", "nextapp", gcPinnedAppName, "-n", gcAppNamespace,
+				"-o", "jsonpath={.status.conditions[?(@.type=='Ready')].status}")
+			g.Expect(err).NotTo(HaveOccurred(), out)
+			g.Expect(strings.TrimSpace(out)).NotTo(BeEmpty(),
+				"operator has not written status.conditions for the pinned NextApp yet")
+		}, gcAssertTimeout, gcAssertPoll).Should(Succeed())
+
+		By("asserting the premise: spec pins a revision AND status.currentTraffic is EMPTY")
+		out, err := utils.Kubectl("get", "nextapp", gcPinnedAppName, "-n", gcAppNamespace,
+			"-o", "jsonpath={.status.currentTraffic}")
+		Expect(err).NotTo(HaveOccurred(), out)
+		Expect(strings.TrimSpace(out)).To(BeEmpty(),
+			"premise broken: status.currentTraffic must be EMPTY while the spec pin cannot resolve")
+
+		assertEndpointIsTestMinIO()
+
+		By("running the REAL CLI: kn-next gc --build-id " + gcPinnedBidNew + " against the pinned/empty-status app")
+		res, err := utils.RunCLIInDir(pinnedDir, "gc", "--build-id", gcPinnedBidNew, "-n", gcAppNamespace)
+		Expect(err).NotTo(HaveOccurred(), "failed to spawn the CLI at all")
+		Expect(res.ExitCode).To(Equal(0),
+			"gc must exit 0 on the fail-safe skip\nstdout:\n%s\nstderr:\n%s", res.Stdout, res.Stderr)
+		Expect(res.Stdout).To(ContainSubstring("SKIPPED (fail-safe over-keep)"),
+			"gc must report the fail-safe skip")
+		Expect(res.Stdout).To(ContainSubstring("pinned-with-empty-status"),
+			"the skip must carry the machine-greppable reason token")
+		Expect(res.Stdout).To(ContainSubstring(pinnedRevision),
+			"the skip report must NAME the pinned revision")
+
+		By("asserting ZERO deletions: every window-reapable prefix survives intact")
+		keys := gcListKeysUnder(Default, gcPinnedAppName)
+		for _, bid := range []string{gcPinnedBidOld1, gcPinnedBidOld2, gcPinnedBidNew} {
+			Expect(gcKeysWithPrefix(keys, pinnedStatic(bid))).To(HaveLen(3),
+				"prefix %s must be untouched by the skipped GC", bid)
 		}
 	})
 })
