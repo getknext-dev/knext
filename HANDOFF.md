@@ -64,7 +64,10 @@ Repo clean (0 uncommitted, 0 open PRs). Scorecard history: `docs/SCORECARD.md`
 **Public docs site** (getknext-dev/docs, Fumadocs) is LIVE + current at
 `http://knext-docs.knext-docs.51.170.86.139.sslip.io` (Knative Service `knext-docs` in ns
 `knext-docs`, rev `knext-docs-00002`), with the scale-zero-pg SDK/extensions/reliability
-pages. **Redeploy:** the docs-site OKE deploy artifacts are now committed to getknext-dev/docs
+pages. **Pending publish:** the **write-heavy tuning guide** (docs PR **#14**, merged to
+`main` 2026-07-14 — mirrors repo `docs/tuning-write-heavy.md`/#104) is NOT yet on the live
+site; it goes live on the next docs redeploy (one `deploy/oke/README.md` rebuild-and-roll —
+no code change, purely additive page). **Redeploy:** the docs-site OKE deploy artifacts are now committed to getknext-dev/docs
 (`Dockerfile.oke`, `deploy/oke/docs-ksvc.yaml` [the authoritative Knative Service, digest-pinned],
 `deploy/oke/README.md` with the steps) — a fresh machine can rebuild the site from the repo:
 build `--platform linux/amd64`, push to OCIR `…/knext-docs`, ensure the `ocir-pull` secret in ns
@@ -73,8 +76,11 @@ build `--platform linux/amd64`, push to OCIR `…/knext-docs`, ensure the `ocir-
 ## 3. OPEN DECISIONS for the owner (nothing else is autonomously blocked)
 - **Tag `v1.4.x` + convene the blind-trio scorecard review** — the whole reliability arc
   above merged UNBLESSED since v1.3.0; the loop's own release-tag trigger review is overdue.
-- **Docs site PR #11** (getknext-dev/docs) — reviewed, builds (35 pages), accurate; awaiting
-  **merge + OKE redeploy** (public-facing publish).
+- **Docs site redeploy** — PR #11 (SDK/extensions/reliability) is merged + LIVE (rev
+  `knext-docs-00002`). PR **#14** (write-heavy tuning guide) is merged to `main` but NOT yet
+  live; trigger one docs rebuild-and-roll (`getknext-dev/docs` `deploy/oke/README.md`) to
+  publish it — additive page, no code change. Low-risk; deferred autonomously only to avoid a
+  half-deploy at the edge of an OKE auth window.
 - **#182** — expose compute_ctl `:3080` + a JWT to **live-enable the `/status` gate**
   (also validates #158's closure; drill: assert first post-cold-wake conn = scram, never md5).
 - **#118** — policy-capable CNI (makes `apps-compute-ingress` NetworkPolicy enforce);
