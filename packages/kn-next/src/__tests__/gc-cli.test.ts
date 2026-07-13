@@ -18,7 +18,7 @@ import { describe, expect, it, vi } from "vitest";
  * asset-gc.test.ts; the live end-to-end proof by the e2e_gc kind suite.
  */
 
-import { parseGcArgs, runAssetGC } from "../cli/gc";
+import { parseGcArgs, renderGcReport, runAssetGC } from "../cli/gc";
 import type { KnativeNextConfig } from "../config";
 
 function makeConfig(name = "shop"): KnativeNextConfig {
@@ -83,6 +83,36 @@ describe("runAssetGC", () => {
             expect.anything(),
             ["bid-a"],
             "bid-d",
+            { dryRun: false },
+        );
+    });
+
+    it("--dry-run (#264 part 2): dryRun flows to the prune boundary; the READ-ONLY cluster reads still run", () => {
+        const calls: string[][] = [];
+        const exec = (argv: readonly string[]): string => {
+            calls.push([...argv]);
+            if (argv.includes("nextapp")) return trafficJson(["shop-00002"]);
+            return "bid-a";
+        };
+        const prune = vi.fn();
+
+        const res = runAssetGC(
+            makeConfig(),
+            "prod",
+            "bid-d",
+            exec,
+            prune,
+            true,
+        );
+
+        expect(res.pruned).toBe(true);
+        // The read-only resolution is IDENTICAL under dry-run (same argv).
+        expect(calls).toHaveLength(2);
+        expect(prune).toHaveBeenCalledWith(
+            expect.anything(),
+            ["bid-a"],
+            "bid-d",
+            { dryRun: true },
         );
     });
 
@@ -136,7 +166,9 @@ describe("runAssetGC", () => {
         const res = runAssetGC(makeConfig(), "prod", "bid-d", exec, prune);
 
         expect(res.pruned).toBe(true);
-        expect(prune).toHaveBeenCalledWith(expect.anything(), [], "bid-d");
+        expect(prune).toHaveBeenCalledWith(expect.anything(), [], "bid-d", {
+            dryRun: false,
+        });
     });
 
     it("FAIL-SAFE (#264): spec.traffic.revisionName pinned but status.currentTraffic empty ⇒ NO prune (over-keep)", () => {
@@ -211,20 +243,113 @@ describe("parseGcArgs", () => {
         expect(parseGcArgs(["--build-id", "bid-d", "-n", "prod"])).toEqual({
             namespace: "prod",
             buildId: "bid-d",
+            dryRun: false,
         });
         expect(parseGcArgs(["--namespace", "prod"])).toEqual({
             namespace: "prod",
             buildId: "",
+            dryRun: false,
         });
     });
 
-    it("defaults: namespace=default, empty build-id (window falls back to listing order)", () => {
-        expect(parseGcArgs([])).toEqual({ namespace: "default", buildId: "" });
+    it("defaults: namespace=default, empty build-id (window falls back to listing order), dryRun off", () => {
+        expect(parseGcArgs([])).toEqual({
+            namespace: "default",
+            buildId: "",
+            dryRun: false,
+        });
+    });
+
+    it("--dry-run (#264 part 2) composes with --build-id and -n, in any order", () => {
+        expect(
+            parseGcArgs(["--dry-run", "--build-id", "bid-d", "-n", "prod"]),
+        ).toEqual({ namespace: "prod", buildId: "bid-d", dryRun: true });
+        expect(parseGcArgs(["--build-id", "bid-d", "--dry-run"])).toEqual({
+            namespace: "default",
+            buildId: "bid-d",
+            dryRun: true,
+        });
     });
 
     it("is STRICT: unknown flags / dangling values are hard errors (gc DELETES objects)", () => {
         expect(() => parseGcArgs(["--buildid", "x"])).toThrow(/unknown flag/);
         expect(() => parseGcArgs(["--build-id"])).toThrow(/requires a value/);
         expect(() => parseGcArgs(["stray"])).toThrow(/unexpected positional/);
+    });
+
+    it("stays STRICT around --dry-run: near-miss spellings hard-error, never a silent wet run", () => {
+        expect(() => parseGcArgs(["--dryrun"])).toThrow(/unknown flag/);
+        expect(() => parseGcArgs(["--dry-run=true"])).toThrow(/unknown flag/);
+        expect(() => parseGcArgs(["--dry_run"])).toThrow(/unknown flag/);
+    });
+});
+
+describe("renderGcReport (#264 part 2 — the synchronous fd-1 outcome line)", () => {
+    const summary = {
+        reaped: ["b2", "b3"],
+        keptUnmarked: ["turbo"],
+        keptWindow: ["b4"],
+        keptLive: ["b1"],
+        reservedExcluded: ["chunks", "css"],
+        dryRun: false,
+    };
+
+    it("dry-run: prints the FULL reap/keep plan (reap candidates, window-kept, live-kept, unmarked-kept, reserved-excluded) and that NOTHING was deleted", () => {
+        const text = renderGcReport("shop", "prod", {
+            pruned: true,
+            liveRevisions: ["shop-00007"],
+            summary: { ...summary, dryRun: true },
+        });
+        expect(text).toContain("DRY-RUN");
+        expect(text).toContain("would reap");
+        for (const tok of [
+            "b2",
+            "b3",
+            "b4",
+            "b1",
+            "turbo",
+            "chunks",
+            "css",
+            "shop-00007",
+        ]) {
+            expect(text).toContain(tok);
+        }
+        expect(text.toLowerCase()).toContain("nothing was deleted");
+        // A dry-run must never masquerade as a completed wet prune.
+        expect(text).not.toContain("gc: completed");
+    });
+
+    it("wet run: keeps the `gc: completed` contract with reaped ids + the loud unmarked-keep note", () => {
+        const text = renderGcReport("shop", "prod", {
+            pruned: true,
+            liveRevisions: ["shop-00007"],
+            summary,
+        });
+        expect(text).toContain("gc: completed for shop (ns prod)");
+        expect(text).toContain("b2");
+        expect(text).toContain("turbo");
+        expect(text).not.toContain("DRY-RUN");
+    });
+
+    it("skip lines carry the machine-greppable reason token (pinned-with-empty-status / unresolvable-live-build-id)", () => {
+        const pinned = renderGcReport("shop", "prod", {
+            pruned: false,
+            liveRevisions: [],
+            skipReason: "pinned-with-empty-status",
+            pinnedRevision: "shop-00007",
+        });
+        expect(pinned).toContain("SKIPPED (fail-safe over-keep)");
+        expect(pinned).toContain("pinned-with-empty-status");
+        expect(pinned).toContain("shop-00007");
+        expect(pinned).toContain("Nothing was deleted");
+
+        const unresolvable = renderGcReport("shop", "prod", {
+            pruned: false,
+            liveRevisions: ["shop-00002"],
+            skipReason: "unresolvable-live-build-id",
+        });
+        expect(unresolvable).toContain("SKIPPED (fail-safe over-keep)");
+        expect(unresolvable).toContain("unresolvable-live-build-id");
+        expect(unresolvable).toContain("shop-00002");
     });
 });

@@ -363,6 +363,26 @@ describe("pruneOldBuilds", () => {
         const providers: StorageProvider[] = ["gcs", "s3", "minio", "azure"];
         it.each(
             providers,
+        )("provider=%s: --dry-run issues ZERO delete invocations", (provider) => {
+            runCaptureMock.mockReturnValue(
+                STATIC_LISTERS[provider](
+                    "b",
+                    "shop",
+                    marked(["b1", "b2", "b3", "b4"]),
+                ),
+            );
+            const summary = pruneOldBuilds(
+                makeConfig(provider, "b", "shop", 1),
+                [],
+                "b4",
+                { dryRun: true },
+            );
+            expect(runDeleteMock).not.toHaveBeenCalled();
+            expect(summary.dryRun).toBe(true);
+            expect(summary.reaped).toEqual(["b1", "b2", "b3"]);
+        });
+        it.each(
+            providers,
         )("provider=%s: reaps ONLY marker-carrying aged prefixes; the unmarked prefix survives", (provider) => {
             const bucket = "b";
             const app = "shop";
@@ -387,6 +407,96 @@ describe("pruneOldBuilds", () => {
             expect(deleted).not.toContain("/new-marked/");
             expect(summary.reaped).toEqual(["old-marked"]);
             expect(summary.keptUnmarked).toEqual(["old-unmarked"]);
+        });
+    });
+
+    /**
+     * #264 part 2 — `--dry-run`: the FULL reap/keep plan is computed exactly
+     * as a wet run would, but NO delete ever crosses the exec boundary. The
+     * argv-level proof: the ONLY exec'd command is the read-only listing.
+     */
+    describe("--dry-run (#264 part 2): full plan, ZERO delete invocations", () => {
+        /** b1 live, b4 newest; turbo unmarked; chunks/css reserved (one with a hostile marker). */
+        const prefixes: SeededPrefix[] = [
+            ...marked(["b1", "b2", "b3", "b4"]),
+            { id: "turbo", marker: false },
+            { id: "chunks", marker: true }, // hostile marker — reserved wins
+            { id: "css", marker: false },
+        ];
+
+        it("argv-pinned: the ONLY exec is the read-only listing — the delete boundary is never touched", () => {
+            const bucket = "b";
+            const app = "shop";
+            runCaptureMock.mockReturnValue(
+                STATIC_LISTERS.gcs(bucket, app, prefixes),
+            );
+
+            const summary = pruneOldBuilds(
+                makeConfig("gcs", bucket, app, 1),
+                ["b1"],
+                "b4",
+                { dryRun: true },
+            );
+
+            // THE bound assertion: zero delete invocations.
+            expect(runDeleteMock).not.toHaveBeenCalled();
+            // Exactly one exec crossed the boundary, and it is the read-only
+            // recursive listing — pinned argv, not a substring check.
+            expect(runCaptureMock.mock.calls).toEqual([
+                [["gsutil", "ls", "-r", `gs://${bucket}/${app}/_next/static/`]],
+            ]);
+
+            // The full plan, every bucket named:
+            expect(summary.dryRun).toBe(true);
+            expect(summary.reaped).toEqual(["b2", "b3"]); // would-reap, oldest-first
+            expect(summary.keptWindow).toEqual(["b4"]); // retain=1 ⇒ newest only
+            expect(summary.keptLive).toEqual(["b1"]); // live-set rule alone
+            expect(summary.keptUnmarked).toEqual(["turbo"]);
+            expect([...summary.reservedExcluded].sort()).toEqual([
+                "chunks",
+                "css",
+            ]);
+        });
+
+        it("the dry-run plan EQUALS the wet run's actions on the same listing (plan fidelity)", () => {
+            const bucket = "b";
+            const app = "shop";
+            runCaptureMock.mockReturnValue(
+                STATIC_LISTERS.gcs(bucket, app, prefixes),
+            );
+
+            const dry = pruneOldBuilds(
+                makeConfig("gcs", bucket, app, 1),
+                ["b1"],
+                "b4",
+                { dryRun: true },
+            );
+            expect(runDeleteMock).not.toHaveBeenCalled();
+
+            const wet = pruneOldBuilds(
+                makeConfig("gcs", bucket, app, 1),
+                ["b1"],
+                "b4",
+            );
+
+            // Same selection, same keep buckets — the plan is not a parallel
+            // implementation that can drift from the real prune.
+            expect(wet.dryRun).toBe(false);
+            expect(wet.reaped).toEqual(dry.reaped);
+            expect(wet.keptWindow).toEqual(dry.keptWindow);
+            expect(wet.keptLive).toEqual(dry.keptLive);
+            expect(wet.keptUnmarked).toEqual(dry.keptUnmarked);
+            expect(wet.reservedExcluded).toEqual(dry.reservedExcluded);
+
+            // And the wet run actually deleted EXACTLY the dry-run candidates.
+            const deletedPrefixes = runDeleteMock.mock.calls
+                .map((c) => (c[0] as string[]).find((t) => t.includes("_next")))
+                .filter(Boolean) as string[];
+            expect(deletedPrefixes).toEqual(
+                dry.reaped.map(
+                    (id) => `gs://${bucket}/${app}/_next/static/${id}/`,
+                ),
+            );
         });
     });
 });

@@ -59,16 +59,35 @@ function isLive(buildId: string, liveBuildIds: readonly string[]): boolean {
 }
 
 /**
- * Returns the build-ids that are safe to delete, oldest-first. Pure: no I/O.
- *
- * Guarantees:
+ * The full reap/keep partition of the candidate set (#264 part 2 — the
+ * `kn-next gc --dry-run` plan). Every candidate lands in EXACTLY one bucket;
+ * `selectBuildsToDelete` delegates here, so the printed plan and the actual
+ * reap set share one implementation and cannot drift.
+ */
+export interface BuildClassification {
+    /** Safe to delete, oldest-first (identical to `selectBuildsToDelete`). */
+    reap: string[];
+    /** Kept by the retain window (the newest `max(retain, 1)`), newest-first. */
+    keptWindow: string[];
+    /**
+     * Kept ONLY by the live-set rule (outside the window but exactly equal to
+     * a resolved live build-id), newest-first. A live id inside the window is
+     * counted as window-kept, never double-counted here.
+     */
+    keptLive: string[];
+}
+
+/**
+ * Partitions the candidate build-ids into reap / window-kept / live-kept.
+ * Pure: no I/O. Guarantees (shared with {@link selectBuildsToDelete}):
  *   - keeps the newest `max(retain, 1)` build-ids,
  *   - keeps any build-id EXACTLY in {@link SelectBuildsInput.liveBuildIds},
- *   - never returns the only/last build,
+ *   - never reaps the only/last build (it is window-kept),
  *   - drops empty/falsy build-ids (never proposes an unscoped delete),
- *   - de-dupes the input and orders the result deterministically (oldest-first).
+ *   - de-dupes the input and orders the reap set deterministically
+ *     (oldest-first).
  */
-export function selectBuildsToDelete(input: SelectBuildsInput): string[] {
+export function classifyBuilds(input: SelectBuildsInput): BuildClassification {
     const { remoteBuildIds, timestamps, liveBuildIds } = input;
     const retain = Math.max(1, input.retain | 0);
 
@@ -82,19 +101,29 @@ export function selectBuildsToDelete(input: SelectBuildsInput): string[] {
         (a, b) => (timestamps[b] ?? 0) - (timestamps[a] ?? 0),
     );
 
-    // Defensive: never delete the only remaining build.
-    if (byNewest.length <= 1) {
-        return [];
-    }
-
+    // Defensive: never delete the only remaining build — it is window-kept
+    // (retain is clamped to >= 1, so the window always covers it).
     const windowKept = new Set(byNewest.slice(0, retain));
 
-    const deletable = byNewest.filter(
-        (id) => !windowKept.has(id) && !isLive(id, liveBuildIds),
-    );
+    const out: BuildClassification = { reap: [], keptWindow: [], keptLive: [] };
+    for (const id of byNewest) {
+        if (windowKept.has(id)) out.keptWindow.push(id);
+        else if (isLive(id, liveBuildIds)) out.keptLive.push(id);
+        else out.reap.push(id);
+    }
 
-    // Return oldest-first for deterministic, low-surprise deletion order.
-    return deletable.reverse();
+    // Reap oldest-first for deterministic, low-surprise deletion order.
+    out.reap.reverse();
+    return out;
+}
+
+/**
+ * Returns the build-ids that are safe to delete, oldest-first. Pure: no I/O.
+ * Thin façade over {@link classifyBuilds} (the single selection authority);
+ * see it for the guarantees.
+ */
+export function selectBuildsToDelete(input: SelectBuildsInput): string[] {
+    return classifyBuilds(input).reap;
 }
 
 /**

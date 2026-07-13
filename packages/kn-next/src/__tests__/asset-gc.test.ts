@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+    classifyBuilds,
     parseLiveRevisionNames,
     resolveLiveBuildIds,
     selectBuildsToDelete,
@@ -241,5 +242,62 @@ describe("resolveLiveBuildIds", () => {
         const res = resolveLiveBuildIds([], () => "");
         expect(res.ok).toBe(true);
         expect(res.ok && res.buildIds).toEqual([]);
+    });
+});
+
+/**
+ * #264 part 2 — `classifyBuilds` is the single source of truth behind BOTH
+ * `selectBuildsToDelete` (the reap set) and the `--dry-run` plan's keep
+ * buckets. Every candidate lands in EXACTLY one bucket; the reap set can never
+ * drift from the printed plan because the selector delegates to it.
+ */
+describe("classifyBuilds (#264 part 2 — dry-run keep buckets)", () => {
+    it("partitions every candidate into exactly one bucket: reap / keptWindow / keptLive", () => {
+        const res = classifyBuilds({
+            remoteBuildIds: ["a", "b", "c", "d"],
+            timestamps: { a: 1, b: 2, c: 3, d: 4 },
+            liveBuildIds: ["a"],
+            retain: 1,
+        });
+        expect(res.keptWindow).toEqual(["d"]);
+        expect(res.keptLive).toEqual(["a"]);
+        expect(res.reap).toEqual(["b", "c"]); // oldest-first
+        // Total + disjoint: the three buckets are a partition of the input.
+        const all = [...res.reap, ...res.keptWindow, ...res.keptLive].sort();
+        expect(all).toEqual(["a", "b", "c", "d"]);
+    });
+
+    it("a live id INSIDE the window is window-kept, never double-counted as live-kept", () => {
+        const res = classifyBuilds({
+            remoteBuildIds: ["a", "b", "c"],
+            timestamps: { a: 1, b: 2, c: 3 },
+            liveBuildIds: ["c"],
+            retain: 2,
+        });
+        expect(res.keptWindow).toEqual(["c", "b"]); // newest-first
+        expect(res.keptLive).toEqual([]);
+        expect(res.reap).toEqual(["a"]);
+    });
+
+    it("selectBuildsToDelete IS classifyBuilds().reap (no parallel selector to drift)", () => {
+        const input = {
+            remoteBuildIds: ["a", "b", "c", "d", "e"],
+            timestamps: { a: 1, b: 2, c: 3, d: 4, e: 5 },
+            liveBuildIds: ["b"],
+            retain: 2,
+        };
+        expect(selectBuildsToDelete(input)).toEqual(classifyBuilds(input).reap);
+    });
+
+    it("the only/last build is window-kept, never reaped", () => {
+        const res = classifyBuilds({
+            remoteBuildIds: ["solo"],
+            timestamps: { solo: 1 },
+            liveBuildIds: [],
+            retain: 1,
+        });
+        expect(res.reap).toEqual([]);
+        expect(res.keptWindow).toEqual(["solo"]);
+        expect(res.keptLive).toEqual([]);
     });
 });
