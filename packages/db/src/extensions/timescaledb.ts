@@ -55,8 +55,9 @@ export interface HypertableOptions {
   /** The time / partitioning column — the hypertable's range dimension. */
   by: string;
   /**
-   * Chunk time interval, e.g. `'7 days'`. Emitted as
-   * `chunk_time_interval => INTERVAL '<value>'`. Omit to accept TimescaleDB's default.
+   * Chunk (partition) time interval, e.g. `'7 days'`. Emitted inside the
+   * dimension builder as `by_range('<col>', INTERVAL '<value>')`. Omit to
+   * accept TimescaleDB's default.
    */
   chunkInterval?: string;
   /**
@@ -77,24 +78,30 @@ export interface HypertableOptions {
  * TimescaleDB hypertable. Run it in the migration **after** the `CREATE TABLE` and
  * after {@link createTimescaleExtension}.
  *
+ * Emits the **modern dimension-builder form** — `by_range('<col>'[, INTERVAL])`
+ * — introduced in TimescaleDB 2.13 and the ONLY interface on 2.24+ (the legacy
+ * `create_hypertable(regclass, name, ...)` signature was removed there and
+ * hard-errors: #259). **Minimum supported TimescaleDB: 2.13.** There is
+ * deliberately no legacy escape hatch — a new SDK has no pre-2.13 installed base.
+ *
  * ```ts
  * import { hypertable } from '@knext/db/schema';
  * export const metrics = pgTable('metrics', {
  *   ts: timestamp('ts', { withTimezone: true }).notNull(),
  *   value: doublePrecision('value').notNull(),
  * });
- * // → SELECT create_hypertable('metrics', 'ts',
- * //     chunk_time_interval => INTERVAL '7 days', if_not_exists => TRUE);
+ * // → SELECT create_hypertable('metrics', by_range('ts', INTERVAL '7 days'),
+ * //     if_not_exists => TRUE);
  * export const metricsHyper = hypertable(metrics, { by: 'ts', chunkInterval: '7 days' });
  * ```
  */
 export function hypertable(table: TableRef, options: HypertableOptions): string {
   const { by, chunkInterval, ifNotExists = true, migrateData = false } = options;
 
-  const args = [`'${tableName(table)}'`, `'${by}'`];
-  if (chunkInterval) {
-    args.push(`chunk_time_interval => INTERVAL '${chunkInterval}'`);
-  }
+  const dimension = chunkInterval
+    ? `by_range('${by}', INTERVAL '${chunkInterval}')`
+    : `by_range('${by}')`;
+  const args = [`'${tableName(table)}'`, dimension];
   if (migrateData) {
     args.push('migrate_data => TRUE');
   }

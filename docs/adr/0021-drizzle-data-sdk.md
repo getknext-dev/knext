@@ -92,6 +92,10 @@ Apps define schema in `src/db/schema.ts` with drizzle's `pgTable`, re-exported f
   `dropChunksPolicy` retention helper that generates a `drop_chunks()` call for the
   migration/CI to run (**not** a background policy — that cannot run on scale-to-zero).
   The helper docstring + guide state the compression/continuous-aggregate bound loudly.
+  **Minimum supported TimescaleDB: 2.13** (#259) — the emitter targets the modern
+  dimension-builder interface (`create_hypertable(<table>, by_range('<col>'[, INTERVAL]))`,
+  stable since 2.13 and the only interface on 2.24+, where the legacy
+  `create_hypertable(regclass, name, ...)` signature was removed). No legacy fork.
 - **pgvector** — re-export drizzle's `vector(n)` column + `hnsw`/`ivfflat` index
   helpers and a `<->`/`<=>` similarity query helper; the migration emits
   `CREATE EXTENSION vector`. **Gated on scale-zero-pg #178**: shipped as designed +
