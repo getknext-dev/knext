@@ -61,11 +61,11 @@ Repo clean (0 uncommitted, 0 open PRs). Scorecard history: `docs/SCORECARD.md`
 **Public docs site** (getknext-dev/docs, Fumadocs) is LIVE + current at
 `http://knext-docs.knext-docs.51.170.86.139.sslip.io` (Knative Service `knext-docs` in ns
 `knext-docs`, rev `knext-docs-00002`), with the scale-zero-pg SDK/extensions/reliability
-pages. **Handoff caveat:** the docs-site OKE deploy artifacts (`Dockerfile.oke`,
-`deploy/oke/docs-ksvc.yaml`) live **local/untracked** in `~/POC/docs-site` — they were never
-committed to getknext-dev/docs, so a fresh machine redeploying the site must recreate them
-(build `--platform linux/amd64`, push to OCIR `…/knext-docs`, needs the `ocir-pull` secret in
-ns `knext-docs`, serve via Kourier — no new LB). Worth committing them to the docs repo.
+pages. **Redeploy:** the docs-site OKE deploy artifacts are now committed to getknext-dev/docs
+(`Dockerfile.oke`, `deploy/oke/docs-ksvc.yaml` [the authoritative Knative Service, digest-pinned],
+`deploy/oke/README.md` with the steps) — a fresh machine can rebuild the site from the repo:
+build `--platform linux/amd64`, push to OCIR `…/knext-docs`, ensure the `ocir-pull` secret in ns
+`knext-docs`, apply the ksvc, serve via Kourier (no new LB). See that repo's `deploy/oke/README.md`.
 
 ## 3. OPEN DECISIONS for the owner (nothing else is autonomously blocked)
 - **Tag `v1.4.x` + convene the blind-trio scorecard review** — the whole reliability arc
