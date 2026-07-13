@@ -271,54 +271,9 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 	// app's EXTERNAL state (object-store prefix + Redis keyspace) — state that
 	// has no ownerRef and would otherwise leak across deploy/delete cycles.
 	// In-cluster children (ksvc/SA/PVC) keep using ownerRef GC.
-	if nextApp.DeletionTimestamp.IsZero() {
-		// Live object: ensure the finalizer(s) are present so we get a chance to
-		// run cleanup before the object is GC'd. Use a metadata Patch (not a
-		// full Update) so it does not race the later Status().Update: finalizers
-		// live in metadata, status in the /status subresource — patching one and
-		// updating the other touches disjoint resourceVersions and avoids the
-		// "object has been modified" conflict spam (#98).
-		patch := client.MergeFrom(nextApp.DeepCopy())
-		changed := controllerutil.AddFinalizer(&nextApp, ExternalCleanupFinalizer)
-		// db-cleanup finalizer only for apps that delegate a database (ADR-0006
-		// §3c): cross-ns AppDatabase teardown cannot ride an ownerRef.
-		if databaseEnabled(&nextApp) {
-			changed = controllerutil.AddFinalizer(&nextApp, DatabaseCleanupFinalizer) || changed
-		}
-		if changed {
-			if err := r.Patch(ctx, &nextApp, patch); err != nil {
-				return ctrl.Result{}, err
-			}
-		}
-	} else {
-		// Object is being deleted: run best-effort, bounded cleanup for each
-		// finalizer, then remove it so deletion can complete. Neither cleanup
-		// returns a hard error for an unreachable dependency (they log + Warning),
-		// so we never wedge the CR in Terminating (ADR-0006 §5).
-		if controllerutil.ContainsFinalizer(&nextApp, DatabaseCleanupFinalizer) {
-			if err := r.cleanupDatabase(ctx, &nextApp); err != nil {
-				return ctrl.Result{}, err
-			}
-			patch := client.MergeFrom(nextApp.DeepCopy())
-			controllerutil.RemoveFinalizer(&nextApp, DatabaseCleanupFinalizer)
-			if err := r.Patch(ctx, &nextApp, patch); err != nil {
-				return ctrl.Result{}, err
-			}
-		}
-		if controllerutil.ContainsFinalizer(&nextApp, ExternalCleanupFinalizer) {
-			if err := r.cleanupExternalState(ctx, &nextApp); err != nil {
-				return ctrl.Result{}, err
-			}
-			// Remove the finalizer via a metadata Patch (see the add path above)
-			// to keep the metadata vs status writes on disjoint subresources.
-			patch := client.MergeFrom(nextApp.DeepCopy())
-			controllerutil.RemoveFinalizer(&nextApp, ExternalCleanupFinalizer)
-			if err := r.Patch(ctx, &nextApp, patch); err != nil {
-				return ctrl.Result{}, err
-			}
-		}
+	if deleting, err := r.reconcileFinalizers(ctx, &nextApp); err != nil || deleting {
 		// Nothing more to reconcile for a deleting object.
-		return ctrl.Result{}, nil
+		return ctrl.Result{}, err
 	}
 
 	// NOTE (#98): we intentionally do NOT write an eager Reconciling=True status
@@ -458,33 +413,11 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 	}
 
 	// 2. Create/Update PVC if Bytecode Caching is enabled
-	if nextApp.Spec.Cache != nil && nextApp.Spec.Cache.EnableBytecodeCache {
-		size := nextApp.Spec.Cache.BytecodeCacheSize
-		if size == "" {
-			size = "512Mi"
-		}
-		pvc := &corev1.PersistentVolumeClaim{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      nextApp.Name + "-bytecode-cache",
-				Namespace: nextApp.Namespace,
-			},
-		}
-		_, err = controllerutil.CreateOrUpdate(ctx, r.Client, pvc, func() error {
-			if pvc.Spec.AccessModes == nil {
-				pvc.Spec.AccessModes = []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce}
-			}
-			if pvc.Spec.Resources.Requests == nil {
-				pvc.Spec.Resources.Requests = corev1.ResourceList{}
-			}
-			pvc.Spec.Resources.Requests[corev1.ResourceStorage] = resource.MustParse(size)
-			return ctrl.SetControllerReference(&nextApp, pvc, r.Scheme)
-		})
-		if err != nil {
-			logger.Error(err, "Failed to reconcile PVC")
-			r.emitEvent(&nextApp, corev1.EventTypeWarning, ReasonReconcileFailed,
-				fmt.Sprintf("Failed to reconcile bytecode-cache PVC: %s", err.Error()))
-			return ctrl.Result{}, err
-		}
+	if err := r.reconcileBytecodeCachePVC(ctx, &nextApp); err != nil {
+		logger.Error(err, "Failed to reconcile PVC")
+		r.emitEvent(&nextApp, corev1.EventTypeWarning, ReasonReconcileFailed,
+			fmt.Sprintf("Failed to reconcile bytecode-cache PVC: %s", err.Error()))
+		return ctrl.Result{}, err
 	}
 
 	// 3. Create/Update Image Cache (pre-pull for faster cold starts)
@@ -510,12 +443,6 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 		logger.Info("Could not reconcile Image cache (CRD may not be installed)", "error", err.Error())
 	}
 
-	// Determine health check path
-	healthPath := "/api/health"
-	if nextApp.Spec.HealthCheckPath != "" {
-		healthPath = nextApp.Spec.HealthCheckPath
-	}
-
 	// 4. Create/Update Knative Service
 	ksvc := &servingv1.Service{
 		ObjectMeta: metav1.ObjectMeta{
@@ -524,322 +451,7 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 		},
 	}
 	_, err = controllerutil.CreateOrUpdate(ctx, r.Client, ksvc, func() error {
-		if ksvc.Labels == nil {
-			ksvc.Labels = make(map[string]string)
-		}
-		ksvc.Labels["app"] = nextApp.Name
-		ksvc.Labels["generated-by"] = "kn-next-operator"
-
-		annotations := map[string]string{
-			"autoscaling.knative.dev/min-scale": "0",
-			"autoscaling.knative.dev/max-scale": "10",
-		}
-		// Rotation roll (ADR-0006 §4.3): stamp a checksum of the delegated
-		// DATABASE_URL so a credential rotation in the source Secret produces a
-		// new pod-template hash → a new Knative Revision → pods re-read the DSN
-		// (secretKeyRef is resolved at pod START only).
-		if dbSecretHash != "" {
-			annotations[databaseSecretHashAnnotation] = dbSecretHash
-		}
-		if nextApp.Spec.Scaling != nil {
-			annotations["autoscaling.knative.dev/min-scale"] = fmt.Sprintf("%d", nextApp.Spec.Scaling.MinScale)
-			annotations["autoscaling.knative.dev/max-scale"] = fmt.Sprintf("%d", nextApp.Spec.Scaling.MaxScale)
-		}
-
-		// Observability annotations — aligned with CLI
-		if nextApp.Spec.Observability != nil && nextApp.Spec.Observability.Enabled {
-			annotations["prometheus.io/scrape"] = "true"
-			annotations["prometheus.io/port"] = "9091"
-			annotations["prometheus.io/path"] = "/metrics"
-		}
-
-		if nextApp.Spec.Preview != nil && nextApp.Spec.Preview.Enabled {
-			ksvc.Labels["environment"] = "preview"
-			ksvc.Labels["pr-id"] = nextApp.Spec.Preview.PRID
-
-			// Override max-scale to 1 to save cluster resources on previews
-			annotations["autoscaling.knative.dev/max-scale"] = "1"
-			annotations["autoscaling.knative.dev/min-scale"] = "0"
-			// Set a very short scale-to-zero window
-			annotations["autoscaling.knative.dev/scale-to-zero-pod-retention-period"] = "30s"
-		}
-
-		var envVars []corev1.EnvVar
-		// HOSTNAME=0.0.0.0 overrides kubelet's HOSTNAME=<pod-name> so a bare
-		// `next start`/server.js entrypoint binds all interfaces instead of the
-		// pod IP only (Knative's queue-proxy dials 127.0.0.1:USER_PORT).
-		// Verified benign for middleware rewrites (#178): with 0.0.0.0 the
-		// router initUrl and the middleware-visible origin match. The knext
-		// runtime entry (node-server.ts buildChildEnv) now additionally empties
-		// HOSTNAME for its spawned standalone child, making this injection moot
-		// there — kept as defense-in-depth for custom images that run server.js
-		// directly. Do NOT change this to a loopback IP or hostname.
-		//
-		// Pod identity for tracing (#184): this override clobbers kubelet's
-		// HOSTNAME=<pod-name>, and we can NOT restore it via the downward API —
-		// valueFrom.fieldRef in ksvc env is feature-gated on stock Knative
-		// (`kubernetes.podspec-fieldref`, Disabled by default: serving
-		// pkg/apis/config/features.go; the validation webhook rejects the
-		// Service via EnvVarSourceMask, k8s_validation.go). Requiring a
-		// cluster-wide config-features edit is not acceptable for a default
-		// path. Instead the knext runtime (buildChildEnv) recovers the pod
-		// name from the KERNEL hostname (os.hostname() — kubelet sets the
-		// pod's OS hostname to the pod name; this env override does not touch
-		// it) and exports it as KNEXT_POD_NAME → otel host.name. Do NOT add a
-		// fieldRef env here; it would break deploys on stock Knative.
-		envVars = append(envVars, corev1.EnvVar{Name: "HOSTNAME", Value: "0.0.0.0"})
-		envVars = append(envVars, corev1.EnvVar{Name: "NODE_ENV", Value: "production"})
-
-		if nextApp.Spec.Storage != nil && nextApp.Spec.Storage.Provider != "" {
-			envVars = append(envVars, corev1.EnvVar{Name: "STORAGE_PROVIDER", Value: nextApp.Spec.Storage.Provider})
-			envVars = append(envVars, corev1.EnvVar{Name: "GCS_BUCKET_NAME", Value: nextApp.Spec.Storage.Bucket})
-			// S3/MinIO provider fields — aligned with CLI knative-manifest.ts storageEnvVarGenerators
-			if nextApp.Spec.Storage.Region != "" {
-				envVars = append(envVars, corev1.EnvVar{Name: "CACHE_BUCKET_REGION", Value: nextApp.Spec.Storage.Region})
-			}
-			if nextApp.Spec.Storage.Endpoint != "" {
-				envVars = append(envVars, corev1.EnvVar{Name: "S3_ENDPOINT", Value: nextApp.Spec.Storage.Endpoint})
-			}
-		}
-		if nextApp.Spec.Cache != nil && nextApp.Spec.Cache.Provider != "" {
-			envVars = append(envVars, corev1.EnvVar{Name: "CACHE_PROVIDER", Value: nextApp.Spec.Cache.Provider})
-			envVars = append(envVars, corev1.EnvVar{Name: "REDIS_URL", Value: nextApp.Spec.Cache.URL})
-			if nextApp.Spec.Cache.KeyPrefix != "" {
-				envVars = append(envVars, corev1.EnvVar{Name: "REDIS_KEY_PREFIX", Value: nextApp.Spec.Cache.KeyPrefix})
-			}
-			if nextApp.Spec.Cache.EnableBytecodeCache {
-				envVars = append(envVars, corev1.EnvVar{Name: "NODE_COMPILE_CACHE", Value: "/cache/bytecode/latest"})
-				// Bun analog of NODE_COMPILE_CACHE: Bun has no runtime bytecode
-				// cache (`bun build --bytecode` hard-fails on the Next standalone
-				// server), but its runtime transpiler cache persists transpiled
-				// modules ≥ ~50KB across cold starts. Measured on next@16.2.4
-				// standalone (Bun 1.3.5): warm cache ≈ -20% time-to-first-response;
-				// unwritable dir is fail-open. Same PVC as NODE_COMPILE_CACHE
-				// (mounted at /cache/bytecode), sibling dir so the two runtimes'
-				// artifacts never collide. Only meaningful under runtime=bun —
-				// NODE_COMPILE_CACHE stays set regardless (inert under Bun).
-				if nextApp.Spec.Runtime == "bun" {
-					envVars = append(envVars, corev1.EnvVar{Name: "BUN_RUNTIME_TRANSPILER_CACHE_PATH", Value: "/cache/bytecode/bun-transpiler"})
-				}
-			}
-		}
-		if nextApp.Spec.Revalidation != nil && nextApp.Spec.Revalidation.Queue != "" {
-			envVars = append(envVars, corev1.EnvVar{Name: "KAFKA_BROKER_URL", Value: nextApp.Spec.Revalidation.KafkaBrokerUrl})
-			envVars = append(envVars, corev1.EnvVar{Name: "KAFKA_REVALIDATION_TOPIC", Value: fmt.Sprintf("%s-revalidation", nextApp.Name)})
-		}
-
-		// Observability env vars — aligned with CLI
-		if nextApp.Spec.Observability != nil && nextApp.Spec.Observability.Enabled {
-			envVars = append(envVars, corev1.EnvVar{Name: "KN_APP_NAME", Value: nextApp.Name})
-
-			// RUM (#94): activate the client Web Vitals beacon. NEXT_PUBLIC_*
-			// vars are baked into the client bundle so the reporter no-ops
-			// unless enabled here. Default OFF (only set when Rum.Enabled).
-			if rum := nextApp.Spec.Observability.Rum; rum != nil && rum.Enabled {
-				envVars = append(envVars, corev1.EnvVar{Name: "NEXT_PUBLIC_RUM_ENABLED", Value: "true"})
-				if rum.SampleRate != "" {
-					envVars = append(envVars, corev1.EnvVar{Name: "NEXT_PUBLIC_RUM_SAMPLE_RATE", Value: rum.SampleRate})
-				}
-			}
-
-			// Tracing (#30): server-side OTel. Default OFF — only set
-			// OTEL_TRACING_ENABLED when Tracing.Enabled, so unconfigured apps
-			// initialize no exporter (the runtime hook returns null). The
-			// endpoint/sampler args are passed through only when set; the runtime
-			// applies a cluster-local default endpoint otherwise (ADR-0012).
-			if tracing := nextApp.Spec.Observability.Tracing; tracing != nil && tracing.Enabled {
-				envVars = append(envVars, corev1.EnvVar{Name: "OTEL_TRACING_ENABLED", Value: "true"})
-				if tracing.Endpoint != "" {
-					envVars = append(envVars, corev1.EnvVar{Name: "OTEL_EXPORTER_OTLP_ENDPOINT", Value: tracing.Endpoint})
-				}
-				if tracing.SampleRate != "" {
-					envVars = append(envVars, corev1.EnvVar{Name: "OTEL_TRACES_SAMPLER_ARG", Value: tracing.SampleRate})
-				}
-			}
-		}
-
-		var envFrom []corev1.EnvFromSource
-		if nextApp.Spec.Secrets != nil {
-			// envFrom: inject entire secrets as env vars
-			for _, secretName := range nextApp.Spec.Secrets.EnvFrom {
-				envFrom = append(envFrom, corev1.EnvFromSource{
-					SecretRef: &corev1.SecretEnvSource{
-						LocalObjectReference: corev1.LocalObjectReference{Name: secretName},
-					},
-				})
-			}
-			// envMap: map specific secret keys to env var names — aligned with CLI
-			for envName, entry := range nextApp.Spec.Secrets.EnvMap {
-				envVars = append(envVars, corev1.EnvVar{
-					Name: envName,
-					ValueFrom: &corev1.EnvVarSource{
-						SecretKeyRef: &corev1.SecretKeySelector{
-							LocalObjectReference: corev1.LocalObjectReference{Name: entry.SecretName},
-							Key:                  entry.SecretKey,
-						},
-					},
-				})
-			}
-		}
-
-		// spec.env (#186): plain NON-SECRET name/value config flags. Appended
-		// LAST and de-duplicated so it can never override operator-injected
-		// system env (HOSTNAME/NODE_ENV/... — the #178/#184 hazard) or a
-		// Secret-backed envMap entry; a colliding name is dropped WITH a
-		// Warning event naming the authoritative source (never silently).
-		// Reserved names (HOSTNAME, PORT, K_*) are additionally rejected at
-		// admission by CRD CEL validation. Sorted for deterministic reconcile
-		// output. NOTE: secrets.envFrom collisions cannot be detected here —
-		// the referenced Secrets' keys are invisible at reconcile time and
-		// kubelet applies envFrom BEFORE env, so a spec.env name matching a
-		// key inside an envFrom Secret shadows it at runtime (documented user
-		// responsibility, docs/operator/crd-nextapp.md).
-		if len(nextApp.Spec.Env) > 0 {
-			// name → authoritative source, for the Warning message. Entries
-			// with ValueFrom are the spec.secrets.envMap Secret mappings; all
-			// plain-Value entries before this point are operator-managed.
-			taken := make(map[string]string, len(envVars))
-			for _, ev := range envVars {
-				if ev.ValueFrom != nil {
-					taken[ev.Name] = "spec.secrets.envMap"
-				} else {
-					taken[ev.Name] = "operator-managed system env"
-				}
-			}
-			names := make([]string, 0, len(nextApp.Spec.Env))
-			for name := range nextApp.Spec.Env {
-				names = append(names, name)
-			}
-			sort.Strings(names)
-			for _, name := range names {
-				if source, exists := taken[name]; exists {
-					r.emitEvent(&nextApp, corev1.EventTypeWarning, ReasonEnvVarIgnored,
-						fmt.Sprintf("spec.env[%s] ignored: name is reserved/managed by %s", name, source))
-					continue
-				}
-				envVars = append(envVars, corev1.EnvVar{Name: name, Value: nextApp.Spec.Env[name]})
-			}
-		}
-
-		var volumes []corev1.Volume
-		var volumeMounts []corev1.VolumeMount
-		if nextApp.Spec.Cache != nil && nextApp.Spec.Cache.EnableBytecodeCache {
-			volumes = append(volumes, corev1.Volume{
-				Name: "bytecode-cache",
-				VolumeSource: corev1.VolumeSource{
-					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-						ClaimName: nextApp.Name + "-bytecode-cache",
-					},
-				},
-			})
-			volumeMounts = append(volumeMounts, corev1.VolumeMount{
-				Name:      "bytecode-cache",
-				MountPath: "/cache/bytecode",
-			})
-		}
-
-		cc := int64(100)
-		if nextApp.Spec.Scaling != nil && nextApp.Spec.Scaling.ContainerConcurrency > 0 {
-			cc = int64(nextApp.Spec.Scaling.ContainerConcurrency)
-		}
-
-		// Resource limits — aligned with CLI defaults
-		resourceRequests := corev1.ResourceList{
-			corev1.ResourceCPU:    resource.MustParse("250m"),
-			corev1.ResourceMemory: resource.MustParse("512Mi"),
-		}
-		resourceLimits := corev1.ResourceList{
-			corev1.ResourceCPU:    resource.MustParse("1000m"),
-			corev1.ResourceMemory: resource.MustParse("1Gi"),
-		}
-		if nextApp.Spec.Resources != nil {
-			if nextApp.Spec.Resources.CPURequest != "" {
-				resourceRequests[corev1.ResourceCPU] = resource.MustParse(nextApp.Spec.Resources.CPURequest)
-			}
-			if nextApp.Spec.Resources.MemoryRequest != "" {
-				resourceRequests[corev1.ResourceMemory] = resource.MustParse(nextApp.Spec.Resources.MemoryRequest)
-			}
-			if nextApp.Spec.Resources.CPULimit != "" {
-				resourceLimits[corev1.ResourceCPU] = resource.MustParse(nextApp.Spec.Resources.CPULimit)
-			}
-			if nextApp.Spec.Resources.MemoryLimit != "" {
-				resourceLimits[corev1.ResourceMemory] = resource.MustParse(nextApp.Spec.Resources.MemoryLimit)
-			}
-		}
-
-		// TimeoutSeconds: default 300s when unset (matches knative-manifest.ts hardcoded value)
-		timeoutSeconds := int64(300)
-		if nextApp.Spec.TimeoutSeconds > 0 {
-			timeoutSeconds = int64(nextApp.Spec.TimeoutSeconds)
-		}
-
-		// Runtime: select bun or node to exec server.js
-		var containerCommand []string
-		if nextApp.Spec.Runtime == "bun" {
-			containerCommand = []string{"bun", "run", "server.js"}
-		}
-
-		ksvc.Spec.Template.ObjectMeta.Annotations = annotations
-
-		// Skew protection (#93): stamp the deploy's BUILD_ID onto the revision
-		// (pod) template as a label. Knative propagates template labels to every
-		// Revision, so the CLI's deploy-time asset GC can resolve a live revision
-		// back to its build-id (read-only) and never reap a live build's assets.
-		if nextApp.Spec.BuildID != "" {
-			if ksvc.Spec.Template.ObjectMeta.Labels == nil {
-				ksvc.Spec.Template.ObjectMeta.Labels = make(map[string]string)
-			}
-			ksvc.Spec.Template.ObjectMeta.Labels[appsv1alpha1.BuildIDLabel] = nextApp.Spec.BuildID
-		}
-
-		ksvc.Spec.Template.Spec.ServiceAccountName = nextApp.Name + "-sa"
-		ksvc.Spec.Template.Spec.ContainerConcurrency = &cc
-		ksvc.Spec.Template.Spec.TimeoutSeconds = &timeoutSeconds
-		ksvc.Spec.Template.Spec.Containers = []corev1.Container{
-			{
-				Image:        nextApp.Spec.Image,
-				Command:      containerCommand,
-				Env:          envVars,
-				EnvFrom:      envFrom,
-				VolumeMounts: volumeMounts,
-				Ports: []corev1.ContainerPort{
-					{ContainerPort: 3000},
-				},
-				Resources: corev1.ResourceRequirements{
-					Requests: resourceRequests,
-					Limits:   resourceLimits,
-				},
-				// Probe values aligned with CLI: initialDelay=2, period=3 for readiness
-				ReadinessProbe: &corev1.Probe{
-					ProbeHandler: corev1.ProbeHandler{
-						HTTPGet: &corev1.HTTPGetAction{
-							Path: healthPath,
-							Port: intstr.FromInt(3000),
-						},
-					},
-					InitialDelaySeconds: 2,
-					PeriodSeconds:       3,
-				},
-				LivenessProbe: &corev1.Probe{
-					ProbeHandler: corev1.ProbeHandler{
-						HTTPGet: &corev1.HTTPGetAction{
-							Path: healthPath,
-							Port: intstr.FromInt(3000),
-						},
-					},
-					InitialDelaySeconds: 5,
-					PeriodSeconds:       10,
-				},
-			},
-		}
-		ksvc.Spec.Template.Spec.Volumes = volumes
-
-		// Traffic split (issue #92): render the rollback/canary intent from
-		// spec.traffic. nil => clear any prior split so Knative reverts to
-		// 100% latest-ready (no stale pin on transition back).
-		ksvc.Spec.Traffic = buildTrafficTargets(&nextApp)
-
-		return ctrl.SetControllerReference(&nextApp, ksvc, r.Scheme)
+		return r.buildDesiredKsvc(&nextApp, ksvc, dbSecretHash)
 	})
 	if err != nil {
 		logger.Error(err, "Failed to reconcile Knative Service")
@@ -955,6 +567,92 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 	return result, nil
 }
 
+// reconcileFinalizers ensures the cleanup finalizers on a live NextApp and,
+// for a deleting one, runs the bounded external/database teardown and releases
+// the finalizers (deleting=true => the caller stops reconciling). Moved
+// VERBATIM out of Reconcile (#254 companion move) — behavior-preserving;
+// finalizer_test.go is the characterization net.
+func (r *NextAppReconciler) reconcileFinalizers(ctx context.Context, nextApp *appsv1alpha1.NextApp) (deleting bool, err error) {
+	if nextApp.DeletionTimestamp.IsZero() {
+		// Live object: ensure the finalizer(s) are present so we get a chance to
+		// run cleanup before the object is GC'd. Use a metadata Patch (not a
+		// full Update) so it does not race the later Status().Update: finalizers
+		// live in metadata, status in the /status subresource — patching one and
+		// updating the other touches disjoint resourceVersions and avoids the
+		// "object has been modified" conflict spam (#98).
+		patch := client.MergeFrom(nextApp.DeepCopy())
+		changed := controllerutil.AddFinalizer(nextApp, ExternalCleanupFinalizer)
+		// db-cleanup finalizer only for apps that delegate a database (ADR-0006
+		// §3c): cross-ns AppDatabase teardown cannot ride an ownerRef.
+		if databaseEnabled(nextApp) {
+			changed = controllerutil.AddFinalizer(nextApp, DatabaseCleanupFinalizer) || changed
+		}
+		if changed {
+			if err := r.Patch(ctx, nextApp, patch); err != nil {
+				return false, err
+			}
+		}
+		return false, nil
+	}
+	// Object is being deleted: run best-effort, bounded cleanup for each
+	// finalizer, then remove it so deletion can complete. Neither cleanup
+	// returns a hard error for an unreachable dependency (they log + Warning),
+	// so we never wedge the CR in Terminating (ADR-0006 §5).
+	if controllerutil.ContainsFinalizer(nextApp, DatabaseCleanupFinalizer) {
+		if err := r.cleanupDatabase(ctx, nextApp); err != nil {
+			return true, err
+		}
+		patch := client.MergeFrom(nextApp.DeepCopy())
+		controllerutil.RemoveFinalizer(nextApp, DatabaseCleanupFinalizer)
+		if err := r.Patch(ctx, nextApp, patch); err != nil {
+			return true, err
+		}
+	}
+	if controllerutil.ContainsFinalizer(nextApp, ExternalCleanupFinalizer) {
+		if err := r.cleanupExternalState(ctx, nextApp); err != nil {
+			return true, err
+		}
+		// Remove the finalizer via a metadata Patch (see the add path above)
+		// to keep the metadata vs status writes on disjoint subresources.
+		patch := client.MergeFrom(nextApp.DeepCopy())
+		controllerutil.RemoveFinalizer(nextApp, ExternalCleanupFinalizer)
+		if err := r.Patch(ctx, nextApp, patch); err != nil {
+			return true, err
+		}
+	}
+	return true, nil
+}
+
+// reconcileBytecodeCachePVC creates/updates the bytecode-cache PVC when
+// spec.cache.enableBytecodeCache is set (no-op otherwise). Moved VERBATIM out
+// of Reconcile (#254 companion move).
+func (r *NextAppReconciler) reconcileBytecodeCachePVC(ctx context.Context, nextApp *appsv1alpha1.NextApp) error {
+	if nextApp.Spec.Cache == nil || !nextApp.Spec.Cache.EnableBytecodeCache {
+		return nil
+	}
+	size := nextApp.Spec.Cache.BytecodeCacheSize
+	if size == "" {
+		size = "512Mi"
+	}
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      nextApp.Name + "-bytecode-cache",
+			Namespace: nextApp.Namespace,
+		},
+	}
+	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, pvc, func() error {
+		if pvc.Spec.AccessModes == nil {
+			pvc.Spec.AccessModes = []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce}
+		}
+		if pvc.Spec.Resources.Requests == nil {
+			pvc.Spec.Resources.Requests = corev1.ResourceList{}
+		}
+		pvc.Spec.Resources.Requests[corev1.ResourceStorage] = resource.MustParse(size)
+		return ctrl.SetControllerReference(nextApp, pvc, r.Scheme)
+	})
+	return err
+}
+
 // applyStatusVerdict is the impure half of the compute→apply split (#254): it
 // emits the verdict's (already transition-filtered) events, applies the
 // condition removals then sets IN ORDER (append order is part of the #98
@@ -984,6 +682,357 @@ func (r *NextAppReconciler) applyStatusVerdict(
 		return r.Status().Update(ctx, app)
 	}
 	return nil
+}
+
+// buildDesiredKsvc mutates ksvc toward the desired state derived from the
+// NextApp spec: labels, autoscaling/observability annotations, the full env
+// assembly (system env, storage/cache/revalidation, observability, secrets
+// envFrom/envMap, spec.env with collision warnings), probes, resources,
+// runtime command, the build-id revision label (#93), and the traffic split
+// (#92). Moved VERBATIM out of the CreateOrUpdate closure in Reconcile (#254
+// companion move) — behavior-preserving; the rendered-output envtests
+// (reconcile_output_test.go, spec_env_test.go) are the characterization net.
+// Not fully pure: a colliding spec.env name emits a Warning event (#186).
+func (r *NextAppReconciler) buildDesiredKsvc(nextApp *appsv1alpha1.NextApp, ksvc *servingv1.Service, dbSecretHash string) error {
+	// Determine health check path
+	healthPath := "/api/health"
+	if nextApp.Spec.HealthCheckPath != "" {
+		healthPath = nextApp.Spec.HealthCheckPath
+	}
+
+	if ksvc.Labels == nil {
+		ksvc.Labels = make(map[string]string)
+	}
+	ksvc.Labels["app"] = nextApp.Name
+	ksvc.Labels["generated-by"] = "kn-next-operator"
+
+	annotations := map[string]string{
+		"autoscaling.knative.dev/min-scale": "0",
+		"autoscaling.knative.dev/max-scale": "10",
+	}
+	// Rotation roll (ADR-0006 §4.3): stamp a checksum of the delegated
+	// DATABASE_URL so a credential rotation in the source Secret produces a
+	// new pod-template hash → a new Knative Revision → pods re-read the DSN
+	// (secretKeyRef is resolved at pod START only).
+	if dbSecretHash != "" {
+		annotations[databaseSecretHashAnnotation] = dbSecretHash
+	}
+	if nextApp.Spec.Scaling != nil {
+		annotations["autoscaling.knative.dev/min-scale"] = fmt.Sprintf("%d", nextApp.Spec.Scaling.MinScale)
+		annotations["autoscaling.knative.dev/max-scale"] = fmt.Sprintf("%d", nextApp.Spec.Scaling.MaxScale)
+	}
+
+	// Observability annotations — aligned with CLI
+	if nextApp.Spec.Observability != nil && nextApp.Spec.Observability.Enabled {
+		annotations["prometheus.io/scrape"] = "true"
+		annotations["prometheus.io/port"] = "9091"
+		annotations["prometheus.io/path"] = "/metrics"
+	}
+
+	if nextApp.Spec.Preview != nil && nextApp.Spec.Preview.Enabled {
+		ksvc.Labels["environment"] = "preview"
+		ksvc.Labels["pr-id"] = nextApp.Spec.Preview.PRID
+
+		// Override max-scale to 1 to save cluster resources on previews
+		annotations["autoscaling.knative.dev/max-scale"] = "1"
+		annotations["autoscaling.knative.dev/min-scale"] = "0"
+		// Set a very short scale-to-zero window
+		annotations["autoscaling.knative.dev/scale-to-zero-pod-retention-period"] = "30s"
+	}
+
+	envVars, envFrom := r.buildKsvcEnv(nextApp)
+
+	var volumes []corev1.Volume
+	var volumeMounts []corev1.VolumeMount
+	if nextApp.Spec.Cache != nil && nextApp.Spec.Cache.EnableBytecodeCache {
+		volumes = append(volumes, corev1.Volume{
+			Name: "bytecode-cache",
+			VolumeSource: corev1.VolumeSource{
+				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+					ClaimName: nextApp.Name + "-bytecode-cache",
+				},
+			},
+		})
+		volumeMounts = append(volumeMounts, corev1.VolumeMount{
+			Name:      "bytecode-cache",
+			MountPath: "/cache/bytecode",
+		})
+	}
+
+	cc := int64(100)
+	if nextApp.Spec.Scaling != nil && nextApp.Spec.Scaling.ContainerConcurrency > 0 {
+		cc = int64(nextApp.Spec.Scaling.ContainerConcurrency)
+	}
+
+	// Resource limits — aligned with CLI defaults
+	resourceRequests := corev1.ResourceList{
+		corev1.ResourceCPU:    resource.MustParse("250m"),
+		corev1.ResourceMemory: resource.MustParse("512Mi"),
+	}
+	resourceLimits := corev1.ResourceList{
+		corev1.ResourceCPU:    resource.MustParse("1000m"),
+		corev1.ResourceMemory: resource.MustParse("1Gi"),
+	}
+	if nextApp.Spec.Resources != nil {
+		if nextApp.Spec.Resources.CPURequest != "" {
+			resourceRequests[corev1.ResourceCPU] = resource.MustParse(nextApp.Spec.Resources.CPURequest)
+		}
+		if nextApp.Spec.Resources.MemoryRequest != "" {
+			resourceRequests[corev1.ResourceMemory] = resource.MustParse(nextApp.Spec.Resources.MemoryRequest)
+		}
+		if nextApp.Spec.Resources.CPULimit != "" {
+			resourceLimits[corev1.ResourceCPU] = resource.MustParse(nextApp.Spec.Resources.CPULimit)
+		}
+		if nextApp.Spec.Resources.MemoryLimit != "" {
+			resourceLimits[corev1.ResourceMemory] = resource.MustParse(nextApp.Spec.Resources.MemoryLimit)
+		}
+	}
+
+	// TimeoutSeconds: default 300s when unset (matches knative-manifest.ts hardcoded value)
+	timeoutSeconds := int64(300)
+	if nextApp.Spec.TimeoutSeconds > 0 {
+		timeoutSeconds = int64(nextApp.Spec.TimeoutSeconds)
+	}
+
+	// Runtime: select bun or node to exec server.js
+	var containerCommand []string
+	if nextApp.Spec.Runtime == "bun" {
+		containerCommand = []string{"bun", "run", "server.js"}
+	}
+
+	ksvc.Spec.Template.ObjectMeta.Annotations = annotations
+
+	// Skew protection (#93): stamp the deploy's BUILD_ID onto the revision
+	// (pod) template as a label. Knative propagates template labels to every
+	// Revision, so the CLI's deploy-time asset GC can resolve a live revision
+	// back to its build-id (read-only) and never reap a live build's assets.
+	if nextApp.Spec.BuildID != "" {
+		if ksvc.Spec.Template.ObjectMeta.Labels == nil {
+			ksvc.Spec.Template.ObjectMeta.Labels = make(map[string]string)
+		}
+		ksvc.Spec.Template.ObjectMeta.Labels[appsv1alpha1.BuildIDLabel] = nextApp.Spec.BuildID
+	}
+
+	ksvc.Spec.Template.Spec.ServiceAccountName = nextApp.Name + "-sa"
+	ksvc.Spec.Template.Spec.ContainerConcurrency = &cc
+	ksvc.Spec.Template.Spec.TimeoutSeconds = &timeoutSeconds
+	ksvc.Spec.Template.Spec.Containers = []corev1.Container{
+		{
+			Image:        nextApp.Spec.Image,
+			Command:      containerCommand,
+			Env:          envVars,
+			EnvFrom:      envFrom,
+			VolumeMounts: volumeMounts,
+			Ports: []corev1.ContainerPort{
+				{ContainerPort: 3000},
+			},
+			Resources: corev1.ResourceRequirements{
+				Requests: resourceRequests,
+				Limits:   resourceLimits,
+			},
+			// Probe values aligned with CLI: initialDelay=2, period=3 for readiness
+			ReadinessProbe: &corev1.Probe{
+				ProbeHandler: corev1.ProbeHandler{
+					HTTPGet: &corev1.HTTPGetAction{
+						Path: healthPath,
+						Port: intstr.FromInt(3000),
+					},
+				},
+				InitialDelaySeconds: 2,
+				PeriodSeconds:       3,
+			},
+			LivenessProbe: &corev1.Probe{
+				ProbeHandler: corev1.ProbeHandler{
+					HTTPGet: &corev1.HTTPGetAction{
+						Path: healthPath,
+						Port: intstr.FromInt(3000),
+					},
+				},
+				InitialDelaySeconds: 5,
+				PeriodSeconds:       10,
+			},
+		},
+	}
+	ksvc.Spec.Template.Spec.Volumes = volumes
+
+	// Traffic split (issue #92): render the rollback/canary intent from
+	// spec.traffic. nil => clear any prior split so Knative reverts to
+	// 100% latest-ready (no stale pin on transition back).
+	ksvc.Spec.Traffic = buildTrafficTargets(nextApp)
+
+	return ctrl.SetControllerReference(nextApp, ksvc, r.Scheme)
+}
+
+// buildKsvcEnv assembles the container env (operator-managed system env,
+// storage/cache/revalidation/observability wiring, then the Secret-backed
+// envFrom/envMap entries) and finishes with the spec.env merge. Moved VERBATIM
+// out of buildDesiredKsvc (#254 companion move) — behavior-preserving; the env
+// ordering is part of the rendered-output characterization (spec_env_test.go).
+func (r *NextAppReconciler) buildKsvcEnv(nextApp *appsv1alpha1.NextApp) ([]corev1.EnvVar, []corev1.EnvFromSource) {
+	var envVars []corev1.EnvVar
+	// HOSTNAME=0.0.0.0 overrides kubelet's HOSTNAME=<pod-name> so a bare
+	// `next start`/server.js entrypoint binds all interfaces instead of the
+	// pod IP only (Knative's queue-proxy dials 127.0.0.1:USER_PORT).
+	// Verified benign for middleware rewrites (#178): with 0.0.0.0 the
+	// router initUrl and the middleware-visible origin match. The knext
+	// runtime entry (node-server.ts buildChildEnv) now additionally empties
+	// HOSTNAME for its spawned standalone child, making this injection moot
+	// there — kept as defense-in-depth for custom images that run server.js
+	// directly. Do NOT change this to a loopback IP or hostname.
+	//
+	// Pod identity for tracing (#184): this override clobbers kubelet's
+	// HOSTNAME=<pod-name>, and we can NOT restore it via the downward API —
+	// valueFrom.fieldRef in ksvc env is feature-gated on stock Knative
+	// (`kubernetes.podspec-fieldref`, Disabled by default: serving
+	// pkg/apis/config/features.go; the validation webhook rejects the
+	// Service via EnvVarSourceMask, k8s_validation.go). Requiring a
+	// cluster-wide config-features edit is not acceptable for a default
+	// path. Instead the knext runtime (buildChildEnv) recovers the pod
+	// name from the KERNEL hostname (os.hostname() — kubelet sets the
+	// pod's OS hostname to the pod name; this env override does not touch
+	// it) and exports it as KNEXT_POD_NAME → otel host.name. Do NOT add a
+	// fieldRef env here; it would break deploys on stock Knative.
+	envVars = append(envVars, corev1.EnvVar{Name: "HOSTNAME", Value: "0.0.0.0"})
+	envVars = append(envVars, corev1.EnvVar{Name: "NODE_ENV", Value: "production"})
+
+	if nextApp.Spec.Storage != nil && nextApp.Spec.Storage.Provider != "" {
+		envVars = append(envVars, corev1.EnvVar{Name: "STORAGE_PROVIDER", Value: nextApp.Spec.Storage.Provider})
+		envVars = append(envVars, corev1.EnvVar{Name: "GCS_BUCKET_NAME", Value: nextApp.Spec.Storage.Bucket})
+		// S3/MinIO provider fields — aligned with CLI knative-manifest.ts storageEnvVarGenerators
+		if nextApp.Spec.Storage.Region != "" {
+			envVars = append(envVars, corev1.EnvVar{Name: "CACHE_BUCKET_REGION", Value: nextApp.Spec.Storage.Region})
+		}
+		if nextApp.Spec.Storage.Endpoint != "" {
+			envVars = append(envVars, corev1.EnvVar{Name: "S3_ENDPOINT", Value: nextApp.Spec.Storage.Endpoint})
+		}
+	}
+	if nextApp.Spec.Cache != nil && nextApp.Spec.Cache.Provider != "" {
+		envVars = append(envVars, corev1.EnvVar{Name: "CACHE_PROVIDER", Value: nextApp.Spec.Cache.Provider})
+		envVars = append(envVars, corev1.EnvVar{Name: "REDIS_URL", Value: nextApp.Spec.Cache.URL})
+		if nextApp.Spec.Cache.KeyPrefix != "" {
+			envVars = append(envVars, corev1.EnvVar{Name: "REDIS_KEY_PREFIX", Value: nextApp.Spec.Cache.KeyPrefix})
+		}
+		if nextApp.Spec.Cache.EnableBytecodeCache {
+			envVars = append(envVars, corev1.EnvVar{Name: "NODE_COMPILE_CACHE", Value: "/cache/bytecode/latest"})
+			// Bun analog of NODE_COMPILE_CACHE: Bun has no runtime bytecode
+			// cache (`bun build --bytecode` hard-fails on the Next standalone
+			// server), but its runtime transpiler cache persists transpiled
+			// modules ≥ ~50KB across cold starts. Measured on next@16.2.4
+			// standalone (Bun 1.3.5): warm cache ≈ -20% time-to-first-response;
+			// unwritable dir is fail-open. Same PVC as NODE_COMPILE_CACHE
+			// (mounted at /cache/bytecode), sibling dir so the two runtimes'
+			// artifacts never collide. Only meaningful under runtime=bun —
+			// NODE_COMPILE_CACHE stays set regardless (inert under Bun).
+			if nextApp.Spec.Runtime == "bun" {
+				envVars = append(envVars, corev1.EnvVar{Name: "BUN_RUNTIME_TRANSPILER_CACHE_PATH", Value: "/cache/bytecode/bun-transpiler"})
+			}
+		}
+	}
+	if nextApp.Spec.Revalidation != nil && nextApp.Spec.Revalidation.Queue != "" {
+		envVars = append(envVars, corev1.EnvVar{Name: "KAFKA_BROKER_URL", Value: nextApp.Spec.Revalidation.KafkaBrokerUrl})
+		envVars = append(envVars, corev1.EnvVar{Name: "KAFKA_REVALIDATION_TOPIC", Value: fmt.Sprintf("%s-revalidation", nextApp.Name)})
+	}
+
+	// Observability env vars — aligned with CLI
+	if nextApp.Spec.Observability != nil && nextApp.Spec.Observability.Enabled {
+		envVars = append(envVars, corev1.EnvVar{Name: "KN_APP_NAME", Value: nextApp.Name})
+
+		// RUM (#94): activate the client Web Vitals beacon. NEXT_PUBLIC_*
+		// vars are baked into the client bundle so the reporter no-ops
+		// unless enabled here. Default OFF (only set when Rum.Enabled).
+		if rum := nextApp.Spec.Observability.Rum; rum != nil && rum.Enabled {
+			envVars = append(envVars, corev1.EnvVar{Name: "NEXT_PUBLIC_RUM_ENABLED", Value: "true"})
+			if rum.SampleRate != "" {
+				envVars = append(envVars, corev1.EnvVar{Name: "NEXT_PUBLIC_RUM_SAMPLE_RATE", Value: rum.SampleRate})
+			}
+		}
+
+		// Tracing (#30): server-side OTel. Default OFF — only set
+		// OTEL_TRACING_ENABLED when Tracing.Enabled, so unconfigured apps
+		// initialize no exporter (the runtime hook returns null). The
+		// endpoint/sampler args are passed through only when set; the runtime
+		// applies a cluster-local default endpoint otherwise (ADR-0012).
+		if tracing := nextApp.Spec.Observability.Tracing; tracing != nil && tracing.Enabled {
+			envVars = append(envVars, corev1.EnvVar{Name: "OTEL_TRACING_ENABLED", Value: "true"})
+			if tracing.Endpoint != "" {
+				envVars = append(envVars, corev1.EnvVar{Name: "OTEL_EXPORTER_OTLP_ENDPOINT", Value: tracing.Endpoint})
+			}
+			if tracing.SampleRate != "" {
+				envVars = append(envVars, corev1.EnvVar{Name: "OTEL_TRACES_SAMPLER_ARG", Value: tracing.SampleRate})
+			}
+		}
+	}
+
+	var envFrom []corev1.EnvFromSource
+	if nextApp.Spec.Secrets != nil {
+		// envFrom: inject entire secrets as env vars
+		for _, secretName := range nextApp.Spec.Secrets.EnvFrom {
+			envFrom = append(envFrom, corev1.EnvFromSource{
+				SecretRef: &corev1.SecretEnvSource{
+					LocalObjectReference: corev1.LocalObjectReference{Name: secretName},
+				},
+			})
+		}
+		// envMap: map specific secret keys to env var names — aligned with CLI
+		for envName, entry := range nextApp.Spec.Secrets.EnvMap {
+			envVars = append(envVars, corev1.EnvVar{
+				Name: envName,
+				ValueFrom: &corev1.EnvVarSource{
+					SecretKeyRef: &corev1.SecretKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{Name: entry.SecretName},
+						Key:                  entry.SecretKey,
+					},
+				},
+			})
+		}
+	}
+
+	return r.appendUserEnv(nextApp, envVars), envFrom
+}
+
+// appendUserEnv merges spec.env (#186) into the assembled env. Moved VERBATIM
+// out of buildDesiredKsvc (#254 companion move).
+func (r *NextAppReconciler) appendUserEnv(nextApp *appsv1alpha1.NextApp, envVars []corev1.EnvVar) []corev1.EnvVar {
+	// spec.env (#186): plain NON-SECRET name/value config flags. Appended
+	// LAST and de-duplicated so it can never override operator-injected
+	// system env (HOSTNAME/NODE_ENV/... — the #178/#184 hazard) or a
+	// Secret-backed envMap entry; a colliding name is dropped WITH a
+	// Warning event naming the authoritative source (never silently).
+	// Reserved names (HOSTNAME, PORT, K_*) are additionally rejected at
+	// admission by CRD CEL validation. Sorted for deterministic reconcile
+	// output. NOTE: secrets.envFrom collisions cannot be detected here —
+	// the referenced Secrets' keys are invisible at reconcile time and
+	// kubelet applies envFrom BEFORE env, so a spec.env name matching a
+	// key inside an envFrom Secret shadows it at runtime (documented user
+	// responsibility, docs/operator/crd-nextapp.md).
+	if len(nextApp.Spec.Env) > 0 {
+		// name → authoritative source, for the Warning message. Entries
+		// with ValueFrom are the spec.secrets.envMap Secret mappings; all
+		// plain-Value entries before this point are operator-managed.
+		taken := make(map[string]string, len(envVars))
+		for _, ev := range envVars {
+			if ev.ValueFrom != nil {
+				taken[ev.Name] = "spec.secrets.envMap"
+			} else {
+				taken[ev.Name] = "operator-managed system env"
+			}
+		}
+		names := make([]string, 0, len(nextApp.Spec.Env))
+		for name := range nextApp.Spec.Env {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			if source, exists := taken[name]; exists {
+				r.emitEvent(nextApp, corev1.EventTypeWarning, ReasonEnvVarIgnored,
+					fmt.Sprintf("spec.env[%s] ignored: name is reserved/managed by %s", name, source))
+				continue
+			}
+			envVars = append(envVars, corev1.EnvVar{Name: name, Value: nextApp.Spec.Env[name]})
+		}
+	}
+
+	return envVars
 }
 
 // buildTrafficTargets renders the Knative Service spec.traffic block from the
