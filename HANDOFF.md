@@ -58,6 +58,15 @@ larger/roomier drill cluster restores ~2–5s wakes and unblocks those.
 Repo clean (0 uncommitted, 0 open PRs). Scorecard history: `docs/SCORECARD.md`
 (last tagged round v1.3.0 = 6.7 / 6.0 / 5.7).
 
+**Public docs site** (getknext-dev/docs, Fumadocs) is LIVE + current at
+`http://knext-docs.knext-docs.51.170.86.139.sslip.io` (Knative Service `knext-docs` in ns
+`knext-docs`, rev `knext-docs-00002`), with the scale-zero-pg SDK/extensions/reliability
+pages. **Handoff caveat:** the docs-site OKE deploy artifacts (`Dockerfile.oke`,
+`deploy/oke/docs-ksvc.yaml`) live **local/untracked** in `~/POC/docs-site` — they were never
+committed to getknext-dev/docs, so a fresh machine redeploying the site must recreate them
+(build `--platform linux/amd64`, push to OCIR `…/knext-docs`, needs the `ocir-pull` secret in
+ns `knext-docs`, serve via Kourier — no new LB). Worth committing them to the docs repo.
+
 ## 3. OPEN DECISIONS for the owner (nothing else is autonomously blocked)
 - **Tag `v1.4.x` + convene the blind-trio scorecard review** — the whole reliability arc
   above merged UNBLESSED since v1.3.0; the loop's own release-tag trigger review is overdue.
