@@ -2219,6 +2219,26 @@ scales 1→N (N≥2)**, re-checks that writes are still rejected and re-measures
 staleness under load, then drains the load and **asserts it scales back N→1**.
 Numbers: [BENCHMARKS](BENCHMARKS.md#read-only-pool-under-load-hpa-n1-issue-99).
 
+> **`WAKE_BUDGET_MS` — running the battery on a slow / capacity-constrained cluster
+> (issue #198).** The drill battery's timing budgets were calibrated for a fast
+> ~2–5 s cold wake. On a CPU-request-tight cluster (e.g. a 2-node OKE where cold
+> wakes run ~14 s mean / ~19 s max) those fixed budgets false-FAIL even though the
+> products are healthy. `deploy/_verify-readpool.sh` and `deploy/_verify-multitenant.sh`
+> now source `deploy/_lib-drill.sh` and size their idle/hold budgets off one knob:
+> `WAKE_BUDGET_MS` (default **30000** = the assumed worst-case cold wake). Raise it
+> on an even slower cluster, lower it to tighten the battery on a fast one, e.g.
+> `WAKE_BUDGET_MS=45000 sh deploy/_verify-readpool.sh`. It drives the test gateway's
+> idle window (must outlast a wake so a just-woken pool isn't slept before the
+> `replicas≥1` check) and the multitenant busy-hold duration (must outlast the idle
+> app's whole wake-then-idle-down sequence). Unit tests: `sh deploy/_lib-drill.sh selftest`.
+>
+> The same fix corrected the HPA **load generator**, which had become a *no-op*: it
+> dialed `compute-ro` as the public default `cloud_admin:cloud_admin`, which #168/#112
+> reject over TCP (the base compute serves `cloud_admin` only under its strong md5),
+> so the loader ran **no** query, CPU stayed ~10 %, and the CPU-target HPA never
+> tripped. It now dials the strong credential from the `DATABASE_URL` Secret, so the
+> N≥2 scale-up is genuinely exercised.
+
 **Ephemeral-storage sizing — no flap under load (issue #121).** A **warm** RO
 compute's local working set lives on the pod's **ephemeral (container) fs**: the
 Neon Local File Cache (LFC, uncapped by default), `pg_wal` streamed from the tip

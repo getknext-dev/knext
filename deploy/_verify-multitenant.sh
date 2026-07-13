@@ -34,6 +34,9 @@ KCTX="${KCTX:-context-ckmva7v7zvq}"
 NS="${NS:-scale-zero-pg}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 PROV="$HERE/provision-app.sh"
+# Shared drill budget helpers (#198): wake-latency-scaled hold/idle budgets so a
+# slow/CPU-tight cluster (~14s cold wake) does not false-FAIL fixed 2–5s numbers.
+. "$HERE/_lib-drill.sh"
 # Throwaway psql CLIENT pods use a small, ALWAYS-PULLABLE psql image (issue #171):
 # the neon compute image is pre-pulled on only SOME nodes, so a client pod pinned
 # to it with imagePullPolicy=Never intermittently hits ErrImageNeverPull (and its
@@ -45,6 +48,15 @@ B=mtb
 C=mtc  # crash-safety drill app (issue #76)
 IDLE_DRILL_MS="${IDLE_DRILL_MS:-8000}"   # apps-gateway idle lowered for a fast per-app idle assertion
 IDLE_RESTORE_MS="${IDLE_RESTORE_MS:-60000}" # restored on cleanup (matches 81-apps-gateway.yaml)
+# BUSY-HOLD duration (#198): B's held connection must outlast A's ENTIRE cold-wake-
+# then-idle-down sequence, or on a slow cluster (~14s wake) the old fixed pg_sleep(60)
+# expires first and B idles down before the "busy app stays awake" check → false FAIL.
+# hold_budget_s scales off the wake budget (default 150s @ 30s budget); the hold pod
+# is force-killed on the assertion + on cleanup, so a generous value costs nothing.
+HOLD_S="$(hold_budget_s)"
+# How long to wait for the IDLE app (A) to scale to zero: its gateway idle window
+# plus wake-budget-scaled slack for scale-down latency on a busy cluster.
+A_IDLE_WAIT_S="$(idle_wait_s "$IDLE_DRILL_MS")"
 
 K() { kubectl --context "$KCTX" -n "$NS" "$@"; }
 fail() { echo "FAIL: $*" >&2; exit 1; }
@@ -328,13 +340,14 @@ BPW="$(app_pw "$B")"
 K run "mthold-$$" --image="$PSQL_IMG" --image-pull-policy=IfNotPresent \
   --labels="mtdrill=hold" --restart=Never --quiet --command -- \
   psql "postgres://app_$B:$BPW@pggw-apps:55432/$B?sslmode=disable" -tA -w \
-  -c "select pg_sleep(60)" >/dev/null 2>&1 &
+  -c "select pg_sleep($HOLD_S)" >/dev/null 2>&1 &
 # Arm A's idle timer: a quick gateway query that connects then disconnects.
 GCLIENT arma "$A" 'select 1' >/dev/null || fail "could not arm $A idle"
 [ "$(PODS "$A")" = "1" ] || fail "$A not running before idle drill"
 # Within a few idle windows, A must scale to zero (B busy must NOT hold it awake).
+# Wait bound scales off the wake budget (A_IDLE_WAIT_S) for slow-cluster scale-down.
 i=0; while [ "$(PODS "$A")" != "0" ]; do
-  i=$((i+1)); [ $i -gt 45 ] && fail "$A did NOT scale to zero while $B was busy (fleet-global idle regression, #75)"; sleep 1
+  i=$((i+1)); [ $i -gt "$A_IDLE_WAIT_S" ] && fail "$A did NOT scale to zero while $B was busy (fleet-global idle regression, #75)"; sleep 1
 done
 ok "$A scaled to zero on schedule while $B held an open connection (per-app idle holds)"
 [ "$(PODS "$B")" -ge 1 ] || fail "$B (busy) was wrongly scaled down"

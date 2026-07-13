@@ -23,6 +23,9 @@
 #      read loaders). RO_HPA_UP_TIMEOUT / RO_HPA_DOWN_TIMEOUT seconds.
 set -eu
 cd "$(dirname "$0")"
+# Shared drill budget helpers (#198): wake-latency-scaled idle/hold budgets so a
+# slow/CPU-tight cluster (~14s cold wake) does not false-FAIL fixed 2–5s numbers.
+. ./_lib-drill.sh
 NS=scale-zero-pg
 K="kubectl -n $NS"
 # Throwaway psql CLIENT pods use a small, ALWAYS-PULLABLE psql image (issue #171):
@@ -59,7 +62,13 @@ RO_DSN="postgres://${CA_CRED}@pggw-ro:55434/postgres?sslmode=disable"
 # gateway RO driver and the HPA never fight over compute-ro's replica count. The
 # Service load-balances across the pool (kube-proxy), which is exactly what the
 # gateway's GW_RO_TARGET points at.
-RO_DIRECT="postgres://cloud_admin:cloud_admin@compute-ro.scale-zero-pg.svc:55433/postgres?sslmode=disable"
+# CRED FIX (#198): dial the STRONG cloud_admin from the DATABASE_URL Secret ($CA_CRED),
+# NOT the public default cloud_admin:cloud_admin. Since #168/#112 the base compute
+# serves cloud_admin over TCP only under its strong md5 — the default password is
+# rejected, so a default-cred loader ran NO query, compute-ro CPU stayed ~10%, and
+# the CPU-target HPA never tripped (the "no-op load generator" bug). $CA_CRED is
+# TCP-valid, so the CPU-heavy loader below now actually loads the pool.
+RO_DIRECT="$(ro_direct_dsn "$CA_CRED" compute-ro.scale-zero-pg.svc)"
 RO_LOAD_REPLICAS="${RO_LOAD_REPLICAS:-4}"
 RO_HPA_UP_TIMEOUT="${RO_HPA_UP_TIMEOUT:-240}"
 RO_HPA_DOWN_TIMEOUT="${RO_HPA_DOWN_TIMEOUT:-330}"
@@ -68,6 +77,12 @@ RO_HPA_DOWN_TIMEOUT="${RO_HPA_DOWN_TIMEOUT:-330}"
 # cluster, 5 RO pods at 1Gi each cause node memory eviction. The n>1 GA gate only
 # needs N>=2, so the drill patches max down after apply. Raise on a bigger cluster.
 RO_HPA_MAX="${RO_HPA_MAX:-3}"
+# Test-gateway idle (#198): the baked-in 8000ms was < the ~14s cold wake, so the RO
+# pool idled back to 0 BEFORE the post-read `compute-ro replicas>=1` assertion. Size
+# it off the wake budget (idle_budget_ms, default 60000) so a just-woken pool stays
+# up long enough for the pre-HPA assertions. The HPA section overrides this to ~1h
+# anyway (posture B), so a large value here is only felt by sections 2–4.
+TEST_IDLE_MS="$(idle_budget_ms)"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 ok() { echo "ok - $*"; }
@@ -128,8 +143,22 @@ preclean() {
   for p in $($K get pods --no-headers 2>/dev/null | awk '/^rocli-/{print $1}'); do
     $K delete pod "$p" --ignore-not-found --wait=false >/dev/null 2>&1 || true
   done
+  # CRASH-SAFETY (#198): the HPA section disables the LIVE pggw's RO idle and relies
+  # on the EXIT trap to restore it. A kill -9 / OOM would skip the trap and leave the
+  # production gateway patched. If a leftover _tmp-pggw-ro-idle.orig from such a run
+  # survives, restore the live pggw from it up front so we never START on a patched
+  # prod gateway. (compute-ro is a SHARED singleton the live pggw co-drives, so this
+  # cannot be sidestepped with a throwaway gateway — the live pggw is the co-driver.)
+  if [ -f _tmp-pggw-ro-idle.orig ]; then
+    STALE_IDLE="$(cat _tmp-pggw-ro-idle.orig 2>/dev/null || true)"
+    if [ -n "$STALE_IDLE" ]; then
+      $K set env deploy/pggw GW_RO_IDLE_MS="$STALE_IDLE" >/dev/null 2>&1 || true
+      echo "    restored live pggw GW_RO_IDLE_MS=$STALE_IDLE from a crashed prior run"
+    fi
+    rm -f _tmp-pggw-ro-idle.orig
+  fi
   rm -f _tmp-pggw-ro.yaml
-  ok "preclean done (stale test gateway + rocli-* pods removed)"
+  ok "preclean done (stale test gateway + rocli-* pods removed; live pggw idle un-patched if crashed)"
 }
 preclean
 
@@ -177,8 +206,8 @@ spec:
             - { name: GW_RO_DEPLOYMENT, value: "compute-ro" }
             - { name: GW_RO_TARGET, value: "compute-ro.scale-zero-pg.svc:55433" }
             - { name: GW_RO_WAKE_REPLICAS, value: "1" }
-            - { name: GW_RO_IDLE_MS, value: "8000" }
-            - { name: GW_IDLE_MS, value: "8000" }
+            - { name: GW_RO_IDLE_MS, value: "${TEST_IDLE_MS}" }
+            - { name: GW_IDLE_MS, value: "${TEST_IDLE_MS}" }
             - { name: GW_WAKE_TIMEOUT_MS, value: "120000" }
             - { name: GW_RETRY_MS, value: "100" }
           ports:
@@ -207,7 +236,7 @@ spec:
     - { name: ro-pg, port: 55434, targetPort: ro-pg }
     - { name: metrics, port: 9090, targetPort: metrics }
 YAML
-sed -i.sedbak "s|\${IMAGE}|${IMAGE}|" _tmp-pggw-ro.yaml && rm -f _tmp-pggw-ro.yaml.sedbak
+sed -i.sedbak -e "s|\${IMAGE}|${IMAGE}|" -e "s|\${TEST_IDLE_MS}|${TEST_IDLE_MS}|g" _tmp-pggw-ro.yaml && rm -f _tmp-pggw-ro.yaml.sedbak
 $K apply -f _tmp-pggw-ro.yaml >/dev/null || fail "test gateway apply failed"
 $K rollout status deploy/pggw-ro --timeout=120s >/dev/null || fail "test gateway not ready"
 ok "test gateway pggw-ro (writer + RO lanes) ready"
