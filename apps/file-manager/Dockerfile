@@ -100,7 +100,8 @@ ENV PORT=3000
 # 1.34.8-r0 for CVE-2026-33630, pulled in via libcurl) would otherwise trip the
 # Trivy HIGH/CRITICAL gate until the next digest bump. The upgrade only pulls
 # published fixes from the SAME pinned alpine stable branch — it cannot float
-# the base to a different alpine release.
+# the base to a different alpine release. Policy: docs/security/threat-model.md
+# §4 "Patching policy" (#267).
 RUN apk upgrade --no-cache && apk add --no-cache curl vips
 
 # Strip the package managers from the RUNTIME image (#199). The standalone server

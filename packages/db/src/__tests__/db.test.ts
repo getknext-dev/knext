@@ -41,7 +41,7 @@ describe('@knext/db — client accessors over the @knext/lib pools', () => {
   describe('getDb() — writer', () => {
     it('wraps the @knext/lib writer pool (DATABASE_URL)', async () => {
       const { getDb } = await import('../index');
-      const db = (await getDb()) as unknown as { pool: unknown };
+      const db = getDb() as unknown as { pool: unknown };
       expect(getDbPool).toHaveBeenCalledTimes(1);
       expect(db.pool).toBe(WRITER_POOL);
     });

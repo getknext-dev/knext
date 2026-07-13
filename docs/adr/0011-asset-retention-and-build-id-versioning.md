@@ -80,7 +80,9 @@ build, so a query-string/`deploymentId` mechanism was missing.
    entirely** — over-keep, never over-delete. This guarantees a **#92 pinned / canary / rolled-back**
    build is **never reaped, even when older than the window**. The deploy-time pruner
    (`pruneOldBuilds`) deletes strictly under `<app>/_next/static/<id>/`, best-effort (a GC failure
-   never fails an already-shipped deploy). It never deletes the only/last build and refuses any
+   never fails an already-shipped deploy). Consequently the summary's `reaped` field records the
+   **attempted** delete set, not confirmed outcomes — a silently-failed provider delete is still
+   listed. It never deletes the only/last build and refuses any
    delete URI not scoped to `_next/static/<id>/`.
 
 4. **Authority split (load-bearing).** The ADR-0008 deletion finalizer's bare-`<app>/` delete is

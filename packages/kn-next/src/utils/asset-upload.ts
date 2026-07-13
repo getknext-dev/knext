@@ -799,6 +799,9 @@ export interface PruneSummary {
      * Build-ids whose prefixes were reaped (delete issued), oldest-first.
      * Under `dryRun` these are the candidates that WOULD be reaped — no
      * delete was issued (`dryRun: true` makes the distinction unambiguous).
+     * `reaped` records the ATTEMPTED delete set, not the confirmed outcome:
+     * deletes are best-effort (`runQuietAllowFail`), so a silently-failed
+     * provider delete is still listed here.
      */
     reaped: string[];
     /**
