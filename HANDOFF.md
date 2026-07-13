@@ -101,6 +101,49 @@ sign-off COMMENTS are posted on the PR (learned from #163). User docs + `BENCHMA
 ship in the same PR (rule 2b). After each workflow: shut the agent down, remove its
 worktree, close its pane (loop step 6).
 
+## 5b. Agent-team structure — HOW to run the improvement loop
+This project is run by a **multi-agent team** (cmux — each named teammate opens in its own
+split pane). A future LLM agent should reproduce this structure; the roles are:
+
+- **Lead (orchestrator)** — you. Files issues, spawns lanes, runs the sign-off gate, merges,
+  deploys, and keeps the handoff artifacts current. The lead does the coordination and the
+  MERGE; it does NOT implement or self-approve.
+- **Implementer lane** — ONE agent per issue, working in its OWN git worktree
+  (`git worktree add -b feat/<n>-<slug> origin/main /path/KS-PG-wt-<slug>`). It does TDD
+  (red→green), opens a PR that says "Closes #N", and **STOPS at the gate** — it never spawns
+  reviewers, never merges, never enables auto-merge. Reports the PR number to the lead.
+- **Per-PR gate reviewers** — THREE independent agents the LEAD spawns after CI is green:
+  (1) **code-reviewer** (correctness/TDD/conventions), (2) **architect-signoff** (ADR/
+  sequencing/kill-criteria), (3) **system-designer-signoff** (contracts/failure-modes/
+  isolation). Each POSTS its verdict as a PR comment (`gh pr comment`) starting with e.g.
+  `**CODE REVIEW: APPROVE**` / `**ARCHITECT: SIGN-OFF**` / `**SYSTEM-DESIGNER: SIGN-OFF**`.
+  For scale-zero-pg use `general-purpose` agents with a scoped prompt; the knext repo has
+  dedicated `knext-code-reviewer` / `knext-architect-signoff` / `knext-systemdesigner-signoff`.
+
+**The loop, end to end:** lead files issue(s) → spawns an implementer lane per issue →
+lane TDDs + opens PR + stops → lead waits for CI green → lead spawns the 3 gate reviewers →
+each posts a sign-off comment → **lead merges ONLY when all 3 sign-off COMMENTS are posted**
+(reconcile from the PR comments, don't trust a bare idle-notification) → if the change is a
+manifest/image, lead does the **post-merge deploy** (CD builds on push to `gateway/**`; lead
+pins the new `sha-<short>@sha256:<digest>` in the deploy manifest + `kubectl rollout`) →
+lead tells the lane to run **loop step 6** (remove worktree + prune, delete branch, close
+pane) → lead verifies cleanup and sends a `shutdown_request` to each finished agent.
+
+**Hard rules (learned the hard way):**
+- **#163 — lanes NEVER self-merge or self-spawn reviewers.** The gate bypass in #161 (a lane
+  merged with 1/3 sign-offs) is why the lead owns the merge and requires 3 POSTED comments.
+- **Deconfliction (agent-spawn-deconfliction):** unique worktree name per lane + DISJOINT
+  issue/file ownership; check the roster before spawning; if two lanes collide, the
+  furthest-along wins.
+- **Pane/agent hygiene:** after a lane completes + cleans up, `shutdown_request` it; verify the
+  pane closed (a wedged pane is killed via its captured pane id). Reviewers are retired the
+  same way once their sign-off is posted.
+- **Signal vs noise (drills/tests):** classify a test FAIL as product-REGRESSION (alarm) vs
+  drill-timing / capacity / transient-infra artifact (expected on the 2-node cluster) — only a
+  real regression blocks. NEVER scale down production to free drill capacity — park instead.
+- **Honesty:** report coverage truthfully (offline vs live), never fabricate a green run; when
+  the OKE API is flaky or the session lapses, say so and fall back to offline/code-traced proof.
+
 ## 6. Credentials / access a new agent must provision (NOT in the repo)
 1. **GitHub**: `gh auth` with push to `getknext-dev/scale-zero-pg` (auto-merge +
    delete-branch enabled on the repo).
