@@ -156,6 +156,12 @@
       "flakey": [
         "app-dir - server-actions-redirect-middleware-rewrite.test should redirect correctly in edge runtime with middleware rewrite"
       ]
+    },
+    "test/e2e/edge-async-local-storage/index.test.ts": {
+      "flakey": [
+        "edge api can use async local storage cans use a single instance per request",
+        "edge api can use async local storage cans use multiple instances per request"
+      ]
     }
   },
   "rules": {
@@ -344,6 +350,17 @@
       "mechanism": "60s jest timeout awaiting an EDGE-runtime server-action redirect through a middleware rewrite; zero assertion diffs and ZERO server-side exceptions in the surfaced server-log tails (run 28616072395). Cross-run wobble on the bun lane (fails/passes whole runs), so ledgered as flakey — but honestly noted: the hang shape overlaps the documented Bun ≤1.3.14 edge-sandbox outbound-fetch gap (next/dist/compiled/edge-runtime bundled-undici fetch never resolving; the middleware-rewrite proxy path exercises the same sandbox), which likely decides which runs lose the race. Re-examine when Bun ships the 1.4 fixes.",
       "evidence": "run 28616072395 (KNEXT_RUNTIME=bun, #188 round 3): FINAL failure, same case 3/3 attempts at 60000ms; run 28607626868 (first bun run): FINAL failure, same case (Bucket-2 investigate list); run 28612654960 (round 2): file PASSED — cross-run wobble, bun lane only (Node lane green).",
       "provenance": "Not in upstream's flakey ledger; bun-lane-only observation. Mechanism family: the Bun edge-sandbox outbound-fetch gap documented in PR #189 (middleware-fetches-with-any-http-method, app-static POST-fetch case) — the deterministic members of that family stay RED and unledgered; this case alone wobbles run-to-run."
+    },
+    {
+      "test": "test/e2e/edge-async-local-storage/index.test.ts",
+      "nextjsRef": "v16.2.0",
+      "cases": [
+        "edge api can use async local storage cans use a single instance per request",
+        "edge api can use async local storage cans use multiple instances per request"
+      ],
+      "mechanism": "60s hardcoded individualTestTimeout ('Exceeded timeout of 60000 ms') in BOTH edge-API AsyncLocalStorage cases; zero assertion diffs. The fixture's edge handlers (config.runtime='edge' pages/api routes, 100 concurrent requests per case) do await fetch('https://example.vercel.sh') + await response.text() inside the edge sandbox — VERBATIM the documented Bun <=1.3.x edge-sandbox outbound-fetch gap (docs/compat/upstream-bun-sandbox-fetch-bug.md: the fetch resolves with status 200, then a mid-body socket error is swallowed by the bundled undici over bun's node-compat sockets and the body promise neither resolves nor rejects), so the handler awaits forever and the case hits the bare test-level timeout. The WAN-endpoint-dependent trigger (mid-body connection death) explains the partial in-run recovery on attempt 3. Packaging exonerated: the same run's three-tarball 0.2.0 deploys were healthy across shards.",
+      "evidence": "run 29276122186 (KNEXT_RUNTIME=bun, observed Bun 1.3.14, main, first bun-lane run of the 0.2.0 packaging; shard 13/16, 47 passed / 1 failed): FINAL failure past retries ('failed to pass within 2 retries') — 'cans use multiple instances per request' hung 60s on ALL 3 attempts (66292/66314/66319 ms); 'cans use a single instance per request' hung 60s on attempts 1+2 (66305/66318 ms) then PASSED attempt 3 in 12643 ms — quarantined alongside its final-failing sibling per the alternating-sibling precedent (both cases exercise the identical sandbox-fetch mechanism). Prior bun weeklies were GREEN on this file (run 28734528961: 775/3, the 3 reds being the documented deterministic gap files) — cross-run wobble, bun lane only (Node lane green: the file is part of the Node 778/0 credential). LANE-SCOPING COST, stated honestly: the manifest is lane-BLIND (both lanes load the same NEXT_EXTERNAL_TESTS_FILTERS file; there is no lane-scoped suites mechanism), so this flakey skip also drops the two cases on the NODE lane where they pass — the identical accepted cost as the server-actions-redirect-middleware-rewrite precedent; re-test for removal on the first Bun >=1.4 stable bump or NEXTJS_REF bump.",
+      "provenance": "Not in upstream's flakey ledger; bun-lane-only observation, same mechanism family as the server-actions-redirect-middleware-rewrite entry: the Bun edge-sandbox outbound-fetch gap (docs/compat/upstream-bun-sandbox-fetch-bug.md, PR #189/#207 — fetch resolves, errored body never settles; persists on Bun 1.4.0-canary). Reference-adapter corroboration: the official Bun adapter (nextjs/adapter-bun) excludes test/e2e/edge-async-local-storage/index.test.ts WHOLESALE in its own test/deploy-tests-manifest.adapter-bun.json, alongside the same family's middleware-fetches-with-any-http-method and server-actions-redirect-middleware-rewrite — the reference Bun deploy target cannot run this file either. knext stays per-case (S c.1), not file-level: the family-level bar (ADR-0007 S d) is reserved for the runtime-prefetch family."
     },
     {
       "test": "test/e2e/app-dir/segment-cache/cached-navigations/cached-navigations.test.ts",

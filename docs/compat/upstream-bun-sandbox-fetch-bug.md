@@ -49,6 +49,17 @@ Affected files and the evidence trail (#188, PR #189 rounds 1–3):
   edge-runtime page): same signature, same runs.
 - Ledger note: the `server-actions-redirect-middleware-rewrite` cross-run wobble overlaps this
   mechanism class (PR #189 round 3).
+- `edge-async-local-storage/index.test.ts` (both cases — edge-API AsyncLocalStorage handlers
+  doing `await fetch('https://example.vercel.sh')` + `await response.text()` in the sandbox,
+  the mechanism verbatim): FINAL post-retry failure on
+  [29276122186](https://github.com/getknext-dev/knext/actions/runs/29276122186)
+  (2026-07-13, first bun-lane run of the 0.2.0 packaging, Bun 1.3.14, shard 13/16 — the
+  "multiple instances" case hung 60s on all 3 attempts; "a single instance" hung attempts 1+2
+  then recovered), green on prior bun weeklies (e.g. 28734528961) — cross-run wobble, so
+  §c.1 per-case quarantined rather than left red like the deterministic members above.
+  Corroboration: the reference `nextjs/adapter-bun` excludes this file wholesale in its own
+  deploy manifest, alongside `middleware-fetches-with-any-http-method` and
+  `server-actions-redirect-middleware-rewrite`.
 
 **The control that makes this evidence-grade:** the **node lane** of the identical workflow —
 same GHA infra, same test files, same external echo endpoint, same knext build — is green on

@@ -407,6 +407,14 @@ const FAMILY_FILE_QUARANTINES: Record<
 //   • server-actions-redirect-middleware-rewrite: bun-lane wobble whose
 //     mechanism overlaps the documented Bun edge-sandbox outbound-fetch gap
 //     (PR #189) — NOT the runtime-prefetch family; stays per-case.
+//   • edge-async-local-storage: same edge-sandbox outbound-fetch mechanism
+//     class (the fixture's edge handlers await fetch(...) + response.text() —
+//     the documented Bun ≤1.3.x errored-body-never-settles gap); bun-lane-only
+//     final-post-retry failure in run 29276122186. LANE-SCOPING NOTE: the
+//     manifest is lane-BLIND (both lanes load the same
+//     NEXT_EXTERNAL_TESTS_FILTERS file), so this skip also drops the two cases
+//     on the NODE lane where they pass — the same accepted cost as the
+//     server-actions precedent entry, documented in the ledger record.
 const PER_CASE_QUARANTINES: Record<string, { cases: string[]; observedRuns: string[] }> = {
   'test/e2e/app-dir/server-actions-redirect-middleware-rewrite/server-actions-redirect-middleware-rewrite.test.ts':
     {
@@ -415,6 +423,13 @@ const PER_CASE_QUARANTINES: Record<string, { cases: string[]; observedRuns: stri
       ],
       observedRuns: ['28616072395', '28607626868'],
     },
+  'test/e2e/edge-async-local-storage/index.test.ts': {
+    cases: [
+      'edge api can use async local storage cans use a single instance per request',
+      'edge api can use async local storage cans use multiple instances per request',
+    ],
+    observedRuns: ['29276122186'],
+  },
 };
 
 describe('deploy-tests-manifest — #214 family-level quarantine (ADR-0007 §d)', () => {
