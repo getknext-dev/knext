@@ -27,7 +27,11 @@
 import { writeSync } from "node:fs";
 import type { KnativeNextConfig } from "../config";
 import { parseLiveRevisionNames, resolveLiveBuildIds } from "../utils/asset-gc";
-import { pruneOldBuilds } from "../utils/asset-upload";
+import {
+    BUILD_MARKER_FILENAME,
+    type PruneSummary,
+    pruneOldBuilds,
+} from "../utils/asset-upload";
 import { createLogger } from "../utils/logger";
 import { runCapture } from "./exec";
 // Single source of truth for config loading — also runs validateConfig.
@@ -50,6 +54,15 @@ export interface AssetGCResult {
     pruned: boolean;
     /** The revision names observed in status.currentTraffic (diagnostics). */
     liveRevisions: string[];
+    /** Which fail-safe fired (only set when `pruned` is false). */
+    skipReason?: "unresolvable-live-build-id" | "pinned-with-empty-status";
+    /**
+     * The `spec.traffic.revisionName` pin observed while status.currentTraffic
+     * was empty (#264 fail-safe), or "(unreadable)" when the probe threw.
+     */
+    pinnedRevision?: string;
+    /** What the prune did (only set when `pruned` is true). */
+    summary?: PruneSummary;
 }
 
 /**
@@ -78,6 +91,39 @@ export function runAssetGC(
     const liveRevisions = parseLiveRevisionNames(
         trafficJson.replace(/^'|'$/g, ""),
     );
+    // #264 fail-safe: an EMPTY status.currentTraffic while the CR PINS a
+    // revision (spec.traffic.revisionName set — a #92 rollback) means the
+    // status was wiped or is lagging. A window-only prune here could reap the
+    // pinned build's assets. Probe the spec (READ-ONLY) and skip loudly; a
+    // failed probe also skips (we cannot prove there is no pin — over-keep,
+    // never over-delete).
+    if (liveRevisions.length === 0) {
+        let pinned: string;
+        try {
+            pinned = exec([
+                "kubectl",
+                "get",
+                "nextapp",
+                config.name,
+                "-n",
+                namespace,
+                "-o",
+                "jsonpath={.spec.traffic.revisionName}",
+            ])
+                .replace(/^'|'$/g, "")
+                .trim();
+        } catch {
+            pinned = "(unreadable)";
+        }
+        if (pinned) {
+            return {
+                pruned: false,
+                liveRevisions,
+                skipReason: "pinned-with-empty-status",
+                pinnedRevision: pinned,
+            };
+        }
+    }
     // Resolve each live revision to its build-id via the operator-stamped
     // label (read-only). The single-token jsonpath escapes the dotted/slashed
     // label key. A missing label yields '' → resolveLiveBuildIds fails safe.
@@ -96,10 +142,14 @@ export function runAssetGC(
             .trim(),
     );
     if (!resolved.ok) {
-        return { pruned: false, liveRevisions };
+        return {
+            pruned: false,
+            liveRevisions,
+            skipReason: "unresolvable-live-build-id",
+        };
     }
-    prune(config, resolved.buildIds, newBuildId);
-    return { pruned: true, liveRevisions };
+    const summary = prune(config, resolved.buildIds, newBuildId);
+    return { pruned: true, liveRevisions, summary };
 }
 
 export interface GcArgs {
@@ -150,9 +200,19 @@ keeps the newest \`storage.assetRetention\` build-ids (default 3) PLUS every
 build-id currently serving traffic (resolved read-only from the NextApp's
 status.currentTraffic via the operator-stamped \`apps.kn-next.dev/build-id\`
 revision label) — a pinned/canary/rolled-back revision's assets are NEVER
-reaped. FAIL-SAFE: if any live revision has no resolvable build-id the GC is
-skipped entirely (over-keep, never over-delete). The bare \`<app>/\` prefix is
-teardown-only (ADR-0008) and never touched.
+reaped. FAIL-SAFE: if any live revision has no resolvable build-id, or the CR
+pins a revision (spec.traffic.revisionName) while status.currentTraffic is
+empty (status wiped/lagging), the GC is skipped entirely
+(over-keep, never over-delete). The bare \`<app>/\` prefix is teardown-only
+(ADR-0008) and never touched.
+
+MARKER INVERSION: only prefixes carrying the \`.knext-build\` marker object
+(written by every \`kn-next\` upload at \`_next/static/<id>/.knext-build\`) are
+ever reap candidates — unknown/future dirs default to KEEP. Builds uploaded by
+a pre-marker kn-next are therefore never reaped until a marker-carrying
+re-upload; such kept prefixes are named in the output, and reclaiming a
+retired app's pre-marker prefixes is a manual delete (or deleting the NextApp,
+whose teardown finalizer wipes the whole \`<app>/\` namespace).
 
 The app + storage come from kn-next.config.ts in the current directory.
 
@@ -190,10 +250,28 @@ export async function gcMain(argv: readonly string[]): Promise<number> {
     // process.exit right after can swallow it — a command that may have
     // DELETED objects must always print what it did.
     if (res.pruned) {
+        // Unmarked prefixes were skipped LOUDLY, by name (#264 marker
+        // inversion — pre-marker uploads / unknown dirs are over-kept).
+        const keptUnmarked = res.summary?.keptUnmarked ?? [];
+        const unmarkedNote =
+            keptUnmarked.length > 0
+                ? `; unmarked prefixes kept (no ${BUILD_MARKER_FILENAME} marker — ` +
+                  `pre-marker upload or unknown dir): [${keptUnmarked.join(", ")}]`
+                : "";
         writeSync(
             1,
             `gc: completed for ${config.name} (ns ${args.namespace}) — ` +
-                `live revisions protected: [${res.liveRevisions.join(", ")}]\n`,
+                `live revisions protected: [${res.liveRevisions.join(", ")}]` +
+                `; reaped: [${(res.summary?.reaped ?? []).join(", ")}]` +
+                `${unmarkedNote}\n`,
+        );
+    } else if (res.skipReason === "pinned-with-empty-status") {
+        writeSync(
+            1,
+            `gc: SKIPPED (fail-safe over-keep) — ${config.name} pins revision ` +
+                `"${res.pinnedRevision}" (spec.traffic.revisionName) but ` +
+                `status.currentTraffic is empty (status wiped or lagging); a ` +
+                `window-only prune could reap the pinned build. Nothing was deleted.\n`,
         );
     } else {
         writeSync(

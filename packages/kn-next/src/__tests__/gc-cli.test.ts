@@ -124,8 +124,10 @@ describe("runAssetGC", () => {
         ).toThrow(/no such nextapp/);
     });
 
-    it("empty currentTraffic ⇒ window-only GC (prune with an empty live set)", () => {
+    it("empty currentTraffic AND no spec pin ⇒ window-only GC (prune with an empty live set)", () => {
         const exec = (argv: readonly string[]): string => {
+            // Both NextApp reads (status.currentTraffic, then the #264
+            // spec.traffic.revisionName pin probe) come back empty.
             if (argv.includes("nextapp")) return "";
             throw new Error("unexpected revision read");
         };
@@ -135,6 +137,72 @@ describe("runAssetGC", () => {
 
         expect(res.pruned).toBe(true);
         expect(prune).toHaveBeenCalledWith(expect.anything(), [], "bid-d");
+    });
+
+    it("FAIL-SAFE (#264): spec.traffic.revisionName pinned but status.currentTraffic empty ⇒ NO prune (over-keep)", () => {
+        // status wiped/lagging while a rollback pin is set in spec: a
+        // window-only prune could reap the pinned build. Must skip loudly.
+        const calls: string[][] = [];
+        const exec = (argv: readonly string[]): string => {
+            calls.push([...argv]);
+            if (argv.some((a) => a.includes(".status.currentTraffic")))
+                return "";
+            if (argv.some((a) => a.includes(".spec.traffic.revisionName")))
+                return "shop-00007";
+            throw new Error("unexpected read");
+        };
+        const prune = vi.fn();
+
+        const res = runAssetGC(makeConfig(), "prod", "bid-d", exec, prune);
+
+        expect(res.pruned).toBe(false);
+        expect(res.skipReason).toBe("pinned-with-empty-status");
+        expect(res.pinnedRevision).toBe("shop-00007");
+        expect(prune).not.toHaveBeenCalled();
+        // The pin probe is a READ-ONLY nextapp get with the exact jsonpath.
+        expect(calls[1]).toEqual([
+            "kubectl",
+            "get",
+            "nextapp",
+            "shop",
+            "-n",
+            "prod",
+            "-o",
+            "jsonpath={.spec.traffic.revisionName}",
+        ]);
+    });
+
+    it("FAIL-SAFE (#264): a THROWING spec-pin probe (with empty status) ⇒ NO prune (over-keep, no throw)", () => {
+        const exec = (argv: readonly string[]): string => {
+            if (argv.some((a) => a.includes(".status.currentTraffic")))
+                return "";
+            throw new Error("kubectl blew up reading the spec");
+        };
+        const prune = vi.fn();
+
+        const res = runAssetGC(makeConfig(), "prod", "bid-d", exec, prune);
+
+        expect(res.pruned).toBe(false);
+        expect(res.skipReason).toBe("pinned-with-empty-status");
+        expect(prune).not.toHaveBeenCalled();
+    });
+
+    it("non-empty currentTraffic ⇒ NO spec-pin probe (status is authoritative when populated)", () => {
+        const calls: string[][] = [];
+        const exec = (argv: readonly string[]): string => {
+            calls.push([...argv]);
+            if (argv.includes("nextapp")) return trafficJson(["shop-00002"]);
+            return "bid-a";
+        };
+        const res = runAssetGC(makeConfig(), "prod", "bid-d", exec, vi.fn());
+        expect(res.pruned).toBe(true);
+        // status read + one revision-label read; NO extra spec read.
+        expect(calls).toHaveLength(2);
+        expect(
+            calls.some((argv) =>
+                argv.some((a) => a.includes(".spec.traffic.revisionName")),
+            ),
+        ).toBe(false);
     });
 });
 
