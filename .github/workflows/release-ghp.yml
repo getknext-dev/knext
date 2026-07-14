@@ -39,6 +39,10 @@ jobs:
     runs-on: ubuntu-latest
     # Only ever run on the canonical repo (never forks).
     if: github.repository == 'getknext-dev/knext'
+    outputs:
+      # The just-published @getknext-dev/core version — the smoke job installs
+      # exactly this version from the registry channel (never a floating tag).
+      core-version: ${{ steps.published-version.outputs.core-version }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -103,3 +107,50 @@ jobs:
           publish_dir ".ghp-staging/lib"
           publish_dir ".ghp-staging/db"
           publish_dir ".ghp-staging/core"
+
+      # Surface the just-published core version so the consumer smoke job installs
+      # EXACTLY it (@getknext-dev/core@<version>), not a floating dist-tag.
+      - name: Record published core version
+        id: published-version
+        run: |
+          set -euo pipefail
+          v="$(node -p "require('./.ghp-staging/core/package.json').version")"
+          echo "core-version=${v}" >>"$GITHUB_OUTPUT"
+          echo "==> published @getknext-dev/core@${v}"
+
+  # P3a: the REGISTRY-CHANNEL consumer proof (v2-incident follow-up). Installs the
+  # just-published @getknext-dev/core FROM npm.pkg.github.com as an outside consumer
+  # would — repo-linked packages + GITHUB_TOKEN read, so NO new secret is needed —
+  # and asserts the CLI bin runs and the public app-import surface resolves to real
+  # JS. scripts/install-smoke.mjs proves the SOURCE tarball; this proves the
+  # published REGISTRY channel is actually installable.
+  smoke-ghp:
+    name: Consumer install-smoke (@getknext-dev/* from GitHub Packages)
+    runs-on: ubuntu-latest
+    needs: publish-ghp
+    if: github.repository == 'getknext-dev/knext'
+    # READ-ONLY scopes below — a consumer NEVER publishes and needs no token minting.
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      # The consumer smoke script writes its OWN .npmrc in a temp dir outside the
+      # repo (scoping @getknext-dev to npm.pkg.github.com + wiring GITHUB_TOKEN),
+      # asserts the scope registry resolves to pkg.github.com BEFORE installing,
+      # installs @getknext-dev/core@<the-just-published-version>, then audits every
+      # resolved @getknext-dev/* tarball URL is on pkg.github.com before running the
+      # CLI + app-import assertions. The @getknext-dev:registry line below documents
+      # the scope this job proves; the script is the source of truth.
+      - name: Consumer install-smoke against the GitHub Packages channel
+        env:
+          # @getknext-dev:registry=https://npm.pkg.github.com
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node scripts/ghp-install-smoke.mjs --version "${{ needs.publish-ghp.outputs.core-version }}"
