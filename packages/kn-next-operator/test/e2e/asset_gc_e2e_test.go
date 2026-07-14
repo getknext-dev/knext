@@ -164,6 +164,14 @@ const (
 	// prune actually pruned (the live-set protection is not a no-op).
 	gcBidCanaryReap = "bid-05-canary-reap"
 
+	// gcBidLagReap is seeded FRESH for the lagging-status leg (v3-P5):
+	// marked, unpinned, out-of-window — the reap that proves the POST-RESTORE
+	// normal GC actually prunes (reconcile genuinely resumed; the leg is not a
+	// no-op). While the app is scaled-to-zero + pinned with an EMPTY
+	// currentTraffic, the fail-safe skip must keep this prefix too (over-keep,
+	// never over-delete); only after restore does a normal GC reap it.
+	gcBidLagReap = "bid-06-lag-reap"
+
 	// gcMarkerFile is the ADR-0011 marker object name (#264): the pruner only
 	// ever reaps prefixes carrying `<app>/_next/static/<id>/.knext-build`.
 	gcMarkerFile = ".knext-build"
@@ -343,6 +351,49 @@ spec:
     minScale: 0
     maxScale: 2
 `, gcAppName, gcAppNamespace, gcAppImage, buildIDLine, target)
+}
+
+// gcMainAppPinnedManifest renders the MAIN app's CR with a spec.traffic pin
+// AND an explicit scaling window — the v3-P5 lagging-status lever. Reusing the
+// main app (not a second CR) is deliberate: the leg must prove reconcile
+// RESUMES on the SAME app after a real scale-to-zero cycle. `pinnedRevision`
+// goes into spec.traffic.revisionName; `buildID` re-asserts the label stamp so
+// the pinned revision stays resolvable across the churn; minScale lets the leg
+// drive a genuine scale-to-zero (0) and restore (1).
+func gcMainAppPinnedManifest(target, buildID, pinnedRevision string, minScale int) string {
+	buildIDLine := ""
+	if buildID != "" {
+		buildIDLine = fmt.Sprintf("  buildId: %q\n", buildID)
+	}
+	trafficBlock := ""
+	if pinnedRevision != "" {
+		trafficBlock = fmt.Sprintf("  traffic:\n    revisionName: %q\n", pinnedRevision)
+	}
+	return fmt.Sprintf(`apiVersion: apps.kn-next.dev/v1alpha1
+kind: NextApp
+metadata:
+  name: %s
+  namespace: %s
+spec:
+  image: %q
+  healthCheckPath: /
+%s  env:
+    TARGET: %q
+  scaling:
+    minScale: %d
+    maxScale: 2
+%s`, gcAppName, gcAppNamespace, gcAppImage, buildIDLine, target, minScale, trafficBlock)
+}
+
+// gcCurrentTrafficRaw reads NextApp status.currentTraffic WITHOUT asserting it
+// is non-empty (unlike gcCurrentTraffic). Returns the trimmed raw jsonpath so a
+// caller can poll for the LAGGING-EMPTY window (v3-P5) — an empty string is a
+// valid, expected observation there, not a failure.
+func gcCurrentTrafficRaw(g Gomega) string {
+	out, err := utils.Kubectl("get", "nextapp", gcAppName, "-n", gcAppNamespace,
+		"-o", "jsonpath={.status.currentTraffic}")
+	g.Expect(err).NotTo(HaveOccurred(), out)
+	return strings.TrimSpace(out)
 }
 
 // gcPinnedAppManifest renders the SECOND NextApp of the pin+wiped-status leg
@@ -1009,6 +1060,183 @@ var _ = Describe("asset retention GC against a live cluster (ADR-0011)", Ordered
 		for _, bid := range []string{gcPinnedBidOld1, gcPinnedBidOld2, gcPinnedBidNew} {
 			Expect(gcKeysWithPrefix(keys, pinnedStatic(bid))).To(HaveLen(3),
 				"prefix %s must be untouched by the skipped GC", bid)
+		}
+	})
+
+	// -----------------------------------------------------------------------
+	// v3-P5: the BOUND lagging-status leg. Discharges the deferral #264 part 2
+	// recorded explicitly (asset_gc_e2e_test.go, the "live pin+wiped-status" leg
+	// body): it noted that "scaling the operator down to freeze status mutates
+	// cluster state OUTSIDE the throwaway namespace, violating the suite's
+	// blast-radius contract in existing-cluster mode" — so it proved the skip on
+	// a SECOND, never-scaled CR pinned to a nonexistent revision. What it left
+	// UNPROVEN, and what THIS leg proves, is the same fail-safe reached through a
+	// REAL scale-to-zero cycle on the app itself, plus that the operator's
+	// reconcile RESUMES once traffic is restored.
+	//
+	// THE STATE UNDER TEST (real, user-reachable): an app pinned to a revision
+	// is scaled to zero; while at zero, the operator's status.currentTraffic can
+	// LAG — go empty/stale — because it mirrors ksvc.Status.Traffic
+	// (nextapp_controller.go mapTrafficStatus) and an unprogrammed/idle route can
+	// report no targets. A window-only prune in that window would reap the pinned
+	// build. The GC must instead hit the P4a fail-safe over-keep skip
+	// `pinned-with-empty-status` (empty currentTraffic + a standing spec pin ⇒
+	// SKIP, over-keep, never over-delete). We hold the lagging-empty state
+	// DETERMINISTICALLY the same honest way #264 part 2 established is real: a
+	// spec.traffic pin to a revision Knative cannot program the route to (so
+	// ksvc.Status.Traffic stays empty) — but here on the MAIN app, and ONLY
+	// after a genuine scale-to-zero. Restore then re-pins to the resolvable
+	// revision + scales back, and asserts currentTraffic REPOPULATES and a normal
+	// GC resolves the live set (reaping only the out-of-window unpinned build).
+	//
+	// BINDING CONDITION (v3 plan): this leg is CLUSTER-MUTATING beyond the
+	// namespace-confined, cluster-READ-ONLY guarantee the rest of this suite
+	// keeps — it scales the real app and churns its pin. It therefore runs ONLY
+	// on a self-contained kind cluster this suite provisions and owns; in
+	// existing-cluster mode (KNEXT_E2E_KUBE_CONTEXT set) it SKIPS, so a shared /
+	// ambient PROD app is never scaled out from under its owner. This mirrors the
+	// P2 kind-only guard rationale (a cluster-mutating suite must never touch an
+	// ambient context) applied at leg granularity.
+	It("lagging status (v3-P5): a scaled-to-zero app pinned while status.currentTraffic LAGS empty ⇒ gc SKIPS [pinned-with-empty-status], ZERO deletions; restore ⇒ reconcile resumes ⇒ normal GC reaps only the unpinned out-of-window build", func() {
+		if existing != "" {
+			Skip("lagging-status leg is self-contained-kind ONLY (it scales the app to zero — a mutation beyond this suite's namespace-confined, cluster-read-only contract); refusing to scale an app on a possibly shared existing cluster (KNEXT_E2E_KUBE_CONTEXT=" + existing + ")")
+		}
+
+		// This leg runs AFTER the reap leg (Ordered), which pinned rev2
+		// (gcBidPinned, resolvable+labeled) and left it as the single live
+		// target. Guard the premise so a reorder fails loud, not silently.
+		// rev2 (labeled gcBidPinned, resolvable) is BOTH the standing pin under
+		// test and the revision restore re-pins to — keeping gcBidPinned on the
+		// live-set rule across the whole leg. rev3 (labeled gcBidNew) is the
+		// retain-window survivor. Guard both premises so a reorder fails loud.
+		Expect(rev2Name).NotTo(BeEmpty(),
+			"premise: the reap leg must have pinned rev2 before this leg (Ordered)")
+		Expect(rev3Name).NotTo(BeEmpty(),
+			"premise: rev3 must exist (its build gcBidNew is the retain-window survivor)")
+
+		// A revision name the operator will never be able to program the route
+		// to — the deterministic lagging-empty lever (ADR-0014
+		// PinnedRevisionNotFound → Knative RevisionMissing → empty ksvc traffic),
+		// the SAME real state #264 part 2 documented.
+		lagPinnedRevision := gcAppName + "-00099" // never created
+
+		By("seeding a FRESH marked, unpinned, out-of-window build the POST-RESTORE prune must reap (so the reconcile-resumed assertion has teeth)")
+		for _, f := range []string{"_buildManifest.js", "_ssgManifest.js", gcMarkerFile} {
+			Expect(gcSeedObject(gcStaticPrefix(gcBidLagReap) + f)).To(Succeed())
+		}
+
+		// FULL RESTORE is guaranteed by DeferCleanup regardless of where the leg
+		// fails: re-pin to the real latest revision (rev3), restore minScale:1,
+		// and wait for the operator to reconcile a non-empty currentTraffic — so
+		// the leg leaves the app exactly as re-runnable as it found it.
+		DeferCleanup(func() {
+			By("DeferCleanup: restoring the app (re-pin to the resolvable rev2, minScale:1) and waiting for reconcile to resume")
+			Eventually(func(g Gomega) {
+				g.Expect(utils.ApplyManifest(
+					gcMainAppPinnedManifest("rev2", gcBidPinned, rev2Name, 1))).To(Succeed())
+			}, 2*time.Minute, 10*time.Second).Should(Succeed())
+			Eventually(func(g Gomega) {
+				g.Expect(gcCurrentTrafficRaw(g)).NotTo(BeEmpty(),
+					"reconcile did not resume: status.currentTraffic never repopulated after restore")
+			}, gcAssertTimeout, gcAssertPoll).Should(Succeed())
+		})
+
+		By("scaling the app to zero: patching minScale:0 while pinning the unprogrammable revision " + lagPinnedRevision)
+		// One apply does both: pin to an unprogrammable revision (empties
+		// ksvc.Status.Traffic — the lagging premise) AND minScale:0 (a genuine
+		// scale-to-zero). buildId reasserts rev2's label so the pin the GC unions
+		// stays resolvable were the status NON-empty; here it goes empty, which
+		// is the whole point.
+		Eventually(func(g Gomega) {
+			g.Expect(utils.ApplyManifest(
+				gcMainAppPinnedManifest("rev2", gcBidPinned, lagPinnedRevision, 0))).To(Succeed())
+		}, 2*time.Minute, 10*time.Second).Should(Succeed())
+
+		By("waiting for the app to actually scale to zero (0 Running pods) — a REAL scale-to-zero, not a simulated empty status")
+		Expect(utils.WaitForScaleToZero(gcAppNamespace, gcAppName)).To(Succeed(),
+			"app never scaled to zero — the lagging-while-scaled-to-zero premise cannot hold")
+
+		By("waiting until the operator has reconciled status.currentTraffic to LAGGING-EMPTY while the spec pin stands (the P4a fail-safe premise)")
+		// This is the operator's OBSERVED truth: the unprogrammable pin leaves
+		// ksvc.Status.Traffic empty, so mapTrafficStatus writes an empty
+		// currentTraffic — deterministically, for as long as the pin cannot
+		// resolve. We poll (bounded) because reconcile is asynchronous; an empty
+		// observation here is the EXPECTED window, not a failure.
+		Eventually(func(g Gomega) {
+			g.Expect(gcCurrentTrafficRaw(g)).To(BeEmpty(),
+				"premise unmet: status.currentTraffic must be EMPTY (lagging) while the spec pin cannot program the route")
+		}, gcAssertTimeout, gcAssertPoll).Should(Succeed())
+
+		By("confirming the spec pin still STANDS (empty status + a live pin is exactly the fail-safe premise)")
+		Eventually(func(g Gomega) {
+			out, err := utils.Kubectl("get", "nextapp", gcAppName, "-n", gcAppNamespace,
+				"-o", "jsonpath={.spec.traffic.revisionName}")
+			g.Expect(err).NotTo(HaveOccurred(), out)
+			g.Expect(strings.TrimSpace(out)).To(Equal(lagPinnedRevision),
+				"spec.traffic.revisionName must still carry the pin")
+		}).Should(Succeed())
+
+		assertEndpointIsTestMinIO()
+
+		By("running the REAL CLI: kn-next gc --build-id " + gcBidNew + " against the scaled-to-zero, lagging-empty, pinned app")
+		res := gcRunCLI("gc", "--build-id", gcBidNew, "-n", gcAppNamespace)
+		Expect(res.ExitCode).To(Equal(0),
+			"gc must exit 0 on the fail-safe skip\nstdout:\n%s\nstderr:\n%s", res.Stdout, res.Stderr)
+		Expect(res.Stdout).To(ContainSubstring("SKIPPED (fail-safe over-keep)"),
+			"gc must report the fail-safe skip while status lags empty under the pin")
+		Expect(res.Stdout).To(ContainSubstring("pinned-with-empty-status"),
+			"the skip MUST carry the P4a machine-greppable token (empty currentTraffic + pin ⇒ over-keep)")
+		Expect(res.Stdout).To(ContainSubstring(lagPinnedRevision),
+			"the skip report must NAME the standing pin")
+
+		By("asserting ZERO deletions while lagging: the pinned build AND the fresh out-of-window reap candidate BOTH survive the skip")
+		keys := gcListAppKeys(Default)
+		Expect(gcKeysWithPrefix(keys, gcStaticPrefix(gcBidPinned))).To(HaveLen(3),
+			"the pinned build must survive the fail-safe skip (never over-delete)")
+		Expect(gcKeysWithPrefix(keys, gcStaticPrefix(gcBidLagReap))).To(HaveLen(3),
+			"even a reapable out-of-window build must survive the skip — the whole point is over-keep, not over-delete")
+
+		// ── RESTORE ── re-pin to the resolvable revision rev2 + scale back;
+		// assert the operator's reconcile RESUMES (currentTraffic repopulates).
+		// We restore to rev2 (the pinned build under test) rather than rev3 so
+		// the live-set protection of gcBidPinned is preserved across the leg —
+		// the post-restore prune then keeps it on the live-set rule and reaps
+		// ONLY the fresh unpinned candidate.
+		By("RESTORE: re-pinning to the resolvable revision rev2 and restoring minScale:1")
+		Eventually(func(g Gomega) {
+			g.Expect(utils.ApplyManifest(
+				gcMainAppPinnedManifest("rev2", gcBidPinned, rev2Name, 1))).To(Succeed())
+		}, 2*time.Minute, 10*time.Second).Should(Succeed())
+
+		By("asserting the operator's reconcile RESUMES: status.currentTraffic repopulates to the restored live revision")
+		Eventually(func(g Gomega) {
+			targets := gcCurrentTraffic(g)
+			g.Expect(targets).NotTo(BeEmpty(),
+				"reconcile did not resume: currentTraffic still empty after restore")
+			g.Expect(targets[0].RevisionName).To(Equal(rev2Name),
+				"restored live traffic must be the re-pinned rev2, got %+v", targets)
+		}, gcAssertTimeout, gcAssertPoll).Should(Succeed())
+
+		assertEndpointIsTestMinIO()
+
+		By("running a NORMAL GC after restore: kn-next gc --build-id " + gcBidNew + " (reconcile resumed, live set resolvable again)")
+		res = gcRunCLI("gc", "--build-id", gcBidNew, "-n", gcAppNamespace)
+		Expect(res.ExitCode).To(Equal(0),
+			"post-restore gc must exit 0\nstdout:\n%s\nstderr:\n%s", res.Stdout, res.Stderr)
+		Expect(res.Stdout).To(ContainSubstring("gc: completed"),
+			"post-restore gc must report a completed prune (reconcile resumed ⇒ live set resolvable)")
+
+		By("asserting the post-restore prune reaps ONLY the unpinned out-of-window build; the pinned build + reserved dirs survive")
+		keys = gcListAppKeys(Default)
+		Expect(gcKeysWithPrefix(keys, gcStaticPrefix(gcBidLagReap))).To(BeEmpty(),
+			"the unpinned, out-of-window build MUST be reaped once reconcile resumed — proving a normal, non-skipped GC ran")
+		Expect(gcKeysWithPrefix(keys, gcStaticPrefix(gcBidPinned))).To(HaveLen(3),
+			"the pinned build must STILL survive the normal prune (live-set protection holds)")
+		Expect(gcKeysWithPrefix(keys, gcStaticPrefix(gcBidNew))).To(HaveLen(3),
+			"the just-deployed build must survive (retain window)")
+		for _, seg := range []string{"chunks", "css", "media"} {
+			Expect(gcKeysWithPrefix(keys, gcStaticPrefix(seg))).NotTo(BeEmpty(),
+				"reserved _next/static/%s/ must never be reaped", seg)
 		}
 	})
 })
