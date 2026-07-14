@@ -1,6 +1,7 @@
 # ADR-0011: Build-id-versioned assets, retention GC, and client→build pinning (skew protection)
 
-- Status: Accepted (amended 2026-07-13: marker-object inversion + pin-with-empty-status fail-safe, #264)
+- Status: Accepted (amended 2026-07-13: marker-object inversion + pin-with-empty-status fail-safe, #264;
+  amended v3-P4b: §TOCTOU — pre-delete re-read narrows the plan/delete window, `traffic-drift-during-plan`)
 - Date: 2026-06-22
 - Deciders: knext architect
 - Related: ADR-0001 (operator = single source of truth), ADR-0006 (object-store data plane),
@@ -201,8 +202,52 @@ lagging, a window-only prune can reap the pinned build.
   through a real prune), and the live pin+wiped-status e2e spec (a NextApp pinning a nonexistent
   revision — the PinnedRevisionNotFound/ADR-0014 state — proves the fail-safe skip on a real
   cluster) landed as the second half of #264.
-- **Known TOCTOU (named, not fixed):** the GC's status/spec reads and its delete execution are
-  not atomic — a pin applied in that narrow window is unprotected for the in-flight run.
-  Pre-existing and seconds-narrow; fixing it would need conditional-write/compare-and-delete
-  semantics the four object stores do not offer uniformly (documented at `runAssetGC` in
-  `packages/kn-next/src/cli/gc.ts`).
+- **Known TOCTOU (NARROWED, not eliminated — see §TOCTOU below):** the GC's status/spec reads and
+  its delete execution are not atomic — a pin/traffic change applied in that window is unprotected
+  for the in-flight run. Pre-existing and seconds-narrow; v3-P4b narrows (but does not close) the
+  window with a pre-delete re-read (documented at `runAssetGC` in `packages/kn-next/src/cli/gc.ts`).
+
+## §TOCTOU: the plan/delete window is NARROWED, not made atomic (v3-P4b)
+
+### The window
+
+`runAssetGC` has a **PLAN phase** (read `status.currentTraffic` + the `spec.traffic.revisionName`
+pin → resolve each live/pinned revision's build-id → compute the concrete set of
+`_next/static/<id>/` prefixes to delete) and a **DELETE phase** (execute those deletes via
+`pruneOldBuilds`). These are not atomic: a `kn-next rollback --to` (a #92 pin) or a traffic shift
+applied in the window BETWEEN the plan read and the delete is invisible to the plan's protected
+set, so an in-flight GC could reap the freshly-live/pinned build's prefix.
+
+### Decision — a single pre-delete re-read (narrowing)
+
+Immediately before the first delete, `runAssetGC` **RE-READS the pin +
+`status.currentTraffic` once more** (a second observation through the same read seam) and
+**ABORTS all deletes** (fail-safe over-keep — nothing deleted,
+`gc: SKIPPED (fail-safe over-keep) [traffic-drift-during-plan]`) on **any drift**:
+
+> `drift = (pin₂ ≠ pin₁) OR (currentTraffic₂ revision SET ≠ currentTraffic₁ set)`
+
+The `currentTraffic` comparison is a **full-set, order-insensitive** comparison (any added or
+removed revision is drift; a re-ordering is not). A re-read that itself **fails** (either read
+throws) is treated as **drift** (abort), never as "no drift" — the re-read may only ever make the
+GC **more conservative**; it can never cause a delete the original plan would have kept
+(over-keep, NEVER over-delete). `traffic-drift-during-plan` is the lowest-precedence skip token: it
+is only reachable once the three plan-phase fail-safes have passed and a concrete delete set exists.
+
+### Guarantee: NARROWED, NOT ATOMIC (claim no more)
+
+The re-read **shrinks** the window — a pin/traffic change observed at the second read aborts the
+run — but does **NOT eliminate** it. A change landing AFTER the second read and BEFORE the physical
+delete is still possible. Object stores (GCS/S3/MinIO/Azure) offer no uniform atomic
+**compare-and-delete across a set**, so a truly atomic guarantee is not achievable at this layer.
+This ADR claims only **narrowing**, not atomicity.
+
+### Alternative considered and NOT chosen — grace window
+
+A **grace window** (after computing the plan, wait *N* seconds so freshly-cut traffic /a
+just-applied pin stabilizes and is re-observed before deleting) was considered. **Rejected:** it
+adds fixed latency to every deploy-tail GC (and to `kn-next gc`) for a case that is rare, and it is
+**still not atomic** — a change arriving after the grace window and before the delete has the exact
+same exposure as the plain re-read, so it trades guaranteed latency for no stronger guarantee. The
+single pre-delete re-read gives most of the narrowing benefit at near-zero latency; a grace window
+can be layered on later if real-world drift is observed, without changing this contract.

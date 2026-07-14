@@ -92,8 +92,36 @@ describe("runAssetGC", () => {
             "-o",
             "jsonpath={.metadata.labels.apps\\.kn-next\\.dev/build-id}",
         ]);
-        // NOTHING else was exec'd through the kubectl boundary (no writes).
-        expect(calls).toHaveLength(3);
+        // v3-P4b TOCTOU re-read: immediately before the prune, the pin +
+        // status.currentTraffic are RE-READ ONCE more (a second observation).
+        // The re-read is the pin probe then the currentTraffic read — same
+        // READ-ONLY argv, no new per-revision label reads.
+        expect(calls[3]).toEqual([
+            "kubectl",
+            "get",
+            "nextapp",
+            "shop",
+            "-n",
+            "prod",
+            "-o",
+            "jsonpath={.spec.traffic.revisionName}",
+        ]);
+        expect(calls[4]).toEqual([
+            "kubectl",
+            "get",
+            "nextapp",
+            "shop",
+            "-n",
+            "prod",
+            "-o",
+            "jsonpath={.status.currentTraffic}",
+        ]);
+        // status + pin (plan) + ONE revision label + pin + status (re-read):
+        // exactly 5 READ-ONLY reads, no writes, no extra per-revision reads.
+        expect(calls).toHaveLength(5);
+        expect(calls.filter((argv) => argv.includes("revision"))).toHaveLength(
+            1,
+        );
         expect(prune).toHaveBeenCalledWith(
             expect.anything(),
             ["bid-a"],
@@ -275,7 +303,9 @@ describe("runAssetGC", () => {
             expect.anything(),
             ["bid-new", "bid-old"],
             "bid-d",
-            { dryRun: false },
+            {
+                dryRun: false,
+            },
         );
     });
 
@@ -294,8 +324,14 @@ describe("runAssetGC", () => {
         const res = runAssetGC(makeConfig(), "prod", "bid-d", exec, prune);
 
         expect(res.pruned).toBe(true);
-        // status + pin probe + ONE revision-label read (the live one).
-        expect(calls).toHaveLength(3);
+        // status + pin probe + ONE revision-label read (the live one), then the
+        // v3-P4b pre-delete re-read (pin + status again). The pin being already in
+        // currentTraffic still triggers NO extra per-revision label read — exactly
+        // one `kubectl get revision` across the whole run.
+        expect(calls).toHaveLength(5);
+        expect(calls.filter((argv) => argv.includes("revision"))).toHaveLength(
+            1,
+        );
         expect(prune).toHaveBeenCalledWith(
             expect.anything(),
             ["bid-a"],
@@ -437,7 +473,11 @@ describe("parseGcArgs", () => {
     it("--dry-run (#264 part 2) composes with --build-id and -n, in any order", () => {
         expect(
             parseGcArgs(["--dry-run", "--build-id", "bid-d", "-n", "prod"]),
-        ).toEqual({ namespace: "prod", buildId: "bid-d", dryRun: true });
+        ).toEqual({
+            namespace: "prod",
+            buildId: "bid-d",
+            dryRun: true,
+        });
         expect(parseGcArgs(["--build-id", "bid-d", "--dry-run"])).toEqual({
             namespace: "default",
             buildId: "bid-d",

@@ -44,16 +44,19 @@ describe("GC_SKIP_REASONS registry (v3-P4a — condition 1)", () => {
         }
     });
 
-    it("enumerates EXACTLY the three fail-safe skip causes the code can hit", () => {
+    it("enumerates EXACTLY the four fail-safe skip causes the code can hit", () => {
         // Grepped from every `pruned: false` return in runAssetGC:
         //   - empty status + a spec pin (or a failed pin probe with empty status)
         //   - a pin probe that threw / a pin build-id that can't be resolved
         //   - a live revision with no resolvable build-id label
+        //   - drift (pin/currentTraffic changed) between the plan re-read and the
+        //     first delete (v3-P4b TOCTOU narrowing)
         expect(new Set(REGISTRY_TOKENS)).toEqual(
             new Set([
                 "pinned-with-empty-status",
                 "pinned-not-resolvable",
                 "unresolvable-live-build-id",
+                "traffic-drift-during-plan",
             ]),
         );
     });
@@ -120,6 +123,22 @@ describe("rendered SKIPPED line is byte-identical per token (v3-P4a — conditio
             "gc: SKIPPED (fail-safe over-keep) [unresolvable-live-build-id] — " +
                 "a live revision of shop has no resolvable build-id label; " +
                 "nothing was deleted. live revisions: [shop-00001, shop-00002]\n",
+        );
+    });
+
+    it("[traffic-drift-during-plan] pins the whole line byte-for-byte (v3-P4b)", () => {
+        const line = renderGcReport("shop", "prod", {
+            pruned: false,
+            liveRevisions: ["shop-00008"],
+            skipReason: "traffic-drift-during-plan",
+            pinnedRevision: "shop-00007",
+        });
+        expect(line).toBe(
+            "gc: SKIPPED (fail-safe over-keep) [traffic-drift-during-plan] — " +
+                "the pin or status.currentTraffic of shop changed between the GC " +
+                "plan and the first delete (or the re-read failed); the delete set " +
+                "may no longer be safe, so the deletes were aborted. Nothing was " +
+                "deleted.\n",
         );
     });
 
