@@ -27,8 +27,12 @@ not listed is internal and may change without a major bump.
   writer** and emits a one-time warning.
 - **drizzle-orm re-exports** — the package root re-exports drizzle-orm's operators
   and query builder (`export * from 'drizzle-orm'`). drizzle-orm's own semver +
-  docs govern these; `@knext/db` pins a compatible range and also declares it an
-  (optional) peer so an app may supply its own compatible drizzle.
+  docs govern these; `@knext/db` declares drizzle-orm a **hard `dependency`** (it is
+  a real runtime dep — it is NOT an optional peer, ADR-0021 amendment 2026-07-14).
+  The re-exported drizzle-orm **range is part of `@knext/db`'s semver contract**: a
+  range change that could move an app to an incompatible drizzle-orm is at least a
+  **minor** `@knext/db` release. To pin a specific drizzle-orm yourself, use your
+  package manager's `overrides` / `resolutions`.
 
 ### `@knext/db/schema`
 
@@ -78,9 +82,15 @@ not listed is internal and may change without a major bump.
   port). Throws (fail loud) when no writer DSN is available.
 - **`RO_GATEWAY_PORT`** (`'55434'`) — the scale-zero-pg RO gateway port migrations
   must never target.
-- `drizzle-kit` is a **type-only** dependency (an optional peer) — `defineDrizzleConfig()`
-  returns a plain object typed as its `Config`; no drizzle-kit code is imported at
-  runtime. `runMigrations()` uses drizzle-**orm**'s migrator + `pg` (runtime).
+- `drizzle-kit` is the sole **optional peer** — a **type** in the source
+  (`defineDrizzleConfig()` returns a plain object typed as its `Config`) with **no
+  value import** at module top-level. `defineDrizzleConfig()` lazily probes that the
+  peer resolves and, when it is absent, throws an **actionable named-peer error**
+  ("drizzle-kit is required for defineDrizzleConfig — install it as a devDependency"),
+  never a bare `ERR_MODULE_NOT_FOUND`. The `@knext/db` main entry (`.`) and
+  `runMigrations()` load without drizzle-kit installed; `runMigrations()` uses
+  drizzle-**orm**'s migrator + `pg` (runtime). Pinned by
+  `packages/db/src/__tests__/peer-shape.test.ts`.
 
 ## Stability policy
 

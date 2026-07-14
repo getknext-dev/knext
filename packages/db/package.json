@@ -61,14 +61,10 @@
     "pg": "^8.16.3"
   },
   "peerDependencies": {
-    "drizzle-kit": "^0.31.0",
-    "drizzle-orm": "^0.45.2"
+    "drizzle-kit": "^0.31.0"
   },
   "peerDependenciesMeta": {
     "drizzle-kit": {
-      "optional": true
-    },
-    "drizzle-orm": {
       "optional": true
     }
   },

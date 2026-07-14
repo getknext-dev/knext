@@ -8,15 +8,58 @@ import { Pool } from 'pg';
  *
  * Two things live here:
  * - `defineDrizzleConfig()` — the helper an app uses in its `drizzle.config.ts`
- *   (#239). `drizzle-kit` is a **type-only** import for it: it returns a plain
- *   object typed as drizzle-kit's `Config`, so the import erases at build and
- *   pulls no runtime code from drizzle-kit (the app's own dev tool, which runs
- *   `generate`/`migrate` against this config).
+ *   (#239). `drizzle-kit` is only ever a **type** in this module (the `Config`
+ *   return shape, erased at build) and is declared an **optional peer** — never a
+ *   hard runtime dep (ADR-0021, amended: supersedes Open decision 6). Because the
+ *   config is *consumed* by `drizzle-kit generate`/`migrate` (the app's own dev
+ *   tool), `defineDrizzleConfig()` lazily verifies the peer is present and, when
+ *   it is absent, throws an ACTIONABLE named-peer error rather than letting a bare
+ *   `ERR_MODULE_NOT_FOUND` surface downstream when drizzle-kit loads this config.
  * - `runMigrations()` / `resolveWriterDsn()` — the engine behind the one-shot
  *   `kn-next db migrate` runner + Job recipe (#242). Applies drizzle-kit-generated
  *   migrations against the **writer only**, once per deploy, out of the request
- *   path (ADR-0021 §3). This half is runtime code (drizzle-orm's migrator + `pg`).
+ *   path (ADR-0021 §3). This half is runtime code (drizzle-orm's migrator + `pg`);
+ *   it needs drizzle-orm + `pg`, NOT drizzle-kit — so the `@knext/db` main entry
+ *   and the runner import cleanly without the optional peer installed.
  */
+
+/**
+ * Injectable resolver for the optional `drizzle-kit` peer. Used by
+ * {@link defineDrizzleConfig} to detect the peer lazily; injectable so the
+ * peer-shape contract test can simulate absence deterministically.
+ */
+export interface DefineDrizzleConfigDeps {
+  /** Return the resolved path of `drizzle-kit`, or throw if it is not installed. */
+  resolveDrizzleKit(): string;
+}
+
+function defaultResolveDrizzleKit(): string {
+  // The compiled output is CommonJS (Node16 module, no package `type: module`),
+  // so the module-global `require` is available and resolves relative to this
+  // file — no runtime import of drizzle-kit, only a resolvability probe. (If this
+  // package ever ships ESM output, swap to `createRequire(import.meta.url)`.)
+  return require.resolve('drizzle-kit');
+}
+
+/**
+ * Assert the optional `drizzle-kit` peer is installed. `defineDrizzleConfig`'s
+ * result is consumed by `drizzle-kit` itself, so a missing peer is a real error —
+ * but it must be a NAMED, actionable one (which package, and how to install it),
+ * never a bare `ERR_MODULE_NOT_FOUND` bubbling up from drizzle-kit's own loader.
+ */
+function assertDrizzleKitPresent(resolve: () => string): void {
+  try {
+    resolve();
+  } catch {
+    throw new Error(
+      'drizzle-kit is required for defineDrizzleConfig — install it as a devDependency ' +
+        '(`npm i -D drizzle-kit`). It is an optional peer of @knext/db (ADR-0021): the ' +
+        'main entry (@knext/db) and the `kn-next db migrate` runner do not need it, but ' +
+        'the drizzle.config.ts produced by defineDrizzleConfig is consumed by ' +
+        '`drizzle-kit generate`/`migrate`, which must be installed.',
+    );
+  }
+}
 
 /** Conventional schema location for a knext app (ADR-0021 §2). */
 export const DEFAULT_SCHEMA_PATH = './src/db/schema.ts';
@@ -58,8 +101,18 @@ export interface DefineDrizzleConfigOptions {
  *
  * The result is a plain `Config` object, so an app can spread it to add fields
  * drizzle-kit supports (`tablesFilter`, `casing`, `migrations`, …).
+ *
+ * `drizzle-kit` is an **optional peer**: this call verifies it is installed (the
+ * config is only meaningful when `drizzle-kit generate`/`migrate` consumes it) and
+ * throws an actionable named-peer error if it is missing — never a bare
+ * `ERR_MODULE_NOT_FOUND`.
  */
-export function defineDrizzleConfig(options: DefineDrizzleConfigOptions = {}): Config {
+export function defineDrizzleConfig(
+  options: DefineDrizzleConfigOptions = {},
+  deps: DefineDrizzleConfigDeps = { resolveDrizzleKit: defaultResolveDrizzleKit },
+): Config {
+  assertDrizzleKitPresent(deps.resolveDrizzleKit);
+
   const {
     schema = DEFAULT_SCHEMA_PATH,
     out = DEFAULT_MIGRATIONS_DIR,

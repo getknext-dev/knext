@@ -123,3 +123,13 @@ not a channel.
 - [ ] Dispatch `release-ghp.yml` after the 2026-07-12 amendment merges so
       `@getknext-dev/db` exists and `@getknext-dev/core` becomes installable
       again (needs a version bump via changesets if 0.1.0 conflicts).
+- [x] **Registry-channel install-smoke** for the interim GHP channel:
+      `scripts/ghp-install-smoke.mjs` + the `smoke-ghp` job in `release-ghp.yml`
+      (v3-P3a) prove a consumer with `GITHUB_TOKEN` + `packages: read` can
+      `npm install @getknext-dev/core@<version>` FROM `npm.pkg.github.com` and get a
+      working CLI + real (`.js`) app-import surface, with a dependency-confusion
+      guard (assert the `@getknext-dev` scope registry is `npm.pkg.github.com`
+      pre-install and every resolved tarball URL is on `pkg.github.com` post-install).
+      Unlike `scripts/install-smoke.mjs` (which packs from source and never touches a
+      registry), this proves the *published channel* is installable. A single manual
+      dispatch of `release-ghp.yml` retro-proves the already-published `0.2.0`.

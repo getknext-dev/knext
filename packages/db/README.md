@@ -62,6 +62,18 @@ Rule of thumb:
 directly. The knext value-add is client selection (above), plus the schema and
 migration-config helpers below.
 
+> **drizzle-orm is a hard dependency, and its range is part of `@knext/db`'s
+> semver contract.** You import drizzle's query surface *through* `@knext/db`, so a
+> range change that could move you to an incompatible drizzle-orm is at least a
+> **minor** `@knext/db` release (a major-range bump ⇒ a `@knext/db` major). To pin a
+> specific drizzle-orm version yourself, use your package manager's `overrides`
+> (npm/pnpm) or `resolutions` (yarn) — `@knext/db` does not declare drizzle-orm an
+> optional peer. `drizzle-kit` (below) is the one **optional peer**: it is needed
+> only for `defineDrizzleConfig()` / `drizzle-kit generate` at dev time, not by the
+> runtime client or the `kn-next db migrate` runner. If you call
+> `defineDrizzleConfig()` without it installed, you get a clear
+> "install it as a devDependency" error — never a bare module-not-found.
+
 ## Schema — define your tables in one place
 
 Import the table + column builders from `@knext/db/schema` and define your schema
