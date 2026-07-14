@@ -30,7 +30,7 @@
 import { existsSync, writeSync } from "node:fs";
 import type { KnativeNextConfig } from "../config";
 import { type KubectlFn, kubectlRunner } from "./doctor";
-import { loadConfig } from "./shared";
+import { excerpt, loadConfig } from "./shared";
 
 /** --watch poll interval. */
 const WATCH_INTERVAL_MS = 5_000;
@@ -352,7 +352,7 @@ function fetchModel(
             );
         }
         throw new Error(
-            `cluster unreachable (${stderr.slice(0, 160) || "kubectl failed with no stderr"}) — check your kubeconfig/context; \`kn-next doctor\` diagnoses cluster prereqs.`,
+            `cluster unreachable (${excerpt(stderr) || "kubectl failed with no stderr"}) — check your kubeconfig/context; \`kn-next doctor\` diagnoses cluster prereqs.`,
         );
     }
     let parsed: unknown;

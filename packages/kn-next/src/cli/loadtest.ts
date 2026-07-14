@@ -23,6 +23,7 @@ import {
     type LoadTestType,
 } from "../generators/loadtest-job";
 import { createLogger } from "../utils/logger";
+import { isEntrypoint } from "./exec";
 import { loadConfig } from "./shared";
 
 const log = createLogger({ module: "loadtest" });
@@ -71,8 +72,35 @@ export async function runLoadTest(
     return manifestPath;
 }
 
-async function main() {
+/** Injectable side-effects so the CLI wrapper is unit-testable + hermetic. */
+export interface LoadTestCliDeps {
+    /**
+     * STDERR sink. Every early-exit error path MUST write a short hint here
+     * BEFORE returning a non-zero code — a silent exit reads as false success.
+     * Defaults to fd 2 (`process.stderr.write`), NOT pino (which writes fd 1).
+     */
+    stderr?: (line: string) => void;
+}
+
+/**
+ * Parse argv and run the load test, returning the process exit code.
+ *
+ * Contract (v3-P6a): on every error/empty path this prints a one-line hint to
+ * STDERR and returns a NON-ZERO code — it must never silently `exit(0)`.
+ *
+ * @param argv - args after the `loadtest` subcommand word
+ * @param deps - injectable stderr sink (defaults to process.stderr)
+ * @returns process exit code (0 success, 1 on any handled error)
+ */
+export async function runLoadTestCli(
+    argv: readonly string[],
+    deps: LoadTestCliDeps = {},
+): Promise<number> {
+    const emit = deps.stderr ?? ((line: string) => process.stderr.write(line));
+    const hint = (msg: string) => emit(`${msg}\n`);
+
     const { values } = parseArgs({
+        args: [...argv],
         options: {
             url: { type: "string", short: "u" },
             type: { type: "string", short: "t", default: "smoke" },
@@ -84,36 +112,47 @@ async function main() {
 
     const targetUrl = values.url as string | undefined;
     if (!targetUrl) {
-        log.error("--url <ksvc URL> is required (the Knative service URL)");
-        process.exit(1);
+        hint("--url <ksvc URL> is required (the Knative service URL)");
+        return 1;
     }
 
     const type = values.type as string as LoadTestType;
     if (!VALID_TYPES.includes(type)) {
-        log.error(`--type must be one of ${VALID_TYPES.join(", ")}`);
-        process.exit(1);
+        hint(`--type must be one of ${VALID_TYPES.join(", ")}`);
+        return 1;
     }
 
-    const config = await loadConfig();
-    await runLoadTest(
-        config.name,
-        targetUrl,
-        type,
-        values.namespace as string,
-        config.observability?.enabled ?? false,
-    );
+    try {
+        const config = await loadConfig();
+        await runLoadTest(
+            config.name,
+            targetUrl,
+            type,
+            values.namespace as string,
+            config.observability?.enabled ?? false,
+        );
+    } catch (e: unknown) {
+        // Never bubble out as a silent exit — always leave a stderr breadcrumb.
+        hint(
+            `failed to start load test: ${e instanceof Error ? e.message : String(e)}`,
+        );
+        return 1;
+    }
+    return 0;
 }
 
-// Run only when invoked directly (Node ESM entrypoint check).
-if (
-    import.meta.url === `file://${process.argv[1]}` ||
-    process.argv[1]?.endsWith("loadtest.js")
-) {
-    main().catch((e: unknown) => {
-        log.error(
-            { err: e instanceof Error ? e.message : String(e) },
-            "Failed to start load test",
-        );
-        process.exit(1);
-    });
+// Run only when invoked directly. Uses the SHARED isEntrypoint guard (./exec)
+// — the same symlink-correct check every other CLI entrypoint uses — instead
+// of a hand-rolled import.meta.url / basename comparison (see #263 / exec.ts).
+if (isEntrypoint(import.meta.url)) {
+    runLoadTestCli(process.argv.slice(2))
+        .then((code) => process.exit(code))
+        .catch((err) => {
+            // Last-resort guard: an unexpected throw (e.g. from argv parsing,
+            // outside runLoadTestCli's own try/catch) must never exit silently.
+            process.stderr.write(
+                `load test failed unexpectedly: ${err instanceof Error ? err.message : String(err)}\n`,
+            );
+            process.exit(1);
+        });
 }
