@@ -40,6 +40,46 @@ import { loadConfig } from "./shared";
 const log = createLogger({ module: "gc" });
 
 /**
+ * The machine-readable skip-reason TOKEN REGISTRY for the asset-GC fail-safe
+ * over-keep skips (v3-P4a, ADR-0011).
+ *
+ * These tokens are a PUBLIC, STABLE contract: they are emitted verbatim inside
+ * the `[<token>]` suffix of the `gc: SKIPPED (fail-safe over-keep) [<token>]`
+ * line, which operators match on to alert / build dashboards / key runbooks.
+ * Treat them like an enum — do NOT rename a token casually; a rename is a
+ * breaking change to every consumer that greps for it. Adding a NEW skip cause
+ * means adding a token HERE and a render case in {@link renderGcReport} (the
+ * `never`-exhaustiveness check there forces this — a new cause without a token
+ * + render fails to compile, so a future skip can never silently mislabel).
+ *
+ * FIRST-CAUSE PRECEDENCE. When more than one skip condition could hold at once
+ * (e.g. the spec-pin probe threw AND a live revision's build-id label is also
+ * unresolvable), the token reflects the FIRST cause checked in
+ * {@link runAssetGC}. The check order — and therefore the precedence — is:
+ *
+ *   1. `pinned-with-empty-status`   — status.currentTraffic is empty while the
+ *      CR pins a revision (spec.traffic.revisionName set), OR the pin probe
+ *      itself threw while the status was empty. A window-only prune here could
+ *      reap the pinned build. (Highest precedence.)
+ *   2. `pinned-not-resolvable`      — with a NON-empty (possibly lagging)
+ *      status, the pin probe threw (cannot prove there is no pin), OR the pin
+ *      is outside currentTraffic and its build-id cannot be resolved (revision
+ *      gone / label absent / read failed). Decided BEFORE per-live-revision
+ *      label resolution.
+ *   3. `unresolvable-live-build-id` — a live revision has no resolvable
+ *      build-id label (missing, empty, or the read threw). (Lowest precedence.)
+ */
+export const GC_SKIP_REASONS = {
+    "pinned-with-empty-status": "pinned-with-empty-status",
+    "pinned-not-resolvable": "pinned-not-resolvable",
+    "unresolvable-live-build-id": "unresolvable-live-build-id",
+} as const;
+
+/** A stable machine-readable GC skip-reason token (see {@link GC_SKIP_REASONS}). */
+export type GcSkipReason =
+    (typeof GC_SKIP_REASONS)[keyof typeof GC_SKIP_REASONS];
+
+/**
  * Exec boundary for the two READ-ONLY kubectl reads, injectable so tests can
  * assert the exact argv (and that nothing else is exec'd). Production passes
  * {@link runCapture} (execFileSync, shell:false — CLI-58).
@@ -54,11 +94,12 @@ export interface AssetGCResult {
     pruned: boolean;
     /** The revision names observed in status.currentTraffic (diagnostics). */
     liveRevisions: string[];
-    /** Which fail-safe fired (only set when `pruned` is false). */
-    skipReason?:
-        | "unresolvable-live-build-id"
-        | "pinned-with-empty-status"
-        | "pinned-not-resolvable";
+    /**
+     * Which fail-safe fired (only set when `pruned` is false), as a STABLE
+     * machine-readable token from {@link GC_SKIP_REASONS}. Rendered into the
+     * `[<token>]` suffix of the SKIPPED line by {@link renderGcReport}.
+     */
+    skipReason?: GcSkipReason;
     /**
      * The `spec.traffic.revisionName` pin observed by the UNCONDITIONAL spec
      * probe (#272 residual — set on both pin fail-safes), or "(unreadable)"
@@ -323,31 +364,48 @@ export function renderGcReport(
     res: AssetGCResult,
 ): string {
     if (!res.pruned) {
-        if (res.skipReason === "pinned-with-empty-status") {
-            return (
-                `gc: SKIPPED (fail-safe over-keep) [pinned-with-empty-status] — ` +
-                `${appName} pins revision "${res.pinnedRevision}" ` +
-                `(spec.traffic.revisionName) but status.currentTraffic is empty ` +
-                `(status wiped or lagging); a window-only prune could reap the ` +
-                `pinned build. Nothing was deleted.\n`
-            );
+        // The `[<token>]` suffix is a REQUIRED, byte-identical machine-readable
+        // contract (v3-P4a): the common `gc: SKIPPED (fail-safe over-keep)
+        // [<token>] — <human reason>` shape is assembled here so the token prefix
+        // is pinned once, and the switch below is EXHAUSTIVE over GcSkipReason —
+        // its `never` default makes a future skip cause fail to COMPILE unless it
+        // is given a token AND a rendered human reason (stops P4b's future token
+        // from silently mislabeling).
+        const token: GcSkipReason =
+            res.skipReason ?? "unresolvable-live-build-id";
+        const prefix = `gc: SKIPPED (fail-safe over-keep) [${token}] — `;
+        switch (token) {
+            case "pinned-with-empty-status":
+                return (
+                    prefix +
+                    `${appName} pins revision "${res.pinnedRevision}" ` +
+                    `(spec.traffic.revisionName) but status.currentTraffic is empty ` +
+                    `(status wiped or lagging); a window-only prune could reap the ` +
+                    `pinned build. Nothing was deleted.\n`
+                );
+            case "pinned-not-resolvable":
+                return (
+                    prefix +
+                    `${appName} pins revision "${res.pinnedRevision}" ` +
+                    `(spec.traffic.revisionName) but the pin's build-id could not ` +
+                    `be resolved (revision missing, build-id label absent, or the ` +
+                    `read failed), so the pinned build cannot be proven protected. ` +
+                    `Nothing was deleted.\n`
+                );
+            case "unresolvable-live-build-id":
+                return (
+                    prefix +
+                    `a live revision of ${appName} has no resolvable build-id label; ` +
+                    `nothing was deleted. ` +
+                    `live revisions: [${res.liveRevisions.join(", ")}]\n`
+                );
+            default: {
+                // Exhaustiveness guard: if a new GcSkipReason is added without a
+                // render case above, this assignment fails to type-check.
+                const _exhaustive: never = token;
+                return _exhaustive;
+            }
         }
-        if (res.skipReason === "pinned-not-resolvable") {
-            return (
-                `gc: SKIPPED (fail-safe over-keep) [pinned-not-resolvable] — ` +
-                `${appName} pins revision "${res.pinnedRevision}" ` +
-                `(spec.traffic.revisionName) but the pin's build-id could not ` +
-                `be resolved (revision missing, build-id label absent, or the ` +
-                `read failed), so the pinned build cannot be proven protected. ` +
-                `Nothing was deleted.\n`
-            );
-        }
-        return (
-            `gc: SKIPPED (fail-safe over-keep) [unresolvable-live-build-id] — ` +
-            `a live revision of ${appName} has no resolvable build-id label; ` +
-            `nothing was deleted. ` +
-            `live revisions: [${res.liveRevisions.join(", ")}]\n`
-        );
     }
 
     const s = res.summary;
