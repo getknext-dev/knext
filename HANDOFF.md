@@ -10,7 +10,9 @@ approval** — see §3). Platform health: green, 0 open PRs, full test battery p
 zero product regressions. **Code-documentation hardening arc complete** (#200–#205):
 every control-plane Go binary now carries thorough godoc — gateway + wake, AppDatabase
 operator, and the zone operator (ADR-0007) — plus `docs/ARCHITECTURE.md`, `docs/DRILLS.md`,
-`docs/tuning-write-heavy.md` for the next agent._
+`docs/tuning-write-heavy.md` for the next agent. **Latest work (#206/#207, MERGED):** the
+`ColdRestorable` recoverability condition (see §2) — one OKE `_verify-restore.sh` drill
+pending to close its e2e loop._
 
 ## 1. What this project is
 A **Knative-ecosystem scale-to-zero PostgreSQL platform** — idle databases cost zero
@@ -38,6 +40,19 @@ Through v1.3.5 the zone axis + SCRAM auth + wake-budget shipped (history in git 
   (deployed + live-verified — native cascade-GC); ADR-0008 **RATIFIED** + #158
   accept-and-document (**#193**); RO-staleness drill-verdict + honest deferral **#195/#188**;
   DATABASE_URL dbname doc **#196/#123**; drill-battery robustness **#198/#199**.
+- **Recoverability observability — `ColdRestorable` condition (#206/#207, MERGED):** the
+  appdb-operator now surfaces the sharpest DR limitation (runbook-dr.md §9d-bis, the
+  post-provision ancestor-durability window) as a machine-readable AppDatabase status
+  condition. Compares the template `remote_consistent_lsn` to each branch's persisted
+  `.status.ancestorLsn`: `True`/AncestorDurable, `False`/AncestorWALNotYetDurable (requeues,
+  self-heals), `Unknown` on a pageserver blip. Monotonic (stops polling once True), does
+  NOT gate `Ready` (no provisioning-latency change), additive status-only (no DATABASE_URL
+  contract change). Full 3-way sign-off (code review + architect + system-designer).
+  **⚠ e2e still PENDING:** the OKE `_verify-restore.sh` drill (which already asserts the
+  same ancestor-durability property) is the e2e validator and was NOT run (auth window) —
+  unit-tested + fail-safe (a wrong field assumption resolves to `Unknown`, never a false
+  durability claim). Run `_verify-restore.sh` on the next OKE window to close the loop, and
+  confirm the pageserver timeline-detail JSON key is exactly `remote_consistent_lsn`.
 - **Drizzle data SDK (`@knext/db`)** — complete on the **knext** side (getknext-dev/knext):
   `getDb`/`getDbRO`, writer-only `kn-next db migrate`, TimescaleDB/pgvector helpers, guide +
   `apps/db-demo`, SIGTERM RO-drain. ADR-0021.
