@@ -46,6 +46,11 @@ export default defineConfig([
       // CLI helpers exported as library subpaths (./cli/validate, ./cli/shared)
       'cli/validate': 'src/cli/validate.ts',
       'cli/shared': 'src/cli/shared.ts',
+      // Public config-validation surface (`@knext/core/validate`): a PURE
+      // re-export of validateConfig + ConfigValidationError that a consumer
+      // imports into their own build/test process. Own dist file so the public
+      // subpath resolves without exposing the internal cli-validate path.
+      'validate-public': 'src/validate-public.ts',
       // --- Library surface (#114) -----------------------------------------
       // dist/config.js — the `.` export (KnativeNextConfig type + helpers)
       config: 'src/config.ts',
@@ -77,6 +82,7 @@ export default defineConfig([
         'cli/db-migrate': 'src/cli/db-migrate.ts',
         'cli/validate': 'src/cli/validate.ts',
         'cli/shared': 'src/cli/shared.ts',
+        'validate-public': 'src/validate-public.ts',
         config: 'src/config.ts',
         loader: 'src/loader.ts',
         'adapters/next-adapter': 'src/adapters/next-adapter.ts',

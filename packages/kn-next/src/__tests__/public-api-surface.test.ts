@@ -37,7 +37,7 @@ const libPkg: any = require(resolve(libPkgDir, "package.json"));
 const PUBLIC_API_DOC = resolve(repoRoot, "docs/PUBLIC_API.md");
 
 /** The deliberate, supported public application surface (PK5). */
-const PUBLIC_CORE = [".", "./adapter", "./adapters/otel-config"];
+const PUBLIC_CORE = [".", "./adapter", "./adapters/otel-config", "./validate"];
 const PUBLIC_LIB = [".", "./logger", "./clients", "./health"];
 
 /**

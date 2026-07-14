@@ -94,6 +94,39 @@ export default {
 This module is plain JavaScript (no `.d.ts`); you reference it by path rather than
 calling it directly, so no type surface is exposed.
 
+### `@knext/core/validate`
+
+Validates a `kn-next.config.ts` against the **exact same rules** the `kn-next`
+deploy step applies. Use it as a config-quality gate in your own CI — call it in
+a test or a build script so a bad deploy config fails fast, before it reaches the
+cluster.
+
+```ts
+import { validateConfig, ConfigValidationError } from '@knext/core/validate';
+import type { KnativeNextConfig } from '@knext/core';
+import config from './kn-next.config';
+
+try {
+  validateConfig(config); // returns void when valid
+} catch (err) {
+  if (err instanceof ConfigValidationError) {
+    console.error(err.message);
+    process.exit(1);
+  }
+  throw err;
+}
+```
+
+This module is **pure**: importing it runs no I/O and never exits your process —
+it is safe to pull into your own build/test process. On an invalid config,
+`validateConfig` throws a `ConfigValidationError`; on a valid config it returns
+`void`.
+
+Exports:
+- `validateConfig(config: KnativeNextConfig): void` — throws `ConfigValidationError`
+  on invalid config.
+- `ConfigValidationError` — the error type thrown on failure (`instanceof`-checkable).
+
 ---
 
 ## `@knext/lib`
