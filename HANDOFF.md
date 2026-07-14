@@ -116,7 +116,13 @@ build `--platform linux/amd64`, push to OCIR `…/knext-docs`, ensure the `ocir-
 
 ## 4. Open backlog (github.com/getknext-dev/scale-zero-pg/issues)
 Autonomously-doable (no owner decision, no cluster-capacity block):
-- **#104** — docs: write-heavy tuning guide (batch/COPY, pooling, async commit, RO offload).
+- **#208** — alert on stuck cold-restorability: export appdb-operator `/metrics`
+  (`appdb_cold_restorable` gauge) + a `ColdRestorableStuck` PrometheusRule (follow-up to
+  #206/#207; makes the new recoverability signal alertable, not just kubectl-visible).
+  Mostly offline-implementable; `_verify-alerting.sh` + `_verify-restore.sh` are the OKE
+  e2e gate (currently auth-blocked). Well-specified acceptance criteria in the issue.
+- **#104** — docs: write-heavy tuning guide (batch/COPY, pooling, async commit, RO offload)
+  — DONE (repo `docs/tuning-write-heavy.md`; also published to the public doc site, docs #14).
 Owner-/infra-gated: **#182**, **#118** (see §3), **#185** (deferred /status live steps).
 Feature/design (want owner steer): **#35** (wake-ahead: Knative-activation → gateway
 pre-warm), **#7** (in-process CNPG hibernate driver).
