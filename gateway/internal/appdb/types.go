@@ -39,6 +39,15 @@ const (
 const (
 	CondProvisioned = "Provisioned" // branch + child objects exist
 	CondReady       = "Ready"       // compute has an available replica
+	// CondColdRestorable reports whether this app is recoverable by a COLD restore
+	// (fresh cluster, object-storage bucket only) RIGHT NOW. It is True once the shared
+	// template timeline's remote_consistent_lsn has caught up to this branch's ancestor
+	// LSN — i.e. the template layers the branch's unmodified pages depend on are durable
+	// in object storage (docs/runbook-dr.md §9d-bis). It is briefly False in the first
+	// seconds-to-minutes of a freshly-provisioned app while the template WAL tail flushes.
+	// It does NOT gate serving readiness (that is CondReady) — the app is fully usable
+	// while this is still False; this condition is purely about disaster-restore coverage.
+	CondColdRestorable = "ColdRestorable"
 )
 
 // AppDatabase is the typed view of the CR the reconciler operates on. The
@@ -88,8 +97,14 @@ type AppDatabaseStatus struct {
 	// SecretName is the output credential Secret an external driver reads/mirrors
 	// (app-db-<appName>). Published so consumers wait on + read the name from
 	// status rather than reconstructing it (external-driver contract, #119).
-	SecretName         string      `json:"secretName,omitempty"`
-	TimelineID         string      `json:"timelineId,omitempty"`
+	SecretName string `json:"secretName,omitempty"`
+	TimelineID string `json:"timelineId,omitempty"`
+	// AncestorLSN is the template `last_record_lsn` this app branched from (its
+	// ancestor point). Persisted at branch time so the cold-restorability check
+	// (docs/runbook-dr.md §9d-bis) can compare it against the template's advancing
+	// remote_consistent_lsn without re-reading the branch. Empty for apps provisioned
+	// before this field existed (or by provision-app.sh); those skip the check.
+	AncestorLSN        string      `json:"ancestorLsn,omitempty"`
 	ComputeReady       bool        `json:"computeReady,omitempty"`
 	Message            string      `json:"message,omitempty"`
 	ObservedGeneration int64       `json:"observedGeneration,omitempty"`

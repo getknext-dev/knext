@@ -129,6 +129,12 @@ spec:
                 timelineId:
                   type: string
                   description: The app's Neon timeline id (the durable owner of record). Minted once, fresh per lifecycle.
+                ancestorLsn:
+                  type: string
+                  description: >-
+                    The template last_record_lsn this app branched from (its ancestor
+                    point). Compared against the template's remote_consistent_lsn to
+                    decide the ColdRestorable condition (docs/runbook-dr.md §9d-bis).
                 computeReady:
                   type: boolean
                   description: true iff the app's compute Deployment has >=1 available replica.

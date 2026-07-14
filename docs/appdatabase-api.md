@@ -60,9 +60,11 @@ The operator reconciles `.status`. A driver gates its own work on these fields:
 | `status.phase` | `Provisioning` \| `Ready` \| `Failed` \| `Deleting` | wait for `Ready`; surface `Failed` |
 | `status.conditions[type=Ready]` | `status: "True"` when servable | the canonical readiness gate |
 | `status.conditions[type=Provisioned]` | branch + child objects exist | provisioning progress |
+| `status.conditions[type=ColdRestorable]` | `"True"` once this app is recoverable by a **cold** disaster restore (ancestor WAL durable in object storage; runbook-dr.md §9d-bis) | **do NOT gate readiness on this** — it is disaster-restore coverage, not serving; alert if it stays non-`True` for long |
 | `status.secretName` | the output Secret name (`app-db-<app>`) | **read the Secret to mirror** — do not reconstruct |
 | `status.observedGeneration` | last `spec` generation reconciled | detect stale status after a `spec` edit |
 | `status.timelineId` | the app's Neon timeline id | diagnostics |
+| `status.ancestorLsn` | the template LSN this app branched from | diagnostics; the cold-restorability comparison point |
 | `status.computeReady` | compute has ≥1 available replica | warm-tier readiness detail |
 
 **Readiness semantics.** A **`cold`** tier reaches `phase: Ready` /
@@ -77,6 +79,19 @@ phase == Ready  &&  conditions[Ready].status == "True"
 Wait on that before reading `status.secretName` and mirroring the Secret. A
 `Failed` phase carries the reason verbatim in `status.message` — surface it; do
 **not** deploy the app on a `Failed` DB (ADR-0006 §4.1 hard-gate).
+
+**Cold-restorability (`ColdRestorable`).** Independently of serving readiness, the
+operator reports whether the app is recoverable by a **cold** disaster restore (fresh
+cluster, object-storage bucket only) *right now*. A freshly-branched app reads its
+unmodified pages from the shared template at its ancestor LSN, so a cold restore can
+only reconstruct it once the template's layers up to that LSN are durable in object
+storage (`remote_consistent_lsn ≥ ancestorLsn`; see runbook-dr.md §9d-bis). For the
+first seconds-to-minutes of an app's life that is briefly `False`
+(`AncestorWALNotYetDurable`) and then self-heals to `True` (`AncestorDurable`) — the
+property is monotonic. **Do not gate app rollout on this** (the app is fully usable
+while it is still `False`); it is an operational signal — alert if it stays non-`True`
+far longer than expected (a stuck template upload). `Unknown` means the operator could
+not read the pageserver on that pass and will re-check.
 
 ---
 

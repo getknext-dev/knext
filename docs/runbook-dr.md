@@ -339,11 +339,21 @@ un-flushed WAL tail. So:
   time would shrink the window to ~zero, but the pageserver's force-checkpoint API is
   **compiled out** on `neon:8464` (`PUT …/checkpoint` → *"pageserver was compiled without
   testing APIs"*). The only levers on 8464 are **WAL-driven** (push enough template WAL
-  to cross `checkpoint_distance`) or **time** (wait for the periodic upload). Documented
-  limitation, not a shipped mitigation: **do not promise a cold restore of an app in the
-  first few minutes of its life** until the template tail has flushed. (A first-class
-  safekeeper/timeline-import API in a future neon bump — the ops "upgrade carrot" — would
-  remove this entirely.)
+  to cross `checkpoint_distance`) or **time** (wait for the periodic upload). The window
+  cannot yet be *closed* on 8464, but it is no longer *invisible*: **do not promise a cold
+  restore of an app in the first few minutes of its life** until the template tail has
+  flushed. (A first-class safekeeper/timeline-import API in a future neon bump — the ops
+  "upgrade carrot" — would remove this entirely.)
+- **SHIPPED observability (issue #206).** The AppDatabase operator now surfaces this
+  window as a first-class, machine-readable status condition **`ColdRestorable`** on every
+  app: `True`/`AncestorDurable` once the template `remote_consistent_lsn` ≥ the branch's
+  `ancestorLsn` (persisted in `.status.ancestorLsn`), `False`/`AncestorWALNotYetDurable`
+  during the window (the operator requeues and it self-heals in minutes), `Unknown` on a
+  transient pageserver read error. It does **not** delay `Ready` — the app is fully usable
+  while `False`; the property is monotonic, so the operator stops polling once `True`. This
+  turns "which apps are cold-restorable right now?" from a disaster-time discovery into a
+  `kubectl get appdatabase`-visible, alertable signal:
+  `kubectl get appdatabase <app> -o jsonpath='{.status.conditions[?(@.type=="ColdRestorable")].status}'`.
 
 - **CAN — isolation (proven both directions):** destroying/​restoring one app does **not**
   touch its peers. On the live plane the drill destroys the victim's branch and asserts

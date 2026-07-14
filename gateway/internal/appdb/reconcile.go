@@ -168,6 +168,10 @@ func (d *Deps) reconcileApply(ctx context.Context, cr *AppDatabase) (bool, error
 		if err := d.Pageserver.Branch(ctx, d.Tenant, tl, d.Template, lsn, d.PGVersion); err != nil {
 			return true, fmt.Errorf("branch timeline: %w", err)
 		}
+		// Persist the branch point (this app's ancestor LSN) so the cold-restorability
+		// check below can compare it against the template's advancing remote_consistent_lsn
+		// without re-reading the branch (docs/runbook-dr.md §9d-bis).
+		cr.Status.AncestorLSN = lsn
 		d.Cluster.Event(cr, "Normal", "Branched", fmt.Sprintf("timeline %s branched from template@%s", tl, lsn))
 	}
 
@@ -180,6 +184,46 @@ func (d *Deps) reconcileApply(ctx context.Context, cr *AppDatabase) (bool, error
 	cr.Status.ObservedGeneration = cr.Generation
 	cr.Status.SecretName = "app-db-" + app // external-driver contract: the output Secret name (#119)
 	d.setCondition(cr, CondProvisioned, "True", "Provisioned", "branch + compute objects reconciled")
+
+	// 6b. Cold-restorability (ancestor-durability; docs/runbook-dr.md §9d-bis). A freshly
+	//     branched app reads its unmodified pages from the TEMPLATE at its ancestor LSN; a
+	//     COLD restore (fresh cluster, object-storage bucket only) can only materialize
+	//     them once the TEMPLATE's layers up to that LSN are durably uploaded — i.e. the
+	//     template's remote_consistent_lsn has caught up to this branch's ancestor LSN. For
+	//     the first seconds-to-minutes of an app's life that tail may be un-uploaded, so the
+	//     app is briefly NOT cold-restorable. We SURFACE this as a machine-readable
+	//     condition + event so an operator/knext can see + alert on it; we do NOT delay
+	//     Ready (the app is fully usable now — this is disaster-restore coverage, not
+	//     serving). The property is MONOTONIC (remote_consistent_lsn only advances), so once
+	//     True we stop polling. Apps with no persisted ancestor LSN (provisioned before this
+	//     field, or by provision-app.sh) are past the window and skip the check.
+	coldRestorableRequeue := false
+	if cr.Status.AncestorLSN != "" && !isConditionTrue(cr, CondColdRestorable) {
+		rc, rcErr := d.Pageserver.TemplateRemoteConsistentLSN(ctx, d.Tenant, d.Template)
+		switch {
+		case rcErr != nil:
+			// A pageserver blip must never fail provisioning; re-check next pass.
+			d.setCondition(cr, CondColdRestorable, "Unknown", "PageserverUnavailable",
+				fmt.Sprintf("could not read template remote_consistent_lsn: %v", rcErr))
+			coldRestorableRequeue = true
+		default:
+			gte, ok := lsnGTE(rc, cr.Status.AncestorLSN)
+			switch {
+			case !ok:
+				d.setCondition(cr, CondColdRestorable, "Unknown", "UnparseableLSN",
+					fmt.Sprintf("could not compare template remote_consistent_lsn %q to ancestor %q", rc, cr.Status.AncestorLSN))
+				coldRestorableRequeue = true
+			case gte:
+				d.setCondition(cr, CondColdRestorable, "True", "AncestorDurable",
+					fmt.Sprintf("template remote_consistent_lsn %s covers branch point %s; a cold restore can materialize this app", rc, cr.Status.AncestorLSN))
+				d.Cluster.Event(cr, "Normal", "ColdRestorable", "ancestor WAL is durable in object storage; app is cold-restorable")
+			default:
+				d.setCondition(cr, CondColdRestorable, "False", "AncestorWALNotYetDurable",
+					fmt.Sprintf("template remote_consistent_lsn %s has not reached branch point %s; NOT cold-restorable until the template WAL tail flushes (self-heals in minutes)", rc, cr.Status.AncestorLSN))
+				coldRestorableRequeue = true
+			}
+		}
+	}
 
 	roNote := ""
 	if cr.Spec.ROPool.Enabled {
@@ -209,7 +253,7 @@ func (d *Deps) reconcileApply(ctx context.Context, cr *AppDatabase) (bool, error
 	if err := d.Cluster.UpdateStatus(ctx, cr); err != nil {
 		return true, fmt.Errorf("update status: %w", err)
 	}
-	return requeue, nil
+	return requeue || coldRestorableRequeue, nil
 }
 
 // reconcileDelete runs safe deprovision under the finalizer, then removes it so the
@@ -311,6 +355,44 @@ func (d *Deps) setCondition(cr *AppDatabase, condType, status, reason, message s
 	cr.Status.Conditions = append(cr.Status.Conditions, Condition{
 		Type: condType, Status: status, Reason: reason, Message: message, LastTransitionTime: &now,
 	})
+}
+
+// isConditionTrue reports whether the named status condition is present and "True".
+func isConditionTrue(cr *AppDatabase, condType string) bool {
+	for i := range cr.Status.Conditions {
+		if cr.Status.Conditions[i].Type == condType {
+			return cr.Status.Conditions[i].Status == "True"
+		}
+	}
+	return false
+}
+
+// lsnGTE reports whether Neon LSN a >= b. Neon prints an LSN as "hi/lo" in hex — a
+// 64-bit WAL position split into a high and low 32-bit word (e.g. "1/A3B4C8"). ok is
+// false when either side does not parse into exactly two hex words; the caller treats
+// that as "unknown" rather than emitting a false durability verdict.
+func lsnGTE(a, b string) (gte, ok bool) {
+	av, aok := parseLSN(a)
+	bv, bok := parseLSN(b)
+	if !aok || !bok {
+		return false, false
+	}
+	return av >= bv, true
+}
+
+// parseLSN reconstructs the 64-bit value of a Neon "hi/lo" hex LSN. ok is false for any
+// string that is not exactly two slash-separated hex words.
+func parseLSN(s string) (uint64, bool) {
+	hiStr, loStr, found := strings.Cut(s, "/")
+	if !found || strings.Contains(loStr, "/") {
+		return 0, false
+	}
+	hi, err1 := strconv.ParseUint(hiStr, 16, 64)
+	lo, err2 := strconv.ParseUint(loStr, 16, 64)
+	if err1 != nil || err2 != nil {
+		return 0, false
+	}
+	return hi<<32 | lo, true
 }
 
 // roDSN derives the read-only DSN from the writer DSN by swapping ONLY the gateway

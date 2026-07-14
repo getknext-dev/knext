@@ -93,6 +93,31 @@ func (p *HTTPPageserver) TemplateLastLSN(ctx context.Context, tenant, template s
 	return t.LastRecordLSN, nil
 }
 
+// TemplateRemoteConsistentLSN reads the shared template timeline's remote_consistent_lsn
+// — the WAL position up to which the template's layers are durably uploaded to object
+// storage. A freshly-branched app is only COLD-restorable (recoverable into a fresh
+// cluster from the bucket alone) once this has caught up to the app's ancestor LSN,
+// because a cold restore materializes the branch's unmodified pages from the template's
+// uploaded layers (docs/runbook-dr.md §9d-bis). The operator surfaces the comparison as
+// the AppDatabase ColdRestorable condition. An empty result means the field was absent
+// (older pageserver) — the caller treats that as unknown, never as "not durable".
+func (p *HTTPPageserver) TemplateRemoteConsistentLSN(ctx context.Context, tenant, template string) (string, error) {
+	code, data, err := p.do(ctx, http.MethodGet, fmt.Sprintf("%s/v1/tenant/%s/timeline/%s", p.BaseURL, tenant, template), nil)
+	if err != nil {
+		return "", err
+	}
+	if code != http.StatusOK {
+		return "", fmt.Errorf("get template timeline: pageserver %d: %s", code, string(data))
+	}
+	var t struct {
+		RemoteConsistentLSN string `json:"remote_consistent_lsn"`
+	}
+	if err := json.Unmarshal(data, &t); err != nil {
+		return "", fmt.Errorf("decode template timeline: %w", err)
+	}
+	return t.RemoteConsistentLSN, nil
+}
+
 // Branch creates timeline tl as a copy-on-write child of the template timeline at lsn —
 // the Neon primitive that gives each app its own isolated database near-instantly and
 // cheaply (no data copy). Called only after TimelineExists reports absent, so it is

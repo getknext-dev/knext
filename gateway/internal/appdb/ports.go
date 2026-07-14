@@ -17,6 +17,11 @@ type PageserverOps interface {
 	TimelineExists(ctx context.Context, tenant, tl string) (bool, error)
 	// TemplateLastLSN returns the template timeline's last_record_lsn (the branch point).
 	TemplateLastLSN(ctx context.Context, tenant, template string) (string, error)
+	// TemplateRemoteConsistentLSN returns the template timeline's remote_consistent_lsn
+	// — the WAL position up to which the template's layers are durable in object storage.
+	// The cold-restorability check (docs/runbook-dr.md §9d-bis) compares it to a branch's
+	// ancestor LSN: a cold restore can only materialize the branch once this covers it.
+	TemplateRemoteConsistentLSN(ctx context.Context, tenant, template string) (string, error)
 	// Branch creates timeline tl as a child of template at lsn (idempotent on tl).
 	Branch(ctx context.Context, tenant, tl, template, lsn string, pgVersion int) error
 	// DeleteTimeline removes tl's pages/WAL from the pageserver (404 == already gone).

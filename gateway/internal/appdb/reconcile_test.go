@@ -14,12 +14,19 @@ import (
 type fakePS struct {
 	timelines  map[string]bool // tl -> exists
 	lsn        string
+	rcLSN      string   // template remote_consistent_lsn (cold-restorability, §9d-bis)
 	branchArgs []string // tl ids branched
 	deleted    []string
 	failLSN    bool
+	failRCLSN  bool
 }
 
-func newFakePS() *fakePS { return &fakePS{timelines: map[string]bool{}, lsn: "0/1500000"} }
+// newFakePS defaults rcLSN == lsn so a freshly-branched app is cold-restorable
+// immediately (the common case); tests that exercise the un-durable window set rcLSN
+// below lsn explicitly.
+func newFakePS() *fakePS {
+	return &fakePS{timelines: map[string]bool{}, lsn: "0/1500000", rcLSN: "0/1500000"}
+}
 
 func (f *fakePS) TimelineExists(_ context.Context, _, tl string) (bool, error) {
 	return f.timelines[tl], nil
@@ -29,6 +36,12 @@ func (f *fakePS) TemplateLastLSN(_ context.Context, _, _ string) (string, error)
 		return "", errors.New("boom")
 	}
 	return f.lsn, nil
+}
+func (f *fakePS) TemplateRemoteConsistentLSN(_ context.Context, _, _ string) (string, error) {
+	if f.failRCLSN {
+		return "", errors.New("boom")
+	}
+	return f.rcLSN, nil
 }
 func (f *fakePS) Branch(_ context.Context, _, tl, _, _ string, _ int) error {
 	f.branchArgs = append(f.branchArgs, tl)
@@ -641,5 +654,124 @@ func TestReclaimClearsLedgerOnSuccess(t *testing.T) {
 
 	if _, ok := h.cl.pending["c1c1000000000000000000000000000a"]; ok {
 		t.Errorf("ledger not cleared after full reclaim: %v", h.cl.pending)
+	}
+}
+
+// ---- cold-restorability (ancestor-durability, docs/runbook-dr.md §9d-bis) --------
+
+// A fresh branch whose template remote_consistent_lsn already covers the branch point
+// is cold-restorable immediately: ColdRestorable=True, ancestor LSN persisted, and it
+// does NOT add a requeue (a cold-tier app still settles to Ready with no requeue).
+func TestColdRestorable_TrueWhenAncestorDurable(t *testing.T) {
+	h := newHarness()
+	h.ps.lsn = "0/1500000"
+	h.ps.rcLSN = "0/1500000" // template layers up to the branch point are uploaded
+	cr := &AppDatabase{Name: "app1", Namespace: "scale-zero-pg", Generation: 1, Spec: AppDatabaseSpec{AppName: "app1"}}
+
+	rq := mustReconcile(t, h, cr)
+
+	if rq {
+		t.Errorf("cold, cold-restorable app should not requeue")
+	}
+	if cr.Status.AncestorLSN != "0/1500000" {
+		t.Errorf("ancestor LSN not persisted: %q", cr.Status.AncestorLSN)
+	}
+	c := cond(cr, CondColdRestorable)
+	if c == nil || c.Status != "True" || c.Reason != "AncestorDurable" {
+		t.Fatalf("ColdRestorable not True/AncestorDurable: %+v", c)
+	}
+}
+
+// In the risk window right after provisioning, the template's un-flushed WAL tail means
+// remote_consistent_lsn has NOT reached the branch point: ColdRestorable=False and the
+// reconciler REQUEUES so it flips to True once the tail uploads (self-heal). The app is
+// still provisioned + Ready (usable) — the window is a restore-coverage gap, not an outage.
+func TestColdRestorable_FalseWhenAncestorNotYetDurable(t *testing.T) {
+	h := newHarness()
+	h.ps.lsn = "0/1500000"
+	h.ps.rcLSN = "0/1400000" // template upload lags the branch point
+	cr := &AppDatabase{Name: "app1", Namespace: "scale-zero-pg", Generation: 1, Spec: AppDatabaseSpec{AppName: "app1"}}
+
+	rq := mustReconcile(t, h, cr)
+
+	if !rq {
+		t.Errorf("not-yet-cold-restorable app must requeue to re-check")
+	}
+	if cr.Status.Phase != PhaseReady {
+		t.Errorf("phase = %q, want Ready (the window does not block serving)", cr.Status.Phase)
+	}
+	c := cond(cr, CondColdRestorable)
+	if c == nil || c.Status != "False" || c.Reason != "AncestorWALNotYetDurable" {
+		t.Fatalf("ColdRestorable not False/AncestorWALNotYetDurable: %+v", c)
+	}
+}
+
+// A pageserver blip while reading remote_consistent_lsn must NOT fail provisioning:
+// the condition goes Unknown and the reconciler requeues to re-check.
+func TestColdRestorable_UnknownOnPageserverError(t *testing.T) {
+	h := newHarness()
+	h.ps.failRCLSN = true
+	cr := &AppDatabase{Name: "app1", Namespace: "scale-zero-pg", Generation: 1, Spec: AppDatabaseSpec{AppName: "app1"}}
+
+	rq := mustReconcile(t, h, cr)
+
+	if !rq {
+		t.Errorf("pageserver error should requeue to re-check")
+	}
+	if cr.Status.Phase != PhaseReady {
+		t.Errorf("phase = %q, want Ready — a pageserver blip must not fail provisioning", cr.Status.Phase)
+	}
+	c := cond(cr, CondColdRestorable)
+	if c == nil || c.Status != "Unknown" {
+		t.Fatalf("ColdRestorable not Unknown on pageserver error: %+v", c)
+	}
+}
+
+// Once ColdRestorable is True the property is MONOTONIC (remote_consistent_lsn only
+// advances), so the reconciler stops polling: a later pageserver error does NOT flip
+// the condition back to Unknown, and it does not requeue on account of the check.
+func TestColdRestorable_MonotonicStopsPolling(t *testing.T) {
+	h := newHarness()
+	h.ps.lsn = "0/1500000"
+	h.ps.rcLSN = "0/1500000"
+	cr := &AppDatabase{Name: "app1", Namespace: "scale-zero-pg", Generation: 1, Spec: AppDatabaseSpec{AppName: "app1"}}
+	if rq := mustReconcile(t, h, cr); rq {
+		t.Fatalf("first pass should settle without requeue")
+	}
+	if c := cond(cr, CondColdRestorable); c == nil || c.Status != "True" {
+		t.Fatalf("precondition: ColdRestorable should be True after first pass: %+v", c)
+	}
+
+	// Pageserver now errors; a monotonic-True condition must be left untouched.
+	h.ps.failRCLSN = true
+	rq := mustReconcile(t, h, cr)
+
+	if rq {
+		t.Errorf("already-cold-restorable app should not re-poll or requeue")
+	}
+	if c := cond(cr, CondColdRestorable); c == nil || c.Status != "True" {
+		t.Errorf("monotonic condition flipped away from True: %+v", c)
+	}
+}
+
+func TestLsnGTE(t *testing.T) {
+	cases := []struct {
+		a, b    string
+		gte, ok bool
+	}{
+		{"0/1500000", "0/1500000", true, true},  // equal
+		{"0/1500001", "0/1500000", true, true},  // greater (low word)
+		{"0/1400000", "0/1500000", false, true}, // less
+		{"1/0", "0/FFFFFFFF", true, true},       // high-word rollover dominates
+		{"0/FFFFFFFF", "1/0", false, true},      // and the reverse
+		{"garbage", "0/1", false, false},        // unparseable a
+		{"0/1", "nope", false, false},           // unparseable b
+		{"0/1", "0/1/2", false, false},          // malformed
+	}
+	for _, tc := range cases {
+		gte, ok := lsnGTE(tc.a, tc.b)
+		if gte != tc.gte || ok != tc.ok {
+			t.Errorf("lsnGTE(%q,%q) = (%v,%v), want (%v,%v)", tc.a, tc.b, gte, ok, tc.gte, tc.ok)
+		}
 	}
 }
