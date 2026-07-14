@@ -328,6 +328,53 @@ try {
     }
   }
 
+  // --- 5b. @knext/db runs with drizzle-kit ABSENT (v3-P3c peer shape) --------
+  // ADR-0021 amendment: drizzle-orm is a hard dep, drizzle-kit the sole OPTIONAL
+  // peer (lazily consulted only inside defineDrizzleConfig). A clean consumer
+  // install pulls @knext/db's real deps (drizzle-orm + pg) but NOT drizzle-kit
+  // (an optional peer is not installed unless the consumer asks). This leg proves
+  // that shape holds on a real install: drizzle-kit must be absent, yet
+  // `@knext/db`'s main entry imports and `runMigrations` resolves; and
+  // `defineDrizzleConfig()` — the one surface that needs the peer — yields the
+  // actionable named error, never a bare module-not-found.
+  console.log('[install-smoke] @knext/db imports + runMigrations resolve without drizzle-kit ...');
+  const dbNoKit = run(
+    'node',
+    [
+      '--input-type=module',
+      '-e',
+      [
+        "import { createRequire } from 'node:module';",
+        "const require = createRequire(process.cwd() + '/x.js');",
+        // drizzle-kit is an OPTIONAL peer — a clean consumer install must NOT have it.
+        'let kitAbsent = false;',
+        "try { require.resolve('drizzle-kit'); } catch { kitAbsent = true; }",
+        "if (!kitAbsent) { console.error('drizzle-kit unexpectedly present — optional peer leaked into the install'); process.exit(2); }",
+        // Main entry imports (re-exports drizzle-orm) with no drizzle-kit.
+        "const db = await import('@knext/db');",
+        "if (typeof db.getDb !== 'function' || typeof db.eq !== 'function') { console.error('@knext/db main entry missing getDb/eq'); process.exit(3); }",
+        // The migrate runner resolves + guards the DSN (no drizzle-kit needed).
+        "const mig = await import('@knext/db/migrate');",
+        "if (typeof mig.runMigrations !== 'function') { console.error('@knext/db/migrate missing runMigrations'); process.exit(4); }",
+        'let guarded = false;',
+        "try { mig.resolveWriterDsn({ url: '' }); } catch (e) { guarded = /DATABASE_URL/.test(e.message); }",
+        "if (!guarded) { console.error('runMigrations/resolveWriterDsn unreachable without drizzle-kit'); process.exit(5); }",
+        // defineDrizzleConfig is the ONLY surface that needs the peer — actionable error.
+        'let named = false;',
+        "try { mig.defineDrizzleConfig(); console.error('defineDrizzleConfig did not throw without drizzle-kit'); process.exit(6); }",
+        "catch (e) { named = /drizzle-kit/.test(e.message) && /devDependency/i.test(e.message) && e.code !== 'ERR_MODULE_NOT_FOUND' && e.code !== 'MODULE_NOT_FOUND'; }",
+        "if (!named) { console.error('defineDrizzleConfig error was not the actionable named-peer error'); process.exit(7); }",
+        "console.log('db-no-drizzle-kit-ok');",
+      ].join('\n'),
+    ],
+    { cwd: workDir },
+  );
+  console.log((dbNoKit.stdout || '').trim());
+  if (dbNoKit.status !== 0) {
+    console.error((dbNoKit.stderr || '').trim());
+    finish(FAIL, '@knext/db does not run cleanly without the optional drizzle-kit peer');
+  }
+
   // --- 6. negative guard: a removed bare path must NOT resolve --------------
   console.log('[install-smoke] negative guard: removed bare path must not resolve ...');
   const neg = run(
@@ -352,8 +399,9 @@ try {
 
   finish(
     PASS,
-    'packed @knext/core + @knext/lib + @knext/db install on plain npm/Node; CLI runs ' +
-      'and every public app-import subpath resolves to real JS outside the workspace',
+    'packed @knext/core + @knext/lib + @knext/db install on plain npm/Node; CLI runs, ' +
+      'every public app-import subpath resolves to real JS outside the workspace, and ' +
+      '@knext/db imports + migrates without the optional drizzle-kit peer',
   );
 } catch (err) {
   finish(FAIL, `unexpected error: ${err?.message ?? err}`);

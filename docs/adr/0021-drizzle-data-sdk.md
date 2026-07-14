@@ -1,8 +1,9 @@
 # ADR-0021 — Drizzle-based data SDK: `@knext/db` (typed schema · migrations · queries · extensions)
 
-- **Status:** Draft (design pass — no implementation until the plan is approved, per
-  `.claude/rules/architecture.md §1`)
-- **Date:** 2026-07-11
+- **Status:** Accepted (implemented — `@knext/db` shipped; **amended 2026-07-14**:
+  drizzle dependency/peer shape settled before the first npmjs publish — see the
+  *Amendment* below, which SUPERSEDES Open decision 6)
+- **Date:** 2026-07-11 (amended 2026-07-14)
 - **Relates to:** ADR-0001 (operator = single source of truth), ADR-0018
   (`spec.database` managed mode), ADR-0019 (`spec.database.secretRef` BYO binding +
   the pool/connect-timeout contract), issue #235 (this ADR), scale-zero-pg
@@ -165,6 +166,72 @@ the RO compute. Both drain on SIGTERM. The 15s connect timeout already tolerates
   **data-access** layer, not a PaaS and not database machinery — provisioning and
   scale-to-zero stay with scale-zero-pg.
 
+## Amendment (2026-07-14) — drizzle dependency/peer shape settled (SUPERSEDES Open decision 6)
+
+### Context
+
+Open decision 6 was implemented **literally**, producing a contradictory
+`packages/db/package.json`: `drizzle-orm` was declared **both** a hard
+`dependency` (`^0.45.2`) **and** an entry in `peerDependencies` +
+`peerDependenciesMeta.optional: true`. A dependency cannot coherently be both — the
+resolver already installs it (the hard dep), so the "optional peer" duplicate is
+dead metadata that only misleads consumers and tooling. `drizzle-kit` was correctly
+an optional peer, but its lazy-import discipline was undocumented and unverified.
+With the first `@knext/*` npmjs publish imminent (issue #53 may unblock any day) and
+`@knext/db` in the published set (ADR-0020 amendment), the shape must be coherent
+**before** it is frozen on the registry.
+
+The technical reality that drove the recommendation: `@knext/db`'s main entry
+(`.`) **re-exports drizzle-orm** (`export * from 'drizzle-orm'`) and `getDb`/`getDbRO`
+call `drizzle(...)` at runtime — drizzle-orm is a **real runtime dependency**, not an
+app-supplied peer. drizzle-**kit**, by contrast, is only ever a **type** in the
+source (`Config`) and a **dev/CI tool** the app runs against the generated
+`drizzle.config.ts`; the `@knext/db` main entry and the `kn-next db migrate` runner
+never load it.
+
+### Decision
+
+1. **`drizzle-orm` is a hard `dependency` only.** Drop the `peerDependencies` /
+   `peerDependenciesMeta` duplicate. The re-exported drizzle-orm range
+   (`^0.45.2`) is **part of `@knext/db`'s semver contract**: because apps import
+   drizzle's query surface *through* `@knext/db`, a range change that could move an
+   app to an incompatible drizzle-orm major/minor is itself at least a **minor**
+   `@knext/db` release (a major-range bump ⇒ a `@knext/db` major). This is stated in
+   the README and PUBLIC_API stability note.
+2. **`drizzle-kit` stays the sole optional peer**
+   (`peerDependencies.drizzle-kit` + `peerDependenciesMeta.drizzle-kit.optional: true`),
+   **lazily** consulted only inside `defineDrizzleConfig`. It is never imported for
+   value at module top-level; `defineDrizzleConfig` probes its resolvability
+   (`require.resolve('drizzle-kit')`) and, if absent, throws an **actionable
+   named-peer error** ("drizzle-kit is required for defineDrizzleConfig — install it
+   as a devDependency"), never a bare `ERR_MODULE_NOT_FOUND`. A contract test
+   (`packages/db/src/__tests__/peer-shape.test.ts`) pins both the manifest shape and
+   the runtime behaviour: the built main entry + `runMigrations` load in a subprocess
+   with drizzle-kit made unresolvable, and only `defineDrizzleConfig` errors — with
+   the named message.
+3. **App-pinning path.** A consumer that must pin a specific drizzle version (e.g. to
+   a patched or newer compatible release) does so with a package-manager
+   **`overrides`** (npm/pnpm) / **`resolutions`** (yarn) entry for `drizzle-orm` — the
+   standard mechanism for constraining a transitive/hard dep — rather than relying on
+   a peer range. The removed optional-peer entry added nothing over this: it did not
+   let an app *substitute* drizzle-orm (the hard dep still installs one), it only
+   duplicated the constraint.
+
+### Consequences
+
+- The manifest is coherent and publish-safe: `drizzle-orm` a hard dep, `drizzle-kit`
+  an optional peer; no dependency appears in two conflicting roles.
+- The drizzle-orm re-export range is now an explicit **semver-contract** surface —
+  range bumps are gated at ≥ minor, documented in README + PUBLIC_API.md.
+- The `defineDrizzleConfig` peer guard turns a confusing downstream loader failure
+  into a one-line fix instruction, verified by the contract test and an
+  install-smoke leg (`scripts/install-smoke.mjs`) that proves `@knext/db` installs +
+  its main entry imports + `runMigrations` resolves **without** drizzle-kit in the
+  tree.
+- Change is runtime-neutral (dropping dead metadata + a lazy guard that only fires on
+  a genuinely-missing peer) → shipped as a **patch** changeset.
+- No new ADR needed; this is a settlement of a pre-existing open decision.
+
 ## Open decisions (for the owner)
 
 1. **Migration execution model.** Recommend the one-shot `kn-next db migrate`
@@ -183,9 +250,12 @@ the RO compute. Both drain on SIGTERM. The 15s connect timeout already tolerates
    vector`). Alternative: **defer** all vector code until #178 merges. Owner call.
 5. **Package name.** Recommend **`@knext/db`**. Alternatives: `@knext/data`,
    `@knext/orm`. Confirm.
-6. **drizzle dependency shape.** Recommend `@knext/db` **re-exports** drizzle-orm
+6. **drizzle dependency shape.** ~~Recommend `@knext/db` **re-exports** drizzle-orm
    (apps get one pinned dep) **and** declares it a peer range, so apps may pin their
-   own compatible drizzle. Confirm vs. hard-pinning.
+   own compatible drizzle. Confirm vs. hard-pinning.~~ **SUPERSEDED by the
+   2026-07-14 amendment (see below): drizzle-orm is a hard `dependency` only (a dep
+   cannot coherently be both a dep and an optional peer); drizzle-kit stays the sole
+   optional peer.**
 7. **Example app.** Recommend porting an existing sample (`apps/file-manager`) to
    `@knext/db` as the runnable proof, vs. a fresh minimal `apps/db-demo`. Owner
    preference.
