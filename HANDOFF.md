@@ -53,6 +53,10 @@ Through v1.3.5 the zone axis + SCRAM auth + wake-budget shipped (history in git 
   unit-tested + fail-safe (a wrong field assumption resolves to `Unknown`, never a false
   durability claim). Run `_verify-restore.sh` on the next OKE window to close the loop, and
   confirm the pageserver timeline-detail JSON key is exactly `remote_consistent_lsn`.
+  **#209 (MERGED) hardens it:** `status.ancestorLsn` is now back-filled from the branch's own
+  pageserver `ancestor_lsn` when empty, so ColdRestorable covers EVERY app — break-glass
+  `provision-app.sh` branches, pre-field apps, and the crash-between-branch-and-status window —
+  not just freshly operator-branched ones (full 3-way sign-off; e2e still pending same OKE window).
 - **Drizzle data SDK (`@knext/db`)** — complete on the **knext** side (getknext-dev/knext):
   `getDb`/`getDbRO`, writer-only `kn-next db migrate`, TimescaleDB/pgvector helpers, guide +
   `apps/db-demo`, SIGTERM RO-drain. ADR-0021.
