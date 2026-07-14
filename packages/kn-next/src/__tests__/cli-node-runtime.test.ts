@@ -184,19 +184,22 @@ describe("self-entry blocks exist ONLY in sanctioned entry modules (#263)", () =
     // load, hijacking every subcommand (observed live with gc.ts, PR #262).
     // The ONLY modules allowed to carry one are:
     //   - deploy.ts   — the published bin entry (the subcommand dispatcher)
-    //   - build.ts / cleanup.ts / preview.ts — documented directly-runnable
-    //     entries (docs-site cli.mdx "Directly runnable entries";
-    //     .github/workflows/preview.yml invokes dist/cli/preview.js directly)
-    //     with their OWN tsup entries, so they emit as separate files and are
-    //     never inlined into the bin.
+    //   - build.ts / cleanup.ts / preview.ts / loadtest.ts — documented
+    //     directly-runnable entries (docs-site cli.mdx "Directly runnable
+    //     entries"; .github/workflows/preview.yml invokes dist/cli/preview.js
+    //     directly; scripts/load-test.sh runs dist/cli/loadtest.js) — each with
+    //     its OWN tsup entry, so they emit as separate files and are never
+    //     inlined into the bin. loadtest.ts uses the SHARED isEntrypoint guard
+    //     (v3-P6a: normalized off its former hand-rolled argv check), so its
+    //     self-entry block belongs here.
     // Every other CLI module is reached exclusively through the bin dispatch
-    // and must NOT self-execute. (loadtest.ts uses its own argv check and its
-    // own tsup entry — scripts/load-test.sh runs dist/cli/loadtest.js.)
+    // and must NOT self-execute.
     const SANCTIONED = new Set([
         "deploy.ts",
         "build.ts",
         "cleanup.ts",
         "preview.ts",
+        "loadtest.ts",
     ]);
 
     it("no non-sanctioned CLI module carries an isEntrypoint self-entry block", () => {

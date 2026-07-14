@@ -40,6 +40,7 @@
 
 import { spawnSync } from "node:child_process";
 import { writeSync } from "node:fs";
+import { excerpt } from "./shared";
 
 /** The ingress class net-kourier actually registers a reconciler for (#208). */
 export const KOURIER_INGRESS_CLASS = "kourier.ingress.networking.knative.dev";
@@ -191,11 +192,7 @@ function infraFailure(r: KubectlResult): InfraFailure | undefined {
     // (P6c nit): drop control bytes (ANSI escapes, BEL, ...) BEFORE collapsing
     // whitespace and capping, so a detail line never re-emits terminal escape
     // sequences and control bytes never eat the 160-char budget.
-    const excerpt = r.stderr
-        .replace(/[^\x20-\x7e\s]/g, "")
-        .trim()
-        .replace(/\s+/g, " ")
-        .slice(0, 160);
+    const detailExcerpt = excerpt(r.stderr.replace(/[^\x20-\x7e\s]/g, ""));
     if (cls === "forbidden") {
         // The apiserver names the denied resource in its Status message
         // (`<resource> is forbidden: …`); fall back to a generic phrase when
@@ -208,17 +205,17 @@ function infraFailure(r: KubectlResult): InfraFailure | undefined {
             rawToken.replace(/[^\x21-\x7e]/g, "").slice(0, 80) ||
             "the probed resource";
         return {
-            detail: `probe failed (rbac): ${excerpt}`,
+            detail: `probe failed (rbac): ${detailExcerpt}`,
             hint: `insufficient RBAC — ask a cluster admin for get/list on ${resource}`,
         };
     }
     return cls === "auth"
         ? {
-              detail: `probe failed (auth): ${excerpt}`,
+              detail: `probe failed (auth): ${detailExcerpt}`,
               hint: "credentials failed — re-authenticate (refresh your kubeconfig token) and retry",
           }
         : {
-              detail: `probe failed (network): ${excerpt}`,
+              detail: `probe failed (network): ${detailExcerpt}`,
               hint: "cluster connection flaked — check network/VPN and retry",
           };
 }
