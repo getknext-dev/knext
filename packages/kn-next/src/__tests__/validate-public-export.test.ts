@@ -71,7 +71,7 @@ describe("@knext/core/validate — public export pinning", () => {
     });
 
     it("exports exactly validateConfig + ConfigValidationError (the result type)", async () => {
-        const mod = await import("../validate-public.ts");
+        const mod = await import("../validate-public");
         expect(typeof mod.validateConfig).toBe("function");
         expect(typeof mod.ConfigValidationError).toBe("function");
         // Nothing else leaks onto the public surface. Only the two intentional
@@ -82,7 +82,7 @@ describe("@knext/core/validate — public export pinning", () => {
 
     it("behaves as a pure function — throws on bad config, returns on good", async () => {
         const { validateConfig, ConfigValidationError } = await import(
-            "../validate-public.ts"
+            "../validate-public"
         );
         // Bad config throws the typed error, does NOT exit the process.
         // biome-ignore lint/suspicious/noExplicitAny: intentionally invalid config
