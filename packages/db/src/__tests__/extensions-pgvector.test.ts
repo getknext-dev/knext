@@ -79,6 +79,40 @@ describe('@knext/db pgvector — distance-operator query builders', () => {
   });
 });
 
+describe('@knext/db pgvector — quote hardening (#278)', () => {
+  // The index name / table / column are SQL identifiers → double-quoted with any
+  // embedded `"` doubled, so a hostile name cannot break out of the identifier.
+  const weird = pgTable('we"ird', {
+    id: serial('id').primaryKey(),
+    'em"b': vector('em"b', { dimensions: 3 }),
+  });
+
+  it('escapes a double-quote in the index name (hnsw)', () => {
+    expect(hnsw('id"x', docs.embedding)).toBe(
+      'CREATE INDEX IF NOT EXISTS "id""x" ON "docs" USING hnsw ("embedding" vector_cosine_ops);',
+    );
+  });
+
+  it('escapes a double-quote in the table + column identifiers (hnsw)', () => {
+    expect(hnsw('emb_idx', weird['em"b'])).toBe(
+      'CREATE INDEX IF NOT EXISTS "emb_idx" ON "we""ird" USING hnsw ("em""b" vector_cosine_ops);',
+    );
+  });
+
+  it('escapes a double-quote in the index name (ivfflat)', () => {
+    expect(ivfflat('id"x', docs.embedding, { lists: 100 })).toBe(
+      'CREATE INDEX IF NOT EXISTS "id""x" ON "docs" USING ivfflat ("embedding" vector_cosine_ops) ' +
+        'WITH (lists = 100);',
+    );
+  });
+
+  it('leaves well-formed inputs byte-for-byte unchanged', () => {
+    expect(hnsw('emb_idx', docs.embedding)).toBe(
+      'CREATE INDEX IF NOT EXISTS "emb_idx" ON "docs" USING hnsw ("embedding" vector_cosine_ops);',
+    );
+  });
+});
+
 describe('@knext/db/schema — re-exports the pgvector helpers on the seam', () => {
   it('exposes hnsw / ivfflat / createVectorExtension + distance ops', () => {
     for (const name of [

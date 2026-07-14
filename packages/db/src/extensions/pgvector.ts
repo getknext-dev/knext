@@ -21,6 +21,7 @@
 
 import { getTableName } from 'drizzle-orm';
 import type { PgColumn } from 'drizzle-orm/pg-core';
+import { quoteIdent } from '../sql';
 
 // The distance operators are drizzle's own typed builders: `cosineDistance` → `<=>`,
 // `l2Distance` → `<->`, `innerProduct` → `<#>`. Re-exported so the pgvector
@@ -68,7 +69,8 @@ function createIndexPrefix(name: string, concurrently: boolean, ifNotExists: boo
   if (ifNotExists) {
     parts.push('IF NOT EXISTS');
   }
-  parts.push(`"${name}"`);
+  // The index name is a developer-supplied identifier → quote + escape (#278).
+  parts.push(quoteIdent(name));
   return parts.join(' ');
 }
 
@@ -116,7 +118,8 @@ export function hnsw(name: string, column: PgColumn, options: HnswIndexOptions =
     ['m', m],
     ['ef_construction', efConstruction],
   ]);
-  return `${prefix} ON "${table}" USING hnsw ("${col}" ${ops})${withSql};`;
+  // table + column are identifiers → quote + escape; ops is an opclass keyword (#278).
+  return `${prefix} ON ${quoteIdent(table)} USING hnsw (${quoteIdent(col)} ${ops})${withSql};`;
 }
 
 /** Options for {@link ivfflat}. */
@@ -147,5 +150,6 @@ export function ivfflat(name: string, column: PgColumn, options: IvfflatIndexOpt
   const { table, column: col } = ref(column);
   const prefix = createIndexPrefix(name, concurrently, ifNotExists);
   const withSql = withClause([['lists', lists]]);
-  return `${prefix} ON "${table}" USING ivfflat ("${col}" ${ops})${withSql};`;
+  // table + column are identifiers → quote + escape; ops is an opclass keyword (#278).
+  return `${prefix} ON ${quoteIdent(table)} USING ivfflat (${quoteIdent(col)} ${ops})${withSql};`;
 }
