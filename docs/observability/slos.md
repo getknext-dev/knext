@@ -133,3 +133,29 @@ Once the overlay is applied AND kube-state-metrics is pointed at this ConfigMap,
 `knext_nextapp_condition` is emitted and `KnextNextAppDegraded` is live. If KSM
 is not yet running with this config, the alert has no series — track the
 condition via `kubectl get nextapp -o jsonpath` in the meantime (see runbook).
+
+## Readiness dependency taxonomy (hard vs soft)
+
+The deep readiness probe (`checkDeepHealth`, `@knext/lib`) backs the Knative
+readiness gate, which under scale-to-zero decides whether a pod keeps serving
+traffic or is **evicted**. Its overall verdict is derived by dependency
+**severity**, not "any dependency down ⇒ down" (see ADR-0023):
+
+- **Hard dependency (Postgres):** configured + unreachable ⇒ overall `down` —
+  readiness **fails CLOSED**. The pod can't serve, so don't route to it or keep
+  it in rotation. A slow-PG timeout is treated the same; the timed-out sub-check
+  is never left falsely `up`.
+- **Soft dependency (Redis-as-cache):** the cache layer **fails OPEN** (SCS/Zones
+  contract) — a cache miss still serves from the origin. Configured + unreachable
+  ⇒ overall `degraded` but still **Ready**; a cache blip must not evict a pod
+  that can serve cache-miss traffic.
+
+| postgres        | redis (cache)       | overall    |
+|-----------------|---------------------|------------|
+| up / unconfig   | up / unconfig       | `ok`       |
+| up / unconfig   | down                | `degraded` |
+| down            | up / down / unconfig | `down`    |
+| timeout         | *                   | `down`     |
+
+`degraded` is a **Ready** state, reserved for soft-dependency failures — it
+surfaces reduced capacity to observability, it does not gate traffic.
