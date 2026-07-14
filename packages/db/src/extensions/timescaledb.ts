@@ -30,6 +30,7 @@
 
 import { getTableName } from 'drizzle-orm';
 import type { PgTable } from 'drizzle-orm/pg-core';
+import { quoteLiteral } from '../sql';
 
 /** A table this helper targets: a drizzle `pgTable`, or a bare table name. */
 export type TableRef = PgTable | string;
@@ -98,10 +99,12 @@ export interface HypertableOptions {
 export function hypertable(table: TableRef, options: HypertableOptions): string {
   const { by, chunkInterval, ifNotExists = true, migrateData = false } = options;
 
+  // create_hypertable / by_range take the table + column as TEXT arguments (not
+  // bare identifiers), so they are quoted as string literals (#278).
   const dimension = chunkInterval
-    ? `by_range('${by}', INTERVAL '${chunkInterval}')`
-    : `by_range('${by}')`;
-  const args = [`'${tableName(table)}'`, dimension];
+    ? `by_range(${quoteLiteral(by)}, INTERVAL ${quoteLiteral(chunkInterval)})`
+    : `by_range(${quoteLiteral(by)})`;
+  const args = [quoteLiteral(tableName(table)), dimension];
   if (migrateData) {
     args.push('migrate_data => TRUE');
   }
@@ -133,5 +136,8 @@ export interface DropChunksOptions {
  * ```
  */
 export function dropChunks(table: TableRef, options: DropChunksOptions): string {
-  return `SELECT drop_chunks('${tableName(table)}', INTERVAL '${options.olderThan}');`;
+  // drop_chunks takes the table + interval as TEXT arguments — quote as literals (#278).
+  return `SELECT drop_chunks(${quoteLiteral(tableName(table))}, INTERVAL ${quoteLiteral(
+    options.olderThan,
+  )});`;
 }
