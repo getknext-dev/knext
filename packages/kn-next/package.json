@@ -78,6 +78,7 @@
       "public": [
         ".",
         "./adapter",
+        "./validate",
         "./adapters/otel-config",
         "./adapters/cache-handler"
       ],
