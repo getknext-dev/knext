@@ -145,5 +145,14 @@ export async function runLoadTestCli(
 // — the same symlink-correct check every other CLI entrypoint uses — instead
 // of a hand-rolled import.meta.url / basename comparison (see #263 / exec.ts).
 if (isEntrypoint(import.meta.url)) {
-    runLoadTestCli(process.argv.slice(2)).then((code) => process.exit(code));
+    runLoadTestCli(process.argv.slice(2))
+        .then((code) => process.exit(code))
+        .catch((err) => {
+            // Last-resort guard: an unexpected throw (e.g. from argv parsing,
+            // outside runLoadTestCli's own try/catch) must never exit silently.
+            process.stderr.write(
+                `load test failed unexpectedly: ${err instanceof Error ? err.message : String(err)}\n`,
+            );
+            process.exit(1);
+        });
 }
