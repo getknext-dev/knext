@@ -94,6 +94,47 @@ describe('@knext/db timescaledb — dropChunks() retention', () => {
   });
 });
 
+describe('@knext/db timescaledb — quote hardening (#278)', () => {
+  // create_hypertable / by_range / drop_chunks take their table + column as TEXT
+  // arguments (not bare identifiers), so a name with a `'` must be escaped as a
+  // string literal (`''`), not left to break out of the quotes.
+  it('escapes a single-quote in a bare table name (hypertable)', () => {
+    expect(hypertable("o'clock", { by: 'ts' })).toBe(
+      "SELECT create_hypertable('o''clock', by_range('ts'), if_not_exists => TRUE);",
+    );
+  });
+
+  it('escapes a single-quote in the partitioning column (by_range)', () => {
+    expect(hypertable('metrics', { by: "we'rd" })).toBe(
+      "SELECT create_hypertable('metrics', by_range('we''rd'), if_not_exists => TRUE);",
+    );
+  });
+
+  it('escapes a single-quote in the chunk interval literal', () => {
+    // A hostile interval cannot break out of the INTERVAL '...' literal.
+    expect(hypertable('metrics', { by: 'ts', chunkInterval: "7'; DROP TABLE x; --" })).toBe(
+      "SELECT create_hypertable('metrics', by_range('ts', INTERVAL '7''; DROP TABLE x; --'), " +
+        'if_not_exists => TRUE);',
+    );
+  });
+
+  it('escapes a single-quote in the dropChunks table + interval', () => {
+    expect(dropChunks("o'clock", { olderThan: "30'; DROP TABLE x; --" })).toBe(
+      "SELECT drop_chunks('o''clock', INTERVAL '30''; DROP TABLE x; --');",
+    );
+  });
+
+  it('leaves well-formed inputs byte-for-byte unchanged', () => {
+    expect(hypertable('metrics', { by: 'ts', chunkInterval: '7 days' })).toBe(
+      "SELECT create_hypertable('metrics', by_range('ts', INTERVAL '7 days'), " +
+        'if_not_exists => TRUE);',
+    );
+    expect(dropChunks('metrics', { olderThan: '30 days' })).toBe(
+      "SELECT drop_chunks('metrics', INTERVAL '30 days');",
+    );
+  });
+});
+
 describe('@knext/db/schema — re-exports the timescaledb helpers on the seam', () => {
   it('exposes hypertable / dropChunks / createTimescaleExtension', () => {
     expect(typeof schema.hypertable).toBe('function');
