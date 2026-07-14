@@ -76,6 +76,10 @@ knext-plan-out/
 .migration-spec.md
 skills-lock.json
 
+# npm/JS supply-chain gate (scripts/audit-published.mjs, v4-P3) — the per-package
+# CycloneDX SBOMs are a CI artifact (uploaded by the release workflows), not source.
+/sbom/
+
 # e2e-deploy.sh local pack-once fallback (#147 A3-3 fix round 1) — packed
 # adapter tarballs + the atomic staging dirs must never be committed.
 **/.e2e-tarballs/

@@ -1,0 +1,4 @@
+{
+  "$schema-note": "Dated + justified allowlist for the npm/JS supply-chain gate (scripts/audit-published.mjs, v4-P3). Mirrors the Trivy .trivyignore triage discipline: an accepted HIGH/CRITICAL advisory in the PUBLISHED (@knext/{core,lib,db}) production closure is suppressed ONLY by an entry here, so the gate can never be silently neutered. Each entry MUST carry: `id` (a GHSA/advisory id), `justification` (why it's accepted — not exploitable in our usage, no fix available, etc.), and `added` (ISO date it was accepted). `expires` (ISO date) is optional; past its expiry the entry stops suppressing and the risk must be re-justified. Bump the dependency FIRST; allowlist only when there is no fix.",
+  "allow": []
+}

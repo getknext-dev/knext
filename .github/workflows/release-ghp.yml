@@ -34,9 +34,49 @@ permissions:
   # NOTE: no id-token — the GHP path publishes WITHOUT provenance.
 
 jobs:
+  # npm/JS supply-chain gate (v4-P3) — identical gate to release.yml, applied to
+  # the GHP interim channel too. Audits the PUBLISHED production closure
+  # (--omit=dev) of @knext/{core,lib,db} (the SAME source the rename script
+  # stages as @getknext-dev/*), FAILS on HIGH/CRITICAL, and emits a CycloneDX
+  # SBOM per package. PUBLISH-BLOCKING: publish-ghp `needs: audit`.
+  audit:
+    name: npm supply-chain audit + JS SBOM (blocks publish)
+    runs-on: ubuntu-latest
+    if: github.repository == 'getknext-dev/knext'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build publishable packages
+        run: pnpm --filter @knext/lib build && pnpm --filter @knext/db build && pnpm --filter @knext/core build
+
+      - name: Audit published production closure + generate SBOMs
+        run: node scripts/audit-published.mjs
+
+      - name: Upload JS SBOMs (CycloneDX)
+        uses: actions/upload-artifact@v4
+        with:
+          name: npm-sbom-ghp
+          path: sbom/*.cdx.json
+          if-no-files-found: error
+
   publish-ghp:
     name: Publish @getknext-dev/* to GitHub Packages
     runs-on: ubuntu-latest
+    # Publish-BLOCKING supply-chain gate: never publish tarballs the audit did
+    # not clear. Does NOT unblock #53 (this is the interim GHP channel).
+    needs: audit
     # Only ever run on the canonical repo (never forks).
     if: github.repository == 'getknext-dev/knext'
     outputs:
