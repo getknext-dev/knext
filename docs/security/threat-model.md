@@ -86,7 +86,8 @@ its scope is `FROM` lines only (the base *input*), not packages resolved at buil
   supply-chain workflows (`supply-chain.yml`, `operator-supply-chain.yml`) Trivy-gate the
   exact built image (fail on HIGH/CRITICAL) **before** any push, and cosign-sign the pushed
   digest on `main` — a scan-failed image is never pullable at a stable tag and never signed.
-  PR builds are Trivy-gated too, but never pushed or signed.
+  PR builds are Trivy-scanned too (report-only — the gate enforces on `main`), and never
+  pushed or signed.
 - **Digests are still refreshed on intentional bumps.** The in-place upgrade only covers the
   window between a published apk fix and the next digest bump (e.g. c-ares 1.34.8-r0 for
   CVE-2026-33630); it is a complement to digest pinning, not a substitute.
