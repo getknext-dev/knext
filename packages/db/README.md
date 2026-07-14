@@ -367,8 +367,10 @@ Notes:
   DSN — they prove pool **routing**, not scale-zero-pg's bounded-staleness
   semantics (vanilla PG cannot reproduce those).
 - The TimescaleDB `hypertable()` spec is skip-gated (plain `postgres:16` lacks
-  the extension): run a `timescale/timescaledb:latest-pg16` container instead
-  and set `KNEXT_DB_LIVE_TIMESCALE=1`. The pgvector spec stays skipped pending
+  the extension): run a `timescale/timescaledb:latest-pg17` container instead
+  and set `KNEXT_DB_LIVE_TIMESCALE=1`. Any image with TimescaleDB ≥ 2.13 works
+  (the `by_range()` minimum documented above); `latest-pg17` is what the live
+  lane was last verified against (TimescaleDB 2.28.2). The pgvector spec stays skipped pending
   the scale-zero-pg image gate (ADR-0021, open decision 4).
 
 ## Documentation

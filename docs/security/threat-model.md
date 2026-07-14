@@ -5,7 +5,7 @@
 > knext's **real** components today — not a generic web-app checklist. Keep current when a trust
 > boundary changes.
 
-Last reviewed: 2026-06-27.
+Last reviewed: 2026-07-14 (added the §4 patching policy — `apk upgrade` on a pinned base, #267).
 
 ## Scope & assets
 knext is the scale-to-zero Next.js adapter for Knative. The assets worth protecting:
@@ -71,6 +71,26 @@ knext is the scale-to-zero Next.js adapter for Knative. The assets worth protect
 | **I**nfo disclosure | Vulnerable deps shipped silently. | **syft SBOM** per image; **Trivy fails the build on HIGH/CRITICAL** on main (`--ignore-unfixed`) — and **both images are scanned BEFORE they are pushed** (`supply-chain.yml` + `operator-supply-chain.yml`: build local → SBOM → Trivy gate → push → sign; guarded by `tests/supply-chain-workflow.test.ts` + `tests/operator-supply-chain-workflow.test.ts`), so a scan-failed image is never pullable at a stable tag and never signed — and a scan-failed operator run never refreshes the `operator-latest` release's `install.yaml`. The Trivy/syft actions themselves are **SHA-pinned** in both workflows. Builder pinned to a patched Go release (`check-trivy-baseimage.bats.sh`). | — |
 | **R**epudiate | Can't prove which source built an image. | **cosign SBOM attestation + keyless signature** for both images, plus **buildkit SLSA provenance (`mode=max`) restored for BOTH images**: each build exports an OCI layout (which, unlike the `docker` exporter used briefly after the scan-before-push fix, carries the attestation manifest), Trivy gates that exact layout, and a version+checksum-pinned `crane push` publishes it byte-for-byte; a post-push step **fails the run if the pushed index lacks the attestation manifest or the SLSA provenance predicate** (guarded by both workflow test files). | `mode=max` records build args — safe today (the only arg is the public `SOURCE_DATE_EPOCH`); never add a secret build-arg. |
 | **Reproducibility** | Two builds of the same commit differ, weakening provenance. | **Not yet fully reproducible** — `SOURCE_DATE_EPOCH` (commit time) is now passed to the app build as a best-effort input, but pnpm/npm install ordering and native `sharp` prebuilts still vary. We deliberately do **not** claim reproducible builds. | Enable buildkit `rewrite-timestamp` + a lockfile-pinned, vendored install before claiming it. |
+
+### Patching policy — `apk upgrade` on a digest-pinned base (#267)
+
+Runner stages **MAY** run `apk upgrade --no-cache` against a digest-pinned base image
+(precedent: the `apps/file-manager/Dockerfile` runner stage, added in #267). This is not a
+pinning violation, and `scripts/check-base-images-pinned.sh` deliberately does not flag it —
+its scope is `FROM` lines only (the base *input*), not packages resolved at build time.
+
+- **The base digest pins provenance of the input.** `apk upgrade` pulls only fixes already
+  published on the **same pinned alpine stable branch** — it cannot float the base to a
+  different alpine release.
+- **The trust anchor for what SHIPPED is the scanned + signed OUTPUT digest.** Both
+  supply-chain workflows (`supply-chain.yml`, `operator-supply-chain.yml`) Trivy-gate the
+  exact built image (fail on HIGH/CRITICAL) **before** any push, and cosign-sign the pushed
+  digest on `main` — a scan-failed image is never pullable at a stable tag and never signed.
+  PR builds are Trivy-scanned too (report-only — the gate enforces on `main`), and never
+  pushed or signed.
+- **Digests are still refreshed on intentional bumps.** The in-place upgrade only covers the
+  window between a published apk fix and the next digest bump (e.g. c-ares 1.34.8-r0 for
+  CVE-2026-33630); it is a complement to digest pinning, not a substitute.
 
 ---
 
