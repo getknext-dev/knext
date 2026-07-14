@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
@@ -24,6 +25,17 @@ import { GC_SKIP_REASONS, type GcSkipReason, renderGcReport } from "../cli/gc";
 
 /** Every token, as an array, derived from the exported registry. */
 const REGISTRY_TOKENS = Object.values(GC_SKIP_REASONS) as GcSkipReason[];
+
+/**
+ * Absolute path to the gc CLI doc, resolved from THIS test file.
+ * Uses dirname(fileURLToPath(import.meta.url)) + resolve (the idiom that works
+ * under CI vitest/Node) rather than new URL(relative, import.meta.url), which
+ * can yield a non-file URL in CI and throw ERR_INVALID_URL_SCHEME.
+ */
+const GC_CLI_DOC = resolve(
+    dirname(fileURLToPath(import.meta.url)),
+    "../../../../docs/guides/gc-cli.md",
+);
 
 describe("GC_SKIP_REASONS registry (v3-P4a — condition 1)", () => {
     it("is an exported const whose value equals its key for every entry (enum-like stable tokens)", () => {
@@ -147,9 +159,7 @@ describe("registry ⇔ union ⇔ docs contract (v3-P4a — condition 5)", () => 
 
     /** Tokens documented in the gc CLI doc (fenced-code `[token]` mentions). */
     function docTokens(): Set<string> {
-        const docPath = fileURLToPath(
-            new URL("../../../../docs/guides/gc-cli.md", import.meta.url),
-        );
+        const docPath = GC_CLI_DOC;
         const md = readFileSync(docPath, "utf8");
         const found = new Set<string>();
         for (const token of REGISTRY_TOKENS) {
@@ -167,9 +177,7 @@ describe("registry ⇔ union ⇔ docs contract (v3-P4a — condition 5)", () => 
     });
 
     it("the gc CLI doc carries the stable-contract note so tokens are not renamed casually", () => {
-        const docPath = fileURLToPath(
-            new URL("../../../../docs/guides/gc-cli.md", import.meta.url),
-        );
+        const docPath = GC_CLI_DOC;
         const md = readFileSync(docPath, "utf8").toLowerCase();
         expect(md).toContain("stable");
         expect(md).toMatch(/machine-readable|machine readable/);
