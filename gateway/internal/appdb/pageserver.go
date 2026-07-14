@@ -118,6 +118,29 @@ func (p *HTTPPageserver) TemplateRemoteConsistentLSN(ctx context.Context, tenant
 	return t.RemoteConsistentLSN, nil
 }
 
+// TimelineAncestorLSN reads a branch timeline's own ancestor_lsn — the exact template
+// LSN it was cut from. The operator back-fills status.ancestorLsn from this for any app
+// whose branch already exists without a persisted ancestor (adopted from provision-app.sh,
+// pre-dating the field, or an operator crash between branch and status write), so the
+// ColdRestorable check (docs/runbook-dr.md §9d-bis) converges for EVERY app, not just ones
+// this operator freshly branched (#209). Empty means the field was absent in the response.
+func (p *HTTPPageserver) TimelineAncestorLSN(ctx context.Context, tenant, tl string) (string, error) {
+	code, data, err := p.do(ctx, http.MethodGet, fmt.Sprintf("%s/v1/tenant/%s/timeline/%s", p.BaseURL, tenant, tl), nil)
+	if err != nil {
+		return "", err
+	}
+	if code != http.StatusOK {
+		return "", fmt.Errorf("get branch timeline: pageserver %d: %s", code, string(data))
+	}
+	var t struct {
+		AncestorLSN string `json:"ancestor_lsn"`
+	}
+	if err := json.Unmarshal(data, &t); err != nil {
+		return "", fmt.Errorf("decode branch timeline: %w", err)
+	}
+	return t.AncestorLSN, nil
+}
+
 // Branch creates timeline tl as a copy-on-write child of the template timeline at lsn —
 // the Neon primitive that gives each app its own isolated database near-instantly and
 // cheaply (no data copy). Called only after TimelineExists reports absent, so it is

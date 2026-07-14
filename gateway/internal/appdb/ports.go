@@ -22,6 +22,11 @@ type PageserverOps interface {
 	// The cold-restorability check (docs/runbook-dr.md §9d-bis) compares it to a branch's
 	// ancestor LSN: a cold restore can only materialize the branch once this covers it.
 	TemplateRemoteConsistentLSN(ctx context.Context, tenant, template string) (string, error)
+	// TimelineAncestorLSN returns a branch timeline's own ancestor_lsn (the template LSN
+	// it was cut from). Used to BACK-FILL status.ancestorLsn for apps whose branch already
+	// exists but has no persisted ancestor (adopted from provision-app.sh, or an operator
+	// crash between branch and status write) so cold-restorability covers every app (#209).
+	TimelineAncestorLSN(ctx context.Context, tenant, tl string) (string, error)
 	// Branch creates timeline tl as a child of template at lsn (idempotent on tl).
 	Branch(ctx context.Context, tenant, tl, template, lsn string, pgVersion int) error
 	// DeleteTimeline removes tl's pages/WAL from the pageserver (404 == already gone).

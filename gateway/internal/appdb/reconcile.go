@@ -175,6 +175,20 @@ func (d *Deps) reconcileApply(ctx context.Context, cr *AppDatabase) (bool, error
 		d.Cluster.Event(cr, "Normal", "Branched", fmt.Sprintf("timeline %s branched from template@%s", tl, lsn))
 	}
 
+	// 5b. Back-fill the branch point for an ADOPTED branch. If the branch already exists
+	//     but status.ancestorLsn was never persisted — branched by provision-app.sh
+	//     (break-glass), pre-dating the field, or an operator crash between the branch and
+	//     its status write — read it from the branch's OWN pageserver detail so the
+	//     cold-restorability check (6b) covers EVERY app, not just ones this operator
+	//     freshly branched (#209). Fresh branches already set AncestorLSN in step 5, so
+	//     this is a no-op for them. A read error (or an absent field) is benign: leave it
+	//     empty and re-check next pass — never fail provisioning on it.
+	if cr.Status.AncestorLSN == "" {
+		if anc, aerr := d.Pageserver.TimelineAncestorLSN(ctx, d.Tenant, tl); aerr == nil && anc != "" {
+			cr.Status.AncestorLSN = anc
+		}
+	}
+
 	// 6. Observe compute readiness and settle status.
 	avail, err := d.Cluster.DeploymentAvailable(ctx, app)
 	if err != nil {
@@ -195,8 +209,10 @@ func (d *Deps) reconcileApply(ctx context.Context, cr *AppDatabase) (bool, error
 	//     condition + event so an operator/knext can see + alert on it; we do NOT delay
 	//     Ready (the app is fully usable now — this is disaster-restore coverage, not
 	//     serving). The property is MONOTONIC (remote_consistent_lsn only advances), so once
-	//     True we stop polling. Apps with no persisted ancestor LSN (provisioned before this
-	//     field, or by provision-app.sh) are past the window and skip the check.
+	//     True we stop polling. AncestorLSN is set in step 5 for fresh branches and
+	//     back-filled in step 5b for adopted ones, so every app is covered; it is only ever
+	//     empty transiently (a pageserver read still pending) — the check is skipped that
+	//     pass and re-evaluated on the next.
 	coldRestorableRequeue := false
 	if cr.Status.AncestorLSN != "" && !isConditionTrue(cr, CondColdRestorable) {
 		rc, rcErr := d.Pageserver.TemplateRemoteConsistentLSN(ctx, d.Tenant, d.Template)

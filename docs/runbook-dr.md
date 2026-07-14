@@ -350,9 +350,13 @@ un-flushed WAL tail. So:
   `ancestorLsn` (persisted in `.status.ancestorLsn`), `False`/`AncestorWALNotYetDurable`
   during the window (the operator requeues and it self-heals in minutes), `Unknown` on a
   transient pageserver read error. It does **not** delay `Ready` — the app is fully usable
-  while `False`; the property is monotonic, so the operator stops polling once `True`. This
-  turns "which apps are cold-restorable right now?" from a disaster-time discovery into a
-  `kubectl get appdatabase`-visible, alertable signal:
+  while `False`; the property is monotonic, so the operator stops polling once `True`.
+  `.status.ancestorLsn` is persisted at operator-branch time and, for a branch the operator
+  merely **adopts** (created by `provision-app.sh`, pre-dating the field, or a crash between
+  branch and status write), **back-filled** from the branch's own pageserver `ancestor_lsn`
+  on the next reconcile (issue #209) — so cold-restorability covers **every** app, not only
+  ones the operator freshly branched. This turns "which apps are cold-restorable right now?"
+  from a disaster-time discovery into a `kubectl get appdatabase`-visible, alertable signal:
   `kubectl get appdatabase <app> -o jsonpath='{.status.conditions[?(@.type=="ColdRestorable")].status}'`.
 
 - **CAN — isolation (proven both directions):** destroying/​restoring one app does **not**

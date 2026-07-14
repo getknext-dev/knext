@@ -64,7 +64,7 @@ The operator reconciles `.status`. A driver gates its own work on these fields:
 | `status.secretName` | the output Secret name (`app-db-<app>`) | **read the Secret to mirror** — do not reconstruct |
 | `status.observedGeneration` | last `spec` generation reconciled | detect stale status after a `spec` edit |
 | `status.timelineId` | the app's Neon timeline id | diagnostics |
-| `status.ancestorLsn` | the template LSN this app branched from | diagnostics; the cold-restorability comparison point |
+| `status.ancestorLsn` | the template LSN this app branched from (persisted at branch time; back-filled from the branch for adopted/pre-existing apps, #209) | diagnostics; the cold-restorability comparison point |
 | `status.computeReady` | compute has ≥1 available replica | warm-tier readiness detail |
 
 **Readiness semantics.** A **`cold`** tier reaches `phase: Ready` /

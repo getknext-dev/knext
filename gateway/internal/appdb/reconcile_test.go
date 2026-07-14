@@ -12,13 +12,15 @@ import (
 // ---- fakes -----------------------------------------------------------------
 
 type fakePS struct {
-	timelines  map[string]bool // tl -> exists
-	lsn        string
-	rcLSN      string   // template remote_consistent_lsn (cold-restorability, §9d-bis)
-	branchArgs []string // tl ids branched
-	deleted    []string
-	failLSN    bool
-	failRCLSN  bool
+	timelines     map[string]bool // tl -> exists
+	lsn           string
+	rcLSN         string   // template remote_consistent_lsn (cold-restorability, §9d-bis)
+	tlAncestorLSN string   // a branch's own ancestor_lsn (back-fill source, #209)
+	branchArgs    []string // tl ids branched
+	deleted       []string
+	failLSN       bool
+	failRCLSN     bool
+	failAncestor  bool
 }
 
 // newFakePS defaults rcLSN == lsn so a freshly-branched app is cold-restorable
@@ -42,6 +44,12 @@ func (f *fakePS) TemplateRemoteConsistentLSN(_ context.Context, _, _ string) (st
 		return "", errors.New("boom")
 	}
 	return f.rcLSN, nil
+}
+func (f *fakePS) TimelineAncestorLSN(_ context.Context, _, _ string) (string, error) {
+	if f.failAncestor {
+		return "", errors.New("boom")
+	}
+	return f.tlAncestorLSN, nil
 }
 func (f *fakePS) Branch(_ context.Context, _, tl, _, _ string, _ int) error {
 	f.branchArgs = append(f.branchArgs, tl)
@@ -751,6 +759,56 @@ func TestColdRestorable_MonotonicStopsPolling(t *testing.T) {
 	}
 	if c := cond(cr, CondColdRestorable); c == nil || c.Status != "True" {
 		t.Errorf("monotonic condition flipped away from True: %+v", c)
+	}
+}
+
+// An app whose branch ALREADY exists but has no persisted ancestorLsn (adopted from
+// provision-app.sh, pre-dating the field, or an operator crash between branch and status
+// write) must have ancestorLsn BACK-FILLED from the branch's own pageserver detail, so
+// cold-restorability then evaluates normally (#209) — not silently skipped forever.
+func TestColdRestorable_BackfillsAncestorForExistingBranch(t *testing.T) {
+	h := newHarness()
+	tl := "abcabc000000000000000000000000aa"
+	h.ps.timelines[tl] = true        // branch already present (e.g. provision-app.sh made it)
+	h.ps.tlAncestorLSN = "0/1500000" // its ancestor point, read back from the pageserver
+	h.ps.rcLSN = "0/1500000"
+	cr := &AppDatabase{
+		Name: "app1", Namespace: "scale-zero-pg", Generation: 1,
+		Spec:   AppDatabaseSpec{AppName: "app1"},
+		Status: AppDatabaseStatus{TimelineID: tl}, // adopted branch, ancestorLsn empty
+	}
+
+	mustReconcile(t, h, cr)
+
+	if cr.Status.AncestorLSN != "0/1500000" {
+		t.Fatalf("ancestorLsn not back-filled from the existing branch: %q", cr.Status.AncestorLSN)
+	}
+	c := cond(cr, CondColdRestorable)
+	if c == nil || c.Status != "True" || c.Reason != "AncestorDurable" {
+		t.Fatalf("ColdRestorable not evaluated after back-fill: %+v", c)
+	}
+}
+
+// Back-fill is benign when the pageserver read fails: ancestorLsn stays empty, the app is
+// still provisioned/Ready, and it re-checks next pass (never fails provisioning).
+func TestColdRestorable_BackfillBenignOnError(t *testing.T) {
+	h := newHarness()
+	tl := "abcabc000000000000000000000000bb"
+	h.ps.timelines[tl] = true
+	h.ps.failAncestor = true
+	cr := &AppDatabase{
+		Name: "app1", Namespace: "scale-zero-pg", Generation: 1,
+		Spec:   AppDatabaseSpec{AppName: "app1"},
+		Status: AppDatabaseStatus{TimelineID: tl},
+	}
+
+	mustReconcile(t, h, cr)
+
+	if cr.Status.AncestorLSN != "" {
+		t.Errorf("ancestorLsn should stay empty on read error, got %q", cr.Status.AncestorLSN)
+	}
+	if cr.Status.Phase != PhaseReady {
+		t.Errorf("phase = %q, want Ready — a back-fill read error must not fail provisioning", cr.Status.Phase)
 	}
 }
 
