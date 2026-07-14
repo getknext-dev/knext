@@ -24,9 +24,13 @@ Complements `.claude/rules/architecture.md`. These run through **every** phase â
   the obvious cases; you own the rest.)
 
 ## Supply chain (the open security milestone)
-- **SBOM** per image (e.g. syft).
-- **Scan** every image (Trivy/Grype); **fail the build on HIGH/CRITICAL**; triage + document
-  accepted risk or upgrade.
+- **SBOM** per image (e.g. syft) **and per published npm package** (CycloneDX over the
+  `@knext/*` production closure â€” `scripts/audit-published.mjs`).
+- **Scan** every image (Trivy/Grype) **and every published npm tarball** (`npm audit --omit=dev`
+  over the packed prod closure); **fail the build on HIGH/CRITICAL**; triage + document accepted
+  risk or upgrade. The npm gate is **publish-blocking** (runs `needs`-before the publish job in
+  both `release.yml` and `release-ghp.yml`); accepted advisories go in the dated+justified
+  `security/npm-audit-allowlist.json` (mirrors the Trivy triage pattern).
 - **Sign** images (cosign) + attestation; aim for reproducible builds.
 - Maintain a short **threat model** in `docs/security/`.
 - **Pin images by digest; reject `:latest`.** The operator already rejects `:latest`
