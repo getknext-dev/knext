@@ -63,6 +63,17 @@ jobs:
       - name: Typecheck @knext/core (tsc --noEmit, tests in scope)
         run: pnpm --filter @knext/core typecheck
 
+      # @knext/ui (private component lib) — self-contained, no dist deps; the
+      # P6c coverage guard (ci-typecheck-contract.test.ts) requires every TS
+      # workspace member be gated or documented-excluded.
+      - name: Typecheck @knext/ui (tsc --noEmit)
+        run: pnpm --filter @knext/ui typecheck
+
+      # apps/db-demo — dist-dependent on @knext/db + @knext/core (imports
+      # @knext/db and @knext/db/schema), so it runs AFTER those builds above.
+      - name: Typecheck db-demo (tsc --noEmit)
+        run: pnpm --filter db-demo typecheck
+
       - name: Run tests
         run: pnpm exec vitest run --coverage
       

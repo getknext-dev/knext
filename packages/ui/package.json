@@ -9,7 +9,8 @@
     "./components/*": "./src/components/*.tsx"
   },
   "scripts": {
-    "test": "vitest"
+    "test": "vitest",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "class-variance-authority": "^0.7.1",
