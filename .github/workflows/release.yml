@@ -33,9 +33,57 @@ permissions:
   id-token: write # required for npm provenance (--provenance)
 
 jobs:
+  # npm/JS supply-chain gate (v4-P3). The image Trivy gate scans containers; this
+  # scans the PUBLISHED npm tarballs' PRODUCTION closure (--omit=dev) of
+  # @knext/{core,lib,db}, FAILS on HIGH/CRITICAL (mirrors security.md's Trivy
+  # rule), and emits a CycloneDX SBOM per package. It is PUBLISH-BLOCKING: the
+  # `release` job `needs: audit`, so a failed audit stops the publish — never
+  # advisory/after. scripts/audit-published.mjs is the single source of truth for
+  # scope + audit-level; the dated+justified allowlist is security/npm-audit-allowlist.json.
+  audit:
+    name: npm supply-chain audit + JS SBOM (blocks publish)
+    runs-on: ubuntu-latest
+    if: github.repository == 'getknext-dev/knext'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # Build in dependency order so the packed tarballs carry real dist/ (lib →
+      # db → core) — audit-published.mjs pnpm-packs each (rewriting workspace:^
+      # exactly like changeset publish) and audits the resolved prod closure.
+      - name: Build publishable packages
+        run: pnpm --filter @knext/lib build && pnpm --filter @knext/db build && pnpm --filter @knext/core build
+
+      # Audits the PUBLISHED production closure (--omit=dev, HIGH/CRITICAL) and
+      # writes sbom/*.cdx.json. Non-zero exit here fails the job → blocks publish.
+      - name: Audit published production closure + generate SBOMs
+        run: node scripts/audit-published.mjs
+
+      - name: Upload JS SBOMs (CycloneDX)
+        uses: actions/upload-artifact@v4
+        with:
+          name: npm-sbom
+          path: sbom/*.cdx.json
+          if-no-files-found: error
+
   release:
     name: Version PR / Publish (gated on NPM_TOKEN)
     runs-on: ubuntu-latest
+    # Publish-BLOCKING supply-chain gate: never publish tarballs the audit did
+    # not clear (HIGH/CRITICAL fail-closed). This does NOT unblock #53 — publish
+    # still requires the human NPM_TOKEN (see "Determine publish gate" below).
+    needs: audit
     # Belt-and-suspenders: only ever run on the canonical repo (never forks).
     if: github.repository == 'getknext-dev/knext'
     steps:
