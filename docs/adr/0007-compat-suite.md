@@ -532,6 +532,46 @@ first `NEXTJS_REF` bump to a release containing #95301 must re-run the whole fam
 every entry that no longer wobbles. This is a pinned-ref quarantine with a known upstream fix —
 not permanent debt.
 
+## Addendum (2026-07-14, PR #279): §c.1 sibling-admissibility rule + counting semantics
+
+### (e) The alternating-sibling rule (codifying existing practice)
+
+§c.2 as written ("retry-then-passed wobble does NOT qualify") is per-case absolute, but the
+ledger has twice quarantined a retry-recovered case alongside a final-failing co-fixture
+sibling — first in the family's per-case era (the alternating-case entries later promoted by
+§d, e.g. segment-cache-refresh: a DIFFERENT case hung each attempt, every observed hanging case
+was ledgered), and now the edge-async-local-storage entry (run 29276122186: 'multiple
+instances' failed all 3 attempts; 'a single instance' hung 60s on attempts 1+2 then recovered).
+The #279 sysdesign gate correctly flagged that this practice was uncodified. It is codified
+here as the **sibling-admissibility rule**, amending §c.1/§c.2: a retry-recovered case is
+admissible in a per-case quarantine ONLY when ALL of:
+
+1. **A final-failing co-fixture sibling.** Another case in the SAME test file meets the §c.2
+   bar in the same real run (failed all its retries).
+2. **Identical, documented mechanism.** The recovered case exercises the same documented
+   failure mechanism as the final-failing sibling (cited in the entry's `mechanism`), not
+   merely the same file.
+3. **Multi-attempt signature in the same run.** The recovered case itself showed the failure
+   signature (e.g. the hardcoded 60s per-case timeout) on **more than one attempt** of that
+   run — a single-attempt wobble stays inadmissible, exactly as §c.2 says.
+4. **Verbatim per-attempt record.** The entry's `evidence` field states each case's TRUE
+   per-attempt outcome (which attempts hung, which passed, timings) — never a rounded-up
+   "failed all attempts".
+5. **Whole-file honesty phrase.** When the quarantine deselects ALL of the file's cases, the
+   entry must own the phrase **"effectively whole-file in coverage"**: it is per-case in FORM
+   (unlike a `rules.exclude` entry the fixture still builds, deploys, and boots through the
+   adapter, so deploy/serving regressions in that fixture still surface), but it contributes
+   no per-case coverage until re-audit.
+
+### (f) Counting semantics (record, so no triage re-derives this wrong)
+
+**`suites` entries are per-case jest deselections; run totals are FILE counts.** run-tests.js
+counts test FILES: a file with deselected cases still runs and still reports as one passing
+file when its remaining selected cases pass. A per-case quarantine therefore never changes a
+lane's pass/fail totals by itself; only `rules.exclude` (file-level) changes the selected-file
+count. Corollary for the lane-blind manifest: a per-case entry observed on one lane costs the
+other lane case *coverage*, not files or totals.
+
 ## Action items
 
 - **A3-1 (per-PR gate, this PR's deliverable):**
