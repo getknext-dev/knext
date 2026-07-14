@@ -67,12 +67,19 @@ const log = createLogger({ module: "gc" });
  *      gone / label absent / read failed). Decided BEFORE per-live-revision
  *      label resolution.
  *   3. `unresolvable-live-build-id` — a live revision has no resolvable
- *      build-id label (missing, empty, or the read threw). (Lowest precedence.)
+ *      build-id label (missing, empty, or the read threw).
+ *   4. `traffic-drift-during-plan` — the pin or status.currentTraffic changed
+ *      between the plan and the pre-delete re-read (or the re-read itself
+ *      failed), so the computed delete set may no longer be safe (v3-P4b TOCTOU
+ *      narrowing). This is checked LAST — it is only reachable once the plan has
+ *      already resolved to a concrete, prunable delete set (all three fail-safes
+ *      above passed), so it has the LOWEST precedence. See {@link runAssetGC}.
  */
 export const GC_SKIP_REASONS = {
     "pinned-with-empty-status": "pinned-with-empty-status",
     "pinned-not-resolvable": "pinned-not-resolvable",
     "unresolvable-live-build-id": "unresolvable-live-build-id",
+    "traffic-drift-during-plan": "traffic-drift-during-plan",
 } as const;
 
 /** A stable machine-readable GC skip-reason token (see {@link GC_SKIP_REASONS}). */
@@ -119,24 +126,24 @@ export interface AssetGCResult {
  * With `dryRun` (#264 part 2) the cluster reads and the plan computation are
  * IDENTICAL; only the deletes are withheld (see pruneOldBuilds).
  *
- * TOCTOU (documented, NOT fixed — #264 part 2, sysdesign note): the
- * status/spec reads here and the prune's delete execution are not atomic. A
- * pin (`kn-next rollback --to`) applied in the narrow window BETWEEN the
- * status read and the delete is invisible to this run's live set, so an
- * in-flight GC can still reap the freshly-pinned build's prefix. This is
- * pre-existing (the deploy-tail GC always had it), seconds-narrow, and not
- * fixable at this layer: it would need conditional-write/compare-and-delete
- * semantics the four object stores (GCS/S3/MinIO/Azure) do not offer
- * uniformly. Named so the fail-safes above are not mistaken for atomicity.
+ * TOCTOU (v3-P4b — NARROWED, NOT eliminated; ADR-0011 §TOCTOU): the plan
+ * (status/spec reads → protected-set computation) and the prune's delete
+ * execution are not atomic. To shrink the window, this run RE-READS the pin +
+ * status.currentTraffic ONCE immediately before the first delete and ABORTS
+ * (fail-safe over-keep — nothing deleted, [traffic-drift-during-plan]) on ANY
+ * drift: drift = (pin₂ ≠ pin₁) OR (currentTraffic₂ revision SET ≠
+ * currentTraffic₁ set, order-insensitive). A re-read that itself fails is
+ * treated as drift (over-keep, never over-delete). This NARROWS but does NOT
+ * close the window — a change after the second read and before the physical
+ * delete is still possible; object stores offer no atomic compare-and-delete
+ * across the set. The re-read only ever makes the GC MORE conservative
+ * (abort/keep) — it can never cause a delete the original plan would have kept.
  */
-export function runAssetGC(
+function readCurrentTrafficRevisions(
+    exec: GcExec,
     config: KnativeNextConfig,
     namespace: string,
-    newBuildId: string,
-    exec: GcExec = runCapture,
-    prune: GcPrune = pruneOldBuilds,
-    dryRun = false,
-): AssetGCResult {
+): string[] {
     const trafficJson = exec([
         "kubectl",
         "get",
@@ -147,21 +154,21 @@ export function runAssetGC(
         "-o",
         "jsonpath={.status.currentTraffic}",
     ]);
-    const liveRevisions = parseLiveRevisionNames(
-        trafficJson.replace(/^'|'$/g, ""),
-    );
-    // Spec-pin probe — UNCONDITIONAL (#272 sysdesign-gate residual, folded
-    // into #254): status.currentTraffic is the operator's OBSERVATION and can
-    // LAG the spec — a fresh `kn-next rollback --to revA` pin may not be
-    // reflected in a still-populated (or wiped) status yet. The pin is
-    // therefore read on EVERY run (READ-ONLY): an empty status with a pin
-    // skips (#264 fail-safe below); a populated status has the pin's build-id
-    // unioned into the protected set after live resolution. A failed probe is
-    // treated as "cannot prove there is no pin" — over-keep, never over-delete.
-    let pinnedRevision = "";
-    let pinProbeFailed = false;
+    return parseLiveRevisionNames(trafficJson.replace(/^'|'$/g, ""));
+}
+
+/**
+ * Reads `spec.traffic.revisionName` (READ-ONLY). Returns `{ ok:false }` when
+ * the probe throws — the plan path treats that as "cannot prove there is no
+ * pin" (over-keep), and the re-read path treats it as drift (over-keep).
+ */
+function readSpecPin(
+    exec: GcExec,
+    config: KnativeNextConfig,
+    namespace: string,
+): { ok: true; pin: string } | { ok: false } {
     try {
-        pinnedRevision = exec([
+        const pin = exec([
             "kubectl",
             "get",
             "nextapp",
@@ -173,10 +180,35 @@ export function runAssetGC(
         ])
             .replace(/^'|'$/g, "")
             .trim();
+        return { ok: true, pin };
     } catch {
-        pinProbeFailed = true;
-        pinnedRevision = "(unreadable)";
+        return { ok: false };
     }
+}
+
+export function runAssetGC(
+    config: KnativeNextConfig,
+    namespace: string,
+    newBuildId: string,
+    exec: GcExec = runCapture,
+    prune: GcPrune = pruneOldBuilds,
+    dryRun = false,
+): AssetGCResult {
+    // ── PLAN PHASE ── first observation of pin + status.currentTraffic; compute
+    // the concrete delete set (via the prune's classify path) but DO NOT delete
+    // until the re-read below confirms no drift.
+    const liveRevisions = readCurrentTrafficRevisions(exec, config, namespace);
+    // Spec-pin probe — UNCONDITIONAL (#272 sysdesign-gate residual, folded
+    // into #254): status.currentTraffic is the operator's OBSERVATION and can
+    // LAG the spec — a fresh `kn-next rollback --to revA` pin may not be
+    // reflected in a still-populated (or wiped) status yet. The pin is
+    // therefore read on EVERY run (READ-ONLY): an empty status with a pin
+    // skips (#264 fail-safe below); a populated status has the pin's build-id
+    // unioned into the protected set after live resolution. A failed probe is
+    // treated as "cannot prove there is no pin" — over-keep, never over-delete.
+    const pin1 = readSpecPin(exec, config, namespace);
+    const pinProbeFailed = !pin1.ok;
+    const pinnedRevision = pin1.ok ? pin1.pin : "(unreadable)";
     // #264 fail-safe: an EMPTY status.currentTraffic while the CR PINS a
     // revision (spec.traffic.revisionName set — a #92 rollback) means the
     // status was wiped or is lagging. A window-only prune here could reap the
@@ -260,8 +292,70 @@ export function runAssetGC(
             liveBuildIds = [...liveBuildIds, pinnedBuildId];
         }
     }
+
+    // ── TOCTOU RE-READ (v3-P4b) ── the plan is now a concrete, prunable delete
+    // set. RE-READ the pin + status.currentTraffic ONCE more immediately before
+    // the first delete and ABORT on ANY drift (fail-safe over-keep). This is the
+    // LAST skip cause — only reachable once the three plan-phase fail-safes
+    // passed — so it never overwrites an earlier skip's token.
+    //
+    // A dry-run computes the plan but issues ZERO deletes, so there is no delete
+    // to guard: the re-read is skipped (it would be pointless cluster reads and
+    // would change the argv-count contract the --dry-run tests pin).
+    if (
+        !dryRun &&
+        driftedSincePlan(exec, config, namespace, liveRevisions, pin1)
+    ) {
+        return {
+            pruned: false,
+            liveRevisions,
+            skipReason: "traffic-drift-during-plan",
+            pinnedRevision,
+        };
+    }
+
     const summary = prune(config, liveBuildIds, newBuildId, { dryRun });
     return { pruned: true, liveRevisions, summary };
+}
+
+/**
+ * The pre-delete TOCTOU re-read (v3-P4b). Observes the pin + currentTraffic a
+ * SECOND time and returns true iff there is drift vs the plan-phase observation:
+ *
+ *   drift = (pin₂ ≠ pin₁) OR (currentTraffic₂ revision SET ≠ plan set)
+ *
+ * The currentTraffic comparison is a SET comparison (order-insensitive) —
+ * duplicates collapse and re-ordering is not drift. HARD SAFETY INVARIANT: a
+ * re-read that itself FAILS (either read throws) returns `true` (drift/abort),
+ * never `false` — the re-read may only ever make the GC more conservative.
+ */
+function driftedSincePlan(
+    exec: GcExec,
+    config: KnativeNextConfig,
+    namespace: string,
+    planRevisions: readonly string[],
+    planPin: { ok: true; pin: string } | { ok: false },
+): boolean {
+    let revisions2: string[];
+    const pin2 = readSpecPin(exec, config, namespace);
+    try {
+        revisions2 = readCurrentTrafficRevisions(exec, config, namespace);
+    } catch {
+        // Re-read failed → cannot prove no drift → fail-safe abort (over-keep).
+        return true;
+    }
+    // A re-read pin probe that threw is itself drift (cannot prove no change).
+    if (!pin2.ok) return true;
+    // Pin value changed (including "" ⇄ set) ⇒ drift.
+    if (!planPin.ok || pin2.pin !== planPin.pin) return true;
+    // currentTraffic revision SET changed (order-insensitive) ⇒ drift.
+    const before = new Set(planRevisions);
+    const after = new Set(revisions2);
+    if (before.size !== after.size) return true;
+    for (const r of after) {
+        if (!before.has(r)) return true;
+    }
+    return false;
 }
 
 export interface GcArgs {
@@ -398,6 +492,14 @@ export function renderGcReport(
                     `a live revision of ${appName} has no resolvable build-id label; ` +
                     `nothing was deleted. ` +
                     `live revisions: [${res.liveRevisions.join(", ")}]\n`
+                );
+            case "traffic-drift-during-plan":
+                return (
+                    prefix +
+                    `the pin or status.currentTraffic of ${appName} changed between ` +
+                    `the GC plan and the first delete (or the re-read failed); the ` +
+                    `delete set may no longer be safe, so the deletes were aborted. ` +
+                    `Nothing was deleted.\n`
                 );
             default: {
                 // Exhaustiveness guard: if a new GcSkipReason is added without a
