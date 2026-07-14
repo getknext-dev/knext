@@ -162,6 +162,12 @@ core** to `npm.pkg.github.com` using the built-in `GITHUB_TOKEN` (`packages: wri
 with an unchanged version fails with a clear "already published — bump versions via changesets
 first" message; bump versions before re-releasing.
 
+After publish, the workflow's `smoke-ghp` job runs `scripts/ghp-install-smoke.mjs`, which
+installs the just-published `@getknext-dev/*` FROM `npm.pkg.github.com` as a real consumer would
+(`GITHUB_TOKEN` + `packages: read`) and asserts the CLI + app-import surface — so a maintainer
+dispatch of `release-ghp.yml` yields the first live green proving the channel is installable, not
+just packable.
+
 ### Consuming `@getknext-dev/*` from GitHub Packages
 
 GHP requires auth for installs **even for public packages**. In the consuming project add an
