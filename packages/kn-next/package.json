@@ -26,6 +26,11 @@
       "default": "./dist/adapters/otel-config.js"
     },
     "./adapters/cache-handler": "./dist/adapters/cache-handler.js",
+    "./validate": {
+      "types": "./dist/validate-public.d.ts",
+      "import": "./dist/validate-public.js",
+      "default": "./dist/validate-public.js"
+    },
     "./internal/cache-control-normalize": "./dist/adapters/cache-control-normalize.cjs",
     "./internal/bun-keepalive-guard": "./dist/adapters/bun-keepalive-guard.cjs",
     "./internal/sandbox-fetch-debug": "./dist/adapters/sandbox-fetch-debug.cjs",
