@@ -1126,7 +1126,7 @@ var _ = Describe("asset retention GC against a live cluster (ADR-0011)", Ordered
 		}
 
 		// FULL RESTORE is guaranteed by DeferCleanup regardless of where the leg
-		// fails: re-pin to the real latest revision (rev3), restore minScale:1,
+		// fails: re-pin to the resolvable rev2, restore minScale:1,
 		// and wait for the operator to reconcile a non-empty currentTraffic — so
 		// the leg leaves the app exactly as re-runnable as it found it.
 		DeferCleanup(func() {
