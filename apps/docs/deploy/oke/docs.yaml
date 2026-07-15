@@ -1,0 +1,55 @@
+# Plain-k8s deploy of knext-docs on OKE (no Knative / knext operator).
+# Image built from Dockerfile.oke (vanilla Next.js build + `next start`).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: knext-docs
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: knext-docs
+  namespace: knext-docs
+  labels: { app: knext-docs }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: knext-docs } }
+  template:
+    metadata:
+      labels: { app: knext-docs }
+    spec:
+      imagePullSecrets:
+        - name: ocir-pull
+      containers:
+        - name: web
+          image: me-abudhabi-1.ocir.io/axfqznklsd2t/knext-docs:sha-6fc1b98
+          ports: [{ containerPort: 3000 }]
+          env:
+            - { name: NODE_ENV, value: production }
+            - { name: PORT, value: "3000" }
+            - { name: HOSTNAME, value: "0.0.0.0" }
+          readinessProbe:
+            httpGet: { path: /, port: 3000 }
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /, port: 3000 }
+            initialDelaySeconds: 30
+            periodSeconds: 15
+          resources:
+            requests: { cpu: 100m, memory: 256Mi }
+            limits: { cpu: "1", memory: 768Mi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: knext-docs
+  namespace: knext-docs
+  labels: { app: knext-docs }
+spec:
+  type: LoadBalancer
+  selector: { app: knext-docs }
+  ports:
+    - name: http
+      port: 80
+      targetPort: 3000

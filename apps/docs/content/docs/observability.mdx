@@ -1,0 +1,146 @@
+---
+title: Observability
+description: Self-hosted metrics, RUM, and tracing for knext — Prometheus, Web Vitals, and OpenTelemetry, with no SaaS lock-in.
+---
+
+knext is deliberately **self-hosted**: it matches Vercel's compute layer, not its proprietary
+observability SaaS. Everything here exports to a stack **you run** — Prometheus, Grafana, and an
+OTLP backend like Grafana Tempo. No data leaves your cluster, and there is **no hosted default**.
+
+Observability is configured per app under `observability` in your knext config. Metrics are always
+on; **RUM and tracing are opt-in and default OFF**.
+
+```ts title="kn-next.config.ts"
+observability: {
+  enabled: true,
+  prometheus: { scrapeInterval: '15s' },   // default 15s
+  grafana: { enabled: true },              // deploy dashboard ConfigMaps (default true)
+  rum: { enabled: false, sampleRate: 1 },  // Web Vitals — default OFF
+  tracing: { enabled: false },             // OpenTelemetry — default OFF
+}
+```
+
+## Metrics (Prometheus)
+
+The app exposes a Prometheus scrape endpoint at **`GET /api/metrics`**. A single shared registry
+serves both the V8 bytecode-cache metrics and the RUM Web Vitals histograms, so all series merge
+into one scrape.
+
+In addition, the server runs a **metrics sidecar on port `9091`** (separate from the app's
+`$PORT`/3000), exposing `/metrics`. The pod is annotated with `prometheus.io/port: "9091"` and
+`prometheus.io/path: /metrics` for scrape discovery.
+
+Custom `kn_next_*` series include:
+
+| Metric | Type | Meaning |
+|---|---|---|
+| `kn_next_startup_duration_seconds` | Histogram | Time for the server to become ready (labelled `cache_status` warm/cold). |
+| `kn_next_bytecode_cache_files_total` | Gauge | Files in the V8 bytecode cache. |
+| `kn_next_bytecode_cache_size_bytes` | Gauge | Total bytecode-cache size. |
+| `kn_next_bytecode_cache_warm_start` | Gauge | `1` if the cache was warm at startup, else `0`. |
+| `kn_next_bytecode_cache_write_count` | Counter | New bytecode files written this run. |
+| `kn_next_web_vitals_*` | Histogram | Core Web Vitals (see [RUM](#rum-web-vitals)). |
+
+These complement the default Node.js process metrics. Ready-made Grafana dashboards ship with knext
+for bytecode caching, RUM, and load testing.
+
+<Callout type="info">
+The bytecode-cache metrics tell you whether [scale-to-zero](/docs/scale-to-zero) cold starts are
+landing on a warm cache — a cold pod that reads `kn_next_bytecode_cache_warm_start = 0` is
+recompiling JavaScript instead of reusing cached V8 bytecode.
+</Callout>
+
+## RUM (Web Vitals)
+
+Real-User Monitoring is **opt-in** via `observability.rum`:
+
+```ts
+rum: { enabled: true, sampleRate: 0.25 }   // enabled is required; sampleRate 0..1, default 1
+```
+
+When enabled, knext sets `NEXT_PUBLIC_RUM_ENABLED=true` (and, if `sampleRate` is set,
+`NEXT_PUBLIC_RUM_SAMPLE_RATE`) for your app. The client then collects **LCP, INP, CLS, FCP, TTFB**
+via Next.js `useReportWebVitals` and beacons each to the same-origin **`POST /api/rum`** endpoint
+(`navigator.sendBeacon`, with a `fetch`+`keepalive` fallback). With RUM disabled the client sends
+nothing.
+
+The ingest endpoint records into `kn_next_web_vitals_*` histograms, merged into `/api/metrics`.
+Each carries three labels: `app`, `route`, and `rating`.
+
+### Why a public beacon is safe
+
+A browser beacon cannot carry a Bearer token, so `/api/rum` is **not** secured by auth. Instead it
+is a **bounded, fixed-schema aggregator** — its only possible effect is `observe()` on one of a
+closed set of pre-declared histograms. It is neutered by four independent layers:
+
+1. **Same-origin / cluster-local.** Reachable only as broadly as the app itself — governed by the
+   default-on [NetworkPolicy](/docs/security#network-isolation). No new external surface.
+2. **Fixed-schema lossy aggregator.** It cannot create series, set arbitrary values, write storage,
+   or trigger cache revalidation. The worst an attacker can do is skew aggregate percentiles.
+3. **Server-enforced bounded cardinality.** `metric` ∈ `{LCP, INP, CLS, FCP, TTFB}`,
+   `rating` ∈ `{good, needs-improvement, poor}`, and `route` is a **server-mapped template** — the
+   reported pathname is matched against a closed known-route table; anything unmatched collapses to
+   a single `other` bucket. Raw paths, UUIDs, and query strings can **never** become labels. The
+   `app` label comes from the server environment, never the client.
+4. **Rate-limit + size cap + strict shape.** An in-process token-bucket limiter caps the rate
+   (`429` on flood), a **2 KB** payload cap returns `413`, and strict allow-list validation returns
+   `400`. There is intentionally **no GET handler**.
+
+Responses: `204` recorded · `400` malformed · `413` oversized · `429` rate-limited.
+
+## Tracing (OpenTelemetry)
+
+Distributed tracing is **opt-in** via `observability.tracing` and **default OFF**:
+
+```ts
+tracing: {
+  enabled: true,
+  endpoint: 'http://otel-collector.monitoring:4317',  // OTLP/gRPC; default used if unset
+  sampleRate: 0.1,                                     // head-based, 0..1, default 1
+}
+```
+
+When enabled, knext sets `OTEL_TRACING_ENABLED=true` (plus `OTEL_EXPORTER_OTLP_ENDPOINT` and
+`OTEL_TRACES_SAMPLER_ARG` from your config). Your app then exports spans over **OTLP** to a
+self-hostable collector. Knative resource attributes (`knative.revision`, `knative.service`,
+`knative.configuration`, `host.name`) are attached automatically when present.
+
+<Callout type="warn">
+**No SaaS exporter default.** The recommended backend is **Grafana Tempo** (shares your Grafana,
+trace→metric exemplars are first-class); **Jaeger** is the alternative. SaaS exporters (Honeycomb,
+Datadog, and similar) are not used as a default — they reintroduce lock-in. You may still point
+`endpoint` at any OTLP backend you run.
+</Callout>
+
+When tracing is disabled, the instrumentation hook returns **without initializing OpenTelemetry** —
+no exporter, no span processors, **zero overhead**.
+
+## Load testing
+
+knext ships a **k6** load-test harness invoked with `kn-next loadtest`:
+
+```bash
+kn-next loadtest --url https://app.example.com --type scale-to-zero --namespace default
+```
+
+It generates a Kubernetes `ConfigMap` + `Job` (image `grafana/k6`) that runs the k6 script
+in-cluster against your Knative service URL, and cleans itself up via `ttlSecondsAfterFinished`.
+Four scenarios are available with `--type`:
+
+| Type | Profile |
+|---|---|
+| `smoke` | 1 VU for 1m — sanity check. |
+| `load` | ramp to 50 VUs, hold, ramp down. |
+| `spike` | burst to 200 VUs and back. |
+| `scale-to-zero` | a burst, wait past the scale-to-zero window, then a second burst — exercises a [cold start](/docs/scale-to-zero). |
+
+When `observability.enabled` is set, k6 results are exported to the in-cluster Prometheus via
+experimental remote-write.
+
+<Callout type="info">
+Load testing is a **manual / nightly runbook**, not part of your deploy pipeline. It applies an
+ephemeral `Job` and never mutates your app's deployment.
+</Callout>
+
+See also: [Operator & the NextApp CRD](/docs/operator) · [Security](/docs/security) ·
+[Bytecode caching](/docs/bytecode).

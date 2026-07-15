@@ -1,0 +1,163 @@
+---
+title: "Data SDK (@knext/db)"
+description: "The typed data layer for knext apps — Drizzle over the scale-to-zero Postgres pools the operator binds in."
+---
+
+`@knext/db` is knext's typed data-access layer on top of scale-zero-pg — a **thin
+[drizzle-orm](https://orm.drizzle.team) wrapper** over the scale-to-zero Postgres
+pools the operator binds into your app. It provisions nothing and mutates no cluster
+resource: it just gives the database a typed schema, migrations, and queries. You keep
+drizzle's whole query surface and lose no power.
+
+<Callout type="info">
+**One platform, two layers.** knext scales your *application* (Next.js on Knative);
+scale-zero-pg scales its *database* (a wake-on-connect Postgres gateway). Both sleep at
+zero and **wake together on one visitor request**. `@knext/db` is how an app *talks* to
+that database — it builds no database machinery of its own.
+</Callout>
+
+## Install
+
+```bash
+npm i @knext/db
+npm i -D drizzle-kit        # dev-only: generates SQL migrations
+```
+
+`@knext/db` depends on and re-exports `drizzle-orm`, so you get one pinned-compatible
+drizzle. `drizzle-kit` is a dev tool (a type-only peer) that runs `generate` at dev time
+and ships no runtime code.
+
+## Bind the database
+
+An app talks to an ordinary Postgres over a `DATABASE_URL` (and optionally a
+`DATABASE_URL_RO`) Secret. In managed mode a knext `NextApp` declares its database inline
+and the [AppDatabase operator](/docs/scale-zero-pg/appdatabase-api) provisions a
+branch-per-app Postgres and injects both keys — see
+[Connecting](/docs/scale-zero-pg/connecting). `@knext/db` reads those environment
+variables; you write no connection code.
+
+## Define your schema
+
+Put your tables in `src/db/schema.ts` and import the builders from `@knext/db/schema` —
+a thin re-export of drizzle's `pg-core` (plus `relations`/`sql`), so
+[drizzle's schema docs](https://orm.drizzle.team/docs/sql-schema-declaration) apply
+directly.
+
+```ts
+// src/db/schema.ts
+import { pgTable, serial, text, timestamp } from '@knext/db/schema';
+
+export const messages = pgTable('messages', {
+  id: serial('id').primaryKey(),
+  author: text('author').notNull(),
+  body: text('body').notNull(),
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+});
+
+// Typed rows for free:
+export type Message = typeof messages.$inferSelect;
+export type NewMessage = typeof messages.$inferInsert;
+```
+
+## `getDb` vs `getDbRO` — the staleness contract
+
+Two clients; **you pick per query — nothing is auto-routed**. This mirrors
+scale-zero-pg's own contract: *you* decide which queries are reads.
+
+| | `getDb()` | `getDbRO()` |
+|---|---|---|
+| DSN | `DATABASE_URL` (writer) | `DATABASE_URL_RO` (RO gateway, port `55434`) |
+| Consistency | **read-your-writes**, single-writer | **bounded-stale (~9s)**, no read-your-writes |
+| Use for | every write; any read that must see its own write | dashboards / analytics / fan-out reads that tolerate a few seconds of lag |
+
+```ts
+// src/db/queries.ts — the read/write split, explicit clients
+import { desc, getDb, getDbRO } from '@knext/db';
+import { type Message, type NewMessage, messages } from './schema';
+
+// staleness-tolerant list → the READER (bounded-stale RO gateway)
+export function listMessages(limit = 50): Promise<Message[]> {
+  return getDbRO({ messages })
+    .select().from(messages).orderBy(desc(messages.createdAt)).limit(limit);
+}
+
+// insert → the WRITER; the returned row is read-your-writes
+export async function addMessage(input: NewMessage): Promise<Message> {
+  const [row] = await getDb({ messages }).insert(messages).values(input).returning();
+  return row;
+}
+```
+
+<Callout type="warn">
+**The SDK never auto-splits.** It does not parse SQL or route by statement — that would
+silently serve stale reads and break read-your-writes. If `DATABASE_URL_RO` is unset,
+`getDbRO()` falls back to the writer with a one-time warning, so an app without a RO pool
+still works. Rule of thumb: **write, or read-your-own-write → `getDb()`**; **read that
+tolerates ≤ ~9s staleness → `getDbRO()`**.
+</Callout>
+
+## Migrations — `kn-next db migrate`
+
+Migrating a single-writer, scale-to-zero database is a **one-shot, writer-only** job, out
+of the request path. Generate SQL at dev time (no database needed), commit it, and apply
+it once per deploy.
+
+```bash
+npx drizzle-kit generate          # diff schema → ./drizzle/*.sql — commit these
+kn-next db migrate                # apply ./drizzle against the writer DATABASE_URL
+```
+
+- **Writer-only.** `kn-next db migrate` resolves `DATABASE_URL` and **refuses** a
+  read-replica DSN (an exact `DATABASE_URL_RO`, or any DSN on the RO gateway port
+  `55434`) — single-writer forbids writes on the replica.
+- **Once per deploy, out of the request path.** Run it as a CI step or a pre-deploy
+  `Job` — not on pod boot (that races N migrators and penalises cold start) and not by
+  the operator (migrating app *data* is not a cluster-resource mutation).
+- **Idempotent + fail loud.** drizzle records applied migrations in
+  `__drizzle_migrations`, so a re-run is a no-op; a migration error exits non-zero so a
+  Job fails instead of a half-applied schema going live.
+- **Wakes the writer once** with a cold-wake-tolerant 15s connect timeout (the wake is
+  ~2.5s).
+
+Sequence it **after** the database is `Ready` and **before** app pods serve, as a
+one-shot Kubernetes `Job` on the same image + Secret the app uses:
+
+```bash
+kubectl wait --for=condition=Ready appdatabase/db-demo -n my-apps --timeout=120s
+kubectl apply -f migrate-job.yaml -n my-apps
+kubectl wait --for=condition=Complete job/db-demo-migrate -n my-apps --timeout=300s
+```
+
+`--for=condition=Complete` returns non-zero if the Job fails — wire it into your pipeline
+so a bad migration blocks the rollout.
+
+## Pooling — you get the wake contract for free
+
+Both pools inherit the scale-to-zero contract, already tuned so you rarely touch them:
+
+- **Pool idle timeout < the gateway's 60s idle** — the app never holds an idle socket
+  across `GW_IDLE_MS`, so it never keeps the database awake (default: idle 10s).
+- **Connect timeout ≥ 10s** — absorbs the ~2.5s cold wake with margin (default: 15s).
+  Because the connect timeout already tolerates the cold wake, **no app-side wake retry
+  is needed**.
+- **Graceful drain on scale-down.** On `SIGTERM`, the runtime drains both the writer and
+  RO pools after in-flight requests finish, so a terminating replica releases its gateway
+  connections cleanly. Nothing to wire in app code.
+
+This is the payoff of the unified platform: the app scales to zero on Knative, its
+database scales to zero on scale-zero-pg, and **the first visitor request wakes both**.
+
+## Extensions
+
+`@knext/db/schema` also ships helpers for the two extensions bundled in the compute image
+— **TimescaleDB** (hypertables, `time_bucket`) and **pgvector** (`hnsw`/`ivfflat` ANN
+indexes). Your app self-enables the one it needs over its own `DATABASE_URL`. See
+[Extensions](/docs/scale-zero-pg/extensions).
+
+## See also
+
+- [Connecting](/docs/scale-zero-pg/connecting) — the DSN, pooling, and wake-latency sizing.
+- [AppDatabase API](/docs/scale-zero-pg/appdatabase-api) — declarative branch-per-app provisioning.
+- [Extensions](/docs/scale-zero-pg/extensions) — TimescaleDB + pgvector.
+
+Source: [ADR-0021 — Drizzle data SDK](https://github.com/getknext-dev/knext) (knext repo).

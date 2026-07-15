@@ -1,0 +1,72 @@
+---
+title: Official adapter
+description: How knext runs on the official Next.js Deployment Adapter API.
+---
+
+knext is built on the **official Next.js Deployment Adapter API** — not a reverse-engineered
+runtime. The adapter is a small object implementing the official `NextAdapter` shape, shipped as a
+package export so any app (and the official compatibility harness) can point at it.
+
+## The adapter object
+
+The knext adapter lives in `@knext/core` and is exported at `@knext/core/adapter`. Its default
+export is a `NextAdapter`:
+
+```ts
+const adapter: NextAdapter = {
+  name: 'knext-adapter',
+  modifyConfig(config, { phase }) {
+    // forces output: 'standalone' on phase-production-build
+  },
+  async onBuildComplete(ctx) {
+    // logs output counts + uploads static artifacts to object storage (keyed by buildId)
+  },
+};
+export default adapter;
+```
+
+- **`modifyConfig`** forces `output: 'standalone'` during the production build.
+- **`onBuildComplete`** uploads the build's static artifacts to the configured object store, keyed
+  by `buildId`.
+
+## Wiring it into an app
+
+On Next.js **16.2 and later**, `adapterPath` is **top-level** configuration:
+
+```ts title="next.config.ts — Next.js 16.2+"
+export default {
+  adapterPath: '@knext/core/adapter',
+};
+```
+
+<Callout type="info">
+**Version note.** On Next.js 16.0.x–16.1.x the option lives under `experimental` instead
+(`experimental: { adapterPath: '@knext/core/adapter' }`). The 16.2+ config loader auto-migrates
+the old `experimental` key (with a warning), but 16.0.x does **not** recognize the top-level form
+— match the form to your Next.js version.
+</Callout>
+
+You can also point `adapterPath` at a thin local re-export file if you want the adapter contract
+visible at the app boundary:
+
+```ts title="next-adapter.ts"
+import adapter from '@knext/core/adapter';
+export default adapter;
+```
+
+This is the same pattern used by the example apps in the knext repo, and by **this docs site**
+(the dogfood target).
+
+## Verified against the official suite
+
+knext validates the adapter against the official Next.js compatibility suite: the
+`vercel/next.js` deploy-mode e2e harness runs through knext's lifecycle scripts and passes
+**778 tests with zero failures** on the Node runtime, re-verified **nightly** (Next.js v16.2.0). A
+fast smoke gate additionally runs a Node + Bun matrix on every change.
+
+<Callout type="info">
+The exact scope of that claim — including the four documented architectural exclusions (edge
+runtime, edge middleware, PPR, cache components) and the Bun lane's most recently observed 775/778 — is on
+[Verified compatibility](/docs/compat-suite). Row-by-row feature status lives in the
+[compatibility matrix](/docs/compat-matrix).
+</Callout>

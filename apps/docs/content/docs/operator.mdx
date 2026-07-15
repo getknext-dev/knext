@@ -1,0 +1,231 @@
+---
+title: Operator & the NextApp CRD
+description: The Go operator is the single source of truth for cluster state.
+---
+
+knext follows one hard rule: **nothing mutates the cluster out-of-band.** A single Go operator
+watches `NextApp` resources and reconciles each into a running Knative Service. The CLI only ever
+*applies the CR* — it never touches Knative or infra manifests directly.
+
+```
+kn-next deploy   →  build · push · emit CR
+NextApp CR       →  applied to the cluster
+operator         →  reconciles desired state
+Knative Service  →  scaled-to-zero, reachable
+```
+
+## The NextApp resource
+
+- **apiVersion:** `apps.kn-next.dev/v1alpha1`
+- **kind:** `NextApp`
+
+One resource describes the whole deployment. The `image` field is **required** and must be
+digest-pinned.
+
+```yaml title="nextapp.yaml"
+apiVersion: apps.kn-next.dev/v1alpha1
+kind: NextApp
+metadata:
+  name: storefront
+spec:
+  image: registry/storefront@sha256:9f1c...   # required, digest-pinned
+  scaling:
+    minScale: 0
+    maxScale: 20
+    containerConcurrency: 100
+  cache:
+    enableBytecodeCache: true                  # mount a PVC, set NODE_COMPILE_CACHE
+  storage:
+    provider: gcs
+    bucket: storefront-assets
+  security:
+    networkPolicy: {}                          # default-on internal-only isolation
+status:
+  url: https://storefront.apps.example.com
+  conditions: []                               # Ready / Degraded / Reconciling
+```
+
+### Spec fields (selected)
+
+| Field | Notes |
+|---|---|
+| `image` | **Required.** Container image — must be digest-pinned (`@sha256:`). |
+| `scaling` | `minScale`, `maxScale`, `containerConcurrency`. |
+| `resources` | `cpuRequest`, `memoryRequest`, `cpuLimit`, `memoryLimit`. |
+| `storage` | `provider`, `bucket`, `region`, `endpoint`. |
+| `cache` | `provider`, `url`, `enableBytecodeCache`, `bytecodeCacheSize`, `keyPrefix`. |
+| `revalidation` | `queue`, `kafkaBrokerUrl`, `provisionKafkaSource` — async ISR revalidation (see below). |
+| `env` | Plain, **non-secret** env vars (name → value). Reserved names are rejected at admission (see below). |
+| `secrets` | `envFrom`, `envMap` (Kubernetes Secret refs) — see [Binding secrets](#binding-secrets-envmap--database_url). |
+| `database` | The app's database, in one of two mutually-exclusive modes: **bind an existing Secret** (`secretRef` / `roSecretRef`) or **provision a managed scale-to-zero Postgres** (`enabled: true`). See [Databases](#databases-specdatabase). |
+| `runtime` | `bun` or `node` (default `node`). A Bun **bytecode-built** image only boots under Bun — flipping it to `node` makes the pod exit with a loud `FATAL` message; rebuild instead. See [Bun runtime](/docs/bun-runtime). |
+| `security` | `networkPolicy` — pod-level L3/L4 isolation, default-on. |
+| `traffic` | `revisionName`, `canaryPercent` (rollback / canary). |
+| `buildId` | Next.js BUILD_ID, stamped as label `apps.kn-next.dev/build-id` (skew protection). |
+
+### Plain env vars (`spec.env`)
+
+`spec.env` sets non-secret environment variables — feature flags and runtime tuning. Values are
+stored verbatim in the resource, so anything sensitive belongs in `spec.secrets` instead.
+
+```yaml
+spec:
+  env:
+    FEATURE_FLAG_BETA: "on"
+```
+
+- Names must be valid env identifiers (`[A-Za-z_][A-Za-z0-9_]*`).
+- The reserved names `HOSTNAME`, `PORT`, `K_SERVICE`, `K_REVISION`, and `K_CONFIGURATION` are
+  **rejected when you apply the resource** — they are managed by the platform, and overriding
+  them would break request routing.
+- If an `env` name collides with a platform-managed variable or a `secrets.envMap` mapping, the
+  `env` entry is ignored and a **Warning event** is recorded on the resource
+  (`kubectl describe nextapp <name>`) explaining which side won.
+
+### Binding secrets: `envMap` + `DATABASE_URL`
+
+`spec.secrets` is the CR's mechanism for secret-backed environment variables: `envFrom` injects
+every key of a Secret; `envMap` maps a single env var to a specific Secret key. The canonical
+use is the **one-Secret database binding** — the app reads `DATABASE_URL` from the environment,
+and the CR binds it from a Kubernetes Secret:
+
+```yaml title="nextapp.yaml (database binding)"
+spec:
+  secrets:
+    envMap:
+      DATABASE_URL:
+        secretName: storefront-db-app
+        secretKey: pooler-url
+```
+
+This works with **any** Postgres the Secret points at — a CloudNativePG cluster (point the URL's
+host at the **pooler** Service, not the primary, so scale-to-zero fan-out doesn't storm the
+database), or a managed/serverless provider with a scale-to-zero gateway. Swapping providers is a
+Secret change, zero app or CR schema change. knext binds the Secret; it does not create it or
+provision the database.
+
+### Databases: `spec.database`
+
+`spec.database` is the first-class database surface, with **two mutually-exclusive modes**
+(validated at admission — a CR declaring both is rejected):
+
+**Bind an existing Secret (bring-your-own).** `secretRef` binds a Secret in the app's own
+namespace as `DATABASE_URL`; `roSecretRef` optionally binds a read-only DSN as `DATABASE_URL_RO`
+(its key defaults to `DATABASE_URL_RO`, so one Secret carrying both keys binds with the same
+name). Typed sugar over the `envMap` path above — same injection machinery, same semantics.
+`kn-next db bind` writes exactly this patch for you (see the [CLI reference](/docs/cli#kn-next-db-bind)).
+
+```yaml title="nextapp.yaml (BYO database)"
+spec:
+  database:
+    secretRef: { name: storefront-db }          # key defaults to DATABASE_URL
+    roSecretRef: { name: storefront-db }        # key defaults to DATABASE_URL_RO
+```
+
+**Managed mode.** `enabled: true` asks the operator to provision a scale-to-zero Postgres for this
+app on the [scale-zero-pg](/docs/scale-zero-pg) platform and inject its credentials. The
+author-facing knobs are `tier` (`cold` = scale-to-zero, default; `warm` = one parked replica for a
+~0.4s wake), `readReplicas` (also injects `DATABASE_URL_RO`), `quotas` (per-app CPU/memory/
+connection bounds), and `keepOnDelete` (retain the database timeline when the NextApp is deleted).
+
+```yaml title="nextapp.yaml (managed database)"
+spec:
+  database:
+    enabled: true
+    tier: cold
+    readReplicas: true
+```
+
+The database identity is always **derived from the NextApp's own namespace and name** — a NextApp
+can never name or bind another app's managed database. The managed-mode knobs (`tier`,
+`readReplicas`, `quotas`, `keepOnDelete`) cannot be combined with `secretRef`, and `spec.database`
+owns `DATABASE_URL`/`DATABASE_URL_RO`: a conflicting `secrets.envMap` entry for those names is
+rejected rather than silently overridden. Database health is reported on the CR as a
+`DatabaseReady` condition. To consume the injected DSNs with a typed client, see the
+[Data SDK](/docs/data-sdk).
+
+<Callout type="warn">
+Secrets live in Kubernetes Secrets / env **only** — never in `spec.env`, config files, images, or
+URLs. `spec.env` values are stored verbatim in the CR and visible to anyone who can read it.
+</Callout>
+
+### Status fields
+
+| Field | Notes |
+|---|---|
+| `url` | The resolved Knative Service URL. |
+| `conditions` | `Ready`, `Degraded`, `Reconciling`, `DatabaseReady` — see below. |
+| `currentTraffic` | Mirror of the ksvc traffic split. |
+
+The operator reports **honest readiness**: `Ready` mirrors the underlying Knative Service's own
+`Ready` condition rather than reporting success as soon as the resource is applied — a CR whose
+service never comes up shows `Ready: False` with the real reason (e.g. the image-pull or crash
+detail). `kn-next status` renders these conditions verbatim and exits non-zero when `Ready` is
+`False` — see the [CLI reference](/docs/cli#kn-next-status).
+
+Two otherwise-silent failure modes get first-class diagnoses:
+
+- **Ingress never programs.** If the Knative Service reports its ingress as not-yet-configured for
+  more than two minutes, the operator flips `Ready` to `False` with reason `IngressNotProgrammed`
+  and emits a Warning event naming the usual fix — the `config-network` ConfigMap's
+  `ingress-class` must be the full controller-qualified value
+  (`kourier.ingress.networking.knative.dev`; see
+  [Installing knext](/docs/install#2--knative-serving--kourier)). Without this, a misconfigured
+  ingress class looks like an app that is "still starting" forever.
+- **A pinned revision no longer exists.** If `spec.traffic` pins a revision that has been deleted
+  (e.g. garbage-collected), Knative keeps serving the last-good route with only an opaque internal
+  condition. The operator instead performs its own existence check and — after a short stall
+  window that rules out an in-progress deploy — reports `Ready: False` /
+  `Degraded` with reason `PinnedRevisionNotFound`, plus a Warning event telling you to list the
+  surviving revisions and re-pin (or clear `spec.traffic`). See
+  [Rollback & traffic split](/docs/rollback).
+
+## ISR revalidation & the Kafka queue
+
+knext's ISR / data cache is **Redis** (`cache.provider: redis`). `revalidateTag()` and
+`revalidatePath()` write through the Redis-backed cache handler, and because the Redis keys are
+shared across every pod, an invalidation is **fleet-wide** — one pod's `revalidateTag` is seen by
+all of them. This is the default path and requires no queue.
+
+The `spec.revalidation` block opts into running revalidation **asynchronously** over a queue, so
+regeneration does not block the user's request:
+
+```yaml title="nextapp.yaml (revalidation)"
+spec:
+  revalidation:
+    queue: kafka
+    kafkaBrokerUrl: kafka-cluster-kafka-bootstrap.kafka.svc:9092
+    provisionKafkaSource: true   # explicit opt-in; default is NOT provisioned
+```
+
+When `queue: kafka` **and** `provisionKafkaSource: true`, the operator provisions a Knative
+`KafkaSource` that consumes the `<app>-revalidation` topic and routes events to an
+`<app>-revalidator` consumer.
+
+<Callout type="warn">
+**Honest scope.** This is **not** a turnkey feature. By default `provisionKafkaSource` is unset, so
+**no `KafkaSource` is provisioned** — the `<app>-revalidator` consumer that events would sink into
+is **not yet shipped by knext**. Setting `provisionKafkaSource: true` is an assertion that you have
+deployed your own external consumer for the `<app>-revalidation` topic. If you enable `queue: kafka`
+without opting in, the operator records a non-fatal `RevalidationDeferred` status condition (`Ready`
+stays `True`) and provisions nothing.
+</Callout>
+
+## Security defaults
+
+The operator is also the policy boundary:
+
+- **Digest pinning is enforced.** A CR whose `image` is `:latest`, tag-only, or untagged is
+  **rejected** (`Degraded` / reason `InvalidImage`) and never deployed. The validator accepts a ref
+  only if it contains `@sha256:`.
+- **Mutating endpoints require auth.** App-level cache-invalidation routes require a signed bearer
+  token; nothing mutating is open by default.
+- **Default-on NetworkPolicy.** `spec.security.networkPolicy` reconciles an internal-only network
+  policy for the app.
+- **Cluster-local backends (design-stage).** The planned gRPC backend layer is `cluster-local`
+  with no public ingress — designed, not yet shipped.
+
+<Callout type="info">
+Because only the operator mutates cluster state, your Git history of `NextApp` resources *is* the
+deployment history — auditable, reproducible, portable across clouds.
+</Callout>

@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Getting started — knext docs</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,500;12..96,700;12..96,800&family=JetBrains+Mono:wght@400;500;700&display=swap"
+      rel="stylesheet"
+    />
+    <style>
+      :root {
+        --void: #08090b; --void-2: #0e1014; --panel: #14161b; --line: #23262e;
+        --ink: #e8eaed; --ink-dim: #9aa0aa; --ink-faint: #61656e;
+        --signal: #ccff00; --signal-dim: #a4cc00;
+        --display: "Bricolage Grotesque", serif; --mono: "JetBrains Mono", ui-monospace, monospace;
+      }
+      * { box-sizing: border-box; margin: 0; padding: 0; }
+      html { scroll-behavior: smooth; }
+      body { background: var(--void); color: var(--ink); font-family: var(--mono); line-height: 1.7; -webkit-font-smoothing: antialiased; }
+      a { color: var(--signal-dim); text-decoration: none; } a:hover { color: var(--signal); }
+
+      nav { position: sticky; top: 0; z-index: 50; height: 60px; display: flex; align-items: center; padding: 0 28px; border-bottom: 1px solid var(--line); background: #08090bcc; backdrop-filter: blur(12px); justify-content: space-between; }
+      .mark { font-family: var(--display); font-weight: 800; font-size: 20px; letter-spacing: -0.04em; color: var(--ink); }
+      .mark b { color: var(--signal); }
+      nav .crumbs { font-size: 12px; color: var(--ink-faint); }
+      nav .crumbs b { color: var(--ink-dim); }
+
+      .layout { display: grid; grid-template-columns: 248px minmax(0, 1fr) 200px; max-width: 1280px; margin: 0 auto; }
+      aside { border-right: 1px solid var(--line); padding: 36px 22px; position: sticky; top: 60px; height: calc(100vh - 60px); overflow-y: auto; }
+      aside .group { font-size: 11px; letter-spacing: 0.18em; text-transform: uppercase; color: var(--ink-faint); margin: 26px 0 12px; }
+      aside .group:first-child { margin-top: 0; }
+      aside ul { list-style: none; }
+      aside li a { display: block; padding: 6px 12px; margin-left: -12px; font-size: 13px; color: var(--ink-dim); border-radius: 3px; }
+      aside li a:hover { color: var(--ink); background: var(--void-2); }
+      aside li a.on { color: #0a0a00; background: var(--signal); font-weight: 500; }
+
+      main { padding: 56px 56px 120px; min-width: 0; }
+      .kicker { font-size: 12px; letter-spacing: 0.2em; text-transform: uppercase; color: var(--signal-dim); }
+      main h1 { font-family: var(--display); font-weight: 800; font-size: 46px; letter-spacing: -0.04em; margin: 14px 0 18px; line-height: 1; }
+      main h2 { font-family: var(--display); font-weight: 700; font-size: 27px; letter-spacing: -0.02em; margin: 56px 0 14px; scroll-margin-top: 80px; }
+      main p { color: var(--ink-dim); max-width: 68ch; margin: 14px 0; }
+      main p b, main li b { color: var(--ink); font-weight: 500; }
+      main .lead { font-size: 17px; color: var(--ink-dim); max-width: 64ch; }
+      main ol, main ul.body { color: var(--ink-dim); margin: 14px 0 14px 22px; max-width: 64ch; }
+      main li { margin: 8px 0; }
+      code.in { background: var(--panel); border: 1px solid var(--line); border-radius: 3px; padding: 1px 6px; font-size: 0.86em; color: var(--ink); }
+
+      .code { background: #0b0d11; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; font-size: 13px; margin: 20px 0; }
+      .code .top { display: flex; align-items: center; gap: 8px; padding: 10px 16px; border-bottom: 1px solid var(--line); color: var(--ink-faint); font-size: 11px; }
+      .code .top .d { width: 9px; height: 9px; border-radius: 50%; background: #2a2e36; }
+      .code pre { padding: 16px; overflow-x: auto; line-height: 1.7; }
+      .code .k { color: var(--signal); } .code .s { color: #8fd6ff; } .code .c { color: var(--ink-faint); } .code .p { color: var(--ink-dim); } .code .f { color: #ffd479; }
+
+      .callout { border: 1px solid var(--line); border-left: 2px solid var(--signal); background: #0c0f08; border-radius: 0 4px 4px 0; padding: 16px 20px; margin: 22px 0; font-size: 14px; color: var(--ink-dim); max-width: 68ch; }
+      .callout b { color: var(--signal); }
+
+      .toc { padding: 56px 20px; position: sticky; top: 60px; height: calc(100vh - 60px); font-size: 12px; }
+      .toc div:first-child { color: var(--ink-faint); letter-spacing: 0.14em; text-transform: uppercase; margin-bottom: 14px; }
+      .toc a { display: block; color: var(--ink-dim); padding: 5px 0; }
+      .next { margin-top: 64px; display: flex; justify-content: space-between; border-top: 1px solid var(--line); padding-top: 24px; }
+      .next a { color: var(--ink); } .next .t { color: var(--ink-faint); font-size: 11px; text-transform: uppercase; letter-spacing: 0.12em; }
+      @media (max-width: 1080px) { .layout { grid-template-columns: 220px 1fr; } .toc { display: none; } }
+      @media (max-width: 760px) { .layout { grid-template-columns: 1fr; } aside { display: none; } main { padding: 36px 22px 90px; } }
+    </style>
+  </head>
+  <body>
+    <nav>
+      <a class="mark" href="../index.html">kn<b>e</b>xt</a>
+      <div class="crumbs"><b>docs</b> / getting started</div>
+      <a href="https://github.com/AhmedElBanna80/knext" style="font-size:12px;color:var(--ink-dim)">github ↗</a>
+    </nav>
+
+    <div class="layout">
+      <aside>
+        <div class="group">Start</div>
+        <ul>
+          <li><a class="on" href="#">Getting started</a></li>
+          <li><a href="#install">Install the adapter</a></li>
+          <li><a href="#deploy">First deploy</a></li>
+        </ul>
+        <div class="group">Runtime</div>
+        <ul>
+          <li><a href="#">Official adapter</a></li>
+          <li><a href="#bytecode">Bytecode caching</a></li>
+          <li><a href="#">Scale-to-zero &amp; cold starts</a></li>
+        </ul>
+        <div class="group">Platform</div>
+        <ul>
+          <li><a href="operator.html">Operator + NextApp CRD</a></li>
+          <li><a href="#">Multi-cloud deploy</a></li>
+          <li><a href="#">SCS / Zones</a></li>
+        </ul>
+      </aside>
+
+      <main>
+        <div class="kicker">// start here</div>
+        <h1>Getting started</h1>
+        <p class="lead">
+          Take an existing Next.js app from <code class="in">next build</code> to a
+          <b>scale-to-zero</b> Knative service in about five minutes. knext uses the official Next.js
+          Deployment Adapter API — no fork, no custom runtime.
+        </p>
+
+        <div class="callout">
+          <b>Prerequisites.</b> A Kubernetes cluster with Knative Serving installed, Next.js 16.2+,
+          and a container registry. New to Knative? The operator-managed install sets up Serving and
+          the correct ingress class for you.
+        </div>
+
+        <h2 id="install">1 · Point Next.js at the adapter</h2>
+        <p>Install knext and reference the adapter from your <code class="in">next.config.ts</code>. The adapter forces <code class="in">output:'standalone'</code> at build time.</p>
+        <div class="code">
+          <div class="top"><span class="d"></span><span class="d"></span><span class="d"></span>&nbsp; next.config.ts</div>
+<pre><span class="p">import</span> path <span class="p">from</span> <span class="s">'node:path'</span>;
+<span class="p">import type</span> { NextConfig } <span class="p">from</span> <span class="s">'next'</span>;
+
+<span class="p">const</span> config: NextConfig = {
+  <span class="p">output:</span> <span class="s">'standalone'</span>,
+  <span class="p">experimental:</span> {
+    <span class="c">// knext ships the official NextAdapter as a local adapter file.</span>
+    <span class="p">adapterPath:</span> path.<span class="f">resolve</span>(import.meta.dirname, <span class="s">'next-adapter.ts'</span>),
+  },
+};
+<span class="p">export default</span> config;</pre>
+        </div>
+
+        <h2 id="deploy">2 · Build, push, declare</h2>
+        <p>Build a digest-pinned image, then describe the deployment as a <b>NextApp</b> custom resource. The CLI emits the CR; the operator does the rest.</p>
+        <div class="code">
+          <div class="top"><span class="d"></span><span class="d"></span><span class="d"></span>&nbsp; shell</div>
+<pre><span class="c"># build + push (digest is resolved automatically)</span>
+<span class="k">$</span> npx kn-next deploy --registry registry.example.com/storefront
+
+<span class="c"># the CLI emits a NextApp CR; the operator reconciles it</span>
+<span class="p">✓</span> image  registry.example.com/storefront<span class="s">@sha256:9f1c…</span>
+<span class="p">✓</span> NextApp/storefront applied
+<span class="p">✓</span> url    https://storefront.apps.example.com  <span class="c">(scaled to 0)</span></pre>
+        </div>
+
+        <h2 id="operator">The operator is the source of truth</h2>
+        <p>knext never mutates the cluster out-of-band. The Go operator reconciles your <b>NextApp</b> into a Knative Service — wiring autoscaling, the bytecode-cache volume, and digest-pinned images. The CLI only ever applies the CR.</p>
+        <div class="callout"><b>Security by default.</b> The operator rejects mutable tags (<code class="in" style="color:var(--ink)">:latest</code>) — every image is pinned by <code class="in" style="color:var(--ink)">@sha256:</code>. Backends are cluster-local; mutating endpoints require auth.</div>
+
+        <h2 id="bytecode">Bytecode-cached cold starts</h2>
+        <p>Scale-to-zero means cold starts — so knext sets <b>NODE_COMPILE_CACHE</b> to a persistent volume. On the first start V8 serializes compiled bytecode to disk; every later cold pod reads it and skips JS parsing. It's the self-hosted version of the mechanism behind Vercel Fluid.</p>
+        <div class="code">
+          <div class="top"><span class="d"></span><span class="d"></span><span class="d"></span>&nbsp; nextapp.yaml — cache</div>
+<pre><span class="p">spec:</span>
+  <span class="p">cache:</span>
+    <span class="p">enableBytecodeCache:</span> <span class="k">true</span>   <span class="c"># mount a PVC, set NODE_COMPILE_CACHE</span>
+  <span class="p">scaling:</span>
+    <span class="p">minScale:</span> <span class="k">0</span>        <span class="c"># idle → zero pods</span></pre>
+        </div>
+
+        <div class="next">
+          <a href="../index.html"><div class="t">← back</div>Home</a>
+          <a href="#operator" style="text-align:right"><div class="t">next →</div>Operator &amp; the NextApp CRD</a>
+        </div>
+      </main>
+
+      <div class="toc">
+        <div>On this page</div>
+        <a href="#install">Install the adapter</a>
+        <a href="#deploy">First deploy</a>
+        <a href="#operator">Operator &amp; CRD</a>
+        <a href="#bytecode">Bytecode caching</a>
+      </div>
+    </div>
+  </body>
+</html>

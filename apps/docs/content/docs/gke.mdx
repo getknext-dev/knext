@@ -1,0 +1,215 @@
+---
+title: Deploy on Google Kubernetes Engine (GKE)
+description: A reference walkthrough for running knext on GKE — GCS for assets, Redis for the data cache, Artifact Registry for digest-pinned images.
+---
+
+This is the **reference cloud** for knext: the real data plane the project runs on is **GCS +
+Redis on GKE**. Everything below has been exercised on a live GKE cluster.
+
+This guide assumes you have already installed Knative Serving, Kourier, cert-manager, and the
+knext operator. Those are cloud-agnostic and live on the common install page — start there:
+
+<Callout type="info">
+**Prerequisite: [the common install page](/docs/install).** It covers Knative Serving + Kourier
+(networking), cert-manager, the knext operator, and the PVC feature flags that back the
+bytecode-cache mount. This guide only covers the GKE-specific pieces: cluster, storage, cache, and
+registry.
+</Callout>
+
+## 1. Create the cluster
+
+Autopilot (Google manages the nodes) is the simplest path:
+
+```bash
+gcloud container clusters create-auto knext \
+  --region=us-central1 \
+  --project=my-project
+gcloud container clusters get-credentials knext --region=us-central1
+```
+
+Or a Standard cluster if you need node-pool control (e.g. for self-hosted Redis):
+
+```bash
+gcloud container clusters create knext \
+  --region=us-central1 \
+  --num-nodes=2 \
+  --machine-type=e2-standard-4 \
+  --workload-pool=my-project.svc.id.goog   # enables Workload Identity
+gcloud container clusters get-credentials knext --region=us-central1
+```
+
+GKE ships a default `standard-rwo` StorageClass, so the bytecode-cache PVC from the install page
+binds with no extra setup.
+
+After the cluster is up, follow [the common install page](/docs/install) to install Knative,
+Kourier, cert-manager, and the operator.
+
+## 2. Storage: GCS
+
+knext uploads build output (static assets) to an object store keyed by build ID and serves it from
+`assetPrefix`. On GKE that store is a **GCS bucket**.
+
+```bash
+gcloud storage buckets create gs://my-app-assets \
+  --location=us-central1 \
+  --uniform-bucket-level-access
+```
+
+Auth uses **Workload Identity** — no static keys in the image. Bind the app's Kubernetes
+ServiceAccount to a GCP service account that has `objectAdmin` on the bucket:
+
+```bash
+# 1. A GCP service account for the app
+gcloud iam service-accounts create knext-app
+
+# 2. Grant it object admin on the bucket
+gcloud storage buckets add-iam-policy-binding gs://my-app-assets \
+  --member="serviceAccount:knext-app@my-project.iam.gserviceaccount.com" \
+  --role="roles/storage.objectAdmin"
+
+# 3. Let the app's K8s ServiceAccount impersonate it
+gcloud iam service-accounts add-iam-policy-binding \
+  knext-app@my-project.iam.gserviceaccount.com \
+  --role="roles/iam.workloadIdentityUser" \
+  --member="serviceAccount:my-project.svc.id.goog[default/my-app]"
+```
+
+Then annotate the app's ServiceAccount so the pods authenticate as that GCP SA:
+
+```bash
+kubectl annotate serviceaccount my-app \
+  iam.gke.io/gcp-service-account=knext-app@my-project.iam.gserviceaccount.com
+```
+
+In the config, `provider: 'gcs'` and a `publicUrl` under `storage.googleapis.com`:
+
+```ts
+storage: {
+  provider: 'gcs',
+  bucket: 'my-app-assets',
+  publicUrl: 'https://storage.googleapis.com/my-app-assets',
+},
+```
+
+<Callout type="warn">
+knext's storage validator accepts only `gcs`, `s3`, and `minio`. There is **no Azure Blob
+provider** — see [Multi-cloud deploy](/docs/multi-cloud).
+</Callout>
+
+## 3. Cache: Redis
+
+The ISR / data cache provider is **Redis**. Use **Memorystore** (managed) or a self-hosted Redis
+in the cluster. Provision Memorystore:
+
+```bash
+gcloud redis instances create knext-cache \
+  --size=1 --region=us-central1 --tier=basic
+```
+
+Wire its connection string into `cache`. `cache.url` is **required** when `provider: 'redis'`;
+keep the URL in a Kubernetes Secret rather than hardcoding it:
+
+```ts
+cache: {
+  provider: 'redis',
+  url: process.env.REDIS_URL!,   // injected from a K8s Secret
+  keyPrefix: 'my-app',
+},
+```
+
+## 4. Registry: Artifact Registry
+
+Push the runtime image to **Artifact Registry**. The operator **rejects `:latest`** — images must
+be digest-pinned (`@sha256:`), so let the CLI build and push.
+
+```bash
+gcloud artifacts repositories create knext-repo \
+  --repository-format=docker --location=us-central1
+gcloud auth configure-docker us-central1-docker.pkg.dev
+```
+
+Set `registry` to the repo path:
+
+```ts
+registry: 'us-central1-docker.pkg.dev/my-project/knext-repo',
+```
+
+## 5. Complete config
+
+```ts title="kn-next.config.ts"
+import type { KnativeNextConfig } from '@knext/core';
+
+const config: KnativeNextConfig = {
+  name: 'my-app',
+
+  // Static assets → GCS, served from assetPrefix
+  storage: {
+    provider: 'gcs',
+    bucket: 'my-app-assets',
+    region: 'us-central1',
+    publicUrl: 'https://storage.googleapis.com/my-app-assets',
+  },
+
+  // ISR / data cache → Redis (Memorystore)
+  cache: {
+    provider: 'redis',
+    url: process.env.REDIS_URL!,
+    keyPrefix: 'my-app',
+  },
+
+  // Artifact Registry — image is digest-pinned by the CLI
+  registry: 'us-central1-docker.pkg.dev/my-project/knext-repo',
+
+  // Knative autoscaling — minScale 0 = scale to zero
+  scaling: {
+    minScale: 0,
+    maxScale: 5,
+    memoryRequest: '256Mi',
+    memoryLimit: '512Mi',
+  },
+
+  // Prometheus metrics + Grafana dashboards
+  observability: {
+    enabled: true,
+  },
+
+  // Redis URL lives in a K8s Secret, never in this file
+  secrets: {
+    envFrom: ['my-app-credentials'],
+  },
+};
+
+export default config;
+```
+
+## 6. Build and deploy
+
+```bash
+kn-next build     # builds the standalone image, pushes a digest-pinned ref
+kn-next deploy    # emits the NextApp CR; the operator reconciles it
+```
+
+The CLI never touches Knative directly — it applies a `NextApp` resource and the operator
+reconciles it into a scaled-to-zero Knative Service. See
+[Operator & the NextApp CRD](/docs/operator).
+
+## 7. Verify scale-to-zero
+
+```bash
+kubectl get ksvc my-app
+```
+
+With `minScale: 0`, an idle service drops to **0 replicas** after the stable window. The first
+request routes through the Knative activator, which wakes a pod and forwards the request:
+
+```bash
+# Watch replicas drop to 0 when idle
+kubectl get pods -l serving.knative.dev/service=my-app -w
+
+# Hit the URL → a pod is scheduled and the request is served
+URL=$(kubectl get ksvc my-app -o jsonpath='{.status.url}')
+```
+
+For the wake-latency details (and how the bytecode cache speeds the cold start) see
+[Scale-to-zero & cold starts](/docs/scale-to-zero). For digest pinning and the security defaults
+the operator enforces, see [Operator & the NextApp CRD](/docs/operator).

@@ -1,0 +1,132 @@
+---
+title: Deploy on Oracle Kubernetes Engine (OKE)
+description: The reference-validated knext deployment path — OKE with OCI Object Storage (S3-compatible) and the Kourier ingress-class fix.
+---
+
+OKE has been validated end-to-end with scale-to-zero and bytecode caching verified on a live
+cluster, so this guide is a tested path. The general control-plane install is on
+[Operator & the NextApp CRD](/docs/operator); the prerequisites and config walkthrough are in
+[Getting started](/docs/getting-started). This page covers only the OCI-specific pieces.
+
+## 1 · Create the cluster
+
+Create an OKE cluster (managed nodes), then fetch a kubeconfig. OKE kubeconfigs use the OCI CLI's
+**session-token** auth — the kubeconfig invokes `oci ce cluster generate-token`, so the OCI CLI
+must be installed and authenticated on whoever runs `kubectl`:
+
+```sh
+oci ce cluster create-kubeconfig \
+  --cluster-id <cluster-ocid> \
+  --file ~/.kube/config \
+  --region <region> \
+  --token-version 2.0.0
+```
+
+For the bytecode-cache PVC, knext needs a `StorageClass` that provisions writable volumes. On OKE
+the OCI Block Volume provisioner ships as the `oci-bv` StorageClass:
+
+```sh
+kubectl get storageclass oci-bv
+```
+
+## 2 · Install Knative, Kourier, cert-manager, and the operator
+
+Follow [Operator & the NextApp CRD](/docs/operator) for the one-command bundle install. The
+prerequisites — Knative Serving + Kourier, cert-manager, and a StorageClass — are listed in
+[Getting started](/docs/getting-started).
+
+<Callout type="warn">
+**The Kourier ingress-class is the OKE gotcha.** If knext apps are unreachable through the ingress,
+the cause is usually that Knative Serving's `config-network` ConfigMap (namespace
+`knative-serving`) left `ingress-class` **unset**, so Serving never programmed routes against
+Kourier. The operator's install bundle ships a declarative `config-network` ConfigMap that pins
+`ingress-class: kourier.ingress.networking.knative.dev` (the full controller-qualified form — the
+short `kourier.knative.dev` form does **not** match and leaves routes unprogrammed). Apply the
+bundle with `kubectl apply --server-side` so this ConfigMap **merges** into the one Knative Serving
+owns rather than clobbering it.
+</Callout>
+
+## 3 · Storage — OCI Object Storage via the `s3` provider
+
+knext storage accepts exactly `gcs`, `s3`, and `minio` (see
+[Multi-cloud deploy](/docs/multi-cloud)). OCI Object Storage exposes an **S3-compatible** endpoint,
+so use `provider: 's3'` with the OCI S3-compat `endpoint` and a **Customer Secret Key** (an
+S3-compatible access-key/secret pair you generate against your OCI user).
+
+The OCI S3-compat endpoint format is:
+
+```
+https://<namespace>.compat.objectstorage.<region>.oraclecloud.com
+```
+
+where `<namespace>` is your tenancy's Object Storage namespace. Alternatively, run self-hosted
+**MinIO** in-cluster and use `provider: 'minio'`.
+
+## 4 · Cache — Redis
+
+ISR / data cache uses Redis (`cache.provider: 'redis'`). Point `cache.url` at OCI Cache (managed
+Redis) or a self-hosted Redis Service. `cache.url` is required when the provider is `redis`.
+
+## 5 · Registry — OCIR
+
+Push the app image to OCI Registry (OCIR), e.g.
+`<region-key>.ocir.io/<tenancy-namespace>/<repo>`. The operator **rejects any image that is not
+digest-pinned** (`@sha256:…`); `kn-next deploy` resolves the digest automatically.
+
+## 6 · Complete `kn-next.config.ts`
+
+```ts title="kn-next.config.ts"
+import type { KnativeNextConfig } from '@knext/core';
+
+const config: KnativeNextConfig = {
+  name: 'storefront',
+  registry: '<region-key>.ocir.io/<tenancy-namespace>/storefront',
+
+  storage: {
+    provider: 's3', // OCI Object Storage is S3-compatible
+    bucket: 'storefront-assets',
+    region: '<region>', // e.g. us-ashburn-1
+    endpoint:
+      'https://<namespace>.compat.objectstorage.<region>.oraclecloud.com',
+    publicUrl:
+      'https://<namespace>.compat.objectstorage.<region>.oraclecloud.com/storefront-assets',
+    // S3-compatible access key / secret (an OCI Customer Secret Key). Prefer
+    // injecting these via env/Secrets rather than committing them.
+    accessKey: process.env.OCI_S3_ACCESS_KEY,
+    secretKey: process.env.OCI_S3_SECRET_KEY,
+  },
+
+  cache: {
+    provider: 'redis',
+    url: process.env.REDIS_URL || 'redis://storefront-redis.default.svc.cluster.local:6379',
+    keyPrefix: 'storefront',
+  },
+
+  scaling: { minScale: 0, maxScale: 20 }, // minScale 0 = scale to zero
+};
+
+export default config;
+```
+
+## 7 · Deploy and verify scale-to-zero
+
+```sh
+kn-next deploy --registry <region-key>.ocir.io/<tenancy-namespace>/storefront
+```
+
+`kn-next deploy` builds the standalone image, pushes it (resolving the digest), and applies the
+`NextApp` CR; the operator reconciles it into a Knative Service. Confirm the service scales to zero
+when idle:
+
+```sh
+# After the idle window, the app's pods should be gone:
+kubectl get pods -l serving.knative.dev/service=storefront
+# (no resources) — the ksvc scaled to zero
+
+# The next request cold-starts a pod; the URL resolves either way:
+kubectl get ksvc storefront -o jsonpath='{.status.url}'
+```
+
+A cold request reprovisions a pod; the bytecode cache (when
+`spec.cache.enableBytecodeCache` is set) shortens that cold start by reusing the persisted V8
+compile cache. See [Bytecode caching](/docs/bytecode) and [Scale to zero](/docs/scale-to-zero).

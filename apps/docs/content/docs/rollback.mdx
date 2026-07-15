@@ -1,0 +1,113 @@
+---
+title: Rollback & traffic split
+description: Shift serving traffic to a prior Knative Revision by patching the NextApp CR.
+---
+
+Every `kn-next deploy` produces a new Knative **Revision** — an immutable snapshot of the pod
+template. Knative keeps prior revisions around, so rolling back is never a rebuild: it is purely a
+traffic decision. knext exposes that decision as a CR patch.
+
+The CLI **never touches the Knative Service, Route, or `kn` directly.** `kn-next rollback` issues
+exactly one cluster write — a merge-patch of the `NextApp` CR's `spec.traffic` — and the operator
+renders that into the Knative Service's traffic targets.
+
+```
+kn-next rollback  →  kubectl patch nextapp … spec.traffic
+operator          →  renders ksvc.spec.traffic
+Knative Route     →  shifts revision traffic
+```
+
+## The command
+
+```bash
+# Revert to the latest-ready revision (clear any pin)
+kn-next rollback storefront
+
+# Pin 100% of traffic to a specific prior revision
+kn-next rollback storefront --to storefront-00002
+
+# Canary: send 20% to latest-ready, 80% to the pinned revision
+kn-next rollback storefront --to storefront-00002 --canary 20
+```
+
+| Flag | Notes |
+|---|---|
+| `<app>` | Positional, optional. Defaults to `name` from your `kn-next.config`. |
+| `--to <revision>` | Pin to a named Knative Revision (e.g. `storefront-00002`). Omit to revert to latest-ready. |
+| `--canary <n>` | Integer **1–99** only. Percentage sent to **latest-ready**; the remainder goes to the pinned revision. `0` is not "no canary" (omit the flag) and `100` would not be a rollback at all — both are rejected. Requires `--to`. |
+| `-n`, `--namespace` | Target namespace (default `default`). |
+
+Parsing is deliberately strict. Because the bare form (`kn-next rollback <app>`) *clears* the pin,
+a dangling `--to`, an unknown flag, or an extra positional is a **hard error** — a typo can never
+silently fall through to the opposite mutation (un-pinning when you asked to pin).
+
+## What gets patched
+
+The `TrafficSpec` on the CR has two fields — `revisionName` and `canaryPercent`:
+
+```yaml
+# kn-next rollback storefront --to storefront-00002
+spec:
+  traffic:
+    revisionName: storefront-00002
+```
+
+```yaml
+# kn-next rollback storefront --to storefront-00002 --canary 20
+spec:
+  traffic:
+    revisionName: storefront-00002
+    canaryPercent: 20
+```
+
+```yaml
+# kn-next rollback storefront  (no --to)
+spec:
+  traffic: null        # cleared → operator emits no spec.traffic → 100% latest-ready
+```
+
+## How the operator renders it
+
+The operator maps `spec.traffic` to Knative traffic targets:
+
+| `spec.traffic` | Rendered `ksvc.spec.traffic` |
+|---|---|
+| `nil` or empty `revisionName` | No traffic block — Knative serves 100% of latest-ready (pre-rollback default). |
+| `revisionName` set, `canaryPercent` is 0 (or ≥100) | One target: **100%** to the pinned revision. |
+| `revisionName` set, `canaryPercent` in 1–99 | Two targets: **(100−p)%** to the pinned revision, **p%** to latest-ready. |
+
+## Observing the live split
+
+The operator mirrors the Knative Service's observed traffic back into
+`NextApp.status.currentTraffic`, so the live split is readable straight off the CR:
+
+```bash
+kubectl get nextapp storefront -o jsonpath='{.status.currentTraffic}'
+```
+
+Each entry carries `revisionName`, `percent`, and `latestRevision`. `kn-next status` renders the
+same truth — conditions, reasons, and guidance — straight off the CR (see the
+[CLI reference](/docs/cli#kn-next-status)).
+
+## When the pinned revision is gone
+
+A pin is only as durable as the revision it names. If the pinned revision is later deleted (e.g.
+garbage-collected), Knative fails safe — it keeps serving the last-good route — but the declared
+rollback can never resolve, and natively that surfaces only as an opaque internal condition. The
+operator checks the pinned revision's existence itself and, once a short stall window rules out an
+in-progress deploy, reports an honest verdict on the CR: `Ready: False` / `Degraded` with reason
+**`PinnedRevisionNotFound`**, plus a Warning event with the fix — list surviving revisions
+(`kubectl get revisions`), then re-pin with `kn-next rollback <app> --to <existing-revision>` or
+clear the pin entirely.
+
+<Callout type="info">
+A pinned or canaried revision still serves **its own** static assets — knext never prunes the
+assets of a revision in the live traffic set. That is what makes a rollback safe for clients that
+already loaded the older build. See [Skew protection](/docs/skew-protection).
+</Callout>
+
+## Related
+
+- [Operator & the NextApp CRD](/docs/operator) — the `traffic` spec field and `currentTraffic` status field.
+- [Scale to zero](/docs/scale-to-zero) — how revisions scale independently.
+- [Skew protection](/docs/skew-protection) — why a rolled-back build keeps working.

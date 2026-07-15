@@ -1,0 +1,117 @@
+---
+title: Security
+description: knext's security invariants — authed mutating endpoints, network isolation, digest pinning, supply-chain signing, and runtime hardening.
+---
+
+Security in knext is not a milestone to defer — these controls run through every phase. The
+non-negotiable rule: **no unauthenticated mutating endpoints, ever.** Several controls are enforced
+automatically; the rest are documented guarantees knext holds to.
+
+## No unauthenticated mutating endpoints
+
+Any route that changes state requires auth. Two app routes mutate cache state, and both require a
+**Bearer token**:
+
+| Endpoint | Method | Auth |
+|---|---|---|
+| `/api/cache/invalidate` | `POST` | Bearer `CACHE_INVALIDATE_TOKEN`, fail-closed |
+| `/api/cache/events` | `DELETE` | same Bearer token |
+
+The token check is:
+
+- **Fail-closed** — if `CACHE_INVALIDATE_TOKEN` is unset or empty, **nothing is authorized**. An
+  unconfigured deployment rejects all invalidations rather than leaving the endpoint open.
+- **Constant-time** — comparison uses `timingSafeEqual` so the token cannot be recovered via
+  response timing (length is checked first, which does not leak the secret).
+
+The token is provisioned from a Kubernetes Secret into the `CACHE_INVALIDATE_TOKEN` env var — never
+hardcoded.
+
+<Callout type="warn">
+There is intentionally **no `GET /api/cache/invalidate`** handler. A mutating GET is
+prefetchable/link-triggerable and would leak the Bearer token into URLs and logs. App Router
+returns `405` for the unexported GET; `POST` is the only invalidation entrypoint.
+</Callout>
+
+The browser RUM beacon `POST /api/rum` is a deliberate, justified exception — a bounded metrics
+aggregator, not a write primitive. See [Observability → RUM](/docs/observability#rum-web-vitals)
+for the full rationale.
+
+## Network isolation
+
+Auth is one factor; **network isolation** is the second. knext reconciles a default-on Kubernetes
+`NetworkPolicy` for your app automatically.
+
+- **Object:** a `NetworkPolicy` named `<app>-allow-ingress`, tied to your app's lifecycle
+  (garbage-collected on delete).
+- **Targets:** the app's serving pods (selected by `serving.knative.dev/service: <app>`).
+- **Allows ingress from:** the `knative-serving` and `kourier-system` namespaces (so
+  scale-from-zero traffic keeps flowing) plus same-namespace pods. Everything else — arbitrary
+  cross-namespace and external pod-direct traffic — is denied.
+- **Toggle:** `spec.security.networkPolicy` (`*bool`). `nil` (unset) or `true` reconciles the
+  policy (**default-on**); `false` skips it and deletes any existing one on the next reconcile.
+
+<Callout type="warn">
+**Honest scope: L3/L4, not L7.** A `NetworkPolicy` filters by source pod/namespace at the network
+layer — it **cannot** target an HTTP path. It does not isolate `/api/cache/invalidate` per se; it
+makes the **whole pod** unreachable for disallowed direct traffic (a leaked token is useless to an
+attacker who cannot route to the pod). It is also only enforced if your cluster **CNI** supports
+NetworkPolicy (Calico, Cilium, etc.) — on a non-enforcing CNI the policy is a no-op.
+</Callout>
+
+## Digest pinning
+
+knext rejects mutable image tags everywhere.
+
+- **`:latest` is rejected.** An app whose `image` is `:latest`, tag-only, or untagged is marked
+  `Degraded` (reason `InvalidImage`) and never deployed — a ref is accepted only if it is
+  digest-pinned (`@sha256:`).
+- **knext's own images are digest-pinned too.** A build-time check fails if any internal deployment
+  manifest references a non-pinned tag, so knext never ships a mutable image reference.
+
+See [Operator → Security defaults](/docs/operator#security-defaults).
+
+## Supply chain
+
+Both the **app image** and the **operator image** go through the same supply-chain pipeline, with
+a strict ordering: **build → SBOM → scan gate → push → sign**. Nothing reaches the registry before
+it passes the scan, and signing happens on the digest that was actually pushed.
+
+- **SBOM per image** — generated with **syft** (SPDX-JSON), published as an artifact and attested.
+- **Vulnerability scan as a push gate** — **Trivy** scans the exact image (as a local OCI layout)
+  for `HIGH,CRITICAL` findings **before** it is pushed. A failing scan means the image is never
+  published — not "published but flagged."
+- **Signing + attestation on the pushed digest** — **cosign** keyless signing (OIDC / Sigstore) of
+  the digest that was pushed, plus an SBOM attestation (`cosign attest --type spdxjson`) bound to
+  that digest.
+- **SLSA provenance** — the build carries a BuildKit SLSA provenance attestation, and the pipeline
+  asserts it survived the push before anything is signed.
+- **Digest-pinned release bundle** — the operator's `install.yaml` release asset is regenerated
+  with the **real pushed digest** of the operator image, so what you `kubectl apply` is exactly
+  what was scanned and signed. See [Installing knext](/docs/install#5--install-the-operator).
+
+## Runtime hardening
+
+- **Distroless, non-root.** The operator image is `gcr.io/distroless/static:nonroot` running as
+  UID `65532`; the app image runs as a non-root `node` user.
+- **No token automount.** knext sets `AutomountServiceAccountToken: false` on the app's
+  ServiceAccount.
+- **Graceful shutdown.** On `SIGTERM` the server forwards the signal to Next.js so it **drains
+  in-flight requests and runs `after()` callbacks** before exit, then closes the metrics server —
+  no dropped requests on scale-down. The drain has a hard cap kept below the pod's
+  `terminationGracePeriodSeconds`.
+
+## Secrets
+
+Secrets live in **Kubernetes Secrets / env only** — never in config files, source, container
+images, or URLs. knext provisions them (via `spec.secrets` — `envFrom` / `envMap`) and the app
+reads them from the environment.
+
+<Callout type="info">
+**Honest scope — not yet shipped.** Service-to-service **mTLS/authz** between the gateway and
+backends, and the **cluster-local** gRPC backend services with no public ingress, are designed but
+**not yet shipped**. Today's enforced boundary is endpoint auth plus the network policy above.
+</Callout>
+
+See also: [Operator & the NextApp CRD](/docs/operator) ·
+[Observability](/docs/observability) · [Scale-to-zero](/docs/scale-to-zero).

@@ -1,0 +1,321 @@
+---
+title: Data SDK (@knext/db)
+description: A thin, typed drizzle-orm layer over knext's scale-to-zero Postgres pools — schema, migrations, and read/write clients.
+---
+
+`@knext/db` is knext's typed data-access layer: a **thin [drizzle-orm](https://orm.drizzle.team)
+wrapper** over the scale-to-zero Postgres connection pools the platform binds into your app. It
+re-exports drizzle's whole query surface and adds only the platform-specific ergonomics —
+**you keep drizzle's own docs and lose no power**, and the SDK provisions nothing and mutates no
+cluster resource.
+
+knext and [scale-zero-pg](/docs/scale-zero-pg) are one platform, two layers: knext scales your
+*application* to zero, scale-zero-pg scales its *database* to zero, and both wake together on one
+visitor request. `@knext/db` gives that database a typed schema, migrations, and queries.
+
+The package has three public subpaths:
+
+| Subpath | What it is |
+|---|---|
+| `@knext/db` | Re-exports `drizzle-orm` (query builder, `eq`/`and`/`or`/`desc`/`sql`, …) plus the client accessors `getDb()` / `getDbRO()`. |
+| `@knext/db/schema` | The schema surface — a thin re-export of drizzle's `pg-core` builders plus `relations`/`sql`, and the extension helpers. |
+| `@knext/db/migrate` | `defineDrizzleConfig()` for your `drizzle.config.ts`, plus the engine behind `kn-next db migrate`. |
+
+```bash
+npm i @knext/db
+npm i -D drizzle-kit        # dev-only: generates SQL migrations
+```
+
+`@knext/db` depends on `drizzle-orm` and re-exports it, so your app has a single pinned-compatible
+drizzle. `drizzle-kit` is a dev tool only — it generates migrations and ships no runtime code.
+
+<Callout type="warn">
+**Package availability.** `@knext/db` is not on the public npm registry yet. It is installable
+today from the **interim GitHub Packages channel** as `@getknext-dev/db` — see
+[Getting started](/docs/getting-started#0--install-the-packages-interim-channel) for the `.npmrc`
+setup (a `read:packages` token is required even though the packages are public). Under that scope,
+substitute `@getknext-dev/db` for `@knext/db` in the install command and imports on this page.
+When `@knext/*` goes live on npm, the interim names will be deprecated in its favor; installs
+keep working.
+</Callout>
+
+## Define your schema
+
+Put your tables in `src/db/schema.ts` (the knext convention) and import the builders from
+`@knext/db/schema`. It is a plain re-export of drizzle's `pg-core` — no bespoke DSL — so
+[drizzle's schema docs](https://orm.drizzle.team/docs/sql-schema-declaration) apply directly.
+
+```ts title="src/db/schema.ts"
+import { pgTable, serial, text, timestamp } from '@knext/db/schema';
+
+export const messages = pgTable('messages', {
+  id: serial('id').primaryKey(),
+  author: text('author').notNull(),
+  body: text('body').notNull(),
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+});
+
+// Typed rows for free:
+export type Message = typeof messages.$inferSelect;
+export type NewMessage = typeof messages.$inferInsert;
+```
+
+Available from `@knext/db/schema`: `pgTable`, the column builders
+(`serial`/`text`/`integer`/`timestamp`/`jsonb`/`uuid`/`vector`/…), `index`/`uniqueIndex`,
+`primaryKey`/`foreignKey`, `pgEnum`/`pgSchema`, and `relations`/`sql`.
+
+## Migrations
+
+Migrations are **one-shot and writer-only**, run out of the request path — the answer to "who
+migrates a single-writer, scale-to-zero database?".
+
+### Config
+
+```ts title="drizzle.config.ts"
+import { defineDrizzleConfig } from '@knext/db/migrate';
+
+// dialect: 'postgresql' · schema: './src/db/schema.ts' · out: './drizzle'
+// dbCredentials.url: process.env.DATABASE_URL (the WRITER, injected by the operator)
+export default defineDrizzleConfig();
+```
+
+`defineDrizzleConfig()` wires drizzle-kit to the **writer** `DATABASE_URL` — never the read
+replica. It returns a plain drizzle-kit `Config` object, so you can spread it to add any field
+drizzle-kit supports, and override `schema`, `out`, or `url` when needed.
+
+### Generate (dev time — no database needed)
+
+```bash
+npx drizzle-kit generate     # diff schema → ./drizzle/*.sql — commit these
+```
+
+`generate` needs no live database (an unset `DATABASE_URL` still produces SQL). **Commit
+`./drizzle`** — the generated SQL is your migration history.
+
+### Apply — `kn-next db migrate`
+
+```bash
+kn-next db migrate                       # apply ./drizzle against the writer DATABASE_URL
+kn-next db migrate --dir ./migrations    # custom migrations directory
+kn-next db migrate --url "$WRITER_DSN"   # explicit writer DSN override
+```
+
+- **Writer-only.** The runner resolves `DATABASE_URL` and **refuses** a read-replica DSN — a
+  single-writer database forbids writes on the replica.
+- **Once per deploy, out of the request path.** Run it as a CI step or a pre-deploy Job — **not**
+  on pod boot (that races N migrators and penalises cold start).
+- **Idempotent + fail-loud.** Applied migrations are recorded in `__drizzle_migrations`, so a
+  re-run is a no-op; an error exits non-zero so the Job fails instead of a half-applied schema
+  going live.
+- **Cold-wake tolerant.** Connecting wakes a scale-to-zero compute; the runner's 15s connect
+  timeout absorbs the ~2.5s cold wake.
+
+### Run it as a one-shot Job
+
+Run the migration as a Kubernetes `Job` on the **same image and Secret** the app uses, gated on
+the database being ready and completed before app pods serve:
+
+```yaml title="migrate-job.yaml"
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: storefront-migrate
+  namespace: my-apps
+spec:
+  backoffLimit: 2               # fail loud — never ship a half-applied schema
+  ttlSecondsAfterFinished: 300  # reap the finished Job
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: migrate
+          image: registry.example/storefront:<same-digest-as-the-deploy>
+          command: ['kn-next', 'db', 'migrate']
+          env:
+            # The WRITER DSN — the same Secret the operator injects into the app.
+            # Writer only: never wire DATABASE_URL_RO here (the runner refuses it).
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: storefront-db
+                  key: DATABASE_URL
+```
+
+```bash
+kubectl apply -f migrate-job.yaml -n my-apps
+kubectl wait --for=condition=Complete job/storefront-migrate -n my-apps --timeout=300s
+```
+
+`kubectl wait --for=condition=Complete` returns non-zero if the Job fails — wire it into your
+pipeline so a failed migration blocks the rollout.
+
+## Queries: `getDb()` vs `getDbRO()`
+
+Two clients, and **you pick per query** — the SDK never parses SQL or auto-routes statements
+(auto-routing would silently serve stale reads and break read-your-writes):
+
+| | `getDb()` | `getDbRO()` |
+|---|---|---|
+| DSN | `DATABASE_URL` (writer) | `DATABASE_URL_RO` (read-only pool) |
+| Consistency | **Read-your-writes**, single writer | **Bounded-stale (~9s)**, no read-your-writes |
+| Use for | Every write; any read that must see its own write | Dashboards / analytics / fan-out reads that tolerate a few seconds of lag |
+
+Both are one-client-per-pod singletons over the platform's managed pools. If `DATABASE_URL_RO` is
+unset (no read replica), `getDbRO()` **falls back to the writer with a one-time warning** — the
+app still works, it just reads from the primary.
+
+```ts title="src/db/queries.ts"
+import { desc, getDb, getDbRO } from '@knext/db';
+import { type Message, type NewMessage, messages } from './schema';
+
+// staleness-tolerant list → the reader
+export function listMessages(limit = 50): Promise<Message[]> {
+  return getDbRO({ messages })
+    .select()
+    .from(messages)
+    .orderBy(desc(messages.createdAt))
+    .limit(limit);
+}
+
+// insert → the writer; the returned row is read-your-writes
+export async function addMessage(input: NewMessage): Promise<Message> {
+  const [row] = await getDb({ messages }).insert(messages).values(input).returning();
+  return row;
+}
+```
+
+Reads run in server components / route handlers; wrap writes in `'use server'` actions:
+
+```ts title="src/app/actions.ts"
+'use server';
+import { revalidatePath } from 'next/cache';
+import { addMessage } from '@/db/queries';
+
+export async function postMessage(formData: FormData): Promise<void> {
+  const body = String(formData.get('body') ?? '').trim();
+  if (!body) return;
+  await addMessage({ author: 'anonymous', body });
+  revalidatePath('/');
+}
+```
+
+Rule of thumb: **write, or read-your-own-write → `getDb()`**; **read that tolerates a few seconds
+of staleness → `getDbRO()`**.
+
+## Pooling, wake, and graceful drain
+
+The pools are tuned for scale-to-zero out of the box:
+
+- **Pool idle timeout (10s) < the database gateway's 60s idle window** — the app never holds an
+  idle socket that keeps a scale-to-zero database awake.
+- **Connect timeout 15s ≥ the ~2.5s cold wake** — no app-side wake-retry logic is needed.
+- **Graceful drain on scale-down.** On `SIGTERM` (Knative scaling a replica down) the runtime
+  drains **both** pools — the writer *and* the read-only pool — after in-flight requests finish,
+  so a terminating replica releases its connections cleanly instead of severing them mid-write or
+  leaking idle sockets. Each close is idempotent (a no-op if the pool was never opened), and the
+  whole drain is bounded by the shutdown grace cap so a slow database can never wedge shutdown.
+  You get this for free — nothing to wire in app code.
+
+Override the writer pool with `DB_POOL_*` env vars and the reader with `DB_POOL_RO_*` if you must;
+the defaults already satisfy the contract.
+
+## Extensions: TimescaleDB & pgvector
+
+When your database runs on [scale-zero-pg](/docs/scale-zero-pg), two Postgres extensions ship in
+the compute image, both **opt-in and self-service**: your app enables the one it needs itself,
+once, over its own `DATABASE_URL` — no operator involvement, no superuser. Their data and indexes
+live on durable storage, so **they survive scale-to-zero**.
+
+The helpers below are **migration SQL emitters** — drizzle-kit cannot model these statements, so
+the helpers return the exact SQL to paste into (or append to) your generated migration.
+
+### TimescaleDB (time-series)
+
+```ts
+import {
+  pgTable, timestamp, text, doublePrecision,
+  hypertable, dropChunks, createTimescaleExtension,
+} from '@knext/db/schema';
+
+export const metrics = pgTable('metrics', {
+  ts: timestamp('ts', { withTimezone: true }).notNull(),
+  device: text('device').notNull(),
+  value: doublePrecision('value').notNull(),
+});
+
+// Emit these into your migration:
+createTimescaleExtension();
+// → CREATE EXTENSION IF NOT EXISTS timescaledb;
+hypertable(metrics, { by: 'ts', chunkInterval: '7 days' });
+// → SELECT create_hypertable('metrics', 'ts',
+//     chunk_time_interval => INTERVAL '7 days', if_not_exists => TRUE);
+
+// Retention — a ONE-SHOT drop, run by your migration/CI on a schedule you own:
+dropChunks(metrics, { olderThan: '30 days' });
+// → SELECT drop_chunks('metrics', INTERVAL '30 days');
+```
+
+<Callout type="warn">
+**Two honest bounds.** First, you get the Apache-licensed tier only: hypertables, `time_bucket()`,
+chunk pruning, and one-shot `dropChunks()` retention. Columnar compression, continuous aggregates,
+and `add_retention_policy()` all rely on *background policy jobs*, which cannot run on a compute
+that scales to zero — run `dropChunks()` from a schedule you control instead. Second, a **version
+caveat**: `hypertable()` currently emits the classic `create_hypertable(table, column, …)` call
+form, which **TimescaleDB 2.24+ no longer accepts** (newer versions require the dimension-builder
+form). A fix is planned; on TimescaleDB ≥ 2.24, write the `create_hypertable` statement by hand
+in your migration for now.
+</Callout>
+
+### pgvector (embeddings / semantic search)
+
+The `vector(n)` column type is drizzle's own (already re-exported from `@knext/db/schema`); the
+helpers add the index DDL drizzle-kit can't generate, and re-export the typed distance operators.
+
+```ts
+import {
+  pgTable, serial, text, vector,
+  hnsw, ivfflat, createVectorExtension,
+} from '@knext/db/schema';
+
+export const docs = pgTable('docs', {
+  id: serial('id').primaryKey(),
+  body: text('body').notNull(),
+  embedding: vector('embedding', { dimensions: 1536 }),
+});
+
+// Emit into your migration:
+createVectorExtension();
+// → CREATE EXTENSION IF NOT EXISTS vector;
+hnsw('docs_embedding_idx', docs.embedding, { m: 16, efConstruction: 64 });
+// → CREATE INDEX IF NOT EXISTS "docs_embedding_idx" ON "docs"
+//     USING hnsw ("embedding" vector_cosine_ops) WITH (m = 16, ef_construction = 64);
+```
+
+Query with the distance operators, and **match the operator to the index's ops class**:
+`cosineDistance` (`<=>`) ⇄ `vector_cosine_ops`, `l2Distance` (`<->`) ⇄ `vector_l2_ops`,
+`innerProduct` (`<#>`) ⇄ `vector_ip_ops`.
+
+```ts
+import { getDbRO, cosineDistance } from '@knext/db';
+import { docs } from '@/db/schema';
+
+const nearest = await getDbRO({ docs })
+  .select()
+  .from(docs)
+  .orderBy(cosineDistance(docs.embedding, queryEmbedding))
+  .limit(5);
+```
+
+<Callout type="info">
+**Early-stage + version-gated.** The pgvector helpers are new and gated on the database side:
+self-service `CREATE EXTENSION vector` requires a scale-zero-pg release that ships pgvector as a
+trusted extension in the compute image (≥ v1.4.0). The helpers themselves are pure SQL emitters
+and work against any Postgres with pgvector installed.
+</Callout>
+
+## Related
+
+- [CLI reference → db migrate / db bind](/docs/cli) — the commands behind this page.
+- [Operator & the NextApp CRD → Databases](/docs/operator#databases-specdatabase) — how
+  `DATABASE_URL` / `DATABASE_URL_RO` get into your pods.
+- [scale-zero-pg](/docs/scale-zero-pg) — the scale-to-zero database layer itself.

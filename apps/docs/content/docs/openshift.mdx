@@ -1,0 +1,112 @@
+---
+title: Deploy on RedHat OpenShift (on-premise)
+description: Run knext on on-prem OpenShift via the OpenShift Serverless operator, self-hosted MinIO and Redis, and an internal registry.
+---
+
+knext runs on OpenShift, where Knative is provided by the **OpenShift Serverless** operator rather
+than a raw `serving-core.yaml`. The general control-plane install is on
+[Operator & the NextApp CRD](/docs/operator); the prerequisites and config walkthrough are in
+[Getting started](/docs/getting-started). This page covers only the OpenShift-specific pieces.
+
+<Callout type="warn">
+**Not yet validated on a live OpenShift cluster.** This guide is a documented procedure, not a
+verified run — verify it in your own environment before relying on it in production.
+</Callout>
+
+## 1 · Install Knative via OpenShift Serverless
+
+On OpenShift, install **OpenShift Serverless** from OperatorHub instead of applying upstream
+`serving-core.yaml`. OpenShift Serverless *is* upstream Knative Serving, packaged by Red Hat;
+create a `KnativeServing` CR (in the `knative-serving` namespace) to enable Serving.
+
+<Callout type="warn">
+**Confirm the networking layer.** knext targets **Kourier-class** ingress — the operator bundle
+ships a `config-network` ConfigMap that pins
+`ingress-class: kourier.ingress.networking.knative.dev`.
+OpenShift Serverless supports Kourier; ensure your `KnativeServing` ingress is Kourier (not Istio)
+so this ConfigMap applies, and apply the operator bundle with `kubectl apply --server-side` so it
+merges into Knative Serving's ConfigMap.
+</Callout>
+
+<Callout type="info">
+**Check version compatibility.** Confirm your OpenShift Serverless (Knative) version is compatible
+with the Next.js adapter requirements before rolling out. See
+[Compatibility matrix](/docs/compat-matrix).
+</Callout>
+
+## 2 · cert-manager and a StorageClass
+
+- **cert-manager** is required (the operator bundle includes its webhook `Issuer`/`Certificate`).
+  Install it via the cert-manager Operator for Red Hat OpenShift, or upstream cert-manager.
+- A **StorageClass** from your on-prem CSI (for example OpenShift Data Foundation / Ceph) is needed
+  for the bytecode-cache PVC.
+
+Then install the operator bundle per [Operator & the NextApp CRD](/docs/operator).
+
+## 3 · SecurityContextConstraints
+
+The operator manager and the deployed app both run **non-root** with no privilege escalation, so
+OpenShift's default **restricted SCC** is compatible:
+
+- The operator manager sets `runAsNonRoot: true` and `allowPrivilegeEscalation: false`.
+- The operator sets `automountServiceAccountToken: false` on the app's ServiceAccount.
+
+No custom SCC or `anyuid` grant is required for the standard restricted security context.
+
+## 4 · Storage — self-hosted MinIO
+
+There is no managed object store on-prem, so run **MinIO** in-cluster (S3-API) and use
+`provider: 'minio'`. knext storage accepts only `gcs`, `s3`, and `minio`
+(see [Multi-cloud deploy](/docs/multi-cloud)); MinIO is the on-prem choice.
+
+## 5 · Cache — self-hosted Redis
+
+ISR / data cache uses Redis (`cache.provider: 'redis'`). Run a Redis Service in-cluster and point
+`cache.url` at it. `cache.url` is required when the provider is `redis`.
+
+## 6 · Registry — internal registry or Quay
+
+Push the app image to the OpenShift internal registry or to Quay, e.g.
+`image-registry.openshift-image-registry.svc:5000/<namespace>/storefront` or
+`quay.example.com/<org>/storefront`. The operator **rejects any image that is not digest-pinned**
+(`@sha256:…`); `kn-next deploy` resolves the digest automatically.
+
+## 7 · Complete `kn-next.config.ts`
+
+```ts title="kn-next.config.ts"
+import type { KnativeNextConfig } from '@knext/core';
+
+const config: KnativeNextConfig = {
+  name: 'storefront',
+  registry: 'image-registry.openshift-image-registry.svc:5000/apps/storefront',
+
+  storage: {
+    provider: 'minio', // self-hosted MinIO (S3-API) — no managed object store on-prem
+    bucket: 'storefront-assets',
+    endpoint: 'http://minio.minio.svc.cluster.local:9000',
+    publicUrl: 'https://assets.internal.example.com/storefront-assets',
+    accessKey: process.env.MINIO_ACCESS_KEY,
+    secretKey: process.env.MINIO_SECRET_KEY,
+  },
+
+  cache: {
+    provider: 'redis',
+    url: process.env.REDIS_URL || 'redis://storefront-redis.apps.svc.cluster.local:6379',
+    keyPrefix: 'storefront',
+  },
+
+  scaling: { minScale: 0, maxScale: 20 }, // minScale 0 = scale to zero
+};
+
+export default config;
+```
+
+## 8 · Deploy
+
+```sh
+kn-next deploy --registry image-registry.openshift-image-registry.svc:5000/apps/storefront
+```
+
+`kn-next deploy` builds the standalone image, pushes it (resolving the digest), and applies the
+`NextApp` CR; the operator reconciles it into a scale-to-zero Knative Service. Verify the resolved
+URL with `kubectl get ksvc storefront -o jsonpath='{.status.url}'`.

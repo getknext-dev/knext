@@ -1,0 +1,64 @@
+---
+title: Compatibility matrix
+description: Honest, evidence-gated status of what the knext adapter supports.
+---
+
+> **Honest, evidence-gated status of what the knext adapter supports.** Every row is grounded in
+> real, on-disk evidence and a mechanical guard test fails CI if a ✅ ("supported") row cannot be
+> backed up. When in doubt it is marked ⚠️, not ✅.
+
+<Callout type="info">
+**The official suite is green on Node.** knext passes the official `vercel/next.js` deploy-mode
+e2e suite on the Node runtime — **778 tests, zero failures**, against Next.js v16.2.0, re-verified
+nightly. The scope (including documented exclusions) is on
+[Verified compatibility](/docs/compat-suite). The weekly Bun runtime lane most recently observed 775/778 and is tracked
+separately below — the Node claim does not extend to Bun.
+</Callout>
+
+## Legend
+
+| Marker | Meaning |
+|---|---|
+| ✅ | **Supported** — backed by a red-on-fail check (the per-PR `compat-smoke` gate) or test-covered source on disk. |
+| ⚠️ | **Partial** — implemented but **not** guarded by a hard correctness check, or with a known caveat. Do not rely on it as "verified." |
+| ❌ | **Unsupported / unverified** — no working implementation or no evidence; treat as a gap. |
+| ⛔ | **Upstream-gated** — architecturally out of reach today (global edge, not yet adapter-standardizable upstream). |
+
+The `compat-smoke` job runs per-PR on a **Node + Bun** matrix. It is a knext **smoke** gate, not the
+official suite.
+
+## Matrix
+
+| Feature | Status | Notes |
+|---|---|---|
+| App Router (RSC server render, `GET /` → 200 HTML) | ✅ | Hard-asserts 200 + `text/html` + non-trivial body against the standalone `server.js`. |
+| RSC flight payload (`RSC: 1` → `text/x-component`) | ✅ | Hard-asserts the React flight content-type. |
+| Route handlers (`app/api/*/route.ts`) | ✅ | Hard-asserts `GET /api/health` → 200 + valid JSON. |
+| Dynamic routes (`force-dynamic`) | ✅ | Hard-asserts 200 on a `force-dynamic` route. |
+| Static / prerendered routes (`force-static`) | ✅ | Hard-asserts 200 on a `force-static` route. |
+| Middleware (Node runtime, header injection) | ✅ | Hard-asserts a middleware-injected header. Node-runtime middleware only. |
+| Graceful shutdown (SIGTERM drain) | ✅ | Unit-tested drain-on-SIGTERM in the standalone runtime. Not yet exercised end-to-end by `compat-smoke`. |
+| ISR / Data Cache (Redis-backed cache handler) | ⚠️ | Redis cache handler, **not** GCS. `compat-smoke` runs with `REDIS_URL=""` (in-memory fallback) and has no revalidate/ISR-freshness assertion, so ISR correctness is unverified by the gate. |
+| `next/image` optimization (sharp, avif/webp) | ⚠️ | Implementation landed, but the `compat-smoke` image check is **skip-on-fail**, not a hard gate — so the matrix does not mark this ✅. |
+| Server Actions (`'use server'` mutations) | ⚠️ | Server Actions exist in the app, but no `compat-smoke` or unit assertion exercises a round-trip. Configured, not verified. |
+| Streaming / Suspense (incremental flush) | ❌ | No streaming/Suspense flush assertion and no other evidence. Planned, not built. |
+| Edge Middleware (edge runtime) | ⛔ | Upstream-gated: edge-runtime middleware is not yet adapter-standardizable on Knative; knext middleware runs on the Node runtime only. |
+| PPR / Cache Components | ⛔ | Upstream-gated: Partial Prerendering / Cache Components are not yet adapter-standardizable. |
+| Official Next.js compatibility suite (Node runtime) | ✅ | **Green: 778 passed / 0 failed** (16 shards, Next.js v16.2.0, deploy mode, Node runtime), re-verified nightly. Covers Next's deploy-eligible e2e set minus 4 documented architectural exclusions (the ⛔ rows) and a small evidence-backed flaky-quarantine ledger — see [Verified compatibility](/docs/compat-suite). A red nightly withdraws this row. |
+| Official suite — Bun runtime lane | ❌ | **Not yet green — no fully-green Bun run has been observed**, so under the evidence contract this row stays ❌ and the Node ✅ does not extend to Bun. Most recently observed weekly result: **775 of 778 passing**; the 3 remaining failures are bugs we've isolated in the Bun runtime, with minimal reproductions, that persist in current Bun releases. See [Bun runtime](/docs/bun-runtime). |
+
+## Maintenance & honesty
+
+- **Every ✅ is mechanically gated.** In the knext source repository, a guard test parses this
+  table's canonical twin and fails CI if a ✅ row's evidence does not resolve to real on-disk
+  files, a hard `compat-smoke` check, or a recorded green run. It forbids citing the
+  **skip-on-fail** `next/image` check as proof of a ✅.
+- **The official-suite claim is revocable, not permanent.** The ✅ above is backed by a recorded
+  green run and re-verified nightly; a shard with any failed test fails the job, a red scheduled
+  run raises an alarm, and the policy is to flip the row back and withdraw the claim. The Bun lane
+  stays ❌ until a fully-green Bun run is observed — the same evidence contract as the Node row.
+
+<Callout type="info">
+This page mirrors the CI-guarded compatibility matrix in the knext source repository, which is the
+canonical source. If the two ever diverge, the source-repo file wins.
+</Callout>

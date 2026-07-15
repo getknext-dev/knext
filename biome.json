@@ -17,6 +17,7 @@
       "!**/.turbo",
       "!**/build",
       "!**/.cursor",
+      "!**/_design-reference",
       "!**/bun.lockb"
     ]
   },

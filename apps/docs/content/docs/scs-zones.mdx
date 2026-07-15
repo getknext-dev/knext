@@ -1,0 +1,77 @@
+---
+title: SCS / Zones
+description: Self-Contained Systems and Multi-Zones on knext — the architecture, the hard rules, and what's recipe-level today.
+---
+
+knext's target architecture is a **Self-Contained Systems (SCS) + Next.js Multi-Zones** model:
+a product is split into autonomous vertical slices ("zones"), each owning its UI, logic, and data,
+each deployed as its own scale-to-zero Knative Service. The [Overview](/docs) covers the *why*; this
+page is the reference for the *rules*.
+
+<Callout type="warn">
+**Honest scope.** Much of the SCS/PWA capability described here is the **end goal**, not shipping
+framework code today. Where a capability is "recipe-level" (an app-level template, not built into
+knext core), it is marked as such. Never treat an unbuilt generator as shipping.
+</Callout>
+
+## What a zone is
+
+A **zone** is one Self-Contained System: an autonomous Next.js application that owns its full
+vertical stack and is deployed as its own Knative Service.
+
+| Layer | A zone owns… |
+|---|---|
+| **UI** | Its own Next.js app + routes. Zones are stitched into one product in the browser via **Next.js Multi-Zones** under a single domain. |
+| **Logic** | Its own business logic. No shared backend runtime; no synchronous request-time calls into another zone's internals. |
+| **Data** | Its **own** PostgreSQL database (provisioned via CloudNativePG). No shared schema, no shared database. |
+| **Lifecycle** | Its own build, deploy, rollback, and **scale-to-zero** — owned by one team, released on its own cadence. |
+
+Because each zone is a normal Next.js app, it is deployed by knext exactly like any other app — one
+`NextApp` custom resource → one Knative Service that scales independently to zero.
+
+## Data sovereignty (the hard rule)
+
+This is the constraint that makes the systems *self-contained*:
+
+- A zone **owns its data store**; there is **no shared database**.
+- A zone **must not read another zone's database** — never connect to another zone's primary
+  (`-rw`) or replica (`-ro`) service.
+- Cross-zone data flows **only** via **async Kafka domain events** (each zone keeps its own
+  projection/copy) and via the **browser** (links / UI composition). Transient cross-tab UI state
+  may use `BroadcastChannel`.
+- A zone reaches **its own** DB via `DATABASE_URL` from a Kubernetes Secret — never a hardcoded
+  host.
+
+## How zones integrate
+
+Integration is deliberately loose — never a distributed monolith:
+
+- **In the browser (synchronous, UI-level).** Next.js Multi-Zones composes the independent zone apps
+  under one domain; navigation between zones is just links. The user sees one product; each zone
+  ships and scales on its own.
+- **Via domain events (asynchronous, data-level).** When one zone's state changes in a way another
+  zone cares about, it publishes a **Kafka domain event**. Subscribers keep their own copy. No zone
+  ever reaches into another's database to read "live" state.
+
+## What's in knext core today vs recipe-level
+
+| Capability | Status |
+|---|---|
+| Knative / scale-to-zero, the official adapter, per-zone deploy | **In core.** |
+| `assetPrefix` wiring, serving the App Shell, generating the precache manifest | **In core.** |
+| Service Worker / Server-Worker-Interface / `BroadcastChannel` / Module-Federation runtime | **Recipe-level** — app template, not core yet. |
+| `generate zone` scaffolder, micro-frontend (asset + runtime) isolation, PWA flag | **End goal** — design + app-level today; promoted into the framework after the adapter-correctness work lands. |
+
+## Caching & security
+
+Service-worker / caching config must **never cache auth endpoints or any mutation route**
+(network-only). Caching them is a correctness *and* security bug. This mirrors knext's platform-wide
+rule that there are **no unauthenticated mutating endpoints**.
+
+<Callout type="info">
+**Sequencing.** Zone generation, micro-frontend isolation, and the PWA stitching layer stay
+design + app-level template for now, then get promoted into the framework as the core correctness
+work matures. The adapter itself is now
+[validated against the official Next.js compatibility suite](/docs/compat-suite); the
+comprehensive SCS framework is the end-state built on top of that verified foundation.
+</Callout>
