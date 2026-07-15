@@ -244,3 +244,54 @@ func firstEnvTestBinaryDir() string {
 	}
 	return ""
 }
+
+// --- HA leader-election unit coverage (issue #307) --------------------------
+//
+// buildManagerOptions is the single place manager HA is configured. These tests
+// pin the behaviour that keeps exactly ONE active reconciler across 2+ replicas
+// (single-writer, ADR-0001): election follows the flag, the lease ID is stable,
+// and a gracefully-stopped leader releases the lease immediately.
+
+// TestBuildManagerOptionsLeaderElectionFollowsFlag: LeaderElection must mirror
+// the --leader-elect flag exactly — on when requested (2-replica prod deploy),
+// off otherwise (`make run` must not attempt to acquire a lease).
+func TestBuildManagerOptionsLeaderElectionFollowsFlag(t *testing.T) {
+	on := buildManagerOptions(true, metricsserver.Options{}, nil, ":8081")
+	if !on.LeaderElection {
+		t.Errorf("buildManagerOptions(true): LeaderElection = false, want true (a 2-replica deploy without it split-brains)")
+	}
+	off := buildManagerOptions(false, metricsserver.Options{}, nil, ":8081")
+	if off.LeaderElection {
+		t.Errorf("buildManagerOptions(false): LeaderElection = true, want false (must not force election on for `make run`)")
+	}
+}
+
+// TestBuildManagerOptionsHasStableLeaderElectionID: the lease ID must be set and
+// non-empty. controller-runtime rejects LeaderElection with an empty ID, and a
+// churning ID would let two revisions each believe they hold leadership.
+func TestBuildManagerOptionsHasStableLeaderElectionID(t *testing.T) {
+	opts := buildManagerOptions(true, metricsserver.Options{}, nil, ":8081")
+	if opts.LeaderElectionID == "" {
+		t.Errorf("LeaderElectionID is empty — controller-runtime requires a stable lease name")
+	}
+}
+
+// TestBuildManagerOptionsReleasesLeaseOnCancel: a gracefully-stopped leader must
+// release the lease on shutdown so the standby takes over immediately (no
+// reconciliation gap for a full LeaseDuration). Safe here because main() returns
+// — and the process exits — the instant mgr.Start() unblocks; no post-stop work.
+func TestBuildManagerOptionsReleasesLeaseOnCancel(t *testing.T) {
+	opts := buildManagerOptions(true, metricsserver.Options{}, nil, ":8081")
+	if !opts.LeaderElectionReleaseOnCancel {
+		t.Errorf("LeaderElectionReleaseOnCancel = false; a drained leader would strand reconciliation for a full LeaseDuration")
+	}
+}
+
+// TestBuildManagerOptionsWiresProbeAddr: the health-probe bind address must be
+// threaded through so the liveness/readiness probes (#252, #307) have a listener.
+func TestBuildManagerOptionsWiresProbeAddr(t *testing.T) {
+	opts := buildManagerOptions(true, metricsserver.Options{}, nil, ":8081")
+	if opts.HealthProbeBindAddress != ":8081" {
+		t.Errorf("HealthProbeBindAddress = %q, want :8081", opts.HealthProbeBindAddress)
+	}
+}
