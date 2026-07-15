@@ -138,7 +138,7 @@ URLs. `spec.env` values are stored verbatim in the CR and visible to anyone who 
 | Field | Notes |
 |---|---|
 | `url` | The resolved Knative Service URL. |
-| `conditions` | `Ready`, `Degraded`, `Reconciling` — see below. |
+| `conditions` | `Ready`, `Degraded`, `Reconciling`, `DatabaseReady` — see below. |
 | `currentTraffic` | Mirror of the ksvc traffic split. |
 
 The operator reports **honest readiness**: `Ready` mirrors the underlying Knative Service's own
@@ -146,6 +146,12 @@ The operator reports **honest readiness**: `Ready` mirrors the underlying Knativ
 service never comes up shows `Ready: False` with the real reason (e.g. the image-pull or crash
 detail). `kn-next status` renders these conditions verbatim and exits non-zero when `Ready` is
 `False` — see the [CLI reference](/docs/cli#kn-next-status).
+
+`DatabaseReady` reports **binding health** for a bring-your-own database. When `spec.database`
+binds a Secret, a successfully bound app shows `DatabaseReady: True` with reason `Bound` (message:
+"Bound existing Secret … as DATABASE_URL"). It is a binding-health signal, not a provisioning one —
+knext binds an existing Secret, it does not provision or manage the database. When `spec.database`
+is empty the condition is not set.
 
 Two otherwise-silent failure modes get first-class diagnoses:
 
