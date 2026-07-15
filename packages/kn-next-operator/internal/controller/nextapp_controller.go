@@ -175,10 +175,6 @@ type NextAppReconciler struct {
 	// exact scoped delete and the cross-app safety guard. May be nil (skips
 	// external cleanup) for unit tests of unrelated paths.
 	Cleaner ExternalCleaner
-	// DatabaseNamespace is where delegated AppDatabases + their app-db-<app>
-	// Secrets live (ADR-0006). Empty => DefaultDatabaseNamespace ("scale-zero-pg").
-	// Injectable so tests can point at a fixture namespace.
-	DatabaseNamespace string
 }
 
 // ingressProgrammingStalled reports whether the child Knative Service's route
@@ -314,83 +310,24 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 		return ctrl.Result{}, err
 	}
 
-	// 0. Delegated database (ADR-0006, #119). When spec.database.enabled, the
-	// operator provisions an AppDatabase in the scale-zero-pg namespace, HARD-GATES
-	// the app on it reaching Ready, mirrors the DSN Secret into this namespace, and
-	// injects DATABASE_URL(+_RO) into the env below. dbSecretHash carries a
-	// checksum of the DSN so a rotation rolls a new Revision (§4.3). The
-	// DatabaseReady/Ready composition for every db state lives in
-	// computeStatusVerdict (#254); this block only does the imperative work and
-	// records the outcome in db.
-	var dbSecretHash string
+	// 0. Database binding (ADR-0019). knext is engine-agnostic and provisions NO
+	// database (the managed scale-to-zero-Postgres mode was removed — ADR-0025).
+	// The only database surface is BYO: spec.database.secretRef binds an EXISTING
+	// same-namespace Secret onto DATABASE_URL(+_RO). The DatabaseReady composition
+	// lives in computeStatusVerdict (#254).
 	db := databaseCheckState{mode: databaseModeNone}
-	if databaseEnabled(&nextApp) {
-		db.mode = databaseModeManaged
-		// Managed mode (again): a previously-orphaned AppDatabase (managed→BYO/
-		// none→managed round-trip) is rebound below — deriveAppName is
-		// deterministic, so reconcileDatabase's CreateOrUpdate reuses the SAME
-		// AppDatabase. It is no longer orphaned; drop the flag before any
-		// hard-gate early return.
-		apimeta.RemoveStatusCondition(&nextApp.Status.Conditions, ConditionDatabaseOrphaned)
-		wiring, dbResult, dbErr := r.reconcileDatabase(ctx, &nextApp)
-		db.phase = wiring.phase
-		if dbErr != nil {
-			logger.Error(dbErr, "Failed to reconcile delegated database")
-			db.err = dbErr
-			_ = r.applyStatusVerdict(ctx, &nextApp, observedStatus,
-				computeStatusVerdict(&nextApp, nil, db, revisionCheck{}, time.Now()))
-			return ctrl.Result{}, dbErr
-		}
-		if !wiring.ready {
-			// HARD-GATE (§4.1): the verdict surfaces DatabaseReady=False +
-			// Ready=False and requeues; the app never boots into a crash-loop
-			// on a missing DSN.
-			db.requeueAfter = dbResult.RequeueAfter
-			verdict := computeStatusVerdict(&nextApp, nil, db, revisionCheck{}, time.Now())
-			if err := r.applyStatusVerdict(ctx, &nextApp, observedStatus, verdict); err != nil {
-				return ctrl.Result{}, err
-			}
-			return ctrl.Result{RequeueAfter: verdict.requeueAfter}, nil
-		}
-		// Ready: inject DATABASE_URL(+_RO) into the in-memory spec so the existing
-		// envMap → SecretKeyRef wiring below picks it up, and record the DSN
-		// checksum for the pod-template roll annotation. A stored (ratcheted,
-		// ADR-0019) CR that still carries an author envMap DATABASE_URL(_RO)
-		// entry has it overridden by the managed mirror — LOUDLY, via a
-		// Warning naming the ignored entry, never silently.
-		db.ready = true
-		r.warnDatabaseEnvOverride(&nextApp, DefaultDatabaseURLKey)
-		if wiring.injectRO {
-			r.warnDatabaseEnvOverride(&nextApp, DefaultDatabaseURLROKey)
-		}
-		injectDatabaseEnv(&nextApp, wiring)
-		dbSecretHash = wiring.dsnHash
-	} else if databaseBound(&nextApp) {
+	if databaseBound(&nextApp) {
 		// 0b. BYO binding (ADR-0019): spec.database.secretRef maps an EXISTING
-		// same-namespace Secret onto DATABASE_URL(+_RO) through the same
-		// in-memory envMap injection the managed mode uses. No provisioning,
-		// no hard-gate (envMap semantics: a missing Secret surfaces on the pod
-		// as CreateContainerConfigError). Mode exclusivity vs enabled is
-		// enforced at admission.
-		//
-		// A managed→BYO switch orphans the previously-provisioned AppDatabase:
-		// it is RETAINED (a spec edit never deletes data — ADR-0019 addendum)
-		// and flagged via DatabaseOrphaned + a Warning until resolved.
+		// same-namespace Secret onto DATABASE_URL(+_RO) through the in-memory
+		// envMap injection. No provisioning, no hard-gate (envMap semantics: a
+		// missing Secret surfaces on the pod as CreateContainerConfigError).
 		db.mode = databaseModeBound
-		r.reconcileOrphanedDatabase(ctx, &nextApp)
 		r.injectBoundDatabaseEnv(&nextApp)
 		nextApp.Status.DatabaseSecretName = nextApp.Spec.Database.SecretRef.Name
 	} else {
 		// 0c. spec.database removed/emptied: the status must stop claiming a
-		// database. Clear the bound/mirrored Secret name; the verdict drops the
-		// DatabaseReady condition. Status.DatabaseAppName is RETAINED while its
-		// AppDatabase still exists (see its godoc): the delete-time db-cleanup
-		// finalizer needs it to reclaim an AppDatabase orphaned by a
-		// managed→none switch. The orphan itself is retained + flagged
-		// (DatabaseOrphaned) — a spec edit never deletes data (ADR-0019
-		// addendum); reconcileOrphanedDatabase clears the appName once the
-		// AppDatabase is confirmed gone.
-		r.reconcileOrphanedDatabase(ctx, &nextApp)
+		// database. Clear the bound Secret name; the verdict drops the
+		// DatabaseReady condition.
 		nextApp.Status.DatabaseSecretName = ""
 	}
 
@@ -451,7 +388,7 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 		},
 	}
 	_, err = controllerutil.CreateOrUpdate(ctx, r.Client, ksvc, func() error {
-		return r.buildDesiredKsvc(&nextApp, ksvc, dbSecretHash)
+		return r.buildDesiredKsvc(&nextApp, ksvc)
 	})
 	if err != nil {
 		logger.Error(err, "Failed to reconcile Knative Service")
@@ -582,11 +519,9 @@ func (r *NextAppReconciler) reconcileFinalizers(ctx context.Context, nextApp *ap
 		// "object has been modified" conflict spam (#98).
 		patch := client.MergeFrom(nextApp.DeepCopy())
 		changed := controllerutil.AddFinalizer(nextApp, ExternalCleanupFinalizer)
-		// db-cleanup finalizer only for apps that delegate a database (ADR-0006
-		// §3c): cross-ns AppDatabase teardown cannot ride an ownerRef.
-		if databaseEnabled(nextApp) {
-			changed = controllerutil.AddFinalizer(nextApp, DatabaseCleanupFinalizer) || changed
-		}
+		// NOTE: the db-cleanup finalizer is NO LONGER added — managed provisioning
+		// was removed (ADR-0025). The delete branch below still DRAINS it off any
+		// legacy CR that carries it, for one release.
 		if changed {
 			if err := r.Patch(ctx, nextApp, patch); err != nil {
 				return false, err
@@ -598,6 +533,10 @@ func (r *NextAppReconciler) reconcileFinalizers(ctx context.Context, nextApp *ap
 	// finalizer, then remove it so deletion can complete. Neither cleanup
 	// returns a hard error for an unreachable dependency (they log + Warning),
 	// so we never wedge the CR in Terminating (ADR-0006 §5).
+	// DRAIN the legacy db-cleanup finalizer (ADR-0025): managed provisioning is
+	// gone, but a NextApp ever provisioned under the old operator still carries it.
+	// cleanupDatabase is now a no-op (no re-provision, no cross-ns reach); we only
+	// strip the finalizer so the CR does not wedge in Terminating forever.
 	if controllerutil.ContainsFinalizer(nextApp, DatabaseCleanupFinalizer) {
 		if err := r.cleanupDatabase(ctx, nextApp); err != nil {
 			return true, err
@@ -693,7 +632,7 @@ func (r *NextAppReconciler) applyStatusVerdict(
 // companion move) — behavior-preserving; the rendered-output envtests
 // (reconcile_output_test.go, spec_env_test.go) are the characterization net.
 // Not fully pure: a colliding spec.env name emits a Warning event (#186).
-func (r *NextAppReconciler) buildDesiredKsvc(nextApp *appsv1alpha1.NextApp, ksvc *servingv1.Service, dbSecretHash string) error {
+func (r *NextAppReconciler) buildDesiredKsvc(nextApp *appsv1alpha1.NextApp, ksvc *servingv1.Service) error {
 	// Determine health check path
 	healthPath := "/api/health"
 	if nextApp.Spec.HealthCheckPath != "" {
@@ -709,13 +648,6 @@ func (r *NextAppReconciler) buildDesiredKsvc(nextApp *appsv1alpha1.NextApp, ksvc
 	annotations := map[string]string{
 		"autoscaling.knative.dev/min-scale": "0",
 		"autoscaling.knative.dev/max-scale": "10",
-	}
-	// Rotation roll (ADR-0006 §4.3): stamp a checksum of the delegated
-	// DATABASE_URL so a credential rotation in the source Secret produces a
-	// new pod-template hash → a new Knative Revision → pods re-read the DSN
-	// (secretKeyRef is resolved at pod START only).
-	if dbSecretHash != "" {
-		annotations[databaseSecretHashAnnotation] = dbSecretHash
 	}
 	if nextApp.Spec.Scaling != nil {
 		annotations["autoscaling.knative.dev/min-scale"] = fmt.Sprintf("%d", nextApp.Spec.Scaling.MinScale)

@@ -154,6 +154,14 @@ override for grandfathered ones.
 
 ## Addendum (2026-07-06) — orphaned AppDatabase on a managed→BYO/none switch
 
+> **Superseded by the DB-scope trim ([ADR-0025](0025-remove-managed-database-mode.md),
+> 2026-07-15).** Managed provisioning was removed entirely, so there is no longer
+> a managed `AppDatabase` to orphan on a mode switch — this addendum (the
+> `DatabaseOrphaned` condition, the retained `status.databaseAppName`, the
+> switch-time reclaim) **no longer describes live behaviour**. The BYO binding in
+> the body of this ADR is unaffected and remains the operative contract. Retained
+> for history; do not read this addendum as a live operator contract.
+
 This resolves the follow-up scope named above: what the operator does **at
 switch time** with the `AppDatabase` a managed-mode app had provisioned.
 

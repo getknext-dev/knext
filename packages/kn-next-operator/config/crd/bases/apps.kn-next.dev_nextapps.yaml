@@ -87,65 +87,17 @@ spec:
                 type: object
               database:
                 description: |-
-                  Database declares an INLINE scale-zero-pg database that the knext operator
-                  auto-provisions (via an AppDatabase CR in the scale-zero-pg namespace) and
-                  wires into the app's env as DATABASE_URL (+ DATABASE_URL_RO when
-                  readReplicas). This is the unified-config flagship (ADR-0006, #119): the
-                  author declares an app AND its database in one NextApp, one namespace, and
-                  the two scale-to-zero and wake together.
-
-                  Escape hatch (BYO database): leave this nil / enabled=false and wire an
-                  external/existing DB by hand via spec.secrets.envMap — that path is fully
-                  preserved and additive to this one.
+                  Database binds an EXISTING database to the app (ADR-0019). knext is
+                  engine-agnostic and provisions NO database (the managed scale-to-zero-pg
+                  mode was removed — ADR-0025): set spec.database.secretRef to bind an
+                  existing same-namespace Secret's DSN as DATABASE_URL (+ roSecretRef ->
+                  DATABASE_URL_RO). Leave nil to wire a DB by hand via spec.secrets.envMap.
                 properties:
-                  enabled:
-                    description: |-
-                      Enabled turns on inline provisioning. false/nil => no DB is provisioned
-                      (bring-your-own via secretRef below, or the raw spec.secrets.envMap
-                      escape hatch).
-                    type: boolean
-                  keepOnDelete:
-                    description: |-
-                      KeepOnDelete maps to AppDatabase.spec.keepTimelineOnDelete. Default false
-                      (deleting the NextApp reclaims the Neon timeline). true retains it for PITR.
-                    type: boolean
-                  quotas:
-                    description: |-
-                      Quotas maps 1:1 to AppDatabase.spec.quotas (per-app noisy-neighbour bound).
-                      Empty fields inherit AppDatabase defaults (1000m/250m CPU, 1Gi/256Mi mem,
-                      100 conns).
-                    properties:
-                      cpu:
-                        description: CPU limit (e.g. "1000m").
-                        type: string
-                      cpuRequest:
-                        description: CPURequest is the scheduling floor (e.g. "250m").
-                        type: string
-                      maxConnections:
-                        description: MaxConnections is the app compute's Postgres
-                          max_connections.
-                        minimum: 1
-                        type: integer
-                      mem:
-                        description: Mem limit (OOM bound, e.g. "1Gi").
-                        type: string
-                      memRequest:
-                        description: MemRequest is the scheduling floor (e.g. "256Mi").
-                        type: string
-                    type: object
-                  readReplicas:
-                    description: |-
-                      ReadReplicas requests the read-only pool. Maps to
-                      AppDatabase.spec.roPool.enabled; when true the operator ALSO injects
-                      DATABASE_URL_RO (tolerating its absence until scale-zero-pg emits the key).
-                      Default false.
-                    type: boolean
                   roSecretRef:
                     description: |-
                       ROSecretRef optionally binds a read-only DSN as DATABASE_URL_RO (BYO
                       mode). key defaults to "DATABASE_URL_RO", so a single Secret carrying
-                      both keys (the scale-zero-pg layout) binds with roSecretRef: {name: <same>}.
-                      Requires secretRef.
+                      both keys binds with roSecretRef: {name: <same>}. Requires secretRef.
                     properties:
                       key:
                         description: |-
@@ -166,7 +118,6 @@ spec:
                     description: |-
                       SecretRef binds an EXISTING Secret in the app's namespace as the app's
                       DATABASE_URL (BYO mode, ADR-0019). key defaults to "DATABASE_URL".
-                      Mutually exclusive with enabled: true.
                     properties:
                       key:
                         description: |-
@@ -183,26 +134,10 @@ spec:
                     required:
                     - name
                     type: object
-                  tier:
-                    description: |-
-                      Tier maps 1:1 to AppDatabase.spec.tier. cold = scale-to-zero (default);
-                      warm = one parked replica for ~0.4s wake.
-                    enum:
-                    - cold
-                    - warm
-                    type: string
                 type: object
                 x-kubernetes-validations:
-                - message: spec.database.enabled (managed) and spec.database.secretRef
-                    (BYO binding) are mutually exclusive — pick one mode
-                  rule: '!(has(self.enabled) && self.enabled && has(self.secretRef))'
                 - message: spec.database.roSecretRef requires spec.database.secretRef
                   rule: '!has(self.roSecretRef) || has(self.secretRef)'
-                - message: tier/readReplicas/quotas/keepOnDelete are managed-mode
-                    only and cannot be combined with secretRef
-                  rule: '!(has(self.secretRef) && (has(self.tier) || has(self.quotas)
-                    || (has(self.readReplicas) && self.readReplicas) || (has(self.keepOnDelete)
-                    && self.keepOnDelete)))'
               env:
                 additionalProperties:
                   type: string
@@ -522,23 +457,12 @@ spec:
                       type: string
                   type: object
                 type: array
-              databaseAppName:
-                description: |-
-                  DatabaseAppName is the DERIVED, plane-globally-unique appName the operator
-                  created the AppDatabase under (ADR-0006 §4.4). Surfaced on status so the
-                  derivation is auditable and the security seam (a NextApp can only bind its
-                  OWN derived DB) is observable. Managed mode only; deliberately RETAINED
-                  even after spec.database is removed or switched to the BYO binding, so the
-                  delete-time db-cleanup finalizer can still reclaim the (now orphaned)
-                  AppDatabase (ADR-0019 — cleanup-on-mode-switch is follow-up scope).
-                type: string
               databaseSecretName:
                 description: |-
                   DatabaseSecretName is the name of the same-namespace Secret currently
-                  feeding DATABASE_URL(+_RO), per spec.database mode: in MANAGED mode
-                  (enabled) the operator-written mirror Secret (ownerRef'd to this NextApp);
-                  in BINDING mode (secretRef, ADR-0019) the user-supplied Secret named by
-                  spec.database.secretRef. Cleared when spec.database is removed.
+                  feeding DATABASE_URL(+_RO): the user-supplied Secret named by
+                  spec.database.secretRef (BINDING mode, ADR-0019). Cleared when
+                  spec.database is removed.
                 type: string
               url:
                 type: string

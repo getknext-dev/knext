@@ -282,15 +282,6 @@ func TestValidateNextAppSpecDatabaseBinding(t *testing.T) {
 			errHas:  "roSecretRef.name",
 		},
 		{
-			name: "enabled + secretRef rejected (one mode per app)",
-			spec: &appsv1alpha1.NextAppSpec{
-				Image:    digestImage,
-				Database: &appsv1alpha1.DatabaseSpec{Enabled: true, SecretRef: ref("shop-db")},
-			},
-			wantErr: true,
-			errHas:  "enabled",
-		},
-		{
 			name: "roSecretRef without secretRef rejected",
 			spec: &appsv1alpha1.NextAppSpec{
 				Image:    digestImage,
@@ -298,14 +289,6 @@ func TestValidateNextAppSpecDatabaseBinding(t *testing.T) {
 			},
 			wantErr: true,
 			errHas:  "roSecretRef",
-		},
-		{
-			name: "provisioning knobs with secretRef rejected",
-			spec: &appsv1alpha1.NextAppSpec{
-				Image:    digestImage,
-				Database: &appsv1alpha1.DatabaseSpec{SecretRef: ref("shop-db"), ReadReplicas: true},
-			},
-			wantErr: true,
 		},
 		{
 			// Collisions are deliberately NOT part of ValidateNextAppSpec: the
@@ -317,15 +300,6 @@ func TestValidateNextAppSpecDatabaseBinding(t *testing.T) {
 			spec: &appsv1alpha1.NextAppSpec{
 				Image:    digestImage,
 				Database: &appsv1alpha1.DatabaseSpec{SecretRef: ref("shop-db")},
-				Secrets:  envMapURL,
-			},
-			wantErr: false,
-		},
-		{
-			name: "managed mode colliding with envMap DATABASE_URL is NOT a shared-validation error (webhook-only, ratcheted)",
-			spec: &appsv1alpha1.NextAppSpec{
-				Image:    digestImage,
-				Database: &appsv1alpha1.DatabaseSpec{Enabled: true},
 				Secrets:  envMapURL,
 			},
 			wantErr: false,
@@ -391,36 +365,12 @@ func TestDatabaseEnvMapCollisions(t *testing.T) {
 			want: []string{"DATABASE_URL"},
 		},
 		{
-			name: "managed + envMap DATABASE_URL",
-			spec: &appsv1alpha1.NextAppSpec{
-				Database: &appsv1alpha1.DatabaseSpec{Enabled: true},
-				Secrets:  envMap("DATABASE_URL"),
-			},
-			want: []string{"DATABASE_URL"},
-		},
-		{
 			name: "BYO+RO + both envMap entries",
 			spec: &appsv1alpha1.NextAppSpec{
 				Database: &appsv1alpha1.DatabaseSpec{SecretRef: ref("shop-db"), ROSecretRef: ref("shop-db")},
 				Secrets:  envMap("DATABASE_URL", "DATABASE_URL_RO"),
 			},
 			want: []string{"DATABASE_URL", "DATABASE_URL_RO"},
-		},
-		{
-			name: "managed without readReplicas does not claim RO",
-			spec: &appsv1alpha1.NextAppSpec{
-				Database: &appsv1alpha1.DatabaseSpec{Enabled: true},
-				Secrets:  envMap("DATABASE_URL_RO"),
-			},
-			want: nil,
-		},
-		{
-			name: "managed with readReplicas claims RO",
-			spec: &appsv1alpha1.NextAppSpec{
-				Database: &appsv1alpha1.DatabaseSpec{Enabled: true, ReadReplicas: true},
-				Secrets:  envMap("DATABASE_URL_RO"),
-			},
-			want: []string{"DATABASE_URL_RO"},
 		},
 		{
 			name: "other env vars never collide",

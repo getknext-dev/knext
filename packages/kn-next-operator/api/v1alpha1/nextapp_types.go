@@ -66,16 +66,11 @@ type NextAppSpec struct {
 	// +optional
 	Secrets *SecretsSpec `json:"secrets,omitempty"`
 
-	// Database declares an INLINE scale-zero-pg database that the knext operator
-	// auto-provisions (via an AppDatabase CR in the scale-zero-pg namespace) and
-	// wires into the app's env as DATABASE_URL (+ DATABASE_URL_RO when
-	// readReplicas). This is the unified-config flagship (ADR-0006, #119): the
-	// author declares an app AND its database in one NextApp, one namespace, and
-	// the two scale-to-zero and wake together.
-	//
-	// Escape hatch (BYO database): leave this nil / enabled=false and wire an
-	// external/existing DB by hand via spec.secrets.envMap — that path is fully
-	// preserved and additive to this one.
+	// Database binds an EXISTING database to the app (ADR-0019). knext is
+	// engine-agnostic and provisions NO database (the managed scale-to-zero-pg
+	// mode was removed — ADR-0025): set spec.database.secretRef to bind an
+	// existing same-namespace Secret's DSN as DATABASE_URL (+ roSecretRef ->
+	// DATABASE_URL_RO). Leave nil to wire a DB by hand via spec.secrets.envMap.
 	// +optional
 	Database *DatabaseSpec `json:"database,omitempty"`
 
@@ -187,76 +182,38 @@ type SecuritySpec struct {
 	NetworkPolicy *bool `json:"networkPolicy,omitempty"`
 }
 
-// DatabaseSpec is the author-facing surface of the app's database. It has two
-// MUTUALLY-EXCLUSIVE modes, validated at admission:
+// DatabaseSpec is the author-facing surface of the app's database. knext is
+// engine-agnostic and provisions NO database (the managed scale-to-zero-Postgres
+// mode was removed — ADR-0025). The only mode is BRING-YOUR-OWN:
 //
-//   - MANAGED (enabled: true): inline scale-zero-pg provisioning (ADR-0006).
-//     Exposes the SMALL, author-relevant subset of AppDatabase.spec; the
-//     operator derives/defaults the rest (appName, credentials, plane wiring).
-//   - BINDING (secretRef): bring-your-own — bind an EXISTING same-namespace
-//     Secret's DSN as DATABASE_URL (+ roSecretRef -> DATABASE_URL_RO). Typed
-//     sugar over the proven spec.secrets.envMap path (ADR-0019): the operator
-//     injects through the exact same envMap -> SecretKeyRef machinery, so
-//     precedence/dedupe semantics are identical. No provisioning, no hard-gate;
-//     a missing Secret surfaces as CreateContainerConfigError (envMap semantics).
+//   - BINDING (secretRef): bind an EXISTING same-namespace Secret's DSN as
+//     DATABASE_URL (+ roSecretRef -> DATABASE_URL_RO). Typed sugar over the
+//     proven spec.secrets.envMap path (ADR-0019): the operator injects through
+//     the exact same envMap -> SecretKeyRef machinery, so precedence/dedupe
+//     semantics are identical. No provisioning, no hard-gate; a missing Secret
+//     surfaces as CreateContainerConfigError (envMap semantics).
 //
-// SECURITY (ADR-0006 §4.4): appName is NEVER surfaced here — it is DERIVED by
-// the operator from the NextApp's own (namespace, name). A NextApp can therefore
-// only ever provision/bind the AppDatabase minted for ITS OWN identity; it can
-// never name an arbitrary existing database in another namespace.
-// +kubebuilder:validation:XValidation:rule="!(has(self.enabled) && self.enabled && has(self.secretRef))",message="spec.database.enabled (managed) and spec.database.secretRef (BYO binding) are mutually exclusive — pick one mode"
+// SECURITY: there is deliberately no namespace field — cross-namespace
+// secretKeyRef is impossible in Kubernetes, so a NextApp can only ever bind a
+// Secret in its OWN namespace.
 // +kubebuilder:validation:XValidation:rule="!has(self.roSecretRef) || has(self.secretRef)",message="spec.database.roSecretRef requires spec.database.secretRef"
-// +kubebuilder:validation:XValidation:rule="!(has(self.secretRef) && (has(self.tier) || has(self.quotas) || (has(self.readReplicas) && self.readReplicas) || (has(self.keepOnDelete) && self.keepOnDelete)))",message="tier/readReplicas/quotas/keepOnDelete are managed-mode only and cannot be combined with secretRef"
 type DatabaseSpec struct {
-	// Enabled turns on inline provisioning. false/nil => no DB is provisioned
-	// (bring-your-own via secretRef below, or the raw spec.secrets.envMap
-	// escape hatch).
-	// +optional
-	Enabled bool `json:"enabled,omitempty"`
-
 	// SecretRef binds an EXISTING Secret in the app's namespace as the app's
 	// DATABASE_URL (BYO mode, ADR-0019). key defaults to "DATABASE_URL".
-	// Mutually exclusive with enabled: true.
 	// +optional
 	SecretRef *DatabaseSecretRef `json:"secretRef,omitempty"`
 
 	// ROSecretRef optionally binds a read-only DSN as DATABASE_URL_RO (BYO
 	// mode). key defaults to "DATABASE_URL_RO", so a single Secret carrying
-	// both keys (the scale-zero-pg layout) binds with roSecretRef: {name: <same>}.
-	// Requires secretRef.
+	// both keys binds with roSecretRef: {name: <same>}. Requires secretRef.
 	// +optional
 	ROSecretRef *DatabaseSecretRef `json:"roSecretRef,omitempty"`
-
-	// Tier maps 1:1 to AppDatabase.spec.tier. cold = scale-to-zero (default);
-	// warm = one parked replica for ~0.4s wake.
-	// +optional
-	// +kubebuilder:validation:Enum=cold;warm
-	Tier string `json:"tier,omitempty"`
-
-	// ReadReplicas requests the read-only pool. Maps to
-	// AppDatabase.spec.roPool.enabled; when true the operator ALSO injects
-	// DATABASE_URL_RO (tolerating its absence until scale-zero-pg emits the key).
-	// Default false.
-	// +optional
-	ReadReplicas bool `json:"readReplicas,omitempty"`
-
-	// Quotas maps 1:1 to AppDatabase.spec.quotas (per-app noisy-neighbour bound).
-	// Empty fields inherit AppDatabase defaults (1000m/250m CPU, 1Gi/256Mi mem,
-	// 100 conns).
-	// +optional
-	Quotas *DatabaseQuotas `json:"quotas,omitempty"`
-
-	// KeepOnDelete maps to AppDatabase.spec.keepTimelineOnDelete. Default false
-	// (deleting the NextApp reclaims the Neon timeline). true retains it for PITR.
-	// +optional
-	KeepOnDelete bool `json:"keepOnDelete,omitempty"`
 }
 
 // DatabaseSecretRef points at a key in an existing Secret IN THE APP'S OWN
 // NAMESPACE that carries a database DSN (ADR-0019 BYO binding). There is
 // deliberately no namespace field — cross-namespace secretKeyRef is impossible
-// in Kubernetes, and allowing one here would be the exact security seam
-// ADR-0006 §4.4 closes.
+// in Kubernetes, keeping a NextApp bound to a Secret in its own namespace only.
 type DatabaseSecretRef struct {
 	// Name of the Secret (DNS-1123 subdomain).
 	// +kubebuilder:validation:Required
@@ -270,26 +227,6 @@ type DatabaseSecretRef struct {
 	// +optional
 	// +kubebuilder:validation:MinLength=1
 	Key string `json:"key,omitempty"`
-}
-
-// DatabaseQuotas mirrors AppDatabase.spec.quotas (the per-app resource bound).
-type DatabaseQuotas struct {
-	// CPU limit (e.g. "1000m").
-	// +optional
-	CPU string `json:"cpu,omitempty"`
-	// CPURequest is the scheduling floor (e.g. "250m").
-	// +optional
-	CPURequest string `json:"cpuRequest,omitempty"`
-	// Mem limit (OOM bound, e.g. "1Gi").
-	// +optional
-	Mem string `json:"mem,omitempty"`
-	// MemRequest is the scheduling floor (e.g. "256Mi").
-	// +optional
-	MemRequest string `json:"memRequest,omitempty"`
-	// MaxConnections is the app compute's Postgres max_connections.
-	// +optional
-	// +kubebuilder:validation:Minimum=1
-	MaxConnections int `json:"maxConnections,omitempty"`
 }
 
 type PreviewSpec struct {
@@ -430,21 +367,10 @@ type NextAppStatus struct {
 	// +optional
 	CurrentTraffic []TrafficStatus `json:"currentTraffic,omitempty"`
 
-	// DatabaseAppName is the DERIVED, plane-globally-unique appName the operator
-	// created the AppDatabase under (ADR-0006 §4.4). Surfaced on status so the
-	// derivation is auditable and the security seam (a NextApp can only bind its
-	// OWN derived DB) is observable. Managed mode only; deliberately RETAINED
-	// even after spec.database is removed or switched to the BYO binding, so the
-	// delete-time db-cleanup finalizer can still reclaim the (now orphaned)
-	// AppDatabase (ADR-0019 — cleanup-on-mode-switch is follow-up scope).
-	// +optional
-	DatabaseAppName string `json:"databaseAppName,omitempty"`
-
 	// DatabaseSecretName is the name of the same-namespace Secret currently
-	// feeding DATABASE_URL(+_RO), per spec.database mode: in MANAGED mode
-	// (enabled) the operator-written mirror Secret (ownerRef'd to this NextApp);
-	// in BINDING mode (secretRef, ADR-0019) the user-supplied Secret named by
-	// spec.database.secretRef. Cleared when spec.database is removed.
+	// feeding DATABASE_URL(+_RO): the user-supplied Secret named by
+	// spec.database.secretRef (BINDING mode, ADR-0019). Cleared when
+	// spec.database is removed.
 	// +optional
 	DatabaseSecretName string `json:"databaseSecretName,omitempty"`
 }
