@@ -1,0 +1,108 @@
+---
+title: Databases (bring your own Postgres)
+description: knext is engine-agnostic — you bring your own Postgres and bind its DSN from a Kubernetes Secret. knext does not provision or manage databases.
+---
+
+knext is **engine-agnostic about databases**. It does **not** provision, host, or manage a
+database for you — **you bring your own Postgres**. knext's only database surface is a thin,
+secure **binding**: point the app at an existing Postgres by supplying a `DATABASE_URL` from a
+Kubernetes Secret, and the operator injects it into your pods.
+
+<Callout type="info">
+**knext does not run your database.** There is no managed mode, no per-app provisioning, and no
+"branch-per-app" database. Any Postgres your app can reach over the network works — a
+CloudNativePG cluster you run in the same cluster, or a managed/serverless provider.
+</Callout>
+
+## Bind an existing Postgres
+
+The whole contract is one Kubernetes Secret carrying a DSN, referenced from the `NextApp`:
+
+```yaml title="nextapp.yaml (database binding)"
+spec:
+  database:
+    secretRef: { name: storefront-db }          # key defaults to DATABASE_URL
+    roSecretRef: { name: storefront-db }         # optional; key defaults to DATABASE_URL_RO
+```
+
+- `secretRef` binds a Secret in the app's own namespace as **`DATABASE_URL`** (the writer).
+- `roSecretRef` optionally binds a read-only DSN as **`DATABASE_URL_RO`**. Its key defaults to
+  `DATABASE_URL_RO`, so a single Secret that carries both keys can be referenced by the same name
+  for both fields.
+- `spec.database` owns `DATABASE_URL` / `DATABASE_URL_RO`: a conflicting `spec.secrets.envMap`
+  entry for those names is rejected rather than silently overridden.
+
+The `NextApp` never names or reaches into another app's database — it only binds a Secret that
+lives in its **own** namespace. Swapping providers is a Secret change: zero app or CR schema
+change.
+
+The `kn-next db bind` command writes exactly this patch for you — see the
+[CLI reference](/docs/cli#kn-next-db-bind).
+
+<Callout type="warn">
+Secrets live in Kubernetes Secrets / env **only** — never in `spec.env`, config files, images, or
+URLs. Put the DSN in a Secret and bind it; never inline a connection string.
+</Callout>
+
+### The equivalent raw binding
+
+`spec.database` is typed sugar over `spec.secrets.envMap` — the same injection machinery. If you
+prefer, bind the DSN by hand:
+
+```yaml title="nextapp.yaml (raw envMap binding)"
+spec:
+  secrets:
+    envMap:
+      DATABASE_URL:
+        secretName: storefront-db
+        secretKey: pooler-url
+```
+
+## Use a connection pooler
+
+Because knext scales your app **to zero and back up**, replicas come and go and each cold-started
+pod opens its own database connections. Without a pooler, a scale-up fan-out can open far more
+connections than Postgres allows and storm the database. **Put a connection pooler in front of
+Postgres and point `DATABASE_URL` at the pooler**, not at the database directly.
+
+Any Postgres-aware pooler works — for example **PgBouncer** or **pgcat**, run either as a
+per-pod sidecar or as a shared in-cluster Service. If you run Postgres with CloudNativePG, point
+the DSN's host at its **pooler** Service (not the primary).
+
+```yaml title="db-secret.yaml (DSN points at the pooler)"
+apiVersion: v1
+kind: Secret
+metadata:
+  name: storefront-db
+  namespace: my-apps
+type: Opaque
+stringData:
+  # transaction-mode pooler in front of Postgres, NOT the primary directly
+  DATABASE_URL: "postgresql://app:PASSWORD@storefront-pooler.my-apps.svc:6432/storefront"
+  DATABASE_URL_RO: "postgresql://app:PASSWORD@storefront-reader-pooler.my-apps.svc:6432/storefront"
+```
+
+Two settings keep the pooler friendly to a scale-to-zero app that reconnects on every cold start:
+
+- **Pool idle timeout below your pooler's / provider's idle window** — so a parked app never holds
+  an idle socket open across scale-to-zero.
+- **Connect timeout comfortably above your database's cold-wake time** — so the first request
+  after scale-up waits for the connection instead of failing, with no app-side retry logic.
+
+The [`@knext/db`](/docs/data-sdk) SDK already ships pools tuned to these bounds and drains them
+cleanly on `SIGTERM`, so a terminating replica releases its connections instead of severing them
+mid-request.
+
+## Read your data with a typed client
+
+For a typed, drizzle-orm-based data layer over the DSNs you just bound — schema, migrations, and
+explicit `getDb()` (writer) / `getDbRO()` (reader) clients — use the
+[`@knext/db` Data SDK](/docs/data-sdk). It provisions nothing and mutates no cluster resource; it
+is a plain client over whatever `DATABASE_URL` you supply.
+
+## Related
+
+- [Data SDK (`@knext/db`)](/docs/data-sdk) — typed schema, migrations, and read/write clients.
+- [CLI reference → `db bind` / `db migrate`](/docs/cli) — the commands behind this page.
+- [Operator & the NextApp CRD → Databases](/docs/operator#databases-specdatabase) — how the DSN
+  gets into your pods.

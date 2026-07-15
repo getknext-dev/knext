@@ -144,45 +144,42 @@ spec:
 
       <section className={styles.section}>
         <div className={styles.wrap}>
-          <div className={styles.sectLabel}>{'// the database layer — scale-zero-pg'}</div>
+          <div className={styles.sectLabel}>{'// databases — bring your own Postgres'}</div>
           <div className={styles.codewrap}>
             <div className={styles.codetext}>
-              <h2>Your database sleeps too.</h2>
+              <h2>Bring your own database.</h2>
               <p>
-                knext scales the <b>app</b> to zero; its companion{' '}
-                <span className={styles.signal}>scale-zero-pg</span> scales the <b>database</b> to
-                zero. Native Postgres on{' '}
-                <a href="https://github.com/neondatabase/neon">Neon&apos;s open-source</a>{' '}
-                disaggregated storage, fronted by a small Go <b>wake-on-connect</b> gateway: an idle
-                database costs zero compute and wakes on the first client connection in{' '}
-                <span className={styles.signal}>~2.5s</span> — or <b>~400ms</b> from an opt-in warm
-                tier. Same cluster, two layers, one platform: an app and its database{' '}
-                <b>sleep at zero and wake together on a single visitor request</b>.
+                knext is <b>engine-agnostic</b>: it provisions{' '}
+                <span className={styles.signal}>nothing</span> and manages no database. You bring
+                your own Postgres — a CloudNativePG cluster in the same cluster, or a managed /
+                serverless provider — and knext <b>binds its DSN</b> from a Kubernetes Secret into
+                your pods as <code>DATABASE_URL</code>. Swapping providers is a Secret change: no
+                app or CR schema change.
               </p>
               <ul className={styles.steps}>
                 <li>
-                  <span>01</span> declare <code>spec.database</code> on your NextApp
+                  <span>01</span> put your Postgres DSN in a Kubernetes <code>Secret</code>
                 </li>
                 <li>
-                  <span>02</span> the operator provisions a branch-per-app Postgres and wires{' '}
-                  <code>DATABASE_URL</code>
+                  <span>02</span> reference it with <code>spec.database.secretRef</code> — the
+                  operator wires <code>DATABASE_URL</code> (+ optional <code>roSecretRef</code> →{' '}
+                  <code>DATABASE_URL_RO</code>)
                 </li>
                 <li>
                   <span>03</span> query it with typed{' '}
-                  <a href="/docs/scale-zero-pg/data-sdk">
+                  <a href="/docs/databases">
                     <code>@knext/db</code>
                   </a>{' '}
-                  (Drizzle) — writer / bounded-stale reader split, <b>TimescaleDB + pgvector</b>{' '}
-                  built in
+                  (Drizzle) — writer / bounded-stale reader split
                 </li>
                 <li>
-                  <span>04</span> idle → 0 compute · connect → wakes sub-second · data durable on
-                  the storage plane
+                  <span>04</span> front Postgres with a <b>connection pooler</b> (PgBouncer / pgcat)
+                  so scale-to-zero fan-out never storms the database
                 </li>
               </ul>
             </div>
             <pre className={styles.code}>
-              <code>{`# one platform, two layers — declare the database inline
+              <code>{`# bring your own Postgres — bind an existing Secret
 apiVersion: apps.kn-next.dev/v1alpha1
 kind: NextApp
 metadata:
@@ -190,11 +187,11 @@ metadata:
 spec:
   image: registry/storefront@sha256:9f1c...
   scaling:
-    minScale: 0            # the app scales to zero
+    minScale: 0                      # the app scales to zero
   database:
-    enabled: true          # scale-zero-pg provisions + wires it
-    tier: small            # its own 0↔1 compute, wakes on connect
-    # → injects DATABASE_URL (+ DATABASE_URL_RO) into the app`}</code>
+    secretRef: { name: storefront-db }   # → DATABASE_URL from a K8s Secret
+    roSecretRef: { name: storefront-db }  # optional → DATABASE_URL_RO
+    # point the DSN at a pooler, not the primary`}</code>
             </pre>
           </div>
         </div>

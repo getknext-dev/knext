@@ -103,9 +103,11 @@ in-core-vs-recipe split, and never treat an unbuilt generator as shipping.
 - **The operator is the source of truth.** A Go operator reconciles a `NextApp` custom resource
   into a Knative Service, reports honest `Ready`/`Degraded` conditions, and rejects
   non-digest-pinned (`:latest`) images. See [Operator & the NextApp CRD](/docs/operator).
-- **A typed data layer.** `@knext/db` wraps drizzle-orm over the platform's scale-to-zero Postgres
-  pools: typed schema, one-shot writer-only migrations (`kn-next db migrate`), and explicit
-  read/write clients (`getDb()` / `getDbRO()`). See [Data SDK](/docs/data-sdk).
+- **Bring-your-own database.** knext is engine-agnostic: bind an existing Postgres by supplying a
+  `DATABASE_URL` from a Kubernetes Secret — knext provisions nothing. The optional `@knext/db`
+  layer wraps drizzle-orm over that DSN with a typed schema, one-shot writer-only migrations
+  (`kn-next db migrate`), and explicit read/write clients (`getDb()` / `getDbRO()`). See
+  [Databases](/docs/databases) and the [Data SDK](/docs/data-sdk).
 - **Signed, scanned supply chain.** Every published image is Trivy-gated before push, carries an
   SBOM attestation and SLSA provenance, and is cosign-signed on the pushed digest. See
   [Security](/docs/security#supply-chain).
