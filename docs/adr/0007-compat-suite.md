@@ -572,6 +572,55 @@ lane's pass/fail totals by itself; only `rules.exclude` (file-level) changes the
 count. Corollary for the lane-blind manifest: a per-case entry observed on one lane costs the
 other lane case *coverage*, not files or totals.
 
+## Addendum (2026-07-16, v5-P2 #281/#282): lane-scoped ledger + per-mechanism-family soft bound
+
+### (g) The lane-scoped `$knextQuarantines` schema + the per-family soft bound
+
+Two accounting properties are added to the compat-ledger schema. Both are **schema +
+accounting only** — they touch **zero** live matrix numbers and **zero** manifest test-case
+selections (`suites`/`rules.include`/`rules.exclude` are unchanged). Guarded by
+`tests/deploy-manifest-lanes.test.ts`; every prior invariant in `tests/deploy-manifest.test.ts`
+is preserved (version:2, ledger⇔`rules.exclude` no-drift, evidence/provenance/`nextjsRef` stamps,
+the ≤15 file-level family cap, the closed `rules.exclude` taxonomy, per-case `mechanism`).
+
+**1. Lane-scoping (`lane: 'node' | 'bun'`, default `'node'`).** Every `$knextQuarantines` entry
+is attributed to exactly one lane. This **MIRRORS the ALREADY-EXISTING Node/Bun matrix-row
+split** in `docs/compat-matrix.md` — the Node 778/0 credential row vs. the Bun runtime-axis row.
+It is **not a new parity claim**: it aligns the ledger's accounting to a split the scoreboard
+already draws, so a Bun-lane quarantine is booked against the Bun lane and **does not cross-tax
+the Node scoreboard**. The two bun-lane entries (`server-actions-redirect-middleware-rewrite`,
+`edge-async-local-storage`) are bun-only observations whose Node lane is green — they are part of
+the Node credential, not deductions from it. **Total conservation** is a hard-guarded invariant:
+`sum(per-lane counts) === total ledger size`, so no entry can be truncated into invisibility by
+lane bucketing. The manifest remains lane-BLIND in EXECUTION (both lanes load the same
+`NEXT_EXTERNAL_TESTS_FILTERS` file — there is no lane-scoped `suites` mechanism upstream); the
+`lane` field is an accounting attribution, not a per-lane filter, and the honest per-case coverage
+cost on the non-observing lane is already documented in each bun-lane entry's ledger record.
+
+**2. Per-mechanism-family soft bound (`family`, closed taxonomy).** Every entry names a
+mechanism-family from a **closed taxonomy** (`runtime-prefetch` — the §d navigation-timing /
+segment-cache race family; `bun-edge-fetch` — the documented Bun edge-sandbox outbound-fetch gap).
+A **per-family** soft bound (reviewed constant **N = 15**, kept in sync with the existing §d
+file-level ≤15 cap) codifies the #214 lesson that *a growing blanket skip is not a policy*.
+Exceeding the bound for **any** family is a **HARD FAIL with a documented escalation message**
+(`assertPerFamilySoftBound` throws; the guard proves it throws, not warns) — a warn-and-pass cap
+is a fake-green vector and is **rejected**. The escalation message names the offending family and
+count and instructs: re-audit at the current `NEXTJS_REF`, drop entries that no longer wobble
+(the upstream root-cause fix #95301 should be **shrinking** the family, not growing it), and never
+raise the bound to go green — a genuine over-cap requires a reviewed ADR amendment.
+
+**Options considered.** (a) A single global cap on all quarantines — rejected: it lets one family
+starve another's headroom and hides which mechanism is drifting. (b) A per-family **warn** on
+overflow — rejected as a fake-green vector (the guard would stay green while the blanket skip
+grows). (c) A per-family **hard-fail-with-escalation** bound + lane-scoped accounting — **accepted**:
+it makes the drift attributable (which family, which lane) and non-bypassable, while the lane split
+keeps the Bun axis from taxing the Node credential it does not belong to.
+
+**Consequences.** The ledger is now a lane-attributable, per-family-bounded scoreboard: a bun
+quarantine cannot silently shrink the Node claim, and a family cannot grow unbounded without a
+loud, escalating CI failure. The bound and the lane field are additive metadata — no entry was
+reclassified, no `suites`/`rules.exclude` selection changed, no matrix number moved.
+
 ## Action items
 
 - **A3-1 (per-PR gate, this PR's deliverable):**
