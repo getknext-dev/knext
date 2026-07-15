@@ -1,0 +1,19 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: controller-manager
+  namespace: system
+  labels:
+    control-plane: controller-manager
+    app.kubernetes.io/name: kn-next-operator
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  # HA (issue #307): keep at least one manager Pod up across VOLUNTARY disruptions
+  # (node drains, rolling updates) so leader election always has a live candidate.
+  # minAvailable: 1 (NOT 2, NOT maxUnavailable: 0) — with only 2 replicas a stricter
+  # budget would block node drains and deadlock cluster maintenance.
+  minAvailable: 1
+  selector:
+    matchLabels:
+      control-plane: controller-manager
+      app.kubernetes.io/name: kn-next-operator

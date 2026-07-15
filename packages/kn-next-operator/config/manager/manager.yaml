@@ -21,7 +21,9 @@ spec:
     matchLabels:
       control-plane: controller-manager
       app.kubernetes.io/name: kn-next-operator
-  replicas: 1
+  # HA (issue #307): 2 replicas behind leader election. Only the lease holder
+  # reconciles (single-writer, ADR-0001); the standby takes over on primary loss.
+  replicas: 2
   template:
     metadata:
       annotations:
@@ -30,6 +32,20 @@ spec:
         control-plane: controller-manager
         app.kubernetes.io/name: kn-next-operator
     spec:
+      # SOFT pod anti-affinity (issue #307): prefer scheduling the 2 replicas on
+      # distinct nodes so a single node loss can't take both out. It MUST stay
+      # `preferred` (not `required`) — hard anti-affinity would leave the 2nd
+      # replica permanently Pending on single-node / kind / CI clusters.
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    control-plane: controller-manager
+                    app.kubernetes.io/name: kn-next-operator
       # TODO(user): Uncomment the following code to configure the nodeAffinity expression
       # according to the platforms which are supported by your solution.
       # It is considered best practice to support multiple architectures. You can
