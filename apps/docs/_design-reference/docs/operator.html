@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Operator &amp; the NextApp CRD — knext docs</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,500;12..96,700;12..96,800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet" />
+    <style>
+      :root { --void:#08090b; --void-2:#0e1014; --panel:#14161b; --line:#23262e; --ink:#e8eaed; --ink-dim:#9aa0aa; --ink-faint:#61656e; --signal:#ccff00; --signal-dim:#a4cc00; --display:"Bricolage Grotesque",serif; --mono:"JetBrains Mono",ui-monospace,monospace; }
+      * { box-sizing:border-box; margin:0; padding:0; }
+      html { scroll-behavior:smooth; }
+      body { background:var(--void); color:var(--ink); font-family:var(--mono); line-height:1.7; -webkit-font-smoothing:antialiased; }
+      a { color:var(--signal-dim); text-decoration:none; } a:hover { color:var(--signal); }
+      nav { position:sticky; top:0; z-index:50; height:60px; display:flex; align-items:center; padding:0 28px; border-bottom:1px solid var(--line); background:#08090bcc; backdrop-filter:blur(12px); justify-content:space-between; }
+      .mark { font-family:var(--display); font-weight:800; font-size:20px; letter-spacing:-0.04em; color:var(--ink); } .mark b { color:var(--signal); }
+      nav .crumbs { font-size:12px; color:var(--ink-faint); } nav .crumbs b { color:var(--ink-dim); }
+      .layout { display:grid; grid-template-columns:248px minmax(0,1fr) 200px; max-width:1280px; margin:0 auto; }
+      aside { border-right:1px solid var(--line); padding:36px 22px; position:sticky; top:60px; height:calc(100vh - 60px); overflow-y:auto; }
+      aside .group { font-size:11px; letter-spacing:0.18em; text-transform:uppercase; color:var(--ink-faint); margin:26px 0 12px; } aside .group:first-child { margin-top:0; }
+      aside ul { list-style:none; } aside li a { display:block; padding:6px 12px; margin-left:-12px; font-size:13px; color:var(--ink-dim); border-radius:3px; } aside li a:hover { color:var(--ink); background:var(--void-2); } aside li a.on { color:#0a0a00; background:var(--signal); font-weight:500; }
+      main { padding:56px 56px 120px; min-width:0; }
+      .kicker { font-size:12px; letter-spacing:0.2em; text-transform:uppercase; color:var(--signal-dim); }
+      main h1 { font-family:var(--display); font-weight:800; font-size:46px; letter-spacing:-0.04em; margin:14px 0 18px; line-height:1; }
+      main h2 { font-family:var(--display); font-weight:700; font-size:27px; letter-spacing:-0.02em; margin:56px 0 14px; scroll-margin-top:80px; }
+      main p { color:var(--ink-dim); max-width:68ch; margin:14px 0; } main p b { color:var(--ink); font-weight:500; }
+      main .lead { font-size:17px; color:var(--ink-dim); max-width:64ch; }
+      code.in { background:var(--panel); border:1px solid var(--line); border-radius:3px; padding:1px 6px; font-size:0.86em; color:var(--ink); }
+      .code { background:#0b0d11; border:1px solid var(--line); border-radius:6px; overflow:hidden; font-size:13px; margin:20px 0; }
+      .code .top { display:flex; align-items:center; gap:8px; padding:10px 16px; border-bottom:1px solid var(--line); color:var(--ink-faint); font-size:11px; } .code .top .d { width:9px; height:9px; border-radius:50%; background:#2a2e36; }
+      .code pre { padding:16px; overflow-x:auto; line-height:1.7; } .code .k { color:var(--signal); } .code .s { color:#8fd6ff; } .code .c { color:var(--ink-faint); } .code .p { color:var(--ink-dim); } .code .f { color:#ffd479; }
+      .callout { border:1px solid var(--line); border-left:2px solid var(--signal); background:#0c0f08; border-radius:0 4px 4px 0; padding:16px 20px; margin:22px 0; font-size:14px; color:var(--ink-dim); max-width:68ch; } .callout b { color:var(--signal); }
+      .flow { display:flex; gap:0; margin:24px 0; max-width:68ch; flex-wrap:wrap; }
+      .flow .step { flex:1; min-width:120px; border:1px solid var(--line); padding:16px; font-size:12px; color:var(--ink-dim); position:relative; }
+      .flow .step:not(:last-child)::after { content:"→"; position:absolute; right:-9px; top:50%; transform:translateY(-50%); color:var(--signal-dim); z-index:2; background:var(--void); }
+      .flow .step b { display:block; color:var(--ink); font-size:13px; margin-bottom:4px; }
+      .toc { padding:56px 20px; position:sticky; top:60px; height:calc(100vh - 60px); font-size:12px; } .toc div:first-child { color:var(--ink-faint); letter-spacing:0.14em; text-transform:uppercase; margin-bottom:14px; } .toc a { display:block; color:var(--ink-dim); padding:5px 0; }
+      @media (max-width:1080px){ .layout{ grid-template-columns:220px 1fr; } .toc{ display:none; } } @media (max-width:760px){ .layout{ grid-template-columns:1fr; } aside{ display:none; } main{ padding:36px 22px 90px; } }
+    </style>
+  </head>
+  <body>
+    <nav>
+      <a class="mark" href="../index.html">kn<b>e</b>xt</a>
+      <div class="crumbs"><b>docs</b> / operator &amp; the NextApp CRD</div>
+      <a href="https://github.com/AhmedElBanna80/knext" style="font-size:12px;color:var(--ink-dim)">github ↗</a>
+    </nav>
+
+    <div class="layout">
+      <aside>
+        <div class="group">Start</div>
+        <ul>
+          <li><a href="getting-started.html">Getting started</a></li>
+          <li><a href="getting-started.html#install">Install the adapter</a></li>
+          <li><a href="getting-started.html#deploy">First deploy</a></li>
+        </ul>
+        <div class="group">Runtime</div>
+        <ul>
+          <li><a href="getting-started.html#bytecode">Bytecode caching</a></li>
+          <li><a href="getting-started.html">Scale-to-zero &amp; cold starts</a></li>
+        </ul>
+        <div class="group">Platform</div>
+        <ul>
+          <li><a class="on" href="#">Operator + NextApp CRD</a></li>
+          <li><a href="#crd">The NextApp spec</a></li>
+          <li><a href="#reconcile">Reconciliation</a></li>
+          <li><a href="#security">Security defaults</a></li>
+        </ul>
+      </aside>
+
+      <main>
+        <div class="kicker">// platform</div>
+        <h1>The operator is the source of truth</h1>
+        <p class="lead">knext follows one hard rule: <b>nothing mutates the cluster out-of-band.</b> A single Go operator watches <code class="in">NextApp</code> resources and reconciles each into a running Knative Service. The CLI only ever applies the CR — it never touches Knative or infra manifests directly.</p>
+
+        <div class="flow">
+          <div class="step"><b>kn-next deploy</b>build · push · emit CR</div>
+          <div class="step"><b>NextApp CR</b>applied to the cluster</div>
+          <div class="step"><b>operator</b>reconciles desired state</div>
+          <div class="step"><b>Knative Service</b>scaled-to-zero, reachable</div>
+        </div>
+
+        <h2 id="crd">The NextApp spec</h2>
+        <p>One resource describes the whole deployment — image, scaling, cache, storage. The operator owns the translation to a ksvc, so the surface you manage stays small and declarative.</p>
+        <div class="code">
+          <div class="top"><span class="d"></span><span class="d"></span><span class="d"></span>&nbsp; nextapp.yaml</div>
+<pre><span class="p">apiVersion:</span> <span class="s">apps.kn-next.dev/v1alpha1</span>
+<span class="p">kind:</span> <span class="k">NextApp</span>
+<span class="p">metadata:</span> { <span class="p">name:</span> <span class="s">storefront</span> }
+<span class="p">spec:</span>
+  <span class="p">image:</span> <span class="s">registry/storefront@sha256:9f1c…</span>  <span class="c"># digest-pinned (required)</span>
+  <span class="p">scaling:</span>   { <span class="p">minScale:</span> <span class="k">0</span>, <span class="p">maxScale:</span> <span class="k">20</span> }
+  <span class="p">cache:</span>     { <span class="p">enableBytecodeCache:</span> <span class="k">true</span>, <span class="p">url:</span> <span class="s">redis://redis:6379</span> }
+  <span class="p">storage:</span>   { <span class="p">bucket:</span> <span class="s">app-assets</span>, <span class="p">endpoint:</span> <span class="s">s3.example.com</span> }
+<span class="p">status:</span>
+  <span class="p">url:</span> <span class="s">https://storefront.apps.example.com</span>
+  <span class="p">conditions:</span>  <span class="c"># Ready / Reconciling / Degraded</span></pre>
+        </div>
+
+        <h2 id="reconcile">Reconciliation</h2>
+        <p>On every change the operator builds the desired ksvc — KPA autoscaling annotations from <code class="in">scaling</code>, a PVC + <code class="in">NODE_COMPILE_CACHE</code> from <code class="in">cache.enableBytecodeCache</code>, storage secrets from <code class="in">storage</code> — and reports <b>Status.Conditions</b> so <code class="in">kubectl get nextapp</code> tells you exactly where reconciliation is.</p>
+        <div class="callout"><b>Observable by design.</b> The reconciler sets <code class="in" style="color:var(--ink)">Reconciling → Ready</code> (or <code class="in" style="color:var(--ink)">Degraded</code> with a reason) plus the live URL — no guessing whether a deploy landed.</div>
+
+        <h2 id="security">Security defaults</h2>
+        <p>The operator is also the policy boundary:</p>
+        <p>· <b>Digest pinning enforced</b> — a CR with a <code class="in">:latest</code> or tag-only image is rejected (<code class="in">Degraded/InvalidImage</code>), never deployed.<br />· <b>Mutating endpoints require auth</b> — e.g. cache invalidation needs a signed token; nothing open by default.<br />· <b>Cluster-local backends (by design)</b> — the planned gRPC backend layer (ADR-0004) runs <code class="in">cluster-local</code> with no public ingress. Design-stage, not yet shipped.</p>
+        <div class="callout"><b>One writer.</b> Because only the operator mutates cluster state, your Git history of <code class="in" style="color:var(--ink)">NextApp</code> resources <em>is</em> the deployment history — auditable, reproducible, portable across clouds.</div>
+      </main>
+
+      <div class="toc">
+        <div>On this page</div>
+        <a href="#crd">The NextApp spec</a>
+        <a href="#reconcile">Reconciliation</a>
+        <a href="#security">Security defaults</a>
+      </div>
+    </div>
+  </body>
+</html>

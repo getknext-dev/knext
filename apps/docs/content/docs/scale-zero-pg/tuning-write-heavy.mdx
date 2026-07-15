@@ -1,0 +1,245 @@
+---
+title: "Tuning write-heavy workloads"
+description: "Consumer-side tuning for bulk loads, event ingestion, and high-frequency writes on the single-writer, scale-to-zero plane: batch/COPY, pooling that still sleeps, honest synchronous_commit, and read offload."
+---
+
+A practical guide for app authors running write-heavy workloads (bulk loads, event
+ingestion, high-frequency inserts, ETL) on the scale-to-zero platform. Everything
+here is consumer-side tuning — no platform changes. Where a knob lives in the
+platform, this guide links to [Connecting](/docs/scale-zero-pg/connecting) /
+[Operations](/docs/scale-zero-pg/operations) rather than repeating it.
+
+The short version:
+
+1. **Batch writes into fewer, larger transactions; use `COPY` over `INSERT` loops.**
+2. **Keep a small pool whose idle timeout is below the gateway idle window** so the
+   DB can still sleep.
+3. **Relax `synchronous_commit` only for data you can afford to replay** — and know
+   exactly what the data-loss window is.
+4. **Push reads to `DATABASE_URL_RO`** so the one writer spends 100% of its time on
+   writes.
+5. **Know the hard limits:** one writer, no horizontal write scaling, and no
+   background jobs while asleep.
+
+## The platform shape that matters for tuning
+
+You are tuning **one writer**. That single fact drives everything below.
+
+- **Compute plane — one stateless Neon compute, `0↔1`.** Writes go to a single
+  primary compute (a Deployment with `strategy: Recreate`). Single-writer is
+  intrinsic to Neon — there is no second writer to spread load onto, and no
+  lease/fencing layer to add one. You scale writes **vertically** (a bigger
+  compute, better batching), never horizontally.
+- **Storage plane — disaggregated durability.** Postgres here does **not** fsync to
+  a local disk. The compute's `walproposer` streams the WAL to a **safekeeper
+  quorum** (3 safekeepers, 2/3 write quorum — see
+  [Scaling](/docs/scale-zero-pg/scaling)); pages are served/offloaded by the
+  pageserver. **The safekeeper quorum is your durability boundary**, not a local
+  disk. Every commit's durability cost is a network round-trip to that quorum —
+  which is exactly why batching commits pays off more here than on a local-SSD
+  Postgres.
+- **Routing plane — the wake-on-connect gateway.** The gateway wakes the compute on
+  the first connection after idle and scales it back to zero after `GW_IDLE_MS`
+  with no connections (**deployed: 60s**; code default 300000 ms — confirm your
+  cluster's value in
+  [Operations](/docs/scale-zero-pg/operations#gateway-configuration-env-on-deploypggw)).
+  Two consequences for write-heavy apps:
+  - **A cold wake costs a few seconds** — set your client connect timeout **≥ 10 s**
+    so a bulk job that starts against a sleeping DB doesn't race the wake
+    (p50 ~3.7 s / p95 ~4.1 s cold; see [Benchmarks](/docs/scale-zero-pg/benchmarks),
+    and [Reliability](/docs/scale-zero-pg/reliability) for the wake machinery that
+    keeps it transparent).
+  - **Sustained write traffic keeps it warm** — an actively-writing job never trips
+    the idle timer, so you pay the wake **once** at the start of a batch window, not
+    per statement.
+
+## Batch and bulk load
+
+Row-by-row `INSERT`s are the most common write-heavy anti-pattern here, because each
+autocommitted statement forces its own commit → its own safekeeper-quorum round-trip.
+Fold many rows into each commit.
+
+**Prefer `COPY` for bulk load.** `COPY` is the fastest path into Postgres — it skips
+per-row statement parsing/planning and streams rows in one command:
+
+```sql
+-- fastest bulk ingest: one command, one commit, one quorum flush
+COPY events (ts, user_id, kind, payload)
+FROM STDIN WITH (FORMAT csv);
+```
+
+Most drivers expose it (`psycopg`'s `copy`, `pgx`'s `CopyFrom`, `node-postgres` +
+`pg-copy-streams`). For a load from an existing table/query, `INSERT ... SELECT`
+keeps the whole operation server-side in one transaction.
+
+**If you must `INSERT`, use multi-row `VALUES`** instead of a loop:
+
+```sql
+-- one statement, one commit — not 1000 autocommits
+INSERT INTO events (ts, user_id, kind) VALUES
+  ($1,$2,$3), ($4,$5,$6), ($7,$8,$9), …;   -- batch ~500–1000 rows/statement
+```
+
+**Wrap batches in an explicit transaction** to amortize the commit cost. The commit —
+not the insert — is what waits on the safekeeper quorum, so committing once per
+1000 rows instead of once per row removes ~999 quorum round-trips:
+
+```sql
+BEGIN;
+  -- COPY, or N multi-row INSERTs
+COMMIT;   -- the single quorum flush for the whole batch
+```
+
+**Batch sizing.** Bigger batches amortize commit cost but grow the transaction's
+memory/WAL footprint and the redo you'd lose on a mid-batch failure. Start around
+**500–5000 rows (or a few MB) per transaction** and tune from there. Very large
+single transactions also hold locks and bloat WAL — chunk a multi-million-row load
+into successive committed batches rather than one giant transaction.
+
+<Callout type="info">
+**Why this matters more here than on local-disk Postgres:** on a normal single-node
+PG a commit is a local `fsync`. Here every commit waits for the WAL to reach a
+**quorum of safekeepers over the network**. Batching turns N commit-latencies into
+one, so the win from fewer, larger transactions is proportionally larger on this
+platform.
+</Callout>
+
+## Connection pooling
+
+Pooling and scale-to-zero interact in one way that will bite you if ignored:
+**an idle pooled connection looks like activity and pins the compute awake.** A pool
+that holds a connection open forever defeats scale-to-zero — the DB never sleeps, and
+you pay for a compute that does nothing. See the full rules in
+[Connecting → Connection pooling rules](/docs/scale-zero-pg/connecting#connection-pooling-rules).
+
+For write-heavy apps specifically:
+
+1. **Keep the pool small.** One writer means extra connections don't buy write
+   parallelism — they queue at the single compute. A handful of connections
+   saturates a bulk-load path; dozens just add context-switching and memory
+   pressure.
+2. **Pool idle timeout &lt; `GW_IDLE_MS`.** This is the critical scale-to-zero rule:
+   set the pool's idle timeout **below** the deployed gateway idle window (60s) so
+   an idle app releases its connections and lets the DB sleep. `@knext/lib`'s
+   `getDbPool()` already ships scale-to-zero-sane defaults (`DB_POOL_MAX=5`, idle
+   timeout **10 s**) — see [Connecting → knext apps](/docs/scale-zero-pg/connecting#knext-apps).
+3. **Keep `min`/`minIdle` at 0** for apps that should let the DB sleep — a warm
+   minimum pins the compute awake 24/7.
+4. **Connect timeout ≥ 10 s** so a cold wake never races your pool's connect.
+5. **Mind the gateway connection cap.** The deployed writer gateway sets
+   `GW_MAX_CONNS=90` and **must stay under the compute's `max_connections=100`**;
+   connections beyond the cap get a clean `53300` rejection rather than
+   overwhelming the compute (see
+   [Operations](/docs/scale-zero-pg/operations#gateway-configuration-env-on-deploypggw)).
+   Size `maxScale × pool-max` across all app replicas to stay under it.
+
+## Async / relaxed durability (with the caveat)
+
+`synchronous_commit` controls whether a `COMMIT` waits for durability before
+returning. On this platform, **durability = the WAL reaching the safekeeper
+quorum** (there is no meaningful local disk — the compute is stateless and uses
+`Recreate`). That changes what each setting means:
+
+| Setting | What it means here | Data-loss window |
+|---|---|---|
+| `on` (**default**) | `COMMIT` returns only after the WAL is durably on the safekeeper quorum | none beyond the quorum — the safe default |
+| `remote_write` | returns after the quorum has **received** the WAL (before its own fsync) | tiny — a simultaneous quorum-side crash |
+| `local` / `off` | returns **before** the WAL is confirmed on the quorum | **all not-yet-flushed transactions if the single compute crashes** |
+
+The honest trade-off: relaxing `synchronous_commit` removes the per-commit quorum
+wait, so a stream of small commits gets much faster — but because the compute is
+**stateless and single-writer**, anything acknowledged-but-not-yet-flushed is
+**lost** if that compute dies before the WAL reaches the quorum. Transactions stay
+atomic and consistent (you never get a torn/partial write); you only ever lose the
+most-recent tail of "committed" transactions.
+
+**Recommended posture:**
+
+- **Keep the `on` default for anything you can't reconstruct** (orders, payments,
+  user data, anything a human notices is missing).
+- **Relax it only per-transaction, only for replayable data** — an ETL load you can
+  re-run, derived/aggregate tables, idempotent event replay. Scope it with
+  `SET LOCAL` so it never leaks to the rest of the session:
+
+  ```sql
+  BEGIN;
+    SET LOCAL synchronous_commit = off;   -- this bulk load only; re-runnable on failure
+    COPY staging_events FROM STDIN WITH (FORMAT csv);
+  COMMIT;
+  ```
+
+- **Do not set `synchronous_commit=off` globally as a default.** It is not a free
+  speed knob — it is a durability trade you should make deliberately, per workload.
+
+## Read offload — keep the writer for writes
+
+The single writer is your scarcest resource. Every reporting query, dashboard, or
+fan-out read you run on `DATABASE_URL` is time the primary isn't spending on writes.
+Push read-heavy traffic to the **read-only pool** so the writer is 100% writes:
+
+```
+DATABASE_URL     → the primary compute        (writes + read-your-writes)
+DATABASE_URL_RO  → the compute-ro pool (0→N→0) (read-only, load-balanced, HPA-scaled)
+```
+
+This is a deliberate **two-DSN** choice in your app — there is no SQL parsing and
+nothing automatic. Route reporting/analytics/dashboard reads to a pool built on
+`DATABASE_URL_RO`; keep writes (and any read that must see them immediately) on
+`DATABASE_URL`. Full contract in
+[Connecting → Scaling reads](/docs/scale-zero-pg/connecting#scaling-reads-database_url_ro-opt-in-read-only-pool).
+
+**When to offload:** read-heavy reporting/analytics/fan-out reads that tolerate a
+**bounded staleness ceiling of ~9 s** (typically sub-second; the ~9 s is the
+worst-case tip-following lag). Offloading these frees the writer *and* lets the read
+pool scale horizontally under load.
+
+**When NOT to:** anything needing **read-your-writes** or a strongly-consistent
+read. The RO pool is eventually consistent and gives **no** read-your-writes
+guarantee — if you commit on `DATABASE_URL` and must read that exact row back
+immediately, read it from `DATABASE_URL`. A write-then-verify step in an ingest
+pipeline belongs on the writer.
+
+## What you canNOT do (honest limits)
+
+Tuning can't buy past these — design around them:
+
+- **No horizontal write scaling.** Single-writer is intrinsic to Neon (the
+  safekeeper quorum *enforces* one writer — see
+  [Scaling](/docs/scale-zero-pg/scaling)). There is no multi-master, no
+  sharded-writer option on this plane. Scale writes by tuning the one writer
+  (batching, `COPY`, a larger compute) — not by adding writers. A genuine
+  write-throughput ceiling means a bigger compute or a workload that doesn't fit
+  scale-to-zero, not more primaries.
+- **Background jobs don't run while the compute is at zero.** `pg_cron` schedules,
+  **TimescaleDB continuous aggregates, compression, and retention/refresh
+  policies** are all driven by background workers that **stop with the pod** — they
+  will not fire during the idle window, which for a time-series app is exactly when
+  data accumulates (see [Extensions](/docs/scale-zero-pg/extensions)). Instead:
+  - Run periodic maintenance (aggregation rollups, `drop_chunks()` retention,
+    `VACUUM`/`ANALYZE`) from an **external trigger** — a Kubernetes `CronJob` or
+    one-shot `Job` that connects (waking the DB), does the work, and disconnects
+    (letting it sleep again).
+  - Prefer Apache-2 TimescaleDB features that need no background worker
+    (hypertables, chunk pruning, `drop_chunks`) over TSL policy jobs.
+- **The first hit after idle pays a cold wake.** Cold wake is p50 ~3.7 s / p95
+  ~4.1 s; a first-ever boot on a fresh node adds a one-time image pull (~38 s), and
+  a combined app-plus-DB cold start on a capacity-tight cluster lands around
+  **~13 s (range 7.4–16.1 s)** ([Benchmarks](/docs/scale-zero-pg/benchmarks)).
+  Absorb it with a connect timeout **≥ 10 s** and, for latency-sensitive write
+  paths, consider the **warm tier** (~0.4 s wake, at the cost of one parked pod —
+  see [Connecting → cold-zero vs warm](/docs/scale-zero-pg/connecting#choosing-a-tier-cold-zero-default-vs-warm)).
+
+## See also
+
+- [Connecting your app](/docs/scale-zero-pg/connecting) — DSN, pooling rules, the RO
+  pool contract, knext integration.
+- [Extensions](/docs/scale-zero-pg/extensions) — why TimescaleDB TSL background jobs
+  don't fit scale-to-zero.
+- [Scaling](/docs/scale-zero-pg/scaling) — the four scaling axes and why write
+  scaling is vertical.
+- [Reliability](/docs/scale-zero-pg/reliability) — the wake-on-connect machinery that
+  keeps cold starts transparent.
+- [Operations](/docs/scale-zero-pg/operations) — the full gateway config reference
+  (`GW_IDLE_MS`, `GW_MAX_CONNS`, wake timeouts) and monitoring.
+- [Benchmarks](/docs/scale-zero-pg/benchmarks) — every wake/throughput number with
+  provenance.

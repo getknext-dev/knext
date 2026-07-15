@@ -1,0 +1,8 @@
+node_modules
+.next
+.source
+.git
+.github
+*.log
+Dockerfile
+Dockerfile.oke

@@ -1,0 +1,90 @@
+---
+title: Preview environments
+description: Per-PR ephemeral preview deployments, isolated by name down to the cache keyspace.
+---
+
+A preview is a complete, ephemeral deployment of your app for a single pull request. `kn-next
+preview deploy` builds a fresh image and applies a **new** `NextApp` CR named `<app>-pr-<n>` — its
+own image, its own URL, its own assets, its own cache keyspace. `kn-next preview destroy` deletes
+only that CR; the operator then reaps everything it owned.
+
+The CLI emits intent only: it `kubectl apply`s the preview CR and (on destroy) deletes it. It never
+writes the Knative Service or Route directly.
+
+## The commands
+
+```bash
+# Deploy / update the preview for PR 42 from a branch
+kn-next preview deploy --pr 42 --branch feature/cart
+
+# Tear it down
+kn-next preview destroy --pr 42
+```
+
+| Flag | Notes |
+|---|---|
+| `deploy` / `destroy` | Required subcommand (first positional). |
+| `--pr <n>` | Required. PR number; forms the `<app>-pr-<n>` name. |
+| `--branch <ref>` | Required for `deploy`. Git ref to build from. |
+| `-n`, `--namespace` | Target namespace (default `default`). |
+
+`preview deploy` prints the resolved preview URL (read back from `status.url`) to stdout so CI can
+post it on the PR. The derived name must be a valid DNS-1123 label ≤63 chars, so a very long app
+name plus the `-pr-<n>` suffix aborts loudly *before* any build or apply.
+
+## Operator overrides
+
+When the rendered CR carries `spec.preview.enabled: true`, the operator reconciles a
+resource-frugal, ephemeral shape:
+
+| Setting | Preview value |
+|---|---|
+| `autoscaling.knative.dev/min-scale` | `0` (scale to zero) |
+| `autoscaling.knative.dev/max-scale` | `1` (one pod max) |
+| `autoscaling.knative.dev/scale-to-zero-pod-retention-period` | `30s` |
+| Labels | `environment=preview`, `pr-id=<n>` |
+
+The `spec.preview` block carries `enabled`, `branch`, and `prId`.
+
+## Name-derived isolation
+
+Everything that scopes a preview is **derived from its `<app>-pr-<n>` name**, so a preview can
+neither read nor flush production:
+
+- **Assets & URL** — the asset prefix and service URL are re-derived from the CR name.
+- **Teardown** — on destroy, the operator's external cleanup reaps exactly the preview's
+  name-scoped asset prefix.
+- **Cache keyspace** — when the cache provider is Redis, the CLI overrides `cache.keyPrefix` to the
+  preview name. This is the load-bearing safety property: without it a preview copied from prod
+  would share prod's Redis keyspace, and `preview destroy` would flush prod's cache.
+- **No shared DB** — previews are ephemeral and do not attach to a production data store.
+
+<Callout type="warn">
+The Redis `keyPrefix` override is what keeps teardown safe. A preview's teardown flushes only
+`<app>-pr-<n>:*`, never `<app>:*`. Do not hand a preview a verbatim production `keyPrefix`.
+</Callout>
+
+## The GitHub workflow
+
+knext ships a GitHub Actions workflow that wires the full loop: on PR open/sync it runs `preview
+deploy` and upserts a sticky comment with the URL; on close it runs `preview destroy`. It is
+**committed but inert by default** — the deploy job only runs when both hold:
+
+- a repository variable enabling previews is set, **and**
+- the PR carries the `preview` label.
+
+It triggers on `pull_request` (deliberately **not** `pull_request_target`), so a fork PR runs with
+a read-only token and cannot reach deploy credentials.
+
+<Callout type="info">
+The shippable mechanism — the `kn-next preview` CLI and the operator's preview reconcile — is fully
+implemented and tested. The live per-PR flow stays inert until you provide the cluster credentials
+and enable previews in your repository; knext does not ship those for you.
+</Callout>
+
+## Related
+
+- [Operator & the NextApp CRD](/docs/operator) — the `NextApp` resource the preview CR is.
+- [Scale to zero](/docs/scale-to-zero) — the min/max-scale autoscaling knobs previews tune down.
+- [Skew protection](/docs/skew-protection) — previews get their own build-id, isolated from prod GC.
+- [Security](/docs/security) — the isolation properties above (cache-keyspace separation, fork-PR token safety, name-scoped teardown) are part of knext's security model.

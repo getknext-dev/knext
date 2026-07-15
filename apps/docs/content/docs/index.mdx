@@ -1,0 +1,132 @@
+---
+title: Overview
+description: knext is the scale-to-zero Next.js deployment adapter for Knative / Kubernetes — and the substrate for Self-Contained Systems.
+---
+
+## What knext is
+
+**knext is the scale-to-zero Next.js adapter for Knative/Kubernetes** — a Next.js-specific
+deployment framework, architecturally closer to OpenNext than to a PaaS. It runs your Next.js app
+on the **official Next.js Deployment Adapter API** with true **scale-to-zero**: idle services drop
+to zero replicas and wake on the first request.
+
+It is **not** a general-purpose PaaS, and **not** "Coolify for Kubernetes." The differentiator is
+**Knative + scale-to-zero** — and, longer term, what that scale-to-zero substrate makes possible:
+**Self-Contained Systems**.
+
+<Callout type="info">
+**Validated against the official suite.** knext passes the official Next.js deploy-mode e2e suite
+on the Node runtime — **778 tests, zero failures**, re-verified **nightly** against Next.js 16.2.
+The exact scope (including documented exclusions and the Bun lane's most recently observed 775/778) is on
+[Verified compatibility](/docs/compat-suite); per-feature status lives in the
+[compatibility matrix](/docs/compat-matrix).
+</Callout>
+
+## Philosophy: Self-Contained Systems
+
+knext exists to make one architectural style cheap and natural to run on your own infrastructure:
+the **Self-Contained System (SCS)**.
+
+A Self-Contained System is an **autonomous web application that owns its entire vertical slice** —
+its UI, its business logic, and its own data store — and integrates with its peers as loosely as
+possible. The defining constraints:
+
+- **It owns its data.** Each system has its **own database**. No system reads another system's
+  database directly. There is no shared schema and no shared data layer.
+- **It includes its UI.** An SCS is a *web application*, not a headless backend service. This is the
+  key difference from microservices, where the UI lives elsewhere and integration happens
+  server-side behind an API gateway.
+- **Integration is asynchronous and in the browser.** Systems compose primarily through the
+  **browser** (links and UI composition) and through **asynchronous domain events** — never through
+  synchronous, request-time calls into each other's internals or databases.
+- **It deploys, scales, and fails independently.** Each system is owned by one team and has its own
+  release cadence; one system being down or redeployed does not take the others with it.
+
+The payoff is **autonomy without a distributed monolith**: teams move independently, a failure is
+contained to one system, and the architecture stays legible because each system is small and whole.
+The classic cost of the style is operational — *many* small applications to deploy and, naively,
+keep running.
+
+### Why scale-to-zero Next.js on Knative is the natural substrate
+
+That operational cost is exactly what knext removes. The mapping is one-to-one:
+
+> **One Self-Contained System ≙ one Next.js app ≙ one scale-to-zero Knative Service ("zone").**
+
+Each system becomes a knext **zone** — its own Next.js application that knext deploys as its own
+Knative Service. Because every zone scales independently to **zero**, a product made of *N* systems
+where most are idle at any moment costs almost nothing to keep available: you pay only for the
+systems actually receiving traffic, and an idle system is genuinely **0 replicas**, not a warm pod.
+This is what makes "many small autonomous applications" economically viable on your **own**
+Kubernetes — not only on a managed PaaS.
+
+The architecture's hard rules map cleanly onto the platform:
+
+- **Data sovereignty** → each zone gets its **own PostgreSQL** (provisioned via CloudNativePG) and
+  reads it via a `DATABASE_URL` from a Kubernetes Secret. A zone never connects to another zone's
+  primary or replica.
+- **Asynchronous integration** → cross-zone state flows **only** via **Kafka domain events** (each
+  zone keeps its own copy) and via the **browser**.
+- **Browser-side composition** → **Next.js Multi-Zones** stitches the independent zone apps under a
+  single domain, so the user sees one product while each zone ships and scales on its own.
+- **Independent lifecycle** → per-zone build, deploy, rollback, and scale-to-zero are first-class.
+
+In short: **SCS is the "why," and scale-to-zero Knative is the "how."** Autonomy, independent
+deployability, and pay-per-use — per self-contained system.
+
+<Callout type="info">
+**Honest scope — substrate today, framework tomorrow.** What ships in knext core *today* is the
+substrate: the official adapter, per-zone scale-to-zero deploy, `assetPrefix` wiring, and serving
+the App Shell. The full SCS toolkit — a `generate zone` scaffolder, micro-frontend (asset +
+Module-Federation) isolation, and the PWA stitching layer — is the **end goal**; today those are
+app-level recipes, not framework code. They will be promoted into core only **after** the
+official-adapter correctness work lands. See [SCS / Zones](/docs/scs-zones) for the rules and the
+in-core-vs-recipe split, and never treat an unbuilt generator as shipping.
+</Callout>
+
+## The pillars
+
+- **Official adapter, not a fork.** Built on the official Deployment Adapter API (`NextAdapter`,
+  top-level `adapterPath` on Next.js 16.2+, `output: 'standalone'`). knext ships the adapter as a
+  reusable package export (`@knext/core/adapter`). See [Official adapter](/docs/official-adapter).
+- **Verified compatibility.** The official `vercel/next.js` deploy-mode e2e suite runs against
+  knext nightly: 778 tests, zero failures on Node. See
+  [Verified compatibility](/docs/compat-suite).
+- **True scale-to-zero.** Knative's autoscaler + activator take idle services to `0` replicas and
+  wake them on the first request. See [Scale-to-zero & cold starts](/docs/scale-to-zero).
+- **Bytecode-cached cold starts.** On Node, `NODE_COMPILE_CACHE` persists V8 bytecode on a PVC
+  across cold pods; on Bun, the standalone tree is precompiled to bytecode at build time (−47%
+  measured boot). See [Bytecode caching](/docs/bytecode) and [Bun runtime](/docs/bun-runtime).
+- **Two runtimes, one artifact.** The same standalone `server.js` runs under Node (default) or Bun
+  (`runtime: 'bun'`) — both exercised against the official suite. See
+  [Bun runtime](/docs/bun-runtime).
+- **The operator is the source of truth.** A Go operator reconciles a `NextApp` custom resource
+  into a Knative Service, reports honest `Ready`/`Degraded` conditions, and rejects
+  non-digest-pinned (`:latest`) images. See [Operator & the NextApp CRD](/docs/operator).
+- **A typed data layer.** `@knext/db` wraps drizzle-orm over the platform's scale-to-zero Postgres
+  pools: typed schema, one-shot writer-only migrations (`kn-next db migrate`), and explicit
+  read/write clients (`getDb()` / `getDbRO()`). See [Data SDK](/docs/data-sdk).
+- **Signed, scanned supply chain.** Every published image is Trivy-gated before push, carries an
+  SBOM attestation and SLSA provenance, and is cosign-signed on the pushed digest. See
+  [Security](/docs/security#supply-chain).
+- **Multi-cloud object storage.** Assets go to `gcs`, `s3`, or `minio`. See
+  [Multi-cloud deploy](/docs/multi-cloud).
+
+## This site is built to run on knext
+
+This documentation site is itself a Next.js App-Router app (Fumadocs + MDX). It is **built to deploy
+on knext**: with `KNEXT_ADAPTER=1` it builds with `output: 'standalone'` and the knext official
+adapter — the same path it documents — and its dogfood config
+([`kn-next.config.ts`](https://github.com/getknext-dev/docs)) and deploy runbook (`DEPLOY.md`) live
+in this repo.
+
+<Callout type="info">
+**Honest status.** Right now this site is served on **Vercel** at `knext.dev` as an interim host
+while the self-host cluster and the `@knext/core` npm package are provisioned. Without
+`KNEXT_ADAPTER=1` the repo builds as a vanilla Next.js app (which is what the managed host runs).
+**Migrating it onto knext is the dogfood target** — not yet the live deployment.
+</Callout>
+
+## License
+
+knext is licensed under **Apache-2.0**.

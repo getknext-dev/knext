@@ -1,0 +1,57 @@
+---
+title: Scale-to-zero & cold starts
+description: How Knative drops idle knext services to zero, and how knext keeps the wake fast.
+---
+
+When a knext service is idle, Knative drops it to **zero replicas** — you pay nothing for traffic
+you're not serving. The first request after that wakes it through the activator. This page is how
+that works, and how knext keeps the wake fast.
+
+## How it scales to zero
+
+Each service runs behind a queue-proxy that reports concurrency to the **Knative Pod Autoscaler
+(KPA)**. After the stable window with no requests, the KPA scales the deployment to `0`. Incoming
+requests then route to the shared **activator**, which buffers the request, triggers a scale-up, and
+forwards once a pod is ready.
+
+| Step | What happens |
+|---|---|
+| **t+0ms** | Request arrives at the ingress; the service is at 0 replicas → routed to the activator. |
+| **buffer** | The activator holds the request and signals the autoscaler to scale 0→1. |
+| **start** | A pod is scheduled; the Node standalone server boots — V8 reads its bytecode cache. |
+| **serve** | The activator forwards the buffered request; later requests hit the pod directly. |
+
+## Set it per app
+
+`spec.scaling.minScale: 0` enables scale-to-zero; raise it to keep a warm floor for
+latency-critical services. The operator translates this to KPA annotations on the Knative Service.
+
+```yaml
+spec:
+  scaling:
+    minScale: 0     # idle → zero pods
+    maxScale: 20
+```
+
+## The cold-start budget
+
+A cold start is **pod scheduling + container start + the server boot + first-request work**. The
+boot is where a Next.js app spends real CPU compiling JavaScript — so knext attacks exactly that
+with [bytecode caching](/docs/bytecode): on Node, `NODE_COMPILE_CACHE` on a persistent volume means
+each cold pod reads pre-compiled V8 bytecode instead of recompiling from source; on the
+[Bun runtime](/docs/bun-runtime), the standalone tree is precompiled to bytecode at **build time**
+(measured −47% boot, 287 ms → 152 ms median on a real Next.js 16.2 build).
+
+<Callout type="info">
+**Cross-cold-start caching needs persistence.** The bytecode cache only helps across pods if it
+survives pod death — knext mounts it from a PVC, not pod-local disk, when
+`spec.cache.enableBytecodeCache` is set.
+</Callout>
+
+<Callout type="warn">
+**Perspective on the numbers.** On a real cluster, an end-to-end cold start (~1.3 s in a project
+benchmark) is dominated by **pod scheduling**, not the server boot — so shaving the boot helps but
+does not make scheduling free. Treat any specific millisecond figure as environment-dependent, not
+a guaranteed number. Node (with `NODE_COMPILE_CACHE`) remains the default runtime; Bun's
+build-time bytecode is the opt-in for squeezing the boot phase further.
+</Callout>

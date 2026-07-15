@@ -85,3 +85,6 @@ skills-lock.json
 **/.e2e-tarballs/
 **/.e2e-tarballs.lock/
 **/.e2e-pack.*/
+
+# turbo prune output (docs dependency closure, CI Trivy scan)
+.docs-closure/

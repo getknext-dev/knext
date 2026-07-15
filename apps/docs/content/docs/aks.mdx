@@ -1,0 +1,114 @@
+---
+title: Deploy on Azure Kubernetes Service (AKS)
+description: Run knext on AKS with MinIO (or an S3 gateway) for assets, Azure Cache for Redis, and ACR — Azure Blob is not a knext storage provider.
+---
+
+knext runs on any Kubernetes cluster with Knative Serving, including AKS. The general
+control-plane install is on [Operator & the NextApp CRD](/docs/operator); the prerequisites and
+config walkthrough are in [Getting started](/docs/getting-started). This page covers only the
+Azure-specific pieces.
+
+<Callout type="warn">
+**Not yet validated on a live AKS cluster.** This guide is a documented procedure, not a verified
+run — verify it in your own environment. Treat the commands below as a starting point and confirm
+against your cluster.
+</Callout>
+
+## 1 · Create the cluster
+
+```sh
+az aks create \
+  --resource-group <rg> \
+  --name <cluster-name> \
+  --node-count 2 \
+  --generate-ssh-keys
+
+az aks get-credentials --resource-group <rg> --name <cluster-name>
+```
+
+For the bytecode-cache PVC, knext needs a `StorageClass` that provisions writable volumes. AKS
+ships the Azure Disk CSI driver as the `managed-csi` StorageClass:
+
+```sh
+kubectl get storageclass managed-csi
+```
+
+## 2 · Install Knative, Kourier, cert-manager, and the operator
+
+Follow [Operator & the NextApp CRD](/docs/operator) for the one-command bundle install. The
+prerequisites — Knative Serving + Kourier, cert-manager, and a StorageClass — are listed in
+[Getting started](/docs/getting-started). The bundle ships a `config-network` ConfigMap that pins
+the Kourier ingress-class; apply it with `kubectl apply --server-side` so it merges into Knative
+Serving's own ConfigMap.
+
+## 3 · Storage — MinIO or an S3 gateway (not Azure Blob)
+
+<Callout type="warn">
+**Azure Blob Storage is not a knext storage provider.** knext storage accepts exactly `gcs`,
+`s3`, and `minio`. See [Multi-cloud deploy](/docs/multi-cloud) for the supported providers. On AKS,
+use one of:
+</Callout>
+
+- **Self-hosted MinIO** (S3-API, runs in-cluster): `provider: 'minio'` with `endpoint` pointing at
+  the in-cluster MinIO Service.
+- **An S3-compatible gateway** in front of object storage: `provider: 's3'` with `endpoint` set to
+  that gateway.
+
+The example below uses self-hosted MinIO.
+
+## 4 · Cache — Azure Cache for Redis
+
+ISR / data cache uses Redis (`cache.provider: 'redis'`). Point `cache.url` at an Azure Cache for
+Redis instance (or a self-hosted Redis Service). `cache.url` is required when the provider is
+`redis`.
+
+## 5 · Registry — ACR
+
+Push the app image to Azure Container Registry, e.g. `<registry>.azurecr.io/storefront`. Attach ACR
+to the cluster (`az aks update --attach-acr`) so nodes can pull. The operator **rejects any image
+that is not digest-pinned** (`@sha256:…`); `kn-next deploy` resolves the digest automatically.
+
+## 6 · Complete `kn-next.config.ts`
+
+```ts title="kn-next.config.ts"
+import type { KnativeNextConfig } from '@knext/core';
+
+const config: KnativeNextConfig = {
+  name: 'storefront',
+  registry: '<registry>.azurecr.io/storefront',
+
+  storage: {
+    provider: 'minio', // self-hosted MinIO (S3-API). Azure Blob is NOT supported.
+    bucket: 'storefront-assets',
+    endpoint: 'http://minio.minio.svc.cluster.local:9000',
+    publicUrl: 'https://assets.example.com/storefront-assets',
+    accessKey: process.env.MINIO_ACCESS_KEY,
+    secretKey: process.env.MINIO_SECRET_KEY,
+  },
+
+  cache: {
+    provider: 'redis',
+    url: process.env.REDIS_URL || 'rediss://<name>.redis.cache.windows.net:6380',
+    keyPrefix: 'storefront',
+  },
+
+  scaling: { minScale: 0, maxScale: 20 }, // minScale 0 = scale to zero
+};
+
+export default config;
+```
+
+<Callout type="info">
+If your Redis endpoint requires TLS (Azure Cache for Redis does, on port 6380), set `cache.tls:
+true` alongside the `rediss://` URL.
+</Callout>
+
+## 7 · Deploy
+
+```sh
+kn-next deploy --registry <registry>.azurecr.io/storefront
+```
+
+`kn-next deploy` builds the standalone image, pushes it (resolving the digest), and applies the
+`NextApp` CR; the operator reconciles it into a scale-to-zero Knative Service. Verify the resolved
+URL with `kubectl get ksvc storefront -o jsonpath='{.status.url}'`.

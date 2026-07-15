@@ -1,0 +1,51 @@
+---
+title: Bytecode caching
+description: Skipping JS recompilation on cold pods — NODE_COMPILE_CACHE on Node, per-file .jsc precompilation on Bun.
+---
+
+Scale-to-zero means cold starts. The expensive part of a Next.js cold start is the JS engine
+compiling JavaScript from source. knext skips that work: on **Node** by persisting the V8 bytecode
+cache to a volume, and on **Bun** by precompiling the standalone tree to bytecode at **build
+time** (see [Bun runtime](/docs/bun-runtime)). This page covers the Node mechanism.
+
+## How it works (Node)
+
+knext runs the standalone server with `NODE_COMPILE_CACHE` pointing at a directory. On the first
+start V8 serializes compiled bytecode to that directory; every later cold pod reads it and skips JS
+parsing/compilation.
+
+The runtime image starts the server like this:
+
+```dockerfile
+# NODE_COMPILE_CACHE: V8 bytecode cache for faster subsequent cold starts.
+CMD ["sh", "-c", "export NODE_COMPILE_CACHE=\"${NODE_COMPILE_CACHE:-.next/compile-cache}\"; exec node server.js"]
+```
+
+The Dockerfile supplies a fallback path; the operator's externally-injected value wins. When
+`spec.cache.enableBytecodeCache: true`, the operator injects:
+
+```
+NODE_COMPILE_CACHE=/cache/bytecode/latest
+```
+
+backed by a PVC, so the cache survives pod death and is shared across cold starts.
+
+<Callout type="warn">
+**Persistence is the whole point.** A pod-local cache directory would be re-primed on every cold
+start and save nothing. The cache must live on a PVC (`enableBytecodeCache`) to pay off across pods.
+</Callout>
+
+## Node vs Bun
+
+Both runtimes get a compile cache — via different mechanisms:
+
+| Runtime | Bytecode mechanism |
+|---|---|
+| **Node** (default) | `NODE_COMPILE_CACHE` — V8 serializes bytecode to the PVC at runtime; every later cold pod reads it. |
+| **Bun** (`runtime: 'bun'`) | **Build-time per-file bytecode precompilation**: `kn-next build` emits a companion `.jsc` for every server-side file (measured −47% startup, 287 ms → 152 ms median), plus Bun's runtime transpiler cache (`BUN_RUNTIME_TRANSPILER_CACHE_PATH`) on the same PVC. See [Bun runtime](/docs/bun-runtime). |
+
+<Callout type="warn">
+A Bun bytecode-built image is **Bun-only** — booting it with Node exits 1 with a `FATAL` message
+naming the fix rather than crash-looping silently. Details and costs are on the
+[Bun runtime](/docs/bun-runtime) page.
+</Callout>

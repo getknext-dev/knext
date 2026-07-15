@@ -1,0 +1,82 @@
+---
+title: Skew protection
+description: Old clients keep fetching their own build's chunks across rollouts and rollbacks.
+---
+
+Version skew happens when more than one revision serves at once — during a rollout, or when a
+[rollback](/docs/rollback) canary splits traffic. A browser that loaded build **A** keeps requesting
+`_next/static/A/...` chunks even after the server rolls forward to build **B**. If A's assets are
+gone, that client breaks. knext keeps old clients working by serving every build's assets from the
+durable object store and only reaping them under a build-id-aware retention rule.
+
+## Stable, deploy-pinned BUILD_ID
+
+knext ties Next.js's `BUILD_ID` to the deploy tag rather than a random id. At build time the CLI
+sets `NEXT_DEPLOYMENT_ID` to the deploy tag, and `next.config` reads it back as the build id:
+
+```ts title="next.config.ts"
+generateBuildId: () => process.env.NEXT_DEPLOYMENT_ID || null,
+deploymentId:    process.env.NEXT_DEPLOYMENT_ID || undefined,
+```
+
+Because `BUILD_ID === NEXT_DEPLOYMENT_ID`, the uploaded asset prefix
+(`_next/static/<BUILD_ID>/`), the image tag, and the static prefix the GC prunes by all share one
+id. `deploymentId` additionally makes Next append `?dpl=<id>` to asset and RSC requests —
+client-to-build pinning so a client only ever resolves chunks for its own build.
+
+## Uploads are additive
+
+A deploy uploads the new build's assets but **never prunes on upload** — old builds' static prefixes
+persist. Pruning is a separate, bounded step, so a fresh deploy can never strand a client that is
+mid-session on the previous build.
+
+## Build-id-aware GC
+
+After upload, knext reaps old static prefixes under two keep rules, OR'd together:
+
+1. **Retain window** — keep the newest *N* build-ids. *N* is `storage.assetRetention` (default 3).
+2. **Live set** — keep any build-id currently serving traffic, even if it is older than the window.
+
+The live set is read **read-only** from `NextApp.status.currentTraffic`: knext parses each live
+`revisionName`, then resolves it to a build-id via a label the operator stamps onto the revision.
+So a pinned, canaried, or rolled-back build is **never** reaped while it serves — even if it has
+aged out of the retain window.
+
+Deletes are scoped strictly to `<app>/_next/static/<buildId>/`; the bare `<app>/` prefix is
+teardown-only and is never a prune target. Shared, content-hashed directories (`chunks/`, `css/`,
+`media/`) are never treated as build-id prefixes, so assets referenced across builds are never
+candidates for pruning.
+
+The GC runs automatically after every deploy (best-effort — a GC failure never fails a deploy that
+has already shipped) and is also available as a standalone command, `kn-next gc`, for scheduled or
+manual runs — see the [CLI reference](/docs/cli#kn-next-gc).
+
+<Callout type="warn">
+The GC is **fail-safe**: if any live revision cannot be resolved to a build-id (label missing or
+the read failed), the whole GC is skipped for that deploy. The only failure mode is over-keeping
+assets — never over-deleting a build a client still needs.
+</Callout>
+
+## Tuning retention
+
+```ts title="kn-next.config.ts"
+storage: {
+  provider: 'gcs',
+  bucket: 'storefront-assets',
+  assetRetention: 5,   // keep the newest 5 build-ids (default 3)
+},
+```
+
+The live set is *added* to whatever the window keeps, so raising `assetRetention` widens the skew
+window for normal rollouts; live revisions are protected regardless.
+
+<Callout type="info">
+The browser-level proof — a real client on a canaried old build fetching its own chunks — runs as a
+nightly end-to-end test, not on every PR.
+</Callout>
+
+## Related
+
+- [Rollback & traffic split](/docs/rollback) — the traffic split that puts an old build back in the live set.
+- [Multi-cloud deploy](/docs/multi-cloud) — where per-build assets are stored and served from.
+- [Operator & the NextApp CRD](/docs/operator) — the `buildId` spec field and `currentTraffic` status field.

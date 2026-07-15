@@ -1,0 +1,143 @@
+---
+title: Getting started
+description: Take a Next.js app from next build to a scale-to-zero Knative service.
+---
+
+Take an existing Next.js app from `next build` to a scale-to-zero Knative service. knext uses the
+**official Next.js Deployment Adapter API** — no fork, no custom runtime.
+
+<Callout type="info">
+**Prerequisites.** A Kubernetes cluster with **Knative Serving** installed, **Next.js 16.x**, a
+container registry, and an object-storage bucket (`gcs`, `s3`, or `minio`).
+</Callout>
+
+## 0 · Install the packages (interim channel)
+
+The `@knext/*` packages' permanent home on the **public npm registry** is still being set up.
+Until it goes live, knext ships on an **interim distribution channel on GitHub Packages**, under
+the `@getknext-dev` scope — the same packages, republished under the org-matching scope GitHub
+Packages requires. When `@knext/*` goes live, the `@getknext-dev/*` names will be deprecated in
+its favor; existing installs keep working.
+
+GitHub Packages requires authentication **even for public packages** — an anonymous install gets a
+`401`. Create a GitHub personal access token with the `read:packages` scope and add an `.npmrc` to
+your project:
+
+```ini title=".npmrc"
+@getknext-dev:registry=https://npm.pkg.github.com
+//npm.pkg.github.com/:_authToken=${GITHUB_TOKEN}
+```
+
+```bash title="shell"
+npm install @getknext-dev/core     # installs the CLI too — the bin is `kn-next`
+npx kn-next --version              # or one-shot: npx @getknext-dev/core <subcommand>
+```
+
+<Callout type="warn">
+**Scope substitution.** Under the interim channel the package scope is `@getknext-dev`, so
+substitute it anywhere these docs say `@knext/*`: `adapterPath: '@getknext-dev/core/adapter'` in
+`next.config.ts`, `import type { KnativeNextConfig } from '@getknext-dev/core'`, and
+`@getknext-dev/db` for the [Data SDK](/docs/data-sdk). No token at hand? Running the CLI from a
+checkout of the knext repo still works as the token-less alternative.
+</Callout>
+
+## 1 · Point Next.js at the adapter
+
+Reference the knext adapter from your `next.config.ts`. The adapter forces `output: 'standalone'` at
+build time.
+
+```ts title="next.config.ts — Next.js 16.2+"
+import type { NextConfig } from 'next';
+
+const config: NextConfig = {
+  // knext ships the official NextAdapter as a package export.
+  // adapterPath is top-level config on Next.js 16.2+.
+  adapterPath: '@knext/core/adapter',
+};
+
+export default config;
+```
+
+<Callout type="info">
+**Next.js 16.0.x–16.1.x:** the option lives under `experimental` on those versions
+(`experimental: { adapterPath: '@knext/core/adapter' }`). Next.js 16.2+ auto-migrates the old
+`experimental` key with a warning; 16.0.x does **not** recognize the top-level form.
+</Callout>
+
+## 2 · Write the deploy config
+
+knext reads a typed `kn-next.config.ts`. The config type is `KnativeNextConfig`, exported from
+`@knext/core`. The minimum valid config requires `name`, `registry`, and a `storage` block with
+`provider`, `bucket`, and `publicUrl`.
+
+```ts title="kn-next.config.ts"
+import type { KnativeNextConfig } from '@knext/core';
+
+const config: KnativeNextConfig = {
+  name: 'storefront',
+  registry: 'registry.example.com/storefront',
+  storage: {
+    provider: 'gcs', // one of: gcs | s3 | minio
+    bucket: 'storefront-assets',
+    publicUrl: 'https://storage.googleapis.com/storefront-assets',
+  },
+  scaling: { minScale: 0, maxScale: 20 }, // minScale 0 = scale to zero
+  // runtime: 'bun',  // optional — run the standalone server under Bun, with
+  //                  // build-time bytecode precompilation. See /docs/bun-runtime.
+};
+
+export default config;
+```
+
+<Callout type="warn">
+`storage.provider` is validated against `gcs | s3 | minio`. The `StorageProvider` type *also* lists
+`azure`, but the CLI validator does **not** accept it — an `azure` config is rejected at load time.
+Don't use it. See [Multi-cloud deploy](/docs/multi-cloud).
+</Callout>
+
+## 3 · Build, push, deploy
+
+**`deploy`** is the default command — build → push → apply the `NextApp` CR. Validation runs
+automatically when the config loads.
+
+```bash title="shell"
+# build + push (digest is resolved automatically) and apply the NextApp CR
+$ kn-next deploy --registry registry.example.com/storefront
+
+✓ image  registry.example.com/storefront@sha256:9f1c...
+✓ NextApp/storefront applied
+✓ url    https://storefront.apps.example.com  (scaled to 0)
+```
+
+`kn-next deploy` flags: `-r/--registry`, `-b/--bucket`, `-t/--tag`, `-n/--namespace`,
+`--skip-build`, `--skip-upload`, `--dry-run` (print the CR without applying), `-h/--help`,
+`-v/--version`.
+
+Then watch the rollout to real readiness — `status` exits non-zero if the app fails to come up, so
+this pair works as a CI gate:
+
+```bash title="shell"
+$ kn-next status storefront --watch   # polls until Ready=True (bounded)
+```
+
+<Callout type="info">
+**The operator is the source of truth.** The CLI only ever *applies the `NextApp` CR*. The Go
+operator reconciles it into a Knative Service — wiring autoscaling, optionally the bytecode-cache
+volume, and rejecting any image that is not digest-pinned. See
+[Operator & the NextApp CRD](/docs/operator).
+</Callout>
+
+## Other commands
+
+The full surface is on the [CLI reference](/docs/cli). Highlights:
+
+- `kn-next doctor` — read-only cluster-prereq preflight, with honest failure classes (a network
+  flake is never reported as a missing CRD).
+- `kn-next status [app] [--json|--watch]` — the operator's honest conditions; exit 1 iff
+  `Ready=False`.
+- `kn-next rollback [app] --to <revision>` (optionally `--canary <n>`, 1–99) — shift traffic on
+  the `NextApp` CR's `spec.traffic` back to a prior revision.
+- `kn-next db bind` / `kn-next db migrate` — bind an existing Postgres Secret; apply
+  drizzle migrations against the writer, once. See the [Data SDK](/docs/data-sdk).
+- `kn-next gc` — reap old static-asset prefixes under the skew-protection retention rule
+  (over-keep, never over-delete).

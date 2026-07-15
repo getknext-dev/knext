@@ -1,0 +1,18 @@
+{
+  "title": "scale-zero-pg",
+  "description": "The database layer — scale-to-zero PostgreSQL",
+  "pages": [
+    "index",
+    "getting-started",
+    "connecting",
+    "data-sdk",
+    "extensions",
+    "appdatabase-api",
+    "scaling",
+    "tuning-write-heavy",
+    "reliability",
+    "operations",
+    "disaster-recovery",
+    "benchmarks"
+  ]
+}

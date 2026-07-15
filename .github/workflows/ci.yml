@@ -466,3 +466,177 @@ jobs:
           packages/db/src/__tests__/integration/live-postgres.test.ts
           packages/db/src/__tests__/live-dsn-guard.test.ts
           tests/db-live-workflow.test.ts
+
+  docs-site:
+    # Docs site (apps/docs, knext.dev) build gate — mirrors the compat-smoke
+    # file-manager pattern: root workspace-aware install, build the @knext chain
+    # (lib→db→core) then knext-docs. The docs app consumes @knext/core via
+    # `workspace:*` (it imports @knext/core, @knext/core/adapter, and
+    # @knext/core/validate), so the chain MUST build before `next build`.
+    #
+    # Two build legs, BOTH required:
+    #   1. vanilla (KNEXT_ADAPTER unset) — the managed-host build (what Vercel
+    #      ships at knext.dev). Asserts .next/BUILD_ID.
+    #   2. adapter (KNEXT_ADAPTER=1) — the self-host / dogfood leg. NON-OPTIONAL:
+    #      exercises next.config's experimental.adapterPath branch so adapter-key
+    #      drift under the monorepo's pinned Next is caught in CI. Asserts the
+    #      standalone server at .next/standalone/apps/docs/server.js.
+    #
+    # Path-filtered: only runs when the docs app OR the public @knext/core surface
+    # changes (turbo-cache-friendly — an unrelated PR skips the ~minutes-long
+    # Fumadocs build).
+    name: Docs site build (apps/docs → knext.dev)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Detect relevant changes
+        id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          # For push (main) the base is the previous commit; on PRs the action
+          # diffs against the PR base automatically.
+          filters: |
+            docs:
+              - 'apps/docs/**'
+              - 'packages/kn-next/src/**'
+              - 'packages/kn-next/package.json'
+              - '.github/workflows/ci.yml'
+
+      - name: Setup Node.js
+        if: steps.filter.outputs.docs == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Setup pnpm
+        if: steps.filter.outputs.docs == 'true'
+        uses: pnpm/action-setup@v4
+
+      - name: Install dependencies
+        if: steps.filter.outputs.docs == 'true'
+        run: pnpm install --frozen-lockfile
+
+      # lib→db→core, same ordering rationale as compat-smoke: core's dts build
+      # type-imports @knext/lib/clients and @knext/db/migrate, so both must ship
+      # dist first or core's build hard-fails (TS2307). knext-docs then resolves
+      # @knext/core (and its ./adapter + ./validate subpaths) against that dist.
+      - name: Build @knext/lib
+        if: steps.filter.outputs.docs == 'true'
+        run: pnpm --filter @knext/lib build
+
+      - name: Build @knext/db
+        if: steps.filter.outputs.docs == 'true'
+        run: pnpm --filter @knext/db build
+
+      - name: Build @knext/core
+        if: steps.filter.outputs.docs == 'true'
+        run: pnpm --filter @knext/core build
+
+      # Config-validate gate: run the docs dogfood kn-next.config.ts through the
+      # REAL @knext/core/validate (the public surface), same code path
+      # `kn-next deploy` uses. Proves the workspace `./validate` export resolves.
+      - name: Validate the docs kn-next.config.ts (real validateConfig)
+        if: steps.filter.outputs.docs == 'true'
+        working-directory: apps/docs
+        run: pnpm config:validate
+
+      # Leg 1 — vanilla managed-host build (Vercel parity; KNEXT_ADAPTER unset).
+      - name: Build knext-docs (vanilla / managed-host, KNEXT_ADAPTER unset)
+        if: steps.filter.outputs.docs == 'true'
+        run: pnpm --filter knext-docs build
+
+      - name: Assert vanilla build output
+        if: steps.filter.outputs.docs == 'true'
+        run: test -f apps/docs/.next/BUILD_ID
+
+      # Leg 2 — adapter / self-host dogfood build (NON-OPTIONAL). Exercises the
+      # experimental.adapterPath branch so adapter-key drift is caught here.
+      - name: Build knext-docs via adapter (KNEXT_ADAPTER=1, self-host dogfood)
+        if: steps.filter.outputs.docs == 'true'
+        env:
+          KNEXT_ADAPTER: '1'
+        run: pnpm --filter knext-docs build
+
+      - name: Assert adapter standalone server output
+        if: steps.filter.outputs.docs == 'true'
+        run: test -f apps/docs/.next/standalone/apps/docs/server.js
+
+      # Materialise the DOCS-SCOPED dependency closure. Under pnpm the whole
+      # workspace shares ONE root pnpm-lock.yaml and node_modules hoists to the
+      # root — so `scan-ref: apps/docs` finds NOTHING (no local lockfile). Instead
+      # `turbo prune` emits a pruned workspace whose pnpm-lock.yaml contains ONLY
+      # knext-docs + its @knext/{core,db,lib} closure. Trivy scans THAT lockfile,
+      # so the npm→pnpm transitive shifts (and the root pnpm.overrides Trivy
+      # remediations) are checked against the docs-only tree, not the whole repo.
+      - name: Prune docs dependency closure (turbo prune → scoped lockfile)
+        if: steps.filter.outputs.docs == 'true'
+        run: pnpm exec turbo prune knext-docs --out-dir ./.docs-closure
+
+      # Trivy fs scan of the docs closure lockfile. Report (don't block) on PRs;
+      # ENFORCE (fail) on main — the same phased gate the image supply-chain job
+      # uses. FAIL on HIGH/CRITICAL. NOTE: the pruned closure pulls in the shared
+      # workspace DEV toolchain (vitest→vite→rollup, picomatch) — any HIGH there is
+      # a pre-existing REPO-WIDE toolchain CVE (remediate via the root
+      # pnpm.overrides, like the other entries), not a docs-runtime issue; next /
+      # fumadocs / react are clean.
+      - name: Trivy scan — docs dependency closure (FAIL on HIGH/CRITICAL)
+        if: steps.filter.outputs.docs == 'true'
+        continue-on-error: ${{ github.ref != 'refs/heads/main' }}
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: ./.docs-closure/pnpm-lock.yaml
+          severity: HIGH,CRITICAL
+          exit-code: '1'
+          ignore-unfixed: true
+          format: table
+
+  docs-drift-reminder:
+    # SOFT, NON-BLOCKING nudge (judgment-based, never a hard gate):
+    #   (a) if a PR changes public surface (packages/kn-next/src exports, config
+    #       schema, CLI) WITHOUT touching apps/docs/content/**, warn "docs may
+    #       need an update — knext.dev is user-facing".
+    #   (b) grep the apps/docs/content/** DIFF for internal refs
+    #       (ADR-NNNN | #NN | vinext | Nitro) and warn — the site stays
+    #       user-facing even living beside the code + ADRs.
+    # Both are ::warning:: annotations only; the job always succeeds.
+    name: Docs drift reminder (soft, non-blocking)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Public-surface-changed-without-docs reminder
+        run: |
+          BASE="origin/${{ github.base_ref }}"
+          git fetch --no-tags --depth=1 origin "${{ github.base_ref }}" || true
+          CHANGED="$(git diff --name-only "$BASE"...HEAD || true)"
+          echo "Changed files:"; echo "$CHANGED"
+          SURFACE="$(echo "$CHANGED" | grep -E '^packages/kn-next/src/|^packages/kn-next/package.json' || true)"
+          DOCS="$(echo "$CHANGED" | grep -E '^apps/docs/content/' || true)"
+          if [ -n "$SURFACE" ] && [ -z "$DOCS" ]; then
+            echo "::warning title=Docs may need an update::Public @knext/core surface changed but apps/docs/content/** was not touched. knext.dev is user-facing — did the docs need an update? (Judgment-based reminder, not a gate.)"
+          else
+            echo "No public-surface-without-docs drift detected."
+          fi
+
+      - name: User-facing internal-reference reminder (content/** only)
+        run: |
+          BASE="origin/${{ github.base_ref }}"
+          git fetch --no-tags --depth=1 origin "${{ github.base_ref }}" || true
+          # Only scan ADDED lines in content/** — the app's next-adapter/config
+          # legitimately reference internals; this guard is content-only.
+          DIFF="$(git diff "$BASE"...HEAD -- 'apps/docs/content/**' || true)"
+          HITS="$(echo "$DIFF" | grep -E '^\+' | grep -vE '^\+\+\+' | grep -EI 'ADR-[0-9]|#[0-9]{2,}|vinext|Nitro' || true)"
+          if [ -n "$HITS" ]; then
+            echo "::warning title=Possible internal reference in user-facing docs::Added lines under apps/docs/content/** contain internal references (ADR-NNNN, #NN, vinext, or Nitro). knext.dev is user-facing — scrub internal refs. (Judgment-based reminder, not a gate.)"
+            echo "$HITS"
+          else
+            echo "No internal references detected in added content/** lines."
+          fi

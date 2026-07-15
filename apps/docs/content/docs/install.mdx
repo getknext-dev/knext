@@ -1,0 +1,154 @@
+---
+title: Installing knext (cluster prerequisites)
+description: Cluster prerequisites and the one-command operator install bundle.
+---
+
+This is the cloud-agnostic install page. It covers the cluster prerequisites and the order to
+install them, then installs the knext control plane (the Go operator) from its published bundle.
+The per-cloud guides — [GKE](/docs/gke), [EKS](/docs/eks), [AKS](/docs/aks), [OKE](/docs/oke),
+[OpenShift](/docs/openshift) — link back here for the shared steps.
+
+<Callout type="info">
+**The operator is the control plane.** Installing knext means installing the Go operator
+(`kn-next-operator`) plus the cluster pieces it depends on. After that, you deploy apps by applying
+`NextApp` resources — see [Operator & the NextApp CRD](/docs/operator).
+</Callout>
+
+## Install order
+
+| # | Prerequisite | Why |
+|---|---|---|
+| 1 | Kubernetes 1.27+ and `kubectl` | The cluster and client. |
+| 2 | Knative Serving + Kourier | Scale-to-zero serving and the ingress knext targets. |
+| 3 | cert-manager | Backs the operator's webhook certificate. |
+| 4 | A StorageClass + the Knative PVC feature flags | Required for the bytecode-cache PVC. |
+| 5 | The knext operator bundle | The control plane itself. |
+| 6 | A `NextApp` smoke test | Confirms the install works end to end. |
+
+## 1 · Kubernetes cluster and kubectl
+
+You need a Kubernetes cluster (1.27+) and a configured `kubectl`. Any conformant distribution works;
+the per-cloud guides cover provider specifics.
+
+## 2 · Knative Serving + Kourier
+
+knext deploys each app as a Knative Service, so **Knative Serving** must be installed, with a
+networking layer. knext targets **Kourier**.
+
+Knative Serving only programs routes against Kourier if its `config-network` ConfigMap (in the
+`knative-serving` namespace) sets `ingress-class` to the full controller-qualified value. The install
+bundle ships a `config-network` ConfigMap that pins it:
+
+```yaml title="config-network (shipped in the bundle)"
+data:
+  ingress-class: kourier.ingress.networking.knative.dev
+```
+
+<Callout type="warn">
+Apply the bundle with `kubectl apply --server-side` so this ConfigMap **merges** into the one Knative
+Serving already owns (which holds other networking keys) instead of clobbering it. If
+`kubectl apply --server-side` reports a **field-ownership conflict** — for example because a GitOps
+tool like Argo CD or Flux already manages this ConfigMap — add `--force-conflicts` to take over just
+the keys the bundle sets. The short `kourier.knative.dev` form does **not** match Kourier's ingress
+class and leaves routes unprogrammed.
+</Callout>
+
+If Knative routes never become reachable even though Kourier is installed, the usual cause is a
+missing or wrong `ingress-class`: the routes are never wired to the installed Kourier ingress.
+Setting `ingress-class` explicitly to the controller-qualified value (above) fixes routing.
+
+## 3 · cert-manager
+
+The operator runs a validating webhook, which needs a serving certificate.
+[cert-manager](https://cert-manager.io) must be installed in the cluster before you apply the
+bundle — the bundle includes the operator's `Issuer`/`Certificate` for the webhook.
+
+## 4 · StorageClass + Knative PVC feature flags
+
+The bytecode-cache PVC (enabled per app via `spec.enableBytecodeCache`) mounts a **writable**
+PersistentVolumeClaim so the runtime can persist its `NODE_COMPILE_CACHE` across cold starts. Knative
+Serving gates PVC-referencing PodSpecs behind two feature flags that are **default-off**:
+
+```yaml title="config-features (shipped in the bundle)"
+data:
+  kubernetes.podspec-persistent-volume-claim: enabled
+  kubernetes.podspec-persistent-volume-write: enabled
+```
+
+The bundle ships a `config-features` ConfigMap enabling both. Without **both**, Knative's admission
+webhook denies the bytecode-cache ksvc and reconcile fails with no ksvc created. Apply with
+`--server-side` so it merges into the `config-features` Serving already owns. As with the
+`config-network` ConfigMap above, if `--server-side` reports a **field-ownership conflict** (e.g. a
+GitOps tool already manages this ConfigMap), add `--force-conflicts` to take over just the keys the
+bundle sets.
+
+<Callout type="info">
+Unlike the ingress-class (which is Kourier-specific), these flags are **networking-layer
+independent** — safe under both Kourier and net-istio. A `StorageClass` / volume provisioner is a
+**separate** prerequisite: the PVC needs something to bind to. (`kind` ships the `local-path`
+provisioner; production clusters supply their own.)
+</Callout>
+
+## 5 · Install the operator
+
+The operator image and the `install.yaml` bundle are built and published automatically for each
+release. Every build generates an SBOM, is Trivy-scanned **before** it is pushed (HIGH/CRITICAL
+findings block publication), carries SLSA provenance, and is cosign-signed on the **pushed
+digest**. The published `install.yaml` (CRDs + RBAC + manager Deployment + webhook + cert-manager
+resources + the `config-network` and `config-features` ConfigMaps above) is regenerated with that
+same pushed digest, so the bundle you apply references exactly the image that was scanned and
+signed. See [Security → Supply chain](/docs/security#supply-chain).
+
+Install the control plane with one apply:
+
+```sh title="shell"
+kubectl apply --server-side -f https://github.com/getknext-dev/knext/releases/latest/download/install.yaml
+```
+
+<Callout type="warn">
+**The `latest/download/install.yaml` URL resolves only once a release has been cut.** If no release
+exists yet — or you are building from a fork — generate the bundle locally instead, from the
+operator source directory:
+
+```sh title="shell"
+make build-installer IMG=<some-registry>/kn-next-operator:tag
+kubectl apply --server-side -f dist/install.yaml
+```
+
+The checked-in `dist/install.yaml` carries a clearly-fake all-zeros bootstrap digest until the first
+published release.
+</Callout>
+
+The published bundle's manager image is **digest-pinned** (`@sha256:…`), never `:latest`. You can
+verify the operator image signature with cosign:
+
+```sh title="shell"
+cosign verify ghcr.io/getknext-dev/kn-next-operator@sha256:<digest> \
+  --certificate-identity-regexp 'https://github.com/getknext-dev/knext/.*' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+
+Verify the operator is up:
+
+```sh title="shell"
+kubectl wait --for=condition=Available -n kn-next-operator-system \
+  deployment/kn-next-operator-controller-manager --timeout=120s
+```
+
+The operator's readiness probe gates on its **admission webhook actually serving TLS**, not just
+on the process being alive. The `NextApp` validating webhook fails closed, so a "ready" operator
+whose webhook wasn't serving yet would reject every `NextApp` apply with a connection error —
+gating readiness on the webhook means `Available` implies admission works, and the `kubectl wait`
+above is sufficient before your first apply.
+
+<Callout type="info">
+The bundle is **Kourier-targeted**. The PVC feature flags from step 4 are correct under both Kourier
+and net-istio; the Kourier `ingress-class` from step 2 is correct for the Kourier path and must
+**not** be applied to an istio-only dev cluster.
+</Callout>
+
+## 6 · Verify with a NextApp
+
+With the operator running, deploy a `NextApp` resource and confirm the operator reconciles it into a
+reachable Knative Service. Follow [Getting started](/docs/getting-started) to build and apply your
+first app, and see [Operator & the NextApp CRD](/docs/operator) for the resource reference.

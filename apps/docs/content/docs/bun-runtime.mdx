@@ -1,0 +1,111 @@
+---
+title: Bun runtime
+description: Run the standalone server under Bun — with per-file bytecode precompilation for measurably faster cold starts.
+---
+
+knext runs one runtime artifact — the standalone `server.js` that `next build` produces — and lets
+you choose the process that executes it: **Node** (the default) or **Bun**. Bun is a first-class,
+suite-tested runtime choice, and it unlocks a cold-start optimization Node doesn't have: **per-file
+bytecode precompilation** at build time.
+
+## Enabling it
+
+Set `runtime: "bun"` in your deploy config:
+
+```ts title="kn-next.config.ts"
+const config: KnativeNextConfig = {
+  name: 'storefront',
+  registry: 'registry.example.com/storefront',
+  runtime: 'bun', // 'node' (default) or 'bun'
+  // ...
+};
+```
+
+The `NextApp` resource carries the same field (`spec.runtime: "bun"`), and the operator runs the
+container accordingly.
+
+## Verified against the official suite
+
+The same official `vercel/next.js` deploy-mode e2e suite that validates the Node runtime
+([778/778 nightly](/docs/compat-suite)) also runs against Bun, on a weekly cadence:
+
+- The most recent weekly run observed **775 of 778 tests passing** under Bun — not yet a
+  fully-green lane.
+- The remaining failures are **bugs we've isolated in the Bun runtime**, with minimal
+  reproductions (the edge-sandbox outbound `fetch()` hang is reduced to a completely Next-free
+  repro; the other is an instrumentation-related `not-found` invariant). They **persist in current
+  Bun releases** — Bun's canary line clears part of the set, but the `fetch()` hang persists even
+  there — and they are re-tested as new Bun versions land.
+
+<Callout type="info">
+knext does not blur the two claims: the **Node** runtime is the fully-green, nightly-verified
+credential; **Bun** is suite-tested weekly with the remaining gaps published rather than papered
+over.
+</Callout>
+
+## Per-file bytecode precompilation
+
+Scale-to-zero means cold starts, and the expensive part of a Next.js cold start is the JS engine
+compiling the server bundle from source. When you build with `runtime: 'bun'`, `kn-next build`
+precompiles the standalone tree to **JavaScriptCore bytecode ahead of time**:
+
+- Every server-side `.js` file is transformed **individually** (the module graph is untouched —
+  every `require()` stays verbatim), emitting a companion `.jsc` file that Bun's runtime consumes
+  on `require()`.
+- The `.jsc` is validated against its source: a stale, corrupt, or wrong-Bun-version companion
+  silently falls back to executing the source. A version mismatch only forfeits the speed win.
+- The pass is **fail-open**: any file that can't be transformed is left byte-identical (with the
+  reason reported), and if the Bun binary can't do bytecode at all the whole pass is skipped.
+  Opt out entirely with `KNEXT_BUN_BYTECODE=0`.
+
+**Measured** on a real Next.js 16.2 standalone build (spawn → first dynamic-route response, N=12):
+**287 ms → 152 ms median (−47%)**. Bun's runtime transpiler cache composes on top (145 ms warm; see
+below).
+
+### The costs, stated plainly
+
+- **Build time:** the pass spawns one `bun build` per file — roughly **12 s** for a ~970-file
+  standalone tree, paid on every `runtime: 'bun'` build.
+- **Image size:** the `.jsc` companions roughly double-to-triple the standalone tree (37 MB →
+  95 MB on a minimal app).
+- **The output is Bun-only** — see the guard below.
+
+<Callout type="warn">
+**A bytecode-built image only boots under Bun.** A transformed file does not load under Node — and
+it would fail *silently* there. knext makes this loud instead: after a successful bytecode pass,
+the server entry gets a fail-fast guard, so `node server.js` on a bytecode-built image **exits 1
+with a `FATAL` message naming the fix** (boot with Bun, or rebuild with `runtime: 'node'` /
+`KNEXT_BUN_BYTECODE=0`) rather than crash-looping mutely in a pod. Switching a bytecode-built app
+back to Node requires a **rebuild**. Images built for Node run under either runtime.
+</Callout>
+
+## The runtime transpiler cache
+
+Independently of the build-time bytecode pass, Bun caches its transpilation work at runtime. knext
+points `BUN_RUNTIME_TRANSPILER_CACHE_PATH` at the same persistent volume that backs
+[bytecode caching](/docs/bytecode) (`spec.cache.enableBytecodeCache`), so the cache survives pod
+death and pays off across cold starts — worth roughly 20% alone, and composing with the bytecode
+pass to 145 ms warm in the measurement above.
+
+## The keep-alive guard (Bun ≤ 1.3)
+
+Bun releases up to 1.3.x have a socket-reuse bug: a reused keep-alive connection can be **reset**
+when the next request arrives immediately after the previous response — clients see sporadic
+`ECONNRESET` / "socket hang up" on small, fast responses. knext ships a dependency-free preload
+that mitigates it by advertising `Connection: close` on every response, so spec-honoring clients
+(browsers, `undici`, the Knative activator) never reuse the socket.
+
+The guard is loaded **only** on the Bun runtime, is a no-op under Node, and **self-disables on
+Bun ≥ 1.4**, where the underlying bug is fixed upstream.
+
+## Choosing a runtime
+
+| | Node (default) | Bun |
+|---|---|---|
+| Official-suite status | **778/778, nightly** | 775/778 most recent weekly (not yet green); the 3 remaining failures isolated to Bun runtime bugs |
+| Cold-start compile cache | `NODE_COMPILE_CACHE` on a PVC | Build-time `.jsc` bytecode (−47% measured) + runtime transpiler cache on the PVC |
+| Build cost | — | ~12 s extra per build; larger image |
+| Image portability | Runs under Node **and** Bun | Bytecode-built images are **Bun-only** (loud guard) |
+
+If you want the maximally-verified path, stay on Node. If cold-start latency is your priority and
+you accept a Bun-only artifact, `runtime: 'bun'` is the fastest boot knext ships.

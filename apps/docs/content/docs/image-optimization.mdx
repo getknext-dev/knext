@@ -1,0 +1,61 @@
+---
+title: Image optimization
+description: next/image optimization via sharp, with optimized variants persisted to the object store so they survive scale-to-zero.
+---
+
+knext serves `next/image` runtime optimization (the `/_next/image` endpoint: resize, quality, and
+format negotiation to AVIF/WebP) with [**sharp**](https://sharp.pixelplumbing.com/) bundled into the
+runtime image. Optimization is configured in `next.config.ts`:
+
+```ts title="next.config.ts"
+images: {
+  formats: ['image/avif', 'image/webp'],
+  remotePatterns: [],
+},
+```
+
+- `formats` negotiates modern formats per the request's `Accept` header.
+- `remotePatterns` is an **explicit allowlist**. Empty (the default) means **local images only** —
+  there is no open optimizer, so the endpoint cannot be turned into an SSRF proxy. Add trusted
+  hosts as needed.
+
+## Variants survive scale-to-zero
+
+Optimizing an image is CPU-expensive, and under Knative scale-to-zero every cold pod starts with an
+empty local cache. Without intervention, each freshly-woken pod would re-optimize images another pod
+already produced — burning the cold-start CPU budget on redundant work.
+
+knext closes this with an **object-store sync** for the optimized-variant cache. The optimized
+variants persist to the object store (GCS / S3 / MinIO — knext's data plane), so a variant computed
+once is reused by every later pod. This is the same "survives the cold start" property as the
+[bytecode cache](/docs/bytecode): the work outlives the pod that did it.
+
+### How the sync works
+
+Next.js writes optimized variants to a **pod-local** directory
+(`.next/cache/images/<cacheKey>/...`), where `cacheKey` is a content hash of `(src, width, quality,
+mimeType)`. On the pinned Next.js version the image-optimizer cache is **not** pluggable through
+`cacheHandler`, so knext syncs the directory Next already writes rather than intercepting it:
+
+| Phase | Behavior |
+|---|---|
+| **Restore** (startup) | Downloads every persisted variant from the store into the local cache dir, skipping files that already exist locally — warming the cache before the server starts. |
+| **Watch + push** (runtime) | Watches the cache dir; when Next writes a new variant, the (debounced) variant directory is uploaded to the store under `<prefix>/<cacheKey>/`. |
+
+The sync is guarded by `STORAGE_BUCKET`: when it is unset, the sync is a no-op and Next falls back
+to pod-local caching. Both restore and push are **best-effort** — a store outage degrades to
+local-only optimization rather than crashing the pod.
+
+<Callout type="warn">
+**Honest scope.** Image optimization is implemented and working, but the dedicated per-PR image
+check is **skip-on-fail** (a missing or failed optimizer downgrades to a skip rather than a red
+build), so it is currently marked **⚠️ partial** in the
+[compatibility matrix](/docs/compat-matrix) rather than ✅ — functional, but not yet hard-gated by
+its own red-on-fail check.
+</Callout>
+
+## Related
+
+- [Scale to zero](/docs/scale-to-zero) — why a cold pod must not re-do work, and the autoscaling model.
+- [Bytecode cache](/docs/bytecode) — the sibling "survives the cold start" feature for V8 bytecode.
+- [Multi-cloud](/docs/multi-cloud) — the object store (GCS / S3 / MinIO) that holds the persisted variants.

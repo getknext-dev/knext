@@ -1,0 +1,51 @@
+@import 'tailwindcss';
+@import 'fumadocs-ui/css/neutral.css';
+@import 'fumadocs-ui/css/preset.css';
+@source '../node_modules/fumadocs-ui/dist/**/*.js';
+
+/*
+ * knext "acid-lime-on-void" identity, ported from the original static
+ * _design-reference/index.html so the Fumadocs site keeps the same visual brand.
+ */
+:root {
+  --void: #08090b;
+  --void-2: #0e1014;
+  --panel: #14161b;
+  --line: #23262e;
+  --ink: #e8eaed;
+  --ink-dim: #9aa0aa;
+  --ink-faint: #61656e;
+  --signal: #ccff00; /* acid lime — "active / scaled-up" */
+  --signal-dim: #a4cc00;
+  --display: 'Bricolage Grotesque', 'Times New Roman', serif;
+  --mono: 'JetBrains Mono', ui-monospace, monospace;
+
+  /* Map the brand onto Fumadocs theme tokens (dark-first). */
+  --color-fd-background: var(--void);
+  --color-fd-foreground: var(--ink);
+  --color-fd-primary: var(--signal);
+  --color-fd-border: var(--line);
+}
+
+.dark {
+  --color-fd-background: var(--void);
+  --color-fd-foreground: var(--ink);
+  --color-fd-primary: var(--signal);
+  --color-fd-border: var(--line);
+}
+
+body {
+  font-family: var(--mono);
+  background-image:
+    linear-gradient(transparent 0 calc(100% - 1px), #ffffff06 100%),
+    linear-gradient(90deg, transparent 0 calc(100% - 1px), #ffffff06 100%);
+  background-size: 64px 64px;
+}
+
+h1,
+h2,
+h3,
+.font-display {
+  font-family: var(--display);
+  letter-spacing: -0.03em;
+}

@@ -52,6 +52,13 @@ const DOCUMENTED_EXCLUSIONS: Record<string, string> = {
     // (only next.config-less scaffolding). Nothing for `tsc --noEmit` to check.
     "spike-bun-bytecode":
         "throwaway cold-start spike — no TS source and no tsconfig, nothing to typecheck",
+    // Fumadocs/Next docs site (apps/docs). Type-checked via `next build` in
+    // the `docs-site` CI job — Next apps need generated `.next/types` and
+    // fumadocs `.source/` types, so a cold standalone `tsc --noEmit` is
+    // unreliable; the build IS the typecheck. A standalone typecheck step is
+    // a follow-up once source/route-type generation is wired.
+    "knext-docs":
+        "Fumadocs/Next docs site — type-checked via next build in the docs-site CI job (Next needs generated .next/types + fumadocs .source types); a standalone tsc step is a follow-up",
     // Database layer of the unified platform: a Go + Kubernetes project (imported at
     // packages/scale-zero-pg). It carries a package.json only so turbo can orchestrate its
     // OWN Go toolchain (build/lint/test via `turbo run … --affected`); there is no

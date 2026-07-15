@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Scale-to-zero &amp; cold starts — knext docs</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,500;12..96,700;12..96,800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet" />
+    <style>
+      :root { --void:#08090b; --void-2:#0e1014; --panel:#14161b; --line:#23262e; --ink:#e8eaed; --ink-dim:#9aa0aa; --ink-faint:#61656e; --signal:#ccff00; --signal-dim:#a4cc00; --display:"Bricolage Grotesque",serif; --mono:"JetBrains Mono",ui-monospace,monospace; }
+      * { box-sizing:border-box; margin:0; padding:0; } html { scroll-behavior:smooth; }
+      body { background:var(--void); color:var(--ink); font-family:var(--mono); line-height:1.7; -webkit-font-smoothing:antialiased; }
+      a { color:var(--signal-dim); text-decoration:none; } a:hover { color:var(--signal); }
+      nav { position:sticky; top:0; z-index:50; height:60px; display:flex; align-items:center; padding:0 28px; border-bottom:1px solid var(--line); background:#08090bcc; backdrop-filter:blur(12px); justify-content:space-between; }
+      .mark { font-family:var(--display); font-weight:800; font-size:20px; letter-spacing:-0.04em; color:var(--ink); } .mark b { color:var(--signal); }
+      nav .crumbs { font-size:12px; color:var(--ink-faint); } nav .crumbs b { color:var(--ink-dim); }
+      .layout { display:grid; grid-template-columns:248px minmax(0,1fr) 200px; max-width:1280px; margin:0 auto; }
+      aside { border-right:1px solid var(--line); padding:36px 22px; position:sticky; top:60px; height:calc(100vh - 60px); overflow-y:auto; }
+      aside .group { font-size:11px; letter-spacing:0.18em; text-transform:uppercase; color:var(--ink-faint); margin:26px 0 12px; } aside .group:first-child { margin-top:0; }
+      aside ul { list-style:none; } aside li a { display:block; padding:6px 12px; margin-left:-12px; font-size:13px; color:var(--ink-dim); border-radius:3px; } aside li a:hover { color:var(--ink); background:var(--void-2); } aside li a.on { color:#0a0a00; background:var(--signal); font-weight:500; }
+      main { padding:56px 56px 120px; min-width:0; }
+      .kicker { font-size:12px; letter-spacing:0.2em; text-transform:uppercase; color:var(--signal-dim); }
+      main h1 { font-family:var(--display); font-weight:800; font-size:46px; letter-spacing:-0.04em; margin:14px 0 18px; line-height:1; }
+      main h2 { font-family:var(--display); font-weight:700; font-size:27px; letter-spacing:-0.02em; margin:56px 0 14px; scroll-margin-top:80px; }
+      main p { color:var(--ink-dim); max-width:68ch; margin:14px 0; } main p b { color:var(--ink); font-weight:500; }
+      main .lead { font-size:17px; color:var(--ink-dim); max-width:64ch; }
+      code.in { background:var(--panel); border:1px solid var(--line); border-radius:3px; padding:1px 6px; font-size:0.86em; color:var(--ink); }
+      .callout { border:1px solid var(--line); border-left:2px solid var(--signal); background:#0c0f08; border-radius:0 4px 4px 0; padding:16px 20px; margin:22px 0; font-size:14px; color:var(--ink-dim); max-width:68ch; } .callout b { color:var(--signal); }
+      .seq { border:1px solid var(--line); border-radius:6px; background:#0b0d11; margin:24px 0; max-width:68ch; overflow:hidden; }
+      .seq .row { display:grid; grid-template-columns:90px 1fr; border-bottom:1px solid var(--line); }
+      .seq .row:last-child { border-bottom:0; }
+      .seq .t { padding:14px 16px; font-size:12px; color:var(--signal-dim); border-right:1px solid var(--line); }
+      .seq .d { padding:14px 16px; font-size:13px; color:var(--ink-dim); } .seq .d b { color:var(--ink); }
+      .stat { display:flex; gap:0; margin:24px 0; max-width:68ch; }
+      .stat div { flex:1; border:1px solid var(--line); padding:18px; text-align:center; }
+      .stat .n { font-family:var(--display); font-weight:800; font-size:34px; color:var(--signal); letter-spacing:-0.03em; }
+      .stat .l { font-size:11px; color:var(--ink-faint); text-transform:uppercase; letter-spacing:0.1em; margin-top:4px; }
+      .toc { padding:56px 20px; position:sticky; top:60px; height:calc(100vh - 60px); font-size:12px; } .toc div:first-child { color:var(--ink-faint); letter-spacing:0.14em; text-transform:uppercase; margin-bottom:14px; } .toc a { display:block; color:var(--ink-dim); padding:5px 0; }
+      @media (max-width:1080px){ .layout{ grid-template-columns:220px 1fr; } .toc{ display:none; } } @media (max-width:760px){ .layout{ grid-template-columns:1fr; } aside{ display:none; } main{ padding:36px 22px 90px; } .stat{ flex-direction:column; } }
+    </style>
+  </head>
+  <body>
+    <nav>
+      <a class="mark" href="../index.html">kn<b>e</b>xt</a>
+      <div class="crumbs"><b>docs</b> / scale-to-zero &amp; cold starts</div>
+      <a href="https://github.com/AhmedElBanna80/knext" style="font-size:12px;color:var(--ink-dim)">github ↗</a>
+    </nav>
+    <div class="layout">
+      <aside>
+        <div class="group">Start</div>
+        <ul><li><a href="getting-started.html">Getting started</a></li><li><a href="getting-started.html#deploy">First deploy</a></li></ul>
+        <div class="group">Runtime</div>
+        <ul>
+          <li><a class="on" href="#">Scale-to-zero &amp; cold starts</a></li>
+          <li><a href="#how">How it scales to zero</a></li>
+          <li><a href="#cold">The cold-start budget</a></li>
+          <li><a href="getting-started.html#bytecode">Bytecode caching</a></li>
+        </ul>
+        <div class="group">Platform</div>
+        <ul><li><a href="operator.html">Operator + NextApp CRD</a></li></ul>
+      </aside>
+      <main>
+        <div class="kicker">// runtime</div>
+        <h1>Scale-to-zero &amp; cold starts</h1>
+        <p class="lead">When a knext service is idle, Knative drops it to <b>zero replicas</b> — you pay nothing for traffic you're not serving. The first request after that wakes it through the activator. This page is how that works, and how knext keeps the wake fast.</p>
+
+        <h2 id="how">How it scales to zero</h2>
+        <p>Each service runs behind a <b>queue-proxy</b> that reports concurrency to the Knative Pod Autoscaler (KPA). After the stable window with no requests, the KPA scales the deployment to <code class="in">0</code>. Incoming requests then route to the shared <b>activator</b>, which buffers the request, triggers a scale-up, and forwards once a pod is ready.</p>
+        <div class="seq">
+          <div class="row"><div class="t">t+0ms</div><div class="d"><b>Request arrives</b> at the ingress; the service is at 0 replicas → routed to the activator.</div></div>
+          <div class="row"><div class="t">buffer</div><div class="d">The <b>activator</b> holds the request and signals the autoscaler to scale 0→1.</div></div>
+          <div class="row"><div class="t">start</div><div class="d">A pod is scheduled; the Node standalone server boots — V8 reads its <b>bytecode cache</b>.</div></div>
+          <div class="row"><div class="t">serve</div><div class="d">The activator forwards the buffered request; subsequent requests hit the pod directly.</div></div>
+        </div>
+        <div class="callout"><b>Set it per app.</b> <code class="in" style="color:var(--ink)">spec.scaling.minScale: 0</code> enables scale-to-zero; raise it to keep a warm floor for latency-critical zones. The operator translates this to KPA annotations on the ksvc.</div>
+
+        <h2 id="cold">The cold-start budget</h2>
+        <p>A cold start is pod scheduling + container start + the Node/Next boot + first-request work. The boot is where a Next.js app spends real CPU compiling JavaScript — so knext attacks exactly that with <b>bytecode caching</b>: <code class="in">NODE_COMPILE_CACHE</code> on a persistent volume means each cold pod reads pre-compiled V8 bytecode instead of recompiling from source.</p>
+        <div class="stat">
+          <div><div class="n">~3s</div><div class="l">first cold start</div></div>
+          <div><div class="n">~24ms</div><div class="l">warm response</div></div>
+          <div><div class="n">$0</div><div class="l">idle compute</div></div>
+        </div>
+        <p>Measured on a real cluster (OKE, <code class="in">minScale:0</code>). The first cold start primes the cache; later cold pods on the same volume skip the compile step.</p>
+        <div class="callout"><b>Cross-cold-start caching needs persistence.</b> The bytecode cache only helps across pods if it survives pod death — knext mounts it from a PVC, not pod-local disk. See <a href="getting-started.html#bytecode">Bytecode caching</a>.</div>
+      </main>
+      <div class="toc">
+        <div>On this page</div>
+        <a href="#how">How it scales to zero</a>
+        <a href="#cold">The cold-start budget</a>
+      </div>
+    </div>
+  </body>
+</html>

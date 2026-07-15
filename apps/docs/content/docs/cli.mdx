@@ -1,0 +1,228 @@
+---
+title: CLI reference
+description: The kn-next CLI — deploy, doctor, status, rollback, db bind, db migrate, gc.
+---
+
+The `kn-next` binary is a small dispatcher around one job: **build → push → apply the `NextApp`
+CR**. Everything on the cluster is reconciled by the operator; the CLI's cluster writes are limited
+to applying or patching the CR, and its diagnostic commands are strictly read-only.
+
+```bash
+kn-next [deploy]       # default — build → push → apply the NextApp CR
+kn-next doctor         # cluster-prereq preflight (read-only)
+kn-next status         # the NextApp's honest conditions (read-only)
+kn-next rollback       # pin traffic to a prior Knative Revision
+kn-next db bind        # bind an existing Postgres Secret to the CR
+kn-next db migrate     # apply pending migrations against the writer, once
+kn-next gc             # reap old _next/static/<build-id>/ asset prefixes
+```
+
+<Callout type="info">
+**Strict flag parsing.** The subcommands fail loudly on unknown flags, dangling values, and stray
+positionals — a typo'd `--to` or `--wacth` is a hard error, never a silent fall-through to a
+different (possibly opposite) action.
+</Callout>
+
+<Callout type="warn">
+Only the subcommand words above are dispatched — any other first argument runs the default
+**deploy** flow. `build`, `cleanup`, `preview`, and `loadtest` are **not** bin subcommands; they
+ship as separate runnable entries inside the package (see
+[Directly runnable entries](#directly-runnable-entries) below).
+</Callout>
+
+## `kn-next deploy` (default)
+
+Loads and validates `kn-next.config.ts`, runs `next build` (standalone output), uploads static
+assets, builds and pushes the container image, resolves its **digest**, and applies a digest-pinned
+`NextApp` CR. After a successful deploy it also runs a best-effort [asset-retention
+GC](#kn-next-gc) — a GC failure never fails a deploy that has already shipped.
+
+| Flag | Notes |
+|---|---|
+| `-r`, `--registry` | Container registry (overrides config; env fallback `KN_REGISTRY`). |
+| `-b`, `--bucket` | Storage bucket (overrides config; env fallback `KN_BUCKET`). |
+| `-t`, `--tag` | Image tag (default: timestamp; env fallback `KN_IMAGE_TAG`). The tag doubles as the Next.js `BUILD_ID` — see [Skew protection](/docs/skew-protection). |
+| `-n`, `--namespace` | Kubernetes namespace (default `default`; env fallback `KN_NAMESPACE`). |
+| `--skip-build` | Skip the `next build` step. |
+| `--skip-upload` | Skip the asset-upload step (also skips the post-deploy GC). |
+| `--dry-run` | Print the `NextApp` CR without applying it. |
+| `-h`, `--help` / `-v`, `--version` | Help / version. |
+
+Config validation runs automatically when the config loads — there is no separate `validate`
+command.
+
+## `kn-next doctor`
+
+A **read-only** preflight that checks the cluster prerequisites: the `NextApp` CRD, operator
+readiness, the cert-manager-backed admission webhook, the Knative `ingress-class` against the
+reconciler that actually serves it, operator-image pullability, and Knative Serving itself.
+
+```bash
+kn-next doctor            # human-readable checklist
+kn-next doctor --json     # structured results for CI
+```
+
+Each check reports `PASS`, `WARN`, `FAIL`, `SKIP`, or `ERROR` — and the distinction is deliberate.
+When a probe itself fails, doctor **classifies the failure before mapping it to a result**, so a
+flaky network is never reported as a missing CRD:
+
+| Class | Meaning | Hint printed |
+|---|---|---|
+| not-found | The API server answered: the resource is absent. | Install the missing prerequisite. |
+| network | The probe never got an answer (refused / TLS / timeout). | Check network/VPN and retry. |
+| auth | Credentials failed (expired token, `Unauthorized`). | Re-authenticate and retry. |
+| forbidden | Authenticated but RBAC denied the read. | Ask a cluster admin for `get`/`list` on the resource. |
+
+**Exit code:** `1` on any hard `FAIL` **or** probe `ERROR` (the cluster state could not be
+verified); `WARN`/`SKIP` never fail. A fully unreachable cluster degrades to all-`SKIP` and exits
+`0` — doctor reports what it could verify, it does not guess.
+
+## `kn-next status`
+
+Renders the operator-reported truth from the `NextApp` CR — URL, image, and the conditions
+`Ready`, `Degraded`, `Reconciling`, and `DatabaseReady` — with the operator's reason and guidance
+verbatim when something is wrong (e.g. `IngressNotProgrammed`, `PinnedRevisionNotFound`).
+Conditions an older operator does not report render as `not reported`.
+
+```bash
+kn-next status storefront                 # one-shot
+kn-next status storefront --json          # structured subset (absent conditions are explicit nulls)
+kn-next deploy && kn-next status --watch  # CI gate: poll until Ready=True
+```
+
+| Flag | Notes |
+|---|---|
+| `<app>` | Positional, optional — defaults to `name` from `kn-next.config.ts`. |
+| `-n`, `--namespace` | Namespace (default `default`). |
+| `--json` | One-shot only — rejected in combination with `--watch` (a 5s poll would emit concatenated JSON documents; poll `status --json` from your script instead). |
+| `--watch` | Poll every 5s until `Ready=True`. Bounded at 10 minutes (exit `1` on timeout); tolerates up to 3 consecutive transient `kubectl` failures. |
+
+**Exit code:** `1` **iff** the `Ready` condition is present with status `False` — a missing
+condition is "not reported", not a failure. This makes `kn-next deploy && kn-next status --watch`
+a usable CI gate.
+
+## `kn-next rollback`
+
+Shifts serving traffic to a prior Knative Revision by patching **only** the `NextApp` CR's
+`spec.traffic` (one `kubectl` merge-patch); the operator renders the Knative traffic split. See
+[Rollback & traffic split](/docs/rollback) for the full semantics.
+
+```bash
+kn-next rollback storefront --to storefront-00002              # pin 100% to a prior revision
+kn-next rollback storefront --to storefront-00002 --canary 20  # 20% to latest-ready, 80% pinned
+kn-next rollback storefront                                    # clear the pin — back to latest-ready
+```
+
+| Flag | Notes |
+|---|---|
+| `--to <revision>` | Prior Knative Revision to pin. Omit to clear any pin. |
+| `--canary <n>` | Integer **1–99** only: percent sent to **latest-ready**; the remainder goes to the pinned revision. `0` and `100` are rejected (omit the flag, or don't pin). Requires `--to`. |
+| `-n`, `--namespace` | Namespace (default `default`). |
+
+Because the bare form (`kn-next rollback <app>`) *clears* the pin, argument parsing is
+deliberately strict: a dangling `--to`, an unknown flag, or an extra positional is a hard error —
+never a silent un-pin when you asked to pin.
+
+## `kn-next db bind`
+
+Binds an **existing** Postgres Secret to the app as `DATABASE_URL` (and optionally a read-only DSN
+as `DATABASE_URL_RO`) by setting `spec.database.secretRef` on the `NextApp` CR — exactly one
+cluster write. The operator wires the env injection. See
+[Operator & the NextApp CRD → Databases](/docs/operator#databases-specdatabase).
+
+```bash
+kn-next db bind storefront --secret storefront-db
+kn-next db bind storefront --secret storefront-db --ro-secret storefront-db   # same Secret, both keys
+kn-next db bind storefront --secret storefront-db --dry-run                   # print the patch, write nothing
+```
+
+| Flag | Notes |
+|---|---|
+| `--secret <name>` | **Required.** Secret carrying the `DATABASE_URL` DSN. |
+| `--key <key>` | Key inside `--secret` (default `DATABASE_URL`). |
+| `--ro-secret <name>` | Secret carrying a read-only DSN → `DATABASE_URL_RO`. |
+| `--ro-key <key>` | Key inside `--ro-secret` (default `DATABASE_URL_RO`). |
+| `-n`, `--namespace` | Namespace (default `default`). |
+| `--dry-run` | Print the CR merge-patch YAML without applying it. |
+| `--dsn <dsn>` / `--secret-file <path>` | Local-only inputs for the connection-contract check (never sent to the cluster). |
+
+The command validates the binding against the live CR first (managed mode and BYO mode are
+mutually exclusive; `spec.database` owns `DATABASE_URL`), and after patching it **re-reads the CR**
+— on a cluster whose operator predates the `spec.database` schema the field would be silently
+pruned, so the CLI fails loudly and tells you to upgrade the operator bundle instead of logging a
+false success.
+
+## `kn-next db migrate`
+
+Applies pending [drizzle-kit-generated migrations](/docs/data-sdk#migrations) against the
+**writer**, once, out of the request path.
+
+```bash
+kn-next db migrate                       # apply ./drizzle against DATABASE_URL
+kn-next db migrate --dir ./migrations    # custom migrations directory
+kn-next db migrate --url "$WRITER_DSN"   # explicit writer DSN override
+```
+
+| Flag | Notes |
+|---|---|
+| `--url <dsn>` | Writer DSN override (default: `DATABASE_URL`). |
+| `--dir <path>` / `--migrations <path>` | Migrations directory (default `./drizzle`). |
+
+- **Writer-only.** It refuses a read-replica DSN — running migrations on a replica is always a
+  bug.
+- **Idempotent, fail-loud.** Applied migrations are recorded, so a re-run is a no-op; a migration
+  error exits non-zero so a CI step or Job fails instead of shipping a half-applied schema.
+- Run it as a CI step or a one-shot Kubernetes Job — **not** on pod boot. The
+  [Data SDK page](/docs/data-sdk#migrations) has the full Job recipe.
+
+## `kn-next gc`
+
+Reaps old `_next/static/<build-id>/` asset prefixes from the object store under the skew-protection
+retention rule: keep the newest `storage.assetRetention` build-ids (default 3) **plus** every
+build-id currently **serving traffic** (resolved read-only from `NextApp.status.currentTraffic`).
+The same logic runs automatically after every deploy; the standalone command exists for scheduled
+or manual runs.
+
+```bash
+kn-next gc                          # prune using the config's app + retention
+kn-next gc --build-id 20260711-1    # treat this build-id as the newest
+```
+
+| Flag | Notes |
+|---|---|
+| `--build-id <id>` | Build-id to treat as the newest (e.g. a tag just deployed). |
+| `-n`, `--namespace` | Namespace of the `NextApp` (default `default`). |
+
+**Fail-safe: over-keep, never over-delete.** If any live revision cannot be resolved to a
+build-id, the GC skips entirely — the only possible failure mode is keeping assets too long.
+Shared, content-hashed directories (`chunks/`, `css/`, `media/`) are never treated as build-id
+prefixes, and the bare `<app>/` prefix is never a prune target. See
+[Skew protection](/docs/skew-protection).
+
+## Directly runnable entries
+
+Some entries ship in the package as directly runnable scripts rather than bin subcommands:
+
+- **build** (`dist/cli/build.js`) — run `next build` (standalone output) and upload static assets,
+  without deploying.
+- **cleanup** (`dist/cli/cleanup.js`) — tear down a deployed app by issuing exactly one cluster
+  write: `kubectl delete nextapp <name> --ignore-not-found`. Owned resources (Knative Service,
+  ServiceAccount, PVC) are removed by Kubernetes owner-reference garbage collection, and the
+  operator's finalizer clears external state (the app's object-store prefix and Redis keyspace,
+  scoped strictly to that app).
+- **preview** (`dist/cli/preview.js`) — deploy/destroy per-PR ephemeral
+  [preview environments](/docs/previews) (`preview deploy --pr <n> --branch <ref>` /
+  `preview destroy --pr <n>`).
+- **loadtest** (`dist/cli/loadtest.js`) — generate and apply an ephemeral k6 load-test Job
+  against a deployed service. An operability tool, not part of the deploy path.
+
+```bash
+node node_modules/@knext/core/dist/cli/build.js
+node node_modules/@knext/core/dist/cli/cleanup.js
+```
+
+## Related
+
+- [Getting started](/docs/getting-started) — the deploy walkthrough.
+- [Operator & the NextApp CRD](/docs/operator) — what the operator does with the CR.
+- [Data SDK](/docs/data-sdk) — `@knext/db`, migrations, and the database binding.

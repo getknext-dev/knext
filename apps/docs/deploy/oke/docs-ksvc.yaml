@@ -1,0 +1,22 @@
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: knext-docs
+  namespace: knext-docs
+spec:
+  template:
+    metadata:
+      annotations:
+        autoscaling.knative.dev/min-scale: "1"   # keep warm; set "0" for scale-to-zero
+    spec:
+      imagePullSecrets:
+        - name: ocir-pull
+      containers:
+        - image: me-abudhabi-1.ocir.io/axfqznklsd2t/knext-docs:sha-389cfa3-amd64@sha256:38c4bcd10175e945d2e6c231f3a4ec61b03109620ab6068f549b8c6afa3be09e
+          ports:
+            - containerPort: 3000
+          env:
+            - { name: HOSTNAME, value: "0.0.0.0" }
+          resources:
+            requests: { cpu: 100m, memory: 256Mi }
+            limits: { cpu: "1", memory: 768Mi }

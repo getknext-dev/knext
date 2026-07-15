@@ -1,0 +1,228 @@
+---
+title: Deploy on Amazon EKS
+description: A documented procedure for running knext on EKS — S3 for assets, ElastiCache/Redis or DynamoDB for the cache, ECR for digest-pinned images.
+---
+
+This is a **documented procedure** for EKS. The steps below are documented but **not yet validated
+on a live EKS cluster** — see the callout below before relying on it in production.
+
+<Callout type="warn">
+**Not yet validated on a live EKS cluster.** knext's deployment has been exercised live on other
+clouds, not on EKS. Treat this guide as a procedure to validate in your own environment, not a
+battle-tested runbook.
+</Callout>
+
+This guide assumes Knative Serving, Kourier, cert-manager, and the knext operator are already
+installed (those are cloud-agnostic):
+
+<Callout type="info">
+**Prerequisite: [the common install page](/docs/install).** It covers Knative Serving + Kourier
+(networking), cert-manager, the knext operator, and the PVC feature flags that back the
+bytecode-cache mount. This guide only covers the EKS-specific pieces: cluster, the EBS CSI driver,
+storage, cache, and registry.
+</Callout>
+
+## 1. Create the cluster
+
+The quickest path is `eksctl`:
+
+```bash
+eksctl create cluster \
+  --name knext \
+  --region us-east-1 \
+  --nodes 2 \
+  --node-type m5.large \
+  --with-oidc          # required for IRSA, below
+```
+
+`--with-oidc` provisions the OIDC provider that **IRSA** (IAM Roles for Service Accounts) needs —
+that's how the app authenticates to S3 without static keys.
+
+After the cluster is up, follow [the common install page](/docs/install) to install Knative,
+Kourier, cert-manager, and the operator.
+
+## 2. Install the EBS CSI driver
+
+The bytecode-cache PVC (see the install page's PVC feature flags) needs a StorageClass backed by a
+real volume provisioner. On EKS that's the **EBS CSI driver**, exposing `gp3` / `gp2`:
+
+```bash
+eksctl create addon --name aws-ebs-csi-driver --cluster knext --force
+```
+
+A `gp3` StorageClass (preferred over `gp2`):
+
+```yaml title="storageclass-gp3.yaml"
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: gp3
+provisioner: ebs.csi.aws.com
+volumeBindingMode: WaitForFirstConsumer
+parameters:
+  type: gp3
+```
+
+Point the bytecode-cache PVC at this StorageClass per the install page.
+
+## 3. Storage: S3
+
+knext uploads build output (static assets) to an object store keyed by build ID and serves it from
+`assetPrefix`. On EKS that store is an **S3 bucket**:
+
+```bash
+aws s3api create-bucket \
+  --bucket my-app-assets \
+  --region us-east-1 \
+  --create-bucket-configuration LocationConstraint=us-east-1
+```
+
+Auth uses **IRSA** — bind the app's Kubernetes ServiceAccount to an IAM role that grants
+`s3:PutObject` / `s3:GetObject` on the bucket (knext writes build assets to it; browsers read them
+over the public `publicUrl` / CDN):
+
+```bash
+eksctl create iamserviceaccount \
+  --cluster knext \
+  --namespace default \
+  --name my-app \
+  --attach-policy-arn arn:aws:iam::aws:policy/AmazonS3FullAccess \
+  --approve
+```
+
+For least privilege, replace the managed policy with a custom policy scoped to
+`s3:PutObject` / `s3:GetObject` on `arn:aws:s3:::my-app-assets/*`.
+
+In the config, `provider: 's3'` with a `region`. Serve `publicUrl` either directly from S3 or
+through a CloudFront distribution / custom endpoint:
+
+```ts
+storage: {
+  provider: 's3',
+  bucket: 'my-app-assets',
+  region: 'us-east-1',
+  publicUrl: 'https://my-app-assets.s3.us-east-1.amazonaws.com',
+  // CloudFront: set publicUrl to the distribution domain instead.
+  // S3-compatible store: set `endpoint`.
+},
+```
+
+<Callout type="warn">
+knext's storage validator accepts only `gcs`, `s3`, and `minio`. There is **no Azure Blob
+provider**. Any S3-compatible store works via `s3` + `endpoint` — see
+[Multi-cloud deploy](/docs/multi-cloud).
+</Callout>
+
+## 4. Cache: Redis (ElastiCache) or DynamoDB
+
+knext supports two cache providers: `redis` and `dynamodb`.
+
+### Option A — Redis (ElastiCache)
+
+The well-trodden path. Provision an ElastiCache for Redis cluster and wire its endpoint into
+`cache`. `cache.url` is **required** when `provider: 'redis'`; keep it in a Kubernetes Secret:
+
+```ts
+cache: {
+  provider: 'redis',
+  url: process.env.REDIS_URL!,   // injected from a K8s Secret
+  keyPrefix: 'my-app',
+},
+```
+
+### Option B — DynamoDB
+
+```ts
+cache: {
+  provider: 'dynamodb',
+  tableName: 'my-app-cache',
+  region: 'us-east-1',
+},
+```
+
+<Callout type="warn">
+**DynamoDB cache is config/schema-level.** The `dynamodb` provider is a valid config value — the
+validator accepts it and the type carries `tableName` / `region` — but unlike Redis the validator
+performs **no depth checks** on it (only `redis` is required to have a `url`). Verify the DynamoDB
+cache adapter's runtime behavior against your workload before depending on it; Redis (ElastiCache)
+is the exercised cache path.
+</Callout>
+
+## 5. Registry: ECR
+
+Push the runtime image to **ECR**. The operator **rejects `:latest`** — images must be
+digest-pinned (`@sha256:`), so let the CLI build and push.
+
+```bash
+aws ecr create-repository --repository-name knext-repo --region us-east-1
+aws ecr get-login-password --region us-east-1 \
+  | docker login --username AWS --password-stdin \
+    <account-id>.dkr.ecr.us-east-1.amazonaws.com
+```
+
+Set `registry` to the ECR repo path:
+
+```ts
+registry: '<account-id>.dkr.ecr.us-east-1.amazonaws.com/knext-repo',
+```
+
+## 6. Complete config
+
+```ts title="kn-next.config.ts"
+import type { KnativeNextConfig } from '@knext/core';
+
+const config: KnativeNextConfig = {
+  name: 'my-app',
+
+  // Static assets → S3, served from assetPrefix
+  storage: {
+    provider: 's3',
+    bucket: 'my-app-assets',
+    region: 'us-east-1',
+    publicUrl: 'https://my-app-assets.s3.us-east-1.amazonaws.com',
+  },
+
+  // ISR / data cache → Redis (ElastiCache)
+  cache: {
+    provider: 'redis',
+    url: process.env.REDIS_URL!,
+    keyPrefix: 'my-app',
+  },
+
+  // ECR — image is digest-pinned by the CLI
+  registry: '<account-id>.dkr.ecr.us-east-1.amazonaws.com/knext-repo',
+
+  // Knative autoscaling — minScale 0 = scale to zero
+  scaling: {
+    minScale: 0,
+    maxScale: 5,
+    memoryRequest: '256Mi',
+    memoryLimit: '512Mi',
+  },
+
+  // Prometheus metrics + Grafana dashboards
+  observability: {
+    enabled: true,
+  },
+
+  // Redis URL lives in a K8s Secret, never in this file
+  secrets: {
+    envFrom: ['my-app-credentials'],
+  },
+};
+
+export default config;
+```
+
+## 7. Build and deploy
+
+```bash
+kn-next build     # builds the standalone image, pushes a digest-pinned ref
+kn-next deploy    # emits the NextApp CR; the operator reconciles it
+```
+
+The CLI never touches Knative directly — it applies a `NextApp` resource and the operator
+reconciles it into a scaled-to-zero Knative Service. See
+[Operator & the NextApp CRD](/docs/operator) for the CRD shape, digest-pinning enforcement, and
+the operator's security defaults. For the scale-to-zero wake path, see
+[Scale-to-zero & cold starts](/docs/scale-to-zero).

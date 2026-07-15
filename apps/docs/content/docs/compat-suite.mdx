@@ -1,0 +1,93 @@
+---
+title: Verified compatibility
+description: knext is validated against the official Next.js deploy-mode e2e suite — 778 tests, zero failures on Node, re-verified nightly.
+---
+
+knext's goal is **verified-adapter status**: open source, validated against the official
+Next.js compatibility suite, honest about every exclusion. This page describes exactly what is
+verified, how, and what the claim does and does not cover.
+
+<Callout type="info">
+**The claim.** knext passes the official `vercel/next.js` **deploy-mode e2e suite** on the **Node
+runtime**: **778 tests, zero failures**, against Next.js **v16.2.0**, re-verified **nightly**. The
+scope — including the small set of documented exclusions — is spelled out below.
+</Callout>
+
+## What "the official suite" is
+
+There is no `@next/compat-suite` npm package. The official compatibility harness is a **mode** of
+Next.js's own e2e suite: you check out `vercel/next.js`, build it, and run its deploy-eligible e2e
+tests with `NEXT_TEST_MODE=deploy`, pointing the harness at your adapter's lifecycle scripts. Each
+test then builds a real app **through your adapter** and runs its assertions over HTTP against the
+deployment your scripts produce — the same validation path the reference adapters use.
+
+## How knext runs it
+
+- **Pinned upstream ref.** The harness checks out `vercel/next.js` at a pinned release tag
+  (currently `v16.2.0`) — never `canary` — so an upstream break is not mistaken for a knext
+  regression. Refs older than v16.2.0 are rejected: that release is where deploy mode routes tests
+  through the configured adapter, so anything earlier would test nothing knext-related.
+- **Real lifecycle scripts.** The deploy tests run through knext's lifecycle scripts, which pack
+  the `@knext/core` adapter, set `NEXT_ADAPTER_PATH`, run `next build` (standalone output), and
+  boot the standalone `server.js`.
+- **16 shards, nightly.** The full run is sharded 16 ways (matching the reference adapter setup)
+  and runs on a nightly schedule plus manual dispatch. A **Bun-runtime lane** of the same suite
+  runs weekly — see [Bun runtime](/docs/bun-runtime).
+- **Red means red.** A shard reporting any failed (or silently not-run) test fails the job, and a
+  red scheduled run opens a tracking alarm. The claim on this page is only as good as the most
+  recent green run, and the policy is to withdraw it if the nightly goes red.
+
+## Results
+
+| Runtime | Result | Cadence |
+|---|---|---|
+| **Node** (default) | **778 passed / 0 failed** (16 shards, Next.js v16.2.0) | Nightly |
+| **Bun** | Not yet green — the weekly lane most recently observed **775 of 778 passing**, with the 3 remaining failures being isolated, documented Bun runtime bugs — see [Bun runtime](/docs/bun-runtime) | Weekly |
+
+## What the claim covers — and what it doesn't
+
+The 778 tests are Next.js's own **deploy-eligible e2e selection** at the pinned ref (including
+upstream's own per-case skips), minus two documented, auditable subtractions:
+
+### 1 · Architectural exclusions (4 categories)
+
+These are capabilities knext does not have, excluded openly rather than silently skipped:
+
+| Excluded category | Why |
+|---|---|
+| Edge Runtime | knext targets the Node/Bun standalone server; it has no edge (V8-isolate) runtime. |
+| Edge Middleware | Edge Middleware needs the Edge Runtime; knext supports the Node middleware convention only. |
+| PPR | Partial Prerendering is not adapter-standardizable yet (upstream-gated). |
+| Cache Components | `'use cache'` / `cacheLife` is an evolving upstream API not yet stabilized for adapters. |
+
+### 2 · A per-case flaky-quarantine ledger
+
+A small, evidence-guarded ledger quarantines individually-documented flaky tests. Every entry
+records the observed failure mechanism and its upstream provenance, and the ledger is guarded by a
+test so entries cannot be added without that evidence. It exists to keep the nightly signal clean —
+not to manufacture a green run.
+
+The ledger has two tiers: per-case skips for isolated wobble, and a bounded set of **file-level
+quarantines** for one test family whose flakiness under CPU contention was root-caused to an
+upstream client-cache race — **fixed upstream after the pinned release**. Those entries expire
+automatically the moment the pin moves to a release containing the fix; they are why the headline
+total moved from an earlier 788 to today's 778.
+
+<Callout type="warn">
+**No silent skips.** Every exclusion is named, categorized, and kept in a manifest that must shrink
+— never grow — except from observed, documented failures. If a category above ever becomes
+adapter-standardizable upstream, it comes off the list and into the run.
+</Callout>
+
+## The per-PR smoke gate
+
+Independently of the official suite, a fast in-repo smoke gate runs on **every change**: it builds
+an example app through the adapter, boots the standalone `server.js` on a **Node + Bun** matrix,
+and hard-asserts real HTTP behavior (App Router HTML, RSC flight payloads, route handlers,
+dynamic/static routes, middleware header injection). The official suite is the correctness
+credential; the smoke gate is the minutes-fast regression tripwire in front of it.
+
+<Callout type="info">
+For the per-feature status — each row backed by on-disk evidence and a CI guard test — see the
+[compatibility matrix](/docs/compat-matrix).
+</Callout>
