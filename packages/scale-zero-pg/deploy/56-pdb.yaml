@@ -1,0 +1,33 @@
+# PodDisruptionBudgets for the storage plane. Voluntary disruptions (node
+# drains, kubectl rollout) must never take the durability tier below quorum.
+#
+# Safekeeper: 3 members, writes need a 2/3 majority. minAvailable: 2 means a
+# drain evicts at most ONE member at a time — the quorum (and therefore write
+# availability) is preserved throughout.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: safekeeper
+  namespace: scale-zero-pg
+  labels: { app: safekeeper, plane: storage }
+spec:
+  minAvailable: 2 # keep the 2/3 write quorum during any voluntary disruption
+  selector:
+    matchLabels: { app: safekeeper }
+---
+# Pageserver: single replica in the MVP (a known SPOF — see docs/reviews).
+# minAvailable: 1 makes a drain that would evict it BLOCK rather than silently
+# cause a read outage. CAVEAT: with one replica this means a node drain will
+# not proceed automatically — draining the pageserver's node is a MANUAL,
+# planned operation (cordon, scale a standby, or accept the read-serving gap).
+# Production must add a second pageserver and raise this.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: pageserver
+  namespace: scale-zero-pg
+  labels: { app: pageserver, plane: storage }
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: { app: pageserver }

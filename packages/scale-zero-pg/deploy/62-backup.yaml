@@ -1,0 +1,964 @@
+# 62-backup.yaml — backups + rehearsed restore (closes the CRITICAL "no backups
+# anywhere" finding, devops-review F1).
+#
+# WHAT IS THE BACKUP: the durable truth of this platform is the LIVE object-store
+# bucket (the configured `storage-objstore` backend — MinIO by default, any
+# external S3 when re-pointed, #105/#120): pageserver layer uploads under
+# /pageserver + safekeeper WAL offload under /safekeeper, PLUS the fixed
+# tenant/timeline IDs and storage config. The
+# pageserver PVC is a rebuildable cache; safekeeper PVCs hold only recent WAL
+# (bounded by remote_consistent_lsn). So a faithful backup = a copy of the
+# `neon` bucket + the config ConfigMaps (tenant/timeline IDs, compute/pageserver
+# spec). A faithful restore = a fresh storage plane attached to a restored bucket
+# copy (proven by deploy/_verify-restore.sh).
+#
+# NO SECRET MATERIAL LEAVES THE CLUSTER (issue #28). The config dump used to
+# `kubectl get secret storage-s3-creds -o yaml` and `mc cp` it into the backup
+# bucket — putting the storage-plane credentials (base64, not encrypted) at rest
+# OFF-cluster, exactly the blast-radius the separate `backup-s3-target` credential
+# exists to avoid. It is now EXCLUDED: `storage-s3-creds` is the MinIO root
+# credential (a knob, not data) and is RE-PROVISIONED on restore by
+# deploy/gen-secrets.sh (fresh MinIO gets fresh roots). The dump carries only
+# ConfigMaps. The scoped Role no longer grants `secrets`.
+#
+# WHERE IT GOES (issue #4): OFF-CLUSTER, into OCI Object Storage over the native
+# S3-compatible endpoint. This is what survives node loss / `kubectl delete pvc`
+# — the whole reason the in-cluster `backup-store` MinIO PVC was retired (see the
+# MIGRATION note below). The destination bucket carries VERSIONING + a LIFECYCLE
+# policy (delete non-current versions > 30d).
+#
+# VERSIONING-AWARE PRUNING (issue #28). `mc mirror --remove` propagates live
+# deletions to the OCI copy (the janitor's intentional WAL trims + pageserver GC),
+# keeping it lean — but a bug/bad-actor emptying the live bucket would propagate
+# into the backup too. Mitigation: --remove is passed ONLY when the destination
+# bucket has VERSIONING enabled, so every propagated deletion becomes a recoverable
+# non-current version (aged out by the 30-day lifecycle, NOT immediately gone). If
+# versioning is somehow off, the mirror falls back to additive (no --remove) and
+# warns, rather than destructively propagating without the safety net. LIMITATION
+# (documented, MVP gap): retention is a mutable 30-day window with NO object-lock /
+# WORM — a bucket admin can still shorten it or purge versions. See docs/operations
+# .md "Backup & disaster recovery" for the deletion-propagation risk + hardening.
+#
+# CREDENTIALS: the `backup-s3-target` Secret (endpoint/access/secret/bucket),
+# provisioned by deploy/gen-secrets.sh from an OCI Customer Secret Key. `dst`
+# (OCI OS) uses backup-s3-target — a SEPARATE, least-privilege credential
+# (blast-radius). `src` is the LIVE object store and authenticates with
+# storage-s3-creds; its ENDPOINT/BUCKET/REGION come from the `storage-objstore`
+# ConfigMap (issue #120) so the backup + wal-janitor follow the SAME configurable
+# backend the pageserver/safekeepers offload to (#105) — MinIO by default, any
+# external S3 (OCI/Ceph/SeaweedFS/Garage) when re-pointed. Before #120 `src` was
+# hardcoded to minio:9000, so a non-MinIO deployment had NO backup AND leaked
+# safekeeper WAL unbounded (the janitor pruned a store that wasn't there).
+#
+# MIGRATION (backup-store retired): the old in-cluster `backup-store` MinIO
+# Deployment/PVC/Service is GONE from this manifest. On a cluster that still runs
+# it, delete the live objects after the first OCI backup is green:
+#     kubectl -n scale-zero-pg delete deploy/backup-store svc/backup-store
+#     kubectl -n scale-zero-pg delete pvc/backup-store-data
+# See docs/operations.md "Backup & disaster recovery".
+#
+# Images pinned (no :latest). mc talks to the in-cluster MinIO and OCI OS; a
+# scoped ServiceAccount (get/list on configmaps in scale-zero-pg ONLY — NOT
+# secrets, issue #28) lets the kubectl step dump the config alongside the mirror.
+---
+# --- scoped ServiceAccount for the config dump: get/list CONFIGMAPS in
+#     scale-zero-pg ONLY (no secrets — issue #28). No write, no cluster scope.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: backup-operator
+  namespace: scale-zero-pg
+  labels: { app: backup, plane: backup }
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: backup-config-reader
+  namespace: scale-zero-pg
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"] # NOT secrets — no secret material leaves the cluster (issue #28)
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: backup-operator-config-reader
+  namespace: scale-zero-pg
+subjects:
+  - kind: ServiceAccount
+    name: backup-operator
+    namespace: scale-zero-pg
+roleRef:
+  kind: Role
+  name: backup-config-reader
+  apiGroup: rbac.authorization.k8s.io
+---
+# --- the backup pod template lives on a CronJob (scheduled) and is reused
+#     on-demand by the drill via `kubectl create job --from=cronjob/backup`.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: backup
+  namespace: scale-zero-pg
+  labels: { app: backup, plane: backup }
+spec:
+  schedule: "0 3 * * *" # daily 03:00 — mirror the neon bucket + dump config
+  concurrencyPolicy: Forbid
+  # issue #31: keep 6 SCHEDULED successes (≈a week of 03:00 runs) so an operator can
+  # always point at recent scheduled successes for forensics. NOTE (verified on
+  # k8s 1.34): `kubectl create job --from=cronjob/backup` stamps a controller
+  # ownerReference to THIS CronJob, so a naive on-demand run IS owned — it counts
+  # against this limit and trips `UnexpectedJob`. The documented on-demand recipe
+  # therefore STRIPS ownerReferences so manual runs are standalone (not counted, no
+  # UnexpectedJob) — see docs/operations.md "On demand" + "Confirming the scheduled
+  # 3am backup". The headroom (6) still absorbs the occasional naive manual run.
+  successfulJobsHistoryLimit: 6
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 3
+      template:
+        metadata:
+          labels: { app: backup, plane: backup }
+        spec:
+          serviceAccountName: backup-operator
+          restartPolicy: OnFailure
+          securityContext:
+            seccompProfile: { type: RuntimeDefault }
+          # STEP 1 (initContainer, kubectl, scoped SA): dump ONLY the ConfigMaps the
+          # bucket alone cannot rebuild — tenant/timeline IDs, compute spec,
+          # pageserver config — into a shared volume. NO SECRET is dumped (issue
+          # #28): storage-s3-creds is the MinIO root credential, re-provisioned on
+          # restore by deploy/gen-secrets.sh; putting it in the bucket only widened
+          # the blast radius. The SA's Role no longer grants `secrets`.
+          initContainers:
+            - name: dump-config
+              image: alpine/k8s:1.30.2 # pinned; bundles kubectl + a shell (distroless kubectl has no /bin/sh)
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities: { drop: ["ALL"] }
+              command: ["/bin/sh", "-c"]
+              args:
+                - |
+                  set -eu
+                  mkdir -p /dump
+                  kubectl get configmap compute-config compute-files pageserver-config \
+                    -o yaml > /dump/configmaps.yaml
+                  echo "config dump written (ConfigMaps only — no secret material, issue #28):"; ls -l /dump
+              volumeMounts:
+                - { name: dump, mountPath: /dump }
+          # STEP 2 (mc): mirror the neon bucket to OCI Object Storage (dst) and
+          # upload the config dump alongside it, under the destination bucket's
+          # neon/ and neon-config/ prefixes.
+          containers:
+            - name: mirror
+              image: minio/mc:RELEASE.2023-01-28T20-29-38Z # pinned
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities: { drop: ["ALL"] }
+              # TENANT_ID / TIMELINE_ID / PAGESERVER_HOST for the post-mirror
+              # index-integrity check (issue #21). storage-objstore supplies the
+              # LIVE object-store endpoint/bucket/region (issue #120): the `src`
+              # alias must follow the SAME configurable backend the pageserver +
+              # safekeepers offload to (#105), NOT a hardcoded minio:9000 — else a
+              # deployment on OCI/S3/Ceph has NO backup at all.
+              envFrom:
+                - configMapRef: { name: compute-config }
+                - configMapRef: { name: storage-objstore } # OBJSTORE_ENDPOINT / _BUCKET / _REGION (#120)
+              env:
+                # mc writes its config under $MC_CONFIG_DIR (default ~/.mc);
+                # /root is not writable for this image's user, so use /tmp.
+                - name: MC_CONFIG_DIR
+                  value: /tmp/.mc
+                # src (LIVE object store — MinIO by default, any external S3 when
+                # storage-objstore is re-pointed, #120) credentials. storage-s3-creds
+                # is the SAME S3 access/secret the pageserver + safekeepers use to
+                # reach the configured backend (#105).
+                - name: S3_USER
+                  valueFrom: { secretKeyRef: { name: storage-s3-creds, key: user } }
+                - name: S3_PASS
+                  valueFrom: { secretKeyRef: { name: storage-s3-creds, key: password } }
+                # dst (OCI Object Storage, S3-compat) credentials + target
+                - name: BK_ENDPOINT
+                  valueFrom: { secretKeyRef: { name: backup-s3-target, key: endpoint } }
+                - name: BK_ACCESS
+                  valueFrom: { secretKeyRef: { name: backup-s3-target, key: access } }
+                - name: BK_SECRET
+                  valueFrom: { secretKeyRef: { name: backup-s3-target, key: secret } }
+                - name: BK_BUCKET
+                  valueFrom: { secretKeyRef: { name: backup-s3-target, key: bucket } }
+              command: ["/bin/sh", "-c"]
+              args:
+                - |
+                  set -eu
+                  # mc stores its config under $HOME/.mc; this image's user cannot
+                  # write /root, so anchor HOME at a writable path.
+                  export HOME=/tmp
+                  mkdir -p /tmp/.mc
+                  # src = the LIVE object store the pageserver/safekeepers offload
+                  # to (#105). Endpoint/bucket/region come from storage-objstore
+                  # (issue #120) — MinIO by default (http://minio:9000, bucket neon),
+                  # OR an external S3 (OCI/Ceph/SeaweedFS/Garage) when re-pointed.
+                  # SigV4 + path-style works for BOTH MinIO and every managed S3.
+                  mc alias set src "$OBJSTORE_ENDPOINT" "$S3_USER" "$S3_PASS" --api S3v4 --path on
+                  # dst = OFF-CLUSTER backup target (OCI Object Storage S3-compat):
+                  # signature v4, path-style.
+                  mc alias set dst "$BK_ENDPOINT" "$BK_ACCESS" "$BK_SECRET" --api S3v4 --path on
+                  # SRC_ROOT = live-store bucket root (config-driven, #120);
+                  # DST_ROOT = the backup layout inside the OFF-CLUSTER bucket. The
+                  # 'neon/' prefix is a FIXED backup-layout convention (restore reads
+                  # dst/<bucket>/neon), decoupled from the live bucket's NAME.
+                  SRC_ROOT="src/$OBJSTORE_BUCKET"
+                  DST_ROOT="dst/$BK_BUCKET/neon"
+                  echo "backup src=$SRC_ROOT (live store $OBJSTORE_ENDPOINT) -> dst=$DST_ROOT"
+                  # VERSIONING-AWARE --remove (issue #28). --remove propagates live
+                  # deletions to the OCI copy (the janitor's WAL trims + pageserver
+                  # GC) so it stays lean — but a bug/bad-actor emptying src would
+                  # propagate into the backup too. Guard: only pass --remove when the
+                  # DESTINATION bucket has VERSIONING enabled, so every propagated
+                  # deletion is a recoverable non-current version (30-day lifecycle),
+                  # not an immediate loss. If versioning is off, mirror ADDITIVELY
+                  # (no --remove) and warn — never destructively propagate without the
+                  # version safety net. LIMITATION: retention is a mutable 30d window,
+                  # no object-lock/WORM (known MVP gap; see docs/operations.md).
+                  REMOVE=""
+                  if mc version info "dst/$BK_BUCKET" 2>/dev/null | grep -qi enabled; then
+                    REMOVE="--remove"
+                    echo "dst bucket versioning ENABLED -> --remove is version-recoverable"
+                  else
+                    echo "WARNING: dst bucket versioning NOT enabled -> mirroring ADDITIVELY (no --remove); the OCI copy may accumulate. Enable bucket versioning to restore lean pruning (issue #28)." >&2
+                  fi
+                  echo "mirroring live store bucket ($SRC_ROOT) -> OCI OS ($DST_ROOT) ..."
+                  # Retry the mirror: the live pageserver compacts every ~20s,
+                  # deleting layer files mid-copy -> mc "ContentLength ... Body length"
+                  # read errors on a large/churny bucket. mc mirror is idempotent
+                  # (skips objects already copied), so a re-run fills the gaps and
+                  # converges once compaction settles.
+                  n=0
+                  until mc mirror --overwrite $REMOVE "$SRC_ROOT" "$DST_ROOT"; do
+                    n=$((n+1)); [ "$n" -gt 8 ] && { echo "mirror failed after $n attempts" >&2; exit 1; }
+                    echo "mirror retry $n (transient read race) ..."; sleep 5
+                  done
+                  echo "uploading config dump (ConfigMaps only — no secret material, issue #28) ..."
+                  mc cp /dump/configmaps.yaml "dst/$BK_BUCKET/neon-config/configmaps.yaml"
+                  # --- issue #21: index_part.json can be captured mid-compaction
+                  # (torn backup). The live pageserver rewrites index_part.json
+                  # every ~20s of compaction; if the mirror reads it mid-PUT the
+                  # backup carries a truncated index that fails to deserialize on
+                  # restore. Make the backup SELF-HEALING and self-verifying: after
+                  # the mirror, re-read the newest index_part.json-<gen> in the
+                  # OFF-CLUSTER copy; a complete neon index is a JSON object that
+                  # ends with '}'. If torn, re-copy just the index prefix from src
+                  # (mc cp picks up the now-settled object) and re-verify. Fail the
+                  # backup if it is still torn after several tries — a torn index
+                  # must never ship (the drill's retry becomes a safety net, not
+                  # the primary defense).
+                  # IX_REL = the timeline's index path RELATIVE to a bucket root, so
+                  # it composes with SRC_ROOT (live store, any bucket name #120) AND
+                  # DST_ROOT (backup layout) independently.
+                  IX_REL="pageserver/tenants/${TENANT_ID}/timelines/${TIMELINE_ID}"
+                  verify_index() {
+                    f="$(mc ls "$DST_ROOT/$IX_REL/" 2>/dev/null | sed 's/.* //' | grep -o 'index_part.json-[0-9]*' | sort | tail -1)"
+                    [ -z "$f" ] && { echo "  no index_part.json in backup"; return 1; }
+                    last="$(mc cat "$DST_ROOT/$IX_REL/$f" 2>/dev/null | tail -c 1)"
+                    [ "$last" = "}" ] && { echo "  index INTACT: $f"; return 0; }
+                    echo "  index TORN (captured mid-rewrite): $f"; return 1
+                  }
+                  echo "verifying pageserver index integrity in the backup (issue #21) ..."
+                  a=0
+                  until verify_index; do
+                    a=$((a+1)); [ "$a" -gt 5 ] && { echo "index still TORN after $a re-copies — failing backup (issue #21)" >&2; exit 1; }
+                    echo "  re-copying index prefix from src (attempt $a) ..."
+                    mc cp --recursive "$SRC_ROOT/$IX_REL/" "$DST_ROOT/$IX_REL/" >/dev/null 2>&1 || true
+                    sleep 3
+                  done
+                  echo "backup complete:"; mc du "$DST_ROOT"; mc ls "dst/$BK_BUCKET/neon-config"
+              volumeMounts:
+                - { name: dump, mountPath: /dump }
+              resources:
+                # mc mirror buffers many parallel object transfers at high
+                # throughput; on a large (multi-GB, 256MB-layer) bucket 512Mi
+                # OOMKills the client mid-copy (observed at ~18GB). 1Gi holds a
+                # real production-size mirror — the backup client must survive its
+                # own traffic, same lesson as the 512Mi minio bump.
+                requests: { cpu: 50m, memory: 128Mi, ephemeral-storage: 100Mi }
+                limits: { memory: 1Gi, ephemeral-storage: 1Gi }
+          volumes:
+            - name: dump
+              emptyDir: {}
+---
+# ===========================================================================
+# wal-janitor (issue #19) — bound safekeeper WAL accumulation in the live
+# `neon` bucket so restore drills (and backup mirrors) stay lean.
+#
+# WHY THIS EXISTS. Each restore/failover drill fills ~360 MB of WAL through the
+# live compute; the safekeepers offload that WAL to the bucket's /safekeeper
+# prefix as their durability backup. Nothing trims it: the bucket LIFECYCLE
+# policy only ages out non-current VERSIONS (not current accumulation), and
+# neon's pageserver GC (`gc_horizon` / `pitr_interval`) reclaims only PAGESERVER
+# LAYER files — it never touches the /safekeeper prefix (verified: with a 7-day
+# PITR window and <7-day-old data, gc returns 200 and reclaims nothing, and it
+# has no notion of safekeeper WAL). So /safekeeper grew to ~5.6 GB / ~360×16 MiB
+# segments, inflating every cross-internet restore copy.
+#
+# WHAT IS SAFE TO PRUNE. A safekeeper WAL segment is dead weight once it is BOTH
+# (a) below the pageserver's remote_consistent_lsn — i.e. already ingested AND
+# uploaded into pageserver layers (the honesty-rule LSN) — AND (b) outside the
+# window the writable restore re-seeds. deploy/_restore-writable.sh reads only a
+# handful of segments around last_record_lsn ([last_record − 2 seg .. + ~1 seg]),
+# so we keep KEEP_SEGMENTS (default 32 = 512 MiB) BELOW remote_consistent_lsn as
+# the safety horizon — 8× the ~4 segments the restore actually needs and 2× the
+# 256 MB checkpoint_distance. Everything AT or ABOVE the horizon, and every
+# .partial segment (the live durability tail the safekeepers are still writing),
+# is NEVER touched. Fail-closed: if remote_consistent_lsn can't be read the job
+# aborts and prunes nothing.
+#
+# HORIZON MATH. WAL segments are 16 MiB; the object name is the 24-hex
+# `<TLI><LOGID><SEG>` (256 segments per LOGID). Fixed-width hex sorts in LSN
+# order, so the prune set is exactly the segment objects whose 24-hex name sorts
+# strictly before the threshold name (segno(remote_consistent_lsn) − KEEP_SEGMENTS).
+#
+# Prune runs BEFORE the daily backup (02:30 vs 03:00) so the next `mc mirror
+# --remove` propagates the trim to the OCI copy the same night.
+# --- SLOT-AWARE janitor RBAC (issue #139, ADR-0007 §4a). The janitor must never
+#     prune WAL an ACTIVE replication slot still needs (breaking live cross-zone
+#     replication). Its resolve-slot-floors initContainer reads pg_replication_slots
+#     on each AWAKE writer compute (psql over pod-local loopback — the only path
+#     cloud_admin is admitted, #112) to floor pruning at active slots' restart_lsn.
+#     Least privilege: read pods + exec into them + read the per-compute ConfigMap,
+#     in THIS namespace only. No write, no cluster scope, no secrets.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: wal-janitor
+  namespace: scale-zero-pg
+  labels: { app: backup, plane: backup }
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: wal-janitor-slot-reader
+  namespace: scale-zero-pg
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["configmaps"] # map an awake compute pod → its (tenant,timeline) for the floor
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: wal-janitor-slot-reader
+  namespace: scale-zero-pg
+subjects:
+  - kind: ServiceAccount
+    name: wal-janitor
+    namespace: scale-zero-pg
+roleRef:
+  kind: Role
+  name: wal-janitor-slot-reader
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: wal-janitor
+  namespace: scale-zero-pg
+  labels: { app: backup, plane: backup }
+spec:
+  schedule: "30 2 * * *" # daily 02:30 — 30m before the backup mirror
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      template:
+        metadata:
+          labels: { app: backup, plane: backup }
+        spec:
+          serviceAccountName: wal-janitor # #139: exec into awake computes to read slots
+          restartPolicy: OnFailure
+          securityContext:
+            seccompProfile: { type: RuntimeDefault }
+          # STEP 1 (initContainer): read remote_consistent_lsn from the pageserver
+          # and write the prune threshold (24-hex WAL segment name) to /state.
+          # Fail-closed — a missing/zero rcl aborts the job before any deletion.
+          initContainers:
+            - name: resolve-horizon
+              image: alpine/k8s:1.30.2 # bundles curl + bash (hex arithmetic)
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities: { drop: ["ALL"] }
+              envFrom:
+                - configMapRef: { name: compute-config } # TENANT_ID/TIMELINE_ID/PAGESERVER_HOST
+              env:
+                - name: KEEP_SEGMENTS
+                  value: "32" # 512 MiB of WAL kept below remote_consistent_lsn (safety horizon)
+              command: ["/bin/bash", "-c"]
+              args:
+                - |
+                  set -euo pipefail
+                  PS="http://${PAGESERVER_HOST}:9898"
+                  mkdir -p /state/horizons
+
+                  # rcl_to_suffix "<hi>/<lo>" -> prints the 16-hex LOGID+SEG horizon
+                  # (KEEP_SEGMENTS below remote_consistent_lsn), or returns 1 if the rcl
+                  # is unusable. TLI-INDEPENDENT: only the LOGID+SEG suffix is emitted;
+                  # the TLI (high 8 hex of a segment name) is derived per-segment by the
+                  # prune step (issue #42), never hardcoded here.
+                  rcl_to_suffix() {
+                    local RCL="$1" hi lo full segno keep logid seg
+                    case "$RCL" in */*) : ;; *) return 1 ;; esac
+                    hi=$((16#${RCL%/*})); lo=$((16#${RCL#*/}))
+                    full=$(( (hi<<32) | lo ))
+                    segno=$(( full / 16777216 ))            # 16 MiB WAL segments
+                    keep=$(( segno - KEEP_SEGMENTS ))
+                    [ "$keep" -lt 0 ] && keep=0
+                    logid=$(( keep / 256 )); seg=$(( keep % 256 ))
+                    printf '%08X%08X' "$logid" "$seg"
+                  }
+
+                  # resolve_one <tenant> <timeline>: write /state/horizons/<tenant>/<timeline>
+                  # from THAT timeline's OWN remote_consistent_lsn, or WARN + leave it
+                  # UNRESOLVED (the prune step fail-safe-SKIPS an unresolved timeline). This is
+                  # issue #59 (per-timeline horizons) generalized to (tenant, timeline) pairs
+                  # so the branch-per-app plane is covered (issue #77).
+                  resolve_one() {
+                    T="$1"; TL="$2"
+                    RCL="$(curl -sf "$PS/v1/tenant/$T/timeline/$TL" \
+                          | tr ',' '\n' | grep '"remote_consistent_lsn"' | head -1 | cut -d'"' -f4)"
+                    if S="$(rcl_to_suffix "$RCL")"; then
+                      mkdir -p "/state/horizons/$T"
+                      printf '%s' "$S" > "/state/horizons/$T/$TL"
+                      echo "resolved horizon: tenant=$T timeline=$TL rcl=$RCL suffix=$S"
+                      return 0
+                    fi
+                    echo "WARN: tenant=$T timeline=$TL has no usable remote_consistent_lsn ('$RCL') — UNRESOLVED (prune fail-safe-skips it)"
+                    return 1
+                  }
+
+                  # list_timelines <tenant> -> stdout the timeline ids under that tenant.
+                  list_timelines() {
+                    L="$(curl -sf "$PS/v1/tenant/$1/timeline")" || return 1
+                    if command -v jq >/dev/null 2>&1; then
+                      echo "$L" | jq -r '.[].timeline_id' 2>/dev/null
+                    else
+                      echo "$L" | tr ',{}' '\n' | grep '"timeline_id"' \
+                        | sed -E 's/.*"timeline_id" *: *"?([^",]*)"?.*/\1/'
+                    fi
+                  }
+
+                  # PRIMARY (configured) tenant/timeline — fail-CLOSED: a missing/zero rcl on
+                  # the configured timeline aborts the whole job before any deletion (unchanged
+                  # safety invariant). Also seeds the drill-visible threshold_suffix.
+                  RCL="$(curl -sf "$PS/v1/tenant/${TENANT_ID}/timeline/${TIMELINE_ID}" \
+                        | tr ',' '\n' | grep '"remote_consistent_lsn"' | head -1 | cut -d'"' -f4)"
+                  if ! SUF="$(rcl_to_suffix "$RCL")"; then
+                    echo "FATAL: could not read remote_consistent_lsn (got '$RCL') — aborting, pruning nothing" >&2; exit 1
+                  fi
+                  printf '%s' "$SUF" > /state/threshold_suffix
+                  mkdir -p "/state/horizons/${TENANT_ID}"
+                  printf '%s' "$SUF" > "/state/horizons/${TENANT_ID}/${TIMELINE_ID}"
+                  echo "remote_consistent_lsn=$RCL keep_segments=$KEEP_SEGMENTS threshold_suffix=$SUF tenant=${TENANT_ID} timeline=${TIMELINE_ID}"
+
+                  # ALL TENANTS (issue #77). The branch-per-app plane lives under a SEPARATE
+                  # tenant (a000…) from the configured primary (f000…). The janitor previously
+                  # read TENANT_ID from compute-config = the primary ONLY, so per-app branch WAL
+                  # on the safekeepers was NEVER pruned (unbounded growth). Enumerate EVERY
+                  # tenant that hosts live timelines from the pageserver, then resolve each
+                  # timeline's OWN horizon (issue #59 semantics, now per (tenant,timeline)).
+                  # A sleeping app's WAL (stable rcl) is retained; a churned app's is reclaimed.
+                  # Anything unresolvable is left with NO horizon file → prune fail-safe-SKIPS
+                  # it and fails loud (never over-pruned against a foreign horizon).
+                  if command -v jq >/dev/null 2>&1; then
+                    TENANTS="$(curl -sf "$PS/v1/tenant" | jq -r '.[].id' 2>/dev/null || true)"
+                  else
+                    TENANTS="$(curl -sf "$PS/v1/tenant" | tr ',{}' '\n' | grep '"id"' \
+                              | sed -E 's/.*"id" *: *"?([^",]*)"?.*/\1/' || true)"
+                  fi
+                  if [ -z "$TENANTS" ]; then
+                    echo "WARN: could not enumerate tenants at $PS/v1/tenant — only the configured tenant is resolved; any OTHER tenant present in the bucket is fail-safe-skipped and pages (#77/#59)"
+                    TENANTS="${TENANT_ID}"
+                  fi
+                  echo "tenants to resolve: $(echo $TENANTS | tr '\n' ' ')"
+                  for T in $TENANTS; do
+                    [ -n "$T" ] || continue
+                    if ! TLS="$(list_timelines "$T")" || [ -z "$TLS" ]; then
+                      echo "WARN: could not list timelines for tenant=$T at $PS — its bucket timelines are fail-safe-skipped and page (#77/#59)"
+                      continue
+                    fi
+                    for TL in $TLS; do
+                      [ -n "$TL" ] || continue
+                      resolve_one "$T" "$TL" || true
+                    done
+                  done
+              volumeMounts:
+                - { name: state, mountPath: /state }
+            # STEP 1b (initContainer, #139/ADR-0007 §4a): SLOT-AWARE prune floor. For
+            # every AWAKE writer compute (a pod exists ⇒ it can hold a live walsender),
+            # read pg_replication_slots. An ACTIVE slot's restart_lsn is WAL a LIVE
+            # cross-zone subscriber still needs: write a floor so the prune step NEVER
+            # crosses it → never breaks live replication. INACTIVE slots are only
+            # SURFACED (WARN): their WAL may be reclaimed (degrade-to-re-sync), with
+            # max_slot_wal_keep_size (config.json) as the hard backstop. An awake compute
+            # whose Postgres we cannot read is PROTECTED (its timeline skip-marked) —
+            # fail-safe: never risk pruning a possibly-live slot's WAL. An awake compute
+            # whose ConfigMap is UNREADABLE (can't even map tenant/timeline — the #142
+            # hazard, #144) writes a GLOBAL marker (/state/protect/.unmapped-compute) that
+            # makes the prune SKIP ALL pruning + PAGE (WalJanitorJobFailed): we can't scope
+            # which timeline's WAL is at risk, so fail-CLOSED for the whole pass. NON-FATAL overall:
+            # on today's slot-free plane this pass finds nothing and is a pure no-op
+            # (identical janitor behaviour), so it can never regress the load-bearing prune.
+            - name: resolve-slot-floors
+              image: alpine/k8s:1.30.2 # bundles kubectl + a shell; execs psql INSIDE the compute pod
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities: { drop: ["ALL"] }
+              env:
+                - name: KEEP_SEGMENTS
+                  value: "32" # same safety margin the horizon uses, applied BELOW the slot restart_lsn
+              command: ["/bin/sh", "-c"]
+              args:
+                - |
+                  set -eu
+                  mkdir -p /state/slotfloors /state/protect
+                  KEEP_SEGMENTS="${KEEP_SEGMENTS:-32}"
+                  # "hi/lo" restart_lsn -> 16-hex LOGID+SEG suffix, KEEP_SEGMENTS below it
+                  # (an EXTRA safety margin under the slot's own floor). Same math as
+                  # resolve-horizon's rcl_to_suffix so the two are directly comparable.
+                  lsn_to_suffix() {
+                    L="$1"; case "$L" in */*) : ;; *) return 1 ;; esac
+                    hi=$((16#${L%/*})); lo=$((16#${L#*/}))
+                    full=$(( (hi<<32) | lo )); segno=$(( full / 16777216 ))
+                    keep=$(( segno - KEEP_SEGMENTS )); [ "$keep" -lt 0 ] && keep=0
+                    logid=$(( keep / 256 )); seg=$(( keep % 256 ))
+                    printf '%08X%08X' "$logid" "$seg"
+                  }
+                  # Awake WRITER computes (plane=compute = single-DB + per-app publishers;
+                  # the RO pool omits plane=compute). Emit "pod|configmap-name" so we can
+                  # map each to its (tenant,timeline) even if psql is unreadable.
+                  PODS="$(kubectl get pods -l plane=compute --field-selector=status.phase=Running \
+                          -o jsonpath='{range .items[*]}{.metadata.name}|{.spec.containers[?(@.name=="compute")].envFrom[0].configMapRef.name}{"\n"}{end}' 2>/dev/null || true)"
+                  if [ -z "$PODS" ]; then
+                    echo "slot-floor: no awake writer compute pods — no live slots to protect (no-op)"; exit 0
+                  fi
+                  printf '%s\n' "$PODS" | while IFS='|' read -r pod cm; do
+                    [ -n "$pod" ] || continue
+                    TEN="$(kubectl get cm "$cm" -o jsonpath='{.data.TENANT_ID}' 2>/dev/null || true)"
+                    TL="$(kubectl get cm "$cm" -o jsonpath='{.data.TIMELINE_ID}' 2>/dev/null || true)"
+                    # >>> #144 unmap-branch
+                    if [ -z "$TEN" ] || [ -z "$TL" ]; then
+                      # #144 FAIL-SAFE: an AWAKE writer compute whose ConfigMap is
+                      # unreadable (the #142 CM-deletion hazard) cannot be mapped to a
+                      # (tenant,timeline), so we CANNOT scope a per-timeline PROTECT —
+                      # we do not know which timeline's active-slot WAL is at risk.
+                      # Before #144 this branch silently `continue`d (no floor, no
+                      # PROTECT) → the prune pruned that timeline against the rcl horizon
+                      # (fail-OPEN, backstopped only by the KEEP_SEGMENTS==max_slot_wal_keep_size
+                      # numeric alignment). Now: write a GLOBAL protect marker recording
+                      # the offending pod/cm; the prune step SKIPS ALL pruning this pass
+                      # and FAILS LOUD (WalJanitorJobFailed) so an operator restores the
+                      # config. Fail-CLOSED beats pruning around a live writer we can't see.
+                      echo "slot-floor: $pod (cm=$cm) UNMAPPABLE — TENANT_ID/TIMELINE_ID unreadable (CM missing/corrupt, #142/#144); writing a GLOBAL protect marker so the prune SKIPS ALL pruning this pass (fail-safe) and PAGES (WalJanitorJobFailed)" >&2
+                      mkdir -p /state/protect
+                      printf '%s\n' "$pod (cm=$cm)" >> /state/protect/.unmapped-compute
+                      continue
+                    fi
+                    # <<< #144 unmap-branch
+                    # emit active as a literal t/f via CASE — `||active||` renders the
+                    # boolean as `true`/`false` in text-concat, breaking the $2=="t" test.
+                    Q="SELECT slot_name||' '||(case when active then 't' else 'f' end)||' '||coalesce(restart_lsn::text,'-')||' '||coalesce(wal_status,'') FROM pg_replication_slots ORDER BY restart_lsn ASC NULLS LAST"
+                    ROWS=""; okread=""
+                    i=0
+                    while [ "$i" -lt 3 ]; do
+                      if ROWS="$(kubectl exec "$pod" -c compute </dev/null -- \
+                                 env PGPASSWORD=cloud_admin psql -h localhost -p 55433 -U cloud_admin -d postgres -tAc "$Q" 2>/dev/null)"; then okread=1; break; fi
+                      i=$((i+1)); sleep 2
+                    done
+                    if [ -z "$okread" ]; then
+                      echo "slot-floor: $pod tenant=$TEN timeline=$TL — Postgres UNREADABLE after retries; PROTECT (prune step will SKIP this timeline, fail-safe)"
+                      mkdir -p "/state/protect/$TEN"; : > "/state/protect/$TEN/$TL"; continue
+                    fi
+                    [ -z "$ROWS" ] && { echo "slot-floor: $pod tenant=$TEN timeline=$TL — no replication slots"; continue; }
+                    printf '%s\n' "$ROWS" > /tmp/slots
+                    # rows are restart_lsn-ascending: the first ACTIVE row with a real
+                    # restart_lsn is the minimum a live subscriber needs = the floor.
+                    FLOOR_LSN="$(awk '$2=="t" && $3!="-" {print $3; exit}' /tmp/slots)"
+                    ACT="$(awk '$2=="t"{c++} END{print c+0}' /tmp/slots)"
+                    INACT="$(awk '$2=="f"{c++} END{print c+0}' /tmp/slots)"
+                    echo "slot-floor: $pod tenant=$TEN timeline=$TL active=$ACT inactive=$INACT"
+                    [ "$INACT" -gt 0 ] && echo "slot-floor: WARN tenant=$TEN timeline=$TL has $INACT INACTIVE slot(s) — their WAL is reclaimable (degrade-to-re-sync); max_slot_wal_keep_size is the backstop (#139)"
+                    if [ -n "$FLOOR_LSN" ] && SUF="$(lsn_to_suffix "$FLOOR_LSN")"; then
+                      mkdir -p "/state/slotfloors/$TEN"
+                      printf '%s' "$SUF" > "/state/slotfloors/$TEN/$TL"
+                      echo "slot-floor: tenant=$TEN timeline=$TL ACTIVE-slot floor restart_lsn=$FLOOR_LSN suffix=$SUF — prune will NOT cross this (never break live replication) (#139)"
+                    fi
+                    rm -f /tmp/slots
+                  done || true
+                  # NON-FATAL by design: this early-protection pass must NEVER fail the
+                  # load-bearing janitor. The prune step is fail-safe without it (the WAL
+                  # bound is the backstop); a hiccup here at worst leaves a floor unwritten.
+                  echo "slot-floor: pass complete"
+              volumeMounts:
+                - { name: state, mountPath: /state }
+          # STEP 2 (mc): for EACH timeline prefix present under /safekeeper/<tenant>/,
+          # delete every complete WAL segment whose 24-hex name sorts strictly before
+          # THAT timeline's OWN horizon (issue #59 — never a foreign timeline's), with
+          # the per-8-hex-TLI derivation of issue #42 applied within each timeline.
+          # Excludes .partial (live tail) by construction (they don't match
+          # ^[0-9A-Fa-f]{24}$). DRY_RUN=true lists only. Busybox-safe (sort + sed
+          # boundary, no awk / no `<`). Fail-LOUD (exit nonzero → WalJanitorJobFailed):
+          # a bucket listing that errors, OR a timeline present in the bucket whose own
+          # remote_consistent_lsn STEP 1 could not resolve (skipped fail-safe so it is
+          # never over-pruned, #59). Never exit 0 having silently pruned nothing (#42).
+          containers:
+            - name: prune
+              image: minio/mc:RELEASE.2023-01-28T20-29-38Z # pinned
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities: { drop: ["ALL"] }
+              envFrom:
+                - configMapRef: { name: compute-config }  # TENANT_ID / TIMELINE_ID
+                - configMapRef: { name: storage-objstore } # OBJSTORE_ENDPOINT / _BUCKET (#120)
+              env:
+                - name: DRY_RUN
+                  value: "false" # set true for a list-only supervised preview
+                - name: S3_USER
+                  valueFrom: { secretKeyRef: { name: storage-s3-creds, key: user } }
+                - name: S3_PASS
+                  valueFrom: { secretKeyRef: { name: storage-s3-creds, key: password } }
+              command: ["/bin/sh", "-c"]
+              args:
+                - |
+                  set -eu
+                  export HOME=/tmp
+                  mkdir -p /tmp/.mc
+                  # #144 FAIL-CLOSED GUARD (runs BEFORE any mc listing). resolve-slot-floors
+                  # ran first; if it found an AWAKE writer compute it could not map to a
+                  # (tenant,timeline) — its ConfigMap was unreadable (the #142 CM-deletion
+                  # hazard) — it wrote /state/protect/.unmapped-compute. We cannot know WHICH
+                  # timeline's active-slot WAL that live writer needs, so we CANNOT scope a
+                  # per-timeline PROTECT. The only sound response is to SKIP THE ENTIRE PRUNE
+                  # this pass (prune nothing) and FAIL LOUD (WalJanitorJobFailed) so an
+                  # operator restores the compute config. Never fail-OPEN by pruning around
+                  # an unmappable live writer.
+                  # >>> #144 unmapped-compute-guard
+                  if [ -f /state/protect/.unmapped-compute ]; then
+                    echo "FATAL: resolve-slot-floors found AWAKE writer compute(s) it could NOT map to a (tenant,timeline) — ConfigMap unreadable (#142/#144):" >&2
+                    cat /state/protect/.unmapped-compute >&2
+                    echo "SKIPPING ALL PRUNING this pass (fail-safe: cannot scope which timeline's active-slot WAL is at risk) and failing loud (WalJanitorJobFailed). Restore the compute config (kubectl -n scale-zero-pg get cm) — see docs/operations.md slot-janitor 'fail-safe on an unreadable compute config'." >&2
+                    exit 1
+                  fi
+                  # <<< #144 unmapped-compute-guard
+                  # src = the LIVE object store (config-driven, #120): the janitor
+                  # MUST prune the SAME store the safekeepers offload WAL to, or a
+                  # non-MinIO deployment leaks safekeeper WAL unbounded. SigV4 +
+                  # path-style works for MinIO and every managed S3 alike.
+                  mc alias set src "$OBJSTORE_ENDPOINT" "$S3_USER" "$S3_PASS" --api S3v4 --path on
+                  SKBASE="src/$OBJSTORE_BUCKET/safekeeper"
+                  echo "pruning /safekeeper WAL across ALL tenants, each timeline against ITS OWN horizon (issues #42/#59/#77, DRY_RUN=${DRY_RUN})"
+                  # ALL TENANTS (issue #77). Enumerate the TENANT prefixes present in the bucket
+                  # (primary f000… + apps a000… + any future), then within each tenant enumerate
+                  # its timeline prefixes. fail-LOUD if any listing errors: a silent `mc ls`
+                  # failure must page (WalJanitorJobFailed), never exit 0 having pruned nothing.
+                  if ! mc ls "$SKBASE/" > /tmp/tenantdirs 2>/tmp/lserr; then
+                    echo "FATAL: could not list $SKBASE (mc ls failed) — aborting, pruning nothing" >&2
+                    cat /tmp/lserr >&2; exit 1
+                  fi
+                  sed 's/.* //' /tmp/tenantdirs | grep '/$' | sed 's:/$::' | sort -u > /tmp/tenants || true
+                  tncount="$(grep -c . /tmp/tenants || true)"
+                  if [ "$tncount" -eq 0 ]; then echo "no tenant prefixes present under $SKBASE — nothing to prune"; exit 0; fi
+                  echo "tenant prefixes present: $(tr '\n' ' ' < /tmp/tenants)"
+
+                  # UNRESOLVED horizons are split by tenant (issue #77 + #59):
+                  #  - PRIMARY (configured) tenant: an unresolved sibling is an ANOMALY on a
+                  #    single-writer plane with exactly one expected timeline -> FAIL LOUD
+                  #    (WalJanitorJobFailed), unchanged #59 behaviour.
+                  #  - OTHER (apps) tenant(s): the branch-per-app plane is CHURNY — orphaned
+                  #    safekeeper WAL from a deprovisioned app (pageserver 404, no rcl) is
+                  #    expected residue. Skip it fail-safe + WARN LOUDLY (visible in janitor
+                  #    logs), but do NOT fail the nightly job on expected apps churn (that would
+                  #    be pager noise). The safety invariant (never over-prune an unresolved
+                  #    timeline) is preserved either way. Ongoing orphan reclamation is the
+                  #    deprovision path's job (deprovision deletes the safekeeper timeline dir).
+                  UNRESOLVED_PRIMARY=""; UNRESOLVED_APPS=""; GRAND=0; : > /tmp/anyseg
+                  while IFS= read -r TEN; do
+                    [ -n "$TEN" ] || continue
+                    BASE="$SKBASE/$TEN"
+                    if ! mc ls "$BASE/" > /tmp/tldirs 2>/tmp/lserr; then
+                      echo "FATAL: could not list $BASE (mc ls failed) — aborting" >&2; cat /tmp/lserr >&2; exit 1
+                    fi
+                    sed 's/.* //' /tmp/tldirs | grep '/$' | sed 's:/$::' | sort -u > /tmp/tls || true
+                    tlcount="$(grep -c . /tmp/tls || true)"
+                    if [ "$tlcount" -eq 0 ]; then echo "  tenant $TEN: no timeline prefixes — nothing to prune"; continue; fi
+                    echo "  tenant $TEN: timeline prefixes present: $(tr '\n' ' ' < /tmp/tls)"
+                  while IFS= read -r TL; do
+                    [ -n "$TL" ] || continue
+                    PFX="$BASE/$TL"
+                    # #59/#77 — a (tenant,timeline) we could not resolve a horizon for is
+                    # SKIPPED, never judged against another timeline's horizon (fail-safe: no
+                    # over-prune of a sleeping app's WAL).
+                    if [ ! -f "/state/horizons/$TEN/$TL" ]; then
+                      if [ "$TEN" = "${TENANT_ID}" ]; then
+                        echo "    tenant $TEN timeline $TL: UNRESOLVED horizon on the PRIMARY tenant — SKIP, pruning nothing (fail-safe) and will FAIL LOUD (#59)"
+                        UNRESOLVED_PRIMARY="$UNRESOLVED_PRIMARY $TEN/$TL"
+                      else
+                        echo "    tenant $TEN timeline $TL: UNRESOLVED horizon on an apps tenant (deprovisioned-app WAL residue / in-flight branch) — SKIP, pruning nothing (fail-safe #77); WARN, not job-fail"
+                        UNRESOLVED_APPS="$UNRESOLVED_APPS $TEN/$TL"
+                      fi
+                      continue
+                    fi
+                    SUFFIX="$(cat "/state/horizons/$TEN/$TL")"
+                    echo "    tenant $TEN timeline $TL: horizon suffix=$SUFFIX"
+                    # SLOT-AWARE (#139/ADR-0007 §4a). resolve-slot-floors ran first:
+                    #  - PROTECT marker: an AWAKE compute for this timeline had unreadable
+                    #    Postgres — we could not confirm it holds no live slot, so SKIP
+                    #    pruning it entirely (fail-safe: never risk a live slot's WAL).
+                    #  - slot floor: an ACTIVE slot's restart_lsn floor. Take the OLDER
+                    #    (lexicographically smaller, fixed-width hex) of the rcl horizon and
+                    #    the slot floor, so the prune NEVER crosses a live slot's restart_lsn.
+                    #    INACTIVE slots set NO floor → their far-behind WAL is reclaimable
+                    #    (degrade-to-re-sync), bounded by max_slot_wal_keep_size.
+                    if [ -f "/state/protect/$TEN/$TL" ]; then
+                      echo "      SLOT-PROTECT: an awake compute for $TEN/$TL had unreadable Postgres — SKIP pruning this timeline (fail-safe, never risk a live slot's WAL) (#139)"
+                      continue
+                    fi
+                    if [ -f "/state/slotfloors/$TEN/$TL" ]; then
+                      SFLOOR="$(cat "/state/slotfloors/$TEN/$TL")"
+                      LOWER="$(printf '%s\n%s\n' "$SUFFIX" "$SFLOOR" | LC_ALL=C sort | head -1)"
+                      if [ "$LOWER" != "$SUFFIX" ]; then
+                        echo "      SLOT-FLOOR: active replication slot floor $SFLOOR is below the rcl horizon $SUFFIX — lowering the prune horizon to $SFLOOR (never crosses a live slot's restart_lsn) (#139)"
+                        SUFFIX="$LOWER"
+                      else
+                        echo "      SLOT-FLOOR: active replication slot floor $SFLOOR is at/above the rcl horizon $SUFFIX — rcl horizon already safe, no change (#139)"
+                      fi
+                    fi
+                    if ! mc ls "$PFX/" > /tmp/lsout 2>/tmp/lserr; then
+                      echo "FATAL: could not list $PFX (mc ls failed) — aborting" >&2; cat /tmp/lserr >&2; exit 1
+                    fi
+                    # complete 16 MiB segments only (24-hex, anchored); .partial excluded by regex.
+                    sed 's/.* //' /tmp/lsout | grep -E '^[0-9A-Fa-f]{24}$' | sort -u > /tmp/all || true
+                    total="$(grep -c . /tmp/all || true)"
+                    [ "$total" -gt 0 ] && echo x >> /tmp/anyseg
+                    if [ "$total" -eq 0 ]; then echo "      no complete WAL segments — nothing to prune for $TL"; continue; fi
+                    # DERIVE the 8-hex TLI(s) present and prune each against THIS timeline's
+                    # suffix (issue #42): a bumped TLI (00000002...) gets its own 24-hex
+                    # threshold and is actually pruned, never latch-skipped.
+                    cut -c1-8 /tmp/all | sort -u > /tmp/tlis
+                    : > /tmp/todelete
+                    while IFS= read -r tli; do
+                      [ -n "$tli" ] || continue
+                      KEEP="${tli}${SUFFIX}"                  # per-(timeline,TLI) 24-hex threshold
+                      grep "^${tli}" /tmp/all > /tmp/all_tli || true
+                      { cat /tmp/all_tli; echo "$KEEP"; } | sort -u | sed "/^$KEEP\$/,\$d" >> /tmp/todelete
+                    done < /tmp/tlis
+                    sort -u /tmp/todelete -o /tmp/todelete
+                    n="$(grep -c . /tmp/todelete || true)"
+                    echo "      segments=$total prunable(below horizon)=$n; keep(at/above)+partials retained"
+                    if [ "$n" -gt 0 ]; then echo "      range: $(head -1 /tmp/todelete) .. $(tail -1 /tmp/todelete)"; fi
+                    if [ "$n" -eq 0 ]; then echo "      nothing to prune — $TEN/$TL already lean"; continue; fi
+                    if [ "${DRY_RUN:-false}" = "true" ]; then echo "      DRY_RUN=true — listing only, no deletions for $TEN/$TL"; continue; fi
+                    i=0
+                    while IFS= read -r o; do
+                      [ -n "$o" ] || continue
+                      mc rm "$PFX/$o" >/dev/null && i=$((i+1))
+                    done < /tmp/todelete
+                    echo "      pruned $i segment(s) from $TEN/$TL (~$((i*16)) MiB reclaimed)"
+                    GRAND=$((GRAND+i))
+                  done < /tmp/tls
+                  done < /tmp/tenants
+
+                  echo "prune summary: $GRAND segment(s) removed across resolved (tenant,timeline) pair(s)"
+                  if [ ! -s /tmp/anyseg ]; then echo "no complete WAL segments present — nothing to prune"; fi
+                  if [ "$GRAND" -eq 0 ] && [ -z "$UNRESOLVED_PRIMARY" ] && [ -z "$UNRESOLVED_APPS" ]; then echo "nothing to prune — bucket already lean"; fi
+                  # Apps-tenant orphans: skipped fail-safe (never over-pruned), surfaced LOUDLY
+                  # in the log, but NOT a job failure (expected branch-per-app churn residue).
+                  if [ -n "$UNRESOLVED_APPS" ]; then
+                    echo "WARN: apps-tenant (tenant,timeline)(s) with UNRESOLVED horizon (deprovisioned-app WAL residue / in-flight branch):$UNRESOLVED_APPS — SKIPPED fail-safe (no over-prune). Reclaim via the deprovision path (delete the safekeeper timeline dir). (#77)" >&2
+                  fi
+                  # FAIL LOUD (#59): a PRIMARY-tenant sibling with an unresolved horizon is an
+                  # anomaly on the single-writer plane — page so the missing per-timeline rcl is
+                  # investigated, never silently swallowed.
+                  if [ -n "$UNRESOLVED_PRIMARY" ]; then
+                    echo "FATAL: PRIMARY-tenant (tenant,timeline)(s) present with UNRESOLVED horizon:$UNRESOLVED_PRIMARY — skipped (fail-safe, no over-prune) and failing loud (WalJanitorJobFailed) (#59)" >&2
+                    exit 1
+                  fi
+                  echo "post-prune /safekeeper size:"; mc du "$SKBASE"
+              volumeMounts:
+                - { name: state, mountPath: /state }
+              resources:
+                requests: { cpu: 50m, memory: 64Mi, ephemeral-storage: 50Mi }
+                limits: { memory: 256Mi, ephemeral-storage: 256Mi }
+          volumes:
+            - name: state
+              emptyDir: {}
+---
+# ===========================================================================
+# apps-wal-monitor (issues #90/#87) — the SIGNAL half of the apps-tenant WAL
+# fail-safe. The wal-janitor NEVER over-prunes an unresolvable apps timeline
+# (correct), but before this the residue it skipped was UNMONITORED: no metric,
+# no alert, no bound. Orphaned per-app safekeeper WAL could accumulate on the
+# fixed-size (2Gi) safekeeper PVs with ZERO operational pressure until ENOSPC
+# wedged the ENTIRE storage plane — disguised as "expected churn". This CronJob
+# closes that: it measures, on the ACTUAL safekeeper PVs (not the bucket), BOTH
+#   (a) ORPHAN apps-tenant WAL: a timeline dir present under /data/<apps-tenant>/
+#       on a safekeeper whose branch is GONE from the pageserver (404) — exactly
+#       the residue the janitor skips + the deprovision path should have reclaimed;
+#   (b) safekeeper PV UTILIZATION: `df /data` on every safekeeper — the direct
+#       early-warning before ENOSPC, independent of the janitor.
+# It FAILS its Job (exit 1) when orphan count > ORPHAN_MAX or any PV use% > PV_PCT,
+# which surfaces via the KSM-joined `SafekeeperWALGrowth` alert (deploy/60,
+# WARNING — visible but off the primary pager, distinct from WalJanitorJobFailed).
+# Reclamation is the deprovision path's job: `provision-app.sh reclaim-orphans`
+# (docs/operations.md "Reclaiming orphaned apps-tenant WAL").
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: apps-wal-monitor
+  namespace: scale-zero-pg
+  labels: { app: apps-wal-monitor, plane: observability }
+---
+# Least privilege: read pods + exec into them (df /data, ls the WAL dir) in THIS
+# namespace only. No write, no cluster scope, no secrets.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: apps-wal-monitor
+  namespace: scale-zero-pg
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: apps-wal-monitor
+  namespace: scale-zero-pg
+subjects:
+  - kind: ServiceAccount
+    name: apps-wal-monitor
+    namespace: scale-zero-pg
+roleRef:
+  kind: Role
+  name: apps-wal-monitor
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: apps-wal-monitor
+  namespace: scale-zero-pg
+  labels: { app: apps-wal-monitor, plane: observability }
+spec:
+  schedule: "17 */3 * * *" # every 3h — orphan residue is slow; frequent enough for early warning
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 0 # one shot: a persistent residue must keep the Job Failed (alert stays lit)
+      template:
+        metadata:
+          labels: { app: apps-wal-monitor, plane: observability }
+        spec:
+          serviceAccountName: apps-wal-monitor
+          restartPolicy: Never
+          securityContext:
+            seccompProfile: { type: RuntimeDefault }
+          containers:
+            - name: monitor
+              image: alpine/k8s:1.30.2 # bundles kubectl + curl + coreutils
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities: { drop: ["ALL"] }
+              envFrom:
+                - configMapRef: { name: compute-config } # PAGESERVER_HOST (shared plane)
+              env:
+                - name: APPS_TENANT
+                  value: "a0000000000000000000000000000001" # must match provision-app.sh
+                - name: TEMPLATE_TL
+                  value: "a0000000000000000000000000000010" # the shared template branch (never an orphan)
+                - name: SK_REPLICAS
+                  value: "3"
+                - name: ORPHAN_MAX
+                  value: "0"  # any CONFIRMED orphan (pageserver-404 WAL dir) is a residue signal
+                - name: PV_PCT
+                  value: "75" # safekeeper /data utilization early-warning threshold (before ENOSPC)
+              command: ["/bin/sh", "-c"]
+              args:
+                - |
+                  set -eu
+                  PS="http://${PAGESERVER_HOST}:9898"
+                  echo "apps-wal-monitor: apps_tenant=$APPS_TENANT pageserver=$PS orphan_max=$ORPHAN_MAX pv_pct=$PV_PCT"
+
+                  # LIVE apps-tenant timelines (present on the pageserver). A tenant with
+                  # no timelines yet returns [] (curl -f still 200). If the pageserver is
+                  # unreachable we cannot classify orphans -> fail loud (a blind monitor is
+                  # worse than a noisy one for a durability leak).
+                  if ! LIVE_JSON="$(curl -sf "$PS/v1/tenant/$APPS_TENANT/timeline" 2>/dev/null)"; then
+                    echo "FATAL: cannot reach pageserver at $PS/v1/tenant/$APPS_TENANT/timeline — cannot classify orphans" >&2
+                    exit 1
+                  fi
+                  LIVE="$(printf '%s' "$LIVE_JSON" | tr ',{}' '\n' | grep '"timeline_id"' \
+                        | sed -E 's/.*"timeline_id" *: *"?([^",]*)"?.*/\1/' | sort -u || true)"
+                  echo "live apps timelines on pageserver: $(printf '%s' "$LIVE" | tr '\n' ' ')"
+
+                  # PRESENT timelines on the safekeeper PVs + PV utilization. Read the
+                  # actual /data on each safekeeper (the ENOSPC risk lives HERE, not the
+                  # bucket). Neon lays timelines out at /data/<tenant>/<timeline>/.
+                  ORPHANS=""; ORPHAN_N=0; PV_BAD=""; MEASURED=0
+                  ord=0
+                  while [ "$ord" -lt "$SK_REPLICAS" ]; do
+                    SKPOD="safekeeper-$ord"
+                    # PV utilization (df): Use% of /data.
+                    USEP="$(kubectl exec "$SKPOD" -c safekeeper -- df -P /data 2>/dev/null | awk 'NR==2{gsub(/%/,"",$5);print $5}' || true)"
+                    if [ -n "$USEP" ]; then
+                      MEASURED=1
+                      echo "  $SKPOD: /data utilization ${USEP}%"
+                      if [ "$USEP" -gt "$PV_PCT" ]; then PV_BAD="$PV_BAD $SKPOD=${USEP}%"; fi
+                    else
+                      echo "  $SKPOD: could not read df /data (pod down?)"
+                    fi
+                    ord=$((ord+1))
+                  done
+
+                  # Orphan set: WAL dirs present on safekeeper-0 whose timeline is NOT a
+                  # live pageserver branch and is not the shared template. safekeeper-0 is
+                  # representative (quorum-replicated); if it is unreachable, fall through.
+                  PRESENT="$(kubectl exec safekeeper-0 -c safekeeper -- sh -c "ls -1 /data/$APPS_TENANT 2>/dev/null" 2>/dev/null \
+                            | grep -E '^[0-9a-fA-F]{32}$' | sort -u || true)"
+                  for tl in $PRESENT; do
+                    [ "$tl" = "$TEMPLATE_TL" ] && continue
+                    if printf '%s\n' "$LIVE" | grep -qx "$tl"; then continue; fi   # live branch — fine
+                    ORPHANS="$ORPHANS $tl"; ORPHAN_N=$((ORPHAN_N+1))
+                  done
+                  echo "orphan apps-tenant WAL dirs (present on safekeeper, pageserver-404):$ORPHANS (count=$ORPHAN_N)"
+
+                  RC=0
+                  if [ "$ORPHAN_N" -gt "$ORPHAN_MAX" ]; then
+                    echo "SafekeeperWALGrowth: $ORPHAN_N orphan apps-tenant WAL dir(s) exceed ORPHAN_MAX=$ORPHAN_MAX — deprovisioned-app WAL residue is accumulating on the safekeeper PVs. Reclaim: provision-app.sh reclaim-orphans (docs/operations.md#reclaiming-orphaned-apps-tenant-wal)." >&2
+                    RC=1
+                  fi
+                  if [ -n "$PV_BAD" ]; then
+                    echo "SafekeeperWALGrowth: safekeeper PV utilization over ${PV_PCT}%:$PV_BAD — approaching ENOSPC on a fixed 2Gi PV, which would wedge the WHOLE storage plane. Investigate WAL growth / run reclaim-orphans / grow the PV." >&2
+                    RC=1
+                  fi
+                  if [ "$MEASURED" = 0 ] && [ -z "$PRESENT" ]; then
+                    echo "WARN: could not read df or WAL dirs on ANY safekeeper — monitor is blind this run (check safekeeper pods)." >&2
+                  fi
+                  [ "$RC" = 0 ] && echo "apps-wal-monitor: clean (no orphan residue, all safekeeper PVs under ${PV_PCT}%)"
+                  exit $RC
+              resources:
+                requests: { cpu: 20m, memory: 32Mi, ephemeral-storage: 50Mi }
+                limits: { memory: 128Mi, ephemeral-storage: 128Mi }

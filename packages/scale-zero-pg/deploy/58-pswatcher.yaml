@@ -1,0 +1,154 @@
+# pswatcher: the pageserver auto-failover controller (issue #3). Watches the
+# primary's liveness via the stable pageserver-primary Service and, on sustained
+# failure, promotes the warm standby at generation+1, flips the client
+# `pageserver` Service selector to the standby, and bounces the compute — the
+# manual runbook, automated.
+#
+# Availability posture (issue #23): SINGLE replica on purpose — promotion is the
+# single-writer of a one-way, standby-consuming action; two watchers could double
+# flip. We do NOT add a replica or leader-election. Instead the authority is
+# crash-only: its truth lives in the cluster (the client-Service selector + the
+# generation ledger ConfigMap), so a watcher that dies mid-failover resumes
+# idempotently on restart. `strategy: Recreate` guarantees a rollout never runs two
+# watchers at once; the PodDisruptionBudget below lets node drains proceed (we
+# accept the brief gap — recovery is idempotent) while making the intent explicit.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: pswatcher
+  namespace: scale-zero-pg
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: pswatcher
+  namespace: scale-zero-pg
+rules:
+  # Read the client Service selector (idempotency guard) and flip it on failover.
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "patch"]
+  # Read + advance the generation ledger.
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "update", "patch"]
+  # Bounce the compute so a cold wake re-attaches to the promoted standby.
+  # Per-name Delete needs only `delete` (not `deletecollection`); list to find them.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["list", "delete"]
+  # Read-only view of the compute Deployment (diagnostics; no scale here).
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: pswatcher
+  namespace: scale-zero-pg
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: pswatcher
+subjects:
+  - kind: ServiceAccount
+    name: pswatcher
+    namespace: scale-zero-pg
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pswatcher
+  namespace: scale-zero-pg
+  labels: { app: pswatcher, plane: storage }
+spec:
+  replicas: 1
+  # Recreate (not RollingUpdate): a rollout tears the old watcher down BEFORE the new
+  # one starts, so two watchers never run at once (single-writer of promotions).
+  strategy: { type: Recreate }
+  selector:
+    matchLabels: { app: pswatcher }
+  template:
+    metadata:
+      labels: { app: pswatcher, plane: storage }
+    spec:
+      imagePullSecrets:
+        - name: ocir-pull
+      serviceAccountName: pswatcher
+      # distroless:nonroot ships USER by NAME (nonroot); kubelet cannot verify a
+      # non-numeric user against runAsNonRoot, so pin the numeric uid/gid (65532)
+      # or the pod fails admission with CreateContainerConfigError.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: pswatcher
+          image: me-abudhabi-1.ocir.io/axfqznklsd2t/ks-pg/gateway:v0.6.1@sha256:12a735337adcd2470fe834557ad7ab298d20a35e2113b80669211324f28a0ccb # v0.6.0 RELEASE build (issues #78/#82) — supersedes iter8-pswatcher-0386420; same multi-binary image, /pswatcher entrypoint override (line below)
+          imagePullPolicy: IfNotPresent
+          command: ["/pswatcher"] # override the image's /gateway entrypoint
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+          env:
+            - { name: PSW_NAMESPACE, value: "scale-zero-pg" }
+            - { name: PSW_PRIMARY_STATUS_URL, value: "http://pageserver-primary:9898/v1/status" }
+            - { name: PSW_STANDBY_BASE_URL, value: "http://pageserver-standby:9898" }
+            - { name: PSW_CLIENT_SERVICE, value: "pageserver" } # selector flipped on failover
+            - { name: PSW_STANDBY_SELECTOR_APP, value: "pageserver-standby" }
+            - { name: PSW_GEN_CONFIGMAP, value: "pageserver-generation" }
+            - { name: PSW_COMPUTE_SELECTOR, value: "app=compute" }
+            - { name: PSW_PRIMARY_SELECTOR, value: "app=pageserver" } # #26 second-vantage: the primary pod the API server reports on
+            - name: PSW_TENANT_ID
+              valueFrom: { configMapKeyRef: { name: compute-config, key: TENANT_ID } }
+            - { name: PSW_POLL_MS, value: "2000" } # 2s poll
+            - { name: PSW_FAIL_THRESHOLD, value: "3" } # ~6s of misses before failover (don't split-brain a slow primary)
+            - { name: PSW_BASE_GENERATION, value: "1" } # storage-init attached at gen 1
+            - { name: PSW_HEALTH_ADDR, value: ":9091" }
+          ports:
+            - { name: metrics, containerPort: 9091 }
+          readinessProbe:
+            httpGet: { path: /healthz, port: metrics }
+            initialDelaySeconds: 1
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /healthz, port: metrics }
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          resources:
+            requests: { cpu: 20m, memory: 32Mi, ephemeral-storage: 100Mi }
+            limits: { memory: 64Mi, ephemeral-storage: 1Gi }
+---
+# ClusterIP so Prometheus can scrape pswatcher_promotions_total / _primary_up.
+# Never fronted by a LoadBalancer (metrics must not leak — same rule as pggw).
+apiVersion: v1
+kind: Service
+metadata:
+  name: pswatcher
+  namespace: scale-zero-pg
+  labels: { app: pswatcher }
+spec:
+  type: ClusterIP
+  selector: { app: pswatcher }
+  ports:
+    - { name: metrics, port: 9091, targetPort: metrics }
+---
+# Availability posture (issue #23). The watcher is a deliberate SINGLE-replica
+# singleton (single-writer of promotions). maxUnavailable:1 makes that intent
+# explicit and lets voluntary disruptions (node drains) proceed — we accept the
+# brief gap because recovery is crash-only idempotent: the restarted watcher reads
+# its truth from the client-Service selector + the generation ledger and resumes
+# any interrupted failover. A rollout can't run two watchers at once (Deployment
+# strategy: Recreate, above), so promotions stay single-writer.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: pswatcher
+  namespace: scale-zero-pg
+  labels: { app: pswatcher, plane: storage }
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels: { app: pswatcher }

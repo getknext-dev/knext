@@ -1,0 +1,126 @@
+# The scale-to-zero unit: one stateless Neon compute (native Postgres).
+# replicas is 0 at rest — the gateway (or KEDA) raises it to 1 on connect and
+# back to 0 after idle. Data lives in the storage plane, never in this pod.
+#
+# The compute needs storage endpoints + tenant/timeline IDs. Those are
+# environment-specific, so they live in the `compute-config` ConfigMap /
+# `compute-files` volume created by wire-local-storage.sh (local dev: points
+# at the docker-compose storage plane via host.orb.internal). A production
+# cluster would point at in-cluster StatefulSets instead.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: compute
+  # plane: compute is the WRITER selector the writer-autoscaler (#103) watches; the
+  # read-replica pool (app=compute-ro) deliberately does NOT carry it, so a
+  # plane=compute selector targets exactly the writers.
+  labels: { app: compute, plane: compute }
+spec:
+  replicas: 0 # at rest; gateway scales 0<->1
+  revisionHistoryLimit: 2 # cap ReplicaSet churn from wake/rollout cycles
+  selector:
+    matchLabels: { app: compute }
+  strategy:
+    type: Recreate # single-writer: never two computes on one timeline during rollout
+  template:
+    metadata:
+      labels: { app: compute, plane: compute }
+    spec:
+      # Wake-critical path: keep hardening light. The compute image runs as the
+      # non-root `postgres` user by default; we only add seccomp here and leave
+      # uid/caps to the image so compute_ctl boot is never perturbed.
+      securityContext:
+        seccompProfile: { type: RuntimeDefault }
+      # Fast drain: a Terminating compute holds the timeline (single-writer),
+      # delaying the next wake by its grace period. Data is WAL-safe on the
+      # safekeeper quorum, so a short grace is free.
+      terminationGracePeriodSeconds: 10
+      # Block startup until the pageserver has the tenant+timeline (created by
+      # the storage-init Job). Runs on the neon image because it ships curl; the
+      # compute image does not. This is what lets the compute image stay stock.
+      initContainers:
+        - name: wait-timeline
+          image: neondatabase/neon:8464
+          envFrom:
+            - configMapRef:
+                name: compute-config # TENANT_ID, TIMELINE_ID, PAGESERVER_HOST
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              PS="http://${PAGESERVER_HOST}:9898"
+              until curl -sf "${PS}/v1/tenant/${TENANT_ID}/timeline" | grep -q "${TIMELINE_ID}"; do
+                echo "waiting for timeline ${TIMELINE_ID} on tenant ${TENANT_ID} ..."; sleep 0.5;
+              done
+              echo "timeline ready"
+      containers:
+        - name: compute
+          # Stock Neon compute (native Postgres 17). Stateless — no tools needed
+          # in-image: the slim entrypoint only seds IDs into the spec and execs
+          # compute_ctl.
+          # PINNED: the compute must stay wire/format-compatible with the
+          # pinned storage plane (neondatabase/neon:8464) — upgrade them as a
+          # PAIR (see docs/operations.md "Upgrades"). Never :latest here.
+          image: neondatabase/compute-node-v17:8464
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "/compute-files/entrypoint.sh"]
+          envFrom:
+            - configMapRef:
+                name: compute-config # TENANT_ID, TIMELINE_ID, PG_VERSION, PAGESERVER_HOST
+          env:
+            # STRONG base cloud_admin md5 (issue #168). This base single-DB writer
+            # runs cloud_admin as the documented DATABASE_URL credential over TCP
+            # (no APP_ROLE → the entrypoint pg_hba harden is deliberately skipped),
+            # so it cannot rely on the loopback-only reject. Injecting the strong
+            # md5 from pg-base-admin (minted by deploy/gen-secrets.sh, matching the
+            # strong plaintext in the DATABASE_URL Secret) means the public default
+            # cloud_admin:cloud_admin is rejected over TCP. REQUIRED (the
+            # secretKeyRef is NOT marked optional) → fail-closed: the pod will not
+            # start without the Secret, so a base compute can never boot on the default.
+            - name: CLOUD_ADMIN_MD5
+              valueFrom:
+                secretKeyRef: { name: pg-base-admin, key: CLOUD_ADMIN_MD5 }
+          ports:
+            - { name: pg, containerPort: 55433 }
+            - { name: compute-http, containerPort: 3080 }
+          volumeMounts:
+            - { name: compute-files, mountPath: /compute-files }
+          # In-place vertical resize (#67/#103): cpu+memory actuate LIVE (cgroup
+          # cpu.max/memory.max) with NO restart. Declaring NotRequired makes the
+          # zero-restart contract explicit — the writer-autoscaler patches the
+          # pods/resize subresource within min/max bounds. shared_buffers stays
+          # boot-fixed (not resizable live); the autoscaler never bounces to grow it.
+          resizePolicy:
+            - { resourceName: cpu, restartPolicy: NotRequired }
+            - { resourceName: memory, restartPolicy: NotRequired }
+          readinessProbe:
+            tcpSocket: { port: pg }
+            initialDelaySeconds: 0
+            periodSeconds: 1 # tight: wake latency depends on it
+            failureThreshold: 60
+          resources:
+            # A CPU limit is now declared (was mem-only): the writer-autoscaler grows
+            # the ceiling under load, so the baseline starts modest. cpu 250m→ up to
+            # WAS_MAX_CPU (default 2); memory 256Mi→ up to WAS_MEM_MAX (default 1Gi).
+            requests: { cpu: 250m, memory: 256Mi, ephemeral-storage: 100Mi }
+            limits: { cpu: "1", memory: 1Gi, ephemeral-storage: 1Gi }
+      volumes:
+        - name: compute-files
+          configMap:
+            name: compute-files # entrypoint.sh + config.json spec template (54-compute-files.yaml)
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: compute
+  namespace: scale-zero-pg
+  labels: { app: compute }
+spec:
+  # ClusterIP (not headless) on purpose: the DNS record exists even at zero
+  # replicas, so the gateway never hits an NXDOMAIN that CoreDNS negative-
+  # caches (~5s) across the whole wake. Connects fail fast until the
+  # endpoint appears, and the gateway's TCP retry is the readiness check.
+  publishNotReadyAddresses: true
+  selector: { app: compute }
+  ports:
+    - { name: pg, port: 55433, targetPort: pg }

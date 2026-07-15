@@ -1,0 +1,136 @@
+# Pageserver: ingests WAL from safekeepers, materializes pages, offloads to the
+# CONFIGURED object store, serves GetPage@LSN to computes. StatefulSet + PVC (its
+# layer cache and tenant metadata live under /data/.neon). Config from upstream
+# compose, broker renamed storage_broker -> storage-broker (DNS-1035).
+#
+# OBJECT-STORAGE BACKEND (#105). The S3 page-offload target is NO LONGER
+# hardcoded to in-cluster MinIO — endpoint/bucket/region come from the
+# `storage-objstore` ConfigMap (deploy/gen-secrets.sh; default = MinIO, override
+# via STORAGE_OBJSTORE_* for OCI Object Storage / SeaweedFS / Ceph RGW / Garage),
+# and the S3 access/secret stay in the `storage-s3-creds` Secret. The
+# `remote_storage` TOML line is APPENDED by the seed-config init container from
+# those env vars (TOML has no env interpolation). NOTE: neon's S3 remote_storage
+# forces PATH-STYLE addressing automatically whenever a custom `endpoint` is set
+# (which it always is here) — no separate force-path-style flag is needed, and
+# this is exactly what makes both MinIO and OCI's S3 Compatibility API work.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pageserver-config
+  namespace: scale-zero-pg
+data:
+  # remote_storage is intentionally ABSENT here — the seed-config init container
+  # appends it from the storage-objstore ConfigMap (endpoint/bucket/region).
+  pageserver.toml: |
+    broker_endpoint='http://storage-broker:50051'
+    pg_distrib_dir='/usr/local/'
+    listen_pg_addr='0.0.0.0:6400'
+    listen_http_addr='0.0.0.0:9898'
+    control_plane_api='http://0.0.0.0:6666' # no storage controller in the MVP; junk address
+    control_plane_emergency_mode=true
+    virtual_file_io_mode="buffered"
+  identity.toml: |
+    id=1234
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: pageserver
+  namespace: scale-zero-pg
+  labels: { app: pageserver, plane: storage }
+spec:
+  serviceName: pageserver
+  replicas: 1
+  revisionHistoryLimit: 2 # cap StatefulSet controller-revision churn
+  selector: { matchLabels: { app: pageserver } }
+  template:
+    metadata:
+      labels: { app: pageserver, plane: storage }
+    spec:
+      # neon:8464 runs as uid 1000 (neon). fsGroup 1000 keeps /data writable
+      # for both the seed-config initContainer and the pageserver itself.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile: { type: RuntimeDefault }
+      # Config files must live inside the writable data dir (/data/.neon),
+      # so an init container seeds them from the ConfigMap onto the PVC.
+      initContainers:
+        - name: seed-config
+          image: neondatabase/neon:8464
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+          # Object-store endpoint/bucket/region are env-driven (#105). cp brings a
+          # fresh remote_storage-LESS toml every boot, then we append exactly ONE
+          # remote_storage line built from env — idempotent across restarts.
+          envFrom:
+            - configMapRef: { name: storage-objstore } # OBJSTORE_ENDPOINT / _BUCKET / _REGION
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              mkdir -p /data/.neon
+              cp /config/pageserver.toml /config/identity.toml /data/.neon/
+              printf "remote_storage={ endpoint='%s', bucket_name='%s', bucket_region='%s', prefix_in_bucket='/pageserver' }\n" \
+                "$OBJSTORE_ENDPOINT" "$OBJSTORE_BUCKET" "$OBJSTORE_REGION" >> /data/.neon/pageserver.toml
+              echo "pageserver.toml object-store target: endpoint=$OBJSTORE_ENDPOINT bucket=$OBJSTORE_BUCKET region=$OBJSTORE_REGION (path-style auto)"
+          volumeMounts:
+            - { name: data, mountPath: /data }
+            - { name: config, mountPath: /config }
+      containers:
+        - name: pageserver
+          image: neondatabase/neon:8464
+          command: ["/usr/local/bin/pageserver", "-D", "/data/.neon"] # image default, made explicit
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+          # S3 creds from the storage-s3-creds Secret (deploy/gen-secrets.sh),
+          # never plaintext YAML.
+          env:
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom: { secretKeyRef: { name: storage-s3-creds, key: user } }
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom: { secretKeyRef: { name: storage-s3-creds, key: password } }
+          ports:
+            - { name: pg, containerPort: 6400 }
+            - { name: http, containerPort: 9898 }
+          volumeMounts:
+            - { name: data, mountPath: /data }
+          readinessProbe:
+            httpGet: { path: /v1/status, port: http }
+            periodSeconds: 2
+          # Liveness: the pageserver is the single read SPOF in the MVP — a hung
+          # (not crashed) process must be restarted, not left serving nothing.
+          livenessProbe:
+            httpGet: { path: /v1/status, port: http }
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 6
+          # Memory-hungry: it materializes pages + holds a layer cache. Sized for
+          # a local cluster; raise for real tenant/write volume.
+          resources:
+            requests: { cpu: 100m, memory: 256Mi, ephemeral-storage: 100Mi }
+            limits: { memory: 1Gi, ephemeral-storage: 1Gi }
+      volumes:
+        - name: config
+          configMap: { name: pageserver-config }
+  volumeClaimTemplates:
+    - metadata: { name: data }
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources: { requests: { storage: 5Gi } }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pageserver
+  namespace: scale-zero-pg
+spec:
+  selector: { app: pageserver }
+  ports:
+    - { name: pg, port: 6400, targetPort: pg }
+    - { name: http, port: 9898, targetPort: http }

@@ -1,0 +1,638 @@
+# Minimal, self-contained Prometheus for the platform — NO operator, NO helm.
+# One Deployment + ConfigMap (config + alert rules) + PVC. It discovers the
+# gateway fleet by pod label (app=pggw) and evaluates the three alerts called out
+# in docs/reviews/devops-review.md. ClusterIP only (never exposed externally).
+#
+# Data persists on a small PVC (15d retention): capacity trends and incident
+# evaluator for the MVP, not a long-term metrics store. Point remote_write at a
+# durable backend for production.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: prometheus
+  namespace: scale-zero-pg
+---
+# Least privilege: read-only pod/endpoint/service discovery, scoped to THIS
+# namespace via a Role (not a ClusterRole). Kubernetes SD is likewise pinned to
+# the namespace in the scrape config below.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: prometheus-discovery
+  namespace: scale-zero-pg
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "services", "endpoints"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: prometheus-discovery
+  namespace: scale-zero-pg
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: prometheus-discovery
+subjects:
+  - kind: ServiceAccount
+    name: prometheus
+    namespace: scale-zero-pg
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-config
+  namespace: scale-zero-pg
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 15s
+      evaluation_interval: 15s
+    rule_files:
+      - /etc/prometheus/rules/*.yml
+    alerting:
+      alertmanagers:
+        - static_configs:
+            - targets: ["alertmanager:9093"]
+    scrape_configs:
+      # Discover only the gateway pods, only in this namespace, only their
+      # :9090 metrics port. Everything else is dropped by relabeling.
+      # WIDENED (issue #80): the keep regex was exact `pggw`, so the multi-tenant
+      # apps-gateway (app=pggw-apps, GW_METRICS_PORT=9090, deploy/81) was NEVER
+      # scraped — every gateway-derived alert was blind to the entire branch-per-app
+      # plane and all per-app computes. `pggw(-apps)?` keeps both the single-DB
+      # gateway (pggw) and the apps-gateway (pggw-apps); the anchored regex still
+      # EXCLUDES the ephemeral read-pool drill gateway (pggw-ro). A `gateway` label
+      # carries the pod's app value so alerts can scope per plane (pggw vs pggw-apps).
+      - job_name: pggw
+        kubernetes_sd_configs:
+          - role: pod
+            namespaces:
+              names: [scale-zero-pg]
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_label_app]
+            regex: pggw(-apps)?
+            action: keep
+          - source_labels: [__meta_kubernetes_pod_container_port_number]
+            regex: "9090"
+            action: keep
+          # per-plane label: gateway="pggw" (single-DB) | "pggw-apps" (branch-per-app).
+          # Lets ComputeWakeStuck scope its connection sum to ONE plane (issue #80).
+          - source_labels: [__meta_kubernetes_pod_label_app]
+            target_label: gateway
+          - source_labels: [__meta_kubernetes_pod_name]
+            target_label: pod
+          - source_labels: [__meta_kubernetes_namespace]
+            target_label: namespace
+      # kube-state-metrics (59): the CronJob/Deployment/StatefulSet/Job/Pod
+      # producer the platform alerts key off. Singleton ClusterIP — a static
+      # target is deterministic (no SD race on a one-pod service).
+      - job_name: kube-state-metrics
+        static_configs:
+          - targets: ["kube-state-metrics.scale-zero-pg.svc:8080"]
+      # pswatcher (58): the failover controller publishes promotions/primary_up
+      # on :9091/metrics. Scraping it makes `up{job="pswatcher"}` a
+      # watcher-liveness signal and exposes the promotion counter (issue #23).
+      - job_name: pswatcher
+        static_configs:
+          - targets: ["pswatcher.scale-zero-pg.svc:9091"]
+        metrics_path: /metrics
+  rules.yml: |
+    groups:
+      - name: ks-pg-gateway
+        rules:
+          # Cold starts are failing — clients are being told "compute unavailable".
+          - alert: GatewayWakeFailures
+            expr: increase(pggw_wake_failures_total[5m]) > 0
+            for: 1m
+            labels: { severity: critical }
+            annotations:
+              summary: "Gateway wake failures on {{ $labels.pod }}"
+              description: "pggw_wake_failures_total increased in the last 5m — computes are failing to wake."
+          # Wake latency regressed past the review's 5s budget (node image pull,
+          # resource pressure, storage-plane slowness).
+          - alert: GatewayWakeLatencyHigh
+            expr: max(pggw_wake_latency_ms_last) > 5000
+            for: 1m
+            labels: { severity: warning }
+            annotations:
+              summary: "Wake latency > 5s"
+              description: "Last cold-start took {{ $value }}ms (budget 5000ms)."
+          # Phantom keepalive: the fleet has woken the compute more times than it
+          # has slept it (=> compute is currently UP) yet no client connections
+          # blocking scale-to-zero and burning compute for nothing.
+          # STATE-based on purpose: the old (wakes_total - sleeps_total) form
+          # false-fired at replicas 0 — cumulative counters drift across pod
+          # restarts and never represent current state (devops-r3, live repro
+          # value=41 at zero). "Phantom keepalive" truly means: connections
+          # never drop to zero, so the idle window can never elapse.
+          - alert: ComputePhantomKeepalive
+            expr: min_over_time(sum(pggw_active_connections)[30m:1m]) > 0
+            labels: { severity: warning }
+            annotations:
+              summary: "System never idle for 30m — scale-to-zero blocked"
+              description: "Connections held continuously — check for an app pool with no/large idle timeout (see docs/connecting.md sizing rule)."
+          # WAKE side-channel / per-app wake-budget breach (issue #116, ADR-0008).
+          # The apps-gateway REFUSED one or more 0->1 wakes because a caller force-woke
+          # a per-app compute faster than GW_WAKE_BUDGET/GW_WAKE_WINDOW_MS allows. The
+          # refusal is by-design (churn is capped, no unbounded scale) so this is a
+          # WARNING, not a crit — but it PAGES the apps plane because a sustained breach
+          # is the signature of the unauthenticated wake side-channel #116 documents (an
+          # in-cluster pod force-waking a tenant for cost/DoS). Scoped to pggw-apps: the
+          # single-DB gateway runs no budget. The offending app is in the per-system
+          # series pggw_system_wake_budget_exceeded_total{system=...}.
+          #
+          # DEBOUNCE (issue #166): a SINGLE momentary burst of refusals (one misconfigured
+          # client that reconnects a few times, then gives up) must NOT page — that is
+          # bounded + self-clearing noise, not an incident. The 2m rate window makes such
+          # a burst hold the expr true for only ~2m, which is UNDER the 3m `for:`, so it
+          # never fires. A GENUINELY sustained breach keeps incrementing the counter, holds
+          # the expr true continuously, and pages after 3m. `for:` (3m) is deliberately >
+          # the rate window (2m) so the suppression is robust, not boundary-dependent.
+          - alert: WakeBudgetExceeded
+            expr: increase(pggw_wake_budget_exceeded_total{gateway="pggw-apps"}[2m]) > 0
+            for: 3m
+            labels: { severity: warning, plane: apps }
+            annotations:
+              summary: "Per-app wake budget exceeded on the apps-gateway — possible wake side-channel"
+              description: "pggw_wake_budget_exceeded_total{gateway=pggw-apps} kept rising for >=3m — a caller is force-waking a per-app compute past its budget and the gateway is REFUSING the excess wakes (compute NOT scaled). Bounded + handled, but a SUSTAINED breach (not a single self-clearing burst, which is debounced by the 3m for:) is the signature of the unauthenticated wake side-channel (#116): identify the source pod (per-app: pggw_system_wake_budget_exceeded_total{system=...}) and confirm it is an authorized tenant. See docs/operations.md#wake-budget--wake-side-channel-issue-116."
+      # Platform control-plane alerts. These fire off kube-state-metrics (59)
+      # and pswatcher (58) — the load-bearing machinery whose failure was
+      # previously SILENT (issues #29/#41/#23). Names are matched EXACTLY via
+      # the kube_job_owner join (owner_name="backup"/"wal-janitor"), never a
+      # loose `backup.*` regex that would miss `wal-janitor` (#29).
+      - name: ks-pg-platform
+        rules:
+          # (0) SELF-GUARD on the producer (issue #48). kube-state-metrics is the
+          # SOLE source of the kube_job_*/kube_cronjob_*/kube_*_replicas series that
+          # five rules below evaluate. If KSM dies or is never scraped, those series
+          # go ABSENT and PromQL over absent series produces no samples — every
+          # dependent rule silently stops firing (the "silently-failing load-bearing
+          # machinery" class, relocated into the observability plane). Page on KSM
+          # itself: down (==0) OR never-scraped (absent — a target that never came up
+          # has no `up` series at all). Symmetric to PswatcherDown.
+          - alert: KubeStateMetricsDown
+            expr: up{job="kube-state-metrics"} == 0 or absent(up{job="kube-state-metrics"})
+            for: 2m
+            labels: { severity: critical }
+            annotations:
+              summary: "kube-state-metrics is DOWN — ALL platform alerts are blind"
+              description: "up{job=kube-state-metrics}==0 or absent for 2m. BackupJobFailed, WalJanitorJobFailed, BackupStale, WalJanitorStale, PageserverStandbyNotReady, ComputeWakeStuck, ComputeWakeStuckApps, ComputeRoPoolStuck, ComputeStuckNotReady, SafekeeperWALGrowth, ReplicationSlotWALGrowth, ReplicationSlotInactive, ZoneDegradedOrFailed and ZoneSubscriptionBroken all evaluate KSM series and stop firing while it is down. Treat as sev-1: restore KSM (deploy/59) before trusting any platform alert."
+          # (a) backup CronJob run failed. Restore depends on a fresh backup;
+          # a failing backup is a silent DR regression.
+          - alert: BackupJobFailed
+            expr: |
+              sum(kube_job_status_failed{namespace="scale-zero-pg"}
+                  * on(namespace, job_name) group_left(owner_name)
+                  kube_job_owner{namespace="scale-zero-pg", owner_name="backup"}) > 0
+            for: 1m
+            labels: { severity: critical }
+            annotations:
+              summary: "backup CronJob run failed"
+              description: "A Job owned by the backup CronJob is in Failed state — the daily off-cluster mirror did not complete. See docs/operations.md#backup--disaster-recovery."
+          # (a) wal-janitor CronJob run failed. The janitor is load-bearing for
+          # restore RTO (#19): if it stops pruning, /safekeeper WAL regrows
+          # unbounded and restores silently slow back past 60min (#41).
+          - alert: WalJanitorJobFailed
+            expr: |
+              sum(kube_job_status_failed{namespace="scale-zero-pg"}
+                  * on(namespace, job_name) group_left(owner_name)
+                  kube_job_owner{namespace="scale-zero-pg", owner_name="wal-janitor"}) > 0
+            for: 1m
+            labels: { severity: critical }
+            annotations:
+              summary: "wal-janitor CronJob run failed — restore RTO at risk"
+              description: "The WAL janitor failed; /safekeeper WAL will regrow unbounded and slow restores. Check pageserver reachability at 02:30. See docs/operations.md#bounding-safekeeper-wal-growth."
+          # (b) backup staleness: last SUCCESSFUL backup older than 26h (>1
+          # missed daily run). Uses the CronJob's own last-success timestamp.
+          - alert: BackupStale
+            expr: time() - kube_cronjob_status_last_successful_time{namespace="scale-zero-pg", cronjob="backup"} > 93600
+            for: 10m
+            labels: { severity: critical }
+            annotations:
+              summary: "backup has not succeeded in >26h"
+              description: "Last successful backup is {{ $value | humanizeDuration }} old (>26h). The off-cluster copy is stale — a restore would lose recent data."
+          # (b) wal-janitor staleness (issue #49): last SUCCESSFUL janitor run older
+          # than 26h. Symmetric to BackupStale. This covers the silent-STOP failure
+          # mode WalJanitorJobFailed does NOT: a janitor that stops producing runs
+          # with ZERO Failed Jobs (schedule keeps missing startingDeadlineSeconds,
+          # controller backlog) never trips the Failed-Job rule, yet /safekeeper WAL
+          # regrows unbounded and restore RTO silently slips back past 60min (#41).
+          - alert: WalJanitorStale
+            expr: time() - kube_cronjob_status_last_successful_time{namespace="scale-zero-pg", cronjob="wal-janitor"} > 93600
+            for: 10m
+            labels: { severity: critical }
+            annotations:
+              summary: "wal-janitor has not succeeded in >26h — restore RTO at risk"
+              description: "Last successful WAL prune is {{ $value | humanizeDuration }} old (>26h). /safekeeper WAL is regrowing and restores are slowing back past 60min (#19/#41). See docs/operations.md#bounding-safekeeper-wal-growth."
+          # (b') absent/suspended guards (issues #49/#51). kube_cronjob_status_last_
+          # _successful_time does NOT exist until the FIRST successful run, and is
+          # gone when the CronJob is suspended or deleted/renamed. In every one of
+          # those states BackupStale/WalJanitorStale produce no samples and never
+          # fire — a backup or janitor that NEVER once succeeded, or was fat-fingered
+          # into suspend:true, would pass silently. These companions page on exactly
+          # that: metric absent OR spec.suspend==1.
+          # DAY-0 / POST-DR GUARD (issue #62): kube_cronjob_status_last_successful_time
+          # does not exist until the FIRST successful run. On a freshly deployed or
+          # DR-restored plane the janitor (02:30) and backup (03:00) have no last-success
+          # metric yet, so a bare absent(...)==1 would fire ~10m after apply and page
+          # until the first schedule finally runs (up to ~16h) — guaranteed noise at
+          # exactly the worst moment (right after an incident rebuild). Gate the
+          # never-succeeded/suspended arm on the CronJob having EXISTED > 26h (one full
+          # schedule period, so a run should genuinely have happened). The deleted/renamed
+          # case (the CronJob object itself gone ⇒ kube_cronjob_created absent) is NOT
+          # age-gated — a missing backup/janitor definition is never benign.
+          - alert: BackupStaleAbsent
+            expr: |
+              (
+                ( absent(kube_cronjob_status_last_successful_time{namespace="scale-zero-pg", cronjob="backup"}) == 1
+                  or kube_cronjob_spec_suspend{namespace="scale-zero-pg", cronjob="backup"} == 1 )
+                and on(namespace, cronjob)
+                (time() - kube_cronjob_created{namespace="scale-zero-pg", cronjob="backup"} > 93600)
+              )
+              or absent(kube_cronjob_created{namespace="scale-zero-pg", cronjob="backup"}) == 1
+            for: 10m
+            labels: { severity: critical }
+            annotations:
+              summary: "backup has NEVER succeeded, or is suspended/deleted (plane >26h old)"
+              description: "No last-successful-time series for the backup CronJob (never succeeded / suspended), and the CronJob has existed >26h so a run should have happened — OR the CronJob object is gone (deleted/renamed). BackupStale is blind in this state — treat as no off-cluster backup at all. Check `kubectl -n scale-zero-pg get cronjob backup`. (Fresh/DR-restored planes are suppressed for the first 26h — #62.)"
+          - alert: WalJanitorStaleAbsent
+            expr: |
+              (
+                ( absent(kube_cronjob_status_last_successful_time{namespace="scale-zero-pg", cronjob="wal-janitor"}) == 1
+                  or kube_cronjob_spec_suspend{namespace="scale-zero-pg", cronjob="wal-janitor"} == 1 )
+                and on(namespace, cronjob)
+                (time() - kube_cronjob_created{namespace="scale-zero-pg", cronjob="wal-janitor"} > 93600)
+              )
+              or absent(kube_cronjob_created{namespace="scale-zero-pg", cronjob="wal-janitor"}) == 1
+            for: 10m
+            labels: { severity: critical }
+            annotations:
+              summary: "wal-janitor has NEVER succeeded, or is suspended/deleted (plane >26h old)"
+              description: "No last-successful-time series for the wal-janitor CronJob (never succeeded / suspended), and the CronJob has existed >26h so a run should have happened — OR the CronJob object is gone. WalJanitorStale is blind in this state — /safekeeper WAL will regrow unbounded. Check `kubectl -n scale-zero-pg get cronjob wal-janitor`. (Fresh/DR-restored planes are suppressed for the first 26h — #62.)"
+          # (b''') JANITOR/MONITOR DISARMED BY MISSING CONFIG (issue #142). The silent
+          # hole WalJanitorStale (26h) is far too slow for: a janitor-critical ConfigMap
+          # (storage-objstore / compute-config, or the repl-slot monitors' script CM) is
+          # deleted — e.g. residue from a throwaway drill in the main ns — so the next
+          # scheduled pod's container CANNOT be created (envFrom/volume references a
+          # ConfigMap that is gone → CreateContainerConfigError). The container NEVER
+          # STARTS, so the pod never becomes a Failed Job → WalJanitorJobFailed /
+          # ReplicationSlot* / SafekeeperWALGrowth (all kube_job_status_failed joins)
+          # NEVER fire. The ONLY backstop was WalJanitorStale at >26h — by which time
+          # /safekeeper WAL has already accumulated toward a node DiskPressure (the
+          # 2026-07-06 incident). This rule closes it at the SOURCE: page within one
+          # evaluation window when a janitor/monitor/backup POD is stuck unable to start
+          # its container (config-missing = the job is DISARMED; also image-pull faults).
+          # It reads kube_pod_container_status_waiting_reason (KSM `pods` collector,
+          # deploy/59) directly off the POD — no Failed-Job dependency, so it sees the
+          # exact never-starts case the owner-join rules are blind to. Covers BOTH the
+          # nightly wal-janitor AND the zone repl-slot monitors (same shared-config/exec
+          # coupling class), plus backup + apps-wal-monitor. `for: 2m` tolerates a normal
+          # brief image pull; a stuck-config pod persists (kubelet retries in place) so it
+          # crosses 2m and pages the SAME night, not 26h later.
+          - alert: JanitorConfigDisarmed
+            expr: |
+              max by (namespace, pod, container, reason) (
+                kube_pod_container_status_waiting_reason{
+                  namespace="scale-zero-pg",
+                  reason=~"CreateContainerConfigError|CreateContainerError|InvalidImageName|ImagePullBackOff|ErrImagePull|ErrImageNeverPull",
+                  pod=~"(wal-janitor|repl-slot-wal-monitor|repl-slot-inactive-monitor|apps-wal-monitor|backup)-.+"
+                }
+              ) > 0
+            for: 2m
+            labels: { severity: critical }
+            annotations:
+              summary: "a janitor/monitor pod is DISARMED — its container cannot start ({{ $labels.pod }}: {{ $labels.reason }})"
+              description: "Pod {{ $labels.pod }} container {{ $labels.container }} is stuck in {{ $labels.reason }} — a janitor-critical ConfigMap/Secret is missing (config-missing = the job is DISARMED, e.g. storage-objstore deleted as drill residue) or an image cannot be pulled. The container NEVER starts, so no Failed Job is produced and WalJanitorJobFailed / ReplicationSlot* / SafekeeperWALGrowth stay silent — /safekeeper WAL then accumulates unbounded toward node DiskPressure (the 2026-07-06 incident). This fires the SAME cycle instead of waiting 26h for WalJanitorStale. Restore the missing config (`kubectl -n scale-zero-pg describe pod {{ $labels.pod }}` names it; re-derive storage-objstore via deploy/gen-secrets.sh) — see docs/operations.md 'Kill-criteria tripwires' → janitor-disarm."
+          # (b'') apps-tenant orphaned-WAL residue + safekeeper PV growth (issues
+          # #90/#87). The wal-janitor correctly NEVER over-prunes an unresolvable apps
+          # timeline, but the residue it skips was previously UNMONITORED — no metric,
+          # no alert, no bound — so orphaned per-app safekeeper WAL could grow on the
+          # fixed 2Gi safekeeper PVs until ENOSPC wedged the WHOLE storage plane,
+          # disguised as "expected churn". The apps-wal-monitor CronJob (deploy/62)
+          # measures orphan WAL dirs (safekeeper-present, pageserver-404) AND df /data
+          # on every safekeeper, and FAILS its Job when either crosses threshold. This
+          # rule joins that Failed Job via the SAME kube_job_owner pattern as backup /
+          # wal-janitor. DELIBERATELY severity=warning + distinct from WalJanitorJobFailed:
+          # it stays OFF the primary pager (expected branch-per-app churn) but is no
+          # longer invisible. Reclaim: `provision-app.sh reclaim-orphans`. DORMANT when
+          # the monitor is not deployed (no kube_job_owner series ⇒ no samples).
+          - alert: SafekeeperWALGrowth
+            expr: |
+              sum(kube_job_status_failed{namespace="scale-zero-pg"}
+                  * on(namespace, job_name) group_left(owner_name)
+                  kube_job_owner{namespace="scale-zero-pg", owner_name="apps-wal-monitor"}) > 0
+            for: 1h
+            labels: { severity: warning, plane: apps }
+            annotations:
+              summary: "apps-tenant orphaned WAL residue or safekeeper PV utilization high"
+              description: "The apps-wal-monitor Job failed: orphaned apps-tenant WAL (a deprovisioned app's safekeeper WAL dir, pageserver-404) is accumulating on the fixed-size safekeeper PVs, and/or a safekeeper /data is over its utilization threshold — an unbounded leak that ends in ENOSPC wedging the whole storage plane. Off the primary pager (expected branch-per-app churn) but must be reclaimed. Read the Job log for orphan count vs PV%; reclaim with `provision-app.sh reclaim-orphans`. See docs/operations.md#reclaiming-orphaned-apps-tenant-wal."
+          # (c) pswatcher down: the failover authority is not being scraped.
+          # No watcher => no automated pageserver failover (#23).
+          - alert: PswatcherDown
+            expr: up{job="pswatcher"} == 0
+            for: 2m
+            labels: { severity: critical }
+            annotations:
+              summary: "pswatcher is DOWN — no automated pageserver failover"
+              description: "Prometheus cannot scrape pswatcher (:9091). While it is down, a primary pageserver death degrades to the manual runbook (docs/operations.md#pageserver-failover)."
+          # (c) promotion counter jumped: a failover actually happened. Page —
+          # the promoted standby is now the unguarded read authority (#25/#23).
+          - alert: PswatcherPromotionFired
+            expr: increase(pswatcher_promotions_total[10m]) > 0
+            labels: { severity: critical }
+            annotations:
+              summary: "pageserver FAILOVER fired — standby promoted"
+              description: "pswatcher promoted the warm standby. The platform is now on a pageserver with NO standby behind it until an operator rebuilds one (docs/operations.md#pageserver-failover)."
+          # (c) primary_up flipped: the watched pageserver is unreachable from
+          # the watcher, sustained. Precedes a promotion.
+          - alert: PswatcherPrimaryDown
+            expr: pswatcher_primary_up == 0
+            for: 1m
+            labels: { severity: warning }
+            annotations:
+              summary: "pswatcher reports the primary pageserver unreachable"
+              description: "pswatcher_primary_up==0 sustained — the watcher is failing probes and may promote the standby (~6s at default threshold)."
+          # (d) pageserver-standby not ready >5m: the warm standby that failover
+          # promotes into is gone. Failover would have nothing to promote.
+          - alert: PageserverStandbyNotReady
+            expr: kube_statefulset_status_replicas_ready{namespace="scale-zero-pg", statefulset="pageserver-standby"} < 1
+            for: 5m
+            labels: { severity: critical }
+            annotations:
+              summary: "pageserver-standby is not ready — failover has no target"
+              description: "The warm standby STS has <1 ready replica for >5m. An automated failover (#3) has nothing to promote; rebuild the standby."
+          # (e) wake-path failure — SINGLE-DB plane. The single-DB gateway reports
+          # live client connections but no primary compute replica is ready. A client
+          # is connected and the DB it woke never came up. SCOPED (issue #80): the
+          # connection sum is now pinned to gateway="pggw" so apps-plane traffic (now
+          # also scraped) can't mask or spuriously trip the single-DB rule.
+          - alert: ComputeWakeStuck
+            expr: |
+              (sum(pggw_active_connections{gateway="pggw"}) > 0)
+              and
+              (sum(kube_deployment_status_replicas_ready{namespace="scale-zero-pg", deployment=~"compute|compute-warm"}) < 1)
+            for: 2m
+            labels: { severity: critical, plane: single-db }
+            annotations:
+              summary: "single-DB clients connected but no compute is ready — wake path stuck"
+              description: "pggw_active_connections{gateway=pggw}>0 yet 0 ready compute/compute-warm replicas for >2m — the single-DB wake path is failing (attach error, image pull, storage-plane stall). Clients are hanging. See docs/operations.md#wake-path--multi-tenant-compute-alerts."
+          # (e') wake-path failure — BRANCH-PER-APP plane (issue #80). The apps-gateway
+          # (pggw-apps) holds live client connections but NO per-app compute is ready
+          # anywhere. compute-<app> deployments are matched by `compute-.+` with the
+          # RO/warm/tmpl pools excluded (they are not tenant computes). AGGREGATE by
+          # design: it fires when the whole apps plane is down (0 ready per-app
+          # computes while apps traffic is present); a SINGLE stuck app among healthy
+          # peers is caught instead by ComputeStuckNotReady (per-pod, below) — the
+          # gateway connection metric is not labelled per app so a per-tenant conn
+          # variant is not available from gateway metrics alone.
+          - alert: ComputeWakeStuckApps
+            expr: |
+              (sum(pggw_active_connections{gateway="pggw-apps"}) > 0)
+              and
+              (sum(kube_deployment_status_replicas_ready{namespace="scale-zero-pg", deployment=~"compute-.+", deployment!~"compute-(ro|warm|tmpl)"}) < 1)
+            for: 2m
+            labels: { severity: critical, plane: apps }
+            annotations:
+              summary: "apps-gateway clients connected but no per-app compute is ready — apps wake path stuck"
+              description: "pggw_active_connections{gateway=pggw-apps}>0 yet 0 ready compute-<app> replicas for >2m — the branch-per-app wake path is failing for the whole apps plane. See docs/operations.md#wake-path--multi-tenant-compute-alerts."
+          # (e'') READ-POOL stuck (issue #80). The read-replica pool (compute-ro, #66)
+          # was asked to serve — the gateway RO lane scaled its desired replicas up
+          # (spec>=1) — but no replica became ready (crashloop, attach stall, image
+          # pull). "RO pool stuck at 0 under read traffic" was referenced by NO alert
+          # before this. KSM-only expr (no gateway conn dependency): desired>=1 AND
+          # ready<1 for 2m. When the pool is legitimately at rest (spec==0) it is
+          # silent (0>=1 is false).
+          - alert: ComputeRoPoolStuck
+            expr: |
+              (kube_deployment_spec_replicas{namespace="scale-zero-pg", deployment="compute-ro"} > 0)
+              and
+              (kube_deployment_status_replicas_ready{namespace="scale-zero-pg", deployment="compute-ro"} < 1)
+            for: 2m
+            labels: { severity: critical, plane: read-pool }
+            annotations:
+              summary: "read-replica pool (compute-ro) asked to serve but 0 ready — RO wake stuck"
+              description: "compute-ro spec.replicas>=1 (the gateway RO lane woke it under read traffic) yet 0 ready for >2m — the read path is failing. DATABASE_URL_RO reads are hanging. See docs/operations.md#wake-path--multi-tenant-compute-alerts."
+          # (e''') generic compute NOT-READY (issue #80, item 4). The connection-gated
+          # rules above only page when a CLIENT is waiting. A sleeping app's compute
+          # that starts CRASH-LOOPING with NObody connected would page nobody. This
+          # per-pod rule catches ANY compute-family pod (compute, compute-ro,
+          # compute-warm, compute-<app>) whose Ready condition is false for >5m —
+          # regardless of client traffic. Uses kube_pod_status_ready (always present
+          # for existing pods); a healthy cold start (~5s) never trips the 5m window,
+          # and a scaled-to-zero pool has no pod so nothing matches.
+          - alert: ComputeStuckNotReady
+            expr: |
+              max by (pod) (kube_pod_status_ready{namespace="scale-zero-pg", condition="true", pod=~"compute.*"}) == 0
+            for: 5m
+            labels: { severity: critical }
+            annotations:
+              summary: "compute pod {{ $labels.pod }} not ready for >5m (no client needed to page)"
+              description: "A compute-family pod ({{ $labels.pod }}) has Ready=false for >5m — a crash-looping / attach-stalled compute that pages even with NO client waiting (catches a sleeping app's compute crash-looping). See docs/operations.md#wake-path--multi-tenant-compute-alerts."
+      # DEAD-MAN'S-SWITCH (issue #60). Every rule above is EVALUATED by Prometheus and
+      # ROUTED by Alertmanager. If either is down/crashlooping/OOM/evicted, NO rule fires
+      # and NO page is sent — including KubeStateMetricsDown and PswatcherDown, the guards
+      # meant to catch silent machinery. Those close the *producer*-death holes but are all
+      # blind to *evaluator/router* death. The standard fix is an always-firing Watchdog
+      # routed to an EXTERNAL receiver (deploy/61 `watchdog`): the off-cluster side alarms
+      # when the heartbeat STOPS arriving. Without it, "all rules green" cannot distinguish
+      # a healthy alerting stack from a dead one.
+      - name: ks-pg-watchdog
+        rules:
+          - alert: Watchdog
+            expr: vector(1)
+            labels: { severity: none }
+            annotations:
+              summary: "Alerting pipeline heartbeat — always firing by design"
+              description: "This alert is ALWAYS firing. Alertmanager routes it to the external `watchdog` receiver on a short repeat_interval; an off-cluster monitor (healthchecks.io / Dead Man's Snitch / cronitor) is configured to ALARM if the ping stops. If you are paged by the EXTERNAL monitor, Prometheus or Alertmanager itself is down — see docs/operations.md#dead-mans-switch-external-heartbeat-60."
+      # DEMO END-TO-END CANARY (issue #39). The pg-demo NextApp is the only workload
+      # that exercises the FULL visitor->app->gateway->compute cold wake — a synthetic
+      # the gateway :9090 metrics can't be (they see the DB half only, never an app /
+      # DNS / Knative ingress-class regression). The `demo-canary` CronJob
+      # (demo/manifests/30-demo-canary.yaml, in THIS namespace so KSM sees it) fails a
+      # Job when the app can't return DB-backed data within budget; this rule joins on
+      # that Failed Job via the SAME kube_job_owner pattern as backup / wal-janitor.
+      # DORMANT by design: when the demo canary is not deployed there is no
+      # kube_job_owner{owner_name="demo-canary"} series, so the expr yields no samples
+      # and never fires — shipping it in the always-on Prometheus is free.
+      - name: ks-pg-demo-canary
+        rules:
+          - alert: DemoCanaryFailed
+            expr: |
+              sum(kube_job_status_failed{namespace="scale-zero-pg"}
+                  * on(namespace, job_name) group_left(owner_name)
+                  kube_job_owner{namespace="scale-zero-pg", owner_name="demo-canary"}) > 0
+            for: 1m
+            labels: { severity: warning }
+            annotations:
+              summary: "demo end-to-end canary failed — combined app+DB wake broken"
+              description: "A Job owned by the demo-canary CronJob failed: the pg-demo NextApp could not return DB-backed data within the wake budget across all retries. This is the only synthetic exercising the full app->gateway->compute cold path (catches app-side / DNS / Knative ingress-class regressions the gateway metrics cannot see). Warning, not crit — the demo is not a durability path. Dormant unless the demo canary is deployed (demo/manifests/30-demo-canary.yaml). See docs/operations.md#demo-canary and demo/README.md."
+      # ZONED-REPLICATION SLOT alerts (issue #139, ADR-0007 §4a). Cross-zone logical
+      # replication grows a per-subscriber replication slot on the publisher; an
+      # inactive/leaked slot pins publisher WAL toward the max_slot_wal_keep_size bound
+      # (deploy/compute-files/config.json) and, unbounded, would ENOSPC-wedge the shared
+      # 2Gi safekeeper PVs. The repl-slot-monitor CronJobs (deploy/63) read
+      # pg_replication_slots on every awake writer and FAIL their Job on a breach; these
+      # rules join that Failed Job via the SAME kube_job_owner pattern as backup /
+      # wal-janitor / apps-wal-monitor. DELIBERATELY severity=warning + plane=zones: the
+      # WAL bound is the hard backstop (degrade-to-re-sync, never plane-fill) — these are
+      # the EARLY WARNING, off the primary pager. DORMANT until the monitors are deployed
+      # AND a slot exists (no kube_job_owner series ⇒ no samples), so shipping them is free.
+      - name: ks-pg-replication
+        rules:
+          # (a) a slot's retained WAL is approaching the max_slot_wal_keep_size bound
+          # (>75%) OR was already invalidated by it — a subscriber falling behind / a
+          # leaked slot; unaddressed it degrades that dependency to a re-sync.
+          - alert: ReplicationSlotWALGrowth
+            expr: |
+              sum(kube_job_status_failed{namespace="scale-zero-pg"}
+                  * on(namespace, job_name) group_left(owner_name)
+                  kube_job_owner{namespace="scale-zero-pg", owner_name="repl-slot-wal-monitor"}) > 0
+            for: 1h
+            labels: { severity: warning, plane: zones }
+            annotations:
+              summary: "a replication slot's retained WAL is approaching the max_slot_wal_keep_size bound"
+              description: "The repl-slot-wal-monitor Job failed: a logical replication slot on an awake publisher is retaining WAL past 75% of the 512MB max_slot_wal_keep_size bound (or was already invalidated by it, wal_status=lost). A cross-zone subscriber is falling behind or a slot is leaked; past the bound Postgres invalidates the slot and the subscriber must re-sync (drop+recreate subscription with copy_data) — the designed degrade, never a plane-fill. Read the Job log for the offending slot(s). See docs/operations.md#zoned-replication-slot-monitoring-adr-0007."
+          # (b) a slot inactive longer than the threshold — a LEAKED slot from a dead or
+          # deprovisioned subscriber, still pinning publisher WAL. Reclaim it.
+          - alert: ReplicationSlotInactive
+            expr: |
+              sum(kube_job_status_failed{namespace="scale-zero-pg"}
+                  * on(namespace, job_name) group_left(owner_name)
+                  kube_job_owner{namespace="scale-zero-pg", owner_name="repl-slot-inactive-monitor"}) > 0
+            for: 1h
+            labels: { severity: warning, plane: zones }
+            annotations:
+              summary: "a replication slot has been inactive too long — likely a leaked slot"
+              description: "The repl-slot-inactive-monitor Job failed: a logical replication slot has been inactive for longer than the threshold (24h) — very likely a LEAKED slot from a dead or deprovisioned cross-zone subscriber, still pinning publisher WAL. Drop it (pg_drop_replication_slot on the publisher) or run the Zone deprovision hygiene (ADR-0007 §4d). Read the Job log for the offending slot(s). See docs/operations.md#zoned-replication-slot-monitoring-adr-0007."
+      # ZONE STATUS alerts (ADR-0007, #139 v2-2; SRE F2 v1.3.0 review). Cross-zone
+      # breakage — a Zone in Failed/Degraded phase, or a dataDependency in
+      # error/denied/needs_resync — is invisible to the slot-WAL monitors above (which
+      # only see publisher WAL). The zone-status-monitor CronJobs (deploy/64) read the
+      # Zone CRs and FAIL their Job on a breach; these rules join that Failed Job via the
+      # SAME kube_job_owner pattern. DELIBERATELY severity=critical + plane=zones: unlike
+      # the slot WAL warnings (early-warning, off the primary pager), a broken cross-zone
+      # dependency is a live data-freshness failure and must PAGE. DORMANT until the
+      # monitors are deployed AND a Zone is Failed/Degraded (no kube_job_owner series ⇒ no
+      # samples), so shipping them is free. `for` debounces transient reconcile windows.
+      - name: ks-pg-zones
+        rules:
+          # (a) a Zone is Failed (invalid spec) or Degraded (denied dep / wiring error /
+          # an invalidated slot awaiting re-sync).
+          - alert: ZoneDegradedOrFailed
+            expr: |
+              sum(kube_job_status_failed{namespace="scale-zero-pg"}
+                  * on(namespace, job_name) group_left(owner_name)
+                  kube_job_owner{namespace="scale-zero-pg", owner_name="zone-phase-monitor"}) > 0
+            for: 15m
+            labels: { severity: critical, plane: zones }
+            annotations:
+              summary: "a Zone is Failed or Degraded — cross-zone fabric is broken"
+              description: "The zone-phase-monitor Job failed: one or more Zone CRs are phase=Failed (an invalid spec — terminal until corrected) or phase=Degraded (a dataDependency the operator could not wire: governance denial, a wiring error, or a replication slot invalidated by the max_slot_wal_keep_size bound and awaiting re-sync). A cross-zone data dependency is not delivering. Read the Job log and `kubectl get zone -o yaml` for the offending zone + status.message. See docs/operations.md#zone-alerts--re-sync-runbook."
+          # (b) a dataDependency subscription in error / denied / needs_resync.
+          - alert: ZoneSubscriptionBroken
+            expr: |
+              sum(kube_job_status_failed{namespace="scale-zero-pg"}
+                  * on(namespace, job_name) group_left(owner_name)
+                  kube_job_owner{namespace="scale-zero-pg", owner_name="zone-subscription-monitor"}) > 0
+            for: 15m
+            labels: { severity: critical, plane: zones }
+            annotations:
+              summary: "a cross-zone subscription is error/denied/needs_resync"
+              description: "The zone-subscription-monitor Job failed: one or more cross-zone subscriptions are state=error (a wiring failure), denied (governance — the peer does not publish the requested tables; declare them in the peer's spec.publishes to grant), or needs_resync (the peer slot was invalidated, wal_status=lost — the local copy is stale; the operator auto-actuates DROP+CREATE SUBSCRIPTION copy_data unless ZONE_AUTO_RESYNC=false). Read the Job log for the offending zone->peer pairs + subscription message. See docs/operations.md#zone-alerts--re-sync-runbook."
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prometheus
+  namespace: scale-zero-pg
+  labels: { app: prometheus, plane: observability }
+spec:
+  replicas: 1
+  revisionHistoryLimit: 2
+  selector: { matchLabels: { app: prometheus } }
+  strategy: { type: Recreate }
+  template:
+    metadata:
+      labels: { app: prometheus, plane: observability }
+      annotations:
+        # AUTO-RELOAD (issue #155): sha256 of the prometheus-config ConfigMap data
+        # (prometheus.yml + rules.yml). A rule/scrape edit changes this hash → the pod
+        # template changes → `kubectl apply` rolls this (Recreate) Deployment → the new
+        # pod LOADS the fresh rules at boot. WITHOUT this, a merged+applied ConfigMap
+        # change stays DARK in the running Prometheus until a manual POST /-/reload — the
+        # 2026-07-06 zone-alerts miss (rules mounted-but-never-loaded). REGENERATE after
+        # ANY edit to the ConfigMap above:  ./_validate.sh prom-config-hash
+        # (prints the value to paste here). _validate.sh contract 27 fails if this drifts
+        # from the ConfigMap data; _verify-drift.sh section E independently asserts every
+        # shipped rule is LOADED in the live pod (/api/v1/rules).
+        ks-pg.dev/prometheus-config-sha256: "ee37e0b843fa77ecd1965afad047a00325d1eafb31ef59b54f66628bc736750d"
+    spec:
+      serviceAccountName: prometheus
+      securityContext:
+        fsGroup: 65534
+        runAsNonRoot: true
+        runAsUser: 65534 # nobody — prom/prometheus default
+        runAsGroup: 65534
+        fsGroup: 65534
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: prometheus
+          image: prom/prometheus:v2.53.2 # pinned; LTS line
+          args:
+            - --config.file=/etc/prometheus/prometheus.yml
+            - --storage.tsdb.path=/prometheus
+            - --storage.tsdb.retention.time=15d
+            - --web.enable-lifecycle
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+          ports:
+            - { name: web, containerPort: 9090 }
+          readinessProbe:
+            httpGet: { path: /-/ready, port: web }
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /-/healthy, port: web }
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            failureThreshold: 6
+          resources:
+            requests: { cpu: 50m, memory: 128Mi, ephemeral-storage: 100Mi }
+            limits: { memory: 384Mi, ephemeral-storage: 1Gi }
+          volumeMounts:
+            - { name: config, mountPath: /etc/prometheus/prometheus.yml, subPath: prometheus.yml }
+            # rules mounted as a DIRECTORY on purpose: subPath mounts never see
+            # ConfigMap updates, so rule changes would need a pod restart (this
+            # broke the alert-fire drill before the fix).
+            - { name: rules, mountPath: /etc/prometheus/rules }
+            - { name: data, mountPath: /prometheus }
+      volumes:
+        - name: config
+          configMap: { name: prometheus-config, items: [{ key: prometheus.yml, path: prometheus.yml }] }
+        - name: rules
+          configMap: { name: prometheus-config, items: [{ key: rules.yml, path: rules.yml }] }
+        - name: data
+          persistentVolumeClaim: { claimName: prometheus-data }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus
+  namespace: scale-zero-pg
+  labels: { app: prometheus, plane: observability }
+spec:
+  type: ClusterIP # internal only; never exposed
+  selector: { app: prometheus }
+  ports:
+    - { name: web, port: 9090, targetPort: web }
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: prometheus-data
+  namespace: scale-zero-pg
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources: { requests: { storage: 2Gi } }

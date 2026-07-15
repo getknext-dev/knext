@@ -1,0 +1,66 @@
+# External-driver RBAC for the AppDatabase API (ADR-0006 §3a, #119).
+#
+# This is the scoped Role an EXTERNAL operator (the knext operator, getknext-dev/knext)
+# binds its ServiceAccount to so it can drive the AppDatabase API in THIS namespace:
+# create/watch AppDatabase custom resources and READ the per-app output Secret
+# (app-db-<app>) to mirror it into the app's own namespace (the delegation flow in
+# ADR-0006 §2). It is namespace-scoped (a Role, not a ClusterRole) and grants NOTHING
+# on the storage plane — no pageserver/safekeeper/minio, no StatefulSets/Deployments/
+# Pods/PVCs, no storage-plane Secrets access, no compute control. A knext-operator
+# compromise is bounded to the apps tenant (provision/destroy app databases + read
+# app-db-* DSNs); it cannot touch or read the storage plane.
+#
+# INSTALL: apply this Role in scale-zero-pg, then bind the knext operator's SA
+# (edit the RoleBinding below: name + namespace of that SA). The knext operator does
+# NOT run in scale-zero-pg — a RoleBinding in scale-zero-pg may reference a SA in
+# another namespace, which is exactly the cross-namespace grant we want.
+#
+# See docs/appdatabase-api.md for the full external-driver contract.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: knext-appdb-driver
+  namespace: scale-zero-pg
+  labels: { tier: apps, plane: control, "app.kubernetes.io/part-of": scale-zero-pg }
+rules:
+  # The AppDatabase API surface: create the CR for an app, watch it to Ready,
+  # update it (tier / readReplicas / quotas changes), and delete it on teardown.
+  - apiGroups: ["apps.scale-zero-pg.dev"]
+    resources: ["appdatabases"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Read the reconciled status (phase / Ready condition / secretName / observedGeneration)
+  # to gate the app rollout on the DB being Ready (ADR-0006 §4.1 hard-gate).
+  - apiGroups: ["apps.scale-zero-pg.dev"]
+    resources: ["appdatabases/status"]
+    verbs: ["get"]
+  # Read the per-app output Secret (app-db-<app>) to MIRROR it into the app namespace
+  # (ADR-0006 §3b). ⚠️ RBAC CANNOT prefix-scope resourceNames for list/watch, so this
+  # grants read of Secrets in THIS namespace only. app-db-* are the ONLY app-facing
+  # Secrets here; storage-plane credentials (minio/objstore/TLS) also live in this ns.
+  # For deployments that require strict app-db-*-only reads, use the name-scoped variant
+  # documented in docs/appdatabase-api.md#hardening-the-secret-read (a per-app
+  # get-by-resourceName grant, or relocating app-db-* to a dedicated namespace).
+  # This blanket read is namespace-scoped and read-only; it confers NO write on any
+  # Secret and NO access outside scale-zero-pg.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "watch"]
+---
+# Bind the knext operator's ServiceAccount to the Role above.
+# EDIT: set subjects[0].name/namespace to the knext operator's SA (it lives in
+# knext's own namespace, e.g. knext-system). A RoleBinding in scale-zero-pg may
+# reference a SA in another namespace — that is the intended cross-namespace grant.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: knext-appdb-driver
+  namespace: scale-zero-pg
+  labels: { tier: apps, plane: control, "app.kubernetes.io/part-of": scale-zero-pg }
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: knext-appdb-driver
+subjects:
+  - kind: ServiceAccount
+    name: knext-operator # EDIT: the knext operator's ServiceAccount name
+    namespace: knext-system # EDIT: the namespace that SA lives in

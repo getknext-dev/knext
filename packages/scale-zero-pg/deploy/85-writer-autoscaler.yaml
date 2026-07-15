@@ -1,0 +1,169 @@
+# writer-autoscaler: the writer vertical-autoscaler (issue #103, docs/SCALING.md
+# axis 1). Watches every WRITER compute's CPU+memory pressure (metrics-server) and
+# applies the proven #67 in-place pod resize (the pods/resize subresource) within
+# operator-configured min/max bounds — growing/shrinking a RUNNING Postgres writer
+# with ZERO restart. Per-app aware: the plane=compute selector covers the primary
+# `compute` and every per-app `compute-<app>` writer; the read-replica pool
+# (app=compute-ro, no plane=compute label) is deliberately excluded.
+#
+# Hard invariant (never-bounce-silently): CPU + memory limits actuate live;
+# shared_buffers is boot-fixed, so a writer memory-bound AT its max limit is
+# ANNOTATED (writer-autoscaler.scale-zero-pg/needs-bounce) for an operator
+# maintenance-window bounce — the controller never restarts a live writer.
+#
+# Ships in the same multi-binary ks-pg/gateway image; the Deployment overrides
+# ENTRYPOINT to /writer-autoscaler (same image, distinct binary — like pswatcher).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: writer-autoscaler
+  namespace: scale-zero-pg
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: writer-autoscaler
+  namespace: scale-zero-pg
+rules:
+  # List/read writer pods (find them + read ACTUATED resources from status) and
+  # patch the needs-bounce annotation on the pod metadata (never a delete/bounce).
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "patch"]
+  # The in-place resize subresource — the ONLY way to grow/shrink a running
+  # container without a restart (k8s 1.33 InPlacePodVerticalScaling).
+  - apiGroups: [""]
+    resources: ["pods/resize"]
+    verbs: ["patch"]
+  # Read-only view of the writer Deployments (diagnostics; no scale/patch here —
+  # patching the template would trigger a Recreate rollout = a bounce, which we
+  # must never do to a live writer).
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list"]
+---
+# metrics-server exposes PodMetrics as a namespaced resource under metrics.k8s.io;
+# a namespaced Role suffices for read access to this namespace's pod usage.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: writer-autoscaler-metrics
+  namespace: scale-zero-pg
+rules:
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: writer-autoscaler
+  namespace: scale-zero-pg
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: writer-autoscaler
+subjects:
+  - kind: ServiceAccount
+    name: writer-autoscaler
+    namespace: scale-zero-pg
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: writer-autoscaler-metrics
+  namespace: scale-zero-pg
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: writer-autoscaler-metrics
+subjects:
+  - kind: ServiceAccount
+    name: writer-autoscaler
+    namespace: scale-zero-pg
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: writer-autoscaler
+  namespace: scale-zero-pg
+  # NOT labelled plane=compute: this controller is not a writer and must never
+  # select itself (the WAS_SELECTOR is plane=compute,role!=ro).
+  labels: { app: writer-autoscaler }
+spec:
+  replicas: 1
+  # Recreate (not RollingUpdate): a single controller avoids two instances racing
+  # resizes on the same pod. Resizes are idempotent (the target is a clamped
+  # absolute value, not a delta), but one writer keeps the metrics/logs clean.
+  strategy: { type: Recreate }
+  selector:
+    matchLabels: { app: writer-autoscaler }
+  template:
+    metadata:
+      labels: { app: writer-autoscaler }
+    spec:
+      imagePullSecrets:
+        - name: ocir-pull
+      serviceAccountName: writer-autoscaler
+      # distroless:nonroot ships USER by NAME; pin the numeric uid/gid (65532) so
+      # the kubelet can verify runAsNonRoot (else CreateContainerConfigError).
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: writer-autoscaler
+          image: me-abudhabi-1.ocir.io/axfqznklsd2t/ks-pg/gateway:v1.2.0-wa103@sha256:7c24a84cfb51997c83580b4008d558786fe08b111b1fd9d12ed5612aa445d820 # multi-binary gateway image + /writer-autoscaler (#103); digest-pinned per contract-22 (docs/operations.md "Releasing an OCIR image")
+          imagePullPolicy: IfNotPresent
+          command: ["/writer-autoscaler"] # override the image's /gateway entrypoint
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+          env:
+            - { name: WAS_NAMESPACE, value: "scale-zero-pg" }
+            # WRITERS only: plane=compute is shared with per-app read replicas (which
+            # carry role=ro), so exclude them; the base RO pool (app=compute-ro) has no
+            # plane label. This is a writer autoscaler — read scaling is the RO HPA's job.
+            - { name: WAS_SELECTOR, value: "plane=compute,role!=ro" }
+            - { name: WAS_CONTAINER, value: "compute" }
+            - { name: WAS_POLL_MS, value: "15000" } # 15s poll
+            - { name: WAS_MIN_CPU, value: "250m" }
+            - { name: WAS_MAX_CPU, value: "2" } # the vertical CPU ceiling per writer
+            - { name: WAS_CPU_STEP, value: "250m" }
+            - { name: WAS_MIN_MEM, value: "256Mi" }
+            - { name: WAS_MAX_MEM, value: "1Gi" } # the vertical memory ceiling per writer
+            - { name: WAS_MEM_STEP, value: "256Mi" }
+            - { name: WAS_UP_RATIO, value: "0.80" } # scale up at >=80% of the limit
+            - { name: WAS_DOWN_RATIO, value: "0.30" } # scale down at <=30% of the limit
+            - { name: WAS_UP_HOLD, value: "3" } # ~45s sustained before a scale-up
+            - { name: WAS_DOWN_HOLD, value: "8" } # ~2min sustained idle before a scale-down
+            - { name: WAS_COOLDOWN, value: "4" } # ~60s after any resize before the next (anti-flap)
+            - { name: WAS_HEALTH_ADDR, value: ":9092" }
+          ports:
+            - { name: metrics, containerPort: 9092 }
+          readinessProbe:
+            httpGet: { path: /healthz, port: metrics }
+            initialDelaySeconds: 1
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /healthz, port: metrics }
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          resources:
+            requests: { cpu: 20m, memory: 32Mi, ephemeral-storage: 100Mi }
+            limits: { cpu: "1", memory: 64Mi, ephemeral-storage: 1Gi }
+---
+# ClusterIP so Prometheus can scrape writer_autoscaler_* counters. Never fronted by
+# a LoadBalancer (metrics must not leak — same rule as pggw/pswatcher).
+apiVersion: v1
+kind: Service
+metadata:
+  name: writer-autoscaler
+  namespace: scale-zero-pg
+  labels: { app: writer-autoscaler }
+spec:
+  type: ClusterIP
+  selector: { app: writer-autoscaler }
+  ports:
+    - { name: metrics, port: 9092, targetPort: metrics }

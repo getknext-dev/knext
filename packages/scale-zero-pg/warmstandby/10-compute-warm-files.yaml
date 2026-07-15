@@ -1,0 +1,55 @@
+# Gated entrypoint for the warm-standby compute prototype (design A).
+#
+# This overlays ONLY a new entrypoint on top of the STOCK compute image. It
+# reuses the existing `compute-files` ConfigMap for config.json (mounted at
+# /compute-files) so the compute spec never drifts from deploy/. The single
+# difference vs deploy/compute-files/entrypoint.sh: after rendering the spec,
+# the container prints a sentinel and BLOCKS on a gate file before exec'ing
+# compute_ctl. The pod is therefore fully scheduled + running (RAM held) but
+# postgres/compute_ctl has NOT attached to the timeline — a "warm-RAM" tier.
+#
+# Wake = create the gate file (`kubectl exec ... touch /tmp/go`). That skips
+# ALL pod-creation mechanics (sandbox, image, init) which already happened;
+# remaining cost = compute_ctl attach + first probe.
+#
+# SINGLE-WRITER: releasing the gate attaches this pod to the shared timeline.
+# The measurement harness NEVER releases it unless deploy/compute is at 0 and
+# fully drained. compute and compute-warm must never be attached at once.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: compute-warm-files
+  namespace: scale-zero-pg
+  labels: { app: compute-warm }
+data:
+  entrypoint.sh: |
+    #!/bin/sh
+    # Gated compute entrypoint. Renders the spec (identical sed to the stock
+    # entrypoint), then waits on a gate file before attaching compute_ctl.
+    set -eu
+    : "${TENANT_ID:?compute-config must set TENANT_ID}"
+    : "${TIMELINE_ID:?compute-config must set TIMELINE_ID}"
+
+    SRC=/compute-files/config.json   # reused from the existing compute-files CM
+    DST=/tmp/config.json
+    CLOUD_ADMIN_MD5="${CLOUD_ADMIN_MD5:-b093c0d3b281ba6da1eacc608620abd8}"
+
+    echo "Rendering compute spec (tenant=${TENANT_ID} timeline=${TIMELINE_ID})"
+    sed -e "s|TENANT_ID|${TENANT_ID}|g" -e "s|TIMELINE_ID|${TIMELINE_ID}|g" \
+        -e "s|CLOUD_ADMIN_MD5_PLACEHOLDER|${CLOUD_ADMIN_MD5}|g" "$SRC" > "$DST"
+
+    GATE="${WARM_GATE_FILE:-/tmp/go}"
+    rm -f "$GATE"
+    # Sentinel: pod is warm (scheduled, RAM held) but compute_ctl is NOT yet
+    # attached to the timeline. The harness polls logs for this line to know
+    # the pod reached the gate (the "asleep" warm state).
+    echo "WARM_GATE_WAITING"
+    while [ ! -f "$GATE" ]; do sleep 0.02; done
+    echo "WARM_GATE_RELEASED"
+
+    # From here it is byte-identical to the stock entrypoint's exec line.
+    exec /usr/local/bin/compute_ctl --pgdata /var/db/postgres/compute \
+         -C "postgresql://cloud_admin@localhost:55433/postgres" \
+         -b /usr/local/bin/postgres \
+         --compute-id "compute-warm-${HOSTNAME:-k8s}" \
+         --config "${DST}"

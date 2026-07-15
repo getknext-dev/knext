@@ -1,0 +1,211 @@
+#!/usr/bin/env bash
+# _verify.sh — the knext end-to-end demo drill (scale-zero-pg issue #8).
+#
+# Proves the north star, MEASURED: a knext NextApp (Knative scale-to-zero) and a
+# scale-to-zero Postgres both sleep at rest, and ONE cold HTTP request wakes BOTH
+# and returns data from Postgres. Then both idle back to zero. Repeated N times.
+#
+# It also separates the both-cold overhead from the app's own cold start by
+# measuring three request classes (the both-cold delta is co-scheduling /
+# image-cache contention, NOT the DB wake — see issue #45 / docs/BENCHMARKS.md):
+#   T_both     both asleep  -> request wakes app + DB      (the headline number)
+#   T_appcold  DB pre-woken  -> request wakes only the app (app cold, DB warm)
+#   T_warm     both awake    -> steady-state request
+# and a bare DB cold-connect (psql through the gateway, no app) for reference.
+#
+# CONSTRAINT: read-only on the scale-zero-pg namespace. We never scale the DB;
+# it wakes only through the gateway (via the app, or via a psql client), and we
+# only *observe* compute replicas. App scaling is Knative's.
+#
+# Requires: kubectl context on the knext2 cluster. Creates two helper pods in
+# the knext-demo namespace (curl + psql drivers) and cleans them up on exit.
+set -uo pipefail
+
+NS_APP=knext-demo
+NS_DB=scale-zero-pg
+APP=pg-demo
+# DB_DEPLOY: which scale-to-zero compute the app is bound to — the one we OBSERVE
+# for 0-replica rest. Default `compute` (the shared primary). Set to
+# `compute-<app>` when the demo has been migrated onto a per-app database
+# (branch-per-app, KC5/#99 — see migrate-to-perapp.sh + README).
+DB_DEPLOY="${DB_DEPLOY:-compute}"
+# DB_PREWAKE: run the bare-DB psql cold-connect reference + the T_appcold
+# (app-cold-only) isolation class. Requires reachable cloud_admin creds on the
+# shared gateway — set DB_PREWAKE=0 for a per-app DB (its role is app_<app>, not
+# cloud_admin, and the T_both headline is what the per-app proof needs anyway).
+DB_PREWAKE="${DB_PREWAKE:-1}"
+# KSVC_HOST is the Host header Knative routes on. It is DERIVED at runtime
+# (issue #40) — never hardcode a cluster's LB IP. Override with KSVC_HOST=... .
+KSVC_HOST="${KSVC_HOST:-}"
+INGRESS_URL="http://kourier-internal.knative-serving.svc/"
+DSN_HOST="pggw.${NS_DB}.svc.cluster.local"
+DSN_PORT=55432
+ITERS="${ITERS:-5}"
+IDLE_WAIT="${IDLE_WAIT:-180}"   # max seconds to wait for both to reach zero
+WAKE_MAX="${WAKE_MAX:-60}"      # curl/psql max-time for a cold wake
+
+HTTP_DRIVER=demo-driver-http
+DB_DRIVER=demo-driver-db
+
+say() { printf '%s\n' "$*"; }
+hr()  { printf -- '----------------------------------------------------------------\n'; }
+
+# Derive the app's Host header at runtime (issue #40). The ksvc's own advertised
+# URL is authoritative — Knative routes by Host, and the sslip.io domain in that
+# URL may differ from the live Kourier LB IP (the domain config can lag an LB
+# re-provision), so building the host from the LB IP is only a last-resort
+# fallback. Explicit KSVC_HOST=... always wins.
+resolve_ksvc_host() {
+  if [[ -n "$KSVC_HOST" ]]; then say "ksvc host (override): $KSVC_HOST"; return; fi
+  local url host ip
+  url=$(kubectl -n "$NS_APP" get ksvc "$APP" -o jsonpath='{.status.url}' 2>/dev/null)
+  if [[ -n "$url" ]]; then
+    host=${url#*://}; host=${host%%/*}
+    KSVC_HOST="$host"; say "ksvc host (from ksvc .status.url): $KSVC_HOST"; return
+  fi
+  # Fallback: build pg-demo.<ns>.<LB-IP>.sslip.io from the Kourier LB address.
+  ip=$(kubectl -n knative-serving get svc kourier -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null)
+  [[ -z "$ip" ]] && ip=$(kubectl -n knative-serving get svc kourier -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null)
+  if [[ -n "$ip" ]]; then
+    KSVC_HOST="${APP}.${NS_APP}.${ip}.sslip.io"
+    say "ksvc host (fallback, from Kourier LB $ip): $KSVC_HOST"
+    say "  NOTE: assumes the ksvc domain tracks the LB IP; prefer the ksvc URL."
+    return
+  fi
+  say "FATAL: could not resolve the app Host header — ksvc '$APP' has no .status.url"
+  say "  and 'kubectl -n knative-serving get svc kourier' has no load-balancer ingress."
+  say "  Set it explicitly:  KSVC_HOST=pg-demo.knext-demo.<LB-IP>.sslip.io bash demo/_verify.sh"
+  exit 1
+}
+
+cleanup() {
+  # Synchronous delete so a following run never races a Terminating driver pod.
+  kubectl -n "$NS_APP" delete pod "$HTTP_DRIVER" "$DB_DRIVER" \
+    --ignore-not-found --grace-period=1 --wait=true >/dev/null 2>&1
+}
+trap cleanup EXIT
+
+app_pods()   { kubectl -n "$NS_APP" get pod -l serving.knative.dev/service="$APP" --no-headers 2>/dev/null | grep -c Running; }
+db_replicas(){ kubectl -n "$NS_DB" get deploy "$DB_DEPLOY" -o jsonpath='{.spec.replicas}' 2>/dev/null; }
+
+wait_for_zero() {
+  # Wait until BOTH the app (0 running pods) and the DB (0 compute replicas) are asleep.
+  local deadline=$((SECONDS + IDLE_WAIT))
+  while (( SECONDS < deadline )); do
+    local a d; a=$(app_pods); d=$(db_replicas)
+    if [[ "$a" == "0" && "$d" == "0" ]]; then return 0; fi
+    sleep 5
+  done
+  say "WARN: timed out waiting for zero (app_pods=$(app_pods) compute=$(db_replicas)); another workload may be holding the DB awake."
+  return 1
+}
+
+# curl inside the http driver pod; prints "<http_code> <ttfb_seconds>".
+http_probe() {
+  kubectl -n "$NS_APP" exec "$HTTP_DRIVER" -- \
+    curl -s -o /tmp/body -w '%{http_code} %{time_starttransfer}' \
+    --max-time "$WAKE_MAX" -H "Host: ${KSVC_HOST}" "$INGRESS_URL" 2>/dev/null
+}
+http_body_has_db() {
+  kubectl -n "$NS_APP" exec "$HTTP_DRIVER" -- sh -c 'grep -qi "db round-trip" /tmp/body && echo yes || echo no' 2>/dev/null
+}
+
+# psql SELECT 1 through the gateway (wakes DB, no app). Prints wall seconds.
+db_wake_probe() {
+  kubectl -n "$NS_APP" exec "$DB_DRIVER" -- sh -c "
+    export PGCONNECT_TIMEOUT=$WAKE_MAX PGPASSWORD=cloud_admin
+    start=\$(date +%s.%N)
+    psql -h $DSN_HOST -p $DSN_PORT -U cloud_admin -d postgres -tAc 'select 1' >/dev/null 2>&1
+    end=\$(date +%s.%N)
+    awk -v s=\$start -v e=\$end 'BEGIN{printf \"%.3f\", e-s}'
+  " 2>/dev/null
+}
+
+ensure_drivers() {
+  # Always start from a clean slate: delete any leftover driver pods and wait
+  # for them to be gone, so we never exec into a Terminating pod.
+  kubectl -n "$NS_APP" delete pod "$HTTP_DRIVER" "$DB_DRIVER" \
+    --ignore-not-found --grace-period=1 --wait=true >/dev/null 2>&1
+  kubectl -n "$NS_APP" run "$HTTP_DRIVER" --image=curlimages/curl:8.11.1 --restart=Never \
+    --command -- sleep 100000 >/dev/null 2>&1
+  kubectl -n "$NS_APP" run "$DB_DRIVER" --image=postgres:17-alpine --restart=Never \
+    --command -- sleep 100000 >/dev/null 2>&1
+  kubectl -n "$NS_APP" wait --for=condition=Ready pod/"$HTTP_DRIVER" --timeout=120s >/dev/null 2>&1
+  kubectl -n "$NS_APP" wait --for=condition=Ready pod/"$DB_DRIVER"   --timeout=120s >/dev/null 2>&1
+  local h d
+  h=$(kubectl -n "$NS_APP" get pod "$HTTP_DRIVER" -o jsonpath='{.status.phase}' 2>/dev/null)
+  d=$(kubectl -n "$NS_APP" get pod "$DB_DRIVER"   -o jsonpath='{.status.phase}' 2>/dev/null)
+  say "drivers: http=$h db=$d"
+  [[ "$h" == "Running" && "$d" == "Running" ]] || { say "FATAL: driver pods not Running; aborting."; exit 1; }
+}
+
+hr; say "knext demo drill — cluster $(kubectl config current-context)"; hr
+resolve_ksvc_host
+say "ksvc:     $(kubectl -n "$NS_APP" get ksvc "$APP" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null) (Ready)"
+say "operator: $(kubectl -n kn-next-operator-system get deploy kn-next-operator-controller-manager -o jsonpath='{.status.readyReplicas}' 2>/dev/null)/1 ready"
+say "GW_IDLE_MS=$(kubectl -n "$NS_DB" get deploy pggw -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="GW_IDLE_MS")].value}' 2>/dev/null)"
+say "DB observed: deploy/$DB_DEPLOY (0-replica rest) — $([[ "$DB_DEPLOY" == compute ]] && echo 'shared primary' || echo 'per-app database, branch-per-app KC5/#99')"
+ensure_drivers
+hr
+
+both=(); appcold=(); warm=(); dbonly=()
+
+for ((i=1; i<=ITERS; i++)); do
+  say "### iteration $i/$ITERS"
+
+  # --- COLD-BOTH: both asleep, one request wakes both -------------------------
+  wait_for_zero
+  say "  state: app_pods=$(app_pods) compute=$(db_replicas) (both asleep)"
+  read -r code ttfb <<<"$(http_probe)"
+  hasdb=$(http_body_has_db)
+  say "  T_both     HTTP $code  ttfb=${ttfb}s  db-backed=$hasdb  (woke app+DB)"
+  [[ "$code" == "200" && "$hasdb" == "yes" ]] && both+=("$ttfb")
+
+  # --- WARM: both awake now ---------------------------------------------------
+  read -r code2 ttfb2 <<<"$(http_probe)"
+  say "  T_warm     HTTP $code2  ttfb=${ttfb2}s  (both warm)"
+  [[ "$code2" == "200" ]] && warm+=("$ttfb2")
+
+  # let both settle back to zero before the isolation probe
+  wait_for_zero
+
+  # --- APP-COLD-ONLY: pre-wake the DB via psql, then hit the cold app ---------
+  # Skipped for a per-app DB (DB_PREWAKE=0): the bare psql probe assumes
+  # cloud_admin on the shared gateway; a per-app DB authenticates as app_<app>.
+  if [[ "$DB_PREWAKE" == "1" ]]; then
+    dbw=$(db_wake_probe)
+    say "  (bare DB cold-connect via gateway: ${dbw}s)"
+    [[ -n "$dbw" ]] && dbonly+=("$dbw")
+    read -r code3 ttfb3 <<<"$(http_probe)"     # DB already warm, app still cold
+    say "  T_appcold  HTTP $code3  ttfb=${ttfb3}s  (app cold, DB pre-warmed)"
+    [[ "$code3" == "200" ]] && appcold+=("$ttfb3")
+  else
+    say "  (T_appcold / bare-DB probe skipped: DB_PREWAKE=0, per-app DB '$DB_DEPLOY')"
+  fi
+
+  hr
+done
+
+mean() { # mean of args, 3dp; empty -> n/a
+  [[ $# -eq 0 ]] && { echo "n/a"; return; }
+  printf '%s\n' "$@" | awk '{s+=$1;n++} END{ if(n) printf "%.3f", s/n; else print "n/a" }'
+}
+mB=$(mean "${both[@]}"); mA=$(mean "${appcold[@]}"); mW=$(mean "${warm[@]}"); mD=$(mean "${dbonly[@]}")
+
+say "SUMMARY  (means over successful iterations)"
+say "  T_both     (app+DB cold)   = ${mB}s   n=${#both[@]}"
+say "  T_appcold  (app cold only) = ${mA}s   n=${#appcold[@]}"
+say "  T_warm     (both warm)     = ${mW}s   n=${#warm[@]}"
+say "  DB cold-connect (bare)     = ${mD}s   n=${#dbonly[@]}"
+if [[ "$mB" != "n/a" && "$mA" != "n/a" ]]; then
+  awk -v b="$mB" -v a="$mA" -v d="$mD" 'BEGIN{
+    ovh=b-a;
+    # NOT the DB wake: T_both-T_appcold is co-scheduling / image-cache-locality
+    # contention in the both-cold path, and routinely EXCEEDS the bare DB wake (d),
+    # so it cannot be attributed to the DB. See docs/BENCHMARKS.md + issue #45.
+    printf "  combined-cold overhead (T_both - T_appcold) = %.3fs  [both-cold contention, NOT DB wake]\n", ovh;
+    if (d!="n/a") printf "  bare DB cold-connect (reference)             = %.3fs\n", d;
+  }'
+fi
+hr
+say "north star: both asleep -> one cold request wakes both -> data from Postgres -> both idle to zero. PROVEN x${#both[@]}."

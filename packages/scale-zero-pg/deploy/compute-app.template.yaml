@@ -1,0 +1,165 @@
+# Per-app compute template (branch-per-app multi-tenancy, ADR-0003).
+#
+# This is a TEMPLATE, not an applied manifest: deploy/provision-app.sh substitutes
+# __APP__ / __TENANT_ID__ / __TIMELINE_ID__ / __REPLICAS__ and the per-app QUOTA
+# knobs (__CPU_REQ__ / __CPU_LIM__ / __MEM_REQ__ / __MEM_LIM__ / __MAX_CONNS__,
+# issue #89) and applies the result.
+# One of these per app. Each app is a Neon TIMELINE (a branch of the shared
+# `apps` template timeline) under the SAME tenant — so N apps share one storage
+# plane (pageserver + safekeeper quorum) but are isolated at the timeline level.
+#
+# It mirrors deploy/20-compute.yaml (the single-DB primary) exactly except that
+# the tenant/timeline come from a per-app ConfigMap and the names carry the app
+# suffix. The compute image, entrypoint, spec (compute-files) and single-writer
+# Recreate strategy are all shared with the primary — nothing app-specific in the
+# image, so a new app costs one branch + one ConfigMap + one Deployment.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: compute-config-__APP__
+  namespace: scale-zero-pg
+  labels: { app: compute-__APP__, tier: apps, plane: compute }
+data:
+  PG_VERSION: "17"
+  PAGESERVER_HOST: "pageserver"
+  TENANT_ID: "__TENANT_ID__"
+  TIMELINE_ID: "__TIMELINE_ID__"
+  # Per-app role (issue #74): compute_ctl applies this login role every boot; its
+  # SCRAM verifier comes from the Secret app-db-__APP__ (APP_ROLE_VERIFIER, optional).
+  # The apps-gateway only admits user == this role for database __APP__.
+  APP_ROLE: "app___APP__"
+  # Per-app connection cap (issue #89, tenant quotas). PG_MAX_CONNECTIONS overrides
+  # the shared compute default (100) so an operator can bound one tenant's
+  # server-side backends below the fleet default — a runaway app cannot open
+  # unbounded backends and OOM/CPU-starve its own (separate) Postgres. Consumed by
+  # the shared entrypoint (compute-files) via envFrom; default 100 = current
+  # behavior. The apps-gateway's GW_MAX_CONNS is a PROCESS-WIDE goroutine ceiling
+  # shared across all apps (see ADR-0003 "noisy-neighbour"); this is the per-app,
+  # Postgres-enforced bound.
+  PG_MAX_CONNECTIONS: "__MAX_CONNS__"
+  # Quota knobs recorded for idempotent re-provision readback (issue #89): a bare
+  # `create <app>` (or `fsck --converge`) reads these back so a customized app's
+  # limits are preserved, not reset to defaults. They ALSO drive the Deployment
+  # resources below (rendered by provision-app.sh from the same values).
+  QUOTA_CPU_REQUEST: "__CPU_REQ__"
+  QUOTA_CPU_LIMIT: "__CPU_LIM__"
+  QUOTA_MEM_REQUEST: "__MEM_REQ__"
+  QUOTA_MEM_LIMIT: "__MEM_LIM__"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: compute-__APP__
+  namespace: scale-zero-pg
+  labels: { app: compute-__APP__, tier: apps, plane: compute }
+spec:
+  replicas: __REPLICAS__ # at rest 0; the apps-gateway (template mode) scales 0<->1 on connect
+  revisionHistoryLimit: 2
+  selector:
+    matchLabels: { app: compute-__APP__ }
+  strategy:
+    type: Recreate # single-writer: never two computes on one timeline during rollout
+  template:
+    metadata:
+      labels: { app: compute-__APP__, tier: apps, plane: compute }
+    spec:
+      securityContext:
+        seccompProfile: { type: RuntimeDefault }
+      terminationGracePeriodSeconds: 10
+      # Block startup until the pageserver has this app's branched timeline
+      # (created by provision-app.sh via the ancestor API). Same idempotent
+      # wait the primary compute uses.
+      initContainers:
+        - name: wait-timeline
+          image: neondatabase/neon:8464
+          envFrom:
+            - configMapRef: { name: compute-config-__APP__ }
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              PS="http://${PAGESERVER_HOST}:9898"
+              until curl -sf "${PS}/v1/tenant/${TENANT_ID}/timeline" | grep -q "${TIMELINE_ID}"; do
+                echo "waiting for timeline ${TIMELINE_ID} on tenant ${TENANT_ID} ..."; sleep 0.5;
+              done
+              echo "timeline ready"
+      containers:
+        - name: compute
+          image: neondatabase/compute-node-v17:8464 # PINNED pair with storage (ops "Upgrades")
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "/compute-files/entrypoint.sh"]
+          envFrom:
+            - configMapRef: { name: compute-config-__APP__ }
+          env:
+            # Per-app role SCRAM verifier (issue #74 role; issue #117 SCRAM). A
+            # precomputed SCRAM-SHA-256 verifier (non-reversible) that the entrypoint
+            # injects verbatim into the compute spec — the role is SCRAM from boot and
+            # NO tenant plaintext reaches the compute (safe to pass as env; there is no
+            # plaintext to protect). optional:true so the shared entrypoint stays a
+            # no-op for computes without a per-app Secret (the primary single-DB compute
+            # and the seed-time tmpl compute): absent -> entrypoint injects no extra role.
+            - name: APP_ROLE_VERIFIER
+              valueFrom:
+                secretKeyRef:
+                  name: app-db-__APP__
+                  key: APP_ROLE_VERIFIER
+                  optional: true
+            # cloud_admin md5 (issue #112): optional strong, cluster-known value
+            # from the pg-cloud-admin Secret (deploy/gen-secrets.sh). ABSENT -> the
+            # entrypoint mints a strong RANDOM md5 per boot; the public default is
+            # never used on a per-app compute. cloud_admin is loopback-only either
+            # way (pg_hba rejects it over TCP), so this only affects break-glass
+            # localhost access, not the tenant boundary.
+            - name: CLOUD_ADMIN_MD5
+              valueFrom:
+                secretKeyRef:
+                  name: pg-cloud-admin
+                  key: CLOUD_ADMIN_MD5
+                  optional: true
+          ports:
+            - { name: pg, containerPort: 55433 }
+            - { name: compute-http, containerPort: 3080 }
+          volumeMounts:
+            - { name: compute-files, mountPath: /compute-files }
+          # In-place vertical resize (#67/#103): the writer-autoscaler grows/shrinks
+          # this per-app writer's cpu+memory LIVE (no restart) within its configured
+          # bounds. NotRequired makes the zero-restart contract explicit. The pod
+          # carries plane=compute, so the shared writer-autoscaler selector picks it up.
+          resizePolicy:
+            - { resourceName: cpu, restartPolicy: NotRequired }
+            - { resourceName: memory, restartPolicy: NotRequired }
+          readinessProbe:
+            tcpSocket: { port: pg }
+            initialDelaySeconds: 0
+            periodSeconds: 1
+            failureThreshold: 60
+          resources:
+            # Per-app quota (issue #89, noisy-neighbour bound). A CPU LIMIT is now
+            # rendered (was absent — a busy app could burn unbounded CPU and starve
+            # the node for its neighbours); values come from provision-app.sh
+            # (--cpu-request/--cpu-limit/--mem-request/--mem-limit, defaults
+            # 250m/1000m/256Mi/1Gi). The mem limit is the OOM bound; the CPU limit
+            # caps a hostile CPU burn to its allotment so co-scheduled apps keep
+            # their share.
+            requests: { cpu: __CPU_REQ__, memory: __MEM_REQ__, ephemeral-storage: 100Mi }
+            limits: { cpu: __CPU_LIM__, memory: __MEM_LIM__, ephemeral-storage: 1Gi }
+      volumes:
+        - name: compute-files
+          configMap:
+            name: compute-files # shared spec template (54-compute-files.yaml); IDs come from env
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: compute-__APP__
+  namespace: scale-zero-pg
+  labels: { app: compute-__APP__, tier: apps, plane: compute }
+spec:
+  # publishNotReadyAddresses like the primary: the DNS record exists at zero
+  # replicas so the gateway's TCP retry (not CoreDNS negative-cache) is the
+  # readiness signal. compute-<app>.scale-zero-pg.svc:55433 is what the
+  # apps-gateway GW_TARGET_TEMPLATE resolves to.
+  publishNotReadyAddresses: true
+  selector: { app: compute-__APP__ }
+  ports:
+    - { name: pg, port: 55433, targetPort: pg }

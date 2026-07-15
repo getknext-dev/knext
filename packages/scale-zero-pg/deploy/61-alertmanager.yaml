@@ -1,0 +1,180 @@
+# Alertmanager + a verifiable webhook sink. Alerts that fire must REACH
+# someone: Prometheus (60) evaluates rules; this routes them. The alert-sink
+# is a placeholder receiver that logs every delivery — replace its URL in
+# alertmanager.yml with Slack/PagerDuty for real on-call. The sink also makes
+# the pager path TESTABLE (deploy/_verify-alerting.sh greps its logs).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: alertmanager-config
+  namespace: scale-zero-pg
+data:
+  alertmanager.yml: |
+    route:
+      # DEFAULT = the in-cluster logging sink (keeps _verify-alerting.sh testable
+      # with no external creds). To go live: create the alertmanager-receiver
+      # Secret (deploy/gen-secrets.sh scaffolds it) and flip this one line to
+      #   receiver: slack
+      # then `kubectl rollout restart deploy/alertmanager`. Nothing else changes.
+      receiver: webhook-sink
+      group_wait: 5s
+      group_interval: 30s
+      repeat_interval: 4h
+      routes:
+        # DEAD-MAN'S-SWITCH (issue #60): the always-firing Watchdog alert (deploy/60)
+        # is routed to its OWN external receiver and NOT to the sink/pager (continue is
+        # implicitly false — the first matching sibling route wins). It repeats on a
+        # short interval so the off-cluster monitor sees a steady heartbeat and alarms
+        # within minutes if Prometheus/Alertmanager die and the pings STOP.
+        - receiver: watchdog
+          matchers:
+            - alertname="Watchdog"
+          group_wait: 0s
+          group_interval: 1m
+          repeat_interval: 1m
+    receivers:
+      - name: webhook-sink
+        webhook_configs:
+          # In-cluster logging sink — proves the pager path end-to-end.
+          - url: http://alert-sink.scale-zero-pg.svc:8080/
+            send_resolved: false
+      # DEAD-MAN'S-SWITCH external receiver (issue #60). POSTs the always-firing
+      # Watchdog to an EXTERNAL heartbeat URL read at send time from the mounted
+      # Secret (watchdog-webhook key — a healthchecks.io / Dead Man's Snitch /
+      # cronitor ping URL). optional: absent until you arm it (gen-secrets.sh
+      # WATCHDOG_HEARTBEAT_URL=...); the in-cluster alert path is unaffected either
+      # way. The whole point lives OFF cluster: the external monitor alarms when the
+      # ping stops — the only way to detect the alerting stack's own death.
+      - name: watchdog
+        webhook_configs:
+          - url_file: /etc/alertmanager/secrets/watchdog-webhook
+            send_resolved: false
+      # Real on-call receiver. Slack-compatible: the incoming-webhook URL is
+      # read at send time from a FILE mounted from the alertmanager-receiver
+      # Secret (never inlined into this ConfigMap — no secret in git). Unused
+      # until `route.receiver` is set to `slack` above.
+      - name: slack
+        slack_configs:
+          - api_url_file: /etc/alertmanager/secrets/slack-webhook
+            channel: "#ks-pg-alerts"
+            send_resolved: true
+            title: '{{ .CommonLabels.alertname }} ({{ .CommonLabels.severity }})'
+            text: '{{ range .Alerts }}{{ .Annotations.description }}\n{{ end }}'
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: alertmanager
+  namespace: scale-zero-pg
+  labels: { app: alertmanager, plane: observability }
+spec:
+  replicas: 1
+  revisionHistoryLimit: 2
+  selector: { matchLabels: { app: alertmanager } }
+  template:
+    metadata:
+      labels: { app: alertmanager, plane: observability }
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: alertmanager
+          image: prom/alertmanager:v0.27.0 # pinned
+          args:
+            - --config.file=/etc/alertmanager/alertmanager.yml
+            - --storage.path=/alertmanager
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+          ports:
+            - { name: web, containerPort: 9093 }
+          volumeMounts:
+            - { name: config, mountPath: /etc/alertmanager }
+            - { name: data, mountPath: /alertmanager }
+            # Real-receiver webhook URL, read at send time via api_url_file.
+            # optional: alertmanager starts fine before the Secret exists (the
+            # default route uses the in-cluster sink, not this file).
+            - { name: receiver-secret, mountPath: /etc/alertmanager/secrets, readOnly: true }
+          readinessProbe:
+            httpGet: { path: /-/ready, port: web }
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /-/healthy, port: web }
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            requests: { cpu: 10m, memory: 32Mi, ephemeral-storage: 100Mi }
+            limits: { memory: 64Mi, ephemeral-storage: 1Gi }
+      volumes:
+        - name: config
+          configMap: { name: alertmanager-config }
+        - name: data
+          emptyDir: {} # silences/notification-log only; safe to lose
+        - name: receiver-secret
+          secret:
+            secretName: alertmanager-receiver # scaffolded by deploy/gen-secrets.sh
+            optional: true # absent until you wire a real pager — sink still works
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: alertmanager
+  namespace: scale-zero-pg
+spec:
+  selector: { app: alertmanager }
+  ports:
+    - { name: web, port: 9093, targetPort: web }
+---
+# Log-everything webhook sink: proves deliveries end-to-end. A tiny Go binary
+# (gateway image, /alertsink) that logs every request BODY to stdout, where
+# _verify-alerting.sh greps for the alert name. (Replaced the busybox nc loop,
+# which returned a canned 200 while discarding payloads — devops-r3 CRITICAL.)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: alert-sink
+  namespace: scale-zero-pg
+  labels: { app: alert-sink, plane: observability }
+spec:
+  replicas: 1
+  revisionHistoryLimit: 2
+  selector: { matchLabels: { app: alert-sink } }
+  template:
+    metadata:
+      labels: { app: alert-sink, plane: observability }
+    spec:
+      imagePullSecrets:
+        - name: ocir-pull
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: sink
+          image: me-abudhabi-1.ocir.io/axfqznklsd2t/ks-pg/gateway:v0.6.1@sha256:12a735337adcd2470fe834557ad7ab298d20a35e2113b80669211324f28a0ccb # v0.6.0 RELEASE build (issues #78/#82) — supersedes v0.3.1; same multi-binary image, /alertsink entrypoint override (line below)
+          imagePullPolicy: IfNotPresent
+          # OCIR is private: ocir-pull secret created by deploy/gen-secrets.sh
+          command: ["/alertsink"]
+          readinessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 5
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+          ports:
+            - { name: http, containerPort: 8080 }
+          resources:
+            requests: { cpu: 10m, memory: 16Mi, ephemeral-storage: 100Mi }
+            limits: { memory: 32Mi, ephemeral-storage: 1Gi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: alert-sink
+  namespace: scale-zero-pg
+spec:
+  selector: { app: alert-sink }
+  ports:
+    - { name: http, port: 8080, targetPort: http }

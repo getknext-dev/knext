@@ -1,0 +1,409 @@
+# Connecting your application
+
+Your app talks to an ordinary Postgres. It never needs to know the database sleeps.
+
+## The DSN
+
+```
+postgres://cloud_admin:cloud_admin@pggw.scale-zero-pg.svc:55432/<database>?sslmode=require
+```
+
+- **Host is always the gateway** (`pggw`), never the compute. The gateway routes,
+  wakes, and holds your connection during cold start.
+- **`sslmode=require`** — the gateway now terminates TLS on the Postgres wire itself
+  (TLS 1.2+). The connection is encrypted end-to-end to the gateway; no ingress/mesh
+  TLS layer is needed. The shipped cert is **self-signed** (cluster-local infra), so
+  use `sslmode=require` (encrypt, don't verify the CA) — **not** `verify-full` — until
+  you front the gateway with a real CA. See [operations](operations.md#tls-certificate-rotation).
+- **`sslmode=disable` still works** — TLS is optional, not enforced. Existing plaintext
+  DSNs keep connecting unchanged; enforcing TLS-only is a future flag. If the gateway
+  has no cert configured, it declines TLS (answers `N`) and only `sslmode=disable`
+  connects.
+- **Credentials** — `cloud_admin`/`cloud_admin` is the dev default, enforced by the
+  compute spec on every boot. Rotation: see [operations](operations.md#password-rotation).
+- **Auth is SCRAM-SHA-256** — per-app roles (`app_<app>`) authenticate over the wire
+  with **SCRAM-SHA-256** (issue #117), not md5. Your DSN is unchanged: libpq (and any
+  modern Postgres driver) negotiates SCRAM transparently from the same plaintext
+  password in the URL — no client change needed. The compute stores only a
+  non-reversible SCRAM verifier, never your password. (One caveat: an *existing*
+  md5-era app can still see md5 on the very first connection in a ~tens-of-ms
+  cold-wake window before the compute finishes applying the SCRAM verifier — a
+  `compute_ctl` limitation, tracked in #158; every subsequent connection is SCRAM.)
+
+## What your app experiences
+
+| Situation | Behavior |
+|---|---|
+| DB awake | Normal Postgres. The gateway is a transparent byte pipe. |
+| DB asleep (idle > `GW_IDLE_MS`) | First connection blocks ~2.5s while the compute wakes, then completes normally. No error, no retry needed. |
+| DB mid-startup | The gateway absorbs Postgres's transient "database system is starting up" and retries internally — your app never sees it. |
+| Wake fails (storage down, image missing) | After `GW_WAKE_TIMEOUT_MS` your app gets a clean Postgres error: `FATAL 57P03 compute unavailable`. |
+
+Set your client's connect timeout ≥ 10s so cold starts never race it.
+
+## Choosing a tier: cold-zero (default) vs warm
+
+Every database picks one of two tiers. **Nothing in your application changes** —
+same DSN, same driver, same SQL. The only difference is first-connection latency
+after idle, and what it costs while idle.
+
+| | **Cold-zero** (default) | **Warm** (opt-in) |
+|---|---|---|
+| Wake after idle | ~2.5–3.7 s | **~0.4 s** (p50; bound tested < 1.5 s) |
+| RAM/CPU reserved while idle | **0** — no pod exists | **256 MiB + 250 m, 24/7** — one parked pod |
+| Scales to true zero? | yes | no (warm-**RAM** tier) |
+| Cost model | pay per wake | pay to keep one pod parked |
+| What your app sees | first query blocks on the wake | first query blocks ~9× less |
+
+**Default is cold-zero** (ADR-0002): `deploy/25-compute-warm.yaml` ships with
+`replicas: 0`, so no warm RAM is reserved unless you opt a workload in. Cold-zero
+is the right choice for the overwhelming majority of apps — the wake is absorbed
+transparently and costs nothing at rest.
+
+**Choose warm** only for latency-sensitive workloads where a ~2.5 s first-hit
+after idle is unacceptable and you accept paying for 256 MiB reserved around the
+clock. To enable it:
+
+1. Scale up the warm deployment: `kubectl -n scale-zero-pg scale deploy/compute-warm --replicas=1`.
+2. Point it at a gateway running in **warmpool** mode (`GW_COMPUTE_MODE=warmpool`,
+   `GW_GATE_PORT=9091`) via `WARM_GATE_ADDR` on the warm deployment.
+
+The warm compute attaches to the **same** timeline as the cold one, so the
+gateway enforces the single-writer invariant in-band: it opens the warm pod's
+gate **only** after verifying the cold `compute` deployment is fully drained
+(0 replicas, 0 pods). Two computes never attach at once. `deploy/_verify-warmtier.sh`
+drills this (wake latency, the single-writer refusal, and idle re-park) and is
+part of the test battery.
+
+## Scaling reads: `DATABASE_URL_RO` (opt-in read-only pool)
+
+The writer DSN above is a single primary (single-writer is intrinsic to Neon).
+To scale **reads** horizontally, KS-PG ships an optional **read-only pool** — a
+separate set of read-only computes on the **same** timeline, fronted by a second
+gateway port. Your app opts in with a **two-DSN** pattern; there is **no SQL
+parsing** and nothing is automatic — you decide which queries are reads.
+
+```
+# writes + read-your-writes  (the primary; unchanged)
+DATABASE_URL    = postgres://cloud_admin:cloud_admin@pggw.scale-zero-pg.svc:55432/<db>?sslmode=require
+# read-only queries          (the pool; port 55434)
+DATABASE_URL_RO = postgres://cloud_admin:cloud_admin@pggw.scale-zero-pg.svc:55434/<db>?sslmode=require
+```
+
+| | `DATABASE_URL` (writer) | `DATABASE_URL_RO` (read pool) |
+|---|---|---|
+| Routes to | the single primary compute | the `compute-ro` pool (0→N→0) |
+| Writes | yes | **rejected** — `ERROR: cannot execute … in a read-only transaction` |
+| Wake | wakes the primary | wakes **only** the pool; the primary stays asleep |
+| Scaling | one writer | N replicas, load-balanced by the Service; HPA-driven (deploy/27) |
+| Idle | primary sleeps after `GW_IDLE_MS` | pool sleeps after `GW_RO_IDLE_MS` |
+
+**Staleness contract — this is a guarantee, not a surprise.** The pool is
+**eventually consistent** with the primary. Treat the following as a contract you
+can design against:
+
+> **Contract (`RO_MODE=Replica`, the default):** a row committed on the writer
+> becomes visible on `DATABASE_URL_RO` within a **bounded staleness ceiling of
+> ~9 s**, and usually much faster (true streaming-replication lag is typically
+> sub-second; the ~9 s ceiling is the worst case measured end-to-end by
+> `deploy/_verify-readpool.sh`, poll-granularity inflated). Visibility is
+> **never synchronous** and there is **no read-your-writes guarantee** on the RO
+> DSN. If you commit on `DATABASE_URL` and must read that exact write back
+> immediately, read it from `DATABASE_URL` — not the pool.
+
+**Cold catch-up vs. warm steady-state — two different numbers, don't conflate
+them.** The ~9 s contract above is the *steady-state* tip-following replication lag
+of a **warm** RO compute that is already streaming WAL. Do **not** confuse it with
+the **one-time cold catch-up** paid when a freshly-attached (or freshly-woken from
+zero) RO compute *first* starts its walreceiver: that initial attach-and-catch-up
+is a **wake cost**, measured on the wake/scale-to-zero axis, not a replication-lag
+cost. A wall-clock "write → visible on RO" stopwatch that starts before the RO is
+awake will fold that RO-side wake into its number and report tens of seconds — this
+is an artifact of *cold-wake timing*, not of replication. When both computes are
+warm, tip-following replication is **sub-second** (well inside the ~9 s ceiling);
+`deploy/_measure-ro-staleness.sh` isolates the two by discarding warm-up cycles and
+reporting the replication-only poll count separately from wall-clock (see
+[BENCHMARKS](BENCHMARKS.md#warm-plane-ro-staleness-issue-169)).
+
+The read-only computes boot in one of two modes (`RO_MODE`, on
+`deploy/26-compute-ro.yaml`):
+
+- **`Replica` (default, tip-following):** each RO compute streams WAL from the
+  safekeepers and tracks the timeline tip, honoring the ~9 s ceiling above. This
+  holds **under read load too** — `deploy/_verify-readpool.sh` (HPA section)
+  re-measures the catch-up while the pool is saturated and the HPA has scaled it
+  to N>1 (see [BENCHMARKS](BENCHMARKS.md#read-only-pool-under-load-hpa-n1-issue-99)).
+- **`Static` (honest fallback):** each RO compute is pinned to a **fixed LSN**
+  captured when it attached. Reads are frozen at that point; the pool advances
+  only when a replica is **re-rolled** (an HPA scale-up naturally brings
+  fresh-LSN pods online). Use this only where a bounded, known-stale read is
+  acceptable. Which mode you actually get is confirmed by
+  `deploy/_verify-readpool.sh` and recorded in
+  [BENCHMARKS](BENCHMARKS.md#read-only-pool-issue-66).
+
+**When to use it:** read-heavy workloads (dashboards, analytics, fan-out reads)
+that tolerate the ~9 s staleness ceiling. **When not to:** anything needing
+read-your-writes or a strongly-consistent read — point those at `DATABASE_URL`.
+
+Enabling and operating the pool (HPA vs scale-to-zero trade-off, and the GA
+n>1-under-load drill) is in
+[operations](operations.md#read-only-pool-issue-66).
+
+## Connection pooling rules
+
+Pools + scale-to-zero interact in one important way: **idle pooled connections look
+like activity** and keep the database awake.
+
+1. **Pool idle timeout < `GW_IDLE_MS`** (gateway default here: 60s). If your pool
+   holds idle connections forever, the DB never sleeps — that's the #1 cause of
+   "never scales to zero".
+2. Keep `min_connections`/`minIdle` at **0** for apps that should let the DB sleep.
+3. Size the pool normally otherwise; the gateway doesn't cap connections by default
+   (the deployed writer gateway sets `GW_MAX_CONNS=90`, under the compute's
+   `max_connections=100` — see [operations](operations.md#gateway-configuration-env-on-deploypggw)).
+
+Running a **write-heavy** workload (bulk load, event ingestion, high-frequency
+inserts)? See the [write-heavy tuning guide](tuning-write-heavy.md) for batching,
+`COPY`, `synchronous_commit`, and read-offload guidance.
+
+## knext apps
+
+knext binds databases via a Secret only. Apply `deploy/30-knext-secret.yaml` (edit
+name/namespace per app), then reference it in the `NextApp` CR. The operator CRD
+(`apps.kn-next.dev/v1alpha1`, verified on cluster) takes `envMap` as a **map** of
+`ENV_VAR → {secretName, secretKey}`:
+
+```yaml
+spec:
+  secrets:
+    envMap:
+      DATABASE_URL:
+        secretName: myapp-database
+        secretKey: DATABASE_URL
+```
+
+`@knext/lib`'s `getDbPool()` reads `DATABASE_URL` and already uses scale-to-zero-sane
+defaults (`DB_POOL_MAX=5`, idle timeout **10s**). Sizing rule: `maxScale × DB_POOL_MAX`
+bounds the connections that can hit the gateway; keep the pool's idle timeout below
+`GW_IDLE_MS`. App and database then sleep and wake together — the app's cold start
+(Knative activator) and the DB's wake overlap, so users mostly pay only one of them.
+
+**A full, runnable end-to-end example** — operator install, a `NextApp` that
+queries Postgres, and a measured drill proving both wake on one cold request —
+lives in [`demo/`](../demo/README.md). Combined-wake numbers:
+[BENCHMARKS](BENCHMARKS.md#combined-wake-knext-demo-issue-8).
+
+## Multi-app / branch-per-app
+
+Each app gets its own database — a Neon **branch** (timeline) off a shared
+**template**, on one storage plane. N apps, one pageserver + safekeeper quorum,
+each with its own compute that sleeps and wakes independently. This is the
+DB-per-app product promise; the design, evidence and caveats are in
+[ADR-0003](adr-0003-multi-tenancy.md).
+
+**Provision an app** (operator/CI, from `deploy/`):
+
+```sh
+# one-time: create the apps tenant + template timeline + base schema
+./provision-app.sh init-plane --schema testdata/app-base-schema.sql
+# per app: branch the template + stand up a scale-to-zero compute
+./provision-app.sh create orders          # replicas 0 (wakes on first connect)
+./provision-app.sh list                   # show apps tenant timelines
+./provision-app.sh destroy orders         # tear down — reclaims the timeline BY DEFAULT (no orphan, #91)
+#   destroy orders --keep-timeline        # explicit opt-out: retain the branch for PITR (prints reclaim cmd)
+```
+
+Provisioning an app is one pageserver branch call + one rendered per-app compute
+(`compute-app.template.yaml`) — **~4s** end-to-end
+([BENCHMARKS](BENCHMARKS.md#branch-per-app-provisioning-adr-0003)), no initdb, no
+migration replay: the branch inherits the template schema copy-on-write. `create`
+also mints a **per-app credential** (role `app_<app>` + a random password, stored as
+a **SCRAM-SHA-256 verifier** the compute injects into its spec — `APP_ROLE_VERIFIER`,
+issue #117) into a Secret `app-db-<app>` — this is the app's DSN. Re-running `create` is idempotent
+and crash-safe (the timeline id is persisted before the branch call, so an
+interrupted create leaves no orphan; `./provision-app.sh fsck` surfaces any).
+
+**Each app has its own credential (issue #74).** The DSN user is the per-app role
+`app_<app>`, and the apps-gateway **refuses** any startup whose `(user, database)`
+is not `app_<app>/<app>` — *before* it wakes anything. So knowing one app's DSN
+does not grant access to another, and `cloud_admin` does **not** work through the
+apps-gateway (admin is direct-to-compute only). Read the DSN from the Secret:
+
+```sh
+kubectl -n scale-zero-pg get secret app-db-<app> -o jsonpath='{.data.DATABASE_URL}' | base64 -d
+# postgres://app_<app>:<per-app-password>@pggw-apps.scale-zero-pg.svc:55432/<app>?sslmode=disable
+```
+
+**No tenant-existence oracle (issue #92).** Every refusal on the apps-gateway —
+a wrong `(user,database)` pair, a reserved name (`tmpl`/`warm`/`ro`), a malformed
+name, **and** a syntactically-valid pair for an app that does **not exist** — is
+collapsed to the byte-identical error `FATAL: password authentication failed for
+user "<user>"` (SQLSTATE `28P01`, the same message Postgres itself gives for a bad
+password). The gateway never returns "deployment not found" or any internal k8s
+object name, so an unauthenticated client on the open front door cannot enumerate
+which apps exist. The real cause is logged **server-side only**. A constant-floor
+delay (`GW_AUTH_FAIL_FLOOR_MS`, default 250 ms) equalises the latency of the
+gateway-side refusals so timing does not separate "unknown app" from "wrong pair".
+*Honest limit:* this closes the message-content oracle and the fast-fail timing
+gap; it does **not** mask the multi-second cold-**wake** latency a real app incurs
+on a wrong password (that path wakes the compute first) — closing that fully would
+mean delaying every refusal by a full wake, a DoS lever we deliberately avoid.
+
+The DSN **database name is the app handle, not a physical database (issue #123).**
+The `/<app>` path component in `DATABASE_URL` is a **routing handle**: it selects
+`compute-<app>` and wakes it, but it does **not** name a database you can open. Each
+app is its own **Neon branch (timeline)**, and every branch carries only the databases
+it inherited from the template — `postgres`, `template0`, `template1`. There is no
+database named `<app>`. Before replaying the startup packet, the apps-gateway
+**rewrites the requested database to the served DB** (`postgres`, configurable via
+`GW_SERVED_DATABASE`), so every connection lands on that branch's `postgres` database
+regardless of the `/<app>` you asked for. You do **not** create a database named
+`<app>` yourself.
+
+Concretely, on a connection through the apps-gateway:
+
+- `SELECT current_database()` returns **`postgres`**, *not* `<app>`.
+- `psql \conninfo` prints "connected to database `<app>`" — this echoes the name the
+  **client** requested and is cosmetic; it does **not** reflect the served database.
+- Anything that trusts the DSN dbname as a real, distinct database will surprise you:
+  `\c <app>`, `CREATE DATABASE <app>`, dbname-scoped connection assertions, and a few
+  ORMs/migration tools that verify `current_database()` against the URL. **Do not rely
+  on `/<app>` meaning a separate database** — treat it purely as the app's wake handle
+  and put your schema in the branch's `postgres` database (the default; it already
+  carries the inherited template schema).
+
+**This is intended behavior, and tenant isolation is unaffected.** Isolation is by
+**timeline/branch** — each app is a distinct Neon branch with its own credential
+(`app_<app>`) and its own `compute-<app>` — **not** by database name. App A can never
+read app B's data even though both serve a database called `postgres` on their own
+branches. (The apps-gateway also refuses any startup whose `(user, database)` pair is
+not `app_<app>/<app>` *before* it wakes anything — the handle still authenticates as
+`<app>`; only the *served* database is rewritten.) For **knext**, wire each app's
+`DATABASE_URL` Secret (`NextApp.spec.secrets.envMap`) straight from `app-db-<app>`
+(same shape as the primary contract) — one Secret per app, isolated by credential —
+knext uses the URL opaquely, so the dbname mapping is transparent to it.
+
+**Per-app read DSN (`DATABASE_URL_RO`).** When an app requests the read-replica
+pool (`AppDatabase.spec.roPool.enabled`, which knext maps from
+`NextApp.spec.database.readReplicas`), the AppDatabase operator also emits a
+`DATABASE_URL_RO` key into `app-db-<app>` — the same per-app role/password/host/
+database as the writer, on the gateway **RO port** (`55434`):
+
+```sh
+kubectl -n scale-zero-pg get secret app-db-<app> -o jsonpath='{.data.DATABASE_URL_RO}' | base64 -d
+# postgres://app_<app>:<per-app-password>@pggw-apps.scale-zero-pg.svc:55434/<app>?sslmode=disable
+```
+
+✅ **The per-app RO serving endpoint is LIVE (issue #127).** `DATABASE_URL_RO` on
+`app-db-<app>` is a real, tenant-isolated read endpoint: the apps-gateway runs a
+second listener on `55434` in **template mode**, so `database=<app>` reads route to
+**that app's own** read-only compute (`compute-ro-<app>`, attached to the app's own
+timeline), scaled `0↔N` on connect. It is **not** the primary `compute-ro` pool on
+`pggw:55434` (that is the single-DB path). App A's reads can never reach app B's RO
+compute (or the primary pool): the RO port enforces the identical `(user,database)`
+authz as the writer port, and each app resolves to a distinct `compute-ro-<app>`.
+Point per-app reads at `DATABASE_URL_RO` and writes at `DATABASE_URL`. Isolation +
+staleness are proven by `deploy/_verify-perapp-ro.sh` (A reads A, never B, both
+ways; writes rejected on RO). See
+[AppDatabase API reference](appdatabase-api.md#3-output-secret-contract).
+
+**Isolation is at two layers.** *Data* isolation is the Neon timeline (each app is
+a separate branch — app A's rows are invisible to app B, proven by
+`deploy/_verify-multitenant.sh`). *Access* isolation is the per-app credential +
+the gateway `(user,database)` refusal (proven by the same drill: app A's DSN is
+denied against app B, and `cloud_admin` is denied through the gateway). What is
+**shared** is availability: all apps ride one pageserver + safekeeper quorum, so a
+plane-wide stall hits every app. Dropping an app reclaims its timeline **by default**
+(`destroy <app>`, #91) so a routine teardown never pins template history or leaks
+safekeeper WAL; `--keep-timeline` retains it deliberately (and tells you how to
+reclaim later). Full caveats:
+[ADR-0003](adr-0003-multi-tenancy.md#consequences--caveats-blast-radius--isolation).
+
+### Rotating an app credential (issue #93b)
+
+The per-app password can be rotated without changing the DSN **shape** — the role
+(`app_<app>`), host, database, and `sslmode` are all unchanged; only the password
+**value** rotates. The operator runs:
+
+```sh
+deploy/provision-app.sh rotate-cred <app>            # new password into Secret app-db-<app>
+deploy/provision-app.sh rotate-cred <app> --bounce   # + apply it to the running compute now
+```
+
+Because your app reads `DATABASE_URL` from the Secret **at pod start**, a rotation
+only reaches the app when its pods restart: after a rotate, **roll your consumer
+Deployment** so it picks up the new `DATABASE_URL`. A compute that was scaled to
+zero applies the new password automatically on its next wake; a running compute
+keeps the old password until it is bounced (`--bounce`, a single-writer-safe
+`Recreate`). Operator runbook: [operations](operations.md#rotating-an-app-credential-issue-93b).
+
+## Enabling extensions (TimescaleDB, pgvector)
+
+Two Postgres extensions ship in the compute image and are **opt-in, self-service**: your
+app enables them **itself** over its own `DATABASE_URL` — no operator, no superuser. Both
+are marked `trusted`, and each app database grants its login `CREATE` on its own database
+(the app is its own isolated Neon branch), so a single `CREATE EXTENSION` line is all it
+takes. Extensions and their data live on the pageserver, so **they survive scale-to-zero**:
+scale to 0, wake on the next connection, and your hypertables / vectors / indexes are still
+there. The whole path is proven by `deploy/_verify-extensions.sh`.
+
+```sql
+-- run once per app database, through your DATABASE_URL (as app_<app>):
+CREATE EXTENSION IF NOT EXISTS timescaledb;   -- 2.17.1
+CREATE EXTENSION IF NOT EXISTS vector;        -- pgvector 0.8.0
+```
+
+### TimescaleDB (time-series)
+
+`CREATE EXTENSION timescaledb;` gives you the **Apache-2 tier**: hypertables,
+`time_bucket()`, chunk pruning, and `drop_chunks()` retention.
+
+```sql
+CREATE EXTENSION IF NOT EXISTS timescaledb;
+CREATE TABLE readings (ts timestamptz NOT NULL, sensor int, val double precision);
+SELECT create_hypertable('readings', 'ts');
+INSERT INTO readings VALUES (now(), 1, 42.0);
+SELECT time_bucket('15 minutes', ts) AS bucket, avg(val)
+FROM readings GROUP BY bucket ORDER BY bucket;
+```
+
+Columnar **compression** and **continuous aggregates** are **not** available on this
+platform — they are TSL features driven by background policy jobs, which cannot run on a
+compute that scales to zero (see `adr-0001-timescale-and-sharding.md`). For big regular
+tables, `pg_partman` is also preinstalled.
+
+### pgvector (embeddings / semantic search)
+
+`CREATE EXTENSION vector;` gives you the `vector` type plus `ivfflat` and `hnsw` index
+access methods and the `<->` (L2), `<#>` (inner product), `<=>` (cosine) operators.
+
+```sql
+CREATE EXTENSION IF NOT EXISTS vector;
+CREATE TABLE docs (id bigserial PRIMARY KEY, body text, embedding vector(1536));
+-- INSERT your embeddings (e.g. from an embedding model), then index for ANN search:
+CREATE INDEX ON docs USING hnsw (embedding vector_l2_ops);
+-- nearest neighbours to a query embedding:
+SELECT id, body FROM docs ORDER BY embedding <-> $1 LIMIT 5;
+```
+
+Build the `hnsw`/`ivfflat` index while the compute is awake (index builds run on your own
+per-app compute). The index and vectors persist across scale-to-zero like any other table.
+
+### Already-provisioned apps (created before this feature)
+
+Apps branched **before** the self-service grant shipped won't have `CREATE` on their
+database yet, so `CREATE EXTENSION` returns *"must have CREATE privilege on current
+database"*. Fix it once, as the platform operator (loopback cloud_admin on the app's
+compute) — either grant self-service, or just install the extension centrally:
+
+```bash
+POD=$(kubectl -n scale-zero-pg get pod -l app=compute-<app> -o jsonpath='{.items[0].metadata.name}')
+# either enable self-service for the app going forward:
+kubectl -n scale-zero-pg exec "$POD" -c compute -- env PGPASSWORD=cloud_admin \
+  psql -h localhost -p 55433 -U cloud_admin -d postgres -c 'GRANT CREATE ON DATABASE postgres TO PUBLIC;'
+# …or install the extension centrally in one shot:
+kubectl -n scale-zero-pg exec "$POD" -c compute -- env PGPASSWORD=cloud_admin \
+  psql -h localhost -p 55433 -U cloud_admin -d postgres -c 'CREATE EXTENSION IF NOT EXISTS vector;'
+```
+
+New apps (branched from the template after this change) get the grant automatically.

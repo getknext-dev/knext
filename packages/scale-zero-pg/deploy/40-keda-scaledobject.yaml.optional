@@ -1,0 +1,28 @@
+# OPTIONAL alternative to gateway-driven scaling (rename to .yaml to use).
+# Requires KEDA installed (https://keda.sh). The gateway's kubectl mode makes
+# this unnecessary for the MVP — fewer moving parts — but KEDA is the right
+# shape once you want fleet-wide policies or scale metrics beyond the gateway.
+#
+# Trigger: the gateway's Prometheus metric for active connections per system.
+# KEDA scales compute 0->1 when connections appear and back after cooldown.
+# With this enabled, set GW_IDLE_MS=0 (KEDA owns sleep) and keep GW_COMPUTE_MODE
+# =kubectl only as wake accelerator, or switch wake to KEDA's HTTP add-on.
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: compute
+  namespace: scale-zero-pg
+spec:
+  scaleTargetRef:
+    name: compute
+  minReplicaCount: 0
+  maxReplicaCount: 1
+  cooldownPeriod: 60
+  triggers:
+    - type: prometheus
+      metadata:
+        serverAddress: http://prometheus.monitoring.svc:9090
+        metricName: pggw_system_active_connections
+        query: sum(pggw_system_active_connections{system="scale-zero-pg/compute"})
+        threshold: "1"
+        activationThreshold: "0"
