@@ -63,7 +63,28 @@
     "(mechanism + multi-run evidence + upstream provenance). Bar for membership:",
     ">=1 knext FINAL post-retry failure with the family signature AND upstream",
     "provenance (#95301 and/or an upstream suite-skip PR). Re-test the whole family",
-    "on the first NEXTJS_REF containing #95301. Everything else stays per-case."
+    "on the first NEXTJS_REF containing #95301. Everything else stays per-case.",
+    "",
+    "v5-P2 (#281/#282, ADR-0007 §c/§d amendment) — LANE-SCOPING + PER-FAMILY SOFT",
+    "BOUND. Each $knextQuarantines entry now carries two accounting fields:",
+    "  - `lane` ('node' | 'bun', default 'node'): the matrix lane the quarantine is",
+    "    accounted against. This MIRRORS the ALREADY-EXISTING Node/Bun matrix-row",
+    "    split in docs/compat-matrix.md (the Node 778/0 credential row vs the Bun",
+    "    runtime-axis row) — it is NOT a new parity claim, it aligns the ledger's",
+    "    accounting to a split the scoreboard already draws, so a bun-lane quarantine",
+    "    is booked against the Bun lane and does NOT cross-tax the Node scoreboard.",
+    "    Total conservation is guarded: sum(per-lane counts) === total ledger size,",
+    "    so no entry is ever truncated into invisibility. The two bun-lane entries",
+    "    (server-actions-redirect-middleware-rewrite, edge-async-local-storage) are",
+    "    bun-only observations whose Node lane is green (part of the Node credential).",
+    "  - `family` (closed taxonomy: 'runtime-prefetch' | 'bun-edge-fetch'): the",
+    "    mechanism-family the entry belongs to. A PER-MECHANISM-FAMILY SOFT BOUND",
+    "    (reviewed constant N=15) codifies the #214 lesson that a growing blanket",
+    "    skip is not a policy. Exceeding the bound for ANY family is a HARD FAIL",
+    "    with a documented ESCALATION message (not a warn-and-pass cap — that would",
+    "    be a fake-green vector): re-audit the family at the current NEXTJS_REF and",
+    "    shrink it toward zero as the upstream root-cause fix lands; never raise the",
+    "    bound to go green. Guarded by tests/deploy-manifest-lanes.test.ts."
   ],
   "suites": {
     "test/e2e/app-dir/app-client-cache/client-cache.defaults.test.ts": {
@@ -217,6 +238,8 @@
     {
       "test": "test/e2e/app-dir/segment-cache/search-params/segment-cache-search-params.test.ts",
       "nextjsRef": "v16.2.0",
+      "lane": "node",
+      "family": "runtime-prefetch",
       "cases": [
         "segment cache (search params) stores prefetched data by its rewritten search params, not the original ones"
       ],
@@ -228,6 +251,8 @@
     {
       "test": "test/e2e/app-dir/segment-cache/prefetch-layout-sharing/prefetch-layout-sharing.test.ts",
       "nextjsRef": "v16.2.0",
+      "lane": "node",
+      "family": "runtime-prefetch",
       "cases": [
         "layout sharing in non-static prefetches segment-level prefetch config uses a runtime prefetch for sub-pages of runtime-prefetchable layouts if requested"
       ],
@@ -239,6 +264,8 @@
     {
       "test": "test/e2e/app-dir/segment-cache/refresh/segment-cache-refresh.test.ts",
       "nextjsRef": "v16.2.0",
+      "lane": "node",
+      "family": "runtime-prefetch",
       "cases": [
         "segment cache (refresh) Server Action refresh() refreshes dynamic data only, not cached",
         "segment cache (refresh) re-navigation to a fully static page does not overwrite dynamic slots with default content"
@@ -251,6 +278,8 @@
     {
       "test": "test/e2e/app-dir/segment-cache/staleness/segment-cache-stale-time.test.ts",
       "nextjsRef": "v16.2.0",
+      "lane": "node",
+      "family": "runtime-prefetch",
       "cases": [
         "segment cache (staleness) expires runtime prefetches when their stale time has elapsed",
         "segment cache (staleness) reuses dynamic data up to the staleTimes.dynamic threshold"
@@ -263,6 +292,8 @@
     {
       "test": "test/e2e/app-dir/segment-cache/staleness/segment-cache-per-page-dynamic-stale-time.test.ts",
       "nextjsRef": "v16.2.0",
+      "lane": "node",
+      "family": "runtime-prefetch",
       "cases": [
         "segment cache (per-page dynamic stale time) reuses dynamic data within the per-page stale time window",
         "segment cache (per-page dynamic stale time) back/forward navigation always reuses BFCache regardless of stale time",
@@ -278,6 +309,8 @@
     {
       "test": "test/e2e/app-dir/segment-cache/vary-params/vary-params.test.ts",
       "nextjsRef": "v16.2.0",
+      "lane": "node",
+      "family": "runtime-prefetch",
       "cases": [
         "segment cache - vary params does not share cached segment when all params accessed statically (runtime prefetch)",
         "segment cache - vary params renders cached loading state instantly with runtime prefetching",
@@ -293,6 +326,8 @@
     {
       "test": "test/e2e/app-dir/app-client-cache/client-cache.parallel-routes.test.ts",
       "nextjsRef": "v16.2.0",
+      "lane": "node",
+      "family": "runtime-prefetch",
       "cases": [
         "app dir client cache with parallel routes prefetch={true} should prefetch the full page",
         "app dir client cache with parallel routes prefetch={true} should re-use the cache for the full page, only for 5 mins"
@@ -305,6 +340,8 @@
     {
       "test": "test/e2e/app-dir/app-prefetch/prefetching.test.ts",
       "nextjsRef": "v16.2.0",
+      "lane": "node",
+      "family": "runtime-prefetch",
       "cases": [
         "app dir - prefetching should not unintentionally modify the requested prefetch by escaping the uri encoded query params",
         "app dir - prefetching should show layout eagerly when prefetched with loading one level down",
@@ -318,6 +355,8 @@
     {
       "test": "test/e2e/app-dir/optimistic-routing/optimistic-routing.test.ts",
       "nextjsRef": "v16.2.0",
+      "lane": "node",
+      "family": "runtime-prefetch",
       "cases": [
         "optimistic-routing rewrite detection: detects dynamic rewrite when URL does not match route structure",
         "optimistic-routing static route with catch-all sibling: does not match sub-route against catch-all",
@@ -332,6 +371,8 @@
     {
       "test": "test/e2e/app-dir/prefetch-true-instant/prefetch-true-instant.test.ts",
       "nextjsRef": "v16.2.0",
+      "lane": "node",
+      "family": "runtime-prefetch",
       "cases": [
         "prefetch={true} with instant route also disables full prefetch when instant is on a layout, not the page",
         "prefetch={true} with instant route does not include dynamic content in the prefetch when the target route has instant"
@@ -344,6 +385,8 @@
     {
       "test": "test/e2e/app-dir/server-actions-redirect-middleware-rewrite/server-actions-redirect-middleware-rewrite.test.ts",
       "nextjsRef": "v16.2.0",
+      "lane": "bun",
+      "family": "bun-edge-fetch",
       "cases": [
         "app-dir - server-actions-redirect-middleware-rewrite.test should redirect correctly in edge runtime with middleware rewrite"
       ],
@@ -354,6 +397,8 @@
     {
       "test": "test/e2e/edge-async-local-storage/index.test.ts",
       "nextjsRef": "v16.2.0",
+      "lane": "bun",
+      "family": "bun-edge-fetch",
       "cases": [
         "edge api can use async local storage cans use a single instance per request",
         "edge api can use async local storage cans use multiple instances per request"
@@ -365,6 +410,8 @@
     {
       "test": "test/e2e/app-dir/segment-cache/cached-navigations/cached-navigations.test.ts",
       "nextjsRef": "v16.2.0",
+      "lane": "node",
+      "family": "runtime-prefetch",
       "cases": [
         "cached navigations caches runtime-prefetchable content from a navigation for instant second visit",
         "cached navigations defers fallback params to the runtime stage",
@@ -380,6 +427,8 @@
     {
       "test": "test/e2e/app-dir/segment-cache/basic/segment-cache-basic.test.ts",
       "nextjsRef": "v16.2.0",
+      "lane": "node",
+      "family": "runtime-prefetch",
       "level": "file",
       "cases": [
         "segment cache (basic tests) skips static layouts during partially static navigation",
