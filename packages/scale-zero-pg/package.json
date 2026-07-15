@@ -1,0 +1,12 @@
+{
+  "name": "scale-zero-pg",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Database layer of the unified knext platform — the wake-on-connect Postgres gateway + AppDatabase/zone operators (Go + Kubernetes). Not a JS package; these scripts let turbo orchestrate its own toolchain so `turbo run … --affected` builds/tests it when it changes.",
+  "scripts": {
+    "build": "cd gateway && go build ./...",
+    "build:image": "docker build -t scale-zero-pg/gateway:ci gateway/",
+    "lint": "cd gateway && test -z \"$(gofmt -l .)\" && go vet ./...",
+    "test": "cd gateway && go test ./... && cd ../deploy && python3 -m unittest discover -s . -p 'test_skctl.py' && bash test_provision-app.sh"
+  }
+}
