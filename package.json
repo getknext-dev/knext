@@ -46,6 +46,9 @@
     "//overrides": "Trivy HIGH/CRITICAL remediation for the shipped file-manager image (#199; same discipline as the operator fix in #155: bump the deps, don't suppress). Chains: @knext/lib → @cerbos/grpc (grpc-js, protobufjs) + minio (fast-xml-parser 4); @knext/core → @google-cloud/storage (fast-xml-parser 5, retry-request → @types/request → form-data 2). Guarded by tests/supply-chain-workflow.test.ts.",
     "overrides": {
       "@grpc/grpc-js": ">=1.14.4 <2",
+      "rollup": ">=4.59.0 <5",
+      "vite": ">=7.3.5 <8",
+      "picomatch@4": ">=4.0.4 <5",
       "fast-xml-parser@4": ">=4.5.5 <5",
       "fast-xml-parser@5": ">=5.5.6 <6",
       "form-data@2": ">=2.5.6 <3",
