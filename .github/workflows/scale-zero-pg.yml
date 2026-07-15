@@ -1,0 +1,79 @@
+# scale-zero-pg CI — the database layer of the unified platform (packages/scale-zero-pg).
+#
+# scale-zero-pg is a Go + Kubernetes project, so — like packages/kn-next-operator — it
+# lives in the monorepo but stays OUT of the turbo/pnpm JS graph (no package.json, so the
+# `packages/*` workspace glob ignores it). Turbo orchestrates the JS build graph; a Go
+# package can't join it without a JS shim, so its CI is a dedicated, PATH-SCOPED workflow
+# instead — the standard turborepo pattern for a non-JS package. The `paths:` filters make
+# this workflow run ONLY when the pg project (or this file) changes, so unrelated JS PRs
+# don't pay for a Go toolchain spin-up and pg PRs get their own focused signal.
+#
+# Re-homes the checks from the project's original standalone ci.yml (now inert at
+# packages/scale-zero-pg/.github/, which GitHub does not execute — only root workflows run).
+name: scale-zero-pg CI
+
+on:
+  pull_request:
+    paths:
+      - 'packages/scale-zero-pg/**'
+      - '.github/workflows/scale-zero-pg.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'packages/scale-zero-pg/**'
+      - '.github/workflows/scale-zero-pg.yml'
+
+defaults:
+  run:
+    working-directory: packages/scale-zero-pg
+
+jobs:
+  gateway:
+    name: gateway (gofmt + vet + test + build)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: packages/scale-zero-pg/gateway/go.mod
+          cache: true
+          cache-dependency-path: packages/scale-zero-pg/gateway/go.sum
+      - name: gofmt (fail on any unformatted file)
+        working-directory: packages/scale-zero-pg/gateway
+        run: test -z "$(gofmt -l .)" || { echo 'gofmt needed on:'; gofmt -l .; exit 1; }
+      - name: go vet
+        working-directory: packages/scale-zero-pg/gateway
+        run: go vet ./...
+      - name: go test
+        working-directory: packages/scale-zero-pg/gateway
+        run: go test ./...
+      - name: go build
+        working-directory: packages/scale-zero-pg/gateway
+        run: go build ./...
+
+  image:
+    name: gateway image builds (Dockerfile)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: docker build gateway
+        working-directory: packages/scale-zero-pg
+        run: docker build -t scale-zero-pg/gateway:ci gateway/
+
+  scripts:
+    name: deploy scripts (skctl + provision-app name validation)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: skctl serializer round-trip + version-guard tests
+        working-directory: packages/scale-zero-pg
+        run: python3 -m unittest discover -s deploy -p 'test_skctl.py' -v
+      - name: provision-app.sh name-validation tests
+        working-directory: packages/scale-zero-pg
+        run: bash deploy/test_provision-app.sh
