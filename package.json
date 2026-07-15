@@ -6,6 +6,7 @@
     "build": "turbo run build",
     "dev": "turbo run dev",
     "lint": "biome check .",
+    "lint:ts-imports": "node scripts/check-ts-import-extensions.mjs",
     "format": "biome format --write .",
     "test": "vitest",
     "test:ui": "vitest --ui",
@@ -33,6 +34,7 @@
     "minio": "^8.0.6",
     "tsup": "^8.5.1",
     "turbo": "latest",
+    "typescript": "^5.9.3",
     "vitest": "^4.0.16"
   },
   "workspaces": [
