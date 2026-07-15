@@ -163,7 +163,15 @@ function applyOverrides(
     return overridden;
 }
 
-async function deploy() {
+/**
+ * The deploy orchestrator: build → upload assets → push image → apply the
+ * NextApp CR (ADR-0001: operator is the single source of truth). Exported at
+ * the MODULE level (not a package `exports` subpath) so the sibling
+ * deploy-orchestrator.test.ts can pin its failure/skip/skew branches
+ * hermetically against mocked seams. It is invoked by the entry dispatcher
+ * below when run as the `kn-next`/`kn-next deploy` bin.
+ */
+export async function deploy() {
     const options = parseCliArgs();
 
     log.info({ dryRun: options.dryRun }, "kn-next deploy");
