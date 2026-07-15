@@ -30,8 +30,8 @@
     "aks",
     "oke",
     "openshift",
-    "---Database layer---",
-    "data-sdk",
-    "scale-zero-pg"
+    "---Databases---",
+    "databases",
+    "data-sdk"
   ]
 }

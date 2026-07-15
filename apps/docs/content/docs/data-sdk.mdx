@@ -1,17 +1,18 @@
 ---
 title: Data SDK (@knext/db)
-description: A thin, typed drizzle-orm layer over knext's scale-to-zero Postgres pools — schema, migrations, and read/write clients.
+description: A thin, typed drizzle-orm layer over your Postgres DATABASE_URL — schema, migrations, and read/write clients.
 ---
 
 `@knext/db` is knext's typed data-access layer: a **thin [drizzle-orm](https://orm.drizzle.team)
-wrapper** over the scale-to-zero Postgres connection pools the platform binds into your app. It
-re-exports drizzle's whole query surface and adds only the platform-specific ergonomics —
+wrapper** over the Postgres connection pools built from the `DATABASE_URL` your app is bound to. It
+re-exports drizzle's whole query surface and adds only the scale-to-zero ergonomics —
 **you keep drizzle's own docs and lose no power**, and the SDK provisions nothing and mutates no
 cluster resource.
 
-knext and [scale-zero-pg](/docs/scale-zero-pg) are one platform, two layers: knext scales your
-*application* to zero, scale-zero-pg scales its *database* to zero, and both wake together on one
-visitor request. `@knext/db` gives that database a typed schema, migrations, and queries.
+knext is [engine-agnostic about databases](/docs/databases): **you bring your own Postgres** and
+bind its DSN from a Secret; `@knext/db` is a plain client over that `DATABASE_URL`, giving your
+database a typed schema, migrations, and queries. It works against any Postgres your app can
+reach.
 
 The package has three public subpaths:
 
@@ -160,7 +161,7 @@ Two clients, and **you pick per query** — the SDK never parses SQL or auto-rou
 | Consistency | **Read-your-writes**, single writer | **Bounded-stale (~9s)**, no read-your-writes |
 | Use for | Every write; any read that must see its own write | Dashboards / analytics / fan-out reads that tolerate a few seconds of lag |
 
-Both are one-client-per-pod singletons over the platform's managed pools. If `DATABASE_URL_RO` is
+Both are one-client-per-pod singletons over the app's connection pools. If `DATABASE_URL_RO` is
 unset (no read replica), `getDbRO()` **falls back to the writer with a one-time warning** — the
 app still works, it just reads from the primary.
 
@@ -221,10 +222,10 @@ the defaults already satisfy the contract.
 
 ## Extensions: TimescaleDB & pgvector
 
-When your database runs on [scale-zero-pg](/docs/scale-zero-pg), two Postgres extensions ship in
-the compute image, both **opt-in and self-service**: your app enables the one it needs itself,
-once, over its own `DATABASE_URL` — no operator involvement, no superuser. Their data and indexes
-live on durable storage, so **they survive scale-to-zero**.
+Two common Postgres extensions have first-class schema helpers. They are **opt-in**: your app
+enables the extension it needs itself, once, over its own `DATABASE_URL`. They work against any
+Postgres that has the extension available (for example, a self-hosted cluster or a managed
+provider that offers it).
 
 The helpers below are **migration SQL emitters** — drizzle-kit cannot model these statements, so
 the helpers return the exact SQL to paste into (or append to) your generated migration.
@@ -307,15 +308,14 @@ const nearest = await getDbRO({ docs })
 ```
 
 <Callout type="info">
-**Early-stage + version-gated.** The pgvector helpers are new and gated on the database side:
-self-service `CREATE EXTENSION vector` requires a scale-zero-pg release that ships pgvector as a
-trusted extension in the compute image (≥ v1.4.0). The helpers themselves are pure SQL emitters
-and work against any Postgres with pgvector installed.
+**Early-stage.** The pgvector helpers are new. They are pure SQL emitters and work against any
+Postgres that has the `vector` extension available to enable.
 </Callout>
 
 ## Related
 
+- [Databases (bring your own Postgres)](/docs/databases) — how to bind a `DATABASE_URL` and front
+  it with a connection pooler.
 - [CLI reference → db migrate / db bind](/docs/cli) — the commands behind this page.
 - [Operator & the NextApp CRD → Databases](/docs/operator#databases-specdatabase) — how
   `DATABASE_URL` / `DATABASE_URL_RO` get into your pods.
-- [scale-zero-pg](/docs/scale-zero-pg) — the scale-to-zero database layer itself.

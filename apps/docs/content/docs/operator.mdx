@@ -57,7 +57,7 @@ status:
 | `revalidation` | `queue`, `kafkaBrokerUrl`, `provisionKafkaSource` — async ISR revalidation (see below). |
 | `env` | Plain, **non-secret** env vars (name → value). Reserved names are rejected at admission (see below). |
 | `secrets` | `envFrom`, `envMap` (Kubernetes Secret refs) — see [Binding secrets](#binding-secrets-envmap--database_url). |
-| `database` | The app's database, in one of two mutually-exclusive modes: **bind an existing Secret** (`secretRef` / `roSecretRef`) or **provision a managed scale-to-zero Postgres** (`enabled: true`). See [Databases](#databases-specdatabase). |
+| `database` | Bind a **bring-your-own** Postgres by referencing an existing Secret (`secretRef` / optional `roSecretRef`). knext does not provision databases. See [Databases](#databases-specdatabase). |
 | `runtime` | `bun` or `node` (default `node`). A Bun **bytecode-built** image only boots under Bun — flipping it to `node` makes the pod exit with a loud `FATAL` message; rebuild instead. See [Bun runtime](/docs/bun-runtime). |
 | `security` | `networkPolicy` — pod-level L3/L4 isolation, default-on. |
 | `traffic` | `revisionName`, `canaryPercent` (rollback / canary). |
@@ -106,14 +106,14 @@ provision the database.
 
 ### Databases: `spec.database`
 
-`spec.database` is the first-class database surface, with **two mutually-exclusive modes**
-(validated at admission — a CR declaring both is rejected):
+knext is **engine-agnostic** — it does **not** provision or manage a database. `spec.database` is
+a **bring-your-own** binding: it wires an existing Postgres Secret into the app as `DATABASE_URL`.
 
-**Bind an existing Secret (bring-your-own).** `secretRef` binds a Secret in the app's own
-namespace as `DATABASE_URL`; `roSecretRef` optionally binds a read-only DSN as `DATABASE_URL_RO`
-(its key defaults to `DATABASE_URL_RO`, so one Secret carrying both keys binds with the same
-name). Typed sugar over the `envMap` path above — same injection machinery, same semantics.
-`kn-next db bind` writes exactly this patch for you (see the [CLI reference](/docs/cli#kn-next-db-bind)).
+`secretRef` binds a Secret in the app's own namespace as `DATABASE_URL`; `roSecretRef` optionally
+binds a read-only DSN as `DATABASE_URL_RO` (its key defaults to `DATABASE_URL_RO`, so one Secret
+carrying both keys binds with the same name). It is typed sugar over the `envMap` path above —
+same injection machinery, same semantics. `kn-next db bind` writes exactly this patch for you (see
+the [CLI reference](/docs/cli#kn-next-db-bind)).
 
 ```yaml title="nextapp.yaml (BYO database)"
 spec:
@@ -122,27 +122,11 @@ spec:
     roSecretRef: { name: storefront-db }        # key defaults to DATABASE_URL_RO
 ```
 
-**Managed mode.** `enabled: true` asks the operator to provision a scale-to-zero Postgres for this
-app on the [scale-zero-pg](/docs/scale-zero-pg) platform and inject its credentials. The
-author-facing knobs are `tier` (`cold` = scale-to-zero, default; `warm` = one parked replica for a
-~0.4s wake), `readReplicas` (also injects `DATABASE_URL_RO`), `quotas` (per-app CPU/memory/
-connection bounds), and `keepOnDelete` (retain the database timeline when the NextApp is deleted).
-
-```yaml title="nextapp.yaml (managed database)"
-spec:
-  database:
-    enabled: true
-    tier: cold
-    readReplicas: true
-```
-
-The database identity is always **derived from the NextApp's own namespace and name** — a NextApp
-can never name or bind another app's managed database. The managed-mode knobs (`tier`,
-`readReplicas`, `quotas`, `keepOnDelete`) cannot be combined with `secretRef`, and `spec.database`
-owns `DATABASE_URL`/`DATABASE_URL_RO`: a conflicting `secrets.envMap` entry for those names is
-rejected rather than silently overridden. Database health is reported on the CR as a
-`DatabaseReady` condition. To consume the injected DSNs with a typed client, see the
-[Data SDK](/docs/data-sdk).
+A NextApp only binds a Secret in its **own** namespace — it can never name or reach into another
+app's database. `spec.database` owns `DATABASE_URL`/`DATABASE_URL_RO`: a conflicting
+`secrets.envMap` entry for those names is rejected rather than silently overridden. Point the DSN
+at a connection pooler for scale-to-zero apps, and consume the injected DSNs with a typed client —
+see the [Databases guide](/docs/databases) and the [Data SDK](/docs/data-sdk).
 
 <Callout type="warn">
 Secrets live in Kubernetes Secrets / env **only** — never in `spec.env`, config files, images, or
@@ -154,7 +138,7 @@ URLs. `spec.env` values are stored verbatim in the CR and visible to anyone who 
 | Field | Notes |
 |---|---|
 | `url` | The resolved Knative Service URL. |
-| `conditions` | `Ready`, `Degraded`, `Reconciling`, `DatabaseReady` — see below. |
+| `conditions` | `Ready`, `Degraded`, `Reconciling` — see below. |
 | `currentTraffic` | Mirror of the ksvc traffic split. |
 
 The operator reports **honest readiness**: `Ready` mirrors the underlying Knative Service's own
