@@ -1,6 +1,11 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import {
+  capBindingMessage,
+  FAMILY_QUARANTINE_CAP,
+  QUARANTINE_CAP_CALLSITES,
+} from './compat-quarantine-bounds';
 
 /**
  * Self-contained glob matcher (no `minimatch` runtime dep — it is not hoisted to
@@ -513,9 +518,12 @@ describe('deploy-tests-manifest — #214 family-level quarantine (ADR-0007 §d)'
     }
   });
 
-  it('the family stays BOUNDED (≤ 15 file-level entries) — a growing blanket skip is not a policy', () => {
+  it(`the family stays BOUNDED (≤ ${FAMILY_QUARANTINE_CAP} file-level entries) — a growing blanket skip is not a policy`, () => {
     const fileLevel = quarantines.filter((q) => q.level === 'file');
-    expect(fileLevel.length).toBeLessThanOrEqual(15);
+    // The file-level cap BINDS to the single shared FAMILY_QUARANTINE_CAP
+    // (tests/compat-quarantine-bounds.ts) — the SAME constant the per-family soft
+    // bound in tests/deploy-manifest-lanes.test.ts uses, so they cannot diverge.
+    expect(fileLevel.length, capBindingMessage()).toBeLessThanOrEqual(FAMILY_QUARANTINE_CAP);
     // And every level:"file" ledger entry must be one of the family files above —
     // promoting a NEW file requires updating BOTH this table (with its runs +
     // provenance) and the manifest, keeping the guard and the ledger in lockstep.
@@ -526,6 +534,22 @@ describe('deploy-tests-manifest — #214 family-level quarantine (ADR-0007 §d)'
           'update FAMILY_FILE_QUARANTINES with its observed runs and provenance',
       ).toBe(true);
     }
+  });
+
+  it('the file-level cap BINDS to the shared FAMILY_QUARANTINE_CAP (no bare literal — ADR-0007 §g)', () => {
+    // The file-level cap MUST read the shared constant, not a hardcoded number. If a
+    // future edit reintroduces a bare numeric literal for the fileLevel cap, this
+    // fails and names BOTH call-sites so the diverger keeps them in lockstep.
+    const selfSrc = readFileSync(resolve(import.meta.dirname, 'deploy-manifest.test.ts'), 'utf8');
+    // Every `fileLevel.length` bound assertion must compare against the constant,
+    // never a raw number — scan the source for a bare-numeric divergence.
+    const bareLiteralCap = /fileLevel\.length[\s\S]{0,80}?toBeLessThanOrEqual\(\s*\d/;
+    expect(bareLiteralCap.test(selfSrc), capBindingMessage()).toBe(false);
+    const boundToConstant =
+      /fileLevel\.length[\s\S]{0,80}?toBeLessThanOrEqual\(\s*FAMILY_QUARANTINE_CAP/;
+    expect(boundToConstant.test(selfSrc), capBindingMessage()).toBe(true);
+    expect(QUARANTINE_CAP_CALLSITES.join(' ')).toContain('deploy-manifest-lanes.test.ts');
+    expect(QUARANTINE_CAP_CALLSITES.join(' ')).toContain('deploy-manifest.test.ts');
   });
 
   it('rules.exclude taxonomy is CLOSED: upstream mirror ∪ architectural ledger ∪ family ledger (no silent file drops)', () => {

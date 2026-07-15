@@ -1,6 +1,11 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import {
+  capBindingMessage,
+  FAMILY_QUARANTINE_CAP,
+  QUARANTINE_CAP_CALLSITES,
+} from './compat-quarantine-bounds';
 
 /**
  * v5-P2 (#281/#282) — compat-ledger LANE-SCOPING + per-mechanism-family SOFT BOUND
@@ -72,10 +77,12 @@ const KNOWN_FAMILIES = new Set(['runtime-prefetch', 'bun-edge-fetch']);
 /**
  * The per-mechanism-family SOFT BOUND. A reviewed constant: the runtime-prefetch
  * family (§d) is the largest today at 12 file-level entries, so 15 leaves modest
- * headroom while making an unbounded blanket-skip drift FAIL. Kept in sync with
- * the existing ≤15 file-level cap in tests/deploy-manifest.test.ts.
+ * headroom while making an unbounded blanket-skip drift FAIL. ASSERTED in sync with
+ * the file-level cap in tests/deploy-manifest.test.ts — both now BIND to the single
+ * shared constant FAMILY_QUARANTINE_CAP (tests/compat-quarantine-bounds.ts), so they
+ * can no longer silently diverge (ADR-0007 §g).
  */
-const PER_FAMILY_SOFT_BOUND = 15;
+const PER_FAMILY_SOFT_BOUND = FAMILY_QUARANTINE_CAP;
 
 /** The exact escalation message the guard must emit on a per-family overflow. */
 function familyOverflowMessage(family: string, count: number): string {
@@ -227,6 +234,25 @@ describe('v5-P2 mechanism-family soft bound — HARD FAIL on overflow (#282)', (
         `family "${family}" (${count}) exceeds the per-family soft bound ${PER_FAMILY_SOFT_BOUND}`,
       ).toBeLessThanOrEqual(PER_FAMILY_SOFT_BOUND);
     }
+  });
+
+  it('the per-family soft bound BINDS to the shared FAMILY_QUARANTINE_CAP (no bare literal — ADR-0007 §g)', () => {
+    // The bound MUST reference the single shared constant, not a hardcoded 15.
+    // If a future edit hardcodes a literal here, this fails and names BOTH call-sites.
+    expect(PER_FAMILY_SOFT_BOUND, capBindingMessage()).toBe(FAMILY_QUARANTINE_CAP);
+    // Belt-and-braces: the source of THIS file must DEFINE the bound from the shared
+    // constant, never from a bare numeric literal — scan for a bare-numeric divergence.
+    const selfSrc = readFileSync(
+      resolve(import.meta.dirname, 'deploy-manifest-lanes.test.ts'),
+      'utf8',
+    );
+    const bareLiteralBound = /const PER_FAMILY_SOFT_BOUND\s*=\s*\d/;
+    expect(bareLiteralBound.test(selfSrc), capBindingMessage()).toBe(false);
+    const boundToConstant = /const PER_FAMILY_SOFT_BOUND\s*=\s*FAMILY_QUARANTINE_CAP/;
+    expect(boundToConstant.test(selfSrc), capBindingMessage()).toBe(true);
+    // And the shared module names both consumers, so a diverger gets a clear pointer.
+    expect(QUARANTINE_CAP_CALLSITES.join(' ')).toContain('deploy-manifest-lanes.test.ts');
+    expect(QUARANTINE_CAP_CALLSITES.join(' ')).toContain('deploy-manifest.test.ts');
   });
 
   it('records the per-family soft bound + hard-fail-with-escalation policy in the manifest text', () => {
