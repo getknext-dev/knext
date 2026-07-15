@@ -1,0 +1,109 @@
+# Warm-standby compute (warm tier, ADR-0002) — the productized successor to the
+# warmstandby/ prototype. SAME tenant/timeline as the cold `compute` (deploy/20):
+# that is the point — a client wakes into the same data, ~9x faster (prototype
+# p50 413ms vs cold ~3.7s). The single-writer invariant (never two computes
+# attached to one timeline) is enforced IN THE GATEWAY: the warmpool driver opens
+# the gate this pod blocks on ONLY after proving cold `compute` is fully drained.
+#
+# DEFAULT POSTURE IS COLD-ZERO (ADR-0002): this ships with replicas: 0 so no RAM
+# is reserved unless an operator opts a workload into the warm tier. Enable per
+# docs/connecting.md "Choosing a tier" (and point a warmpool-mode gateway at the
+# gate). deploy/_verify-warmtier.sh scales it to 1 for the drill and back to 0.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: compute-warm
+  namespace: scale-zero-pg
+  labels: { app: compute-warm }
+spec:
+  replicas: 0 # enable for warm-tier apps; default posture stays cold-zero (ADR-0002)
+  revisionHistoryLimit: 2
+  selector:
+    matchLabels: { app: compute-warm }
+  strategy:
+    type: Recreate # single-writer: never two warm computes on one timeline
+  template:
+    metadata:
+      labels: { app: compute-warm }
+    spec:
+      securityContext:
+        seccompProfile: { type: RuntimeDefault }
+      # Fast re-park: idle Sleep deletes this pod; a short grace = quick respawn
+      # into the freshly-closed gate.
+      terminationGracePeriodSeconds: 10
+      # Same timeline gate as the cold compute: block until it exists on the
+      # pageserver (already satisfied here, so it passes immediately).
+      initContainers:
+        - name: wait-timeline
+          image: neondatabase/neon:8464
+          envFrom:
+            - configMapRef:
+                name: compute-config
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              PS="http://${PAGESERVER_HOST}:9898"
+              until curl -sf "${PS}/v1/tenant/${TENANT_ID}/timeline" | grep -q "${TIMELINE_ID}"; do
+                echo "waiting for timeline ${TIMELINE_ID} on tenant ${TENANT_ID} ..."; sleep 0.5;
+              done
+              echo "timeline ready"
+      containers:
+        - name: compute
+          # PINNED as a pair with the storage plane (see 20-compute.yaml). The
+          # ONLY difference vs cold: the gated warm entrypoint, which blocks on
+          # the gateway gate before compute_ctl attaches.
+          image: neondatabase/compute-node-v17:8464
+          imagePullPolicy: IfNotPresent
+          # bash (not sh): the gated entrypoint uses /dev/tcp to poll the gate.
+          command: ["/bin/bash", "/compute-files/entrypoint-warm.sh"]
+          envFrom:
+            - configMapRef:
+                name: compute-config # TENANT_ID, TIMELINE_ID, PAGESERVER_HOST
+          env:
+            # host:port of the gateway's gate listener (GW_GATE_PORT). Point this
+            # at whichever warmpool-mode gateway guards this pod's single-writer
+            # gate. The drill overrides it to its test gateway (pggw-warm:9091).
+            - name: WARM_GATE_ADDR
+              value: "pggw.scale-zero-pg.svc:9091"
+            # STRONG base cloud_admin md5 (issue #168) — REQUIRED, fail-closed. The
+            # base warm tier serves cloud_admin over TCP (WARM_DSN, no APP_ROLE →
+            # harden skipped), so it carries the strong md5 from pg-base-admin
+            # (deploy/gen-secrets.sh) and never the public default. See 20-compute.yaml.
+            - name: CLOUD_ADMIN_MD5
+              valueFrom:
+                secretKeyRef: { name: pg-base-admin, key: CLOUD_ADMIN_MD5 }
+          ports:
+            - { name: pg, containerPort: 55433 }
+            - { name: compute-http, containerPort: 3080 }
+          volumeMounts:
+            - { name: compute-files, mountPath: /compute-files } # config.json + entrypoint-warm.sh
+          readinessProbe:
+            tcpSocket: { port: pg }
+            initialDelaySeconds: 0
+            periodSeconds: 1
+            failureThreshold: 60
+          resources:
+            # The warm-tier cost: 256Mi + 250m reserved 24/7 while parked (same
+            # as cold compute when awake). This reservation IS the warm tier.
+            requests: { cpu: 250m, memory: 256Mi, ephemeral-storage: 100Mi }
+            limits: { memory: 1Gi, ephemeral-storage: 1Gi }
+      volumes:
+        - name: compute-files
+          configMap:
+            name: compute-files # deploy/54: config.json + entrypoint-warm.sh
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: compute-warm
+  namespace: scale-zero-pg
+  labels: { app: compute-warm }
+spec:
+  # publishNotReadyAddresses: DNS/endpoint exists while the pod is gated (not
+  # ready), so the gateway can connect the instant the gate opens — the TCP
+  # retry is the readiness check (same rationale as deploy/compute).
+  publishNotReadyAddresses: true
+  selector: { app: compute-warm }
+  ports:
+    - { name: pg, port: 55433, targetPort: pg }

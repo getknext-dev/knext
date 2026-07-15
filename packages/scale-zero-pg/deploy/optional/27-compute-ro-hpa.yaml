@@ -1,0 +1,73 @@
+# HorizontalPodAutoscaler for the read-only pool (issue #66; GA'd in #99).
+# `kubectl apply` this to let load drive N>1 read replicas. GA status: this is a
+# SUPPORTED, DRILLED posture — `deploy/_verify-readpool.sh` (RO_HPA=1, auto-on
+# when metrics-server is present) proves the pool scales compute-ro 1→N under
+# real concurrent read load and back to 1 when the load drains. Numbers:
+# BENCHMARKS.md "Read-only pool under load (HPA n>1)".
+#
+# PREREQUISITE: a metrics-server (the metrics.k8s.io API) must be installed for
+# the CPU Resource metric below to resolve; without it the HPA reports
+# `<unknown>` targets and never scales. Install:
+#   kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml
+#
+# WHY deploy/optional/ (opt-in, NOT applied by the default install): applying
+# this HPA floors compute-ro at minReplicas=1 — one read replica costs RAM 24/7,
+# which contradicts the platform's scale-to-zero default (connecting.md: the RO
+# pool is "off by default, replicas 0"). Living under deploy/optional/ keeps it
+# OUT of `kubectl apply -f deploy/` (non-recursive), so the default posture stays
+# gateway-managed 0↔N. Enable read-scaling deliberately:
+#   kubectl -n scale-zero-pg apply -f deploy/optional/27-compute-ro-hpa.yaml
+#
+# ── The scale-to-zero vs HPA tension (read this before enabling) ────────────
+# An HPA OWNS the Deployment's replica count between minReplicas and
+# maxReplicas. The gateway RO driver ALSO scales the Deployment (0 on idle,
+# GW_RO_WAKE_REPLICAS on wake). These two controllers FIGHT unless you pick one
+# of the two supported postures:
+#
+#   A. Gateway-managed 0<->N (DEFAULT, no HPA):
+#      Do NOT apply this file. The gateway does full scale-to-zero and wakes to
+#      a FIXED GW_RO_WAKE_REPLICAS. Simple; N is static while awake.
+#
+#   B. HPA-managed 1<->N (this file, minReplicas=1):
+#      Load drives N. Set GW_RO_IDLE_MS=0 on the gateway so it never sleeps the
+#      RO pool (the HPA's minReplicas=1 floor means NO scale-to-zero — the pool
+#      costs one replica 24/7). Reads are always warm; you trade zero-cost idle
+#      for load elasticity.
+#
+#   C. Zero-cost AND load-elastic: use KEDA (deploy/40 pattern) with a Postgres
+#      connections trigger and minReplicaCount=0. KEDA supports scale-to-zero
+#      that a stock HPA cannot. Left as the documented upgrade path.
+#
+# This manifest is posture B. CPU is the portable default metric; a
+# connections-based metric (custom/external, e.g. the gateway's
+# gw_conn_active{...} gauge via prometheus-adapter) tracks read demand more
+# directly — swap the metrics block once an adapter is installed.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: compute-ro
+  namespace: scale-zero-pg
+  labels: { app: compute-ro }
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: compute-ro
+  minReplicas: 1 # posture B: no scale-to-zero (see header); set GW_RO_IDLE_MS=0
+  maxReplicas: 5
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 30
+      policies:
+        - { type: Pods, value: 2, periodSeconds: 30 }
+    scaleDown:
+      stabilizationWindowSeconds: 120
+      policies:
+        - { type: Pods, value: 1, periodSeconds: 60 }

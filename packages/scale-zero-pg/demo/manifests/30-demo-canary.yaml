@@ -1,0 +1,108 @@
+# demo-canary — synthetic end-to-end wake canary (scale-zero-pg issue #39).
+#
+# The pg-demo NextApp is the ONLY workload that exercises the full
+#   visitor → Kourier → app (cold) → gateway → Neon compute (cold) → data
+# path. The gateway's own :9090 metrics can see a DB-wake regression but are
+# blind to an app-side, DNS, or Knative ingress-class regression (the kind the
+# iteration-5 review found by hand). This CronJob is that missing synthetic:
+# every 15 min it hits the app cold and asserts it returns DB-backed data
+# within a wake budget. A run that can't is a FAILED Job.
+#
+# MECHANISM (deliberately zero-new-infra — see docs/operations.md#demo-canary):
+#   - It lives in namespace `scale-zero-pg` (NOT knext-demo) on purpose:
+#     kube-state-metrics (deploy/59) watches only `--namespaces=scale-zero-pg`,
+#     so only a Job here is visible to the alert rules. It reaches the app
+#     cross-namespace via the internal Kourier gateway + the app's cluster-local
+#     Host header — no LB IP, no RBAC, no new exporter.
+#   - A failed run surfaces as `kube_job_status_failed{owner_name="demo-canary"}`,
+#     which the `DemoCanaryFailed` rule (deploy/60-prometheus.yaml) already joins
+#     on — the SAME Failed-Job pattern as backup / wal-janitor. The rule is
+#     DORMANT (no series, never fires) until this canary is deployed, so shipping
+#     the rule in the always-on Prometheus costs nothing when the demo is absent.
+#
+# It probes the CLUSTER-LOCAL Knative host (`pg-demo.knext-demo.svc.cluster.local`),
+# served by kourier-internal, so it needs no external LB IP (issue #40's lesson).
+# Override with KSVC_HOST if the app is routed differently.
+#
+# This is a DEMO-scoped extra: apply it only when the pg-demo app is deployed,
+# and delete it with the demo (see demo/README.md → Cleanup). Left running
+# without the app it would (correctly) page that the canary path is broken.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: demo-canary
+  namespace: scale-zero-pg
+  labels: { app: demo-canary, plane: demo }
+spec:
+  schedule: "*/15 * * * *" # every 15 min — long enough that the app is genuinely cold
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 120
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      # backoffLimit 0: one failed pod = one Failed Job, immediately. We do NOT
+      # want k8s retries to mask a broken wake behind an eventual success — the
+      # retry-for-cold-start race is handled INSIDE the probe (a real visitor
+      # reloads), so an exhausted probe is a real end-to-end failure.
+      backoffLimit: 0
+      activeDeadlineSeconds: 240 # hard cap: 3 attempts × budget + slack
+      template:
+        metadata:
+          labels: { app: demo-canary, plane: demo }
+        spec:
+          restartPolicy: Never
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            seccompProfile: { type: RuntimeDefault }
+          containers:
+            - name: probe
+              image: curlimages/curl:8.11.1
+              imagePullPolicy: IfNotPresent
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities: { drop: ["ALL"] }
+              env:
+                # Cluster-local Knative host — routed by kourier-internal, no LB IP.
+                - name: KSVC_HOST
+                  value: "pg-demo.knext-demo.svc.cluster.local"
+                - name: INGRESS_URL
+                  value: "http://kourier-internal.knative-serving.svc/"
+                - name: WAKE_BUDGET
+                  value: "45" # per-attempt max seconds; a wake past this is a failure (latency drift)
+                - name: ATTEMPTS
+                  value: "3" # a real visitor reloads through the cold-start race
+              command: ["/bin/sh", "-c"]
+              args:
+                - |
+                  set -u
+                  i=1
+                  while [ "$i" -le "$ATTEMPTS" ]; do
+                    code=$(curl -s -o /tmp/body -w '%{http_code}' -m "$WAKE_BUDGET" \
+                           -H "Host: $KSVC_HOST" "$INGRESS_URL" 2>/dev/null || echo 000)
+                    if [ "$code" = 200 ] && grep -qi 'db round-trip' /tmp/body; then
+                      echo "demo-canary OK: db-backed 200 on attempt $i/$ATTEMPTS (combined app+DB wake healthy)"
+                      exit 0
+                    fi
+                    db=no; grep -qi 'db round-trip' /tmp/body 2>/dev/null && db=yes
+                    echo "attempt $i/$ATTEMPTS: http=$code db-backed=$db"
+                    i=$((i + 1)); [ "$i" -le "$ATTEMPTS" ] && sleep 5
+                  done
+                  echo "CANARY FAILED: no db-backed 200 within $ATTEMPTS attempts (${WAKE_BUDGET}s budget each)."
+                  echo "The full visitor->app->gateway->compute wake is BROKEN or regressed past budget."
+                  exit 1
+              resources:
+                requests:
+                  cpu: 10m
+                  memory: 32Mi
+                  ephemeral-storage: 64Mi
+                limits:
+                  memory: 64Mi
+                  ephemeral-storage: 128Mi
+              volumeMounts:
+                - { name: tmp, mountPath: /tmp }
+          volumes:
+            - name: tmp
+              emptyDir: {}

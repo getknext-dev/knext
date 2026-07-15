@@ -1,0 +1,534 @@
+# compute-files: the compute_ctl spec template (config.json, TENANT_ID/TIMELINE_ID
+# placeholders) + entrypoint.sh (cold/primary) + entrypoint-ro.sh (read-replica pool)
+# + entrypoint-warm.sh (warm tier, ADR-0002) + lib-harden.sh (SHARED pg_hba harden,
+# issue #164 — sourced by all three entrypoints so #112/#117 can't drift).
+# GENERATED from deploy/compute-files/ — edit those files and regenerate with:
+#   kubectl create configmap compute-files -n scale-zero-pg \
+#     --from-file=config.json=deploy/compute-files/config.json \
+#     --from-file=entrypoint.sh=deploy/compute-files/entrypoint.sh \
+#     --from-file=entrypoint-ro.sh=deploy/compute-files/entrypoint-ro.sh \
+#     --from-file=entrypoint-warm.sh=deploy/compute-files/entrypoint-warm.sh \
+#     --from-file=lib-harden.sh=deploy/compute-files/lib-harden.sh \
+#     --dry-run=client -o yaml
+# then re-append the compute-config ConfigMap below (it is env, not file-generated).
+# Rationale for the non-obvious Postgres settings (fsync=off etc.) lives in
+# deploy/compute-files/README.md. compute-config: env for the compute + init
+# containers (fixed tenant/timeline IDs, see 55-storage-init.yaml).
+apiVersion: v1
+data:
+  config.json: |
+    {
+        "spec": {
+            "format_version": 1.0,
+            "timestamp": "2022-10-12T18:00:00.000Z",
+            "operation_uuid": "0f657b36-4b0f-4a2d-9c2e-1dcd615e7d8c",
+            "suspend_timeout_seconds": -1,
+            "cluster": {
+                "cluster_id": "ks-pg",
+                "name": "ks-pg",
+                "state": "restarted",
+                "roles": [
+                    {
+                        "name": "cloud_admin",
+                        "encrypted_password": "CLOUD_ADMIN_MD5_PLACEHOLDER",
+                        "options": null
+                    }
+                ],
+                "databases": [],
+                "settings": [
+                    {
+                        "name": "fsync",
+                        "value": "off",
+                        "vartype": "bool"
+                    },
+                    {
+                        "name": "wal_level",
+                        "value": "logical",
+                        "vartype": "enum"
+                    },
+                    {
+                        "name": "wal_log_hints",
+                        "value": "on",
+                        "vartype": "bool"
+                    },
+                    {
+                        "name": "log_connections",
+                        "value": "on",
+                        "vartype": "bool"
+                    },
+                    {
+                        "name": "port",
+                        "value": "55433",
+                        "vartype": "integer"
+                    },
+                    {
+                        "name": "shared_buffers",
+                        "value": "256MB",
+                        "vartype": "string"
+                    },
+                    {
+                        "name": "max_connections",
+                        "value": "100",
+                        "vartype": "integer"
+                    },
+                    {
+                        "name": "listen_addresses",
+                        "value": "0.0.0.0",
+                        "vartype": "string"
+                    },
+                    {
+                        "name": "max_wal_senders",
+                        "value": "10",
+                        "vartype": "integer"
+                    },
+                    {
+                        "name": "max_replication_slots",
+                        "value": "10",
+                        "vartype": "integer"
+                    },
+                    {
+                        "name": "wal_sender_timeout",
+                        "value": "5s",
+                        "vartype": "string"
+                    },
+                    {
+                        "name": "wal_keep_size",
+                        "value": "0",
+                        "vartype": "integer"
+                    },
+                    {
+                        "name": "max_slot_wal_keep_size",
+                        "value": "512MB",
+                        "vartype": "string"
+                    },
+                    {
+                        "name": "password_encryption",
+                        "value": "scram-sha-256",
+                        "vartype": "enum"
+                    },
+                    {
+                        "name": "restart_after_crash",
+                        "value": "off",
+                        "vartype": "bool"
+                    },
+                    {
+                        "name": "synchronous_standby_names",
+                        "value": "walproposer",
+                        "vartype": "string"
+                    },
+                    {
+                        "name": "shared_preload_libraries",
+                        "value": "neon,pg_cron,timescaledb,pg_stat_statements",
+                        "vartype": "string"
+                    },
+                    {
+                        "name": "neon.safekeepers",
+                        "value": "safekeeper-0.safekeeper:5454,safekeeper-1.safekeeper:5454,safekeeper-2.safekeeper:5454",
+                        "vartype": "string"
+                    },
+                    {
+                        "name": "neon.timeline_id",
+                        "value": "TIMELINE_ID",
+                        "vartype": "string"
+                    },
+                    {
+                        "name": "neon.tenant_id",
+                        "value": "TENANT_ID",
+                        "vartype": "string"
+                    },
+                    {
+                        "name": "neon.pageserver_connstring",
+                        "value": "host=pageserver port=6400",
+                        "vartype": "string"
+                    },
+                    {
+                        "name": "max_replication_write_lag",
+                        "value": "500MB",
+                        "vartype": "string"
+                    },
+                    {
+                        "name": "max_replication_flush_lag",
+                        "value": "10GB",
+                        "vartype": "string"
+                    },
+                    {
+                        "name": "cron.database",
+                        "value": "postgres",
+                        "vartype": "string"
+                    },
+                    {
+                        "name": "work_mem",
+                        "value": "8MB",
+                        "vartype": "string"
+                    },
+                    {
+                        "name": "maintenance_work_mem",
+                        "value": "64MB",
+                        "vartype": "string"
+                    },
+                    {
+                        "name": "effective_cache_size",
+                        "value": "512MB",
+                        "vartype": "string"
+                    }
+                ]
+            },
+            "delta_operations": []
+        },
+        "compute_ctl_config": {
+            "jwks": {
+                "keys": [
+                    {
+                        "use": "sig",
+                        "key_ops": [
+                            "verify"
+                        ],
+                        "alg": "EdDSA",
+                        "kid": "ZGIxMzAzOGY0YWQwODk2ODU1MTk1NzMxMDFkYmUyOWU2NzZkOWNjNjMyMGRkZGJjOWY0MjdjYWVmNzE1MjUyOAo=",
+                        "kty": "OKP",
+                        "crv": "Ed25519",
+                        "x": "MGQ4ZDFhOTdmNTM0NmUwMDc3ZmJkN2Q0MWE0ZmI3M2NhNWE3YjFjOTNkM2IyYzRkZTQzOGM3MjBkZTk3N2E5ZAo="
+                    }
+                ]
+            }
+        }
+    }
+  entrypoint-ro.sh: |
+    #!/bin/sh
+    # Read-only pool compute entrypoint (read-replica pool, issue #66). SAME
+    # tenant/timeline as the cold `compute` writer — reads reflect the writer's
+    # committed data. The ONLY difference vs the stock entrypoint is that it injects
+    # a read-only `mode` into the compute_ctl spec so compute_ctl boots Postgres as
+    # a read-only endpoint that never attaches as the single writer. No gate, no
+    # generation ceremony: a read-only compute coordinates nothing.
+    #
+    # RO_MODE (default "Replica"):
+    #   Replica  - hot-standby that FOLLOWS the timeline tip (streams WAL from the
+    #              safekeepers, reads pages from the pageserver). This is the goal:
+    #              reads track the writer with only replication lag. Requires
+    #              compute_ctl/Postgres to support the Replica compute mode.
+    #   Static   - read-only pinned at a FIXED LSN captured at attach time (the
+    #              honest fallback the restore drill already proves works). Reads are
+    #              frozen at boot; a replica advances only by re-rolling the pod
+    #              (an HPA scale-up naturally brings fresh-LSN pods online). Needs
+    #              RO_STATIC_LSN, or the resolve-lsn initContainer's /ro-lsn/lsn.
+    set -eu
+
+    : "${TENANT_ID:?compute-config must set TENANT_ID}"
+    : "${TIMELINE_ID:?compute-config must set TIMELINE_ID}"
+
+    RO_MODE="${RO_MODE:-Replica}"
+    SRC=/compute-files/config.json
+    IDS=/tmp/config.ids.json
+    DST=/tmp/config.json
+    CLOUD_ADMIN_MD5="${CLOUD_ADMIN_MD5:-b093c0d3b281ba6da1eacc608620abd8}"
+
+    # pg_hba harden shared with the primary + warm entrypoints (issue #164). See
+    # lib-harden.sh: harden_pg_hba inserts the #112 cloud_admin loopback-only reject and
+    # rewrites the pg_hba catch-all md5 -> scram-sha-256 (#117). On a per-app RO compute
+    # (APP_ROLE set via compute-config-<app>) the app role app_<app> already carries its
+    # SCRAM verifier in the REPLICATED catalog (streamed from the primary via WAL — an RO
+    # replica reads the same timeline), so app-role auth Just Works over SCRAM after the
+    # harden while cloud_admin is rejected over TCP. On the base single-DB RO pool
+    # (deploy/26, no APP_ROLE) the harden is skipped so DATABASE_URL_RO's cloud_admin-over-
+    # TCP path (mirroring the primary single-DB) keeps working — but with a STRONG
+    # cloud_admin md5 injected from pg-base-admin (issue #168), so the public default is
+    # rejected over TCP even here. The fallback below is only for a BARE local run.
+    . /compute-files/lib-harden.sh
+
+    echo "Rendering RO compute spec (tenant=${TENANT_ID} timeline=${TIMELINE_ID} mode=${RO_MODE})"
+    sed -e "s|TENANT_ID|${TENANT_ID}|g" -e "s|TIMELINE_ID|${TIMELINE_ID}|g" \
+        -e "s|CLOUD_ADMIN_MD5_PLACEHOLDER|${CLOUD_ADMIN_MD5}|g" "$SRC" > "$IDS"
+
+    case "$RO_MODE" in
+      Replica)
+        MODE_JSON='"mode": "Replica",'
+        ;;
+      Static)
+        LSN="${RO_STATIC_LSN:-}"
+        if [ -z "$LSN" ] && [ -f /ro-lsn/lsn ]; then LSN="$(cat /ro-lsn/lsn)"; fi
+        [ -n "$LSN" ] || { echo "RO_MODE=Static needs RO_STATIC_LSN or the resolve-lsn initContainer (/ro-lsn/lsn)"; exit 1; }
+        echo "  static read LSN = ${LSN}"
+        MODE_JSON="\"mode\": {\"Static\": \"${LSN}\"},"
+        ;;
+      *)
+        echo "unknown RO_MODE=${RO_MODE} (want Replica|Static)"; exit 1
+        ;;
+    esac
+
+    # Inject the read-only mode as a top-level spec field, right after format_version
+    # (same seam the restore drill uses for its Static compute).
+    awk -v m="$MODE_JSON" '{print} /"format_version": 1.0,/{print "        " m}' "$IDS" > "$DST"
+
+    # Per-app tenant boundary + SCRAM wire enforcement (issue #164): reconcile pg_hba
+    # (loopback-only cloud_admin #112 + scram-sha-256 wire auth #117) once Postgres is up.
+    # Backgrounded before exec so the wake path is never blocked; a no-op on the base
+    # single-DB RO pool (no APP_ROLE) so DATABASE_URL_RO's cloud_admin path is unchanged.
+    if [ -n "${APP_ROLE:-}" ]; then
+      harden_pg_hba &
+    fi
+
+    echo "Starting compute_ctl (read-only, mode=${RO_MODE})"
+    exec /usr/local/bin/compute_ctl --pgdata /var/db/postgres/compute \
+         -C "postgresql://cloud_admin@localhost:55433/postgres" \
+         -b /usr/local/bin/postgres \
+         --compute-id "compute-ro-${HOSTNAME:-k8s}" \
+         --config "${DST}"
+  entrypoint-warm.sh: |
+    #!/bin/bash
+    # Gated warm-standby compute entrypoint (warm tier, ADR-0002). Productizes
+    # warmstandby/'s prototype gate: instead of the harness touching a file via
+    # `kubectl exec`, the pod polls the GATEWAY's gate port and boots compute_ctl
+    # only once the gateway opens it. The gateway's warmpool driver opens that gate
+    # ONLY after proving the cold `compute` deployment is fully drained, so the
+    # single-writer invariant is enforced in tested Go, not shell.
+    #
+    # Bash (not sh): the /dev/tcp pseudo-device is a bash builtin. The stock
+    # compute image (neondatabase/compute-node-v17) ships bash but no curl/nc, so
+    # this TCP probe is the exec-free, dependency-free way to wait on the gate.
+    #
+    # The pod is fully scheduled + Running (RAM reserved) while it blocks here, but
+    # compute_ctl has NOT attached to the timeline — the "warm-RAM" parked state.
+    set -eu
+
+    : "${TENANT_ID:?compute-config must set TENANT_ID}"
+    : "${TIMELINE_ID:?compute-config must set TIMELINE_ID}"
+    : "${WARM_GATE_ADDR:?warm entrypoint needs WARM_GATE_ADDR=host:port of the gateway gate}"
+
+    SRC=/compute-files/config.json   # reused from the compute-files ConfigMap
+    DST=/tmp/config.json
+    CLOUD_ADMIN_MD5="${CLOUD_ADMIN_MD5:-b093c0d3b281ba6da1eacc608620abd8}"
+
+    # pg_hba harden shared with the primary + RO entrypoints (issue #164). See
+    # lib-harden.sh: harden_pg_hba inserts the #112 cloud_admin loopback-only reject and
+    # rewrites the pg_hba catch-all md5 -> scram-sha-256 (#117). Gated on APP_ROLE (below):
+    # a per-app warm compute hardens exactly like the primary per-app writer, while the base
+    # single-DB warm tier (deploy/25, no APP_ROLE) keeps cloud_admin over TCP so the warm
+    # path (WARM_DSN cloud_admin) mirrors the primary single-DB unchanged — but with a
+    # STRONG cloud_admin md5 injected from pg-base-admin (issue #168), so the public default
+    # is rejected over TCP even here. The fallback below is only for a BARE local run.
+    . /compute-files/lib-harden.sh
+
+    echo "Rendering compute spec (tenant=${TENANT_ID} timeline=${TIMELINE_ID})"
+    sed -e "s|TENANT_ID|${TENANT_ID}|g" -e "s|TIMELINE_ID|${TIMELINE_ID}|g" \
+        -e "s|CLOUD_ADMIN_MD5_PLACEHOLDER|${CLOUD_ADMIN_MD5}|g" "$SRC" > "$DST"
+
+    GATE_HOST="${WARM_GATE_ADDR%:*}"
+    GATE_PORT="${WARM_GATE_ADDR##*:}"
+
+    # Sentinel: pod is warm (scheduled, RAM held) but compute_ctl is NOT yet
+    # attached. A successful TCP connect to the gateway gate = gate open = boot.
+    echo "WARM_GATE_WAITING ${WARM_GATE_ADDR}"
+    until (exec 3<>"/dev/tcp/${GATE_HOST}/${GATE_PORT}") 2>/dev/null; do
+      sleep 0.2
+    done
+    exec 3>&- 2>/dev/null || true
+    echo "WARM_GATE_OPEN — attaching compute_ctl"
+
+    # Per-app tenant boundary + SCRAM wire enforcement (issue #164): reconcile pg_hba
+    # (loopback-only cloud_admin #112 + scram-sha-256 wire auth #117) once Postgres is up.
+    # Backgrounded before exec so the wake path is never blocked; a no-op on the base
+    # single-DB warm tier (no APP_ROLE) so the WARM_DSN cloud_admin-over-TCP path is unchanged.
+    if [ -n "${APP_ROLE:-}" ]; then
+      harden_pg_hba &
+    fi
+
+    # From here it is identical to the stock entrypoint's exec line.
+    exec /usr/local/bin/compute_ctl --pgdata /var/db/postgres/compute \
+         -C "postgresql://cloud_admin@localhost:55433/postgres" \
+         -b /usr/local/bin/postgres \
+         --compute-id "compute-warm-${HOSTNAME:-k8s}" \
+         --config "${DST}"
+  entrypoint.sh: |
+    #!/bin/sh
+    # Compute entrypoint (k8s), adapted from local/compute_wrapper/shell/compute.sh.
+    #
+    # The compute image (neondatabase/compute-node-v17) ships NO nc/curl/jq, so this
+    # entrypoint does the bare minimum and stays POSIX-sh clean:
+    #   - tenant/timeline IDs arrive via env from the compute-config ConfigMap;
+    #     they are created on the pageserver by the storage-init Job, and the
+    #     compute pod's wait-timeline initContainer blocks until they exist. So we
+    #     never talk to the pageserver HTTP API from here.
+    #   - we only substitute the IDs into the spec (sed is present) and exec compute_ctl.
+    set -eu
+
+    : "${TENANT_ID:?compute-config must set TENANT_ID}"
+    : "${TIMELINE_ID:?compute-config must set TIMELINE_ID}"
+
+    SRC=/compute-files/config.json
+    DST=/tmp/config.json
+    PGDATA=/var/db/postgres/compute
+    # The publicly-documented dev md5 = md5("cloud_admin"||"cloud_admin"). It is a
+    # SKELETON KEY (issue #112) and must never reach a compute that holds tenant data.
+    PUBLIC_CLOUD_ADMIN_MD5=b093c0d3b281ba6da1eacc608620abd8
+
+    # cloud_admin credential + trust boundary (issue #112 CRITICAL).
+    #
+    # On a PER-APP compute (APP_ROLE set) cloud_admin is used EXCLUSIVELY over the
+    # pod-local loopback: compute_ctl's own boot connection and provision-app.sh /
+    # the drills all `psql -h localhost`, which the initdb pg_hba TRUSTS (see the
+    # harden step below). It is NEVER presented over the pod network — apps reach the
+    # compute only through the apps-gateway as the per-app role app_<app>. So on a
+    # per-app compute we HARD-DISABLE the public default: an unset (or the public)
+    # CLOUD_ADMIN_MD5 becomes a strong random, unguessable md5. Combined with the
+    # pg_hba loopback-binding below, a co-tenant pod dialing compute-<app>:55433
+    # directly can neither guess the password NOR be admitted as cloud_admin.
+    #
+    # On the PRIMARY single-DB compute (no APP_ROLE) cloud_admin IS the documented
+    # credential clients present THROUGH the primary gateway over TCP. In a PRODUCT
+    # deployment the base compute manifest (deploy/20) injects CLOUD_ADMIN_MD5 from the
+    # STRONG pg-base-admin Secret (deploy/gen-secrets.sh, matching the DATABASE_URL Secret
+    # plaintext), so the public default cloud_admin:cloud_admin is rejected over TCP even
+    # on the base tier (issue #168). The dev-default fallback below only applies to a BARE
+    # local run with no pg-base-admin Secret — a pure single-tenant path defended by
+    # NetworkPolicy + operator posture (docs/operations.md "Network isolation caveat" +
+    # "Base-tier cloud_admin").
+    if [ -n "${APP_ROLE:-}" ]; then
+      if [ -z "${CLOUD_ADMIN_MD5:-}" ] || [ "${CLOUD_ADMIN_MD5}" = "$PUBLIC_CLOUD_ADMIN_MD5" ]; then
+        CLOUD_ADMIN_MD5="$(od -An -tx1 -N16 /dev/urandom | tr -d ' \n')"
+        echo "issue #112: per-app compute cloud_admin uses a strong random md5 (public default disabled)"
+      fi
+    else
+      CLOUD_ADMIN_MD5="${CLOUD_ADMIN_MD5:-$PUBLIC_CLOUD_ADMIN_MD5}"
+    fi
+
+    # harden_pg_hba (issues #112 + #117): factored into the SHARED lib-harden.sh so
+    # the primary / RO / warm entrypoints cannot drift (issue #164). It inserts the
+    # cloud_admin loopback-only reject (#112) + rewrites the pg_hba network catch-all
+    # md5 -> scram-sha-256 (#117). Sourced with an absolute path from the mounted
+    # compute-files ConfigMap. See lib-harden.sh for the full rationale.
+    . /compute-files/lib-harden.sh
+
+    echo "Rendering compute spec (tenant=${TENANT_ID} timeline=${TIMELINE_ID})"
+    sed -e "s|TENANT_ID|${TENANT_ID}|g" -e "s|TIMELINE_ID|${TIMELINE_ID}|g" \
+        -e "s|CLOUD_ADMIN_MD5_PLACEHOLDER|${CLOUD_ADMIN_MD5}|g" "$SRC" > "$DST"
+
+    # Per-app connection cap (issue #89, tenant quotas). When PG_MAX_CONNECTIONS is set
+    # (per-app computes get it from compute-config-<app>), override ONLY the
+    # max_connections value in the rendered spec so an operator can bound one tenant's
+    # server-side backends below the 100 default. Additive + surgical: absent -> the
+    # spec is byte-for-byte unchanged (primary single-DB / tmpl / any compute without
+    # the var), and config.json is untouched (warm/ro entrypoints unaffected). Each app
+    # is its own Postgres, so this is the per-app bound; a runaway app cannot exhaust a
+    # neighbour's backends. (The apps-gateway GW_MAX_CONNS is a separate process-wide
+    # goroutine ceiling — see ADR-0003 "noisy-neighbour".)
+    if [ -n "${PG_MAX_CONNECTIONS:-}" ]; then
+      echo "Applying per-app max_connections=${PG_MAX_CONNECTIONS}"
+      awk -v mc="${PG_MAX_CONNECTIONS}" '
+        prev ~ /"name": "max_connections"/ && /"value":/ { sub(/"value": "[0-9]+"/, "\"value\": \"" mc "\"") }
+        { print; prev=$0 }' "$DST" > "$DST.tmp" && mv "$DST.tmp" "$DST"
+    fi
+
+    # Per-app role (issue #74, branch-per-app tenant isolation; SCRAM under issue #117).
+    # When BOTH APP_ROLE and APP_ROLE_VERIFIER are set (per-app computes get them from
+    # compute-config-<app> and the Secret app-db-<app>), inject an extra LOGIN role into the
+    # spec's roles array. APP_ROLE_VERIFIER is a PRECOMPUTED SCRAM-SHA-256 verifier
+    # (SCRAM-SHA-256$...); compute_ctl stores a recognised verifier VERBATIM as the role's
+    # encrypted_password (only a bare md5-hex value gets the "md5" prefix), so the app role
+    # is SCRAM FROM BOOT with NO tenant plaintext on the compute. compute_ctl applies spec
+    # roles on every boot, so the credential is (re)asserted each wake. This is ADDITIVE: the
+    # primary single-DB compute and the seed-time tmpl compute set neither var, so the block
+    # is skipped and their spec is byte-for-byte unchanged (zero blast radius).
+    if [ -n "${APP_ROLE:-}" ] && [ -n "${APP_ROLE_VERIFIER:-}" ]; then
+      echo "Injecting per-app login role ${APP_ROLE} (SCRAM verifier)"
+      ROLE_JSON="{\"name\": \"${APP_ROLE}\", \"encrypted_password\": \"${APP_ROLE_VERIFIER}\", \"options\": null},"
+      awk -v r="$ROLE_JSON" 'BEGIN{done=0}{print}(done==0 && /"roles": \[/){print "                    " r; done=1}' \
+          "$DST" > "$DST.tmp" && mv "$DST.tmp" "$DST"
+    fi
+
+    # Per-app tenant boundary + SCRAM wire enforcement: reconcile pg_hba (loopback-only
+    # cloud_admin #112 + scram-sha-256 wire auth #117) once Postgres is up. Backgrounded
+    # before exec so the wake path is never blocked; a no-op on the primary/tmpl-less
+    # single-DB compute (no APP_ROLE).
+    if [ -n "${APP_ROLE:-}" ]; then
+      harden_pg_hba &
+    fi
+
+    echo "Starting compute_ctl"
+    exec /usr/local/bin/compute_ctl --pgdata "$PGDATA" \
+         -C "postgresql://cloud_admin@localhost:55433/postgres" \
+         -b /usr/local/bin/postgres \
+         --compute-id "compute-${HOSTNAME:-k8s}" \
+         --config "${DST}"
+  lib-harden.sh: |
+    # shellcheck shell=sh
+    # lib-harden.sh — SINGLE SOURCE OF TRUTH for the compute pg_hba harden (issues
+    # #112 + #117 + #164). Sourced by all three compute entrypoints so the harden can
+    # never drift across tiers:
+    #   - entrypoint.sh       (primary / per-app writer, deploy/54 + operator render)
+    #   - entrypoint-ro.sh    (read-replica pool, deploy/26 base + operator per-app RO)
+    #   - entrypoint-warm.sh  (warm tier, deploy/25, ADR-0002)
+    # POSIX sh (also valid under bash) — no bashisms; only psql/awk/grep/sleep, all of
+    # which the stock compute image (neondatabase/compute-node-v17) ships.
+    #
+    # harden_pg_hba (issues #112 + #117): once Postgres is accepting loopback
+    # connections, (1) insert a `host all cloud_admin all reject` line JUST BEFORE the
+    # network catch-all (issue #112 — cloud_admin loopback-only), and (2) rewrite that
+    # catch-all's method from md5 to `scram-sha-256` (issue #117 — enforce SCRAM on the
+    # wire; an md5-only client, or any role still carrying an md5 verifier, is refused).
+    # The app role itself already carries a SCRAM verifier FROM BOOT (its spec
+    # encrypted_password is the precomputed APP_ROLE_VERIFIER on the primary writer, and
+    # on a READ replica the SAME verifier is REPLICATED from the primary catalog via WAL),
+    # so there is NO cold-wake md5 window: even before this reload lands the md5 catch-all
+    # auto-negotiates SCRAM against the SCRAM verifier. Order matters and is safe:
+    # compute_ctl's initdb pg_hba lists the loopback lines (127.0.0.1/32, ::1/128 -> trust)
+    # FIRST, so pg_hba's first-match rule keeps cloud_admin working over loopback (the pod's
+    # own admin ops connect cloud_admin@localhost:55433) while rejecting it from every other
+    # address, and app roles (app_<app>) fall through to the SCRAM catch-all so the
+    # apps-gateway path keeps working. This is the ENFORCING, CNI-independent tenant boundary
+    # (flannel ships no NetworkPolicy controller, so 70-networkpolicy.yaml is defense-in-depth
+    # only). Runs in the background so it never delays the wake/readiness path.
+    #
+    # Gating (identical across all three entrypoints): call `harden_pg_hba &` ONLY when
+    # APP_ROLE is set (a per-app compute — writer, RO replica, or warm). On the base
+    # single-DB tiers (primary / compute-ro / compute-warm, no APP_ROLE) cloud_admin IS the
+    # documented TCP credential the clients present through the gateway, so the harden is
+    # deliberately SKIPPED there (that single-tenant path is defended by NetworkPolicy +
+    # operator posture, docs/operations.md "Network isolation caveat"). This keeps the base
+    # DATABASE_URL / DATABASE_URL_RO cloud_admin-over-TCP paths working unchanged.
+    harden_pg_hba() {
+      HBA="${PGDATA:-/var/db/postgres/compute}/pg_hba.conf"
+      PSQL="psql -h localhost -p 55433 -U cloud_admin -d postgres -tAc"
+      i=0
+      while [ $i -lt 600 ]; do
+        $PSQL 'select 1' >/dev/null 2>&1 && break
+        i=$((i+1)); sleep 0.2
+      done
+      [ -f "$HBA" ] || { echo "WARN issue #112: $HBA absent; cloud_admin still protected by strong md5"; return 0; }
+      # Insert the cloud_admin reject before the first `host all all all <method>`
+      # catch-all AND rewrite that catch-all's method to scram-sha-256 (issue #117).
+      awk '{
+        if ($1=="host" && $2=="all" && $3=="all" && $4=="all" && !d){
+          print "host\tall\tcloud_admin\tall\treject"; d=1
+        }
+        if ($1=="host" && $2=="all" && $3=="all" && $4=="all"){
+          print "host\tall\tall\tall\tscram-sha-256"; next
+        }
+        print
+      }' "$HBA" > "$HBA.harden" 2>/dev/null && cat "$HBA.harden" > "$HBA" && rm -f "$HBA.harden"
+      if grep -qiE '^host[[:space:]]+all[[:space:]]+cloud_admin[[:space:]]+all[[:space:]]+reject' "$HBA"; then
+        if $PSQL 'SELECT pg_reload_conf()' >/dev/null 2>&1; then
+          echo "issue #112/#117: cloud_admin loopback-only + wire auth is scram-sha-256; pg_hba reloaded"
+        else
+          echo "WARN issue #112: pg_hba reload failed; cloud_admin still protected by strong random md5"
+        fi
+      else
+        echo "WARN issue #112: could not locate the network catch-all in pg_hba; cloud_admin still protected by strong random md5"
+      fi
+    }
+kind: ConfigMap
+metadata:
+  creationTimestamp: null
+  name: compute-files
+  namespace: scale-zero-pg
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: compute-config
+  namespace: scale-zero-pg
+data:
+  PG_VERSION: "17"
+  PAGESERVER_HOST: "pageserver"
+  TENANT_ID: "f000f000f000f000f000f000f000f001"
+  TIMELINE_ID: "f000f000f000f000f000f000f000f002"

@@ -1,0 +1,99 @@
+# Safekeepers: quorum-replicated durable WAL + single-writer authority.
+# THREE members — writes need a 2/3 majority ack, so losing any one pod
+# neither blocks writes nor loses data. Each pod derives its unique
+# safekeeper --id from its StatefulSet ordinal and advertises its stable
+# per-pod DNS name. The durability layer: never scale to zero.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: safekeeper
+  namespace: scale-zero-pg
+  labels: { app: safekeeper, plane: storage }
+spec:
+  serviceName: safekeeper
+  replicas: 3
+  revisionHistoryLimit: 2 # cap StatefulSet controller-revision churn
+  podManagementPolicy: Parallel # members are independent; no ordered start needed
+  selector: { matchLabels: { app: safekeeper } }
+  template:
+    metadata:
+      labels: { app: safekeeper, plane: storage }
+    spec:
+      # neon:8464 runs as uid 1000 (neon); non-root is the image default, so we
+      # assert it. fsGroup 1000 keeps the PVC writable; seccomp on by default.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: safekeeper
+          image: neondatabase/neon:8464
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+          command: ["/bin/sh", "-c"]
+          # ordinal -> id (safekeeper ids must be unique and stable):
+          # safekeeper-0 -> id 1, safekeeper-1 -> id 2, safekeeper-2 -> id 3.
+          args:
+            - |
+              ORD=${HOSTNAME##*-}
+              exec safekeeper \
+                --listen-pg=0.0.0.0:5454 \
+                --advertise-pg=${HOSTNAME}.safekeeper:5454 \
+                --listen-http=0.0.0.0:7676 \
+                --id=$((ORD + 1)) \
+                --broker-endpoint=http://storage-broker:50051 \
+                -D /data \
+                --remote-storage="{endpoint='${OBJSTORE_ENDPOINT}', bucket_name='${OBJSTORE_BUCKET}', bucket_region='${OBJSTORE_REGION}', prefix_in_bucket='/safekeeper/'}"
+          # Object-store endpoint/bucket/region are env-driven (#105) from the
+          # storage-objstore ConfigMap (default MinIO; override for external S3).
+          # neon forces path-style automatically when a custom endpoint is set.
+          envFrom:
+            - configMapRef: { name: storage-objstore } # OBJSTORE_ENDPOINT / _BUCKET / _REGION
+          # S3 creds from the storage-s3-creds Secret (deploy/gen-secrets.sh),
+          # never plaintext YAML.
+          env:
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom: { secretKeyRef: { name: storage-s3-creds, key: user } }
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom: { secretKeyRef: { name: storage-s3-creds, key: password } }
+          ports:
+            - { name: pg, containerPort: 5454 }
+            - { name: http, containerPort: 7676 }
+          volumeMounts:
+            - { name: data, mountPath: /data }
+          readinessProbe:
+            httpGet: { path: /v1/status, port: http }
+            periodSeconds: 2
+          # Liveness: restart a member that is up but wedged (not answering the
+          # status endpoint). Generous threshold so a busy WAL flush isn't killed.
+          livenessProbe:
+            httpGet: { path: /v1/status, port: http }
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 6
+          resources:
+            requests: { cpu: 50m, memory: 128Mi, ephemeral-storage: 100Mi }
+            limits: { memory: 512Mi, ephemeral-storage: 1Gi }
+  volumeClaimTemplates:
+    - metadata: { name: data }
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources: { requests: { storage: 2Gi } }
+---
+# Headless: gives each member its stable DNS name
+# (safekeeper-N.safekeeper.scale-zero-pg.svc) for advertise + compute config.
+apiVersion: v1
+kind: Service
+metadata:
+  name: safekeeper
+  namespace: scale-zero-pg
+spec:
+  clusterIP: None
+  selector: { app: safekeeper }
+  ports:
+    - { name: pg, port: 5454, targetPort: pg }
+    - { name: http, port: 7676, targetPort: http }

@@ -1,0 +1,55 @@
+# Storage broker: lightweight coordination between safekeepers and
+# pageservers. Stateless. (Compose name storage_broker -> DNS-valid
+# storage-broker; the pageserver.toml + safekeeper args reference the new name.)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: storage-broker
+  namespace: scale-zero-pg
+  labels: { app: storage-broker, plane: storage }
+spec:
+  replicas: 1
+  revisionHistoryLimit: 2 # cap ReplicaSet churn
+  selector: { matchLabels: { app: storage-broker } }
+  template:
+    metadata:
+      labels: { app: storage-broker, plane: storage }
+    spec:
+      # neon:8464 runs as uid 1000 (neon); the broker is stateless (no PVC).
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: storage-broker
+          image: neondatabase/neon:8464 # pinned release, same as compose derivation
+          command: ["storage_broker", "--listen-addr=0.0.0.0:50051"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+          ports:
+            - { name: grpc, containerPort: 50051 }
+          readinessProbe:
+            tcpSocket: { port: grpc }
+            periodSeconds: 2
+          # Liveness: restart if the gRPC port stops accepting (wedged broker
+          # silently breaks safekeeper<->pageserver coordination).
+          livenessProbe:
+            tcpSocket: { port: grpc }
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 6
+          resources:
+            requests: { cpu: 20m, memory: 32Mi, ephemeral-storage: 100Mi }
+            limits: { memory: 64Mi, ephemeral-storage: 1Gi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: storage-broker
+  namespace: scale-zero-pg
+spec:
+  selector: { app: storage-broker }
+  ports:
+    - { name: grpc, port: 50051, targetPort: grpc }

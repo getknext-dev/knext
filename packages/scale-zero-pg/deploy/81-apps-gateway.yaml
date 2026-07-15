@@ -1,0 +1,176 @@
+# apps-gateway: a second wake-on-connect proxy in TEMPLATE mode, for branch-per-app
+# multi-tenancy (ADR-0003, #6). It is deliberately SEPARATE from the primary
+# gateway (deploy/10-gateway.yaml, kubectl mode -> the single `compute`):
+#
+#   - primary gateway  (pggw,      :55432): database=postgres -> `compute`
+#   - apps  gateway    (pggw-apps, :55432): database=<app>    -> `compute-<app>`
+#
+# Keeping them separate means the primary single-DB path (and its blast radius)
+# is untouched by multi-tenancy: the apps-gateway's {system} routing maps the
+# DSN database name to the per-app Deployment/Service that provision-app.sh
+# created. It reuses the pggw ServiceAccount/Role (deployments/scale is namespace
+# -wide), so no new RBAC. Front-door TLS is ON (issue #113): the shared pggw-tls
+# Secret (deploy/gen-tls.sh, SANs cover pggw-apps too) is mounted and the gateway
+# answers SSLRequest with 'S', so per-tenant traffic — the md5 auth exchange AND
+# every query/result row — is encrypted on the wire. sslmode=require works;
+# sslmode=disable still works (TLS optional, no regression). Rotate the cert the
+# same way as the primary (docs/operations.md "TLS certificate rotation").
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pggw-apps
+  namespace: scale-zero-pg
+  labels: { app: pggw-apps, tier: apps }
+spec:
+  replicas: 2 # no-SPOF; peer-aware idle keeps the sleep decision fleet-safe
+  selector:
+    matchLabels: { app: pggw-apps }
+  template:
+    metadata:
+      labels: { app: pggw-apps, tier: apps }
+    spec:
+      imagePullSecrets:
+        - name: ocir-pull
+      serviceAccountName: pggw # reuse: deployments/scale is namespace-wide
+      containers:
+        - name: gateway
+          # apps-gateway image. Carries v0.6.1 tenant security ((user,database)
+          # authz + per-app peer idle) + the #92 existence-oracle fix, the #127
+          # per-app READ-ONLY lane (template-mode RO routing -> compute-ro-<app>,
+          # tenant-isolated), PLUS #139 v2-1 gateway-mediated replication-wake
+          # (ADR-0007 §4c: a walreceiver connecting through the gateway wakes a
+          # sleeping publisher compute-<zone> and holds it awake while streaming),
+          # PLUS #116 the per-app WAKE budget (GW_WAKE_BUDGET token-bucket refusing
+          # over-budget 0->1 wakes with a clean 53400 — the CNI-independent control
+          # for the unauthenticated wake side-channel, ADR-0008).
+          # Digest-pinned (contract 22). Rebuild + re-pin on any gateway change. The
+          # primary gateway (10-gateway.yaml) has no per-app path and is repinned
+          # independently.
+          image: me-abudhabi-1.ocir.io/axfqznklsd2t/ks-pg/gateway:sha-45dbec3@sha256:75b169364aada7f88e692626fc063907bfe4a51f3a8949fe0cb90e9d6624e6e6
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: GW_PORT
+              value: "55432"
+            - name: GW_METRICS_PORT
+              value: "9090"
+            - name: GW_COMPUTE_MODE
+              value: "template" # database=<app> -> compute-<app>, scaled 0<->1 per app
+            - name: GW_K8S_NAMESPACE
+              value: "scale-zero-pg"
+            - name: GW_K8S_DEPLOYMENT_TEMPLATE
+              value: "compute-{system}" # {system} = DSN database name; guarded non-empty in wake.go
+            - name: GW_TARGET_TEMPLATE
+              value: "compute-{system}.scale-zero-pg.svc:55433"
+            # Tenant access control (issue #74). The gateway refuses any startup
+            # whose (user, database) is not <prefix><db>/<db>, and any database
+            # that is a reserved system name — BEFORE waking. Keeps cloud_admin and
+            # cross-app DSNs out. MUST stay in lock-step with provision-app.sh
+            # (APP_ROLE_PREFIX / RESERVED_NAMES).
+            - name: GW_APP_ROLE_PREFIX
+              value: "app_"
+            # Gateway-mediated replication-wake (#139 v2-1, ADR-0007 §4c). A
+            # REPLICATION (walreceiver) startup — a subscriber's slot connecting
+            # THROUGH the gateway to wake + drain a sleeping publisher — authorizes
+            # against the per-zone REPLICATION role repl_<zone> (NOT app_<zone>: the
+            # app role has no REPLICATION attribute; the repl role must not be usable
+            # for ordinary tenant traffic). MUST match the Zone operator's minted
+            # role name (ADR-0007 §4b).
+            - name: GW_REPL_ROLE_PREFIX
+              value: "repl_"
+            - name: GW_RESERVED_SYSTEMS
+              value: "tmpl,warm,ro"
+            - name: GW_IDLE_MS
+              value: "60000" # demo-friendly; production: 300000+
+            # Per-app READ-ONLY lane (issue #127). A SECOND listener on GW_RO_PORT
+            # that — because the base mode is `template` — routes database=<app>
+            # READS to THAT app's OWN read-only compute (compute-ro-<app>), scaled
+            # 0<->N on connect. It reuses the SAME (user,database) authz, reserved
+            # systems, servedDatabase rewrite and TLS as the writer port, so the RO
+            # port enforces the identical tenant boundary. It is NOT the primary
+            # gateway's kubectl RO lane (one shared compute-ro) — that would route
+            # every app's reads to one pool = cross-tenant exposure. DATABASE_URL_RO
+            # (emitted by the appdb-operator when roPool.enabled) points here.
+            - name: GW_RO_PORT
+              value: "55434"
+            - name: GW_RO_WAKE_REPLICAS
+              value: "1" # wake to 1 read replica; a per-app HPA grows N under load
+            - name: GW_RO_IDLE_MS
+              value: "60000" # RO pool sleeps after 60s idle (demo-friendly)
+            - name: GW_WAKE_TIMEOUT_MS
+              value: "120000"
+            - name: GW_RETRY_MS
+              value: "100"
+            # Cold-boot role-apply race (#132): compute_ctl opens the socket a beat
+            # before it (re)applies the per-app spec role on every boot, so the FIRST
+            # connect during a 0->1 cold wake could transiently 28P01 and self-heal
+            # next request. On a GENUINE cold wake the gateway holds the client this
+            # long BEFORE the auth attempt so the role is applied first (~85ms apply
+            # window observed on OKE; 250ms gives margin). NOT an auth retry — a wrong
+            # password still fast-fails; warm connects are never delayed; clamped to
+            # GW_WAKE_TIMEOUT_MS. Set to "0" to disable (accept the rare transient).
+            - name: GW_ROLE_APPLY_SETTLE_MS
+              value: "250"
+            - name: GW_MAX_CONNS
+              value: "90" # per compute; each app has its own compute so this is per-app
+            # Per-app WAKE budget (issue #116, ADR-0008): a token-bucket on the 0->1
+            # wake primitive, keyed per app (compute-<app>). The gateway holds NO
+            # tenant credentials (rule 5 / #117), so a syntactically-valid startup can
+            # wake a sleeping app before any password check — a cost/DoS side-channel.
+            # This caps it: an app gets GW_WAKE_BUDGET burst wakes that refill over
+            # GW_WAKE_WINDOW_MS; excess wakes are REFUSED (clean 53400, compute NOT
+            # scaled) and counted (pggw_wake_budget_exceeded_total -> WakeBudgetExceeded
+            # alert). 15/60s is generous headroom for a legit reconnect storm (a pod
+            # restart) — a real app wakes once then stays warm GW_IDLE_MS — while capping
+            # a malicious loop to ~1 wake/4s sustained instead of unbounded churn. The
+            # network-layer control (who can even reach pggw-apps) is #118 (needs a
+            # policy-capable CNI). Tune per docs/operations.md "Wake budget & wake
+            # side-channel (issue #116)".
+            - name: GW_WAKE_BUDGET
+              value: "15"
+            - name: GW_WAKE_WINDOW_MS
+              value: "60000"
+            - name: GW_PEER_SELECTOR
+              value: "app=pggw-apps" # peer-aware idle across the apps-gateway fleet only
+            - name: GW_POD_NAMESPACE
+              valueFrom: { fieldRef: { fieldPath: metadata.namespace } }
+            - name: GW_POD_IP
+              valueFrom: { fieldRef: { fieldPath: status.podIP } }
+            - name: GW_TLS_CERT_FILE # front-door TLS (issue #113): answer SSLRequest with 'S'
+              value: "/etc/pggw-tls/tls.crt" # both set+loadable -> TLS on the wire
+            - name: GW_TLS_KEY_FILE # sslmode=require works; sslmode=disable still allowed
+              value: "/etc/pggw-tls/tls.key" # shared pggw-tls Secret (deploy/gen-tls.sh)
+          volumeMounts:
+            - name: pggw-tls
+              mountPath: /etc/pggw-tls
+              readOnly: true
+          ports:
+            - { name: pg, containerPort: 55432 }
+            - { name: pg-ro, containerPort: 55434 } # per-app read-only lane (#127)
+            - { name: metrics, containerPort: 9090 }
+          readinessProbe:
+            httpGet: { path: /healthz, port: metrics }
+            initialDelaySeconds: 1
+            periodSeconds: 5
+          resources:
+            requests: { cpu: 50m, memory: 32Mi, ephemeral-storage: 100Mi }
+            limits: { memory: 128Mi, ephemeral-storage: 1Gi }
+      volumes:
+        - name: pggw-tls # self-signed keypair (deploy/gen-tls.sh); SANs cover pggw-apps
+          secret:
+            secretName: pggw-tls
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pggw-apps
+  namespace: scale-zero-pg
+  labels: { app: pggw-apps, tier: apps }
+spec:
+  # knext apps connect DATABASE_URL -> pggw-apps.scale-zero-pg.svc:55432 with the
+  # per-app database name; the gateway routes by {system}=database.
+  selector: { app: pggw-apps }
+  ports:
+    - { name: pg, port: 55432, targetPort: pg }
+    # Per-app read-only lane (#127): DATABASE_URL_RO -> pggw-apps:55434 with the
+    # per-app database name; the gateway routes reads to compute-ro-<app>.
+    - { name: pg-ro, port: 55434, targetPort: pg-ro }

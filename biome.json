@@ -18,7 +18,8 @@
       "!**/build",
       "!**/.cursor",
       "!**/_design-reference",
-      "!**/bun.lockb"
+      "!**/bun.lockb",
+      "!packages/scale-zero-pg/**"
     ]
   },
   "formatter": {

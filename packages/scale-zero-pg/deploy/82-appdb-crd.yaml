@@ -1,0 +1,156 @@
+# AppDatabase CRD — the v1.0 declarative provisioning interface (ADR-0004, #96).
+#
+# OWNER-RATIFIED 2026-07-04: BUILD the operator. An AppDatabase custom resource is
+# the source of truth for one branch-per-app database (ADR-0003); the appdb-operator
+# (deploy/83-appdb-operator.yaml) reconciles reality to match it — branch the shared
+# `apps` template timeline, render the per-app compute (Deployment + Service +
+# ConfigMap), mint the per-app credential Secret, and wire the apps-gateway routing.
+# This REIMPLEMENTS the proven imperative logic of deploy/provision-app.sh in Go; the
+# script remains as a break-glass / CI tool. See docs/adr-0004-provisioning-bless-or-build.md.
+#
+# Lifecycle: `kubectl apply` an AppDatabase -> operator provisions (phase Ready);
+# `kubectl delete appdatabase <name>` -> finalizer runs safe deprovision (two-sided
+# timeline delete on the pageserver + all safekeepers, unless keepTimelineOnDelete)
+# before the object is removed. Continuous reconciliation heals drift (a hand-deleted
+# Deployment is re-created; a missing branch is re-branched).
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: appdatabases.apps.scale-zero-pg.dev
+  labels: { tier: apps, plane: control }
+spec:
+  group: apps.scale-zero-pg.dev
+  scope: Namespaced
+  names:
+    kind: AppDatabase
+    listKind: AppDatabaseList
+    plural: appdatabases
+    singular: appdatabase
+    shortNames: [appdb]
+    categories: [all]
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - { name: App, type: string, jsonPath: .spec.appName }
+        - { name: Phase, type: string, jsonPath: .status.phase }
+        - { name: Secret, type: string, jsonPath: .status.secretName }
+        - { name: Timeline, type: string, jsonPath: .status.timelineId }
+        - { name: Ready, type: boolean, jsonPath: .status.computeReady }
+        - { name: Tier, type: string, jsonPath: .spec.tier }
+        - { name: Age, type: date, jsonPath: .metadata.creationTimestamp }
+      schema:
+        openAPIV3Schema:
+          type: object
+          required: [spec]
+          properties:
+            spec:
+              type: object
+              required: [appName]
+              properties:
+                appName:
+                  type: string
+                  description: >-
+                    RFC1123 DNS label; the DSN database name and the suffix of
+                    compute-<app>. Immutable after creation (a rename is a
+                    new app). Reserved names (tmpl/warm/ro) are rejected.
+                  pattern: '^[a-z0-9]([a-z0-9-]*[a-z0-9])?$'
+                  maxLength: 63
+                tier:
+                  type: string
+                  description: cold = scale-to-zero at rest (replicas 0); warm = keep one replica hot.
+                  enum: [cold, warm]
+                  default: cold
+                quotas:
+                  type: object
+                  description: Per-app noisy-neighbour bound (issue #89). Limits cap; requests default.
+                  properties:
+                    cpu:
+                      type: string
+                      description: CPU limit (e.g. "1000m"). Caps a hostile CPU burn to its allotment.
+                      default: "1000m"
+                    cpuRequest:
+                      type: string
+                      description: CPU request (scheduling floor).
+                      default: "250m"
+                    mem:
+                      type: string
+                      description: Memory limit (OOM bound, e.g. "1Gi").
+                      default: "1Gi"
+                    memRequest:
+                      type: string
+                      description: Memory request (scheduling floor).
+                      default: "256Mi"
+                    maxConnections:
+                      type: integer
+                      description: Postgres max_connections for this app's compute.
+                      default: 100
+                      minimum: 1
+                  default: {}
+                roPool:
+                  type: object
+                  description: >-
+                    Read-replica pool (read-scaling axis). When enabled, the operator
+                    emits a DATABASE_URL_RO key into the output Secret (the stable
+                    external-driver contract knext maps from NextApp.spec.database.
+                    readReplicas). The per-app RO SERVING endpoint (apps-gateway RO
+                    listener + per-app RO computes) is a tracked read-scaling/gateway
+                    follow-up — see docs/appdatabase-api.md and docs/operations.md.
+                  properties:
+                    enabled: { type: boolean, default: false }
+                    minReplicas: { type: integer, default: 0, minimum: 0 }
+                    maxReplicas: { type: integer, default: 3, minimum: 0 }
+                  default: {}
+                keepTimelineOnDelete:
+                  type: boolean
+                  description: >-
+                    When true, `kubectl delete` removes the k8s objects but RETAINS the
+                    Neon timeline (PITR/forensics) as an orphan — reclaim it later with
+                    `provision-app.sh reclaim-orphans`. Default false = safe two-sided
+                    timeline delete (no orphan branch, no unbounded safekeeper WAL).
+                  default: false
+            status:
+              type: object
+              properties:
+                phase:
+                  type: string
+                  description: Provisioning | Ready | Failed | Deleting
+                  enum: [Provisioning, Ready, Failed, Deleting]
+                secretName:
+                  type: string
+                  description: >-
+                    The output credential Secret an external driver reads/mirrors
+                    (app-db-<appName>): keys PGUSER, PGPASSWORD, APP_ROLE_VERIFIER,
+                    DATABASE_URL, and DATABASE_URL_RO (only when spec.roPool.enabled).
+                    Part of the external-driver contract — see docs/appdatabase-api.md.
+                timelineId:
+                  type: string
+                  description: The app's Neon timeline id (the durable owner of record). Minted once, fresh per lifecycle.
+                ancestorLsn:
+                  type: string
+                  description: >-
+                    The template last_record_lsn this app branched from (its ancestor
+                    point). Compared against the template's remote_consistent_lsn to
+                    decide the ColdRestorable condition (docs/runbook-dr.md §9d-bis).
+                computeReady:
+                  type: boolean
+                  description: true iff the app's compute Deployment has >=1 available replica.
+                message:
+                  type: string
+                observedGeneration:
+                  type: integer
+                  format: int64
+                conditions:
+                  type: array
+                  items:
+                    type: object
+                    required: [type, status]
+                    properties:
+                      type: { type: string }
+                      status: { type: string, enum: ["True", "False", "Unknown"] }
+                      reason: { type: string }
+                      message: { type: string }
+                      lastTransitionTime: { type: string, format: date-time }

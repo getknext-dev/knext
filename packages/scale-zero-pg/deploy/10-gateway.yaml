@@ -1,0 +1,163 @@
+# Wake-on-connect gateway: the only always-on component on the connection
+# path. Scales horizontally (stateless); wakes the compute deployment via the
+# scale subresource, so RBAC is the minimum for that one verb pair.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: pggw
+  namespace: scale-zero-pg
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: pggw-scaler
+  namespace: scale-zero-pg
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments/scale"]
+    verbs: ["get", "patch", "update"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list"]
+  - apiGroups: [""] # peer-aware idle: find sibling gateway pods;
+    # list/get for peer + warmpool single-writer check (count cold pods incl
+    # Terminating); delete for warmpool re-park (Sleep deletes the warm pod so
+    # the Deployment respawns a freshly-gated one).
+    resources: ["pods"]
+    verbs: ["get", "list", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: pggw-scaler
+  namespace: scale-zero-pg
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: pggw-scaler
+subjects:
+  - kind: ServiceAccount
+    name: pggw
+    namespace: scale-zero-pg
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pggw
+  namespace: scale-zero-pg
+  labels: { app: pggw }
+spec:
+  replicas: 2 # no-SPOF; peer-aware idle keeps the sleep decision fleet-safe
+  selector:
+    matchLabels: { app: pggw }
+  template:
+    metadata:
+      labels: { app: pggw }
+    spec:
+      imagePullSecrets:
+        - name: ocir-pull
+      serviceAccountName: pggw
+      containers:
+        - name: gateway
+          image: me-abudhabi-1.ocir.io/axfqznklsd2t/ks-pg/gateway:v0.6.1@sha256:12a735337adcd2470fe834557ad7ab298d20a35e2113b80669211324f28a0ccb # OCIR, digest-pinned (issue #56); v0.6.0 RELEASE build (issues #78/#82) — supersedes iter9-ro-ef543a5; includes the RO-pool lane (#66) + branch-per-app (#6)
+          imagePullPolicy: IfNotPresent
+          # OCIR is private: ocir-pull secret created by deploy/gen-secrets.sh
+          env:
+            - name: GW_PORT
+              value: "55432"
+            - name: GW_METRICS_PORT
+              value: "9090"
+            - name: GW_COMPUTE_MODE
+              value: "kubectl" # scales deployments via the API server (in-cluster config)
+            - name: GW_K8S_NAMESPACE
+              value: "scale-zero-pg"
+            - name: GW_K8S_DEPLOYMENT
+              value: "compute"
+            - name: GW_TARGET
+              value: "compute.scale-zero-pg.svc:55433"
+            # Read-only pool lane (issue #66): a second listener that routes the
+            # DATABASE_URL_RO DSN to the compute-ro pool (0->N->0). Reuses the
+            # same RBAC (deployments/scale), TLS, and idle machinery. Remove
+            # GW_RO_PORT to disable the RO lane entirely.
+            - name: GW_RO_PORT
+              value: "55434"
+            - name: GW_RO_DEPLOYMENT
+              value: "compute-ro"
+            - name: GW_RO_TARGET
+              value: "compute-ro.scale-zero-pg.svc:55433"
+            - name: GW_RO_WAKE_REPLICAS
+              value: "1" # wake brings 1 replica online; HPA (deploy/27) grows N under load
+            - name: GW_RO_IDLE_MS
+              value: "60000" # RO pool idle window; set 0 if an HPA owns compute-ro (deploy/27 posture B)
+            - name: GW_IDLE_MS
+              value: "60000" # demo-friendly idle window; production: 300000+
+            - name: GW_WAKE_TIMEOUT_MS
+              value: "120000" # first wake on a cluster may pull the compute image
+            - name: GW_RETRY_MS
+              value: "100" # tight connect-poll: shaves ~150ms avg off wake
+            - name: GW_MAX_CONNS
+              value: "90" # MUST stay under compute max_connections=100 (see compute-files/README.md); excess gets a clean 53300
+            - name: GW_PEER_SELECTOR
+              value: "app=pggw" # peer-aware idle: sleep only when fleet-wide zero
+            - name: GW_POD_NAMESPACE
+              valueFrom: { fieldRef: { fieldPath: metadata.namespace } }
+            - name: GW_POD_IP
+              valueFrom: { fieldRef: { fieldPath: status.podIP } }
+            - name: GW_TLS_CERT_FILE # front-door TLS: answer SSLRequest with 'S'
+              value: "/etc/pggw-tls/tls.crt" # both set+loadable -> TLS on the wire
+            - name: GW_TLS_KEY_FILE # sslmode=require works; sslmode=disable still allowed
+              value: "/etc/pggw-tls/tls.key" # generate the Secret via deploy/gen-tls.sh
+          volumeMounts:
+            - name: pggw-tls
+              mountPath: /etc/pggw-tls
+              readOnly: true
+          ports:
+            - { name: pg, containerPort: 55432 }
+            - { name: ro-pg, containerPort: 55434 } # read-only pool DSN (issue #66)
+            - { name: metrics, containerPort: 9090 }
+          readinessProbe:
+            httpGet: { path: /healthz, port: metrics }
+            initialDelaySeconds: 1
+            periodSeconds: 5
+          resources:
+            requests: { cpu: 50m, memory: 32Mi, ephemeral-storage: 100Mi }
+            limits: { memory: 128Mi, ephemeral-storage: 1Gi }
+      volumes:
+        - name: pggw-tls # self-signed keypair; create with deploy/gen-tls.sh
+          secret:
+            secretName: pggw-tls
+---
+# Internal service: the stable in-cluster name every consumer uses —
+# knext apps (DATABASE_URL -> pggw.scale-zero-pg.svc:55432), peer gateways and
+# Prometheus scraping metrics (pggw:9090), and deploy/_metrics.sh. ClusterIP on
+# purpose: metrics (9090) are reachable in-cluster but NEVER via an external
+# LoadBalancer (system-design-review finding #4 — metrics must not leak).
+apiVersion: v1
+kind: Service
+metadata:
+  name: pggw
+  namespace: scale-zero-pg
+  labels: { app: pggw }
+spec:
+  type: ClusterIP
+  selector: { app: pggw }
+  ports:
+    - { name: pg, port: 55432, targetPort: pg }
+    - { name: ro-pg, port: 55434, targetPort: ro-pg } # DATABASE_URL_RO (issue #66)
+    - { name: metrics, port: 9090, targetPort: metrics }
+---
+# External front door: exposes ONLY the Postgres wire port. 9090 is deliberately
+# absent so metrics cannot be reached from outside the cluster. OrbStack surfaces
+# this on localhost; in a real cluster front it with TLS termination.
+apiVersion: v1
+kind: Service
+metadata:
+  name: pggw-lb
+  namespace: scale-zero-pg
+  labels: { app: pggw }
+spec:
+  type: LoadBalancer
+  selector: { app: pggw }
+  ports:
+    - { name: pg, port: 55432, targetPort: pg }
+    - { name: ro-pg, port: 55434, targetPort: ro-pg } # DATABASE_URL_RO (issue #66)

@@ -1,0 +1,98 @@
+# The SAME gateway binary (scale-zero-pg/gateway:dev), re-based into
+# scale-zero-pg/gateway-exec:dev (adds sh+kubectl; binary byte-identical — see
+# bakeoff/gateway-exec.Dockerfile), fronting the CNPG foundation in *exec* mode.
+#
+# Wake  = un-hibernate the CNPG cluster (operator recreates pod + attaches PVC).
+# Sleep = hibernate it after GW_IDLE_MS with no connections.
+# Target = the CNPG primary read-write service.
+#
+# This proves the review's claim: one gateway, two foundations, zero source
+# changes — only the driver MODE and the wake/sleep commands differ.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: pggw-exec
+  namespace: bakeoff-cnpg
+---
+# Minimal RBAC: annotate (patch) the one CNPG Cluster to toggle hibernation.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: pggw-exec-hibernator
+  namespace: bakeoff-cnpg
+rules:
+  - apiGroups: ["postgresql.cnpg.io"]
+    resources: ["clusters"]
+    verbs: ["get", "list", "patch", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: pggw-exec-hibernator
+  namespace: bakeoff-cnpg
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: pggw-exec-hibernator
+subjects:
+  - kind: ServiceAccount
+    name: pggw-exec
+    namespace: bakeoff-cnpg
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pggw
+  namespace: bakeoff-cnpg
+  labels: { app: pggw }
+spec:
+  replicas: 1 # bake-off: single replica; peer-aware idle not needed here
+  selector:
+    matchLabels: { app: pggw }
+  strategy: { type: Recreate }
+  template:
+    metadata:
+      labels: { app: pggw }
+    spec:
+      serviceAccountName: pggw-exec
+      containers:
+        - name: gateway
+          image: scale-zero-pg/gateway-exec:dev # identical binary + sh + kubectl
+          imagePullPolicy: IfNotPresent
+          env:
+            - { name: GW_PORT, value: "55432" }
+            - { name: GW_METRICS_PORT, value: "9090" }
+            - { name: GW_COMPUTE_MODE, value: "exec" }
+            - { name: GW_TARGET, value: "pg-rw.bakeoff-cnpg.svc:5432" }
+            # Wake/sleep = toggle CNPG declarative hibernation via kubectl
+            # (in-cluster SA config is picked up automatically).
+            - name: GW_WAKE_CMD
+              value: "kubectl annotate --overwrite cluster/pg -n bakeoff-cnpg cnpg.io/hibernation=off"
+            - name: GW_SLEEP_CMD
+              value: "kubectl annotate --overwrite cluster/pg -n bakeoff-cnpg cnpg.io/hibernation=on"
+            - { name: GW_IDLE_MS, value: "60000" } # match the Neon side's demo idle
+            - { name: GW_WAKE_TIMEOUT_MS, value: "120000" } # un-hibernate is slow (~13s+)
+            - { name: GW_RETRY_MS, value: "250" }
+          ports:
+            - { name: pg, containerPort: 55432 }
+            - { name: metrics, containerPort: 9090 }
+          readinessProbe:
+            httpGet: { path: /healthz, port: metrics }
+            initialDelaySeconds: 1
+            periodSeconds: 5
+          resources:
+            requests: { cpu: 50m, memory: 32Mi }
+            limits: { memory: 128Mi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pggw
+  namespace: bakeoff-cnpg
+  labels: { app: pggw }
+spec:
+  type: ClusterIP # harness connects from an in-cluster client pod
+  selector: { app: pggw }
+  ports:
+    - { name: pg, port: 55432, targetPort: pg }
+    - { name: metrics, port: 9090, targetPort: metrics }

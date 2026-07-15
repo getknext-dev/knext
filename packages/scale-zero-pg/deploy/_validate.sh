@@ -1,0 +1,650 @@
+#!/bin/sh
+# Validation for deploy/ manifests: server-side dry-run against the current
+# kube context, plus contract checks the YAML must satisfy. Run from repo root
+# or deploy/. Exits non-zero on any failure.
+set -eu
+cd "$(dirname "$0")"
+
+fail() { echo "FAIL: $*" >&2; exit 1; }
+ok() { echo "ok - $*"; }
+
+# Canonical sha256 of the prometheus-config ConfigMap DATA (prometheus.yml + rules.yml)
+# in 60-prometheus.yaml — the SINGLE SOURCE OF TRUTH for the auto-reload config-hash
+# annotation (issue #155). The pod-template annotation ks-pg.dev/prometheus-config-sha256
+# must equal this value; contract 27 enforces it, and `./_validate.sh prom-config-hash`
+# prints it so a human can regenerate the annotation after editing the rules. Offline
+# (no cluster / no pyyaml): extracts the two block-scalar keys with an indent-aware parser
+# and hashes their dedented content in sorted-key order.
+prom_config_hash() {
+  python3 - "$1" <<'PY'
+import hashlib, re, sys
+text = open(sys.argv[1]).read()
+cm = None
+for d in re.split(r'(?m)^---\s*$', text):
+    if re.search(r'(?m)^kind:\s*ConfigMap\s*$', d) and 'name: prometheus-config' in d:
+        cm = d; break
+if cm is None:
+    sys.stderr.write("prom-config-hash: no prometheus-config ConfigMap in 60-prometheus.yaml\n"); sys.exit(3)
+lines = cm.splitlines(); data = {}; i = 0
+while i < len(lines):
+    m = re.match(r'^  ([^\s:]+):\s*\|\s*$', lines[i])  # 2-space key whose value is a literal block
+    if m:
+        key = m.group(1); i += 1; block = []
+        while i < len(lines) and (lines[i].strip() == '' or lines[i].startswith('    ')):
+            block.append(lines[i][4:] if lines[i].startswith('    ') else '')
+            i += 1
+        data[key] = "\n".join(block); continue
+    i += 1
+if not data:
+    sys.stderr.write("prom-config-hash: no data block-scalars found\n"); sys.exit(3)
+canon = "".join("%s\n%s\n" % (k, data[k]) for k in sorted(data))
+sys.stdout.write(hashlib.sha256(canon.encode()).hexdigest())
+PY
+}
+
+# Subcommand: print the prometheus config-hash and exit (offline; regenerates the
+# annotation after a rules edit — `./_validate.sh prom-config-hash`).
+if [ "${1:-}" = "prom-config-hash" ]; then
+  prom_config_hash 60-prometheus.yaml; echo; exit 0
+fi
+
+command -v kubectl >/dev/null || fail "kubectl not found"
+
+# 1. every manifest must dry-run apply cleanly (server-side validation).
+# The namespace is applied for real first: namespaced dry-runs need it to
+# exist, and this cluster is the demo target anyway.
+kubectl apply -f 00-namespace.yaml >/dev/null || fail "namespace apply failed"
+ok "00-namespace.yaml applied"
+for f in [0-9][0-9]-*.yaml; do
+  [ -e "$f" ] || fail "no numbered manifests found in deploy/"
+  [ "$f" = 00-namespace.yaml ] && continue
+  # Doc-only manifests carry ONLY comments (no k8s objects) — e.g. 30-knext-secret.yaml,
+  # whose base DATABASE_URL Secret is now owned by gen-secrets.sh (issue #168). A
+  # server dry-run of a comment-only file errors "no objects passed to apply"; that is
+  # not a defect, so skip cleanly when the file declares no apiVersion.
+  grep -q '^apiVersion:' "$f" || { ok "$f is doc-only (no k8s objects; owned by gen-secrets.sh)"; continue; }
+  # Capture stderr (stdout discarded). On success this is empty and we move on.
+  if err="$(kubectl apply --dry-run=server -f "$f" 2>&1 >/dev/null)"; then
+    ok "$f validates (server dry-run)"
+    continue
+  fi
+  # #126: server dry-run REJECTS a re-apply that touches an immutable field on an
+  # ALREADY-APPLIED object — e.g. the completed storage-init Job (immutable
+  # spec.template/selector). That is not a manifest defect, but the old `|| fail`
+  # ABORTED the whole loop there, so the later manifests (notably 82/83, the
+  # AppDatabase CRD + operator) were NEVER validated — the guard that should have
+  # caught the #125 placeholder digest. Fall back to CLIENT dry-run (schema
+  # validation) for the immutable case so validation continues and still checks
+  # the YAML is well-formed.
+  if printf '%s' "$err" | grep -qi 'immutable'; then
+    kubectl apply --dry-run=client -f "$f" >/dev/null 2>&1 \
+      || fail "$f does not validate (client dry-run after immutable server-side reject): $err"
+    ok "$f validates (client dry-run; server rejects an immutable field on the live object — #126)"
+    continue
+  fi
+  fail "$f does not validate: $err"
+done
+
+# 2. contract: compute deployment must start at zero replicas
+grep -q 'replicas: 0' 20-compute.yaml || fail "20-compute.yaml must set replicas: 0"
+ok "compute starts at zero"
+
+# 2b. contract: the read-only pool (issue #66) starts at zero and the gateway
+#     serves a second RO DSN lane pointed at it.
+grep -q 'replicas: 0' 26-compute-ro.yaml || fail "26-compute-ro.yaml must set replicas: 0"
+grep -q 'name: compute-ro' 26-compute-ro.yaml || fail "26-compute-ro.yaml missing the compute-ro Service"
+grep -q 'GW_RO_PORT' 10-gateway.yaml || fail "10-gateway.yaml missing GW_RO_PORT (RO pool lane)"
+grep -q 'GW_RO_DEPLOYMENT' 10-gateway.yaml || fail "10-gateway.yaml missing GW_RO_DEPLOYMENT"
+ok "read-only pool starts at zero + gateway RO lane wired (GW_RO_PORT -> compute-ro)"
+
+# 2c. contract: the read-scaling HPA (issue #99 GA) is a real, valid manifest but
+#     lives under deploy/optional/ so the default `kubectl apply -f deploy/`
+#     (non-recursive) never floors compute-ro at 1 — scale-to-zero stays default.
+HPA=optional/27-compute-ro-hpa.yaml
+[ -f "$HPA" ] || fail "$HPA missing (read-scaling HPA must ship as a real .yaml, not .optional)"
+[ -e 27-compute-ro-hpa.yaml.optional ] && fail "stale 27-compute-ro-hpa.yaml.optional present — GA'd file moved to $HPA"
+[ -e 27-compute-ro-hpa.yaml ] && fail "27-compute-ro-hpa.yaml must live under optional/ (else -f deploy/ auto-applies it)"
+kubectl apply --dry-run=server -f "$HPA" >/dev/null || fail "$HPA does not validate"
+grep -q 'name: compute-ro' "$HPA" || fail "$HPA must target the compute-ro deployment"
+grep -q 'minReplicas: 1' "$HPA" || fail "$HPA posture B must set minReplicas: 1"
+ok "read-scaling HPA ships under optional/ (opt-in, valid, targets compute-ro)"
+
+# 3. contract: gateway RBAC may scale deployments (scale subresource)
+grep -q 'deployments/scale' 10-gateway.yaml || fail "gateway RBAC lacks deployments/scale"
+ok "gateway RBAC includes deployments/scale"
+
+# 4. contract: gateway runs in kubectl mode against the compute deployment
+grep -q 'GW_COMPUTE_MODE' 10-gateway.yaml || fail "gateway env GW_COMPUTE_MODE missing"
+ok "gateway wake mode configured"
+
+# 5. contract: knext consumes the DB only via a DATABASE_URL secret
+grep -q 'DATABASE_URL' 30-knext-secret.yaml || fail "knext secret lacks DATABASE_URL"
+ok "knext DATABASE_URL secret present"
+
+# 6. contract: every storage pod must declare a liveness probe (a hung — not
+#    crashed — pageserver/safekeeper must be restarted, not silently stalled).
+for f in 50-minio.yaml 51-storage-broker.yaml 52-safekeeper.yaml 53-pageserver.yaml; do
+  grep -q 'livenessProbe:' "$f" || fail "$f lacks a livenessProbe"
+done
+ok "storage pods declare liveness probes"
+
+# 7. contract: every storage pod must set resource requests AND limits (no
+#    BestEffort QoS on the durability tier — one hog must not evict the plane).
+for f in 50-minio.yaml 51-storage-broker.yaml 52-safekeeper.yaml 53-pageserver.yaml; do
+  grep -q 'requests:' "$f" || fail "$f lacks resource requests"
+  grep -q 'limits:' "$f"   || fail "$f lacks resource limits"
+done
+ok "storage pods set resource requests + limits"
+
+# 8. contract: storage + compute cap ReplicaSet/controller history (no churn).
+for f in 20-compute.yaml 26-compute-ro.yaml 50-minio.yaml 51-storage-broker.yaml 52-safekeeper.yaml 53-pageserver.yaml; do
+  grep -q 'revisionHistoryLimit:' "$f" || fail "$f lacks revisionHistoryLimit"
+done
+ok "compute + storage cap controller revision history"
+
+# 9. contract: storage pods harden the securityContext (drop caps / no priv-esc /
+#    seccomp; neon images run as uid 1000 so runAsNonRoot is safe there).
+for f in 50-minio.yaml 51-storage-broker.yaml 52-safekeeper.yaml 53-pageserver.yaml; do
+  grep -q 'securityContext:' "$f" || fail "$f lacks a securityContext"
+done
+ok "storage pods set a hardened securityContext"
+
+# 10. contract: PodDisruptionBudgets guard the safekeeper quorum + pageserver.
+grep -q 'kind: PodDisruptionBudget' 56-pdb.yaml || fail "56-pdb.yaml missing PDBs"
+grep -q 'minAvailable: 2' 56-pdb.yaml || fail "safekeeper PDB must keep minAvailable: 2 (quorum)"
+ok "56-pdb.yaml guards safekeeper quorum + pageserver"
+
+# 11. contract: a minimal in-cluster Prometheus scrapes the gateway FAMILY and
+#     ships the review's three alerts (wake failures, wake latency, phantom keepalive).
+grep -q 'prom/prometheus' 60-prometheus.yaml || fail "60-prometheus.yaml lacks a pinned prometheus image"
+grep -q 'pggw_wake_failures_total' 60-prometheus.yaml || fail "60-prometheus.yaml missing wake-failure alert"
+grep -q 'pggw_wake_latency_ms_last' 60-prometheus.yaml || fail "60-prometheus.yaml missing wake-latency alert"
+grep -q 'PhantomKeepalive' 60-prometheus.yaml || fail "60-prometheus.yaml missing phantom-keepalive alert"
+# #80: the scrape keep MUST cover the apps-gateway (pggw-apps), not exact `pggw` only —
+# otherwise the entire branch-per-app plane + per-app computes emit metrics no rule sees.
+grep -q 'regex: pggw(-apps)?' 60-prometheus.yaml || fail "60-prometheus.yaml scrape keep must be 'pggw(-apps)?' to cover the apps-gateway (#80)"
+grep -q 'target_label: gateway' 60-prometheus.yaml || fail "60-prometheus.yaml must carry a per-plane 'gateway' label (#80)"
+# #80: multi-tenant / read-pool compute wake alerts must exist.
+for a in ComputeWakeStuckApps ComputeRoPoolStuck ComputeStuckNotReady; do
+  grep -q "alert: $a" 60-prometheus.yaml || fail "60-prometheus.yaml missing $a alert (#80)"
+done
+# ComputeWakeStuck (single-DB) must be scoped to gateway=pggw so apps traffic can't trip it.
+grep -q 'pggw_active_connections{gateway="pggw"}' 60-prometheus.yaml || fail "60 ComputeWakeStuck must scope its connection sum to gateway=\"pggw\" (#80)"
+# #116/ADR-0008: the per-app WAKE budget must be configured on the apps-gateway AND
+# alerted on. The budget caps the unauthenticated wake side-channel; a missing env or
+# alert re-opens the cost/DoS vector silently.
+grep -q 'GW_WAKE_BUDGET' 81-apps-gateway.yaml || fail "81-apps-gateway.yaml must set GW_WAKE_BUDGET — the #116 per-app wake budget (ADR-0008)"
+grep -q 'alert: WakeBudgetExceeded' 60-prometheus.yaml || fail "60-prometheus.yaml missing WakeBudgetExceeded alert (#116) — the wake side-channel would be unmonitored"
+grep -q 'pggw_wake_budget_exceeded_total{gateway="pggw-apps"}' 60-prometheus.yaml || fail "60 WakeBudgetExceeded must scope to gateway=\"pggw-apps\" (the single-DB gateway runs no budget)"
+ok "60-prometheus.yaml scrapes the gateway family (pggw + pggw-apps) + ships the review alerts + multi-tenant/read-pool wake alerts (#80) + the #116 wake-budget alert"
+
+# 12. contract: storage S3/root credentials come from a Secret, never plaintext
+#     YAML. No `value: password`/`value: minio` literals; secretKeyRef present.
+for f in 50-minio.yaml 52-safekeeper.yaml 53-pageserver.yaml; do
+  grep -q 'secretKeyRef' "$f" || fail "$f must source S3 creds via secretKeyRef"
+  grep -qE 'value:[[:space:]]*(password|minio)[[:space:]]*(#.*)?$' "$f" \
+    && fail "$f still carries a plaintext S3 credential value"
+done
+grep -q 'storage-s3-creds' 50-minio.yaml || fail "50-minio.yaml must reference the storage-s3-creds Secret"
+ok "storage S3 creds sourced from Secret (no plaintext in 50/52/53)"
+
+# 13. contract: credential-provisioning + PV-hardening scripts exist.
+[ -f gen-secrets.sh ] || fail "gen-secrets.sh missing"
+grep -q 'storage-s3-creds' gen-secrets.sh || fail "gen-secrets.sh must manage the storage-s3-creds Secret"
+[ -f harden-pvs.sh ] || fail "harden-pvs.sh missing"
+grep -q 'Retain' harden-pvs.sh || fail "harden-pvs.sh must set Retain reclaim policy"
+ok "gen-secrets.sh + harden-pvs.sh present"
+
+echo "deploy validation: all checks passed"
+
+# 12. contract: compute and storage are a VERSION PAIR (ADR-0002 kill-criterion
+#     #3; the pageserver wire protocol has no cross-version guarantee). A tag
+#     drift anywhere fails the build.
+CT=$(grep -o 'neondatabase/compute-node-v[0-9]*:[a-z0-9.]*' 20-compute.yaml | head -1 | cut -d: -f2)
+for f in 51-storage-broker.yaml 52-safekeeper.yaml 53-pageserver.yaml 55-storage-init.yaml 57-pageserver-standby.yaml 26-compute-ro.yaml; do
+  for st in $(grep -o 'neondatabase/neon:[a-z0-9.]*' "$f" | cut -d: -f2 | sort -u); do
+    [ "$st" = "$CT" ] || fail "version-pair drift: $f uses neon:$st but compute is :$CT"
+  done
+  for ct in $(grep -o 'neondatabase/compute-node-v[0-9]*:[a-z0-9.]*' "$f" | cut -d: -f2 | sort -u); do
+    [ "$ct" = "$CT" ] || fail "version-pair drift: $f uses compute-node:$ct but writer is :$CT"
+  done
+done
+[ -n "$CT" ] || fail "could not extract compute tag from 20-compute.yaml"
+ok "compute↔storage version pair consistent (:$CT everywhere)"
+
+# 13. contract: every long-running pod declares ephemeral-storage requests
+#     (incident 2026-07-03: pods without them were kubelet's preferred
+#     eviction targets during DiskPressure - the storage plane died first).
+for f in 10-gateway.yaml 20-compute.yaml 25-compute-warm.yaml 26-compute-ro.yaml 50-minio.yaml 51-storage-broker.yaml 52-safekeeper.yaml 53-pageserver.yaml 57-pageserver-standby.yaml 58-pswatcher.yaml 59-kube-state-metrics.yaml 60-prometheus.yaml 61-alertmanager.yaml 62-backup.yaml; do
+  # must be under requests: (eviction ordering ranks on requests, not limits)
+  grep -E 'requests: \{[^}]*ephemeral-storage' "$f" >/dev/null || fail "$f lacks ephemeral-storage under requests:"
+done
+ok "all long-running pods declare ephemeral-storage REQUESTS (incl. backup mirror)"
+
+# 13b. contract: the RO read-pool ephemeral-storage is SIZED for load (issue #121).
+#      At the old 1Gi limit the kubelet evicted compute-ro pods under sustained read
+#      load (LFC + pg_wal + temp spill all live on the pod's ephemeral fs), so the
+#      read-scaling axis flapped. The limit must be raised WELL above 1Gi and the
+#      request set realistically so a loaded pod is not the first eviction target.
+grep -qE 'ephemeral-storage: 1Gi' 26-compute-ro.yaml && fail "26-compute-ro still caps ephemeral-storage at 1Gi — the RO pool evicts under load (issue #121); raise the limit + set a realistic request"
+grep -qE 'limits: \{[^}]*ephemeral-storage: (4|8|16)Gi' 26-compute-ro.yaml || fail "26-compute-ro must raise the ephemeral-storage LIMIT (>=4Gi) so a loaded read replica is not evicted (issue #121)"
+grep -qE 'requests: \{[^}]*ephemeral-storage: (2|4|8)Gi' 26-compute-ro.yaml || fail "26-compute-ro must set a REALISTIC ephemeral-storage REQUEST (>=2Gi) so loaded RO pods aren't the first eviction target (issue #121)"
+ok "RO read-pool ephemeral-storage sized for sustained load (request>=2Gi, limit>=4Gi) — no flap (issue #121)"
+
+# 14. contract: automated pageserver failover (issue #3) — a standing warm
+#     Secondary standby + a watcher that promotes it. The SPOF is only bounded
+#     if BOTH ship: the standby holds warm layers, the watcher drives the flip.
+grep -q 'kind: StatefulSet' 57-pageserver-standby.yaml || fail "57 missing the standby StatefulSet"
+grep -q '"mode":"Secondary"' 57-pageserver-standby.yaml || fail "57 standby-init must register a warm Secondary"
+grep -q 'name: pageserver-primary' 57-pageserver-standby.yaml || fail "57 missing stable pageserver-primary liveness Service"
+grep -q 'name: pageserver-generation' 57-pageserver-standby.yaml || fail "57 missing the generation ledger ConfigMap"
+grep -q '/pswatcher' 58-pswatcher.yaml || fail "58 must run the /pswatcher binary (not /gateway)"
+grep -q 'PSW_STANDBY_SELECTOR_APP' 58-pswatcher.yaml || fail "58 watcher missing the standby selector-flip target"
+# the watcher's RBAC must be able to flip the Service and bounce the compute.
+grep -q 'services' 58-pswatcher.yaml || fail "58 watcher RBAC lacks services (selector flip)"
+ok "automated failover ships: warm-Secondary standby (57) + auto-failover watcher (58)"
+
+# 15. contract: the backup target is OFF-CLUSTER OCI Object Storage (issue #4),
+#     NOT the retired in-cluster backup-store PVC. The mirror must authenticate
+#     dst from the backup-s3-target Secret and must not reintroduce backup-store.
+grep -q 'backup-s3-target' 62-backup.yaml || fail "62 backup mirror must read the backup-s3-target Secret (off-cluster dst)"
+grep -q 'api S3v4' 62-backup.yaml || fail "62 backup mirror must use S3v4 for the OCI S3-compat endpoint"
+grep -q 'kind: PersistentVolumeClaim' 62-backup.yaml && fail "62 must NOT declare a PVC — backup-store is retired (off-cluster OCI OS)"
+# reintroduction guard: the backup-store WORKLOAD (Service endpoint / resource
+# name), not the migration note that tells operators to delete it.
+grep -qE 'backup-store:9000|name: backup-store' 62-backup.yaml && fail "62 still runs the backup-store workload — it is retired (issue #4)"
+ok "backup target is off-cluster OCI Object Storage (backup-store retired)"
+
+# 15b. contract: the backup SOURCE store is CONFIGURABLE (issue #120), NOT pinned to
+#      minio:9000. GA #105 made the pageserver/safekeeper offload backend swappable
+#      (S3/OCI/Ceph, MinIO optional); the backup Job + wal-janitor MUST follow the
+#      SAME storage-objstore ConfigMap for their `src` alias. Before #120 both
+#      hardcoded `mc alias set src http://minio:9000`, so a non-MinIO deployment had
+#      NO backup (mirror can't reach a `minio` service) AND leaked safekeeper WAL
+#      unbounded (janitor pruned a store that wasn't there) — the #105 portability
+#      claim only half-delivered.
+grep -qE 'mc alias set src[[:space:]]+http://minio:9000' 62-backup.yaml && fail "62 backup/wal-janitor still hardcode 'src http://minio:9000' — parameterize the LIVE store via storage-objstore (issue #120); a non-MinIO backend has no backup + leaks WAL"
+# both the mirror AND the wal-janitor prune container must envFrom storage-objstore
+# (2 references) and build the src alias from OBJSTORE_ENDPOINT.
+[ "$(grep -c 'configMapRef: { name: storage-objstore }' 62-backup.yaml)" -ge 2 ] || fail "62 backup mirror AND wal-janitor must BOTH source the live object store from the storage-objstore ConfigMap (issue #120) — expected >=2 envFrom refs"
+grep -q 'mc alias set src "$OBJSTORE_ENDPOINT"' 62-backup.yaml || fail "62 must build the backup/janitor 'src' alias from OBJSTORE_ENDPOINT (storage-objstore), not a hardcoded endpoint (issue #120)"
+grep -q 'src/$OBJSTORE_BUCKET' 62-backup.yaml || fail "62 must resolve the live-store bucket path from OBJSTORE_BUCKET, not a hardcoded 'neon' bucket (issue #120)"
+ok "backup + wal-janitor SOURCE the live object store from storage-objstore — portable to any S3 backend (issue #120)"
+
+# 16. contract: a WAL janitor bounds safekeeper WAL accumulation (issue #19), and
+#     the backup path self-heals a torn pageserver index (issue #21).
+#     SAFETY: the janitor must prune only WAL strictly BELOW a horizon measured
+#     from remote_consistent_lsn (provably ingested + uploaded), keep a
+#     KEEP_SEGMENTS margin above what the writable restore re-seeds, and must
+#     NEVER delete the live durability tail (.partial segments / segments at or
+#     above the horizon). The backup must verify index_part.json is intact so a
+#     torn index can no longer ship.
+grep -q 'name: wal-janitor' 62-backup.yaml || fail "62 missing the wal-janitor CronJob (issue #19)"
+# issues #90/#87: the apps-tenant orphaned-WAL fail-safe must be MONITORED, not just
+# WARNed on. The apps-wal-monitor CronJob measures orphan WAL dirs (safekeeper-present,
+# pageserver-404) + safekeeper /data utilization and fails its Job to surface the alert.
+grep -q 'name: apps-wal-monitor' 62-backup.yaml || fail "62 missing the apps-wal-monitor CronJob (issues #90/#87) — orphan WAL residue + SK PV growth must be monitored"
+grep -q 'df -P /data' 62-backup.yaml || fail "62 apps-wal-monitor must check safekeeper PV utilization (df /data) for ENOSPC early-warning (#90)"
+grep -q 'KEEP_SEGMENTS' 62-backup.yaml || fail "62 wal-janitor must expose a KEEP_SEGMENTS safety horizon"
+grep -q 'remote_consistent_lsn' 62-backup.yaml || fail "62 wal-janitor must derive its prune threshold from remote_consistent_lsn"
+grep -q 'partial' 62-backup.yaml || fail "62 wal-janitor must exclude .partial WAL (the live durability tail)"
+grep -q 'index_part.json' 62-backup.yaml || fail "62 backup must verify pageserver index integrity post-mirror (issue #21)"
+# issue #42: the prune threshold's TLI must be DERIVED from the segment names, not
+# hardcoded to 1 (a promotion bumps the TLI and a TLI=1 threshold silently stops
+# pruning). Assert the hardcode is gone, the derivation is present, and the janitor
+# fails LOUD (not exit-0-having-pruned-nothing) if the bucket listing errors.
+grep -qE "printf '%08X%08X%08X' 1 " 62-backup.yaml && fail "62 wal-janitor still hardcodes TLI=1 in the prune threshold (issue #42) — derive it from the segment set"
+grep -q 'threshold_suffix' 62-backup.yaml || fail "62 wal-janitor must emit a TLI-independent LOGID+SEG threshold_suffix (issue #42)"
+grep -q 'cut -c1-8' 62-backup.yaml || fail "62 wal-janitor must derive the timeline id(s) from the 24-hex segment names (issue #42)"
+grep -q 'mc ls failed' 62-backup.yaml || fail "62 wal-janitor must fail-LOUD (exit nonzero) when the bucket listing errors, not exit 0 pruning nothing (issue #42)"
+# issue #59: PER-TIMELINE horizon — each timeline judged against ITS OWN
+# remote_consistent_lsn; an unresolvable sibling is fail-safe-skipped (not pruned).
+grep -q '/state/horizons' 62-backup.yaml || fail "62 wal-janitor must resolve a PER-TIMELINE horizon (each timeline vs its own rcl), not a shared suffix (#59)"
+grep -q 'UNRESOLVED' 62-backup.yaml || fail "62 wal-janitor must fail-safe-SKIP (never over-prune) a timeline whose own rcl it cannot resolve (#59)"
+ok "wal-janitor bounds safekeeper WAL (issue #19), derives TLI per-timeline + fails loud (issue #42), per-timeline horizon fail-safe (issue #59), backup self-heals torn index (issue #21)"
+
+# 16b. contract: SLOT-AWARE janitor + bounded WAL retention (issue #139, ADR-0007 §4a).
+#      The zone axis introduces logical-replication slots that pin publisher WAL; the
+#      janitor must NEVER prune an ACTIVE slot's WAL (break live replication), and an
+#      inactive/leaked slot must be bounded by max_slot_wal_keep_size (degrade-to-re-sync,
+#      never plane-fill) and surfaced by a slot-aware monitor.
+grep -q '"max_slot_wal_keep_size"' compute-files/config.json || fail "config.json must set a BOUNDED max_slot_wal_keep_size (issue #139) — default -1 pins WAL unbounded for an inactive slot"
+# the DEPLOYED ConfigMap (54, inlined) must carry the same knob — that is what boots
+grep -q '"max_slot_wal_keep_size"' 54-compute-files.yaml || fail "54-compute-files.yaml (the applied ConfigMap) must also carry max_slot_wal_keep_size — config.json is inlined here (issue #139)"
+grep -A2 '"max_slot_wal_keep_size"' compute-files/config.json | grep -q '"value": "-1"' && fail "config.json max_slot_wal_keep_size must not be -1 (unbounded) (issue #139)"
+grep -q 'name: resolve-slot-floors' 62-backup.yaml || fail "62 wal-janitor must have a resolve-slot-floors initContainer (slot-aware prune floor, issue #139)"
+grep -q '/state/slotfloors' 62-backup.yaml || fail "62 wal-janitor must floor pruning at ACTIVE slots' restart_lsn via /state/slotfloors (issue #139)"
+grep -q '/state/protect' 62-backup.yaml || fail "62 wal-janitor must fail-safe-SKIP (PROTECT) a timeline whose awake compute's Postgres it cannot read (issue #139)"
+grep -q 'pg_replication_slots' 62-backup.yaml || fail "62 wal-janitor slot-floor pass must read pg_replication_slots (issue #139)"
+grep -q 'SLOT-FLOOR' 62-backup.yaml || fail "62 prune step must apply the active-slot floor (SLOT-FLOOR, issue #139)"
+grep -q 'serviceAccountName: wal-janitor' 62-backup.yaml || fail "62 wal-janitor must run under a scoped ServiceAccount to exec computes (issue #139)"
+ok "wal-janitor is SLOT-AWARE — bounded retention + active-slot floor, never breaks live replication (issue #139)"
+
+# 16c. contract: the slot-aware MONITOR (deploy/63) — two CronJobs that read
+#      pg_replication_slots on awake writers and fail their Job on a growing / leaked
+#      slot, sourcing the ReplicationSlotWALGrowth / ReplicationSlotInactive alerts.
+[ -f 63-repl-slot-monitor.yaml ] || fail "deploy/63-repl-slot-monitor.yaml missing (slot-aware early-warning monitor, issue #139)"
+grep -q 'name: repl-slot-wal-monitor' 63-repl-slot-monitor.yaml || fail "63 missing repl-slot-wal-monitor CronJob (ReplicationSlotWALGrowth source, #139)"
+grep -q 'name: repl-slot-inactive-monitor' 63-repl-slot-monitor.yaml || fail "63 missing repl-slot-inactive-monitor CronJob (ReplicationSlotInactive source, #139)"
+grep -q 'pg_replication_slots' 63-repl-slot-monitor.yaml || fail "63 slot monitor must read pg_replication_slots (#139)"
+grep -q 'MAX_SLOT_WAL_KEEP_MB' 63-repl-slot-monitor.yaml || fail "63 growth monitor must compare retained WAL to the max_slot_wal_keep_size bound (#139)"
+ok "63 ships the slot-aware early-warning monitor (growth + inactive/leaked), owner_name-joined like apps-wal-monitor (#139)"
+
+# 17. contract: kube-state-metrics (59) is the CronJob/Deployment/STS metric
+#     PRODUCER the janitor/backup/failover alerts key off (issues #29/#41/#23).
+#     Minimal: single-namespace scope + only the five collectors we alert on.
+grep -q 'kube-state-metrics/kube-state-metrics' 59-kube-state-metrics.yaml || fail "59 lacks a pinned kube-state-metrics image"
+grep -q 'namespaces=scale-zero-pg' 59-kube-state-metrics.yaml || fail "59 KSM must be namespace-scoped (--namespaces=scale-zero-pg)"
+grep -q 'resources=cronjobs,jobs,deployments,statefulsets,pods' 59-kube-state-metrics.yaml || fail "59 KSM must limit collectors to the five we alert on"
+grep -q 'kind: Role' 59-kube-state-metrics.yaml || fail "59 KSM must use a namespaced Role (least privilege, not ClusterRole)"
+grep -q 'kind: ClusterRole' 59-kube-state-metrics.yaml && fail "59 KSM must NOT use a ClusterRole (namespace-scoped)"
+ok "59 ships a minimal, namespace-scoped kube-state-metrics producer"
+
+# 18. contract: Prometheus (60) scrapes BOTH new producers — KSM and pswatcher —
+#     otherwise the platform alerts have no data (issues #23/#29).
+grep -q 'job_name: kube-state-metrics' 60-prometheus.yaml || fail "60 must scrape kube-state-metrics"
+grep -q 'job_name: pswatcher' 60-prometheus.yaml || fail "60 must scrape pswatcher (:9091 metrics)"
+
+# 19. contract: the platform alert rules exist — a failing backup AND a failing
+#     wal-janitor (matched by EXACT owner_name, not a loose backup.* regex),
+#     backup staleness, pswatcher down / promotion, standby-not-ready, and a
+#     stuck wake path. This is the "silent load-bearing machinery" close (#29/#41).
+grep -q 'owner_name="backup"' 60-prometheus.yaml || fail "60 backup alert must match the CronJob by exact owner_name"
+grep -q 'owner_name="wal-janitor"' 60-prometheus.yaml || fail "60 must alert on wal-janitor failure by exact owner_name (not backup.*)"
+grep -q 'alert: WalJanitorJobFailed' 60-prometheus.yaml || fail "60 missing WalJanitorJobFailed alert (#41)"
+grep -q 'alert: BackupJobFailed' 60-prometheus.yaml || fail "60 missing BackupJobFailed alert"
+grep -q 'alert: BackupStale' 60-prometheus.yaml || fail "60 missing BackupStale (>26h) alert"
+grep -q 'kube_cronjob_status_last_successful_time' 60-prometheus.yaml || fail "60 BackupStale must use the last-successful-time metric"
+grep -q 'alert: PswatcherDown' 60-prometheus.yaml || fail "60 missing PswatcherDown alert (#23)"
+grep -q 'alert: PswatcherPromotionFired' 60-prometheus.yaml || fail "60 missing promotion-fired alert (#23)"
+grep -q 'alert: PageserverStandbyNotReady' 60-prometheus.yaml || fail "60 missing standby-not-ready alert"
+grep -q 'alert: ComputeWakeStuck' 60-prometheus.yaml || fail "60 missing wake-path-stuck alert"
+# issue #39: demo end-to-end canary alert — dormant Failed-Job rule joined on the
+# demo-canary CronJob owner_name, same pattern as backup/wal-janitor.
+grep -q 'alert: DemoCanaryFailed' 60-prometheus.yaml || fail "60 missing DemoCanaryFailed alert (#39)"
+grep -q 'owner_name="demo-canary"' 60-prometheus.yaml || fail "60 DemoCanaryFailed must match the canary CronJob by exact owner_name (#39)"
+# issues #90/#87: apps-tenant orphaned-WAL residue + safekeeper PV growth — the SIGNAL
+# on the fail-safe the janitor only WARNs on. Distinct from WalJanitorJobFailed, joined
+# on the apps-wal-monitor CronJob via the SAME owner_name pattern.
+grep -q 'alert: SafekeeperWALGrowth' 60-prometheus.yaml || fail "60 missing SafekeeperWALGrowth alert (#90) — orphaned apps WAL + SK PV growth would be unmonitored"
+grep -q 'owner_name="apps-wal-monitor"' 60-prometheus.yaml || fail "60 SafekeeperWALGrowth must match the apps-wal-monitor CronJob by exact owner_name (#90)"
+# issue #49: wal-janitor STALENESS (silent-stop with zero Failed Jobs), symmetric to BackupStale.
+grep -q 'alert: WalJanitorStale' 60-prometheus.yaml || fail "60 missing WalJanitorStale alert (#49) — a silently-stopped janitor produces no Failed Job"
+# issue #51: absent()/suspend companions so a never-succeeded or suspended CronJob pages instead of passing silently.
+grep -q 'alert: BackupStaleAbsent' 60-prometheus.yaml || fail "60 missing BackupStaleAbsent (absent/suspend guard, #51)"
+grep -q 'alert: WalJanitorStaleAbsent' 60-prometheus.yaml || fail "60 missing WalJanitorStaleAbsent (absent/suspend guard, #49/#51)"
+grep -q 'kube_cronjob_spec_suspend' 60-prometheus.yaml || fail "60 absent-guards must also page on a suspended CronJob (kube_cronjob_spec_suspend==1)"
+# issue #62: the *StaleAbsent guards must be GATED by CronJob age so a fresh/DR-restored
+# plane isn't paged before the first schedule has genuinely been missed (Day-0 noise).
+grep -q 'kube_cronjob_created' 60-prometheus.yaml || fail "60 *StaleAbsent must gate on CronJob age (kube_cronjob_created > 26h) to suppress Day-0/post-DR over-fire (#62)"
+# issue #60: DEAD-MAN'S-SWITCH — an always-firing Watchdog routed to an EXTERNAL receiver.
+grep -q 'alert: Watchdog' 60-prometheus.yaml || fail "60 missing the Watchdog dead-man's-switch alert (#60)"
+grep -q 'vector(1)' 60-prometheus.yaml || fail "60 Watchdog must be always-firing (expr: vector(1)) (#60)"
+# issue #48: SELF-GUARD on kube-state-metrics — the sole producer of every rule above.
+grep -q 'alert: KubeStateMetricsDown' 60-prometheus.yaml || fail "60 missing KubeStateMetricsDown (#48) — a dead KSM silently blinds all platform alerts"
+grep -q 'absent(up{job="kube-state-metrics"})' 60-prometheus.yaml || fail "60 KubeStateMetricsDown must also page when KSM was never scraped (absent up series, #48)"
+# the phantom-keepalive honesty rule must survive (state-based, not counter drift)
+grep -q 'min_over_time(sum(pggw_active_connections)' 60-prometheus.yaml || fail "60 phantom-keepalive honesty rule was lost"
+# issue #139: zoned-replication slot alerts — dormant Failed-Job rules joined on the
+# repl-slot-monitor CronJobs (deploy/63) by exact owner_name, same pattern as apps-wal-monitor.
+grep -q 'alert: ReplicationSlotWALGrowth' 60-prometheus.yaml || fail "60 missing ReplicationSlotWALGrowth alert (#139) — a slot nearing the WAL bound would be unmonitored"
+grep -q 'alert: ReplicationSlotInactive' 60-prometheus.yaml || fail "60 missing ReplicationSlotInactive alert (#139) — a leaked slot from a dead subscriber would be unmonitored"
+grep -q 'owner_name="repl-slot-wal-monitor"' 60-prometheus.yaml || fail "60 ReplicationSlotWALGrowth must match the repl-slot-wal-monitor CronJob by exact owner_name (#139)"
+grep -q 'owner_name="repl-slot-inactive-monitor"' 60-prometheus.yaml || fail "60 ReplicationSlotInactive must match the repl-slot-inactive-monitor CronJob by exact owner_name (#139)"
+# ADR-0007 v2-2 (SRE F2): ZONE STATUS alerts — a Failed/Degraded Zone or a broken
+# subscription must PAGE (severity critical), sourced from the zone-status-monitor
+# CronJobs (deploy/64) joined by exact owner_name, same Failed-Job pattern.
+grep -q 'alert: ZoneDegradedOrFailed' 60-prometheus.yaml || fail "60 missing ZoneDegradedOrFailed alert (ADR-0007) — a Failed/Degraded Zone would be unmonitored"
+grep -q 'alert: ZoneSubscriptionBroken' 60-prometheus.yaml || fail "60 missing ZoneSubscriptionBroken alert (ADR-0007) — a broken cross-zone subscription would be unmonitored"
+grep -q 'owner_name="zone-phase-monitor"' 60-prometheus.yaml || fail "60 ZoneDegradedOrFailed must match the zone-phase-monitor CronJob by exact owner_name (ADR-0007)"
+grep -q 'owner_name="zone-subscription-monitor"' 60-prometheus.yaml || fail "60 ZoneSubscriptionBroken must match the zone-subscription-monitor CronJob by exact owner_name (ADR-0007)"
+grep -Eq 'alert: Zone(DegradedOrFailed|SubscriptionBroken)' 60-prometheus.yaml && grep -q 'severity: critical, plane: zones' 60-prometheus.yaml || fail "60 zone-status alerts must PAGE (severity: critical, plane: zones)"
+[ -f 64-zone-status-monitor.yaml ] || fail "deploy/64-zone-status-monitor.yaml missing (zone-status paging monitor, ADR-0007 SRE F2)"
+grep -q 'name: zone-phase-monitor' 64-zone-status-monitor.yaml || fail "64 missing zone-phase-monitor CronJob (ZoneDegradedOrFailed source)"
+grep -q 'name: zone-subscription-monitor' 64-zone-status-monitor.yaml || fail "64 missing zone-subscription-monitor CronJob (ZoneSubscriptionBroken source)"
+grep -q 'kubectl get zones' 64-zone-status-monitor.yaml || fail "64 zone-status monitor must read the Zone CRs"
+ok "60 ships the platform alert rules (backup+janitor+staleness+pswatcher+standby+wake+slot+zone) and keeps the phantom honesty rule"
+
+# 20. contract: Alertmanager (61) keeps the testable in-cluster sink as default
+#     BUT cleanly supports a real Slack-compatible receiver via a Secret FILE
+#     (api_url_file — no webhook URL ever inlined into the ConfigMap or git).
+grep -q 'receiver: webhook-sink' 61-alertmanager.yaml || fail "61 default route must stay the testable in-cluster sink"
+grep -q 'slack_configs' 61-alertmanager.yaml || fail "61 must define a real Slack-compatible receiver"
+grep -q 'api_url_file' 61-alertmanager.yaml || fail "61 real receiver must read the webhook URL from a Secret file (not inline)"
+grep -q 'alertmanager-receiver' 61-alertmanager.yaml || fail "61 must mount the alertmanager-receiver Secret (optional)"
+grep -q 'alertmanager-receiver' gen-secrets.sh || fail "gen-secrets.sh must scaffold the alertmanager-receiver Secret"
+# issue #60: DEAD-MAN'S-SWITCH — a dedicated external `watchdog` receiver reading the
+# heartbeat URL from the optional Secret (like slack), routed the Watchdog alert only.
+grep -q 'name: watchdog' 61-alertmanager.yaml || fail "61 missing the external watchdog receiver (dead-man's-switch, #60)"
+grep -q 'watchdog-webhook' 61-alertmanager.yaml || fail "61 watchdog receiver must read the heartbeat URL from the Secret file watchdog-webhook (#60)"
+grep -q 'alertname="Watchdog"' 61-alertmanager.yaml || fail "61 must route the Watchdog alert to the watchdog receiver (#60)"
+grep -q 'watchdog-webhook' gen-secrets.sh || fail "gen-secrets.sh must scaffold the watchdog-webhook heartbeat URL (#60)"
+ok "61 keeps the testable sink default + real Slack receiver + external Watchdog dead-man's-switch (#60), all via Secret files"
+
+# 21. contract: skctl.py's safekeeper.control serializer is COUPLED to the neon
+#     on-disk format (magic cafeceef, format v9) reverse-engineered from a
+#     specific neon image (issue #22). The version-pair check above guards the
+#     compute<->storage tag; this guards the SECOND version-coupled artifact the
+#     pair check cannot see. A neon tag bump that does not re-validate
+#     safekeeper.control and update skctl's recorded compat tag MUST fail CI —
+#     otherwise writable restore silently crafts a structurally-wrong control
+#     file, surfacing only in an actual disaster.
+SKTAG=$(grep -oE 'SK_COMPAT_NEON_TAG[[:space:]]*=[[:space:]]*"[a-z0-9.]+"' skctl.py | head -1 | sed -E 's/.*"([a-z0-9.]+)".*/\1/')
+[ -n "$SKTAG" ] || fail "skctl.py missing SK_COMPAT_NEON_TAG (issue #22 format-coupling gate)"
+grep -qE 'SK_CONTROL_VERSION[[:space:]]*=[[:space:]]*9\b' skctl.py || fail "skctl.py SK_CONTROL_VERSION drifted from the reverse-engineered v9"
+[ "$SKTAG" = "$CT" ] || fail "skctl format coupling: skctl.py targets neon:$SKTAG but the plane pins neon:$CT — re-validate safekeeper.control (dump one from neon:$CT, run deploy/test_skctl.py against it) and bump SK_COMPAT_NEON_TAG (docs/operations.md 'skctl format coupling')"
+ok "skctl.py safekeeper.control (v9) coupled to pinned neon:$CT (issue #22)"
+
+# 22. contract (issue #56): every one of OUR OWN OCIR images (me-abudhabi-1.ocir.io
+#     /.../ks-pg/*) must be pinned by DIGEST — `tag@sha256:<64hex>`, not a mutable
+#     tag alone. A bare tag lets a rebuilt-but-not-rolled, or rolled-but-stale-tag,
+#     binary pass the presence/readiness drift check while running old code — the
+#     last place the merged≠deployed class can hide (the manifests even noted
+#     "same image, distinct binary"). We keep the human :tag for provenance AND
+#     require the @sha256 Kubernetes actually pulls; _verify-drift.sh then asserts
+#     the LIVE running imageID digest equals the manifest digest. Release procedure:
+#     docs/operations.md "Releasing an OCIR image (digest pinning)".
+for ref in $(grep -rhoE 'me-abudhabi-1\.ocir\.io/[^[:space:]"#]+' [0-9][0-9]-*.yaml | sort -u); do
+  case "$ref" in
+    *:*@sha256:*) : ;; # has BOTH a human :tag and an @sha256 digest — good
+    *@sha256:*) fail "OCIR image $ref pins a digest but dropped its human :tag — use tag@sha256:... (issue #56)" ;;
+    *) fail "OCIR image not digest-pinned: $ref — pin as tag@sha256:<64hex> (issue #56)" ;;
+  esac
+done
+ok "our OCIR images are digest-pinned with a human tag (tag@sha256:...) (issue #56)"
+
+# 23. contract (issue #105): the object-storage backend is CONFIGURABLE — the
+#     pageserver page-offload + safekeeper WAL-offload S3 target
+#     (endpoint/bucket/region) is sourced from the `storage-objstore` ConfigMap
+#     (env), NOT hardcoded to in-cluster MinIO. Credentials stay in the
+#     storage-s3-creds Secret. An external endpoint disables MinIO (its bucket
+#     Job moved to endpoint-agnostic storage-init), and MinIO — whose upstream is
+#     archived — is pinned by DIGEST as an OPTIONAL local default.
+for f in 52-safekeeper.yaml 53-pageserver.yaml 57-pageserver-standby.yaml; do
+  grep -q 'configMapRef: { name: storage-objstore }' "$f" \
+    || fail "$f must source the object-store endpoint from the storage-objstore ConfigMap (#105)"
+  grep -q "endpoint='http://minio:9000'" "$f" \
+    && fail "$f still hardcodes the minio S3 endpoint — parameterize via storage-objstore (#105)"
+done
+grep -q 'storage-objstore' gen-secrets.sh \
+  || fail "gen-secrets.sh must manage the storage-objstore ConfigMap (endpoint/bucket/region) (#105)"
+# storage-init must ensure the bucket on the CONFIGURED endpoint (not minio-only).
+grep -q 'OBJSTORE_ENDPOINT' 55-storage-init.yaml \
+  || fail "55-storage-init must ensure the bucket on the CONFIGURED object-store endpoint (#105)"
+# MinIO is now OPTIONAL + digest-pinned; its minio-only bucket Job must be gone
+# (bucket creation is endpoint-agnostic in storage-init).
+grep -qE 'quay.io/minio/minio:[^ ]*@sha256:[0-9a-f]{64}' 50-minio.yaml \
+  || fail "50-minio.yaml must digest-pin MinIO (archived upstream, #105)"
+grep -q 'name: minio-create-buckets' 50-minio.yaml \
+  && fail "50-minio.yaml still carries the minio-only bucket Job — bucket creation moved to storage-init (#105)"
+ok "object-storage backend is configurable via storage-objstore; MinIO optional + digest-pinned (#105)"
+
+# 24. contract (issue #96, ADR-0004): the AppDatabase CRD + operator ship together.
+#     The CRD defines the v1.0 declarative provisioning interface; the operator (a
+#     distinct binary in the SAME multi-binary gateway image, /appdb-operator
+#     entrypoint) reconciles it. The operator must NOT claim the deployments/scale
+#     subresource — the apps-gateway owns spec.replicas (0<->1 wake); the operator
+#     only get/update/patch deployments and preserves the live replica count.
+grep -q 'kind: CustomResourceDefinition' 82-appdb-crd.yaml || fail "82-appdb-crd.yaml missing the CustomResourceDefinition"
+grep -q 'appdatabases.apps.scale-zero-pg.dev' 82-appdb-crd.yaml || fail "82-appdb-crd.yaml wrong CRD name"
+grep -q 'appdatabases/finalizers' 83-appdb-operator.yaml || fail "83-appdb-operator.yaml RBAC lacks appdatabases/finalizers (safe deprovision)"
+grep -q '/appdb-operator' 83-appdb-operator.yaml || fail "83-appdb-operator.yaml must override the entrypoint to /appdb-operator"
+grep -q 'deployments/scale' 83-appdb-operator.yaml && fail "appdb-operator must NOT hold deployments/scale — the apps-gateway owns spec.replicas"
+grep -q 'appdb-operator' ../gateway/Dockerfile || fail "Dockerfile does not build the appdb-operator binary into the image"
+ok "AppDatabase CRD + operator wired (82/83), operator built into the image, does not claim deployments/scale (issue #96)"
+
+# 25. contract (issue #151, ADR-0007 v2-2): the Zone CRD + zone-operator ship together
+#     and are STANDARD deploy artifacts, not drill-only. Same "merged ≠ deployed" class
+#     the loop has caught 3× (#27/#125/#126): the flagship was proven only in
+#     _verify-zones.sh, which applied 86/87 then TORE THEM DOWN on exit — so the live
+#     cluster never carried the CRD or the operator. These grep-contracts guard the
+#     MANIFESTS; _verify-drift.sh (section D) asserts the LIVE presence + readiness so a
+#     regression to drill-only-again cannot pass silently.
+grep -q 'kind: CustomResourceDefinition' 86-zone-crd.yaml || fail "86-zone-crd.yaml missing the CustomResourceDefinition"
+grep -q 'zones.zones.scale-zero-pg.dev' 86-zone-crd.yaml || fail "86-zone-crd.yaml wrong CRD name (want zones.zones.scale-zero-pg.dev)"
+grep -q 'group: zones.scale-zero-pg.dev' 86-zone-crd.yaml || fail "86-zone-crd.yaml wrong API group"
+grep -q 'kind: Deployment' 87-zone-operator.yaml || fail "87-zone-operator.yaml missing the zone-operator Deployment"
+grep -q 'name: zone-operator' 87-zone-operator.yaml || fail "87-zone-operator.yaml missing the zone-operator name"
+grep -q '/zone-operator' 87-zone-operator.yaml || fail "87-zone-operator.yaml must override the entrypoint to /zone-operator"
+grep -q 'zones/finalizers' 87-zone-operator.yaml || fail "87-zone-operator.yaml RBAC lacks zones/finalizers (cross-zone deprovision hygiene, ADR-0007 §4d)"
+grep -q 'zone-operator' ../gateway/Dockerfile || fail "Dockerfile does not build the zone-operator binary into the image"
+# STANDARD-DEPLOY guard: 86/87 must be picked up by the documented deploy glob
+# (deploy/[0-9][0-9]-*.yaml). They already match by number; assert docs present them as
+# standard (not an opt-in aside) so a future reader does not treat the flagship as optional.
+grep -q '86-zone-crd.yaml' ../docs/getting-started.md || fail "getting-started.md must document 86-zone-crd as a standard deploy artifact (#151)"
+grep -q '87-zone-operator.yaml' ../docs/getting-started.md || fail "getting-started.md must document 87-zone-operator as a standard deploy artifact (#151)"
+ok "Zone CRD + operator wired (86/87), operator built into the image, standard-deploy documented (issue #151)"
+
+# 26. contract (issue #142): the janitor-disarm tripwire. A missing janitor-critical
+#     ConfigMap (storage-objstore/compute-config, or the repl-slot monitors' script CM)
+#     puts the next scheduled pod in CreateContainerConfigError — the container never
+#     starts, so no Failed Job → WalJanitorJobFailed/ReplicationSlot*/SafekeeperWALGrowth
+#     stay SILENT and the only backstop was WalJanitorStale at 26h (the WAL then
+#     accumulates toward DiskPressure — the 2026-07-06 incident). JanitorConfigDisarmed
+#     reads the POD's waiting-reason directly (KSM `pods` collector, deploy/59) so it
+#     PAGES within one cycle. Must cover BOTH the wal-janitor AND the zone repl-slot
+#     monitors (same shared-config/exec coupling class).
+grep -q 'alert: JanitorConfigDisarmed' 60-prometheus.yaml || fail "60 missing JanitorConfigDisarmed alert (#142) — a missing janitor-critical ConfigMap would silently disarm the janitor for up to 26h"
+grep -q 'kube_pod_container_status_waiting_reason' 60-prometheus.yaml || fail "60 JanitorConfigDisarmed must read kube_pod_container_status_waiting_reason off the POD (Failed-Job joins are blind to a never-starting container) (#142)"
+grep -q 'CreateContainerConfigError' 60-prometheus.yaml || fail "60 JanitorConfigDisarmed must match CreateContainerConfigError (config-missing = janitor disarmed) (#142)"
+grep -q 'repl-slot-wal-monitor|repl-slot-inactive-monitor' 60-prometheus.yaml || fail "60 JanitorConfigDisarmed must ALSO cover the zone repl-slot monitors (same config/exec coupling class) (#142)"
+# the KSM `pods` collector is the metric SOURCE — assert it stays enabled (else the rule is inert).
+grep -q 'resources=cronjobs,jobs,deployments,statefulsets,pods' 59-kube-state-metrics.yaml || fail "59 KSM must keep the `pods` collector — JanitorConfigDisarmed reads kube_pod_container_status_waiting_reason from it (#142)"
+ok "janitor-disarm tripwire wired: JanitorConfigDisarmed pages on CreateContainerConfigError for janitor+repl-slot monitors (issue #142)"
+
+# 27. contract (issue #155): the prometheus Deployment POD TEMPLATE carries a config-hash
+#     annotation equal to the sha256 of the prometheus-config ConfigMap data. A rule/scrape
+#     edit changes the hash → the pod template changes → `kubectl apply` rolls the (Recreate)
+#     Deployment → the new pod LOADS the fresh rules at boot (AUTO-RELOAD). WITHOUT it, a
+#     merged+applied ConfigMap change is DARK in the running Prometheus until a manual POST
+#     /-/reload — the 2026-07-06 zone-alerts miss (rules can be applied yet never loaded).
+#     Making a stale annotation a HARD failure guarantees the roll is never forgotten.
+#     Regenerate the value with: ./_validate.sh prom-config-hash
+WANT_PROM_HASH=$(prom_config_hash 60-prometheus.yaml)
+GOT_PROM_HASH=$(grep -oE 'ks-pg\.dev/prometheus-config-sha256:[[:space:]]*"?[0-9a-f]{64}' 60-prometheus.yaml | grep -oE '[0-9a-f]{64}' | head -1)
+[ -n "$GOT_PROM_HASH" ] || fail "60-prometheus.yaml pod template lacks the ks-pg.dev/prometheus-config-sha256 auto-reload annotation (#155) — add it under spec.template.metadata.annotations; value = ./_validate.sh prom-config-hash"
+[ "$WANT_PROM_HASH" = "$GOT_PROM_HASH" ] || fail "60-prometheus.yaml config-hash annotation ($GOT_PROM_HASH) != the ConfigMap data hash ($WANT_PROM_HASH) — the rules/config changed but the pod template was not re-hashed, so \`kubectl apply\` would NOT roll prometheus and the new rules would stay DARK. Regenerate: ./_validate.sh prom-config-hash (#155)"
+# placement: the annotation MUST sit on spec.template.metadata (rolls the pod). A top-level
+# metadata annotation does not change the pod template and would never trigger a roll.
+awk '/^  template:/{t=NR} /prometheus-config-sha256:/{a=NR} END{exit !(t>0 && a>t)}' 60-prometheus.yaml \
+  || fail "60 config-hash annotation must live under spec.template.metadata.annotations (a top-level annotation does NOT roll the pod, so rules would stay DARK) (#155)"
+ok "prometheus pod template carries a config-hash annotation matching the ConfigMap data — a rules edit auto-rolls the pod (#155)"
+
+# 28. contract (issues #155 + #153): the LIVE drift gate (_verify-drift.sh) must
+#     (a) assert every SHIPPED alert rule is LOADED in the running Prometheus (query
+#     /api/v1/rules) — a rule can be merged+applied to the ConfigMap yet DARK until a
+#     reload, which sections A–D were blind to; and (b) in the digest-provenance check
+#     accept the manifest digest carried by a pod's .status.image, not the imageID alone —
+#     an image pushed as an OCI INDEX (docker buildx attestations) reports imageID as the
+#     selected child's CONFIG digest, which never equals the index/manifest digest the
+#     manifest pins, so imageID-alone false-fires on a pod running EXACTLY the pinned
+#     reference (the appdb-operator case). Guard both so a refactor cannot silently drop them.
+grep -q 'api/v1/rules' _verify-drift.sh || fail "_verify-drift.sh must assert shipped rules are LOADED in the running Prometheus via /api/v1/rules — a merged-but-not-reloaded rule is DARK (#155)"
+grep -q 'RULEUNLOADED' _verify-drift.sh || fail "_verify-drift.sh loaded-rules assertion missing (expected the shipped-vs-loaded diff that flags RULEUNLOADED) (#155)"
+grep -q 'status.image' _verify-drift.sh || fail "_verify-drift.sh section C must also accept the manifest digest from .status.image — OCI-index images report imageID as the child CONFIG digest (the appdb-operator false positive, #153)"
+ok "drift gate asserts shipped rules LOADED + tolerates OCI-index imageID via the .status.image digest (#155/#153)"
+
+# 29. contract (issue #117): SCRAM-SHA-256 password auth (was md5). The app role gets a
+#     PRECOMPUTED SCRAM verifier injected into the compute spec (compute_ctl stores a
+#     recognised SCRAM-SHA-256$... verifier verbatim), so the role is SCRAM FROM BOOT —
+#     no cold-wake md5 window, and ZERO tenant plaintext on the compute (the verifier is
+#     non-reversible). Legs:
+#     (a) password_encryption=scram-sha-256 (source spec + inlined 54) — belt for the
+#         zone repl role's plaintext ALTER path;
+#     (b) the per-app writer entrypoint (APP_ROLE) injects APP_ROLE_VERIFIER into the
+#         spec's encrypted_password, and rewrites the pg_hba network catch-all
+#         md5 -> scram-sha-256 (reject md5-only clients) while KEEPING the #112
+#         cloud_admin loopback-only reject;
+#     (c) the per-app Secret carries APP_ROLE_VERIFIER (a SCRAM verifier), delivered as
+#         an env var (a verifier is safe to env; there is no plaintext to protect) — and
+#         there is NO plaintext file mount and NO md5 key.
+grep -q '"name": "password_encryption"' compute-files/config.json || fail "config.json must set password_encryption (issue #117)"
+grep -A2 '"name": "password_encryption"' compute-files/config.json | grep -q '"value": "scram-sha-256"' || fail "config.json password_encryption must be scram-sha-256, not md5 (issue #117)"
+grep -A2 '"name": "password_encryption"' 54-compute-files.yaml | grep -q '"value": "scram-sha-256"' || fail "54-compute-files.yaml (inlined spec) password_encryption must be scram-sha-256 (issue #117)"
+# entrypoint (source + inlined) injects the SCRAM VERIFIER into the spec + enforces SCRAM in pg_hba.
+grep -q 'APP_ROLE_VERIFIER' compute-files/entrypoint.sh || fail "entrypoint.sh must inject APP_ROLE_VERIFIER (a SCRAM verifier) into the compute spec (issue #117)"
+grep -q 'APP_ROLE_VERIFIER' 54-compute-files.yaml || fail "54-compute-files.yaml (inlined entrypoint) must inject APP_ROLE_VERIFIER (issue #117)"
+grep -q 'APP_ROLE_MD5' compute-files/entrypoint.sh && fail "entrypoint.sh must not reference APP_ROLE_MD5 — renamed to APP_ROLE_VERIFIER (issue #117)" || true
+# the pg_hba harden (scram catch-all + #112 cloud_admin reject) lives in the SHARED
+# lib-harden.sh (issue #164) — assert it there, the single source of truth.
+grep -q 'scram-sha-256' compute-files/lib-harden.sh || fail "lib-harden.sh must rewrite the pg_hba network catch-all to scram-sha-256 (issue #117)"
+# the #112 cloud_admin loopback reject MUST survive the SCRAM change (no cross-tenant regression).
+grep -q 'cloud_admin.*reject' compute-files/lib-harden.sh || fail "lib-harden.sh must keep the cloud_admin loopback-only reject (issue #112 preserved under #117)"
+# the per-app compute injects the verifier from the Secret; NO plaintext file mount.
+grep -q 'APP_ROLE_VERIFIER' compute-app.template.yaml || fail "compute-app.template.yaml must inject APP_ROLE_VERIFIER from the per-app Secret (issue #117)"
+grep -q 'app-role-secret' compute-app.template.yaml && fail "compute-app.template.yaml must NOT mount a plaintext file — the verifier-in-spec approach needs no plaintext on the compute (issue #117)" || true
+# provision-app + the appdb operator must COMPUTE a SCRAM verifier (not an md5 hash).
+grep -q 'app_scram_verifier\|APP_ROLE_VERIFIER' provision-app.sh || fail "provision-app.sh must mint APP_ROLE_VERIFIER via a SCRAM verifier (issue #117)"
+ok "SCRAM-SHA-256 auth wired: app role gets a precomputed SCRAM verifier in-spec (SCRAM from boot, no plaintext on compute, no cold-wake window), scram-sha-256 pg_hba, cloud_admin reject preserved (issue #117)"
+
+# 30. contract (issue #164): the pg_hba harden (cloud_admin loopback-only reject #112 +
+#     md5 -> scram-sha-256 catch-all rewrite #117) is a SINGLE SHARED snippet
+#     (lib-harden.sh) sourced by ALL THREE compute entrypoints (primary/RO/warm) so it
+#     can never drift. Each entrypoint calls harden_pg_hba gated on APP_ROLE (a per-app
+#     compute), identical to the primary — the base single-DB tiers (no APP_ROLE) keep
+#     cloud_admin over TCP so DATABASE_URL / DATABASE_URL_RO are unchanged.
+[ -f compute-files/lib-harden.sh ] || fail "compute-files/lib-harden.sh missing — the shared pg_hba harden (issue #164)"
+grep -q 'harden_pg_hba()' compute-files/lib-harden.sh || fail "lib-harden.sh must define harden_pg_hba() (issue #164)"
+grep -q 'lib-harden.sh' 54-compute-files.yaml || fail "54-compute-files.yaml must embed lib-harden.sh in the compute-files ConfigMap (issue #164)"
+for e in entrypoint.sh entrypoint-ro.sh entrypoint-warm.sh; do
+  grep -q '\. /compute-files/lib-harden.sh' "compute-files/$e" || fail "compute-files/$e must source the shared /compute-files/lib-harden.sh (issue #164)"
+  # the harden must NOT be redefined inline in any entrypoint (single source of truth).
+  grep -q 'harden_pg_hba()' "compute-files/$e" && fail "compute-files/$e must NOT redefine harden_pg_hba() — source lib-harden.sh instead (issue #164)" || true
+done
+# RO + warm must actually CALL the harden, gated on APP_ROLE (parity with the primary).
+for e in entrypoint-ro.sh entrypoint-warm.sh; do
+  grep -Eq 'APP_ROLE.*\]' "compute-files/$e" || fail "compute-files/$e must gate the harden on APP_ROLE (issue #164)"
+  grep -q 'harden_pg_hba &' "compute-files/$e" || fail "compute-files/$e must call harden_pg_hba (backgrounded) when APP_ROLE is set (issue #164)"
+done
+# the primary still gates identically (byte-identical behavior preserved under the refactor).
+grep -q 'harden_pg_hba &' compute-files/entrypoint.sh || fail "entrypoint.sh must still call harden_pg_hba when APP_ROLE is set (issue #164 refactor must not change primary behavior)"
+ok "pg_hba harden factored into shared lib-harden.sh; sourced + APP_ROLE-gated by primary/RO/warm entrypoints; embedded in 54 ConfigMap (issue #164)"
+
+# 31. contract (issue #168): the BASE single-DB tiers must NOT ship the PUBLIC
+#     DEFAULT cloud_admin:cloud_admin as their only TCP defense. The base tiers
+#     (compute / compute-ro / compute-warm) run cloud_admin as the documented
+#     DATABASE_URL[_RO] credential over TCP (no APP_ROLE → the pg_hba harden is
+#     deliberately skipped), so — unlike a per-app compute — they cannot rely on
+#     the loopback-only reject. Instead they carry a STRONG cloud_admin md5 minted
+#     by gen-secrets.sh (Secret pg-base-admin) and injected as a REQUIRED env, so
+#     a base compute can never boot on the public default (fail-closed). The
+#     matching strong PLAINTEXT lives in the base DATABASE_URL[_RO] Secret, also
+#     gen-secrets-owned. See docs/operations.md "Base-tier cloud_admin".
+#
+# (a) deploy/30 must be DOC-ONLY: it must NOT ship the literal public default.
+grep -Eq 'cloud_admin:cloud_admin@' 30-knext-secret.yaml && fail "30-knext-secret.yaml must NOT ship the public default cloud_admin:cloud_admin (issue #168 — gen-secrets.sh owns the strong base DATABASE_URL Secret)" || true
+# (b) each base compute manifest must inject CLOUD_ADMIN_MD5 from pg-base-admin,
+#     REQUIRED (no optional:true) so the pod fails closed without the strong Secret.
+for m in 20-compute.yaml 25-compute-warm.yaml 26-compute-ro.yaml; do
+  grep -q 'CLOUD_ADMIN_MD5' "$m" || fail "$m must inject CLOUD_ADMIN_MD5 from the pg-base-admin Secret (issue #168)"
+  grep -q 'pg-base-admin' "$m" || fail "$m must reference the pg-base-admin Secret for the strong base cloud_admin md5 (issue #168)"
+  # the block that mounts pg-base-admin's CLOUD_ADMIN_MD5 must be fail-closed
+  # (no optional:true anywhere in the manifest — base tiers never boot on the default).
+  grep -Eq 'optional:[[:space:]]*true' "$m" && fail "$m must NOT mark the pg-base-admin CLOUD_ADMIN_MD5 secretKeyRef optional:true — base compute must fail closed (issue #168)" || true
+done
+# (c) gen-secrets.sh must mint pg-base-admin (strong plaintext + its md5) AND own
+#     the base DATABASE_URL[_RO] Secret derived from it.
+grep -q 'pg-base-admin' gen-secrets.sh || fail "gen-secrets.sh must mint the pg-base-admin Secret (issue #168)"
+grep -q 'CLOUD_ADMIN_MD5' gen-secrets.sh || fail "gen-secrets.sh must compute CLOUD_ADMIN_MD5=md5(password||cloud_admin) for pg-base-admin (issue #168)"
+grep -q 'myapp-database' gen-secrets.sh || fail "gen-secrets.sh must own the base DATABASE_URL Secret myapp-database, derived from pg-base-admin (issue #168)"
+ok "base tiers carry a STRONG cloud_admin md5 (pg-base-admin, fail-closed) — the public default is never shipped (issue #168)"

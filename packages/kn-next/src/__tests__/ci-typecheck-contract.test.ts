@@ -59,6 +59,13 @@ const DOCUMENTED_EXCLUSIONS: Record<string, string> = {
     // a follow-up once source/route-type generation is wired.
     "knext-docs":
         "Fumadocs/Next docs site — type-checked via next build in the docs-site CI job (Next needs generated .next/types + fumadocs .source types); a standalone tsc step is a follow-up",
+    // Database layer of the unified platform: a Go + Kubernetes project (imported at
+    // packages/scale-zero-pg). It carries a package.json only so turbo can orchestrate its
+    // OWN Go toolchain (build/lint/test via `turbo run … --affected`); there is no
+    // TypeScript source and no tsconfig, so `tsc --noEmit` has nothing to check. Its build
+    // and tests run in the dedicated scale-zero-pg CI workflow (Go), not the TS typecheck gate.
+    "scale-zero-pg":
+        "Go + k8s project (packages/scale-zero-pg); no TS source/tsconfig — built & tested via its own turbo Go tasks in the scale-zero-pg workflow, not tsc",
 };
 
 interface PkgManifest {

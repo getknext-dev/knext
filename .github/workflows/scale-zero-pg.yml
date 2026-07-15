@@ -1,0 +1,57 @@
+# scale-zero-pg CI — turbo-affected entrypoint.
+#
+# The pg project (packages/scale-zero-pg) is a Go + Kubernetes project. It participates
+# in the turbo graph via its own package.json scripts + package-level turbo.json (build /
+# lint / test / build:image), so THE PROJECT OWNS ITS OWN SCRIPTS and turbo just orchestrates
+# them. This job's entrypoint is `turbo run … --affected`: turbo computes the affected graph
+# against the PR base (needs full git history, hence fetch-depth: 0) and runs the pg tasks
+# ONLY when packages/scale-zero-pg actually changed. `--filter=scale-zero-pg` scopes this job
+# to the pg project (it never runs the JS packages' tasks — those keep their own ci.yml jobs);
+# on a JS-only PR turbo selects 0 tasks here and the job is a fast no-op.
+name: scale-zero-pg CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Turbo needs Go, Python (deploy-script tests) and Node/pnpm (to run turbo itself).
+jobs:
+  turbo-affected:
+    name: turbo run (affected) — scale-zero-pg
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout (full history for turbo --affected)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: packages/scale-zero-pg/gateway/go.mod
+          cache: true
+          cache-dependency-path: packages/scale-zero-pg/gateway/go.sum
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # turbo --affected computes the changed set vs the PR base (or the previous commit
+      # on a push to main) and runs only the pg tasks when packages/scale-zero-pg changed.
+      # build:image validates the gateway Dockerfile still builds.
+      - name: turbo run build lint test build:image (affected, scoped to scale-zero-pg)
+        run: pnpm turbo run build lint test build:image --affected --filter=scale-zero-pg

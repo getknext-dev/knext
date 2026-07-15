@@ -1,0 +1,192 @@
+# ===========================================================================
+# zone-status-monitor (ADR-0007, #139 v2-2; SRE F2 v1.3.0 review) — the PAGING
+# half of zone observability. Cross-zone breakage must reach the pager.
+#
+# WHY THIS EXISTS. The zone axis wires cross-zone logical replication / FDW via
+# Zone CRs. When a Zone goes phase=Failed (invalid spec) or phase=Degraded (a
+# dependency denied by governance, a wiring error, or a slot invalidated →
+# needs_resync), or a subscription lands in state=error/denied/needs_resync, the
+# breakage is invisible to the slot-WAL monitors (deploy/63, which only see
+# publisher WAL). Without this, a broken cross-zone dependency degrades SILENTLY —
+# the exact "grep-green / prod-red" class the loop keeps catching. This surfaces it.
+#
+# PATTERN (identical to repl-slot-monitor / apps-wal-monitor). Two CronJobs read
+# the Zone CRs and FAIL their Job on a breach; a Prometheus rule (deploy/60) joins
+# that Failed Job via kube_job_owner and PAGES (severity=critical, plane=zones):
+#   - zone-phase-monitor      → ZoneDegradedOrFailed
+#   - zone-subscription-monitor → ZoneSubscriptionBroken
+#
+# DORMANT by design: with no Zone CRD / zero Zones the query returns nothing and
+# both Jobs exit 0 — shipping it always-on is free. Least privilege: READ zones
+# only, this namespace, no exec, no secrets, no writes.
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: zone-status-monitor
+  namespace: scale-zero-pg
+  labels: { app: zone-status-monitor, plane: observability }
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: zone-status-monitor
+  namespace: scale-zero-pg
+rules:
+  - apiGroups: ["zones.scale-zero-pg.dev"]
+    resources: ["zones"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: zone-status-monitor
+  namespace: scale-zero-pg
+subjects:
+  - kind: ServiceAccount
+    name: zone-status-monitor
+    namespace: scale-zero-pg
+roleRef:
+  kind: Role
+  name: zone-status-monitor
+  apiGroup: rbac.authorization.k8s.io
+---
+# Shared check script (DRY: two CronJobs run it with CHECK=phase | subscription).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: zone-status-monitor-script
+  namespace: scale-zero-pg
+  labels: { app: zone-status-monitor, plane: observability }
+data:
+  zonecheck.sh: |
+    #!/bin/sh
+    # Read the Zone CRs and FAIL the Job on a cross-zone breach (→ ZoneDegradedOrFailed /
+    # ZoneSubscriptionBroken via kube_job_owner). Dormant when the CRD/zones are absent.
+    set -eu
+    CHECK="${CHECK:?CHECK must be phase|subscription}"
+    echo "zone-status-monitor CHECK=$CHECK"
+
+    # DORMANT: no Zone CRD (not installed) or no Zones → nothing to inspect (clean).
+    JSON="$(kubectl get zones -o json 2>/dev/null || true)"
+    if [ -z "$JSON" ]; then echo "no Zone CRD/zones — nothing to inspect (clean)"; exit 0; fi
+    COUNT="$(printf '%s' "$JSON" | jq -r '.items | length')"
+    if [ "$COUNT" = "0" ]; then echo "zero Zones — clean"; exit 0; fi
+    echo "inspecting $COUNT Zone(s)"
+
+    case "$CHECK" in
+      phase)
+        # A Zone in Failed (invalid spec) or Degraded (denied dep / wiring error / an
+        # invalidated slot awaiting re-sync). Deleting is a transient lifecycle phase — ignore.
+        BAD="$(printf '%s' "$JSON" | jq -r '.items[] | select(.status.phase=="Failed" or .status.phase=="Degraded") | "\(.metadata.name)=\(.status.phase): \(.status.message // "")"')"
+        if [ -n "$BAD" ]; then
+          echo "ZoneDegradedOrFailed: one or more Zones are Failed/Degraded:" >&2
+          printf '  %s\n' "$BAD" >&2
+          exit 1
+        fi
+        echo "phase clean: no Zone Failed/Degraded"
+        ;;
+      subscription)
+        # A dataDependency that could not be wired or whose copy went stale:
+        #   error        — a wiring failure (bad conninfo, exec error)
+        #   denied       — governance refusal (peer does not publish the requested tables)
+        #   needs_resync — the peer slot was invalidated (wal_status=lost); re-sync required
+        BAD="$(printf '%s' "$JSON" | jq -r '.items[] | .metadata.name as $z | (.status.subscriptions // [])[] | select(.state=="error" or .state=="denied" or .state=="needs_resync") | "\($z) -> \(.fromZone): \(.state) (\(.message // ""))"')"
+        if [ -n "$BAD" ]; then
+          echo "ZoneSubscriptionBroken: one or more cross-zone subscriptions are error/denied/needs_resync:" >&2
+          printf '  %s\n' "$BAD" >&2
+          exit 1
+        fi
+        echo "subscription clean: no error/denied/needs_resync dependency"
+        ;;
+      *) echo "unknown CHECK=$CHECK" >&2; exit 2;;
+    esac
+    exit 0
+---
+# (a) ZoneDegradedOrFailed source — a Zone in Failed/Degraded phase.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: zone-phase-monitor
+  namespace: scale-zero-pg
+  labels: { app: zone-status-monitor, plane: observability }
+spec:
+  schedule: "*/5 * * * *" # every 5m — cross-zone breakage must page promptly
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 0 # one shot: a persistent breach keeps the Job Failed (alert stays lit)
+      template:
+        metadata:
+          labels: { app: zone-status-monitor, plane: observability }
+        spec:
+          serviceAccountName: zone-status-monitor
+          restartPolicy: Never
+          securityContext:
+            seccompProfile: { type: RuntimeDefault }
+          containers:
+            - name: monitor
+              image: alpine/k8s:1.30.2 # bundles kubectl + jq
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities: { drop: ["ALL"] }
+                runAsNonRoot: true
+                runAsUser: 65532
+              env:
+                - name: CHECK
+                  value: "phase"
+              command: ["/bin/sh", "/scripts/zonecheck.sh"]
+              volumeMounts:
+                - { name: script, mountPath: /scripts }
+              resources:
+                requests: { cpu: 20m, memory: 32Mi, ephemeral-storage: 50Mi }
+                limits: { memory: 128Mi, ephemeral-storage: 128Mi }
+          volumes:
+            - name: script
+              configMap: { name: zone-status-monitor-script, items: [{ key: zonecheck.sh, path: zonecheck.sh }] }
+---
+# (b) ZoneSubscriptionBroken source — a subscription error/denied/needs_resync.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: zone-subscription-monitor
+  namespace: scale-zero-pg
+  labels: { app: zone-status-monitor, plane: observability }
+spec:
+  schedule: "*/5 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      template:
+        metadata:
+          labels: { app: zone-status-monitor, plane: observability }
+        spec:
+          serviceAccountName: zone-status-monitor
+          restartPolicy: Never
+          securityContext:
+            seccompProfile: { type: RuntimeDefault }
+          containers:
+            - name: monitor
+              image: alpine/k8s:1.30.2
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities: { drop: ["ALL"] }
+                runAsNonRoot: true
+                runAsUser: 65532
+              env:
+                - name: CHECK
+                  value: "subscription"
+              command: ["/bin/sh", "/scripts/zonecheck.sh"]
+              volumeMounts:
+                - { name: script, mountPath: /scripts }
+              resources:
+                requests: { cpu: 20m, memory: 32Mi, ephemeral-storage: 50Mi }
+                limits: { memory: 128Mi, ephemeral-storage: 128Mi }
+          volumes:
+            - name: script
+              configMap: { name: zone-status-monitor-script, items: [{ key: zonecheck.sh, path: zonecheck.sh }] }

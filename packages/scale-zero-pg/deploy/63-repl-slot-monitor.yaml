@@ -1,0 +1,240 @@
+# ===========================================================================
+# repl-slot-monitor (issue #139, ADR-0007 §4a) — the SLOT-AWARE early-warning
+# half of the zoned-replication WAL safety net.
+#
+# WHY THIS EXISTS. The zone axis (ADR-0007) introduces cross-zone LOGICAL
+# replication: a publisher zone's compute grows a replication slot per
+# subscriber. On this neon:8464 build max_slot_wal_keep_size defaulted to -1
+# (UNBOUNDED) and idle_replication_slot_timeout does not exist (spike #133), so
+# an INACTIVE/leaked slot (a sleeping or dead cross-zone subscriber) pinned
+# publisher WAL FOREVER — a slow ENOSPC that would wedge the shared 2Gi
+# safekeeper PVs, invisible to the (slot-unaware) wal-janitor + apps-wal-monitor.
+#
+# THE THREE-PART FIX (ADR-0007 §4a):
+#   1. HARD BACKSTOP — max_slot_wal_keep_size=512MB in the compute spec
+#      (deploy/compute-files/config.json): past the cap Postgres INVALIDATES the
+#      slot (wal_status=lost) → the subscriber re-syncs from a fresh snapshot
+#      ('degrade to re-sync, never plane-fill'). Bounded + recoverable.
+#   2. EARLY WARNING — *this* monitor: two CronJobs that read pg_replication_slots
+#      on every AWAKE writer compute and FAIL their Job (→ a Prometheus alert via
+#      kube_job_owner, exactly the apps-wal-monitor #90 pattern) when a slot is
+#      (a) retaining WAL past 75% of the bound (ReplicationSlotWALGrowth), or
+#      (b) inactive longer than a threshold — a LEAKED slot (ReplicationSlotInactive).
+#   3. JANITOR AWARENESS — the wal-janitor (deploy/62) floors pruning at every
+#      ACTIVE slot's restart_lsn (never breaks live replication) and surfaces
+#      inactive-slot WAL (reclaimable, with the bound as backstop).
+#
+# SCOPE. A slot lives on a PUBLISHER (a writer, plane=compute — the RO pool
+# deliberately lacks that label). WAL only accrues while the publisher is AWAKE,
+# so inspecting Running writer pods is complete: a scaled-to-zero publisher
+# accrues no new WAL and holds no ACTIVE slot (active ⟹ a live walsender ⟹ awake).
+# DORMANT by design: on today's slot-free plane the query returns zero slots and
+# both Jobs exit 0 — shipping it always-on is free (like apps-wal-monitor).
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: repl-slot-monitor
+  namespace: scale-zero-pg
+  labels: { app: repl-slot-monitor, plane: observability }
+---
+# Least privilege: read pods + exec into them (psql over pod-local loopback, the
+# only path cloud_admin is admitted — #112 pg_hba rejects it over TCP) in THIS
+# namespace only. No write, no cluster scope, no secrets.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: repl-slot-monitor
+  namespace: scale-zero-pg
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["configmaps"] # read the per-compute config to map a pod → its slots' context
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: repl-slot-monitor
+  namespace: scale-zero-pg
+subjects:
+  - kind: ServiceAccount
+    name: repl-slot-monitor
+    namespace: scale-zero-pg
+roleRef:
+  kind: Role
+  name: repl-slot-monitor
+  apiGroup: rbac.authorization.k8s.io
+---
+# Shared check script (DRY: two CronJobs run it with CHECK=growth | inactive).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: repl-slot-monitor-script
+  namespace: scale-zero-pg
+  labels: { app: repl-slot-monitor, plane: observability }
+data:
+  slotcheck.sh: |
+    #!/bin/sh
+    # Read pg_replication_slots on every AWAKE writer compute and FAIL the Job on a
+    # breach (→ ReplicationSlotWALGrowth / ReplicationSlotInactive via kube_job_owner).
+    set -eu
+    CHECK="${CHECK:?CHECK must be growth|inactive}"
+    MAX_SLOT_WAL_KEEP_MB="${MAX_SLOT_WAL_KEEP_MB:-512}"   # MUST match config.json's max_slot_wal_keep_size
+    WARN_PCT="${WARN_PCT:-75}"                            # growth: alert at this % of the bound
+    INACTIVE_MAX_SECS="${INACTIVE_MAX_SECS:-86400}"       # inactive: a leaked slot older than this (24h)
+    echo "repl-slot-monitor CHECK=$CHECK bound=${MAX_SLOT_WAL_KEEP_MB}MB warn_pct=${WARN_PCT} inactive_max_secs=${INACTIVE_MAX_SECS}"
+
+    # Awake WRITER computes (plane=compute = single-DB + per-app publishers; the RO
+    # pool deliberately omits plane=compute so it is excluded). Publishers only accrue
+    # slot WAL while awake, so Running writer pods are the complete inspection set.
+    PODS="$(kubectl get pods -l plane=compute --field-selector=status.phase=Running \
+            -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null || true)"
+    if [ -z "$PODS" ]; then
+      echo "no awake writer compute pods — no live replication slots to inspect (clean)"; exit 0
+    fi
+
+    # slot_name|active(t/f)|inactive_seconds|retained_bytes|wal_status
+    # NB: emit active as a literal t/f via CASE — `||active||` would render the
+    # boolean as `true`/`false` (text-coercion in concat), breaking the $3=="f" test.
+    Q="SELECT slot_name||'|'||(case when active then 't' else 'f' end)||'|'||coalesce(extract(epoch from (now()-inactive_since))::bigint::text,'0')||'|'||coalesce(pg_wal_lsn_diff(pg_current_wal_lsn(),restart_lsn)::bigint::text,'0')||'|'||coalesce(wal_status,'') FROM pg_replication_slots"
+    : > /tmp/slots
+    for p in $PODS; do
+      R="$(kubectl exec "$p" -c compute </dev/null -- \
+            env PGPASSWORD=cloud_admin psql -h localhost -p 55433 -U cloud_admin -d postgres -tAc "$Q" 2>/dev/null || echo __ERR__)"
+      if [ "$R" = "__ERR__" ]; then echo "  $p: pg_replication_slots unreadable (compute not ready?) — skipped"; continue; fi
+      [ -z "$R" ] && { echo "  $p: no replication slots"; continue; }
+      printf '%s\n' "$R" | grep -v '^[[:space:]]*$' | sed "s/^/$p|/" >> /tmp/slots || true
+    done
+    if [ ! -s /tmp/slots ]; then echo "awake writers hold zero replication slots — clean"; exit 0; fi
+    echo "slots (pod|name|active|inactive_s|retained_bytes|wal_status):"; cat /tmp/slots
+
+    RC=0
+    BOUND=$(( MAX_SLOT_WAL_KEEP_MB * 1024 * 1024 ))
+    THRESH=$(( BOUND * WARN_PCT / 100 ))
+    case "$CHECK" in
+      growth)
+        # (a) retaining WAL past WARN_PCT% of the bound — a subscriber falling behind /
+        #     a slot leaking, approaching forced invalidation (degrade-to-re-sync).
+        if awk -F'|' -v t="$THRESH" '($5+0)>t{print}' /tmp/slots | grep -q .; then
+          echo "ReplicationSlotWALGrowth: slot(s) retaining > ${WARN_PCT}% of the ${MAX_SLOT_WAL_KEEP_MB}MB max_slot_wal_keep_size bound — approaching forced invalidation (degrade-to-re-sync):" >&2
+          awk -F'|' -v t="$THRESH" '($5+0)>t{printf "  %s slot=%s active=%s retained=%dMB wal_status=%s\n",$1,$2,$3,($5/1048576),$6}' /tmp/slots >&2
+          RC=1
+        fi
+        # (b) ALREADY invalidated by the bound — the subscriber must re-sync. Surfaced
+        #     under the SAME growth alert (it is the designed outcome of growth-past-bound).
+        if awk -F'|' 'tolower($6)=="lost"||tolower($6)=="unreserved"{print}' /tmp/slots | grep -q .; then
+          echo "ReplicationSlotWALGrowth: slot(s) INVALIDATED by the WAL bound (wal_status=lost/unreserved) — the subscriber must RE-SYNC (drop+recreate subscription with copy_data). Designed degrade, NEVER a plane-fill:" >&2
+          awk -F'|' 'tolower($6)=="lost"||tolower($6)=="unreserved"{printf "  %s slot=%s wal_status=%s\n",$1,$2,$6}' /tmp/slots >&2
+          RC=1
+        fi
+        [ "$RC" = 0 ] && echo "growth clean: no slot past ${WARN_PCT}% of the ${MAX_SLOT_WAL_KEEP_MB}MB bound, none invalidated"
+        ;;
+      inactive)
+        # A slot INACTIVE longer than the threshold — very likely a LEAKED slot from a
+        # dead/deprovisioned subscriber (a briefly-sleeping subscriber is short + expected).
+        if awk -F'|' -v m="$INACTIVE_MAX_SECS" '$3=="f" && ($4+0)>m{print}' /tmp/slots | grep -q .; then
+          echo "ReplicationSlotInactive: slot(s) inactive longer than ${INACTIVE_MAX_SECS}s — likely a LEAKED slot from a dead/deprovisioned subscriber, still pinning publisher WAL. Drop it (pg_drop_replication_slot) or run the Zone deprovision hygiene:" >&2
+          awk -F'|' -v m="$INACTIVE_MAX_SECS" '$3=="f" && ($4+0)>m{printf "  %s slot=%s inactive_for=%ds retained=%dMB\n",$1,$2,$4,($5/1048576)}' /tmp/slots >&2
+          RC=1
+        fi
+        [ "$RC" = 0 ] && echo "inactive clean: no slot inactive longer than ${INACTIVE_MAX_SECS}s"
+        ;;
+      *) echo "unknown CHECK=$CHECK" >&2; exit 2;;
+    esac
+    exit $RC
+---
+# (a) ReplicationSlotWALGrowth source — a slot's retained WAL nearing the bound.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: repl-slot-wal-monitor
+  namespace: scale-zero-pg
+  labels: { app: repl-slot-monitor, plane: observability }
+spec:
+  schedule: "37 * * * *" # hourly — WAL growth can accelerate; hourly catches it well before the bound
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 0 # one shot: a persistent breach keeps the Job Failed (alert stays lit)
+      template:
+        metadata:
+          labels: { app: repl-slot-monitor, plane: observability }
+        spec:
+          serviceAccountName: repl-slot-monitor
+          restartPolicy: Never
+          securityContext:
+            seccompProfile: { type: RuntimeDefault }
+          containers:
+            - name: monitor
+              image: alpine/k8s:1.30.2 # bundles kubectl + a shell; execs psql INSIDE the compute pod
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities: { drop: ["ALL"] }
+              env:
+                - name: CHECK
+                  value: "growth"
+                - name: MAX_SLOT_WAL_KEEP_MB
+                  value: "512" # MUST equal deploy/compute-files/config.json max_slot_wal_keep_size
+                - name: WARN_PCT
+                  value: "75"
+              command: ["/bin/sh", "/scripts/slotcheck.sh"]
+              volumeMounts:
+                - { name: script, mountPath: /scripts }
+              resources:
+                requests: { cpu: 20m, memory: 32Mi, ephemeral-storage: 50Mi }
+                limits: { memory: 128Mi, ephemeral-storage: 128Mi }
+          volumes:
+            - name: script
+              configMap: { name: repl-slot-monitor-script, items: [{ key: slotcheck.sh, path: slotcheck.sh }] }
+---
+# (b) ReplicationSlotInactive source — a leaked slot from a dead subscriber.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: repl-slot-inactive-monitor
+  namespace: scale-zero-pg
+  labels: { app: repl-slot-monitor, plane: observability }
+spec:
+  schedule: "43 */3 * * *" # every 3h — a leaked slot is slow; frequent enough for early warning
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      template:
+        metadata:
+          labels: { app: repl-slot-monitor, plane: observability }
+        spec:
+          serviceAccountName: repl-slot-monitor
+          restartPolicy: Never
+          securityContext:
+            seccompProfile: { type: RuntimeDefault }
+          containers:
+            - name: monitor
+              image: alpine/k8s:1.30.2
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities: { drop: ["ALL"] }
+              env:
+                - name: CHECK
+                  value: "inactive"
+                - name: INACTIVE_MAX_SECS
+                  value: "86400" # 24h — a briefly-sleeping subscriber is expected; a day-old inactive slot is leaked
+              command: ["/bin/sh", "/scripts/slotcheck.sh"]
+              volumeMounts:
+                - { name: script, mountPath: /scripts }
+              resources:
+                requests: { cpu: 20m, memory: 32Mi, ephemeral-storage: 50Mi }
+                limits: { memory: 128Mi, ephemeral-storage: 128Mi }
+          volumes:
+            - name: script
+              configMap: { name: repl-slot-monitor-script, items: [{ key: slotcheck.sh, path: slotcheck.sh }] }
