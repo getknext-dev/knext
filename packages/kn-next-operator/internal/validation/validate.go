@@ -188,11 +188,11 @@ func ValidateNextAppSpec(spec *appsv1alpha1.NextAppSpec) error {
 // validateDatabase enforces the ADR-0019 spec.database rules (matrix mirrored
 // from the CRD CEL validations):
 //
-//  1. enabled (managed) and secretRef (BYO binding) are mutually exclusive.
-//  2. roSecretRef requires secretRef.
-//  3. secretRef/roSecretRef names are DNS-1123 subdomains.
-//  4. Provisioning knobs (tier/readReplicas/quotas/keepOnDelete) are
-//     managed-mode-only — rejected with secretRef, never silently ignored.
+//  1. roSecretRef requires secretRef.
+//  2. secretRef/roSecretRef names are DNS-1123 subdomains.
+//
+// knext is engine-agnostic and provisions no database (managed mode removed —
+// ADR-0025); the only surface is the BYO secretRef binding (ADR-0019).
 //
 // DATABASE_URL(_RO) collisions against spec.secrets.envMap are deliberately
 // NOT validated here: this function is shared with the FAIL-CLOSED reconciler,
@@ -207,18 +207,12 @@ func validateDatabase(spec *appsv1alpha1.NextAppSpec) error {
 		return nil
 	}
 
-	if db.Enabled && db.SecretRef != nil {
-		return fmt.Errorf("spec.database.enabled (managed) and spec.database.secretRef (BYO binding) are mutually exclusive — pick one mode")
-	}
 	if db.ROSecretRef != nil && db.SecretRef == nil {
 		return fmt.Errorf("spec.database.roSecretRef requires spec.database.secretRef")
 	}
 	if db.SecretRef != nil {
 		if errs := utilvalidation.IsDNS1123Subdomain(db.SecretRef.Name); len(errs) > 0 {
 			return fmt.Errorf("spec.database.secretRef.name %q is not a valid Secret name: %s", db.SecretRef.Name, strings.Join(errs, "; "))
-		}
-		if db.Tier != "" || db.ReadReplicas || db.Quotas != nil || db.KeepOnDelete {
-			return fmt.Errorf("spec.database tier/readReplicas/quotas/keepOnDelete are managed-mode only and cannot be combined with secretRef")
 		}
 	}
 	if db.ROSecretRef != nil {
@@ -240,11 +234,11 @@ func DatabaseEnvMapCollisions(spec *appsv1alpha1.NextAppSpec) []string {
 		return nil
 	}
 	var out []string
-	definesURL := db.SecretRef != nil || db.Enabled
+	definesURL := db.SecretRef != nil
 	if _, clash := spec.Secrets.EnvMap["DATABASE_URL"]; clash && definesURL {
 		out = append(out, "DATABASE_URL")
 	}
-	definesRO := db.ROSecretRef != nil || (db.Enabled && db.ReadReplicas)
+	definesRO := db.ROSecretRef != nil
 	if _, clash := spec.Secrets.EnvMap["DATABASE_URL_RO"]; clash && definesRO {
 		out = append(out, "DATABASE_URL_RO")
 	}

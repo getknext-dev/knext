@@ -208,4 +208,54 @@ var _ = Describe("NextApp deletion finalizer", func() {
 		Expect(apierrors.IsNotFound(k8sClient.Get(ctx, failNN, gone))).To(BeTrue(),
 			"CR must be fully deleted after a fail-open cleanup — never stuck Terminating")
 	})
+
+	It("DRAINS a legacy db-cleanup finalizer on delete — a NextApp that was ever managed reaches GONE, not stuck Terminating", func() {
+		// The managed scale-to-zero-Postgres mode was removed (ADR-0025, the
+		// engine-agnostic DB-scope trim). But live NextApps provisioned under the
+		// old operator still carry the string finalizer apps.kn-next.dev/db-cleanup
+		// in metadata. The trimmed reconciler no longer ADDS it, but it MUST still
+		// STRIP it on delete for one release — otherwise those CRs wedge in
+		// Terminating forever (finalizers only clear when a controller removes them).
+		//
+		// This test PINS the drain: pre-set a NextApp with the legacy finalizer (and
+		// a plain BYO spec, no managed knobs — managed fields no longer exist), delete
+		// it, reconcile, and assert it is genuinely GONE. If the drain regressed to a
+		// bare delete of the handler (finalizer never removed), the Get below would
+		// still succeed with a DeletionTimestamp — a wedged CR.
+		const drainName = "legacy-db-cleanup-drain"
+		drainNN := types.NamespacedName{Name: drainName, Namespace: "default"}
+
+		By("creating a NextApp pre-set with the legacy db-cleanup finalizer")
+		app := &appsv1alpha1.NextApp{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:       drainName,
+				Namespace:  "default",
+				Finalizers: []string{DatabaseCleanupFinalizer, ExternalCleanupFinalizer},
+			},
+			Spec: appsv1alpha1.NextAppSpec{
+				Image: "registry.example.com/app:v1@sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abc1",
+				Database: &appsv1alpha1.DatabaseSpec{
+					SecretRef: &appsv1alpha1.DatabaseSecretRef{Name: "shop-db"},
+				},
+			},
+		}
+		Expect(k8sClient.Create(ctx, app)).To(Succeed())
+
+		fc := &fakeCleaner{}
+		r := &NextAppReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Cleaner: fc}
+
+		By("deleting the NextApp — both finalizers hold it in Terminating")
+		Expect(k8sClient.Delete(ctx, app)).To(Succeed())
+		stillThere := &appsv1alpha1.NextApp{}
+		Expect(k8sClient.Get(ctx, drainNN, stillThere)).To(Succeed())
+		Expect(stillThere.DeletionTimestamp).NotTo(BeNil())
+		Expect(controllerutil.ContainsFinalizer(stillThere, DatabaseCleanupFinalizer)).To(BeTrue())
+
+		By("reconciling the delete — the db-cleanup finalizer is drained (no re-provision, no cross-ns reach)")
+		Eventually(func() bool {
+			_, _ = r.Reconcile(ctx, reconcile.Request{NamespacedName: drainNN})
+			return apierrors.IsNotFound(k8sClient.Get(ctx, drainNN, &appsv1alpha1.NextApp{}))
+		}, 10*time.Second, 100*time.Millisecond).Should(BeTrue(),
+			"a NextApp carrying the legacy db-cleanup finalizer must reach GONE, never wedge in Terminating")
+	})
 })

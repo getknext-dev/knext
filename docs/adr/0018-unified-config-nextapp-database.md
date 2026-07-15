@@ -1,6 +1,12 @@
 # ADR-0018 — Unified config: `NextApp.spec.database` delegates to scale-zero-pg
 
-- **Status:** Accepted (implements #119). Companion to the cross-repo design record
+- **Status:** **Superseded by [ADR-0025](0025-remove-managed-database-mode.md)**
+  (2026-07-15). The managed `spec.database.enabled` provisioning mode this ADR
+  records was **removed** to honour the 2026-06-26 engine-agnostic DB-scope
+  decision (knext builds no scale-to-zero-Postgres machinery). The BYO binding
+  ([ADR-0019](0019-database-binding-secretref.md)) is now the only database
+  surface. Kept for history — do not read the sections below as live contract.
+  Was: Accepted (implements #119). Companion to the cross-repo design record
   [scale-zero-pg ADR-0006](https://github.com/getknext-dev/scale-zero-pg/blob/main/docs/adr-0006-unified-config.md),
   which owns the `AppDatabase` external-driver contract. This ADR records the **knext
   side**: the `spec.database` surface, the mirror, and the finalizer.

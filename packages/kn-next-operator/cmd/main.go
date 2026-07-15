@@ -65,7 +65,6 @@ func main() {
 	var probeAddr string
 	var secureMetrics bool
 	var enableHTTP2 bool
-	var databaseNamespace string
 	var tlsOpts []func(*tls.Config)
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
@@ -84,9 +83,6 @@ func main() {
 	flag.StringVar(&metricsCertKey, "metrics-cert-key", "tls.key", "The name of the metrics server key file.")
 	flag.BoolVar(&enableHTTP2, "enable-http2", false,
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
-	flag.StringVar(&databaseNamespace, "database-namespace", controller.DefaultDatabaseNamespace,
-		"The namespace where delegated scale-zero-pg AppDatabases and their app-db-<app> "+
-			"Secrets live (ADR-0006 unified config). The operator provisions/mirrors there.")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -187,11 +183,10 @@ func main() {
 	}
 
 	if err := (&controller.NextAppReconciler{
-		Client:            mgr.GetClient(),
-		Scheme:            mgr.GetScheme(),
-		Recorder:          mgr.GetEventRecorderFor("nextapp-controller"),
-		Cleaner:           controller.NewDefaultCleaner(),
-		DatabaseNamespace: databaseNamespace,
+		Client:   mgr.GetClient(),
+		Scheme:   mgr.GetScheme(),
+		Recorder: mgr.GetEventRecorderFor("nextapp-controller"),
+		Cleaner:  controller.NewDefaultCleaner(),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "NextApp")
 		os.Exit(1)

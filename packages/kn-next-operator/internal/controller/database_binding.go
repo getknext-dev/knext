@@ -17,6 +17,7 @@ limitations under the License.
 package controller
 
 import (
+	"context"
 	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
@@ -24,15 +25,43 @@ import (
 	appsv1alpha1 "github.com/AhmedElBanna80/knext/packages/kn-next-operator/api/v1alpha1"
 )
 
+// DatabaseCleanupFinalizer is the LEGACY finalizer the removed managed
+// scale-to-zero-Postgres mode (ADR-0018, now superseded by ADR-0025) added to
+// NextApps that delegated a database. Managed provisioning has been removed for
+// the engine-agnostic DB-scope decision, but live NextApps ever provisioned
+// under the old operator still carry this string in metadata. The trimmed
+// operator NEVER adds it anymore, yet it MUST still DRAIN it on delete for one
+// release — a finalizer only clears when a controller removes it, so leaving it
+// would wedge those CRs in Terminating forever. See cleanupDatabase (a no-op
+// drain: it removes the finalizer, never re-provisions, never reaches
+// cross-namespace).
+const DatabaseCleanupFinalizer = "apps.kn-next.dev/db-cleanup"
+
+// ConditionDatabaseReady surfaces the app's database binding on the NextApp. In
+// BYO mode (spec.database.secretRef, ADR-0019) it is True/Bound once the Secret
+// is wired into the env; it is removed when spec.database is absent. (Managed
+// provisioning — the old hard-gate — was removed, ADR-0025.)
+const ConditionDatabaseReady = "DatabaseReady"
+
+// cleanupDatabase is the (now no-op) db-cleanup finalizer body. The managed
+// AppDatabase teardown it once performed is gone (ADR-0025); this remains ONLY
+// to DRAIN the legacy DatabaseCleanupFinalizer off any NextApp that still
+// carries it (provisioned under the old managed operator), so deletion can
+// complete. It provisions nothing and reaches no other namespace — the caller
+// removes the finalizer once this returns nil.
+func (r *NextAppReconciler) cleanupDatabase(_ context.Context, _ *appsv1alpha1.NextApp) error {
+	return nil
+}
+
 // ADR-0019 — the BYO database binding: spec.database.secretRef / roSecretRef
 // map an EXISTING same-namespace Secret onto DATABASE_URL / DATABASE_URL_RO.
-// This is typed sugar over spec.secrets.envMap: the injection below mutates the
-// IN-MEMORY envMap exactly like the managed mode's injectDatabaseEnv, so the
-// existing envMap -> SecretKeyRef wiring (and its precedence/dedupe rules) is
-// the single env mechanism. Deliberately NO provisioning, NO hard-gate, NO
-// finalizer: the operator does not own the bound Secret's lifecycle, and a
-// missing Secret surfaces exactly like a missing envMap Secret
-// (CreateContainerConfigError on the pod).
+// This is the ONLY database surface — managed provisioning was removed
+// (ADR-0025). It is typed sugar over spec.secrets.envMap: the injection below
+// mutates the IN-MEMORY envMap, so the existing envMap -> SecretKeyRef wiring
+// (and its precedence/dedupe rules) is the single env mechanism. Deliberately
+// NO provisioning, NO hard-gate, NO finalizer: the operator does not own the
+// bound Secret's lifecycle, and a missing Secret surfaces exactly like a
+// missing envMap Secret (CreateContainerConfigError on the pod).
 
 // Default Secret keys for the BYO binding. secretRef defaults to DATABASE_URL
 // and roSecretRef to DATABASE_URL_RO so a single Secret carrying both keys
@@ -42,9 +71,8 @@ const (
 	DefaultDatabaseURLROKey = "DATABASE_URL_RO"
 )
 
-// databaseBound reports whether the BYO binding mode is configured. Mutually
-// exclusive with databaseEnabled (managed mode) — enforced at admission by CRD
-// CEL + validation.ValidateNextAppSpec.
+// databaseBound reports whether the BYO binding mode is configured. It is the
+// only database mode (managed provisioning was removed, ADR-0025).
 func databaseBound(app *appsv1alpha1.NextApp) bool {
 	return app.Spec.Database != nil && app.Spec.Database.SecretRef != nil
 }

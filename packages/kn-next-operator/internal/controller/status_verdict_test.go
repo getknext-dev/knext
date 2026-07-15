@@ -17,7 +17,6 @@ limitations under the License.
 package controller
 
 import (
-	"errors"
 	"testing"
 	"time"
 
@@ -41,8 +40,6 @@ import (
 // without envtest.
 
 const (
-	// testDatabaseAppName is the deterministic deriveAppName(prod, shop) shape.
-	testDatabaseAppName = "prod-shop"
 	// reasonReconcileSuccess / reasonKsvcNotReady pin the exact healthy /
 	// generic-unhealthy Ready reasons the reconciler has always written.
 	reasonReconcileSuccess = "ReconcileSuccess"
@@ -94,113 +91,6 @@ func assertConditionOrder(t *testing.T, v statusVerdict, want []string) {
 	}
 }
 
-func TestComputeStatusVerdict_DatabaseError(t *testing.T) {
-	app := verdictApp()
-	app.Status.DatabaseAppName = testDatabaseAppName
-	dbErr := errors.New("reconcile AppDatabase \"prod-shop\" in scale-zero-pg: boom")
-
-	v := computeStatusVerdict(app, nil, databaseCheckState{mode: databaseModeManaged, err: dbErr},
-		revisionCheck{}, time.Now())
-
-	assertConditionOrder(t, v, []string{ConditionDatabaseReady})
-	cond := findVerdictCondition(t, v, ConditionDatabaseReady)
-	if cond.Status != metav1.ConditionFalse || cond.Reason != "DatabaseError" {
-		t.Fatalf("DatabaseReady: got %+v", cond)
-	}
-	if cond.Message != dbErr.Error() {
-		t.Fatalf("DatabaseReady message: got %q", cond.Message)
-	}
-	if cond.ObservedGeneration != app.Generation {
-		t.Fatalf("ObservedGeneration: got %d", cond.ObservedGeneration)
-	}
-	if len(v.events) != 1 || v.events[0].eventType != corev1.EventTypeWarning ||
-		v.events[0].reason != ReasonReconcileFailed ||
-		v.events[0].message != "Failed to reconcile database: "+dbErr.Error() {
-		t.Fatalf("events: got %+v", v.events)
-	}
-	if v.requeueAfter != 0 {
-		t.Fatalf("requeueAfter: got %s, want 0 (error path requeues via the returned error)", v.requeueAfter)
-	}
-}
-
-func TestComputeStatusVerdict_DatabaseProvisioningGate(t *testing.T) {
-	app := verdictApp()
-	app.Status.DatabaseAppName = testDatabaseAppName
-
-	v := computeStatusVerdict(app, nil,
-		databaseCheckState{mode: databaseModeManaged, phase: "", requeueAfter: 42 * time.Second},
-		revisionCheck{}, time.Now())
-
-	// HARD-GATE verdict: DatabaseReady=False then Ready=False, nothing else.
-	assertConditionOrder(t, v, []string{ConditionDatabaseReady, ConditionReady})
-	dbCond := findVerdictCondition(t, v, ConditionDatabaseReady)
-	if dbCond.Reason != "Provisioning" ||
-		dbCond.Message != "AppDatabase \"prod-shop\" is not Ready yet (phase=Provisioning)" {
-		t.Fatalf("DatabaseReady: got %+v (empty phase must default to \"Provisioning\")", dbCond)
-	}
-	readyCond := findVerdictCondition(t, v, ConditionReady)
-	if readyCond.Status != metav1.ConditionFalse || readyCond.Reason != "DatabaseProvisioning" ||
-		readyCond.Message != "App deploy is gated on its database becoming Ready" {
-		t.Fatalf("Ready: got %+v", readyCond)
-	}
-	if len(v.events) != 1 || v.events[0].eventType != corev1.EventTypeNormal ||
-		v.events[0].reason != ReasonDatabaseProvisioning ||
-		v.events[0].message != "Waiting for database \"prod-shop\" to become Ready (phase=Provisioning)" {
-		t.Fatalf("events: got %+v", v.events)
-	}
-	if v.requeueAfter != 42*time.Second {
-		t.Fatalf("requeueAfter: got %s, want the database gate's requeue passed through", v.requeueAfter)
-	}
-}
-
-func TestComputeStatusVerdict_ManagedReadyAndKsvcReady(t *testing.T) {
-	now := time.Now()
-	app := verdictApp()
-	app.Status.DatabaseAppName = testDatabaseAppName
-
-	v := computeStatusVerdict(app, readyKsvc(now),
-		databaseCheckState{mode: databaseModeManaged, ready: true, phase: "Ready"},
-		revisionCheck{}, now)
-
-	// Append order is part of the #98 contract: DatabaseReady first (step 0),
-	// then the step-6 roll-up in its historical order.
-	assertConditionOrder(t, v, []string{
-		ConditionDatabaseReady, ConditionReconciling, ConditionReady, ConditionDegraded,
-		ConditionRevalidationDeferred,
-	})
-	dbCond := findVerdictCondition(t, v, ConditionDatabaseReady)
-	if dbCond.Status != metav1.ConditionTrue || dbCond.Reason != "Provisioned" ||
-		dbCond.Message != "Database \"prod-shop\" Ready; DATABASE_URL wired into the app" {
-		t.Fatalf("DatabaseReady: got %+v", dbCond)
-	}
-	if c := findVerdictCondition(t, v, ConditionReconciling); c.Status != metav1.ConditionFalse ||
-		c.Reason != reasonReconcileSuccess || c.Message != "Reconciliation complete" {
-		t.Fatalf("Reconciling: got %+v", c)
-	}
-	if c := findVerdictCondition(t, v, ConditionReady); c.Status != metav1.ConditionTrue ||
-		c.Reason != reasonReconcileSuccess ||
-		c.Message != "NextApp reconciled successfully; Knative Service is Ready" {
-		t.Fatalf("Ready: got %+v", c)
-	}
-	if c := findVerdictCondition(t, v, ConditionDegraded); c.Status != metav1.ConditionFalse ||
-		c.Reason != reasonReconcileSuccess || c.Message != "No errors detected" {
-		t.Fatalf("Degraded: got %+v", c)
-	}
-	if c := findVerdictCondition(t, v, ConditionRevalidationDeferred); c.Status != metav1.ConditionFalse ||
-		c.Reason != "NotDeferred" || c.Message != "Kafka revalidation not deferred" {
-		t.Fatalf("RevalidationDeferred: got %+v", c)
-	}
-	if len(v.events) != 0 {
-		t.Fatalf("events: got %+v, want none on a healthy pass", v.events)
-	}
-	if v.requeueAfter != 0 {
-		t.Fatalf("requeueAfter: got %s, want 0 on a healthy pass", v.requeueAfter)
-	}
-	if len(v.removeConditions) != 0 {
-		t.Fatalf("removeConditions: got %v", v.removeConditions)
-	}
-}
-
 func TestComputeStatusVerdict_BoundSecret(t *testing.T) {
 	now := time.Now()
 	app := verdictApp()
@@ -211,10 +101,22 @@ func TestComputeStatusVerdict_BoundSecret(t *testing.T) {
 	v := computeStatusVerdict(app, readyKsvc(now), databaseCheckState{mode: databaseModeBound},
 		revisionCheck{}, now)
 
+	// BYO binding: DatabaseReady=True (Bound), then the step-6 roll-up.
+	assertConditionOrder(t, v, []string{
+		ConditionDatabaseReady, ConditionReconciling, ConditionReady, ConditionDegraded,
+		ConditionRevalidationDeferred,
+	})
 	dbCond := findVerdictCondition(t, v, ConditionDatabaseReady)
 	if dbCond.Status != metav1.ConditionTrue || dbCond.Reason != "Bound" ||
 		dbCond.Message != "Bound existing Secret \"shop-db\" as DATABASE_URL" {
 		t.Fatalf("DatabaseReady: got %+v", dbCond)
+	}
+	if c := findVerdictCondition(t, v, ConditionReady); c.Status != metav1.ConditionTrue ||
+		c.Reason != reasonReconcileSuccess {
+		t.Fatalf("Ready: got %+v", c)
+	}
+	if len(v.events) != 0 {
+		t.Fatalf("events: got %+v, want none on a healthy bound pass", v.events)
 	}
 }
 

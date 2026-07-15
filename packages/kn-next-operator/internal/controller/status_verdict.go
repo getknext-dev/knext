@@ -38,39 +38,26 @@ import (
 // (pure) → applyStatusVerdict. No I/O happens here, so the verdict is fully
 // unit-testable without envtest (status_verdict_test.go).
 
-// databaseMode enumerates the three shapes of spec.database the reconciler
-// distinguishes (steps 0 / 0b / 0c): operator-managed provisioning (ADR-0006),
-// BYO Secret binding (ADR-0019), or no database at all.
+// databaseMode enumerates the two shapes of spec.database the reconciler
+// distinguishes (steps 0b / 0c): BYO Secret binding (ADR-0019) or no database at
+// all. The operator-managed provisioning mode was removed (ADR-0025) — knext is
+// engine-agnostic and provisions no database.
 type databaseMode int
 
 const (
 	// databaseModeNone: spec.database absent/emptied — the status must stop
 	// claiming a database.
 	databaseModeNone databaseMode = iota
-	// databaseModeManaged: spec.database.enabled — the operator provisions an
-	// AppDatabase and HARD-GATES the app on it reaching Ready (ADR-0006 §4.1).
-	databaseModeManaged
 	// databaseModeBound: spec.database.secretRef — an EXISTING same-namespace
 	// Secret is bound as DATABASE_URL; no provisioning, no hard-gate (ADR-0019).
 	databaseModeBound
 )
 
-// databaseCheckState carries the outcome of the imperative database phase into
-// the verdict. For databaseModeManaged exactly one of {err != nil, ready,
-// neither (still provisioning)} holds; the other modes use only mode.
+// databaseCheckState carries the outcome of the database binding phase into the
+// verdict. Only mode is consulted (BYO binding never fails or gates — a missing
+// Secret surfaces on the pod as CreateContainerConfigError, envMap semantics).
 type databaseCheckState struct {
 	mode databaseMode
-	// err is a managed-mode reconcile failure (AppDatabase create/update error).
-	err error
-	// ready is true only when the AppDatabase is Ready AND the DSN Secret has
-	// been mirrored (databaseWiring.ready).
-	ready bool
-	// phase is the observed AppDatabase.status.phase, for the gate messages
-	// ("" is rendered as "Provisioning").
-	phase string
-	// requeueAfter is the bounded requeue reconcileDatabase asked for while the
-	// gate is closed; passed through so the verdict owns the full requeue story.
-	requeueAfter time.Duration
 }
 
 // revisionCheck is the three-valued outcome of the pinned-revision existence
@@ -122,12 +109,11 @@ func revalidationDeferred(app *appsv1alpha1.NextApp) bool {
 }
 
 // computeStatusVerdict is the single, pure seam for the NextApp status verdict:
-// the DatabaseReady composition (managed error / hard-gate / ready, BYO bound,
-// none), the honest-Ready roll-up from the child ksvc's own Ready condition,
-// the pinned-revision verdict (with its three-valued check handling), the
-// ingress-programming stall, the RevalidationDeferred surface, and the bounded
-// requeues. ksvc may be nil ONLY while the database gate is closed (managed
-// mode, err or !ready) — those verdicts return before the ksvc is read.
+// the DatabaseReady composition (BYO bound, or none — managed provisioning was
+// removed, ADR-0025), the honest-Ready roll-up from the child ksvc's own Ready
+// condition, the pinned-revision verdict (with its three-valued check handling),
+// the ingress-programming stall, the RevalidationDeferred surface, and the
+// bounded requeues.
 func computeStatusVerdict(
 	app *appsv1alpha1.NextApp,
 	ksvc *servingv1.Service,
@@ -137,55 +123,9 @@ func computeStatusVerdict(
 ) statusVerdict {
 	var v statusVerdict
 
-	// 0. Delegated database (ADR-0006, #119) / BYO binding (ADR-0019).
+	// 0. BYO database binding (ADR-0019). Managed provisioning was removed
+	// (ADR-0025): the only database surface is a bound existing Secret, or none.
 	switch db.mode {
-	case databaseModeManaged:
-		if db.err != nil {
-			v.events = append(v.events, verdictEvent{corev1.EventTypeWarning, ReasonReconcileFailed,
-				fmt.Sprintf("Failed to reconcile database: %s", db.err.Error())})
-			v.conditions = append(v.conditions, metav1.Condition{
-				Type:               ConditionDatabaseReady,
-				Status:             metav1.ConditionFalse,
-				ObservedGeneration: app.Generation,
-				Reason:             "DatabaseError",
-				Message:            db.err.Error(),
-			})
-			return v
-		}
-		if !db.ready {
-			// HARD-GATE (§4.1): do NOT create the Knative Service until the DB is
-			// Ready. Surface DatabaseReady=False + Ready=False and requeue; the
-			// app never boots into a crash-loop on a missing DSN.
-			phaseMsg := db.phase
-			if phaseMsg == "" {
-				phaseMsg = "Provisioning"
-			}
-			v.events = append(v.events, verdictEvent{corev1.EventTypeNormal, ReasonDatabaseProvisioning,
-				fmt.Sprintf("Waiting for database %q to become Ready (phase=%s)", app.Status.DatabaseAppName, phaseMsg)})
-			v.conditions = append(v.conditions, metav1.Condition{
-				Type:               ConditionDatabaseReady,
-				Status:             metav1.ConditionFalse,
-				ObservedGeneration: app.Generation,
-				Reason:             "Provisioning",
-				Message:            fmt.Sprintf("AppDatabase %q is not Ready yet (phase=%s)", app.Status.DatabaseAppName, phaseMsg),
-			})
-			v.conditions = append(v.conditions, metav1.Condition{
-				Type:               ConditionReady,
-				Status:             metav1.ConditionFalse,
-				ObservedGeneration: app.Generation,
-				Reason:             "DatabaseProvisioning",
-				Message:            "App deploy is gated on its database becoming Ready",
-			})
-			v.requeueAfter = db.requeueAfter
-			return v
-		}
-		v.conditions = append(v.conditions, metav1.Condition{
-			Type:               ConditionDatabaseReady,
-			Status:             metav1.ConditionTrue,
-			ObservedGeneration: app.Generation,
-			Reason:             "Provisioned",
-			Message:            fmt.Sprintf("Database %q Ready; DATABASE_URL wired into the app", app.Status.DatabaseAppName),
-		})
 	case databaseModeBound:
 		v.conditions = append(v.conditions, metav1.Condition{
 			Type:               ConditionDatabaseReady,

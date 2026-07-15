@@ -142,15 +142,6 @@ func TestDatabaseCollisionRatchet(t *testing.T) {
 		}
 	})
 
-	t.Run("CREATE managed-mode collision is rejected too", func(t *testing.T) {
-		spec := collisionSpec()
-		spec.Database = &appsv1alpha1.DatabaseSpec{Enabled: true}
-		_, err := v.ValidateCreate(ctx, newNextApp(spec))
-		if err == nil || !strings.Contains(err.Error(), "DATABASE_URL") {
-			t.Fatalf("expected DATABASE_URL collision rejection on create, got err=%v", err)
-		}
-	})
-
 	t.Run("UPDATE that ADDS a collision is rejected", func(t *testing.T) {
 		_, err := v.ValidateUpdate(ctx, newNextApp(cleanSpec()), newNextApp(collisionSpec()))
 		if err == nil || !strings.Contains(err.Error(), "DATABASE_URL") {
