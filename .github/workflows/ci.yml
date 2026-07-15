@@ -29,6 +29,13 @@ jobs:
       - name: Run Biome lint & format check
         run: pnpm run lint
 
+      # Fail FAST on the TS5097 main-red class (#289): a relative import written
+      # with an explicit .ts/.tsx extension passes vitest at runtime but fails
+      # `tsc --noEmit` under moduleResolution:bundler. Runs before the builds so
+      # the branch goes red at PR time, not only after the post-build typecheck.
+      - name: Guard — no .ts/.tsx import extensions (TS5097)
+        run: pnpm run lint:ts-imports
+
       # @knext/core ships only dist/ and its exports resolve to ./dist/* (#114).
       # The publish-surface test asserts every exports subpath exists in dist, so
       # core MUST be built before vitest runs. @knext/lib must be built first —
