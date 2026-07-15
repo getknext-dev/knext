@@ -158,25 +158,8 @@ func main() {
 		metricsServerOptions.KeyName = metricsCertKey
 	}
 
-	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
-		Scheme:                 scheme,
-		Metrics:                metricsServerOptions,
-		WebhookServer:          webhookServer,
-		HealthProbeBindAddress: probeAddr,
-		LeaderElection:         enableLeaderElection,
-		LeaderElectionID:       "2dd0b3e2.kn-next.dev",
-		// LeaderElectionReleaseOnCancel defines if the leader should step down voluntarily
-		// when the Manager ends. This requires the binary to immediately end when the
-		// Manager is stopped, otherwise, this setting is unsafe. Setting this significantly
-		// speeds up voluntary leader transitions as the new leader don't have to wait
-		// LeaseDuration time first.
-		//
-		// In the default scaffold provided, the program ends immediately after
-		// the manager stops, so would be fine to enable this option. However,
-		// if you are doing or is intended to do any operation such as perform cleanups
-		// after the manager stops then its usage might be unsafe.
-		// LeaderElectionReleaseOnCancel: true,
-	})
+	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(),
+		buildManagerOptions(enableLeaderElection, metricsServerOptions, webhookServer, probeAddr))
 	if err != nil {
 		setupLog.Error(err, "Failed to start manager")
 		os.Exit(1)
@@ -216,6 +199,43 @@ func main() {
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
 		setupLog.Error(err, "Failed to run manager")
 		os.Exit(1)
+	}
+}
+
+// leaderElectionID is the coordination.k8s.io Lease name the operator contends
+// on. It MUST stay stable across releases: a changed ID would let an old and a
+// new revision each acquire "their own" lease and reconcile simultaneously —
+// exactly the split-brain leader election exists to prevent (single-writer,
+// ADR-0001).
+const leaderElectionID = "2dd0b3e2.kn-next.dev"
+
+// buildManagerOptions assembles the controller-manager options (issue #307 HA).
+//
+// Isolated from main() so leader-election configuration is unit-testable without
+// standing up a real manager. Leader election makes the operator horizontally
+// available: run 2+ replicas, but only the current Lease holder reconciles, so
+// there is still exactly ONE active writer (ADR-0001) while the standby is a
+// warm spare ready to take over.
+//
+// LeaderElectionReleaseOnCancel is enabled: when a leader is gracefully stopped
+// (rolling update, node drain, SIGTERM), it hands the Lease back on the way out
+// so the standby acquires it immediately instead of waiting a full LeaseDuration
+// (~15s) for the stale lease to expire. This is SAFE because main() does no work
+// after mgr.Start() returns — the process exits the instant the manager stops.
+func buildManagerOptions(
+	enableLeaderElection bool,
+	metricsServerOptions metricsserver.Options,
+	webhookServer webhook.Server,
+	probeAddr string,
+) ctrl.Options {
+	return ctrl.Options{
+		Scheme:                        scheme,
+		Metrics:                       metricsServerOptions,
+		WebhookServer:                 webhookServer,
+		HealthProbeBindAddress:        probeAddr,
+		LeaderElection:                enableLeaderElection,
+		LeaderElectionID:              leaderElectionID,
+		LeaderElectionReleaseOnCancel: true,
 	}
 }
 

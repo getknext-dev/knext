@@ -92,6 +92,87 @@ func TestManagerKeepsLeaderElectFlag(t *testing.T) {
 	}
 }
 
+// managerContainer returns the `manager` container map from the Deployment.
+func managerContainer(t *testing.T) map[string]any {
+	t.Helper()
+	dep := managerDeployment(t)
+	spec, _ := dep["spec"].(map[string]any)
+	tmpl, _ := spec["template"].(map[string]any)
+	pspec, _ := tmpl["spec"].(map[string]any)
+	containers, _ := pspec["containers"].([]any)
+	for _, c := range containers {
+		cm, _ := c.(map[string]any)
+		if name, _ := cm["name"].(string); name == "manager" {
+			return cm
+		}
+	}
+	t.Fatalf("manager container not found in Deployment")
+	return nil
+}
+
+// AC (limits): the manager must declare BOTH requests and limits for cpu and
+// memory. Without limits an OOM/runaway operator can starve co-tenants and get
+// evicted unpredictably — the exact failure #307 is about (a crashed/OOM-killed
+// operator stalling reconciliation). Requests are what the scheduler and the
+// PodDisruptionBudget rely on to keep a replica placeable.
+func TestManagerHasResourceRequestsAndLimits(t *testing.T) {
+	cm := managerContainer(t)
+	res, _ := cm["resources"].(map[string]any)
+	if res == nil {
+		t.Fatalf("manager container has no resources block (want requests+limits for cpu+memory)")
+	}
+	for _, kind := range []string{"requests", "limits"} {
+		q, _ := res[kind].(map[string]any)
+		if q == nil {
+			t.Fatalf("manager resources.%s missing", kind)
+		}
+		for _, dim := range []string{"cpu", "memory"} {
+			if _, ok := q[dim]; !ok {
+				t.Errorf("manager resources.%s.%s missing", kind, dim)
+			}
+		}
+	}
+}
+
+// AC (probes): the manager must have BOTH a liveness and a readiness probe on
+// the health-probe port, and they must be HTTP probes on /healthz and /readyz
+// (the endpoints main.go registers). A replicas:2 HA deployment without probes
+// can't detect a wedged replica or gate rollout on readiness.
+func TestManagerHasLivenessAndReadinessProbes(t *testing.T) {
+	cm := managerContainer(t)
+	for _, p := range []struct{ key, path string }{
+		{"livenessProbe", "/healthz"},
+		{"readinessProbe", "/readyz"},
+	} {
+		probe, _ := cm[p.key].(map[string]any)
+		if probe == nil {
+			t.Errorf("manager container missing %s", p.key)
+			continue
+		}
+		hg, _ := probe["httpGet"].(map[string]any)
+		if hg == nil {
+			t.Errorf("%s is not an httpGet probe", p.key)
+			continue
+		}
+		if got, _ := hg["path"].(string); got != p.path {
+			t.Errorf("%s httpGet.path = %q, want %q", p.key, got, p.path)
+		}
+	}
+}
+
+// AC (no :latest, CLAUDE.md §4): the kustomize image override must be
+// digest-pinned (@sha256:) and never :latest — an operator that silently pulls
+// a moving tag on restart defeats the whole HA story.
+func TestManagerImageIsDigestPinnedNotLatest(t *testing.T) {
+	k := repoFile(t, "config/manager/kustomization.yaml")
+	if strings.Contains(k, ":latest") {
+		t.Errorf("config/manager/kustomization.yaml pins a :latest image — must be @sha256: digest-pinned")
+	}
+	if !strings.Contains(k, "@sha256:") {
+		t.Errorf("config/manager/kustomization.yaml image override is not digest-pinned (@sha256: missing)")
+	}
+}
+
 // AC2: soft pod anti-affinity — preferredDuringSchedulingIgnoredDuringExecution.
 // It MUST be soft: hard (requiredDuring...) anti-affinity would strand the 2nd
 // replica Pending forever on single-node/kind/CI clusters.
@@ -158,6 +239,31 @@ func TestPodDisruptionBudgetMinAvailableOne(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("config/manager/pdb.yaml: no PodDisruptionBudget document found")
+	}
+}
+
+// AC (docs, issue #307 acceptance criterion): an HA section must exist and cover
+// the load-bearing operator concepts — leader election, running 2 replicas, and
+// the blast radius when the operator is down (running apps keep serving; only
+// reconciliation pauses). Docs shipping with the change is a CLAUDE.md hard rule
+// (2b); the acceptance criterion explicitly requires the HA section, so its
+// existence + content is asserted here, not left to review.
+func TestHighAvailabilityDocExists(t *testing.T) {
+	doc := repoFile(t, "docs/high-availability.md")
+	lower := strings.ToLower(doc)
+	for _, want := range []string{
+		"leader election",
+		"2 replicas",
+		"blast radius",
+		"reconciliation",
+	} {
+		if !strings.Contains(lower, want) {
+			t.Errorf("docs/high-availability.md does not mention %q", want)
+		}
+	}
+	// The blast-radius promise: running apps keep serving while the operator is down.
+	if !strings.Contains(lower, "keep serving") && !strings.Contains(lower, "keeps serving") {
+		t.Errorf("docs/high-availability.md must state running apps keep serving when the operator is down")
 	}
 }
 
