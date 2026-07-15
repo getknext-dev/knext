@@ -1,0 +1,19 @@
+# In-cluster psql client for the warm-standby measurement. Uses the compute
+# image (already cached on the node, ships psql). Sleeps forever; the harness
+# execs `psql` from it to probe the warm compute directly on :55433.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: warm-client
+  namespace: scale-zero-pg
+  labels: { app: warm-client }
+spec:
+  containers:
+    - name: client
+      image: neondatabase/compute-node-v17:8464
+      imagePullPolicy: IfNotPresent
+      command: ["/bin/sh", "-c", "sleep infinity"]
+      resources:
+        requests: { cpu: 50m, memory: 32Mi }
+        limits: { memory: 128Mi }
+  terminationGracePeriodSeconds: 2

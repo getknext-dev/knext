@@ -1,0 +1,198 @@
+# Standing warm-Secondary pageserver + the generation ledger the failover
+# watcher advances. This is the durable half of issue #3: a second pageserver
+# (distinct identity id, SAME bucket + broker) that holds a warm Secondary
+# location for the SAME tenant storage-init created on the primary — it
+# pre-downloads layers from MinIO without serving, so a promotion is a
+# generation+1 re-attach, not a cold restore.
+#
+# Topology (the watcher — 58 — drives the flip):
+#   Service pageserver          (from 53) — the CLIENT handle the compute
+#     resolves (host=pageserver). Selector app:pageserver at rest; the watcher
+#     FLIPS it to app:pageserver-standby on failover.
+#   Service pageserver-primary  — STABLE handle to the primary STS, unaffected
+#     by the flip; the watcher probes THIS for primary liveness.
+#   Service pageserver-standby  — handle to the standby STS; the watcher PUTs
+#     the promotion here and flips the client Service TO its selector.
+---
+# Stable liveness handle for the primary STS (never flipped). The watcher probes
+# :9898/v1/status here so it detects the PRIMARY's death, not the client
+# Service's current target.
+apiVersion: v1
+kind: Service
+metadata:
+  name: pageserver-primary
+  namespace: scale-zero-pg
+  labels: { app: pageserver, plane: storage }
+spec:
+  selector: { app: pageserver }
+  ports:
+    - { name: pg, port: 6400, targetPort: pg }
+    - { name: http, port: 9898, targetPort: http }
+---
+# Generation ledger: the last generation the tenant was attached at. storage-init
+# used generation 1, so the ledger seeds at "1"; each auto-failover reads it,
+# promotes at value+1, and writes value+1 back. Persisting it here keeps repeated
+# failovers monotonic and survives a watcher restart.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pageserver-generation
+  namespace: scale-zero-pg
+  labels: { plane: storage }
+data:
+  generation: "1"
+---
+# Standby config: identical to the primary's (same broker + bucket) EXCEPT a
+# distinct node identity (id=1235 vs the primary's 1234) — two pageservers must
+# never share an id.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pageserver-standby-config
+  namespace: scale-zero-pg
+data:
+  # remote_storage is appended by the seed-config init container from the
+  # storage-objstore ConfigMap (#105) — SAME bucket/endpoint as the primary
+  # (the standby must read the identical object store to hold warm layers).
+  pageserver.toml: |
+    broker_endpoint='http://storage-broker:50051'
+    pg_distrib_dir='/usr/local/'
+    listen_pg_addr='0.0.0.0:6400'
+    listen_http_addr='0.0.0.0:9898'
+    control_plane_api='http://0.0.0.0:6666' # no storage controller in the MVP; junk address
+    control_plane_emergency_mode=true
+    virtual_file_io_mode="buffered"
+  identity.toml: |
+    id=1235
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: pageserver-standby
+  namespace: scale-zero-pg
+  labels: { app: pageserver-standby, plane: storage }
+spec:
+  serviceName: pageserver-standby
+  replicas: 1
+  revisionHistoryLimit: 2
+  selector: { matchLabels: { app: pageserver-standby } }
+  template:
+    metadata:
+      labels: { app: pageserver-standby, plane: storage }
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile: { type: RuntimeDefault }
+      initContainers:
+        - name: seed-config
+          image: neondatabase/neon:8464
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+          # Object-store endpoint/bucket/region are env-driven (#105), same as the
+          # primary; cp first, then append exactly one remote_storage line.
+          envFrom:
+            - configMapRef: { name: storage-objstore } # OBJSTORE_ENDPOINT / _BUCKET / _REGION
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              mkdir -p /data/.neon
+              cp /config/pageserver.toml /config/identity.toml /data/.neon/
+              printf "remote_storage={ endpoint='%s', bucket_name='%s', bucket_region='%s', prefix_in_bucket='/pageserver' }\n" \
+                "$OBJSTORE_ENDPOINT" "$OBJSTORE_BUCKET" "$OBJSTORE_REGION" >> /data/.neon/pageserver.toml
+              echo "standby pageserver.toml object-store target: endpoint=$OBJSTORE_ENDPOINT bucket=$OBJSTORE_BUCKET region=$OBJSTORE_REGION"
+          volumeMounts:
+            - { name: data, mountPath: /data }
+            - { name: config, mountPath: /config }
+      containers:
+        - name: pageserver
+          image: neondatabase/neon:8464
+          command: ["/usr/local/bin/pageserver", "-D", "/data/.neon"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+          env:
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom: { secretKeyRef: { name: storage-s3-creds, key: user } }
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom: { secretKeyRef: { name: storage-s3-creds, key: password } }
+          ports:
+            - { name: pg, containerPort: 6400 }
+            - { name: http, containerPort: 9898 }
+          volumeMounts:
+            - { name: data, mountPath: /data }
+          readinessProbe:
+            httpGet: { path: /v1/status, port: http }
+            periodSeconds: 2
+          # A hung standby is a dead standby — restart it so the warm layers
+          # keep tracking the bucket (mirrors the primary's liveness stance).
+          livenessProbe:
+            httpGet: { path: /v1/status, port: http }
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 6
+          resources:
+            requests: { cpu: 100m, memory: 256Mi, ephemeral-storage: 100Mi }
+            limits: { memory: 1Gi, ephemeral-storage: 1Gi }
+      volumes:
+        - name: config
+          configMap: { name: pageserver-standby-config }
+  volumeClaimTemplates:
+    - metadata: { name: data }
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources: { requests: { storage: 5Gi } }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pageserver-standby
+  namespace: scale-zero-pg
+spec:
+  selector: { app: pageserver-standby }
+  ports:
+    - { name: pg, port: 6400, targetPort: pg }
+    - { name: http, port: 9898, targetPort: http }
+---
+# One-shot Job that registers the standby as a WARM Secondary for the live
+# tenant (mode:"Secondary", secondary_conf.warm:true) and kicks a first layer
+# download. Idempotent: re-running just re-asserts the location. Runs on the
+# neon image (ships curl); fixed IDs => no jq. It intentionally does NOT attach
+# the tenant — only the watcher promotes, at generation+1.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: pageserver-standby-init
+  namespace: scale-zero-pg
+  labels: { app: pageserver-standby-init, plane: storage }
+spec:
+  backoffLimit: 30
+  template:
+    metadata:
+      labels: { app: pageserver-standby-init, plane: storage }
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: init
+          image: neondatabase/neon:8464
+          envFrom:
+            - configMapRef: { name: compute-config } # TENANT_ID, TIMELINE_ID, PG_VERSION, PAGESERVER_HOST
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              SB="http://pageserver-standby:9898"
+              echo "waiting for standby HTTP at ${SB} ..."
+              until curl -sf "${SB}/v1/tenant" >/dev/null 2>&1; do sleep 2; done
+              echo "registering warm Secondary for tenant ${TENANT_ID} on the standby"
+              curl -sf -X PUT -H 'Content-Type: application/json' \
+                -d '{"mode":"Secondary","secondary_conf":{"warm":true},"tenant_conf":{}}' \
+                "${SB}/v1/tenant/${TENANT_ID}/location_config" >/dev/null
+              echo "kicking a first layer download (best-effort)"
+              curl -sf -X POST "${SB}/v1/tenant/${TENANT_ID}/secondary/download" >/dev/null 2>&1 || true
+              echo "standby warm-Secondary registered"

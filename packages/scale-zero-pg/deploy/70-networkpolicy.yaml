@@ -1,0 +1,222 @@
+# NetworkPolicy: default-deny ingress for the namespace, then explicit allows
+# for the real traffic flows (mapped from the system-design review, finding #4).
+#
+# Flow map (who may INGRESS to whom, in-namespace unless noted):
+#   client / knext (any ns) -> gateway:55432        (the front door; open to all)
+#   Prometheus / peer gw    -> gateway:9090         (metrics; in-namespace only)
+#   gateway                 -> compute:55433        (STRICT: gateway pods only)
+#   compute                 -> pageserver:6400      (GetPage@LSN / basebackup)
+#   compute                 -> safekeeper:5454      (WAL write)
+#   pageserver              -> safekeeper:5454      (WAL fetch)
+#   safekeeper, pageserver  -> storage-broker:50051 (pub/sub)
+#   safekeeper, pageserver  -> minio:9000           (WAL / page offload)
+#   {storage-init, wait-timeline init, verify pods} -> pageserver:9898 (HTTP API)
+#   {bucket-init job, ...}  -> minio:9000
+#
+# Two deliberate looseness trade-offs, both documented:
+#   * pageserver:9898 is allowed from the WHOLE namespace (not a single label)
+#     because the storage-init Job, the compute wait-timeline initContainer, and
+#     the kubectl-run verify pods all need it, and the verify/job pods carry no
+#     app label we can select (their manifests are owned elsewhere). The
+#     sensitive data path — compute:55433 — stays STRICTLY gateway-only.
+#   * minio:9000 is allowed from the whole namespace for the same reason
+#     (unlabeled bucket-init Job). MinIO holds only already-known dev creds and
+#     is never externally exposed.
+#
+# ENFORCEMENT NOTE: OrbStack's bundled k8s AND the OKE GA cluster run flannel
+# (kube-flannel-ds), which ships NO NetworkPolicy controller — these objects are
+# inert there but declaratively correct and enforced by any compliant CNI
+# (Calico, Cilium, OCI VCN-native w/ network policy). Health/readiness probes
+# originate from the kubelet (node IP); strict CNIs may need a node-CIDR or
+# failsafe allowance for the *:9090/9898/7676/9000 health ports — verify on the
+# target CNI before production.
+#
+# TENANT ISOLATION DOES NOT DEPEND ON THIS FILE (issue #112/#114). Because the CNI
+# may not enforce NetworkPolicy, the ENFORCING control that keeps a co-tenant pod
+# from becoming superuser on compute-<app>:55433 is the per-app compute's pg_hba:
+# cloud_admin is bound to loopback and REJECTED over TCP (deploy/compute-files/
+# entrypoint.sh), independent of the CNI. apps-compute-ingress below is DEFENSE-
+# IN-DEPTH that becomes active isolation on a policy-capable CNI. See
+# docs/operations.md "Network isolation caveat" / "Tenant isolation controls".
+#
+# namespaceSelector uses the auto-applied `kubernetes.io/metadata.name` label.
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+  namespace: scale-zero-pg
+spec:
+  podSelector: {} # every pod in the namespace
+  policyTypes: ["Ingress"]
+  # no ingress rules => deny all ingress unless a later policy allows it
+---
+# Gateway: 55432 is the front door (open to all sources, incl. other
+# namespaces / knext apps); 9090 metrics only from within the namespace
+# (peer gateways + an in-namespace Prometheus). To scrape from a dedicated
+# monitoring namespace later, add its namespaceSelector to the 9090 rule.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: gateway-ingress
+  namespace: scale-zero-pg
+spec:
+  podSelector:
+    matchLabels: { app: pggw }
+  policyTypes: ["Ingress"]
+  ingress:
+    - ports: # 55432 from anywhere — no `from` selector
+        - { protocol: TCP, port: 55432 }
+    - from:
+        - podSelector: {} # any pod in this namespace
+      ports:
+        - { protocol: TCP, port: 9090 }
+---
+# Compute: the only sensitive data path. Reachable on 55433 ONLY from the
+# gateway pods. Everything else (incl. compute_ctl HTTP :3080) is denied.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: compute-ingress
+  namespace: scale-zero-pg
+spec:
+  podSelector:
+    matchLabels: { app: compute }
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: { app: pggw }
+      ports:
+        - { protocol: TCP, port: 55433 }
+---
+# Pageserver: 6400 (GetPage/basebackup) from compute; 9898 (HTTP API) from the
+# whole namespace (storage-init + wait-timeline init + verify pods).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: pageserver-ingress
+  namespace: scale-zero-pg
+spec:
+  podSelector:
+    matchLabels: { app: pageserver }
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: { app: compute }
+      ports:
+        - { protocol: TCP, port: 6400 }
+    - from:
+        - podSelector: {} # namespace-wide: HTTP API for init/verify (see header)
+      ports:
+        - { protocol: TCP, port: 9898 }
+---
+# Safekeeper: 5454 (WAL) from compute (write) and pageserver (fetch); 7676
+# (HTTP status) from within the namespace.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: safekeeper-ingress
+  namespace: scale-zero-pg
+spec:
+  podSelector:
+    matchLabels: { app: safekeeper }
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: { app: compute }
+        - podSelector:
+            matchLabels: { app: pageserver }
+      ports:
+        - { protocol: TCP, port: 5454 }
+    - from:
+        - podSelector: {}
+      ports:
+        - { protocol: TCP, port: 7676 }
+---
+# MinIO: 9000 (S3) from within the namespace (safekeeper + pageserver offload,
+# plus the unlabeled bucket-init Job — see header). Console 9001 stays denied.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: minio-ingress
+  namespace: scale-zero-pg
+spec:
+  podSelector:
+    matchLabels: { app: minio }
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector: {}
+      ports:
+        - { protocol: TCP, port: 9000 }
+---
+# Storage broker: 50051 pub/sub from safekeeper and pageserver only.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: storage-broker-ingress
+  namespace: scale-zero-pg
+spec:
+  podSelector:
+    matchLabels: { app: storage-broker }
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: { app: safekeeper }
+        - podSelector:
+            matchLabels: { app: pageserver }
+      ports:
+        - { protocol: TCP, port: 50051 }
+---
+# apps-gateway (branch-per-app multi-tenancy, issue #74): the multi-tenant front
+# door on 55432 is OPEN to all sources (knext apps in any namespace connect their
+# per-app DATABASE_URL here) — tenant isolation is NOT network-based, it is the
+# per-app credential + the gateway's (user,database) refusal. 9090 metrics stay
+# in-namespace (peer gateways scrape each other + Prometheus). This mirrors the
+# primary gateway-ingress policy for the app=pggw-apps pods, which default-deny
+# would otherwise block on a strict CNI.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: apps-gateway-ingress
+  namespace: scale-zero-pg
+spec:
+  podSelector:
+    matchLabels: { app: pggw-apps }
+  policyTypes: ["Ingress"]
+  ingress:
+    - ports: # 55432 writer + 55434 per-app read-only (#127) — the multi-tenant front door
+        - { protocol: TCP, port: 55432 }
+        - { protocol: TCP, port: 55434 }
+    - from:  # 9090 metrics: in-namespace only (peer scrape + Prometheus)
+        - podSelector: {}
+      ports:
+        - { protocol: TCP, port: 9090 }
+---
+# Per-app computes (branch-per-app, issue #74): the sensitive data path
+# (compute-<app>:55433) is reachable ONLY from the apps-gateway pods — the same
+# STRICT posture as the primary compute-ingress. Per-app Deployments carry
+# {tier: apps, plane: compute}, so this one policy covers every app without a
+# per-app rule — INCLUDING the per-app read-only computes (compute-ro-<app>, #127),
+# which carry the same {tier: apps, plane: compute} labels and so are reachable on
+# 55433 only from the apps-gateway pods. (The tmpl seed compute is written via
+# `kubectl exec`, API-server exec not pod-network ingress, so it is unaffected.)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: apps-compute-ingress
+  namespace: scale-zero-pg
+spec:
+  podSelector:
+    matchLabels: { tier: apps, plane: compute }
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: { app: pggw-apps }
+      ports:
+        - { protocol: TCP, port: 55433 }

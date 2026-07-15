@@ -1,0 +1,105 @@
+# Object storage: bottomless history + basis for branching/PITR.
+#
+# OPTIONAL — this MinIO is the LOCAL-DEV / ON-PREM DEFAULT, not a hard dependency
+# (#105). The pageserver + safekeepers speak the S3 API and read their endpoint
+# from the `storage-objstore` ConfigMap (deploy/gen-secrets.sh). To run against an
+# EXTERNAL object store (managed cloud S3 or a self-hosted alternative), point
+# storage-objstore at it and DO NOT apply this file — see docs/operations.md
+# "Object-storage backend" and deploy/_verify-objstore.sh. Bucket creation lives
+# in 55-storage-init.yaml so it works against whatever endpoint is configured
+# (this file no longer creates the bucket).
+#
+# WHY OPTIONAL MATTERS: MinIO archived its community repos, so a platform whose
+# goal is "easy to host anywhere" must not be married to it. Maintained on-prem
+# S3 alternatives that speak the same API (all path-style, SigV4): SeaweedFS,
+# Ceph RADOS Gateway, and Garage. On a managed cluster, prefer the cloud's native
+# object store (e.g. OCI Object Storage's S3 Compatibility API — proven in
+# deploy/_verify-objstore.sh).
+#
+# IMAGE IS DIGEST-PINNED: MinIO's community project is archived, so we pin the
+# last-good RELEASE.2022-10-20 build by its immutable sha256 (the exact image the
+# live plane has been running) — a moved/retagged upstream can never change what
+# we pull.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: minio
+  namespace: scale-zero-pg
+  labels: { app: minio, plane: storage }
+spec:
+  replicas: 1
+  revisionHistoryLimit: 2 # cap ReplicaSet churn
+  selector: { matchLabels: { app: minio } }
+  strategy: { type: Recreate }
+  template:
+    metadata:
+      labels: { app: minio, plane: storage }
+    spec:
+      # NOTE: this MinIO image defaults to root and the existing PVC data is
+      # root-owned, so we do NOT force runAsNonRoot here (would break on the
+      # bound volume). We still harden: no privilege escalation, drop all caps,
+      # seccomp RuntimeDefault. Prod should move to real S3 / non-root MinIO.
+      securityContext:
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: minio
+          image: quay.io/minio/minio:RELEASE.2022-10-20T00-55-09Z@sha256:cc144348ad1e4126766279b042804fa4f130da531cc811e91fdbcb12c6bc8881 # digest-pinned last-good (upstream archived, #105)
+          args: ["server", "/data", "--address", ":9000", "--console-address", ":9001"]
+          # Root identity from the storage-s3-creds Secret (deploy/gen-secrets.sh),
+          # never plaintext YAML. Same creds double as the S3 key for the storage
+          # plane. Rotating requires MinIO's root-rotation flow — see gen-secrets.sh.
+          env:
+            - name: MINIO_ROOT_USER
+              valueFrom: { secretKeyRef: { name: storage-s3-creds, key: user } }
+            - name: MINIO_ROOT_PASSWORD
+              valueFrom: { secretKeyRef: { name: storage-s3-creds, key: password } }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+          ports:
+            - { name: s3, containerPort: 9000 }
+            - { name: console, containerPort: 9001 }
+          volumeMounts:
+            - { name: data, mountPath: /data }
+          readinessProbe:
+            httpGet: { path: /minio/health/ready, port: s3 }
+            periodSeconds: 2
+          # Liveness: /minio/health/live flips only on a wedged server.
+          livenessProbe:
+            httpGet: { path: /minio/health/live, port: s3 }
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 6
+          resources:
+            requests: { cpu: 50m, memory: 256Mi, ephemeral-storage: 100Mi }
+            # 512Mi: 256Mi OOMKilled 12x under a legitimate full-bucket backup
+            # mirror (observed live at ~18GB). The durability tier must survive
+            # its own backup traffic.
+            limits: { memory: 512Mi, ephemeral-storage: 1Gi }
+      volumes:
+        - name: data
+          persistentVolumeClaim: { claimName: minio-data }
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: minio-data
+  namespace: scale-zero-pg
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources: { requests: { storage: 5Gi } }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: minio
+  namespace: scale-zero-pg
+spec:
+  selector: { app: minio }
+  ports:
+    - { name: s3, port: 9000, targetPort: s3 }
+    - { name: console, port: 9001, targetPort: console }
+# NOTE (#105): bucket creation used to live here (minio-create-buckets Job). It
+# has moved to 55-storage-init.yaml's ensure-bucket initContainer so the bucket
+# is created on the CONFIGURED endpoint (MinIO or external S3), not minio-only.

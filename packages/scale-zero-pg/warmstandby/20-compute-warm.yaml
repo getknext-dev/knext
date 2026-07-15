@@ -1,0 +1,94 @@
+# Warm-standby compute (design A: GATED POD). A SEPARATE deployment from
+# deploy/20-compute.yaml — it never modifies the production wake path. Managed
+# manually (0/1) by the measurement harness only.
+#
+# The pod is identical to the stock compute EXCEPT its command points at the
+# gated entrypoint (warmstandby/10-compute-warm-files.yaml), which blocks
+# before compute_ctl attaches. So the pod runs (RAM held) while "asleep".
+#
+# SINGLE-WRITER: the Recreate strategy + the harness's pre-release assertion
+# (deploy/compute == 0, fully drained) keep exactly one writer on the timeline.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: compute-warm
+  namespace: scale-zero-pg
+  labels: { app: compute-warm }
+spec:
+  replicas: 0 # manually scaled 0<->1 by the harness for the experiment
+  revisionHistoryLimit: 2
+  selector:
+    matchLabels: { app: compute-warm }
+  strategy:
+    type: Recreate # single-writer: never two warm computes on one timeline
+  template:
+    metadata:
+      labels: { app: compute-warm }
+    spec:
+      securityContext:
+        seccompProfile: { type: RuntimeDefault }
+      terminationGracePeriodSeconds: 10
+      # Same gate as the stock compute: block until the tenant+timeline exist.
+      # Already satisfied here, so it passes immediately.
+      initContainers:
+        - name: wait-timeline
+          image: neondatabase/neon:8464
+          envFrom:
+            - configMapRef:
+                name: compute-config
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              PS="http://${PAGESERVER_HOST}:9898"
+              until curl -sf "${PS}/v1/tenant/${TENANT_ID}/timeline" | grep -q "${TIMELINE_ID}"; do
+                echo "waiting for timeline ${TIMELINE_ID} on tenant ${TENANT_ID} ..."; sleep 0.5;
+              done
+              echo "timeline ready"
+      containers:
+        - name: compute
+          image: neondatabase/compute-node-v17:8464
+          imagePullPolicy: IfNotPresent
+          # THE difference: gated entrypoint instead of /compute-files/entrypoint.sh
+          command: ["/bin/sh", "/warm/entrypoint.sh"]
+          envFrom:
+            - configMapRef:
+                name: compute-config
+          ports:
+            - { name: pg, containerPort: 55433 }
+            - { name: compute-http, containerPort: 3080 }
+          volumeMounts:
+            - { name: compute-files, mountPath: /compute-files } # reused: config.json
+            - { name: compute-warm-files, mountPath: /warm }     # gated entrypoint.sh
+          readinessProbe:
+            tcpSocket: { port: pg }
+            initialDelaySeconds: 0
+            periodSeconds: 1
+            failureThreshold: 60
+          resources:
+            # Identical to deploy/compute so "RAM held while asleep" is apples-
+            # to-apples: the scheduler reserves this whether gated or attached.
+            requests: { cpu: 250m, memory: 256Mi }
+            limits: { memory: 1Gi }
+      volumes:
+        - name: compute-files
+          configMap:
+            name: compute-files # EXISTING CM (deploy/54): config.json spec template
+        - name: compute-warm-files
+          configMap:
+            name: compute-warm-files # this dir's 10-*.yaml: gated entrypoint.sh
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: compute-warm
+  namespace: scale-zero-pg
+  labels: { app: compute-warm }
+spec:
+  # publishNotReadyAddresses: the endpoint (and DNS) exists even while the pod
+  # is gated/not-ready, so the harness can connect the instant the gate opens
+  # and the TCP retry is the readiness check (same rationale as deploy/compute).
+  publishNotReadyAddresses: true
+  selector: { app: compute-warm }
+  ports:
+    - { name: pg, port: 55433, targetPort: pg }

@@ -1,0 +1,12 @@
+node_modules/
+graphify-out/
+.DS_Store
+*.log
+local/.data/
+
+# read-pool drill scratch (deploy/_verify-readpool.sh)
+deploy/_tmp-*
+
+# python bytecode from deploy/ test runs (skctl/provision unit tests)
+__pycache__/
+*.pyc
