@@ -104,15 +104,24 @@ vi.mock("../cli/shared", () => ({
 // node:fs is mocked so the skew guard's readFileSync(.next/BUILD_ID) is
 // controllable. writeFileSync/mkdirSync are stubbed so a real apply-branch run
 // doesn't touch disk. readFileSync default: return the deploy tag (match).
+// deploy.ts uses NAMED imports (`import { readFileSync, writeSync }`), so the
+// named overrides below are what it actually binds to. We ALSO expose a matching
+// `default` (spread of the real default + the same overrides) so the mock stays
+// correct if deploy.ts ever switches to a default `import fs from "node:fs"` —
+// belt-and-suspenders, no behavior change to the current named-import path.
 const readFileSyncMock = vi.fn<(...a: unknown[]) => string>(() => "");
 vi.mock("node:fs", async (importOriginal) => {
     const actual = await importOriginal<typeof import("node:fs")>();
-    return {
-        ...actual,
+    const overrides = {
         readFileSync: (...a: unknown[]) => readFileSyncMock(...(a as [string])),
         writeFileSync: vi.fn(),
         mkdirSync: vi.fn(),
         writeSync: vi.fn(),
+    };
+    return {
+        ...actual,
+        ...overrides,
+        default: { ...(actual as { default?: object }).default, ...overrides },
     };
 });
 
