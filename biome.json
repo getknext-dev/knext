@@ -17,7 +17,8 @@
       "!**/.turbo",
       "!**/build",
       "!**/.cursor",
-      "!**/bun.lockb"
+      "!**/bun.lockb",
+      "!packages/scale-zero-pg/**"
     ]
   },
   "formatter": {
