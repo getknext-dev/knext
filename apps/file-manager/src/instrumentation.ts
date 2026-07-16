@@ -1,4 +1,6 @@
 import { resolveOtelOptions } from '@knext/core/adapters/otel-config';
+import { installTraceIdProvider } from '@knext/core/adapters/tracing';
+import { setTraceIdProvider } from '@knext/lib/context';
 import { registerOTel } from '@vercel/otel';
 
 // NOTE: setCacheHandler is not exported from next/cache in Next.js 16.0.3.
@@ -26,4 +28,11 @@ export function register() {
     attributes: otel.resourceAttributes,
     traceSampler: otel.sampleRate >= 1 ? 'always_on' : 'parentbased_traceidratio',
   });
+
+  // Join logs to traces (C4, #318): the correlation layer stamps every
+  // in-request log line with the active span's `trace_id` via this provider,
+  // so a `knext.cold_start` / `knext.db_wake` span and its log lines share one
+  // id. Only wired when tracing is on — when disabled the provider is never
+  // installed (the C4 default no-trace provider stays in place, zero overhead).
+  setTraceIdProvider(installTraceIdProvider());
 }

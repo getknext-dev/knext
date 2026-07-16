@@ -1,4 +1,5 @@
 import { context, trace } from "@opentelemetry/api";
+import { AsyncLocalStorageContextManager } from "@opentelemetry/context-async-hooks";
 import {
     BasicTracerProvider,
     InMemorySpanExporter,
@@ -31,12 +32,21 @@ import {
  * BasicTracerProvider — never a live collector.
  */
 
-const exporter = new InMemorySpanExporter();
+// A fresh exporter per enable() — `provider.shutdown()` also shuts the exporter
+// down (InMemorySpanExporter refuses exports after shutdown), so reusing one
+// across tests would silently drop later spans.
+let exporter = new InMemorySpanExporter();
 let provider: BasicTracerProvider | undefined;
+const contextManager = new AsyncLocalStorageContextManager();
 
 /** Register a real (recording) tracer provider — simulates tracing ENABLED. */
 function enableTracing(): void {
-    exporter.reset();
+    exporter = new InMemorySpanExporter();
+    // A context manager makes `context.with(...)` propagate the active span,
+    // mirroring the runtime (sdk-node/@vercel/otel register one). Without it,
+    // `trace.getActiveSpan()` always reads the empty root context.
+    contextManager.enable();
+    context.setGlobalContextManager(contextManager);
     provider = new BasicTracerProvider({
         spanProcessors: [new SimpleSpanProcessor(exporter)],
     });
@@ -47,8 +57,9 @@ function enableTracing(): void {
 function disableTracing(): void {
     trace.disable();
     context.disable();
+    contextManager.disable();
     provider = undefined;
-    exporter.reset();
+    exporter = new InMemorySpanExporter();
 }
 
 afterEach(async () => {

@@ -63,6 +63,7 @@ export default defineConfig([
       // cache-handler is plain JS (untyped) — bundled to dist, no .d.ts emitted
       'adapters/cache-handler': 'src/adapters/cache-handler.js',
       'adapters/otel-config': 'src/adapters/otel-config.ts',
+      'adapters/tracing': 'src/adapters/tracing.ts',
       'utils/logger': 'src/utils/logger.ts',
     },
     // Emit `.d.ts` declarations for the TS library entries so typed consumers
@@ -89,6 +90,7 @@ export default defineConfig([
         'adapters/node-server': 'src/adapters/node-server.ts',
         'adapters/standalone-bun-exports': 'src/adapters/standalone-bun-exports.ts',
         'adapters/otel-config': 'src/adapters/otel-config.ts',
+        'adapters/tracing': 'src/adapters/tracing.ts',
         'utils/logger': 'src/utils/logger.ts',
       },
     },
