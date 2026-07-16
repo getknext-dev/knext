@@ -14,15 +14,12 @@
  */
 
 import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
 const here = dirname(fileURLToPath(import.meta.url));
-const instrumentationSrc = readFileSync(
-  join(here, 'src', 'instrumentation.ts'),
-  'utf8',
-);
+const instrumentationSrc = readFileSync(join(here, 'src', 'instrumentation.ts'), 'utf8');
 
 /**
  * Modules that are Node-only (native/Node-built-in dependencies) and therefore
@@ -32,12 +29,7 @@ const instrumentationSrc = readFileSync(
  * `@knext/lib/clients` is the primary offender: it transitively imports
  * `@cerbos/grpc`, `pg`, and `minio`.
  */
-const NODE_ONLY_MODULES = [
-  '@knext/lib/clients',
-  'pg',
-  '@cerbos/grpc',
-  'minio',
-];
+const NODE_ONLY_MODULES = ['@knext/lib/clients', 'pg', '@cerbos/grpc', 'minio'];
 
 /**
  * Extract the set of module specifiers reached by TOP-LEVEL *static* imports.
@@ -50,9 +42,8 @@ function topLevelStaticImportSpecifiers(source: string): string[] {
   const staticImportRe = /^\s*import\b[^;]*?from\s*['"]([^'"]+)['"]/gm;
   const sideEffectImportRe = /^\s*import\s*['"]([^'"]+)['"]/gm;
   for (const re of [staticImportRe, sideEffectImportRe]) {
-    let m: RegExpExecArray | null;
-    while ((m = re.exec(source)) !== null) {
-      specs.push(m[1]);
+    for (const match of source.matchAll(re)) {
+      specs.push(match[1]);
     }
   }
   return specs;
@@ -61,17 +52,12 @@ function topLevelStaticImportSpecifiers(source: string): string[] {
 describe('instrumentation.ts edge-bundle safety (#342)', () => {
   const staticSpecs = topLevelStaticImportSpecifiers(instrumentationSrc);
 
-  it.each(NODE_ONLY_MODULES)(
-    'does NOT top-level static-import the Node-only module %s',
-    (mod) => {
-      expect(staticSpecs).not.toContain(mod);
-    },
-  );
+  it.each(NODE_ONLY_MODULES)('does NOT top-level static-import the Node-only module %s', (mod) => {
+    expect(staticSpecs).not.toContain(mod);
+  });
 
   it('guards the Node-only body behind NEXT_RUNTIME === "nodejs"', () => {
-    expect(instrumentationSrc).toMatch(
-      /process\.env\.NEXT_RUNTIME\s*[!=]==?\s*['"]nodejs['"]/,
-    );
+    expect(instrumentationSrc).toMatch(/process\.env\.NEXT_RUNTIME\s*[!=]==?\s*['"]nodejs['"]/);
   });
 
   it('loads Node-only wiring via a dynamic import (await import)', () => {

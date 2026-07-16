@@ -139,6 +139,44 @@ setTraceIdProvider(installTraceIdProvider());  // log ↔ trace join (§5)
 An app that uses `@knext/lib`'s pools (`getDbPool` / `getDbPoolRO`) or the
 `@knext/db` SDK gets `knext.db_wake` for free — no query-site changes.
 
+### Edge-runtime safety (REQUIRED for apps with middleware) — #342
+
+Next.js compiles `instrumentation.ts` for **both** the `nodejs` **and** the
+`edge` runtimes (any app with a `middleware.ts` triggers an edge build). All of
+the wiring above is **Node-only**: `@knext/lib/clients` transitively pulls in
+`@cerbos/grpc` (→ `@grpc/grpc-js`, needing `zlib`/`stream`/`net`/`tls`/`fs`),
+plus `pg` and `minio`. A **top-level static import** of any of that lands in the
+edge bundle and fails the production `next build` with
+`Module not found: Can't resolve 'stream' / 'fs' / 'tls' / 'net' / 'zlib'`.
+
+App instrumentation **must guard the Node-only wiring behind
+`NEXT_RUNTIME === 'nodejs'`** and load it via a dynamic import, so it never
+enters the edge bundle. The canonical pattern (see
+`apps/file-manager/src/instrumentation.ts`):
+
+```ts
+// instrumentation.ts — EDGE-CLEAN. No top-level import of a Node-only client.
+export async function register() {
+  if (process.env.NEXT_RUNTIME !== 'nodejs') return; // edge: no-op
+  const { registerNode } = await import('./instrumentation-node');
+  registerNode();
+}
+```
+
+The Node-only body (the `registerOTel` / metrics / `setPoolInstrumentor` calls
+shown above) lives in `instrumentation-node.ts`, which is only reached on the
+nodejs runtime. Because webpack still *statically traces* a dynamic import into
+both runtime bundles, the app's `next.config.ts` also excludes
+`instrumentation-node` from the **edge** compile via an `IgnorePlugin` scoped to
+`nextRuntime === 'edge'` — the nodejs bundle is untouched and keeps the real
+wiring. The knext runtime runs the app on Node (the standalone server), so
+nothing is lost.
+
+A fast static-analysis guard
+(`apps/file-manager/instrumentation-edge-safe.test.ts`) fails the gate if
+`instrumentation.ts` ever regains a top-level import of a Node-only client
+module — this class of regression must fail the gate, not the deploy build.
+
 ### Manual bracketing (optional)
 
 For code paths outside the automatic hooks, `withColdStartSpan(attrs, fn)` and
