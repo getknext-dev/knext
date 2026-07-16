@@ -35,13 +35,16 @@ not own the app's route chain, so per-request signals are read off the OTel
 spans, not by wrapping handlers.
 
 Those hooks run in the **Next.js child process**; the operator scrapes the
-**supervisor's `:9091`**. So the child serves its core registry on a
-localhost-only port (`KN_CHILD_METRICS_PORT`, default 9092) and the supervisor's
-`:9091` handler merges it in (best-effort — a not-yet-up / scaled-to-zero child
-just yields the process metrics). Because the metrics ride the OTel spans they
-share tracing's **default-off** gate: they appear once
-`spec.observability.tracing.enabled` (⇒ `OTEL_TRACING_ENABLED=true`) is set on
-the `NextApp`.
+**supervisor's `:9091`**. So the child serves its core registry (only the
+`knext_*` families) on a localhost-only port (`KN_CHILD_METRICS_PORT`, default
+9092) and the supervisor's `:9091` handler merges it in (best-effort — a
+not-yet-up / scaled-to-zero child just yields the process metrics). The default
+process metrics (`process_*`, `nodejs_*`) are seeded **only** on the persistent
+supervisor registry, never on the child, so the merged exposition carries each
+default family exactly once (no duplicate `# HELP`/`# TYPE` that Prometheus would
+reject). Because the metrics ride the OTel spans they share tracing's
+**default-off** gate: they appear once `spec.observability.tracing.enabled` (⇒
+`OTEL_TRACING_ENABLED=true`) is set on the `NextApp`.
 
 ## App runtime series (`:9091`)
 

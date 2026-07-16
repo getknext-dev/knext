@@ -309,19 +309,31 @@ export class GoldenSignalMetricsProcessor implements KnextSpanProcessor {
 let runtimeMetrics: KnextMetrics | undefined;
 
 /**
- * Initialise (once) the knext metric set on `registry`, seeding it with
- * prom-client's default process metrics too. Idempotent: a second call returns
- * the first instance so the cold-start / db-wake emitters and the span processor
- * share one registry. `app` defaults to KN_APP_NAME.
+ * Initialise (once) the knext metric set on `registry`. Idempotent: a second
+ * call returns the first instance so the cold-start / db-wake emitters and the
+ * span processor share one registry. `app` defaults to KN_APP_NAME.
+ *
+ * This is the CHILD-process path (called from `instrumentation.ts`). It carries
+ * ONLY the `knext_*` families — it deliberately does NOT seed prom-client's
+ * default process metrics, because the persistent SUPERVISOR (`node-server.ts`)
+ * already owns them on its own registry. Seeding them here too would duplicate
+ * every default family (`process_*`, `nodejs_*`) in the supervisor's merged
+ * `:9091` exposition on the healthy warm path — duplicate `# HELP`/`# TYPE`
+ * lines and duplicate zero-label samples, which Prometheus rejects. Opt in via
+ * `collectDefaults` only for a standalone registry that has no supervisor in
+ * front of it (not the case for the knext runtime).
  */
 export function initRuntimeMetrics(
     registry: Registry,
     app: string = process.env.KN_APP_NAME ?? "unknown",
+    collectDefaults = false,
 ): KnextMetrics {
     if (runtimeMetrics) {
         return runtimeMetrics;
     }
-    collectDefaultMetrics({ register: registry });
+    if (collectDefaults) {
+        collectDefaultMetrics({ register: registry });
+    }
     runtimeMetrics = createMetricsRegistry(registry, app);
     return runtimeMetrics;
 }

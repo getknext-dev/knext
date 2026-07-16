@@ -144,6 +144,8 @@ describe("#315 default process metrics are not duplicated in the merged scrape",
             seen.add(l);
             return false;
         });
-        expect(dupes, `duplicate # TYPE lines: ${dupes.join(" | ")}`).toEqual([]);
+        expect(dupes, `duplicate # TYPE lines: ${dupes.join(" | ")}`).toEqual(
+            [],
+        );
     });
 });
