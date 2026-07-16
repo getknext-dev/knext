@@ -788,6 +788,80 @@ function deleteBuildPrefix(
             throw new Error(`Unsupported storage provider: ${provider}`);
     }
 }
+/**
+ * Builds the recursive-delete URI scoped to EXACTLY `<app>/_next/static/<id>/`
+ * for one build-id — the SAME per-provider shape the listing's `deleteUriFor`
+ * closures produce, factored out so {@link reclaimBuildPrefix} can target a
+ * single known prefix WITHOUT a remote listing (no full-remote-set enumeration).
+ */
+function staticBuildDeleteUri(
+    config: KnativeNextConfig,
+    buildId: string,
+): string {
+    const { provider, bucket } = config.storage;
+    const appPrefix = appKeyPrefix(config); // "<name>/"
+    switch (provider) {
+        case "gcs":
+            return `gs://${bucket}/${appPrefix}${STATIC_NS}${buildId}/`;
+        case "s3":
+            return `s3://${bucket}/${appPrefix}${STATIC_NS}${buildId}/`;
+        case "minio":
+            return `minio/${bucket}/${appPrefix}${STATIC_NS}${buildId}/`;
+        case "azure":
+            return `${appPrefix}${STATIC_NS}${buildId}/`;
+        default:
+            throw new Error(`Unsupported storage provider: ${provider}`);
+    }
+}
+
+/**
+ * FAILURE-PATH orphan reclaim (v6-P2, ADR-0011). Deletes EXACTLY this run's
+ * own `<app>/_next/static/<buildId>/` prefix and NOTHING else — a single,
+ * idempotent, scoped delete of one known prefix.
+ *
+ * Called by `kn-next deploy` on the confirmed upload-succeeded-then-push-failed
+ * leg: the assets were already uploaded, but the deploy is aborting before
+ * `kubectl apply`, so those assets would otherwise be orphaned forever (the
+ * post-apply {@link pruneOldBuilds} never runs on the failure path, and it
+ * prunes by CURRENT traffic — a never-applied build-id is never in traffic, so
+ * nothing would ever reclaim it).
+ *
+ * SAFETY INVARIANT (why a targeted delete is safe here, ADR-0011): `buildId` is
+ * this run's UNIQUE build-id — `.next/BUILD_ID` == `NEXT_DEPLOYMENT_ID` == the
+ * deploy tag, enforced unique-per-run by the deploy skew guard (ADR-0011 §2
+ * lock-step). Because this deploy is aborting before apply, this build-id can
+ * NEVER appear in the operator's `status.currentTraffic` nor in a
+ * `spec.traffic.revisionName` pin, and a CONCURRENT deploy's build-id is a
+ * DIFFERENT value. Deleting only this build-id's own prefix therefore cannot
+ * touch a live/pinned build or a concurrently-deploying build's not-yet-live
+ * assets. That uniqueness is the ONLY reason a targeted delete is safe — this
+ * MUST NOT call {@link pruneOldBuilds} / the retention GC, which enumerate ALL
+ * remote builds and could reap a concurrent deploy's prefix (an ADR-0011
+ * over-keep-never-over-delete violation on a path with no traffic to consult).
+ *
+ * Routes through {@link deleteBuildPrefix}, whose hard `_next/static/<id>/`
+ * scope assertion makes a bare `<app>/` (teardown-only, ADR-0008) delete
+ * impossible. Best-effort delete (`runQuietAllowFail`): the caller rethrows the
+ * original push error regardless, so a stuck cleanup never masks the failure.
+ *
+ * OUT OF SCOPE (documented): the symmetric leg — upload REJECTS while the push
+ * SUCCEEDS — leaves an orphaned image TAG in the registry. Reclaiming that is a
+ * SEPARATE authority (registry GC), not this asset-store reclaim.
+ */
+export function reclaimBuildPrefix(
+    config: KnativeNextConfig,
+    buildId: string,
+): void {
+    if (!buildId) return; // never scope to the static root
+    const deleteUri = staticBuildDeleteUri(config, buildId);
+    log.warn(
+        { buildId, deleteUri, provider: config.storage.provider },
+        "Reclaiming orphaned asset prefix from a failed deploy (upload " +
+            "succeeded, push failed) — scoped single-prefix delete of THIS " +
+            "run's own _next/static/<buildId>/ (ADR-0011; NOT the retention GC)",
+    );
+    deleteBuildPrefix(config, buildId, deleteUri);
+}
 
 /**
  * What one {@link pruneOldBuilds} run did — returned so callers (`kn-next gc`)

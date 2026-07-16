@@ -37,7 +37,7 @@ vi.mock("../cli/exec", () => ({
 
 import { runCapture, runQuietAllowFail } from "../cli/exec";
 import type { KnativeNextConfig, StorageProvider } from "../config";
-import { pruneOldBuilds } from "../utils/asset-upload";
+import { pruneOldBuilds, reclaimBuildPrefix } from "../utils/asset-upload";
 
 const runCaptureMock = runCapture as unknown as Mock;
 const runDeleteMock = runQuietAllowFail as unknown as Mock;
@@ -498,5 +498,69 @@ describe("pruneOldBuilds", () => {
                 ),
             );
         });
+    });
+});
+/**
+ * v6-P2 (ADR-0011): reclaimBuildPrefix — the FAILURE-PATH orphan reclaim.
+ *
+ * `kn-next deploy` calls this on the confirmed upload-succeeded-then-push-failed
+ * leg to delete EXACTLY this run's own `<app>/_next/static/<buildId>/` prefix —
+ * a single, idempotent, scoped delete of ONE known prefix. It must NEVER:
+ *   - list / enumerate the full remote build set (no runCapture — that is the
+ *     runAssetGC / pruneOldBuilds classifier path, which on a no-traffic failure
+ *     path could reap a concurrent deploy's not-yet-live assets),
+ *   - issue anything but a delete scoped to `_next/static/<buildId>/` (the
+ *     bare `<app>/` prefix is teardown-only, ADR-0008),
+ *   - act on an empty build-id (that would scope to the static root).
+ */
+describe("reclaimBuildPrefix — failure-path orphan reclaim (v6-P2, ADR-0011)", () => {
+    beforeEach(() => {
+        runCaptureMock.mockReset();
+        runDeleteMock.mockReset();
+    });
+    afterEach(() => vi.clearAllMocks());
+
+    /** Every token passed to the delete exec, joined for substring checks. */
+    function deletedTokens(): string {
+        return runDeleteMock.mock.calls
+            .flatMap((c) => c[0] as string[])
+            .join("\n");
+    }
+
+    const SCOPED: Record<StorageProvider, string> = {
+        gcs: "gs://b/shop/_next/static/deploytag/",
+        s3: "s3://b/shop/_next/static/deploytag/",
+        minio: "minio/b/shop/_next/static/deploytag/",
+        // azure delete-batch takes the app-relative key prefix as its pattern.
+        azure: "shop/_next/static/deploytag/",
+    };
+
+    for (const provider of [
+        "gcs",
+        "s3",
+        "minio",
+        "azure",
+    ] as StorageProvider[]) {
+        it(`[${provider}] issues ONE scoped delete of exactly _next/static/<buildId>/ and NEVER lists`, () => {
+            reclaimBuildPrefix(makeConfig(provider, "b", "shop"), "deploytag");
+
+            // Exactly one delete, scoped to this run's own build-id prefix.
+            expect(runDeleteMock).toHaveBeenCalledTimes(1);
+            expect(deletedTokens()).toContain(SCOPED[provider]);
+
+            // No remote listing / enumeration — this is NOT the pruneOldBuilds
+            // full-remote-set classifier (ADR-0011 over-delete hazard avoided).
+            expect(runCaptureMock).not.toHaveBeenCalled();
+
+            // Never the bare <app>/ teardown prefix (ADR-0008).
+            const tokens = deletedTokens();
+            expect(tokens).toContain("_next/static/deploytag/");
+        });
+    }
+
+    it("is a NO-OP for an empty build-id (never scopes to the static root)", () => {
+        reclaimBuildPrefix(makeConfig("gcs", "b", "shop"), "");
+        expect(runDeleteMock).not.toHaveBeenCalled();
+        expect(runCaptureMock).not.toHaveBeenCalled();
     });
 });
