@@ -4,7 +4,7 @@ How knext logs are shaped so they are machine-parseable, correlated by a request
 id, and joinable to traces (ADR-0012). This is the standard for both the runtime
 (app) and the operator; the correlation layer ships in `@knext/lib`.
 
-Related: [distributed tracing](./tracing.md) · [SLOs / SLIs](./slos.md) · [OTel tracing backend](../adr/0012-otel-tracing-backend.md).
+Related: [distributed tracing](./tracing.md) · [Prometheus metrics catalog](./metrics.md) · [SLOs / SLIs](./slos.md) · [OTel tracing backend](../adr/0012-otel-tracing-backend.md).
 
 ## 1. Structured (JSON) log schema
 

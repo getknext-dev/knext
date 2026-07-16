@@ -1,0 +1,48 @@
+# Per-app golden-signal metrics (#315).
+#
+# The operator annotates every generated Knative Service with
+# `prometheus.io/scrape=true`, `prometheus.io/port=9091`, `prometheus.io/path=/metrics`
+# (see internal/controller/nextapp_controller.go) — the annotation-based scrape
+# that plain Prometheus honors. For a Prometheus OPERATOR setup (which ignores
+# those annotations and discovers targets via CRDs) this PodMonitor makes the
+# same per-app :9091 endpoint discoverable.
+#
+# :9091 is the runtime SUPERVISOR's endpoint (node-server.ts). It serves the
+# process metrics AND merges in the child's core golden-signal / cold-start /
+# db-wake series (knext_http_requests_total, knext_http_request_duration_seconds,
+# knext_http_inflight_requests, knext_coldstart_*, knext_db_wake_*). Every app
+# pod the operator generates carries the label `generated-by: kn-next-operator`,
+# which is the selector below — one PodMonitor covers all NextApps.
+#
+# Scale-to-zero note: a scaled-to-zero app has no pods, so it exports no series
+# and its targets vanish from Prometheus until the next request wakes it. That
+# is expected; the SLIs in docs/observability/slos.md are evaluated over rolling
+# windows for exactly this reason.
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  labels:
+    app.kubernetes.io/name: kn-next-operator
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/component: app-metrics
+  name: nextapp-metrics
+  namespace: system
+spec:
+  # Discover every knext-generated app pod, across namespaces, by the operator's
+  # ownership label. Narrow to a single app by adding `app: <NextApp name>`.
+  selector:
+    matchLabels:
+      generated-by: kn-next-operator
+  namespaceSelector:
+    any: true
+  podMetricsEndpoints:
+    # Knative user-container ports are unnamed in the pod spec, so target the
+    # supervisor metrics port by NUMBER (9091) rather than by port name.
+    - targetPort: 9091
+      path: /metrics
+      interval: 30s
+      scheme: http
+      relabelings:
+        # Surface the app name (the operator labels every pod `app=<NextApp>`).
+        - sourceLabels: [__meta_kubernetes_pod_label_app]
+          targetLabel: app

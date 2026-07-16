@@ -10,19 +10,26 @@ The structured-logging standard and the request/correlation-ID contract (the
 `correlation_id` / `trace_id` fields that make logs joinable to traces) are in
 [`logging.md`](./logging.md); end-to-end distributed tracing (the
 `knext.cold_start` / `knext.db_wake` spans that attribute cold-path latency) is
-in [`tracing.md`](./tracing.md).
+in [`tracing.md`](./tracing.md). The **full metric catalog** (every name, type,
+label, and the scrape setup) is in [`metrics.md`](./metrics.md).
 
 ## Where the series come from
 
 | Series | Exported by |
 | --- | --- |
-| `kn_next_http_requests_total{app,method,route,status_class}` | app — `apps/file-manager/src/app/api/_metrics/registry.ts` (`observeHttpRequest` / `withRedMetrics`) |
+| `knext_http_requests_total{app,method,status_class}` | runtime — core-owned OTel HTTP-span processor on `:9091` (#315); the golden request-rate / error-rate signal |
+| `knext_http_request_duration_seconds_bucket{…}` | runtime — same processor (golden latency) |
+| `knext_http_inflight_requests{app}` | runtime — same processor (golden saturation) |
+| `knext_coldstart_total{app}` / `knext_coldstart_duration_seconds_bucket{app}` | runtime — the `ColdStartSpanProcessor` path (#315/#317) |
+| `knext_db_wake_total{app,role}` / `knext_db_wake_duration_seconds_bucket{app,role}` | runtime — the `instrumentPoolForDbWake` path (#315/#317) |
+| `kn_next_http_requests_total{app,method,route,status_class}` | app — `apps/file-manager/src/app/api/_metrics/registry.ts` (`observeHttpRequest` / `withRedMetrics`), the app-owned RED series with a `route` label |
 | `kn_next_http_request_duration_seconds_bucket{…}` | app — same registry (RED duration histogram) |
 | `kn_next_startup_duration_seconds_bucket{cache_status,app}` | app — observed once per process start |
 | `kn_next_bytecode_cache_warm_start{app}` | app — 1 if the V8 bytecode cache was warm at boot |
 | `knext_nextapp_reconcile_total{result}` | operator — `internal/controller/metrics.go` |
 | `knext_nextapp_reconcile_errors_total` | operator — same |
 | `knext_nextapp_reconcile_duration_seconds_bucket` | operator — same |
+| `workqueue_depth{name="nextapp"}` | operator — controller-runtime workqueue provider (control-plane saturation) |
 | `knext_nextapp_condition{type,status,namespace,name}` | kube-state-metrics, reading `NextApp.status.conditions` (Ready / Degraded / Reconciling) the reconciler populates — see "kube-state-metrics" below |
 
 Scale-to-zero caveat: when an app is scaled to zero it exports **no** app series
