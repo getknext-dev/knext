@@ -600,8 +600,11 @@ cost on the non-observing lane is already documented in each bun-lane entry's le
 **2. Per-mechanism-family soft bound (`family`, closed taxonomy).** Every entry names a
 mechanism-family from a **closed taxonomy** (`runtime-prefetch` — the §d navigation-timing /
 segment-cache race family; `bun-edge-fetch` — the documented Bun edge-sandbox outbound-fetch gap).
-A **per-family** soft bound (reviewed constant **N = 15**, kept in sync with the existing §d
-file-level ≤15 cap) codifies the #214 lesson that *a growing blanket skip is not a policy*.
+A **per-family** soft bound (reviewed constant **N = 15**, asserted in sync with the existing §d
+file-level ≤15 cap — both now bind to the single shared `FAMILY_QUARANTINE_CAP` in
+`tests/compat-quarantine-bounds.ts`, with a binding test in each consumer that names both
+call-sites so a future diverger gets a clear pointer) codifies the #214 lesson that *a growing
+blanket skip is not a policy*.
 Exceeding the bound for **any** family is a **HARD FAIL with a documented escalation message**
 (`assertPerFamilySoftBound` throws; the guard proves it throws, not warns) — a warn-and-pass cap
 is a fake-green vector and is **rejected**. The escalation message names the offending family and
