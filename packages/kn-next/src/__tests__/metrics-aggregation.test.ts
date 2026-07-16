@@ -1,11 +1,13 @@
 import type http from "node:http";
-import { Registry } from "prom-client";
+import { collectDefaultMetrics, Registry } from "prom-client";
 import { afterEach, describe, expect, it } from "vitest";
 
 import {
     createMetricsRegistry,
     fetchChildMetrics,
+    initRuntimeMetrics,
     mergeExposition,
+    resetRuntimeMetrics,
     startChildMetricsServer,
 } from "../adapters/metrics";
 
@@ -74,5 +76,74 @@ describe("#315 supervisor merge", () => {
     it("drops empty sources (an unreachable child) without a trailing gap", () => {
         const merged = mergeExposition(["process_cpu 1\n", ""]);
         expect(merged).toBe("process_cpu 1\n");
+    });
+});
+
+/**
+ * #315 DEFECT (system-designer BLOCK): the persistent SUPERVISOR seeds the
+ * default process metrics. The CHILD must NOT seed them again, or the healthy
+ * warm scrape (child reachable) emits every default family TWICE — duplicate
+ * `# HELP`/`# TYPE` + duplicate zero-label samples — which Prometheus rejects.
+ * These tests exercise the REAL supervisor+child registries and merge.
+ */
+describe("#315 default process metrics are not duplicated in the merged scrape", () => {
+    afterEach(() => {
+        resetRuntimeMetrics();
+    });
+
+    /** How many times a metric FAMILY (a `# TYPE <name> ...` line) appears. */
+    function typeLineCount(exposition: string, family: string): number {
+        return exposition
+            .split("\n")
+            .filter((l) => l.startsWith(`# TYPE ${family} `)).length;
+    }
+
+    it("the child registry carries only knext_* families, no process/nodejs defaults", async () => {
+        const childReg = new Registry();
+        const metrics = initRuntimeMetrics(childReg, "child-app");
+        metrics.httpInflight.labels({ app: "child-app" }).set(0);
+        const childBody = await childReg.metrics();
+
+        // Default families must NOT be present on the child (the supervisor owns them).
+        expect(typeLineCount(childBody, "process_cpu_seconds_total")).toBe(0);
+        expect(childBody).not.toMatch(/# TYPE nodejs_/);
+        // The knext series are still there.
+        expect(childBody).toContain("knext_http_inflight_requests");
+    });
+
+    it("merging the supervisor default dump with the child yields each default family EXACTLY once", async () => {
+        // Supervisor: the persistent process registry with the default metrics.
+        const supervisorReg = new Registry();
+        collectDefaultMetrics({ register: supervisorReg });
+        const supervisorBody = await supervisorReg.metrics();
+
+        // Child: the knext runtime registry (must NOT re-seed defaults).
+        const childReg = new Registry();
+        initRuntimeMetrics(childReg, "child-app");
+        const childBody = await childReg.metrics();
+
+        const merged = mergeExposition([supervisorBody, childBody]);
+
+        // Each default family appears exactly once — no duplicate TYPE/samples.
+        expect(typeLineCount(merged, "process_cpu_seconds_total")).toBe(1);
+        // A representative nodejs default family, whichever the platform emits.
+        const nodejsFamily = supervisorBody
+            .split("\n")
+            .map((l) => l.match(/^# TYPE (nodejs_\w+) /)?.[1])
+            .find(Boolean);
+        if (nodejsFamily) {
+            expect(typeLineCount(merged, nodejsFamily)).toBe(1);
+        }
+        // No default family's TYPE line is duplicated anywhere in the merge.
+        const typeLines = merged
+            .split("\n")
+            .filter((l) => l.startsWith("# TYPE "));
+        const seen = new Set<string>();
+        const dupes = typeLines.filter((l) => {
+            if (seen.has(l)) return true;
+            seen.add(l);
+            return false;
+        });
+        expect(dupes, `duplicate # TYPE lines: ${dupes.join(" | ")}`).toEqual([]);
     });
 });
