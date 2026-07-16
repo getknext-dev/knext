@@ -28,6 +28,20 @@ creates or mutates Knative Services, PVCs, ServiceAccounts, KafkaSources, etc.
 - The operator's `NextAppSpec` must be a superset of what the CLI previously templated
   (scaling, cache, storage, secrets, revalidation, observability already present).
 - Enables Phase-2 control-plane consolidation in the maturity plan.
+- **Single-writer holds under HA (replicas > 1).** The "operator is the sole authority"
+  invariant is not weakened by running the manager with more than one replica for availability.
+  The manager runs with `--leader-elect`, so controller-runtime leader election guarantees that
+  **exactly one** manager instance is the active reconciler at any time (it holds a coordination
+  `Lease`); every other replica stands by, reconciling nothing, until it acquires the lease.
+  Thus there is still a single writer of cluster state — a warm standby, not a second active
+  reconciler (a `replicas: 2` Deployment *without* leader election would be split-brain).
+  This is realized by the HA manifest (`config/manager/manager.yaml` — `replicas: 2` +
+  `--leader-elect`, PDB `minAvailable: 1`, soft pod anti-affinity) and verified at two levels:
+  the manifest contract test (`internal/install/ha_test.go`) pins the structural shape, and the
+  leader-election failover envtest
+  (`internal/controller/leader_election_envtest_test.go`) proves the runtime behavior — exactly
+  one active leader, with deterministic (cancellation-driven) hand-off to the standby on leader
+  loss, observed via the `Lease` holder and the leadership callback.
 
 ## Action items
 
