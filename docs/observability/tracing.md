@@ -7,7 +7,9 @@ exactly where the time went — activator wake, app boot, cache, and the
 `trace_id` trace query land on the same request.
 
 Related: [structured logging + correlation IDs](./logging.md) ·
-[SLOs / SLIs](./slos.md) · [OTel tracing backend](../adr/0012-otel-tracing-backend.md).
+[SLOs / SLIs](./slos.md) · [Prometheus metrics catalog](./metrics.md) (the
+`knext_coldstart_*` / `knext_db_wake_*` counters mirror these spans) ·
+[OTel tracing backend](../adr/0012-otel-tracing-backend.md).
 
 ## 1. What tracing buys you
 

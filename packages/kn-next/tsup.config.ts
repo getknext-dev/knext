@@ -64,6 +64,7 @@ export default defineConfig([
       'adapters/cache-handler': 'src/adapters/cache-handler.js',
       'adapters/otel-config': 'src/adapters/otel-config.ts',
       'adapters/tracing': 'src/adapters/tracing.ts',
+      'adapters/metrics': 'src/adapters/metrics.ts',
       'utils/logger': 'src/utils/logger.ts',
     },
     // Emit `.d.ts` declarations for the TS library entries so typed consumers
@@ -91,6 +92,7 @@ export default defineConfig([
         'adapters/standalone-bun-exports': 'src/adapters/standalone-bun-exports.ts',
         'adapters/otel-config': 'src/adapters/otel-config.ts',
         'adapters/tracing': 'src/adapters/tracing.ts',
+        'adapters/metrics': 'src/adapters/metrics.ts',
         'utils/logger': 'src/utils/logger.ts',
       },
     },

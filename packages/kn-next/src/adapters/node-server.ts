@@ -23,6 +23,11 @@ import { createLogger } from "../utils/logger";
 import { registerDbPoolDrain } from "./db-drain";
 import { buildChildEnv } from "./env";
 import { startImageCacheSync } from "./image-cache-sync";
+import {
+    CHILD_METRICS_PORT,
+    fetchChildMetrics,
+    mergeExposition,
+} from "./metrics";
 import { gracefulShutdown } from "./shutdown";
 
 const log = createLogger({ module: "server" });
@@ -40,11 +45,21 @@ const SHUTDOWN_GRACE_MS = Number(process.env.SHUTDOWN_GRACE_MS ?? 25_000);
 const metricsRegistry = new Registry();
 collectDefaultMetrics({ register: metricsRegistry });
 
+// The golden-signal / cold-start / db-wake metrics (#315) are emitted in the
+// Next.js CHILD (that's where the @vercel/otel HTTP spans + the #317 hooks run).
+// The operator scrapes THIS supervisor endpoint (prometheus.io/port=9091), so we
+// merge our own process metrics with a best-effort localhost scrape of the
+// child's core metrics port. If the child is scaled to zero / not yet up / has
+// tracing off (no child server), the fetch returns "" and we serve just the
+// process metrics — never fatal. Overridable via KN_CHILD_METRICS_PORT.
 const metricsServer = http.createServer(async (req, res) => {
     if (req.url === "/metrics" && req.method === "GET") {
         res.setHeader("Content-Type", metricsRegistry.contentType);
-        const metrics = await metricsRegistry.metrics();
-        res.end(metrics);
+        const [own, child] = await Promise.all([
+            metricsRegistry.metrics(),
+            fetchChildMetrics(CHILD_METRICS_PORT),
+        ]);
+        res.end(mergeExposition([own, child]));
         return;
     }
     res.writeHead(404);

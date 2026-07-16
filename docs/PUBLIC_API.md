@@ -108,6 +108,50 @@ Exports: `ColdStartSpanProcessor`, `instrumentPoolForDbWake(pool, role)`,
 `ColdStartAttrs`, `KnextSpanProcessor`, and the span-name constants
 `COLD_START_SPAN_NAME`, `DB_WAKE_SPAN_NAME`, `TRACER_NAME`.
 
+### `@knext/core/adapters/metrics`
+
+Prometheus golden-signal, cold-start and DB-wake metrics for a `NextApp`,
+derived from the **same** core-owned OTel hooks as tracing (no app route-handler
+wiring). `GoldenSignalMetricsProcessor` (pass to `registerOTel({ spanProcessors })`)
+turns each inbound HTTP SERVER span into request rate / error rate / latency /
+saturation series; `recordColdStart` / `recordDbWake` bump the cold-start and
+DB-wake counters from the tracing hooks. The metrics live in a core-owned
+registry served on a localhost-only child port; the runtime supervisor's `:9091`
+(the operator's scrape target) merges it in. Because they ride the OTel spans,
+they share tracing's default-off gate.
+
+```ts
+import {
+  GoldenSignalMetricsProcessor,
+  initRuntimeMetrics,
+  recordColdStart,
+  recordDbWake,
+  startChildMetricsServer,
+} from '@knext/core/adapters/metrics';
+import { Registry } from 'prom-client';
+
+const metrics = initRuntimeMetrics(new Registry());
+startChildMetricsServer(metrics.registry);
+registerOTel({
+  serviceName,
+  spanProcessors: [
+    'auto',
+    new ColdStartSpanProcessor(undefined, (ms) => recordColdStart(metrics, ms)),
+    new GoldenSignalMetricsProcessor(metrics),
+  ],
+});
+```
+
+Exports: `initRuntimeMetrics(registry, app?)`, `createMetricsRegistry(registry, app)`,
+`GoldenSignalMetricsProcessor`, `recordColdStart(metrics, wakeMs)`,
+`recordDbWake(metrics, role, wakeMs)`, `startChildMetricsServer(registry, port?, host?)`,
+`fetchChildMetrics(port?, host?, timeoutMs?)`, `mergeExposition(sources)`,
+`statusClass(status)`, `getRuntimeMetrics()`, the `KnextMetrics` type, the
+`CHILD_METRICS_PORT` constant, and the metric-name constants
+(`HTTP_REQUESTS_TOTAL_METRIC`, `HTTP_REQUEST_DURATION_METRIC`,
+`HTTP_INFLIGHT_METRIC`, `COLDSTART_TOTAL_METRIC`, `COLDSTART_DURATION_METRIC`,
+`DB_WAKE_TOTAL_METRIC`, `DB_WAKE_DURATION_METRIC`).
+
 ### `@knext/core/adapters/cache-handler`
 
 The ISR / Redis cache handler. Next.js requires its `cacheHandler` option to be a
