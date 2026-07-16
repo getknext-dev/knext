@@ -10,7 +10,10 @@
 //
 // Not covered here (deliberate scope line): actual lease-failover behavior. Proving a
 // standby acquires the lease and resumes reconciliation on primary loss needs an
-// envtest/e2e harness; that gap is noted in the PR, not smuggled into a unit test.
+// envtest/e2e harness — that lives in
+// internal/controller/leader_election_envtest_test.go (v6-P3), which starts two
+// managers and asserts exactly one active leader plus deterministic hand-off. It is
+// NOT smuggled into a unit test.
 package install
 
 import (
