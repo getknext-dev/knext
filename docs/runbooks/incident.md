@@ -6,6 +6,9 @@ diagnose → remediate**, grounded in metrics this codebase actually exports
 `packages/kn-next-operator/internal/controller/metrics.go`) and the alerts in
 [`../../packages/kn-next-operator/config/observability/prometheusrule.yaml`](../../packages/kn-next-operator/config/observability/prometheusrule.yaml).
 SLO definitions: [`../observability/slos.md`](../observability/slos.md).
+For "won't deploy / which failure mode am I in" (image rejected, stuck reconcile,
+route never programs, webhook down), see the
+[troubleshooting guide](./troubleshooting.md).
 
 > knext is the **scale-to-zero Next.js adapter for Knative**. Two facts shape
 > every response below:
