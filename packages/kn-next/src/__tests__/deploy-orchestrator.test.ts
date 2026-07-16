@@ -54,10 +54,15 @@ vi.mock("../cli/exec", () => ({
 
 const uploadAssets = vi.fn<AnyFn>(async () => {});
 const getAssetPrefix = vi.fn<AnyFn>(() => "https://cdn.example.com/_next");
+// v6-P2: the scoped, single-prefix orphan-reclaim seam. deploy() calls this on
+// the confirmed upload-ok-then-push-failed leg to reclaim EXACTLY this run's
+// `<app>/_next/static/<BUILD_ID>/` prefix (NOT runAssetGC / pruneOldBuilds).
+const reclaimBuildPrefix = vi.fn<AnyFn>();
 
 vi.mock("../utils/asset-upload", () => ({
     uploadAssets: (...a: unknown[]) => uploadAssets(...a),
     getAssetPrefix: (...a: unknown[]) => getAssetPrefix(...a),
+    reclaimBuildPrefix: (...a: unknown[]) => reclaimBuildPrefix(...a),
 }));
 
 const renderNextAppCR = vi.fn<AnyFn>(() => "kind: NextApp\n");
@@ -319,5 +324,124 @@ describe("deploy() skip flags", () => {
             (c) => argvOf(c)[0] === "kubectl" && argvOf(c)[1] === "apply",
         );
         expect(applied).toBe(true);
+    });
+});
+// ---------------------------------------------------------------------------
+// v6-P2 — partial-failure atomicity + orphan-prefix reclaim (ADR-0011).
+//
+// deploy() runs uploadAssets(config) and the docker build/push CONCURRENTLY
+// under one Promise.all. If the push REJECTS after the upload already resolved,
+// `kubectl apply` is (correctly) never reached — but the just-uploaded
+// `<app>/_next/static/<BUILD_ID>/` prefix is orphaned (post-apply runAssetGC
+// never runs). The fix reclaims ONLY this run's own unique BUILD_ID prefix via
+// a scoped single-prefix reclaim (reclaimBuildPrefix), then RETHROWS the
+// original push error — never masking it, never reaching apply, and never
+// invoking the full-remote-set classifiers runAssetGC / pruneOldBuilds (which
+// enumerate ALL builds and could reap a concurrently-deploying build's
+// not-yet-live assets — an ADR-0011 over-keep-never-over-delete violation).
+// ---------------------------------------------------------------------------
+describe("deploy() partial-failure atomicity + orphan reclaim (v6-P2, ADR-0011)", () => {
+    /** Make the docker build/push reject; keep upload resolving (order-tagged). */
+    function makePushFail(message = "docker push failed"): Error {
+        const pushErr = new Error(message);
+        runInherit.mockImplementation((...a: unknown[]) => {
+            const argv = a[0] as string[];
+            if (argv?.[0] === "docker") {
+                order.push("docker");
+                throw pushErr;
+            }
+            if (argv?.[0] === "kubectl" && argv?.[1] === "apply")
+                order.push("apply");
+        });
+        return pushErr;
+    }
+
+    it("upload-ok + push-FAIL: never reaches kubectl apply and fails LOUDLY", async () => {
+        setArgv(["deploy", "--tag", "deploytag"]);
+        const pushErr = makePushFail();
+        const deploy = await importDeploy();
+
+        // The original push error must propagate (loud, non-zero) — not masked.
+        await expect(deploy()).rejects.toBe(pushErr);
+
+        // The mutating apply must NEVER have run.
+        const applied = runInherit.mock.calls.some(
+            (c) => argvOf(c)[0] === "kubectl" && argvOf(c)[1] === "apply",
+        );
+        expect(applied).toBe(false);
+    });
+
+    it("upload-ok + push-FAIL: reclaims EXACTLY this run's BUILD_ID prefix (scoped, single-prefix)", async () => {
+        setArgv(["deploy", "--tag", "deploytag"]);
+        makePushFail();
+        const deploy = await importDeploy();
+
+        await expect(deploy()).rejects.toThrow();
+
+        // Reclaim invoked once, for THIS run's BUILD_ID (== the deploy tag).
+        expect(reclaimBuildPrefix).toHaveBeenCalledTimes(1);
+        const [cfg, buildId] = reclaimBuildPrefix.mock.calls[0] as [
+            KnativeNextConfig,
+            string,
+        ];
+        expect(buildId).toBe("deploytag");
+        expect(cfg?.name).toBe("my-app");
+    });
+
+    it("upload-ok + push-FAIL: does NOT call runAssetGC / pruneOldBuilds (no full-remote-set classifier)", async () => {
+        setArgv(["deploy", "--tag", "deploytag"]);
+        makePushFail();
+        const deploy = await importDeploy();
+
+        await expect(deploy()).rejects.toThrow();
+
+        // The full-remote-set classifier (runAssetGC → pruneOldBuilds) must NOT
+        // run on the failure path — it enumerates ALL builds and could reap a
+        // concurrent deploy's not-yet-live prefix (ADR-0011 over-delete hazard).
+        expect(runAssetGC).not.toHaveBeenCalled();
+    });
+
+    it("upload-ok + push-FAIL: reclaim cleanup NEVER masks the original push error", async () => {
+        setArgv(["deploy", "--tag", "deploytag"]);
+        const pushErr = makePushFail("original push boom");
+        // Even if the best-effort reclaim itself throws, the ORIGINAL error wins.
+        reclaimBuildPrefix.mockImplementation(() => {
+            throw new Error("cleanup blew up — must be swallowed");
+        });
+        const deploy = await importDeploy();
+
+        await expect(deploy()).rejects.toBe(pushErr);
+    });
+
+    it("SYMMETRIC leg — upload-FAIL + push-ok: no apply, fails LOUDLY (registry-orphan reclaim OUT OF SCOPE)", async () => {
+        // The other Promise.all branch: assets REJECT while the push succeeds.
+        // That leaks an image TAG in the registry — a SEPARATE authority
+        // (registry GC), explicitly OUT OF SCOPE here. We only assert this leg
+        // ALSO never reaches apply and fails loudly (and does not reclaim an
+        // asset prefix — nothing was uploaded).
+        setArgv(["deploy", "--tag", "deploytag"]);
+        const uploadErr = new Error("asset upload failed");
+        uploadAssets.mockImplementation(async () => {
+            order.push("upload");
+            throw uploadErr;
+        });
+        const deploy = await importDeploy();
+
+        await expect(deploy()).rejects.toThrow();
+
+        const applied = runInherit.mock.calls.some(
+            (c) => argvOf(c)[0] === "kubectl" && argvOf(c)[1] === "apply",
+        );
+        expect(applied).toBe(false);
+        expect(reclaimBuildPrefix).not.toHaveBeenCalled();
+    });
+
+    it("happy path unchanged: a successful push does NOT invoke reclaimBuildPrefix", async () => {
+        setArgv(["deploy", "--tag", "deploytag"]);
+        const deploy = await importDeploy();
+
+        await deploy();
+
+        expect(reclaimBuildPrefix).not.toHaveBeenCalled();
     });
 });

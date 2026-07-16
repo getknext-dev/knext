@@ -21,7 +21,11 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import type { KnativeNextConfig } from "../config";
-import { getAssetPrefix, uploadAssets } from "../utils/asset-upload";
+import {
+    getAssetPrefix,
+    reclaimBuildPrefix,
+    uploadAssets,
+} from "../utils/asset-upload";
 import { createLogger } from "../utils/logger";
 import {
     renderNextAppCR,
@@ -248,14 +252,21 @@ export async function deploy() {
     if (!options.dryRun) {
         const tasks: Promise<void>[] = [];
 
+        // v6-P2 (ADR-0011): track whether the asset upload actually COMPLETED,
+        // so that if the concurrent docker push rejects we can tell the
+        // upload-succeeded-then-push-failed leg (orphaned _next/static/<id>/
+        // prefix to reclaim) from an upload-failed leg (nothing uploaded).
+        let uploadSucceeded = false;
+        let uploadPromise: Promise<void> | undefined;
+
         if (!options.skipUpload) {
             log.info("Running parallel tasks: asset upload + Docker build");
-            tasks.push(
-                (async () => {
-                    await uploadAssets(config);
-                    log.info("Assets uploaded");
-                })(),
-            );
+            uploadPromise = (async () => {
+                await uploadAssets(config);
+                uploadSucceeded = true;
+                log.info("Assets uploaded");
+            })();
+            tasks.push(uploadPromise);
         }
 
         // Write buildx metadata to a temp file so resolveDigest can read
@@ -291,7 +302,51 @@ export async function deploy() {
             })(),
         );
 
-        await Promise.all(tasks);
+        try {
+            await Promise.all(tasks);
+        } catch (err) {
+            // Partial-failure atomicity (v6-P2, ADR-0011). Promise.all rejects
+            // on the FIRST failure (correctly: the CR apply below is never
+            // reached — no partial deploy, ADR-0001 preserved). But if the
+            // upload already SUCCEEDED and the push is what failed, its
+            // _next/static/<buildId>/ prefix is now orphaned. Confirm the leg by
+            // awaiting the upload's settlement (not the fast-fail race), then
+            // reclaim EXACTLY this run's own unique prefix.
+            //
+            // Best-effort + LOUD: the reclaim must NEVER mask the original push
+            // failure — we log the cleanup outcome, then RETHROW the original
+            // error so the deploy still fails loudly (non-zero) and the CR apply
+            // is never reached. We do NOT call runAssetGC / pruneOldBuilds here:
+            // those classify the FULL remote build set and, on a failure path
+            // with no traffic to consult, could reap a concurrently-deploying
+            // build's not-yet-live assets — an ADR-0011
+            // over-keep-never-over-delete violation. reclaimBuildPrefix targets
+            // only this run's unique BUILD_ID (== NEXT_DEPLOYMENT_ID == the
+            // deploy tag, per the skew-guard lock-step), which — because this
+            // deploy aborts before apply — can never be a live/pinned build or a
+            // concurrent deploy's id. (Symmetric leg — upload rejects, push
+            // succeeds — leaves an orphaned image TAG: registry GC's authority,
+            // OUT OF SCOPE here.)
+            if (!options.skipUpload && uploadPromise) {
+                try {
+                    await uploadPromise;
+                } catch {
+                    // Upload itself failed → nothing was uploaded to reclaim.
+                }
+                if (uploadSucceeded) {
+                    try {
+                        reclaimBuildPrefix(config, buildId);
+                    } catch (cleanupErr) {
+                        log.warn(
+                            { cleanupErr },
+                            "Orphan asset-prefix reclaim failed (non-fatal) — " +
+                                "the deploy still fails on the original error below",
+                        );
+                    }
+                }
+            }
+            throw err;
+        }
 
         // Resolve the real content-digest after push so the CR image ref is pinned.
         // PRIMARY: read containerimage.digest from the buildx metadata file (no extra I/O).
