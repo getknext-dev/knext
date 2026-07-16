@@ -15,6 +15,7 @@ export default defineConfig({
   resolve: {
     alias: {
       '@knext/lib/clients': resolve(LIB_SRC, 'clients.ts'),
+      '@knext/lib/context': resolve(LIB_SRC, 'context/index.ts'),
       '@knext/lib/health': resolve(LIB_SRC, 'health/index.ts'),
       '@knext/lib/logger': resolve(LIB_SRC, 'logger/index.ts'),
       '@knext/lib': resolve(LIB_SRC, 'index.ts'),

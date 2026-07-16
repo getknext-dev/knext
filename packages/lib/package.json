@@ -30,6 +30,11 @@
       "import": "./dist/clients.js",
       "default": "./dist/clients.js"
     },
+    "./context": {
+      "types": "./dist/context/index.d.ts",
+      "import": "./dist/context/index.js",
+      "default": "./dist/context/index.js"
+    },
     "./health": {
       "types": "./dist/health/index.d.ts",
       "import": "./dist/health/index.js",
@@ -44,6 +49,7 @@
         ".",
         "./logger",
         "./clients",
+        "./context",
         "./health"
       ],
       "internalPrefix": null

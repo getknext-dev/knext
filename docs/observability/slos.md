@@ -6,6 +6,10 @@ alerts that fire on a breach live in
 [`packages/kn-next-operator/config/observability/prometheusrule.yaml`](../../packages/kn-next-operator/config/observability/prometheusrule.yaml);
 the 3am response is in [`../runbooks/incident.md`](../runbooks/incident.md).
 
+The structured-logging standard and the request/correlation-ID contract (the
+`correlation_id` / `trace_id` fields that make logs joinable to traces) are in
+[`logging.md`](./logging.md).
+
 ## Where the series come from
 
 | Series | Exported by |
