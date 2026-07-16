@@ -250,9 +250,21 @@ export class ColdStartSpanProcessor implements KnextSpanProcessor {
     private readonly bootAt: number;
     /** Latch: the cold-start span is emitted at most once, on the first request. */
     private emitted = false;
+    /**
+     * Optional Prometheus emitter (#315). When supplied, the FIRST-request wake
+     * is ALSO recorded as a `knext_coldstart_*` metric on the core :9091
+     * registry, not only as a span. Kept optional so #317's tracing-only wiring
+     * (and its tests) is unchanged and this module stays prom-client-free unless
+     * the runtime passes an emitter.
+     */
+    private readonly onColdStart?: (wakeMs: number) => void;
 
-    constructor(bootAt: number = Date.now()) {
+    constructor(
+        bootAt: number = Date.now(),
+        onColdStart?: (wakeMs: number) => void,
+    ) {
         this.bootAt = bootAt;
+        this.onColdStart = onColdStart;
     }
 
     onStart(span: StartedSpanLike, parentContext: Context): void {
@@ -261,6 +273,7 @@ export class ColdStartSpanProcessor implements KnextSpanProcessor {
         }
         this.emitted = true;
         const wakeMs = Math.max(0, Date.now() - this.bootAt);
+        this.onColdStart?.(wakeMs);
         // Parent the cold-start span under the request span that just started.
         const parent = trace.setSpan(parentContext, span as unknown as Span);
         const cold = tracer().startSpan(
@@ -314,10 +327,14 @@ interface ConnectablePool {
  *
  * @param pool - the freshly-created pool (its `connect` is monkey-patched once)
  * @param role - 'writer' | 'reader', recorded as `knext.db_role`
+ * @param onDbWake - optional Prometheus emitter (#315); called with (role,
+ *                   wakeMs) on the 0→1 wake so the wake is also a
+ *                   `knext_db_wake_*` metric, not only a span
  */
 export function instrumentPoolForDbWake(
     pool: ConnectablePool,
     role: "writer" | "reader",
+    onDbWake?: (role: "writer" | "reader", wakeMs: number) => void,
 ): void {
     const originalConnect = pool.connect;
     if (typeof originalConnect !== "function") {
@@ -339,10 +356,12 @@ export function instrumentPoolForDbWake(
             { attributes: { "knext.db_role": role } },
             (span) => {
                 const finish = () => {
-                    span.setAttribute(
-                        "knext.wake_ms",
-                        Math.max(0, Date.now() - startedAt),
-                    );
+                    const wakeMs = Math.max(0, Date.now() - startedAt);
+                    span.setAttribute("knext.wake_ms", wakeMs);
+                    // #315: also record the 0→1 wake as a Prometheus counter +
+                    // duration on the core :9091 registry, when an emitter is
+                    // wired. Optional so #317's tracing-only path is unchanged.
+                    onDbWake?.(role, wakeMs);
                     span.end();
                 };
                 let result: Promise<unknown>;

@@ -1,12 +1,12 @@
-import http from "node:http";
+import type http from "node:http";
 import { Registry } from "prom-client";
 import { afterEach, describe, expect, it } from "vitest";
 
 import {
     createMetricsRegistry,
-    startChildMetricsServer,
     fetchChildMetrics,
     mergeExposition,
+    startChildMetricsServer,
 } from "../adapters/metrics";
 
 /**

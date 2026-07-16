@@ -2,8 +2,8 @@ import { context, SpanKind, SpanStatusCode, trace } from "@opentelemetry/api";
 import { AsyncLocalStorageContextManager } from "@opentelemetry/context-async-hooks";
 import {
     BasicTracerProvider,
-    SimpleSpanProcessor,
     InMemorySpanExporter,
+    SimpleSpanProcessor,
 } from "@opentelemetry/sdk-trace-base";
 import { Registry } from "prom-client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -17,9 +17,9 @@ import {
     HTTP_INFLIGHT_METRIC,
     HTTP_REQUEST_DURATION_METRIC,
     HTTP_REQUESTS_TOTAL_METRIC,
+    type KnextMetrics,
     recordColdStart,
     recordDbWake,
-    type KnextMetrics,
 } from "../adapters/metrics";
 import {
     ColdStartSpanProcessor,
@@ -50,7 +50,10 @@ function bootRuntime(reg: Registry): {
     exporter = new InMemorySpanExporter();
     contextManager.enable();
     context.setGlobalContextManager(contextManager);
-    const cold = new ColdStartSpanProcessor();
+    // The runtime wires the cold-start metric emitter through the processor.
+    const cold = new ColdStartSpanProcessor(Date.now() - 42, (wakeMs) =>
+        recordColdStart(metrics, wakeMs),
+    );
     const golden = new GoldenSignalMetricsProcessor(metrics);
     provider = new BasicTracerProvider({
         spanProcessors: [cold, golden, new SimpleSpanProcessor(exporter)],
@@ -129,9 +132,7 @@ describe("#315 golden signals from the core-owned HTTP-span processor", () => {
         // latency histogram present
         expect(out).toContain(`${HTTP_REQUEST_DURATION_METRIC}_bucket`);
         // saturation gauge back to 0 after the request completed
-        expect(out).toMatch(
-            new RegExp(`${HTTP_INFLIGHT_METRIC}\\{[^}]*\\} 0`),
-        );
+        expect(out).toMatch(new RegExp(`${HTTP_INFLIGHT_METRIC}\\{[^}]*\\} 0`));
     });
 
     it("counts a 5xx / errored request under status_class=5xx", async () => {
@@ -192,7 +193,10 @@ describe("#315 db-wake metrics from the #317 instrumentPoolForDbWake path", () =
         const reg = metrics.registry;
         bootRuntime(reg);
         const pool = makeFakePool();
-        instrumentPoolForDbWake(pool, "writer");
+        // The runtime wires the metrics emitter through the same seam.
+        instrumentPoolForDbWake(pool, "writer", (role, wakeMs) =>
+            recordDbWake(metrics, role, wakeMs),
+        );
         await handleRequest("GET /a", {}, async () => {
             await (await pool.connect()).release();
             await (await pool.connect()).release(); // warm reuse
@@ -217,7 +221,9 @@ describe("#315 direct emitters record into the core registry", () => {
             new RegExp(`${COLDSTART_TOTAL_METRIC}\\{[^}]*\\} 1`),
         );
         expect(out).toMatch(
-            new RegExp(`${DB_WAKE_TOTAL_METRIC}\\{[^}]*role="reader"[^}]*\\} 1`),
+            new RegExp(
+                `${DB_WAKE_TOTAL_METRIC}\\{[^}]*role="reader"[^}]*\\} 1`,
+            ),
         );
     });
 });

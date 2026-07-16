@@ -30,6 +30,11 @@
       "import": "./dist/adapters/tracing.js",
       "default": "./dist/adapters/tracing.js"
     },
+    "./adapters/metrics": {
+      "types": "./dist/adapters/metrics.d.ts",
+      "import": "./dist/adapters/metrics.js",
+      "default": "./dist/adapters/metrics.js"
+    },
     "./adapters/cache-handler": "./dist/adapters/cache-handler.js",
     "./validate": {
       "types": "./dist/validate-public.d.ts",
@@ -86,6 +91,7 @@
         "./validate",
         "./adapters/otel-config",
         "./adapters/tracing",
+        "./adapters/metrics",
         "./adapters/cache-handler"
       ],
       "internalPrefix": "./internal/"
