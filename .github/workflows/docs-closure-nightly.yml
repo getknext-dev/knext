@@ -1,0 +1,143 @@
+name: Docs closure nightly Trivy
+
+# ── #320: continuous HIGH/CRITICAL coverage for the docs dependency closure ────
+# The per-PR `docs-site` job (ci.yml) already Trivy-scans the docs closure, but
+# it is PATH-FILTERED (runs only when apps/docs/** or the @knext/core surface
+# changes) AND report-on-PR / fail-on-main. So a transitive HIGH/CRITICAL pulled
+# in by a PR that DOESN'T touch apps/docs escapes the gate entirely and only
+# turns main red on the NEXT push that happens to touch docs — exactly how the
+# #319 main-red landed (a newly-disclosed vite/rollup/picomatch CVE in the
+# shared dev toolchain).
+#
+# This workflow closes that gap: nightly it prunes the SAME docs closure and
+# runs the SAME Trivy scan WITHOUT the path filter, FAILS on HIGH/CRITICAL, and
+# fires an IDEMPOTENT pinned alert issue (one pinned issue, comment don't spam —
+# mirrors the `nightly-red-alert` pattern in test-e2e-deploy.yml).
+#
+# NO DRIFT: the scan config below (scan-type/scan-ref/severity/exit-code/
+# ignore-unfixed + the trivy-action SHA pin) is asserted BYTE-EQUAL to the
+# ci.yml docs-site step by tests/docs-closure-nightly-workflow.test.ts. Change
+# one and you must change the other or the contract test goes red.
+#
+# HUMAN PRECONDITION (§4(b)): the alert-issue create/pin needs the repo setting
+# "Settings → Actions → General → Workflow permissions → Allow GitHub Actions to
+# create and approve pull requests" (which also governs issue creation by the
+# default GITHUB_TOKEN) to be ENABLED. Without it the alert job's `gh issue
+# create`/`pin` fails and no alert surfaces.
+
+on:
+  # 04:23 UTC nightly — offset from the compat nightly (03:17) so a busy runner
+  # queue doesn't serialize the two security-signal jobs.
+  schedule:
+    - cron: '23 4 * * *'
+  # Manual runs for testing the scan; the alert job is scheduled-only (below) so
+  # a dispatch experiment never files/updates the pinned issue.
+  workflow_dispatch: {}
+
+# Least privilege: the scan job needs read; only the alert job gets issues:write.
+permissions:
+  contents: read
+
+jobs:
+  docs-closure-scan:
+    name: Trivy scan — docs dependency closure (nightly, FAIL on HIGH/CRITICAL)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # Materialise the DOCS-SCOPED dependency closure — identical to the ci.yml
+      # docs-site step. Under pnpm the whole workspace shares ONE root
+      # pnpm-lock.yaml, so `turbo prune` emits a pruned workspace whose
+      # pnpm-lock.yaml contains ONLY knext-docs + its @knext/{core,db,lib}
+      # closure; Trivy scans THAT lockfile.
+      - name: Prune docs dependency closure (turbo prune → scoped lockfile)
+        run: pnpm exec turbo prune knext-docs --out-dir ./.docs-closure
+
+      # Trivy fs scan of the docs closure lockfile. NO path filter, NO
+      # continue-on-error: the nightly ALWAYS enforces. The `with:` block below
+      # is asserted byte-equal to the ci.yml docs-site Trivy step
+      # (tests/docs-closure-nightly-workflow.test.ts) so the two can't diverge.
+      - name: Trivy scan — docs dependency closure (FAIL on HIGH/CRITICAL)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: ./.docs-closure/pnpm-lock.yaml
+          severity: HIGH,CRITICAL
+          exit-code: '1'
+          ignore-unfixed: true
+          format: table
+
+  # ── Idempotent pinned alert (mirrors nightly-red-alert in test-e2e-deploy) ───
+  # On a failed SCHEDULED run (never a workflow_dispatch experiment), create-or-
+  # update ONE pinned "Docs closure nightly RED" issue carrying the run link.
+  # Idempotent: an already-open alert issue gets a COMMENT per red night, not a
+  # new issue.
+  nightly-red-alert:
+    name: Nightly red alert (pinned issue)
+    needs: [docs-closure-scan]
+    # always() so this job is not skipped when the scan fails; the needs-result
+    # check fires it ONLY on failure; the event check scopes it to the schedule.
+    if: >-
+      always() &&
+      github.event_name == 'schedule' &&
+      needs.docs-closure-scan.result == 'failure'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      - name: Create or update the "Docs closure nightly RED" issue (idempotent)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          SCAN_RESULT: ${{ needs.docs-closure-scan.result }}
+        run: |
+          set -euo pipefail
+          # The idempotency KEY is this fixed literal title — the lookup and the
+          # create MUST share it, so keep it a constant (never interpolated).
+          title='Docs closure nightly RED'
+          body="The nightly Trivy scan of the docs dependency closure (\`turbo prune knext-docs\`
+          → \`.docs-closure/pnpm-lock.yaml\`) FAILED on a HIGH/CRITICAL finding.
+
+          - Run: ${RUN_URL}
+          - Scan job result: ${SCAN_RESULT}
+
+          A transitive HIGH/CRITICAL entered the docs dev-toolchain closure
+          (typically vitest→vite→rollup, picomatch, or a @knext/* runtime dep).
+          Because the per-PR \`docs-site\` gate is path-filtered + fail-on-main,
+          this can land on a green PR and only red main later — this nightly
+          catches it continuously.
+
+          **Remediation** (per the #155/#199/#319 discipline): BUMP the flagged
+          package via the root \`pnpm.overrides\`, don't suppress. Re-run this
+          workflow to confirm green, then close this issue."
+          # Idempotency: exactly-one open alert issue. Comment on it if present,
+          # create (+ pin, best-effort) only when absent. --limit 100 explicitly
+          # (gh defaults to 30): with >30 open issues the pinned alert could fall
+          # off the first page, the lookup would return empty, and every red
+          # night would file a NEW issue — the spam this dedup prevents.
+          existing="$(gh issue list --repo "${GITHUB_REPOSITORY}" --state open --limit 100 \
+            --json number,title \
+            --jq "[.[] | select(.title == \"${title}\")][0].number // empty")"
+          if [ -n "${existing}" ]; then
+            echo "updating existing alert issue #${existing}"
+            gh issue comment "${existing}" --repo "${GITHUB_REPOSITORY}" --body "${body}"
+          else
+            echo "creating the alert issue"
+            new_url="$(gh issue create --repo "${GITHUB_REPOSITORY}" --title "${title}" --body "${body}")"
+            new_num="${new_url##*/}"
+            gh issue pin "${new_num}" --repo "${GITHUB_REPOSITORY}" || echo "::warning::could not pin issue #${new_num} (non-fatal)"
+          fi
