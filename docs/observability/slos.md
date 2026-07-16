@@ -8,7 +8,9 @@ the 3am response is in [`../runbooks/incident.md`](../runbooks/incident.md).
 
 The structured-logging standard and the request/correlation-ID contract (the
 `correlation_id` / `trace_id` fields that make logs joinable to traces) are in
-[`logging.md`](./logging.md).
+[`logging.md`](./logging.md); end-to-end distributed tracing (the
+`knext.cold_start` / `knext.db_wake` spans that attribute cold-path latency) is
+in [`tracing.md`](./tracing.md).
 
 ## Where the series come from
 

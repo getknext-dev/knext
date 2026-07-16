@@ -71,6 +71,43 @@ const otel = resolveOtelOptions(); // OtelOptions | null
 Exports: `resolveOtelOptions(): OtelOptions | null`, and the types `OtelOptions`,
 `OtelEnv`.
 
+### `@knext/core/adapters/tracing`
+
+OpenTelemetry spans for the cold, DB-backed request path — the wake latency that
+auto-instrumentation does not otherwise capture — emitted **automatically** on
+the real request path via two hooks you wire once in `instrumentation.ts` (only
+when tracing is enabled; a zero-overhead no-op otherwise):
+
+- `ColdStartSpanProcessor` — pass to `registerOTel({ spanProcessors: [...] })`.
+  It opens `knext.cold_start` under the first inbound request span (the app boot
+  / first-request wake), once.
+- `instrumentPoolForDbWake` — install via `@knext/lib/clients`'
+  `setPoolInstrumentor`. It spans each pool's first `connect()` (the database
+  0→1 wake) as `knext.db_wake`, nested in the request trace.
+
+Both nest inside the active request trace, so one cold request yields a single
+trace showing where the time went. `installTraceIdProvider()` returns the
+provider you pass to `@knext/lib`'s `setTraceIdProvider` so log lines and spans
+share one `trace_id`. `withColdStartSpan` / `withDbWakeSpan` remain for manual
+bracketing of a specific span of work.
+
+```ts
+import {
+  ColdStartSpanProcessor,
+  instrumentPoolForDbWake,
+} from '@knext/core/adapters/tracing';
+import { setPoolInstrumentor } from '@knext/lib/clients';
+
+registerOTel({ serviceName, spanProcessors: ['auto', new ColdStartSpanProcessor()] });
+setPoolInstrumentor(instrumentPoolForDbWake);
+```
+
+Exports: `ColdStartSpanProcessor`, `instrumentPoolForDbWake(pool, role)`,
+`withColdStartSpan(attrs, fn)`, `withDbWakeSpan(fn)`,
+`activeTraceId(): string | undefined`, `installTraceIdProvider()`, the types
+`ColdStartAttrs`, `KnextSpanProcessor`, and the span-name constants
+`COLD_START_SPAN_NAME`, `DB_WAKE_SPAN_NAME`, `TRACER_NAME`.
+
 ### `@knext/core/adapters/cache-handler`
 
 The ISR / Redis cache handler. Next.js requires its `cacheHandler` option to be a
@@ -148,8 +185,15 @@ const minio = getMinioClient();  // Minio.Client
 
 Exports:
 - `getDbPool(): Pool` — a PostgreSQL connection pool (`pg`).
+- `getDbPoolRO(): Pool | null` — a read-only pool over `DATABASE_URL_RO`, or
+  `null` when no read replica is configured.
+- `closeDbPool()` / `closeDbPoolRO()` — drain + close the pools (SIGTERM path).
 - `getMinioClient(): Minio.Client` — an S3/MinIO-compatible object-store client.
 - `getCerbosClient(): Cerbos` — a Cerbos authorization client.
+- `setPoolInstrumentor(fn)` / `resetPoolInstrumentor()` — a dependency-inversion
+  seam (this package stays OTel-free) invoked once per pool as it is created, so
+  an OTel-aware layer can wrap the first connect for a `knext.db_wake` span (see
+  `@knext/core/adapters/tracing`'s `instrumentPoolForDbWake`). Default is a no-op.
 
 ### `@knext/lib/health`
 
@@ -181,10 +225,35 @@ logger.info({ msg: 'ready' });
 
 Exports: `logger` — a `pino.Logger`.
 
+### `@knext/lib/context`
+
+Request correlation for the runtime path. Each request carries an ambient
+correlation id (adopted from a well-formed inbound `x-request-id`, else
+generated) that flows through `AsyncLocalStorage`, lands on every structured log
+line, is echoed on the response, and is forwarded to downstream / db-wake calls.
+When an OpenTelemetry span is active, the id is joined to the span's `trace_id`
+via an injectable provider — wire it once with `setTraceIdProvider` (see
+`@knext/core/adapters/tracing`'s `installTraceIdProvider`) so logs and traces
+share one id.
+
+```ts
+import { beginRequest, runWithRequestContext, setTraceIdProvider } from '@knext/lib/context';
+
+const ctx = beginRequest(request.headers);
+runWithRequestContext(ctx, () => handle(request));
+```
+
+Exports: `beginRequest`, `createRequestContext`, `runWithRequestContext`,
+`getRequestContext`, `getCorrelationId`, `getTraceId`, `resolveCorrelationId`,
+`isWellFormedCorrelationId`, `readHeader`, `correlationLogFields`,
+`correlationHeaders`, `applyCorrelationHeader`, `setTraceIdProvider`,
+`resetTraceIdProvider`, `CORRELATION_HEADER`, and the type `RequestContext`.
+
 ### `@knext/lib`
 
 The package root re-exports everything from `@knext/lib/clients`,
-`@knext/lib/health`, and `@knext/lib/logger` for convenience.
+`@knext/lib/context`, `@knext/lib/health`, and `@knext/lib/logger` for
+convenience.
 
 ```ts
 import { getDbPool, checkDeepHealth, logger } from '@knext/lib';

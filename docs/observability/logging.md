@@ -4,7 +4,7 @@ How knext logs are shaped so they are machine-parseable, correlated by a request
 id, and joinable to traces (ADR-0012). This is the standard for both the runtime
 (app) and the operator; the correlation layer ships in `@knext/lib`.
 
-Related: [SLOs / SLIs](./slos.md) · [OTel tracing backend](../adr/0012-otel-tracing-backend.md).
+Related: [distributed tracing](./tracing.md) · [SLOs / SLIs](./slos.md) · [OTel tracing backend](../adr/0012-otel-tracing-backend.md).
 
 ## 1. Structured (JSON) log schema
 
@@ -89,6 +89,8 @@ import {
 } from '@knext/lib/context';
 
 // Once, at startup — ties correlation_id to the active trace (skip if no OTel).
+// The tracing adapter ships this provider (`installTraceIdProvider()`); see
+// ./tracing.md §5. Inline form shown here for illustration.
 setTraceIdProvider(() => trace.getActiveSpan()?.spanContext().traceId);
 
 // Per request (e.g. Next.js middleware / route handler / server entry):
