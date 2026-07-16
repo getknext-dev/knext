@@ -1,4 +1,5 @@
 import pino from 'pino';
+import { correlationLogFields } from '../context';
 
 const isProduction = process.env.NODE_ENV === 'production';
 
@@ -18,6 +19,13 @@ export const logger = pino({
   base: {
     app: process.env.KN_APP_NAME || 'kn-next',
     env: process.env.NODE_ENV,
+  },
+  // Correlation (#318): stamp every line emitted DURING a request with the
+  // ambient correlation_id (+ trace_id when an OTel span is active), pulled from
+  // the AsyncLocalStorage request context. Returns {} outside a request, so
+  // non-request logs are unchanged and no correlation field ever leaks.
+  mixin() {
+    return correlationLogFields();
   },
   // Automatically redact sensitive data from logs
   redact: ['req.headers.authorization', 'req.headers.cookie', 'password', 'token'],
