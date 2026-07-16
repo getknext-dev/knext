@@ -1,5 +1,10 @@
 # knext incident runbook (day-2)
 
+> Part of the [knext runbooks](./README.md). For planned day-2 operations rather
+> than incidents, see [upgrade.md](./upgrade.md) (operator/CRD upgrade),
+> [rollback.md](./rollback.md) (app + operator rollback), and
+> [backup-restore.md](./backup-restore.md) (Postgres DR + cache state).
+
 The 3am playbook for a knext-deployed app. Each scenario is **detect →
 diagnose → remediate**, grounded in metrics this codebase actually exports
 (`apps/file-manager/src/app/api/_metrics/registry.ts` and the operator's
