@@ -1,5 +1,10 @@
 import { resolveOtelOptions } from '@knext/core/adapters/otel-config';
-import { installTraceIdProvider } from '@knext/core/adapters/tracing';
+import {
+  ColdStartSpanProcessor,
+  installTraceIdProvider,
+  instrumentPoolForDbWake,
+} from '@knext/core/adapters/tracing';
+import { setPoolInstrumentor } from '@knext/lib/clients';
 import { setTraceIdProvider } from '@knext/lib/context';
 import { registerOTel } from '@vercel/otel';
 
@@ -27,7 +32,15 @@ export function register() {
     serviceName: otel.serviceName,
     attributes: otel.resourceAttributes,
     traceSampler: otel.sampleRate >= 1 ? 'always_on' : 'parentbased_traceidratio',
+    // Emit `knext.cold_start` under the FIRST inbound request span, automatically
+    // (#317) — the app-boot/first-request wake auto-instrumentation doesn't show.
+    spanProcessors: ['auto', new ColdStartSpanProcessor()],
   });
+
+  // Automatic `knext.db_wake` (#317): wrap each pg pool's first connect (the
+  // scale-zero-pg 0→1 wake) so any DB-backed request gets the span with no app
+  // code. The lib stays OTel-free — it calls this instrumentor via a seam.
+  setPoolInstrumentor(instrumentPoolForDbWake);
 
   // Join logs to traces (C4, #318): the correlation layer stamps every
   // in-request log line with the active span's `trace_id` via this provider,

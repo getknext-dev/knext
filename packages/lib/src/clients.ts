@@ -8,6 +8,52 @@ let minioClient: Minio.Client | null = null;
 let pgPool: Pool | null = null;
 let pgPoolRO: Pool | null = null;
 
+// ── Pool-instrumentor seam (dependency inversion, #317) ───────────────────────
+// This module stays OTel-free (mirroring `./context`'s `setTraceIdProvider`): an
+// OTel-aware layer (`@knext/core/adapters/tracing`) installs an instrumentor
+// that is invoked ONCE per pool as it is created, with the pool and its role.
+// The tracing adapter uses it to wrap the pool's first `connect()` in a
+// `knext.db_wake` span so the scale-zero-pg 0→1 DB wake shows up on the request
+// trace WITHOUT any app code. Default is a no-op — an app that has not opted
+// into tracing pays nothing, and pool creation is unchanged.
+
+/** Which scale-zero-pg endpoint a pool talks to. */
+export type PoolRole = 'writer' | 'reader';
+
+/** Instrument a freshly-created pool (e.g. wrap its first connect for tracing). */
+export type PoolInstrumentor = (pool: Pool, role: PoolRole) => void;
+
+const NO_POOL_INSTRUMENTOR: PoolInstrumentor = () => {};
+let poolInstrumentor: PoolInstrumentor = NO_POOL_INSTRUMENTOR;
+
+/**
+ * Install the pool instrumentor. Called once at startup by an OTel-aware app so
+ * new pools get a `knext.db_wake` span around their first connect, without this
+ * package taking an OTel dependency.
+ */
+export const setPoolInstrumentor = (fn: PoolInstrumentor): void => {
+  poolInstrumentor = fn;
+};
+
+/** Reset the pool instrumentor to the default no-op. Mainly for tests. */
+export const resetPoolInstrumentor = (): void => {
+  poolInstrumentor = NO_POOL_INSTRUMENTOR;
+};
+
+/**
+ * Run the installed instrumentor over a newly-created pool. Best-effort: a
+ * misbehaving instrumentor must never break pool creation (fail-open) — the
+ * pool is far more important than its span.
+ */
+const instrumentPool = (pool: Pool, role: PoolRole): Pool => {
+  try {
+    poolInstrumentor(pool, role);
+  } catch {
+    // Instrumentation is observability sugar; never let it sink the DB path.
+  }
+  return pool;
+};
+
 export const getCerbosClient = () => {
   if (!cerbosClient) {
     const target = process.env.CERBOS_URL || 'cerbos.default.svc.cluster.local:3593';
@@ -71,6 +117,8 @@ export const getDbPool = () => {
         DEFAULT_DB_POOL_CONNECT_TIMEOUT_MS,
       ),
     });
+    // Wrap the fresh pool for db-wake tracing (no-op unless an app opted in).
+    instrumentPool(pgPool, 'writer');
   }
   return pgPool;
 };
@@ -125,6 +173,8 @@ export const getDbPoolRO = (): Pool | null => {
         DEFAULT_DB_POOL_CONNECT_TIMEOUT_MS,
       ),
     });
+    // Wrap the fresh RO pool for db-wake tracing (no-op unless opted in).
+    instrumentPool(pgPoolRO, 'reader');
   }
   return pgPoolRO;
 };

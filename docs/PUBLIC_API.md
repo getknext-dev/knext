@@ -73,27 +73,40 @@ Exports: `resolveOtelOptions(): OtelOptions | null`, and the types `OtelOptions`
 
 ### `@knext/core/adapters/tracing`
 
-Manual OpenTelemetry spans for the cold, DB-backed request path — the wake
-latency that auto-instrumentation does not otherwise capture. `withColdStartSpan`
-times the app boot / first-request wake and `withDbWakeSpan` times the database
-0→1 wake + first connect; both nest inside the active request trace, so one cold
-request yields a single trace showing where the time went. Both are a
-zero-overhead no-op when tracing is disabled. `installTraceIdProvider()` returns
-the provider you pass to `@knext/lib`'s `setTraceIdProvider` so log lines and
-spans share one `trace_id`.
+OpenTelemetry spans for the cold, DB-backed request path — the wake latency that
+auto-instrumentation does not otherwise capture — emitted **automatically** on
+the real request path via two hooks you wire once in `instrumentation.ts` (only
+when tracing is enabled; a zero-overhead no-op otherwise):
+
+- `ColdStartSpanProcessor` — pass to `registerOTel({ spanProcessors: [...] })`.
+  It opens `knext.cold_start` under the first inbound request span (the app boot
+  / first-request wake), once.
+- `instrumentPoolForDbWake` — install via `@knext/lib/clients`'
+  `setPoolInstrumentor`. It spans each pool's first `connect()` (the database
+  0→1 wake) as `knext.db_wake`, nested in the request trace.
+
+Both nest inside the active request trace, so one cold request yields a single
+trace showing where the time went. `installTraceIdProvider()` returns the
+provider you pass to `@knext/lib`'s `setTraceIdProvider` so log lines and spans
+share one `trace_id`. `withColdStartSpan` / `withDbWakeSpan` remain for manual
+bracketing of a specific span of work.
 
 ```ts
-import { withColdStartSpan, withDbWakeSpan } from '@knext/core/adapters/tracing';
+import {
+  ColdStartSpanProcessor,
+  instrumentPoolForDbWake,
+} from '@knext/core/adapters/tracing';
+import { setPoolInstrumentor } from '@knext/lib/clients';
 
-const rows = await withColdStartSpan({ cold: true, wakeMs }, () =>
-  withDbWakeSpan(() => db.query('select 1')),
-);
+registerOTel({ serviceName, spanProcessors: ['auto', new ColdStartSpanProcessor()] });
+setPoolInstrumentor(instrumentPoolForDbWake);
 ```
 
-Exports: `withColdStartSpan(attrs, fn)`, `withDbWakeSpan(fn)`,
-`activeTraceId(): string | undefined`, `installTraceIdProvider()`, the type
-`ColdStartAttrs`, and the span-name constants `COLD_START_SPAN_NAME`,
-`DB_WAKE_SPAN_NAME`, `TRACER_NAME`.
+Exports: `ColdStartSpanProcessor`, `instrumentPoolForDbWake(pool, role)`,
+`withColdStartSpan(attrs, fn)`, `withDbWakeSpan(fn)`,
+`activeTraceId(): string | undefined`, `installTraceIdProvider()`, the types
+`ColdStartAttrs`, `KnextSpanProcessor`, and the span-name constants
+`COLD_START_SPAN_NAME`, `DB_WAKE_SPAN_NAME`, `TRACER_NAME`.
 
 ### `@knext/core/adapters/cache-handler`
 
@@ -172,8 +185,15 @@ const minio = getMinioClient();  // Minio.Client
 
 Exports:
 - `getDbPool(): Pool` — a PostgreSQL connection pool (`pg`).
+- `getDbPoolRO(): Pool | null` — a read-only pool over `DATABASE_URL_RO`, or
+  `null` when no read replica is configured.
+- `closeDbPool()` / `closeDbPoolRO()` — drain + close the pools (SIGTERM path).
 - `getMinioClient(): Minio.Client` — an S3/MinIO-compatible object-store client.
 - `getCerbosClient(): Cerbos` — a Cerbos authorization client.
+- `setPoolInstrumentor(fn)` / `resetPoolInstrumentor()` — a dependency-inversion
+  seam (this package stays OTel-free) invoked once per pool as it is created, so
+  an OTel-aware layer can wrap the first connect for a `knext.db_wake` span (see
+  `@knext/core/adapters/tracing`'s `instrumentPoolForDbWake`). Default is a no-op.
 
 ### `@knext/lib/health`
 

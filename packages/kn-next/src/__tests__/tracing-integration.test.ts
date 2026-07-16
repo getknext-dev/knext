@@ -123,7 +123,10 @@ describe("#317 acceptance: one cold DB-backed request → one trace, spans auto-
 
         // All three spans exist and were produced automatically.
         expect(http, "HTTP server span").toBeDefined();
-        expect(cold, "knext.cold_start (from the span processor)").toBeDefined();
+        expect(
+            cold,
+            "knext.cold_start (from the span processor)",
+        ).toBeDefined();
         expect(dbWake, "knext.db_wake (from the pool wrapper)").toBeDefined();
 
         // ONE trace: cold_start + db_wake share the HTTP span's traceId.

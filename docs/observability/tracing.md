@@ -17,27 +17,26 @@ The latency that hides on a knext request is the cold path:
 activator wake → app boot (cold start) → ISR/cache → DB wake (0→1) → query → render
 ```
 
-Auto-instrumentation (`@vercel/otel`) captures the HTTP handler, `fetch`, and
-`pg` **queries**. It does **not** emit a span for the knext-specific waits — the
-app boot / first-request wake, and the `scale-zero-pg` 0→1 scale + first connect
-that happens *before* the first query. knext adds two manual spans so those show
-up in the same trace:
+Auto-instrumentation (`@vercel/otel`) captures the inbound HTTP handler and
+`fetch`. It does **not** bundle `pg` instrumentation, and it emits nothing for
+the knext-specific waits — the app boot / first-request wake, and the
+`scale-zero-pg` 0→1 scale + first connect. knext adds two spans that fill exactly
+that gap, and — this is the important part — they are emitted **automatically on
+the real request path with no app route-handler wiring** (see §4 for how):
 
 | Span | Emitted by | Covers |
 | --- | --- | --- |
 | *(request)* | `@vercel/otel` (auto) | the inbound HTTP handler |
-| `knext.cold_start` | `@knext/core/adapters/tracing` | app boot / first-request wake |
-| `knext.db_wake` | `@knext/core/adapters/tracing` | `scale-zero-pg` 0→1 scale + first connect |
-| *(pg query)* | `@vercel/otel` (auto) | the SQL query itself |
+| `knext.cold_start` | `ColdStartSpanProcessor` (auto) | app boot / first-request wake |
+| `knext.db_wake` | pg-pool connect wrapper (auto) | `scale-zero-pg` 0→1 scale + first connect |
 
 They compose into one trace (`knext.cold_start` and `knext.db_wake` are children
-of the active request span, so they share its `traceId`):
+of the request span, so they share its `traceId`):
 
 ```
 request  (auto, HTTP)
 ├─ knext.cold_start          knext.cold_start=true  knext.wake_ms=2500
-│  └─ knext.db_wake
-└─ pg  select …              (auto)
+└─ knext.db_wake             knext.db_role=writer   knext.wake_ms=2480
 ```
 
 ## 2. Enabling tracing (default-OFF)
@@ -91,28 +90,63 @@ SaaS exporters (Honeycomb, Datadog, Vercel's OTel integrations, …) are
 itself is not provisioned by knext today; knext only *emits* OTLP and assumes a
 collector at the endpoint.
 
-## 4. The manual spans (`@knext/core/adapters/tracing`)
+## 4. Automatic wiring (`@knext/core/adapters/tracing`)
 
-`withColdStartSpan` and `withDbWakeSpan` wrap the boot/wake work. Both are a
-**zero-overhead no-op when tracing is disabled** — with no registered tracer
-provider, OTel's built-in no-op tracer runs the callback with a non-recording
-span, so nothing is exported. Both nest under the active request span, so they
-appear in the same trace.
+Both knext spans are emitted **automatically** — you do **not** hand-open spans
+in your route handlers. When tracing is enabled, knext's `instrumentation.ts`
+registers two knext-core-owned hooks; when tracing is disabled neither is
+installed, so the cost is zero (OTel's no-op tracer records nothing).
+
+**`knext.cold_start` — a span processor.** `ColdStartSpanProcessor` is passed to
+`registerOTel({ spanProcessors: ['auto', new ColdStartSpanProcessor()] })`. Its
+`onStart` fires for the **first** inbound HTTP server span the process sees after
+boot and opens a `knext.cold_start` child under it, recording
+`knext.wake_ms` = time from process boot to that first request. Every request
+after the first is a no-op. Because it parents under the request span, the
+cold-start span lands in the same trace.
+
+**`knext.db_wake` — a pg-pool connect wrapper.** `instrumentPoolForDbWake` is
+installed once via `@knext/lib/clients`' `setPoolInstrumentor` seam. The lib
+(which stays OTel-free) calls it for every pool it creates; the wrapper spans the
+pool's **first** `connect()` — the scale-zero-pg 0→1 wake — as `knext.db_wake`
+(attributes `knext.db_role` = `writer`/`reader`, `knext.wake_ms`). It opens in
+the caller's active context, so inside a request handler it nests under the
+request span. Warm connects from the ready pool are untouched: the span marks the
+wake, not every checkout.
+
+Both are wired in `instrumentation.ts` (only when tracing is enabled):
 
 ```ts
-import { withColdStartSpan, withDbWakeSpan } from '@knext/core/adapters/tracing';
+import {
+  ColdStartSpanProcessor,
+  installTraceIdProvider,
+  instrumentPoolForDbWake,
+} from '@knext/core/adapters/tracing';
+import { setPoolInstrumentor } from '@knext/lib/clients';
+import { setTraceIdProvider } from '@knext/lib/context';
+import { registerOTel } from '@vercel/otel';
 
-// Around app boot / the first-request wake:
-const rows = await withColdStartSpan({ cold: isColdBoot, wakeMs }, () =>
-  // Around the scale-zero-pg 0→1 wake + first connect (the query itself is
-  // already auto-instrumented by @vercel/otel's pg instrumentation):
-  withDbWakeSpan(() => db.query('select 1')),
-);
+registerOTel({
+  serviceName,
+  spanProcessors: ['auto', new ColdStartSpanProcessor()], // knext.cold_start
+});
+setPoolInstrumentor(instrumentPoolForDbWake); // knext.db_wake on first connect
+setTraceIdProvider(installTraceIdProvider());  // log ↔ trace join (§5)
 ```
 
-`withColdStartSpan` records `knext.cold_start` (boolean) and, when supplied,
-`knext.wake_ms` (the measured wake duration) so wake latency is attributable per
-request.
+An app that uses `@knext/lib`'s pools (`getDbPool` / `getDbPoolRO`) or the
+`@knext/db` SDK gets `knext.db_wake` for free — no query-site changes.
+
+### Manual bracketing (optional)
+
+For code paths outside the automatic hooks, `withColdStartSpan(attrs, fn)` and
+`withDbWakeSpan(fn)` bracket a specific span of work by hand. Same zero-overhead
+no-op posture when tracing is disabled; both nest under the active request span.
+
+```ts
+import { withDbWakeSpan } from '@knext/core/adapters/tracing';
+const rows = await withDbWakeSpan(() => db.query('select 1'));
+```
 
 ## 5. Joining logs to traces (C4 correlation layer)
 
@@ -137,10 +171,21 @@ default no-trace behavior (zero overhead).
 
 ## 6. Verifying
 
-The span behavior is unit-tested with the OTel SDK's in-memory span exporter
-(`packages/kn-next/src/__tests__/tracing.test.ts`): the no-op posture when
-disabled, the `knext.cold_start` name + attributes, the parent/child nesting
-under a request span, the `db_wake` span in the same trace, and the
-`trace_id`↔context join. On a live cluster, send one cold request and confirm a
-single trace in Tempo/Jaeger with `knext.cold_start` → `knext.db_wake` nested
-under the HTTP span.
+The behavior is proven with the OTel SDK's in-memory span exporter (no live
+collector):
+
+- `packages/kn-next/src/__tests__/tracing-integration.test.ts` — the acceptance
+  proof. It drives a simulated cold, DB-backed request through the **automatic**
+  hooks (`ColdStartSpanProcessor` + the pool `connect` wrapper, exactly as
+  `instrumentation.ts` wires them) and asserts one trace containing
+  HTTP → `knext.cold_start` + `knext.db_wake`, correctly nested — with no
+  hand-opened spans. It also proves cold_start fires only on the first request,
+  db_wake only on the first (0→1) connect, and zero spans when tracing is off.
+- `packages/kn-next/src/__tests__/tracing.test.ts` — the helper units
+  (`withColdStartSpan` / `withDbWakeSpan`, attributes, nesting, `trace_id` join).
+- `packages/lib/src/__tests__/clients-instrumentor.test.ts` — the `@knext/lib`
+  `setPoolInstrumentor` seam (invoked once per pool, fail-open, default no-op).
+
+On a live cluster, send one cold request and confirm a single trace in
+Tempo/Jaeger with `knext.cold_start` and `knext.db_wake` nested under the HTTP
+span.
