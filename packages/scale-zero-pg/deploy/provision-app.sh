@@ -518,8 +518,13 @@ cmd_fsck() {
   local all; all="$(PS "http://localhost:9898/v1/tenant/$APPS_TENANT/timeline" \
     | python3 -c 'import sys,json;[print(t["timeline_id"]) for t in json.load(sys.stdin)]')"
   # Owner ConfigMaps as "name timeline" pairs (name = compute-config-<app>).
+  # The tier=apps label is intentionally shared by system markers too (e.g. the
+  # wal-reclaim marker $RECLAIM_CM), so we key intent-reconciliation off the
+  # compute-config-<app> naming convention — NOT the broad label — to avoid
+  # misclassifying a timeline-less system marker as a dangling app intent (#337).
   local owned_pairs; owned_pairs="$(K get configmap -l tier=apps \
-    -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.data.TIMELINE_ID}{"\n"}{end}' 2>/dev/null | grep -v '^ *$' || true)"
+    -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.data.TIMELINE_ID}{"\n"}{end}' 2>/dev/null \
+    | awk '$1 ~ /^compute-config-./' | grep -v '^ *$' || true)"
   local owned_tls; owned_tls="$(printf '%s\n' "$owned_pairs" | awk '{print $2}' | grep -v '^$' | sort -u || true)"
 
   local problems=0 tl

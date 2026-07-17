@@ -1862,6 +1862,13 @@ directions** and exits non-zero if anything is off:
    applies) is also reported; resolve with `create <app>` (completes the provision)
    or `destroy <app>` (removes it).
 
+   **System markers are excluded (issue #337).** Intent-reconciliation walks only
+   ConfigMaps named `compute-config-<app>` — the genuine per-app intents — **not**
+   every ConfigMap carrying the shared `tier=apps` label. So the wal-reclaim ledger
+   `apps-wal-reclaim-pending` (a `tier=apps` system marker with **no** `TIMELINE_ID`
+   by design) is **not** misclassified as a dangling intent. A real
+   `compute-config-<app>` with no `TIMELINE_ID` is still flagged.
+
 ### Rotating an app credential (issue #93b)
 
 Each app authenticates as `app_<app>` with a per-app password stored in Secret
