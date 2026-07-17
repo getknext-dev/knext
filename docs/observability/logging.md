@@ -67,18 +67,21 @@ Set the floor with `LOG_LEVEL` (default `info` in production, `debug` in dev).
   the span's `trace_id`, so a log query by `correlation_id` and a trace query by
   `trace_id` land on the same request.
 - **Propagation:**
-  - **Response echo — deferred on the automatic path (#346).** `@knext/lib`
-    ships `applyCorrelationHeader(...)` to echo `x-request-id` on a response, and
-    it fires when a code path knext-core owns establishes the context explicitly
-    (§3). On the **automatic** path it does **not** fire: echoing on the inbound
-    HTTP response requires owning the handler/response chain, and knext-core does
-    **not** own it — the app's standalone Next.js child owns responses, and
-    `@vercel/otel` exposes no inbound response hook (same #317/#342 constraint as
-    handler wrapping). We deliberately do not force an architecturally wrong wrap.
-    Inbound stamping + log correlation (below) is the shipped behavior; a client
-    that needs the id back should read it from the correlated log/trace, or the
-    app can call `applyCorrelationHeader` in a route it owns. Tracked as a
-    follow-up.
+  - **Response echo — automatic on the real path (default when tracing is on).**
+    knext-core echoes `x-request-id` on the HTTP **response** automatically, with
+    no app handler wrapping (#350). The `correlation-response` adapter
+    (`installCorrelationResponseEcho()`, wired once in `instrumentation.ts`'s Node
+    path when tracing is on) patches `http.ServerResponse.prototype` — the same
+    core-owned seam the deploy-mode cache-control normalizer uses — so at the
+    header-flush point the response carries `x-request-id` = the **active**
+    correlation id (read from the same OTel Context the logger mixin resolves
+    from). It only fills the header when the id is present and the app has **not**
+    already set it (an app-set value always wins), is **fail-open** (a throw never
+    breaks the response), **idempotent**, and **default-off** (installed only when
+    tracing is enabled). So a client that sends (or is assigned) an `x-request-id`
+    gets it back on the response, joinable to the correlated logs/trace.
+    `@knext/lib` still ships `applyCorrelationHeader(...)` for routes the app owns
+    and explicit `runWithRequestContext` paths (§3).
   - **Downstream / db-wake:** forward `x-request-id` on outbound calls so a
     request is traceable app → db-wake → downstream. Across the Postgres hop
     (a TCP wake-on-connect gateway that carries no HTTP headers) the join key is
@@ -141,6 +144,26 @@ resolvers), emits a log field set inside the request — **including inside a
 `knext.db_wake` child span** — with **no** hand-call to `runWithRequestContext`,
 and asserts every line carries a `correlation_id` (adopted from inbound
 `x-request-id` when present, generated otherwise) and the matching `trace_id`.
+
+**OTel-upgrade tripwire.** The automatic correlation rests on one load-bearing
+behavior of the inbound HTTP auto-instrumentation
+(`@opentelemetry/instrumentation-http`, which `@vercel/otel` uses): it runs
+`propagation.extract(activeContext, requestHeaders)` **then** starts the SERVER
+span **under** the extracted context, so the seeded id descends to every child
+span. `packages/kn-next/src/__tests__/otel-http-extract-tripwire.test.ts` pins
+that assumption — it resolves the runtime's actual `@vercel/otel` node build,
+checks the `registerOTel` seam + the bundled extract/SERVER-span machinery still
+exist, and asserts the extract→SERVER-span contract in-process (with a
+counter-proof showing the broken ordering loses the id). A future `@vercel/otel`
+/ `@opentelemetry/instrumentation-http` bump that changes the extract-then-parent
+behavior fails this test instead of silently breaking child-span correlation. Add
+running this tripwire to the OTel-dependency-bump checklist.
+
+The response-echo of `x-request-id` (§2, automatic path) is proven by
+`packages/kn-next/src/__tests__/correlation-response.test.ts`: the
+`ServerResponse.prototype` patch stamps the active id at header flush, does not
+override an app-set value, is fail-open + idempotent, and is inert when tracing
+is off.
 
 ## 3. Using the layer explicitly (`@knext/lib/context`)
 
