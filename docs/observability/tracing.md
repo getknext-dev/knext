@@ -125,6 +125,27 @@ the wake, not every checkout.
 > The wrapper now covers `query` too, preserving every pg overload (text, params,
 > config object, with/without callback) and staying fail-open.
 
+> Why the seam state lives on `globalThis` (#352): every `@knext/lib` seam that
+> is SET by `instrumentation.ts` but READ elsewhere on the request path
+> (`setPoolInstrumentor` in `@knext/lib/clients`; `setTraceIdProvider` /
+> `setCorrelationIdProvider` in `@knext/lib/context`) stores its provider on a
+> `Symbol.for('knext.lib.*')` slot on `globalThis` — never a plain module-level
+> `let`. In the Next.js **standalone** build `instrumentation.ts` compiles in a
+> SEPARATE webpack layer from the app server bundles, and `@knext/lib` is bundled
+> (not externalized) into each layer, so `instrumentation-node`'s copy of
+> `@knext/lib/clients` and the app server component's copy are two PHYSICAL
+> modules with independent module state. A module-level `let` written by the
+> instrumentation copy is invisible to the copy `getDbPool()` reads — the pool is
+> never wrapped and `knext_db_wake_*` silently never fires (the live #352 defect;
+> SpanProcessor-based `golden-signal`/`cold_start` metrics kept working because
+> they are passed directly into `registerOTel`, crossing no seam). Anchoring the
+> state on the single shared `globalThis` makes set-from-copy-A visible to
+> read-from-copy-B regardless of bundling; `Symbol.for` uses the cross-realm
+> registry so the key is identical in every copy. **Any future `@knext/lib` seam
+> that is installed from `instrumentation.ts` MUST follow this pattern** — see
+> `packages/lib/src/__tests__/seam-duplication.test.ts` for the two-instances
+> guard. The public API and fail-open / default-off semantics are unchanged.
+
 Both are wired in `instrumentation.ts` (only when tracing is enabled):
 
 ```ts

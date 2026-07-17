@@ -24,20 +24,41 @@ export type PoolRole = 'writer' | 'reader';
 export type PoolInstrumentor = (pool: Pool, role: PoolRole) => void;
 
 const NO_POOL_INSTRUMENTOR: PoolInstrumentor = () => {};
-let poolInstrumentor: PoolInstrumentor = NO_POOL_INSTRUMENTOR;
+
+// The instrumentor is stored on a well-known `globalThis` key rather than a
+// plain module-level `let` (#352). In the Next.js standalone build,
+// `instrumentation.ts` compiles in a SEPARATE webpack layer from the app server
+// bundles and `@knext/lib` is bundled (not externalized) into each — so
+// `instrumentation-node`'s `@knext/lib/clients` and the app's server-component
+// `@knext/lib/clients` are TWO PHYSICAL module copies with independent
+// module-level state. A module-level `let` written by the copy that runs
+// `setPoolInstrumentor(...)` is invisible to the copy whose `getDbPool()` reads
+// it → the pool is never wrapped → `knext_db_wake_*` never fires. Anchoring the
+// state on the single shared `globalThis` makes set-from-copy-A visible to
+// read-from-copy-B, whatever the bundling. `Symbol.for` uses the cross-realm
+// registry so the key is stable across every copy.
+const POOL_INSTRUMENTOR_KEY = Symbol.for('knext.lib.clients.poolInstrumentor');
+
+type PoolInstrumentorGlobal = Record<symbol, PoolInstrumentor | undefined>;
+
+const instrumentorGlobal = globalThis as unknown as PoolInstrumentorGlobal;
+
+const getPoolInstrumentor = (): PoolInstrumentor =>
+  instrumentorGlobal[POOL_INSTRUMENTOR_KEY] ?? NO_POOL_INSTRUMENTOR;
 
 /**
  * Install the pool instrumentor. Called once at startup by an OTel-aware app so
  * new pools get a `knext.db_wake` span around their first connect, without this
- * package taking an OTel dependency.
+ * package taking an OTel dependency. State lives on `globalThis` so it is shared
+ * even when this module is duplicated across bundles (#352).
  */
 export const setPoolInstrumentor = (fn: PoolInstrumentor): void => {
-  poolInstrumentor = fn;
+  instrumentorGlobal[POOL_INSTRUMENTOR_KEY] = fn;
 };
 
 /** Reset the pool instrumentor to the default no-op. Mainly for tests. */
 export const resetPoolInstrumentor = (): void => {
-  poolInstrumentor = NO_POOL_INSTRUMENTOR;
+  delete instrumentorGlobal[POOL_INSTRUMENTOR_KEY];
 };
 
 /**
@@ -47,7 +68,7 @@ export const resetPoolInstrumentor = (): void => {
  */
 const instrumentPool = (pool: Pool, role: PoolRole): Pool => {
   try {
-    poolInstrumentor(pool, role);
+    getPoolInstrumentor()(pool, role);
   } catch {
     // Instrumentation is observability sugar; never let it sink the DB path.
   }
