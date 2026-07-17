@@ -31,11 +31,13 @@ import {
 import { resolveOtelOptions } from '@knext/core/adapters/otel-config';
 import {
   ColdStartSpanProcessor,
+  correlationAttributesFromHeaders,
+  installCorrelationIdProvider,
   installTraceIdProvider,
   instrumentPoolForDbWake,
 } from '@knext/core/adapters/tracing';
 import { setPoolInstrumentor } from '@knext/lib/clients';
-import { setTraceIdProvider } from '@knext/lib/context';
+import { setCorrelationIdProvider, setTraceIdProvider } from '@knext/lib/context';
 import { registerOTel } from '@vercel/otel';
 import { Registry } from 'prom-client';
 
@@ -66,6 +68,13 @@ export function registerNode() {
   registerOTel({
     serviceName: otel.serviceName,
     attributes: otel.resourceAttributes,
+    // Establish the request correlation id on the REAL path (#346): this hook
+    // runs per-request with the inbound headers, adopts a well-formed
+    // `x-request-id` (else generates one) and stamps it on the inbound SERVER
+    // span as `knext.correlation_id`. Since @vercel/otel propagates that span via
+    // an AsyncLocalStorageContextManager, the correlation-id provider below reads
+    // it back at log time — no `runWithRequestContext` handler wrapping needed.
+    attributesFromHeaders: correlationAttributesFromHeaders,
     traceSampler: otel.sampleRate >= 1 ? 'always_on' : 'parentbased_traceidratio',
     // Emit `knext.cold_start` under the FIRST inbound request span, automatically
     // (#317) — the app-boot/first-request wake auto-instrumentation doesn't show.
@@ -93,4 +102,12 @@ export function registerNode() {
   // id. Only wired when tracing is on — when disabled the provider is never
   // installed (the C4 default no-trace provider stays in place, zero overhead).
   setTraceIdProvider(installTraceIdProvider());
+
+  // Correlate logs on the REAL request path (#346): resolve the request's
+  // `correlation_id` from the ACTIVE OTel span (the `knext.correlation_id`
+  // attribute stamped by `attributesFromHeaders` above) at log time. Together
+  // with the trace-id provider, every in-request log line now carries BOTH
+  // correlation_id + trace_id with no `runWithRequestContext` handler wrapping.
+  // Only wired when tracing is on (rides the default-off gate).
+  setCorrelationIdProvider(installCorrelationIdProvider());
 }

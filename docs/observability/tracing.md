@@ -196,18 +196,34 @@ active trace id to the [correlation layer](./logging.md) via the injectable
 
 ```ts
 // instrumentation.ts — wired once at startup, only when tracing is enabled.
-import { installTraceIdProvider } from '@knext/core/adapters/tracing';
-import { setTraceIdProvider } from '@knext/lib/context';
+import {
+  correlationAttributesFromHeaders,
+  installCorrelationIdProvider,
+  installTraceIdProvider,
+} from '@knext/core/adapters/tracing';
+import { setCorrelationIdProvider, setTraceIdProvider } from '@knext/lib/context';
+import { registerOTel } from '@vercel/otel';
 
-setTraceIdProvider(installTraceIdProvider());
+registerOTel({
+  // Establish the correlation id per request from inbound headers (#346).
+  attributesFromHeaders: correlationAttributesFromHeaders,
+  // ...serviceName, spanProcessors, etc.
+});
+setTraceIdProvider(installTraceIdProvider());          // trace_id resolver
+setCorrelationIdProvider(installCorrelationIdProvider()); // correlation_id resolver
 ```
 
 After this, every in-request log line carries the active span's `trace_id`
-alongside its `correlation_id` (see [logging.md §3](./logging.md)). A log query
-by `correlation_id` and a trace query by `trace_id` then resolve to the same
-request — the bridge between the two observability planes. When tracing is
-disabled the provider is never installed, so the correlation layer stays on its
-default no-trace behavior (zero overhead).
+**and** its `correlation_id` — established automatically on the real request
+path, with no `runWithRequestContext` handler wrapping (#346; see
+[logging.md §3a](./logging.md)). The `attributesFromHeaders` hook adopts/generates
+the id and stamps it on the inbound SERVER span (`knext.correlation_id`); the two
+providers read `trace_id` + `correlation_id` back from the active OTel span at log
+time. A log query by `correlation_id` and a trace query by `trace_id` then resolve
+to the same request — the bridge between the two observability planes. When
+tracing is disabled neither provider is installed and the hook is never wired, so
+the correlation layer stays on its default no-trace / no-correlation behavior
+(zero overhead).
 
 ## 6. Verifying
 

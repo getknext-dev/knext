@@ -24,7 +24,7 @@ Every line carries these load-bearing fields:
 | `app` | `KN_APP_NAME` (fallback `kn-next`) | which app/service emitted it |
 | `env` | `NODE_ENV` | deployment environment |
 | `msg` | call site | human message |
-| `correlation_id` | request context (§3) | present on every line emitted **during a request** |
+| `correlation_id` | request context / active OTel span (§3) | present on every line emitted **during a request** (automatic when tracing is on) |
 | `trace_id` | active OTel span (§3) | present when tracing is enabled and a span is active |
 
 Secrets are redacted at the logger: `req.headers.authorization`,
@@ -58,8 +58,11 @@ Set the floor with `LOG_LEVEL` (default `info` in production, `debug` in dev).
   control chars, markup, oversized, empty) is **not trusted** and a fresh uuid
   is generated. The id is a log/propagation field, so untrusted structure is a
   log-injection / cardinality hazard.
-- **One id per request**, ambient for the whole request via
-  `AsyncLocalStorage` — no need to thread it through function signatures.
+- **One id per request**, ambient for the whole request — no need to thread it
+  through function signatures. On the real request path this is established
+  **automatically** (§3a): knext-core does not own the Next.js route-handler
+  chain, so it rides the per-request OTel context `@vercel/otel` already
+  propagates rather than requiring the app to wrap every handler.
 - **Trace tie-in:** when an OTel span is active the correlation id is joined to
   the span's `trace_id`, so a log query by `correlation_id` and a trace query by
   `trace_id` land on the same request.
@@ -73,10 +76,51 @@ Set the floor with `LOG_LEVEL` (default `info` in production, `debug` in dev).
     `correlation_id`/`trace_id` pair on the app's log lines around the DB call
     stitches the two layers together.
 
-## 3. Using the layer (`@knext/lib/context`)
+## 3a. Automatic correlation on the real request path (default when tracing is on)
 
-The correlation layer is dependency-free (no OTel SDK import); the app injects
-the active-trace-id reader once at startup.
+You do **not** need to wrap handlers to get correlated logs. When tracing is
+enabled (`spec.observability.tracing.enabled`, ADR-0012), knext-core establishes
+the correlation id automatically for every inbound request — no app code, no
+`runWithRequestContext` in your route handlers (#346).
+
+How it works (all core-owned, wired once in `instrumentation-node.ts`):
+
+1. **Establish (per request):** `@vercel/otel`'s `attributesFromHeaders` hook —
+   `correlationAttributesFromHeaders` (`@knext/core/adapters/tracing`) — runs on
+   the inbound request with its headers, **adopts a well-formed `x-request-id`
+   (else generates one)** by the same rules as §2, and stamps it on the inbound
+   HTTP **SERVER span** as the `knext.correlation_id` attribute.
+2. **Carry:** `@vercel/otel` installs an `AsyncLocalStorageContextManager`, so
+   that SERVER span is the **active OTel span** for the whole request (across
+   `await`s) without any ambient store of our own.
+3. **Resolve (at log time):** `@knext/lib`'s logger `mixin` reads
+   `correlation_id` (and `trace_id`) from the active OTel span via two injected
+   providers — `installCorrelationIdProvider()` / `installTraceIdProvider()` from
+   the tracing adapter, installed via `setCorrelationIdProvider` /
+   `setTraceIdProvider`. `@knext/lib` stays OTel-free (dependency-inversion seam);
+   the OTel-aware `@knext/core` supplies the resolvers.
+
+This is why the schema table marks `correlation_id` "automatic when tracing is
+on". **Default-off / zero overhead:** with tracing disabled neither provider is
+installed, `correlationLogFields()` returns `{}`, and no correlation work runs —
+non-request and background logs stay clean and no id ever leaks.
+
+The proof is the integration test
+`packages/kn-next/src/__tests__/correlation-integration.test.ts`: it drives a
+simulated request through the exact wiring (the `attributesFromHeaders` hook + a
+real tracer provider + `AsyncLocalStorageContextManager` + injected resolvers),
+emits a log field set inside the request with **no** hand-call to
+`runWithRequestContext`, and asserts the line carries a `correlation_id` (adopted
+from inbound `x-request-id` when present, generated otherwise) and the matching
+`trace_id`.
+
+## 3. Using the layer explicitly (`@knext/lib/context`)
+
+For code paths that knext-core **does** own (a custom server entry, an operator
+task, a script) you can establish the context by hand. This is the same layer;
+an explicit `runWithRequestContext` always takes precedence over the automatic
+provider (one path, no double-stamping). The layer is dependency-free (no OTel
+SDK import); the app injects the active-trace-id reader once at startup.
 
 ```ts
 import { trace } from '@opentelemetry/api';

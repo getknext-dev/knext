@@ -49,16 +49,28 @@
  * via `setTraceIdProvider` so a log line and a span share the same `trace_id`.
  */
 
+import { CORRELATION_HEADER, resolveCorrelationId } from "@knext/lib/context";
 import {
+    type Attributes,
     type Context,
     type Span,
     SpanKind,
     SpanStatusCode,
+    type TextMapGetter,
     trace,
 } from "@opentelemetry/api";
 
 /** Tracer name for all manually-instrumented knext runtime spans. */
 export const TRACER_NAME = "@knext/core";
+
+/**
+ * Span attribute that carries the request correlation id (#346). It rides the
+ * inbound SERVER span so it is (a) exported on the trace, (b) readable back at
+ * log time from the ACTIVE OTel span, and (c) available to echo on the response.
+ * `x-request-id.` prefix mirrors OTel's `http.request.header.*` convention while
+ * staying under the vendor-neutral `knext.` namespace.
+ */
+export const CORRELATION_ATTRIBUTE = "knext.correlation_id";
 
 /** Span name for the app boot / first-request wake. */
 export const COLD_START_SPAN_NAME = "knext.cold_start";
@@ -202,6 +214,80 @@ export function activeTraceId(): string | undefined {
  */
 export function installTraceIdProvider(): () => string | undefined {
     return activeTraceId;
+}
+
+// ── Automatic request correlation on the real path (#346) ─────────────────────
+
+/**
+ * `attributesFromHeaders` hook for `@vercel/otel`'s `registerOTel(...)`. It runs
+ * PER-REQUEST, on the real path, with the inbound request headers — the one
+ * core-owned seam that sees a request's headers without knext-core owning the
+ * route-handler chain (the node-server adapter is a supervisor; the app's
+ * handlers run in the standalone child, #317/#342).
+ *
+ * It adopts a WELL-FORMED inbound `x-request-id` (else mints a fresh uuid — the
+ * untrusted-input rules live in `@knext/lib/context`) and returns it as the
+ * `knext.correlation_id` attribute on the inbound HTTP SERVER span. Because
+ * @vercel/otel installs an `AsyncLocalStorageContextManager`, that SERVER span is
+ * the active span while the handler runs, so `installCorrelationIdProvider()`
+ * (below) can read the id back at log time — the correlation id thus lands on
+ * every in-request log line with NO `runWithRequestContext` wrapping.
+ *
+ * Registered only when tracing is on, so it shares tracing's default-off gate:
+ * with tracing disabled this hook is never wired and there is zero overhead.
+ *
+ * @param headers - opaque inbound-headers carrier (passed by @vercel/otel)
+ * @param getter  - TextMapGetter to read a header from `headers`
+ */
+export function correlationAttributesFromHeaders<Carrier = unknown>(
+    headers: Carrier,
+    getter: TextMapGetter<Carrier>,
+): Attributes {
+    const raw = getter.get(headers, CORRELATION_HEADER);
+    const id = resolveCorrelationId(Array.isArray(raw) ? raw[0] : raw);
+    return { [CORRELATION_ATTRIBUTE]: id };
+}
+
+/**
+ * Read the request correlation id from the currently-active OTel span — the
+ * `knext.correlation_id` attribute stamped by `correlationAttributesFromHeaders`
+ * on the inbound SERVER span. Returns `undefined` when no span is active, when
+ * tracing is disabled (no-op span), or when the attribute is absent.
+ *
+ * The SDK's span implementation exposes its `attributes` map as a public field;
+ * we read it structurally so this module keeps its `@opentelemetry/api`-only
+ * runtime posture (no `@opentelemetry/sdk-trace-base` dependency).
+ */
+export function activeCorrelationId(): string | undefined {
+    const span = trace.getActiveSpan();
+    if (!span) {
+        return undefined;
+    }
+    // A no-op / non-recording span has an all-zero trace id — treat as no
+    // correlation so disabled tracing never surfaces a bogus/empty id.
+    const ctx = span.spanContext();
+    if (!ctx.traceId || /^0+$/.test(ctx.traceId)) {
+        return undefined;
+    }
+    const attrs = (span as { attributes?: Attributes }).attributes;
+    const value = attrs?.[CORRELATION_ATTRIBUTE];
+    return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+/**
+ * Return a provider suitable for `@knext/lib`'s `setCorrelationIdProvider`
+ * (#346). Wiring it once at startup makes every in-request log line carry the
+ * active request's `correlation_id`, read from the active OTel span, so logs are
+ * correlated on the real path with no handler wrapping:
+ *
+ *   import { setCorrelationIdProvider } from '@knext/lib/context';
+ *   setCorrelationIdProvider(installCorrelationIdProvider());
+ *
+ * Kept dependency-inverted (returns the provider rather than calling the setter)
+ * so this module stays independently unit-testable and the app owns the wiring.
+ */
+export function installCorrelationIdProvider(): () => string | undefined {
+    return activeCorrelationId;
 }
 
 // ── Automatic cold-start span (a SpanProcessor) ───────────────────────────────
