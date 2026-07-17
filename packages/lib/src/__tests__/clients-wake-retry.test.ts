@@ -199,7 +199,40 @@ describe('@knext/lib/clients — wake-path retry/backoff (#310)', () => {
     const assertion = expect(failing).rejects.toThrow(/password authentication failed/);
     await vi.runAllTimersAsync();
     await assertion;
+    // #373: fail-FAST — a permanent (auth) error short-circuits `isPermanentAcquireError`
+    // on the FIRST attempt, so exactly ONE acquisition happens (no retry-until-budget).
+    // Pins that a regression which made 28xxx/auth errors retry would fail here rather
+    // than silently hammering a genuinely-failing DB for the whole budget.
+    expect(acquireCount).toBe(1);
     // Fail-open single-flight: the failed wake did not latch woken.
+    expect(mod.isDbWoken?.()).toBe(false);
+  });
+
+  it('short-circuits mid-retry when a permanent (auth) error follows a transient one (#373)', async () => {
+    vi.useFakeTimers();
+    process.env.DB_WAKE_RETRY_BUDGET_MS = '2000';
+    process.env.DB_WAKE_RETRY_BASE_MS = '50';
+    const mod = await import('../clients');
+    const pool = mod.getDbPool();
+
+    // A transient connect-race failure (retried), then a PERMANENT auth error
+    // arrives on the second attempt. The retry loop must NOT keep going after the
+    // permanent error even though the budget is far from exhausted — it fails fast.
+    outcomes = [
+      { kind: 'err', err: TRANSIENT() },
+      { kind: 'err', err: new Error('password authentication failed') },
+      // Anything queued after this must NEVER be consumed (would prove it kept retrying).
+      { kind: 'ok' },
+      { kind: 'ok' },
+    ];
+
+    const failing = pool.connect();
+    const assertion = expect(failing).rejects.toThrow(/password authentication failed/);
+    await vi.runAllTimersAsync();
+    await assertion;
+    // Exactly two acquisitions: the transient (retried) + the permanent (short-circuit).
+    // The queued OK outcomes are never reached → no further retries after the auth error.
+    expect(acquireCount).toBe(2);
     expect(mod.isDbWoken?.()).toBe(false);
   });
 });
