@@ -47,6 +47,12 @@ describe('db pool chaos: connection failure is BOUNDED, never a hang or false su
     process.env.DB_POOL_CONNECT_TIMEOUT_MS = String(CONNECT_TIMEOUT_MS);
     // Keep the pool tiny so a single failed connect surfaces immediately.
     process.env.DB_POOL_MAX = '1';
+    // Isolate the CONNECT bound from the #310 wake-retry layer: getDbPool now
+    // wraps acquire in retryWake, which classifies ECONNREFUSED / connect-timeout
+    // as transient and retries for DB_WAKE_RETRY_BUDGET_MS (default 8s). This test
+    // asserts the connect guard in isolation, so pin a 1ms retry budget = a single
+    // attempt, no retry. (`toFinitePositiveInt` treats 0 as unset → default, so use 1.)
+    process.env.DB_WAKE_RETRY_BUDGET_MS = '1';
     // Silence expected connection-error noise so suite output stays clean.
     vi.spyOn(console, 'error').mockImplementation(() => {});
     vi.spyOn(console, 'warn').mockImplementation(() => {});
