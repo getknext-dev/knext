@@ -103,6 +103,26 @@ case "$0" in
       check "hold custom mult/marg" "$(WAKE_BUDGET_MS=10000 hold_budget_s 2 10)" "30"
       # idle_wait_s: gateway idle + wake slack + fixed
       check "idle_wait 8s+30s+15"   "$(WAKE_BUDGET_MS=30000 idle_wait_s 8000)" "53"
+      # --- adaptive budget (#340) ---
+      # budget_from_measured_ms: measured*3 + 30000 margin, floored at 120000.
+      check "measured 40s->150s"    "$(budget_from_measured_ms 40000)"          "150000"
+      check "measured 100s->330s"   "$(budget_from_measured_ms 100000)"         "330000"
+      check "measured tiny->floor"  "$(budget_from_measured_ms 2000)"           "120000"
+      check "measured 0->floor"     "$(budget_from_measured_ms 0)"              "120000"
+      check "measured garbage->flr" "$(budget_from_measured_ms abc)"            "120000"
+      check "override beats probe"  "$(WAKE_BUDGET_MS=30000 WAKE_BUDGET_MS_MEASURED=40000 wake_budget_ms)" "30000"
+      check "probe when no override" "$(WAKE_BUDGET_MS= WAKE_BUDGET_MS_MEASURED=40000 wake_budget_ms)" "150000"
+      check "no-probe safe fallback" "$(WAKE_BUDGET_MS= WAKE_BUDGET_MS_MEASURED= wake_budget_ms)" "120000"
+      check "garbage probe->fallbk"  "$(WAKE_BUDGET_MS= WAKE_BUDGET_MS_MEASURED=abc wake_budget_ms)" "120000"
+      check "idle derives from probe" "$(WAKE_BUDGET_MS= WAKE_BUDGET_MS_MEASURED=40000 idle_budget_ms)" "300000"
+      check "hold derives from probe" "$(WAKE_BUDGET_MS= WAKE_BUDGET_MS_MEASURED=40000 hold_budget_s)" "630"
+      _rb_clock() { RB_NOW=$((RB_NOW + 7)); }
+      _rb_never() { return 1; }
+      RB_NOW=0; retry_bounded 20 0 _rb_clock _rb_never >/dev/null 2>&1
+      check "retry_bounded fails broken wake (rc=1)" "$?" "1"
+      RB_NOW=0; _rb_ok() { return 0; }
+      retry_bounded 20 0 _rb_clock _rb_ok >/dev/null 2>&1
+      check "retry_bounded returns 0 on success" "$?" "0"
       # ro_direct_dsn: builds a DSN with the given (non-default) credential
       check "ro_direct_dsn strong"  "$(ro_direct_dsn 'cloud_admin:S3cret' compute-ro.scale-zero-pg.svc)" \
             "postgres://cloud_admin:S3cret@compute-ro.scale-zero-pg.svc:55433/postgres?sslmode=disable"
