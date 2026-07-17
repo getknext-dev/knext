@@ -459,6 +459,31 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 	}
 	nextApp.Status.CurrentTraffic = mapTrafficStatus(ksvc.Status.Traffic)
 
+	// 6-pre. Scale-state + last-deploy status (#312): read the latest-READY
+	// revision's Knative "Active" condition so `kubectl get nextapp -o wide` can
+	// report whether the app is scaled to zero (Ready-but-Inactive revision) and
+	// which build is live, without an operator having to spelunk Knative + pods.
+	// The GET is best-effort: a transient failure or a not-yet-created revision
+	// leaves activeness UNKNOWN (nil), which omits the field rather than guessing.
+	var revisionActive *bool
+	if ready := ksvc.Status.LatestReadyRevisionName; ready != "" {
+		latest := &servingv1.Revision{}
+		if getErr := r.Get(ctx, client.ObjectKey{Namespace: nextApp.Namespace, Name: ready}, latest); getErr == nil {
+			if active := latest.Status.GetCondition(servingv1.RevisionConditionActive); active != nil {
+				switch {
+				case active.IsTrue():
+					revisionActive = ptr.To(true)
+				case active.IsFalse():
+					revisionActive = ptr.To(false)
+				}
+			}
+		}
+	}
+	ds := deriveDeployState(&nextApp, ksvc, revisionActive, time.Now())
+	nextApp.Status.ObservedRevision = ds.observedRevision
+	nextApp.Status.ScaledToZero = ds.scaledToZero
+	nextApp.Status.LastSuccessfulDeployTime = ds.lastSuccessfulDeployTime
+
 	// Pinned-revision existence check (ADR-0014 follow-up). When spec.traffic
 	// pins a revision, GET it so a GC'd pin surfaces as a first-class
 	// PinnedRevisionNotFound instead of only Knative's opaque RevisionMissing.

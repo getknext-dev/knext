@@ -79,6 +79,35 @@ The operator watches `NextApp` resources and provisions the corresponding Knativ
 Service, networking, and cache wiring. See `docs/adr/0001-*` for the control-plane
 contract.
 
+### Health & readiness at a glance (#312)
+The operator surfaces an app's health on the `NextApp` CR so you never have to
+spelunk Knative + pod state to answer "is my app healthy?":
+
+```sh
+kubectl get nextapp                 # URL, Ready, Age
+kubectl get nextapp -o wide         # + Revision, ScaledToZero, Degraded, LastDeploy
+```
+
+- **Ready** — mirrors the child Knative Service's OWN `Ready` condition (honest
+  roll-up; a CrashLoopBackOff / ImagePullBackOff app reports `Ready=False`, never a
+  false-green).
+- **Revision** (`-o wide`) — `.status.observedRevision`, the latest-READY Knative
+  Revision. This is the build that is actually live.
+- **ScaledToZero** (`-o wide`) — `.status.scaledToZero`. `true` when the live
+  revision is Ready but Inactive (no compute, scaled to zero); `false` when active;
+  omitted while activeness is unknown (the operator does not guess).
+- **Degraded** (`-o wide`) — the `Degraded` condition status; carries the ksvc's own
+  failure reason/message (e.g. `IngressNotProgrammed`, `PinnedRevisionNotFound`).
+- **LastDeploy** (`-o wide`) — `.status.lastSuccessfulDeployTime`, when the current
+  revision first went live. It advances only when a NEW revision becomes Ready, so a
+  failed new rollout leaves it pointing at the last good deploy — distinguishing a
+  stale-but-serving app from a broken new push.
+
+The full condition set lives under `.status.conditions` (Ready, Reconciling,
+Degraded, DatabaseReady, RevalidationDeferred, …). Reconcile FAILURES also emit
+Kubernetes **Events** on the NextApp with actionable messages (what failed + the
+likely fix) — see them with `kubectl describe nextapp <name>`.
+
 ## Getting Started
 
 ### Prerequisites
