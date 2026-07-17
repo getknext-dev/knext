@@ -124,9 +124,14 @@ spec:
               echo '===K6_SUMMARY_JSON_END==='
           volumeMounts:
             - { name: script, mountPath: /scripts, readOnly: true }
+          # Resources are KNOBS (drill-substituted): the live OKE cluster is
+          # CPU-REQUEST-constrained (2 nodes, most allocatable reserved), so the k6
+          # pod must be able to request less to schedule. Lower K6_CPU_REQUEST there
+          # AND reduce RAMP_CEIL_VU — a CPU-starved k6 client measures the CLIENT
+          # ceiling, not the app's (see operations.md).
           resources:
-            requests: { cpu: "500m", memory: 256Mi }
-            limits:   { cpu: "2",    memory: 512Mi }
+            requests: { cpu: "${K6_CPU_REQUEST}", memory: ${K6_MEM_REQUEST} }
+            limits:   { cpu: "${K6_CPU_LIMIT}",   memory: ${K6_MEM_LIMIT} }
       volumes:
         - name: script
           configMap: { name: loadsoak-k6-script }

@@ -1844,9 +1844,26 @@ Knobs (env, all optional except `TARGET_URL` for a live run):
 | `P95_MS` / `P99_MS` | `1500` / `3000` | latency thresholds (ms) |
 | `MAX_ERR_RATE` | `0.01` | error budget (fraction) |
 | `K6_IMAGE` | `grafana/k6:0.49.0` | k6 image |
+| `K6_CPU_REQUEST` / `K6_CPU_LIMIT` | `500m` / `2` | k6 pod CPU request / limit (see the constrained-cluster note) |
+| `K6_MEM_REQUEST` / `K6_MEM_LIMIT` | `256Mi` / `512Mi` | k6 pod memory request / limit |
 | `RUN_TIMEOUT_S` | ramp+soak+slack | Job wall budget |
 | `GW_DEPLOY` | `pggw-apps` | `app=` label of the apps-gateway pod scraped for the `pggw_*` snapshot |
 | `LOADSOAK_CONTEXT` / `LOADSOAK_NS` | ambient / `scale-zero-pg` | kubectl context / namespace |
+
+**CPU-request-constrained cluster (e.g. the live OKE plane):** OKE is 2 nodes with most
+allocatable CPU *reserved* by Knative/kourier/storage/monitoring (actual usage is only
+~5 %, but *requests* are saturated), so the default k6 `cpu: 500m` request fails to
+schedule (`Insufficient cpu`). Set **`K6_CPU_REQUEST=150m`** (or lower) so the Job
+schedules, **and reduce `RAMP_CEIL_VU`** to match — a CPU-starved k6 client measures the
+*client* ceiling, not the app's. Record the k6 CPU budget (`K6_CPU_REQUEST`/`K6_CPU_LIMIT`)
+alongside the numbers in BENCHMARKS.md so a client-bound run is not mistaken for an
+app-bound one. Example:
+
+```sh
+TARGET_URL='http://file-manager.knext-apps.svc.cluster.local/users' \
+  K6_CPU_REQUEST=150m K6_CPU_LIMIT=1 RAMP_CEIL_VU=40 SOAK_VU=28 \
+  LOADSOAK_CONTEXT=context-ckmva7v7zvq ./_verify-loadsoak.sh
+```
 
 **Knob safety (injection guard):** the knobs are interpolated into the k6 Job's
 `/bin/sh -c` argument, so the harness rejects any knob value carrying a shell

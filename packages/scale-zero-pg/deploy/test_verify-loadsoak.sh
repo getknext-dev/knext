@@ -154,6 +154,11 @@ case "$cl" in *,*,*) ok "conc_lat_row emits a CSV concurrency->latency line" ;; 
 _unsafe_knob "http://app.knext-apps.svc.cluster.local/users?x=1" && fail "guard: benign URL flagged unsafe"
 _unsafe_knob "2m" && fail "guard: benign duration flagged unsafe"
 _unsafe_knob "grafana/k6:0.49.0" && fail "guard: benign image flagged unsafe"
+# resource-quantity knobs (#376 follow-up) must pass the guard (alphanum + m/Mi/Gi).
+_unsafe_knob "150m" && fail "guard: cpu quantity 150m flagged unsafe"
+_unsafe_knob "2" && fail "guard: cpu quantity 2 flagged unsafe"
+_unsafe_knob "256Mi" && fail "guard: mem quantity 256Mi flagged unsafe"
+_unsafe_knob "2Gi" && fail "guard: mem quantity 2Gi flagged unsafe"
 _unsafe_knob "x'; touch /tmp/pwned; '" || fail "guard: single-quote breakout NOT flagged"
 _unsafe_knob 'x$(id)' || fail "guard: command-substitution NOT flagged"
 _unsafe_knob 'a`id`b' || fail "guard: backtick NOT flagged"
@@ -173,6 +178,22 @@ clean_out="$( TARGET_URL='http://app.svc/users' render_manifest 2>&1 )"; clean_r
 [ "$clean_rc" -eq 0 ] || fail "render_manifest failed on CLEAN knobs:\n$clean_out"
 has "kind: Job" "$clean_out" || fail "render_manifest did not emit a Job on clean knobs:\n$clean_out"
 ok "render_manifest renders a Job for clean knobs"
+
+# ---------------------------------------------------------------------------------
+# 4b. k6 pod resources are KNOBS (#376 follow-up): a CPU-request-constrained cluster must
+#     be able to lower the request so the Job schedules. Assert the value renders into the
+#     resources: block (no leftover placeholder), and the default still renders.
+# ---------------------------------------------------------------------------------
+res_out="$( TARGET_URL='http://app.svc/users' K6_CPU_REQUEST=150m K6_MEM_REQUEST=128Mi K6_CPU_LIMIT=1 K6_MEM_LIMIT=256Mi render_manifest 2>&1 )"
+has 'requests: { cpu: "150m", memory: 128Mi }' "$res_out" || fail "resources: CPU/mem request knob did not render:\n$(printf '%s' "$res_out" | grep -A2 'resources:')"
+has 'limits:   { cpu: "1",   memory: 256Mi }' "$res_out"  || fail "resources: CPU/mem limit knob did not render:\n$(printf '%s' "$res_out" | grep -A2 'resources:')"
+case "$res_out" in *'${K6_CPU_REQUEST}'*|*'${K6_MEM_LIMIT}'*) fail "resources: knob left as unrendered placeholder:\n$res_out";; esac
+ok "k6 pod resources render from K6_CPU/MEM_REQUEST/LIMIT knobs (schedules-shaped on a constrained cluster)"
+
+# default render still carries the shipped defaults (500m request).
+def_out="$( TARGET_URL='http://app.svc/users' render_manifest 2>&1 )"
+has 'cpu: "500m"' "$def_out" || fail "resources: default CPU request 500m missing:\n$def_out"
+ok "k6 pod resources fall back to shipped defaults (cpu 500m) when unset"
 
 # ---------------------------------------------------------------------------------
 # 5. GW_DEPLOY knob is actually wired into the gateway-pod selector (not hardcoded).

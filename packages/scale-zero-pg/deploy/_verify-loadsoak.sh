@@ -36,6 +36,10 @@
 #   P95_MS/P99_MS  latency thresholds in ms (default 1500 / 3000).
 #   MAX_ERR_RATE   error budget as a fraction (default 0.01 = 1%).
 #   K6_IMAGE       k6 image (default grafana/k6:0.49.0).
+#   K6_CPU_REQUEST / K6_CPU_LIMIT     k6 pod CPU request / limit (default 500m / 2). On a
+#                  CPU-request-constrained cluster set K6_CPU_REQUEST=150m (and lower
+#                  RAMP_CEIL_VU) so the Job schedules; record the k6 CPU budget with the numbers.
+#   K6_MEM_REQUEST / K6_MEM_LIMIT     k6 pod memory request / limit (default 256Mi / 512Mi).
 #   RUN_TIMEOUT_S  wall budget for the Job (default: derived from ramp+soak+slack).
 #   GW_DEPLOY      apps-gateway deploy name for the pggw_* snapshot (default pggw-apps).
 #   LOADSOAK_CONTEXT / LOADSOAK_NS  kubectl context / namespace (default ambient / scale-zero-pg).
@@ -61,6 +65,14 @@ P95_MS="${P95_MS:-1500}"
 P99_MS="${P99_MS:-3000}"
 MAX_ERR_RATE="${MAX_ERR_RATE:-0.01}"
 K6_IMAGE="${K6_IMAGE:-grafana/k6:0.49.0}"
+# k6 pod resources are KNOBS (#376 follow-up): the live OKE cluster is CPU-REQUEST-
+# constrained (2 nodes, most allocatable reserved), so the default 500m request fails
+# to schedule (Insufficient cpu). Lower K6_CPU_REQUEST there (e.g. 150m) AND reduce
+# RAMP_CEIL_VU — a CPU-starved k6 client measures the CLIENT ceiling, not the app's.
+K6_CPU_REQUEST="${K6_CPU_REQUEST:-500m}"
+K6_CPU_LIMIT="${K6_CPU_LIMIT:-2}"
+K6_MEM_REQUEST="${K6_MEM_REQUEST:-256Mi}"
+K6_MEM_LIMIT="${K6_MEM_LIMIT:-512Mi}"
 GW_DEPLOY="${GW_DEPLOY:-pggw-apps}"
 LOADSOAK_NS="${LOADSOAK_NS:-scale-zero-pg}"
 
@@ -181,7 +193,8 @@ _unsafe_knob() {
 validate_knobs() {
   _vk_bad=0
   for _vk in TARGET_URL RAMP_CEIL_VU RAMP_UP SOAK_VU SOAK_DUR RAMP_DOWN \
-             P95_MS P99_MS MAX_ERR_RATE K6_IMAGE APP_NAME; do
+             P95_MS P99_MS MAX_ERR_RATE K6_IMAGE APP_NAME \
+             K6_CPU_REQUEST K6_CPU_LIMIT K6_MEM_REQUEST K6_MEM_LIMIT; do
     eval "_vk_val=\${$_vk:-}"
     # shellcheck disable=SC2154  # _vk_val IS assigned by the eval above (indirect read).
     if _unsafe_knob "$_vk_val"; then
@@ -199,7 +212,8 @@ validate_knobs() {
 render_manifest() {
   validate_knobs || return 1
   export TARGET_URL RAMP_CEIL_VU RAMP_UP SOAK_VU SOAK_DUR RAMP_DOWN \
-         P95_MS P99_MS MAX_ERR_RATE K6_IMAGE
+         P95_MS P99_MS MAX_ERR_RATE K6_IMAGE \
+         K6_CPU_REQUEST K6_CPU_LIMIT K6_MEM_REQUEST K6_MEM_LIMIT
   if command -v envsubst >/dev/null 2>&1; then
     envsubst < "$MANIFEST"
   else
@@ -214,6 +228,10 @@ render_manifest() {
         -e "s#\${P99_MS}#${P99_MS}#g" \
         -e "s#\${MAX_ERR_RATE}#${MAX_ERR_RATE}#g" \
         -e "s#\${K6_IMAGE}#${K6_IMAGE}#g" \
+        -e "s#\${K6_CPU_REQUEST}#${K6_CPU_REQUEST}#g" \
+        -e "s#\${K6_CPU_LIMIT}#${K6_CPU_LIMIT}#g" \
+        -e "s#\${K6_MEM_REQUEST}#${K6_MEM_REQUEST}#g" \
+        -e "s#\${K6_MEM_LIMIT}#${K6_MEM_LIMIT}#g" \
         "$MANIFEST"
   fi
 }
@@ -315,6 +333,17 @@ if [ "${SELFTEST:-0}" = "1" ]; then
     fi
   fi
   rm -f "$TMP_MANIFEST"
+
+  # 1b. the k6 pod resources block renders with the KNOB values (#376 follow-up): the
+  #     CPU-request-constrained OKE cluster needs a lowerable request to schedule. Render
+  #     with an explicit CPU request and assert it lands in the resources: block, not the
+  #     literal ${K6_CPU_REQUEST} placeholder.
+  _rr="$(K6_CPU_REQUEST=150m K6_MEM_REQUEST=128Mi render_manifest 2>/dev/null)"
+  case "$_rr" in
+    *'requests: { cpu: "150m", memory: 128Mi }'*) echo "ok   - k6 resources render with the knob (cpu request 150m)" ;;
+    *'${K6_CPU_REQUEST}'*) echo "FAIL - K6_CPU_REQUEST left as an unrendered placeholder"; fails=$((fails+1)) ;;
+    *) echo "FAIL - k6 resources block did not render the CPU-request knob:"; printf '%s\n' "$_rr" | grep -A1 'resources:' >&2; fails=$((fails+1)) ;;
+  esac
 
   # 2. the k6 script embeds a ramp phase, a soak phase, and p95/p99 thresholds.
   grep -q 'ramping-vus' "$MANIFEST" || { echo "FAIL - no ramping-vus executor"; fails=$((fails+1)); }
