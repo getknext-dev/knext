@@ -155,6 +155,49 @@ var _ = Describe("NextApp Controller reconcile output", func() {
 			Expect(annotations).To(HaveKeyWithValue("autoscaling.knative.dev/max-scale", "10"))
 		})
 
+		It("injects KNEXT_DB_POOL_MAX into the app container when spec.scaling.poolMax is declared (#378)", func() {
+			// #378 (W3, ADR-0029): close the declared-vs-runtime poolMax drift.
+			// spec.scaling.poolMax was validation-only (ADR-0028) — the operator
+			// gated maxScale × poolMax ≤ 80 at admission but never told the app
+			// what its per-pod cap was, so @knext/lib's pg Pool could open more
+			// than poolMax connections/pod and blow the budget at runtime. The
+			// operator now injects the declared cap as KNEXT_DB_POOL_MAX so
+			// getDbPool() can enforce it. maxScale(7) × poolMax(5) = 35 ≤ 80.
+			nn := reconcileOnce("ksvc-poolmax", appsv1alpha1.NextAppSpec{
+				Image: validImage,
+				Scaling: &appsv1alpha1.ScalingSpec{
+					MinScale: 0,
+					MaxScale: 7,
+					PoolMax:  5,
+				},
+			})
+
+			ksvc := &servingv1.Service{}
+			Expect(k8sClient.Get(ctx, nn, ksvc)).To(Succeed())
+
+			env := ksvc.Spec.Template.Spec.Containers[0].Env
+			Expect(envValue(env, "KNEXT_DB_POOL_MAX")).To(Equal("5"),
+				"the operator must inject the declared per-pod pool cap so the app can enforce it at runtime")
+		})
+
+		It("does NOT inject KNEXT_DB_POOL_MAX when spec.scaling.poolMax is unset (#378 back-compat)", func() {
+			// When poolMax is undeclared (0) the wall is documented-only
+			// (ADR-0028 §3): the operator cannot enforce a cap it does not know,
+			// so it injects no env — every pre-existing CR that never set poolMax
+			// is unaffected and the app falls back to its DB_POOL_MAX default.
+			nn := reconcileOnce("ksvc-no-poolmax", appsv1alpha1.NextAppSpec{
+				Image:   validImage,
+				Scaling: &appsv1alpha1.ScalingSpec{MinScale: 0, MaxScale: 10},
+			})
+
+			ksvc := &servingv1.Service{}
+			Expect(k8sClient.Get(ctx, nn, ksvc)).To(Succeed())
+
+			env := ksvc.Spec.Template.Spec.Containers[0].Env
+			Expect(hasEnvKey(env, "KNEXT_DB_POOL_MAX")).To(BeFalse(),
+				"no per-pod cap env when poolMax is undeclared (back-compat)")
+		})
+
 		It("renders scale-to-zero-eligible annotations (min-scale 0, max-scale 1) for #39 activation", func() {
 			// A2-3 (#39): the activation path requires the revision to be eligible
 			// to scale to zero (min-scale 0) and to wake on demand. A single-replica
@@ -852,6 +895,17 @@ func envValue(envs []corev1.EnvVar, name string) string {
 		}
 	}
 	return ""
+}
+
+// hasEnvKey reports whether an env var with the given name is present (unlike
+// envValue, it distinguishes "absent" from "present but empty").
+func hasEnvKey(envs []corev1.EnvVar, name string) bool {
+	for _, e := range envs {
+		if e.Name == name {
+			return true
+		}
+	}
+	return false
 }
 
 // newKafkaSourceObj returns an empty unstructured KafkaSource for Get calls.

@@ -193,6 +193,78 @@ SIGTERM drain.) PGS-1 provides, in `getDbPool()`:
 Even with a pooler, keep `DB_POOL_MAX` small: `max_client_conn` on the pooler must comfortably
 exceed `maxScale × DB_POOL_MAX` or instances will queue waiting for a pooler client slot.
 
+### The operator-enforced cap: `spec.scaling.poolMax` → `KNEXT_DB_POOL_MAX` (ADR-0029)
+
+`DB_POOL_MAX` is the app's *own* request. To make the connection budget a **platform-enforced
+invariant** rather than a convention, declare `spec.scaling.poolMax` on the `NextApp`:
+
+- The admission webhook + reconciler **reject** any spec where `maxScale × poolMax > 80` (the app
+  connection budget = the scale-zero-pg gateway's `GW_MAX_CONNS` 90 minus admin/replication reserve —
+  ADR-0028).
+- When `poolMax` is declared, the operator **injects it into the app container as
+  `KNEXT_DB_POOL_MAX`**, and `@knext/lib`'s `getDbPool()` **caps the pg pool `max` at that value**.
+  This closes the declared-vs-runtime drift: the number the operator gated at admission is the number
+  the pool actually opens at runtime. **Precedence: the minimum of the app's `DB_POOL_MAX` (or the
+  default 5) and `KNEXT_DB_POOL_MAX` wins** — an app may be *more* conservative than the budget, never
+  less. When `poolMax` is unset the cap is a no-op (documented-only wall) and back-compat holds.
+
+---
+
+## 4-bis. BYO transaction pooler BEHIND the wake-on-connect gateway (scale-zero-pg)
+
+> This section is the **scale-zero-pg**-specific placement rule. §2–§4 above describe the CNPG
+> `Pooler`; the same PgBouncer/pgcat transaction-mode mechanics apply, but the scale-zero-pg wake
+> gateway adds one hard placement constraint you MUST get right or you break scale-to-zero.
+
+scale-zero-pg fronts a `compute-<app>` that scales to **zero**; a TCP connection to the **wake
+gateway** scales it 0→1, and the gateway scales it back to 0 after `GW_IDLE_MS` with no live
+connections. If you bring your own transaction pooler (PgBouncer ≥ 1.21 / pgcat), it MUST sit
+**behind** the gateway:
+
+```
+app pods ──► gateway (wake-on-connect) ──► your pooler ──► compute-<app> (0↔1)
+```
+
+**Never put the pooler in FRONT of the gateway.** A pooler in front holds a persistent TCP
+connection open to keep its backend pool warm; that connection would keep the gateway awake forever,
+the compute would never scale to zero, and you lose the entire cost win. The gateway must remain the
+sole sleep authority.
+
+**`server_idle_timeout < GW_IDLE_MS` is mandatory.** The pooler's idle backend connections to
+`compute-<app>` must drain **before** the gateway's idle window elapses, or the pooler pins the
+compute awake:
+
+```ini
+; PgBouncer — pooler behind the scale-zero-pg gateway
+pool_mode = transaction
+server_idle_timeout = 30        ; seconds — MUST be < GW_IDLE_MS (default 60s)
+max_prepared_statements = 100   ; PgBouncer ≥ 1.21: keeps driver prepared stmts working
+```
+
+With `GW_IDLE_MS = 60000` (60s), a `server_idle_timeout` of 30s means the pooler closes its backend
+connections ~30s before the gateway would otherwise consider the compute idle — so an idle app's
+compute still sleeps.
+
+**Transaction-mode caveat (same as §3):** transaction pooling breaks server-side prepared statements
+and session state. Either run **PgBouncer ≥ 1.21 / pgcat with prepared-statement support** (set
+`max_prepared_statements`), or **disable server-side prepared statements** in your driver
+(`?pgbouncer=true` for Prisma, `prepare: false` for Drizzle/`postgres.js`). See §3 for the full list.
+
+**`DATABASE_URL` wiring.** Point the app's `DATABASE_URL` **host at the gateway** (unchanged — the
+gateway address is stable), and configure the **pooler's** upstream to `compute-<app>`. The topology
+change is entirely on the DB-plane side of the gateway; the app-facing `DATABASE_URL` contract does
+not change:
+
+```
+DATABASE_URL = postgres://app:<pw>@<gateway-host>:5432/app   # unchanged
+                                    │
+                    gateway wakes compute, forwards to pooler → compute
+```
+
+Keep `spec.scaling.poolMax` × `maxScale ≤ 80` even with a BYO pooler: the pooler bounds the
+compute's *backend* connections, but the gateway's `GW_MAX_CONNS` still caps *client* connections
+through it, so the app-tier budget invariant (ADR-0028/0029) still applies to the client side.
+
 ---
 
 ## 5. Option — serverless Postgres (the database also scales to zero)
