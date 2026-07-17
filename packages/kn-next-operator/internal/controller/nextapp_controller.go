@@ -632,12 +632,27 @@ func (r *NextAppReconciler) applyStatusVerdict(
 // companion move) — behavior-preserving; the rendered-output envtests
 // (reconcile_output_test.go, spec_env_test.go) are the characterization net.
 // Not fully pure: a colliding spec.env name emits a Warning event (#186).
-func (r *NextAppReconciler) buildDesiredKsvc(nextApp *appsv1alpha1.NextApp, ksvc *servingv1.Service) error {
-	// Determine health check path
-	healthPath := "/api/health"
+// readinessProbePath returns the SHALLOW health path that backs the Knative
+// readiness + liveness probes (#338, ADR-0026). It must NOT resolve to a handler
+// that deep-checks a scale-to-zero DB, or readiness flaps on every cold wake. It
+// honours spec.healthCheckPath when set (the app owns the shallow endpoint),
+// defaulting to /api/health (which the app serves shallow).
+func readinessProbePath(nextApp *appsv1alpha1.NextApp) string {
 	if nextApp.Spec.HealthCheckPath != "" {
-		healthPath = nextApp.Spec.HealthCheckPath
+		return nextApp.Spec.HealthCheckPath
 	}
+	return "/api/health"
+}
+
+// deepHealthPath is the DEEP dependency-reachability path used by
+// observability/alerting only — never wired to a probe (#338, ADR-0026).
+func deepHealthPath(nextApp *appsv1alpha1.NextApp) string {
+	return readinessProbePath(nextApp) + "/deep"
+}
+
+func (r *NextAppReconciler) buildDesiredKsvc(nextApp *appsv1alpha1.NextApp, ksvc *servingv1.Service) error {
+	// Determine the SHALLOW readiness/liveness probe path (#338).
+	healthPath := readinessProbePath(nextApp)
 
 	if ksvc.Labels == nil {
 		ksvc.Labels = make(map[string]string)

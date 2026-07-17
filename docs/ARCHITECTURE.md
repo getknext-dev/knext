@@ -263,7 +263,8 @@ The environment variables depend on your chosen storage and cache providers.
 
 | Endpoint | Method | Description |
 | ---------- | -------- | ------------- |
-| `/api/health` | GET | Health check |
+| `/api/health` | GET | Shallow readiness/liveness (no DB dial) — backs Knative probes |
+| `/api/health/deep` | GET | Deep dependency reachability — observability/alerting only |
 | `/api/audit` | GET | Paginated audit logs |
 | `/api/cache-stats` | GET | Cache statistics |
 | `/api/cache/events` | GET | SSE cache events stream |

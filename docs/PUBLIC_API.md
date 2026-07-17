@@ -241,20 +241,39 @@ Exports:
 
 ### `@knext/lib/health`
 
-A deep readiness probe for your `/api/health` route. Verifies connectivity to
-core dependencies (Postgres, Redis).
+Two health checks with different jobs:
+
+- **`checkShallowHealth()` — readiness/liveness.** Returns healthy whenever the
+  process/server is up, WITHOUT dialing Postgres or Redis. This is what backs
+  your Knative readiness + liveness probes (serve it at `/api/health`). Gating
+  readiness on a scale-to-zero DB's reachability defeats scale-to-zero — an
+  asleep/waking database is normal, and a deep check would flap readiness on
+  every cold wake.
+- **`checkDeepHealth()` — observability only.** Verifies connectivity to core
+  dependencies (Postgres, Redis) for monitoring/alerting. Serve it at a separate
+  route (e.g. `/api/health/deep`) and do NOT wire it to a probe. It is
+  wake-aware: a connection-refused/timeout against a scale-to-zero DB is
+  classified `waking` (transient, not a fault); a reachable-but-erroring query
+  is `down`; a cache blip is `degraded`. Its cluster timeout is configurable via
+  `HEALTH_DEEP_TIMEOUT_MS` (default 8000ms, aligned with the DB wake budget).
 
 ```ts
-import { checkDeepHealth } from '@knext/lib/health';
+import { checkShallowHealth, checkDeepHealth } from '@knext/lib/health';
 
-const status = await checkDeepHealth(); // HealthStatus
+// /api/health — readiness/liveness (no DB dial)
+const ready = checkShallowHealth(); // ShallowHealthStatus, always { status: 'ok' }
+
+// /api/health/deep — observability only
+const deep = await checkDeepHealth(); // HealthStatus
 ```
 
 Exports:
+- `checkShallowHealth(): ShallowHealthStatus`
 - `checkDeepHealth(): Promise<HealthStatus>`
-- `HealthStatus` — `{ status: 'ok' | 'degraded' | 'down'; timestamp: string;
-  checks: { postgres: 'up' | 'down' | 'unconfigured'; redis: 'up' | 'down' |
-  'unconfigured' } }`.
+- `ShallowHealthStatus` — `{ status: 'ok'; timestamp: string; check: 'shallow' }`.
+- `HealthStatus` — `{ status: 'ok' | 'degraded' | 'down' | 'waking'; timestamp:
+  string; checks: { postgres: 'up' | 'down' | 'waking' | 'unconfigured'; redis:
+  'up' | 'down' | 'unconfigured' } }`.
 
 ### `@knext/lib/logger`
 

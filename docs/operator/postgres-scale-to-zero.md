@@ -212,6 +212,38 @@ provider. You adopt it by pointing `DATABASE_URL` at the provider — **zero kne
 **Aurora Serverless v2** (AWS) is an equivalent managed option (autoscaling ACUs; does not fully
 suspend to zero the way Neon does, but scales capacity down under low load).
 
+### Readiness/liveness MUST stay shallow when the DB scales to zero (ADR-0026)
+
+When the database itself scales to zero (the scale-zero-pg `compute-<app>`, Neon
+suspend, etc.), it legitimately sleeps and takes ~2–6s to wake on the next
+connection. **Do not let readiness/liveness deep-check the DB** — an asleep DB is
+normal, and a deep probe would fail during the wake window, flap readiness, and
+compound cold-start latency under load (Knative won't route to a not-Ready pod,
+so the wake never completes).
+
+The operator generates SHALLOW readiness + liveness probes at `spec.healthCheckPath`
+(default `/api/health`), served by `checkShallowHealth()` — process-only, no DB
+dial. Deep DB/Redis reachability is exposed separately at `/api/health/deep`
+(`checkDeepHealth()`) for monitoring/alerting only and is **never** wired to a
+probe. The deep check is wake-aware (a connection-refused/timeout on a
+scale-to-zero DB reports `waking`, not `down`) with a configurable
+`HEALTH_DEEP_TIMEOUT_MS` (default 8s, aligned with the wake budget).
+
+Operator-generated probe config (both readiness and liveness → the shallow path):
+
+```yaml
+readinessProbe:
+  httpGet: { path: /api/health, port: 3000 }   # shallow — no DB dial
+  initialDelaySeconds: 2
+  periodSeconds: 3
+livenessProbe:
+  httpGet: { path: /api/health, port: 3000 }   # shallow — no DB dial
+  initialDelaySeconds: 5
+  periodSeconds: 10
+```
+
+Point Prometheus/alerting at `/api/health/deep`, not at the probe path.
+
 **Flags — read before adopting:**
 - **Lock-in / not the default.** These are **managed, provider-hosted** options. knext's default
   and the SCS data-sovereignty contract assume an **in-cluster CloudNativePG** database; a managed

@@ -144,7 +144,9 @@ describe('checkDeepHealth — hard vs soft dependency taxonomy (readiness contra
   it('#338 HARD dep (Postgres) connection-refused during a wake window ⇒ waking (NOT down)', async () => {
     process.env.DATABASE_URL = 'postgres://u:p@h:5432/db';
     // A scale-to-zero DB that is legitimately WAKING refuses the connection.
-    pgQuery.mockRejectedValue(Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' }));
+    pgQuery.mockRejectedValue(
+      Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' }),
+    );
 
     const { checkDeepHealth } = await import('../health');
     const res = await checkDeepHealth();
