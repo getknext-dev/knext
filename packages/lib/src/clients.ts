@@ -496,6 +496,34 @@ export const getMinioClient = () => {
 // scale-to-zero guide.
 const DEFAULT_DB_POOL_MAX = 5;
 const DEFAULT_DB_POOL_IDLE_TIMEOUT_MS = 10_000;
+
+/**
+ * Resolve the effective per-pod pool `max` under the operator-declared cap
+ * (#378, W3, ADR-0029). The operator gates `maxScale × poolMax ≤ 80` at
+ * admission (ADR-0028) and, when `spec.scaling.poolMax` is declared, injects it
+ * as `KNEXT_DB_POOL_MAX` so the app enforces that same budget at RUNTIME —
+ * closing the declared-vs-runtime drift the W2 system-designer flagged (a pool
+ * could otherwise open more than `poolMax` connections/pod and blow the budget).
+ *
+ * Precedence:
+ *  - `KNEXT_DB_POOL_MAX` (operator cap) is authoritative — an app can NEVER open
+ *    more than it. It caps whatever the app asked for.
+ *  - The app's own request is `DB_POOL_MAX` (its per-zone override) or the
+ *    bounded default (5). An app-set value BELOW the cap is respected (min wins),
+ *    so an app can always be MORE conservative than the budget, never less.
+ *  - When `KNEXT_DB_POOL_MAX` is unset (undeclared poolMax → documented-only
+ *    wall, ADR-0028 §3), this is a no-op: the app keeps its `DB_POOL_MAX`/default.
+ */
+const resolveDbPoolMax = (
+  requestedEnv: string | undefined,
+  capEnv: string | undefined,
+  fallback: number,
+): number => {
+  const requested = toFinitePositiveInt(requestedEnv, fallback);
+  const cap = toFinitePositiveInt(capEnv, 0);
+  // cap === 0 means "no operator cap declared" — return the app's request as-is.
+  return cap > 0 ? Math.min(requested, cap) : requested;
+};
 // pg's default connect timeout is 0 = wait indefinitely: that survives a cold
 // scale-to-zero DB wake, but it also hangs every request forever when the DB
 // is truly unreachable. A bounded 15s fails fast with a clear pool error while
@@ -508,7 +536,12 @@ export const getDbPool = () => {
   if (!pgPool) {
     pgPool = new Pool({
       connectionString: process.env.DATABASE_URL,
-      max: toFinitePositiveInt(process.env.DB_POOL_MAX, DEFAULT_DB_POOL_MAX),
+      // #378: cap the pool at the operator-declared KNEXT_DB_POOL_MAX (min wins).
+      max: resolveDbPoolMax(
+        process.env.DB_POOL_MAX,
+        process.env.KNEXT_DB_POOL_MAX,
+        DEFAULT_DB_POOL_MAX,
+      ),
       idleTimeoutMillis: toFinitePositiveInt(
         process.env.DB_POOL_IDLE_TIMEOUT_MS,
         DEFAULT_DB_POOL_IDLE_TIMEOUT_MS,

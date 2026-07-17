@@ -32,7 +32,7 @@ All fields below are defined on the `NextApp` CRD in
 | `MinScale` | `minScale` | `autoscaling.knative.dev/min-scale` annotation | `0` |
 | `MaxScale` | `maxScale` | `autoscaling.knative.dev/max-scale` annotation | `10` |
 | `ContainerConcurrency` | `containerConcurrency` | Knative `spec.template.spec.containerConcurrency` | `20` (was `100` — lowered in #377 / ADR-0028) |
-| `PoolMax` | `poolMax` | *validation only* — the per-pod DB pool max used to enforce `maxScale × poolMax ≤ 80` (the app connection budget, ADR-0028) | *unset (check skipped)* |
+| `PoolMax` | `poolMax` | enforces `maxScale × poolMax ≤ 80` (the app connection budget, ADR-0028) at admission **and** injects `KNEXT_DB_POOL_MAX` into the app container so `@knext/lib`'s `getDbPool()` caps the pg pool `max` at runtime (ADR-0029, #378) | *unset (no check, no env)* |
 
 The defaults are asserted by the reconciler test
 `reconcile_output_test.go` →

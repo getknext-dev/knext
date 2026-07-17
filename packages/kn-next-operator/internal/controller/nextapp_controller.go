@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strconv"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -887,6 +888,23 @@ func (r *NextAppReconciler) buildKsvcEnv(nextApp *appsv1alpha1.NextApp) ([]corev
 	// fieldRef env here; it would break deploys on stock Knative.
 	envVars = append(envVars, corev1.EnvVar{Name: "HOSTNAME", Value: "0.0.0.0"})
 	envVars = append(envVars, corev1.EnvVar{Name: "NODE_ENV", Value: "production"})
+
+	// KNEXT_DB_POOL_MAX (#378, W3, ADR-0029): close the declared-vs-runtime
+	// poolMax drift the W2 system-designer flagged. ADR-0028 made
+	// spec.scaling.poolMax a VALIDATION-only field — the operator gates
+	// maxScale × poolMax ≤ 80 at admission, but the app was never TOLD its
+	// per-pod cap, so @knext/lib's pg Pool could open more than poolMax
+	// connections/pod and blow the budget at runtime. We inject the declared
+	// cap so getDbPool() enforces the same number the operator gated. Only
+	// injected when poolMax is DECLARED (>0): an undeclared poolMax is the
+	// documented-only wall (ADR-0028 §3), so no env is stamped — back-compat
+	// for every CR that never set poolMax (it keeps its DB_POOL_MAX default).
+	if nextApp.Spec.Scaling != nil && nextApp.Spec.Scaling.PoolMax > 0 {
+		envVars = append(envVars, corev1.EnvVar{
+			Name:  "KNEXT_DB_POOL_MAX",
+			Value: strconv.Itoa(int(nextApp.Spec.Scaling.PoolMax)),
+		})
+	}
 
 	if nextApp.Spec.Storage != nil && nextApp.Spec.Storage.Provider != "" {
 		envVars = append(envVars, corev1.EnvVar{Name: "STORAGE_PROVIDER", Value: nextApp.Spec.Storage.Provider})
