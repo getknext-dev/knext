@@ -117,6 +117,37 @@ spec:
             description: "Server-side error ratio is {{ $value | humanizePercentage }} over 5m."
             runbook_url: "https://github.com/getknext-dev/knext/blob/main/docs/runbooks/incident.md#scenario-3-rediscache-down"
 
+        # #348: SUSTAINED deep-health `waking` = a permanent connection-level DB
+        # outage. checkDeepHealth (packages/lib/src/health/index.ts) classifies a
+        # connection-level failure (ECONNREFUSED / timeout / dead DNS / bad
+        # DATABASE_URL) as `waking` — CORRECT for a normal scale-to-zero wake,
+        # which is brief (~2-6s). But a GENUINELY-down DB presents the SAME
+        # connection-level signature, so it sits at `waking` FOREVER and never
+        # becomes `down` (only a reachable-but-erroring query yields `down`).
+        # Alerts keyed on `down`/503 alone therefore never page on it. This rule
+        # closes that gap: the deep-health state gauge (knext_deep_health_state,
+        # refreshed on the :9091 scrape cadence) reporting overall waking=1 for
+        # LONGER than the wake budget is a stuck-waking real outage. `for: 2m` is
+        # far above the legitimate 2-6s wake, so a normal wake never pages.
+        - alert: KnextDeepHealthStuckWaking
+          expr: >-
+            max by (app) (
+              knext_deep_health_state{dependency="overall",state="waking"}
+            ) == 1
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: "knext app {{ $labels.app }} deep health stuck WAKING (DB outage?)"
+            description: >-
+              The deep health check has reported `waking` for over 2m — far
+              longer than a legitimate 2-6s scale-to-zero wake. A permanent
+              connection-level DB outage (host gone, dead DNS, bad DATABASE_URL)
+              presents as connection-level errors and sits at `waking` forever,
+              never `down`. Check the scale-zero-pg gateway / compute and the
+              app's DATABASE_URL.
+            runbook_url: "https://github.com/getknext-dev/knext/blob/main/docs/runbooks/troubleshooting.md#deep-health-stuck-waking-permanent-db-outage"
+
         # Cache/Redis unreachable. The /api/health route runs deep readiness
         # checks against Postgres/Redis and returns 503 when a dependency is
         # down; that route is wrapped in withRedMetrics, so a Redis outage shows
