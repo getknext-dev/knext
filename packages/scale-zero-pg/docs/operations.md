@@ -1945,15 +1945,21 @@ the honest hard limit: writes scale **only vertically** to the node/limit ceilin
 writer; beyond that = sharding, out of scope for the wave).
 
 The load generator is an **in-cluster loader Deployment** (`WC_LOADERS` pods, default 4), each
-running a tight `psql` INSERT loop **through the apps-gateway on the app's own branch**:
+running a tight `psql` INSERT loop **through the apps-gateway on the app's own branch** using a
+**passwordless** DSN (the password is injected out-of-band; see below):
 
 ```
-postgres://app_<app>:<pw>@pggw-apps:55432/<app>?sslmode=disable
+postgres://app_<app>@pggw-apps:55432/<app>?sslmode=disable
 ```
 
 INSERTing batches of `WC_BATCH` rows into a **throwaway `wc_drill` table** (created in setup,
 dropped in teardown) on that branch. This reuses the **real** knext write path and respects
 single-writer + tenant sovereignty — the loader **never** dials `compute-<app>:55433` directly.
+The app-branch password is **never** placed in the DSN, the manifest, the on-disk tmp yaml, or
+etcd (security.md): it is injected as `PGPASSWORD` via a **`secretKeyRef`** to the app's
+credential Secret (`app-db-<app>`, `PGPASSWORD` key) — for the loader Deployment and, via
+`kubectl run --overrides`, for the one-shot `wc_drill` create/drop pods (no password on any pod
+command line).
 Each loader counts its committed batches and prints a sentinel `WCLOAD ok=<N> err=<M> secs=<S>`
 on SIGTERM; the drill's pure parser turns that into a per-loader write-RPS, and the fleet
 aggregates by **summing** the disjoint per-loader streams (same reasoning as the #382 loadsoak

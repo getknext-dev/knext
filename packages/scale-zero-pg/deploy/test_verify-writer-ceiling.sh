@@ -127,7 +127,10 @@ ok "render_loader fails closed on a poisoned knob (no manifest emitted)"
 #    apps-gateway (pggw-apps) on the app's own branch (never a bypass path) into a
 #    throwaway drill table.
 # ---------------------------------------------------------------------------------
-clean_out="$( APP_NAME='file-manager' APP_PW='secret' WC_LOADERS=4 \
+# APP_PW is exported to PROVE the plaintext password does NOT leak into the manifest —
+# render_loader must ignore it and inject via secretKeyRef instead (security defect fix).
+PW_SENTINEL='pl41nt3xt-pw-must-not-leak'
+clean_out="$( APP_NAME='file-manager' APP_PW="$PW_SENTINEL" WC_LOADERS=4 \
               WC_CPU_REQUEST=150m WC_MEM_REQUEST=128Mi render_loader 2>&1 )"; clean_rc=$?
 [ "$clean_rc" -eq 0 ] || fail "render_loader failed on CLEAN knobs:\n$clean_out"
 has "kind: Deployment" "$clean_out" || fail "render_loader did not emit a Deployment:\n$clean_out"
@@ -146,6 +149,37 @@ has "wc_drill" "$clean_out"         || fail "render_loader does not use the thro
 case "$clean_out" in *'${WC_CPU_REQUEST}'*) fail "render_loader left WC_CPU_REQUEST as a placeholder:\n$clean_out";; esac
 has "150m" "$clean_out"             || fail "render_loader did not render the CPU-request knob (150m):\n$clean_out"
 ok "render_loader drives INSERTs THROUGH pggw-apps as app_<app> into the throwaway wc_drill table (no bypass)"
+
+# ---------------------------------------------------------------------------------
+# 5b. SECURITY (security.md — secrets never in config files / URLs / container images).
+#     The REGRESSED property: the app-branch password must NOT be interpolated as
+#     plaintext into the loader manifest (on-disk tmp yaml AND etcd via the Deployment).
+#     It must reach the pod ONLY via a secretKeyRef to app-db-<app>, and the DSN must be
+#     PASSWORDLESS (psql picks the password up from PGPASSWORD). Pin this so the
+#     plaintext-in-manifest defect can never come back silently.
+# ---------------------------------------------------------------------------------
+has "$PW_SENTINEL" "$clean_out" && fail "SECURITY: plaintext password leaked into the rendered loader manifest (etcd/tmp yaml):\n$clean_out"
+# the DSN must be the passwordless form — no `app_<app>:<pw>@pggw` inline credential.
+case "$clean_out" in
+  *"app_file-manager@pggw-apps:55432"*) : ;;  # passwordless DSN, good
+  *) fail "SECURITY: loader DSN is not the expected passwordless form app_<app>@pggw-apps:55432:\n$clean_out" ;;
+esac
+printf '%s' "$clean_out" | grep -Eq 'app_[^@[:space:]]+:[^@[:space:]]+@pggw' \
+  && fail "SECURITY: loader DSN carries an inline password (:<pw>@pggw) — must be passwordless:\n$clean_out"
+# PGPASSWORD must be injected via secretKeyRef to the app's Secret, not a literal value.
+has "secretKeyRef" "$clean_out"        || fail "SECURITY: loader does not inject PGPASSWORD via secretKeyRef:\n$clean_out"
+has "name: PGPASSWORD" "$clean_out"    || fail "SECURITY: loader does not set a PGPASSWORD env var:\n$clean_out"
+has "app-db-file-manager" "$clean_out" || fail "SECURITY: secretKeyRef does not target the app credential Secret app-db-<app>:\n$clean_out"
+ok "SECURITY: no plaintext password in the manifest; PGPASSWORD via secretKeyRef(app-db-<app>); DSN passwordless"
+
+# the one-shot table create/drop must ALSO avoid a plaintext password on the command
+# line — the drill's psql_oneshot injects PGPASSWORD via an --overrides secretKeyRef and
+# NO longer builds a `psql "$_dsn"` with a password-bearing DSN.
+sut_src2="$(cat "$SUT")"
+has "psql_oneshot" "$sut_src2" || fail "SECURITY: drill has no psql_oneshot helper (one-shot create/drop path)"
+printf '%s' "$sut_src2" | grep -Eq 'run wc(init|drop)[^\n]*psql "\$_dsn"' \
+  && fail "SECURITY: a one-shot pod still runs psql with an inline-password DSN on the command line"
+ok "SECURITY: wcinit/wcdrop one-shots inject PGPASSWORD via secretKeyRef (no password on the pod command line)"
 
 # ---------------------------------------------------------------------------------
 # 6. The drill samples the #103 autoscaler proof: the ACTUATED cpu-limit (from pod

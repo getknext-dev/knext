@@ -873,7 +873,9 @@ fabricated here** — the table stays "pending" until the OKE run fills it (rule
 
 Harness: `deploy/_verify-writer-ceiling.sh` + `deploy/test_verify-writer-ceiling.sh` — an
 **in-cluster write loader** (`WC_LOADERS` `psql` INSERT-loop pods) driving sustained INSERTs
-**through the apps-gateway on the app's own branch** (`postgres://app_<app>:<pw>@pggw-apps:55432/<app>`)
+**through the apps-gateway on the app's own branch** (passwordless DSN
+`postgres://app_<app>@pggw-apps:55432/<app>`; the password is injected as `PGPASSWORD` via a
+`secretKeyRef` to `app-db-<app>` — never in the manifest/DSN/etcd, per security.md)
 into a throwaway `wc_drill` table, while the drill samples the #103 writer vertical-autoscaler
 on `compute-<app>`. Two things are proven/published (wave #375 W4):
 

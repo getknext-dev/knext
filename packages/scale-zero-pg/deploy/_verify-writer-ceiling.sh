@@ -11,10 +11,15 @@
 #
 # WRITE PATH (the load mechanism) — REUSES A REAL WRITE PATH, no bypass:
 #   An in-cluster loader Deployment (WC_LOADERS pods) each runs a tight psql INSERT
-#   loop against the app's OWN branch THROUGH THE APPS-GATEWAY:
-#       postgres://app_<app>:<pw>@pggw-apps:55432/<app>?sslmode=disable
-#   INSERTing into a THROWAWAY drill table `wc_drill` (created in setup, dropped in
-#   teardown) on that branch. This respects single-writer + tenant sovereignty exactly
+#   loop against the app's OWN branch THROUGH THE APPS-GATEWAY on a PASSWORDLESS DSN:
+#       postgres://app_<app>@pggw-apps:55432/<app>?sslmode=disable
+#   The app-branch password is NEVER in the DSN, the manifest, the on-disk tmp yaml, or
+#   etcd (security.md): it is injected as PGPASSWORD via a secretKeyRef to the app's
+#   credential Secret (app-db-<app>, PGPASSWORD key) — for the loader Deployment and,
+#   via `kubectl run --overrides`, for the one-shot wc_drill create/drop pods (no
+#   password on any pod command line). psql picks PGPASSWORD up from the environment.
+#   The loaders INSERT into a THROWAWAY drill table `wc_drill` (created in setup, dropped
+#   in teardown) on that branch. This respects single-writer + tenant sovereignty exactly
 #   as knext apps do (the mission's hard constraint): we NEVER dial compute-<app>:55433
 #   directly. Each loader counts its own committed rows and prints a sentinel line
 #     WCLOAD ok=<N> err=<M> secs=<S>
@@ -77,9 +82,13 @@ GW_DEPLOY="${GW_DEPLOY:-pggw-apps}"
 PROM_DEPLOY="${PROM_DEPLOY:-prometheus}"
 WC_NS="${WC_NS:-scale-zero-pg}"
 
-# APP_NAME / APP_PW are the interpolated values render_loader uses. Default APP_NAME
-# from WC_APP; APP_PW is filled from the app's Secret at live-run time (a placeholder
-# here so a cluster-free render/selftest still works).
+# APP_NAME is interpolated into the loader manifest (app-name / DSN host — NOT a secret).
+# APP_PW is NEVER interpolated anywhere (security.md): the password reaches the loader /
+# one-shot pods ONLY via a secretKeyRef / an --env-from-secret --overrides to app-db-<app>.
+# APP_PW is set from the Secret at live-run time solely as a READINESS FLAG so teardown /
+# the one-shot table drop know the drill got far enough to have a live credential (the
+# sentinel __APP_PW__ means "not yet read"); it is not placed in any manifest, DSN, or
+# command line. Placeholder here so a cluster-free render/selftest still works.
 APP_NAME="${APP_NAME:-$WC_APP}"
 APP_PW="${APP_PW:-__APP_PW__}"
 
@@ -167,7 +176,10 @@ _wc_unsafe_knob() {
 # and returns 1 so render_loader / the live run fail closed. Pure.
 validate_wc_knobs() {
   _wk_bad=0
-  for _wk in APP_NAME APP_PW WC_LOADERS WC_CPU_REQUEST WC_CPU_LIMIT \
+  # APP_PW is deliberately NOT in this list: it is never interpolated into the manifest
+  # or a command line (it flows only via secretKeyRef / --env-from-secret), so it needs
+  # no injection guard — and listing it would leak it into the diagnostic on stderr.
+  for _wk in APP_NAME WC_LOADERS WC_CPU_REQUEST WC_CPU_LIMIT \
              WC_MEM_REQUEST WC_MEM_LIMIT WC_BATCH WC_IMG GW_DEPLOY; do
     eval "_wk_val=\${$_wk:-}"
     # shellcheck disable=SC2154  # _wk_val IS assigned by the eval above (indirect read).
@@ -179,22 +191,32 @@ validate_wc_knobs() {
   return "$_wk_bad"
 }
 
-# _wc_loader_dsn — PURE. The write DSN each loader dials: the app's per-app role through
-# the APPS-GATEWAY on the app's own database. NEVER a direct compute-<app> dial (that
-# would bypass the gateway + tenant sovereignty). Pure.
+# _wc_loader_dsn — PURE. The PASSWORDLESS write DSN each loader dials: the app's per-app
+# role through the APPS-GATEWAY on the app's own database. NEVER a direct compute-<app>
+# dial (that would bypass the gateway + tenant sovereignty). The password is NEVER in the
+# DSN (security.md: secrets never in config files / URLs / container images) — psql picks
+# it up from the PGPASSWORD env var, which the loader/one-shot pods get via a secretKeyRef
+# to the app's Secret (app-db-<app>, PGPASSWORD key). Pure.
 _wc_loader_dsn() {
-  printf 'postgres://app_%s:%s@%s:55432/%s?sslmode=disable' \
-    "$APP_NAME" "$APP_PW" "$GW_DEPLOY" "$APP_NAME"
+  printf 'postgres://app_%s@%s:55432/%s?sslmode=disable' \
+    "$APP_NAME" "$GW_DEPLOY" "$APP_NAME"
 }
+
+# _wc_secret_name — PURE. The per-app credential Secret provision-app.sh mints
+# (app-db-<app>), holding the PGPASSWORD key. secretKeyRef targets this. Pure.
+_wc_secret_name() { printf 'app-db-%s' "$APP_NAME"; }
 
 # render_loader — PURE (no cluster). Emit the write-load loader Deployment: WC_LOADERS
 # pods each running a tight psql INSERT loop through the apps-gateway (see _wc_loader_dsn)
 # into the throwaway `wc_drill` table on the app's branch, counting committed rows and
-# printing the WCLOAD sentinel on exit. GUARDED: validate_wc_knobs rejects a shell-
-# injection vector before any knob is interpolated. Fails closed (non-zero, no emit).
+# printing the WCLOAD sentinel on exit. The app password is injected as PGPASSWORD via a
+# secretKeyRef to app-db-<app> — it NEVER appears in the manifest, the on-disk tmp yaml,
+# or etcd (security.md). GUARDED: validate_wc_knobs rejects a shell-injection vector
+# before any knob is interpolated. Fails closed (non-zero, no emit).
 render_loader() {
   validate_wc_knobs || return 1
   _dsn="$(_wc_loader_dsn)"
+  _sec="$(_wc_secret_name)"
   cat <<YAML
 apiVersion: apps/v1
 kind: Deployment
@@ -213,13 +235,21 @@ spec:
         - name: loader
           image: ${WC_IMG}
           imagePullPolicy: IfNotPresent
+          env:
+            # PGPASSWORD injected from the app's credential Secret — the password is
+            # NEVER interpolated into the manifest/args/DSN (security.md). psql reads it
+            # from the environment; the DSN below is deliberately passwordless.
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef: { name: ${_sec}, key: PGPASSWORD }
           command: ["/bin/sh","-c"]
           args:
             - |
               # Sustained WRITE load THROUGH the apps-gateway on the app's own branch
               # (single-writer respected). Batches of ${WC_BATCH} rows per INSERT so the
               # writer, not psql connect overhead, is the bottleneck. Counts committed
-              # batches and prints WCLOAD ok=/err=/secs= on exit for the parser.
+              # batches and prints WCLOAD ok=/err=/secs= on exit for the parser. The
+              # DSN carries NO password — psql authenticates via \$PGPASSWORD (secretKeyRef).
               DSN='${_dsn}'
               ok=0; err=0; start=\$(date +%s)
               trap 'now=\$(date +%s); echo "WCLOAD ok=\$ok err=\$err secs=\$((now-start))"; exit 0' TERM INT
@@ -250,6 +280,24 @@ TMP_LOADER="$HERE/_tmp-wcload.yaml"
 fail() { echo "FAIL: $*" >&2; exit 1; }
 ok()   { echo "ok - $*"; }
 say()  { printf '\n=== %s\n' "$*"; }
+
+# psql_oneshot <pod-suffix> <sql> — run ONE psql statement in a throwaway pod against
+# the PASSWORDLESS loader DSN, with PGPASSWORD injected via a secretKeyRef to
+# app-db-<app> through --overrides. The password NEVER appears on the command line, in
+# the pod args, or in the pod spec (security.md) — only a Secret reference does. Used
+# for the wc_drill create (setup) + drop (teardown). Best-effort; returns kubectl's rc.
+psql_oneshot() { # $1 pod-suffix  $2 sql
+  _pod="wc$1-$$"; _dsn="$(_wc_loader_dsn)"; _sec="$(_wc_secret_name)"
+  # --overrides injects env-from-secret so no plaintext lands in the pod spec; the SQL
+  # and passwordless DSN are the only args. jsonpath-free single-container override.
+  _ovr='{"spec":{"containers":[{"name":"'"$_pod"'","image":"'"$WC_IMG"'","imagePullPolicy":"IfNotPresent","command":["psql","'"$_dsn"'","-qtAc","'"$2"'"],"env":[{"name":"PGPASSWORD","valueFrom":{"secretKeyRef":{"name":"'"$_sec"'","key":"PGPASSWORD"}}}]}],"restartPolicy":"Never"}}'
+  $K run "$_pod" --image="$WC_IMG" --image-pull-policy=IfNotPresent --restart=Never --quiet \
+    --overrides="$_ovr" >/dev/null 2>&1 || true
+  $K wait --for=jsonpath='{.status.phase}'=Succeeded pod/"$_pod" --timeout=120s >/dev/null 2>&1
+  _rc=$?
+  $K delete pod "$_pod" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+  return "$_rc"
+}
 
 # millicores from a k8s CPU quantity ("1" -> 1000, "1500m" -> 1500, "250m" -> 250).
 to_milli() {
@@ -303,23 +351,23 @@ teardown() {
   echo "    teardown (idempotent): sweep loaders + drill table; restore autoscaler; rest writer"
   $K delete deploy -l drill=writer-ceiling --ignore-not-found --wait=false >/dev/null 2>&1 || true
   $K delete deploy/wcload --ignore-not-found --wait=false >/dev/null 2>&1 || true
-  # drop the throwaway drill table on the app's branch (best-effort, through the gateway).
+  # drop the throwaway drill table on the app's branch (best-effort, through the gateway;
+  # PGPASSWORD via secretKeyRef — no plaintext on the command line). APP_PW is the
+  # readiness flag (set from the Secret only after we have a live credential).
   if [ "${APP_PW:-__APP_PW__}" != "__APP_PW__" ]; then
-    _dsn="$(_wc_loader_dsn)"
-    $K run wcdrop-$$ --image="$WC_IMG" --image-pull-policy=IfNotPresent --restart=Never --quiet \
-      --command -- psql "$_dsn" -qtAc 'drop table if exists wc_drill' >/dev/null 2>&1 || true
-    $K wait --for=jsonpath='{.status.phase}'=Succeeded pod/wcdrop-$$ --timeout=60s >/dev/null 2>&1 || true
-    $K delete pod wcdrop-$$ --ignore-not-found --wait=false >/dev/null 2>&1 || true
+    psql_oneshot drop 'drop table if exists wc_drill' || true
   fi
   # restore the #103 autoscaler to its committed spec (fast-cadence patch drift).
   if [ "$WC_FAST" = "1" ] && [ -f "$HERE/85-writer-autoscaler.yaml" ]; then
     $K apply -f "$HERE/85-writer-autoscaler.yaml" >/dev/null 2>&1 || true
     $K rollout status deploy/writer-autoscaler --timeout=90s >/dev/null 2>&1 || true
   fi
-  # rest the writer (scale the per-app compute back to 0) unless we are reusing an app.
-  $K scale deploy/"compute-${APP_NAME}" --replicas=0 >/dev/null 2>&1 || true
-  # destroy the app we provisioned (leave a pre-existing reused app alone).
+  # rest the writer (scale the per-app compute back to 0) ONLY for an app WE provisioned:
+  # a reused pre-existing app (WC_KEEP_APP=1 / not DID_PROVISION) may be serving real
+  # traffic — never rest its writer out from under it.
   if [ "$DID_PROVISION" = "1" ] && [ "${WC_KEEP_APP:-0}" != "1" ]; then
+    $K scale deploy/"compute-${APP_NAME}" --replicas=0 >/dev/null 2>&1 || true
+    # destroy the app we provisioned (leave a pre-existing reused app alone).
     NS="$WC_NS" KCTX="${WC_CONTEXT:-}" "$PROV" destroy "$APP_NAME" --delete-timeline >/dev/null 2>&1 || true
   fi
   rm -f "$TMP_LOADER"
@@ -333,8 +381,10 @@ if [ "${SELFTEST:-0}" = "1" ]; then
   fails=0
   ck() { if [ "$2" = "$3" ]; then echo "ok   - $1"; else echo "FAIL - $1: got [$2] want [$3]"; fails=$((fails+1)); fi; }
 
-  # 1. loader manifest renders + dry-run applies (structurally valid).
-  APP_PW="selftestpw" render_loader > "$TMP_LOADER" 2>/dev/null || { echo "FAIL - render_loader"; fails=$((fails+1)); }
+  # 1. loader manifest renders + dry-run applies (structurally valid). A password is
+  #    exported in the environment to PROVE it does NOT leak into the rendered manifest
+  #    (the secretKeyRef path means render_loader must ignore it entirely).
+  APP_PW="s3cr3t-should-not-appear" render_loader > "$TMP_LOADER" 2>/dev/null || { echo "FAIL - render_loader"; fails=$((fails+1)); }
   if $K apply --dry-run=client -f "$TMP_LOADER" >/dev/null 2>&1; then
     echo "ok   - loader manifest applies with --dry-run=client"
   else
@@ -350,6 +400,18 @@ if [ "${SELFTEST:-0}" = "1" ]; then
   grep -q 'compute-.*:55433' "$TMP_LOADER" && { echo "FAIL - loader dials the per-app compute DIRECTLY (bypass!)"; fails=$((fails+1)); }
   grep -q 'insert into wc_drill' "$TMP_LOADER" || { echo "FAIL - loader does not INSERT into the throwaway wc_drill table"; fails=$((fails+1)); }
   echo "ok   - loader writes through pggw-apps into the throwaway wc_drill table (no bypass)"
+
+  # 1c. SECURITY (security.md): the password must NEVER appear in the rendered manifest
+  #     (on-disk tmp yaml / etcd). It must reach the pod ONLY via a secretKeyRef, and the
+  #     DSN must be PASSWORDLESS (no `:<pw>@pggw`).
+  if grep -q 's3cr3t-should-not-appear' "$TMP_LOADER"; then
+    echo "FAIL - PLAINTEXT PASSWORD leaked into the rendered loader manifest (security.md)"; fails=$((fails+1))
+  fi
+  grep -Eq 'app_[^@[:space:]]+:[^@[:space:]]+@pggw' "$TMP_LOADER" \
+    && { echo "FAIL - DSN carries an inline password (:<pw>@pggw) — must be passwordless"; fails=$((fails+1)); }
+  grep -q 'secretKeyRef' "$TMP_LOADER" || { echo "FAIL - loader does not inject PGPASSWORD via secretKeyRef"; fails=$((fails+1)); }
+  grep -q 'name: PGPASSWORD' "$TMP_LOADER" || { echo "FAIL - loader does not set a PGPASSWORD env var"; fails=$((fails+1)); }
+  echo "ok   - no plaintext password in the manifest; PGPASSWORD via secretKeyRef; DSN passwordless"
   rm -f "$TMP_LOADER"
 
   # 2. per-loader parser round-trips a sentinel line into write-RPS + err%.
@@ -400,16 +462,16 @@ else
 fi
 $K rollout status deploy/"compute-${APP_NAME}" --timeout=180s >/dev/null 2>&1 || fail "compute-${APP_NAME} not ready"
 
-# read the per-app password from its Secret for the loader DSN.
-APP_PW="$($K get secret "app-db-$WC_APP" -o jsonpath='{.data.PGPASSWORD}' 2>/dev/null | base64 -d 2>/dev/null || true)"
-[ -n "$APP_PW" ] || fail "could not read app password (secret app-db-$WC_APP)"
-_dsn="$(_wc_loader_dsn)"
+# Confirm the per-app credential Secret exists (the loader + one-shot pods reference it
+# via secretKeyRef). We NEVER decode the plaintext password into the drill process — the
+# PGPASSWORD_KEY existence check is the readiness gate; APP_PW stays a non-secret flag.
+$K get secret "app-db-$WC_APP" -o jsonpath='{.data.PGPASSWORD}' >/dev/null 2>&1 \
+  || fail "app credential Secret app-db-$WC_APP has no PGPASSWORD key (provision failed?)"
+APP_PW="secretKeyRef"   # readiness flag ONLY (not the password) — enables teardown drop
 
-say "create the throwaway drill table wc_drill on the app's branch (through the gateway)"
-$K run wcinit-$$ --image="$WC_IMG" --image-pull-policy=IfNotPresent --restart=Never --quiet \
-  --command -- psql "$_dsn" -qtAc 'drop table if exists wc_drill; create table wc_drill(id bigserial primary key, payload text, ts timestamptz default now())' >/dev/null 2>&1 || true
-$K wait --for=jsonpath='{.status.phase}'=Succeeded pod/wcinit-$$ --timeout=120s >/dev/null 2>&1 || true
-$K delete pod wcinit-$$ --ignore-not-found --wait=false >/dev/null 2>&1 || true
+say "create the throwaway drill table wc_drill on the app's branch (through the gateway; PGPASSWORD via secretKeyRef)"
+psql_oneshot init 'drop table if exists wc_drill; create table wc_drill(id bigserial primary key, payload text, ts timestamptz default now())' \
+  || echo "note - wc_drill create pod did not report Succeeded (cold-writer wake may lag); loaders will create-if-needed"
 ok "wc_drill table ready (throwaway; dropped on teardown)"
 
 # fast autoscaler cadence for the drill (restored by teardown from the manifest).
