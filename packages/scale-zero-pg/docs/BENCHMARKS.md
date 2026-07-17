@@ -60,6 +60,30 @@ distribution). Cluster was CPU-healthy (~4% node CPU) at measurement; the histor
 the ~1.5× tail shown in arm B, which single-flight removes. #361 (a rejected pool query
 still stamps `lastDbActivityAt`) is unit-covered, not a cluster metric.
 
+### Wake-path resilience — request-during-wake returns 200, not 5xx (#310), OKE, 2026-07-17
+
+#310 adds a knext-client-side bounded retry/backoff in `@knext/lib` getDbPool (inner to
+#339's single-flight; the client complement to the gateway wake-retry #190). A request
+arriving during a `compute-<app>` 0→1 wake retries transient connect failures
+(`ECONNREFUSED`/`ECONNRESET`/"Connection terminated", non-`28xxx`) within a bounded
+budget (`DB_WAKE_RETRY_BUDGET_MS`=8000, `BASE`=100, `MAX`=1000 ms), so it resolves as
+bounded latency rather than a 5xx; permanent (auth/`28xxx`) errors fail fast.
+
+Live drill on OKE (`obs-6e977bc` on file-manager, `/users`): **3 forced-cold cycles**
+(compute scaled to 0 between cycles, app warm), **33 requests total, 0 failures / 0 5xx**:
+
+| Cycle | Pattern | Result |
+|---|---|---|
+| 1 | C=10 concurrent cold-wake | 10/10 = 200 (tight ~19s band — one shared wake) |
+| 2 | 1 trigger + waves at +2s/+4s **arriving mid-wake** | 11/11 = 200, incl. **10/10 mid-wake arrivals** |
+| 3 | C=12 concurrent cold-wake | 12/12 = 200 (~3.6s wake) |
+
+The cycle-2 mid-wake arrivals are the headline #310 case (a request landing while the
+wake is in-flight) — all returned 200. Wake wall-time varies (3.6–19s) with per-cycle
+compute pod scheduling under the manual scale-to-0 force; the resilience property (no
+5xx) held across all cycles. Unit tests pin the retry/backoff/fail-fast contract with
+fake timers; this drill proves it against the real gateway connect-race.
+
 ### Cold-boot role-apply settle gate (#132) — OKE drill, 2026-07-11
 
 `deploy/_verify-coldboot.sh` (app=pgdemo, CYCLES=8, settle build sha-55edfaa on the
