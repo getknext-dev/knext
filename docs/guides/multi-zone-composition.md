@@ -65,7 +65,7 @@ spec:
   scaling:
     minScale: 0          # scale-to-zero
     maxScale: 10
-    containerConcurrency: 100
+    containerConcurrency: 20   # operator default (ADR-0028); low => reactive scale-out under burst
   storage:
     provider: "gcs"
     bucket: "knext-assets-dashboard"

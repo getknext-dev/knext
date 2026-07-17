@@ -125,6 +125,94 @@ func TestValidateNextAppSpec(t *testing.T) {
 			errHas:  "containerConcurrency",
 		},
 		{
+			// Connection-wall invariant (#377, ADR-0028): with a declared
+			// per-pod pool.max, maxScale * poolMax must not exceed the app
+			// connection budget MaxAppConnections (80 = GW_MAX_CONNS 90 minus a
+			// ~10 reserve for superuser_reserved_connections + replication +
+			// wake-probe headroom). Lowering ContainerConcurrency makes apps
+			// scale to more pods sooner, so this guards against a lower cc
+			// silently enabling connection exhaustion.
+			name: "maxScale * poolMax exceeding app budget rejected (#377)",
+			spec: &appsv1alpha1.NextAppSpec{
+				Image:   digestImage,
+				Scaling: &appsv1alpha1.ScalingSpec{MaxScale: 10, PoolMax: 20},
+			},
+			wantErr: true,
+			errHas:  "connection budget",
+		},
+		{
+			name: "maxScale * poolMax within app budget accepted (#377)",
+			spec: &appsv1alpha1.NextAppSpec{
+				Image:   digestImage,
+				Scaling: &appsv1alpha1.ScalingSpec{MaxScale: 10, PoolMax: 5},
+			},
+			wantErr: false,
+		},
+		{
+			// 10 × 8 = 80 == MaxAppConnections — the boundary is INCLUSIVE.
+			name: "maxScale * poolMax exactly at app budget (80) accepted (#377)",
+			spec: &appsv1alpha1.NextAppSpec{
+				Image:   digestImage,
+				Scaling: &appsv1alpha1.ScalingSpec{MaxScale: 10, PoolMax: 8},
+			},
+			wantErr: false,
+		},
+		{
+			// 27 × 3 = 81 — one over MaxAppConnections — rejected.
+			name: "maxScale * poolMax one over app budget (81) rejected (#377)",
+			spec: &appsv1alpha1.NextAppSpec{
+				Image:   digestImage,
+				Scaling: &appsv1alpha1.ScalingSpec{MaxScale: 27, PoolMax: 3},
+			},
+			wantErr: true,
+			errHas:  "connection budget",
+		},
+		{
+			// 10 × 10 = 100 (= Postgres max_connections) is now REJECTED: it
+			// blows past both the 90 gateway cap and the 80 app budget, leaving
+			// zero admin/replication headroom.
+			name: "maxScale * poolMax at Postgres max_connections (100) rejected (#377)",
+			spec: &appsv1alpha1.NextAppSpec{
+				Image:   digestImage,
+				Scaling: &appsv1alpha1.ScalingSpec{MaxScale: 10, PoolMax: 10},
+			},
+			wantErr: true,
+			errHas:  "connection budget",
+		},
+		{
+			// poolMax unset (0) means "not declared" — the cap check is skipped
+			// (the operator can't verify the wall it doesn't know about; it is
+			// documented loudly in ADR-0028 instead). Back-compat for every
+			// existing CR that never set poolMax.
+			name: "poolMax unset skips the cap check (#377 back-compat)",
+			spec: &appsv1alpha1.NextAppSpec{
+				Image:   digestImage,
+				Scaling: &appsv1alpha1.ScalingSpec{MaxScale: 50},
+			},
+			wantErr: false,
+		},
+		{
+			// maxScale 0 (unbounded) with a declared poolMax cannot satisfy a
+			// finite budget — an unbounded fan-out against a fixed
+			// MaxAppConnections is exactly the exhaustion this guards.
+			name: "unbounded maxScale with declared poolMax rejected (#377)",
+			spec: &appsv1alpha1.NextAppSpec{
+				Image:   digestImage,
+				Scaling: &appsv1alpha1.ScalingSpec{MaxScale: 0, PoolMax: 5},
+			},
+			wantErr: true,
+			errHas:  "connection budget",
+		},
+		{
+			name: "negative poolMax rejected (#377)",
+			spec: &appsv1alpha1.NextAppSpec{
+				Image:   digestImage,
+				Scaling: &appsv1alpha1.ScalingSpec{PoolMax: -1},
+			},
+			wantErr: true,
+			errHas:  "poolMax",
+		},
+		{
 			name: "unknown storage provider rejected",
 			spec: &appsv1alpha1.NextAppSpec{
 				Image:   digestImage,

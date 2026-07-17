@@ -33,10 +33,18 @@ Controls the autoscaling behavior of the underlying Knative Service.
 ```yaml
 spec:
   scaling:
-    minScale: 1              # Minimum active pods (Default: 0)
-    maxScale: 10             # Maximum pods during burst traffic (Default: 10)
-    containerConcurrency: 100 # Max concurrent requests per pod
+    minScale: 1               # Minimum active pods / warm floor (Default: 0, scale to zero for cost)
+    maxScale: 10              # Maximum pods during burst traffic (Default: 10)
+    containerConcurrency: 20  # Concurrent requests per pod before Knative adds a pod (Default: 20, ADR-0028; W1/#376 refines)
+    poolMax: 5                # Optional per-pod DB pool max; when set the operator enforces maxScale × poolMax ≤ 80 (ADR-0028)
 ```
+
+> The `containerConcurrency` default was lowered from `100` to `20` in ADR-0028
+> so reactive scale-out is not inert under high traffic. Declare `poolMax` to let
+> the operator enforce the connection-wall invariant `maxScale × poolMax ≤ 80`
+> (the gateway cap `GW_MAX_CONNS=90` minus an admin/replication reserve, not the
+> raw Postgres `max_connections=100`).
+> See [`scaling-cold-start.md`](./scaling-cold-start.md#high-traffic-profile-377-adr-0028).
 
 ### `storage` (Optional)
 Binds the Next.js Server Actions (e.g., `<input type="file" />`) to a cloud storage provider.

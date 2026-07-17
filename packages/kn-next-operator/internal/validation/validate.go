@@ -30,6 +30,30 @@ import (
 	appsv1alpha1 "github.com/AhmedElBanna80/knext/packages/kn-next-operator/api/v1alpha1"
 )
 
+// MaxConnections documents scale-zero-pg's Postgres primary `max_connections`
+// (100). It is NOT the bound the operator validates against — the app
+// autoscaling must live well within it (see MaxAppConnections).
+const MaxConnections = 100
+
+// MaxAppConnections is the connection BUDGET the app autoscaling must fit
+// within (ADR-0028) — the bound the operator actually enforces. Derivation:
+//
+//	GW_MAX_CONNS (90)  — the wake gateway's hard cap; excess connections are
+//	                     refused with SQLSTATE 53300 (too_many_connections).
+//	  − ~10 reserve     — superuser_reserved_connections (default 3) +
+//	                     replication slots + the wake gateway's own probe
+//	                     connection headroom.
+//	  = 80              — MaxAppConnections.
+//
+// Budgeting against max_connections (100) directly would exhaust the 90 gateway
+// cap AND leave zero admin/replication headroom, defeating the guard the cc=20
+// change (#377) makes necessary. The operator enforces
+// `maxScale × poolMax ≤ MaxAppConnections` when a per-pod poolMax is declared,
+// so a low ContainerConcurrency (which scales apps to more pods sooner) cannot
+// silently exhaust the gateway/DB. W3 (#378) owns breaking this wall (e.g. a
+// shared server-side pooler that decouples pod count from backend connections).
+const MaxAppConnections = 80
+
 // Recognized enum values for the provider/queue free-form string fields.
 // These mirror the providers the CLI + reconciler actually wire up. They are
 // intentionally permissive supersets — unknown values are rejected so that a
@@ -103,6 +127,9 @@ func ValidateImageRef(image string) error {
 //   - Image is required and digest-pinned (delegates to ValidateImageRef).
 //   - Scaling is non-negative and MinScale <= MaxScale (when MaxScale is set).
 //   - ContainerConcurrency is non-negative.
+//   - When a per-pod poolMax is declared, maxScale × poolMax ≤ MaxAppConnections
+//     (the ADR-0028 connection-wall invariant — the gateway cap minus reserve,
+//     not the raw Postgres max_connections).
 //   - Storage.Provider / Cache.Provider / Revalidation.Queue, when set, are
 //     recognized enum values.
 //
@@ -139,6 +166,37 @@ func ValidateNextAppSpec(spec *appsv1alpha1.NextAppSpec) error {
 				"spec.scaling.minScale (%d) must be <= maxScale (%d)",
 				s.MinScale, s.MaxScale,
 			)
+		}
+		if s.PoolMax < 0 {
+			return fmt.Errorf("spec.scaling.poolMax must be >= 0, got %d", s.PoolMax)
+		}
+		// Connection-wall invariant (#377, ADR-0028). Only enforced when the
+		// per-pod pool.max is DECLARED (>0) — the operator cannot guard a wall
+		// it does not know about; an undeclared poolMax is documented loudly in
+		// ADR-0028 instead. When declared, the reactive fan-out must fit within
+		// the app connection BUDGET (GW_MAX_CONNS 90 minus admin/replication
+		// reserve = MaxAppConnections 80), NOT the raw max_connections (100):
+		//   maxScale × poolMax ≤ MaxAppConnections.
+		// An unbounded maxScale (0) with a declared poolMax cannot satisfy a
+		// finite budget, so it is rejected outright.
+		if s.PoolMax > 0 {
+			if s.MaxScale == 0 {
+				return fmt.Errorf(
+					"spec.scaling.poolMax (%d) is declared with an unbounded maxScale (0): "+
+						"an unbounded pod fan-out cannot fit within the app connection budget (%d) — "+
+						"set a finite maxScale so maxScale × poolMax ≤ %d (ADR-0028)",
+					s.PoolMax, MaxAppConnections, MaxAppConnections,
+				)
+			}
+			if int64(s.MaxScale)*int64(s.PoolMax) > int64(MaxAppConnections) {
+				return fmt.Errorf(
+					"spec.scaling: maxScale × poolMax (%d × %d = %d) exceeds the app connection budget (%d = GW_MAX_CONNS 90 − reserve; max_connections is %d): "+
+						"lower maxScale or poolMax so their product ≤ %d (ADR-0028 connection wall; "+
+						"W3/#378 owns breaking it)",
+					s.MaxScale, s.PoolMax, int64(s.MaxScale)*int64(s.PoolMax),
+					MaxAppConnections, MaxConnections, MaxAppConnections,
+				)
+			}
 		}
 	}
 

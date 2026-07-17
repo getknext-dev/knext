@@ -235,10 +235,31 @@ type PreviewSpec struct {
 	PRID    string `json:"prId,omitempty"`
 }
 
+// ScalingSpec tunes the app's 0→N autoscaling and its coupling to the shared
+// Postgres connection ceiling (ADR-0028).
+//
+// MinScale is the warm floor (default 0 for cost — the app scales to zero when
+// idle). MaxScale caps the reactive fan-out. ContainerConcurrency is the
+// per-pod concurrent-request soft target that drives when Knative adds a pod
+// (default 20 — ADR-0028, W1-refinable; lower = scales sooner, more pods).
+//
+// PoolMax is the OPTIONAL per-pod DB connection-pool maximum. When set (>0) it
+// lets the operator enforce the ADR-0028 connection-wall invariant
+// `maxScale × poolMax ≤ 80` — the app connection budget (GW_MAX_CONNS 90 minus
+// an admin/replication reserve), NOT the raw Postgres max_connections (100). A
+// lower ContainerConcurrency scales apps to more pods sooner, so without this
+// guard it could silently exhaust the gateway/DB. Leave unset (0) to skip the
+// check (documented, not enforced). W3 (#378) owns breaking the wall (e.g. a
+// shared pooler).
 type ScalingSpec struct {
 	MinScale             int32 `json:"minScale,omitempty"`
 	MaxScale             int32 `json:"maxScale,omitempty"`
 	ContainerConcurrency int32 `json:"containerConcurrency,omitempty"`
+	// PoolMax is the per-pod DATABASE_URL connection-pool maximum. When >0 the
+	// operator enforces maxScale × poolMax ≤ 80 (the app connection budget,
+	// ADR-0028).
+	// +optional
+	PoolMax int32 `json:"poolMax,omitempty"`
 }
 
 type StorageSpec struct {

@@ -73,6 +73,14 @@ const (
 // converges toward the ksvc's real health even if a status event is missed.
 const ksvcNotReadyRequeueAfter = 30 * time.Second
 
+// defaultContainerConcurrency is the per-pod concurrent-request soft target
+// stamped on the generated Knative Service when spec.scaling.containerConcurrency
+// is unset (#377, ADR-0028). Lowered from 100 → 20: at 100 a single pod
+// absorbed 100 concurrent requests before Knative added a 2nd replica, making
+// reactive scale-to-N effectively inert. 20 is the documented high-traffic
+// interim; W1 (#376) refines it from the concurrency→latency curve.
+const defaultContainerConcurrency = 20
+
 // Ingress-programming stall detection (#208). When the cluster's configured
 // ingress-class matches NO installed ingress controller (e.g. the short-form
 // drift `kourier.knative.dev` vs the class net-kourier actually serves), Knative
@@ -735,7 +743,16 @@ func (r *NextAppReconciler) buildDesiredKsvc(nextApp *appsv1alpha1.NextApp, ksvc
 		})
 	}
 
-	cc := int64(100)
+	// ContainerConcurrency default (#377, ADR-0028). Lowered from 100 → 20: a
+	// pod absorbing 100 concurrent requests before Knative added a 2nd replica
+	// made reactive scale-to-N effectively inert. 20 is the documented
+	// high-traffic interim; W1 (#376) refines the exact value from the
+	// concurrency→latency curve. Still overridable via
+	// spec.scaling.containerConcurrency. NOTE: a lower cc scales apps to more
+	// pods sooner, which raises DB connection pressure — the connection-wall
+	// invariant (maxScale × poolMax ≤ max_connections) is enforced in
+	// validation.ValidateNextAppSpec when a poolMax is declared.
+	cc := int64(defaultContainerConcurrency)
 	if nextApp.Spec.Scaling != nil && nextApp.Spec.Scaling.ContainerConcurrency > 0 {
 		cc = int64(nextApp.Spec.Scaling.ContainerConcurrency)
 	}

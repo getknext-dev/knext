@@ -135,14 +135,18 @@ var _ = Describe("NextApp Controller reconcile output", func() {
 			Expect(ownedBy(ksvc.OwnerReferences, nn.Name)).To(BeTrue())
 		})
 
-		It("defaults containerConcurrency to 100 and timeout to 300 when scaling/timeout are unset", func() {
+		It("defaults containerConcurrency to 20 (#377, ADR-0028) and timeout to 300 when scaling/timeout are unset", func() {
+			// #377 / ADR-0028: the high-traffic default. cc=100 made reactive
+			// scale-to-N inert (a pod absorbed 100 concurrent requests before
+			// Knative added a 2nd replica). 20 is the documented, W1-refinable
+			// interim. Still overridable via spec.scaling.containerConcurrency.
 			nn := reconcileOnce("ksvc-defaults", appsv1alpha1.NextAppSpec{Image: validImage})
 
 			ksvc := &servingv1.Service{}
 			Expect(k8sClient.Get(ctx, nn, ksvc)).To(Succeed())
 
 			Expect(ksvc.Spec.Template.Spec.ContainerConcurrency).NotTo(BeNil())
-			Expect(*ksvc.Spec.Template.Spec.ContainerConcurrency).To(Equal(int64(100)))
+			Expect(*ksvc.Spec.Template.Spec.ContainerConcurrency).To(Equal(int64(20)))
 			Expect(ksvc.Spec.Template.Spec.TimeoutSeconds).NotTo(BeNil())
 			Expect(*ksvc.Spec.Template.Spec.TimeoutSeconds).To(Equal(int64(300)))
 
