@@ -347,8 +347,10 @@ cleanup of children (there are none).
 > `min-scale` annotation is a template change, so Knative rolls a **new Revision**
 > when the effective floor actually changes (at a window boundary — twice per
 > window, not on every reconcile). That is fine for a normal app but resets
-> traffic to latest-ready — so **do not combine `warmSchedule` with a pinned
-> traffic target** (`spec.traffic.revisionName`).
+> traffic to latest-ready — so **`warmSchedule` cannot be combined with a pinned
+> traffic target** (`spec.traffic.revisionName`). As of #393 the operator's
+> admission validation **rejects** that combination outright (webhook + fail-closed
+> reconciler) with an actionable error; drop the pin or the `warmSchedule`.
 
 ### Fields (`WarmWindow`)
 

@@ -126,11 +126,14 @@ Knative creates a **new Revision** when the effective floor actually changes (at
 window boundary). This is far less churn than the abandoned CronJob approach (no
 revert loop — the operator only changes the annotation when the *computed* floor
 changes, i.e. twice per window), but it still resets traffic to latest-ready — so
-**`warmSchedule` must not be combined with a pinned traffic target**
-(`spec.traffic.revisionName`, #92). This is documented on the CRD field; turning
-it into an admission rejection is a filed follow-up (#393). A revision-free
-variant (a first-class Knative scheduled-scale) is a possible future refinement,
-out of scope for the MVP.
+**`warmSchedule` cannot be combined with a pinned traffic target**
+(`spec.traffic.revisionName`, #92). As of #393 this is a **hard admission
+rejection** in `ValidateNextAppSpec` (shared by the webhook and the fail-closed
+reconciler): a spec that sets a non-empty `spec.scaling.warmSchedule` together
+with a non-empty `spec.traffic.revisionName` is refused with an actionable error
+("warmSchedule cannot be combined with pinned traffic … see ADR-0030"). It is no
+longer a documented-only advisory. A revision-free variant (a first-class Knative
+scheduled-scale) is a possible future refinement, out of scope for the MVP.
 
 ### Timezones on distroless (embedded tzdata)
 
@@ -141,8 +144,12 @@ blank-imports `time/tzdata` to embed the IANA database in the binary — without
 it a non-UTC window would silently fail-open (skipped, warming nothing) in the
 shipped image while passing on a dev host that has system tzdata.
 `TestEmbeddedTimezoneDatabase` (cmd package, which links the embed) guards this.
-DST-transition-boundary tests for the window evaluation are a filed follow-up
-(#394).
+DST-transition-boundary behavior is pinned by `warm_schedule_floor_test.go`
+(#394): the floor engages/disengages correctly straddling the `America/New_York`
+2026 spring-forward gap (02:00→03:00, the 02:xx wall hour is skipped) and
+fall-back overlap (01:00→02:00 replayed) — including windows whose start lands in
+the gap or on the repeated hour. `robfig/cron`'s `ParseStandard` + `Next` over a
+`time.LoadLocation` zone handle both transitions; no normalization was needed.
 
 ## Honesty — this is SCHEDULED, not LEARNED
 

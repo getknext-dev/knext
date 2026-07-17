@@ -62,8 +62,9 @@ spec:
 > KEDA (KEDA cannot scale a Knative Service; see ADR-0030) — so the floor never
 > reverts. This is **scheduled, owner-authored** warming — **not learned
 > prediction**. Empty => min-scale falls back to `minScale` (default scale-to-zero).
-> Do **not** combine with a pinned `spec.traffic.revisionName` (a min-scale change
-> rolls a new Revision). See
+> **Cannot** be combined with a pinned `spec.traffic.revisionName` (a min-scale
+> change rolls a new Revision and would reset the pin) — this is a **hard admission
+> rejection** as of #393, not just advice. See
 > [`scaling-cold-start.md`](./scaling-cold-start.md#scheduled-warm-floor-specscalingwarmschedule-adr-0030--380)
 > and [ADR-0030](../adr/0030-scheduled-warm-floor.md) (incl. the deferred
 > learned-controller / DB-lockstep / warm-budget follow-ups).

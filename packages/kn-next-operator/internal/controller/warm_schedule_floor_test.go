@@ -181,10 +181,11 @@ func TestWarmScheduleRequeue(t *testing.T) {
 // behavior. A failure here is a real DST finding to report, not to paper over.
 //
 // Reference instants (America/New_York, 2026):
-//   spring-forward: 2026-03-08, 02:00 EST(-5) -> 03:00 EDT(-4). The 02:xx wall hour
-//     does not exist. UTC 07:00 == 03:00 EDT (the first instant after the gap).
-//   fall-back: 2026-11-01, 02:00 EDT(-4) -> 01:00 EST(-5). The 01:xx wall hour occurs
-//     twice: first at UTC 05:00 (EDT), again at UTC 06:00 (EST).
+//
+//	spring-forward: 2026-03-08, 02:00 EST(-5) -> 03:00 EDT(-4). The 02:xx wall hour
+//	  does not exist. UTC 07:00 == 03:00 EDT (the first instant after the gap).
+//	fall-back: 2026-11-01, 02:00 EDT(-4) -> 01:00 EST(-5). The 01:xx wall hour occurs
+//	  twice: first at UTC 05:00 (EDT), again at UTC 06:00 (EST).
 func TestWarmScheduleFloor_DSTSpringForward(t *testing.T) {
 	utc := time.UTC
 	ny := "America/New_York"

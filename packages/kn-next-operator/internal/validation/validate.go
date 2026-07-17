@@ -304,6 +304,23 @@ func ValidateNextAppSpec(spec *appsv1alpha1.NextAppSpec) error {
 		return fmt.Errorf("spec.traffic.canaryPercent requires a pinned revisionName")
 	}
 
+	// warmSchedule + pinned traffic (#393, ADR-0030): the scheduled warm-floor
+	// changes the ksvc min-scale annotation at each window boundary. A min-scale
+	// change is a template change, so Knative rolls a NEW Revision and resets
+	// traffic to latest-ready. If the app ALSO pins traffic to a specific Revision
+	// (spec.traffic.revisionName — #92 rollback/canary), the boundary roll would
+	// silently reset the pin. Reject the combination at admission (shared webhook +
+	// fail-closed reconciler) rather than leaving it as an advisory foot-gun.
+	if spec.Scaling != nil && len(spec.Scaling.WarmSchedule) > 0 &&
+		spec.Traffic != nil && spec.Traffic.RevisionName != "" {
+		return fmt.Errorf(
+			"warmSchedule cannot be combined with pinned traffic (spec.traffic.revisionName %q): "+
+				"the scheduled min-scale change rolls a new Revision at each window boundary and "+
+				"would reset the pin; drop the pin or the warmSchedule (see ADR-0030)",
+			spec.Traffic.RevisionName,
+		)
+	}
+
 	return nil
 }
 
