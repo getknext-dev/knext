@@ -65,6 +65,7 @@ export default defineConfig([
       'adapters/otel-config': 'src/adapters/otel-config.ts',
       'adapters/tracing': 'src/adapters/tracing.ts',
       'adapters/metrics': 'src/adapters/metrics.ts',
+      'adapters/correlation-response': 'src/adapters/correlation-response.ts',
       'utils/logger': 'src/utils/logger.ts',
     },
     // Emit `.d.ts` declarations for the TS library entries so typed consumers
@@ -93,6 +94,7 @@ export default defineConfig([
         'adapters/otel-config': 'src/adapters/otel-config.ts',
         'adapters/tracing': 'src/adapters/tracing.ts',
         'adapters/metrics': 'src/adapters/metrics.ts',
+        'adapters/correlation-response': 'src/adapters/correlation-response.ts',
         'utils/logger': 'src/utils/logger.ts',
       },
     },

@@ -31,6 +31,7 @@ import {
   recordDbWake,
   startChildMetricsServer,
 } from '@knext/core/adapters/metrics';
+import { installCorrelationResponseEcho } from '@knext/core/adapters/correlation-response';
 import { resolveOtelOptions } from '@knext/core/adapters/otel-config';
 import {
   ColdStartSpanProcessor,
@@ -145,4 +146,17 @@ export function registerNode() {
   // BOTH correlation_id + trace_id with no `runWithRequestContext` wrapping.
   // Only wired when tracing is on (rides the default-off gate).
   setCorrelationIdProvider(installCorrelationIdProvider());
+
+  // Echo `x-request-id` on the RESPONSE automatically (#350). #346 established
+  // the id on the OTel Context and correlated logs from it, but did NOT echo it
+  // on the HTTP response — @vercel/otel has no inbound response hook and
+  // knext-core does not own the app response chain. This patches
+  // `http.ServerResponse.prototype` (the same mechanism as
+  // `cache-control-normalize.cjs`) so that at the header-flush point the
+  // response carries `x-request-id` = the ACTIVE correlation id (read from the
+  // SAME OTel Context the logger mixin uses), IF present and not already set by
+  // the app. Node-only (touches node:http) — loaded only from this Node path, so
+  // it never enters the edge bundle (#342/#344). Fail-open + idempotent +
+  // default-off (wired only when tracing is on).
+  installCorrelationResponseEcho();
 }
