@@ -1,12 +1,13 @@
 # ADR-0023 — Health/readiness dependency taxonomy: hard ⇒ `down`, soft ⇒ `degraded`
 
-- **Status:** Accepted
+- **Status:** Accepted — **Amended by [ADR-0026](0026-shallow-readiness-scale-to-zero-db.md):** this taxonomy no longer gates Knative readiness/liveness (now backed by the shallow, DB-free `checkShallowHealth()`); the `down`/`degraded`/`waking` verdict backs the **deep observability** signal (`/api/health/deep`) only.
 - **Date:** 2026-07-14
 - **Relates to:** ADR-0001 (operator = single source of truth), the SCS/Zones
   cache-fails-open contract (`.claude/rules/scs-zones.md`), graceful-shutdown /
   scale-to-zero pod lifecycle.
-- **Scope:** `checkDeepHealth()` in `packages/lib/src/health/index.ts`, which
-  backs the Knative **readiness** probe.
+- **Scope:** `checkDeepHealth()` in `packages/lib/src/health/index.ts`. Originally
+  backed the Knative **readiness** probe; per ADR-0026 it now backs the
+  **deep observability** endpoint only (readiness/liveness are shallow).
 
 ## Context
 
