@@ -462,78 +462,143 @@ export class ColdStartSpanProcessor implements KnextSpanProcessor {
 
 // ── Automatic db-wake span (a pool instrumentor) ──────────────────────────────
 
-/** Minimal shape of the pg pool this module instruments: a `connect()` method. */
-interface ConnectablePool {
-    connect: (...args: unknown[]) => Promise<unknown>;
+/**
+ * Minimal shape of the pg pool this module instruments. A pool acquires a
+ * client either explicitly via `connect()` or implicitly via `query()`
+ * (node-pg's `Pool.query()` checks a client out through an internal path that
+ * does NOT call the public `connect()`), so BOTH are wrapped (#345).
+ */
+interface InstrumentablePool {
+    connect?: (...args: unknown[]) => Promise<unknown>;
+    query?: (...args: unknown[]) => unknown;
 }
 
 /**
- * Wrap a pg pool's FIRST `connect()` in a `knext.db_wake` span so the
- * scale-zero-pg 0→1 DB wake shows up on the request trace — automatically, with
- * no app code. Install once at startup via `@knext/lib/clients`:
+ * Wrap a pg pool's FIRST client acquisition — via `connect()` OR `query()` — in
+ * a `knext.db_wake` span so the scale-zero-pg 0→1 DB wake shows up on the
+ * request trace automatically, with no app code. Install once at startup via
+ * `@knext/lib/clients`:
  *
  *   import { setPoolInstrumentor } from '@knext/lib/clients';
  *   import { instrumentPoolForDbWake } from '@knext/core/adapters/tracing';
  *   setPoolInstrumentor(instrumentPoolForDbWake);
  *
- * The lib then calls this for each pool it creates. Only the FIRST connect (the
- * cold 0→1 wake) is spanned; warm connects from the ready pool are untouched, so
- * the span marks the wake, not every checkout. The span opens in the caller's
- * active context — inside a request handler that means it nests under the request
- * span. It is best-effort and fail-open: if wrapping throws, the original pool
- * behavior is preserved. A no-op when tracing is disabled (no-op tracer).
+ * The lib then calls this for each pool it creates. #345: the common usage is
+ * `pool.query(...)` (never `pool.connect()`); node-pg's `Pool.query()` acquires
+ * a client via an internal path that bypasses the public `connect()`, so wrapping
+ * `connect` alone left db-wake dead for typical apps. Both entry points now
+ * share ONE per-pool `waked` latch: whichever fires first (query or connect)
+ * emits exactly one span + metric; every subsequent query/connect (warm) is a
+ * plain pass-through.
  *
- * @param pool - the freshly-created pool (its `connect` is monkey-patched once)
+ * The span opens in the caller's active context — inside a request handler that
+ * means it nests under the request span. Best-effort and fail-open: if wrapping
+ * throws, or the metric emitter throws, the original pool behavior is preserved.
+ * A no-op when tracing is disabled (no-op tracer).
+ *
+ * @param pool - the freshly-created pool (`connect` and `query` are patched once)
  * @param role - 'writer' | 'reader', recorded as `knext.db_role`
  * @param onDbWake - optional Prometheus emitter (#315); called with (role,
  *                   wakeMs) on the 0→1 wake so the wake is also a
  *                   `knext_db_wake_*` metric, not only a span
  */
 export function instrumentPoolForDbWake(
-    pool: ConnectablePool,
+    pool: InstrumentablePool,
     role: "writer" | "reader",
     onDbWake?: (role: "writer" | "reader", wakeMs: number) => void,
 ): void {
+    // Shared latch across BOTH connect() and query() so the wake fires exactly
+    // once per pool regardless of which acquisition path runs first (#345).
+    const state = { waked: false };
+
     const originalConnect = pool.connect;
-    if (typeof originalConnect !== "function") {
-        return;
+    if (typeof originalConnect === "function") {
+        pool.connect = function instrumentedConnect(
+            this: unknown,
+            ...args: unknown[]
+        ): Promise<unknown> {
+            const call = () =>
+                originalConnect.apply(this ?? pool, args) as Promise<unknown>;
+            if (state.waked) {
+                return call();
+            }
+            // connect() always resolves to a client Promise; firstWake preserves
+            // that promise (or rethrows), so the cast is sound.
+            return firstWake(state, role, onDbWake, call) as Promise<unknown>;
+        } as InstrumentablePool["connect"];
     }
-    let waked = false;
-    pool.connect = function instrumentedConnect(
-        this: unknown,
-        ...args: unknown[]
-    ): Promise<unknown> {
-        const call = () => originalConnect.apply(this ?? pool, args);
-        if (waked) {
-            return call();
-        }
-        waked = true;
-        const startedAt = Date.now();
-        return tracer().startActiveSpan(
-            DB_WAKE_SPAN_NAME,
-            { attributes: { "knext.db_role": role } },
-            (span) => {
-                const finish = () => {
-                    const wakeMs = Math.max(0, Date.now() - startedAt);
-                    span.setAttribute("knext.wake_ms", wakeMs);
-                    // #315: also record the 0→1 wake as a Prometheus counter +
-                    // duration on the core :9091 registry, when an emitter is
-                    // wired. Optional so #317's tracing-only path is unchanged.
-                    onDbWake?.(role, wakeMs);
-                    span.end();
-                };
-                let result: Promise<unknown>;
-                try {
-                    result = call();
-                } catch (err) {
-                    recordError(span, err);
-                    finish();
-                    throw err;
-                }
+
+    const originalQuery = pool.query;
+    if (typeof originalQuery === "function") {
+        pool.query = function instrumentedQuery(
+            this: unknown,
+            ...args: unknown[]
+        ): unknown {
+            const call = () => originalQuery.apply(this ?? pool, args);
+            if (state.waked) {
+                return call();
+            }
+            // `Pool.query()` has callback and promise overloads: with a trailing
+            // callback it returns void and delivers via the callback; otherwise
+            // it returns a Promise. Detect the callback form so the span ends
+            // when the result is actually delivered, preserving pg semantics.
+            const last = args[args.length - 1];
+            if (typeof last === "function") {
+                return firstWakeCallback(
+                    state,
+                    role,
+                    onDbWake,
+                    args,
+                    last as (...cbArgs: unknown[]) => void,
+                    (patchedArgs) =>
+                        (originalQuery as (...a: unknown[]) => unknown).apply(
+                            this ?? pool,
+                            patchedArgs,
+                        ),
+                );
+            }
+            return firstWake(state, role, onDbWake, call);
+        } as InstrumentablePool["query"];
+    }
+}
+
+/**
+ * Run the FIRST-acquisition work inside a `knext.db_wake` span, flip the shared
+ * latch, record the wake latency + optional metric, and preserve the callee's
+ * return value / error propagation / promise-or-sync shape. Fail-open: the
+ * metric emitter is guarded so a throwing emitter never breaks the DB call.
+ */
+function firstWake(
+    state: { waked: boolean },
+    role: "writer" | "reader",
+    onDbWake: ((role: "writer" | "reader", wakeMs: number) => void) | undefined,
+    call: () => unknown,
+): unknown {
+    state.waked = true;
+    const startedAt = Date.now();
+    return tracer().startActiveSpan(
+        DB_WAKE_SPAN_NAME,
+        { attributes: { "knext.db_role": role } },
+        (span) => {
+            const finish = () => {
+                const wakeMs = Math.max(0, Date.now() - startedAt);
+                span.setAttribute("knext.wake_ms", wakeMs);
+                emitDbWake(onDbWake, role, wakeMs);
+                span.end();
+            };
+            let result: unknown;
+            try {
+                result = call();
+            } catch (err) {
+                recordError(span, err);
+                finish();
+                throw err;
+            }
+            if (isPromise(result)) {
                 return result.then(
-                    (client) => {
+                    (value) => {
                         finish();
-                        return client;
+                        return value;
                     },
                     (err) => {
                         recordError(span, err);
@@ -541,7 +606,76 @@ export function instrumentPoolForDbWake(
                         throw err;
                     },
                 );
-            },
-        );
-    } as ConnectablePool["connect"];
+            }
+            finish();
+            return result;
+        },
+    );
+}
+
+/**
+ * Callback-overload variant of {@link firstWake}: `pool.query(text, cb)` returns
+ * void and delivers via `cb(err, res)`. We wrap the app's callback so the span
+ * ends (recording an error on failure) exactly when the result is delivered,
+ * then invoke the original with the wrapped callback in place of the last arg.
+ */
+function firstWakeCallback(
+    state: { waked: boolean },
+    role: "writer" | "reader",
+    onDbWake: ((role: "writer" | "reader", wakeMs: number) => void) | undefined,
+    args: unknown[],
+    userCb: (...cbArgs: unknown[]) => void,
+    invoke: (patchedArgs: unknown[]) => unknown,
+): unknown {
+    state.waked = true;
+    const startedAt = Date.now();
+    return tracer().startActiveSpan(
+        DB_WAKE_SPAN_NAME,
+        { attributes: { "knext.db_role": role } },
+        (span) => {
+            let ended = false;
+            const finish = (err?: unknown) => {
+                if (ended) {
+                    return;
+                }
+                ended = true;
+                if (err) {
+                    recordError(span, err);
+                }
+                const wakeMs = Math.max(0, Date.now() - startedAt);
+                span.setAttribute("knext.wake_ms", wakeMs);
+                emitDbWake(onDbWake, role, wakeMs);
+                span.end();
+            };
+            const wrappedCb = (...cbArgs: unknown[]) => {
+                finish(cbArgs[0]);
+                return userCb(...cbArgs);
+            };
+            const patchedArgs = args.slice();
+            patchedArgs[patchedArgs.length - 1] = wrappedCb;
+            try {
+                return invoke(patchedArgs);
+            } catch (err) {
+                // Synchronous throw before the callback could fire.
+                finish(err);
+                throw err;
+            }
+        },
+    );
+}
+
+/** Invoke the #315 metric emitter fail-open — a throw here must not break the DB call. */
+function emitDbWake(
+    onDbWake: ((role: "writer" | "reader", wakeMs: number) => void) | undefined,
+    role: "writer" | "reader",
+    wakeMs: number,
+): void {
+    if (!onDbWake) {
+        return;
+    }
+    try {
+        onDbWake(role, wakeMs);
+    } catch {
+        // Fail-open: metric emission is best-effort; never break the query/connect.
+    }
 }
