@@ -869,6 +869,59 @@ The harness is validated cluster-free (`SELFTEST=1 ./_verify-loadsoak.sh` +
 asserted to produce this exact row format from a sample k6 JSON. **No load numbers are
 fabricated here** — the table stays "pending" until the OKE run fills it (rule 2b / honesty).
 
+## Writer vertical-autoscale under sustained write load (#379)
+
+Harness: `deploy/_verify-writer-ceiling.sh` + `deploy/test_verify-writer-ceiling.sh` — an
+**in-cluster write loader** (`WC_LOADERS` `psql` INSERT-loop pods) driving sustained INSERTs
+**through the apps-gateway on the app's own branch** (passwordless DSN
+`postgres://app_<app>@pggw-apps:55432/<app>`; the password is injected as `PGPASSWORD` via a
+`secretKeyRef` to `app-db-<app>` — never in the manifest/DSN/etcd, per security.md)
+into a throwaway `wc_drill` table, while the drill samples the #103 writer vertical-autoscaler
+on `compute-<app>`. Two things are proven/published (wave #375 W4):
+
+1. **In-place resize under real write load** — the writer's *actuated* cpu-limit grows UP under
+   the write soak and shrinks DOWN after drain, with `restartCount == baseline` throughout (an
+   in-place resize never bounces Postgres). Same invariant as the #103 CPU-burner drill, now
+   under the **real gateway write path** instead of a synthetic in-container burner.
+2. **Write RPS ceiling** — the max sustained write RPS (committed INSERT batches/s, summed across
+   loaders) at the node-fit / limit ceiling. This is the **honest hard limit**: writes scale
+   **only vertically** (single-writer, the #103 resize) up to the node/limit ceiling; beyond that
+   = **sharding, out of scope**. The number below is one app-branch's write capacity on the cluster.
+
+Invoke (see operations.md "Writer vertical-autoscale ceiling under sustained WRITE load"):
+
+```sh
+cd deploy
+WC_APP=wcdrill WC_LOADERS=4 WC_BATCH=50 WC_SOAK_S=180 \
+  WC_CONTEXT=context-ckmva7v7zvq ./_verify-writer-ceiling.sh
+```
+
+Results — **SCHEMA, pending OKE** (the orchestrator fills the numbers; no fabricated values):
+
+| Phase | writeRPS (fleet, summed) | ok batches | err | err% | window (s) | writer cpu-limit | restartCount |
+|---|---|---|---|---|---|---|---|
+| ramp+soak (WC_LOADERS loaders) | _pending-OKE_ | _pending-OKE_ | _pending-OKE_ | _pending-OKE_ | _pending-OKE_ | `<base>m → <peak>m` (in-place) | **0** (no bounce) |
+| drain (hysteresis) | — | — | — | — | — | `<peak>m → <base>m` (in-place) | **0** (no bounce) |
+
+**Honest note (single-writer ceiling).** The write ceiling is the **single-writer vertical
+limit**. A knext app has exactly one writer per branch; the only knob to raise write throughput
+is the #103 in-place cpu-limit resize, up to the node/limit ceiling. Past that, the answer is
+**sharding across branches** — deliberately out of scope for this wave. This drill turns the
+previously-unknown write ceiling into a **known, documented capacity number**.
+
+**Feasibility caveat (recorded honestly, per the mission).** On a CPU-request-constrained OKE
+cluster each loader pod schedules at ~50m and the single writer may not be pushed past
+`WAS_UP_RATIO` — the drill may only reach a **moderate write rate** and reports that explicitly
+rather than faking a ceiling. In that case the *ceiling* row is the honest achievable write RPS
+for the run, and the *in-place resize* proof may show "no scale-up observed under this load"
+(the autoscaler correctness is still separately covered by `_verify-writer-autoscaler.sh` #103).
+
+The harness is validated cluster-free (`SELFTEST=1 ./_verify-writer-ceiling.sh` +
+`bash deploy/test_verify-writer-ceiling.sh`): the loader manifest dry-runs (asserting it writes
+*through* pggw-apps, never a direct `compute-<app>` bypass) and the `parse_wcount` /
+`aggregate_wcounts` parsers are asserted to produce this exact row format from fixed inputs.
+**No write numbers are fabricated here** — the table stays "pending" until the OKE run fills it.
+
 ## Capacity / sizing facts
 
 - Gateway: `GW_MAX_CONNS=90` < compute `max_connections=100`; excess → clean 53300.
