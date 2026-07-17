@@ -14,9 +14,11 @@ The `spec` defines the desired state of the Next.js application.
 
 ### `image` (Required)
 The absolute OCI registry path to the Next.js container image (built from `output:'standalone'`).
+Must be **digest-pinned** (`@sha256:...`); the operator rejects `:latest` and tag-only refs
+at admission (mutable tags break rollbacks and provenance — see `.claude/rules/security.md`).
 ```yaml
 spec:
-  image: ghcr.io/org/repo/app:latest
+  image: ghcr.io/org/repo/app:v1.2.3@sha256:abc123...   # digest-pinned, never :latest
 ```
 
 ### `runtime` (Optional)
@@ -37,6 +39,11 @@ spec:
     maxScale: 10              # Maximum pods during burst traffic (Default: 10)
     containerConcurrency: 20  # Concurrent requests per pod before Knative adds a pod (Default: 20, ADR-0028; W1/#376 refines)
     poolMax: 5                # Optional per-pod DB pool max; when set the operator enforces maxScale × poolMax ≤ 80 (ADR-0028)
+    warmSchedule:             # Optional SCHEDULED warm floor (ADR-0030, #380); no KEDA needed
+      - start: "0 8 * * 1-5"     # 5-field cron: warm floor begins (08:00 weekdays)
+        end:   "0 20 * * 1-5"    # 5-field cron: warm floor ends (20:00 weekdays)
+        replicas: 3             # min-scale floor held during the window (>= 1, <= maxScale)
+        timezone: America/New_York # IANA timezone; defaults to UTC
 ```
 
 > The `containerConcurrency` default was lowered from `100` to `20` in ADR-0028
@@ -45,6 +52,21 @@ spec:
 > (the gateway cap `GW_MAX_CONNS=90` minus an admin/replication reserve, not the
 > raw Postgres `max_connections=100`).
 > See [`scaling-cold-start.md`](./scaling-cold-start.md#high-traffic-profile-377-adr-0028).
+
+> `warmSchedule` pre-warms the app to a floor of `replicas` pods **during declared
+> windows**: on every reconcile the **operator** evaluates the windows against now
+> (in each window's timezone) and sets the ksvc
+> `autoscaling.knative.dev/min-scale` to `max(minScale, active-window replicas)`,
+> RequeueAfter'ing the next window boundary (the Knative KPA still scales above the
+> floor). The operator is the **single writer** of min-scale — no CronJobs, no
+> KEDA (KEDA cannot scale a Knative Service; see ADR-0030) — so the floor never
+> reverts. This is **scheduled, owner-authored** warming — **not learned
+> prediction**. Empty => min-scale falls back to `minScale` (default scale-to-zero).
+> Do **not** combine with a pinned `spec.traffic.revisionName` (a min-scale change
+> rolls a new Revision). See
+> [`scaling-cold-start.md`](./scaling-cold-start.md#scheduled-warm-floor-specscalingwarmschedule-adr-0030--380)
+> and [ADR-0030](../adr/0030-scheduled-warm-floor.md) (incl. the deferred
+> learned-controller / DB-lockstep / warm-budget follow-ups).
 
 ### `storage` (Optional)
 Binds the Next.js Server Actions (e.g., `<input type="file" />`) to a cloud storage provider.

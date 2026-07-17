@@ -24,7 +24,9 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -644,6 +646,135 @@ var _ = Describe("NextApp Controller reconcile output", func() {
 
 			By("being owner-referenced by the NextApp")
 			Expect(ownedBy(ks.GetOwnerReferences(), nn.Name)).To(BeTrue())
+		})
+	})
+
+	// Scheduled warm-floor (ADR-0030, W5/#380): the OPERATOR is the SINGLE writer
+	// of the ksvc min-scale annotation. On each reconcile it evaluates the
+	// warmSchedule windows against NOW (clock-injectable in tests) and folds the
+	// active-window floor into min-scale; outside every window min-scale falls back
+	// to Spec.MinScale (default 0, scale-to-zero). It RequeueAfter's the next window
+	// boundary. No CronJobs, no patcher RBAC, no external writer — so the floor
+	// never reverts/thrashes.
+	Context("warm-schedule operator-owned min-scale floor", func() {
+		// reconcileWithClock creates the NextApp and runs ONE reconcile with the
+		// reconciler's clock pinned to `now`, returning the namespaced name + the
+		// reconcile result (so the RequeueAfter boundary can be asserted).
+		reconcileWithClock := func(name string, now time.Time, spec appsv1alpha1.NextAppSpec) (types.NamespacedName, reconcile.Result) {
+			nn := types.NamespacedName{Name: name, Namespace: namespace}
+			spec.Image = orDefault(spec.Image, validImage)
+			app := &appsv1alpha1.NextApp{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace}, Spec: spec}
+			Expect(k8sClient.Create(ctx, app)).To(Succeed())
+			DeferCleanup(func() {
+				cur := &appsv1alpha1.NextApp{}
+				if err := k8sClient.Get(ctx, nn, cur); err == nil {
+					Expect(k8sClient.Delete(ctx, cur)).To(Succeed())
+					cleanup := &NextAppReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+					_, _ = cleanup.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+				}
+			})
+			r := &NextAppReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Clock: func() time.Time { return now }}
+			res, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+			return nn, res
+		}
+
+		minScaleOf := func(nn types.NamespacedName) string {
+			ksvc := &servingv1.Service{}
+			Expect(k8sClient.Get(ctx, nn, ksvc)).To(Succeed())
+			return ksvc.Spec.Template.Annotations["autoscaling.knative.dev/min-scale"]
+		}
+
+		// A window that spans the whole day in UTC, so "now" (any UTC instant that is
+		// not exactly 00:00) is inside it.
+		allDayWindow := appsv1alpha1.WarmWindow{Start: "1 0 * * *", End: "59 23 * * *", Replicas: 3, Timezone: "UTC"}
+
+		It("creates NO CronJobs/RBAC (the mechanism is annotation-only, no children)", func() {
+			now := time.Date(2026, 7, 18, 12, 0, 0, 0, time.UTC)
+			nn, _ := reconcileWithClock("warm-nochildren", now, appsv1alpha1.NextAppSpec{
+				Scaling: &appsv1alpha1.ScalingSpec{MaxScale: 8, WarmSchedule: []appsv1alpha1.WarmWindow{allDayWindow}},
+			})
+			cj := &batchv1.CronJob{}
+			Err := k8sClient.Get(ctx, types.NamespacedName{Name: nn.Name + "-warm-0-set", Namespace: namespace}, cj)
+			Expect(errors.IsNotFound(Err)).To(BeTrue(), "no CronJob: warm-floor is operator-owned, annotation-only")
+			sa := &corev1.ServiceAccount{}
+			Err = k8sClient.Get(ctx, types.NamespacedName{Name: nn.Name + "-warm-patcher", Namespace: namespace}, sa)
+			Expect(errors.IsNotFound(Err)).To(BeTrue(), "no patcher SA: no external writer")
+			role := &rbacv1.Role{}
+			Err = k8sClient.Get(ctx, types.NamespacedName{Name: nn.Name + "-warm-patcher", Namespace: namespace}, role)
+			Expect(errors.IsNotFound(Err)).To(BeTrue(), "no patcher Role: no external writer")
+		})
+
+		It("sets ksvc min-scale to the active window's replicas (INSIDE the window)", func() {
+			now := time.Date(2026, 7, 18, 12, 0, 0, 0, time.UTC) // noon UTC, inside allDayWindow
+			nn, res := reconcileWithClock("warm-inside", now, appsv1alpha1.NextAppSpec{
+				Scaling: &appsv1alpha1.ScalingSpec{MinScale: 0, MaxScale: 8, WarmSchedule: []appsv1alpha1.WarmWindow{allDayWindow}},
+			})
+			Expect(minScaleOf(nn)).To(Equal("3"), "min-scale must equal the active window floor")
+			Expect(res.RequeueAfter).To(BeNumerically(">", 0), "must requeue to the next boundary")
+		})
+
+		It("keeps the floor across a SECOND reconcile — no revert (single-writer)", func() {
+			now := time.Date(2026, 7, 18, 12, 0, 0, 0, time.UTC)
+			nn, _ := reconcileWithClock("warm-noreset", now, appsv1alpha1.NextAppSpec{
+				Scaling: &appsv1alpha1.ScalingSpec{MinScale: 0, MaxScale: 8, WarmSchedule: []appsv1alpha1.WarmWindow{allDayWindow}},
+			})
+			Expect(minScaleOf(nn)).To(Equal("3"))
+			By("running a second reconcile at the same instant — the floor MUST survive")
+			r := &NextAppReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Clock: func() time.Time { return now }}
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(minScaleOf(nn)).To(Equal("3"), "the operator is the single writer: no revert to Spec.MinScale")
+		})
+
+		It("falls back to Spec.MinScale OUTSIDE all windows (scale-to-zero preserved)", func() {
+			// Window only 08:00-09:00 UTC; evaluate at 12:00 UTC => outside.
+			w := appsv1alpha1.WarmWindow{Start: "0 8 * * *", End: "0 9 * * *", Replicas: 5, Timezone: "UTC"}
+			now := time.Date(2026, 7, 18, 12, 0, 0, 0, time.UTC)
+			nn, res := reconcileWithClock("warm-outside", now, appsv1alpha1.NextAppSpec{
+				Scaling: &appsv1alpha1.ScalingSpec{MinScale: 0, MaxScale: 8, WarmSchedule: []appsv1alpha1.WarmWindow{w}},
+			})
+			Expect(minScaleOf(nn)).To(Equal("0"), "outside the window the floor is Spec.MinScale (0)")
+			Expect(res.RequeueAfter).To(BeNumerically(">", 0), "still requeues to the next window start")
+		})
+
+		It("honours Spec.MinScale as a lower bound (max of Spec.MinScale and window)", func() {
+			// Outside the window, Spec.MinScale=2 must still hold.
+			w := appsv1alpha1.WarmWindow{Start: "0 8 * * *", End: "0 9 * * *", Replicas: 5, Timezone: "UTC"}
+			now := time.Date(2026, 7, 18, 12, 0, 0, 0, time.UTC)
+			nn, _ := reconcileWithClock("warm-floorfloor", now, appsv1alpha1.NextAppSpec{
+				Scaling: &appsv1alpha1.ScalingSpec{MinScale: 2, MaxScale: 8, WarmSchedule: []appsv1alpha1.WarmWindow{w}},
+			})
+			Expect(minScaleOf(nn)).To(Equal("2"), "Spec.MinScale is the floor outside windows")
+		})
+
+		It("takes the MAX replicas across overlapping active windows", func() {
+			now := time.Date(2026, 7, 18, 12, 0, 0, 0, time.UTC)
+			windows := []appsv1alpha1.WarmWindow{
+				{Start: "1 0 * * *", End: "59 23 * * *", Replicas: 2, Timezone: "UTC"},
+				{Start: "0 10 * * *", End: "0 14 * * *", Replicas: 6, Timezone: "UTC"},
+			}
+			nn, _ := reconcileWithClock("warm-overlap", now, appsv1alpha1.NextAppSpec{
+				Scaling: &appsv1alpha1.ScalingSpec{MinScale: 0, MaxScale: 8, WarmSchedule: windows},
+			})
+			Expect(minScaleOf(nn)).To(Equal("6"), "overlapping windows => max replicas wins")
+		})
+
+		It("drops the floor when the schedule is removed (no lingering warm state)", func() {
+			now := time.Date(2026, 7, 18, 12, 0, 0, 0, time.UTC)
+			nn, _ := reconcileWithClock("warm-clear", now, appsv1alpha1.NextAppSpec{
+				Scaling: &appsv1alpha1.ScalingSpec{MinScale: 0, MaxScale: 8, WarmSchedule: []appsv1alpha1.WarmWindow{allDayWindow}},
+			})
+			Expect(minScaleOf(nn)).To(Equal("3"))
+			By("removing the schedule and re-reconciling")
+			cur := &appsv1alpha1.NextApp{}
+			Expect(k8sClient.Get(ctx, nn, cur)).To(Succeed())
+			cur.Spec.Scaling.WarmSchedule = nil
+			Expect(k8sClient.Update(ctx, cur)).To(Succeed())
+			r := &NextAppReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Clock: func() time.Time { return now }}
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(minScaleOf(nn)).To(Equal("0"), "cleared schedule => floor back to Spec.MinScale")
 		})
 	})
 

@@ -302,6 +302,73 @@ spec:
                       ADR-0028).
                     format: int32
                     type: integer
+                  warmSchedule:
+                    description: |-
+                      WarmSchedule declares SCHEDULED warm-floor windows (ADR-0030, W5/#380):
+                      during each window the app is pre-warmed to a floor of `replicas` pods so
+                      a predictable traffic spike (a known daily peak, a scheduled campaign) does
+                      NOT pay a cold start on the first request. This is OWNER-AUTHORED
+                      scheduling, NOT learned prediction — the learned/heuristic controller
+                      (same-hour-last-week RPS percentile), the DB-compute lockstep pre-warm, and
+                      the per-tenant warm-budget cap are DEFERRED follow-ups (see ADR-0030).
+
+                      MECHANISM (ADR-0030): the OPERATOR is the single writer of the ksvc
+                      min-scale annotation. On every reconcile it evaluates these windows against
+                      NOW (in each window's timezone) and sets the ksvc
+                      `autoscaling.knative.dev/min-scale` to max(spec.scaling.minScale, the active
+                      window's replicas). The Knative KPA reads that as its scale FLOOR and still
+                      scales ABOVE it reactively. The operator RequeueAfter's the next window
+                      boundary so the floor flips at start/end. Because the operator is the sole
+                      writer, the floor never reverts/thrashes (no CronJob, no KEDA — KEDA cannot
+                      scale a Knative Service; an external CronJob writer was reverted every
+                      reconcile). Outside every window the floor is spec.scaling.minScale (default
+                      0), so scale-to-zero is preserved. Empty/nil => no effect (byte-identical
+                      back-compat). NOTE: a min-scale CHANGE rolls a new Knative Revision (the
+                      template is Knative's source of truth) — acceptable for a twice-a-window
+                      flip; do not use warmSchedule on an app that pins traffic to a fixed
+                      revision (spec.traffic.revisionName).
+                    items:
+                      description: |-
+                        WarmWindow is one scheduled warm-floor window (ADR-0030, W5/#380). Start/End
+                        are standard 5-field cron expressions (minute hour day month weekday) in the
+                        window's Timezone; Replicas is the warm floor enforced between Start and End.
+                      properties:
+                        end:
+                          description: |-
+                            End is the cron expression at which the warm floor ends (e.g. "0 20 * * 1-5"
+                            = 20:00 on weekdays). Between Start and End the floor of `replicas` pods is
+                            held. Standard 5-field cron; syntax-validated at admission.
+                          minLength: 1
+                          type: string
+                        replicas:
+                          description: |-
+                            Replicas is the warm-pod FLOOR held during the window (the min-scale the
+                            operator stamps on the ksvc while now is inside this window). Must be >= 1 —
+                            a window that floors at 0 warms nothing (use no window at all for
+                            scale-to-zero). The Knative KPA still scales ABOVE this floor on real
+                            traffic.
+                          format: int32
+                          minimum: 1
+                          type: integer
+                        start:
+                          description: |-
+                            Start is the cron expression at which the warm floor begins. Standard
+                            5-field cron (e.g. "0 8 * * 1-5" = 08:00 on weekdays); syntax-validated at
+                            admission.
+                          minLength: 1
+                          type: string
+                        timezone:
+                          description: |-
+                            Timezone is an IANA timezone (e.g. "UTC", "America/New_York") the cron
+                            schedules are evaluated in when the operator tests window membership.
+                            Defaults to "UTC" when unset.
+                          type: string
+                      required:
+                      - end
+                      - replicas
+                      - start
+                      type: object
+                    type: array
                 type: object
               secrets:
                 description: External Secrets mapping

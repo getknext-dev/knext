@@ -296,11 +296,122 @@ not the raw `max_connections` 100). The operator rejects specs that violate it
 (ADR-0028); if you leave `poolMax` unset the check is skipped but the wall still
 applies.
 
+## Scheduled warm floor (`spec.scaling.warmSchedule`, ADR-0030 / #380)
+
+For a **known** traffic pattern — a daily 08:00 peak, a scheduled campaign, a
+business-hours window — you can pre-warm the app to a floor of `K` pods *during
+declared windows* so the first request of the wave does **not** pay a cold
+start. This is **scheduled, owner-authored** warming, and it composes with the
+reactive KPA: **the schedule raises the min-scale floor during the window;
+Knative's KPA still scales ABOVE the floor** on real traffic. Outside every
+window there is **no floor**, so the app keeps its cost-friendly scale-to-zero
+(`minScale: 0`) behaviour.
+
+> **Honest framing (ADR-0030):** `warmSchedule` is **scheduled, NOT learned**.
+> It warms only the windows you declare — it does not learn traffic, does not
+> pre-warm the database compute, and does not cap warm cost per tenant. The
+> learned/heuristic controller (same-hour-last-week RPS percentile), the
+> DB-compute lockstep pre-warm (existing warm-tier, #25), and the per-tenant
+> warm-budget cap are **deferred follow-ups** (see ADR-0030 §Deferred).
+
+### How it works
+
+The **operator itself** owns the floor — there are **no extra objects** (no
+CronJobs, no KEDA, no RBAC). On every reconcile the operator:
+
+1. Evaluates your `warmSchedule` windows against **now**, each in its own
+   `timezone` (default `UTC`), using the same 5-field cron parser Kubernetes uses.
+2. Sets the ksvc `autoscaling.knative.dev/min-scale` annotation to
+   `max(spec.scaling.minScale, active_window_replicas)` — where
+   `active_window_replicas` is the largest `replicas` of any window that contains
+   now (`0` if none).
+3. `RequeueAfter`s the **next window boundary** (clamped 10s–1h) so the floor
+   flips promptly at each `start`/`end` without waiting for an unrelated event.
+
+Because the operator is the **single writer** of `min-scale`, the floor never
+reverts and never thrashes. Outside every window the annotation is
+`spec.scaling.minScale` (default `0`), so scale-to-zero is preserved. Removing the
+schedule simply lets the next reconcile compute `min-scale = minScale` — no
+cleanup of children (there are none).
+
+> **Why not KEDA / an external CronJob?** KEDA scales through the Kubernetes
+> `/scale` subresource, which a **Knative Service does not expose** — a KEDA
+> ScaledObject on a ksvc errors and never materializes a floor. And an external
+> CronJob patching `min-scale` gets **reverted every reconcile**: the operator
+> rebuilds the ksvc annotations from spec on each pass (it is the source of truth,
+> ADR-0001), so a second writer's patch is erased (and thrashes Revisions). The
+> correct model is a **single writer**: the operator folds the schedule into the
+> annotation it already owns. (See ADR-0030 §"Two mechanisms rejected".)
+
+> **Trade-off — new Revision when the floor changes.** Changing the ksvc template
+> `min-scale` annotation is a template change, so Knative rolls a **new Revision**
+> when the effective floor actually changes (at a window boundary — twice per
+> window, not on every reconcile). That is fine for a normal app but resets
+> traffic to latest-ready — so **do not combine `warmSchedule` with a pinned
+> traffic target** (`spec.traffic.revisionName`).
+
+### Fields (`WarmWindow`)
+
+| Field | JSON tag | Effect | Notes |
+|-------|----------|--------|-------|
+| `Start` | `start` | Cron at which the floor engages | **5-field cron**, syntax-validated at admission; **required** |
+| `End` | `end` | Cron at which the floor drops | **5-field cron**, syntax-validated; **required** |
+| `Replicas` | `replicas` | The `min-scale` floor held while now ∈ [start,end) | **must be ≥ 1** and **≤ `maxScale`** (finite) |
+| `Timezone` | `timezone` | Timezone the crons are evaluated in | IANA zone (e.g. `America/New_York`); defaults to `UTC` |
+
+Validation (admission webhook + fail-closed reconciler) rejects an empty or
+**malformed** `start`/`end` cron (validated with the same 5-field parser the
+Kubernetes CronJob controller uses, so a bad cron fails at `kubectl apply` with
+an actionable error rather than silently in the scheduler), `replicas < 1` (a
+floor of 0 warms nothing — omit the window), and `replicas > maxScale` when
+`maxScale` is finite (a floor cannot exceed the reactive ceiling).
+
+### Example — warm on weekdays 08:00–20:00 New York time
+
+```yaml
+apiVersion: apps.kn-next.dev/v1alpha1
+kind: NextApp
+metadata:
+  name: storefront
+spec:
+  image: registry.example.com/storefront@sha256:abc123...   # digest-pinned
+  scaling:
+    minScale: 0              # scale to zero OUTSIDE the windows (cost floor)
+    maxScale: 10             # reactive ceiling; KPA scales above the warm floor
+    containerConcurrency: 20
+    warmSchedule:
+      - start: "0 8 * * 1-5"     # 08:00 on weekdays
+        end:   "0 20 * * 1-5"    # 20:00 on weekdays
+        replicas: 3             # hold 3 warm pods across the business day
+        timezone: America/New_York
+      - start: "0 10 * * 6,0"    # 10:00 on Sat/Sun
+        end:   "0 18 * * 6,0"    # 18:00 on Sat/Sun
+        replicas: 2             # lighter weekend floor (timezone defaults to UTC)
+```
+
+During each window the operator holds the declared `min-scale` floor; the KPA
+still adds pods above it under load. At all other times the app scales to zero.
+(No KEDA and no CronJobs — the operator folds the schedule into the Knative
+`min-scale` annotation it already owns.)
+
+### Deferred follow-ups (ADR-0030)
+
+- **Learned/heuristic warm controller** — schedule from same-hour-last-week RPS
+  percentile (per-app, from already-scraped metrics). No ML until seasonality
+  proves it; adds a control loop mutating the NextApp → its own ADR.
+- **DB-compute lockstep pre-warm** — warm the app's scale-to-zero Postgres
+  compute (existing warm-tier, #25) alongside the window so the DB half of the
+  cold tax is removed too.
+- **Per-tenant warm-budget cap** — analog to the ADR-0008 wake budget so
+  over-warming cannot erode the scale-to-zero cost win; mispredict failure modes
+  (cold storm / wasted cost) measured.
+
 ## Summary
 
 | Concern | Knob / mitigation |
 |---------|-------------------|
 | Cold start on critical path | `spec.scaling.minScale: 1` (keep warm) |
+| Cold start only during known peaks | `spec.scaling.warmSchedule` (operator-owned scheduled min-scale floor, ADR-0030; no KEDA/CronJobs) |
 | Cost on idle read zones | `spec.scaling.minScale: 0` (scale to zero) |
 | JS recompile on cold start | `spec.cache.enableBytecodeCache: true` (+ a `provider`) |
 | DB pool re-establish | warm zone (`minScale: 1`) and/or transaction-mode pooler |

@@ -25,10 +25,24 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/robfig/cron/v3"
 	utilvalidation "k8s.io/apimachinery/pkg/util/validation"
 
 	appsv1alpha1 "github.com/AhmedElBanna80/knext/packages/kn-next-operator/api/v1alpha1"
 )
+
+// validateCronExpr validates the 5-field (minute hour day-of-month month
+// day-of-week) cron syntax of a warmSchedule window start/end. It uses the same
+// robfig/cron ParseStandard parser the operator's reconcile-time window
+// evaluation (warmScheduleFloor, ADR-0030) uses, so a cron this admission check
+// accepts is exactly one the reconciler can evaluate. Rejecting a trailing
+// seconds field, an out-of-range value, or unparseable text HERE (at admission)
+// means a malformed cron never reaches the operator's min-scale floor
+// calculation — where it would otherwise be skipped and silently warm nothing.
+func validateCronExpr(expr string) error {
+	_, err := cron.ParseStandard(strings.TrimSpace(expr))
+	return err
+}
 
 // MaxConnections documents scale-zero-pg's Postgres primary `max_connections`
 // (100). It is NOT the bound the operator validates against — the app
@@ -195,6 +209,56 @@ func ValidateNextAppSpec(spec *appsv1alpha1.NextAppSpec) error {
 						"W3/#378 owns breaking it)",
 					s.MaxScale, s.PoolMax, int64(s.MaxScale)*int64(s.PoolMax),
 					MaxAppConnections, MaxConnections, MaxAppConnections,
+				)
+			}
+		}
+
+		// Scheduled warm-floor windows (ADR-0030, W5/#380). Each window declares a
+		// cron start/end and a warm-pod floor. At runtime the OPERATOR (the single
+		// writer of min-scale) evaluates these windows against NOW on every
+		// reconcile and stamps max(minScale, active-window replicas) onto the ksvc
+		// min-scale annotation — there is no CronJob. Validated here (shared with
+		// the fail-closed reconciler) so a bad window is rejected at admission AND
+		// a stored CR with one is refused, rather than a malformed cron silently
+		// being skipped in the reconcile floor calc (warming nothing). CRD CEL
+		// enforces MinLength/Minimum on the fields; the checks below add the cron
+		// SYNTAX validation (the same robfig/cron parser the reconciler evaluates
+		// with) and the cross-field replicas ≤ maxScale rule CEL cannot express
+		// against a sibling field cleanly.
+		for i, w := range s.WarmSchedule {
+			if strings.TrimSpace(w.Start) == "" {
+				return fmt.Errorf("spec.scaling.warmSchedule[%d].start is required (a 5-field cron expression)", i)
+			}
+			if err := validateCronExpr(w.Start); err != nil {
+				return fmt.Errorf(
+					"spec.scaling.warmSchedule[%d].start %q is not a valid 5-field cron expression (e.g. \"0 8 * * 1-5\"): %v",
+					i, w.Start, err,
+				)
+			}
+			if strings.TrimSpace(w.End) == "" {
+				return fmt.Errorf("spec.scaling.warmSchedule[%d].end is required (a 5-field cron expression)", i)
+			}
+			if err := validateCronExpr(w.End); err != nil {
+				return fmt.Errorf(
+					"spec.scaling.warmSchedule[%d].end %q is not a valid 5-field cron expression (e.g. \"0 20 * * 1-5\"): %v",
+					i, w.End, err,
+				)
+			}
+			if w.Replicas < 1 {
+				return fmt.Errorf(
+					"spec.scaling.warmSchedule[%d].replicas must be >= 1 (a window that floors at 0 warms nothing; omit the window for scale-to-zero), got %d",
+					i, w.Replicas,
+				)
+			}
+			// A warm floor above the reactive ceiling is a self-contradiction: the
+			// scheduled min-scale would floor higher than the KPA is ever allowed to
+			// scale. Only checked against a FINITE maxScale (0 = unbounded, no
+			// ceiling to breach).
+			if s.MaxScale > 0 && w.Replicas > s.MaxScale {
+				return fmt.Errorf(
+					"spec.scaling.warmSchedule[%d].replicas (%d) exceeds maxScale (%d): "+
+						"the warm floor cannot be higher than the reactive scale ceiling (ADR-0030)",
+					i, w.Replicas, s.MaxScale,
 				)
 			}
 		}
