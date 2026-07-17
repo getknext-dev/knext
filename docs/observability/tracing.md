@@ -197,7 +197,8 @@ active trace id to the [correlation layer](./logging.md) via the injectable
 ```ts
 // instrumentation.ts — wired once at startup, only when tracing is enabled.
 import {
-  correlationAttributesFromHeaders,
+  CorrelationContextPropagator,
+  CorrelationSpanProcessor,
   installCorrelationIdProvider,
   installTraceIdProvider,
 } from '@knext/core/adapters/tracing';
@@ -205,9 +206,13 @@ import { setCorrelationIdProvider, setTraceIdProvider } from '@knext/lib/context
 import { registerOTel } from '@vercel/otel';
 
 registerOTel({
-  // Establish the correlation id per request from inbound headers (#346).
-  attributesFromHeaders: correlationAttributesFromHeaders,
-  // ...serviceName, spanProcessors, etc.
+  // Establish the correlation id per request from inbound headers (#346): the
+  // propagator's `extract` seeds it onto the OTel Context, which descends to the
+  // SERVER span AND every child span (db_wake / cold_start / pg / fetch).
+  propagators: ['auto', new CorrelationContextPropagator()],
+  // Copy the context-key id onto the SERVER span for trace export (index/echo).
+  spanProcessors: ['auto', new CorrelationSpanProcessor()],
+  // ...serviceName, other spanProcessors, etc.
 });
 setTraceIdProvider(installTraceIdProvider());          // trace_id resolver
 setCorrelationIdProvider(installCorrelationIdProvider()); // correlation_id resolver
@@ -216,14 +221,16 @@ setCorrelationIdProvider(installCorrelationIdProvider()); // correlation_id reso
 After this, every in-request log line carries the active span's `trace_id`
 **and** its `correlation_id` — established automatically on the real request
 path, with no `runWithRequestContext` handler wrapping (#346; see
-[logging.md §3a](./logging.md)). The `attributesFromHeaders` hook adopts/generates
-the id and stamps it on the inbound SERVER span (`knext.correlation_id`); the two
-providers read `trace_id` + `correlation_id` back from the active OTel span at log
-time. A log query by `correlation_id` and a trace query by `trace_id` then resolve
-to the same request — the bridge between the two observability planes. When
-tracing is disabled neither provider is installed and the hook is never wired, so
-the correlation layer stays on its default no-trace / no-correlation behavior
-(zero overhead).
+[logging.md §3a](./logging.md)). The id rides the **OTel Context** (seeded by the
+propagator's `extract`, which adopts/generates it from the inbound
+`x-request-id`), so it resolves correctly under **any** span — the SERVER span
+and every child span alike (a span *attribute* would not, hence the context key).
+The `CorrelationSpanProcessor` mirrors the id onto the SERVER span as
+`knext.correlation_id` **for trace export only**; logs read the context key, not
+the attribute. A log query by `correlation_id` and a trace query by `trace_id`
+then resolve to the same request. When tracing is disabled neither provider,
+propagator, nor processor is installed, so the correlation layer stays on its
+default no-trace / no-correlation behavior (zero overhead).
 
 ## 6. Verifying
 

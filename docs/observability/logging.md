@@ -67,8 +67,18 @@ Set the floor with `LOG_LEVEL` (default `info` in production, `debug` in dev).
   the span's `trace_id`, so a log query by `correlation_id` and a trace query by
   `trace_id` land on the same request.
 - **Propagation:**
-  - **Response:** `x-request-id` is echoed on the response so a client (and any
-    fronting proxy/CDN) can report the id it saw.
+  - **Response echo — deferred on the automatic path (#346).** `@knext/lib`
+    ships `applyCorrelationHeader(...)` to echo `x-request-id` on a response, and
+    it fires when a code path knext-core owns establishes the context explicitly
+    (§3). On the **automatic** path it does **not** fire: echoing on the inbound
+    HTTP response requires owning the handler/response chain, and knext-core does
+    **not** own it — the app's standalone Next.js child owns responses, and
+    `@vercel/otel` exposes no inbound response hook (same #317/#342 constraint as
+    handler wrapping). We deliberately do not force an architecturally wrong wrap.
+    Inbound stamping + log correlation (below) is the shipped behavior; a client
+    that needs the id back should read it from the correlated log/trace, or the
+    app can call `applyCorrelationHeader` in a route it owns. Tracked as a
+    follow-up.
   - **Downstream / db-wake:** forward `x-request-id` on outbound calls so a
     request is traceable app → db-wake → downstream. Across the Postgres hop
     (a TCP wake-on-connect gateway that carries no HTTP headers) the join key is
@@ -83,36 +93,54 @@ enabled (`spec.observability.tracing.enabled`, ADR-0012), knext-core establishes
 the correlation id automatically for every inbound request — no app code, no
 `runWithRequestContext` in your route handlers (#346).
 
-How it works (all core-owned, wired once in `instrumentation-node.ts`):
+How it works (all core-owned, wired once in `instrumentation-node.ts`). The id
+rides the **OTel Context**, not a single span — that is what makes it correct for
+log lines emitted under *any* span in the request, including child spans:
 
-1. **Establish (per request):** `@vercel/otel`'s `attributesFromHeaders` hook —
-   `correlationAttributesFromHeaders` (`@knext/core/adapters/tracing`) — runs on
-   the inbound request with its headers, **adopts a well-formed `x-request-id`
-   (else generates one)** by the same rules as §2, and stamps it on the inbound
-   HTTP **SERVER span** as the `knext.correlation_id` attribute.
+1. **Establish (per request):** a `CorrelationContextPropagator`
+   (`@knext/core/adapters/tracing`), registered via
+   `registerOTel({ propagators: ['auto', new CorrelationContextPropagator()] })`.
+   `@opentelemetry/instrumentation-http` (what `@vercel/otel` uses) runs
+   `propagation.extract(activeContext, requestHeaders)` for each inbound request
+   and starts the SERVER span **under** the returned context. Our `extract`
+   **adopts a well-formed `x-request-id` (else generates one)** by the §2 rules
+   and puts it on the Context under a private key.
 2. **Carry:** `@vercel/otel` installs an `AsyncLocalStorageContextManager`, so
-   that SERVER span is the **active OTel span** for the whole request (across
-   `await`s) without any ambient store of our own.
+   the extracted Context is the **active Context** for the whole request (across
+   `await`s). OTel Context values **descend to every child span by
+   construction** (a child's context derives from its parent's) — so the id is
+   present whether the innermost active span is the SERVER span, `knext.db_wake`,
+   `knext.cold_start`, an app `startActiveSpan`, or an auto-instrumented pg/fetch
+   span. (A span **attribute** would *not* have this property — it lives only on
+   the span it is set on — which is why logs resolve from the context key, not an
+   attribute.)
 3. **Resolve (at log time):** `@knext/lib`'s logger `mixin` reads
-   `correlation_id` (and `trace_id`) from the active OTel span via two injected
-   providers — `installCorrelationIdProvider()` / `installTraceIdProvider()` from
-   the tracing adapter, installed via `setCorrelationIdProvider` /
+   `correlation_id` from the active **Context key** and `trace_id` from the
+   active span, via two injected providers — `installCorrelationIdProvider()` /
+   `installTraceIdProvider()`, installed via `setCorrelationIdProvider` /
    `setTraceIdProvider`. `@knext/lib` stays OTel-free (dependency-inversion seam);
    the OTel-aware `@knext/core` supplies the resolvers.
 
+A `CorrelationSpanProcessor` additionally copies the context-key id onto the
+inbound SERVER span as the `knext.correlation_id` attribute **for trace export
+only** (so a backend can index/echo it on the request span); logs never read that
+attribute.
+
 This is why the schema table marks `correlation_id` "automatic when tracing is
-on". **Default-off / zero overhead:** with tracing disabled neither provider is
-installed, `correlationLogFields()` returns `{}`, and no correlation work runs —
-non-request and background logs stay clean and no id ever leaks.
+on". **Default-off / zero overhead:** with tracing disabled the propagator and
+providers are never installed, `correlationLogFields()` returns `{}`, and no
+correlation work runs — non-request and background logs stay clean and no id ever
+leaks.
 
 The proof is the integration test
 `packages/kn-next/src/__tests__/correlation-integration.test.ts`: it drives a
-simulated request through the exact wiring (the `attributesFromHeaders` hook + a
-real tracer provider + `AsyncLocalStorageContextManager` + injected resolvers),
-emits a log field set inside the request with **no** hand-call to
-`runWithRequestContext`, and asserts the line carries a `correlation_id` (adopted
-from inbound `x-request-id` when present, generated otherwise) and the matching
-`trace_id`.
+simulated request through the exact wiring (the propagator's `extract` seeding
+the context + the SERVER span opened under it + a real tracer provider +
+`AsyncLocalStorageContextManager` + `CorrelationSpanProcessor` + injected
+resolvers), emits a log field set inside the request — **including inside a
+`knext.db_wake` child span** — with **no** hand-call to `runWithRequestContext`,
+and asserts every line carries a `correlation_id` (adopted from inbound
+`x-request-id` when present, generated otherwise) and the matching `trace_id`.
 
 ## 3. Using the layer explicitly (`@knext/lib/context`)
 
