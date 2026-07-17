@@ -19,16 +19,12 @@ package controller
 import (
 	"context"
 	"fmt"
-	"os"
 	"sort"
 	"strconv"
-	"strings"
 	"time"
 
-	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
-	rbacv1 "k8s.io/api/rbac/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
@@ -192,6 +188,18 @@ type NextAppReconciler struct {
 	// exact scoped delete and the cross-app safety guard. May be nil (skips
 	// external cleanup) for unit tests of unrelated paths.
 	Cleaner ExternalCleaner
+	// Clock returns the current time; injectable so tests can pin "now" to
+	// exercise the scheduled warm-floor window evaluation (ADR-0030, #380)
+	// deterministically. nil => time.Now (production).
+	Clock func() time.Time
+}
+
+// now returns the reconciler's clock (test-injectable), defaulting to time.Now.
+func (r *NextAppReconciler) now() time.Time {
+	if r.Clock != nil {
+		return r.Clock()
+	}
+	return time.Now()
 }
 
 // ingressProgrammingStalled reports whether the child Knative Service's route
@@ -239,14 +247,12 @@ func (r *NextAppReconciler) emitEvent(obj runtime.Object, eventType, reason, mes
 // +kubebuilder:rbac:groups=caching.internal.knative.dev,resources=images,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=sources.knative.dev,resources=kafkasources,verbs=get;list;watch;create;update;patch;delete
-// Warm-schedule (ADR-0030, #380): the operator generates CronJobs that patch the
-// app's ksvc min-scale annotation on a schedule, plus a scoped patcher Role +
-// RoleBinding. It needs batch/cronjobs and rbac roles/rolebindings CRUD. The
-// operator already holds get;...;patch on serving.knative.dev/services (above),
-// which RBAC escalation-prevention requires to GRANT get/patch on that resource
-// to the patcher Role.
-// +kubebuilder:rbac:groups=batch,resources=cronjobs,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=roles;rolebindings,verbs=get;list;watch;create;update;patch;delete
+// Warm-schedule (ADR-0030, #380) needs NO extra RBAC: the operator is the SINGLE
+// writer of the ksvc min-scale annotation (folded into the ksvc it already
+// manages via serving.knative.dev/services above). No CronJobs, no patcher
+// Role/RoleBinding — the earlier CronJob approach (which needed batch/cronjobs +
+// rbac roles/rolebindings) was replaced because an external writer raced the
+// operator and got reverted every reconcile.
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 // Secrets: needed to MIRROR the delegated database DSN (app-db-<app>) into the
 // app's own namespace (ADR-0006 §3b). Cross-ns SecretKeyRef is impossible, so the
@@ -478,19 +484,12 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 		}
 	}
 
-	// 5b. Reconcile the scheduled warm-floor (ADR-0030, W5/#380): a pair of
-	// CronJobs per window (+ a scoped patcher SA/Role/RoleBinding) that patch the
-	// ksvc `autoscaling.knative.dev/min-scale` annotation to the window replicas
-	// at start and back to 0 at end. Generated ONLY when warmSchedule is
-	// non-empty; all warm children are pruned/deleted when the schedule shrinks
-	// or clears. A hard error here is a real reconcile failure (CronJobs/RBAC are
-	// core kinds, always present) so surface it, unlike the optional KafkaSource.
-	if err := r.reconcileWarmSchedule(ctx, &nextApp); err != nil {
-		logger.Error(err, "Failed to reconcile warm-schedule CronJobs")
-		r.emitEvent(&nextApp, corev1.EventTypeWarning, ReasonReconcileFailed,
-			fmt.Sprintf("Failed to reconcile warm-schedule CronJobs: %s", err.Error()))
-		return ctrl.Result{}, err
-	}
+	// 5b. NOTE (ADR-0030, W5/#380): the scheduled warm-floor is applied INSIDE
+	// buildDesiredKsvc (step 4) — the operator folds the active warmSchedule
+	// window's floor into the ksvc min-scale annotation it already owns, making it
+	// the SINGLE writer of min-scale. There is no separate warm-floor child to
+	// reconcile here; the RequeueAfter to the next window boundary is set below,
+	// after the status verdict, so it never masks the ksvc-not-ready requeue.
 
 	// 6. Update Status: URL + conditions + observed traffic split (#92)
 	if ksvc.Status.URL != nil {
@@ -559,6 +558,11 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 		return ctrl.Result{}, err
 	}
 	result.RequeueAfter = verdict.requeueAfter
+
+	// Warm-schedule boundary requeue (ADR-0030, W5/#380): re-reconcile at the next
+	// window start/end so the operator flips the min-scale floor exactly at the
+	// boundary rather than waiting for an unrelated event. Take the SOONER of this
+	// and any verdict requeue (e.g. ksvc-not-ready) so neither is masked.
 
 	r.emitEvent(&nextApp, corev1.EventTypeNormal, ReasonReconciled,
 		fmt.Sprintf("NextApp reconciled successfully (image %s)", nextApp.Spec.Image))
@@ -728,10 +732,23 @@ func (r *NextAppReconciler) buildDesiredKsvc(nextApp *appsv1alpha1.NextApp, ksvc
 		"autoscaling.knative.dev/min-scale": "0",
 		"autoscaling.knative.dev/max-scale": "10",
 	}
+	// Effective min-scale = max(Spec.MinScale, active warm-schedule floor). The
+	// OPERATOR is the SINGLE writer of min-scale (ADR-0030, #380): on every
+	// reconcile it evaluates the warmSchedule windows against NOW and folds the
+	// active-window floor into the min-scale it stamps here. No external writer
+	// (no CronJob) ever races the operator, so there is no revert/thrash. Outside
+	// every window the floor is Spec.MinScale (default 0), preserving
+	// scale-to-zero. Reconcile() additionally RequeueAfter's the next window
+	// boundary so the floor flips at start/end without waiting for an unrelated
+	// reconcile.
+	minScale := int32(0)
 	if nextApp.Spec.Scaling != nil {
-		annotations["autoscaling.knative.dev/min-scale"] = fmt.Sprintf("%d", nextApp.Spec.Scaling.MinScale)
+		minScale = nextApp.Spec.Scaling.MinScale
 		annotations["autoscaling.knative.dev/max-scale"] = fmt.Sprintf("%d", nextApp.Spec.Scaling.MaxScale)
 	}
+	// RED STUB (#380): floor application intentionally omitted so the
+	// operator-owns-schedule tests fail; green fills this in.
+	annotations["autoscaling.knative.dev/min-scale"] = fmt.Sprintf("%d", minScale)
 
 	// Observability annotations — aligned with CLI
 	if nextApp.Spec.Observability != nil && nextApp.Spec.Observability.Enabled {
@@ -1224,256 +1241,20 @@ func (r *NextAppReconciler) reconcileNetworkPolicy(ctx context.Context, nextApp 
 	return err
 }
 
-// Warm-schedule (ADR-0030, W5/#380) resource-name helpers. All warm children
-// are prefixed with `<app>-warm` and owner-referenced to the NextApp for GC.
-const warmMinScaleAnnotation = "autoscaling.knative.dev/min-scale"
-
-// warmPatcherName is the shared, scoped ServiceAccount/Role/RoleBinding name the
-// warm CronJobs run as — granted get/patch on the app's OWN ksvc only.
-func warmPatcherName(app *appsv1alpha1.NextApp) string {
-	return app.Name + "-warm-patcher"
+// Warm-schedule window evaluation (ADR-0030, W5/#380) — RED STUB. Real logic in
+// the green commit; these zero-returning stubs let the tests compile and fail.
+func warmScheduleFloor(app *appsv1alpha1.NextApp, now time.Time) (floor int32, next time.Time, hasNext bool) {
+	return 0, time.Time{}, false
 }
 
-// warmCronJobName is the deterministic name of the CronJob for window index `i`
-// and phase ("set" at window start, "clear" at window end).
-func warmCronJobName(app *appsv1alpha1.NextApp, i int, phase string) string {
-	return fmt.Sprintf("%s-warm-%d-%s", app.Name, i, phase)
+func warmScheduleRequeue(app *appsv1alpha1.NextApp, now time.Time) time.Duration {
+	return 0
 }
 
-// defaultWarmKubectlImage is the DIGEST-PINNED kubectl image the warm CronJobs
-// run to patch the ksvc (security.md supply-chain rule: pin by digest, reject
-// :latest). This is the OFFICIAL Kubernetes-published kubectl image
-// (registry.k8s.io/kubectl) — no third-party registry — pinned to v1.31.4.
-// The warm job runs as the <app>-warm-patcher SA that can patch the app's LIVE
-// ksvc, so a mutable tag here would be a real supply-chain surface; the operator
-// forbids :latest for user app images (ValidateImageRef) and holds itself to the
-// same bar.
-//
-// To bump: `crane digest registry.k8s.io/kubectl:vX.Y.Z` and replace the tag +
-// @sha256 below (keep both so the tag documents the version and the digest pins
-// it). Overridable at runtime via KNEXT_WARM_KUBECTL_IMAGE for air-gapped /
-// mirrored registries — but the default MUST stay digest-pinned.
-const defaultWarmKubectlImage = "registry.k8s.io/kubectl:v1.31.4@sha256:a519329b1bf8f7889e4c902f7147e6933d6a6e1dde25e8171973642396e31f0d"
-
-// warmKubectlImageEnv lets an operator override the warm CronJob image (e.g. to
-// point at an internal mirror). A set-but-:latest value is ignored in favour of
-// the pinned default so the supply-chain guarantee cannot be silently weakened.
-const warmKubectlImageEnv = "KNEXT_WARM_KUBECTL_IMAGE"
-
-// warmKubectlImage returns the image the warm CronJobs run: the operator env
-// override when set to a digest-pinned ref, else the pinned default. A :latest /
-// tag-only override is rejected (falls back to the pinned default) so the
-// security.md "reject :latest" rule holds even for the override path.
-func warmKubectlImage() string {
-	if v := strings.TrimSpace(os.Getenv(warmKubectlImageEnv)); v != "" {
-		if validation.ValidateImageRef(v) == nil {
-			return v
-		}
-	}
-	return defaultWarmKubectlImage
-}
-
-// warmPatchCommand builds the `kubectl patch` argv that sets the ksvc min-scale
-// annotation to `minScale`. It patches spec.template.metadata.annotations (the
-// Knative source of truth for the revision's scale floor) via a JSON merge patch
-// (`--type=merge`), and stamps a companion label so the change is observable.
-// Kept pure for unit testing.
-func warmPatchCommand(app *appsv1alpha1.NextApp, minScale string) []string {
-	patch := fmt.Sprintf(
-		`{"spec":{"template":{"metadata":{"annotations":{%q:%q},"labels":{"service.serving.knative.dev/%s":%q}}}}}`,
-		warmMinScaleAnnotation, minScale, app.Name, app.Name,
-	)
-	return []string{
-		"kubectl", "patch", "service.serving.knative.dev", app.Name,
-		"--type=merge", "-p", patch,
-	}
-}
-
-// buildWarmCronJob renders one warm CronJob (set or clear) for a window. schedule
-// is the window's start (set) or end (clear) cron; tz the window timezone
-// (defaulted to UTC by the caller); minScale the annotation value to patch.
-func (r *NextAppReconciler) buildWarmCronJob(app *appsv1alpha1.NextApp, cj *batchv1.CronJob, schedule, tz, minScale string) error {
-	if cj.Labels == nil {
-		cj.Labels = map[string]string{}
-	}
-	cj.Labels["app"] = app.Name
-	cj.Labels["generated-by"] = "kn-next-operator"
-
-	cj.Spec.Schedule = schedule
-	cj.Spec.TimeZone = ptr.To(tz)
-	// Missed windows must NOT stack up a backlog of patches; only the most recent
-	// run matters (the floor is idempotent). Forbid concurrency and skip missed.
-	cj.Spec.ConcurrencyPolicy = batchv1.ForbidConcurrent
-	cj.Spec.StartingDeadlineSeconds = ptr.To(int64(300))
-	cj.Spec.SuccessfulJobsHistoryLimit = ptr.To(int32(1))
-	cj.Spec.FailedJobsHistoryLimit = ptr.To(int32(1))
-
-	cj.Spec.JobTemplate.Spec.BackoffLimit = ptr.To(int32(2))
-	podSpec := &cj.Spec.JobTemplate.Spec.Template.Spec
-	podSpec.ServiceAccountName = warmPatcherName(app)
-	podSpec.RestartPolicy = corev1.RestartPolicyNever
-	podSpec.Containers = []corev1.Container{
-		{
-			Name:    "patch-min-scale",
-			Image:   warmKubectlImage(),
-			Command: warmPatchCommand(app, minScale),
-		},
-	}
-	return ctrl.SetControllerReference(app, cj, r.Scheme)
-}
-
-// reconcileWarmSchedule generates (or prunes) the scheduled warm-floor children
-// for a NextApp (ADR-0030, W5/#380): a scoped patcher SA/Role/RoleBinding and,
-// per window, a "set" CronJob (patches ksvc min-scale to `replicas` at window
-// start) and a "clear" CronJob (resets min-scale to 0 at window end). The
-// Knative KPA reads the min-scale annotation as its floor and still scales ABOVE
-// it — so the floor is held during the window and scale-to-zero is preserved
-// outside every window.
-//
-// Why CronJobs patching min-scale, not KEDA: KEDA actuates its target via the
-// Kubernetes /scale subresource, which a Knative Service (and its PodAutoscaler)
-// does NOT expose; and Knative treats the Revision template as the source of
-// truth for autoscaling annotations (a PA-level patch is reverted). Patching the
-// ksvc template min-scale annotation is the Knative-native scheduled-floor path.
-// (A patch rolls a new Revision — acceptable for a twice-a-window flip; not for
-// pinned-traffic apps, documented on the CRD field + ADR-0030.)
-//
-// HONESTY: owner-authored SCHEDULING, not learned prediction. The learned
-// controller (#387), DB-compute lockstep pre-warm (#388), and per-tenant
-// warm-budget cap (#389) are DEFERRED follow-ups (ADR-0030 §Deferred).
-//
-// Empty warmSchedule => all warm children are deleted (byte-identical
-// back-compat). A shrinking schedule prunes the now-unused higher-index windows.
-func (r *NextAppReconciler) reconcileWarmSchedule(ctx context.Context, nextApp *appsv1alpha1.NextApp) error {
-	var windows []appsv1alpha1.WarmWindow
-	if nextApp.Spec.Scaling != nil {
-		windows = nextApp.Spec.Scaling.WarmSchedule
-	}
-
-	if len(windows) == 0 {
-		return r.deleteWarmChildren(ctx, nextApp, 0)
-	}
-
-	// 1. Scoped patcher RBAC: ServiceAccount + Role (get/patch on the app's OWN
-	// ksvc by resourceName only — least privilege) + RoleBinding.
-	if err := r.reconcileWarmPatcherRBAC(ctx, nextApp); err != nil {
-		return err
-	}
-
-	// 2. One set + one clear CronJob per window.
-	for i, w := range windows {
-		tz := w.Timezone
-		if tz == "" {
-			tz = "UTC"
-		}
-		setCJ := &batchv1.CronJob{ObjectMeta: metav1.ObjectMeta{Name: warmCronJobName(nextApp, i, "set"), Namespace: nextApp.Namespace}}
-		if _, err := controllerutil.CreateOrUpdate(ctx, r.Client, setCJ, func() error {
-			return r.buildWarmCronJob(nextApp, setCJ, w.Start, tz, strconv.Itoa(int(w.Replicas)))
-		}); err != nil {
-			return err
-		}
-		clearCJ := &batchv1.CronJob{ObjectMeta: metav1.ObjectMeta{Name: warmCronJobName(nextApp, i, "clear"), Namespace: nextApp.Namespace}}
-		if _, err := controllerutil.CreateOrUpdate(ctx, r.Client, clearCJ, func() error {
-			return r.buildWarmCronJob(nextApp, clearCJ, w.End, tz, "0")
-		}); err != nil {
-			return err
-		}
-	}
-
-	// 3. Prune CronJobs for windows that no longer exist (schedule shrank).
-	return r.deleteWarmChildren(ctx, nextApp, len(windows))
-}
-
-// reconcileWarmPatcherRBAC provisions the scoped ServiceAccount + Role +
-// RoleBinding the warm CronJobs run as. The Role grants ONLY get/patch on the
-// app's OWN Knative Service (resourceNames-scoped) in its own namespace — a warm
-// job can never touch another app's ksvc or any other resource.
-func (r *NextAppReconciler) reconcileWarmPatcherRBAC(ctx context.Context, nextApp *appsv1alpha1.NextApp) error {
-	name := warmPatcherName(nextApp)
-
-	sa := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: nextApp.Namespace}}
-	if _, err := controllerutil.CreateOrUpdate(ctx, r.Client, sa, func() error {
-		sa.AutomountServiceAccountToken = ptr.To(true)
-		return ctrl.SetControllerReference(nextApp, sa, r.Scheme)
-	}); err != nil {
-		return err
-	}
-
-	role := &rbacv1.Role{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: nextApp.Namespace}}
-	if _, err := controllerutil.CreateOrUpdate(ctx, r.Client, role, func() error {
-		role.Rules = []rbacv1.PolicyRule{
-			{
-				APIGroups:     []string{"serving.knative.dev"},
-				Resources:     []string{"services"},
-				ResourceNames: []string{nextApp.Name},
-				Verbs:         []string{"get", "patch"},
-			},
-		}
-		return ctrl.SetControllerReference(nextApp, role, r.Scheme)
-	}); err != nil {
-		return err
-	}
-
-	rb := &rbacv1.RoleBinding{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: nextApp.Namespace}}
-	if _, err := controllerutil.CreateOrUpdate(ctx, r.Client, rb, func() error {
-		rb.RoleRef = rbacv1.RoleRef{APIGroup: "rbac.authorization.k8s.io", Kind: "Role", Name: name}
-		rb.Subjects = []rbacv1.Subject{{Kind: "ServiceAccount", Name: name, Namespace: nextApp.Namespace}}
-		return ctrl.SetControllerReference(nextApp, rb, r.Scheme)
-	}); err != nil {
-		return err
-	}
-	return nil
-}
-
-// deleteWarmChildren removes warm CronJobs for window indices >= keepFrom (used
-// both to prune a shrunk schedule and, with keepFrom=0, to tear everything down
-// when warmSchedule is cleared). When keepFrom==0 the scoped patcher RBAC is
-// removed too. Best-effort: a NotFound is success. It walks indices until it
-// finds a contiguous gap (both set+clear of an index absent), bounding the scan.
-func (r *NextAppReconciler) deleteWarmChildren(ctx context.Context, nextApp *appsv1alpha1.NextApp, keepFrom int) error {
-	deleteByName := func(obj client.Object, name string) error {
-		obj.SetName(name)
-		obj.SetNamespace(nextApp.Namespace)
-		if err := r.Delete(ctx, obj); err != nil && !errors.IsNotFound(err) {
-			return err
-		}
-		return nil
-	}
-	// Probe a bounded range beyond keepFrom; stop after a run of empties. The
-	// upper bound (keepFrom+64) is generous — no real app declares 64 windows —
-	// and the missing-run break keeps steady-state cost O(windows).
-	misses := 0
-	for i := keepFrom; i < keepFrom+64 && misses < 2; i++ {
-		setName := warmCronJobName(nextApp, i, "set")
-		clearName := warmCronJobName(nextApp, i, "clear")
-		existing := &batchv1.CronJob{}
-		found := r.Get(ctx, types.NamespacedName{Name: setName, Namespace: nextApp.Namespace}, existing) == nil
-		if err := deleteByName(&batchv1.CronJob{}, setName); err != nil {
-			return err
-		}
-		if err := deleteByName(&batchv1.CronJob{}, clearName); err != nil {
-			return err
-		}
-		if found {
-			misses = 0
-		} else {
-			misses++
-		}
-	}
-
-	if keepFrom == 0 {
-		if err := deleteByName(&rbacv1.RoleBinding{}, warmPatcherName(nextApp)); err != nil {
-			return err
-		}
-		if err := deleteByName(&rbacv1.Role{}, warmPatcherName(nextApp)); err != nil {
-			return err
-		}
-		if err := deleteByName(&corev1.ServiceAccount{}, warmPatcherName(nextApp)); err != nil {
-			return err
-		}
-	}
-	return nil
-}
+const (
+	warmRequeueMin = 10 * time.Second
+	warmRequeueMax = 1 * time.Hour
+)
 
 // revisionToNextAppRequests maps a Knative Revision to a reconcile request for
 // the NextApp that owns it, so a pure Revision Active-condition flip (Active <->
@@ -1502,13 +1283,13 @@ func (r *NextAppReconciler) revisionToNextAppRequests(_ context.Context, obj cli
 	}
 }
 
-// NOTE (ADR-0030): the scheduled warm-floor children are Kubernetes CronJobs +
-// a scoped Role/RoleBinding — CORE built-in kinds (batch/v1, rbac/v1), always
-// present — so they are Owns(...)-watched below (unlike the abandoned KEDA
-// ScaledObject approach, which could not be Owns-watched because KEDA is
-// optional and its CRD may be absent). KEDA cannot drive a Knative Service
-// (no /scale subresource), so warm-floor is scheduled via ksvc min-scale
-// patching instead — see reconcileWarmSchedule.
+// NOTE (ADR-0030): the scheduled warm-floor has NO child objects to watch. The
+// operator is the single writer of the ksvc min-scale annotation (folded into
+// the ksvc it already Owns-watches below) and RequeueAfter's the next window
+// boundary itself, so there is no CronJob / patcher RBAC to reconcile. (The
+// earlier KEDA and CronJob approaches were both abandoned — KEDA cannot drive a
+// Knative Service's /scale, and an external CronJob writer got reverted by the
+// operator every reconcile; single-writer is the correct model.)
 func (r *NextAppReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		// GenerationChangedPredicate on the PRIMARY (For) watch only: a
@@ -1518,18 +1299,12 @@ func (r *NextAppReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		// also means annotation-only / label-only edits to the NextApp do not
 		// reconcile (generation is bumped only on spec changes). That is the
 		// accepted trade-off. We do NOT filter the Owns(...) watches: drift in an
-		// owned child (ksvc/SA/PVC/NetworkPolicy/CronJob/RBAC) must still trigger a reconcile.
+		// owned child (ksvc/SA/PVC/NetworkPolicy) must still trigger a reconcile.
 		For(&appsv1alpha1.NextApp{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Owns(&servingv1.Service{}).
 		Owns(&corev1.PersistentVolumeClaim{}).
 		Owns(&corev1.ServiceAccount{}).
 		Owns(&networkingv1.NetworkPolicy{}).
-		// Warm-schedule children (ADR-0030, #380): drift or manual edits on a
-		// generated CronJob / patcher RBAC re-enqueue the NextApp so the operator
-		// reconciles them back to desired.
-		Owns(&batchv1.CronJob{}).
-		Owns(&rbacv1.Role{}).
-		Owns(&rbacv1.RoleBinding{}).
 		// #365: watch child Knative Revisions so a pure Active-condition flip
 		// (scale-to-zero / wake) re-enqueues the owning NextApp and
 		// `.status.scaledToZero` converges within a bounded window. Revisions are
