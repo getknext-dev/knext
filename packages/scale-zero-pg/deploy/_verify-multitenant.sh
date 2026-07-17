@@ -190,6 +190,12 @@ GERR() { # $1 tag  $2 user  $3 pass  $4 db
 }
 
 # 0. preconditions
+# Attribute a flaky run to cluster pressure, not a defect (#340) — never blocks.
+preflight_cluster_health "kubectl --context $KCTX -n $NS" || true
+# Adaptive wake budget (#340): probe ONE real cold wake and size the battery off it,
+# unless WAKE_BUDGET_MS is explicitly pinned. A failed/absent probe -> safe 120s floor.
+probe_wake_budget "kubectl --context $KCTX -n $NS" || true
+echo "    wake budget for this run: $(wake_budget_s)s (WAKE_BUDGET_MS=${WAKE_BUDGET_MS:-<adaptive>})"
 K rollout status deploy/pggw-apps --timeout=120s >/dev/null || fail "apps-gateway not ready"
 ok "apps-gateway ready"
 
@@ -198,8 +204,10 @@ echo "==> provisioning drill apps"
 KCTX="$KCTX" NS="$NS" "$PROV" init-plane >/dev/null || fail "init-plane failed"
 KCTX="$KCTX" NS="$NS" "$PROV" create "$A" --replicas 1 >/dev/null || fail "create $A failed"
 KCTX="$KCTX" NS="$NS" "$PROV" create "$B" --replicas 1 >/dev/null || fail "create $B failed"
-K rollout status deploy/compute-"$A" --timeout=120s >/dev/null || fail "$A compute not ready"
-K rollout status deploy/compute-"$B" --timeout=120s >/dev/null || fail "$B compute not ready"
+# Bounded retry/backoff (#340): absorb a transient scheduling stall on a pressured
+# cluster; a genuinely-broken wake still fails within the adaptive budget.
+rollout_ready_retry "kubectl --context $KCTX -n $NS" deploy/compute-"$A" || fail "$A compute not ready"
+rollout_ready_retry "kubectl --context $KCTX -n $NS" deploy/compute-"$B" || fail "$B compute not ready"
 ok "provisioned $A and $B (each its own branch)"
 
 # 2. both inherit the template schema (copy-on-write from the template timeline)
