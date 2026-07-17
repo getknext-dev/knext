@@ -32,13 +32,18 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
  * first-callers BEFORE the wake resolves.
  */
 let coldAcquires = 0;
+let gateOpen = false;
 let releaseWake!: () => void;
 let rejectWake!: (err: unknown) => void;
 let wakeGate!: Promise<void>;
 
 function newGate() {
+  gateOpen = false;
   wakeGate = new Promise<void>((resolve, reject) => {
-    releaseWake = resolve;
+    releaseWake = () => {
+      gateOpen = true;
+      resolve();
+    };
     rejectWake = reject;
   });
 }
@@ -46,10 +51,16 @@ function newGate() {
 class FakePool {
   constructor(public config: unknown) {}
 
-  // The first (cold) acquisition blocks on `wakeGate`; later (warm) ones resolve
-  // immediately. Counting `coldAcquires` = counting real 0→1 wake triggers.
+  // A COLD acquisition (issued before the wake gate opens) models a 0→1 wake
+  // trigger — each one that reaches the socket blocks on `wakeGate` and counts.
+  // A WARM acquisition (issued after the gate opened) resolves instantly and is
+  // NOT a wake trigger. Single-flight's job: only ONE cold acquisition reaches
+  // here for N concurrent first-callers; the rest wait for the shared wake, then
+  // acquire warm. So `coldAcquires` counts real 0→1 wake triggers.
   private acquire(): Promise<{ release(): void }> {
-    coldAcquires += 1;
+    if (!gateOpen) {
+      coldAcquires += 1;
+    }
     return wakeGate.then(() => ({ release() {} }));
   }
 
