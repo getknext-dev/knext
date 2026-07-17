@@ -134,6 +134,18 @@ retry_bounded() {
 # seconds to RB_NOW (setter style, so the value survives outside a subshell). Pure.
 rb_wallclock() { RB_NOW=$(date +%s); }
 
+# pods_present <get-pods-output> — PURE. True (rc 0) iff <get-pods-output> (the raw
+# `kubectl get pods --no-headers` text) contains at least one non-blank line, i.e. a
+# pod object exists. Empty/whitespace-only input -> false (rc 1) = the zero state.
+# Factored out of probe_wake_budget's settle loop so it is unit-testable, and to avoid
+# the `grep -c . || echo 0` bug (grep -c on EMPTY input prints "0" AND exits non-zero,
+# so `|| echo 0` appended a SECOND "0" -> "0\n0" != "0" -> the settle loop never saw
+# the zero state and burned its whole ~60s cap on every probe, #340 gate finding).
+pods_present() {
+  # any non-whitespace char present -> at least one pod line exists.
+  [ -n "$(printf '%s' "$1" | tr -d ' \t\n\r')" ]
+}
+
 # probe_wake_budget — CLUSTER-TOUCHING (#340). Measure ONE real cold-wake latency of
 # the default `compute` Deployment and export WAKE_BUDGET_MS_MEASURED so wake_budget_ms
 # sizes the whole battery off it (adaptive). Only runs when WAKE_BUDGET_MS is UNSET
@@ -153,7 +165,7 @@ probe_wake_budget() {
     echo "wake-budget probe: no compute deploy -> safe fallback ${WAKE_FALLBACK_MS}ms" >&2
     return 0
   }
-  _z=0; while [ "$($_kc get pods -l app=compute --no-headers 2>/dev/null | grep -c . || echo 0)" != "0" ]; do
+  _z=0; while pods_present "$($_kc get pods -l app=compute --no-headers 2>/dev/null)"; do
     _z=$((_z+1)); [ "$_z" -gt 60 ] && break; sleep 1
   done
   _t0=$(date +%s)
@@ -277,6 +289,14 @@ case "$0" in
       RB_NOW=0; _rb_ok() { return 0; }
       retry_bounded 20 0 _rb_clock _rb_ok >/dev/null 2>&1
       check "retry_bounded returns 0 on success" "$?" "0"
+      # pods_present (#340 gate fix): empty `get pods` output = the ZERO state (false),
+      # a real pod line = present (true). This replaced the `grep -c . || echo 0` bug
+      # that made the settle loop never detect zero and burn its full ~60s cap.
+      pods_present ""            2>/dev/null; check "pods_present empty=zero"      "$?" "1"
+      pods_present "   "         2>/dev/null; check "pods_present blank=zero"      "$?" "1"
+      pods_present "$(printf '\n')" 2>/dev/null; check "pods_present newline=zero" "$?" "1"
+      pods_present "compute-abc-1 1/1 Running 0 5s" 2>/dev/null; check "pods_present one pod=present" "$?" "0"
+      pods_present "$(printf 'a\nb')" 2>/dev/null; check "pods_present two pods=present" "$?" "0"
       # ro_direct_dsn: builds a DSN with the given (non-default) credential
       check "ro_direct_dsn strong"  "$(ro_direct_dsn 'cloud_admin:S3cret' compute-ro.scale-zero-pg.svc)" \
             "postgres://cloud_admin:S3cret@compute-ro.scale-zero-pg.svc:55433/postgres?sslmode=disable"
