@@ -125,6 +125,69 @@ func TestValidateNextAppSpec(t *testing.T) {
 			errHas:  "containerConcurrency",
 		},
 		{
+			// Connection-wall invariant (#377, ADR-0028): with a declared
+			// per-pod pool.max, maxScale * poolMax must not exceed the DB's
+			// max_connections ceiling (100). Lowering ContainerConcurrency makes
+			// apps scale to more pods sooner, so this guards against a lower cc
+			// silently enabling connection exhaustion.
+			name: "maxScale * poolMax exceeding max_connections rejected (#377)",
+			spec: &appsv1alpha1.NextAppSpec{
+				Image:   digestImage,
+				Scaling: &appsv1alpha1.ScalingSpec{MaxScale: 10, PoolMax: 20},
+			},
+			wantErr: true,
+			errHas:  "max_connections",
+		},
+		{
+			name: "maxScale * poolMax within max_connections accepted (#377)",
+			spec: &appsv1alpha1.NextAppSpec{
+				Image:   digestImage,
+				Scaling: &appsv1alpha1.ScalingSpec{MaxScale: 10, PoolMax: 5},
+			},
+			wantErr: false,
+		},
+		{
+			name: "maxScale * poolMax exactly at max_connections accepted (#377)",
+			spec: &appsv1alpha1.NextAppSpec{
+				Image:   digestImage,
+				Scaling: &appsv1alpha1.ScalingSpec{MaxScale: 10, PoolMax: 10},
+			},
+			wantErr: false,
+		},
+		{
+			// poolMax unset (0) means "not declared" — the cap check is skipped
+			// (the operator can't verify the wall it doesn't know about; it is
+			// documented loudly in ADR-0028 instead). Back-compat for every
+			// existing CR that never set poolMax.
+			name: "poolMax unset skips the cap check (#377 back-compat)",
+			spec: &appsv1alpha1.NextAppSpec{
+				Image:   digestImage,
+				Scaling: &appsv1alpha1.ScalingSpec{MaxScale: 50},
+			},
+			wantErr: false,
+		},
+		{
+			// maxScale 0 (unbounded) with a declared poolMax cannot satisfy a
+			// finite ceiling — an unbounded fan-out against a fixed
+			// max_connections is exactly the exhaustion this guards.
+			name: "unbounded maxScale with declared poolMax rejected (#377)",
+			spec: &appsv1alpha1.NextAppSpec{
+				Image:   digestImage,
+				Scaling: &appsv1alpha1.ScalingSpec{MaxScale: 0, PoolMax: 5},
+			},
+			wantErr: true,
+			errHas:  "max_connections",
+		},
+		{
+			name: "negative poolMax rejected (#377)",
+			spec: &appsv1alpha1.NextAppSpec{
+				Image:   digestImage,
+				Scaling: &appsv1alpha1.ScalingSpec{PoolMax: -1},
+			},
+			wantErr: true,
+			errHas:  "poolMax",
+		},
+		{
 			name: "unknown storage provider rejected",
 			spec: &appsv1alpha1.NextAppSpec{
 				Image:   digestImage,
