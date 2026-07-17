@@ -264,6 +264,85 @@ func TestValidateNextAppSpec(t *testing.T) {
 			wantErr: false,
 		},
 		{
+			name: "warmSchedule window with empty start rejected (#380)",
+			spec: &appsv1alpha1.NextAppSpec{
+				Image: digestImage,
+				Scaling: &appsv1alpha1.ScalingSpec{
+					WarmSchedule: []appsv1alpha1.WarmWindow{
+						{Start: "", End: "0 20 * * *", Replicas: 2},
+					},
+				},
+			},
+			wantErr: true,
+			errHas:  "warmSchedule",
+		},
+		{
+			name: "warmSchedule window with empty end rejected (#380)",
+			spec: &appsv1alpha1.NextAppSpec{
+				Image: digestImage,
+				Scaling: &appsv1alpha1.ScalingSpec{
+					WarmSchedule: []appsv1alpha1.WarmWindow{
+						{Start: "0 8 * * *", End: "", Replicas: 2},
+					},
+				},
+			},
+			wantErr: true,
+			errHas:  "warmSchedule",
+		},
+		{
+			name: "warmSchedule window with replicas < 1 rejected (#380)",
+			spec: &appsv1alpha1.NextAppSpec{
+				Image: digestImage,
+				Scaling: &appsv1alpha1.ScalingSpec{
+					WarmSchedule: []appsv1alpha1.WarmWindow{
+						{Start: "0 8 * * *", End: "0 20 * * *", Replicas: 0},
+					},
+				},
+			},
+			wantErr: true,
+			errHas:  "warmSchedule",
+		},
+		{
+			name: "warmSchedule replicas above finite maxScale rejected (#380)",
+			spec: &appsv1alpha1.NextAppSpec{
+				Image: digestImage,
+				Scaling: &appsv1alpha1.ScalingSpec{
+					MaxScale: 3,
+					WarmSchedule: []appsv1alpha1.WarmWindow{
+						{Start: "0 8 * * *", End: "0 20 * * *", Replicas: 5},
+					},
+				},
+			},
+			wantErr: true,
+			errHas:  "maxScale",
+		},
+		{
+			name: "valid warmSchedule window accepted (#380)",
+			spec: &appsv1alpha1.NextAppSpec{
+				Image: digestImage,
+				Scaling: &appsv1alpha1.ScalingSpec{
+					MaxScale: 5,
+					WarmSchedule: []appsv1alpha1.WarmWindow{
+						{Start: "0 8 * * 1-5", End: "0 20 * * 1-5", Replicas: 3, Timezone: "UTC"},
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "warmSchedule with unbounded maxScale accepted (no ceiling to breach, #380)",
+			spec: &appsv1alpha1.NextAppSpec{
+				Image: digestImage,
+				Scaling: &appsv1alpha1.ScalingSpec{
+					MaxScale: 0,
+					WarmSchedule: []appsv1alpha1.WarmWindow{
+						{Start: "0 8 * * *", End: "0 20 * * *", Replicas: 4},
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
 			name: "canaryPercent without pinned revisionName rejected (#92)",
 			spec: &appsv1alpha1.NextAppSpec{
 				Image:   digestImage,

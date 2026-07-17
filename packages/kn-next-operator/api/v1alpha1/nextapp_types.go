@@ -260,6 +260,58 @@ type ScalingSpec struct {
 	// ADR-0028).
 	// +optional
 	PoolMax int32 `json:"poolMax,omitempty"`
+
+	// WarmSchedule declares SCHEDULED warm-floor windows (ADR-0030, W5/#380):
+	// during each window the app is pre-warmed to a floor of `replicas` pods so
+	// a predictable traffic spike (a known daily peak, a scheduled campaign) does
+	// NOT pay a cold start on the first request. This is OWNER-AUTHORED
+	// scheduling, NOT learned prediction — the learned/heuristic controller
+	// (same-hour-last-week RPS percentile), the DB-compute lockstep pre-warm, and
+	// the per-tenant warm-budget cap are DEFERRED follow-ups (see ADR-0030).
+	//
+	// The operator translates a non-empty WarmSchedule into a KEDA ScaledObject
+	// with one `cron` trigger per window (target: the app's Knative Service).
+	// KEDA sets the min-replica FLOOR during the window; the existing Knative KPA
+	// still scales ABOVE the floor reactively. Outside every window there is NO
+	// floor, so the default scale-to-zero (minScale 0) cost model is preserved.
+	// Empty/nil => no ScaledObject is generated (back-compat; KEDA need not be
+	// installed). Requires KEDA (https://keda.sh) installed on the cluster —
+	// OPTIONAL today; the ScaledObject is inert until KEDA reconciles it.
+	// +optional
+	WarmSchedule []WarmWindow `json:"warmSchedule,omitempty"`
+}
+
+// WarmWindow is one scheduled warm-floor window (ADR-0030, W5/#380). Start/End
+// are standard 5-field cron expressions (minute hour day month weekday) in the
+// window's Timezone; Replicas is the warm floor enforced between Start and End.
+type WarmWindow struct {
+	// Start is the cron expression at which the warm floor begins (KEDA cron
+	// trigger `start`). Standard 5-field cron (e.g. "0 8 * * 1-5" = 08:00 on
+	// weekdays).
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	Start string `json:"start"`
+
+	// End is the cron expression at which the warm floor ends (KEDA cron trigger
+	// `end`, e.g. "0 20 * * 1-5" = 20:00 on weekdays). Between Start and End the
+	// floor of `replicas` pods is held.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	End string `json:"end"`
+
+	// Replicas is the warm-pod FLOOR held during the window (KEDA cron trigger
+	// `desiredReplicas`). Must be >= 1 — a window that floors at 0 warms nothing
+	// (use no window at all for scale-to-zero). The Knative KPA still scales
+	// ABOVE this floor on real traffic.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:Minimum=1
+	Replicas int32 `json:"replicas"`
+
+	// Timezone is an IANA timezone (e.g. "UTC", "America/New_York") the cron
+	// expressions are evaluated in (KEDA cron trigger `timezone`). Defaults to
+	// "UTC" when unset.
+	// +optional
+	Timezone string `json:"timezone,omitempty"`
 }
 
 type StorageSpec struct {

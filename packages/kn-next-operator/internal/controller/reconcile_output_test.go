@@ -647,6 +647,112 @@ var _ = Describe("NextApp Controller reconcile output", func() {
 		})
 	})
 
+	// Scheduled warm-floor (ADR-0030, W5/#380): the operator emits a KEDA
+	// ScaledObject (one cron trigger per window, targeting the app's Knative
+	// Service) ONLY when spec.scaling.warmSchedule is non-empty. KEDA sets the
+	// floor during the window; the Knative KPA still scales above it. Outside a
+	// window there is no floor, so scale-to-zero cost is preserved.
+	Context("warm-schedule KEDA ScaledObject", func() {
+		It("does NOT create a ScaledObject when warmSchedule is empty (back-compat, KEDA optional)", func() {
+			nn := reconcileOnce("warm-off", appsv1alpha1.NextAppSpec{Image: validImage})
+
+			so := newScaledObjectObj()
+			soName := types.NamespacedName{Name: nn.Name + "-warm-schedule", Namespace: namespace}
+			err := k8sClient.Get(ctx, soName, so)
+			Expect(errors.IsNotFound(err)).To(BeTrue(),
+				"ScaledObject must not exist when warmSchedule is empty")
+		})
+
+		It("creates a ScaledObject targeting the ksvc with one cron trigger per window", func() {
+			nn := reconcileOnce("warm-on", appsv1alpha1.NextAppSpec{
+				Image: validImage,
+				Scaling: &appsv1alpha1.ScalingSpec{
+					MaxScale: 8,
+					WarmSchedule: []appsv1alpha1.WarmWindow{
+						{Start: "0 8 * * 1-5", End: "0 20 * * 1-5", Replicas: 3, Timezone: "America/New_York"},
+						{Start: "0 10 * * 6,0", End: "0 18 * * 6,0", Replicas: 2},
+					},
+				},
+			})
+
+			so := newScaledObjectObj()
+			soName := types.NamespacedName{Name: nn.Name + "-warm-schedule", Namespace: namespace}
+			Expect(k8sClient.Get(ctx, soName, so)).To(Succeed())
+
+			By("targeting the app's Knative Service via scaleTargetRef")
+			apiVersion, _, _ := unstructured.NestedString(so.Object, "spec", "scaleTargetRef", "apiVersion")
+			kind, _, _ := unstructured.NestedString(so.Object, "spec", "scaleTargetRef", "kind")
+			name, _, _ := unstructured.NestedString(so.Object, "spec", "scaleTargetRef", "name")
+			Expect(apiVersion).To(Equal("serving.knative.dev/v1"))
+			Expect(kind).To(Equal("Service"))
+			Expect(name).To(Equal(nn.Name))
+
+			By("keeping minReplicaCount at 0 so it never fights scale-to-zero outside windows")
+			minReplicas, found, _ := unstructured.NestedInt64(so.Object, "spec", "minReplicaCount")
+			Expect(found).To(BeTrue())
+			Expect(minReplicas).To(Equal(int64(0)))
+
+			By("carrying maxReplicaCount from the app's maxScale")
+			maxReplicas, found, _ := unstructured.NestedInt64(so.Object, "spec", "maxReplicaCount")
+			Expect(found).To(BeTrue())
+			Expect(maxReplicas).To(Equal(int64(8)))
+
+			By("emitting one cron trigger per window with start/end/timezone/desiredReplicas")
+			triggers, found, err := unstructured.NestedSlice(so.Object, "spec", "triggers")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(found).To(BeTrue())
+			Expect(triggers).To(HaveLen(2))
+
+			t0 := triggers[0].(map[string]interface{})
+			Expect(t0["type"]).To(Equal("cron"))
+			meta0 := t0["metadata"].(map[string]interface{})
+			Expect(meta0["start"]).To(Equal("0 8 * * 1-5"))
+			Expect(meta0["end"]).To(Equal("0 20 * * 1-5"))
+			Expect(meta0["timezone"]).To(Equal("America/New_York"))
+			Expect(meta0["desiredReplicas"]).To(Equal("3"))
+
+			t1 := triggers[1].(map[string]interface{})
+			meta1 := t1["metadata"].(map[string]interface{})
+			Expect(meta1["desiredReplicas"]).To(Equal("2"))
+			By("defaulting timezone to UTC when unset")
+			Expect(meta1["timezone"]).To(Equal("UTC"))
+
+			By("being owner-referenced by the NextApp for GC")
+			Expect(ownedBy(so.GetOwnerReferences(), nn.Name)).To(BeTrue())
+		})
+
+		It("deletes a previously-created ScaledObject when warmSchedule is removed", func() {
+			nn := reconcileOnce("warm-toggle", appsv1alpha1.NextAppSpec{
+				Image: validImage,
+				Scaling: &appsv1alpha1.ScalingSpec{
+					MaxScale: 5,
+					WarmSchedule: []appsv1alpha1.WarmWindow{
+						{Start: "0 8 * * *", End: "0 20 * * *", Replicas: 2},
+					},
+				},
+			})
+
+			so := newScaledObjectObj()
+			soName := types.NamespacedName{Name: nn.Name + "-warm-schedule", Namespace: namespace}
+			Expect(k8sClient.Get(ctx, soName, so)).To(Succeed())
+
+			By("removing the warmSchedule and re-reconciling")
+			cur := &appsv1alpha1.NextApp{}
+			Expect(k8sClient.Get(ctx, nn, cur)).To(Succeed())
+			cur.Spec.Scaling.WarmSchedule = nil
+			Expect(k8sClient.Update(ctx, cur)).To(Succeed())
+			reconciler := &NextAppReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+
+			By("the ScaledObject is gone")
+			fresh := newScaledObjectObj()
+			getErr := k8sClient.Get(ctx, soName, fresh)
+			Expect(errors.IsNotFound(getErr)).To(BeTrue(),
+				"ScaledObject must be deleted once warmSchedule is cleared")
+		})
+	})
+
 	Context("Error path: invalid image", func() {
 		It("ends not-Ready/Degraded and creates no ksvc or SA child", func() {
 			name := "bad-image"
@@ -914,6 +1020,14 @@ func newKafkaSourceObj() *unstructured.Unstructured {
 	ks.SetAPIVersion("sources.knative.dev/v1beta1")
 	ks.SetKind("KafkaSource")
 	return ks
+}
+
+// newScaledObjectObj returns an empty unstructured KEDA ScaledObject for Get calls.
+func newScaledObjectObj() *unstructured.Unstructured {
+	so := &unstructured.Unstructured{}
+	so.SetAPIVersion("keda.sh/v1alpha1")
+	so.SetKind("ScaledObject")
+	return so
 }
 
 func orDefault(v, def string) string {
