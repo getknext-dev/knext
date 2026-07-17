@@ -174,6 +174,54 @@ describe('@knext/lib/clients — single-flight DB wake (#339)', () => {
     expect(mod.isDbWoken?.()).toBe(true);
   });
 
+  it('a leader that hangs to the pool connect-timeout propagates the timeout to ALL N followers and clears the cell (#371)', async () => {
+    // The FakePool models "hang until connectionTimeoutMillis fires" via the wakeGate
+    // deferred — N followers wait behind the SAME shared in-flight wake, then that wake
+    // is rejected with the exact error pg's pool raises on connect timeout. The #310
+    // client-side wake-retry budget is kept tiny in beforeEach (20ms, real timers) so
+    // the leader's retries exhaust fast and the timeout is the terminal outcome; that
+    // path is orthogonal to the single-flight follower-propagation contract pinned here.
+    const mod = await import('../clients');
+    const pool = mod.getDbPool();
+
+    // N concurrent cold first-callers: ONE leads the wake, the rest await the shared
+    // in-flight. The leader HANGS (gate never opens) until the connect-timeout fires.
+    const N = 6;
+    const inflight = Array.from({ length: N }, () => pool.connect());
+    // Attach rejection handlers up front so no unhandled rejection escapes when the
+    // timeout fires; assert every follower sees the SAME timeout error.
+    const settled = inflight.map((p) =>
+      p.then(
+        () => ({ ok: true as const }),
+        (err: unknown) => ({ ok: false as const, err }),
+      ),
+    );
+
+    // The pool's connectionTimeoutMillis fires: pg rejects the pending acquire.
+    const timeoutErr = Object.assign(new Error('timeout exceeded when trying to connect'), {
+      code: 'ETIMEDOUT',
+    });
+    rejectWake(timeoutErr);
+
+    const results = await Promise.all(settled);
+    // (a) The timeout rejection propagated to ALL N followers — not just the leader.
+    expect(results).toHaveLength(N);
+    for (const r of results) {
+      expect(r.ok).toBe(false);
+      expect((r as { err: unknown }).err).toBe(timeoutErr);
+    }
+    // The failed wake did NOT falsely latch `woken`.
+    expect(mod.isDbWoken?.()).toBe(false);
+
+    // (b) The single-flight cell is CLEARED — the very next acquisition re-single-flights
+    // a FRESH wake (not wedged on the dead in-flight), and now succeeds.
+    newGate();
+    const retry = pool.connect();
+    releaseWake();
+    (await retry).release();
+    expect(mod.isDbWoken?.()).toBe(true);
+  });
+
   it('a REJECTED wake does not consume the latch — the retry re-wakes (fail-open, #336)', async () => {
     const mod = await import('../clients');
     const pool = mod.getDbPool();
