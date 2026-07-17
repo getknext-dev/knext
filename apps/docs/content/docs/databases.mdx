@@ -93,6 +93,15 @@ The [`@knext/db`](/docs/data-sdk) SDK already ships pools tuned to these bounds 
 cleanly on `SIGTERM`, so a terminating replica releases its connections instead of severing them
 mid-request.
 
+<Callout type="info">
+**Concurrent cold starts share one database wake.** When a burst of requests hits a pod whose
+database is asleep, the pool **single-flights** the 0→1 wake: the first request triggers the wake
+and every concurrent first-request awaits that same wake rather than each racing its own. So a
+20-request burst pays roughly one cold-wake, not twenty stacked wakes. The single-flight is
+fail-open — if the first wake attempt times out it does not latch, so the next request re-triggers
+a fresh wake — and adds nothing to the warm path once the database is up.
+</Callout>
+
 ## Read your data with a typed client
 
 For a typed, drizzle-orm-based data layer over the DSNs you just bound — schema, migrations, and

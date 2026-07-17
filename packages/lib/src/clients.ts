@@ -156,6 +156,147 @@ const trackPoolActivity = (pool: Pool): Pool => {
   return pool;
 };
 
+// ── Single-flight the DB wake (#339) ──────────────────────────────────────────
+// Cold-start under concurrency was ~5x slower than a single cold request (OKE:
+// 6.4s single, ~32s at concurrency 20). Root cause: N concurrent first-connects
+// each independently open a socket to the scale-zero-pg gateway and each blocks
+// on the same 0→1 `compute-<app>` wake — the burst contends on one wake with no
+// coordination. We single-flight it: the FIRST client acquisition (connect() OR
+// query()) on a cold pool runs the real acquisition and PUBLISHES its in-flight
+// promise; every concurrent first-caller AWAITS that single shared promise
+// instead of triggering its own wake, then proceeds warm. Once the wake resolves
+// the pool is latched `woken` and later acquisitions pass straight through.
+//
+// Fail-open + retry-safe (mirrors the db-wake latch, #336): a REJECTED wake does
+// NOT latch `woken` and clears the in-flight slot, so the next acquisition
+// single-flights a FRESH wake (a cold gateway that timed out then succeeds on
+// retry still collapses its own burst). Nothing here changes success/error
+// propagation or return values — a hiccup in single-flight never breaks the DB
+// path (the wrapper delegates to the original and only GATES cold callers).
+//
+// Anchored on `globalThis` via `Symbol.for` (ADR-0027, #352), NOT a module-level
+// `let`: in the standalone build `@knext/lib` is bundled into multiple webpack
+// layers, so a bare `let` would split the single-flight state per copy and let
+// two copies each trigger a wake. The shared globalThis cell keeps ONE wake for
+// the whole process regardless of bundle duplication.
+const DB_WAKE_SF_KEY = Symbol.for('knext.lib.clients.dbWakeSingleflight');
+
+interface WakeSingleflight {
+  /** A cold acquisition has SUCCEEDED — permanent; later acquisitions are warm. */
+  woken: boolean;
+  /** The shared in-flight wake, or null when no wake is running / already woken. */
+  inflight: Promise<unknown> | null;
+}
+
+type WakeSingleflightGlobal = Record<symbol, WakeSingleflight | undefined>;
+
+const wakeSfGlobal = globalThis as unknown as WakeSingleflightGlobal;
+
+const getWakeSingleflight = (): WakeSingleflight => {
+  let sf = wakeSfGlobal[DB_WAKE_SF_KEY];
+  if (!sf) {
+    sf = { woken: false, inflight: null };
+    wakeSfGlobal[DB_WAKE_SF_KEY] = sf;
+  }
+  return sf;
+};
+
+/** True once the writer pool's 0→1 wake has succeeded this process (cross-copy). */
+export const isDbWoken = (): boolean => getWakeSingleflight().woken;
+
+/** Reset the DB-wake single-flight state (tests only). */
+export const resetDbWakeSingleflight = (): void => {
+  delete wakeSfGlobal[DB_WAKE_SF_KEY];
+};
+
+/**
+ * Wrap a pool's `connect`/`query` so the FIRST cold acquisition is single-flighted:
+ * concurrent first-callers share ONE wake instead of each triggering a 0→1 wake.
+ *
+ * Contract (see the block comment above):
+ *  - Warm (`woken`) → straight pass-through, zero added latency.
+ *  - Cold, no wake in flight → THIS caller runs the real acquisition, publishes
+ *    its promise as the shared in-flight; on success latches `woken` + clears the
+ *    slot; on failure clears the slot WITHOUT latching (retry re-wakes, #336).
+ *  - Cold, a wake already in flight → await the shared in-flight (ignoring its
+ *    rejection), then run this caller's own (now-warm) acquisition.
+ *
+ * Fail-open: if patching throws, the original pool is returned unchanged.
+ */
+const singleflightWake = (pool: Pool): Pool => {
+  try {
+    const sf = getWakeSingleflight();
+
+    // Run `op` as the wake leader (publishes in-flight) or a warm follower.
+    const gate = <R>(op: () => R): R | Promise<R> => {
+      if (sf.woken) {
+        return op();
+      }
+      if (sf.inflight) {
+        // A wake is already running — wait for it (ignore its outcome; our own op
+        // reports the real result), then acquire warm.
+        return sf.inflight.then(
+          () => op(),
+          () => op(),
+        );
+      }
+      // We are the wake leader: run the real op and publish it as the shared wake.
+      let result: R;
+      try {
+        result = op();
+      } catch (err) {
+        // Synchronous throw before any promise — leave unlatched so a retry re-wakes.
+        sf.inflight = null;
+        throw err;
+      }
+      if (result != null && typeof (result as { then?: unknown }).then === 'function') {
+        const promise = result as unknown as Promise<unknown>;
+        sf.inflight = promise.then(
+          (value) => {
+            sf.woken = true;
+            sf.inflight = null;
+            return value;
+          },
+          (err) => {
+            // #336: a failed wake must NOT latch `woken`; clear so the retry re-wakes.
+            sf.inflight = null;
+            throw err;
+          },
+        );
+        // Swallow the published promise's rejection so an awaiting sibling that
+        // maps it through `.then(_, _)` never produces an unhandled rejection; the
+        // leader itself still sees the original rejection via `result`.
+        sf.inflight.catch(() => {});
+        return result;
+      }
+      // Synchronous success (e.g. a mock) — treat as woken immediately.
+      sf.woken = true;
+      sf.inflight = null;
+      return result;
+    };
+
+    const originalConnect = pool.connect;
+    if (typeof originalConnect === 'function') {
+      pool.connect = function singleflightConnect(this: unknown, ...args: unknown[]) {
+        return gate(() =>
+          (originalConnect as (...a: unknown[]) => unknown).apply(this ?? pool, args),
+        );
+      } as Pool['connect'];
+    }
+    const originalQuery = pool.query;
+    if (typeof originalQuery === 'function') {
+      pool.query = function singleflightQuery(this: unknown, ...args: unknown[]) {
+        return gate(() =>
+          (originalQuery as (...a: unknown[]) => unknown).apply(this ?? pool, args),
+        );
+      } as Pool['query'];
+    }
+  } catch {
+    // Fail-open: single-flight is a latency optimization, never break the pool.
+  }
+  return pool;
+};
+
 /**
  * Run the installed instrumentor over a newly-created pool. Best-effort: a
  * misbehaving instrumentor must never break pool creation (fail-open) — the
@@ -233,12 +374,19 @@ export const getDbPool = () => {
         DEFAULT_DB_POOL_CONNECT_TIMEOUT_MS,
       ),
     });
-    // Track writer-pool activity (#348) so the deep-health scrape only dials the
-    // DB when the app used it recently — never re-waking an idle scale-to-zero
-    // DB. Applied before db-wake tracing; both just delegate to the original.
-    trackPoolActivity(pgPool);
-    // Wrap the fresh pool for db-wake tracing (no-op unless an app opted in).
+    // Wrapping order matters — each wrap is a layer, and the LAST wrap is the
+    // OUTERMOST (runs first on a call). We want, from outermost → innermost:
+    //   1. activity tracking (#348/#361): stamp lastDbActivityAt BEFORE anything
+    //      else, so even a cold caller that is about to be GATED by single-flight,
+    //      or one whose query later REJECTS, still counts as activity → the
+    //      stuck-`waking` alert keeps probing during an outage.
+    //   2. single-flight the 0→1 wake (#339): collapse N concurrent first-connects
+    //      onto ONE wake; warm callers pass straight through.
+    //   3. db-wake tracing instrumentor (no-op unless an app opted in).
+    // So we wrap in reverse: instrument (inner) → single-flight → activity (outer).
     instrumentPool(pgPool, 'writer');
+    singleflightWake(pgPool);
+    trackPoolActivity(pgPool);
   }
   return pgPool;
 };
