@@ -140,6 +140,11 @@ a defect against that ticket). Grouped by theme.
 | `_verify-cronjob-alerting.sh` | A **real failing CronJob** pages via the same path (the real failure signal, not a synthetic). | #23 #29 #41 |
 | `_verify-ksm-down.sh` | `kube-state-metrics` (sole producer of the CronJob-failure signal) self-guards: scale it to 0 → `KubeStateMetricsDown` reaches the sink. | #48 |
 
+### Performance / capacity
+| Drill | What it proves | Guards |
+|---|---|---|
+| `_verify-loadsoak.sh` | **Sustained-load / soak / throughput harness**: an in-cluster k6 Job ramps VUs to a ceiling then holds a ≥10-min soak against ONE app, records RPS + p50/p95/p99 + error rate, the **concurrency→latency** curve (to set W2 ContainerConcurrency), and snapshots both planes (gateway `pggw_*`, writer replicas/restarts, DB CPU) to record **which wall broke first** (app pods / `GW_MAX_CONNS=90` / writer / DB CPU). `SELFTEST=1` runs cluster-free. | #375 #376 |
+
 ### Operator / extensions
 | Drill | What it proves | Guards |
 |---|---|---|

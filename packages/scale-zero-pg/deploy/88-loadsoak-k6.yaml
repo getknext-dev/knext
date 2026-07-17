@@ -1,0 +1,137 @@
+# 88-loadsoak-k6.yaml — in-cluster k6 sustained-load / soak harness (issue #376, W1 of
+# the high-traffic wave #375). Rendered + applied by deploy/_verify-loadsoak.sh; the
+# ${...} placeholders are substituted by that drill (envsubst) so RPS ramp / soak
+# duration / thresholds are env-parameterized, following the existing drill style.
+#
+# WHY IN-CLUSTER (BENCHMARKS "RTT-bound" note): an out-of-region k6 driver adds the
+# cluster's ~hundreds-of-ms WAN RTT to every request, swamping the app+DB latency the
+# baseline is trying to isolate. Running k6 as a Job ON the OKE cluster measures the
+# app latency, not the operator's home-broadband round-trip. The Job targets the
+# in-cluster app URL (Knative route / ClusterIP), never the public sslip.io ingress.
+#
+# This file is NOT part of the always-on plane and is NOT in _validate.sh's numbered
+# manifest set — it is a drill artifact applied on demand and torn down after.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: loadsoak-k6-script
+  namespace: scale-zero-pg
+  labels: { app: loadsoak-k6, drill: loadsoak }
+data:
+  # k6 test script. ramping-VUs executor: a ramp-to-ceiling phase THEN a steady soak
+  # phase, so one run yields both the RPS knee (ramp) and the sustained p50/p95/p99
+  # (soak). Thresholds abort/flag on p95/p99 breach. summary-export writes the JSON
+  # the drill's pure parser turns into a BENCHMARKS row.
+  loadsoak.js: |
+    import http from 'k6/http';
+    import { check } from 'k6';
+    import { Trend, Rate, Counter } from 'k6/metrics';
+
+    // --- knobs (env-injected by the drill via -e / envsubst) ----------------------
+    const TARGET_URL   = __ENV.TARGET_URL   || 'http://app.default.svc.cluster.local/';
+    const RAMP_CEIL_VU = parseInt(__ENV.RAMP_CEIL_VU || '120');   // ramp target VUs
+    const RAMP_UP      = __ENV.RAMP_UP      || '2m';              // time to reach ceiling
+    const SOAK_VU      = parseInt(__ENV.SOAK_VU || '80');         // ~70% of ceiling
+    const SOAK_DUR     = __ENV.SOAK_DUR     || '10m';             // >=10min sustained soak
+    const RAMP_DOWN    = __ENV.RAMP_DOWN    || '30s';
+    const P95_MS       = parseInt(__ENV.P95_MS || '1500');        // p95 threshold
+    const P99_MS       = parseInt(__ENV.P99_MS || '3000');        // p99 threshold
+    const MAX_ERR_RATE = parseFloat(__ENV.MAX_ERR_RATE || '0.01'); // 1% error budget
+
+    // Distinct trend so the concurrency->latency (W2 sizing) relationship is exportable.
+    const appLatency = new Trend('app_latency_ms', true);
+    const appErrors  = new Rate('app_errors');
+    const appOk      = new Counter('app_ok');
+
+    export const options = {
+      // Two-stage ramping-VUs: RAMP (0 -> ceiling) then SOAK (hold ~70% ceiling).
+      scenarios: {
+        rampsoak: {
+          executor: 'ramping-vus',
+          startVUs: 0,
+          stages: [
+            { duration: RAMP_UP,   target: RAMP_CEIL_VU }, // ramp to ceiling — find the knee
+            { duration: SOAK_DUR,  target: SOAK_VU },      // steady soak at ~70%
+            { duration: RAMP_DOWN, target: 0 },            // drain
+          ],
+          gracefulRampDown: '10s',
+        },
+      },
+      thresholds: {
+        // p95/p99 gates (the issue's latency SLOs). abortOnFail stops a clearly-broken
+        // run early instead of burning the whole soak window.
+        'http_req_duration': [
+          { threshold: `p(95)<${P95_MS}`, abortOnFail: false },
+          { threshold: `p(99)<${P99_MS}`, abortOnFail: false },
+        ],
+        'app_errors': [{ threshold: `rate<${MAX_ERR_RATE}`, abortOnFail: false }],
+      },
+      summaryTrendStats: ['avg', 'min', 'med', 'p(90)', 'p(95)', 'p(99)', 'max'],
+      // no thresholds-only summary; we want the full metric set exported.
+      discardResponseBodies: true,
+    };
+
+    export default function () {
+      const res = http.get(TARGET_URL, { timeout: '30s' });
+      const good = check(res, { 'status 2xx/3xx': (r) => r.status >= 200 && r.status < 400 });
+      appLatency.add(res.timings.duration);
+      appErrors.add(!good);
+      if (good) appOk.add(1);
+    }
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: loadsoak-k6
+  namespace: scale-zero-pg
+  labels: { app: loadsoak-k6, drill: loadsoak }
+spec:
+  backoffLimit: 0            # a load run is not retried — the drill owns re-runs
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels: { app: loadsoak-k6, drill: loadsoak }
+    spec:
+      restartPolicy: Never
+      terminationGracePeriodSeconds: 5
+      containers:
+        - name: k6
+          image: ${K6_IMAGE}
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-c"]
+          # k6 writes the summary-export JSON to a shared emptyDir; a sidecar-free
+          # pattern — the drill reads it back via `kubectl logs`/`kubectl cp` after the
+          # Job completes. The trailing `cat` prints the JSON to stdout, delimited by
+          # sentinels the drill greps out (so `kubectl logs` alone suffices; no cp).
+          args:
+            - |
+              set -e
+              k6 run \
+                -e TARGET_URL='${TARGET_URL}' \
+                -e RAMP_CEIL_VU='${RAMP_CEIL_VU}' \
+                -e RAMP_UP='${RAMP_UP}' \
+                -e SOAK_VU='${SOAK_VU}' \
+                -e SOAK_DUR='${SOAK_DUR}' \
+                -e RAMP_DOWN='${RAMP_DOWN}' \
+                -e P95_MS='${P95_MS}' \
+                -e P99_MS='${P99_MS}' \
+                -e MAX_ERR_RATE='${MAX_ERR_RATE}' \
+                --summary-export=/tmp/summary.json \
+                /scripts/loadsoak.js || true
+              echo '===K6_SUMMARY_JSON_BEGIN==='
+              cat /tmp/summary.json
+              echo '===K6_SUMMARY_JSON_END==='
+          volumeMounts:
+            - { name: script, mountPath: /scripts, readOnly: true }
+          # Resources are KNOBS (drill-substituted): the live OKE cluster is
+          # CPU-REQUEST-constrained (2 nodes, most allocatable reserved), so the k6
+          # pod must be able to request less to schedule. Lower K6_CPU_REQUEST there
+          # AND reduce RAMP_CEIL_VU — a CPU-starved k6 client measures the CLIENT
+          # ceiling, not the app's (see operations.md).
+          resources:
+            requests: { cpu: "${K6_CPU_REQUEST}", memory: ${K6_MEM_REQUEST} }
+            limits:   { cpu: "${K6_CPU_LIMIT}",   memory: ${K6_MEM_LIMIT} }
+      volumes:
+        - name: script
+          configMap: { name: loadsoak-k6-script }
