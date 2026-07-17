@@ -20,6 +20,7 @@ import { describe, expect, it } from 'vitest';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const instrumentationSrc = readFileSync(join(here, 'src', 'instrumentation.ts'), 'utf8');
+const nextConfigSrc = readFileSync(join(here, 'next.config.ts'), 'utf8');
 
 /**
  * Modules that are Node-only (native/Node-built-in dependencies) and therefore
@@ -62,5 +63,41 @@ describe('instrumentation.ts edge-bundle safety (#342)', () => {
 
   it('loads Node-only wiring via a dynamic import (await import)', () => {
     expect(instrumentationSrc).toMatch(/await\s+import\s*\(/);
+  });
+});
+
+/**
+ * #344 (hardening the #342 guard): the edge-clean `instrumentation.ts` is only
+ * HALF the fence. Because `instrumentation.ts` calls
+ * `await import('./instrumentation-node')` with a STATIC literal specifier,
+ * webpack STATICALLY traces that module into BOTH the nodejs AND the edge
+ * bundle — the runtime `NEXT_RUNTIME === 'nodejs'` guard only stops it EXECUTING
+ * on the edge, not from being BUNDLED. The load-bearing edge exclusion is the
+ * `IgnorePlugin` in `next.config.ts` webpack(): for the edge compile ONLY it
+ * replaces `./instrumentation-node` with an empty module so its Node-only
+ * subtree (`@knext/lib/clients` → `@cerbos/grpc`/`pg`/`minio`) never enters the
+ * edge bundle. Deleting that plugin passes the instrumentation.ts checks above
+ * yet re-breaks the production `next build` with `Module not found`.
+ *
+ * These assertions close that blind spot: the edge-scoped IgnorePlugin must
+ * exist and must target the instrumentation-node module. This test FAILS if a
+ * future change removes the plugin (proven in #344 by deleting the block).
+ */
+describe('next.config.ts edge IgnorePlugin fence (#342/#344)', () => {
+  it('has a webpack() config that branches on the edge runtime', () => {
+    // The edge exclusion must be scoped to the edge compile — the nodejs
+    // compile bundles the real Node-only module (that is where it must run).
+    expect(nextConfigSrc).toMatch(/nextRuntime\s*===\s*['"]edge['"]/);
+  });
+
+  it('registers an IgnorePlugin (the load-bearing edge exclusion)', () => {
+    expect(nextConfigSrc).toMatch(/new\s+webpack\.IgnorePlugin\s*\(/);
+  });
+
+  it('the IgnorePlugin targets the instrumentation-node module', () => {
+    // The `resourceRegExp` must match `instrumentation-node` so webpack replaces
+    // it with an empty module on the edge compile. A plugin that no longer
+    // targets this module is as broken as no plugin at all.
+    expect(nextConfigSrc).toMatch(/resourceRegExp:\s*\/[^/]*instrumentation-node/);
   });
 });
