@@ -373,6 +373,31 @@ type NextAppStatus struct {
 	// spec.database is removed.
 	// +optional
 	DatabaseSecretName string `json:"databaseSecretName,omitempty"`
+
+	// ObservedRevision is the child Knative Service's latest-READY Revision
+	// (mirrored from ksvc.status.latestReadyRevisionName). It is the revision an
+	// operator can trust is actually serving — surfaced so `kubectl get nextapp
+	// -o wide` answers "which build is live?" without a Knative round-trip (#312).
+	// +optional
+	ObservedRevision string `json:"observedRevision,omitempty"`
+
+	// ScaledToZero reports whether the app currently has no active compute: it is
+	// true when the observed (latest-ready) Revision's Knative "Active" condition
+	// is False — a Ready-but-Inactive revision, i.e. scaled to zero. nil means the
+	// activeness is unknown (the revision could not be read yet); the operator
+	// omits the field rather than guessing. Derived from the Revision the operator
+	// already reconciles — no replica-count bookkeeping is invented (#312).
+	// +optional
+	ScaledToZero *bool `json:"scaledToZero,omitempty"`
+
+	// LastSuccessfulDeployTime is the time the operator first observed the CURRENT
+	// observedRevision reach Ready — i.e. the last time a deploy actually went
+	// live. It is only advanced when a NEW revision becomes Ready; a subsequent
+	// failed rollout (ksvc Ready=False) leaves it pointing at the last good
+	// deploy, so operators can see "how long has this been the live build" and
+	// distinguish a stale-but-serving app from a broken new push (#312).
+	// +optional
+	LastSuccessfulDeployTime *metav1.Time `json:"lastSuccessfulDeployTime,omitempty"`
 }
 
 // TrafficStatus is one entry of the observed Knative traffic distribution.
@@ -387,6 +412,10 @@ type TrafficStatus struct {
 // +kubebuilder:printcolumn:name="URL",type="string",JSONPath=".status.url"
 // +kubebuilder:printcolumn:name="Ready",type="string",JSONPath=".status.conditions[?(@.type=='Ready')].status"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
+// +kubebuilder:printcolumn:name="Revision",type="string",priority=1,JSONPath=".status.observedRevision"
+// +kubebuilder:printcolumn:name="ScaledToZero",type="boolean",priority=1,JSONPath=".status.scaledToZero"
+// +kubebuilder:printcolumn:name="Degraded",type="string",priority=1,JSONPath=".status.conditions[?(@.type=='Degraded')].status"
+// +kubebuilder:printcolumn:name="LastDeploy",type="date",priority=1,JSONPath=".status.lastSuccessfulDeployTime"
 
 // NextApp is the Schema for the nextapps API
 type NextApp struct {

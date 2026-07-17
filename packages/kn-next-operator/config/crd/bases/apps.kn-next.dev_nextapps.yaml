@@ -24,6 +24,22 @@ spec:
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
+    - jsonPath: .status.observedRevision
+      name: Revision
+      priority: 1
+      type: string
+    - jsonPath: .status.scaledToZero
+      name: ScaledToZero
+      priority: 1
+      type: boolean
+    - jsonPath: .status.conditions[?(@.type=='Degraded')].status
+      name: Degraded
+      priority: 1
+      type: string
+    - jsonPath: .status.lastSuccessfulDeployTime
+      name: LastDeploy
+      priority: 1
+      type: date
     name: v1alpha1
     schema:
       openAPIV3Schema:
@@ -464,6 +480,32 @@ spec:
                   spec.database.secretRef (BINDING mode, ADR-0019). Cleared when
                   spec.database is removed.
                 type: string
+              lastSuccessfulDeployTime:
+                description: |-
+                  LastSuccessfulDeployTime is the time the operator first observed the CURRENT
+                  observedRevision reach Ready — i.e. the last time a deploy actually went
+                  live. It is only advanced when a NEW revision becomes Ready; a subsequent
+                  failed rollout (ksvc Ready=False) leaves it pointing at the last good
+                  deploy, so operators can see "how long has this been the live build" and
+                  distinguish a stale-but-serving app from a broken new push (#312).
+                format: date-time
+                type: string
+              observedRevision:
+                description: |-
+                  ObservedRevision is the child Knative Service's latest-READY Revision
+                  (mirrored from ksvc.status.latestReadyRevisionName). It is the revision an
+                  operator can trust is actually serving — surfaced so `kubectl get nextapp
+                  -o wide` answers "which build is live?" without a Knative round-trip (#312).
+                type: string
+              scaledToZero:
+                description: |-
+                  ScaledToZero reports whether the app currently has no active compute: it is
+                  true when the observed (latest-ready) Revision's Knative "Active" condition
+                  is False — a Ready-but-Inactive revision, i.e. scaled to zero. nil means the
+                  activeness is unknown (the revision could not be read yet); the operator
+                  omits the field rather than guessing. Derived from the Revision the operator
+                  already reconciles — no replica-count bookkeeping is invented (#312).
+                type: boolean
               url:
                 type: string
             type: object

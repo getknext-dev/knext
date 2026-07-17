@@ -25,8 +25,6 @@ import (
 	"k8s.io/utils/ptr"
 	"knative.dev/pkg/apis"
 	servingv1 "knative.dev/serving/pkg/apis/serving/v1"
-
-	appsv1alpha1 "github.com/AhmedElBanna80/knext/packages/kn-next-operator/api/v1alpha1"
 )
 
 // Unit tests for deriveDeployState, the pure helper that fills the NextApp's
