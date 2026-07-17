@@ -22,6 +22,17 @@ import (
 	"fmt"
 	"os"
 
+	// Embed the IANA timezone database into the binary. The operator runtime
+	// image is gcr.io/distroless/static:nonroot (Dockerfile), which ships NO
+	// /usr/share/zoneinfo — so without this blank import time.LoadLocation() for
+	// any non-UTC zone returns an error at runtime. The scheduled warm-floor
+	// (ADR-0030, #380) resolves each warmSchedule window's timezone via
+	// LoadLocation; without embedded tzdata a non-UTC window would silently
+	// fail-open (the window is skipped, the warm floor never engages). ~450KB
+	// binary bump, acceptable. Dev hosts have system tzdata so tests pass either
+	// way — this import is what makes the SHIPPED distroless image correct.
+	_ "time/tzdata"
+
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"

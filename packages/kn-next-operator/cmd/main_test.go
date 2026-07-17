@@ -39,6 +39,27 @@ import (
 	webhookv1alpha1 "github.com/AhmedElBanna80/knext/packages/kn-next-operator/internal/webhook/v1alpha1"
 )
 
+// TestEmbeddedTimezoneDatabase pins the ADR-0030/#380 fix: the operator runs on
+// gcr.io/distroless/static:nonroot, which ships NO /usr/share/zoneinfo. The
+// scheduled warm-floor resolves each warmSchedule window's IANA timezone via
+// time.LoadLocation; without the `_ "time/tzdata"` blank import in main.go, a
+// non-UTC window would silently fail-open in the shipped image (the window is
+// skipped, the floor never engages). This test binary links the SAME main
+// package (hence the tzdata embed), so a successful LoadLocation of a named,
+// non-UTC zone proves the embed is wired — and would FAIL if the blank import
+// were dropped and this ran in a zoneinfo-less environment. It is the guard the
+// distroless gap needs (the controller envtests can't see it: the dev host has
+// system tzdata).
+func TestEmbeddedTimezoneDatabase(t *testing.T) {
+	for _, zone := range []string{"America/New_York", "Europe/London", "Asia/Tokyo", "UTC"} {
+		if _, err := time.LoadLocation(zone); err != nil {
+			t.Fatalf("time.LoadLocation(%q) failed: %v — the operator must embed tzdata "+
+				"(import _ \"time/tzdata\" in main.go) so warmSchedule timezones resolve on "+
+				"distroless/static, which has no /usr/share/zoneinfo", zone, err)
+		}
+	}
+}
+
 // These tests pin the #252 fix: the manager's readiness (readyz) must gate on
 // the webhook server's TLS listener, so that a Ready pod ⇒ a serving
 // validating webhook (failurePolicy=Fail blocks ALL NextApp writes when the

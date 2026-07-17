@@ -32,12 +32,13 @@ import (
 )
 
 // validateCronExpr validates the 5-field (minute hour day-of-month month
-// day-of-week) cron syntax used by Kubernetes CronJob schedules — the exact
-// parser flavour (robfig/cron ParseStandard) the Kubernetes CronJob controller
-// uses, so a warmSchedule cron the operator accepts is one the generated
-// CronJob will accept. A trailing seconds field, an out-of-range value, or
-// unparseable text is rejected at admission (ADR-0030) instead of failing
-// silently in the scheduler.
+// day-of-week) cron syntax of a warmSchedule window start/end. It uses the same
+// robfig/cron ParseStandard parser the operator's reconcile-time window
+// evaluation (warmScheduleFloor, ADR-0030) uses, so a cron this admission check
+// accepts is exactly one the reconciler can evaluate. Rejecting a trailing
+// seconds field, an out-of-range value, or unparseable text HERE (at admission)
+// means a malformed cron never reaches the operator's min-scale floor
+// calculation — where it would otherwise be skipped and silently warm nothing.
 func validateCronExpr(expr string) error {
 	_, err := cron.ParseStandard(strings.TrimSpace(expr))
 	return err
@@ -212,15 +213,17 @@ func ValidateNextAppSpec(spec *appsv1alpha1.NextAppSpec) error {
 			}
 		}
 
-		// Scheduled warm-floor windows (ADR-0030, W5/#380). Each window declares
-		// a cron start/end and a warm-pod floor, translated by the operator into
-		// a pair of Kubernetes CronJobs that patch the ksvc min-scale annotation.
-		// Validated here (shared with the fail-closed reconciler) so a bad window
-		// is rejected at admission AND a stored CR with one is refused rather than
-		// silently emitting a CronJob the scheduler will reject. CRD CEL enforces
-		// MinLength/Minimum on the fields; the checks below add the cron SYNTAX
-		// validation (the exact 5-field parser the Kubernetes CronJob controller
-		// uses) and the cross-field replicas ≤ maxScale rule CEL cannot express
+		// Scheduled warm-floor windows (ADR-0030, W5/#380). Each window declares a
+		// cron start/end and a warm-pod floor. At runtime the OPERATOR (the single
+		// writer of min-scale) evaluates these windows against NOW on every
+		// reconcile and stamps max(minScale, active-window replicas) onto the ksvc
+		// min-scale annotation — there is no CronJob. Validated here (shared with
+		// the fail-closed reconciler) so a bad window is rejected at admission AND
+		// a stored CR with one is refused, rather than a malformed cron silently
+		// being skipped in the reconcile floor calc (warming nothing). CRD CEL
+		// enforces MinLength/Minimum on the fields; the checks below add the cron
+		// SYNTAX validation (the same robfig/cron parser the reconciler evaluates
+		// with) and the cross-field replicas ≤ maxScale rule CEL cannot express
 		// against a sibling field cleanly.
 		for i, w := range s.WarmSchedule {
 			if strings.TrimSpace(w.Start) == "" {
