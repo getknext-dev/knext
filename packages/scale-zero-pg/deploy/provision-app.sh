@@ -643,6 +643,11 @@ cmd_render() {
     "${Q_MAX_CONNS:-$DEF_MAX_CONNS}"
 }
 
+# Source-guard: when this file is `source`d (e.g. by test_provision-app.sh to
+# unit-test cmd_fsck's classification with stubbed K/PS), skip the CLI dispatch so
+# the functions can be called directly without argv side effects (#337).
+[ "${PROVISION_APP_SOURCED:-0}" = 1 ] && return 0 2>/dev/null
+
 case "${1:-}" in
   init-plane)      shift; cmd_init_plane "$@";;
   create)          shift; cmd_create "$@";;
