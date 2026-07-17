@@ -114,9 +114,10 @@ pool's **first client acquisition — via `pool.query(...)` OR `pool.connect()`*
 the scale-zero-pg 0→1 wake — as `knext.db_wake` (attributes `knext.db_role` =
 `writer`/`reader`, `knext.wake_ms`). It opens in the caller's active context, so
 inside a request handler it nests under the request span. Both entry points share
-one per-pool latch, so the wake fires **exactly once** no matter which path runs
-first; warm queries/connects from the ready pool are untouched — the span marks
-the wake, not every checkout.
+one per-pool latch that is consumed on the **first _successful_ acquisition**, so
+the wake metric fires **exactly once** no matter which path runs first; warm
+queries/connects from the ready pool are untouched — the span marks the wake, not
+every checkout.
 
 > Why both paths (#345): the common app pattern is `db.query(...)`, never
 > `db.connect()`. node-pg's `Pool.query()` acquires a client through an internal
@@ -124,6 +125,22 @@ the wake, not every checkout.
 > left `knext.db_wake` (and the `knext_db_wake_*` metric) dead for typical usage.
 > The wrapper now covers `query` too, preserving every pg overload (text, params,
 > config object, with/without callback) and staying fail-open.
+
+> Why the latch consumes on **success only** (#336): the previous code flipped
+> the `waked` latch _before_ awaiting `connect()`/`query()`, so if the very first
+> 0→1 acquisition **rejected** (the scale-zero-pg cold case: gateway still waking
+> / connect timeout) the failed attempt consumed the latch and the successful
+> **retry** — the real wake — was recorded as a warm no-op. `knext_db_wake_*` then
+> measured the failed attempt's latency, not the actual wake, and lost the metric
+> precisely on the slow/failure-prone cold path. The latch is now consumed **only
+> when an acquisition resolves successfully**: a failed attempt is still
+> error-spanned (`knext.db_wake` with ERROR status) but does **not** steal the
+> latch, so the next attempt is treated as the first wake and its success gets the
+> span + `knext.wake_ms` + metric. Under concurrency (Node single-threaded), each
+> not-yet-warm acquisition opens its own span but the success + metric are recorded
+> only by the **first attempt to resolve** (check-then-set on `waked`), so N racing
+> first-connects — even one rejecting while another succeeds — yield exactly one
+> metric increment and one successful `knext.db_wake` span.
 
 > Why the seam state lives on `globalThis` (#352): every `@knext/lib` seam that
 > is SET by `instrumentation.ts` but READ elsewhere on the request path
@@ -295,6 +312,11 @@ collector):
   fires on the `pool.query()` path (the real usage), a shared connect+query latch
   fires exactly once, pg query overloads keep their semantics, and the error/
   fail-open paths never break the query.
+- `packages/kn-next/src/__tests__/tracing-dbwake-reject.test.ts` — #336: when the
+  first 0→1 acquisition REJECTS and a retry succeeds, the db_wake span + metric
+  land on the successful retry (not the failed attempt); failed attempts stay
+  error-spanned; exactly-once on success holds across query+connect; and a
+  concurrent reject/succeed race yields exactly one successful db_wake span.
 - `packages/kn-next/src/__tests__/tracing.test.ts` — the helper units
   (`withColdStartSpan` / `withDbWakeSpan`, attributes, nesting, `trace_id` join).
 - `packages/lib/src/__tests__/clients-instrumentor.test.ts` — the `@knext/lib`

@@ -507,9 +507,37 @@ export function instrumentPoolForDbWake(
     role: "writer" | "reader",
     onDbWake?: (role: "writer" | "reader", wakeMs: number) => void,
 ): void {
-    // Shared latch across BOTH connect() and query() so the wake fires exactly
-    // once per pool regardless of which acquisition path runs first (#345).
-    const state = { waked: false };
+    // Shared wake-latch across BOTH connect() and query() (#345, #336).
+    //
+    //   waked   — a client acquisition has SUCCEEDED. Permanent: once set, every
+    //             later acquisition is warm and passes straight through.
+    //
+    // #336: the latch is consumed (waked=true) only on a SUCCESSFUL acquisition.
+    // If the first attempt REJECTS during the 0→1 wake (scale-zero-pg cold case:
+    // gateway still waking / connect timeout), the failed attempt is error-
+    // spanned but does NOT set `waked`, so the next attempt (the retry) is still
+    // treated as the first wake and gets its own db_wake span/metric on success.
+    //
+    // Concurrency (Node is single-threaded; each decision below runs to completion
+    // with no interleaving — no locks needed). Every not-yet-warm acquisition
+    // opens its OWN db_wake span and runs the op; the span records the SUCCESS +
+    // metric only for the FIRST attempt that RESOLVES, guarded by the shared
+    // `waked` latch that is check-then-set atomically inside that resolution:
+    //   - On success: if `!waked`, set waked=true and end THIS span with success +
+    //     the wake latency + metric. That is the real wake. If `waked` is already
+    //     set (a concurrent sibling won the race and recorded first), end THIS
+    //     span WITHOUT a metric — it was a redundant concurrent wake, no double-
+    //     count. (After `waked` is set, no NEW spans are opened — later calls take
+    //     the warm pass-through at the top — so at most the already-open siblings
+    //     end quietly.)
+    //   - On rejection: record the error on THIS span and end it, but do NOT set
+    //     `waked`. A failed attempt never steals the latch (#336), so the next
+    //     acquisition still opens a first-wake span and can record the eventual
+    //     successful wake.
+    // Net: exactly ONE span records the success + fires the metric (the first
+    // resolver), failed attempts are error-spanned, and the metric measures the
+    // real successful-wake latency — never a failed attempt's latency.
+    const state: WakeState = { waked: false };
 
     const originalConnect = pool.connect;
     if (typeof originalConnect === "function") {
@@ -563,51 +591,78 @@ export function instrumentPoolForDbWake(
 }
 
 /**
- * Run the FIRST-acquisition work inside a `knext.db_wake` span, flip the shared
- * latch, record the wake latency + optional metric, and preserve the callee's
- * return value / error propagation / promise-or-sync shape. Fail-open: the
- * metric emitter is guarded so a throwing emitter never breaks the DB call.
+ * Per-pool wake state shared across connect()/query() (#336).
+ * See {@link instrumentPoolForDbWake} for the concurrency contract.
+ */
+interface WakeState {
+    /** A client acquisition has SUCCEEDED — permanent; later calls are warm. */
+    waked: boolean;
+}
+
+/**
+ * Run a not-yet-warm acquisition inside a `knext.db_wake` span and preserve the
+ * callee's return value / error propagation / promise-or-sync shape. Fail-open:
+ * the metric emitter is guarded so a throwing emitter never breaks the DB call.
+ *
+ * #336: the shared `waked` latch is consumed (and the metric emitted) ONLY when
+ * this attempt RESOLVES successfully AND no concurrent sibling has already
+ * recorded the wake (check-then-set on `state.waked`, atomic under Node's
+ * single-threaded model). A REJECTION is error-recorded on the span but does NOT
+ * consume the latch, so the next acquisition (the retry) still opens a first-wake
+ * span and can record the real successful wake.
  */
 function firstWake(
-    state: { waked: boolean },
+    state: WakeState,
     role: "writer" | "reader",
     onDbWake: ((role: "writer" | "reader", wakeMs: number) => void) | undefined,
     call: () => unknown,
 ): unknown {
-    state.waked = true;
     const startedAt = Date.now();
     return tracer().startActiveSpan(
         DB_WAKE_SPAN_NAME,
         { attributes: { "knext.db_role": role } },
         (span) => {
-            const finish = () => {
+            // Called on SUCCESS: consume the latch + emit the metric only if this
+            // attempt is the first to resolve (no sibling won the race).
+            const finishSuccess = () => {
                 const wakeMs = Math.max(0, Date.now() - startedAt);
                 span.setAttribute("knext.wake_ms", wakeMs);
-                emitDbWake(onDbWake, role, wakeMs);
+                if (!state.waked) {
+                    state.waked = true;
+                    emitDbWake(onDbWake, role, wakeMs);
+                }
+                span.end();
+            };
+            // Called on FAILURE: record the error, end the span, but leave the
+            // latch UNCONSUMED so the retry is still treated as the first wake.
+            const finishError = (err: unknown) => {
+                recordError(span, err);
+                span.setAttribute(
+                    "knext.wake_ms",
+                    Math.max(0, Date.now() - startedAt),
+                );
                 span.end();
             };
             let result: unknown;
             try {
                 result = call();
             } catch (err) {
-                recordError(span, err);
-                finish();
+                finishError(err);
                 throw err;
             }
             if (isPromise(result)) {
                 return result.then(
                     (value) => {
-                        finish();
+                        finishSuccess();
                         return value;
                     },
                     (err) => {
-                        recordError(span, err);
-                        finish();
+                        finishError(err);
                         throw err;
                     },
                 );
             }
-            finish();
+            finishSuccess();
             return result;
         },
     );
@@ -620,31 +675,35 @@ function firstWake(
  * then invoke the original with the wrapped callback in place of the last arg.
  */
 function firstWakeCallback(
-    state: { waked: boolean },
+    state: WakeState,
     role: "writer" | "reader",
     onDbWake: ((role: "writer" | "reader", wakeMs: number) => void) | undefined,
     args: unknown[],
     userCb: (...cbArgs: unknown[]) => void,
     invoke: (patchedArgs: unknown[]) => unknown,
 ): unknown {
-    state.waked = true;
     const startedAt = Date.now();
     return tracer().startActiveSpan(
         DB_WAKE_SPAN_NAME,
         { attributes: { "knext.db_role": role } },
         (span) => {
             let ended = false;
+            // #336: consume the latch + emit the metric only when the callback
+            // delivers a SUCCESS and no sibling has recorded yet; an error ends
+            // the span but leaves the latch unconsumed so the retry re-wakes.
             const finish = (err?: unknown) => {
                 if (ended) {
                     return;
                 }
                 ended = true;
-                if (err) {
-                    recordError(span, err);
-                }
                 const wakeMs = Math.max(0, Date.now() - startedAt);
                 span.setAttribute("knext.wake_ms", wakeMs);
-                emitDbWake(onDbWake, role, wakeMs);
+                if (err) {
+                    recordError(span, err);
+                } else if (!state.waked) {
+                    state.waked = true;
+                    emitDbWake(onDbWake, role, wakeMs);
+                }
                 span.end();
             };
             const wrappedCb = (...cbArgs: unknown[]) => {
