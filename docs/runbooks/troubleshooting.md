@@ -293,6 +293,54 @@ ADR-0019) cause the timeout:
 [postgres scale-to-zero](../operator/postgres-scale-to-zero.md). This is a client
 configuration fix, not a cluster change.
 
+### Deep-health stuck WAKING (permanent DB outage) {#deep-health-stuck-waking-permanent-db-outage}
+
+**Symptom.** `KnextDeepHealthStuckWaking` fires (severity: critical). The
+deep-health state gauge `knext_deep_health_state{dependency="overall",
+state="waking"}` has been `1` for over 2 minutes.
+
+**Normal vs stuck.** The deep health check (`checkDeepHealth`, ADR-0026/#338)
+classifies a **connection-level** failure to Postgres — `ECONNREFUSED`, a
+connect timeout, dead DNS — as `waking`, NOT `down`. That is deliberate: a
+scale-to-zero database asleep behind the scale-zero-pg gateway shows exactly
+that signature while it wakes, and a legitimate wake is **brief (~2-6s)**. So a
+short blip of `waking` is normal and does **not** page.
+
+A **genuinely-down** DB (host gone, dead DNS, a bad/rotated `DATABASE_URL`)
+presents the *same* connection-level errors — so it sits at `waking`
+**forever** and never becomes `down` (only a *reachable-but-erroring* query
+yields `down`). An alert keyed on `down`/503 alone would therefore **never
+page** on a permanent connection-level outage. This alert closes that gap by
+paging on `waking` **sustained past the wake budget** (`for: 2m`).
+
+**What it means.** The app cannot reach its database at the connection level for
+minutes — this is a real outage, not a wake.
+
+**Act.**
+
+1. Confirm it is not a legitimate very-slow wake: check the scale-zero-pg
+   gateway + `compute-<app>` — is the compute scaling up, or stuck at 0 /
+   crash-looping? See [postgres scale-to-zero](../operator/postgres-scale-to-zero.md).
+2. Verify the app's `DATABASE_URL` Secret resolves to a live host/port (dead DNS
+   or a rotated DSN is the common cause — cross-check §5 / §7 above).
+3. If the gateway is healthy but the app still can't connect, check the
+   NetworkPolicy to the DB host (§10) and the client connect timeout (§9 above).
+
+The alert resolves automatically once a scrape observes the DB reachable again
+(the gauge flips `waking`→`ok`/`up` on the next scrape).
+
+**Why this doesn't break scale-to-zero.** The gauge is refreshed on the :9091
+scrape by running `checkDeepHealth()`, which issues a real `SELECT 1` through
+the scale-zero-pg gateway — and that would re-arm the gateway's 60s DB idle
+timer on every ~30s scrape, keeping an idle app's DB awake forever. So the
+scrape dial is **activity-gated**: it runs the deep DB probe **only when the app
+used its writer pool recently** (within `DB_ACTIVITY_BUDGET_MS`, default 45s —
+below the 60s gateway idle). An idle app (not querying its DB) is **never**
+probed by the scrape, so its DB sleeps normally; the gauge just holds its
+last-known value. This is safe for the alert because a stuck-`waking` outage
+only matters when the app is actively trying to use the DB — which is exactly
+when the gate is open and the probe runs.
+
 ## 10 — NetworkPolicy blocks the activator
 
 **Symptom.** The app pod is Running but unreachable; scale-from-zero requests

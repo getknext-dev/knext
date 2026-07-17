@@ -71,6 +71,34 @@ export const COLDSTART_DURATION_METRIC = "knext_coldstart_duration_seconds";
 export const DB_WAKE_TOTAL_METRIC = "knext_db_wake_total";
 /** DB wake-latency histogram (seconds), labeled by pool role. */
 export const DB_WAKE_DURATION_METRIC = "knext_db_wake_duration_seconds";
+/**
+ * Deep-health state gauge (#348), labeled by `dependency` + `state`. For each
+ * dependency (and the `overall` roll-up) the ACTIVE state is 1 and every other
+ * state 0. This exposes the {@link import("@knext/lib/health").checkDeepHealth}
+ * verdict as a SCRAPABLE series so Prometheus can alert on a SUSTAINED `waking`
+ * — a permanent connection-level DB outage that `checkDeepHealth` correctly
+ * classifies `waking` forever (never `down`), so `down`/503-keyed alerts alone
+ * would never page.
+ */
+export const DEEP_HEALTH_STATE_METRIC = "knext_deep_health_state";
+
+/**
+ * The fixed, bounded set of deep-health states we emit for the `overall`
+ * roll-up. Emitting every state as its own series (active=1, rest=0) means an
+ * alert on `state="waking" == 1` is unambiguous AND self-clears when the state
+ * flips (the prior `waking` series drops to 0). Bounded by construction — no
+ * unbounded label growth.
+ */
+const DEEP_HEALTH_STATES = ["ok", "degraded", "down", "waking"] as const;
+/** Per-dependency sub-check states (postgres adds `waking`; redis never wakes). */
+const DEEP_HEALTH_DEP_STATES = [
+    "up",
+    "down",
+    "unconfigured",
+    "waking",
+] as const;
+/** Dependencies we roll up plus the composite. Bounded, no per-instance labels. */
+const DEEP_HEALTH_DEPENDENCIES = ["overall", "postgres", "redis"] as const;
 
 /** Latency buckets: sub-ms floor up to slow / cold paths (seconds). */
 const REQUEST_LATENCY_BUCKETS = [
@@ -94,6 +122,22 @@ export interface KnextMetrics {
     readonly coldstartDuration: Histogram<"app">;
     readonly dbWakeTotal: Counter<"app" | "role">;
     readonly dbWakeDuration: Histogram<"app" | "role">;
+    readonly deepHealthState: Gauge<"app" | "dependency" | "state">;
+}
+
+/**
+ * The minimal shape of a `@knext/lib` `HealthStatus` (deliberately duplicated
+ * so this core module keeps NO dependency on `@knext/lib` — the app wiring
+ * bridges the two). Structurally matches `checkDeepHealth`'s return.
+ */
+export interface DeepHealthSnapshot {
+    readonly status: "ok" | "degraded" | "down" | "waking";
+    readonly checks: {
+        readonly postgres: "up" | "down" | "unconfigured" | "waking";
+        readonly redis: "up" | "down" | "unconfigured";
+    };
+    /** Present on the real `@knext/lib` HealthStatus; unused here. */
+    readonly timestamp?: string;
 }
 
 /**
@@ -150,6 +194,12 @@ export function createMetricsRegistry(
         buckets: WAKE_LATENCY_BUCKETS,
         registers: [registry],
     });
+    const deepHealthState = new Gauge({
+        name: DEEP_HEALTH_STATE_METRIC,
+        help: "Deep-health verdict per dependency + the overall roll-up: the active state is 1, every other state 0 (#348). Alert on overall state='waking' sustained past the wake budget.",
+        labelNames: ["app", "dependency", "state"] as const,
+        registers: [registry],
+    });
     return {
         registry,
         app,
@@ -160,6 +210,7 @@ export function createMetricsRegistry(
         coldstartDuration,
         dbWakeTotal,
         dbWakeDuration,
+        deepHealthState,
     };
 }
 
@@ -196,6 +247,88 @@ export function recordDbWake(
     metrics.dbWakeDuration
         .labels({ app: metrics.app, role })
         .observe(Math.max(0, wakeMs) / 1000);
+}
+
+/**
+ * Refresh the `knext_deep_health_state` gauge (#348) from a deep-health
+ * snapshot: for each dependency (and the `overall` roll-up) set the ACTIVE
+ * state to 1 and every OTHER known state to 0. Emitting all states as explicit
+ * 0/1 series means an alert on `state="waking" == 1` is unambiguous and
+ * SELF-CLEARS when the state flips — the previously-active series drops to 0,
+ * with no stale `waking=1` left behind.
+ *
+ * Called by the app wiring on the :9091 SCRAPE cadence (right before serving
+ * exposition) after running `checkDeepHealth()` — no new background timer, the
+ * deep check runs on Prometheus's scrape interval.
+ */
+export function refreshDeepHealthGauge(
+    metrics: KnextMetrics,
+    health: DeepHealthSnapshot,
+): void {
+    const { app } = metrics;
+    for (const state of DEEP_HEALTH_STATES) {
+        metrics.deepHealthState
+            .labels({ app, dependency: "overall", state })
+            .set(state === health.status ? 1 : 0);
+    }
+    for (const state of DEEP_HEALTH_DEP_STATES) {
+        metrics.deepHealthState
+            .labels({ app, dependency: "postgres", state })
+            .set(state === health.checks.postgres ? 1 : 0);
+    }
+    for (const state of DEEP_HEALTH_DEP_STATES) {
+        metrics.deepHealthState
+            .labels({ app, dependency: "redis", state })
+            .set(state === health.checks.redis ? 1 : 0);
+    }
+}
+
+// Reference the bounded dependency list so it stays a documented source of
+// truth (the loops above enumerate the individual members explicitly).
+void DEEP_HEALTH_DEPENDENCIES;
+
+/** Dependencies the scrape hook injects (kept core-owned + @knext/lib-free). */
+export interface DeepHealthScrapeDeps {
+    /** Runs the deep dependency check (bridged from `@knext/lib/health`). */
+    readonly checkDeepHealth: () => Promise<DeepHealthSnapshot>;
+    /**
+     * Whether the app used the DB pool RECENTLY (bridged from `@knext/lib`'s
+     * `isDbRecentlyActive`). When false, the hook SKIPS the deep check so an idle
+     * app's scale-to-zero DB is never woken by the :9091 scrape (#348 gate fix).
+     */
+    readonly isRecentlyActive: () => boolean;
+}
+
+/**
+ * Build the :9091 scrape hook that refreshes the deep-health gauge — ACTIVITY-
+ * GATED (#348 gate fix). It runs `checkDeepHealth()` (which dials Postgres) ONLY
+ * when `isRecentlyActive()` is true; when the app has been idle past the DB
+ * activity budget it does NOTHING, leaving the gauge at its last-known value so
+ * the idle DB can sleep normally. This preserves BOTH the alert (a real in-use
+ * DB stuck `waking` still pages) AND scale-to-zero (an idle app's DB sleeps).
+ *
+ * Fail-open: a throwing deep check never rejects the scrape.
+ */
+export function makeDeepHealthScrapeHook(
+    metrics: KnextMetrics,
+    deps: DeepHealthScrapeDeps,
+): () => Promise<void> {
+    return async () => {
+        // ACTIVITY GATE: skip the DB dial entirely when the pool is idle. This is
+        // the whole fix — no `SELECT 1` on scrape while idle ⇒ the gateway lets
+        // the DB sleep. A stuck-`waking` outage only matters while the app is
+        // actively using the DB, which is exactly when this gate is open.
+        if (!deps.isRecentlyActive()) {
+            return;
+        }
+        try {
+            const health = await deps.checkDeepHealth();
+            refreshDeepHealthGauge(metrics, health);
+        } catch {
+            // Fail-open: a failed deep check must never fail the scrape; leave the
+            // gauge at its last-known value.
+        }
+    };
 }
 
 // ── The golden-signal span processor ──────────────────────────────────────────
@@ -373,9 +506,22 @@ export function startChildMetricsServer(
     registry: Registry,
     port: number = CHILD_METRICS_PORT,
     host = "127.0.0.1",
+    onScrape?: () => Promise<void> | void,
 ): http.Server {
     const server = http.createServer(async (req, res) => {
         if (req.url === "/metrics" && req.method === "GET") {
+            // Refresh scrape-cadence-driven gauges (e.g. the #348 deep-health
+            // state) right before serving. This runs the deep check on
+            // Prometheus's scrape interval — no new background timer. FAIL-OPEN:
+            // a throwing hook must never fail the scrape, so we still serve the
+            // base registry (a missing refresh is a stale-but-present sample).
+            if (onScrape) {
+                try {
+                    await onScrape();
+                } catch {
+                    // fall through and serve whatever the registry has
+                }
+            }
             res.setHeader("Content-Type", registry.contentType);
             res.end(await registry.metrics());
             return;

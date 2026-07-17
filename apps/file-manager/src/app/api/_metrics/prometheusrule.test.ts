@@ -33,6 +33,8 @@ const KNOWN_SERIES = [
   // kube-state-metrics series for the Degraded condition (documented dependency)
   'kube_customresource',
   'knext_nextapp_condition',
+  // #348 deep-health state gauge (packages/kn-next/src/adapters/metrics.ts).
+  'knext_deep_health_state',
 ];
 
 interface Rule {
@@ -99,5 +101,30 @@ describe('PrometheusRule manifest', () => {
     expect(names).toContain('KnextColdStartLatencyHigh');
     // cache/Redis unreachable
     expect(names).toContain('KnextCacheUnreachable');
+  });
+
+  // #348: a permanent connection-level DB outage sits at `waking` forever and
+  // never becomes `down`, so alerting on `down`/503 alone never pages. The
+  // sustained-waking alert closes that gap.
+  it('#348 fires a SUSTAINED-waking alert on knext_deep_health_state with for: well above the wake budget', () => {
+    const { docs } = loadRule();
+    const rule = docs.find((d) => d?.kind === 'PrometheusRule');
+    const alerts = rule.spec.groups.flatMap((g: { rules: (Rule & { for?: string })[] }) => g.rules);
+    const stuck = alerts.find((a: Rule) => a.alert === 'KnextDeepHealthStuckWaking') as
+      | (Rule & { for?: string })
+      | undefined;
+
+    expect(stuck, 'KnextDeepHealthStuckWaking alert must exist').toBeDefined();
+    // Keys on the new deep-health state gauge, the waking slice specifically.
+    expect(stuck?.expr).toContain('knext_deep_health_state');
+    expect(stuck?.expr).toMatch(/state="waking"/);
+    // `for:` must be well above the ~2-6s legitimate wake so a normal brief
+    // wake NEVER pages, only a stuck-waking (real outage) does.
+    expect(stuck?.for).toBeTruthy();
+    const m = /^(\d+)m$/.exec(stuck?.for ?? '');
+    expect(m, `for: must be minutes-scale, got ${stuck?.for}`).not.toBeNull();
+    expect(Number(m?.[1])).toBeGreaterThanOrEqual(2);
+    expect(stuck?.labels?.severity).toMatch(/^(critical|warning)$/);
+    expect(stuck?.annotations?.runbook_url ?? stuck?.annotations?.runbook).toBeTruthy();
   });
 });

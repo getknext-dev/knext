@@ -244,6 +244,19 @@ livenessProbe:
 
 Point Prometheus/alerting at `/api/health/deep`, not at the probe path.
 
+**Deep health as a scrapable metric (activity-gated, #348).** The deep verdict
+is also exported on the runtime `:9091` registry as
+`knext_deep_health_state{app,dependency,state}` (active state=1, others=0), which
+the `KnextDeepHealthStuckWaking` alert keys on to page when a permanent
+connection-level DB outage sits at `waking` past the wake budget (a case
+`down`/503 alerts miss). Critically, this gauge is refreshed **only when the app
+used its writer pool recently** (`DB_ACTIVITY_BUDGET_MS`, default 45s — below
+the 60s gateway idle window). That activity-gate is what keeps observability
+from breaking scale-to-zero: an unconditional deep probe on every ~30s scrape
+would issue a `SELECT 1` that re-arms the gateway idle timer and keep an idle
+app's DB permanently awake. An **idle** app is never probed by the scrape, so
+its DB sleeps; a genuinely-**in-use** DB stuck `waking` still pages.
+
 **Flags — read before adopting:**
 - **Lock-in / not the default.** These are **managed, provider-hosted** options. knext's default
   and the SCS data-sovereignty contract assume an **in-cluster CloudNativePG** database; a managed
