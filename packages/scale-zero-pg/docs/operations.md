@@ -1934,6 +1934,59 @@ dry-runs the manifest(s) and self-checks the summary parser + the fan-out aggreg
 from a sample k6 JSON, the fan-out renders N distinct shard Jobs, and the aggregator sums
 RPS/VUs and count-weight-pools the percentiles correctly on fixed inputs.
 
+### Writer vertical-autoscale ceiling under sustained WRITE load (issue #379, wave #375 W4)
+
+The soak harness above is **read-oriented** (HTTP GETs). This drill drives the other axis:
+**sustained WRITE load** at ONE app's writer to (a) prove the #103 writer vertical-autoscaler
+does an **in-place** cpu-limit resize (`restartCount` stays 0) *under real gateway write load*
+— not the synthetic in-container CPU burner of `_verify-writer-autoscaler.sh` — then a
+**hysteresis** resize-down after the load drains; and (b) publish the **write RPS ceiling**,
+the honest hard limit: writes scale **only vertically** to the node/limit ceiling (single
+writer; beyond that = sharding, out of scope for the wave).
+
+The load generator is an **in-cluster loader Deployment** (`WC_LOADERS` pods, default 4), each
+running a tight `psql` INSERT loop **through the apps-gateway on the app's own branch**:
+
+```
+postgres://app_<app>:<pw>@pggw-apps:55432/<app>?sslmode=disable
+```
+
+INSERTing batches of `WC_BATCH` rows into a **throwaway `wc_drill` table** (created in setup,
+dropped in teardown) on that branch. This reuses the **real** knext write path and respects
+single-writer + tenant sovereignty — the loader **never** dials `compute-<app>:55433` directly.
+Each loader counts its committed batches and prints a sentinel `WCLOAD ok=<N> err=<M> secs=<S>`
+on SIGTERM; the drill's pure parser turns that into a per-loader write-RPS, and the fleet
+aggregates by **summing** the disjoint per-loader streams (same reasoning as the #382 loadsoak
+RPS sum). While the load ramps + soaks, the drill samples on `compute-<app>` the **actuated**
+cpu-limit (from pod `.status`, not the spec), the `restartCount` (must stay at baseline), and
+`kubectl top` CPU, plus the gateway `pggw_*` snapshot via Prometheus.
+
+Run (self-cleaning; idempotent teardown drops the drill table, restores the autoscaler to its
+committed cadence, rests the writer, and destroys the drill app it provisioned):
+
+```sh
+cd deploy
+WC_APP=wcdrill WC_LOADERS=4 WC_BATCH=50 \
+  WC_RAMP_S=60 WC_SOAK_S=180 WC_DRAIN_S=210 \
+  WC_CONTEXT=context-ckmva7v7zvq \
+  ./_verify-writer-ceiling.sh
+```
+
+The drill **auto-skips cleanly** (exit 0) if metrics-server, the `writer-autoscaler` Deployment
+(#103), or the apps-gateway are absent — the autoscaler cannot actuate without them. Reuse an
+existing app with `WC_KEEP_APP=1` (then it is not destroyed on teardown). On a
+**CPU-request-constrained cluster** the loaders may not drive the single writer past
+`WAS_UP_RATIO`; the drill says so honestly and still publishes the write-RPS ceiling it reached
+(the writer proof and the ceiling number are reported independently). Paste the emitted
+`app | phase | writeRPS | ok | err | err% | secs` fleet row into `docs/BENCHMARKS.md` under
+"Writer vertical-autoscale under sustained write load (#379)" (rule 2b).
+
+**Cluster-free validation** (no OKE, no psql binary): `SELFTEST=1 ./_verify-writer-ceiling.sh`
+renders + dry-runs the loader manifest (asserting it writes *through* pggw-apps, never a bypass)
+and self-checks the parsers; `bash test_verify-writer-ceiling.sh` asserts `parse_wcount` /
+`aggregate_wcounts` produce the exact row format on fixed inputs and that a poisoned knob fails
+`render_loader` closed.
+
 ### Deprovision is safe by default (issue #91)
 
 `destroy <app>` — the obvious command, **no flag** — now DELETEs the app's Neon
