@@ -245,16 +245,19 @@ type PreviewSpec struct {
 //
 // PoolMax is the OPTIONAL per-pod DB connection-pool maximum. When set (>0) it
 // lets the operator enforce the ADR-0028 connection-wall invariant
-// `maxScale × poolMax ≤ max_connections` (100) — a lower ContainerConcurrency
-// scales apps to more pods sooner, so without this guard it could silently
-// exhaust the DB's connections. Leave unset (0) to skip the check (documented,
-// not enforced). W3 (#378) owns breaking the wall (e.g. a shared pooler).
+// `maxScale × poolMax ≤ 80` — the app connection budget (GW_MAX_CONNS 90 minus
+// an admin/replication reserve), NOT the raw Postgres max_connections (100). A
+// lower ContainerConcurrency scales apps to more pods sooner, so without this
+// guard it could silently exhaust the gateway/DB. Leave unset (0) to skip the
+// check (documented, not enforced). W3 (#378) owns breaking the wall (e.g. a
+// shared pooler).
 type ScalingSpec struct {
 	MinScale             int32 `json:"minScale,omitempty"`
 	MaxScale             int32 `json:"maxScale,omitempty"`
 	ContainerConcurrency int32 `json:"containerConcurrency,omitempty"`
 	// PoolMax is the per-pod DATABASE_URL connection-pool maximum. When >0 the
-	// operator enforces maxScale × poolMax ≤ max_connections (ADR-0028).
+	// operator enforces maxScale × poolMax ≤ 80 (the app connection budget,
+	// ADR-0028).
 	// +optional
 	PoolMax int32 `json:"poolMax,omitempty"`
 }

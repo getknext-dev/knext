@@ -32,7 +32,7 @@ All fields below are defined on the `NextApp` CRD in
 | `MinScale` | `minScale` | `autoscaling.knative.dev/min-scale` annotation | `0` |
 | `MaxScale` | `maxScale` | `autoscaling.knative.dev/max-scale` annotation | `10` |
 | `ContainerConcurrency` | `containerConcurrency` | Knative `spec.template.spec.containerConcurrency` | `20` (was `100` — lowered in #377 / ADR-0028) |
-| `PoolMax` | `poolMax` | *validation only* — the per-pod DB pool max used to enforce `maxScale × poolMax ≤ max_connections` (ADR-0028) | *unset (check skipped)* |
+| `PoolMax` | `poolMax` | *validation only* — the per-pod DB pool max used to enforce `maxScale × poolMax ≤ 80` (the app connection budget, ADR-0028) | *unset (check skipped)* |
 
 The defaults are asserted by the reconciler test
 `reconcile_output_test.go` →
@@ -172,16 +172,25 @@ The operator can **enforce** the wall for you: declare your per-pod pool max in
 code the admission webhook runs) **rejects** any spec where
 
 ```
-maxScale × poolMax > max_connections   (max_connections = 100, ADR-0028)
+maxScale × poolMax > MaxAppConnections   (MaxAppConnections = 80, ADR-0028)
+
+where 80 = GW_MAX_CONNS (90) − ~10 reserve
+         (superuser_reserved_connections + replication + wake-probe headroom)
 ```
+
+The bound is the **app connection budget `80`**, NOT the raw Postgres
+`max_connections=100`: the wake gateway hard-caps at `GW_MAX_CONNS=90` (excess →
+SQLSTATE `53300` too_many_connections) and Postgres reserves connections for
+superuser/replication. Sizing against 100 would blow the 90 cap and leave zero
+admin headroom.
 
 - **`poolMax` unset (`0`)** → the check is **skipped** (the operator cannot guard
   a wall it does not know about). The wall still exists — it is documented here
   and in ADR-0028; you are responsible for keeping `maxScale × app_pool_max`
-  under `max_connections` yourself (or fronting Postgres with a pooler).
+  under `80` yourself (or fronting Postgres with a pooler).
 - **`poolMax` set with an unbounded `maxScale: 0`** → **rejected**: an unbounded
-  fan-out can never fit a finite ceiling. Set a finite `maxScale`.
-- **`poolMax` set with a finite `maxScale`** → accepted iff the product ≤ 100.
+  fan-out can never fit a finite budget. Set a finite `maxScale`.
+- **`poolMax` set with a finite `maxScale`** → accepted iff the product ≤ 80.
 
 Example that is **rejected** at admission (and by the fail-closed reconciler):
 
@@ -189,7 +198,7 @@ Example that is **rejected** at admission (and by the fail-closed reconciler):
 spec:
   scaling:
     maxScale: 10
-    poolMax: 20   # 10 × 20 = 200 > 100 → rejected (ADR-0028 connection wall)
+    poolMax: 20   # 10 × 20 = 200 > 80 → rejected (ADR-0028 connection wall)
 ```
 
 Breaking the wall itself — e.g. a shared server-side pooler so instance count no
@@ -265,7 +274,7 @@ spec:
     minScale: 0              # cost floor — scale to zero when idle (set 1 to pin a warm pod)
     maxScale: 10             # reactive fan-out ceiling
     containerConcurrency: 20 # = operator default; low => a 2nd pod is added early under burst
-    poolMax: 5               # per-pod DB pool max => 10 × 5 = 50 ≤ 100 (wall holds)
+    poolMax: 5               # per-pod DB pool max => 10 × 5 = 50 ≤ 80 (app budget holds)
   cache:
     provider: redis
     enableBytecodeCache: true  # keep each scale-up cheap
@@ -278,12 +287,14 @@ Tuning guidance for the three knobs:
 | Trigger scale-out sooner / cut tail latency under burst | **Lower** `containerConcurrency` (adds pods earlier). W1 (#376) publishes the curve. |
 | Cut cost / accept a cold start on the first request | `minScale: 0` (default). |
 | Never cold-start on the critical path | `minScale: 1` (one warm pod, 24/7 cost). |
-| Cap the reactive fan-out | `maxScale` — and set `poolMax` so the operator **enforces** `maxScale × poolMax ≤ 100`. |
-| Break the connection wall (scale wider than 100/poolMax) | Front Postgres with a transaction-mode pooler — owned by **W3 (#378)**. |
+| Cap the reactive fan-out | `maxScale` — and set `poolMax` so the operator **enforces** `maxScale × poolMax ≤ 80`. |
+| Break the connection wall (scale wider than 80/poolMax) | Front Postgres with a transaction-mode pooler — owned by **W3 (#378)**. |
 
 **Invariant to respect:** with a declared `poolMax`, keep
-`maxScale × poolMax ≤ 100`. The operator rejects specs that violate it (ADR-0028);
-if you leave `poolMax` unset the check is skipped but the wall still applies.
+`maxScale × poolMax ≤ 80` (the app connection budget = GW_MAX_CONNS 90 − reserve,
+not the raw `max_connections` 100). The operator rejects specs that violate it
+(ADR-0028); if you leave `poolMax` unset the check is skipped but the wall still
+applies.
 
 ## Summary
 
@@ -293,7 +304,7 @@ if you leave `poolMax` unset the check is skipped but the wall still applies.
 | Cost on idle read zones | `spec.scaling.minScale: 0` (scale to zero) |
 | JS recompile on cold start | `spec.cache.enableBytecodeCache: true` (+ a `provider`) |
 | DB pool re-establish | warm zone (`minScale: 1`) and/or transaction-mode pooler |
-| Connection storm | low `maxScale` + declare `poolMax` (operator enforces `maxScale × poolMax ≤ 100`, ADR-0028); a pooler caps it further |
+| Connection storm | low `maxScale` + declare `poolMax` (operator enforces `maxScale × poolMax ≤ 80`, ADR-0028); a pooler caps it further |
 | Reactive scale-out under burst | lower `containerConcurrency` (default now `20`, ADR-0028; W1/#376 refines) |
 
 knext exposes the scaling/cache knobs and this guidance; the database and its

@@ -75,10 +75,21 @@ without waiting on W1.
 ### 3. Enforce the connection-wall invariant (gate the lower cc)
 
 Because a lower `containerConcurrency` raises DB connection pressure, the operator
-MUST NOT let it silently exhaust the database. The wall is the invariant:
+MUST NOT let it silently exhaust the gateway/database. The bound is **not** the
+raw Postgres `max_connections` (100): the wake gateway hard-caps at
+`GW_MAX_CONNS = 90` (excess connections are refused with SQLSTATE `53300`
+too_many_connections), and Postgres itself reserves connections for
+`superuser_reserved_connections` (default 3), replication slots, and the wake
+gateway's own probe. A spec sized against 100 would exhaust the 90 gateway cap
+AND leave zero admin/replication headroom — defeating the very guard the cc=20
+change makes necessary. So the enforced invariant budgets against the gateway cap
+minus a reserve:
 
 ```
-maxScale × poolMax ≤ max_connections        (max_connections = 100)
+maxScale × poolMax ≤ MaxAppConnections       (MaxAppConnections = 80)
+
+where 80 = GW_MAX_CONNS (90) − ~10 reserve
+         (superuser_reserved_connections + replication + wake-probe headroom)
 ```
 
 - A new **optional** `spec.scaling.poolMax` field declares the app's **per-pod DB
@@ -86,20 +97,22 @@ maxScale × poolMax ≤ max_connections        (max_connections = 100)
 - **When `poolMax > 0`,** the shared validation
   (`ValidateNextAppSpec`, run by the admission webhook AND the fail-closed
   reconciler, so they cannot drift) **rejects** any spec where
-  `maxScale × poolMax > 100`, and rejects a declared `poolMax` against an
+  `maxScale × poolMax > 80`, and rejects a declared `poolMax` against an
   **unbounded** `maxScale: 0` (an unbounded fan-out can never fit a finite
-  ceiling). `MaxConnections = 100` is a named constant in `internal/validation`.
+  budget). `MaxAppConnections = 80` is the enforced named constant in
+  `internal/validation`; `MaxConnections = 100` is retained alongside it purely
+  to document the raw Postgres ceiling.
 - **When `poolMax` is unset (`0`),** the check is **skipped** — the operator
   cannot verify a wall it does not know about. The wall still applies; it is
   documented **loudly** (ADR + `docs/operator/scaling-cold-start.md`) and the
-  app owner remains responsible for keeping the product under `max_connections`
-  (or fronting Postgres with a pooler). This preserves back-compat for every
-  existing CR that never set `poolMax`.
+  app owner remains responsible for keeping the product within the app budget
+  (`maxScale × poolMax ≤ 80`) — or fronting Postgres with a pooler. This
+  preserves back-compat for every existing CR that never set `poolMax`.
 
 ### 4. W3 (#378) owns breaking the wall
 
 The invariant is a *constraint*, not the end state. Scaling an app wider than
-`100 / poolMax` pods requires **decoupling instance count from backend
+`80 / poolMax` pods requires **decoupling instance count from backend
 connections** — a shared, server-side transaction-mode pooler (e.g. PgBouncer /
 CloudNativePG pooler) so many pods share a bounded set of backend connections.
 That work is **explicitly out of scope here and owned by W3 (#378)**; this ADR
@@ -116,7 +129,7 @@ only makes the wall visible and enforced.
 - **New `spec.scaling.poolMax` field** — additive/optional; the CRD and RBAC are
   regenerated (`make manifests generate`). No migration for existing CRs.
 - **The default is interim.** W1 (#376) may re-tune `20`; W3 (#378) may relax the
-  `maxScale × poolMax ≤ 100` wall once a shared pooler decouples the two. Both are
+  `maxScale × poolMax ≤ 80` wall once a shared pooler decouples the two. Both are
   tracked; this ADR is the anchor they amend.
 - **Cost/latency trade-off is now explicit and documented** (the `minScale`
   floor + the `containerConcurrency` sooner-scale trade), so operators tune with
