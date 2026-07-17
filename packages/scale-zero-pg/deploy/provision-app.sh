@@ -518,8 +518,13 @@ cmd_fsck() {
   local all; all="$(PS "http://localhost:9898/v1/tenant/$APPS_TENANT/timeline" \
     | python3 -c 'import sys,json;[print(t["timeline_id"]) for t in json.load(sys.stdin)]')"
   # Owner ConfigMaps as "name timeline" pairs (name = compute-config-<app>).
+  # The tier=apps label is intentionally shared by system markers too (e.g. the
+  # wal-reclaim marker $RECLAIM_CM), so we key intent-reconciliation off the
+  # compute-config-<app> naming convention — NOT the broad label — to avoid
+  # misclassifying a timeline-less system marker as a dangling app intent (#337).
   local owned_pairs; owned_pairs="$(K get configmap -l tier=apps \
-    -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.data.TIMELINE_ID}{"\n"}{end}' 2>/dev/null | grep -v '^ *$' || true)"
+    -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.data.TIMELINE_ID}{"\n"}{end}' 2>/dev/null \
+    | awk '$1 ~ /^compute-config-./' | grep -v '^ *$' || true)"
   local owned_tls; owned_tls="$(printf '%s\n' "$owned_pairs" | awk '{print $2}' | grep -v '^$' | sort -u || true)"
 
   local problems=0 tl
@@ -642,6 +647,11 @@ cmd_render() {
     "${Q_MEM_REQ:-$DEF_MEM_REQUEST}" "${Q_MEM_LIM:-$DEF_MEM_LIMIT}" \
     "${Q_MAX_CONNS:-$DEF_MAX_CONNS}"
 }
+
+# Source-guard: when this file is `source`d (e.g. by test_provision-app.sh to
+# unit-test cmd_fsck's classification with stubbed K/PS), skip the CLI dispatch so
+# the functions can be called directly without argv side effects (#337).
+[ "${PROVISION_APP_SOURCED:-0}" = 1 ] && return 0 2>/dev/null
 
 case "${1:-}" in
   init-plane)      shift; cmd_init_plane "$@";;
