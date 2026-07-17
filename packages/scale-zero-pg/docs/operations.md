@@ -1846,8 +1846,10 @@ Knobs (env, all optional except `TARGET_URL` for a live run):
 | `K6_IMAGE` | `grafana/k6:0.49.0` | k6 image |
 | `K6_CPU_REQUEST` / `K6_CPU_LIMIT` | `500m` / `2` | k6 pod CPU request / limit (see the constrained-cluster note) |
 | `K6_MEM_REQUEST` / `K6_MEM_LIMIT` | `256Mi` / `512Mi` | k6 pod memory request / limit |
+| `K6_FANOUT` | `1` | number of **parallel** k6 Jobs (fan-out mode — see below); `1` = single Job |
 | `RUN_TIMEOUT_S` | ramp+soak+slack | Job wall budget |
-| `GW_DEPLOY` | `pggw-apps` | `app=` label of the apps-gateway pod scraped for the `pggw_*` snapshot |
+| `GW_DEPLOY` | `pggw-apps` | `gateway=` series label of the apps-gateway scraped for the `pggw_*` snapshot |
+| `PROM_DEPLOY` | `prometheus` | Prometheus deployment the `pggw_*` snapshot instant-queries |
 | `LOADSOAK_CONTEXT` / `LOADSOAK_NS` | ambient / `scale-zero-pg` | kubectl context / namespace |
 
 **CPU-request-constrained cluster (e.g. the live OKE plane):** OKE is 2 nodes with most
@@ -1865,6 +1867,36 @@ TARGET_URL='http://file-manager.knext-apps.svc.cluster.local/users' \
   LOADSOAK_CONTEXT=context-ckmva7v7zvq ./_verify-loadsoak.sh
 ```
 
+**Fan-out mode — driving real high-traffic load on a request-constrained cluster
+(`K6_FANOUT`, issue #382):** because one k6 pod only schedules at ~150m (≈40 VU) on the
+OKE plane, a single Job never actually stresses the app (file-manager did 135 RPS / 0 err
+on one pod and was never pushed to a wall). `K6_FANOUT=N` launches **N parallel k6 Jobs**
+(`loadsoak-k6-0` … `loadsoak-k6-N-1`), each at `K6_CPU_REQUEST`, **sharding** the VU
+target so `ceil(RAMP_CEIL_VU/N)` × N ≥ the requested concurrency (N shards together drive
+the full load, not N× it). The harness waits for **all** shards, then AGGREGATES:
+
+- **RPS is SUMMED** across shards — valid: the shards drive disjoint request streams, so
+  fleet throughput is their sum.
+- **peak VUs are SUMMED** — the fleet's true peak concurrency (`40 + 40 = 80`).
+- **error % is a request-weighted mean** (weighted by `http_reqs.count`).
+- **p50/p95/p99 are a COUNT-WEIGHTED MEAN across shards** and are printed as **`~pooled`**.
+  This is an **approximation, stated honestly**: a *true* global percentile needs the
+  merged per-request latency samples, which k6 `--summary-export` does **not** emit (only
+  each shard's pre-computed percentiles). For the fan-out design — identical target,
+  identical CPU per shard, so near-equal latency distributions — the count-weighted pool is
+  close to the true value, but it is **not** an exact global p95/p99. Treat `~pooled`
+  percentiles as indicative; if you need an exact global tail, run a single larger Job (or
+  merge the raw samples out-of-band). Per-shard rows are printed alongside the aggregate for
+  provenance. `K6_FANOUT=1` is byte-identical to the original single-Job behavior. Teardown
+  is idempotent and sweeps **all** shards (by the `drill=loadsoak` label). Example:
+
+```sh
+TARGET_URL='http://file-manager.knext-apps.svc.cluster.local/users' \
+  K6_FANOUT=4 K6_CPU_REQUEST=150m K6_CPU_LIMIT=1 RAMP_CEIL_VU=160 SOAK_VU=112 \
+  LOADSOAK_CONTEXT=context-ckmva7v7zvq ./_verify-loadsoak.sh
+# 4 pods × 40 VU = 160 VU total; each pod requests 150m so all four schedule.
+```
+
 **Knob safety (injection guard):** the knobs are interpolated into the k6 Job's
 `/bin/sh -c` argument, so the harness rejects any knob value carrying a shell
 metacharacter (`'` `"` `` ` `` `$` `;` `|` `&` `\` `<` `>` `(` `)` or a control char) and
@@ -1873,16 +1905,34 @@ Job. Practical consequence: a `TARGET_URL` whose query string needs a literal `&
 refused; target a route/path without `&` (or add a single query param). URLs, durations
 (`2m`), and integers use none of these characters, so legitimate values are unaffected.
 
-Reading the wall analysis: if `pggw_rejected_connections_total` climbed, the
-`GW_MAX_CONNS=90` cap was the wall (raise it or add app pods so the pool spreads); if the
-writer `compute-<app>` CPU pinned at its limit with connections well under 90, the single
-writer is the wall (the W3 write-path lever); if app pods pinned CPU first, that is the
-Knative-side lever (ContainerConcurrency / min-scale, W2). Every run's numbers land in
+**How the wall snapshot reads its numbers (issue #383):** the `pggw_*` gateway counters
+are read from **Prometheus** (`PROM_DEPLOY`, default `prometheus`) via the instant-query
+API — `sum(pggw_<metric>{gateway="$GW_DEPLOY"})` — **not** by exec-ing the gateway pod.
+The apps-gateway image is distroless (`gcr.io/distroless/static:nonroot`): it has no shell,
+`wget`, or `curl`, so the earlier pod-exec scrape always returned "(metrics unavailable)"
+and the wall analysis had nothing to adjudicate. Prometheus already scrapes the gateway's
+`:9090` and labels the series `gateway="pggw-apps"`, so the query returns real numbers.
+Likewise the DB-compute line now targets the per-app deployment **`compute-$APP_NAME`**
+directly (no fall-through to the base single-DB `compute`, which is always `replicas=0` in
+branch-per-app mode and produced a misleading "writer compute: replicas=0" line while the
+app was being served).
+
+Reading the wall analysis: if `pggw_rejected_connections_total` climbed above 0, the
+`GW_MAX_CONNS=90` cap was the wall (raise it or add app pods so the pool spreads); if
+`pggw_active_connections` peaked near 90 with rejections just starting, you are at the cap;
+if the DB compute `compute-<app>` CPU pinned at its limit with connections well under 90,
+the single writer is the wall (the W3 write-path lever); if app pods pinned CPU first, that
+is the Knative-side lever (ContainerConcurrency / min-scale, W2). Under fan-out these
+counters reflect the **combined** load of all N shards (they hit the one shared gateway and
+the one per-app compute), so the wall reading is fleet-wide. Every run's numbers land in
 `docs/BENCHMARKS.md` under "Sustained-load / soak baseline" (rule 2b).
 
 **Cluster-free validation** (no OKE, no k6 binary): `SELFTEST=1 ./_verify-loadsoak.sh`
-dry-runs the manifest and self-checks the summary parser; `bash test_verify-loadsoak.sh`
-asserts the parser produces the exact BENCHMARKS row format from a sample k6 JSON.
+dry-runs the manifest(s) and self-checks the summary parser + the fan-out aggregation math
+(`SELFTEST=1 K6_FANOUT=2 ./_verify-loadsoak.sh` also proves the N-shard render);
+`bash test_verify-loadsoak.sh` asserts the parser produces the exact BENCHMARKS row format
+from a sample k6 JSON, the fan-out renders N distinct shard Jobs, and the aggregator sums
+RPS/VUs and count-weight-pools the percentiles correctly on fixed inputs.
 
 ### Deprovision is safe by default (issue #91)
 

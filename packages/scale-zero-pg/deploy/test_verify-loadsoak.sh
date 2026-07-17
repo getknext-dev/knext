@@ -196,9 +196,132 @@ has 'cpu: "500m"' "$def_out" || fail "resources: default CPU request 500m missin
 ok "k6 pod resources fall back to shipped defaults (cpu 500m) when unset"
 
 # ---------------------------------------------------------------------------------
-# 5. GW_DEPLOY knob is actually wired into the gateway-pod selector (not hardcoded).
+# 5. GW_DEPLOY knob is actually wired into the gateway= query label (not hardcoded).
+#    (#383: gw_snapshot moved from a dead pod-exec to a Prometheus query scoped to the
+#    gateway="$GW_DEPLOY" series — the knob must still be live in that scope.)
 # ---------------------------------------------------------------------------------
-grep -q 'app=\$GW_DEPLOY' "$SUT" || fail "gw_snapshot selector does not use \$GW_DEPLOY (knob is dead)"
-ok "gw_snapshot selects the gateway pod via the GW_DEPLOY knob"
+grep -q '\${GW_DEPLOY}' "$SUT" || fail "gw_snapshot query does not use \$GW_DEPLOY (knob is dead)"
+ok "gw_snapshot scopes its Prometheus query via the GW_DEPLOY knob"
+
+# ---------------------------------------------------------------------------------
+# 6. #383 (instrument fix — gateway pggw_* scrape). The apps-gateway container is
+#    distroless (gcr.io/distroless/static:nonroot) — it has NO shell, NO wget, NO
+#    curl — so the old `kubectl exec <gw-pod> -- sh -c 'wget .../metrics'` ALWAYS
+#    returned "(metrics unavailable)". The fix scrapes the pggw_* series through the
+#    PROMETHEUS instant-query API (Prometheus already scrapes the gateway's :9090 and
+#    labels the series gateway="pggw-apps"), the same pattern _verify-wake-guard.sh
+#    uses. Assert the wall-relevant counters are queried, scoped to the gateway label.
+# ---------------------------------------------------------------------------------
+sut_src="$(cat "$SUT")"
+# must query Prometheus (deploy/prometheus wget of the instant-query API), NOT sh-exec
+# the shell-less gateway pod.
+has 'deploy/$PROM_DEPLOY' "$sut_src" || fail "#383: gw_snapshot does not query Prometheus (gateway pod is distroless, has no shell to exec wget)"
+has '/api/v1/query' "$sut_src"     || fail "#383: gw_snapshot does not use the Prometheus instant-query API"
+# the wall analysis hinges on rejected_connections_total>0 => GW_MAX_CONNS wall; it
+# must be one of the queried series, scoped to the apps-gateway plane label.
+# the counters are queried via the `sum(pggw_${_m}{...})` loop over the metric list —
+# assert both the loop template and the wall-critical metric names appear.
+has 'sum(pggw_${_m}' "$sut_src"       || fail "#383: gw_snapshot does not query sum(pggw_<metric>{...})"
+has 'rejected_connections_total' "$sut_src" || fail "#383: gw_snapshot does not query rejected_connections_total (the GW_MAX_CONNS wall signal)"
+has 'active_connections' "$sut_src"         || fail "#383: gw_snapshot does not query active_connections (the connection-cap headroom signal)"
+# the label must be the GW_DEPLOY knob (pggw-apps), not hardcoded — URL-encoded gateway= scope.
+has 'gateway%3D%22${GW_DEPLOY}%22' "$sut_src" \
+  || fail "#383: gw_snapshot does not scope its Prometheus query to gateway=\"\$GW_DEPLOY\" (label hardcoded or missing)"
+# the dead distroless exec path must be GONE.
+has "http://127.0.0.1:9090/metrics" "$sut_src" && fail "#383: gw_snapshot still exec-scrapes the shell-less gateway pod (dead path not removed)"
+ok "#383: gw_snapshot scrapes pggw_* via the Prometheus instant-query API, scoped to gateway=\$GW_DEPLOY"
+
+# ---------------------------------------------------------------------------------
+# 7. #383 (instrument fix — DB-compute snapshot). The old plane_snapshot fell through
+#    from compute-<app> to the base single-DB `compute` deployment (always replicas=0
+#    in branch-per-app mode), producing the misleading "writer compute: replicas=0"
+#    line WHILE the app was being served. The fix points the DB-compute snapshot at
+#    the per-app deployment compute-$APP_NAME ONLY (no fall-through to base compute).
+# ---------------------------------------------------------------------------------
+has 'compute-${APP_NAME}' "$sut_src" || fail "#383: plane_snapshot does not target the per-app compute-\$APP_NAME deployment"
+# the misleading fall-through `for d in "compute-${APP_NAME}" compute;` must be gone.
+has 'for d in "compute-${APP_NAME}" compute' "$sut_src" && fail "#383: plane_snapshot still falls through to base 'compute' (mislabels the DB compute as replicas=0)"
+ok "#383: plane_snapshot targets compute-\$APP_NAME only (no base-compute fall-through mislabel)"
+
+# ---------------------------------------------------------------------------------
+# 8. #382 (fan-out). K6_FANOUT=N renders N distinct k6 Jobs (loadsoak-k6-0..N-1),
+#    each sharding the VU target, so a CPU-request-constrained cluster (one k6 pod
+#    ~150m) can drive real high-traffic load. K6_FANOUT=1 stays byte-compatible with
+#    the single-Job behavior (name loadsoak-k6, no shard suffix).
+# ---------------------------------------------------------------------------------
+# default (K6_FANOUT unset / 1): one Job named loadsoak-k6 (backward-compatible).
+one_out="$( TARGET_URL='http://app.svc/users' render_all_manifests 2>&1 )"; one_rc=$?
+[ "$one_rc" -eq 0 ] || fail "#382: render_all_manifests failed for the default (K6_FANOUT=1):\n$one_out"
+has 'name: loadsoak-k6' "$one_out" || fail "#382: K6_FANOUT=1 did not render the single Job 'loadsoak-k6':\n$one_out"
+case "$one_out" in *'name: loadsoak-k6-1'*) fail "#382: K6_FANOUT=1 rendered a shard-suffixed Job (should be byte-compatible single Job)";; esac
+ok "#382: K6_FANOUT=1 renders the single 'loadsoak-k6' Job (backward-compatible)"
+
+# K6_FANOUT=3: three distinct shard Jobs loadsoak-k6-0/-1/-2.
+three_out="$( TARGET_URL='http://app.svc/users' K6_FANOUT=3 render_all_manifests 2>&1 )"; three_rc=$?
+[ "$three_rc" -eq 0 ] || fail "#382: render_all_manifests failed for K6_FANOUT=3:\n$three_out"
+for i in 0 1 2; do
+  has "name: loadsoak-k6-$i" "$three_out" || fail "#382: K6_FANOUT=3 missing shard Job loadsoak-k6-$i:\n$three_out"
+  has "name: loadsoak-k6-script-$i" "$three_out" || fail "#382: K6_FANOUT=3 missing per-shard ConfigMap loadsoak-k6-script-$i:\n$three_out"
+done
+# each shard must carry a distinct VU target sum = original (sharding, not N-fold load).
+njobs="$(printf '%s\n' "$three_out" | grep -c '^kind: Job')"
+[ "$njobs" -eq 3 ] || fail "#382: K6_FANOUT=3 rendered $njobs Jobs, want 3:\n$three_out"
+ok "#382: K6_FANOUT=3 renders 3 distinct shard Jobs (loadsoak-k6-0..2) + per-shard ConfigMaps"
+
+# sharding: N shards each get ceil(RAMP_CEIL_VU/N) so N*per-shard >= target. With
+# RAMP_CEIL_VU=120, K6_FANOUT=3 -> each shard RAMP_CEIL_VU=40.
+has 'RAMP_CEIL_VU=40' "$three_out" || has "value: \"40\"" "$three_out" || has "RAMP_CEIL_VU='40'" "$three_out" \
+  || fail "#382: K6_FANOUT=3 did not shard RAMP_CEIL_VU=120 into 40/shard:\n$(printf '%s' "$three_out" | grep -i ceil)"
+ok "#382: fan-out shards the VU target across N shards (120 VU / 3 = 40 VU each)"
+
+# the fan-out knob is injection-guarded like the others.
+poison_fan="$( TARGET_URL='http://app.svc/users' K6_FANOUT='2; rm -rf /' render_all_manifests 2>&1 )"; poison_fan_rc=$?
+[ "$poison_fan_rc" -ne 0 ] || fail "#382: render_all_manifests did NOT fail on a poisoned K6_FANOUT"
+has 'unsafe' "$poison_fan" || has 'K6_FANOUT' "$poison_fan" || fail "#382: no diagnostic on poisoned K6_FANOUT:\n$poison_fan"
+ok "#382: K6_FANOUT is injection-guarded (poisoned value fails closed)"
+
+# ---------------------------------------------------------------------------------
+# 9. #382 (aggregation math). aggregate_summaries sums RPS across shards and pools the
+#    percentiles (count-weighted mean — an honest approximation, documented). Unit-test
+#    with TWO fake per-shard summaries so the arithmetic is checked exactly.
+# ---------------------------------------------------------------------------------
+# shard A: 100 RPS, p50=20 p95=50 p99=90, err 0.00%, vus 40, count 60000
+# shard B: 200 RPS, p50=30 p95=60 p99=120, err 0.00%, vus 40, count 120000
+# pooled RPS = 300. Count-weighted p95 = (50*60000 + 60*120000)/180000 = 56.6667.
+SA="$(mktemp)"; SB="$(mktemp)"; trap 'rm -rf "$SHIM" "$SAMPLE" "$SA" "$SB"' EXIT
+cat > "$SA" <<'JSON'
+{ "metrics": {
+  "http_req_duration": { "med": 20.0, "p(50)": 20.0, "p(95)": 50.0, "p(99)": 90.0 },
+  "http_req_failed": { "value": 0.0 },
+  "http_reqs":       { "count": 60000, "rate": 100.0 },
+  "vus_max":         { "value": 40 }
+} }
+JSON
+cat > "$SB" <<'JSON'
+{ "metrics": {
+  "http_req_duration": { "med": 30.0, "p(50)": 30.0, "p(95)": 60.0, "p(99)": 120.0 },
+  "http_req_failed": { "value": 0.0 },
+  "http_reqs":       { "count": 120000, "rate": 200.0 },
+  "vus_max":         { "value": 40 }
+} }
+JSON
+agg="$(aggregate_summaries "file-manager" "rampsoak" "$SA" "$SB")"
+# aggregated row: app | phase | RPS | p50 | p95 | p99 | err% | peakVUs(sum)
+has "file-manager" "$agg" || fail "#382: aggregate_summaries dropped the app name:\n$agg"
+has "| 300.00 |" "$agg"   || fail "#382: aggregate_summaries did not SUM RPS (100+200=300):\n$agg"
+# count-weighted pooled p95 = 56.67 (2dp).
+has "56.67" "$agg"        || fail "#382: aggregate_summaries pooled p95 wrong (want count-weighted 56.67):\n$agg"
+# count-weighted pooled p99 = (90*60000+120*120000)/180000 = 110.00.
+has "110.00" "$agg"       || fail "#382: aggregate_summaries pooled p99 wrong (want 110.00):\n$agg"
+# peak VUs are SUMMED across shards (40+40=80): the whole fleet's concurrency.
+has "| 80" "$agg"         || fail "#382: aggregate_summaries did not sum peak VUs across shards (40+40=80):\n$agg"
+has "0.00%" "$agg"        || fail "#382: aggregate_summaries error% wrong for a zero-error fleet:\n$agg"
+ok "#382: aggregate_summaries sums RPS+VUs and count-weight-pools the percentiles (2 shards -> correct row)"
+
+# a SINGLE shard aggregates to itself (identity — K6_FANOUT=1 path).
+agg1="$(aggregate_summaries "file-manager" "rampsoak" "$SA")"
+has "| 100.00 |" "$agg1" || fail "#382: single-shard aggregate did not pass RPS through (100.00):\n$agg1"
+has "| 40" "$agg1"       || fail "#382: single-shard aggregate did not pass VUs through (40):\n$agg1"
+ok "#382: aggregate_summaries is identity on a single shard (K6_FANOUT=1)"
 
 echo "PASSED ($pass checks)"
