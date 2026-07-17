@@ -26,9 +26,9 @@
 import {
   GoldenSignalMetricsProcessor,
   initRuntimeMetrics,
+  makeDeepHealthScrapeHook,
   recordColdStart,
   recordDbWake,
-  refreshDeepHealthGauge,
   startChildMetricsServer,
 } from '@knext/core/adapters/metrics';
 import { resolveOtelOptions } from '@knext/core/adapters/otel-config';
@@ -40,7 +40,7 @@ import {
   installTraceIdProvider,
   instrumentPoolForDbWake,
 } from '@knext/core/adapters/tracing';
-import { setPoolInstrumentor } from '@knext/lib/clients';
+import { isDbRecentlyActive, setPoolInstrumentor } from '@knext/lib/clients';
 import { setCorrelationIdProvider, setTraceIdProvider } from '@knext/lib/context';
 import { checkDeepHealth } from '@knext/lib/health';
 import { registerOTel } from '@vercel/otel';
@@ -68,12 +68,25 @@ export function registerNode() {
   // verdict onto knext_deep_health_state. This surfaces a SUSTAINED `waking`
   // (a permanent connection-level DB outage that checkDeepHealth classifies
   // `waking` forever, never `down`) as a scrapable series the alert rule keys
-  // on — with NO new background timer and no extra load between scrapes. The
-  // hook is fail-open (a throw never fails the scrape).
-  startChildMetricsServer(metrics.registry, undefined, undefined, async () => {
-    const health = await checkDeepHealth();
-    refreshDeepHealthGauge(metrics, health);
-  });
+  // on — with NO new background timer and no extra load between scrapes.
+  //
+  // ACTIVITY-GATED (#348 gate fix): the hook dials Postgres ONLY when the app
+  // used the writer pool recently (isDbRecentlyActive). checkDeepHealth() runs a
+  // real `SELECT 1` through the scale-zero-pg gateway, which re-arms its 60s DB
+  // idle timer. Since the scrape (~30s) is more frequent than that window, an
+  // UNGATED dial would keep an idle app's DB awake forever — breaking
+  // scale-to-zero. Gating on recent activity means: a genuinely-in-use DB stuck
+  // `waking` still pages, but an idle app's DB is never woken by the scrape and
+  // sleeps normally. Fail-open: a throwing check never fails the scrape.
+  startChildMetricsServer(
+    metrics.registry,
+    undefined,
+    undefined,
+    makeDeepHealthScrapeHook(metrics, {
+      checkDeepHealth,
+      isRecentlyActive: () => isDbRecentlyActive(),
+    }),
+  );
 
   // @vercel/otel reads the OTLP endpoint from OTEL_EXPORTER_OTLP_ENDPOINT and
   // the sampler arg from OTEL_TRACES_SAMPLER_ARG (both set by the operator).

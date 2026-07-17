@@ -329,6 +329,18 @@ minutes — this is a real outage, not a wake.
 The alert resolves automatically once a scrape observes the DB reachable again
 (the gauge flips `waking`→`ok`/`up` on the next scrape).
 
+**Why this doesn't break scale-to-zero.** The gauge is refreshed on the :9091
+scrape by running `checkDeepHealth()`, which issues a real `SELECT 1` through
+the scale-zero-pg gateway — and that would re-arm the gateway's 60s DB idle
+timer on every ~30s scrape, keeping an idle app's DB awake forever. So the
+scrape dial is **activity-gated**: it runs the deep DB probe **only when the app
+used its writer pool recently** (within `DB_ACTIVITY_BUDGET_MS`, default 45s —
+below the 60s gateway idle). An idle app (not querying its DB) is **never**
+probed by the scrape, so its DB sleeps normally; the gauge just holds its
+last-known value. This is safe for the alert because a stuck-`waking` outage
+only matters when the app is actively trying to use the DB — which is exactly
+when the gate is open and the probe runs.
+
 ## 10 — NetworkPolicy blocks the activator
 
 **Symptom.** The app pod is Running but unreachable; scale-from-zero requests

@@ -287,6 +287,50 @@ export function refreshDeepHealthGauge(
 // truth (the loops above enumerate the individual members explicitly).
 void DEEP_HEALTH_DEPENDENCIES;
 
+/** Dependencies the scrape hook injects (kept core-owned + @knext/lib-free). */
+export interface DeepHealthScrapeDeps {
+    /** Runs the deep dependency check (bridged from `@knext/lib/health`). */
+    readonly checkDeepHealth: () => Promise<DeepHealthSnapshot>;
+    /**
+     * Whether the app used the DB pool RECENTLY (bridged from `@knext/lib`'s
+     * `isDbRecentlyActive`). When false, the hook SKIPS the deep check so an idle
+     * app's scale-to-zero DB is never woken by the :9091 scrape (#348 gate fix).
+     */
+    readonly isRecentlyActive: () => boolean;
+}
+
+/**
+ * Build the :9091 scrape hook that refreshes the deep-health gauge — ACTIVITY-
+ * GATED (#348 gate fix). It runs `checkDeepHealth()` (which dials Postgres) ONLY
+ * when `isRecentlyActive()` is true; when the app has been idle past the DB
+ * activity budget it does NOTHING, leaving the gauge at its last-known value so
+ * the idle DB can sleep normally. This preserves BOTH the alert (a real in-use
+ * DB stuck `waking` still pages) AND scale-to-zero (an idle app's DB sleeps).
+ *
+ * Fail-open: a throwing deep check never rejects the scrape.
+ */
+export function makeDeepHealthScrapeHook(
+    metrics: KnextMetrics,
+    deps: DeepHealthScrapeDeps,
+): () => Promise<void> {
+    return async () => {
+        // ACTIVITY GATE: skip the DB dial entirely when the pool is idle. This is
+        // the whole fix — no `SELECT 1` on scrape while idle ⇒ the gateway lets
+        // the DB sleep. A stuck-`waking` outage only matters while the app is
+        // actively using the DB, which is exactly when this gate is open.
+        if (!deps.isRecentlyActive()) {
+            return;
+        }
+        try {
+            const health = await deps.checkDeepHealth();
+            refreshDeepHealthGauge(metrics, health);
+        } catch {
+            // Fail-open: a failed deep check must never fail the scrape; leave the
+            // gauge at its last-known value.
+        }
+    };
+}
+
 // ── The golden-signal span processor ──────────────────────────────────────────
 
 /** Read-only view of a span the processor needs on start (duck-typed vs SDK). */

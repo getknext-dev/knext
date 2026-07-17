@@ -61,6 +61,101 @@ export const resetPoolInstrumentor = (): void => {
   delete instrumentorGlobal[POOL_INSTRUMENTOR_KEY];
 };
 
+// ── Writer-pool ACTIVITY tracking (#348 gate fix) ─────────────────────────────
+// The deep-health scrape (:9091, every ~30s) must dial Postgres ONLY when the
+// app has actually used the writer pool RECENTLY — otherwise `SELECT 1` on every
+// scrape re-arms the scale-zero-pg gateway's 60s DB idle timer and the DB never
+// sleeps while the pod is up, BREAKING scale-to-zero. So we record the wall-clock
+// instant of the last writer-pool query/connect, and expose it so the scrape hook
+// can SKIP the DB dial when the pool has been idle past the budget.
+//
+// Anchored on `globalThis` (like the instrumentor above, #352): in the standalone
+// build `@knext/lib` is bundled into multiple webpack layers, so a module-level
+// `let` written by the app-server copy (which issues the queries) would be
+// invisible to the copy the scrape hook reads. A shared `globalThis` slot makes
+// the timestamp visible across every copy. This tracking is INDEPENDENT of OTel —
+// the pool is used (and must be tracked) whether or not tracing is enabled.
+const DB_ACTIVITY_KEY = Symbol.for('knext.lib.clients.lastDbActivityAt');
+
+type DbActivityGlobal = Record<symbol, number | undefined>;
+
+const activityGlobal = globalThis as unknown as DbActivityGlobal;
+
+/**
+ * Recency budget (ms) for "the app used the DB recently enough that the scrape
+ * may dial it". Deliberately BELOW the scale-zero-pg gateway's 60s DB idle
+ * window so an idle app's DB is never kept awake by the scrape: if the pool has
+ * been idle longer than this, the gateway is already letting the DB sleep, and
+ * the scrape must not re-wake it. Env-overridable via DB_ACTIVITY_BUDGET_MS.
+ */
+const DEFAULT_DB_ACTIVITY_BUDGET_MS = 45_000;
+
+/** The resolved recency budget (env-overridable, clamped positive). */
+export const DB_ACTIVITY_BUDGET_MS = ((): number => {
+  const raw = process.env.DB_ACTIVITY_BUDGET_MS;
+  if (raw !== undefined) {
+    const parsed = Number.parseInt(raw, 10);
+    if (Number.isFinite(parsed) && parsed > 0) return parsed;
+  }
+  return DEFAULT_DB_ACTIVITY_BUDGET_MS;
+})();
+
+/** Record that the writer pool was just used (called by the activity wrapper). */
+const markDbActivity = (): void => {
+  activityGlobal[DB_ACTIVITY_KEY] = Date.now();
+};
+
+/**
+ * The wall-clock instant (ms) the writer pool was last used, or `undefined` if
+ * it has never been used this process (never woken). Cross-copy via globalThis.
+ */
+export const getLastDbActivityAt = (): number | undefined => activityGlobal[DB_ACTIVITY_KEY];
+
+/**
+ * True iff the writer pool was used within `budgetMs` (default
+ * {@link DB_ACTIVITY_BUDGET_MS}). A never-used pool is NOT recently active, so
+ * an app that hasn't touched its DB never has the DB woken by the scrape.
+ */
+export const isDbRecentlyActive = (budgetMs = DB_ACTIVITY_BUDGET_MS): boolean => {
+  const last = activityGlobal[DB_ACTIVITY_KEY];
+  if (last === undefined) return false;
+  return Date.now() - last <= budgetMs;
+};
+
+/** Reset the DB-activity timestamp (tests only). */
+export const resetDbActivity = (): void => {
+  delete activityGlobal[DB_ACTIVITY_KEY];
+};
+
+/**
+ * Wrap a pool's `query`/`connect` so each successful-or-attempted use stamps
+ * `lastDbActivityAt`. Best-effort + transparent: it delegates to the original
+ * and never changes the return value or error propagation (fail-open — a hiccup
+ * in activity tracking must never break the DB path). Kept SEPARATE from the
+ * OTel db-wake instrumentor so activity is tracked even when tracing is off.
+ */
+const trackPoolActivity = (pool: Pool): Pool => {
+  try {
+    const originalQuery = pool.query;
+    if (typeof originalQuery === 'function') {
+      pool.query = function trackedQuery(this: unknown, ...args: unknown[]) {
+        markDbActivity();
+        return (originalQuery as (...a: unknown[]) => unknown).apply(this ?? pool, args);
+      } as Pool['query'];
+    }
+    const originalConnect = pool.connect;
+    if (typeof originalConnect === 'function') {
+      pool.connect = function trackedConnect(this: unknown, ...args: unknown[]) {
+        markDbActivity();
+        return (originalConnect as (...a: unknown[]) => unknown).apply(this ?? pool, args);
+      } as Pool['connect'];
+    }
+  } catch {
+    // Fail-open: activity tracking is observability sugar, never break the pool.
+  }
+  return pool;
+};
+
 /**
  * Run the installed instrumentor over a newly-created pool. Best-effort: a
  * misbehaving instrumentor must never break pool creation (fail-open) — the
@@ -138,6 +233,10 @@ export const getDbPool = () => {
         DEFAULT_DB_POOL_CONNECT_TIMEOUT_MS,
       ),
     });
+    // Track writer-pool activity (#348) so the deep-health scrape only dials the
+    // DB when the app used it recently — never re-waking an idle scale-to-zero
+    // DB. Applied before db-wake tracing; both just delegate to the original.
+    trackPoolActivity(pgPool);
     // Wrap the fresh pool for db-wake tracing (no-op unless an app opted in).
     instrumentPool(pgPool, 'writer');
   }
