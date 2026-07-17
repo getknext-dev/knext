@@ -170,3 +170,118 @@ func TestWarmScheduleRequeue(t *testing.T) {
 		t.Fatalf("mid-band boundary requeue = %v, want 30m", d)
 	}
 }
+
+// DST-transition-boundary characterization tests (#394, ADR-0030). warmScheduleFloor
+// evaluates each window in its own IANA timezone via robfig/cron ParseStandard +
+// time.LoadLocation, which is DST-aware. DST transitions are a classic scheduled-job
+// bug source: at spring-forward a wall-clock hour is SKIPPED (02:00->03:00 gap) and
+// at fall-back an hour occurs TWICE (01:00->02:00 replayed). These tests pin that the
+// floor engages/disengages correctly straddling the two America/New_York 2026
+// transitions. They must PASS against current code — they characterize (not fix)
+// behavior. A failure here is a real DST finding to report, not to paper over.
+//
+// Reference instants (America/New_York, 2026):
+//   spring-forward: 2026-03-08, 02:00 EST(-5) -> 03:00 EDT(-4). The 02:xx wall hour
+//     does not exist. UTC 07:00 == 03:00 EDT (the first instant after the gap).
+//   fall-back: 2026-11-01, 02:00 EDT(-4) -> 01:00 EST(-5). The 01:xx wall hour occurs
+//     twice: first at UTC 05:00 (EDT), again at UTC 06:00 (EST).
+func TestWarmScheduleFloor_DSTSpringForward(t *testing.T) {
+	utc := time.UTC
+	ny := "America/New_York"
+
+	// A window whose START (03:00) falls exactly on the post-gap resume. Before the
+	// transition the floor is off; from 03:00 EDT onward it engages. The 02:xx gap
+	// hour never occurs, so a would-be 02:00 wall time is moot.
+	morning := appWithWindows(0, appsv1alpha1.WarmWindow{
+		Start: "0 3 * * *", End: "0 6 * * *", Replicas: 4, Timezone: ny,
+	})
+
+	// 01:30 EST (UTC 06:30) — before the window, before the gap. Floor off.
+	if floor, _, _ := warmScheduleFloor(morning, time.Date(2026, 3, 8, 6, 30, 0, 0, utc)); floor != 0 {
+		t.Fatalf("spring-forward pre-window (01:30 EST): floor = %d, want 0", floor)
+	}
+	// 03:00 EDT exactly (UTC 07:00) — the window start, immediately after the gap.
+	// Floor engages.
+	if floor, _, _ := warmScheduleFloor(morning, time.Date(2026, 3, 8, 7, 0, 0, 0, utc)); floor != 4 {
+		t.Fatalf("spring-forward at window start (03:00 EDT): floor = %d, want 4", floor)
+	}
+	// 04:00 EDT (UTC 08:00) — inside the window. Floor held.
+	if floor, _, _ := warmScheduleFloor(morning, time.Date(2026, 3, 8, 8, 0, 0, 0, utc)); floor != 4 {
+		t.Fatalf("spring-forward inside window (04:00 EDT): floor = %d, want 4", floor)
+	}
+	// 06:00 EDT (UTC 10:00) — the window end. Floor disengages.
+	if floor, _, _ := warmScheduleFloor(morning, time.Date(2026, 3, 8, 10, 0, 0, 0, utc)); floor != 0 {
+		t.Fatalf("spring-forward at window end (06:00 EDT): floor = %d, want 0", floor)
+	}
+
+	// EDGE: a window whose START (02:00) falls INSIDE the spring-forward gap. That
+	// wall-clock instant does not exist on 2026-03-08. robfig/cron's Next skips to
+	// the next real occurrence, so the 02:00 start effectively fires at/after the
+	// resumed clock. This pins that the floor still engages across the morning of
+	// the transition rather than silently vanishing for the day.
+	gapStart := appWithWindows(0, appsv1alpha1.WarmWindow{
+		Start: "0 2 * * *", End: "0 6 * * *", Replicas: 5, Timezone: ny,
+	})
+	// 03:30 EDT (UTC 07:30) — past the (skipped) 02:00 start, before the 06:00 end.
+	// The window is active for the rest of the morning.
+	if floor, _, _ := warmScheduleFloor(gapStart, time.Date(2026, 3, 8, 7, 30, 0, 0, utc)); floor != 5 {
+		t.Fatalf("spring-forward gap-start window (03:30 EDT): floor = %d, want 5 (start in the gap must not drop the window)", floor)
+	}
+	// 06:00 EDT (UTC 10:00) — the end. Floor off.
+	if floor, _, _ := warmScheduleFloor(gapStart, time.Date(2026, 3, 8, 10, 0, 0, 0, utc)); floor != 0 {
+		t.Fatalf("spring-forward gap-start window end (06:00 EDT): floor = %d, want 0", floor)
+	}
+}
+
+func TestWarmScheduleFloor_DSTFallBack(t *testing.T) {
+	utc := time.UTC
+	ny := "America/New_York"
+
+	// A window 00:30 -> 03:00 that spans the fall-back overlap (the 01:00 wall hour
+	// occurs twice). The floor must stay engaged across BOTH 01:xx passes and only
+	// disengage at the real 03:00 end.
+	overnight := appWithWindows(0, appsv1alpha1.WarmWindow{
+		Start: "30 0 * * *", End: "0 3 * * *", Replicas: 6, Timezone: ny,
+	})
+
+	// 00:45 EDT (UTC 04:45) — inside the window, before the fall-back. Floor on.
+	if floor, _, _ := warmScheduleFloor(overnight, time.Date(2026, 11, 1, 4, 45, 0, 0, utc)); floor != 6 {
+		t.Fatalf("fall-back pre-transition (00:45 EDT): floor = %d, want 6", floor)
+	}
+	// 01:30 EDT (UTC 05:30) — the FIRST pass through the repeated 01:xx hour. On.
+	if floor, _, _ := warmScheduleFloor(overnight, time.Date(2026, 11, 1, 5, 30, 0, 0, utc)); floor != 6 {
+		t.Fatalf("fall-back first 01:30 pass (EDT): floor = %d, want 6", floor)
+	}
+	// 01:30 EST (UTC 06:30) — the SECOND pass through the repeated 01:xx hour after
+	// clocks fell back. Still inside the window; floor must stay on (not double-fire
+	// or drop).
+	if floor, _, _ := warmScheduleFloor(overnight, time.Date(2026, 11, 1, 6, 30, 0, 0, utc)); floor != 6 {
+		t.Fatalf("fall-back second 01:30 pass (EST): floor = %d, want 6 (window must not drop across the overlap)", floor)
+	}
+	// 02:30 EST (UTC 07:30) — after the overlap, still before 03:00 end. On.
+	if floor, _, _ := warmScheduleFloor(overnight, time.Date(2026, 11, 1, 7, 30, 0, 0, utc)); floor != 6 {
+		t.Fatalf("fall-back post-overlap (02:30 EST): floor = %d, want 6", floor)
+	}
+	// 03:00 EST (UTC 08:00) — the window end. Floor off.
+	if floor, _, _ := warmScheduleFloor(overnight, time.Date(2026, 11, 1, 8, 0, 0, 0, utc)); floor != 0 {
+		t.Fatalf("fall-back at window end (03:00 EST): floor = %d, want 0", floor)
+	}
+
+	// A window whose START (01:00) lands on the repeated hour. It should engage on
+	// the first 01:00 pass and remain engaged; it must not be confused by the second.
+	repeatStart := appWithWindows(0, appsv1alpha1.WarmWindow{
+		Start: "0 1 * * *", End: "0 4 * * *", Replicas: 7, Timezone: ny,
+	})
+	// 00:30 EDT (UTC 04:30) — before the 01:00 start. Off.
+	if floor, _, _ := warmScheduleFloor(repeatStart, time.Date(2026, 11, 1, 4, 30, 0, 0, utc)); floor != 0 {
+		t.Fatalf("fall-back repeat-start pre-window (00:30 EDT): floor = %d, want 0", floor)
+	}
+	// 01:30 EST (UTC 06:30) — inside the window (after both 01:00 firings). On.
+	if floor, _, _ := warmScheduleFloor(repeatStart, time.Date(2026, 11, 1, 6, 30, 0, 0, utc)); floor != 7 {
+		t.Fatalf("fall-back repeat-start inside window (01:30 EST): floor = %d, want 7", floor)
+	}
+	// 04:00 EST (UTC 09:00) — the end. Off.
+	if floor, _, _ := warmScheduleFloor(repeatStart, time.Date(2026, 11, 1, 9, 0, 0, 0, utc)); floor != 0 {
+		t.Fatalf("fall-back repeat-start at end (04:00 EST): floor = %d, want 0", floor)
+	}
+}
