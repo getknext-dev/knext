@@ -60,8 +60,8 @@ cardinality).
 | `knext_http_inflight_requests` | gauge | `app` | SATURATION (concurrently-handled requests) |
 | `knext_coldstart_total` | counter | `app` | cold starts (app boot / first-request wake) observed |
 | `knext_coldstart_duration_seconds` | histogram | `app` | cold-start wake duration |
-| `knext_db_wake_total` | counter | `app`, `role` | scale-zero-pg 0→1 DB wakes (first connect) |
-| `knext_db_wake_duration_seconds` | histogram | `app`, `role` | DB 0→1 wake / first-connect duration |
+| `knext_db_wake_total` | counter | `app`, `role` | scale-zero-pg 0→1 DB wakes (first `query()` or `connect()`) |
+| `knext_db_wake_duration_seconds` | histogram | `app`, `role` | DB 0→1 wake duration (first `query()`/`connect()`) |
 
 ### Also on the app scrape (app-owned, not from the OTel hooks)
 

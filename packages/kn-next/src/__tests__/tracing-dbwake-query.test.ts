@@ -7,7 +7,10 @@ import {
 } from "@opentelemetry/sdk-trace-base";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { DB_WAKE_SPAN_NAME, instrumentPoolForDbWake } from "../adapters/tracing";
+import {
+    DB_WAKE_SPAN_NAME,
+    instrumentPoolForDbWake,
+} from "../adapters/tracing";
 
 /**
  * #345 — the db-wake span/metric must fire on the FIRST client acquisition
@@ -116,9 +119,10 @@ describe("#345 db-wake fires on the pool.query() path", () => {
         });
 
         const spans = dbWakeSpans();
-        expect(spans, "exactly one db_wake span on the query path").toHaveLength(
-            1,
-        );
+        expect(
+            spans,
+            "exactly one db_wake span on the query path",
+        ).toHaveLength(1);
         // Metric emitter fired once (knext_db_wake_total increment path #315).
         expect(emitter).toHaveBeenCalledTimes(1);
         expect(emitter.mock.calls[0][0]).toBe("writer");
@@ -206,7 +210,7 @@ describe("#345 db-wake fires on the pool.query() path", () => {
             async connect() {
                 return { release() {} };
             },
-            query(): Promise<unknown> {
+            query(..._args: unknown[]): Promise<unknown> {
                 return Promise.reject(boom);
             },
         };

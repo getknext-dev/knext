@@ -30,7 +30,7 @@ the real request path with no app route-handler wiring** (see §4 for how):
 | --- | --- | --- |
 | *(request)* | `@vercel/otel` (auto) | the inbound HTTP handler |
 | `knext.cold_start` | `ColdStartSpanProcessor` (auto) | app boot / first-request wake |
-| `knext.db_wake` | pg-pool connect wrapper (auto) | `scale-zero-pg` 0→1 scale + first connect |
+| `knext.db_wake` | pg-pool acquire wrapper (auto) | `scale-zero-pg` 0→1 scale + first `query()`/`connect()` |
 
 They compose into one trace (`knext.cold_start` and `knext.db_wake` are children
 of the request span, so they share its `traceId`):
@@ -107,14 +107,23 @@ boot and opens a `knext.cold_start` child under it, recording
 after the first is a no-op. Because it parents under the request span, the
 cold-start span lands in the same trace.
 
-**`knext.db_wake` — a pg-pool connect wrapper.** `instrumentPoolForDbWake` is
+**`knext.db_wake` — a pg-pool acquisition wrapper.** `instrumentPoolForDbWake` is
 installed once via `@knext/lib/clients`' `setPoolInstrumentor` seam. The lib
 (which stays OTel-free) calls it for every pool it creates; the wrapper spans the
-pool's **first** `connect()` — the scale-zero-pg 0→1 wake — as `knext.db_wake`
-(attributes `knext.db_role` = `writer`/`reader`, `knext.wake_ms`). It opens in
-the caller's active context, so inside a request handler it nests under the
-request span. Warm connects from the ready pool are untouched: the span marks the
-wake, not every checkout.
+pool's **first client acquisition — via `pool.query(...)` OR `pool.connect()`** —
+the scale-zero-pg 0→1 wake — as `knext.db_wake` (attributes `knext.db_role` =
+`writer`/`reader`, `knext.wake_ms`). It opens in the caller's active context, so
+inside a request handler it nests under the request span. Both entry points share
+one per-pool latch, so the wake fires **exactly once** no matter which path runs
+first; warm queries/connects from the ready pool are untouched — the span marks
+the wake, not every checkout.
+
+> Why both paths (#345): the common app pattern is `db.query(...)`, never
+> `db.connect()`. node-pg's `Pool.query()` acquires a client through an internal
+> path that does **not** call the public `connect()`, so wrapping `connect` alone
+> left `knext.db_wake` (and the `knext_db_wake_*` metric) dead for typical usage.
+> The wrapper now covers `query` too, preserving every pg overload (text, params,
+> config object, with/without callback) and staying fail-open.
 
 Both are wired in `instrumentation.ts` (only when tracing is enabled):
 
@@ -132,7 +141,7 @@ registerOTel({
   serviceName,
   spanProcessors: ['auto', new ColdStartSpanProcessor()], // knext.cold_start
 });
-setPoolInstrumentor(instrumentPoolForDbWake); // knext.db_wake on first connect
+setPoolInstrumentor(instrumentPoolForDbWake); // knext.db_wake on first query OR connect
 setTraceIdProvider(installTraceIdProvider());  // log ↔ trace join (§5)
 ```
 
@@ -239,11 +248,15 @@ collector):
 
 - `packages/kn-next/src/__tests__/tracing-integration.test.ts` — the acceptance
   proof. It drives a simulated cold, DB-backed request through the **automatic**
-  hooks (`ColdStartSpanProcessor` + the pool `connect` wrapper, exactly as
+  hooks (`ColdStartSpanProcessor` + the pool acquire wrapper, exactly as
   `instrumentation.ts` wires them) and asserts one trace containing
   HTTP → `knext.cold_start` + `knext.db_wake`, correctly nested — with no
   hand-opened spans. It also proves cold_start fires only on the first request,
-  db_wake only on the first (0→1) connect, and zero spans when tracing is off.
+  db_wake only on the first (0→1) acquisition, and zero spans when tracing is off.
+- `packages/kn-next/src/__tests__/tracing-dbwake-query.test.ts` — #345: db_wake
+  fires on the `pool.query()` path (the real usage), a shared connect+query latch
+  fires exactly once, pg query overloads keep their semantics, and the error/
+  fail-open paths never break the query.
 - `packages/kn-next/src/__tests__/tracing.test.ts` — the helper units
   (`withColdStartSpan` / `withDbWakeSpan`, attributes, nesting, `trace_id` join).
 - `packages/lib/src/__tests__/clients-instrumentor.test.ts` — the `@knext/lib`
