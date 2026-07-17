@@ -825,14 +825,44 @@ Metrics per run: RPS achieved, p50/p95/p99, error rate, the concurrency→latenc
 first**. Invoke: `TARGET_URL=<in-cluster app URL> ./_verify-loadsoak.sh` (see
 operations.md "Sustained-load / soak / throughput harness").
 
-Row schema the harness emits (paste target — the OKE baseline lands here):
+### OKE baseline — 2026-07-17 (cc=100, no pooler, max-scale=10)
+
+Live run on OKE (`context-ckmva7v7zvq`), image `obs-6e977bc`, target the in-cluster
+route `http://file-manager.default.svc.cluster.local/users` (`unstable_noStore` → a DB
+query every request), ramp 0→40 VU (2m) → soak 28 VU (5m). **k6 client pinned to
+`K6_CPU_REQUEST=150m`** (see caveat).
 
 | app | phase | RPS | p50 (ms) | p95 (ms) | p99 (ms) | err % | peak VUs | first wall |
 |---|---|---|---|---|---|---|---|---|
-| _(pending OKE baseline — orchestrator runs #376 on live OKE)_ | rampsoak | — | — | — | — | — | — | app pods / GW_MAX_CONNS=90 / writer / DB CPU |
+| file-manager | rampsoak | **135.3** | 226.8 | 308.1 | 398.0 | **0.00%** | 40 | none hit at this load |
 
-Concurrency→latency curve (the W2 ContainerConcurrency input), CSV
-`concurrency,p50,p95,p99,err%,rps`, one row per sampled VU level — _pending OKE baseline_.
+Concurrency→latency curve (W2 ContainerConcurrency input), CSV `concurrency,p50,p95,p99,err%,rps`:
+```
+40,226.83,308.08,397.95,0.00,135.32
+```
+
+**Reading:** at 40 concurrent the app served **135 RPS at p99 ~398 ms, 0 errors, on ONE
+app pod** — with the default `containerConcurrency=100`, 40 concurrency is well below the
+add-a-replica threshold, so the app never scaled out and no wall (app pods / GW_MAX_CONNS=90
+/ writer / DB CPU) was approached. Healthy headroom; the DB single-writer absorbed the
+read-heavy mix comfortably.
+
+**Caveats (honest limits of this baseline):**
+1. **k6-client-CPU-bound, not app-bound.** This OKE cluster is CPU-**request**-constrained
+   (2 nodes × 1830m allocatable, ~mostly reserved by Knative/kourier/storage/monitoring;
+   actual usage ~5%). A single in-cluster k6 pod only schedules at `~150m`, which caps it
+   near ~40 VU. So 135 RPS is a *floor* (the k6 client ceiling), NOT the app's ceiling —
+   the app stayed at 1 pod and 0 errors, i.e. it was never stressed. Driving the real
+   ceilings (app scale-out at cc, the 90-conn wall, writer saturation) needs either more
+   schedulable CPU or a **fan-out of N k6 pods** — a harness follow-up (#376-fanout).
+2. **Gateway `pggw_*` metrics scraped "unavailable"** and the DB-compute snapshot showed
+   `replicas=0` while requests were served 0-error (mislabeled deployment lookup) — the
+   "which wall broke first" instrumentation needs a fix before it can adjudicate a real
+   wall (harness follow-up). Not load-bearing here since no wall was hit.
+
+This is the honest "before" data point for the wave: at achievable in-cluster load the
+platform is comfortable; the true high-traffic ceilings remain to be driven once the
+load-generation constraint is lifted (multi-k6-pod fan-out).
 
 The harness is validated cluster-free (`SELFTEST=1 ./_verify-loadsoak.sh` +
 `bash deploy/test_verify-loadsoak.sh`): the manifest dry-runs and the summary parser is
