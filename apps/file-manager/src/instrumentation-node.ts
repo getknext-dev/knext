@@ -9,16 +9,18 @@
  * production `next build` fails with `Module not found`.
  *
  * Keeping this body in a SEPARATE module that `instrumentation.ts` loads via a
- * dynamic `await import(...)` with a runtime-computed specifier means webpack
- * never traces it into the edge bundle. `instrumentation.ts` calls this ONLY
- * when `process.env.NEXT_RUNTIME === 'nodejs'`, so on the edge runtime nothing
- * here is ever imported or executed. The knext runtime runs the app on Node
- * (the standalone server), so no behavior is lost.
+ * dynamic `await import(...)` lets `instrumentation.ts` stay edge-clean and CALL
+ * this only when `process.env.NEXT_RUNTIME === 'nodejs'`, so on the edge runtime
+ * nothing here ever EXECUTES. Note: the dynamic import uses a STATIC literal
+ * specifier, so webpack still TRACES this module into the edge compile — the
+ * edge-scoped `IgnorePlugin` in `next.config.ts` is what actually excludes its
+ * Node-only subtree from the edge bundle (#342/#344). The knext runtime runs the
+ * app on Node (the standalone server), so no behavior is lost.
  *
  * This module MUST be loaded lazily (never statically imported from an
- * edge-compiled file) — the static-import guard in
- * `apps/file-manager/instrumentation-edge-safe.test.ts` enforces that
- * `instrumentation.ts` stays edge-clean.
+ * edge-compiled file) AND the edge IgnorePlugin MUST stay in next.config.ts —
+ * the guard in `apps/file-manager/instrumentation-edge-safe.test.ts` enforces
+ * both halves of the fence.
  */
 
 import {

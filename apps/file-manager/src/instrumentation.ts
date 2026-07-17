@@ -13,26 +13,33 @@
 //
 // This file therefore stays EDGE-CLEAN: it has NO top-level static import of
 // any Node-only client module. The Node-only body lives in
-// `./instrumentation-node.ts` and is loaded via a dynamic `await import(...)`
-// with a runtime-computed specifier, ONLY when `NEXT_RUNTIME === 'nodejs'`.
-// Because the specifier is not a static string literal, webpack does not trace
-// that module (and its `@cerbos/grpc` / `pg` / `minio` subtree) into the edge
-// bundle at all. On the edge runtime `register()` is a no-op — the knext
-// runtime runs the app on Node (the standalone server), so nothing is lost.
+// `./instrumentation-node.ts` and is loaded via a dynamic `await import(...)`,
+// and is CALLED only when `NEXT_RUNTIME === 'nodejs'` (the runtime guard below).
 //
-// The static-import guard in
-// `apps/file-manager/instrumentation-edge-safe.test.ts` enforces that this file
-// never regains a top-level Node-only import (that class must fail the gate,
-// not the deploy build — #342).
+// IMPORTANT (#344): the dynamic `import('./instrumentation-node')` uses a STATIC
+// string literal, so webpack STILL traces that module (and its `@cerbos/grpc` /
+// `pg` / `minio` subtree) into BOTH runtime bundles — the runtime guard only
+// stops it EXECUTING on the edge, NOT from being BUNDLED. The LOAD-BEARING edge
+// exclusion is the `IgnorePlugin` in `next.config.ts`, which — for the edge
+// compile ONLY — replaces `./instrumentation-node` with an empty module so its
+// Node-only subtree never enters the edge bundle. On the edge runtime
+// `register()` is a no-op anyway — the knext runtime runs the app on Node (the
+// standalone server), so nothing is lost.
+//
+// The guard in `apps/file-manager/instrumentation-edge-safe.test.ts` enforces
+// BOTH halves of the fence: this file never regains a top-level Node-only
+// import, AND the edge IgnorePlugin stays in next.config.ts. That class must
+// fail the gate, not the deploy build — #342/#344.
 export async function register() {
   if (process.env.NEXT_RUNTIME !== 'nodejs') {
     return;
   }
 
   // Static-literal dynamic import: webpack bundles `./instrumentation-node` into
-  // the NODEJS instrumentation chunk (so it works at runtime). For the EDGE
-  // compile, `next.config.ts` webpack config ignores this module (and its
-  // Node-only client subtree) so it never enters the edge bundle — see #342.
+  // the NODEJS instrumentation chunk (so it works at runtime). webpack traces
+  // this literal specifier into the edge compile TOO; the edge-scoped
+  // `IgnorePlugin` in `next.config.ts` is what replaces it with an empty module
+  // there so its Node-only client subtree never enters the edge bundle — #342.
   const { registerNode } = await import('./instrumentation-node');
   registerNode();
 }

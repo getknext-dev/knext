@@ -198,6 +198,20 @@ jobs:
           KNEXT_REQUIRE_STANDALONE: '1'
         run: pnpm exec vitest run apps/file-manager/bytecode-cache-reuse.test.ts
 
+      # #344 seam-alive gate (reuses the standalone build above — no extra build):
+      # asserts the @knext/lib module-state SEAMS survive the standalone bundle.
+      # #352 shipped with db_wake + correlation DEAD in prod because @knext/lib is
+      # DUPLICATED across the instrumentation vs app-server webpack layers and the
+      # seam was not shared. The fix backs the seam with globalThis Symbol.for(...)
+      # cells; this artifact assertion checks those symbols co-occur in BOTH the
+      # instrumentation (writer) chunk AND an app-server (reader) chunk of the
+      # real `next build --webpack` output — so a re-broken seam (or moving
+      # @knext/lib into serverExternalPackages) fails the gate, not the deploy.
+      - name: Run seam-alive artifact gate (#352/#344, must NOT skip)
+        env:
+          KNEXT_REQUIRE_STANDALONE: '1'
+        run: pnpm exec vitest run apps/file-manager/standalone-seam-alive.test.ts
+
   sigterm-drain-shipped:
     # Per-PR GATE: proves the SHIPPED container layout actually boots the knext
     # runtime entry and drains in-flight requests on SIGTERM (security.md graceful
