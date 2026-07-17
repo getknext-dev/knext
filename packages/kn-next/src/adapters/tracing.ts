@@ -511,9 +511,6 @@ export function instrumentPoolForDbWake(
     //
     //   waked   — a client acquisition has SUCCEEDED. Permanent: once set, every
     //             later acquisition is warm and passes straight through.
-    //   inFlight — a first-wake attempt is OPEN right now (span started, op not
-    //             yet resolved). Gates concurrent firsts so only ONE db_wake span
-    //             is opened per wake.
     //
     // #336: the latch is consumed (waked=true) only on a SUCCESSFUL acquisition.
     // If the first attempt REJECTS during the 0→1 wake (scale-zero-pg cold case:
