@@ -36,6 +36,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	appsv1alpha1 "github.com/AhmedElBanna80/knext/packages/kn-next-operator/api/v1alpha1"
+	"github.com/AhmedElBanna80/knext/packages/kn-next-operator/internal/validation"
 	servingv1 "knative.dev/serving/pkg/apis/serving/v1"
 )
 
@@ -696,6 +697,13 @@ var _ = Describe("NextApp Controller reconcile output", func() {
 			Expect(setArgs).To(ContainSubstring("autoscaling.knative.dev/min-scale"))
 			Expect(setArgs).To(ContainSubstring(`"3"`))
 			Expect(setArgs).To(ContainSubstring("service.serving.knative.dev/" + nn.Name))
+
+			By("running a DIGEST-PINNED kubectl image, never :latest (security.md supply-chain rule)")
+			warmImage := setPod.Containers[0].Image
+			Expect(warmImage).To(ContainSubstring("@sha256:"), "warm CronJob image must be digest-pinned")
+			Expect(warmImage).NotTo(HaveSuffix(":latest"), "warm CronJob image must not use the :latest tag")
+			Expect(validation.ValidateImageRef(warmImage)).To(Succeed(),
+				"warm CronJob image must pass the same digest-pinning gate as app images")
 
 			By("scheduling the CLEAR CronJob at the window end")
 			clearCJ := &batchv1.CronJob{}

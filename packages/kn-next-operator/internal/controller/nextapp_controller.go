@@ -19,8 +19,10 @@ package controller
 import (
 	"context"
 	"fmt"
+	"os"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	batchv1 "k8s.io/api/batch/v1"
@@ -1238,17 +1240,44 @@ func warmCronJobName(app *appsv1alpha1.NextApp, i int, phase string) string {
 	return fmt.Sprintf("%s-warm-%d-%s", app.Name, i, phase)
 }
 
-// warmKubectlImage is the image the warm CronJobs run to patch the ksvc. bitnami
-// kubectl is a small, widely-mirrored image; digest-agnostic here because the
-// job is cluster-internal tooling, not user workload (validateImageRef governs
-// user app images, not operator-managed sidecars/jobs).
-const warmKubectlImage = "bitnami/kubectl:latest"
+// defaultWarmKubectlImage is the DIGEST-PINNED kubectl image the warm CronJobs
+// run to patch the ksvc (security.md supply-chain rule: pin by digest, reject
+// :latest). This is the OFFICIAL Kubernetes-published kubectl image
+// (registry.k8s.io/kubectl) — no third-party registry — pinned to v1.31.4.
+// The warm job runs as the <app>-warm-patcher SA that can patch the app's LIVE
+// ksvc, so a mutable tag here would be a real supply-chain surface; the operator
+// forbids :latest for user app images (ValidateImageRef) and holds itself to the
+// same bar.
+//
+// To bump: `crane digest registry.k8s.io/kubectl:vX.Y.Z` and replace the tag +
+// @sha256 below (keep both so the tag documents the version and the digest pins
+// it). Overridable at runtime via KNEXT_WARM_KUBECTL_IMAGE for air-gapped /
+// mirrored registries — but the default MUST stay digest-pinned.
+const defaultWarmKubectlImage = "registry.k8s.io/kubectl:v1.31.4@sha256:a519329b1bf8f7889e4c902f7147e6933d6a6e1dde25e8171973642396e31f0d"
+
+// warmKubectlImageEnv lets an operator override the warm CronJob image (e.g. to
+// point at an internal mirror). A set-but-:latest value is ignored in favour of
+// the pinned default so the supply-chain guarantee cannot be silently weakened.
+const warmKubectlImageEnv = "KNEXT_WARM_KUBECTL_IMAGE"
+
+// warmKubectlImage returns the image the warm CronJobs run: the operator env
+// override when set to a digest-pinned ref, else the pinned default. A :latest /
+// tag-only override is rejected (falls back to the pinned default) so the
+// security.md "reject :latest" rule holds even for the override path.
+func warmKubectlImage() string {
+	if v := strings.TrimSpace(os.Getenv(warmKubectlImageEnv)); v != "" {
+		if validation.ValidateImageRef(v) == nil {
+			return v
+		}
+	}
+	return defaultWarmKubectlImage
+}
 
 // warmPatchCommand builds the `kubectl patch` argv that sets the ksvc min-scale
 // annotation to `minScale`. It patches spec.template.metadata.annotations (the
-// Knative source of truth for the revision's scale floor) with a strategic-merge
-// patch, and stamps a companion label so the change is observable. Kept pure for
-// unit testing.
+// Knative source of truth for the revision's scale floor) via a JSON merge patch
+// (`--type=merge`), and stamps a companion label so the change is observable.
+// Kept pure for unit testing.
 func warmPatchCommand(app *appsv1alpha1.NextApp, minScale string) []string {
 	patch := fmt.Sprintf(
 		`{"spec":{"template":{"metadata":{"annotations":{%q:%q},"labels":{"service.serving.knative.dev/%s":%q}}}}}`,
@@ -1286,7 +1315,7 @@ func (r *NextAppReconciler) buildWarmCronJob(app *appsv1alpha1.NextApp, cj *batc
 	podSpec.Containers = []corev1.Container{
 		{
 			Name:    "patch-min-scale",
-			Image:   warmKubectlImage,
+			Image:   warmKubectlImage(),
 			Command: warmPatchCommand(app, minScale),
 		},
 	}

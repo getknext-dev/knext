@@ -14,9 +14,11 @@ The `spec` defines the desired state of the Next.js application.
 
 ### `image` (Required)
 The absolute OCI registry path to the Next.js container image (built from `output:'standalone'`).
+Must be **digest-pinned** (`@sha256:...`); the operator rejects `:latest` and tag-only refs
+at admission (mutable tags break rollbacks and provenance — see `.claude/rules/security.md`).
 ```yaml
 spec:
-  image: ghcr.io/org/repo/app:latest
+  image: ghcr.io/org/repo/app:v1.2.3@sha256:abc123...   # digest-pinned, never :latest
 ```
 
 ### `runtime` (Optional)

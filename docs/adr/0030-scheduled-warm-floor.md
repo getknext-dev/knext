@@ -76,7 +76,13 @@ non-empty, the operator generates, all owner-referenced to the NextApp for GC:
    - `<app>-warm-<i>-clear`, scheduled at the window **`end`**, patches the same
      annotation back to **`"0"`** — restoring scale-to-zero.
    Both run as the scoped patcher SA, `ConcurrencyPolicy: Forbid`, with bounded
-   history/backoff (an idempotent floor patch — no missed-window backlog).
+   history/backoff (an idempotent floor patch — no missed-window backlog). The
+   CronJob image is **digest-pinned** (`registry.k8s.io/kubectl` — the official
+   Kubernetes-published image, no third-party registry), never `:latest`
+   (`.claude/rules/security.md` supply-chain rule): the patcher can mutate the
+   app's live ksvc, so a mutable tag there is a real supply-chain surface.
+   Overridable via `KNEXT_WARM_KUBECTL_IMAGE` for mirrored/air-gapped registries,
+   but a `:latest`/tag-only override is rejected in favour of the pinned default.
 
 The Knative **KPA reads that annotation as its floor and still scales ABOVE it**
 on real traffic, so the composition is: CronJob sets the floor during the window,
