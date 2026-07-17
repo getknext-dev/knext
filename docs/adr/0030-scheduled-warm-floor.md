@@ -1,4 +1,4 @@
-# ADR-0030 — Scheduled warm-floor (KEDA cron), and the deferred learned/budget controller
+# ADR-0030 — Scheduled warm-floor (min-scale CronJobs), and the deferred learned/budget controller
 
 - **Status:** Accepted
 - **Date:** 2026-07-17
@@ -7,13 +7,14 @@
   (existing DB warm-tier).
 - **Relates to / amends:** ADR-0001 (the operator is the single source of truth
   for the generated Knative Service and its autoscaling annotations — this ADR
-  adds a **derived** KEDA `ScaledObject`, no raw-manifest generation),
-  ADR-0028 (scale-to-zero model + `spec.scaling`).
+  adds **derived** CronJobs that patch the SAME `min-scale` annotation the
+  operator already owns; no raw app-manifest generation), ADR-0028 (scale-to-zero
+  model + `spec.scaling`).
 - **Scope:** a new `spec.scaling.warmSchedule` on the `NextApp` CRD
-  (`api/v1alpha1/nextapp_types.go` — `WarmSchedule []WarmWindow`), the KEDA
-  `ScaledObject` generated in `reconcileWarmSchedule`
+  (`api/v1alpha1/nextapp_types.go` — `WarmSchedule []WarmWindow`), the CronJobs +
+  scoped patcher RBAC generated in `reconcileWarmSchedule`
   (`internal/controller/nextapp_controller.go`), and the shared spec validation
-  (`internal/validation/validate.go`).
+  (`internal/validation/validate.go`, incl. 5-field cron-syntax validation).
 
 ## Context
 
@@ -26,42 +27,88 @@ controller. Owners already know their daily peaks and scheduled campaigns; a
 scheduled warm floor cuts the spike-tail latency for those known windows with
 zero new control loop, zero ML, and no new source of truth mutating the NextApp.
 
-KEDA (already shipped as OPTIONAL infrastructure — see
-`packages/scale-zero-pg/deploy/40-keda-scaledobject.yaml.optional`) provides a
-`cron` scaler that sets a `minReplicaCount` floor during a window. That composes
-cleanly with Knative's KPA: **KEDA sets the floor, the KPA scales ABOVE it** on
-real traffic.
+### Why NOT KEDA (research finding — corrects the first draft)
+
+The first draft generated a **KEDA `cron` ScaledObject** targeting the Knative
+Service. **That does not work.** Research on this repo's pinned Knative
+(`serving@v0.48.0`) and the KEDA model:
+
+- KEDA actuates its `scaleTargetRef` through the Kubernetes **`/scale`
+  subresource** (it reads/writes `.spec.replicas`).
+- The Knative **Service** CRD declares `subresources: { status: {} }` only — **no
+  `/scale`** (`config/core/300-resources/service.yaml`). The Knative
+  **PodAutoscaler** CRD is likewise `status`-only — no `/scale` either
+  (`config/core/300-resources/podautoscaler.yaml`). Knative's replica count is
+  owned by its KPA and expressed via the `autoscaling.knative.dev/min-scale`
+  annotation, not `.spec.replicas`.
+- So a KEDA ScaledObject on a ksvc errors at KEDA's own reconcile
+  (`error getting scale target … could not find the requested resource`) and the
+  warm floor **never materializes** — the feature would be inert.
+- The repo's own example (`packages/scale-zero-pg/deploy/40-keda-scaledobject.yaml.optional`)
+  targets a plain **Deployment** — consistent with the `/scale` requirement.
+- Patching the per-revision **PodAutoscaler** min-scale annotation directly does
+  NOT survive either: the Knative Revision reconciler makes the Revision template
+  the **source of truth** for all `autoscaling.knative.dev/*` annotations and
+  *deletes* any it did not put there (`reconcile_resources.go`
+  `syncAnnotationsForKPA`). A PA-level patch is reverted on the next PA reconcile.
+
+The one place Knative accepts as source of truth is the **ksvc
+`spec.template` `min-scale` annotation**. That is the mechanism this ADR lands.
 
 ## Decision
 
 Add `spec.scaling.warmSchedule` — a list of `WarmWindow{ start, end, replicas,
-timezone }` where `start`/`end` are standard cron expressions. When non-empty,
-the operator generates ONE KEDA `ScaledObject` named `<app>-warm-schedule` with:
+timezone }` where `start`/`end` are standard **5-field** cron expressions. When
+non-empty, the operator generates, all owner-referenced to the NextApp for GC:
 
-- `scaleTargetRef` → the app's **Knative Service** (`serving.knative.dev/v1`,
-  kind `Service`, name = app name). Targeting the ksvc (not the KPA-owned
-  Deployment, whose replica count Knative reconciles and would fight) is the
-  supported composition: KEDA writes the desired floor, Knative's KPA owns
-  scale-above.
-- `minReplicaCount: 0` — the ScaledObject NEVER floors the app above zero
-  *outside* a window, so the default scale-to-zero cost model (ADR-0028) is
-  fully preserved.
-- `maxReplicaCount` = the app's `spec.scaling.maxScale` (or the operator default
-  `10` when maxScale is unbounded) — KEDA requires a finite ceiling and must
-  never floor above the reactive ceiling.
-- one `cron` trigger per window: `{ start, end, timezone (default UTC),
-  desiredReplicas }`.
+1. A **scoped patcher RBAC** trio (`<app>-warm-patcher`): a `ServiceAccount`, a
+   `Role` granting ONLY `get`/`patch` on the app's OWN Knative Service
+   (`resourceNames: [<app>]` — least privilege; a warm job can touch no other
+   ksvc or resource), and a `RoleBinding`. RBAC escalation-prevention is
+   satisfied because the operator itself already holds `get`/`patch` on
+   `serving.knative.dev/services`.
+2. Per window, a pair of **Kubernetes CronJobs**:
+   - `<app>-warm-<i>-set`, scheduled at the window **`start`** (in the window's
+     `timezone`, via CronJob `spec.timeZone`, default `UTC`), runs
+     `kubectl patch service.serving.knative.dev <app> --type=merge` to set
+     `spec.template.metadata.annotations["autoscaling.knative.dev/min-scale"]`
+     to **`replicas`** — raising the KPA's scale floor for the window.
+   - `<app>-warm-<i>-clear`, scheduled at the window **`end`**, patches the same
+     annotation back to **`"0"`** — restoring scale-to-zero.
+   Both run as the scoped patcher SA, `ConcurrencyPolicy: Forbid`, with bounded
+   history/backoff (an idempotent floor patch — no missed-window backlog).
 
-When `warmSchedule` is empty (the DEFAULT) **no ScaledObject is generated**, and
-any previously-generated one is deleted. KEDA therefore remains **OPTIONAL**: a
-cluster without KEDA installed is unaffected, and a missing `keda.sh` CRD is a
-non-fatal log-and-continue during reconcile (the operator does not add a hard
-`Owns(ScaledObject)` watch, which would break startup where KEDA is absent).
+The Knative **KPA reads that annotation as its floor and still scales ABOVE it**
+on real traffic, so the composition is: CronJob sets the floor during the window,
+KPA scales above it. Outside every window the floor is `"0"`, so the default
+scale-to-zero cost model (ADR-0028) is preserved.
+
+When `warmSchedule` is empty (the DEFAULT) **no warm children are generated**,
+and any previously-generated ones (CronJobs + patcher RBAC) are deleted. A
+**shrinking** schedule prunes the now-unused higher-index window CronJobs.
+CronJobs and RBAC are **core built-in kinds** (always present), so they are also
+`Owns(...)`-watched — drift on a generated child re-enqueues the NextApp.
 
 Validation (shared by the admission webhook and the fail-closed reconciler)
-rejects: an empty `start`/`end`, `replicas < 1` (a floor of 0 warms nothing —
-omit the window instead), and `replicas > maxScale` when maxScale is finite (the
-floor cannot exceed the reactive ceiling).
+rejects: an empty `start`/`end`, a `start`/`end` that is **not valid 5-field
+cron** (validated with `robfig/cron` `ParseStandard` — the exact parser the
+Kubernetes CronJob controller uses, so a cron the operator accepts is one the
+generated CronJob accepts; a seconds field, out-of-range value, or garbage is
+rejected at admission with an actionable error instead of failing silently in the
+scheduler), `replicas < 1` (a floor of 0 warms nothing — omit the window), and
+`replicas > maxScale` when maxScale is finite (the floor cannot exceed the
+reactive ceiling).
+
+### Known trade-off — a min-scale patch rolls a new Revision
+
+Patching the ksvc `spec.template` annotation is a template change, so Knative
+creates a **new Revision** at each window boundary (twice per window). This is
+acceptable for a twice-a-window annotation flip on a normal app, but it resets
+traffic to latest-ready — so **`warmSchedule` must not be combined with a pinned
+traffic target** (`spec.traffic.revisionName`, #92). This is documented on the
+CRD field. A revision-free variant (a first-class Knative scheduled-scale, or an
+operator-run scheduler that patches the PA in a way Knative won't revert) is a
+possible future refinement but is out of scope for the MVP.
 
 ## Honesty — this is SCHEDULED, not LEARNED
 
@@ -89,9 +136,12 @@ warm cost per tenant. Those three are explicitly **DEFERRED** (below).
 
 - **Positive:** known peaks get a warm floor with zero new control loop and no
   new source of truth; back-compat is byte-identical for every CR that omits
-  `warmSchedule`; KEDA stays optional.
-- **Negative / accepted:** the floor is only as good as the owner's schedule
-  (no learning yet); a warm floor costs `replicas` pods for the window's
-  duration (the owner opts into that cost explicitly). The AC's benchmark
-  (KEDA-cron warm floor vs off, warm cost quantified) is owner-gated on an OKE
-  run and tracked in `BENCHMARKS.md` — this ADR ships the mechanism.
+  `warmSchedule`; the mechanism uses only core Kubernetes kinds (CronJob + RBAC)
+  and the Knative min-scale annotation the operator already owns — **no KEDA
+  dependency at all** (the abandoned KEDA path could not actuate a ksvc).
+- **Negative / accepted:** the floor is only as good as the owner's schedule (no
+  learning yet); a warm floor costs `replicas` pods for the window's duration
+  (opt-in cost); each window boundary rolls a new Revision (so not for
+  pinned-traffic apps). The AC's benchmark (scheduled warm floor vs off, warm
+  cost quantified) is owner-gated on an OKE run and tracked in `BENCHMARKS.md` —
+  this ADR ships the mechanism.

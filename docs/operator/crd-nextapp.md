@@ -37,10 +37,10 @@ spec:
     maxScale: 10              # Maximum pods during burst traffic (Default: 10)
     containerConcurrency: 20  # Concurrent requests per pod before Knative adds a pod (Default: 20, ADR-0028; W1/#376 refines)
     poolMax: 5                # Optional per-pod DB pool max; when set the operator enforces maxScale × poolMax ≤ 80 (ADR-0028)
-    warmSchedule:             # Optional SCHEDULED warm floor (ADR-0030, #380); requires KEDA (optional)
-      - start: "0 8 * * 1-5"     # cron: warm floor begins (08:00 weekdays)
-        end:   "0 20 * * 1-5"    # cron: warm floor ends (20:00 weekdays)
-        replicas: 3             # warm pods held during the window (>= 1, <= maxScale)
+    warmSchedule:             # Optional SCHEDULED warm floor (ADR-0030, #380); no KEDA needed
+      - start: "0 8 * * 1-5"     # 5-field cron: warm floor begins (08:00 weekdays)
+        end:   "0 20 * * 1-5"    # 5-field cron: warm floor ends (20:00 weekdays)
+        replicas: 3             # min-scale floor held during the window (>= 1, <= maxScale)
         timezone: America/New_York # IANA timezone; defaults to UTC
 ```
 
@@ -52,9 +52,13 @@ spec:
 > See [`scaling-cold-start.md`](./scaling-cold-start.md#high-traffic-profile-377-adr-0028).
 
 > `warmSchedule` pre-warms the app to a floor of `replicas` pods **during declared
-> windows** (a KEDA `cron` scaler; the Knative KPA still scales above the floor).
-> This is **scheduled, owner-authored** warming — **not learned prediction**. Empty
-> => no `ScaledObject` (default scale-to-zero, KEDA not required). See
+> windows**: the operator generates a pair of Kubernetes CronJobs per window that
+> patch the ksvc `autoscaling.knative.dev/min-scale` annotation to `replicas` at
+> `start` and back to `0` at `end` (the Knative KPA still scales above the floor).
+> This is **scheduled, owner-authored** warming — **not learned prediction** — and
+> needs **no KEDA** (KEDA cannot scale a Knative Service; see ADR-0030). Empty =>
+> nothing generated (default scale-to-zero). Do **not** combine with a pinned
+> `spec.traffic.revisionName` (a min-scale patch rolls a new Revision). See
 > [`scaling-cold-start.md`](./scaling-cold-start.md#scheduled-warm-floor-specscalingwarmschedule-adr-0030--380)
 > and [ADR-0030](../adr/0030-scheduled-warm-floor.md) (incl. the deferred
 > learned-controller / DB-lockstep / warm-budget follow-ups).

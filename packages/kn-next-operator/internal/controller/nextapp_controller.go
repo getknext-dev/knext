@@ -23,8 +23,10 @@ import (
 	"strconv"
 	"time"
 
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
@@ -235,10 +237,14 @@ func (r *NextAppReconciler) emitEvent(obj runtime.Object, eventType, reason, mes
 // +kubebuilder:rbac:groups=caching.internal.knative.dev,resources=images,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=sources.knative.dev,resources=kafkasources,verbs=get;list;watch;create;update;patch;delete
-// ScaledObjects: the scheduled warm-floor (ADR-0030, #380) generates a KEDA
-// ScaledObject with cron triggers for the app's Knative Service. KEDA is
-// OPTIONAL — the operator only ever creates/deletes the object; KEDA reconciles it.
-// +kubebuilder:rbac:groups=keda.sh,resources=scaledobjects,verbs=get;list;watch;create;update;patch;delete
+// Warm-schedule (ADR-0030, #380): the operator generates CronJobs that patch the
+// app's ksvc min-scale annotation on a schedule, plus a scoped patcher Role +
+// RoleBinding. It needs batch/cronjobs and rbac roles/rolebindings CRUD. The
+// operator already holds get;...;patch on serving.knative.dev/services (above),
+// which RBAC escalation-prevention requires to GRANT get/patch on that resource
+// to the patcher Role.
+// +kubebuilder:rbac:groups=batch,resources=cronjobs,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=roles;rolebindings,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 // Secrets: needed to MIRROR the delegated database DSN (app-db-<app>) into the
 // app's own namespace (ADR-0006 §3b). Cross-ns SecretKeyRef is impossible, so the
@@ -470,13 +476,18 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 		}
 	}
 
-	// 5b. Reconcile the scheduled warm-floor KEDA ScaledObject (ADR-0030,
-	// W5/#380). Generated ONLY when spec.scaling.warmSchedule is non-empty; a
-	// prior one is deleted when the schedule is cleared. KEDA is OPTIONAL — the
-	// object is inert until KEDA reconciles it. A missing KEDA CRD is non-fatal:
-	// like the Image cache we log and continue rather than wedge the reconcile.
+	// 5b. Reconcile the scheduled warm-floor (ADR-0030, W5/#380): a pair of
+	// CronJobs per window (+ a scoped patcher SA/Role/RoleBinding) that patch the
+	// ksvc `autoscaling.knative.dev/min-scale` annotation to the window replicas
+	// at start and back to 0 at end. Generated ONLY when warmSchedule is
+	// non-empty; all warm children are pruned/deleted when the schedule shrinks
+	// or clears. A hard error here is a real reconcile failure (CronJobs/RBAC are
+	// core kinds, always present) so surface it, unlike the optional KafkaSource.
 	if err := r.reconcileWarmSchedule(ctx, &nextApp); err != nil {
-		logger.Info("Could not reconcile warm-schedule ScaledObject (KEDA CRD may not be installed)", "error", err.Error())
+		logger.Error(err, "Failed to reconcile warm-schedule CronJobs")
+		r.emitEvent(&nextApp, corev1.EventTypeWarning, ReasonReconcileFailed,
+			fmt.Sprintf("Failed to reconcile warm-schedule CronJobs: %s", err.Error()))
+		return ctrl.Result{}, err
 	}
 
 	// 6. Update Status: URL + conditions + observed traffic split (#92)
@@ -1211,115 +1222,228 @@ func (r *NextAppReconciler) reconcileNetworkPolicy(ctx context.Context, nextApp 
 	return err
 }
 
-// warmScheduleObjectName is the deterministic name of the KEDA ScaledObject the
-// operator generates for a NextApp's scheduled warm-floor (ADR-0030, W5/#380).
-func warmScheduleObjectName(app *appsv1alpha1.NextApp) string {
-	return app.Name + "-warm-schedule"
+// Warm-schedule (ADR-0030, W5/#380) resource-name helpers. All warm children
+// are prefixed with `<app>-warm` and owner-referenced to the NextApp for GC.
+const warmMinScaleAnnotation = "autoscaling.knative.dev/min-scale"
+
+// warmPatcherName is the shared, scoped ServiceAccount/Role/RoleBinding name the
+// warm CronJobs run as — granted get/patch on the app's OWN ksvc only.
+func warmPatcherName(app *appsv1alpha1.NextApp) string {
+	return app.Name + "-warm-patcher"
 }
 
-// buildWarmScheduleTriggers renders one KEDA `cron` trigger per warm window.
-// Each window (start/end cron + replicas + timezone) becomes a cron trigger
-// whose `desiredReplicas` is the window's warm floor. Timezone defaults to UTC.
-// Kept pure so it can be unit-tested independent of the API server.
-func buildWarmScheduleTriggers(windows []appsv1alpha1.WarmWindow) []interface{} {
-	triggers := make([]interface{}, 0, len(windows))
-	for _, w := range windows {
-		tz := w.Timezone
-		if tz == "" {
-			tz = "UTC"
-		}
-		triggers = append(triggers, map[string]interface{}{
-			"type": "cron",
-			"metadata": map[string]interface{}{
-				"timezone":        tz,
-				"start":           w.Start,
-				"end":             w.End,
-				"desiredReplicas": strconv.Itoa(int(w.Replicas)),
-			},
-		})
+// warmCronJobName is the deterministic name of the CronJob for window index `i`
+// and phase ("set" at window start, "clear" at window end).
+func warmCronJobName(app *appsv1alpha1.NextApp, i int, phase string) string {
+	return fmt.Sprintf("%s-warm-%d-%s", app.Name, i, phase)
+}
+
+// warmKubectlImage is the image the warm CronJobs run to patch the ksvc. bitnami
+// kubectl is a small, widely-mirrored image; digest-agnostic here because the
+// job is cluster-internal tooling, not user workload (validateImageRef governs
+// user app images, not operator-managed sidecars/jobs).
+const warmKubectlImage = "bitnami/kubectl:latest"
+
+// warmPatchCommand builds the `kubectl patch` argv that sets the ksvc min-scale
+// annotation to `minScale`. It patches spec.template.metadata.annotations (the
+// Knative source of truth for the revision's scale floor) with a strategic-merge
+// patch, and stamps a companion label so the change is observable. Kept pure for
+// unit testing.
+func warmPatchCommand(app *appsv1alpha1.NextApp, minScale string) []string {
+	patch := fmt.Sprintf(
+		`{"spec":{"template":{"metadata":{"annotations":{%q:%q},"labels":{"service.serving.knative.dev/%s":%q}}}}}`,
+		warmMinScaleAnnotation, minScale, app.Name, app.Name,
+	)
+	return []string{
+		"kubectl", "patch", "service.serving.knative.dev", app.Name,
+		"--type=merge", "-p", patch,
 	}
-	return triggers
 }
 
-// warmScheduleMaxReplicas is the ScaledObject's maxReplicaCount: it mirrors the
-// app's declared maxScale so KEDA never floors above the reactive ceiling. When
-// maxScale is unbounded (0) we fall back to the operator's default ksvc
-// max-scale (10) so KEDA always has a finite ceiling (it requires one).
-func warmScheduleMaxReplicas(app *appsv1alpha1.NextApp) int64 {
-	if app.Spec.Scaling != nil && app.Spec.Scaling.MaxScale > 0 {
-		return int64(app.Spec.Scaling.MaxScale)
+// buildWarmCronJob renders one warm CronJob (set or clear) for a window. schedule
+// is the window's start (set) or end (clear) cron; tz the window timezone
+// (defaulted to UTC by the caller); minScale the annotation value to patch.
+func (r *NextAppReconciler) buildWarmCronJob(app *appsv1alpha1.NextApp, cj *batchv1.CronJob, schedule, tz, minScale string) error {
+	if cj.Labels == nil {
+		cj.Labels = map[string]string{}
 	}
-	return 10
+	cj.Labels["app"] = app.Name
+	cj.Labels["generated-by"] = "kn-next-operator"
+
+	cj.Spec.Schedule = schedule
+	cj.Spec.TimeZone = ptr.To(tz)
+	// Missed windows must NOT stack up a backlog of patches; only the most recent
+	// run matters (the floor is idempotent). Forbid concurrency and skip missed.
+	cj.Spec.ConcurrencyPolicy = batchv1.ForbidConcurrent
+	cj.Spec.StartingDeadlineSeconds = ptr.To(int64(300))
+	cj.Spec.SuccessfulJobsHistoryLimit = ptr.To(int32(1))
+	cj.Spec.FailedJobsHistoryLimit = ptr.To(int32(1))
+
+	cj.Spec.JobTemplate.Spec.BackoffLimit = ptr.To(int32(2))
+	podSpec := &cj.Spec.JobTemplate.Spec.Template.Spec
+	podSpec.ServiceAccountName = warmPatcherName(app)
+	podSpec.RestartPolicy = corev1.RestartPolicyNever
+	podSpec.Containers = []corev1.Container{
+		{
+			Name:    "patch-min-scale",
+			Image:   warmKubectlImage,
+			Command: warmPatchCommand(app, minScale),
+		},
+	}
+	return ctrl.SetControllerReference(app, cj, r.Scheme)
 }
 
-// reconcileWarmSchedule emits (or deletes) the KEDA ScaledObject that pre-warms
-// the app to a floor of K pods during declared windows (ADR-0030, W5/#380).
+// reconcileWarmSchedule generates (or prunes) the scheduled warm-floor children
+// for a NextApp (ADR-0030, W5/#380): a scoped patcher SA/Role/RoleBinding and,
+// per window, a "set" CronJob (patches ksvc min-scale to `replicas` at window
+// start) and a "clear" CronJob (resets min-scale to 0 at window end). The
+// Knative KPA reads the min-scale annotation as its floor and still scales ABOVE
+// it — so the floor is held during the window and scale-to-zero is preserved
+// outside every window.
 //
-// Composition with Knative: the ScaledObject targets the app's Knative Service
-// and sets minReplicaCount=0 with one `cron` trigger per window. During a
-// window KEDA raises the floor to the window's replicas; the existing Knative
-// KPA still scales ABOVE the floor on real traffic. Outside every window there
-// is no active trigger, so the floor is 0 and the app's default scale-to-zero
-// cost model is preserved.
+// Why CronJobs patching min-scale, not KEDA: KEDA actuates its target via the
+// Kubernetes /scale subresource, which a Knative Service (and its PodAutoscaler)
+// does NOT expose; and Knative treats the Revision template as the source of
+// truth for autoscaling annotations (a PA-level patch is reverted). Patching the
+// ksvc template min-scale annotation is the Knative-native scheduled-floor path.
+// (A patch rolls a new Revision — acceptable for a twice-a-window flip; not for
+// pinned-traffic apps, documented on the CRD field + ADR-0030.)
 //
-// HONESTY: this is OWNER-AUTHORED SCHEDULING, not learned prediction. The
-// learned/heuristic controller (same-hour-last-week RPS percentile), the
-// DB-compute lockstep pre-warm, and the per-tenant warm-budget cap are DEFERRED
-// follow-ups (ADR-0030 §Deferred; issues referencing #375/#380).
+// HONESTY: owner-authored SCHEDULING, not learned prediction. The learned
+// controller (#387), DB-compute lockstep pre-warm (#388), and per-tenant
+// warm-budget cap (#389) are DEFERRED follow-ups (ADR-0030 §Deferred).
 //
-// KEDA is OPTIONAL on the cluster. When warmSchedule is empty we delete any
-// prior ScaledObject and do nothing else (no KEDA dependency). Unstructured is
-// used so the operator does not take a hard build/scheme dependency on KEDA.
+// Empty warmSchedule => all warm children are deleted (byte-identical
+// back-compat). A shrinking schedule prunes the now-unused higher-index windows.
 func (r *NextAppReconciler) reconcileWarmSchedule(ctx context.Context, nextApp *appsv1alpha1.NextApp) error {
-	so := &unstructured.Unstructured{}
-	so.SetAPIVersion("keda.sh/v1alpha1")
-	so.SetKind("ScaledObject")
-	so.SetName(warmScheduleObjectName(nextApp))
-	so.SetNamespace(nextApp.Namespace)
-
-	windows := []appsv1alpha1.WarmWindow(nil)
+	var windows []appsv1alpha1.WarmWindow
 	if nextApp.Spec.Scaling != nil {
 		windows = nextApp.Spec.Scaling.WarmSchedule
 	}
 
-	// No windows => ensure any previously-generated ScaledObject is removed so a
-	// cleared schedule stops flooring the app. Best-effort: a NotFound (never
-	// created, or KEDA CRD absent) is success.
 	if len(windows) == 0 {
-		if err := r.Delete(ctx, so); err != nil && !errors.IsNotFound(err) {
-			// A missing KEDA CRD surfaces as a NoKindMatchError (not IsNotFound);
-			// treat it as nothing-to-delete rather than a hard failure.
-			if apimeta.IsNoMatchError(err) {
-				return nil
-			}
+		return r.deleteWarmChildren(ctx, nextApp, 0)
+	}
+
+	// 1. Scoped patcher RBAC: ServiceAccount + Role (get/patch on the app's OWN
+	// ksvc by resourceName only — least privilege) + RoleBinding.
+	if err := r.reconcileWarmPatcherRBAC(ctx, nextApp); err != nil {
+		return err
+	}
+
+	// 2. One set + one clear CronJob per window.
+	for i, w := range windows {
+		tz := w.Timezone
+		if tz == "" {
+			tz = "UTC"
+		}
+		setCJ := &batchv1.CronJob{ObjectMeta: metav1.ObjectMeta{Name: warmCronJobName(nextApp, i, "set"), Namespace: nextApp.Namespace}}
+		if _, err := controllerutil.CreateOrUpdate(ctx, r.Client, setCJ, func() error {
+			return r.buildWarmCronJob(nextApp, setCJ, w.Start, tz, strconv.Itoa(int(w.Replicas)))
+		}); err != nil {
+			return err
+		}
+		clearCJ := &batchv1.CronJob{ObjectMeta: metav1.ObjectMeta{Name: warmCronJobName(nextApp, i, "clear"), Namespace: nextApp.Namespace}}
+		if _, err := controllerutil.CreateOrUpdate(ctx, r.Client, clearCJ, func() error {
+			return r.buildWarmCronJob(nextApp, clearCJ, w.End, tz, "0")
+		}); err != nil {
+			return err
+		}
+	}
+
+	// 3. Prune CronJobs for windows that no longer exist (schedule shrank).
+	return r.deleteWarmChildren(ctx, nextApp, len(windows))
+}
+
+// reconcileWarmPatcherRBAC provisions the scoped ServiceAccount + Role +
+// RoleBinding the warm CronJobs run as. The Role grants ONLY get/patch on the
+// app's OWN Knative Service (resourceNames-scoped) in its own namespace — a warm
+// job can never touch another app's ksvc or any other resource.
+func (r *NextAppReconciler) reconcileWarmPatcherRBAC(ctx context.Context, nextApp *appsv1alpha1.NextApp) error {
+	name := warmPatcherName(nextApp)
+
+	sa := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: nextApp.Namespace}}
+	if _, err := controllerutil.CreateOrUpdate(ctx, r.Client, sa, func() error {
+		sa.AutomountServiceAccountToken = ptr.To(true)
+		return ctrl.SetControllerReference(nextApp, sa, r.Scheme)
+	}); err != nil {
+		return err
+	}
+
+	role := &rbacv1.Role{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: nextApp.Namespace}}
+	if _, err := controllerutil.CreateOrUpdate(ctx, r.Client, role, func() error {
+		role.Rules = []rbacv1.PolicyRule{
+			{
+				APIGroups:     []string{"serving.knative.dev"},
+				Resources:     []string{"services"},
+				ResourceNames: []string{nextApp.Name},
+				Verbs:         []string{"get", "patch"},
+			},
+		}
+		return ctrl.SetControllerReference(nextApp, role, r.Scheme)
+	}); err != nil {
+		return err
+	}
+
+	rb := &rbacv1.RoleBinding{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: nextApp.Namespace}}
+	if _, err := controllerutil.CreateOrUpdate(ctx, r.Client, rb, func() error {
+		rb.RoleRef = rbacv1.RoleRef{APIGroup: "rbac.authorization.k8s.io", Kind: "Role", Name: name}
+		rb.Subjects = []rbacv1.Subject{{Kind: "ServiceAccount", Name: name, Namespace: nextApp.Namespace}}
+		return ctrl.SetControllerReference(nextApp, rb, r.Scheme)
+	}); err != nil {
+		return err
+	}
+	return nil
+}
+
+// deleteWarmChildren removes warm CronJobs for window indices >= keepFrom (used
+// both to prune a shrunk schedule and, with keepFrom=0, to tear everything down
+// when warmSchedule is cleared). When keepFrom==0 the scoped patcher RBAC is
+// removed too. Best-effort: a NotFound is success. It walks indices until it
+// finds a contiguous gap (both set+clear of an index absent), bounding the scan.
+func (r *NextAppReconciler) deleteWarmChildren(ctx context.Context, nextApp *appsv1alpha1.NextApp, keepFrom int) error {
+	deleteByName := func(obj client.Object, name string) error {
+		obj.SetName(name)
+		obj.SetNamespace(nextApp.Namespace)
+		if err := r.Delete(ctx, obj); err != nil && !errors.IsNotFound(err) {
 			return err
 		}
 		return nil
 	}
+	// Probe a bounded range beyond keepFrom; stop after a run of empties. The
+	// upper bound (keepFrom+64) is generous — no real app declares 64 windows —
+	// and the missing-run break keeps steady-state cost O(windows).
+	misses := 0
+	for i := keepFrom; i < keepFrom+64 && misses < 2; i++ {
+		setName := warmCronJobName(nextApp, i, "set")
+		clearName := warmCronJobName(nextApp, i, "clear")
+		existing := &batchv1.CronJob{}
+		found := r.Get(ctx, types.NamespacedName{Name: setName, Namespace: nextApp.Namespace}, existing) == nil
+		if err := deleteByName(&batchv1.CronJob{}, setName); err != nil {
+			return err
+		}
+		if err := deleteByName(&batchv1.CronJob{}, clearName); err != nil {
+			return err
+		}
+		if found {
+			misses = 0
+		} else {
+			misses++
+		}
+	}
 
-	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, so, func() error {
-		labels := map[string]string{
-			"app":          nextApp.Name,
-			"generated-by": "kn-next-operator",
+	if keepFrom == 0 {
+		if err := deleteByName(&rbacv1.RoleBinding{}, warmPatcherName(nextApp)); err != nil {
+			return err
 		}
-		so.SetLabels(labels)
-		spec := map[string]interface{}{
-			"scaleTargetRef": map[string]interface{}{
-				"apiVersion": "serving.knative.dev/v1",
-				"kind":       "Service",
-				"name":       nextApp.Name,
-			},
-			// minReplicaCount stays 0 so the ScaledObject NEVER fights the app's
-			// scale-to-zero outside a window; the cron triggers raise the floor
-			// only during their windows.
-			"minReplicaCount": int64(0),
-			"maxReplicaCount": warmScheduleMaxReplicas(nextApp),
-			"triggers":        buildWarmScheduleTriggers(windows),
+		if err := deleteByName(&rbacv1.Role{}, warmPatcherName(nextApp)); err != nil {
+			return err
 		}
-		so.Object["spec"] = spec
-		return ctrl.SetControllerReference(nextApp, so, r.Scheme)
-	})
-	return err
+		if err := deleteByName(&corev1.ServiceAccount{}, warmPatcherName(nextApp)); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // revisionToNextAppRequests maps a Knative Revision to a reconcile request for
@@ -1349,13 +1473,13 @@ func (r *NextAppReconciler) revisionToNextAppRequests(_ context.Context, obj cli
 	}
 }
 
-// NOTE (ADR-0030): we deliberately do NOT add an Owns(ScaledObject) watch to the
-// manager. KEDA is OPTIONAL — a hard Owns watch would make the operator fail to
-// start on a cluster where the keda.sh CRD is not installed (the informer cannot
-// list an unregistered kind). The ScaledObject is instead reconciled on the
-// NextApp's own reconcile passes (CreateOrUpdate / delete), which is sufficient:
-// the object is derived purely from spec and low-churn. If KEDA is absent the
-// generation is a non-fatal log-and-continue (see reconcileWarmSchedule caller).
+// NOTE (ADR-0030): the scheduled warm-floor children are Kubernetes CronJobs +
+// a scoped Role/RoleBinding — CORE built-in kinds (batch/v1, rbac/v1), always
+// present — so they are Owns(...)-watched below (unlike the abandoned KEDA
+// ScaledObject approach, which could not be Owns-watched because KEDA is
+// optional and its CRD may be absent). KEDA cannot drive a Knative Service
+// (no /scale subresource), so warm-floor is scheduled via ksvc min-scale
+// patching instead — see reconcileWarmSchedule.
 func (r *NextAppReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		// GenerationChangedPredicate on the PRIMARY (For) watch only: a
@@ -1365,12 +1489,18 @@ func (r *NextAppReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		// also means annotation-only / label-only edits to the NextApp do not
 		// reconcile (generation is bumped only on spec changes). That is the
 		// accepted trade-off. We do NOT filter the Owns(...) watches: drift in an
-		// owned child (ksvc/SA/PVC/NetworkPolicy) must still trigger a reconcile.
+		// owned child (ksvc/SA/PVC/NetworkPolicy/CronJob/RBAC) must still trigger a reconcile.
 		For(&appsv1alpha1.NextApp{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Owns(&servingv1.Service{}).
 		Owns(&corev1.PersistentVolumeClaim{}).
 		Owns(&corev1.ServiceAccount{}).
 		Owns(&networkingv1.NetworkPolicy{}).
+		// Warm-schedule children (ADR-0030, #380): drift or manual edits on a
+		// generated CronJob / patcher RBAC re-enqueue the NextApp so the operator
+		// reconciles them back to desired.
+		Owns(&batchv1.CronJob{}).
+		Owns(&rbacv1.Role{}).
+		Owns(&rbacv1.RoleBinding{}).
 		// #365: watch child Knative Revisions so a pure Active-condition flip
 		// (scale-to-zero / wake) re-enqueues the owning NextApp and
 		// `.status.scaledToZero` converges within a bounded window. Revisions are

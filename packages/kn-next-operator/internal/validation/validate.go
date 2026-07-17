@@ -25,10 +25,23 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/robfig/cron/v3"
 	utilvalidation "k8s.io/apimachinery/pkg/util/validation"
 
 	appsv1alpha1 "github.com/AhmedElBanna80/knext/packages/kn-next-operator/api/v1alpha1"
 )
+
+// validateCronExpr validates the 5-field (minute hour day-of-month month
+// day-of-week) cron syntax used by Kubernetes CronJob schedules — the exact
+// parser flavour (robfig/cron ParseStandard) the Kubernetes CronJob controller
+// uses, so a warmSchedule cron the operator accepts is one the generated
+// CronJob will accept. A trailing seconds field, an out-of-range value, or
+// unparseable text is rejected at admission (ADR-0030) instead of failing
+// silently in the scheduler.
+func validateCronExpr(expr string) error {
+	_, err := cron.ParseStandard(strings.TrimSpace(expr))
+	return err
+}
 
 // MaxConnections documents scale-zero-pg's Postgres primary `max_connections`
 // (100). It is NOT the bound the operator validates against — the app
@@ -200,19 +213,33 @@ func ValidateNextAppSpec(spec *appsv1alpha1.NextAppSpec) error {
 		}
 
 		// Scheduled warm-floor windows (ADR-0030, W5/#380). Each window declares
-		// a cron start/end and a warm-pod floor. Validated here (shared with the
-		// fail-closed reconciler) so a bad window is rejected at admission AND a
-		// stored CR with one is refused rather than silently emitting a broken
-		// KEDA ScaledObject. CRD CEL enforces MinLength/Minimum on the fields; the
-		// reconciler-side checks below are the defense-in-depth ratchet + the
-		// cross-field replicas ≤ maxScale rule CEL cannot express against a
-		// sibling field cleanly.
+		// a cron start/end and a warm-pod floor, translated by the operator into
+		// a pair of Kubernetes CronJobs that patch the ksvc min-scale annotation.
+		// Validated here (shared with the fail-closed reconciler) so a bad window
+		// is rejected at admission AND a stored CR with one is refused rather than
+		// silently emitting a CronJob the scheduler will reject. CRD CEL enforces
+		// MinLength/Minimum on the fields; the checks below add the cron SYNTAX
+		// validation (the exact 5-field parser the Kubernetes CronJob controller
+		// uses) and the cross-field replicas ≤ maxScale rule CEL cannot express
+		// against a sibling field cleanly.
 		for i, w := range s.WarmSchedule {
 			if strings.TrimSpace(w.Start) == "" {
-				return fmt.Errorf("spec.scaling.warmSchedule[%d].start is required (a cron expression)", i)
+				return fmt.Errorf("spec.scaling.warmSchedule[%d].start is required (a 5-field cron expression)", i)
+			}
+			if err := validateCronExpr(w.Start); err != nil {
+				return fmt.Errorf(
+					"spec.scaling.warmSchedule[%d].start %q is not a valid 5-field cron expression (e.g. \"0 8 * * 1-5\"): %v",
+					i, w.Start, err,
+				)
 			}
 			if strings.TrimSpace(w.End) == "" {
-				return fmt.Errorf("spec.scaling.warmSchedule[%d].end is required (a cron expression)", i)
+				return fmt.Errorf("spec.scaling.warmSchedule[%d].end is required (a 5-field cron expression)", i)
+			}
+			if err := validateCronExpr(w.End); err != nil {
+				return fmt.Errorf(
+					"spec.scaling.warmSchedule[%d].end %q is not a valid 5-field cron expression (e.g. \"0 20 * * 1-5\"): %v",
+					i, w.End, err,
+				)
 			}
 			if w.Replicas < 1 {
 				return fmt.Errorf(
@@ -220,9 +247,10 @@ func ValidateNextAppSpec(spec *appsv1alpha1.NextAppSpec) error {
 					i, w.Replicas,
 				)
 			}
-			// A warm floor above the reactive ceiling is a self-contradiction: KEDA
-			// would floor higher than the KPA is ever allowed to scale. Only checked
-			// against a FINITE maxScale (0 = unbounded, no ceiling to breach).
+			// A warm floor above the reactive ceiling is a self-contradiction: the
+			// scheduled min-scale would floor higher than the KPA is ever allowed to
+			// scale. Only checked against a FINITE maxScale (0 = unbounded, no
+			// ceiling to breach).
 			if s.MaxScale > 0 && w.Replicas > s.MaxScale {
 				return fmt.Errorf(
 					"spec.scaling.warmSchedule[%d].replicas (%d) exceeds maxScale (%d): "+

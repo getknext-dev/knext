@@ -302,10 +302,10 @@ For a **known** traffic pattern — a daily 08:00 peak, a scheduled campaign, a
 business-hours window — you can pre-warm the app to a floor of `K` pods *during
 declared windows* so the first request of the wave does **not** pay a cold
 start. This is **scheduled, owner-authored** warming, and it composes with the
-reactive KPA: **KEDA sets the floor during the window; Knative's KPA still
-scales ABOVE the floor** on real traffic. Outside every window there is **no
-floor**, so the app keeps its cost-friendly scale-to-zero (`minScale: 0`)
-behaviour.
+reactive KPA: **the schedule raises the min-scale floor during the window;
+Knative's KPA still scales ABOVE the floor** on real traffic. Outside every
+window there is **no floor**, so the app keeps its cost-friendly scale-to-zero
+(`minScale: 0`) behaviour.
 
 > **Honest framing (ADR-0030):** `warmSchedule` is **scheduled, NOT learned**.
 > It warms only the windows you declare — it does not learn traffic, does not
@@ -316,31 +316,47 @@ behaviour.
 
 ### How it works
 
-When `spec.scaling.warmSchedule` is non-empty the operator generates a KEDA
-`ScaledObject` named `<app>-warm-schedule` targeting the app's **Knative
-Service**, with `minReplicaCount: 0`, `maxReplicaCount` = your `maxScale`, and
-**one `cron` trigger per window**. When `warmSchedule` is empty (the default)
-**no `ScaledObject` is generated** and any prior one is deleted.
+When `spec.scaling.warmSchedule` is non-empty the operator generates, per window,
+a **pair of Kubernetes CronJobs** (owned by the NextApp):
 
-> **KEDA is OPTIONAL.** `warmSchedule` requires [KEDA](https://keda.sh)
-> installed on the cluster (it provides the `cron` scaler). If KEDA is not
-> installed the generated `ScaledObject` is inert (and its generation is a
-> non-fatal log during reconcile) — apps that omit `warmSchedule` need no KEDA
-> at all.
+- `<app>-warm-<i>-set` runs at the window `start` and patches the app's Knative
+  Service `autoscaling.knative.dev/min-scale` annotation to `replicas`.
+- `<app>-warm-<i>-clear` runs at the window `end` and patches it back to `0`.
+
+The CronJobs run as a **scoped patcher ServiceAccount** whose `Role` grants only
+`get`/`patch` on the app's OWN ksvc (`resourceNames: [<app>]` — least privilege).
+When `warmSchedule` is empty (the default) **no CronJobs or patcher RBAC are
+generated**, and any prior ones are deleted; a shrinking schedule prunes the
+removed windows' CronJobs.
+
+> **Why not KEDA?** KEDA scales its target through the Kubernetes `/scale`
+> subresource, which a **Knative Service does not expose** (its replica count is
+> owned by the KPA via the `min-scale` annotation, not `.spec.replicas`). A KEDA
+> ScaledObject on a ksvc would error at KEDA's own reconcile and the floor would
+> never materialize. Scheduled `min-scale` patching is the Knative-native path —
+> and it needs **no KEDA at all**. (See ADR-0030 §"Why NOT KEDA".)
+
+> **Trade-off — new Revision per window boundary.** Patching the ksvc template
+> `min-scale` annotation is a template change, so Knative rolls a **new Revision**
+> at each `start`/`end` (twice per window). That is fine for a normal app but
+> resets traffic to latest-ready — so **do not combine `warmSchedule` with a
+> pinned traffic target** (`spec.traffic.revisionName`).
 
 ### Fields (`WarmWindow`)
 
-| Field | JSON tag | Maps to KEDA cron trigger | Notes |
-|-------|----------|---------------------------|-------|
-| `Start` | `start` | `start` | Standard 5-field cron; **required** |
-| `End` | `end` | `end` | Standard 5-field cron; **required** |
-| `Replicas` | `replicas` | `desiredReplicas` | The warm floor; **must be ≥ 1** and **≤ `maxScale`** (finite) |
-| `Timezone` | `timezone` | `timezone` | IANA zone (e.g. `America/New_York`); defaults to `UTC` |
+| Field | JSON tag | Effect | Notes |
+|-------|----------|--------|-------|
+| `Start` | `start` | The "set" CronJob schedule | **5-field cron**, syntax-validated at admission; **required** |
+| `End` | `end` | The "clear" CronJob schedule | **5-field cron**, syntax-validated; **required** |
+| `Replicas` | `replicas` | The `min-scale` value patched during the window | **must be ≥ 1** and **≤ `maxScale`** (finite) |
+| `Timezone` | `timezone` | The CronJobs' `spec.timeZone` | IANA zone (e.g. `America/New_York`); defaults to `UTC` |
 
-Validation (admission webhook + fail-closed reconciler) rejects an empty
-`start`/`end`, `replicas < 1` (a floor of 0 warms nothing — omit the window),
-and `replicas > maxScale` when `maxScale` is finite (a floor cannot exceed the
-reactive ceiling).
+Validation (admission webhook + fail-closed reconciler) rejects an empty or
+**malformed** `start`/`end` cron (validated with the same 5-field parser the
+Kubernetes CronJob controller uses, so a bad cron fails at `kubectl apply` with
+an actionable error rather than silently in the scheduler), `replicas < 1` (a
+floor of 0 warms nothing — omit the window), and `replicas > maxScale` when
+`maxScale` is finite (a floor cannot exceed the reactive ceiling).
 
 ### Example — warm on weekdays 08:00–20:00 New York time
 
@@ -365,8 +381,10 @@ spec:
         replicas: 2             # lighter weekend floor (timezone defaults to UTC)
 ```
 
-During each window KEDA holds the declared floor; the KPA still adds pods above
-it under load. At all other times the app scales to zero.
+During each window the scheduled `min-scale` floor holds the declared warm pods;
+the KPA still adds pods above it under load. At all other times the app scales to
+zero. (Requires no KEDA — the mechanism is core Kubernetes CronJobs + the Knative
+`min-scale` annotation.)
 
 ### Deferred follow-ups (ADR-0030)
 
@@ -385,7 +403,7 @@ it under load. At all other times the app scales to zero.
 | Concern | Knob / mitigation |
 |---------|-------------------|
 | Cold start on critical path | `spec.scaling.minScale: 1` (keep warm) |
-| Cold start only during known peaks | `spec.scaling.warmSchedule` (scheduled KEDA-cron warm floor, ADR-0030; KEDA optional) |
+| Cold start only during known peaks | `spec.scaling.warmSchedule` (scheduled min-scale warm floor via CronJobs, ADR-0030; no KEDA) |
 | Cost on idle read zones | `spec.scaling.minScale: 0` (scale to zero) |
 | JS recompile on cold start | `spec.cache.enableBytecodeCache: true` (+ a `provider`) |
 | DB pool re-establish | warm zone (`minScale: 1`) and/or transaction-mode pooler |

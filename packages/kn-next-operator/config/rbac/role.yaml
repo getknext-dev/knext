@@ -52,6 +52,18 @@ rules:
   - patch
   - update
 - apiGroups:
+  - batch
+  resources:
+  - cronjobs
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
   - caching.internal.knative.dev
   resources:
   - images
@@ -64,9 +76,9 @@ rules:
   - update
   - watch
 - apiGroups:
-  - keda.sh
+  - networking.k8s.io
   resources:
-  - scaledobjects
+  - networkpolicies
   verbs:
   - create
   - delete
@@ -76,9 +88,10 @@ rules:
   - update
   - watch
 - apiGroups:
-  - networking.k8s.io
+  - rbac.authorization.k8s.io
   resources:
-  - networkpolicies
+  - rolebindings
+  - roles
   verbs:
   - create
   - delete
