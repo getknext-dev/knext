@@ -296,11 +296,96 @@ not the raw `max_connections` 100). The operator rejects specs that violate it
 (ADR-0028); if you leave `poolMax` unset the check is skipped but the wall still
 applies.
 
+## Scheduled warm floor (`spec.scaling.warmSchedule`, ADR-0030 / #380)
+
+For a **known** traffic pattern — a daily 08:00 peak, a scheduled campaign, a
+business-hours window — you can pre-warm the app to a floor of `K` pods *during
+declared windows* so the first request of the wave does **not** pay a cold
+start. This is **scheduled, owner-authored** warming, and it composes with the
+reactive KPA: **KEDA sets the floor during the window; Knative's KPA still
+scales ABOVE the floor** on real traffic. Outside every window there is **no
+floor**, so the app keeps its cost-friendly scale-to-zero (`minScale: 0`)
+behaviour.
+
+> **Honest framing (ADR-0030):** `warmSchedule` is **scheduled, NOT learned**.
+> It warms only the windows you declare — it does not learn traffic, does not
+> pre-warm the database compute, and does not cap warm cost per tenant. The
+> learned/heuristic controller (same-hour-last-week RPS percentile), the
+> DB-compute lockstep pre-warm (existing warm-tier, #25), and the per-tenant
+> warm-budget cap are **deferred follow-ups** (see ADR-0030 §Deferred).
+
+### How it works
+
+When `spec.scaling.warmSchedule` is non-empty the operator generates a KEDA
+`ScaledObject` named `<app>-warm-schedule` targeting the app's **Knative
+Service**, with `minReplicaCount: 0`, `maxReplicaCount` = your `maxScale`, and
+**one `cron` trigger per window**. When `warmSchedule` is empty (the default)
+**no `ScaledObject` is generated** and any prior one is deleted.
+
+> **KEDA is OPTIONAL.** `warmSchedule` requires [KEDA](https://keda.sh)
+> installed on the cluster (it provides the `cron` scaler). If KEDA is not
+> installed the generated `ScaledObject` is inert (and its generation is a
+> non-fatal log during reconcile) — apps that omit `warmSchedule` need no KEDA
+> at all.
+
+### Fields (`WarmWindow`)
+
+| Field | JSON tag | Maps to KEDA cron trigger | Notes |
+|-------|----------|---------------------------|-------|
+| `Start` | `start` | `start` | Standard 5-field cron; **required** |
+| `End` | `end` | `end` | Standard 5-field cron; **required** |
+| `Replicas` | `replicas` | `desiredReplicas` | The warm floor; **must be ≥ 1** and **≤ `maxScale`** (finite) |
+| `Timezone` | `timezone` | `timezone` | IANA zone (e.g. `America/New_York`); defaults to `UTC` |
+
+Validation (admission webhook + fail-closed reconciler) rejects an empty
+`start`/`end`, `replicas < 1` (a floor of 0 warms nothing — omit the window),
+and `replicas > maxScale` when `maxScale` is finite (a floor cannot exceed the
+reactive ceiling).
+
+### Example — warm on weekdays 08:00–20:00 New York time
+
+```yaml
+apiVersion: apps.kn-next.dev/v1alpha1
+kind: NextApp
+metadata:
+  name: storefront
+spec:
+  image: registry.example.com/storefront@sha256:abc123...   # digest-pinned
+  scaling:
+    minScale: 0              # scale to zero OUTSIDE the windows (cost floor)
+    maxScale: 10             # reactive ceiling; KPA scales above the warm floor
+    containerConcurrency: 20
+    warmSchedule:
+      - start: "0 8 * * 1-5"     # 08:00 on weekdays
+        end:   "0 20 * * 1-5"    # 20:00 on weekdays
+        replicas: 3             # hold 3 warm pods across the business day
+        timezone: America/New_York
+      - start: "0 10 * * 6,0"    # 10:00 on Sat/Sun
+        end:   "0 18 * * 6,0"    # 18:00 on Sat/Sun
+        replicas: 2             # lighter weekend floor (timezone defaults to UTC)
+```
+
+During each window KEDA holds the declared floor; the KPA still adds pods above
+it under load. At all other times the app scales to zero.
+
+### Deferred follow-ups (ADR-0030)
+
+- **Learned/heuristic warm controller** — schedule from same-hour-last-week RPS
+  percentile (per-app, from already-scraped metrics). No ML until seasonality
+  proves it; adds a control loop mutating the NextApp → its own ADR.
+- **DB-compute lockstep pre-warm** — warm the app's scale-to-zero Postgres
+  compute (existing warm-tier, #25) alongside the window so the DB half of the
+  cold tax is removed too.
+- **Per-tenant warm-budget cap** — analog to the ADR-0008 wake budget so
+  over-warming cannot erode the scale-to-zero cost win; mispredict failure modes
+  (cold storm / wasted cost) measured.
+
 ## Summary
 
 | Concern | Knob / mitigation |
 |---------|-------------------|
 | Cold start on critical path | `spec.scaling.minScale: 1` (keep warm) |
+| Cold start only during known peaks | `spec.scaling.warmSchedule` (scheduled KEDA-cron warm floor, ADR-0030; KEDA optional) |
 | Cost on idle read zones | `spec.scaling.minScale: 0` (scale to zero) |
 | JS recompile on cold start | `spec.cache.enableBytecodeCache: true` (+ a `provider`) |
 | DB pool re-establish | warm zone (`minScale: 1`) and/or transaction-mode pooler |

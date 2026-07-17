@@ -198,6 +198,39 @@ func ValidateNextAppSpec(spec *appsv1alpha1.NextAppSpec) error {
 				)
 			}
 		}
+
+		// Scheduled warm-floor windows (ADR-0030, W5/#380). Each window declares
+		// a cron start/end and a warm-pod floor. Validated here (shared with the
+		// fail-closed reconciler) so a bad window is rejected at admission AND a
+		// stored CR with one is refused rather than silently emitting a broken
+		// KEDA ScaledObject. CRD CEL enforces MinLength/Minimum on the fields; the
+		// reconciler-side checks below are the defense-in-depth ratchet + the
+		// cross-field replicas ≤ maxScale rule CEL cannot express against a
+		// sibling field cleanly.
+		for i, w := range s.WarmSchedule {
+			if strings.TrimSpace(w.Start) == "" {
+				return fmt.Errorf("spec.scaling.warmSchedule[%d].start is required (a cron expression)", i)
+			}
+			if strings.TrimSpace(w.End) == "" {
+				return fmt.Errorf("spec.scaling.warmSchedule[%d].end is required (a cron expression)", i)
+			}
+			if w.Replicas < 1 {
+				return fmt.Errorf(
+					"spec.scaling.warmSchedule[%d].replicas must be >= 1 (a window that floors at 0 warms nothing; omit the window for scale-to-zero), got %d",
+					i, w.Replicas,
+				)
+			}
+			// A warm floor above the reactive ceiling is a self-contradiction: KEDA
+			// would floor higher than the KPA is ever allowed to scale. Only checked
+			// against a FINITE maxScale (0 = unbounded, no ceiling to breach).
+			if s.MaxScale > 0 && w.Replicas > s.MaxScale {
+				return fmt.Errorf(
+					"spec.scaling.warmSchedule[%d].replicas (%d) exceeds maxScale (%d): "+
+						"the warm floor cannot be higher than the reactive scale ceiling (ADR-0030)",
+					i, w.Replicas, s.MaxScale,
+				)
+			}
+		}
 	}
 
 	// Provider / queue enums.

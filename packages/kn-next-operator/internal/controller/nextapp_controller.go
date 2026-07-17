@@ -235,6 +235,10 @@ func (r *NextAppReconciler) emitEvent(obj runtime.Object, eventType, reason, mes
 // +kubebuilder:rbac:groups=caching.internal.knative.dev,resources=images,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=sources.knative.dev,resources=kafkasources,verbs=get;list;watch;create;update;patch;delete
+// ScaledObjects: the scheduled warm-floor (ADR-0030, #380) generates a KEDA
+// ScaledObject with cron triggers for the app's Knative Service. KEDA is
+// OPTIONAL — the operator only ever creates/deletes the object; KEDA reconciles it.
+// +kubebuilder:rbac:groups=keda.sh,resources=scaledobjects,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 // Secrets: needed to MIRROR the delegated database DSN (app-db-<app>) into the
 // app's own namespace (ADR-0006 §3b). Cross-ns SecretKeyRef is impossible, so the
@@ -464,6 +468,15 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 				fmt.Sprintf("Failed to reconcile KafkaSource: %s", err.Error()))
 			return ctrl.Result{}, err
 		}
+	}
+
+	// 5b. Reconcile the scheduled warm-floor KEDA ScaledObject (ADR-0030,
+	// W5/#380). Generated ONLY when spec.scaling.warmSchedule is non-empty; a
+	// prior one is deleted when the schedule is cleared. KEDA is OPTIONAL — the
+	// object is inert until KEDA reconciles it. A missing KEDA CRD is non-fatal:
+	// like the Image cache we log and continue rather than wedge the reconcile.
+	if err := r.reconcileWarmSchedule(ctx, &nextApp); err != nil {
+		logger.Info("Could not reconcile warm-schedule ScaledObject (KEDA CRD may not be installed)", "error", err.Error())
 	}
 
 	// 6. Update Status: URL + conditions + observed traffic split (#92)
@@ -1198,6 +1211,117 @@ func (r *NextAppReconciler) reconcileNetworkPolicy(ctx context.Context, nextApp 
 	return err
 }
 
+// warmScheduleObjectName is the deterministic name of the KEDA ScaledObject the
+// operator generates for a NextApp's scheduled warm-floor (ADR-0030, W5/#380).
+func warmScheduleObjectName(app *appsv1alpha1.NextApp) string {
+	return app.Name + "-warm-schedule"
+}
+
+// buildWarmScheduleTriggers renders one KEDA `cron` trigger per warm window.
+// Each window (start/end cron + replicas + timezone) becomes a cron trigger
+// whose `desiredReplicas` is the window's warm floor. Timezone defaults to UTC.
+// Kept pure so it can be unit-tested independent of the API server.
+func buildWarmScheduleTriggers(windows []appsv1alpha1.WarmWindow) []interface{} {
+	triggers := make([]interface{}, 0, len(windows))
+	for _, w := range windows {
+		tz := w.Timezone
+		if tz == "" {
+			tz = "UTC"
+		}
+		triggers = append(triggers, map[string]interface{}{
+			"type": "cron",
+			"metadata": map[string]interface{}{
+				"timezone":        tz,
+				"start":           w.Start,
+				"end":             w.End,
+				"desiredReplicas": strconv.Itoa(int(w.Replicas)),
+			},
+		})
+	}
+	return triggers
+}
+
+// warmScheduleMaxReplicas is the ScaledObject's maxReplicaCount: it mirrors the
+// app's declared maxScale so KEDA never floors above the reactive ceiling. When
+// maxScale is unbounded (0) we fall back to the operator's default ksvc
+// max-scale (10) so KEDA always has a finite ceiling (it requires one).
+func warmScheduleMaxReplicas(app *appsv1alpha1.NextApp) int64 {
+	if app.Spec.Scaling != nil && app.Spec.Scaling.MaxScale > 0 {
+		return int64(app.Spec.Scaling.MaxScale)
+	}
+	return 10
+}
+
+// reconcileWarmSchedule emits (or deletes) the KEDA ScaledObject that pre-warms
+// the app to a floor of K pods during declared windows (ADR-0030, W5/#380).
+//
+// Composition with Knative: the ScaledObject targets the app's Knative Service
+// and sets minReplicaCount=0 with one `cron` trigger per window. During a
+// window KEDA raises the floor to the window's replicas; the existing Knative
+// KPA still scales ABOVE the floor on real traffic. Outside every window there
+// is no active trigger, so the floor is 0 and the app's default scale-to-zero
+// cost model is preserved.
+//
+// HONESTY: this is OWNER-AUTHORED SCHEDULING, not learned prediction. The
+// learned/heuristic controller (same-hour-last-week RPS percentile), the
+// DB-compute lockstep pre-warm, and the per-tenant warm-budget cap are DEFERRED
+// follow-ups (ADR-0030 §Deferred; issues referencing #375/#380).
+//
+// KEDA is OPTIONAL on the cluster. When warmSchedule is empty we delete any
+// prior ScaledObject and do nothing else (no KEDA dependency). Unstructured is
+// used so the operator does not take a hard build/scheme dependency on KEDA.
+func (r *NextAppReconciler) reconcileWarmSchedule(ctx context.Context, nextApp *appsv1alpha1.NextApp) error {
+	so := &unstructured.Unstructured{}
+	so.SetAPIVersion("keda.sh/v1alpha1")
+	so.SetKind("ScaledObject")
+	so.SetName(warmScheduleObjectName(nextApp))
+	so.SetNamespace(nextApp.Namespace)
+
+	windows := []appsv1alpha1.WarmWindow(nil)
+	if nextApp.Spec.Scaling != nil {
+		windows = nextApp.Spec.Scaling.WarmSchedule
+	}
+
+	// No windows => ensure any previously-generated ScaledObject is removed so a
+	// cleared schedule stops flooring the app. Best-effort: a NotFound (never
+	// created, or KEDA CRD absent) is success.
+	if len(windows) == 0 {
+		if err := r.Delete(ctx, so); err != nil && !errors.IsNotFound(err) {
+			// A missing KEDA CRD surfaces as a NoKindMatchError (not IsNotFound);
+			// treat it as nothing-to-delete rather than a hard failure.
+			if apimeta.IsNoMatchError(err) {
+				return nil
+			}
+			return err
+		}
+		return nil
+	}
+
+	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, so, func() error {
+		labels := map[string]string{
+			"app":          nextApp.Name,
+			"generated-by": "kn-next-operator",
+		}
+		so.SetLabels(labels)
+		spec := map[string]interface{}{
+			"scaleTargetRef": map[string]interface{}{
+				"apiVersion": "serving.knative.dev/v1",
+				"kind":       "Service",
+				"name":       nextApp.Name,
+			},
+			// minReplicaCount stays 0 so the ScaledObject NEVER fights the app's
+			// scale-to-zero outside a window; the cron triggers raise the floor
+			// only during their windows.
+			"minReplicaCount": int64(0),
+			"maxReplicaCount": warmScheduleMaxReplicas(nextApp),
+			"triggers":        buildWarmScheduleTriggers(windows),
+		}
+		so.Object["spec"] = spec
+		return ctrl.SetControllerReference(nextApp, so, r.Scheme)
+	})
+	return err
+}
+
 // revisionToNextAppRequests maps a Knative Revision to a reconcile request for
 // the NextApp that owns it, so a pure Revision Active-condition flip (Active <->
 // Inactive on wake/sleep) re-enqueues the NextApp and `.status.scaledToZero`
@@ -1225,6 +1349,13 @@ func (r *NextAppReconciler) revisionToNextAppRequests(_ context.Context, obj cli
 	}
 }
 
+// NOTE (ADR-0030): we deliberately do NOT add an Owns(ScaledObject) watch to the
+// manager. KEDA is OPTIONAL — a hard Owns watch would make the operator fail to
+// start on a cluster where the keda.sh CRD is not installed (the informer cannot
+// list an unregistered kind). The ScaledObject is instead reconciled on the
+// NextApp's own reconcile passes (CreateOrUpdate / delete), which is sufficient:
+// the object is derived purely from spec and low-churn. If KEDA is absent the
+// generation is a non-fatal log-and-continue (see reconcileWarmSchedule caller).
 func (r *NextAppReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		// GenerationChangedPredicate on the PRIMARY (For) watch only: a
