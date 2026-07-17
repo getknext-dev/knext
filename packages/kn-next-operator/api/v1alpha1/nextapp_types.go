@@ -282,8 +282,9 @@ type ScalingSpec struct {
 	// 0), so scale-to-zero is preserved. Empty/nil => no effect (byte-identical
 	// back-compat). NOTE: a min-scale CHANGE rolls a new Knative Revision (the
 	// template is Knative's source of truth) — acceptable for a twice-a-window
-	// flip; do not use warmSchedule on an app that pins traffic to a fixed
-	// revision (spec.traffic.revisionName).
+	// flip; because that roll resets traffic to latest-ready, warmSchedule CANNOT
+	// be combined with a pinned traffic target (spec.traffic.revisionName). That
+	// combination is a HARD admission REJECTION (#393, ADR-0030), not just advice.
 	// +optional
 	WarmSchedule []WarmWindow `json:"warmSchedule,omitempty"`
 }

@@ -415,6 +415,66 @@ func TestValidateNextAppSpec(t *testing.T) {
 			},
 			wantErr: false,
 		},
+		{
+			// #393 (ADR-0030): the scheduled warm-floor changes ksvc min-scale at
+			// each window boundary, which rolls a new Knative Revision and resets
+			// traffic to latest-ready — silently breaking a pinned revision. Reject
+			// the combination at admission.
+			name: "warmSchedule combined with pinned revisionName rejected (#393)",
+			spec: &appsv1alpha1.NextAppSpec{
+				Image: digestImage,
+				Scaling: &appsv1alpha1.ScalingSpec{
+					MaxScale: 5,
+					WarmSchedule: []appsv1alpha1.WarmWindow{
+						{Start: "0 8 * * 1-5", End: "0 20 * * 1-5", Replicas: 3, Timezone: "UTC"},
+					},
+				},
+				Traffic: &appsv1alpha1.TrafficSpec{RevisionName: "app-00002"},
+			},
+			wantErr: true,
+			errHas:  "warmSchedule cannot be combined with pinned traffic",
+		},
+		{
+			// A canary (pinned revisionName + canaryPercent) is also a pin — same
+			// Revision-roll hazard — so it is likewise rejected with warmSchedule.
+			name: "warmSchedule combined with pinned revisionName + canary rejected (#393)",
+			spec: &appsv1alpha1.NextAppSpec{
+				Image: digestImage,
+				Scaling: &appsv1alpha1.ScalingSpec{
+					MaxScale: 5,
+					WarmSchedule: []appsv1alpha1.WarmWindow{
+						{Start: "0 8 * * 1-5", End: "0 20 * * 1-5", Replicas: 3, Timezone: "UTC"},
+					},
+				},
+				Traffic: &appsv1alpha1.TrafficSpec{RevisionName: "app-00002", CanaryPercent: 25},
+			},
+			wantErr: true,
+			errHas:  "warmSchedule cannot be combined with pinned traffic",
+		},
+		{
+			// warmSchedule with NO traffic pin is fine (the common case).
+			name: "warmSchedule without pinned traffic accepted (#393)",
+			spec: &appsv1alpha1.NextAppSpec{
+				Image: digestImage,
+				Scaling: &appsv1alpha1.ScalingSpec{
+					MaxScale: 5,
+					WarmSchedule: []appsv1alpha1.WarmWindow{
+						{Start: "0 8 * * 1-5", End: "0 20 * * 1-5", Replicas: 3, Timezone: "UTC"},
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			// A pinned revision with NO warmSchedule is fine (rollback/canary #92).
+			name: "pinned revisionName without warmSchedule accepted (#393)",
+			spec: &appsv1alpha1.NextAppSpec{
+				Image:   digestImage,
+				Scaling: &appsv1alpha1.ScalingSpec{MaxScale: 5},
+				Traffic: &appsv1alpha1.TrafficSpec{RevisionName: "app-00002"},
+			},
+			wantErr: false,
+		},
 	}
 
 	for _, tc := range tests {
