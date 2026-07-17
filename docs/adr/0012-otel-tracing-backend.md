@@ -74,6 +74,11 @@ exporter must target a **self-hostable** OTLP backend, never a hosted SaaS by de
   bundled collector/Tempo manifest is deferred (see action items).
 - Sampling is head-based via `OTEL_TRACES_SAMPLER_ARG`; `sampleRate >= 1` → `always_on`, else
   `parentbased_traceidratio`.
+- The `registerOTel(...)` **direct-pass** of resolved collaborators used here is the reference
+  for the preferred instrumentation→app wiring path in **ADR-0027** — it crosses no module-state
+  seam and so is immune to the standalone-bundle webpack-layer duplication that broke the
+  `@knext/lib` setter seams (#352). The `@knext/lib`-stays-OTel-free dependency inversion this ADR
+  relies on is exactly what makes those (now `globalThis`-anchored) seams necessary.
 
 ## Action items / what is NOT covered here (honest scope)
 
