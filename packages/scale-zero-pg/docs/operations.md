@@ -1798,6 +1798,66 @@ ADR-0003 ("Consequences"). Key findings baked into the claim:
   (the drill's wake client retries for this reason). Not a data or availability
   defect — a first-connect timing window.
 
+### Sustained-load / soak / throughput harness (issue #376, wave #375)
+
+Finds the **real high-traffic ceilings** of ONE app under sustained load: RPS ceiling,
+p50/p95/p99 under a ≥10-min soak, the error rate, the **concurrency→latency** curve (the
+input to the W2 ContainerConcurrency decision), and — critically — **which wall breaks
+first**: app pods, the `GW_MAX_CONNS=90` gateway cap, the single writer, or DB CPU.
+
+The load generator is an **in-cluster k6 Job** (`deploy/88-loadsoak-k6.yaml`), not an
+out-of-region driver: a remote k6 adds the cluster's WAN RTT to every request and swamps
+the app+DB latency the baseline is trying to isolate (the BENCHMARKS "RTT-bound" note).
+The Job targets the in-cluster app URL (Knative route / ClusterIP), never public ingress.
+
+The k6 script runs a **ramping-VUs** scenario: a *ramp* stage (0 → `RAMP_CEIL_VU`) that
+finds the knee, then a *soak* stage that holds `SOAK_VU` (~70 % of ceiling) for `SOAK_DUR`,
+then drains. k6 `p(95)`/`p(99)` thresholds flag SLO breaches; `--summary-export` writes a
+JSON the drill's pure parser turns into a paste-ready BENCHMARKS row + a concurrency→latency
+CSV line. Alongside the run the drill snapshots the gateway `pggw_*` metrics
+(`active_connections`, `rejected_connections_total`, …), the writer `compute-<app>` replica
+count + restarts + CPU, app pod count, and storage-plane (pageserver/safekeeper) CPU —
+sampled every 30 s so the **peak** wall pressure during the soak is captured, not just the ends.
+
+Run (self-cleaning; the Job + ConfigMap are torn down on exit, idempotent — safe to re-run):
+
+```sh
+cd deploy
+TARGET_URL='http://file-manager.knext-apps.svc.cluster.local/users' \
+  RAMP_CEIL_VU=120 RAMP_UP=2m SOAK_VU=80 SOAK_DUR=10m \
+  P95_MS=1500 P99_MS=3000 \
+  LOADSOAK_CONTEXT=context-ckmva7v7zvq \
+  ./_verify-loadsoak.sh
+```
+
+Knobs (env, all optional except `TARGET_URL` for a live run):
+
+| Env | Default | Meaning |
+|---|---|---|
+| `TARGET_URL` | — (required) | in-cluster URL of the app under test |
+| `APP_NAME` | derived from URL host | label for the BENCHMARKS row + `compute-<app>` instrument |
+| `RAMP_CEIL_VU` | `120` | ramp target VUs — raise until p99 breaks / first error to find the knee |
+| `RAMP_UP` | `2m` | time to reach the ceiling |
+| `SOAK_VU` | `80` | soak VUs (~70 % of ceiling) |
+| `SOAK_DUR` | `10m` | sustained soak duration (the issue's ≥10 min) |
+| `RAMP_DOWN` | `30s` | drain |
+| `P95_MS` / `P99_MS` | `1500` / `3000` | latency thresholds (ms) |
+| `MAX_ERR_RATE` | `0.01` | error budget (fraction) |
+| `K6_IMAGE` | `grafana/k6:0.49.0` | k6 image |
+| `RUN_TIMEOUT_S` | ramp+soak+slack | Job wall budget |
+| `LOADSOAK_CONTEXT` / `LOADSOAK_NS` | ambient / `scale-zero-pg` | kubectl context / namespace |
+
+Reading the wall analysis: if `pggw_rejected_connections_total` climbed, the
+`GW_MAX_CONNS=90` cap was the wall (raise it or add app pods so the pool spreads); if the
+writer `compute-<app>` CPU pinned at its limit with connections well under 90, the single
+writer is the wall (the W3 write-path lever); if app pods pinned CPU first, that is the
+Knative-side lever (ContainerConcurrency / min-scale, W2). Every run's numbers land in
+`docs/BENCHMARKS.md` under "Sustained-load / soak baseline" (rule 2b).
+
+**Cluster-free validation** (no OKE, no k6 binary): `SELFTEST=1 ./_verify-loadsoak.sh`
+dry-runs the manifest and self-checks the summary parser; `bash test_verify-loadsoak.sh`
+asserts the parser produces the exact BENCHMARKS row format from a sample k6 JSON.
+
 ### Deprovision is safe by default (issue #91)
 
 `destroy <app>` — the obvious command, **no flag** — now DELETEs the app's Neon

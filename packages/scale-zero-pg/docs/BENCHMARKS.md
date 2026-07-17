@@ -815,6 +815,30 @@ sleeps — ADR-0001 Q1). pgvector has no such caveat (no background worker). Dri
 flaky OKE control plane is dominated by throwaway-psql-pod scheduling + occasional TLS-handshake
 retries, not by Postgres — every positive assertion is wrapped in a 6× `RETRY`.
 
+## Sustained-load / soak baseline (high-traffic wave, #375 W1 · #376)
+
+Harness: `deploy/_verify-loadsoak.sh` + `deploy/88-loadsoak-k6.yaml` — an **in-cluster**
+k6 Job (ramping-VUs: ramp-to-ceiling → ≥10-min soak) against ONE knext app. In-cluster to
+avoid the WAN RTT that made earlier out-of-region numbers RTT-bound (see Methodology).
+Metrics per run: RPS achieved, p50/p95/p99, error rate, the concurrency→latency curve
+(input to W2 ContainerConcurrency), and a both-planes snapshot recording **which wall broke
+first**. Invoke: `TARGET_URL=<in-cluster app URL> ./_verify-loadsoak.sh` (see
+operations.md "Sustained-load / soak / throughput harness").
+
+Row schema the harness emits (paste target — the OKE baseline lands here):
+
+| app | phase | RPS | p50 (ms) | p95 (ms) | p99 (ms) | err % | peak VUs | first wall |
+|---|---|---|---|---|---|---|---|---|
+| _(pending OKE baseline — orchestrator runs #376 on live OKE)_ | rampsoak | — | — | — | — | — | — | app pods / GW_MAX_CONNS=90 / writer / DB CPU |
+
+Concurrency→latency curve (the W2 ContainerConcurrency input), CSV
+`concurrency,p50,p95,p99,err%,rps`, one row per sampled VU level — _pending OKE baseline_.
+
+The harness is validated cluster-free (`SELFTEST=1 ./_verify-loadsoak.sh` +
+`bash deploy/test_verify-loadsoak.sh`): the manifest dry-runs and the summary parser is
+asserted to produce this exact row format from a sample k6 JSON. **No load numbers are
+fabricated here** — the table stays "pending" until the OKE run fills it (rule 2b / honesty).
+
 ## Capacity / sizing facts
 
 - Gateway: `GW_MAX_CONNS=90` < compute `max_connections=100`; excess → clean 53300.
