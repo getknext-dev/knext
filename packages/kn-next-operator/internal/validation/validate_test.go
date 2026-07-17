@@ -290,6 +290,47 @@ func TestValidateNextAppSpec(t *testing.T) {
 			errHas:  "warmSchedule",
 		},
 		{
+			name: "warmSchedule window with malformed start cron rejected (#380)",
+			spec: &appsv1alpha1.NextAppSpec{
+				Image: digestImage,
+				Scaling: &appsv1alpha1.ScalingSpec{
+					WarmSchedule: []appsv1alpha1.WarmWindow{
+						{Start: "not a cron", End: "0 20 * * *", Replicas: 2},
+					},
+				},
+			},
+			wantErr: true,
+			errHas:  "cron",
+		},
+		{
+			name: "warmSchedule window with wrong field-count cron rejected (#380)",
+			spec: &appsv1alpha1.NextAppSpec{
+				Image: digestImage,
+				Scaling: &appsv1alpha1.ScalingSpec{
+					WarmSchedule: []appsv1alpha1.WarmWindow{
+						// 6 fields (has a seconds field) — not the K8s 5-field CronJob format.
+						{Start: "0 0 8 * * 1-5", End: "0 20 * * *", Replicas: 2},
+					},
+				},
+			},
+			wantErr: true,
+			errHas:  "cron",
+		},
+		{
+			name: "warmSchedule window with out-of-range cron field rejected (#380)",
+			spec: &appsv1alpha1.NextAppSpec{
+				Image: digestImage,
+				Scaling: &appsv1alpha1.ScalingSpec{
+					WarmSchedule: []appsv1alpha1.WarmWindow{
+						// minute 99 is out of range.
+						{Start: "99 8 * * *", End: "0 20 * * *", Replicas: 2},
+					},
+				},
+			},
+			wantErr: true,
+			errHas:  "cron",
+		},
+		{
 			name: "warmSchedule window with replicas < 1 rejected (#380)",
 			spec: &appsv1alpha1.NextAppSpec{
 				Image: digestImage,

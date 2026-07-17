@@ -24,7 +24,9 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -647,23 +649,28 @@ var _ = Describe("NextApp Controller reconcile output", func() {
 		})
 	})
 
-	// Scheduled warm-floor (ADR-0030, W5/#380): the operator emits a KEDA
-	// ScaledObject (one cron trigger per window, targeting the app's Knative
-	// Service) ONLY when spec.scaling.warmSchedule is non-empty. KEDA sets the
-	// floor during the window; the Knative KPA still scales above it. Outside a
-	// window there is no floor, so scale-to-zero cost is preserved.
-	Context("warm-schedule KEDA ScaledObject", func() {
-		It("does NOT create a ScaledObject when warmSchedule is empty (back-compat, KEDA optional)", func() {
+	// Scheduled warm-floor (ADR-0030, W5/#380): the operator emits a pair of
+	// Kubernetes CronJobs per window (a "set" at start, a "clear" at end) that
+	// patch the app's Knative Service `autoscaling.knative.dev/min-scale`
+	// annotation to `replicas` during the window and back to "0" after. The
+	// Knative KPA reads that annotation as its scale floor and still scales above
+	// it. KEDA is NOT used: it actuates via the Kubernetes /scale subresource,
+	// which a Knative Service does not expose. CronJobs + the scoped patcher
+	// ServiceAccount/Role/RoleBinding exist ONLY when warmSchedule is non-empty.
+	Context("warm-schedule scheduled min-scale CronJobs", func() {
+		It("creates NO warm CronJobs/RBAC when warmSchedule is empty (back-compat)", func() {
 			nn := reconcileOnce("warm-off", appsv1alpha1.NextAppSpec{Image: validImage})
 
-			so := newScaledObjectObj()
-			soName := types.NamespacedName{Name: nn.Name + "-warm-schedule", Namespace: namespace}
-			err := k8sClient.Get(ctx, soName, so)
-			Expect(errors.IsNotFound(err)).To(BeTrue(),
-				"ScaledObject must not exist when warmSchedule is empty")
+			cj := &batchv1.CronJob{}
+			err := k8sClient.Get(ctx, types.NamespacedName{Name: nn.Name + "-warm-0-set", Namespace: namespace}, cj)
+			Expect(errors.IsNotFound(err)).To(BeTrue(), "no set CronJob when warmSchedule empty")
+
+			sa := &corev1.ServiceAccount{}
+			err = k8sClient.Get(ctx, types.NamespacedName{Name: nn.Name + "-warm-patcher", Namespace: namespace}, sa)
+			Expect(errors.IsNotFound(err)).To(BeTrue(), "no patcher ServiceAccount when warmSchedule empty")
 		})
 
-		It("creates a ScaledObject targeting the ksvc with one cron trigger per window", func() {
+		It("creates a set+clear CronJob per window that patch the ksvc min-scale annotation", func() {
 			nn := reconcileOnce("warm-on", appsv1alpha1.NextAppSpec{
 				Image: validImage,
 				Scaling: &appsv1alpha1.ScalingSpec{
@@ -675,53 +682,70 @@ var _ = Describe("NextApp Controller reconcile output", func() {
 				},
 			})
 
-			so := newScaledObjectObj()
-			soName := types.NamespacedName{Name: nn.Name + "-warm-schedule", Namespace: namespace}
-			Expect(k8sClient.Get(ctx, soName, so)).To(Succeed())
+			By("scheduling the SET CronJob at the window start in its timezone")
+			setCJ := &batchv1.CronJob{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: nn.Name + "-warm-0-set", Namespace: namespace}, setCJ)).To(Succeed())
+			Expect(setCJ.Spec.Schedule).To(Equal("0 8 * * 1-5"))
+			Expect(setCJ.Spec.TimeZone).NotTo(BeNil())
+			Expect(*setCJ.Spec.TimeZone).To(Equal("America/New_York"))
 
-			By("targeting the app's Knative Service via scaleTargetRef")
-			apiVersion, _, _ := unstructured.NestedString(so.Object, "spec", "scaleTargetRef", "apiVersion")
-			kind, _, _ := unstructured.NestedString(so.Object, "spec", "scaleTargetRef", "kind")
-			name, _, _ := unstructured.NestedString(so.Object, "spec", "scaleTargetRef", "name")
-			Expect(apiVersion).To(Equal("serving.knative.dev/v1"))
-			Expect(kind).To(Equal("Service"))
-			Expect(name).To(Equal(nn.Name))
+			By("the SET job patches min-scale to the window replicas via the scoped SA")
+			setPod := setCJ.Spec.JobTemplate.Spec.Template.Spec
+			Expect(setPod.ServiceAccountName).To(Equal(nn.Name + "-warm-patcher"))
+			setArgs := strings.Join(setPod.Containers[0].Command, " ") + " " + strings.Join(setPod.Containers[0].Args, " ")
+			Expect(setArgs).To(ContainSubstring("autoscaling.knative.dev/min-scale"))
+			Expect(setArgs).To(ContainSubstring(`"3"`))
+			Expect(setArgs).To(ContainSubstring("service.serving.knative.dev/" + nn.Name))
 
-			By("keeping minReplicaCount at 0 so it never fights scale-to-zero outside windows")
-			minReplicas, found, _ := unstructured.NestedInt64(so.Object, "spec", "minReplicaCount")
-			Expect(found).To(BeTrue())
-			Expect(minReplicas).To(Equal(int64(0)))
+			By("scheduling the CLEAR CronJob at the window end")
+			clearCJ := &batchv1.CronJob{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: nn.Name + "-warm-0-clear", Namespace: namespace}, clearCJ)).To(Succeed())
+			Expect(clearCJ.Spec.Schedule).To(Equal("0 20 * * 1-5"))
 
-			By("carrying maxReplicaCount from the app's maxScale")
-			maxReplicas, found, _ := unstructured.NestedInt64(so.Object, "spec", "maxReplicaCount")
-			Expect(found).To(BeTrue())
-			Expect(maxReplicas).To(Equal(int64(8)))
+			By("the CLEAR job resets min-scale to 0 (preserving scale-to-zero)")
+			clearPod := clearCJ.Spec.JobTemplate.Spec.Template.Spec
+			clearArgs := strings.Join(clearPod.Containers[0].Command, " ") + " " + strings.Join(clearPod.Containers[0].Args, " ")
+			Expect(clearArgs).To(ContainSubstring("autoscaling.knative.dev/min-scale"))
+			Expect(clearArgs).To(ContainSubstring(`"0"`))
 
-			By("emitting one cron trigger per window with start/end/timezone/desiredReplicas")
-			triggers, found, err := unstructured.NestedSlice(so.Object, "spec", "triggers")
-			Expect(err).NotTo(HaveOccurred())
-			Expect(found).To(BeTrue())
-			Expect(triggers).To(HaveLen(2))
+			By("defaulting timezone to UTC for a window that omits it")
+			set1 := &batchv1.CronJob{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: nn.Name + "-warm-1-set", Namespace: namespace}, set1)).To(Succeed())
+			Expect(set1.Spec.TimeZone).NotTo(BeNil())
+			Expect(*set1.Spec.TimeZone).To(Equal("UTC"))
 
-			t0 := triggers[0].(map[string]interface{})
-			Expect(t0["type"]).To(Equal("cron"))
-			meta0 := t0["metadata"].(map[string]interface{})
-			Expect(meta0["start"]).To(Equal("0 8 * * 1-5"))
-			Expect(meta0["end"]).To(Equal("0 20 * * 1-5"))
-			Expect(meta0["timezone"]).To(Equal("America/New_York"))
-			Expect(meta0["desiredReplicas"]).To(Equal("3"))
+			By("owner-referencing every warm CronJob to the NextApp for GC")
+			Expect(ownedBy(setCJ.OwnerReferences, nn.Name)).To(BeTrue())
+			Expect(ownedBy(clearCJ.OwnerReferences, nn.Name)).To(BeTrue())
 
-			t1 := triggers[1].(map[string]interface{})
-			meta1 := t1["metadata"].(map[string]interface{})
-			Expect(meta1["desiredReplicas"]).To(Equal("2"))
-			By("defaulting timezone to UTC when unset")
-			Expect(meta1["timezone"]).To(Equal("UTC"))
+			By("provisioning a scoped patcher ServiceAccount + Role + RoleBinding limited to patching THIS ksvc")
+			sa := &corev1.ServiceAccount{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: nn.Name + "-warm-patcher", Namespace: namespace}, sa)).To(Succeed())
+			Expect(ownedBy(sa.OwnerReferences, nn.Name)).To(BeTrue())
 
-			By("being owner-referenced by the NextApp for GC")
-			Expect(ownedBy(so.GetOwnerReferences(), nn.Name)).To(BeTrue())
+			role := &rbacv1.Role{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: nn.Name + "-warm-patcher", Namespace: namespace}, role)).To(Succeed())
+			By("granting only get/patch on the app's own Knative Service (resourceNames scoped)")
+			var sawScopedRule bool
+			for _, r := range role.Rules {
+				for _, res := range r.Resources {
+					if res == "services" {
+						Expect(r.APIGroups).To(ContainElement("serving.knative.dev"))
+						Expect(r.Verbs).To(ContainElements("get", "patch"))
+						Expect(r.ResourceNames).To(ContainElement(nn.Name))
+						sawScopedRule = true
+					}
+				}
+			}
+			Expect(sawScopedRule).To(BeTrue(), "Role must scope patch to the app's own ksvc by resourceName")
+
+			rb := &rbacv1.RoleBinding{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: nn.Name + "-warm-patcher", Namespace: namespace}, rb)).To(Succeed())
+			Expect(rb.RoleRef.Name).To(Equal(nn.Name + "-warm-patcher"))
+			Expect(rb.Subjects).To(ContainElement(rbacv1.Subject{Kind: "ServiceAccount", Name: nn.Name + "-warm-patcher", Namespace: namespace}))
 		})
 
-		It("deletes a previously-created ScaledObject when warmSchedule is removed", func() {
+		It("deletes the warm CronJobs + RBAC when warmSchedule is removed", func() {
 			nn := reconcileOnce("warm-toggle", appsv1alpha1.NextAppSpec{
 				Image: validImage,
 				Scaling: &appsv1alpha1.ScalingSpec{
@@ -732,9 +756,8 @@ var _ = Describe("NextApp Controller reconcile output", func() {
 				},
 			})
 
-			so := newScaledObjectObj()
-			soName := types.NamespacedName{Name: nn.Name + "-warm-schedule", Namespace: namespace}
-			Expect(k8sClient.Get(ctx, soName, so)).To(Succeed())
+			setName := types.NamespacedName{Name: nn.Name + "-warm-0-set", Namespace: namespace}
+			Expect(k8sClient.Get(ctx, setName, &batchv1.CronJob{})).To(Succeed())
 
 			By("removing the warmSchedule and re-reconciling")
 			cur := &appsv1alpha1.NextApp{}
@@ -745,11 +768,39 @@ var _ = Describe("NextApp Controller reconcile output", func() {
 			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
 			Expect(err).NotTo(HaveOccurred())
 
-			By("the ScaledObject is gone")
-			fresh := newScaledObjectObj()
-			getErr := k8sClient.Get(ctx, soName, fresh)
-			Expect(errors.IsNotFound(getErr)).To(BeTrue(),
-				"ScaledObject must be deleted once warmSchedule is cleared")
+			By("the set CronJob and patcher SA are gone")
+			getErr := k8sClient.Get(ctx, setName, &batchv1.CronJob{})
+			Expect(errors.IsNotFound(getErr)).To(BeTrue(), "set CronJob must be deleted once warmSchedule is cleared")
+			saErr := k8sClient.Get(ctx, types.NamespacedName{Name: nn.Name + "-warm-patcher", Namespace: namespace}, &corev1.ServiceAccount{})
+			Expect(errors.IsNotFound(saErr)).To(BeTrue(), "patcher ServiceAccount must be deleted once warmSchedule is cleared")
+		})
+
+		It("prunes stale window CronJobs when the schedule shrinks", func() {
+			nn := reconcileOnce("warm-shrink", appsv1alpha1.NextAppSpec{
+				Image: validImage,
+				Scaling: &appsv1alpha1.ScalingSpec{
+					MaxScale: 5,
+					WarmSchedule: []appsv1alpha1.WarmWindow{
+						{Start: "0 8 * * *", End: "0 20 * * *", Replicas: 2},
+						{Start: "0 1 * * *", End: "0 3 * * *", Replicas: 1},
+					},
+				},
+			})
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: nn.Name + "-warm-1-set", Namespace: namespace}, &batchv1.CronJob{})).To(Succeed())
+
+			By("shrinking to a single window and re-reconciling")
+			cur := &appsv1alpha1.NextApp{}
+			Expect(k8sClient.Get(ctx, nn, cur)).To(Succeed())
+			cur.Spec.Scaling.WarmSchedule = cur.Spec.Scaling.WarmSchedule[:1]
+			Expect(k8sClient.Update(ctx, cur)).To(Succeed())
+			reconciler := &NextAppReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
+			Expect(err).NotTo(HaveOccurred())
+
+			By("window 0 survives, the now-removed window 1 CronJobs are pruned")
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: nn.Name + "-warm-0-set", Namespace: namespace}, &batchv1.CronJob{})).To(Succeed())
+			pruned := k8sClient.Get(ctx, types.NamespacedName{Name: nn.Name + "-warm-1-set", Namespace: namespace}, &batchv1.CronJob{})
+			Expect(errors.IsNotFound(pruned)).To(BeTrue(), "removed window's CronJob must be pruned")
 		})
 	})
 
@@ -1020,14 +1071,6 @@ func newKafkaSourceObj() *unstructured.Unstructured {
 	ks.SetAPIVersion("sources.knative.dev/v1beta1")
 	ks.SetKind("KafkaSource")
 	return ks
-}
-
-// newScaledObjectObj returns an empty unstructured KEDA ScaledObject for Get calls.
-func newScaledObjectObj() *unstructured.Unstructured {
-	so := &unstructured.Unstructured{}
-	so.SetAPIVersion("keda.sh/v1alpha1")
-	so.SetKind("ScaledObject")
-	return so
 }
 
 func orDefault(v, def string) string {

@@ -269,14 +269,19 @@ type ScalingSpec struct {
 	// (same-hour-last-week RPS percentile), the DB-compute lockstep pre-warm, and
 	// the per-tenant warm-budget cap are DEFERRED follow-ups (see ADR-0030).
 	//
-	// The operator translates a non-empty WarmSchedule into a KEDA ScaledObject
-	// with one `cron` trigger per window (target: the app's Knative Service).
-	// KEDA sets the min-replica FLOOR during the window; the existing Knative KPA
-	// still scales ABOVE the floor reactively. Outside every window there is NO
-	// floor, so the default scale-to-zero (minScale 0) cost model is preserved.
-	// Empty/nil => no ScaledObject is generated (back-compat; KEDA need not be
-	// installed). Requires KEDA (https://keda.sh) installed on the cluster —
-	// OPTIONAL today; the ScaledObject is inert until KEDA reconciles it.
+	// MECHANISM (ADR-0030): the operator generates a pair of Kubernetes CronJobs
+	// per window (owned by the NextApp) that patch the app's Knative Service
+	// `autoscaling.knative.dev/min-scale` annotation to `replicas` at the window
+	// `start` and back to "0" at the `end`. The Knative KPA reads that annotation
+	// as its scale FLOOR and still scales ABOVE it reactively. This is the
+	// Knative-native scheduled-floor path: KEDA is NOT used because it actuates
+	// via the Kubernetes /scale subresource, which a Knative Service does not
+	// expose. Outside every window the floor is "0", so the default scale-to-zero
+	// (minScale 0) cost model is preserved. Empty/nil => no CronJobs generated
+	// (byte-identical back-compat). NOTE: a min-scale patch rolls a new Knative
+	// Revision (the template is Knative's source of truth) — acceptable for a
+	// twice-a-window annotation flip; do not use warmSchedule on an app that pins
+	// traffic to a fixed revision (spec.traffic.revisionName).
 	// +optional
 	WarmSchedule []WarmWindow `json:"warmSchedule,omitempty"`
 }
@@ -285,30 +290,30 @@ type ScalingSpec struct {
 // are standard 5-field cron expressions (minute hour day month weekday) in the
 // window's Timezone; Replicas is the warm floor enforced between Start and End.
 type WarmWindow struct {
-	// Start is the cron expression at which the warm floor begins (KEDA cron
-	// trigger `start`). Standard 5-field cron (e.g. "0 8 * * 1-5" = 08:00 on
+	// Start is the cron expression at which the warm floor begins (the "set"
+	// CronJob's schedule). Standard 5-field cron (e.g. "0 8 * * 1-5" = 08:00 on
 	// weekdays).
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinLength=1
 	Start string `json:"start"`
 
-	// End is the cron expression at which the warm floor ends (KEDA cron trigger
-	// `end`, e.g. "0 20 * * 1-5" = 20:00 on weekdays). Between Start and End the
-	// floor of `replicas` pods is held.
+	// End is the cron expression at which the warm floor ends (the "clear"
+	// CronJob's schedule, e.g. "0 20 * * 1-5" = 20:00 on weekdays). Between Start
+	// and End the floor of `replicas` pods is held.
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinLength=1
 	End string `json:"end"`
 
-	// Replicas is the warm-pod FLOOR held during the window (KEDA cron trigger
-	// `desiredReplicas`). Must be >= 1 — a window that floors at 0 warms nothing
-	// (use no window at all for scale-to-zero). The Knative KPA still scales
-	// ABOVE this floor on real traffic.
+	// Replicas is the warm-pod FLOOR held during the window (the min-scale value
+	// the "set" CronJob patches onto the ksvc). Must be >= 1 — a window that
+	// floors at 0 warms nothing (use no window at all for scale-to-zero). The
+	// Knative KPA still scales ABOVE this floor on real traffic.
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:Minimum=1
 	Replicas int32 `json:"replicas"`
 
 	// Timezone is an IANA timezone (e.g. "UTC", "America/New_York") the cron
-	// expressions are evaluated in (KEDA cron trigger `timezone`). Defaults to
+	// schedules are evaluated in (the CronJobs' spec.timeZone). Defaults to
 	// "UTC" when unset.
 	// +optional
 	Timezone string `json:"timezone,omitempty"`
