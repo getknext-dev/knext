@@ -79,3 +79,8 @@ readiness on deep DB reachability directly defeats scale-to-zero.
   `waking` member — additive to the `@knext/lib/health` public API.
 - The operator adds a `deepHealthPath` (`<readinessPath>/deep`) used only for
   documentation/monitoring wiring; it is never attached to a probe.
+- The NextApp CR's `.status.scaledToZero` field (#312) surfaces this same
+  normal scale-to-zero state at the app/Knative-Revision layer: a scaled-to-zero
+  app is **normal, not degraded** (`ScaledToZero=true` never implies `Degraded`).
+  The operator watches child Knative Revisions so that field converges on a
+  Revision `Active` flip (#365).
