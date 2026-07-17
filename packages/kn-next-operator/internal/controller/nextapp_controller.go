@@ -21,8 +21,10 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
+	"github.com/robfig/cron/v3"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
@@ -563,6 +565,11 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 	// window start/end so the operator flips the min-scale floor exactly at the
 	// boundary rather than waiting for an unrelated event. Take the SOONER of this
 	// and any verdict requeue (e.g. ksvc-not-ready) so neither is masked.
+	if warmRequeue := warmScheduleRequeue(&nextApp, r.now()); warmRequeue > 0 {
+		if result.RequeueAfter == 0 || warmRequeue < result.RequeueAfter {
+			result.RequeueAfter = warmRequeue
+		}
+	}
 
 	r.emitEvent(&nextApp, corev1.EventTypeNormal, ReasonReconciled,
 		fmt.Sprintf("NextApp reconciled successfully (image %s)", nextApp.Spec.Image))
@@ -746,8 +753,9 @@ func (r *NextAppReconciler) buildDesiredKsvc(nextApp *appsv1alpha1.NextApp, ksvc
 		minScale = nextApp.Spec.Scaling.MinScale
 		annotations["autoscaling.knative.dev/max-scale"] = fmt.Sprintf("%d", nextApp.Spec.Scaling.MaxScale)
 	}
-	// RED STUB (#380): floor application intentionally omitted so the
-	// operator-owns-schedule tests fail; green fills this in.
+	if floor, _, _ := warmScheduleFloor(nextApp, r.now()); floor > minScale {
+		minScale = floor
+	}
 	annotations["autoscaling.knative.dev/min-scale"] = fmt.Sprintf("%d", minScale)
 
 	// Observability annotations — aligned with CLI
@@ -1241,18 +1249,95 @@ func (r *NextAppReconciler) reconcileNetworkPolicy(ctx context.Context, nextApp 
 	return err
 }
 
-// Warm-schedule window evaluation (ADR-0030, W5/#380) — RED STUB. Real logic in
-// the green commit; these zero-returning stubs let the tests compile and fail.
+// Warm-schedule window evaluation (ADR-0030, W5/#380). The OPERATOR is the sole
+// writer of the ksvc min-scale annotation: on every reconcile it evaluates the
+// warmSchedule windows against NOW and folds the active-window floor into the
+// min-scale stamped in buildDesiredKsvc. There is NO external writer (no CronJob,
+// no KEDA) that could race it — so the floor never reverts and never thrashes.
+
+// warmScheduleFloor returns, for the given app at instant `now`:
+//   - floor: the warm-pod floor from the ACTIVE window (the max `replicas` over
+//     all windows whose [start,end) contains `now`), or 0 if no window is active;
+//   - next: the soonest upcoming window boundary strictly after `now` (any
+//     window's next start or next end), used to RequeueAfter so the floor flips
+//     exactly at boundaries;
+//   - hasNext: whether such a boundary exists (always true for a valid non-empty
+//     schedule — cron schedules are unbounded — but false for an empty schedule).
+//
+// Window membership uses robfig/cron ParseStandard (the 5-field flavour the K8s
+// CronJob controller uses, matching admission validation) in each window's
+// timezone (default UTC). A window is ACTIVE at `now` iff its next `end` fire is
+// sooner than its next `start` fire — i.e. we are between a start and its end.
+// A window whose cron fails to parse (should be impossible post-validation) or
+// whose timezone is unknown is skipped defensively rather than erroring the
+// whole reconcile.
 func warmScheduleFloor(app *appsv1alpha1.NextApp, now time.Time) (floor int32, next time.Time, hasNext bool) {
-	return 0, time.Time{}, false
+	if app.Spec.Scaling == nil || len(app.Spec.Scaling.WarmSchedule) == 0 {
+		return 0, time.Time{}, false
+	}
+	for _, w := range app.Spec.Scaling.WarmSchedule {
+		tz := w.Timezone
+		if tz == "" {
+			tz = "UTC"
+		}
+		loc, err := time.LoadLocation(tz)
+		if err != nil {
+			continue // unknown tz: skip this window rather than fail the reconcile
+		}
+		startSched, err := cron.ParseStandard(strings.TrimSpace(w.Start))
+		if err != nil {
+			continue
+		}
+		endSched, err := cron.ParseStandard(strings.TrimSpace(w.End))
+		if err != nil {
+			continue
+		}
+		nowTZ := now.In(loc)
+		nextStart := startSched.Next(nowTZ)
+		nextEnd := endSched.Next(nowTZ)
+		// Active iff the pending end comes before the pending start (we're inside
+		// a window). At the exact start instant, Next(now) returns the FOLLOWING
+		// start while nextEnd is this window's end => active (floor engages).
+		if nextEnd.Before(nextStart) && w.Replicas > floor {
+			floor = w.Replicas
+		}
+		// Track the soonest boundary (either edge) across all windows.
+		for _, b := range []time.Time{nextStart, nextEnd} {
+			if !hasNext || b.Before(next) {
+				next, hasNext = b, true
+			}
+		}
+	}
+	return floor, next, hasNext
 }
 
+// warmScheduleRequeue returns the RequeueAfter duration to the next warm-schedule
+// boundary after `now`, clamped to [warmRequeueMin, warmRequeueMax] so a boundary
+// far in the future still gets a bounded periodic re-check and a near/negative
+// boundary (clock skew) is nudged forward. Zero when there is no schedule.
 func warmScheduleRequeue(app *appsv1alpha1.NextApp, now time.Time) time.Duration {
-	return 0
+	_, next, hasNext := warmScheduleFloor(app, now)
+	if !hasNext {
+		return 0
+	}
+	d := next.Sub(now)
+	if d < warmRequeueMin {
+		d = warmRequeueMin
+	}
+	if d > warmRequeueMax {
+		d = warmRequeueMax
+	}
+	return d
 }
 
 const (
+	// warmRequeueMin floors the boundary requeue so a boundary essentially "now"
+	// (or slightly past, from clock skew / reconcile latency) still schedules a
+	// prompt re-check instead of a busy 0s requeue.
 	warmRequeueMin = 10 * time.Second
+	// warmRequeueMax caps the boundary requeue so a distant next boundary still
+	// yields a bounded periodic reconcile (defense-in-depth if a boundary is
+	// mis-evaluated); a window starting in a week re-checks at least hourly.
 	warmRequeueMax = 1 * time.Hour
 )
 

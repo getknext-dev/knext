@@ -54,13 +54,16 @@ spec:
 > See [`scaling-cold-start.md`](./scaling-cold-start.md#high-traffic-profile-377-adr-0028).
 
 > `warmSchedule` pre-warms the app to a floor of `replicas` pods **during declared
-> windows**: the operator generates a pair of Kubernetes CronJobs per window that
-> patch the ksvc `autoscaling.knative.dev/min-scale` annotation to `replicas` at
-> `start` and back to `0` at `end` (the Knative KPA still scales above the floor).
-> This is **scheduled, owner-authored** warming — **not learned prediction** — and
-> needs **no KEDA** (KEDA cannot scale a Knative Service; see ADR-0030). Empty =>
-> nothing generated (default scale-to-zero). Do **not** combine with a pinned
-> `spec.traffic.revisionName` (a min-scale patch rolls a new Revision). See
+> windows**: on every reconcile the **operator** evaluates the windows against now
+> (in each window's timezone) and sets the ksvc
+> `autoscaling.knative.dev/min-scale` to `max(minScale, active-window replicas)`,
+> RequeueAfter'ing the next window boundary (the Knative KPA still scales above the
+> floor). The operator is the **single writer** of min-scale — no CronJobs, no
+> KEDA (KEDA cannot scale a Knative Service; see ADR-0030) — so the floor never
+> reverts. This is **scheduled, owner-authored** warming — **not learned
+> prediction**. Empty => min-scale falls back to `minScale` (default scale-to-zero).
+> Do **not** combine with a pinned `spec.traffic.revisionName` (a min-scale change
+> rolls a new Revision). See
 > [`scaling-cold-start.md`](./scaling-cold-start.md#scheduled-warm-floor-specscalingwarmschedule-adr-0030--380)
 > and [ADR-0030](../adr/0030-scheduled-warm-floor.md) (incl. the deferred
 > learned-controller / DB-lockstep / warm-budget follow-ups).
