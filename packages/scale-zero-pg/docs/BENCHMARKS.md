@@ -864,6 +864,39 @@ This is the honest "before" data point for the wave: at achievable in-cluster lo
 platform is comfortable; the true high-traffic ceilings remain to be driven once the
 load-generation constraint is lifted (multi-k6-pod fan-out).
 
+### W2+W3 validation — 2026-07-17 (cc=20 + poolMax=8, fan-out×2)
+
+Live run after W2 (#377, `containerConcurrency` 100→20) + W3 (#378, `poolMax`→`KNEXT_DB_POOL_MAX`
+runtime cap) merged. Image `ht-bdfa2fa`, `file-manager` patched to **cc=20**, env
+**`KNEXT_DB_POOL_MAX=8`** (so `maxScale 10 × 8 = 80 ≤ 80`), max-scale=10; harness with the
+merged **fan-out (#382)** + **Prometheus instrument fix (#383)**: `K6_FANOUT=2`
+(2 shards × `K6_CPU_REQUEST=120m`), ramp 0→60 VU → soak 44 VU, target the in-cluster
+`/users` route.
+
+| app | phase | RPS | p50 | ~p95 | ~p99 | err % | peak VUs | peak app pods | peak GW conns |
+|---|---|---|---|---|---|---|---|---|---|
+| file-manager | rampsoak-fanout2 | **227.1** | 159 ms | 474 ms | 730 ms | **0.00%** | 60 | **5** | 21 |
+
+**Reading — both wins demonstrated live:**
+- **W2 (scale-out fires):** at cc=20 the app scaled **0→2→5 pods** under the load, vs the
+  cc=100 baseline above that stayed at **1 pod** at similar concurrency. Lowering
+  ContainerConcurrency from the inert default made Knative's reactive autoscaling engage —
+  227 RPS across 5 pods at 0 errors.
+- **W3 (cap holds):** with `KNEXT_DB_POOL_MAX=8`, 5 pods could open ≤40 writer connections;
+  the gateway peaked at **21 active connections, 0 rejections (`53300`)**, comfortably under
+  `GW_MAX_CONNS=90`. The runtime pool cap is real (the W3 drift closure) and the connection
+  budget held.
+- The gateway `pggw_*` metrics now scrape correctly (the #383 fix): `pggw_rejected_connections_total=0`,
+  `pggw_wakes_total` tracked the cold-wakes.
+
+Caveats: still k6-client-CPU-bound (2×120m fan-out ≈ 60 VU on the request-constrained
+cluster), so this validates the **mechanisms** (cc scale-out + the poolMax cap) at moderate
+load — it does NOT saturate 5 pods, breach the 90-conn wall, or stress the single writer.
+Percentiles are `~pooled` (fan-out count-weighted mean across shards — see the fan-out note
+in operations.md), RPS/peak-VUs are exact sums. The true high-traffic ceiling still needs a
+larger load-gen budget than this 2-node cluster affords (#382 fan-out lifts the per-pod cap;
+a bigger node pool would lift the aggregate).
+
 The harness is validated cluster-free (`SELFTEST=1 ./_verify-loadsoak.sh` +
 `bash deploy/test_verify-loadsoak.sh`): the manifest dry-runs and the summary parser is
 asserted to produce this exact row format from a sample k6 JSON. **No load numbers are
