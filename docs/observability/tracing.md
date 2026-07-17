@@ -145,6 +145,15 @@ the wake, not every checkout.
 > that is installed from `instrumentation.ts` MUST follow this pattern** — see
 > `packages/lib/src/__tests__/seam-duplication.test.ts` for the two-instances
 > guard. The public API and fail-open / default-off semantics are unchanged.
+>
+> **CI keeps this fixed (#344):** the unit guard above is complemented by a
+> build-artifact gate, `apps/file-manager/standalone-seam-alive.test.ts`, run in
+> the `bytecode-cache-reuse` CI job (which already produces the standalone
+> build, so no extra build cost). It asserts the `Symbol.for('knext.lib.*')`
+> seam keys co-occur in BOTH the instrumentation (writer) chunk AND an app-server
+> (reader) chunk of the real `next build --webpack` output, and that `@knext/lib`
+> is never added to `serverExternalPackages` (which would re-split the dedup). A
+> re-broken seam fails the gate, not the deploy.
 
 Both are wired in `instrumentation.ts` (only when tracing is enabled):
 
@@ -203,9 +212,17 @@ wiring. The knext runtime runs the app on Node (the standalone server), so
 nothing is lost.
 
 A fast static-analysis guard
-(`apps/file-manager/instrumentation-edge-safe.test.ts`) fails the gate if
-`instrumentation.ts` ever regains a top-level import of a Node-only client
-module — this class of regression must fail the gate, not the deploy build.
+(`apps/file-manager/instrumentation-edge-safe.test.ts`) fails the gate if EITHER
+half of the fence breaks: (a) `instrumentation.ts` regains a top-level import of
+a Node-only client module, OR (b) the edge-scoped `IgnorePlugin` disappears from
+`next.config.ts` (the load-bearing exclusion — #344). Both classes must fail the
+gate, not the deploy build.
+
+Belt-and-suspenders: the webpack production build itself is a **PR-triggered CI
+gate** — `pnpm --filter file-manager build` runs in the `compat-smoke`,
+`bytecode-cache-reuse`, and `sigterm-drain-shipped` jobs, so an edge-bundle
+regression that slips past the static guard still fails `next build` in CI
+before merge (#344).
 
 ### Manual bracketing (optional)
 
