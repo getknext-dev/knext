@@ -1,5 +1,5 @@
-import { createRequire } from "node:module";
 import { readFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { CORRELATION_HEADER } from "@knext/lib/context";
 import { context, SpanKind, trace } from "@opentelemetry/api";
 import { AsyncLocalStorageContextManager } from "@opentelemetry/context-async-hooks";
@@ -11,8 +11,8 @@ import {
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
-    correlationIdFromContext,
     CorrelationContextPropagator,
+    correlationIdFromContext,
 } from "../adapters/tracing";
 
 /**
@@ -83,12 +83,14 @@ describe("#350 Part 2: OTel-upgrade tripwire — the seam we call still exists",
         const { path } = resolveVercelOtel();
         // path resolves to dist/node/index.js (the node entry the runtime loads).
         const src = readFileSync(path, "utf8");
-        expect(src, "bundled node build must still call propagation.extract").toContain(
-            "extract",
-        );
-        expect(src, "bundled node build must still model a SERVER span kind").toContain(
-            "SpanKind.SERVER",
-        );
+        expect(
+            src,
+            "bundled node build must still call propagation.extract",
+        ).toContain("extract");
+        expect(
+            src,
+            "bundled node build must still model a SERVER span kind",
+        ).toContain("SpanKind.SERVER");
     });
 });
 

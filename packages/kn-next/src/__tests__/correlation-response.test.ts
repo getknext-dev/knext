@@ -1,18 +1,17 @@
+import { ServerResponse } from "node:http";
 import { CORRELATION_HEADER } from "@knext/lib/context";
 import { context, trace } from "@opentelemetry/api";
 import { AsyncLocalStorageContextManager } from "@opentelemetry/context-async-hooks";
 import { BasicTracerProvider } from "@opentelemetry/sdk-trace-base";
-import { ServerResponse } from "node:http";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-
-import {
-    CorrelationContextPropagator,
-    withCorrelationId,
-} from "../adapters/tracing";
 import {
     CORRELATION_RESPONSE_INSTALLED,
     installCorrelationResponseEcho,
 } from "../adapters/correlation-response";
+import {
+    CorrelationContextPropagator,
+    withCorrelationId,
+} from "../adapters/tracing";
 
 /**
  * #350 Part 1 — automatic response-echo of `x-request-id`.
@@ -79,7 +78,11 @@ function installBaseCaptures(): void {
     ) {
         // Apply any inline headers object to the store (mirrors node's base).
         for (const arg of rest) {
-            if (arg !== null && typeof arg === "object" && !Array.isArray(arg)) {
+            if (
+                arg !== null &&
+                typeof arg === "object" &&
+                !Array.isArray(arg)
+            ) {
                 for (const [k, v] of Object.entries(
                     arg as Record<string, unknown>,
                 )) {
@@ -123,9 +126,7 @@ function makeRes(): {
 }
 
 function runInRequest<T>(id: string | undefined, fn: () => T): T {
-    const ctx = id
-        ? withCorrelationId(context.active(), id)
-        : context.active();
+    const ctx = id ? withCorrelationId(context.active(), id) : context.active();
     return context.with(ctx, fn);
 }
 

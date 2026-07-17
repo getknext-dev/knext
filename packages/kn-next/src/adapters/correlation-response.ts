@@ -43,8 +43,8 @@
  *     edge bundle. It never statically imports a Node-only client module.
  */
 
-import { CORRELATION_HEADER } from "@knext/lib/context";
 import { ServerResponse } from "node:http";
+import { CORRELATION_HEADER } from "@knext/lib/context";
 
 import { activeCorrelationId as defaultActiveCorrelationId } from "./tracing";
 
@@ -133,7 +133,12 @@ export function installCorrelationResponseEcho(
                 typeof arg === "object" &&
                 !Array.isArray(arg)
             ) {
-                if (objectHasHeader(arg as Record<string, unknown>, CORRELATION_HEADER)) {
+                if (
+                    objectHasHeader(
+                        arg as Record<string, unknown>,
+                        CORRELATION_HEADER,
+                    )
+                ) {
                     inlineHasId = true;
                 }
             }
