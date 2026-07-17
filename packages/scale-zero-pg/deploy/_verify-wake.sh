@@ -9,6 +9,11 @@
 set -eu
 NS=scale-zero-pg
 K="kubectl -n $NS"
+# Shared drill budget helpers (#340): adaptive wake budget (measured probe + safe
+# fallback) + bounded retry, so a transient scheduling stall on a pressured cluster
+# does not false-FAIL the DoD loop. HERE resolves this script's dir for the source.
+HERE="$(cd "$(dirname "$0")" && pwd)"
+. "$HERE/_lib-drill.sh"
 # Throwaway psql CLIENT pods use a small, ALWAYS-PULLABLE psql image (issue #171):
 # the neon compute image is pre-pulled on only SOME nodes, so a client pod pinned
 # to it with imagePullPolicy=Never intermittently hits ErrImageNeverPull (and its
@@ -33,7 +38,7 @@ CLIENT() {
   P=pgclient-$$-$1
   $K run "$P" --image="$PSQL_IMG" --image-pull-policy=IfNotPresent \
     --restart=Never --quiet --command -- psql "$DSN" -tA -c "$2" >/dev/null
-  $K wait --for=jsonpath='{.status.phase}'=Succeeded pod/$P --timeout=150s >/dev/null 2>&1 || true
+  $K wait --for=jsonpath='{.status.phase}'=Succeeded pod/$P --timeout="${WAKE_S:-150}s" >/dev/null 2>&1 || true
   OUT=$($K logs "$P" 2>&1)
   PHASE=$($K get pod "$P" -o jsonpath='{.status.phase}' 2>/dev/null)
   $K delete pod "$P" --ignore-not-found --wait=false >/dev/null 2>&1
@@ -77,6 +82,14 @@ COMPUTE_PODS() { $K get pods -l app=compute --no-headers 2>/dev/null | grep -c .
 $K rollout status deploy/pggw --timeout=120s >/dev/null || fail "gateway not ready"
 ok "gateway ready"
 
+# Attribute a flaky run to cluster pressure, not a defect (#340) — never blocks.
+preflight_cluster_health "$K" || true
+# Adaptive wake budget (#340): probe ONE real cold wake and size the wait budgets off
+# it, unless WAKE_BUDGET_MS is explicitly pinned. Failed/absent probe -> safe 120s.
+probe_wake_budget "$K" || true
+WAKE_S=$(wake_budget_s)
+echo "    wake budget for this run: ${WAKE_S}s (WAKE_BUDGET_MS=${WAKE_BUDGET_MS:-<adaptive>})"
+
 # 1. seed the one-table test db (compute may be up or down; gateway handles both).
 # The first connect uses the bounded retry: a fully cold plane can lose a benign
 # 0->1 startup race on the very first attempt (#61).
@@ -104,7 +117,8 @@ ok "cold connect woke compute 0->1 and returned 3 rows in $((T1-T0))s (gateway w
 
 # 4. idle -> back to zero (GW_IDLE_MS=60000 in 10-gateway.yaml)
 echo "    waiting for idle scale-down (60s idle window)..."
-i=0; while [ "$(COMPUTE_PODS)" != "0" ]; do i=$((i+1)); [ $i -gt 180 ] && fail "compute never scaled back to zero (phantom keepalive?)"; sleep 1; done
+DOWN_MAX=$(( ${WAKE_S:-30} + 180 ))  # idle window + adaptive slack for a slow reap (#340)
+i=0; while [ "$(COMPUTE_PODS)" != "0" ]; do i=$((i+1)); [ $i -gt "$DOWN_MAX" ] && fail "compute never scaled back to zero (phantom keepalive?)"; sleep 1; done
 ok "idle window elapsed -> compute back to zero"
 
 # 5. reconnect: wakes again, data intact

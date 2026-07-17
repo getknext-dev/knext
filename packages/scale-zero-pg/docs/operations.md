@@ -2226,18 +2226,39 @@ scales 1→N (N≥2)**, re-checks that writes are still rejected and re-measures
 staleness under load, then drains the load and **asserts it scales back N→1**.
 Numbers: [BENCHMARKS](BENCHMARKS.md#read-only-pool-under-load-hpa-n1-issue-99).
 
-> **`WAKE_BUDGET_MS` — running the battery on a slow / capacity-constrained cluster
-> (issue #198).** The drill battery's timing budgets were calibrated for a fast
-> ~2–5 s cold wake. On a CPU-request-tight cluster (e.g. a 2-node OKE where cold
-> wakes run ~14 s mean / ~19 s max) those fixed budgets false-FAIL even though the
-> products are healthy. `deploy/_verify-readpool.sh` and `deploy/_verify-multitenant.sh`
-> now source `deploy/_lib-drill.sh` and size their idle/hold budgets off one knob:
-> `WAKE_BUDGET_MS` (default **30000** = the assumed worst-case cold wake). Raise it
-> on an even slower cluster, lower it to tighten the battery on a fast one, e.g.
-> `WAKE_BUDGET_MS=45000 sh deploy/_verify-readpool.sh`. It drives the test gateway's
-> idle window (must outlast a wake so a just-woken pool isn't slept before the
-> `replicas≥1` check) and the multitenant busy-hold duration (must outlast the idle
-> app's whole wake-then-idle-down sequence). Unit tests: `sh deploy/_lib-drill.sh selftest`.
+> **`WAKE_BUDGET_MS` — the drill battery's ADAPTIVE wake budget (issues #198, #340).**
+> The battery's timing budgets were calibrated for a fast ~2–5 s cold wake. On a
+> CPU-request-tight or memory-pressured cluster (e.g. a 2-node OKE where cold wakes
+> run ~14 s mean / ~19 s max, and transient scheduling stalls push a single wake past
+> a minute) those fixed budgets false-FAIL even though the products are healthy.
+> `deploy/_verify-readpool.sh`, `deploy/_verify-multitenant.sh` and `deploy/_verify-wake.sh`
+> source `deploy/_lib-drill.sh` and size their idle/hold/ready-wait budgets off one
+> knob, `WAKE_BUDGET_MS`, resolved with a strict precedence:
+>
+> 1. **Explicit override always wins.** Set `WAKE_BUDGET_MS=<ms>` (operators/CI pin
+>    the battery), e.g. `WAKE_BUDGET_MS=45000 sh deploy/_verify-readpool.sh`.
+> 2. **Adaptive measured probe (default).** When `WAKE_BUDGET_MS` is unset, the wake
+>    and multitenant drills call `probe_wake_budget` at battery start: it scales the
+>    default `compute` Deployment 0→1, times ONE real cold wake, scales back to 0, and
+>    sizes the budget as `measured × 3 + 30 s` margin (`budget_from_measured_ms`). So
+>    a slow cluster auto-tunes the whole battery from its own measured latency.
+> 3. **Safe fallback = 120 s (NOT 30 s).** If no probe ran (no cluster) or the probe
+>    failed/timed out, the budget falls back to a **120 s** floor — deliberately not
+>    the old fixed 30 s, which false-failed `_verify-wake.sh` / `_verify-multitenant.sh`
+>    on a memory-pressured OKE cluster (**#340**: 30 s failed with "compute not ready",
+>    a re-run at `WAKE_BUDGET_MS=210000` passed in **12 s** — the stall was transient
+>    scheduling, not a defect).
+>
+> The budget drives the test gateway's idle window (must outlast a wake so a just-woken
+> pool isn't slept before the `replicas≥1` check), the multitenant busy-hold duration
+> (must outlast the idle app's whole wake-then-idle-down sequence), and the compute
+> **ready-wait** (`rollout_ready_retry` wraps `rollout status` in a **bounded retry/
+> backoff**: it absorbs a transient Pending stall but a genuinely-broken wake still
+> fails within the adaptive budget — never an infinite wait). A one-line
+> `preflight_cluster_health` note warns (non-blocking) at battery start if any node is
+> under `MemoryPressure` or an `Evicted` pod tombstone exists, so a flaky run is
+> attributable. Unit tests (pure budget math + bounded-retry property):
+> `sh deploy/_lib-drill.sh selftest`.
 >
 > The same fix corrected the HPA **load generator**, which had become a *no-op*: it
 > dialed `compute-ro` as the public default `cloud_admin:cloud_admin`, which #168/#112
