@@ -49,16 +49,43 @@
  * via `setTraceIdProvider` so a log line and a span share the same `trace_id`.
  */
 
+import { CORRELATION_HEADER, resolveCorrelationId } from "@knext/lib/context";
 import {
     type Context,
+    context,
+    createContextKey,
     type Span,
     SpanKind,
     SpanStatusCode,
+    type TextMapGetter,
+    type TextMapPropagator,
+    type TextMapSetter,
     trace,
 } from "@opentelemetry/api";
 
 /** Tracer name for all manually-instrumented knext runtime spans. */
 export const TRACER_NAME = "@knext/core";
+
+/**
+ * Span attribute that carries the request correlation id (#346). It rides the
+ * inbound SERVER span PURELY FOR TRACE EXPORT — so a tracing backend can index /
+ * echo the id on the request span. LOGS are NOT resolved from this attribute
+ * (an attribute lives only on the span it is set on, so a log line emitted while
+ * a CHILD span is active would miss it); logs resolve from the OTel context key
+ * below, which descends to all child spans. `knext.` keeps it vendor-neutral.
+ */
+export const CORRELATION_ATTRIBUTE = "knext.correlation_id";
+
+/**
+ * Private OTel Context key that carries the request correlation id across the
+ * WHOLE trace (#346, BLOCKER-1 fix). Context values descend to every child span
+ * by construction (the SDK derives a child span's context from its parent's), so
+ * reading the id from `context.active()` resolves the SAME request id whether the
+ * innermost active span is the SERVER span, `knext.db_wake`, `knext.cold_start`,
+ * an app `startActiveSpan`, or an auto-instrumented pg/fetch span. This is why
+ * the id must ride the CONTEXT, not a single span's attributes.
+ */
+const CORRELATION_CTX_KEY = createContextKey("knext.correlation_id");
 
 /** Span name for the app boot / first-request wake. */
 export const COLD_START_SPAN_NAME = "knext.cold_start";
@@ -202,6 +229,137 @@ export function activeTraceId(): string | undefined {
  */
 export function installTraceIdProvider(): () => string | undefined {
     return activeTraceId;
+}
+
+// ── Automatic request correlation on the real path (#346) ─────────────────────
+
+/**
+ * Read the request correlation id off an OTel `Context` (our private key).
+ * Returns `undefined` when the key is absent.
+ */
+export function correlationIdFromContext(ctx: Context): string | undefined {
+    const value = ctx.getValue(CORRELATION_CTX_KEY);
+    return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+/** Put a correlation id on an OTel `Context`, returning the derived context. */
+export function withCorrelationId(ctx: Context, id: string): Context {
+    return ctx.setValue(CORRELATION_CTX_KEY, id);
+}
+
+/**
+ * A `TextMapPropagator` that ESTABLISHES the request correlation id on the OTel
+ * Context from the inbound headers (#346). This is the correct seam because
+ * `@opentelemetry/instrumentation-http` (what `@vercel/otel` uses) runs
+ * `propagation.extract(activeContext, requestHeaders)` for each inbound request
+ * and starts the SERVER span UNDER the returned context — so whatever this
+ * `extract` puts on the context descends to the SERVER span AND every child span
+ * (db_wake / cold_start / pg / fetch), closing BLOCKER-1's child-span gap with
+ * no parent-walk.
+ *
+ * `extract` adopts a WELL-FORMED inbound `x-request-id` (else mints a fresh uuid
+ * — untrusted-input rules live in `@knext/lib/context`) and stores it on the
+ * context. `inject` is a deliberate no-op: the id already flows downstream as the
+ * `x-request-id` header via `@knext/lib`'s `correlationHeaders()` on the app's
+ * outbound calls, and W3C tracecontext carries the trace itself — this propagator
+ * exists only to seed the INBOUND context, so we don't also emit a bespoke header.
+ *
+ * Register it composed with the default propagators (it only ADDS a context key,
+ * it never strips tracecontext):
+ *   registerOTel({ propagators: ['auto', new CorrelationContextPropagator()] })
+ *
+ * Registered only when tracing is on (default-off gate) — zero overhead otherwise.
+ */
+export class CorrelationContextPropagator implements TextMapPropagator {
+    extract<Carrier>(
+        ctx: Context,
+        carrier: Carrier,
+        getter: TextMapGetter<Carrier>,
+    ): Context {
+        const raw = getter.get(carrier, CORRELATION_HEADER);
+        const id = resolveCorrelationId(Array.isArray(raw) ? raw[0] : raw);
+        return ctx.setValue(CORRELATION_CTX_KEY, id);
+    }
+
+    inject<Carrier>(
+        _ctx: Context,
+        _carrier: Carrier,
+        _setter: TextMapSetter<Carrier>,
+    ): void {
+        // No-op: correlation flows downstream via the app's x-request-id header
+        // (@knext/lib correlationHeaders()); this propagator only seeds inbound.
+    }
+
+    fields(): string[] {
+        return [CORRELATION_HEADER];
+    }
+}
+
+/**
+ * Read the request correlation id from the ACTIVE OTel context (the key seeded
+ * by `CorrelationContextPropagator.extract`). Because it reads the CONTEXT — not
+ * the innermost span's attributes — it resolves the SAME request id from any
+ * child span, so a log line on the db_wake / cold_start path still carries it
+ * (BLOCKER-1 fix). Returns `undefined` outside a request / when tracing is
+ * disabled (the key was never seeded).
+ */
+export function activeCorrelationId(): string | undefined {
+    return correlationIdFromContext(context.active());
+}
+
+/**
+ * Return a provider suitable for `@knext/lib`'s `setCorrelationIdProvider`
+ * (#346). Wiring it once at startup makes every in-request log line carry the
+ * active request's `correlation_id`, read from the active OTel CONTEXT, so logs
+ * are correlated on the real path with no handler wrapping — on the SERVER span
+ * AND under any child span:
+ *
+ *   import { setCorrelationIdProvider } from '@knext/lib/context';
+ *   setCorrelationIdProvider(installCorrelationIdProvider());
+ *
+ * Kept dependency-inverted (returns the provider rather than calling the setter)
+ * so this module stays independently unit-testable and the app owns the wiring.
+ */
+export function installCorrelationIdProvider(): () => string | undefined {
+    return activeCorrelationId;
+}
+
+/**
+ * A `SpanProcessor` that copies the context-key correlation id onto the inbound
+ * SERVER span as the `knext.correlation_id` attribute FOR TRACE EXPORT (so a
+ * backend can index / echo it on the request span). It reads the id from the
+ * span's `parentContext` (which is the context the SERVER span was started
+ * under — the extracted context our propagator seeded), so no header re-parse.
+ *
+ * Only the SERVER span is stamped: the id is already on the context for logs and
+ * for children, so tagging child spans would be redundant cardinality. When the
+ * key is absent (tracing off / non-request span) this is a no-op.
+ *
+ * Register it alongside the other knext processors:
+ *   registerOTel({ spanProcessors: ['auto', new CorrelationSpanProcessor()] })
+ */
+export class CorrelationSpanProcessor implements KnextSpanProcessor {
+    onStart(span: StartedSpanLike, parentContext: Context): void {
+        if (span.kind !== SpanKind.SERVER) {
+            return;
+        }
+        const id = correlationIdFromContext(parentContext);
+        if (!id) {
+            return;
+        }
+        // `onStart` receives the concrete SDK span, which supports setAttribute.
+        (span as unknown as Span).setAttribute(CORRELATION_ATTRIBUTE, id);
+    }
+
+    onEnd(): void {}
+
+    forceFlush(): Promise<void> {
+        return Promise.resolve();
+    }
+
+    shutdown(): Promise<void> {
+        return Promise.resolve();
+    }
 }
 
 // ── Automatic cold-start span (a SpanProcessor) ───────────────────────────────

@@ -31,11 +31,14 @@ import {
 import { resolveOtelOptions } from '@knext/core/adapters/otel-config';
 import {
   ColdStartSpanProcessor,
+  CorrelationContextPropagator,
+  CorrelationSpanProcessor,
+  installCorrelationIdProvider,
   installTraceIdProvider,
   instrumentPoolForDbWake,
 } from '@knext/core/adapters/tracing';
 import { setPoolInstrumentor } from '@knext/lib/clients';
-import { setTraceIdProvider } from '@knext/lib/context';
+import { setCorrelationIdProvider, setTraceIdProvider } from '@knext/lib/context';
 import { registerOTel } from '@vercel/otel';
 import { Registry } from 'prom-client';
 
@@ -66,16 +69,29 @@ export function registerNode() {
   registerOTel({
     serviceName: otel.serviceName,
     attributes: otel.resourceAttributes,
+    // Establish the request correlation id on the REAL path (#346). This
+    // propagator's `extract` runs per-request on the inbound headers (before the
+    // SERVER span opens), adopts a well-formed `x-request-id` (else generates
+    // one) and puts it on the OTel CONTEXT. instrumentation-http starts the
+    // SERVER span under that context, so the id descends to the SERVER span AND
+    // every child span (db_wake / cold_start / pg / fetch) — a log line anywhere
+    // on the request path carries it, with no `runWithRequestContext` wrapping.
+    // Composed with 'auto' so W3C tracecontext propagation is unchanged.
+    propagators: ['auto', new CorrelationContextPropagator()],
     traceSampler: otel.sampleRate >= 1 ? 'always_on' : 'parentbased_traceidratio',
     // Emit `knext.cold_start` under the FIRST inbound request span, automatically
     // (#317) — the app-boot/first-request wake auto-instrumentation doesn't show.
     // The processor also bumps the `knext_coldstart_*` metric (#315).
     // The golden-signal processor derives request rate/error/latency/saturation
     // from each inbound HTTP SERVER span — no handler wrapping (#315).
+    // CorrelationSpanProcessor copies the context-key id onto the SERVER span as
+    // `knext.correlation_id` for TRACE EXPORT (backends index/echo it) — logs
+    // resolve from the context key, not this attribute (#346, child-span safe).
     spanProcessors: [
       'auto',
       new ColdStartSpanProcessor(undefined, (wakeMs) => recordColdStart(metrics, wakeMs)),
       new GoldenSignalMetricsProcessor(metrics),
+      new CorrelationSpanProcessor(),
     ],
   });
 
@@ -93,4 +109,13 @@ export function registerNode() {
   // id. Only wired when tracing is on — when disabled the provider is never
   // installed (the C4 default no-trace provider stays in place, zero overhead).
   setTraceIdProvider(installTraceIdProvider());
+
+  // Correlate logs on the REAL request path (#346): resolve the request's
+  // `correlation_id` from the ACTIVE OTel CONTEXT KEY (seeded by the propagator
+  // above) at log time. Reading the CONTEXT — not the innermost span — means a
+  // log line under any child span (db_wake / cold_start) still carries the id.
+  // Together with the trace-id provider, every in-request log line now carries
+  // BOTH correlation_id + trace_id with no `runWithRequestContext` wrapping.
+  // Only wired when tracing is on (rides the default-off gate).
+  setCorrelationIdProvider(installCorrelationIdProvider());
 }

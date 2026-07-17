@@ -129,6 +129,54 @@ function currentTraceId(): string | undefined {
   }
 }
 
+// ── Correlation-id provider (dependency-inversion seam, #346) ──────────────────
+
+/**
+ * On the real request path knext-core does NOT own the Next.js route-handler
+ * chain (the node-server adapter is a supervisor that only runs the metrics
+ * server; the app's handlers run in the standalone child). So nothing wraps the
+ * handler in `runWithRequestContext`, and the AsyncLocalStorage store above is
+ * empty during a real request.
+ *
+ * The OTel-aware `@knext/core` closes that gap by installing a correlation-id
+ * PROVIDER (twin of the trace-id provider): it resolves the request's
+ * correlation id from the ACTIVE OTel context/span at log time — the same
+ * per-request context @vercel/otel already propagates via an
+ * AsyncLocalStorageContextManager. When the ALS store is empty,
+ * `correlationLogFields()` falls through to this provider so a log line emitted
+ * during a request still carries `correlation_id` (+ `trace_id`) with no
+ * hand-call to `runWithRequestContext`.
+ *
+ * This package stays OTel-free: the provider is injected, mirroring
+ * `setTraceIdProvider`. Default is no-correlation (undefined), so with tracing
+ * disabled there is zero correlation work and no field ever leaks.
+ */
+const NO_CORRELATION: () => string | undefined = () => undefined;
+let correlationIdProvider: () => string | undefined = NO_CORRELATION;
+
+/**
+ * Install the active-correlation-id provider. Called once at startup by an
+ * OTel-aware app so the correlation layer can resolve the request's id from the
+ * active OTel context without this package taking an OTel dependency.
+ */
+export function setCorrelationIdProvider(fn: () => string | undefined): void {
+  correlationIdProvider = fn;
+}
+
+/** Reset the correlation-id provider to the default (none). Mainly for tests. */
+export function resetCorrelationIdProvider(): void {
+  correlationIdProvider = NO_CORRELATION;
+}
+
+function providedCorrelationId(): string | undefined {
+  try {
+    return correlationIdProvider() || undefined;
+  } catch {
+    // A misbehaving provider must never break request handling or logging.
+    return undefined;
+  }
+}
+
 // ── Request context lifecycle ─────────────────────────────────────────────────
 
 /**
@@ -187,12 +235,24 @@ export function correlationLogFields(): {
   trace_id?: string;
 } {
   const ctx = store.getStore();
-  if (!ctx) {
+  if (ctx) {
+    // Explicit ALS context (someone called runWithRequestContext) always wins —
+    // one path, no double-stamping.
+    return ctx.traceId
+      ? { correlation_id: ctx.correlationId, trace_id: ctx.traceId }
+      : { correlation_id: ctx.correlationId };
+  }
+  // #346: no ALS store — the real request path. Fall through to the injected
+  // providers, which read the id + trace id from the ACTIVE OTel context/span.
+  // With tracing disabled both return undefined ⇒ {} (zero overhead, no leak).
+  const correlationId = providedCorrelationId();
+  if (!correlationId) {
     return {};
   }
-  return ctx.traceId
-    ? { correlation_id: ctx.correlationId, trace_id: ctx.traceId }
-    : { correlation_id: ctx.correlationId };
+  const traceId = currentTraceId();
+  return traceId
+    ? { correlation_id: correlationId, trace_id: traceId }
+    : { correlation_id: correlationId };
 }
 
 /**
