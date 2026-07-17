@@ -16,7 +16,8 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
     CORRELATION_ATTRIBUTE,
-    correlationAttributesFromHeaders,
+    CorrelationContextPropagator,
+    CorrelationSpanProcessor,
     installCorrelationIdProvider,
     installTraceIdProvider,
 } from "../adapters/tracing";
@@ -24,19 +25,25 @@ import {
 /**
  * #346 — the ACCEPTANCE-CRITERION proof: a request log line carries a
  * `correlation_id` (+ matching `trace_id`) emitted AUTOMATICALLY on the real
- * request path, with NO hand-call to `runWithRequestContext` in the handler.
+ * request path, with NO hand-call to `runWithRequestContext` in the handler,
+ * INCLUDING log lines emitted while a CHILD span (db_wake / cold_start / any
+ * app or auto-instrumented span) is active.
  *
  * This exercises exactly the wiring `instrumentation-node.ts` installs when
  * tracing is on:
- *   1. `correlationAttributesFromHeaders` — the `@vercel/otel`
- *      `attributesFromHeaders` hook. It runs per-request with the inbound
- *      headers, adopts a well-formed `x-request-id` (else generates one), and
- *      stamps it as the `knext.correlation_id` attribute on the SERVER span.
- *   2. `installCorrelationIdProvider()` / `installTraceIdProvider()` — injected
- *      into `@knext/lib/context` via `setCorrelationIdProvider` /
- *      `setTraceIdProvider`. At log time the logger mixin resolves both fields
- *      from the ACTIVE OTel span (rides @vercel/otel's
- *      AsyncLocalStorageContextManager), so no ALS wrapping is needed.
+ *   1. `CorrelationContextPropagator` — a `TextMapPropagator` whose `extract`
+ *      runs per-request on the inbound headers (before the SERVER span opens),
+ *      adopts a well-formed `x-request-id` (else generates one) and puts it on
+ *      the OTel Context under a private key. `@opentelemetry/instrumentation-http`
+ *      starts the SERVER span under this extracted context, so the key descends
+ *      to the SERVER span AND every child span by construction.
+ *   2. `CorrelationSpanProcessor` — copies the context-key id onto the SERVER
+ *      span as `knext.correlation_id` for TRACE EXPORT (so a backend can index /
+ *      echo it). Logs are NOT resolved from this attribute.
+ *   3. `installCorrelationIdProvider()` / `installTraceIdProvider()` — injected
+ *      into `@knext/lib/context`. At log time the logger mixin resolves
+ *      `correlation_id` from the active OTel CONTEXT KEY (constant across the
+ *      whole trace incl. child spans) and `trace_id` from the active span.
  *
  * We simulate the runtime with the SDK's `BasicTracerProvider` +
  * `InMemorySpanExporter` and a real async-hooks context manager (what
@@ -46,13 +53,17 @@ import {
 let exporter = new InMemorySpanExporter();
 let provider: BasicTracerProvider | undefined;
 const contextManager = new AsyncLocalStorageContextManager();
+const propagator = new CorrelationContextPropagator();
 
 function bootRuntime(): void {
     exporter = new InMemorySpanExporter();
     contextManager.enable();
     context.setGlobalContextManager(contextManager);
     provider = new BasicTracerProvider({
-        spanProcessors: [new SimpleSpanProcessor(exporter)],
+        spanProcessors: [
+            new CorrelationSpanProcessor(),
+            new SimpleSpanProcessor(exporter),
+        ],
     });
     trace.setGlobalTracerProvider(provider);
     // The one-time wiring instrumentation-node.ts performs when tracing is on.
@@ -75,7 +86,7 @@ afterEach(async () => {
 
 /**
  * A minimal getter over a plain header map, matching @opentelemetry/api's
- * TextMapGetter shape that @vercel/otel passes to attributesFromHeaders.
+ * TextMapGetter shape that instrumentation-http passes to a propagator.
  */
 const headerGetter = {
     keys: (carrier: Record<string, string>) => Object.keys(carrier),
@@ -83,10 +94,11 @@ const headerGetter = {
 };
 
 /**
- * Drive one inbound HTTP request through the runtime exactly as @vercel/otel
- * would: compute the SERVER span's attributes from the inbound headers (via the
- * knext hook), open the SERVER span with them, run the handler under its
- * context, end it. The handler emits a log line WITHOUT any knext ALS wrapping.
+ * Drive one inbound HTTP request through the runtime exactly as
+ * instrumentation-http does: EXTRACT the inbound context (our propagator seeds
+ * the correlation key), then open the SERVER span UNDER the extracted context,
+ * run the handler under it, end it. The handler emits a log line WITHOUT any
+ * knext ALS wrapping. `body` may open child spans to model the DB-wake path.
  */
 async function handleRequest(
     name: string,
@@ -94,12 +106,14 @@ async function handleRequest(
     handler: () => void,
 ): Promise<Record<string, string | undefined>> {
     const tracer = trace.getTracer("@vercel/otel");
-    const attrs = correlationAttributesFromHeaders(headers, headerGetter);
-    const server = tracer.startSpan(name, {
-        kind: SpanKind.SERVER,
-        attributes: attrs,
-    });
-    const ctx = trace.setSpan(context.active(), server);
+    // instrumentation-http: parent context = propagation.extract(active, headers)
+    const extracted = propagator.extract(
+        context.active(),
+        headers,
+        headerGetter,
+    );
+    const server = tracer.startSpan(name, { kind: SpanKind.SERVER }, extracted);
+    const ctx = trace.setSpan(extracted, server);
     let captured: Record<string, string | undefined> = {};
     await context.with(ctx, async () => {
         // No runWithRequestContext here — this is the whole point of #346.
@@ -160,6 +174,60 @@ describe("#346 acceptance: in-request log line is auto-correlated on the real pa
         const a = await handleRequest("GET /a", {}, () => {});
         const b = await handleRequest("GET /b", {}, () => {});
         expect(a.correlation_id).not.toBe(b.correlation_id);
+    });
+
+    it("a log line emitted while a CHILD span is active STILL carries the request's correlation_id (BLOCKER 1)", async () => {
+        // The db_wake / cold_start path opens ACTIVE child spans via
+        // startActiveSpan, which re-parents `trace.getActiveSpan()` to the child.
+        // The correlation id must ride the OTel CONTEXT (constant across the
+        // trace), not the innermost span's attributes, so a log line on the
+        // DB-wake path — exactly where the diagnostic value is — still resolves
+        // the SERVER-level correlation id (and the same trace_id).
+        let atServer: Record<string, string | undefined> = {};
+        let inChild: Record<string, string | undefined> = {};
+        const tracer = trace.getTracer("@knext/core");
+
+        await handleRequest(
+            "GET /files",
+            { "x-request-id": "req-child-1" },
+            () => {
+                atServer = correlationLogFields();
+                // Open a child span (models knext.db_wake) and log inside it.
+                tracer.startActiveSpan("knext.db_wake", (child) => {
+                    inChild = correlationLogFields();
+                    child.end();
+                });
+            },
+        );
+
+        expect(atServer.correlation_id).toBe("req-child-1");
+        // The gap this blocker names: WITHOUT the context-key carrier this is
+        // undefined (attribute lives only on the SERVER span).
+        expect(inChild.correlation_id).toBe("req-child-1");
+        // trace_id stays constant across the trace, so it must match too.
+        expect(inChild.trace_id).toBe(atServer.trace_id);
+        expect(inChild.trace_id).toBeTruthy();
+    });
+
+    it("nested child spans all resolve the same correlation_id (context descends)", async () => {
+        const seen: (string | undefined)[] = [];
+        const tracer = trace.getTracer("@knext/core");
+        await handleRequest(
+            "GET /files",
+            { "x-request-id": "req-nested-1" },
+            () => {
+                seen.push(correlationLogFields().correlation_id);
+                tracer.startActiveSpan("knext.cold_start", (a) => {
+                    seen.push(correlationLogFields().correlation_id);
+                    tracer.startActiveSpan("knext.db_wake", (b) => {
+                        seen.push(correlationLogFields().correlation_id);
+                        b.end();
+                    });
+                    a.end();
+                });
+            },
+        );
+        expect(seen).toEqual(["req-nested-1", "req-nested-1", "req-nested-1"]);
     });
 });
 
