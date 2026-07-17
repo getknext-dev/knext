@@ -127,9 +127,22 @@ window boundary). This is far less churn than the abandoned CronJob approach (no
 revert loop — the operator only changes the annotation when the *computed* floor
 changes, i.e. twice per window), but it still resets traffic to latest-ready — so
 **`warmSchedule` must not be combined with a pinned traffic target**
-(`spec.traffic.revisionName`, #92). This is documented on the CRD field. A
-revision-free variant (a first-class Knative scheduled-scale) is a possible
-future refinement, out of scope for the MVP.
+(`spec.traffic.revisionName`, #92). This is documented on the CRD field; turning
+it into an admission rejection is a filed follow-up (#393). A revision-free
+variant (a first-class Knative scheduled-scale) is a possible future refinement,
+out of scope for the MVP.
+
+### Timezones on distroless (embedded tzdata)
+
+Window membership is evaluated per window in its IANA `timezone` via
+`time.LoadLocation`. The operator ships on `gcr.io/distroless/static:nonroot`,
+which has **no** `/usr/share/zoneinfo`, so the operator's `main` package
+blank-imports `time/tzdata` to embed the IANA database in the binary — without
+it a non-UTC window would silently fail-open (skipped, warming nothing) in the
+shipped image while passing on a dev host that has system tzdata.
+`TestEmbeddedTimezoneDatabase` (cmd package, which links the embed) guards this.
+DST-transition-boundary tests for the window evaluation are a filed follow-up
+(#394).
 
 ## Honesty — this is SCHEDULED, not LEARNED
 
