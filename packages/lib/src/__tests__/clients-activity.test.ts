@@ -41,6 +41,10 @@ describe('@knext/lib/clients — DB activity tracking (#348 gate fix)', () => {
     query.mockImplementation((..._args: unknown[]) => Promise.resolve({ rows: [] }));
     connect.mockClear();
     connect.mockImplementation(() => Promise.resolve({ release() {} }));
+    // Keep the #310 client-side wake-retry budget tiny so a PERSISTENT-failure
+    // test (below) exhausts it fast under real timers instead of retrying for 8s.
+    process.env.DB_WAKE_RETRY_BUDGET_MS = '20';
+    process.env.DB_WAKE_RETRY_BASE_MS = '5';
     process.env.DATABASE_URL = 'postgres://u:p@localhost:5432/db';
     // The activity timestamp lives on globalThis (cross-bundle, #352), which
     // survives vi.resetModules() — clear it so each test starts from "never used".
@@ -51,6 +55,8 @@ describe('@knext/lib/clients — DB activity tracking (#348 gate fix)', () => {
   afterEach(() => {
     vi.useRealTimers();
     delete process.env.DATABASE_URL;
+    delete process.env.DB_WAKE_RETRY_BUDGET_MS;
+    delete process.env.DB_WAKE_RETRY_BASE_MS;
   });
 
   it('records lastQueryAt when the writer pool is queried', async () => {
@@ -103,7 +109,10 @@ describe('@knext/lib/clients — DB activity tracking (#348 gate fix)', () => {
   it('stamps lastDbActivityAt even when the writer-pool QUERY rejects', async () => {
     const mod = await import('../clients');
     expect(mod.getLastDbActivityAt()).toBeUndefined();
-    query.mockImplementationOnce(() => Promise.reject(new Error('DB down')));
+    // A PERSISTENT failure — the #310 client wake-retry exhausts its (tiny, per
+    // beforeEach) budget and then surfaces the error, so the "rejects" contract
+    // holds while proving activity is stamped even on a failing acquire.
+    query.mockImplementation(() => Promise.reject(new Error('DB down')));
 
     const t0 = Date.now();
     await expect(mod.getDbPool().query('SELECT 1')).rejects.toThrow('DB down');
@@ -118,7 +127,8 @@ describe('@knext/lib/clients — DB activity tracking (#348 gate fix)', () => {
   it('stamps lastDbActivityAt even when the writer-pool CONNECT rejects', async () => {
     const mod = await import('../clients');
     expect(mod.getLastDbActivityAt()).toBeUndefined();
-    connect.mockImplementationOnce(() => Promise.reject(new Error('connect refused')));
+    // Persistent failure — see the QUERY-rejects test above for the rationale.
+    connect.mockImplementation(() => Promise.reject(new Error('connect refused')));
 
     const t0 = Date.now();
     await expect(mod.getDbPool().connect()).rejects.toThrow('connect refused');
