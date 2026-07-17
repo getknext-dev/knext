@@ -31,6 +31,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/utils/ptr"
@@ -38,12 +39,15 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	appsv1alpha1 "github.com/AhmedElBanna80/knext/packages/kn-next-operator/api/v1alpha1"
 	"github.com/AhmedElBanna80/knext/packages/kn-next-operator/internal/validation"
 	"knative.dev/pkg/apis"
+	"knative.dev/serving/pkg/apis/serving"
 	servingv1 "knative.dev/serving/pkg/apis/serving/v1"
 )
 
@@ -1159,6 +1163,33 @@ func (r *NextAppReconciler) reconcileNetworkPolicy(ctx context.Context, nextApp 
 	return err
 }
 
+// revisionToNextAppRequests maps a Knative Revision to a reconcile request for
+// the NextApp that owns it, so a pure Revision Active-condition flip (Active <->
+// Inactive on wake/sleep) re-enqueues the NextApp and `.status.scaledToZero`
+// converges within a bounded window (#365).
+//
+// A Revision is owned by its Configuration, NOT by the NextApp, so a plain
+// Owns(Revision) owner-ref walk never resolves back to the NextApp. Instead we
+// use the `serving.knative.dev/service` label Knative stamps on every Revision:
+// the child ksvc name equals the NextApp name (buildDesiredKsvc), so that label
+// value IS the owning NextApp's name in the same namespace. A Revision without
+// the label (not ours) enqueues nothing. The re-enqueued reconcile is protected
+// by the #98 no-op-status guard, so a Revision event that does not actually
+// change status writes nothing and does not hot-loop.
+func (r *NextAppReconciler) revisionToNextAppRequests(_ context.Context, obj client.Object) []reconcile.Request {
+	rev, ok := obj.(*servingv1.Revision)
+	if !ok {
+		return nil
+	}
+	svc := rev.Labels[serving.ServiceLabelKey]
+	if svc == "" {
+		return nil
+	}
+	return []reconcile.Request{
+		{NamespacedName: types.NamespacedName{Name: svc, Namespace: rev.Namespace}},
+	}
+}
+
 func (r *NextAppReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		// GenerationChangedPredicate on the PRIMARY (For) watch only: a
@@ -1174,6 +1205,16 @@ func (r *NextAppReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&corev1.PersistentVolumeClaim{}).
 		Owns(&corev1.ServiceAccount{}).
 		Owns(&networkingv1.NetworkPolicy{}).
+		// #365: watch child Knative Revisions so a pure Active-condition flip
+		// (scale-to-zero / wake) re-enqueues the owning NextApp and
+		// `.status.scaledToZero` converges within a bounded window. Revisions are
+		// owned by the Configuration (not the NextApp), so this is a label-mapped
+		// Watches rather than an owner-ref Owns; the #98 no-op-status guard keeps a
+		// no-change Revision event from writing status or hot-looping.
+		Watches(
+			&servingv1.Revision{},
+			handler.EnqueueRequestsFromMapFunc(r.revisionToNextAppRequests),
+		).
 		Named("nextapp").
 		Complete(r)
 }
