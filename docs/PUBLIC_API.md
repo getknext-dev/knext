@@ -152,6 +152,31 @@ Exports: `initRuntimeMetrics(registry, app?)`, `createMetricsRegistry(registry, 
 `HTTP_INFLIGHT_METRIC`, `COLDSTART_TOTAL_METRIC`, `COLDSTART_DURATION_METRIC`,
 `DB_WAKE_TOTAL_METRIC`, `DB_WAKE_DURATION_METRIC`).
 
+### `@knext/core/adapters/correlation-response`
+
+Automatic **response-echo** of `x-request-id`. The correlation layer establishes
+the request correlation id on the OTel Context and correlates logs from it, but
+does not echo the id back on the HTTP response — `@vercel/otel` exposes no inbound
+response hook and knext-core does not own the app's response chain.
+`installCorrelationResponseEcho()` patches `http.ServerResponse.prototype` (the
+same mechanism as the cache-control normalizer) so that at the header-flush point
+the response carries `x-request-id` = the **active** correlation id (read from the
+same OTel Context the logger mixin uses), **only if** it is present and the app
+has not already set it. Node-only (touches `node:http`), so wire it exclusively
+from the Node path of `instrumentation.ts`, and only when tracing is on. It is
+fail-open, idempotent, and default-off.
+
+```ts
+import { installCorrelationResponseEcho } from '@knext/core/adapters/correlation-response';
+
+// In the NEXT_RUNTIME === 'nodejs' branch, after registerOTel(...) with the
+// CorrelationContextPropagator, and only when tracing is enabled:
+installCorrelationResponseEcho();
+```
+
+Exports: `installCorrelationResponseEcho(deps?)`, the `CorrelationResponseDeps`
+type, and the `CORRELATION_RESPONSE_INSTALLED` idempotency symbol.
+
 ### `@knext/core/adapters/cache-handler`
 
 The ISR / Redis cache handler. Next.js requires its `cacheHandler` option to be a

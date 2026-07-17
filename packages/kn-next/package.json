@@ -35,6 +35,11 @@
       "import": "./dist/adapters/metrics.js",
       "default": "./dist/adapters/metrics.js"
     },
+    "./adapters/correlation-response": {
+      "types": "./dist/adapters/correlation-response.d.ts",
+      "import": "./dist/adapters/correlation-response.js",
+      "default": "./dist/adapters/correlation-response.js"
+    },
     "./adapters/cache-handler": "./dist/adapters/cache-handler.js",
     "./validate": {
       "types": "./dist/validate-public.d.ts",
@@ -92,6 +97,7 @@
         "./adapters/otel-config",
         "./adapters/tracing",
         "./adapters/metrics",
+        "./adapters/correlation-response",
         "./adapters/cache-handler"
       ],
       "internalPrefix": "./internal/"
