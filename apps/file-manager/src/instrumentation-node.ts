@@ -23,6 +23,7 @@
  * both halves of the fence.
  */
 
+import { installCorrelationResponseEcho } from '@knext/core/adapters/correlation-response';
 import {
   GoldenSignalMetricsProcessor,
   initRuntimeMetrics,
@@ -31,7 +32,6 @@ import {
   recordDbWake,
   startChildMetricsServer,
 } from '@knext/core/adapters/metrics';
-import { installCorrelationResponseEcho } from '@knext/core/adapters/correlation-response';
 import { resolveOtelOptions } from '@knext/core/adapters/otel-config';
 import {
   ColdStartSpanProcessor,
