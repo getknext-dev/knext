@@ -20,6 +20,46 @@ k8s on an M-series laptop (decommissioned 2026-07-03); **OKE** = Oracle OKE
 | SCRAM-SHA-256 auth (issue #117) | no measurable regression | ✅ verified on OKE | wire auth is now SCRAM (was md5). The SCRAM handshake adds one client↔server round-trip vs md5 (sub-ms on the in-cluster LAN, swamped by the seconds-scale cold-wake); cold-wake wall-time was indistinguishable from the md5 baseline. The app-role verifier is precomputed at provision time (PBKDF2 4096 iters, ~ms, off the wake path). Cold-wake caveat: an existing md5-era app can still auth via md5 in the ~tens-of-ms window before `apply_config` lands the SCRAM verifier (#158). |
 | **Cold-boot role-apply settle (#132)** | — | **+250 ms deterministic** on per-app cold wake | `GW_ROLE_APPLY_SETTLE_MS` (default 250). The gateway holds the client 250 ms on a **genuine cold wake** of a per-app front door before the auth attempt, absorbing the cold-boot `28P01` role-apply race. Fires ONLY on cold wake (gateway log `cold wake — settling 250ms`, once per wake — no retry loop); warm connects + base single-DB path add **0**. ≈7 % of the p50 3.72 s cold-wake baseline; clamped to `GW_WAKE_TIMEOUT_MS`. |
 
+### Cold-start under concurrency — single-flight DB wake (#339), OKE, 2026-07-17
+
+N concurrent first-connects from a knext app each independently blocked on the 0→1
+compute wake. #339 single-flights the wake in `@knext/lib` `getDbPool` (globalThis /
+`Symbol.for` inflight-promise cell, fail-open on rejection) so N concurrent
+first-connects collapse onto **one** shared wake. Measured on OKE via the file-manager
+app hitting `/users` (`unstable_noStore` → a DB query on every request); latencies are
+client-observed HTTP round-trips (sslip.io ingress → Knative → app → apps-gateway →
+compute wake). BEFORE = `obs-4331a43` (no single-flight); AFTER = `obs-88d66dd`.
+
+**A) Pure DB-wake herd (app warm, DB cold)** — app held warm via shallow `/api/health`
+pings so the number isolates the wake path (AFTER / single-flight):
+
+| Concurrency | p50 / p95 / max |
+|---|---|
+| C=1  | **3.6s** (single-request cold wake) |
+| C=20 | **3.8s / 3.9s / 4.3s** |
+
+p95(C=20) ÷ single-request = **1.08×** — comfortably within the ≤1.5× acceptance bound
+(#339). 20 concurrent cold-DB requests finish within ~1× a single wake because they
+share one inflight wake instead of each racing their own.
+
+**B) End-to-end cold (app cold + DB cold), matched before/after** — app-wake is the same
+constant in both arms, so the delta is the DB-herd effect:
+
+| Concurrency | BEFORE p50/p95/max/wall | AFTER p50/p95/max/wall |
+|---|---|---|
+| C=20 | 9.2 / 9.6 / **14.5** / 14.5s | 8.2 / 8.4 / **8.4** / 8.4s |
+
+The herd tail collapses: worst-case **14.5s → 8.4s (−42%)**, wall 14.5s → 8.4s. All 20
+AFTER requests land in a tight 8.1–8.4s band (one shared wake) vs the 9–14.5s BEFORE
+spread.
+
+Method / caveats: one burst per cell (the 20 concurrent samples give the intra-burst
+distribution). Cluster was CPU-healthy (~4% node CPU) at measurement; the historical
+**32s** figure cited in #339 was taken under ~99% CPU-request saturation
+(scheduling-bound, not steady-state DB contention), so the steady-state herd penalty is
+the ~1.5× tail shown in arm B, which single-flight removes. #361 (a rejected pool query
+still stamps `lastDbActivityAt`) is unit-covered, not a cluster metric.
+
 ### Cold-boot role-apply settle gate (#132) — OKE drill, 2026-07-11
 
 `deploy/_verify-coldboot.sh` (app=pgdemo, CYCLES=8, settle build sha-55edfaa on the
