@@ -52,7 +52,53 @@ export interface RequestContext {
   traceId?: string;
 }
 
-const store = new AsyncLocalStorage<RequestContext>();
+// ── Shared cross-bundle state (#352) ──────────────────────────────────────────
+// In the Next.js standalone build `instrumentation.ts` compiles in a SEPARATE
+// webpack layer from the app server bundles and `@knext/lib` is bundled (not
+// externalized) into each, so `@knext/lib/context` exists as MULTIPLE physical
+// module copies with independent module-level state. The injectable providers
+// (setTraceIdProvider / setCorrelationIdProvider, #318/#346) are written by the
+// instrumentation copy but read by the app-server copy — with plain module-level
+// `let`s the write is invisible to the reader and both seams are inert live.
+// We anchor the mutable seam state (providers + the AsyncLocalStorage store) on
+// a single `globalThis` slot keyed by a registry `Symbol.for(...)`, so every
+// copy reads/writes the SAME state regardless of bundling.
+const NO_TRACE: () => string | undefined = () => undefined;
+const NO_CORRELATION: () => string | undefined = () => undefined;
+
+const CONTEXT_STATE_KEY = Symbol.for('knext.lib.context.state');
+
+interface ContextState {
+  store: AsyncLocalStorage<RequestContext>;
+  traceIdProvider: () => string | undefined;
+  correlationIdProvider: () => string | undefined;
+}
+
+type ContextStateGlobal = Record<symbol, ContextState | undefined>;
+
+const contextStateGlobal = globalThis as unknown as ContextStateGlobal;
+
+function contextState(): ContextState {
+  let state = contextStateGlobal[CONTEXT_STATE_KEY];
+  if (!state) {
+    state = {
+      store: new AsyncLocalStorage<RequestContext>(),
+      traceIdProvider: NO_TRACE,
+      correlationIdProvider: NO_CORRELATION,
+    };
+    contextStateGlobal[CONTEXT_STATE_KEY] = state;
+  }
+  return state;
+}
+
+/** The single, cross-bundle-shared AsyncLocalStorage for request context. */
+const store = new Proxy({} as AsyncLocalStorage<RequestContext>, {
+  get(_target, prop, receiver) {
+    const real = contextState().store;
+    const value = Reflect.get(real, prop, receiver);
+    return typeof value === 'function' ? value.bind(real) : value;
+  },
+});
 
 /** A minimal, framework-agnostic view of inbound request headers. */
 export type HeaderSource =
@@ -103,26 +149,24 @@ export function readHeader(source: HeaderSource, name: string): string | undefin
 
 // ── Trace-id provider (dependency-inversion seam) ─────────────────────────────
 
-const NO_TRACE: () => string | undefined = () => undefined;
-let traceIdProvider: () => string | undefined = NO_TRACE;
-
 /**
  * Install the active-trace-id provider. Called once at startup by an OTel-aware
  * app so the correlation layer can tie each id to the current trace_id without
- * this package taking an OTel dependency.
+ * this package taking an OTel dependency. Stored on the shared `globalThis`
+ * state so it survives module duplication across bundles (#352).
  */
 export function setTraceIdProvider(fn: () => string | undefined): void {
-  traceIdProvider = fn;
+  contextState().traceIdProvider = fn;
 }
 
 /** Reset the trace-id provider to the default (no trace). Mainly for tests. */
 export function resetTraceIdProvider(): void {
-  traceIdProvider = NO_TRACE;
+  contextState().traceIdProvider = NO_TRACE;
 }
 
 function currentTraceId(): string | undefined {
   try {
-    return traceIdProvider() || undefined;
+    return contextState().traceIdProvider() || undefined;
   } catch {
     // A misbehaving provider must never break request handling or logging.
     return undefined;
@@ -151,26 +195,25 @@ function currentTraceId(): string | undefined {
  * `setTraceIdProvider`. Default is no-correlation (undefined), so with tracing
  * disabled there is zero correlation work and no field ever leaks.
  */
-const NO_CORRELATION: () => string | undefined = () => undefined;
-let correlationIdProvider: () => string | undefined = NO_CORRELATION;
 
 /**
  * Install the active-correlation-id provider. Called once at startup by an
  * OTel-aware app so the correlation layer can resolve the request's id from the
- * active OTel context without this package taking an OTel dependency.
+ * active OTel context without this package taking an OTel dependency. Stored on
+ * the shared `globalThis` state so it survives module duplication (#352).
  */
 export function setCorrelationIdProvider(fn: () => string | undefined): void {
-  correlationIdProvider = fn;
+  contextState().correlationIdProvider = fn;
 }
 
 /** Reset the correlation-id provider to the default (none). Mainly for tests. */
 export function resetCorrelationIdProvider(): void {
-  correlationIdProvider = NO_CORRELATION;
+  contextState().correlationIdProvider = NO_CORRELATION;
 }
 
 function providedCorrelationId(): string | undefined {
   try {
-    return correlationIdProvider() || undefined;
+    return contextState().correlationIdProvider() || undefined;
   } catch {
     // A misbehaving provider must never break request handling or logging.
     return undefined;
