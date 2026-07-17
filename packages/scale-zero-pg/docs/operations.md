@@ -1845,7 +1845,16 @@ Knobs (env, all optional except `TARGET_URL` for a live run):
 | `MAX_ERR_RATE` | `0.01` | error budget (fraction) |
 | `K6_IMAGE` | `grafana/k6:0.49.0` | k6 image |
 | `RUN_TIMEOUT_S` | ramp+soak+slack | Job wall budget |
+| `GW_DEPLOY` | `pggw-apps` | `app=` label of the apps-gateway pod scraped for the `pggw_*` snapshot |
 | `LOADSOAK_CONTEXT` / `LOADSOAK_NS` | ambient / `scale-zero-pg` | kubectl context / namespace |
+
+**Knob safety (injection guard):** the knobs are interpolated into the k6 Job's
+`/bin/sh -c` argument, so the harness rejects any knob value carrying a shell
+metacharacter (`'` `"` `` ` `` `$` `;` `|` `&` `\` `<` `>` `(` `)` or a control char) and
+fails closed before rendering the manifest — a poisoned `TARGET_URL` cannot execute in the
+Job. Practical consequence: a `TARGET_URL` whose query string needs a literal `&` is
+refused; target a route/path without `&` (or add a single query param). URLs, durations
+(`2m`), and integers use none of these characters, so legitimate values are unaffected.
 
 Reading the wall analysis: if `pggw_rejected_connections_total` climbed, the
 `GW_MAX_CONNS=90` cap was the wall (raise it or add app pods so the pool spreads); if the

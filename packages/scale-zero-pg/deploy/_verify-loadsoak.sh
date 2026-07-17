@@ -74,16 +74,41 @@ fi
 # PURE HELPERS — no cluster, no side effects. Unit-tested by test_verify-loadsoak.sh.
 # =================================================================================
 
-# _jnum <json-file> <dotted.path> — extract a numeric leaf from k6 summary JSON with a
-# portable grep/sed (no jq dependency in the k6 image or on the drill host). Handles
-# the k6 shapes: "p(95)": 96.4  and  "rate": 300.0  and  "value": 0.0021. Prints the
-# raw number (or empty). Keys with parens (p(95)) are matched literally.
-_jnum() {
-  _f="$1"; _key="$2"
-  # escape regex metachars in the key (parens) so p(95) matches literally.
-  _esc="$(printf '%s' "$_key" | sed -E 's/[][().*+?^$|\\{}]/\\&/g')"
-  grep -oE "\"${_esc}\"[[:space:]]*:[[:space:]]*-?[0-9]+(\.[0-9]+)?" "$_f" 2>/dev/null \
+# _esc_key <key> — escape regex metachars (notably the parens in p(95)) so a key is
+# matched literally by grep -E. Pure.
+_esc_key() { printf '%s' "$1" | sed -E 's/[][().*+?^$|\\{}]/\\&/g'; }
+
+# _jblock <json-file> <metric> — isolate ONE k6 metric object, e.g. the contents of
+# `"http_req_duration": { ... }`, as a single-line string. CRITICAL (#376 review):
+# k6 --summary-export lists EVERY registered metric, and the custom metrics this drill
+# registers (app_errors/app_ok/app_latency_ms) sort ALPHABETICALLY BEFORE the http_*
+# built-ins, while checks/vus carry their own "rate"/"value" keys. A whole-file
+# first-match grep for a bare key (rate/value/p(95)) therefore reads the WRONG metric.
+# Scoping every extraction to its metric block first fixes that. k6 metric objects
+# contain NO nested braces, so after flattening newlines we can grab from the metric's
+# `{` to the FIRST `}`. Prints the block body (between the braces) or empty. Pure.
+_jblock() {
+  _f="$1"; _m="$(_esc_key "$2")"
+  # flatten to one line, then extract "<metric>" : { up-to-first-} .
+  tr -d '\n' < "$_f" 2>/dev/null \
+    | grep -oE "\"${_m}\"[[:space:]]*:[[:space:]]*\{[^}]*\}" \
+    | head -1
+}
+
+# _jfield <block-string> <key> — pull a numeric key from an isolated metric block
+# (the output of _jblock). Prints the number or empty. Pure.
+_jfield() {
+  _blk="$1"; _k="$(_esc_key "$2")"
+  printf '%s' "$_blk" \
+    | grep -oE "\"${_k}\"[[:space:]]*:[[:space:]]*-?[0-9]+(\.[0-9]+)?" \
     | head -1 | sed -E 's/.*:[[:space:]]*//'
+}
+
+# _jnum <json-file> <metric> <key> — BLOCK-SCOPED numeric extraction: isolate <metric>'s
+# object, then pull <key> from it. This is the anchored replacement for the old
+# whole-file first-match grep (the #376 confounder bug). Prints the number or empty. Pure.
+_jnum() {
+  _jfield "$(_jblock "$1" "$2")" "$3"
 }
 
 # _round2 <num> — round to 2 decimals (portable). Empty/garbage -> "0.00".
@@ -108,18 +133,19 @@ _pct2() {
 parse_k6_summary() {
   _f="$1"; _app="${2:-app}"; _phase="${3:-run}"
   [ -f "$_f" ] || { echo "$_app | $_phase | 0 | 0.00 | 0.00 | 0.00 | 0.00% | 0"; return; }
-  _rps="$(_jnum "$_f" 'rate')"
-  # p50: k6 exports both "med" and "p(50)"; prefer p(50), fall back to med.
-  _p50="$(_jnum "$_f" 'p(50)')"; [ -n "$_p50" ] || _p50="$(_jnum "$_f" 'med')"
-  _p95="$(_jnum "$_f" 'p(95)')"
-  _p99="$(_jnum "$_f" 'p(99)')"
-  _err="$(_jnum "$_f" 'value')"       # http_req_failed.value (fraction)
-  _vus="$(_jnum "$_f" 'vus_max')"; [ -n "$_vus" ] || _vus="$(_jnum "$_f" 'value')"
-  # vus_max lands under a "value" too; prefer an explicit vus_max block if present.
-  _vblock="$(grep -oE '"vus_max"[[:space:]]*:[[:space:]]*\{[^}]*\}' "$_f" 2>/dev/null | head -1)"
-  if [ -n "$_vblock" ]; then
-    _vus="$(printf '%s' "$_vblock" | grep -oE '"value"[[:space:]]*:[[:space:]]*[0-9]+' | sed -E 's/.*:[[:space:]]*//')"
-  fi
+  # RPS: throughput is http_reqs.rate — NOT app_ok.rate / checks.rate / data_*.rate.
+  _rps="$(_jnum "$_f" 'http_reqs' 'rate')"
+  # Latency: the app request latency is http_req_duration.* — NOT app_latency_ms.* nor
+  # iteration_duration.*. p50: k6 exports both "med" and "p(50)"; prefer p(50).
+  _durblk="$(_jblock "$_f" 'http_req_duration')"
+  _p50="$(_jfield "$_durblk" 'p(50)')"; [ -n "$_p50" ] || _p50="$(_jfield "$_durblk" 'med')"
+  _p95="$(_jfield "$_durblk" 'p(95)')"
+  _p99="$(_jfield "$_durblk" 'p(99)')"
+  # Error rate: the request-failure fraction is http_req_failed.value — NOT
+  # app_errors.value / checks.value / vus.value.
+  _err="$(_jnum "$_f" 'http_req_failed' 'value')"
+  # Peak VUs: vus_max.value — NOT the instantaneous vus.value.
+  _vus="$(_jnum "$_f" 'vus_max' 'value')"
   printf '%s | %s | %s | %s | %s | %s | %s | %s\n' \
     "$_app" "$_phase" "$(_round2 "${_rps:-0}")" "$(_round2 "${_p50:-0}")" \
     "$(_round2 "${_p95:-0}")" "$(_round2 "${_p99:-0}")" "$(_pct2 "${_err:-0}")" "${_vus:-0}"
@@ -132,10 +158,46 @@ conc_lat_row() {
   printf '%s,%s,%s,%s,%s,%s\n' "${1:-0}" "${2:-0}" "${3:-0}" "${4:-0}" "${5:-0}" "${6:-0}"
 }
 
+# _unsafe_knob <value> — PURE. True (rc 0) iff <value> contains a character that would
+# break out of the single-quoted `/bin/sh -c` arg the knobs are interpolated into inside
+# the k6 Job (88-loadsoak-k6.yaml), i.e. a shell-injection vector (#376 review). We reject
+# rather than escape: the knobs are URLs / durations / integers whose LEGITIMATE alphabet
+# (letters, digits, ':/?.=&%_-+, whitespace) contains none of these. Rejecting a quote,
+# backtick, $, ;, |, backslash, or a control char is both safe and clear. A `&` in a URL
+# query is uncommon for these targets and also a shell metachar, so we reject it too and
+# document that a target needing `&` should be reached via a path/route without it. Pure.
+_unsafe_knob() {
+  case "$1" in
+    *"'"*|*'"'*|*'`'*|*'$'*|*';'*|*'|'*|*'&'*|*'\'*|*'<'*|*'>'*|*'('*|*')'*) return 0 ;;
+  esac
+  # any control char (incl. newline) -> unsafe. printf|tr strips printable set; leftover=unsafe.
+  [ -n "$(printf '%s' "$1" | tr -d '[:print:]')" ] && return 0
+  return 1
+}
+
+# validate_knobs — PURE (no cluster). Reject any knob carrying a shell-injection vector
+# BEFORE it is interpolated into the k6 Job's `/bin/sh -c` arg. Echoes the offending knob
+# to stderr and returns 1 so render_manifest / the live run fail closed. Pure.
+validate_knobs() {
+  _vk_bad=0
+  for _vk in TARGET_URL RAMP_CEIL_VU RAMP_UP SOAK_VU SOAK_DUR RAMP_DOWN \
+             P95_MS P99_MS MAX_ERR_RATE K6_IMAGE APP_NAME; do
+    eval "_vk_val=\${$_vk:-}"
+    # shellcheck disable=SC2154  # _vk_val IS assigned by the eval above (indirect read).
+    if _unsafe_knob "$_vk_val"; then
+      echo "unsafe value for $_vk: [$_vk_val] contains a shell metacharacter (quote/\$/\`/;/|/&/\\/<>()/control); refuse to interpolate it into the k6 Job (#376)" >&2
+      _vk_bad=1
+    fi
+  done
+  return "$_vk_bad"
+}
+
 # render_manifest — envsubst the k6 manifest so the drill's knobs land in the Job/CM.
 # Uses only the vars the manifest references; a bare envsubst would also eat any other
-# ${...} in the file, but this manifest has none outside our set.
+# ${...} in the file, but this manifest has none outside our set. GUARDED: validate_knobs
+# rejects a shell-injection vector before any knob is interpolated (#376 review).
 render_manifest() {
+  validate_knobs || return 1
   export TARGET_URL RAMP_CEIL_VU RAMP_UP SOAK_VU SOAK_DUR RAMP_DOWN \
          P95_MS P99_MS MAX_ERR_RATE K6_IMAGE
   if command -v envsubst >/dev/null 2>&1; then
@@ -180,9 +242,10 @@ teardown() {
 
 # --- gateway pggw_* snapshot: which wall did the gateway hit? ---------------------
 # Reads the apps-gateway /metrics (Prometheus text) via a pod exec so we do not need a
-# route to :9090. Best-effort: prints the connection cap-relevant counters.
+# route to :9090. Best-effort: prints the connection cap-relevant counters. The pod is
+# selected by the GW_DEPLOY knob (default pggw-apps, the apps-gateway's `app=` label).
 gw_snapshot() { # $1 label
-  _pod="$($K get pods -l app=pggw-apps --no-headers 2>/dev/null | awk '$3=="Running"{print $1; exit}')"
+  _pod="$($K get pods -l "app=$GW_DEPLOY" --no-headers 2>/dev/null | awk '$3=="Running"{print $1; exit}')"
   echo "-- gateway pggw_* [$1] --"
   if [ -z "$_pod" ]; then echo "  (no running $GW_DEPLOY pod)"; return; fi
   $K exec "$_pod" -- sh -c 'wget -qO- http://127.0.0.1:9090/metrics 2>/dev/null || curl -s http://127.0.0.1:9090/metrics 2>/dev/null' 2>/dev/null \
@@ -260,20 +323,28 @@ if [ "${SELFTEST:-0}" = "1" ]; then
   grep -q 'summary-export' "$MANIFEST" || { echo "FAIL - no summary-export"; fails=$((fails+1)); }
   echo "ok   - k6 script has ramp+soak stages, p95/p99 thresholds, summary export"
 
-  # 3. parser round-trips a sample summary into the expected row fields.
+  # 3. parser round-trips a REALISTIC summary (with alphabetical-confounder metrics —
+  #    app_ok.rate, app_latency_ms.*, app_errors.value, checks.value, vus.value) into
+  #    the expected row fields, reading the CORRECT metric block for each (#376 review).
   _s="$(mktemp)"
   cat > "$_s" <<'JSON'
 { "metrics": {
-  "http_reqs": { "count": 90000, "rate": 300.0 },
-  "http_req_failed": { "value": 0.0021 },
+  "app_errors":     { "value": 0.99 },
+  "app_latency_ms": { "med": 888.8, "p(50)": 888.8, "p(95)": 999.9, "p(99)": 999.9 },
+  "app_ok":         { "rate": 777.7 },
+  "checks":         { "value": 0.995, "rate": 555.5 },
   "http_req_duration": { "med": 33.5, "p(50)": 33.5, "p(95)": 96.4, "p(99)": 210.7 },
-  "vus_max": { "value": 120 }
+  "http_req_failed": { "value": 0.0021 },
+  "http_reqs":      { "count": 90000, "rate": 300.0 },
+  "vus":            { "value": 118 },
+  "vus_max":        { "value": 120 }
 } }
 JSON
   _row="$(parse_k6_summary "$_s" test soak)"; rm -f "$_s"
+  # exact expected row: confounders (777.70/888.80/99.00%/118) must NOT appear.
   case "$_row" in
-    *"300.00"*"33.50"*"96.40"*"210.70"*"0.21%"*"120"*) echo "ok   - parse_k6_summary row: $_row" ;;
-    *) echo "FAIL - parse_k6_summary bad row: $_row"; fails=$((fails+1)) ;;
+    "test | soak | 300.00 | 33.50 | 96.40 | 210.70 | 0.21% | 120") echo "ok   - parse_k6_summary row (block-scoped): $_row" ;;
+    *) echo "FAIL - parse_k6_summary bad/confounded row: $_row"; fails=$((fails+1)) ;;
   esac
 
   if [ "$fails" -eq 0 ]; then echo "selftest PASSED"; exit 0; else echo "selftest FAILED ($fails)"; exit 1; fi
