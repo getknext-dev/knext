@@ -333,7 +333,7 @@ spec:
   image: registry.example.com/catalog-zone@sha256:<digest>
   scaling:
     maxScale: 10                # operator default; wide read fan-out is safe behind the ro pooler
-    containerConcurrency: 100
+    containerConcurrency: 100   # explicit override of the ADR-0028 default (20) — few, busy read pods behind the pooler
   secrets:
     envMap:
       DATABASE_URL: { secretName: catalog-zone-db-app, secretKey: pooler-ro-url }

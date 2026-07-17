@@ -31,22 +31,29 @@ All fields below are defined on the `NextApp` CRD in
 |-------|----------|---------|--------------------------------------------------|
 | `MinScale` | `minScale` | `autoscaling.knative.dev/min-scale` annotation | `0` |
 | `MaxScale` | `maxScale` | `autoscaling.knative.dev/max-scale` annotation | `10` |
-| `ContainerConcurrency` | `containerConcurrency` | Knative `spec.template.spec.containerConcurrency` | `100` |
+| `ContainerConcurrency` | `containerConcurrency` | Knative `spec.template.spec.containerConcurrency` | `20` (was `100` — lowered in #377 / ADR-0028) |
+| `PoolMax` | `poolMax` | *validation only* — the per-pod DB pool max used to enforce `maxScale × poolMax ≤ max_connections` (ADR-0028) | *unset (check skipped)* |
 
 The defaults are asserted by the reconciler test
 `reconcile_output_test.go` →
-`"defaults containerConcurrency to 100 and timeout to 300 when scaling/timeout are unset"`:
+`"defaults containerConcurrency to 20 (#377, ADR-0028) and timeout to 300 when scaling/timeout are unset"`:
 
-- `min-scale` = `"0"`, `max-scale` = `"10"`
-  (`reconcile_output_test.go:150-151`),
-- `containerConcurrency` = `int64(100)`
-  (`reconcile_output_test.go:144-145`).
+- `min-scale` = `"0"`, `max-scale` = `"10"`,
+- `containerConcurrency` = `int64(20)`.
 
-In the controller, the annotation defaults are set at
-`nextapp_controller.go:309-311` and overridden from `spec.scaling` at
-`nextapp_controller.go:312-315`; `containerConcurrency` defaults to `int64(100)`
-at `nextapp_controller.go:436` and is overridden only when
-`spec.scaling.containerConcurrency > 0` (`nextapp_controller.go:437-438`).
+In the controller, the annotation defaults are set in `buildDesiredKsvc` and
+overridden from `spec.scaling`; `containerConcurrency` defaults to
+`defaultContainerConcurrency` (`= 20`) and is overridden only when
+`spec.scaling.containerConcurrency > 0`.
+
+> **Why 20, not 100 (ADR-0028).** At `containerConcurrency: 100` a single pod
+> absorbed **100** concurrent requests before Knative added a second replica, so
+> the reactive `max-scale: N` fan-out was effectively **inert** under bursty
+> high-traffic load. `20` is a documented, defensible interim; **W1 (#376)**
+> refines the exact value from the measured concurrency→latency curve. The knob
+> stays fully overridable via `spec.scaling.containerConcurrency`. A **lower**
+> `containerConcurrency` scales to **more** pods sooner, which raises DB
+> connection pressure — see the connection-wall guard below.
 
 ### `spec.cache` (`CacheSpec`, the cold-start-relevant fields)
 
@@ -156,6 +163,38 @@ A **transaction-mode connection pooler caps `peak_backend_conns`** regardless of
 robust fix when you cannot keep `maxScale` low. Use both: a sane `maxScale` and a
 pooler.
 
+### The connection-wall guard (`spec.scaling.poolMax`, ADR-0028)
+
+Because #377 lowered the default `containerConcurrency` (an app now scales to
+**more** pods, **sooner**), the connection-storm risk above is easier to hit.
+The operator can **enforce** the wall for you: declare your per-pod pool max in
+`spec.scaling.poolMax` and the operator (via `internal/validation`, the same
+code the admission webhook runs) **rejects** any spec where
+
+```
+maxScale × poolMax > max_connections   (max_connections = 100, ADR-0028)
+```
+
+- **`poolMax` unset (`0`)** → the check is **skipped** (the operator cannot guard
+  a wall it does not know about). The wall still exists — it is documented here
+  and in ADR-0028; you are responsible for keeping `maxScale × app_pool_max`
+  under `max_connections` yourself (or fronting Postgres with a pooler).
+- **`poolMax` set with an unbounded `maxScale: 0`** → **rejected**: an unbounded
+  fan-out can never fit a finite ceiling. Set a finite `maxScale`.
+- **`poolMax` set with a finite `maxScale`** → accepted iff the product ≤ 100.
+
+Example that is **rejected** at admission (and by the fail-closed reconciler):
+
+```yaml
+spec:
+  scaling:
+    maxScale: 10
+    poolMax: 20   # 10 × 20 = 200 > 100 → rejected (ADR-0028 connection wall)
+```
+
+Breaking the wall itself — e.g. a shared server-side pooler so instance count no
+longer maps 1:1 to backend connections — is owned by **W3 (#378)**.
+
 ## Worked example
 
 Two zones in the same product: a write-heavy `ledger` zone and a read-heavy
@@ -197,7 +236,7 @@ spec:
   scaling:
     minScale: 0              # scale to zero when idle — save cost
     maxScale: 10             # operator default; wide fan-out is fine for read traffic
-    containerConcurrency: 100 # operator default
+    # containerConcurrency omitted => operator default 20 (ADR-0028)
   cache:
     provider: redis
     enableBytecodeCache: true  # keep the cold start short when traffic returns
@@ -208,6 +247,44 @@ spec:
 - If this zone reads Postgres, still front it with a pooler so a `maxScale: 10`
   fan-out cannot storm the database.
 
+## High-traffic profile (#377, ADR-0028)
+
+For an app that takes sustained, bursty traffic and must scale out **reactively**
+(not sit inert behind a high `containerConcurrency`), start from this profile and
+tune from there. It keeps the cost-friendly `minScale: 0` floor by default and
+relies on the lowered default `containerConcurrency` to trigger scale-out early:
+
+```yaml
+apiVersion: apps.kn-next.dev/v1alpha1
+kind: NextApp
+metadata:
+  name: storefront
+spec:
+  image: registry.example.com/storefront@sha256:abc123...   # digest-pinned
+  scaling:
+    minScale: 0              # cost floor — scale to zero when idle (set 1 to pin a warm pod)
+    maxScale: 10             # reactive fan-out ceiling
+    containerConcurrency: 20 # = operator default; low => a 2nd pod is added early under burst
+    poolMax: 5               # per-pod DB pool max => 10 × 5 = 50 ≤ 100 (wall holds)
+  cache:
+    provider: redis
+    enableBytecodeCache: true  # keep each scale-up cheap
+```
+
+Tuning guidance for the three knobs:
+
+| Goal | Move |
+|------|------|
+| Trigger scale-out sooner / cut tail latency under burst | **Lower** `containerConcurrency` (adds pods earlier). W1 (#376) publishes the curve. |
+| Cut cost / accept a cold start on the first request | `minScale: 0` (default). |
+| Never cold-start on the critical path | `minScale: 1` (one warm pod, 24/7 cost). |
+| Cap the reactive fan-out | `maxScale` — and set `poolMax` so the operator **enforces** `maxScale × poolMax ≤ 100`. |
+| Break the connection wall (scale wider than 100/poolMax) | Front Postgres with a transaction-mode pooler — owned by **W3 (#378)**. |
+
+**Invariant to respect:** with a declared `poolMax`, keep
+`maxScale × poolMax ≤ 100`. The operator rejects specs that violate it (ADR-0028);
+if you leave `poolMax` unset the check is skipped but the wall still applies.
+
 ## Summary
 
 | Concern | Knob / mitigation |
@@ -216,7 +293,8 @@ spec:
 | Cost on idle read zones | `spec.scaling.minScale: 0` (scale to zero) |
 | JS recompile on cold start | `spec.cache.enableBytecodeCache: true` (+ a `provider`) |
 | DB pool re-establish | warm zone (`minScale: 1`) and/or transaction-mode pooler |
-| Connection storm | low `maxScale` + high `containerConcurrency`; pooler caps `maxScale × app_pool_max` |
+| Connection storm | low `maxScale` + declare `poolMax` (operator enforces `maxScale × poolMax ≤ 100`, ADR-0028); a pooler caps it further |
+| Reactive scale-out under burst | lower `containerConcurrency` (default now `20`, ADR-0028; W1/#376 refines) |
 
 knext exposes the scaling/cache knobs and this guidance; the database and its
 connection pooler are operated outside knext.

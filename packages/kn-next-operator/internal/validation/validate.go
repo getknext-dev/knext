@@ -30,6 +30,15 @@ import (
 	appsv1alpha1 "github.com/AhmedElBanna80/knext/packages/kn-next-operator/api/v1alpha1"
 )
 
+// MaxConnections is the shared Postgres primary connection ceiling the app
+// autoscaling must live within (ADR-0028). It mirrors scale-zero-pg's
+// `max_connections=100` (the wake gateway caps at GW_MAX_CONNS=90). The
+// operator enforces `maxScale × poolMax ≤ MaxConnections` when a per-pod
+// poolMax is declared, so a low ContainerConcurrency (which scales apps to
+// more pods sooner) cannot silently exhaust the DB. W3 (#378) owns breaking
+// this wall (e.g. a shared server-side pooler).
+const MaxConnections = 100
+
 // Recognized enum values for the provider/queue free-form string fields.
 // These mirror the providers the CLI + reconciler actually wire up. They are
 // intentionally permissive supersets — unknown values are rejected so that a
@@ -103,6 +112,8 @@ func ValidateImageRef(image string) error {
 //   - Image is required and digest-pinned (delegates to ValidateImageRef).
 //   - Scaling is non-negative and MinScale <= MaxScale (when MaxScale is set).
 //   - ContainerConcurrency is non-negative.
+//   - When a per-pod poolMax is declared, maxScale × poolMax ≤ max_connections
+//     (the ADR-0028 connection-wall invariant).
 //   - Storage.Provider / Cache.Provider / Revalidation.Queue, when set, are
 //     recognized enum values.
 //
@@ -139,6 +150,36 @@ func ValidateNextAppSpec(spec *appsv1alpha1.NextAppSpec) error {
 				"spec.scaling.minScale (%d) must be <= maxScale (%d)",
 				s.MinScale, s.MaxScale,
 			)
+		}
+		if s.PoolMax < 0 {
+			return fmt.Errorf("spec.scaling.poolMax must be >= 0, got %d", s.PoolMax)
+		}
+		// Connection-wall invariant (#377, ADR-0028). Only enforced when the
+		// per-pod pool.max is DECLARED (>0) — the operator cannot guard a wall
+		// it does not know about; an undeclared poolMax is documented loudly in
+		// ADR-0028 instead. When declared, the reactive fan-out must fit under
+		// the shared max_connections ceiling:
+		//   maxScale × poolMax ≤ MaxConnections.
+		// An unbounded maxScale (0) with a declared poolMax cannot satisfy a
+		// finite ceiling, so it is rejected outright.
+		if s.PoolMax > 0 {
+			if s.MaxScale == 0 {
+				return fmt.Errorf(
+					"spec.scaling.poolMax (%d) is declared with an unbounded maxScale (0): "+
+						"an unbounded pod fan-out cannot fit under max_connections (%d) — "+
+						"set a finite maxScale so maxScale × poolMax ≤ %d (ADR-0028)",
+					s.PoolMax, MaxConnections, MaxConnections,
+				)
+			}
+			if int64(s.MaxScale)*int64(s.PoolMax) > int64(MaxConnections) {
+				return fmt.Errorf(
+					"spec.scaling: maxScale × poolMax (%d × %d = %d) exceeds max_connections (%d): "+
+						"lower maxScale or poolMax so their product ≤ %d (ADR-0028 connection wall; "+
+						"W3/#378 owns breaking it)",
+					s.MaxScale, s.PoolMax, int64(s.MaxScale)*int64(s.PoolMax),
+					MaxConnections, MaxConnections,
+				)
+			}
 		}
 	}
 

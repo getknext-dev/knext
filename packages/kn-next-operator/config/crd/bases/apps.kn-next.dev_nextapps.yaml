@@ -295,6 +295,12 @@ spec:
                   minScale:
                     format: int32
                     type: integer
+                  poolMax:
+                    description: |-
+                      PoolMax is the per-pod DATABASE_URL connection-pool maximum. When >0 the
+                      operator enforces maxScale × poolMax ≤ max_connections (ADR-0028).
+                    format: int32
+                    type: integer
                 type: object
               secrets:
                 description: External Secrets mapping
