@@ -87,7 +87,7 @@ Two settings keep the pooler friendly to a scale-to-zero app that reconnects on 
 - **Pool idle timeout below your pooler's / provider's idle window** — so a parked app never holds
   an idle socket open across scale-to-zero.
 - **Connect timeout comfortably above your database's cold-wake time** — so the first request
-  after scale-up waits for the connection instead of failing, with no app-side retry logic.
+  after scale-up waits for the connection instead of failing.
 
 The [`@knext/db`](/docs/data-sdk) SDK already ships pools tuned to these bounds and drains them
 cleanly on `SIGTERM`, so a terminating replica releases its connections instead of severing them
@@ -100,6 +100,37 @@ and every concurrent first-request awaits that same wake rather than each racing
 20-request burst pays roughly one cold-wake, not twenty stacked wakes. The single-flight is
 fail-open — if the first wake attempt times out it does not latch, so the next request re-triggers
 a fresh wake — and adds nothing to the warm path once the database is up.
+</Callout>
+
+<Callout type="info">
+**A request arriving mid-wake gets bounded latency, not a 5xx.** During the ~2.5s cold wake the
+gateway's socket-accept briefly races the database's readiness, so a connect can see a transient
+error (`ECONNREFUSED`/`ECONNRESET`/"Connection terminated") a moment before the database is truly
+up. The pool absorbs that: a **transient acquire failure during the wake window is retried with
+capped exponential backoff** within a bounded total budget, so the request resolves as slightly
+higher latency — a `200`, not a `5xx`. This is the client-side complement to the scale-zero-pg
+gateway's own bounded wake-retry.
+
+The retry is **deterministic and bounded**: a **permanent** error (bad password / SQLSTATE `28xxx`,
+missing role, missing database) fails **fast** without burning the budget, and if the wake never
+completes within the budget the **last error surfaces** — no infinite retry, no unhandled rejection.
+It composes with the single-flight above: only the wake **leader** retries; concurrent
+first-requests await that one shared wake instead of each retry-storming their own.
+
+Tunables (env, sane defaults — no config needed for the common case):
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `DB_WAKE_RETRY_BUDGET_MS` | `8000` | Total budget across all retries of one cold acquire (comfortably above the ~2.5s wake). |
+| `DB_WAKE_RETRY_BASE_MS` | `100` | First backoff; doubles each attempt. |
+| `DB_WAKE_RETRY_MAX_MS` | `1000` | Cap on any single backoff sleep. |
+
+**Warm-tier fallback for latency-sensitive apps.** The retry keeps a mid-wake request correct, but
+it still pays the cold-wake latency. If an app cannot tolerate that occasional first-request delay,
+keep a **warm replica** so the database never fully sleeps — bind a warm read endpoint via
+`DATABASE_URL_RO` (see [Read your data with a typed client](#read-your-data-with-a-typed-client))
+or raise the app/database idle window so a low-traffic app stays warm between requests. That trades
+some scale-to-zero savings for a consistently warm path.
 </Callout>
 
 ## Read your data with a typed client

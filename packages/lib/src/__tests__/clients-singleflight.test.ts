@@ -88,6 +88,11 @@ describe('@knext/lib/clients — single-flight DB wake (#339)', () => {
     newGate();
     process.env.DATABASE_URL = 'postgres://u:p@localhost:5432/db';
     delete process.env.DATABASE_URL_RO;
+    // Keep the #310 client-side wake-retry budget tiny so the REJECTED-wake test
+    // (which rejects persistently) exhausts it fast under real timers rather than
+    // retrying for 8s; the single-flight fail-open contract is orthogonal to it.
+    process.env.DB_WAKE_RETRY_BUDGET_MS = '20';
+    process.env.DB_WAKE_RETRY_BASE_MS = '5';
     const mod = await import('../clients');
     mod.resetDbActivity();
     mod.resetDbWakeSingleflight?.();
@@ -96,6 +101,8 @@ describe('@knext/lib/clients — single-flight DB wake (#339)', () => {
   afterEach(async () => {
     delete process.env.DATABASE_URL;
     delete process.env.DATABASE_URL_RO;
+    delete process.env.DB_WAKE_RETRY_BUDGET_MS;
+    delete process.env.DB_WAKE_RETRY_BASE_MS;
     const mod = await import('../clients');
     mod.resetDbWakeSingleflight?.();
   });

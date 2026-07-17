@@ -297,6 +297,158 @@ const singleflightWake = (pool: Pool): Pool => {
   return pool;
 };
 
+// ── Wake-path retry/backoff (#310) ────────────────────────────────────────────
+// The companion scale-zero-pg gateway wakes a `compute-<app>` in ~2.5s cold
+// (~400ms warm) and has its OWN bounded wake-retry (#190). But a request that
+// arrives DURING that wake can still hit a transient connection error at the
+// client — the gateway's socket accept races the compute's readiness, so pg can
+// see an ECONNREFUSED / ECONNRESET / "Connection terminated" before the DB is
+// truly up. Without a client-side retry, that single transient error propagates
+// out of `getDbPool().connect()/query()` and the request becomes a 5xx instead of
+// bounded latency. This layer is the knext-client-side COMPLEMENT to #190: a
+// transient acquire failure during the wake window is retried with capped
+// exponential backoff within a bounded total budget, so a mid-wake request
+// resolves as a (slightly slower) SUCCESS. A PERSISTENT failure (or one that
+// outlasts the budget) surfaces the LAST error deterministically — bounded
+// latency, never an unhandled rejection or an infinite retry.
+//
+// This does NOT own wake liveness — the gateway still drives the actual 0→1
+// wake; the client merely tolerates the brief connect-race window. It composes
+// INSIDE the #339 single-flight (retry is applied inner to single-flight, so only
+// the wake LEADER retries; followers await the leader's shared in-flight and do
+// NOT each independently retry-storm). Tunables are env-overridable with sane
+// defaults (mirroring DEFAULT_DB_POOL_CONNECT_TIMEOUT_MS / DB_ACTIVITY_BUDGET_MS).
+
+/**
+ * Total budget (ms) across all retry attempts of a single cold acquire. Sized
+ * comfortably above the ~2.5s scale-zero-pg cold wake with margin for a couple of
+ * connect-race retries, yet bounded so a truly-dead DB fails fast-ish rather than
+ * hanging. Env-overridable via DB_WAKE_RETRY_BUDGET_MS.
+ */
+const toFinitePositiveInt = (raw: string | undefined, fallback: number): number => {
+  if (raw === undefined) {
+    return fallback;
+  }
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+};
+
+const DEFAULT_DB_WAKE_RETRY_BUDGET_MS = 8_000;
+/** Base backoff (ms) for the first retry; doubles each attempt up to the max. */
+const DEFAULT_DB_WAKE_RETRY_BASE_MS = 100;
+/** Cap (ms) on a single backoff sleep so late attempts don't stall the request. */
+const DEFAULT_DB_WAKE_RETRY_MAX_MS = 1_000;
+
+/** The resolved total retry budget (env-overridable, clamped positive). */
+export const DB_WAKE_RETRY_BUDGET_MS = toFinitePositiveInt(
+  process.env.DB_WAKE_RETRY_BUDGET_MS,
+  DEFAULT_DB_WAKE_RETRY_BUDGET_MS,
+);
+/** The resolved base backoff (env-overridable, clamped positive). */
+export const DB_WAKE_RETRY_BASE_MS = toFinitePositiveInt(
+  process.env.DB_WAKE_RETRY_BASE_MS,
+  DEFAULT_DB_WAKE_RETRY_BASE_MS,
+);
+/** The resolved per-sleep backoff cap (env-overridable, clamped positive). */
+export const DB_WAKE_RETRY_MAX_MS = toFinitePositiveInt(
+  process.env.DB_WAKE_RETRY_MAX_MS,
+  DEFAULT_DB_WAKE_RETRY_MAX_MS,
+);
+
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Whether a pool-acquire error looks like the transient connect-race that a
+ * mid-wake request hits (worth retrying) vs. a permanent error like an auth
+ * failure or a bad DSN (retrying would just burn the budget). We match on pg /
+ * libpq connection-layer signals; anything else is treated as retryable ONLY if
+ * it is NOT a recognised permanent error, because during a wake the exact error
+ * text varies by driver version and we prefer bounded-latency-success over a
+ * false 5xx. Permanent-error signals short-circuit to fail fast.
+ */
+const isPermanentAcquireError = (err: unknown): boolean => {
+  const code = (err as { code?: unknown })?.code;
+  // Postgres SQLSTATE 28xxx = invalid authorization / auth failure.
+  if (typeof code === 'string' && code.startsWith('28')) return true;
+  const message = String((err as { message?: unknown })?.message ?? err ?? '').toLowerCase();
+  return (
+    message.includes('password authentication failed') ||
+    message.includes('authentication failed') ||
+    (message.includes('role') && message.includes('does not exist')) ||
+    (message.includes('database') && message.includes('does not exist'))
+  );
+};
+
+/**
+ * Wrap a pool's `connect`/`query` so a TRANSIENT acquire failure during the DB
+ * wake window is retried with capped exponential backoff within
+ * {@link DB_WAKE_RETRY_BUDGET_MS}. On budget exhaustion (or a permanent error)
+ * the LAST error is re-thrown deterministically. Applied INNER to the #339
+ * single-flight so only the wake leader retries.
+ *
+ * Fail-open: if patching throws, the original pool is returned unchanged; and a
+ * synchronous (non-promise) acquire result is passed straight through.
+ */
+const retryWake = (pool: Pool): Pool => {
+  const withRetry = <R>(op: () => R): R | Promise<R> => {
+    let first: R;
+    try {
+      first = op();
+    } catch (err) {
+      // Synchronous throw (e.g. a mock) — surface as-is; nothing to await/retry.
+      throw err;
+    }
+    if (first == null || typeof (first as { then?: unknown }).then !== 'function') {
+      // Synchronous / non-promise result — pass straight through.
+      return first;
+    }
+    const deadline = Date.now() + DB_WAKE_RETRY_BUDGET_MS;
+    const attempt = (pending: Promise<R>, retries: number): Promise<R> =>
+      pending.then(
+        (value) => value,
+        (err) => {
+          if (isPermanentAcquireError(err) || Date.now() >= deadline) {
+            throw err;
+          }
+          const backoff = Math.min(DB_WAKE_RETRY_MAX_MS, DB_WAKE_RETRY_BASE_MS * 2 ** retries);
+          // Don't sleep past the deadline.
+          const remaining = deadline - Date.now();
+          const wait = Math.max(0, Math.min(backoff, remaining));
+          return sleep(wait).then(() => {
+            if (Date.now() >= deadline) {
+              // Budget spent during the sleep — one final attempt, no more retries.
+              return op() as Promise<R>;
+            }
+            return attempt(op() as Promise<R>, retries + 1);
+          });
+        },
+      );
+    return attempt(first as unknown as Promise<R>, 0);
+  };
+
+  try {
+    const originalConnect = pool.connect;
+    if (typeof originalConnect === 'function') {
+      pool.connect = function retryingConnect(this: unknown, ...args: unknown[]) {
+        return withRetry(() =>
+          (originalConnect as (...a: unknown[]) => unknown).apply(this ?? pool, args),
+        );
+      } as Pool['connect'];
+    }
+    const originalQuery = pool.query;
+    if (typeof originalQuery === 'function') {
+      pool.query = function retryingQuery(this: unknown, ...args: unknown[]) {
+        return withRetry(() =>
+          (originalQuery as (...a: unknown[]) => unknown).apply(this ?? pool, args),
+        );
+      } as Pool['query'];
+    }
+  } catch {
+    // Fail-open: retry is a resilience layer, never break the pool.
+  }
+  return pool;
+};
+
 /**
  * Run the installed instrumentor over a newly-created pool. Best-effort: a
  * misbehaving instrumentor must never break pool creation (fail-open) — the
@@ -352,14 +504,6 @@ const DEFAULT_DB_POOL_IDLE_TIMEOUT_MS = 10_000;
 // per zone (DB_POOL_CONNECT_TIMEOUT_MS).
 const DEFAULT_DB_POOL_CONNECT_TIMEOUT_MS = 15_000;
 
-const toFinitePositiveInt = (raw: string | undefined, fallback: number): number => {
-  if (raw === undefined) {
-    return fallback;
-  }
-  const parsed = Number.parseInt(raw, 10);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
-};
-
 export const getDbPool = () => {
   if (!pgPool) {
     pgPool = new Pool({
@@ -378,13 +522,19 @@ export const getDbPool = () => {
     // OUTERMOST (runs first on a call). We want, from outermost → innermost:
     //   1. activity tracking (#348/#361): stamp lastDbActivityAt BEFORE anything
     //      else, so even a cold caller that is about to be GATED by single-flight,
-    //      or one whose query later REJECTS, still counts as activity → the
-    //      stuck-`waking` alert keeps probing during an outage.
+    //      one that RETRIES, or one whose query later REJECTS, still counts as
+    //      activity → the stuck-`waking` alert keeps probing during an outage.
     //   2. single-flight the 0→1 wake (#339): collapse N concurrent first-connects
     //      onto ONE wake; warm callers pass straight through.
-    //   3. db-wake tracing instrumentor (no-op unless an app opted in).
-    // So we wrap in reverse: instrument (inner) → single-flight → activity (outer).
+    //   3. wake-path retry/backoff (#310): a transient acquire failure during the
+    //      wake window is retried within a bounded budget → mid-wake requests
+    //      resolve as bounded latency, not a 5xx. Applied INNER to single-flight
+    //      so only the wake LEADER retries; followers await the shared in-flight
+    //      and do NOT each retry-storm.
+    //   4. db-wake tracing instrumentor (no-op unless an app opted in).
+    // So we wrap in reverse: instrument (inner) → retry → single-flight → activity.
     instrumentPool(pgPool, 'writer');
+    retryWake(pgPool);
     singleflightWake(pgPool);
     trackPoolActivity(pgPool);
   }
