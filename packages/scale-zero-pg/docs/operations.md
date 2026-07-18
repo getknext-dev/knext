@@ -52,11 +52,12 @@ Scrape each gateway pod's `:9090/metrics` (Prometheus text) or read `/metrics.js
 | `pggw_system_*{system=...}` | the same, per database key |
 
 **Alerting is deployed and drilled**, not aspirational. Prometheus
-(`deploy/60-prometheus.yaml`, PVC-backed, 15d retention) scrapes three producers
+(`deploy/60-prometheus.yaml`, PVC-backed, 15d retention) scrapes four producers
 — the gateway fleet (`:9090`), **kube-state-metrics** (`deploy/59`, the CronJob /
-Deployment / StatefulSet / Job health producer), and **pswatcher** (`deploy/58`,
-the failover controller `:9091`) — evaluates the rules below, and routes via
-Alertmanager (`61-alertmanager.yaml`) to a receiver.
+Deployment / StatefulSet / Job health producer), **pswatcher** (`deploy/58`,
+the failover controller `:9091`), and the **appdb-operator** (`deploy/83`,
+`:9092` — the `appdb_warm_hold_active` gauge, knext #388) — evaluates the rules
+below, and routes via Alertmanager (`61-alertmanager.yaml`) to a receiver.
 
 ### Alert rules — what each means, and the 3am action
 
@@ -64,7 +65,7 @@ Alertmanager (`61-alertmanager.yaml`) to a receiver.
 |---|---|---|
 | `GatewayWakeFailures` (crit) | `pggw_wake_failures_total` rose in 5m | Cold starts are erroring — check compute events / storage plane reachability. |
 | `GatewayWakeLatencyHigh` (warn) | last wake >5s | Node image-pull or resource pressure — check compute scheduling. |
-| `ComputePhantomKeepalive` (warn) | connections never idle for 30m (state-based) | An app pool holds connections open — see [connecting](connecting.md#connection-pooling-rules) sizing rule. Blocks scale-to-zero. |
+| `ComputePhantomKeepalive` (warn) | connections never idle for 30m (state-based), **minus declared warm holds** | An app pool holds connections open — see [connecting](connecting.md#connection-pooling-rules) sizing rule. Blocks scale-to-zero. **Deliberate warm-hold connections (`AppDatabase.spec.warmSchedule`, knext #388) are subtracted via `appdb_warm_hold_active`** — during a declared warm window they are intended warming, not a phantom. If this fires, the held-beyond-schedule connections are the unexplained remainder. |
 | `BackupJobFailed` (crit) | a Job owned by the **backup** CronJob failed | The daily off-cluster mirror did not complete — check `kubectl -n scale-zero-pg logs job/<backup-job>`; a restore would be stale. |
 | `WalJanitorJobFailed` (crit) | a Job owned by the **wal-janitor** CronJob failed | The WAL trimmer stalled — `/safekeeper` WAL will regrow and slow restores past 60min (#19/#41). Check pageserver reachability at 02:30. |
 | `WalJanitorStale` (crit) | last successful janitor run >26h old | The janitor **silently stopped** producing runs (no Failed Job) — schedule misses / backlog. `/safekeeper` is regrowing; restore RTO is slipping. Check `kubectl -n scale-zero-pg get cronjob wal-janitor` (suspend? schedule?) and the last `wal-janitor-*` Job. (#49) |

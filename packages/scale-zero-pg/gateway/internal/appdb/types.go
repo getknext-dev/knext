@@ -48,6 +48,18 @@ const (
 	// It does NOT gate serving readiness (that is CondReady) — the app is fully usable
 	// while this is still False; this condition is purely about disaster-restore coverage.
 	CondColdRestorable = "ColdRestorable"
+	// CondWarmHold reports the scheduled DB warm lockstep (knext #388, ADR-0030
+	// addendum): while any spec.warmSchedule window is active the operator holds one
+	// authenticated connection through the apps-gateway so the compute never goes
+	// idle (its scale-to-zero sleep only arms with zero connections) — True/WindowActive.
+	// It is False/WindowInactive outside every window, False/InvalidWarmWindow when a
+	// window fails to parse (no admission webhook exists on this CRD, so a typo is
+	// surfaced here + via a Warning event rather than silently skipped), and
+	// False/HoldFailed when the hold could not be (re-)established. It NEVER gates
+	// serving readiness: a hold failure degrades warming to the ordinary cold-wake
+	// path. Emitted only when spec.warmSchedule is non-empty, so schedule-less CRs
+	// reconcile byte-identically to before.
+	CondWarmHold = "WarmHold"
 )
 
 // AppDatabase is the typed view of the CR the reconciler operates on. The
@@ -67,11 +79,26 @@ type AppDatabase struct {
 
 // AppDatabaseSpec mirrors deploy/82-appdb-crd.yaml .spec.
 type AppDatabaseSpec struct {
-	AppName              string `json:"appName"`
-	Tier                 string `json:"tier,omitempty"`
-	Quotas               Quotas `json:"quotas,omitempty"`
-	ROPool               ROPool `json:"roPool,omitempty"`
-	KeepTimelineOnDelete bool   `json:"keepTimelineOnDelete,omitempty"`
+	AppName              string       `json:"appName"`
+	Tier                 string       `json:"tier,omitempty"`
+	Quotas               Quotas       `json:"quotas,omitempty"`
+	ROPool               ROPool       `json:"roPool,omitempty"`
+	KeepTimelineOnDelete bool         `json:"keepTimelineOnDelete,omitempty"`
+	WarmSchedule         []WarmWindow `json:"warmSchedule,omitempty"`
+}
+
+// WarmWindow is one scheduled DB-warm window (knext #388, ADR-0030 addendum).
+// Start/End are standard 5-field cron expressions (minute hour day month weekday)
+// in the window's Timezone (default UTC) — the SAME shape and semantics as the
+// knext NextApp's spec.scaling.warmSchedule (ADR-0030), so the owner declares the
+// same windows on both resources and the app pod floor and this DB warm hold flip
+// together. Deliberately NO `replicas` field: a Neon compute is single-writer
+// (Recreate strategy, one attach per timeline), so a DB warm window is binary —
+// warm means exactly one compute held awake for the window.
+type WarmWindow struct {
+	Start    string `json:"start"`
+	End      string `json:"end"`
+	Timezone string `json:"timezone,omitempty"`
 }
 
 // Quotas is the per-app noisy-neighbour bound (issue #89). cpu/mem are LIMITS;

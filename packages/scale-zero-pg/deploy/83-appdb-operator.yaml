@@ -106,6 +106,14 @@ spec:
           # sha-f3c3c00 (#122): reconciler now stamps controller ownerReferences on every
           # child (native cascade-GC), on top of #117 SCRAM + #127 per-app RO provisioning.
           # Rebuild + re-pin on any operator change (contract 22).
+          # PENDING RE-PIN (knext #388, 2026-07-18): the operator source now includes the
+          # scheduled DB warm lockstep (appdb/warm_schedule.go + warmhold.go +
+          # spec.warmSchedule in 82-appdb-crd.yaml) and a /metrics endpoint on :9092.
+          # This pin still points at the pre-#388 build — rebuild the gateway image,
+          # re-pin here, and apply 82/83/60 together on the next OKE battery; until
+          # then the pre-#388 binary ignores spec.warmSchedule entirely (unknown spec
+          # fields are skipped on decode), so the field is safely inert — no holds,
+          # no errors.
           image: me-abudhabi-1.ocir.io/axfqznklsd2t/ks-pg/gateway:sha-f3c3c00@sha256:f875ec57690dea510acb2ba2494a1ef1213dd300d06ea872bb6cb8d70e6c1b7f
           imagePullPolicy: IfNotPresent
           command: ["/appdb-operator"] # override the image's /gateway entrypoint

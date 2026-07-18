@@ -127,13 +127,34 @@ type ClusterOps interface {
 	Event(cr *AppDatabase, eventType, reason, message string)
 }
 
+// WarmHolds is the scheduled DB-warm actuator (knext #388, ADR-0030 addendum).
+// While any spec.warmSchedule window is active the reconciler asks for a hold:
+// ONE persistent authenticated connection through the apps-gateway, which keeps
+// the app's compute awake — the gateway's idle scale-to-zero only arms when a
+// compute has ZERO connections, so a held connection is the warm tier. This
+// rides the gateway's normal wake path, preserving the single-writer invariant
+// (the gateway is the ONLY scaler of the compute Deployment; the operator holds
+// NO deployments/scale grant — deploy/_validate.sh contract). EnsureHold is
+// idempotent and verifies the hold is still alive; ReleaseHold is a no-op for
+// an unheld app (window-end and delete paths both call it).
+type WarmHolds interface {
+	// EnsureHold holds (or verifies) the app's warm connection. An error means
+	// warming is degraded this pass — the reconciler surfaces it (event +
+	// condition) but NEVER fails provisioning: the cold-wake path still works.
+	EnsureHold(ctx context.Context, app string) error
+	// ReleaseHold drops the app's warm connection (no-op when unheld). The
+	// gateway parks the compute on its ordinary idle window afterwards.
+	ReleaseHold(app string)
+}
+
 // Clock and id/secret generators are injected so tests are deterministic.
 type Deps struct {
 	Pageserver    PageserverOps
 	Safekeeper    SafekeeperOps
 	Cluster       ClusterOps
-	Tenant        string // apps tenant id (APPS_TENANT)
-	Template      string // shared template timeline id (TEMPLATE_TL)
+	Holds         WarmHolds // nil disables the warm lockstep (schedule-less installs)
+	Tenant        string    // apps tenant id (APPS_TENANT)
+	Template      string    // shared template timeline id (TEMPLATE_TL)
 	PGVersion     int
 	RolePrefix    string // app role prefix, e.g. "app_"
 	GatewayHost   string // apps-gateway service DNS for the DSN, e.g. pggw-apps.scale-zero-pg.svc

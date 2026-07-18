@@ -155,8 +155,9 @@ the gap or on the repeated hour. `robfig/cron`'s `ParseStandard` + `Next` over a
 
 `warmSchedule` is **owner-authored scheduling**, not learned prediction. It cuts
 the cold-start tail only for windows the owner declared. It does **not** learn
-traffic, does **not** pre-warm the app's database compute, and does **not** cap
-warm cost per tenant. Those three are explicitly **DEFERRED** (below). The
+traffic and does **not** cap warm cost per tenant — those two remain
+**DEFERRED** (below). (The third original gap — "does not pre-warm the app's
+database compute" — is **closed by the 2026-07-18 addendum below**, #388.) The
 operator-owns-schedule model is also the natural foundation for the learned
 controller (#387): that work replaces the owner-authored windows with a computed
 schedule, writing through the same single min-scale writer.
@@ -170,11 +171,87 @@ schedule, writing through the same single min-scale writer.
 2. **DB-compute lockstep pre-warm (#388)** — warm the app's scale-to-zero
    Postgres compute (existing warm-tier, #25) in lockstep with the scheduled
    window, so the prediction removes the DB half of the cold tax, not just the
-   pod half.
+   pod half. **SHIPPED 2026-07-18 — see the addendum below.**
 3. **Per-tenant warm-budget cap (#389)** — an analog to the ADR-0008 wake budget
    so over-provisioning (a mispredicted or over-broad schedule) cannot erode the
    scale-to-zero cost win. Mispredict failure modes (cold storm on under-warm /
    wasted spend on over-warm) must be measured.
+
+## Addendum 2026-07-18 — DB-compute lockstep pre-warm SHIPPED (#388)
+
+**Status of this addendum:** Accepted. Implements Deferred-item-2. The DATABASE_URL
+contract is unchanged: knext still binds a database only via the Secret and still
+manages no DB machinery — the entire mechanism lives on the scale-zero-pg side
+(`packages/scale-zero-pg`), and the coordination seam is **shared owner
+declaration**, not a new cross-operator writer.
+
+**Decision.** The `AppDatabase` CRD gains `spec.warmSchedule` — the SAME
+`WarmWindow{start,end,timezone}` shape and 5-field-cron/IANA-tz semantics as this
+ADR's `spec.scaling.warmSchedule` (one deliberate divergence: **no `replicas`**
+— a Neon compute is single-writer, `Recreate` strategy, one attach per timeline,
+so a DB warm window is binary: warm means exactly one compute held awake). The
+owner declares the same windows on the NextApp (pod floor) and on the AppDatabase
+(DB hold); both operators evaluate identical semantics against cluster-synchronized
+clocks, so the two halves of the pre-warm flip at the same boundaries. This side
+flips within one appdb-operator resync of a boundary (`APPDB_RESYNC_MS`, default
+15s — the lean loop's tick IS the boundary requeue; no per-CR RequeueAfter like
+the knext side's).
+
+**Mechanism — a held connection, not a replica write.** While any window is
+active the appdb operator holds ONE authenticated idle postgres connection per
+app through the apps-gateway (DSN read verbatim from the operator-minted
+`app-db-<app>` Secret's `DATABASE_URL` key; SCRAM-SHA-256 via lib/pq). The
+gateway counts a compute with an open connection as active, so its idle
+scale-to-zero (`GW_IDLE_MS`) never arms during the window; the first dial rides
+the ordinary wake path (one wake-budget token, the normal 0→1). At window end
+the hold is released and the gateway parks the compute on its usual idle window.
+
+**Why NOT mirror the pod-side approach (and why NOT a CronJob scaling the
+compute).** The pod floor works by the operator folding a value into an
+annotation it solely owns. The DB side has no equivalent annotation to own:
+- An external CronJob (or the appdb operator) writing `compute-<app>`
+  `spec.replicas=1` is **undone by the apps-gateway**, which scales the compute
+  to 0 `GW_IDLE_MS` after the last connection ends regardless of any replica
+  pin — the gateway is the sole writer of per-app replica counts (the appdb
+  operator deliberately holds NO `deployments/scale` grant; its `ApplyCompute`
+  preserves the live count). A replica-pinning writer would fight the gateway
+  every idle window — the same two-writer defect §Context records for ksvc
+  min-scale patches, one layer down.
+- The held connection is the only mechanism that warms **through** the
+  single-writer wake path instead of around it: zero new replica writers, zero
+  gateway changes, and a genuine end-to-end warm (the held session completes
+  real SCRAM auth, so the first in-window query pays neither the compute wake
+  nor a cold-auth surprise). Cost: 1 of `GW_MAX_CONNS` (90) per held app, one
+  liveness ping per resync, and the compute's reserved cpu/mem for the window —
+  the opt-in warm cost the owner declared.
+
+**Failure and lifecycle semantics.** Warming is **best-effort**: a hold failure
+degrades to the ordinary cold-wake path and surfaces loudly (`WarmHoldFailed`
+Warning event + `WarmHold` status condition), it never fails provisioning.
+Malformed windows are loud too (`InvalidWarmWindow` — this CRD has no admission
+webhook). Holds are in-memory in the operator: an operator restart drops them
+(TCP dies with the process), the gateway parks on idle, and the next resync
+re-establishes — crash-only, self-healing. Deprovision releases the hold first.
+Schedule-less CRs reconcile byte-identically to before (no condition emitted).
+
+**Observability.** `WarmHold` status condition per AppDatabase
+(`True/WindowActive`, `False/WindowInactive|HoldFailed|InvalidWarmWindow`);
+`appdb_warm_hold_active{app=...}` gauge on the operator's `:9092/metrics`
+(scraped by the platform Prometheus); the `ComputePhantomKeepalive` alert
+subtracts held connections (a declared hold is intended warming, not a phantom
+pool) with an `or vector(0)` guard so the alert is not silenced when nothing is
+held.
+
+**Known skew (accepted).** The pod floor flips within seconds of a boundary
+(RequeueAfter); the DB hold within one resync (≤15s default). At window start an
+early query in that gap simply pays one ordinary wake and the hold then keeps
+the compute warm; at window end the DB stays warm ≤15s longer. Declare windows
+to open a minute ahead of the expected peak. The acceptance-criteria measurement
+(first in-window query vs pod-only warming) is owner-gated on an OKE run and
+tracked in `docs/BENCHMARKS.md`.
+
+**Still deferred:** #387 (learned controller) and #389 (per-tenant warm-budget
+cap) — unchanged, above.
 
 ## Consequences
 

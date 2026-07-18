@@ -112,6 +112,46 @@ spec:
                     `provision-app.sh reclaim-orphans`. Default false = safe two-sided
                     timeline delete (no orphan branch, no unbounded safekeeper WAL).
                   default: false
+                warmSchedule:
+                  type: array
+                  description: >-
+                    Scheduled DB warm windows (knext #388, ADR-0030 addendum). While
+                    any window is active the appdb operator holds ONE authenticated
+                    connection through the apps-gateway so this app's compute never
+                    goes idle — the first query in the window pays no compute wake
+                    and no cold-auth. Declare the SAME windows as the knext NextApp's
+                    spec.scaling.warmSchedule (same 5-field cron semantics, same
+                    timezone handling) and the app pod floor + this DB hold flip
+                    together (this side within one operator resync, default 15s, of a
+                    boundary). Outside every window the hold is released and the
+                    compute sleeps at zero as usual. No `replicas` field: a Neon
+                    compute is single-writer, so warm means exactly one compute held
+                    awake. There is no admission webhook on this CRD — a malformed
+                    cron/timezone is surfaced by the operator as an
+                    InvalidWarmWindow Warning event + the WarmHold status condition,
+                    never silently skipped. Empty/absent = cold scale-to-zero as
+                    before (byte-identical back-compat).
+                  items:
+                    type: object
+                    required: [start, end]
+                    properties:
+                      start:
+                        type: string
+                        minLength: 1
+                        description: >-
+                          5-field cron (minute hour day month weekday) at which the
+                          DB warm hold engages, e.g. "0 8 * * 1-5" = 08:00 weekdays.
+                      end:
+                        type: string
+                        minLength: 1
+                        description: >-
+                          5-field cron at which the warm hold is released (the
+                          gateway then parks the compute on its ordinary idle window).
+                      timezone:
+                        type: string
+                        description: >-
+                          IANA timezone the crons are evaluated in (e.g.
+                          "America/New_York"). Defaults to UTC.
             status:
               type: object
               properties:

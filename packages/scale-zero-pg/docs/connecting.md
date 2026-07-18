@@ -75,6 +75,30 @@ gate **only** after verifying the cold `compute` deployment is fully drained
 drills this (wake latency, the single-writer refusal, and idle re-park) and is
 part of the test battery.
 
+### A middle option: scheduled warm windows (`spec.warmSchedule`, knext #388)
+
+Between cold-zero (pay nothing, accept the wake) and always-warm (park a pod
+24/7), an AppDatabase can warm **only during declared windows** — for a known
+daily peak or a scheduled campaign:
+
+```yaml
+spec:
+  warmSchedule:
+    - { start: "0 8 * * 1-5", end: "0 20 * * 1-5", timezone: America/New_York }
+```
+
+While a window is active the appdb operator holds **one authenticated
+connection** to your app's compute through the apps-gateway, which is what keeps
+the compute awake for the whole window (the gateway's idle scale-to-zero only
+arms at zero connections — a replica pin alone would be parked 60s after your
+last query). The first in-window query pays no wake and no cold-auth; outside
+every window you are back at cold-zero cost. Declare the **same** 5-field-cron
+windows as the knext app's `spec.scaling.warmSchedule` and the app pods **and**
+the database pre-warm in lockstep (knext ADR-0030 addendum). Boundary skew ≤ one
+operator resync (default 15s) — open the window a minute ahead of the peak. See
+[appdatabase-api.md §3b](appdatabase-api.md) for semantics, costs, and the
+`WarmHold` condition.
+
 ## Scaling reads: `DATABASE_URL_RO` (opt-in read-only pool)
 
 The writer DSN above is a single primary (single-writer is intrinsic to Neon).

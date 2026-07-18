@@ -152,6 +152,27 @@ func (d *Deps) reconcileApply(ctx context.Context, cr *AppDatabase) (bool, error
 		return true, fmt.Errorf("teardown ro compute: %w", err)
 	}
 
+	// 4c. Scheduled DB warm lockstep (knext #388, ADR-0030 addendum). While any
+	//    spec.warmSchedule window is active, hold ONE authenticated connection
+	//    through the apps-gateway so this app's compute stays at 1 for the whole
+	//    window — the gateway's idle scale-to-zero only arms with ZERO connections,
+	//    so the hold is the warm tier (a replica-pinning CronJob would still be
+	//    parked by the gateway 60s after the last query: two writers, the defect
+	//    ADR-0030 §Context records). The owner declares the SAME windows on the
+	//    knext NextApp (pod floor) — both sides evaluate identical cron semantics
+	//    against cluster clocks, so pod floor and DB hold flip together. This side
+	//    flips within one resync tick of a boundary (APPDB_RESYNC_MS, default 15s)
+	//    — no per-CR RequeueAfter machinery exists in this lean loop, and the tick
+	//    IS the boundary requeue. Outside every window the hold is released and
+	//    the gateway parks the compute on its ordinary idle window. Warming is
+	//    BEST-EFFORT: a hold failure degrades to the normal cold-wake path and
+	//    surfaces loudly (Warning event + WarmHold condition), it NEVER fails
+	//    provisioning. Schedule-less CRs skip this entirely (byte-identical
+	//    back-compat); Holds==nil (a schedule-less install) likewise.
+	if len(cr.Spec.WarmSchedule) > 0 && d.Holds != nil {
+		d.reconcileWarmHold(ctx, cr, app)
+	}
+
 	// 5. Ensure the branch exists on the pageserver (durable). Idempotent on tl.
 	exists, err := d.Pageserver.TimelineExists(ctx, d.Tenant, tl)
 	if err != nil {
@@ -272,6 +293,39 @@ func (d *Deps) reconcileApply(ctx context.Context, cr *AppDatabase) (bool, error
 	return requeue || coldRestorableRequeue, nil
 }
 
+// reconcileWarmHold applies the scheduled warm-window decision for one app:
+// ensure the hold while a window is active, release it otherwise, and surface
+// the state on the WarmHold condition (never gating). Called only when the CR
+// declares a warmSchedule and a Holds actuator is wired.
+func (d *Deps) reconcileWarmHold(ctx context.Context, cr *AppDatabase, app string) {
+	active, invalid := warmScheduleActive(cr.Spec.WarmSchedule, d.Now().Time)
+	// No admission webhook guards this CRD, so a window that fails to parse is
+	// LOUD (Warning event per window) — never a silently skipped warm window.
+	for _, w := range invalid {
+		d.Cluster.Event(cr, "Warning", "InvalidWarmWindow",
+			fmt.Sprintf("warmSchedule window {start:%q end:%q timezone:%q} is not valid 5-field cron/IANA-tz — it warms nothing; fix or remove it", w.Start, w.End, w.Timezone))
+	}
+	switch {
+	case !active:
+		d.Holds.ReleaseHold(app) // idempotent; the gateway parks the compute on idle
+		if len(invalid) > 0 && len(invalid) == len(cr.Spec.WarmSchedule) {
+			d.setCondition(cr, CondWarmHold, "False", "InvalidWarmWindow", "every warmSchedule window failed to parse; nothing is held warm")
+		} else {
+			d.setCondition(cr, CondWarmHold, "False", "WindowInactive", "no warmSchedule window is active; compute sleeps at zero and wakes on connect")
+		}
+	default:
+		if err := d.Holds.EnsureHold(ctx, app); err != nil {
+			d.setCondition(cr, CondWarmHold, "False", "HoldFailed",
+				fmt.Sprintf("warm window active but the hold could not be established (degraded to cold-wake this pass; retried next resync): %v", err))
+			d.Cluster.Event(cr, "Warning", "WarmHoldFailed",
+				fmt.Sprintf("could not hold compute-%s warm for the active window (cold wake still works; retrying): %v", app, err))
+			return
+		}
+		d.setCondition(cr, CondWarmHold, "True", "WindowActive",
+			"a warmSchedule window is active; holding one gateway connection so the compute stays warm (no DB cold start during the window)")
+	}
+}
+
 // reconcileDelete runs safe deprovision under the finalizer, then removes it so the
 // CR object can be deleted. Mirrors provision-app.sh destroy (safe-by-default):
 // remove k8s objects, then two-sided timeline delete unless keepTimelineOnDelete.
@@ -282,6 +336,12 @@ func (d *Deps) reconcileDelete(ctx context.Context, cr *AppDatabase) (bool, erro
 	app := cr.Spec.AppName
 	cr.Status.Phase = PhaseDeleting
 	_ = d.Cluster.UpdateStatus(ctx, cr) // best-effort; object may be mid-deletion
+
+	// Drop any scheduled warm hold FIRST (#388): a deprovisioned app must not keep
+	// a connection (and its compute) alive. Idempotent, nil-safe.
+	if d.Holds != nil {
+		d.Holds.ReleaseHold(app)
+	}
 
 	// Remove the per-app read-only compute first (Deployment/Service/HPA), so a
 	// deprovisioned app leaves no orphaned read replicas (#127). Idempotent.

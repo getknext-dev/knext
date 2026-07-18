@@ -151,6 +151,24 @@ func (k *K8sCluster) EnsureSecretROKey(ctx context.Context, app string, enabled 
 	return err
 }
 
+// DatabaseURL returns the app-db-<app> Secret's DATABASE_URL key — the writer
+// DSN the warm-hold manager dials (knext #388). The hold rides the contract key
+// verbatim rather than reconstructing a DSN from parts, so the hold exercises
+// exactly the endpoint an external driver hands to the app. An error (missing
+// Secret, missing key) means the app is not fully provisioned yet; the caller
+// retries on the next pass.
+func (k *K8sCluster) DatabaseURL(ctx context.Context, app string) (string, error) {
+	sec, err := k.cs.CoreV1().Secrets(k.ns).Get(ctx, "app-db-"+app, metav1.GetOptions{})
+	if err != nil {
+		return "", fmt.Errorf("read app-db-%s secret: %w", app, err)
+	}
+	dsn := string(sec.Data["DATABASE_URL"])
+	if dsn == "" {
+		return "", fmt.Errorf("app-db-%s has no DATABASE_URL key yet", app)
+	}
+	return dsn, nil
+}
+
 // ApplyCompute upserts the ConfigMap + Deployment + Service. It PRESERVES the
 // Deployment's live spec.replicas so it never fights the apps-gateway that scales
 // the compute 0<->1 on connect — the operator owns the template/quotas, the gateway
