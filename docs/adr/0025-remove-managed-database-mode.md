@@ -54,6 +54,13 @@ only removes the operator's coupling to it.
 
 ### Finalizer drain (one release)
 
+> **Drain removed (#304, 2026-07-18).** The removal precondition was verified on
+> the only live cluster (OKE): the `NextApp` CRD is not even installed there
+> (`kubectl get nextapps -A` → "the server doesn't have a resource type"), so
+> **zero** live objects carry `apps.kn-next.dev/db-cleanup`. The const, the no-op
+> `cleanupDatabase`, the delete-branch drain, and the drain envtest are deleted.
+> This section is retained for history; it no longer describes live behaviour.
+
 Live `NextApp`s that were ever managed carry the string finalizer
 `apps.kn-next.dev/db-cleanup` in metadata. A finalizer clears only when a
 controller removes it — deleting the handler outright would wedge those CRs in
@@ -65,9 +72,9 @@ controller removes it — deleting the handler outright would wedge those CRs in
   **no-op** — it neither re-provisions nor reaches cross-namespace; it exists only
   so the finalizer can be released and deletion can complete.
 
-The constant `DatabaseCleanupFinalizer` is retained to name the string being
-drained. An envtest pins the drain: a NextApp pre-set with the legacy finalizer,
-deleted under the trimmed reconciler, must reach `NotFound` (never stuck
+A constant naming the drained string was retained for that release, and an
+envtest pinned the drain: a NextApp pre-set with the legacy finalizer, deleted
+under the trimmed reconciler, had to reach `NotFound` (never stuck
 `Terminating`).
 
 ## Options considered
@@ -97,8 +104,8 @@ deleted under the trimmed reconciler, must reach `NotFound` (never stuck
   the operator no longer imports/drives it. Positioning note: keeping a
   scale-to-zero-Postgres platform in the monorepo, even decoupled, is a known
   tension with the engine-agnostic line; re-coupling must not be reintroduced.
-- The finalizer-drain path is **temporary** — it can be removed in a later release
-  once no live cluster carries the legacy finalizer.
+- The finalizer-drain path was **temporary** — removed in #304 (2026-07-18) once
+  the only live cluster was confirmed to carry no `db-cleanup` finalizer.
 
 ## Action items
 
@@ -112,5 +119,7 @@ deleted under the trimmed reconciler, must reach `NotFound` (never stuck
 - [x] Add the finalizer-drain envtest; operator suite green.
 - [ ] **(human)** run the ops precondition check on live clusters before applying
   the new CRD.
-- [ ] **(later release)** remove the finalizer-drain path once no live cluster
-  carries `apps.kn-next.dev/db-cleanup`.
+- [x] **(later release)** remove the finalizer-drain path once no live cluster
+  carries `apps.kn-next.dev/db-cleanup` — done in #304 (2026-07-18); precondition
+  verified on OKE (the only live cluster): no `NextApp` CRD installed ⇒ zero live
+  objects carry the finalizer.

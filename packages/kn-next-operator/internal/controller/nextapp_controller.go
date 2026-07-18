@@ -594,9 +594,6 @@ func (r *NextAppReconciler) reconcileFinalizers(ctx context.Context, nextApp *ap
 		// "object has been modified" conflict spam (#98).
 		patch := client.MergeFrom(nextApp.DeepCopy())
 		changed := controllerutil.AddFinalizer(nextApp, ExternalCleanupFinalizer)
-		// NOTE: the db-cleanup finalizer is NO LONGER added — managed provisioning
-		// was removed (ADR-0025). The delete branch below still DRAINS it off any
-		// legacy CR that carries it, for one release.
 		if changed {
 			if err := r.Patch(ctx, nextApp, patch); err != nil {
 				return false, err
@@ -608,20 +605,6 @@ func (r *NextAppReconciler) reconcileFinalizers(ctx context.Context, nextApp *ap
 	// finalizer, then remove it so deletion can complete. Neither cleanup
 	// returns a hard error for an unreachable dependency (they log + Warning),
 	// so we never wedge the CR in Terminating (ADR-0006 §5).
-	// DRAIN the legacy db-cleanup finalizer (ADR-0025): managed provisioning is
-	// gone, but a NextApp ever provisioned under the old operator still carries it.
-	// cleanupDatabase is now a no-op (no re-provision, no cross-ns reach); we only
-	// strip the finalizer so the CR does not wedge in Terminating forever.
-	if controllerutil.ContainsFinalizer(nextApp, DatabaseCleanupFinalizer) {
-		if err := r.cleanupDatabase(ctx, nextApp); err != nil {
-			return true, err
-		}
-		patch := client.MergeFrom(nextApp.DeepCopy())
-		controllerutil.RemoveFinalizer(nextApp, DatabaseCleanupFinalizer)
-		if err := r.Patch(ctx, nextApp, patch); err != nil {
-			return true, err
-		}
-	}
 	if controllerutil.ContainsFinalizer(nextApp, ExternalCleanupFinalizer) {
 		if err := r.cleanupExternalState(ctx, nextApp); err != nil {
 			return true, err

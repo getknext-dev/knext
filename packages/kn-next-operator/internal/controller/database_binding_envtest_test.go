@@ -26,7 +26,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
-	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	appsv1alpha1 "github.com/AhmedElBanna80/knext/packages/kn-next-operator/api/v1alpha1"
@@ -107,10 +106,10 @@ var _ = Describe("Database binding — NextApp.spec.database.secretRef (ADR-0019
 		Expect(envHasSecretRef(env, "DATABASE_URL", "shop-db", "DATABASE_URL")).To(BeTrue(),
 			"secretRef.key must default to DATABASE_URL")
 
-		// BYO provisions NOTHING: no db-cleanup finalizer.
+		// BYO provisions NOTHING: the only finalizer is the external-cleanup one.
 		fetched := &appsv1alpha1.NextApp{}
 		Expect(k8sClient.Get(ctx, nn, fetched)).To(Succeed())
-		Expect(controllerutil.ContainsFinalizer(fetched, DatabaseCleanupFinalizer)).To(BeFalse())
+		Expect(fetched.Finalizers).To(ConsistOf(ExternalCleanupFinalizer))
 
 		// Status surface: bound Secret recorded + DatabaseReady=True/Bound.
 		Expect(fetched.Status.DatabaseSecretName).To(Equal("shop-db"))
