@@ -258,3 +258,74 @@ describe("#350 Part 1: uses the same context source as #346", () => {
         expect(headers[CORRELATION_HEADER]).toBe("inbound-prop-id");
     });
 });
+
+describe("#368: echo re-validates the correlation id before stamping", () => {
+    beforeEach(() => {
+        installBaseCaptures();
+        bootTracing();
+    });
+
+    it("does NOT stamp an id with header-smuggling chars seeded via the withCorrelationId seam", () => {
+        installCorrelationResponseEcho();
+        const { res, headers } = makeRes();
+        // Simulate a future refactor seeding CORRELATION_CTX_KEY from an
+        // UNVALIDATED source: `withCorrelationId` writes the key verbatim.
+        const smuggled = "evil\r\nx-injected: 1";
+        runInRequest(smuggled, () => {
+            res.writeHead(200);
+        });
+        expect(headers[CORRELATION_HEADER]).toBeUndefined();
+    });
+
+    it("does NOT stamp an over-long id (> MAX_ID_LENGTH) from an unvalidated context write", () => {
+        installCorrelationResponseEcho();
+        const { res, headers } = makeRes();
+        const tooLong = "a".repeat(129);
+        runInRequest(tooLong, () => {
+            res.writeHead(200);
+        });
+        expect(headers[CORRELATION_HEADER]).toBeUndefined();
+    });
+
+    it("does NOT stamp an invalid id returned by an unvalidated provider (dep seam)", () => {
+        installCorrelationResponseEcho({
+            activeCorrelationId: () => "bad value with spaces\r\n",
+        });
+        const { res, headers } = makeRes();
+        res.writeHead(200);
+        expect(headers[CORRELATION_HEADER]).toBeUndefined();
+    });
+
+    it("still stamps a well-formed id after re-validation (validated path unchanged)", () => {
+        installCorrelationResponseEcho();
+        const { res, headers } = makeRes();
+        runInRequest("valid-id_1.2-3", () => {
+            res.writeHead(200);
+        });
+        expect(headers[CORRELATION_HEADER]).toBe("valid-id_1.2-3");
+    });
+
+    it("still echoes the propagator-validated id (primary path stays zero-touch)", () => {
+        installCorrelationResponseEcho();
+        const propagator = new CorrelationContextPropagator();
+        const getter = {
+            keys: (c: Record<string, string>) => Object.keys(c),
+            get: (c: Record<string, string>, k: string) => c[k],
+        };
+        // A hostile inbound header is replaced by a minted uuid at extract time;
+        // the echo must stamp THAT (validated) value, not the hostile raw one.
+        const extracted = propagator.extract(
+            context.active(),
+            { [CORRELATION_HEADER]: "hostile\r\nx-evil: 1" },
+            getter,
+        );
+        const { res, headers } = makeRes();
+        context.with(extracted, () => {
+            res.writeHead(200);
+        });
+        const stamped = headers[CORRELATION_HEADER];
+        expect(typeof stamped).toBe("string");
+        expect(stamped).toMatch(/^[A-Za-z0-9._-]{1,128}$/);
+        expect(stamped).not.toContain("hostile");
+    });
+});
