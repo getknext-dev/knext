@@ -67,37 +67,32 @@ describe('instrumentation.ts edge-bundle safety (#342)', () => {
 });
 
 /**
- * #344 (hardening the #342 guard): the edge-clean `instrumentation.ts` is only
- * HALF the fence. Because `instrumentation.ts` calls
- * `await import('./instrumentation-node')` with a STATIC literal specifier,
- * webpack STATICALLY traces that module into BOTH the nodejs AND the edge
- * bundle — the runtime `NEXT_RUNTIME === 'nodejs'` guard only stops it EXECUTING
- * on the edge, not from being BUNDLED. The load-bearing edge exclusion is the
- * `IgnorePlugin` in `next.config.ts` webpack(): for the edge compile ONLY it
- * replaces `./instrumentation-node` with an empty module so its Node-only
- * subtree (`@knext/lib/clients` → `@cerbos/grpc`/`pg`/`minio`) never enters the
- * edge bundle. Deleting that plugin passes the instrumentation.ts checks above
- * yet re-breaks the production `next build` with `Module not found`.
+ * #356 (ADR-0031) graduated the second half of the #342/#344 fence: the
+ * edge-scoped `IgnorePlugin` that excludes `./instrumentation-node` from the
+ * EDGE bundle is now PLATFORM-OWNED — the knext adapter's `modifyConfig`
+ * injects it (unit-guarded in
+ * `packages/kn-next/src/__tests__/adapter-edge-ignore-plugin.test.ts`). Apps no
+ * longer hand-write that webpack hook; hand-writing it would only duplicate the
+ * platform injection.
  *
- * These assertions close that blind spot: the edge-scoped IgnorePlugin must
- * exist and must target the instrumentation-node module. This test FAILS if a
- * future change removes the plugin (proven in #344 by deleting the block).
+ * These assertions pin the new ownership: the app must wire the package-shipped
+ * adapter via `adapterPath` (that is what carries the injected fence into the
+ * build), and the app's own `next.config.ts` must NOT reintroduce a hand-written
+ * IgnorePlugin. The end-to-end tripwire is unchanged: the PR-gated production
+ * `next build --webpack` still fails if the Node-only subtree ever reaches the
+ * edge bundle.
  */
-describe('next.config.ts edge IgnorePlugin fence (#342/#344)', () => {
-  it('has a webpack() config that branches on the edge runtime', () => {
-    // The edge exclusion must be scoped to the edge compile — the nodejs
-    // compile bundles the real Node-only module (that is where it must run).
-    expect(nextConfigSrc).toMatch(/nextRuntime\s*===\s*['"]edge['"]/);
+describe('edge IgnorePlugin fence — platform-owned via the knext adapter (#342/#344/#356)', () => {
+  it('wires the knext adapter via adapterPath (the fence carrier)', () => {
+    expect(nextConfigSrc).toMatch(/adapterPath\s*:/);
   });
 
-  it('registers an IgnorePlugin (the load-bearing edge exclusion)', () => {
-    expect(nextConfigSrc).toMatch(/new\s+webpack\.IgnorePlugin\s*\(/);
+  it('the app adapter is the package-shipped @knext/core adapter', () => {
+    const appAdapterSrc = readFileSync(join(here, 'next-adapter.ts'), 'utf8');
+    expect(appAdapterSrc).toMatch(/from\s+['"]@knext\/core\/adapter['"]/);
   });
 
-  it('the IgnorePlugin targets the instrumentation-node module', () => {
-    // The `resourceRegExp` must match `instrumentation-node` so webpack replaces
-    // it with an empty module on the edge compile. A plugin that no longer
-    // targets this module is as broken as no plugin at all.
-    expect(nextConfigSrc).toMatch(/resourceRegExp:\s*\/[^/]*instrumentation-node/);
+  it('does NOT hand-write the IgnorePlugin webpack hook (graduated to the adapter modifyConfig)', () => {
+    expect(nextConfigSrc).not.toMatch(/new\s+webpack\.IgnorePlugin\s*\(/);
   });
 });
