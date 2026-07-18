@@ -78,8 +78,12 @@ Set the floor with `LOG_LEVEL` (default `info` in production, `debug` in dev).
     from). It only fills the header when the id is present and the app has **not**
     already set it (an app-set value always wins), is **fail-open** (a throw never
     breaks the response), **idempotent**, and **default-off** (installed only when
-    tracing is enabled). So a client that sends (or is assigned) an `x-request-id`
-    gets it back on the response, joinable to the correlated logs/trace.
+    tracing is enabled). Defense-in-depth (#368): the id is **re-validated**
+    against the correlation-id charset immediately before stamping, so a value
+    that fails the §2 well-formedness rules is **never** echoed — the header is
+    simply left unset rather than stamping raw bytes. So a client that sends (or
+    is assigned) an `x-request-id` gets it back on the response, joinable to the
+    correlated logs/trace.
     `@knext/lib` still ships `applyCorrelationHeader(...)` for routes the app owns
     and explicit `runWithRequestContext` paths (§3).
   - **Downstream / db-wake:** forward `x-request-id` on outbound calls so a

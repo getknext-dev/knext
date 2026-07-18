@@ -162,7 +162,10 @@ response hook and knext-core does not own the app's response chain.
 same mechanism as the cache-control normalizer) so that at the header-flush point
 the response carries `x-request-id` = the **active** correlation id (read from the
 same OTel Context the logger mixin uses), **only if** it is present and the app
-has not already set it. Node-only (touches `node:http`), so wire it exclusively
+has not already set it. The id is **re-validated** against the correlation-id
+charset (`isWellFormedCorrelationId`) immediately before stamping: an id that
+fails the well-formedness rules is never echoed — the header is left unset.
+Node-only (touches `node:http`), so wire it exclusively
 from the Node path of `instrumentation.ts`, and only when tracing is on. It is
 fail-open, idempotent, and default-off.
 
