@@ -21,7 +21,8 @@
  * fn, so the "returns a webpack fn" assertion failed before the implementation.
  */
 import type { NextConfig } from "next";
-import type { NextConfigComplete } from "next/dist/build/adapter/build-complete";
+// NextConfigComplete is not re-exported from the 'next' public barrel; import directly.
+import type { NextConfigComplete } from "next/dist/server/config-shared";
 import { describe, expect, it, vi } from "vitest";
 import adapter from "../adapters/next-adapter";
 
@@ -39,11 +40,17 @@ class FakeIgnorePlugin {
     }
 }
 
-function modify(config: Partial<NextConfig>, phase: ModifyCtx["phase"] = PRODUCTION_BUILD) {
-    return (adapter.modifyConfig as ModifyConfig)(config as NextConfigComplete, {
-        phase,
-        nextVersion: "16.2.10",
-    } as ModifyCtx);
+function modify(
+    config: Partial<NextConfig>,
+    phase: ModifyCtx["phase"] = PRODUCTION_BUILD,
+) {
+    return (adapter.modifyConfig as ModifyConfig)(
+        config as NextConfigComplete,
+        {
+            phase,
+            nextVersion: "16.2.10",
+        } as ModifyCtx,
+    );
 }
 
 /** Invoke the returned config.webpack hook the way `next build --webpack` would. */

@@ -162,6 +162,17 @@ const nextConfig: NextConfig = {
 export default nextConfig;
 ```
 
+> **Instrumentation.** Apps generated inside this repo with `pnpm generate`
+> (`turbo gen zone`) ship the platform's guarded observability instrumentation
+> by default — an edge-clean `src/instrumentation.ts` + Node-only
+> `src/instrumentation-node.ts`, the knext adapter wired via `adapterPath`
+> (whose `modifyConfig` injects the edge `IgnorePlugin` fence), and the two
+> static/build-artifact guards — so tracing, metrics, and db-wake spans work
+> once enabled on the NextApp CR, with no app wiring (#356, ADR-0031).
+> Hand-rolled apps (like this guide's) opt in by following
+> [docs/observability/tracing.md](./observability/tracing.md) — including the
+> edge-safety rules there if you add a `middleware.ts`.
+
 **3. A `Dockerfile`** in the app directory. A minimal one for the layout above
 (remember: `COPY` paths are relative to the **repository root**):
 

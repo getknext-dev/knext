@@ -1,17 +1,26 @@
-import { defineConfig } from "@kn-next/config";
+import type { KnativeNextConfig } from "@knext/core";
 
-export default defineConfig({
-  // NextApp Operator declarative configuration
-  deploy: {
-    scaling: {
-      minScale: 1,
-      maxScale: 10,
-      containerConcurrency: 100,
-    },
-    cache: {
-      provider: "redis",
-      url: "redis://redis.default.svc.cluster.local:6379",
-      enableBytecodeCache: true,
-    },
+// NextApp Operator declarative configuration — see docs/QUICKSTART.md Step 4.
+const config: KnativeNextConfig = {
+  // App name — becomes the NextApp resource and Knative Service name.
+  name: "{{ name }}",
+
+  // Registry to push the image to (the app name is appended).
+  registry: "ghcr.io/<your-user>",
+
+  // Object storage for static assets; publicUrl is where browsers fetch them.
+  storage: {
+    provider: "gcs", // "gcs" | "s3" | "minio"
+    bucket: "<your-assets-bucket>",
+    publicUrl: "https://storage.googleapis.com/<your-assets-bucket>",
   },
-});
+
+  // Knative autoscaling. minScale: 0 (the default) keeps scale-to-zero on.
+  scaling: {
+    minScale: 1,
+    maxScale: 10,
+    containerConcurrency: 100,
+  },
+};
+
+export default config;

@@ -35,7 +35,13 @@ import { describe, expect, it } from "vitest";
 const here = dirname(fileURLToPath(import.meta.url));
 // packages/kn-next/src/__tests__ → repo root
 const REPO_ROOT = resolve(here, "../../../..");
-const ZONE_TEMPLATE = join(REPO_ROOT, "turbo", "generators", "templates", "zone");
+const ZONE_TEMPLATE = join(
+    REPO_ROOT,
+    "turbo",
+    "generators",
+    "templates",
+    "zone",
+);
 const LIB_SRC = join(REPO_ROOT, "packages", "lib", "src");
 
 function readTemplate(rel: string): string | null {
@@ -67,23 +73,31 @@ describe("app template — edge-clean instrumentation.ts (#342/#356)", () => {
     const instrumentation = readTemplate("src/instrumentation.ts.hbs");
 
     it("the template emits src/instrumentation.ts", () => {
-        expect(instrumentation, "src/instrumentation.ts.hbs missing from the zone template").not.toBeNull();
+        expect(
+            instrumentation,
+            "src/instrumentation.ts.hbs missing from the zone template",
+        ).not.toBeNull();
     });
 
     it("guards the Node-only body behind NEXT_RUNTIME === 'nodejs'", () => {
-        expect(instrumentation).toMatch(/process\.env\.NEXT_RUNTIME\s*[!=]==?\s*['"]nodejs['"]/);
+        expect(instrumentation).toMatch(
+            /process\.env\.NEXT_RUNTIME\s*[!=]==?\s*['"]nodejs['"]/,
+        );
     });
 
     it("loads the Node-only body via a dynamic import of ./instrumentation-node", () => {
-        expect(instrumentation).toMatch(/await\s+import\s*\(\s*['"]\.\/instrumentation-node['"]\s*\)/);
+        expect(instrumentation).toMatch(
+            /await\s+import\s*\(\s*['"]\.\/instrumentation-node['"]\s*\)/,
+        );
     });
 
-    it.each(NODE_ONLY_MODULES)(
-        "never top-level static-imports the Node-only module %s",
-        (mod) => {
-            expect(topLevelStaticImportSpecifiers(instrumentation ?? "")).not.toContain(mod);
-        },
-    );
+    it.each(
+        NODE_ONLY_MODULES,
+    )("never top-level static-imports the Node-only module %s", (mod) => {
+        expect(
+            topLevelStaticImportSpecifiers(instrumentation ?? ""),
+        ).not.toContain(mod);
+    });
 });
 
 describe("app template — seam-alive instrumentation-node.ts (#352/ADR-0027/#356)", () => {
@@ -97,7 +111,9 @@ describe("app template — seam-alive instrumentation-node.ts (#352/ADR-0027/#35
     });
 
     it("exports the Node-only registerNode body", () => {
-        expect(instrumentationNode).toMatch(/export\s+function\s+registerNode\s*\(/);
+        expect(instrumentationNode).toMatch(
+            /export\s+function\s+registerNode\s*\(/,
+        );
     });
 
     it.each([
@@ -106,7 +122,9 @@ describe("app template — seam-alive instrumentation-node.ts (#352/ADR-0027/#35
         { mod: "@knext/lib/context", fn: "setCorrelationIdProvider" },
     ])("wires the globalThis-anchored seam $fn from $mod", ({ mod, fn }) => {
         const escaped = mod.replace(/\//g, "\\/");
-        expect(instrumentationNode).toMatch(new RegExp(`from\\s*['"]${escaped}['"]`));
+        expect(instrumentationNode).toMatch(
+            new RegExp(`from\\s*['"]${escaped}['"]`),
+        );
         expect(instrumentationNode).toContain(fn);
     });
 
@@ -130,15 +148,15 @@ describe("app template — seam-alive instrumentation-node.ts (#352/ADR-0027/#35
             libFile: join(LIB_SRC, "context", "index.ts"),
             symbol: "knext.lib.context.state",
         },
-    ])(
-        "the seam it wires stays anchored on globalThis in @knext/lib ($symbol)",
-        ({ libFile, symbol }) => {
-            // The anchor itself is owned (and unit-guarded) by @knext/lib; this
-            // pins that the seams the template wires are the anchored ones.
-            const src = readFileSync(libFile, "utf8");
-            expect(src).toContain(`Symbol.for('${symbol}')`);
-        },
-    );
+    ])("the seam it wires stays anchored on globalThis in @knext/lib ($symbol)", ({
+        libFile,
+        symbol,
+    }) => {
+        // The anchor itself is owned (and unit-guarded) by @knext/lib; this
+        // pins that the seams the template wires are the anchored ones.
+        const src = readFileSync(libFile, "utf8");
+        expect(src).toContain(`Symbol.for('${symbol}')`);
+    });
 });
 
 describe("app template — next.config wires the platform fence, never hand-writes it (#356)", () => {
@@ -153,17 +171,25 @@ describe("app template — next.config wires the platform fence, never hand-writ
     });
 
     it("does NOT hand-write the IgnorePlugin webpack hook (the adapter injects it)", () => {
-        expect(nextConfig).not.toMatch(/IgnorePlugin/);
+        // A hand-written hook would construct the plugin or define a webpack
+        // config key; comments may legitimately NAME the injected fence.
+        expect(nextConfig).not.toMatch(/new\s+webpack\.IgnorePlugin\s*\(/);
+        expect(nextConfig).not.toMatch(/^\s*webpack\s*[:(]/m);
     });
 
     it("never externalizes @knext/lib (ADR-0027: would re-split the seam state)", () => {
-        const externals = nextConfig?.match(/serverExternalPackages:\s*\[([^\]]*)\]/s)?.[1] ?? "";
+        const externals =
+            nextConfig?.match(/serverExternalPackages:\s*\[([^\]]*)\]/s)?.[1] ??
+            "";
         expect(externals).not.toMatch(/@knext\/lib/);
     });
 
     it("ships the thin app adapter re-exporting @knext/core/adapter", () => {
         const appAdapter = readTemplate("next-adapter.ts.hbs");
-        expect(appAdapter, "next-adapter.ts.hbs missing from the zone template").not.toBeNull();
+        expect(
+            appAdapter,
+            "next-adapter.ts.hbs missing from the zone template",
+        ).not.toBeNull();
         expect(appAdapter).toMatch(/from\s*['"]@knext\/core\/adapter['"]/);
     });
 });
@@ -207,12 +233,12 @@ describe("app template — package.json carries the instrumentation contract (#3
         expect(pkg).toMatch(/"build":\s*"next build --webpack"/);
     });
 
-    it.each(["@vercel/otel", "prom-client"])(
-        "declares the runtime dependency the generated instrumentation needs: %s",
-        (dep) => {
-            expect(pkg).toContain(`"${dep}"`);
-        },
-    );
+    it.each([
+        "@vercel/otel",
+        "prom-client",
+    ])("declares the runtime dependency the generated instrumentation needs: %s", (dep) => {
+        expect(pkg).toContain(`"${dep}"`);
+    });
 
     it("declares @knext/core (the adapter + core-owned instrumentation adapters)", () => {
         expect(pkg).toContain('"@knext/core"');

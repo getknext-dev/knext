@@ -170,7 +170,9 @@ every checkout.
 > seam keys co-occur in BOTH the instrumentation (writer) chunk AND an app-server
 > (reader) chunk of the real `next build --webpack` output, and that `@knext/lib`
 > is never added to `serverExternalPackages` (which would re-split the dedup). A
-> re-broken seam fails the gate, not the deploy.
+> re-broken seam fails the gate, not the deploy. Since #356 (ADR-0031) this
+> guard also **ships with every app generated from the knext template**
+> (`turbo gen zone`), parameterized for the generated app name.
 
 Both are wired in `instrumentation.ts` (only when tracing is enabled):
 
@@ -205,6 +207,11 @@ plus `pg` and `minio`. A **top-level static import** of any of that lands in the
 edge bundle and fails the production `next build` with
 `Module not found: Can't resolve 'stream' / 'fs' / 'tls' / 'net' / 'zlib'`.
 
+**Apps generated from the knext template (`pnpm generate` / `turbo gen zone`)
+inherit the full guarded-instrumentation pair by default (#356, ADR-0031)** —
+this section is the reference for what the template emits and why. Hand-rolled
+apps must follow the same pattern.
+
 App instrumentation **must guard the Node-only wiring behind
 `NEXT_RUNTIME === 'nodejs'`** and load it via a dynamic import, so it never
 enters the edge bundle. The canonical pattern (see
@@ -222,17 +229,27 @@ export async function register() {
 The Node-only body (the `registerOTel` / metrics / `setPoolInstrumentor` calls
 shown above) lives in `instrumentation-node.ts`, which is only reached on the
 nodejs runtime. Because webpack still *statically traces* a dynamic import into
-both runtime bundles, the app's `next.config.ts` also excludes
-`instrumentation-node` from the **edge** compile via an `IgnorePlugin` scoped to
-`nextRuntime === 'edge'` — the nodejs bundle is untouched and keeps the real
-wiring. The knext runtime runs the app on Node (the standalone server), so
-nothing is lost.
+both runtime bundles, `instrumentation-node` must also be excluded from the
+**edge** compile via an `IgnorePlugin` scoped to `nextRuntime === 'edge'` — the
+nodejs bundle is untouched and keeps the real wiring. The knext runtime runs the
+app on Node (the standalone server), so nothing is lost.
 
-A fast static-analysis guard
-(`apps/file-manager/instrumentation-edge-safe.test.ts`) fails the gate if EITHER
-half of the fence breaks: (a) `instrumentation.ts` regains a top-level import of
-a Node-only client module, OR (b) the edge-scoped `IgnorePlugin` disappears from
-`next.config.ts` (the load-bearing exclusion — #344). Both classes must fail the
+**Since #356 (ADR-0031) that `IgnorePlugin` is platform-owned:** the knext
+adapter's `modifyConfig` injects it for every app wired through `adapterPath`
+(the template wires it by default), composed after any webpack hook the app
+still owns — app authors no longer hand-write the webpack hook. An app that
+does NOT use the knext adapter (e.g. an external app deployed with `kn-next
+deploy` and no `adapterPath` in its `next.config.ts`) must still hand-write the
+edge-scoped `IgnorePlugin` in its own `next.config.ts` exactly as
+`apps/file-manager` did pre-#356.
+
+A fast static-analysis guard fails the gate if EITHER half of the fence breaks:
+(a) `instrumentation.ts` regains a top-level import of a Node-only client
+module, OR (b) the adapter wiring disappears (or a hand-written `IgnorePlugin`
+reappears in app code). The guard shipped with `apps/file-manager`
+(`instrumentation-edge-safe.test.ts`, #344) and now **ships with every generated
+app** from the template (#356); the adapter injection itself is unit-guarded in
+`@knext/core` (`adapter-edge-ignore-plugin.test.ts`). Both classes must fail the
 gate, not the deploy build.
 
 Belt-and-suspenders: the webpack production build itself is a **PR-triggered CI

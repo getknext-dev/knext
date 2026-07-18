@@ -1,13 +1,29 @@
+import path from "node:path";
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  // Required for OpenNext to bundle correctly
+  // Required: self-contained server.js output for the knext container image.
   output: "standalone",
-  // Next.js Multi-Zone configuration
+  // Next.js Multi-Zone configuration.
   basePath: "/{{ name }}",
-  experimental: {
-    dynamicIO: true,
-  },
+  // kn-next deploy sets ASSET_PREFIX so browsers load static assets from the
+  // storage bucket; unset in `next dev`, so local development serves them locally.
+  assetPrefix: process.env.ASSET_PREFIX || "",
+  // kn-next deploy sets NEXT_DEPLOYMENT_ID (the deploy tag). Pinning the build
+  // ID to it keeps the uploaded asset paths and the deployed build in lock-step,
+  // and deploymentId pins each browser session to the build it loaded (#93).
+  generateBuildId: () => process.env.NEXT_DEPLOYMENT_ID || null,
+  deploymentId: process.env.NEXT_DEPLOYMENT_ID || undefined,
+  // The knext adapter (thin re-export in ./next-adapter.ts). Beyond forcing
+  // standalone output, its modifyConfig injects the edge-scoped webpack
+  // IgnorePlugin that excludes src/instrumentation-node.ts from the EDGE bundle
+  // (#342/#356, ADR-0031) — do NOT hand-write that webpack hook here; the
+  // adapter composes the fence after any webpack fn you add yourself.
+  adapterPath: path.resolve(import.meta.dirname, "next-adapter.ts"),
+  // ADR-0027 / #352: NEVER add @knext/lib to serverExternalPackages — it must
+  // stay bundled (not externalized) so the globalThis-anchored seam state
+  // (`Symbol.for('knext.lib.*')`) survives the standalone bundle's webpack-layer
+  // duplication.
 };
 
 export default nextConfig;
