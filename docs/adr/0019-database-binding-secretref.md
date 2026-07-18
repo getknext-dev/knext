@@ -138,6 +138,14 @@ override for grandfathered ones.
   delete-time `db-cleanup` finalizer can still reclaim it when the NextApp is
   eventually deleted. Switch-time handling is defined by the **addendum
   below** (retain + flag; never auto-delete).
+
+  > **Superseded (managed-mode half).** The orphaned-`AppDatabase` /
+  > `status.databaseAppName` / `db-cleanup`-finalizer machinery this bullet
+  > describes no longer exists: managed provisioning was removed by
+  > [ADR-0025](0025-remove-managed-database-mode.md) (#303), and the
+  > `db-cleanup` finalizer itself was then removed by **#304**. The BYO half
+  > (removing `spec.database` clears `status.databaseSecretName` and the
+  > `DatabaseReady` condition) remains the live contract.
 - Rotation semantics differ by mode and are documented: managed mode rolls a
   new Revision on DSN change (checksum annotation); BYO inherits envMap
   semantics (a Secret edit does **not** roll a Revision — redeploy to pick it
@@ -204,8 +212,12 @@ Resolution paths, all spec-tested:
    `enabled: true` rebinds the **same** `AppDatabase` (CreateOrUpdate; no
    duplicate provisioning) and the orphan flag is dropped.
 3. **NextApp deletion** — the retained `status.databaseAppName` drives the
-   `db-cleanup` finalizer exactly as before. Note: a `keepOnDelete: true` set
-   while managed is no longer visible in the post-switch spec, but the
+   `db-cleanup` finalizer exactly as before. *(The `db-cleanup` finalizer no
+   longer exists: [ADR-0025](0025-remove-managed-database-mode.md)/#303 removed
+   managed provisioning and only drained the finalizer for one release; **#304**
+   then removed the drain path itself — nothing on this path is live.)* Note: a
+   `keepOnDelete: true` set while managed is no longer visible in the
+   post-switch spec, but the
    `keepTimelineOnDelete` it wrote onto the `AppDatabase.spec` **is** still
    honored by scale-zero-pg's deprovision finalizer — the timeline survives
    even though the CR is reclaimed.

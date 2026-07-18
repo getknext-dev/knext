@@ -144,7 +144,7 @@ spec:
         secretKey: password
 ```
 
-Note: when `spec.database` is set (either mode below), it **owns**
+Note: when `spec.database` is set, it **owns**
 `DATABASE_URL`/`DATABASE_URL_RO` — an `envMap` entry for the same name is
 rejected by the validating webhook on create and on any update that introduces
 the conflict (no silent precedence). CRs that already carried the conflict
@@ -153,9 +153,10 @@ before this rule are grandfathered (ratcheted): they keep reconciling,
 ignored `envMap` entry. Every other env var is fair game.
 
 ### `database` (Optional)
-Declares the app's Postgres. Two mutually-exclusive modes — **binding**
-(`secretRef`: bring your own DB) and **managed** (`enabled: true`: inline
-provisioning).
+Binds the app's Postgres. The only mode is **binding** (`secretRef`): bring
+your own database — knext provisions and manages nothing. (The operator's
+former managed provisioning mode was removed; see
+[ADR-0025](../adr/0025-remove-managed-database-mode.md).)
 
 **Binding mode (`secretRef`) — ADR-0019.** Binds an *existing* Secret in the
 app's namespace as `DATABASE_URL` (and optionally a read-only DSN as
@@ -179,83 +180,12 @@ spec:
   rotating the DSN in-place does **not** roll a new Revision (redeploy to pick it up).
 - `status.databaseSecretName` records the bound Secret; condition
   `DatabaseReady=True` with reason `Bound`. Removing `spec.database` clears
-  both on the next reconcile (for a previously managed app, see
-  [switching modes](#switching-database-modes) below).
-- Provisioning knobs (`tier`, `readReplicas`, `quotas`, `keepOnDelete`) are
-  rejected alongside `secretRef` (they are managed-mode-only), and `secretRef`
-  is rejected alongside `enabled: true` — one mode per app.
+  both on the next reconcile.
+- `roSecretRef` requires `secretRef` — a read-only binding cannot stand alone
+  (the block's one intra-field validation rule).
 - Pool-timeout contract (pool idle **<** the gateway's 60 s window, connect
   timeout **≥** 10 s) + the worked scale-zero-pg example: see the
   [Postgres binding guide](../guides/postgres-binding.md).
-
-**Managed mode (`enabled: true`).** Declares an **inline** [scale-zero-pg](../guides/unified-config-database.md) database
-that the operator auto-provisions and wires into `DATABASE_URL` — the app and its
-database sleep at zero and wake together on one visitor request. This is the
-**unified-config** flagship (ADR-0006). You do **not** hand-write a `DATABASE_URL`
-`envMap` entry: the operator provisions the DB, mirrors its credential Secret into
-your app's namespace, and injects `DATABASE_URL` (and `DATABASE_URL_RO` when
-`readReplicas: true`) for you.
-
-```yaml
-spec:
-  database:
-    enabled: true            # false/absent => bring-your-own via secretRef (above)
-    tier: cold               # cold = scale-to-zero (default) | warm = ~0.4s wake
-    readReplicas: true       # also injects DATABASE_URL_RO
-    quotas:                  # per-app noisy-neighbour bound (all fields optional)
-      cpu: "1000m"
-      cpuRequest: "250m"
-      mem: "1Gi"
-      memRequest: "256Mi"
-      maxConnections: 100
-    keepOnDelete: false      # false => deleting the NextApp reclaims the Neon timeline
-```
-
-- **`appName` is derived, never set by you** — the operator computes a
-  plane-globally-unique name from your NextApp's own `(namespace, name)` and records
-  it on `status.databaseAppName`. This is the security seam: a NextApp can only ever
-  bind the database minted for **its own** identity, never another namespace's DB.
-- **Hard-gate:** the app is **not** deployed (no Knative Service) until its database
-  reports `Ready` (`status.conditions[DatabaseReady]`). A `cold` DB reaches `Ready` in
-  ~seconds. This prevents booting an app that would crash-loop on a missing DSN.
-- **Teardown:** deleting the NextApp deletes the database (and reclaims its Neon
-  timeline) via a finalizer, unless `keepOnDelete: true`.
-- **BYO:** use `secretRef` (binding mode, above) to point at an external or existing
-  database; the raw `secrets.envMap` recipe also still works when `spec.database`
-  is fully omitted.
-
-See the [unified-config guide](../guides/unified-config-database.md) for the full flow,
-sizing notes, rotation behavior, and required RBAC.
-
-#### Switching database modes
-
-**Managed → binding (or removing `spec.database` entirely) never deletes your
-managed database.** A spec edit is not a destruction order: the provisioned
-database (and its data) keeps running, and the operator flags it instead:
-
-- condition `DatabaseOrphaned=True` (reason `ModeSwitched`) names the retained
-  database, plus a one-time `Warning` event (`DatabaseOrphaned`) at switch time;
-- the new `secretRef` binding works immediately and independently
-  (`DatabaseReady=True/Bound`);
-- `status.databaseAppName` stays set so you (and the operator) can still find
-  the orphan.
-
-You resolve the orphan one of three ways:
-
-1. **Delete it manually** — `kubectl delete appdatabase <databaseAppName>
-   -n scale-zero-pg`. The next reconcile clears `DatabaseOrphaned` and
-   `status.databaseAppName`.
-2. **Switch back to managed** (`enabled: true`) — the operator rebinds the
-   **same** database (the name is derived from your app's identity, so no
-   duplicate is provisioned) and drops the flag. Your data is exactly where
-   you left it.
-3. **Delete the NextApp** — the delete-time finalizer reclaims the orphaned
-   database as usual. A `keepOnDelete: true` set while the app was managed is
-   still honored downstream (the underlying timeline is retained even though
-   the database object is reclaimed).
-
-The mirrored `<name>-db` credential Secret is also retained until the NextApp
-is deleted (older Revisions may still reference it).
 
 ### `preview` (Optional)
 Enables ephemeral GitOps isolation for Pull Request testing. See [GitOps Previews](./gitops-preview.md).

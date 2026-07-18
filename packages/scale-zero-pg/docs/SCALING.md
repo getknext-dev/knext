@@ -41,7 +41,7 @@ the measured envelope).
 |---|---|
 | Branch-per-app: N apps, each own timeline + 0↔1 compute, one shared plane | ✅ shipped (#6) |
 | Declarative provisioning (AppDatabase CRD operator) | ✅ shipped (#96) |
-| Unified config: `NextApp.spec.database` auto-provisions + wires | ✅ shipped (v1.1.0) |
+| ~~Unified config: `NextApp.spec.database` auto-provisions + wires~~ | ❌ **removed** 2026-07-15 (knext ADR-0025 / knext #303 — was ✅ v1.1.0); the AppDatabase CRD above stays — knext binds BYO `secretRef` only |
 | Demonstrated ceiling: ~30 apps, footprint linear, WAL pin flat | ✅ measured (#86) |
 | Higher ceiling (100s–1000s) = pageserver sharding | 🔮 v2 (Neon-cloud does this) |
 
