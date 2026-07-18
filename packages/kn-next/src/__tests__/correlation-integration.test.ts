@@ -1,4 +1,6 @@
+import { ServerResponse } from "node:http";
 import {
+    CORRELATION_HEADER,
     correlationLogFields,
     resetCorrelationIdProvider,
     resetTraceIdProvider,
@@ -15,11 +17,16 @@ import {
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
+    CORRELATION_RESPONSE_INSTALLED,
+    installCorrelationResponseEcho,
+} from "../adapters/correlation-response";
+import {
     CORRELATION_ATTRIBUTE,
     CorrelationContextPropagator,
     CorrelationSpanProcessor,
     installCorrelationIdProvider,
     installTraceIdProvider,
+    withCorrelationId,
 } from "../adapters/tracing";
 
 /**
@@ -238,5 +245,153 @@ describe("#346 acceptance: zero-overhead when tracing is DISABLED", () => {
         resetCorrelationIdProvider();
         resetTraceIdProvider();
         expect(correlationLogFields()).toEqual({});
+    });
+});
+
+describe("#401: the shared context reader re-validates — all three readers inherit the guard", () => {
+    beforeEach(() => {
+        bootRuntime();
+    });
+
+    /**
+     * Capture `x-request-id` header writes on the echo patch without a live
+     * socket: replace the prototype's BASE methods with a shared store (the
+     * patch closes over these as its "originals"), install the echo, run `fn`,
+     * then restore everything (including the install latch) in `finally`.
+     */
+    function withEchoCapture(fn: (headers: Record<string, unknown>) => void): void {
+        const pristineWriteHead = ServerResponse.prototype.writeHead;
+        const pristineSetHeader = ServerResponse.prototype.setHeader;
+        const pristineGetHeader = ServerResponse.prototype.getHeader;
+        const headers: Record<string, unknown> = {};
+        ServerResponse.prototype.setHeader = function baseSetHeader(
+            this: ServerResponse,
+            name: string,
+            value: unknown,
+        ) {
+            headers[String(name).toLowerCase()] = value;
+            return this;
+        } as ServerResponse["setHeader"];
+        ServerResponse.prototype.getHeader = function baseGetHeader(
+            this: ServerResponse,
+            name: string,
+        ) {
+            return headers[String(name).toLowerCase()] as
+                | number
+                | string
+                | string[]
+                | undefined;
+        } as ServerResponse["getHeader"];
+        ServerResponse.prototype.writeHead = function baseWriteHead(
+            this: ServerResponse,
+        ) {
+            return this;
+        } as ServerResponse["writeHead"];
+        try {
+            // biome-ignore lint/suspicious/noExplicitAny: clearing the install latch for isolation.
+            delete (ServerResponse.prototype as any)[CORRELATION_RESPONSE_INSTALLED];
+            installCorrelationResponseEcho();
+            const res = Object.create(ServerResponse.prototype) as ServerResponse;
+            fn(headers);
+            res.writeHead(200);
+        } finally {
+            ServerResponse.prototype.writeHead = pristineWriteHead;
+            ServerResponse.prototype.setHeader = pristineSetHeader;
+            ServerResponse.prototype.getHeader = pristineGetHeader;
+            // biome-ignore lint/suspicious/noExplicitAny: clearing the install latch for isolation.
+            delete (ServerResponse.prototype as any)[CORRELATION_RESPONSE_INSTALLED];
+        }
+    }
+
+    it("a hostile id seeded via the verbatim withCorrelationId seam is omitted from log fields, the SERVER-span attribute, AND the response echo", async () => {
+        // UNVALIDATED source: `withCorrelationId` writes the context key
+        // verbatim (any future caller could seed from an unvalidated source).
+        // The shared reader (`correlationIdFromContext`) must refuse the value
+        // so ALL THREE readers of the key behave as if no id was seeded:
+        //   1. the logger mixin (via installCorrelationIdProvider)
+        //   2. the CorrelationSpanProcessor SERVER-span attribute
+        //   3. the response echo (installCorrelationResponseEcho)
+        const tracer = trace.getTracer("@vercel/otel");
+        const hostile = "evil\r\nx-injected: 1";
+        const seeded = withCorrelationId(context.active(), hostile);
+        const server = tracer.startSpan(
+            "GET /hostile",
+            { kind: SpanKind.SERVER },
+            seeded,
+        );
+
+        let fields: Record<string, string | undefined> = {};
+        let stamped: Record<string, unknown> = {};
+        await context.with(trace.setSpan(seeded, server), async () => {
+            fields = correlationLogFields(); // reader 1: logger mixin
+            withEchoCapture((headers) => {
+                stamped = headers; // reader 3: response echo at writeHead
+            });
+        });
+        server.end();
+
+        const finished = exporter
+            .getFinishedSpans()
+            .find((s) => s.name === "GET /hostile");
+
+        expect(
+            fields.correlation_id,
+            "logger mixin must omit a hostile context-seeded id (fail-open: no id)",
+        ).toBeUndefined();
+        expect(
+            finished?.attributes[CORRELATION_ATTRIBUTE],
+            "SERVER-span attribute must omit a hostile context-seeded id",
+        ).toBeUndefined();
+        expect(
+            stamped[CORRELATION_HEADER],
+            "response echo must omit a hostile context-seeded id",
+        ).toBeUndefined();
+    });
+
+    it("an over-long id (> MAX_ID_LENGTH) seeded via withCorrelationId is omitted from log fields and the span attribute", async () => {
+        const tracer = trace.getTracer("@vercel/otel");
+        const seeded = withCorrelationId(context.active(), "a".repeat(129));
+        const server = tracer.startSpan(
+            "GET /too-long",
+            { kind: SpanKind.SERVER },
+            seeded,
+        );
+        let fields: Record<string, string | undefined> = {};
+        await context.with(trace.setSpan(seeded, server), async () => {
+            fields = correlationLogFields();
+        });
+        server.end();
+
+        const finished = exporter
+            .getFinishedSpans()
+            .find((s) => s.name === "GET /too-long");
+        expect(fields.correlation_id).toBeUndefined();
+        expect(
+            finished?.attributes[CORRELATION_ATTRIBUTE],
+        ).toBeUndefined();
+    });
+
+    it("a well-formed id seeded via withCorrelationId still flows to log fields and the span attribute (no behavior change)", async () => {
+        const tracer = trace.getTracer("@vercel/otel");
+        const seeded = withCorrelationId(context.active(), "manual-seed_1.2-3");
+        const server = tracer.startSpan(
+            "GET /manual",
+            { kind: SpanKind.SERVER },
+            seeded,
+        );
+        let fields: Record<string, string | undefined> = {};
+        await context.with(trace.setSpan(seeded, server), async () => {
+            fields = correlationLogFields();
+        });
+        server.end();
+
+        const finished = exporter
+            .getFinishedSpans()
+            .find((s) => s.name === "GET /manual");
+        expect(fields.correlation_id).toBe("manual-seed_1.2-3");
+        expect(fields.trace_id).toBe(finished?.spanContext().traceId);
+        expect(finished?.attributes[CORRELATION_ATTRIBUTE]).toBe(
+            "manual-seed_1.2-3",
+        );
     });
 });
