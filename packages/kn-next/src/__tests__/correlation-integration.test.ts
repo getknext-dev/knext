@@ -259,7 +259,9 @@ describe("#401: the shared context reader re-validates — all three readers inh
      * patch closes over these as its "originals"), install the echo, run `fn`,
      * then restore everything (including the install latch) in `finally`.
      */
-    function withEchoCapture(fn: (headers: Record<string, unknown>) => void): void {
+    function withEchoCapture(
+        fn: (headers: Record<string, unknown>) => void,
+    ): void {
         const pristineWriteHead = ServerResponse.prototype.writeHead;
         const pristineSetHeader = ServerResponse.prototype.setHeader;
         const pristineGetHeader = ServerResponse.prototype.getHeader;
@@ -289,9 +291,13 @@ describe("#401: the shared context reader re-validates — all three readers inh
         } as ServerResponse["writeHead"];
         try {
             // biome-ignore lint/suspicious/noExplicitAny: clearing the install latch for isolation.
-            delete (ServerResponse.prototype as any)[CORRELATION_RESPONSE_INSTALLED];
+            delete (ServerResponse.prototype as any)[
+                CORRELATION_RESPONSE_INSTALLED
+            ];
             installCorrelationResponseEcho();
-            const res = Object.create(ServerResponse.prototype) as ServerResponse;
+            const res = Object.create(
+                ServerResponse.prototype,
+            ) as ServerResponse;
             fn(headers);
             res.writeHead(200);
         } finally {
@@ -299,7 +305,9 @@ describe("#401: the shared context reader re-validates — all three readers inh
             ServerResponse.prototype.setHeader = pristineSetHeader;
             ServerResponse.prototype.getHeader = pristineGetHeader;
             // biome-ignore lint/suspicious/noExplicitAny: clearing the install latch for isolation.
-            delete (ServerResponse.prototype as any)[CORRELATION_RESPONSE_INSTALLED];
+            delete (ServerResponse.prototype as any)[
+                CORRELATION_RESPONSE_INSTALLED
+            ];
         }
     }
 
@@ -366,9 +374,7 @@ describe("#401: the shared context reader re-validates — all three readers inh
             .getFinishedSpans()
             .find((s) => s.name === "GET /too-long");
         expect(fields.correlation_id).toBeUndefined();
-        expect(
-            finished?.attributes[CORRELATION_ATTRIBUTE],
-        ).toBeUndefined();
+        expect(finished?.attributes[CORRELATION_ATTRIBUTE]).toBeUndefined();
     });
 
     it("a well-formed id seeded via withCorrelationId still flows to log fields and the span attribute (no behavior change)", async () => {

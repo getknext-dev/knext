@@ -81,9 +81,11 @@ Set the floor with `LOG_LEVEL` (default `info` in production, `debug` in dev).
     tracing is enabled). Defense-in-depth (#368): the id is **re-validated**
     against the correlation-id charset immediately before stamping, so a value
     that fails the §2 well-formedness rules is **never** echoed — the header is
-    simply left unset rather than stamping raw bytes. So a client that sends (or
-    is assigned) an `x-request-id` gets it back on the response, joinable to the
-    correlated logs/trace.
+    simply left unset rather than stamping raw bytes. (The same predicate is
+    also applied when the id is **read** off the Context — #401, §3a — so the
+    logger mixin and span attribute are guarded by the one rule.) So a client
+    that sends (or is assigned) an `x-request-id` gets it back on the response,
+    joinable to the correlated logs/trace.
     `@knext/lib` still ships `applyCorrelationHeader(...)` for routes the app owns
     and explicit `runWithRequestContext` paths (§3).
   - **Downstream / db-wake:** forward `x-request-id` on outbound calls so a
@@ -132,6 +134,22 @@ A `CorrelationSpanProcessor` additionally copies the context-key id onto the
 inbound SERVER span as the `knext.correlation_id` attribute **for trace export
 only** (so a backend can index/echo it on the request span); logs never read that
 attribute.
+
+**Read-path validation (#401, defense-in-depth).** All three consumers of the
+context key — the logger mixin, the `CorrelationSpanProcessor` SERVER-span
+attribute, and the response echo — read it through ONE shared reader,
+`correlationIdFromContext`, which **re-validates** the value against the §2
+well-formedness rules on every read. The propagator only ever writes validated
+ids, but the `withCorrelationId` seam writes the key **verbatim**; validating on
+read means an id seeded from any unvalidated source behaves as if **no id was
+seeded** (fail-open — nothing is logged, stamped, or echoed; no substitute is
+minted on the hot path). The echo additionally re-validates at the stamp site
+(#368), which stays load-bearing for embedders injecting their own resolver.
+Proven by the `#401` describe in
+`packages/kn-next/src/__tests__/correlation-integration.test.ts` (hostile +
+over-long `withCorrelationId`-seeded ids are omitted by all three readers; a
+well-formed seeded id still flows) together with the `#368` suite in
+`correlation-response.test.ts`.
 
 This is why the schema table marks `correlation_id` "automatic when tracing is
 on". **Default-off / zero overhead:** with tracing disabled the propagator and

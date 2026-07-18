@@ -34,14 +34,16 @@
  *   - FAIL-OPEN: any throw while resolving/stamping the id is swallowed and the
  *     original `writeHead`/`setHeader` behavior is preserved — never break a
  *     response over an observability header.
- *   - DEFENSE-IN-DEPTH (#368): the resolved id is RE-VALIDATED against the
+ *   - DEFENSE-IN-DEPTH (#368, #401): the resolved id is RE-VALIDATED against the
  *     correlation-id charset (`isWellFormedCorrelationId`, the same ID_PATTERN
- *     the #346 propagator validates with) immediately before stamping. Today the
- *     only writer of the context key is `CorrelationContextPropagator.extract`
- *     (already validated), so this check is free on the primary path; it exists
- *     so a FUTURE unvalidated writer of the key can never smuggle an
- *     attacker-controlled value into a response header (response-splitting
- *     vector). An invalid id is simply NOT stamped (fail-open: no substitute).
+ *     the #346 propagator validates with) immediately before stamping. The shared
+ *     context reader (`correlationIdFromContext`) also validates on read (#401),
+ *     so the default resolver can no longer return an ill-formed value — this
+ *     stamp-site gate remains for the injected-resolver seam (tests / embedders
+ *     supplying their own `activeCorrelationId`) and as belt-and-braces: a
+ *     FUTURE unvalidated writer of the key can never smuggle an attacker-
+ *     controlled value into a response header (response-splitting vector).
+ *     An invalid id is simply NOT stamped (fail-open: no substitute).
  *   - IDEMPOTENT: a `Symbol.for` latch on the prototype guards double-wrapping.
  *   - NEVER OVERRIDES: an app-set `x-request-id` (via `setHeader` or inline in
  *     `writeHead(status, headers)`) always wins — we only fill it when absent.
