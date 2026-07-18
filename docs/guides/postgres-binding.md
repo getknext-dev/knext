@@ -46,8 +46,8 @@ kn-next db bind --secret shop-db --ro-secret shop-db
 ```
 
 The CLI validates the whole rule matrix below **client-side** — DNS-1123 Secret
-names, `DATABASE_URL`/`DATABASE_URL_RO` collisions with `spec.secrets.envMap`,
-and the managed-vs-BYO mutual exclusion — so a conflict fails at your keyboard
+names and `DATABASE_URL`/`DATABASE_URL_RO` collisions with `spec.secrets.envMap`
+— so a conflict fails at your keyboard
 with the exact reason instead of an apiserver rejection. It then issues a
 single merge-patch of the `NextApp` CR's `spec.database` (the operator
 reconciles everything else; the CLI never touches the ksvc or the Secret).
@@ -79,29 +79,23 @@ kn-next db bind shop --secret shop-db --ro-secret shop-db \
   conflict before this rule keep deploying — `spec.database` wins and the
   operator records a Warning event naming the ignored `envMap` entry. Use
   `envMap` freely for every *other* secret-backed env var.
-- `secretRef` (bind an existing DB) and `enabled: true` (let the platform
-  provision one — see the [unified-config guide](./unified-config-database.md))
-  are mutually exclusive: one mode per app. Provisioning knobs (`tier`,
-  `readReplicas`, `quotas`, `keepOnDelete`) are rejected alongside `secretRef`
-  rather than silently ignored.
+- `roSecretRef` requires `secretRef` — you cannot bind a read-only DSN without
+  the writer. `secretRef` is the only `spec.database` mode: the operator's
+  former managed provisioning mode was removed
+  ([ADR-0025](../adr/0025-remove-managed-database-mode.md)) — knext binds a
+  Secret, it never provisions one.
 - If the Secret doesn't exist yet, the app is still deployed and its pods wait
   on the Secret (`CreateContainerConfigError`) — create the Secret and the pod
   starts. The operator does not gate the deploy on a Secret it doesn't manage.
 - Rotating the DSN inside the Secret does **not** roll a new revision by
   itself; redeploy (or bump the CR) to pick it up.
 
-## Switching modes
+## Removing the binding
 
-Moving an app from **managed** (`enabled: true`) to **binding** (`secretRef`)
-— or dropping `spec.database` entirely — is safe for your data: the operator
-**never deletes the managed database because of a spec edit**. It keeps
-running, and the app gets a `DatabaseOrphaned=True` condition plus a one-time
-Warning event naming it. Resolve it by deleting the orphaned database
-manually (`kubectl delete appdatabase <status.databaseAppName> -n
-scale-zero-pg`), switching back to `enabled: true` (which rebinds the **same**
-database — no duplicate, data intact), or deleting the NextApp (its finalizer
-reclaims the database as usual). Details in the
-[NextApp CRD reference](../operator/crd-nextapp.md#switching-database-modes).
+Removing `spec.database` — or deleting the `NextApp` — never touches the
+database: knext bound a Secret, it never owned one. On the next reconcile the
+operator clears `status.databaseSecretName` and drops the `DatabaseReady`
+condition; the Secret itself is yours and stays until you delete it.
 
 ## The connection contract (read this once)
 
@@ -174,7 +168,5 @@ spec:
 
 App sleeps at zero, database sleeps at zero, one visitor wakes both.
 
-Prefer not to manage the `AppDatabase`/Secret yourself? `spec.database.enabled:
-true` has the platform provision and wire it end-to-end — see
-[unified config](./unified-config-database.md). The wider platform picture
-(tiers, replicas, backups) is in [database platform](./database-platform.md).
+The wider platform picture (tiers, replicas, backups) is in
+[database platform](./database-platform.md).

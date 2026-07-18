@@ -121,8 +121,9 @@ kn-next db migrate --url "$WRITER_DSN"   # explicit writer DSN override
 
 ### 3d. Sequence it after the database is `Ready` (one-shot Job)
 
-An `AppDatabase` (managed mode) or a BYO Secret gives the app a writer
-`DATABASE_URL`. Migrations run **after** the database is `Ready` and **before** app
+An `AppDatabase` provisioned on scale-zero-pg (or any BYO Postgres) gives the
+app a writer `DATABASE_URL` Secret, bound via `spec.database.secretRef`.
+Migrations run **after** the database is `Ready` and **before** app
 pods serve:
 
 ```
@@ -395,6 +396,6 @@ database scales to zero on scale-zero-pg, and **the first visitor request wakes 
 - Runnable example: [`apps/db-demo`](../../apps/db-demo)
 - Public API + stability: [`packages/db/docs/PUBLIC_API.md`](../../packages/db/docs/PUBLIC_API.md)
 - Binding a database: [postgres-binding](./postgres-binding.md) ·
-  [unified-config-database](./unified-config-database.md)
+  [database platform](./database-platform.md)
 - ADR: [ADR-0021 — Drizzle data SDK](../adr/0021-drizzle-data-sdk.md)
 ```

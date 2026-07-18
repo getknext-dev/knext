@@ -101,7 +101,6 @@ a defect against that ticket). Grouped by theme.
 | `_verify-tenant-quotas.sh` | Noisy-neighbour bound: a hostile app's low CPU cap doesn't change a victim's default; per-app CPU limit rendered. | #89 #112 #171 · ADR-0003 |
 | `_verify-scale-ceiling.sh` | The ADR-0003 "tens/low-hundreds" claim: provisions **N apps on one plane**, measures template WAL-pin growth + safekeeper pressure (30-app linear). | #86 #171 · ADR-0003 |
 | `_verify-operator.sh` | **AppDatabase CRD operator** lifecycle: one CR → provisioned app, reconcile/ownerRefs/finalizer cascade. | #96 #119 #122 #127 #171 · ADR-0004 |
-| `_verify-unified-config.sh` | Cross-repo **unified-config** contract: knext `NextApp` → injected `DATABASE_URL`, Knative Service hard-gated on the Secret (consumer-side; SKIPs if knext absent). | #119 #219 · ADR-0006 |
 
 ### Zones / repl-wake / slot-janitor
 | Drill | What it proves | Guards |
