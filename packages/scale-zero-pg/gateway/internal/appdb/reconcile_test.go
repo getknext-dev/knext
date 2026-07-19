@@ -95,7 +95,13 @@ type fakeCluster struct {
 	finalizerAdds int
 	finalizerRms  int
 	events        []string
+	eventLog      []eventRecord // full type+reason+message, for tests that must inspect message content (e.g. redaction)
 }
+
+// eventRecord is a full Cluster.Event() call, captured for tests that need
+// the MESSAGE text (events []string above only tracks the reason, which is
+// all most existing tests need).
+type eventRecord struct{ eventType, reason, message string }
 
 func newFakeCluster() *fakeCluster {
 	return &fakeCluster{
@@ -208,8 +214,9 @@ func (c *fakeCluster) RemoveFinalizer(_ context.Context, cr *AppDatabase) error 
 	c.finalizerRms++
 	return nil
 }
-func (c *fakeCluster) Event(_ *AppDatabase, _, reason, _ string) {
+func (c *fakeCluster) Event(_ *AppDatabase, eventType, reason, message string) {
 	c.events = append(c.events, reason)
+	c.eventLog = append(c.eventLog, eventRecord{eventType: eventType, reason: reason, message: message})
 }
 
 // ---- harness ---------------------------------------------------------------

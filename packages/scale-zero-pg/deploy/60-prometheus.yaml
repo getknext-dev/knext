@@ -98,6 +98,27 @@ data:
         static_configs:
           - targets: ["pswatcher.scale-zero-pg.svc:9091"]
         metrics_path: /metrics
+      # appdb-operator (83): publishes appdb_warm_hold_active{app=...} on
+      # :9092/metrics — the DELIBERATE warm-hold connections (knext #388) the
+      # ComputePhantomKeepalive alert subtracts from the gateway's
+      # active-connection count. No Service: pod SD like the pggw job, kept to
+      # the operator's app label + its 9092 container port.
+      - job_name: appdb-operator
+        kubernetes_sd_configs:
+          - role: pod
+            namespaces:
+              names: [scale-zero-pg]
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_label_app]
+            regex: appdb-operator
+            action: keep
+          - source_labels: [__meta_kubernetes_pod_container_port_number]
+            regex: "9092"
+            action: keep
+          - source_labels: [__meta_kubernetes_pod_name]
+            target_label: pod
+          - source_labels: [__meta_kubernetes_namespace]
+            target_label: namespace
   rules.yml: |
     groups:
       - name: ks-pg-gateway
@@ -127,12 +148,19 @@ data:
           # restarts and never represent current state (devops-r3, live repro
           # value=41 at zero). "Phantom keepalive" truly means: connections
           # never drop to zero, so the idle window can never elapse.
+          # knext #388: DELIBERATE warm holds are NOT phantoms. While an
+          # AppDatabase warmSchedule window is active the appdb operator holds
+          # exactly one connection per warmed app (by design — that IS the DB
+          # warm tier); it publishes appdb_warm_hold_active{app=...} so this
+          # alert subtracts held connections and only pages on UNEXPLAINED ones.
+          # The `or vector(0)` keeps the subtraction total when nothing is held
+          # (an absent right-hand series would otherwise silence the alert).
           - alert: ComputePhantomKeepalive
-            expr: min_over_time(sum(pggw_active_connections)[30m:1m]) > 0
+            expr: min_over_time((sum(pggw_active_connections) - (sum(appdb_warm_hold_active) or vector(0)))[30m:1m]) > 0
             labels: { severity: warning }
             annotations:
               summary: "System never idle for 30m — scale-to-zero blocked"
-              description: "Connections held continuously — check for an app pool with no/large idle timeout (see docs/connecting.md sizing rule)."
+              description: "Connections held continuously beyond declared warmSchedule warm holds — check for an app pool with no/large idle timeout (see docs/connecting.md sizing rule). During a warm window, appdb_warm_hold_active accounts for the deliberate holds."
           # WAKE side-channel / per-app wake-budget breach (issue #116, ADR-0008).
           # The apps-gateway REFUSED one or more 0->1 wakes because a caller force-woke
           # a per-app compute faster than GW_WAKE_BUDGET/GW_WAKE_WINDOW_MS allows. The
@@ -567,7 +595,7 @@ spec:
         # (prints the value to paste here). _validate.sh contract 27 fails if this drifts
         # from the ConfigMap data; _verify-drift.sh section E independently asserts every
         # shipped rule is LOADED in the live pod (/api/v1/rules).
-        ks-pg.dev/prometheus-config-sha256: "ee37e0b843fa77ecd1965afad047a00325d1eafb31ef59b54f66628bc736750d"
+        ks-pg.dev/prometheus-config-sha256: "b5092b20ee68881ec9d334eaf4289bca25cea32c7c389f2b2c925ed685f300c2"
     spec:
       serviceAccountName: prometheus
       securityContext:

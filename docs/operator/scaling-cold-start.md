@@ -308,11 +308,13 @@ window there is **no floor**, so the app keeps its cost-friendly scale-to-zero
 (`minScale: 0`) behaviour.
 
 > **Honest framing (ADR-0030):** `warmSchedule` is **scheduled, NOT learned**.
-> It warms only the windows you declare — it does not learn traffic, does not
-> pre-warm the database compute, and does not cap warm cost per tenant. The
-> learned/heuristic controller (same-hour-last-week RPS percentile), the
-> DB-compute lockstep pre-warm (existing warm-tier, #25), and the per-tenant
-> warm-budget cap are **deferred follow-ups** (see ADR-0030 §Deferred).
+> It warms only the windows you declare — it does not learn traffic and does not
+> cap warm cost per tenant. The learned/heuristic controller (same-hour-last-week
+> RPS percentile) and the per-tenant warm-budget cap are **deferred follow-ups**
+> (see ADR-0030 §Deferred). The **DB-compute lockstep pre-warm** — warming the
+> app's scale-to-zero Postgres compute during the same windows — is **shipped**
+> (#388, see [DB-compute lockstep](#db-compute-lockstep-pre-warm-388--adr-0030-addendum)
+> below).
 
 ### How it works
 
@@ -396,17 +398,65 @@ still adds pods above it under load. At all other times the app scales to zero.
 (No KEDA and no CronJobs — the operator folds the schedule into the Knative
 `min-scale` annotation it already owns.)
 
+### DB-compute lockstep pre-warm (#388 / ADR-0030 addendum)
+
+The pod floor alone removes only **half** the cold tax: during a warm window the
+app's first query still cold-starts its scale-to-zero Postgres **compute** (the
+wake + connection-pool re-establish half). The lockstep closes that half — and
+it is **opt-in, on the database side**, because knext deliberately manages no DB
+machinery (the DATABASE_URL contract; ADR-0025).
+
+**You opt in by declaring the SAME windows on the app's `AppDatabase`**
+(scale-zero-pg, `packages/scale-zero-pg`): it accepts a `spec.warmSchedule` with
+the same `{start, end, timezone}` 5-field-cron shape (no `replicas` — a compute
+is single-writer, so DB warm is binary):
+
+```yaml
+# NextApp (app pod floor)                     # AppDatabase (DB compute hold) — scale-zero-pg ns
+spec:                                          spec:
+  scaling:                                       appName: storefront
+    warmSchedule:                                warmSchedule:          # same windows
+      - start: "0 8 * * 1-5"                       - start: "0 8 * * 1-5"
+        end:   "0 20 * * 1-5"                        end:   "0 20 * * 1-5"
+        replicas: 3                                  timezone: America/New_York
+        timezone: America/New_York
+```
+
+While a window is active, the scale-zero-pg **appdb operator holds ONE
+authenticated connection** to the app's compute through the apps-gateway — the
+gateway's idle scale-to-zero only arms when a compute has zero connections, so
+the compute stays warm for the whole window no matter how little traffic the
+app sees. The hold rides the ordinary wake path (the gateway stays the only
+replica scaler — no CronJob, no second writer), and the held session completes
+real SCRAM auth, so the first in-window query pays **neither** the compute wake
+**nor** a cold-auth surprise. At window end the hold is released and the compute
+sleeps on its usual idle window.
+
+- **Boundary skew:** the pod floor flips within seconds; the DB hold within one
+  appdb-operator resync (default 15s). Declare windows to open a minute ahead of
+  the peak.
+- **Cost while held:** one connection of the compute's `GW_MAX_CONNS` (90), a
+  liveness ping per resync, and the compute's reserved cpu/mem for the window —
+  the warm cost you declared.
+- **Observability:** `WarmHold` condition on the AppDatabase
+  (`True/WindowActive`, `False/WindowInactive|HoldFailed|InvalidWarmWindow`) and
+  the `appdb_warm_hold_active` metric; the platform's phantom-keepalive alert
+  subtracts declared holds. A hold failure degrades to the normal cold wake —
+  it never blocks the app.
+- Full DB-side reference: `packages/scale-zero-pg/docs/appdatabase-api.md`
+  (§"Scheduled warm windows") and ADR-0030's 2026-07-18 addendum.
+
 ### Deferred follow-ups (ADR-0030)
 
 - **Learned/heuristic warm controller** — schedule from same-hour-last-week RPS
   percentile (per-app, from already-scraped metrics). No ML until seasonality
   proves it; adds a control loop mutating the NextApp → its own ADR.
-- **DB-compute lockstep pre-warm** — warm the app's scale-to-zero Postgres
-  compute (existing warm-tier, #25) alongside the window so the DB half of the
-  cold tax is removed too.
 - **Per-tenant warm-budget cap** — analog to the ADR-0008 wake budget so
   over-warming cannot erode the scale-to-zero cost win; mispredict failure modes
   (cold storm / wasted cost) measured.
+
+(The **DB-compute lockstep pre-warm** shipped 2026-07-18 as #388 — see the
+section above and ADR-0030's addendum.)
 
 ## Burst buffering (`spec.scaling.targetBurstCapacity`, ADR-0032 / #411)
 
@@ -519,10 +569,10 @@ record.
 | Concern | Knob / mitigation |
 |---------|-------------------|
 | Cold start on critical path | `spec.scaling.minScale: 1` (keep warm) |
-| Cold start only during known peaks | `spec.scaling.warmSchedule` (operator-owned scheduled min-scale floor, ADR-0030; no KEDA/CronJobs) |
+| Cold start only during known peaks | `spec.scaling.warmSchedule` (operator-owned scheduled min-scale floor, ADR-0030; no KEDA/CronJobs) + the SAME windows on the AppDatabase `spec.warmSchedule` for the DB half (#388) |
 | Cost on idle read zones | `spec.scaling.minScale: 0` (scale to zero) |
 | JS recompile on cold start | `spec.cache.enableBytecodeCache: true` (+ a `provider`) |
-| DB pool re-establish | warm zone (`minScale: 1`) and/or transaction-mode pooler |
+| DB pool re-establish | warm zone (`minScale: 1`) and/or transaction-mode pooler; during declared windows, AppDatabase `spec.warmSchedule` holds the compute warm (#388) |
 | Connection storm | low `maxScale` + declare `poolMax` (operator enforces `maxScale × poolMax ≤ 80`, ADR-0028); a pooler caps it further |
 | Reactive scale-out under burst | lower `containerConcurrency` (default now `20`, ADR-0028; W1/#376 refines) |
 | Unpredicted traffic spike | `spec.scaling.targetBurstCapacity` (activator burst buffer, ADR-0032; still bound by the `maxScale × poolMax` wall) |

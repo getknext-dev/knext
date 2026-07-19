@@ -648,3 +648,20 @@ grep -q 'pg-base-admin' gen-secrets.sh || fail "gen-secrets.sh must mint the pg-
 grep -q 'CLOUD_ADMIN_MD5' gen-secrets.sh || fail "gen-secrets.sh must compute CLOUD_ADMIN_MD5=md5(password||cloud_admin) for pg-base-admin (issue #168)"
 grep -q 'myapp-database' gen-secrets.sh || fail "gen-secrets.sh must own the base DATABASE_URL Secret myapp-database, derived from pg-base-admin (issue #168)"
 ok "base tiers carry a STRONG cloud_admin md5 (pg-base-admin, fail-closed) — the public default is never shipped (issue #168)"
+
+# 32. contract (knext #388, ADR-0030 addendum): the scheduled DB warm lockstep.
+#     An AppDatabase may declare spec.warmSchedule; while a window is active the
+#     appdb operator holds ONE authenticated gateway connection per app so the
+#     compute never idles. Invariants the manifests must keep:
+grep -q 'warmSchedule' 82-appdb-crd.yaml || fail "82-appdb-crd.yaml missing spec.warmSchedule (knext #388 DB warm lockstep)"
+# (a) the lockstep is a HOLD, never a scale: the operator must still NOT claim
+#     deployments/scale (contract 24 above is the guard; restated here as the
+#     #388 design constraint — a replica-pinning writer would fight the
+#     gateway's idle scale-to-zero, the ADR-0030 two-writer defect).
+grep -q 'deployments/scale' 83-appdb-operator.yaml && fail "appdb-operator must warm via a held CONNECTION, never via deployments/scale (knext #388)" || true
+# (b) the operator exposes the deliberate holds on :9092/metrics and Prometheus
+#     scrapes them, so the phantom-keepalive alert can subtract them.
+grep -q 'job_name: appdb-operator' 60-prometheus.yaml || fail "60-prometheus.yaml must scrape the appdb-operator :9092 /metrics (appdb_warm_hold_active, knext #388)"
+grep -q 'appdb_warm_hold_active' 60-prometheus.yaml || fail "60-prometheus.yaml ComputePhantomKeepalive must subtract appdb_warm_hold_active — a declared warm hold is not a phantom (knext #388)"
+grep -q 'or vector(0)' 60-prometheus.yaml || fail "60-prometheus.yaml phantom-keepalive subtraction must use 'or vector(0)' so the alert is not silenced when nothing is held (knext #388)"
+ok "AppDatabase warmSchedule CRD field shipped; warm = held connection (no deployments/scale); holds scraped + subtracted from phantom-keepalive (knext #388)"

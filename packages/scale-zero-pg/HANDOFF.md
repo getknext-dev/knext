@@ -13,6 +13,14 @@ operator, and the zone operator (ADR-0007) — plus `docs/ARCHITECTURE.md`, `doc
 `docs/tuning-write-heavy.md` for the next agent. **Latest work (#206/#207, MERGED):** the
 `ColdRestorable` recoverability condition (see §2) — one OKE `_verify-restore.sh` drill
 pending to close its e2e loop._
+**In flight from the knext monorepo lane (knext #388, 2026-07-18): scheduled DB warm
+lockstep — `AppDatabase.spec.warmSchedule`; while a window is active the appdb operator
+holds ONE authenticated gateway connection per app so the compute never idles (no
+`deployments/scale` — single-writer preserved). Ships with the `WarmHold` condition,
+`appdb_warm_hold_active` metric + phantom-keepalive carve-out. See
+`docs/appdatabase-api.md` §3b + knext ADR-0030 addendum. OKE: rebuild + re-pin the
+gateway image (83 carries a PENDING RE-PIN note), apply 82/83/60, measure per
+`docs/BENCHMARKS.md` "Scheduled DB warm lockstep".**
 
 ## 1. What this project is
 A **Knative-ecosystem scale-to-zero PostgreSQL platform** — idle databases cost zero

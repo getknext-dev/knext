@@ -67,10 +67,14 @@ spec:
 > prediction**. Empty => min-scale falls back to `minScale` (default scale-to-zero).
 > **Cannot** be combined with a pinned `spec.traffic.revisionName` (a min-scale
 > change rolls a new Revision and would reset the pin) — this is a **hard admission
-> rejection** as of #393, not just advice. See
+> rejection** as of #393, not just advice. To also pre-warm the app's scale-to-zero
+> **Postgres compute** during the same windows (the DB half of the cold tax),
+> declare the same `{start, end, timezone}` windows on the app's scale-zero-pg
+> `AppDatabase` `spec.warmSchedule` (#388 — a held gateway connection keeps the
+> compute warm; knext stays out of DB management). See
 > [`scaling-cold-start.md`](./scaling-cold-start.md#scheduled-warm-floor-specscalingwarmschedule-adr-0030--380)
-> and [ADR-0030](../adr/0030-scheduled-warm-floor.md) (incl. the deferred
-> learned-controller / DB-lockstep / warm-budget follow-ups).
+> and [ADR-0030](../adr/0030-scheduled-warm-floor.md) (incl. the 2026-07-18 #388
+> addendum and the still-deferred learned-controller / warm-budget follow-ups).
 
 > `targetBurstCapacity` (ADR-0032, #411) tunes whether the Knative **activator**
 > stays in the request path as a burst buffer, pacing an **unpredicted** traffic

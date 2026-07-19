@@ -3,6 +3,7 @@ package appdb
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 )
@@ -152,6 +153,27 @@ func (d *Deps) reconcileApply(ctx context.Context, cr *AppDatabase) (bool, error
 		return true, fmt.Errorf("teardown ro compute: %w", err)
 	}
 
+	// 4c. Scheduled DB warm lockstep (knext #388, ADR-0030 addendum). While any
+	//    spec.warmSchedule window is active, hold ONE authenticated connection
+	//    through the apps-gateway so this app's compute stays at 1 for the whole
+	//    window — the gateway's idle scale-to-zero only arms with ZERO connections,
+	//    so the hold is the warm tier (a replica-pinning CronJob would still be
+	//    parked by the gateway 60s after the last query: two writers, the defect
+	//    ADR-0030 §Context records). The owner declares the SAME windows on the
+	//    knext NextApp (pod floor) — both sides evaluate identical cron semantics
+	//    against cluster clocks, so pod floor and DB hold flip together. This side
+	//    flips within one resync tick of a boundary (APPDB_RESYNC_MS, default 15s)
+	//    — no per-CR RequeueAfter machinery exists in this lean loop, and the tick
+	//    IS the boundary requeue. Outside every window the hold is released and
+	//    the gateway parks the compute on its ordinary idle window. Warming is
+	//    BEST-EFFORT: a hold failure degrades to the normal cold-wake path and
+	//    surfaces loudly (Warning event + WarmHold condition), it NEVER fails
+	//    provisioning. Schedule-less CRs skip this entirely (byte-identical
+	//    back-compat); Holds==nil (a schedule-less install) likewise.
+	if len(cr.Spec.WarmSchedule) > 0 && d.Holds != nil {
+		d.reconcileWarmHold(ctx, cr, app)
+	}
+
 	// 5. Ensure the branch exists on the pageserver (durable). Idempotent on tl.
 	exists, err := d.Pageserver.TimelineExists(ctx, d.Tenant, tl)
 	if err != nil {
@@ -272,6 +294,70 @@ func (d *Deps) reconcileApply(ctx context.Context, cr *AppDatabase) (bool, error
 	return requeue || coldRestorableRequeue, nil
 }
 
+// reconcileWarmHold applies the scheduled warm-window decision for one app:
+// ensure the hold while a window is active, release it otherwise, and surface
+// the state on the WarmHold condition (never gating). Called only when the CR
+// declares a warmSchedule and a Holds actuator is wired.
+//
+// Warning events are gated on the CondWarmHold TRANSITION, not fired on every
+// ~15s resync pass while the bad state persists — mirroring the
+// ColdRestorable !isConditionTrue guard below (issue #388 review: unbounded
+// Event objects on a persistently invalid schedule or a persistently
+// unreachable compute). The condition itself is still refreshed every pass
+// (never stale); only the duplicate Event object is suppressed.
+func (d *Deps) reconcileWarmHold(ctx context.Context, cr *AppDatabase, app string) {
+	active, invalid := warmScheduleActive(cr.Spec.WarmSchedule, d.Now().Time)
+
+	// Snapshot BEFORE this pass mutates the condition, so the gates below
+	// compare against what was true on the LAST reconcile, not this one.
+	prevReason := ""
+	if pc := findCondition(cr, CondWarmHold); pc != nil {
+		prevReason = pc.Reason
+	}
+
+	allInvalid := len(invalid) > 0 && len(invalid) == len(cr.Spec.WarmSchedule)
+	// No admission webhook guards this CRD, so a window that fails to parse is
+	// LOUD (Warning event) the first time it's seen — never a silently skipped
+	// warm window. When EVERY window is invalid, that state is reflected on
+	// CondWarmHold, so gate on the TRANSITION into it (persistently-bad
+	// schedule must not spam an Event per resync, #388 review). A mix of
+	// valid+invalid windows has no single aggregate condition state to gate
+	// on (the app is still warming via the valid window), so it stays
+	// unconditionally loud — a rarer misconfiguration.
+	if len(invalid) > 0 && (!allInvalid || prevReason != "InvalidWarmWindow") {
+		for _, w := range invalid {
+			d.Cluster.Event(cr, "Warning", "InvalidWarmWindow",
+				fmt.Sprintf("warmSchedule window {start:%q end:%q timezone:%q} is not valid 5-field cron/IANA-tz — it warms nothing; fix or remove it", w.Start, w.End, w.Timezone))
+		}
+	}
+	switch {
+	case !active:
+		d.Holds.ReleaseHold(app) // idempotent; the gateway parks the compute on idle
+		if allInvalid {
+			d.setCondition(cr, CondWarmHold, "False", "InvalidWarmWindow", "every warmSchedule window failed to parse; nothing is held warm")
+		} else {
+			d.setCondition(cr, CondWarmHold, "False", "WindowInactive", "no warmSchedule window is active; compute sleeps at zero and wakes on connect")
+		}
+	default:
+		if err := d.Holds.EnsureHold(ctx, app); err != nil {
+			// Defense-in-depth (#388 review): EnsureHold's error may wrap a
+			// malformed DSN (net/url can echo a postgres://role:pw@... userinfo
+			// verbatim). Redact BEFORE this text reaches the condition, the
+			// Event, or (via the controller's error log) stdout.
+			safeErr := redactDSN(err.Error())
+			d.setCondition(cr, CondWarmHold, "False", "HoldFailed",
+				fmt.Sprintf("warm window active but the hold could not be established (degraded to cold-wake this pass; retried next resync): %s", safeErr))
+			if prevReason != "HoldFailed" {
+				d.Cluster.Event(cr, "Warning", "WarmHoldFailed",
+					fmt.Sprintf("could not hold compute-%s warm for the active window (cold wake still works; retrying): %s", app, safeErr))
+			}
+			return
+		}
+		d.setCondition(cr, CondWarmHold, "True", "WindowActive",
+			"a warmSchedule window is active; holding one gateway connection so the compute stays warm (no DB cold start during the window)")
+	}
+}
+
 // reconcileDelete runs safe deprovision under the finalizer, then removes it so the
 // CR object can be deleted. Mirrors provision-app.sh destroy (safe-by-default):
 // remove k8s objects, then two-sided timeline delete unless keepTimelineOnDelete.
@@ -282,6 +368,12 @@ func (d *Deps) reconcileDelete(ctx context.Context, cr *AppDatabase) (bool, erro
 	app := cr.Spec.AppName
 	cr.Status.Phase = PhaseDeleting
 	_ = d.Cluster.UpdateStatus(ctx, cr) // best-effort; object may be mid-deletion
+
+	// Drop any scheduled warm hold FIRST (#388): a deprovisioned app must not keep
+	// a connection (and its compute) alive. Idempotent, nil-safe.
+	if d.Holds != nil {
+		d.Holds.ReleaseHold(app)
+	}
 
 	// Remove the per-app read-only compute first (Deployment/Service/HPA), so a
 	// deprovisioned app leaves no orphaned read replicas (#127). Idempotent.
@@ -373,6 +465,21 @@ func (d *Deps) setCondition(cr *AppDatabase, condType, status, reason, message s
 	})
 }
 
+// dsnUserinfoRE matches a URL userinfo segment (scheme://user:password@) that
+// may be embedded anywhere in free text — e.g. a Dial/Ping error that wraps a
+// malformed postgres:// DSN, which net/url can echo verbatim including the
+// password (review finding, #388).
+var dsnUserinfoRE = regexp.MustCompile(`://[^\s/@]+:[^\s/@]+@`)
+
+// redactDSN strips any embedded DSN userinfo (role:password) from free-form
+// text before it reaches a status Condition, a Kubernetes Event, or a log
+// line. Defense-in-depth: EnsureHold's error should never legitimately
+// contain the DSN, but if a driver/url error wraps one, the password must
+// never surface in cluster-visible or logged text.
+func redactDSN(s string) string {
+	return dsnUserinfoRE.ReplaceAllString(s, "://[REDACTED]@")
+}
+
 // isConditionTrue reports whether the named status condition is present and "True".
 func isConditionTrue(cr *AppDatabase, condType string) bool {
 	for i := range cr.Status.Conditions {
@@ -381,6 +488,18 @@ func isConditionTrue(cr *AppDatabase, condType string) bool {
 		}
 	}
 	return false
+}
+
+// findCondition returns the named status condition, or nil if absent. Used to
+// snapshot a condition's prior state before a reconcile pass recomputes it
+// (transition-gating for Warning events, e.g. reconcileWarmHold).
+func findCondition(cr *AppDatabase, condType string) *Condition {
+	for i := range cr.Status.Conditions {
+		if cr.Status.Conditions[i].Type == condType {
+			return &cr.Status.Conditions[i]
+		}
+	}
+	return nil
 }
 
 // lsnGTE reports whether Neon LSN a >= b. Neon prints an LSN as "hi/lo" in hex — a

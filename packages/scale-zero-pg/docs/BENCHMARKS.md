@@ -955,6 +955,30 @@ The harness is validated cluster-free (`SELFTEST=1 ./_verify-writer-ceiling.sh` 
 `aggregate_wcounts` parsers are asserted to produce this exact row format from fixed inputs.
 **No write numbers are fabricated here** — the table stays "pending" until the OKE run fills it.
 
+## Scheduled DB warm lockstep — first-in-window query latency (knext #388, ADR-0030 addendum)
+
+Mechanism shipped (code + manifests + unit tests; **no cluster numbers yet — the OKE
+measurement is the lead's post-merge job**). While an `AppDatabase.spec.warmSchedule`
+window is active, the appdb operator holds one authenticated connection through
+pggw-apps so the app's compute never idles to zero during the window.
+
+**Expected behavior (hypothesis to verify, NOT measured):** during an active window,
+the first user query should pay **no compute wake** (saves the ~2.4–3.7s cold wake,
+the "Cold + warm OKE baseline" section above) and **no cold-auth settle** — the held
+session completed SCRAM at window open. What remains is ordinary pool establishment
+against an already-warm compute (TCP + auth, ~tens of ms). Versus pod-only warming
+(#380), the first-in-window request should drop from "pod warm but DB cold" (~one full
+DB wake on the query path) to fully warm.
+
+**Measurement plan for the OKE run (owner-gated):** NextApp + AppDatabase with the
+same `warmSchedule` window; at window open+2min, time the app's first DB query
+(p50/p95 over ~10 window openings), three arms: (a) no warming, (b) pod-only
+`spec.scaling.warmSchedule`, (c) pod + DB lockstep. Assert: (c) first-query p50 ≈
+steady-state query time; (b)−(c) ≈ one cold wake; `WarmHold` condition flips within
+one resync (≤15s default) of each boundary; `ComputePhantomKeepalive` does NOT fire
+during a >30m window; hold released ≤1 resync after window end and the compute parks
+on the ordinary `GW_IDLE_MS` idle. **No numbers are recorded here until that run.**
+
 ## Capacity / sizing facts
 
 - Gateway: `GW_MAX_CONNS=90` < compute `max_connections=100`; excess → clean 53300.

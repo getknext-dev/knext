@@ -14,10 +14,12 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
+	"sort"
 	"strconv"
 	"syscall"
 	"time"
@@ -76,6 +78,9 @@ func main() {
 	resyncMs := envInt("APPDB_RESYNC_MS", 15000)
 	healthAddr := env("APPDB_HEALTH_ADDR", ":9092")
 	httpTimeout := time.Duration(envInt("APPDB_HTTP_TIMEOUT_MS", 10000)) * time.Millisecond
+	// Bounds the warm-hold Dial/Ping (knext #388 review): a black-holed compute
+	// must never stall reconciliation of every other AppDatabase behind it.
+	warmHoldTimeout := time.Duration(envInt("APPDB_WARM_HOLD_TIMEOUT_MS", 5000)) * time.Millisecond
 
 	if tenant == "" {
 		logger.Fatal("[appdb] APPDB_TENANT_ID is required")
@@ -101,10 +106,20 @@ func main() {
 	render.ComputeImage = env("APPDB_COMPUTE_IMAGE", render.ComputeImage)
 	render.InitImage = env("APPDB_INIT_IMAGE", render.InitImage)
 
+	cluster := appdb.NewK8sCluster(cs, dyn, namespace, render, reclaimCM, logger)
+	// The scheduled DB warm lockstep (knext #388, ADR-0030 addendum): while any
+	// AppDatabase warmSchedule window is active the reconciler holds one
+	// authenticated connection through the apps-gateway so the compute never goes
+	// idle. The DSN comes from the operator-minted app-db-<app> Secret
+	// (DatabaseURL); the dial is a real SCRAM connection (lib/pq) — never a
+	// replica write (the gateway stays the sole scaler).
+	holds := appdb.NewHoldManager(cluster.DatabaseURL, appdb.SQLDialer{ConnectTimeout: warmHoldTimeout}, warmHoldTimeout)
+
 	deps := &appdb.Deps{
 		Pageserver:    appdb.NewHTTPPageserver(pageserverURL, httpTimeout),
 		Safekeeper:    appdb.NewHTTPSafekeeper(namespace, skService, skPort, skReplicas, httpTimeout),
-		Cluster:       appdb.NewK8sCluster(cs, dyn, namespace, render, reclaimCM, logger),
+		Cluster:       cluster,
+		Holds:         holds,
 		Tenant:        tenant,
 		Template:      template,
 		PGVersion:     pgVersion,
@@ -121,7 +136,11 @@ func main() {
 
 	ctrl := appdb.NewController(dyn, deps, namespace, time.Duration(resyncMs)*time.Millisecond, logger)
 
-	// /healthz + /readyz for the Deployment probes.
+	// /healthz + /readyz for the Deployment probes; /metrics exposes the warm-hold
+	// gauge (appdb_warm_hold_active{app=...} 1 per held app) so the
+	// ComputePhantomKeepalive alert can subtract DELIBERATE warm holds from the
+	// gateway's active-connection count (60-prometheus.yaml — a held window is
+	// intended warming, not a phantom pool).
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		if ctrl.Healthy() {
@@ -133,6 +152,21 @@ func main() {
 		_, _ = w.Write([]byte("stale reconcile"))
 	})
 	mux.HandleFunc("/readyz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+	mux.HandleFunc("/metrics", func(w http.ResponseWriter, _ *http.Request) {
+		held := holds.Held()
+		apps := make([]string, 0, len(held))
+		for app := range held {
+			apps = append(apps, app)
+		}
+		sort.Strings(apps)
+		w.Header().Set("content-type", "text/plain")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("# HELP appdb_warm_hold_active 1 while the appdb operator holds this app's compute warm for an active warmSchedule window (knext #388).\n"))
+		_, _ = w.Write([]byte("# TYPE appdb_warm_hold_active gauge\n"))
+		for _, app := range apps {
+			_, _ = fmt.Fprintf(w, "appdb_warm_hold_active{app=%q} 1\n", app)
+		}
+	})
 	srv := &http.Server{Addr: healthAddr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	go func() {
 		logger.Printf("[appdb] health on %s", healthAddr)
