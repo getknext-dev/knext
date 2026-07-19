@@ -33,6 +33,23 @@ spec:
     maxScale: 20
 ```
 
+Every scaling knob on this page — `minScale`, `maxScale`, `containerConcurrency`, `poolMax`,
+`warmSchedule`, `targetBurstCapacity`, `panicWindowPercentage`, `panicThresholdPercentage` — is
+also settable from your `kn-next.config.ts` `scaling:` block, so the app and its autoscaling are
+configured from one file:
+
+```ts title="kn-next.config.ts"
+const config: KnativeNextConfig = {
+  name: 'storefront',
+  scaling: {
+    minScale: 0,
+    maxScale: 20,
+    containerConcurrency: 20,
+    targetBurstCapacity: -1,
+  },
+};
+```
+
 ## The cold-start budget
 
 A cold start is **pod scheduling + container start + the server boot + first-request work**. The

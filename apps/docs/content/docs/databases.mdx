@@ -36,8 +36,28 @@ The `NextApp` never names or reaches into another app's database — it only bin
 lives in its **own** namespace. Swapping providers is a Secret change: zero app or CR schema
 change.
 
-The `kn-next db bind` command writes exactly this patch for you — see the
-[CLI reference](/docs/cli#kn-next-db-bind).
+You can also declare the binding in your `kn-next.config.ts` — knext emits the same
+`spec.database` into the app's manifest, so the database and the app are configured from **one
+file**:
+
+```ts title="kn-next.config.ts"
+import type { KnativeNextConfig } from '@knext/core';
+
+const config: KnativeNextConfig = {
+  name: 'storefront',
+  // …storage, registry, scaling, etc.
+  database: {
+    secretRef: { name: 'storefront-db' },     // key defaults to DATABASE_URL
+    roSecretRef: { name: 'storefront-db' },    // optional; key defaults to DATABASE_URL_RO
+  },
+};
+
+export default config;
+```
+
+The config still references a **Secret** — never an inline DSN. Declaring `roSecretRef` without
+`secretRef` is rejected. The `kn-next db bind` command writes the equivalent patch directly — see
+the [CLI reference](/docs/cli#kn-next-db-bind).
 
 <Callout type="warn">
 Secrets live in Kubernetes Secrets / env **only** — never in `spec.env`, config files, images, or

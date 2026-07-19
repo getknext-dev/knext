@@ -205,6 +205,17 @@ export function validateConfig(config: KnativeNextConfig): void {
         }
     }
 
+    // Database binding validation (#417) — the ONE cheap check mirroring the
+    // operator's CRD XValidation on DatabaseSpec (nextapp_types.go):
+    // `!has(self.roSecretRef) || has(self.secretRef)`. Everything else
+    // (Secret existence, DSN correctness) stays the operator's job —
+    // envMap/secretKeyRef semantics, not re-implemented here.
+    if (config.database?.roSecretRef && !config.database?.secretRef) {
+        errors.push(
+            "'database.roSecretRef' requires 'database.secretRef' (mirrors the NextApp CRD's XValidation)",
+        );
+    }
+
     // Env validation (#186) — plain NON-SECRET env vars. Mirror the operator's
     // CRD CEL rules so a bad name fails HERE (validate/deploy time) instead of
     // only at `kubectl apply`.

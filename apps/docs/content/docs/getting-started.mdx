@@ -95,6 +95,11 @@ export default config;
 Don't use it. See [Multi-cloud deploy](/docs/multi-cloud).
 </Callout>
 
+The `scaling` block also carries the full set of autoscaling knobs (`containerConcurrency`,
+`poolMax`, `warmSchedule`, burst-response tuning) — see [Scale to zero](/docs/scale-to-zero#set-it-per-app).
+To bind an existing Postgres, add a `database` block — see
+[Databases](/docs/databases#bind-an-existing-postgres).
+
 ## 3 · Build, push, deploy
 
 **`deploy`** is the default command — build → push → apply the `NextApp` CR. Validation runs

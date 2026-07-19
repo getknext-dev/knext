@@ -159,6 +159,40 @@ export interface ScalingConfig {
     panicThresholdPercentage?: number;
 }
 
+// #417 — bring-your-own database BINDING (ADR-0019), mirroring the NextApp
+// CRD's DatabaseSpec/DatabaseSecretRef
+// (packages/kn-next-operator/api/v1alpha1/nextapp_types.go) 1:1. knext is
+// engine-agnostic and provisions NO database (ADR-0025 — the managed
+// scale-to-zero-Postgres mode was removed). The only mode is BRING-YOUR-OWN:
+// this block BINDS an EXISTING Secret in the app's own namespace as the
+// app's DATABASE_URL (+ optional roSecretRef -> DATABASE_URL_RO). Typed
+// sugar over the same envMap -> secretKeyRef machinery `secrets.envMap`
+// uses (ADR-0019) — precedence/dedupe semantics are identical.
+//
+// SECURITY: this config carries a Secret NAME + KEY reference ONLY — never
+// a DSN or credential value. The actual connection string lives in the
+// Kubernetes Secret and is never written to this file. There is
+// deliberately no namespace field: cross-namespace secretKeyRef is
+// impossible in Kubernetes, so a NextApp can only ever bind a Secret in its
+// own namespace.
+export interface DatabaseSecretRef {
+    // Name of the Secret (DNS-1123 subdomain) in the app's own namespace.
+    name: string;
+    // Key inside the Secret holding the DSN. Defaults to "DATABASE_URL" for
+    // secretRef and "DATABASE_URL_RO" for roSecretRef.
+    key?: string;
+}
+
+export interface DatabaseConfig {
+    // Binds an EXISTING Secret as the app's DATABASE_URL (BYO mode,
+    // ADR-0019).
+    secretRef?: DatabaseSecretRef;
+    // Optionally binds a read-only DSN as DATABASE_URL_RO. A single Secret
+    // carrying both keys binds with roSecretRef: { name: <same as secretRef> }.
+    // Requires secretRef (operator XValidation; also checked at CLI validate time).
+    roSecretRef?: DatabaseSecretRef;
+}
+
 // Observability — Prometheus metrics + Grafana dashboards
 export interface ObservabilityConfig {
     enabled: boolean;
@@ -208,6 +242,10 @@ export interface KnativeNextConfig {
     runtime?: "bun" | "node"; // Runtime to execute the Next.js standalone server.js: 'bun' or 'node' (default)
     infrastructure?: InfrastructureConfig; // Deploy PostgreSQL, Redis, MinIO as Knative services
     scaling?: ScalingConfig; // Knative autoscaling options
+    // #417 — bring-your-own database binding (ADR-0019/ADR-0025): binds an
+    // EXISTING Secret's DSN into the app as DATABASE_URL (+ optional
+    // DATABASE_URL_RO). knext provisions NO database. See {@link DatabaseConfig}.
+    database?: DatabaseConfig;
     observability?: ObservabilityConfig; // Prometheus metrics + Grafana dashboards
     healthCheckPath?: string; // Default: "/api/health"
     secrets?: SecretsConfig; // Kubernetes Native Secrets Binding

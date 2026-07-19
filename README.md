@@ -266,6 +266,9 @@ interface KnativeNextConfig {
   
   // Optional: Knative autoscaling settings
   scaling?: ScalingConfig;
+
+  // Optional: bring-your-own database binding (no provisioning)
+  database?: DatabaseConfig;
 }
 ```
 
@@ -424,6 +427,30 @@ scaling: {
   panicThresholdPercentage: 200,
 }
 ```
+
+### Database Binding
+
+knext is **engine-agnostic** and provisions **no database** — bring your own Postgres (or
+whatever engine your app uses) and bind it into `kn-next.config.ts`. `database` binds an
+**existing** Kubernetes Secret's connection string into the app as `DATABASE_URL` (and
+optionally a read-only replica DSN as `DATABASE_URL_RO`):
+
+```typescript
+database: {
+  // Binds an existing Secret as the app's DATABASE_URL.
+  // `key` defaults to "DATABASE_URL" when omitted.
+  secretRef: { name: 'storefront-db' },
+
+  // Optional: bind a read-only DSN as DATABASE_URL_RO. Requires secretRef.
+  // A single Secret carrying both keys binds with roSecretRef: { name: <same> }.
+  // `key` defaults to "DATABASE_URL_RO" when omitted.
+  roSecretRef: { name: 'storefront-db' },
+}
+```
+
+Only the Secret **name** and **key** are ever written to this config file — never a
+connection string or credential. The DSN itself lives exclusively in the Kubernetes Secret.
+Omitting `database` entirely leaves the app's database wiring unchanged (back-compat).
 
 ---
 
