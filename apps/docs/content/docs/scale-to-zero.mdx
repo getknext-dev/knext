@@ -55,3 +55,41 @@ does not make scheduling free. Treat any specific millisecond figure as environm
 a guaranteed number. Node (with `NODE_COMPILE_CACHE`) remains the default runtime; Bun's
 build-time bytecode is the opt-in for squeezing the boot phase further.
 </Callout>
+
+## Tuning burst response
+
+Scale-to-zero and warm floors handle traffic you can predict. A **burst you did not predict** —
+traffic that jumps from a handful of requests to a spike faster than new pods can be scheduled —
+is a different problem, and `spec.scaling` has three knobs for it that work together:
+
+```yaml
+spec:
+  scaling:
+    maxScale: 10
+    containerConcurrency: 20
+    poolMax: 5                       # keep maxScale × poolMax within your database's connection budget
+    targetBurstCapacity: -1          # keep a request buffer in front of your pods during a scale-up
+    panicWindowPercentage: 10        # react to a spike faster than the normal evaluation window
+    panicThresholdPercentage: 200    # how far over target traffic has to go before reacting fast
+```
+
+- **`targetBurstCapacity`** controls whether a buffer sits in front of your pods while they scale
+  up. Set it to `-1` to always keep that buffer in place — the safest setting for a bursty
+  workload, at the cost of a small extra hop on every request. Set it to a specific number of
+  requests to buffer only up to that amount. Leave it unset and the platform default applies.
+- **`panicWindowPercentage`** and **`panicThresholdPercentage`** control how quickly the
+  autoscaler notices a burst and reacts. A smaller `panicWindowPercentage` (as low as `1`) makes
+  it look at a shorter, more recent slice of traffic; a lower `panicThresholdPercentage` (as low
+  as `110`) makes it react to a smaller overshoot above your target. Leave either unset and the
+  platform default applies.
+
+<Callout type="warn">
+**These knobs change timing, not the ceiling.** `targetBurstCapacity` and the panic-reaction knobs
+control *how a burst is absorbed while your service scales up* — they don't change the maximum
+number of pods your service can reach (`maxScale`), and they don't change how many database
+connections each pod can open (`poolMax`, if you've set one). If you've sized `maxScale` and
+`poolMax` so their product fits your database's connection budget, tuning burst response for a
+faster reaction is safe. If you haven't set `poolMax`, tuning these knobs doesn't create a new
+risk, but it also doesn't protect you from the one that already exists — size `maxScale` and
+`poolMax` together first.
+</Callout>
