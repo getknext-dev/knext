@@ -128,6 +128,34 @@ export function buildNextAppCRObject(
           }
         : undefined;
 
+    // Database binding spec (#417, ADR-0019) — maps config.database ->
+    // spec.database ONLY when config.database.secretRef is set, mirroring
+    // the scaling-knobs mapping style: unset ⇒ omitted from the CR ⇒
+    // back-compat (no spec.database key at all, not present-as-undefined).
+    // roSecretRef without secretRef is rejected by validateConfig before
+    // this ever runs (mirrors the operator's XValidation), so it is safe to
+    // key emission off secretRef alone here.
+    const database = config.database?.secretRef
+        ? {
+              secretRef: {
+                  name: config.database.secretRef.name,
+                  ...(config.database.secretRef.key
+                      ? { key: config.database.secretRef.key }
+                      : {}),
+              },
+              ...(config.database.roSecretRef
+                  ? {
+                        roSecretRef: {
+                            name: config.database.roSecretRef.name,
+                            ...(config.database.roSecretRef.key
+                                ? { key: config.database.roSecretRef.key }
+                                : {}),
+                        },
+                    }
+                  : {}),
+          }
+        : undefined;
+
     // Revalidation spec
     const revalidation =
         config.queue && config.queue.provider === "kafka"
@@ -223,6 +251,7 @@ export function buildNextAppCRObject(
         ...(resources ? { resources } : {}),
         ...(storage ? { storage } : {}),
         ...(cache ? { cache } : {}),
+        ...(database ? { database } : {}),
         ...(revalidation ? { revalidation } : {}),
         ...(config.secrets ? { secrets } : {}),
         // #186 plain, NON-SECRET env vars → spec.env. The operator injects
