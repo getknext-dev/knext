@@ -42,9 +42,7 @@ describe("buildNextAppCRObject — database binding (#417)", () => {
     it("omits spec.database when config.database is unset (back-compat)", () => {
         const spec = specOf(baseConfig(undefined));
         expect(spec.database).toBeUndefined();
-        expect(Object.prototype.hasOwnProperty.call(spec, "database")).toBe(
-            false,
-        );
+        expect(Object.hasOwn(spec, "database")).toBe(false);
     });
 
     it("maps a bare secretRef into spec.database.secretRef (key defaults omitted)", () => {
