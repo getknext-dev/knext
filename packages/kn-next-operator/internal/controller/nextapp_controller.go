@@ -754,6 +754,22 @@ func (r *NextAppReconciler) buildDesiredKsvc(nextApp *appsv1alpha1.NextApp, ksvc
 		annotations["autoscaling.knative.dev/target-burst-capacity"] = fmt.Sprintf("%d", *nextApp.Spec.Scaling.TargetBurstCapacity)
 	}
 
+	// PanicWindowPercentage / PanicThresholdPercentage (#413, ADR-0033): how
+	// fast the KPA reacts to an unpredicted surge. Only stamped when
+	// EXPLICITLY set — nil leaves the annotation absent so the Knative
+	// cluster defaults (10% window / 200% threshold) apply unmanaged, exactly
+	// as before this field existed (byte-identical back-compat). Written into
+	// the SAME annotations map as min-scale/max-scale/containerConcurrency/
+	// targetBurstCapacity, and is untouched by the preview-env override below
+	// (that override rewrites only max-scale/min-scale/retention-period, so a
+	// stamped panic annotation always survives it).
+	if nextApp.Spec.Scaling != nil && nextApp.Spec.Scaling.PanicWindowPercentage != nil {
+		annotations["autoscaling.knative.dev/panic-window-percentage"] = fmt.Sprintf("%d", *nextApp.Spec.Scaling.PanicWindowPercentage)
+	}
+	if nextApp.Spec.Scaling != nil && nextApp.Spec.Scaling.PanicThresholdPercentage != nil {
+		annotations["autoscaling.knative.dev/panic-threshold-percentage"] = fmt.Sprintf("%d", *nextApp.Spec.Scaling.PanicThresholdPercentage)
+	}
+
 	// Observability annotations — aligned with CLI
 	if nextApp.Spec.Observability != nil && nextApp.Spec.Observability.Enabled {
 		annotations["prometheus.io/scrape"] = "true"
