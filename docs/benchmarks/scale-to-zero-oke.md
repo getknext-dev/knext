@@ -1,6 +1,14 @@
-# Scale-to-zero & burst benchmark — OKE (2026-07-19)
+# Scale-to-zero & burst benchmark — OKE (2026-07-19 / 2026-07-20)
 
-Status: point-in-time measurement · Date: 2026-07-19 · Target: `file-manager` Knative Service
+Status: point-in-time measurement · Runs: 2026-07-19 (run 1, throwaway scripts) and 2026-07-20
+(run 2, committed harness) · Target: `file-manager` Knative Service
+
+> **Correction notice (2026-07-20).** Run 2 **did not reproduce** run 1's headline burst finding —
+> the median-latency delta between the baseline and tuned burst configs reversed sign. The run-1
+> conclusion that the burst knobs are a "marginal median-latency lever" is **withdrawn**; see
+> [Run 2](#run-2-2026-07-20--produced-by-the-committed-harness) and the
+> [corrected findings](#corrected-findings-after-run-2). Run-1 data is retained below as history,
+> not as a current conclusion.
 
 ## Environment
 
@@ -14,6 +22,35 @@ Status: point-in-time measurement · Date: 2026-07-19 · Target: `file-manager` 
 
 This is a single small (2-node) cluster. Treat every number below as **environment-dependent, not
 a guarantee** — see the closing note.
+
+## Reproducing this
+
+Every phase below is reproducible via the committed harness at
+[`benchmarks/scale-to-zero-oke/`](../../benchmarks/scale-to-zero-oke/) (added in #423 — the
+numbers here were originally produced by throwaway temp scripts). It runs against any Knative
+Service on any cluster; no cluster identity is hardcoded:
+
+```bash
+cd benchmarks/scale-to-zero-oke
+
+# Dry run — prints every kubectl/k6 action without touching a cluster.
+./run.sh --service my-app --namespace default --dry-run
+
+# The full run behind this doc (Phase A + Phase C + the discriminating burst A/B):
+./run.sh --context my-kube-context --namespace default --service my-app \
+  --max-scale 6 --container-concurrency 15
+```
+
+The harness captures and restores the target's autoscaling config on exit (including on Ctrl-C),
+so an interrupted run doesn't leave the cluster patched with test config. See
+[its README](../../benchmarks/scale-to-zero-oke/README.md) for the full flag list, how to read the
+output, and the **two false-result traps** — think-time load that never fans out (peak pods = 1),
+and an oversized k6 CPU request that leaves the load generator `Pending` (a false zero-load
+result). Both are the failures that actually occurred while producing the numbers below.
+
+Not covered by the harness: CI regression gating (needs a dedicated perf environment) and
+p99 cold start *under concurrency* — the Phase A methodology here is sequential single-request
+samples.
 
 ## Methodology
 
@@ -47,7 +84,10 @@ CPU and went `Pending` on the near-full 2-node cluster — 1830m allocatable/nod
 the time. Refit k6 to request 150m CPU; `file-manager` pods request 0 CPU so the *app* was never
 the constrained side.)
 
-## Results
+## Results — run 1 (2026-07-19, historical)
+
+These numbers were produced by throwaway temp scripts, before the harness existed. Retained as
+history. Where run 2 contradicts them, **run 2 governs**.
 
 ### Cold start, soak, and first burst round
 
@@ -70,7 +110,7 @@ Total across cold-start/round-1-burst/soak (5 + 7290 + 7379 + 7409 + 7408 + 2264
 | tuned (TBC=-1, pw=6, pt=150) | 1 | 9s | 9s | 37276 | 2 (0.005%) | 81ms | 286ms | 515ms | 28.4s | 497 |
 | tuned | 2 | 9s | 15s | 27101 | 0 | 72ms | 549ms | 1.31s | 21.77s | 361 |
 
-## Findings
+## Findings — run 1 (as published 2026-07-19; the burst-knob bullet is now WITHDRAWN)
 
 - **Fan-out to maxScale confirmed every rep once concurrency was pinned to force it:** 0→6 pods
   in **9–15s**, with 2 pods reached in **6–9s** — this is the run that actually exercises the
@@ -80,8 +120,11 @@ Total across cold-start/round-1-burst/soak (5 + 7290 + 7379 + 7409 + 7408 + 2264
   fan-out reps (0.005% in the one rep with failures; 0% in the other three). Combined with the
   52,134-request, 0-failure cold-start/round-1-burst/soak dataset, the platform did not drop requests under
   either sustained or bursty load in this test.
-- **The burst knobs (`targetBurstCapacity`, `panicWindowPercentage`, `panicThresholdPercentage`)
-  are a marginal MEDIAN-latency lever, not an error-rate or tail-latency fixer.** Tuned config
+- ~~**The burst knobs (`targetBurstCapacity`, `panicWindowPercentage`, `panicThresholdPercentage`)
+  are a marginal MEDIAN-latency lever, not an error-rate or tail-latency fixer.**~~
+  **WITHDRAWN — refuted by run 2**, which measured the tuned config's median *higher* than
+  baseline's. The run-1 delta below was run-to-run noise. Original text kept for the record:
+  Tuned config
   held median **72–81ms** vs baseline **106–112ms** — keeping `targetBurstCapacity=-1` (an
   always-on buffer in front of the pods) shows up as a consistent median improvement. It did
   **not** improve error rate (already ~0 in both) and the tail is noisy in both configs (max
@@ -97,8 +140,123 @@ Total across cold-start/round-1-burst/soak (5 + 7290 + 7379 + 7409 + 7408 + 2264
   across 22,643 requests, scaled 0→3 pods, reached 2 pods at 12s, p99 731ms (again the one cold
   first-request pulling the tail up).
 
+## Run 2 (2026-07-20) — produced by the committed harness
+
+Same cluster and same target (`file-manager`, OKE 2-node) as run 1. **This is the first run
+produced end-to-end by the committed harness** rather than by throwaway scripts, so it is
+reproducible by anyone with cluster access:
+
+```bash
+cd benchmarks/scale-to-zero-oke
+./run.sh --namespace default --service file-manager \
+  --max-scale 6 --container-concurrency 15 --burst-vus 90
+```
+
+Harness defaults for this run: `max-scale=6`, `containerConcurrency` pinned to **15** for the
+burst phase, **90** continuous (no-think-time) burst VUs (`90 ÷ 15 = 6` pods = the cap),
+k6 image `grafana/k6:0.49.0` at a 150m CPU request. Captured pre-run config (restored on exit):
+`max-scale=10`, `containerConcurrency=20`, burst/panic annotations unset.
+
+### Phase A — cold start (5 sequential single-request samples, baseline config)
+
+| Sample | Idle before request | Response time | Peak pods |
+|---|---|---|---|
+| 1 | 66s | 5.84s | 1 |
+| 2 | 18s | **17.6s** | 2 |
+| 3 | 30s | 3.72s | 1 |
+| 4 | 72s | 3.83s | 1 |
+| 5 | 48s | 3.95s | 1 |
+
+Median **3.95s**; max **17.6s** — a **4.5× median** outlier (run 1's worst cold sample was 6.66s).
+All 5 samples succeeded; 0 errors.
+
+**The median badly understates the cold-start tail.** Four of five samples cluster in 3.7–5.9s and
+one lands at 17.6s. **We do not know what caused the 17.6s sample** — the harness records
+end-to-end request time only, with no per-stage breakdown (scheduling vs image pull vs boot vs
+first serve), so any explanation would be speculation and none is offered here. What the sample
+does establish is that a 5-sample sequential median is not a safe summary of cold-start behavior,
+and it is the concrete empirical justification for measuring **p99 cold start under concurrency**
+(#309) rather than reporting a median of sequential singles.
+
+### Phase C — sustained soak (ramp 0→120 VU over 20s, hold 3m, baseline config, think-time load)
+
+| Reqs | Errors | med | p90 | p95 | p99 | max | rps | peak pods |
+|---|---|---|---|---|---|---|---|---|
+| 23,027 | 0 (0.00%) | 7.75ms | 21.1ms | 44.56ms | 191.35ms | 3.83s | 109.4 | **1** |
+
+**Peak pods varied run-to-run: 1 here vs 3 in run 1**, at comparable request volume (23,027 vs
+22,643) and identical load shape. The harness flagged this rep with its `peak pods = 1` warning.
+Under think-time load a single pod can absorb 120 VUs, so whether a second pod is created at all
+depends on where request arrivals land relative to the autoscaler's window — this is variance in
+the measurement, not a demonstrated behavior change. It is also why the *burst* phase pins
+`containerConcurrency` to force fan-out.
+
+Phase D (scale-down after soak): scaled to 0 after **60s**.
+
+### Phase B — discriminating burst A/B (cc=15 pinned, 90 continuous VUs, maxScale=6)
+
+| Config | rep | peak pods | →2 pods | →6 pods | reqs | errors | med | p90 | p95 | p99 | max | rps |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| baseline (TBC=200, pw=10, pt=200) | 1 | 6 | 3s | 9s | 37,031 | 0 | 70.86ms | 332.9ms | 415.64ms | 668.97ms | 8.34s | 493.5 |
+| baseline | 2 | 6 | 6s | 12s | 35,712 | 0 | 77.4ms | 343.08ms | 429.76ms | 686.82ms | 8.39s | 476.0 |
+| tuned (TBC=-1, pw=6, pt=150) | 1 | 6 | **0s** | 9s | 34,593 | 0 | 88.06ms | 348.91ms | 431.48ms | 715.7ms | 7.92s | 461.1 |
+| tuned | 2 | 6 | **0s** | 3s | — | — | — | — | — | — | — | — |
+
+**Data gap, stated rather than filled:** the results file records tuned rep 2's pod metrics
+(peak=6, →2 pods 0s, →6 pods 3s) but **contains no k6 metrics block for that rep** — no request
+count, latency, or error figures. Those cells are left empty rather than estimated, and every
+request total below covers only the **three** reps that have recorded metrics.
+
+Recorded request volume, run 2: **107,336** burst requests across those three reps
+(37,031 + 35,712 + 34,593), **0 failures**. Including Phase A (5) and Phase C (23,027):
+**130,368 recorded requests, 0 failures** for the whole run.
+
+### Corrected findings after run 2
+
+- **The run-1 median improvement did not reproduce — the direction flipped.** Run 1 measured tuned
+  at 81/72ms vs baseline 106/112ms; run 2 measured tuned at **88.06ms** vs baseline **70.86ms /
+  77.4ms**, i.e. baseline equal or better. Across both runs the burst knobs show **no demonstrable
+  effect on median response time at all**. This is a firmer statement than run 1's "marginal lever"
+  framing, not a softer one: the honest reading is not "the knobs help a little" but "**we cannot
+  demonstrate that they help**." Do not cite the run-1 delta.
+- **Methodological lesson, and the reason this correction exists: a single-run performance delta on
+  a shared 2-node cluster is not trustworthy.** Run 1's ~30ms gap looked like a clean signal,
+  consistent across two reps, and was published as a finding; a second run of the same A/B on the
+  same cluster reversed it. Two reps *within* one run share that run's cluster conditions and so do
+  not establish reproducibility — only a repeated run does. Treat any future single-run latency
+  delta here as a hypothesis until an independent run confirms it.
+- **A real and consistent difference does exist — in how fast capacity is added, not in latency.**
+  The tuned config reached 2 pods **instantly (0s in both reps)** vs baseline's **3s and 6s**.
+  `targetBurstCapacity=-1` keeps the activator in the request path, so it buffers requests and
+  triggers scale-up immediately rather than waiting for a proxy-reported concurrency breach. The
+  cost is an extra network hop on every request — a plausible reading of why tuned's median is not
+  better. **Faster fan-out, not better latency** is the defensible claim.
+- **Fan-out to the cap confirmed in all four burst reps: `peak=6` every time**, with 0 errors
+  across the 107,336 requests that have recorded metrics.
+- **Cold start remains the tail driver, and its own tail is worse than run 1 suggested** (17.6s max
+  vs 6.66s in run 1). Burst-knob tuning does not touch it.
+
+### Harness fail-closed path: live-verified
+
+The first live invocation of the harness in this session **aborted instead of producing results**.
+A transient `TLS handshake timeout` caused the autoscaling patch to fail; the harness detected the
+failed patch, refused to run any load phase against a configuration it had not successfully
+applied, and restored the service exactly as captured (`containerConcurrency=20`, `max-scale=10`,
+annotations returned to their captured state, no k6 Jobs/ConfigMaps left behind).
+
+That is the fail-loud/fail-closed behavior added in the harness hardening pass, and it is worth
+recording that it fired for real on its first live outing: **without it, that run would have
+produced a complete, plausible-looking benchmark measuring an unapplied config** — a silently
+wrong result of exactly the kind this document is now correcting.
+
 ## Caveat
 
 These are **point-in-time measurements on a specific small (2-node) OKE cluster** with a
 zero-CPU-request target app — they demonstrate behavior and relative effect, not portable
 absolute numbers or a performance guarantee for other clusters, node pools, or workloads.
+
+Run 2 additionally showed that **even the "relative effect" half of that claim needs a repeated
+run to stand up**: the burst A/B's median delta reversed between two runs of the same A/B against
+the same cluster and app. Latency deltas here should be reported only when they reproduce across
+runs; pod-count and time-to-N-pods observations proved far more stable and are the more
+trustworthy signal from this harness.

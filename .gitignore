@@ -88,3 +88,7 @@ skills-lock.json
 
 # turbo prune output (docs dependency closure, CI Trivy scan)
 .docs-closure/
+
+# benchmarks/scale-to-zero-oke/run.sh default output — a per-run artifact
+# against a live cluster, never checked in (#423).
+benchmarks/**/results/
