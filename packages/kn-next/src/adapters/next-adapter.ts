@@ -7,7 +7,11 @@
  * — that requires the adapter to live in @knext/core, not in one app.
  *
  * Hooks:
- *  - modifyConfig: force output:'standalone' on phase-production-build
+ *  - modifyConfig: force output:'standalone' on phase-production-build, and
+ *    inject the edge-scoped webpack IgnorePlugin that excludes
+ *    `instrumentation-node` from the EDGE bundle (#342/#356, ADR-0031) — the
+ *    platform-owned half of the guarded-instrumentation fence, composed after
+ *    any webpack hook the app still owns
  *  - onBuildComplete:
  *      1. Log output counts + routing counts
  *      2. Best-effort upload staticFiles + prerenders to MinIO/S3 keyed by buildId
@@ -65,9 +69,42 @@ const adapter: NextAdapter = {
 
         // Ensure standalone output is set (already set in next.config.ts but we
         // enforce it here so the adapter is self-contained in later phases).
+        //
+        // #356 / ADR-0031 — the edge `IgnorePlugin` fence is PLATFORM-OWNED.
+        // #342/#344: Next compiles `instrumentation.ts` for BOTH the nodejs and
+        // edge runtimes (any app with `middleware.ts` forces an edge build).
+        // The edge-clean entry guards EXECUTION behind `NEXT_RUNTIME ===
+        // 'nodejs'`, but webpack still STATICALLY traces the dynamic
+        // `import('./instrumentation-node')` into the edge bundle — pulling in
+        // `@knext/lib/clients` → `@cerbos/grpc`/`pg`/`minio` and failing the
+        // build with `Module not found`. For the EDGE compile ONLY we replace
+        // `instrumentation-node` with an empty module via `IgnorePlugin`, so its
+        // Node-only subtree never enters the edge bundle; the nodejs compile is
+        // untouched and keeps the real wiring (the knext runtime runs the app on
+        // Node — the standalone server). Apps used to hand-write this hook in
+        // their own next.config.ts; a NEW app that didn't know to do so silently
+        // re-broke the build. Every app wired through `adapterPath` now gets the
+        // fence by construction, composed AFTER any webpack hook the app still
+        // owns (guarded by adapter-edge-ignore-plugin.test.ts).
+        const appWebpack = config.webpack;
         return {
             ...config,
             output: "standalone",
+            webpack(webpackConfig, ctx) {
+                const cfg = appWebpack
+                    ? appWebpack(webpackConfig, ctx)
+                    : webpackConfig;
+                if (ctx.nextRuntime === "edge") {
+                    cfg.plugins = cfg.plugins || [];
+                    cfg.plugins.push(
+                        new ctx.webpack.IgnorePlugin({
+                            resourceRegExp:
+                                /instrumentation-node(\.[cm]?[jt]s)?$/,
+                        }),
+                    );
+                }
+                return cfg;
+            },
         };
     },
 
