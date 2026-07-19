@@ -20,9 +20,10 @@
  *   The admission matrix is validated CLIENT-SIDE here so the user gets the
  *   exact conflict at the keyboard instead of an apiserver rejection:
  *   DNS-1123 Secret names (rule 1), key defaults left to the server (rule 2),
- *   envMap DATABASE_URL/_RO collisions (rules 3/4), managed-vs-BYO mutual
- *   exclusion (rule 5), roSecretRef requires secretRef (rule 6), provisioning
- *   knobs are managed-mode-only (rule 7).
+ *   envMap DATABASE_URL/_RO collisions (rules 3/4), roSecretRef requires
+ *   secretRef (rule 6). Rules 5/7 (managed-vs-BYO mutual exclusion /
+ *   managed-mode-only provisioning knobs) no longer apply — managed database
+ *   mode was removed by ADR-0025 (#303); BYO via secretRef is the only mode.
  *
  *   When a DSN is available (--dsn or a local Secret manifest via
  *   --secret-file), the command also surfaces the measured wake/pooling
@@ -42,14 +43,6 @@ const log = createLogger({ module: "db-bind" });
 /** Env vars owned by spec.database (ADR-0019). */
 const ENV_DATABASE_URL = "DATABASE_URL";
 const ENV_DATABASE_URL_RO = "DATABASE_URL_RO";
-
-/** Managed-mode-only provisioning knobs (ADR-0019 rule 7). */
-const PROVISIONING_KNOBS = [
-    "tier",
-    "readReplicas",
-    "quotas",
-    "keepOnDelete",
-] as const;
 
 /** DNS-1123 subdomain (what Secret names must satisfy), max 253 chars. */
 const DNS1123_SUBDOMAIN_RE =
@@ -167,33 +160,18 @@ export interface BindTargetSpec {
 }
 
 /**
- * Cross-source validation — ADR-0019 rules 3/4 (envMap collisions), 5
- * (managed vs BYO) and 7 (provisioning knobs). `source` names where the
- * conflicting spec came from ("config" = local kn-next.config.ts,
- * "cluster" = the live NextApp CR) so the error points at the right file.
+ * Cross-source validation — ADR-0019 rules 3/4 (envMap DATABASE_URL/_RO
+ * collisions). `source` names where the conflicting spec came from
+ * ("config" = local kn-next.config.ts, "cluster" = the live NextApp CR) so
+ * the error points at the right file. (Rules 5/7 — managed-vs-BYO mutual
+ * exclusion and managed-mode-only provisioning knobs — were removed with
+ * managed database mode itself; ADR-0025 #303, #404.)
  */
 export function validateBindAgainstSpec(
     opts: DbBindOptions,
     spec: BindTargetSpec,
     source: "config" | "cluster",
 ): void {
-    const db = spec.database ?? {};
-
-    // Rule 5 — one database mode per app.
-    if (db.enabled === true) {
-        throw new Error(
-            `spec.database.enabled (managed mode) and spec.database.secretRef (BYO) are mutually exclusive — one database mode per app (ADR-0019). Found database.enabled: true on the ${source}.`,
-        );
-    }
-
-    // Rule 7 — provisioning knobs are managed-mode-only.
-    const knobs = PROVISIONING_KNOBS.filter((k) => db[k] !== undefined);
-    if (knobs.length > 0) {
-        throw new Error(
-            `provisioning knobs (${knobs.join(", ")}) are managed-mode-only and cannot be combined with secretRef (ADR-0019); found them on the ${source} spec.database.`,
-        );
-    }
-
     // Rules 3/4 — spec.database owns DATABASE_URL / DATABASE_URL_RO.
     const envMap = spec.secrets?.envMap ?? {};
     const collide = (envName: string) => {
@@ -357,8 +335,8 @@ export async function runDbBind(
 ): Promise<void> {
     validateDbBindOptions(opts);
 
-    // Local config cross-check (managed-mode `database.enabled` may live in
-    // kn-next.config.ts before it ever reaches a CR).
+    // Local config cross-check — envMap DATABASE_URL/_RO collisions (rules
+    // 3/4) may be visible in kn-next.config.ts before ever reaching a CR.
     if (localConfig && typeof localConfig === "object") {
         const cfg = localConfig as {
             database?: Record<string, unknown>;
@@ -494,7 +472,8 @@ export async function dbMain(argv: readonly string[]): Promise<void> {
     const opts = parseDbBindArgs(rest);
 
     // Resolve the app name: positional wins, else the local config's name.
-    // The config (when present) also feeds the managed-mode conflict check.
+    // The config (when present) also feeds the envMap-collision cross-check
+    // (rules 3/4).
     let localConfig: KnativeNextConfig | undefined;
     if (existsSync("kn-next.config.ts")) {
         localConfig = await loadConfig();

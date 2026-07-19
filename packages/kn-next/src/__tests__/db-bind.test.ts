@@ -9,8 +9,10 @@
  * The validation matrix here mirrors ADR-0019's admission rules CLIENT-SIDE so
  * a user gets the exact conflict at the keyboard instead of an apiserver
  * rejection: DNS-1123 names (rule 1), envMap DATABASE_URL/_RO collisions
- * (rules 3/4), managed-vs-BYO mutual exclusion (rule 5), roSecretRef without
- * secretRef (rule 6), provisioning knobs with secretRef (rule 7).
+ * (rules 3/4), roSecretRef without secretRef (rule 6). Rules 5/7
+ * (managed-vs-BYO mutual exclusion / managed-mode-only provisioning knobs)
+ * no longer apply — managed database mode was removed by ADR-0025 (#303);
+ * BYO via secretRef is the only mode (#404).
  */
 
 import { describe, expect, it, vi } from "vitest";
@@ -149,19 +151,7 @@ describe("validateDbBindOptions (arg-level, ADR-0019 rules 1 + 6)", () => {
     });
 });
 
-describe("validateBindAgainstSpec (ADR-0019 rules 3/4/5/7)", () => {
-    it("rule 5 — rejects when the spec already enables managed mode, with the exact conflict message", () => {
-        expect(() =>
-            validateBindAgainstSpec(
-                opts(),
-                { database: { enabled: true } },
-                "cluster",
-            ),
-        ).toThrow(
-            "spec.database.enabled (managed mode) and spec.database.secretRef (BYO) are mutually exclusive — one database mode per app (ADR-0019). Found database.enabled: true on the cluster.",
-        );
-    });
-
+describe("validateBindAgainstSpec (ADR-0019 rules 3/4)", () => {
     it("rule 3 — rejects when envMap already defines DATABASE_URL, with the exact conflict message", () => {
         expect(() =>
             validateBindAgainstSpec(
@@ -206,18 +196,6 @@ describe("validateBindAgainstSpec (ADR-0019 rules 3/4/5/7)", () => {
             ),
         ).toThrow(
             'spec.database owns DATABASE_URL_RO: it is already defined in spec.secrets.envMap (cluster). Remove the envMap["DATABASE_URL_RO"] entry — there is no silent precedence (ADR-0019).',
-        );
-    });
-
-    it("rule 7 — rejects provisioning knobs alongside secretRef, naming the knobs", () => {
-        expect(() =>
-            validateBindAgainstSpec(
-                opts(),
-                { database: { tier: "warm", readReplicas: 1 } },
-                "cluster",
-            ),
-        ).toThrow(
-            "provisioning knobs (tier, readReplicas) are managed-mode-only and cannot be combined with secretRef (ADR-0019); found them on the cluster spec.database",
         );
     });
 
@@ -337,14 +315,20 @@ describe("runDbBind — CR-only write (ADR-0001)", () => {
         expect(exec).toHaveBeenCalledTimes(3);
     });
 
-    it("live: a managed-mode CR blocks the patch (validation runs BEFORE the write)", async () => {
-        const exec = vi
-            .fn()
-            .mockReturnValueOnce(liveCr({ database: { enabled: true } }));
+    it("live: an envMap DATABASE_URL collision on the cluster blocks the patch (validation runs BEFORE the write)", async () => {
+        const exec = vi.fn().mockReturnValueOnce(
+            liveCr({
+                secrets: {
+                    envMap: {
+                        DATABASE_URL: { secretName: "x", secretKey: "y" },
+                    },
+                },
+            }),
+        );
         const write = vi.fn();
         await expect(
             runDbBind("my-app", opts(), { exec, write }),
-        ).rejects.toThrow(/mutually exclusive — one database mode per app/);
+        ).rejects.toThrow(/spec.database owns DATABASE_URL/);
         // Only the read happened; the patch was never issued.
         expect(exec).toHaveBeenCalledTimes(1);
     });
