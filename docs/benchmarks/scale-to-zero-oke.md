@@ -78,7 +78,7 @@ Total across cold-start/round-1-burst/soak (5 + 7290 + 7379 + 7409 + 7408 + 2264
   behavior).
 - **Near-zero errors under saturation:** 2 failures across ~129k requests during the forced
   fan-out reps (0.005% in the one rep with failures; 0% in the other three). Combined with the
-  ~44.5k-request, 0-failure cold-start/soak dataset, the platform did not drop requests under
+  52,134-request, 0-failure cold-start/round-1-burst/soak dataset, the platform did not drop requests under
   either sustained or bursty load in this test.
 - **The burst knobs (`targetBurstCapacity`, `panicWindowPercentage`, `panicThresholdPercentage`)
   are a marginal MEDIAN-latency lever, not an error-rate or tail-latency fixer.** Tuned config
