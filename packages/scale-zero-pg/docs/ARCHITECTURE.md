@@ -396,7 +396,7 @@ The OKE acceptance suite (`CLAUDE.md` loop step 3). Run before requesting review
   (`_verify-wake`, `_verify-coldboot`, `_verify-warmtier`, `_verify-wake-guard`); **storage/failover**
   (`_verify-storage`, `_verify-restore`, `_verify-app-restore`, `_verify-backup-portability`,
   `_verify-objstore`, `_verify-pageserver-failover`); **multitenant/quota** (`_verify-multitenant`,
-  `_verify-tenant-quotas`, `_verify-scale-ceiling`, `_verify-operator`, `_verify-unified-config`);
+  `_verify-tenant-quotas`, `_verify-scale-ceiling`, `_verify-operator`);
   **read pool** (`_verify-readpool`, `_verify-perapp-ro`); **zone/repl** (`_verify-zones`,
   `_verify-zone-deploy`, `_verify-repl-wake`, `_verify-slot-janitor`, `_verify-wal-janitor`,
   `_verify-janitor-protect`); **security** (`_verify-netpol`, `_verify-tls`); **observability**

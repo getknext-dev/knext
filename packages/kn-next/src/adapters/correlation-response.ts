@@ -34,6 +34,16 @@
  *   - FAIL-OPEN: any throw while resolving/stamping the id is swallowed and the
  *     original `writeHead`/`setHeader` behavior is preserved — never break a
  *     response over an observability header.
+ *   - DEFENSE-IN-DEPTH (#368, #401): the resolved id is RE-VALIDATED against the
+ *     correlation-id charset (`isWellFormedCorrelationId`, the same ID_PATTERN
+ *     the #346 propagator validates with) immediately before stamping. The shared
+ *     context reader (`correlationIdFromContext`) also validates on read (#401),
+ *     so the default resolver can no longer return an ill-formed value — this
+ *     stamp-site gate remains for the injected-resolver seam (tests / embedders
+ *     supplying their own `activeCorrelationId`) and as belt-and-braces: a
+ *     FUTURE unvalidated writer of the key can never smuggle an attacker-
+ *     controlled value into a response header (response-splitting vector).
+ *     An invalid id is simply NOT stamped (fail-open: no substitute).
  *   - IDEMPOTENT: a `Symbol.for` latch on the prototype guards double-wrapping.
  *   - NEVER OVERRIDES: an app-set `x-request-id` (via `setHeader` or inline in
  *     `writeHead(status, headers)`) always wins — we only fill it when absent.
@@ -44,7 +54,10 @@
  */
 
 import { ServerResponse } from "node:http";
-import { CORRELATION_HEADER } from "@knext/lib/context";
+import {
+    CORRELATION_HEADER,
+    isWellFormedCorrelationId,
+} from "@knext/lib/context";
 
 import { activeCorrelationId as defaultActiveCorrelationId } from "./tracing";
 
@@ -110,7 +123,12 @@ export function installCorrelationResponseEcho(
                 return;
             }
             const id = resolve();
-            if (!id) {
+            if (!id || !isWellFormedCorrelationId(id)) {
+                // #368: never stamp a value that fails the correlation-id
+                // charset — today impossible (the propagator validates), but a
+                // future unvalidated writer of the context key must not be able
+                // to smuggle raw bytes into a response header. Fail-open: stamp
+                // nothing rather than minting a substitute on the hot path.
                 return;
             }
             res.setHeader(CORRELATION_HEADER, id);

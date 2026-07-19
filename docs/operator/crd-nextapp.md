@@ -44,6 +44,9 @@ spec:
         end:   "0 20 * * 1-5"    # 5-field cron: warm floor ends (20:00 weekdays)
         replicas: 3             # min-scale floor held during the window (>= 1, <= maxScale)
         timezone: America/New_York # IANA timezone; defaults to UTC
+    targetBurstCapacity: -1   # Optional burst buffer (ADR-0032, #411); -1 = always keep the activator in path
+    panicWindowPercentage: 10    # Optional KPA panic-window tuning (ADR-0033, #413); 1-100
+    panicThresholdPercentage: 200 # Optional KPA panic-threshold tuning (ADR-0033, #413); >= 110
 ```
 
 > The `containerConcurrency` default was lowered from `100` to `20` in ADR-0028
@@ -72,6 +75,33 @@ spec:
 > [`scaling-cold-start.md`](./scaling-cold-start.md#scheduled-warm-floor-specscalingwarmschedule-adr-0030--380)
 > and [ADR-0030](../adr/0030-scheduled-warm-floor.md) (incl. the 2026-07-18 #388
 > addendum and the still-deferred learned-controller / warm-budget follow-ups).
+
+> `targetBurstCapacity` (ADR-0032, #411) tunes whether the Knative **activator**
+> stays in the request path as a burst buffer, pacing an **unpredicted** traffic
+> spike into pods as they scale rather than letting the first Running pod absorb
+> the whole burst directly. `-1` = always keep the activator in path (max burst
+> tolerance, at the cost of an extra hop on every request); `>= 0` = a numeric
+> burst capacity in requests; **unset (default) = the annotation is not stamped**
+> and the Knative cluster default (`200`) applies unmanaged (back-compat).
+> **Connection-wall interlock:** a buffered burst is still released into pods up
+> to `maxScale`, so it does **not** bypass the `maxScale × poolMax ≤ 80` invariant
+> (ADR-0028/ADR-0029) — re-check that math when you tune TBC. See
+> [`scaling-cold-start.md`](./scaling-cold-start.md#burst-buffering-specscalingtargetburstcapacity-adr-0032--411)
+> and [ADR-0032](../adr/0032-target-burst-capacity.md).
+
+> `panicWindowPercentage` / `panicThresholdPercentage` (ADR-0033, #413) tune **how fast the
+> Knative Pod Autoscaler (KPA) itself reacts** to an unpredicted N→M surge — a different lever
+> from `targetBurstCapacity` (whether the activator buffers a spike) or `containerConcurrency`
+> (what makes reactive scale-out fire). `panicWindowPercentage` (1-100) is the panic-mode
+> evaluation window as a percentage of the stable window — smaller = more reactive.
+> `panicThresholdPercentage` (>= 110) is how far over the steady-state target trips panic mode —
+> lower = trips on a smaller overshoot. Both unset (default) = neither annotation is stamped and
+> the Knative cluster defaults (10% / 200%) apply unmanaged (back-compat). **Connection-wall
+> interlock:** a faster panic reaction changes the *rate* pods are added, not the
+> `maxScale × poolMax ≤ 80` ceiling (ADR-0028/ADR-0029) — re-check that math when you tune these.
+> **KPA-class caveat:** ignored under the HPA autoscaler class; knext defaults every ksvc to KPA.
+> See [`scaling-cold-start.md`](./scaling-cold-start.md#kpa-panic-window--panic-threshold-specscalingpanicwindowpercentage--panicthresholdpercentage-adr-0033--413)
+> and [ADR-0033](../adr/0033-panic-window-threshold.md).
 
 ### `storage` (Optional)
 Binds the Next.js Server Actions (e.g., `<input type="file" />`) to a cloud storage provider.
@@ -148,7 +178,7 @@ spec:
         secretKey: password
 ```
 
-Note: when `spec.database` is set (either mode below), it **owns**
+Note: when `spec.database` is set, it **owns**
 `DATABASE_URL`/`DATABASE_URL_RO` — an `envMap` entry for the same name is
 rejected by the validating webhook on create and on any update that introduces
 the conflict (no silent precedence). CRs that already carried the conflict
@@ -157,9 +187,10 @@ before this rule are grandfathered (ratcheted): they keep reconciling,
 ignored `envMap` entry. Every other env var is fair game.
 
 ### `database` (Optional)
-Declares the app's Postgres. Two mutually-exclusive modes — **binding**
-(`secretRef`: bring your own DB) and **managed** (`enabled: true`: inline
-provisioning).
+Binds the app's Postgres. The only mode is **binding** (`secretRef`): bring
+your own database — knext provisions and manages nothing. (The operator's
+former managed provisioning mode was removed; see
+[ADR-0025](../adr/0025-remove-managed-database-mode.md).)
 
 **Binding mode (`secretRef`) — ADR-0019.** Binds an *existing* Secret in the
 app's namespace as `DATABASE_URL` (and optionally a read-only DSN as
@@ -183,83 +214,12 @@ spec:
   rotating the DSN in-place does **not** roll a new Revision (redeploy to pick it up).
 - `status.databaseSecretName` records the bound Secret; condition
   `DatabaseReady=True` with reason `Bound`. Removing `spec.database` clears
-  both on the next reconcile (for a previously managed app, see
-  [switching modes](#switching-database-modes) below).
-- Provisioning knobs (`tier`, `readReplicas`, `quotas`, `keepOnDelete`) are
-  rejected alongside `secretRef` (they are managed-mode-only), and `secretRef`
-  is rejected alongside `enabled: true` — one mode per app.
+  both on the next reconcile.
+- `roSecretRef` requires `secretRef` — a read-only binding cannot stand alone
+  (the block's one intra-field validation rule).
 - Pool-timeout contract (pool idle **<** the gateway's 60 s window, connect
   timeout **≥** 10 s) + the worked scale-zero-pg example: see the
   [Postgres binding guide](../guides/postgres-binding.md).
-
-**Managed mode (`enabled: true`).** Declares an **inline** [scale-zero-pg](../guides/unified-config-database.md) database
-that the operator auto-provisions and wires into `DATABASE_URL` — the app and its
-database sleep at zero and wake together on one visitor request. This is the
-**unified-config** flagship (ADR-0006). You do **not** hand-write a `DATABASE_URL`
-`envMap` entry: the operator provisions the DB, mirrors its credential Secret into
-your app's namespace, and injects `DATABASE_URL` (and `DATABASE_URL_RO` when
-`readReplicas: true`) for you.
-
-```yaml
-spec:
-  database:
-    enabled: true            # false/absent => bring-your-own via secretRef (above)
-    tier: cold               # cold = scale-to-zero (default) | warm = ~0.4s wake
-    readReplicas: true       # also injects DATABASE_URL_RO
-    quotas:                  # per-app noisy-neighbour bound (all fields optional)
-      cpu: "1000m"
-      cpuRequest: "250m"
-      mem: "1Gi"
-      memRequest: "256Mi"
-      maxConnections: 100
-    keepOnDelete: false      # false => deleting the NextApp reclaims the Neon timeline
-```
-
-- **`appName` is derived, never set by you** — the operator computes a
-  plane-globally-unique name from your NextApp's own `(namespace, name)` and records
-  it on `status.databaseAppName`. This is the security seam: a NextApp can only ever
-  bind the database minted for **its own** identity, never another namespace's DB.
-- **Hard-gate:** the app is **not** deployed (no Knative Service) until its database
-  reports `Ready` (`status.conditions[DatabaseReady]`). A `cold` DB reaches `Ready` in
-  ~seconds. This prevents booting an app that would crash-loop on a missing DSN.
-- **Teardown:** deleting the NextApp deletes the database (and reclaims its Neon
-  timeline) via a finalizer, unless `keepOnDelete: true`.
-- **BYO:** use `secretRef` (binding mode, above) to point at an external or existing
-  database; the raw `secrets.envMap` recipe also still works when `spec.database`
-  is fully omitted.
-
-See the [unified-config guide](../guides/unified-config-database.md) for the full flow,
-sizing notes, rotation behavior, and required RBAC.
-
-#### Switching database modes
-
-**Managed → binding (or removing `spec.database` entirely) never deletes your
-managed database.** A spec edit is not a destruction order: the provisioned
-database (and its data) keeps running, and the operator flags it instead:
-
-- condition `DatabaseOrphaned=True` (reason `ModeSwitched`) names the retained
-  database, plus a one-time `Warning` event (`DatabaseOrphaned`) at switch time;
-- the new `secretRef` binding works immediately and independently
-  (`DatabaseReady=True/Bound`);
-- `status.databaseAppName` stays set so you (and the operator) can still find
-  the orphan.
-
-You resolve the orphan one of three ways:
-
-1. **Delete it manually** — `kubectl delete appdatabase <databaseAppName>
-   -n scale-zero-pg`. The next reconcile clears `DatabaseOrphaned` and
-   `status.databaseAppName`.
-2. **Switch back to managed** (`enabled: true`) — the operator rebinds the
-   **same** database (the name is derived from your app's identity, so no
-   duplicate is provisioned) and drops the flag. Your data is exactly where
-   you left it.
-3. **Delete the NextApp** — the delete-time finalizer reclaims the orphaned
-   database as usual. A `keepOnDelete: true` set while the app was managed is
-   still honored downstream (the underlying timeline is retained even though
-   the database object is reclaimed).
-
-The mirrored `<name>-db` credential Secret is also retained until the NextApp
-is deleted (older Revisions may still reference it).
 
 ### `preview` (Optional)
 Enables ephemeral GitOps isolation for Pull Request testing. See [GitOps Previews](./gitops-preview.md).

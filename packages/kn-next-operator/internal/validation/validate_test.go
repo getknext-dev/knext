@@ -20,6 +20,8 @@ import (
 	"strings"
 	"testing"
 
+	"k8s.io/utils/ptr"
+
 	appsv1alpha1 "github.com/AhmedElBanna80/knext/packages/kn-next-operator/api/v1alpha1"
 )
 
@@ -211,6 +213,131 @@ func TestValidateNextAppSpec(t *testing.T) {
 			},
 			wantErr: true,
 			errHas:  "poolMax",
+		},
+		{
+			// targetBurstCapacity (#411, ADR-0032): -1 = always keep the
+			// activator in the request path (a burst buffer); it is a
+			// legitimate, documented value and must NOT be rejected by a naive
+			// ">= 0" check.
+			name: "targetBurstCapacity -1 (always-activator) accepted (#411)",
+			spec: &appsv1alpha1.NextAppSpec{
+				Image:   digestImage,
+				Scaling: &appsv1alpha1.ScalingSpec{TargetBurstCapacity: ptr.To(int32(-1))},
+			},
+			wantErr: false,
+		},
+		{
+			name: "targetBurstCapacity 0 accepted (#411)",
+			spec: &appsv1alpha1.NextAppSpec{
+				Image:   digestImage,
+				Scaling: &appsv1alpha1.ScalingSpec{TargetBurstCapacity: ptr.To(int32(0))},
+			},
+			wantErr: false,
+		},
+		{
+			name: "targetBurstCapacity 200 accepted (#411)",
+			spec: &appsv1alpha1.NextAppSpec{
+				Image:   digestImage,
+				Scaling: &appsv1alpha1.ScalingSpec{TargetBurstCapacity: ptr.To(int32(200))},
+			},
+			wantErr: false,
+		},
+		{
+			name: "targetBurstCapacity -2 rejected (#411)",
+			spec: &appsv1alpha1.NextAppSpec{
+				Image:   digestImage,
+				Scaling: &appsv1alpha1.ScalingSpec{TargetBurstCapacity: ptr.To(int32(-2))},
+			},
+			wantErr: true,
+			errHas:  "targetBurstCapacity",
+		},
+		{
+			name: "targetBurstCapacity unset accepted (#411 back-compat)",
+			spec: &appsv1alpha1.NextAppSpec{
+				Image:   digestImage,
+				Scaling: &appsv1alpha1.ScalingSpec{MaxScale: 10},
+			},
+			wantErr: false,
+		},
+		{
+			// panicWindowPercentage (#413, ADR-0033): boundaries of the
+			// [1,100] range must be accepted, not just interior values.
+			name: "panicWindowPercentage 1 accepted (#413)",
+			spec: &appsv1alpha1.NextAppSpec{
+				Image:   digestImage,
+				Scaling: &appsv1alpha1.ScalingSpec{PanicWindowPercentage: ptr.To(int32(1))},
+			},
+			wantErr: false,
+		},
+		{
+			name: "panicWindowPercentage 50 accepted (#413)",
+			spec: &appsv1alpha1.NextAppSpec{
+				Image:   digestImage,
+				Scaling: &appsv1alpha1.ScalingSpec{PanicWindowPercentage: ptr.To(int32(50))},
+			},
+			wantErr: false,
+		},
+		{
+			name: "panicWindowPercentage 100 accepted (#413)",
+			spec: &appsv1alpha1.NextAppSpec{
+				Image:   digestImage,
+				Scaling: &appsv1alpha1.ScalingSpec{PanicWindowPercentage: ptr.To(int32(100))},
+			},
+			wantErr: false,
+		},
+		{
+			name: "panicWindowPercentage 0 rejected (#413)",
+			spec: &appsv1alpha1.NextAppSpec{
+				Image:   digestImage,
+				Scaling: &appsv1alpha1.ScalingSpec{PanicWindowPercentage: ptr.To(int32(0))},
+			},
+			wantErr: true,
+			errHas:  "panicWindowPercentage",
+		},
+		{
+			name: "panicWindowPercentage 101 rejected (#413)",
+			spec: &appsv1alpha1.NextAppSpec{
+				Image:   digestImage,
+				Scaling: &appsv1alpha1.ScalingSpec{PanicWindowPercentage: ptr.To(int32(101))},
+			},
+			wantErr: true,
+			errHas:  "panicWindowPercentage",
+		},
+		{
+			// panicThresholdPercentage (#413, ADR-0033): Knative requires the
+			// threshold to exceed 100% (it is a multiple of the steady-state
+			// target); 110 is the documented lower bound.
+			name: "panicThresholdPercentage 110 accepted (#413)",
+			spec: &appsv1alpha1.NextAppSpec{
+				Image:   digestImage,
+				Scaling: &appsv1alpha1.ScalingSpec{PanicThresholdPercentage: ptr.To(int32(110))},
+			},
+			wantErr: false,
+		},
+		{
+			name: "panicThresholdPercentage 200 accepted (#413)",
+			spec: &appsv1alpha1.NextAppSpec{
+				Image:   digestImage,
+				Scaling: &appsv1alpha1.ScalingSpec{PanicThresholdPercentage: ptr.To(int32(200))},
+			},
+			wantErr: false,
+		},
+		{
+			name: "panicThresholdPercentage 109 rejected (#413)",
+			spec: &appsv1alpha1.NextAppSpec{
+				Image:   digestImage,
+				Scaling: &appsv1alpha1.ScalingSpec{PanicThresholdPercentage: ptr.To(int32(109))},
+			},
+			wantErr: true,
+			errHas:  "panicThresholdPercentage",
+		},
+		{
+			name: "both panic knobs unset accepted (#413 back-compat)",
+			spec: &appsv1alpha1.NextAppSpec{
+				Image:   digestImage,
+				Scaling: &appsv1alpha1.ScalingSpec{MaxScale: 10},
+			},
+			wantErr: false,
 		},
 		{
 			name: "unknown storage provider rejected",

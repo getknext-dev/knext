@@ -144,6 +144,9 @@ func ValidateImageRef(image string) error {
 //   - When a per-pod poolMax is declared, maxScale × poolMax ≤ MaxAppConnections
 //     (the ADR-0028 connection-wall invariant — the gateway cap minus reserve,
 //     not the raw Postgres max_connections).
+//   - TargetBurstCapacity, when set, is -1 or >= 0 (ADR-0032, #411).
+//   - PanicWindowPercentage, when set, is in [1,100]; PanicThresholdPercentage,
+//     when set, is >= 110 (ADR-0033, #413).
 //   - Storage.Provider / Cache.Provider / Revalidation.Queue, when set, are
 //     recognized enum values.
 //
@@ -211,6 +214,35 @@ func ValidateNextAppSpec(spec *appsv1alpha1.NextAppSpec) error {
 					MaxAppConnections, MaxConnections, MaxAppConnections,
 				)
 			}
+		}
+
+		// targetBurstCapacity (#411, ADR-0032): -1 (always keep the activator
+		// in path) and any value >= 0 (a numeric burst capacity) are valid
+		// Knative semantics; only < -1 is meaningless and rejected. Unset
+		// (nil) skips the check entirely — no annotation is stamped
+		// (back-compat, see buildDesiredKsvc).
+		if s.TargetBurstCapacity != nil && *s.TargetBurstCapacity < -1 {
+			return fmt.Errorf(
+				"spec.scaling.targetBurstCapacity must be -1 (always keep the activator in path) or >= 0 (a burst capacity in requests), got %d",
+				*s.TargetBurstCapacity,
+			)
+		}
+
+		// panicWindowPercentage / panicThresholdPercentage (#413, ADR-0033):
+		// mirror Knative's own bounds on the panic-window and panic-threshold
+		// KPA annotations. Unset (nil) skips the check entirely — no
+		// annotation is stamped (back-compat, see buildDesiredKsvc).
+		if s.PanicWindowPercentage != nil && (*s.PanicWindowPercentage < 1 || *s.PanicWindowPercentage > 100) {
+			return fmt.Errorf(
+				"spec.scaling.panicWindowPercentage must be between 1 and 100 (a percentage of the KPA stable window), got %d",
+				*s.PanicWindowPercentage,
+			)
+		}
+		if s.PanicThresholdPercentage != nil && *s.PanicThresholdPercentage < 110 {
+			return fmt.Errorf(
+				"spec.scaling.panicThresholdPercentage must be >= 110 (a percentage of the steady-state target; Knative requires > 100), got %d",
+				*s.PanicThresholdPercentage,
+			)
 		}
 
 		// Scheduled warm-floor windows (ADR-0030, W5/#380). Each window declares a

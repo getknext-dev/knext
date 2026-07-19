@@ -287,6 +287,93 @@ type ScalingSpec struct {
 	// combination is a HARD admission REJECTION (#393, ADR-0030), not just advice.
 	// +optional
 	WarmSchedule []WarmWindow `json:"warmSchedule,omitempty"`
+
+	// TargetBurstCapacity tunes the Knative
+	// `autoscaling.knative.dev/target-burst-capacity` annotation (#411,
+	// ADR-0032, amending ADR-0028): whether the ACTIVATOR stays in the request
+	// path as a burst buffer, pacing an UNPREDICTED traffic spike into pods as
+	// they scale rather than letting the first Running pod absorb the whole
+	// burst directly. Neither the ADR-0028 ContainerConcurrency default (which
+	// makes reactive scale-out *fire*) nor ADR-0030's warmSchedule (which
+	// pre-warms *known* windows) buffers a spike nobody scheduled — this field
+	// is that missing lever.
+	//
+	// Semantics (mirrors upstream Knative):
+	//   - -1  => always keep the activator in the path (max burst tolerance,
+	//            at the cost of an extra network hop on every request while
+	//            the KPA holds it there).
+	//   - >=0 => the burst capacity in requests the activator will buffer
+	//            before Knative removes it from the path.
+	//   - unset (nil) => the annotation is NOT stamped and the Knative
+	//            cluster default (200) applies unmanaged, exactly as before
+	//            this field existed (byte-identical back-compat).
+	//
+	// Connection-wall interlock (ADR-0028/ADR-0029): a buffered burst is
+	// eventually released into more pods, which raises PEAK backend DB
+	// connections just like any other fan-out. TargetBurstCapacity does not
+	// bypass the `maxScale × poolMax ≤ 80` invariant — that cap is enforced at
+	// admission independently of this field and composes cleanly with it (see
+	// ADR-0032).
+	// +optional
+	// +kubebuilder:validation:Minimum=-1
+	TargetBurstCapacity *int32 `json:"targetBurstCapacity,omitempty"`
+
+	// PanicWindowPercentage tunes the Knative
+	// `autoscaling.knative.dev/panic-window-percentage` annotation (#413,
+	// ADR-0033, amending ADR-0032): how FAST the Knative Pod Autoscaler (KPA)
+	// reacts to an UNPREDICTED N→M traffic surge. TargetBurstCapacity (above)
+	// decides whether the activator BUFFERS a spike; ContainerConcurrency
+	// (ADR-0028) makes reactive scale-out FIRE; warmSchedule (ADR-0030)
+	// pre-warms KNOWN windows. None of them tune the KPA's own reaction
+	// speed — the panic-window/panic-threshold pair is that lever, and it is
+	// Knative's own mechanism, not a new control loop this operator runs.
+	//
+	// PanicWindowPercentage is expressed as a percentage of the KPA's stable
+	// window (e.g. 10 = a 10% panic window): a SMALLER value makes the KPA
+	// evaluate a shorter, more reactive window and enter "panic mode" (scale
+	// up fast, never scale down while panicking) sooner on a surge.
+	//
+	// Representation (mirrors TargetBurstCapacity's *int32 pattern; ADR-0033
+	// records the decision): a whole-percent *int32, NOT a float string or
+	// resource.Quantity. Knative accepts integer-valued percentages; any
+	// sub-integer precision is intentionally dropped to keep the CRD simple.
+	//
+	// Unset (nil) => the annotation is NOT stamped and the Knative cluster
+	// default (10%) applies unmanaged, exactly as before this field existed
+	// (byte-identical back-compat).
+	//
+	// Connection-wall interlock (ADR-0028/ADR-0029, restated in ADR-0033): a
+	// faster panic reaction changes the RATE pods are added, not the
+	// `maxScale × poolMax ≤ 80` ceiling enforced independently at admission.
+	//
+	// KPA-class caveat: this annotation is ignored under the HPA autoscaler
+	// class; knext defaults every ksvc to the KPA class, where it applies.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=100
+	PanicWindowPercentage *int32 `json:"panicWindowPercentage,omitempty"`
+
+	// PanicThresholdPercentage tunes the Knative
+	// `autoscaling.knative.dev/panic-threshold-percentage` annotation (#413,
+	// ADR-0033, amending ADR-0032): the concurrency/RPS level, as a
+	// percentage of the steady-state target, that trips the KPA into "panic
+	// mode" within PanicWindowPercentage's shorter window. A LOWER threshold
+	// (closer to the Knative minimum of 110%) makes the KPA panic — and
+	// therefore scale up fast without scaling back down mid-panic — on a
+	// smaller overshoot; the Knative default is 200% (double the target
+	// before panicking).
+	//
+	// Representation: a whole-percent *int32, matching PanicWindowPercentage
+	// and the TargetBurstCapacity pattern (ADR-0033).
+	//
+	// Unset (nil) => the annotation is NOT stamped and the Knative cluster
+	// default (200%) applies unmanaged (byte-identical back-compat).
+	//
+	// Connection-wall interlock / KPA-class caveat: see PanicWindowPercentage
+	// above — both apply identically here.
+	// +optional
+	// +kubebuilder:validation:Minimum=110
+	PanicThresholdPercentage *int32 `json:"panicThresholdPercentage,omitempty"`
 }
 
 // WarmWindow is one scheduled warm-floor window (ADR-0030, W5/#380). Start/End

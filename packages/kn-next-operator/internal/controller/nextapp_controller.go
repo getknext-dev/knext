@@ -594,9 +594,6 @@ func (r *NextAppReconciler) reconcileFinalizers(ctx context.Context, nextApp *ap
 		// "object has been modified" conflict spam (#98).
 		patch := client.MergeFrom(nextApp.DeepCopy())
 		changed := controllerutil.AddFinalizer(nextApp, ExternalCleanupFinalizer)
-		// NOTE: the db-cleanup finalizer is NO LONGER added — managed provisioning
-		// was removed (ADR-0025). The delete branch below still DRAINS it off any
-		// legacy CR that carries it, for one release.
 		if changed {
 			if err := r.Patch(ctx, nextApp, patch); err != nil {
 				return false, err
@@ -608,20 +605,6 @@ func (r *NextAppReconciler) reconcileFinalizers(ctx context.Context, nextApp *ap
 	// finalizer, then remove it so deletion can complete. Neither cleanup
 	// returns a hard error for an unreachable dependency (they log + Warning),
 	// so we never wedge the CR in Terminating (ADR-0006 §5).
-	// DRAIN the legacy db-cleanup finalizer (ADR-0025): managed provisioning is
-	// gone, but a NextApp ever provisioned under the old operator still carries it.
-	// cleanupDatabase is now a no-op (no re-provision, no cross-ns reach); we only
-	// strip the finalizer so the CR does not wedge in Terminating forever.
-	if controllerutil.ContainsFinalizer(nextApp, DatabaseCleanupFinalizer) {
-		if err := r.cleanupDatabase(ctx, nextApp); err != nil {
-			return true, err
-		}
-		patch := client.MergeFrom(nextApp.DeepCopy())
-		controllerutil.RemoveFinalizer(nextApp, DatabaseCleanupFinalizer)
-		if err := r.Patch(ctx, nextApp, patch); err != nil {
-			return true, err
-		}
-	}
 	if controllerutil.ContainsFinalizer(nextApp, ExternalCleanupFinalizer) {
 		if err := r.cleanupExternalState(ctx, nextApp); err != nil {
 			return true, err
@@ -757,6 +740,35 @@ func (r *NextAppReconciler) buildDesiredKsvc(nextApp *appsv1alpha1.NextApp, ksvc
 		minScale = floor
 	}
 	annotations["autoscaling.knative.dev/min-scale"] = fmt.Sprintf("%d", minScale)
+
+	// TargetBurstCapacity (#411, ADR-0032): whether the activator stays in the
+	// request path as a burst buffer. Only stamped when the field is
+	// EXPLICITLY set — nil leaves the annotation absent so the Knative
+	// cluster default (200) applies unmanaged, exactly as before this field
+	// existed (byte-identical back-compat). Written into the SAME annotations
+	// map as min-scale/max-scale/containerConcurrency, and is untouched by
+	// the preview-env override below (that override rewrites only
+	// max-scale/min-scale/retention-period, so a stamped TBC always
+	// survives it).
+	if nextApp.Spec.Scaling != nil && nextApp.Spec.Scaling.TargetBurstCapacity != nil {
+		annotations["autoscaling.knative.dev/target-burst-capacity"] = fmt.Sprintf("%d", *nextApp.Spec.Scaling.TargetBurstCapacity)
+	}
+
+	// PanicWindowPercentage / PanicThresholdPercentage (#413, ADR-0033): how
+	// fast the KPA reacts to an unpredicted surge. Only stamped when
+	// EXPLICITLY set — nil leaves the annotation absent so the Knative
+	// cluster defaults (10% window / 200% threshold) apply unmanaged, exactly
+	// as before this field existed (byte-identical back-compat). Written into
+	// the SAME annotations map as min-scale/max-scale/containerConcurrency/
+	// targetBurstCapacity, and is untouched by the preview-env override below
+	// (that override rewrites only max-scale/min-scale/retention-period, so a
+	// stamped panic annotation always survives it).
+	if nextApp.Spec.Scaling != nil && nextApp.Spec.Scaling.PanicWindowPercentage != nil {
+		annotations["autoscaling.knative.dev/panic-window-percentage"] = fmt.Sprintf("%d", *nextApp.Spec.Scaling.PanicWindowPercentage)
+	}
+	if nextApp.Spec.Scaling != nil && nextApp.Spec.Scaling.PanicThresholdPercentage != nil {
+		annotations["autoscaling.knative.dev/panic-threshold-percentage"] = fmt.Sprintf("%d", *nextApp.Spec.Scaling.PanicThresholdPercentage)
+	}
 
 	// Observability annotations — aligned with CLI
 	if nextApp.Spec.Observability != nil && nextApp.Spec.Observability.Enabled {

@@ -170,11 +170,13 @@ request path** (never on pod boot). Composes with `AppDatabase`: provision → `
 → migrate → app serves.
 
 ```
-NextApp(spec.database) ──▶ AppDatabase provisions branch (template schema, ~4s) ──▶ Ready
-                                                                                      │
-                          kn-next db migrate (CI/Job, writer, once) ◀────────────────┘
-                                                                                      │
-                          app pods boot; getDb()/getDbRO() serve traffic ◀────────────┘
+AppDatabase (on scale-zero-pg, kubectl/CI) provisions branch (template schema, ~4s) ──▶ Ready
+                          │   NextApp binds the minted Secret via spec.database.secretRef
+                          ▼
+                          kn-next db migrate (CI/Job, writer, once)
+                          │
+                          ▼
+                          app pods boot; getDb()/getDbRO() serve traffic
 ```
 
 ## 6. Queries & mutations (App Router)

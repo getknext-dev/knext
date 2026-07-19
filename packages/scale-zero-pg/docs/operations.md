@@ -1626,8 +1626,11 @@ operator runs from the multi-binary gateway image — after this merges, **roll 
 back-fills existing apps. Merged ≠ deployed.
 
 **External-driver API (unified config, #119).** The `AppDatabase` CRD is also the
-stable API the **knext operator** drives to provision + wire a per-app database
-(ADR-0006). The full contract — status fields to wait on (`phase`, `Ready`,
+stable API **any external controller** can drive to provision + wire a per-app
+database (ADR-0006). *(The original driver — the knext operator's managed
+`spec.database.enabled` mode — was removed on 2026-07-15 by knext's ADR-0025 /
+knext #303; knext now binds the minted Secret via BYO `secretRef` only.)* The
+full contract — status fields to wait on (`phase`, `Ready`,
 `status.secretName`, `observedGeneration`), the output Secret keys (incl.
 `DATABASE_URL_RO`, emitted only when `spec.roPool.enabled`), the scoped external
 RBAC (`deploy/84-appdb-external-driver-role.yaml`), and the `v1alpha1` soft-compat

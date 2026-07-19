@@ -458,6 +458,112 @@ sleeps on its usual idle window.
 (The **DB-compute lockstep pre-warm** shipped 2026-07-18 as #388 — see the
 section above and ADR-0030's addendum.)
 
+## Burst buffering (`spec.scaling.targetBurstCapacity`, ADR-0032 / #411)
+
+ADR-0028's `containerConcurrency` default makes reactive scale-out *fire*, and
+`warmSchedule` (above) pre-warms *known* windows. Neither buffers a spike nobody
+scheduled: on an **unpredicted** burst, the requests that land before new pods are
+Running/Ready go straight to whatever pods already exist. Knative's
+`autoscaling.knative.dev/target-burst-capacity` (TBC) annotation controls whether
+the **activator** — the component in front of the pods that can queue requests —
+stays in the request path to pace that burst into pods as they scale, instead of
+letting the first Running pod absorb the whole spike directly.
+
+```yaml
+spec:
+  scaling:
+    maxScale: 10
+    containerConcurrency: 20
+    poolMax: 5                 # 10 × 5 = 50 ≤ 80 — connection budget still holds
+    targetBurstCapacity: -1    # always keep the activator in path during a scale-up
+```
+
+- **`-1`** — always keep the activator in the path. Maximum burst tolerance, but
+  every request pays an extra activator→pod hop while the KPA holds it there, not
+  just during a burst. Best for apps that would rather take a small constant
+  latency tax than risk an overload spike.
+- **`>= 0`** — a numeric burst capacity in requests the activator buffers before
+  Knative removes it from the path once it judges capacity sufficient.
+- **Unset (default)** — the annotation is **not stamped**; the Knative cluster
+  default (`200`) applies unmanaged, exactly as before this field existed
+  (back-compat).
+
+### The connection-wall interlock
+
+TBC paces *when* a burst is released into pods — it does not raise how many pods
+`maxScale` allows, and it does not change the `maxScale × poolMax ≤ 80` invariant
+(ADR-0028/ADR-0029) enforced at admission. A buffered burst still ends up running
+on up to `maxScale` pods, each still capped at `poolMax` connections. So:
+
+- Turning on `targetBurstCapacity: -1` is **not** a substitute for sizing
+  `maxScale`/`poolMax` correctly — re-check that product still holds ≤ 80 when you
+  tune burst buffering.
+- The safest posture for a bursty, connection-sensitive app is **both**: `-1` (or
+  a numeric buffer) to pace the ramp, *and* a `maxScale`/`poolMax` pair that was
+  already validated to fit the connection budget.
+
+See [ADR-0032](../adr/0032-target-burst-capacity.md) for the full trade-off
+record.
+
+## KPA panic-window / panic-threshold (`spec.scaling.panicWindowPercentage` / `panicThresholdPercentage`, ADR-0033 / #413)
+
+`targetBurstCapacity` (above) decides *whether the activator buffers* a spike,
+`containerConcurrency` (ADR-0028) decides *what makes reactive scale-out fire*, and
+`warmSchedule` decides *what gets pre-warmed for a known window*. None of the three
+tune **how fast the Knative Pod Autoscaler (KPA) itself reacts** to a surge it did
+not predict. The KPA normally evaluates a 60s "stable" window; on a burst it can
+switch into a much shorter "panic" window and refuse to scale back down until the
+panic period elapses. Two Knative annotations tune that behavior directly:
+
+```yaml
+spec:
+  scaling:
+    maxScale: 10
+    containerConcurrency: 20
+    poolMax: 5                       # 10 × 5 = 50 ≤ 80 — connection budget still holds
+    panicWindowPercentage: 10        # shorter panic window = more reactive (Knative default: 10)
+    panicThresholdPercentage: 200    # lower = trips panic mode sooner (Knative default: 200)
+```
+
+- **`panicWindowPercentage`** (`1`-`100`) — the panic-mode evaluation window as a
+  percentage of the stable window. A smaller value makes the KPA look at a
+  shorter, more reactive slice of recent traffic before deciding it is in a
+  surge.
+- **`panicThresholdPercentage`** (`>= 110`) — how far over the steady-state
+  concurrency/RPS target trips panic mode. A lower value (closer to the `110`
+  floor) panics on a smaller overshoot; the Knative default is `200` (double
+  the target).
+- **Unset (default)**, either or both — the corresponding annotation is **not
+  stamped**; the Knative cluster defaults (`10%` / `200%`) apply unmanaged,
+  exactly as before these fields existed (back-compat).
+
+### The connection-wall interlock
+
+Exactly like `targetBurstCapacity`, the panic knobs change the **rate** the KPA
+ramps toward `maxScale`, not the `maxScale × poolMax ≤ 80` ceiling
+(ADR-0028/ADR-0029) enforced at admission. A faster panic reaction can reach
+`maxScale` sooner during a surge; it cannot exceed it, and every pod that comes
+up is still capped at `poolMax` connections. So:
+
+- A short panic window / low panic threshold is **not** a substitute for sizing
+  `maxScale`/`poolMax` correctly — re-check that product still holds ≤ 80 when
+  you tune the panic knobs.
+- The safest posture for an app that needs a fast reaction to genuine surges is
+  **both**: an aggressive panic-window/threshold pair to ramp quickly, *and* a
+  `maxScale`/`poolMax` pair that was already validated to fit the connection
+  budget.
+
+### The KPA-class caveat
+
+Both annotations are read by Knative's **KPA** autoscaler. They are silently
+ignored if a ksvc's `autoscaling.knative.dev/class` is set to the HPA-backed
+class instead. knext does not stamp a class annotation, so every ksvc runs
+under Knative's default class (KPA) today — but if HPA-class support is ever
+added for a specific workload, these knobs would silently stop applying for it.
+
+See [ADR-0033](../adr/0033-panic-window-threshold.md) for the full trade-off
+record.
+
 ## Summary
 
 | Concern | Knob / mitigation |
@@ -469,6 +575,8 @@ section above and ADR-0030's addendum.)
 | DB pool re-establish | warm zone (`minScale: 1`) and/or transaction-mode pooler; during declared windows, AppDatabase `spec.warmSchedule` holds the compute warm (#388) |
 | Connection storm | low `maxScale` + declare `poolMax` (operator enforces `maxScale × poolMax ≤ 80`, ADR-0028); a pooler caps it further |
 | Reactive scale-out under burst | lower `containerConcurrency` (default now `20`, ADR-0028; W1/#376 refines) |
+| Unpredicted traffic spike | `spec.scaling.targetBurstCapacity` (activator burst buffer, ADR-0032; still bound by the `maxScale × poolMax` wall) |
+| Slow KPA reaction to an unpredicted surge | `spec.scaling.panicWindowPercentage` / `panicThresholdPercentage` (KPA reaction-speed tuning, ADR-0033; still bound by the `maxScale × poolMax` wall) |
 
 knext exposes the scaling/cache knobs and this guidance; the database and its
 connection pooler are operated outside knext.

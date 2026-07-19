@@ -49,7 +49,11 @@
  * via `setTraceIdProvider` so a log line and a span share the same `trace_id`.
  */
 
-import { CORRELATION_HEADER, resolveCorrelationId } from "@knext/lib/context";
+import {
+    CORRELATION_HEADER,
+    isWellFormedCorrelationId,
+    resolveCorrelationId,
+} from "@knext/lib/context";
 import {
     type Context,
     context,
@@ -236,13 +240,27 @@ export function installTraceIdProvider(): () => string | undefined {
 /**
  * Read the request correlation id off an OTel `Context` (our private key).
  * Returns `undefined` when the key is absent.
+ *
+ * #401: the id is RE-VALIDATED on read (`isWellFormedCorrelationId`, the same
+ * predicate the propagator validates with). `CorrelationContextPropagator`
+ * only ever writes validated values, but `withCorrelationId` is a VERBATIM
+ * seam — a future caller could seed the key from an unvalidated source — and
+ * this reader feeds ALL THREE consumers of the key: the logger mixin (via
+ * `installCorrelationIdProvider`), the `CorrelationSpanProcessor` SERVER-span
+ * attribute, and the response echo (via `activeCorrelationId`). Validating
+ * here guards all three with one predicate. Fail-open: an ill-formed value
+ * behaves as if no id was seeded (never a substitute minted on the hot path).
  */
 export function correlationIdFromContext(ctx: Context): string | undefined {
     const value = ctx.getValue(CORRELATION_CTX_KEY);
-    return typeof value === "string" && value.length > 0 ? value : undefined;
+    return isWellFormedCorrelationId(value) ? value : undefined;
 }
 
-/** Put a correlation id on an OTel `Context`, returning the derived context. */
+/**
+ * Put a correlation id on an OTel `Context`, returning the derived context.
+ * NOTE: this writes the key VERBATIM — readers re-validate on read (#401),
+ * so an ill-formed `id` behaves as if no id was seeded.
+ */
 export function withCorrelationId(ctx: Context, id: string): Context {
     return ctx.setValue(CORRELATION_CTX_KEY, id);
 }
@@ -333,7 +351,8 @@ export function installCorrelationIdProvider(): () => string | undefined {
  *
  * Only the SERVER span is stamped: the id is already on the context for logs and
  * for children, so tagging child spans would be redundant cardinality. When the
- * key is absent (tracing off / non-request span) this is a no-op.
+ * key is absent (tracing off / non-request span) — or the seeded value fails
+ * read-time validation (#401) — this is a no-op.
  *
  * Register it alongside the other knext processors:
  *   registerOTel({ spanProcessors: ['auto', new CorrelationSpanProcessor()] })

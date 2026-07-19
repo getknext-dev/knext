@@ -49,32 +49,24 @@ const nextConfig: NextConfig = {
       allowedOrigins: ['localhost:8080', 'next-home.default.136.111.227.195.sslip.io'],
     },
   },
-  // #342: `instrumentation.ts` is compiled for BOTH the `nodejs` AND the `edge`
-  // runtimes (this app has `middleware.ts`, which forces an edge build). The
-  // Node-only instrumentation body lives in `src/instrumentation-node.ts` and is
-  // loaded via a dynamic `import('./instrumentation-node')` guarded at RUNTIME
-  // behind `process.env.NEXT_RUNTIME === 'nodejs'`. But webpack STATICALLY
-  // traces that dynamic import into BOTH runtime bundles, so the edge compile
-  // pulls in `@knext/lib/clients` → `@cerbos/grpc`/`@grpc/grpc-js`/`pg`/`minio`
-  // and fails with `Module not found: Can't resolve 'stream'/'fs'/'tls'/'net'/'zlib'`.
+  // #342/#356 (ADR-0031): `instrumentation.ts` is compiled for BOTH the
+  // `nodejs` AND the `edge` runtimes (this app has `middleware.ts`, which forces
+  // an edge build). The Node-only instrumentation body lives in
+  // `src/instrumentation-node.ts`, loaded via a dynamic import guarded at
+  // RUNTIME behind `process.env.NEXT_RUNTIME === 'nodejs'` — but webpack
+  // STATICALLY traces that dynamic import into BOTH runtime bundles, so the
+  // edge compile would pull in `@knext/lib/clients` →
+  // `@cerbos/grpc`/`@grpc/grpc-js`/`pg`/`minio` and fail with
+  // `Module not found`.
   //
-  // That body NEVER runs on the edge (the runtime guard returns first), so for
-  // the EDGE compile ONLY we replace `./instrumentation-node` with an empty
-  // module via `IgnorePlugin`. webpack then never descends into its Node-only
-  // subtree on the edge. The NODEJS compile is untouched — it bundles the real
-  // module — so the tracing / golden-signal-metrics / db-wake wiring stays fully
-  // functional when `NEXT_RUNTIME === 'nodejs'`.
-  webpack: (config, { nextRuntime, webpack }) => {
-    if (nextRuntime === 'edge') {
-      config.plugins = config.plugins || [];
-      config.plugins.push(
-        new webpack.IgnorePlugin({
-          resourceRegExp: /instrumentation-node(\.[cm]?[jt]s)?$/,
-        }),
-      );
-    }
-    return config;
-  },
+  // The load-bearing edge exclusion — an `IgnorePlugin` replacing
+  // `instrumentation-node` with an empty module on the EDGE compile ONLY — is
+  // PLATFORM-OWNED since #356: the knext adapter's `modifyConfig` injects it
+  // (see `./next-adapter.ts` → `@knext/core/adapter`, wired via `adapterPath`
+  // above; unit-guarded by `adapter-edge-ignore-plugin.test.ts`). This app
+  // deliberately does NOT hand-write that webpack hook; the adapter composes
+  // the fence after any app-owned webpack fn. The guard in
+  // `instrumentation-edge-safe.test.ts` enforces both halves of the fence.
   // NOTE (POC-ADAPTER-P1): Turbopack (Next 16 default) has an upstream bug where
   // it processes test files inside packages listed in serverExternalPackages
   // (specifically thread-stream/test/*.{js,mjs} and pino-elasticsearch's transitive
