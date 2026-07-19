@@ -275,6 +275,74 @@ var _ = Describe("NextApp Controller reconcile output", func() {
 				HaveKeyWithValue("autoscaling.knative.dev/target-burst-capacity", "200"))
 		})
 
+		It("stamps both panic annotations when spec.scaling.panicWindowPercentage and panicThresholdPercentage are set (#413, ADR-0033)", func() {
+			nn := reconcileOnce("ksvc-panic-both-set", appsv1alpha1.NextAppSpec{
+				Image: validImage,
+				Scaling: &appsv1alpha1.ScalingSpec{
+					MinScale:                 1,
+					MaxScale:                 7,
+					ContainerConcurrency:     20,
+					TargetBurstCapacity:      ptr.To(int32(-1)),
+					PanicWindowPercentage:    ptr.To(int32(10)),
+					PanicThresholdPercentage: ptr.To(int32(200)),
+				},
+			})
+
+			ksvc := &servingv1.Service{}
+			Expect(k8sClient.Get(ctx, nn, ksvc)).To(Succeed())
+
+			annotations := ksvc.Spec.Template.Annotations
+			Expect(annotations).To(HaveKeyWithValue("autoscaling.knative.dev/panic-window-percentage", "10"))
+			Expect(annotations).To(HaveKeyWithValue("autoscaling.knative.dev/panic-threshold-percentage", "200"))
+			By("coexisting with min/max-scale + cc + targetBurstCapacity")
+			Expect(annotations).To(HaveKeyWithValue("autoscaling.knative.dev/min-scale", "1"))
+			Expect(annotations).To(HaveKeyWithValue("autoscaling.knative.dev/max-scale", "7"))
+			Expect(annotations).To(HaveKeyWithValue("autoscaling.knative.dev/target-burst-capacity", "-1"))
+		})
+
+		It("does NOT stamp either panic annotation when both are unset (#413 back-compat)", func() {
+			nn := reconcileOnce("ksvc-panic-unset", appsv1alpha1.NextAppSpec{
+				Image:   validImage,
+				Scaling: &appsv1alpha1.ScalingSpec{MinScale: 0, MaxScale: 10},
+			})
+
+			ksvc := &servingv1.Service{}
+			Expect(k8sClient.Get(ctx, nn, ksvc)).To(Succeed())
+
+			Expect(ksvc.Spec.Template.Annotations).NotTo(HaveKey("autoscaling.knative.dev/panic-window-percentage"),
+				"no panic-window annotation when unset — preserves the Knative default (10%)")
+			Expect(ksvc.Spec.Template.Annotations).NotTo(HaveKey("autoscaling.knative.dev/panic-threshold-percentage"),
+				"no panic-threshold annotation when unset — preserves the Knative default (200%)")
+		})
+
+		It("stamps only panicWindowPercentage when panicThresholdPercentage is unset (#413)", func() {
+			nn := reconcileOnce("ksvc-panic-window-only", appsv1alpha1.NextAppSpec{
+				Image:   validImage,
+				Scaling: &appsv1alpha1.ScalingSpec{PanicWindowPercentage: ptr.To(int32(20))},
+			})
+
+			ksvc := &servingv1.Service{}
+			Expect(k8sClient.Get(ctx, nn, ksvc)).To(Succeed())
+
+			Expect(ksvc.Spec.Template.Annotations).To(
+				HaveKeyWithValue("autoscaling.knative.dev/panic-window-percentage", "20"))
+			Expect(ksvc.Spec.Template.Annotations).NotTo(HaveKey("autoscaling.knative.dev/panic-threshold-percentage"))
+		})
+
+		It("stamps only panicThresholdPercentage when panicWindowPercentage is unset (#413)", func() {
+			nn := reconcileOnce("ksvc-panic-threshold-only", appsv1alpha1.NextAppSpec{
+				Image:   validImage,
+				Scaling: &appsv1alpha1.ScalingSpec{PanicThresholdPercentage: ptr.To(int32(150))},
+			})
+
+			ksvc := &servingv1.Service{}
+			Expect(k8sClient.Get(ctx, nn, ksvc)).To(Succeed())
+
+			Expect(ksvc.Spec.Template.Annotations).NotTo(HaveKey("autoscaling.knative.dev/panic-window-percentage"))
+			Expect(ksvc.Spec.Template.Annotations).To(
+				HaveKeyWithValue("autoscaling.knative.dev/panic-threshold-percentage", "150"))
+		})
+
 		It("stamps the build-id label onto the revision (pod) template when Spec.BuildID is set (#93)", func() {
 			nn := reconcileOnce("ksvc-buildid", appsv1alpha1.NextAppSpec{
 				Image:   validImage,
@@ -1071,6 +1139,33 @@ var _ = Describe("NextApp Controller reconcile output", func() {
 				"preview override still wins on max-scale")
 			Expect(annotations).To(HaveKeyWithValue("autoscaling.knative.dev/target-burst-capacity", "-1"),
 				"TBC must coexist with the preview scaling override, not be dropped by it")
+		})
+
+		It("still stamps the panic annotations under the preview max-scale=1 override (#413)", func() {
+			nn := reconcileOnce("preview-panic", appsv1alpha1.NextAppSpec{
+				Image: validImage,
+				Scaling: &appsv1alpha1.ScalingSpec{
+					MaxScale:                 10,
+					PanicWindowPercentage:    ptr.To(int32(15)),
+					PanicThresholdPercentage: ptr.To(int32(150)),
+				},
+				Preview: &appsv1alpha1.PreviewSpec{
+					Enabled: true,
+					PRID:    "998",
+					Branch:  "feat/y",
+				},
+			})
+
+			ksvc := &servingv1.Service{}
+			Expect(k8sClient.Get(ctx, nn, ksvc)).To(Succeed())
+
+			annotations := ksvc.Spec.Template.Annotations
+			Expect(annotations).To(HaveKeyWithValue("autoscaling.knative.dev/max-scale", "1"),
+				"preview override still wins on max-scale")
+			Expect(annotations).To(HaveKeyWithValue("autoscaling.knative.dev/panic-window-percentage", "15"),
+				"panic-window must coexist with the preview scaling override, not be dropped by it")
+			Expect(annotations).To(HaveKeyWithValue("autoscaling.knative.dev/panic-threshold-percentage", "150"),
+				"panic-threshold must coexist with the preview scaling override, not be dropped by it")
 		})
 
 		It("does not apply preview overrides when Preview.Enabled is false", func() {
