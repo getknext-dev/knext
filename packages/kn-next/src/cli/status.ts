@@ -110,7 +110,7 @@ export interface ConditionView {
     lastTransitionTime?: string;
 }
 
-export type DatabaseMode = "managed" | "bound" | "none";
+export type DatabaseMode = "bound" | "none";
 
 /** The structured subset `--json` emits and the human renderer consumes. */
 export interface StatusModel {
@@ -138,7 +138,7 @@ interface RawNextApp {
     metadata?: { name?: string; namespace?: string };
     spec?: {
         image?: string;
-        database?: { enabled?: boolean; secretRef?: { name?: string } };
+        database?: { secretRef?: { name?: string } };
     };
     status?: {
         url?: string;
@@ -176,11 +176,7 @@ export function extractStatus(cr: unknown): StatusModel {
         conditionView(conditions.find((c) => c.type === t));
 
     const db = raw.spec?.database;
-    const mode: DatabaseMode = db?.enabled
-        ? "managed"
-        : db?.secretRef
-          ? "bound"
-          : "none";
+    const mode: DatabaseMode = db?.secretRef ? "bound" : "none";
 
     return {
         name: raw.metadata?.name ?? "<unknown>",
@@ -436,7 +432,7 @@ const STATUS_HELP = `kn-next status — show the NextApp's honest conditions (re
 
 Renders the operator-reported truth from the NextApp CR: URL, Ready (with the
 operator's reason + guidance verbatim when False, e.g. IngressNotProgrammed),
-Degraded, Reconciling, Database (managed|bound|none + bound Secret), image.
+Degraded, Reconciling, Database (bound|none + bound Secret), image.
 Conditions an older operator does not report render as "not reported".
 
 Exit code: 1 iff Ready=False — usable as a CI gate after kn-next deploy.

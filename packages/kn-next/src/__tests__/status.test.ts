@@ -308,16 +308,6 @@ describe("extractStatus", () => {
         expect(m.databaseReady?.reason).toBe("Bound");
     });
 
-    it("managed database: spec.database.enabled → mode managed", () => {
-        const cr = healthyCr();
-        (cr.spec as Record<string, unknown>).database = { enabled: true };
-        (cr.status as Record<string, unknown>).databaseSecretName =
-            "web-db-mirror";
-        const m = extractStatus(cr);
-        expect(m.database.mode).toBe("managed");
-        expect(m.database.secretName).toBe("web-db-mirror");
-    });
-
     it("old-operator sparse status: conditions absent → undefined views", () => {
         const m = extractStatus(sparseCr());
         expect(m.url).toBe("https://web.default.example.com");
