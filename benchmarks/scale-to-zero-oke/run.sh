@@ -48,7 +48,20 @@ KCTX="${KCTX:-}"                                   # kube context; empty = curre
 NS="${NS:-default}"                                # namespace
 SERVICE="${SERVICE:-}"                             # ksvc name — REQUIRED
 URL="${URL:-}"                                     # target URL; default derived from SERVICE/NS
+# k6 image. NOTE: .claude/rules/security.md asks for digest pinning. This is left
+# tag-pinned deliberately: resolving the real digest for grafana/k6:0.49.0
+# requires a registry round-trip that was not available in the environment this
+# was written in, and inventing a digest would be worse than an honest tag.
+# TODO(#423): replace with grafana/k6@sha256:<digest> once resolvable
+# (`docker buildx imagetools inspect grafana/k6:0.49.0`). Overridable via --k6-image,
+# so a digest can be passed today without editing this file.
 IMG="${IMG:-grafana/k6:0.49.0}"                     # k6 image
+KUBECTL_BIN="${KUBECTL_BIN:-kubectl}"              # kubectl binary (test seam; see below)
+# Test seam: with DRY_RUN=1, kc() normally echoes instead of running. Setting
+# DRY_RUN_EXERCISE_KC=1 makes kc() actually invoke $KUBECTL_BIN, so the
+# capture/restore path (the only code here that can destroy a real service's
+# config) can be exercised against a stub kubectl. See capture-restore.test.sh.
+DRY_RUN_EXERCISE_KC="${DRY_RUN_EXERCISE_KC:-0}"
 MAXSCALE="${MAXSCALE:-6}"                          # autoscaling.knative.dev/max-scale during the run
 CC="${CC:-15}"                                     # containerConcurrency pinned during the burst phase
 K6_CPU_REQUEST="${K6_CPU_REQUEST:-150m}"           # keep small — see "oversized k6 request" trap in README
@@ -64,6 +77,7 @@ BURST_RAMP="${BURST_RAMP:-15s}"
 BURST_HOLD="${BURST_HOLD:-50s}"
 BURST_COOLDOWN="${BURST_COOLDOWN:-10s}"
 BURST_REPS="${BURST_REPS:-2}"
+BURST_VUS_PER_POD_WHEN_UNBOUNDED="${BURST_VUS_PER_POD_WHEN_UNBOUNDED:-15}" # used only when CC=0 (unbounded)
 BASELINE_CFG="${BASELINE_CFG:-200,10,200}"         # target-burst-capacity,panic-window-pct,panic-threshold-pct
 TUNED_CFG="${TUNED_CFG:--1,6,150}"
 PHASES="${PHASES:-cold,soak,burst}"                # comma list: cold,soak,burst,all
@@ -161,8 +175,15 @@ if [ -z "$URL" ]; then
   URL="http://${SERVICE}.${NS}.svc.cluster.local"
 fi
 
+# containerConcurrency 0 is LEGAL in Knative (means "unbounded"), so it must not
+# be used as a divisor. With CC=0 there is no VUs-per-pod ratio to size against;
+# fall back to sizing the burst purely off max-scale.
 if [ -z "$BURST_VUS" ]; then
-  BURST_VUS=$((CC * MAXSCALE))
+  if [ "$CC" -gt 0 ] 2>/dev/null; then
+    BURST_VUS=$((CC * MAXSCALE))
+  else
+    BURST_VUS=$((BURST_VUS_PER_POD_WHEN_UNBOUNDED * MAXSCALE))
+  fi
 fi
 
 if [ -z "$OUT" ]; then
@@ -176,15 +197,20 @@ fi
 IFS=',' read -r BASELINE_TBC BASELINE_PW BASELINE_PT <<< "$BASELINE_CFG"
 IFS=',' read -r TUNED_TBC TUNED_PW TUNED_PT <<< "$TUNED_CFG"
 
+# kc_live: true when kc() actually talks to a cluster (or a stub), i.e. when the
+# mutating/capturing code paths are real and must be handled honestly.
+kc_live() { [ "$DRY_RUN" != "1" ] || [ "$DRY_RUN_EXERCISE_KC" = "1" ]; }
+
 kc() {
-  if [ "$DRY_RUN" = "1" ]; then
-    echo "[dry-run] kubectl ${KCTX:+--context $KCTX }-n $NS $*" >&2
+  if ! kc_live; then
+    # Callers already pass their own `-n <ns>`; don't echo a doubled namespace.
+    echo "[dry-run] kubectl ${KCTX:+--context $KCTX }$*" >&2
     return 0
   fi
   if [ -n "$KCTX" ]; then
-    kubectl --context "$KCTX" "$@"
+    "$KUBECTL_BIN" --context "$KCTX" "$@"
   else
-    kubectl "$@"
+    "$KUBECTL_BIN" "$@"
   fi
 }
 
@@ -205,13 +231,66 @@ ORIG_PW=""
 ORIG_PT=""
 CAPTURED=0
 
+# Capture is ATOMIC and FAIL-CLOSED. It does ONE `get -o json`, checks the exit
+# code, and only then sets CAPTURED=1.
+#
+# The bug this replaces (PR #424 review): the old version ran five separate
+# jsonpath gets with `2>/dev/null || true` and set CAPTURED=1 unconditionally, so
+# "the get failed" was indistinguishable from "the field is unset". cleanup()
+# then dutifully "restored" every field to unset — resetting containerConcurrency
+# to 0 and stripping all four autoscaling annotations off a service that may have
+# had a real, load-bearing config. A transient API error, a typo'd --service, or
+# RBAC that denies `get` but allows `patch` was enough to trigger it.
+#
+# Rule: never mutate a target whose original state you could not read.
 capture_original() {
-  [ "$DRY_RUN" = "1" ] && return 0
-  ORIG_MAXSCALE=$(kc get ksvc "$SERVICE" -n "$NS" -o jsonpath='{.spec.template.metadata.annotations.autoscaling\.knative\.dev/max-scale}' 2>/dev/null || true)
-  ORIG_CC=$(kc get ksvc "$SERVICE" -n "$NS" -o jsonpath='{.spec.template.spec.containerConcurrency}' 2>/dev/null || true)
-  ORIG_TBC=$(kc get ksvc "$SERVICE" -n "$NS" -o jsonpath='{.spec.template.metadata.annotations.autoscaling\.knative\.dev/target-burst-capacity}' 2>/dev/null || true)
-  ORIG_PW=$(kc get ksvc "$SERVICE" -n "$NS" -o jsonpath='{.spec.template.metadata.annotations.autoscaling\.knative\.dev/panic-window-percentage}' 2>/dev/null || true)
-  ORIG_PT=$(kc get ksvc "$SERVICE" -n "$NS" -o jsonpath='{.spec.template.metadata.annotations.autoscaling\.knative\.dev/panic-threshold-percentage}' 2>/dev/null || true)
+  if ! kc_live; then
+    log "captured original config: (dry-run — no cluster read, nothing will be mutated)"
+    return 0
+  fi
+
+  if ! command -v jq >/dev/null 2>&1; then
+    log "FATAL: 'jq' is required to capture the target's original autoscaling config."
+    log "       Refusing to mutate '${SERVICE}' without a reliable way to restore it."
+    exit 1
+  fi
+
+  local json rc
+  json=$(kc get ksvc "$SERVICE" -n "$NS" -o json 2>&1)
+  rc=$?
+  if [ "$rc" -ne 0 ] || [ -z "$json" ]; then
+    log "FATAL: could not read ksvc '${SERVICE}' in namespace '${NS}' (kubectl get exited ${rc})."
+    log "       ABORTING before any mutation — restoring a config we never captured would"
+    log "       silently destroy this service's real autoscaling settings."
+    log "       kubectl said: ${json:-<no output>}"
+    exit 1
+  fi
+
+  # One JSON document -> all five values. `// empty` yields "" for genuinely
+  # unset fields, which is what cleanup() treats as "remove the annotation".
+  local parsed
+  parsed=$(printf '%s' "$json" | jq -r '
+    .spec.template as $t
+    | ($t.metadata.annotations // {}) as $a
+    | [ ($a["autoscaling.knative.dev/max-scale"] // ""),
+        ($t.spec.containerConcurrency // "" | tostring),
+        ($a["autoscaling.knative.dev/target-burst-capacity"] // ""),
+        ($a["autoscaling.knative.dev/panic-window-percentage"] // ""),
+        ($a["autoscaling.knative.dev/panic-threshold-percentage"] // "") ]
+    | .[]' 2>&1)
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    log "FATAL: could not parse the ksvc JSON for '${SERVICE}' (jq exited ${rc}). ABORTING before any mutation."
+    log "       jq said: ${parsed}"
+    exit 1
+  fi
+
+  { read -r ORIG_MAXSCALE; read -r ORIG_CC; read -r ORIG_TBC; read -r ORIG_PW; read -r ORIG_PT; } <<< "$parsed"
+  # `null` can survive an explicit JSON null; normalise it to "unset".
+  for v in ORIG_MAXSCALE ORIG_CC ORIG_TBC ORIG_PW ORIG_PT; do
+    [ "${!v}" = "null" ] && printf -v "$v" '%s' ""
+  done
+
   CAPTURED=1
   log "captured original config: max-scale='${ORIG_MAXSCALE:-<unset>}' containerConcurrency='${ORIG_CC:-<unset(0=unbounded)>}' target-burst-capacity='${ORIG_TBC:-<unset>}' panic-window-pct='${ORIG_PW:-<unset>}' panic-threshold-pct='${ORIG_PT:-<unset>}'"
 }
@@ -227,8 +306,10 @@ cleanup() {
   CLEANED_UP=1
   log ""
   log "## CLEANUP — restoring $SERVICE to its captured original autoscaling config"
-  if [ "$DRY_RUN" = "1" ] || [ "$CAPTURED" != "1" ]; then
-    log "  (dry-run or nothing captured — nothing to restore)"
+  if ! kc_live || [ "$CAPTURED" != "1" ]; then
+    # Reaching here with CAPTURED=0 outside dry-run means we aborted BEFORE any
+    # mutation (see capture_original) — so there is genuinely nothing to undo.
+    log "  (dry-run, or aborted before capture — no mutation was made, nothing to restore)"
   else
     local cc_restore="${ORIG_CC:-0}"
     kc patch ksvc "$SERVICE" -n "$NS" --type merge -p \
@@ -285,7 +366,9 @@ running_pods() {
 
 wait_zero() {
   [ "$DRY_RUN" = "1" ] && { log "  [dry-run] skip wait-for-zero"; return 0; }
-  local t=0 n
+  # n MUST be initialised: with SCALE_DOWN_TIMEOUT=0 the loop body never runs and
+  # the trailing log line would abort the script under `set -u`.
+  local t=0 n=0
   while [ "$t" -lt "$SCALE_DOWN_TIMEOUT" ]; do
     n=$(running_pods)
     if [ "$n" = "0" ]; then
@@ -303,10 +386,26 @@ apply_autoscaling() {
   local tbc="$1" pw="$2" pt="$3" cc="${4:-}"
   local cc_patch=""
   [ -n "$cc" ] && cc_patch="\"spec\":{\"containerConcurrency\":${cc}},"
-  kc patch ksvc "$SERVICE" -n "$NS" --type merge -p \
-    "{\"spec\":{\"template\":{${cc_patch}\"metadata\":{\"annotations\":{\"autoscaling.knative.dev/max-scale\":\"${MAXSCALE}\",\"autoscaling.knative.dev/target-burst-capacity\":\"${tbc}\",\"autoscaling.knative.dev/panic-window-percentage\":\"${pw}\",\"autoscaling.knative.dev/panic-threshold-percentage\":\"${pt}\"}}}}}" \
-    >/dev/null 2>&1
-  [ "$DRY_RUN" = "1" ] || sleep 8
+  # A silently-failed patch produces a complete, plausible-looking result file
+  # for a config that was never applied — i.e. the whole A/B becomes a lie.
+  # Keep stderr and check the exit code.
+  local out rc
+  out=$(kc patch ksvc "$SERVICE" -n "$NS" --type merge -p \
+    "{\"spec\":{\"template\":{${cc_patch}\"metadata\":{\"annotations\":{\"autoscaling.knative.dev/max-scale\":\"${MAXSCALE}\",\"autoscaling.knative.dev/target-burst-capacity\":\"${tbc}\",\"autoscaling.knative.dev/panic-window-percentage\":\"${pw}\",\"autoscaling.knative.dev/panic-threshold-percentage\":\"${pt}\"}}}}}" 2>&1)
+  rc=$?
+  # In dry-run, kc()'s "[dry-run] kubectl ..." line lands in $out — surface it
+  # rather than swallowing it, so --dry-run still shows the patch it would make.
+  if ! kc_live; then
+    [ -n "$out" ] && log "  ${out}"
+    return 0
+  fi
+  if [ "$rc" -ne 0 ]; then
+    log "FATAL: failed to apply autoscaling config (tbc=${tbc} pw=${pw} pt=${pt} cc=${cc:-<unchanged>}); kubectl exited ${rc}."
+    log "       Results for an unapplied config would be meaningless — aborting (cleanup will restore the original)."
+    log "       kubectl said: ${out}"
+    exit 1
+  fi
+  if kc_live; then sleep 8; fi
 }
 
 # run_k6 rid k6-options-js-fragment iteration-body sample(0|1)
@@ -368,6 +467,15 @@ YAML
     peak_file=$(mktemp)
     (
       local t=0 mx=0 f2="" fmax=""
+      # POD_SAMPLE_BUDGET is an upper bound, not a target: the parent kills this
+      # sampler the moment the k6 Job finishes. Emit the collected data from a
+      # trap so a killed sampler still reports peak/time-to-N — otherwise the
+      # early kill would trade a 240s stall for lost measurements.
+      emit() {
+        echo "$mx" > "$peak_file"
+        echo "    pods: peak=${mx}  time_to_2pods=${f2:->${POD_SAMPLE_BUDGET}}s  time_to_${MAXSCALE}pods=${fmax:-not-reached}" >> "$OUT"
+      }
+      trap 'emit; exit 0' TERM
       while [ "$t" -lt "$POD_SAMPLE_BUDGET" ]; do
         n=$(running_pods)
         { [ "$n" -gt "$mx" ]; } 2>/dev/null && mx=$n
@@ -376,15 +484,21 @@ YAML
         sleep 3
         t=$((t + 3))
       done
-      echo "$mx" > "$peak_file"
-      echo "    pods: peak=${mx}  time_to_2pods=${f2:->${POD_SAMPLE_BUDGET}}s  time_to_${MAXSCALE}pods=${fmax:-not-reached}" >> "$OUT"
+      emit
     ) &
     samp_pid=$!
   fi
 
   kc wait --for=condition=complete "job/${name}" -n "$NS" --timeout="${K6_JOB_TIMEOUT}s" >/dev/null 2>&1 \
     || kc wait --for=condition=failed "job/${name}" -n "$NS" --timeout=10s >/dev/null 2>&1 || true
-  [ -n "$samp_pid" ] && wait "$samp_pid" 2>/dev/null
+
+  # The Job is done — stop sampling NOW. Waiting out the full POD_SAMPLE_BUDGET
+  # cost ~21 min of idle polling per cold phase (~40 min per default run) for
+  # ~10s of actual work. The TERM trap above flushes the results first.
+  if [ -n "$samp_pid" ]; then
+    kill -TERM "$samp_pid" 2>/dev/null
+    wait "$samp_pid" 2>/dev/null
+  fi
 
   kc logs -n "$NS" "job/${name}" 2>/dev/null \
     | grep -E 'http_req_duration|http_req_failed|http_reqs|iteration_duration|checks\.\.\.|vus_max|dropped' \
@@ -428,8 +542,16 @@ phase_soak() {
 phase_burst() {
   log ""
   log "## PHASE B — discriminating burst A/B: containerConcurrency pinned to ${CC}, continuous"
-  log "   (no-think-time) load at ${BURST_VUS} VUs. ${BURST_VUS} / ${CC} = $((BURST_VUS / CC))"
-  log "   pods needed — sized against --max-scale=${MAXSCALE} to force real fan-out to the cap."
+  if [ "$CC" -gt 0 ] 2>/dev/null; then
+    log "   (no-think-time) load at ${BURST_VUS} VUs. ${BURST_VUS} / ${CC} = $((BURST_VUS / CC))"
+    log "   pods needed — sized against --max-scale=${MAXSCALE} to force real fan-out to the cap."
+  else
+    # containerConcurrency=0 is Knative's "unbounded" — there is no VUs-per-pod
+    # ratio, so fan-out is driven by the autoscaler's RPS target, not by CC.
+    log "   (no-think-time) load at ${BURST_VUS} VUs. containerConcurrency=0 (unbounded):"
+    log "   no VUs-per-pod cap, so fan-out depends on the autoscaler's RPS target, not CC."
+    log "   Expect a WEAKER A/B signal than with a pinned containerConcurrency."
+  fi
   local burst_opts="stages:[{duration:'${BURST_RAMP}',target:${BURST_VUS}},{duration:'${BURST_HOLD}',target:${BURST_VUS}},{duration:'${BURST_COOLDOWN}',target:10}]"
   for cfg in "baseline $BASELINE_TBC $BASELINE_PW $BASELINE_PT" "tuned $TUNED_TBC $TUNED_PW $TUNED_PT"; do
     # shellcheck disable=SC2086 # intentional word-split of "name tbc pw pt"

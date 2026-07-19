@@ -15,7 +15,9 @@ harness.
 ## Requirements
 
 - `kubectl` configured with a context that can read/patch the target `ksvc` and
-  create Jobs/ConfigMaps in its namespace.
+  create Jobs/ConfigMaps in its namespace. **`get` permission is mandatory** — the
+  harness refuses to run if it can't read the config it would have to restore.
+- `jq`, used to capture the target's original autoscaling config in one atomic read.
 - The target is a **Knative Service** (`ksvc`) — the harness patches
   `spec.template.spec.containerConcurrency` and `autoscaling.knative.dev/*`
   annotations directly.
@@ -111,13 +113,37 @@ A/B, not as evidence the tuned config "won" or "lost".
 Before making any change, the harness captures the target ksvc's **current**
 `containerConcurrency` and `autoscaling.knative.dev/{max-scale,target-burst-capacity,
 panic-window-percentage,panic-threshold-percentage}` — whatever they actually are,
-not an assumed baseline. A `trap` on `EXIT`, `INT`, and `TERM` restores exactly
-those captured values (or removes the annotation if it wasn't set originally) and
-deletes this run's k6 Jobs/ConfigMaps (labeled `bench-run=<run-id>`), **even if the
-script is killed mid-run** (Ctrl-C, `kill`, a crashed shell). This is the direct
-fix for the real incident behind this harness: the manual runs that produced the
-published numbers were interrupted twice and left the cluster patched with test
-autoscaling config.
+not an assumed baseline. This is a **single** `kubectl get ksvc -o json` whose exit
+code is checked, so the capture is atomic and can't half-succeed. It requires `jq`.
+
+**If that read fails, the harness aborts before touching anything.** A missing
+ksvc, a typo'd `--service`, a transient API error, or RBAC that allows `patch` but
+denies `get` all stop the run with a `FATAL:` message and a non-zero exit — nothing
+is patched. This matters because "the get failed" and "the field is unset" are
+otherwise indistinguishable, and acting on the latter would reset
+`containerConcurrency` to `0` and strip all four annotations off a service that had
+a real, load-bearing config.
+
+Once the capture succeeds, a `trap` on `EXIT`, `INT`, and `TERM` restores exactly
+those captured values (or removes the annotation via a JSON-patch `remove` if it
+genuinely wasn't set originally) and deletes this run's k6 Jobs/ConfigMaps (labeled
+`bench-run=<run-id>`), **even if the script is killed mid-run** (Ctrl-C, `kill`, a
+crashed shell). This is the direct fix for the real incident behind this harness:
+the manual runs that produced the published numbers were interrupted twice and left
+the cluster patched with test autoscaling config.
+
+The capture/restore path is the only code here that can damage a real service, so
+it has its own tests — run them with:
+
+```bash
+bash benchmarks/scale-to-zero-oke/capture-restore.test.sh
+```
+
+They drive `run.sh` against a stub `kubectl` (via the `KUBECTL_BIN` +
+`DRY_RUN_EXERCISE_KC=1` test seam) and assert that a failed capture aborts without
+issuing a single `patch`, and that a successful capture restores the exact original
+values. Note that plain `--dry-run` deliberately short-circuits before any cluster
+read, so it does *not* exercise this path — that's what the stub is for.
 
 Note the annotation keys are **kebab-case** (`autoscaling.knative.dev/max-scale`),
 not camelCase (`maxScale`) — Knative's KPA silently ignores the camelCase form, so
