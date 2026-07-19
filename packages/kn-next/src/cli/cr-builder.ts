@@ -49,7 +49,40 @@ export function buildNextAppCRObject(
     const scaling = {
         minScale,
         maxScale,
-        ...(config.scaling ? {} : {}),
+        // #415 — the 6 ScalingSpec knobs the CRD already supports
+        // (ADR-0028/0029/0030/0032/0033). Mapped ONLY when set on the
+        // config so unset ⇒ omitted from the CR ⇒ the operator's own
+        // default is preserved (byte-identical back-compat).
+        ...(config.scaling?.containerConcurrency !== undefined
+            ? { containerConcurrency: config.scaling.containerConcurrency }
+            : {}),
+        ...(config.scaling?.poolMax !== undefined
+            ? { poolMax: config.scaling.poolMax }
+            : {}),
+        ...(config.scaling?.warmSchedule?.length
+            ? {
+                  warmSchedule: config.scaling.warmSchedule.map((w) => ({
+                      start: w.start,
+                      end: w.end,
+                      replicas: w.replicas,
+                      ...(w.timezone ? { timezone: w.timezone } : {}),
+                  })),
+              }
+            : {}),
+        ...(config.scaling?.targetBurstCapacity !== undefined
+            ? { targetBurstCapacity: config.scaling.targetBurstCapacity }
+            : {}),
+        ...(config.scaling?.panicWindowPercentage !== undefined
+            ? {
+                  panicWindowPercentage: config.scaling.panicWindowPercentage,
+              }
+            : {}),
+        ...(config.scaling?.panicThresholdPercentage !== undefined
+            ? {
+                  panicThresholdPercentage:
+                      config.scaling.panicThresholdPercentage,
+              }
+            : {}),
     };
 
     // Resources — from config.scaling (legacy field names match ResourcesSpec)

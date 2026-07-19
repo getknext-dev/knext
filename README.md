@@ -383,6 +383,48 @@ scaling: {
 }
 ```
 
+Beyond `minScale`/`maxScale`/`cpuRequest`/`memoryRequest`/`cpuLimit`/`memoryLimit`,
+`scaling` also exposes the Knative autoscaling knobs the `NextApp` resource
+supports. All are optional; leaving one unset omits it from the emitted
+`NextApp` resource and the operator's own default applies unchanged:
+
+```typescript
+scaling: {
+  // Concurrent requests per pod before Knative adds another pod.
+  // Operator default: 20.
+  containerConcurrency: 20,
+
+  // Per-pod DATABASE_URL connection-pool maximum. When set, the operator
+  // enforces `maxScale × poolMax ≤ 80` (the app connection budget) and
+  // caps the runtime pg pool to match.
+  poolMax: 5,
+
+  // Scheduled warm-floor windows: during each window the app is
+  // pre-warmed to a floor of `replicas` pods so a known traffic peak
+  // doesn't pay a cold start. Cron expressions are evaluated in `timezone`
+  // (default "UTC"). Outside every window the floor reverts to `minScale`.
+  warmSchedule: [
+    { start: '0 8 * * 1-5', end: '0 20 * * 1-5', replicas: 2, timezone: 'UTC' },
+  ],
+
+  // Whether the Knative activator stays in the request path as a burst
+  // buffer for an unpredicted spike. -1 = always keep it in the path
+  // (max burst tolerance); >= 0 = the buffered request count before it's
+  // removed. Unset = the Knative cluster default (200) applies.
+  targetBurstCapacity: -1,
+
+  // How fast the Knative Pod Autoscaler reacts to an unpredicted surge,
+  // as a percentage of the stable window (1-100; smaller = more
+  // reactive). Unset = the Knative cluster default (10%) applies.
+  panicWindowPercentage: 10,
+
+  // The overshoot (as a percentage of the steady-state target) that trips
+  // panic mode (>= 110; lower = trips sooner). Unset = the Knative
+  // cluster default (200%) applies.
+  panicThresholdPercentage: 200,
+}
+```
+
 ---
 
 ## Caching & Adapters

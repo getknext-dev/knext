@@ -16,6 +16,12 @@ const config: KnativeNextConfig = {
   },
 
   // Knative autoscaling. minScale: 0 (the default) keeps scale-to-zero on.
+  // Beyond minScale/maxScale/cpu*/memory*, ScalingConfig also supports:
+  //   containerConcurrency, poolMax, warmSchedule[], targetBurstCapacity,
+  //   panicWindowPercentage, panicThresholdPercentage — see the "Scaling
+  //   Configuration" section of the README for the full list. All optional;
+  //   unset ones are omitted from the NextApp CR and the operator's own
+  //   default applies.
   scaling: {
     minScale: 1,
     maxScale: 10,

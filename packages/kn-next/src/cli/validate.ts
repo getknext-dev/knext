@@ -163,6 +163,46 @@ export function validateConfig(config: KnativeNextConfig): void {
                 "'scaling.minScale' cannot be greater than 'scaling.maxScale'",
             );
         }
+
+        // #415 — cheap, SINGLE-FIELD range checks for the 6 new knobs,
+        // mirroring the operator's own single-field rules
+        // (containerConcurrency/poolMax >= 0, internal/validation/validate.go)
+        // and the CRD's `+kubebuilder:validation` markers on the *int32
+        // fields. Deliberately NOT the `maxScale × poolMax ≤ 80` cross-field
+        // wall — that stays the operator's job (admission + reconciler).
+        if (
+            config.scaling.containerConcurrency !== undefined &&
+            config.scaling.containerConcurrency < 0
+        ) {
+            errors.push("'scaling.containerConcurrency' must be >= 0");
+        }
+        if (
+            config.scaling.poolMax !== undefined &&
+            config.scaling.poolMax < 0
+        ) {
+            errors.push("'scaling.poolMax' must be >= 0");
+        }
+        if (
+            config.scaling.targetBurstCapacity !== undefined &&
+            config.scaling.targetBurstCapacity < -1
+        ) {
+            errors.push("'scaling.targetBurstCapacity' must be -1 or >= 0");
+        }
+        if (
+            config.scaling.panicWindowPercentage !== undefined &&
+            (config.scaling.panicWindowPercentage < 1 ||
+                config.scaling.panicWindowPercentage > 100)
+        ) {
+            errors.push(
+                "'scaling.panicWindowPercentage' must be between 1 and 100",
+            );
+        }
+        if (
+            config.scaling.panicThresholdPercentage !== undefined &&
+            config.scaling.panicThresholdPercentage < 110
+        ) {
+            errors.push("'scaling.panicThresholdPercentage' must be >= 110");
+        }
     }
 
     // Env validation (#186) — plain NON-SECRET env vars. Mirror the operator's
