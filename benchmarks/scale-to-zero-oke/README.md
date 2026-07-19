@@ -59,9 +59,9 @@ you're expected to override for your own cluster.
 | `burst` | The **discriminating** burst A/B: pins `containerConcurrency` and runs **continuous, no-think-time** load, sized so `VUs ÷ containerConcurrency ≈ max-scale`, forcing real fan-out to the pod cap. Runs a `baseline` and a `tuned` burst-knob config, N reps each, and reports peak pods per rep. | Phase B ("discriminating burst A/B" section) |
 
 Use `--phases` to pick a subset (`cold`, `soak`, `burst`, comma-combinations, or
-`all`). Every phase restores the target's autoscaling config afterward via the
-same cleanup path (see below) — you can safely interleave phases across separate
-invocations.
+`all`). Whichever subset you run, the target's autoscaling config is restored when
+the script exits, via the single cleanup path (see below) — so you can safely
+split phases across separate invocations.
 
 ## Reading the output
 

@@ -15,6 +15,35 @@ Status: point-in-time measurement · Date: 2026-07-19 · Target: `file-manager` 
 This is a single small (2-node) cluster. Treat every number below as **environment-dependent, not
 a guarantee** — see the closing note.
 
+## Reproducing this
+
+Every phase below is reproducible via the committed harness at
+[`benchmarks/scale-to-zero-oke/`](../../benchmarks/scale-to-zero-oke/) (added in #423 — the
+numbers here were originally produced by throwaway temp scripts). It runs against any Knative
+Service on any cluster; no cluster identity is hardcoded:
+
+```bash
+cd benchmarks/scale-to-zero-oke
+
+# Dry run — prints every kubectl/k6 action without touching a cluster.
+./run.sh --service my-app --namespace default --dry-run
+
+# The full run behind this doc (Phase A + Phase C + the discriminating burst A/B):
+./run.sh --context my-kube-context --namespace default --service my-app \
+  --max-scale 6 --container-concurrency 15
+```
+
+The harness captures and restores the target's autoscaling config on exit (including on Ctrl-C),
+so an interrupted run doesn't leave the cluster patched with test config. See
+[its README](../../benchmarks/scale-to-zero-oke/README.md) for the full flag list, how to read the
+output, and the **two false-result traps** — think-time load that never fans out (peak pods = 1),
+and an oversized k6 CPU request that leaves the load generator `Pending` (a false zero-load
+result). Both are the failures that actually occurred while producing the numbers below.
+
+Not covered by the harness: CI regression gating (needs a dedicated perf environment) and
+p99 cold start *under concurrency* — the Phase A methodology here is sequential single-request
+samples.
+
 ## Methodology
 
 ### Phase A — cold start
