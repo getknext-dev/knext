@@ -741,6 +741,19 @@ func (r *NextAppReconciler) buildDesiredKsvc(nextApp *appsv1alpha1.NextApp, ksvc
 	}
 	annotations["autoscaling.knative.dev/min-scale"] = fmt.Sprintf("%d", minScale)
 
+	// TargetBurstCapacity (#411, ADR-0032): whether the activator stays in the
+	// request path as a burst buffer. Only stamped when the field is
+	// EXPLICITLY set — nil leaves the annotation absent so the Knative
+	// cluster default (200) applies unmanaged, exactly as before this field
+	// existed (byte-identical back-compat). Written into the SAME annotations
+	// map as min-scale/max-scale/containerConcurrency so it participates in
+	// the preview-env override below unconditionally (the preview override
+	// only touches max-scale/min-scale/retention-period, so TBC always
+	// survives it).
+	if nextApp.Spec.Scaling != nil && nextApp.Spec.Scaling.TargetBurstCapacity != nil {
+		annotations["autoscaling.knative.dev/target-burst-capacity"] = fmt.Sprintf("%d", *nextApp.Spec.Scaling.TargetBurstCapacity)
+	}
+
 	// Observability annotations — aligned with CLI
 	if nextApp.Spec.Observability != nil && nextApp.Spec.Observability.Enabled {
 		annotations["prometheus.io/scrape"] = "true"
