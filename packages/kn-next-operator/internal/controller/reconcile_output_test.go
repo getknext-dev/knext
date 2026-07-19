@@ -225,6 +225,56 @@ var _ = Describe("NextApp Controller reconcile output", func() {
 				"max-scale must be 1 so exactly one pod is woken on activation")
 		})
 
+		It("stamps autoscaling.knative.dev/target-burst-capacity when spec.scaling.targetBurstCapacity is set (#411, ADR-0032)", func() {
+			// -1 = always keep the activator in the request path as a burst
+			// buffer, pacing an unpredicted spike into pods as they scale
+			// rather than letting the first Running pod eat the whole burst.
+			nn := reconcileOnce("ksvc-tbc-set", appsv1alpha1.NextAppSpec{
+				Image: validImage,
+				Scaling: &appsv1alpha1.ScalingSpec{
+					MinScale:             1,
+					MaxScale:             7,
+					ContainerConcurrency: 20,
+					TargetBurstCapacity:  ptr.To(int32(-1)),
+				},
+			})
+
+			ksvc := &servingv1.Service{}
+			Expect(k8sClient.Get(ctx, nn, ksvc)).To(Succeed())
+
+			annotations := ksvc.Spec.Template.Annotations
+			Expect(annotations).To(HaveKeyWithValue("autoscaling.knative.dev/target-burst-capacity", "-1"))
+			By("coexisting with the existing min/max-scale + cc annotations")
+			Expect(annotations).To(HaveKeyWithValue("autoscaling.knative.dev/min-scale", "1"))
+			Expect(annotations).To(HaveKeyWithValue("autoscaling.knative.dev/max-scale", "7"))
+		})
+
+		It("does NOT stamp target-burst-capacity when spec.scaling.targetBurstCapacity is unset (#411 back-compat)", func() {
+			nn := reconcileOnce("ksvc-tbc-unset", appsv1alpha1.NextAppSpec{
+				Image:   validImage,
+				Scaling: &appsv1alpha1.ScalingSpec{MinScale: 0, MaxScale: 10},
+			})
+
+			ksvc := &servingv1.Service{}
+			Expect(k8sClient.Get(ctx, nn, ksvc)).To(Succeed())
+
+			Expect(ksvc.Spec.Template.Annotations).NotTo(HaveKey("autoscaling.knative.dev/target-burst-capacity"),
+				"no TBC annotation when the field is unset — preserves the Knative default (back-compat)")
+		})
+
+		It("stamps a non-negative targetBurstCapacity (a numeric burst capacity, not always-activator) (#411)", func() {
+			nn := reconcileOnce("ksvc-tbc-numeric", appsv1alpha1.NextAppSpec{
+				Image:   validImage,
+				Scaling: &appsv1alpha1.ScalingSpec{TargetBurstCapacity: ptr.To(int32(200))},
+			})
+
+			ksvc := &servingv1.Service{}
+			Expect(k8sClient.Get(ctx, nn, ksvc)).To(Succeed())
+
+			Expect(ksvc.Spec.Template.Annotations).To(
+				HaveKeyWithValue("autoscaling.knative.dev/target-burst-capacity", "200"))
+		})
+
 		It("stamps the build-id label onto the revision (pod) template when Spec.BuildID is set (#93)", func() {
 			nn := reconcileOnce("ksvc-buildid", appsv1alpha1.NextAppSpec{
 				Image:   validImage,
@@ -997,6 +1047,30 @@ var _ = Describe("NextApp Controller reconcile output", func() {
 				"preview max-scale=1 must override Spec.Scaling.MaxScale=10")
 			Expect(annotations).To(HaveKeyWithValue("autoscaling.knative.dev/min-scale", "0"),
 				"preview min-scale=0 must override Spec.Scaling.MinScale=3")
+		})
+
+		It("still stamps target-burst-capacity under the preview max-scale=1 override (#411)", func() {
+			nn := reconcileOnce("preview-tbc", appsv1alpha1.NextAppSpec{
+				Image: validImage,
+				Scaling: &appsv1alpha1.ScalingSpec{
+					MaxScale:            10,
+					TargetBurstCapacity: ptr.To(int32(-1)),
+				},
+				Preview: &appsv1alpha1.PreviewSpec{
+					Enabled: true,
+					PRID:    "999",
+					Branch:  "feat/z",
+				},
+			})
+
+			ksvc := &servingv1.Service{}
+			Expect(k8sClient.Get(ctx, nn, ksvc)).To(Succeed())
+
+			annotations := ksvc.Spec.Template.Annotations
+			Expect(annotations).To(HaveKeyWithValue("autoscaling.knative.dev/max-scale", "1"),
+				"preview override still wins on max-scale")
+			Expect(annotations).To(HaveKeyWithValue("autoscaling.knative.dev/target-burst-capacity", "-1"),
+				"TBC must coexist with the preview scaling override, not be dropped by it")
 		})
 
 		It("does not apply preview overrides when Preview.Enabled is false", func() {

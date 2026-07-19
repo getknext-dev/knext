@@ -287,6 +287,36 @@ type ScalingSpec struct {
 	// combination is a HARD admission REJECTION (#393, ADR-0030), not just advice.
 	// +optional
 	WarmSchedule []WarmWindow `json:"warmSchedule,omitempty"`
+
+	// TargetBurstCapacity tunes the Knative
+	// `autoscaling.knative.dev/target-burst-capacity` annotation (#411,
+	// ADR-0032, amending ADR-0028): whether the ACTIVATOR stays in the request
+	// path as a burst buffer, pacing an UNPREDICTED traffic spike into pods as
+	// they scale rather than letting the first Running pod absorb the whole
+	// burst directly. Neither the ADR-0028 ContainerConcurrency default (which
+	// makes reactive scale-out *fire*) nor ADR-0030's warmSchedule (which
+	// pre-warms *known* windows) buffers a spike nobody scheduled — this field
+	// is that missing lever.
+	//
+	// Semantics (mirrors upstream Knative):
+	//   - -1  => always keep the activator in the path (max burst tolerance,
+	//            at the cost of an extra network hop on every request while
+	//            the KPA holds it there).
+	//   - >=0 => the burst capacity in requests the activator will buffer
+	//            before Knative removes it from the path.
+	//   - unset (nil) => the annotation is NOT stamped and the Knative
+	//            cluster default (200) applies unmanaged, exactly as before
+	//            this field existed (byte-identical back-compat).
+	//
+	// Connection-wall interlock (ADR-0028/ADR-0029): a buffered burst is
+	// eventually released into more pods, which raises PEAK backend DB
+	// connections just like any other fan-out. TargetBurstCapacity does not
+	// bypass the `maxScale × poolMax ≤ 80` invariant — that cap is enforced at
+	// admission independently of this field and composes cleanly with it (see
+	// ADR-0032).
+	// +optional
+	// +kubebuilder:validation:Minimum=-1
+	TargetBurstCapacity *int32 `json:"targetBurstCapacity,omitempty"`
 }
 
 // WarmWindow is one scheduled warm-floor window (ADR-0030, W5/#380). Start/End

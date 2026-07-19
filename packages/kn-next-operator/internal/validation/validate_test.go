@@ -20,6 +20,8 @@ import (
 	"strings"
 	"testing"
 
+	"k8s.io/utils/ptr"
+
 	appsv1alpha1 "github.com/AhmedElBanna80/knext/packages/kn-next-operator/api/v1alpha1"
 )
 
@@ -211,6 +213,51 @@ func TestValidateNextAppSpec(t *testing.T) {
 			},
 			wantErr: true,
 			errHas:  "poolMax",
+		},
+		{
+			// targetBurstCapacity (#411, ADR-0032): -1 = always keep the
+			// activator in the request path (a burst buffer); it is a
+			// legitimate, documented value and must NOT be rejected by a naive
+			// ">= 0" check.
+			name: "targetBurstCapacity -1 (always-activator) accepted (#411)",
+			spec: &appsv1alpha1.NextAppSpec{
+				Image:   digestImage,
+				Scaling: &appsv1alpha1.ScalingSpec{TargetBurstCapacity: ptr.To(int32(-1))},
+			},
+			wantErr: false,
+		},
+		{
+			name: "targetBurstCapacity 0 accepted (#411)",
+			spec: &appsv1alpha1.NextAppSpec{
+				Image:   digestImage,
+				Scaling: &appsv1alpha1.ScalingSpec{TargetBurstCapacity: ptr.To(int32(0))},
+			},
+			wantErr: false,
+		},
+		{
+			name: "targetBurstCapacity 200 accepted (#411)",
+			spec: &appsv1alpha1.NextAppSpec{
+				Image:   digestImage,
+				Scaling: &appsv1alpha1.ScalingSpec{TargetBurstCapacity: ptr.To(int32(200))},
+			},
+			wantErr: false,
+		},
+		{
+			name: "targetBurstCapacity -2 rejected (#411)",
+			spec: &appsv1alpha1.NextAppSpec{
+				Image:   digestImage,
+				Scaling: &appsv1alpha1.ScalingSpec{TargetBurstCapacity: ptr.To(int32(-2))},
+			},
+			wantErr: true,
+			errHas:  "targetBurstCapacity",
+		},
+		{
+			name: "targetBurstCapacity unset accepted (#411 back-compat)",
+			spec: &appsv1alpha1.NextAppSpec{
+				Image:   digestImage,
+				Scaling: &appsv1alpha1.ScalingSpec{MaxScale: 10},
+			},
+			wantErr: false,
 		},
 		{
 			name: "unknown storage provider rejected",
