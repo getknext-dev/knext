@@ -27,6 +27,15 @@ const config: KnativeNextConfig = {
     maxScale: 10,
     containerConcurrency: 100,
   },
+
+  // Bring-your-own database binding (optional). knext provisions no
+  // database — this only binds an EXISTING Secret's DSN into the app as
+  // DATABASE_URL (+ optional roSecretRef -> DATABASE_URL_RO). See the
+  // "Database Binding" section of the README. Uncomment and point at your
+  // own Secret to use it:
+  // database: {
+  //   secretRef: { name: "<your-db-secret>" },
+  // },
 };
 
 export default config;
