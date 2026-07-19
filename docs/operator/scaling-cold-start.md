@@ -408,6 +408,53 @@ still adds pods above it under load. At all other times the app scales to zero.
   over-warming cannot erode the scale-to-zero cost win; mispredict failure modes
   (cold storm / wasted cost) measured.
 
+## Burst buffering (`spec.scaling.targetBurstCapacity`, ADR-0032 / #411)
+
+ADR-0028's `containerConcurrency` default makes reactive scale-out *fire*, and
+`warmSchedule` (above) pre-warms *known* windows. Neither buffers a spike nobody
+scheduled: on an **unpredicted** burst, the requests that land before new pods are
+Running/Ready go straight to whatever pods already exist. Knative's
+`autoscaling.knative.dev/target-burst-capacity` (TBC) annotation controls whether
+the **activator** — the component in front of the pods that can queue requests —
+stays in the request path to pace that burst into pods as they scale, instead of
+letting the first Running pod absorb the whole spike directly.
+
+```yaml
+spec:
+  scaling:
+    maxScale: 10
+    containerConcurrency: 20
+    poolMax: 5                 # 10 × 5 = 50 ≤ 80 — connection budget still holds
+    targetBurstCapacity: -1    # always keep the activator in path during a scale-up
+```
+
+- **`-1`** — always keep the activator in the path. Maximum burst tolerance, but
+  every request pays an extra activator→pod hop while the KPA holds it there, not
+  just during a burst. Best for apps that would rather take a small constant
+  latency tax than risk an overload spike.
+- **`>= 0`** — a numeric burst capacity in requests the activator buffers before
+  Knative removes it from the path once it judges capacity sufficient.
+- **Unset (default)** — the annotation is **not stamped**; the Knative cluster
+  default (`200`) applies unmanaged, exactly as before this field existed
+  (back-compat).
+
+### The connection-wall interlock
+
+TBC paces *when* a burst is released into pods — it does not raise how many pods
+`maxScale` allows, and it does not change the `maxScale × poolMax ≤ 80` invariant
+(ADR-0028/ADR-0029) enforced at admission. A buffered burst still ends up running
+on up to `maxScale` pods, each still capped at `poolMax` connections. So:
+
+- Turning on `targetBurstCapacity: -1` is **not** a substitute for sizing
+  `maxScale`/`poolMax` correctly — re-check that product still holds ≤ 80 when you
+  tune burst buffering.
+- The safest posture for a bursty, connection-sensitive app is **both**: `-1` (or
+  a numeric buffer) to pace the ramp, *and* a `maxScale`/`poolMax` pair that was
+  already validated to fit the connection budget.
+
+See [ADR-0032](../adr/0032-target-burst-capacity.md) for the full trade-off
+record.
+
 ## Summary
 
 | Concern | Knob / mitigation |
@@ -419,6 +466,7 @@ still adds pods above it under load. At all other times the app scales to zero.
 | DB pool re-establish | warm zone (`minScale: 1`) and/or transaction-mode pooler |
 | Connection storm | low `maxScale` + declare `poolMax` (operator enforces `maxScale × poolMax ≤ 80`, ADR-0028); a pooler caps it further |
 | Reactive scale-out under burst | lower `containerConcurrency` (default now `20`, ADR-0028; W1/#376 refines) |
+| Unpredicted traffic spike | `spec.scaling.targetBurstCapacity` (activator burst buffer, ADR-0032; still bound by the `maxScale × poolMax` wall) |
 
 knext exposes the scaling/cache knobs and this guidance; the database and its
 connection pooler are operated outside knext.

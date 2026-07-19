@@ -44,6 +44,7 @@ spec:
         end:   "0 20 * * 1-5"    # 5-field cron: warm floor ends (20:00 weekdays)
         replicas: 3             # min-scale floor held during the window (>= 1, <= maxScale)
         timezone: America/New_York # IANA timezone; defaults to UTC
+    targetBurstCapacity: -1   # Optional burst buffer (ADR-0032, #411); -1 = always keep the activator in path
 ```
 
 > The `containerConcurrency` default was lowered from `100` to `20` in ADR-0028
@@ -68,6 +69,19 @@ spec:
 > [`scaling-cold-start.md`](./scaling-cold-start.md#scheduled-warm-floor-specscalingwarmschedule-adr-0030--380)
 > and [ADR-0030](../adr/0030-scheduled-warm-floor.md) (incl. the deferred
 > learned-controller / DB-lockstep / warm-budget follow-ups).
+
+> `targetBurstCapacity` (ADR-0032, #411) tunes whether the Knative **activator**
+> stays in the request path as a burst buffer, pacing an **unpredicted** traffic
+> spike into pods as they scale rather than letting the first Running pod absorb
+> the whole burst directly. `-1` = always keep the activator in path (max burst
+> tolerance, at the cost of an extra hop on every request); `>= 0` = a numeric
+> burst capacity in requests; **unset (default) = the annotation is not stamped**
+> and the Knative cluster default (`200`) applies unmanaged (back-compat).
+> **Connection-wall interlock:** a buffered burst is still released into pods up
+> to `maxScale`, so it does **not** bypass the `maxScale × poolMax ≤ 80` invariant
+> (ADR-0028/ADR-0029) — re-check that math when you tune TBC. See
+> [`scaling-cold-start.md`](./scaling-cold-start.md#burst-buffering-specscalingtargetburstcapacity-adr-0032--411)
+> and [ADR-0032](../adr/0032-target-burst-capacity.md).
 
 ### `storage` (Optional)
 Binds the Next.js Server Actions (e.g., `<input type="file" />`) to a cloud storage provider.
