@@ -69,7 +69,9 @@ survives pod death — knext mounts it from a PVC, not pod-local disk, when
 **Perspective on the numbers.** On a real cluster, an end-to-end cold start (~1.3 s in a project
 benchmark) is dominated by **pod scheduling**, not the server boot — so shaving the boot helps but
 does not make scheduling free. Treat any specific millisecond figure as environment-dependent, not
-a guaranteed number. Node (with `NODE_COMPILE_CACHE`) remains the default runtime; Bun's
+a guaranteed number — and a typical figure is not a worst case: cold starts vary a lot run to run,
+and an occasional wake can take several times the typical one. Size your warm floor against that
+tail, not the average. Node (with `NODE_COMPILE_CACHE`) remains the default runtime; Bun's
 build-time bytecode is the opt-in for squeezing the boot phase further.
 </Callout>
 
@@ -114,10 +116,14 @@ risk, but it also doesn't protect you from the one that already exists — size 
 <Callout type="info">
 **What a burst looks like in practice.** In a representative benchmark, a sustained burst sized
 to saturate the pod cap (`maxScale`) scaled from zero to the cap in roughly ten to fifteen
-seconds, with essentially no errors. Tightening the burst knobs (`targetBurstCapacity`, `panicWindowPercentage`,
-`panicThresholdPercentage`) shaved the median response time — roughly from the low hundreds of
-milliseconds down to double digits — but didn't change the (already near-zero) error rate, and
-didn't change the tail, which stayed dominated by cold-start scheduling rather than by autoscaler
-reaction speed. Numbers like these are illustrative and environment-dependent, not a guarantee —
+seconds, with essentially no errors. What the burst knobs (`targetBurstCapacity`,
+`panicWindowPercentage`, `panicThresholdPercentage`) reliably changed was **how quickly capacity
+started being added**, not how fast individual requests came back: with the buffered setting
+(`targetBurstCapacity: -1`) the service began adding pods immediately at the start of the burst,
+while the default setting took a few seconds to react. Response-time differences between the two
+settings did **not** hold up when the same comparison was repeated — treat the knobs as a lever on
+reaction speed, not on latency. They also didn't change the (already near-zero) error rate, and
+they don't change the tail, which stays dominated by cold start rather than by autoscaler
+reaction speed. Behavior like this is illustrative and environment-dependent, not a guarantee —
 see the perspective note above on cold-start numbers, which applies here too.
 </Callout>
