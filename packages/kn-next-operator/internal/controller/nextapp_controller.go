@@ -746,9 +746,9 @@ func (r *NextAppReconciler) buildDesiredKsvc(nextApp *appsv1alpha1.NextApp, ksvc
 	// EXPLICITLY set — nil leaves the annotation absent so the Knative
 	// cluster default (200) applies unmanaged, exactly as before this field
 	// existed (byte-identical back-compat). Written into the SAME annotations
-	// map as min-scale/max-scale/containerConcurrency so it participates in
-	// the preview-env override below unconditionally (the preview override
-	// only touches max-scale/min-scale/retention-period, so TBC always
+	// map as min-scale/max-scale/containerConcurrency, and is untouched by
+	// the preview-env override below (that override rewrites only
+	// max-scale/min-scale/retention-period, so a stamped TBC always
 	// survives it).
 	if nextApp.Spec.Scaling != nil && nextApp.Spec.Scaling.TargetBurstCapacity != nil {
 		annotations["autoscaling.knative.dev/target-burst-capacity"] = fmt.Sprintf("%d", *nextApp.Spec.Scaling.TargetBurstCapacity)
