@@ -3,10 +3,23 @@ package appdb
 import (
 	"context"
 	"database/sql"
+	"fmt"
+	"strings"
 	"sync"
+	"time"
 
 	_ "github.com/lib/pq" // postgres driver for the warm-hold connections (SCRAM-SHA-256)
 )
+
+// DefaultHoldTimeout bounds every warm-hold Dial/Ping (review finding, #388).
+// EnsureHold runs synchronously inside the controller's single-goroutine
+// reconcileAll, on the long-lived signal context (no deadline) — without a
+// bound, one unreachable/black-holed compute would block on the OS TCP
+// connect timeout (tens of seconds+), stalling reconciliation of EVERY other
+// AppDatabase behind it. Mirrors the APPDB_HTTP_TIMEOUT_MS pattern already
+// used for the pageserver/safekeeper HTTP calls (cmd/appdb-operator/main.go).
+// Best-effort warming must never degrade the whole operator.
+const DefaultHoldTimeout = 5 * time.Second
 
 // The warm-hold manager (knext #388, ADR-0030 addendum) is the production
 // actuator behind the WarmHolds port. A "hold" is ONE open, authenticated,
@@ -56,16 +69,22 @@ type HoldDialer interface {
 // HoldManager tracks one hold per app. Safe for concurrent use (the controller
 // is single-goroutine today; the lock keeps that an accident, not a contract).
 type HoldManager struct {
-	dsn   func(ctx context.Context, app string) (string, error) // reads app-db-<app> DATABASE_URL
-	dial  HoldDialer
-	mu    sync.Mutex
-	holds map[string]HoldConn
+	dsn     func(ctx context.Context, app string) (string, error) // reads app-db-<app> DATABASE_URL
+	dial    HoldDialer
+	timeout time.Duration // bounds every Dial/Ping regardless of the caller's ctx deadline
+	mu      sync.Mutex
+	holds   map[string]HoldConn
 }
 
 // NewHoldManager builds a manager. dsn resolves an app to its writer DSN (the
-// Secret's DATABASE_URL key); dial opens connections.
-func NewHoldManager(dsn func(ctx context.Context, app string) (string, error), dial HoldDialer) *HoldManager {
-	return &HoldManager{dsn: dsn, dial: dial, holds: map[string]HoldConn{}}
+// Secret's DATABASE_URL key); dial opens connections. timeout bounds every
+// Dial/Ping the manager issues (DefaultHoldTimeout when <= 0) — see
+// DefaultHoldTimeout for why this must never be unbounded.
+func NewHoldManager(dsn func(ctx context.Context, app string) (string, error), dial HoldDialer, timeout time.Duration) *HoldManager {
+	if timeout <= 0 {
+		timeout = DefaultHoldTimeout
+	}
+	return &HoldManager{dsn: dsn, dial: dial, timeout: timeout, holds: map[string]HoldConn{}}
 }
 
 // EnsureHold makes sure the app's hold is established and alive. Idempotent:
@@ -78,7 +97,10 @@ func (m *HoldManager) EnsureHold(ctx context.Context, app string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if held, ok := m.holds[app]; ok {
-		if err := held.Ping(ctx); err == nil {
+		pingCtx, cancel := context.WithTimeout(ctx, m.timeout)
+		err := held.Ping(pingCtx)
+		cancel()
+		if err == nil {
 			return nil
 		}
 		// Dead hold: close the corpse and fall through to a fresh dial.
@@ -89,11 +111,16 @@ func (m *HoldManager) EnsureHold(ctx context.Context, app string) error {
 	if err != nil {
 		return err
 	}
-	conn, err := m.dial.Dial(ctx, dsn)
+	dialCtx, cancel := context.WithTimeout(ctx, m.timeout)
+	conn, err := m.dial.Dial(dialCtx, dsn)
+	cancel()
 	if err != nil {
 		return err
 	}
-	if err := conn.Ping(ctx); err != nil {
+	pingCtx, cancel := context.WithTimeout(ctx, m.timeout)
+	err = conn.Ping(pingCtx)
+	cancel()
+	if err != nil {
 		_ = conn.Close()
 		return err
 	}
@@ -130,12 +157,60 @@ func (m *HoldManager) Held() map[string]bool {
 // DATABASE_URL (postgres://app_<app>:<pw>@pggw-apps...:55432/<app>?sslmode=disable)
 // — lib/pq speaks SCRAM-SHA-256, which is what the operator-minted role uses
 // from boot (#117).
-type SQLDialer struct{}
+//
+// ConnectTimeout bounds lib/pq's OWN raw TCP connect (review finding, #388).
+// database/sql's LEGACY connector path — the only one lib/pq implements, it
+// has no driver.DriverContext/OpenConnector — calls driver.Open(dsn)
+// SYNCHRONOUSLY with the caller's context.Context discarded entirely
+// (database/sql's dsnConnector.Connect ignores its ctx argument). A
+// context.WithTimeout around Dial (HoldManager already applies one, above)
+// therefore does NOT bound a fresh connect against a black-holed/unreachable
+// compute — only the DSN's connect_timeout parameter does (lib/pq reads it
+// and calls net.Dialer.DialTimeout internally). SQLDialer derives a
+// LOCAL, warm-hold-only DSN with connect_timeout appended; the Secret's
+// DATABASE_URL (the external-driver contract apps read) is never touched.
+type SQLDialer struct {
+	// ConnectTimeout bounds the raw TCP connect. <= 0 falls back to
+	// DefaultHoldTimeout — never silently unbounded.
+	ConnectTimeout time.Duration
+}
+
+// dsnWithTimeout returns dsn with a connect_timeout query parameter applied,
+// derived from ConnectTimeout (DefaultHoldTimeout if unset). A DSN that
+// already declares connect_timeout (an explicit owner override) is left
+// untouched.
+func (d SQLDialer) dsnWithTimeout(dsn string) string {
+	timeout := d.ConnectTimeout
+	if timeout <= 0 {
+		timeout = DefaultHoldTimeout
+	}
+	secs := int(timeout / time.Second)
+	if secs <= 0 {
+		secs = 1 // a sub-second timeout still needs a >=1s DSN value (lib/pq parses whole seconds)
+	}
+	return appendConnectTimeout(dsn, secs)
+}
+
+// appendConnectTimeout adds connect_timeout=<seconds> to a postgres DSN's
+// query string if one is not already present. String-level rather than
+// net/url-based: the DSN's userinfo (role:password) must reach lib/pq
+// byte-for-byte, and a round-trip through url.Parse/url.String is unnecessary
+// risk for a simple query-param append.
+func appendConnectTimeout(dsn string, seconds int) string {
+	if strings.Contains(dsn, "connect_timeout=") {
+		return dsn
+	}
+	sep := "?"
+	if strings.Contains(dsn, "?") {
+		sep = "&"
+	}
+	return fmt.Sprintf("%s%sconnect_timeout=%d", dsn, sep, seconds)
+}
 
 type sqlHoldConn struct{ db *sql.DB }
 
-func (SQLDialer) Dial(_ context.Context, dsn string) (HoldConn, error) {
-	db, err := sql.Open("postgres", dsn)
+func (d SQLDialer) Dial(_ context.Context, dsn string) (HoldConn, error) {
+	db, err := sql.Open("postgres", d.dsnWithTimeout(dsn))
 	if err != nil {
 		return nil, err
 	}

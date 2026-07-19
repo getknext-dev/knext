@@ -3,6 +3,7 @@ package appdb
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -20,6 +21,7 @@ type fakeHolds struct {
 	released   []string
 	held       map[string]bool
 	failEnsure map[string]bool
+	dialErr    error // when set, returned instead of the generic failure below (redaction tests)
 }
 
 func newFakeHolds() *fakeHolds {
@@ -29,6 +31,9 @@ func newFakeHolds() *fakeHolds {
 func (f *fakeHolds) EnsureHold(_ context.Context, app string) error {
 	f.ensured = append(f.ensured, app)
 	if f.failEnsure[app] {
+		if f.dialErr != nil {
+			return f.dialErr
+		}
 		return errors.New("dial pggw-apps: connection refused")
 	}
 	f.held[app] = true
@@ -231,6 +236,145 @@ func TestWarmHold_NoScheduleMeansNoHoldAndNoCondition(t *testing.T) {
 	}
 	if c := cond(cr, CondWarmHold); c != nil {
 		t.Fatalf("WarmHold condition = %+v, want absent for a schedule-less CR", c)
+	}
+}
+
+// ---- event spam on persistent bad state (review finding #2, #388) ---------
+
+func TestWarmHold_HoldFailedEventNotRepeatedOnIdenticalReconcile(t *testing.T) {
+	h, fh := harnessWithHolds(time.Date(2026, 7, 18, 12, 0, 0, 0, time.UTC))
+	fh.failEnsure["app1"] = true
+	cr := &AppDatabase{
+		Name: "app1", Namespace: "scale-zero-pg", Generation: 1,
+		Spec: AppDatabaseSpec{
+			AppName:      "app1",
+			WarmSchedule: []WarmWindow{{Start: "0 8 * * *", End: "0 20 * * *", Timezone: "UTC"}},
+		},
+	}
+
+	mustReconcile(t, h, cr) // first pass: dial fails, condition transitions -> loud
+	if n := countEvents(h, "WarmHoldFailed"); n != 1 {
+		t.Fatalf("WarmHoldFailed events after pass 1 = %d, want 1", n)
+	}
+
+	// Second (and third) reconcile of the SAME persistent failure — the resync
+	// loop runs every ~15s while the condition doesn't change; must NOT emit
+	// another Event object each time (unbounded Event spam, #388 review).
+	mustReconcile(t, h, cr)
+	mustReconcile(t, h, cr)
+	if n := countEvents(h, "WarmHoldFailed"); n != 1 {
+		t.Fatalf("WarmHoldFailed events after 3 identical passes = %d, want 1 (gated on condition transition)", n)
+	}
+
+	// The condition itself keeps up to date every pass (never stale) — only
+	// the Event object is deduplicated.
+	c := cond(cr, CondWarmHold)
+	if c == nil || c.Status != "False" || c.Reason != "HoldFailed" {
+		t.Fatalf("WarmHold condition = %+v, want False/HoldFailed on every pass", c)
+	}
+}
+
+func TestWarmHold_HoldFailedEventFiresAgainAfterRecovery(t *testing.T) {
+	h, fh := harnessWithHolds(time.Date(2026, 7, 18, 12, 0, 0, 0, time.UTC))
+	fh.failEnsure["app1"] = true
+	cr := &AppDatabase{
+		Name: "app1", Namespace: "scale-zero-pg", Generation: 1,
+		Spec: AppDatabaseSpec{
+			AppName:      "app1",
+			WarmSchedule: []WarmWindow{{Start: "0 8 * * *", End: "0 20 * * *", Timezone: "UTC"}},
+		},
+	}
+	mustReconcile(t, h, cr)
+	mustReconcile(t, h, cr)
+	if n := countEvents(h, "WarmHoldFailed"); n != 1 {
+		t.Fatalf("WarmHoldFailed events before recovery = %d, want 1", n)
+	}
+
+	fh.failEnsure["app1"] = false
+	mustReconcile(t, h, cr) // recovers -> WindowActive
+	c := cond(cr, CondWarmHold)
+	if c == nil || c.Status != "True" || c.Reason != "WindowActive" {
+		t.Fatalf("WarmHold condition after recovery = %+v, want True/WindowActive", c)
+	}
+
+	fh.failEnsure["app1"] = true
+	mustReconcile(t, h, cr) // fails again: a FRESH transition, must be loud again
+	if n := countEvents(h, "WarmHoldFailed"); n != 2 {
+		t.Fatalf("WarmHoldFailed events after re-failing post-recovery = %d, want 2 (a new transition into HoldFailed)", n)
+	}
+}
+
+func TestWarmHold_InvalidWindowEventNotRepeatedOnIdenticalReconcile(t *testing.T) {
+	h, _ := harnessWithHolds(time.Date(2026, 7, 18, 12, 0, 0, 0, time.UTC))
+	cr := &AppDatabase{
+		Name: "app1", Namespace: "scale-zero-pg", Generation: 1,
+		Spec: AppDatabaseSpec{
+			AppName:      "app1",
+			WarmSchedule: []WarmWindow{{Start: "garbage", End: "0 20 * * *", Timezone: "UTC"}},
+		},
+	}
+
+	mustReconcile(t, h, cr)
+	if n := countEvents(h, "InvalidWarmWindow"); n != 1 {
+		t.Fatalf("InvalidWarmWindow events after pass 1 = %d, want 1", n)
+	}
+
+	mustReconcile(t, h, cr)
+	mustReconcile(t, h, cr)
+	if n := countEvents(h, "InvalidWarmWindow"); n != 1 {
+		t.Fatalf("InvalidWarmWindow events after 3 identical passes = %d, want 1 (gated on condition transition)", n)
+	}
+	c := cond(cr, CondWarmHold)
+	if c == nil || c.Status != "False" || c.Reason != "InvalidWarmWindow" {
+		t.Fatalf("WarmHold condition = %+v, want False/InvalidWarmWindow on every pass", c)
+	}
+}
+
+func countEvents(h *harness, reason string) int {
+	n := 0
+	for _, e := range h.cl.events {
+		if e == reason {
+			n++
+		}
+	}
+	return n
+}
+
+// ---- DSN/password redaction (review finding #3, #388) ---------------------
+
+func TestWarmHold_HoldFailedEventRedactsPassword(t *testing.T) {
+	h, fh := harnessWithHolds(time.Date(2026, 7, 18, 12, 0, 0, 0, time.UTC))
+	fh.dialErr = errors.New(`dial postgres://app_app1:s3cr3t-pw@pggw-apps.scale-zero-pg.svc:55432/app1?sslmode=disable: connection refused`)
+	fh.failEnsure["app1"] = true
+	cr := &AppDatabase{
+		Name: "app1", Namespace: "scale-zero-pg", Generation: 1,
+		Spec: AppDatabaseSpec{
+			AppName:      "app1",
+			WarmSchedule: []WarmWindow{{Start: "0 8 * * *", End: "0 20 * * *", Timezone: "UTC"}},
+		},
+	}
+
+	mustReconcile(t, h, cr)
+
+	c := cond(cr, CondWarmHold)
+	if c == nil {
+		t.Fatal("WarmHold condition missing")
+	}
+	if strings.Contains(c.Message, "s3cr3t-pw") {
+		t.Fatalf("WarmHold condition message leaks the password: %q", c.Message)
+	}
+	found := false
+	for _, e := range h.cl.eventLog {
+		if e.reason != "WarmHoldFailed" {
+			continue
+		}
+		found = true
+		if strings.Contains(e.message, "s3cr3t-pw") {
+			t.Fatalf("WarmHoldFailed event message leaks the password: %q", e.message)
+		}
+	}
+	if !found {
+		t.Fatal("no WarmHoldFailed event was recorded")
 	}
 }
 

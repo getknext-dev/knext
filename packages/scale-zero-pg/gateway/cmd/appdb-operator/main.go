@@ -78,6 +78,9 @@ func main() {
 	resyncMs := envInt("APPDB_RESYNC_MS", 15000)
 	healthAddr := env("APPDB_HEALTH_ADDR", ":9092")
 	httpTimeout := time.Duration(envInt("APPDB_HTTP_TIMEOUT_MS", 10000)) * time.Millisecond
+	// Bounds the warm-hold Dial/Ping (knext #388 review): a black-holed compute
+	// must never stall reconciliation of every other AppDatabase behind it.
+	warmHoldTimeout := time.Duration(envInt("APPDB_WARM_HOLD_TIMEOUT_MS", 5000)) * time.Millisecond
 
 	if tenant == "" {
 		logger.Fatal("[appdb] APPDB_TENANT_ID is required")
@@ -110,7 +113,7 @@ func main() {
 	// idle. The DSN comes from the operator-minted app-db-<app> Secret
 	// (DatabaseURL); the dial is a real SCRAM connection (lib/pq) — never a
 	// replica write (the gateway stays the sole scaler).
-	holds := appdb.NewHoldManager(cluster.DatabaseURL, appdb.SQLDialer{})
+	holds := appdb.NewHoldManager(cluster.DatabaseURL, appdb.SQLDialer{ConnectTimeout: warmHoldTimeout}, warmHoldTimeout)
 
 	deps := &appdb.Deps{
 		Pageserver:    appdb.NewHTTPPageserver(pageserverURL, httpTimeout),
