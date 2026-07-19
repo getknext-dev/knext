@@ -59,7 +59,7 @@ the constrained side.)
 | C soak | baseline | 120 VU held 3m | 22643 | 0% | 5.6ms | 28ms | 731ms | 10.96s | 3 | time-to-2-pods 12s |
 | D scale-down | — | post-load | — | — | — | — | — | — | →0 | clean, fast |
 
-Total across cold-start/round-1-burst/soak: **~44,500 requests, 0 failures.**
+Total across cold-start/round-1-burst/soak (5 + 7290 + 7379 + 7409 + 7408 + 22643): **52,134 requests, 0 failures.**
 
 ### Discriminating burst A/B (cc=15 pinned, forced fan-out to maxScale=6)
 
