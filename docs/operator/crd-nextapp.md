@@ -45,6 +45,8 @@ spec:
         replicas: 3             # min-scale floor held during the window (>= 1, <= maxScale)
         timezone: America/New_York # IANA timezone; defaults to UTC
     targetBurstCapacity: -1   # Optional burst buffer (ADR-0032, #411); -1 = always keep the activator in path
+    panicWindowPercentage: 10    # Optional KPA panic-window tuning (ADR-0033, #413); 1-100
+    panicThresholdPercentage: 200 # Optional KPA panic-threshold tuning (ADR-0033, #413); >= 110
 ```
 
 > The `containerConcurrency` default was lowered from `100` to `20` in ADR-0028
@@ -82,6 +84,20 @@ spec:
 > (ADR-0028/ADR-0029) — re-check that math when you tune TBC. See
 > [`scaling-cold-start.md`](./scaling-cold-start.md#burst-buffering-specscalingtargetburstcapacity-adr-0032--411)
 > and [ADR-0032](../adr/0032-target-burst-capacity.md).
+
+> `panicWindowPercentage` / `panicThresholdPercentage` (ADR-0033, #413) tune **how fast the
+> Knative Pod Autoscaler (KPA) itself reacts** to an unpredicted N→M surge — a different lever
+> from `targetBurstCapacity` (whether the activator buffers a spike) or `containerConcurrency`
+> (what makes reactive scale-out fire). `panicWindowPercentage` (1-100) is the panic-mode
+> evaluation window as a percentage of the stable window — smaller = more reactive.
+> `panicThresholdPercentage` (>= 110) is how far over the steady-state target trips panic mode —
+> lower = trips on a smaller overshoot. Both unset (default) = neither annotation is stamped and
+> the Knative cluster defaults (10% / 200%) apply unmanaged (back-compat). **Connection-wall
+> interlock:** a faster panic reaction changes the *rate* pods are added, not the
+> `maxScale × poolMax ≤ 80` ceiling (ADR-0028/ADR-0029) — re-check that math when you tune these.
+> **KPA-class caveat:** ignored under the HPA autoscaler class; knext defaults every ksvc to KPA.
+> See [`scaling-cold-start.md`](./scaling-cold-start.md#kpa-panic-window--panic-threshold-specscalingpanicwindowpercentage--panicthresholdpercentage-adr-0033--413)
+> and [ADR-0033](../adr/0033-panic-window-threshold.md).
 
 ### `storage` (Optional)
 Binds the Next.js Server Actions (e.g., `<input type="file" />`) to a cloud storage provider.
