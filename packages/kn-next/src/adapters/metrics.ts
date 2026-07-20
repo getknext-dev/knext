@@ -569,6 +569,60 @@ export function fetchChildMetrics(
     });
 }
 
+/** The slice of `http.IncomingMessage` the supervisor handler reads. */
+interface MetricsRequest {
+    readonly url?: string;
+    readonly method?: string;
+}
+
+/** The slice of `http.ServerResponse` the supervisor handler writes. */
+interface MetricsResponse {
+    setHeader(name: string, value: string): unknown;
+    writeHead(status: number): unknown;
+    end(body?: string): unknown;
+}
+
+export interface SupervisorMetricsHandlerDeps {
+    /** The supervisor's :9091 registry. */
+    readonly registry: Registry;
+    /**
+     * Starts prom-client's default-metric collection if it has not started yet
+     * (#441). A scrape that lands DURING the child's boot — i.e. before the
+     * child-serving signal fires — must still return a complete exposition, so
+     * the scrape itself is a start trigger. Idempotent by contract.
+     */
+    readonly ensureDefaultMetrics: () => boolean;
+    /** Best-effort scrape of the child's core metrics (see `fetchChildMetrics`). */
+    readonly fetchChild: () => Promise<string>;
+}
+
+/**
+ * Build the supervisor's `/metrics` request listener: start deferred default
+ * metrics on demand, then serve our own exposition merged with a best-effort
+ * scrape of the child's. Extracted from `node-server.ts` so the deferral
+ * behaviour is unit-testable without spawning a real child.
+ */
+export function createSupervisorMetricsHandler(
+    deps: SupervisorMetricsHandlerDeps,
+): (req: MetricsRequest, res: MetricsResponse) => Promise<void> {
+    return async (req, res) => {
+        if (req.url === "/metrics" && req.method === "GET") {
+            // On-demand start: an early scrape gets real process metrics rather
+            // than an empty registry (see deferred-default-metrics.ts).
+            deps.ensureDefaultMetrics();
+            res.setHeader("Content-Type", deps.registry.contentType);
+            const [own, child] = await Promise.all([
+                deps.registry.metrics(),
+                deps.fetchChild(),
+            ]);
+            res.end(mergeExposition([own, child]));
+            return;
+        }
+        res.writeHead(404);
+        res.end("Not Found");
+    };
+}
+
 /**
  * Merge several Prometheus exposition bodies into one, dropping empty sources
  * (e.g. an unreachable child) and ensuring exactly one separating newline

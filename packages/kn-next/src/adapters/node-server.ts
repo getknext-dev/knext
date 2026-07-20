@@ -18,15 +18,22 @@ import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import http from "node:http";
 import { dirname, resolve } from "node:path";
-import { collectDefaultMetrics, Registry } from "prom-client";
+import { Registry } from "prom-client";
 import { createLogger } from "../utils/logger";
 import { registerDbPoolDrain } from "./db-drain";
+import {
+    createDeferredDefaultMetrics,
+    isDeferralEnabled,
+    probeIntervalMs,
+    readyDeadlineMs,
+    waitForChildServing,
+} from "./deferred-default-metrics";
 import { buildChildEnv } from "./env";
 import { startImageCacheSync } from "./image-cache-sync";
 import {
     CHILD_METRICS_PORT,
+    createSupervisorMetricsHandler,
     fetchChildMetrics,
-    mergeExposition,
 } from "./metrics";
 import { gracefulShutdown } from "./shutdown";
 
@@ -43,7 +50,20 @@ const SHUTDOWN_GRACE_MS = Number(process.env.SHUTDOWN_GRACE_MS ?? 25_000);
 // ── Prometheus metrics server on :9091 ────────────────────────────────────────
 // Clean separation: Next.js standalone owns $PORT (3000), metrics owns 9091.
 const metricsRegistry = new Registry();
-collectDefaultMetrics({ register: metricsRegistry });
+// #441: prom-client's default-metric setup starts PERSISTENT background
+// samplers (libuv event-loop-delay histogram + a GC PerformanceObserver), which
+// would otherwise run for the whole duration of the child's boot and steal CPU
+// from it on an oversubscribed node (~847ms measured on OKE). Defer that setup;
+// the idle metrics LISTENER below stays early because it samples nothing.
+// Collection starts on whichever comes first: the child serving, the first
+// scrape, or the deadline. Opt out with KNEXT_DEFER_DEFAULT_METRICS=0.
+const deferredDefaultMetrics = createDeferredDefaultMetrics({
+    registry: metricsRegistry,
+    log,
+});
+if (!isDeferralEnabled()) {
+    deferredDefaultMetrics.ensureStarted("deferral-disabled");
+}
 
 // The golden-signal / cold-start / db-wake metrics (#315) are emitted in the
 // Next.js CHILD (that's where the @vercel/otel HTTP spans + the #317 hooks run).
@@ -52,19 +72,16 @@ collectDefaultMetrics({ register: metricsRegistry });
 // child's core metrics port. If the child is scaled to zero / not yet up / has
 // tracing off (no child server), the fetch returns "" and we serve just the
 // process metrics — never fatal. Overridable via KN_CHILD_METRICS_PORT.
-const metricsServer = http.createServer(async (req, res) => {
-    if (req.url === "/metrics" && req.method === "GET") {
-        res.setHeader("Content-Type", metricsRegistry.contentType);
-        const [own, child] = await Promise.all([
-            metricsRegistry.metrics(),
-            fetchChildMetrics(CHILD_METRICS_PORT),
-        ]);
-        res.end(mergeExposition([own, child]));
-        return;
-    }
-    res.writeHead(404);
-    res.end("Not Found");
-});
+const metricsServer = http.createServer(
+    createSupervisorMetricsHandler({
+        registry: metricsRegistry,
+        // A scrape landing during the boot window still gets real process
+        // metrics — the deferral never yields an empty exposition (#441).
+        ensureDefaultMetrics: () =>
+            deferredDefaultMetrics.ensureStarted("scrape"),
+        fetchChild: () => fetchChildMetrics(CHILD_METRICS_PORT),
+    }),
+);
 
 metricsServer.listen(METRICS_PORT, () => {
     log.info({ port: METRICS_PORT }, "Prometheus metrics server started");
@@ -153,6 +170,29 @@ const nextProc = spawn(process.execPath, [...preloadArgs, serverJs], {
     stdio: "inherit",
     env: buildChildEnv(),
 });
+
+// ── Deferred default-metrics start (#441) ────────────────────────────────────
+// The child self-starts on $PORT (see buildChildEnv), so its accepting socket
+// IS the "child is serving" signal — no new protocol and no stdout parsing
+// (stdio is `inherit`, so the child's logs stay untouched). Once it answers, the
+// cold-start critical path is over and prom-client's samplers can start. A
+// scrape arriving earlier starts them on demand; the deadline covers a child
+// that never binds.
+if (!deferredDefaultMetrics.isStarted()) {
+    waitForChildServing({
+        port: Number(process.env.PORT ?? 3000),
+        intervalMs: probeIntervalMs(),
+        deadlineMs: readyDeadlineMs(),
+    })
+        .then((outcome) => {
+            deferredDefaultMetrics.ensureStarted(`child-${outcome}`);
+        })
+        .catch((err) => {
+            // Never lose process metrics to a probe bug.
+            log.warn({ err }, "Child readiness probe failed; starting metrics");
+            deferredDefaultMetrics.ensureStarted("probe-error");
+        });
+}
 
 nextProc.on("error", (err) => {
     log.fatal({ err }, "Failed to start Next.js standalone server");
