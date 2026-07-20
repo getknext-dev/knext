@@ -115,9 +115,11 @@ API_RETRY_DEADLINE_S="${API_RETRY_DEADLINE_S:-60}"
 # Per-CALL cap, distinct from the TOTAL budget above. Making one knob do both
 # jobs made API_RETRY_ATTEMPTS dead for the case this feature exists for: a hung
 # first attempt consumed the entire budget, so a stalled apiserver got exactly
-# one attempt however many were configured. Default: deadline/attempts (>=1s),
-# so all configured attempts fit inside the total budget by construction and the
-# budget stays the authoritative bound. Set explicitly to override; an override
+# one attempt however many were configured. Default: deadline/attempts, floored
+# at 1s. The floor means the attempts do NOT always fit inside the budget (a 3s
+# budget over 4 attempts floors to 4x1s), so the budget check — not arithmetic —
+# is what bounds the run: the worst case is ~ budget + one per-call cap, which is
+# what the startup banner reports. Set explicitly to override; an override
 # larger than the total budget is clamped to it, because no single call may
 # outlive the budget that bounds the whole operation.
 API_CALL_TIMEOUT_S="${API_CALL_TIMEOUT_S:-}"
@@ -236,6 +238,15 @@ fi
 if [ -z "$URL" ]; then
   URL="http://${SERVICE}.${NS}.svc.cluster.local"
 fi
+
+# Sanitise the attempt count ONCE, here, so the startup banner and the code that
+# enforces the bound are driven by the same number. They used to diverge: the
+# banner passed the RAW value to api_call_cap while api_retry clamped its own
+# copy, so API_RETRY_ATTEMPTS=0 announced "up to 0 attempt(s), each call capped
+# at s" (plus a stray "division by 0" on stderr) for a run that actually enforced
+# 1 attempt at a 60s cap. Announcing a TIGHTER bound than is enforced is the same
+# "reads cleaner than reality" direction as #424/#425/#426.
+[ "$API_RETRY_ATTEMPTS" -ge 1 ] 2>/dev/null || API_RETRY_ATTEMPTS=1
 
 # containerConcurrency 0 is LEGAL in Knative (means "unbounded"), so it must not
 # be used as a divisor. With CC=0 there is no VUs-per-pod ratio to size against;
@@ -374,6 +385,10 @@ record_api_abandon() {
 api_call_cap() {
   local attempts="$1" deadline="$API_RETRY_DEADLINE_S" cap
   [ "$deadline" -ge 1 ] 2>/dev/null || { echo 0; return 0; }
+  # Guard the divisor at the point of division too: callers pass a value that is
+  # sanitised at startup, but this helper must never emit "division by 0" to
+  # stderr (an arithmetic error that no assertion would otherwise catch).
+  [ "$attempts" -ge 1 ] 2>/dev/null || attempts=1
   if [ -n "$API_CALL_TIMEOUT_S" ]; then
     cap="$API_CALL_TIMEOUT_S"
     [ "$cap" -ge 1 ] 2>/dev/null || cap=0
@@ -405,8 +420,8 @@ API_RETRY_LAST_ATTEMPTS=0
 # rather than keep claiming a guarantee we are not providing.
 api_retry() {
   local op="$1"; shift
+  # Already sanitised once at startup, so this matches what the banner announced.
   local attempts="$API_RETRY_ATTEMPTS"
-  [ "$attempts" -ge 1 ] 2>/dev/null || attempts=1
   local backoff_ms="$API_RETRY_BASE_MS" n=1 rc=0 class="" start now
   [ "$backoff_ms" -ge 0 ] 2>/dev/null || backoff_ms=0
   start=$(date +%s)

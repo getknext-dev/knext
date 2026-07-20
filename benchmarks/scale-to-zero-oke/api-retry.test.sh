@@ -428,6 +428,61 @@ assert_contains "${T12}/results.txt" "DEGRADED" "a retried run with data is stil
 assert_contains "${T12}/results.txt" "The data is valid" \
   "a degraded run that DID collect complete data still states its data is valid"
 
+# ── Test 10c: the BUDGET-exhaustion abandon path is itself covered ───────────
+# Tests 10/10a/10b all leave api_retry through the ATTEMPTS-exhausted return, so
+# the second abandon call site — the one on the wall-clock budget check, which is
+# the exact line that caused the "stalled run filed as clean" bug (#427 round 2)
+# — was satisfied by the other call site and never actually exercised. Stubbing
+# it out left all 137 tests green while resurrecting the bug verbatim.
+#
+# The budget path is reached whenever per_call >= deadline, i.e. one attempt can
+# spend the whole budget: here an explicit --api-call-timeout-s 60 is clamped to
+# the 3s budget, so attempt 1 of a configured 4 exhausts it while attempts remain.
+echo
+echo "[10c] a run abandoned by the BUDGET (not by attempts) is reported as degraded"
+T10C="$(mktemp -d)"
+make_stub "$T10C"
+echo 20 > "${T10C}/get_hang_s"
+API_RETRY_ATTEMPTS=4 API_RETRY_DEADLINE_S=3 run_bench "$T10C" --phases none \
+  --api-call-timeout-s 60
+# Exactly ONE attempt: this pins the exit as the budget check, not the attempts
+# check (which would need all 4). If this were 4, the test would be re-covering
+# the already-covered path instead of the unguarded one.
+assert_eq "$(get_attempts "$T10C")" "1" \
+  "the budget is spent by attempt 1 of 4, so the run leaves via the BUDGET check"
+assert_contains "${T10C}/out.txt" "budget was spent" \
+  "the budget-exhaustion abandonment is logged by its own call site"
+assert_not_contains "${T10C}/results.txt" "clean control-plane run" \
+  "a run abandoned on a spent budget never claims a 'clean control-plane run'"
+assert_contains "${T10C}/results.txt" "DEGRADED" \
+  "a run abandoned on a spent budget is loudly marked degraded"
+assert_contains "${T10C}/results.txt" "abandoned" \
+  "the abandoned call is counted in the results file (not just logged)"
+
+# ── Test 14: the startup banner reports the bound that is actually ENFORCED ──
+# The banner called api_call_cap with the RAW API_RETRY_ATTEMPTS while api_retry
+# clamped it, so the two disagreed on every invalid value: attempts=0 printed
+# "up to 0 attempt(s) ... capped at s" plus a stray "division by 0" on stderr,
+# while 1 attempt at a 60s cap was what actually ran. Understating the enforced
+# bound is the "artifact reads cleaner than reality" direction, so the banner and
+# the enforcement must be driven by one sanitised value.
+echo
+echo "[14] the banner's attempt/cap figures match what is enforced for invalid input"
+for bad in 0 -2 abc; do
+  T14="$(mktemp -d)"
+  make_stub "$T14"
+  API_RETRY_ATTEMPTS="$bad" API_RETRY_DEADLINE_S=60 run_bench "$T14" --phases none
+  assert_not_contains "${T14}/out.txt" "division by 0" \
+    "API_RETRY_ATTEMPTS=${bad} raises no 'division by 0' arithmetic error"
+  assert_contains "${T14}/out.txt" "up to 1 attempt(s)" \
+    "API_RETRY_ATTEMPTS=${bad} banners the 1 attempt that is actually enforced"
+  assert_contains "${T14}/out.txt" "capped at 60s" \
+    "API_RETRY_ATTEMPTS=${bad} banners the 60s per-call cap that is actually enforced"
+  assert_not_contains "${T14}/out.txt" "up to ${bad} attempt(s)" \
+    "API_RETRY_ATTEMPTS=${bad} is not echoed back as if it were honoured"
+  rm -rf "$T14"
+done
+
 # ── Test 13: classification emits no stray diagnostics on binary stderr ──────
 echo
 echo "[13] classification of binary kubectl output leaks no tr(1) diagnostics"
@@ -443,7 +498,7 @@ run_bench "$T13" --phases none
 assert_not_contains "${T13}/out.txt" "Illegal byte sequence" \
   "no 'tr: Illegal byte sequence' leaks to stderr for binary API output"
 
-rm -rf "$T1" "$T3" "$T4" "$T5" "$T6" "$T7" "$T8" "$T10" "$T10A" "$T11" "$T12" "$T13"
+rm -rf "$T1" "$T3" "$T4" "$T5" "$T6" "$T7" "$T8" "$T10" "$T10A" "$T10C" "$T11" "$T12" "$T13"
 
 echo
 echo "== ${PASS} passed, ${FAIL} failed =="

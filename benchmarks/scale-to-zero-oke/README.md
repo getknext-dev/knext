@@ -253,7 +253,7 @@ a slow failure, which is exactly what the terminal-first bias exists to prevent.
 
 | Knob | Default | Meaning |
 |---|---|---|
-| `API_RETRY_ATTEMPTS` / `--api-retry-attempts` | `4` | Total attempts per operation. `1` disables retrying. |
+| `API_RETRY_ATTEMPTS` / `--api-retry-attempts` | `4` | Total attempts per operation. `1` disables retrying. A value below `1` or non-numeric is clamped to `1`, and the startup banner reports the clamped value it will actually enforce. |
 | `API_RETRY_BASE_MS` / `--api-retry-base-ms` | `500` | First backoff step; doubles each retry. |
 | `API_RETRY_MAX_MS` / `--api-retry-max-ms` | `8000` | Per-step backoff ceiling. |
 | `API_RETRY_DEADLINE_S` | `60` | **Total** wall-clock budget per operation — see below. |
@@ -267,8 +267,10 @@ These are two different bounds and they must stay separate:
   so a *hung* apiserver connection is terminated rather than waited on
   indefinitely.
 
-The per-call cap defaults to `deadline / attempts` so that all configured
-attempts fit inside the total budget by construction. When one knob did both
+The per-call cap defaults to `deadline / attempts`, floored at 1s, so that the
+configured attempts normally fit inside the total budget. The floor means they
+are not *guaranteed* to (a 3s budget over 4 attempts floors to 4×1s); the budget
+check, not the arithmetic, is what bounds the run. When one knob did both
 jobs, a hung first attempt consumed the whole budget and `API_RETRY_ATTEMPTS`
 became **dead for exactly the failure this feature exists for** — a stalled
 apiserver got one attempt regardless of the configured number. With defaults
