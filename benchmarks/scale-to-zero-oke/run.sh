@@ -255,6 +255,14 @@ CAPTURED=0
 # run exits non-zero if M < N so no caller can mistake it for a clean dataset.
 REPS_RUN=0
 INCOMPLETE_REPS=""
+# Did the script reach its normal end-of-phases fall-through? Without this, a
+# FATAL *after* >=1 clean rep exited 1 while cleanup() still printed "dataset is
+# complete": no rep was flagged incomplete, so "nothing was flagged" was read as
+# "nothing is missing". It is not — the run was truncated, so the reps that never
+# ran are missing from a file that claimed to be the configured experiment. The
+# verdict is therefore derived from all three facts (reps run, incomplete reps,
+# finished normally), not from the absence of a flag.
+PHASES_COMPLETED=0
 # How much of a lost rep's raw k6 log to embed in the results file. Bounded so a
 # chatty Job cannot bury the rest of the results, but large enough to contain a
 # k6 summary plus the surrounding failure context.
@@ -382,15 +390,31 @@ cleanup() {
   # ── run integrity verdict — ALWAYS printed, so a partial dataset can never
   # masquerade as a complete one (#425 item 5).
   log ""
+  # Per-rep data loss is reported independently of how the run ended, because a
+  # run can be BOTH truncated and missing a rep's metrics — reporting only one
+  # of the two would hide the other.
   if [ -n "$INCOMPLETE_REPS" ]; then
     log "*** RUN INCOMPLETE — untrustworthy rep(s): ${INCOMPLETE_REPS} ***"
     log "*** ${REPS_RUN} rep(s) ran; this results file is MISSING or UNRELIABLE data for the reps above. ***"
     log "*** Do NOT publish these numbers as a complete dataset — scope any claim to the reps that have data, and say so. ***"
+  fi
+  # The verdict is a function of (finished normally, reps run, incomplete reps).
+  # "Complete" requires the run to have finished ALL configured work — never
+  # merely "nothing was flagged".
+  if [ "$PHASES_COMPLETED" -ne 1 ]; then
+    if [ "$REPS_RUN" -eq 0 ]; then
+      # A FATAL before the first rep: nothing was measured at all.
+      log "run integrity: no reps ran; no data collected — this file is NOT a dataset"
+    else
+      log "run integrity: ABORTED after ${REPS_RUN} rep(s) — partial dataset, NOT the configured experiment"
+    fi
+  elif [ -n "$INCOMPLETE_REPS" ]; then
+    log "run integrity: ${REPS_RUN} rep(s) ran but some LOST data — dataset is NOT complete"
   elif [ "$REPS_RUN" -eq 0 ]; then
     # "metrics captured for all 0 rep(s) — dataset is complete" is literally
-    # true and completely misleading: it fired on `--phases none` AND on the
-    # abort path (a FATAL before the first rep), i.e. the designated integrity
-    # verdict asserted completeness for a run that collected nothing.
+    # true and completely misleading: it fired on `--phases none`, i.e. the
+    # designated integrity verdict asserted completeness for a run that
+    # collected nothing.
     log "run integrity: no reps ran; no data collected — this file is NOT a dataset"
   else
     log "run integrity: k6 metrics captured for all ${REPS_RUN} rep(s) — dataset is complete"
@@ -735,6 +759,10 @@ for p in "${PHASE_LIST[@]}"; do
     *) log "Unknown phase '$p' — skipping (valid: cold,soak,burst,all,none)" ;;
   esac
 done
+# Every configured phase ran to completion. Set BEFORE the exit below so the
+# EXIT trap can tell "finished, but a rep lost data" (exit 2) apart from
+# "aborted part-way through" (a FATAL's exit 1) — those are different datasets.
+PHASES_COMPLETED=1
 
 # cleanup runs via the EXIT trap (and prints the run-integrity verdict there).
 #

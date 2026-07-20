@@ -48,6 +48,7 @@ assert_not_contains() {
 #   wait_failed_rc    exit code for `wait --for=condition=failed`   (default 1)
 #   pod_count         how many Running app pods `get pods` reports  (default 1)
 #   k6_logs           what `kubectl logs job/...` prints            (default empty)
+#   patch_fail_at     Nth `patch ksvc` call that fails (0/unset = never)
 make_k6_stub() {
   local dir="$1"
   cat > "${dir}/ksvc.json" <<'JSON'
@@ -74,6 +75,17 @@ case "\$args" in
   *"get pods"*"job-name="*) printf 'Running' ;;
   *"get pods"*) for i in \$(seq 1 "\$pods"); do echo "pod-\$i 1/1 Running 0 1s"; done ;;
   *"apply -f"*) cat > /dev/null ;;
+  *"patch ksvc"*)
+    # Count patches so a test can fail the Nth one — that is how a mid-run FATAL
+    # (e.g. the tuned burst config never applied) is simulated without a cluster.
+    n=\$(cat "${dir}/patch_count" 2>/dev/null || echo 0); n=\$((n + 1))
+    echo "\$n" > "${dir}/patch_count"
+    failat=\$(cat "${dir}/patch_fail_at" 2>/dev/null || echo 0)
+    if [ "\$failat" != "0" ] && [ "\$n" -ge "\$failat" ]; then
+      echo "error: forced patch failure (call \$n)" >&2
+      exit 1
+    fi
+    ;;
   *) : ;;
 esac
 exit 0
@@ -307,7 +319,75 @@ else nope "run.sh exits NON-ZERO for a rep whose Job failed (got 0)"; fi
 assert_not_contains "${T12}/results.txt" "dataset is complete" \
   "a run containing a failed Job never claims a complete dataset"
 
-rm -rf "$T1" "$T3" "$T4" "$T5" "$T6" "$T7" "$T7B" "$T7C" "$T8" "$T9" "$T10" "$T12"
+# ── Test 13: a run ABORTED mid-way must not claim a complete dataset ──────────
+# Third instance of the same bug class as [9]/[10]: the verdict asserting
+# completeness for a run that did not deliver the configured measurements. A
+# FATAL *after* >=1 clean rep (here: the tuned burst config fails to apply)
+# exits non-zero, yet every rep that DID run captured its metrics — so the
+# "no rep was flagged incomplete" test passed and cleanup() printed
+# "dataset is complete" while the process exited 1. The verdict and the exit
+# code disagreed, and the verdict was the wrong one: the run is truncated, so
+# the file is NOT the configured experiment.
+echo
+echo "[13] a run aborted after >=1 good rep reports ABORTED, not 'dataset is complete'"
+T13="$(mktemp -d)"
+make_k6_stub "$T13"
+printf '%s\n' "$REAL_K6_SUMMARY" > "${T13}/k6_logs"
+# 1st patch = baseline burst config (ok) -> rep runs and captures metrics;
+# 2nd patch = tuned burst config (FATAL) -> abort with one clean rep banked.
+echo 2 > "${T13}/patch_fail_at"
+run_bench "$T13" --phases burst --burst-reps 1
+rc=$?
+assert_contains "${T13}/results.txt" "FATAL: failed to apply autoscaling config" \
+  "the mid-run abort is triggered by a failed autoscaling patch"
+assert_not_contains "${T13}/results.txt" "dataset is complete" \
+  "an aborted run never claims 'dataset is complete'"
+assert_contains "${T13}/results.txt" "run integrity: ABORTED after 1 rep(s)" \
+  "the verdict names the abort and how many reps actually ran"
+assert_contains "${T13}/results.txt" "NOT the configured experiment" \
+  "the verdict says the partial dataset is not the configured experiment"
+if [ "$rc" -ne 0 ]; then ok "run.sh still exits NON-ZERO on the aborted path (got $rc)"
+else nope "run.sh still exits NON-ZERO on the aborted path (got 0)"; fi
+assert_not_contains "${T13}/results.txt" "no reps ran" \
+  "an abort after a good rep is not reported as a zero-rep run"
+
+# ── Test 14: the abort verdict must not regress the clean path ────────────────
+echo
+echo "[14] a run that finished all phases still reports 'dataset is complete', exit 0"
+T14="$(mktemp -d)"
+make_k6_stub "$T14"
+printf '%s\n' "$REAL_K6_SUMMARY" > "${T14}/k6_logs"
+run_bench "$T14" --phases burst --burst-reps 1
+rc=$?
+assert_contains "${T14}/results.txt" "dataset is complete" \
+  "a run that reached the end of its phases is still reported as complete"
+assert_not_contains "${T14}/results.txt" "ABORTED" \
+  "a clean run is never labelled ABORTED"
+if [ "$rc" -eq 0 ]; then ok "a clean full run still exits 0 (got $rc)"
+else nope "a clean full run still exits 0 (got $rc)"; fi
+
+# ── Test 15: abort + an incomplete rep composes, it does not pick one ─────────
+# The states must be derivable from (reps run, incomplete reps, finished
+# normally) rather than a chain of special cases, so a run that is BOTH
+# truncated and missing a rep's metrics has to report both facts.
+echo
+echo "[15] a run that both lost a rep AND aborted reports both facts"
+T15="$(mktemp -d)"
+make_k6_stub "$T15"
+printf 'running (0m03.0s), 010/010 VUs, 27 complete\n' > "${T15}/k6_logs"  # no summary
+echo 2 > "${T15}/patch_fail_at"
+run_bench "$T15" --phases burst --burst-reps 1
+rc=$?
+assert_contains "${T15}/results.txt" "RUN INCOMPLETE" \
+  "the lost-metrics warning is still printed on an aborted run"
+assert_contains "${T15}/results.txt" "run integrity: ABORTED after 1 rep(s)" \
+  "the abort verdict is still printed when a rep was also incomplete"
+assert_not_contains "${T15}/results.txt" "dataset is complete" \
+  "a run that is both truncated and missing data never claims completeness"
+if [ "$rc" -ne 0 ]; then ok "the combined path exits NON-ZERO (got $rc)"
+else nope "the combined path exits NON-ZERO (got $rc)"; fi
+
+rm -rf "$T1" "$T3" "$T4" "$T5" "$T6" "$T7" "$T7B" "$T7C" "$T8" "$T9" "$T10" "$T12" "$T13" "$T14" "$T15"
 
 echo
 echo "== ${PASS} passed, ${FAIL} failed =="

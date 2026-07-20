@@ -100,9 +100,17 @@ mistaken for a complete one:
 
 | Output | Meaning |
 |---|---|
-| `run integrity: k6 metrics captured for all N rep(s) — dataset is complete` | Every rep that ran finished cleanly **and** produced all four required metric keys. Exit code 0. |
+| `run integrity: k6 metrics captured for all N rep(s) — dataset is complete` | The run reached the end of every configured phase, and every rep finished cleanly **and** produced all four required metric keys. Exit code 0. |
+| `run integrity: ABORTED after N rep(s) — partial dataset, NOT the configured experiment` | A `FATAL:` abort stopped the run part-way (e.g. an autoscaling config that would not apply) after at least one rep had banked data. The reps that did run may be fine, but the reps that never ran are missing — **do not compare the halves of an A/B that only half-ran.** Non-zero exit (1 from the `FATAL:`). |
 | `run integrity: no reps ran; no data collected — this file is NOT a dataset` | No rep executed at all (`--phases none`, a plain `--dry-run`, or an abort before the first rep). Exit code is whatever caused it — 0 for a dry run, non-zero for a `FATAL:` abort. Never read this file as a result. |
-| `*** RUN INCOMPLETE — untrustworthy rep(s): <rep> [<reason>] ***` | One or more reps are missing data or did not finish cleanly. **Exit code 2.** Scope any claim to the reps that do have data, and say so. |
+| `run integrity: N rep(s) ran but some LOST data — dataset is NOT complete` | The run finished all phases, but at least one rep is missing data or did not finish cleanly. **Exit code 2.** Preceded by the `*** RUN INCOMPLETE ***` block naming the reps. |
+| `*** RUN INCOMPLETE — untrustworthy rep(s): <rep> [<reason>] ***` | Printed whenever a rep lost data, **independently** of how the run ended — a run can be both truncated *and* missing a rep, and you need to see both facts. Scope any claim to the reps that do have data, and say so. |
+
+The verdict is derived from three facts — reps run, reps flagged incomplete, and
+whether the run reached the end of its phases — so it always agrees with the exit
+code. In particular, "nothing was flagged incomplete" is **not** sufficient for
+`dataset is complete`: a run that aborted before doing all its configured work is
+reported as `ABORTED`, not as complete.
 
 A rep counts as **complete** only if both hold:
 
@@ -147,6 +155,10 @@ Three things make this reliable:
 > by the harness, and it nearly produced a published "0 errors across all four
 > reps" claim the data did not support. A benchmark that omits a rep in silence
 > is worse than one that crashes, because the partial dataset *looks complete*.
+
+Note that a results file embeds the target URL and raw k6 Job log lines, so give
+it a skim before pasting it into a public issue. (k6 sends no auth headers, so
+there are no credentials in there — this is a tidiness check, not a security one.)
 
 ## Two known false-result traps (read before trusting a result)
 
