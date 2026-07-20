@@ -696,6 +696,99 @@ cache ends up empty). The **identical bug exists in `apps/docs/Dockerfile`** and
 - **The root cause is confirmed, not inferred:** an empty cache directory shipped in the image,
   refilled and discarded on every cold pod.
 
+## Run 13 (2026-07-21) — ADR-0036 P1b: two-target cold-boot A/B on OKE
+
+The **first OKE measurement of the optional `bun-exec` build target** proposed in
+[ADR-0036](../adr/0036-optional-vinext-bun-single-exec-build-target.md) (node stays the default;
+this target is opt-in and compat-gated). It answers a narrow question: on **equal minimal
+footing**, how much cold-boot does a `vinext → bun --compile` single executable save versus the
+default Next-standalone-on-node path?
+
+This run is deliberately **not** the `file-manager` app the runs above measure — it is a minimal
+app built three ways so the comparison is apples-to-apples. Same cluster class (OKE 2-node), a
+different, purpose-built harness.
+
+> **Appended independently of PR #442.** Runs 7–12 live in an open, unmerged PR (#442) that is not
+> reflected in this file on `main`. Run 13 is added here as a self-contained section and makes no
+> reference to those runs' numbers; it is the ADR-0036 **P1b** measurement and stands on its own.
+
+### Method — three in-cluster pods, one minimal app built three ways
+
+Three `node:22` pods on OKE (**150m** CPU request / **2** CPU limit, mirroring the app's burst
+profile). Each pod builds a **minimal app** — one page plus a shallow, dependency-free
+`/api/health` route — and measures **process spawn → first HTTP 200 on `/api/health`**. The
+minimal surface is identical across all three paths, which is the entire point: it isolates the
+*runtime/boot* difference and removes the app itself as a variable.
+
+This is **in-pod boot, not full Knative cold start.** It does not include scale-to-zero →
+activator → schedule → image pull — only the spawn-to-first-200 boot segment.
+
+Toolchain pins (per P1a): **vinext `1.0.0-beta.2`**, **`@vitejs/plugin-rsc` `^0.5.27`**, **nitro
+`3.0.260610-beta`**.
+
+Reproduction scripts (three in-cluster `node:22` pods; build + bench):
+[`scratchpad/oke-vinext-bench.sh`] and [`scratchpad/oke-next-baseline.sh`] — the vinext/bun and the
+Next-standalone-baseline builders respectively.
+
+### Results — median spawn → first-200 (minimal app, in-cluster native x64)
+
+| Path (minimal app, OKE) | Samples (ms) | Median | Artifact size |
+|---|---|---|---|
+| Next standalone → node | 1079, 852, 846, 967, 766 | **~852 ms** | `.next/standalone` 77 MB |
+| vinext → node | 322, 306, 316, 318, 315, 329 | **~317 ms** | `.output` 1.1 MB |
+| vinext → `bun --compile` binary | 226, 261, 248, 177, 277, 181 | **~237 ms** | binary 137 MB (native x64 in-cluster) |
+
+**Complete distribution separation:** the slowest `vinext-bun` sample (**277 ms**) is faster than
+the fastest Next-standalone sample (**766 ms**) — zero overlap. By this document's own bar (a
+result is only reported when the distributions do not overlap; see [run 6](#run-6-2026-07-20--compile-cache-value-the-first-measured-performance-result-in-this-document)),
+this separation is what makes it reportable as a **result** rather than a signal.
+
+### Headline finding — framed honestly
+
+- **`vinext-bun` boots ~3.6× faster than Next-standalone-node** on this minimal app (237 vs
+  852 ms), with complete separation.
+- **Attribution — most of the win is vinext, not bun.** vinext-on-node already accounts for
+  **852 → 317 ms (~2.7×)**, because vinext (Vite/rolldown) never boots Next's standalone server at
+  all. `bun --compile` adds a **further, still-separated ~1.3× (317 → 237 ms)** plus the benefit of
+  single-file distribution. The compile step is the smaller half of the improvement.
+- **Explicit correction of an earlier over-claim.** A prior framing cited **"~44× vs 1957 ms."**
+  That compared the *heavy* `file-manager` app's boot to a *minimal* vinext app — **not
+  apples-to-apples**, and the ratio is withdrawn. On equal minimal footing the ratio is **~3.6×**.
+  A heavier app grows **both** sides of the comparison, so the real-world ratio is **app-dependent
+  and must be measured per app**, never extrapolated from this minimal number.
+
+### Confounds — recorded in full, none buried
+
+- **Minimal app only.** `file-manager`-class apps differ, and `file-manager` is specifically
+  **`bun-exec`-INELIGIBLE**: `next/image` + `sharp` are lost under vinext. The apps that benefit
+  most from this target are not the apps this run measured.
+- **In-pod boot, not full Knative cold start.** No scale-to-zero → activator → schedule segment is
+  included; the end-to-end cold-start numbers elsewhere in this document (3.8–4.0s median) are a
+  different, larger measurement.
+- **Binary is 137 MB** (native x64 built in-cluster; a cross-compiled musl build was 104–108 MB).
+  The **first-ever image-pull cost on a fresh node is NOT measured** — the layer was already
+  present on the node during timing.
+- **Beta toolchain.** vinext-beta is pinned to nitro-beta; this carries real
+  maintenance/abandonment risk for anything that would ship on it.
+- **The `RuntimeContract` is NOT tested.** SIGTERM drain + `after()`, the in-process `:9091`
+  metrics endpoint, the Redis `cache-handler`, Bearer-auth cache routes, and the ADR-0027
+  `globalThis` seam are all unverified under this target. That is **P2**, and it is the gate to a
+  *shippable* target — a fast boot with an unmet runtime contract is not a deployable path.
+
+### Findings — run 13
+
+- **A `vinext → bun --compile` single executable boots ~3.6× faster than Next-standalone-node on a
+  minimal app** (237 vs 852 ms), with complete distribution separation across all samples — a
+  result by this document's separation bar.
+- **The win is mostly vinext (~2.7×), with bun-compile adding a further separated ~1.3×** plus
+  single-file distribution. Do not attribute the whole gap to `bun --compile`.
+- **The earlier "~44×" framing is withdrawn** as a heavy-vs-minimal mismatch; the honest, apples-to-apples
+  figure is **~3.6×**, and it is app-dependent.
+- **This is a boot-segment result on a minimal, `bun-exec`-eligible app — not a shippable target.**
+  Runtime-contract verification (P2), full Knative cold start, image-pull cost, and heavy-app
+  behavior are all still open; and per ADR-0036, `bun-exec` ships only if a separated win survives
+  those. `bun-exec` remains **opt-in and compat-gated**; node stays the default.
+
 ## Caveat
 
 These are **point-in-time measurements on a specific small (2-node) OKE cluster** with a
