@@ -1,7 +1,8 @@
 # Scale-to-zero & burst benchmark — OKE (2026-07-19 / 2026-07-20)
 
-Status: point-in-time measurement · Runs: 2026-07-19 (run 1, throwaway scripts) and 2026-07-20
-(run 2, committed harness) · Target: `file-manager` Knative Service
+Status: point-in-time measurement · Runs: 2026-07-19 (run 1, throwaway scripts), 2026-07-20
+(run 2, committed harness) and 2026-07-20 (run 3, data-integrity-hardened harness — **aborted
+mid-run, partial dataset**) · Target: `file-manager` Knative Service
 
 > **Correction notice (2026-07-20).** Run 2 **did not reproduce** run 1's headline burst finding —
 > the median-latency delta between the baseline and tuned burst configs reversed sign. The run-1
@@ -207,6 +208,17 @@ Phase D (scale-down after soak): scaled to 0 after **60s**.
 count, latency, or error figures. Those cells are left empty rather than estimated, and every
 request total below covers only the **three** reps that have recorded metrics.
 
+**This gap is why the harness now fails loudly on it (#425).** At the time of run 2 the harness
+discarded the `kubectl wait` result, so a k6 Job that had not finished — and therefore had printed
+no end-of-run summary to scrape — was indistinguishable from one that had; the rep was dropped in
+silence and the run still exited 0. The gap was caught by a human reading this document, not by the
+harness, and it nearly produced a "0 errors across all four reps" claim the data did not support.
+The harness now reports each rep's Job outcome (`completed` / `failed` / `timed-out`), keeps the Job
+when its metrics were not captured, prints an always-on run-integrity verdict line, and **exits 2**
+on an incomplete dataset. A rerun that hit this same condition today would surface it loudly instead
+of silently — see [the harness README](../../benchmarks/scale-to-zero-oke/README.md) for the full
+set of output states. **No rerun has been performed; the numbers above are unchanged.**
+
 Recorded request volume, run 2: **107,336** burst requests across those three reps
 (37,031 + 35,712 + 34,593), **0 failures**. Including Phase A (5) and Phase C (23,027):
 **130,368 recorded requests, 0 failures** for the whole run.
@@ -249,6 +261,100 @@ recording that it fired for real on its first live outing: **without it, that ru
 produced a complete, plausible-looking benchmark measuring an unapplied config** — a silently
 wrong result of exactly the kind this document is now correcting.
 
+## Run 3 (2026-07-20) — first run on the data-integrity-hardened harness (ABORTED)
+
+Same cluster and same target as runs 1 and 2. This is the first run produced by the harness with
+the data-integrity fixes from #425 in place. **It did not complete**: while applying the burst
+autoscaling config, `kubectl` failed with a transient OKE API-server `TLS handshake timeout`, and
+the harness aborted with exit code 1.
+
+```bash
+cd benchmarks/scale-to-zero-oke
+./run.sh --namespace default --service file-manager \
+  --max-scale 6 --container-concurrency 15 --burst-vus 90
+```
+
+Harness config for this run: `max-scale=6`, `containerConcurrency` pinned to **15** for the burst
+phase, **90** burst VUs, k6 image `grafana/k6:0.49.0` at a 150m CPU request, phases `all`. Captured
+pre-run config: `max-scale=10`, `containerConcurrency=20`, burst/panic annotations unset.
+
+### The abort was reported honestly — the headline result
+
+The run's closing verdict line was:
+
+```
+run integrity: ABORTED after 6 rep(s) — partial dataset, NOT the configured experiment
+```
+
+with exit code **1** (the harness's "aborted part-way through" code, distinct from exit **2** for
+"finished, but a rep lost data"). Cleanup restored the service exactly as captured —
+`containerConcurrency=20`, `max-scale=10`, burst/panic annotations restored/removed to the captured
+originals — and deleted every k6 Job/ConfigMap for the run, leaving **0 leftover artifacts**.
+
+**This is precisely the failure mode the system-designer sign-off on #426 flagged as untested, and
+it fired on the fix's first live run.** Before this change the run-integrity verdict was computed
+from a rep count rather than from whether the configured experiment actually ran, so this same
+aborted run would have printed `dataset is complete for 6 rep(s)` while exiting 1 — a
+"complete dataset" label on a run that never executed its burst phase. It now says the opposite, in
+the one line a reader is most likely to trust.
+
+### Valid data captured before the abort (6 reps)
+
+The five cold-start samples and the soak rep completed and are reportable.
+
+**Phase A — cold start (5 sequential single-request samples, baseline config):**
+
+| Sample | Response time | Peak pods |
+|---|---|---|
+| 1 | 3.70s | 1 |
+| 2 | 3.91s | 1 |
+| 3 | 4.33s | 1 |
+| 4 | 3.44s | 1 |
+| 5 | 3.93s | 1 |
+
+Median **3.91s**; worst sample **4.33s**. All 5 samples succeeded; 0 errors.
+
+**Phase C — sustained soak (ramp 0→120 VU over 20s, hold 3m, baseline config, think-time load):**
+
+| Reqs | Errors | med | p90 | p95 | p99 | max | rps | peak pods |
+|---|---|---|---|---|---|---|---|---|
+| 23,101 | 0 (0.00%) | 8.77ms | 19.99ms | 28.79ms | 84.07ms | 4.03s | 109.5 | **1** |
+
+Phase D (scale-down after soak): scaled to 0 after **36s**.
+
+**Phase B (burst A/B) did not run.** The abort happened while applying the first burst config, so
+run 3 contributes **no burst data at all** — no request counts, no latency figures, no fan-out
+timings. Nothing in the burst tables above changes; run 2 remains the most recent burst dataset.
+
+### Findings — run 3
+
+- **The cold-start median is highly reproducible; the cold-start tail is not.** Medians across the
+  three runs: **~4.0s → 3.95s → 3.91s** (run 1 was recorded only to that precision) — the three
+  independent runs on this cluster agree to within about a tenth of a second. The tail behaves completely differently: run 2 recorded a **17.6s** sample, while
+  run 3's *worst* sample was **4.33s**. The plain implication is that the 17.6s outlier is
+  **intermittent, not systematic** — a short run can miss it entirely, and five sequential samples
+  is nowhere near enough to characterise the tail. This is the empirical case for the p99
+  cold-start-under-concurrency work (#309), and specifically for that work needing **long** runs: a
+  five-sample run would have reported run 3's clean 3.44–4.33s band as the whole story.
+- **Soak p99 varies widely run-to-run, and the trend is not an improvement.** Soak p99 across runs:
+  **730.6ms → 191.35ms → 84.07ms**, with peak pods **3 → 1 → 1**, at near-identical request volume
+  (22,643 / 23,027 / 23,101) and identical load shape. **Nothing was optimised between these runs** —
+  no runtime, autoscaler, or app change sits between them — so this is run-to-run variance on a
+  small shared cluster, not a real improvement. Do not cite the downward sequence as progress. What
+  it does establish is that soak p99 here is not a stable enough number to regress against; the
+  peak-pod count tracks it (the 730.6ms run is the one that fanned out to 3 pods), which again
+  points at scheduling, not steady-state serving, as the tail driver.
+- **Sustained-load health held:** 23,101 requests, 0 errors, median **8.77ms** — consistent with
+  runs 1 and 2 on the metrics that have been stable throughout (error rate and median).
+- **Control-plane flakiness is now a pattern, not an incident.** Two of the three runs aborted on
+  the same transient `TLS handshake timeout` talking to the OKE API server: run 2's session hit it
+  before any load phase (see [above](#harness-fail-closed-path-live-verified)) and run 3 hit it
+  mid-run while applying the burst config. The harness's refusal to continue is the correct
+  behaviour in both cases — results for a configuration that was never applied are meaningless —
+  but at this frequency it will make long p99 runs abort routinely. Bounded retry on transient API
+  errors is tracked as **#427**; without it, the long-run measurements #309 needs are impractical
+  on this cluster.
+
 ## Caveat
 
 These are **point-in-time measurements on a specific small (2-node) OKE cluster** with a
@@ -260,3 +366,9 @@ run to stand up**: the burst A/B's median delta reversed between two runs of the
 the same cluster and app. Latency deltas here should be reported only when they reproduce across
 runs; pod-count and time-to-N-pods observations proved far more stable and are the more
 trustworthy signal from this harness.
+
+Run 3 adds a second caveat about the *runs themselves*: two of three aborted on transient control-plane
+errors, and run 3's dataset is **partial** — cold start and soak only, no burst phase. Read its
+numbers as the six reps that completed before an experiment that was never finished — which is
+exactly what the harness's own verdict line says. Any figure in this document should be checked against the run it
+came from before it is quoted.
