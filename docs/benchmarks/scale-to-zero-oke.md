@@ -6,9 +6,10 @@ mid-run, partial dataset**) and 2026-07-20 (run 4, retry-hardened harness — **
 complete every phase**), 2026-07-20 (run 5, one-off bytecode before/after — **aborted before the
 AFTER arm**) and 2026-07-20 (run 6, in-pod compile-cache COLD/WARM pairs — **the first measured
 performance result here, with complete distribution separation**), 2026-07-20 (run 7, startup
-ablation — **a null result: instrumentation ruled out**) and 2026-07-20 (run 8, cold-boot
-decomposition — **the knext wrapper adds 842 ms, complete distribution separation**) · Target:
-`file-manager` Knative Service
+ablation — **a null result, but see run 9: the ablation toggled the wrong knob**) and 2026-07-20
+(run 8, cold-boot decomposition — **the knext wrapper adds 842 ms, complete distribution
+separation**), 2026-07-20 (run 9, attributing that 842 ms — **refutes the parent-module-loading
+hypothesis; points at CPU contention**) · Target: `file-manager` Knative Service
 
 > **Correction notice (2026-07-20).** Run 2 **did not reproduce** run 1's headline burst finding —
 > the median-latency delta between the baseline and tuned burst configs reversed sign. The run-1
@@ -700,6 +701,16 @@ cache ends up empty). The **identical bug exists in `apps/docs/Dockerfile`** and
 
 ## Run 7 (2026-07-20) — startup ablation: is instrumentation costing us boot time? (NULL result)
 
+> **⚠️ Annotation (added after run 9). Do not read this null at face value.** Run 9 showed that
+> `KN_METRICS_PORT=0` — the toggle this run used to "disable metrics" — **never disabled
+> `collectDefaultMetrics()`**, which runs unconditionally at module scope in
+> `node-server.ts:45-46`. Every arm below, including `NEITHER`, therefore paid the identical
+> metrics-collection cost. **The four arms were not four arms.** The null is real as reported,
+> but it does not mean what it was written to mean: it rules out the metrics *server*, and says
+> nothing about the process-metrics collector that run 9 identifies as the likely competitor for
+> CPU. See [run 9](#run-9-2026-07-20--attributing-the-842-ms-wrapper-overhead) and
+> [the lesson this run teaches about ablation design](#the-lesson-an-ablation-that-toggles-the-wrong-knob-produces-a-confident-null).
+
 Run 6 left ~2.7s of warm-cache boot unexplained. Run 7 asks the cheapest question available about
 it: **do knext's own OTel tracing or metrics server contribute measurably to boot time?** Both are
 knext code that runs before the server is health-ready, so both were plausible suspects.
@@ -747,6 +758,10 @@ would be needed to close that gap.
   both ways: it withholds small positive claims and it makes a null result meaningful.
 - **The remaining boot cost is elsewhere** — which is what motivated run 8.
 - **Scope limit:** rules out the metrics *server*, not the `prom-client` module import.
+- **⚠️ Superseded in part by run 9.** The first bullet overstates its reach. The ablation never
+  disabled `collectDefaultMetrics()`, so "metrics ruled out" should be read strictly as "the
+  metrics *listen* is ruled out." The correct standing claim is the narrower one in the scope
+  limit — which run 7 already stated, and which run 9 shows was the load-bearing sentence.
 
 ## Run 8 (2026-07-20) — cold-boot decomposition: the knext wrapper costs 842 ms
 
@@ -810,6 +825,11 @@ That last point is an interpretation of two measurements, not a third measuremen
 designed, attempted, or measured**, and the split between spawn overhead and parent-side module
 loading is unattributed.
 
+> **Annotation (added after run 9).** That standing hypothesis — parent-side module loading —
+> **was measured and refuted.** The parent's module load plus spawn costs ~52 ms, not ~842 ms. The
+> 842 ms measurement below stands unchanged; only its attribution moved. See
+> [run 9](#run-9-2026-07-20--attributing-the-842-ms-wrapper-overhead).
+
 ### Findings — run 8
 
 - **The knext wrapper adds 842 ms (+43%) to warm-cache boot**, with complete distribution separation
@@ -818,12 +838,145 @@ loading is unattributed.
 - **This is the largest knext-owned cold-start cost measured so far** — ~2.1× the compile-cache win.
 - **Cause is narrowed, not identified:** instrumentation is excluded (run 7); spawn architecture and
   parent-side module loading are the standing hypotheses, unmeasured.
+  **⚠️ Both clauses of this bullet were overturned by run 9:** parent-side module loading is
+  refuted (~52 ms), and instrumentation was never actually excluded, because run 7's toggle did
+  not disable `collectDefaultMetrics()`.
 
 ### Scope — same limits as run 6
 
 Runs 7 and 8 measure **boot-to-shallow-health inside a pod**, not end-to-end Knative cold start
 (**3.81s median**, run 5). They are single-environment measurements on one 2-node OKE cluster with
 one app image, and are **environment-dependent**.
+
+## Run 9 (2026-07-20) — attributing the 842 ms wrapper overhead
+
+Run 8 **measured** the wrapper's 842 ms. Run 9 asks **where it goes** — and the answer refutes the
+hypothesis that was filed as **#441** on the strength of run 8's interpretation.
+
+The filed hypothesis was that the parent process pays ~842 ms loading its own module graph
+(`prom-client` and friends) before the child that actually serves traffic starts. **That is wrong by
+a factor of sixteen.**
+
+### Part A — split the wrapper into parent cost and child cost (3 reps)
+
+| Segment | Samples (ms) | Median |
+|---|---|---|
+| Parent module-load + spawn | 53, 52, 51 | **52 ms** |
+| Child boot (via the wrapper) | 3339, 2804, 2709 | **2804 ms** |
+
+**The parent costs ~52 ms, not ~842 ms.** The overhead is not in the parent's own startup work at
+all. What the numbers say instead is stranger and more specific: **the same Next.js server boots
+~847 ms slower merely because the wrapper is running alongside it.**
+
+Two adjacent explanations were ruled out by inspection rather than measurement, and are reported as
+such:
+
+- **Spawn arguments are byte-identical to a direct run under Node.** `preloadArgs` only populates
+  under Bun, so the child is invoked exactly as `server.js` would be invoked directly.
+- **`buildChildEnv` is benign.** It blanks `HOSTNAME`, sets `PORT`, and adds `KNEXT_POD_NAME`.
+  Nothing there changes how Next.js boots.
+
+So neither the arguments nor the environment explain the gap. Whatever costs 847 ms happens
+**while** the child boots, not before it.
+
+### Part B — CPU contention test (3 pairs, no CPU limit, mirroring the real pod)
+
+If the parent isn't slow and the child isn't invoked differently, the remaining candidate is that
+the parent **competes with the child for CPU** during boot. Part B tests whether contention of that
+magnitude is even achievable, by booting `server.js` alone versus alongside a deliberately busy
+sibling `node` process — with no CPU limit set, mirroring the real pod.
+
+| Arm | Samples (ms) | Median |
+|---|---|---|
+| `server.js` **alone** | 1938, 2015, 2091 | **2015 ms** |
+| `server.js` **+ busy sibling node process** | 2945, 2995, 2966 | **2966 ms** |
+
+**Delta: 951 ms.** **Separation is complete — the slowest alone sample (2091 ms) is faster than the
+fastest with-busy sample (2945 ms), zero overlap.** By the standing bar in this document, that
+ordering is what makes Part B reportable as a result rather than a signal.
+
+### Mechanism — what is actually running during the child's boot
+
+`node-server.ts:45-46` calls **`collectDefaultMetrics()` at module scope**, which starts a periodic
+process-metrics collector in the parent. That collector keeps running for the entire duration of the
+child's boot. And `file-manager` pods **request 0 CPU**, so they are scheduled onto an
+oversubscribed node where CPU is genuinely contended — this is not a theoretical scheduling concern
+on this cluster.
+
+### The lesson: an ablation that toggles the wrong knob produces a confident null
+
+This is the most transferable finding in run 9, and it is a methodological one.
+
+[Run 7](#run-7-2026-07-20--startup-ablation-is-instrumentation-costing-us-boot-time-null-result)
+reported a clean null: four arms, medians within ~30 ms, no separation, instrumentation ruled out.
+Run 9 explains **why that null was inevitable regardless of the truth**. `KN_METRICS_PORT=0` skipped
+the metrics *listen*; it never disabled `collectDefaultMetrics()`. **Every arm — baseline,
+`NO_OTEL`, `NO_METRICS`, and `NEITHER` alike — ran the same process-metrics collector and paid the
+same cost.** The experiment compared four copies of the same condition.
+
+Note what did *not* fail here. The statistics were sound, the interleaving was right, the bar for
+separation was correctly applied, and the null was honestly reported. **A well-executed experiment
+on the wrong knob still yields a confident, wrong-feeling-of-certainty answer.** Run 7's own scope
+caveat — "rules out the metrics *server*, not the module import" — was the one sentence that
+survived contact with run 9, and it was written as a footnote rather than as the headline. The
+generalizable rule: **before trusting a null, verify that the toggle actually changed the thing
+being ablated.** A null is only as strong as the difference between the arms.
+
+### The busy-loop is a proxy — what Part B does and does not prove
+
+Part B does **not** prove the parent's metrics work is the competitor. It proves something weaker
+and worth stating precisely:
+
+- **What it proves:** CPU contention of this magnitude (~951 ms) is achievable in this pod
+  configuration, and is **consistent with** the 847 ms measured in Part A.
+- **What it does not prove:** that `collectDefaultMetrics()` specifically is the process consuming
+  that CPU. A busy loop is not a periodic metrics collector; matching magnitudes are corroboration,
+  not identification.
+
+**The falsification condition, stated plainly:** the decisive test is to **defer the parent's
+metrics startup and re-measure the wrapper** — which is the work in flight under **#441**. If
+deferring it closes the ~847 ms gap, the hypothesis holds. **If it does not close the gap, the
+hypothesis is wrong**, and the correct response is to **re-profile** — not to reach for a second
+patch on the same theory. Two patches on an unfalsified hypothesis is how run 7's mistake repeats
+itself at a larger cost.
+
+### Reproduction method
+
+**Part A — splitting the wrapper.** One pod, the real application image, an `emptyDir` compile cache
+primed before measurement so every sample is a WARM boot, `SIGTERM` between boots, timing to the
+shallow dependency-free `/api/health` route — the same in-pod technique as runs 6–8. The wrapper's
+boot is instrumented at two points: the parent's timestamp immediately before it spawns the child
+(giving parent module-load + spawn), and the child's time to health (giving child boot). 3 reps.
+The spawn-argument and environment checks are code inspection of `node-server.ts` `preloadArgs` and
+`buildChildEnv`, not measurements.
+
+**Part B — contention.** Same pod, same warm cache, **no CPU limit set** so the pod mirrors the real
+`file-manager` deployment's 0-CPU-request scheduling. Each pair boots `server.js` directly to health
+twice: once with nothing else running, once with a sibling `node` process spinning a busy loop for
+the duration of the boot. 3 alternating pairs, `SIGTERM` between boots, so cluster drift hits both
+arms equally.
+
+### Findings — run 9
+
+- **The parent's own module load and spawn cost ~52 ms, not ~842 ms** — the hypothesis filed in
+  **#441** is refuted by a factor of ~16.
+- **The same Next.js server boots ~847 ms slower with the wrapper running alongside it**, with the
+  spawn arguments byte-identical and the child environment benign.
+- **CPU contention of that magnitude is demonstrably achievable** (951 ms, complete separation) in a
+  pod that requests 0 CPU on an oversubscribed node.
+- **`collectDefaultMetrics()` at module scope (`node-server.ts:45-46`) is the identified suspect**,
+  running for the whole of the child's boot.
+- **Run 7's null is explained and should not be cited as "instrumentation ruled out."** Its ablation
+  never disabled the collector, so all four arms were the same condition.
+- **The suspect is not confirmed.** The busy loop is a proxy; the decisive test is deferring the
+  parent's metrics startup (#441) and re-measuring.
+
+### Scope — same limits as runs 6–8
+
+Run 9 measures **boot-to-shallow-health inside a pod**, not end-to-end Knative cold start
+(**3.81s median**, run 5). It is a single-environment measurement on one 2-node OKE cluster with one
+app image, and is **environment-dependent** — and the contention effect in particular depends on the
+node being oversubscribed, which is a property of this cluster and this pod's 0-CPU request.
 
 ## Caveat
 
@@ -869,3 +1022,20 @@ health**, not end-to-end Knative cold start (**3.81s median**, run 5), on a sing
 with a single app image. The 842 ms figure should be cited with that scope attached. Its **cause is
 narrowed but not identified**, and **no fix has been designed or measured** — treat the spawn-
 architecture and parent-side-module-loading explanations as the open hypotheses they are.
+
+Run 9 then **refuted the parent-side-module-loading half of that** (~52 ms, not ~842 ms) and added
+the sharpest caveat in this document — one about how experiments here are *constructed* rather than
+how they are reported. Run 7's null was statistically clean and methodologically honest, and it was
+still uninformative, because its toggle never disabled the thing it claimed to ablate. **All four of
+its arms were the same condition.** Anyone citing a null from this document should first check that
+the arms actually differed; that check is cheaper than the four runs it can save.
+
+Run 9's own positive claim carries the matching caveat. Part B clears the separation bar (951 ms,
+zero overlap) and shows contention of the right magnitude is achievable — but **a busy loop is a
+proxy, not the parent's metrics collector**. Magnitude agreement with the measured 847 ms is
+corroboration, not identification. **The hypothesis is not confirmed, and the experiment that would
+confirm it is the fix itself:** defer the parent's metrics startup (#441) and re-measure. If the gap
+does not close, the right move is to re-profile rather than to patch the same theory twice — which
+is precisely the failure mode run 7 demonstrates when a hypothesis outruns its evidence. The
+contention finding is also more environment-bound than the rest: it depends on the pod requesting
+0 CPU on an oversubscribed node.
