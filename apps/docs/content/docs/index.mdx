@@ -94,9 +94,10 @@ in-core-vs-recipe split, and never treat an unbuilt generator as shipping.
   [Verified compatibility](/docs/compat-suite).
 - **True scale-to-zero.** Knative's autoscaler + activator take idle services to `0` replicas and
   wake them on the first request. See [Scale-to-zero & cold starts](/docs/scale-to-zero).
-- **Bytecode-cached cold starts.** On Node, `NODE_COMPILE_CACHE` persists V8 bytecode on a PVC
-  across cold pods; on Bun, the standalone tree is precompiled to bytecode at build time (−47%
-  measured boot). See [Bytecode caching](/docs/bytecode) and [Bun runtime](/docs/bun-runtime).
+- **Bytecode-cached cold starts.** On Node, `NODE_COMPILE_CACHE` persists V8 bytecode on a volume
+  across cold pods — opt-in, and it trades horizontal fan-out for boot speed; on Bun, the standalone
+  tree is precompiled to bytecode at build time (−47% measured boot) with no such trade-off. See
+  [Bytecode caching](/docs/bytecode) and [Bun runtime](/docs/bun-runtime).
 - **Two runtimes, one artifact.** The same standalone `server.js` runs under Node (default) or Bun
   (`runtime: 'bun'`) — both exercised against the official suite. See
   [Bun runtime](/docs/bun-runtime).

@@ -129,6 +129,13 @@ export default {
 };
 ```
 
+> **Back-compat (CLI only).** When `bytecodeCache` is **omitted**, `cr-builder.ts` falls back to the
+> legacy inference `cache.provider === "redis" ⇒ enableBytecodeCache: true`, so CRs generated from
+> existing configs are byte-identical. "Opt-in" is therefore exact at the **CRD** level
+> (`enableBytecodeCache` defaults to false) and *inherited* at the config level by Redis users who
+> never set `bytecodeCache`. Set `bytecodeCache: { enabled: false }` to opt a Redis app out
+> explicitly — that wins over the inference.
+
 This removes the JS recompile cost. It does **not** remove framework boot or the
 database pool re-establish — those are addressed below.
 

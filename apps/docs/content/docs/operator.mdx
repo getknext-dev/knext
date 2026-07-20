@@ -34,7 +34,8 @@ spec:
     maxScale: 20
     containerConcurrency: 100
   cache:
-    enableBytecodeCache: true                  # mount a PVC, set NODE_COMPILE_CACHE
+    enableBytecodeCache: true                  # faster boot; the volume binds to ONE node
+                                               # — extra pods on another node stay Pending
   storage:
     provider: gcs
     bucket: storefront-assets
@@ -53,7 +54,7 @@ status:
 | `scaling` | `minScale`, `maxScale`, `containerConcurrency`. |
 | `resources` | `cpuRequest`, `memoryRequest`, `cpuLimit`, `memoryLimit`. |
 | `storage` | `provider`, `bucket`, `region`, `endpoint`. |
-| `cache` | `provider`, `url`, `enableBytecodeCache`, `bytecodeCacheSize`, `keyPrefix`. |
+| `cache` | `provider`, `url`, `keyPrefix` configure the **data cache** (ISR/data). `enableBytecodeCache`, `bytecodeCacheSize` configure the **boot cache** and are independent of the provider — either works without the other. `enableBytecodeCache` is off by default: its volume attaches to one node at a time, so combining it with a `maxScale` that spreads pods across nodes leaves those pods `Pending`. See [bytecode caching](/docs/bytecode). |
 | `revalidation` | `queue`, `kafkaBrokerUrl`, `provisionKafkaSource` — async ISR revalidation (see below). |
 | `env` | Plain, **non-secret** env vars (name → value). Reserved names are rejected at admission (see below). |
 | `secrets` | `envFrom`, `envMap` (Kubernetes Secret refs) — see [Binding secrets](#binding-secrets-envmap--database_url). |

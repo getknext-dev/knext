@@ -93,7 +93,7 @@ flowchart LR
 ## Features
 
 - ✅ **Official Next.js Adapter API** – `next build` standalone, no fork, runs on Node 20+ and Bun
-- ✅ **V8 Bytecode Caching** – `NODE_COMPILE_CACHE` on a shared volume for sub-second cold starts (Vercel-Fluid-style)
+- ✅ **V8 Bytecode Caching** – `NODE_COMPILE_CACHE` on a shared volume, opt-in (Vercel-Fluid-style). The PVC is `ReadWriteOnce`: pods scheduled onto a second node cannot attach it and stay `Pending`, so enable it on narrow, cold-start-sensitive apps — not wide-bursting ones (#432)
 - ✅ **Fluid Compute** – Scale-to-zero, high concurrency, auto-scaling
 - ✅ **Distributed Caching** – Redis-backed caching with automatic tag invalidation
 - 🟡 **Portable by design** – GKE/kind-verified; portable to EKS/AKS/OKE or any Kubernetes by design (2nd-cloud verification tracked in [#46](https://github.com/getknext-dev/knext/issues/46)). See [Multi-Cloud Portability](docs/operator/multi-cloud-portability.md)
@@ -156,7 +156,9 @@ The Dockerfile uses a **2-stage build** producing a lean distroless Node image:
 1. **Build Stage** – `node:22` + `pnpm` runs `next build` (`output: 'standalone'`) → self-contained `server.js`
 2. **Runtime Stage** – `gcr.io/distroless/nodejs22` runs the standalone server with `NODE_COMPILE_CACHE` pointed at a shared volume
 
-On the first request a pod compiles its JavaScript and writes the V8 code cache to the volume; subsequent cold-started pods deserialize that cache instead of re-parsing/JIT-compiling — the same approach Vercel Fluid uses. In production the [kn-next operator](./docs/operator/README.md) mounts this cache on a PVC (`spec.cache.enableBytecodeCache`) so it survives scale-to-zero. Combined with Knative's resource caching, this achieves consistent sub-second cold starts even with `minScale: 0`.
+On the first request a pod compiles its JavaScript and writes the V8 code cache to the volume; subsequent cold-started pods deserialize that cache instead of re-parsing/JIT-compiling — the same approach Vercel Fluid uses. In production the [kn-next operator](./docs/operator/README.md) mounts this cache on a PVC (`spec.cache.enableBytecodeCache`) so it survives scale-to-zero.
+
+**Opt-in, and it constrains scaling.** `enableBytecodeCache` defaults to off. The PVC is `ReadWriteOnce` — it attaches to one node at a time — so an app that scales out onto a second node leaves those pods `Pending` (#432), and on a cluster with no default StorageClass the PVC never binds at all. It is also **independent of the data-cache `provider`**: `NODE_COMPILE_CACHE` is emitted from `enableBytecodeCache` alone, so an app with no Redis still gets a working compile cache. See [scaling & cold start](./docs/operator/scaling-cold-start.md).
 
 **Running on Bun?** Two mechanisms combine when your app is deployed with `runtime: bun`:
 
