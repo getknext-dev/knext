@@ -355,6 +355,18 @@ timings. Nothing in the burst tables above changes; run 2 remains the most recen
   errors is tracked as **#427**; without it, the long-run measurements #309 needs are impractical
   on this cluster.
 
+  **Since resolved (#427).** The harness now retries *transient* API errors — including this exact
+  `TLS handshake timeout` — with capped exponential backoff, bounded by attempt count and a
+  wall-clock deadline. Terminal errors (and anything unrecognised) still fail fast, and on retry
+  exhaustion the abort/restore path above is unchanged, so a genuinely unreachable cluster still
+  aborts. Runs that used a retry are annotated in their own results file (`api retries: N` plus per
+  retry `api-retry:` lines and a `*** RUN DEGRADED BY TRANSIENT API ERRORS ***` block), so a run
+  that limped through a flaky window stays distinguishable from a clean one; treat such a run's
+  wall-clock timings as possibly inflated by control-plane stalls. See the harness
+  [README](../../benchmarks/scale-to-zero-oke/README.md#transient-api-retry).
+  **No run in this document was produced with retry enabled** — runs 1–3 predate it, and their
+  numbers above are unchanged.
+
 ## Caveat
 
 These are **point-in-time measurements on a specific small (2-node) OKE cluster** with a

@@ -238,7 +238,10 @@ annotation value) into a *slow* failure, which is worse than a fast one.
 | Class | Examples | Behaviour |
 |---|---|---|
 | **transient** (retried) | TLS handshake timeout · connection refused/reset · i/o timeout · `unable to connect to the server` · context deadline exceeded · request timed out / `time allotted` · 429 / `TooManyRequests` / throttling · 5xx (`InternalError`, `ServiceUnavailable`, `an error on the server`) · unexpected EOF · network unreachable | Retry with backoff, up to the attempt/deadline bound |
-| **terminal** (never retried) | `NotFound` · `Forbidden` · `Unauthorized` · `Invalid` / validation / unknown-field · `BadRequest` · `AlreadyExists` · `Gone` · **and every unrecognised message** | Fail immediately, exactly as before |
+| **terminal** (never retried) | `NotFound` · `Forbidden` · `Unauthorized` · `Invalid` / validation / unknown-field · `BadRequest` · `AlreadyExists` · `MethodNotAllowed` · `Gone` · `no such host` and `couldn't get current server api group list` (a wrong cluster/kubeconfig, not a blip) · **and every unrecognised message** | Fail immediately, exactly as before |
+
+Classification is applied terminal-first on purpose: a terminal error that happens
+to mention a timeout stays terminal.
 
 | Knob | Default | Meaning |
 |---|---|---|
@@ -265,7 +268,24 @@ Every retry is recorded in the results file:
 This is deliberate. A run that limped through a flaky window must not produce an
 artifact identical to a clean run — that would be another instance of the
 "results look cleaner than reality" bug class this harness has already had three
-of. What is *not* retried: k6 workload failures. A failed load generator is a real
+of.
+
+**How to read a retried run.** Grep the results file for `api retries:` — it is
+always present, exactly once, near the verdict:
+
+- `api retries: 0` — clean first-try control-plane run. Nothing to caveat.
+- `api retries: N` (N > 0) — the numbers are still *valid*: a config is only
+  measured after it was verified applied, so no rep was taken against a
+  half-applied service. But the run's **wall-clock timings may be inflated** by
+  up to the backoff spent inside the retried operation. Read the `api-retry:`
+  lines above the verdict to see which operation stalled and by how long.
+
+Practical consequences: quote a retried run's cold-start numbers with the
+degradation noted, don't silently pool a retried run with clean runs in the same
+p99 claim, and if the retry count is high enough to matter, re-run rather than
+caveat.
+
+What is *not* retried: k6 workload failures. A failed load generator is a real
 result, not a blip.
 
 ## Tests
@@ -278,7 +298,7 @@ bash benchmarks/scale-to-zero-oke/k6-metrics-integrity.test.sh # can publish a f
 bash benchmarks/scale-to-zero-oke/api-retry.test.sh            # can mask an unreachable cluster
 ```
 
-Both drive `run.sh` against a stub `kubectl` (via the `KUBECTL_BIN` +
+All three drive `run.sh` against a stub `kubectl` (via the `KUBECTL_BIN` +
 `DRY_RUN_EXERCISE_KC=1` test seam). `capture-restore` asserts that a failed
 capture aborts without issuing a single `patch`, and that a successful capture
 restores the exact original values. `k6-metrics-integrity` asserts the honest-
