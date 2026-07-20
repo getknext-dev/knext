@@ -111,6 +111,24 @@ export function validateConfig(config: KnativeNextConfig): void {
         }
     }
 
+    // #431 bytecode (V8 compile) cache — orthogonal to the data cache above.
+    // Cheap SINGLE-FIELD check only: the operator stays the single source of
+    // validation truth (it parses the quantity via resource.MustParse and would
+    // otherwise panic-guard at reconcile). We only catch the obvious typo early
+    // so the user gets a CLI-side error instead of a stuck PVC.
+    if (config.bytecodeCache?.size !== undefined) {
+        if (
+            !/^\d+(\.\d+)?(Ki|Mi|Gi|Ti|K|M|G|T)?$/.test(
+                config.bytecodeCache.size,
+            )
+        ) {
+            errors.push(
+                `'bytecodeCache.size' ("${config.bytecodeCache.size}") is not a valid Kubernetes quantity ` +
+                    `(e.g. "512Mi", "1Gi"). Omit it to use the operator default of 512Mi.`,
+            );
+        }
+    }
+
     // Queue (ISR-revalidation) validation. Only the ADR-0016 kafka path and
     // 'none' are valid; anything else is an unknown provider.
     if (config.queue) {

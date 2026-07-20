@@ -125,6 +125,10 @@ spec:
 
 `enableBytecodeCache` covers **both** runtimes from one field: Node's `NODE_COMPILE_CACHE` (always) and Bun's runtime transpiler cache (added when `runtime: bun`), on the same PVC. Cache growth is bounded only by `bytecodeCacheSize` — there is no eviction — and both runtimes fail open (serving is unaffected) if the volume fills up or is unwritable.
 
+The two halves of this block are **independent**: `provider`/`url`/`keyPrefix` configure ISR/data caching, while `enableBytecodeCache`/`bytecodeCacheSize` configure the V8 compile cache that governs **boot speed**. Either may be set without the other — `enableBytecodeCache: true` with no `provider` is valid and wires `NODE_COMPILE_CACHE` as expected.
+
+Bytecode caching is **opt-in**, not default-on: the PVC is `ReadWriteOnce`, so pods scaling onto a second node cannot attach it, and on a cluster with no default StorageClass it never binds. See [scaling & cold start](./scaling-cold-start.md) for the full trade-off.
+
 ### `revalidation` (Optional)
 Configures Asynchronous ISR Regenerations.
 ```yaml

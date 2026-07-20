@@ -46,6 +46,38 @@ export interface DynamoDBCacheConfig {
 
 export type CacheConfig = RedisCacheConfig | DynamoDBCacheConfig;
 
+/**
+ * #431 — BYTECODE (V8 compile) CACHE. This governs how fast the server BOOTS,
+ * NOT what/where application data is cached. It is deliberately a TOP-LEVEL
+ * option, orthogonal to {@link CacheConfig}: the two used to be coupled
+ * (`enableBytecodeCache` was derived from `cache.provider === "redis"`), which
+ * meant an app on GCS with no Redis silently paid a fully-uncached ~2s Node
+ * boot on every cold start.
+ *
+ * When enabled, the operator provisions a PVC mounted at `/cache/bytecode` and
+ * exports `NODE_COMPILE_CACHE` (plus `BUN_RUNTIME_TRANSPILER_CACHE_PATH` when
+ * `runtime` is `"bun"`), so V8 reuses compiled bytecode across cold starts.
+ *
+ * DEFAULT: OFF, deliberately (opt-in). The cost is not just storage:
+ *  - the PVC is `ReadWriteOnce`, so pods that burst onto a SECOND NODE cannot
+ *    attach the volume and stay Pending — defaulting on would silently cap
+ *    horizontal scaling (default `scaling.maxScale` is 10);
+ *  - on a cluster with no default StorageClass the PVC never binds and the pod
+ *    never starts at all.
+ * Neither may be inflicted on a deployment that works today. Enable it for
+ * cold-start-sensitive, low-fanout apps.
+ */
+export interface BytecodeCacheConfig {
+    /** Provision the bytecode-cache PVC and wire the runtime compile cache. */
+    enabled: boolean;
+    /**
+     * PVC size (Kubernetes quantity, e.g. "512Mi", "1Gi"). Omit to take the
+     * operator's default of 512Mi. Growth is bounded only by this size — there
+     * is no eviction; both runtimes fail OPEN when the volume is full.
+     */
+    size?: string;
+}
+
 // Queue providers for ISR revalidation
 export type QueueProvider = "kafka" | "none";
 
@@ -237,6 +269,10 @@ export interface KnativeNextConfig {
     name: string;
     storage: StorageConfig;
     cache?: CacheConfig;
+    // #431 — cold-start boot cache. ORTHOGONAL to `cache` (which is ISR/data
+    // caching): this is the V8 compile cache on a PVC. Default OFF — see
+    // {@link BytecodeCacheConfig} for the RWO/StorageClass trade-off.
+    bytecodeCache?: BytecodeCacheConfig;
     queue?: QueueConfig; // For ISR revalidation (Kafka for Knative Eventing)
     registry: string;
     runtime?: "bun" | "node"; // Runtime to execute the Next.js standalone server.js: 'bun' or 'node' (default)
