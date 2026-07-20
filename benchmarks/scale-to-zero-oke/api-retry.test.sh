@@ -100,6 +100,15 @@ case "\$args" in
       *"panic-window-percentage"*"target-burst-capacity"*|*"target-burst-capacity"*"panic-window-percentage"*)
         n=\$(cat "${dir}/apply_count" 2>/dev/null || echo 0); n=\$((n + 1))
         echo "\$n" > "${dir}/apply_count"
+        # Simulate a HUNG apply so a signal can be delivered while an api_retry
+        # attempt is genuinely in flight (the cleanup-leak path, #428).
+        ahang=\$(cat "${dir}/apply_hang_s" 2>/dev/null || echo 0)
+        if [ "\$ahang" != "0" ]; then
+          : > "${dir}/apply_started"
+          trap 'kill \$sp 2>/dev/null; exit 143' TERM
+          sleep "\$ahang" & sp=\$!
+          wait \$sp
+        fi
         from=\$(cat "${dir}/apply_fail_from" 2>/dev/null || echo 0)
         to=\$(cat "${dir}/apply_fail_to" 2>/dev/null || echo 0)
         if [ "\$from" != "0" ] && [ "\$n" -ge "\$from" ] && [ "\$n" -le "\$to" ]; then
@@ -107,7 +116,18 @@ case "\$args" in
           if [ "\$mode" = "terminal" ]; then echo "\$terminal_msg" >&2; else echo "\$transient_msg" >&2; fi
           exit 1
         fi ;;
-      *) : ;;
+      *)
+        # Single-key patches are cleanup()'s restore patches. They may be made to
+        # take a while (to prove they run UNCAPPED) and/or to fail (to prove the
+        # log does not claim a restore that did not happen).
+        rhang=\$(cat "${dir}/restore_hang_s" 2>/dev/null || echo 0)
+        [ "\$rhang" != "0" ] && sleep "\$rhang"
+        rn=\$(cat "${dir}/restore_done" 2>/dev/null || echo 0)
+        echo "\$((rn + 1))" > "${dir}/restore_done"
+        if [ -f "${dir}/restore_fail" ]; then
+          echo "\$transient_msg" >&2
+          exit 1
+        fi ;;
     esac ;;
   *"wait --for=condition=complete"*) exit 0 ;;
   *"wait --for=condition=failed"*) exit 1 ;;
@@ -497,6 +517,101 @@ chmod +x "${T13}/kubectl"
 run_bench "$T13" --phases none
 assert_not_contains "${T13}/out.txt" "Illegal byte sequence" \
   "no 'tr: Illegal byte sequence' leaks to stderr for binary API output"
+
+# ── Test 15: the per-call cap must NOT leak into cleanup on the SIGNAL path ──
+# api_retry arms KC_TIMEOUT_S around each attempt and clears it on the line
+# AFTER the call returns. Bash defers a trapped signal until the in-flight
+# command substitution completes and then runs the trap BEFORE the next
+# statement — so a TERM arriving mid-attempt entered cleanup() with the per-call
+# cap still armed. Every restore `kc patch` was then wrapped in
+# `timeout -k 5 <cap>` and its failure swallowed, while the log still printed
+# "restored:" — abandoning a MUTATED live service and lying about it.
+#
+# Note the three earlier review rounds measured "restore runs unbounded" only on
+# the exhaustion -> FATAL -> EXIT path, where the reset has already run. The
+# signal path is a different entry into cleanup().
+echo
+echo "[15] a TERM during an in-flight attempt leaves cleanup's restore UNCAPPED"
+T15="$(mktemp -d)"
+make_stub "$T15"
+# per-call cap = deadline/attempts = 2/1 = 2s. Restores take 4s each, so a leaked
+# cap kills them; an unleaked cleanup lets every one of them finish.
+echo 8 > "${T15}/apply_hang_s"
+echo 3 > "${T15}/restore_hang_s"
+# NOTE: run.sh is backgrounded DIRECTLY (not wrapped in a subshell) so $! is
+# run.sh's own pid. Signalling a wrapper subshell instead would let `wait`
+# return while the orphaned run.sh was still mid-cleanup, and the assertions
+# below would race the restore patches they are meant to measure.
+DRY_RUN=1 DRY_RUN_EXERCISE_KC=1 KUBECTL_BIN="${T15}/kubectl" \
+OUT="${T15}/results.txt" SCALE_DOWN_TIMEOUT=0 APPLY_SETTLE_SECONDS=0 \
+POD_SAMPLE_BUDGET=1 SCHEDULE_CHECK_TIMEOUT=0 K6_JOB_TIMEOUT=5 \
+API_RETRY_BASE_MS=5 API_RETRY_MAX_MS=20 \
+API_RETRY_ATTEMPTS=1 API_RETRY_DEADLINE_S=2 \
+  bash "$RUN_SH" --service demo-svc --namespace bench --phases cold \
+    > "${T15}/out.txt" 2>&1 &
+T15_PID=$!
+# Wait until the apply attempt is genuinely in flight before signalling. This
+# gate is asserted, not assumed: if apply never started, the TERM would land
+# somewhere else entirely (e.g. mid-cleanup) and the test would "pass" without
+# ever exercising the leak it exists to catch.
+T15_ARMED=0
+for _ in $(seq 1 150); do
+  [ -f "${T15}/apply_started" ] && { T15_ARMED=1; break; }
+  sleep 0.1
+done
+sleep 0.3
+kill -TERM "$T15_PID" 2>/dev/null
+wait "$T15_PID"; T15_RC=$?
+
+assert_eq "$T15_ARMED" "1" "the TERM was delivered while an api_retry attempt was genuinely in flight"
+assert_eq "$T15_RC" "143" "TERM during an in-flight attempt still exits 143 after cleanup"
+# 5 restore patches: containerConcurrency, max-scale, tbc, panic-window, panic-threshold.
+assert_eq "$(cat "${T15}/restore_done" 2>/dev/null || echo 0)" "5" \
+  "all 5 restore patches run to completion UNCAPPED (the per-call cap did not leak into cleanup)"
+assert_contains "${T15}/out.txt" "restored:" \
+  "an uncapped, successful restore is reported as restored"
+rm -rf "$T15"
+
+# ── Test 16: cleanup must not claim a restore that actually failed ───────────
+echo
+echo "[16] a FAILING restore patch is reported, not swallowed under 'restored:'"
+T16="$(mktemp -d)"
+make_stub "$T16"
+: > "${T16}/restore_fail"
+run_bench "$T16" --phases none
+assert_not_contains "${T16}/out.txt" "  restored:" \
+  "cleanup does not print 'restored:' when the restore patches failed"
+assert_contains "${T16}/out.txt" "RESTORE FAILED" \
+  "cleanup loudly reports the failed restore — the service is left MUTATED"
+# One failing patch must not abort the rest: every restore step still runs.
+assert_eq "$(cat "${T16}/restore_done" 2>/dev/null || echo 0)" "5" \
+  "a failing restore patch does not abort the remaining restore steps"
+rm -rf "$T16"
+
+# ── Test 17: API_RETRY_DEADLINE_S is sanitised like the attempt count ────────
+# Only the attempt count was sanitised at startup. With a 0/negative/non-numeric
+# deadline, api_call_cap returned 0 -> NO timeout wrapper -> a hung first call
+# was unbounded, contradicting both the banner and the documented bound.
+for bad in 0 -3 abc; do
+  echo
+  echo "[17] API_RETRY_DEADLINE_S='${bad}' still bounds a hung call, and the banner matches"
+  T17="$(mktemp -d)"
+  make_stub "$T17"
+  echo 30 > "${T17}/get_hang_s"   # would hang far past any sane bound
+  T17_START=$(date +%s)
+  API_RETRY_ATTEMPTS=1 API_RETRY_DEADLINE_S="$bad" run_bench "$T17" --phases none
+  T17_ELAPSED=$(( $(date +%s) - T17_START ))
+  if [ "$T17_ELAPSED" -lt 20 ]; then
+    ok "API_RETRY_DEADLINE_S='${bad}' still hard-caps a hung API call (took ${T17_ELAPSED}s, not 30s+)"
+  else
+    nope "API_RETRY_DEADLINE_S='${bad}' left a hung API call unbounded (took ${T17_ELAPSED}s)"
+  fi
+  assert_contains "${T17}/out.txt" "total budget API_RETRY_DEADLINE_S=1s" \
+    "API_RETRY_DEADLINE_S='${bad}' banners the 1s budget that is actually enforced"
+  assert_not_contains "${T17}/out.txt" "capped at 0s" \
+    "API_RETRY_DEADLINE_S='${bad}' never announces a 0s (i.e. absent) per-call cap"
+  rm -rf "$T17"
+done
 
 rm -rf "$T1" "$T3" "$T4" "$T5" "$T6" "$T7" "$T8" "$T10" "$T10A" "$T10C" "$T11" "$T12" "$T13"
 

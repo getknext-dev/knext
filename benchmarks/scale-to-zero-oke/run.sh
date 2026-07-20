@@ -247,6 +247,12 @@ fi
 # 1 attempt at a 60s cap. Announcing a TIGHTER bound than is enforced is the same
 # "reads cleaner than reality" direction as #424/#425/#426.
 [ "$API_RETRY_ATTEMPTS" -ge 1 ] 2>/dev/null || API_RETRY_ATTEMPTS=1
+# The deadline needs the SAME treatment, for a sharper reason than cosmetics: a
+# 0/negative/non-numeric deadline made api_call_cap return 0, which means kc()
+# adds NO timeout wrapper at all — so a hung call was completely unbounded while
+# the banner still advertised a bound. Sanitising here keeps banner and
+# enforcement driven by one number, as above.
+[ "$API_RETRY_DEADLINE_S" -ge 1 ] 2>/dev/null || API_RETRY_DEADLINE_S=1
 
 # containerConcurrency 0 is LEGAL in Knative (means "unbounded"), so it must not
 # be used as a divisor. With CC=0 there is no VUs-per-pod ratio to size against;
@@ -604,6 +610,17 @@ capture_original() {
 # this trap is the fix.
 CLEANED_UP=0
 cleanup() {
+  # FIRST statement, before anything else can call kc(): this is the SIGNAL-path
+  # reset of the per-call cap. api_retry arms KC_TIMEOUT_S around each attempt and
+  # clears it on the line after the call returns — but bash defers a trapped
+  # signal until the in-flight command substitution completes and then runs the
+  # trap BEFORE that next statement. So an INT/TERM arriving mid-attempt reached
+  # here with the cap still armed, wrapping every restore patch below in
+  # `timeout -k 5 <cap>` and killing it. Restores must ALWAYS run unbounded: this
+  # is the last chance to un-mutate a live service (#424 fail-closed contract).
+  # The exhaustion -> FATAL -> EXIT path resets it in api_retry; this covers the
+  # other entry.
+  KC_TIMEOUT_S=0
   [ "$CLEANED_UP" = "1" ] && return 0
   CLEANED_UP=1
   log ""
@@ -613,19 +630,27 @@ cleanup() {
     # mutation (see capture_original) — so there is genuinely nothing to undo.
     log "  (dry-run, or aborted before capture — no mutation was made, nothing to restore)"
   else
+    # Restore failures are COUNTED, not swallowed. `|| true` everywhere meant a
+    # restore that never applied still printed "restored: ..." — the artifact
+    # claimed a clean cluster while the service stayed mutated. Each step still
+    # uses `|| RESTORE_FAILED=...` (never a bare failure) so ONE failing patch
+    # cannot abort the remaining steps: a partial restore must still get as far
+    # as it can. The names are the failed keys, so the operator knows exactly
+    # what to undo by hand.
+    local restore_failed=""
     local cc_restore="${ORIG_CC:-0}"
     kc patch ksvc "$SERVICE" -n "$NS" --type merge -p \
       "{\"spec\":{\"template\":{\"spec\":{\"containerConcurrency\":${cc_restore}}}}}" \
-      >/dev/null 2>&1 || true
+      >/dev/null 2>&1 || restore_failed="${restore_failed} containerConcurrency"
 
     if [ -n "$ORIG_MAXSCALE" ]; then
       kc patch ksvc "$SERVICE" -n "$NS" --type merge -p \
         "{\"spec\":{\"template\":{\"metadata\":{\"annotations\":{\"autoscaling.knative.dev/max-scale\":\"${ORIG_MAXSCALE}\"}}}}}" \
-        >/dev/null 2>&1 || true
+        >/dev/null 2>&1 || restore_failed="${restore_failed} max-scale"
     else
       kc patch ksvc "$SERVICE" -n "$NS" --type json -p \
         '[{"op":"remove","path":"/spec/template/metadata/annotations/autoscaling.knative.dev~1max-scale"}]' \
-        >/dev/null 2>&1 || true
+        >/dev/null 2>&1 || restore_failed="${restore_failed} max-scale"
     fi
 
     for pair in "ORIG_TBC:target-burst-capacity" "ORIG_PW:panic-window-percentage" "ORIG_PT:panic-threshold-percentage"; do
@@ -634,14 +659,23 @@ cleanup() {
       if [ -n "$val" ]; then
         kc patch ksvc "$SERVICE" -n "$NS" --type merge -p \
           "{\"spec\":{\"template\":{\"metadata\":{\"annotations\":{\"autoscaling.knative.dev/${key}\":\"${val}\"}}}}}" \
-          >/dev/null 2>&1 || true
+          >/dev/null 2>&1 || restore_failed="${restore_failed} ${key}"
       else
         kc patch ksvc "$SERVICE" -n "$NS" --type json -p \
           "[{\"op\":\"remove\",\"path\":\"/spec/template/metadata/annotations/autoscaling.knative.dev~1${key}\"}]" \
-          >/dev/null 2>&1 || true
+          >/dev/null 2>&1 || restore_failed="${restore_failed} ${key}"
       fi
     done
-    log "  restored: containerConcurrency=${cc_restore}, max-scale=${ORIG_MAXSCALE:-<removed>}, burst/panic annotations restored/removed to captured originals"
+    # A `remove` of an already-absent annotation is a legitimate failure mode of
+    # the json patch type, so this can be noisy on a service that was never
+    # annotated — but over-reporting a restore is the safe direction; silently
+    # claiming one is not.
+    if [ -z "$restore_failed" ]; then
+      log "  restored: containerConcurrency=${cc_restore}, max-scale=${ORIG_MAXSCALE:-<removed>}, burst/panic annotations restored/removed to captured originals"
+    else
+      log "*** RESTORE FAILED — these keys did NOT apply:${restore_failed} ***"
+      log "*** $SERVICE MAY STILL BE MUTATED by this benchmark. Check and restore it by hand before trusting the service or any later run. ***"
+    fi
   fi
 
   # NOTE: reps that lost their metrics deliberately keep their Job (see run_k6).

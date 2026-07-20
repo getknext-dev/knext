@@ -213,6 +213,29 @@ crashed shell). This is the direct fix for the real incident behind this harness
 the manual runs that produced the published numbers were interrupted twice and left
 the cluster patched with test autoscaling config.
 
+**The restore always runs unbounded.** The per-call `timeout` box that bounds a hung
+API call (see *Transient API retry* below) is explicitly cleared as the first
+statement of the cleanup path, because cleanup is the last chance to un-mutate a
+live service. This matters specifically on the signal path: bash defers a trapped
+signal until the in-flight command completes and then runs the trap *before* the
+next statement, so an interrupt arriving mid-call used to enter cleanup with the
+per-call cap still armed and every restore patch got killed by it.
+
+**A restore that fails is reported, not swallowed.** Each restore patch is
+attempted independently — one failure never aborts the remaining steps — but if any
+of them did not apply, cleanup prints
+
+```
+*** RESTORE FAILED — these keys did NOT apply: max-scale target-burst-capacity ***
+*** <service> MAY STILL BE MUTATED by this benchmark. Check and restore it by hand … ***
+```
+
+instead of the usual `restored: …` line. Treat that as "the service is still
+carrying benchmark config" and fix it by hand before trusting the service or any
+later run. Note this can also fire benignly when removing an annotation that was
+never set; over-reporting a failed restore is the safe direction, silently claiming
+a successful one is not.
+
 ## Transient API retry
 
 Two of the three original OKE runs aborted on the same one-off control-plane blip
@@ -256,7 +279,7 @@ a slow failure, which is exactly what the terminal-first bias exists to prevent.
 | `API_RETRY_ATTEMPTS` / `--api-retry-attempts` | `4` | Total attempts per operation. `1` disables retrying. A value below `1` or non-numeric is clamped to `1`, and the startup banner reports the clamped value it will actually enforce. |
 | `API_RETRY_BASE_MS` / `--api-retry-base-ms` | `500` | First backoff step; doubles each retry. |
 | `API_RETRY_MAX_MS` / `--api-retry-max-ms` | `8000` | Per-step backoff ceiling. |
-| `API_RETRY_DEADLINE_S` | `60` | **Total** wall-clock budget per operation — see below. |
+| `API_RETRY_DEADLINE_S` | `60` | **Total** wall-clock budget per operation — see below. Clamped to `1` the same way as the attempt count: at `0`/negative/non-numeric the per-call cap computed to `0`, which meant *no* `timeout` wrapper at all and a hung call was unbounded while the banner still advertised a bound. |
 | `API_CALL_TIMEOUT_S` / `--api-call-timeout-s` | `deadline / attempts` (min `1`) | Hard cap on a **single** call. Clamped to the total budget. |
 
 These are two different bounds and they must stay separate:
