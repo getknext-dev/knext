@@ -18,9 +18,15 @@ Record every significant decision as an ADR in `docs/adr/NNNN-title.md` with:
 Recommend an option — don't just enumerate.
 
 ## 4. Established hard rules (north star)
-- **Official Next.js Deployment Adapter API only.** Target `NextAdapter`
-  (`adapterPath` — top-level since next 16.2, `experimental.*` on ≤16.1; `modifyConfig` + `onBuildComplete`). Do NOT reverse-engineer
-  Nitro/Vinext or hand-roll a runtime. The vinext/`bun --compile` path is **deprecated**.
+- **Official Next.js Deployment Adapter API is the DEFAULT and only all-apps-verified path.** Target
+  `NextAdapter` (`adapterPath` — top-level since next 16.2, `experimental.*` on ≤16.1; `modifyConfig` +
+  `onBuildComplete`). Do NOT hand-roll a Nitro-style runtime, and never make anything but the node/
+  official-adapter target the default. **Amended by ADR-0036 (2026-07-20, founder-directed):** a
+  compiled **vinext → `bun build --compile --bytecode` single-executable build TARGET** is permitted as
+  an **opt-in, compat-gated** alternative — motivated by the measured ~1957 ms Next-standalone boot
+  floor the node path cannot cross. This is a build target, NOT a return to reverse-engineering
+  Nitro/Vinext as a runtime; both targets share one config/CRD/operator/`RuntimeContract`. `bun-exec`
+  ships only if the P1 OKE A/B shows a separated win.
 - **The Go operator (`packages/kn-next-operator`) is the single source of truth for cluster
   state** (ADR-001). Nothing else may mutate cluster resources out-of-band.
 - **Don't rewrite the runtime twice.** One standalone Node server, run on Node and Bun.
