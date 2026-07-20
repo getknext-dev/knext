@@ -51,7 +51,7 @@ runtime contract. The targets differ ONLY at the build+image layer.
 | build | turbopack / `next build` → `.next/standalone` | `vinext build` |
 | compile | — | `bun build --compile --bytecode --target=bun-linux-<arch>-musl` |
 | image | multi-stage alpine, node runtime + baked compile cache (ADR-0035) | `FROM alpine` + the single binary (~5–15 MB) |
-| runtime process | supervisor spawns `server.js` | the binary IS the server (no Next standalone, no spawn) |
+| runtime process | supervisor spawns `server.js`; `:9091` metrics in the supervisor | the binary IS the server (no Next standalone, no spawn); `:9091` served **in-process** at listen-time |
 | verification | official compat suite (shipped) | official compat suite against the bun image (gate) |
 
 ## Options considered
@@ -66,10 +66,32 @@ runtime contract. The targets differ ONLY at the build+image layer.
 ## Consequences
 
 - **Two build targets, one everything-else.** The cost the old "don't rewrite the runtime twice" rule
-  feared is capped by forcing both targets through a single `RuntimeContract` (health `/api/health`
-  shallow, Prometheus `:9091` sidecar, SIGTERM drain, operator env injection) and one CRD/operator.
+  feared is capped by forcing both targets through a single `RuntimeContract` and one CRD/operator.
   **If `bun-exec` ever needs its own CRD/operator/config, that is a STOP signal** — the decision is
   invalid at that point.
+- **`RuntimeContract` — full enumeration (both targets MUST satisfy all of it).** Under-specifying
+  this is how the two targets silently drift; this session already saw deferring the `:9091` listen
+  break `sigterm-drain-e2e`. The contract:
+  1. **Health:** shallow `/api/health` (no PG/Redis dial, ADR-0026); deep health where applicable.
+  2. **Metrics:** Prometheus on **`:9091`, served in-process at listen-time** (node: in the supervisor;
+     bun-exec: in the binary) — bound early so a scrape while the runtime is up is answered.
+  3. **Graceful shutdown on SIGTERM:** drain in-flight requests **and run Next.js `after()` callbacks**
+     before exit (security.md / graceful-shutdown rule), within the grace cap.
+  4. **Redis ISR/data-cache handler** wiring (`cache-handler.js` equivalent) — present and functional.
+  5. **Bearer-authenticated, fail-closed mutating routes** `POST /api/cache/invalidate` and
+     `DELETE /api/cache/events` (`CACHE_INVALIDATE_TOKEN`) — **dropping or unauthenticating these in the
+     bun binary is a security.md hard-rule violation (no unauthenticated mutating endpoints).**
+  6. Operator env-injection contract (DATABASE_URL, cache, HOSTNAME/PORT, etc.).
+  7. **ADR-0027 module-state seam:** state the bun-exec equivalent of the `globalThis`
+     `Symbol.for('knext.lib.*')` seam + the standalone-seam-alive guard, or an explicit N/A with reason.
+  P2 extracts this contract; CI's `sigterm-drain-e2e` / `sigterm-hardcap-e2e` gates are parameterised
+  over BOTH images, and a compat/contract check asserts routes 1–6 on the bun image.
+- **Supply chain — a `bun --compile` binary is OPAQUE to Trivy/syft.** Scanning the shipped image goes
+  blind, defeating security.md's SBOM-per-image + fail-on-HIGH gate. Therefore for `bun-exec`: the
+  **SBOM is generated from the lockfile / pre-compile dependency closure** and attached as a **cosign
+  attestation**; the **HIGH/CRITICAL scan runs against that pre-compile closure**, not the compiled
+  binary; **cosign image signing + digest pinning apply unchanged**. Record this as a build-pipeline
+  requirement, not an afterthought.
 - **vinext fidelity bounds honesty.** vinext is a separate Vite-based reimplementation; not every Next
   feature is covered. `bun-exec` is only offered for apps that pass the **official compat suite** on the
   bun image. An app that fails compat on `bun-exec` **falls back to `node`** — same north-star bar as
@@ -89,9 +111,17 @@ runtime contract. The targets differ ONLY at the build+image layer.
 - **P0** — this ADR (founder approves the vinext-deprecation amendment; done by acceptance).
 - **P1 — spike + measure FIRST.** Bring vinext in for one app; build it both ways; OKE cold-start A/B
   (`node`-baked vs `bun-exec`) using the alternating-pairs method (run 6). Publish as a benchmark run.
-  **Gate: separated win, or stop.**
-- **P2 — `RuntimeContract`.** Extract the health/metrics/drain contract; implement it for the bun-exec
-  binary; parameterise CI `sigterm-drain-e2e` / `sigterm-hardcap-e2e` over both images.
+  **Gate: separated win, or stop.** The spike report must also record **vinext's license, maintenance
+  posture, and an abandonment exit stance** (per architect review) — a shipping target cannot depend on
+  an unmaintained upstream.
+- **P3 config decision:** resolve whether `bun-exec` is a new `buildTarget` field or a third
+  `spec.runtime` value **in the P3 PR** (architect flagged that `spec.runtime: bun` vs `bun-exec` will
+  confuse users — prefer folding into one knob). Amend this ADR in place with the outcome.
+- **P2 — `RuntimeContract`.** Extract the full contract (all 7 items above); implement it for the
+  bun-exec binary; parameterise CI `sigterm-drain-e2e` / `sigterm-hardcap-e2e` over both images; add a
+  contract check asserting the health/metrics/auth-cache routes on the bun image. **Add a startup-order
+  test (both targets):** the binary must not accept its first request before the health/`:9091`
+  listeners are up — nothing covers readiness-vs-metrics-vs-first-request ordering today.
 - **P3 — build pipeline.** `kn-next build --target bun-exec` (or via a new `buildTarget` config field /
   the existing `spec.runtime`); the second Dockerfile (Dockerfiles are hand-maintained, not templated —
   #439 context).
