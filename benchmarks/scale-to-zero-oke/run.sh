@@ -255,6 +255,10 @@ CAPTURED=0
 # run exits non-zero if M < N so no caller can mistake it for a clean dataset.
 REPS_RUN=0
 INCOMPLETE_REPS=""
+# How much of a lost rep's raw k6 log to embed in the results file. Bounded so a
+# chatty Job cannot bury the rest of the results, but large enough to contain a
+# k6 summary plus the surrounding failure context.
+RAW_LOG_TAIL_LINES="${RAW_LOG_TAIL_LINES:-200}"
 
 # Capture is ATOMIC and FAIL-CLOSED. It does ONE `get -o json`, checks the exit
 # code, and only then sets CAPTURED=1.
@@ -379,9 +383,15 @@ cleanup() {
   # masquerade as a complete one (#425 item 5).
   log ""
   if [ -n "$INCOMPLETE_REPS" ]; then
-    log "*** RUN INCOMPLETE — no k6 metrics captured for: ${INCOMPLETE_REPS} ***"
-    log "*** ${REPS_RUN} rep(s) ran; this results file is MISSING data for the reps above. ***"
+    log "*** RUN INCOMPLETE — untrustworthy rep(s): ${INCOMPLETE_REPS} ***"
+    log "*** ${REPS_RUN} rep(s) ran; this results file is MISSING or UNRELIABLE data for the reps above. ***"
     log "*** Do NOT publish these numbers as a complete dataset — scope any claim to the reps that have data, and say so. ***"
+  elif [ "$REPS_RUN" -eq 0 ]; then
+    # "metrics captured for all 0 rep(s) — dataset is complete" is literally
+    # true and completely misleading: it fired on `--phases none` AND on the
+    # abort path (a FATAL before the first rep), i.e. the designated integrity
+    # verdict asserted completeness for a run that collected nothing.
+    log "run integrity: no reps ran; no data collected — this file is NOT a dataset"
   else
     log "run integrity: k6 metrics captured for all ${REPS_RUN} rep(s) — dataset is complete"
   fi
@@ -568,17 +578,26 @@ YAML
       log "  ***   'timed-out' = neither condition=complete nor condition=failed within ${K6_JOB_TIMEOUT}s; the Job may still be running, so any metrics below are partial or absent. ***"
   fi
 
-  # Capture metrics into a variable FIRST so "how many lines did we get?" is a
-  # checkable fact, instead of appending straight to $OUT where zero lines is
-  # indistinguishable from a rep that was never run.
-  local metrics metric_lines=0
-  metrics=$(kc logs -n "$NS" "job/${name}" 2>/dev/null \
+  # Capture the raw logs ONCE, then derive both the metrics block and the
+  # completeness check from them — a second `kubectl logs` could race the Job's
+  # TTL and see different output.
+  local raw_logs metrics
+  raw_logs=$(kc logs -n "$NS" "job/${name}" 2>/dev/null)
+  metrics=$(printf '%s\n' "$raw_logs" \
     | grep -E 'http_req_duration|http_req_failed|http_reqs|iteration_duration|checks\.\.\.|vus_max|dropped' \
     | sed 's/^/    /')
-  if [ -n "$metrics" ]; then
-    metric_lines=$(printf '%s\n' "$metrics" | wc -l | tr -d ' ')
-    printf '%s\n' "$metrics" >> "$OUT"
-  fi
+  [ -n "$metrics" ] && printf '%s\n' "$metrics" >> "$OUT"
+
+  # Completeness is a check for an expected SET of keys, NOT a line count.
+  # A count-based test ("did we get >=1 matching line?") let a truncated or
+  # partially-flushed k6 summary — e.g. an http_reqs line and nothing else —
+  # pass as a complete rep, which is exactly the "partial dataset masquerading
+  # as complete" failure this harness exists to prevent (#425, PR #426 review).
+  local missing_keys="" key
+  for key in http_req_duration http_req_failed http_reqs checks; do
+    printf '%s\n' "$metrics" | grep -q "$key" || \
+      missing_keys="${missing_keys}${missing_keys:+, }${key}"
+  done
 
   if [ -n "$peak_file" ]; then
     local peak_raw
@@ -605,12 +624,40 @@ YAML
     fi
   fi
 
-  if [ "$metric_lines" -eq 0 ]; then
-    INCOMPLETE_REPS="${INCOMPLETE_REPS}${INCOMPLETE_REPS:+, }${rid}"
-    log "  *** WARNING: no k6 metrics captured for '${rid}' — this rep's result is INCOMPLETE (k6 Job ${wait_state}). ***"
-    log "  *** The k6 Job has been KEPT rather than deleted, because it is now the only remaining evidence. Read it with: ***"
-    log "  ***   kubectl logs -n ${NS} job/${name} ***"
-    log "  *** (the Job still carries ttlSecondsAfterFinished: 300, so it is reaped shortly — capture the logs now.) ***"
+  # Two independent ways a rep can fail to be trustworthy. Both are recorded
+  # with the REASON, so the final verdict says what is wrong, not just that
+  # something is.
+  local rep_problem=""
+  if [ -z "$metrics" ]; then
+    rep_problem="no k6 metrics captured (k6 Job ${wait_state})"
+  elif [ -n "$missing_keys" ]; then
+    rep_problem="k6 metrics INCOMPLETE — missing: ${missing_keys}"
+  elif [ "$wait_state" != "completed" ]; then
+    # DELIBERATE: metrics that look whole are still not trusted when the Job did
+    # not finish cleanly. `kubectl wait` never saw condition=complete, so the
+    # summary may have been flushed mid-flight (k6 prints a summary on abort
+    # too) and the numbers describe a truncated test, not the configured one.
+    # Under-reporting confidence is the safe direction for a benchmark whose
+    # output gets published.
+    rep_problem="k6 Job did not finish cleanly (kubectl wait result: ${wait_state})"
+  fi
+
+  if [ -n "$rep_problem" ]; then
+    INCOMPLETE_REPS="${INCOMPLETE_REPS}${INCOMPLETE_REPS:+, }${rid} [${rep_problem}]"
+    log "  *** WARNING: ${rep_problem} for '${rid}' — this rep's result is INCOMPLETE. ***"
+    # Copy the raw logs into the RESULTS FILE. The Job is kept for the rest of
+    # this rep, but cleanup()'s label sweep reaps it when the run ends — for the
+    # final rep (the observed #425 failure) that is seconds later, so a printed
+    # `kubectl logs` instruction would point at an object already gone. Evidence
+    # only counts if it outlives the run.
+    log "  *** The raw k6 Job log is captured below, in this results file, because the Job itself does not survive the run. ***"
+    log "  --- raw k6 Job log for '${rid}' (job/${name}, last ${RAW_LOG_TAIL_LINES} lines) ---"
+    if [ -n "$raw_logs" ]; then
+      printf '%s\n' "$raw_logs" | tail -n "$RAW_LOG_TAIL_LINES" | sed 's/^/  | /' >> "$OUT"
+    else
+      log "  | (kubectl logs returned nothing for job/${name} — the Job's pod may already be gone)"
+    fi
+    log "  --- end raw k6 Job log for '${rid}' ---"
     return 0
   fi
 

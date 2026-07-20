@@ -100,16 +100,30 @@ mistaken for a complete one:
 
 | Output | Meaning |
 |---|---|
-| `run integrity: k6 metrics captured for all N rep(s) — dataset is complete` | Every rep that ran produced metrics. Exit code 0. |
-| `*** RUN INCOMPLETE — no k6 metrics captured for: <reps> ***` | One or more reps produced **no** k6 summary. **Exit code 2.** Scope any claim to the reps that do have data, and say so. |
+| `run integrity: k6 metrics captured for all N rep(s) — dataset is complete` | Every rep that ran finished cleanly **and** produced all four required metric keys. Exit code 0. |
+| `run integrity: no reps ran; no data collected — this file is NOT a dataset` | No rep executed at all (`--phases none`, a plain `--dry-run`, or an abort before the first rep). Exit code is whatever caused it — 0 for a dry run, non-zero for a `FATAL:` abort. Never read this file as a result. |
+| `*** RUN INCOMPLETE — untrustworthy rep(s): <rep> [<reason>] ***` | One or more reps are missing data or did not finish cleanly. **Exit code 2.** Scope any claim to the reps that do have data, and say so. |
 
-The per-rep failure looks like this, and is emitted whenever a rep's metrics grep
-came back empty:
+A rep counts as **complete** only if both hold:
+
+1. its captured metrics contain **all** of `http_req_duration`, `http_req_failed`,
+   `http_reqs`, and `checks` — a *set* check, not a line count, so a truncated or
+   partially-flushed summary is caught rather than passing as whole; and
+2. `kubectl wait` observed `condition=complete`.
+
+Rule 2 is deliberate: a Job that failed or timed out **is flagged even when its
+summary looks whole**, because k6 also prints a summary on abort — those numbers
+describe a truncated test, not the one that was configured. For a benchmark whose
+output gets published, under-reporting confidence is the safe direction.
+
+The per-rep failure names the reason and embeds the evidence:
 
 ```
-  *** WARNING: no k6 metrics captured for 'burst-tuned-2' — this rep's result is INCOMPLETE (k6 Job timed-out). ***
-  *** The k6 Job has been KEPT rather than deleted, because it is now the only remaining evidence. Read it with: ***
-  ***   kubectl logs -n <ns> job/k6-<run-id>-burst-tuned-2 ***
+  *** WARNING: k6 metrics INCOMPLETE — missing: http_req_duration, checks for 'burst-tuned-2' — this rep's result is INCOMPLETE. ***
+  *** The raw k6 Job log is captured below, in this results file, because the Job itself does not survive the run. ***
+  --- raw k6 Job log for 'burst-tuned-2' (job/k6-<run-id>-burst-tuned-2, last 200 lines) ---
+  | ...
+  --- end raw k6 Job log for 'burst-tuned-2' ---
 ```
 
 Three things make this reliable:
@@ -118,10 +132,12 @@ Three things make this reliable:
   whether its Job `completed`, `failed`, or `timed-out`. k6 prints its summary
   *only at end of run*, so a Job that hasn't finished has no summary to scrape —
   `timed-out` is the tell.
-- **The Job survives a failed rep.** It is not deleted until its metrics are
-  safely captured, because on that path it is the only remaining evidence. Note
-  it still carries `ttlSecondsAfterFinished: 300`, so capture the logs promptly;
-  the end-of-run cleanup also sweeps Jobs by label once the run is over.
+- **The evidence outlives the run.** The per-rep Job delete is skipped for a bad
+  rep, but the end-of-run cleanup sweeps Jobs by label and the Job carries
+  `ttlSecondsAfterFinished: 300` — so for the *last* rep the Job is gone seconds
+  later. The raw logs are therefore copied into the results file itself (last
+  `RAW_LOG_TAIL_LINES`, default 200), which is the only copy guaranteed to
+  survive.
 - **Lost sampler data is not rounded to zero.** If the pod sampler produced no
   measurement at all, you get `peak pods = <no sampler data>` — fan-out for that
   rep is *unknown*, which is a different fact from a measured peak of 0.
@@ -196,8 +212,10 @@ Both drive `run.sh` against a stub `kubectl` (via the `KUBECTL_BIN` +
 `DRY_RUN_EXERCISE_KC=1` test seam). `capture-restore` asserts that a failed
 capture aborts without issuing a single `patch`, and that a successful capture
 restores the exact original values. `k6-metrics-integrity` asserts the honest-
-reporting rules above: a rep with no metrics warns loudly and exits non-zero, its
-Job is kept, `kubectl wait` outcomes are distinguished, lost sampler data reads
+reporting rules above: a rep with no metrics — or with a *partial* summary, or
+one whose Job did not finish cleanly — warns loudly and exits non-zero, its raw
+log lands in the results file, a zero-rep run refuses to claim completeness,
+`kubectl wait` outcomes are distinguished, lost sampler data reads
 `<no sampler data>`, and the fan-out warning is scoped to the burst phase.
 
 Two further env-var seams exist only to keep those tests fast and deterministic;

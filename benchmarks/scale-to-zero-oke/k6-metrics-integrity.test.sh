@@ -123,13 +123,15 @@ assert_contains "${T1}/results.txt" "RUN INCOMPLETE" \
 
 # ── Test 2: on that path the Job is KEPT — it is the only evidence left ──────
 echo
-echo "[2] the k6 Job is NOT deleted when metrics could not be captured"
+# NOTE the scope: this asserts only that the PER-REP delete is skipped, so the
+# Job outlives the rep. It does NOT survive the run — cleanup()'s label sweep
+# reaps it at the end (which is why test [11] pins the results-file capture as
+# the evidence that actually survives).
+echo "[2] the per-rep Job delete is skipped when metrics could not be captured"
 assert_not_contains "${T1}/calls.log" "delete job,configmap -n bench k6-" \
   "no per-rep 'kubectl delete job' is issued when metrics were lost"
-assert_contains "${T1}/results.txt" "kubectl logs -n bench job/k6-" \
-  "the warning tells the operator how to read the kept Job's logs"
-assert_contains "${T1}/results.txt" "ttlSecondsAfterFinished" \
-  "the warning notes the kept Job is still reaped by its TTL"
+assert_contains "${T1}/calls.log" "delete job,configmap -n bench -l app=k6-loadtest" \
+  "cleanup's label sweep still runs, so the kept Job does NOT survive the run"
 
 # ── Test 3: a happy rep appends metrics, deletes its Job, and exits clean ────
 echo
@@ -159,9 +161,9 @@ printf '%s\n' "$REAL_K6_SUMMARY" > "${T4}/k6_logs"
 echo 1 > "${T4}/wait_complete_rc"   # neither complete...
 echo 1 > "${T4}/wait_failed_rc"     # ...nor failed => timed out / still running
 run_bench "$T4" --phases cold --cold-samples 1
-assert_contains "${T4}/results.txt" "timed-out" \
+assert_contains "${T4}/results.txt" "kubectl wait result: timed-out" \
   "a wait that matched neither condition is reported as timed-out"
-assert_not_contains "${T4}/results.txt" "Job completed" \
+assert_not_contains "${T4}/results.txt" "kubectl wait result: completed" \
   "a timed-out Job is never described as completed"
 
 # ── Test 5: a FAILED k6 Job is reported as failed, not as a timeout ──────────
@@ -173,9 +175,9 @@ printf '%s\n' "$REAL_K6_SUMMARY" > "${T5}/k6_logs"
 echo 1 > "${T5}/wait_complete_rc"
 echo 0 > "${T5}/wait_failed_rc"
 run_bench "$T5" --phases cold --cold-samples 1
-assert_contains "${T5}/results.txt" "failed" \
+assert_contains "${T5}/results.txt" "kubectl wait result: failed" \
   "a Job matching condition=failed is reported as failed"
-assert_not_contains "${T5}/results.txt" "timed-out" \
+assert_not_contains "${T5}/results.txt" "kubectl wait result: timed-out" \
   "a genuinely-failed Job is not mislabelled as a timeout"
 
 # ── Test 6: empty sampler data is NOT reported as a real peak of 0 ───────────
@@ -237,7 +239,75 @@ assert_not_contains "${T8}/results.txt" "no kubectl mutation, no cluster require
 assert_contains "${T8}/results.txt" "DRY_RUN_EXERCISE_KC" \
   "the banner names the seam that is making it mutate"
 
-rm -rf "$T1" "$T3" "$T4" "$T5" "$T6" "$T7" "$T7B" "$T7C" "$T8"
+# ── Test 9: a PARTIAL k6 summary must not read as a complete rep ─────────────
+# The #425 claim is "a partial dataset can no longer masquerade as complete".
+# A count-based check ("did we get >=1 matching line?") does not deliver that:
+# a truncated / partially-flushed summary containing a single http_reqs line
+# passed as complete. Completeness must be a check for the expected SET of keys.
+echo
+echo "[9] a rep with a truncated k6 summary is flagged incomplete, not complete"
+T9="$(mktemp -d)"
+make_k6_stub "$T9"
+printf '     http_reqs......................: 1000    98.4/s\n' > "${T9}/k6_logs"
+run_bench "$T9" --phases cold --cold-samples 1
+rc=$?
+assert_contains "${T9}/results.txt" "RUN INCOMPLETE" \
+  "a truncated summary (only http_reqs) makes the run report INCOMPLETE"
+if [ "$rc" -ne 0 ]; then ok "run.sh exits NON-ZERO on a partially-captured rep (got $rc)"
+else nope "run.sh exits NON-ZERO on a partially-captured rep (got 0 — a partial rep must not look clean)"; fi
+assert_not_contains "${T9}/results.txt" "dataset is complete" \
+  "the integrity verdict never says 'complete' when a rep is missing metric keys"
+assert_contains "${T9}/results.txt" "http_req_duration" \
+  "the warning names a missing metric key (http_req_duration)"
+assert_contains "${T9}/results.txt" "checks" \
+  "the warning names a missing metric key (checks)"
+
+# ── Test 10: a run in which ZERO reps ran must not claim completeness ─────────
+echo
+echo "[10] a run where no rep ran does not claim 'dataset is complete'"
+T10="$(mktemp -d)"
+make_k6_stub "$T10"
+DRY_RUN=1 DRY_RUN_EXERCISE_KC=1 KUBECTL_BIN="${T10}/kubectl" \
+OUT="${T10}/results.txt" \
+  bash "$RUN_SH" --service demo-svc --namespace bench --phases none \
+    > "${T10}/out.txt" 2>&1
+assert_not_contains "${T10}/results.txt" "dataset is complete" \
+  "a zero-rep run does not print 'dataset is complete'"
+assert_contains "${T10}/results.txt" "no reps ran" \
+  "a zero-rep run states plainly that no data was collected"
+
+# ── Test 11: the evidence for a lost rep SURVIVES the run ────────────────────
+# cleanup()'s label sweep deletes the "kept" Job at the end of the run, so for
+# the final rep — the observed #425 failure — the printed `kubectl logs`
+# instruction pointed at an object the same run had already reaped. The raw
+# logs must therefore be written into the results file itself.
+echo
+echo "[11] raw k6 logs for a lost rep are captured into the results file"
+assert_contains "${T1}/results.txt" "010/010 VUs" \
+  "the raw k6 Job logs are copied into the results file when metrics were lost"
+assert_contains "${T1}/results.txt" "raw k6 Job log" \
+  "the captured raw log is labelled so a reader knows what it is"
+assert_not_contains "${T1}/results.txt" "so it is reaped shortly — capture the logs now." \
+  "the warning no longer points only at a Job this same run deletes"
+
+# ── Test 12: a Job that did not complete cleanly is incomplete, metrics or not ─
+echo
+echo "[12] a failed k6 Job is incomplete even when its summary looks whole"
+T12="$(mktemp -d)"
+make_k6_stub "$T12"
+printf '%s\n' "$REAL_K6_SUMMARY" > "${T12}/k6_logs"
+echo 1 > "${T12}/wait_complete_rc"
+echo 0 > "${T12}/wait_failed_rc"
+run_bench "$T12" --phases cold --cold-samples 1
+rc=$?
+assert_contains "${T12}/results.txt" "RUN INCOMPLETE" \
+  "a rep whose Job did not complete cleanly is flagged incomplete"
+if [ "$rc" -ne 0 ]; then ok "run.sh exits NON-ZERO for a rep whose Job failed (got $rc)"
+else nope "run.sh exits NON-ZERO for a rep whose Job failed (got 0)"; fi
+assert_not_contains "${T12}/results.txt" "dataset is complete" \
+  "a run containing a failed Job never claims a complete dataset"
+
+rm -rf "$T1" "$T3" "$T4" "$T5" "$T6" "$T7" "$T7B" "$T7C" "$T8" "$T9" "$T10" "$T12"
 
 echo
 echo "== ${PASS} passed, ${FAIL} failed =="
