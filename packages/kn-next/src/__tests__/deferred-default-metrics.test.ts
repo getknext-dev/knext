@@ -94,26 +94,30 @@ describe("createDeferredDefaultMetrics", () => {
         const calls: string[] = [];
         const deferred = createDeferredDefaultMetrics({
             registry,
-            collect: () => calls.push("collect"),
+            collect: () => {
+                calls.push("collect");
+            },
         });
 
         expect(calls).toEqual([]);
         expect(deferred.isStarted()).toBe(false);
     });
 
-    it("collects once the child is ready — and only once", () => {
+    it("collects once the child is ready — and only once", async () => {
         const registry = new Registry();
         const calls: Registry[] = [];
         const deferred = createDeferredDefaultMetrics({
             registry,
-            collect: (opts) => calls.push(opts.register),
+            collect: (opts) => {
+                calls.push(opts.register);
+            },
         });
 
-        expect(deferred.ensureStarted("child-ready")).toBe(true);
+        expect(await deferred.ensureStarted("child-ready")).toBe(true);
         expect(calls).toEqual([registry]);
         // Idempotent: a later scrape must not double-register the default
         // families (prom-client throws on duplicate metric names).
-        expect(deferred.ensureStarted("scrape")).toBe(false);
+        expect(await deferred.ensureStarted("scrape")).toBe(false);
         expect(calls).toHaveLength(1);
     });
 
@@ -122,8 +126,32 @@ describe("createDeferredDefaultMetrics", () => {
         const deferred = createDeferredDefaultMetrics({ registry });
 
         expect(await registry.metrics()).not.toContain("process_cpu");
-        deferred.ensureStarted("child-ready");
+        // AWAITED: the collector is now reached via a dynamic import (#441), so
+        // the families are not registered synchronously.
+        await deferred.ensureStarted("child-ready");
         expect(await registry.metrics()).toContain("process_cpu");
+    });
+
+    it("concurrent starters all await the SAME collection", async () => {
+        const registry = new Registry();
+        let collects = 0;
+        const deferred = createDeferredDefaultMetrics({
+            registry,
+            collect: async () => {
+                collects += 1;
+                await new Promise((r) => setTimeout(r, 5));
+            },
+        });
+
+        // A scrape racing the child-ready trigger must not double-register, and
+        // the loser must not return before collection has actually finished.
+        const [first, second] = await Promise.all([
+            deferred.ensureStarted("child-ready"),
+            deferred.ensureStarted("scrape"),
+        ]);
+        expect(collects).toBe(1);
+        expect(first).toBe(true);
+        expect(second).toBe(false);
     });
 });
 
@@ -225,17 +253,34 @@ describe("node-server.ts wiring (source guard)", () => {
         expect(src).not.toMatch(/^collectDefaultMetrics\(/m);
     });
 
-    it("wires the deferred collector", () => {
-        expect(src).toContain("createDeferredDefaultMetrics");
+    it("wires the deferred init behind the child-readiness probe", () => {
+        // The default-metrics deferral now lives INSIDE the lazy metrics
+        // endpoint (createLazyMetricsEndpoint), which node-server.ts drives
+        // through the shared readiness probe.
+        expect(src).toContain("createLazyMetricsEndpoint");
+        expect(src).toContain("createDeferredSupervisorInit");
         expect(src).toContain("waitForChildServing");
     });
 
-    it("still listens on the metrics port BEFORE spawning the child", () => {
-        const listenAt = src.indexOf("metricsServer.listen(");
+    it("binds :9091 only AFTER the spawn (deliberate reversal — see #441)", () => {
+        // cdd3f7c kept `metricsServer.listen()` before the spawn on the theory
+        // that an idle listener is free. It is — but CREATING it is not: the
+        // handler needs ./metrics, which statically pulls @opentelemetry/api +
+        // prom-client, and static imports are evaluated before the module body.
+        // Profiling attributed the supervisor's ~1 CPU-second to exactly this
+        // kind of eager module loading, so the whole endpoint moved behind the
+        // readiness probe. The cost, accepted knowingly: a scrape landing in the
+        // boot window is refused rather than answered.
+        expect(src).not.toContain("metricsServer.listen(");
+        const createAt = src.indexOf("createLazyMetricsEndpoint({");
         const spawnAt = src.indexOf("spawn(process.execPath");
+        const listenAt = src.indexOf('metricsEndpoint.ensureListening("');
+        expect(createAt).toBeGreaterThan(-1);
         expect(listenAt).toBeGreaterThan(-1);
-        expect(spawnAt).toBeGreaterThan(-1);
-        expect(listenAt).toBeLessThan(spawnAt);
+        // Constructed early (so the closable is wired into shutdown)...
+        expect(createAt).toBeLessThan(spawnAt);
+        // ...but the actual bind is a deferred step, not pre-spawn work.
+        expect(src).toContain('name: "metrics-endpoint"');
     });
 
     it("leaves the SIGTERM drain wiring untouched", () => {
@@ -243,7 +288,7 @@ describe("node-server.ts wiring (source guard)", () => {
             "const SHUTDOWN_GRACE_MS = Number(process.env.SHUTDOWN_GRACE_MS ?? 25_000);",
         );
         expect(src).toContain("graceMs: SHUTDOWN_GRACE_MS");
-        expect(src).toContain("closables: [metricsServer]");
+        expect(src).toContain("closables: [metricsEndpoint.closable]");
         expect(src).toContain(
             'process.on("SIGTERM", () => onSignal("SIGTERM"));',
         );

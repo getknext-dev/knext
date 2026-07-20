@@ -40,7 +40,10 @@
  */
 
 import net from "node:net";
-import { collectDefaultMetrics, type Registry } from "prom-client";
+// TYPE-ONLY (#441): a value import of prom-client here would load it in the
+// supervisor before the spawn — the very cost this module exists to defer. The
+// real `collectDefaultMetrics` is reached through a dynamic import at start time.
+import type { Registry } from "prom-client";
 
 /** Set to `0`/`false` to collect default metrics immediately (pre-#441 behaviour). */
 export const DEFER_DEFAULT_METRICS_ENV = "KNEXT_DEFER_DEFAULT_METRICS";
@@ -74,7 +77,7 @@ export interface DeferredDefaultMetricsOptions {
     /** Registry the default families are registered on (the :9091 registry). */
     readonly registry: Registry;
     /** Injected for tests; defaults to prom-client's `collectDefaultMetrics`. */
-    readonly collect?: (opts: { register: Registry }) => void;
+    readonly collect?: (opts: { register: Registry }) => void | Promise<void>;
     /** Optional structured logger (same shape as `createLogger`'s result). */
     readonly log?: { info: (obj: object, msg: string) => void };
 }
@@ -82,13 +85,25 @@ export interface DeferredDefaultMetricsOptions {
 export interface DeferredDefaultMetrics {
     /**
      * Start default-metric collection if it has not started yet. Idempotent —
-     * returns `true` only for the call that actually started it (a second
+     * resolves `true` only for the call that actually started it (a second
      * `collectDefaultMetrics` on the same registry would throw on duplicate
      * metric names).
+     *
+     * ASYNC because the default collector is reached via a dynamic import (#441).
+     * Callers that need a complete exposition — the `/metrics` handler — must
+     * AWAIT this before serializing the registry.
      */
-    ensureStarted(reason: string): boolean;
-    /** Whether collection has started. */
+    ensureStarted(reason: string): Promise<boolean>;
+    /** Whether collection has started (set synchronously, so it is race-free). */
     isStarted(): boolean;
+}
+
+/** Load prom-client lazily and start its default collectors. */
+async function collectViaDynamicImport(opts: {
+    register: Registry;
+}): Promise<void> {
+    const { collectDefaultMetrics } = await import("prom-client");
+    collectDefaultMetrics({ register: opts.register });
 }
 
 /**
@@ -98,20 +113,30 @@ export interface DeferredDefaultMetrics {
 export function createDeferredDefaultMetrics(
     options: DeferredDefaultMetricsOptions,
 ): DeferredDefaultMetrics {
-    const collect = options.collect ?? collectDefaultMetrics;
+    const collect = options.collect ?? collectViaDynamicImport;
     let started = false;
+    let inFlight: Promise<boolean> | undefined;
     return {
-        ensureStarted(reason: string): boolean {
+        ensureStarted(reason: string): Promise<boolean> {
             if (started) {
-                return false;
+                // Concurrent triggers (child-ready racing a scrape) must await
+                // the SAME start, or a scrape could serialize the registry
+                // before the default families finish registering.
+                return (inFlight ?? Promise.resolve(false)).then(() => false);
             }
+            // Set synchronously: two callers in the same tick must not both
+            // reach `collect` (prom-client throws on duplicate metric names).
             started = true;
-            collect({ register: options.registry });
-            options.log?.info(
-                { reason },
-                "Started Prometheus default-metrics collection",
-            );
-            return true;
+            inFlight = Promise.resolve(collect({ register: options.registry }))
+                .then(() => {
+                    options.log?.info(
+                        { reason },
+                        "Started Prometheus default-metrics collection",
+                    );
+                    return true;
+                })
+                .catch(() => false);
+            return inFlight.then(() => true);
         },
         isStarted(): boolean {
             return started;

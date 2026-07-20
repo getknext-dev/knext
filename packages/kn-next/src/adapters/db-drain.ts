@@ -20,28 +20,72 @@
  * without spawning the real runtime (mirrors env.ts / buildChildEnv). Kept in the
  * runtime package so @knext/lib's pool stays free of any dependency on the runtime
  * or ./shutdown — no circular dependency.
+ *
+ * ## Why the clients module is imported LAZILY (#441)
+ *
+ * `@knext/lib/clients` statically pulls `@cerbos/grpc`, `minio` and `pg` — by far
+ * the heaviest graph the supervisor touches, and it is needed ONLY at shutdown to
+ * close two pools. A static import here would evaluate that whole graph in the
+ * supervisor BEFORE it spawns the Next.js child (static ESM imports run before the
+ * importing module's body), so its cost lands on the child's cold start — the
+ * ~1 CPU-second measured in #441.
+ *
+ * The drain HOOK is still registered eagerly, before the spawn: a SIGTERM arriving
+ * mid-boot must drain correctly. Only the module LOAD moves to drain time, where
+ * it is off the critical path and bounded by the shutdown grace cap. If the pools
+ * were never opened the closes are no-ops, and a load failure is swallowed —
+ * draining must never throw.
  */
-import { closeDbPool, closeDbPoolRO } from "@knext/lib/clients";
 import { createLogger } from "../utils/logger";
 import { registerShutdownDrain } from "./shutdown";
 
 const log = createLogger({ module: "server" });
 
+/** The slice of `@knext/lib/clients` the drain needs. */
+export interface DbPoolClosers {
+    closeDbPool(): Promise<void>;
+    closeDbPoolRO(): Promise<void>;
+}
+
+/** Loads the pool closers. Injected in tests; real one is a dynamic import. */
+export type DbClientsLoader = () => Promise<DbPoolClosers>;
+
+const loadDbClients: DbClientsLoader = () => import("@knext/lib/clients");
+
+export interface DrainDbPoolsOptions {
+    /** Injected for tests; defaults to the lazy `@knext/lib/clients` import. */
+    readonly loadClients?: DbClientsLoader;
+}
+
 /**
  * Close BOTH Postgres pools (writer + RO). Best-effort and non-fatal: each close
  * runs independently so a failure of one never skips the other, and a rejection
  * is logged (warn) rather than propagated — draining must not throw. Always
- * resolves; the shutdown grace cap is the backstop for a hung close.
+ * resolves; the shutdown grace cap is the backstop for a hung close (including a
+ * hung module load).
  */
-export async function drainDbPools(): Promise<void> {
+export async function drainDbPools(
+    options: DrainDbPoolsOptions = {},
+): Promise<void> {
+    let clients: DbPoolClosers;
+    try {
+        clients = await (options.loadClients ?? loadDbClients)();
+    } catch (err) {
+        log.warn(
+            { err },
+            "DB clients module failed to load during shutdown; skipping pool drain (non-fatal)",
+        );
+        return;
+    }
+
     await Promise.all([
-        closeDbPool().catch((err) => {
+        clients.closeDbPool().catch((err) => {
             log.warn(
                 { err },
                 "DB writer pool drain failed during shutdown (non-fatal)",
             );
         }),
-        closeDbPoolRO().catch((err) => {
+        clients.closeDbPoolRO().catch((err) => {
             log.warn(
                 { err },
                 "DB RO pool drain failed during shutdown (non-fatal)",
@@ -50,7 +94,12 @@ export async function drainDbPools(): Promise<void> {
     ]);
 }
 
-/** Register {@link drainDbPools} to run on SIGTERM after the HTTP drain. */
-export function registerDbPoolDrain(): void {
-    registerShutdownDrain(drainDbPools);
+/**
+ * Register {@link drainDbPools} to run on SIGTERM after the HTTP drain.
+ *
+ * Called EAGERLY by node-server.ts, before the child is spawned — this is the
+ * shutdown-safety path and is deliberately never deferred (#441).
+ */
+export function registerDbPoolDrain(options: DrainDbPoolsOptions = {}): void {
+    registerShutdownDrain(() => drainDbPools(options));
 }

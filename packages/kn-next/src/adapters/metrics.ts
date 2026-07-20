@@ -591,7 +591,7 @@ export interface SupervisorMetricsHandlerDeps {
      * child-serving signal fires — must still return a complete exposition, so
      * the scrape itself is a start trigger. Idempotent by contract.
      */
-    readonly ensureDefaultMetrics: () => boolean;
+    readonly ensureDefaultMetrics: () => boolean | Promise<boolean>;
     /** Best-effort scrape of the child's core metrics (see `fetchChildMetrics`). */
     readonly fetchChild: () => Promise<string>;
 }
@@ -608,8 +608,11 @@ export function createSupervisorMetricsHandler(
     return async (req, res) => {
         if (req.url === "/metrics" && req.method === "GET") {
             // On-demand start: an early scrape gets real process metrics rather
-            // than an empty registry (see deferred-default-metrics.ts).
-            deps.ensureDefaultMetrics();
+            // than an empty registry (see deferred-default-metrics.ts). AWAITED
+            // because the collector is loaded via a dynamic import (#441) —
+            // serializing the registry first would emit an exposition missing
+            // the default families.
+            await deps.ensureDefaultMetrics();
             res.setHeader("Content-Type", deps.registry.contentType);
             const [own, child] = await Promise.all([
                 deps.registry.metrics(),
