@@ -63,8 +63,12 @@ STUB
 # run_harness <stubdir> -> exit code of run.sh; stdout+stderr in $stubdir/out.txt
 run_harness() {
   local dir="$1"
+  # PHASES=none, NOT PHASES="": run.sh reads `${PHASES:-cold,soak,burst}`, and
+  # `:-` treats an empty value as *unset*, so PHASES="" silently ran all three
+  # phases here (#425). It only looked like "no phases" because run_k6 used to
+  # early-return under DRY_RUN=1.
   DRY_RUN=1 DRY_RUN_EXERCISE_KC=1 KUBECTL_BIN="${dir}/kubectl" \
-  PHASES="" OUT="${dir}/results.txt" \
+  PHASES="none" OUT="${dir}/results.txt" \
     bash "$RUN_SH" --service demo-svc --namespace bench > "${dir}/out.txt" 2>&1
 }
 

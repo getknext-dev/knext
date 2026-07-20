@@ -60,8 +60,15 @@ KUBECTL_BIN="${KUBECTL_BIN:-kubectl}"              # kubectl binary (test seam; 
 # Test seam: with DRY_RUN=1, kc() normally echoes instead of running. Setting
 # DRY_RUN_EXERCISE_KC=1 makes kc() actually invoke $KUBECTL_BIN, so the
 # capture/restore path (the only code here that can destroy a real service's
-# config) can be exercised against a stub kubectl. See capture-restore.test.sh.
+# config) and the run_k6 metrics-capture path can be exercised against a stub
+# kubectl. See capture-restore.test.sh and k6-metrics-integrity.test.sh.
+# NOTE: with this set, the run IS mutating — the banner says so (#425 item 2).
 DRY_RUN_EXERCISE_KC="${DRY_RUN_EXERCISE_KC:-0}"
+# Test seam (#425 item 1): simulate the pod sampler being killed before its TERM
+# trap can flush, so the "<no sampler data>" branch is coverable. The real race
+# is near-unreachable (0/200 losses measured), but the branch must still be
+# correct: lost data must never be rendered as a measured peak of 0.
+SAMPLER_SIMULATE_LOST="${SAMPLER_SIMULATE_LOST:-0}"
 MAXSCALE="${MAXSCALE:-6}"                          # autoscaling.knative.dev/max-scale during the run
 CC="${CC:-15}"                                     # containerConcurrency pinned during the burst phase
 K6_CPU_REQUEST="${K6_CPU_REQUEST:-150m}"           # keep small — see "oversized k6 request" trap in README
@@ -85,6 +92,7 @@ SCALE_DOWN_TIMEOUT="${SCALE_DOWN_TIMEOUT:-150}"    # seconds to wait for pods ->
 POD_SAMPLE_BUDGET="${POD_SAMPLE_BUDGET:-240}"      # seconds to sample pod count during a k6 run
 K6_JOB_TIMEOUT="${K6_JOB_TIMEOUT:-600}"             # seconds to wait for the k6 Job to complete
 SCHEDULE_CHECK_TIMEOUT="${SCHEDULE_CHECK_TIMEOUT:-20}" # seconds before warning k6 pod is still Pending
+APPLY_SETTLE_SECONDS="${APPLY_SETTLE_SECONDS:-8}"   # settle time after an autoscaling patch (0 in tests)
 OUT="${OUT:-}"                                      # results file; default computed below
 DRY_RUN="${DRY_RUN:-0}"
 
@@ -114,7 +122,8 @@ Load generator:
                               an oversized request can leave the pod Pending, see README)
 
 Phase sizing:
-  --phases <list>             comma list of: cold,soak,burst,all (default: cold,soak,burst)
+  --phases <list>             comma list of: cold,soak,burst,all,none (default: cold,soak,burst;
+                              'none' = capture+restore only, no load phases)
   --cold-samples <n>          Phase A sequential samples (default: 5)
   --soak-vus <n>              Phase C sustained VUs (default: 120)
   --soak-ramp <dur>           Phase C ramp-up duration (default: 20s)
@@ -220,7 +229,15 @@ log "=== knext scale-to-zero benchmark — service=$SERVICE namespace=$NS ==="
 log "context=${KCTX:-<current>} url=$URL max-scale=$MAXSCALE containerConcurrency(burst)=$CC"
 log "phases=$PHASES burst-vus=$BURST_VUS (>= container-concurrency*max-scale forces fan-out to cap)"
 log "k6 image=$IMG cpu-request=$K6_CPU_REQUEST (kept small — see README 'oversized k6 request' trap)"
-[ "$DRY_RUN" = "1" ] && log "*** DRY RUN — no kubectl mutation, no cluster required ***"
+if [ "$DRY_RUN" = "1" ]; then
+  if [ "$DRY_RUN_EXERCISE_KC" = "1" ]; then
+    # The old banner claimed "no kubectl mutation" even under the test seam,
+    # i.e. while the script WAS mutating (#425 item 2). Never say "safe" here.
+    log "*** DRY RUN + DRY_RUN_EXERCISE_KC=1 (TEST SEAM) — kubectl ('${KUBECTL_BIN}') IS being invoked and the target IS being mutated. This is NOT a safe dry run. ***"
+  else
+    log "*** DRY RUN — no kubectl mutation, no cluster required ***"
+  fi
+fi
 log ""
 
 # ── capture original ksvc autoscaling state, once, before any mutation ───────
@@ -230,6 +247,14 @@ ORIG_TBC=""
 ORIG_PW=""
 ORIG_PT=""
 CAPTURED=0
+
+# ── run-integrity accounting (#425 item 5) ───────────────────────────────────
+# A benchmark that silently omits a rep is worse than one that crashes: the
+# partial dataset LOOKS complete. REPS_RUN / INCOMPLETE_REPS make "we measured
+# N reps and got data for M of them" an explicit, always-printed fact, and the
+# run exits non-zero if M < N so no caller can mistake it for a clean dataset.
+REPS_RUN=0
+INCOMPLETE_REPS=""
 
 # Capture is ATOMIC and FAIL-CLOSED. It does ONE `get -o json`, checks the exit
 # code, and only then sets CAPTURED=1.
@@ -342,8 +367,24 @@ cleanup() {
     log "  restored: containerConcurrency=${cc_restore}, max-scale=${ORIG_MAXSCALE:-<removed>}, burst/panic annotations restored/removed to captured originals"
   fi
 
+  # NOTE: reps that lost their metrics deliberately keep their Job (see run_k6).
+  # This label-wide sweep still removes them, because leaving Jobs behind after
+  # the run ends would leak cluster resources — the operator is told in the
+  # warning to read the logs, and Jobs carry ttlSecondsAfterFinished=300 anyway.
+  # The Job survives the rep, not the run.
   kc delete job,configmap -n "$NS" -l "app=k6-loadtest,bench-run=${RUN_ID:-scale-to-zero}" --ignore-not-found >/dev/null 2>&1 || true
   log "  k6 Jobs/ConfigMaps for this run deleted (label bench-run=${RUN_ID:-scale-to-zero})"
+
+  # ── run integrity verdict — ALWAYS printed, so a partial dataset can never
+  # masquerade as a complete one (#425 item 5).
+  log ""
+  if [ -n "$INCOMPLETE_REPS" ]; then
+    log "*** RUN INCOMPLETE — no k6 metrics captured for: ${INCOMPLETE_REPS} ***"
+    log "*** ${REPS_RUN} rep(s) ran; this results file is MISSING data for the reps above. ***"
+    log "*** Do NOT publish these numbers as a complete dataset — scope any claim to the reps that have data, and say so. ***"
+  else
+    log "run integrity: k6 metrics captured for all ${REPS_RUN} rep(s) — dataset is complete"
+  fi
   log "=== DONE (results: $OUT) ==="
 }
 # IMPORTANT: a signal trap that only runs cleanup does NOT terminate the
@@ -365,7 +406,7 @@ running_pods() {
 }
 
 wait_zero() {
-  [ "$DRY_RUN" = "1" ] && { log "  [dry-run] skip wait-for-zero"; return 0; }
+  if ! kc_live; then log "  [dry-run] skip wait-for-zero"; return 0; fi
   # n MUST be initialised: with SCALE_DOWN_TIMEOUT=0 the loop body never runs and
   # the trailing log line would abort the script under `set -u`.
   local t=0 n=0
@@ -405,18 +446,23 @@ apply_autoscaling() {
     log "       kubectl said: ${out}"
     exit 1
   fi
-  if kc_live; then sleep 8; fi
+  if kc_live && [ "$APPLY_SETTLE_SECONDS" -gt 0 ] 2>/dev/null; then sleep "$APPLY_SETTLE_SECONDS"; fi
 }
 
-# run_k6 rid k6-options-js-fragment iteration-body sample(0|1)
+# run_k6 rid k6-options-js-fragment iteration-body sample(0|1) phase(cold|soak|burst)
+# `phase` exists so the fan-out warning can be scoped to the phase that actually
+# measures fan-out (#425 item 4): in cold, 1 request => 1 pod is the only correct
+# outcome, and soak is think-time load, so warning there is pure noise on the one
+# signal that makes a false-result run visible.
 run_k6() {
-  local rid="$1" opts="$2" body="$3" sample="$4"
+  local rid="$1" opts="$2" body="$3" sample="$4" phase_kind="${5:-burst}"
   local name="k6-${RUN_ID}-${rid}"
 
-  if [ "$DRY_RUN" = "1" ]; then
+  if ! kc_live; then
     log "  [dry-run] would run k6 job '$name' opts={${opts}} body={${body}} cpu=${K6_CPU_REQUEST}"
     return 0
   fi
+  REPS_RUN=$((REPS_RUN + 1))
 
   cat <<YAML | kc apply -f - >/dev/null 2>&1
 apiVersion: v1
@@ -472,6 +518,10 @@ YAML
       # trap so a killed sampler still reports peak/time-to-N — otherwise the
       # early kill would trade a 240s stall for lost measurements.
       emit() {
+        # Test seam only (#425 item 1): pretend the sampler died before it could
+        # flush, leaving peak_file empty — the branch the parent must NOT round
+        # down to a measured "0".
+        [ "$SAMPLER_SIMULATE_LOST" = "1" ] && exit 0
         echo "$mx" > "$peak_file"
         echo "    pods: peak=${mx}  time_to_2pods=${f2:->${POD_SAMPLE_BUDGET}}s  time_to_${MAXSCALE}pods=${fmax:-not-reached}" >> "$OUT"
       }
@@ -489,8 +539,20 @@ YAML
     samp_pid=$!
   fi
 
-  kc wait --for=condition=complete "job/${name}" -n "$NS" --timeout="${K6_JOB_TIMEOUT}s" >/dev/null 2>&1 \
-    || kc wait --for=condition=failed "job/${name}" -n "$NS" --timeout=10s >/dev/null 2>&1 || true
+  # The bug this replaces (#425 item 5): BOTH waits discarded their exit code
+  # (`>/dev/null 2>&1 || true`), so "the Job finished" and "the Job is still
+  # running / the wait timed out" were indistinguishable. k6 prints its summary
+  # ONLY at end of run, so an unfinished pod's logs contain no summary, the grep
+  # below matched nothing, and the rep was dropped in silence. Observed live on
+  # OKE: `tuned burst rep 2` produced pod metrics, no k6 metrics, and exit 0.
+  local wait_state=""
+  if kc wait --for=condition=complete "job/${name}" -n "$NS" --timeout="${K6_JOB_TIMEOUT}s" >/dev/null 2>&1; then
+    wait_state="completed"
+  elif kc wait --for=condition=failed "job/${name}" -n "$NS" --timeout=10s >/dev/null 2>&1; then
+    wait_state="failed"
+  else
+    wait_state="timed-out"
+  fi
 
   # The Job is done — stop sampling NOW. Waiting out the full POD_SAMPLE_BUDGET
   # cost ~21 min of idle polling per cold phase (~40 min per default run) for
@@ -500,17 +562,56 @@ YAML
     wait "$samp_pid" 2>/dev/null
   fi
 
-  kc logs -n "$NS" "job/${name}" 2>/dev/null \
+  if [ "$wait_state" != "completed" ]; then
+    log "  *** WARNING: the k6 Job for '${rid}' did not complete — kubectl wait result: ${wait_state}. ***"
+    [ "$wait_state" = "timed-out" ] && \
+      log "  ***   'timed-out' = neither condition=complete nor condition=failed within ${K6_JOB_TIMEOUT}s; the Job may still be running, so any metrics below are partial or absent. ***"
+  fi
+
+  # Capture metrics into a variable FIRST so "how many lines did we get?" is a
+  # checkable fact, instead of appending straight to $OUT where zero lines is
+  # indistinguishable from a rep that was never run.
+  local metrics metric_lines=0
+  metrics=$(kc logs -n "$NS" "job/${name}" 2>/dev/null \
     | grep -E 'http_req_duration|http_req_failed|http_reqs|iteration_duration|checks\.\.\.|vus_max|dropped' \
-    | sed 's/^/    /' >> "$OUT"
+    | sed 's/^/    /')
+  if [ -n "$metrics" ]; then
+    metric_lines=$(printf '%s\n' "$metrics" | wc -l | tr -d ' ')
+    printf '%s\n' "$metrics" >> "$OUT"
+  fi
 
   if [ -n "$peak_file" ]; then
-    local peak
-    peak=$(cat "$peak_file" 2>/dev/null || echo 0)
+    local peak_raw
+    peak_raw=$(tr -d '[:space:]' < "$peak_file" 2>/dev/null)
     rm -f "$peak_file"
-    if [ "${peak:-0}" -le 1 ]; then
-      log "  *** WARNING: peak pods = ${peak:-0} — this rep did NOT fan out past 1 pod. If this is the burst phase, the A/B is inconclusive for this rep (think-time load or too-low VUs/containerConcurrency ratio — see README false-result traps). ***"
+    if [ -z "$peak_raw" ]; then
+      # An empty peak_file means the sampler never reported — which is NOT the
+      # same fact as "the service peaked at 0 pods" (#425 item 1). Coercing it
+      # to 0 published an unmeasured number as a measurement.
+      log "  *** WARNING: peak pods = <no sampler data> for '${rid}' — the pod sampler produced no measurement. Fan-out for this rep is UNKNOWN, not zero. ***"
+    else
+      case "$phase_kind" in
+        burst)
+          if [ "$peak_raw" -le 1 ] 2>/dev/null; then
+            log "  *** WARNING: peak pods = ${peak_raw} — this burst rep did NOT fan out past 1 pod, so the A/B is inconclusive for this rep (think-time load or too-low VUs/containerConcurrency ratio — see README false-result traps). ***"
+          fi ;;
+        cold)
+          # 1 request => 1 pod is the only correct cold-start outcome; warning
+          # here trains the reader to skim past the one signal that matters.
+          log "    (peak pods = ${peak_raw} — expected for the cold phase: a single request needs a single pod; fan-out is not measured here)" ;;
+        soak)
+          log "    (peak pods = ${peak_raw} — soak is think-time load; sustained throughput, not fan-out, is what this phase measures)" ;;
+      esac
     fi
+  fi
+
+  if [ "$metric_lines" -eq 0 ]; then
+    INCOMPLETE_REPS="${INCOMPLETE_REPS}${INCOMPLETE_REPS:+, }${rid}"
+    log "  *** WARNING: no k6 metrics captured for '${rid}' — this rep's result is INCOMPLETE (k6 Job ${wait_state}). ***"
+    log "  *** The k6 Job has been KEPT rather than deleted, because it is now the only remaining evidence. Read it with: ***"
+    log "  ***   kubectl logs -n ${NS} job/${name} ***"
+    log "  *** (the Job still carries ttlSecondsAfterFinished: 300, so it is reaped shortly — capture the logs now.) ***"
+    return 0
   fi
 
   kc delete job,configmap -n "$NS" "${name}" >/dev/null 2>&1 || true
@@ -524,7 +625,7 @@ phase_cold() {
   for i in $(seq 1 "$COLD_SAMPLES"); do
     log "  -- cold-start sample $i/${COLD_SAMPLES} --"
     wait_zero
-    run_k6 "cold-${i}" "vus: 1, iterations: 1" "" 1
+    run_k6 "cold-${i}" "vus: 1, iterations: 1" "" 1 cold
   done
 }
 
@@ -533,7 +634,7 @@ phase_soak() {
   log "## PHASE C — sustained soak: ramp 0->${SOAK_VUS} VU/${SOAK_RAMP}, hold ${SOAK_HOLD} (baseline config, think-time load)"
   apply_autoscaling "$BASELINE_TBC" "$BASELINE_PW" "$BASELINE_PT"
   wait_zero
-  run_k6 "soak" "stages:[{duration:'${SOAK_RAMP}',target:${SOAK_VUS}},{duration:'${SOAK_HOLD}',target:${SOAK_VUS}},{duration:'10s',target:0}]" "sleep(1);" 1
+  run_k6 "soak" "stages:[{duration:'${SOAK_RAMP}',target:${SOAK_VUS}},{duration:'${SOAK_HOLD}',target:${SOAK_VUS}},{duration:'10s',target:0}]" "sleep(1);" 1 soak
   log ""
   log "## PHASE D — scale-down after soak (time-to-zero)"
   wait_zero
@@ -563,7 +664,7 @@ phase_burst() {
     for r in $(seq 1 "$BURST_REPS"); do
       log "  -- $nm burst rep $r --"
       wait_zero
-      run_k6 "burst-${nm}-${r}" "$burst_opts" "" 1
+      run_k6 "burst-${nm}-${r}" "$burst_opts" "" 1 burst
     done
   done
 }
@@ -578,9 +679,25 @@ for p in "${PHASE_LIST[@]}"; do
     soak) phase_soak ;;
     burst) phase_burst ;;
     all) phase_cold; phase_soak; phase_burst ;;
-    "") ;;
-    *) log "Unknown phase '$p' — skipping (valid: cold,soak,burst,all)" ;;
+    # `none` runs no load phases (capture + restore only). NOTE: PHASES="" does
+    # NOT mean this — run.sh reads `${PHASES:-cold,soak,burst}`, and `:-` treats
+    # an EMPTY value as unset, so PHASES="" silently runs ALL THREE phases. That
+    # trap cost real debugging time (#425): capture-restore.test.sh believed it
+    # was running zero phases for months. Use `none` when you mean none.
+    none|"") ;;
+    *) log "Unknown phase '$p' — skipping (valid: cold,soak,burst,all,none)" ;;
   esac
 done
 
-# cleanup runs via the EXIT trap
+# cleanup runs via the EXIT trap (and prints the run-integrity verdict there).
+#
+# Exit non-zero if ANY rep lost its metrics (#425 item 5). The observed failure
+# was a run that dropped a rep and still exited 0, so every automated caller —
+# and every human skimming the tail — read it as a clean, complete dataset.
+# A partial result must be loud in the exit code too, not just in the text.
+if [ -n "$INCOMPLETE_REPS" ]; then
+  exit 2
+fi
+# Explicit: falling off the end would leak the exit status of the test above (1),
+# turning every clean run into a spurious failure.
+exit 0
