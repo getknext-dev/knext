@@ -49,7 +49,13 @@ function cmdDefault(varName: string): string {
 }
 
 /** Run the warm-up script with a stubbed boot command, return {status, output}. */
-function runWarmup(opts: { cacheDir: string; bootCmd: string; port: number }): {
+function runWarmup(opts: {
+  cacheDir: string;
+  bootCmd: string;
+  port: number;
+  /** Extra env, e.g. to lower the plausibility floor for a stub-sized cache. */
+  env?: Record<string, string>;
+}): {
   status: number;
   output: string;
 } {
@@ -66,6 +72,7 @@ function runWarmup(opts: { cacheDir: string; bootCmd: string; port: number }): {
         PORT: String(opts.port),
         KNEXT_WARMUP_BOOT_CMD: opts.bootCmd,
         KNEXT_WARMUP_TIMEOUT_S: '30',
+        ...opts.env,
       },
     });
     return { status: 0, output };
@@ -73,6 +80,18 @@ function runWarmup(opts: { cacheDir: string; bootCmd: string; port: number }): {
     const e = err as { status?: number; stdout?: string; stderr?: string };
     return { status: e.status ?? 1, output: `${e.stdout ?? ''}${e.stderr ?? ''}` };
   }
+}
+
+/** A floor of 1/1 — for stubs whose "cache" is a single 8-byte file. */
+const STUB_FLOOR = { KNEXT_WARMUP_MIN_FILES: '1', KNEXT_WARMUP_MIN_BYTES: '1' };
+
+/** Write a JS file to a fresh temp dir and return a `node <path>` boot command. */
+function nodeScript(name: string, source: string): string {
+  const path = join(mkdtempSync(join(tmpdir(), 'knext-cc-stub-')), name);
+  writeFileSync(path, source);
+  // `env -u NODE_COMPILE_CACHE`: see stubServer — keep the stub's own V8 cache
+  // out of the directory under test so entry counts are exactly known.
+  return `env -u NODE_COMPILE_CACHE node ${path}`;
 }
 
 /**
@@ -148,6 +167,7 @@ describe('#437 — the compile cache is baked into the image at build time', () 
       cacheDir,
       bootCmd: stubServer(false),
       port: 34371,
+      env: STUB_FLOOR, // even the most permissive floor must reject zero
     });
 
     expect(status).not.toBe(0);
@@ -160,13 +180,14 @@ describe('#437 — the compile cache is baked into the image at build time', () 
       cacheDir,
       bootCmd: stubServer(true),
       port: 34372,
+      env: STUB_FLOOR,
     });
 
     expect(status).toBe(0);
     expect(output).toMatch(/baked 1 entries, 8 bytes/);
   });
 
-  it('FAILS the build when the warm-up server never becomes ready', () => {
+  it('FAILS the build when the warm-up server EXITS EARLY (distinct from a ready timeout)', () => {
     const cacheDir = mkdtempSync(join(tmpdir(), 'knext-cc-dead-'));
     // A "server" that exits immediately without ever listening.
     const { status, output } = runWarmup({
@@ -176,7 +197,108 @@ describe('#437 — the compile cache is baked into the image at build time', () 
     });
 
     expect(status).not.toBe(0);
-    expect(output).toMatch(/ready/i);
+    // Must name the EXITED path specifically. `/ready/i` would also match the
+    // ready-timeout message, so it cannot tell the two failures apart — and a
+    // regression collapsing them into one would pass unnoticed.
+    expect(output).toMatch(/exited before it was ready/i);
+    expect(output).not.toMatch(/not ready within/i);
+  });
+
+  it('FAILS the build when the server stays alive but never becomes ready (timeout path)', () => {
+    const cacheDir = mkdtempSync(join(tmpdir(), 'knext-cc-hang-'));
+    // Alive for the whole run, but never binds the port — so the health probe
+    // never succeeds and the READY_TIMEOUT_S branch is what must fire.
+    const { status, output } = runWarmup({
+      cacheDir,
+      bootCmd: nodeScript('hang.js', 'setTimeout(() => {}, 60_000);\n'),
+      port: 34374,
+      env: { KNEXT_WARMUP_TIMEOUT_S: '3' },
+    });
+
+    expect(status).not.toBe(0);
+    expect(output).toMatch(/not ready within 3s/i);
+    expect(output).not.toMatch(/exited before it was ready/i);
+  });
+
+  it('waits for the standalone-server GRANDCHILD to flush before asserting', () => {
+    // The runtime entry (node-server.ts) SPAWNS `server.js` as a child, and it
+    // is that grandchild whose modules V8 caches. The parent's graceful shutdown
+    // has a hard cap (SHUTDOWN_GRACE_MS) and calls process.exit() even if the
+    // child has not finished — so waiting on the parent alone can assert, and
+    // COMMIT THE IMAGE LAYER, while the real writer is still flushing.
+    const cacheDir = mkdtempSync(join(tmpdir(), 'knext-cc-grandchild-'));
+    const child = nodeScript(
+      'late-writer.js',
+      [
+        "const fs = require('node:fs');",
+        "const path = require('node:path');",
+        '// Ignore SIGTERM: only the parent is signalled, exactly as in the real',
+        '// runtime where the supervisor forwards and then gives up at its cap.',
+        'setTimeout(() => {',
+        "  fs.writeFileSync(path.join(process.env.CACHE_PROBE_DIR, 'entry.bin'), 'bytecode');",
+        '  process.exit(0);',
+        '}, 3000);',
+      ].join('\n'),
+    );
+    const parent = nodeScript(
+      'supervisor.js',
+      [
+        "const http = require('node:http');",
+        "const { spawn } = require('node:child_process');",
+        `const kid = spawn('sh', ['-c', ${JSON.stringify(child)}], { stdio: 'inherit' });`,
+        "const s = http.createServer((_q, r) => r.end('ok'));",
+        's.listen(Number(process.env.PORT));',
+        '// Exit IMMEDIATELY on SIGTERM, abandoning the still-writing child.',
+        "process.on('SIGTERM', () => { s.close(); process.exit(0); });",
+        'kid.unref();',
+      ].join('\n'),
+    );
+
+    const { status, output } = runWarmup({
+      cacheDir,
+      bootCmd: parent,
+      port: 34375,
+      env: STUB_FLOOR,
+    });
+
+    // If the script only waited on the parent it would find an EMPTY dir here
+    // and fail — the partial-cache race, made deterministic.
+    expect(status).toBe(0);
+    expect(output).toMatch(/baked 1 entries, 8 bytes/);
+  });
+
+  it('rejects a PARTIAL cache, not merely an empty one (plausibility floor)', () => {
+    // A truncated flush leaves a handful of entries, which sails past a `>= 1`
+    // non-empty check. The real bake produces 1106 entries / ~4.25 MB, so the
+    // DEFAULT floor must reject a single 8-byte entry.
+    const cacheDir = mkdtempSync(join(tmpdir(), 'knext-cc-partial-'));
+    const { status, output } = runWarmup({
+      cacheDir,
+      bootCmd: stubServer(true),
+      port: 34376,
+      // NB: no STUB_FLOOR — this exercises the shipped defaults.
+    });
+
+    expect(status).not.toBe(0);
+    // The message must state expected-vs-actual so a build failure is diagnosable.
+    expect(output).toMatch(/1 files/);
+    expect(output).toMatch(/8 bytes/);
+    expect(output).toMatch(/expected/i);
+  });
+
+  it('pins the default floor comfortably below the real bake (1106 entries / 4.25 MB)', () => {
+    const script = readFileSync(WARMUP_SCRIPT, 'utf8');
+    const files = script.match(/KNEXT_WARMUP_MIN_FILES:-(\d+)/);
+    const bytes = script.match(/KNEXT_WARMUP_MIN_BYTES:-(\d+)/);
+    if (!files || !bytes) throw new Error('warm-up must expose overridable MIN_FILES/MIN_BYTES');
+
+    // Far above trivial…
+    expect(Number(files[1])).toBeGreaterThanOrEqual(100);
+    expect(Number(bytes[1])).toBeGreaterThanOrEqual(500_000);
+    // …and well under the observed real values, so legitimate app-size
+    // variation never fails a build that is in fact fine.
+    expect(Number(files[1])).toBeLessThanOrEqual(1106 / 2);
+    expect(Number(bytes[1])).toBeLessThanOrEqual(4_246_032 / 2);
   });
 
   it('does not depend on Postgres/Redis: it probes the shallow health route', () => {
