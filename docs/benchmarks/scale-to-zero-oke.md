@@ -5,8 +5,10 @@ Status: point-in-time measurement · Runs: 2026-07-19 (run 1, throwaway scripts)
 mid-run, partial dataset**) and 2026-07-20 (run 4, retry-hardened harness — **the first run to
 complete every phase**), 2026-07-20 (run 5, one-off bytecode before/after — **aborted before the
 AFTER arm**) and 2026-07-20 (run 6, in-pod compile-cache COLD/WARM pairs — **the first measured
-performance result here, with complete distribution separation**) · Target: `file-manager` Knative
-Service
+performance result here, with complete distribution separation**), 2026-07-20 (run 7, startup
+ablation — **a null result: instrumentation ruled out**) and 2026-07-20 (run 8, cold-boot
+decomposition — **the knext wrapper adds 842 ms, complete distribution separation**) · Target:
+`file-manager` Knative Service
 
 > **Correction notice (2026-07-20).** Run 2 **did not reproduce** run 1's headline burst finding —
 > the median-latency delta between the baseline and tuned burst configs reversed sign. The run-1
@@ -696,6 +698,133 @@ cache ends up empty). The **identical bug exists in `apps/docs/Dockerfile`** and
 - **The root cause is confirmed, not inferred:** an empty cache directory shipped in the image,
   refilled and discarded on every cold pod.
 
+## Run 7 (2026-07-20) — startup ablation: is instrumentation costing us boot time? (NULL result)
+
+Run 6 left ~2.7s of warm-cache boot unexplained. Run 7 asks the cheapest question available about
+it: **do knext's own OTel tracing or metrics server contribute measurably to boot time?** Both are
+knext code that runs before the server is health-ready, so both were plausible suspects.
+
+**The answer is no, and that null result is the reportable finding** — it is what redirected the
+search onto the wrapper, which run 8 then measured.
+
+### Method — four interleaved arms in one pod, all warm
+
+Same cluster and app image as runs 1–6, and the same in-pod technique as run 6 — one pod, an
+`emptyDir` compile cache **primed before the first arm** so every arm is a WARM boot, `SIGTERM`
+between boots, timing taken to the shallow dependency-free `/api/health` route. **3 reps of each
+arm, interleaved**, so cluster drift over the run hits all four arms equally.
+
+| Arm | Toggle | Samples (ms) | Median |
+|---|---|---|---|
+| **BASELINE** | — | 2760, 2675, 2734 | **2734 ms** |
+| **NO_OTEL** | `OTEL_TRACING_ENABLED=false` | 2778, 2693, 2742 | **2742 ms** |
+| **NO_METRICS** | `KN_METRICS_PORT=0` | 2715, 2967, 2714 | **2715 ms** |
+| **NEITHER** | both | 2714, 3032, 2674 | **2714 ms** |
+
+### Why this is reported as a null, not as a small effect
+
+**All four medians fall within ~30 ms of each other, and the spreads overlap heavily** — NO_METRICS
+spans 2714–2967, NEITHER spans 2674–3032, and each of those ranges contains every other arm's
+median. There is **no distribution separation**, so by the standing bar in this document — the same
+bar that made [run 6](#why-this-one-is-reported-as-a-result) reportable and left runs 1–4's burst
+A/B inconclusive — **there is nothing here to report except the absence of an effect.**
+
+Reported the other way round, a 30 ms "improvement" from disabling OTel would be exactly the kind of
+noise-sized claim that failed to reproduce three times earlier in this document.
+
+### Honest caveat on what was actually ablated
+
+`KN_METRICS_PORT=0` **skips the listen, not the module import.** This run therefore rules out the
+cost of the metrics *server* — binding and serving — but **not** the cost of importing `prom-client`
+at module scope, which still happens in every arm. A future ablation that removes the import itself
+would be needed to close that gap.
+
+### Findings — run 7
+
+- **Neither OTel tracing nor the metrics server is a measurable contributor to boot time.** Two
+  plausible suspects ruled out at a cost of 12 boots.
+- **No distribution separation ⇒ reported as null.** The methodological bar this document uses cuts
+  both ways: it withholds small positive claims and it makes a null result meaningful.
+- **The remaining boot cost is elsewhere** — which is what motivated run 8.
+- **Scope limit:** rules out the metrics *server*, not the `prom-client` module import.
+
+## Run 8 (2026-07-20) — cold-boot decomposition: the knext wrapper costs 842 ms
+
+With instrumentation ruled out, run 8 asks where the remaining ~2.7s of warm-cache boot actually
+goes, by booting **Next.js's own `server.js` directly** and comparing it against **the knext wrapper**
+(the parent process that spawns the standalone server as a child).
+
+**This is the second comparison in this document with complete distribution separation, and it is
+the largest knext-controlled cost measured so far.**
+
+### Method — same in-pod technique as run 6, applied to two boot paths
+
+One pod, the real application image, an `emptyDir` compile cache **primed for both boot paths
+before measurement** so every sample is a WARM boot, `SIGTERM` between boots, timing to the shallow
+`/api/health` route. Part B **alternates the two arms in pairs**, so drift in cluster conditions
+affects both equally.
+
+As in run 6, this needs **no image rebuild and no mutation of the live Knative Service** — which is
+precisely why it can isolate a boot-level effect this cleanly.
+
+### Part A — 3 reps each
+
+| Arm | Samples (ms) | Median |
+|---|---|---|
+| Bare `node` process floor | 75, 70, 138 | **75 ms** |
+| Next.js `server.js` alone | 2234, 1930, 2361 | **2234 ms** |
+| knext wrapper (parent + child) | 2887, 2839, 2732 | **2839 ms** |
+
+### Part B — 6 alternating pairs (the tighter measurement)
+
+| Arm | Samples (ms) | Median |
+|---|---|---|
+| **NEXTJS** (`server.js` alone) | 1972, 1934, 1940, 2449, 1950, 1961 | **1957 ms** |
+| **WRAPPER** (knext parent spawns child) | 2845, 2718, 2804, 2794, 2847, 2708 | **2799 ms** |
+
+**Delta: 842 ms (+43%) added by the knext wrapper over booting Next.js directly.**
+
+**Separation is complete: the slowest NEXTJS sample (2449 ms) is faster than the fastest WRAPPER
+sample (2708 ms) — zero overlap across all 12 samples.** As with run 6, it is that ordering, not the
+size of the delta, that makes this a result rather than a signal.
+
+### Decomposition of a warm-cache boot
+
+| Segment | Cost | Share |
+|---|---|---|
+| `node` process floor | ~75 ms | 3% |
+| Next.js's own boot | ~1957 ms | 70% |
+| knext wrapper | ~842 ms | 30% |
+
+### Why this matters more than its size suggests
+
+- **It is ~2.1× the 393 ms the baked compile cache saved** (run 6, shipped as **#438** / ADR-0035) —
+  the largest boot win this document has recorded to date.
+- **Unlike Next.js's own 1957 ms, it is entirely within knext's control.** The 70% belongs upstream;
+  the 30% is knext's code.
+- **Run 7 already rules out instrumentation as the cause**, which points the remaining suspicion at
+  the **child-process spawn architecture and parent-side module loading** — the parent boots a full
+  Node module graph before the child that actually serves traffic even starts.
+
+That last point is an interpretation of two measurements, not a third measurement. **No fix has been
+designed, attempted, or measured**, and the split between spawn overhead and parent-side module
+loading is unattributed.
+
+### Findings — run 8
+
+- **The knext wrapper adds 842 ms (+43%) to warm-cache boot**, with complete distribution separation
+  across 12 alternating samples.
+- **Warm-cache boot decomposes as ~3% node floor / ~70% Next.js / ~30% knext wrapper.**
+- **This is the largest knext-owned cold-start cost measured so far** — ~2.1× the compile-cache win.
+- **Cause is narrowed, not identified:** instrumentation is excluded (run 7); spawn architecture and
+  parent-side module loading are the standing hypotheses, unmeasured.
+
+### Scope — same limits as run 6
+
+Runs 7 and 8 measure **boot-to-shallow-health inside a pod**, not end-to-end Knative cold start
+(**3.81s median**, run 5). They are single-environment measurements on one 2-node OKE cluster with
+one app image, and are **environment-dependent**.
+
 ## Caveat
 
 These are **point-in-time measurements on a specific small (2-node) OKE cluster** with a
@@ -727,3 +856,16 @@ still a single-environment measurement of a single app image, and it measures **
 rather than end-to-end cold start — so the 393 ms figure should be cited with that scope attached,
 and not as a portable cold-start improvement. The baked-cache image that #437 produces remains
 unmeasured on this or any cluster.
+
+Runs 7 and 8 apply that same bar in both directions, and it is worth naming that this is the bar —
+not a preference for interesting results. **Run 8's 842 ms wrapper cost clears it** (zero overlap
+across 12 samples) and is stated as a result. **Run 7 does not clear it, and is therefore published
+as a null** rather than as a 30 ms instrumentation saving — a claim that, at that size, would have
+sat in exactly the noise band where three earlier conclusions in this document failed to reproduce.
+A null reported honestly is what made run 8 worth running.
+
+Both runs share run 6's scope limit and inherit it unchanged: they measure **in-pod boot to shallow
+health**, not end-to-end Knative cold start (**3.81s median**, run 5), on a single 2-node OKE cluster
+with a single app image. The 842 ms figure should be cited with that scope attached. Its **cause is
+narrowed but not identified**, and **no fix has been designed or measured** — treat the spawn-
+architecture and parent-side-module-loading explanations as the open hypotheses they are.
