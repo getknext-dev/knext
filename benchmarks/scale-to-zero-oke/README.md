@@ -105,6 +105,8 @@ mistaken for a complete one:
 | `run integrity: no reps ran; no data collected — this file is NOT a dataset` | No rep executed at all (`--phases none`, a plain `--dry-run`, or an abort before the first rep). Exit code is whatever caused it — 0 for a dry run, non-zero for a `FATAL:` abort. Never read this file as a result. |
 | `run integrity: N rep(s) ran but some LOST data — dataset is NOT complete` | The run finished all phases, but at least one rep is missing data or did not finish cleanly. **Exit code 2.** Preceded by the `*** RUN INCOMPLETE ***` block naming the reps. |
 | `*** RUN INCOMPLETE — untrustworthy rep(s): <rep> [<reason>] ***` | Printed whenever a rep lost data, **independently** of how the run ended — a run can be both truncated *and* missing a rep, and you need to see both facts. Scope any claim to the reps that do have data, and say so. |
+| `api retries: 0 (no transient API errors — clean control-plane run)` | Always printed. The control plane answered every call first try. |
+| `api retries: N (transient API errors were retried — this run is NOT a clean first-try run)` | Printed with a `*** RUN DEGRADED BY TRANSIENT API ERRORS ***` block naming each retried operation. The data is still valid — every config was verified applied before it was measured — but the control plane was flaky, so wall-clock timings may include control-plane stalls. See "Transient API retry" below. |
 
 The verdict is derived from three facts — reps run, reps flagged incomplete, and
 whether the run reached the end of its phases — so it always agrees with the exit
@@ -211,13 +213,69 @@ crashed shell). This is the direct fix for the real incident behind this harness
 the manual runs that produced the published numbers were interrupted twice and left
 the cluster patched with test autoscaling config.
 
+## Transient API retry
+
+Two of the three original OKE runs aborted on the same one-off control-plane blip
+while applying a burst config:
+
+```
+FATAL: failed to apply autoscaling config …; kubectl exited 1.
+       kubectl said: Unable to connect to the server: net/http: TLS handshake timeout
+```
+
+Refusing to measure a config that was never applied is **correct and unchanged**.
+But throwing away a valid partial dataset over a one-second blip forces a full
+re-run, and long runs (p99 cold start under concurrency needs many samples) hit
+that window often. So the two API calls whose failure aborts a run —
+`apply_autoscaling`'s patch and `capture_original`'s read — now retry **transient**
+errors with capped exponential backoff plus jitter.
+
+**Terminal errors are never retried.** Classification is terminal-first, and
+anything unrecognised is treated as terminal: a wrong "transient" verdict would
+turn a real misconfiguration (typo'd `--service`, missing RBAC, invalid
+annotation value) into a *slow* failure, which is worse than a fast one.
+
+| Class | Examples | Behaviour |
+|---|---|---|
+| **transient** (retried) | TLS handshake timeout · connection refused/reset · i/o timeout · `unable to connect to the server` · context deadline exceeded · request timed out / `time allotted` · 429 / `TooManyRequests` / throttling · 5xx (`InternalError`, `ServiceUnavailable`, `an error on the server`) · unexpected EOF · network unreachable | Retry with backoff, up to the attempt/deadline bound |
+| **terminal** (never retried) | `NotFound` · `Forbidden` · `Unauthorized` · `Invalid` / validation / unknown-field · `BadRequest` · `AlreadyExists` · `Gone` · **and every unrecognised message** | Fail immediately, exactly as before |
+
+| Knob | Default | Meaning |
+|---|---|---|
+| `API_RETRY_ATTEMPTS` / `--api-retry-attempts` | `4` | Total attempts per operation. `1` disables retrying. |
+| `API_RETRY_BASE_MS` / `--api-retry-base-ms` | `500` | First backoff step; doubles each retry. |
+| `API_RETRY_MAX_MS` / `--api-retry-max-ms` | `8000` | Per-step backoff ceiling. |
+| `API_RETRY_DEADLINE_S` | `60` | Hard wall-clock box per operation. |
+
+Bounded means bounded: a genuinely unreachable cluster still aborts, just a few
+seconds later. **On exhaustion the behaviour is exactly the old behaviour** — the
+same `FATAL:`, the same restore of the captured original config, the same
+`ABORTED` verdict and non-zero exit. The fail-closed guarantee is untouched:
+`capture_original` still refuses to mutate a service whose original config it
+could not read, whether that read failed once or four times.
+
+Every retry is recorded in the results file:
+
+```
+  api-retry: op='apply-autoscaling' attempt=1/4 class=transient — retrying after 380ms; the API said: Unable to connect to the server: net/http: TLS handshake timeout
+…
+*** RUN DEGRADED BY TRANSIENT API ERRORS — 2 retry/retries: apply-autoscaling x2 ***
+```
+
+This is deliberate. A run that limped through a flaky window must not produce an
+artifact identical to a clean run — that would be another instance of the
+"results look cleaner than reality" bug class this harness has already had three
+of. What is *not* retried: k6 workload failures. A failed load generator is a real
+result, not a blip.
+
 ## Tests
 
-Two paths here can produce real damage or a real lie, so both have tests:
+Three paths here can produce real damage or a real lie, so all three have tests:
 
 ```bash
 bash benchmarks/scale-to-zero-oke/capture-restore.test.sh      # can damage a service
 bash benchmarks/scale-to-zero-oke/k6-metrics-integrity.test.sh # can publish a false result
+bash benchmarks/scale-to-zero-oke/api-retry.test.sh            # can mask an unreachable cluster
 ```
 
 Both drive `run.sh` against a stub `kubectl` (via the `KUBECTL_BIN` +
@@ -229,6 +287,11 @@ one whose Job did not finish cleanly — warns loudly and exits non-zero, its ra
 log lands in the results file, a zero-rep run refuses to claim completeness,
 `kubectl wait` outcomes are distinguished, lost sampler data reads
 `<no sampler data>`, and the fan-out warning is scoped to the burst phase.
+`api-retry` asserts both directions of the classification above against real
+kubectl error strings — a transient error is retried and the run completes, a
+terminal one is attempted *exactly once*, exhaustion still restores the config and
+reports `ABORTED`, retries appear in the results file, and a clean run reports
+zero retries.
 
 Two further env-var seams exist only to keep those tests fast and deterministic;
 leave them alone in a real run:
