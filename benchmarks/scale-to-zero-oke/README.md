@@ -200,6 +200,17 @@ reporting rules above: a rep with no metrics warns loudly and exits non-zero, it
 Job is kept, `kubectl wait` outcomes are distinguished, lost sampler data reads
 `<no sampler data>`, and the fan-out warning is scoped to the burst phase.
 
+Two further env-var seams exist only to keep those tests fast and deterministic;
+leave them alone in a real run:
+
+- `SAMPLER_SIMULATE_LOST=1` makes the pod sampler exit without flushing, which is
+  the only practical way to reach the `<no sampler data>` branch — the real race
+  (sampler killed before its `TERM` trap runs) was never observed in practice, but
+  the branch still has to be correct, because coercing it to `0` would publish an
+  unmeasured number as a measurement.
+- `APPLY_SETTLE_SECONDS` (default `8`) is the post-patch settle sleep; the tests
+  set it to `0`.
+
 Note that plain `--dry-run` deliberately short-circuits before any cluster read,
 so it does *not* exercise these paths — that's what the stub is for. Because the
 seam makes the script genuinely mutate, the banner says so rather than claiming

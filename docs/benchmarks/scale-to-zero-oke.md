@@ -207,6 +207,17 @@ Phase D (scale-down after soak): scaled to 0 after **60s**.
 count, latency, or error figures. Those cells are left empty rather than estimated, and every
 request total below covers only the **three** reps that have recorded metrics.
 
+**This gap is why the harness now fails loudly on it (#425).** At the time of run 2 the harness
+discarded the `kubectl wait` result, so a k6 Job that had not finished — and therefore had printed
+no end-of-run summary to scrape — was indistinguishable from one that had; the rep was dropped in
+silence and the run still exited 0. The gap was caught by a human reading this document, not by the
+harness, and it nearly produced a "0 errors across all four reps" claim the data did not support.
+The harness now reports each rep's Job outcome (`completed` / `failed` / `timed-out`), keeps the Job
+when its metrics were not captured, prints an always-on run-integrity verdict line, and **exits 2**
+on an incomplete dataset. A rerun that hit this same condition today would surface it loudly instead
+of silently — see [the harness README](../../benchmarks/scale-to-zero-oke/README.md) for the full
+set of output states. **No rerun has been performed; the numbers above are unchanged.**
+
 Recorded request volume, run 2: **107,336** burst requests across those three reps
 (37,031 + 35,712 + 34,593), **0 failures**. Including Phase A (5) and Phase C (23,027):
 **130,368 recorded requests, 0 failures** for the whole run.
