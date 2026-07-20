@@ -3,7 +3,10 @@
 Status: point-in-time measurement · Runs: 2026-07-19 (run 1, throwaway scripts), 2026-07-20
 (run 2, committed harness), 2026-07-20 (run 3, data-integrity-hardened harness — **aborted
 mid-run, partial dataset**) and 2026-07-20 (run 4, retry-hardened harness — **the first run to
-complete every phase**) · Target: `file-manager` Knative Service
+complete every phase**), 2026-07-20 (run 5, one-off bytecode before/after — **aborted before the
+AFTER arm**) and 2026-07-20 (run 6, in-pod compile-cache COLD/WARM pairs — **the first measured
+performance result here, with complete distribution separation**) · Target: `file-manager` Knative
+Service
 
 > **Correction notice (2026-07-20).** Run 2 **did not reproduce** run 1's headline burst finding —
 > the median-latency delta between the baseline and tuned burst configs reversed sign. The run-1
@@ -604,6 +607,95 @@ live service can both destroy state and publish a false result.
   flags are off by default (**#436**).
 - **A fail-closed verify-before-measure check converted a would-be false null into a real finding.**
 
+## Run 6 (2026-07-20) — compile-cache value: the first measured performance result in this document
+
+Same cluster and target app image (`file-manager`, OKE 2-node) as runs 1–5. This run answers the
+question run 5 was aborted before reaching — *what does a populated `NODE_COMPILE_CACHE` actually
+buy?* — by a different method that needs no PVC, no service mutation, and no image rebuild.
+
+**It is the first comparison in this document with complete distribution separation, and therefore
+the first one reported as a result rather than as a signal worth investigating.**
+
+### Method — alternating COLD/WARM boot pairs in one pod
+
+A single pod runs the real application image
+(`me-abudhabi-1.ocir.io/.../file-manager:ht-bdfa2fa`) with an `emptyDir` mounted at `/ccache` as the
+compile-cache directory. Inside that pod:
+
+1. Boot the **same runtime entry the image's `CMD` boots** — `node -e import('@knext/core/internal/node-server')`
+   with `STANDALONE_SERVER_PATH=apps/file-manager/server.js` — not a proxy script.
+2. Wait on the **shallow, dependency-free `/api/health` route**, so the timing measures server boot
+   rather than database or Redis readiness.
+3. `SIGTERM` the server (so V8 flushes cache entries to disk), then repeat.
+
+Cache files are **deleted before each COLD boot and retained for each WARM boot**, and the two arms
+**alternate**, so any drift in cluster conditions over the run affects both arms equally. The pod
+mirrors the app's own profile (**no CPU request**), so scheduling is not CPU-gated.
+
+This technique is worth reusing: it isolates a boot-level optimisation **without rebuilding an
+image or mutating the live Knative Service**, and the alternating-pairs shape is what makes the
+separation below interpretable rather than a snapshot of one moment's cluster conditions.
+
+### Results — 5 alternating pairs (10 samples)
+
+| Arm | Cache state | Samples (ms) | Median |
+|---|---|---|---|
+| **COLD** | 0 cache files | 3266, 3112, 3144, 3244, 3162 | **3162 ms** |
+| **WARM** | 1106 files / 4,246,088 bytes | 2774, 2769, 2809, 2741, 2732 | **2769 ms** |
+
+**Delta: 393 ms (12.4%) faster boot with a populated compile cache.**
+
+Cache size written by one boot: **1106 files / 4,246,088 bytes**.
+
+### Why this one is reported as a result
+
+**Every prior comparison in this document that lacked distribution separation later failed to
+reproduce.** The burst-knob A/B produced two successive conclusions and flipped sign twice; it is
+now recorded as inconclusive (see [run 4](#the-headline-the-burst-ab-does-not-reproduce-in-either-direction)).
+Run 4's ~35% p99 gap is likewise recorded only as a hypothesis.
+
+This measurement is different in exactly the way those were not: **the slowest WARM sample (2809 ms)
+is faster than the fastest COLD sample (3112 ms) — zero overlap across all 10 samples.** There is no
+value of run-to-run variance that produces that ordering by chance at this gap. That separation, not
+the size of the delta, is why this is stated as a result.
+
+### Scope of the claim — what it does and does not show
+
+- **It measures server boot to health-ready inside a pod.** It is **not** an end-to-end Knative
+  cold-start measurement.
+- End-to-end cold start on this cluster is **3.81s median** (run 5, 8 samples), of which roughly
+  **2s** is `Started → Ready`. A ~393 ms boot saving is therefore roughly **10% of end-to-end cold
+  start** — and it targets precisely the segment #437 addresses.
+- #437 bakes the cache at **image build time**, so a cold pod's *first* boot becomes the WARM case.
+  This measurement demonstrates **the value of a populated cache**. It does **not** yet demonstrate
+  that the build-time warm-up produces an equivalent cache — **CI building the image is the first
+  test of that**, and **no image carrying the baked cache has been deployed or measured**.
+- **Image-size growth from the baked cache is unmeasured.**
+
+### Root cause this confirms
+
+`apps/file-manager/Dockerfile` created an **empty** compile-cache directory that nothing ever
+populated, then pointed `NODE_COMPILE_CACHE` at it. Every cold pod therefore compiled the standalone
+server from scratch, wrote the cache to the ephemeral container layer, and **discarded it on
+scale-to-zero** — so the cache never paid off across pods, and the "faster subsequent cold starts"
+comment in the Dockerfile was false as shipped. That recompilation is a large part of the ~2s
+`Started → Ready` segment measured in runs 1–5.
+
+Fixed in **#437** (build-time cache warm-up baked into the image layer, with a build failure if the
+cache ends up empty). The **identical bug exists in `apps/docs/Dockerfile`** and is tracked as
+**#439**.
+
+### Findings — run 6
+
+- **A populated compile cache is worth ~393 ms (12.4%) of server boot on this app**, with complete
+  distribution separation across 10 alternating samples — the first non-overlapping comparison in
+  this document.
+- **That is ~10% of end-to-end cold start** (3.81s median), and it is the segment #437 targets.
+- **The baked-cache image itself is still unmeasured.** Equivalence between the build-time warm-up
+  and a runtime-populated cache, and the image-size cost, are both open.
+- **The root cause is confirmed, not inferred:** an empty cache directory shipped in the image,
+  refilled and discarded on every cold pod.
+
 ## Caveat
 
 These are **point-in-time measurements on a specific small (2-node) OKE cluster** with a
@@ -628,3 +720,10 @@ effect did not appear at all. With every burst reading so far contradicted by th
 honest summary of this A/B is that **three runs have not been enough to measure it**. Read the
 per-config latency and fan-out deltas in this document as open questions; read the pod-count,
 error-rate, and median figures — which have held across all four runs — as the trustworthy output.
+
+Run 6 is the one comparison here that clears that bar, and it clears it on a specific ground worth
+naming: **complete separation between the two distributions**, not the size of its delta. It is
+still a single-environment measurement of a single app image, and it measures **in-pod server boot**
+rather than end-to-end cold start — so the 393 ms figure should be cited with that scope attached,
+and not as a portable cold-start improvement. The baked-cache image that #437 produces remains
+unmeasured on this or any cluster.

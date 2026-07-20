@@ -1,40 +1,84 @@
 ---
 title: Bytecode caching
-description: Skipping JS recompilation on cold pods — NODE_COMPILE_CACHE on Node, per-file .jsc precompilation on Bun.
+description: Skipping JS recompilation on cold pods — a compile cache baked into your image on Node, per-file .jsc precompilation on Bun.
 ---
 
 Scale-to-zero means cold starts. The expensive part of a Next.js cold start is the JS engine
-compiling JavaScript from source. knext skips that work: on **Node** by persisting the V8 bytecode
-cache to a volume, and on **Bun** by precompiling the standalone tree to bytecode at **build
-time** (see [Bun runtime](/docs/bun-runtime)). This page covers the Node mechanism.
+compiling JavaScript from source. knext skips that work on both runtimes by doing the compilation
+**at build time** and shipping the result inside your application image: on **Node** as a V8 compile
+cache, and on **Bun** as per-file bytecode (see [Bun runtime](/docs/bun-runtime)). This page covers
+the Node mechanism.
 
-<Callout type="warn">
-**Opt in deliberately — this caps how wide your app can scale.** The Node bytecode cache is off by
-default for new configurations (see [Already on for Redis
-users](#already-on-for-redis-users) for the one case where it is on without you asking), and it is
-not a free win. The cache lives on a persistent volume that **attaches to one
-node at a time**, so if your app scales out and Kubernetes places a pod on a *second* node, that
-pod cannot attach the volume and will sit **Pending** instead of serving traffic. On a cluster
-with **no default storage class**, the volume never binds at all and the app does not start.
+**There is nothing to configure and nothing to enable.** The cache is built when your image is
+built, so it is present from the very first pod, on any cluster.
 
-Enable it when cold-start latency matters more than horizontal fan-out — a read-mostly zone that
-wakes from zero and runs a handful of pods on one node. Leave it off for anything that bursts
-wide. Confirm your cluster has a default storage class before turning it on.
+## How it works (Node)
+
+During the image build, knext boots your server once and lets V8 serialize its compiled bytecode to
+a cache directory inside the image. At runtime the server reads that cache instead of parsing and
+compiling your application's JavaScript again.
+
+Because the cache lives in the image layer:
+
+- **It works on a stock Kubernetes or Knative install.** No storage class, no volume, no cluster
+  storage configuration of any kind.
+- **It is there on the first cold pod**, not merely on later ones. A pod that wakes from zero reads
+  a cache that was already populated before the image shipped.
+- **It never goes stale.** The cache is versioned with the image it lives in, so a new build always
+  carries a cache that matches the code it was built from.
+- **It does not constrain how wide you scale.** Every pod carries its own copy, so there is no
+  shared resource to contend over and no limit on how many nodes your app spreads across.
+
+The trade-off is image size: the cache adds a layer of serialized bytecode to every image.
+
+<Callout type="info">
+**The build fails if the cache comes out empty.** A compile cache that is silently never populated
+looks exactly like one that works — same configuration, same startup path, no error — while
+delivering nothing. The build checks that the cache was actually written rather than trusting that
+it was.
 </Callout>
 
-## Already on for Redis users
+This is independent of your **data cache**. Bytecode caching governs how fast the server *boots*;
+the cache provider (`redis`, and friends) governs where *ISR and data* are cached. The two are
+unrelated and neither one turns the other on.
+
+## What to expect
+
+Skipping compilation removes real work from every cold start, and the effect is measurable on the
+server-boot portion of a cold start. How much of your *end-to-end* cold start that represents
+depends heavily on your cluster: on a small cluster where pod scheduling and image pull dominate,
+compilation is a smaller slice of the total than on a fast, warm-image cluster.
+
+Treat it as a real but **environment-dependent** improvement, not a guaranteed number. Measure your
+own cold start if it matters to your service-level objectives.
+
+## Node vs Bun
+
+Both runtimes get a compile cache, built at image build time, via different mechanisms:
+
+| Runtime | Bytecode mechanism |
+|---|---|
+| **Node** (default) | V8 compile cache, populated during the image build and shipped in the image. Read by every pod from its first boot. |
+| **Bun** (`runtime: 'bun'`) | **Per-file bytecode precompilation**: `kn-next build` emits a companion `.jsc` for every server-side file (measured −47% startup, 287 ms → 152 ms median), plus Bun's runtime transpiler cache. See [Bun runtime](/docs/bun-runtime). |
 
 <Callout type="warn">
-**If your config sets the Redis cache provider and has no `bytecodeCache` block, bytecode caching
-is already enabled for your app** — you did not have to opt in. This is long-standing behaviour,
-kept as-is so that upgrading knext does not silently change how existing deployments are
-provisioned.
+A Bun bytecode-built image is **Bun-only** — booting it with Node exits 1 with a `FATAL` message
+naming the fix rather than crash-looping silently. Details and costs are on the
+[Bun runtime](/docs/bun-runtime) page.
+</Callout>
 
-That means the scaling constraint above already applies to you: your app's cache volume attaches to
-**one node at a time**, so pods that Kubernetes places on a second node will sit **Pending**. If
-your app runs — or may ever run — on more than one node, check this before you scale out.
+## If you enabled the volume-backed cache
 
-To turn it off explicitly:
+Earlier versions of knext kept the Node compile cache on a **persistent volume** instead, so that it
+survived pod death. That approach is superseded and you should not enable it on a new deployment:
+
+- Most Kubernetes and Knative installs **reject** the volume outright unless a cluster administrator
+  has turned on optional persistent-volume support, so the app simply fails to start.
+- Where it does work, the volume attaches to **one node at a time**, so a pod scheduled onto a
+  second node sits **Pending** instead of serving traffic — capping how wide the app can scale.
+
+The build-time cache has neither limitation and needs no configuration, so if your config still
+carries a `bytecodeCache` block you can remove it, or turn it off explicitly:
 
 ```ts
 export default {
@@ -43,52 +87,4 @@ export default {
 }
 ```
 
-Setting `bytecodeCache` at all — `enabled: true` or `enabled: false` — takes over from the
-inference, so an explicit block always wins.
-</Callout>
-
-## How it works (Node)
-
-knext runs the standalone server with `NODE_COMPILE_CACHE` pointing at a directory. On the first
-start V8 serializes compiled bytecode to that directory; every later cold pod reads it and skips JS
-parsing/compilation.
-
-The runtime image starts the server like this:
-
-```dockerfile
-# NODE_COMPILE_CACHE: V8 bytecode cache for faster subsequent cold starts.
-CMD ["sh", "-c", "export NODE_COMPILE_CACHE=\"${NODE_COMPILE_CACHE:-.next/compile-cache}\"; exec node server.js"]
-```
-
-The Dockerfile supplies a fallback path; the operator's externally-injected value wins. When
-`spec.cache.enableBytecodeCache: true`, the operator injects:
-
-```
-NODE_COMPILE_CACHE=/cache/bytecode/latest
-```
-
-backed by a persistent volume, so the cache survives pod death and is shared across cold starts.
-
-This is independent of your **data cache**. Bytecode caching governs how fast the server *boots*;
-the cache provider (`redis`, and friends) governs where *ISR and data* are cached. You can turn on
-bytecode caching with no data-cache provider configured at all, and vice versa.
-
-<Callout type="warn">
-**Persistence is the whole point.** A pod-local cache directory would be re-primed on every cold
-start and save nothing. The cache must live on a PVC (`enableBytecodeCache`) to pay off across pods.
-</Callout>
-
-## Node vs Bun
-
-Both runtimes get a compile cache — via different mechanisms:
-
-| Runtime | Bytecode mechanism |
-|---|---|
-| **Node** (default) | `NODE_COMPILE_CACHE` — V8 serializes bytecode to the PVC at runtime; every later cold pod reads it. |
-| **Bun** (`runtime: 'bun'`) | **Build-time per-file bytecode precompilation**: `kn-next build` emits a companion `.jsc` for every server-side file (measured −47% startup, 287 ms → 152 ms median), plus Bun's runtime transpiler cache (`BUN_RUNTIME_TRANSPILER_CACHE_PATH`) on the same PVC. See [Bun runtime](/docs/bun-runtime). |
-
-<Callout type="warn">
-A Bun bytecode-built image is **Bun-only** — booting it with Node exits 1 with a `FATAL` message
-naming the fix rather than crash-looping silently. Details and costs are on the
-[Bun runtime](/docs/bun-runtime) page.
-</Callout>
+Turning it off does **not** disable bytecode caching — the cache in your image is always active.
