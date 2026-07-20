@@ -504,6 +504,106 @@ configured experiment rather than a subset of it.
   median latency, and pod-count behaviour are the numbers this harness measures reproducibly; tail
   and per-config latency deltas are not.
 
+## Run 5 (2026-07-20) — #431 bytecode-cache before/after (ABORTED before the AFTER arm)
+
+Same cluster and target (`file-manager`, OKE 2-node) as runs 1–4. This run was **not** the committed
+`benchmarks/scale-to-zero-oke` harness — it was a one-off before/after script written to answer a
+single question for #431: *does `NODE_COMPILE_CACHE` on a mounted PVC actually cut cold start on
+OKE?*
+
+**It never got to answer it.** The BEFORE arm completed and is valid. Enabling the bytecode cache
+was rejected by Knative's admission webhook, so the AFTER arm never ran, and the script aborted
+fail-closed rather than measure an unconfigured service.
+
+```bash
+# one-off, run from the scratchpad — not part of the committed harness
+SAMPLES=8 ./bytecode-ba2.sh     # namespace default, service file-manager,
+                                # PVC file-manager-bytecode-cache
+```
+
+### BEFORE arm — cold start (8 cold samples, `max-scale` pinned to 1)
+
+`max-scale` was pinned to **1** for this run: the bytecode PVC is `ReadWriteOnce`, and cold start is
+a single-pod measurement either way. Captured pre-run state (restored on exit): `max-scale=10`,
+**11** env entries, no volumes or mounts.
+
+| Sample | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 |
+|---|---|---|---|---|---|---|---|---|
+| Response time | 3.95s | 3.81s | 4.01s | 3.79s | 3.80s | 4.50s | 3.43s | 3.80s |
+
+Median **~3.81s**, worst sample 4.50s. This sits squarely inside the band the four prior runs
+established (medians **3.8–4.0s**). It adds nothing new on its own — it is the control half of a
+comparison that was never completed.
+
+### AFTER arm — never ran
+
+Patching the service to mount the cache PVC was denied:
+
+```
+Error from server (BadRequest): admission webhook "validation.webhook.serving.knative.dev"
+denied the request: validation failed: Persistent volume claim support is disabled, but found
+persistent volume claim file-manager-bytecode-cache:
+Persistent volume write support is disabled, but found persistent volume claim
+file-manager-bytecode-cache that is not read-only:
+must not set the field(s): spec.template.spec.volumes[0].persistentVolumeClaim
+```
+
+The cause is Knative's stock `config-features` defaults in namespace `knative-serving`:
+
+| Flag | Stock default |
+|---|---|
+| `kubernetes.podspec-persistent-volume-claim` | `disabled` |
+| `kubernetes.podspec-persistent-volume-write` | `disabled` |
+| `kubernetes.podspec-volumes-emptydir` | **`enabled`** |
+
+The third row is recorded because it points at the fix: `emptyDir` is available on a stock install
+where a PVC is not. Tracked as **#436**. Note also that **ADR-0010 states the OKE cluster already
+had these two flags enabled** — this rejection, on that same cluster, contradicts that premise and
+is part of what #436 has to settle.
+
+### The harness behaved correctly — and that is the finding
+
+There is no bytecode-cache measurement in this run. There is a fail-closed check that worked:
+
+- It **verified the mutation had applied before measuring**, reading back
+  `NODE_COMPILE_CACHE=''  mount=''`.
+- On seeing the mutation had not applied, it **aborted** rather than run an AFTER arm against a
+  service that was still in its BEFORE configuration.
+- It **restored the service exactly**: 11 env entries, no mounts, `max-scale=10`, `Ready=True`.
+  (The PVC itself was left in place — deletion is human-gated under ADR-0001.)
+
+**Without that fail-closed check this run would have published "bytecode caching: no improvement"** —
+8 BEFORE samples and 8 identically-configured "AFTER" samples, agreeing to within noise, and a false
+null presented as a measured result. That is precisely what the first version of this script did.
+
+### Methodological note — one-off scripts need the committed harness's discipline
+
+The v1 script carried three bugs, all of which mattered because it mutates a **live** service:
+
+1. A `--type merge` patch on the containers array **replaced** it wholesale, dropping `image`, so
+   the webhook rejected the patch — and **stderr was swallowed**, so the AFTER arm silently
+   measured the unconfigured service. A clean-looking null that actually meant *the change never
+   applied*.
+2. The capture step **printed** "env/volumes/mounts confirmed empty" without checking anything. The
+   service has 11 env vars; the v1 restore would have patched `env: null` and wiped
+   `DATABASE_URL` / `REDIS_URL` / GCS config. Only bug 1 prevented it.
+3. The trap did not fire on kill, which would have left `max-scale` pinned at 1.
+
+The committed harness earned its fail-closed and run-integrity checks across runs 2–4 (a silently
+dropped rep, an honestly-reported abort). **The lesson run 5 adds is that a throwaway measurement
+script needs the same fail-loud discipline** — verify every mutation applied, restore from captured
+values never from assumptions, and never swallow stderr — because a one-off script pointed at a
+live service can both destroy state and publish a false result.
+
+### Findings — run 5
+
+- **No bytecode-caching result exists.** Do not read this run as evidence that bytecode caching
+  helps, or that it doesn't. The measurement did not happen.
+- **The BEFORE arm is valid** and consistent with runs 1–4: median ~3.81s over 8 samples.
+- **PVC-mounted bytecode caching cannot be enabled on a stock Knative install** — both PVC feature
+  flags are off by default (**#436**).
+- **A fail-closed verify-before-measure check converted a would-be false null into a real finding.**
+
 ## Caveat
 
 These are **point-in-time measurements on a specific small (2-node) OKE cluster** with a
