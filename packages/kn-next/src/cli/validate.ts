@@ -111,6 +111,35 @@ export function validateConfig(config: KnativeNextConfig): void {
         }
     }
 
+    // #431 bytecode (V8 compile) cache — orthogonal to the data cache above.
+    // Cheap SINGLE-FIELD check only: the operator stays the single source of
+    // validation truth (ValidateNextAppSpec parses this with
+    // resource.ParseQuantity and fails the CR as a status condition). This is
+    // the early, CLI-side copy so the user learns about a typo at `kn-next
+    // deploy` time instead of from a rejected CR.
+    //
+    // The suffix set mirrors the Kubernetes quantity grammar EXACTLY
+    // (apimachinery pkg/api/resource/quantity.go) — getting it wrong in either
+    // direction is a real bug, so:
+    //   binarySI        Ki | Mi | Gi | Ti | Pi | Ei   (uppercase, always "i")
+    //   decimalSI       n | u | m | "" | k | M | G | T | P | E
+    //                   NOTE: decimal kilo is lowercase `k`; there is NO `K`,
+    //                   so "512K" is invalid (it would be rejected by the
+    //                   operator's parser) while "500k" is valid.
+    //   decimalExponent e|E followed by a signed integer, e.g. "1e3"
+    if (config.bytecodeCache?.size !== undefined) {
+        if (
+            !/^\+?(\d+(\.\d+)?|\.\d+)(Ki|Mi|Gi|Ti|Pi|Ei|[numkMGTPE]|[eE][+-]?\d+)?$/.test(
+                config.bytecodeCache.size,
+            )
+        ) {
+            errors.push(
+                `'bytecodeCache.size' ("${config.bytecodeCache.size}") is not a valid Kubernetes quantity ` +
+                    `(e.g. "512Mi", "1Gi"). Omit it to use the operator default of 512Mi.`,
+            );
+        }
+    }
+
     // Queue (ISR-revalidation) validation. Only the ADR-0016 kafka path and
     // 'none' are valid; anything else is an unknown provider.
     if (config.queue) {

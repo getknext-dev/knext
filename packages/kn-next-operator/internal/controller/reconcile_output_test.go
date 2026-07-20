@@ -461,13 +461,14 @@ var _ = Describe("NextApp Controller reconcile output", func() {
 			Expect(pvc.Spec.Resources.Requests.Storage().Equal(resource.MustParse("512Mi"))).To(BeTrue())
 		})
 
-		// Documents a real coupling in the reconciler: the bytecode-cache volume
-		// and mount are gated only on EnableBytecodeCache, but the
-		// NODE_COMPILE_CACHE env var is nested under the cache *Provider* block.
-		// With bytecode caching on but no cache Provider, the PVC is still mounted
-		// while NODE_COMPILE_CACHE is NOT set. This asserts that as-built behavior
-		// (a candidate cleanup is flagged in the issue report, not changed here).
-		It("mounts the PVC but omits NODE_COMPILE_CACHE when no cache Provider is set", func() {
+		// This used to be a CHARACTERIZATION test pinning a known bug: the
+		// volume + mount gated on EnableBytecodeCache alone, but the
+		// NODE_COMPILE_CACHE env var was nested under the cache *Provider*
+		// block, so bytecode caching with no Provider mounted a PVC that
+		// nothing ever wrote to. Its own comment flagged the cleanup as
+		// pending — #431 is that cleanup, so the expectation is now the FIXED
+		// behavior (env asserted in the "#431" context below).
+		It("mounts the PVC and wires NODE_COMPILE_CACHE when no cache Provider is set", func() {
 			nn := reconcileOnce("pvc-no-provider", appsv1alpha1.NextAppSpec{
 				Image: validImage,
 				Cache: &appsv1alpha1.CacheSpec{EnableBytecodeCache: true},
@@ -476,13 +477,13 @@ var _ = Describe("NextApp Controller reconcile output", func() {
 			ksvc := &servingv1.Service{}
 			Expect(k8sClient.Get(ctx, nn, ksvc)).To(Succeed())
 
-			By("still mounting the bytecode-cache volume")
+			By("mounting the bytecode-cache volume")
 			Expect(ksvc.Spec.Template.Spec.Volumes).To(HaveLen(1))
 			Expect(ksvc.Spec.Template.Spec.Containers[0].VolumeMounts).To(HaveLen(1))
 
-			By("NOT setting NODE_COMPILE_CACHE (gated on cache Provider)")
+			By("pointing the compile cache at the volume it just mounted")
 			Expect(envValue(ksvc.Spec.Template.Spec.Containers[0].Env, "NODE_COMPILE_CACHE")).
-				To(BeEmpty())
+				To(Equal("/cache/bytecode/latest"))
 		})
 	})
 
@@ -547,6 +548,65 @@ var _ = Describe("NextApp Controller reconcile output", func() {
 			Expect(k8sClient.Get(ctx, nn, ksvc)).To(Succeed())
 			Expect(envValue(ksvc.Spec.Template.Spec.Containers[0].Env, "BUN_RUNTIME_TRANSPILER_CACHE_PATH")).
 				To(BeEmpty())
+		})
+	})
+
+	// #431 — the bytecode cache is a V8 compile cache governing SERVER BOOT
+	// SPEED; the cache Provider is about ISR/DATA caching. They are orthogonal,
+	// but the env wiring used to be nested inside `Provider != ""`, so an app
+	// with no data-cache provider got the PVC provisioned and MOUNTED while
+	// NODE_COMPILE_CACHE stayed unset — 512Mi bought nothing. The PVC (line
+	// ~627) and the volumeMount already gate on EnableBytecodeCache alone; the
+	// env must match them.
+	Context("bytecode-cache env is independent of the data-cache provider (#431)", func() {
+		It("sets NODE_COMPILE_CACHE with EnableBytecodeCache and NO provider", func() {
+			nn := reconcileOnce("bc-no-provider", appsv1alpha1.NextAppSpec{
+				Image: validImage,
+				Cache: &appsv1alpha1.CacheSpec{EnableBytecodeCache: true},
+			})
+
+			ksvc := &servingv1.Service{}
+			Expect(k8sClient.Get(ctx, nn, ksvc)).To(Succeed())
+			env := ksvc.Spec.Template.Spec.Containers[0].Env
+
+			By("wiring the compile cache into the PVC that is already mounted")
+			Expect(envValue(env, "NODE_COMPILE_CACHE")).
+				To(Equal("/cache/bytecode/latest"))
+
+			By("NOT inventing a data-cache provider the user did not configure")
+			Expect(envValue(env, "CACHE_PROVIDER")).To(BeEmpty())
+			Expect(envValue(env, "REDIS_URL")).To(BeEmpty())
+		})
+
+		It("sets BUN_RUNTIME_TRANSPILER_CACHE_PATH with no provider when runtime is bun", func() {
+			nn := reconcileOnce("bc-no-provider-bun", appsv1alpha1.NextAppSpec{
+				Image:   validImage,
+				Runtime: "bun",
+				Cache:   &appsv1alpha1.CacheSpec{EnableBytecodeCache: true},
+			})
+
+			ksvc := &servingv1.Service{}
+			Expect(k8sClient.Get(ctx, nn, ksvc)).To(Succeed())
+			Expect(envValue(ksvc.Spec.Template.Spec.Containers[0].Env, "BUN_RUNTIME_TRANSPILER_CACHE_PATH")).
+				To(Equal("/cache/bytecode/bun-transpiler"))
+		})
+
+		It("still omits NODE_COMPILE_CACHE when a provider is set but the bytecode cache is off", func() {
+			nn := reconcileOnce("bc-provider-off", appsv1alpha1.NextAppSpec{
+				Image: validImage,
+				Cache: &appsv1alpha1.CacheSpec{
+					Provider: "redis",
+					URL:      "redis://cache:6379",
+				},
+			})
+
+			ksvc := &servingv1.Service{}
+			Expect(k8sClient.Get(ctx, nn, ksvc)).To(Succeed())
+			env := ksvc.Spec.Template.Spec.Containers[0].Env
+			Expect(envValue(env, "NODE_COMPILE_CACHE")).To(BeEmpty())
+			By("leaving the data-cache env byte-identical")
+			Expect(envValue(env, "CACHE_PROVIDER")).To(Equal("redis"))
+			Expect(envValue(env, "REDIS_URL")).To(Equal("redis://cache:6379"))
 		})
 	})
 

@@ -631,20 +631,31 @@ func (r *NextAppReconciler) reconcileBytecodeCachePVC(ctx context.Context, nextA
 	if size == "" {
 		size = "512Mi"
 	}
+	// #431: never MustParse unvalidated CR input inside the reconciler — a
+	// malformed quantity would panic the whole controller. Validation
+	// (validateBytecodeCacheSize) rejects bad sizes upstream; this
+	// error-returning parse is the defense-in-depth for stored CRs that
+	// predate that check.
+	quantity, err := resource.ParseQuantity(size)
+	if err != nil {
+		return fmt.Errorf(
+			"spec.cache.bytecodeCacheSize %q is not a valid Kubernetes quantity: %w", size, err,
+		)
+	}
 	pvc := &corev1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      nextApp.Name + "-bytecode-cache",
 			Namespace: nextApp.Namespace,
 		},
 	}
-	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, pvc, func() error {
+	_, err = controllerutil.CreateOrUpdate(ctx, r.Client, pvc, func() error {
 		if pvc.Spec.AccessModes == nil {
 			pvc.Spec.AccessModes = []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce}
 		}
 		if pvc.Spec.Resources.Requests == nil {
 			pvc.Spec.Resources.Requests = corev1.ResourceList{}
 		}
-		pvc.Spec.Resources.Requests[corev1.ResourceStorage] = resource.MustParse(size)
+		pvc.Spec.Resources.Requests[corev1.ResourceStorage] = quantity
 		return ctrl.SetControllerReference(nextApp, pvc, r.Scheme)
 	})
 	return err
@@ -986,20 +997,28 @@ func (r *NextAppReconciler) buildKsvcEnv(nextApp *appsv1alpha1.NextApp) ([]corev
 		if nextApp.Spec.Cache.KeyPrefix != "" {
 			envVars = append(envVars, corev1.EnvVar{Name: "REDIS_KEY_PREFIX", Value: nextApp.Spec.Cache.KeyPrefix})
 		}
-		if nextApp.Spec.Cache.EnableBytecodeCache {
-			envVars = append(envVars, corev1.EnvVar{Name: "NODE_COMPILE_CACHE", Value: "/cache/bytecode/latest"})
-			// Bun analog of NODE_COMPILE_CACHE: Bun has no runtime bytecode
-			// cache (`bun build --bytecode` hard-fails on the Next standalone
-			// server), but its runtime transpiler cache persists transpiled
-			// modules ≥ ~50KB across cold starts. Measured on next@16.2.4
-			// standalone (Bun 1.3.5): warm cache ≈ -20% time-to-first-response;
-			// unwritable dir is fail-open. Same PVC as NODE_COMPILE_CACHE
-			// (mounted at /cache/bytecode), sibling dir so the two runtimes'
-			// artifacts never collide. Only meaningful under runtime=bun —
-			// NODE_COMPILE_CACHE stays set regardless (inert under Bun).
-			if nextApp.Spec.Runtime == "bun" {
-				envVars = append(envVars, corev1.EnvVar{Name: "BUN_RUNTIME_TRANSPILER_CACHE_PATH", Value: "/cache/bytecode/bun-transpiler"})
-			}
+	}
+	// #431 — the bytecode cache is a V8 compile cache governing server BOOT
+	// SPEED; the data-cache Provider governs ISR/data caching. Orthogonal
+	// concerns that merely share the CRD's spec.cache block. This env block
+	// used to be NESTED inside the `Provider != ""` branch above, so an app
+	// with no data-cache provider got the PVC provisioned AND mounted (both
+	// gate on EnableBytecodeCache alone) while NODE_COMPILE_CACHE stayed
+	// unset — 512Mi of storage buying nothing. Gate it exactly the way the
+	// PVC and the volumeMount already do.
+	if nextApp.Spec.Cache != nil && nextApp.Spec.Cache.EnableBytecodeCache {
+		envVars = append(envVars, corev1.EnvVar{Name: "NODE_COMPILE_CACHE", Value: "/cache/bytecode/latest"})
+		// Bun analog of NODE_COMPILE_CACHE: Bun has no runtime bytecode
+		// cache (`bun build --bytecode` hard-fails on the Next standalone
+		// server), but its runtime transpiler cache persists transpiled
+		// modules ≥ ~50KB across cold starts. Measured on next@16.2.4
+		// standalone (Bun 1.3.5): warm cache ≈ -20% time-to-first-response;
+		// unwritable dir is fail-open. Same PVC as NODE_COMPILE_CACHE
+		// (mounted at /cache/bytecode), sibling dir so the two runtimes'
+		// artifacts never collide. Only meaningful under runtime=bun —
+		// NODE_COMPILE_CACHE stays set regardless (inert under Bun).
+		if nextApp.Spec.Runtime == "bun" {
+			envVars = append(envVars, corev1.EnvVar{Name: "BUN_RUNTIME_TRANSPILER_CACHE_PATH", Value: "/cache/bytecode/bun-transpiler"})
 		}
 	}
 	if nextApp.Spec.Revalidation != nil && nextApp.Spec.Revalidation.Queue != "" {

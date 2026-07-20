@@ -15,6 +15,11 @@ spec:
   cache:
     provider: "redis"
     url: "redis://redis.default.svc.cluster.local:6379"
+    # Bytecode (V8 compile) cache — governs BOOT SPEED, independent of `provider`
+    # above (which governs ISR/data caching). Opt-in; defaults to false.
+    # CAUTION (#432): the backing PVC is ReadWriteOnce, so it attaches to ONE node
+    # at a time. With maxScale: 10, pods scheduled onto a second node cannot attach
+    # it and stay Pending. Only enable where fan-out stays on one node.
     enableBytecodeCache: true
     bytecodeCacheSize: "512Mi"
   secrets:

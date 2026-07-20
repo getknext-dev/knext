@@ -61,8 +61,16 @@ each cold pod reads pre-compiled V8 bytecode instead of recompiling from source;
 
 <Callout type="info">
 **Cross-cold-start caching needs persistence.** The bytecode cache only helps across pods if it
-survives pod death — knext mounts it from a PVC, not pod-local disk, when
+survives pod death — knext mounts it from a persistent volume, not pod-local disk, when
 `spec.cache.enableBytecodeCache` is set.
+</Callout>
+
+<Callout type="warn">
+**That volume is also a scaling limit.** It attaches to **one node at a time**, so an app that
+scales out onto a second node will have those extra pods sit **Pending**. Bytecode caching is
+therefore **opt-in**: it trades horizontal fan-out for boot speed. Enable it on cold-start-sensitive
+zones that stay narrow; leave it off on anything that bursts wide. See
+[bytecode caching](/docs/bytecode).
 </Callout>
 
 <Callout type="warn">

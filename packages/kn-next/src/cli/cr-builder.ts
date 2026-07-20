@@ -33,7 +33,9 @@ export interface PreviewInput {
  *
  * Invariants preserved (A1-cli discipline):
  * - scale-to-zero: scaling.minScale defaults to 0
- * - bytecode cache: cache.enableBytecodeCache=true when provider=redis
+ * - bytecode cache (#431): cache.enableBytecodeCache follows config.bytecodeCache,
+ *   INDEPENDENTLY of the data-cache provider; falls back to the legacy
+ *   redis⇒on inference when unset (back-compat)
  * - NODE_COMPILE_CACHE wiring: operator reads cache.enableBytecodeCache
  */
 export function buildNextAppCRObject(
@@ -113,20 +115,49 @@ export function buildNextAppCRObject(
           }
         : undefined;
 
-    // Cache spec — enable bytecode cache when Redis is configured
-    // (operator uses cache.enableBytecodeCache to provision PVC + NODE_COMPILE_CACHE)
-    const cache = config.cache
+    // Cache spec. TWO ORTHOGONAL CONCERNS share the CRD's `spec.cache` block
+    // (#431): the DATA cache (provider/url/keyPrefix → ISR + data caching) and
+    // the BYTECODE cache (enableBytecodeCache/bytecodeCacheSize → a V8 compile
+    // cache on a PVC that governs server BOOT SPEED). They used to be coupled
+    // — `enableBytecodeCache` was derived from `provider === "redis"`, and
+    // `spec.cache` was emitted only when a `cache` block existed — so an app on
+    // GCS with no Redis silently paid a fully-uncached ~2s Node boot on every
+    // cold start (measured on OKE). They are now decided independently.
+    //
+    // Default is OFF (opt-in): the PVC is ReadWriteOnce, so defaulting on would
+    // strand burst pods on a second node, and it never binds on a cluster with
+    // no default StorageClass. Neither may break a deployment that works today.
+    // BACK-COMPAT: with `bytecodeCache` unset we fall back to the legacy
+    // redis⇒on inference, so existing CRs are byte-identical.
+    const enableBytecodeCache =
+        config.bytecodeCache?.enabled ?? config.cache?.provider === "redis";
+
+    const dataCache = config.cache
         ? {
               provider: config.cache.provider,
               url: config.cache.provider === "redis" ? config.cache.url : "",
               ...(config.cache.provider === "redis" && config.cache.keyPrefix
                   ? { keyPrefix: config.cache.keyPrefix }
                   : {}),
-              // Enable bytecode cache by default when Redis is available —
-              // this is what triggers the PVC + NODE_COMPILE_CACHE env var in the operator
-              enableBytecodeCache: config.cache.provider === "redis",
           }
         : undefined;
+
+    // Emit spec.cache when EITHER concern needs it — notably when bytecode
+    // caching is requested with no data-cache provider at all. In that case we
+    // emit ONLY the bytecode fields: an empty `provider` would make the
+    // operator export CACHE_PROVIDER="" / REDIS_URL="".
+    const cache =
+        dataCache || enableBytecodeCache
+            ? {
+                  ...(dataCache ?? {}),
+                  enableBytecodeCache,
+                  // Size is mapped only when authored ⇒ omitted ⇒ the
+                  // operator's own 512Mi default applies, exactly as before.
+                  ...(enableBytecodeCache && config.bytecodeCache?.size
+                      ? { bytecodeCacheSize: config.bytecodeCache.size }
+                      : {}),
+              }
+            : undefined;
 
     // Database binding spec (#417, ADR-0019) — maps config.database ->
     // spec.database ONLY when config.database.secretRef is set, mirroring

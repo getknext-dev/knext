@@ -87,6 +87,11 @@ points `BUN_RUNTIME_TRANSPILER_CACHE_PATH` at the same persistent volume that ba
 death and pays off across cold starts — worth roughly 20% alone, and composing with the bytecode
 pass to 145 ms warm in the measurement above.
 
+Because it rides on that same volume, it inherits the same constraint: the volume attaches to **one
+node at a time**, so enabling it on an app that scales out across nodes leaves the extra pods
+`Pending`. The build-time bytecode pass above has no such limit — it is baked into the image. See
+[bytecode caching](/docs/bytecode).
+
 ## The keep-alive guard (Bun ≤ 1.3)
 
 Bun releases up to 1.3.x have a socket-reuse bug: a reused keep-alive connection can be **reset**

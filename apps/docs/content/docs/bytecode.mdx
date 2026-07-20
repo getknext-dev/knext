@@ -8,6 +8,45 @@ compiling JavaScript from source. knext skips that work: on **Node** by persisti
 cache to a volume, and on **Bun** by precompiling the standalone tree to bytecode at **build
 time** (see [Bun runtime](/docs/bun-runtime)). This page covers the Node mechanism.
 
+<Callout type="warn">
+**Opt in deliberately — this caps how wide your app can scale.** The Node bytecode cache is off by
+default for new configurations (see [Already on for Redis
+users](#already-on-for-redis-users) for the one case where it is on without you asking), and it is
+not a free win. The cache lives on a persistent volume that **attaches to one
+node at a time**, so if your app scales out and Kubernetes places a pod on a *second* node, that
+pod cannot attach the volume and will sit **Pending** instead of serving traffic. On a cluster
+with **no default storage class**, the volume never binds at all and the app does not start.
+
+Enable it when cold-start latency matters more than horizontal fan-out — a read-mostly zone that
+wakes from zero and runs a handful of pods on one node. Leave it off for anything that bursts
+wide. Confirm your cluster has a default storage class before turning it on.
+</Callout>
+
+## Already on for Redis users
+
+<Callout type="warn">
+**If your config sets the Redis cache provider and has no `bytecodeCache` block, bytecode caching
+is already enabled for your app** — you did not have to opt in. This is long-standing behaviour,
+kept as-is so that upgrading knext does not silently change how existing deployments are
+provisioned.
+
+That means the scaling constraint above already applies to you: your app's cache volume attaches to
+**one node at a time**, so pods that Kubernetes places on a second node will sit **Pending**. If
+your app runs — or may ever run — on more than one node, check this before you scale out.
+
+To turn it off explicitly:
+
+```ts
+export default {
+  cache: { provider: 'redis', url: process.env.REDIS_URL },
+  bytecodeCache: { enabled: false },
+}
+```
+
+Setting `bytecodeCache` at all — `enabled: true` or `enabled: false` — takes over from the
+inference, so an explicit block always wins.
+</Callout>
+
 ## How it works (Node)
 
 knext runs the standalone server with `NODE_COMPILE_CACHE` pointing at a directory. On the first
@@ -28,7 +67,11 @@ The Dockerfile supplies a fallback path; the operator's externally-injected valu
 NODE_COMPILE_CACHE=/cache/bytecode/latest
 ```
 
-backed by a PVC, so the cache survives pod death and is shared across cold starts.
+backed by a persistent volume, so the cache survives pod death and is shared across cold starts.
+
+This is independent of your **data cache**. Bytecode caching governs how fast the server *boots*;
+the cache provider (`redis`, and friends) governs where *ISR and data* are cached. You can turn on
+bytecode caching with no data-cache provider configured at all, and vice versa.
 
 <Callout type="warn">
 **Persistence is the whole point.** A pod-local cache directory would be re-primed on every cold

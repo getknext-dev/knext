@@ -70,13 +70,25 @@ When `spec.cache.enableBytecodeCache` is true the operator creates a
 BytecodeCacheSize is unset"*). The PVC is mounted at `/cache/bytecode`
 (`nextapp_controller.go:431-432`).
 
-> **Gotcha (as-built):** `NODE_COMPILE_CACHE` is only set when a cache
-> **`provider`** is also configured — the env var is emitted inside the
-> `spec.cache.provider != ""` block (`nextapp_controller.go:350-358`), pointing at
-> `/cache/bytecode/latest`. Asserted by `reconcile_output_test.go:303` *"mounts the
-> PVC but omits NODE_COMPILE_CACHE when no cache Provider is set"*. Set
-> `spec.cache.provider` (e.g. `redis`) alongside `enableBytecodeCache` to actually
-> activate the V8 compile cache.
+`NODE_COMPILE_CACHE` (pointing at `/cache/bytecode/latest`) is emitted from
+`enableBytecodeCache` **alone** — it is independent of `spec.cache.provider`.
+The bytecode cache governs **server boot speed**; the cache `provider` governs
+**ISR/data caching**. They are orthogonal concerns that merely share the
+`spec.cache` block, so a zone with no data-cache provider (or a non-Redis one)
+still gets a working compile cache.
+
+> **Changed:** `NODE_COMPILE_CACHE` used to be nested inside the
+> `spec.cache.provider != ""` branch, so enabling the bytecode cache without a
+> provider mounted a PVC that nothing ever wrote to. Fixed — no config change is
+> needed for setups that already set a provider.
+
+**Cost — read before enabling.** The PVC is `ReadWriteOnce`. A `ReadWriteOnce`
+volume attaches to **one node at a time**, so pods that scale out onto a second
+node cannot attach it and stay `Pending`. On a cluster with **no default
+StorageClass** the PVC never binds and the pod never starts at all. This is why
+the cache is **opt-in** rather than on by default: prefer it for
+cold-start-sensitive zones with modest fan-out, and verify a default
+StorageClass exists first.
 
 ## What a cold start costs, and what mitigates it
 
@@ -101,10 +113,28 @@ matters:
 ```yaml
 spec:
   cache:
-    provider: redis            # required for NODE_COMPILE_CACHE to be emitted
     enableBytecodeCache: true
     bytecodeCacheSize: 1Gi     # optional; defaults to 512Mi
 ```
+
+No `provider` is required — add one only if you also want Redis-backed ISR/data
+caching. From `kn-next.config.ts` this is a top-level block, deliberately
+separate from `cache`:
+
+```ts
+export default {
+  // ...
+  bytecodeCache: { enabled: true, size: "1Gi" },  // boot speed
+  cache: { provider: "redis", url: "..." },       // ISR/data caching (independent)
+};
+```
+
+> **Back-compat (CLI only).** When `bytecodeCache` is **omitted**, `cr-builder.ts` falls back to the
+> legacy inference `cache.provider === "redis" ⇒ enableBytecodeCache: true`, so CRs generated from
+> existing configs are byte-identical. "Opt-in" is therefore exact at the **CRD** level
+> (`enableBytecodeCache` defaults to false) and *inherited* at the config level by Redis users who
+> never set `bytecodeCache`. Set `bytecodeCache: { enabled: false }` to opt a Redis app out
+> explicitly — that wins over the inference.
 
 This removes the JS recompile cost. It does **not** remove framework boot or the
 database pool re-establish — those are addressed below.
@@ -571,7 +601,7 @@ record.
 | Cold start on critical path | `spec.scaling.minScale: 1` (keep warm) |
 | Cold start only during known peaks | `spec.scaling.warmSchedule` (operator-owned scheduled min-scale floor, ADR-0030; no KEDA/CronJobs) + the SAME windows on the AppDatabase `spec.warmSchedule` for the DB half (#388) |
 | Cost on idle read zones | `spec.scaling.minScale: 0` (scale to zero) |
-| JS recompile on cold start | `spec.cache.enableBytecodeCache: true` (+ a `provider`) |
+| JS recompile on cold start | `spec.cache.enableBytecodeCache: true` (no `provider` needed) |
 | DB pool re-establish | warm zone (`minScale: 1`) and/or transaction-mode pooler; during declared windows, AppDatabase `spec.warmSchedule` holds the compute warm (#388) |
 | Connection storm | low `maxScale` + declare `poolMax` (operator enforces `maxScale × poolMax ≤ 80`, ADR-0028); a pooler caps it further |
 | Reactive scale-out under burst | lower `containerConcurrency` (default now `20`, ADR-0028; W1/#376 refines) |
