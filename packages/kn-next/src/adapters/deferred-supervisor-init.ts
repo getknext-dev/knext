@@ -40,15 +40,28 @@
  * cannot open a mishandled-signal window: the hook is registered, and the load
  * happens inside the drain, bounded by the grace cap.
  *
- * ## Cost of the trade
+ * ## What binds early vs what loads lazily (#441 correction)
  *
- * :9091 is not bound until the deferred init runs, so a scrape landing inside the
- * boot window is refused rather than answered. Prometheus records a failed scrape
- * and retries; this is the price of moving `prom-client` + `@opentelemetry/api`
- * off the critical path. Once bound, the exposition is COMPLETE — the default
- * families are registered as part of the same step, and the first scrape still
- * starts them on demand if it somehow wins the race. Operators who prefer
- * metrics-from-t=0 set `KNEXT_DEFER_SUPERVISOR_INIT=0`.
+ * The platform contract — enforced by the shipped-bundle SIGTERM drain gate — is
+ * that the :9091 sidecar answers WHILE the runtime entry is up. An idle
+ * `http.createServer(...).listen()` is free (it samples nothing and pulls no heavy
+ * module), so the FIRST attempt's regression was deferring the `listen()` itself.
+ * The expensive thing is the ~790ms module GRAPH (`prom-client` +
+ * `@opentelemetry/api` via `./metrics`, plus the `@knext/lib` clients via
+ * `db-drain`), NOT binding a socket. So the split is:
+ *
+ *  - {@link LazyMetricsEndpoint.ensureListening} binds :9091 EARLY with a
+ *    LIGHTWEIGHT request listener that statically references NONE of the heavy
+ *    modules. The graph is pulled by a dynamic `import()` on the FIRST scrape (a
+ *    boot-window scrape is answered — possibly slowly — with a COMPLETE
+ *    exposition, never refused), so :9091 is up from process start.
+ *  - {@link LazyMetricsEndpoint.startCollector} loads that same graph and starts
+ *    `collectDefaultMetrics` — driven off the child-ready probe as a deferred
+ *    step, so the heavy load lands AFTER the child is serving, not on its boot.
+ *
+ * Net: :9091 listens from t=0 (contract satisfied), but the prom-client/OTel graph
+ * only loads on the first scrape or on child-ready (cold-start budget preserved).
+ * Operators who prefer eager collection set `KNEXT_DEFER_SUPERVISOR_INIT=0`.
  */
 
 import http from "node:http";
@@ -156,29 +169,59 @@ export interface LazyMetricsEndpoint {
      * is what lets the SIGTERM handler be wired before the deferred init runs.
      */
     readonly closable: Closable;
-    /** Create the registry + server and bind the port. Idempotent. */
+    /**
+     * Bind :9091 with a LIGHTWEIGHT request listener. Idempotent. Does NOT load
+     * `prom-client` / `./metrics` — that heavy graph is pulled lazily by the
+     * first scrape (or by {@link startCollector}), so binding stays cheap enough
+     * to run from process start and honour the sidecar-always-up contract.
+     */
     ensureListening(reason: string): Promise<void>;
+    /**
+     * Load the heavy metrics graph and start `collectDefaultMetrics`. Idempotent
+     * and concurrency-safe; safe to call before OR after {@link ensureListening}.
+     * Driven off the child-ready probe so the ~790ms load lands after the child
+     * is serving, not on its cold-start path.
+     */
+    startCollector(reason: string): Promise<void>;
     isListening(): boolean;
     /** The bound port (useful when `port: 0`), or `undefined` if not listening. */
     address(): number | undefined;
 }
 
+/** The heavy metrics graph — loaded exactly once via a dynamic import. */
+interface MetricsGraph {
+    readonly handle: (
+        req: { url?: string; method?: string },
+        res: {
+            setHeader(name: string, value: string): unknown;
+            writeHead(status: number): unknown;
+            end(body?: string): unknown;
+        },
+    ) => Promise<void>;
+    ensureCollected(reason: string): Promise<boolean>;
+}
+
 /**
- * A :9091 metrics endpoint that costs NOTHING until it is first needed.
+ * A :9091 metrics endpoint whose SOCKET binds early but whose ~790ms module graph
+ * (`prom-client` + `@opentelemetry/api` via `./metrics`) loads lazily.
  *
- * Construction touches no heavy module: `prom-client` and `./metrics` (which
- * pulls `@opentelemetry/api`) are loaded by the dynamic import inside
- * {@link LazyMetricsEndpoint.ensureListening}, so they stay off the pre-spawn
- * path entirely.
+ * The request listener passed to `http.createServer` is a plain closure that
+ * references NONE of the heavy modules statically — so creating and binding the
+ * server pulls nothing expensive. The graph is loaded by the dynamic `import()`
+ * in {@link loadGraph}, reached only on the first scrape or from
+ * {@link LazyMetricsEndpoint.startCollector}. This keeps the sidecar answering
+ * from process start (contract) while the heavy load stays off the boot path.
  */
 export function createLazyMetricsEndpoint(
     options: LazyMetricsEndpointOptions,
 ): LazyMetricsEndpoint {
     let server: http.Server | undefined;
-    let starting: Promise<void> | undefined;
+    let listening: Promise<void> | undefined;
+    let graph: Promise<MetricsGraph> | undefined;
 
-    const start = async (reason: string): Promise<void> => {
-        // The ONE place the heavy metrics graph is loaded.
+    // The ONE place the heavy metrics graph is loaded. Dynamic imports keep
+    // prom-client + @opentelemetry/api off the pre-spawn / listen path.
+    const loadGraph = async (): Promise<MetricsGraph> => {
         const metrics = await import("./metrics");
         const { Registry: PromRegistry } = await import("prom-client");
 
@@ -187,40 +230,44 @@ export function createLazyMetricsEndpoint(
             registry: reg,
             log: options.log,
         });
-
         const fetchChild =
             options.fetchChild ??
             (() => metrics.fetchChildMetrics(metrics.CHILD_METRICS_PORT));
 
-        const srv = http.createServer(
-            metrics.createSupervisorMetricsHandler({
-                registry: reg,
-                // Still on-demand: if a scrape somehow beats the line below,
-                // it starts collection itself rather than serving an empty
-                // registry. Idempotent, so the two can race safely.
-                ensureDefaultMetrics: () => deferred.ensureStarted("scrape"),
-                fetchChild,
-            }),
-        );
-        server = srv;
-
-        await deferred.ensureStarted(reason);
-
-        await new Promise<void>((resolvePromise, rejectPromise) => {
-            const onError = (err: Error) => {
-                srv.removeListener("error", onError);
-                rejectPromise(err);
-            };
-            srv.once("error", onError);
-            srv.listen(options.port, () => {
-                srv.removeListener("error", onError);
-                options.log?.info(
-                    { port: addressOf(srv), reason },
-                    "Prometheus metrics server started",
-                );
-                resolvePromise();
-            });
+        const handle = metrics.createSupervisorMetricsHandler({
+            registry: reg,
+            // On-demand: a scrape landing before the child-ready collector fires
+            // still starts collection itself, so the first exposition is COMPLETE
+            // rather than empty. Idempotent, so the two paths race safely.
+            ensureDefaultMetrics: () => deferred.ensureStarted("scrape"),
+            fetchChild,
         });
+        return {
+            handle,
+            ensureCollected: (reason) => deferred.ensureStarted(reason),
+        };
+    };
+    const ensureGraph = (): Promise<MetricsGraph> => {
+        graph ??= loadGraph();
+        return graph;
+    };
+
+    // Lightweight listener: it lazy-loads the heavy graph on the FIRST request
+    // and delegates. It references no heavy module statically, so binding the
+    // server (below) never pulls prom-client / ./metrics in.
+    const requestListener = (
+        req: http.IncomingMessage,
+        res: http.ServerResponse,
+    ): void => {
+        ensureGraph()
+            .then((g) => g.handle(req, res))
+            .catch((err) => {
+                options.log?.warn({ err }, "Metrics scrape failed");
+                if (!res.headersSent) {
+                    res.writeHead(500);
+                }
+                res.end();
+            });
     };
 
     return {
@@ -234,8 +281,28 @@ export function createLazyMetricsEndpoint(
             },
         },
         ensureListening(reason: string): Promise<void> {
-            starting ??= start(reason);
-            return starting;
+            listening ??= new Promise<void>((resolvePromise, rejectPromise) => {
+                const srv = http.createServer(requestListener);
+                server = srv;
+                const onError = (err: Error) => {
+                    srv.removeListener("error", onError);
+                    rejectPromise(err);
+                };
+                srv.once("error", onError);
+                srv.listen(options.port, () => {
+                    srv.removeListener("error", onError);
+                    options.log?.info(
+                        { port: addressOf(srv), reason },
+                        "Prometheus metrics server started",
+                    );
+                    resolvePromise();
+                });
+            });
+            return listening;
+        },
+        async startCollector(reason: string): Promise<void> {
+            const g = await ensureGraph();
+            await g.ensureCollected(reason);
         },
         isListening(): boolean {
             return server?.listening ?? false;

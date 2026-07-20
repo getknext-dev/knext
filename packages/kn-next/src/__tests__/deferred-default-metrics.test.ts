@@ -253,34 +253,41 @@ describe("node-server.ts wiring (source guard)", () => {
         expect(src).not.toMatch(/^collectDefaultMetrics\(/m);
     });
 
-    it("wires the deferred init behind the child-readiness probe", () => {
+    it("wires the deferred collector behind the child-readiness probe", () => {
         // The default-metrics deferral now lives INSIDE the lazy metrics
-        // endpoint (createLazyMetricsEndpoint), which node-server.ts drives
-        // through the shared readiness probe.
+        // endpoint (createLazyMetricsEndpoint); node-server.ts warms it via the
+        // shared readiness probe while the socket is bound eagerly.
         expect(src).toContain("createLazyMetricsEndpoint");
         expect(src).toContain("createDeferredSupervisorInit");
         expect(src).toContain("waitForChildServing");
     });
 
-    it("binds :9091 only AFTER the spawn (deliberate reversal — see #441)", () => {
-        // cdd3f7c kept `metricsServer.listen()` before the spawn on the theory
-        // that an idle listener is free. It is — but CREATING it is not: the
-        // handler needs ./metrics, which statically pulls @opentelemetry/api +
-        // prom-client, and static imports are evaluated before the module body.
-        // Profiling attributed the supervisor's ~1 CPU-second to exactly this
-        // kind of eager module loading, so the whole endpoint moved behind the
-        // readiness probe. The cost, accepted knowingly: a scrape landing in the
-        // boot window is refused rather than answered.
+    it("binds :9091 EARLY (before the spawn) but warms the graph after (#441)", () => {
+        // #441 correction: an idle http listener really IS free — the ~790ms
+        // cost is the prom-client + @opentelemetry/api module GRAPH, which loads
+        // lazily on the first scrape / child-ready, NOT at listen() time. So the
+        // platform contract (the :9091 sidecar answers while the runtime entry is
+        // up, enforced by the shipped-bundle drain gate) is honoured by binding
+        // the socket BEFORE the spawn, while the heavy load stays deferred.
         expect(src).not.toContain("metricsServer.listen(");
         const createAt = src.indexOf("createLazyMetricsEndpoint({");
         const spawnAt = src.indexOf("spawn(process.execPath");
         const listenAt = src.indexOf('metricsEndpoint.ensureListening("');
         expect(createAt).toBeGreaterThan(-1);
         expect(listenAt).toBeGreaterThan(-1);
+        expect(spawnAt).toBeGreaterThan(-1);
         // Constructed early (so the closable is wired into shutdown)...
         expect(createAt).toBeLessThan(spawnAt);
-        // ...but the actual bind is a deferred step, not pre-spawn work.
-        expect(src).toContain('name: "metrics-endpoint"');
+        // ...and the socket is bound BEFORE the spawn (contract), not deferred.
+        expect(listenAt).toBeLessThan(spawnAt);
+        // The heavy graph load is the deferred step, not the listen.
+        expect(src).toContain('name: "metrics-collector"');
+        expect(src).toContain('metricsEndpoint.startCollector("child-ready")');
+        // The old "listen is a deferred step" wiring must be gone.
+        expect(src).not.toContain('name: "metrics-endpoint"');
+        expect(src).not.toContain(
+            'metricsEndpoint.ensureListening("deferred-init")',
+        );
     });
 
     it("leaves the SIGTERM drain wiring untouched", () => {

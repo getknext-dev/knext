@@ -42,16 +42,19 @@ const METRICS_PORT = Number(process.env.METRICS_PORT ?? 9091);
 // terminationGracePeriodSeconds (k8s default 30s) so the child drains in time.
 const SHUTDOWN_GRACE_MS = Number(process.env.SHUTDOWN_GRACE_MS ?? 25_000);
 
-// ── Prometheus metrics endpoint on :9091 (DEFERRED — see #441) ────────────────
+// ── Prometheus metrics endpoint on :9091 (#441) ───────────────────────────────
 // Clean separation: Next.js standalone owns $PORT (3000), metrics owns 9091.
 //
-// Constructing this costs nothing: `prom-client` and `./metrics` (which pulls
-// `@opentelemetry/api`) are loaded by a dynamic import inside `ensureListening`.
-// That is the point — profiling showed the supervisor spends ~1 CPU-second on
-// its own startup, dominated by static module graphs, and since it spawns the
-// child at 52ms that cost lands on the child's boot (~847ms on a 0-CPU-request
-// pod). Static ESM imports run BEFORE the module body, so deferring the *work*
-// was not enough; the *imports* had to move.
+// The SOCKET binds early (see the eager section below) so the sidecar answers
+// from process start — the platform contract enforced by the shipped-bundle drain
+// gate. What binding does NOT do is load the heavy graph: `prom-client` and
+// `./metrics` (which pulls `@opentelemetry/api`, ~790ms) are reached only by the
+// dynamic `import()` inside the endpoint, on the first scrape or from
+// `startCollector`. Profiling showed the supervisor spends ~1 CPU-second on its
+// own startup, dominated by those static module graphs; since it spawns the child
+// at 52ms that cost otherwise lands on the child's boot. Static ESM imports run
+// BEFORE the module body, so the heavy *imports* had to move — but an idle
+// listener is free, so the listen() itself does not.
 //
 // The golden-signal / cold-start / db-wake metrics (#315) are emitted in the
 // Next.js CHILD (that's where the @vercel/otel HTTP spans + the #317 hooks run).
@@ -95,8 +98,11 @@ const deferredInit = createDeferredSupervisorInit({
     log,
     steps: [
         {
-            name: "metrics-endpoint",
-            run: () => metricsEndpoint.ensureListening("deferred-init"),
+            // The :9091 socket is already bound (eager section below); this step
+            // warms the heavy metrics graph + starts collectDefaultMetrics once
+            // the child is serving, so the ~790ms load stays off its boot path.
+            name: "metrics-collector",
+            run: () => metricsEndpoint.startCollector("child-ready"),
         },
         {
             name: "image-cache-sync",
@@ -223,6 +229,16 @@ const onSignal = (signal: string) => {
 process.on("SIGTERM", () => onSignal("SIGTERM"));
 process.on("SIGINT", () => onSignal("SIGINT"));
 
+// ── Bind :9091 EARLY (#441) ──────────────────────────────────────────────────
+// The metrics sidecar must answer WHILE the runtime entry is up (platform
+// contract, enforced by the shipped-bundle drain gate). Binding the socket is
+// free — the lightweight listener pulls no heavy module; prom-client +
+// @opentelemetry/api load lazily on the first scrape or on child-ready. So we
+// listen from process start and keep the ~790ms graph off the cold-start path.
+void metricsEndpoint.ensureListening("startup").catch((err) => {
+    log.warn({ err }, "Metrics endpoint failed to bind :9091");
+});
+
 // ═══ Spawn the child — the cold-start critical path ═══════════════════════════
 const nextProc = spawn(process.execPath, [...preloadArgs, serverJs], {
     stdio: "inherit",
@@ -246,9 +262,12 @@ nextProc.on("exit", (code, signal) => {
 // IS the "child is serving" signal — no new protocol and no stdout parsing
 // (stdio is `inherit`, so the child's logs stay untouched). Once it answers, the
 // cold-start critical path is over and the supervisor can finally pay for its
-// own startup: bind :9091 (loading prom-client + @opentelemetry/api) and start
-// the image-cache sync. The deadline covers a child that never binds, so a
-// broken app never costs us the metrics endpoint permanently.
+// own startup: warm the metrics graph (loading prom-client + @opentelemetry/api)
+// and start collectDefaultMetrics + the image-cache sync. :9091 itself is already
+// bound (eager section above); this only loads the heavy graph behind it. The
+// deadline covers a child that never binds, so a broken app never leaves the
+// endpoint permanently un-warmed — and a scrape meanwhile still warms it on
+// demand.
 if (isSupervisorInitDeferred()) {
     waitForChildServing({
         port: Number(process.env.PORT ?? 3000),

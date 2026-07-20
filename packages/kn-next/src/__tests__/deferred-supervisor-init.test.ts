@@ -352,4 +352,55 @@ describe("createLazyMetricsEndpoint", () => {
         expect(endpoint.address()).toBe(port);
         await new Promise<void>((r) => endpoint.closable.close(() => r()));
     });
+
+    it("binds the socket WITHOUT the collector, then a scrape warms it (#441)", async () => {
+        // The regression fix: listen() is early + cheap, the heavy graph loads
+        // lazily. ensureListening must bind the port even though startCollector
+        // was never called, and the FIRST scrape must still produce a complete
+        // exposition (default families warmed on demand). This is exactly what
+        // the shipped-bundle drain gate asserts against :9091.
+        const endpoint = createLazyMetricsEndpoint({
+            port: 0,
+            fetchChild: async () => "",
+        });
+        await endpoint.ensureListening("startup");
+        expect(endpoint.isListening()).toBe(true);
+
+        const res = await fetch(
+            `http://127.0.0.1:${endpoint.address()}/metrics`,
+        );
+        expect(res.status).toBe(200);
+        expect(await res.text()).toContain(
+            "# HELP process_cpu_user_seconds_total",
+        );
+        await new Promise<void>((r) => endpoint.closable.close(() => r()));
+    });
+
+    it("startCollector warms the default families before any scrape, idempotently", async () => {
+        // Driven off the child-ready probe: warm the graph so post-ready scrapes
+        // are fast. A second call must not double-register (prom-client throws on
+        // duplicate default metrics), and it must not require ensureListening.
+        const endpoint = createLazyMetricsEndpoint({
+            port: 0,
+            fetchChild: async () => "",
+        });
+        await expect(
+            endpoint.startCollector("child-ready"),
+        ).resolves.toBeUndefined();
+        // Idempotent — a duplicate collectDefaultMetrics on the same registry
+        // would throw; this must not.
+        await expect(
+            endpoint.startCollector("scrape"),
+        ).resolves.toBeUndefined();
+
+        // The warmed families surface once we bind + scrape.
+        await endpoint.ensureListening("startup");
+        const res = await fetch(
+            `http://127.0.0.1:${endpoint.address()}/metrics`,
+        );
+        expect(await res.text()).toContain(
+            "# HELP process_cpu_user_seconds_total",
+        );
+        await new Promise<void>((r) => endpoint.closable.close(() => r()));
+    });
 });
