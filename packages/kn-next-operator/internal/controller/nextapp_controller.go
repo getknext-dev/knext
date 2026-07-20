@@ -631,20 +631,31 @@ func (r *NextAppReconciler) reconcileBytecodeCachePVC(ctx context.Context, nextA
 	if size == "" {
 		size = "512Mi"
 	}
+	// #431: never MustParse unvalidated CR input inside the reconciler — a
+	// malformed quantity would panic the whole controller. Validation
+	// (validateBytecodeCacheSize) rejects bad sizes upstream; this
+	// error-returning parse is the defense-in-depth for stored CRs that
+	// predate that check.
+	quantity, err := resource.ParseQuantity(size)
+	if err != nil {
+		return fmt.Errorf(
+			"spec.cache.bytecodeCacheSize %q is not a valid Kubernetes quantity: %w", size, err,
+		)
+	}
 	pvc := &corev1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      nextApp.Name + "-bytecode-cache",
 			Namespace: nextApp.Namespace,
 		},
 	}
-	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, pvc, func() error {
+	_, err = controllerutil.CreateOrUpdate(ctx, r.Client, pvc, func() error {
 		if pvc.Spec.AccessModes == nil {
 			pvc.Spec.AccessModes = []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce}
 		}
 		if pvc.Spec.Resources.Requests == nil {
 			pvc.Spec.Resources.Requests = corev1.ResourceList{}
 		}
-		pvc.Spec.Resources.Requests[corev1.ResourceStorage] = resource.MustParse(size)
+		pvc.Spec.Resources.Requests[corev1.ResourceStorage] = quantity
 		return ctrl.SetControllerReference(nextApp, pvc, r.Scheme)
 	})
 	return err
