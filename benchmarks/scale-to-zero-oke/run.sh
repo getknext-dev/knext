@@ -112,6 +112,15 @@ API_RETRY_MAX_MS="${API_RETRY_MAX_MS:-8000}"       # per-step backoff ceiling
 # the retry *scheduling*: the worst case is then attempts x per-call duration,
 # and the run says so at startup.
 API_RETRY_DEADLINE_S="${API_RETRY_DEADLINE_S:-60}"
+# Per-CALL cap, distinct from the TOTAL budget above. Making one knob do both
+# jobs made API_RETRY_ATTEMPTS dead for the case this feature exists for: a hung
+# first attempt consumed the entire budget, so a stalled apiserver got exactly
+# one attempt however many were configured. Default: deadline/attempts (>=1s),
+# so all configured attempts fit inside the total budget by construction and the
+# budget stays the authoritative bound. Set explicitly to override; an override
+# larger than the total budget is clamped to it, because no single call may
+# outlive the budget that bounds the whole operation.
+API_CALL_TIMEOUT_S="${API_CALL_TIMEOUT_S:-}"
 API_TIMEOUT_BIN=""
 if command -v timeout >/dev/null 2>&1; then API_TIMEOUT_BIN="timeout"
 elif command -v gtimeout >/dev/null 2>&1; then API_TIMEOUT_BIN="gtimeout"; fi
@@ -163,10 +172,15 @@ Transient-API retry (see README "Transient API retry"):
                                \$API_RETRY_ATTEMPTS)
   --api-retry-base-ms <ms>    first backoff step (default: 500; \$API_RETRY_BASE_MS)
   --api-retry-max-ms <ms>     per-step backoff ceiling (default: 8000; \$API_RETRY_MAX_MS)
-                              \$API_RETRY_DEADLINE_S (default 60) boxes each operation:
-                              it gates retry scheduling AND caps each call via
-                              timeout(1) — without timeout/gtimeout on PATH only the
-                              scheduling is bounded (the run says so at startup).
+  --api-call-timeout-s <s>    hard cap on a SINGLE API call (default: derived as
+                              \$API_RETRY_DEADLINE_S / attempts, min 1s; \$API_CALL_TIMEOUT_S).
+                              Clamped to the total budget.
+                              \$API_RETRY_DEADLINE_S (default 60) is the TOTAL wall-clock
+                              budget for one operation; the per-call cap above bounds each
+                              individual (possibly hung) call via timeout(1), so every
+                              configured attempt fits inside the budget. Without
+                              timeout/gtimeout on PATH only the scheduling is bounded
+                              (the run says so at startup).
                               ONLY transient errors (TLS handshake timeout, connection
                               refused/reset, i/o timeout, 5xx, TooManyRequests/throttling)
                               are retried;
@@ -204,6 +218,7 @@ while [ $# -gt 0 ]; do
     --burst-reps) BURST_REPS="$2"; shift 2 ;;
     --out) OUT="$2"; shift 2 ;;
     --api-retry-attempts) API_RETRY_ATTEMPTS="$2"; shift 2 ;;
+    --api-call-timeout-s) API_CALL_TIMEOUT_S="$2"; shift 2 ;;
     --api-retry-base-ms) API_RETRY_BASE_MS="$2"; shift 2 ;;
     --api-retry-max-ms) API_RETRY_MAX_MS="$2"; shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
@@ -338,6 +353,38 @@ classify_api_error() {
 # in the results file and summarised in the final verdict.
 API_RETRY_COUNT=0
 API_RETRY_OPS=""   # newline-separated op names, one line per retry performed
+# Retries are only half the story. An operation that hit transient errors and
+# was then GIVEN UP ON (attempts exhausted, or the wall-clock budget spent while
+# a call was still hanging) recorded nothing at all: the wall-clock check
+# returned before the retry counter was incremented, so a run whose control
+# plane demonstrably stalled was filed as "api retries: 0 ... clean
+# control-plane run". Abandonments are therefore counted separately and
+# reported, and the "clean" claim requires BOTH counters to be zero.
+API_ABANDONED_COUNT=0
+API_ABANDONED_OPS=""
+
+# record_api_abandon <op-label> <why> — a transient failure we stopped fighting.
+record_api_abandon() {
+  API_ABANDONED_COUNT=$((API_ABANDONED_COUNT + 1))
+  API_ABANDONED_OPS="${API_ABANDONED_OPS}${1}"$'\n'
+  log "  api-abandoned: op='${1}' — giving up after transient failures: ${2}; the API said: $(printf '%s' "$API_RETRY_LAST_OUT" | head -n 1)"
+}
+
+# api_call_cap <attempts> — the per-call timeout(1) cap for one attempt.
+api_call_cap() {
+  local attempts="$1" deadline="$API_RETRY_DEADLINE_S" cap
+  [ "$deadline" -ge 1 ] 2>/dev/null || { echo 0; return 0; }
+  if [ -n "$API_CALL_TIMEOUT_S" ]; then
+    cap="$API_CALL_TIMEOUT_S"
+    [ "$cap" -ge 1 ] 2>/dev/null || cap=0
+  else
+    cap=$(( deadline / attempts ))
+    [ "$cap" -lt 1 ] && cap=1
+  fi
+  # A single call may never outlive the budget for the whole operation.
+  [ "$cap" -gt "$deadline" ] && cap="$deadline"
+  echo "$cap"
+}
 
 # api_retry <op-label> <command...>
 # Runs the command, retrying ONLY transient failures with capped exponential
@@ -363,8 +410,8 @@ api_retry() {
   local backoff_ms="$API_RETRY_BASE_MS" n=1 rc=0 class="" start now
   [ "$backoff_ms" -ge 0 ] 2>/dev/null || backoff_ms=0
   start=$(date +%s)
-  local per_call="$API_RETRY_DEADLINE_S"
-  [ "$per_call" -ge 1 ] 2>/dev/null || per_call=0
+  local per_call
+  per_call=$(api_call_cap "$attempts")
   while :; do
     # Set explicitly rather than as an assignment prefix: prefix assignments on a
     # shell-function call have surprising persistence semantics across bash modes.
@@ -377,7 +424,7 @@ api_retry() {
     # verbatim "kubectl said: ..." reporting stays truthful instead of blank.
     if [ -n "$API_TIMEOUT_BIN" ] && [ "$per_call" -gt 0 ] \
        && { [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; }; then
-      API_RETRY_LAST_OUT="i/o timeout: the API call did not return within API_RETRY_DEADLINE_S=${per_call}s and was terminated${API_RETRY_LAST_OUT:+ — partial output: ${API_RETRY_LAST_OUT}}"
+      API_RETRY_LAST_OUT="i/o timeout: the API call did not return within the per-call cap of ${per_call}s (budget API_RETRY_DEADLINE_S=${API_RETRY_DEADLINE_S}s / ${attempts} attempts) and was terminated${API_RETRY_LAST_OUT:+ — partial output: ${API_RETRY_LAST_OUT}}"
     fi
     API_RETRY_LAST_ATTEMPTS=$n
     [ "$rc" -eq 0 ] && return 0
@@ -386,12 +433,20 @@ api_retry() {
     # Terminal: fail exactly as fast as before this feature existed.
     [ "$class" != "transient" ] && return "$rc"
     # Bounded by attempts...
-    [ "$n" -ge "$attempts" ] && return "$rc"
+    if [ "$n" -ge "$attempts" ]; then
+      record_api_abandon "$op" "API_RETRY_ATTEMPTS=${attempts} exhausted"
+      return "$rc"
+    fi
     # ...and by wall clock. With timeout(1) present this is a genuine box: each
-    # attempt is itself capped at API_RETRY_DEADLINE_S, so a hung apiserver
-    # cannot stretch a run. Without it, this check only bounds *scheduling*.
+    # attempt is itself capped at ${per_call}s, so a hung apiserver cannot
+    # stretch a run. Without it, this check only bounds *scheduling*.
+    # The abandonment is RECORDED before returning: this return used to be the
+    # one exit that left no trace, which is how a stalled run got filed as clean.
     now=$(date +%s)
-    [ $((now - start)) -ge "$API_RETRY_DEADLINE_S" ] 2>/dev/null && return "$rc"
+    if [ $((now - start)) -ge "$API_RETRY_DEADLINE_S" ] 2>/dev/null; then
+      record_api_abandon "$op" "the API_RETRY_DEADLINE_S=${API_RETRY_DEADLINE_S}s budget was spent after ${n} attempt(s)"
+      return "$rc"
+    fi
 
     # Equal jitter (d/2 + rand[0,d/2]) so repeated ops don't synchronise.
     local sleep_ms sleep_s
@@ -416,6 +471,8 @@ log "phases=$PHASES burst-vus=$BURST_VUS (>= container-concurrency*max-scale for
 log "k6 image=$IMG cpu-request=$K6_CPU_REQUEST (kept small — see README 'oversized k6 request' trap)"
 if [ -z "$API_TIMEOUT_BIN" ]; then
   log "NOTE: no timeout(1)/gtimeout on PATH — API_RETRY_DEADLINE_S=${API_RETRY_DEADLINE_S}s bounds only retry SCHEDULING, not an individual hung API call (worst case ~ ${API_RETRY_ATTEMPTS} x per-call duration). Install coreutils for a hard per-call box."
+else
+  log "api retry: up to ${API_RETRY_ATTEMPTS} attempt(s) per operation, each call capped at $(api_call_cap "$API_RETRY_ATTEMPTS")s, total budget API_RETRY_DEADLINE_S=${API_RETRY_DEADLINE_S}s (worst case ~ budget + one per-call cap)."
 fi
 if [ "$DRY_RUN" = "1" ]; then
   if [ "$DRY_RUN_EXERCISE_KC" = "1" ]; then
@@ -589,21 +646,28 @@ cleanup() {
   # Transient-retry disclosure (#427). Printed ALWAYS, including the zero case,
   # so "this run hit no API trouble" is a positive statement in the artifact
   # rather than the absence of a line a reader might not know to look for.
-  if [ "$API_RETRY_COUNT" -gt 0 ]; then
+  # A run is degraded if the control plane misbehaved AT ALL — whether we
+  # recovered by retrying or gave up. Keying this on the retry count alone meant
+  # a run killed by a stalled apiserver (0 retries, 1 abandonment) printed the
+  # "clean control-plane run" line.
+  if [ "$API_RETRY_COUNT" -gt 0 ] || [ "$API_ABANDONED_COUNT" -gt 0 ]; then
     local ops_summary
-    ops_summary=$(printf '%s' "$API_RETRY_OPS" | grep -v '^$' | sort | uniq -c \
+    ops_summary=$(printf '%s%s' "$API_RETRY_OPS" "$API_ABANDONED_OPS" | grep -v '^$' | sort | uniq -c \
       | awk '{ printf "%s%s x%s", (NR>1 ? ", " : ""), $2, $1 }')
-    log "*** RUN DEGRADED BY TRANSIENT API ERRORS — ${API_RETRY_COUNT} retry/retries: ${ops_summary} ***"
+    log "*** RUN DEGRADED BY TRANSIENT API ERRORS — ${API_RETRY_COUNT} retry/retries, ${API_ABANDONED_COUNT} abandoned call(s): ${ops_summary} ***"
     # "The data is valid" is a claim about DATA, so it may only be made when
     # there IS complete data. Printed unconditionally it contradicted the
     # authoritative verdict two lines below on a zero-rep or data-losing run —
     # the fifth "reads cleaner than reality" bug in this harness.
     if [ "$REPS_RUN" -gt 0 ] && [ -z "$INCOMPLETE_REPS" ] && [ "$PHASES_COMPLETED" -eq 1 ]; then
-      log "*** The control plane was flaky during this run. The data is valid (every config was verified applied), but timings may include control-plane stalls — see the 'api-retry:' lines above. ***"
+      log "*** The control plane was flaky during this run. The data is valid (every config was verified applied), but timings may include control-plane stalls — see the 'api-retry:'/'api-abandoned:' lines above. ***"
     else
       log "*** The control plane was flaky during this run. Every config that WAS applied was verified applied, but this run did not produce a complete dataset — see the run-integrity verdict below, and the 'api-retry:' lines above. ***"
     fi
-    log "api retries: ${API_RETRY_COUNT} (transient API errors were retried — this run is NOT a clean first-try run)"
+    # One line, both facts. Reporting only the retry count let "api retries: 0"
+    # stand alone on a run that stalled and was abandoned — a reader grepping
+    # for that line would have read it as "clean".
+    log "api retries: ${API_RETRY_COUNT}, api calls abandoned after transient failure(s): ${API_ABANDONED_COUNT} (the control plane misbehaved — this run is NOT a clean first-try run)"
   else
     log "api retries: 0 (no transient API errors — clean control-plane run)"
   fi

@@ -256,14 +256,32 @@ a slow failure, which is exactly what the terminal-first bias exists to prevent.
 | `API_RETRY_ATTEMPTS` / `--api-retry-attempts` | `4` | Total attempts per operation. `1` disables retrying. |
 | `API_RETRY_BASE_MS` / `--api-retry-base-ms` | `500` | First backoff step; doubles each retry. |
 | `API_RETRY_MAX_MS` / `--api-retry-max-ms` | `8000` | Per-step backoff ceiling. |
-| `API_RETRY_DEADLINE_S` | `60` | Wall-clock box per operation — see below. |
+| `API_RETRY_DEADLINE_S` | `60` | **Total** wall-clock budget per operation — see below. |
+| `API_CALL_TIMEOUT_S` / `--api-call-timeout-s` | `deadline / attempts` (min `1`) | Hard cap on a **single** call. Clamped to the total budget. |
 
-`API_RETRY_DEADLINE_S` bounds **both** the retry scheduling (no new attempt is
-started once it has elapsed) **and** each individual call: every retried API call
-is run under `timeout(1)`, so a *hung* apiserver connection is terminated rather
-than waited on indefinitely. A call killed this way is classified transient and
-counted as a retry, and the operation's total is therefore ~the deadline rather
-than `attempts × per-call duration`.
+These are two different bounds and they must stay separate:
+
+- `API_RETRY_DEADLINE_S` is the **total** budget for one operation. No new
+  attempt is started once it has elapsed.
+- `API_CALL_TIMEOUT_S` caps **one call**. Every attempt runs under `timeout(1)`,
+  so a *hung* apiserver connection is terminated rather than waited on
+  indefinitely.
+
+The per-call cap defaults to `deadline / attempts` so that all configured
+attempts fit inside the total budget by construction. When one knob did both
+jobs, a hung first attempt consumed the whole budget and `API_RETRY_ATTEMPTS`
+became **dead for exactly the failure this feature exists for** — a stalled
+apiserver got one attempt regardless of the configured number. With defaults
+(`60s / 4`), each call is capped at 15s and a stalled control plane still gets
+its four attempts. Worst case for an operation is therefore ~`deadline` plus the
+one per-call cap that may be in flight when the budget expires — not
+`attempts × per-call duration`.
+
+A call killed by the per-call cap is classified transient. If a further attempt
+remains within the budget it is **counted as a retry**; if the budget or the
+attempt count is exhausted, the operation is **counted as abandoned** (see
+below). Either way it is recorded — a stalled run can never be reported as
+clean.
 
 This per-call cap needs `timeout` (or `gtimeout`) on `PATH` — GNU coreutils,
 present on Linux and via Homebrew, **absent from a stock macOS**. Without it the
@@ -279,12 +297,13 @@ same `FATAL:`, the same restore of the captured original config, the same
 `capture_original` still refuses to mutate a service whose original config it
 could not read, whether that read failed once or four times.
 
-Every retry is recorded in the results file:
+Every retry **and every abandonment** is recorded in the results file:
 
 ```
   api-retry: op='apply-autoscaling' attempt=1/4 class=transient — retrying after 380ms; the API said: Unable to connect to the server: net/http: TLS handshake timeout
+  api-abandoned: op='capture-original' — giving up after transient failures: the API_RETRY_DEADLINE_S=6s budget was spent after 2 attempt(s); the API said: i/o timeout: the API call did not return within the per-call cap of 2s …
 …
-*** RUN DEGRADED BY TRANSIENT API ERRORS — 2 retry/retries: apply-autoscaling x2 ***
+*** RUN DEGRADED BY TRANSIENT API ERRORS — 2 retry/retries, 1 abandoned call(s): apply-autoscaling x2, capture-original x1 ***
 ```
 
 This is deliberate. A run that limped through a flaky window must not produce an
@@ -295,12 +314,23 @@ of.
 **How to read a retried run.** Grep the results file for `api retries:` — it is
 always present, exactly once, near the verdict:
 
-- `api retries: 0` — clean first-try control-plane run. Nothing to caveat.
-- `api retries: N` (N > 0) — the numbers are still *valid*: a config is only
-  measured after it was verified applied, so no rep was taken against a
-  half-applied service. But the run's **wall-clock timings may be inflated** by
-  up to the backoff spent inside the retried operation. Read the `api-retry:`
-  lines above the verdict to see which operation stalled and by how long.
+- `api retries: 0 (no transient API errors — clean control-plane run)` — clean
+  first-try control-plane run. Nothing to caveat. This exact line is the **only**
+  clean claim, and it is emitted only when the retry count *and* the abandonment
+  count are both zero.
+- `api retries: N, api calls abandoned after transient failure(s): M` — the
+  control plane misbehaved.
+  - `N > 0, M = 0`: every stall was recovered by retrying. The numbers are still
+    *valid* — a config is only measured after it was verified applied, so no rep
+    was taken against a half-applied service — but the run's **wall-clock timings
+    may be inflated** by the backoff spent inside the retried operation.
+  - `M > 0`: an operation was given up on (attempts or budget exhausted), so the
+    run aborted. Read the run-integrity verdict: this file is not a complete
+    dataset. A call killed by the per-call cap counts here even if it was the
+    only attempt, which is what stops a stalled run from reading as clean.
+
+  Read the `api-retry:` / `api-abandoned:` lines above the verdict to see which
+  operation stalled and by how long.
 
 Practical consequences: quote a retried run's cold-start numbers with the
 degradation noted, don't silently pool a retried run with clean runs in the same

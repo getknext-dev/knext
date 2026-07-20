@@ -341,15 +341,65 @@ t_start=$(date +%s)
 API_RETRY_ATTEMPTS=4 API_RETRY_DEADLINE_S=2 run_bench "$T10" --phases none
 rc=$?
 t_elapsed=$(( $(date +%s) - t_start ))
-if [ "$t_elapsed" -lt 12 ]; then
-  ok "a 20s-hanging call with API_RETRY_DEADLINE_S=2 returns in ${t_elapsed}s (bounded)"
+# The old bound (<12s for a 2s budget) proved only "not 20s". It passed at ~11s
+# and could not tell "boxed AND retried" from "boxed, zero retries" — which is
+# exactly how the API_RETRY_ATTEMPTS-is-dead defect slipped through review. The
+# bound is now tied to the CONFIGURED budget (deadline + one per-call cap of
+# slack for the attempt in flight when the budget expires), and the number of
+# attempts is asserted alongside it so the semantics are pinned, not just the
+# wall clock.
+if [ "$t_elapsed" -lt 6 ]; then
+  ok "a 20s-hanging call with API_RETRY_DEADLINE_S=2 returns in ${t_elapsed}s (bounded by the configured budget)"
 else
   nope "a 20s-hanging call with API_RETRY_DEADLINE_S=2 took ${t_elapsed}s — the deadline does not bound an in-flight call"
 fi
+# per-call cap = max(1, deadline/attempts) = 1s, so attempt 1 ends at ~1s (budget
+# not yet spent -> retry) and attempt 2 ends at ~2s (budget spent -> abandon).
+assert_eq "$(get_attempts "$T10")" "2" \
+  "the hung call was actually RETRIED inside its budget (2 attempts), not tried once and abandoned"
 if [ "$rc" -ne 0 ]; then ok "a call killed by the deadline still fails the run (got $rc)"
 else nope "a call killed by the deadline still fails the run (got 0)"; fi
 assert_not_contains "${T10}/calls.log" "patch" \
   "a deadline-killed capture read still mutates NOTHING (fail-closed, #424)"
+
+# ── Test 10a: API_RETRY_ATTEMPTS is not dead for a STALLED apiserver ─────────
+# A stalled apiserver is the primary motivating case for this feature (2 of the
+# 3 observed #427 runs died on "TLS handshake timeout"). When the deadline did
+# double duty as both the per-call cap and the total budget, the first hung
+# attempt consumed the whole budget, so a stall got exactly ONE attempt no
+# matter what API_RETRY_ATTEMPTS said.
+echo
+echo "[10a] a stalled apiserver still gets every attempt that fits in the budget"
+T10A="$(mktemp -d)"
+make_stub "$T10A"
+echo 20 > "${T10A}/get_hang_s"
+t_start=$(date +%s)
+API_RETRY_ATTEMPTS=3 API_RETRY_DEADLINE_S=6 run_bench "$T10A" --phases none
+t_elapsed=$(( $(date +%s) - t_start ))
+assert_eq "$(get_attempts "$T10A")" "3" \
+  "API_RETRY_ATTEMPTS=3 against a hung apiserver produces 3 attempts (per-call cap = 6/3 = 2s)"
+if [ "$t_elapsed" -lt 10 ]; then
+  ok "3 x 2s attempts still finish inside the API_RETRY_DEADLINE_S=6 budget (${t_elapsed}s)"
+else
+  nope "the total wall-clock budget regressed — took ${t_elapsed}s for API_RETRY_DEADLINE_S=6"
+fi
+
+# ── Test 10b: a stalled-and-abandoned run is NOT reported as clean ───────────
+# The wall-clock check returned BEFORE the retry counter was incremented, so a
+# run whose control plane demonstrably stalled was written to the results file
+# as "api retries: 0 (no transient API errors — clean control-plane run)". That
+# is the seventh "the artifact reads cleaner than reality" bug in this harness.
+echo
+echo "[10b] a run abandoned on a stalled API call is reported as degraded, not clean"
+assert_not_contains "${T10A}/results.txt" "clean control-plane run" \
+  "a run that died on a stalled apiserver never claims a 'clean control-plane run'"
+assert_contains "${T10A}/results.txt" "DEGRADED" \
+  "a run that died on a stalled apiserver is loudly marked degraded"
+assert_contains "${T10A}/results.txt" "abandoned" \
+  "the abandoned API call is visible in the results file"
+# Test 10's single-retry case must be disclosed too: 1 retry + 1 abandonment.
+assert_not_contains "${T10}/results.txt" "clean control-plane run" \
+  "the deadline-killed run in test 10 is likewise not reported as clean"
 
 # ── Test 11: the DEGRADED banner must not claim valid data when none exists ──
 # The banner asserted "The data is valid (every config was verified applied)"
@@ -393,7 +443,7 @@ run_bench "$T13" --phases none
 assert_not_contains "${T13}/out.txt" "Illegal byte sequence" \
   "no 'tr: Illegal byte sequence' leaks to stderr for binary API output"
 
-rm -rf "$T1" "$T3" "$T4" "$T5" "$T6" "$T7" "$T8" "$T10" "$T11" "$T12" "$T13"
+rm -rf "$T1" "$T3" "$T4" "$T5" "$T6" "$T7" "$T8" "$T10" "$T10A" "$T11" "$T12" "$T13"
 
 echo
 echo "== ${PASS} passed, ${FAIL} failed =="
