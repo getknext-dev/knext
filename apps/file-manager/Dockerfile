@@ -147,8 +147,33 @@ COPY --from=builder /sharp-runtime/node_modules/ ./apps/file-manager/node_module
 RUN node -e "const{createRequire}=require('module');const r=createRequire('/app/apps/file-manager/server.js');const s=r('sharp');console.log('sharp ok: libvips '+s.versions.vips)" \
     || (echo 'FATAL: sharp failed to load — next/image optimization is broken in this image (missing libvips/musl runtime?)' && exit 1)
 
-# Pre-create the compile-cache directory
-RUN mkdir -p apps/file-manager/.next/compile-cache && chown -R node:node apps/file-manager/.next
+# ── Bake the V8 module compile cache INTO the image (#437) ───────────────────
+# This used to be a bare `mkdir -p …/compile-cache`, which shipped an EMPTY
+# directory that nothing ever populated. Since NODE_COMPILE_CACHE only helps when
+# the cache is already populated at process start, every cold pod recompiled the
+# whole standalone server from scratch (~2s of a 3.81s median cold start measured
+# on OKE), wrote the cache to the ephemeral container layer, and discarded it on
+# scale-to-zero — no cold start ever benefited.
+#
+# Now the build boots the runtime entry once, with the SAME NODE_COMPILE_CACHE and
+# STANDALONE_SERVER_PATH the CMD below uses (V8 keys entries by module filename,
+# so paths must match), waits for the dependency-free shallow health route, then
+# SIGTERMs it — which is when V8 flushes its entries to disk. The result lands in
+# the image layer, so it is present from the FIRST pod onward, needs no volume
+# (works on stock Knative, #436; no RWO scale-out conflict, #432), and can never
+# go stale because it is versioned with the image.
+#
+# The script FAILS THE BUILD if the cache ends up empty — the empty-dir bug above
+# shipped unnoticed precisely because nothing asserted this.
+COPY --from=builder /app/apps/file-manager/scripts/warm-compile-cache.sh /usr/local/bin/warm-compile-cache.sh
+RUN chmod +x /usr/local/bin/warm-compile-cache.sh \
+    && NODE_ENV=production \
+       PORT=3000 \
+       METRICS_PORT=9099 \
+       NODE_COMPILE_CACHE=apps/file-manager/.next/compile-cache \
+       STANDALONE_SERVER_PATH=apps/file-manager/server.js \
+       /usr/local/bin/warm-compile-cache.sh \
+    && chown -R node:node apps/file-manager/.next
 
 EXPOSE 3000
 
@@ -174,7 +199,11 @@ USER node
 # the runtime entry where it is via STANDALONE_SERVER_PATH (its default,
 # .next/standalone/server.js, is the single-app layout).
 #
-# NODE_COMPILE_CACHE: V8 bytecode cache for faster subsequent cold starts.
+# NODE_COMPILE_CACHE: points at the V8 module compile cache that was POPULATED at
+# image build time by the warm-up above (#437), so a cold pod loads baked bytecode
+# instead of compiling the standalone server from source. Runtime writes to this
+# dir are ephemeral (container layer) and that is fine — the baked entries are what
+# every cold start reads.
 # EXPORT so the value reaches the exec'd node process (a bare `${VAR:=default}` only sets a shell
 # variable, not an env var). The operator's externally-injected value (PVC path) still wins via
 # `:-`; the Dockerfile only supplies the fallback when the env var is unset at runtime.
