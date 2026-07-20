@@ -79,6 +79,15 @@ case "\$args" in
   *"get ksvc"*)
     n=\$(cat "${dir}/get_count" 2>/dev/null || echo 0); n=\$((n + 1))
     echo "\$n" > "${dir}/get_count"
+    # Simulate a HUNG apiserver call: block for get_hang_s seconds. A well-behaved
+    # client exits on SIGTERM and releases its stdout, exactly as kubectl does —
+    # otherwise a command substitution would block on the orphaned child's fd.
+    hang=\$(cat "${dir}/get_hang_s" 2>/dev/null || echo 0)
+    if [ "\$hang" != "0" ]; then
+      trap 'kill \$sp 2>/dev/null; exit 143' TERM
+      sleep "\$hang" & sp=\$!
+      wait \$sp
+    fi
     failn=\$(cat "${dir}/get_fail_count" 2>/dev/null || echo 0)
     if [ "\$n" -le "\$failn" ]; then
       mode=\$(cat "${dir}/get_fail_mode" 2>/dev/null || echo transient)
@@ -304,8 +313,87 @@ classify_case 'Error from server (Forbidden): services.serving.knative.dev "demo
 classify_case 'Error from server (Invalid): Service "demo-svc" is invalid: spec.template.spec.containerConcurrency: Invalid value: -1' terminal "Invalid — a bad annotation value is a real bug"
 classify_case 'error: error validating data: unknown field "maxScale"' terminal "validation/unknown-field error"
 classify_case 'error: forced patch failure (call 1)' terminal "UNRECOGNISED error is treated as terminal (bias to fail fast)"
+# A Knative admission denial for an OUT-OF-BOUNDS annotation renders as
+# "expected 0 <= 429 <= 100" — no 'invalid'/'validating' token, and the value is
+# USER-SUPPLIED via --baseline/--tuned. A substring match on "429" classified it
+# transient, turning a typo'd flag into a slow failure: precisely the case the
+# terminal-first bias exists to prevent.
+classify_case 'Error from server (BadRequest): admission webhook "validation.webhook.serving.knative.dev" denied the request: expected 0 <= 429 <= 100' \
+  terminal "admission denial quoting a bad value of 429 is TERMINAL (a typo'd --tuned must fail fast)"
+classify_case 'admission webhook "validation.webhook.serving.knative.dev" denied the request: expected 0 <= 429 <= 100: autoscaling.knative.dev/panic-window-percentage' \
+  terminal "bare admission denial with 429 as an out-of-bounds value is TERMINAL"
+classify_case 'Error from server (TooManyRequests): please try again later' transient \
+  "a REAL kubectl 429 still classifies transient (via TooManyRequests, not a bare '429')"
+classify_case 'Error from server: client rate limiter: request throttled' transient \
+  "client-side throttling still classifies transient"
 
-rm -rf "$T1" "$T3" "$T4" "$T5" "$T6" "$T7" "$T8"
+# ── Test 10: API_RETRY_DEADLINE_S genuinely bounds a HUNG call ───────────────
+# The deadline was documented as "a hard wall-clock box per operation" that
+# ensures "a hung/flapping apiserver cannot stretch a run", but it was only
+# checked BETWEEN attempts — an in-flight hung call was not bounded at all, so
+# the true worst case was attempts x per-call duration.
+echo
+echo "[10] a hung API call is bounded by API_RETRY_DEADLINE_S, not just scheduled by it"
+T10="$(mktemp -d)"
+make_stub "$T10"
+echo 20 > "${T10}/get_hang_s"
+t_start=$(date +%s)
+API_RETRY_ATTEMPTS=4 API_RETRY_DEADLINE_S=2 run_bench "$T10" --phases none
+rc=$?
+t_elapsed=$(( $(date +%s) - t_start ))
+if [ "$t_elapsed" -lt 12 ]; then
+  ok "a 20s-hanging call with API_RETRY_DEADLINE_S=2 returns in ${t_elapsed}s (bounded)"
+else
+  nope "a 20s-hanging call with API_RETRY_DEADLINE_S=2 took ${t_elapsed}s — the deadline does not bound an in-flight call"
+fi
+if [ "$rc" -ne 0 ]; then ok "a call killed by the deadline still fails the run (got $rc)"
+else nope "a call killed by the deadline still fails the run (got 0)"; fi
+assert_not_contains "${T10}/calls.log" "patch" \
+  "a deadline-killed capture read still mutates NOTHING (fail-closed, #424)"
+
+# ── Test 11: the DEGRADED banner must not claim valid data when none exists ──
+# The banner asserted "The data is valid (every config was verified applied)"
+# unconditionally — including on a run that collected no data at all, two lines
+# above the authoritative "no reps ran; ... NOT a dataset" verdict.
+echo
+echo "[11] the DEGRADED banner does not claim valid data on a zero-rep run"
+T11="$(mktemp -d)"
+make_stub "$T11"
+echo 2 > "${T11}/get_fail_count"; echo transient > "${T11}/get_fail_mode"
+run_bench "$T11" --phases none
+assert_contains "${T11}/results.txt" "DEGRADED" "the retried run is still marked degraded"
+assert_contains "${T11}/results.txt" "api retries: 2" "the retries are still counted"
+assert_contains "${T11}/results.txt" "no reps ran" "the authoritative verdict says no data was collected"
+assert_not_contains "${T11}/results.txt" "The data is valid" \
+  "a zero-rep degraded run does NOT claim 'The data is valid'"
+
+echo
+echo "[12] the DEGRADED banner claims valid data only when reps actually produced it"
+T12="$(mktemp -d)"
+make_stub "$T12"
+echo 1 > "${T12}/apply_fail_from"; echo 1 > "${T12}/apply_fail_to"
+echo transient > "${T12}/apply_fail_mode"
+run_bench "$T12" --phases cold --cold-samples 1
+assert_contains "${T12}/results.txt" "DEGRADED" "a retried run with data is still marked degraded"
+assert_contains "${T12}/results.txt" "The data is valid" \
+  "a degraded run that DID collect complete data still states its data is valid"
+
+# ── Test 13: classification emits no stray diagnostics on binary stderr ──────
+echo
+echo "[13] classification of binary kubectl output leaks no tr(1) diagnostics"
+T13="$(mktemp -d)"
+make_stub "$T13"
+cat > "${T13}/kubectl" <<'BINSTUB'
+#!/usr/bin/env bash
+printf 'error: \xc3\x28\xff\xfe unexpected garbage\n' >&2
+exit 1
+BINSTUB
+chmod +x "${T13}/kubectl"
+run_bench "$T13" --phases none
+assert_not_contains "${T13}/out.txt" "Illegal byte sequence" \
+  "no 'tr: Illegal byte sequence' leaks to stderr for binary API output"
+
+rm -rf "$T1" "$T3" "$T4" "$T5" "$T6" "$T7" "$T8" "$T10" "$T11" "$T12" "$T13"
 
 echo
 echo "== ${PASS} passed, ${FAIL} failed =="

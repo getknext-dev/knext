@@ -106,7 +106,16 @@ DRY_RUN="${DRY_RUN:-0}"
 API_RETRY_ATTEMPTS="${API_RETRY_ATTEMPTS:-4}"      # total attempts (1 = no retry)
 API_RETRY_BASE_MS="${API_RETRY_BASE_MS:-500}"      # first backoff step
 API_RETRY_MAX_MS="${API_RETRY_MAX_MS:-8000}"       # per-step backoff ceiling
-API_RETRY_DEADLINE_S="${API_RETRY_DEADLINE_S:-60}" # hard wall-clock box per operation
+# Wall-clock box per operation. Enforced BOTH between attempts and, via
+# timeout(1), on each individual call — so a hung apiserver is bounded too. If
+# no timeout/gtimeout binary exists (stock macOS), it degrades to bounding only
+# the retry *scheduling*: the worst case is then attempts x per-call duration,
+# and the run says so at startup.
+API_RETRY_DEADLINE_S="${API_RETRY_DEADLINE_S:-60}"
+API_TIMEOUT_BIN=""
+if command -v timeout >/dev/null 2>&1; then API_TIMEOUT_BIN="timeout"
+elif command -v gtimeout >/dev/null 2>&1; then API_TIMEOUT_BIN="gtimeout"; fi
+KC_TIMEOUT_S=0   # >0 only while an api_retry attempt is in flight (see kc())
 
 usage() {
   cat <<EOF
@@ -154,9 +163,13 @@ Transient-API retry (see README "Transient API retry"):
                                \$API_RETRY_ATTEMPTS)
   --api-retry-base-ms <ms>    first backoff step (default: 500; \$API_RETRY_BASE_MS)
   --api-retry-max-ms <ms>     per-step backoff ceiling (default: 8000; \$API_RETRY_MAX_MS)
-                              \$API_RETRY_DEADLINE_S (default 60) hard-boxes each operation.
+                              \$API_RETRY_DEADLINE_S (default 60) boxes each operation:
+                              it gates retry scheduling AND caps each call via
+                              timeout(1) — without timeout/gtimeout on PATH only the
+                              scheduling is bounded (the run says so at startup).
                               ONLY transient errors (TLS handshake timeout, connection
-                              refused/reset, i/o timeout, 5xx, 429/throttling) are retried;
+                              refused/reset, i/o timeout, 5xx, TooManyRequests/throttling)
+                              are retried;
                               NotFound/Forbidden/Invalid and anything unrecognised fail fast.
 
 Other:
@@ -241,10 +254,19 @@ kc() {
     echo "[dry-run] kubectl ${KCTX:+--context $KCTX }$*" >&2
     return 0
   fi
+  # KC_TIMEOUT_S (>0) hard-caps this single invocation. api_retry sets it for the
+  # duration of an attempt so API_RETRY_DEADLINE_S bounds a HUNG call and not
+  # merely the gap between attempts. It stays unset everywhere else, so the
+  # bounded poll loops (wait_zero/running_pods) are untouched.
+  local tmo=()
+  if [ -n "$API_TIMEOUT_BIN" ] && [ "${KC_TIMEOUT_S:-0}" -gt 0 ] 2>/dev/null; then
+    # -k: KILL shortly after TERM, so the box holds even against a wedged client.
+    tmo=("$API_TIMEOUT_BIN" -k 5 "$KC_TIMEOUT_S")
+  fi
   if [ -n "$KCTX" ]; then
-    "$KUBECTL_BIN" --context "$KCTX" "$@"
+    ${tmo[@]+"${tmo[@]}"} "$KUBECTL_BIN" --context "$KCTX" "$@"
   else
-    "$KUBECTL_BIN" "$@"
+    ${tmo[@]+"${tmo[@]}"} "$KUBECTL_BIN" "$@"
   fi
 }
 
@@ -268,11 +290,22 @@ log() { echo "$@" | tee -a "$OUT"; }
 #               message this function does not recognise.
 #   transient — TLS handshake timeout, connection refused/reset, broken pipe,
 #               i/o timeout, "unable to connect to the server", context deadline
-#               exceeded, etcd/request timed out, 429/TooManyRequests/throttling,
+#               exceeded, etcd/request timed out, TooManyRequests/throttling,
 #               5xx (InternalError/ServiceUnavailable/ServerTimeout), unexpected EOF.
+#
+# NOTE: there is deliberately NO bare "429" pattern. kubectl renders a real
+# rate-limit as "Error from server (TooManyRequests): ..." (already matched), so
+# the substring only ever fired on 429 appearing as a *number* — e.g. a Knative
+# admission denial "expected 0 <= 429 <= 100" for a USER-SUPPLIED --tuned value,
+# which carries no invalid/validating token and would otherwise be retried. That
+# turns a typo'd flag into a slow failure: exactly what the terminal-first bias
+# is here to prevent.
 classify_api_error() {
   local m
-  m=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
+  # LC_ALL=C: kubectl stderr can carry binary bytes, and a locale-aware tr(1)
+  # then prints "tr: Illegal byte sequence" to our stderr. Classification already
+  # falls back to terminal in that case; the stray diagnostic is pure noise.
+  m=$(printf '%s' "$1" | LC_ALL=C tr '[:upper:]' '[:lower:]' 2>/dev/null)
   # TERMINAL first — a terminal error mentioning a timeout must stay terminal.
   case "$m" in
     *notfound*|*"not found"*|*forbidden*|*unauthorized*|*"is invalid"*|*invalid*|\
@@ -287,7 +320,7 @@ classify_api_error() {
     *"broken pipe"*|*"i/o timeout"*|*"unable to connect to the server"*|\
     *"context deadline exceeded"*|*"request timed out"*|*"etcdserver"*|\
     *"server timeout"*|*servertimeout*|*"too many requests"*|*toomanyrequests*|\
-    *"429"*|*throttl*|*internalerror*|*"internal error"*|*serviceunavailable*|\
+    *throttl*|*internalerror*|*"internal error"*|*serviceunavailable*|\
     *"service unavailable"*|*"an error on the server"*|*"unexpected eof"*|\
     *"the server is currently unable to handle the request"*|\
     *"transport is closing"*|*"network is unreachable"*|*"no route to host"*)
@@ -315,6 +348,14 @@ API_RETRY_OPS=""   # newline-separated op names, one line per retry performed
 # MUST NOT be called inside $(...) — it sets globals the caller depends on.
 API_RETRY_LAST_OUT=""
 API_RETRY_LAST_ATTEMPTS=0
+
+# ── per-call enforcement of API_RETRY_DEADLINE_S ─────────────────────────────
+# The deadline used to be checked only BETWEEN attempts, so a *hung* call was
+# not bounded at all: a 25s-hanging kubectl under API_RETRY_DEADLINE_S=5 still
+# took 26s, and the worst case was attempts x per-call duration. Each attempt is
+# now wrapped in timeout(1) so the box is real. `timeout` is coreutils; on a
+# stock macOS without it we degrade to the old scheduling-only bound and SAY SO
+# rather than keep claiming a guarantee we are not providing.
 api_retry() {
   local op="$1"; shift
   local attempts="$API_RETRY_ATTEMPTS"
@@ -322,9 +363,22 @@ api_retry() {
   local backoff_ms="$API_RETRY_BASE_MS" n=1 rc=0 class="" start now
   [ "$backoff_ms" -ge 0 ] 2>/dev/null || backoff_ms=0
   start=$(date +%s)
+  local per_call="$API_RETRY_DEADLINE_S"
+  [ "$per_call" -ge 1 ] 2>/dev/null || per_call=0
   while :; do
+    # Set explicitly rather than as an assignment prefix: prefix assignments on a
+    # shell-function call have surprising persistence semantics across bash modes.
+    KC_TIMEOUT_S="$per_call"
     API_RETRY_LAST_OUT=$("$@" 2>&1)
     rc=$?
+    KC_TIMEOUT_S=0
+    # timeout(1) reports 124 on expiry (137 if it had to KILL). Synthesise a
+    # message so the stall classifies as the transient it is, and so the caller's
+    # verbatim "kubectl said: ..." reporting stays truthful instead of blank.
+    if [ -n "$API_TIMEOUT_BIN" ] && [ "$per_call" -gt 0 ] \
+       && { [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; }; then
+      API_RETRY_LAST_OUT="i/o timeout: the API call did not return within API_RETRY_DEADLINE_S=${per_call}s and was terminated${API_RETRY_LAST_OUT:+ — partial output: ${API_RETRY_LAST_OUT}}"
+    fi
     API_RETRY_LAST_ATTEMPTS=$n
     [ "$rc" -eq 0 ] && return 0
 
@@ -333,7 +387,9 @@ api_retry() {
     [ "$class" != "transient" ] && return "$rc"
     # Bounded by attempts...
     [ "$n" -ge "$attempts" ] && return "$rc"
-    # ...and by wall clock, so a hung/flapping apiserver cannot stretch a run.
+    # ...and by wall clock. With timeout(1) present this is a genuine box: each
+    # attempt is itself capped at API_RETRY_DEADLINE_S, so a hung apiserver
+    # cannot stretch a run. Without it, this check only bounds *scheduling*.
     now=$(date +%s)
     [ $((now - start)) -ge "$API_RETRY_DEADLINE_S" ] 2>/dev/null && return "$rc"
 
@@ -358,6 +414,9 @@ log "=== knext scale-to-zero benchmark — service=$SERVICE namespace=$NS ==="
 log "context=${KCTX:-<current>} url=$URL max-scale=$MAXSCALE containerConcurrency(burst)=$CC"
 log "phases=$PHASES burst-vus=$BURST_VUS (>= container-concurrency*max-scale forces fan-out to cap)"
 log "k6 image=$IMG cpu-request=$K6_CPU_REQUEST (kept small — see README 'oversized k6 request' trap)"
+if [ -z "$API_TIMEOUT_BIN" ]; then
+  log "NOTE: no timeout(1)/gtimeout on PATH — API_RETRY_DEADLINE_S=${API_RETRY_DEADLINE_S}s bounds only retry SCHEDULING, not an individual hung API call (worst case ~ ${API_RETRY_ATTEMPTS} x per-call duration). Install coreutils for a hard per-call box."
+fi
 if [ "$DRY_RUN" = "1" ]; then
   if [ "$DRY_RUN_EXERCISE_KC" = "1" ]; then
     # The old banner claimed "no kubectl mutation" even under the test seam,
@@ -535,7 +594,15 @@ cleanup() {
     ops_summary=$(printf '%s' "$API_RETRY_OPS" | grep -v '^$' | sort | uniq -c \
       | awk '{ printf "%s%s x%s", (NR>1 ? ", " : ""), $2, $1 }')
     log "*** RUN DEGRADED BY TRANSIENT API ERRORS — ${API_RETRY_COUNT} retry/retries: ${ops_summary} ***"
-    log "*** The control plane was flaky during this run. The data is valid (every config was verified applied), but timings may include control-plane stalls — see the 'api-retry:' lines above. ***"
+    # "The data is valid" is a claim about DATA, so it may only be made when
+    # there IS complete data. Printed unconditionally it contradicted the
+    # authoritative verdict two lines below on a zero-rep or data-losing run —
+    # the fifth "reads cleaner than reality" bug in this harness.
+    if [ "$REPS_RUN" -gt 0 ] && [ -z "$INCOMPLETE_REPS" ] && [ "$PHASES_COMPLETED" -eq 1 ]; then
+      log "*** The control plane was flaky during this run. The data is valid (every config was verified applied), but timings may include control-plane stalls — see the 'api-retry:' lines above. ***"
+    else
+      log "*** The control plane was flaky during this run. Every config that WAS applied was verified applied, but this run did not produce a complete dataset — see the run-integrity verdict below, and the 'api-retry:' lines above. ***"
+    fi
     log "api retries: ${API_RETRY_COUNT} (transient API errors were retried — this run is NOT a clean first-try run)"
   else
     log "api retries: 0 (no transient API errors — clean control-plane run)"

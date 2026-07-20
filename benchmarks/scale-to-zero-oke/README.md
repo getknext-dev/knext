@@ -106,7 +106,7 @@ mistaken for a complete one:
 | `run integrity: N rep(s) ran but some LOST data — dataset is NOT complete` | The run finished all phases, but at least one rep is missing data or did not finish cleanly. **Exit code 2.** Preceded by the `*** RUN INCOMPLETE ***` block naming the reps. |
 | `*** RUN INCOMPLETE — untrustworthy rep(s): <rep> [<reason>] ***` | Printed whenever a rep lost data, **independently** of how the run ended — a run can be both truncated *and* missing a rep, and you need to see both facts. Scope any claim to the reps that do have data, and say so. |
 | `api retries: 0 (no transient API errors — clean control-plane run)` | Always printed. The control plane answered every call first try. |
-| `api retries: N (transient API errors were retried — this run is NOT a clean first-try run)` | Printed with a `*** RUN DEGRADED BY TRANSIENT API ERRORS ***` block naming each retried operation. The data is still valid — every config was verified applied before it was measured — but the control plane was flaky, so wall-clock timings may include control-plane stalls. See "Transient API retry" below. |
+| `api retries: N (transient API errors were retried — this run is NOT a clean first-try run)` | Printed with a `*** RUN DEGRADED BY TRANSIENT API ERRORS ***` block naming each retried operation. Every config that was applied was verified applied before it was measured, so if the run also completed all its reps the data is valid — the banner says so only in that case — but the control plane was flaky, so wall-clock timings may include control-plane stalls. If the run aborted or lost a rep, the banner says that instead and the `run integrity:` verdict below it is authoritative. See "Transient API retry" below. |
 
 The verdict is derived from three facts — reps run, reps flagged incomplete, and
 whether the run reached the end of its phases — so it always agrees with the exit
@@ -237,18 +237,40 @@ annotation value) into a *slow* failure, which is worse than a fast one.
 
 | Class | Examples | Behaviour |
 |---|---|---|
-| **transient** (retried) | TLS handshake timeout · connection refused/reset · i/o timeout · `unable to connect to the server` · context deadline exceeded · request timed out / `time allotted` · 429 / `TooManyRequests` / throttling · 5xx (`InternalError`, `ServiceUnavailable`, `an error on the server`) · unexpected EOF · network unreachable | Retry with backoff, up to the attempt/deadline bound |
+| **transient** (retried) | TLS handshake timeout · connection refused/reset · i/o timeout · `unable to connect to the server` · context deadline exceeded · request timed out / `time allotted` · `TooManyRequests` / throttling · 5xx (`InternalError`, `ServiceUnavailable`, `an error on the server`) · unexpected EOF · network unreachable | Retry with backoff, up to the attempt/deadline bound |
 | **terminal** (never retried) | `NotFound` · `Forbidden` · `Unauthorized` · `Invalid` / validation / unknown-field · `BadRequest` · `AlreadyExists` · `MethodNotAllowed` · `Gone` · `no such host` and `couldn't get current server api group list` (a wrong cluster/kubeconfig, not a blip) · **and every unrecognised message** | Fail immediately, exactly as before |
 
 Classification is applied terminal-first on purpose: a terminal error that happens
 to mention a timeout stays terminal.
+
+Matching is on message substrings, so a pattern must not be able to fire on a
+value that merely *contains* it. There is deliberately **no bare `429` pattern**:
+kubectl renders a real rate-limit as `Error from server (TooManyRequests): …`,
+which is matched by name, whereas a Knative admission denial for an out-of-bounds
+annotation reads `expected 0 <= 429 <= 100` — and that value comes from your own
+`--baseline` / `--tuned` flag. Matching `429` there would turn a typo'd flag into
+a slow failure, which is exactly what the terminal-first bias exists to prevent.
 
 | Knob | Default | Meaning |
 |---|---|---|
 | `API_RETRY_ATTEMPTS` / `--api-retry-attempts` | `4` | Total attempts per operation. `1` disables retrying. |
 | `API_RETRY_BASE_MS` / `--api-retry-base-ms` | `500` | First backoff step; doubles each retry. |
 | `API_RETRY_MAX_MS` / `--api-retry-max-ms` | `8000` | Per-step backoff ceiling. |
-| `API_RETRY_DEADLINE_S` | `60` | Hard wall-clock box per operation. |
+| `API_RETRY_DEADLINE_S` | `60` | Wall-clock box per operation — see below. |
+
+`API_RETRY_DEADLINE_S` bounds **both** the retry scheduling (no new attempt is
+started once it has elapsed) **and** each individual call: every retried API call
+is run under `timeout(1)`, so a *hung* apiserver connection is terminated rather
+than waited on indefinitely. A call killed this way is classified transient and
+counted as a retry, and the operation's total is therefore ~the deadline rather
+than `attempts × per-call duration`.
+
+This per-call cap needs `timeout` (or `gtimeout`) on `PATH` — GNU coreutils,
+present on Linux and via Homebrew, **absent from a stock macOS**. Without it the
+harness degrades to bounding retry *scheduling* only, so a hung call is not
+itself interrupted and the worst case really is `attempts × per-call duration`.
+The run prints a `NOTE:` line at startup when it is in that mode; install
+coreutils to get the hard box.
 
 Bounded means bounded: a genuinely unreachable cluster still aborts, just a few
 seconds later. **On exhaustion the behaviour is exactly the old behaviour** — the
