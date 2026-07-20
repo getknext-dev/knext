@@ -33,6 +33,26 @@ standalone server at all and is therefore not subject to the ~1957 ms. The found
 (vinext + `bun --bytecode` single executable on a ~5 MB alpine image, "amazing" cold start) is this
 second path. So the ask is genuinely new territory, not a re-run of a settled comparison.
 
+### P1 feasibility spike findings (2026-07-20 — corrects earlier assumptions in this ADR)
+A feasibility spike (`scratchpad/vinext-bun-feasibility.md`) returned **CONDITIONAL-GO**:
+- **Core premise CONFIRMED:** `bun build --compile --bytecode` works and cross-compiles to
+  `linux-x64-musl` / `linux-arm64-musl`; a trivial compiled app boots in **~2–4 ms** — i.e. it does
+  bypass Next's ~1957 ms server boot. This is the whole reason to do it, and it holds.
+- **The ADR's build pipeline is NOT a native path.** vinext (currently **1.0.0-beta.2**) emits only
+  Cloudflare Workers + Nitro presets — it has **no bun/single-executable output**. The only bridge is
+  `vinext (Nitro node preset) → .output/server/index.mjs → bun build --compile`, which is **unproven**.
+  **This is the #1 risk P1 must retire before anything else.** If that bridge can't produce a running
+  binary, that is the NO-GO trigger.
+- **`next/image` optimization is LOST under vinext** (it auto-stubs `sharp` in prod) — so apps that use
+  optimized images (ADR-0006) are **`bun-exec`-ineligible and fall back to `node`**, caught by the
+  compat gate. This narrows `bun-exec`'s addressable app set.
+- **The knext webpack adapter hooks don't apply** — vinext is Vite/rolldown and ignores
+  webpack/turbopack config, `adapterPath`, and the `next build --webpack` pin. The `RuntimeContract`
+  must be re-provided by a **bespoke knext bun entry** wrapping vinext's handler (net-new work).
+- **`file-manager` is a poor FIRST target** (uses `sharp`; relies on adapter hooks). P1 proves the
+  pipeline + bun entry on a **minimal App-Router sample** (no sharp, no adapter hooks) first;
+  `file-manager` may simply be a fallback-to-node app under this ADR's own rule.
+
 ### State of the world in-repo (grounding)
 - vinext is **not** a dependency today (no `packages/vinext`, no reference in manifests). Adding it is
   part of this work. The `migrate-to-vinext` skill provides the migration tooling.
@@ -50,7 +70,7 @@ runtime contract. The targets differ ONLY at the build+image layer.
 |---|---|---|
 | build | turbopack / `next build` → `.next/standalone` | `vinext build` |
 | compile | — | `bun build --compile --bytecode --target=bun-linux-<arch>-musl` |
-| image | multi-stage alpine, node runtime + baked compile cache (ADR-0035) | `FROM alpine` + the single binary (~5–15 MB) |
+| image | multi-stage alpine, node runtime + baked compile cache (ADR-0035) | `FROM alpine` + the single binary (**~90–110 MB** — `bun --compile` embeds the ~57 MB Bun runtime; the "5 MB" idea is wrong, corrected by the P1 spike) |
 | runtime process | supervisor spawns `server.js`; `:9091` metrics in the supervisor | the binary IS the server (no Next standalone, no spawn); `:9091` served **in-process** at listen-time |
 | verification | official compat suite (shipped) | official compat suite against the bun image (gate) |
 
@@ -109,11 +129,16 @@ runtime contract. The targets differ ONLY at the build+image layer.
 ## Action items (phased; measure gates the build)
 
 - **P0** — this ADR (founder approves the vinext-deprecation amendment; done by acceptance).
-- **P1 — spike + measure FIRST.** Bring vinext in for one app; build it both ways; OKE cold-start A/B
-  (`node`-baked vs `bun-exec`) using the alternating-pairs method (run 6). Publish as a benchmark run.
-  **Gate: separated win, or stop.** The spike report must also record **vinext's license, maintenance
-  posture, and an abandonment exit stance** (per architect review) — a shipping target cannot depend on
-  an unmaintained upstream.
+- **P1a — retire the pipeline risk FIRST (feasibility done → build-through next).** On a **minimal
+  App-Router sample** (no `sharp`, no adapter hooks), prove `vinext (Nitro node preset) →
+  .output/server/index.mjs → bun build --compile --bytecode --target=…-musl` produces a **running
+  binary** that serves requests. If it cannot, **NO-GO** — stop and record it.
+- **P1b — bun entry + measure.** Add the bespoke bun entry providing the `RuntimeContract` (health;
+  `:9091` in-process; SIGTERM drain + `after()`; auth cache routes). Then OKE cold-start A/B
+  (`node`-baked vs `bun-exec`) via the alternating-pairs method (run 6), published as a benchmark run.
+  **Gate: distribution-separated win, or stop.** Record **vinext's license + maintenance posture +
+  abandonment exit stance** (it is currently beta) — a shipping target cannot depend on an unmaintained
+  upstream.
 - **P3 config decision:** resolve whether `bun-exec` is a new `buildTarget` field or a third
   `spec.runtime` value **in the P3 PR** (architect flagged that `spec.runtime: bun` vs `bun-exec` will
   confuse users — prefer folding into one knob). Amend this ADR in place with the outcome.
