@@ -95,6 +95,38 @@ SCHEDULE_CHECK_TIMEOUT="${SCHEDULE_CHECK_TIMEOUT:-20}" # seconds before warning 
 APPLY_SETTLE_SECONDS="${APPLY_SETTLE_SECONDS:-8}"   # settle time after an autoscaling patch (0 in tests)
 OUT="${OUT:-}"                                      # results file; default computed below
 DRY_RUN="${DRY_RUN:-0}"
+# ── bounded retry for TRANSIENT control-plane errors (#427) ──────────────────
+# Two of the three OKE runs behind docs/benchmarks/scale-to-zero-oke.md died on
+# "Unable to connect to the server: net/http: TLS handshake timeout" while
+# applying a burst config, throwing away an otherwise-valid partial dataset. The
+# refusal to measure an UNAPPLIED config is correct and is preserved exactly —
+# these knobs only decide how long we wait for a blip to pass before concluding
+# the failure is real. Bounded means bounded: a genuinely unreachable cluster
+# still aborts, just a few seconds later.
+API_RETRY_ATTEMPTS="${API_RETRY_ATTEMPTS:-4}"      # total attempts (1 = no retry)
+API_RETRY_BASE_MS="${API_RETRY_BASE_MS:-500}"      # first backoff step
+API_RETRY_MAX_MS="${API_RETRY_MAX_MS:-8000}"       # per-step backoff ceiling
+# Wall-clock box per operation. Enforced BOTH between attempts and, via
+# timeout(1), on each individual call — so a hung apiserver is bounded too. If
+# no timeout/gtimeout binary exists (stock macOS), it degrades to bounding only
+# the retry *scheduling*: the worst case is then attempts x per-call duration,
+# and the run says so at startup.
+API_RETRY_DEADLINE_S="${API_RETRY_DEADLINE_S:-60}"
+# Per-CALL cap, distinct from the TOTAL budget above. Making one knob do both
+# jobs made API_RETRY_ATTEMPTS dead for the case this feature exists for: a hung
+# first attempt consumed the entire budget, so a stalled apiserver got exactly
+# one attempt however many were configured. Default: deadline/attempts, floored
+# at 1s. The floor means the attempts do NOT always fit inside the budget (a 3s
+# budget over 4 attempts floors to 4x1s), so the budget check — not arithmetic —
+# is what bounds the run: the worst case is ~ budget + one per-call cap, which is
+# what the startup banner reports. Set explicitly to override; an override
+# larger than the total budget is clamped to it, because no single call may
+# outlive the budget that bounds the whole operation.
+API_CALL_TIMEOUT_S="${API_CALL_TIMEOUT_S:-}"
+API_TIMEOUT_BIN=""
+if command -v timeout >/dev/null 2>&1; then API_TIMEOUT_BIN="timeout"
+elif command -v gtimeout >/dev/null 2>&1; then API_TIMEOUT_BIN="gtimeout"; fi
+KC_TIMEOUT_S=0   # >0 only while an api_retry attempt is in flight (see kc())
 
 usage() {
   cat <<EOF
@@ -137,6 +169,25 @@ Phase sizing:
 Output:
   --out <path>                results file (default: ./results/<service>-<UTC timestamp>.txt)
 
+Transient-API retry (see README "Transient API retry"):
+  --api-retry-attempts <n>    total attempts per API operation, 1 = no retry (default: 4;
+                               \$API_RETRY_ATTEMPTS)
+  --api-retry-base-ms <ms>    first backoff step (default: 500; \$API_RETRY_BASE_MS)
+  --api-retry-max-ms <ms>     per-step backoff ceiling (default: 8000; \$API_RETRY_MAX_MS)
+  --api-call-timeout-s <s>    hard cap on a SINGLE API call (default: derived as
+                              \$API_RETRY_DEADLINE_S / attempts, min 1s; \$API_CALL_TIMEOUT_S).
+                              Clamped to the total budget.
+                              \$API_RETRY_DEADLINE_S (default 60) is the TOTAL wall-clock
+                              budget for one operation; the per-call cap above bounds each
+                              individual (possibly hung) call via timeout(1), so every
+                              configured attempt fits inside the budget. Without
+                              timeout/gtimeout on PATH only the scheduling is bounded
+                              (the run says so at startup).
+                              ONLY transient errors (TLS handshake timeout, connection
+                              refused/reset, i/o timeout, 5xx, TooManyRequests/throttling)
+                              are retried;
+                              NotFound/Forbidden/Invalid and anything unrecognised fail fast.
+
 Other:
   --dry-run                   print the actions/manifests that would run; never touch a cluster
   -h, --help                   show this help
@@ -168,6 +219,10 @@ while [ $# -gt 0 ]; do
     --burst-hold) BURST_HOLD="$2"; shift 2 ;;
     --burst-reps) BURST_REPS="$2"; shift 2 ;;
     --out) OUT="$2"; shift 2 ;;
+    --api-retry-attempts) API_RETRY_ATTEMPTS="$2"; shift 2 ;;
+    --api-call-timeout-s) API_CALL_TIMEOUT_S="$2"; shift 2 ;;
+    --api-retry-base-ms) API_RETRY_BASE_MS="$2"; shift 2 ;;
+    --api-retry-max-ms) API_RETRY_MAX_MS="$2"; shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown arg: $1" >&2; usage >&2; exit 1 ;;
@@ -183,6 +238,21 @@ fi
 if [ -z "$URL" ]; then
   URL="http://${SERVICE}.${NS}.svc.cluster.local"
 fi
+
+# Sanitise the attempt count ONCE, here, so the startup banner and the code that
+# enforces the bound are driven by the same number. They used to diverge: the
+# banner passed the RAW value to api_call_cap while api_retry clamped its own
+# copy, so API_RETRY_ATTEMPTS=0 announced "up to 0 attempt(s), each call capped
+# at s" (plus a stray "division by 0" on stderr) for a run that actually enforced
+# 1 attempt at a 60s cap. Announcing a TIGHTER bound than is enforced is the same
+# "reads cleaner than reality" direction as #424/#425/#426.
+[ "$API_RETRY_ATTEMPTS" -ge 1 ] 2>/dev/null || API_RETRY_ATTEMPTS=1
+# The deadline needs the SAME treatment, for a sharper reason than cosmetics: a
+# 0/negative/non-numeric deadline made api_call_cap return 0, which means kc()
+# adds NO timeout wrapper at all — so a hung call was completely unbounded while
+# the banner still advertised a bound. Sanitising here keeps banner and
+# enforcement driven by one number, as above.
+[ "$API_RETRY_DEADLINE_S" -ge 1 ] 2>/dev/null || API_RETRY_DEADLINE_S=1
 
 # containerConcurrency 0 is LEGAL in Knative (means "unbounded"), so it must not
 # be used as a divisor. With CC=0 there is no VUs-per-pod ratio to size against;
@@ -216,19 +286,215 @@ kc() {
     echo "[dry-run] kubectl ${KCTX:+--context $KCTX }$*" >&2
     return 0
   fi
+  # KC_TIMEOUT_S (>0) hard-caps this single invocation. api_retry sets it for the
+  # duration of an attempt so API_RETRY_DEADLINE_S bounds a HUNG call and not
+  # merely the gap between attempts. It stays unset everywhere else, so the
+  # bounded poll loops (wait_zero/running_pods) are untouched.
+  local tmo=()
+  if [ -n "$API_TIMEOUT_BIN" ] && [ "${KC_TIMEOUT_S:-0}" -gt 0 ] 2>/dev/null; then
+    # -k: KILL shortly after TERM, so the box holds even against a wedged client.
+    tmo=("$API_TIMEOUT_BIN" -k 5 "$KC_TIMEOUT_S")
+  fi
   if [ -n "$KCTX" ]; then
-    "$KUBECTL_BIN" --context "$KCTX" "$@"
+    ${tmo[@]+"${tmo[@]}"} "$KUBECTL_BIN" --context "$KCTX" "$@"
   else
-    "$KUBECTL_BIN" "$@"
+    ${tmo[@]+"${tmo[@]}"} "$KUBECTL_BIN" "$@"
   fi
 }
 
 log() { echo "$@" | tee -a "$OUT"; }
 
+# ── transient-vs-terminal API error classification (#427) ────────────────────
+# Mirrors the spirit of isTerminalWakeErr() in
+# packages/scale-zero-pg/gateway/internal/wake/retry.go: TERMINAL means "retrying
+# cannot fix this", so fail loud immediately instead of burning the budget.
+#
+# The bias here is deliberately the OPPOSITE of the Go version's. There, retrying
+# is safe by default because GetScale->UpdateScale is idempotent and the caller is
+# a latency-sensitive wake path. Here, a wrong "transient" verdict turns a real
+# misconfiguration (typo'd --service, missing RBAC, invalid annotation value) into
+# a SLOW failure in an interactive benchmark run — so terminal patterns are
+# checked FIRST and ANYTHING UNRECOGNISED IS TREATED AS TERMINAL. Adding a new
+# transient pattern is a deliberate act, never an accident of matching order.
+#
+#   terminal  — NotFound, Forbidden, Unauthorized, Invalid/validation, BadRequest,
+#               AlreadyExists, MethodNotAllowed, Gone, unknown-field  ... and any
+#               message this function does not recognise.
+#   transient — TLS handshake timeout, connection refused/reset, broken pipe,
+#               i/o timeout, "unable to connect to the server", context deadline
+#               exceeded, etcd/request timed out, TooManyRequests/throttling,
+#               5xx (InternalError/ServiceUnavailable/ServerTimeout), unexpected EOF.
+#
+# NOTE: there is deliberately NO bare "429" pattern. kubectl renders a real
+# rate-limit as "Error from server (TooManyRequests): ..." (already matched), so
+# the substring only ever fired on 429 appearing as a *number* — e.g. a Knative
+# admission denial "expected 0 <= 429 <= 100" for a USER-SUPPLIED --tuned value,
+# which carries no invalid/validating token and would otherwise be retried. That
+# turns a typo'd flag into a slow failure: exactly what the terminal-first bias
+# is here to prevent.
+classify_api_error() {
+  local m
+  # LC_ALL=C: kubectl stderr can carry binary bytes, and a locale-aware tr(1)
+  # then prints "tr: Illegal byte sequence" to our stderr. Classification already
+  # falls back to terminal in that case; the stray diagnostic is pure noise.
+  m=$(printf '%s' "$1" | LC_ALL=C tr '[:upper:]' '[:lower:]' 2>/dev/null)
+  # TERMINAL first — a terminal error mentioning a timeout must stay terminal.
+  case "$m" in
+    *notfound*|*"not found"*|*forbidden*|*unauthorized*|*"is invalid"*|*invalid*|\
+    *badrequest*|*"bad request"*|*"already exists"*|*"error validating"*|\
+    *"unknown field"*|*methodnotallowed*|*"method not allowed"*|*"(gone)"*|\
+    *"no such host"*|*"couldn't get current server api group list"*)
+      echo terminal; return 0 ;;
+  esac
+  case "$m" in
+    *"tls handshake timeout"*|*"connection refused"*|*"connection reset"*|\
+    *"was refused"*|*"time allotted"*|\
+    *"broken pipe"*|*"i/o timeout"*|*"unable to connect to the server"*|\
+    *"context deadline exceeded"*|*"request timed out"*|*"etcdserver"*|\
+    *"server timeout"*|*servertimeout*|*"too many requests"*|*toomanyrequests*|\
+    *throttl*|*internalerror*|*"internal error"*|*serviceunavailable*|\
+    *"service unavailable"*|*"an error on the server"*|*"unexpected eof"*|\
+    *"the server is currently unable to handle the request"*|\
+    *"transport is closing"*|*"network is unreachable"*|*"no route to host"*)
+      echo transient; return 0 ;;
+  esac
+  # Unrecognised => TERMINAL. Failing fast on an unknown error is recoverable by
+  # a human; slowly retrying a real misconfiguration wastes a long benchmark run.
+  echo terminal
+}
+
+# ── retry accounting — a degraded run must never look like a clean one ───────
+# This harness has already shipped three "the results look cleaner than reality"
+# bugs (#424, #425, #426). A run that limped through a flaky control-plane window
+# is NOT the same artifact as a first-try-clean run, so every retry is recorded
+# in the results file and summarised in the final verdict.
+API_RETRY_COUNT=0
+API_RETRY_OPS=""   # newline-separated op names, one line per retry performed
+# Retries are only half the story. An operation that hit transient errors and
+# was then GIVEN UP ON (attempts exhausted, or the wall-clock budget spent while
+# a call was still hanging) recorded nothing at all: the wall-clock check
+# returned before the retry counter was incremented, so a run whose control
+# plane demonstrably stalled was filed as "api retries: 0 ... clean
+# control-plane run". Abandonments are therefore counted separately and
+# reported, and the "clean" claim requires BOTH counters to be zero.
+API_ABANDONED_COUNT=0
+API_ABANDONED_OPS=""
+
+# record_api_abandon <op-label> <why> — a transient failure we stopped fighting.
+record_api_abandon() {
+  API_ABANDONED_COUNT=$((API_ABANDONED_COUNT + 1))
+  API_ABANDONED_OPS="${API_ABANDONED_OPS}${1}"$'\n'
+  log "  api-abandoned: op='${1}' — giving up after transient failures: ${2}; the API said: $(printf '%s' "$API_RETRY_LAST_OUT" | head -n 1)"
+}
+
+# api_call_cap <attempts> — the per-call timeout(1) cap for one attempt.
+api_call_cap() {
+  local attempts="$1" deadline="$API_RETRY_DEADLINE_S" cap
+  [ "$deadline" -ge 1 ] 2>/dev/null || { echo 0; return 0; }
+  # Guard the divisor at the point of division too: callers pass a value that is
+  # sanitised at startup, but this helper must never emit "division by 0" to
+  # stderr (an arithmetic error that no assertion would otherwise catch).
+  [ "$attempts" -ge 1 ] 2>/dev/null || attempts=1
+  if [ -n "$API_CALL_TIMEOUT_S" ]; then
+    cap="$API_CALL_TIMEOUT_S"
+    [ "$cap" -ge 1 ] 2>/dev/null || cap=0
+  else
+    cap=$(( deadline / attempts ))
+    [ "$cap" -lt 1 ] && cap=1
+  fi
+  # A single call may never outlive the budget for the whole operation.
+  [ "$cap" -gt "$deadline" ] && cap="$deadline"
+  echo "$cap"
+}
+
+# api_retry <op-label> <command...>
+# Runs the command, retrying ONLY transient failures with capped exponential
+# backoff, bounded by API_RETRY_ATTEMPTS and deadline-boxed by API_RETRY_DEADLINE_S.
+# Returns the command's exit code; the combined output is left in API_RETRY_LAST_OUT
+# so callers keep their existing "kubectl said: ..." reporting verbatim.
+#
+# MUST NOT be called inside $(...) — it sets globals the caller depends on.
+API_RETRY_LAST_OUT=""
+API_RETRY_LAST_ATTEMPTS=0
+
+# ── per-call enforcement of API_RETRY_DEADLINE_S ─────────────────────────────
+# The deadline used to be checked only BETWEEN attempts, so a *hung* call was
+# not bounded at all: a 25s-hanging kubectl under API_RETRY_DEADLINE_S=5 still
+# took 26s, and the worst case was attempts x per-call duration. Each attempt is
+# now wrapped in timeout(1) so the box is real. `timeout` is coreutils; on a
+# stock macOS without it we degrade to the old scheduling-only bound and SAY SO
+# rather than keep claiming a guarantee we are not providing.
+api_retry() {
+  local op="$1"; shift
+  # Already sanitised once at startup, so this matches what the banner announced.
+  local attempts="$API_RETRY_ATTEMPTS"
+  local backoff_ms="$API_RETRY_BASE_MS" n=1 rc=0 class="" start now
+  [ "$backoff_ms" -ge 0 ] 2>/dev/null || backoff_ms=0
+  start=$(date +%s)
+  local per_call
+  per_call=$(api_call_cap "$attempts")
+  while :; do
+    # Set explicitly rather than as an assignment prefix: prefix assignments on a
+    # shell-function call have surprising persistence semantics across bash modes.
+    KC_TIMEOUT_S="$per_call"
+    API_RETRY_LAST_OUT=$("$@" 2>&1)
+    rc=$?
+    KC_TIMEOUT_S=0
+    # timeout(1) reports 124 on expiry (137 if it had to KILL). Synthesise a
+    # message so the stall classifies as the transient it is, and so the caller's
+    # verbatim "kubectl said: ..." reporting stays truthful instead of blank.
+    if [ -n "$API_TIMEOUT_BIN" ] && [ "$per_call" -gt 0 ] \
+       && { [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; }; then
+      API_RETRY_LAST_OUT="i/o timeout: the API call did not return within the per-call cap of ${per_call}s (budget API_RETRY_DEADLINE_S=${API_RETRY_DEADLINE_S}s / ${attempts} attempts) and was terminated${API_RETRY_LAST_OUT:+ — partial output: ${API_RETRY_LAST_OUT}}"
+    fi
+    API_RETRY_LAST_ATTEMPTS=$n
+    [ "$rc" -eq 0 ] && return 0
+
+    class=$(classify_api_error "$API_RETRY_LAST_OUT")
+    # Terminal: fail exactly as fast as before this feature existed.
+    [ "$class" != "transient" ] && return "$rc"
+    # Bounded by attempts...
+    if [ "$n" -ge "$attempts" ]; then
+      record_api_abandon "$op" "API_RETRY_ATTEMPTS=${attempts} exhausted"
+      return "$rc"
+    fi
+    # ...and by wall clock. With timeout(1) present this is a genuine box: each
+    # attempt is itself capped at ${per_call}s, so a hung apiserver cannot
+    # stretch a run. Without it, this check only bounds *scheduling*.
+    # The abandonment is RECORDED before returning: this return used to be the
+    # one exit that left no trace, which is how a stalled run got filed as clean.
+    now=$(date +%s)
+    if [ $((now - start)) -ge "$API_RETRY_DEADLINE_S" ] 2>/dev/null; then
+      record_api_abandon "$op" "the API_RETRY_DEADLINE_S=${API_RETRY_DEADLINE_S}s budget was spent after ${n} attempt(s)"
+      return "$rc"
+    fi
+
+    # Equal jitter (d/2 + rand[0,d/2]) so repeated ops don't synchronise.
+    local sleep_ms sleep_s
+    sleep_ms=$(( backoff_ms / 2 + (RANDOM % (backoff_ms / 2 + 1)) ))
+    sleep_s=$(awk -v ms="$sleep_ms" 'BEGIN { printf "%.3f", ms / 1000 }')
+    sleep "$sleep_s"
+
+    # Committed to another attempt: count it NOW so the record matches reality.
+    API_RETRY_COUNT=$((API_RETRY_COUNT + 1))
+    API_RETRY_OPS="${API_RETRY_OPS}${op}"$'\n'
+    log "  api-retry: op='${op}' attempt=${n}/${attempts} class=transient — retrying after ${sleep_ms}ms; the API said: $(printf '%s' "$API_RETRY_LAST_OUT" | head -n 1)"
+
+    backoff_ms=$((backoff_ms * 2))
+    [ "$backoff_ms" -gt "$API_RETRY_MAX_MS" ] 2>/dev/null && backoff_ms="$API_RETRY_MAX_MS"
+    n=$((n + 1))
+  done
+}
+
 log "=== knext scale-to-zero benchmark — service=$SERVICE namespace=$NS ==="
 log "context=${KCTX:-<current>} url=$URL max-scale=$MAXSCALE containerConcurrency(burst)=$CC"
 log "phases=$PHASES burst-vus=$BURST_VUS (>= container-concurrency*max-scale forces fan-out to cap)"
 log "k6 image=$IMG cpu-request=$K6_CPU_REQUEST (kept small — see README 'oversized k6 request' trap)"
+if [ -z "$API_TIMEOUT_BIN" ]; then
+  log "NOTE: no timeout(1)/gtimeout on PATH — API_RETRY_DEADLINE_S=${API_RETRY_DEADLINE_S}s bounds only retry SCHEDULING, not an individual hung API call (worst case ~ ${API_RETRY_ATTEMPTS} x per-call duration). Install coreutils for a hard per-call box."
+else
+  log "api retry: up to ${API_RETRY_ATTEMPTS} attempt(s) per operation, each call capped at $(api_call_cap "$API_RETRY_ATTEMPTS")s, total budget API_RETRY_DEADLINE_S=${API_RETRY_DEADLINE_S}s (worst case ~ budget + one per-call cap)."
+fi
 if [ "$DRY_RUN" = "1" ]; then
   if [ "$DRY_RUN_EXERCISE_KC" = "1" ]; then
     # The old banner claimed "no kubectl mutation" even under the test seam,
@@ -292,11 +558,16 @@ capture_original() {
     exit 1
   fi
 
+  # The READ is retried on transient errors (#427) — but the fail-closed contract
+  # is untouched: retrying a blip before CONCLUDING failure is fine, silently
+  # proceeding with an unread config is not. On exhaustion (or on any terminal
+  # error, which is not retried at all) we still abort BEFORE any mutation.
   local json rc
-  json=$(kc get ksvc "$SERVICE" -n "$NS" -o json 2>&1)
+  api_retry "capture-original" kc get ksvc "$SERVICE" -n "$NS" -o json
   rc=$?
+  json="$API_RETRY_LAST_OUT"
   if [ "$rc" -ne 0 ] || [ -z "$json" ]; then
-    log "FATAL: could not read ksvc '${SERVICE}' in namespace '${NS}' (kubectl get exited ${rc})."
+    log "FATAL: could not read ksvc '${SERVICE}' in namespace '${NS}' (kubectl get exited ${rc} after ${API_RETRY_LAST_ATTEMPTS} attempt(s))."
     log "       ABORTING before any mutation — restoring a config we never captured would"
     log "       silently destroy this service's real autoscaling settings."
     log "       kubectl said: ${json:-<no output>}"
@@ -339,6 +610,17 @@ capture_original() {
 # this trap is the fix.
 CLEANED_UP=0
 cleanup() {
+  # FIRST statement, before anything else can call kc(): this is the SIGNAL-path
+  # reset of the per-call cap. api_retry arms KC_TIMEOUT_S around each attempt and
+  # clears it on the line after the call returns — but bash defers a trapped
+  # signal until the in-flight command substitution completes and then runs the
+  # trap BEFORE that next statement. So an INT/TERM arriving mid-attempt reached
+  # here with the cap still armed, wrapping every restore patch below in
+  # `timeout -k 5 <cap>` and killing it. Restores must ALWAYS run unbounded: this
+  # is the last chance to un-mutate a live service (#424 fail-closed contract).
+  # The exhaustion -> FATAL -> EXIT path resets it in api_retry; this covers the
+  # other entry.
+  KC_TIMEOUT_S=0
   [ "$CLEANED_UP" = "1" ] && return 0
   CLEANED_UP=1
   log ""
@@ -348,19 +630,27 @@ cleanup() {
     # mutation (see capture_original) — so there is genuinely nothing to undo.
     log "  (dry-run, or aborted before capture — no mutation was made, nothing to restore)"
   else
+    # Restore failures are COUNTED, not swallowed. `|| true` everywhere meant a
+    # restore that never applied still printed "restored: ..." — the artifact
+    # claimed a clean cluster while the service stayed mutated. Each step still
+    # uses `|| RESTORE_FAILED=...` (never a bare failure) so ONE failing patch
+    # cannot abort the remaining steps: a partial restore must still get as far
+    # as it can. The names are the failed keys, so the operator knows exactly
+    # what to undo by hand.
+    local restore_failed=""
     local cc_restore="${ORIG_CC:-0}"
     kc patch ksvc "$SERVICE" -n "$NS" --type merge -p \
       "{\"spec\":{\"template\":{\"spec\":{\"containerConcurrency\":${cc_restore}}}}}" \
-      >/dev/null 2>&1 || true
+      >/dev/null 2>&1 || restore_failed="${restore_failed} containerConcurrency"
 
     if [ -n "$ORIG_MAXSCALE" ]; then
       kc patch ksvc "$SERVICE" -n "$NS" --type merge -p \
         "{\"spec\":{\"template\":{\"metadata\":{\"annotations\":{\"autoscaling.knative.dev/max-scale\":\"${ORIG_MAXSCALE}\"}}}}}" \
-        >/dev/null 2>&1 || true
+        >/dev/null 2>&1 || restore_failed="${restore_failed} max-scale"
     else
       kc patch ksvc "$SERVICE" -n "$NS" --type json -p \
         '[{"op":"remove","path":"/spec/template/metadata/annotations/autoscaling.knative.dev~1max-scale"}]' \
-        >/dev/null 2>&1 || true
+        >/dev/null 2>&1 || restore_failed="${restore_failed} max-scale"
     fi
 
     for pair in "ORIG_TBC:target-burst-capacity" "ORIG_PW:panic-window-percentage" "ORIG_PT:panic-threshold-percentage"; do
@@ -369,14 +659,23 @@ cleanup() {
       if [ -n "$val" ]; then
         kc patch ksvc "$SERVICE" -n "$NS" --type merge -p \
           "{\"spec\":{\"template\":{\"metadata\":{\"annotations\":{\"autoscaling.knative.dev/${key}\":\"${val}\"}}}}}" \
-          >/dev/null 2>&1 || true
+          >/dev/null 2>&1 || restore_failed="${restore_failed} ${key}"
       else
         kc patch ksvc "$SERVICE" -n "$NS" --type json -p \
           "[{\"op\":\"remove\",\"path\":\"/spec/template/metadata/annotations/autoscaling.knative.dev~1${key}\"}]" \
-          >/dev/null 2>&1 || true
+          >/dev/null 2>&1 || restore_failed="${restore_failed} ${key}"
       fi
     done
-    log "  restored: containerConcurrency=${cc_restore}, max-scale=${ORIG_MAXSCALE:-<removed>}, burst/panic annotations restored/removed to captured originals"
+    # A `remove` of an already-absent annotation is a legitimate failure mode of
+    # the json patch type, so this can be noisy on a service that was never
+    # annotated — but over-reporting a restore is the safe direction; silently
+    # claiming one is not.
+    if [ -z "$restore_failed" ]; then
+      log "  restored: containerConcurrency=${cc_restore}, max-scale=${ORIG_MAXSCALE:-<removed>}, burst/panic annotations restored/removed to captured originals"
+    else
+      log "*** RESTORE FAILED — these keys did NOT apply:${restore_failed} ***"
+      log "*** $SERVICE MAY STILL BE MUTATED by this benchmark. Check and restore it by hand before trusting the service or any later run. ***"
+    fi
   fi
 
   # NOTE: reps that lost their metrics deliberately keep their Job (see run_k6).
@@ -393,6 +692,35 @@ cleanup() {
   # Per-rep data loss is reported independently of how the run ended, because a
   # run can be BOTH truncated and missing a rep's metrics — reporting only one
   # of the two would hide the other.
+  # Transient-retry disclosure (#427). Printed ALWAYS, including the zero case,
+  # so "this run hit no API trouble" is a positive statement in the artifact
+  # rather than the absence of a line a reader might not know to look for.
+  # A run is degraded if the control plane misbehaved AT ALL — whether we
+  # recovered by retrying or gave up. Keying this on the retry count alone meant
+  # a run killed by a stalled apiserver (0 retries, 1 abandonment) printed the
+  # "clean control-plane run" line.
+  if [ "$API_RETRY_COUNT" -gt 0 ] || [ "$API_ABANDONED_COUNT" -gt 0 ]; then
+    local ops_summary
+    ops_summary=$(printf '%s%s' "$API_RETRY_OPS" "$API_ABANDONED_OPS" | grep -v '^$' | sort | uniq -c \
+      | awk '{ printf "%s%s x%s", (NR>1 ? ", " : ""), $2, $1 }')
+    log "*** RUN DEGRADED BY TRANSIENT API ERRORS — ${API_RETRY_COUNT} retry/retries, ${API_ABANDONED_COUNT} abandoned call(s): ${ops_summary} ***"
+    # "The data is valid" is a claim about DATA, so it may only be made when
+    # there IS complete data. Printed unconditionally it contradicted the
+    # authoritative verdict two lines below on a zero-rep or data-losing run —
+    # the fifth "reads cleaner than reality" bug in this harness.
+    if [ "$REPS_RUN" -gt 0 ] && [ -z "$INCOMPLETE_REPS" ] && [ "$PHASES_COMPLETED" -eq 1 ]; then
+      log "*** The control plane was flaky during this run. The data is valid (every config was verified applied), but timings may include control-plane stalls — see the 'api-retry:'/'api-abandoned:' lines above. ***"
+    else
+      log "*** The control plane was flaky during this run. Every config that WAS applied was verified applied, but this run did not produce a complete dataset — see the run-integrity verdict below, and the 'api-retry:' lines above. ***"
+    fi
+    # One line, both facts. Reporting only the retry count let "api retries: 0"
+    # stand alone on a run that stalled and was abandoned — a reader grepping
+    # for that line would have read it as "clean".
+    log "api retries: ${API_RETRY_COUNT}, api calls abandoned after transient failure(s): ${API_ABANDONED_COUNT} (the control plane misbehaved — this run is NOT a clean first-try run)"
+  else
+    log "api retries: 0 (no transient API errors — clean control-plane run)"
+  fi
+
   if [ -n "$INCOMPLETE_REPS" ]; then
     log "*** RUN INCOMPLETE — untrustworthy rep(s): ${INCOMPLETE_REPS} ***"
     log "*** ${REPS_RUN} rep(s) ran; this results file is MISSING or UNRELIABLE data for the reps above. ***"
@@ -464,18 +792,24 @@ apply_autoscaling() {
   # A silently-failed patch produces a complete, plausible-looking result file
   # for a config that was never applied — i.e. the whole A/B becomes a lie.
   # Keep stderr and check the exit code.
-  local out rc
-  out=$(kc patch ksvc "$SERVICE" -n "$NS" --type merge -p \
-    "{\"spec\":{\"template\":{${cc_patch}\"metadata\":{\"annotations\":{\"autoscaling.knative.dev/max-scale\":\"${MAXSCALE}\",\"autoscaling.knative.dev/target-burst-capacity\":\"${tbc}\",\"autoscaling.knative.dev/panic-window-percentage\":\"${pw}\",\"autoscaling.knative.dev/panic-threshold-percentage\":\"${pt}\"}}}}}" 2>&1)
-  rc=$?
+  local out rc payload
+  payload="{\"spec\":{\"template\":{${cc_patch}\"metadata\":{\"annotations\":{\"autoscaling.knative.dev/max-scale\":\"${MAXSCALE}\",\"autoscaling.knative.dev/target-burst-capacity\":\"${tbc}\",\"autoscaling.knative.dev/panic-window-percentage\":\"${pw}\",\"autoscaling.knative.dev/panic-threshold-percentage\":\"${pt}\"}}}}}"
   # In dry-run, kc()'s "[dry-run] kubectl ..." line lands in $out — surface it
   # rather than swallowing it, so --dry-run still shows the patch it would make.
   if ! kc_live; then
+    out=$(kc patch ksvc "$SERVICE" -n "$NS" --type merge -p "$payload" 2>&1)
     [ -n "$out" ] && log "  ${out}"
     return 0
   fi
+  # This is THE call site that killed two of three OKE runs (#427): a TLS
+  # handshake timeout here discarded an otherwise-valid partial dataset. Retry
+  # transient blips; terminal errors (and exhaustion) fall through to the
+  # UNCHANGED FATAL below, because measuring an unapplied config is still a lie.
+  api_retry "apply-autoscaling" kc patch ksvc "$SERVICE" -n "$NS" --type merge -p "$payload"
+  rc=$?
+  out="$API_RETRY_LAST_OUT"
   if [ "$rc" -ne 0 ]; then
-    log "FATAL: failed to apply autoscaling config (tbc=${tbc} pw=${pw} pt=${pt} cc=${cc:-<unchanged>}); kubectl exited ${rc}."
+    log "FATAL: failed to apply autoscaling config (tbc=${tbc} pw=${pw} pt=${pt} cc=${cc:-<unchanged>}); kubectl exited ${rc} after ${API_RETRY_LAST_ATTEMPTS} attempt(s)."
     log "       Results for an unapplied config would be meaningless — aborting (cleanup will restore the original)."
     log "       kubectl said: ${out}"
     exit 1

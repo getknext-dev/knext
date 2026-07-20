@@ -105,6 +105,8 @@ mistaken for a complete one:
 | `run integrity: no reps ran; no data collected — this file is NOT a dataset` | No rep executed at all (`--phases none`, a plain `--dry-run`, or an abort before the first rep). Exit code is whatever caused it — 0 for a dry run, non-zero for a `FATAL:` abort. Never read this file as a result. |
 | `run integrity: N rep(s) ran but some LOST data — dataset is NOT complete` | The run finished all phases, but at least one rep is missing data or did not finish cleanly. **Exit code 2.** Preceded by the `*** RUN INCOMPLETE ***` block naming the reps. |
 | `*** RUN INCOMPLETE — untrustworthy rep(s): <rep> [<reason>] ***` | Printed whenever a rep lost data, **independently** of how the run ended — a run can be both truncated *and* missing a rep, and you need to see both facts. Scope any claim to the reps that do have data, and say so. |
+| `api retries: 0 (no transient API errors — clean control-plane run)` | Always printed. The control plane answered every call first try. |
+| `api retries: N (transient API errors were retried — this run is NOT a clean first-try run)` | Printed with a `*** RUN DEGRADED BY TRANSIENT API ERRORS ***` block naming each retried operation. Every config that was applied was verified applied before it was measured, so if the run also completed all its reps the data is valid — the banner says so only in that case — but the control plane was flaky, so wall-clock timings may include control-plane stalls. If the run aborted or lost a rep, the banner says that instead and the `run integrity:` verdict below it is authoritative. See "Transient API retry" below. |
 
 The verdict is derived from three facts — reps run, reps flagged incomplete, and
 whether the run reached the end of its phases — so it always agrees with the exit
@@ -211,16 +213,169 @@ crashed shell). This is the direct fix for the real incident behind this harness
 the manual runs that produced the published numbers were interrupted twice and left
 the cluster patched with test autoscaling config.
 
+**The restore always runs unbounded.** The per-call `timeout` box that bounds a hung
+API call (see *Transient API retry* below) is explicitly cleared as the first
+statement of the cleanup path, because cleanup is the last chance to un-mutate a
+live service. This matters specifically on the signal path: bash defers a trapped
+signal until the in-flight command completes and then runs the trap *before* the
+next statement, so an interrupt arriving mid-call used to enter cleanup with the
+per-call cap still armed and every restore patch got killed by it.
+
+**A restore that fails is reported, not swallowed.** Each restore patch is
+attempted independently — one failure never aborts the remaining steps — but if any
+of them did not apply, cleanup prints
+
+```
+*** RESTORE FAILED — these keys did NOT apply: max-scale target-burst-capacity ***
+*** <service> MAY STILL BE MUTATED by this benchmark. Check and restore it by hand … ***
+```
+
+instead of the usual `restored: …` line. Treat that as "the service is still
+carrying benchmark config" and fix it by hand before trusting the service or any
+later run. Note this can also fire benignly when removing an annotation that was
+never set; over-reporting a failed restore is the safe direction, silently claiming
+a successful one is not.
+
+## Transient API retry
+
+Two of the three original OKE runs aborted on the same one-off control-plane blip
+while applying a burst config:
+
+```
+FATAL: failed to apply autoscaling config …; kubectl exited 1.
+       kubectl said: Unable to connect to the server: net/http: TLS handshake timeout
+```
+
+Refusing to measure a config that was never applied is **correct and unchanged**.
+But throwing away a valid partial dataset over a one-second blip forces a full
+re-run, and long runs (p99 cold start under concurrency needs many samples) hit
+that window often. So the two API calls whose failure aborts a run —
+`apply_autoscaling`'s patch and `capture_original`'s read — now retry **transient**
+errors with capped exponential backoff plus jitter.
+
+**Terminal errors are never retried.** Classification is terminal-first, and
+anything unrecognised is treated as terminal: a wrong "transient" verdict would
+turn a real misconfiguration (typo'd `--service`, missing RBAC, invalid
+annotation value) into a *slow* failure, which is worse than a fast one.
+
+| Class | Examples | Behaviour |
+|---|---|---|
+| **transient** (retried) | TLS handshake timeout · connection refused/reset · i/o timeout · `unable to connect to the server` · context deadline exceeded · request timed out / `time allotted` · `TooManyRequests` / throttling · 5xx (`InternalError`, `ServiceUnavailable`, `an error on the server`) · unexpected EOF · network unreachable | Retry with backoff, up to the attempt/deadline bound |
+| **terminal** (never retried) | `NotFound` · `Forbidden` · `Unauthorized` · `Invalid` / validation / unknown-field · `BadRequest` · `AlreadyExists` · `MethodNotAllowed` · `Gone` · `no such host` and `couldn't get current server api group list` (a wrong cluster/kubeconfig, not a blip) · **and every unrecognised message** | Fail immediately, exactly as before |
+
+Classification is applied terminal-first on purpose: a terminal error that happens
+to mention a timeout stays terminal.
+
+Matching is on message substrings, so a pattern must not be able to fire on a
+value that merely *contains* it. There is deliberately **no bare `429` pattern**:
+kubectl renders a real rate-limit as `Error from server (TooManyRequests): …`,
+which is matched by name, whereas a Knative admission denial for an out-of-bounds
+annotation reads `expected 0 <= 429 <= 100` — and that value comes from your own
+`--baseline` / `--tuned` flag. Matching `429` there would turn a typo'd flag into
+a slow failure, which is exactly what the terminal-first bias exists to prevent.
+
+| Knob | Default | Meaning |
+|---|---|---|
+| `API_RETRY_ATTEMPTS` / `--api-retry-attempts` | `4` | Total attempts per operation. `1` disables retrying. A value below `1` or non-numeric is clamped to `1`, and the startup banner reports the clamped value it will actually enforce. |
+| `API_RETRY_BASE_MS` / `--api-retry-base-ms` | `500` | First backoff step; doubles each retry. |
+| `API_RETRY_MAX_MS` / `--api-retry-max-ms` | `8000` | Per-step backoff ceiling. |
+| `API_RETRY_DEADLINE_S` | `60` | **Total** wall-clock budget per operation — see below. Clamped to `1` the same way as the attempt count: at `0`/negative/non-numeric the per-call cap computed to `0`, which meant *no* `timeout` wrapper at all and a hung call was unbounded while the banner still advertised a bound. |
+| `API_CALL_TIMEOUT_S` / `--api-call-timeout-s` | `deadline / attempts` (min `1`) | Hard cap on a **single** call. Clamped to the total budget. |
+
+These are two different bounds and they must stay separate:
+
+- `API_RETRY_DEADLINE_S` is the **total** budget for one operation. No new
+  attempt is started once it has elapsed.
+- `API_CALL_TIMEOUT_S` caps **one call**. Every attempt runs under `timeout(1)`,
+  so a *hung* apiserver connection is terminated rather than waited on
+  indefinitely.
+
+The per-call cap defaults to `deadline / attempts`, floored at 1s, so that the
+configured attempts normally fit inside the total budget. The floor means they
+are not *guaranteed* to (a 3s budget over 4 attempts floors to 4×1s); the budget
+check, not the arithmetic, is what bounds the run. When one knob did both
+jobs, a hung first attempt consumed the whole budget and `API_RETRY_ATTEMPTS`
+became **dead for exactly the failure this feature exists for** — a stalled
+apiserver got one attempt regardless of the configured number. With defaults
+(`60s / 4`), each call is capped at 15s and a stalled control plane still gets
+its four attempts. Worst case for an operation is therefore ~`deadline` plus the
+one per-call cap that may be in flight when the budget expires — not
+`attempts × per-call duration`.
+
+A call killed by the per-call cap is classified transient. If a further attempt
+remains within the budget it is **counted as a retry**; if the budget or the
+attempt count is exhausted, the operation is **counted as abandoned** (see
+below). Either way it is recorded — a stalled run can never be reported as
+clean.
+
+This per-call cap needs `timeout` (or `gtimeout`) on `PATH` — GNU coreutils,
+present on Linux and via Homebrew, **absent from a stock macOS**. Without it the
+harness degrades to bounding retry *scheduling* only, so a hung call is not
+itself interrupted and the worst case really is `attempts × per-call duration`.
+The run prints a `NOTE:` line at startup when it is in that mode; install
+coreutils to get the hard box.
+
+Bounded means bounded: a genuinely unreachable cluster still aborts, just a few
+seconds later. **On exhaustion the behaviour is exactly the old behaviour** — the
+same `FATAL:`, the same restore of the captured original config, the same
+`ABORTED` verdict and non-zero exit. The fail-closed guarantee is untouched:
+`capture_original` still refuses to mutate a service whose original config it
+could not read, whether that read failed once or four times.
+
+Every retry **and every abandonment** is recorded in the results file:
+
+```
+  api-retry: op='apply-autoscaling' attempt=1/4 class=transient — retrying after 380ms; the API said: Unable to connect to the server: net/http: TLS handshake timeout
+  api-abandoned: op='capture-original' — giving up after transient failures: the API_RETRY_DEADLINE_S=6s budget was spent after 2 attempt(s); the API said: i/o timeout: the API call did not return within the per-call cap of 2s …
+…
+*** RUN DEGRADED BY TRANSIENT API ERRORS — 2 retry/retries, 1 abandoned call(s): apply-autoscaling x2, capture-original x1 ***
+```
+
+This is deliberate. A run that limped through a flaky window must not produce an
+artifact identical to a clean run — that would be another instance of the
+"results look cleaner than reality" bug class this harness has already had three
+of.
+
+**How to read a retried run.** Grep the results file for `api retries:` — it is
+always present, exactly once, near the verdict:
+
+- `api retries: 0 (no transient API errors — clean control-plane run)` — clean
+  first-try control-plane run. Nothing to caveat. This exact line is the **only**
+  clean claim, and it is emitted only when the retry count *and* the abandonment
+  count are both zero.
+- `api retries: N, api calls abandoned after transient failure(s): M` — the
+  control plane misbehaved.
+  - `N > 0, M = 0`: every stall was recovered by retrying. The numbers are still
+    *valid* — a config is only measured after it was verified applied, so no rep
+    was taken against a half-applied service — but the run's **wall-clock timings
+    may be inflated** by the backoff spent inside the retried operation.
+  - `M > 0`: an operation was given up on (attempts or budget exhausted), so the
+    run aborted. Read the run-integrity verdict: this file is not a complete
+    dataset. A call killed by the per-call cap counts here even if it was the
+    only attempt, which is what stops a stalled run from reading as clean.
+
+  Read the `api-retry:` / `api-abandoned:` lines above the verdict to see which
+  operation stalled and by how long.
+
+Practical consequences: quote a retried run's cold-start numbers with the
+degradation noted, don't silently pool a retried run with clean runs in the same
+p99 claim, and if the retry count is high enough to matter, re-run rather than
+caveat.
+
+What is *not* retried: k6 workload failures. A failed load generator is a real
+result, not a blip.
+
 ## Tests
 
-Two paths here can produce real damage or a real lie, so both have tests:
+Three paths here can produce real damage or a real lie, so all three have tests:
 
 ```bash
 bash benchmarks/scale-to-zero-oke/capture-restore.test.sh      # can damage a service
 bash benchmarks/scale-to-zero-oke/k6-metrics-integrity.test.sh # can publish a false result
+bash benchmarks/scale-to-zero-oke/api-retry.test.sh            # can mask an unreachable cluster
 ```
 
-Both drive `run.sh` against a stub `kubectl` (via the `KUBECTL_BIN` +
+All three drive `run.sh` against a stub `kubectl` (via the `KUBECTL_BIN` +
 `DRY_RUN_EXERCISE_KC=1` test seam). `capture-restore` asserts that a failed
 capture aborts without issuing a single `patch`, and that a successful capture
 restores the exact original values. `k6-metrics-integrity` asserts the honest-
@@ -229,6 +384,11 @@ one whose Job did not finish cleanly — warns loudly and exits non-zero, its ra
 log lands in the results file, a zero-rep run refuses to claim completeness,
 `kubectl wait` outcomes are distinguished, lost sampler data reads
 `<no sampler data>`, and the fan-out warning is scoped to the burst phase.
+`api-retry` asserts both directions of the classification above against real
+kubectl error strings — a transient error is retried and the run completes, a
+terminal one is attempted *exactly once*, exhaustion still restores the config and
+reports `ABORTED`, retries appear in the results file, and a clean run reports
+zero retries.
 
 Two further env-var seams exist only to keep those tests fast and deterministic;
 leave them alone in a real run:
