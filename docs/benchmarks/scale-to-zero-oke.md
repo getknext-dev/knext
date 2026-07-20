@@ -1,8 +1,9 @@
 # Scale-to-zero & burst benchmark — OKE (2026-07-19 / 2026-07-20)
 
 Status: point-in-time measurement · Runs: 2026-07-19 (run 1, throwaway scripts), 2026-07-20
-(run 2, committed harness) and 2026-07-20 (run 3, data-integrity-hardened harness — **aborted
-mid-run, partial dataset**) · Target: `file-manager` Knative Service
+(run 2, committed harness), 2026-07-20 (run 3, data-integrity-hardened harness — **aborted
+mid-run, partial dataset**) and 2026-07-20 (run 4, retry-hardened harness — **the first run to
+complete every phase**) · Target: `file-manager` Knative Service
 
 > **Correction notice (2026-07-20).** Run 2 **did not reproduce** run 1's headline burst finding —
 > the median-latency delta between the baseline and tuned burst configs reversed sign. The run-1
@@ -10,6 +11,13 @@ mid-run, partial dataset**) · Target: `file-manager` Knative Service
 > [Run 2](#run-2-2026-07-20--produced-by-the-committed-harness) and the
 > [corrected findings](#corrected-findings-after-run-2). Run-1 data is retained below as history,
 > not as a current conclusion.
+>
+> **Second correction notice (2026-07-20, after run 4).** Run 2's replacement claim — that the
+> tuned config reaches 2 pods **instantly** while baseline takes 3–6s — **also did not reproduce**:
+> in run 4 both configs reached 2 pods at 6s and 6 pods at 12s, identically. Both conclusions
+> ever drawn from this A/B have now failed to reproduce, in opposite directions. The standing
+> position is that **the burst-knob comparison is not conclusive either way at this sample size**;
+> see [Run 4](#run-4-2026-07-20--first-complete-run-retry-hardened-harness).
 
 ## Environment
 
@@ -367,6 +375,135 @@ timings. Nothing in the burst tables above changes; run 2 remains the most recen
   **No run in this document was produced with retry enabled** — runs 1–3 predate it, and their
   numbers above are unchanged.
 
+## Run 4 (2026-07-20) — first complete run, retry-hardened harness
+
+Same cluster and same target (`file-manager`, OKE 2-node) as runs 1–3. This is the OKE validation
+of the transient-API-retry work (#427 / PR #428), and **the first run in this document to complete
+every configured phase**: the harness exited **0** with
+
+```
+api retries: 0 (no transient API errors — clean control-plane run)
+run integrity: k6 metrics captured for all 10 rep(s) — dataset is complete
+```
+
+**The retry path was not exercised by real blips.** Zero transient API errors occurred, so this run
+completed because the control plane happened to be healthy — **not** because retry rescued it. The
+retry feature gets no credit for this run's success; what the run does show is that a healthy
+window on this cluster is enough to finish all 10 reps, and that the run-integrity verdict says so
+honestly when it is.
+
+```bash
+cd benchmarks/scale-to-zero-oke
+./run.sh --namespace default --service file-manager \
+  --max-scale 6 --container-concurrency 15 --burst-vus 90
+```
+
+Harness config for this run: phases `all`, `max-scale=6`, `containerConcurrency` pinned to **15**
+for the burst phase, **90** continuous burst VUs, k6 image `grafana/k6:0.49.0` at a 150m CPU
+request; API retry up to **4 attempts** per operation, each call capped at **15s**, total budget
+`API_RETRY_DEADLINE_S=60s`. Captured pre-run config (restored on exit): `max-scale=10`,
+`containerConcurrency=20`, burst/panic annotations unset.
+
+### The headline: the burst A/B does not reproduce, in either direction
+
+Run 4's burst A/B, in full — all four reps:
+
+| Config | rep | peak pods | →2 pods | →6 pods | reqs | errors | med | p90 | p95 | p99 | max | rps |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| baseline (TBC=200, pw=10, pt=200) | 1 | 6 | 6s | 12s | 32,038 | 0 | 60.82ms | 332.95ms | 447.34ms | 1.18s | 23.99s | 427.1 |
+| baseline | 2 | 6 | 6s | 12s | 32,407 | 0 | 71.45ms | 340.59ms | 438.34ms | 1.16s | 12.06s | 431.8 |
+| tuned (TBC=-1, pw=6, pt=150) | 1 | 6 | 6s | 12s | 35,620 | 0 | 48.41ms | 350.32ms | 453.42ms | 767.9ms | 9.48s | 474.8 |
+| tuned | 2 | 6 | 6s | 12s | 34,402 | 0 | 64.22ms | 355.52ms | 454.8ms | 719.62ms | 10.23s | 458.5 |
+
+Placed against the two earlier runs of the *same* A/B on the *same* cluster and app:
+
+| Run | median winner | fan-out timing |
+|---|---|---|
+| 1 (throwaway scripts) | tuned (81 / 72ms vs 106 / 112ms) | — |
+| 2 (harness) | **baseline** (70.86 / 77.4ms vs 88.06ms) | tuned reached 2 pods at **0s**; baseline 3s / 6s |
+| 4 (this run) | tuned (48.41 / 64.22ms vs 60.82 / 71.45ms) | **identical** — both 6s→2 pods, 12s→6 pods |
+
+**Two separate conclusions have now been drawn from this comparison, and each has failed to
+reproduce.** Run 1's median ordering flipped in run 2. Run 2's replacement finding — the one that
+looked far more mechanistically convincing, that `targetBurstCapacity=-1` keeps the activator in
+the path and so triggers scale-up instantly — **vanished entirely in run 4**, where the two configs
+fanned out on exactly the same schedule to the second.
+
+**Conclusion: at n=2 reps per config per run, between-run variance exceeds the between-config
+difference. The burst-knob comparison is not conclusive, in either direction.** It does not
+establish that the knobs help, and it does not establish that they don't. Settling it needs more
+reps per config and repeated runs, not another single-run reading.
+
+That includes the one difference in run 4 that looks strongest. **Tuned's p99 was ~35% lower than
+baseline's — 767.9ms / 719.62ms vs 1.18s / 1.16s — and unlike every earlier candidate signal it was
+consistent across both reps of both configs**, with no overlap between the two bands. It is the
+largest and most internally consistent difference observed in this A/B so far, and it is recorded
+here as **worth investigating — explicitly not as an established result.** This document already
+carries one withdrawn burst conclusion and one silently-refuted one; the lesson both taught is that
+a single run's delta on this cluster is not trustworthy, and that lesson applies to this p99 gap
+exactly as it applied to them.
+
+Fan-out itself remains the stable signal: **`peak=6` in all four reps**, 2 pods at 6s and 6 pods at
+12s in every rep, **0 errors across 134,467 burst requests** (32,038 + 32,407 + 35,620 + 34,402).
+
+### Phase A — cold start (5 sequential single-request samples, baseline config)
+
+| Sample | Response time | Peak pods |
+|---|---|---|
+| 1 | **7.15s** | 1 |
+| 2 | 3.83s | 1 |
+| 3 | 3.82s | 1 |
+| 4 | 3.44s | 1 |
+| 5 | 3.90s | 1 |
+
+Median **3.83s**; worst sample **7.15s** — roughly **2× the median**, and again the *first* sample
+of the run. All 5 succeeded; 0 errors.
+
+This extends the intermittent-outlier finding from runs 2 and 3 rather than changing it. Outliers
+of roughly 2× median show up in most runs (**6.66s** in run 1, **7.15s** here), with one much
+larger excursion on record (**17.6s** in run 2) and one run that saw none at all (run 3, worst
+sample 4.33s). The median stays remarkably stable across all four runs while the tail does not,
+which is the same conclusion in stronger form: **the median understates the tail, and
+characterising the tail needs far more than 5 samples** — the empirical case for the p99
+cold-start-under-concurrency work (#309).
+
+### Phase C — sustained soak (ramp 0→120 VU over 20s, hold 3m, baseline config, think-time load)
+
+| Reqs | Errors | med | p90 | p95 | p99 | max | rps | peak pods |
+|---|---|---|---|---|---|---|---|---|
+| 23,166 | 0 (0.00%) | 7.49ms | 14.49ms | 19.41ms | 37.95ms | 4.91s | 110.2 | **1** |
+
+Phase D (scale-down after soak): scaled to 0 after **72s**.
+
+Soak p99 across the four runs is now **730.6ms → 191.35ms → 84.07ms → 37.95ms**, at near-identical
+request volume (22,643 / 23,027 / 23,101 / 23,166) and identical load shape. **Nothing was
+optimised between any of these runs** — no runtime, autoscaler, or app change sits between them, and
+run 4's only code delta is the harness's API-retry path, which did not fire. **This is variance, not
+a trend, and the descending sequence must not be presented as improvement.** What it establishes is
+unchanged from run 3: soak p99 on this cluster is not stable enough to regress against.
+
+Recorded request volume, run 4: **157,638 requests, 0 failures** — Phase A (5) + Phase C (23,166) +
+the four burst reps (134,467). This is the first run where that total covers the complete
+configured experiment rather than a subset of it.
+
+### Findings — run 4
+
+- **The dataset is complete, and the harness said so from a real check rather than a rep count.**
+  Exit 0 with `k6 metrics captured for all 10 rep(s)`. Runs 2 and 3 are the reason that line is
+  trusted: run 2 silently dropped a rep and still exited 0, and run 3 correctly refused to call an
+  aborted run complete. This is the first run where the verdict line reports completeness because
+  the experiment actually ran.
+- **The retry path is untested by real transient errors.** `api retries: 0`. Three of the previous
+  runs' sessions hit `TLS handshake timeout` against the OKE API server; this one hit none, so #427's
+  retry logic never engaged. Its live behaviour under a genuine control-plane blip remains
+  unobserved — do not read run 4 as validation that retry works.
+- **The burst A/B is inconclusive.** See [above](#the-headline-the-burst-ab-does-not-reproduce-in-either-direction).
+  Both prior conclusions failed to reproduce; the ~35% p99 gap is a hypothesis, not a result.
+- **The stable signals stayed stable.** Fan-out to `peak=6` in every burst rep, 0 errors across
+  157,638 requests, cold-start median 3.83s (vs ~4.0 / 3.95 / 3.91s), soak median 7.49ms. Error rate,
+  median latency, and pod-count behaviour are the numbers this harness measures reproducibly; tail
+  and per-config latency deltas are not.
+
 ## Caveat
 
 These are **point-in-time measurements on a specific small (2-node) OKE cluster** with a
@@ -384,3 +521,10 @@ errors, and run 3's dataset is **partial** — cold start and soak only, no burs
 numbers as the six reps that completed before an experiment that was never finished — which is
 exactly what the harness's own verdict line says. Any figure in this document should be checked against the run it
 came from before it is quoted.
+
+Run 4 sharpens the first caveat rather than relieving it. It is the only complete dataset here, and
+it still **refuted the surviving burst conclusion** — run 2's "tuned reaches 2 pods instantly"
+effect did not appear at all. With every burst reading so far contradicted by the next run, the
+honest summary of this A/B is that **three runs have not been enough to measure it**. Read the
+per-config latency and fan-out deltas in this document as open questions; read the pod-count,
+error-rate, and median figures — which have held across all four runs — as the trustworthy output.
