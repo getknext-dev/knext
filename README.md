@@ -117,12 +117,12 @@ flowchart LR
 
 ### Cold Start Performance (Scale from Zero)
 
-With `minScale: 0`, pods terminate after 10 seconds of inactivity and must be provisioned fresh on next request:
+With `minScale: 0`, pods terminate after 10 seconds of inactivity and must be provisioned fresh on next request. The figures below are from a **single early GKE run** and are **not representative** — cold start is scheduling-dominated and environment-dependent. Our more rigorous multi-run OKE benchmark measures **~4s median (scheduling-bound)** on a 2-node cluster; treat that as the honest number and these as one favorable data point. See [benchmarks](docs/benchmarks/scale-to-zero-oke.md).
 
-| Metric | Value |
+| Metric | Value (single early GKE run — not representative) |
 |--------|-------|
-| **Time to First Byte (TTFB)** | **0.66s** |
-| **Total Response Time** | **0.92s** |
+| **Time to First Byte (TTFB)** | 0.66s |
+| **Total Response Time** | 0.92s |
 | **Pod Provisioning** | Container goes from `Pending → Running` in ~1s |
 
 ### Warm Start Performance

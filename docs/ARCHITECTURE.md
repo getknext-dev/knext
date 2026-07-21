@@ -353,10 +353,12 @@ flowchart LR
 
 #### Cold Start (0 Pods → Provision → Boot → Response)
 
-| Metric | Value |
+> These figures are from a **single early GKE run and are not representative** — cold start is scheduling-dominated and environment-dependent. The more rigorous multi-run OKE benchmark measures **~4s median (scheduling-bound)** on a 2-node cluster ([benchmarks](benchmarks/scale-to-zero-oke.md)); treat that as the honest number and the row below as one favorable data point.
+
+| Metric | Value (single early GKE run — not representative) |
 |--------|-------|
-| **Time to First Byte (TTFB)** | **0.66s** |
-| **Total Response Time** | **0.92s** |
+| **Time to First Byte (TTFB)** | 0.66s |
+| **Total Response Time** | 0.92s |
 | **Pod Provisioning** | `Pending → ContainerCreating → Running` in ~1s |
 
 #### Warm Start (Already Running Pod)
@@ -388,7 +390,7 @@ seq 1 100000 | xargs -n1 -P100 -I {} curl -s -o /dev/null -w "%{time_total}\n" \
 | **Sustained RPS** | ~192 req/s (100 workers ÷ 0.521s avg) |
 | **Peak Autoscale** | 2 pods (`maxScale: 2`) |
 | **Per-Pod RPS** | ~96 req/s |
-| **Scale-to-Zero Recovery** | Pods terminate after 10s idle, resume in < 1s |
+| **Scale-to-Zero Recovery** | Pods terminate after 10s idle; resume time is scheduling-dominated and environment-dependent (~4s median measured on a 2-node OKE cluster — see [benchmarks](benchmarks/scale-to-zero-oke.md)) |
 | **Zero Errors** | All 100,000 requests completed successfully |
 
 #### How Cold Starts Are Optimized
