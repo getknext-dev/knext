@@ -1162,8 +1162,11 @@ the round's `http_req_duration` distribution + peak pod fan-out. 400 cold reques
 | 8 | 6.21s | 6.36s | 6.36s | 6.36s | 4 |
 
 **Findings.**
-- **Failure-free.** All 50 requests completed in every round — 400/400 cold requests served, zero
-  drops, zero timeouts under the herd. No request was stranded behind the activator queue.
+- **Failure-free.** All 50 requests completed in every round — 400/400 cold requests served (each
+  round reported `reqs=50`), and every duration landed in the 5–7 s band, far under the 170 s request
+  timeout, with no low-side outliers that would signal an early error. (The runner captured the
+  request count, not an explicit `http_req_failed` line, so "failure-free" is grounded in that
+  distribution shape rather than a failure-rate metric.) No request was stranded behind the activator queue.
 - **The tail is tight WITHIN a round.** In every round p99 ≈ p95 ≈ max ≈ median (e.g. round 7: median
   6.93s → p99 7.11s, a ~180 ms spread across 50 concurrent requests). Knative's activator holds the
   herd and releases it together once ~3–4 pods are Ready, so the 50 requests finish in a narrow band
