@@ -81,8 +81,9 @@ implemented — it is a known-uncovered vinext surface, so ISR-dependent apps ar
 ## Beta-on-beta toolchain risk ⚠️
 
 The pipeline rides **two coupled betas**: `vinext@1.0.0-beta.2` is locked to
-`nitro@3.0.260610-beta`, with `@vitejs/plugin-rsc@^0.5.27` and `vite@^8`. **These
-pins are exact and load-bearing** — an unpinned/`^`-resolved install silently
+`nitro@3.0.260610-beta`, with `@vitejs/plugin-rsc@0.5.28` (exact-pinned) and
+`vite@^8`. **These pins are exact and load-bearing** (and enforced by the
+committed `bun.lock` + `bun install --frozen-lockfile`) — an unpinned/`^`-resolved install silently
 breaks the build (stable nitro renames the SSR service bundle so vinext's
 RSC↔SSR dynamic import can't resolve; `@vitejs/plugin-rsc@0.4.x` fails with
 `RUNTIME_MODULE_SYMBOL_NOT_FOUND`). **Re-validate this entire recipe on every pin

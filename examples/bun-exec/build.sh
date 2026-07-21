@@ -24,8 +24,8 @@ OUT="${OUT:-knext-bun-exec-$ARCH}"
 
 command -v bun >/dev/null 2>&1 || { echo "bun is required (https://bun.sh)"; exit 1; }
 
-echo "==> [1/3] bun install (exact pinned deps)"
-bun install
+echo "==> [1/3] bun install --frozen-lockfile (exact pinned deps)"
+bun install --frozen-lockfile
 
 echo "==> [2/3] vite build (vinext → Nitro bun preset → .output/server/index.mjs)"
 ./node_modules/.bin/vite build
