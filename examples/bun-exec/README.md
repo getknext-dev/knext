@@ -1,12 +1,14 @@
 # `bun-exec` build recipe (opt-in, experimental)
 
-> **⚠ NOT DEPLOYABLE AS-IS — see [#460](https://github.com/getknext-dev/knext/issues/460).**
-> The compiled binary is **not portable**: `bun --compile` bakes the build machine's *absolute*
-> `.output/` path into the executable, and it loads its SSR/route chunks from that path at runtime.
-> Run anywhere but the exact build directory — including a container, the ship path documented below —
-> and it serves a 404 for **every** route. The "single self-contained executable, ship it in a bare
-> Alpine image" framing in this README is **aspirational and currently false**; it was only ever
-> exercised by running the binary from its build directory. Do not ship this until #460 is fixed.
+> **⚠ THIS BUILD IS NOT SELF-CONTAINED YET — see [#460](https://github.com/getknext-dev/knext/issues/460).**
+> A truly self-contained single binary IS achievable (it has been shipped before — binary only,
+> nothing else), and that remains the target. But **this recipe's current build does not produce
+> one:** it uses the `nitro` **bun preset**, which loads its route/SSR chunks *dynamically from
+> `.output/` at runtime*, so `bun --compile .output/server/index.mjs` embeds only the entry — not the
+> routes. Run the binary anywhere but its build directory (a container, another dir) and it serves a
+> 404 for **every** route. The "single self-contained executable, ship it in a bare Alpine image"
+> framing below is the **goal, not yet met** by this build — it was only ever exercised by running the
+> binary from its build directory. The fix (bundle the full route graph into the binary) is #460.
 
 > **Maintainer example.** This directory is an in-repo recipe for knext
 > maintainers, not user-facing documentation — so it references ADRs and the
@@ -28,9 +30,10 @@ Bun single executable **never boots Next's server**, so *in principle* it
 side-steps that floor — the ADR-0036 P1 feasibility spike booted a **trivial**
 compiled binary in ~2–4 ms (bypassing the ~1957 ms), which is the whole reason to
 try this. Whether the **real** recipe delivers a distribution-separated cold-start
-win **remains unmeasured — and currently unmeasurable**: the P1b OKE A/B (benchmark
-run 16) could not run because the deployed binary is non-portable (#460). **No
-speedup is claimed, and none can be until #460 is fixed.** ADR-0036 authorises this as an **opt-in, compat-gated** alternative target
+win **remains unmeasured**: the P1b OKE A/B (benchmark run 16) could not run yet
+because *this build* isn't self-contained, so it doesn't survive deployment (#460).
+**No speedup is claimed until the recipe produces a portable binary (#460) and the
+A/B is run.** ADR-0036 authorises this as an **opt-in, compat-gated** alternative target
 — never a default, never a silent flip.
 
 ## Eligibility boundary (read before using)
@@ -109,8 +112,10 @@ upstream — that exit stance is tracked in ADR-0036 P1b.
 `bun --compile` embeds the ~57 MB Bun runtime, so the executable is **~90–110 MB**
 (the pre-compile `.output/` tree is ~1 MB — the size is entirely the runtime; the
 "5 MB alpine" idea is wrong). **The intended ship path — a bare `FROM alpine` image, cosign-signed
-and digest-pinned — does NOT currently work: the binary 404s all routes when run outside its build
-directory ([#460](https://github.com/getknext-dev/knext/issues/460)).** Once that is fixed, because
+and digest-pinned — does not work with *this* build yet: because the nitro bun preset loads routes
+from `.output/` at runtime, the binary alone 404s all routes ([#460](https://github.com/getknext-dev/knext/issues/460)).
+Once the build is fixed to bundle the routes into the binary (self-containment is the goal, and is
+achievable), that ship path applies — and because
 the binary is opaque to Trivy/syft, the SBOM + HIGH/CRITICAL
 scan run against the **pre-compile dependency closure** (lockfile), not the binary
 (ADR-0036 supply-chain consequence).
