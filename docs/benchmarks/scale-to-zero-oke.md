@@ -979,7 +979,7 @@ node being oversubscribed, which is a property of this cluster and this pod's 0-
 ## Run 13 (2026-07-21) — ADR-0036 P1b: two-target cold-boot A/B on OKE
 
 The **first OKE measurement of the optional `bun-exec` build target** proposed in
-[ADR-0036](../adr/0036-optional-vinext-bun-single-exec-build-target.md) (node stays the default;
+[ADR-0036](../adr/0036-optional-vinext-bun-build-target.md) (node stays the default;
 this target is opt-in and compat-gated). It answers a narrow question: on **equal minimal
 footing**, how much cold-boot does a `vinext → bun --compile` single executable save versus the
 default Next-standalone-on-node path?
