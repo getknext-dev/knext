@@ -696,6 +696,380 @@ cache ends up empty). The **identical bug exists in `apps/docs/Dockerfile`** and
 - **The root cause is confirmed, not inferred:** an empty cache directory shipped in the image,
   refilled and discarded on every cold pod.
 
+## Run 7 (2026-07-20) — startup ablation: is instrumentation costing us boot time? (NULL result)
+
+> **⚠️ Annotation (added after run 9). Do not read this null at face value.** Run 9 showed that
+> `KN_METRICS_PORT=0` — the toggle this run used to "disable metrics" — **never disabled
+> `collectDefaultMetrics()`**, which runs unconditionally at module scope in
+> `node-server.ts:45-46`. Every arm below, including `NEITHER`, therefore paid the identical
+> metrics-collection cost. **The four arms were not four arms.** The null is real as reported,
+> but it does not mean what it was written to mean: it rules out the metrics *server*, and says
+> nothing about the process-metrics collector that run 9 identifies as the likely competitor for
+> CPU. See [run 9](#run-9-2026-07-20--attributing-the-842-ms-wrapper-overhead) and
+> [the lesson this run teaches about ablation design](#the-lesson-an-ablation-that-toggles-the-wrong-knob-produces-a-confident-null).
+
+Run 6 left ~2.7s of warm-cache boot unexplained. Run 7 asks the cheapest question available about
+it: **do knext's own OTel tracing or metrics server contribute measurably to boot time?** Both are
+knext code that runs before the server is health-ready, so both were plausible suspects.
+
+**The answer is no, and that null result is the reportable finding** — it is what redirected the
+search onto the wrapper, which run 8 then measured.
+
+### Method — four interleaved arms in one pod, all warm
+
+Same cluster and app image as runs 1–6, and the same in-pod technique as run 6 — one pod, an
+`emptyDir` compile cache **primed before the first arm** so every arm is a WARM boot, `SIGTERM`
+between boots, timing taken to the shallow dependency-free `/api/health` route. **3 reps of each
+arm, interleaved**, so cluster drift over the run hits all four arms equally.
+
+| Arm | Toggle | Samples (ms) | Median |
+|---|---|---|---|
+| **BASELINE** | — | 2760, 2675, 2734 | **2734 ms** |
+| **NO_OTEL** | `OTEL_TRACING_ENABLED=false` | 2778, 2693, 2742 | **2742 ms** |
+| **NO_METRICS** | `KN_METRICS_PORT=0` | 2715, 2967, 2714 | **2715 ms** |
+| **NEITHER** | both | 2714, 3032, 2674 | **2714 ms** |
+
+### Why this is reported as a null, not as a small effect
+
+**All four medians fall within ~30 ms of each other, and the spreads overlap heavily** — NO_METRICS
+spans 2714–2967, NEITHER spans 2674–3032, and each of those ranges contains every other arm's
+median. There is **no distribution separation**, so by the standing bar in this document — the same
+bar that made [run 6](#why-this-one-is-reported-as-a-result) reportable and left runs 1–4's burst
+A/B inconclusive — **there is nothing here to report except the absence of an effect.**
+
+Reported the other way round, a 30 ms "improvement" from disabling OTel would be exactly the kind of
+noise-sized claim that failed to reproduce three times earlier in this document.
+
+### Honest caveat on what was actually ablated
+
+`KN_METRICS_PORT=0` **skips the listen, not the module import.** This run therefore rules out the
+cost of the metrics *server* — binding and serving — but **not** the cost of importing `prom-client`
+at module scope, which still happens in every arm. A future ablation that removes the import itself
+would be needed to close that gap.
+
+### Findings — run 7
+
+- **Neither OTel tracing nor the metrics server is a measurable contributor to boot time.** Two
+  plausible suspects ruled out at a cost of 12 boots.
+- **No distribution separation ⇒ reported as null.** The methodological bar this document uses cuts
+  both ways: it withholds small positive claims and it makes a null result meaningful.
+- **The remaining boot cost is elsewhere** — which is what motivated run 8.
+- **Scope limit:** rules out the metrics *server*, not the `prom-client` module import.
+- **⚠️ Superseded in part by run 9.** The first bullet overstates its reach. The ablation never
+  disabled `collectDefaultMetrics()`, so "metrics ruled out" should be read strictly as "the
+  metrics *listen* is ruled out." The correct standing claim is the narrower one in the scope
+  limit — which run 7 already stated, and which run 9 shows was the load-bearing sentence.
+
+## Run 8 (2026-07-20) — cold-boot decomposition: the knext wrapper costs 842 ms
+
+With instrumentation ruled out, run 8 asks where the remaining ~2.7s of warm-cache boot actually
+goes, by booting **Next.js's own `server.js` directly** and comparing it against **the knext wrapper**
+(the parent process that spawns the standalone server as a child).
+
+**This is the second comparison in this document with complete distribution separation, and it is
+the largest knext-controlled cost measured so far.**
+
+### Method — same in-pod technique as run 6, applied to two boot paths
+
+One pod, the real application image, an `emptyDir` compile cache **primed for both boot paths
+before measurement** so every sample is a WARM boot, `SIGTERM` between boots, timing to the shallow
+`/api/health` route. Part B **alternates the two arms in pairs**, so drift in cluster conditions
+affects both equally.
+
+As in run 6, this needs **no image rebuild and no mutation of the live Knative Service** — which is
+precisely why it can isolate a boot-level effect this cleanly.
+
+### Part A — 3 reps each
+
+| Arm | Samples (ms) | Median |
+|---|---|---|
+| Bare `node` process floor | 75, 70, 138 | **75 ms** |
+| Next.js `server.js` alone | 2234, 1930, 2361 | **2234 ms** |
+| knext wrapper (parent + child) | 2887, 2839, 2732 | **2839 ms** |
+
+### Part B — 6 alternating pairs (the tighter measurement)
+
+| Arm | Samples (ms) | Median |
+|---|---|---|
+| **NEXTJS** (`server.js` alone) | 1972, 1934, 1940, 2449, 1950, 1961 | **1957 ms** |
+| **WRAPPER** (knext parent spawns child) | 2845, 2718, 2804, 2794, 2847, 2708 | **2799 ms** |
+
+**Delta: 842 ms (+43%) added by the knext wrapper over booting Next.js directly.**
+
+**Separation is complete: the slowest NEXTJS sample (2449 ms) is faster than the fastest WRAPPER
+sample (2708 ms) — zero overlap across all 12 samples.** As with run 6, it is that ordering, not the
+size of the delta, that makes this a result rather than a signal.
+
+### Decomposition of a warm-cache boot
+
+| Segment | Cost | Share |
+|---|---|---|
+| `node` process floor | ~75 ms | 3% |
+| Next.js's own boot | ~1957 ms | 70% |
+| knext wrapper | ~842 ms | 30% |
+
+### Why this matters more than its size suggests
+
+- **It is ~2.1× the 393 ms the baked compile cache saved** (run 6, shipped as **#438** / ADR-0035) —
+  the largest boot win this document has recorded to date.
+- **Unlike Next.js's own 1957 ms, it is entirely within knext's control.** The 70% belongs upstream;
+  the 30% is knext's code.
+- **Run 7 already rules out instrumentation as the cause**, which points the remaining suspicion at
+  the **child-process spawn architecture and parent-side module loading** — the parent boots a full
+  Node module graph before the child that actually serves traffic even starts.
+
+That last point is an interpretation of two measurements, not a third measurement. **No fix has been
+designed, attempted, or measured**, and the split between spawn overhead and parent-side module
+loading is unattributed.
+
+> **Annotation (added after run 9).** That standing hypothesis — parent-side module loading —
+> **was measured and refuted.** The parent's module load plus spawn costs ~52 ms, not ~842 ms. The
+> 842 ms measurement below stands unchanged; only its attribution moved. See
+> [run 9](#run-9-2026-07-20--attributing-the-842-ms-wrapper-overhead).
+
+### Findings — run 8
+
+- **The knext wrapper adds 842 ms (+43%) to warm-cache boot**, with complete distribution separation
+  across 12 alternating samples.
+- **Warm-cache boot decomposes as ~3% node floor / ~70% Next.js / ~30% knext wrapper.**
+- **This is the largest knext-owned cold-start cost measured so far** — ~2.1× the compile-cache win.
+- **Cause is narrowed, not identified:** instrumentation is excluded (run 7); spawn architecture and
+  parent-side module loading are the standing hypotheses, unmeasured.
+  **⚠️ Both clauses of this bullet were overturned by run 9:** parent-side module loading is
+  refuted (~52 ms), and instrumentation was never actually excluded, because run 7's toggle did
+  not disable `collectDefaultMetrics()`.
+
+### Scope — same limits as run 6
+
+Runs 7 and 8 measure **boot-to-shallow-health inside a pod**, not end-to-end Knative cold start
+(**3.81s median**, run 5). They are single-environment measurements on one 2-node OKE cluster with
+one app image, and are **environment-dependent**.
+
+## Run 9 (2026-07-20) — attributing the 842 ms wrapper overhead
+
+Run 8 **measured** the wrapper's 842 ms. Run 9 asks **where it goes** — and the answer refutes the
+hypothesis that was filed as **#441** on the strength of run 8's interpretation.
+
+The filed hypothesis was that the parent process pays ~842 ms loading its own module graph
+(`prom-client` and friends) before the child that actually serves traffic starts. **That is wrong by
+a factor of sixteen.**
+
+### Part A — split the wrapper into parent cost and child cost (3 reps)
+
+| Segment | Samples (ms) | Median |
+|---|---|---|
+| Parent module-load + spawn | 53, 52, 51 | **52 ms** |
+| Child boot (via the wrapper) | 3339, 2804, 2709 | **2804 ms** |
+
+**The parent costs ~52 ms, not ~842 ms.** The overhead is not in the parent's own startup work at
+all. What the numbers say instead is stranger and more specific: **the same Next.js server boots
+~847 ms slower merely because the wrapper is running alongside it.**
+
+Two adjacent explanations were ruled out by inspection rather than measurement, and are reported as
+such:
+
+- **Spawn arguments are byte-identical to a direct run under Node.** `preloadArgs` only populates
+  under Bun, so the child is invoked exactly as `server.js` would be invoked directly.
+- **`buildChildEnv` is benign.** It blanks `HOSTNAME`, sets `PORT`, and adds `KNEXT_POD_NAME`.
+  Nothing there changes how Next.js boots.
+
+So neither the arguments nor the environment explain the gap. Whatever costs 847 ms happens
+**while** the child boots, not before it.
+
+### Part B — CPU contention test (3 pairs, no CPU limit, mirroring the real pod)
+
+If the parent isn't slow and the child isn't invoked differently, the remaining candidate is that
+the parent **competes with the child for CPU** during boot. Part B tests whether contention of that
+magnitude is even achievable, by booting `server.js` alone versus alongside a deliberately busy
+sibling `node` process — with no CPU limit set, mirroring the real pod.
+
+| Arm | Samples (ms) | Median |
+|---|---|---|
+| `server.js` **alone** | 1938, 2015, 2091 | **2015 ms** |
+| `server.js` **+ busy sibling node process** | 2945, 2995, 2966 | **2966 ms** |
+
+**Delta: 951 ms.** **Separation is complete — the slowest alone sample (2091 ms) is faster than the
+fastest with-busy sample (2945 ms), zero overlap.** By the standing bar in this document, that
+ordering is what makes Part B reportable as a result rather than a signal.
+
+### Mechanism — what is actually running during the child's boot
+
+`node-server.ts:45-46` calls **`collectDefaultMetrics()` at module scope**, which starts a periodic
+process-metrics collector in the parent. That collector keeps running for the entire duration of the
+child's boot. And `file-manager` pods **request 0 CPU**, so they are scheduled onto an
+oversubscribed node where CPU is genuinely contended — this is not a theoretical scheduling concern
+on this cluster.
+
+### The lesson: an ablation that toggles the wrong knob produces a confident null
+
+This is the most transferable finding in run 9, and it is a methodological one.
+
+[Run 7](#run-7-2026-07-20--startup-ablation-is-instrumentation-costing-us-boot-time-null-result)
+reported a clean null: four arms, medians within ~30 ms, no separation, instrumentation ruled out.
+Run 9 explains **why that null was inevitable regardless of the truth**. `KN_METRICS_PORT=0` skipped
+the metrics *listen*; it never disabled `collectDefaultMetrics()`. **Every arm — baseline,
+`NO_OTEL`, `NO_METRICS`, and `NEITHER` alike — ran the same process-metrics collector and paid the
+same cost.** The experiment compared four copies of the same condition.
+
+Note what did *not* fail here. The statistics were sound, the interleaving was right, the bar for
+separation was correctly applied, and the null was honestly reported. **A well-executed experiment
+on the wrong knob still yields a confident, wrong-feeling-of-certainty answer.** Run 7's own scope
+caveat — "rules out the metrics *server*, not the module import" — was the one sentence that
+survived contact with run 9, and it was written as a footnote rather than as the headline. The
+generalizable rule: **before trusting a null, verify that the toggle actually changed the thing
+being ablated.** A null is only as strong as the difference between the arms.
+
+### The busy-loop is a proxy — what Part B does and does not prove
+
+Part B does **not** prove the parent's metrics work is the competitor. It proves something weaker
+and worth stating precisely:
+
+- **What it proves:** CPU contention of this magnitude (~951 ms) is achievable in this pod
+  configuration, and is **consistent with** the 847 ms measured in Part A.
+- **What it does not prove:** that `collectDefaultMetrics()` specifically is the process consuming
+  that CPU. A busy loop is not a periodic metrics collector; matching magnitudes are corroboration,
+  not identification.
+
+**The falsification condition, stated plainly:** the decisive test is to **defer the parent's
+metrics startup and re-measure the wrapper** — which is the work in flight under **#441**. If
+deferring it closes the ~847 ms gap, the hypothesis holds. **If it does not close the gap, the
+hypothesis is wrong**, and the correct response is to **re-profile** — not to reach for a second
+patch on the same theory. Two patches on an unfalsified hypothesis is how run 7's mistake repeats
+itself at a larger cost.
+
+### Reproduction method
+
+**Part A — splitting the wrapper.** One pod, the real application image, an `emptyDir` compile cache
+primed before measurement so every sample is a WARM boot, `SIGTERM` between boots, timing to the
+shallow dependency-free `/api/health` route — the same in-pod technique as runs 6–8. The wrapper's
+boot is instrumented at two points: the parent's timestamp immediately before it spawns the child
+(giving parent module-load + spawn), and the child's time to health (giving child boot). 3 reps.
+The spawn-argument and environment checks are code inspection of `node-server.ts` `preloadArgs` and
+`buildChildEnv`, not measurements.
+
+**Part B — contention.** Same pod, same warm cache, **no CPU limit set** so the pod mirrors the real
+`file-manager` deployment's 0-CPU-request scheduling. Each pair boots `server.js` directly to health
+twice: once with nothing else running, once with a sibling `node` process spinning a busy loop for
+the duration of the boot. 3 alternating pairs, `SIGTERM` between boots, so cluster drift hits both
+arms equally.
+
+### Findings — run 9
+
+- **The parent's own module load and spawn cost ~52 ms, not ~842 ms** — the hypothesis filed in
+  **#441** is refuted by a factor of ~16.
+- **The same Next.js server boots ~847 ms slower with the wrapper running alongside it**, with the
+  spawn arguments byte-identical and the child environment benign.
+- **CPU contention of that magnitude is demonstrably achievable** (951 ms, complete separation) in a
+  pod that requests 0 CPU on an oversubscribed node.
+- **`collectDefaultMetrics()` at module scope (`node-server.ts:45-46`) is the identified suspect**,
+  running for the whole of the child's boot.
+- **Run 7's null is explained and should not be cited as "instrumentation ruled out."** Its ablation
+  never disabled the collector, so all four arms were the same condition.
+- **The suspect is not confirmed.** The busy loop is a proxy; the decisive test is deferring the
+  parent's metrics startup (#441) and re-measuring.
+
+### Scope — same limits as runs 6–8
+
+Run 9 measures **boot-to-shallow-health inside a pod**, not end-to-end Knative cold start
+(**3.81s median**, run 5). It is a single-environment measurement on one 2-node OKE cluster with one
+app image, and is **environment-dependent** — and the contention effect in particular depends on the
+node being oversubscribed, which is a property of this cluster and this pod's 0-CPU request.
+
+
+## Run 13 (2026-07-21) — ADR-0036 P1b: two-target cold-boot A/B on OKE
+
+The **first OKE measurement of the optional `bun-exec` build target** proposed in
+[ADR-0036](../adr/0036-optional-vinext-bun-single-exec-build-target.md) (node stays the default;
+this target is opt-in and compat-gated). It answers a narrow question: on **equal minimal
+footing**, how much cold-boot does a `vinext → bun --compile` single executable save versus the
+default Next-standalone-on-node path?
+
+This run is deliberately **not** the `file-manager` app the runs above measure — it is a minimal
+app built three ways so the comparison is apples-to-apples. Same cluster class (OKE 2-node), a
+different, purpose-built harness.
+
+> **Appended independently of PR #442.** Runs 7–12 live in an open, unmerged PR (#442) that is not
+> reflected in this file on `main`. Run 13 is added here as a self-contained section and makes no
+> reference to those runs' numbers; it is the ADR-0036 **P1b** measurement and stands on its own.
+
+### Method — three in-cluster pods, one minimal app built three ways
+
+Three `node:22` pods on OKE (**150m** CPU request / **2** CPU limit, mirroring the app's burst
+profile). Each pod builds a **minimal app** — one page plus a shallow, dependency-free
+`/api/health` route — and measures **process spawn → first HTTP 200 on `/api/health`**. The
+minimal surface is identical across all three paths, which is the entire point: it isolates the
+*runtime/boot* difference and removes the app itself as a variable.
+
+This is **in-pod boot, not full Knative cold start.** It does not include scale-to-zero →
+activator → schedule → image pull — only the spawn-to-first-200 boot segment.
+
+Toolchain pins (per P1a): **vinext `1.0.0-beta.2`**, **`@vitejs/plugin-rsc` `^0.5.27`**, **nitro
+`3.0.260610-beta`**.
+
+Reproduction scripts (three in-cluster `node:22` pods; build + bench):
+[`scratchpad/oke-vinext-bench.sh`] and [`scratchpad/oke-next-baseline.sh`] — the vinext/bun and the
+Next-standalone-baseline builders respectively.
+
+### Results — median spawn → first-200 (minimal app, in-cluster native x64)
+
+| Path (minimal app, OKE) | Samples (ms) | Median | Artifact size |
+|---|---|---|---|
+| Next standalone → node | 1079, 852, 846, 967, 766 | **~852 ms** | `.next/standalone` 77 MB |
+| vinext → node | 322, 306, 316, 318, 315, 329 | **~317 ms** | `.output` 1.1 MB |
+| vinext → `bun --compile` binary | 226, 261, 248, 177, 277, 181 | **~237 ms** | binary 137 MB (native x64 in-cluster) |
+
+**Complete distribution separation:** the slowest `vinext-bun` sample (**277 ms**) is faster than
+the fastest Next-standalone sample (**766 ms**) — zero overlap. By this document's own bar (a
+result is only reported when the distributions do not overlap; see [run 6](#run-6-2026-07-20--compile-cache-value-the-first-measured-performance-result-in-this-document)),
+this separation is what makes it reportable as a **result** rather than a signal.
+
+### Headline finding — framed honestly
+
+- **`vinext-bun` boots ~3.6× faster than Next-standalone-node** on this minimal app (237 vs
+  852 ms), with complete separation.
+- **Attribution — most of the win is vinext, not bun.** vinext-on-node already accounts for
+  **852 → 317 ms (~2.7×)**, because vinext (Vite/rolldown) never boots Next's standalone server at
+  all. `bun --compile` adds a **further, still-separated ~1.3× (317 → 237 ms)** plus the benefit of
+  single-file distribution. The compile step is the smaller half of the improvement.
+- **Explicit correction of an earlier over-claim.** A prior framing cited **"~44× vs 1957 ms."**
+  That compared the *heavy* `file-manager` app's boot to a *minimal* vinext app — **not
+  apples-to-apples**, and the ratio is withdrawn. On equal minimal footing the ratio is **~3.6×**.
+  A heavier app grows **both** sides of the comparison, so the real-world ratio is **app-dependent
+  and must be measured per app**, never extrapolated from this minimal number.
+
+### Confounds — recorded in full, none buried
+
+- **Minimal app only.** `file-manager`-class apps differ, and `file-manager` is specifically
+  **`bun-exec`-INELIGIBLE**: `next/image` + `sharp` are lost under vinext. The apps that benefit
+  most from this target are not the apps this run measured.
+- **In-pod boot, not full Knative cold start.** No scale-to-zero → activator → schedule segment is
+  included; the end-to-end cold-start numbers elsewhere in this document (3.8–4.0s median) are a
+  different, larger measurement.
+- **Binary is 137 MB** (native x64 built in-cluster; a cross-compiled musl build was 104–108 MB).
+  The **first-ever image-pull cost on a fresh node is NOT measured** — the layer was already
+  present on the node during timing.
+- **Beta toolchain.** vinext-beta is pinned to nitro-beta; this carries real
+  maintenance/abandonment risk for anything that would ship on it.
+- **The `RuntimeContract` is NOT tested.** SIGTERM drain + `after()`, the in-process `:9091`
+  metrics endpoint, the Redis `cache-handler`, Bearer-auth cache routes, and the ADR-0027
+  `globalThis` seam are all unverified under this target. That is **P2**, and it is the gate to a
+  *shippable* target — a fast boot with an unmet runtime contract is not a deployable path.
+
+### Findings — run 13
+
+- **A `vinext → bun --compile` single executable boots ~3.6× faster than Next-standalone-node on a
+  minimal app** (237 vs 852 ms), with complete distribution separation across all samples — a
+  result by this document's separation bar.
+- **The win is mostly vinext (~2.7×), with bun-compile adding a further separated ~1.3×** plus
+  single-file distribution. Do not attribute the whole gap to `bun --compile`.
+- **The earlier "~44×" framing is withdrawn** as a heavy-vs-minimal mismatch; the honest, apples-to-apples
+  figure is **~3.6×**, and it is app-dependent.
+- **This is a boot-segment result on a minimal, `bun-exec`-eligible app — not a shippable target.**
+  Runtime-contract verification (P2), full Knative cold start, image-pull cost, and heavy-app
+  behavior are all still open; and per ADR-0036, `bun-exec` ships only if a separated win survives
+  those. `bun-exec` remains **opt-in and compat-gated**; node stays the default.
+
+
 ## Recipe RuntimeContract validation on OKE (#447, bun-exec)
 
 This is a **correctness validation, not a benchmark A/B.** It confirms the opt-in `examples/bun-exec`
