@@ -730,6 +730,39 @@ correctly. It is **not** a cold-start comparison against the node/official-adapt
 comparable to the file-manager runs above. The recipe cold-start A/B (the ADR's P1b gate) remains
 unmeasured; run 13 is the closest apples-to-apples build/boot comparison to date.
 
+## Run 14 (2026-07-21) — supervisor non-safety init deferred off cold-start (#441/#443)
+
+The node/official-adapter path's own cold-start optimization: the knext supervisor's heavy import
+graphs (`@knext/lib/clients` → `@cerbos/grpc`+`minio`+`pg`; `./metrics` → `prom-client`+OTel;
+`./image-cache-sync`) are converted from **static to dynamic imports** so they load **after** the
+child is serving rather than before the spawn. `:9091` still binds eagerly (lightweight listener,
+heavy collector lazy on first scrape) and all SIGTERM shutdown-safety wiring stays eager.
+
+**Method.** In-pod on OKE, both branches built from source with the repo's own pnpm+turbo build.
+The built supervisor (`dist/adapters/node-server.js`) is run with a **trivial one-line child** (an
+`http.createServer` that binds `:3000` instantly), so the child's own boot is ~0 and
+process-start → first child `/api/health` 200 **isolates the supervisor's import-graph cost**. 8
+reps per arm. Pod limit 2 CPU (less oversubscription than a 0-CPU-request pod, so the effect here
+is a floor, not the worst case).
+
+| Arm | reps (ms, process-start → child health-200) | median |
+| --- | --- | --- |
+| **AFTER** — #443, heavy graphs deferred | 501, 533, 546, 552, 576, 577, 592, 1074 | **~564** |
+| **BEFORE** — main, heavy graphs static pre-spawn | 1090, 1097, 1108, 1114, 1126, 1154, 1158, 1386 | ~1120 |
+
+**Result — complete distribution separation.** Every AFTER rep (max **1074 ms**) is faster than
+every BEFORE rep (min **1090 ms**): **zero overlap**, the evidence bar the burst-A/B runs above
+never cleared. Deferring the import graph roughly **halves** the supervisor's contribution to child
+boot (~1120 → ~564 ms median, **~556 ms / ~2×**). `:9091` first-hit returned `200` in **both** arms,
+confirming the eager-bind is preserved and the earlier drain-gate regression is not reintroduced.
+
+**Scope.** This measures the **supervisor's in-pod boot contribution** with a trivial child on a
+2-CPU pod — it isolates the deferral's mechanism, it is **not** end-to-end cold start. The PR's
+hypothesized ~847 ms was on a 0-CPU-request oversubscribed pod where the supervisor and a real
+Next.js child compete harder; the ~556 ms here (less contention) is the same effect measured with
+more CPU headroom. Direction and separation are decisive; the absolute magnitude scales with pod
+CPU pressure. This is the deferral's isolated cost, not a portable cold-start guarantee.
+
 ## Caveat
 
 These are **point-in-time measurements on a specific small (2-node) OKE cluster** with a

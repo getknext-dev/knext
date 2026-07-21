@@ -14,21 +14,23 @@
  * vinext → official Next.js Adapter migration.
  */
 
-import { spawn } from "node:child_process";
+import { type ChildProcess, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import http from "node:http";
 import { dirname, resolve } from "node:path";
-import { collectDefaultMetrics, Registry } from "prom-client";
 import { createLogger } from "../utils/logger";
 import { registerDbPoolDrain } from "./db-drain";
-import { buildChildEnv } from "./env";
-import { startImageCacheSync } from "./image-cache-sync";
 import {
-    CHILD_METRICS_PORT,
-    fetchChildMetrics,
-    mergeExposition,
-} from "./metrics";
-import { gracefulShutdown } from "./shutdown";
+    probeIntervalMs,
+    readyDeadlineMs,
+    waitForChildServing,
+} from "./deferred-default-metrics";
+import {
+    createDeferredSupervisorInit,
+    createLazyMetricsEndpoint,
+    isSupervisorInitDeferred,
+} from "./deferred-supervisor-init";
+import { buildChildEnv } from "./env";
+import { type ChildLike, gracefulShutdown } from "./shutdown";
 
 const log = createLogger({ module: "server" });
 // Prometheus metrics port. Defaults to 9091 (no behavior change); overridable via
@@ -40,11 +42,20 @@ const METRICS_PORT = Number(process.env.METRICS_PORT ?? 9091);
 // terminationGracePeriodSeconds (k8s default 30s) so the child drains in time.
 const SHUTDOWN_GRACE_MS = Number(process.env.SHUTDOWN_GRACE_MS ?? 25_000);
 
-// ── Prometheus metrics server on :9091 ────────────────────────────────────────
+// ── Prometheus metrics endpoint on :9091 (#441) ───────────────────────────────
 // Clean separation: Next.js standalone owns $PORT (3000), metrics owns 9091.
-const metricsRegistry = new Registry();
-collectDefaultMetrics({ register: metricsRegistry });
-
+//
+// The SOCKET binds early (see the eager section below) so the sidecar answers
+// from process start — the platform contract enforced by the shipped-bundle drain
+// gate. What binding does NOT do is load the heavy graph: `prom-client` and
+// `./metrics` (which pulls `@opentelemetry/api`, ~790ms) are reached only by the
+// dynamic `import()` inside the endpoint, on the first scrape or from
+// `startCollector`. Profiling showed the supervisor spends ~1 CPU-second on its
+// own startup, dominated by those static module graphs; since it spawns the child
+// at 52ms that cost otherwise lands on the child's boot. Static ESM imports run
+// BEFORE the module body, so the heavy *imports* had to move — but an idle
+// listener is free, so the listen() itself does not.
+//
 // The golden-signal / cold-start / db-wake metrics (#315) are emitted in the
 // Next.js CHILD (that's where the @vercel/otel HTTP spans + the #317 hooks run).
 // The operator scrapes THIS supervisor endpoint (prometheus.io/port=9091), so we
@@ -52,23 +63,7 @@ collectDefaultMetrics({ register: metricsRegistry });
 // child's core metrics port. If the child is scaled to zero / not yet up / has
 // tracing off (no child server), the fetch returns "" and we serve just the
 // process metrics — never fatal. Overridable via KN_CHILD_METRICS_PORT.
-const metricsServer = http.createServer(async (req, res) => {
-    if (req.url === "/metrics" && req.method === "GET") {
-        res.setHeader("Content-Type", metricsRegistry.contentType);
-        const [own, child] = await Promise.all([
-            metricsRegistry.metrics(),
-            fetchChildMetrics(CHILD_METRICS_PORT),
-        ]);
-        res.end(mergeExposition([own, child]));
-        return;
-    }
-    res.writeHead(404);
-    res.end("Not Found");
-});
-
-metricsServer.listen(METRICS_PORT, () => {
-    log.info({ port: METRICS_PORT }, "Prometheus metrics server started");
-});
+const metricsEndpoint = createLazyMetricsEndpoint({ port: METRICS_PORT, log });
 
 // ── Next.js standalone server ─────────────────────────────────────────────────
 // `next build` with output:'standalone' emits server.js in .next/standalone/.
@@ -88,17 +83,42 @@ log.info({ serverJs }, "Starting Next.js standalone server");
 // variant computed once is reused by every later pod. No-op unless STORAGE_BUCKET
 // is set. The standalone server keeps `.next/cache/images` next to server.js, so
 // derive the dir from the server path (override via IMAGE_CACHE_DIR if needed).
+// Deferred with the rest of the supervisor's init (#441): computing the path is
+// free, but starting the sync (and loading its object-store client) is not, and
+// nothing needs it until the app is actually serving images.
 const imageCacheDir =
     process.env.IMAGE_CACHE_DIR ??
     resolve(dirname(serverJs), ".next", "cache", "images");
 let stopImageCacheSync: () => void = () => {};
-startImageCacheSync({ ...process.env, IMAGE_CACHE_DIR: imageCacheDir }, { log })
-    .then((handle) => {
-        stopImageCacheSync = handle.stop;
-    })
-    .catch((err) => {
-        log.warn({ err }, "Image cache sync failed to start (non-fatal)");
-    });
+
+// ── The deferred non-safety init (#441) ───────────────────────────────────────
+// Everything here is started only once the child is serving. NOTHING that
+// affects shutdown safety is in this list — see the eager wiring below.
+const deferredInit = createDeferredSupervisorInit({
+    log,
+    steps: [
+        {
+            // The :9091 socket is already bound (eager section below); this step
+            // warms the heavy metrics graph + starts collectDefaultMetrics once
+            // the child is serving, so the ~790ms load stays off its boot path.
+            name: "metrics-collector",
+            run: () => metricsEndpoint.startCollector("child-ready"),
+        },
+        {
+            name: "image-cache-sync",
+            run: async () => {
+                const { startImageCacheSync } = await import(
+                    "./image-cache-sync"
+                );
+                const handle = await startImageCacheSync(
+                    { ...process.env, IMAGE_CACHE_DIR: imageCacheDir },
+                    { log },
+                );
+                stopImageCacheSync = handle.stop;
+            },
+        },
+    ],
+});
 
 // ── Deployed-platform Cache-Control normalization (#175) ─────────────────────
 // Next's origin emits shared-cache directives (`s-maxage=…`, the fallback-shell
@@ -149,21 +169,13 @@ if (process.versions.bun) {
     }
 }
 
-const nextProc = spawn(process.execPath, [...preloadArgs, serverJs], {
-    stdio: "inherit",
-    env: buildChildEnv(),
-});
-
-nextProc.on("error", (err) => {
-    log.fatal({ err }, "Failed to start Next.js standalone server");
-    process.exit(1);
-});
-
-nextProc.on("exit", (code, signal) => {
-    log.info({ code, signal }, "Next.js standalone server exited");
-    metricsServer.close();
-    process.exit(code ?? 0);
-});
+// ═══ EAGER: shutdown safety (#441 — deliberately NOT deferred) ════════════════
+// Everything below this line runs BEFORE the child is spawned. A SIGTERM can
+// arrive at any moment, including mid-boot, and it must still drain correctly
+// (`.claude/rules/security.md`; CI has a shipped-bundle drain gate). Registering
+// a hook and installing a signal handler are microseconds of work — they are not
+// what costs the supervisor its ~1 CPU-second, so there is nothing to win by
+// deferring them and a correctness hole to lose.
 
 // ── DB-pool drain (PGS-1) ─────────────────────────────────────────────────────
 // Register the Postgres pools' drain so that on SIGTERM — after HTTP drains —
@@ -173,6 +185,11 @@ nextProc.on("exit", (code, signal) => {
 // awake). Closes BOTH the writer pool AND the read-only pool (#246); each close
 // is a no-op when its pool was never opened. Extracted to ./db-drain so the lib
 // pools stay free of any dependency on the runtime — no circular dep.
+//
+// #441: the HOOK is registered here, eagerly. Only `@knext/lib/clients` itself
+// (@cerbos/grpc + minio + pg — the supervisor's heaviest graph, needed solely to
+// close two pools) is loaded lazily, inside the drain. That closes no safety
+// window: the handler exists from this point on.
 registerDbPoolDrain();
 
 // ── Graceful shutdown ─────────────────────────────────────────────────────────
@@ -180,6 +197,19 @@ registerDbPoolDrain();
 // drains in-flight requests + runs after(), await registered drains (DB pool),
 // then exit as soon as they finish (hard cap SHUTDOWN_GRACE_MS). Logic lives in
 // ./shutdown for unit testing.
+//
+// `childRef` is populated by the spawn below. A signal arriving in the window
+// before the spawn finds it unset and uses a stub that reports an immediate
+// "exit", so the registered drains still run and we exit cleanly instead of
+// dereferencing an undefined child.
+let childRef: ChildProcess | undefined;
+const alreadyExitedChild: ChildLike = {
+    kill: () => true,
+    once: (_event, listener) => {
+        setImmediate(listener);
+    },
+};
+
 const onSignal = (signal: string) => {
     log.info(
         { signal, graceMs: SHUTDOWN_GRACE_MS },
@@ -187,8 +217,10 @@ const onSignal = (signal: string) => {
     );
     stopImageCacheSync();
     gracefulShutdown(signal, {
-        child: nextProc,
-        closables: [metricsServer],
+        child: childRef ?? alreadyExitedChild,
+        // Safe before the endpoint exists — closing an unbound lazy endpoint is
+        // a no-op (see createLazyMetricsEndpoint).
+        closables: [metricsEndpoint.closable],
         graceMs: SHUTDOWN_GRACE_MS,
         exit: (code) => process.exit(code),
     });
@@ -196,3 +228,59 @@ const onSignal = (signal: string) => {
 
 process.on("SIGTERM", () => onSignal("SIGTERM"));
 process.on("SIGINT", () => onSignal("SIGINT"));
+
+// ── Bind :9091 EARLY (#441) ──────────────────────────────────────────────────
+// The metrics sidecar must answer WHILE the runtime entry is up (platform
+// contract, enforced by the shipped-bundle drain gate). Binding the socket is
+// free — the lightweight listener pulls no heavy module; prom-client +
+// @opentelemetry/api load lazily on the first scrape or on child-ready. So we
+// listen from process start and keep the ~790ms graph off the cold-start path.
+void metricsEndpoint.ensureListening("startup").catch((err) => {
+    log.warn({ err }, "Metrics endpoint failed to bind :9091");
+});
+
+// ═══ Spawn the child — the cold-start critical path ═══════════════════════════
+const nextProc = spawn(process.execPath, [...preloadArgs, serverJs], {
+    stdio: "inherit",
+    env: buildChildEnv(),
+});
+childRef = nextProc;
+
+nextProc.on("error", (err) => {
+    log.fatal({ err }, "Failed to start Next.js standalone server");
+    process.exit(1);
+});
+
+nextProc.on("exit", (code, signal) => {
+    log.info({ code, signal }, "Next.js standalone server exited");
+    metricsEndpoint.closable.close();
+    process.exit(code ?? 0);
+});
+
+// ── Deferred supervisor init (#441) ──────────────────────────────────────────
+// The child self-starts on $PORT (see buildChildEnv), so its accepting socket
+// IS the "child is serving" signal — no new protocol and no stdout parsing
+// (stdio is `inherit`, so the child's logs stay untouched). Once it answers, the
+// cold-start critical path is over and the supervisor can finally pay for its
+// own startup: warm the metrics graph (loading prom-client + @opentelemetry/api)
+// and start collectDefaultMetrics + the image-cache sync. :9091 itself is already
+// bound (eager section above); this only loads the heavy graph behind it. The
+// deadline covers a child that never binds, so a broken app never leaves the
+// endpoint permanently un-warmed — and a scrape meanwhile still warms it on
+// demand.
+if (isSupervisorInitDeferred()) {
+    waitForChildServing({
+        port: Number(process.env.PORT ?? 3000),
+        intervalMs: probeIntervalMs(),
+        deadlineMs: readyDeadlineMs(),
+    })
+        .then((outcome) => deferredInit.ensureStarted(`child-${outcome}`))
+        .catch((err) => {
+            // Never lose the metrics endpoint to a probe bug.
+            log.warn({ err }, "Child readiness probe failed; initialising now");
+            return deferredInit.ensureStarted("probe-error");
+        });
+} else {
+    // Operator opt-out: pre-#441 behaviour (init on the cold-start path).
+    void deferredInit.ensureStarted("deferral-disabled");
+}
