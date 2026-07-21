@@ -391,9 +391,9 @@ seq 1 100000 | xargs -n1 -P100 -I {} curl -s -o /dev/null -w "%{time_total}\n" \
 | **Scale-to-Zero Recovery** | Pods terminate after 10s idle, resume in < 1s |
 | **Zero Errors** | All 100,000 requests completed successfully |
 
-#### Why Sub-Second Cold Starts?
+#### How Cold Starts Are Optimized
 
-Two factors combine to achieve this:
+End-to-end cold start on our OKE benchmarks is **scheduling-dominated (~4s median on a 2-node cluster)** and environment-dependent — pod scheduling plus Next.js's own standalone boot are the bulk, and both are largely outside knext's control. What knext optimizes is the compile/parse cost *within* that boot; two factors reduce it:
 
 1. **Persistent code caching** — Node: `NODE_COMPILE_CACHE` (V8 code cache on a shared volume); Bun: per-file JSC bytecode baked at build time (-47% measured) plus the runtime transpiler cache. Parse/compile work from earlier pods is reused instead of redone.
 2. **Knative Resource Caching** — Knative pre-caches container images and maintains warm network paths, reducing image pull time to near-zero on subsequent cold starts.
