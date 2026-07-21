@@ -18,6 +18,7 @@ import { type ChildProcess, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { createLogger } from "../utils/logger";
+import { warnOnCompileCacheShadow } from "./compile-cache-shadow";
 import { registerDbPoolDrain } from "./db-drain";
 import {
     probeIntervalMs,
@@ -91,12 +92,41 @@ const imageCacheDir =
     resolve(dirname(serverJs), ".next", "cache", "images");
 let stopImageCacheSync: () => void = () => {};
 
+// ── Baked compile-cache shadow diagnostic (#440) ──────────────────────────────
+// The image bakes the V8 compile cache into the standalone `.next/compile-cache`
+// dir (ADR-0035 / #437/#438) and the Dockerfile CMD points NODE_COMPILE_CACHE at
+// it via `${NODE_COMPILE_CACHE:-…}`, so an operator-injected value WINS (intended,
+// bake-test-asserted). The gap: if the injected value points at a DIFFERENT path
+// (e.g. an empty PVC), the baked layer is bypassed silently — cold starts lose the
+// bytecode benefit with no signal. Derive the baked-default the way the runtime
+// does (`.next/compile-cache` next to the standalone server) and WARN when a
+// populated bake is being shadowed. Diagnostics only — fail-open, off the child's
+// critical path (deferred step below), never a behaviour change.
+const bakedCompileCacheDir = resolve(
+    dirname(serverJs),
+    ".next",
+    "compile-cache",
+);
+
 // ── The deferred non-safety init (#441) ───────────────────────────────────────
 // Everything here is started only once the child is serving. NOTHING that
 // affects shutdown safety is in this list — see the eager wiring below.
 const deferredInit = createDeferredSupervisorInit({
     log,
     steps: [
+        {
+            // Diagnostics-only (#440): warn if an injected NODE_COMPILE_CACHE
+            // shadows the populated image-baked compile cache. Cheap (a stat +
+            // shallow readdir), fail-open, and deferred so it never touches the
+            // child's cold-start path.
+            name: "compile-cache-shadow-check",
+            run: () =>
+                warnOnCompileCacheShadow({
+                    env: process.env,
+                    bakedDefaultPath: bakedCompileCacheDir,
+                    log,
+                }),
+        },
         {
             // The :9091 socket is already bound (eager section below); this step
             // warms the heavy metrics graph + starts collectDefaultMetrics once
