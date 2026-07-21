@@ -1,3 +1,8 @@
+// @vitest-environment node
+// These tests bind a real TCP socket for the lazy :9091 metrics endpoint and scrape
+// it over fetch(). The root vitest workspace runs packages/** under happy-dom, whose
+// Same-Origin Policy blocks a cross-origin fetch to 127.0.0.1:<random-port>; node has
+// no such policy. Pin this file to the node environment so the socket scrape works.
 /**
  * deferred-supervisor-init — keep the supervisor's WHOLE non-safety init off the
  * child's cold-start path (#441).
