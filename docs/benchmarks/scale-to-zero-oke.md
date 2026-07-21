@@ -1189,6 +1189,45 @@ timing miss (pods came and went inside the gap), not a real zero — the 50 requ
 Higher-concurrency characterization (herd 100/200, or a pinned low containerConcurrency to force
 queue depth) is a follow-up.
 
+## Run 16 (2026-07-21) — ADR-0036 P1b end-to-end A/B: node arm measured, **bun-exec arm BLOCKED**
+
+The P1b ship-gate for ADR-0036 asks: deployed as **real Knative Services**, does the opt-in
+`bun-exec` build target beat the node target end-to-end (scale-from-zero → first request), not just
+in the in-pod build/boot that run 13 measured? Both targets were built in-cluster (kaniko → OCIR) and
+deployed as scale-to-zero ksvcs (minScale 0 / maxScale 10, digest-pinned, same resources).
+
+**bun-exec arm — could not be measured; the target is not deployable (#460).** The compiled binary
+(`nitro` bun preset → `bun build --compile --bytecode`) embeds the **build machine's absolute
+`.output/` path** and loads its SSR/route chunks from it at runtime. Deployed as a container (the
+recipe's documented "single executable in a bare Alpine image" ship path), it serves the framework
+404 for **every** route — verified across three image builds (node-server preset, bun preset, and bun
+preset with `.output/` copied to the image). `strings` on the binary shows the embedded absolute path.
+Every prior validation (#447 RuntimeContract, the P1a/P2 spikes, run 13) ran the binary **from its
+build directory**, where that absolute path still resolves — masking a non-portable artifact. So P1b's
+A/B cannot be run until #460 is fixed; run 13's ~3.6× in-pod *boot* delta remains the best available
+signal but does **not** come from a deployable artifact.
+
+**node arm — measured (the baseline the A/B would compare against).** Minimal Next `output:standalone`
+→ bare `node server.js`, 8 sequential single-request cold starts, each wait-for-zero'd (#452 verify);
+all returned `200`.
+
+| rep | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| cold start | 2.79s | 2.09s | 2.16s | **10.76s** | 1.70s | 2.66s | **11.22s** | 2.04s |
+
+- **Median ~2.4s**, with 6 of 8 reps tightly in **1.70–2.79s** — a minimal-app end-to-end cold start
+  (small image, fast node boot) well below the ~4s median of the larger `file-manager` app.
+- **The intermittent extreme tail is real: 2 of 8 reps spiked to ~11s.** This is the outlier class
+  #429 flagged (and which run 15's *herd* did not show — a herd is released together once pods are
+  Ready, averaging out the spike; single sequential cold starts expose it). The practical node
+  cold-start tail is "usually ~2s, occasionally ~11s," not a stable number.
+
+**Scope / verdict.** As-deployed minimal apps on this 2-node OKE cluster. The honest ADR-0036 P1b
+conclusion is that **the ship-gate cannot be cleared: `bun-exec` is not deployable as a container**
+(#460), so no end-to-end win can be demonstrated. The node target deploys and serves; its end-to-end
+cold start is ~2.4s median with an intermittent ~11s tail. Both `p1b-*` ksvcs and their OCIR images
+are leftover on the cluster for a maintainer to clean (operator-gated deletes).
+
 ## Caveat
 
 These are **point-in-time measurements on a specific small (2-node) OKE cluster** with a
