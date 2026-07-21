@@ -156,18 +156,24 @@ runtime contract. The targets differ ONLY at the build+image layer.
     Bearer cache route). Reproducible in-repo proof **only** — NOT wired into `kn-next build`, the
     operator, the CRD, or CI's main gates, and it cites no cold-start number (the P1b OKE A/B is still the
     gate).
-  - **P1b OUTCOME (2026-07-21, #460 — the recipe is NOT container-deployable; the "self-contained"
-    claim is WITHDRAWN):** the P1b OKE A/B could not run. Deployed as a container (the recipe's own
-    documented ship path — binary in a bare Alpine image), the compiled binary serves the framework
-    404 for *every* route. `bun --compile` bakes the build machine's **absolute `.output/` path** into
-    the binary, which loads its SSR/route chunks from that path at runtime — absent anywhere but the
-    exact build directory (`strings`-confirmed; reproduced across three image builds as real ksvcs on
-    OKE). #447's RuntimeContract validation, the P1a/P2 spikes, and benchmark run 13 all ran the binary
-    **from its build directory**, where that path still resolves, masking a non-portable artifact.
-    **The `bun-exec` distribution-separated-win gate cannot be evaluated until #460 is fixed** (make
-    the binary portable — bundle `.output/server` into it, or resolve binary-relative). Node arm
+  - **P1b OUTCOME (2026-07-21, #460 — the recipe does not yet produce the self-contained binary it
+    targets; this is a fixable recipe-config gap, NOT a bun limitation):** the P1b OKE A/B could not
+    run *as currently built*. Deployed as a container (binary only, or binary + `.output/`), this
+    recipe's compiled binary serves the framework 404 for *every* route. Root cause is the build
+    approach, not `bun --compile`: the recipe uses `nitro({ preset: 'bun' })` and then
+    `bun --compile .output/server/index.mjs`, but the **nitro bun preset loads its route/SSR chunks
+    dynamically from `.output/` at runtime** (resolving deps like `react-dom` via `createRequire`
+    against absolute `.output/` paths), so `--compile` of `index.mjs` embeds only that entry's static
+    graph — the routes are not in the binary. It "worked" in #447's RuntimeContract validation, the
+    P1a/P2 spikes, and benchmark run 13 only because all three ran the binary **from its build
+    directory**, where `.output/` + node_modules resolve. **A truly self-contained single binary IS
+    achievable** — the founder previously shipped exactly that (binary only, nothing else) — so the
+    fix is to make the build emit a **single fully-bundled server** (e.g. inline the dynamic route
+    imports / single-chunk output) so `--compile` embeds everything. Until the recipe produces that
+    portable binary (#460), the distribution-separated-win gate is **deferred, not failed**. Node arm
     end-to-end cold start measured at ~2.4s median with an intermittent ~11s tail (benchmark run 16);
-    the bun arm is unmeasurable. **`bun-exec` status: NOT deployable pending #460** — not "validated".
+    the bun arm awaits the recipe fix. **`bun-exec` status: recipe not self-contained yet (#460)** —
+    the self-contained single-binary target stands and is known-achievable, just not met by this build.
 - **P4 — compat gate.** Official compat suite against the bun image; document supported feature subset +
   fallback-to-node guidance.
 - **P5 — docs + benchmark.** User-facing "choosing a build target" page (qualitative); benchmark A/B.
