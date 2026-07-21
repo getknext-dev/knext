@@ -353,10 +353,12 @@ flowchart LR
 
 #### Cold Start (0 Pods → Provision → Boot → Response)
 
-| Metric | Value |
+> These figures are from a **single early GKE run and are not representative** — cold start is scheduling-dominated and environment-dependent. The more rigorous multi-run OKE benchmark measures **~4s median (scheduling-bound)** on a 2-node cluster ([benchmarks](benchmarks/scale-to-zero-oke.md)); treat that as the honest number and the row below as one favorable data point.
+
+| Metric | Value (single early GKE run — not representative) |
 |--------|-------|
-| **Time to First Byte (TTFB)** | **0.66s** |
-| **Total Response Time** | **0.92s** |
+| **Time to First Byte (TTFB)** | 0.66s |
+| **Total Response Time** | 0.92s |
 | **Pod Provisioning** | `Pending → ContainerCreating → Running` in ~1s |
 
 #### Warm Start (Already Running Pod)
@@ -388,12 +390,12 @@ seq 1 100000 | xargs -n1 -P100 -I {} curl -s -o /dev/null -w "%{time_total}\n" \
 | **Sustained RPS** | ~192 req/s (100 workers ÷ 0.521s avg) |
 | **Peak Autoscale** | 2 pods (`maxScale: 2`) |
 | **Per-Pod RPS** | ~96 req/s |
-| **Scale-to-Zero Recovery** | Pods terminate after 10s idle, resume in < 1s |
+| **Scale-to-Zero Recovery** | Pods terminate after 10s idle; resume time is scheduling-dominated and environment-dependent (~4s median measured on a 2-node OKE cluster — see [benchmarks](benchmarks/scale-to-zero-oke.md)) |
 | **Zero Errors** | All 100,000 requests completed successfully |
 
-#### Why Sub-Second Cold Starts?
+#### How Cold Starts Are Optimized
 
-Two factors combine to achieve this:
+End-to-end cold start on our OKE benchmarks is **scheduling-dominated (~4s median on a 2-node cluster)** and environment-dependent — pod scheduling plus Next.js's own standalone boot are the bulk, and both are largely outside knext's control. What knext optimizes is the compile/parse cost *within* that boot; two factors reduce it:
 
 1. **Persistent code caching** — Node: `NODE_COMPILE_CACHE` (V8 code cache on a shared volume); Bun: per-file JSC bytecode baked at build time (-47% measured) plus the runtime transpiler cache. Parse/compile work from earlier pods is reused instead of redone.
 2. **Knative Resource Caching** — Knative pre-caches container images and maintains warm network paths, reducing image pull time to near-zero on subsequent cold starts.

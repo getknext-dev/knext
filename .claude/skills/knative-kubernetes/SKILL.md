@@ -18,8 +18,10 @@ autoscaling.knative.dev/max-scale: "5"
 autoscaling.knative.dev/target: "100"    # target concurrent requests/pod
 spec.template.spec.containerConcurrency: 100   # hard per-pod concurrency cap
 ```
-Scale-to-zero: idle pods terminate (~30–60s default); next request cold-starts (sub-second with
-`NODE_COMPILE_CACHE` — see node-bytecode-caching). Pre-warm with `minScale: 1`.
+Scale-to-zero: idle pods terminate (~30–60s default); next request cold-starts (scheduling-dominated
+and environment-dependent — ~4s median measured on a 2-node OKE cluster; `NODE_COMPILE_CACHE` removes
+V8 compile work from that boot but does not make end-to-end cold start sub-second — see
+node-bytecode-caching). Pre-warm with `minScale: 1`.
 
 ## The operator / `NextApp` CRD pattern
 `packages/kn-next-operator` (Kubebuilder). `NextAppSpec`: image, scaling, resources, storage,

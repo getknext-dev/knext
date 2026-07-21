@@ -32,7 +32,7 @@ Built on the **official Next.js Adapter API** with `output: 'standalone'` — no
 | **Portability** | Vendor-locked | Any Kubernetes cluster (portable by design; GKE/kind-verified, other clouds tracked in [#46](https://github.com/getknext-dev/knext/issues/46)) |
 | **Scale-to-Zero** | ✅ | ✅ |
 | **Autoscaling** | Managed | Configurable (KPA/HPA) |
-| **Cold Starts** | ~200-500ms | **< 1s** with V8 bytecode cache (`NODE_COMPILE_CACHE`) + Knative caching |
+| **Cold Starts** | ~200-500ms | **Scheduling-dominated** — measured ~4s median on a 2-node OKE cluster ([benchmarks](docs/benchmarks/scale-to-zero-oke.md)); bytecode caching removes V8 compile work from every cold start, but end-to-end cold start is dominated by pod scheduling + Next.js's own boot and is environment-dependent |
 | **Container Control** | Limited | Full Docker access |
 | **Networking** | Platform-managed | Full K8s networking |
 | **Cost Model** | Per-invocation | Per-pod-second |
@@ -117,12 +117,12 @@ flowchart LR
 
 ### Cold Start Performance (Scale from Zero)
 
-With `minScale: 0`, pods terminate after 10 seconds of inactivity and must be provisioned fresh on next request:
+With `minScale: 0`, pods terminate after 10 seconds of inactivity and must be provisioned fresh on next request. The figures below are from a **single early GKE run** and are **not representative** — cold start is scheduling-dominated and environment-dependent. Our more rigorous multi-run OKE benchmark measures **~4s median (scheduling-bound)** on a 2-node cluster; treat that as the honest number and these as one favorable data point. See [benchmarks](docs/benchmarks/scale-to-zero-oke.md).
 
-| Metric | Value |
+| Metric | Value (single early GKE run — not representative) |
 |--------|-------|
-| **Time to First Byte (TTFB)** | **0.66s** |
-| **Total Response Time** | **0.92s** |
+| **Time to First Byte (TTFB)** | 0.66s |
+| **Total Response Time** | 0.92s |
 | **Pod Provisioning** | Container goes from `Pending → Running` in ~1s |
 
 ### Warm Start Performance
@@ -149,7 +149,7 @@ seq 1 100000 | xargs -n1 -P100 -I {} curl -s -o /dev/null -w "%{time_total}\n" \
 | **Total Test Duration** | ~521s (~8.7 min) |
 | **Error Rate** | 0% (all requests successful) |
 
-### Why Sub-Second Cold Starts?
+### How Cold Starts Are Optimized
 
 The Dockerfile uses a **2-stage build** producing a lean distroless Node image:
 
