@@ -1137,6 +1137,58 @@ Next.js child compete harder; the ~556 ms here (less contention) is the same eff
 more CPU headroom. Direction and separation are decisive; the absolute magnitude scales with pod
 CPU pressure. This is the deferral's isolated cost, not a portable cold-start guarantee.
 
+## Run 15 (2026-07-21) — p99 cold start under a thundering-herd wake (#309 A4)
+
+The reliability edge the median hides: when a **burst of concurrent requests wakes a scaled-to-zero
+app at once**, what does the *tail* of their cold-start latency look like — and is it stable? This is
+the AC of #309 (p99 cold-start under concurrency, not just median).
+
+**Method.** Target = the deployed `file-manager` Knative Service (minScale 0, **maxScale 10**,
+unbounded containerConcurrency — measured **as-deployed**, no config mutation). For each of **8
+rounds**: verify the app is genuinely scaled to zero (the exit-code-checked `wait_zero` from #452 —
+a failed pod query is never read as zero, so no warm round can be recorded as cold), then fire a
+**50-request thundering herd** (k6 `shared-iterations`, 50 VUs × 1 request, all at ~t=0) and record
+the round's `http_req_duration` distribution + peak pod fan-out. 400 cold requests total.
+
+| Round | med | p95 | p99 | max | peak pods |
+| --- | --- | --- | --- | --- | --- |
+| 1 | 5.04s | 5.16s | 5.16s | 5.16s | (sampler miss) |
+| 2 | 4.91s | 5.11s | 5.11s | 5.12s | 3 |
+| 3 | 5.13s | 5.35s | 5.36s | 5.36s | 3 |
+| 4 | 6.41s | 6.51s | 6.52s | 6.52s | 4 |
+| 5 | 6.48s | 6.64s | 6.65s | 6.65s | 4 |
+| 6 | 5.67s | 5.92s | 5.93s | 5.93s | 4 |
+| 7 | 6.93s | 7.09s | **7.11s** | 7.11s | 4 |
+| 8 | 6.21s | 6.36s | 6.36s | 6.36s | 4 |
+
+**Findings.**
+- **Failure-free.** All 50 requests completed in every round — 400/400 cold requests served (each
+  round reported `reqs=50`), and every duration landed in the 5–7 s band, far under the 170 s request
+  timeout, with no low-side outliers that would signal an early error. (The runner captured the
+  request count, not an explicit `http_req_failed` line, so "failure-free" is grounded in that
+  distribution shape rather than a failure-rate metric.) No request was stranded behind the activator queue.
+- **The tail is tight WITHIN a round.** In every round p99 ≈ p95 ≈ max ≈ median (e.g. round 7: median
+  6.93s → p99 7.11s, a ~180 ms spread across 50 concurrent requests). Knative's activator holds the
+  herd and releases it together once ~3–4 pods are Ready, so the 50 requests finish in a narrow band
+  rather than leaving a long intra-round tail.
+- **The variation is ACROSS rounds, not within.** Round-level p99 ranges **5.11s → 7.11s** (worst
+  observed p99 = 7.11s; median-of-round-p99 ≈ 6.1s). The practical "tail" of a herd wake is *which
+  cold round you land in*, not a stranded request inside a round.
+- **Herd overhead over a single cold request.** A single cold request measured ~4s median / 5.5s
+  observed (runs 4–6, and a 5.5s probe here); a 50-herd's p99 is ~5–7s — the herd adds ~1–3s from
+  activator queueing + booting 3–4 pods instead of 1, but stays bounded.
+- **The intermittent extreme outlier did not reproduce.** The 17.6s-class tail seen once in an
+  earlier run (noted in #429) did not appear across these 8 rounds — reassuring, but 8 rounds is a
+  small sample and does not exclude it.
+
+**Scope.** As-deployed `file-manager` on this specific 2-node OKE cluster, herd=50, 8 rounds, external
+sslip.io ingress path. Not a knob A/B and not a portable guarantee — a characterization of the
+tail's shape and stability. The measurement's integrity depends on #452: every round confirmed a real
+scale-to-zero (`z=OK`), so no warm sample was recorded as cold. `peak pods` for round 1 was a sampler
+timing miss (pods came and went inside the gap), not a real zero — the 50 requests were served.
+Higher-concurrency characterization (herd 100/200, or a pinned low containerConcurrency to force
+queue depth) is a follow-up.
+
 ## Caveat
 
 These are **point-in-time measurements on a specific small (2-node) OKE cluster** with a
