@@ -67,7 +67,12 @@ ADR-0036 requires both targets satisfy one contract. This recipe covers:
    (`CACHE_INVALIDATE_TOKEN`) — security.md hard rule; 401 without/with a wrong
    token, including when the server token env is unset.
 6. **Env-injection contract** — `PORT`, `HOSTNAME`, `METRICS_PORT`,
-   `SHUTDOWN_GRACE_MS`, `CACHE_INVALIDATE_TOKEN` (operator-supplied).
+   `SHUTDOWN_GRACE_MS`, `CACHE_INVALIDATE_TOKEN` (operator-supplied). `HOSTNAME`
+   is honoured as a bind host **only when it is an explicit bind/loopback
+   address** (`0.0.0.0`, `::`, `127.0.0.1`, `::1`, `localhost`); a non-bind
+   value — notably the `HOSTNAME=<pod-name>` Kubernetes injects into every pod —
+   is treated as `0.0.0.0`, matching the node path (`env.ts` `isBindOrLoopback`)
+   so the listener stays reachable in-cluster instead of binding to the pod name.
 7. **Module-state seam (ADR-0027)** — the `after()`/waitUntil pending-task set is
    anchored on `globalThis` via `Symbol.for("knext.bunexec.pendingTasks")`,
    never a bare module-level `let`.

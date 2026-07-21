@@ -26,6 +26,7 @@ import {
   createMetricsState,
   METRICS_CONTENT_TYPE,
   renderMetrics,
+  resolveBindHost,
 } from '../runtime-contract.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -44,6 +45,30 @@ describe('renderMetrics — Prometheus exposition', () => {
     expect(text).toContain('knext_bunexec_http_requests_total 3');
     expect(text).toContain('knext_bunexec_http_inflight_requests 1');
     expect(METRICS_CONTENT_TYPE).toMatch(/version=0\.0\.4/);
+  });
+});
+
+describe('resolveBindHost — never bind to a k8s pod name (#447)', () => {
+  it('falls through to 0.0.0.0 for a k8s pod-name HOSTNAME', () => {
+    // Kubernetes injects HOSTNAME=<pod-name> into every pod; a pod name is not
+    // a bind address, so binding to it would make the server unreachable.
+    expect(resolveBindHost({ HOSTNAME: 'recipe-validate-fn252' })).toBe('0.0.0.0');
+    expect(resolveBindHost({ HOSTNAME: 'my-app-7d9f8-abcde' })).toBe('0.0.0.0');
+  });
+
+  it('defaults to 0.0.0.0 when HOSTNAME is unset or empty', () => {
+    expect(resolveBindHost({})).toBe('0.0.0.0');
+    expect(resolveBindHost({ HOSTNAME: '' })).toBe('0.0.0.0');
+  });
+
+  it('honours an explicit bind/loopback HOSTNAME', () => {
+    expect(resolveBindHost({ HOSTNAME: '0.0.0.0' })).toBe('0.0.0.0');
+    expect(resolveBindHost({ HOSTNAME: '127.0.0.1' })).toBe('127.0.0.1');
+    expect(resolveBindHost({ HOSTNAME: '127.0.53.53' })).toBe('127.0.53.53');
+    expect(resolveBindHost({ HOSTNAME: '::1' })).toBe('::1');
+    expect(resolveBindHost({ HOSTNAME: '::' })).toBe('::');
+    expect(resolveBindHost({ HOSTNAME: 'localhost' })).toBe('localhost');
+    expect(resolveBindHost({ HOSTNAME: 'LOCALHOST' })).toBe('LOCALHOST');
   });
 });
 

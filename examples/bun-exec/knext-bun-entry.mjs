@@ -12,7 +12,12 @@
 //
 // Env-injection contract (RuntimeContract item 6 — operator-supplied):
 //   PORT               app listen port           (default 3000)
-//   HOSTNAME           app + metrics bind host    (default 0.0.0.0)
+//   HOSTNAME           app + metrics bind host    (default 0.0.0.0). Honoured
+//                      ONLY when it is an explicit bind/loopback address
+//                      (0.0.0.0, ::, 127.0.0.1, ::1, localhost). A k8s-injected
+//                      pod-name HOSTNAME is NOT a bind address — it falls
+//                      through to 0.0.0.0 (see resolveBindHost), matching the
+//                      node path so the listener stays reachable in-cluster.
 //   METRICS_PORT       Prometheus port            (default 9091)
 //   SHUTDOWN_GRACE_MS  drain hardcap in ms        (default 25000)
 //   CACHE_INVALIDATE_TOKEN  read by the app route, not here (see app/api/cache).
@@ -24,10 +29,14 @@ import {
   drainPending,
   METRICS_CONTENT_TYPE,
   renderMetrics,
+  resolveBindHost,
 } from './runtime-contract.mjs';
 
 const PORT = Number(process.env.PORT ?? 3000);
-const HOSTNAME = process.env.HOSTNAME ?? '0.0.0.0';
+// Bind to 0.0.0.0 unless HOSTNAME is an EXPLICIT bind/loopback address. k8s sets
+// HOSTNAME=<pod-name> in every pod; binding to a pod name makes the server
+// unreachable on 127.0.0.1 / the pod IP (mirrors the node path — see env.ts).
+const HOSTNAME = resolveBindHost(process.env);
 const METRICS_PORT = Number(process.env.METRICS_PORT ?? 9091);
 const GRACE_MS = Number(process.env.SHUTDOWN_GRACE_MS ?? 25_000);
 

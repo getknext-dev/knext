@@ -16,6 +16,40 @@
 // app routes / the env contract / the globalThis anchor below, or explicitly
 // deferred — see README.md.
 
+// ── (6) Bind-host resolution — never bind to a k8s pod name ─────────────────
+// Kubernetes injects HOSTNAME=<pod-name> (e.g. `recipe-validate-fn252`) into
+// EVERY pod. A pod name is an identity, not a bind address: binding
+// `Bun.serve({ hostname: '<pod-name>' })` makes the listener unreachable on
+// 127.0.0.1 / the pod IP, so every request (app :PORT AND metrics :9091) is
+// connection-refused and boot times out (confirmed on OKE).
+//
+// Mirror the node supervisor's intent (packages/kn-next/src/adapters/env.ts
+// `isBindOrLoopback`): only an EXPLICIT bind/loopback address is a real bind
+// target — anything else (a pod name, any non-address hostname) falls through
+// to 0.0.0.0. This keeps an explicit `HOSTNAME=127.0.0.1` / `::1` / `localhost`
+// bind honoured for local dev while never trusting a k8s-injected pod name.
+// `127.` is prefix-matched (the whole 127.0.0.0/8 loopback block); no valid pod
+// name contains a dot, so the prefix can't collide with one.
+const BIND_OR_LOOPBACK_HOSTNAMES = new Set(['0.0.0.0', '::', '::1', 'localhost']);
+
+function isBindOrLoopback(value) {
+  const v = value.toLowerCase();
+  return BIND_OR_LOOPBACK_HOSTNAMES.has(v) || v.startsWith('127.');
+}
+
+/**
+ * Resolve the host both `Bun.serve` listeners bind to. Returns `HOSTNAME` only
+ * when it is an explicit bind/loopback address; otherwise `0.0.0.0`. A k8s
+ * pod-name HOSTNAME (or any non-address value, or unset) ⇒ `0.0.0.0`.
+ *
+ * @param {Record<string, string | undefined>} [env]
+ * @returns {string}
+ */
+export function resolveBindHost(env = process.env) {
+  const h = env.HOSTNAME;
+  return h && isBindOrLoopback(h) ? h : '0.0.0.0';
+}
+
 // ── (2) Prometheus metrics ─────────────────────────────────────────────────
 // Hand-rolled exposition (no prom-client dependency) so the module stays
 // self-contained and compile-safe. Mirrors the process-metric shape the node
