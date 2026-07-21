@@ -89,6 +89,7 @@ BASELINE_CFG="${BASELINE_CFG:-200,10,200}"         # target-burst-capacity,panic
 TUNED_CFG="${TUNED_CFG:--1,6,150}"
 PHASES="${PHASES:-cold,soak,burst}"                # comma list: cold,soak,burst,all
 SCALE_DOWN_TIMEOUT="${SCALE_DOWN_TIMEOUT:-150}"    # seconds to wait for pods -> 0
+SCALE_DOWN_POLL_S="${SCALE_DOWN_POLL_S:-6}"        # wait_zero poll interval (tests shrink this)
 POD_SAMPLE_BUDGET="${POD_SAMPLE_BUDGET:-240}"      # seconds to sample pod count during a k6 run
 K6_JOB_TIMEOUT="${K6_JOB_TIMEOUT:-600}"             # seconds to wait for the k6 Job to complete
 SCHEDULE_CHECK_TIMEOUT="${SCHEDULE_CHECK_TIMEOUT:-20}" # seconds before warning k6 pod is still Pending
@@ -762,26 +763,64 @@ trap 'cleanup; exit 143' TERM
 RUN_ID="s2z-$(date -u +%s)-$$"
 
 # ── helpers ───────────────────────────────────────────────────────────────────
+# running_pods — on SUCCESS prints the count of Running pods (0 for a genuine
+# zero); on FAILURE propagates kubectl's non-zero exit and its message on stderr,
+# and prints NO count. The old body piped through `2>/dev/null | wc -l`, so a
+# kubectl FAILURE produced `0` — indistinguishable from a genuine zero. wait_zero
+# then falsely confirmed scale-to-zero, and the next "cold start" sample actually
+# measured a WARM start (cold-start figures biased downward — the most dangerous
+# error direction). We now check kubectl's EXIT CODE, never the line count of a
+# discarded-stderr pipe (#429). Because the failure is propagated (not swallowed),
+# api_retry can wrap this to retry transient blips and RECORD them, and callers
+# that capture stdout via $(...) see an EMPTY string on failure — never a false 0.
 running_pods() {
-  kc get pods -n "$NS" -l "serving.knative.dev/service=${SERVICE}" \
-    --field-selector=status.phase=Running --no-headers 2>/dev/null | wc -l | tr -d ' '
+  local out rc
+  out=$(kc get pods -n "$NS" -l "serving.knative.dev/service=${SERVICE}" \
+    --field-selector=status.phase=Running --no-headers 2>&1)
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    # Surface kubectl's message on stderr so api_retry (2>&1) can classify it and
+    # keep its verbatim "the API said: ..." reporting truthful.
+    printf '%s\n' "$out" >&2
+    return "$rc"
+  fi
+  # --no-headers => one line per pod; an empty result is a genuine zero.
+  printf '%s' "$out" | grep -c '[^[:space:]]' 2>/dev/null || true
+  return 0
 }
 
 wait_zero() {
   if ! kc_live; then log "  [dry-run] skip wait-for-zero"; return 0; fi
   # n MUST be initialised: with SCALE_DOWN_TIMEOUT=0 the loop body never runs and
   # the trailing log line would abort the script under `set -u`.
-  local t=0 n=0
+  local t=0 n="" rc
   while [ "$t" -lt "$SCALE_DOWN_TIMEOUT" ]; do
-    n=$(running_pods)
+    # api_retry sets globals it needs the caller to read, so it cannot run inside
+    # $(...). Wrap the query in it so a transient blip is retried (and RECORDED
+    # like every other poller in this harness), then read the count it captured.
+    api_retry "wait-zero-pods" running_pods
+    rc=$?
+    n="$API_RETRY_LAST_OUT"
+    if [ "$rc" -ne 0 ]; then
+      # DECISION (#429): a query that FAILED is NOT progress toward zero and MUST
+      # NOT be coerced to "0 pods" — that false zero was the whole bug. We do not
+      # confirm scale-to-zero on an unobserved zero; the transient blip was already
+      # retried and the abandonment RECORDED by api_retry (visible as DEGRADED in
+      # the results file). Keep polling until the timeout rather than silently
+      # proceeding as if scaled — never log a confirmation we did not observe.
+      log "  -> pod query FAILED at ${t}s — NOT confirming scale-to-zero (query error, not an observed zero); the API said: $(printf '%s' "$n" | head -n 1)"
+      sleep "$SCALE_DOWN_POLL_S"
+      t=$((t + SCALE_DOWN_POLL_S))
+      continue
+    fi
     if [ "$n" = "0" ]; then
       log "  -> scaled to 0 after ${t}s"
       return 0
     fi
-    sleep 6
-    t=$((t + 6))
+    sleep "$SCALE_DOWN_POLL_S"
+    t=$((t + SCALE_DOWN_POLL_S))
   done
-  log "  -> still ${n} pod(s) after ${t}s (continuing anyway)"
+  log "  -> still ${n:-unknown} pod(s) after ${t}s (continuing anyway)"
 }
 
 # apply_autoscaling tbc pw pt [cc]  — cc omitted => containerConcurrency untouched
@@ -865,6 +904,10 @@ YAML
 
   # schedule-check: warn if the k6 pod is still Pending after SCHEDULE_CHECK_TIMEOUT
   # (the "oversized k6 CPU request => Pending => zero-load run" trap, README).
+  # NOTE(#429): this get ALSO swallows failures via `2>/dev/null || true`, but its
+  # coercion errs the SAFE way — a failed query reads as "not Running yet", biasing
+  # toward the WARNING, not toward a false clean result. Left as-is deliberately;
+  # the data-corrupting site (running_pods) is the one fixed here.
   local st=0 phase=""
   while [ "$st" -lt "$SCHEDULE_CHECK_TIMEOUT" ]; do
     phase=$(kc get pods -n "$NS" -l "job-name=${name}" -o jsonpath='{.items[0].status.phase}' 2>/dev/null || true)
