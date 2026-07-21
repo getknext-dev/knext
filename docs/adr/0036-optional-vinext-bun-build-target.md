@@ -150,6 +150,12 @@ runtime contract. The targets differ ONLY at the build+image layer.
 - **P3 — build pipeline.** `kn-next build --target bun-exec` (or via a new `buildTarget` config field /
   the existing `spec.runtime`); the second Dockerfile (Dockerfiles are hand-maintained, not templated —
   #439 context).
+  - **P3 increment 1 (landed, #447):** a self-contained, opt-in recipe under `examples/bun-exec/` proves
+    the `vinext → .output/server/index.mjs → bun --compile --bytecode` sequence and the bespoke bun entry
+    providing the `RuntimeContract` (health / in-process `:9091` / SIGTERM drain + `after()` / fail-closed
+    Bearer cache route). Reproducible in-repo proof **only** — NOT wired into `kn-next build`, the
+    operator, the CRD, or CI's main gates, and it cites no cold-start number (the P1b OKE A/B is still the
+    gate).
 - **P4 — compat gate.** Official compat suite against the bun image; document supported feature subset +
   fallback-to-node guidance.
 - **P5 — docs + benchmark.** User-facing "choosing a build target" page (qualitative); benchmark A/B.

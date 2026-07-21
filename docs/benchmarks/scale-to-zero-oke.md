@@ -696,6 +696,40 @@ cache ends up empty). The **identical bug exists in `apps/docs/Dockerfile`** and
 - **The root cause is confirmed, not inferred:** an empty cache directory shipped in the image,
   refilled and discarded on every cold pod.
 
+## Recipe RuntimeContract validation on OKE (#447, bun-exec)
+
+This is a **correctness validation, not a benchmark A/B.** It confirms the opt-in `examples/bun-exec`
+recipe's RuntimeContract holds in a **real `bun --compile --bytecode` linux/musl binary** built from
+the committed `build.sh` — the gap that the macOS unit tests and the five review gates could not close.
+An in-cluster Job cloned the PR branch, ran `build.sh` (frozen install → `vite build` with
+`NITRO_PRESET=node-server` → `bun --compile`), and exercised the compiled binary in-pod.
+
+| Contract probe | Result |
+| --- | --- |
+| Compiled binary size | 121 MB |
+| Boot → first `/api/health` 200 (in-pod, minimal recipe app) | 659 ms |
+| `/api/health` (shallow, ADR-0026 — no PG/Redis dial) | `200 {"status":"ok","target":"bun-exec"}` |
+| `:9091/metrics` Prometheus exposition while up | `200`, valid `# HELP` |
+| `/api/cache/invalidate` — no token / wrong token / right token | `401 / 401 / 200` (fail-closed Bearer) |
+| SIGTERM fired mid-flight into a 2 s `/slow` request | request completes `200`, drained at 2052 ms |
+| Process exit code after drain | `0` |
+
+**A deployment bug this caught (and why it matters).** The first validation run bound the servers to
+`process.env.HOSTNAME`, which Kubernetes sets to the **pod name** — an unreachable host. The binary
+ran (drain exited 0) but served nowhere: boot to first health 200 took 12138 ms and every probe was a
+connection refusal. Neither the macOS tests nor any of the five review gates saw it, because the bug
+lived in the gap between "reads HOSTNAME from env" (reviewable) and "k8s injects the pod name as
+HOSTNAME" (only visible on a real cluster). The fix mirrors the node path's `isBindOrLoopback`
+(`packages/kn-next/src/adapters/env.ts`): bind `0.0.0.0` unless `HOSTNAME` is an explicit
+bind/loopback address. The table above is the **post-fix** re-validation.
+
+**Scope — what this does and does not show.** It shows the recipe's shipped binary satisfies the
+RuntimeContract (shallow health, in-process `:9091`, fail-closed auth, SIGTERM drain) when bound
+correctly. It is **not** a cold-start comparison against the node/official-adapter path — the
+`boot_ms` here is in-pod process boot for a minimal recipe app, not end-to-end cold start, and is not
+comparable to the file-manager runs above. The recipe cold-start A/B (the ADR's P1b gate) remains
+unmeasured; run 13 is the closest apples-to-apples build/boot comparison to date.
+
 ## Caveat
 
 These are **point-in-time measurements on a specific small (2-node) OKE cluster** with a
