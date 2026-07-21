@@ -19,7 +19,6 @@
  *  - they ARE collected once the child is ready (and exactly once),
  *  - `/metrics` serves valid Prometheus exposition in BOTH windows (an early
  *    scrape starts collection on demand rather than serving nothing),
- *  - the deferral is env-overridable,
  *  - the SIGTERM drain wiring in node-server.ts is untouched.
  */
 
@@ -29,8 +28,6 @@ import { Registry } from "prom-client";
 import { describe, expect, it } from "vitest";
 import {
     createDeferredDefaultMetrics,
-    DEFER_DEFAULT_METRICS_ENV,
-    isDeferralEnabled,
     waitForChildServing,
 } from "../adapters/deferred-default-metrics";
 import { createSupervisorMetricsHandler } from "../adapters/metrics";
@@ -66,27 +63,6 @@ function fakeRes() {
         },
     };
 }
-
-describe("deferral policy (env override)", () => {
-    it("defers by default (no env set)", () => {
-        expect(isDeferralEnabled({})).toBe(true);
-    });
-
-    it("collects immediately when KNEXT_DEFER_DEFAULT_METRICS=0", () => {
-        expect(isDeferralEnabled({ [DEFER_DEFAULT_METRICS_ENV]: "0" })).toBe(
-            false,
-        );
-        expect(
-            isDeferralEnabled({ [DEFER_DEFAULT_METRICS_ENV]: "false" }),
-        ).toBe(false);
-    });
-
-    it("stays deferred for any other value", () => {
-        expect(isDeferralEnabled({ [DEFER_DEFAULT_METRICS_ENV]: "1" })).toBe(
-            true,
-        );
-    });
-});
 
 describe("createDeferredDefaultMetrics", () => {
     it("does NOT collect default metrics at construction (cold-start path)", () => {

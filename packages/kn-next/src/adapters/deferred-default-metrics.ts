@@ -34,9 +34,9 @@
  *  3. a deadline (`KNEXT_DEFAULT_METRICS_DEADLINE_MS`, default 60s) — a child
  *     that never binds must not cost us process metrics forever.
  *
- * Set `KNEXT_DEFER_DEFAULT_METRICS=0` to restore the previous behaviour
- * (collect at supervisor start), for an operator who prefers process metrics
- * from t=0 over the cold-start budget.
+ * Deferral is unconditional here — this collection is one STEP of the
+ * supervisor-init deferral, whose single operator opt-out is
+ * `KNEXT_DEFER_SUPERVISOR_INIT` at the `node-server.ts` layer.
  */
 
 import net from "node:net";
@@ -45,8 +45,6 @@ import net from "node:net";
 // real `collectDefaultMetrics` is reached through a dynamic import at start time.
 import type { Registry } from "prom-client";
 
-/** Set to `0`/`false` to collect default metrics immediately (pre-#441 behaviour). */
-export const DEFER_DEFAULT_METRICS_ENV = "KNEXT_DEFER_DEFAULT_METRICS";
 /** Poll interval (ms) for the child-serving TCP probe. */
 export const CHILD_READY_INTERVAL_ENV = "KNEXT_CHILD_READY_PROBE_MS";
 /** Max wait (ms) before starting collection even if the child never binds. */
@@ -58,20 +56,6 @@ export const DEFAULT_PROBE_INTERVAL_MS = 250;
 export const DEFAULT_READY_DEADLINE_MS = 60_000;
 
 type Env = Record<string, string | undefined>;
-
-/**
- * Whether default-metric collection should be deferred. Deferred unless the
- * operator explicitly opts out with `0`/`false` (fail-safe toward the
- * cold-start win; the endpoint keeps working either way).
- */
-export function isDeferralEnabled(env: Env = process.env): boolean {
-    const raw = env[DEFER_DEFAULT_METRICS_ENV];
-    if (raw === undefined) {
-        return true;
-    }
-    const normalized = raw.trim().toLowerCase();
-    return normalized !== "0" && normalized !== "false";
-}
 
 export interface DeferredDefaultMetricsOptions {
     /** Registry the default families are registered on (the :9091 registry). */
