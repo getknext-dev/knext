@@ -45,6 +45,36 @@ export class ConfigValidationError extends Error {
     }
 }
 
+// The Kubernetes quantity grammar (apimachinery pkg/api/resource/quantity.go),
+// mirrored EXACTLY so the CLI agrees with the operator's resource.ParseQuantity:
+//   binarySI        Ki | Mi | Gi | Ti | Pi | Ei   (uppercase, always "i")
+//   decimalSI       n | u | m | "" | k | M | G | T | P | E
+//                   NOTE: decimal kilo is lowercase `k`; there is NO `K`.
+//   decimalExponent e|E followed by a signed integer, e.g. "1e3"
+// A leading `-` is intentionally NOT matched, so a negative quantity fails as
+// "not parseable" (the same net result the operator reaches by Sign() <= 0).
+const QUANTITY_RE =
+    /^\+?(\d+(\.\d+)?|\.\d+)(Ki|Mi|Gi|Ti|Pi|Ei|[numkMGTPE]|[eE][+-]?\d+)?$/;
+
+/**
+ * checkQuantity mirrors the operator's two-step quantity gate: is the value a
+ * parseable Kubernetes quantity, and is it strictly positive (Sign() > 0)?
+ * The mantissa (leading numeric run) determines the sign — a suffix/exponent
+ * cannot turn a zero mantissa non-zero. The operator stays the single source of
+ * truth; this is fast, CLI-side pre-flight feedback.
+ */
+function checkQuantity(value: string): {
+    parseable: boolean;
+    positive: boolean;
+} {
+    if (!QUANTITY_RE.test(value)) {
+        return { parseable: false, positive: false };
+    }
+    const mantissa = value.match(/^\+?((?:\d+(?:\.\d+)?|\.\d+))/);
+    const positive = mantissa != null && Number.parseFloat(mantissa[1]) > 0;
+    return { parseable: true, positive };
+}
+
 /**
  * Validates a KnativeNextConfig at load time.
  * Throws ConfigValidationError with clear messages on invalid config.
@@ -128,14 +158,19 @@ export function validateConfig(config: KnativeNextConfig): void {
     //                   operator's parser) while "500k" is valid.
     //   decimalExponent e|E followed by a signed integer, e.g. "1e3"
     if (config.bytecodeCache?.size !== undefined) {
-        if (
-            !/^\+?(\d+(\.\d+)?|\.\d+)(Ki|Mi|Gi|Ti|Pi|Ei|[numkMGTPE]|[eE][+-]?\d+)?$/.test(
-                config.bytecodeCache.size,
-            )
-        ) {
+        const q = checkQuantity(config.bytecodeCache.size);
+        if (!q.parseable) {
             errors.push(
                 `'bytecodeCache.size' ("${config.bytecodeCache.size}") is not a valid Kubernetes quantity ` +
                     `(e.g. "512Mi", "1Gi"). Omit it to use the operator default of 512Mi.`,
+            );
+        } else if (!q.positive) {
+            // #435 / #433 alignment: the operator rejects a non-positive size
+            // (Sign() <= 0), so "0" / "0Gi" must fail HERE too — otherwise the
+            // CLI would accept a size the operator later rejects as a CR.
+            errors.push(
+                `'bytecodeCache.size' ("${config.bytecodeCache.size}") must be a positive quantity. ` +
+                    `Omit it to use the operator default of 512Mi.`,
             );
         }
     }
@@ -231,6 +266,35 @@ export function validateConfig(config: KnativeNextConfig): void {
             config.scaling.panicThresholdPercentage < 110
         ) {
             errors.push("'scaling.panicThresholdPercentage' must be >= 110");
+        }
+
+        // #435 — cheap, SINGLE-FIELD checks for the four resource quantities
+        // that flow into the CR's spec.resources. The OPERATOR stays the single
+        // source of validation truth (internal/validation/validate.go rejects
+        // malformed / non-positive quantities AND the request>limit cross-field
+        // rule); this early copy just gives fast `kn-next deploy`-time feedback
+        // on a typo like "1GB" / "0.5 CPU" / "0". Deliberately NOT the
+        // request>limit cross-field wall — that stays the operator's job.
+        for (const field of [
+            "cpuRequest",
+            "memoryRequest",
+            "cpuLimit",
+            "memoryLimit",
+        ] as const) {
+            const value = config.scaling[field];
+            if (value === undefined) continue;
+            const q = checkQuantity(value);
+            if (!q.parseable) {
+                errors.push(
+                    `'scaling.${field}' ("${value}") is not a valid Kubernetes quantity ` +
+                        `(e.g. CPU "250m"/"1", memory "512Mi"/"1Gi").`,
+                );
+            } else if (!q.positive) {
+                errors.push(
+                    `'scaling.${field}' ("${value}") must be a positive quantity ` +
+                        `(a zero or negative request/limit is invalid).`,
+                );
+            }
         }
     }
 

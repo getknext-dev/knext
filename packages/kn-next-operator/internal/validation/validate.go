@@ -321,6 +321,16 @@ func ValidateNextAppSpec(spec *appsv1alpha1.NextAppSpec) error {
 	if err := validateBytecodeCacheSize(spec); err != nil {
 		return err
 	}
+	// Resource requests/limits (#435): the four spec.resources fields are
+	// user-supplied free text the reconciler turns into Kubernetes quantities
+	// for the Knative container. Validate them HERE so a malformed value fails
+	// as an admission rejection / status condition instead of panicking the
+	// SHARED reconcile loop (resource.MustParse at the sizing site) — which
+	// would stop EVERY NextApp on the cluster from reconciling until the bad CR
+	// is removed.
+	if err := validateResources(spec); err != nil {
+		return err
+	}
 	if spec.Revalidation != nil && spec.Revalidation.Queue != "" {
 		if _, ok := validRevalidationQueues[spec.Revalidation.Queue]; !ok {
 			return fmt.Errorf(
@@ -432,6 +442,93 @@ func validateBytecodeCacheSize(spec *appsv1alpha1.NextAppSpec) error {
 		)
 	}
 	return nil
+}
+
+// validateResources rejects a spec.resources.{cpuRequest,memoryRequest,
+// cpuLimit,memoryLimit} that is not a valid, positive Kubernetes quantity, and
+// a request that exceeds its own limit (#435). All four fields are user-supplied
+// free text the reconciler feeds into resource.MustParse when building the
+// Knative container's ResourceRequirements; before this check a typo like "500"
+// with a stray suffix, "1GB" (uppercase B is not a Kubernetes suffix), or
+// "0.5 CPU" PANICKED the shared reconcile loop — a cluster-wide outage, since a
+// panic in the shared controller stops every other NextApp from reconciling.
+//
+// Semantic decisions (documented per issue AC):
+//   - PARSEABILITY: each field must be a valid Kubernetes quantity.
+//   - ZERO / NEGATIVE: rejected on ALL four fields (Sign() <= 0). A zero or
+//     negative CPU/memory request or limit is meaningless for a container and
+//     almost always a typo; rejecting it loudly at admission beats letting the
+//     Knative Service creation fail opaquely later.
+//   - REQUEST > LIMIT: rejected for CPU and memory, but ONLY when BOTH the
+//     request AND the matching limit are EXPLICITLY set in the spec. The
+//     validator stays pure and does not couple to the reconciler's hardcoded
+//     defaults (250m/512Mi requests, 1000m/1Gi limits) — those defaults are
+//     always request <= limit, and a request that exceeds an unset (defaulted)
+//     limit surfaces as a Knative reconcile error rather than a silent
+//     mis-sizing.
+func validateResources(spec *appsv1alpha1.NextAppSpec) error {
+	if spec.Resources == nil {
+		return nil
+	}
+	r := spec.Resources
+
+	cpuReq, err := parsePositiveQuantity("spec.resources.cpuRequest", r.CPURequest)
+	if err != nil {
+		return err
+	}
+	memReq, err := parsePositiveQuantity("spec.resources.memoryRequest", r.MemoryRequest)
+	if err != nil {
+		return err
+	}
+	cpuLim, err := parsePositiveQuantity("spec.resources.cpuLimit", r.CPULimit)
+	if err != nil {
+		return err
+	}
+	memLim, err := parsePositiveQuantity("spec.resources.memoryLimit", r.MemoryLimit)
+	if err != nil {
+		return err
+	}
+
+	// request > limit — only when both sides are explicitly declared.
+	if cpuReq != nil && cpuLim != nil && cpuReq.Cmp(*cpuLim) > 0 {
+		return fmt.Errorf(
+			"spec.resources.cpuRequest (%q) exceeds spec.resources.cpuLimit (%q): "+
+				"a request cannot be larger than its limit",
+			r.CPURequest, r.CPULimit,
+		)
+	}
+	if memReq != nil && memLim != nil && memReq.Cmp(*memLim) > 0 {
+		return fmt.Errorf(
+			"spec.resources.memoryRequest (%q) exceeds spec.resources.memoryLimit (%q): "+
+				"a request cannot be larger than its limit",
+			r.MemoryRequest, r.MemoryLimit,
+		)
+	}
+	return nil
+}
+
+// parsePositiveQuantity parses a user-supplied quantity string for a named
+// spec.resources field, returning nil (no error) when the field is unset, the
+// parsed quantity when valid, or an error naming the field when the value is
+// unparseable or not strictly positive.
+func parsePositiveQuantity(field, value string) (*resource.Quantity, error) {
+	if value == "" {
+		return nil, nil // unset → reconciler default
+	}
+	q, err := resource.ParseQuantity(value)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"%s %q is not a valid Kubernetes quantity (e.g. CPU \"250m\"/\"1\", memory \"512Mi\"/\"1Gi\"): %v",
+			field, value, err,
+		)
+	}
+	if q.Sign() <= 0 {
+		return nil, fmt.Errorf(
+			"%s %q must be a positive quantity (a zero or negative request/limit is invalid)",
+			field, value,
+		)
+	}
+	return &q, nil
 }
 
 // mustBeParseableQuantity is the test seam that pins the reconcile-site
