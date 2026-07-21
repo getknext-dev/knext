@@ -28,8 +28,9 @@ Bun single executable **never boots Next's server**, so *in principle* it
 side-steps that floor — the ADR-0036 P1 feasibility spike booted a **trivial**
 compiled binary in ~2–4 ms (bypassing the ~1957 ms), which is the whole reason to
 try this. Whether the **real** recipe delivers a distribution-separated cold-start
-win is exactly what the OKE A/B on this PR must measure: **no speedup is claimed
-yet.** ADR-0036 authorises this as an **opt-in, compat-gated** alternative target
+win **remains unmeasured — and currently unmeasurable**: the P1b OKE A/B (benchmark
+run 16) could not run because the deployed binary is non-portable (#460). **No
+speedup is claimed, and none can be until #460 is fixed.** ADR-0036 authorises this as an **opt-in, compat-gated** alternative target
 — never a default, never a silent flip.
 
 ## Eligibility boundary (read before using)
