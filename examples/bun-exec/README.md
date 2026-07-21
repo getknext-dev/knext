@@ -1,5 +1,13 @@
 # `bun-exec` build recipe (opt-in, experimental)
 
+> **⚠ NOT DEPLOYABLE AS-IS — see [#460](https://github.com/getknext-dev/knext/issues/460).**
+> The compiled binary is **not portable**: `bun --compile` bakes the build machine's *absolute*
+> `.output/` path into the executable, and it loads its SSR/route chunks from that path at runtime.
+> Run anywhere but the exact build directory — including a container, the ship path documented below —
+> and it serves a 404 for **every** route. The "single self-contained executable, ship it in a bare
+> Alpine image" framing in this README is **aspirational and currently false**; it was only ever
+> exercised by running the binary from its build directory. Do not ship this until #460 is fixed.
+
 > **Maintainer example.** This directory is an in-repo recipe for knext
 > maintainers, not user-facing documentation — so it references ADRs and the
 > `RuntimeContract` directly. It implements **P3 increment 1 of ADR-0036**: a
@@ -99,8 +107,10 @@ upstream — that exit stance is tracked in ADR-0036 P1b.
 
 `bun --compile` embeds the ~57 MB Bun runtime, so the executable is **~90–110 MB**
 (the pre-compile `.output/` tree is ~1 MB — the size is entirely the runtime; the
-"5 MB alpine" idea is wrong). Ship it in a bare `FROM alpine` image, cosign-signed
-and digest-pinned. Because the binary is opaque to Trivy/syft, the SBOM + HIGH/CRITICAL
+"5 MB alpine" idea is wrong). **The intended ship path — a bare `FROM alpine` image, cosign-signed
+and digest-pinned — does NOT currently work: the binary 404s all routes when run outside its build
+directory ([#460](https://github.com/getknext-dev/knext/issues/460)).** Once that is fixed, because
+the binary is opaque to Trivy/syft, the SBOM + HIGH/CRITICAL
 scan run against the **pre-compile dependency closure** (lockfile), not the binary
 (ADR-0036 supply-chain consequence).
 
