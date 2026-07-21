@@ -16,9 +16,13 @@
 
 The node path has a hard cold-start floor ≈ Next.js's own `server.js` boot
 (~1957 ms on OKE) that knext cannot optimise below. A vinext build compiled to a
-Bun single executable **never boots Next's server**, so it side-steps that floor
-(spikes measured tens of ms). ADR-0036 authorises this as an **opt-in,
-compat-gated** alternative target — never a default, never a silent flip.
+Bun single executable **never boots Next's server**, so *in principle* it
+side-steps that floor — the ADR-0036 P1 feasibility spike booted a **trivial**
+compiled binary in ~2–4 ms (bypassing the ~1957 ms), which is the whole reason to
+try this. Whether the **real** recipe delivers a distribution-separated cold-start
+win is exactly what the OKE A/B on this PR must measure: **no speedup is claimed
+yet.** ADR-0036 authorises this as an **opt-in, compat-gated** alternative target
+— never a default, never a silent flip.
 
 ## Eligibility boundary (read before using)
 
@@ -130,6 +134,7 @@ The e2e spawns `test/drain-harness.mjs` under bun — the **same** two `Bun.serv
 listeners + shared `runtime-contract.mjs` as the real entry, with a stub router in
 place of vinext's handler. It proves the net-new knext code (metrics, drain,
 auth) over real sockets. The **vinext handler composition** and the **compiled
-Linux binary in-image** are proven by the ADR-0036 P1a/P2 spikes and re-verified
-on **OKE** — running the full compiled-binary e2e in CI is deliberately out of
-scope here (too heavy for the main gates).
+Linux binary in-image** were exercised by the ADR-0036 P1a/P2 feasibility spikes;
+the OKE cold-start A/B is the **pending P1b gate on this PR**, not a result the
+recipe can cite yet. Running the full compiled-binary e2e in CI is deliberately
+out of scope here (too heavy for the main gates).
