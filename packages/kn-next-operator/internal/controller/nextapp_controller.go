@@ -842,17 +842,40 @@ func (r *NextAppReconciler) buildDesiredKsvc(nextApp *appsv1alpha1.NextApp, ksvc
 		corev1.ResourceMemory: resource.MustParse("1Gi"),
 	}
 	if nextApp.Spec.Resources != nil {
-		if nextApp.Spec.Resources.CPURequest != "" {
-			resourceRequests[corev1.ResourceCPU] = resource.MustParse(nextApp.Spec.Resources.CPURequest)
+		// #435: never MustParse unvalidated CR input inside the SHARED reconcile
+		// loop — a malformed quantity ("500", "1GB", "0.5 CPU") would panic the
+		// whole controller and stop EVERY NextApp on the cluster from
+		// reconciling. Validation (validation.validateResources) rejects bad
+		// values upstream at admission / as a status condition; these
+		// error-returning parses are the defense-in-depth for stored CRs that
+		// predate that check.
+		if v := nextApp.Spec.Resources.CPURequest; v != "" {
+			q, err := resource.ParseQuantity(v)
+			if err != nil {
+				return fmt.Errorf("spec.resources.cpuRequest %q is not a valid Kubernetes quantity: %w", v, err)
+			}
+			resourceRequests[corev1.ResourceCPU] = q
 		}
-		if nextApp.Spec.Resources.MemoryRequest != "" {
-			resourceRequests[corev1.ResourceMemory] = resource.MustParse(nextApp.Spec.Resources.MemoryRequest)
+		if v := nextApp.Spec.Resources.MemoryRequest; v != "" {
+			q, err := resource.ParseQuantity(v)
+			if err != nil {
+				return fmt.Errorf("spec.resources.memoryRequest %q is not a valid Kubernetes quantity: %w", v, err)
+			}
+			resourceRequests[corev1.ResourceMemory] = q
 		}
-		if nextApp.Spec.Resources.CPULimit != "" {
-			resourceLimits[corev1.ResourceCPU] = resource.MustParse(nextApp.Spec.Resources.CPULimit)
+		if v := nextApp.Spec.Resources.CPULimit; v != "" {
+			q, err := resource.ParseQuantity(v)
+			if err != nil {
+				return fmt.Errorf("spec.resources.cpuLimit %q is not a valid Kubernetes quantity: %w", v, err)
+			}
+			resourceLimits[corev1.ResourceCPU] = q
 		}
-		if nextApp.Spec.Resources.MemoryLimit != "" {
-			resourceLimits[corev1.ResourceMemory] = resource.MustParse(nextApp.Spec.Resources.MemoryLimit)
+		if v := nextApp.Spec.Resources.MemoryLimit; v != "" {
+			q, err := resource.ParseQuantity(v)
+			if err != nil {
+				return fmt.Errorf("spec.resources.memoryLimit %q is not a valid Kubernetes quantity: %w", v, err)
+			}
+			resourceLimits[corev1.ResourceMemory] = q
 		}
 	}
 
