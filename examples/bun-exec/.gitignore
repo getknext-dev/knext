@@ -1,0 +1,8 @@
+node_modules/
+.output/
+.nitro/
+.next/
+dist/
+# compiled single-executable binaries (arch-specific, ~90-110 MB)
+knext-bun-exec-*
+*.log

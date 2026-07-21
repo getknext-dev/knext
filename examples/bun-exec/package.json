@@ -1,0 +1,24 @@
+{
+  "name": "knext-bun-exec-example",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Opt-in, experimental bun-exec (vinext + bun --compile --bytecode) build recipe for knext (ADR-0036 P3).",
+  "scripts": {
+    "build": "./build.sh",
+    "dev": "vite dev",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "vinext": "1.0.0-beta.2"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-rsc": "^0.5.27",
+    "nitro": "3.0.260610-beta",
+    "react-server-dom-webpack": "^19.2.7",
+    "vite": "^8.0.0",
+    "vitest": "^3.0.0"
+  }
+}
