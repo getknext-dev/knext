@@ -3,6 +3,8 @@ node_modules/
 .nitro/
 .next/
 dist/
+# Next.js auto-generates this on build; its formatting isn't biome-conformant.
+next-env.d.ts
 # compiled single-executable binaries (arch-specific, ~90-110 MB)
 knext-bun-exec-*
 *.log

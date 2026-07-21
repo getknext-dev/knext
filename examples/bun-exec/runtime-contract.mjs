@@ -135,7 +135,8 @@ function constantTimeEqual(a, b) {
 const PENDING_KEY = Symbol.for('knext.bunexec.pendingTasks');
 
 export function waitUntil(promise) {
-  const set = (globalThis[PENDING_KEY] ??= new Set());
+  globalThis[PENDING_KEY] ??= new Set();
+  const set = globalThis[PENDING_KEY];
   const tracked = Promise.resolve(promise)
     .catch(() => {})
     .finally(() => set.delete(tracked));

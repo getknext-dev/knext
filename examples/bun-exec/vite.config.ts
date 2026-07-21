@@ -1,6 +1,6 @@
 import { nitro } from 'nitro/vite';
-import { defineConfig } from 'vite';
 import vinext from 'vinext';
+import { defineConfig } from 'vite';
 
 // vinext (Vite/rolldown Next.js reimpl) → Nitro `bun` preset, with the standard
 // bun server entry REPLACED by our bespoke `knext-bun-entry.mjs` so the emitted

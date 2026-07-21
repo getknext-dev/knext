@@ -40,6 +40,7 @@ const HOSTNAME = resolveBindHost(process.env);
 const METRICS_PORT = Number(process.env.METRICS_PORT ?? 9091);
 const GRACE_MS = Number(process.env.SHUTDOWN_GRACE_MS ?? 25_000);
 
+// biome-ignore lint/correctness/useHookAtTopLevel: useNitroApp() is Nitro's server-app accessor, not a React hook — the "use" prefix is coincidental.
 const nitro = useNitroApp();
 const metrics = createMetricsState();
 
