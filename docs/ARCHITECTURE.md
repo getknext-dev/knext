@@ -123,34 +123,74 @@ sequenceDiagram
 ```mermaid
 sequenceDiagram
     participant Admin
-    participant API as /api/cache/invalidate
+    participant API as POST /api/cache/invalidate
     participant Redis as Redis (ISR/Data Cache)
-    participant GCS as GCS (Static Assets Only)
-    
-    Admin->>API: POST /api/cache/invalidate {tag: "products"}
-    API->>Redis: Get keys for tag "products"
-    Redis-->>API: ["key1", "key2", "key3"]
-    loop For each key
-        API->>Redis: Delete ISR cache entry (cache-handler.js)
+
+    Admin->>API: {tag: "products"} + Authorization: Bearer $CACHE_INVALIDATE_TOKEN
+    alt Missing / invalid token (fail-closed)
+        API-->>Admin: 401 Unauthorized
+    else Authorized
+        API->>Redis: Get keys for tag "products"
+        Redis-->>API: ["key1", "key2", "key3"]
+        loop For each key
+            API->>Redis: Delete ISR cache entry (cache-handler.js)
+        end
+        API->>Redis: Clear tag mapping
+        API-->>Admin: 200 OK {invalidated: 3}
     end
-    API->>Redis: Clear tag mapping
-    API-->>Admin: 200 OK {invalidated: 3}
 ```
+
+> Both mutating cache routes (`POST /api/cache/invalidate`, `DELETE /api/cache/events`)
+> require a Bearer token (`CACHE_INVALIDATE_TOKEN`) and **fail closed** when it is unset —
+> see `docs/security/mutating-endpoints.md`.
 
 ## Deployment Pipeline
 
-The `deploy.sh` script automates the entire deployment:
+`kn-next` builds an image and emits a **`NextApp` custom resource**; the operator
+reconciles the cluster from it. The CLI never applies raw Knative manifests — per
+**ADR-0001 the operator is the single source of truth** for cluster state
+(`deploy.ts` builds → pushes → applies the CR).
 
 ```mermaid
 flowchart LR
-    A["1. pnpm build"] --> B["2. npx open-next"]
-    B --> C["3. Read BUILD_ID"]
-    C --> D["4. gsutil rsync to GCS"]
-    D --> E["5. docker buildx"]
-    E --> F["6. Update YAML"]
-    F --> G["7. kubectl apply"]
-    
-    style C fill:#ff9800,color:#000
+    dev([Developer]) -->|kn-next build| img["Container image<br/>Next standalone + supervisor<br/>digest-pinned"]
+    img --> reg[(Registry<br/>OCIR / GAR / ECR)]
+    dev -->|kn-next deploy| cr["NextApp CR<br/>apps.kn-next.dev"]
+    cr -->|kubectl apply| api[[Kubernetes API]]
+    api --> op["kn-next operator<br/>single source of truth · ADR-0001"]
+    op -->|reconcile| ksvc["Knative Service<br/>scale-to-zero"]
+    ksvc -->|pulls| reg
+    op -->|computeStatusVerdict| cr
+
+    style op fill:#4285f4,color:#fff
+```
+
+### Control plane: what the operator reconciles from one `NextApp`
+
+Every cluster mutation flows from the CR through `Reconcile`. Cross-cutting
+optional features are gated by `spec` flags; all honest status
+(`Conditions` + `Events`) is computed centrally in `computeStatusVerdict`, never
+in ad-hoc `Reconcile` branches.
+
+```mermaid
+flowchart TB
+    cr["NextApp CR (spec)"] --> op["kn-next operator · Reconcile"]
+    op --> sa["ServiceAccount"]
+    op -->|"cache.enableBytecodeCache"| pvc[("Bytecode-cache PVC")]
+    op --> kimg["Knative Image<br/>(pre-pull hint)"]
+    op --> ksvc["Knative Service (ksvc)<br/>runtime: node | bun"]
+    op -->|"security.networkPolicy (default-on)"| np["NetworkPolicy<br/>internal-only"]
+    op -->|"scaling.imagePrewarm (opt-in)"| ds["image-prewarm DaemonSet<br/>pins digest per node · ADR-0037"]
+    op -->|"revalidation.provisionKafkaSource (opt-in)"| ksrc["KafkaSource<br/>(ISR revalidation only)"]
+    op -->|"honest status"| verdict["computeStatusVerdict<br/>Conditions + Events"]
+    verdict --> cr
+    ksvc --> pods["App pods · 0..maxScale"]
+    pods --> redis[("Redis · ISR/data cache")]
+    pods --> pg[("Postgres · app data")]
+    pods --> obj[("Object store · static assets")]
+
+    style op fill:#4285f4,color:#fff
+    style ds fill:#8b5cf6,color:#fff
 ```
 
 **BUILD_ID Synchronization:**
@@ -345,6 +385,59 @@ flowchart LR
 
     style Stage1 fill:#3b82f6,color:#fff
     style Stage2 fill:#10b981,color:#fff
+```
+
+### Scale-from-zero request path
+
+When an app sits at zero replicas, the first request is buffered by Knative's
+activator while the autoscaler provisions a pod. The image pull is a large,
+target-independent share of that latency: **~0 s when the image is already on the
+node** (e.g. via `scaling.imagePrewarm`, ADR-0037) vs **~2 s on a cold node**
+(benchmark run 18). Once warm, steady-state latency is unaffected (run 19: p99
+~285 ms under sustained load).
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant K as Kourier (ingress)
+    participant A as Activator
+    participant AS as Autoscaler (KPA)
+    participant P as App pod
+
+    C->>K: request (app at 0 replicas)
+    K->>A: buffer request
+    A->>AS: report demand
+    AS->>P: scale 0 → 1
+    Note over P: image pull — ~0 s cached / ~2 s uncached (run 18)
+    Note over P: process boot + code-cache deserialize + :9091 metrics up
+    P-->>A: Ready (shallow /api/health)
+    A->>P: forward buffered request
+    P-->>C: 200 — cold ~2–4 s · warm p99 ~285 ms (run 19)
+```
+
+### Build & runtime targets
+
+The process that executes the standalone `server.js` is selected by
+**`spec.runtime`** (`node` default, or `bun` for a Bun-bytecode-precompiled
+image — see the caching notes above). **ADR-0036** is the roadmap that decouples
+the *build* toolchain from the *runtime* into an independent choice, with the hard
+invariant that a `bun` runtime always pairs with a `vinext` build (enforced by a
+CEL rule); `bun + turbopack` is rejected.
+
+```mermaid
+flowchart TB
+    subgraph shipped["Shipped today · spec.runtime selects the process"]
+        n["runtime: node (default)<br/>Next standalone server.js + supervisor sidecar"]
+        b["runtime: bun<br/>Bun-bytecode-precompiled server.js"]
+    end
+    subgraph roadmap["ADR-0036 roadmap · decoupled build × runtime (bun ⇒ vinext)"]
+        c1["node + turbopack — default"]
+        c2["node + vinext"]
+        c3["bun + vinext — single-executable"]
+        c4["bun + turbopack — rejected (CEL invariant)"]
+    end
+
+    style c4 fill:#ef4444,color:#fff
 ```
 
 ### Performance Benchmarks
