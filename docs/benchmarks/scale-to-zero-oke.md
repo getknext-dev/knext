@@ -1248,9 +1248,12 @@ fine; the samples below are those.
 | **bun+vinext** (self-contained binary) | **2.07 s, 2.13 s** |
 | **node** (minimal Next standalone) | **2.79 s** (+ run 16's ~2.4 s median / ~11 s intermittent tail) |
 
-**Finding — the build target is a modest lever; the real cold-start win is image caching, not bun.**
-bun+vinext (~2.1 s) edges node (~2.4–2.8 s) by only a few hundred ms — **not** the ~600 ms regime, and
-far less than run 13's in-pod ~3.6× build/boot separation. The reason is the one run 16 already named:
+**Finding — as deployed here, the build target is only a modest lever; image caching is the likely
+locus of the real win (unmeasured).** bun+vinext (~2.1 s) edges node (~2.4–2.8 s) by only a few hundred
+ms — **not** the ~600 ms regime, and far less than run 13's in-pod ~3.6× build/boot separation. (Caveat:
+run 13's boot delta was measured on the newer beta pins; this deployment reverted to the nitro-alpha /
+vinext-0.0.19 combo for self-containment, so the boot advantage is directionally-but-not-identically
+comparable.) The reason the edge shrinks end-to-end is the one run 16 already named:
 end-to-end cold start is dominated by **pod scheduling + activator queueing + image pull**, all
 **target-independent**. bun's compiled-boot advantage is *real* (run 13) but is **largely absorbed by
 that shared floor** once deployed. The founder's original ~600 ms bun cold start relied on a **second,
