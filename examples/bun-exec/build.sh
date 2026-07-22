@@ -7,8 +7,10 @@
 #     (default: linux-x64 — the ship target; alpine needs the -musl variants)
 #     OUT=<path>  override the output binary name.
 #
-# The pins in package.json are exact and load-bearing (vinext beta ↔ nitro beta);
-# re-validate this whole sequence on any pin bump. See README.md.
+# The output is a self-contained binary: routes are bundled into
+# `.output/server/index.mjs` (nitro 3.0.1-alpha.2 / vinext 0.0.19) so `--compile`
+# embeds them. SHIP the binary alongside `.output/public` (static assets), run
+# it from a dir where `./.output/public` resolves. See README.md.
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -30,8 +32,8 @@ bun install --frozen-lockfile
 echo "==> [2/3] vite build (vinext → Nitro bun preset → .output/server/index.mjs)"
 ./node_modules/.bin/vite build
 
-echo "==> [3/3] bun --compile --bytecode → $OUT ($TARGET)"
-bun build --compile --bytecode --target="$TARGET" \
+echo "==> [3/3] bun --compile --minify --bytecode → $OUT ($TARGET)"
+bun build --compile --minify --bytecode --target="$TARGET" \
   .output/server/index.mjs --outfile "$OUT"
 
 echo "==> done: $OUT"

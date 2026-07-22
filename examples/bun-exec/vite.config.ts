@@ -7,10 +7,13 @@ import { defineConfig } from 'vite';
 // `.output/server/index.mjs` wraps vinext's handler with the RuntimeContract
 // (metrics / drain / auth). `build.sh` then `bun --compile --bytecode`s it.
 //
-// The exact pins in package.json are load-bearing: vinext 1.0.0-beta.2 is locked
-// to nitro 3.0.260610-beta and @vitejs/plugin-rsc 0.5.28 (exact-pinned, matching
-// the committed bun.lock). Stable nitro/rsc break the build (see README
-// "beta-on-beta toolchain risk").
+// SELF-CONTAINMENT (#460 bug 1): the version combo in package.json — nitro
+// 3.0.1-alpha.2 / vinext 0.0.19 / vite 7 / @vitejs/plugin-rsc 0.5.x — emits a
+// server BUNDLED into `.output/server/index.mjs`, so `bun --compile` embeds all
+// routes and the binary is self-contained (ships as binary + `.output/public`).
+// The newer betas (nitro 3.0.260610-beta / vinext 1.0.0-beta.2) instead emit a
+// runtime-CHUNKED server that loads routes from `.output/server/` at runtime,
+// which `--compile` cannot embed → the binary 404s outside its build dir.
 export default defineConfig({
   plugins: [vinext(), nitro({ preset: 'bun', entry: './knext-bun-entry.mjs' })],
 });
