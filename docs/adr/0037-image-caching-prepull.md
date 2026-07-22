@@ -29,13 +29,23 @@ against containerd GC) — every node. Scale-from-zero then never waits on the p
 
 - **CR field:** `spec.scaling.imagePrewarm: bool` (default `false`). Cold-start optimization lives
   under `scaling`, alongside `minScale`/`warmSchedule`.
-- **Operator behavior:** on `imagePrewarm: true`, reconcile a DaemonSet `<app>-imgcache` whose pod
-  uses `spec.image` (the same digest the ksvc runs) with `command: ["/bin/sh","-c","sleep infinity"]`
-  (or a pause-equivalent), `imagePullSecrets` from the app, tiny resource requests (e.g. cpu `1m`,
-  mem `16Mi`), non-root, `AutomountServiceAccountToken: false`, and `tolerations: [operator: Exists]`
-  so it caches on tainted nodes too. On `false`/unset, the operator deletes the DaemonSet. The image
-  digest is threaded from the same resolution the ksvc uses, so a new revision re-pulls on the
-  prewarmer first, keeping the cache ahead of scale-from-zero.
+- **Operator behavior:** on `imagePrewarm: true`, reconcile a DaemonSet `<app>-imgcache` that pulls
+  and pins the app's `spec.image` (same digest the ksvc runs) on every node. `imagePullSecrets` from
+  the app, tiny resource requests (e.g. cpu `1m`, mem `16Mi`), non-root, `readOnlyRootFilesystem`,
+  default seccomp, `AutomountServiceAccountToken: false`, `tolerations: [operator: Exists]` so it caches
+  on tainted nodes too. On `false`/unset, the operator deletes the DaemonSet. The image digest is
+  threaded from the same resolution the ksvc uses, so a new revision re-pulls on the prewarmer first.
+  - **Container mechanism — MUST NOT assume a shell in the app image.** knext runtime images are
+    distroless/Alpine and may have no `/bin/sh` (a `sleep infinity` command would CrashLoopBackOff on
+    a distroless node-target image). The prewarmer therefore keeps the app image both **pulled** and
+    **pinned against containerd GC** without executing the app or relying on the image's own binaries:
+    an `initContainer` copies a static `true`/`sleep` into an `emptyDir`; a **second container runs the
+    APP IMAGE with `command` pointing at that copied binary** (forcing kubelet to pull the app image
+    and keeping a running container referencing it, so image GC never evicts it), while never starting
+    the actual app server. A bare `pause` main container is insufficient by itself — it pins only the
+    pause image, not the app image; a *running* container must reference the app digest. The
+    implementer resolves the exact static-binary source; the invariant is: works on a shell-less
+    distroless app image, app server never boots, app image stays resident.
 - **Reconciliation home:** in the operator (ADR-0001), gated by `computeStatusVerdict` for any status
   condition (never a new `Reconcile` branch). The CLI only emits the CR field; it never creates the
   DaemonSet.
@@ -54,8 +64,10 @@ against containerd GC) — every node. Scale-from-zero then never waits on the p
 
 - **Node cost is real and must be honest:** `imagePrewarm` places a copy of the image and a (tiny)
   running pod on **every** schedulable node, including nodes the app may never serve from. For a
-  ~105 MB image on an N-node cluster that is N×105 MB of disk + N tiny pods. This is the deliberate
-  trade for a predictable cold start; it is **opt-in per app**, never default.
+  ~105 MB image on an N-node cluster that is N×105 MB of disk + N tiny pods. With **M** prewarm-enabled
+  apps it is **M×N** prewarmer pods — which counts against each node's max-pods limit (OKE defaults are
+  low), so heavy use can crowd out app scheduling. This is the deliberate trade for a predictable cold
+  start; it is **opt-in per app**, never default, and the docs must state the M×N pod-slot cost.
 - **Complementary, not a substitute.** It removes the pull component only. The build-target boot edge
   (ADR-0036) and node CPU/scheduling headroom are separate levers; run 17 showed those dominate once
   the image is warm. `imagePrewarm` + bun-exec + adequate headroom is the path toward the founder's
@@ -77,7 +89,10 @@ against containerd GC) — every node. Scale-from-zero then never waits on the p
       passthrough + validator (no CEL invariant needed — it's a plain bool).
 - [ ] Operator reconciler: create/update/delete the `<app>-imgcache` DaemonSet from the field + digest;
       honest status condition via `computeStatusVerdict` (e.g. `ImageCacheReady`).
-- [ ] e2e: DaemonSet lifecycle + the no-`Pulling`-on-cold-start proof (extends the scale-to-zero suite).
+- [ ] e2e: DaemonSet lifecycle + the no-`Pulling`-on-cold-start proof (extends the scale-to-zero
+      suite). **Must include a distroless/shell-less app-image case** so the container mechanism is
+      verified not to CrashLoopBackOff (the failure both sign-off gates flagged), and assert the app
+      server never actually boots in the prewarmer.
 - [ ] Docs: user-facing "cold start & image caching" guidance (the N×image-size node cost is the
       honest trade); benchmark the warm-vs-cold delta on a clean cluster (blocked today by cluster
       clutter — see runs 17–18).
