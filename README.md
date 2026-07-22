@@ -318,17 +318,10 @@ Configure distributed cache for tag-based invalidation:
 ```typescript
 // Redis (recommended)
 cache: {
-  provider: 'redis',
+  provider: 'redis',      // the only implemented cache provider
   url: 'redis://redis:6379',
   keyPrefix: 'my-app',    // Optional namespace
   tls: true,              // Enable TLS
-}
-
-// DynamoDB (AWS)
-cache: {
-  provider: 'dynamodb',
-  tableName: 'my-app-cache',
-  region: 'us-east-1',
 }
 ```
 

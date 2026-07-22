@@ -31,7 +31,7 @@ const config: KnativeNextConfig = {
   name: 'storefront',                       // DNS-1123 label; the zone slug
   registry: 'us-central1-docker.pkg.dev/PROJECT/repo',
   storage: {                                // static assets + image cache
-    provider: 's3',                         // 'gcs' | 's3' | 'minio'  (azure NOT accepted)
+    provider: 's3',                         // 'gcs' | 's3' | 'minio' | 'azure'
     bucket: 'storefront-assets',
     region: 'us-east-1',
     publicUrl: 'https://cdn.example.com/storefront-assets',
@@ -44,8 +44,8 @@ const config: KnativeNextConfig = {
 export default config;
 ```
 
-- Storage providers accepted by the validator are **`gcs` | `s3` | `minio`**.
-  `azure` is typed but rejected at config-load — use MinIO/S3-API for Azure Blob.
+- Storage providers accepted by the validator are **`gcs` | `s3` | `minio` | `azure`**.
+  Each shells out to that cloud's CLI (`gsutil` / `aws` / `mc` / `az`).
 - The CLI turns this config into a `NextApp` Custom Resource at deploy time — see
   the `knext-deploy` skill.
 

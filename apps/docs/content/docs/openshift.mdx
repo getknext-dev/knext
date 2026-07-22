@@ -56,7 +56,7 @@ No custom SCC or `anyuid` grant is required for the standard restricted security
 ## 4 · Storage — self-hosted MinIO
 
 There is no managed object store on-prem, so run **MinIO** in-cluster (S3-API) and use
-`provider: 'minio'`. knext storage accepts only `gcs`, `s3`, and `minio`
+`provider: 'minio'`. knext storage accepts `gcs`, `s3`, `minio`, and `azure`
 (see [Multi-cloud deploy](/docs/multi-cloud)); MinIO is the on-prem choice.
 
 ## 5 · Cache — self-hosted Redis
