@@ -99,11 +99,15 @@ is refined: **the build system and the runtime are independent user choices.** T
 - **Default is unchanged:** `build: turbopack, runtime: node` — the only all-apps-verified path. The
   other two cells are opt-in and compat-gated exactly as the original decision states.
 
-**RuntimeContract applies to all three cells.** node+turbopack uses the supervisor path (today). **Both
-vinext cells** (node+vinext and bun+vinext) wrap the nitro app with the RuntimeContract entry
-(metrics `:9091` / drain / fail-closed auth), so that entry must delegate to nitro's **real request
-handler** — not `useNitroApp().fetch` (see #460: that does not route). This entry bug therefore affects
-**both** vinext cells, not just bun.
+**RuntimeContract applies to all three cells, via exactly TWO implementations:**
+- **turbopack → the supervisor** (node+turbopack, today): supervisor spawns `server.js`, `:9091` in the supervisor.
+- **vinext → one shared in-process entry** (both node+vinext and bun+vinext): the vinext `.output`
+  server runs *directly* (node+vinext: `node .output/server/index.mjs`; bun+vinext: the `--compile`d
+  binary), with `:9091` served **in-process** — **node+vinext does NOT use the turbopack supervisor.**
+  This keeps a single RuntimeContract entry across both vinext cells (minimal drift, per the
+  "one everything-else" principle). That entry must delegate to nitro's **real request handler** — not
+  `useNitroApp().fetch` (see #460: that does not route) — so the entry-routing bug affects **both**
+  vinext cells, not just bun, and fixing it once serves both.
 
 **#460 reframed:** the *self-containment* half of #460 is specific to the **bun+vinext** cell — only it
 uses `bun --compile`, and only the older nitro/vinext versions bundle the server into the binary
