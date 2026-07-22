@@ -128,6 +128,10 @@ func buildImagePrewarmDaemonSet(app *appsv1alpha1.NextApp, pullSecrets []corev1.
 				Spec: corev1.PodSpec{
 					// No API access needed: never mount a SA token.
 					AutomountServiceAccountToken: ptr.To(false),
+					// The pin process is a bare `busybox sleep` (PID 1, no SIGTERM
+					// handler), so the default 30s grace would delay every digest
+					// rollout / disable by 30s per node. Drop it to 1s.
+					TerminationGracePeriodSeconds: ptr.To(int64(1)),
 					// Pull the app image on EVERY node, tainted ones included.
 					Tolerations:      []corev1.Toleration{{Operator: corev1.TolerationOpExists}},
 					ImagePullSecrets: pullSecrets,

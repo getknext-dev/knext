@@ -578,7 +578,17 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 		dsKey := client.ObjectKey{Namespace: nextApp.Namespace, Name: nextApp.Name + "-imgcache"}
 		if getErr := r.Get(ctx, dsKey, prewarmDS); getErr == nil {
 			ic.desired = prewarmDS.Status.DesiredNumberScheduled
-			ic.ready = prewarmDS.Status.NumberReady
+			// Honest ImageCacheReady across a DIGEST ROLLOUT: count only pods
+			// updated to the CURRENT template (old-digest pods are still "Ready"
+			// but cache the wrong image), and only once the DS controller has
+			// observed the latest spec. Otherwise a rollout would read stale-True
+			// while nodes still pin the previous digest.
+			if prewarmDS.Status.ObservedGeneration == prewarmDS.Generation {
+				ic.ready = prewarmDS.Status.UpdatedNumberScheduled
+				if prewarmDS.Status.NumberReady < ic.ready {
+					ic.ready = prewarmDS.Status.NumberReady
+				}
+			}
 		}
 	}
 
