@@ -1,6 +1,8 @@
 # ADR-0037: Image caching via an operator-reconciled pre-pull DaemonSet
 
-- **Status:** Proposed (2026-07-22)
+- **Status:** Accepted (2026-07-22; implemented in the same PR — operator DaemonSet reconciler +
+  `spec.scaling.imagePrewarm` + envtest; the live no-`Pulling`-on-cold-start OKE proof and user-facing
+  docs are tracked follow-ups)
 - **Depends on:** ADR-0001 (operator = single source of cluster state), ADR-0026/0030 (scaling), ADR-0036 (build targets)
 
 ## Context
@@ -19,6 +21,17 @@ remaining cold start is scheduling + activator + process boot (where the build t
 is only a modest lever). So the two-target cold-start win the project is chasing is **gated on the app
 image being present on the node before scale-from-zero**, which today is left to chance (whatever
 containerd happens to still have cached).
+
+### Relationship to the existing Knative `Image` pre-pull (why a DaemonSet on top)
+
+The operator already reconciles a Knative `caching.internal.knative.dev/v1alpha1` `Image` for the app
+(`nextapp_controller.go` step 3). That resource is a **hint** to the cluster's image-pull machinery —
+where the Knative image-caching extension is installed, it can pre-pull to nodes, but it **does not keep
+a running container referencing the image, so it does not pin the layer against containerd garbage
+collection**, and the extension is not guaranteed present on every cluster. The pre-pull DaemonSet here
+is stronger and portable: a *running* container holds the app digest resident on every node until
+`imagePrewarm` is disabled. The two coexist — the Knative `Image` stays as the lightweight default hint;
+`imagePrewarm` is the opt-in, GC-proof guarantee for cold-start-critical apps.
 
 ## Decision
 

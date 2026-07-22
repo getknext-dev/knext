@@ -189,6 +189,16 @@ export interface ScalingConfig {
     // (operator): unset — the Knative cluster default (200%) applies
     // unmanaged.
     panicThresholdPercentage?: number;
+
+    // ADR-0037 — opt-in node-local image pre-pull. When true the operator
+    // reconciles a `<app>-imgcache` DaemonSet that pulls and PINS the app's
+    // digest-pinned image on every schedulable node, so scale-from-zero never
+    // waits on the ~2 s image pull. COST (honest): a copy of the image + a tiny
+    // running pod on EVERY node, including nodes the app never serves from
+    // (N×image-size disk + N pods; M×N pods across M prewarm-enabled apps,
+    // counting against each node's max-pods limit). Opt-in, never default;
+    // unset/false ⇒ omitted from the CR (any prior DaemonSet is deleted).
+    imagePrewarm?: boolean;
 }
 
 // #417 — bring-your-own database BINDING (ADR-0019), mirroring the NextApp

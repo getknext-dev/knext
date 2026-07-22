@@ -99,7 +99,7 @@ func TestComputeStatusVerdict_BoundSecret(t *testing.T) {
 	}
 
 	v := computeStatusVerdict(app, readyKsvc(now), databaseCheckState{mode: databaseModeBound},
-		revisionCheck{}, now)
+		revisionCheck{}, imageCacheState{}, now)
 
 	// BYO binding: DatabaseReady=True (Bound), then the step-6 roll-up.
 	assertConditionOrder(t, v, []string{
@@ -125,7 +125,7 @@ func TestComputeStatusVerdict_NoDatabaseRemovesCondition(t *testing.T) {
 	app := verdictApp()
 
 	v := computeStatusVerdict(app, readyKsvc(now), databaseCheckState{mode: databaseModeNone},
-		revisionCheck{}, now)
+		revisionCheck{}, imageCacheState{}, now)
 
 	if len(v.removeConditions) != 1 || v.removeConditions[0] != ConditionDatabaseReady {
 		t.Fatalf("removeConditions: got %v, want [DatabaseReady]", v.removeConditions)
@@ -148,7 +148,7 @@ func TestComputeStatusVerdict_KsvcNotReadySurfacesKsvcDetail(t *testing.T) {
 	}})
 
 	v := computeStatusVerdict(app, ksvc, databaseCheckState{mode: databaseModeNone},
-		revisionCheck{}, now)
+		revisionCheck{}, imageCacheState{}, now)
 
 	readyCond := findVerdictCondition(t, v, ConditionReady)
 	if readyCond.Status != metav1.ConditionFalse || readyCond.Reason != reasonKsvcNotReady {
@@ -177,7 +177,7 @@ func TestComputeStatusVerdict_KsvcNotReadyNilConditionDefaults(t *testing.T) {
 	ksvc := &servingv1.Service{} // no conditions at all
 
 	v := computeStatusVerdict(app, ksvc, databaseCheckState{mode: databaseModeNone},
-		revisionCheck{}, now)
+		revisionCheck{}, imageCacheState{}, now)
 
 	readyCond := findVerdictCondition(t, v, ConditionReady)
 	wantMsg := "Knative Service is not Ready (Pending): Knative Service has not reported Ready yet"
@@ -206,7 +206,7 @@ func TestComputeStatusVerdict_IngressStallVerdictAndTransitionEvent(t *testing.T
 		ksvcIngressNotConfiguredReason, ingressProgrammingStallWindow+3*time.Minute, now)
 
 	v := computeStatusVerdict(app, ksvc, databaseCheckState{mode: databaseModeNone},
-		revisionCheck{}, now)
+		revisionCheck{}, imageCacheState{}, now)
 
 	readyCond := findVerdictCondition(t, v, ConditionReady)
 	if readyCond.Reason != ReasonIngressNotProgrammed || readyCond.Message != ingressStallMessage {
@@ -229,7 +229,7 @@ func TestComputeStatusVerdict_IngressStallVerdictAndTransitionEvent(t *testing.T
 		Reason: ReasonIngressNotProgrammed, Message: ingressStallMessage,
 	}}
 	v = computeStatusVerdict(app, ksvc, databaseCheckState{mode: databaseModeNone},
-		revisionCheck{}, now)
+		revisionCheck{}, imageCacheState{}, now)
 	if len(v.events) != 0 {
 		t.Fatalf("events on an already-stalled pass: got %+v, want none", v.events)
 	}
@@ -254,7 +254,7 @@ func TestComputeStatusVerdict_PinnedRevisionNotFoundTakesPrecedence(t *testing.T
 		ksvcIngressNotConfiguredReason, pinnedRevisionStallWindow+3*time.Minute, now)
 
 	v := computeStatusVerdict(app, ksvc, databaseCheckState{mode: databaseModeNone},
-		revisionCheck{notFound: true}, now)
+		revisionCheck{notFound: true}, imageCacheState{}, now)
 
 	readyCond := findVerdictCondition(t, v, ConditionReady)
 	if readyCond.Reason != ReasonPinnedRevisionNotFound || readyCond.Message != pinnedNotFoundMessage {
@@ -275,7 +275,7 @@ func TestComputeStatusVerdict_PinnedRevisionNotFoundTakesPrecedence(t *testing.T
 		Reason: ReasonPinnedRevisionNotFound, Message: pinnedNotFoundMessage,
 	}}
 	v = computeStatusVerdict(app, ksvc, databaseCheckState{mode: databaseModeNone},
-		revisionCheck{notFound: true}, now)
+		revisionCheck{notFound: true}, imageCacheState{}, now)
 	if len(v.events) != 0 {
 		t.Fatalf("events on an already-degraded pass: got %+v, want none", v.events)
 	}
@@ -293,7 +293,7 @@ func TestComputeStatusVerdict_PinnedCheckUnknownKeepsPriorVerdict(t *testing.T) 
 		"RevisionMissing", pinnedRevisionStallWindow+time.Minute, now)
 
 	v := computeStatusVerdict(app, ksvc, databaseCheckState{mode: databaseModeNone},
-		revisionCheck{unknown: true}, now)
+		revisionCheck{unknown: true}, imageCacheState{}, now)
 
 	readyCond := findVerdictCondition(t, v, ConditionReady)
 	if readyCond.Reason != ReasonPinnedRevisionNotFound || readyCond.Message != pinnedNotFoundMessage {
@@ -311,7 +311,7 @@ func TestComputeStatusVerdict_PinnedCheckUnknownKeepsPriorVerdict(t *testing.T) 
 	// fall through to the generic not-ready reason.
 	app.Status.Conditions = nil
 	v = computeStatusVerdict(app, ksvc, databaseCheckState{mode: databaseModeNone},
-		revisionCheck{unknown: true}, now)
+		revisionCheck{unknown: true}, imageCacheState{}, now)
 	if c := findVerdictCondition(t, v, ConditionReady); c.Reason != reasonKsvcNotReady {
 		t.Fatalf("Ready without prior verdict: got %+v", c)
 	}
@@ -323,7 +323,7 @@ func TestComputeStatusVerdict_GhostPinRequeuesWhileKsvcStillReady(t *testing.T) 
 	app.Spec.Traffic = &appsv1alpha1.TrafficSpec{RevisionName: "shop-00007"}
 
 	v := computeStatusVerdict(app, readyKsvc(now), databaseCheckState{mode: databaseModeNone},
-		revisionCheck{notFound: true}, now)
+		revisionCheck{notFound: true}, imageCacheState{}, now)
 
 	// Knative hasn't reacted to the pin yet: do NOT degrade in that window, but
 	// keep re-evaluating so the stall window is eventually judged.
@@ -342,7 +342,7 @@ func TestComputeStatusVerdict_RevalidationDeferred(t *testing.T) {
 	app.Spec.Revalidation = &appsv1alpha1.RevalidationSpec{Queue: "kafka"}
 
 	v := computeStatusVerdict(app, readyKsvc(now), databaseCheckState{mode: databaseModeNone},
-		revisionCheck{}, now)
+		revisionCheck{}, imageCacheState{}, now)
 
 	c := findVerdictCondition(t, v, ConditionRevalidationDeferred)
 	if c.Status != metav1.ConditionTrue || c.Reason != "ConsumerNotProvisioned" {
@@ -358,8 +358,92 @@ func TestComputeStatusVerdict_RevalidationDeferred(t *testing.T) {
 	// Opt-in flips it back to not-deferred.
 	app.Spec.Revalidation.ProvisionKafkaSource = ptr.To(true)
 	v = computeStatusVerdict(app, readyKsvc(now), databaseCheckState{mode: databaseModeNone},
-		revisionCheck{}, now)
+		revisionCheck{}, imageCacheState{}, now)
 	if c := findVerdictCondition(t, v, ConditionRevalidationDeferred); c.Status != metav1.ConditionFalse {
 		t.Fatalf("RevalidationDeferred with opt-in: got %+v", c)
+	}
+}
+
+func TestComputeStatusVerdict_ImageCacheReadyCached(t *testing.T) {
+	now := time.Now()
+	app := verdictApp()
+	app.Spec.Scaling = &appsv1alpha1.ScalingSpec{ImagePrewarm: true}
+
+	// Every targeted node has the image pulled+pinned => ImageCacheReady=True.
+	v := computeStatusVerdict(app, readyKsvc(now), databaseCheckState{mode: databaseModeNone},
+		revisionCheck{}, imageCacheState{enabled: true, desired: 3, ready: 3}, now)
+
+	c := findVerdictCondition(t, v, ConditionImageCacheReady)
+	if c.Status != metav1.ConditionTrue || c.Reason != "Cached" {
+		t.Fatalf("ImageCacheReady: got %+v, want True/Cached", c)
+	}
+	// It must be appended LAST (order contract, #98) — after RevalidationDeferred.
+	got := conditionTypes(v)
+	if got[len(got)-1] != ConditionImageCacheReady {
+		t.Fatalf("ImageCacheReady must be the last condition, order=%v", got)
+	}
+}
+
+func TestComputeStatusVerdict_ImageCacheReadyPulling(t *testing.T) {
+	now := time.Now()
+	app := verdictApp()
+	app.Spec.Scaling = &appsv1alpha1.ScalingSpec{ImagePrewarm: true}
+
+	// Partial coverage => ImageCacheReady=False/Pulling (never gates Ready).
+	v := computeStatusVerdict(app, readyKsvc(now), databaseCheckState{mode: databaseModeNone},
+		revisionCheck{}, imageCacheState{enabled: true, desired: 3, ready: 1}, now)
+
+	c := findVerdictCondition(t, v, ConditionImageCacheReady)
+	if c.Status != metav1.ConditionFalse || c.Reason != "Pulling" {
+		t.Fatalf("ImageCacheReady: got %+v, want False/Pulling", c)
+	}
+	// Non-fatal: app Ready stays True while the prewarmer is still pulling.
+	if r := findVerdictCondition(t, v, ConditionReady); r.Status != metav1.ConditionTrue {
+		t.Fatalf("Ready must stay True while prewarm is Pulling, got %+v", r)
+	}
+}
+
+func TestComputeStatusVerdict_ImageCacheDisabledNoCondition(t *testing.T) {
+	now := time.Now()
+	app := verdictApp()
+
+	// Never prewarmed: no ImageCacheReady condition and no removal (order/#98
+	// no-op guard stays byte-identical to the pre-ADR-0037 verdict).
+	v := computeStatusVerdict(app, readyKsvc(now), databaseCheckState{mode: databaseModeNone},
+		revisionCheck{}, imageCacheState{}, now)
+
+	for _, c := range v.conditions {
+		if c.Type == ConditionImageCacheReady {
+			t.Fatalf("ImageCacheReady must be absent when prewarm is disabled, got %+v", c)
+		}
+	}
+	for _, rc := range v.removeConditions {
+		if rc == ConditionImageCacheReady {
+			t.Fatalf("must not remove a never-present ImageCacheReady (would break the #98 no-op guard)")
+		}
+	}
+}
+
+func TestComputeStatusVerdict_ImageCacheDisabledRemovesStaleCondition(t *testing.T) {
+	now := time.Now()
+	app := verdictApp()
+	// Prior status carried ImageCacheReady (prewarm was on, now turned off).
+	app.Status.Conditions = []metav1.Condition{{
+		Type:   ConditionImageCacheReady,
+		Status: metav1.ConditionTrue,
+		Reason: "Cached",
+	}}
+
+	v := computeStatusVerdict(app, readyKsvc(now), databaseCheckState{mode: databaseModeNone},
+		revisionCheck{}, imageCacheState{enabled: false}, now)
+
+	found := false
+	for _, rc := range v.removeConditions {
+		if rc == ConditionImageCacheReady {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("a stale ImageCacheReady must be removed when prewarm is disabled, removeConditions=%v", v.removeConditions)
 	}
 }

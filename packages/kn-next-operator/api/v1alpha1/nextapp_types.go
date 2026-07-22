@@ -261,6 +261,24 @@ type ScalingSpec struct {
 	// +optional
 	PoolMax int32 `json:"poolMax,omitempty"`
 
+	// ImagePrewarm opts the app into node-local image pre-pull (ADR-0037): when
+	// true the operator reconciles a DaemonSet `<app>-imgcache` that pulls and
+	// PINS the app's digest-pinned image (spec.image, the same digest the ksvc
+	// runs) on every schedulable node, so scale-from-zero never waits on the
+	// ~2 s image pull (OKE run 18 halved the uncached cold start). The DaemonSet
+	// never boots the app server: a running container references the app digest
+	// (so containerd GC cannot evict it) via a static helper binary, keeping the
+	// image resident without a shell — safe on distroless runtime images.
+	//
+	// COST (honest, ADR-0037): this places a copy of the image AND a tiny running
+	// pod on EVERY schedulable node — including nodes the app never serves from —
+	// so for an N-node cluster it is N×image-size of disk + N prewarmer pods, and
+	// with M prewarm-enabled apps it is M×N pods counting against each node's
+	// max-pods limit. It is therefore OPT-IN per app, never default. Unset/false
+	// => the operator deletes any previously-created `<app>-imgcache` DaemonSet.
+	// +optional
+	ImagePrewarm bool `json:"imagePrewarm,omitempty"`
+
 	// WarmSchedule declares SCHEDULED warm-floor windows (ADR-0030, W5/#380):
 	// during each window the app is pre-warmed to a floor of `replicas` pods so
 	// a predictable traffic spike (a known daily peak, a scheduled campaign) does
