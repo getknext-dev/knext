@@ -7,7 +7,7 @@ This project is a serverless, cloud-agnostic platform for Next.js. Following a p
 - **OpenNext**: Compiles Next.js into a standalone server compatible with containerized environments.
 - **Knative Service**: The compiled server function is packaged into a Docker image and deployed as a Knative Service on Kubernetes (GKE/EKS/AKS).
 - **Static Assets**: Offloaded to CDN / Object Storage.
-- **Pluggable Adapters**: Supports multiple storage providers (GCS, AWS S3, Azure Blob, MinIO) and cache providers (Redis, DynamoDB) to remain entirely cloud-agnostic.
+- **Pluggable Adapters**: Supports multiple storage providers (GCS, AWS S3, Azure Blob, MinIO) and the Redis cache provider to remain entirely cloud-agnostic.
 - **Caching**: Two-tier cache strategy using Object Storage for data (ISR cache) and Redis for tags (fast O(1) cache invalidation mapping), ensuring sub-10ms cache latency.
 - **Message Queue**: Kafka for asynchronous ISR revalidation loops.
 - **Bytecode Caching**: Utilizes Node.js 24's `NODE_COMPILE_CACHE` with ReadWriteMany persistent volumes to bypass V8 JIT compilation and significantly reduce cold start times.
