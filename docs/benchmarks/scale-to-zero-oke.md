@@ -1269,6 +1269,30 @@ reach the ~600 ms regime. No portable cold-start guarantee is claimed. What run 
 firmly: the bun+vinext target is now deployable and serving (#460 closed), and the naive as-deployed
 cold-start edge over node is modest.
 
+## Run 18 (2026-07-22) — image-pull cost: the measured basis for image caching (#309 / bun-exec)
+
+Run 17 found the bun+vinext cold start was ~2.1s **with the image already node-cached** (no pull). This
+run quantifies what caching actually saves by deploying a **fresh-content** image (a cache-busting layer
+so it is not present on any node) and reading the pull duration from the pod's `Pulling`→`Pulled` events:
+
+- **Image size:** 104,965,037 bytes (~105 MB) — the bun+vinext binary (~57 MB Bun runtime + app) + Alpine.
+- **Pull duration:** **2.09 s** (kubelet: "Successfully pulled … in 2.09s"), on this OKE node from OCIR.
+
+| cold-start scenario | image pull | end-to-end (as-deployed minimal app) |
+| --- | --- | --- |
+| **warm image** (node already has it) | ~0 | **~2.1 s** (run 17) |
+| **cold image** (fresh node / new digest / evicted layer) | **~2.09 s** | **~4.2 s** |
+
+**Finding — image caching roughly HALVES the uncached cold start (~4.2 s → ~2.1 s).** For a scale-to-zero
+app this is a real, recurring hazard, not an edge case: containerd can evict an idle image, a new/replaced
+node starts empty, and a fresh deploy's first cold start on each node pays the full ~2 s pull. This is the
+orthogonal lever run 17 flagged, now measured: pre-pulling the app image onto every node (so scale-from-zero
+never waits on the ~105 MB pull) removes ~2 s from the worst-case cold start — the difference between the
+warm ~2.1 s and the cold ~4.2 s. It is **complementary to** the build target (bun's boot edge) and to
+node CPU/scheduling headroom, not a substitute. Scope: single measurement, this OKE node ↔ OCIR path,
+~105 MB image; pull time scales with image size and registry/network. Motivates an operator-reconciled
+image pre-pull capability (design in the ADR that follows this run).
+
 ## Caveat
 
 These are **point-in-time measurements on a specific small (2-node) OKE cluster** with a
