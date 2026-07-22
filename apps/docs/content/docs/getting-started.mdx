@@ -77,7 +77,7 @@ const config: KnativeNextConfig = {
   name: 'storefront',
   registry: 'registry.example.com/storefront',
   storage: {
-    provider: 'gcs', // one of: gcs | s3 | minio
+    provider: 'gcs', // one of: gcs | s3 | minio | azure
     bucket: 'storefront-assets',
     publicUrl: 'https://storage.googleapis.com/storefront-assets',
   },
@@ -89,10 +89,10 @@ const config: KnativeNextConfig = {
 export default config;
 ```
 
-<Callout type="warn">
-`storage.provider` is validated against `gcs | s3 | minio`. The `StorageProvider` type *also* lists
-`azure`, but the CLI validator does **not** accept it — an `azure` config is rejected at load time.
-Don't use it. See [Multi-cloud deploy](/docs/multi-cloud).
+<Callout>
+`storage.provider` is validated against `gcs | s3 | minio | azure`. Each shells out to that cloud's
+CLI (`gsutil` / `aws` / `mc` / `az`), which must be installed and authenticated in your build
+environment. See [Multi-cloud deploy](/docs/multi-cloud).
 </Callout>
 
 The `scaling` block also carries the full set of autoscaling knobs (`containerConcurrency`,

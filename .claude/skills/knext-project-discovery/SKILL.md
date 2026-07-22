@@ -57,7 +57,7 @@ the official compat suite · **no unauthenticated mutating endpoints** · narrow
 
 ## Known issues to not propagate (CLAUDE.md §9)
 Image optimization missing · `/api/cache/invalidate` unauthenticated · provider shells
-(S3/Azure/MinIO thin; DynamoDB/Kafka config-only; real plane = GCS+Redis) · license MIT vs
+(gcs/s3/minio/azure CLI shell-outs, real plane = GCS+Redis; DynamoDB cache trimmed) · license MIT vs
 Apache-2.0 · npm scope drift (`@kn-next` vs `@knative-next`) · light tests on core paths.
 
 ## Related skills

@@ -5,9 +5,8 @@ import type { KnativeNextConfig } from '@knext/core';
  *
  * Minimal-valid per packages/kn-next/src/cli/validate.ts:
  *   required: name, registry, storage.provider, storage.bucket
- *   storage.provider MUST be one of: "gcs" | "s3" | "minio"
- *     (NOTE: the StorageProvider type also lists "azure", but validate.ts does
- *      NOT accept it — azure would be rejected at config-load time. Do not use it.)
+ *   storage.provider MUST be one of: "gcs" | "s3" | "minio" | "azure"
+ *     (each shells out to that cloud's CLI: gsutil | aws | mc | az)
  *   scaling.minScale >= 0  → set to 0 here for true scale-to-zero.
  *
  * No `cache` block: the docs site is static and needs neither Redis nor an ISR

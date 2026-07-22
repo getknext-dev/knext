@@ -1,6 +1,6 @@
 ---
 title: Deploy on Amazon EKS
-description: A documented procedure for running knext on EKS — S3 for assets, ElastiCache/Redis or DynamoDB for the cache, ECR for digest-pinned images.
+description: A documented procedure for running knext on EKS — S3 for assets, ElastiCache/Redis for the cache, ECR for digest-pinned images.
 ---
 
 This is a **documented procedure** for EKS. The steps below are documented but **not yet validated
@@ -107,20 +107,16 @@ storage: {
 },
 ```
 
-<Callout type="warn">
-knext's storage validator accepts only `gcs`, `s3`, and `minio`. There is **no Azure Blob
-provider**. Any S3-compatible store works via `s3` + `endpoint` — see
-[Multi-cloud deploy](/docs/multi-cloud).
+<Callout>
+knext's storage validator accepts `gcs`, `s3`, `minio`, and `azure`. On EKS use `s3` (or any
+S3-compatible store via `s3` + `endpoint`) — see [Multi-cloud deploy](/docs/multi-cloud).
 </Callout>
 
-## 4. Cache: Redis (ElastiCache) or DynamoDB
+## 4. Cache: Redis (ElastiCache)
 
-knext supports two cache providers: `redis` and `dynamodb`.
-
-### Option A — Redis (ElastiCache)
-
-The well-trodden path. Provision an ElastiCache for Redis cluster and wire its endpoint into
-`cache`. `cache.url` is **required** when `provider: 'redis'`; keep it in a Kubernetes Secret:
+knext's data cache is **Redis** — the only implemented cache provider. Provision an ElastiCache for
+Redis cluster and wire its endpoint into `cache`. `cache.url` is **required** when
+`provider: 'redis'`; keep it in a Kubernetes Secret:
 
 ```ts
 cache: {
@@ -129,24 +125,6 @@ cache: {
   keyPrefix: 'my-app',
 },
 ```
-
-### Option B — DynamoDB
-
-```ts
-cache: {
-  provider: 'dynamodb',
-  tableName: 'my-app-cache',
-  region: 'us-east-1',
-},
-```
-
-<Callout type="warn">
-**DynamoDB cache is config/schema-level.** The `dynamodb` provider is a valid config value — the
-validator accepts it and the type carries `tableName` / `region` — but unlike Redis the validator
-performs **no depth checks** on it (only `redis` is required to have a `url`). Verify the DynamoDB
-cache adapter's runtime behavior against your workload before depending on it; Redis (ElastiCache)
-is the exercised cache path.
-</Callout>
 
 ## 5. Registry: ECR
 

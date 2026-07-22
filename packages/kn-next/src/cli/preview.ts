@@ -128,8 +128,8 @@ export async function runPreviewDeploy(
     // (2) on `preview destroy` the operator's finalizer CleanupCache would flush
     // `<prod-prefix>:*`, WIPING prod's Redis. Overriding keyPrefix to the preview
     // name keeps the keyspace isolated and makes teardown only ever touch the
-    // preview's own keys. Only the Redis cache has a (string) keyPrefix the
-    // finalizer flushes by; DynamoDB is keyed by table, so we leave it untouched.
+    // preview's own keys. Redis is the only cache provider, and its (string)
+    // keyPrefix is what the finalizer flushes by.
     const previewCache: KnativeNextConfig["cache"] =
         config.cache?.provider === "redis"
             ? { ...config.cache, keyPrefix: previewName }

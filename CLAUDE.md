@@ -86,8 +86,11 @@ defer bucket 1.
 
 ## 9. As-built truths & known issues (fix, don't propagate)
 - ISR/data cache is **Redis** (`cache-handler.js`), **not GCS** — `docs/ARCHITECTURE.md` is stale.
-- Real data plane = **GCS + Redis on GKE**; S3/Azure/MinIO are thin shell-outs; DynamoDB/Kafka are
-  config/manifest-only — implement+test or trim the schema/docs.
+- Real data plane = **GCS + Redis on GKE**. Storage providers `gcs`/`s3`/`minio`/`azure` are all
+  validator-accepted CLI shell-outs (`gsutil`/`aws`/`mc`/`az`), each covered by the asset-upload
+  contract test (azure promoted from coded-but-blocked, #474). **(RESOLVED)** the DynamoDB cache
+  surface was trimmed (never had a runtime, #476); `spec.revalidation.kafka` is ISR-revalidation
+  wiring only.
 - **(RESOLVED)** Image optimization is **implemented** per ADR-0006
   (`packages/kn-next/src/adapters/image-cache-sync.ts` + tests) — the earlier "missing / biggest
   functional gap" note is stale; don't re-propose it as a work item.
