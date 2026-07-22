@@ -98,6 +98,13 @@ is refined: **the build system and the runtime are independent user choices.** T
   `build: turbopack`) and mirrored by the CLI validator, per the validate-at-admission pattern (#435/#454).
 - **Default is unchanged:** `build: turbopack, runtime: node` — the only all-apps-verified path. The
   other two cells are opt-in and compat-gated exactly as the original decision states.
+- **Retires the pre-existing `runtime: bun` + Next-standalone combo.** The original ADR listed
+  "`runtime: bun` (existing: Next standalone under bun)" as an additive option. Under `bun ⇒ vinext`
+  that combo (bun + turbopack) is now **rejected** — bun requires a vinext build. The implementation
+  PR must call out this breaking change: the new CEL rule fails such a CR at `kubectl apply`, and the
+  operator's handling of any pre-existing stored `runtime: bun`+standalone CR (reject-with-guidance
+  via `computeStatusVerdict`, not panic) must be specified. Acceptable at `v1alpha1` (ADR-0017); that
+  combo was measured to only tie node, not win.
 
 **RuntimeContract applies to all three cells, via exactly TWO implementations:**
 - **turbopack → the supervisor** (node+turbopack, today): supervisor spawns `server.js`, `:9091` in the supervisor.
