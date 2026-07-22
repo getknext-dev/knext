@@ -10,15 +10,15 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "react": "^19.0.0",
-    "react-dom": "^19.0.0",
-    "vinext": "1.0.0-beta.2"
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
+    "vinext": "^0.0.19"
   },
   "devDependencies": {
-    "@vitejs/plugin-rsc": "0.5.28",
-    "nitro": "3.0.260610-beta",
-    "react-server-dom-webpack": "^19.2.7",
-    "vite": "^8.0.0",
+    "@vitejs/plugin-rsc": "^0.5.21",
+    "nitro": "3.0.1-alpha.2",
+    "react-server-dom-webpack": "^19.2.4",
+    "vite": "^7.3.1",
     "vitest": "^3.0.0"
   }
 }

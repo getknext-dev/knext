@@ -219,9 +219,20 @@ RuntimeContract-entry routing bug is shared by both vinext cells.
     fix is to make the build emit a **single fully-bundled server** (e.g. inline the dynamic route
     imports / single-chunk output) so `--compile` embeds everything. Until the recipe produces that
     portable binary (#460), the distribution-separated-win gate is **deferred, not failed**. Node arm
-    end-to-end cold start measured at ~2.4s median with an intermittent ~11s tail (benchmark run 16);
-    the bun arm awaits the recipe fix. **`bun-exec` status: recipe not self-contained yet (#460)** —
-    the self-contained single-binary target stands and is known-achievable, just not met by this build.
+    end-to-end cold start measured at ~2.4s median with an intermittent ~11s tail (benchmark run 16).
+  - **P1b UPDATE (2026-07-22, #460 FIXED — the recipe is now self-contained):** two coupled bugs were
+    root-caused and fixed in `examples/bun-exec`: (1) the newer beta pins emitted a runtime-chunked
+    server — reverted to the founder's proven combo (nitro `3.0.1-alpha.2` / vinext `^0.0.19`) that
+    bundles the server so `bun --compile` embeds the routes; (2) overriding nitro's `entry` had dropped
+    vinext's route injection AND `useNitroApp().fetch` bypassed nitro's real request pipeline — the
+    entry now `import`s `#nitro/virtual/polyfills` first (restores route bundling) and delegates to
+    srvx's `serve` (nitro's real handler), keeping in-flight counting / SIGTERM drain / in-process
+    `:9091` / fail-closed Bearer auth. **OKE-validated on the linux/musl binary run from a clean dir**
+    (only `.output/public` shipped): `/api/health` 200, `/` 200, `:9091/metrics` 200, cache route
+    401-without-token / 200-with-token, SIGTERM drain → exit 0. Ship shape corrected: binary +
+    `.output/public` (~90–110 MB), not binary-only. **`bun-exec` status: recipe self-contained (#460
+    resolved); the P1b distribution-separated-win A/B is now runnable and still PENDING** — no
+    cold-start win is claimed until that A/B runs (and the ~600 ms regime also needs image caching).
 - **P4 — compat gate.** Official compat suite against the bun image; document supported feature subset +
   fallback-to-node guidance.
 - **P5 — docs + benchmark.** User-facing "choosing a build target" page (qualitative); benchmark A/B.

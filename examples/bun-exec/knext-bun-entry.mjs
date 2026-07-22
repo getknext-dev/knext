@@ -6,9 +6,21 @@
 //
 // Why a bespoke entry: vinext is Vite/rolldown and ignores knext's webpack
 // adapter hooks, so it cannot re-provide the RuntimeContract the node supervisor
-// gives (metrics, drain, auth). Nitro exposes the WinterCG handler via
-// `useNitroApp().fetch`, and a Nitro server entry is a replaceable template — so
-// this ~40-line file wraps that handler with the contract instead of hooking it.
+// gives (metrics, drain, auth). A Nitro server entry is a replaceable template,
+// so this file wraps Nitro's REAL request pipeline with the contract instead of
+// hooking it.
+//
+// IMPORTANT (#460 bug 2): do NOT call `useNitroApp().fetch(req)` from a raw
+// `Bun.serve`. Nitro's default bun preset entry serves through srvx's `serve`
+// (`srvx/bun`), which (a) augments the incoming Request with the `runtime`
+// context + `waitUntil` Nitro/vinext route matching depends on, (b) runs
+// registered middleware, and (c) normalises the handler's result via
+// `toNativeResponse`. Skipping that (raw `Bun.serve` → `nitroApp.fetch`) makes
+// Nitro answer a framework 404 (`{"error":true}`) for EVERY app route — the
+// metrics listener still works, which is why the bug looked entry-shaped. So we
+// delegate app serving to the SAME `srvx/bun` `serve` the default entry uses,
+// and thread the RuntimeContract's in-flight counting through srvx MIDDLEWARE
+// (its own SIGTERM/SIGINT graceful-shutdown is disabled so OUR drain owns exit).
 //
 // Env-injection contract (RuntimeContract item 6 — operator-supplied):
 //   PORT               app listen port           (default 3000)
@@ -22,7 +34,16 @@
 //   SHUTDOWN_GRACE_MS  drain hardcap in ms        (default 25000)
 //   CACHE_INVALIDATE_TOKEN  read by the app route, not here (see app/api/cache).
 
+// MUST be first (#460 bug 1). Nitro's DEFAULT bun entry opens with this import;
+// it pulls in `#nitro-vite-setup`, which registers `globalThis.__nitro_vite_envs__`
+// (vinext's ssr/rsc render services) and thereby keeps the ssr/rsc route chunks in
+// the build graph. Without it, overriding nitro's `entry` with this file drops the
+// vinext route wiring entirely → the compiled binary answers a framework 404 for
+// every app route (no `_ssr` chunks are even emitted). With it, routes are bundled
+// and the binary is self-contained.
+import '#nitro/virtual/polyfills';
 import { useNitroApp } from 'nitro/app';
+import { serve } from 'srvx/bun';
 import {
   createGracefulShutdown,
   createMetricsState,
@@ -44,20 +65,39 @@ const GRACE_MS = Number(process.env.SHUTDOWN_GRACE_MS ?? 25_000);
 const nitro = useNitroApp();
 const metrics = createMetricsState();
 
-// ── App listener — wraps vinext's real handler, counts in-flight requests ────
-const appServer = Bun.serve({
+// ── App listener — Nitro's REAL request pipeline via srvx/bun (#460 bug 2) ───
+// `serve` is the exact code path the default bun preset entry uses; it wraps
+// `nitro.fetch` with the srvx request-context augmentation + `toNativeResponse`
+// that route matching needs. We add ONE srvx middleware for in-flight counting
+// (RuntimeContract §2) and disable srvx's own graceful shutdown so OUR SIGTERM
+// drain below owns the exit. `silent` suppresses srvx's listen banner (we print
+// our own startup-order signal). srvx starts the Bun listener synchronously in
+// the constructor, so it is bound before the log line below.
+const appSrvx = serve({
   port: PORT,
   hostname: HOSTNAME,
-  async fetch(req) {
-    metrics.requestsTotal++;
-    metrics.inflight++;
-    try {
-      return await nitro.fetch(req);
-    } finally {
-      metrics.inflight--;
-    }
-  },
+  fetch: nitro.fetch,
+  gracefulShutdown: false,
+  silent: true,
+  middleware: [
+    async (_req, next) => {
+      metrics.requestsTotal++;
+      metrics.inflight++;
+      try {
+        return await next();
+      } finally {
+        metrics.inflight--;
+      }
+    },
+  ],
 });
+// Adapt srvx's BunServer to the { port, stop(force) } shape the metrics log and
+// the shared drain orchestrator (runtime-contract.mjs) expect. srvx `close()`
+// also awaits its own waitUntil() tasks, so vinext `after()`/waitUntil drains.
+const appServer = {
+  port: appSrvx.bun.server.port,
+  stop: (force) => appSrvx.close(force),
+};
 
 // ── (2) In-process Prometheus :9091 — a SECOND Bun.serve, bound at listen-time
 // so a scrape while the runtime is up is always answered (RuntimeContract §2).
