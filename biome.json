@@ -19,7 +19,7 @@
       "!**/.cursor",
       "!**/_design-reference",
       "!**/bun.lockb",
-      "!packages/scale-zero-pg/**"
+      "!packages/scale-zero-pg"
     ]
   },
   "formatter": {

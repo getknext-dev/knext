@@ -37,13 +37,13 @@ describe("validateConfig trims dead provider surface", () => {
         const cfg = baseConfig();
         // `dynamodb` is no longer part of the CacheProvider type (trimmed dead
         // surface, #476) — a stale config that still names it must be rejected as
-        // an unsupported provider, not silently green-lit.
-        // biome-ignore lint/suspicious/noExplicitAny: deliberately trimmed provider.
+        // an unsupported provider, not silently green-lit. Cast via `unknown`
+        // (not `any`) so no noExplicitAny suppression is needed.
         cfg.cache = {
             provider: "dynamodb",
             tableName: "t",
             region: "us-east-1",
-        } as any;
+        } as unknown as KnativeNextConfig["cache"];
 
         expect(() => validateConfig(cfg)).toThrow(ConfigValidationError);
         // The message must name the provider and point at the supported set.
