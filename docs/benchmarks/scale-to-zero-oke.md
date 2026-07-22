@@ -1293,6 +1293,38 @@ node CPU/scheduling headroom, not a substitute. Scope: single measurement, this 
 ~105 MB image; pull time scales with image size and registry/network. Motivates an operator-reconciled
 image pre-pull capability (design in the ADR that follows this run).
 
+## Run 19 (2026-07-22) — bun+vinext load test on OKE (deployed Knative Service, real traffic path)
+
+The self-contained bun+vinext binary (#460) deployed as a scale-to-zero Knative Service (`p1b-bunexec`,
+minScale 0 / maxScale 10) under sustained + burst concurrent load, via k6 in-cluster -> Kourier ingress ->
+activator -> pods. Profile: **50 constant VUs for 40 s, then a ramp to 200 VUs (25 s burst)**, no think time,
+hitting `/api/health`.
+
+| Metric | Result |
+| --- | --- |
+| Requests | **121,587** over ~72 s |
+| Throughput | **1,689 req/s** (full Knative data path) |
+| Error rate | **0.00 %** (0 failed / 121,587) |
+| Checks (status 200) | **100.00 %** (121,587 pass / 0 fail); 0 interrupted iterations |
+| Latency - median | **27.8 ms** |
+| p90 / p95 / p99 | 139.8 / 183.2 / **285.5 ms** |
+| max | 2.56 s (the FIRST request - app started scaled-to-zero; the initial cold start, not a load artifact) |
+| Peak fan-out | **3 pods** (of maxScale 10) |
+
+**Finding - the runtime holds under concurrency with zero drops.** The hand-written srvx-`serve`
+delegation + in-flight-counting wrapper in `knext-bun-entry.mjs` (the code path most at risk of a
+concurrency bug - a dropped request, a leaked in-flight count) served **250 concurrent VUs / 121k
+requests with 0 failures**, median ~28 ms / p99 ~285 ms warm. `:9091` metrics stayed live throughout.
+
+**Scope / caveats.** (1) The `max=2.56 s` is the single initial cold-start request (scale-from-zero), not
+steady-state - the warm distribution is the p99 285 ms. (2) **Fan-out capped at 3 pods by CLUSTER
+CAPACITY, not the app:** this 2-node OKE cluster runs at ~84 % CPU requested (Knative/system overhead on
+~1830m-allocatable nodes, ~290 m free/node), so the autoscaler had little headroom to add pods; 3 pods
+were sufficient for 1689 RPS at 0 errors, but a higher-throughput or higher-fan-out test needs more node
+capacity (or freeing the leftover experiment clutter). (3) Single run, this cluster and this app image.
+What run 19 establishes firmly: the deployed bun+vinext target survives real concurrent load end-to-end
+with zero dropped requests and warm p99 under 300 ms.
+
 ## Caveat
 
 These are **point-in-time measurements on a specific small (2-node) OKE cluster** with a
