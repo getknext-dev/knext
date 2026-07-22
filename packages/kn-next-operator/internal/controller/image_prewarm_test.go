@@ -43,6 +43,40 @@ func prewarmApp() *appsv1alpha1.NextApp {
 	return app
 }
 
+// TestPrewarmHelperImage_DigestPinned enforces the security hard rule (security.md /
+// CLAUDE.md §7): every image the operator runs is pinned by digest, never a bare
+// tag. The prewarm helper image is operator-owned, so it must be digest-pinned
+// exactly like app images are — closing the one tag-pinned exception (#471). If a
+// future edit drops the @sha256: digest back to a floating tag, this fails.
+func TestPrewarmHelperImage_DigestPinned(t *testing.T) {
+	if !strings.Contains(prewarmHelperImage, "@sha256:") {
+		t.Fatalf("prewarmHelperImage %q must be digest-pinned (@sha256:...), not a floating tag — operator images are digest-pinned per security.md", prewarmHelperImage)
+	}
+	// The digest must be a full 64-hex sha256, not a truncated placeholder.
+	idx := strings.Index(prewarmHelperImage, "@sha256:")
+	digest := prewarmHelperImage[idx+len("@sha256:"):]
+	if len(digest) != 64 {
+		t.Fatalf("prewarmHelperImage digest %q must be 64 hex chars, got %d", digest, len(digest))
+	}
+}
+
+// TestBuildImagePrewarmDaemonSet_InitContainerUsesDigestPinnedHelper asserts the
+// built DaemonSet's initContainer actually consumes the digest-pinned constant
+// (not some other reference).
+func TestBuildImagePrewarmDaemonSet_InitContainerUsesDigestPinnedHelper(t *testing.T) {
+	ds := buildImagePrewarmDaemonSet(prewarmApp(), nil)
+	if len(ds.Spec.Template.Spec.InitContainers) == 0 {
+		t.Fatal("expected an initContainer staging the helper binary")
+	}
+	got := ds.Spec.Template.Spec.InitContainers[0].Image
+	if !strings.Contains(got, "@sha256:") {
+		t.Fatalf("initContainer helper image %q must be digest-pinned", got)
+	}
+	if got != prewarmHelperImage {
+		t.Fatalf("initContainer image %q must be the pinned prewarmHelperImage %q", got, prewarmHelperImage)
+	}
+}
+
 func TestBuildImagePrewarmDaemonSet_NameAndImage(t *testing.T) {
 	app := prewarmApp()
 	ds := buildImagePrewarmDaemonSet(app, nil)
