@@ -1228,6 +1228,44 @@ conclusion is that **the ship-gate cannot be cleared: `bun-exec` is not deployab
 cold start is ~2.4s median with an intermittent ~11s tail. Both `p1b-*` ksvcs and their OCIR images
 are leftover on the cluster for a maintainer to clean (operator-gated deletes).
 
+## Run 17 (2026-07-22) — ADR-0036 P1b A/B, both arms deployed (bun-exec now self-contained, #460 fixed)
+
+The bun arm that run 16 could not measure is now deployable: **#460 is fixed** — the bun+vinext recipe
+produces a genuinely self-contained binary (version revert to the proven nitro-alpha/vinext-0.0.19
+combo that bundles the server + a rewritten entry that imports `#nitro/virtual/polyfills` and delegates
+to srvx's real request handler). Both build targets are deployed as scale-to-zero Knative Services
+(minScale 0, maxScale 10, 0-CPU-request) and the bun+vinext ksvc serves `200` (`/api/health`, `/`,
+`:9091`, fail-closed cache auth) — validated end-to-end.
+
+**This is a DIRECTIONAL result, not a distribution.** The full 8-rep-per-arm A/B could not be captured
+cleanly: by this point the 2-node OKE cluster was heavily contended (dozens of leftover experiment
+Jobs, two 30–44 h stray `Pending` pods, multiple ksvc revisions — none deletable without operator-gated
+`kubectl delete`), which flaked every automated multi-rep runner. Single verified cold-start jobs ran
+fine; the samples below are those.
+
+| Arm | clean cold-start samples (scale-from-zero → first `/api/health` 200) |
+| --- | --- |
+| **bun+vinext** (self-contained binary) | **2.07 s, 2.13 s** |
+| **node** (minimal Next standalone) | **2.79 s** (+ run 16's ~2.4 s median / ~11 s intermittent tail) |
+
+**Finding — the build target is a modest lever; the real cold-start win is image caching, not bun.**
+bun+vinext (~2.1 s) edges node (~2.4–2.8 s) by only a few hundred ms — **not** the ~600 ms regime, and
+far less than run 13's in-pod ~3.6× build/boot separation. The reason is the one run 16 already named:
+end-to-end cold start is dominated by **pod scheduling + activator queueing + image pull**, all
+**target-independent**. bun's compiled-boot advantage is *real* (run 13) but is **largely absorbed by
+that shared floor** once deployed. The founder's original ~600 ms bun cold start relied on a **second,
+orthogonal lever — Docker/Knative image caching** (image pre-pulled to nodes → ~0 pull time) — without
+which the boot advantage cannot show through. **Decision-relevant takeaway:** the two-target payoff is
+gated on image caching at least as much as on the build target; a bun+vinext deployment *without* image
+caching is only marginally faster than node.
+
+**Scope.** As-deployed minimal apps on a specific, degraded 2-node OKE cluster; 2 clean cold samples per
+arm (not a distribution). A trustworthy full-distribution A/B needs a clean cluster (the leftover
+`p1b-*`/experiment clutter requires operator-gated cleanup) and the image-caching lever wired in to
+reach the ~600 ms regime. No portable cold-start guarantee is claimed. What run 17 DOES establish
+firmly: the bun+vinext target is now deployable and serving (#460 closed), and the naive as-deployed
+cold-start edge over node is modest.
+
 ## Caveat
 
 These are **point-in-time measurements on a specific small (2-node) OKE cluster** with a
