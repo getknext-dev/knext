@@ -85,6 +85,10 @@ export function buildNextAppCRObject(
                       config.scaling.panicThresholdPercentage,
               }
             : {}),
+        // ADR-0037 — opt-in node-local image pre-pull. Mapped ONLY when true so
+        // unset/false ⇒ omitted from the CR (the operator deletes any prior
+        // <app>-imgcache DaemonSet); byte-identical back-compat when unused.
+        ...(config.scaling?.imagePrewarm ? { imagePrewarm: true } : {}),
     };
 
     // Resources — from config.scaling (legacy field names match ResourcesSpec)

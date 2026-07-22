@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/robfig/cron/v3"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
@@ -244,6 +245,7 @@ func (r *NextAppReconciler) emitEvent(obj runtime.Object, eventType, reason, mes
 // Revisions: READ-ONLY — the reconciler GETs the spec.traffic.revisionName pin to
 // surface a GC'd revision as PinnedRevisionNotFound (ADR-0014). Never written.
 // +kubebuilder:rbac:groups=serving.knative.dev,resources=revisions,verbs=get;list;watch
+// +kubebuilder:rbac:groups=apps,resources=daemonsets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=persistentvolumeclaims,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=serviceaccounts,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=caching.internal.knative.dev,resources=images,verbs=get;list;watch;create;update;patch;delete
@@ -439,6 +441,17 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 		return ctrl.Result{}, err
 	}
 
+	// 4c. Reconcile the opt-in image-prewarm DaemonSet (ADR-0037). On
+	// spec.scaling.imagePrewarm=true it pulls+pins the app's digest-pinned image
+	// on every node so scale-from-zero skips the image pull; on false/unset any
+	// previously-created DaemonSet is deleted.
+	if err := r.reconcileImagePrewarmDaemonSet(ctx, &nextApp); err != nil {
+		logger.Error(err, "Failed to reconcile image-prewarm DaemonSet")
+		r.emitEvent(&nextApp, corev1.EventTypeWarning, ReasonReconcileFailed,
+			fmt.Sprintf("Failed to reconcile image-prewarm DaemonSet: %s", err.Error()))
+		return ctrl.Result{}, err
+	}
+
 	// 5. Create/Update KafkaSource for ISR revalidation.
 	//
 	// We provision the KafkaSource ONLY when kafka is selected AND the operator is
@@ -555,7 +568,21 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 	// verdict, ingress-stall detection, RevalidationDeferred, requeue) in ONE
 	// pure function (#254) and apply it: conditions in order, transition-gated
 	// events, and the #98 no-op-guarded status write.
-	verdict := computeStatusVerdict(&nextApp, ksvc, db, revCheck, time.Now())
+	// Image-prewarm readiness (ADR-0037): read the DaemonSet's node coverage so
+	// the verdict can report ImageCacheReady honestly (desired vs ready). Only
+	// meaningful when prewarm is enabled; best-effort GET (a not-yet-created or
+	// unreadable DaemonSet leaves it Pulling, never fatal).
+	ic := imageCacheState{enabled: imagePrewarmEnabled(&nextApp)}
+	if ic.enabled {
+		prewarmDS := &appsv1.DaemonSet{}
+		dsKey := client.ObjectKey{Namespace: nextApp.Namespace, Name: nextApp.Name + "-imgcache"}
+		if getErr := r.Get(ctx, dsKey, prewarmDS); getErr == nil {
+			ic.desired = prewarmDS.Status.DesiredNumberScheduled
+			ic.ready = prewarmDS.Status.NumberReady
+		}
+	}
+
+	verdict := computeStatusVerdict(&nextApp, ksvc, db, revCheck, ic, time.Now())
 	if err := r.applyStatusVerdict(ctx, &nextApp, observedStatus, verdict); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -1444,6 +1471,7 @@ func (r *NextAppReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&corev1.PersistentVolumeClaim{}).
 		Owns(&corev1.ServiceAccount{}).
 		Owns(&networkingv1.NetworkPolicy{}).
+		Owns(&appsv1.DaemonSet{}).
 		// #365: watch child Knative Revisions so a pure Active-condition flip
 		// (scale-to-zero / wake) re-enqueues the owning NextApp and
 		// `.status.scaledToZero` converges within a bounded window. Revisions are

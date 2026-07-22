@@ -122,6 +122,20 @@ describe("buildNextAppCRObject — scaling knobs (#415)", () => {
         ]);
     });
 
+    it("maps imagePrewarm:true into spec.scaling when set (ADR-0037)", () => {
+        const scaling = scalingOf(baseConfig({ imagePrewarm: true }));
+        expect(scaling.imagePrewarm).toBe(true);
+    });
+
+    it("omits imagePrewarm when unset or false (opt-in, byte-identical shape)", () => {
+        expect(
+            scalingOf(baseConfig({ minScale: 0, maxScale: 10 })).imagePrewarm,
+        ).toBeUndefined();
+        expect(
+            scalingOf(baseConfig({ imagePrewarm: false })).imagePrewarm,
+        ).toBeUndefined();
+    });
+
     it("round-trips all 6 knobs together with correct values/shape", () => {
         const scaling = scalingOf(
             baseConfig({

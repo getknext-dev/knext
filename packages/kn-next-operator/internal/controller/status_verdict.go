@@ -119,6 +119,7 @@ func computeStatusVerdict(
 	ksvc *servingv1.Service,
 	db databaseCheckState,
 	rev revisionCheck,
+	ic imageCacheState,
 	now time.Time,
 ) statusVerdict {
 	var v statusVerdict
@@ -309,6 +310,38 @@ func computeStatusVerdict(
 			Reason:             "NotDeferred",
 			Message:            "Kafka revalidation not deferred",
 		})
+	}
+
+	// ImageCacheReady (ADR-0037): non-fatal surface of the prewarm DaemonSet's
+	// node coverage. When prewarm is enabled, report True once every targeted
+	// node has the app image pulled+pinned (ready == desired, desired > 0),
+	// else False/Pulling. When disabled, drop the condition — but only if it was
+	// previously present, so a never-prewarmed app's removeConditions/order stays
+	// byte-identical (the #98 no-op guard).
+	if ic.enabled {
+		if ic.desired > 0 && ic.ready == ic.desired {
+			v.conditions = append(v.conditions, metav1.Condition{
+				Type:               ConditionImageCacheReady,
+				Status:             metav1.ConditionTrue,
+				ObservedGeneration: app.Generation,
+				Reason:             "Cached",
+				Message: fmt.Sprintf(
+					"app image pulled and pinned on all %d prewarm node(s); scale-from-zero skips the image pull",
+					ic.desired),
+			})
+		} else {
+			v.conditions = append(v.conditions, metav1.Condition{
+				Type:               ConditionImageCacheReady,
+				Status:             metav1.ConditionFalse,
+				ObservedGeneration: app.Generation,
+				Reason:             "Pulling",
+				Message: fmt.Sprintf(
+					"image prewarm in progress: %d/%d prewarm node(s) have the app image pulled+pinned",
+					ic.ready, ic.desired),
+			})
+		}
+	} else if apimeta.FindStatusCondition(app.Status.Conditions, ConditionImageCacheReady) != nil {
+		v.removeConditions = append(v.removeConditions, ConditionImageCacheReady)
 	}
 
 	return v
