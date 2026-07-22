@@ -74,6 +74,54 @@ runtime contract. The targets differ ONLY at the build+image layer.
 | runtime process | supervisor spawns `server.js`; `:9091` metrics in the supervisor | the binary IS the server (no Next standalone, no spawn); `:9091` served **in-process** at listen-time |
 | verification | official compat suite (shipped) | official compat suite against the bun image (gate) |
 
+## Amendment (2026-07-22, founder-directed): build and runtime are DECOUPLED axes
+
+The original decision above framed two *coupled* targets (`node`=turbopack, `bun-exec`=vinext). This
+is refined: **the build system and the runtime are independent user choices.** The user picks a
+**build** and a **runtime** separately; the model is a build×runtime matrix, not a single target flag.
+
+**Two config axes** (both on `kn-next.config.ts` and the `NextApp` CRD):
+- **`build: turbopack | vinext`** — `turbopack` = Next's own `next build` (turbopack/webpack) →
+  `.next/standalone`; `vinext` = the Vite/rolldown Next reimplementation → nitro `.output`.
+- **`runtime: node | bun`**.
+
+**Valid combinations (3) — the sole invariant is `bun ⇒ vinext`:**
+
+| | build: `turbopack` (Next) | build: `vinext` |
+|---|---|---|
+| **runtime: `node`** | ✅ **node+turbopack** — today's default: `.next/standalone` + the supervisor spawns `server.js` | ✅ **node+vinext** — vinext → nitro **`node-server`** preset; run `node .output/server/index.mjs` |
+| **runtime: `bun`** | ❌ **rejected** — turbopack's Next-standalone output is not the bun single-exec path | ✅ **bun+vinext** — vinext → nitro **`bun`** preset → `bun --compile --bytecode` single executable |
+
+- **turbopack is node-only** (its `.next/standalone` output runs under node).
+- **vinext runs on either runtime** — nitro `node-server` preset for node, nitro `bun` preset + `--compile` for bun.
+- **bun requires vinext** — enforced fail-closed by CEL admission on the CRD (reject `runtime: bun` +
+  `build: turbopack`) and mirrored by the CLI validator, per the validate-at-admission pattern (#435/#454).
+- **Default is unchanged:** `build: turbopack, runtime: node` — the only all-apps-verified path. The
+  other two cells are opt-in and compat-gated exactly as the original decision states.
+- **Retires the pre-existing `runtime: bun` + Next-standalone combo.** The original ADR listed
+  "`runtime: bun` (existing: Next standalone under bun)" as an additive option. Under `bun ⇒ vinext`
+  that combo (bun + turbopack) is now **rejected** — bun requires a vinext build. The implementation
+  PR must call out this breaking change: the new CEL rule fails such a CR at `kubectl apply`, and the
+  operator's handling of any pre-existing stored `runtime: bun`+standalone CR (reject-with-guidance
+  via `computeStatusVerdict`, not panic) must be specified. Acceptable at `v1alpha1` (ADR-0017); that
+  combo was measured to only tie node, not win.
+
+**RuntimeContract applies to all three cells, via exactly TWO implementations:**
+- **turbopack → the supervisor** (node+turbopack, today): supervisor spawns `server.js`, `:9091` in the supervisor.
+- **vinext → one shared in-process entry** (both node+vinext and bun+vinext): the vinext `.output`
+  server runs *directly* (node+vinext: `node .output/server/index.mjs`; bun+vinext: the `--compile`d
+  binary), with `:9091` served **in-process** — **node+vinext does NOT use the turbopack supervisor.**
+  This keeps a single RuntimeContract entry across both vinext cells (minimal drift, per the
+  "one everything-else" principle). That entry must delegate to nitro's **real request handler** — not
+  `useNitroApp().fetch` (see #460: that does not route) — so the entry-routing bug affects **both**
+  vinext cells, not just bun, and fixing it once serves both.
+
+**#460 reframed:** the *self-containment* half of #460 is specific to the **bun+vinext** cell — only it
+uses `bun --compile`, and only the older nitro/vinext versions bundle the server into the binary
+(measured: alpha bundles → self-contained; the recipe's newer betas emit a runtime-chunked layout that
+`--compile` can't embed). node+vinext runs the `.output` tree under node and needs no embedding. The
+RuntimeContract-entry routing bug is shared by both vinext cells.
+
 ## Options considered
 
 | Option | Cold start vs ~2s node floor | Maintenance | Compat risk | Verdict |
