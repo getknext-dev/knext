@@ -31,6 +31,7 @@ vi.mock("../cli/exec", () => ({
 }));
 
 import { runCapture, runQuiet } from "../cli/exec";
+import { SUPPORTED_STORAGE_PROVIDERS } from "../cli/validate";
 import type { KnativeNextConfig, StorageProvider } from "../config";
 import {
     appKeyPrefix,
@@ -137,7 +138,9 @@ describe("uploadAssets data plane", () => {
         ];
     }
 
-    const providers: StorageProvider[] = ["gcs", "s3", "minio", "azure"];
+    // Derive the exercised set from validate's supported list so the data-plane
+    // contract tests and the accepted-provider gate can never drift (#474).
+    const providers: StorageProvider[] = [...SUPPORTED_STORAGE_PROVIDERS];
 
     describe.each(providers)("provider=%s", (provider) => {
         const bucket = "my-bucket";

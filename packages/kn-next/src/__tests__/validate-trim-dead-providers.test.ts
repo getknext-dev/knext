@@ -33,21 +33,22 @@ describe("validateConfig trims dead provider surface", () => {
         } as KnativeNextConfig;
     }
 
-    it("rejects the unimplemented DynamoDB cache provider with a clear error", () => {
+    it("rejects the trimmed DynamoDB cache provider with a clear error", () => {
         const cfg = baseConfig();
+        // `dynamodb` is no longer part of the CacheProvider type (trimmed dead
+        // surface, #476) — a stale config that still names it must be rejected as
+        // an unsupported provider, not silently green-lit.
+        // biome-ignore lint/suspicious/noExplicitAny: deliberately trimmed provider.
         cfg.cache = {
             provider: "dynamodb",
             tableName: "t",
             region: "us-east-1",
-        } as KnativeNextConfig["cache"];
+        } as any;
 
         expect(() => validateConfig(cfg)).toThrow(ConfigValidationError);
-        // The message must name the provider and say it is not implemented, so a
-        // user understands this is a trim, not a typo.
+        // The message must name the provider and point at the supported set.
         expect(() => validateConfig(cfg)).toThrow(/dynamodb/i);
-        expect(() => validateConfig(cfg)).toThrow(
-            /not implemented|unsupported|use 'redis'/i,
-        );
+        expect(() => validateConfig(cfg)).toThrow(/not supported|redis/i);
     });
 
     it("still accepts the implemented Redis cache provider", () => {

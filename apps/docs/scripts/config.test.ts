@@ -24,17 +24,17 @@ describe('knext-docs dogfood kn-next.config.ts', () => {
     expect(config.scaling?.minScale).toBe(0);
   });
 
-  it('uses a storage provider the validator accepts (gcs|s3|minio)', () => {
-    expect(['gcs', 's3', 'minio']).toContain(config.storage.provider);
+  it('uses a storage provider the validator accepts (gcs|s3|minio|azure)', () => {
+    expect(['gcs', 's3', 'minio', 'azure']).toContain(config.storage.provider);
   });
 
-  it('rejects the azure storage provider (docs-vs-code drift guard)', () => {
-    // The StorageProvider type allows "azure", but validate.ts does NOT accept it.
-    // This locks in the caveat documented in the multi-cloud page.
-    const bad = {
+  it('accepts the azure storage provider (multi-cloud/AKS support)', () => {
+    // azure is a supported provider — it shells out to the `az` CLI, matching the
+    // multi-cloud page. This guards against a regression back to rejecting it.
+    const azureCfg = {
       ...config,
       storage: { ...config.storage, provider: 'azure' },
     } as unknown as KnativeNextConfig;
-    expect(() => validateConfig(bad)).toThrow(ConfigValidationError);
+    expect(() => validateConfig(azureCfg)).not.toThrow(ConfigValidationError);
   });
 });

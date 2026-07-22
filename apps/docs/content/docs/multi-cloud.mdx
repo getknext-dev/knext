@@ -1,6 +1,6 @@
 ---
 title: Multi-cloud deploy
-description: Object-storage providers knext supports — and the one its validator rejects.
+description: The object-storage providers knext supports across GKE, EKS, AKS, and OKE.
 ---
 
 knext deploys on any Kubernetes cluster with Knative Serving — GKE, EKS, AKS, OKE, or bare-metal.
@@ -12,30 +12,27 @@ Build output (static assets) is uploaded to an object store keyed by build ID, a
 The `kn-next` config validator accepts exactly these `storage.provider` values:
 
 ```ts
-const SUPPORTED_STORAGE_PROVIDERS = ['gcs', 's3', 'minio'] as const;
+const SUPPORTED_STORAGE_PROVIDERS = ['gcs', 's3', 'minio', 'azure'] as const;
 ```
 
-| Provider | Status |
-|---|---|
-| `gcs` | Supported (validated). |
-| `s3` | Supported (validated). Any S3-compatible store via `endpoint`. |
-| `minio` | Supported (validated). |
-| `azure` | **Not accepted.** See the caveat below. |
+| Provider | Cloud | Uploads via | Notes |
+|---|---|---|---|
+| `gcs` | GKE / Google Cloud | `gsutil` | Google Cloud Storage. |
+| `s3` | EKS / AWS | `aws` | S3, or any S3-compatible store via `endpoint`. |
+| `minio` | Any / self-hosted | `mc` | MinIO or S3-compatible clusters. |
+| `azure` | AKS / Azure | `az` | Azure Blob Storage; `bucket` is the blob container. |
 
-<Callout type="warn">
-**`azure` is typed but not accepted.** The `StorageProvider` TypeScript type in `@knext/core`
-includes `"azure"` (`type StorageProvider = "s3" | "gcs" | "azure" | "minio"`), but the CLI
-validator's accept-list is `gcs | s3 | minio` only. A config with `provider: "azure"` is **rejected
-at config-load time**. This is a real docs-vs-code drift to avoid — do not document azure as
-supported until the validator accepts it.
-</Callout>
+Each provider shells out to that cloud's CLI, which must be installed and authenticated in the
+build environment (for example `AZURE_STORAGE_ACCOUNT` / `az login` for Azure, application-default
+credentials for `gsutil`, an IAM role or keys for `aws`). knext never handles cloud credentials
+itself — it invokes the already-authenticated CLI.
 
 ## Config shape
 
 ```ts title="kn-next.config.ts"
 storage: {
-  provider: 's3',                 // gcs | s3 | minio
-  bucket: 'storefront-assets',
+  provider: 's3',                 // gcs | s3 | minio | azure
+  bucket: 'storefront-assets',    // bucket name — for azure, the blob container
   publicUrl: 'https://cdn.example.com/storefront-assets',
   // s3-compatible stores: set region / endpoint as needed
 },

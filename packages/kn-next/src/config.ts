@@ -17,13 +17,12 @@ export interface StorageConfig {
     assetRetention?: number;
 }
 
-// Cache adapters.
-// NOTE: `dynamodb` is schema-only DEAD surface — there is NO DynamoDB runtime in
-// `cache-handler.js` (Redis + in-memory only) or in the operator. It is REJECTED
-// at config validation (`cli/validate.ts`) so users are not lured into a provider
-// that silently does nothing (CLAUDE.md §9). The type is retained only so existing
-// references compile; do not implement it without a real, tested runtime.
-export type CacheProvider = "redis" | "dynamodb";
+// Cache adapters. Redis (+ the in-memory dev fallback) is the ONLY provider with
+// a real runtime in `cache-handler.js`. The former `dynamodb` schema-only surface
+// was trimmed (#476, honest-scope per CLAUDE.md §9) — there was never a DynamoDB
+// runtime. Unknown providers are rejected at config validation (`cli/validate.ts`);
+// do not re-add a provider here without a real, tested runtime.
+export type CacheProvider = "redis";
 
 export interface RedisCacheConfig {
     provider: "redis";
@@ -32,19 +31,7 @@ export interface RedisCacheConfig {
     tls?: boolean;
 }
 
-/**
- * @deprecated UNIMPLEMENTED — schema-only, rejected by `validateConfig`. There is
- * no DynamoDB cache runtime. Use {@link RedisCacheConfig}.
- */
-export interface DynamoDBCacheConfig {
-    provider: "dynamodb";
-    tableName: string;
-    region: string;
-    accessKey?: string;
-    secretKey?: string;
-}
-
-export type CacheConfig = RedisCacheConfig | DynamoDBCacheConfig;
+export type CacheConfig = RedisCacheConfig;
 
 /**
  * #431 — BYTECODE (V8 compile) CACHE. This governs how fast the server BOOTS,

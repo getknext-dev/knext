@@ -4,18 +4,22 @@
 
 import type { KnativeNextConfig } from "../config";
 
-const SUPPORTED_STORAGE_PROVIDERS = ["gcs", "s3", "minio"] as const;
+// Storage providers with a real, tested upload/verify path in `asset-upload.ts`.
+// Kept in lock-step with the `StorageProvider` type (config.ts) and the
+// `uploadAssets` switch — `asset-upload.test.ts` exercises this exact set. Azure
+// (AKS) is supported (#474); it was promoted from a coded-but-blocked path.
+export const SUPPORTED_STORAGE_PROVIDERS = [
+    "gcs",
+    "s3",
+    "minio",
+    "azure",
+] as const;
 
 // Cache providers that have a REAL runtime. Only Redis (+ the in-memory dev
-// fallback) is implemented in `cache-handler.js`. The `dynamodb` provider is
-// schema-only DEAD surface — there is NO DynamoDB code in the cache-handler or
-// the operator — so we REJECT it at config time rather than green-lighting a
-// provider that silently does nothing (CLAUDE.md §9; "don't ship aspirational
-// surface"). To re-enable: ship the implementation first, then move it here.
+// fallback) is implemented in `cache-handler.js`. The former `dynamodb` schema-only
+// surface was trimmed (#476, CLAUDE.md §9 "don't ship aspirational surface"); any
+// unknown provider now falls through to the generic "not supported" rejection.
 const IMPLEMENTED_CACHE_PROVIDERS = ["redis"] as const;
-// Schema still carries `dynamodb` (config.ts), but the runtime was never built.
-// Listed separately so the error can be honest ("not implemented") vs "unknown".
-const UNIMPLEMENTED_CACHE_PROVIDERS = ["dynamodb"] as const;
 
 // Queue providers for ISR revalidation. `kafka` is NOT dead surface: it is the
 // ADR-0016 deferred-but-WIRED path — the operator provisions a KafkaSource behind
@@ -115,23 +119,15 @@ export function validateConfig(config: KnativeNextConfig): void {
     if (config.cache) {
         const cacheProvider = config.cache.provider;
         if (
-            (UNIMPLEMENTED_CACHE_PROVIDERS as readonly string[]).includes(
-                cacheProvider,
-            )
-        ) {
-            // Honest, actionable error: the provider is recognized by the schema
-            // but has no runtime. Tell the user to use the implemented one.
-            errors.push(
-                `Cache provider '${cacheProvider}' is not implemented (schema-only, no runtime). ` +
-                    `Use 'redis' (the only implemented cache provider) or omit 'cache' for the in-memory dev fallback.`,
-            );
-        } else if (
             !(IMPLEMENTED_CACHE_PROVIDERS as readonly string[]).includes(
                 cacheProvider,
             )
         ) {
+            // Honest error naming the provider + the supported set. A stale config
+            // still naming the trimmed `dynamodb` (#476) lands here.
             errors.push(
-                `Cache provider '${cacheProvider}' is not supported. Supported: ${IMPLEMENTED_CACHE_PROVIDERS.join(", ")}`,
+                `Cache provider '${cacheProvider}' is not supported. Supported: ${IMPLEMENTED_CACHE_PROVIDERS.join(", ")}. ` +
+                    `Omit 'cache' for the in-memory dev fallback.`,
             );
         }
         if (cacheProvider === "redis" && !config.cache.url) {

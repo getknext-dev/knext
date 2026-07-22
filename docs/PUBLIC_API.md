@@ -31,7 +31,7 @@ export default config;
 ```
 
 Exported types: `KnativeNextConfig`, `StorageConfig`, `StorageProvider`,
-`CacheConfig`, `CacheProvider`, `RedisCacheConfig`, `DynamoDBCacheConfig`,
+`CacheConfig`, `CacheProvider`, `RedisCacheConfig`,
 `QueueConfig`, `QueueProvider`, `KafkaQueueConfig`, `NoQueueConfig`,
 `InfrastructureConfig`, `PostgresConfig`, `RedisInfraConfig`, `MinioInfraConfig`,
 `ScalingConfig`, `ObservabilityConfig`, `SecretsConfig`, `SecretRef`.

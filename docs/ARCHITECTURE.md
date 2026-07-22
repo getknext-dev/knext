@@ -226,8 +226,10 @@ The BUILD_ID ensures server and client assets are always in sync:
 ```
 
 > **Correction from earlier docs:** GCS holds **static assets only**. The ISR/data cache
-> (`cache-handler.js`) is backed by **Redis**. S3/Azure/MinIO are thin shell-outs;
-> DynamoDB/Kafka are config/manifest-only and not yet implemented end-to-end.
+> (`cache-handler.js`) is backed by **Redis** (the only implemented data-cache provider). Static
+> assets upload to GCS/S3/MinIO/Azure Blob via each cloud's CLI (`gsutil`/`aws`/`mc`/`az`). The
+> former DynamoDB cache surface was trimmed (never had a runtime); `spec.revalidation.kafka` is
+> ISR-revalidation wiring only.
 
 ### Cache Events (Observability)
 
