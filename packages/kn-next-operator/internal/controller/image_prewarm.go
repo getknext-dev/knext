@@ -63,9 +63,11 @@ const ConditionImageCacheReady = "ImageCacheReady"
 
 // prewarmHelperImage is the tiny, static-binary image the initContainer uses to
 // stage a shell-free `sleep` into the shared emptyDir. It is an OPERATOR-owned
-// helper (NOT the app image); pinned to a fixed version (never :latest) per
-// security.md. A digest pin is a follow-up hardening (TODO(#0037)).
-const prewarmHelperImage = "busybox:1.36.1"
+// helper (NOT the app image). Digest-pinned per security.md / CLAUDE.md §7 — the
+// operator digest-pins every image it runs, and this helper is no exception
+// (#471). The human-readable tag is retained alongside the digest for legibility;
+// the digest is what kubelet resolves. To bump: `crane digest busybox:<tag>`.
+const prewarmHelperImage = "busybox:1.36.1@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662"
 
 // prewarmHelperMountPath is where the shared emptyDir carrying the copied static
 // helper binary is mounted in BOTH the initContainer and the main container.
