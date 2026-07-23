@@ -1325,6 +1325,54 @@ capacity (or freeing the leftover experiment clutter). (3) Single run, this clus
 What run 19 establishes firmly: the deployed bun+vinext target survives real concurrent load end-to-end
 with zero dropped requests and warm p99 under 300 ms.
 
+## Run 20 (2026-07-23) — LOCAL supervisor-overhead micro-bench (#441 re-measure, post-deferral)
+
+> **NOT an OKE run.** Run on a fast dev machine (Apple-silicon), so the absolute numbers are NOT
+> comparable to the OKE runs above. The portable findings are the **delta** and the **distribution
+> separation**. This measures the knext supervisor's *additive* cold-start overhead in isolation.
+
+**Why.** #441 measured (OKE runs 7/8) that the knext wrapper added **842 ms (+43 %)** over booting
+Next directly, and named eager `prom-client` + `collectDefaultMetrics()` at module scope as the
+prime un-ruled-out suspect. Since then the runtime deferred that graph off the cold-start path
+(`createLazyMetricsEndpoint` + `deferred-default-metrics` — `prom-client`/`@opentelemetry/api` load
+via dynamic `import()` at first-scrape / post-child-ready, not at module load). This run re-measures
+with the current code.
+
+**Method.** Alternating pairs (the project's evidence bar), 12 pairs + 1 discarded warm-up. A
+**fast fixture** stands in for Next's `server.js` (binds `$PORT` and answers `/api/health`
+instantly) so the ~1957 ms Next boot is removed and only the supervisor's own overhead remains.
+- **DIRECT** — `node <fast-fixture>` binding `$PORT`.
+- **SUPERVISOR** — the shipped CMD `node -e "import('@knext/core/internal/node-server')"` (from a
+  self-contained `pnpm --filter @knext/core --prod deploy`, mirroring the drain-e2e runner) spawning
+  the same fixture via `STANDALONE_SERVER_PATH`.
+Each pair times spawn → first `/api/health` 200.
+
+**Result.**
+
+| | median | range |
+|---|---|---|
+| DIRECT (fixture alone) | 62 ms | 53–75 |
+| SUPERVISOR (wrapper) | 114 ms | 107–121 |
+| **DELTA (supervisor overhead)** | **52 ms** | — |
+
+**Distribution separation: YES** — fastest supervisor (107 ms) > slowest direct (75 ms), zero
+overlap across 12 pairs.
+
+**Attribution.** The deferred heavy graph costs **~37 ms to import locally** (`prom-client` 35 ms +
+`collectDefaultMetrics` 1 ms + `@opentelemetry/api` 1 ms) — this was paid **eagerly on every cold
+start pre-deferral** and is now off the critical path. The residual ~52 ms supervisor overhead is
+dominated by the inherent **second Node process** (the child) plus a lean parent module load; the
+eager pre-spawn path is now a few `existsSync` stats + `buildChildEnv` + a non-blocking `:9091` bind
++ `spawn` (`warnOnCompileCacheShadow`, the metrics warm-up, and image-cache sync all run in the
+**deferred** post-child-ready block).
+
+**#441 implication.** The 842 ms is **not reproducible locally**; the named eager-metrics suspect is
+now deferred (worth ~37 ms locally, and disproportionately more on OKE's slower/cold-disk nodes,
+which plausibly accounts for the bulk of the pre-deferral figure). The current wrapper overhead is
+small. **A definitive close of #441 needs an OKE re-measure** with the current code (cluster-gated);
+the remaining runtime-side lever is the in-process (no-child-spawn) architecture, which must preserve
+the SIGTERM-drain guarantees and is a larger design change.
+
 ## Caveat
 
 These are **point-in-time measurements on a specific small (2-node) OKE cluster** with a
