@@ -1410,13 +1410,22 @@ middleware** (the RuntimeContract drain accounting).
 | latency p50 / p95 / p99 / max | **0.99 / 1.79 / 2.13 / 6.9 ms** |
 | `:9091` counters | `requests_total` matched (372,338); `inflight` returned to 0 |
 
-**Finding — the runtime is not the throughput bottleneck.** Sub-millisecond p50 and p99 ~2 ms at
-46 k req/s with zero errors; the in-flight-counting middleware adds negligible per-request cost.
-Contrast run 19's OKE p99 of **285 ms** at **1,689 req/s**: the ~140× latency and ~27× throughput
-gap is the **Knative data path** (activator queue on scale-from-zero, pod scheduling, kourier/network,
-cluster CPU contention on the oversubscribed 2-node cluster), **not** the runtime. This bounds where
-throughput optimization can pay off: runtime-side is already lean; the remaining levers are
-cluster-side (activator/autoscaler tuning, node capacity/headroom) and require OKE.
+**Finding — for this route, the runtime's per-request cost is negligible.** `/api/health` isolates
+the knext **wrapper/middleware** path (in-flight counting, auth gate, routing) — it does **not**
+exercise React SSR or data-fetching, so this bounds the *wrapper* overhead, not a real page's render
+cost. On that path: sub-millisecond p50 and p99 ~2 ms at 46 k req/s with zero errors; the
+in-flight-counting middleware adds negligible per-request cost.
+
+**The honest signal is latency, not a throughput multiple.** Run 19 hit the same `/api/health` and
+measured OKE p99 **285 ms** — ~**134×** the local p99 of 2.13 ms. A runtime that answers the identical
+route in ~2 ms cannot be what adds 285 ms; that latency is the **Knative data path** (activator queue
+on scale-from-zero, pod scheduling, kourier/network, cluster CPU contention on the oversubscribed
+2-node cluster). (The *throughput* numbers — 46 k local vs 1,689 OKE — are **not** a clean capacity
+ratio: the local figure is client-limited (a floor) and Run 19's was capped at 3 pods by cluster
+capacity, so no server-capacity multiple can be read off them. The latency comparison is the one
+that holds.) This bounds where throughput optimization can pay off: the runtime's own path is lean;
+the remaining levers are cluster-side (activator/autoscaler tuning, node capacity/headroom) and
+require OKE.
 
 **Together, Runs 20 + 21 establish that knext's runtime is lean on both axes** — cold-start wrapper
 overhead ~52 ms (parent), and steady-state throughput sub-ms p50 / p99 ~2 ms. Future performance work

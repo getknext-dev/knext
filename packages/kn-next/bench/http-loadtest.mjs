@@ -4,8 +4,9 @@
 // p50/p95/p99/max. Does NOT start a server (point it at a running one), so the
 // same tool works locally and against OKE.
 //
-//   KNEXT_BENCH_URL=http://127.0.0.1:8080 [PATH=/api/health] [C=50] [DURATION_MS=8000] \
+//   KNEXT_BENCH_URL=http://127.0.0.1:8080 [PATH_=/api/health] [C=50] [DURATION_MS=8000] \
 //     node packages/kn-next/bench/http-loadtest.mjs
+// (the tested path is PATH_ / BENCH_PATH, NOT PATH — setting PATH would clobber the shell PATH.)
 //
 // On one machine the Node client competes with the server for CPU, so local RPS
 // is client-limited (a floor on server capacity, not a ceiling); latency
