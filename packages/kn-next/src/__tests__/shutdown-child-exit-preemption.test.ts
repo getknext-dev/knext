@@ -1,4 +1,6 @@
 import { EventEmitter } from "node:events";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { registerDbPoolDrain } from "../adapters/db-drain";
 import {
@@ -149,6 +151,30 @@ describe("child-exit does not preempt the DB-pool drain (#449)", () => {
         expect(closeDbPoolRO).toHaveBeenCalledTimes(1);
         expect(moduleExit).not.toHaveBeenCalled();
         expect(gracefulExit).toHaveBeenCalledWith(0);
+    });
+
+    // Call-site regression guard: node-server.ts self-executes (spawns a child on
+    // import), so it can't be unit-imported — the tests above model its handler
+    // inline. This source assertion pins the ACTUAL node-server.ts:291 call site so
+    // the guard can't be silently deleted there (mirrors deferred-supervisor-init's
+    // source-structure checks).
+    it("node-server's child-exit handler gates process.exit() behind isShuttingDown() [source guard]", () => {
+        const src = readFileSync(
+            resolve(__dirname, "..", "adapters", "node-server.ts"),
+            "utf8",
+        );
+        const handler = src.match(
+            /nextProc\.on\(\s*["']exit["'][\s\S]*?\n\}\);/,
+        )?.[0];
+        expect(handler, 'nextProc.on("exit") handler block').toBeTruthy();
+        const body = handler as string;
+        // The guard must be present AND gate the exit: isShuttingDown() is checked
+        // before process.exit() within the handler.
+        expect(body).toMatch(/isShuttingDown\(\)/);
+        expect(body).toMatch(/process\.exit/);
+        expect(body.indexOf("isShuttingDown()")).toBeLessThan(
+            body.indexOf("process.exit"),
+        );
     });
 
     it("still exits via the module-level handler on an UNEXPECTED child crash (no shutdown in progress)", () => {
