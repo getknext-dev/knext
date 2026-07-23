@@ -1,6 +1,6 @@
 {
   "name": "@knext/core",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Knative Next.js configuration and CLI",
   "type": "module",
   "main": "./dist/config.js",
