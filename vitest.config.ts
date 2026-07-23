@@ -9,6 +9,13 @@ const LIB_SRC = resolve(import.meta.dirname, 'packages/lib/src');
 // Same rationale for @knext/db — the apps/db-demo example's unit test imports the
 // SDK before any dist exists (clean-from-root run). Test-only; the real build uses dist.
 const DB_SRC = resolve(import.meta.dirname, 'packages/db/src');
+// Same rationale for the pure `@knext/core/validate` surface — the docs
+// config-quality gate (apps/docs/scripts/config.test.ts) imports validateConfig
+// before any @knext/core dist exists on a clean run, so resolve it to source.
+// Only the pure validate subpath is aliased (never bare `@knext/core`, whose
+// many dist subpaths must keep resolving normally). The dist-surface contract
+// tests read dist by path, so they are unaffected.
+const CORE_SRC = resolve(import.meta.dirname, 'packages/kn-next/src');
 
 export default defineConfig({
   plugins: [react()],
@@ -22,12 +29,15 @@ export default defineConfig({
       '@knext/db/schema': resolve(DB_SRC, 'schema.ts'),
       '@knext/db/migrate': resolve(DB_SRC, 'migrate.ts'),
       '@knext/db': resolve(DB_SRC, 'index.ts'),
+      '@knext/core/validate': resolve(CORE_SRC, 'validate-public.ts'),
     },
   },
   test: {
     globals: true,
     environment: 'happy-dom',
-    setupFiles: ['./vitest.setup.ts'],
+    // Absolute so a project run from a sub-directory (e.g. `cd apps/docs &&
+    // vitest`) still resolves the setup file, not a non-existent CWD-relative one.
+    setupFiles: [resolve(import.meta.dirname, 'vitest.setup.ts')],
     coverage: {
       provider: 'v8',
       reporter: ['text', 'json', 'html'],
