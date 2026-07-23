@@ -1386,6 +1386,43 @@ Run 9 Part A. **Closing #441 still requires an OKE re-measure** with the current
 Beyond that, the remaining runtime-side lever is the in-process (no-child-spawn) architecture, which
 would remove the competing-process class entirely but must preserve the SIGTERM-drain guarantees.
 
+## Run 21 (2026-07-23) — LOCAL runtime throughput (is the runtime the bottleneck? no)
+
+> **NOT an OKE run.** Local, single-machine, closed-loop. On one box the Node client competes with
+> the server for CPU, so the RPS is **client-limited** — a *floor* on server capacity, not a ceiling.
+> The latency percentiles and the "0 errors" are the portable signals.
+
+**Why.** Run 19 (OKE) measured 1,689 req/s and warm **p99 285 ms** through the full Knative data
+path. This run asks how much of that is the knext **runtime** vs the surrounding infrastructure, by
+load-testing the runtime directly (no activator, no network, no scheduling).
+
+**Method.** The `bun-exec` single binary serving `/api/health`, driven by the committed general load
+tester (`packages/kn-next/bench/http-loadtest.mjs`) — C=50 keep-alive workers, 8 s, after a 2 000-req
+warm-up. `/api/health` exercises the real per-request path incl. the srvx **in-flight-counting
+middleware** (the RuntimeContract drain accounting).
+
+**Result.**
+
+| metric | value |
+|---|---|
+| throughput | **46,292 req/s** (client-limited) |
+| requests | 370,337 ok, **0 err** |
+| latency p50 / p95 / p99 / max | **0.99 / 1.79 / 2.13 / 6.9 ms** |
+| `:9091` counters | `requests_total` matched (372,338); `inflight` returned to 0 |
+
+**Finding — the runtime is not the throughput bottleneck.** Sub-millisecond p50 and p99 ~2 ms at
+46 k req/s with zero errors; the in-flight-counting middleware adds negligible per-request cost.
+Contrast run 19's OKE p99 of **285 ms** at **1,689 req/s**: the ~140× latency and ~27× throughput
+gap is the **Knative data path** (activator queue on scale-from-zero, pod scheduling, kourier/network,
+cluster CPU contention on the oversubscribed 2-node cluster), **not** the runtime. This bounds where
+throughput optimization can pay off: runtime-side is already lean; the remaining levers are
+cluster-side (activator/autoscaler tuning, node capacity/headroom) and require OKE.
+
+**Together, Runs 20 + 21 establish that knext's runtime is lean on both axes** — cold-start wrapper
+overhead ~52 ms (parent), and steady-state throughput sub-ms p50 / p99 ~2 ms. Future performance work
+should target (a) the Knative infrastructure path (OKE-gated), (b) confirming the #441 deferral on OKE,
+and (c) the in-process (no-child-spawn) architecture for the cold-start CPU-contention class.
+
 ## Caveat
 
 These are **point-in-time measurements on a specific small (2-node) OKE cluster** with a
