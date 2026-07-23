@@ -1,9 +1,17 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
     clearShutdownDrains,
     gracefulShutdown,
     registerShutdownDrain,
 } from "../adapters/shutdown";
+
+// Reset shutdown state before EVERY test (drains + the `shuttingDown` flag). The
+// A5 describe formerly relied on the flag being harmless when leaked; the #494
+// re-entrancy guard makes a stale `shuttingDown` early-return, so isolation must
+// be universal, not per-describe.
+beforeEach(() => {
+    clearShutdownDrains();
+});
 
 // Minimal child-process double: records signal forwarding + lets the test fire "exit".
 function makeChild() {
