@@ -1386,6 +1386,52 @@ Run 9 Part A. **Closing #441 still requires an OKE re-measure** with the current
 Beyond that, the remaining runtime-side lever is the in-process (no-child-spawn) architecture, which
 would remove the competing-process class entirely but must preserve the SIGTERM-drain guarantees.
 
+## Run 21 (2026-07-23) — LOCAL runtime throughput (is the runtime the bottleneck? no)
+
+> **NOT an OKE run.** Local, single-machine, closed-loop. On one box the Node client competes with
+> the server for CPU, so the RPS is **client-limited** — a *floor* on server capacity, not a ceiling.
+> The latency percentiles and the "0 errors" are the portable signals.
+
+**Why.** Run 19 (OKE) measured 1,689 req/s and warm **p99 285 ms** through the full Knative data
+path. This run asks how much of that is the knext **runtime** vs the surrounding infrastructure, by
+load-testing the runtime directly (no activator, no network, no scheduling).
+
+**Method.** The `bun-exec` single binary serving `/api/health`, driven by the committed general load
+tester (`packages/kn-next/bench/http-loadtest.mjs`) — C=50 keep-alive workers, 8 s, after a 2 000-req
+warm-up. `/api/health` exercises the real per-request path incl. the srvx **in-flight-counting
+middleware** (the RuntimeContract drain accounting).
+
+**Result.**
+
+| metric | value |
+|---|---|
+| throughput | **46,292 req/s** (client-limited) |
+| requests | 370,337 ok, **0 err** |
+| latency p50 / p95 / p99 / max | **0.99 / 1.79 / 2.13 / 6.9 ms** |
+| `:9091` counters | `requests_total` matched (372,338); `inflight` returned to 0 |
+
+**Finding — for this route, the runtime's per-request cost is negligible.** `/api/health` isolates
+the knext **wrapper/middleware** path (in-flight counting, auth gate, routing) — it does **not**
+exercise React SSR or data-fetching, so this bounds the *wrapper* overhead, not a real page's render
+cost. On that path: sub-millisecond p50 and p99 ~2 ms at 46 k req/s with zero errors; the
+in-flight-counting middleware adds negligible per-request cost.
+
+**The honest signal is latency, not a throughput multiple.** Run 19 hit the same `/api/health` and
+measured OKE p99 **285 ms** — ~**134×** the local p99 of 2.13 ms. A runtime that answers the identical
+route in ~2 ms cannot be what adds 285 ms; that latency is the **Knative data path** (activator queue
+on scale-from-zero, pod scheduling, kourier/network, cluster CPU contention on the oversubscribed
+2-node cluster). (The *throughput* numbers — 46 k local vs 1,689 OKE — are **not** a clean capacity
+ratio: the local figure is client-limited (a floor) and Run 19's was capped at 3 pods by cluster
+capacity, so no server-capacity multiple can be read off them. The latency comparison is the one
+that holds.) This bounds where throughput optimization can pay off: the runtime's own path is lean;
+the remaining levers are cluster-side (activator/autoscaler tuning, node capacity/headroom) and
+require OKE.
+
+**Together, Runs 20 + 21 establish that knext's runtime is lean on both axes** — cold-start wrapper
+overhead ~52 ms (parent), and steady-state throughput sub-ms p50 / p99 ~2 ms. Future performance work
+should target (a) the Knative infrastructure path (OKE-gated), (b) confirming the #441 deferral on OKE,
+and (c) the in-process (no-child-spawn) architecture for the cold-start CPU-contention class.
+
 ## Caveat
 
 These are **point-in-time measurements on a specific small (2-node) OKE cluster** with a
