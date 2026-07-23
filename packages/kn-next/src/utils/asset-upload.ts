@@ -360,6 +360,11 @@ function providerOps(
                         // Blob "directory" prefix — objects land under <app>/.
                         "--destination-path",
                         appPrefix,
+                        // #481: az defaults to NO-overwrite, so a second deploy of
+                        // an unhashed asset (e.g. favicon.ico) under the same key
+                        // would ERROR. Overwrite makes re-deploy idempotent, at
+                        // parity with the gcs/s3/minio paths.
+                        "--overwrite",
                     ]);
                 },
                 listRemote() {
@@ -372,6 +377,12 @@ function providerOps(
                         bucket,
                         "--prefix",
                         appPrefix,
+                        // #481: `az storage blob list` caps at 5000 results by
+                        // default; a >5000-object prefix would yield a false
+                        // "missing" verdict → redundant re-uploads. `*` lists all
+                        // (az paginates internally via the continuation marker).
+                        "--num-results",
+                        "*",
                         "--query",
                         "[].name",
                         "-o",
@@ -407,6 +418,9 @@ function providerOps(
                         join(assetsDir, key),
                         "-n",
                         `${appPrefix}${key}`,
+                        // #481: a re-upload always replaces an existing blob; az
+                        // defaults to no-overwrite and would error without this.
+                        "--overwrite",
                     ]);
                 },
             };

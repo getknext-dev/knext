@@ -270,6 +270,76 @@ describe("uploadAssets data plane", () => {
     });
 
     /**
+     * #481 — Azure re-deploy robustness. Two `az` CLI defaults would break a
+     * second deploy or a large asset set unless handled explicitly:
+     *  - `az storage blob upload`/`upload-batch` default to NO-overwrite, so a
+     *    re-deploy of an unhashed asset (e.g. favicon.ico) under the same key
+     *    errors. The gcs/s3/minio paths are idempotent on re-upload; azure must
+     *    match via `--overwrite`.
+     *  - `az storage blob list` caps at 5000 results by default, so a >5000-object
+     *    prefix yields a false "missing" verdict → redundant re-uploads. `--num-results *`
+     *    lists all.
+     */
+    describe("azure re-deploy robustness (#481)", () => {
+        const bucket = "assets-container";
+
+        it("upload-batch passes --overwrite so a second deploy is idempotent", async () => {
+            runCaptureMock.mockReturnValue(
+                REMOTE_LISTERS.azure(bucket, APP_NAME, localKeys),
+            );
+            await uploadAssets(makeConfig("azure", bucket));
+            const uploadBatch = allArgvs().find((a) =>
+                a.includes("upload-batch"),
+            );
+            expect(uploadBatch, "azure bulk upload-batch argv").toBeDefined();
+            expect(uploadBatch).toContain("--overwrite");
+        });
+
+        it("blob list passes --num-results * so verification is correct beyond the 5000-object cap", async () => {
+            runCaptureMock.mockReturnValue(
+                REMOTE_LISTERS.azure(bucket, APP_NAME, localKeys),
+            );
+            await uploadAssets(makeConfig("azure", bucket));
+            const list = allArgvs().find(
+                (a) => a.includes("list") && a.includes("--prefix"),
+            );
+            expect(list, "azure blob list argv").toBeDefined();
+            const i = (list as string[]).indexOf("--num-results");
+            expect(i, "list must pass --num-results").toBeGreaterThanOrEqual(0);
+            expect((list as string[])[i + 1]).toBe("*");
+        });
+
+        it("single-file re-upload passes --overwrite (a re-upload always replaces)", async () => {
+            const missingKey = localKeys[0];
+            // Remote consistently missing one key → the single-file blob upload
+            // path runs (then the deploy fails loudly since it's still missing).
+            // We only assert the re-upload argv carried --overwrite.
+            runCaptureMock.mockReturnValue(
+                REMOTE_LISTERS.azure(
+                    bucket,
+                    APP_NAME,
+                    localKeys.filter((k) => k !== missingKey),
+                ),
+            );
+            await expect(
+                uploadAssets(makeConfig("azure", bucket)),
+            ).rejects.toThrow();
+            // Single-file re-upload uses `-f <file>`; upload-batch uses `-s <dir>`.
+            const reupload = allArgvs().find(
+                (a) =>
+                    a[0] === "az" && a.includes("upload") && a.includes("-f"),
+            );
+            expect(reupload, "azure single-file re-upload argv").toBeDefined();
+            // The -f path is absolute (cwd-resolved, so /private/var vs /var on
+            // macOS) — match on the key suffix, not the full path.
+            expect(
+                (reupload as string[]).some((t) => t.endsWith(missingKey)),
+            ).toBe(true);
+            expect(reupload).toContain("--overwrite");
+        });
+    });
+
+    /**
      * #74 — app-namespacing contract. Objects are uploaded under `<app>/...`
      * inside the shared bucket, and the served `assetPrefix` resolves to the
      * SAME `<publicUrl>/<app>` location. This is what makes the operator
