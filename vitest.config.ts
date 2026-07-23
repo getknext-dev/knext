@@ -1,6 +1,6 @@
 import { resolve } from 'node:path';
 import react from '@vitejs/plugin-react';
-import { defineConfig } from 'vitest/config';
+import { configDefaults, defineConfig } from 'vitest/config';
 
 // Resolve @knext/lib subpaths to source (not dist) in tests.
 // CI runs `pnpm install` then `vitest` without building lib first, so dist/ is absent.
@@ -38,6 +38,10 @@ export default defineConfig({
     // Absolute so a project run from a sub-directory (e.g. `cd apps/docs &&
     // vitest`) still resolves the setup file, not a non-existent CWD-relative one.
     setupFiles: [resolve(import.meta.dirname, 'vitest.setup.ts')],
+    // Never collect tests from throwaway agent git worktrees under .claude/ — they
+    // are stale full-repo copies (often without node_modules) that pollute the run
+    // with duplicate + resolve-error "failures". Preserve vitest's own defaults.
+    exclude: [...configDefaults.exclude, '**/.claude/**'],
     coverage: {
       provider: 'v8',
       reporter: ['text', 'json', 'html'],
