@@ -19,9 +19,10 @@ spec:
         # default (see cmd/main.go), so Prometheus skips verification for this
         # in-cluster scrape. This is acceptable for the default install; the scrape
         # is authenticated with a bearer token (above) and reaches a cluster-local
-        # endpoint. For strict verification, enable cert-manager and apply
-        # config/prometheus/servicemonitor_tls_patch.yaml, which references the
-        # 'metrics-server-cert' secret instead of skipping verification.
+        # endpoint. For strict verification, enable cert-manager and the
+        # monitor_tls_patch.yaml patch in config/prometheus/kustomization.yaml,
+        # which references the 'metrics-server-cert' secret instead of skipping
+        # verification.
         insecureSkipVerify: true
   selector:
     matchLabels:
