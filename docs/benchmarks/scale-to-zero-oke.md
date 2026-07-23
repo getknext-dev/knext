@@ -1325,6 +1325,67 @@ capacity (or freeing the leftover experiment clutter). (3) Single run, this clus
 What run 19 establishes firmly: the deployed bun+vinext target survives real concurrent load end-to-end
 with zero dropped requests and warm p99 under 300 ms.
 
+## Run 20 (2026-07-23) — LOCAL supervisor-overhead micro-bench (#441 re-measure, post-deferral)
+
+> **NOT an OKE run.** Run on a fast dev machine (Apple-silicon), so the absolute numbers are NOT
+> comparable to the OKE runs above. The portable findings are the **delta** and the **distribution
+> separation**. This measures the knext supervisor's *additive* cold-start overhead in isolation.
+
+**Why.** Runs 7/8 measured the knext wrapper adding **842 ms (+43 %)** over booting Next directly, and
+**Run 9 attributed it**: not the parent's own startup (that is ~52 ms), but the module-scope
+`collectDefaultMetrics()` collector **competing for CPU with the child's ~2 s boot** on
+`0`-CPU-request, oversubscribed nodes. Since then the runtime deferred that metrics graph off the
+cold-start path (`createLazyMetricsEndpoint` + `deferred-default-metrics` — the collector now starts
+**after** the child is serving, so it no longer runs during the boot window). This run re-measures the
+parent overhead with the current code (it does **not**, and cannot, re-measure the contention effect
+— see below).
+
+**Method.** Alternating pairs (the project's evidence bar), 12 pairs + 1 discarded warm-up. A
+**fast fixture** stands in for Next's `server.js` (binds `$PORT` and answers `/api/health`
+instantly) so the ~1957 ms Next boot is removed and only the supervisor's own overhead remains.
+- **DIRECT** — `node <fast-fixture>` binding `$PORT`.
+- **SUPERVISOR** — the shipped CMD `node -e "import('@knext/core/internal/node-server')"` (from a
+  self-contained `pnpm --filter @knext/core --prod deploy`, mirroring the drain-e2e runner) spawning
+  the same fixture via `STANDALONE_SERVER_PATH`.
+Each pair times spawn → first `/api/health` 200.
+
+**Result.**
+
+| | median | range |
+|---|---|---|
+| DIRECT (fixture alone) | 62 ms | 53–75 |
+| SUPERVISOR (wrapper) | 114 ms | 107–121 |
+| **DELTA (supervisor overhead)** | **52 ms** | — |
+
+**Distribution separation: YES** — fastest supervisor (107 ms) > slowest direct (75 ms), zero
+overlap across 12 pairs.
+
+**What this confirms — and what it deliberately does NOT.** The ~52 ms parent-overhead figure is
+**consistent with [Run 9 Part A](#run-9-2026-07-20--attributing-the-842-ms-wrapper-overhead)**, which
+already measured the parent's own module-load + spawn at **52 ms on OKE** (import included) and
+established that the parent's startup is *not* where the 842 ms lives. Run 20 reproduces that small
+parent cost with the current code and a reproducible harness.
+
+**Correction to an earlier draft of this run: the 842 ms is NOT import/disk latency.** Run 9 Part A
+falsified that "by a factor of sixteen" (parent 52 ms vs 842 ms), and Part B corroborated the real
+mechanism: `collectDefaultMetrics()` at module scope ran a **periodic process-metrics collector in
+the parent that competed for CPU with the child during its ~2 s boot**, on `0`-CPU-request pods
+scheduled onto an **oversubscribed** node (server.js booted +951 ms alongside a busy sibling,
+complete separation). The deferral fixes the
+842 ms by **removing that concurrent CPU competitor from the child's boot window**, not by shaving a
+~37 ms import. (The ~37 ms local import cost is real but is *not* the mechanism and is not evidence
+about the 842 ms.)
+
+**Why this local run cannot substitute for an OKE re-measure.** By design it eliminates **both**
+preconditions of the Run 9 effect: the fast fixture removes the ~2 s child-boot window during which
+the contention occurs, and a dev machine has no CPU oversubscription. So "not reproducible locally"
+is **expected regardless** of whether the deferral helped — it is *not* evidence that #441 is closed.
+What Run 20 establishes is narrow and honest: the parent's own overhead is small (~52 ms), matching
+Run 9 Part A. **Closing #441 still requires an OKE re-measure** with the current (deferred) code, real
+`server.js`, and `0`-CPU-request pods on an oversubscribed node — the conditions Run 9 identified.
+Beyond that, the remaining runtime-side lever is the in-process (no-child-spawn) architecture, which
+would remove the competing-process class entirely but must preserve the SIGTERM-drain guarantees.
+
 ## Caveat
 
 These are **point-in-time measurements on a specific small (2-node) OKE cluster** with a
