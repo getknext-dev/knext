@@ -15,11 +15,14 @@ spec:
       scheme: https
       bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
       tlsConfig:
-        # TODO(user): The option insecureSkipVerify: true is not recommended for production since it disables
-        # certificate verification, exposing the system to potential man-in-the-middle attacks.
-        # For production environments, it is recommended to use cert-manager for automatic TLS certificate management.
-        # To apply this configuration, enable cert-manager and use the patch located at config/prometheus/servicemonitor_tls_patch.yaml,
-        # which securely references the certificate from the 'metrics-server-cert' secret.
+        # The metrics server uses controller-runtime's self-signed certificate by
+        # default (see cmd/main.go), so Prometheus skips verification for this
+        # in-cluster scrape. This is acceptable for the default install; the scrape
+        # is authenticated with a bearer token (above) and reaches a cluster-local
+        # endpoint. For strict verification, enable cert-manager and the
+        # monitor_tls_patch.yaml patch in config/prometheus/kustomization.yaml,
+        # which references the 'metrics-server-cert' secret instead of skipping
+        # verification.
         insecureSkipVerify: true
   selector:
     matchLabels:
