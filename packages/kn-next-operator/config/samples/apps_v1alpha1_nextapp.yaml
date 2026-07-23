@@ -6,4 +6,28 @@ metadata:
     app.kubernetes.io/managed-by: kustomize
   name: nextapp-sample
 spec:
-  # TODO(user): Add fields here
+  # Images MUST be digest-pinned — the operator rejects tag-only and :latest
+  # references (a human-readable tag alongside the digest is fine). `kn-next deploy`
+  # resolves the digest for you; the placeholder below is illustrative.
+  image: "registry.example.com/my-app:v1@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+  scaling:
+    minScale: 0 # scale-to-zero — the knext differentiator (0 = no idle pods)
+    maxScale: 10
+    containerConcurrency: 100
+  storage:
+    provider: "gcs" # gcs | s3 | minio | azure — static assets, served from assetPrefix
+    bucket: "my-app-assets"
+  cache:
+    provider: "redis" # the ISR/data cache (Redis is the only implemented provider)
+    url: "redis://redis.default.svc.cluster.local:6379"
+  # Optional — run the standalone server under Bun with build-time bytecode
+  # precompilation (default runtime is node):
+  # runtime: "bun"
+  # Optional cold-start optimizations:
+  #   cache.enableBytecodeCache: true  # V8 compile cache on a shared PVC
+  #                                    # (RWO — keep fan-out on one node, see docs)
+  #   scaling.imagePrewarm: true       # pin the image on every node (ADR-0037)
+  # Secrets are injected from Kubernetes Secrets, never inlined here:
+  # secrets:
+  #   envFrom:
+  #     - "my-app-credentials"

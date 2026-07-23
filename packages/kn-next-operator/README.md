@@ -219,7 +219,12 @@ previously added to 'dist/chart/values.yaml' or 'dist/chart/manager/manager.yaml
 is manually re-applied afterwards.
 
 ## Contributing
-// TODO(user): Add detailed information on how you would like others to contribute to this project
+
+Contributions are welcome. Open an issue to discuss a change first, then send a PR
+against `main` with tests (`make test` for the controller unit + envtest suites).
+Run `make manifests generate` after changing the API types so the generated CRDs
+and deepcopy code stay in sync, and keep images digest-pinned (the operator rejects
+tag-only / `:latest` references).
 
 **NOTE:** Run `make help` for more information on all potential `make` targets
 

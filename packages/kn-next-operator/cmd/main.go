@@ -156,10 +156,11 @@ func main() {
 	// generate self-signed certificates for the metrics server. While convenient for development and testing,
 	// this setup is not recommended for production.
 	//
-	// TODO(user): If you enable certManager, uncomment the following lines:
-	// - [METRICS-WITH-CERTS] at config/default/kustomization.yaml to generate and use certificates
-	// managed by cert-manager for the metrics server.
-	// - [PROMETHEUS-WITH-CERTS] at config/prometheus/kustomization.yaml for TLS certification.
+	// To use cert-manager-managed certificates for the metrics server instead of
+	// the self-signed default, enable [METRICS-WITH-CERTS] in
+	// config/default/kustomization.yaml (generate + mount the cert) and
+	// [PROMETHEUS-WITH-CERTS] in config/prometheus/kustomization.yaml (verified TLS
+	// scrape). The provided-cert path is handled below.
 	if len(metricsCertPath) > 0 {
 		setupLog.Info("Initializing metrics certificate watcher using provided certificates",
 			"metrics-cert-path", metricsCertPath, "metrics-cert-name", metricsCertName, "metrics-cert-key", metricsCertKey)
