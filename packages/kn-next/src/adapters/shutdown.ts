@@ -34,14 +34,31 @@ export type ShutdownDrain = () => Promise<void>;
 // keeps the boundary clean and avoids a circular dependency.
 const shutdownDrains: ShutdownDrain[] = [];
 
+// Whether a graceful shutdown is in progress. Set true the moment `gracefulShutdown`
+// begins so the supervisor's module-level child-`exit` handler can DEFER to the
+// drain instead of calling `process.exit()` synchronously on the child's exit —
+// which would preempt the awaited DB-pool drain (#449). Terminal in production
+// (the process exits after gracefulShutdown); reset only for test isolation.
+let shuttingDown = false;
+
+/**
+ * Reports whether a graceful shutdown has begun. The supervisor's child-`exit`
+ * listener checks this and, when true, does nothing — letting `gracefulShutdown`
+ * own the final exit AFTER the DB-pool drain (#449).
+ */
+export function isShuttingDown(): boolean {
+    return shuttingDown;
+}
+
 /** Register a drain hook to be awaited on SIGTERM (after HTTP drain). */
 export function registerShutdownDrain(drain: ShutdownDrain): void {
     shutdownDrains.push(drain);
 }
 
-/** Clear all registered drains. Exposed for test isolation. */
+/** Clear all registered drains + reset shutdown state. Exposed for test isolation. */
 export function clearShutdownDrains(): void {
     shutdownDrains.length = 0;
+    shuttingDown = false;
 }
 
 export interface ChildLike {
@@ -69,6 +86,10 @@ export interface ShutdownOptions {
  */
 export function gracefulShutdown(signal: string, opts: ShutdownOptions): void {
     void signal;
+
+    // Mark shutdown in progress so the supervisor's child-`exit` handler defers
+    // to us (below) instead of exiting synchronously and preempting the drain (#449).
+    shuttingDown = true;
 
     // 1. Stop the sidecar servers accepting new connections.
     for (const closable of opts.closables) {

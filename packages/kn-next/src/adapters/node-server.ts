@@ -31,7 +31,7 @@ import {
     isSupervisorInitDeferred,
 } from "./deferred-supervisor-init";
 import { buildChildEnv } from "./env";
-import { type ChildLike, gracefulShutdown } from "./shutdown";
+import { type ChildLike, gracefulShutdown, isShuttingDown } from "./shutdown";
 
 const log = createLogger({ module: "server" });
 // Prometheus metrics port. Defaults to 9091 (no behavior change); overridable via
@@ -283,6 +283,16 @@ nextProc.on("error", (err) => {
 
 nextProc.on("exit", (code, signal) => {
     log.info({ code, signal }, "Next.js standalone server exited");
+    // #449: if a graceful shutdown is in progress, it forwarded SIGTERM to the
+    // child and OWNS the final exit — after awaiting the DB-pool drain. Exiting
+    // here (this handler was registered before gracefulShutdown's `once("exit")`,
+    // so it fires FIRST) would call process.exit() synchronously and preempt that
+    // async drain, severing the pools mid-close. Defer: let the drain finish.
+    if (isShuttingDown()) {
+        return;
+    }
+    // Unexpected child crash (no shutdown in progress): bring the supervisor down
+    // with the child's code.
     metricsEndpoint.closable.close();
     process.exit(code ?? 0);
 });
