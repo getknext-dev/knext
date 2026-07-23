@@ -167,13 +167,15 @@ describe("child-exit does not preempt the DB-pool drain (#449)", () => {
             /nextProc\.on\(\s*["']exit["'][\s\S]*?\n\}\);/,
         )?.[0];
         expect(handler, 'nextProc.on("exit") handler block').toBeTruthy();
-        const body = handler as string;
+        // Strip line comments — the handler's own comment mentions "process.exit()"
+        // and would confuse a positional check; we assert on the CODE.
+        const code = (handler as string).replace(/\/\/.*$/gm, "");
         // The guard must be present AND gate the exit: isShuttingDown() is checked
-        // before process.exit() within the handler.
-        expect(body).toMatch(/isShuttingDown\(\)/);
-        expect(body).toMatch(/process\.exit/);
-        expect(body.indexOf("isShuttingDown()")).toBeLessThan(
-            body.indexOf("process.exit"),
+        // before the real process.exit() within the handler.
+        expect(code).toMatch(/isShuttingDown\(\)/);
+        expect(code).toMatch(/process\.exit/);
+        expect(code.indexOf("isShuttingDown()")).toBeLessThan(
+            code.indexOf("process.exit"),
         );
     });
 
