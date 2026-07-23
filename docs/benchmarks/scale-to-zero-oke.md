@@ -1366,11 +1366,12 @@ already measured the parent's own module-load + spawn at **52 ms on OKE** (impor
 established that the parent's startup is *not* where the 842 ms lives. Run 20 reproduces that small
 parent cost with the current code and a reproducible harness.
 
-**Correction to an earlier draft of this run: the 842 ms is NOT import/disk latency.** Run 9 Part B
-falsified that "by a factor of sixteen" and identified the real mechanism: `collectDefaultMetrics()`
-at module scope ran a **periodic process-metrics collector in the parent that competed for CPU with
-the child during its ~2 s boot**, on `0`-CPU-request pods scheduled onto an **oversubscribed** node
-(server.js booted +951 ms alongside a busy sibling, complete separation). The deferral fixes the
+**Correction to an earlier draft of this run: the 842 ms is NOT import/disk latency.** Run 9 Part A
+falsified that "by a factor of sixteen" (parent 52 ms vs 842 ms), and Part B corroborated the real
+mechanism: `collectDefaultMetrics()` at module scope ran a **periodic process-metrics collector in
+the parent that competed for CPU with the child during its ~2 s boot**, on `0`-CPU-request pods
+scheduled onto an **oversubscribed** node (server.js booted +951 ms alongside a busy sibling,
+complete separation). The deferral fixes the
 842 ms by **removing that concurrent CPU competitor from the child's boot window**, not by shaving a
 ~37 ms import. (The ~37 ms local import cost is real but is *not* the mechanism and is not evidence
 about the 842 ms.)
