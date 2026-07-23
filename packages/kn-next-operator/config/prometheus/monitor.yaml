@@ -22,7 +22,7 @@ spec:
         # endpoint. For strict verification, enable cert-manager and the
         # monitor_tls_patch.yaml patch in config/prometheus/kustomization.yaml,
         # which references the 'metrics-server-cert' secret instead of skipping
-        # verification.
+        # verification. Threat model: docs/security/threat-model.md §5.
         insecureSkipVerify: true
   selector:
     matchLabels:
