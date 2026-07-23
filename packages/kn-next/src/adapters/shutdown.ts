@@ -87,6 +87,14 @@ export interface ShutdownOptions {
 export function gracefulShutdown(signal: string, opts: ShutdownOptions): void {
     void signal;
 
+    // Re-entrancy guard (#494): a second signal (e.g. SIGTERM then SIGINT, or a
+    // repeated SIGTERM) mid-shutdown must not start a duplicate drain + grace
+    // timer or forward SIGTERM again — the FIRST invocation owns the drain and the
+    // single final exit. Ignore any later call while a shutdown is in progress.
+    if (shuttingDown) {
+        return;
+    }
+
     // Mark shutdown in progress so the supervisor's child-`exit` handler defers
     // to us (below) instead of exiting synchronously and preempting the drain (#449).
     shuttingDown = true;

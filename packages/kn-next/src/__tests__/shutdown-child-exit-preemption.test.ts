@@ -196,3 +196,33 @@ describe("child-exit does not preempt the DB-pool drain (#449)", () => {
         expect(moduleExit).toHaveBeenCalledWith(3);
     });
 });
+
+describe("gracefulShutdown re-entrancy (#494)", () => {
+    it("ignores a second signal mid-shutdown — one kill, one timer, one drain, one exit", async () => {
+        const child = new FakeChild();
+        const drain = vi.fn(async () => {});
+        registerShutdownDrain(drain);
+        const exit = vi.fn();
+        const setTimeoutFn = vi.fn(() => ({ unref() {} }));
+
+        const opts = {
+            child,
+            closables: [],
+            graceMs: 1000,
+            exit,
+            setTimeoutFn,
+        };
+        gracefulShutdown("SIGTERM", opts);
+        // A second signal arrives mid-shutdown — the first invocation owns the
+        // drain + exit; this one must be a no-op (no duplicate kill/timer/drain).
+        gracefulShutdown("SIGINT", opts);
+
+        expect(child.kill).toHaveBeenCalledTimes(1);
+        expect(setTimeoutFn).toHaveBeenCalledTimes(1);
+
+        child.emit("exit", 0);
+        await vi.waitFor(() => expect(exit).toHaveBeenCalledTimes(1));
+        expect(drain).toHaveBeenCalledTimes(1);
+        expect(exit).toHaveBeenCalledWith(0);
+    });
+});
