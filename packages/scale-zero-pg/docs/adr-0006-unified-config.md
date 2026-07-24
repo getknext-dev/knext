@@ -2,6 +2,15 @@
 
 - **Status: ACCEPTED — ACCEPTED by owner 2026-07-05: build FULL cross-namespace directly (not phased).** Design record only. No code is
   written against this ADR until the owner ratifies it (issue #119).
+- **SUPERSEDED IN PART by knext ADR-0025 (2026-07-15, knext #303).** The
+  knext-side half of this contract — the knext operator auto-provisioning by
+  reconciling an `AppDatabase` from `NextApp.spec.database` — was **removed**: the
+  knext operator **no longer drives `AppDatabase`** and binds an already-provisioned
+  database **BYO** via a `DATABASE_URL`-from-Secret only. The scale-zero-pg side —
+  the `AppDatabase` CRD + its standalone operator + the external-driver contract —
+  **stands**, drivable by any external controller (see
+  [`appdatabase-api.md`](appdatabase-api.md)). Read the "knext operator creates the
+  `AppDatabase`" passages below as the *original* design, not current behaviour.
 - **Date:** 2026-07-05
 - **Deciders:** owner (to ratify); design by the scale-zero-pg + knext lanes.
 - **Scope:** a **cross-repo contract**. It is authored here (scale-zero-pg, the

@@ -459,7 +459,8 @@ Where to read for depth:
 - `docs/operations.md` — runbooks, kill-criteria tripwires, the #158 accepted residual.
 - `docs/SCALING.md` — the four scaling axes. `docs/BENCHMARKS.md` — every drill/bake-off number.
 - `docs/SCORECARD.md` — the blind-trio review scores over time.
-- `docs/appdatabase-api.md` — the external-driver (knext operator) contract for AppDatabase.
+- `docs/appdatabase-api.md` — scale-zero-pg's external-driver contract for AppDatabase (any
+  controller may drive it; knext is a BYO `DATABASE_URL` consumer, not the driver — ADR-0025).
 - `docs/runbook-dr.md` — disaster recovery (restore the real plane into a fresh cluster).
 - `docs/knext-research.md` — the consumer platform integration notes.
 
@@ -474,7 +475,7 @@ trigger.
 | 0003 | Multi-tenancy: **branch-per-app** — each app is a Neon timeline under a shared "apps" tenant, its own compute, routed by the apps-gateway template mode. |
 | 0004 | Provisioning: **BUILD** the AppDatabase CRD operator (overrode the "bless the script" option); `provision-app.sh` becomes break-glass. |
 | 0005 | Object storage: **configurable, MinIO-optional** — the durable store is a configured S3 endpoint (OCI/S3/on-prem), MinIO just the local-dev default. |
-| 0006 | Unified config: `NextApp.spec.database` auto-provisions + wires the DB cross-repo (knext declares inline; scale-zero-pg composes the AppDatabase + injects the Secret). |
+| 0006 | Unified config: `NextApp.spec.database` auto-provisions + wires the DB cross-repo (knext declares inline; scale-zero-pg composes the AppDatabase + injects the Secret). **Superseded in part by knext ADR-0025:** knext removed the auto-provisioning half — its operator no longer drives AppDatabase; it binds BYO `DATABASE_URL` only. The scale-zero-pg AppDatabase contract stands. |
 | 0007 | Zoned consistency: DB-per-zone, strong in-zone, eventual across-zone via logical replication; gateway-mediated replication-wake; Zone composes AppDatabase. |
 | 0008 | Wake-primitive security: the wake is a **bounded, observable shared-plane property, not pre-authenticated** — layered control (per-app rate-limit/budget/alert now + NetworkPolicy via #118). |
 | 0009 | *(PROPOSED — research)* In-DB durable execution (`pg_durable`): on-strategy but blocked by scale-to-zero (background-worker conflict, same class as pg_cron); adopt only behind a **wake-on-scheduled-step** primitive. No code. |
