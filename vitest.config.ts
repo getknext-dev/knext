@@ -72,6 +72,21 @@ export default defineConfig({
         branches: 70,
         functions: 74,
         lines: 77,
+        // Per-package floor for @knext/core (packages/kn-next). The @knext/core
+        // coverage push (2026-07) raised its lines to ~90% (from ~78%); this glob
+        // threshold pins that per-package so the aggregate ratchet above can no
+        // longer mask a regression in this one package (reviewers flagged
+        // aggregate-only thresholds). Floors sit at/just below the measured
+        // achieved numbers — lines 90.1 / statements 89.4 / functions 87.5 /
+        // branches 82.8 — so CI fails on any drop below these without red-lining
+        // the current state. node-server.ts (the spawn+sidecar runtime entry) is
+        // the remaining 0%-covered residual; see the coverage report.
+        'packages/kn-next/src/**': {
+          lines: 90,
+          statements: 88,
+          functions: 87,
+          branches: 80,
+        },
       },
     },
   },
