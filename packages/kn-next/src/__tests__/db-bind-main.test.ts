@@ -84,6 +84,28 @@ describe("printDsnContract (via runDbBind --dry-run --secret-file)", () => {
     });
 });
 
+describe("runDbBind — local-config cross-check (ADR-0019 rules 3/4)", () => {
+    it("rejects (before any exec) when the LOCAL config's envMap already defines DATABASE_URL", async () => {
+        const exec = vi.fn();
+        const write = vi.fn();
+        const localConfig = {
+            secrets: {
+                envMap: { DATABASE_URL: { secretName: "x", secretKey: "y" } },
+            },
+        };
+        await expect(
+            runDbBind(
+                "my-app",
+                { namespace: "default", secret: "shop-db", dryRun: true },
+                { exec, write },
+                localConfig,
+            ),
+        ).rejects.toThrow(/spec.database owns DATABASE_URL.*\(config\)/);
+        // The local cross-check fires before the dry-run render / any exec.
+        expect(exec).not.toHaveBeenCalled();
+    });
+});
+
 describe("dbMain", () => {
     it("throws on an unknown subcommand", async () => {
         await expect(dbMain(["frobnicate"])).rejects.toThrow(

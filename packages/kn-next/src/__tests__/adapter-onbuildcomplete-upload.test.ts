@@ -12,7 +12,7 @@
  *  - both routing ctx shapes (legacy ctx.routes / typed ctx.routing) are counted.
  */
 
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -121,6 +121,17 @@ describe("onBuildComplete — artifact upload", () => {
         expect(keys).toContain("b1/home");
         // The missing static file and the fallback-less prerender were skipped.
         expect(putObject).toHaveBeenCalledTimes(2);
+    });
+
+    it("runs the bun-exports heal when the standalone dir already exists", async () => {
+        delete process.env.STORAGE_BUCKET;
+        // distDir/standalone present → the heal branch (else-branch otherwise).
+        // An empty standalone tree (no node_modules) heals nothing but the
+        // real healBunExportTargets orchestration runs (0 copied / 0 skipped).
+        mkdirSync(join(dir, ".next", "standalone"), { recursive: true });
+        await expect(
+            adapter.onBuildComplete?.(makeCtx()),
+        ).resolves.toBeUndefined();
     });
 
     it("counts a putObject failure as skipped without throwing", async () => {
