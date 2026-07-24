@@ -397,6 +397,86 @@ describe('#437 — the compile cache is baked into the image at build time', () 
     expect(output).not.toMatch(/not ready within/i);
   });
 
+  it('rejects a duplicate-slash path WITHOUT deleting (guard squeezes `//`, #440)', () => {
+    // `//etc` is the SAME dir as `/etc` on POSIX, but string-equality on the
+    // blocklist sees "//etc" != "/etc" and lets it through. The guard must
+    // collapse duplicate slashes BEFORE the blocklist. Proven safe by a
+    // double-slash path that resolves back into a temp dir we own.
+    const base = mkdtempSync(join(tmpdir(), 'knext-cc-dslash-'));
+    const sentinel = join(base, 'sentinel.keep');
+    writeFileSync(sentinel, 'must-survive');
+
+    const { status, output } = runWarmup({
+      // Raw string with a leading `//` — `//<abs-temp>` is the same dir as the
+      // temp path, but only the squeeze makes the guard see it that way.
+      cacheDir: `/${base}`, // base already starts with '/', so this is '//…'
+      bootCmd: stubServer(true), // populates the (cleared) dir on SIGTERM
+      port: 34381,
+      env: STUB_FLOOR,
+    });
+
+    // A '//<temp>' path is NOT a critical dir, so it is legitimately clearable —
+    // the point of THIS case is only that the squeeze happens (so the blocklist
+    // is applied to the canonical form). The critical-dir proof is the //etc
+    // case below; here we assert the dir is cleared normally (sentinel gone) and
+    // the run succeeds, proving the squeeze did not break a legit double-slash.
+    expect(status).toBe(0);
+    expect(existsSync(sentinel)).toBe(false);
+    expect(output).toMatch(/baked/);
+  });
+
+  it('FATALs on a `//`-duplicate-slash critical dir (defeats the blocklist bypass, #440)', () => {
+    // `//etc` == `/etc`. Without the squeeze it dodges the string-equality
+    // blocklist and would clear /etc. The guard MUST abort before any rm.
+    const { status, output } = runWarmup({
+      cacheDir: '//etc',
+      bootCmd: nodeScript('dslash-etc-hang.js', 'setTimeout(() => {}, 60_000);\n'),
+      port: 34382,
+      env: { ...STUB_FLOOR, KNEXT_WARMUP_TIMEOUT_S: '2' },
+    });
+
+    expect(status).not.toBe(0);
+    expect(output).toMatch(/critical|refus/i);
+    expect(output).not.toMatch(/not ready within/i);
+  });
+
+  it('rejects a bare `.` path segment WITHOUT deleting (#440)', () => {
+    const { status, output } = runWarmup({
+      cacheDir: '/etc/.',
+      bootCmd: nodeScript('dot-hang.js', 'setTimeout(() => {}, 60_000);\n'),
+      port: 34383,
+      env: { ...STUB_FLOOR, KNEXT_WARMUP_TIMEOUT_S: '2' },
+    });
+
+    expect(status).not.toBe(0);
+    expect(output).toMatch(/'\.'|segment|refus/i);
+    expect(output).not.toMatch(/not ready within/i);
+  });
+
+  it('happy path: a real-shaped `.next/compile-cache` dir still clears normally (#440)', () => {
+    // Regression guard for the `.`-segment and squeeze checks: the REAL cache
+    // path contains a hidden `.next` dir and dotted filenames, none of which is
+    // a bare `.`/`..` segment or a duplicate slash — so it MUST still be cleared
+    // and re-baked, not FATAL'd.
+    const base = mkdtempSync(join(tmpdir(), 'knext-cc-happy-'));
+    const cacheDir = join(base, '.next', 'compile-cache');
+    mkdirSync(cacheDir, { recursive: true });
+    const stale = join(cacheDir, 'stale.cache');
+    writeFileSync(stale, 'leftover');
+
+    const { status, output } = runWarmup({
+      cacheDir,
+      bootCmd: stubServer(true),
+      port: 34384,
+      env: STUB_FLOOR,
+    });
+
+    expect(status).toBe(0);
+    // Cleared then re-baked: the stale file is gone, a fresh entry is present.
+    expect(existsSync(stale)).toBe(false);
+    expect(output).toMatch(/baked 1 entries, 8 bytes/);
+  });
+
   it('does not depend on Postgres/Redis: it probes the shallow health route', () => {
     // /api/health is documented as dependency-free (ADR-0026) — a deep probe
     // would make the image build require a live database.

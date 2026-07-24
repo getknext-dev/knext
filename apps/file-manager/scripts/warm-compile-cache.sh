@@ -84,6 +84,11 @@ HEALTH_URL="http://127.0.0.1:${PORT}/api/health"
 # a single file is removed. Only ever clear a path that is absolute, is not `/`,
 # and is not one of the critical system directories.
 _guard_dir="$CACHE_DIR"
+# Collapse duplicate slashes ('//etc' is the SAME dir as '/etc' but would dodge
+# the string-equality blocklist). Do this BEFORE the trailing-slash strip and
+# the blocklist so every check sees the canonical single-slash form. `tr -s` is
+# available on busybox (alpine) and macOS.
+_guard_dir="$(printf '%s' "$_guard_dir" | tr -s '/')"
 # Strip trailing slashes so "/etc/" is treated identically to "/etc" (and "/"
 # collapses to the empty string, caught by the first case arm below).
 while [ "$_guard_dir" != "${_guard_dir%/}" ]; do
@@ -110,6 +115,16 @@ esac
 case "/$_guard_dir/" in
     */../*)
         echo "FATAL: NODE_COMPILE_CACHE ('$CACHE_DIR') contains a '..' path segment; refusing to clear it." >&2
+        exit 1
+        ;;
+esac
+# Reject a bare '.' path SEGMENT (e.g. '/etc/.'). `rm` itself refuses a '.'
+# final component so this is non-catastrophic, but close it for completeness.
+# '*/./*' on the wrapped value matches only a BARE '.' segment ('/./'), NOT a
+# hidden dir like '.next' ('/app/.next/…' has no '/./') or a dotfile.
+case "/$_guard_dir/" in
+    */./*)
+        echo "FATAL: NODE_COMPILE_CACHE ('$CACHE_DIR') contains a '.' path segment; refusing to clear it." >&2
         exit 1
         ;;
 esac
