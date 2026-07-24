@@ -74,7 +74,13 @@ const serverJs = resolve(
     process.env.STANDALONE_SERVER_PATH ?? ".next/standalone/server.js",
 );
 
-log.info({ serverJs }, "Starting Next.js standalone server");
+// NOTE (#441): the "Starting Next.js standalone server" startup log is emitted
+// AFTER the spawn() below — not here. The FIRST log emit lazily loads pino
+// (~13.5ms; see utils/logger.ts), so emitting before spawn would drop that cost
+// onto the cold-start critical path and steal CPU from the child's boot. In the
+// normal path nothing emits before spawn, so pino loads only once the child is
+// already booting. The rare conditional warns below (preload-not-found,
+// bun-guard-not-found) are error paths and may load pino — acceptable.
 
 // ── Optimized-image variant cache sync (ADR-0006) ─────────────────────────────
 // next/image writes optimized variants to `<distDir>/cache/images`, which is
@@ -275,6 +281,10 @@ const nextProc = spawn(process.execPath, [...preloadArgs, serverJs], {
     env: buildChildEnv(),
 });
 childRef = nextProc;
+
+// Startup log emitted AFTER spawn (#441): the child is already booting, so the
+// first-emit lazy pino load lands off the cold-start critical path.
+log.info({ serverJs }, "Starting Next.js standalone server");
 
 nextProc.on("error", (err) => {
     log.fatal({ err }, "Failed to start Next.js standalone server");
