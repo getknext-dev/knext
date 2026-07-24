@@ -31,6 +31,10 @@ import {
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const HARNESS = resolve(__dirname, 'drain-harness.mjs');
+// Real-srvx harness (#467): same contract wiring but the app listener is the
+// actual `srvx/bun` serve + `appSrvx.close(force)` adaptation, so drain/hardcap
+// run against live srvx close() semantics rather than a raw Bun.serve stub.
+const SRVX_HARNESS = resolve(__dirname, 'srvx-close-harness.mjs');
 
 // ── Layer A: pure unit tests ─────────────────────────────────────────────────
 describe('renderMetrics — Prometheus exposition', () => {
@@ -208,8 +212,8 @@ afterEach(async () => {
   }
 });
 
-function spawnHarness(extraEnv: Record<string, string> = {}) {
-  const proc = spawn('bun', [HARNESS], {
+function spawnHarness(extraEnv: Record<string, string> = {}, harness: string = HARNESS) {
+  const proc = spawn('bun', [harness], {
     env: {
       ...process.env,
       PORT: String(PORT),
@@ -238,6 +242,35 @@ function waitForListening(proc: ReturnType<typeof spawn>): Promise<void> {
       if (buf.includes(`LISTENING:${PORT}`)) {
         clearTimeout(timeout);
         resolvePromise();
+      }
+    });
+    proc.once('exit', (code) => {
+      clearTimeout(timeout);
+      reject(new Error(`harness exited early (${code}). stderr:\n${stderr}`));
+    });
+  });
+}
+
+// Like waitForListening but returns the app port parsed from the LISTENING line —
+// used to exercise the PORT=0 ephemeral path (#467), where the reported port comes
+// from srvx's OS-resolved `.bun.server.port`, the one internal we still read.
+function waitForListeningPort(proc: ReturnType<typeof spawn>): Promise<number> {
+  return new Promise((resolvePromise, reject) => {
+    const timeout = setTimeout(
+      () => reject(new Error(`harness never listened. stderr:\n${stderr}`)),
+      15000,
+    );
+    let stderr = '';
+    let buf = '';
+    proc.stderr?.on('data', (d: Buffer) => {
+      stderr += d.toString();
+    });
+    proc.stdout?.on('data', (d: Buffer) => {
+      buf += d.toString();
+      const m = buf.match(/LISTENING:(\d+) /);
+      if (m) {
+        clearTimeout(timeout);
+        resolvePromise(Number(m[1]));
       }
     });
     proc.once('exit', (code) => {
@@ -311,3 +344,64 @@ describe.skipIf(!bunAvailable)(
     }, 30000);
   },
 );
+
+// ── Layer C: real srvx close() semantics (#467) ──────────────────────────────
+// The mock drain-harness above proves createGracefulShutdown's ORDERING with a
+// raw Bun.serve. This block runs the SAME drain + hardcap through the entry's
+// ACTUAL `srvx/bun` serve + `appSrvx.close(force)` adaptation, so a srvx pin bump
+// that changed close() semantics is caught here rather than only on OKE.
+describe.skipIf(!bunAvailable)('bun-exec entry e2e (REAL srvx close): drain + hardcap', () => {
+  it('srvx close() drains an in-flight /slow request on SIGTERM and exits 0', async () => {
+    child = spawnHarness({ SHUTDOWN_GRACE_MS: '10000' }, SRVX_HARNESS);
+    await waitForListening(child);
+
+    const started = Date.now();
+    const inFlight = fetch(`http://127.0.0.1:${PORT}/slow`).then((r) => r.text());
+    await new Promise((r) => setTimeout(r, 400)); // land SIGTERM mid-flight
+    child.kill('SIGTERM');
+
+    // The in-flight request must still complete 200 — proving srvx close()
+    // (no force) waited for it rather than severing the socket.
+    expect(await inFlight).toBe('drained-ok');
+    expect(Date.now() - started).toBeGreaterThan(1500);
+
+    const exitCode = await new Promise<number | null>((r) => {
+      if (child?.exitCode != null) return r(child.exitCode);
+      child?.once('exit', (code) => r(code));
+    });
+    expect(exitCode).toBe(0);
+  }, 30000);
+
+  it('srvx close(true) force-exits 1 when an in-flight request exceeds the hardcap', async () => {
+    child = spawnHarness({ SHUTDOWN_GRACE_MS: '800' }, SRVX_HARNESS);
+    await waitForListening(child);
+
+    // /hang never resolves, so graceful srvx close() cannot drain it; the
+    // hardcap must fire close(true) (force) and exit 1.
+    const hung = fetch(`http://127.0.0.1:${PORT}/hang`).catch(() => 'errored');
+    await new Promise((r) => setTimeout(r, 300));
+    child.kill('SIGTERM');
+
+    const exitCode = await new Promise<number | null>((r) => {
+      if (child?.exitCode != null) return r(child.exitCode);
+      child?.once('exit', (code) => r(code));
+    });
+    expect(exitCode).toBe(1); // hardcap path (force close)
+    await hung; // the force-closed request errors/settles — don't leak it
+  }, 30000);
+
+  it('PORT=0 resolves the ephemeral port via srvx and serves on it', async () => {
+    // The one path still reading srvx's internal `.bun.server.port`: with PORT=0
+    // the OS assigns the port, so `appServer.port` falls back to the srvx-resolved
+    // value. This pins that fallback so an srvx internal-shape change is caught.
+    child = spawnHarness({ PORT: '0', METRICS_PORT: '0' }, SRVX_HARNESS);
+    const port = await waitForListeningPort(child);
+    expect(port).toBeGreaterThan(0);
+
+    const r = await fetch(`http://127.0.0.1:${port}/api/health`);
+    expect(r.status).toBe(200);
+    expect(await r.json()).toEqual({ status: 'ok', target: 'bun-exec' });
+
+    child.kill('SIGTERM');
+  }, 30000);
+});
