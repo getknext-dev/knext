@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -299,6 +299,55 @@ describe('#437 — the compile cache is baked into the image at build time', () 
     // variation never fails a build that is in fact fine.
     expect(Number(files[1])).toBeLessThanOrEqual(1106 / 2);
     expect(Number(bytes[1])).toBeLessThanOrEqual(4_246_032 / 2);
+  });
+
+  it("CLEARS a pre-existing cache dir before the warm-up (freshness is the script's job, #440 item 2)", () => {
+    // The plausibility floor must reflect a REAL flush of THIS build, never
+    // leftover entries from a previous run. Today the runner stage happens not
+    // to COPY the cache dir, but that is an inference about the Dockerfile a
+    // future edit could invalidate — so the script itself must empty the dir.
+    const cacheDir = mkdtempSync(join(tmpdir(), 'knext-cc-stale-'));
+    // Seed a stale junk "entry" that alone would satisfy a 1-file/1-byte floor.
+    const stale = join(cacheDir, 'stale.junk');
+    writeFileSync(stale, 'leftover-from-a-previous-build');
+
+    const { status, output } = runWarmup({
+      cacheDir,
+      bootCmd: stubServer(true), // writes a single fresh entry on SIGTERM
+      port: 34377,
+      env: STUB_FLOOR,
+    });
+
+    expect(status).toBe(0);
+    // The stale file must be GONE — the dir was emptied before the warm-up, so
+    // leftover entries can never satisfy the floor.
+    expect(existsSync(stale)).toBe(false);
+    // Only the freshly-flushed entry should remain.
+    expect(output).toMatch(/baked 1 entries, 8 bytes/);
+  });
+
+  it('FATALs WITHOUT deleting when NODE_COMPILE_CACHE is a catastrophic path (safety guard, #440 item 2)', () => {
+    // The clear step is `rm -rf "$CACHE_DIR"`, and $CACHE_DIR is attacker-shaped
+    // env input, so the guard must reject `/`, a non-absolute path, and critical
+    // system dirs BEFORE removing anything. A short ready-timeout keeps the
+    // pre-guard (unimplemented) run fast and safe — the boot never enumerates a
+    // real filesystem.
+    for (const badPath of ['/', '/etc', '/usr', 'relative/dir']) {
+      const { status, output } = runWarmup({
+        cacheDir: badPath,
+        // Never becomes ready; short timeout so if the guard is ABSENT the run
+        // still exits quickly (via the ready-timeout) instead of scanning disk.
+        bootCmd: nodeScript('guard-hang.js', 'setTimeout(() => {}, 60_000);\n'),
+        port: 34378,
+        env: { ...STUB_FLOOR, KNEXT_WARMUP_TIMEOUT_S: '2' },
+      });
+
+      expect(status).not.toBe(0);
+      // Must name the guard specifically — a generic ready-timeout message means
+      // the guard did not fire before the boot/clear.
+      expect(output).toMatch(/refus|unsafe|critical|absolute/i);
+      expect(output).not.toMatch(/not ready within/i);
+    }
   });
 
   it('does not depend on Postgres/Redis: it probes the shallow health route', () => {

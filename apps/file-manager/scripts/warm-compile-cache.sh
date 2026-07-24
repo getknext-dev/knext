@@ -71,6 +71,45 @@ BOOT_CMD="${KNEXT_WARMUP_BOOT_CMD:-node -e \"import('@knext/core/internal/node-s
 # dependencies would make the image build require a live database.
 HEALTH_URL="http://127.0.0.1:${PORT}/api/health"
 
+# --- Freshness guard (#440 item 2) ------------------------------------------
+# EMPTY the cache dir before the warm-up boot, so the plausibility floor below
+# reflects a REAL flush of THIS build — never LEFTOVER entries from a previous
+# run. Today the runner stage's COPYs happen not to include this dir, so it is
+# already empty; but that is an INFERENCE about the Dockerfile's COPY lines that
+# a future edit could silently invalidate. Making freshness a property of THIS
+# script removes that fragile coupling.
+#
+# $CACHE_DIR comes straight from NODE_COMPILE_CACHE (env), and we are about to
+# `rm -rf` it, so guard against an implausible/catastrophic path FIRST — before
+# a single file is removed. Only ever clear a path that is absolute, is not `/`,
+# and is not one of the critical system directories.
+_guard_dir="$CACHE_DIR"
+# Strip trailing slashes so "/etc/" is treated identically to "/etc" (and "/"
+# collapses to the empty string, caught by the first case arm below).
+while [ "$_guard_dir" != "${_guard_dir%/}" ]; do
+    _guard_dir="${_guard_dir%/}"
+done
+case "$_guard_dir" in
+    "")
+        echo "FATAL: NODE_COMPILE_CACHE ('$CACHE_DIR') resolves to the root '/'; refusing to clear it." >&2
+        exit 1
+        ;;
+    /*) ;; # absolute path — fall through to the critical-dir blocklist
+    *)
+        echo "FATAL: NODE_COMPILE_CACHE ('$CACHE_DIR') is not an absolute path; refusing to clear it." >&2
+        exit 1
+        ;;
+esac
+for _crit in /bin /sbin /etc /usr /lib /lib64 /var /root /home /boot /dev /proc /sys /opt /run; do
+    if [ "$_guard_dir" = "$_crit" ]; then
+        echo "FATAL: NODE_COMPILE_CACHE ('$CACHE_DIR') points at the critical system directory '$_crit'; refusing to clear it." >&2
+        exit 1
+    fi
+done
+
+# Safe to clear. Remove any pre-existing contents, then (re)create the dir —
+# preserving the original `mkdir -p` create behaviour.
+rm -rf "$CACHE_DIR"
 mkdir -p "$CACHE_DIR"
 
 # Decide HOW we will enumerate child processes before booting anything, so a

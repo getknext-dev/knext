@@ -94,6 +94,15 @@ CI post-fix) — identical entry counts and byte totals within ~100. That is **e
 bake is stable**; it is **not** an assertion of bit-for-bit reproducibility, which remains
 unverified.
 
+**Caveat for future reproducible-builds work (#440 item 3).** The baked compile-cache layer is
+stable but **not bit-reproducible**: across three bakes the entry count was identical (1106) while
+the byte totals differed slightly (4,246,088 / 4,246,032 / 4,245,984 — within ~100 bytes). Any
+future reproducible-builds effort (see `.claude/rules/security.md` supply-chain section, which
+aspires to reproducible builds) MUST therefore **exclude or normalise** this layer from its
+reproducibility check rather than treat it as a regression — otherwise the non-determinism would be
+discovered as a surprise blocker. The V8 cache is a build-time optimisation keyed by module
+filename, not a source artifact, so excluding it from bit-comparison is correct, not a compromise.
+
 **The legacy operator PVC path is retained as an override, but is no longer the recommended
 path.** The operator's `enableBytecodeCache` PVC injection and the CLI's legacy `redis ⇒ on`
 inference (ADR-0034, decision 3) still work for anyone depending on them today. The user-facing
