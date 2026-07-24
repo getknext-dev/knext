@@ -31,7 +31,12 @@ Complements `.claude/rules/architecture.md`. These run through **every** phase â
   risk or upgrade. The npm gate is **publish-blocking** (runs `needs`-before the publish job in
   both `release.yml` and `release-ghp.yml`); accepted advisories go in the dated+justified
   `security/npm-audit-allowlist.json` (mirrors the Trivy triage pattern).
-- **Sign** images (cosign) + attestation; aim for reproducible builds.
+- **Sign** images (cosign) + attestation; aim for reproducible builds. **Caveat (ADR-0035, #440):**
+  the image-baked V8 compile-cache layer (`apps/*/scripts/warm-compile-cache.sh`) is stable but
+  **not bit-reproducible** â€” across three bakes the entry count was identical (1106) while byte
+  totals varied within ~100 (4,246,088 / 4,246,032 / 4,245,984). Any reproducible-builds work MUST
+  **exclude or normalise** this layer rather than flag it as a regression; it is a build-time
+  optimisation keyed by module filename, not a source artifact.
 - Maintain a short **threat model** in `docs/security/`.
 - **Pin images by digest; reject `:latest`.** The operator already rejects `:latest`
   (`nextapp_controller.go:66`); fix the remaining placeholder

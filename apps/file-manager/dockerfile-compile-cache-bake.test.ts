@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -148,6 +148,42 @@ describe('#437 — the compile cache is baked into the image at build time', () 
 
   it('keeps the NODE_COMPILE_CACHE default-substitution so an injected value still wins', () => {
     expect(dockerfileRuntimeCmd()).toContain('${NODE_COMPILE_CACHE:-');
+  });
+
+  it("the warm-up's NODE_COMPILE_CACHE is ABSOLUTE, so it PASSES the freshness guard (#440)", () => {
+    // The freshness guard clears the cache dir and (correctly) FATALs on a
+    // RELATIVE path — clearing a cwd-relative path is unsafe. So the warm-up
+    // CALLER must pass an ABSOLUTE path or the guard kills the real image build.
+    // Unit CI never runs `docker build`, so this string assertion is the only
+    // thing that catches a relative regression before it breaks production.
+    const df = dockerfile();
+    const runBlock = df.slice(0, df.indexOf('CMD ['));
+    const m = runBlock.match(/NODE_COMPILE_CACHE=(\S+)/);
+    if (!m) throw new Error('warm-up RUN block must set NODE_COMPILE_CACHE');
+    const value = m[1];
+
+    // Absolute, and not a form the guard rejects (`..`, `//`, bare `.`).
+    expect(value.startsWith('/')).toBe(true);
+    expect(value).not.toMatch(/(^|\/)\.\.(\/|$)/);
+    expect(value).not.toMatch(/\/\//);
+    expect(value).not.toMatch(/(^|\/)\.(\/|$)/);
+
+    // Prove it end-to-end: the real Dockerfile value must PASS the guard (the
+    // script clears it and reaches the boot), not FATAL on the absolute-path
+    // check. Point it at a temp dir so we exercise the guard, not a real path.
+    const probeDir = mkdtempSync(join(tmpdir(), 'knext-cc-abs-'));
+    const { status, output } = runWarmup({
+      // Substitute the temp dir but KEEP the leading-slash shape of the real
+      // value — we are asserting "absolute ⇒ guard passes", and the shipped
+      // value is absolute.
+      cacheDir: probeDir,
+      bootCmd: stubServer(true),
+      port: 34385,
+      env: STUB_FLOOR,
+    });
+    expect(status).toBe(0);
+    expect(output).not.toMatch(/not an absolute path/i);
+    expect(output).toMatch(/baked/);
   });
 
   it('makes the baked cache readable by the runtime `node` user', () => {
@@ -299,6 +335,182 @@ describe('#437 — the compile cache is baked into the image at build time', () 
     // variation never fails a build that is in fact fine.
     expect(Number(files[1])).toBeLessThanOrEqual(1106 / 2);
     expect(Number(bytes[1])).toBeLessThanOrEqual(4_246_032 / 2);
+  });
+
+  it("CLEARS a pre-existing cache dir before the warm-up (freshness is the script's job, #440 item 2)", () => {
+    // The plausibility floor must reflect a REAL flush of THIS build, never
+    // leftover entries from a previous run. Today the runner stage happens not
+    // to COPY the cache dir, but that is an inference about the Dockerfile a
+    // future edit could invalidate — so the script itself must empty the dir.
+    const cacheDir = mkdtempSync(join(tmpdir(), 'knext-cc-stale-'));
+    // Seed a stale junk "entry" that alone would satisfy a 1-file/1-byte floor.
+    const stale = join(cacheDir, 'stale.junk');
+    writeFileSync(stale, 'leftover-from-a-previous-build');
+
+    const { status, output } = runWarmup({
+      cacheDir,
+      bootCmd: stubServer(true), // writes a single fresh entry on SIGTERM
+      port: 34377,
+      env: STUB_FLOOR,
+    });
+
+    expect(status).toBe(0);
+    // The stale file must be GONE — the dir was emptied before the warm-up, so
+    // leftover entries can never satisfy the floor.
+    expect(existsSync(stale)).toBe(false);
+    // Only the freshly-flushed entry should remain.
+    expect(output).toMatch(/baked 1 entries, 8 bytes/);
+  });
+
+  it('FATALs WITHOUT deleting when NODE_COMPILE_CACHE is a catastrophic path (safety guard, #440 item 2)', () => {
+    // The clear step is `rm -rf "$CACHE_DIR"`, and $CACHE_DIR is attacker-shaped
+    // env input, so the guard must reject `/`, a non-absolute path, and critical
+    // system dirs BEFORE removing anything. A short ready-timeout keeps the
+    // pre-guard (unimplemented) run fast and safe — the boot never enumerates a
+    // real filesystem.
+    for (const badPath of ['/', '/etc', '/usr', 'relative/dir']) {
+      const { status, output } = runWarmup({
+        cacheDir: badPath,
+        // Never becomes ready; short timeout so if the guard is ABSENT the run
+        // still exits quickly (via the ready-timeout) instead of scanning disk.
+        bootCmd: nodeScript('guard-hang.js', 'setTimeout(() => {}, 60_000);\n'),
+        port: 34378,
+        env: { ...STUB_FLOOR, KNEXT_WARMUP_TIMEOUT_S: '2' },
+      });
+
+      expect(status).not.toBe(0);
+      // Must name the guard specifically — a generic ready-timeout message means
+      // the guard did not fire before the boot/clear.
+      expect(output).toMatch(/refus|unsafe|critical|absolute/i);
+      expect(output).not.toMatch(/not ready within/i);
+    }
+  });
+
+  it('rejects a `..`-traversal path WITHOUT deleting (guard normalises segments, #440)', () => {
+    // String-equality on the blocklist is defeated by traversal: `/etc/../etc`
+    // is absolute, never equals a blocklist entry, yet resolves to `/etc`. The
+    // guard must reject any `..` SEGMENT before the rm. Proven safe by pointing
+    // at a traversal that resolves back INTO a temp dir we own: if the guard
+    // regressed, the WORST it could clear is our own temp dir — never a system
+    // path — and the sentinel below makes a stray delete observable.
+    const base = mkdtempSync(join(tmpdir(), 'knext-cc-traverse-'));
+    const real = join(base, 'real');
+    mkdirSync(real);
+    const sentinel = join(real, 'sentinel.keep');
+    writeFileSync(sentinel, 'must-survive');
+
+    const { status, output } = runWarmup({
+      // Raw string concat, NOT path.join — join() would collapse the `..` before
+      // it ever reached the script. = <base>/real/../real, resolves to <base>/real.
+      cacheDir: `${real}/../real`,
+      bootCmd: nodeScript('traverse-hang.js', 'setTimeout(() => {}, 60_000);\n'),
+      port: 34379,
+      env: { ...STUB_FLOOR, KNEXT_WARMUP_TIMEOUT_S: '2' },
+    });
+
+    expect(status).not.toBe(0);
+    // Must name the `..`/traversal guard, not a generic ready-timeout.
+    expect(output).toMatch(/\.\.|traversal|refus/i);
+    expect(output).not.toMatch(/not ready within/i);
+    // Nothing was cleared: the sentinel is still there.
+    expect(existsSync(sentinel)).toBe(true);
+  });
+
+  it('FATALs on a `..`-traversal into a critical dir (defeats the blocklist bypass, #440)', () => {
+    // The archetypal bypass: `/etc/../etc` → `/etc`. The guard MUST abort on the
+    // `..` segment BEFORE any rm, so this never actually touches /etc. We assert
+    // the FATAL message + non-zero exit only — the temp-scoped test above is the
+    // one that proves "nothing deleted".
+    const { status, output } = runWarmup({
+      cacheDir: '/etc/../etc',
+      bootCmd: nodeScript('etc-hang.js', 'setTimeout(() => {}, 60_000);\n'),
+      port: 34380,
+      env: { ...STUB_FLOOR, KNEXT_WARMUP_TIMEOUT_S: '2' },
+    });
+
+    expect(status).not.toBe(0);
+    expect(output).toMatch(/\.\.|traversal|refus/i);
+    expect(output).not.toMatch(/not ready within/i);
+  });
+
+  it('rejects a duplicate-slash path WITHOUT deleting (guard squeezes `//`, #440)', () => {
+    // `//etc` is the SAME dir as `/etc` on POSIX, but string-equality on the
+    // blocklist sees "//etc" != "/etc" and lets it through. The guard must
+    // collapse duplicate slashes BEFORE the blocklist. Proven safe by a
+    // double-slash path that resolves back into a temp dir we own.
+    const base = mkdtempSync(join(tmpdir(), 'knext-cc-dslash-'));
+    const sentinel = join(base, 'sentinel.keep');
+    writeFileSync(sentinel, 'must-survive');
+
+    const { status, output } = runWarmup({
+      // Raw string with a leading `//` — `//<abs-temp>` is the same dir as the
+      // temp path, but only the squeeze makes the guard see it that way.
+      cacheDir: `/${base}`, // base already starts with '/', so this is '//…'
+      bootCmd: stubServer(true), // populates the (cleared) dir on SIGTERM
+      port: 34381,
+      env: STUB_FLOOR,
+    });
+
+    // A '//<temp>' path is NOT a critical dir, so it is legitimately clearable —
+    // the point of THIS case is only that the squeeze happens (so the blocklist
+    // is applied to the canonical form). The critical-dir proof is the //etc
+    // case below; here we assert the dir is cleared normally (sentinel gone) and
+    // the run succeeds, proving the squeeze did not break a legit double-slash.
+    expect(status).toBe(0);
+    expect(existsSync(sentinel)).toBe(false);
+    expect(output).toMatch(/baked/);
+  });
+
+  it('FATALs on a `//`-duplicate-slash critical dir (defeats the blocklist bypass, #440)', () => {
+    // `//etc` == `/etc`. Without the squeeze it dodges the string-equality
+    // blocklist and would clear /etc. The guard MUST abort before any rm.
+    const { status, output } = runWarmup({
+      cacheDir: '//etc',
+      bootCmd: nodeScript('dslash-etc-hang.js', 'setTimeout(() => {}, 60_000);\n'),
+      port: 34382,
+      env: { ...STUB_FLOOR, KNEXT_WARMUP_TIMEOUT_S: '2' },
+    });
+
+    expect(status).not.toBe(0);
+    expect(output).toMatch(/critical|refus/i);
+    expect(output).not.toMatch(/not ready within/i);
+  });
+
+  it('rejects a bare `.` path segment WITHOUT deleting (#440)', () => {
+    const { status, output } = runWarmup({
+      cacheDir: '/etc/.',
+      bootCmd: nodeScript('dot-hang.js', 'setTimeout(() => {}, 60_000);\n'),
+      port: 34383,
+      env: { ...STUB_FLOOR, KNEXT_WARMUP_TIMEOUT_S: '2' },
+    });
+
+    expect(status).not.toBe(0);
+    expect(output).toMatch(/'\.'|segment|refus/i);
+    expect(output).not.toMatch(/not ready within/i);
+  });
+
+  it('happy path: a real-shaped `.next/compile-cache` dir still clears normally (#440)', () => {
+    // Regression guard for the `.`-segment and squeeze checks: the REAL cache
+    // path contains a hidden `.next` dir and dotted filenames, none of which is
+    // a bare `.`/`..` segment or a duplicate slash — so it MUST still be cleared
+    // and re-baked, not FATAL'd.
+    const base = mkdtempSync(join(tmpdir(), 'knext-cc-happy-'));
+    const cacheDir = join(base, '.next', 'compile-cache');
+    mkdirSync(cacheDir, { recursive: true });
+    const stale = join(cacheDir, 'stale.cache');
+    writeFileSync(stale, 'leftover');
+
+    const { status, output } = runWarmup({
+      cacheDir,
+      bootCmd: stubServer(true),
+      port: 34384,
+      env: STUB_FLOOR,
+    });
+
+    expect(status).toBe(0);
+    // Cleared then re-baked: the stale file is gone, a fresh entry is present.
+    expect(existsSync(stale)).toBe(false);
+    expect(output).toMatch(/baked 1 entries, 8 bytes/);
   });
 
   it('does not depend on Postgres/Redis: it probes the shallow health route', () => {
