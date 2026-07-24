@@ -610,6 +610,18 @@ capture_original() {
 # scale-to-zero-oke.md were interrupted mid-run and left the cluster patched;
 # this trap is the fix.
 CLEANED_UP=0
+# RESTORE_PENDING tracks which restore keys have NOT yet been attempted. It is a
+# SCRIPT-GLOBAL (not a cleanup() local) on purpose: a second INT/TERM arriving
+# while the first cleanup's unbounded restore patches are still running is
+# deferred by bash until the in-flight `kc patch` returns, then re-runs the
+# trap -> `cleanup; exit 130/143`. That re-entry hits the CLEANED_UP guard and
+# exits, abandoning every restore patch that had not yet run. The value must
+# survive across that re-entrant call so the guard can NAME the un-applied keys
+# rather than exit silently (#430). Each token carries a LEADING SPACE so
+# _restore_attempted's substring removal cannot confuse panic-window-percentage
+# with panic-threshold-percentage (no token is a prefix of another).
+RESTORE_PENDING=""
+_restore_attempted() { RESTORE_PENDING="${RESTORE_PENDING/ $1/}"; }
 cleanup() {
   # FIRST statement, before anything else can call kc(): this is the SIGNAL-path
   # reset of the per-call cap. api_retry arms KC_TIMEOUT_S around each attempt and
@@ -622,7 +634,19 @@ cleanup() {
   # The exhaustion -> FATAL -> EXIT path resets it in api_retry; this covers the
   # other entry.
   KC_TIMEOUT_S=0
-  [ "$CLEANED_UP" = "1" ] && return 0
+  if [ "$CLEANED_UP" = "1" ]; then
+    # Re-entry (a second INT/TERM deferred until the first restore's in-flight
+    # `kc patch` returned). If restore was still mid-flight, RESTORE_PENDING
+    # names the keys we never got to — report them on the SAME surface as a
+    # restore-failure rather than exiting silently (#430). If it's empty
+    # (restore already finished, or the ordinary EXIT-after-INT double-fire),
+    # stay silent — that is true idempotency.
+    if [ -n "$RESTORE_PENDING" ]; then
+      log "*** RESTORE INTERRUPTED — these keys were NOT applied:${RESTORE_PENDING} ***"
+      log "*** $SERVICE MAY STILL BE MUTATED by this benchmark. Check and restore it by hand before trusting the service or any later run. ***"
+    fi
+    return 0
+  fi
   CLEANED_UP=1
   log ""
   log "## CLEANUP — restoring $SERVICE to its captured original autoscaling config"
@@ -639,10 +663,17 @@ cleanup() {
     # as it can. The names are the failed keys, so the operator knows exactly
     # what to undo by hand.
     local restore_failed=""
+    # Arm the un-attempted-keys tracker BEFORE the first patch, with the full set
+    # we are about to attempt. Each key is removed the moment its patch is
+    # attempted (success OR restore_failed), so a second signal mid-restore leaves
+    # RESTORE_PENDING naming exactly the keys we never reached (#430). Names/order
+    # mirror restore_failed's tokens; leading spaces avoid substring collisions.
+    RESTORE_PENDING=" containerConcurrency max-scale target-burst-capacity panic-window-percentage panic-threshold-percentage"
     local cc_restore="${ORIG_CC:-0}"
     kc patch ksvc "$SERVICE" -n "$NS" --type merge -p \
       "{\"spec\":{\"template\":{\"spec\":{\"containerConcurrency\":${cc_restore}}}}}" \
       >/dev/null 2>&1 || restore_failed="${restore_failed} containerConcurrency"
+    _restore_attempted containerConcurrency
 
     if [ -n "$ORIG_MAXSCALE" ]; then
       kc patch ksvc "$SERVICE" -n "$NS" --type merge -p \
@@ -653,6 +684,7 @@ cleanup() {
         '[{"op":"remove","path":"/spec/template/metadata/annotations/autoscaling.knative.dev~1max-scale"}]' \
         >/dev/null 2>&1 || restore_failed="${restore_failed} max-scale"
     fi
+    _restore_attempted max-scale
 
     for pair in "ORIG_TBC:target-burst-capacity" "ORIG_PW:panic-window-percentage" "ORIG_PT:panic-threshold-percentage"; do
       local var="${pair%%:*}" key="${pair##*:}" val
@@ -666,6 +698,7 @@ cleanup() {
           "[{\"op\":\"remove\",\"path\":\"/spec/template/metadata/annotations/autoscaling.knative.dev~1${key}\"}]" \
           >/dev/null 2>&1 || restore_failed="${restore_failed} ${key}"
       fi
+      _restore_attempted "$key"
     done
     # A `remove` of an already-absent annotation is a legitimate failure mode of
     # the json patch type, so this can be noisy on a service that was never
@@ -1116,6 +1149,16 @@ phase_burst() {
     done
   done
 }
+
+# ── test seam ─────────────────────────────────────────────────────────────────
+# When this file is SOURCED rather than executed, stop here: every function above
+# is now defined, but the benchmark body below (capture + phases + the EXIT/INT/
+# TERM-driven restore) must NOT run. capture-restore.test.sh sources run.sh to
+# unit-test cleanup()'s re-entry reporting DETERMINISTICALLY — a genuine second
+# signal landing mid-restore is bash-build/timing dependent and cannot be relied
+# on in CI. Mirrors the existing DRY_RUN_EXERCISE_KC / SAMPLER_SIMULATE_LOST test
+# seams in this file. Executed normally (BASH_SOURCE[0] == $0) this is a no-op.
+if [ "${BASH_SOURCE[0]}" != "${0}" ]; then return 0; fi
 
 # ── main ──────────────────────────────────────────────────────────────────────
 capture_original
