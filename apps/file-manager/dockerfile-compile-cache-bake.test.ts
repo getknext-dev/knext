@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -348,6 +348,53 @@ describe('#437 — the compile cache is baked into the image at build time', () 
       expect(output).toMatch(/refus|unsafe|critical|absolute/i);
       expect(output).not.toMatch(/not ready within/i);
     }
+  });
+
+  it('rejects a `..`-traversal path WITHOUT deleting (guard normalises segments, #440)', () => {
+    // String-equality on the blocklist is defeated by traversal: `/etc/../etc`
+    // is absolute, never equals a blocklist entry, yet resolves to `/etc`. The
+    // guard must reject any `..` SEGMENT before the rm. Proven safe by pointing
+    // at a traversal that resolves back INTO a temp dir we own: if the guard
+    // regressed, the WORST it could clear is our own temp dir — never a system
+    // path — and the sentinel below makes a stray delete observable.
+    const base = mkdtempSync(join(tmpdir(), 'knext-cc-traverse-'));
+    const real = join(base, 'real');
+    mkdirSync(real);
+    const sentinel = join(real, 'sentinel.keep');
+    writeFileSync(sentinel, 'must-survive');
+
+    const { status, output } = runWarmup({
+      // Raw string concat, NOT path.join — join() would collapse the `..` before
+      // it ever reached the script. = <base>/real/../real, resolves to <base>/real.
+      cacheDir: `${real}/../real`,
+      bootCmd: nodeScript('traverse-hang.js', 'setTimeout(() => {}, 60_000);\n'),
+      port: 34379,
+      env: { ...STUB_FLOOR, KNEXT_WARMUP_TIMEOUT_S: '2' },
+    });
+
+    expect(status).not.toBe(0);
+    // Must name the `..`/traversal guard, not a generic ready-timeout.
+    expect(output).toMatch(/\.\.|traversal|refus/i);
+    expect(output).not.toMatch(/not ready within/i);
+    // Nothing was cleared: the sentinel is still there.
+    expect(existsSync(sentinel)).toBe(true);
+  });
+
+  it('FATALs on a `..`-traversal into a critical dir (defeats the blocklist bypass, #440)', () => {
+    // The archetypal bypass: `/etc/../etc` → `/etc`. The guard MUST abort on the
+    // `..` segment BEFORE any rm, so this never actually touches /etc. We assert
+    // the FATAL message + non-zero exit only — the temp-scoped test above is the
+    // one that proves "nothing deleted".
+    const { status, output } = runWarmup({
+      cacheDir: '/etc/../etc',
+      bootCmd: nodeScript('etc-hang.js', 'setTimeout(() => {}, 60_000);\n'),
+      port: 34380,
+      env: { ...STUB_FLOOR, KNEXT_WARMUP_TIMEOUT_S: '2' },
+    });
+
+    expect(status).not.toBe(0);
+    expect(output).toMatch(/\.\.|traversal|refus/i);
+    expect(output).not.toMatch(/not ready within/i);
   });
 
   it('does not depend on Postgres/Redis: it probes the shallow health route', () => {

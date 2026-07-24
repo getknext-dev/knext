@@ -94,13 +94,26 @@ case "$_guard_dir" in
         echo "FATAL: NODE_COMPILE_CACHE ('$CACHE_DIR') resolves to the root '/'; refusing to clear it." >&2
         exit 1
         ;;
-    /*) ;; # absolute path — fall through to the critical-dir blocklist
+    /*) ;; # absolute path — fall through to the traversal + critical-dir checks
     *)
         echo "FATAL: NODE_COMPILE_CACHE ('$CACHE_DIR') is not an absolute path; refusing to clear it." >&2
         exit 1
         ;;
 esac
-for _crit in /bin /sbin /etc /usr /lib /lib64 /var /root /home /boot /dev /proc /sys /opt /run; do
+# Reject any '..' path SEGMENT. The critical-dir blocklist below is string
+# equality, so a traversal like '/etc/../etc' is absolute, never equals a
+# blocklist entry, yet resolves to '/etc' — clearing it would rm -rf /etc.
+# Wrapping in leading+trailing '/' makes '*/../*' match '..' as a start/middle/
+# end segment ('/etc/../etc', '../x', '/a/..', bare '..') WITHOUT false-matching
+# a filename that merely contains dots (e.g. '/app/foo..bar'). This is a pure
+# string check — no realpath/cd+pwd — so it works for a not-yet-existing dir.
+case "/$_guard_dir/" in
+    */../*)
+        echo "FATAL: NODE_COMPILE_CACHE ('$CACHE_DIR') contains a '..' path segment; refusing to clear it." >&2
+        exit 1
+        ;;
+esac
+for _crit in /bin /sbin /etc /usr /lib /lib64 /var /root /home /boot /dev /proc /sys /opt /run /srv /mnt /media /lost+found; do
     if [ "$_guard_dir" = "$_crit" ]; then
         echo "FATAL: NODE_COMPILE_CACHE ('$CACHE_DIR') points at the critical system directory '$_crit'; refusing to clear it." >&2
         exit 1
