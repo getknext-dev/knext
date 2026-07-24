@@ -146,19 +146,9 @@ describe("parseRollbackArgs hardening (PR #232 review — no silent opposite-int
                 `--canary ${bad} must be rejected`,
             ).toThrow(/--canary must be an integer between 1 and 99/);
         }
-        // A negative value reads as a dangling flag value ("-5" looks like a
-        // flag) — still a HARD --canary error, just via the dangling-value path.
-        {
-            expect(() =>
-                parseRollbackArgs([
-                    "my-app",
-                    "--to",
-                    "rev-1",
-                    "--canary",
-                    "-5",
-                ]),
-            ).toThrow(/--canary requires a value/);
-        }
+        expect(() =>
+            parseRollbackArgs(["my-app", "--to", "rev-1", "--canary", "-5"]),
+        ).toThrow(/--canary requires a value/);
     });
 
     it("--canary 25 with --to is accepted", () => {
