@@ -98,4 +98,7 @@ not cite a speedup for this feature anywhere until an AFTER arm actually runs.
 5. **Measure it.** Re-run the #431 before/after once the mechanism actually admits, and record the
    AFTER arm in `docs/benchmarks/scale-to-zero-oke.md`.
 6. **Plan the retirement** of the CLI's legacy `redis ⇒ on` inference as an announced deprecation,
-   not a silent cleanup.
+   not a silent cleanup. **(Done — announced, issue #457.)** The CLI now emits a one-time stderr
+   deprecation warning when the legacy inference fires (`cr-builder.ts`); the inference itself is
+   unchanged, and its removal is a future breaking change scheduled per the v1alpha1 stability
+   policy (ADR-0017), owned by release notes.

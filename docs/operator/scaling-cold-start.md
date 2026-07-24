@@ -104,6 +104,15 @@ A request that wakes a scaled-to-zero zone pays, roughly in order:
 
 ### V8 bytecode cache (`spec.cache.enableBytecodeCache`)
 
+> **Deprecated (ADR-0035, action item 4).** The PVC-backed bytecode cache
+> (`enableBytecodeCache` / `bytecodeCacheSize`) is deprecated in favour of the V8
+> compile cache **baked into the image at build time** — the default cold-start
+> mechanism, which needs no volume, mount, or cluster feature flag and applies
+> from the first pod. This field still works but is scheduled for removal per the
+> v1alpha1 stability policy (ADR-0017); the operator emits a
+> `DeprecatedBytecodeCachePVC` Warning event when it is set. Prefer the baked
+> default.
+
 Node's `NODE_COMPILE_CACHE` persists compiled V8 bytecode to disk, so a fresh
 process skips re-parsing and re-compiling the application's JavaScript. knext
 persists this cache on a PVC (so it survives pod churn / scale-from-zero rather

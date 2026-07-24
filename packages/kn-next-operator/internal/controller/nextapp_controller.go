@@ -664,6 +664,21 @@ func (r *NextAppReconciler) reconcileBytecodeCachePVC(ctx context.Context, nextA
 	if nextApp.Spec.Cache == nil || !nextApp.Spec.Cache.EnableBytecodeCache {
 		return nil
 	}
+	// #457 (ADR-0035 action item 4): the opt-in PVC-backed bytecode cache is
+	// DEPRECATED in favour of the V8 compile cache baked into the image at build
+	// time (the default cold-start mechanism). The path still works exactly as
+	// before — we only surface a migration signal. See the runtime shadow-warning
+	// (#450) that fires when an operator-injected NODE_COMPILE_CACHE bypasses the
+	// baked layer.
+	const deprecationMsg = "spec.cache.enableBytecodeCache (the PVC-backed bytecode cache) is DEPRECATED " +
+		"in favour of the image-baked V8 compile cache (ADR-0035), which is the default cold-start " +
+		"mechanism and requires no volume. This field still works but will be removed in a future " +
+		"release per the v1alpha1 stability policy (ADR-0017); the runtime already warns (#450) when an " +
+		"operator-injected NODE_COMPILE_CACHE bypasses the baked layer. Migrate off spec.cache.enableBytecodeCache."
+	logf.FromContext(ctx).Info("WARNING: "+deprecationMsg,
+		"nextapp", nextApp.Name, "namespace", nextApp.Namespace)
+	r.emitEvent(nextApp, corev1.EventTypeWarning, "DeprecatedBytecodeCachePVC", deprecationMsg)
+
 	size := nextApp.Spec.Cache.BytecodeCacheSize
 	if size == "" {
 		size = "512Mi"
