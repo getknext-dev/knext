@@ -127,6 +127,7 @@ kubectl get pods -l serving.knative.dev/service=storefront
 kubectl get ksvc storefront -o jsonpath='{.status.url}'
 ```
 
-A cold request reprovisions a pod; the bytecode cache (when
-`spec.cache.enableBytecodeCache` is set) shortens that cold start by reusing the persisted V8
-compile cache. See [Bytecode caching](/docs/bytecode) and [Scale to zero](/docs/scale-to-zero).
+A cold request reprovisions a pod; the compile cache baked into your image shortens that cold start
+by reusing pre-compiled V8 bytecode — no configuration needed. (The older opt-in
+`spec.cache.enableBytecodeCache` volume is deprecated.) See [Bytecode caching](/docs/bytecode) and
+[Scale to zero](/docs/scale-to-zero).

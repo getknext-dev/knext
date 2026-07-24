@@ -59,10 +59,17 @@ each cold pod reads pre-compiled V8 bytecode instead of recompiling from source;
 [Bun runtime](/docs/bun-runtime), the standalone tree is precompiled to bytecode at **build time**
 (measured −47% boot, 287 ms → 152 ms median on a real Next.js 16.2 build).
 
+<Callout type="warn">
+**Deprecated — no setup needed.** The opt-in PVC-backed bytecode cache
+(`spec.cache.enableBytecodeCache`) described below is deprecated; the compile cache is now baked into
+your image by default, so it works from the first cold pod on any cluster with nothing to enable.
+See [bytecode caching](/docs/bytecode).
+</Callout>
+
 <Callout type="info">
-**Cross-cold-start caching needs persistence.** The bytecode cache only helps across pods if it
-survives pod death — knext mounts it from a persistent volume, not pod-local disk, when
-`spec.cache.enableBytecodeCache` is set.
+**Cross-cold-start caching needs persistence.** The (deprecated) volume-backed bytecode cache only
+helps across pods if it survives pod death — knext mounts it from a persistent volume, not pod-local
+disk, when `spec.cache.enableBytecodeCache` is set.
 </Callout>
 
 <Callout type="warn">

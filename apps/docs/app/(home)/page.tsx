@@ -83,9 +83,10 @@ export default function HomePage() {
               <div className={styles.n}>03</div>
               <h3>Bytecode-cached cold starts</h3>
               <p>
-                <code>NODE_COMPILE_CACHE</code> persists V8 bytecode to a volume — cold pods skip JS
-                recompilation. Or run <Link href="/docs/bun-runtime">Bun</Link> with build-time
-                bytecode precompilation (−47% measured boot). Self-hosted, on your cluster.
+                A V8 compile cache is baked into your image at build time — every cold pod skips JS
+                recompilation, with nothing to enable. Or run{' '}
+                <Link href="/docs/bun-runtime">Bun</Link> with build-time bytecode precompilation
+                (−47% measured boot). Self-hosted, on your cluster.
               </p>
             </div>
             <div className={styles.cell}>
@@ -135,8 +136,7 @@ spec:
   scaling:
     minScale: 0      # scale to zero
     maxScale: 20
-  cache:
-    enableBytecodeCache: true   # NODE_COMPILE_CACHE on a PVC`}</code>
+  # bytecode cache is baked into the image — nothing to configure`}</code>
             </pre>
           </div>
         </div>

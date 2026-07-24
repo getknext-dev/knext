@@ -28,6 +28,39 @@ export interface PreviewInput {
 }
 
 /**
+ * #457 — the legacy `redis ⇒ on` bytecode-cache inference is DEPRECATED.
+ *
+ * When `config.bytecodeCache` is unset and `config.cache.provider === "redis"`,
+ * `enableBytecodeCache` is flipped ON implicitly (back-compat, ADR-0034
+ * decision 3). That implicit inference — and the operator PVC path it feeds —
+ * is superseded by the image-baked V8 compile cache (ADR-0035, the default
+ * cold-start mechanism). We warn ONCE per process, to STDERR (stdout may be the
+ * CR YAML), so users move to setting `bytecodeCache.enabled` explicitly. The
+ * computed CR is unchanged — this is a signal, not a behaviour change.
+ */
+let legacyBytecodeInferenceWarned = false;
+
+/** Test-only: reset the one-time warning latch. */
+export function __resetLegacyBytecodeInferenceWarning(): void {
+    legacyBytecodeInferenceWarned = false;
+}
+
+function warnLegacyBytecodeInference(): void {
+    if (legacyBytecodeInferenceWarned) {
+        return;
+    }
+    legacyBytecodeInferenceWarned = true;
+    // Write to stderr (fd 2) — NEVER stdout, which may carry the CR YAML.
+    process.stderr.write(
+        "[kn-next] DEPRECATION: bytecode caching was enabled implicitly because " +
+            'cache.provider is "redis". This legacy redis⇒on inference is deprecated ' +
+            "and will be removed in a future release. Set `bytecodeCache.enabled` " +
+            "explicitly instead. The V8 compile cache is now baked into the image by " +
+            "default, so the opt-in PVC-backed cache is no longer recommended.\n",
+    );
+}
+
+/**
  * Builds a NextApp CR object from a KnativeNextConfig and a resolved image ref.
  * The image MUST be digest-pinned (the operator enforces this at reconcile time).
  *
@@ -133,6 +166,15 @@ export function buildNextAppCRObject(
     // no default StorageClass. Neither may break a deployment that works today.
     // BACK-COMPAT: with `bytecodeCache` unset we fall back to the legacy
     // redis⇒on inference, so existing CRs are byte-identical.
+    // #457: detect the legacy inference path — bytecodeCache unset AND the
+    // redis provider flips it on — and warn (once, to stderr) without changing
+    // the computed value.
+    const usingLegacyRedisInference =
+        config.bytecodeCache?.enabled === undefined &&
+        config.cache?.provider === "redis";
+    if (usingLegacyRedisInference) {
+        warnLegacyBytecodeInference();
+    }
     const enableBytecodeCache =
         config.bytecodeCache?.enabled ?? config.cache?.provider === "redis";
 

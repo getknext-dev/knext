@@ -442,6 +442,12 @@ type StorageSpec struct {
 type CacheSpec struct {
 	Provider string `json:"provider,omitempty"`
 	URL      string `json:"url,omitempty"`
+	// Deprecated: the PVC-backed bytecode cache is superseded by the V8 compile
+	// cache baked into the application image at build time (ADR-0035), which is
+	// the default cold-start mechanism and needs no volume, mount, or cluster
+	// feature flag. This field still works but will be removed in a future
+	// release per the v1alpha1 stability policy (ADR-0017); migrate off it.
+	//
 	// EnableBytecodeCache provisions a PVC mounted at /cache/bytecode and wires
 	// the runtime code cache for the selected runtime: NODE_COMPILE_CACHE
 	// (/cache/bytecode/latest) always, plus BUN_RUNTIME_TRANSPILER_CACHE_PATH
@@ -450,6 +456,11 @@ type CacheSpec struct {
 	// eviction); both runtimes fail open when the volume is full or unwritable.
 	// +optional
 	EnableBytecodeCache bool `json:"enableBytecodeCache,omitempty"`
+	// Deprecated: sizes the deprecated PVC-backed bytecode cache; superseded by
+	// the image-baked V8 compile cache (ADR-0035) and removed with
+	// EnableBytecodeCache in a future release per the v1alpha1 stability policy
+	// (ADR-0017).
+	//
 	// BytecodeCacheSize sizes the bytecode-cache PVC (default 512Mi).
 	// +optional
 	BytecodeCacheSize string `json:"bytecodeCacheSize,omitempty"`

@@ -10,7 +10,9 @@ The reconciliation loop triggers on creation, updates, and deletion of `NextApp`
 The operator generates a dedicated, least-privilege `ServiceAccount` for the application (e.g., `[app-name]-sa`).
 - **Security Check**: It explicitly sets `AutomountServiceAccountToken = false` to prevent arbitrary pods from accessing the Kubernetes API, adhering to secure-by-default container posture.
 
-### 2. Bytecode Cache Storage (`PersistentVolumeClaim`)
+### 2. Bytecode Cache Storage (`PersistentVolumeClaim`) — Deprecated
+> **Deprecated (ADR-0035, action item 4):** superseded by the image-baked V8 compile cache (the default cold-start mechanism). This PVC path still reconciles unchanged but is scheduled for removal per the v1alpha1 stability policy (ADR-0017); the operator emits a `DeprecatedBytecodeCachePVC` Warning event when it runs.
+
 If `spec.cache.enableBytecodeCache` is `true`, the operator dynamically provisions a ReadWriteOnce `PersistentVolumeClaim`.
 - This PVC is sized based on `bytecodeCacheSize` (defaulting to `512Mi`).
 - It allows subsequent pod replicas to skip V8 JS parsing and compilation, accelerating pod startup times.

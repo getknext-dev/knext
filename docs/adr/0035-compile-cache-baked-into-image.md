@@ -119,4 +119,10 @@ per above.
    recommended path.
 4. **Decide and announce the deprecation timeline** for the operator PVC path and the CLI's
    legacy `redis ⇒ on` inference (ADR-0034 action item 6), as a deliberate deprecation rather
-   than a silent cleanup.
+   than a silent cleanup. **(Done — announced, issue #457.)** The deprecation is now *announced,
+   keep-it-working*: the CR fields `CacheSpec.EnableBytecodeCache` / `BytecodeCacheSize` carry
+   `Deprecated:` godoc (surfaced in the generated CRD + `kubectl explain`); the reconciler emits a
+   `DeprecatedBytecodeCachePVC` Warning event + log line when the PVC is provisioned; the CLI warns
+   (once, to stderr) when the legacy `redis ⇒ on` inference is taken. Behaviour is byte-identical —
+   **removal** is a scheduled breaking change owned by release notes under the v1alpha1 stability
+   policy (ADR-0017), landing after verified-adapter status / npm publish.

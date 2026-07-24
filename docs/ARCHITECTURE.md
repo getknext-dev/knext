@@ -497,6 +497,14 @@ End-to-end cold start on our OKE benchmarks is **scheduling-dominated (~4s media
 
 ### Cache volume configuration
 
+> **Deprecated (ADR-0035, action item 4).** The PVC-backed bytecode cache below
+> (`bytecodeCache` / `spec.cache.enableBytecodeCache`) is deprecated in favour of
+> the V8 compile cache **baked into the image at build time** — the default
+> cold-start mechanism, which needs no volume and works on stock Knative. The
+> config field still works but is scheduled for removal per the v1alpha1
+> stability policy (ADR-0017); the operator emits a `DeprecatedBytecodeCachePVC`
+> Warning event when it is set.
+
 For the standard Node.js runtime, `NODE_COMPILE_CACHE` uses a shared volume:
 
 ```typescript
