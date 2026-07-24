@@ -10,6 +10,13 @@
   **composes** AppDatabase; **intra-cluster first**; consistency = **strong
   in-zone / eventual across-zone / no cross-zone ACID (sagas)**. Build sequenced
   AFTER v1.2 (#127/#103) to keep the gateway lane collision-free.
+- **Note (knext ADR-0025, 2026-07-15):** the passages below that describe *"the
+  knext operator delegates DB lifecycle to `AppDatabase`"* / *"knext depends on its
+  Secret/status contract"* reflect **ADR-0006's original design and are no longer
+  current** — knext removed managed provisioning and now binds a database **BYO via
+  `DATABASE_URL`**; it does not drive `AppDatabase`. This does not affect this ADR's
+  decision: the **`Zone`-composes-`AppDatabase` delegation pattern is scale-zero-pg's
+  own** and stands; only the knext analogy is dated.
 - **Wake mechanism: IMPLEMENTED (v2-1, #139, 2026-07-07).** §4c option (ii)
   gateway-mediated replication-wake is BUILT and LIVE-PROVEN on OKE: the
   apps-gateway detects a `replication=` startup, authorizes it against the

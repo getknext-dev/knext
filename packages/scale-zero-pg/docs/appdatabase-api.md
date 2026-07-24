@@ -1,9 +1,16 @@
-# AppDatabase API — the external-driver contract
+# AppDatabase API — scale-zero-pg's provisioning contract
 
 The `AppDatabase` custom resource is scale-zero-pg's **declarative provisioning
-interface** (ADR-0004). This page is its **stable external-driver contract**: the
-surface an *external* operator — the **knext operator** — depends on to provision a
-branch-per-app database and wire it into an app (ADR-0006, unified config, #119).
+interface** (ADR-0004), reconciled by scale-zero-pg's **own** operator (see §5 of
+[`ARCHITECTURE.md`](ARCHITECTURE.md)). This page is its **stable external-driver
+contract**: the surface any *external* controller depends on to drive
+branch-per-app provisioning programmatically (ADR-0006, unified config, #119).
+
+> **knext is a consumer, not the driver.** After **ADR-0025** the knext operator
+> no longer provisions databases at all — it binds an already-provisioned database
+> **BYO** via a `DATABASE_URL`-from-Secret (ADR-0019) and depends only on the
+> resulting DSN, not on this CRD. This contract is **scale-zero-pg's own**; it
+> exists for whoever chooses to drive `AppDatabase` from their controller.
 
 Everything here is a **soft-compatibility surface**: the CRD stays `v1alpha1`
 (see [Versioning](#versioning)), but the fields, Secret keys, and status
