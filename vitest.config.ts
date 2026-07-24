@@ -44,7 +44,35 @@ export default defineConfig({
     exclude: [...configDefaults.exclude, '**/.claude/**'],
     coverage: {
       provider: 'v8',
-      reporter: ['text', 'json', 'html'],
+      reporter: ['text', 'text-summary', 'json', 'json-summary', 'html'],
+      // Honest denominator: an explicit `include` makes Vitest count every
+      // matching source file, not only the ones a test happens to import — so
+      // adding an untested file can no longer silently RAISE the percentage.
+      // (Vitest 4 measures all `include` matches by default; the v3 `all` flag
+      // was removed.)
+      include: ['packages/*/src/**/*.{ts,tsx}'],
+      exclude: [
+        ...(configDefaults.coverage.exclude ?? []),
+        // Untracked local cruft (0 tracked files in git) — never repo code.
+        '**/packages/admin/**',
+        '**/packages/knext/**',
+        // Tests, type-only decls, and generated/index barrels carry no logic to cover.
+        '**/*.test.{ts,tsx}',
+        '**/*.d.ts',
+        '**/__tests__/**',
+        '**/__mocks__/**',
+        '**/*.config.{ts,js,mjs}',
+      ],
+      // Regression ratchet: floors set just below the measured baseline
+      // (@knext/core ~78% lines / ~72% branches on 2026-07-24; lib/db/ui already
+      // >90%). CI fails if coverage drops below these — they are RAISED toward 90
+      // as the @knext/core coverage push lands. See docs/benchmarks/coverage-baseline.md.
+      thresholds: {
+        statements: 77,
+        branches: 70,
+        functions: 74,
+        lines: 77,
+      },
     },
   },
 });
