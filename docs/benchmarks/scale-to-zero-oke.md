@@ -1432,6 +1432,38 @@ overhead ~52 ms (parent), and steady-state throughput sub-ms p50 / p99 ~2 ms. Fu
 should target (a) the Knative infrastructure path (OKE-gated), (b) confirming the #441 deferral on OKE,
 and (c) the in-process (no-child-spawn) architecture for the cold-start CPU-contention class.
 
+## Run 22 (2026-07-25) — LOCAL supervisor pre-spawn import cost (pino lazy-loaded)
+
+> **NOT an OKE run.** A deterministic Node import-cost measurement, not an end-to-end cold start.
+
+**Why.** The #441 arc's mechanism is that the supervisor's own pre-spawn CPU steals from the child's
+boot window on oversubscribed 0-CPU-request nodes, so the deferral work moved the heavy static graphs
+(`prom-client`, `@opentelemetry/api`) behind dynamic imports. This closes the **last** heavy static
+dep the supervisor still paid eagerly: **pino**.
+
+**Finding.** `utils/logger.ts` instantiated pino at **module scope** (`export const logger =
+pino({…})`), so merely importing the logger loaded + initialised pino. Measured in a fresh Node
+process importing the built logger module: **~11.5–13.9 ms** (call it ~13 ms). The supervisor
+imported the logger and emitted a startup line **before** `spawn()`, dropping that cost on the
+cold-start critical path.
+
+**Change.** pino is now lazy (`import type` + `createRequire("pino")` on first emit, behind a
+`Proxy<Logger>`; config byte-identical), and the supervisor's startup `log.info` moved to **after**
+`spawn()`. In the normal path nothing logs before spawn, so pino loads only once the child is already
+booting.
+
+| supervisor pre-spawn logger cost | before | after |
+|---|---|---|
+| import + first-use (no emit) | ~13 ms (eager pino) | **~0.1 ms** (pino not loaded) |
+
+**Scope / honesty.** This is a **deterministic import-cost removal**, locally measured — not an
+end-to-end cold-start number. Whether removing ~13 ms of supervisor pre-spawn CPU moves the observed
+OKE wrapper overhead is **OKE-gated**, exactly like the rest of the #441 arc (Run 9 / Run 20). What is
+certain is that pino no longer executes on the pre-spawn critical path. With `prom-client`, otel, and
+now pino all off that path, the supervisor's remaining pre-spawn work is small local modules + node
+builtins; further cold-start levers are the ones Run 21 named (Knative infra path, in-process
+architecture), which need OKE.
+
 ## Caveat
 
 These are **point-in-time measurements on a specific small (2-node) OKE cluster** with a
