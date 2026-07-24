@@ -53,9 +53,9 @@ describe("#457 legacy redis⇒on bytecode inference deprecation warning", () => 
     });
 
     function warnedDeprecation(): boolean {
-        return warnSpy.mock.calls.some((args) =>
+        return warnSpy.mock.calls.some((args: unknown[]) =>
             args.some(
-                (a) =>
+                (a: unknown) =>
                     typeof a === "string" &&
                     /deprecat/i.test(a) &&
                     /bytecodeCache\.enabled/.test(a),
@@ -116,8 +116,10 @@ describe("#457 legacy redis⇒on bytecode inference deprecation warning", () => 
     it("warns only once per process (one-time)", () => {
         buildNextAppCRObject(baseConfig({ cache: REDIS }), IMG, "ns");
         buildNextAppCRObject(baseConfig({ cache: REDIS }), IMG, "ns");
-        const deprecationCalls = warnSpy.mock.calls.filter((args) =>
-            args.some((a) => typeof a === "string" && /deprecat/i.test(a)),
+        const deprecationCalls = warnSpy.mock.calls.filter((args: unknown[]) =>
+            args.some(
+                (a: unknown) => typeof a === "string" && /deprecat/i.test(a),
+            ),
         );
         expect(deprecationCalls.length).toBe(1);
     });
