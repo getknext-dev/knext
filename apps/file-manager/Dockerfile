@@ -165,12 +165,19 @@ RUN node -e "const{createRequire}=require('module');const r=createRequire('/app/
 #
 # The script FAILS THE BUILD if the cache ends up empty — the empty-dir bug above
 # shipped unnoticed precisely because nothing asserted this.
+#
+# NODE_COMPILE_CACHE here is ABSOLUTE (/app/…) on purpose: the warm-up script
+# CLEARS the cache dir before booting (#440), and its safety guard FATALs on a
+# RELATIVE path — clearing a cwd-relative path is unsafe. WORKDIR is /app, so
+# this is the SAME on-disk dir as the CMD's default below (which resolves the
+# relative fallback against the runtime cwd /app); V8 keys entries by module
+# filename, so the baked cache is read either way.
 COPY --from=builder /app/apps/file-manager/scripts/warm-compile-cache.sh /usr/local/bin/warm-compile-cache.sh
 RUN chmod +x /usr/local/bin/warm-compile-cache.sh \
     && NODE_ENV=production \
        PORT=3000 \
        METRICS_PORT=9099 \
-       NODE_COMPILE_CACHE=apps/file-manager/.next/compile-cache \
+       NODE_COMPILE_CACHE=/app/apps/file-manager/.next/compile-cache \
        STANDALONE_SERVER_PATH=apps/file-manager/server.js \
        /usr/local/bin/warm-compile-cache.sh \
     && chown -R node:node apps/file-manager/.next
@@ -207,4 +214,4 @@ USER node
 # EXPORT so the value reaches the exec'd node process (a bare `${VAR:=default}` only sets a shell
 # variable, not an env var). The operator's externally-injected value (PVC path) still wins via
 # `:-`; the Dockerfile only supplies the fallback when the env var is unset at runtime.
-CMD ["sh", "-c", "export NODE_COMPILE_CACHE=\"${NODE_COMPILE_CACHE:-apps/file-manager/.next/compile-cache}\"; export STANDALONE_SERVER_PATH=\"${STANDALONE_SERVER_PATH:-apps/file-manager/server.js}\"; exec node -e \"import('@knext/core/internal/node-server')\""]
+CMD ["sh", "-c", "export NODE_COMPILE_CACHE=\"${NODE_COMPILE_CACHE:-/app/apps/file-manager/.next/compile-cache}\"; export STANDALONE_SERVER_PATH=\"${STANDALONE_SERVER_PATH:-apps/file-manager/server.js}\"; exec node -e \"import('@knext/core/internal/node-server')\""]

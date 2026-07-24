@@ -150,6 +150,42 @@ describe('#437 — the compile cache is baked into the image at build time', () 
     expect(dockerfileRuntimeCmd()).toContain('${NODE_COMPILE_CACHE:-');
   });
 
+  it("the warm-up's NODE_COMPILE_CACHE is ABSOLUTE, so it PASSES the freshness guard (#440)", () => {
+    // The freshness guard clears the cache dir and (correctly) FATALs on a
+    // RELATIVE path — clearing a cwd-relative path is unsafe. So the warm-up
+    // CALLER must pass an ABSOLUTE path or the guard kills the real image build.
+    // Unit CI never runs `docker build`, so this string assertion is the only
+    // thing that catches a relative regression before it breaks production.
+    const df = dockerfile();
+    const runBlock = df.slice(0, df.indexOf('CMD ['));
+    const m = runBlock.match(/NODE_COMPILE_CACHE=(\S+)/);
+    if (!m) throw new Error('warm-up RUN block must set NODE_COMPILE_CACHE');
+    const value = m[1];
+
+    // Absolute, and not a form the guard rejects (`..`, `//`, bare `.`).
+    expect(value.startsWith('/')).toBe(true);
+    expect(value).not.toMatch(/(^|\/)\.\.(\/|$)/);
+    expect(value).not.toMatch(/\/\//);
+    expect(value).not.toMatch(/(^|\/)\.(\/|$)/);
+
+    // Prove it end-to-end: the real Dockerfile value must PASS the guard (the
+    // script clears it and reaches the boot), not FATAL on the absolute-path
+    // check. Point it at a temp dir so we exercise the guard, not a real path.
+    const probeDir = mkdtempSync(join(tmpdir(), 'knext-cc-abs-'));
+    const { status, output } = runWarmup({
+      // Substitute the temp dir but KEEP the leading-slash shape of the real
+      // value — we are asserting "absolute ⇒ guard passes", and the shipped
+      // value is absolute.
+      cacheDir: probeDir,
+      bootCmd: stubServer(true),
+      port: 34385,
+      env: STUB_FLOOR,
+    });
+    expect(status).toBe(0);
+    expect(output).not.toMatch(/not an absolute path/i);
+    expect(output).toMatch(/baked/);
+  });
+
   it('makes the baked cache readable by the runtime `node` user', () => {
     expect(dockerfile()).toMatch(/chown\s+-R\s+node:node\s+apps\/file-manager\/\.next/);
   });
