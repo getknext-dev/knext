@@ -10,7 +10,16 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { afterAll, describe, expect, it } from 'vitest';
+import { afterAll, describe, expect, it, vi } from 'vitest';
+
+// #492: each `it` drives the extracted port_owned_by_server() bash function via a
+// synchronous execFileSync('/bin/bash', …) shell-out. In isolation these cost
+// ~0.3–1.2s each, but under a full parallel `vitest run` the CPU/process
+// contention on those serialized shell-outs pushes individual cases past the
+// default 5000ms testTimeout — an intermittent 5s timeout with no behavioral
+// cause. Raise the timeout FILE-SCOPED (never the global default, which must stay
+// tight to catch real hangs elsewhere). This does not weaken any assertion.
+vi.setConfig({ testTimeout: 20_000, hookTimeout: 20_000 });
 
 /**
  * GUARD TEST for `port_owned_by_server()` in scripts/e2e-deploy.sh (#210 —
