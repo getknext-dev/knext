@@ -94,8 +94,13 @@ const appSrvx = serve({
 // Adapt srvx's BunServer to the { port, stop(force) } shape the metrics log and
 // the shared drain orchestrator (runtime-contract.mjs) expect. srvx `close()`
 // also awaits its own waitUntil() tasks, so vinext `after()`/waitUntil drains.
+//
+// Prefer the PORT we passed to serve() over srvx's internal `.bun.server.port`
+// (#467): the internal shape is a transitive-dep implementation detail. We only
+// dip into it for the ephemeral case (PORT=0), where the real bound port is
+// assigned by the OS and is not knowable from PORT alone.
 const appServer = {
-  port: appSrvx.bun.server.port,
+  port: PORT || appSrvx.bun?.server?.port,
   stop: (force) => appSrvx.close(force),
 };
 
