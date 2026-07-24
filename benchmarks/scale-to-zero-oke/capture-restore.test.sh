@@ -180,7 +180,200 @@ if [ "$rc" -eq 0 ]; then ok "burst phase survives containerConcurrency=0 (got $r
 else nope "burst phase survives containerConcurrency=0 (got $rc)"; fi
 assert_not_contains "${T5}/out.txt" "division by 0" "no 'division by 0' arithmetic error"
 
-rm -rf "$T1" "$T2" "$T3" "$T4" "$T5"
+# ── Test 6: a second signal during restore is never silent about un-applied keys (#430) ──
+# Restore patches run UNBOUNDED. A first Ctrl-C triggers cleanup's restore; a
+# second signal arriving mid-restore re-enters cleanup(), hits the CLEANED_UP
+# guard, and (pre-#430) exited 130/143 SILENTLY — abandoning whatever restore
+# patches had not yet run, with no RESTORE-FAILED line. The fix tracks the
+# not-yet-attempted keys in a SCRIPT-GLOBAL and, on re-entry with work still
+# pending, prints them instead of exiting silently.
+#
+# Two properties are asserted:
+#   (a) DETERMINISTIC — a completed restore that then re-enters cleanup (the
+#       ordinary INT->exit->EXIT double-fire) stays SILENT: no FALSE
+#       "RESTORE INTERRUPTED" line, and the normal `restored:` line still prints.
+#       This guards the fix against over-reporting and runs on every machine.
+#   (b) BEST-EFFORT — deliver a genuine second signal mid-restore and assert the
+#       interrupted-restore surface NAMES the un-applied keys. Whether a second
+#       signal preempts a still-running restore (vs being deferred by bash until
+#       the restore completes, or default-killing the process) is bash-build and
+#       timing dependent, so this is attempted with bounded retries and SKIPs
+#       (never FAILs) if it cannot be landed on this machine.
+echo
+echo "[6] a second signal during restore is never silent about un-applied keys (#430)"
+T6="$(mktemp -d)"
+cat > "${T6}/ksvc.json" <<'JSON'
+{
+  "apiVersion": "serving.knative.dev/v1",
+  "kind": "Service",
+  "metadata": { "name": "demo-svc", "namespace": "bench" },
+  "spec": {
+    "template": {
+      "metadata": { "annotations": { "autoscaling.knative.dev/max-scale": "3" } },
+      "spec": { "containerConcurrency": 20 }
+    }
+  }
+}
+JSON
+# Stub kubectl: answers `get ksvc` from the fixture, SLEEPS on every `patch` (so
+# both the apply-config patch and the restore patches have an interrupt window),
+# and logs every invocation. `get pods` (wait_zero) returns nothing -> 0.
+cat > "${T6}/kubectl" <<STUB
+#!/usr/bin/env bash
+echo "\$*" >> "${T6}/calls.log"
+case "\$*" in
+  *"get ksvc"*) cat "${T6}/ksvc.json" ;;
+  *patch*)      sleep 1 ;;
+  *)            : ;;
+esac
+exit 0
+STUB
+chmod +x "${T6}/kubectl"
+: > "${T6}/calls.log"
+
+# t6_run <first-sig> <second-sig|"">  — launch run.sh under the seam with a real
+# load phase so the first signal interrupts the in-flight APPLY_SETTLE sleep and
+# cleanup runs via the SIGNAL trap (not the plain EXIT path). Poll for the
+# restore banner, deliver the second signal (if any) into the restore window.
+# Result: $T6_RC (exit status), $T6_OUT (artifact path).
+T6_OUT="${T6}/out.txt"
+t6_run() {
+  local sig1="$1" sig2="$2" pid i
+  : > "$T6_OUT"; : > "${T6}/calls.log"
+  DRY_RUN=1 DRY_RUN_EXERCISE_KC=1 KUBECTL_BIN="${T6}/kubectl" \
+  PHASES="cold" COLD_SAMPLES=1 APPLY_SETTLE_SECONDS=3 OUT="${T6}/results.txt" \
+    bash "$RUN_SH" --service demo-svc --namespace bench > "$T6_OUT" 2>&1 &
+  pid=$!
+  # wait for the cold phase to start applying config, then let the apply patch
+  # (1s) finish so signal 1 lands in the APPLY_SETTLE sleep (an interruptible
+  # builtin), giving a clean signal-triggered cleanup.
+  for i in $(seq 1 100); do
+    grep -qF "PHASE A" "$T6_OUT" 2>/dev/null && break
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.1
+  done
+  sleep 1.5
+  kill -"$sig1" "$pid" 2>/dev/null
+  if [ -n "$sig2" ]; then
+    # wait for restore to actually start, then fire the second signal into it
+    for i in $(seq 1 60); do
+      grep -qF "CLEANUP — restoring" "$T6_OUT" 2>/dev/null && break
+      kill -0 "$pid" 2>/dev/null || break
+      sleep 0.1
+    done
+    sleep 0.4
+    kill -"$sig2" "$pid" 2>/dev/null
+  fi
+  wait "$pid"
+  T6_RC=$?
+}
+
+# (a) DETERMINISTIC — single signal: restore runs to completion, then the
+# INT->exit->EXIT double-fire re-enters cleanup with nothing pending. Must be
+# SILENT about interruption and still print the normal restored: line.
+t6_run INT ""
+assert_not_contains "$T6_OUT" "RESTORE INTERRUPTED" \
+  "a completed restore does NOT emit a false interrupted-restore line (no over-report)"
+assert_contains "$T6_OUT" "restored: containerConcurrency=20" \
+  "a completed restore still prints the normal 'restored:' line after a signal"
+
+# (b) BEST-EFFORT — two signals (INT then TERM) aimed at the restore window.
+t6_landed=0
+for attempt in 1 2 3; do
+  t6_run INT TERM
+  if grep -qF "RESTORE INTERRUPTED" "$T6_OUT"; then t6_landed=1; break; fi
+done
+
+if [ "$t6_landed" != "1" ]; then
+  echo "  SKIP — a second signal could not be landed mid-restore after 3 attempts"
+  echo "         on this bash build (bash defers/serialises the second signal to"
+  echo "         restore completion here). The re-entry-reporting surface and the"
+  echo "         RESTORE_PENDING tracking are exercised structurally by (a) above."
+else
+  assert_contains "$T6_OUT" "RESTORE INTERRUPTED" \
+    "a second signal mid-restore reports the interruption (never silent)"
+  if grep -E "RESTORE INTERRUPTED .*(containerConcurrency|max-scale|target-burst-capacity|panic-window-percentage|panic-threshold-percentage)" "$T6_OUT" >/dev/null; then
+    ok "the interrupted-restore line NAMES at least one un-applied key"
+  else
+    nope "the interrupted-restore line NAMES at least one un-applied key"
+    sed 's/^/          /' "$T6_OUT"
+  fi
+  assert_contains "$T6_OUT" "MAY STILL BE MUTATED" \
+    "the interruption warns the service MAY STILL BE MUTATED"
+  if [ "$T6_RC" = "130" ] || [ "$T6_RC" = "143" ]; then
+    ok "signal exit semantics preserved (got $T6_RC)"
+  else
+    nope "signal exit semantics preserved — expected 130/143, got $T6_RC"
+  fi
+fi
+
+# ── Test 7: cleanup()'s re-entry reporting, driven DETERMINISTICALLY (#430) ──
+# Test 6(b) reproduces the real double-signal race but SKIPs where bash defers
+# the second signal to restore completion. This test removes the race entirely:
+# it SOURCES run.sh (which stops at the test seam, defining cleanup() without
+# running the benchmark) and drives cleanup()'s re-entry path directly. This is
+# the faithful red-before-green check — pre-#430 the CLEANED_UP guard returned
+# silently, so the artifact stayed empty; the fix names the un-applied keys.
+echo
+echo "[7] cleanup() re-entry names un-applied keys (deterministic, sourced) (#430)"
+T7="$(mktemp -d)"
+
+# 7a — re-entry with restore mid-flight: RESTORE_PENDING names the keys not yet
+# attempted, so the artifact must report them (RED before the fix).
+(
+  set -uo pipefail
+  SERVICE="demo-svc"; NS="bench"; DRY_RUN=1; OUT="${T7}/boot.txt"
+  # shellcheck disable=SC1090
+  source "$RUN_SH" --service demo-svc --namespace bench >/dev/null 2>&1
+  trap - EXIT INT TERM                       # don't run cleanup on subshell exit
+  CLEANED_UP=1                               # a first cleanup already began
+  RESTORE_PENDING=" target-burst-capacity panic-window-percentage panic-threshold-percentage"
+  OUT="${T7}/a.txt"; : > "$OUT"
+  cleanup >/dev/null 2>&1                     # the re-entrant second call
+)
+assert_contains "${T7}/a.txt" "RESTORE INTERRUPTED" \
+  "re-entry mid-restore reports the interruption instead of exiting silently"
+assert_contains "${T7}/a.txt" "target-burst-capacity panic-window-percentage panic-threshold-percentage" \
+  "the report NAMES exactly the un-applied keys"
+assert_contains "${T7}/a.txt" "MAY STILL BE MUTATED" \
+  "the report warns the service MAY STILL BE MUTATED"
+
+# 7b — re-entry AFTER restore finished (RESTORE_PENDING empty): the ordinary
+# EXIT-after-INT double-fire must stay SILENT (true idempotency, no over-report).
+(
+  set -uo pipefail
+  SERVICE="demo-svc"; NS="bench"; DRY_RUN=1; OUT="${T7}/boot.txt"
+  # shellcheck disable=SC1090
+  source "$RUN_SH" --service demo-svc --namespace bench >/dev/null 2>&1
+  trap - EXIT INT TERM
+  CLEANED_UP=1; RESTORE_PENDING=""            # restore already completed
+  OUT="${T7}/b.txt"; : > "$OUT"
+  cleanup >/dev/null 2>&1
+)
+assert_not_contains "${T7}/b.txt" "RESTORE INTERRUPTED" \
+  "a re-entry after restore completed stays silent (no false interrupted line)"
+
+# 7c — _restore_attempted's leading-space scheme must not let one key's removal
+# clobber another whose name it is a prefix-collision with (panic-window vs
+# panic-threshold). Attempting panic-window-percentage must leave the others.
+coll="$(
+  set -uo pipefail
+  SERVICE="demo-svc"; NS="bench"; DRY_RUN=1; OUT="${T7}/boot.txt"
+  # shellcheck disable=SC1090
+  source "$RUN_SH" --service demo-svc --namespace bench >/dev/null 2>&1
+  trap - EXIT INT TERM
+  RESTORE_PENDING=" containerConcurrency max-scale target-burst-capacity panic-window-percentage panic-threshold-percentage"
+  _restore_attempted panic-window-percentage
+  printf '%s' "$RESTORE_PENDING"
+)"
+if [ "$coll" = " containerConcurrency max-scale target-burst-capacity panic-threshold-percentage" ]; then
+  ok "_restore_attempted removes only the exact key (panic-threshold-percentage survives)"
+else
+  nope "_restore_attempted removes only the exact key"
+  echo "        got RESTORE_PENDING='${coll}'"
+fi
+
+rm -rf "$T1" "$T2" "$T3" "$T4" "$T5" "$T6" "$T7"
 
 echo
 echo "== ${PASS} passed, ${FAIL} failed =="
