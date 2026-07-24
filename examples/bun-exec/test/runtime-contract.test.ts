@@ -251,6 +251,35 @@ function waitForListening(proc: ReturnType<typeof spawn>): Promise<void> {
   });
 }
 
+// Like waitForListening but returns the app port parsed from the LISTENING line —
+// used to exercise the PORT=0 ephemeral path (#467), where the reported port comes
+// from srvx's OS-resolved `.bun.server.port`, the one internal we still read.
+function waitForListeningPort(proc: ReturnType<typeof spawn>): Promise<number> {
+  return new Promise((resolvePromise, reject) => {
+    const timeout = setTimeout(
+      () => reject(new Error(`harness never listened. stderr:\n${stderr}`)),
+      15000,
+    );
+    let stderr = '';
+    let buf = '';
+    proc.stderr?.on('data', (d: Buffer) => {
+      stderr += d.toString();
+    });
+    proc.stdout?.on('data', (d: Buffer) => {
+      buf += d.toString();
+      const m = buf.match(/LISTENING:(\d+) /);
+      if (m) {
+        clearTimeout(timeout);
+        resolvePromise(Number(m[1]));
+      }
+    });
+    proc.once('exit', (code) => {
+      clearTimeout(timeout);
+      reject(new Error(`harness exited early (${code}). stderr:\n${stderr}`));
+    });
+  });
+}
+
 describe.skipIf(!bunAvailable)(
   'bun-exec entry e2e (harness under bun): drain + metrics + auth',
   () => {
@@ -359,5 +388,20 @@ describe.skipIf(!bunAvailable)('bun-exec entry e2e (REAL srvx close): drain + ha
     });
     expect(exitCode).toBe(1); // hardcap path (force close)
     await hung; // the force-closed request errors/settles — don't leak it
+  }, 30000);
+
+  it('PORT=0 resolves the ephemeral port via srvx and serves on it', async () => {
+    // The one path still reading srvx's internal `.bun.server.port`: with PORT=0
+    // the OS assigns the port, so `appServer.port` falls back to the srvx-resolved
+    // value. This pins that fallback so an srvx internal-shape change is caught.
+    child = spawnHarness({ PORT: '0', METRICS_PORT: '0' }, SRVX_HARNESS);
+    const port = await waitForListeningPort(child);
+    expect(port).toBeGreaterThan(0);
+
+    const r = await fetch(`http://127.0.0.1:${port}/api/health`);
+    expect(r.status).toBe(200);
+    expect(await r.json()).toEqual({ status: 'ok', target: 'bun-exec' });
+
+    child.kill('SIGTERM');
   }, 30000);
 });
