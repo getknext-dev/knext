@@ -12,7 +12,19 @@ import { get as httpGet } from 'node:http';
 import { connect } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+
+// #492: this file runs REAL work in synchronous child processes — beforeAll shells
+// out to bash scripts/e2e-deploy.sh (fake `next build` + standalone server boot +
+// TCP readiness probe), and individual cases spawn e2e-logs.sh / e2e-cleanup.sh or
+// probe the booted server over node:http/net. In isolation each is well under the
+// default 5000ms testTimeout, but under a full parallel `vitest run` the CPU/process
+// contention on those blocking shell-outs intermittently pushes a case (and the
+// heavy beforeAll) past 5s — a spurious 5000ms timeout with no behavioral cause.
+// Raise the timeouts FILE-SCOPED (never the global default, which stays tight to
+// catch real hangs). hookTimeout covers the full deploy in beforeAll (its own
+// execFileSync timeout is 60s). No assertion is weakened.
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 60_000 });
 
 /**
  * Contract test for scripts/e2e-deploy.sh + scripts/e2e-cleanup.sh (#89, ADR-0007 A3-2).
