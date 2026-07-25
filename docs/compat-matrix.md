@@ -81,3 +81,30 @@ gate, not the official suite — the official suite has its own row, own workflo
   Policy: the alert issue opens → triage the shard logs → if the red persists, **flip this row
   back to ❌ citing the red run**. The matrix guard enforces evidence only in the ✅ direction
   (evidence IFF ✅), so the honest flip-back is always free.
+
+## Lane-scoped ledger (#281 / #282)
+
+The compat ledger is **lane-scoped**: every case and every `$knextQuarantines` entry is
+attributed to exactly one runtime lane — **node** or **bun** — mirroring the Node-credential and
+Bun-runtime-axis rows above. Lane isolation is enforced in code
+(`tests/compat-lane-ledger.ts` — `laneVerdict` reads only one lane's results), so **a node-lane
+failure never reds the bun lane, and vice-versa**. The `compat-smoke` runner filters checks by the
+active lane and prints a per-lane summary (`LANE=<lane> passing=… quarantined=… failing=…`).
+
+| Lane | Role | Quarantined entries |
+| --- | --- | --- |
+| node | the Node 778/0 credential | the `runtime-prefetch` §d family (file-level) |
+| bun | the Bun runtime axis (first green pending) | the `bun-edge-fetch` family (per-case) |
+
+_(This per-lane block is derived from `renderLaneSummaryMarkdown(summarizeLedger(...))` in
+`tests/compat-lane-ledger.ts`; update it when the ledger changes.)_
+
+- **Bounded per mechanism-family.** Each family is capped at `FAMILY_QUARANTINE_CAP`
+  (`tests/compat-quarantine-bounds.ts`); exceeding the cap is a **hard CI fail** with an escalation
+  message — a growing blanket skip is not a policy (guarded by `tests/deploy-manifest-lanes.test.ts`).
+- **Dated + upstream-referenced — never hide a regression.** Every quarantine entry must carry a
+  **dated justification** (an ISO date *or* a CI run ID — a timestamped, auditable artifact) **and**
+  an **upstream reference** (a `vercel/next.js#NNNNN` issue/PR, a knext `#NNN`, or a run ID). An
+  entry with no upstream cause is a regression being hidden, and is rejected
+  (`quarantineEntryProblems`, guarded by `tests/compat-lane-ledger.test.ts`). A quarantine may only
+  ever cover a **known-upstream gap**, and expires on the first `NEXTJS_REF` containing the fix.

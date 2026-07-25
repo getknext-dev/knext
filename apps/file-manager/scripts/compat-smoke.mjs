@@ -91,16 +91,33 @@ async function waitForReady(timeoutMs = 60000) {
 }
 
 // ── check runner ───────────────────────────────────────────────────────────
+// The lane this run exercises (#281): the runtime axis the compat-matrix already
+// splits on. Each check declares the lane(s) it applies to; a check NOT in the
+// active lane is SKIPPED, so a node-only check can never red the bun lane (and
+// vice-versa). Default = both lanes.
+const LANE = RUNTIME === 'bun' ? 'bun' : 'node';
+
 const results = [];
-async function check(name, fn) {
+async function check(name, fn, lanes = ['node', 'bun']) {
+  // Lane filter (#281): if this check does not apply to the active lane, record a
+  // lane-scoped SKIP and do NOT run it — its verdict never crosses into this lane.
+  if (!lanes.includes(LANE)) {
+    results.push({ name, status: 'SKIP', lane: LANE, note: `not in "${LANE}" lane` });
+    return;
+  }
   try {
     const note = await fn();
-    results.push({ name, status: 'PASS', note: note || '' });
+    results.push({ name, status: 'PASS', lane: LANE, note: note || '' });
   } catch (err) {
     if (err && err.__skip) {
-      results.push({ name, status: 'SKIP', note: err.message });
+      results.push({ name, status: 'SKIP', lane: LANE, note: err.message });
     } else {
-      results.push({ name, status: 'FAIL', note: err && err.message ? err.message : String(err) });
+      results.push({
+        name,
+        status: 'FAIL',
+        lane: LANE,
+        note: err && err.message ? err.message : String(err),
+      });
     }
   }
 }
@@ -329,6 +346,11 @@ function printReport() {
   const fail = results.filter((r) => r.status === 'FAIL').length;
   const sk = results.filter((r) => r.status === 'SKIP').length;
   console.log(`PASS=${pass}  FAIL=${fail}  SKIP=${sk}  (total ${results.length})`);
+  // Per-lane summary (#281): this run's verdict is attributed to a single lane, so
+  // a red here reds ONLY this lane — the other lane's gate stays independent.
+  console.log(
+    `LANE=${LANE}  passing=${pass}  quarantined=0  failing=${fail}  (per-lane; the other lane runs separately)`,
+  );
   console.log('━'.repeat(72));
 }
 
