@@ -169,6 +169,29 @@ It **degrades closed, never crashing or hanging**:
 A link-out row points to the shipped turnkey **Grafana dashboards** for deep, cluster-wide analysis
 (no embedded iframe — the app renders its own aggregates).
 
+### Cold start & scaling page (`/observability/scaling`)
+
+The scale-to-zero lifecycle view — the page a always-on platform cannot show you. Over the last
+hour it renders:
+
+- **Replica count 0→N** and the current replica count. This series
+  (`kube_deployment_status_replicas`) is **provided by the cluster via kube-state-metrics**, not by
+  knext. If it is not installed the panel says **"requires kube-state-metrics"** — it never draws a
+  misleading "0 replicas".
+- **Cold starts** — rate per second plus p50 / p99 cold-start duration (`knext_coldstart_*`).
+- **Database wake, by pool role** (writer / reader) — rate per second plus p50 / p99 wake duration
+  (`knext_db_wake_*`), i.e. how long the first connect to a sleeping database takes.
+- A **Currently** row (replicas now, in-flight requests).
+
+It uses the same Prometheus backend and the same degrade-closed behaviour as the Overview page, and
+runs the **same PromQL as the shipped "Scale-to-zero lifecycle" Grafana dashboard**, so the page and
+the dashboard can never disagree. A link row points at that dashboard for longer ranges and
+per-deployment breakdowns.
+
+On both this page and the Overview page, a value that has produced **no sample** renders as
+**`no data yet`** — deliberately distinct from a measured `0`, so "nothing recorded" is never
+mistaken for "zero".
+
 ### Web Vitals page (`/observability/web-vitals`)
 
 Server-rendered "Speed Insights" page showing the current **p75** for each Core Web Vital
@@ -185,7 +208,7 @@ server-side; the browser receives the rendered aggregate, never raw metrics.
 | Variable | Description |
 |----------|-------------|
 | `OBSERVABILITY_TOKEN` | Bearer token gating `/observability/*` (unset ⇒ deny-all) |
-| `OBSERVABILITY_PROMETHEUS_URL` | In-cluster Prometheus base URL for the Overview/RED page (unset ⇒ graceful "not configured" empty state; server-side only, never sent to the browser) |
+| `OBSERVABILITY_PROMETHEUS_URL` | In-cluster Prometheus base URL for the Overview/RED and Cold-start & scaling pages (unset ⇒ graceful "not configured" empty state; server-side only, never sent to the browser) |
 
 ### Events API (`/api/cache/events`)
 

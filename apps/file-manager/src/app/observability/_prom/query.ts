@@ -186,6 +186,49 @@ export function latestMatrixValue(result: PromResult<PromMatrixSeries[]>): numbe
   return Number.isFinite(value) ? value : null;
 }
 
+/** One `(label value, latest sample)` pair extracted from a range result. */
+export interface LabeledValue {
+  readonly key: string;
+  readonly value: number;
+}
+
+/**
+ * The latest sample of every series in a range result, keyed by one of its labels
+ * (e.g. `role` for the DB-wake panels). Returns `[]` when the result is not `ok`
+ * or carries no series — callers then render the no-data marker rather than a
+ * misleading zero.
+ */
+export function latestMatrixByLabel(
+  result: PromResult<PromMatrixSeries[]>,
+  label: string,
+): LabeledValue[] {
+  if (result.status !== 'ok') {
+    return [];
+  }
+  const out: LabeledValue[] = [];
+  for (const series of result.data) {
+    const last = series.values.at(-1);
+    if (!last) {
+      continue;
+    }
+    const value = Number(last[1]);
+    if (!Number.isFinite(value)) {
+      continue;
+    }
+    out.push({ key: series.metric[label] ?? 'unknown', value });
+  }
+  return out;
+}
+
+/**
+ * `true` when the query succeeded but Prometheus knows no series at all for it —
+ * the signal used to distinguish "kube-state-metrics is not installed" from
+ * "there are currently 0 replicas".
+ */
+export function hasNoSeries(result: PromResult<PromMatrixSeries[]>): boolean {
+  return result.status === 'ok' && result.data.length === 0;
+}
+
 /**
  * The numeric value of the first sample in an instant result, or `null` when not
  * `ok` / empty.
@@ -224,4 +267,43 @@ export const OVERVIEW_QUERIES = {
     'histogram_quantile(0.99, sum by (le) (rate(knext_http_request_duration_seconds_bucket[5m])))',
   /** Current in-flight requests (saturation). */
   inFlight: 'sum(knext_http_inflight_requests)',
+} as const;
+
+/**
+ * The scale-to-zero lifecycle PromQL for the Cold-start & Scaling page (P1.3).
+ *
+ * These are deliberately the **same query shapes as the shipped Grafana
+ * `scale-to-zero` dashboard** (`packages/kn-next-operator/config/grafana/dashboards/
+ * scale-to-zero.json`), minus its `$app` template selector and with a fixed 5m
+ * rate window in place of `$__rate_interval` — so the in-app page and the
+ * dashboard can never disagree about what a number means. A parity test asserts
+ * both that every `knext_*` series exists in `adapters/metrics.ts` and that each
+ * mirrored query matches a dashboard expression.
+ *
+ * Provenance note: `kube_deployment_status_replicas` is **cluster-provided by
+ * kube-state-metrics**, not emitted by knext. When kube-state-metrics is absent
+ * the query succeeds with zero series — which the page must render as "requires
+ * kube-state-metrics", NEVER as "0 replicas".
+ */
+export const SCALING_QUERIES = {
+  /** Replica count 0→N over the window (kube-state-metrics; cluster-provided). */
+  replicas: 'sum by (deployment) (kube_deployment_status_replicas)',
+  /** Current replica count (kube-state-metrics; cluster-provided). */
+  currentReplicas: 'sum(kube_deployment_status_replicas)',
+  /** Cold starts per second. */
+  coldStartRate: 'sum(rate(knext_coldstart_total[5m]))',
+  /** p50 cold-start duration (seconds). */
+  coldStartP50:
+    'histogram_quantile(0.50, sum by (le) (rate(knext_coldstart_duration_seconds_bucket[5m])))',
+  /** p99 cold-start duration (seconds). */
+  coldStartP99:
+    'histogram_quantile(0.99, sum by (le) (rate(knext_coldstart_duration_seconds_bucket[5m])))',
+  /** DB 0→1 wakes per second, by pool role (writer|reader). */
+  dbWakeRateByRole: 'sum by (role) (rate(knext_db_wake_total[5m]))',
+  /** p50 DB-wake duration (seconds), by pool role. */
+  dbWakeP50ByRole:
+    'histogram_quantile(0.50, sum by (le, role) (rate(knext_db_wake_duration_seconds_bucket[5m])))',
+  /** p99 DB-wake duration (seconds), by pool role. */
+  dbWakeP99ByRole:
+    'histogram_quantile(0.99, sum by (le, role) (rate(knext_db_wake_duration_seconds_bucket[5m])))',
 } as const;

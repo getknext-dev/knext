@@ -3,6 +3,7 @@ import { resolve } from 'node:path';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { OVERVIEW_QUERIES, PROMETHEUS_URL_ENV } from './_prom/query';
+import { NO_DATA } from './_ui/format';
 
 /**
  * P1.2 (obs-pages plan) / ADR-0038 — the /observability Overview (RED) page:
@@ -158,6 +159,19 @@ describe('overview page authorized render (ok path)', () => {
     const html = await renderPage();
     expect(html.toLowerCase()).toContain('grafana');
     expect(html).not.toContain('<iframe');
+  });
+});
+
+describe('overview page — explicit "no data yet" marker (P1.2 sign-off follow-up)', () => {
+  it('renders the no-data marker, not a bare dash, when a series has no samples', async () => {
+    const empty = { status: 'success', data: { resultType: 'matrix', result: [] } };
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () => jsonResponse(empty));
+
+    const html = await renderPage();
+
+    expect(html).toContain(NO_DATA);
+    // No rendered VALUE is a bare dash (a dash reads like a zero at a glance).
+    expect(html).not.toMatch(/>\s*[—–-]\s*</);
   });
 });
 

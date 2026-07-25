@@ -91,7 +91,14 @@ shipped Grafana overlay instead of rebuilding cluster dashboards — faithful to
   typed `ok | unconfigured | unreachable` results). Graceful empty state when
   `OBSERVABILITY_PROMETHEUS_URL` is unset (no fetch) and an error state when unreachable; PromQL is
   parity-tested against `adapters/metrics.ts` so it only references real `knext_*` series.
-- [ ] **P1.3 Cold-start & Scaling** page (knext's unique page; same degrade contract).
+- [x] **P1.3 Cold-start & Scaling** — `apps/file-manager/src/app/observability/scaling/page.tsx`
+  (replicas / cold-start rate + p50/p99 / DB-wake by `role`), reusing `_prom/query.ts` and the
+  shipped `scale-to-zero` Grafana dashboard's PromQL shapes (parity-tested against both
+  `adapters/metrics.ts` and the dashboard JSON). Same auth + degrade contract, plus a **third,
+  distinct state**: the replica series is cluster-provided by kube-state-metrics, so its absence
+  renders "requires kube-state-metrics" — never a dishonest "0 replicas". Also lands the P1.2
+  sign-off follow-up: absent samples render an explicit `no data yet` marker (`_ui/format.ts`),
+  visually distinct from a measured zero, on the Overview page too.
 - [ ] **P1.4 Deployments** page (read-only `NextApp` status; resolve the RBAC vs status-mirror fork).
 - [ ] **Cross-cutting:** `/observability` layout with tab nav + Grafana link-out card.
 - [ ] **Phase 2 (gated on founder greenlight):** promote the recipe to a scaffoldable `--observability`

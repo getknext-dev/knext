@@ -9,6 +9,7 @@ import {
   queryInstant,
   queryRange,
 } from './_prom/query';
+import { formatMillis, formatNumber, NO_DATA } from './_ui/format';
 import { isObservabilityAuthorized, observabilityToken } from './auth';
 
 /**
@@ -88,14 +89,6 @@ interface PanelRow {
   readonly display: string;
 }
 
-function formatMillis(seconds: number | null): string {
-  return seconds === null ? '—' : `${(seconds * 1000).toFixed(0)} ms`;
-}
-
-function formatNumber(value: number | null, digits: number, unit: string): string {
-  return value === null ? '—' : `${value.toFixed(digits)}${unit}`;
-}
-
 export default async function OverviewPage() {
   const requestHeaders = await headers();
   const authorized = isObservabilityAuthorized(
@@ -146,7 +139,8 @@ export default async function OverviewPage() {
       <h1>Overview</h1>
       <p>
         RED signals for this app over the last hour — request rate, 5xx error rate, latency
-        percentiles and current concurrency, from the core <code>knext_http_*</code> metrics.
+        percentiles and current concurrency, from the core <code>knext_http_*</code> metrics. Values
+        marked “{NO_DATA}” have produced no sample — that is not the same as a measured zero.
       </p>
       <table style={{ borderCollapse: 'collapse', marginTop: '1rem' }}>
         <thead>
