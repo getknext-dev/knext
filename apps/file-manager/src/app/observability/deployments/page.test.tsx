@@ -1,7 +1,12 @@
 import { renderToStaticMarkup } from 'react-dom/server';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { NextAppReadResult, NextAppStatusView } from '../_k8s/nextapp';
-import { APP_NAME_ENV, deploymentQueries, PROMETHEUS_URL_ENV } from '../_prom/query';
+import {
+  APP_NAME_ENV,
+  APP_NAMESPACE_ENV,
+  deploymentQueries,
+  PROMETHEUS_URL_ENV,
+} from '../_prom/query';
 
 /**
  * P1.4 (obs-pages plan) / ADR-0038 — the /observability/deployments page.
@@ -43,12 +48,31 @@ vi.mock('../_k8s/nextapp', async (importOriginal) => {
 const ORIGINAL_TOKEN = process.env.OBSERVABILITY_TOKEN;
 const ORIGINAL_URL = process.env[PROMETHEUS_URL_ENV];
 const ORIGINAL_APP = process.env[APP_NAME_ENV];
+const ORIGINAL_NS = process.env[APP_NAMESPACE_ENV];
 const TOKEN = 's3cret-observability-token';
 const APP = 'demo';
+
+const NAMESPACE = 'demo-ns';
 
 /** Deterministic creation timestamps (unix seconds) for the seeded revisions. */
 const CREATED_00002 = Date.UTC(2026, 6, 20, 9, 0, 0) / 1000;
 const CREATED_00003 = Date.UTC(2026, 6, 24, 15, 30, 0) / 1000;
+/** NEWER than this app's newest — a loose selector would call these "current". */
+const CREATED_SIBLING = Date.UTC(2026, 6, 25, 8, 0, 0) / 1000;
+const CREATED_OTHER_NS = Date.UTC(2026, 6, 26, 8, 0, 0) / 1000;
+
+/**
+ * The cluster the fake Prometheus knows about. It contains the two traps the
+ * PR-520 review found: a SIBLING app whose name starts with this app's name, and
+ * a SAME-NAMED app in another namespace — both with newer revisions, so a loose
+ * selector does not merely add a row, it renames "current".
+ */
+const UNIVERSE = [
+  { ns: NAMESPACE, dep: 'demo-00002-deployment', created: CREATED_00002, replicas: 0 },
+  { ns: NAMESPACE, dep: 'demo-00003-deployment', created: CREATED_00003, replicas: 2 },
+  { ns: NAMESPACE, dep: 'demo-api-00007-deployment', created: CREATED_SIBLING, replicas: 5 },
+  { ns: 'other-ns', dep: 'demo-00009-deployment', created: CREATED_OTHER_NS, replicas: 9 },
+] as const;
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -71,39 +95,45 @@ const EMPTY_VECTOR = { status: 'success', data: { resultType: 'vector', result: 
 
 interface SeedOptions {
   readonly kubeStateAbsent?: boolean;
+  /** Restrict the fake cluster to this app's own namespace. */
+  readonly singleNamespace?: boolean;
+}
+
+/**
+ * A fake Prometheus that actually EVALUATES the selector rather than replaying a
+ * fixed answer. Without this, a test could not tell an anchored selector from a
+ * loose one — the seeded rows would come back either way, which is exactly how
+ * the original scoping bug slipped through.
+ *
+ * Prometheus anchors `=~` matchers on both ends, so the regex is `^…$`.
+ */
+function evaluate(promql: string, opts: SeedOptions) {
+  const deploymentMatch = /deployment=~"([^"]+)"/.exec(promql);
+  const namespaceMatch = /namespace="([^"]+)"/.exec(promql);
+  const pattern = new RegExp(`^${deploymentMatch?.[1] ?? '.*'}$`);
+  const universe = opts.singleNamespace ? UNIVERSE.filter((s) => s.ns === NAMESPACE) : UNIVERSE;
+
+  return universe.filter(
+    (s) => pattern.test(s.dep) && (!namespaceMatch || s.ns === namespaceMatch[1]),
+  );
 }
 
 function seededFetch(url: unknown, opts: SeedOptions = {}): Response {
-  const raw = decodeURIComponent(String(url));
+  const promql = decodeURIComponent(new URL(String(url)).searchParams.get('query') ?? '');
 
-  if (opts.kubeStateAbsent) {
+  if (opts.kubeStateAbsent || !promql.includes('kube_deployment_')) {
     return jsonResponse(EMPTY_VECTOR);
   }
-  if (raw.includes('kube_deployment_created')) {
-    return jsonResponse(
-      vector(
-        { metric: { deployment: 'demo-00002-deployment' }, value: String(CREATED_00002) },
-        { metric: { deployment: 'demo-00003-deployment' }, value: String(CREATED_00003) },
-      ),
-    );
-  }
-  if (raw.includes('kube_deployment_status_replicas_available')) {
-    return jsonResponse(
-      vector(
-        { metric: { deployment: 'demo-00002-deployment' }, value: '0' },
-        { metric: { deployment: 'demo-00003-deployment' }, value: '2' },
-      ),
-    );
-  }
-  if (raw.includes('kube_deployment_status_replicas')) {
-    return jsonResponse(
-      vector(
-        { metric: { deployment: 'demo-00002-deployment' }, value: '0' },
-        { metric: { deployment: 'demo-00003-deployment' }, value: '2' },
-      ),
-    );
-  }
-  return jsonResponse(EMPTY_VECTOR);
+
+  const created = promql.includes('kube_deployment_created');
+  return jsonResponse(
+    vector(
+      ...evaluate(promql, opts).map((s) => ({
+        metric: { namespace: s.ns, deployment: s.dep },
+        value: created ? String(s.created) : String(s.replicas),
+      })),
+    ),
+  );
 }
 
 function mockFetch(opts: SeedOptions = {}) {
@@ -154,6 +184,7 @@ beforeEach(() => {
   process.env.OBSERVABILITY_TOKEN = TOKEN;
   process.env[PROMETHEUS_URL_ENV] = 'http://prometheus.monitoring.svc:9090';
   process.env[APP_NAME_ENV] = APP;
+  process.env[APP_NAMESPACE_ENV] = NAMESPACE;
 });
 
 afterEach(() => {
@@ -165,6 +196,8 @@ afterEach(() => {
   else process.env[PROMETHEUS_URL_ENV] = ORIGINAL_URL;
   if (ORIGINAL_APP === undefined) delete process.env[APP_NAME_ENV];
   else process.env[APP_NAME_ENV] = ORIGINAL_APP;
+  if (ORIGINAL_NS === undefined) delete process.env[APP_NAMESPACE_ENV];
+  else process.env[APP_NAMESPACE_ENV] = ORIGINAL_NS;
 });
 
 async function renderPage(): Promise<string> {
@@ -369,7 +402,68 @@ describe('deployments page — Prometheus-derived history (fallback source)', ()
     const queries = sentQueries(spy);
     expect(queries.length).toBeGreaterThan(0);
     expect(queries.filter((q) => !q.includes(APP))).toEqual([]);
-    expect(queries).toContain(deploymentQueries(APP).revisionCreated);
+    expect(queries).toContain(deploymentQueries(APP, NAMESPACE).revisionCreated);
+  });
+
+  it('EXCLUDES a sibling app whose name starts with this app’s name', async () => {
+    // `demo-api-00007-deployment` is newer than every `demo` revision, so a
+    // loose `demo.*` selector would not just add a row — it would label another
+    // workload's deploy as THIS app's "current" revision.
+    mockFetch();
+    const html = await renderPage();
+
+    expect(html).not.toContain('demo-api');
+    expect(html).toContain('demo-00003-deployment');
+    // …and the row still called "current" is this app's own newest revision.
+    const currentRow =
+      /<tr><td[^>]*>([^<]*)<\/td>(?:<td[^>]*>[^<]*<\/td>){4}<td[^>]*>current</.exec(html);
+    expect(currentRow?.[1]).toBe('demo-00003-deployment');
+  });
+
+  it('EXCLUDES a same-named app in another namespace when the namespace is known', async () => {
+    mockFetch();
+    const html = await renderPage();
+
+    expect(html).not.toContain('demo-00009-deployment');
+    expect(html).not.toContain('other-ns');
+    // Every rendered row belongs to this app's namespace.
+    expect(html).toContain(`>${NAMESPACE}<`);
+  });
+});
+
+describe('deployments page — namespace ambiguity is refused, not guessed', () => {
+  it('renders a DISTINCT ambiguous state when two namespaces match and KN_APP_NAMESPACE is unset', async () => {
+    delete process.env[APP_NAMESPACE_ENV];
+    mockFetch();
+
+    const html = await renderPage();
+
+    expect(html).toContain('namespace scope for this app is ambiguous');
+    expect(html).toContain(APP_NAMESPACE_ENV);
+    // No table at all: with two candidate namespaces, calling the newest one
+    // "current" would be the lying panel this page refuses to be.
+    expect(html).not.toContain('<table');
+    expect(html).not.toContain('>current<');
+    // Distinct from every other honest state.
+    expect(html).not.toContain('requires kube-state-metrics');
+    expect(html).not.toContain('could not reach the observability backend');
+  });
+
+  it('still renders (with an explicit caveat) when only ONE namespace matches', async () => {
+    delete process.env[APP_NAMESPACE_ENV];
+    mockFetch({ singleNamespace: true });
+
+    const html = await renderPage();
+
+    expect(html).not.toContain('namespace scope for this app is ambiguous');
+    expect(html).toContain('demo-00003-deployment');
+    expect(html).toContain('not namespace-pinned');
+  });
+
+  it('does not warn about pinning when the namespace IS pinned', async () => {
+    mockFetch();
+    const html = await renderPage();
+    expect(html).not.toContain('not namespace-pinned');
   });
 });
 
@@ -388,7 +482,7 @@ describe('deployments page — NextApp status history (high-fidelity source)', (
     expect(html).toContain('RolloutComplete');
     // Rollback fidelity: the pinned revision + canary split.
     expect(html).toContain('pinned to demo-00002');
-    expect(html).toContain('90');
+    expect(html).toContain('>90<');
     // The pin comes from the CR — the derived table cannot know it, which is
     // why the derived section carries its own "not available" caveat (asserted
     // in the derived-source test).

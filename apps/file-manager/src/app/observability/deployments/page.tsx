@@ -7,10 +7,12 @@ import {
 } from '../_k8s/nextapp';
 import {
   APP_NAME_ENV,
+  APP_NAMESPACE_ENV,
   deploymentQueries,
   hasNoInstantSeries,
   instantByLabel,
   observabilityAppName,
+  observabilityAppNamespace,
   PROMETHEUS_URL_ENV,
   type PromResult,
   type PromVectorSample,
@@ -39,8 +41,10 @@ import { isObservabilityAuthorized, observabilityToken } from '../auth';
  *  - an operator who wants rollback fidelity opts in deliberately: set
  *    `OBSERVABILITY_NEXTAPP_SOURCE=kubernetes` AND apply the least-privilege,
  *    read-only Role in `apps/file-manager/deploy/observability-nextapp-read-rbac.yaml`
- *    (get/list/watch `nextapps` in this namespace only; never part of the
- *    operator's default bundle);
+ *    (`get` on THIS app's `nextapps` object only, by name, in this namespace;
+ *    never part of the operator's default bundle). NOTE: on an operator-managed
+ *    deploy no ServiceAccount token is projected, so that source can only report
+ *    `not-in-cluster` — the manifest documents why (PR-520);
  *  - the page ALWAYS states which source produced what it shows.
  * Choosing (a)-only would have added RBAC for everyone and shown nothing on OKE;
  * (b)-only could never show a rollback. This keeps the smallest default surface
@@ -55,8 +59,13 @@ import { isObservabilityAuthorized, observabilityToken } from '../auth';
  *    ServiceAccount token ever reaches the browser.
  *  - Distinct honest states, never a fake-empty table implying "no deployments":
  *    unconfigured · unreachable · source-unavailable (CRD absent / RBAC denied /
- *    not in cluster) · source not enabled · kube-state-metrics absent · scope
- *    unknown.
+ *    not in cluster) · source not enabled · kube-state-metrics absent · app scope
+ *    unknown · NAMESPACE scope ambiguous.
+ *  - Row-level scoping is part of that contract (PR-520): this page ENUMERATES
+ *    rows and calls the newest "current", so the derived selector is anchored to
+ *    Knative's `<app>-<digits>-deployment` naming and namespace-pinned when the
+ *    namespace is known; rows are keyed by `(namespace, deployment)`. A sibling
+ *    `<app>-api` revision must never appear here, let alone as "current".
  */
 export const dynamic = 'force-dynamic';
 
@@ -72,6 +81,7 @@ const NEXTAPP_NOT_ENABLED = 'NextApp status reads are not enabled';
 const PROM_SOURCE_LABEL = 'Prometheus (kube-state-metrics)';
 const K8S_SOURCE_LABEL = 'NextApp status (Kubernetes API)';
 const NO_ROLLBACK_FIDELITY = 'rollback state is not available from this source';
+const NAMESPACE_AMBIGUOUS = 'namespace scope for this app is ambiguous';
 
 const shell = { padding: '2rem', fontFamily: 'system-ui, sans-serif' } as const;
 const cell = { padding: '0.5rem 1rem' } as const;
@@ -152,29 +162,45 @@ function NextAppSourceNotice({ result }: { result: NextAppReadResult }) {
 
 /** One revision as derived from the cluster-provided kube-state-metrics series. */
 interface RevisionRow {
+  /** `<namespace>/<deployment>` — unique, unlike `deployment` alone. */
+  readonly key: string;
+  readonly namespace: string;
   readonly deployment: string;
   readonly createdSec: number;
   readonly replicas: number | null;
   readonly available: number | null;
 }
 
+/**
+ * Join the three cluster series into one row per revision.
+ *
+ * Keyed on `(namespace, deployment)`, NOT `deployment`: Deployment names are
+ * only unique within a namespace, so keying on the name alone merges two
+ * same-named apps in different namespaces — attaching one's replica count to
+ * the other's row and emitting duplicate React keys (the PR-520 finding).
+ */
 function buildRevisionRows(
   created: PromResult<PromVectorSample[]>,
   replicas: PromResult<PromVectorSample[]>,
   available: PromResult<PromVectorSample[]>,
 ): RevisionRow[] {
-  const byDeployment = (r: PromResult<PromVectorSample[]>) =>
-    new Map(instantByLabel(r, 'deployment').map((v) => [v.key, v.value]));
-  const replicaMap = byDeployment(replicas);
-  const availableMap = byDeployment(available);
+  const byKey = (r: PromResult<PromVectorSample[]>) =>
+    new Map(instantByLabel(r, 'namespace', 'deployment').map((v) => [v.key, v.value]));
+  const replicaMap = byKey(replicas);
+  const availableMap = byKey(available);
 
-  return instantByLabel(created, 'deployment')
-    .map((v) => ({
-      deployment: v.key,
-      createdSec: v.value,
-      replicas: replicaMap.get(v.key) ?? null,
-      available: availableMap.get(v.key) ?? null,
-    }))
+  return instantByLabel(created, 'namespace', 'deployment')
+    .map((v) => {
+      const [namespace = 'unknown', deployment = 'unknown'] = v.key.split('/');
+      return {
+        key: v.key,
+        namespace,
+        deployment,
+        createdSec: v.value,
+        replicas: replicaMap.get(v.key) ?? null,
+        available: availableMap.get(v.key) ?? null,
+      };
+    })
     .sort((a, b) => b.createdSec - a.createdSec);
 }
 
@@ -197,6 +223,7 @@ function DerivedHistory({ rows }: { rows: RevisionRow[] }) {
         <thead>
           <tr>
             <th style={headCell}>Revision (Deployment)</th>
+            <th style={headCell}>Namespace</th>
             <th style={headCell}>First seen (UTC)</th>
             <th style={headCell}>Replicas</th>
             <th style={headCell}>Ready</th>
@@ -205,8 +232,9 @@ function DerivedHistory({ rows }: { rows: RevisionRow[] }) {
         </thead>
         <tbody>
           {rows.map((row, index) => (
-            <tr key={row.deployment}>
+            <tr key={row.key}>
               <td style={labelCell}>{row.deployment}</td>
+              <td style={cell}>{row.namespace}</td>
               <td style={cell}>{new Date(row.createdSec * 1000).toISOString()}</td>
               <td style={cell}>{formatCount(row.replicas)}</td>
               <td style={cell}>{formatCount(row.available)}</td>
@@ -320,31 +348,41 @@ export default async function DeploymentsPage() {
     return <ScopeUnknown />;
   }
 
-  const nextApp = await readNextAppStatus(app);
+  // The namespace half of the scope. Unset is not fatal (the operator injects no
+  // namespace env — see APP_NAMESPACE_ENV), but it means the queries cannot be
+  // namespace-pinned, so an ambiguous result is refused below rather than guessed.
+  const namespace = observabilityAppNamespace();
 
   // Degrade closed before any network call: Prometheus unset ⇒ no fetch.
+  // The Kubernetes read runs CONCURRENTLY with the Prometheus queries — awaiting
+  // it first would add its full 4 s timeout to page latency on a hung API server.
   const promConfigured = Boolean(prometheusBaseUrl());
-  let created: PromResult<PromVectorSample[]> | undefined;
-  let replicas: PromResult<PromVectorSample[]> | undefined;
-  let available: PromResult<PromVectorSample[]> | undefined;
-  if (promConfigured) {
-    const queries = deploymentQueries(app);
-    [created, replicas, available] = await Promise.all([
-      queryInstant(queries.revisionCreated),
-      queryInstant(queries.revisionReplicas),
-      queryInstant(queries.revisionAvailable),
-    ]);
-  }
+  const queries = promConfigured ? deploymentQueries(app, namespace) : undefined;
+  const [nextApp, created, replicas, available] = await Promise.all([
+    readNextAppStatus(app),
+    queries ? queryInstant(queries.revisionCreated) : undefined,
+    queries ? queryInstant(queries.revisionReplicas) : undefined,
+    queries ? queryInstant(queries.revisionAvailable) : undefined,
+  ]);
 
   // ANY failed query means the timeline cannot be trusted, so the page says
   // "could not reach" rather than drawing a partial history that silently omits
   // revisions.
   const promUnreachable = [created, replicas, available].some((r) => r?.status === 'unreachable');
   const kubeStateAbsent = created !== undefined && !promUnreachable && hasNoInstantSeries(created);
-  const rows =
+  const allRows =
     created && replicas && available && !promUnreachable && !kubeStateAbsent
       ? buildRevisionRows(created, replicas, available)
       : [];
+
+  // Namespace ambiguity: with no `KN_APP_NAMESPACE` the query is not
+  // namespace-pinned, so a same-named app in another namespace comes back too.
+  // One namespace ⇒ no ambiguity, render it. More than one ⇒ we cannot know
+  // which is ours, and calling the newest of them "current" would be exactly the
+  // lying panel this page refuses to be.
+  const namespacesSeen = new Set(allRows.map((r) => r.namespace));
+  const namespaceAmbiguous = !namespace && namespacesSeen.size > 1;
+  const rows = namespaceAmbiguous ? [] : allRows;
 
   const nextAppUsable = nextApp.status === 'ok';
   // Neither source can say anything AND neither is even configured: that is a
@@ -392,9 +430,34 @@ export default async function DeploymentsPage() {
         </p>
       ) : null}
 
+      {namespaceAmbiguous ? (
+        <p>
+          The <strong>{NAMESPACE_AMBIGUOUS}</strong>: <code>{APP_NAMESPACE_ENV}</code> is unset, and
+          the revision series for <code>{app}</code> came back from {[...namespacesSeen].length}{' '}
+          different namespaces ({[...namespacesSeen].sort().join(', ')}). Deployment names are only
+          unique within a namespace, so this page cannot tell which of them is <em>this</em> app —
+          and calling the newest of them &ldquo;current&rdquo; would be a lying panel. Set{' '}
+          <code>{APP_NAMESPACE_ENV}</code> (via the CR&rsquo;s <code>spec.env</code>) to this
+          app&rsquo;s namespace to pin the query.
+        </p>
+      ) : null}
+
       {rows.length > 0 ? <DerivedHistory rows={rows} /> : null}
 
-      {promConfigured && !promUnreachable && !kubeStateAbsent && rows.length === 0 ? (
+      {rows.length > 0 && !namespace ? (
+        <p style={{ fontSize: '0.85rem' }}>
+          The revision query is <strong>not namespace-pinned</strong> (
+          <code>{APP_NAMESPACE_ENV}</code> is unset); all matching series came from a single
+          namespace, so the rows above are unambiguous, but setting it makes that guarantee explicit
+          rather than observed.
+        </p>
+      ) : null}
+
+      {promConfigured &&
+      !promUnreachable &&
+      !kubeStateAbsent &&
+      !namespaceAmbiguous &&
+      rows.length === 0 ? (
         <p>
           The revision query succeeded but returned {NO_DATA} for this app&rsquo;s Deployments — no
           revision has been observed yet.

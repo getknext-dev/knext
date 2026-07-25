@@ -1,5 +1,6 @@
 import 'server-only';
 import { readFileSync } from 'node:fs';
+import { request as httpsRequest } from 'node:https';
 
 /**
  * Server-only, READ-ONLY, **opt-in** `NextApp` status reader for the in-app
@@ -19,9 +20,14 @@ import { readFileSync } from 'node:fs';
  * and no network call at all** unless `OBSERVABILITY_NEXTAPP_SOURCE=kubernetes`
  * is explicitly set. Turning it on is a two-step, deliberate act: set the env var
  * AND apply the least-privilege, opt-in Role in
- * `apps/file-manager/deploy/observability-nextapp-read-rbac.yaml` (get/list/watch
- * on `nextapps` in this namespace only — never bundled into the operator's
- * default install).
+ * `apps/file-manager/deploy/observability-nextapp-read-rbac.yaml` (`get` on THIS
+ * app's `nextapps` object only, by `resourceNames`, in this namespace — never
+ * bundled into the operator's default install).
+ *
+ * Honest caveat (PR-520): under an operator-managed deploy the app's
+ * ServiceAccount is reconciled with `automountServiceAccountToken: false`, so no
+ * token is projected and this reader can only return `not-in-cluster`. The
+ * opt-in manifest documents that; nothing here pretends otherwise.
  *
  * ## Contract
  * - **Read-only.** `GET` only; the page never mutates cluster state (ADR-0001:
@@ -34,10 +40,14 @@ import { readFileSync } from 'node:fs';
  *   the returned value; failure details are short categories, never raw errors
  *   or internal hosts/IPs.
  *
- * TLS: the API server is reached over HTTPS and its CA is the projected
- * `.../serviceaccount/ca.crt`. Node's global `fetch` has no per-request CA hook,
- * so the deployment sets `NODE_EXTRA_CA_CERTS` to that path (documented in the
- * opt-in manifest). We deliberately do NOT disable TLS verification.
+ * TLS (PR-520 review): the API server is reached over HTTPS and its CA is the
+ * projected `.../serviceaccount/ca.crt`. That CA is passed **per request** via
+ * `node:https`' `ca` option, so trusting the cluster CA for this ONE read does
+ * not widen the process-wide trust store (which a global `NODE_EXTRA_CA_CERTS`
+ * would). Verification is NEVER disabled — no `rejectUnauthorized: false`, no
+ * `NODE_TLS_REJECT_UNAUTHORIZED`. `node:https` (rather than an `undici`
+ * dispatcher) keeps this dependency-free; global `fetch` has no per-request CA
+ * hook at all.
  */
 
 /** Opt-in switch. Anything other than {@link NEXTAPP_SOURCE_KUBERNETES} = off. */
@@ -122,6 +132,55 @@ function readSecretFile(name: string): string | undefined {
   }
 }
 
+/** The minimal HTTP response shape this module needs. */
+interface RawResponse {
+  readonly statusCode: number;
+  readonly body: string;
+}
+
+/**
+ * One read-only HTTPS GET with a **per-request** CA and a hard timeout.
+ *
+ * `node:https` is used instead of global `fetch` for exactly one reason: it
+ * accepts the cluster CA per request (`ca`), so the app's process-wide TLS trust
+ * store is never widened for this single read (PR-520 sysdesign follow-up). No
+ * response caching exists on this path at all, so there is nothing to opt out of.
+ */
+function getJson(
+  url: string,
+  token: string,
+  ca: string | undefined,
+  opts: { readonly timeoutMs: number },
+): Promise<RawResponse> {
+  return new Promise((resolve, reject) => {
+    const request = httpsRequest(
+      url,
+      {
+        method: 'GET',
+        // Scope the cluster CA to THIS request. Verification stays on.
+        ca: ca ? [ca] : undefined,
+        headers: { authorization: `Bearer ${token}`, accept: 'application/json' },
+        timeout: opts.timeoutMs,
+      },
+      (res) => {
+        const chunks: Buffer[] = [];
+        res.on('data', (chunk: Buffer) => chunks.push(chunk));
+        res.on('end', () =>
+          resolve({
+            statusCode: res.statusCode ?? 0,
+            body: Buffer.concat(chunks).toString('utf8'),
+          }),
+        );
+        res.on('error', reject);
+      },
+    );
+    // A hung API server must degrade the page, never hang the request.
+    request.on('timeout', () => request.destroy(new Error('timeout')));
+    request.on('error', reject);
+    request.end();
+  });
+}
+
 function unavailable(reason: NextAppUnavailableReason, detail: string): NextAppReadResult {
   return { status: 'source-unavailable', reason, detail };
 }
@@ -178,31 +237,28 @@ export async function readNextAppStatus(
 
   const url = `https://${host}:${port}/apis/${API_GROUP}/${API_VERSION}/namespaces/${namespace}/nextapps/${name}`;
 
-  let response: Response;
+  let response: RawResponse;
   try {
-    response = await fetch(url, {
-      method: 'GET',
-      cache: 'no-store',
-      signal: AbortSignal.timeout(opts?.timeoutMs ?? DEFAULT_TIMEOUT_MS),
-      headers: { authorization: `Bearer ${token}`, accept: 'application/json' },
+    response = await getJson(url, token, readSecretFile('ca.crt'), {
+      timeoutMs: opts?.timeoutMs ?? DEFAULT_TIMEOUT_MS,
     });
   } catch {
     // Deliberately no error message: it can carry the API server host/IP.
     return unavailable('unreachable', 'the Kubernetes API server could not be reached');
   }
 
-  if (response.status === 404) {
+  if (response.statusCode === 404) {
     return unavailable('crd-absent', 'HTTP 404 — no such NextApp resource or CRD');
   }
-  if (response.status === 401 || response.status === 403) {
-    return unavailable('forbidden', `HTTP ${response.status} — read access denied`);
+  if (response.statusCode === 401 || response.statusCode === 403) {
+    return unavailable('forbidden', `HTTP ${response.statusCode} — read access denied`);
   }
-  if (!response.ok) {
-    return unavailable('unreachable', `HTTP ${response.status} from the Kubernetes API`);
+  if (response.statusCode < 200 || response.statusCode > 299) {
+    return unavailable('unreachable', `HTTP ${response.statusCode} from the Kubernetes API`);
   }
 
   try {
-    return { status: 'ok', data: toView(await response.json()) };
+    return { status: 'ok', data: toView(JSON.parse(response.body)) };
   } catch {
     return unavailable('unreachable', 'the Kubernetes API returned an unreadable response');
   }
