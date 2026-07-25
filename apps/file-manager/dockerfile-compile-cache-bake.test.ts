@@ -28,7 +28,9 @@ import { describe, expect, it } from 'vitest';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DOCKERFILE = resolve(__dirname, 'Dockerfile');
-const WARMUP_SCRIPT = resolve(__dirname, 'scripts/warm-compile-cache.sh');
+// Promoted out of apps/file-manager/scripts/ to a shared repo-root location so the
+// second consumer (apps/docs, #439) inherits the guards instead of copy-pasting.
+const WARMUP_SCRIPT = resolve(__dirname, '../../scripts/warm-compile-cache.sh');
 
 function dockerfile(): string {
   return readFileSync(DOCKERFILE, 'utf8');

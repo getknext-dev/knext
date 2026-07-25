@@ -66,10 +66,14 @@ MIN_BYTES="${KNEXT_WARMUP_MIN_BYTES:-1000000}"
 # (and by a knext app whose runtime entry differs) without a container build.
 BOOT_CMD="${KNEXT_WARMUP_BOOT_CMD:-node -e \"import('@knext/core/internal/node-server')\"}"
 
-# Shallow health route: returns 200 as soon as the server is up, WITHOUT dialing
-# Postgres or Redis. Never point this at the DEEP health route — probing real
-# dependencies would make the image build require a live database.
-HEALTH_URL="http://127.0.0.1:${PORT}/api/health"
+# Shallow readiness route: returns 200 as soon as the server is up, WITHOUT
+# dialing Postgres or Redis. Never point this at a DEEP health route — probing
+# real dependencies would make the image build require a live database.
+# Overridable so a second consumer can point it at whatever dependency-free route
+# its app serves: apps/file-manager has a shallow /api/health (ADR-0026), while
+# apps/docs (#439) has no health route, so it uses its static home page '/'.
+HEALTH_PATH="${KNEXT_WARMUP_HEALTH_PATH:-/api/health}"
+HEALTH_URL="http://127.0.0.1:${PORT}${HEALTH_PATH}"
 
 # --- Freshness guard (#440 item 2) ------------------------------------------
 # EMPTY the cache dir before the warm-up boot, so the plausibility floor below

@@ -26,6 +26,16 @@ For a container build, either:
 - vendor the package into the build context, or
 - switch to the published `@knext/core` once issue #53 (npm publish) lands.
 
+### Also vendor the shared compile-cache warm-up (#439)
+
+The `Dockerfile` bakes the V8 compile cache at build time using the **shared**
+`scripts/warm-compile-cache.sh` (promoted out of `apps/file-manager/scripts/` per
+ADR-0035 action item 2, so both consumers inherit the same guards). Because this
+single-package image builds from an `apps/docs`-rooted context, vendor that script
+to `./scripts/warm-compile-cache.sh` before the build — the same way `@knext/core`
+is vendored above. If it is missing, the `COPY … warm-compile-cache.sh` step fails
+the build loudly rather than silently shipping an empty cache.
+
 ## 2. Validate the deploy config
 
 ```bash

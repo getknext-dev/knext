@@ -172,7 +172,7 @@ RUN node -e "const{createRequire}=require('module');const r=createRequire('/app/
 # this is the SAME on-disk dir as the CMD's default below (which resolves the
 # relative fallback against the runtime cwd /app); V8 keys entries by module
 # filename, so the baked cache is read either way.
-COPY --from=builder /app/apps/file-manager/scripts/warm-compile-cache.sh /usr/local/bin/warm-compile-cache.sh
+COPY --from=builder /app/scripts/warm-compile-cache.sh /usr/local/bin/warm-compile-cache.sh
 RUN chmod +x /usr/local/bin/warm-compile-cache.sh \
     && NODE_ENV=production \
        PORT=3000 \
