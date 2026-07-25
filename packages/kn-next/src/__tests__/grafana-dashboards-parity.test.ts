@@ -34,16 +34,30 @@ function dashboardFiles(): string[] {
         .sort();
 }
 
-/** Every metric-ish token that is NOT a `knext_*` series (external deps). */
-function externalMetricTokens(json: string): string[] {
+/**
+ * Non-`knext_` tokens surfaced for review. This is a coarse token scrape, not a
+ * true metric parser — PromQL functions, template variables, and Prometheus
+ * label names get filtered out by the deny-list below so they are not mislabeled
+ * as metrics. Anything left is (approximately) an external metric dependency
+ * (kube_*, kn_next_* RUM/bytecode, http_server_* OTel, knative autoscaler).
+ */
+const NON_METRIC_TOKENS = new Set([
+    // PromQL functions / keywords.
+    "histogram_quantile",
+    "label_values",
+    "rate_interval",
+    "clamp_min",
+    "clamp_max",
+    // Prometheus label names we match on (not metrics).
+    "status_class",
+    "http_response_status_code",
+    "le",
+]);
+
+function nonKnextReviewTokens(json: string): string[] {
     const all = json.match(/\b[a-z][a-z0-9_]*_[a-z0-9_]+\b/g) ?? [];
     return [...new Set(all)].filter(
-        (t) =>
-            !t.startsWith("knext_") &&
-            // Grafana / PromQL helpers, not metrics.
-            !["histogram_quantile", "label_values", "rate_interval"].includes(
-                t,
-            ),
+        (t) => !t.startsWith("knext_") && !NON_METRIC_TOKENS.has(t),
     );
 }
 
@@ -66,21 +80,55 @@ describe("Grafana dashboard ↔ exported-metric parity (#316)", () => {
         ).toEqual([]);
     });
 
-    it("collects external (non-knext) metric dependencies for review", () => {
+    it("collects non-knext tokens (review surface)", () => {
         const external: Record<string, string[]> = {};
         for (const file of files) {
             const json = readFileSync(path.join(DASHBOARD_DIR, file), "utf8");
-            external[file] = externalMetricTokens(json);
+            external[file] = nonKnextReviewTokens(json);
         }
         // Not an assertion on values — this documents each dashboard's external
         // deps (kube_*, kn_next_* RUM/bytecode, knative autoscaler) so reviewers
         // can eyeball the cluster/other-exporter surface.
         // biome-ignore lint/suspicious/noConsole: intentional review surface.
         console.log(
-            "External (non-knext_) metric deps per dashboard:\n" +
+            "Non-knext tokens per dashboard (review surface):\n" +
                 JSON.stringify(external, null, 2),
         );
         expect(Object.keys(external).sort()).toEqual(files);
+    });
+
+    // Structural invariants that hold for EVERY bundled dashboard — these run on
+    // all five (unlike the knext_* parity assertion, which is vacuous for the
+    // three dashboards that carry no knext_* series). This is the guard that
+    // would have caught an HTTP-API import envelope masquerading as a raw model.
+    it.each(
+        files,
+    )("%s is a RAW dashboard model (not an import envelope)", (file) => {
+        const model = JSON.parse(
+            readFileSync(path.join(DASHBOARD_DIR, file), "utf8"),
+        );
+        // The Grafana sidecar provisioner expects the raw model at top level;
+        // the HTTP-API envelope `{ dashboard, message, overwrite }` won't load.
+        expect(
+            model.dashboard,
+            `${file} is wrapped in an import envelope (top-level "dashboard" key) — unwrap it`,
+        ).toBeUndefined();
+        expect(Array.isArray(model.panels)).toBe(true);
+        expect(model.panels.length).toBeGreaterThan(0);
+        expect(typeof model.uid).toBe("string");
+        expect(model.uid.length).toBeGreaterThan(0);
+        expect(typeof model.title).toBe("string");
+        expect(model.title.length).toBeGreaterThan(0);
+    });
+
+    // Pins the docs claim "every dashboard uses a datasource template variable"
+    // as a tested invariant.
+    it.each(files)("%s exposes a datasource template variable", (file) => {
+        const model = JSON.parse(
+            readFileSync(path.join(DASHBOARD_DIR, file), "utf8"),
+        );
+        const vars: Array<{ type?: string }> = model.templating?.list ?? [];
+        expect(vars.some((v) => v.type === "datasource")).toBe(true);
     });
 });
 

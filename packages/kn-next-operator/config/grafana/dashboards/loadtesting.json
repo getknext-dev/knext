@@ -1,110 +1,277 @@
 {
-  "dashboard": {
-    "id": null,
-    "uid": "kn-next-loadtest",
-    "title": "kn-next: file-manager Load Testing",
-    "tags": ["knative", "nextjs", "load-test"],
-    "timezone": "browser",
-    "schemaVersion": 39,
-    "refresh": "5s",
-    "panels": [
+  "annotations": {
+    "list": [
       {
-        "title": "Active Replicas (Knative Pod Autoscaling)",
-        "type": "stat",
-        "gridPos": { "h": 6, "w": 8, "x": 0, "y": 0 },
-        "targets": [
-          {
-            "expr": "sum(kube_pod_status_phase{namespace=\"default\", phase=\"Running\", pod=~\"file-manager.*\"}) or sum(up{job=\"file-manager\"})",
-            "legendFormat": "Active Pods"
-          }
-        ],
-        "options": {
-          "colorMode": "value",
-          "graphMode": "area",
-          "justifyMode": "auto"
-        }
-      },
-      {
-        "title": "Throughput (RPS)",
-        "type": "timeseries",
-        "gridPos": { "h": 6, "w": 8, "x": 8, "y": 0 },
-        "targets": [
-          {
-            "expr": "sum(rate(http_server_request_duration_seconds_count{service=\"file-manager\"}[15s]))",
-            "legendFormat": "Requests / sec"
-          }
-        ],
-        "fieldConfig": {
-          "defaults": {
-            "custom": {
-              "drawStyle": "line",
-              "lineInterpolation": "smooth",
-              "fillOpacity": 20,
-              "lineWidth": 2
-            }
-          }
-        }
-      },
-      {
-        "title": "Error Rate (5xx / 4xx)",
-        "type": "timeseries",
-        "gridPos": { "h": 6, "w": 8, "x": 16, "y": 0 },
-        "targets": [
-          {
-            "expr": "sum(rate(http_server_request_duration_seconds_count{service=\"file-manager\", http_response_status_code=~\"5.*\"}[15s]))",
-            "legendFormat": "5xx Errors / sec"
-          },
-          {
-            "expr": "sum(rate(http_server_request_duration_seconds_count{service=\"file-manager\", http_response_status_code=~\"4.*\"}[15s]))",
-            "legendFormat": "4xx Errors / sec"
-          }
-        ]
-      },
-      {
-        "title": "Percentile Latencies (P95, P90, P50)",
-        "type": "timeseries",
-        "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
-        "targets": [
-          {
-            "expr": "histogram_quantile(0.95, sum(rate(http_server_request_duration_seconds_bucket{service=\"file-manager\"}[15s])) by (le))",
-            "legendFormat": "p95 Latency"
-          },
-          {
-            "expr": "histogram_quantile(0.90, sum(rate(http_server_request_duration_seconds_bucket{service=\"file-manager\"}[15s])) by (le))",
-            "legendFormat": "p90 Latency"
-          },
-          {
-            "expr": "histogram_quantile(0.50, sum(rate(http_server_request_duration_seconds_bucket{service=\"file-manager\"}[15s])) by (le))",
-            "legendFormat": "p50 Latency"
-          }
-        ],
-        "fieldConfig": {
-          "defaults": {
-            "unit": "s",
-            "custom": {
-              "drawStyle": "line"
-            }
-          }
-        }
-      },
-      {
-        "title": "Node.js Event Loop Lag",
-        "type": "timeseries",
-        "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 },
-        "targets": [
-          {
-            "expr": "max(nodejs_eventloop_lag_max_seconds{service=\"file-manager\"}) by (pod)",
-            "legendFormat": "Lag {{pod}}"
-          }
-        ],
-        "fieldConfig": {
-          "defaults": {
-            "unit": "s"
-          }
-        }
+        "builtIn": 1,
+        "datasource": "-- Grafana --",
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
       }
     ]
   },
-  "message": "Provisioned by kn-next Assistant",
-  "overwrite": true
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "uid": "kn-next-loadtest",
+  "title": "knext \u2014 Load Testing",
+  "tags": [
+    "knext",
+    "knative",
+    "nextjs",
+    "load-test"
+  ],
+  "timezone": "",
+  "schemaVersion": 39,
+  "refresh": "5s",
+  "panels": [
+    {
+      "title": "Active Replicas (Knative Pod Autoscaling)",
+      "type": "stat",
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 0,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "description": "Running app pods. From kube-state-metrics (the CLUSTER), not knext; parameterized by $namespace/$app.",
+      "targets": [
+        {
+          "expr": "sum(kube_pod_status_phase{namespace=~\"$namespace\", phase=\"Running\", pod=~\"$app.*\"}) or sum(up{service=~\"$app\"})",
+          "legendFormat": "Active Pods",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      }
+    },
+    {
+      "title": "Throughput (RPS)",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 8,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "description": "Request throughput from the OTel http.server duration histogram count, matched on $app.",
+      "targets": [
+        {
+          "expr": "sum(rate(http_server_request_duration_seconds_count{service=~\"$app\"}[$__rate_interval]))",
+          "legendFormat": "Requests / sec",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 20,
+            "lineWidth": 2
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "title": "Error Rate (5xx / 4xx)",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 16,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(http_server_request_duration_seconds_count{service=~\"$app\", http_response_status_code=~\"5.*\"}[$__rate_interval]))",
+          "legendFormat": "5xx Errors / sec",
+          "refId": "A"
+        },
+        {
+          "expr": "sum(rate(http_server_request_duration_seconds_count{service=~\"$app\", http_response_status_code=~\"4.*\"}[$__rate_interval]))",
+          "legendFormat": "4xx Errors / sec",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "title": "Percentile Latencies (P95, P90, P50)",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 6
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(http_server_request_duration_seconds_bucket{service=~\"$app\"}[$__rate_interval])) by (le))",
+          "legendFormat": "p95 Latency",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.90, sum(rate(http_server_request_duration_seconds_bucket{service=~\"$app\"}[$__rate_interval])) by (le))",
+          "legendFormat": "p90 Latency",
+          "refId": "B"
+        },
+        {
+          "expr": "histogram_quantile(0.50, sum(rate(http_server_request_duration_seconds_bucket{service=~\"$app\"}[$__rate_interval])) by (le))",
+          "legendFormat": "p50 Latency",
+          "refId": "C"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "drawStyle": "line"
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "title": "Node.js Event Loop Lag",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 6
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "expr": "max(nodejs_eventloop_lag_max_seconds{service=~\"$app\"}) by (pod)",
+          "legendFormat": "Lag {{pod}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      }
+    }
+  ],
+  "templating": {
+    "list": [
+      {
+        "current": {
+          "selected": false,
+          "text": "Prometheus",
+          "value": "Prometheus"
+        },
+        "hide": 0,
+        "includeAll": false,
+        "label": "Datasource",
+        "multi": false,
+        "name": "datasource",
+        "options": [],
+        "query": "prometheus",
+        "queryValue": "",
+        "refresh": 1,
+        "regex": "",
+        "skipUrlSync": false,
+        "type": "datasource"
+      },
+      {
+        "allValue": ".*",
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "definition": "label_values(http_server_request_duration_seconds_count, service)",
+        "hide": 0,
+        "includeAll": true,
+        "label": "Application",
+        "multi": true,
+        "name": "app",
+        "query": "label_values(http_server_request_duration_seconds_count, service)",
+        "refresh": 2,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "allValue": ".*",
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "definition": "label_values(kube_pod_status_phase, namespace)",
+        "hide": 0,
+        "includeAll": true,
+        "label": "Namespace",
+        "multi": true,
+        "name": "namespace",
+        "query": "label_values(kube_pod_status_phase, namespace)",
+        "refresh": 2,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      }
+    ]
+  },
+  "time": {
+    "from": "now-15m",
+    "to": "now"
+  },
+  "timepicker": {},
+  "weekStart": "",
+  "version": 1
 }
