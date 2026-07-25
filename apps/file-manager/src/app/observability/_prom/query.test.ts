@@ -1,14 +1,20 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   APP_NAME_ENV,
+  hasNoSeries,
   instantValue,
+  latestMatrixByLabel,
   latestMatrixValue,
   observabilityAppName,
+  overviewQueries,
   PROMETHEUS_URL_ENV,
+  type PromMatrixSeries,
+  type PromResult,
   prometheusBaseUrl,
   queryInstant,
   queryRange,
   scalingQueries,
+  totalLatestMatrixValue,
 } from './query';
 
 /**
@@ -209,6 +215,102 @@ describe('observabilityAppName — validated app scope (no PromQL injection)', (
   ])('rejects %s rather than interpolating it into PromQL', (_name, value) => {
     process.env[APP_NAME_ENV] = value;
     expect(observabilityAppName()).toBeUndefined();
+  });
+});
+
+describe('result helpers — no silent zeros', () => {
+  function matrixResult(...series: PromMatrixSeries[]): PromResult<PromMatrixSeries[]> {
+    return { status: 'ok', data: series };
+  }
+
+  describe('latestMatrixByLabel', () => {
+    it('returns the LATEST sample of every series, keyed by the label', () => {
+      const result = matrixResult(
+        {
+          metric: { role: 'writer' },
+          values: [
+            [0, '0.1'],
+            [60, '0.5'],
+          ],
+        },
+        {
+          metric: { role: 'reader' },
+          values: [
+            [0, '0.2'],
+            [60, '0.25'],
+          ],
+        },
+      );
+      expect(latestMatrixByLabel(result, 'role')).toEqual([
+        { key: 'writer', value: 0.5 },
+        { key: 'reader', value: 0.25 },
+      ]);
+    });
+
+    it('handles a single series', () => {
+      const result = matrixResult({ metric: { role: 'writer' }, values: [[0, '3']] });
+      expect(latestMatrixByLabel(result, 'role')).toEqual([{ key: 'writer', value: 3 }]);
+    });
+
+    it('returns [] for an empty result and for a non-ok result', () => {
+      expect(latestMatrixByLabel(matrixResult(), 'role')).toEqual([]);
+      expect(latestMatrixByLabel({ status: 'unreachable', errorSummary: 'down' }, 'role')).toEqual(
+        [],
+      );
+    });
+
+    it('falls back to "unknown" for a series missing the label, and skips unparseable/empty series', () => {
+      const result = matrixResult(
+        { metric: {}, values: [[0, '7']] },
+        { metric: { role: 'reader' }, values: [] },
+        { metric: { role: 'writer' }, values: [[0, 'NaN']] },
+      );
+      expect(latestMatrixByLabel(result, 'role')).toEqual([{ key: 'unknown', value: 7 }]);
+    });
+  });
+
+  describe('totalLatestMatrixValue', () => {
+    it('sums the latest sample ACROSS series so it agrees with an instant sum()', () => {
+      const result = matrixResult(
+        { metric: { deployment: 'demo-00001' }, values: [[0, '2']] },
+        { metric: { deployment: 'demo-00002' }, values: [[0, '1']] },
+      );
+      // Taking only data[0] here would render "2" next to an instant "3".
+      expect(totalLatestMatrixValue(result)).toBe(3);
+    });
+
+    it('is null (never 0) for an empty or non-ok result', () => {
+      expect(totalLatestMatrixValue(matrixResult())).toBeNull();
+      expect(totalLatestMatrixValue({ status: 'unreachable', errorSummary: 'down' })).toBeNull();
+    });
+
+    it('returns a genuine 0 when a series really reports 0', () => {
+      const result = matrixResult({ metric: { deployment: 'demo' }, values: [[0, '0']] });
+      expect(totalLatestMatrixValue(result)).toBe(0);
+    });
+  });
+
+  describe('hasNoSeries', () => {
+    it('is true ONLY when the query succeeded with zero series', () => {
+      expect(hasNoSeries(matrixResult())).toBe(true);
+      expect(hasNoSeries(matrixResult({ metric: {}, values: [[0, '1']] }))).toBe(false);
+      // A failed query knows nothing — it must not claim "the series is absent".
+      expect(hasNoSeries({ status: 'unreachable', errorSummary: 'down' })).toBe(false);
+      expect(hasNoSeries({ status: 'unconfigured', envVar: PROMETHEUS_URL_ENV })).toBe(false);
+    });
+  });
+});
+
+describe('overviewQueries — every RED series is scoped to THIS app', () => {
+  const q = overviewQueries('demo');
+
+  it('scopes every knext_* series by the app label (dashboard shape)', () => {
+    const unscoped = Object.entries(q).filter(([, promql]) => !promql.includes('{app=~"demo"'));
+    expect(unscoped).toEqual([]);
+  });
+
+  it('keeps the 5xx selector alongside the app scope', () => {
+    expect(q.errorRatePct).toContain('{app=~"demo",status_class="5xx"}');
   });
 });
 

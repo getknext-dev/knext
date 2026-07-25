@@ -171,7 +171,7 @@ A link-out row points to the shipped turnkey **Grafana dashboards** for deep, cl
 
 ### Cold start & scaling page (`/observability/scaling`)
 
-The scale-to-zero lifecycle view — the page a always-on platform cannot show you. Over the last
+The scale-to-zero lifecycle view — the page an always-on platform cannot show you. Over the last
 hour it renders:
 
 - **Replica count 0→N** and the current replica count. This series

@@ -90,17 +90,20 @@ shipped Grafana overlay instead of rebuilding cluster dashboards — faithful to
   `_prom/query.ts` (server-only Prometheus `query_range`/`query`, uncached + short abort timeout,
   typed `ok | unconfigured | unreachable` results). Graceful empty state when
   `OBSERVABILITY_PROMETHEUS_URL` is unset (no fetch) and an error state when unreachable; PromQL is
-  parity-tested against `adapters/metrics.ts` so it only references real `knext_*` series.
+  parity-tested against `adapters/metrics.ts` so it only references real `knext_*` series. Its
+  queries are **app-scoped** on the same `KN_APP_NAME` contract as P1.3 (below), with the same
+  "scope unknown" and partial-outage states.
 - [x] **P1.3 Cold-start & Scaling** — `apps/file-manager/src/app/observability/scaling/page.tsx`
   (replicas / cold-start rate + p50/p99 / **warm-start ratio** / DB-wake by `role`), reusing
   `_prom/query.ts` and the shipped `scale-to-zero` Grafana dashboard's PromQL shapes. Same auth +
   degrade contract, plus three further **distinct** states, each covered by a test:
   - **kube-state-metrics absent** — the replica series is cluster-provided, so its absence renders
     "requires kube-state-metrics", never a dishonest "0 replicas";
-  - **scope unknown** — every series is multi-tenant, so all queries are scoped to this app via the
-    operator-injected `KN_APP_NAME` (validated as an RFC1123 label, which also blocks PromQL
-    injection). An unset/invalid value renders "scope unknown" and issues **no** query rather than
-    silently falling back to a cluster-wide sum;
+  - **scope unknown** — every series is multi-tenant, so all queries (on **both** metric pages) are
+    scoped to this app via the operator-injected `KN_APP_NAME` — the same source
+    `adapters/metrics.ts` labels the series with — validated as an RFC1123 label, which also blocks
+    PromQL injection. An unset/invalid value renders "scope unknown" and issues **no** query rather
+    than silently falling back to a cluster-wide sum;
   - **partial Prometheus outage** — failed queries read `metric unavailable`, deliberately distinct
     from `no data yet` ("nothing recorded") and from a measured zero.
 
@@ -109,9 +112,11 @@ shipped Grafana overlay instead of rebuilding cluster dashboards — faithful to
   is checked against `adapters/metrics.ts`. Also lands the P1.2 sign-off follow-up: the explicit
   `no data yet` marker (`_ui/format.ts`) is now used by **all three** pages, Web Vitals included.
 
-  Deferred from this item (not shipped): the **Overview (RED) page is still unscoped** — its
-  `OVERVIEW_QUERIES` aggregate every knext app in the cluster and must get the same `KN_APP_NAME`
-  scoping + "scope unknown" state; and the warm-start ratio is **derived** on the page
+  Replica rows are aggregated across the per-revision series (`totalLatestMatrixValue`) so
+  "Replicas (latest)" and "Replicas (now)" can never contradict each other, with a per-Deployment
+  breakdown below them.
+
+  Deferred from this item (not shipped): the warm-start ratio is **derived** on the page
   (`1 − coldstarts/requests` over 5m — how rare a cold start is per served request, not a
   per-request warm/cold attribution) because knext exports a cold-start counter, not a per-request
   flag. It therefore has no dashboard counterpart and is excluded from the mirrored-query parity

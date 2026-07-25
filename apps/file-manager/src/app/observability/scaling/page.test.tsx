@@ -80,8 +80,15 @@ function seededFetch(url: unknown, opts: SeedOptions = {}): Response {
     if (opts.kubeStateAbsent) {
       return jsonResponse(isInstant ? EMPTY_VECTOR : EMPTY_MATRIX);
     }
+    // A real Knative app has one Deployment PER REVISION, so the range query
+    // returns several series while the instant `sum(...)` returns their total.
     return jsonResponse(
-      isInstant ? vector('3') : matrix({ metric: { deployment: 'demo' }, value: '3' }),
+      isInstant
+        ? vector('3')
+        : matrix(
+            { metric: { deployment: 'demo-00001-deployment' }, value: '2' },
+            { metric: { deployment: 'demo-00002-deployment' }, value: '1' },
+          ),
     );
   }
   if (raw.includes('knext_http_inflight_requests')) {
@@ -219,15 +226,34 @@ describe('scaling page authorized render (ok path)', () => {
 
     const html = await renderPage();
 
-    expect(html).toContain('3'); // replicas
-    expect(html).toContain('0.42'); // cold starts /s
-    expect(html).toContain('1200'); // cold-start p50 = 1.2s -> 1200 ms
-    expect(html).toContain('2500'); // cold-start p99 = 2.5s -> 2500 ms
+    // Assert on rendered VALUE cells — a bare toContain('3') / toContain('7')
+    // matches almost any HTML (the code-review's "weak assertion" finding).
+    expect(html).toContain('>3<'); // replicas (2 + 1 across revisions)
+    expect(html).toContain('>0.42<'); // cold starts /s
+    expect(html).toContain('>1200 ms<'); // cold-start p50 = 1.2s
+    expect(html).toContain('>2500 ms<'); // cold-start p99 = 2.5s
     expect(html).toContain('writer');
     expect(html).toContain('reader');
-    expect(html).toContain('80'); // writer DB-wake p50 = 0.08s -> 80 ms
-    expect(html).toContain('640'); // writer DB-wake p99 = 0.64s -> 640 ms
-    expect(html).toContain('7'); // current in-flight
+    expect(html).toContain('>80 ms<'); // writer DB-wake p50 = 0.08s
+    expect(html).toContain('>640 ms<'); // writer DB-wake p99 = 0.64s
+    expect(html).toContain('>7<'); // current in-flight
+  });
+
+  it('reports the SAME replica count for "latest" and "now" (they cannot contradict)', async () => {
+    mockFetch();
+
+    const html = await renderPage();
+
+    // The range query returns per-revision series (2 + 1); the instant query
+    // returns the sum (3). Taking only the first series would render "2" next
+    // to "3" — two numbers for one fact.
+    const cells = [...html.matchAll(/Replicas \((latest|now)\)<\/td><td[^>]*>([^<]*)</g)].map(
+      (m) => [m[1], m[2]] as const,
+    );
+    expect(cells).toEqual([
+      ['latest', '3'],
+      ['now', '3'],
+    ]);
   });
 
   it('links out to the Grafana scale-to-zero dashboard (static, no iframe)', async () => {
@@ -239,15 +265,25 @@ describe('scaling page authorized render (ok path)', () => {
 });
 
 describe('scaling page — kube-state-metrics absent is a DISTINCT state', () => {
-  it('says the replica panel requires kube-state-metrics instead of showing 0 replicas', async () => {
+  it('says the replica panel REQUIRES kube-state-metrics instead of rendering a number', async () => {
     mockFetch({ kubeStateAbsent: true });
 
     const html = await renderPage();
 
-    expect(html).toMatch(/kube-state-metrics/i);
-    expect(html).not.toMatch(/0\s*replicas/i);
+    // Discriminating string: it exists ONLY in the absent branch. (A plain
+    // /kube-state-metrics/i also matches the present-state provenance note, so
+    // that assertion passed even with the branch deleted.)
+    expect(html).toContain('requires kube-state-metrics');
+    // And no replica VALUE is rendered at all — not a zero, not "no data yet".
+    expect(html).not.toMatch(/Replicas \((latest|now)\)/);
     // The rest of the page (knext-owned series) still renders.
-    expect(html).toContain('0.42');
+    expect(html).toContain('>0.42<');
+  });
+
+  it('does NOT claim kube-state-metrics is missing when the series is present', async () => {
+    mockFetch();
+    const html = await renderPage();
+    expect(html).not.toContain('requires kube-state-metrics');
   });
 
   it('labels the replica series as cluster-provided (provenance, per the dashboard)', async () => {

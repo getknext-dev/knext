@@ -186,6 +186,35 @@ export function latestMatrixValue(result: PromResult<PromMatrixSeries[]>): numbe
   return Number.isFinite(value) ? value : null;
 }
 
+/**
+ * The sum of the latest sample **across all series** of a range result, or `null`
+ * when the result is not `ok` / carries no series.
+ *
+ * Use this — not {@link latestMatrixValue} — whenever the matching instant query
+ * is a `sum(...)`: a `sum by (deployment)` range result has one series per
+ * Knative revision, so reading only the first would render a smaller "latest"
+ * next to a larger "now" and present two numbers for one fact. `null` (rather
+ * than 0) preserves the "no data yet ≠ measured zero" rule.
+ */
+export function totalLatestMatrixValue(result: PromResult<PromMatrixSeries[]>): number | null {
+  if (result.status !== 'ok') {
+    return null;
+  }
+  let total: number | null = null;
+  for (const series of result.data) {
+    const last = series.values.at(-1);
+    if (!last) {
+      continue;
+    }
+    const value = Number(last[1]);
+    if (!Number.isFinite(value)) {
+      continue;
+    }
+    total = (total ?? 0) + value;
+  }
+  return total;
+}
+
 /** One `(label value, latest sample)` pair extracted from a range result. */
 export interface LabeledValue {
   readonly key: string;
@@ -245,30 +274,6 @@ export function instantValue(result: PromResult<PromVectorSample[]>): number | n
   return Number.isFinite(value) ? value : null;
 }
 
-/**
- * The RED (Rate / Errors / Duration) + saturation PromQL for the Overview page.
- * Every `knext_*` series here is asserted against `adapters/metrics.ts` by the
- * page's parity test, so the queries can never drift from the runtime metric set:
- *  - `knext_http_requests_total{status_class}`   — request + 5xx error rate,
- *  - `knext_http_request_duration_seconds_bucket` — p75 / p99 latency,
- *  - `knext_http_inflight_requests`               — current concurrency.
- */
-export const OVERVIEW_QUERIES = {
-  /** Total request rate (req/s), 5-minute rate. */
-  requestRate: 'sum(rate(knext_http_requests_total[5m]))',
-  /** 5xx error rate as a percentage of all requests. */
-  errorRatePct:
-    'sum(rate(knext_http_requests_total{status_class="5xx"}[5m])) / clamp_min(sum(rate(knext_http_requests_total[5m])), 1) * 100',
-  /** p75 request latency (seconds). */
-  latencyP75:
-    'histogram_quantile(0.75, sum by (le) (rate(knext_http_request_duration_seconds_bucket[5m])))',
-  /** p99 request latency (seconds). */
-  latencyP99:
-    'histogram_quantile(0.99, sum by (le) (rate(knext_http_request_duration_seconds_bucket[5m])))',
-  /** Current in-flight requests (saturation). */
-  inFlight: 'sum(knext_http_inflight_requests)',
-} as const;
-
 /** Operator-injected app identity (`nextApp.Name`) — the metric scope. */
 export const APP_NAME_ENV = 'KN_APP_NAME';
 
@@ -301,6 +306,49 @@ export function observabilityAppName(): string | undefined {
   }
   const trimmed = raw.trim();
   return APP_NAME_PATTERN.test(trimmed) ? trimmed : undefined;
+}
+
+/** The RED PromQL for the Overview page, scoped to one app. */
+export interface OverviewQueries {
+  readonly requestRate: string;
+  readonly errorRatePct: string;
+  readonly latencyP75: string;
+  readonly latencyP99: string;
+  readonly inFlight: string;
+}
+
+/**
+ * Build the RED (Rate / Errors / Duration) + saturation PromQL for `app`.
+ *
+ * Every `knext_*` series carries an `app` label (`adapters/metrics.ts`, sourced
+ * from the same `KN_APP_NAME`), and a cluster runs many knext apps — so an
+ * unscoped `sum(rate(knext_http_requests_total[5m]))` reports the CLUSTER's
+ * request rate under this app's heading. The `{app=~"…"}` selector matches the
+ * shipped `red-overview` dashboard's `$app` template variable.
+ *
+ * A parity test asserts every `knext_*` series here exists in
+ * `adapters/metrics.ts`, so the queries cannot drift from the runtime metric set:
+ *  - `knext_http_requests_total{status_class}`    — request + 5xx error rate,
+ *  - `knext_http_request_duration_seconds_bucket` — p75 / p99 latency,
+ *  - `knext_http_inflight_requests`               — current concurrency.
+ *
+ * @param app a name already validated by {@link observabilityAppName}.
+ */
+export function overviewQueries(app: string): OverviewQueries {
+  const byApp = `{app=~"${app}"}`;
+
+  return {
+    /** Total request rate (req/s), 5-minute rate. */
+    requestRate: `sum(rate(knext_http_requests_total${byApp}[5m]))`,
+    /** 5xx error rate as a percentage of all requests. */
+    errorRatePct: `sum(rate(knext_http_requests_total{app=~"${app}",status_class="5xx"}[5m])) / clamp_min(sum(rate(knext_http_requests_total${byApp}[5m])), 1) * 100`,
+    /** p75 request latency (seconds). */
+    latencyP75: `histogram_quantile(0.75, sum by (le) (rate(knext_http_request_duration_seconds_bucket${byApp}[5m])))`,
+    /** p99 request latency (seconds). */
+    latencyP99: `histogram_quantile(0.99, sum by (le) (rate(knext_http_request_duration_seconds_bucket${byApp}[5m])))`,
+    /** Current in-flight requests (saturation). */
+    inFlight: `sum(knext_http_inflight_requests${byApp})`,
+  };
 }
 
 /** The PromQL for the Cold-start & Scaling page, scoped to one app. */

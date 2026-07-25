@@ -15,6 +15,7 @@ import {
   queryInstant,
   queryRange,
   scalingQueries,
+  totalLatestMatrixValue,
 } from '../_prom/query';
 import { formatMillis, formatNumber, NO_DATA, UNAVAILABLE } from '../_ui/format';
 import { isObservabilityAuthorized, observabilityToken } from '../auth';
@@ -248,33 +249,41 @@ export default async function ScalingPage() {
     currentReplicas,
     inFlight,
   ];
-  const firstUnreachable = results.find((r) => r.status === 'unreachable');
-  if (firstUnreachable && results.every((r) => r.status === 'unreachable')) {
-    const summary =
-      firstUnreachable.status === 'unreachable'
-        ? firstUnreachable.errorSummary
-        : 'Prometheus is unreachable';
-    return <Unreachable summary={summary} />;
+  const unreachable = results.filter((r) => r.status === 'unreachable');
+  if (unreachable.length === results.length && unreachable[0]?.status === 'unreachable') {
+    return <Unreachable summary={unreachable[0].errorSummary} />;
   }
   // Some queries failed but not all: the affected panels must say so rather than
   // fall through to the "no data yet" marker (which means "nothing recorded").
-  const partiallyUnavailable = firstUnreachable !== undefined;
+  const partiallyUnavailable = unreachable.length > 0;
 
   // A cluster WITHOUT kube-state-metrics returns a successful query with zero
   // series. That is NOT "0 replicas" — say so instead of drawing a false zero.
   const kubeStateAbsent = hasNoSeries(replicas);
 
+  // "Latest" sums ACROSS the per-revision series so it cannot contradict "now"
+  // (an instant `sum(...)`); reading only the first series would show one
+  // revision's replicas next to the app's total.
   const replicaRows: PanelRow[] = kubeStateAbsent
     ? []
     : [
         {
           label: 'Replicas (latest)',
-          display: matrixDisplay(replicas, (v) => formatNumber(v, 0)),
+          display:
+            replicas.status === 'unreachable'
+              ? UNAVAILABLE
+              : formatNumber(totalLatestMatrixValue(replicas), 0),
         },
         {
           label: 'Replicas (now)',
           display: instantDisplay(currentReplicas, (v) => formatNumber(v, 0)),
         },
+        // Per-Deployment breakdown (a Knative app has one Deployment per
+        // revision) — the detail the aggregate above hides.
+        ...latestMatrixByLabel(replicas, 'deployment').map((v) => ({
+          label: `Replicas — ${v.key}`,
+          display: formatNumber(v.value, 0),
+        })),
       ];
 
   const coldStartRows: PanelRow[] = [

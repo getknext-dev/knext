@@ -6,7 +6,13 @@
  * which is exactly the confusion the P1.2 sign-off flagged: an operator cannot
  * tell "the app served zero requests" from "nothing has been recorded / the
  * series does not exist". So absent samples render the explicit {@link NO_DATA}
- * marker, and a real `0` renders as `0` — everywhere, on every page.
+ * marker, and a real `0` renders as `0`.
+ *
+ * All three observability pages use these markers — Overview and Cold-start &
+ * Scaling via `formatMillis`/`formatNumber`, and Web Vitals via {@link NO_DATA}
+ * directly (it formats its own p75 units). A page that invents its own placeholder
+ * breaks the contract; a value cell is one of: a number, {@link NO_DATA}, or
+ * {@link UNAVAILABLE}.
  */
 
 /** Explicit marker for "the series produced no sample" (never a measured zero). */

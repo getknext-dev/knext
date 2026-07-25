@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { OVERVIEW_QUERIES, PROMETHEUS_URL_ENV } from './_prom/query';
+import { APP_NAME_ENV, overviewQueries, PROMETHEUS_URL_ENV } from './_prom/query';
 import { NO_DATA } from './_ui/format';
 
 /**
@@ -26,7 +26,10 @@ vi.mock('next/headers', () => ({
 
 const ORIGINAL_TOKEN = process.env.OBSERVABILITY_TOKEN;
 const ORIGINAL_URL = process.env[PROMETHEUS_URL_ENV];
+const ORIGINAL_APP = process.env[APP_NAME_ENV];
 const TOKEN = 's3cret-observability-token';
+/** The app identity the operator injects as KN_APP_NAME. */
+const APP = 'demo';
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -66,6 +69,7 @@ beforeEach(() => {
   authHeader.mockReturnValue(`Bearer ${TOKEN}`);
   process.env.OBSERVABILITY_TOKEN = TOKEN;
   process.env[PROMETHEUS_URL_ENV] = 'http://prometheus.monitoring.svc:9090';
+  process.env[APP_NAME_ENV] = APP;
 });
 
 afterEach(() => {
@@ -75,6 +79,8 @@ afterEach(() => {
   else process.env.OBSERVABILITY_TOKEN = ORIGINAL_TOKEN;
   if (ORIGINAL_URL === undefined) delete process.env[PROMETHEUS_URL_ENV];
   else process.env[PROMETHEUS_URL_ENV] = ORIGINAL_URL;
+  if (ORIGINAL_APP === undefined) delete process.env[APP_NAME_ENV];
+  else process.env[APP_NAME_ENV] = ORIGINAL_APP;
 });
 
 async function renderPage(): Promise<string> {
@@ -147,11 +153,13 @@ describe('overview page authorized render (ok path)', () => {
 
     const html = await renderPage();
 
-    expect(html).toContain('12.3'); // request rate (req/s)
-    expect(html).toContain('2.5'); // 5xx error rate %
-    expect(html).toContain('120'); // p75 = 0.12s -> 120 ms
-    expect(html).toContain('450'); // p99 = 0.45s -> 450 ms
-    expect(html).toContain('3'); // in-flight
+    // Assert on rendered VALUE cells: a bare toContain('3') would match almost
+    // any HTML (the code-review's "weak assertion" finding).
+    expect(html).toContain('>12.30<'); // request rate (req/s)
+    expect(html).toContain('>2.5 %<'); // 5xx error rate
+    expect(html).toContain('>120 ms<'); // p75 = 0.12s
+    expect(html).toContain('>450 ms<'); // p99 = 0.45s
+    expect(html).toContain('>3<'); // in-flight
   });
 
   it('links out to the Grafana dashboards (static, no iframe)', async () => {
@@ -175,7 +183,45 @@ describe('overview page — explicit "no data yet" marker (P1.2 sign-off follow-
   });
 });
 
+describe('overview page — every query is scoped to THIS app (#516 code review)', () => {
+  it('never sends a cluster-wide RED query: every PromQL carries the app scope', async () => {
+    const spy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (u) => seededFetch(u));
+
+    await renderPage();
+
+    const queries = spy.mock.calls.map(
+      (call) => new URL(String(call[0])).searchParams.get('query') ?? '',
+    );
+    expect(queries.length).toBe(5);
+    expect(queries.filter((q) => !q.includes(`{app=~"${APP}"`))).toEqual([]);
+  });
+
+  it('renders a DISTINCT "scope unknown" state when KN_APP_NAME is unset — and does NOT fetch', async () => {
+    delete process.env[APP_NAME_ENV];
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+
+    const html = await renderPage();
+
+    expect(html).toContain(APP_NAME_ENV);
+    expect(html).toMatch(/scope|identity/i);
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(html).not.toContain('12.3');
+  });
+
+  it('treats an injection-shaped KN_APP_NAME as unknown scope (no PromQL built from it)', async () => {
+    process.env[APP_NAME_ENV] = 'demo"} or on() up{';
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+
+    const html = await renderPage();
+
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(html).not.toContain('or on()');
+  });
+});
+
 describe('overview PromQL ↔ metrics.ts parity', () => {
+  const QUERIES = overviewQueries(APP);
+
   const METRICS_SRC = resolve(
     import.meta.dirname,
     '../../../../../packages/kn-next/src/adapters/metrics.ts',
@@ -201,7 +247,7 @@ describe('overview PromQL ↔ metrics.ts parity', () => {
     expect(allowed.has('knext_http_requests_total')).toBe(true);
 
     const dangling: string[] = [];
-    for (const promql of Object.values(OVERVIEW_QUERIES)) {
+    for (const promql of Object.values(QUERIES)) {
       const tokens = promql.match(/knext_[a-z_]+/g) ?? [];
       for (const token of tokens) {
         if (!allowed.has(baseName(token))) dangling.push(token);
@@ -211,7 +257,7 @@ describe('overview PromQL ↔ metrics.ts parity', () => {
   });
 
   it('references the three RED series (rate/latency/in-flight)', () => {
-    const joined = Object.values(OVERVIEW_QUERIES).join(' ');
+    const joined = Object.values(QUERIES).join(' ');
     expect(joined).toContain('knext_http_requests_total');
     expect(joined).toContain('knext_http_request_duration_seconds_bucket');
     expect(joined).toContain('knext_http_inflight_requests');
