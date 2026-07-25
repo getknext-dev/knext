@@ -122,7 +122,40 @@ shipped Grafana overlay instead of rebuilding cluster dashboards — faithful to
   flag. It therefore has no dashboard counterpart and is excluded from the mirrored-query parity
   list. Adding a first-class warm/cold request label (and a matching dashboard panel) would need a
   core `adapters/metrics.ts` change — out of scope for an app-level page.
-- [ ] **P1.4 Deployments** page (read-only `NextApp` status; resolve the RBAC vs status-mirror fork).
+- [x] **P1.4 Deployments** — `apps/file-manager/src/app/observability/deployments/page.tsx`, read-only,
+  same auth + degrade contract. **The plan's §7 data-path fork is resolved as (c) both sources,
+  degrading, with the Kubernetes path STRICTLY OPT-IN.**
+
+  *Why:* (a) reading the `NextApp` CR gives the only real rollback fidelity (pinned revision, canary
+  split, image digest, operator conditions, `lastSuccessfulDeployTime`) but adds an RBAC surface to
+  the **app's** ServiceAccount and couples the app to the operator CRD — and the CRD is **not
+  installed on the OKE cluster**, where (a)-alone would render permanently "unavailable". (b)
+  Prometheus/kube-state-metrics needs no new trust surface and reuses the P1.2/P1.3 data path, but
+  can only say *what revision appeared when and which one carries pods* — never *why* traffic moved.
+  Taking both keeps the **default trust surface identical to (b)'s**: with
+  `OBSERVABILITY_NEXTAPP_SOURCE` unset the reader (`observability/_k8s/nextapp.ts`) performs **no
+  file read and no API call**, and no RBAC is required. Fidelity is *bought explicitly* in two
+  deliberate steps — set `OBSERVABILITY_NEXTAPP_SOURCE=kubernetes` **and** apply
+  `apps/file-manager/deploy/observability-nextapp-read-rbac.yaml`: a **namespaced** Role (never a
+  ClusterRole) with `get/list/watch` on `nextapps`/`nextapps/status` only, bound to this app's
+  ServiceAccount, **never** part of the operator's install bundle (pinned by
+  `_k8s/rbac-manifest.test.ts`). The page always names the source that produced what it shows.
+
+  Derived history PromQL (`_prom/query.ts#deploymentQueries`) uses the per-revision Deployment
+  series Knative creates (`kube_deployment_created` / `_status_replicas` / `_status_replicas_available`),
+  app-scoped on the same `KN_APP_NAME` contract as P1.2/P1.3.
+
+  Degradation states, each with its own discriminating string and each **mutation-proved** (deleting
+  the branch fails exactly its test): `no deployment history source is configured` (neither backend
+  configured — and **no** empty table drawn) · `could not reach the observability backend`
+  (Prometheus queries failed) · `requires kube-state-metrics` (query succeeded, series absent — never
+  "no deployments") · `NextApp status source unavailable` + a per-reason sentence (**CRD absent** /
+  **RBAC denied** / no in-cluster ServiceAccount / API unreachable) · `NextApp status reads are not
+  enabled` (**off, not broken** — deliberately different from the previous state) · "scope unknown"
+  (`KN_APP_NAME` unset/invalid ⇒ no read of either kind).
+
+  Not shipped here: a deploy *event* timeline (the CR carries current state + condition transition
+  times, not a history), and the `/observability` nav (see the cross-cutting item below).
 - [ ] **Cross-cutting:** `/observability` layout with tab nav + Grafana link-out card.
 - [ ] **Phase 2 (gated on founder greenlight):** promote the recipe to a scaffoldable `--observability`
   flag — deferred until after the official-adapter migration + Tier-A correctness (scs-zones sequencing).
