@@ -30,6 +30,12 @@ export default defineConfig({
       '@knext/db/migrate': resolve(DB_SRC, 'migrate.ts'),
       '@knext/db': resolve(DB_SRC, 'index.ts'),
       '@knext/core/validate': resolve(CORE_SRC, 'validate-public.ts'),
+      // The bare `server-only` specifier is provided by the Next compiler at
+      // build time (next/dist/compiled/server-only) and is not resolvable at the
+      // repo root. Alias it to a no-op stub so server-only modules (e.g. the
+      // observability Prometheus client) can be unit-tested. Test-only; the real
+      // server-only guard still applies under `next build`.
+      'server-only': resolve(import.meta.dirname, 'vitest.server-only-stub.ts'),
     },
   },
   test: {
