@@ -8,9 +8,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { beforeAll, describe, expect, it, vi } from 'vitest';
 
-// NOTE: the adapter now re-exports @knext/core/adapter (#89). We intentionally do
+// NOTE: the adapter now re-exports @getknext/core/adapter (#89). We intentionally do
 // NOT annotate `mod.default` with the official `NextAdapter` type here: the app and
-// @knext/core can resolve distinct (peer-deduped) `next` type instances, so a direct
+// @getknext/core can resolve distinct (peer-deduped) `next` type instances, so a direct
 // assignment compares nominally-incompatible enums (RenderingMode/AdapterOutputType).
 // The adapter shape is validated structurally by the runtime expect(...) assertions
 // below. This mirrors apps/file-manager/next-adapter.ts, which avoids the same
@@ -242,7 +242,7 @@ describe('next-adapter upload (POC-ADAPTER-P1-rework)', () => {
       stream?.destroy?.();
       return { etag: 'mock-etag' };
     });
-    vi.doMock('@knext/lib/clients', () => ({
+    vi.doMock('@getknext/lib/clients', () => ({
       getMinioClient: () => ({ putObject: putObjectMock }),
     }));
 
@@ -279,7 +279,7 @@ describe('next-adapter upload (POC-ADAPTER-P1-rework)', () => {
 
     consoleSpy.mockRestore();
     delete process.env.STORAGE_BUCKET;
-    vi.doUnmock('@knext/lib/clients');
+    vi.doUnmock('@getknext/lib/clients');
   });
 
   it('calls putObject 3 times when prerender has fallback.filePath', async () => {
@@ -287,7 +287,7 @@ describe('next-adapter upload (POC-ADAPTER-P1-rework)', () => {
     process.env.STORAGE_BUCKET = 'test-bucket';
 
     const putObjectMock = vi.fn().mockResolvedValue({ etag: 'mock-etag' });
-    vi.doMock('@knext/lib/clients', () => ({
+    vi.doMock('@getknext/lib/clients', () => ({
       getMinioClient: () => ({ putObject: putObjectMock }),
     }));
 
@@ -325,6 +325,6 @@ describe('next-adapter upload (POC-ADAPTER-P1-rework)', () => {
 
     consoleSpy.mockRestore();
     delete process.env.STORAGE_BUCKET;
-    vi.doUnmock('@knext/lib/clients');
+    vi.doUnmock('@getknext/lib/clients');
   });
 });

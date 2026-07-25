@@ -1,4 +1,4 @@
-import type { KnativeNextConfig } from '@knext/core';
+import type { KnativeNextConfig } from '@getknext/core';
 
 /**
  * Minimal NextApp config for db-demo. The database is NOT configured here —

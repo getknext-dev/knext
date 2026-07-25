@@ -128,7 +128,7 @@ new Pool({
 });
 ```
 
-`@knext/lib`'s `getDbPool()` ships exactly these defaults (overridable via
+`@getknext/lib`'s `getDbPool()` ships exactly these defaults (overridable via
 `DB_POOL_MAX`, `DB_POOL_IDLE_TIMEOUT_MS`, `DB_POOL_CONNECT_TIMEOUT_MS`).
 
 **What to expect on a fully cold start** (app *and* database at zero, measured

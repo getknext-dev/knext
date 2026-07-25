@@ -1,4 +1,4 @@
-import type { KnativeNextConfig } from '@knext/core';
+import type { KnativeNextConfig } from '@getknext/core';
 
 const config: KnativeNextConfig = {
   name: 'file-manager',

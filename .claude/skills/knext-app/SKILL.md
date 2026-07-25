@@ -1,22 +1,22 @@
 ---
 name: knext-app
 description: >-
-  Turn a Next.js app into a deployable knext zone by wiring the @knext/core public
+  Turn a Next.js app into a deployable knext zone by wiring the @getknext/core public
   surface: the KnativeNextConfig type for kn-next.config.ts, the official Next.js
-  deployment adapter (@knext/core/adapter via the top-level adapterPath config), the ISR
-  Redis cache handler (@knext/core/adapters/cache-handler via next.config
+  deployment adapter (@getknext/core/adapter via the top-level adapterPath config), the ISR
+  Redis cache handler (@getknext/core/adapters/cache-handler via next.config
   cacheHandler), and OpenTelemetry wiring (resolveOtelOptions in
   instrumentation.ts). Use this skill whenever configuring a Next.js app for
   knext, writing or editing kn-next.config.ts or next.config.ts for knext, setting
   up the cache handler / instrumentation / assetPrefix / output:standalone, or
-  scaffolding a new zone — even if "@knext/core" isn't named explicitly.
+  scaffolding a new zone — even if "@getknext/core" isn't named explicitly.
 ---
 
 # Making a Next.js app a knext zone
 
-A knext **zone** is a standard Next.js (App Router) app wired to `@knext/core` so
+A knext **zone** is a standard Next.js (App Router) app wired to `@getknext/core` so
 the build produces a knext-deployable, scale-to-zero output. There are four
-touch-points; all use the **public** `@knext/core` surface (`docs/PUBLIC_API.md`).
+touch-points; all use the **public** `@getknext/core` surface (`docs/PUBLIC_API.md`).
 
 ## 1. `kn-next.config.ts` — the deploy config (`KnativeNextConfig`)
 
@@ -25,7 +25,7 @@ Use the typed config so invalid fields fail at author time:
 
 ```ts
 // kn-next.config.ts
-import type { KnativeNextConfig } from '@knext/core';
+import type { KnativeNextConfig } from '@getknext/core';
 
 const config: KnativeNextConfig = {
   name: 'storefront',                       // DNS-1123 label; the zone slug
@@ -57,13 +57,13 @@ import path from 'node:path';
 
 export default {
   output: 'standalone',                                  // knext runs the standalone server
-  adapterPath: '@knext/core/adapter',                    // the official knext adapter (top-level at Next.js 16.2+)
+  adapterPath: '@getknext/core/adapter',                    // the official knext adapter (top-level at Next.js 16.2+)
   cacheHandler: path.resolve(import.meta.dirname, 'cache-handler.js'),
   assetPrefix: process.env.ASSET_PREFIX || '',           // injected at deploy (object-store CDN)
 };
 ```
 
-- `@knext/core/adapter` is the official Next.js **deployment adapter**, wired via
+- `@getknext/core/adapter` is the official Next.js **deployment adapter**, wired via
   the top-level `adapterPath` config. On Next.js 16.0.x–16.1.x the option lives
   under `experimental` instead (`experimental: { adapterPath: ... }`); 16.2+
   auto-migrates that old key but 16.0.x does NOT accept the top-level form.
@@ -75,7 +75,7 @@ export default {
 
 ```js
 // cache-handler.js (at the app root)
-export { default } from '@knext/core/adapters/cache-handler';
+export { default } from '@getknext/core/adapters/cache-handler';
 ```
 
 This keeps the cache logic in the framework (bug fixes apply everywhere) while
@@ -86,7 +86,7 @@ satisfying Next's file-path requirement. The Redis connection comes from
 
 ```ts
 // instrumentation.ts
-import { resolveOtelOptions } from '@knext/core/adapters/otel-config';
+import { resolveOtelOptions } from '@getknext/core/adapters/otel-config';
 
 export async function register() {
   const otel = resolveOtelOptions(); // OtelOptions | null
@@ -100,15 +100,15 @@ set (the operator plumbs this from `spec.observability`).
 
 ## 5. The health route
 
-Add `app/api/health/route.ts` using `checkDeepHealth()` from `@knext/lib/health`
+Add `app/api/health/route.ts` using `checkDeepHealth()` from `@getknext/lib/health`
 (see the `knext-lib` skill) so readiness probes reflect real dependency health.
 
 ## Rules
-- Only import the **public** `@knext/core` paths above (`.`, `/adapter`,
+- Only import the **public** `@getknext/core` paths above (`.`, `/adapter`,
   `/adapters/otel-config`, `/adapters/cache-handler`). Anything under
-  `@knext/core/internal/*` is framework wiring with no stability guarantee.
+  `@getknext/core/internal/*` is framework wiring with no stability guarantee.
 - `output: 'standalone'` is required — knext spawns the standalone server.
-- Keep server-only helpers (`@knext/lib/*`) out of client components.
+- Keep server-only helpers (`@getknext/lib/*`) out of client components.
 
 ## Related skills
 - `knext-lib` — the runtime helpers app code calls (DB, storage, health, logger).

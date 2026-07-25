@@ -94,13 +94,13 @@ function objectKey(prefix: string, cacheKey: string, file: string): string {
 }
 
 /**
- * Lazily build a MinIO-backed {@link ImageVariantStore} from `@knext/lib`'s client,
+ * Lazily build a MinIO-backed {@link ImageVariantStore} from `@getknext/lib`'s client,
  * matching how `next-adapter.ts` resolves its uploader. Imported dynamically so the
  * dependency never loads when STORAGE_BUCKET is unset (or in tests that inject a fake).
  */
 async function defaultStore(): Promise<ImageVariantStore | null> {
     try {
-        const { getMinioClient } = await import("@knext/lib/clients");
+        const { getMinioClient } = await import("@getknext/lib/clients");
         const client = getMinioClient();
         return {
             async list(bucket, prefix) {

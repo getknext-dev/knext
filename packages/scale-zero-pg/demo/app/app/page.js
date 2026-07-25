@@ -69,7 +69,7 @@ export default async function Page() {
       )}
 
       <p style={{ opacity: 0.6, marginTop: "2rem", fontSize: "0.85rem" }}>
-        Pool mirrors <code>@knext/lib</code> getDbPool: max 5, idle 10s (&lt;
+        Pool mirrors <code>@getknext/lib</code> getDbPool: max 5, idle 10s (&lt;
         gateway 60s idle window). Idle → both scale to zero → next visitor wakes
         both.
       </p>

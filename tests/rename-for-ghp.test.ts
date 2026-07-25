@@ -10,25 +10,25 @@ import { rewriteManifest, rewriteScopeString, stageForGhp } from '../scripts/ren
  * Contract test for scripts/rename-for-ghp.mjs (interim GitHub Packages channel).
  *
  * GitHub Packages requires the scope to match the owning org, so the three
- * publishable packages (@knext/lib, @knext/db, @knext/core) must be republished
+ * publishable packages (@getknext/lib, @getknext/db, @getknext/core) must be republished
  * as @getknext-dev/{lib,db,core}. `publishConfig` cannot override the name, and
- * both @knext/lib and @knext/db are EXTERNALIZED in core's tsup build (db's tsc
- * build likewise preserves its @knext/lib imports) — so the compiled dists
- * hardcode `@knext/lib/...` + `@knext/db/...` specifiers that MUST be rewritten
+ * both @getknext/lib and @getknext/db are EXTERNALIZED in core's tsup build (db's tsc
+ * build likewise preserves its @getknext/lib imports) — so the compiled dists
+ * hardcode `@getknext/lib/...` + `@getknext/db/...` specifiers that MUST be rewritten
  * too, or the published @getknext-dev/core would try to resolve the unpublished
- * @knext/lib + @knext/db at runtime (`kn-next db migrate` dynamically imports
- * `@knext/db/migrate`).
+ * @getknext/lib + @getknext/db at runtime (`kn-next db migrate` dynamically imports
+ * `@getknext/db/migrate`).
  *
  * Every assertion below maps to a deliverable acceptance criterion:
  *  - names rewritten to @getknext-dev
- *  - inter-package dep keys (@knext/lib, @knext/db) rewritten in dependents
+ *  - inter-package dep keys (@getknext/lib, @getknext/db) rewritten in dependents
  *  - dist import strings rewritten (lib AND db specifiers)
  *  - publishConfig.provenance stripped (+ GHP registry set)
  *  - the ORIGINAL fixture tree is left untouched (staging copy only)
- *  - loud non-zero failure PER MISSING SPECIFIER: for every @knext/* dependency
+ *  - loud non-zero failure PER MISSING SPECIFIER: for every @getknext/* dependency
  *    a staged package declares, its dist must contain ≥1 occurrence of that
  *    exact specifier to rewrite — "lib rewritten but db chunk gone" fails too
- *  - loud failure when a staged package depends on an @knext/* package that is
+ *  - loud failure when a staged package depends on an @getknext/* package that is
  *    NOT itself in the publish set (closure check — an unpublished dep would
  *    ship an uninstallable manifest)
  *  - staging/publish order is lib → db → core
@@ -42,7 +42,7 @@ function writeJson(path: string, obj: unknown) {
 }
 
 // Build a synthetic monorepo slice: packages/lib + packages/db + packages/kn-next,
-// each with a package.json, a dist/ tree containing @knext/ import strings, a
+// each with a package.json, a dist/ tree containing @getknext/ import strings, a
 // LICENSE + README.
 function buildFixture(
   root: string,
@@ -62,7 +62,7 @@ function buildFixture(
   mkdirSync(join(coreDir, 'dist', 'cli'), { recursive: true });
 
   writeJson(join(libDir, 'package.json'), {
-    name: '@knext/lib',
+    name: '@getknext/lib',
     version: '0.1.0',
     main: 'dist/index.js',
     publishConfig: { access: 'public', provenance: true },
@@ -70,19 +70,19 @@ function buildFixture(
   });
   writeFileSync(join(libDir, 'dist', 'index.js'), 'export const lib = true;\n');
   writeFileSync(join(libDir, 'LICENSE'), 'Apache-2.0\n');
-  writeFileSync(join(libDir, 'README.md'), '# @knext/lib\n');
+  writeFileSync(join(libDir, 'README.md'), '# @getknext/lib\n');
 
   writeJson(join(dbDir, 'package.json'), {
-    name: '@knext/db',
+    name: '@getknext/db',
     version: '0.1.0',
     main: 'dist/index.js',
     publishConfig: { access: 'public', provenance: true },
-    dependencies: { '@knext/lib': 'workspace:^', pg: '^8.16.3' },
+    dependencies: { '@getknext/lib': 'workspace:^', pg: '^8.16.3' },
   });
   writeFileSync(
     join(dbDir, 'dist', 'index.js'),
     (opts.dbDistHasLibImports ?? true)
-      ? `import { getDbPool } from "@knext/lib/clients";\nexport { getDbPool };\n`
+      ? `import { getDbPool } from "@getknext/lib/clients";\nexport { getDbPool };\n`
       : `export const db = true;\n`,
   );
   writeFileSync(
@@ -90,16 +90,16 @@ function buildFixture(
     'export const runMigrations = async () => ({ applied: 0 });\n',
   );
   writeFileSync(join(dbDir, 'LICENSE'), 'Apache-2.0\n');
-  writeFileSync(join(dbDir, 'README.md'), '# @knext/db\n');
+  writeFileSync(join(dbDir, 'README.md'), '# @getknext/db\n');
 
   writeJson(join(coreDir, 'package.json'), {
-    name: '@knext/core',
+    name: '@getknext/core',
     version: '0.1.0',
     main: 'dist/config.js',
     publishConfig: { access: 'public', provenance: true },
     dependencies: {
-      '@knext/db': 'workspace:^',
-      '@knext/lib': 'workspace:^',
+      '@getknext/db': 'workspace:^',
+      '@getknext/lib': 'workspace:^',
       ioredis: '^5.0.0',
       ...(opts.coreExtraDep ?? {}),
     },
@@ -108,29 +108,29 @@ function buildFixture(
   writeFileSync(
     join(coreDir, 'dist', 'adapters', 'node-server.js'),
     opts.coreDistHasLibImports
-      ? `import { clients } from "@knext/lib/clients";\nexport { clients };\n`
+      ? `import { clients } from "@getknext/lib/clients";\nexport { clients };\n`
       : `export const core = true;\n`,
   );
   writeFileSync(
     join(coreDir, 'dist', 'adapters', 'node-server.d.ts'),
     opts.coreDistHasLibImports
-      ? `export * from "@knext/lib/clients";\n`
+      ? `export * from "@getknext/lib/clients";\n`
       : `export declare const core: boolean;\n`,
   );
   writeFileSync(
     join(coreDir, 'dist', 'cli', 'db-migrate.js'),
     opts.coreDistHasDbImports
-      ? `const run = async () => (await import("@knext/db/migrate")).runMigrations({});\nexport { run };\n`
+      ? `const run = async () => (await import("@getknext/db/migrate")).runMigrations({});\nexport { run };\n`
       : `export const run = async () => {};\n`,
   );
   writeFileSync(join(coreDir, 'LICENSE'), 'Apache-2.0\n');
-  writeFileSync(join(coreDir, 'README.md'), '# @knext/core\n');
+  writeFileSync(join(coreDir, 'README.md'), '# @getknext/core\n');
 }
 
 const PACKAGES = [
-  { name: '@knext/lib', dir: 'packages/lib' },
-  { name: '@knext/db', dir: 'packages/db' },
-  { name: '@knext/core', dir: 'packages/kn-next' },
+  { name: '@getknext/lib', dir: 'packages/lib' },
+  { name: '@getknext/db', dir: 'packages/db' },
+  { name: '@getknext/core', dir: 'packages/kn-next' },
 ];
 
 beforeEach(() => {
@@ -144,9 +144,9 @@ afterEach(() => {
 });
 
 describe('rewriteScopeString()', () => {
-  it('rewrites every @knext/ occurrence to @getknext-dev/', () => {
+  it('rewrites every @getknext/ occurrence to @getknext-dev/', () => {
     const { content, count } = rewriteScopeString(
-      `import a from "@knext/lib/clients";\nimport b from "@knext/db/migrate";\n`,
+      `import a from "@getknext/lib/clients";\nimport b from "@getknext/db/migrate";\n`,
     );
     expect(content).toBe(
       `import a from "@getknext-dev/lib/clients";\nimport b from "@getknext-dev/db/migrate";\n`,
@@ -165,22 +165,22 @@ describe('rewriteManifest()', () => {
   it('rewrites name, dep keys, resolves workspace:, and strips provenance while setting GHP registry', () => {
     const out = rewriteManifest(
       {
-        name: '@knext/core',
+        name: '@getknext/core',
         dependencies: {
-          '@knext/db': 'workspace:^',
-          '@knext/lib': 'workspace:^',
+          '@getknext/db': 'workspace:^',
+          '@getknext/lib': 'workspace:^',
           ioredis: '^5.0.0',
         },
         publishConfig: { access: 'public', provenance: true },
       },
-      { '@knext/lib': '0.2.0', '@knext/db': '0.3.0' },
+      { '@getknext/lib': '0.2.0', '@getknext/db': '0.3.0' },
     );
     expect(out.name).toBe('@getknext-dev/core');
     // workspace:^ resolved against the provided version map.
     expect(out.dependencies['@getknext-dev/lib']).toBe('^0.2.0');
     expect(out.dependencies['@getknext-dev/db']).toBe('^0.3.0');
-    expect(out.dependencies['@knext/lib']).toBeUndefined();
-    expect(out.dependencies['@knext/db']).toBeUndefined();
+    expect(out.dependencies['@getknext/lib']).toBeUndefined();
+    expect(out.dependencies['@getknext/db']).toBeUndefined();
     expect(out.dependencies.ioredis).toBe('^5.0.0');
     expect(out.publishConfig.provenance).toBeUndefined();
     expect(out.publishConfig.registry).toBe('https://npm.pkg.github.com');
@@ -194,17 +194,17 @@ describe('stageForGhp()', () => {
     const report = stageForGhp({ rootDir: fixtureRoot, stagingRoot, packages: PACKAGES });
 
     // --- publish order: lib before db before core ---
-    expect(report.order).toEqual(['@knext/lib', '@knext/db', '@knext/core']);
+    expect(report.order).toEqual(['@getknext/lib', '@getknext/db', '@getknext/core']);
 
     // --- staged manifests renamed ---
     const libPkg = JSON.parse(
-      readFileSync(join(report.staged['@knext/lib'].stagingDir, 'package.json'), 'utf8'),
+      readFileSync(join(report.staged['@getknext/lib'].stagingDir, 'package.json'), 'utf8'),
     );
     const dbPkg = JSON.parse(
-      readFileSync(join(report.staged['@knext/db'].stagingDir, 'package.json'), 'utf8'),
+      readFileSync(join(report.staged['@getknext/db'].stagingDir, 'package.json'), 'utf8'),
     );
     const corePkg = JSON.parse(
-      readFileSync(join(report.staged['@knext/core'].stagingDir, 'package.json'), 'utf8'),
+      readFileSync(join(report.staged['@getknext/core'].stagingDir, 'package.json'), 'utf8'),
     );
     expect(libPkg.name).toBe('@getknext-dev/lib');
     expect(dbPkg.name).toBe('@getknext-dev/db');
@@ -214,11 +214,11 @@ describe('stageForGhp()', () => {
     // range (npm publish from staging cannot rewrite `workspace:^` itself). All
     // fixture versions are 0.1.0 → ^0.1.0. ---
     expect(dbPkg.dependencies['@getknext-dev/lib']).toBe('^0.1.0');
-    expect(dbPkg.dependencies['@knext/lib']).toBeUndefined();
+    expect(dbPkg.dependencies['@getknext/lib']).toBeUndefined();
     expect(corePkg.dependencies['@getknext-dev/lib']).toBe('^0.1.0');
     expect(corePkg.dependencies['@getknext-dev/db']).toBe('^0.1.0');
-    expect(corePkg.dependencies['@knext/lib']).toBeUndefined();
-    expect(corePkg.dependencies['@knext/db']).toBeUndefined();
+    expect(corePkg.dependencies['@getknext/lib']).toBeUndefined();
+    expect(corePkg.dependencies['@getknext/db']).toBeUndefined();
 
     // --- provenance stripped + registry set on all three ---
     for (const pkg of [libPkg, dbPkg, corePkg]) {
@@ -228,87 +228,87 @@ describe('stageForGhp()', () => {
 
     // --- dist import strings rewritten in staging (lib AND db specifiers) ---
     const stagedJs = readFileSync(
-      join(report.staged['@knext/core'].stagingDir, 'dist', 'adapters', 'node-server.js'),
+      join(report.staged['@getknext/core'].stagingDir, 'dist', 'adapters', 'node-server.js'),
       'utf8',
     );
     const stagedDbMigrateJs = readFileSync(
-      join(report.staged['@knext/core'].stagingDir, 'dist', 'cli', 'db-migrate.js'),
+      join(report.staged['@getknext/core'].stagingDir, 'dist', 'cli', 'db-migrate.js'),
       'utf8',
     );
     const stagedDbIndexJs = readFileSync(
-      join(report.staged['@knext/db'].stagingDir, 'dist', 'index.js'),
+      join(report.staged['@getknext/db'].stagingDir, 'dist', 'index.js'),
       'utf8',
     );
     expect(stagedJs).toContain('@getknext-dev/lib/clients');
-    expect(stagedJs).not.toContain('@knext/lib');
+    expect(stagedJs).not.toContain('@getknext/lib');
     expect(stagedDbMigrateJs).toContain('@getknext-dev/db/migrate');
-    expect(stagedDbMigrateJs).not.toContain('@knext/db');
+    expect(stagedDbMigrateJs).not.toContain('@getknext/db');
     expect(stagedDbIndexJs).toContain('@getknext-dev/lib/clients');
-    expect(stagedDbIndexJs).not.toContain('@knext/lib');
-    expect(report.staged['@knext/core'].distOccurrences).toBeGreaterThan(0);
-    expect(report.staged['@knext/db'].distOccurrences).toBeGreaterThan(0);
+    expect(stagedDbIndexJs).not.toContain('@getknext/lib');
+    expect(report.staged['@getknext/core'].distOccurrences).toBeGreaterThan(0);
+    expect(report.staged['@getknext/db'].distOccurrences).toBeGreaterThan(0);
 
     // --- ORIGINAL tree untouched ---
     const origCore = JSON.parse(
       readFileSync(join(fixtureRoot, 'packages', 'kn-next', 'package.json'), 'utf8'),
     );
-    expect(origCore.name).toBe('@knext/core');
-    expect(origCore.dependencies['@knext/lib']).toBe('workspace:^');
-    expect(origCore.dependencies['@knext/db']).toBe('workspace:^');
+    expect(origCore.name).toBe('@getknext/core');
+    expect(origCore.dependencies['@getknext/lib']).toBe('workspace:^');
+    expect(origCore.dependencies['@getknext/db']).toBe('workspace:^');
     const origJs = readFileSync(
       join(fixtureRoot, 'packages', 'kn-next', 'dist', 'adapters', 'node-server.js'),
       'utf8',
     );
-    expect(origJs).toContain('@knext/lib/clients');
+    expect(origJs).toContain('@getknext/lib/clients');
   });
 
   it('copies LICENSE and README into staging', () => {
     buildFixture(fixtureRoot, { coreDistHasLibImports: true, coreDistHasDbImports: true });
     const report = stageForGhp({ rootDir: fixtureRoot, stagingRoot, packages: PACKAGES });
-    for (const name of ['@knext/lib', '@knext/db', '@knext/core'] as const) {
+    for (const name of ['@getknext/lib', '@getknext/db', '@getknext/core'] as const) {
       expect(existsSync(join(report.staged[name].stagingDir, 'LICENSE'))).toBe(true);
       expect(existsSync(join(report.staged[name].stagingDir, 'README.md'))).toBe(true);
     }
   });
 
-  it('FAILS LOUDLY when core has zero dist occurrences of @knext/lib to rewrite', () => {
+  it('FAILS LOUDLY when core has zero dist occurrences of @getknext/lib to rewrite', () => {
     buildFixture(fixtureRoot, { coreDistHasLibImports: false, coreDistHasDbImports: true });
     expect(() => stageForGhp({ rootDir: fixtureRoot, stagingRoot, packages: PACKAGES })).toThrow(
-      /@knext\/lib/,
+      /@getknext\/lib/,
     );
   });
 
-  it('FAILS LOUDLY when core rewrote @knext/lib but has ZERO @knext/db occurrences (per-dependency drift check)', () => {
+  it('FAILS LOUDLY when core rewrote @getknext/lib but has ZERO @getknext/db occurrences (per-dependency drift check)', () => {
     // The aggregate count>0 guard would pass here (lib imports rewritten) while
-    // silently shipping a dead `@knext/db/migrate` dynamic import — the exact
-    // hole behind #255/#256. The guard must be per @knext/* dependency.
+    // silently shipping a dead `@getknext/db/migrate` dynamic import — the exact
+    // hole behind #255/#256. The guard must be per @getknext/* dependency.
     buildFixture(fixtureRoot, { coreDistHasLibImports: true, coreDistHasDbImports: false });
     expect(() => stageForGhp({ rootDir: fixtureRoot, stagingRoot, packages: PACKAGES })).toThrow(
-      /@knext\/db/,
+      /@getknext\/db/,
     );
   });
 
-  it('FAILS LOUDLY when db has zero dist occurrences of its @knext/lib dep to rewrite', () => {
+  it('FAILS LOUDLY when db has zero dist occurrences of its @getknext/lib dep to rewrite', () => {
     buildFixture(fixtureRoot, {
       coreDistHasLibImports: true,
       coreDistHasDbImports: true,
       dbDistHasLibImports: false,
     });
     expect(() => stageForGhp({ rootDir: fixtureRoot, stagingRoot, packages: PACKAGES })).toThrow(
-      /@knext\/lib/,
+      /@getknext\/lib/,
     );
   });
 
-  it('FAILS LOUDLY when a staged package depends on an @knext/* package OUTSIDE the publish set (closure check)', () => {
-    // A plain-semver dep on an unpublished @knext/x would ship an uninstallable
+  it('FAILS LOUDLY when a staged package depends on an @getknext/* package OUTSIDE the publish set (closure check)', () => {
+    // A plain-semver dep on an unpublished @getknext/x would ship an uninstallable
     // manifest (resolveWorkspaceSpec only guards workspace: specs) — refuse it.
     buildFixture(fixtureRoot, {
       coreDistHasLibImports: true,
       coreDistHasDbImports: true,
-      coreExtraDep: { '@knext/extra': '^1.0.0' },
+      coreExtraDep: { '@getknext/extra': '^1.0.0' },
     });
     expect(() => stageForGhp({ rootDir: fixtureRoot, stagingRoot, packages: PACKAGES })).toThrow(
-      /@knext\/extra/,
+      /@getknext\/extra/,
     );
   });
 });

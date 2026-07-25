@@ -1,4 +1,4 @@
-# @knext/lib
+# @getknext/lib
 
 Shared runtime helpers for Next.js apps deployed with **knext** on Knative.
 
@@ -11,15 +11,15 @@ Provides small, focused clients and utilities the knext runtime uses:
 ## Install
 
 ```bash
-npm i @knext/lib
+npm i @getknext/lib
 ```
 
 ## Usage
 
 ```ts
-import { getDbPool, getDbPoolRO, getMinioClient } from '@knext/lib/clients';
-import { logger } from '@knext/lib/logger';
-import { checkDeepHealth } from '@knext/lib/health';
+import { getDbPool, getDbPoolRO, getMinioClient } from '@getknext/lib/clients';
+import { logger } from '@getknext/lib/logger';
+import { checkDeepHealth } from '@getknext/lib/health';
 ```
 
 ### Postgres pools (writer + read-only)
@@ -36,7 +36,7 @@ import { checkDeepHealth } from '@knext/lib/health';
 
 Reads are an **explicit opt-in** — nothing is auto-routed. Both pools drain on
 SIGTERM via `closeDbPool()` / `closeDbPoolRO()`. For typed schema, migrations,
-and drizzle queries over these pools, use [`@knext/db`](../db).
+and drizzle queries over these pools, use [`@getknext/db`](../db).
 
 ## Documentation
 

@@ -1,5 +1,5 @@
 /**
- * `@knext/db` SQL quoting helpers (#278) — the one shared place the extension
+ * `@getknext/db` SQL quoting helpers (#278) — the one shared place the extension
  * emitters (`./extensions/timescaledb`, `./extensions/pgvector`, and future
  * lanes) turn developer-authored table/column names and interval/window literals
  * into **valid, non-injectable** SQL.

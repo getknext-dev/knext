@@ -1,9 +1,9 @@
 /**
- * `@knext/db` pgvector helpers (#241) — index DDL emitters + distance-operator query
- * builders on the `@knext/db/schema` extension seam (ADR-0021 §2).
+ * `@getknext/db` pgvector helpers (#241) — index DDL emitters + distance-operator query
+ * builders on the `@getknext/db/schema` extension seam (ADR-0021 §2).
  *
  * The `vector(n)` column is drizzle's own and is already re-exported from
- * `@knext/db/schema`. drizzle does **not** model the `hnsw`/`ivfflat` access methods
+ * `@getknext/db/schema`. drizzle does **not** model the `hnsw`/`ivfflat` access methods
  * as standalone SQL, so {@link hnsw}/{@link ivfflat} emit the exact `CREATE INDEX`
  * DDL an app runs in its migration (with the right ops class + build params). The
  * distance operators (`<->` / `<=>` / `<#>`) are drizzle's typed `sql` builders,
@@ -25,7 +25,7 @@ import { quoteIdent } from '../sql';
 
 // The distance operators are drizzle's own typed builders: `cosineDistance` → `<=>`,
 // `l2Distance` → `<->`, `innerProduct` → `<#>`. Re-exported so the pgvector
-// vocabulary (column + index + operators) is importable from `@knext/db/schema`.
+// vocabulary (column + index + operators) is importable from `@getknext/db/schema`.
 export { cosineDistance, innerProduct, l2Distance } from 'drizzle-orm';
 
 /**
@@ -98,7 +98,7 @@ export interface HnswIndexOptions {
  * high-recall approximate nearest-neighbour search.
  *
  * ```ts
- * import { hnsw } from '@knext/db/schema';
+ * import { hnsw } from '@getknext/db/schema';
  * // → CREATE INDEX IF NOT EXISTS "emb_idx" ON "docs"
  * //     USING hnsw ("embedding" vector_cosine_ops) WITH (m = 16, ef_construction = 64);
  * hnsw('emb_idx', docs.embedding, { m: 16, efConstruction: 64 });

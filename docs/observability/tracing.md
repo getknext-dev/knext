@@ -72,7 +72,7 @@ appends to the pod env:
 | `OTEL_TRACES_SAMPLER_ARG` | `sampleRate` | head-based sampling fraction |
 
 The app never reads config directly — only env. `resolveOtelOptions(process.env)`
-(`@knext/core/adapters/otel-config`) returns `null` unless
+(`@getknext/core/adapters/otel-config`) returns `null` unless
 `OTEL_TRACING_ENABLED === 'true'`, and `instrumentation.ts` returns *without*
 initializing OTel on `null`.
 
@@ -92,7 +92,7 @@ SaaS exporters (Honeycomb, Datadog, Vercel's OTel integrations, …) are
 itself is not provisioned by knext today; knext only *emits* OTLP and assumes a
 collector at the endpoint.
 
-## 4. Automatic wiring (`@knext/core/adapters/tracing`)
+## 4. Automatic wiring (`@getknext/core/adapters/tracing`)
 
 Both knext spans are emitted **automatically** — you do **not** hand-open spans
 in your route handlers. When tracing is enabled, knext's `instrumentation.ts`
@@ -108,7 +108,7 @@ after the first is a no-op. Because it parents under the request span, the
 cold-start span lands in the same trace.
 
 **`knext.db_wake` — a pg-pool acquisition wrapper.** `instrumentPoolForDbWake` is
-installed once via `@knext/lib/clients`' `setPoolInstrumentor` seam. The lib
+installed once via `@getknext/lib/clients`' `setPoolInstrumentor` seam. The lib
 (which stays OTel-free) calls it for every pool it creates; the wrapper spans the
 pool's **first client acquisition — via `pool.query(...)` OR `pool.connect()`** —
 the scale-zero-pg 0→1 wake — as `knext.db_wake` (attributes `knext.db_role` =
@@ -142,15 +142,15 @@ every checkout.
 > first-connects — even one rejecting while another succeeds — yield exactly one
 > metric increment and one successful `knext.db_wake` span.
 
-> Why the seam state lives on `globalThis` (#352): every `@knext/lib` seam that
+> Why the seam state lives on `globalThis` (#352): every `@getknext/lib` seam that
 > is SET by `instrumentation.ts` but READ elsewhere on the request path
-> (`setPoolInstrumentor` in `@knext/lib/clients`; `setTraceIdProvider` /
-> `setCorrelationIdProvider` in `@knext/lib/context`) stores its provider on a
+> (`setPoolInstrumentor` in `@getknext/lib/clients`; `setTraceIdProvider` /
+> `setCorrelationIdProvider` in `@getknext/lib/context`) stores its provider on a
 > `Symbol.for('knext.lib.*')` slot on `globalThis` — never a plain module-level
 > `let`. In the Next.js **standalone** build `instrumentation.ts` compiles in a
-> SEPARATE webpack layer from the app server bundles, and `@knext/lib` is bundled
+> SEPARATE webpack layer from the app server bundles, and `@getknext/lib` is bundled
 > (not externalized) into each layer, so `instrumentation-node`'s copy of
-> `@knext/lib/clients` and the app server component's copy are two PHYSICAL
+> `@getknext/lib/clients` and the app server component's copy are two PHYSICAL
 > modules with independent module state. A module-level `let` written by the
 > instrumentation copy is invisible to the copy `getDbPool()` reads — the pool is
 > never wrapped and `knext_db_wake_*` silently never fires (the live #352 defect;
@@ -158,7 +158,7 @@ every checkout.
 > they are passed directly into `registerOTel`, crossing no seam). Anchoring the
 > state on the single shared `globalThis` makes set-from-copy-A visible to
 > read-from-copy-B regardless of bundling; `Symbol.for` uses the cross-realm
-> registry so the key is identical in every copy. **Any future `@knext/lib` seam
+> registry so the key is identical in every copy. **Any future `@getknext/lib` seam
 > that is installed from `instrumentation.ts` MUST follow this pattern** — see
 > `packages/lib/src/__tests__/seam-duplication.test.ts` for the two-instances
 > guard. The public API and fail-open / default-off semantics are unchanged.
@@ -168,7 +168,7 @@ every checkout.
 > the `bytecode-cache-reuse` CI job (which already produces the standalone
 > build, so no extra build cost). It asserts the `Symbol.for('knext.lib.*')`
 > seam keys co-occur in BOTH the instrumentation (writer) chunk AND an app-server
-> (reader) chunk of the real `next build --webpack` output, and that `@knext/lib`
+> (reader) chunk of the real `next build --webpack` output, and that `@getknext/lib`
 > is never added to `serverExternalPackages` (which would re-split the dedup). A
 > re-broken seam fails the gate, not the deploy. Since #356 (ADR-0031) this
 > guard also **ships with every app generated from the knext template**
@@ -181,9 +181,9 @@ import {
   ColdStartSpanProcessor,
   installTraceIdProvider,
   instrumentPoolForDbWake,
-} from '@knext/core/adapters/tracing';
-import { setPoolInstrumentor } from '@knext/lib/clients';
-import { setTraceIdProvider } from '@knext/lib/context';
+} from '@getknext/core/adapters/tracing';
+import { setPoolInstrumentor } from '@getknext/lib/clients';
+import { setTraceIdProvider } from '@getknext/lib/context';
 import { registerOTel } from '@vercel/otel';
 
 registerOTel({
@@ -194,14 +194,14 @@ setPoolInstrumentor(instrumentPoolForDbWake); // knext.db_wake on first query OR
 setTraceIdProvider(installTraceIdProvider());  // log ↔ trace join (§5)
 ```
 
-An app that uses `@knext/lib`'s pools (`getDbPool` / `getDbPoolRO`) or the
-`@knext/db` SDK gets `knext.db_wake` for free — no query-site changes.
+An app that uses `@getknext/lib`'s pools (`getDbPool` / `getDbPoolRO`) or the
+`@getknext/db` SDK gets `knext.db_wake` for free — no query-site changes.
 
 ### Edge-runtime safety (REQUIRED for apps with middleware) — #342
 
 Next.js compiles `instrumentation.ts` for **both** the `nodejs` **and** the
 `edge` runtimes (any app with a `middleware.ts` triggers an edge build). All of
-the wiring above is **Node-only**: `@knext/lib/clients` transitively pulls in
+the wiring above is **Node-only**: `@getknext/lib/clients` transitively pulls in
 `@cerbos/grpc` (→ `@grpc/grpc-js`, needing `zlib`/`stream`/`net`/`tls`/`fs`),
 plus `pg` and `minio`. A **top-level static import** of any of that lands in the
 edge bundle and fails the production `next build` with
@@ -249,7 +249,7 @@ module, OR (b) the adapter wiring disappears (or a hand-written `IgnorePlugin`
 reappears in app code). The guard shipped with `apps/file-manager`
 (`instrumentation-edge-safe.test.ts`, #344) and now **ships with every generated
 app** from the template (#356); the adapter injection itself is unit-guarded in
-`@knext/core` (`adapter-edge-ignore-plugin.test.ts`). Both classes must fail the
+`@getknext/core` (`adapter-edge-ignore-plugin.test.ts`). Both classes must fail the
 gate, not the deploy build.
 
 Belt-and-suspenders: the webpack production build itself is a **PR-triggered CI
@@ -265,7 +265,7 @@ For code paths outside the automatic hooks, `withColdStartSpan(attrs, fn)` and
 no-op posture when tracing is disabled; both nest under the active request span.
 
 ```ts
-import { withDbWakeSpan } from '@knext/core/adapters/tracing';
+import { withDbWakeSpan } from '@getknext/core/adapters/tracing';
 const rows = await withDbWakeSpan(() => db.query('select 1'));
 ```
 
@@ -273,7 +273,7 @@ const rows = await withDbWakeSpan(() => db.query('select 1'));
 
 The trace and its logs share one `trace_id`. The tracing module exposes the
 active trace id to the [correlation layer](./logging.md) via the injectable
-`setTraceIdProvider` seam, so no OTel dependency leaks into `@knext/lib`:
+`setTraceIdProvider` seam, so no OTel dependency leaks into `@getknext/lib`:
 
 ```ts
 // instrumentation.ts — wired once at startup, only when tracing is enabled.
@@ -282,8 +282,8 @@ import {
   CorrelationSpanProcessor,
   installCorrelationIdProvider,
   installTraceIdProvider,
-} from '@knext/core/adapters/tracing';
-import { setCorrelationIdProvider, setTraceIdProvider } from '@knext/lib/context';
+} from '@getknext/core/adapters/tracing';
+import { setCorrelationIdProvider, setTraceIdProvider } from '@getknext/lib/context';
 import { registerOTel } from '@vercel/otel';
 
 registerOTel({
@@ -336,7 +336,7 @@ collector):
   concurrent reject/succeed race yields exactly one successful db_wake span.
 - `packages/kn-next/src/__tests__/tracing.test.ts` — the helper units
   (`withColdStartSpan` / `withDbWakeSpan`, attributes, nesting, `trace_id` join).
-- `packages/lib/src/__tests__/clients-instrumentor.test.ts` — the `@knext/lib`
+- `packages/lib/src/__tests__/clients-instrumentor.test.ts` — the `@getknext/lib`
   `setPoolInstrumentor` seam (invoked once per pool, fail-open, default no-op).
 
 On a live cluster, send one cold request and confirm a single trace in

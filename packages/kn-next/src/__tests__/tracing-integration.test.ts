@@ -26,7 +26,7 @@ import {
  *      Its `onStart` fires for the FIRST inbound HTTP server span and emits a
  *      `knext.cold_start` child under it (once; inert afterwards).
  *   2. `instrumentPoolForDbWake` — wraps the pg pool's FIRST `connect()`
- *      (installed via `@knext/lib/clients`' `setPoolInstrumentor` seam) so the
+ *      (installed via `@getknext/lib/clients`' `setPoolInstrumentor` seam) so the
  *      0→1 DB wake becomes a `knext.db_wake` span in the active request context.
  *
  * We simulate the runtime with the SDK's `BasicTracerProvider` +
@@ -70,7 +70,7 @@ afterEach(async () => {
 
 /**
  * A minimal fake pg pool whose `connect()` resolves a fake client. This is what
- * `@knext/lib/clients` hands the instrumentor; the instrumentor wraps `connect`.
+ * `@getknext/lib/clients` hands the instrumentor; the instrumentor wraps `connect`.
  */
 function makeFakePool() {
     let connects = 0;
@@ -107,7 +107,7 @@ describe("#317 acceptance: one cold DB-backed request → one trace, spans auto-
     it("a cold DB-backed request yields HTTP → knext.cold_start + knext.db_wake in ONE trace, all auto-emitted", async () => {
         const pool = makeFakePool();
         // The tracing adapter wraps the pool's first connect — this is what the
-        // @knext/lib/clients seam calls at pool-creation time.
+        // @getknext/lib/clients seam calls at pool-creation time.
         instrumentPoolForDbWake(pool, "writer");
 
         await handleRequest("GET /files", async () => {

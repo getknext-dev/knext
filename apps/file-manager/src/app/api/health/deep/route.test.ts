@@ -8,7 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
  */
 
 const pgQuery = vi.fn<() => Promise<unknown>>();
-vi.mock('@knext/lib/clients', () => ({
+vi.mock('@getknext/lib/clients', () => ({
   getDbPool: () => ({ query: pgQuery }),
 }));
 vi.mock('ioredis', () => ({

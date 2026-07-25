@@ -152,7 +152,7 @@ override for grandfathered ones.
   up).
 - The wake/pooling contract (pool idle < gateway idle 60s; connect timeout
   ≥ 10s; T_both ≈ 13s app-dominated) gets a canonical user-facing home:
-  `docs/guides/postgres-binding.md`. `@knext/lib`'s `getDbPool()` now also
+  `docs/guides/postgres-binding.md`. `@getknext/lib`'s `getDbPool()` now also
   ships a bounded default `connectionTimeoutMillis` of 15s
   (`DB_POOL_CONNECT_TIMEOUT_MS`): pg's default of 0 waits indefinitely, which
   survives wakes but hangs forever on a truly-dead DB — bounded failure with

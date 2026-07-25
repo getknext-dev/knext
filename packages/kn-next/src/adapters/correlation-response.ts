@@ -57,7 +57,7 @@ import { ServerResponse } from "node:http";
 import {
     CORRELATION_HEADER,
     isWellFormedCorrelationId,
-} from "@knext/lib/context";
+} from "@getknext/lib/context";
 
 import { activeCorrelationId as defaultActiveCorrelationId } from "./tracing";
 

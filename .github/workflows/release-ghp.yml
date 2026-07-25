@@ -1,18 +1,18 @@
 # Release — interim GitHub Packages channel (@getknext-dev/*)
 #
-# WHY: the canonical release path is npmjs under the `@knext/*` scope
+# WHY: the canonical release path is npmjs under the `@getknext/*` scope
 # (.github/workflows/release.yml + changesets), blocked on a human NPM_TOKEN.
 # Until npmjs goes live, the maintainer directive is "use GitHub Packages for
 # now". GitHub Packages requires the package SCOPE to match the owning org, so
 # this channel republishes the three publishable packages as:
-#     @knext/lib  -> @getknext-dev/lib
-#     @knext/db   -> @getknext-dev/db
-#     @knext/core -> @getknext-dev/core
-# (#255/#256: @knext/core depends on @knext/db — a lib+core-only publish set
+#     @getknext/lib  -> @getknext-dev/lib
+#     @getknext/db   -> @getknext-dev/db
+#     @getknext/core -> @getknext-dev/core
+# (#255/#256: @getknext/core depends on @getknext/db — a lib+core-only publish set
 # shipped an @getknext-dev/core that 404'd on install.)
 # scripts/rename-for-ghp.mjs stages renamed COPIES (never mutating the tree),
-# rewrites the hardcoded `@knext/lib` + `@knext/db` imports baked into the
-# externalized dists (core hardcodes both; db hardcodes @knext/lib), resolves
+# rewrites the hardcoded `@getknext/lib` + `@getknext/db` imports baked into the
+# externalized dists (core hardcodes both; db hardcodes @getknext/lib), resolves
 # `workspace:` deps, and strips `publishConfig.provenance`
 # (provenance needs npmjs/OIDC — it is NOT available on this path).
 #
@@ -36,7 +36,7 @@ permissions:
 jobs:
   # npm/JS supply-chain gate (v4-P3) — identical gate to release.yml, applied to
   # the GHP interim channel too. Audits the PUBLISHED production closure
-  # (--omit=dev) of @knext/{core,lib,db} (the SAME source the rename script
+  # (--omit=dev) of @getknext/{core,lib,db} (the SAME source the rename script
   # stages as @getknext-dev/*), FAILS on HIGH/CRITICAL, and emits a CycloneDX
   # SBOM per package. PUBLISH-BLOCKING: publish-ghp `needs: audit`.
   audit:
@@ -59,7 +59,7 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Build publishable packages
-        run: pnpm --filter @knext/lib build && pnpm --filter @knext/db build && pnpm --filter @knext/core build
+        run: pnpm --filter @getknext/lib build && pnpm --filter @getknext/db build && pnpm --filter @getknext/core build
 
       - name: Audit published production closure + generate SBOMs
         run: node scripts/audit-published.mjs
@@ -102,16 +102,16 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      # Build in dependency order: @knext/lib, then @knext/db (depends on lib;
-      # holds the `kn-next db migrate` runner, #242), then @knext/core (which
-      # type-imports both @knext/lib and @knext/db at build time).
+      # Build in dependency order: @getknext/lib, then @getknext/db (depends on lib;
+      # holds the `kn-next db migrate` runner, #242), then @getknext/core (which
+      # type-imports both @getknext/lib and @getknext/db at build time).
       - name: Build publishable packages
-        run: pnpm --filter @knext/lib build && pnpm --filter @knext/db build && pnpm --filter @knext/core build
+        run: pnpm --filter @getknext/lib build && pnpm --filter @getknext/db build && pnpm --filter @getknext/core build
 
       # Stage renamed copies into .ghp-staging/{lib,db,core}. Fails LOUDLY if any
       # staged package's dist no longer contains the externalized imports for one
-      # of its @knext/* deps (per-dependency layout-drift guard), or if a staged
-      # package depends on an @knext/* package outside the publish set.
+      # of its @getknext/* deps (per-dependency layout-drift guard), or if a staged
+      # package depends on an @getknext/* package outside the publish set.
       - name: Stage packages for GitHub Packages
         run: node scripts/rename-for-ghp.mjs
 

@@ -4,7 +4,7 @@
 // generated knext app ships with. It MUST stay EDGE-CLEAN: Next.js compiles
 // `instrumentation.ts` for BOTH the `nodejs` AND the `edge` runtimes (adding a
 // `middleware.ts` forces an edge build). All knext observability/db-wake wiring
-// is Node-only by nature — `./instrumentation-node` reaches `@knext/lib/clients`
+// is Node-only by nature — `./instrumentation-node` reaches `@getknext/lib/clients`
 // (→ `@cerbos/grpc` → `@grpc/grpc-js`, needing `zlib`/`stream`/`net`/`tls`/`fs`),
 // plus `pg` and `minio`. A top-level static import of any of that lands in the
 // edge bundle and the production `next build` fails with `Module not found`
@@ -17,7 +17,7 @@
 // subtree) into BOTH runtime bundles — the runtime guard stops it EXECUTING on
 // the edge, NOT from being BUNDLED. The LOAD-BEARING edge exclusion is the
 // `IgnorePlugin` the knext adapter injects from its `modifyConfig`
-// (`./next-adapter.ts` → `@knext/core/adapter`, #356/ADR-0031): for the edge
+// (`./next-adapter.ts` → `@getknext/core/adapter`, #356/ADR-0031): for the edge
 // compile ONLY it replaces `./instrumentation-node` with an empty module, so
 // app authors never hand-write that webpack hook. On the edge runtime
 // `register()` is a no-op anyway — the knext runtime runs the app on Node (the

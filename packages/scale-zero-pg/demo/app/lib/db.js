@@ -1,6 +1,6 @@
 // Postgres pool for the scale-to-zero demo.
 //
-// This intentionally mirrors @knext/lib's getDbPool()
+// This intentionally mirrors @getknext/lib's getDbPool()
 // (packages/lib/src/clients.ts in the knext monorepo) so the demo behaves like
 // a real knext app without vendoring the whole pnpm workspace into the image:
 //

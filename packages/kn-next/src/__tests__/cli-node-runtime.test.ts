@@ -21,8 +21,8 @@
  *     --version → exit 0, usage text) and, when bun is on PATH, under `bun`
  *     with byte-identical --help output — ONE code path, two runtimes.
  *
- * dist/ must exist: CI builds @knext/core before vitest (ci.yml), same
- * contract publish-surface.test.ts relies on. Run `pnpm --filter @knext/core
+ * dist/ must exist: CI builds @getknext/core before vitest (ci.yml), same
+ * contract publish-surface.test.ts relies on. Run `pnpm --filter @getknext/core
  * build` locally first.
  */
 
@@ -236,8 +236,8 @@ describe("built bin (dist/cli/kn-next.js) is Node-runnable", () => {
     beforeAll(() => {
         if (!existsSync(distBin)) {
             throw new Error(
-                `${distBin} missing — build @knext/core before vitest ` +
-                    "(pnpm --filter @knext/lib build && pnpm --filter @knext/db build && pnpm --filter @knext/core build), " +
+                `${distBin} missing — build @getknext/core before vitest ` +
+                    "(pnpm --filter @getknext/lib build && pnpm --filter @getknext/db build && pnpm --filter @getknext/core build), " +
                     "same contract as publish-surface.test.ts / ci.yml.",
             );
         }

@@ -51,7 +51,7 @@ function runWithoutPresetCache(shellCmd: string): string {
 describe('Dockerfile CMD exports NODE_COMPILE_CACHE to the node process (regression: f100deb)', () => {
   it("the container CMD's node process actually receives NODE_COMPILE_CACHE", () => {
     // The runtime CMD now boots the knext runtime entry
-    // (`node -e "import('@knext/core/internal/node-server')"`) rather than
+    // (`node -e "import('@getknext/core/internal/node-server')"`) rather than
     // bare-exec'ing server.js. Swap that `exec node …` for the probe so we
     // exercise the SAME shell prefix (the NODE_COMPILE_CACHE export) that the
     // real node process inherits.

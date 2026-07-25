@@ -1,6 +1,6 @@
 /**
- * PK5 (#116) — Public application API surface contract for @knext/core and
- * @knext/lib.
+ * PK5 (#116) — Public application API surface contract for @getknext/core and
+ * @getknext/lib.
  *
  * PK1 made the published surface *resolvable* (every `exports` subpath points
  * at compiled `dist/` JS + `.d.ts`). PK5 makes it *intentional*: it draws the
@@ -13,7 +13,7 @@
  *   1. the `exports` map (minus the `./internal/*` prefix),
  *   2. the `knext.publicApi.public` array in package.json, and
  *   3. the subpaths documented in `docs/PUBLIC_API.md`.
- * PR #285 promoting `@knext/core/validate` shipped with `publicApi.public`
+ * PR #285 promoting `@getknext/core/validate` shipped with `publicApi.public`
  * missing `./validate` while the other two had it (caught only in human
  * review). This file now derives the public set from the authoritative
  * `knext.publicApi.public` field and asserts all three sources AGREE on it —
@@ -83,8 +83,8 @@ function exportsPublicSubpaths(
 
 /**
  * Subpaths that `docs/PUBLIC_API.md` documents as public for a package, derived
- * from its `### \`<importPath>\`` section headings. `@knext/<pkg>` → `.`,
- * `@knext/<pkg>/foo` → `./foo`. Internal (`/internal/`) headings are excluded —
+ * from its `### \`<importPath>\`` section headings. `@getknext/<pkg>` → `.`,
+ * `@getknext/<pkg>/foo` → `./foo`. Internal (`/internal/`) headings are excluded —
  * those live in the "NOT supported" table, not as `###` sections.
  */
 function docPublicSubpaths(pkgName: string): string[] {
@@ -126,7 +126,7 @@ function dtsTargetOf(value: unknown): string | undefined {
 }
 
 /**
- * `@knext/core/adapters/cache-handler` is PUBLIC but plain (untyped) JS — apps
+ * `@getknext/core/adapters/cache-handler` is PUBLIC but plain (untyped) JS — apps
  * reference it from next.config `cacheHandler` via a thin local re-export. It
  * resolves to a bare `.js` with no `.d.ts`, so its dist target is verified
  * separately from the typed subpaths. The list of *which* subpaths are untyped
@@ -137,7 +137,7 @@ function isTypedSubpath(entry: unknown): boolean {
     return dtsTargetOf(entry) !== undefined;
 }
 
-describe("v5-P1 (#286): @knext/core public API is a 3-way contract", () => {
+describe("v5-P1 (#286): @getknext/core public API is a 3-way contract", () => {
     const authoritative = sorted(CORE_API.public);
 
     it("has a non-empty authoritative knext.publicApi.public set", () => {
@@ -160,7 +160,7 @@ describe("v5-P1 (#286): @knext/core public API is a 3-way contract", () => {
     });
 
     it("PUBLIC_API.md documents exactly the authoritative public set", () => {
-        const fromDoc = sorted(docPublicSubpaths("@knext/core"));
+        const fromDoc = sorted(docPublicSubpaths("@getknext/core"));
         expect(
             fromDoc,
             "docs/PUBLIC_API.md sections must match knext.publicApi.public",
@@ -168,7 +168,7 @@ describe("v5-P1 (#286): @knext/core public API is a 3-way contract", () => {
     });
 });
 
-describe("v5-P1 (#286): @knext/lib public API is a 3-way contract", () => {
+describe("v5-P1 (#286): @getknext/lib public API is a 3-way contract", () => {
     const authoritative = sorted(LIB_API.public);
 
     it("has a non-empty authoritative knext.publicApi.public set", () => {
@@ -189,7 +189,7 @@ describe("v5-P1 (#286): @knext/lib public API is a 3-way contract", () => {
     });
 
     it("PUBLIC_API.md documents exactly the authoritative public set", () => {
-        const fromDoc = sorted(docPublicSubpaths("@knext/lib"));
+        const fromDoc = sorted(docPublicSubpaths("@getknext/lib"));
         expect(
             fromDoc,
             "docs/PUBLIC_API.md sections must match lib knext.publicApi.public",
@@ -197,7 +197,7 @@ describe("v5-P1 (#286): @knext/lib public API is a 3-way contract", () => {
     });
 });
 
-describe("PK5: @knext/core public API surface", () => {
+describe("PK5: @getknext/core public API surface", () => {
     it("declares every public subpath in the exports map", () => {
         for (const sub of CORE_API.public) {
             expect(
@@ -291,16 +291,18 @@ describe("PK5: @knext/core public API surface", () => {
         for (const key of Object.keys(corePkg.exports)) {
             if (key.startsWith("./internal/")) continue;
             const importPath =
-                key === "." ? "@knext/core" : `@knext/core${key.slice(1)}`;
+                key === "."
+                    ? "@getknext/core"
+                    : `@getknext/core${key.slice(1)}`;
             expect(
                 DOC.includes(importPath),
-                `public core export ${key} must be documented as @knext/core${key === "." ? "" : key.slice(1)}`,
+                `public core export ${key} must be documented as @getknext/core${key === "." ? "" : key.slice(1)}`,
             ).toBe(true);
         }
     });
 });
 
-describe("PK5: @knext/lib public API surface", () => {
+describe("PK5: @getknext/lib public API surface", () => {
     it("declares every public subpath in the exports map", () => {
         for (const sub of LIB_API.public) {
             expect(
@@ -345,18 +347,21 @@ describe("PK5: Public API reference doc accuracy", () => {
     it("documents the public surface for both packages", () => {
         for (const sub of CORE_API.public) {
             const p =
-                sub === "." ? "@knext/core" : `@knext/core${sub.slice(1)}`;
+                sub === "."
+                    ? "@getknext/core"
+                    : `@getknext/core${sub.slice(1)}`;
             expect(DOC.includes(p), `doc must list ${p}`).toBe(true);
         }
         for (const sub of LIB_API.public) {
-            const p = sub === "." ? "@knext/lib" : `@knext/lib${sub.slice(1)}`;
+            const p =
+                sub === "." ? "@getknext/lib" : `@getknext/lib${sub.slice(1)}`;
             expect(DOC.includes(p), `doc must list ${p}`).toBe(true);
         }
     });
 
     it("names the internal (unsupported) subpaths explicitly", () => {
         expect(DOC.toLowerCase()).toContain("internal");
-        expect(DOC).toContain("@knext/core/internal/");
+        expect(DOC).toContain("@getknext/core/internal/");
     });
 
     it("states a stability / semver policy", () => {

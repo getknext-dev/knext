@@ -3,11 +3,11 @@
  * check-ts-import-extensions.mjs — deterministic guard for the TS5097 main-red
  * class (#289).
  *
- * Under `moduleResolution: bundler` (used by @knext/core), `tsc --noEmit`
+ * Under `moduleResolution: bundler` (used by @getknext/core), `tsc --noEmit`
  * rejects an explicit `.ts`/`.tsx`/`.mts`/`.cts` import extension with TS5097
  * (`allowImportingTsExtensions` is off). Vitest resolves such specifiers at
  * runtime, so the offending test can run green locally while the post-merge
- * `Typecheck @knext/core` gate goes red — turning the default branch red for
+ * `Typecheck @getknext/core` gate goes red — turning the default branch red for
  * every open PR (the PR #285 → #288 incident).
  *
  * This guard FAILS FAST (author/PR time) on any RELATIVE import specifier that

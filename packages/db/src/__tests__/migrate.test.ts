@@ -14,7 +14,7 @@ import {
 // the config's DSN is always `DATABASE_URL` (never `DATABASE_URL_RO`). These
 // tests pin the dialect, the writer DSN wiring, and the path defaults.
 
-describe('@knext/db/migrate — defineDrizzleConfig()', () => {
+describe('@getknext/db/migrate — defineDrizzleConfig()', () => {
   const originalUrl = process.env.DATABASE_URL;
   const originalRoUrl = process.env.DATABASE_URL_RO;
 
@@ -79,7 +79,7 @@ describe('@knext/db/migrate — defineDrizzleConfig()', () => {
 const WRITER_DSN = 'postgres://writer.example:55432/app';
 const RO_DSN = 'postgres://reader.example:55434/app';
 
-describe('@knext/db/migrate — resolveWriterDsn()', () => {
+describe('@getknext/db/migrate — resolveWriterDsn()', () => {
   const originalUrl = process.env.DATABASE_URL;
   const originalRoUrl = process.env.DATABASE_URL_RO;
 
@@ -126,7 +126,7 @@ describe('@knext/db/migrate — resolveWriterDsn()', () => {
   });
 });
 
-describe('@knext/db/migrate — runMigrations()', () => {
+describe('@getknext/db/migrate — runMigrations()', () => {
   const originalUrl = process.env.DATABASE_URL;
   const originalRoUrl = process.env.DATABASE_URL_RO;
 

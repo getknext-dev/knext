@@ -13,7 +13,7 @@ Public (stable, semver-governed):
 - **CLI:** `kn-next` commands + flags (`build`, `deploy`, `generate`, `cleanup`, …).
 - **Config schemas:** `KnativeNextConfig` (`packages/kn-next/src/config.ts`) and the **`NextApp`
   CRD** (`apps.kn-next.dev/v1alpha1`) — the most load-bearing contracts.
-- **Exported package APIs:** `@knext/core`, `@knext/lib` exports.
+- **Exported package APIs:** `@getknext/core`, `@getknext/lib` exports.
 - **Generated code shape** (gRPC clients/actions/routes) consumed by user apps.
 
 Internal (free to change): reconciler internals, adapter implementation details, build scripts,

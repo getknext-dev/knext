@@ -41,7 +41,7 @@ You can also declare the binding in your `kn-next.config.ts` — knext emits the
 file**:
 
 ```ts title="kn-next.config.ts"
-import type { KnativeNextConfig } from '@knext/core';
+import type { KnativeNextConfig } from '@getknext/core';
 
 const config: KnativeNextConfig = {
   name: 'storefront',
@@ -109,7 +109,7 @@ Two settings keep the pooler friendly to a scale-to-zero app that reconnects on 
 - **Connect timeout comfortably above your database's cold-wake time** — so the first request
   after scale-up waits for the connection instead of failing.
 
-The [`@knext/db`](/docs/data-sdk) SDK already ships pools tuned to these bounds and drains them
+The [`@getknext/db`](/docs/data-sdk) SDK already ships pools tuned to these bounds and drains them
 cleanly on `SIGTERM`, so a terminating replica releases its connections instead of severing them
 mid-request.
 
@@ -157,12 +157,12 @@ some scale-to-zero savings for a consistently warm path.
 
 For a typed, drizzle-orm-based data layer over the DSNs you just bound — schema, migrations, and
 explicit `getDb()` (writer) / `getDbRO()` (reader) clients — use the
-[`@knext/db` Data SDK](/docs/data-sdk). It provisions nothing and mutates no cluster resource; it
+[`@getknext/db` Data SDK](/docs/data-sdk). It provisions nothing and mutates no cluster resource; it
 is a plain client over whatever `DATABASE_URL` you supply.
 
 ## Related
 
-- [Data SDK (`@knext/db`)](/docs/data-sdk) — typed schema, migrations, and read/write clients.
+- [Data SDK (`@getknext/db`)](/docs/data-sdk) — typed schema, migrations, and read/write clients.
 - [CLI reference → `db bind` / `db migrate`](/docs/cli) — the commands behind this page.
 - [Operator & the NextApp CRD → Databases](/docs/operator#databases-specdatabase) — how the DSN
   gets into your pods.

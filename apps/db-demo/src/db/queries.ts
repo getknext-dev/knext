@@ -11,7 +11,7 @@
  *   • {@link addMessage}   → `getDb()`   — the single-writer path; the next
  *     `getDb()` read sees the row (read-your-writes).
  */
-import { desc, getDb, getDbRO } from '@knext/db';
+import { desc, getDb, getDbRO } from '@getknext/db';
 import { type Message, messages, type NewMessage } from './schema';
 
 /** Newest-first list of messages, from the read-only replica (bounded-stale). */

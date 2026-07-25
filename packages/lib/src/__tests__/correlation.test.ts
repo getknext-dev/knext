@@ -26,7 +26,7 @@ import {
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-describe('@knext/lib correlation — id resolution', () => {
+describe('@getknext/lib correlation — id resolution', () => {
   afterEach(() => {
     resetTraceIdProvider();
   });
@@ -70,7 +70,7 @@ describe('@knext/lib correlation — id resolution', () => {
   });
 });
 
-describe('@knext/lib correlation — request context (AsyncLocalStorage)', () => {
+describe('@getknext/lib correlation — request context (AsyncLocalStorage)', () => {
   afterEach(() => {
     resetTraceIdProvider();
   });
@@ -130,7 +130,7 @@ describe('@knext/lib correlation — request context (AsyncLocalStorage)', () =>
   });
 });
 
-describe('@knext/lib correlation — outbound propagation', () => {
+describe('@getknext/lib correlation — outbound propagation', () => {
   afterEach(() => {
     resetTraceIdProvider();
   });
@@ -167,7 +167,7 @@ describe('@knext/lib correlation — outbound propagation', () => {
   });
 });
 
-describe('@knext/lib logger — correlation mixin (#318)', () => {
+describe('@getknext/lib logger — correlation mixin (#318)', () => {
   beforeEach(() => {
     vi.resetModules();
     vi.stubEnv('NODE_ENV', 'production');

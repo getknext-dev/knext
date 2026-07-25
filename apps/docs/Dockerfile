@@ -5,7 +5,7 @@
 FROM node:22-alpine AS builder
 WORKDIR /app
 COPY . .
-# @knext/core is a file: dependency in the monorepo; in a real build it must be
+# @getknext/core is a file: dependency in the monorepo; in a real build it must be
 # resolvable (vendored or published). See DEPLOY.md "Building the image".
 RUN npm install --no-audit --no-fund
 RUN npm run build
@@ -48,15 +48,15 @@ COPY --from=builder /app/public ./public
 # The warm-up script is the SHARED, promoted copy (ADR-0035 action item 2:
 # scripts/warm-compile-cache.sh), so this second consumer inherits the guards
 # instead of copy-pasting them. This single-package (npm) image builds from an
-# apps/docs-rooted context, so — exactly as @knext/core is vendored into the
-# build context (see DEPLOY.md "Resolve @knext/core") — the shared script is
+# apps/docs-rooted context, so — exactly as @getknext/core is vendored into the
+# build context (see DEPLOY.md "Resolve @getknext/core") — the shared script is
 # vendored to ./scripts/warm-compile-cache.sh before the build.
 #
 # NODE_COMPILE_CACHE here is ABSOLUTE (/app/…) on purpose: the warm-up CLEARS the
 # cache dir before booting (#440) and its safety guard FATALs on a RELATIVE path.
 # WORKDIR is /app, so this is the SAME on-disk dir the CMD default resolves to.
 # The plausibility floor is sized for the smaller docs app (a static fumadocs
-# site: no sharp, no @knext/core runtime supervisor), well below file-manager's
+# site: no sharp, no @getknext/core runtime supervisor), well below file-manager's
 # 1106 entries / 4.25 MB reference — see the ADR-0035 determinism note.
 COPY --from=builder /app/scripts/warm-compile-cache.sh /usr/local/bin/warm-compile-cache.sh
 RUN chmod +x /usr/local/bin/warm-compile-cache.sh \

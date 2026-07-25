@@ -324,7 +324,7 @@ describe('buildkit provenance is restored without weakening the gate (#202)', ()
 // ── The CVE fixes that unblock the first green main run (#199 part 2) ──────────
 // Run 28649365278's Trivy report: 17 HIGH/CRITICAL findings in the shipped image.
 // Two buckets:
-//   (a) app-tree deps under node_modules/@knext/core (via @knext/lib →
+//   (a) app-tree deps under node_modules/@getknext/core (via @getknext/lib →
 //       @cerbos/grpc, minio; and @google-cloud/storage): @grpc/grpc-js 1.14.3,
 //       fast-xml-parser 4.5.3 + 5.3.5, form-data 2.5.5, lodash 4.17.23,
 //       protobufjs 7.5.4 → fixed via pnpm overrides (same discipline as the
@@ -400,13 +400,13 @@ describe('file-manager image CVE remediation (#199)', () => {
 
 // ── Build tooling must not ship in the runtime image (P3 v2, main runs
 // 29201513652 et al.) ─────────────────────────────────────────────────────────
-// `pnpm --filter @knext/core --prod deploy --legacy /knext-core-runtime`
-// resolves @knext/db's OPTIONAL peer drizzle-kit from the workspace (it is db's
+// `pnpm --filter @getknext/core --prod deploy --legacy /knext-core-runtime`
+// resolves @getknext/db's OPTIONAL peer drizzle-kit from the workspace (it is db's
 // devDependency), so the deployed prod tree carries drizzle-kit's dependency
 // graph: @esbuild-kit/esm-loader → esbuild@0.18.20 (a Go 1.20.7 binary — 20
 // HIGH/CRITICAL stdlib findings), esbuild@0.25.12 (Go 1.23.12 — 15 findings),
 // tsx → esbuild@0.28.0, @drizzle-team/brocli. None of it is runtime code: the
-// image CMD only boots @knext/core/internal/node-server (prom-client + pino);
+// image CMD only boots @getknext/core/internal/node-server (prom-client + pino);
 // `kn-next db migrate` runs CLI-side in the app's own tree, never in this
 // image. The remediation (same discipline as the npm/corepack strip above):
 // prune the build-tool graph from /knext-core-runtime in the BUILDER stage,
@@ -418,7 +418,7 @@ describe('file-manager image ships no esbuild-class build tooling (P3 v2)', () =
   it('the builder stage prunes the drizzle-kit/esbuild graph from /knext-core-runtime after pnpm deploy', () => {
     const dockerfile = readFileSync(DOCKERFILE_PATH, 'utf8').replace(/\\\n/g, ' ');
     const deployIdx = dockerfile.search(/pnpm[^\n]*--prod deploy[^\n]*\/knext-core-runtime/);
-    expect(deployIdx, 'the builder must still pnpm-deploy @knext/core').toBeGreaterThan(-1);
+    expect(deployIdx, 'the builder must still pnpm-deploy @getknext/core').toBeGreaterThan(-1);
 
     const pruneMatch = dockerfile
       .slice(deployIdx)

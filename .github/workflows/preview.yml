@@ -86,9 +86,9 @@ jobs:
 
       - name: Build CLI (dist/cli/preview.js)
         run: |
-          pnpm --filter @knext/lib build
-          pnpm --filter @knext/db build
-          pnpm --filter @knext/core build
+          pnpm --filter @getknext/lib build
+          pnpm --filter @getknext/db build
+          pnpm --filter @getknext/core build
 
       - name: Configure cluster + registry access
         # Cluster-gated: requires KUBECONFIG + registry creds that DO NOT exist
@@ -156,9 +156,9 @@ jobs:
 
       - name: Build CLI (dist/cli/preview.js)
         run: |
-          pnpm --filter @knext/lib build
-          pnpm --filter @knext/db build
-          pnpm --filter @knext/core build
+          pnpm --filter @getknext/lib build
+          pnpm --filter @getknext/db build
+          pnpm --filter @getknext/core build
 
       - name: Configure cluster access
         env:

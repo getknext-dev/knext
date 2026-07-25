@@ -4,7 +4,7 @@ import { migrate as drizzleMigrate } from 'drizzle-orm/node-postgres/migrator';
 import { Pool } from 'pg';
 
 /**
- * `@knext/db/migrate` — the migration entrypoint.
+ * `@getknext/db/migrate` — the migration entrypoint.
  *
  * Two things live here:
  * - `defineDrizzleConfig()` — the helper an app uses in its `drizzle.config.ts`
@@ -19,7 +19,7 @@ import { Pool } from 'pg';
  *   `kn-next db migrate` runner + Job recipe (#242). Applies drizzle-kit-generated
  *   migrations against the **writer only**, once per deploy, out of the request
  *   path (ADR-0021 §3). This half is runtime code (drizzle-orm's migrator + `pg`);
- *   it needs drizzle-orm + `pg`, NOT drizzle-kit — so the `@knext/db` main entry
+ *   it needs drizzle-orm + `pg`, NOT drizzle-kit — so the `@getknext/db` main entry
  *   and the runner import cleanly without the optional peer installed.
  */
 
@@ -53,8 +53,8 @@ function assertDrizzleKitPresent(resolve: () => string): void {
   } catch {
     throw new Error(
       'drizzle-kit is required for defineDrizzleConfig — install it as a devDependency ' +
-        '(`npm i -D drizzle-kit`). It is an optional peer of @knext/db (ADR-0021): the ' +
-        'main entry (@knext/db) and the `kn-next db migrate` runner do not need it, but ' +
+        '(`npm i -D drizzle-kit`). It is an optional peer of @getknext/db (ADR-0021): the ' +
+        'main entry (@getknext/db) and the `kn-next db migrate` runner do not need it, but ' +
         'the drizzle.config.ts produced by defineDrizzleConfig is consumed by ' +
         '`drizzle-kit generate`/`migrate`, which must be installed.',
     );
@@ -86,7 +86,7 @@ export interface DefineDrizzleConfigOptions {
  *
  * ```ts
  * // drizzle.config.ts
- * import { defineDrizzleConfig } from '@knext/db/migrate';
+ * import { defineDrizzleConfig } from '@getknext/db/migrate';
  * export default defineDrizzleConfig({ schema: './src/db/schema.ts', out: './drizzle' });
  * ```
  *
@@ -227,7 +227,7 @@ export function resolveWriterDsn(opts: Pick<RunMigrationsOptions, 'url' | 'roUrl
 /**
  * Default production dependencies: a one-shot `pg.Pool` (max 1 — a single
  * migrator, no per-pod race) drizzle-wrapped, plus drizzle-orm's node-postgres
- * migrator. The connect timeout matches `@knext/lib`'s ADR-0019 default (15s) so
+ * migrator. The connect timeout matches `@getknext/lib`'s ADR-0019 default (15s) so
  * a cold scale-to-zero writer — which wakes in ~2.5s — is tolerated with margin.
  * The pool is closed after the run (see {@link runMigrations}'s `finally`).
  */

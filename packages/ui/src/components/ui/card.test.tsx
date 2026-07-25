@@ -4,7 +4,7 @@ import { describe, expect, it } from 'vitest';
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from './card';
 
 /**
- * v4-P5 render-smoke floor for @knext/ui (ADR-0020 component lib).
+ * v4-P5 render-smoke floor for @getknext/ui (ADR-0020 component lib).
  * Pure happy-dom render assertions — no jest-dom matchers, no visual-regression rig.
  */
 describe('Card', () => {

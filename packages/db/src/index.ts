@@ -1,10 +1,10 @@
-import { getDbPool, getDbPoolRO } from '@knext/lib/clients';
-import { logger } from '@knext/lib/logger';
+import { getDbPool, getDbPoolRO } from '@getknext/lib/clients';
+import { logger } from '@getknext/lib/logger';
 import { drizzle, type NodePgDatabase } from 'drizzle-orm/node-postgres';
 
 /**
- * `@knext/db` — the knext data SDK. A **thin** drizzle-orm wrapper over the
- * existing `@knext/lib` scale-to-zero pools (ADR-0021). We re-export drizzle's
+ * `@getknext/db` — the knext data SDK. A **thin** drizzle-orm wrapper over the
+ * existing `@getknext/lib` scale-to-zero pools (ADR-0021). We re-export drizzle's
  * query surface (`eq`/`and`/`or`/`sql`/… and the query builder) and add only the
  * knext-specific ergonomics the platform needs — starting with the writer/reader
  * client accessors below. Apps keep drizzle's own docs and lose no power.
@@ -18,15 +18,15 @@ export * from 'drizzle-orm';
 // shape is the app's own, supplied at the call site.
 type AnySchema = Record<string, unknown>;
 
-// One drizzle client per pod, per pool — mirroring @knext/lib's pool singletons.
+// One drizzle client per pod, per pool — mirroring @getknext/lib's pool singletons.
 // The client only wraps the pool; the pool's lifecycle + SIGTERM drain stay in
-// @knext/lib (getDbPool/closeDbPool, getDbPoolRO/closeDbPoolRO).
+// @getknext/lib (getDbPool/closeDbPool, getDbPoolRO/closeDbPoolRO).
 let writer: NodePgDatabase<AnySchema> | null = null;
 let reader: NodePgDatabase<AnySchema> | null = null;
 let warnedNoReadReplica = false;
 
 /**
- * The **writer** client over `DATABASE_URL` (`@knext/lib`'s `getDbPool()`).
+ * The **writer** client over `DATABASE_URL` (`@getknext/lib`'s `getDbPool()`).
  * Read-your-writes, single-writer — all writes and any read that must see its
  * own write go here. One client per pod, shared with any raw-`pg` use of the
  * same pool and drained by the existing `closeDbPool()` SIGTERM hook.
@@ -43,7 +43,7 @@ export function getDb<TSchema extends AnySchema = Record<string, never>>(
 }
 
 /**
- * The **reader** client over `DATABASE_URL_RO` (`@knext/lib`'s `getDbPoolRO()`)
+ * The **reader** client over `DATABASE_URL_RO` (`@getknext/lib`'s `getDbPoolRO()`)
  * — the scale-zero-pg RO gateway: **bounded-staleness (~9s), NO read-your-writes**.
  * Use it for dashboard/analytics/fan-out reads that tolerate a few seconds of
  * lag. Reads are never auto-routed — you pick `getDb()` vs `getDbRO()` per query,

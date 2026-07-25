@@ -81,7 +81,7 @@ class FakePool {
 }
 vi.mock('pg', () => ({ Pool: FakePool }));
 
-describe('@knext/lib/clients — single-flight DB wake (#339)', () => {
+describe('@getknext/lib/clients — single-flight DB wake (#339)', () => {
   beforeEach(async () => {
     vi.resetModules();
     coldAcquires = 0;

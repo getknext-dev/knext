@@ -7,5 +7,5 @@
   "access": "public",
   "baseBranch": "main",
   "updateInternalDependencies": "patch",
-  "ignore": ["@knext/ui", "file-manager", "spike-bun-bytecode"]
+  "ignore": ["@getknext/ui", "file-manager", "spike-bun-bytecode"]
 }

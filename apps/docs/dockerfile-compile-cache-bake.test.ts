@@ -138,7 +138,7 @@ describe('#439 — the docs compile cache is baked into the image at build time'
     // keyed to a path the runtime never loads.
     expect(runBlock).toContain(`NODE_COMPILE_CACHE=${cacheDir}`);
     // docs runs a BARE `node server.js` — so the warm-up must boot that, not the
-    // knext runtime entry (which needs @knext/core, absent in the docs image).
+    // knext runtime entry (which needs @getknext/core, absent in the docs image).
     expect(runBlock).toMatch(/KNEXT_WARMUP_BOOT_CMD=(["']?)node server\.js\1/);
   });
 

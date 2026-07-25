@@ -1042,7 +1042,7 @@ func (r *NextAppReconciler) buildKsvcEnv(nextApp *appsv1alpha1.NextApp) ([]corev
 	// poolMax drift the W2 system-designer flagged. ADR-0028 made
 	// spec.scaling.poolMax a VALIDATION-only field — the operator gates
 	// maxScale × poolMax ≤ 80 at admission, but the app was never TOLD its
-	// per-pod cap, so @knext/lib's pg Pool could open more than poolMax
+	// per-pod cap, so @getknext/lib's pg Pool could open more than poolMax
 	// connections/pod and blow the budget at runtime. We inject the declared
 	// cap so getDbPool() enforces the same number the operator gated. Only
 	// injected when poolMax is DECLARED (>0): an undeclared poolMax is the

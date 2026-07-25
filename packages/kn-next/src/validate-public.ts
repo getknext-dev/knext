@@ -1,5 +1,5 @@
 /**
- * Public config-validation entry — `@knext/core/validate`.
+ * Public config-validation entry — `@getknext/core/validate`.
  *
  * This is the SUPPORTED public surface for validating a `kn-next.config.ts`
  * against the exact same rules `kn-next deploy` applies. A consumer imports it

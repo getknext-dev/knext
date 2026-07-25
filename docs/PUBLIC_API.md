@@ -7,21 +7,21 @@ here as public, you can rely on it. If it is not listed — or lives under an
 
 Two packages make up the application surface:
 
-- **`@knext/core`** — your Next.js config type, the deployment adapter, and
+- **`@getknext/core`** — your Next.js config type, the deployment adapter, and
   observability wiring.
-- **`@knext/lib`** — runtime helpers your application code calls (database and
+- **`@getknext/lib`** — runtime helpers your application code calls (database and
   object-store clients, a health check, a logger).
 
 ---
 
-## `@knext/core`
+## `@getknext/core`
 
-### `@knext/core`
+### `@getknext/core`
 
 The configuration type for your `kn-next.config.ts`.
 
 ```ts
-import type { KnativeNextConfig } from '@knext/core';
+import type { KnativeNextConfig } from '@getknext/core';
 
 const config: KnativeNextConfig = {
   // storage, cache, queue, infrastructure, scaling, observability, secrets…
@@ -36,7 +36,7 @@ Exported types: `KnativeNextConfig`, `StorageConfig`, `StorageProvider`,
 `InfrastructureConfig`, `PostgresConfig`, `RedisInfraConfig`, `MinioInfraConfig`,
 `ScalingConfig`, `ObservabilityConfig`, `SecretsConfig`, `SecretRef`.
 
-### `@knext/core/adapter`
+### `@getknext/core/adapter`
 
 The official Next.js deployment adapter. Wire it into your Next.js config so the
 build produces a knext-deployable output.
@@ -44,26 +44,26 @@ build produces a knext-deployable output.
 ```ts
 // next.config.ts — Next.js 16.2+ (adapterPath is top-level config)
 export default {
-  adapterPath: '@knext/core/adapter',
+  adapterPath: '@getknext/core/adapter',
 };
 ```
 
 On Next.js 16.0.x–16.1.x the option lives under `experimental` instead
-(`experimental: { adapterPath: '@knext/core/adapter' }`). The 16.2+ config
+(`experimental: { adapterPath: '@getknext/core/adapter' }`). The 16.2+ config
 loader auto-migrates the old `experimental` key (with a warning), but 16.0.x
 does **not** recognize the top-level form — match the form to your Next.js
 version.
 
 Signature: `default` export — a Next.js deployment adapter object.
 
-### `@knext/core/adapters/otel-config`
+### `@getknext/core/adapters/otel-config`
 
 Resolves OpenTelemetry options from the environment for your
 `instrumentation.ts`. Tracing is off unless an endpoint is configured, so
 unconfigured apps pay nothing.
 
 ```ts
-import { resolveOtelOptions } from '@knext/core/adapters/otel-config';
+import { resolveOtelOptions } from '@getknext/core/adapters/otel-config';
 
 const otel = resolveOtelOptions(); // OtelOptions | null
 ```
@@ -71,7 +71,7 @@ const otel = resolveOtelOptions(); // OtelOptions | null
 Exports: `resolveOtelOptions(): OtelOptions | null`, and the types `OtelOptions`,
 `OtelEnv`.
 
-### `@knext/core/adapters/tracing`
+### `@getknext/core/adapters/tracing`
 
 OpenTelemetry spans for the cold, DB-backed request path — the wake latency that
 auto-instrumentation does not otherwise capture — emitted **automatically** on
@@ -81,13 +81,13 @@ when tracing is enabled; a zero-overhead no-op otherwise):
 - `ColdStartSpanProcessor` — pass to `registerOTel({ spanProcessors: [...] })`.
   It opens `knext.cold_start` under the first inbound request span (the app boot
   / first-request wake), once.
-- `instrumentPoolForDbWake` — install via `@knext/lib/clients`'
+- `instrumentPoolForDbWake` — install via `@getknext/lib/clients`'
   `setPoolInstrumentor`. It spans each pool's first `connect()` (the database
   0→1 wake) as `knext.db_wake`, nested in the request trace.
 
 Both nest inside the active request trace, so one cold request yields a single
 trace showing where the time went. `installTraceIdProvider()` returns the
-provider you pass to `@knext/lib`'s `setTraceIdProvider` so log lines and spans
+provider you pass to `@getknext/lib`'s `setTraceIdProvider` so log lines and spans
 share one `trace_id`. `withColdStartSpan` / `withDbWakeSpan` remain for manual
 bracketing of a specific span of work.
 
@@ -95,8 +95,8 @@ bracketing of a specific span of work.
 import {
   ColdStartSpanProcessor,
   instrumentPoolForDbWake,
-} from '@knext/core/adapters/tracing';
-import { setPoolInstrumentor } from '@knext/lib/clients';
+} from '@getknext/core/adapters/tracing';
+import { setPoolInstrumentor } from '@getknext/lib/clients';
 
 registerOTel({ serviceName, spanProcessors: ['auto', new ColdStartSpanProcessor()] });
 setPoolInstrumentor(instrumentPoolForDbWake);
@@ -108,7 +108,7 @@ Exports: `ColdStartSpanProcessor`, `instrumentPoolForDbWake(pool, role)`,
 `ColdStartAttrs`, `KnextSpanProcessor`, and the span-name constants
 `COLD_START_SPAN_NAME`, `DB_WAKE_SPAN_NAME`, `TRACER_NAME`.
 
-### `@knext/core/adapters/metrics`
+### `@getknext/core/adapters/metrics`
 
 Prometheus golden-signal, cold-start and DB-wake metrics for a `NextApp`,
 derived from the **same** core-owned OTel hooks as tracing (no app route-handler
@@ -127,7 +127,7 @@ import {
   recordColdStart,
   recordDbWake,
   startChildMetricsServer,
-} from '@knext/core/adapters/metrics';
+} from '@getknext/core/adapters/metrics';
 import { Registry } from 'prom-client';
 
 const metrics = initRuntimeMetrics(new Registry());
@@ -152,7 +152,7 @@ Exports: `initRuntimeMetrics(registry, app?)`, `createMetricsRegistry(registry, 
 `HTTP_INFLIGHT_METRIC`, `COLDSTART_TOTAL_METRIC`, `COLDSTART_DURATION_METRIC`,
 `DB_WAKE_TOTAL_METRIC`, `DB_WAKE_DURATION_METRIC`).
 
-### `@knext/core/adapters/correlation-response`
+### `@getknext/core/adapters/correlation-response`
 
 Automatic **response-echo** of `x-request-id`. The correlation layer establishes
 the request correlation id on the OTel Context and correlates logs from it, but
@@ -173,7 +173,7 @@ from the Node path of `instrumentation.ts`, and only when tracing is on. It is
 fail-open, idempotent, and default-off.
 
 ```ts
-import { installCorrelationResponseEcho } from '@knext/core/adapters/correlation-response';
+import { installCorrelationResponseEcho } from '@getknext/core/adapters/correlation-response';
 
 // In the NEXT_RUNTIME === 'nodejs' branch, after registerOTel(...) with the
 // CorrelationContextPropagator, and only when tracing is enabled:
@@ -183,7 +183,7 @@ installCorrelationResponseEcho();
 Exports: `installCorrelationResponseEcho(deps?)`, the `CorrelationResponseDeps`
 type, and the `CORRELATION_RESPONSE_INSTALLED` idempotency symbol.
 
-### `@knext/core/adapters/cache-handler`
+### `@getknext/core/adapters/cache-handler`
 
 The ISR / Redis cache handler. Next.js requires its `cacheHandler` option to be a
 **file path**, so each app ships a thin local `cache-handler.js` that re-exports
@@ -191,7 +191,7 @@ this module — keeping the cache logic in the framework so fixes apply everywhe
 
 ```js
 // cache-handler.js (at your app root)
-export { default } from '@knext/core/adapters/cache-handler';
+export { default } from '@getknext/core/adapters/cache-handler';
 ```
 
 ```ts
@@ -206,7 +206,7 @@ export default {
 This module is plain JavaScript (no `.d.ts`); you reference it by path rather than
 calling it directly, so no type surface is exposed.
 
-### `@knext/core/validate`
+### `@getknext/core/validate`
 
 Validates a `kn-next.config.ts` against the **exact same rules** the `kn-next`
 deploy step applies. Use it as a config-quality gate in your own CI — call it in
@@ -214,8 +214,8 @@ a test or a build script so a bad deploy config fails fast, before it reaches th
 cluster.
 
 ```ts
-import { validateConfig, ConfigValidationError } from '@knext/core/validate';
-import type { KnativeNextConfig } from '@knext/core';
+import { validateConfig, ConfigValidationError } from '@getknext/core/validate';
+import type { KnativeNextConfig } from '@getknext/core';
 import config from './kn-next.config';
 
 try {
@@ -241,18 +241,18 @@ Exports:
 
 ---
 
-## `@knext/lib`
+## `@getknext/lib`
 
-All `@knext/lib` subpaths are public application API.
+All `@getknext/lib` subpaths are public application API.
 
-### `@knext/lib/clients`
+### `@getknext/lib/clients`
 
 Lazily-constructed clients for your zone's own data stores. Connection details
 come from the environment (`DATABASE_URL`, object-store credentials) — never
 hardcode them.
 
 ```ts
-import { getDbPool, getMinioClient } from '@knext/lib/clients';
+import { getDbPool, getMinioClient } from '@getknext/lib/clients';
 
 const pool = getDbPool();        // pg.Pool
 const minio = getMinioClient();  // Minio.Client
@@ -268,9 +268,9 @@ Exports:
 - `setPoolInstrumentor(fn)` / `resetPoolInstrumentor()` — a dependency-inversion
   seam (this package stays OTel-free) invoked once per pool as it is created, so
   an OTel-aware layer can wrap the first connect for a `knext.db_wake` span (see
-  `@knext/core/adapters/tracing`'s `instrumentPoolForDbWake`). Default is a no-op.
+  `@getknext/core/adapters/tracing`'s `instrumentPoolForDbWake`). Default is a no-op.
 
-### `@knext/lib/health`
+### `@getknext/lib/health`
 
 Two health checks with different jobs:
 
@@ -289,7 +289,7 @@ Two health checks with different jobs:
   `HEALTH_DEEP_TIMEOUT_MS` (default 8000ms, aligned with the DB wake budget).
 
 ```ts
-import { checkShallowHealth, checkDeepHealth } from '@knext/lib/health';
+import { checkShallowHealth, checkDeepHealth } from '@getknext/lib/health';
 
 // /api/health — readiness/liveness (no DB dial)
 const ready = checkShallowHealth(); // ShallowHealthStatus, always { status: 'ok' }
@@ -306,20 +306,20 @@ Exports:
   string; checks: { postgres: 'up' | 'down' | 'waking' | 'unconfigured'; redis:
   'up' | 'down' | 'unconfigured' } }`.
 
-### `@knext/lib/logger`
+### `@getknext/lib/logger`
 
 A shared JSON logger (`pino`) — structured JSON in production, pretty output in
 development.
 
 ```ts
-import { logger } from '@knext/lib/logger';
+import { logger } from '@getknext/lib/logger';
 
 logger.info({ msg: 'ready' });
 ```
 
 Exports: `logger` — a `pino.Logger`.
 
-### `@knext/lib/context`
+### `@getknext/lib/context`
 
 Request correlation for the runtime path. Each request carries an ambient
 correlation id (adopted from a well-formed inbound `x-request-id`, else
@@ -327,11 +327,11 @@ generated) that flows through `AsyncLocalStorage`, lands on every structured log
 line, is echoed on the response, and is forwarded to downstream / db-wake calls.
 When an OpenTelemetry span is active, the id is joined to the span's `trace_id`
 via an injectable provider — wire it once with `setTraceIdProvider` (see
-`@knext/core/adapters/tracing`'s `installTraceIdProvider`) so logs and traces
+`@getknext/core/adapters/tracing`'s `installTraceIdProvider`) so logs and traces
 share one id.
 
 ```ts
-import { beginRequest, runWithRequestContext, setTraceIdProvider } from '@knext/lib/context';
+import { beginRequest, runWithRequestContext, setTraceIdProvider } from '@getknext/lib/context';
 
 const ctx = beginRequest(request.headers);
 runWithRequestContext(ctx, () => handle(request));
@@ -343,21 +343,21 @@ Exports: `beginRequest`, `createRequestContext`, `runWithRequestContext`,
 `correlationHeaders`, `applyCorrelationHeader`, `setTraceIdProvider`,
 `resetTraceIdProvider`, `CORRELATION_HEADER`, and the type `RequestContext`.
 
-### `@knext/lib`
+### `@getknext/lib`
 
-The package root re-exports everything from `@knext/lib/clients`,
-`@knext/lib/context`, `@knext/lib/health`, and `@knext/lib/logger` for
+The package root re-exports everything from `@getknext/lib/clients`,
+`@getknext/lib/context`, `@getknext/lib/health`, and `@getknext/lib/logger` for
 convenience.
 
 ```ts
-import { getDbPool, checkDeepHealth, logger } from '@knext/lib';
+import { getDbPool, checkDeepHealth, logger } from '@getknext/lib';
 ```
 
 ---
 
 ## Internal subpaths — NOT supported
 
-The following `@knext/core` subpaths are **framework wiring** used by the knext
+The following `@getknext/core` subpaths are **framework wiring** used by the knext
 runtime, CLI, and operator. They live under an `/internal/` prefix so the
 boundary is visible in the import path itself. **Do not import them from
 application code** — they have no stability guarantee and may change or disappear
@@ -365,14 +365,14 @@ in any release, including patch releases.
 
 | Internal import | What it is |
 | --- | --- |
-| `@knext/core/internal/next-adapter` | The adapter implementation behind `@knext/core/adapter`; import the public alias instead. |
-| `@knext/core/internal/node-server` | The standalone server entry the runtime spawns. |
-| `@knext/core/internal/loader` | Internal config loader. |
-| `@knext/core/internal/logger` | Internal CLI/runtime logger (apps use `@knext/lib/logger`). |
-| `@knext/core/internal/cli-validate` | CLI config validation helpers. |
-| `@knext/core/internal/cli-shared` | Shared CLI utilities. |
+| `@getknext/core/internal/next-adapter` | The adapter implementation behind `@getknext/core/adapter`; import the public alias instead. |
+| `@getknext/core/internal/node-server` | The standalone server entry the runtime spawns. |
+| `@getknext/core/internal/loader` | Internal config loader. |
+| `@getknext/core/internal/logger` | Internal CLI/runtime logger (apps use `@getknext/lib/logger`). |
+| `@getknext/core/internal/cli-validate` | CLI config validation helpers. |
+| `@getknext/core/internal/cli-shared` | Shared CLI utilities. |
 
-`@knext/lib` exposes no internal subpaths — its entire surface is public.
+`@getknext/lib` exposes no internal subpaths — its entire surface is public.
 
 ---
 

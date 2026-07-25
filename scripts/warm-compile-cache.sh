@@ -64,7 +64,7 @@ MIN_FILES="${KNEXT_WARMUP_MIN_FILES:-200}"
 MIN_BYTES="${KNEXT_WARMUP_MIN_BYTES:-1000000}"
 # The boot command. Overridable so the warm-up can be exercised in unit tests
 # (and by a knext app whose runtime entry differs) without a container build.
-BOOT_CMD="${KNEXT_WARMUP_BOOT_CMD:-node -e \"import('@knext/core/internal/node-server')\"}"
+BOOT_CMD="${KNEXT_WARMUP_BOOT_CMD:-node -e \"import('@getknext/core/internal/node-server')\"}"
 
 # Shallow readiness route: returns 200 as soon as the server is up, WITHOUT
 # dialing Postgres or Redis. Never point this at a DEEP health route — probing

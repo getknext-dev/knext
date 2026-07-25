@@ -1,5 +1,5 @@
 ---
-"@knext/db": patch
+"@getknext/db": patch
 ---
 
 Settle the drizzle dependency/peer shape before the first npmjs publish (ADR-0021
@@ -8,6 +8,6 @@ only — the contradictory optional-peer duplicate is dropped (a dep cannot be b
 `drizzle-kit` remains the sole **optional** peer, consulted lazily only inside
 `defineDrizzleConfig()`, which now throws an actionable named-peer error ("install
 it as a devDependency") instead of a bare `ERR_MODULE_NOT_FOUND` when it is absent.
-The `@knext/db` main entry and the `kn-next db migrate` runner import cleanly
+The `@getknext/db` main entry and the `kn-next db migrate` runner import cleanly
 without drizzle-kit installed. The re-exported drizzle-orm range is documented as
-part of `@knext/db`'s semver contract. Runtime-neutral.
+part of `@getknext/db`'s semver contract. Runtime-neutral.

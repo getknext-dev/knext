@@ -2,13 +2,13 @@
  * hide-drizzle-kit.cjs — v3-P3c contract-test fixture (CJS `--require` preload).
  *
  * Makes `drizzle-kit` (and only it) unresolvable, simulating a consumer who never
- * installed the optional peer. @knext/db ships CommonJS output and probes the peer
+ * installed the optional peer. @getknext/db ships CommonJS output and probes the peer
  * with `require.resolve('drizzle-kit')`, so we patch `Module._resolveFilename`
  * (the single choke point for CJS resolution AND `require.resolve`) to throw
  * MODULE_NOT_FOUND for that specifier. Everything else resolves normally.
  *
  * This lets the peer-shape contract test prove, in a real subprocess, that:
- *   - `require('@knext/db')` / `@knext/db/migrate` still load (no drizzle-kit), and
+ *   - `require('@getknext/db')` / `@getknext/db/migrate` still load (no drizzle-kit), and
  *   - only `defineDrizzleConfig()` fails — with an actionable named error, never a
  *     bare MODULE_NOT_FOUND.
  */

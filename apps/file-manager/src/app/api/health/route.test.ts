@@ -11,7 +11,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 // so a regression to a deep probe is caught.
 const pgQuery = vi.fn(() => Promise.reject(new Error('readiness must not dial pg')));
 const redisPing = vi.fn(() => Promise.reject(new Error('readiness must not dial redis')));
-vi.mock('@knext/lib/clients', () => ({
+vi.mock('@getknext/lib/clients', () => ({
   getDbPool: () => ({ query: pgQuery }),
 }));
 vi.mock('ioredis', () => ({

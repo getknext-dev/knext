@@ -8,7 +8,7 @@ import { describe, expect, it } from 'vitest';
  *
  * Container images are Trivy-gated before push (tests/supply-chain-workflow.test.ts,
  * tests/operator-supply-chain-workflow.test.ts). The npm TARBALLS that the release
- * workflows publish (`@knext/{core,lib,db}` on npmjs; `@getknext-dev/{core,lib,db}`
+ * workflows publish (`@getknext/{core,lib,db}` on npmjs; `@getknext-dev/{core,lib,db}`
  * on GitHub Packages) had NO equivalent gate — closing that real gap in
  * .claude/rules/security.md ("SBOM per image, scan every image, fail on
  * HIGH/CRITICAL"), extended here to the published JS dependency closure.
@@ -138,11 +138,11 @@ describe('scripts/audit-published.mjs — the shared audit contract', () => {
   });
 
   it('scopes the audit to the PUBLISHED package set {core, lib, db}', () => {
-    // The published set (ADR-0020) — NOT @knext/ui (private, changeset-ignored).
-    expect(text).toContain('@knext/core');
-    expect(text).toContain('@knext/lib');
-    expect(text).toContain('@knext/db');
-    expect(text).not.toContain('@knext/ui');
+    // The published set (ADR-0020) — NOT @getknext/ui (private, changeset-ignored).
+    expect(text).toContain('@getknext/core');
+    expect(text).toContain('@getknext/lib');
+    expect(text).toContain('@getknext/db');
+    expect(text).not.toContain('@getknext/ui');
   });
 
   it('generates a JS SBOM (CycloneDX) per published package', () => {

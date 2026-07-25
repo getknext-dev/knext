@@ -7,7 +7,7 @@ import type { NextConfig } from 'next';
  *
  * Build-target switch: the site is BUILT to run on knext (the dogfood target),
  * but it must also build as a plain Next.js app on a managed host (e.g. Vercel)
- * while the self-host cluster + the @knext/core npm publish (#53) are pending.
+ * while the self-host cluster + the @getknext/core npm publish (#53) are pending.
  *
  *   KNEXT_ADAPTER=1 → standalone output + the official knext adapter (self-host)
  *   unset (default, incl. Vercel) → a vanilla Next.js build the platform handles

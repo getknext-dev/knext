@@ -65,7 +65,7 @@ Through v1.3.5 the zone axis + SCRAM auth + wake-budget shipped (history in git 
   pageserver `ancestor_lsn` when empty, so ColdRestorable covers EVERY app — break-glass
   `provision-app.sh` branches, pre-field apps, and the crash-between-branch-and-status window —
   not just freshly operator-branched ones (full 3-way sign-off; e2e still pending same OKE window).
-- **Drizzle data SDK (`@knext/db`)** — complete on the **knext** side (getknext-dev/knext):
+- **Drizzle data SDK (`@getknext/db`)** — complete on the **knext** side (getknext-dev/knext):
   `getDb`/`getDbRO`, writer-only `kn-next db migrate`, TimescaleDB/pgvector helpers, guide +
   `apps/db-demo`, SIGTERM RO-drain. ADR-0021.
 - **Infra:** OCI-session **auto-refresh** installed (`~/.oci/knext-session-refresh.sh` +

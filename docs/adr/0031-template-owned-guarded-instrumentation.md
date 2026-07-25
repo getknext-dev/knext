@@ -23,7 +23,7 @@ not generate or enforce for new apps:
 
 1. **Edge-safety (#342).** Next.js compiles `instrumentation.ts` for BOTH the
    `nodejs` AND the `edge` runtimes (any `middleware.ts` forces an edge build).
-   The knext observability/db-wake wiring is Node-only (`@knext/lib/clients` →
+   The knext observability/db-wake wiring is Node-only (`@getknext/lib/clients` →
    `@cerbos/grpc`/`@grpc/grpc-js`/`pg`/`minio`). It must live in a separate
    `instrumentation-node.ts`, loaded via a dynamic `await import(...)` guarded
    by `NEXT_RUNTIME === 'nodejs'`. Crucially (#344), the runtime guard stops
@@ -31,10 +31,10 @@ not generate or enforce for new apps:
    literal specifier into both runtime bundles, so an edge-scoped webpack
    `IgnorePlugin` is the load-bearing exclusion. Without all three pieces the
    production `next build` fails with `Module not found`.
-2. **Seam-alive (#352, ADR-0027).** `@knext/lib`'s collaborator seams
+2. **Seam-alive (#352, ADR-0027).** `@getknext/lib`'s collaborator seams
    (`setPoolInstrumentor`, `setTraceIdProvider`, `setCorrelationIdProvider`)
    must be anchored on `globalThis` via `Symbol.for('knext.lib.*')` (done in
-   `@knext/lib`), AND `@knext/lib` must stay bundled, not externalized, or the
+   `@getknext/lib`), AND `@getknext/lib` must stay bundled, not externalized, or the
    standalone bundle's webpack-layer duplication silently disconnects the seam.
    **The general rule (codified in ADR-0027, restated here because it is this
    template's rationale): in code that ships inside the Next.js standalone
@@ -65,7 +65,7 @@ break observability. This ADR makes generated apps correct by construction.
      (`registerNode()`): OTel via `registerOTel` behind the default-off
      `resolveOtelOptions` gate, golden-signal/cold-start/db-wake metrics, the
      activity-gated deep-health scrape hook, the `globalThis`-anchored
-     `@knext/lib` seam writers, and the correlation response echo. The body is
+     `@getknext/lib` seam writers, and the correlation response echo. The body is
      app-agnostic (package imports only), so it is platform-authored, not
      app-authored.
    - `next-adapter.ts` + `adapterPath` wiring in `next.config.ts`, and both
@@ -87,7 +87,7 @@ break observability. This ADR makes generated apps correct by construction.
 
 3. **file-manager's hand-written hook is removed** (graduated to the adapter);
    its guard now asserts the fence is adapter-owned (`adapterPath` wired, the
-   app adapter re-exports `@knext/core/adapter`, no hand-written
+   app adapter re-exports `@getknext/core/adapter`, no hand-written
    `IgnorePlugin`). The end-to-end tripwires are unchanged: the PR-gated
    production `next build --webpack` still fails if the Node-only subtree ever
    reaches the edge bundle, and `standalone-seam-alive.test.ts` still proves
@@ -97,7 +97,7 @@ break observability. This ADR makes generated apps correct by construction.
    (`spec.observability.tracing.enabled` on the NextApp CR — default off),
    any app-specific instrumentation ADDED behind the same guard discipline,
    and the app's own webpack customizations (composed, never replaced, by the
-   adapter). What stays platform-owned: the seam anchors (`@knext/lib`), the
+   adapter). What stays platform-owned: the seam anchors (`@getknext/lib`), the
    edge fence (the adapter), the pair shape (the template), and the guards.
 
 ## Options considered
@@ -126,6 +126,6 @@ break observability. This ADR makes generated apps correct by construction.
 - The zone template was modernized as enabling hygiene: it referenced a
   nonexistent `@kn-next/config` package, `@opennextjs/aws`, and the removed
   `experimental.dynamicIO` flag — a generated app could not have inherited
-  anything. It now mirrors the current platform contract (`@knext/core`
+  anything. It now mirrors the current platform contract (`@getknext/core`
   `KnativeNextConfig`, `next build --webpack`, standalone + deploy-env
   `next.config` keys).

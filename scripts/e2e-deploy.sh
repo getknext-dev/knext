@@ -8,8 +8,8 @@
 #
 # Contract (mirrors the reference adapter-bun e2e-deploy.sh, adapted to knext's
 # output:'standalone' runtime):
-#   1. (unless KNEXT_E2E_SKIP_PACK=1) install the @knext/lib + @knext/db +
-#      @knext/core tarballs into the temp app, so NEXT_ADAPTER_PATH resolves the
+#   1. (unless KNEXT_E2E_SKIP_PACK=1) install the @getknext/lib + @getknext/db +
+#      @getknext/core tarballs into the temp app, so NEXT_ADAPTER_PATH resolves the
 #      package-shipped adapter.
 #   2. NEXT_ADAPTER_PATH = the knext adapter; run `next build` (output:'standalone').
 #   3. Stage .next/static + public/ into the standalone tree (standalone does NOT copy
@@ -39,21 +39,21 @@ free_port() {
 # ── 1. install the knext adapter tarballs (skippable for the contract test) ──
 #
 # #147 A3-3 fix round 1 (triage of baseline run 28558576615): this step used to
-# `npm pack` @knext/core PER TEST. That was the ONE bug behind 472/473 failures:
-# `npm pack` ships pnpm's raw `workspace:^` dep on @knext/lib verbatim (only
+# `npm pack` @getknext/core PER TEST. That was the ONE bug behind 472/473 failures:
+# `npm pack` ships pnpm's raw `workspace:^` dep on @getknext/lib verbatim (only
 # `pnpm pack`/`pnpm publish` rewrite the workspace protocol), so every fixture's
 # `npm install <tarball>` died with EUNSUPPORTEDPROTOCOL and `next build` ran
 # ZERO times. Per-test packing ALSO raced: run-tests.js (concurrency 2, retries)
 # packed into the same tarball path simultaneously.
 #
-# Now: @knext/lib, @knext/db AND @knext/core are packed with `pnpm pack` ONCE —
+# Now: @getknext/lib, @getknext/db AND @getknext/core are packed with `pnpm pack` ONCE —
 # in CI by the workflow (handed down via KNEXT_E2E_TARBALLS_DIR, preflight-gated
 # by scripts/e2e-preflight.mjs), locally by a lock-guarded pack-once fallback —
 # and ALL tarballs are installed in ONE `npm install`, so npm satisfies the
-# rewritten `@knext/lib@^x` + `@knext/db@^x` deps from the local tarballs (the
-# @knext scope is not on npm yet — #53 is human-blocked). #255/#256: core gained
-# a workspace dep on @knext/db (`kn-next db migrate`); a lib+core-only set 404s
-# on the unpublished @knext/db in EVERY fixture install.
+# rewritten `@getknext/lib@^x` + `@getknext/db@^x` deps from the local tarballs (the
+# @getknext scope is not on npm yet — #53 is human-blocked). #255/#256: core gained
+# a workspace dep on @getknext/db (`kn-next db migrate`); a lib+core-only set 404s
+# on the unpublished @getknext/db in EVERY fixture install.
 find_tarball() { # <dir> <name-prefix> → newest matching tarball path (or empty)
   # `|| true`: under `set -euo pipefail` a failing pipeline (ls: no match) would
   # otherwise kill the script AT the caller's `VAR="$(find_tarball ...)"`
@@ -74,13 +74,13 @@ if [ "${KNEXT_E2E_SKIP_PACK:-0}" != "1" ]; then
     # read a half-written tarball.
     ADAPTER_PKG_DIR="${ADAPTER_DIR:-}"
     if [ -z "${ADAPTER_PKG_DIR}" ]; then
-      log "ERROR: set KNEXT_E2E_TARBALLS_DIR (pre-packed tarballs) or ADAPTER_DIR (the @knext/core package dir), or KNEXT_E2E_SKIP_PACK=1"
+      log "ERROR: set KNEXT_E2E_TARBALLS_DIR (pre-packed tarballs) or ADAPTER_DIR (the @getknext/core package dir), or KNEXT_E2E_SKIP_PACK=1"
       exit 1
     fi
     LIB_PKG_DIR="${KNEXT_LIB_DIR:-${ADAPTER_PKG_DIR}/../lib}"
     DB_PKG_DIR="${KNEXT_DB_DIR:-${ADAPTER_PKG_DIR}/../db}"
     TARBALLS_DIR="${ADAPTER_PKG_DIR}/.e2e-tarballs"
-    if [ -z "$(find_tarball "${TARBALLS_DIR}" knext-lib)" ] || [ -z "$(find_tarball "${TARBALLS_DIR}" knext-db)" ] || [ -z "$(find_tarball "${TARBALLS_DIR}" knext-core)" ]; then
+    if [ -z "$(find_tarball "${TARBALLS_DIR}" getknext-lib)" ] || [ -z "$(find_tarball "${TARBALLS_DIR}" getknext-db)" ] || [ -z "$(find_tarball "${TARBALLS_DIR}" getknext-core)" ]; then
       LOCK_DIR="${TARBALLS_DIR}.lock"
       acquired=0
       for _ in $(seq 1 600); do
@@ -96,8 +96,8 @@ if [ "${KNEXT_E2E_SKIP_PACK:-0}" != "1" ]; then
       fi
       trap 'rmdir "${LOCK_DIR}" 2>/dev/null || true' EXIT
       # Re-check under the lock — another deploy may have packed while we waited.
-      if [ -z "$(find_tarball "${TARBALLS_DIR}" knext-lib)" ] || [ -z "$(find_tarball "${TARBALLS_DIR}" knext-db)" ] || [ -z "$(find_tarball "${TARBALLS_DIR}" knext-core)" ]; then
-        log "packing @knext/lib + @knext/db + @knext/core with pnpm pack (rewrites workspace:^ so npm can install)"
+      if [ -z "$(find_tarball "${TARBALLS_DIR}" getknext-lib)" ] || [ -z "$(find_tarball "${TARBALLS_DIR}" getknext-db)" ] || [ -z "$(find_tarball "${TARBALLS_DIR}" getknext-core)" ]; then
+        log "packing @getknext/lib + @getknext/db + @getknext/core with pnpm pack (rewrites workspace:^ so npm can install)"
         STAGE_DIR="$(mktemp -d "${ADAPTER_PKG_DIR}/.e2e-pack.XXXXXX")"
         (cd "${LIB_PKG_DIR}" && pnpm pack --pack-destination "${STAGE_DIR}") >&2
         (cd "${DB_PKG_DIR}" && pnpm pack --pack-destination "${STAGE_DIR}") >&2
@@ -111,11 +111,11 @@ if [ "${KNEXT_E2E_SKIP_PACK:-0}" != "1" ]; then
       trap - EXIT
     fi
   fi
-  LIB_TGZ="$(find_tarball "${TARBALLS_DIR}" knext-lib)"
-  DB_TGZ="$(find_tarball "${TARBALLS_DIR}" knext-db)"
-  CORE_TGZ="$(find_tarball "${TARBALLS_DIR}" knext-core)"
+  LIB_TGZ="$(find_tarball "${TARBALLS_DIR}" getknext-lib)"
+  DB_TGZ="$(find_tarball "${TARBALLS_DIR}" getknext-db)"
+  CORE_TGZ="$(find_tarball "${TARBALLS_DIR}" getknext-core)"
   if [ -z "${LIB_TGZ}" ] || [ -z "${DB_TGZ}" ] || [ -z "${CORE_TGZ}" ]; then
-    log "ERROR: adapter tarballs missing in ${TARBALLS_DIR} (need knext-lib-*.tgz + knext-db-*.tgz + knext-core-*.tgz; pack with pnpm pack)"
+    log "ERROR: adapter tarballs missing in ${TARBALLS_DIR} (need getknext-lib-*.tgz + getknext-db-*.tgz + getknext-core-*.tgz; pack with pnpm pack)"
     exit 1
   fi
 
@@ -182,7 +182,7 @@ EOF
 
   log "installing adapter tarballs ${LIB_TGZ} + ${DB_TGZ} + ${CORE_TGZ}${TS_PIN:+ + ${TS_PIN}} into ${APP_DIR}"
   # ONE install with ALL tarballs (+ the TS pin when needed): npm resolves
-  # @knext/core's @knext/lib + @knext/db deps from the local tarballs instead of
+  # @getknext/core's @getknext/lib + @getknext/db deps from the local tarballs instead of
   # the (not-yet-published) registry, and a single reify keeps the
   # snapshot/restore window minimal.
   # shellcheck disable=SC2086
@@ -204,30 +204,30 @@ EOF
   fi
 
   # Resolve the installed adapter entry (package export "./adapter").
-  NEXT_ADAPTER_PATH="$(node -e 'process.stdout.write(require.resolve("@knext/core/adapter"))')"
+  NEXT_ADAPTER_PATH="$(node -e 'process.stdout.write(require.resolve("@getknext/core/adapter"))')"
   # #175 (B7b): resolve the deployed-platform Cache-Control preload from the
   # SAME installed package, so the serve below patches exactly what ships.
-  KNEXT_CC_PRELOAD="$(node -e 'process.stdout.write(require.resolve("@knext/core/internal/cache-control-normalize"))')"
+  KNEXT_CC_PRELOAD="$(node -e 'process.stdout.write(require.resolve("@getknext/core/internal/cache-control-normalize"))')"
   # #188 — Bun ≤1.3.x keep-alive mitigation preload, resolved from the SAME
   # installed package (only booted with it when RUNTIME=bun, see step 4).
-  KNEXT_BUN_GUARD_PRELOAD="$(node -e 'process.stdout.write(require.resolve("@knext/core/internal/bun-keepalive-guard"))')"
+  KNEXT_BUN_GUARD_PRELOAD="$(node -e 'process.stdout.write(require.resolve("@getknext/core/internal/bun-keepalive-guard"))')"
   # #188 round 3 — the bun-condition export heal (ESM dist), resolved from the
   # SAME installed package. Tolerant resolve: an older tarball without the
   # export must not kill Node-lane deploys (the heal is only INVOKED on
   # RUNTIME=bun, post-build — see step 3).
-  KNEXT_BUN_EXPORTS_HEAL="$(node -e 'process.stdout.write(require.resolve("@knext/core/internal/standalone-bun-exports"))' 2>/dev/null || true)"
+  KNEXT_BUN_EXPORTS_HEAL="$(node -e 'process.stdout.write(require.resolve("@getknext/core/internal/standalone-bun-exports"))' 2>/dev/null || true)"
   # #188 path 2 — opt-in edge-sandbox fetch instrumentation preload (inert
   # unless KNEXT_SANDBOX_FETCH_DEBUG=1; only appended under that gate below).
   # Tolerant resolve: an older tarball without the export must not kill deploys.
-  KNEXT_SANDBOX_FETCH_DEBUG_PRELOAD="$(node -e 'process.stdout.write(require.resolve("@knext/core/internal/sandbox-fetch-debug"))' 2>/dev/null || true)"
+  KNEXT_SANDBOX_FETCH_DEBUG_PRELOAD="$(node -e 'process.stdout.write(require.resolve("@getknext/core/internal/sandbox-fetch-debug"))' 2>/dev/null || true)"
   # #188 path 3 — the IN-REALM instrumentation module e2e-deploy patches into
   # the fixture next's sandbox context.js (only under the same debug gate;
   # tolerant resolve for older tarballs).
-  KNEXT_SANDBOX_FETCH_REALM_DEBUG_PRELOAD="$(node -e 'process.stdout.write(require.resolve("@knext/core/internal/sandbox-fetch-realm-debug"))' 2>/dev/null || true)"
+  KNEXT_SANDBOX_FETCH_REALM_DEBUG_PRELOAD="$(node -e 'process.stdout.write(require.resolve("@getknext/core/internal/sandbox-fetch-realm-debug"))' 2>/dev/null || true)"
 else
   log "KNEXT_E2E_SKIP_PACK=1 — skipping tarball install (contract-test mode)"
   NEXT_ADAPTER_PATH="${NEXT_ADAPTER_PATH:-}"
-  # Contract-test mode has no installed @knext/core; the preloads are plain
+  # Contract-test mode has no installed @getknext/core; the preloads are plain
   # dependency-free CJS, so the in-repo SOURCE files are directly loadable.
   KNEXT_CC_PRELOAD="${SCRIPT_DIR}/../packages/kn-next/src/adapters/cache-control-normalize.cjs"
   KNEXT_BUN_GUARD_PRELOAD="${SCRIPT_DIR}/../packages/kn-next/src/adapters/bun-keepalive-guard.cjs"
@@ -321,7 +321,7 @@ BUILD_LOG="${APP_DIR}/.adapter-next-build.log"
 
 # ── B2 (#173, round 3): enable Node-native TS resolution for next.config.ts/.mts.
 # The 18 `next-config-ts-native-ts`/`-native-mts` failures were NOT adapter
-# packaging (the @knext/core adapter dist is require()-safe — gated by
+# packaging (the @getknext/core adapter dist is require()-safe — gated by
 # packages/kn-next/src/__tests__/adapter-require-safe.test.ts): every fixture in
 # those families carries a DELIBERATE top-level await in its own next.config.ts,
 # and without native TS resolution `next build` falls back to the legacy

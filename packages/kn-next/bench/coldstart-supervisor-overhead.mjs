@@ -1,5 +1,5 @@
 // Reproducible cold-start micro-benchmark for the knext supervisor overhead (#441,
-// benchmark doc "Run 20"). Self-contained: deploys a self-contained @knext/core
+// benchmark doc "Run 20"). Self-contained: deploys a self-contained @getknext/core
 // (the shipped-image layout), stubs Next's server.js with a fast fixture, and
 // times the supervisor's ADDITIVE cold-start cost in alternating pairs (the
 // project's evidence bar = distribution separation).
@@ -7,7 +7,7 @@
 //   node packages/kn-next/bench/coldstart-supervisor-overhead.mjs   [N=12]
 //
 // DIRECT     = `node <fast-fixture>` binding $PORT (Next's own boot, stubbed fast).
-// SUPERVISOR = shipped CMD `node -e import('@knext/core/internal/node-server')`
+// SUPERVISOR = shipped CMD `node -e import('@getknext/core/internal/node-server')`
 //              spawning the SAME fixture via STANDALONE_SERVER_PATH.
 // The DELTA is the wrapper's own overhead (parent module load + eager wiring +
 // :9091 bind + spawn + the inherent second Node process). A fast fixture removes
@@ -31,27 +31,27 @@ import { fileURLToPath } from "node:url";
 const N = Number(process.env.N || 12);
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 
-// 1. Self-contained @knext/core deploy (dist + prod node_modules), the shipped layout.
+// 1. Self-contained @getknext/core deploy (dist + prod node_modules), the shipped layout.
 const deploy = mkdtempSync(join(tmpdir(), "knext-core-deploy-"));
-process.stderr.write("deploying @knext/core (prod)…\n");
+process.stderr.write("deploying @getknext/core (prod)…\n");
 const dep = spawnSync(
     "pnpm",
-    ["--filter", "@knext/core", "--prod", "deploy", "--legacy", deploy],
+    ["--filter", "@getknext/core", "--prod", "deploy", "--legacy", deploy],
     { cwd: repoRoot, encoding: "utf8" },
 );
 if (
     dep.status !== 0 ||
     !existsSync(join(deploy, "dist/adapters/node-server.js"))
 ) {
-    console.error("deploy failed — run `pnpm --filter @knext/core build` first");
+    console.error("deploy failed — run `pnpm --filter @getknext/core build` first");
     console.error((dep.stderr || "").split("\n").slice(-6).join("\n"));
     process.exit(2);
 }
 
-// 2. Runner dir whose node_modules/@knext/core -> the deploy (one resolvable core).
+// 2. Runner dir whose node_modules/@getknext/core -> the deploy (one resolvable core).
 const runner = mkdtempSync(join(tmpdir(), "knext-cs-runner-"));
-mkdirSync(join(runner, "node_modules", "@knext"), { recursive: true });
-symlinkSync(deploy, join(runner, "node_modules", "@knext", "core"));
+mkdirSync(join(runner, "node_modules", "@getknext"), { recursive: true });
+symlinkSync(deploy, join(runner, "node_modules", "@getknext", "core"));
 
 // 3. Fast fixture: instant-boot stand-in for Next's server.js.
 const fixture =
@@ -112,7 +112,7 @@ async function measure(port, argv, extraEnv) {
 
 const direct = (p) => measure(p, [fixture], {});
 const supervisor = (p) =>
-    measure(p, ["-e", "import('@knext/core/internal/node-server')"], {
+    measure(p, ["-e", "import('@getknext/core/internal/node-server')"], {
         METRICS_PORT: String(p + 10000),
         STANDALONE_SERVER_PATH: fixture,
         CACHE_INVALIDATE_TOKEN: "bench",

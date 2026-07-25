@@ -1,16 +1,16 @@
 ---
-title: Data SDK (@knext/db)
+title: Data SDK (@getknext/db)
 description: A thin, typed drizzle-orm layer over your Postgres DATABASE_URL — schema, migrations, and read/write clients.
 ---
 
-`@knext/db` is knext's typed data-access layer: a **thin [drizzle-orm](https://orm.drizzle.team)
+`@getknext/db` is knext's typed data-access layer: a **thin [drizzle-orm](https://orm.drizzle.team)
 wrapper** over the Postgres connection pools built from the `DATABASE_URL` your app is bound to. It
 re-exports drizzle's whole query surface and adds only the scale-to-zero ergonomics —
 **you keep drizzle's own docs and lose no power**, and the SDK provisions nothing and mutates no
 cluster resource.
 
 knext is [engine-agnostic about databases](/docs/databases): **you bring your own Postgres** and
-bind its DSN from a Secret; `@knext/db` is a plain client over that `DATABASE_URL`, giving your
+bind its DSN from a Secret; `@getknext/db` is a plain client over that `DATABASE_URL`, giving your
 database a typed schema, migrations, and queries. It works against any Postgres your app can
 reach.
 
@@ -18,36 +18,36 @@ The package has three public subpaths:
 
 | Subpath | What it is |
 |---|---|
-| `@knext/db` | Re-exports `drizzle-orm` (query builder, `eq`/`and`/`or`/`desc`/`sql`, …) plus the client accessors `getDb()` / `getDbRO()`. |
-| `@knext/db/schema` | The schema surface — a thin re-export of drizzle's `pg-core` builders plus `relations`/`sql`, and the extension helpers. |
-| `@knext/db/migrate` | `defineDrizzleConfig()` for your `drizzle.config.ts`, plus the engine behind `kn-next db migrate`. |
+| `@getknext/db` | Re-exports `drizzle-orm` (query builder, `eq`/`and`/`or`/`desc`/`sql`, …) plus the client accessors `getDb()` / `getDbRO()`. |
+| `@getknext/db/schema` | The schema surface — a thin re-export of drizzle's `pg-core` builders plus `relations`/`sql`, and the extension helpers. |
+| `@getknext/db/migrate` | `defineDrizzleConfig()` for your `drizzle.config.ts`, plus the engine behind `kn-next db migrate`. |
 
 ```bash
-npm i @knext/db
+npm i @getknext/db
 npm i -D drizzle-kit        # dev-only: generates SQL migrations
 ```
 
-`@knext/db` depends on `drizzle-orm` and re-exports it, so your app has a single pinned-compatible
+`@getknext/db` depends on `drizzle-orm` and re-exports it, so your app has a single pinned-compatible
 drizzle. `drizzle-kit` is a dev tool only — it generates migrations and ships no runtime code.
 
 <Callout type="warn">
-**Package availability.** `@knext/db` is not on the public npm registry yet. It is installable
+**Package availability.** `@getknext/db` is not on the public npm registry yet. It is installable
 today from the **interim GitHub Packages channel** as `@getknext-dev/db` — see
 [Getting started](/docs/getting-started#0--install-the-packages-interim-channel) for the `.npmrc`
 setup (a `read:packages` token is required even though the packages are public). Under that scope,
-substitute `@getknext-dev/db` for `@knext/db` in the install command and imports on this page.
-When `@knext/*` goes live on npm, the interim names will be deprecated in its favor; installs
+substitute `@getknext-dev/db` for `@getknext/db` in the install command and imports on this page.
+When `@getknext/*` goes live on npm, the interim names will be deprecated in its favor; installs
 keep working.
 </Callout>
 
 ## Define your schema
 
 Put your tables in `src/db/schema.ts` (the knext convention) and import the builders from
-`@knext/db/schema`. It is a plain re-export of drizzle's `pg-core` — no bespoke DSL — so
+`@getknext/db/schema`. It is a plain re-export of drizzle's `pg-core` — no bespoke DSL — so
 [drizzle's schema docs](https://orm.drizzle.team/docs/sql-schema-declaration) apply directly.
 
 ```ts title="src/db/schema.ts"
-import { pgTable, serial, text, timestamp } from '@knext/db/schema';
+import { pgTable, serial, text, timestamp } from '@getknext/db/schema';
 
 export const messages = pgTable('messages', {
   id: serial('id').primaryKey(),
@@ -61,7 +61,7 @@ export type Message = typeof messages.$inferSelect;
 export type NewMessage = typeof messages.$inferInsert;
 ```
 
-Available from `@knext/db/schema`: `pgTable`, the column builders
+Available from `@getknext/db/schema`: `pgTable`, the column builders
 (`serial`/`text`/`integer`/`timestamp`/`jsonb`/`uuid`/`vector`/…), `index`/`uniqueIndex`,
 `primaryKey`/`foreignKey`, `pgEnum`/`pgSchema`, and `relations`/`sql`.
 
@@ -73,7 +73,7 @@ migrates a single-writer, scale-to-zero database?".
 ### Config
 
 ```ts title="drizzle.config.ts"
-import { defineDrizzleConfig } from '@knext/db/migrate';
+import { defineDrizzleConfig } from '@getknext/db/migrate';
 
 // dialect: 'postgresql' · schema: './src/db/schema.ts' · out: './drizzle'
 // dbCredentials.url: process.env.DATABASE_URL (the WRITER, injected by the operator)
@@ -166,7 +166,7 @@ unset (no read replica), `getDbRO()` **falls back to the writer with a one-time 
 app still works, it just reads from the primary.
 
 ```ts title="src/db/queries.ts"
-import { desc, getDb, getDbRO } from '@knext/db';
+import { desc, getDb, getDbRO } from '@getknext/db';
 import { type Message, type NewMessage, messages } from './schema';
 
 // staleness-tolerant list → the reader
@@ -236,7 +236,7 @@ the helpers return the exact SQL to paste into (or append to) your generated mig
 import {
   pgTable, timestamp, text, doublePrecision,
   hypertable, dropChunks, createTimescaleExtension,
-} from '@knext/db/schema';
+} from '@getknext/db/schema';
 
 export const metrics = pgTable('metrics', {
   ts: timestamp('ts', { withTimezone: true }).notNull(),
@@ -269,14 +269,14 @@ in your migration for now.
 
 ### pgvector (embeddings / semantic search)
 
-The `vector(n)` column type is drizzle's own (already re-exported from `@knext/db/schema`); the
+The `vector(n)` column type is drizzle's own (already re-exported from `@getknext/db/schema`); the
 helpers add the index DDL drizzle-kit can't generate, and re-export the typed distance operators.
 
 ```ts
 import {
   pgTable, serial, text, vector,
   hnsw, ivfflat, createVectorExtension,
-} from '@knext/db/schema';
+} from '@getknext/db/schema';
 
 export const docs = pgTable('docs', {
   id: serial('id').primaryKey(),
@@ -297,7 +297,7 @@ Query with the distance operators, and **match the operator to the index's ops c
 `innerProduct` (`<#>`) ⇄ `vector_ip_ops`.
 
 ```ts
-import { getDbRO, cosineDistance } from '@knext/db';
+import { getDbRO, cosineDistance } from '@getknext/db';
 import { docs } from '@/db/schema';
 
 const nearest = await getDbRO({ docs })

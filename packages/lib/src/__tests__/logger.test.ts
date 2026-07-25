@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-// The shared @knext/lib logger (`../logger`) builds a pino instance at module
+// The shared @getknext/lib logger (`../logger`) builds a pino instance at module
 // load. In production it writes raw JSON (no pino-pretty worker); we pin its
 // real, observable contract:
 //   - constructs/exports without throwing,
@@ -19,7 +19,7 @@ function forceProdEnv() {
   vi.stubEnv('KN_APP_NAME', undefined);
 }
 
-describe('@knext/lib logger — instance contract', () => {
+describe('@getknext/lib logger — instance contract', () => {
   beforeEach(() => {
     vi.resetModules();
     forceProdEnv();
@@ -65,7 +65,7 @@ describe('@knext/lib logger — instance contract', () => {
   });
 });
 
-describe('@knext/lib logger — serialization + redaction contract', () => {
+describe('@getknext/lib logger — serialization + redaction contract', () => {
   beforeEach(() => {
     vi.resetModules();
     forceProdEnv();

@@ -19,7 +19,7 @@ const vectorDocs = pgTable('docs', {
 });
 
 /**
- * LIVE-POSTGRES integration lane for `@knext/db` (plan P2, ADR-0021).
+ * LIVE-POSTGRES integration lane for `@getknext/db` (plan P2, ADR-0021).
  *
  * Everything below runs against a REAL Postgres — the first time the SDK's
  * product claims (migrations apply + are idempotent, writer read-your-writes,
@@ -61,7 +61,7 @@ const MIGRATIONS_DIR = resolve(REPO_ROOT, 'apps/db-demo/drizzle');
 // One-time warning capture for the RO-fallback spec. Mocked file-wide; only
 // packages/db/src/index.ts consumes this module here.
 const warned: string[] = [];
-vi.mock('@knext/lib/logger', () => ({
+vi.mock('@getknext/lib/logger', () => ({
   logger: {
     warn: (msg: string) => warned.push(msg),
     info: () => {},
@@ -84,7 +84,7 @@ function dsnFor(base: string, dbName: string, applicationName?: string): string 
 const RUN = `knext_live_${Date.now().toString(36)}`;
 
 describe.skipIf(!LIVE)(
-  '@knext/db live Postgres lane (SKIPPED unless KNEXT_DB_LIVE=1 and DATABASE_URL are set)',
+  '@getknext/db live Postgres lane (SKIPPED unless KNEXT_DB_LIVE=1 and DATABASE_URL are set)',
   () => {
     let admin: Pool;
     const createdDbs: string[] = [];
@@ -195,11 +195,11 @@ describe.skipIf(!LIVE)(
       let appDb: string;
       // Track every SDK "generation" (vi.resetModules world) so its real pg
       // pools are drained after each spec — no leaked sockets, no hung vitest.
-      const generations: Array<typeof import('@knext/lib/clients')> = [];
+      const generations: Array<typeof import('@getknext/lib/clients')> = [];
 
       /**
-       * Import a FRESH copy of the SDK (+ its `@knext/lib` pools) with the
-       * given env. `@knext/db`'s writer/reader clients and `@knext/lib`'s
+       * Import a FRESH copy of the SDK (+ its `@getknext/lib` pools) with the
+       * given env. `@getknext/db`'s writer/reader clients and `@getknext/lib`'s
        * pools are module-level singletons keyed off env at first call, so
        * each routing spec needs its own module generation.
        */
@@ -212,7 +212,7 @@ describe.skipIf(!LIVE)(
           process.env.DATABASE_URL_RO = env.ro;
         }
         const sdk = await import('../../index');
-        const clients = await import('@knext/lib/clients');
+        const clients = await import('@getknext/lib/clients');
         generations.push(clients);
         return sdk;
       }
@@ -319,7 +319,7 @@ describe.skipIf(!LIVE)(
         const out: string[] = [];
         await runDbMigrate(
           ['--url', cliDsn, '--dir', MIGRATIONS_DIR],
-          undefined, // default runner — the REAL @knext/db/migrate engine
+          undefined, // default runner — the REAL @getknext/db/migrate engine
           (text) => out.push(text),
         );
         expect(out.join('')).toMatch(/Migrations applied from/);

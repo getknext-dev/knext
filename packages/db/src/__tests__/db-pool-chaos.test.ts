@@ -3,10 +3,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 /**
  * P1 data-plane resilience — DB connection CHAOS test (CI-runnable, no live
- * Postgres). The @knext/db parity for the cache-handler chaos test
+ * Postgres). The @getknext/db parity for the cache-handler chaos test
  * (packages/kn-next/src/__tests__/cache-handler-chaos.test.ts).
  *
- * The load-bearing reliability property here is BOUNDED FAILURE. `@knext/lib`'s
+ * The load-bearing reliability property here is BOUNDED FAILURE. `@getknext/lib`'s
  * pools deliberately set a finite `connectionTimeoutMillis` (default 15s,
  * env-overridable via `DB_POOL_CONNECT_TIMEOUT_MS`) precisely so that when
  * Postgres is unreachable a request FAILS FAST with a clear pool error instead
@@ -14,7 +14,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
  * see clients.ts). Until now this was only verified by READING the code.
  *
  * This test PROVES it by driving the REAL `pg` pool (unmocked) through the
- * @knext/db `getDb()` accessor against:
+ * @getknext/db `getDb()` accessor against:
  *   - a DEAD loopback port  → the OS refuses the TCP connection immediately;
  *   - a SLOW-but-alive peer  → a socket that ACCEPTS then never speaks the
  *     Postgres protocol, so the connect-timeout guard is what must fire.
@@ -26,7 +26,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
  * Data-sovereignty (scs-zones.md): every DSN below is a private loopback port
  * this test itself owns — never another zone's CNPG service.
  *
- * `@knext/db` / `@knext/lib` read env + build the pool as module-level
+ * `@getknext/db` / `@getknext/lib` read env + build the pool as module-level
  * singletons at first `getDb()`, so each case resets the module registry and
  * re-imports with a fresh environment.
  */
@@ -124,7 +124,7 @@ describe('db pool chaos: connection failure is BOUNDED, never a hang or false su
       expect(elapsed).toBeLessThan(BOUNDED_CEILING_MS);
 
       // Clean up the client pool BEFORE the server so no socket outlives it.
-      const { closeDbPool } = await import('@knext/lib/clients');
+      const { closeDbPool } = await import('@getknext/lib/clients');
       await closeDbPool();
     } finally {
       for (const s of sockets) {

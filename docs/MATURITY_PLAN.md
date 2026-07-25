@@ -70,13 +70,13 @@ cache (FSS/EFS/Filestore/Azure Files per cloud); supported ingress ADR; multi-cl
 image story shipped; ingress path supported on ≥2 clouds.
 
 ### Phase 5 — Release
-npm publishing (`@knext/*`), semver, changesets, versioned docs site, runnable examples.
+npm publishing (`@getknext/*`), semver, changesets, versioned docs site, runnable examples.
 **Exit:** `npm i` works; tagged release; docs published.
 
 ### Phase 6 — Optional: polyglot gRPC business-logic layer (post-maturity)
 See `docs/design/grpc-layer.md` + ADR-0002/0003/0004. **Deliberately sequenced last** — it is a
 scope expansion beyond the narrow-adapter north star and must not precede core maturity. Ship as
-an **optional, separately-versioned module** (`@knext/grpc` + `BackendService` CRD). **Exit
+an **optional, separately-versioned module** (`@getknext/grpc` + `BackendService` CRD). **Exit
 (when undertaken):** one proto → Go + TS service + generated Next.js gateway glue, deployed as a
 cluster-local scale-to-zero Knative service, behind the gateway.
 

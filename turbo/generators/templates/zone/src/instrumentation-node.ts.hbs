@@ -5,7 +5,7 @@
  *
  * Next.js compiles `instrumentation.ts` for BOTH the `nodejs` AND the `edge`
  * runtimes (any app with a `middleware.ts` forces an edge build). ALL of this
- * wiring is Node-only by nature: `@knext/lib/clients` transitively imports
+ * wiring is Node-only by nature: `@getknext/lib/clients` transitively imports
  * `@cerbos/grpc` (→ `@grpc/grpc-js`, needing `zlib`/`stream`/`net`/`tls`/`fs`),
  * plus `pg` and `minio`. If any of it is reachable from the edge bundle the
  * production `next build` fails with `Module not found`.
@@ -20,16 +20,16 @@
  * bundle. The knext runtime runs the app on Node (the standalone server), so no
  * behavior is lost.
  *
- * The `@knext/lib` collaborator seams wired below (`setPoolInstrumentor`,
+ * The `@getknext/lib` collaborator seams wired below (`setPoolInstrumentor`,
  * `setTraceIdProvider`, `setCorrelationIdProvider`) are anchored on `globalThis`
  * via `Symbol.for('knext.lib.*')` (ADR-0027/#352) so they survive the standalone
- * bundle's webpack-layer duplication — and `@knext/lib` must NEVER be added to
+ * bundle's webpack-layer duplication — and `@getknext/lib` must NEVER be added to
  * `serverExternalPackages`, which would re-split that state. The generated
  * guards `instrumentation-edge-safe.test.ts` and `standalone-seam-alive.test.ts`
  * enforce the fence and the seam survival in the shipped artifact.
  */
 
-import { installCorrelationResponseEcho } from '@knext/core/adapters/correlation-response';
+import { installCorrelationResponseEcho } from '@getknext/core/adapters/correlation-response';
 import {
   GoldenSignalMetricsProcessor,
   initRuntimeMetrics,
@@ -37,8 +37,8 @@ import {
   recordColdStart,
   recordDbWake,
   startChildMetricsServer,
-} from '@knext/core/adapters/metrics';
-import { resolveOtelOptions } from '@knext/core/adapters/otel-config';
+} from '@getknext/core/adapters/metrics';
+import { resolveOtelOptions } from '@getknext/core/adapters/otel-config';
 import {
   ColdStartSpanProcessor,
   CorrelationContextPropagator,
@@ -46,10 +46,10 @@ import {
   installCorrelationIdProvider,
   installTraceIdProvider,
   instrumentPoolForDbWake,
-} from '@knext/core/adapters/tracing';
-import { isDbRecentlyActive, setPoolInstrumentor } from '@knext/lib/clients';
-import { setCorrelationIdProvider, setTraceIdProvider } from '@knext/lib/context';
-import { checkDeepHealth } from '@knext/lib/health';
+} from '@getknext/core/adapters/tracing';
+import { isDbRecentlyActive, setPoolInstrumentor } from '@getknext/lib/clients';
+import { setCorrelationIdProvider, setTraceIdProvider } from '@getknext/lib/context';
+import { checkDeepHealth } from '@getknext/lib/health';
 import { registerOTel } from '@vercel/otel';
 import { Registry } from 'prom-client';
 

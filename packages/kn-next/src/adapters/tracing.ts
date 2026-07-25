@@ -28,7 +28,7 @@
  *      (nested in the same trace), carrying the measured process-boot→first-
  *      request wake. It is inert for every request after the first.
  *   2. `instrumentPoolForDbWake` — wraps a pg pool's FIRST `connect()`. It is
- *      installed once via `@knext/lib/clients`' `setPoolInstrumentor` seam
+ *      installed once via `@getknext/lib/clients`' `setPoolInstrumentor` seam
  *      (`setPoolInstrumentor(instrumentPoolForDbWake)`), so every pool the lib
  *      creates gets a `knext.db_wake` span around its 0→1 wake, opened in the
  *      caller's active context (the request span) — automatically, per request.
@@ -45,7 +45,7 @@
  * `resolveOtelOptions` or the SDK here — gating is the SDK's own no-op tracer,
  * which is the cheapest and most honest signal of "is tracing on?".
  *
- * The active trace id is surfaced to `@knext/lib`'s correlation layer (C4, #318)
+ * The active trace id is surfaced to `@getknext/lib`'s correlation layer (C4, #318)
  * via `setTraceIdProvider` so a log line and a span share the same `trace_id`.
  */
 
@@ -53,7 +53,7 @@ import {
     CORRELATION_HEADER,
     isWellFormedCorrelationId,
     resolveCorrelationId,
-} from "@knext/lib/context";
+} from "@getknext/lib/context";
 import {
     type Context,
     context,
@@ -68,7 +68,7 @@ import {
 } from "@opentelemetry/api";
 
 /** Tracer name for all manually-instrumented knext runtime spans. */
-export const TRACER_NAME = "@knext/core";
+export const TRACER_NAME = "@getknext/core";
 
 /**
  * Span attribute that carries the request correlation id (#346). It rides the
@@ -220,14 +220,14 @@ export function activeTraceId(): string | undefined {
 }
 
 /**
- * Return a provider function suitable for `@knext/lib`'s `setTraceIdProvider`
+ * Return a provider function suitable for `@getknext/lib`'s `setTraceIdProvider`
  * (C4, #318). Wiring it once at startup makes every in-request log line carry
  * the active span's `trace_id`, so logs and traces share one id:
  *
- *   import { setTraceIdProvider } from '@knext/lib/context';
+ *   import { setTraceIdProvider } from '@getknext/lib/context';
  *   setTraceIdProvider(installTraceIdProvider());
  *
- * Kept dependency-free of `@knext/lib` (returns the provider rather than calling
+ * Kept dependency-free of `@getknext/lib` (returns the provider rather than calling
  * `setTraceIdProvider` itself) so this module stays independently unit-testable
  * and the app owns the one-time wiring.
  */
@@ -276,9 +276,9 @@ export function withCorrelationId(ctx: Context, id: string): Context {
  * no parent-walk.
  *
  * `extract` adopts a WELL-FORMED inbound `x-request-id` (else mints a fresh uuid
- * — untrusted-input rules live in `@knext/lib/context`) and stores it on the
+ * — untrusted-input rules live in `@getknext/lib/context`) and stores it on the
  * context. `inject` is a deliberate no-op: the id already flows downstream as the
- * `x-request-id` header via `@knext/lib`'s `correlationHeaders()` on the app's
+ * `x-request-id` header via `@getknext/lib`'s `correlationHeaders()` on the app's
  * outbound calls, and W3C tracecontext carries the trace itself — this propagator
  * exists only to seed the INBOUND context, so we don't also emit a bespoke header.
  *
@@ -305,7 +305,7 @@ export class CorrelationContextPropagator implements TextMapPropagator {
         _setter: TextMapSetter<Carrier>,
     ): void {
         // No-op: correlation flows downstream via the app's x-request-id header
-        // (@knext/lib correlationHeaders()); this propagator only seeds inbound.
+        // (@getknext/lib correlationHeaders()); this propagator only seeds inbound.
     }
 
     fields(): string[] {
@@ -326,13 +326,13 @@ export function activeCorrelationId(): string | undefined {
 }
 
 /**
- * Return a provider suitable for `@knext/lib`'s `setCorrelationIdProvider`
+ * Return a provider suitable for `@getknext/lib`'s `setCorrelationIdProvider`
  * (#346). Wiring it once at startup makes every in-request log line carry the
  * active request's `correlation_id`, read from the active OTel CONTEXT, so logs
  * are correlated on the real path with no handler wrapping — on the SERVER span
  * AND under any child span:
  *
- *   import { setCorrelationIdProvider } from '@knext/lib/context';
+ *   import { setCorrelationIdProvider } from '@getknext/lib/context';
  *   setCorrelationIdProvider(installCorrelationIdProvider());
  *
  * Kept dependency-inverted (returns the provider rather than calling the setter)
@@ -496,10 +496,10 @@ interface InstrumentablePool {
  * Wrap a pg pool's FIRST client acquisition — via `connect()` OR `query()` — in
  * a `knext.db_wake` span so the scale-zero-pg 0→1 DB wake shows up on the
  * request trace automatically, with no app code. Install once at startup via
- * `@knext/lib/clients`:
+ * `@getknext/lib/clients`:
  *
- *   import { setPoolInstrumentor } from '@knext/lib/clients';
- *   import { instrumentPoolForDbWake } from '@knext/core/adapters/tracing';
+ *   import { setPoolInstrumentor } from '@getknext/lib/clients';
+ *   import { instrumentPoolForDbWake } from '@getknext/core/adapters/tracing';
  *   setPoolInstrumentor(instrumentPoolForDbWake);
  *
  * The lib then calls this for each pool it creates. #345: the common usage is

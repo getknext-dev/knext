@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
-import { CORRELATION_HEADER } from "@knext/lib/context";
+import { CORRELATION_HEADER } from "@getknext/lib/context";
 import { context, SpanKind, trace } from "@opentelemetry/api";
 import { AsyncLocalStorageContextManager } from "@opentelemetry/context-async-hooks";
 import {

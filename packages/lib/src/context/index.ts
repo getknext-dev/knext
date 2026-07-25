@@ -1,5 +1,5 @@
 /**
- * context/index.ts — request correlation layer for @knext/lib (#318).
+ * context/index.ts — request correlation layer for @getknext/lib (#318).
  *
  * A knext request must be traceable end-to-end: app -> db-wake -> downstream.
  * This module gives the runtime request path a single, ambient correlation id
@@ -54,8 +54,8 @@ export interface RequestContext {
 
 // ── Shared cross-bundle state (#352) ──────────────────────────────────────────
 // In the Next.js standalone build `instrumentation.ts` compiles in a SEPARATE
-// webpack layer from the app server bundles and `@knext/lib` is bundled (not
-// externalized) into each, so `@knext/lib/context` exists as MULTIPLE physical
+// webpack layer from the app server bundles and `@getknext/lib` is bundled (not
+// externalized) into each, so `@getknext/lib/context` exists as MULTIPLE physical
 // module copies with independent module-level state. The injectable providers
 // (setTraceIdProvider / setCorrelationIdProvider, #318/#346) are written by the
 // instrumentation copy but read by the app-server copy — with plain module-level
@@ -182,7 +182,7 @@ function currentTraceId(): string | undefined {
  * handler in `runWithRequestContext`, and the AsyncLocalStorage store above is
  * empty during a real request.
  *
- * The OTel-aware `@knext/core` closes that gap by installing a correlation-id
+ * The OTel-aware `@getknext/core` closes that gap by installing a correlation-id
  * PROVIDER (twin of the trace-id provider): it resolves the request's
  * correlation id from the ACTIVE OTel context/span at log time — the same
  * per-request context @vercel/otel already propagates via an
@@ -270,7 +270,7 @@ export function getTraceId(): string | undefined {
 
 /**
  * Structured-log fields for the current request context. Empty outside a
- * request (nothing to add). Consumed by the `@knext/lib` logger `mixin`, so
+ * request (nothing to add). Consumed by the `@getknext/lib` logger `mixin`, so
  * every in-request line carries `correlation_id` (+ `trace_id` when active).
  */
 export function correlationLogFields(): {

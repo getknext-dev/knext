@@ -5,10 +5,10 @@
 - **Relates to / upholds:** ADR-0012 (OTel tracing backend — the
   `registerOTel` direct-pass path this ADR endorses), ADR-0001 (operator =
   single source of truth; unchanged — this is a runtime-bundling rule, not a
-  cluster-state one). Depends on the `@knext/lib`-stays-OTel-free dependency
+  cluster-state one). Depends on the `@getknext/lib`-stays-OTel-free dependency
   inversion that motivates the seams.
 - **Scope:** Any collaborator wired from `apps/*/src/instrumentation.ts` and
-  read by the app server — specifically the `@knext/lib` seams
+  read by the app server — specifically the `@getknext/lib` seams
   `setPoolInstrumentor` (`packages/lib/src/clients.ts`) and
   `setTraceIdProvider` / `setCorrelationIdProvider`
   (`packages/lib/src/context/index.ts`); and the build-artifact guard
@@ -20,17 +20,17 @@ Three shipped observability features — `knext_db_wake_*` (#345) and
 correlation-id propagation (#318/#346) — were silently INERT in production
 despite green unit tests. Root cause (#352):
 
-- `@knext/lib` exposes **dependency-inversion seams** so the library stays
+- `@getknext/lib` exposes **dependency-inversion seams** so the library stays
   OTel-free: `instrumentation.ts` installs a collaborator
   (`setPoolInstrumentor(...)`, `setTraceIdProvider(...)`,
   `setCorrelationIdProvider(...)`) and the app later reads it
   (`getDbPool()` etc.).
 - Next.js compiles `instrumentation.ts` in a **separate webpack layer** from the
-  app-server bundles and **bundles** `@knext/lib` into each layer (it is not
+  app-server bundles and **bundles** `@getknext/lib` into each layer (it is not
   externalized). In the production standalone build the two layers therefore
-  hold **two physical copies** of `@knext/lib/clients` with independent
+  hold **two physical copies** of `@getknext/lib/clients` with independent
   module-level `let` state. Evidence: distinct webpack module ids **78719** vs
-  **98144** for `@knext/lib/clients` across the layers.
+  **98144** for `@getknext/lib/clients` across the layers.
 - The writer set the seam on copy A; the reader read the still-no-op copy B. The
   pool was never wrapped; the metrics/correlation were dead. Unit tests passed
   because a single test process has ONE module instance — the duplication only
@@ -50,7 +50,7 @@ duplicated-state hazard exists for them.
    duplication, so this path is structurally immune to the #352 class.
 
 2. **A module-state setter seam is a last resort, permitted only when direct-pass
-   is genuinely impossible** — e.g. keeping `@knext/lib` OTel-free via dependency
+   is genuinely impossible** — e.g. keeping `@getknext/lib` OTel-free via dependency
    inversion, where the library must NOT import the OTel SDK and so cannot receive
    the collaborator through its own construction.
 
@@ -66,29 +66,29 @@ duplicated-state hazard exists for them.
    (`apps/file-manager/standalone-seam-alive.test.ts`, #344), which asserts the
    seam symbols co-occur in BOTH the instrumentation (writer) chunk and an
    app-server (reader) chunk of the REAL `next build` standalone output. **And
-   `@knext/lib` MUST stay bundled, not externalized** — it must never be added to
+   `@getknext/lib` MUST stay bundled, not externalized** — it must never be added to
    `serverExternalPackages`, since externalizing changes dedup and re-splits the
    state.
 
 ## Options considered
 
-| Approach | Survives webpack-layer duplication | Keeps `@knext/lib` OTel-free | Verdict |
+| Approach | Survives webpack-layer duplication | Keeps `@getknext/lib` OTel-free | Verdict |
 | --- | --- | --- | --- |
 | **Direct-pass into `registerOTel`** | yes (by reference) | yes | **Preferred** |
 | Module-state seam on `globalThis` + `Symbol.for` | yes (process-global cell) | yes | **Accepted for unavoidable seams** |
 | Module-state seam with a bare module-level `let` | **no** (per-copy state) | yes | **Rejected — the #352 bug** |
-| Import the OTel SDK directly into `@knext/lib` | yes | **no** | Rejected — violates the dependency inversion |
+| Import the OTel SDK directly into `@getknext/lib` | yes | **no** | Rejected — violates the dependency inversion |
 
 ## Consequences
 
-- The two existing `@knext/lib` seams were migrated to the `globalThis` +
+- The two existing `@getknext/lib` seams were migrated to the `globalThis` +
   `Symbol.for` pattern in #352 (`clients.ts`, `context/index.ts`); the
   duplicated-state mechanism is proven at the unit level by
   `seam-duplication.test.ts` and in the shipped artifact by the #344 guard.
 - New instrumentation→app wiring defaults to direct-pass; a reviewer treats a
   new bare-`let` seam as a defect. Any new seam must ship its guard coverage and
-  must not move `@knext/lib` into `serverExternalPackages`.
+  must not move `@getknext/lib` into `serverExternalPackages`.
 - ADR-0012 is unchanged and reinforced: its `registerOTel` direct-pass is the
-  reference for the preferred path; the `@knext/lib`-OTel-free dependency
+  reference for the preferred path; the `@getknext/lib`-OTel-free dependency
   inversion that ADR-0012 relies on is exactly what makes the (now-safe) seams
   necessary.

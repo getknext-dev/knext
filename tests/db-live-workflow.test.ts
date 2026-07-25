@@ -5,7 +5,7 @@ import { describe, expect, it } from 'vitest';
 /**
  * GUARD TESTS for the `db-live-integration` CI job (plan P2).
  *
- * The `@knext/db` live-Postgres lane runs the integration suite against a
+ * The `@getknext/db` live-Postgres lane runs the integration suite against a
  * `postgres:16` service container. Two invariants are load-bearing:
  *
  * 1. **No real DSN can ever enter the lane.** The job's `DATABASE_URL` is a
@@ -41,7 +41,7 @@ function dbLiveJobBlock(): string {
   return next === -1 ? rest : rest.slice(0, next + 1);
 }
 
-describe('ci.yml — db-live-integration job (live @knext/db lane)', () => {
+describe('ci.yml — db-live-integration job (live @getknext/db lane)', () => {
   it('runs a postgres:16 service container', () => {
     const job = dbLiveJobBlock();
     expect(job).toMatch(/services:/);

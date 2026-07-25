@@ -183,29 +183,29 @@ jobs:
         working-directory: knext
         run: pnpm install --frozen-lockfile
 
-      # Build the runtime + the adapter package so `npm pack @knext/core` ships a
+      # Build the runtime + the adapter package so `npm pack @getknext/core` ships a
       # working adapter for NEXT_ADAPTER_PATH.
-      - name: Build @knext/lib + @knext/db + @knext/core
+      - name: Build @getknext/lib + @getknext/db + @getknext/core
         working-directory: knext
         run: |
-          pnpm --filter @knext/lib build
-          pnpm --filter @knext/db build
-          pnpm --filter @knext/core build
+          pnpm --filter @getknext/lib build
+          pnpm --filter @getknext/db build
+          pnpm --filter @getknext/core build
 
       # #147 A3-3 fix round 1 (triage of run 28558576615 — the ONE bug behind
       # 472/473 failures): this step used to run a bare `npm pack` of
-      # @knext/core, which ships pnpm's raw `workspace:^` dep on @knext/lib
+      # @getknext/core, which ships pnpm's raw `workspace:^` dep on @getknext/lib
       # verbatim (npm does NOT rewrite the workspace protocol on pack — only
       # `pnpm pack`/`pnpm publish` do). Every fixture's `npm install <tarball>`
       # then died with EUNSUPPORTEDPROTOCOL and `next build` ran ZERO times.
-      # FIX: `pnpm pack` the FULL @knext/* dependency closure of @knext/core
+      # FIX: `pnpm pack` the FULL @getknext/* dependency closure of @getknext/core
       # (rewrites workspace:^ → the real semver) ONCE here — not per test in
       # e2e-deploy.sh, which also raced at runner concurrency 2 — staged at a
       # STABLE path that rides the workspace artifact into every shard
       # (KNEXT_E2E_TARBALLS_DIR).
-      # #255/#256: core gained `@knext/db: workspace:^` (ADR-0021); packing only
+      # #255/#256: core gained `@getknext/db: workspace:^` (ADR-0021); packing only
       # lib+core made the preflight npm install 404 on the unpublished
-      # @knext/db. The preflight now DERIVES the required set from the packed
+      # @getknext/db. The preflight now DERIVES the required set from the packed
       # manifests, so a missing member fails loud with its name.
       - name: Pack knext adapter tarballs (pnpm pack — npm-installable, once for the whole run)
         working-directory: knext
@@ -219,12 +219,12 @@ jobs:
           ls -la "${DEST}"
 
       # The fail-fast gate that SHOULD have existed before run 28558576615:
-      # derive the @knext/* dependency closure from the packed manifests,
+      # derive the @getknext/* dependency closure from the packed manifests,
       # npm-install ALL closure tarballs into a scratch dir (REAL dependency
-      # resolution — npm satisfies the rewritten @knext/lib@^x + @knext/db@^x
-      # deps from the local tarballs, since the @knext scope is not on npm yet,
-      # #53), audit the lockfile origins, resolve @knext/core/adapter and
-      # import @knext/db/migrate. A packaging regression aborts HERE, in
+      # resolution — npm satisfies the rewritten @getknext/lib@^x + @getknext/db@^x
+      # deps from the local tarballs, since the @getknext scope is not on npm yet,
+      # #53), audit the lockfile origins, resolve @getknext/core/adapter and
+      # import @getknext/db/migrate. A packaging regression aborts HERE, in
       # seconds, BEFORE 16 shards spawn — never again 472 fake failures.
       - name: Preflight — packed tarballs must npm-install + adapter must resolve (fail-fast)
         run: node knext/scripts/e2e-preflight.mjs --tarballs-dir "${GITHUB_WORKSPACE}/knext-tarballs"

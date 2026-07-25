@@ -375,7 +375,7 @@ addendum below: the green run was observed and the row flipped, with the evidenc
 
 **Run 28602886003** (`test-e2e-deploy.yml`, `workflow_dispatch` on `main` @ `f2471511`,
 2026-07-02): **788 passed / 0 failed** across **16 shards** against `vercel/next.js` **v16.2.0**
-(`NEXT_TEST_MODE=deploy`, Node runtime, the published `@knext/core` adapter tarball + knext's
+(`NEXT_TEST_MODE=deploy`, Node runtime, the published `@getknext/core` adapter tarball + knext's
 `scripts/e2e-*.sh` lifecycle scripts). Totals verified by summing the run's 16
 `compat-suite-summary-*.json` artifacts (48–50 passed per shard, 0 failed on every shard; the
 per-shard `excluded: 32` is the full exclusion+skip set evaluated per shard). This satisfies the
@@ -633,7 +633,7 @@ reclassified, no `suites`/`rules.exclude` selection changed, no matrix number mo
         the PR is red on failure.
   - [ ] Document in the job/README that this is a knext smoke suite, **not** the official suite.
 - **A3-2 (scheduled full harness — MVP scaffold landed via #89):**
-  - [x] Extract the `NextAdapter` into `@knext/core` (`packages/kn-next/src/adapters/next-adapter.ts`,
+  - [x] Extract the `NextAdapter` into `@getknext/core` (`packages/kn-next/src/adapters/next-adapter.ts`,
         package export `./adapter`) so the harness can point arbitrary fixture apps at it via
         `NEXT_ADAPTER_PATH`. `apps/file-manager/next-adapter.ts` re-exports it (no behavior change).
   - [x] Add `scripts/e2e-deploy.sh`, `e2e-logs.sh`, `e2e-cleanup.sh` (knext/standalone variant of the

@@ -12,7 +12,7 @@
  * DB?":
  *
  *   - **Writer-only.** Resolves `DATABASE_URL` (never `DATABASE_URL_RO`); the
- *     `@knext/db` engine refuses a read-replica DSN (ADR-0021 §3).
+ *     `@getknext/db` engine refuses a read-replica DSN (ADR-0021 §3).
  *   - **Out of the request path.** Runs once, not on every pod boot — no N-pod
  *     migrator race, no cold-start penalty. Not operator-run (migrating app data
  *     is not a cluster-resource mutation; the operator owns ksvc/Secrets, not
@@ -20,7 +20,7 @@
  *   - **Idempotent + fail loud.** drizzle tracks applied migrations, so a re-run
  *     is a no-op; a migration error exits **non-zero** so a Job fails loud.
  *
- * The migration engine lives in `@knext/db/migrate` (`runMigrations`); this
+ * The migration engine lives in `@getknext/db/migrate` (`runMigrations`); this
  * module is the thin CLI over it. Connecting wakes the writer once — a deliberate
  * one-shot, the intended interaction with scale-to-zero.
  */
@@ -39,8 +39,8 @@ export interface DbMigrateOptions {
 }
 
 /**
- * The migration engine's shape (`@knext/db/migrate`'s `runMigrations`), injected
- * so the CLI is unit-testable without a database or the `@knext/db` build.
+ * The migration engine's shape (`@getknext/db/migrate`'s `runMigrations`), injected
+ * so the CLI is unit-testable without a database or the `@getknext/db` build.
  */
 export type MigrateRunner = (opts: {
     url?: string;
@@ -99,16 +99,16 @@ Options:
   -h, --help           Show this help
 `;
 
-/** The default runner: the `@knext/db/migrate` engine (real pg + drizzle). */
+/** The default runner: the `@getknext/db/migrate` engine (real pg + drizzle). */
 const defaultRun: MigrateRunner = async (opts) => {
-    const { runMigrations } = await import("@knext/db/migrate");
+    const { runMigrations } = await import("@getknext/db/migrate");
     return runMigrations(opts);
 };
 
 /**
  * Run `kn-next db migrate`. The engine (`run`) and stdout (`write`) are injected
  * so the CLI is testable without a database; production wires the real
- * `@knext/db` runner and `writeSync(1, …)`. A runner failure PROPAGATES so the
+ * `@getknext/db` runner and `writeSync(1, …)`. A runner failure PROPAGATES so the
  * bin's dispatcher exits non-zero — a Job must fail loud.
  */
 export async function runDbMigrate(

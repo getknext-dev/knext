@@ -11,7 +11,7 @@
     "config:validate": "tsx scripts/validate-config.ts"
   },
   "dependencies": {
-    "@knext/core": "workspace:*",
+    "@getknext/core": "workspace:*",
     "fumadocs-core": "^16.0.0",
     "fumadocs-mdx": "^15.0.12",
     "fumadocs-ui": "^16.0.0",

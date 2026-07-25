@@ -7,7 +7,7 @@ import { afterAll, describe, expect, it } from 'vitest';
 /**
  * Behavioral tests for scripts/e2e-preflight.mjs — the fail-fast gate #147 A3-3
  * fix round 1 adds after the tarball-packaging bug (triage run 28558576615)
- * burned a full 16-shard compat run: the packed @knext/core tarball shipped a
+ * burned a full 16-shard compat run: the packed @getknext/core tarball shipped a
  * raw `workspace:^` dep, EVERY fixture `npm install` failed with
  * EUNSUPPORTEDPROTOCOL, and 472/473 failures were that ONE bug. The gate that
  * SHOULD have existed: right after packing, npm-install both tarballs into a
@@ -54,27 +54,27 @@ function packFixture(
   });
 }
 
-/** A minimal @knext/lib fixture tarball (real npm package, no deps). */
+/** A minimal @getknext/lib fixture tarball (real npm package, no deps). */
 function packFixtureLib(dest: string): void {
   packFixture(
     dest,
-    { name: '@knext/lib', version: '0.1.0', main: 'index.js' },
+    { name: '@getknext/lib', version: '0.1.0', main: 'index.js' },
     { 'index.js': 'module.exports = { lib: true };\n' },
   );
 }
 
 /**
- * A minimal @knext/db fixture with the `./migrate` subpath (the exact module
+ * A minimal @getknext/db fixture with the `./migrate` subpath (the exact module
  * `kn-next db migrate` dynamically imports); dep spec injectable.
  */
 function packFixtureDb(dest: string, libSpec = '^0.1.0'): void {
   packFixture(
     dest,
     {
-      name: '@knext/db',
+      name: '@getknext/db',
       version: '0.1.0',
       exports: { '.': './index.js', './migrate': './migrate.js' },
-      dependencies: { '@knext/lib': libSpec },
+      dependencies: { '@getknext/lib': libSpec },
     },
     {
       'index.js': 'module.exports = { db: true };\n',
@@ -83,15 +83,15 @@ function packFixtureDb(dest: string, libSpec = '^0.1.0'): void {
   );
 }
 
-/** A minimal @knext/core fixture with an `./adapter` export; dep specs injectable. */
+/** A minimal @getknext/core fixture with an `./adapter` export; dep specs injectable. */
 function packFixtureCore(dest: string, libSpec: string, dbSpec = '^0.1.0'): void {
   packFixture(
     dest,
     {
-      name: '@knext/core',
+      name: '@getknext/core',
       version: '0.1.0',
       exports: { '.': './index.js', './adapter': './adapter.js' },
-      dependencies: { '@knext/lib': libSpec, '@knext/db': dbSpec },
+      dependencies: { '@getknext/lib': libSpec, '@getknext/db': dbSpec },
     },
     {
       'index.js': 'module.exports = {};\n',
@@ -116,10 +116,10 @@ describe('scripts/e2e-preflight.mjs — fail-fast adapter-tarball gate (#147 fix
     const r = runPreflight(dir);
     const out = `${r.stdout}\n${r.stderr}`;
     expect(r.status, `preflight should pass, output:\n${out}`).toBe(0);
-    expect(out).toMatch(/@knext\/core\/adapter/);
+    expect(out).toMatch(/@getknext\/core\/adapter/);
     // The db probe must exercise the EXACT dynamic import `kn-next db migrate`
-    // performs (db-migrate.ts: `await import("@knext/db/migrate")`).
-    expect(out).toMatch(/@knext\/db\/migrate/);
+    // performs (db-migrate.ts: `await import("@getknext/db/migrate")`).
+    expect(out).toMatch(/@getknext\/db\/migrate/);
   }, 180_000);
 
   it('FAILS with ::error:: when the core tarball still ships a raw workspace:^ dep (the 472-failure bug)', () => {
@@ -157,8 +157,8 @@ describe('scripts/e2e-preflight.mjs — fail-fast adapter-tarball gate (#147 fix
   }, 180_000);
 
   it('FAILS fast with the cause NAMED when only the db tarball is missing (the #255/#256 incident shape)', () => {
-    // Runs 29182334221/29184529993: lib+core packed, @knext/db not — every
-    // downstream npm install 404'd on the unpublished `@knext/db@^0.1.0`.
+    // Runs 29182334221/29184529993: lib+core packed, @getknext/db not — every
+    // downstream npm install 404'd on the unpublished `@getknext/db@^0.1.0`.
     // The gate must catch the missing tarball BEFORE any npm install runs.
     const dir = tempDir('knext-tarballs-no-db-');
     packFixtureLib(dir);
@@ -167,7 +167,7 @@ describe('scripts/e2e-preflight.mjs — fail-fast adapter-tarball gate (#147 fix
     const out = `${r.stdout}\n${r.stderr}`;
     expect(r.status, `preflight must fail, output:\n${out}`).toBe(1);
     expect(out).toMatch(/::error::/);
-    expect(out).toMatch(/knext-db/);
+    expect(out).toMatch(/getknext-db/);
   }, 180_000);
 
   it('leaves no tarball behind unvetted: the good-trio run actually installed into a scratch dir (adapter resolves to real JS)', () => {
@@ -186,118 +186,131 @@ describe('scripts/e2e-preflight.mjs — fail-fast adapter-tarball gate (#147 fix
 
 describe('scripts/lib/knext-closure.mjs — dependency-graph-derived tarball set + local-origin guard (#255/#256)', () => {
   // WHY not a hardcoded 3-list: pnpm pack rewrites `workspace:^` → `^x.y.z`, so a
-  // FOURTH @knext/* workspace dep added later never trips the workspace-spec
-  // check — and since the @knext scope is not ours on npmjs yet (#53), a squatted
+  // FOURTH @getknext/* workspace dep added later never trips the workspace-spec
+  // check — and since nothing is published under @getknext on npmjs yet (#53), a stray
   // package could satisfy the install SILENTLY (dependency confusion). The
-  // required tarball set is derived from @knext/core's @knext/* dependency
-  // closure, and every installed @knext/* package must have resolved from a
+  // required tarball set is derived from @getknext/core's @getknext/* dependency
+  // closure, and every installed @getknext/* package must have resolved from a
   // LOCAL tarball, never the registry.
-  it('tarballPrefix maps @knext/* names to pnpm pack tarball prefixes', async () => {
+  it('tarballPrefix maps @getknext/* names to pnpm pack tarball prefixes', async () => {
     const { tarballPrefix } = await import('../scripts/lib/knext-closure.mjs');
-    expect(tarballPrefix('@knext/db')).toBe('knext-db');
-    expect(tarballPrefix('@knext/core')).toBe('knext-core');
+    expect(tarballPrefix('@getknext/db')).toBe('getknext-db');
+    expect(tarballPrefix('@getknext/core')).toBe('getknext-core');
   });
 
-  it('knextDepsOf collects @knext/* keys across dependency fields', async () => {
+  it('knextDepsOf collects @getknext/* keys across dependency fields', async () => {
     const { knextDepsOf } = await import('../scripts/lib/knext-closure.mjs');
     expect(
       knextDepsOf({
-        dependencies: { '@knext/db': '^0.1.0', '@knext/lib': '^0.1.0', ioredis: '^5' },
-        optionalDependencies: { '@knext/opt': '^1.0.0' },
-        peerDependencies: { next: '>=16', '@knext/peer': '^2.0.0' },
-        devDependencies: { '@knext/devonly': '^1.0.0' }, // dev deps do NOT install
+        dependencies: { '@getknext/db': '^0.1.0', '@getknext/lib': '^0.1.0', ioredis: '^5' },
+        optionalDependencies: { '@getknext/opt': '^1.0.0' },
+        peerDependencies: { next: '>=16', '@getknext/peer': '^2.0.0' },
+        devDependencies: { '@getknext/devonly': '^1.0.0' }, // dev deps do NOT install
       }).sort(),
-    ).toEqual(['@knext/db', '@knext/lib', '@knext/opt', '@knext/peer']);
+    ).toEqual(['@getknext/db', '@getknext/lib', '@getknext/opt', '@getknext/peer']);
   });
 
-  it('assertLocalKnextResolutions accepts only local (file:/absent-registry) @knext resolutions', async () => {
+  it('assertLocalKnextResolutions accepts only local (file:/absent-registry) @getknext resolutions', async () => {
     const { assertLocalKnextResolutions } = await import('../scripts/lib/knext-closure.mjs');
     const ok = assertLocalKnextResolutions(
       {
         packages: {
           '': {},
-          'node_modules/@knext/lib': { version: '0.1.0', resolved: 'file:../knext-lib-0.1.0.tgz' },
-          'node_modules/@knext/db': { version: '0.1.0', resolved: 'file:../knext-db-0.1.0.tgz' },
+          'node_modules/@getknext/lib': {
+            version: '0.1.0',
+            resolved: 'file:../getknext-lib-0.1.0.tgz',
+          },
+          'node_modules/@getknext/db': {
+            version: '0.1.0',
+            resolved: 'file:../getknext-db-0.1.0.tgz',
+          },
           'node_modules/ioredis': { version: '5.9.2', resolved: 'https://registry.npmjs.org/x' },
         },
       },
-      new Set(['@knext/lib', '@knext/db', '@knext/core']),
+      new Set(['@getknext/lib', '@getknext/db', '@getknext/core']),
     );
     expect(ok.problems).toEqual([]);
   });
 
-  it('assertLocalKnextResolutions REJECTS a registry-resolved @knext package (dependency confusion)', async () => {
+  it('assertLocalKnextResolutions REJECTS a registry-resolved @getknext package (dependency confusion)', async () => {
     const { assertLocalKnextResolutions } = await import('../scripts/lib/knext-closure.mjs');
     const bad = assertLocalKnextResolutions(
       {
         packages: {
-          'node_modules/@knext/db': {
+          'node_modules/@getknext/db': {
             version: '0.1.0',
-            resolved: 'https://registry.npmjs.org/@knext/db/-/db-0.1.0.tgz',
+            resolved: 'https://registry.npmjs.org/@getknext/db/-/db-0.1.0.tgz',
           },
         },
       },
-      new Set(['@knext/db']),
+      new Set(['@getknext/db']),
     );
     expect(bad.problems.length).toBeGreaterThan(0);
-    expect(bad.problems.join('\n')).toMatch(/@knext\/db/);
+    expect(bad.problems.join('\n')).toMatch(/@getknext\/db/);
     expect(bad.problems.join('\n')).toMatch(/registry/i);
   });
 
-  it('assertLocalKnextResolutions ignores non-@knext packages NESTED under an @knext package', async () => {
-    // Regression: `node_modules/@knext/lib/node_modules/pino` is pino (registry
-    // -resolved, fine), not an @knext package — naive path matching flagged it.
+  it('assertLocalKnextResolutions ignores non-@getknext packages NESTED under an @getknext package', async () => {
+    // Regression: `node_modules/@getknext/lib/node_modules/pino` is pino (registry
+    // -resolved, fine), not an @getknext package — naive path matching flagged it.
     const { assertLocalKnextResolutions } = await import('../scripts/lib/knext-closure.mjs');
     const ok = assertLocalKnextResolutions(
       {
         packages: {
-          'node_modules/@knext/lib': { version: '0.1.0', resolved: 'file:../knext-lib-0.1.0.tgz' },
-          'node_modules/@knext/lib/node_modules/pino': {
+          'node_modules/@getknext/lib': {
+            version: '0.1.0',
+            resolved: 'file:../getknext-lib-0.1.0.tgz',
+          },
+          'node_modules/@getknext/lib/node_modules/pino': {
             version: '10.3.1',
             resolved: 'https://registry.npmjs.org/pino/-/pino-10.3.1.tgz',
           },
-          'node_modules/@knext/lib/node_modules/@knext/db': {
+          'node_modules/@getknext/lib/node_modules/@getknext/db': {
             version: '0.1.0',
-            resolved: 'file:../knext-db-0.1.0.tgz',
+            resolved: 'file:../getknext-db-0.1.0.tgz',
           },
         },
       },
-      new Set(['@knext/lib', '@knext/db']),
+      new Set(['@getknext/lib', '@getknext/db']),
     );
     expect(ok.problems).toEqual([]);
   });
 
-  it('assertLocalKnextResolutions REJECTS an @knext package outside the derived closure', async () => {
+  it('assertLocalKnextResolutions REJECTS an @getknext package outside the derived closure', async () => {
     const { assertLocalKnextResolutions } = await import('../scripts/lib/knext-closure.mjs');
     const bad = assertLocalKnextResolutions(
       {
         packages: {
-          'node_modules/@knext/unexpected': {
+          'node_modules/@getknext/unexpected': {
             version: '9.9.9',
             resolved: 'file:../whatever.tgz',
           },
         },
       },
-      new Set(['@knext/lib']),
+      new Set(['@getknext/lib']),
     );
     expect(bad.problems.length).toBeGreaterThan(0);
-    expect(bad.problems.join('\n')).toMatch(/@knext\/unexpected/);
+    expect(bad.problems.join('\n')).toMatch(/@getknext\/unexpected/);
   });
 });
 
 describe('scripts/e2e-preflight.mjs — dependency-graph-derived set (behavioral, #255/#256)', () => {
-  it('FAILS naming the missing tarball when core declares an @knext/* dep with NO local tarball (future 4th dep)', () => {
+  it('FAILS naming the missing tarball when core declares an @getknext/* dep with NO local tarball (future 4th dep)', () => {
     const dir = tempDir('knext-tarballs-extra-dep-');
     packFixtureLib(dir);
     packFixtureDb(dir);
-    // core additionally depends on @knext/extra — no local tarball exists.
+    // core additionally depends on @getknext/extra — no local tarball exists.
     packFixture(
       dir,
       {
-        name: '@knext/core',
+        name: '@getknext/core',
         version: '0.1.0',
         exports: { '.': './index.js', './adapter': './adapter.js' },
-        dependencies: { '@knext/lib': '^0.1.0', '@knext/db': '^0.1.0', '@knext/extra': '^0.1.0' },
+        dependencies: {
+          '@getknext/lib': '^0.1.0',
+          '@getknext/db': '^0.1.0',
+          '@getknext/extra': '^0.1.0',
+        },
       },
       {
         'index.js': 'module.exports = {};\n',
@@ -308,7 +321,7 @@ describe('scripts/e2e-preflight.mjs — dependency-graph-derived set (behavioral
     const out = `${r.stdout}\n${r.stderr}`;
     expect(r.status, `preflight must fail, output:\n${out}`).toBe(1);
     expect(out).toMatch(/::error::/);
-    expect(out).toMatch(/knext-extra|@knext\/extra/);
+    expect(out).toMatch(/getknext-extra|@getknext\/extra/);
   }, 180_000);
 });
 
@@ -316,17 +329,21 @@ describe('scripts/lib/workspace-protocol.mjs — pure manifest guard (#147 fix r
   it('names every workspace:-protocol dependency across all dependency fields', async () => {
     const { findWorkspaceProtocolDeps } = await import('../scripts/lib/workspace-protocol.mjs');
     const hits = findWorkspaceProtocolDeps({
-      name: '@knext/core',
-      dependencies: { '@knext/lib': 'workspace:^', ioredis: '^5.9.2' },
-      devDependencies: { '@knext/tools': 'workspace:*' },
-      optionalDependencies: { '@knext/opt': 'workspace:~' },
+      name: '@getknext/core',
+      dependencies: { '@getknext/lib': 'workspace:^', ioredis: '^5.9.2' },
+      devDependencies: { '@getknext/tools': 'workspace:*' },
+      optionalDependencies: { '@getknext/opt': 'workspace:~' },
       peerDependencies: { next: '>=16' },
     });
     expect(hits).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ field: 'dependencies', name: '@knext/lib', spec: 'workspace:^' }),
-        expect.objectContaining({ field: 'devDependencies', name: '@knext/tools' }),
-        expect.objectContaining({ field: 'optionalDependencies', name: '@knext/opt' }),
+        expect.objectContaining({
+          field: 'dependencies',
+          name: '@getknext/lib',
+          spec: 'workspace:^',
+        }),
+        expect.objectContaining({ field: 'devDependencies', name: '@getknext/tools' }),
+        expect.objectContaining({ field: 'optionalDependencies', name: '@getknext/opt' }),
       ]),
     );
     expect(hits).toHaveLength(3);
@@ -336,8 +353,8 @@ describe('scripts/lib/workspace-protocol.mjs — pure manifest guard (#147 fix r
     const { findWorkspaceProtocolDeps } = await import('../scripts/lib/workspace-protocol.mjs');
     expect(
       findWorkspaceProtocolDeps({
-        name: '@knext/core',
-        dependencies: { '@knext/lib': '^0.1.0' },
+        name: '@getknext/core',
+        dependencies: { '@getknext/lib': '^0.1.0' },
       }),
     ).toEqual([]);
   });

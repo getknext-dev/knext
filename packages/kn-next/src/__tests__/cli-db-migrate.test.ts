@@ -4,9 +4,9 @@
  * The subcommand applies drizzle-kit-generated migrations against the WRITER
  * `DATABASE_URL` exactly once per deploy (a CI step or a k8s Job), out of the
  * request path. These tests pin the arg surface and the runner wiring — the
- * migration engine itself lives in `@knext/db/migrate` and is injected here, so
+ * migration engine itself lives in `@getknext/db/migrate` and is injected here, so
  * no database is touched. The writer-only + fail-loud guarantees are proven in
- * `@knext/db`'s own `migrate.test.ts` (`runMigrations`/`resolveWriterDsn`).
+ * `@getknext/db`'s own `migrate.test.ts` (`runMigrations`/`resolveWriterDsn`).
  */
 
 import { describe, expect, it, vi } from "vitest";

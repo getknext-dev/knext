@@ -149,7 +149,7 @@ condition via `kubectl get nextapp -o jsonpath` in the meantime (see runbook).
 
 ## Readiness dependency taxonomy (hard vs soft)
 
-The deep readiness probe (`checkDeepHealth`, `@knext/lib`) backs the Knative
+The deep readiness probe (`checkDeepHealth`, `@getknext/lib`) backs the Knative
 readiness gate, which under scale-to-zero decides whether a pod keeps serving
 traffic or is **evicted**. Its overall verdict is derived by dependency
 **severity**, not "any dependency down ⇒ down" (see ADR-0023):

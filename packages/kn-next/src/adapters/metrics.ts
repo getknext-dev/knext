@@ -74,7 +74,7 @@ export const DB_WAKE_DURATION_METRIC = "knext_db_wake_duration_seconds";
 /**
  * Deep-health state gauge (#348), labeled by `dependency` + `state`. For each
  * dependency (and the `overall` roll-up) the ACTIVE state is 1 and every other
- * state 0. This exposes the {@link import("@knext/lib/health").checkDeepHealth}
+ * state 0. This exposes the {@link import("@getknext/lib/health").checkDeepHealth}
  * verdict as a SCRAPABLE series so Prometheus can alert on a SUSTAINED `waking`
  * — a permanent connection-level DB outage that `checkDeepHealth` correctly
  * classifies `waking` forever (never `down`), so `down`/503-keyed alerts alone
@@ -126,8 +126,8 @@ export interface KnextMetrics {
 }
 
 /**
- * The minimal shape of a `@knext/lib` `HealthStatus` (deliberately duplicated
- * so this core module keeps NO dependency on `@knext/lib` — the app wiring
+ * The minimal shape of a `@getknext/lib` `HealthStatus` (deliberately duplicated
+ * so this core module keeps NO dependency on `@getknext/lib` — the app wiring
  * bridges the two). Structurally matches `checkDeepHealth`'s return.
  */
 export interface DeepHealthSnapshot {
@@ -136,7 +136,7 @@ export interface DeepHealthSnapshot {
         readonly postgres: "up" | "down" | "unconfigured" | "waking";
         readonly redis: "up" | "down" | "unconfigured";
     };
-    /** Present on the real `@knext/lib` HealthStatus; unused here. */
+    /** Present on the real `@getknext/lib` HealthStatus; unused here. */
     readonly timestamp?: string;
 }
 
@@ -287,12 +287,12 @@ export function refreshDeepHealthGauge(
 // truth (the loops above enumerate the individual members explicitly).
 void DEEP_HEALTH_DEPENDENCIES;
 
-/** Dependencies the scrape hook injects (kept core-owned + @knext/lib-free). */
+/** Dependencies the scrape hook injects (kept core-owned + @getknext/lib-free). */
 export interface DeepHealthScrapeDeps {
-    /** Runs the deep dependency check (bridged from `@knext/lib/health`). */
+    /** Runs the deep dependency check (bridged from `@getknext/lib/health`). */
     readonly checkDeepHealth: () => Promise<DeepHealthSnapshot>;
     /**
-     * Whether the app used the DB pool RECENTLY (bridged from `@knext/lib`'s
+     * Whether the app used the DB pool RECENTLY (bridged from `@getknext/lib`'s
      * `isDbRecentlyActive`). When false, the hook SKIPS the deep check so an idle
      * app's scale-to-zero DB is never woken by the :9091 scrape (#348 gate fix).
      */

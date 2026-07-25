@@ -1,7 +1,7 @@
 import { defineConfig } from 'tsup';
 
 /**
- * tsup build for the kn-next CLI AND the @knext/core library surface (#68, #114).
+ * tsup build for the kn-next CLI AND the @getknext/core library surface (#68, #114).
  *
  * Produces runnable, Node-only JS for the CLI entries so an outside user with no
  * Bun installed can `npx kn-next`. The `bin.kn-next` in package.json points at
@@ -46,7 +46,7 @@ export default defineConfig([
       // CLI helpers exported as library subpaths (./cli/validate, ./cli/shared)
       'cli/validate': 'src/cli/validate.ts',
       'cli/shared': 'src/cli/shared.ts',
-      // Public config-validation surface (`@knext/core/validate`): a PURE
+      // Public config-validation surface (`@getknext/core/validate`): a PURE
       // re-export of validateConfig + ConfigValidationError that a consumer
       // imports into their own build/test process. Own dist file so the public
       // subpath resolves without exposing the internal cli-validate path.
@@ -69,7 +69,7 @@ export default defineConfig([
       'utils/logger': 'src/utils/logger.ts',
     },
     // Emit `.d.ts` declarations for the TS library entries so typed consumers
-    // (e.g. `import type { KnativeNextConfig } from '@knext/core'`) work. The
+    // (e.g. `import type { KnativeNextConfig } from '@getknext/core'`) work. The
     // cache-handler is plain untyped JS, so it is omitted from the DTS pass
     // (TS6504) — its `exports` subpath is a bare `.js` with no `.d.ts`.
     dts: {
@@ -110,8 +110,8 @@ export default defineConfig([
     sourcemap: true,
     // Do not bundle these — resolve from the package's deps at install time.
     external: [
-      '@knext/db',
-      '@knext/lib',
+      '@getknext/db',
+      '@getknext/lib',
       'ioredis',
       'yaml',
       'pino',

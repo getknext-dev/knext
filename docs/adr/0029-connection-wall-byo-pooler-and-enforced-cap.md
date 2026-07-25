@@ -15,7 +15,7 @@
 - **Scope:** the decision *not* to ship a managed pooler; the operator env
   injection `spec.scaling.poolMax → KNEXT_DB_POOL_MAX` (`buildKsvcEnv` in
   `internal/controller/nextapp_controller.go`); the runtime cap in
-  `@knext/lib`'s `getDbPool()` (`packages/lib/src/clients.ts`); and the BYO-
+  `@getknext/lib`'s `getDbPool()` (`packages/lib/src/clients.ts`); and the BYO-
   pooler placement guidance (`docs/operator/postgres-scale-to-zero.md`).
 
 ## Context
@@ -71,7 +71,7 @@ three reasons:
 ### 2. Close the declared-vs-runtime `poolMax` drift (W2 flag b)
 
 When `spec.scaling.poolMax` is declared (> 0), the operator **injects it into the
-app container as `KNEXT_DB_POOL_MAX`** (`buildKsvcEnv`), and `@knext/lib`'s
+app container as `KNEXT_DB_POOL_MAX`** (`buildKsvcEnv`), and `@getknext/lib`'s
 `getDbPool()` **caps the pg pool `max` at that value**:
 
 - **Precedence — minimum wins.** The effective `max` is

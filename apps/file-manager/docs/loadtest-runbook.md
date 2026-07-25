@@ -34,7 +34,7 @@ The `scale-to-zero` scenario is the one that matters for knext's differentiator.
 URL=$(kubectl get ksvc -n default -o jsonpath='{.items[0].status.url}')
 
 # Build the CLI bundle once (ships dist/cli/loadtest.js)
-pnpm --filter @knext/core build
+pnpm --filter @getknext/core build
 
 # Smoke
 scripts/load-test.sh --url "$URL" --type smoke

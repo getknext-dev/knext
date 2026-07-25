@@ -1,5 +1,5 @@
 /**
- * live-dsn-guard — the SAFETY gate of the `@knext/db` live-Postgres lane
+ * live-dsn-guard — the SAFETY gate of the `@getknext/db` live-Postgres lane
  * (plan P2). Test infrastructure, not SDK API: it ships in no `exports`
  * subpath and never reaches `dist/`.
  *
@@ -45,7 +45,7 @@ function refuse(host: string): LiveDsnCheck {
   return {
     ok: false,
     reason:
-      `refusing to run the live @knext/db suite against host "${host}" — it is not ` +
+      `refusing to run the live @getknext/db suite against host "${host}" — it is not ` +
       `loopback (localhost / 127.0.0.0/8 / ::1) or the CI service hostname "postgres", ` +
       `so it could be a REAL database. The suite creates, writes to, and DROPs ` +
       `databases. If this throwaway host is intentional, set KNEXT_DB_LIVE_UNSAFE_HOST=1.`,
@@ -68,7 +68,7 @@ export function checkLiveDbDsn(dsn: string, opts: CheckLiveDbDsnOptions = {}): L
     return {
       ok: false,
       reason:
-        `refusing to run the live @knext/db suite: DATABASE_URL is not a parseable URL DSN ` +
+        `refusing to run the live @getknext/db suite: DATABASE_URL is not a parseable URL DSN ` +
         `(use postgres://user:pass@host:port/db — the libpq key=value form is not accepted ` +
         `here), so its host cannot be verified as loopback. Set KNEXT_DB_LIVE_UNSAFE_HOST=1 ` +
         `only if you are certain it targets a throwaway database.`,

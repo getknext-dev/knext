@@ -1,5 +1,5 @@
 /**
- * `@knext/db/schema` — the knext **schema surface**.
+ * `@getknext/db/schema` — the knext **schema surface**.
  *
  * An app defines its tables in one place (`src/db/schema.ts` by convention) and
  * imports the builders from here, so it has a single pinned-compatible drizzle
@@ -9,7 +9,7 @@
  *
  * ```ts
  * // src/db/schema.ts
- * import { pgTable, serial, text, timestamp } from '@knext/db/schema';
+ * import { pgTable, serial, text, timestamp } from '@getknext/db/schema';
  *
  * export const orders = pgTable('orders', {
  *   id: serial('id').primaryKey(),
@@ -28,7 +28,7 @@
 
 // Relation graphs and the `sql` tag live on the drizzle-orm root, not `pg-core`,
 // but belong with a schema definition — re-export them from the same place so an
-// app imports its whole schema vocabulary from `@knext/db/schema`.
+// app imports its whole schema vocabulary from `@getknext/db/schema`.
 export { relations, sql } from 'drizzle-orm';
 // Table + column + index + constraint builders (the bulk of the surface).
 export * from 'drizzle-orm/pg-core';

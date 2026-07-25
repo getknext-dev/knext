@@ -1,11 +1,11 @@
 /**
- * #352/#344 — build-artifact assertion: the @knext/lib module-state SEAMS must
+ * #352/#344 — build-artifact assertion: the @getknext/lib module-state SEAMS must
  * survive the production standalone bundle.
  *
  * Live failure (#352): in the Next.js standalone build, `instrumentation.ts`
  * compiles in a SEPARATE webpack layer from the app-server bundles, and
- * `@knext/lib` is bundled (NOT externalized) into each. So the instrumentation
- * copy of `@knext/lib/clients` and the app-server copy are TWO PHYSICAL module
+ * `@getknext/lib` is bundled (NOT externalized) into each. So the instrumentation
+ * copy of `@getknext/lib/clients` and the app-server copy are TWO PHYSICAL module
  * instances with independent module-level `let`s. `setPoolInstrumentor(...)`
  * ran against the instrumentation copy; `getDbPool()` read the app-server copy
  * — still the no-op — so the pool was never wrapped and `knext_db_wake_*`
@@ -22,7 +22,7 @@
  * families — clients/poolInstrumentor and context/state — into DIFFERENT reader
  * chunks; the reader assertion is therefore per-family, not one combined chunk.)
  * If a future change re-breaks the seam — e.g. reverts to a bare module-level
- * `let`, or moves `@knext/lib` into `serverExternalPackages` (which would change
+ * `let`, or moves `@getknext/lib` into `serverExternalPackages` (which would change
  * dedup and re-split the state) — a seam symbol stops co-occurring with its seam
  * API in any reader chunk and this gate fails, instead of the deploy.
  *
@@ -41,7 +41,7 @@ const nextConfigSrc = readFileSync(join(here, 'next.config.ts'), 'utf8');
 
 // The knext seam markers. Each is the argument to a `Symbol.for(...)` — a
 // process-global registry key — which is the ONLY thing that makes the seam
-// state survive `@knext/lib` being duplicated across webpack layers.
+// state survive `@getknext/lib` being duplicated across webpack layers.
 const SEAM_SYMBOLS = ['knext.lib.clients.poolInstrumentor', 'knext.lib.context.state'] as const;
 
 const STANDALONE_SERVER_DIR = resolve(here, '.next/standalone/apps/file-manager/.next/server');
@@ -140,12 +140,12 @@ describe.skipIf(skipReason)('#352/#344 seam survives the standalone bundle', () 
     expect(buildPresent).toBe(true);
   });
 
-  it('@knext/lib is NOT in serverExternalPackages (would re-split the seam state)', () => {
-    // Externalizing @knext/lib would change how it dedups across the
+  it('@getknext/lib is NOT in serverExternalPackages (would re-split the seam state)', () => {
+    // Externalizing @getknext/lib would change how it dedups across the
     // instrumentation vs app-server layers and could reintroduce the #352 split
     // (or mask the globalThis fence). Assert it never gets added there.
     const externals = nextConfigSrc.match(/serverExternalPackages:\s*\[([^\]]*)\]/s)?.[1] ?? '';
-    expect(externals).not.toMatch(/@knext\/lib/);
+    expect(externals).not.toMatch(/@getknext\/lib/);
   });
 
   it('the instrumentation (writer) chunk carries BOTH globalThis seam symbols', () => {

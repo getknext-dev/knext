@@ -3,10 +3,10 @@
  *
  * Incident (PR #285 → #288): a test landed a dynamic import written with an
  * explicit `.ts` extension — `import("../validate-public.ts")`. Under
- * `moduleResolution: bundler` (used by @knext/core), `tsc --noEmit` rejects an
+ * `moduleResolution: bundler` (used by @getknext/core), `tsc --noEmit` rejects an
  * explicit `.ts`/`.tsx` import extension with **TS5097**
  * (`allowImportingTsExtensions` is off). Vitest resolves it at runtime, so the
- * test *ran green locally* — but the `Typecheck @knext/core` CI gate went red
+ * test *ran green locally* — but the `Typecheck @getknext/core` CI gate went red
  * only AFTER merge, turning the default branch red and blocking every open PR.
  *
  * scripts/check-ts-import-extensions.mjs is the deterministic, fail-fast guard:

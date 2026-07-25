@@ -18,13 +18,13 @@ scale-to-zero Knative Service via a `NextApp` CR.
 - An object-storage **bucket** (`gcs`, `s3`, or `minio`) + credentials for asset upload.
 - A checkout of the knext repo (the `kn-next` CLI is not on npm yet — issue #53).
 
-## 1. Resolve `@knext/core`
+## 1. Resolve `@getknext/core`
 
-`package.json` depends on `@knext/core` via a `file:../knext/packages/kn-next` path for local builds.
+`package.json` depends on `@getknext/core` via a `file:../knext/packages/kn-next` path for local builds.
 For a container build, either:
 
 - vendor the package into the build context, or
-- switch to the published `@knext/core` once issue #53 (npm publish) lands.
+- switch to the published `@getknext/core` once issue #53 (npm publish) lands.
 
 ### Also vendor the shared compile-cache warm-up (#439)
 
@@ -32,7 +32,7 @@ The `Dockerfile` bakes the V8 compile cache at build time using the **shared**
 `scripts/warm-compile-cache.sh` (promoted out of `apps/file-manager/scripts/` per
 ADR-0035 action item 2, so both consumers inherit the same guards). Because this
 single-package image builds from an `apps/docs`-rooted context, vendor that script
-to `./scripts/warm-compile-cache.sh` before the build — the same way `@knext/core`
+to `./scripts/warm-compile-cache.sh` before the build — the same way `@getknext/core`
 is vendored above. If it is missing, the `COPY … warm-compile-cache.sh` step fails
 the build loudly rather than silently shipping an empty cache.
 

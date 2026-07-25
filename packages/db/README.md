@@ -1,30 +1,30 @@
-# @knext/db
+# @getknext/db
 
 The typed **data SDK** for [knext](https://knext.dev) apps — a thin
 [drizzle-orm](https://orm.drizzle.team) wrapper over the scale-to-zero Postgres
 pools that the operator binds into your app (`DATABASE_URL` / `DATABASE_URL_RO`).
 
-`@knext/db` re-exports drizzle's query surface and adds only the knext-specific
+`@getknext/db` re-exports drizzle's query surface and adds only the knext-specific
 ergonomics the platform needs. It provisions nothing and mutates no cluster
 resource — it is an **app-side client library** (ADR-0021). Apps keep drizzle's
 own docs and lose no power.
 
 > **Shipped:** the client accessors below (`getDb` / `getDbRO`) + the re-exported
-> drizzle query operators (`.`), the schema surface (`@knext/db/schema`), the
+> drizzle query operators (`.`), the schema surface (`@getknext/db/schema`), the
 > TimescaleDB + pgvector extension helpers on that surface (#240/#241), the
-> `drizzle.config.ts` helper (`@knext/db/migrate` → `defineDrizzleConfig`), and the
-> one-shot `kn-next db migrate` runner (`@knext/db/migrate` → `runMigrations`).
+> `drizzle.config.ts` helper (`@getknext/db/migrate` → `defineDrizzleConfig`), and the
+> one-shot `kn-next db migrate` runner (`@getknext/db/migrate` → `runMigrations`).
 
 ## Install
 
 ```bash
-npm i @knext/db
+npm i @getknext/db
 ```
 
 ## Clients — writer / reader are explicit, never auto-routed
 
 ```ts
-import { getDb, getDbRO, eq } from '@knext/db';
+import { getDb, getDbRO, eq } from '@getknext/db';
 import { orders } from '@/db/schema';
 
 const db = getDb(); // writer  — DATABASE_URL     (read-your-writes, single-writer)
@@ -37,7 +37,7 @@ await getDb({ orders }).insert(orders).values({ userId, total }).returning();
 const rows = await getDbRO({ orders }).select().from(orders).where(eq(orders.userId, uid));
 ```
 
-- **`getDb(schema?)`** wraps `@knext/lib`'s writer pool (`getDbPool()`,
+- **`getDb(schema?)`** wraps `@getknext/lib`'s writer pool (`getDbPool()`,
   `DATABASE_URL`). Use it for every write and any read that must see its own
   write. One client per pod; the pool drains on SIGTERM via `closeDbPool()`.
 - **`getDbRO(schema?)`** wraps the read-only pool (`getDbPoolRO()`,
@@ -57,17 +57,17 @@ Rule of thumb:
 
 ## Query surface
 
-`@knext/db` re-exports drizzle-orm's operators and query builder (`eq`, `and`,
+`@getknext/db` re-exports drizzle-orm's operators and query builder (`eq`, `and`,
 `or`, `sql`, …) — there is **no bespoke DSL**, so drizzle's documentation applies
 directly. The knext value-add is client selection (above), plus the schema and
 migration-config helpers below.
 
-> **drizzle-orm is a hard dependency, and its range is part of `@knext/db`'s
-> semver contract.** You import drizzle's query surface *through* `@knext/db`, so a
+> **drizzle-orm is a hard dependency, and its range is part of `@getknext/db`'s
+> semver contract.** You import drizzle's query surface *through* `@getknext/db`, so a
 > range change that could move you to an incompatible drizzle-orm is at least a
-> **minor** `@knext/db` release (a major-range bump ⇒ a `@knext/db` major). To pin a
+> **minor** `@getknext/db` release (a major-range bump ⇒ a `@getknext/db` major). To pin a
 > specific drizzle-orm version yourself, use your package manager's `overrides`
-> (npm/pnpm) or `resolutions` (yarn) — `@knext/db` does not declare drizzle-orm an
+> (npm/pnpm) or `resolutions` (yarn) — `@getknext/db` does not declare drizzle-orm an
 > optional peer. `drizzle-kit` (below) is the one **optional peer**: it is needed
 > only for `defineDrizzleConfig()` / `drizzle-kit generate` at dev time, not by the
 > runtime client or the `kn-next db migrate` runner. If you call
@@ -76,14 +76,14 @@ migration-config helpers below.
 
 ## Schema — define your tables in one place
 
-Import the table + column builders from `@knext/db/schema` and define your schema
+Import the table + column builders from `@getknext/db/schema` and define your schema
 in `src/db/schema.ts` (the knext convention). It is a thin re-export of drizzle's
 `pg-core` (plus `relations`/`sql`) — no bespoke DSL, so [drizzle's schema
 docs](https://orm.drizzle.team/docs/sql-schema-declaration) apply directly.
 
 ```ts
 // src/db/schema.ts
-import { pgTable, serial, text, timestamp, doublePrecision } from '@knext/db/schema';
+import { pgTable, serial, text, timestamp, doublePrecision } from '@getknext/db/schema';
 
 export const orders = pgTable('orders', {
   id: serial('id').primaryKey(),
@@ -97,7 +97,7 @@ export type Order = typeof orders.$inferSelect; // row shape
 export type NewOrder = typeof orders.$inferInsert; // insert shape
 ```
 
-`@knext/db/schema` re-exports `pgTable`, the column builders (`serial`/`text`/
+`@getknext/db/schema` re-exports `pgTable`, the column builders (`serial`/`text`/
 `integer`/`timestamp`/`jsonb`/`uuid`/`vector`/…), `index`/`uniqueIndex`,
 `primaryKey`/`foreignKey`, `pgEnum`/`pgSchema`, and `relations`/`sql`. The
 platform's TimescaleDB and pgvector helpers (below) slot in **on top of** this
@@ -112,7 +112,7 @@ and self-service**: your app enables the one it needs **itself**, once, over its
 the pageserver, so **they survive scale-to-zero** (see scale-zero-pg
 [`docs/connecting.md`](https://github.com/getknext-dev/scale-zero-pg/blob/main/docs/connecting.md)).
 
-`@knext/db/schema` adds the ergonomics drizzle-kit can't model — the helpers below
+`@getknext/db/schema` adds the ergonomics drizzle-kit can't model — the helpers below
 are **migration SQL emitters**: put their output in the migration that creates the
 table. `createTimescaleExtension()` / `createVectorExtension()` return the enable
 statement; run it at the top of that migration.
@@ -123,7 +123,7 @@ statement; run it at the top of that migration.
 import {
   pgTable, timestamp, text, doublePrecision,
   hypertable, dropChunks, createTimescaleExtension,
-} from '@knext/db/schema';
+} from '@getknext/db/schema';
 
 export const metrics = pgTable('metrics', {
   ts: timestamp('ts', { withTimezone: true }).notNull(),
@@ -162,7 +162,7 @@ dropChunks(metrics, { olderThan: '30 days' });
 import {
   pgTable, serial, text, vector,
   hnsw, ivfflat, createVectorExtension,
-} from '@knext/db/schema';
+} from '@getknext/db/schema';
 
 export const docs = pgTable('docs', {
   id: serial('id').primaryKey(),
@@ -186,7 +186,7 @@ to the index's ops class**: `cosineDistance` (`<=>`) ⇄ `vector_cosine_ops`,
 `l2Distance` (`<->`) ⇄ `vector_l2_ops`, `innerProduct` (`<#>`) ⇄ `vector_ip_ops`.
 
 ```ts
-import { getDbRO, cosineDistance } from '@knext/db';
+import { getDbRO, cosineDistance } from '@getknext/db';
 import { docs } from '@/db/schema';
 
 const nearest = await getDbRO({ docs })
@@ -202,14 +202,14 @@ requires scale-zero-pg ≥ v1.4.0.
 
 ## Migrations — the `drizzle.config.ts` helper
 
-`@knext/db/migrate` ships `defineDrizzleConfig()` — it produces a valid
+`@getknext/db/migrate` ships `defineDrizzleConfig()` — it produces a valid
 [drizzle-kit](https://orm.drizzle.team/docs/drizzle-config-file) config wired to
 the **writer** `DATABASE_URL` (migrations are writer-only). Install `drizzle-kit`
 as a dev dependency, then:
 
 ```ts
 // drizzle.config.ts (app root)
-import { defineDrizzleConfig } from '@knext/db/migrate';
+import { defineDrizzleConfig } from '@getknext/db/migrate';
 
 // dialect: 'postgresql', schema: './src/db/schema.ts', out: './drizzle',
 // dbCredentials.url: process.env.DATABASE_URL (the writer, injected by the operator).
@@ -267,7 +267,7 @@ kn-next db migrate --url "$WRITER_DSN"  # explicit writer DSN override
 Programmatic use (e.g. a custom script) is available too:
 
 ```ts
-import { runMigrations } from '@knext/db/migrate';
+import { runMigrations } from '@getknext/db/migrate';
 await runMigrations({ migrationsFolder: './drizzle' }); // writer DATABASE_URL; throws on failure
 ```
 
@@ -333,7 +333,7 @@ it into your deploy pipeline so a failed migration blocks the rollout.
 
 ## Pooling
 
-Both pools live in `@knext/lib` and inherit the scale-to-zero contract (ADR-0019):
+Both pools live in `@getknext/lib` and inherit the scale-to-zero contract (ADR-0019):
 small `max`, idle timeout **< the gateway's 60s idle** (no dead sockets), connect
 timeout **≥ 10s** (tolerates the ~2.5s cold wake). Tune the writer with
 `DB_POOL_*` and the reader with `DB_POOL_RO_*`.

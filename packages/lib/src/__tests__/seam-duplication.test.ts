@@ -2,14 +2,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 /**
  * #352 — the module-state seams (setPoolInstrumentor / setTraceIdProvider /
- * setCorrelationIdProvider) MUST survive @knext/lib being DUPLICATED across
+ * setCorrelationIdProvider) MUST survive @getknext/lib being DUPLICATED across
  * separate bundle graphs.
  *
  * Live failure: in the Next.js standalone build, `instrumentation.ts` compiles
- * in a SEPARATE webpack layer from the app server bundles, and `@knext/lib` is
+ * in a SEPARATE webpack layer from the app server bundles, and `@getknext/lib` is
  * bundled (not externalized) into each — so instrumentation-node's
- * `@knext/lib/clients` (webpack module 78719) and the app's server-component
- * `@knext/lib/clients` (module 98144) are TWO PHYSICAL COPIES with independent
+ * `@getknext/lib/clients` (webpack module 78719) and the app's server-component
+ * `@getknext/lib/clients` (module 98144) are TWO PHYSICAL COPIES with independent
  * module-level state. `setPoolInstrumentor(...)` wrote copy A's `let
  * poolInstrumentor`; `getDbPool()` read copy B's — still the no-op — so the pool
  * was never wrapped and `knext_db_wake_*` never fired.

@@ -1,4 +1,4 @@
-import { getDbPool } from '@knext/lib/clients';
+import { getDbPool } from '@getknext/lib/clients';
 import { unstable_cache } from 'next/cache';
 import { NextResponse } from 'next/server';
 import { withRedMetrics } from '../_metrics/registry';

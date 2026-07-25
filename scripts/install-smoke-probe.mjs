@@ -8,7 +8,7 @@
  *   - resolves to real compiled JS (NOT a raw `.ts` — the PK1 failure mode), and
  *   - exposes its expected named/default export.
  *
- * The `KnativeNextConfig` export of `@knext/core` is TYPE-ONLY (erased at build), so we
+ * The `KnativeNextConfig` export of `@getknext/core` is TYPE-ONLY (erased at build), so we
  * cannot assert a runtime binding for it — instead we assert the `.` module LOADS, and
  * that the committed `kn-next.config.ts` fixture (which `import type`s it) loads on plain
  * Node via type-stripping, proving the type surface is consumable.
@@ -36,16 +36,16 @@ function ok(msg) {
  * - name  -> assert that named/default export is present and not undefined.
  */
 const PUBLIC_SURFACE = [
-  // @knext/core
-  ['@knext/core', null], // KnativeNextConfig is type-only; assert the module loads
-  ['@knext/core/adapter', null], // default Next.js adapter factory surface
-  ['@knext/core/adapters/otel-config', 'resolveOtelOptions'],
-  ['@knext/core/adapters/cache-handler', 'default'],
-  // @knext/lib
-  ['@knext/lib', null],
-  ['@knext/lib/logger', null],
-  ['@knext/lib/clients', 'getDbPool'],
-  ['@knext/lib/health', 'checkDeepHealth'],
+  // @getknext/core
+  ['@getknext/core', null], // KnativeNextConfig is type-only; assert the module loads
+  ['@getknext/core/adapter', null], // default Next.js adapter factory surface
+  ['@getknext/core/adapters/otel-config', 'resolveOtelOptions'],
+  ['@getknext/core/adapters/cache-handler', 'default'],
+  // @getknext/lib
+  ['@getknext/lib', null],
+  ['@getknext/lib/logger', null],
+  ['@getknext/lib/clients', 'getDbPool'],
+  ['@getknext/lib/health', 'checkDeepHealth'],
 ];
 
 console.log('[probe] resolving + importing the public app surface on plain Node:');

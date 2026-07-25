@@ -10,7 +10,7 @@ let pgPoolRO: Pool | null = null;
 
 // ── Pool-instrumentor seam (dependency inversion, #317) ───────────────────────
 // This module stays OTel-free (mirroring `./context`'s `setTraceIdProvider`): an
-// OTel-aware layer (`@knext/core/adapters/tracing`) installs an instrumentor
+// OTel-aware layer (`@getknext/core/adapters/tracing`) installs an instrumentor
 // that is invoked ONCE per pool as it is created, with the pool and its role.
 // The tracing adapter uses it to wrap the pool's first `connect()` in a
 // `knext.db_wake` span so the scale-zero-pg 0→1 DB wake shows up on the request
@@ -28,9 +28,9 @@ const NO_POOL_INSTRUMENTOR: PoolInstrumentor = () => {};
 // The instrumentor is stored on a well-known `globalThis` key rather than a
 // plain module-level `let` (#352). In the Next.js standalone build,
 // `instrumentation.ts` compiles in a SEPARATE webpack layer from the app server
-// bundles and `@knext/lib` is bundled (not externalized) into each — so
-// `instrumentation-node`'s `@knext/lib/clients` and the app's server-component
-// `@knext/lib/clients` are TWO PHYSICAL module copies with independent
+// bundles and `@getknext/lib` is bundled (not externalized) into each — so
+// `instrumentation-node`'s `@getknext/lib/clients` and the app's server-component
+// `@getknext/lib/clients` are TWO PHYSICAL module copies with independent
 // module-level state. A module-level `let` written by the copy that runs
 // `setPoolInstrumentor(...)` is invisible to the copy whose `getDbPool()` reads
 // it → the pool is never wrapped → `knext_db_wake_*` never fires. Anchoring the
@@ -70,7 +70,7 @@ export const resetPoolInstrumentor = (): void => {
 // can SKIP the DB dial when the pool has been idle past the budget.
 //
 // Anchored on `globalThis` (like the instrumentor above, #352): in the standalone
-// build `@knext/lib` is bundled into multiple webpack layers, so a module-level
+// build `@getknext/lib` is bundled into multiple webpack layers, so a module-level
 // `let` written by the app-server copy (which issues the queries) would be
 // invisible to the copy the scrape hook reads. A shared `globalThis` slot makes
 // the timestamp visible across every copy. This tracking is INDEPENDENT of OTel —
@@ -175,7 +175,7 @@ const trackPoolActivity = (pool: Pool): Pool => {
 // path (the wrapper delegates to the original and only GATES cold callers).
 //
 // Anchored on `globalThis` via `Symbol.for` (ADR-0027, #352), NOT a module-level
-// `let`: in the standalone build `@knext/lib` is bundled into multiple webpack
+// `let`: in the standalone build `@getknext/lib` is bundled into multiple webpack
 // layers, so a bare `let` would split the single-flight state per copy and let
 // two copies each trigger a wake. The shared globalThis cell keeps ONE wake for
 // the whole process regardless of bundle duplication.
@@ -578,7 +578,7 @@ export const getDbPool = () => {
  * Drain and close the singleton Postgres pool, letting in-flight transactions
  * commit-or-rollback before the connections close. Safe to call when no pool was
  * ever created (no-op). Intended to be wired into the runtime's SIGTERM drain
- * (see `registerShutdownDrain` in @knext/kn-next) so scale-down doesn't sever
+ * (see `registerShutdownDrain` in @getknext/kn-next) so scale-down doesn't sever
  * transactions. Resets the singleton so a later `getDbPool()` reconnects.
  */
 export const closeDbPool = async (): Promise<void> => {
@@ -599,7 +599,7 @@ export const closeDbPool = async (): Promise<void> => {
  * picks which one a query uses.
  *
  * Returns `null` when `DATABASE_URL_RO` is unset — an app without a read
- * replica simply has no RO pool (callers such as `@knext/db`'s `getDbRO()`
+ * replica simply has no RO pool (callers such as `@getknext/db`'s `getDbRO()`
  * fall back to the writer). Otherwise mirrors the writer pool's scale-to-zero
  * contract (ADR-0019): small `max` (many small pools under `maxScale`), idle
  * timeout < the gateway's 60s idle (no dead sockets), connect timeout >= 10s

@@ -1,8 +1,8 @@
-import { getTableName } from '@knext/db';
+import { getTableName } from '@getknext/db';
 import { describe, expect, it } from 'vitest';
 
 /**
- * `apps/db-demo` — the runnable `@knext/db` example (#243, ADR-0021 §Consequences).
+ * `apps/db-demo` — the runnable `@getknext/db` example (#243, ADR-0021 §Consequences).
  *
  * These are the unit-level build/typecheck proofs the guide's example rests on:
  * the drizzle config is valid, the schema builds a real drizzle table, and the
@@ -11,7 +11,7 @@ import { describe, expect, it } from 'vitest';
  * `next build` + `tsc --noEmit` covers the App Router glue (page/actions).
  */
 
-describe('apps/db-demo — @knext/db example wiring', () => {
+describe('apps/db-demo — @getknext/db example wiring', () => {
   it('exposes a valid drizzle.config wired to the writer + knext conventions', async () => {
     const mod = await import('./drizzle.config');
     const config = mod.default;
@@ -23,7 +23,7 @@ describe('apps/db-demo — @knext/db example wiring', () => {
     expect((config as { dbCredentials?: unknown }).dbCredentials).toBeDefined();
   });
 
-  it('defines a single `messages` table via the @knext/db/schema surface', async () => {
+  it('defines a single `messages` table via the @getknext/db/schema surface', async () => {
     const schema = await import('./src/db/schema');
     expect(getTableName(schema.messages)).toBe('messages');
     // Typed row/insert shapes are exported for the app to use.
@@ -37,8 +37,8 @@ describe('apps/db-demo — @knext/db example wiring', () => {
     expect(typeof queries.addMessage).toBe('function');
   });
 
-  it('binds to @knext/db clients (getDb writer / getDbRO reader)', async () => {
-    const db = await import('@knext/db');
+  it('binds to @getknext/db clients (getDb writer / getDbRO reader)', async () => {
+    const db = await import('@getknext/db');
     expect(typeof db.getDb).toBe('function');
     expect(typeof db.getDbRO).toBe('function');
   });

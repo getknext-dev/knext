@@ -5,19 +5,19 @@
  * The OUTSIDE-CONSUMER gate. Proves knext works for a user on a fresh machine with
  * plain Node + npm, NO pnpm workspace, NO Bun — exercising BOTH ways a consumer uses
  * knext: (a) the `kn-next` CLI bin, and (b) `import`ing the public app surface
- * (`@knext/core/adapter`, otel-config, cache-handler, the `KnativeNextConfig` type;
- * `@knext/lib/clients`, `@knext/lib/health`, `@knext/lib/logger`). PK1/#114 declared
+ * (`@getknext/core/adapter`, otel-config, cache-handler, the `KnativeNextConfig` type;
+ * `@getknext/lib/clients`, `@getknext/lib/health`, `@getknext/lib/logger`). PK1/#114 declared
  * these exports; PK5/#116 froze the public set. This job CATCHES regressions in either
  * (a raw-`.ts` export, a missing dist file, a broken bin) BEFORE the first publish.
  *
  * Why the install is plain `npm` but the PACK uses `pnpm`:
- *   - @knext/core depends on @knext/lib AND @knext/db via `workspace:^` (package.json),
- *     and @knext/db depends on @knext/lib. `npm pack` leaves those verbatim, which fails
+ *   - @getknext/core depends on @getknext/lib AND @getknext/db via `workspace:^` (package.json),
+ *     and @getknext/db depends on @getknext/lib. `npm pack` leaves those verbatim, which fails
  *     to install (EUNSUPPORTEDPROTOCOL). `pnpm pack` REWRITES `workspace:^` to a real
  *     version range — EXACTLY what `changeset publish` does (release.yml runs under
  *     pnpm). So we pack the way we publish, then install + run the way a CONSUMER would:
  *     plain `npm install`, plain `node`, outside the repo.
- *   - Nothing is published to npm yet, so the rewritten `@knext/lib` + `@knext/db` deps
+ *   - Nothing is published to npm yet, so the rewritten `@getknext/lib` + `@getknext/db` deps
  *     are satisfied by installing ALL THREE tarballs together in the fresh consumer dir.
  *
  * Steps:
@@ -32,7 +32,7 @@
  *      is the guard that fails this job if a public subpath breaks.
  *   5. Exports-completeness: assert EVERY `exports` subpath + the `bin` in each packed
  *      package.json resolves under the clean install.
- *   6. Negative guard: a now-removed bare path (`@knext/core/cli/shared`) must NOT
+ *   6. Negative guard: a now-removed bare path (`@getknext/core/cli/shared`) must NOT
  *      resolve — proves the export map is actually being enforced.
  *
  * This script is committed so it is locally runnable: `node scripts/install-smoke.mjs`.
@@ -88,7 +88,7 @@ function run(cmd, args, opts = {}) {
 
 /**
  * Pack a workspace package with `pnpm pack` into `dest`. pnpm is required (not npm)
- * because @knext/core depends on @knext/lib via `workspace:^`; pnpm rewrites that to a
+ * because @getknext/core depends on @getknext/lib via `workspace:^`; pnpm rewrites that to a
  * real version (what `changeset publish` does), while `npm pack` leaves it verbatim and
  * the install fails with EUNSUPPORTEDPROTOCOL.
  */
@@ -120,21 +120,21 @@ function publishedEntrypoints(pkgDir) {
 
 try {
   // --- 1. build (lib → db → core) + pack all three --------------------------
-  // @knext/lib + @knext/db ship dist/ only — build before packing or the tarball
-  // is empty. Dependency order: @knext/db imports @knext/lib types, and
-  // @knext/core's build (and its .d.ts) import BOTH @knext/lib and @knext/db types
-  // (the `kn-next db migrate` runner lives in @knext/db/migrate, #242), so the
+  // @getknext/lib + @getknext/db ship dist/ only — build before packing or the tarball
+  // is empty. Dependency order: @getknext/db imports @getknext/lib types, and
+  // @getknext/core's build (and its .d.ts) import BOTH @getknext/lib and @getknext/db types
+  // (the `kn-next db migrate` runner lives in @getknext/db/migrate, #242), so the
   // order is lib → db → core.
-  console.log('[install-smoke] building @knext/lib then @knext/db then @knext/core ...');
-  execFileSync('pnpm', ['--filter', '@knext/lib', 'build'], {
+  console.log('[install-smoke] building @getknext/lib then @getknext/db then @getknext/core ...');
+  execFileSync('pnpm', ['--filter', '@getknext/lib', 'build'], {
     cwd: repoRoot,
     stdio: ['ignore', 'inherit', 'inherit'],
   });
-  execFileSync('pnpm', ['--filter', '@knext/db', 'build'], {
+  execFileSync('pnpm', ['--filter', '@getknext/db', 'build'], {
     cwd: repoRoot,
     stdio: ['ignore', 'inherit', 'inherit'],
   });
-  execFileSync('pnpm', ['--filter', '@knext/core', 'build'], {
+  execFileSync('pnpm', ['--filter', '@getknext/core', 'build'], {
     cwd: repoRoot,
     stdio: ['ignore', 'inherit', 'inherit'],
   });
@@ -142,23 +142,23 @@ try {
   libDest = mkdtempSync(join(tmpdir(), 'knext-pack-lib-'));
   dbDest = mkdtempSync(join(tmpdir(), 'knext-pack-db-'));
   coreDest = mkdtempSync(join(tmpdir(), 'knext-pack-core-'));
-  const libTarball = pnpmPack(libPkgDir, libDest, '@knext/lib');
-  const dbTarball = pnpmPack(dbPkgDir, dbDest, '@knext/db');
-  const coreTarball = pnpmPack(corePkgDir, coreDest, '@knext/core');
+  const libTarball = pnpmPack(libPkgDir, libDest, '@getknext/lib');
+  const dbTarball = pnpmPack(dbPkgDir, dbDest, '@getknext/db');
+  const coreTarball = pnpmPack(corePkgDir, coreDest, '@getknext/core');
 
   // --- 1b. manifest guard: no workspace:-protocol spec may survive packing ----
   // #147 A3-3 fix round 1 (run 28558576615): the compat suite burned 16 shards
   // because a tarball packed with `npm pack` (a DIFFERENT pack path this gate
-  // never covered) still shipped `@knext/lib: workspace:^` → EUNSUPPORTEDPROTOCOL
+  // never covered) still shipped `@getknext/lib: workspace:^` → EUNSUPPORTEDPROTOCOL
   // in every fixture install. This gate already pnpm-packs + npm-installs with
   // full dependency resolution (which would fail on the leak) — the explicit
   // manifest inspection makes a future regression NAME its cause here instead of
   // surfacing as a downstream npm error.
   console.log('[install-smoke] inspecting packed manifests for workspace: protocol leaks ...');
   for (const [tgz, label] of [
-    [libTarball, '@knext/lib'],
-    [dbTarball, '@knext/db'],
-    [coreTarball, '@knext/core'],
+    [libTarball, '@getknext/lib'],
+    [dbTarball, '@getknext/db'],
+    [coreTarball, '@getknext/core'],
   ]) {
     const manifest = JSON.parse(
       execFileSync('tar', ['-xzOf', tgz, 'package/package.json'], { encoding: 'utf8' }),
@@ -193,9 +193,9 @@ try {
   consumerPkg.type = 'module';
   writeFileSync(consumerPkgPath, `${JSON.stringify(consumerPkg, null, 2)}\n`);
 
-  // Install all three tarballs together: @knext/core's rewritten `@knext/db` +
-  // `@knext/lib` deps (and @knext/db's rewritten `@knext/lib` dep) are unpublished,
-  // so the local tarballs satisfy them; drizzle-orm/pg (@knext/db's real deps) come
+  // Install all three tarballs together: @getknext/core's rewritten `@getknext/db` +
+  // `@getknext/lib` deps (and @getknext/db's rewritten `@getknext/lib` dep) are unpublished,
+  // so the local tarballs satisfy them; drizzle-orm/pg (@getknext/db's real deps) come
   // from the registry.
   console.log('[install-smoke] npm install <lib.tgz> <db.tgz> <core.tgz> (plain npm, no bun) ...');
   const install = run(
@@ -235,7 +235,7 @@ try {
       '--input-type=module',
       '-e',
       [
-        "import { validateConfig } from '@knext/core/internal/cli-validate';",
+        "import { validateConfig } from '@getknext/core/internal/cli-validate';",
         "validateConfig({ name:'smoke', registry:'us-docker.pkg.dev/p/r', storage:{ provider:'gcs', bucket:'b' } });",
         "console.log('valid-config-accepted');",
         'let rejected = false;',
@@ -261,7 +261,7 @@ try {
   writeFileSync(
     join(workDir, 'kn-next.config.ts'),
     [
-      "import type { KnativeNextConfig } from '@knext/core';",
+      "import type { KnativeNextConfig } from '@getknext/core';",
       '',
       'const config: KnativeNextConfig = {',
       "  name: 'smoke-app',",
@@ -287,7 +287,7 @@ try {
   const coreEntry = publishedEntrypoints(corePkgDir);
   const libEntry = publishedEntrypoints(libPkgDir);
   const dbEntry = publishedEntrypoints(dbPkgDir);
-  // @knext/db's subpaths include ./migrate — this proves `@knext/db/migrate` (the
+  // @getknext/db's subpaths include ./migrate — this proves `@getknext/db/migrate` (the
   // `kn-next db migrate` runner) resolves to real JS in a clean install.
   const allSubpaths = [...coreEntry.subpaths, ...libEntry.subpaths, ...dbEntry.subpaths];
   console.log(`[install-smoke] resolving ${allSubpaths.length} exports subpaths ...`);
@@ -328,16 +328,18 @@ try {
     }
   }
 
-  // --- 5b. @knext/db runs with drizzle-kit ABSENT (v3-P3c peer shape) --------
+  // --- 5b. @getknext/db runs with drizzle-kit ABSENT (v3-P3c peer shape) --------
   // ADR-0021 amendment: drizzle-orm is a hard dep, drizzle-kit the sole OPTIONAL
   // peer (lazily consulted only inside defineDrizzleConfig). A clean consumer
-  // install pulls @knext/db's real deps (drizzle-orm + pg) but NOT drizzle-kit
+  // install pulls @getknext/db's real deps (drizzle-orm + pg) but NOT drizzle-kit
   // (an optional peer is not installed unless the consumer asks). This leg proves
   // that shape holds on a real install: drizzle-kit must be absent, yet
-  // `@knext/db`'s main entry imports and `runMigrations` resolves; and
+  // `@getknext/db`'s main entry imports and `runMigrations` resolves; and
   // `defineDrizzleConfig()` — the one surface that needs the peer — yields the
   // actionable named error, never a bare module-not-found.
-  console.log('[install-smoke] @knext/db imports + runMigrations resolve without drizzle-kit ...');
+  console.log(
+    '[install-smoke] @getknext/db imports + runMigrations resolve without drizzle-kit ...',
+  );
   const dbNoKit = run(
     'node',
     [
@@ -351,11 +353,11 @@ try {
         "try { require.resolve('drizzle-kit'); } catch { kitAbsent = true; }",
         "if (!kitAbsent) { console.error('drizzle-kit unexpectedly present — optional peer leaked into the install'); process.exit(2); }",
         // Main entry imports (re-exports drizzle-orm) with no drizzle-kit.
-        "const db = await import('@knext/db');",
-        "if (typeof db.getDb !== 'function' || typeof db.eq !== 'function') { console.error('@knext/db main entry missing getDb/eq'); process.exit(3); }",
+        "const db = await import('@getknext/db');",
+        "if (typeof db.getDb !== 'function' || typeof db.eq !== 'function') { console.error('@getknext/db main entry missing getDb/eq'); process.exit(3); }",
         // The migrate runner resolves + guards the DSN (no drizzle-kit needed).
-        "const mig = await import('@knext/db/migrate');",
-        "if (typeof mig.runMigrations !== 'function') { console.error('@knext/db/migrate missing runMigrations'); process.exit(4); }",
+        "const mig = await import('@getknext/db/migrate');",
+        "if (typeof mig.runMigrations !== 'function') { console.error('@getknext/db/migrate missing runMigrations'); process.exit(4); }",
         'let guarded = false;',
         "try { mig.resolveWriterDsn({ url: '' }); } catch (e) { guarded = /DATABASE_URL/.test(e.message); }",
         "if (!guarded) { console.error('runMigrations/resolveWriterDsn unreachable without drizzle-kit'); process.exit(5); }",
@@ -372,7 +374,7 @@ try {
   console.log((dbNoKit.stdout || '').trim());
   if (dbNoKit.status !== 0) {
     console.error((dbNoKit.stderr || '').trim());
-    finish(FAIL, '@knext/db does not run cleanly without the optional drizzle-kit peer');
+    finish(FAIL, '@getknext/db does not run cleanly without the optional drizzle-kit peer');
   }
 
   // --- 6. negative guard: a removed bare path must NOT resolve --------------
@@ -385,9 +387,9 @@ try {
       [
         "import { createRequire } from 'node:module';",
         "const require = createRequire(process.cwd() + '/x.js');",
-        "try { const r = require.resolve('@knext/core/cli/shared');",
-        "  console.error('LEAK: @knext/core/cli/shared resolved to', r); process.exit(9); }",
-        "catch { console.log('negative-guard-ok: @knext/core/cli/shared correctly blocked'); }",
+        "try { const r = require.resolve('@getknext/core/cli/shared');",
+        "  console.error('LEAK: @getknext/core/cli/shared resolved to', r); process.exit(9); }",
+        "catch { console.log('negative-guard-ok: @getknext/core/cli/shared correctly blocked'); }",
       ].join('\n'),
     ],
     { cwd: workDir },
@@ -399,9 +401,9 @@ try {
 
   finish(
     PASS,
-    'packed @knext/core + @knext/lib + @knext/db install on plain npm/Node; CLI runs, ' +
+    'packed @getknext/core + @getknext/lib + @getknext/db install on plain npm/Node; CLI runs, ' +
       'every public app-import subpath resolves to real JS outside the workspace, and ' +
-      '@knext/db imports + migrates without the optional drizzle-kit peer',
+      '@getknext/db imports + migrates without the optional drizzle-kit peer',
   );
 } catch (err) {
   finish(FAIL, `unexpected error: ${err?.message ?? err}`);

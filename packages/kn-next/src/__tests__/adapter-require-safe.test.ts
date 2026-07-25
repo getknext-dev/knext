@@ -6,7 +6,7 @@ import { describe, expect, it } from "vitest";
 
 /**
  * B2 regression gate (#173, A3-3 #147): the adapter entry served by the
- * `@knext/core/adapter` export MUST stay require()-safe under plain Node.
+ * `@getknext/core/adapter` export MUST stay require()-safe under plain Node.
  *
  * Next.js resolves `experimental.adapterPath` (NEXT_ADAPTER_PATH) with
  * `require.resolve()` and there are require()-semantics load paths around
@@ -21,7 +21,7 @@ import { describe, expect, it } from "vitest";
  * the harness not enabling native TS resolution — fixed in
  * scripts/e2e-deploy.sh, see tests/e2e-deploy.native-ts-config.test.ts).
  * This test pins that property so a future static import with module-scope
- * await (e.g. hoisting the lazy `@knext/lib/clients` import) fails HERE, not
+ * await (e.g. hoisting the lazy `@getknext/lib/clients` import) fails HERE, not
  * in a 18-file compat wipeout.
  *
  * Requires a prior `tsup` build (same precondition as publish-surface.test.ts).
@@ -31,7 +31,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const pkgDir = resolve(__dirname, "../..");
 const adapterDist = resolve(pkgDir, "dist/adapters/next-adapter.js");
 
-describe("@knext/core/adapter — require()-safe dist (B2, #173)", () => {
+describe("@getknext/core/adapter — require()-safe dist (B2, #173)", () => {
     it("the built adapter entry exists (tsup ran)", () => {
         expect(
             existsSync(adapterDist),

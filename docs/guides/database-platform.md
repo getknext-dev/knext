@@ -131,7 +131,7 @@ connection during cold start. `sslmode=require` (self-signed, cluster-local infr
 **One pooling rule matters** where the two scale-to-zero layers meet: idle pooled connections
 look like activity and keep the database awake. Keep your **pool's idle timeout below the
 gateway's idle window** (`GW_IDLE_MS`, default 60 s) and `minIdle`/`min_connections` at `0`, or
-the database never sleeps. `@knext/lib`'s `getDbPool()` already ships scale-to-zero-sane
+the database never sleeps. `@getknext/lib`'s `getDbPool()` already ships scale-to-zero-sane
 defaults (`DB_POOL_MAX=5`, 10 s idle). Full DSN reference, the cold-start client experience,
 and the tier table are in scale-zero-pg's
 [connecting](https://github.com/getknext-dev/scale-zero-pg/blob/main/docs/connecting.md).

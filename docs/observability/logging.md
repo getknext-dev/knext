@@ -2,7 +2,7 @@
 
 How knext logs are shaped so they are machine-parseable, correlated by a request
 id, and joinable to traces (ADR-0012). This is the standard for both the runtime
-(app) and the operator; the correlation layer ships in `@knext/lib`.
+(app) and the operator; the correlation layer ships in `@getknext/lib`.
 
 Related: [distributed tracing](./tracing.md) · [Prometheus metrics catalog](./metrics.md) · [SLOs / SLIs](./slos.md) · [OTel tracing backend](../adr/0012-otel-tracing-backend.md).
 
@@ -11,9 +11,9 @@ Related: [distributed tracing](./tracing.md) · [Prometheus metrics catalog](./m
 Logs are **line-delimited JSON** (one object per line) in production — the format
 a collector (Loki via Promtail/Alloy, Fluent Bit, Vector, Datadog, Elastic)
 ingests without a regex parser. In local dev, `pino-pretty` renders the same
-records for humans. The runtime logger is `@knext/lib/logger`
+records for humans. The runtime logger is `@getknext/lib/logger`
 (`packages/lib/src/logger/index.ts`); the CLI/framework logger is
-`@knext/kn-next`'s `logger`.
+`@getknext/kn-next`'s `logger`.
 
 Every line carries these load-bearing fields:
 
@@ -86,7 +86,7 @@ Set the floor with `LOG_LEVEL` (default `info` in production, `debug` in dev).
     logger mixin and span attribute are guarded by the one rule.) So a client
     that sends (or is assigned) an `x-request-id` gets it back on the response,
     joinable to the correlated logs/trace.
-    `@knext/lib` still ships `applyCorrelationHeader(...)` for routes the app owns
+    `@getknext/lib` still ships `applyCorrelationHeader(...)` for routes the app owns
     and explicit `runWithRequestContext` paths (§3).
   - **Downstream / db-wake:** forward `x-request-id` on outbound calls so a
     request is traceable app → db-wake → downstream. Across the Postgres hop
@@ -107,7 +107,7 @@ rides the **OTel Context**, not a single span — that is what makes it correct 
 log lines emitted under *any* span in the request, including child spans:
 
 1. **Establish (per request):** a `CorrelationContextPropagator`
-   (`@knext/core/adapters/tracing`), registered via
+   (`@getknext/core/adapters/tracing`), registered via
    `registerOTel({ propagators: ['auto', new CorrelationContextPropagator()] })`.
    `@opentelemetry/instrumentation-http` (what `@vercel/otel` uses) runs
    `propagation.extract(activeContext, requestHeaders)` for each inbound request
@@ -123,12 +123,12 @@ log lines emitted under *any* span in the request, including child spans:
    span. (A span **attribute** would *not* have this property — it lives only on
    the span it is set on — which is why logs resolve from the context key, not an
    attribute.)
-3. **Resolve (at log time):** `@knext/lib`'s logger `mixin` reads
+3. **Resolve (at log time):** `@getknext/lib`'s logger `mixin` reads
    `correlation_id` from the active **Context key** and `trace_id` from the
    active span, via two injected providers — `installCorrelationIdProvider()` /
    `installTraceIdProvider()`, installed via `setCorrelationIdProvider` /
-   `setTraceIdProvider`. `@knext/lib` stays OTel-free (dependency-inversion seam);
-   the OTel-aware `@knext/core` supplies the resolvers.
+   `setTraceIdProvider`. `@getknext/lib` stays OTel-free (dependency-inversion seam);
+   the OTel-aware `@getknext/core` supplies the resolvers.
 
 A `CorrelationSpanProcessor` additionally copies the context-key id onto the
 inbound SERVER span as the `knext.correlation_id` attribute **for trace export
@@ -187,7 +187,7 @@ The response-echo of `x-request-id` (§2, automatic path) is proven by
 override an app-set value, is fail-open + idempotent, and is inert when tracing
 is off.
 
-## 3. Using the layer explicitly (`@knext/lib/context`)
+## 3. Using the layer explicitly (`@getknext/lib/context`)
 
 For code paths that knext-core **does** own (a custom server entry, an operator
 task, a script) you can establish the context by hand. This is the same layer;
@@ -203,7 +203,7 @@ import {
   correlationHeaders,
   runWithRequestContext,
   setTraceIdProvider,
-} from '@knext/lib/context';
+} from '@getknext/lib/context';
 
 // Once, at startup — ties correlation_id to the active trace (skip if no OTel).
 // The tracing adapter ships this provider (`installTraceIdProvider()`); see
@@ -225,7 +225,7 @@ export async function handle(req: Request): Promise<Response> {
 }
 ```
 
-The `@knext/lib/logger` `mixin` reads the ambient context, so **no extra
+The `@getknext/lib/logger` `mixin` reads the ambient context, so **no extra
 argument is needed** to get `correlation_id`/`trace_id` onto a line — it is
 added automatically inside `runWithRequestContext`, and omitted outside a
 request (so background/startup logs stay clean and no id leaks).

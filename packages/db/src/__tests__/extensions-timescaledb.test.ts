@@ -8,7 +8,7 @@ import {
 } from '../extensions/timescaledb';
 import * as schema from '../schema';
 
-// TimescaleDB helpers (#240) are **migration SQL emitters** on the `@knext/db/schema`
+// TimescaleDB helpers (#240) are **migration SQL emitters** on the `@getknext/db/schema`
 // extension seam. drizzle does not model hypertables, so — mirroring how the app
 // self-enables the extension over its own DATABASE_URL (scale-zero-pg connecting.md)
 // — these produce the exact `create_hypertable` / `drop_chunks` SQL an app pastes
@@ -23,14 +23,14 @@ const metrics = pgTable('metrics', {
   value: doublePrecision('value').notNull(),
 });
 
-describe('@knext/db timescaledb — CREATE EXTENSION guidance', () => {
+describe('@getknext/db timescaledb — CREATE EXTENSION guidance', () => {
   it('emits the self-service, idempotent enable statement', () => {
     expect(createTimescaleExtension()).toBe('CREATE EXTENSION IF NOT EXISTS timescaledb;');
     expect(CREATE_TIMESCALEDB_EXTENSION).toBe('CREATE EXTENSION IF NOT EXISTS timescaledb;');
   });
 });
 
-describe('@knext/db timescaledb — hypertable()', () => {
+describe('@getknext/db timescaledb — hypertable()', () => {
   // #259: the emitter targets the MODERN dimension-builder interface —
   // `create_hypertable(<table>, by_range('<col>'[, INTERVAL]))` — stable since
   // TimescaleDB 2.13 and the ONLY interface on 2.24+ (the legacy
@@ -77,7 +77,7 @@ describe('@knext/db timescaledb — hypertable()', () => {
   });
 });
 
-describe('@knext/db timescaledb — dropChunks() retention', () => {
+describe('@getknext/db timescaledb — dropChunks() retention', () => {
   // Retention is a ONE-SHOT drop_chunks() the migration/CI runs — deliberately NOT
   // add_retention_policy(), whose background policy job cannot run on a scale-to-zero
   // compute (scale-zero-pg adr-0001). That is the honest bound.
@@ -94,7 +94,7 @@ describe('@knext/db timescaledb — dropChunks() retention', () => {
   });
 });
 
-describe('@knext/db timescaledb — quote hardening (#278)', () => {
+describe('@getknext/db timescaledb — quote hardening (#278)', () => {
   // create_hypertable / by_range / drop_chunks take their table + column as TEXT
   // arguments (not bare identifiers), so a name with a `'` must be escaped as a
   // string literal (`''`), not left to break out of the quotes.
@@ -135,7 +135,7 @@ describe('@knext/db timescaledb — quote hardening (#278)', () => {
   });
 });
 
-describe('@knext/db/schema — re-exports the timescaledb helpers on the seam', () => {
+describe('@getknext/db/schema — re-exports the timescaledb helpers on the seam', () => {
   it('exposes hypertable / dropChunks / createTimescaleExtension', () => {
     expect(typeof schema.hypertable).toBe('function');
     expect(typeof schema.dropChunks).toBe('function');

@@ -28,7 +28,7 @@ deployment your scripts produce — the same validation path the reference adapt
   regression. Refs older than v16.2.0 are rejected: that release is where deploy mode routes tests
   through the configured adapter, so anything earlier would test nothing knext-related.
 - **Real lifecycle scripts.** The deploy tests run through knext's lifecycle scripts, which pack
-  the `@knext/core` adapter, set `NEXT_ADAPTER_PATH`, run `next build` (standalone output), and
+  the `@getknext/core` adapter, set `NEXT_ADAPTER_PATH`, run `next build` (standalone output), and
   boot the standalone `server.js`.
 - **16 shards, nightly.** The full run is sharded 16 ways (matching the reference adapter setup)
   and runs on a nightly schedule plus manual dispatch. A **Bun-runtime lane** of the same suite
