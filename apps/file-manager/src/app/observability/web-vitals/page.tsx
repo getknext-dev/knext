@@ -1,4 +1,5 @@
 import { headers } from 'next/headers';
+import { NO_DATA } from '../_ui/format';
 import { isObservabilityAuthorized, observabilityToken } from '../auth';
 import { computeVitalsSummary, type VitalSummaryRow } from './vitals';
 
@@ -31,7 +32,9 @@ function AccessDenied() {
 
 function formatValue(row: VitalSummaryRow): string {
   if (row.p75 === null) {
-    return '—';
+    // Shared marker (`_ui/format.ts`): a bare dash reads like a measured zero,
+    // so all three observability pages say "no data yet" instead (#516).
+    return NO_DATA;
   }
   const value = row.unit === 'ms' ? row.p75.toFixed(0) : row.p75.toFixed(3);
   return row.unit ? `${value} ${row.unit}` : value;

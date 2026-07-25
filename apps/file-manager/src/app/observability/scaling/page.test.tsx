@@ -2,8 +2,8 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { PROMETHEUS_URL_ENV, SCALING_QUERIES } from '../_prom/query';
-import { NO_DATA } from '../_ui/format';
+import { APP_NAME_ENV, PROMETHEUS_URL_ENV, scalingQueries } from '../_prom/query';
+import { NO_DATA, UNAVAILABLE } from '../_ui/format';
 
 /**
  * P1.3 (obs-pages plan) / ADR-0038 — the /observability/scaling page (knext's
@@ -33,7 +33,10 @@ vi.mock('next/headers', () => ({
 
 const ORIGINAL_TOKEN = process.env.OBSERVABILITY_TOKEN;
 const ORIGINAL_URL = process.env[PROMETHEUS_URL_ENV];
+const ORIGINAL_APP = process.env[APP_NAME_ENV];
 const TOKEN = 's3cret-observability-token';
+/** The app identity the operator injects as KN_APP_NAME. */
+const APP = 'demo';
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -84,6 +87,10 @@ function seededFetch(url: unknown, opts: SeedOptions = {}): Response {
   if (raw.includes('knext_http_inflight_requests')) {
     return jsonResponse(vector('7'));
   }
+  if (raw.includes('knext_http_requests_total')) {
+    // Warm-start ratio: derived from cold starts vs served requests.
+    return jsonResponse(matrix({ value: '97.5' }));
+  }
   if (raw.includes('knext_coldstart_duration_seconds')) {
     if (opts.coldStartEmpty) return jsonResponse(EMPTY_MATRIX);
     return jsonResponse(matrix({ value: raw.includes('0.99') ? '2.5' : '1.2' }));
@@ -116,10 +123,19 @@ function mockFetch(opts: SeedOptions = {}) {
   return vi.spyOn(globalThis, 'fetch').mockImplementation(async (u) => seededFetch(u, opts));
 }
 
+/** Every PromQL string this render actually sent to Prometheus. */
+function sentQueries(spy: ReturnType<typeof mockFetch>): string[] {
+  return spy.mock.calls.map((call) => {
+    const url = new URL(String(call[0]));
+    return url.searchParams.get('query') ?? '';
+  });
+}
+
 beforeEach(() => {
   authHeader.mockReturnValue(`Bearer ${TOKEN}`);
   process.env.OBSERVABILITY_TOKEN = TOKEN;
   process.env[PROMETHEUS_URL_ENV] = 'http://prometheus.monitoring.svc:9090';
+  process.env[APP_NAME_ENV] = APP;
 });
 
 afterEach(() => {
@@ -129,6 +145,8 @@ afterEach(() => {
   else process.env.OBSERVABILITY_TOKEN = ORIGINAL_TOKEN;
   if (ORIGINAL_URL === undefined) delete process.env[PROMETHEUS_URL_ENV];
   else process.env[PROMETHEUS_URL_ENV] = ORIGINAL_URL;
+  if (ORIGINAL_APP === undefined) delete process.env[APP_NAME_ENV];
+  else process.env[APP_NAME_ENV] = ORIGINAL_APP;
 });
 
 async function renderPage(): Promise<string> {
@@ -256,6 +274,81 @@ describe('scaling page — explicit "no data yet" marker (P1.2 follow-up)', () =
   });
 });
 
+describe('scaling page — every query is scoped to THIS app (#516 review)', () => {
+  it('never sends a cluster-wide query: every PromQL carries the app scope', async () => {
+    const spy = mockFetch();
+
+    await renderPage();
+
+    const queries = sentQueries(spy);
+    expect(queries.length).toBeGreaterThan(0);
+    expect(queries.filter((q) => !q.includes(APP))).toEqual([]);
+    expect(queries).toContain(scalingQueries(APP).replicas);
+    expect(queries).toContain(scalingQueries(APP).currentReplicas);
+  });
+
+  it('renders a DISTINCT "scope unknown" state when KN_APP_NAME is unset — and does NOT fetch', async () => {
+    delete process.env[APP_NAME_ENV];
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+
+    const html = await renderPage();
+
+    // Honest: names the missing var, never falls back to a cluster-wide sum.
+    expect(html).toContain(APP_NAME_ENV);
+    expect(html).toMatch(/scope|identity/i);
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(html).not.toMatch(/replicas \(latest\)/i);
+  });
+
+  it('treats an injection-shaped KN_APP_NAME as unknown scope (no PromQL built from it)', async () => {
+    process.env[APP_NAME_ENV] = 'demo"} or on() up{';
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+
+    const html = await renderPage();
+
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(html).not.toContain('or on()');
+  });
+});
+
+describe('scaling page — warm-start ratio (plan §5.3 AC)', () => {
+  it('renders the warm-start ratio derived from cold starts vs served requests', async () => {
+    mockFetch();
+
+    const html = await renderPage();
+
+    expect(html).toMatch(/warm start/i);
+    expect(html).toContain('97.5');
+  });
+});
+
+describe('scaling page — partial Prometheus failure ≠ no data', () => {
+  it('marks the failed panel unavailable while healthy panels still render', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (u) => {
+      if (String(u).includes('knext_coldstart')) {
+        throw new Error('connect ECONNREFUSED');
+      }
+      return seededFetch(u);
+    });
+
+    const html = await renderPage();
+
+    // The failed series says so — it must NOT masquerade as "no data yet"
+    // (absent data) nor as a measured zero. Checked on rendered VALUE cells:
+    // the marker names may still appear in the explanatory prose.
+    expect(html).toContain(`>${UNAVAILABLE}<`);
+    expect(html).not.toContain(`>${NO_DATA}<`);
+    expect(html).toMatch(/partial|some (panels|metrics)/i);
+    // The panels that DID load still render.
+    expect(html).toContain('80'); // writer DB-wake p50
+    expect(html).toContain('7'); // in-flight
+  });
+
+  it('uses a marker distinct from the no-data marker', () => {
+    expect(UNAVAILABLE).not.toBe(NO_DATA);
+  });
+});
+
 describe('scaling PromQL ↔ metrics.ts + scale-to-zero dashboard parity', () => {
   const REPO_ROOT = resolve(import.meta.dirname, '../../../../../..');
   const METRICS_SRC = resolve(REPO_ROOT, 'packages/kn-next/src/adapters/metrics.ts');
@@ -279,16 +372,22 @@ describe('scaling PromQL ↔ metrics.ts + scale-to-zero dashboard parity', () =>
     return token;
   }
 
-  /** Dashboard exprs, normalized: template label selectors + rate interval removed. */
+  /**
+   * Dashboard exprs with ONLY the Grafana-specific placeholders resolved: the
+   * `$app` template variable becomes the concrete app name and
+   * `$__rate_interval` the page's fixed 5m window. Label selectors are compared
+   * VERBATIM — stripping them (the pre-#516 behaviour) made this gate blind to
+   * exactly the scoping bug it exists to catch.
+   */
+  const QUERIES = scalingQueries(APP);
+
   function dashboardQueries(): Set<string> {
     const json = readFileSync(DASHBOARD, 'utf8');
     const exprs = (JSON.parse(json) as { panels: { targets?: { expr?: string }[] }[] }).panels
       .flatMap((p) => p.targets ?? [])
       .map((t) => t.expr)
       .filter((e): e is string => typeof e === 'string');
-    return new Set(
-      exprs.map((e) => e.replace(/\{[^}]*\}/g, '').replace(/\$__rate_interval/g, '5m')),
-    );
+    return new Set(exprs.map((e) => e.replace(/\$__rate_interval/g, '5m').replace(/\$app/g, APP)));
   }
 
   it('every knext_* series referenced by a Scaling query exists in metrics.ts', () => {
@@ -297,7 +396,7 @@ describe('scaling PromQL ↔ metrics.ts + scale-to-zero dashboard parity', () =>
     expect(allowed.has('knext_db_wake_duration_seconds')).toBe(true);
 
     const dangling: string[] = [];
-    for (const promql of Object.values(SCALING_QUERIES)) {
+    for (const promql of Object.values(QUERIES)) {
       for (const token of promql.match(/knext_[a-z_]+/g) ?? []) {
         if (!allowed.has(baseName(token))) dangling.push(token);
       }
@@ -305,23 +404,30 @@ describe('scaling PromQL ↔ metrics.ts + scale-to-zero dashboard parity', () =>
     expect(dangling).toEqual([]);
   });
 
-  it('reuses the shipped scale-to-zero dashboard PromQL shapes (page ↔ dashboard agree)', () => {
+  it('reuses the shipped scale-to-zero dashboard PromQL shapes, SELECTORS INCLUDED', () => {
     const fromDashboard = dashboardQueries();
     const mirrored = [
-      SCALING_QUERIES.replicas,
-      SCALING_QUERIES.coldStartRate,
-      SCALING_QUERIES.coldStartP50,
-      SCALING_QUERIES.coldStartP99,
-      SCALING_QUERIES.dbWakeRateByRole,
-      SCALING_QUERIES.dbWakeP50ByRole,
-      SCALING_QUERIES.dbWakeP99ByRole,
+      QUERIES.replicas,
+      QUERIES.coldStartRate,
+      QUERIES.coldStartP50,
+      QUERIES.coldStartP99,
+      QUERIES.dbWakeRateByRole,
+      QUERIES.dbWakeP50ByRole,
+      QUERIES.dbWakeP99ByRole,
     ];
     const drifted = mirrored.filter((q) => !fromDashboard.has(q));
     expect(drifted).toEqual([]);
   });
 
+  it('catches an UNSCOPED query — the gate is not blind to label selectors', () => {
+    const fromDashboard = dashboardQueries();
+    // The pre-fix, cluster-wide replica query must NOT satisfy the parity gate.
+    expect(fromDashboard.has('sum by (deployment) (kube_deployment_status_replicas)')).toBe(false);
+    expect(fromDashboard.has(QUERIES.replicas)).toBe(true);
+  });
+
   it('uses the cluster-provided kube-state-metrics replica series for replicas', () => {
-    expect(SCALING_QUERIES.replicas).toContain('kube_deployment_status_replicas');
-    expect(SCALING_QUERIES.currentReplicas).toContain('kube_deployment_status_replicas');
+    expect(QUERIES.replicas).toContain('kube_deployment_status_replicas');
+    expect(QUERIES.currentReplicas).toContain('kube_deployment_status_replicas');
   });
 });

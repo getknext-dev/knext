@@ -269,41 +269,112 @@ export const OVERVIEW_QUERIES = {
   inFlight: 'sum(knext_http_inflight_requests)',
 } as const;
 
+/** Operator-injected app identity (`nextApp.Name`) — the metric scope. */
+export const APP_NAME_ENV = 'KN_APP_NAME';
+
 /**
- * The scale-to-zero lifecycle PromQL for the Cold-start & Scaling page (P1.3).
+ * A Kubernetes RFC1123 **label** (what a `NextApp`/Knative Service name is):
+ * lowercase alphanumerics and `-`, must start and end alphanumeric, ≤63 chars.
+ *
+ * This doubles as the PromQL-injection guard: the app name is interpolated into
+ * a `{app=~"…"}` selector, so anything containing a quote, brace, backslash,
+ * newline or regex metacharacter (`.`, `*`, `|`, …) is REJECTED rather than
+ * escaped. Rejection is safe because the caller then degrades to an explicit
+ * "scope unknown" state — no query is built at all.
+ */
+const APP_NAME_PATTERN = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/;
+
+/**
+ * The validated app name this deployment's metrics belong to, or `undefined`
+ * when `KN_APP_NAME` is unset/blank/not a valid k8s label.
+ *
+ * `undefined` MUST NOT be treated as "query the whole cluster": an unscoped
+ * `kube_deployment_status_replicas` sums every deployment in the cluster and an
+ * unscoped `knext_*` query mixes in every other knext app, so the page would
+ * confidently render another workload's numbers as its own. Callers render a
+ * distinct "scope unknown" state instead.
+ */
+export function observabilityAppName(): string | undefined {
+  const raw = process.env[APP_NAME_ENV];
+  if (!raw) {
+    return undefined;
+  }
+  const trimmed = raw.trim();
+  return APP_NAME_PATTERN.test(trimmed) ? trimmed : undefined;
+}
+
+/** The PromQL for the Cold-start & Scaling page, scoped to one app. */
+export interface ScalingQueries {
+  readonly replicas: string;
+  readonly currentReplicas: string;
+  readonly coldStartRate: string;
+  readonly coldStartP50: string;
+  readonly coldStartP99: string;
+  readonly warmStartRatioPct: string;
+  readonly dbWakeRateByRole: string;
+  readonly dbWakeP50ByRole: string;
+  readonly dbWakeP99ByRole: string;
+  readonly inFlight: string;
+}
+
+/**
+ * Build the scale-to-zero lifecycle PromQL for `app` (P1.3).
  *
  * These are deliberately the **same query shapes as the shipped Grafana
  * `scale-to-zero` dashboard** (`packages/kn-next-operator/config/grafana/dashboards/
- * scale-to-zero.json`), minus its `$app` template selector and with a fixed 5m
- * rate window in place of `$__rate_interval` — so the in-app page and the
- * dashboard can never disagree about what a number means. A parity test asserts
- * both that every `knext_*` series exists in `adapters/metrics.ts` and that each
- * mirrored query matches a dashboard expression.
+ * scale-to-zero.json`) with its `$app` template variable bound to THIS app and a
+ * fixed 5m rate window in place of `$__rate_interval` — so the in-app page and
+ * the dashboard can never disagree about what a number means. The parity test
+ * compares the two **including label selectors** (stripping them, as it did
+ * before #516, hid exactly the scoping bug the gate exists to catch).
+ *
+ * Scoping is not cosmetic: every series here is multi-tenant. `knext_*` carries
+ * an `app` label (`adapters/metrics.ts`), and the replica series is per
+ * deployment — unscoped, the page reports the cluster, not this app.
  *
  * Provenance note: `kube_deployment_status_replicas` is **cluster-provided by
  * kube-state-metrics**, not emitted by knext. When kube-state-metrics is absent
  * the query succeeds with zero series — which the page must render as "requires
  * kube-state-metrics", NEVER as "0 replicas".
+ *
+ * @param app a name already validated by {@link observabilityAppName}.
  */
-export const SCALING_QUERIES = {
-  /** Replica count 0→N over the window (kube-state-metrics; cluster-provided). */
-  replicas: 'sum by (deployment) (kube_deployment_status_replicas)',
-  /** Current replica count (kube-state-metrics; cluster-provided). */
-  currentReplicas: 'sum(kube_deployment_status_replicas)',
-  /** Cold starts per second. */
-  coldStartRate: 'sum(rate(knext_coldstart_total[5m]))',
-  /** p50 cold-start duration (seconds). */
-  coldStartP50:
-    'histogram_quantile(0.50, sum by (le) (rate(knext_coldstart_duration_seconds_bucket[5m])))',
-  /** p99 cold-start duration (seconds). */
-  coldStartP99:
-    'histogram_quantile(0.99, sum by (le) (rate(knext_coldstart_duration_seconds_bucket[5m])))',
-  /** DB 0→1 wakes per second, by pool role (writer|reader). */
-  dbWakeRateByRole: 'sum by (role) (rate(knext_db_wake_total[5m]))',
-  /** p50 DB-wake duration (seconds), by pool role. */
-  dbWakeP50ByRole:
-    'histogram_quantile(0.50, sum by (le, role) (rate(knext_db_wake_duration_seconds_bucket[5m])))',
-  /** p99 DB-wake duration (seconds), by pool role. */
-  dbWakeP99ByRole:
-    'histogram_quantile(0.99, sum by (le, role) (rate(knext_db_wake_duration_seconds_bucket[5m])))',
-} as const;
+export function scalingQueries(app: string): ScalingQueries {
+  // Matches the dashboard's selectors with `$app` bound: Knative appends a
+  // revision suffix to the Deployment name, hence the `.*` on `deployment`.
+  const byApp = `{app=~"${app}"}`;
+  const byDeployment = `{deployment=~"${app}.*"}`;
+
+  return {
+    /** Replica count 0→N over the window (kube-state-metrics; cluster-provided). */
+    replicas: `sum by (deployment) (kube_deployment_status_replicas${byDeployment})`,
+    /** Current replica count (kube-state-metrics; cluster-provided). */
+    currentReplicas: `sum(kube_deployment_status_replicas${byDeployment})`,
+    /** Cold starts per second. */
+    coldStartRate: `sum(rate(knext_coldstart_total${byApp}[5m]))`,
+    /** p50 cold-start duration (seconds). */
+    coldStartP50: `histogram_quantile(0.50, sum by (le) (rate(knext_coldstart_duration_seconds_bucket${byApp}[5m])))`,
+    /** p99 cold-start duration (seconds). */
+    coldStartP99: `histogram_quantile(0.99, sum by (le) (rate(knext_coldstart_duration_seconds_bucket${byApp}[5m])))`,
+    /**
+     * Share of served requests that did NOT pay a cold start, as a percentage.
+     *
+     * Derivation (honest about its limits): knext exports a cold-start COUNTER,
+     * not a per-request warm/cold flag, so this is `1 − coldstarts/requests`
+     * over the same 5m window — i.e. "how rare is a cold start per request",
+     * not a per-request attribution. `clamp_min(…, 0)` keeps a burst of cold
+     * starts with very few served requests from rendering a negative ratio.
+     * It has no dashboard counterpart (page-derived), so it is excluded from
+     * the mirrored-query parity list but still parity-checked for real series.
+     */
+    warmStartRatioPct: `clamp_min((1 - sum(rate(knext_coldstart_total${byApp}[5m])) / sum(rate(knext_http_requests_total${byApp}[5m]))) * 100, 0)`,
+    /** DB 0→1 wakes per second, by pool role (writer|reader). */
+    dbWakeRateByRole: `sum by (role) (rate(knext_db_wake_total${byApp}[5m]))`,
+    /** p50 DB-wake duration (seconds), by pool role. */
+    dbWakeP50ByRole: `histogram_quantile(0.50, sum by (le, role) (rate(knext_db_wake_duration_seconds_bucket${byApp}[5m])))`,
+    /** p99 DB-wake duration (seconds), by pool role. */
+    dbWakeP99ByRole: `histogram_quantile(0.99, sum by (le, role) (rate(knext_db_wake_duration_seconds_bucket${byApp}[5m])))`,
+    /** Current in-flight requests for THIS app (saturation). */
+    inFlight: `sum(knext_http_inflight_requests${byApp})`,
+  };
+}

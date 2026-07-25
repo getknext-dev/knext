@@ -1,19 +1,22 @@
 import { headers } from 'next/headers';
 import {
+  APP_NAME_ENV,
   hasNoSeries,
   instantValue,
   type LabeledValue,
   latestMatrixByLabel,
   latestMatrixValue,
-  OVERVIEW_QUERIES,
+  observabilityAppName,
   PROMETHEUS_URL_ENV,
+  type PromMatrixSeries,
   type PromResult,
+  type PromVectorSample,
   prometheusBaseUrl,
   queryInstant,
   queryRange,
-  SCALING_QUERIES,
+  scalingQueries,
 } from '../_prom/query';
-import { formatMillis, formatNumber, NO_DATA } from '../_ui/format';
+import { formatMillis, formatNumber, NO_DATA, UNAVAILABLE } from '../_ui/format';
 import { isObservabilityAuthorized, observabilityToken } from '../auth';
 
 /**
@@ -38,6 +41,13 @@ import { isObservabilityAuthorized, observabilityToken } from '../auth';
  *    kube-state-metrics. If it is absent the replica panel says so explicitly —
  *    conflating "kube-state-metrics not installed" with "0 replicas" would be a
  *    dishonest zero.
+ *  - FOURTH, distinct state: every series here is multi-tenant, so each query is
+ *    scoped to THIS app via the operator-injected `KN_APP_NAME`. If that scope
+ *    is missing/invalid we render "scope unknown" and query nothing — an
+ *    unscoped fallback would report the whole cluster as if it were this app.
+ *  - FIFTH, distinct state: a PARTIALLY unavailable Prometheus marks only the
+ *    failed panels `metric unavailable` — never `no data yet`, which would claim
+ *    "nothing was recorded" when the truth is "we could not find out".
  */
 export const dynamic = 'force-dynamic';
 
@@ -98,6 +108,23 @@ function Unreachable({ summary }: { summary: string }) {
   );
 }
 
+function ScopeUnknown() {
+  return (
+    <main style={shell}>
+      <h1>Cold start &amp; scaling</h1>
+      <p>
+        The <strong>metric scope for this app is unknown</strong>: <code>{APP_NAME_ENV}</code> is
+        unset or is not a valid Kubernetes name, so no query was run. Every series on this page
+        (replicas, cold starts, DB wakes) is cluster-wide unless it is scoped to one app, and
+        showing the cluster&rsquo;s totals as if they were this app&rsquo;s would be a lying panel.
+        The operator sets <code>{APP_NAME_ENV}</code> when <code>spec.observability.enabled</code>{' '}
+        is true; set it to this app&rsquo;s <code>NextApp</code> name to enable this page.
+      </p>
+      <GrafanaLinkOut />
+    </main>
+  );
+}
+
 interface PanelRow {
   readonly label: string;
   readonly display: string;
@@ -122,12 +149,36 @@ function Panel({ title, rows, note }: { title: string; rows: PanelRow[]; note?: 
   );
 }
 
-/** Rows for a by-role series, or a single no-data row when nothing was recorded. */
+/**
+ * The latest value of a range query, or the marker that tells the truth about
+ * why there is no number: `metric unavailable` (the query FAILED) is deliberately
+ * distinct from `no data yet` (the query succeeded, nothing was recorded).
+ */
+function matrixDisplay(
+  result: PromResult<PromMatrixSeries[]>,
+  render: (v: number | null) => string,
+): string {
+  return result.status === 'unreachable' ? UNAVAILABLE : render(latestMatrixValue(result));
+}
+
+/** As {@link matrixDisplay}, for an instant query. */
+function instantDisplay(
+  result: PromResult<PromVectorSample[]>,
+  render: (v: number | null) => string,
+): string {
+  return result.status === 'unreachable' ? UNAVAILABLE : render(instantValue(result));
+}
+
+/** Rows for a by-role series, or a single no-data/unavailable row. */
 function roleRows(
-  values: LabeledValue[],
+  result: PromResult<PromMatrixSeries[]>,
   label: string,
   render: (v: number) => string,
 ): PanelRow[] {
+  if (result.status === 'unreachable') {
+    return [{ label, display: UNAVAILABLE }];
+  }
+  const values: LabeledValue[] = latestMatrixByLabel(result, 'role');
   if (values.length === 0) {
     return [{ label, display: NO_DATA }];
   }
@@ -149,6 +200,14 @@ export default async function ScalingPage() {
     return <Unconfigured />;
   }
 
+  // Also BEFORE any network call: without a validated app scope we would have to
+  // query the whole cluster. Say "unknown" instead of lying (#516).
+  const app = observabilityAppName();
+  if (!app) {
+    return <ScopeUnknown />;
+  }
+  const queries = scalingQueries(app);
+
   const end = Math.floor(Date.now() / 1000);
   const start = end - RANGE_SECONDS;
   const range = (promql: string) => queryRange(promql, start, end, STEP_SECONDS);
@@ -158,21 +217,23 @@ export default async function ScalingPage() {
     coldStartRate,
     coldStartP50,
     coldStartP99,
+    warmStartRatio,
     dbWakeRate,
     dbWakeP50,
     dbWakeP99,
     currentReplicas,
     inFlight,
   ] = await Promise.all([
-    range(SCALING_QUERIES.replicas),
-    range(SCALING_QUERIES.coldStartRate),
-    range(SCALING_QUERIES.coldStartP50),
-    range(SCALING_QUERIES.coldStartP99),
-    range(SCALING_QUERIES.dbWakeRateByRole),
-    range(SCALING_QUERIES.dbWakeP50ByRole),
-    range(SCALING_QUERIES.dbWakeP99ByRole),
-    queryInstant(SCALING_QUERIES.currentReplicas),
-    queryInstant(OVERVIEW_QUERIES.inFlight),
+    range(queries.replicas),
+    range(queries.coldStartRate),
+    range(queries.coldStartP50),
+    range(queries.coldStartP99),
+    range(queries.warmStartRatioPct),
+    range(queries.dbWakeRateByRole),
+    range(queries.dbWakeP50ByRole),
+    range(queries.dbWakeP99ByRole),
+    queryInstant(queries.currentReplicas),
+    queryInstant(queries.inFlight),
   ]);
 
   const results: PromResult<unknown>[] = [
@@ -180,6 +241,7 @@ export default async function ScalingPage() {
     coldStartRate,
     coldStartP50,
     coldStartP99,
+    warmStartRatio,
     dbWakeRate,
     dbWakeP50,
     dbWakeP99,
@@ -194,6 +256,9 @@ export default async function ScalingPage() {
         : 'Prometheus is unreachable';
     return <Unreachable summary={summary} />;
   }
+  // Some queries failed but not all: the affected panels must say so rather than
+  // fall through to the "no data yet" marker (which means "nothing recorded").
+  const partiallyUnavailable = firstUnreachable !== undefined;
 
   // A cluster WITHOUT kube-state-metrics returns a successful query with zero
   // series. That is NOT "0 replicas" — say so instead of drawing a false zero.
@@ -202,20 +267,30 @@ export default async function ScalingPage() {
   const replicaRows: PanelRow[] = kubeStateAbsent
     ? []
     : [
-        { label: 'Replicas (latest)', display: formatNumber(latestMatrixValue(replicas), 0) },
-        { label: 'Replicas (now)', display: formatNumber(instantValue(currentReplicas), 0) },
+        {
+          label: 'Replicas (latest)',
+          display: matrixDisplay(replicas, (v) => formatNumber(v, 0)),
+        },
+        {
+          label: 'Replicas (now)',
+          display: instantDisplay(currentReplicas, (v) => formatNumber(v, 0)),
+        },
       ];
 
   const coldStartRows: PanelRow[] = [
-    { label: 'Cold starts /s', display: formatNumber(latestMatrixValue(coldStartRate), 2) },
-    { label: 'Cold start p50', display: formatMillis(latestMatrixValue(coldStartP50)) },
-    { label: 'Cold start p99', display: formatMillis(latestMatrixValue(coldStartP99)) },
+    { label: 'Cold starts /s', display: matrixDisplay(coldStartRate, (v) => formatNumber(v, 2)) },
+    { label: 'Cold start p50', display: matrixDisplay(coldStartP50, formatMillis) },
+    { label: 'Cold start p99', display: matrixDisplay(coldStartP99, formatMillis) },
+    {
+      label: 'Warm start ratio',
+      display: matrixDisplay(warmStartRatio, (v) => formatNumber(v, 1, ' %')),
+    },
   ];
 
   const dbWakeRows: PanelRow[] = [
-    ...roleRows(latestMatrixByLabel(dbWakeRate, 'role'), 'DB wakes /s', (v) => v.toFixed(2)),
-    ...roleRows(latestMatrixByLabel(dbWakeP50, 'role'), 'DB wake p50', (v) => formatMillis(v)),
-    ...roleRows(latestMatrixByLabel(dbWakeP99, 'role'), 'DB wake p99', (v) => formatMillis(v)),
+    ...roleRows(dbWakeRate, 'DB wakes /s', (v) => v.toFixed(2)),
+    ...roleRows(dbWakeP50, 'DB wake p50', (v) => formatMillis(v)),
+    ...roleRows(dbWakeP99, 'DB wake p99', (v) => formatMillis(v)),
   ];
 
   return (
@@ -225,8 +300,17 @@ export default async function ScalingPage() {
         The scale-to-zero lifecycle of this app over the last hour: how many replicas are running,
         how often and how slowly it cold starts (<code>knext_coldstart_*</code>), and how long the
         database takes to wake per pool role (<code>knext_db_wake_*</code>). Values marked “
-        {NO_DATA}” have produced no sample — that is not the same as a measured zero.
+        {NO_DATA}” have produced no sample — that is not the same as a measured zero. Every query is
+        scoped to this app (<code>{app}</code>).
       </p>
+
+      {partiallyUnavailable ? (
+        <p style={{ fontSize: '0.9rem' }}>
+          <strong>Partial outage:</strong> some metrics could not be loaded — those values read “
+          {UNAVAILABLE}”. That is <em>not</em> the same as “{NO_DATA}”: the query failed, so nothing
+          is known about those series right now.
+        </p>
+      ) : null}
 
       <Panel
         title="Currently"
@@ -235,9 +319,12 @@ export default async function ScalingPage() {
             label: 'Replicas',
             display: kubeStateAbsent
               ? 'requires kube-state-metrics'
-              : formatNumber(instantValue(currentReplicas), 0),
+              : instantDisplay(currentReplicas, (v) => formatNumber(v, 0)),
           },
-          { label: 'In-flight requests', display: formatNumber(instantValue(inFlight), 0) },
+          {
+            label: 'In-flight requests',
+            display: instantDisplay(inFlight, (v) => formatNumber(v, 0)),
+          },
         ]}
       />
 
@@ -260,7 +347,11 @@ export default async function ScalingPage() {
         />
       )}
 
-      <Panel title="Cold starts" rows={coldStartRows} />
+      <Panel
+        title="Cold starts"
+        note="Warm start ratio is derived (1 − cold starts ÷ requests over 5m): how rare a cold start is per served request, not a per-request warm/cold attribution."
+        rows={coldStartRows}
+      />
       <Panel title="Database wake (by pool role)" rows={dbWakeRows} />
 
       <GrafanaLinkOut />

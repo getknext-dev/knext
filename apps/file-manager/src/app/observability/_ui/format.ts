@@ -12,6 +12,14 @@
 /** Explicit marker for "the series produced no sample" (never a measured zero). */
 export const NO_DATA = 'no data yet';
 
+/**
+ * Explicit marker for "this particular query FAILED" — a partially unavailable
+ * Prometheus (some queries succeed, some do not). Rendering a failed query as
+ * {@link NO_DATA} would claim "nothing was recorded" when the truth is "we could
+ * not find out", so the two states are deliberately distinct strings.
+ */
+export const UNAVAILABLE = 'metric unavailable';
+
 /** A duration in seconds rendered as whole milliseconds, or the no-data marker. */
 export function formatMillis(seconds: number | null): string {
   return seconds === null ? NO_DATA : `${(seconds * 1000).toFixed(0)} ms`;
