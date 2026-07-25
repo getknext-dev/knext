@@ -375,9 +375,10 @@ describe('scaling page — partial Prometheus failure ≠ no data', () => {
     expect(html).toContain(`>${UNAVAILABLE}<`);
     expect(html).not.toContain(`>${NO_DATA}<`);
     expect(html).toMatch(/partial|some (panels|metrics)/i);
-    // The panels that DID load still render.
-    expect(html).toContain('80'); // writer DB-wake p50
-    expect(html).toContain('7'); // in-flight
+    // The panels that DID load still render (rendered value cells, not loose
+    // single-digit substrings).
+    expect(html).toContain('>80 ms<'); // writer DB-wake p50
+    expect(html).toContain('>7<'); // in-flight
   });
 
   it('uses a marker distinct from the no-data marker', () => {
