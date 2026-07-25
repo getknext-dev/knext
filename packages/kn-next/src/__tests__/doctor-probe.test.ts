@@ -92,13 +92,28 @@ describe("doctorMain", () => {
         expect(await doctorMain(["--help"])).toBe(0);
     });
 
+    // HERMETIC: inject fakes for kubectl + the registry probe. The earlier
+    // version ran the REAL kubectlRunner + probeManifest ("whatever the
+    // sandbox's cluster state") — in CI that meant ~7s of kubectl/registry
+    // connection timeouts, flaking the 5s test budget. Unit tests must never
+    // depend on the host's cluster or network.
+    const fakeDeps = {
+        kubectl: (_args: readonly string[]) => ({
+            ok: false,
+            stdout: "",
+            stderr: "kubectl: command not found",
+        }),
+        probeImage: async (_image: string) => "ok" as const,
+    };
+
     it("runs the human-table report and returns a valid exit code", async () => {
-        // Whatever the sandbox's cluster state, doctorMain must resolve to a
-        // 0|1 code without throwing (exercises kubectlRunner + formatDoctorTable).
-        expect([0, 1]).toContain(await doctorMain([]));
+        // kubectl absent → the gate degrades to warn+SKIP; doctorMain must
+        // still resolve to a 0|1 code without throwing (exercises the injected
+        // runner path + formatDoctorTable).
+        expect([0, 1]).toContain(await doctorMain([], fakeDeps));
     });
 
     it("runs the --json report and returns a valid exit code", async () => {
-        expect([0, 1]).toContain(await doctorMain(["--json"]));
+        expect([0, 1]).toContain(await doctorMain(["--json"], fakeDeps));
     });
 });
