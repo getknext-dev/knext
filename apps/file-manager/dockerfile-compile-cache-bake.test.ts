@@ -1,9 +1,14 @@
-import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import {
+  runWarmup,
+  STUB_FLOOR,
+  stubServer,
+  WARMUP_SCRIPT,
+} from '../../tests/helpers/warm-compile-cache-harness';
 
 /**
  * #437 — the V8 compile cache must be BAKED INTO THE IMAGE at build time.
@@ -28,9 +33,10 @@ import { describe, expect, it } from 'vitest';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DOCKERFILE = resolve(__dirname, 'Dockerfile');
-// Promoted out of apps/file-manager/scripts/ to a shared repo-root location so the
-// second consumer (apps/docs, #439) inherits the guards instead of copy-pasting.
-const WARMUP_SCRIPT = resolve(__dirname, '../../scripts/warm-compile-cache.sh');
+// WARMUP_SCRIPT is the SHARED, promoted script (out of apps/file-manager/scripts/
+// into a repo-root location) so the second consumer (apps/docs, #439) inherits the
+// guards instead of copy-pasting. It and the runner harness live in tests/helpers/ —
+// see that module for why the stub port is kernel-allocated, not hardcoded.
 
 function dockerfile(): string {
   return readFileSync(DOCKERFILE, 'utf8');
@@ -70,43 +76,6 @@ function dockerfileRunnerWorkdir(): string {
   return matches[matches.length - 1][1];
 }
 
-/** Run the warm-up script with a stubbed boot command, return {status, output}. */
-function runWarmup(opts: {
-  cacheDir: string;
-  bootCmd: string;
-  port: number;
-  /** Extra env, e.g. to lower the plausibility floor for a stub-sized cache. */
-  env?: Record<string, string>;
-}): {
-  status: number;
-  output: string;
-} {
-  const env = { ...process.env };
-  delete env.NODE_OPTIONS; // harness artifact; keep the child shell clean
-  try {
-    const output = execFileSync('sh', [WARMUP_SCRIPT], {
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'pipe'],
-      env: {
-        ...env,
-        NODE_COMPILE_CACHE: opts.cacheDir,
-        CACHE_PROBE_DIR: opts.cacheDir,
-        PORT: String(opts.port),
-        KNEXT_WARMUP_BOOT_CMD: opts.bootCmd,
-        KNEXT_WARMUP_TIMEOUT_S: '30',
-        ...opts.env,
-      },
-    });
-    return { status: 0, output };
-  } catch (err) {
-    const e = err as { status?: number; stdout?: string; stderr?: string };
-    return { status: e.status ?? 1, output: `${e.stdout ?? ''}${e.stderr ?? ''}` };
-  }
-}
-
-/** A floor of 1/1 — for stubs whose "cache" is a single 8-byte file. */
-const STUB_FLOOR = { KNEXT_WARMUP_MIN_FILES: '1', KNEXT_WARMUP_MIN_BYTES: '1' };
-
 /** Write a JS file to a fresh temp dir and return a `node <path>` boot command. */
 function nodeScript(name: string, source: string): string {
   const path = join(mkdtempSync(join(tmpdir(), 'knext-cc-stub-')), name);
@@ -114,31 +83,6 @@ function nodeScript(name: string, source: string): string {
   // `env -u NODE_COMPILE_CACHE`: see stubServer — keep the stub's own V8 cache
   // out of the directory under test so entry counts are exactly known.
   return `env -u NODE_COMPILE_CACHE node ${path}`;
-}
-
-/**
- * A stub "server": listens on PORT, answers /api/health, and — when
- * `populate` is true — writes a file into NODE_COMPILE_CACHE before exiting on
- * SIGTERM (standing in for V8 flushing real cache entries).
- */
-function stubServer(populate: boolean): string {
-  // `env -u NODE_COMPILE_CACHE` is essential: without it the stub's OWN node
-  // process writes real compile-cache entries into the dir under test, so the
-  // "empty cache" case could never actually be empty and the assertion we are
-  // testing would pass vacuously. The stub instead writes to CACHE_PROBE_DIR,
-  // giving each case an exactly-known entry count.
-  return `env -u NODE_COMPILE_CACHE node -e "${[
-    'const http=require(\\"http\\");',
-    'const fs=require(\\"fs\\");',
-    'const path=require(\\"path\\");',
-    'const s=http.createServer((q,r)=>r.end(\\"ok\\"));',
-    's.listen(Number(process.env.PORT));',
-    'process.on(\\"SIGTERM\\",()=>{',
-    populate
-      ? 'fs.writeFileSync(path.join(process.env.CACHE_PROBE_DIR,\\"entry.bin\\"),\\"bytecode\\");'
-      : '',
-    's.close();process.exit(0);});',
-  ].join('')}"`;
 }
 
 describe('#437 — the compile cache is baked into the image at build time', () => {
@@ -204,7 +148,7 @@ describe('#437 — the compile cache is baked into the image at build time', () 
     expect(dockerfileRuntimeCmd()).toContain('${NODE_COMPILE_CACHE:-');
   });
 
-  it("the warm-up's NODE_COMPILE_CACHE is ABSOLUTE, so it PASSES the freshness guard (#440)", () => {
+  it("the warm-up's NODE_COMPILE_CACHE is ABSOLUTE, so it PASSES the freshness guard (#440)", async () => {
     // The freshness guard clears the cache dir and (correctly) FATALs on a
     // RELATIVE path — clearing a cwd-relative path is unsafe. So the warm-up
     // CALLER must pass an ABSOLUTE path or the guard kills the real image build.
@@ -226,18 +170,17 @@ describe('#437 — the compile cache is baked into the image at build time', () 
     // script clears it and reaches the boot), not FATAL on the absolute-path
     // check. Point it at a temp dir so we exercise the guard, not a real path.
     const probeDir = mkdtempSync(join(tmpdir(), 'knext-cc-abs-'));
-    const { status, output } = runWarmup({
+    const { status, output, diagnostic } = await runWarmup({
       // Substitute the temp dir but KEEP the leading-slash shape of the real
       // value — we are asserting "absolute ⇒ guard passes", and the shipped
       // value is absolute.
       cacheDir: probeDir,
       bootCmd: stubServer(true),
-      port: 34385,
       env: STUB_FLOOR,
     });
-    expect(status).toBe(0);
-    expect(output).not.toMatch(/not an absolute path/i);
-    expect(output).toMatch(/baked/);
+    expect(status, diagnostic).toBe(0);
+    expect(output, diagnostic).not.toMatch(/not an absolute path/i);
+    expect(output, diagnostic).toMatch(/baked/);
   });
 
   it('makes the baked cache readable by the runtime `node` user', () => {
@@ -251,66 +194,62 @@ describe('#437 — the compile cache is baked into the image at build time', () 
     expect(dockerfile()).toMatch(/baked|pre-populated|populated at (image )?build/i);
   });
 
-  it('FAILS the build when the warm-up leaves the cache empty (the shipped bug)', () => {
+  it('FAILS the build when the warm-up leaves the cache empty (the shipped bug)', async () => {
     const cacheDir = mkdtempSync(join(tmpdir(), 'knext-cc-empty-'));
-    const { status, output } = runWarmup({
+    const { status, output, diagnostic } = await runWarmup({
       cacheDir,
       bootCmd: stubServer(false),
-      port: 34371,
       env: STUB_FLOOR, // even the most permissive floor must reject zero
     });
 
-    expect(status).not.toBe(0);
-    expect(output).toMatch(/empty|no .*entries/i);
+    expect(status, diagnostic).not.toBe(0);
+    expect(output, diagnostic).toMatch(/empty|no .*entries/i);
   });
 
-  it('SUCCEEDS and reports the entry count when the warm-up populates the cache', () => {
+  it('SUCCEEDS and reports the entry count when the warm-up populates the cache', async () => {
     const cacheDir = mkdtempSync(join(tmpdir(), 'knext-cc-full-'));
-    const { status, output } = runWarmup({
+    const { status, output, diagnostic } = await runWarmup({
       cacheDir,
       bootCmd: stubServer(true),
-      port: 34372,
       env: STUB_FLOOR,
     });
 
-    expect(status).toBe(0);
-    expect(output).toMatch(/baked 1 entries, 8 bytes/);
+    expect(status, diagnostic).toBe(0);
+    expect(output, diagnostic).toMatch(/baked 1 entries, 8 bytes/);
   });
 
-  it('FAILS the build when the warm-up server EXITS EARLY (distinct from a ready timeout)', () => {
+  it('FAILS the build when the warm-up server EXITS EARLY (distinct from a ready timeout)', async () => {
     const cacheDir = mkdtempSync(join(tmpdir(), 'knext-cc-dead-'));
     // A "server" that exits immediately without ever listening.
-    const { status, output } = runWarmup({
+    const { status, output, diagnostic } = await runWarmup({
       cacheDir,
       bootCmd: 'node -e "process.exit(0)"',
-      port: 34373,
     });
 
-    expect(status).not.toBe(0);
+    expect(status, diagnostic).not.toBe(0);
     // Must name the EXITED path specifically. `/ready/i` would also match the
     // ready-timeout message, so it cannot tell the two failures apart — and a
     // regression collapsing them into one would pass unnoticed.
-    expect(output).toMatch(/exited before it was ready/i);
-    expect(output).not.toMatch(/not ready within/i);
+    expect(output, diagnostic).toMatch(/exited before it was ready/i);
+    expect(output, diagnostic).not.toMatch(/not ready within/i);
   });
 
-  it('FAILS the build when the server stays alive but never becomes ready (timeout path)', () => {
+  it('FAILS the build when the server stays alive but never becomes ready (timeout path)', async () => {
     const cacheDir = mkdtempSync(join(tmpdir(), 'knext-cc-hang-'));
     // Alive for the whole run, but never binds the port — so the health probe
     // never succeeds and the READY_TIMEOUT_S branch is what must fire.
-    const { status, output } = runWarmup({
+    const { status, output, diagnostic } = await runWarmup({
       cacheDir,
       bootCmd: nodeScript('hang.js', 'setTimeout(() => {}, 60_000);\n'),
-      port: 34374,
       env: { KNEXT_WARMUP_TIMEOUT_S: '3' },
     });
 
-    expect(status).not.toBe(0);
-    expect(output).toMatch(/not ready within 3s/i);
-    expect(output).not.toMatch(/exited before it was ready/i);
+    expect(status, diagnostic).not.toBe(0);
+    expect(output, diagnostic).toMatch(/not ready within 3s/i);
+    expect(output, diagnostic).not.toMatch(/exited before it was ready/i);
   });
 
-  it('waits for the standalone-server GRANDCHILD to flush before asserting', () => {
+  it('waits for the standalone-server GRANDCHILD to flush before asserting', async () => {
     // The runtime entry (node-server.ts) SPAWNS `server.js` as a child, and it
     // is that grandchild whose modules V8 caches. The parent's graceful shutdown
     // has a hard cap (SHUTDOWN_GRACE_MS) and calls process.exit() even if the
@@ -344,36 +283,34 @@ describe('#437 — the compile cache is baked into the image at build time', () 
       ].join('\n'),
     );
 
-    const { status, output } = runWarmup({
+    const { status, output, diagnostic } = await runWarmup({
       cacheDir,
       bootCmd: parent,
-      port: 34375,
       env: STUB_FLOOR,
     });
 
     // If the script only waited on the parent it would find an EMPTY dir here
     // and fail — the partial-cache race, made deterministic.
-    expect(status).toBe(0);
-    expect(output).toMatch(/baked 1 entries, 8 bytes/);
+    expect(status, diagnostic).toBe(0);
+    expect(output, diagnostic).toMatch(/baked 1 entries, 8 bytes/);
   });
 
-  it('rejects a PARTIAL cache, not merely an empty one (plausibility floor)', () => {
+  it('rejects a PARTIAL cache, not merely an empty one (plausibility floor)', async () => {
     // A truncated flush leaves a handful of entries, which sails past a `>= 1`
     // non-empty check. The real bake produces 1106 entries / ~4.25 MB, so the
     // DEFAULT floor must reject a single 8-byte entry.
     const cacheDir = mkdtempSync(join(tmpdir(), 'knext-cc-partial-'));
-    const { status, output } = runWarmup({
+    const { status, output, diagnostic } = await runWarmup({
       cacheDir,
       bootCmd: stubServer(true),
-      port: 34376,
       // NB: no STUB_FLOOR — this exercises the shipped defaults.
     });
 
-    expect(status).not.toBe(0);
+    expect(status, diagnostic).not.toBe(0);
     // The message must state expected-vs-actual so a build failure is diagnosable.
-    expect(output).toMatch(/1 files/);
-    expect(output).toMatch(/8 bytes/);
-    expect(output).toMatch(/expected/i);
+    expect(output, diagnostic).toMatch(/1 files/);
+    expect(output, diagnostic).toMatch(/8 bytes/);
+    expect(output, diagnostic).toMatch(/expected/i);
   });
 
   it('pins the default floor comfortably below the real bake (1106 entries / 4.25 MB)', () => {
@@ -391,7 +328,7 @@ describe('#437 — the compile cache is baked into the image at build time', () 
     expect(Number(bytes[1])).toBeLessThanOrEqual(4_246_032 / 2);
   });
 
-  it("CLEARS a pre-existing cache dir before the warm-up (freshness is the script's job, #440 item 2)", () => {
+  it("CLEARS a pre-existing cache dir before the warm-up (freshness is the script's job, #440 item 2)", async () => {
     // The plausibility floor must reflect a REAL flush of THIS build, never
     // leftover entries from a previous run. Today the runner stage happens not
     // to COPY the cache dir, but that is an inference about the Dockerfile a
@@ -401,46 +338,44 @@ describe('#437 — the compile cache is baked into the image at build time', () 
     const stale = join(cacheDir, 'stale.junk');
     writeFileSync(stale, 'leftover-from-a-previous-build');
 
-    const { status, output } = runWarmup({
+    const { status, output, diagnostic } = await runWarmup({
       cacheDir,
       bootCmd: stubServer(true), // writes a single fresh entry on SIGTERM
-      port: 34377,
       env: STUB_FLOOR,
     });
 
-    expect(status).toBe(0);
+    expect(status, diagnostic).toBe(0);
     // The stale file must be GONE — the dir was emptied before the warm-up, so
     // leftover entries can never satisfy the floor.
     expect(existsSync(stale)).toBe(false);
     // Only the freshly-flushed entry should remain.
-    expect(output).toMatch(/baked 1 entries, 8 bytes/);
+    expect(output, diagnostic).toMatch(/baked 1 entries, 8 bytes/);
   });
 
-  it('FATALs WITHOUT deleting when NODE_COMPILE_CACHE is a catastrophic path (safety guard, #440 item 2)', () => {
+  it('FATALs WITHOUT deleting when NODE_COMPILE_CACHE is a catastrophic path (safety guard, #440 item 2)', async () => {
     // The clear step is `rm -rf "$CACHE_DIR"`, and $CACHE_DIR is attacker-shaped
     // env input, so the guard must reject `/`, a non-absolute path, and critical
     // system dirs BEFORE removing anything. A short ready-timeout keeps the
     // pre-guard (unimplemented) run fast and safe — the boot never enumerates a
     // real filesystem.
     for (const badPath of ['/', '/etc', '/usr', 'relative/dir']) {
-      const { status, output } = runWarmup({
+      const { status, output, diagnostic } = await runWarmup({
         cacheDir: badPath,
         // Never becomes ready; short timeout so if the guard is ABSENT the run
         // still exits quickly (via the ready-timeout) instead of scanning disk.
         bootCmd: nodeScript('guard-hang.js', 'setTimeout(() => {}, 60_000);\n'),
-        port: 34378,
         env: { ...STUB_FLOOR, KNEXT_WARMUP_TIMEOUT_S: '2' },
       });
 
-      expect(status).not.toBe(0);
+      expect(status, diagnostic).not.toBe(0);
       // Must name the guard specifically — a generic ready-timeout message means
       // the guard did not fire before the boot/clear.
-      expect(output).toMatch(/refus|unsafe|critical|absolute/i);
-      expect(output).not.toMatch(/not ready within/i);
+      expect(output, diagnostic).toMatch(/refus|unsafe|critical|absolute/i);
+      expect(output, diagnostic).not.toMatch(/not ready within/i);
     }
   });
 
-  it('rejects a `..`-traversal path WITHOUT deleting (guard normalises segments, #440)', () => {
+  it('rejects a `..`-traversal path WITHOUT deleting (guard normalises segments, #440)', async () => {
     // String-equality on the blocklist is defeated by traversal: `/etc/../etc`
     // is absolute, never equals a blocklist entry, yet resolves to `/etc`. The
     // guard must reject any `..` SEGMENT before the rm. Proven safe by pointing
@@ -453,41 +388,39 @@ describe('#437 — the compile cache is baked into the image at build time', () 
     const sentinel = join(real, 'sentinel.keep');
     writeFileSync(sentinel, 'must-survive');
 
-    const { status, output } = runWarmup({
+    const { status, output, diagnostic } = await runWarmup({
       // Raw string concat, NOT path.join — join() would collapse the `..` before
       // it ever reached the script. = <base>/real/../real, resolves to <base>/real.
       cacheDir: `${real}/../real`,
       bootCmd: nodeScript('traverse-hang.js', 'setTimeout(() => {}, 60_000);\n'),
-      port: 34379,
       env: { ...STUB_FLOOR, KNEXT_WARMUP_TIMEOUT_S: '2' },
     });
 
-    expect(status).not.toBe(0);
+    expect(status, diagnostic).not.toBe(0);
     // Must name the `..`/traversal guard, not a generic ready-timeout.
-    expect(output).toMatch(/\.\.|traversal|refus/i);
-    expect(output).not.toMatch(/not ready within/i);
+    expect(output, diagnostic).toMatch(/\.\.|traversal|refus/i);
+    expect(output, diagnostic).not.toMatch(/not ready within/i);
     // Nothing was cleared: the sentinel is still there.
     expect(existsSync(sentinel)).toBe(true);
   });
 
-  it('FATALs on a `..`-traversal into a critical dir (defeats the blocklist bypass, #440)', () => {
+  it('FATALs on a `..`-traversal into a critical dir (defeats the blocklist bypass, #440)', async () => {
     // The archetypal bypass: `/etc/../etc` → `/etc`. The guard MUST abort on the
     // `..` segment BEFORE any rm, so this never actually touches /etc. We assert
     // the FATAL message + non-zero exit only — the temp-scoped test above is the
     // one that proves "nothing deleted".
-    const { status, output } = runWarmup({
+    const { status, output, diagnostic } = await runWarmup({
       cacheDir: '/etc/../etc',
       bootCmd: nodeScript('etc-hang.js', 'setTimeout(() => {}, 60_000);\n'),
-      port: 34380,
       env: { ...STUB_FLOOR, KNEXT_WARMUP_TIMEOUT_S: '2' },
     });
 
-    expect(status).not.toBe(0);
-    expect(output).toMatch(/\.\.|traversal|refus/i);
-    expect(output).not.toMatch(/not ready within/i);
+    expect(status, diagnostic).not.toBe(0);
+    expect(output, diagnostic).toMatch(/\.\.|traversal|refus/i);
+    expect(output, diagnostic).not.toMatch(/not ready within/i);
   });
 
-  it('rejects a duplicate-slash path WITHOUT deleting (guard squeezes `//`, #440)', () => {
+  it('rejects a duplicate-slash path WITHOUT deleting (guard squeezes `//`, #440)', async () => {
     // `//etc` is the SAME dir as `/etc` on POSIX, but string-equality on the
     // blocklist sees "//etc" != "/etc" and lets it through. The guard must
     // collapse duplicate slashes BEFORE the blocklist. Proven safe by a
@@ -496,12 +429,11 @@ describe('#437 — the compile cache is baked into the image at build time', () 
     const sentinel = join(base, 'sentinel.keep');
     writeFileSync(sentinel, 'must-survive');
 
-    const { status, output } = runWarmup({
+    const { status, output, diagnostic } = await runWarmup({
       // Raw string with a leading `//` — `//<abs-temp>` is the same dir as the
       // temp path, but only the squeeze makes the guard see it that way.
       cacheDir: `/${base}`, // base already starts with '/', so this is '//…'
       bootCmd: stubServer(true), // populates the (cleared) dir on SIGTERM
-      port: 34381,
       env: STUB_FLOOR,
     });
 
@@ -510,40 +442,38 @@ describe('#437 — the compile cache is baked into the image at build time', () 
     // is applied to the canonical form). The critical-dir proof is the //etc
     // case below; here we assert the dir is cleared normally (sentinel gone) and
     // the run succeeds, proving the squeeze did not break a legit double-slash.
-    expect(status).toBe(0);
+    expect(status, diagnostic).toBe(0);
     expect(existsSync(sentinel)).toBe(false);
-    expect(output).toMatch(/baked/);
+    expect(output, diagnostic).toMatch(/baked/);
   });
 
-  it('FATALs on a `//`-duplicate-slash critical dir (defeats the blocklist bypass, #440)', () => {
+  it('FATALs on a `//`-duplicate-slash critical dir (defeats the blocklist bypass, #440)', async () => {
     // `//etc` == `/etc`. Without the squeeze it dodges the string-equality
     // blocklist and would clear /etc. The guard MUST abort before any rm.
-    const { status, output } = runWarmup({
+    const { status, output, diagnostic } = await runWarmup({
       cacheDir: '//etc',
       bootCmd: nodeScript('dslash-etc-hang.js', 'setTimeout(() => {}, 60_000);\n'),
-      port: 34382,
       env: { ...STUB_FLOOR, KNEXT_WARMUP_TIMEOUT_S: '2' },
     });
 
-    expect(status).not.toBe(0);
-    expect(output).toMatch(/critical|refus/i);
-    expect(output).not.toMatch(/not ready within/i);
+    expect(status, diagnostic).not.toBe(0);
+    expect(output, diagnostic).toMatch(/critical|refus/i);
+    expect(output, diagnostic).not.toMatch(/not ready within/i);
   });
 
-  it('rejects a bare `.` path segment WITHOUT deleting (#440)', () => {
-    const { status, output } = runWarmup({
+  it('rejects a bare `.` path segment WITHOUT deleting (#440)', async () => {
+    const { status, output, diagnostic } = await runWarmup({
       cacheDir: '/etc/.',
       bootCmd: nodeScript('dot-hang.js', 'setTimeout(() => {}, 60_000);\n'),
-      port: 34383,
       env: { ...STUB_FLOOR, KNEXT_WARMUP_TIMEOUT_S: '2' },
     });
 
-    expect(status).not.toBe(0);
-    expect(output).toMatch(/'\.'|segment|refus/i);
-    expect(output).not.toMatch(/not ready within/i);
+    expect(status, diagnostic).not.toBe(0);
+    expect(output, diagnostic).toMatch(/'\.'|segment|refus/i);
+    expect(output, diagnostic).not.toMatch(/not ready within/i);
   });
 
-  it('happy path: a real-shaped `.next/compile-cache` dir still clears normally (#440)', () => {
+  it('happy path: a real-shaped `.next/compile-cache` dir still clears normally (#440)', async () => {
     // Regression guard for the `.`-segment and squeeze checks: the REAL cache
     // path contains a hidden `.next` dir and dotted filenames, none of which is
     // a bare `.`/`..` segment or a duplicate slash — so it MUST still be cleared
@@ -554,17 +484,16 @@ describe('#437 — the compile cache is baked into the image at build time', () 
     const stale = join(cacheDir, 'stale.cache');
     writeFileSync(stale, 'leftover');
 
-    const { status, output } = runWarmup({
+    const { status, output, diagnostic } = await runWarmup({
       cacheDir,
       bootCmd: stubServer(true),
-      port: 34384,
       env: STUB_FLOOR,
     });
 
-    expect(status).toBe(0);
+    expect(status, diagnostic).toBe(0);
     // Cleared then re-baked: the stale file is gone, a fresh entry is present.
     expect(existsSync(stale)).toBe(false);
-    expect(output).toMatch(/baked 1 entries, 8 bytes/);
+    expect(output, diagnostic).toMatch(/baked 1 entries, 8 bytes/);
   });
 
   it('does not depend on Postgres/Redis: it probes the shallow health route', () => {
