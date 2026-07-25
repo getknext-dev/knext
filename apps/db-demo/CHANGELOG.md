@@ -10,5 +10,5 @@
 - Updated dependencies [49a48e4]
 - Updated dependencies [82ddbef]
 - Updated dependencies
-  - @knext/db@0.2.0
-  - @knext/lib@0.2.0
+  - @getknext/db@0.2.0
+  - @getknext/lib@0.2.0

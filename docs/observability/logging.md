@@ -13,7 +13,7 @@ a collector (Loki via Promtail/Alloy, Fluent Bit, Vector, Datadog, Elastic)
 ingests without a regex parser. In local dev, `pino-pretty` renders the same
 records for humans. The runtime logger is `@getknext/lib/logger`
 (`packages/lib/src/logger/index.ts`); the CLI/framework logger is
-`@getknext/kn-next`'s `logger`.
+`@getknext/core`'s `logger`.
 
 Every line carries these load-bearing fields:
 

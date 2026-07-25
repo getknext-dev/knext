@@ -5,7 +5,7 @@ import { describe, expect, it } from 'vitest';
 
 /**
  * The npm org `knext` was unavailable; the founder owns `getknext`. Nothing was
- * ever published under `@knext/*` (the scope is empty on npmjs), so the rename to
+ * ever published under the retired scope (it is empty on npmjs), so the rename to
  * `@getknext/*` is a clean pre-publish cutover — no deprecation shims, no aliases.
  *
  * This guard keeps the old scope from creeping back in via copy-paste or a stale
@@ -16,11 +16,20 @@ import { describe, expect, it } from 'vitest';
 
 const repoRoot = join(import.meta.dirname, '..');
 
-/** Every tracked file that still mentions the retired `@knext` npm scope. */
+/**
+ * The retired scope, ASSEMBLED AT RUNTIME so this guard file does not match its
+ * own search. The obvious alternatives both punch a hole in the guard: a
+ * `':!tests/npm-scope-getknext.test.ts'` pathspec or an allowlist entry would let
+ * a real regression hide inside this very file. Building the token instead keeps
+ * the sweep genuinely repo-wide, with NO self-exclusion.
+ */
+const OLD_SCOPE = `@${'knext'}`;
+
+/** Every tracked file that still mentions the retired npm scope. */
 function trackedFilesMentioningOldScope(): string[] {
   let out: string;
   try {
-    out = execFileSync('git', ['grep', '-l', '--', '@knext'], {
+    out = execFileSync('git', ['grep', '-l', '--', OLD_SCOPE], {
       cwd: repoRoot,
       encoding: 'utf8',
     });
@@ -35,22 +44,36 @@ function trackedFilesMentioningOldScope(): string[] {
 
 /**
  * The single deliberate exception: this skill file narrates the HISTORICAL scope
- * drift (`@kn-next` vs `@knative-next` vs `@knext`) as a case study. Rewriting the
- * quoted history would make the anecdote false.
+ * drift (`@kn-next` vs `@knative-next` vs the retired scope) as a case study.
+ * Rewriting the quoted history would make the anecdote false.
  */
 const HISTORICAL_QUOTE_ALLOWLIST = ['.claude/skills/framework-design/SKILL.md'];
 
 describe('npm scope is @getknext (npm org `knext` was unavailable)', () => {
-  it('no tracked file references the retired `@knext` scope', () => {
+  it('no tracked file references the retired scope', () => {
     const offenders = trackedFilesMentioningOldScope().filter(
       (f) => !HISTORICAL_QUOTE_ALLOWLIST.includes(f),
     );
     expect(offenders).toEqual([]);
   });
 
-  it('the allowlisted file mentions `@knext` only as quoted scope-drift history', () => {
+  it('this guard file is itself in scope for the sweep (no self-exclusion)', () => {
+    // Regression test for the defect that made this guard structurally unable to
+    // go green: the search token used to appear literally in this file, so
+    // `git grep -l` always returned it. Assert the sweep really does cover this
+    // path — i.e. we fixed it by not matching, not by excluding.
+    const tracked = execFileSync('git', ['ls-files', '--', 'tests/npm-scope-getknext.test.ts'], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+    }).trim();
+    expect(tracked).toBe('tests/npm-scope-getknext.test.ts');
+    expect(HISTORICAL_QUOTE_ALLOWLIST).not.toContain(tracked);
+    expect(readFileSync(join(repoRoot, tracked), 'utf8')).not.toContain(OLD_SCOPE);
+  });
+
+  it('the allowlisted file mentions the retired scope only as quoted drift history', () => {
     const src = readFileSync(join(repoRoot, HISTORICAL_QUOTE_ALLOWLIST[0]), 'utf8');
-    const lines = src.split('\n').filter((l) => l.includes('@knext'));
+    const lines = src.split('\n').filter((l) => l.includes(OLD_SCOPE));
     expect(lines.length).toBeGreaterThan(0);
     // Every surviving mention must sit alongside the other historical names,
     // i.e. it is describing the drift, not declaring a live dependency.

@@ -578,7 +578,7 @@ export const getDbPool = () => {
  * Drain and close the singleton Postgres pool, letting in-flight transactions
  * commit-or-rollback before the connections close. Safe to call when no pool was
  * ever created (no-op). Intended to be wired into the runtime's SIGTERM drain
- * (see `registerShutdownDrain` in @getknext/kn-next) so scale-down doesn't sever
+ * (see `registerShutdownDrain` in @getknext/core) so scale-down doesn't sever
  * transactions. Resets the singleton so a later `getDbPool()` reconnects.
  */
 export const closeDbPool = async (): Promise<void> => {

@@ -29,7 +29,7 @@ export interface Closable {
 export type ShutdownDrain = () => Promise<void>;
 
 // Module-level registry. The runtime (node-server.ts) registers drains here so
-// the @getknext/lib pool stays free of any dependency on @getknext/kn-next — the
+// the @getknext/lib pool stays free of any dependency on @getknext/core — the
 // runtime, which already depends on both, wires lib's pool into this hook. This
 // keeps the boundary clean and avoids a circular dependency.
 const shutdownDrains: ShutdownDrain[] = [];
