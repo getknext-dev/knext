@@ -30,14 +30,10 @@ npm i -D drizzle-kit        # dev-only: generates SQL migrations
 `@getknext/db` depends on `drizzle-orm` and re-exports it, so your app has a single pinned-compatible
 drizzle. `drizzle-kit` is a dev tool only — it generates migrations and ships no runtime code.
 
-<Callout type="warn">
-**Package availability.** `@getknext/db` is not on the public npm registry yet. It is installable
-today from the **interim GitHub Packages channel** as `@getknext-dev/db` — see
-[Getting started](/docs/getting-started#0--install-the-packages-interim-channel) for the `.npmrc`
-setup (a `read:packages` token is required even though the packages are public). Under that scope,
-substitute `@getknext-dev/db` for `@getknext/db` in the install command and imports on this page.
-When `@getknext/*` goes live on npm, the interim names will be deprecated in its favor; installs
-keep working.
+<Callout type="info">
+`@getknext/db` is optional. It is a plain client library — install it only if you want the typed
+schema and migration ergonomics; the rest of knext works without it. See
+[Getting started](/docs/getting-started#0--install-the-packages) for the full package list.
 </Callout>
 
 ## Define your schema
