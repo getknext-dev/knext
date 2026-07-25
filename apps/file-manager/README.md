@@ -151,6 +151,23 @@ Real-time visualization of:
 - Hit rate statistics
 - Tag invalidation testing
 
+### Web Vitals page (`/observability/web-vitals`)
+
+Server-rendered "Speed Insights" page showing the current **p75** for each Core Web Vital
+(LCP, INP, CLS, FCP, TTFB) plus sample counts, read in-process from the app's own RUM registry
+(the `/api/rum` beacons collected by `WebVitalsReporter`). It needs **no** external backend — no
+Prometheus, no extra dependency.
+
+The observability pages are **auth-gated with a timing-safe Bearer token** and are **never cached**
+(`force-dynamic`). Provision `OBSERVABILITY_TOKEN` via a Kubernetes Secret (never hardcoded), then
+request the page with `Authorization: Bearer <token>`. **If `OBSERVABILITY_TOKEN` is unset the pages
+deny every request** — they fail closed rather than exposing metrics. Metric data is only read
+server-side; the browser receives the rendered aggregate, never raw metrics.
+
+| Variable | Description |
+|----------|-------------|
+| `OBSERVABILITY_TOKEN` | Bearer token gating `/observability/*` (unset ⇒ deny-all) |
+
 ### Events API (`/api/cache/events`)
 
 Server-Sent Events stream:
