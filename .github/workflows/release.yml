@@ -80,6 +80,15 @@ jobs:
   release:
     name: Version PR / Publish (gated on NPM_TOKEN)
     runs-on: ubuntu-latest
+    # NPM_TOKEN lives as an ENVIRONMENT secret on `npm-publish`, not a repo
+    # secret. Environment secrets are only injected into jobs that declare the
+    # environment — without this line `secrets.NPM_TOKEN` resolves to the empty
+    # string, the publish gate below reports "not set", and the workflow would
+    # silently only ever open Version PRs. Declaring it also lets the
+    # environment's protection rules (e.g. Required reviewers) gate the publish
+    # itself, which is the point of putting an irreversible action behind an
+    # environment in the first place.
+    environment: npm-publish
     # Publish-BLOCKING supply-chain gate: never publish tarballs the audit did
     # not clear (HIGH/CRITICAL fail-closed). This does NOT unblock #53 — publish
     # still requires the human NPM_TOKEN (see "Determine publish gate" below).
