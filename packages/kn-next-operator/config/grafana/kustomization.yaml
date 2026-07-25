@@ -1,0 +1,48 @@
+# [GRAFANA] Turnkey knext dashboards (#316).
+#
+# Packages every dashboard JSON in ./dashboards as a ConfigMap labeled
+# `grafana_dashboard: "1"` — the standard Grafana sidecar convention
+# (kube-prometheus-stack / grafana Helm chart). A Grafana whose sidecar watches
+# this namespace auto-imports them; no manual "Import dashboard" step. They graph
+# the per-app :9091 series discovered by the PodMonitor in ../prometheus.
+#
+# OPT-IN, mirroring ../prometheus: this overlay is NOT part of the default
+# install bundle (config/default/kustomization.yaml keeps the `- ../grafana`
+# include commented, next to the `- ../prometheus` one). Apply it directly:
+#
+#   kubectl apply -k config/grafana
+#
+# Namespace: the ConfigMaps land in `monitoring` (the conventional
+# kube-prometheus-stack namespace). If your Grafana sidecar watches a different
+# namespace, override with `namespace:` here or `kubectl apply -k` into it.
+#
+# Dashboards stay data-source-agnostic: each references the `${datasource}`
+# Grafana template variable, never a hardcoded datasource UID.
+namespace: monitoring
+
+generatorOptions:
+  # Stable ConfigMap names (no content-hash suffix) so re-applies update in place
+  # and the Grafana sidecar keeps a steady dashboard identity.
+  disableNameSuffixHash: true
+  labels:
+    # The sidecar discovery label — this is what makes the import automatic.
+    grafana_dashboard: "1"
+    app.kubernetes.io/name: kn-next-operator
+    app.kubernetes.io/component: grafana-dashboards
+
+configMapGenerator:
+  - name: knext-dashboard-red-overview
+    files:
+      - dashboards/red-overview.json
+  - name: knext-dashboard-scale-to-zero
+    files:
+      - dashboards/scale-to-zero.json
+  - name: knext-dashboard-rum
+    files:
+      - dashboards/rum.json
+  - name: knext-dashboard-bytecode
+    files:
+      - dashboards/bytecode.json
+  - name: knext-dashboard-loadtesting
+    files:
+      - dashboards/loadtesting.json

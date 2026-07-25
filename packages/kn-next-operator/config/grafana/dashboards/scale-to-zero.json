@@ -1,0 +1,276 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": "-- Grafana --",
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "title": "Replica count 0\u2192N (kube-state-metrics)",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "pointSize": 5
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "sum by (deployment) (kube_deployment_status_replicas{deployment=~\"$app.*\"})",
+          "legendFormat": "{{deployment}}",
+          "refId": "A"
+        }
+      ],
+      "description": "Replica count comes from kube-state-metrics (the CLUSTER), NOT from knext. Requires kube-state-metrics scraped by the same Prometheus. Knative revision Deployments are named <service>-<revision>-deployment; the regex matches the app."
+    },
+    {
+      "title": "Cold starts (rate /s)",
+      "type": "stat",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": ["lastNotNull"]
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(knext_coldstart_total{app=~\"$app\"}[$__rate_interval]))",
+          "legendFormat": "cold starts",
+          "refId": "A"
+        }
+      ],
+      "description": "Scale-to-zero wakes: cold-start count (app boot / first-request wake) from the knext counter."
+    },
+    {
+      "title": "Cold-start latency p50 / p99 (s)",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "pointSize": 5
+          },
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(knext_coldstart_duration_seconds_bucket{app=~\"$app\"}[$__rate_interval])))",
+          "legendFormat": "p50",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(knext_coldstart_duration_seconds_bucket{app=~\"$app\"}[$__rate_interval])))",
+          "legendFormat": "p99",
+          "refId": "B"
+        }
+      ],
+      "description": "Cold-start wake latency quantiles from the knext cold-start duration histogram."
+    },
+    {
+      "title": "DB wake rate by role (/s)",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "pointSize": 5
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "sum by (role) (rate(knext_db_wake_total{app=~\"$app\"}[$__rate_interval]))",
+          "legendFormat": "{{role}}",
+          "refId": "A"
+        }
+      ],
+      "description": "Scale-to-zero Postgres 0\u21921 wakes (first connect) by pool role, from the knext db-wake counter."
+    },
+    {
+      "title": "DB wake latency p50 / p99 by role (s)",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 16
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "pointSize": 5
+          },
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum by (le, role) (rate(knext_db_wake_duration_seconds_bucket{app=~\"$app\"}[$__rate_interval])))",
+          "legendFormat": "p50 {{role}}",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum by (le, role) (rate(knext_db_wake_duration_seconds_bucket{app=~\"$app\"}[$__rate_interval])))",
+          "legendFormat": "p99 {{role}}",
+          "refId": "B"
+        }
+      ],
+      "description": "DB 0\u21921 wake / first-connect latency quantiles from the knext db-wake duration histogram."
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "style": "dark",
+  "tags": ["knext", "scale-to-zero", "cold-start", "knative"],
+  "templating": {
+    "list": [
+      {
+        "current": {
+          "selected": false,
+          "text": "Prometheus",
+          "value": "Prometheus"
+        },
+        "hide": 0,
+        "includeAll": false,
+        "label": "Datasource",
+        "multi": false,
+        "name": "datasource",
+        "options": [],
+        "query": "prometheus",
+        "queryValue": "",
+        "refresh": 1,
+        "regex": "",
+        "skipUrlSync": false,
+        "type": "datasource"
+      },
+      {
+        "allValue": ".*",
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "definition": "label_values(knext_coldstart_total, app)",
+        "hide": 0,
+        "includeAll": true,
+        "label": "Application",
+        "multi": true,
+        "name": "app",
+        "query": "label_values(knext_coldstart_total, app)",
+        "refresh": 2,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      }
+    ]
+  },
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "",
+  "title": "knext \u2014 Scale-to-zero lifecycle",
+  "uid": "knext-scale-to-zero",
+  "version": 1,
+  "weekStart": ""
+}

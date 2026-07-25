@@ -42,13 +42,49 @@ Custom `kn_next_*` series include:
 | `kn_next_web_vitals_*` | Histogram | Core Web Vitals (see [RUM](#rum-web-vitals)). |
 
 These complement the default Node.js process metrics. Ready-made Grafana dashboards ship with knext
-for bytecode caching, RUM, and load testing.
+(see [Dashboards](#dashboards) below).
 
 <Callout type="info">
 The bytecode-cache metrics tell you whether [scale-to-zero](/docs/scale-to-zero) cold starts are
 landing on a warm cache — a cold pod that reads `kn_next_bytecode_cache_warm_start = 0` is
 recompiling JavaScript instead of reusing cached V8 bytecode.
 </Callout>
+
+## Dashboards
+
+knext ships five ready-made Grafana dashboards. You do **not** import them by hand — they are
+packaged as `ConfigMap`s labeled `grafana_dashboard: "1"`, the standard label a Grafana sidecar
+(kube-prometheus-stack, the Grafana Helm chart) watches to auto-load dashboards.
+
+Install all five with one command:
+
+```bash
+kubectl apply -k config/grafana
+```
+
+They land in the `monitoring` namespace by default. If your Grafana sidecar watches a different
+namespace, apply into it (`kubectl apply -k config/grafana -n <ns>`) or edit the overlay's
+`namespace:` field. The dashboards then graph the per-app metrics your Prometheus already scrapes
+from port `9091`.
+
+| Dashboard | What it shows |
+|---|---|
+| **RED service health** | Request rate, error rate (5xx %), duration p50/p95/p99, and in-flight requests — the golden signals. |
+| **Scale-to-zero lifecycle** | Replica count 0→N, cold-start rate and latency (p50/p99), and Postgres 0→1 wake rate and latency by pool role. |
+| **RUM — Web Vitals** | LCP, INP, CLS, FCP, TTFB percentiles per route (needs [RUM](#rum-web-vitals) enabled). |
+| **Bytecode cache** | Warm-start ratio, cache size, and startup duration by cache state. |
+| **Load testing** | Request throughput and latency under a k6 run. |
+
+<Callout type="info">
+**Pick your datasource, once.** Every dashboard uses a Grafana **datasource template variable**
+(no hardcoded datasource UID), so they work against any Prometheus datasource — just select it from
+the **Datasource** dropdown at the top of the dashboard the first time you open it.
+</Callout>
+
+The **replica-count** panel on the scale-to-zero dashboard reads
+`kube_deployment_status_replicas`, which comes from **kube-state-metrics** (the cluster), not from
+knext — so that panel needs kube-state-metrics scraped by the same Prometheus. Every other panel
+reads a `knext_*` series exported on `9091`.
 
 ## RUM (Web Vitals)
 
