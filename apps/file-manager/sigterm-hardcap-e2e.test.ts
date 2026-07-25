@@ -28,13 +28,13 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
  * never e2e against the real spawned runtime entry. Reviewers flagged that gap.
  *
  * Approach (identical container-shaped layout to the drain e2e, so it exercises
- * the SHIPPED `@knext/core/internal/node-server` entry, not the source tree):
- *   1. Build an ISOLATED runner dir OUTSIDE the workspace so `@knext/core`
+ * the SHIPPED `@getknext/core/internal/node-server` entry, not the source tree):
+ *   1. Build an ISOLATED runner dir OUTSIDE the workspace so `@getknext/core`
  *      resolution cannot escape upward into the repo's node_modules.
- *   2. `pnpm --filter @knext/core --prod deploy` a self-contained @knext/core
- *      (dist + prom-client + pino) into <runner>/node_modules/@knext/core —
+ *   2. `pnpm --filter @getknext/core --prod deploy` a self-contained @getknext/core
+ *      (dist + prom-client + pino) into <runner>/node_modules/@getknext/core —
  *      replicating the Dockerfile runtime COPY.
- *   3. Run the EXACT Dockerfile CMD (`node -e import('@knext/core/internal/node-server')`)
+ *   3. Run the EXACT Dockerfile CMD (`node -e import('@getknext/core/internal/node-server')`)
  *      from the runner root, pointed via STANDALONE_SERVER_PATH at the
  *      IGNORE-SIGTERM fixture (traps SIGTERM, never drains, sleeps ~5min), with a
  *      SHORT SHUTDOWN_GRACE_MS so the test is fast.
@@ -73,7 +73,7 @@ const METRICS_PORT = 9092;
 const GRACE_MS = 3000; // SHORT hard cap so the e2e is fast (default is 25s)
 
 // The CMD specifier the container boots — the EXACT string from the Dockerfile.
-const RUNTIME_IMPORT = "import('@knext/core/internal/node-server')";
+const RUNTIME_IMPORT = "import('@getknext/core/internal/node-server')";
 
 /**
  * Locate the standalone "tracing-root mirror" — only used to GATE the test on a
@@ -118,13 +118,13 @@ beforeAll(() => {
   // 1. Isolated runner dir OUTSIDE the workspace — see file header.
   runnerRoot = mkdtempSync(join(tmpdir(), 'knext-hardcap-runner-'));
 
-  // 2. Replicate the Dockerfile runtime COPY: self-contained @knext/core + prod
-  //    deps at node_modules/@knext/core via the SAME `pnpm deploy` the image uses.
+  // 2. Replicate the Dockerfile runtime COPY: self-contained @getknext/core + prod
+  //    deps at node_modules/@getknext/core via the SAME `pnpm deploy` the image uses.
   const deployDir = mkdtempSync(join(tmpdir(), 'knext-core-deploy-'));
   const repoRoot = resolve(APP_DIR, '../..');
   const dep = spawnSync(
     'pnpm',
-    ['--filter', '@knext/core', '--prod', 'deploy', '--legacy', deployDir],
+    ['--filter', '@getknext/core', '--prod', 'deploy', '--legacy', deployDir],
     { cwd: repoRoot, encoding: 'utf8', env: childEnv() },
   );
   if (
@@ -133,14 +133,14 @@ beforeAll(() => {
     !existsSync(join(deployDir, 'node_modules/pino'))
   ) {
     throw new Error(
-      `pnpm deploy did not produce a self-contained @knext/core ` +
+      `pnpm deploy did not produce a self-contained @getknext/core ` +
         `(node-server.js + prom-client + pino). stderr:\n${dep.stderr}`,
     );
   }
   // verbatimSymlinks: keep pnpm's RELATIVE `.pnpm/…` symlinks intact (the
   // Dockerfile COPY preserves them verbatim; the default rewrites to absolute
   // paths into deployDir, which we then delete → dangling → MODULE_NOT_FOUND).
-  cpSync(deployDir, join(runnerRoot, 'node_modules/@knext/core'), {
+  cpSync(deployDir, join(runnerRoot, 'node_modules/@getknext/core'), {
     recursive: true,
     verbatimSymlinks: true,
   });

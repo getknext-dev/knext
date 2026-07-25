@@ -1,10 +1,10 @@
 /**
- * PK1 (#114) — Publish-surface packaging correctness for @knext/core.
+ * PK1 (#114) — Publish-surface packaging correctness for @getknext/core.
  *
  * The package historically advertised its ENTIRE library surface as raw
  * TypeScript (`main`/`types` = ./src/config.ts, every `exports` subpath →
  * ./src/*.ts), while `tsup` only built the CLI entries. On plain Node an app
- * importing `@knext/core/adapter` (or the `KnativeNextConfig` type) resolved to
+ * importing `@getknext/core/adapter` (or the `KnativeNextConfig` type) resolved to
  * a `.ts` file Node cannot load.
  *
  * These tests encode the acceptance criteria:
@@ -49,7 +49,7 @@ function exportTargets(): string[] {
     return targets;
 }
 
-describe("PK1: @knext/core publish surface", () => {
+describe("PK1: @getknext/core publish surface", () => {
     it("main and types point at compiled dist, never raw src/*.ts", () => {
         expect(pkg.main).toMatch(/^\.\/dist\//);
         expect(pkg.types).toMatch(/^\.\/dist\//);

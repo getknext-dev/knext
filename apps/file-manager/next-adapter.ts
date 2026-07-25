@@ -1,7 +1,7 @@
 /**
  * apps/file-manager adapter — re-export of the package-shipped knext NextAdapter.
  *
- * The adapter implementation moved into @knext/core (#89) so the official Next.js
+ * The adapter implementation moved into @getknext/core (#89) so the official Next.js
  * compatibility harness can point arbitrary fixture apps at it via NEXT_ADAPTER_PATH.
  * This file is now a thin re-export — no behavior change. next.config.ts still wires
  * it through the top-level `adapterPath` config (graduated out of `experimental` at
@@ -14,7 +14,7 @@
  * direct assignment would compare those nominally-incompatible RenderingMode enums.
  */
 
-import adapter from '@knext/core/adapter';
+import adapter from '@getknext/core/adapter';
 import type { NextAdapter as _NextAdapter } from 'next';
 
 // Compile-time assertion that the package adapter conforms to the official shape,

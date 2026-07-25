@@ -1,20 +1,20 @@
 ---
 name: knext-lib
 description: >-
-  Use the @knext/lib runtime helper library inside a knext application (a Next.js
+  Use the @getknext/lib runtime helper library inside a knext application (a Next.js
   "zone"): the Postgres pool (getDbPool), the S3/MinIO object-store client
   (getMinioClient), the Cerbos authorization client (getCerbosClient), the deep
   health check (checkDeepHealth) for /api/health, and the shared pino logger.
   Use this skill whenever app code needs a database connection, object storage, a
   readiness/health endpoint, structured logging, or imports anything from
-  @knext/lib — even if "@knext/lib" isn't named explicitly. For deep DB
+  @getknext/lib — even if "@getknext/lib" isn't named explicitly. For deep DB
   connection-pool sizing and the scale-to-zero connection-storm problem, also load
   the `postgres` skill.
 ---
 
-# Using `@knext/lib`
+# Using `@getknext/lib`
 
-`@knext/lib` is the small runtime helper library a knext zone imports from its
+`@getknext/lib` is the small runtime helper library a knext zone imports from its
 **server** code. Its entire surface is public and semver-stable (see
 `docs/PUBLIC_API.md`). Connection details always come from the **environment** —
 never hardcode hosts or credentials (the operator injects them as env from K8s
@@ -24,16 +24,16 @@ Secrets).
 
 ```ts
 // One import for everything (the root re-exports the three subpaths):
-import { getDbPool, getMinioClient, getCerbosClient, checkDeepHealth, logger } from '@knext/lib';
+import { getDbPool, getMinioClient, getCerbosClient, checkDeepHealth, logger } from '@getknext/lib';
 ```
 
 | Import | Returns | Use for |
 | --- | --- | --- |
-| `@knext/lib/clients` → `getDbPool()` | `pg.Pool` (from `DATABASE_URL`) | PostgreSQL access |
-| `@knext/lib/clients` → `getMinioClient()` | `Minio.Client` | S3/MinIO object storage |
-| `@knext/lib/clients` → `getCerbosClient()` | `Cerbos` | authorization checks |
-| `@knext/lib/health` → `checkDeepHealth()` | `Promise<HealthStatus>` | the `/api/health` route |
-| `@knext/lib/logger` → `logger` | `pino.Logger` | structured JSON logging |
+| `@getknext/lib/clients` → `getDbPool()` | `pg.Pool` (from `DATABASE_URL`) | PostgreSQL access |
+| `@getknext/lib/clients` → `getMinioClient()` | `Minio.Client` | S3/MinIO object storage |
+| `@getknext/lib/clients` → `getCerbosClient()` | `Cerbos` | authorization checks |
+| `@getknext/lib/health` → `checkDeepHealth()` | `Promise<HealthStatus>` | the `/api/health` route |
+| `@getknext/lib/logger` → `logger` | `pino.Logger` | structured JSON logging |
 
 The clients are **lazily constructed singletons** — call `getDbPool()` wherever
 you need it; it returns the same pool.
@@ -41,7 +41,7 @@ you need it; it returns the same pool.
 ## Database — `getDbPool()`
 
 ```ts
-import { getDbPool } from '@knext/lib/clients';
+import { getDbPool } from '@getknext/lib/clients';
 
 export async function listUsers() {
   const { rows } = await getDbPool().query('SELECT id, name FROM users');
@@ -60,7 +60,7 @@ export async function listUsers() {
 ## Object storage — `getMinioClient()`
 
 ```ts
-import { getMinioClient } from '@knext/lib/clients';
+import { getMinioClient } from '@getknext/lib/clients';
 const minio = getMinioClient(); // S3-compatible: GCS / S3 / MinIO via env
 ```
 
@@ -74,7 +74,7 @@ dependency health:
 
 ```ts
 // app/api/health/route.ts
-import { checkDeepHealth } from '@knext/lib/health';
+import { checkDeepHealth } from '@getknext/lib/health';
 import { NextResponse } from 'next/server';
 
 export async function GET() {
@@ -90,15 +90,15 @@ The operator points the pod's readiness/liveness probes at `spec.healthCheckPath
 ## Logging — `logger`
 
 ```ts
-import { logger } from '@knext/lib/logger';
+import { logger } from '@getknext/lib/logger';
 logger.info({ msg: 'order placed', orderId });   // JSON in prod, pretty in dev
 ```
 
 Use this in app code; the CLI/runtime have their own internal logger
-(`@knext/core/internal/logger` — do not import that from an app).
+(`@getknext/core/internal/logger` — do not import that from an app).
 
 ## Rules
-- **Never import `@knext/core/internal/*`** from application code — those are
+- **Never import `@getknext/core/internal/*`** from application code — those are
   framework wiring with no stability guarantee (`docs/PUBLIC_API.md`).
 - **Never hardcode** `DATABASE_URL` or object-store credentials — read them from
   the environment; the operator provisions them from Secrets.
@@ -107,5 +107,5 @@ Use this in app code; the CLI/runtime have their own internal logger
 
 ## Related skills
 - `postgres` — connection pooling under scale-to-zero, pool sizing, the pooler.
-- `knext-app` — wiring `@knext/core` (adapter, config, cache handler) into the app.
+- `knext-app` — wiring `@getknext/core` (adapter, config, cache handler) into the app.
 - `knext-deploy` — how `DATABASE_URL`/secrets/scaling reach the pod via the CR.

@@ -12,14 +12,14 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@knext/db": "workspace:*",
-    "@knext/lib": "workspace:*",
+    "@getknext/db": "workspace:*",
+    "@getknext/lib": "workspace:*",
     "next": "16.2.10",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
   },
   "devDependencies": {
-    "@knext/core": "workspace:*",
+    "@getknext/core": "workspace:*",
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",

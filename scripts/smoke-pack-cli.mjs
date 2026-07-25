@@ -2,13 +2,13 @@
 /**
  * smoke-pack-cli.mjs — E1-1 / #68
  *
- * Proves the packed @knext/core artifact installs and exposes a working `kn-next` bin
+ * Proves the packed @getknext/core artifact installs and exposes a working `kn-next` bin
  * for plain Node (no Bun required — issue #68). Since #68 the bin is bundled, Node-only
  * JS (`dist/cli/kn-next.js`) with a `#!/usr/bin/env node` shebang, so `node <bin>` runs
  * it directly. A Bun leg is kept as an OPTIONAL extra check when bun is on PATH.
  *
  * Steps:
- *   1. `pnpm pack` @knext/lib + @knext/core -> tarballs.
+ *   1. `pnpm pack` @getknext/lib + @getknext/core -> tarballs.
  *   2. Fresh temp dir, `npm init -y`, `npm i <tarballs>`.
  *   3. Run the installed bin's `--help` under NODE. Assert exit 0 and that output
  *      mentions "kn-next" or "Usage".
@@ -46,7 +46,7 @@ function hasBun() {
 /**
  * Pack a workspace package with `pnpm pack` (NOT `npm pack`) into `dest` and return
  * the resulting .tgz path. pnpm is required because it rewrites the `workspace:`
- * protocol (@knext/core depends on @knext/lib via `workspace:^`) to a real version —
+ * protocol (@getknext/core depends on @getknext/lib via `workspace:^`) to a real version —
  * exactly what `changeset publish` does, since the release runs under pnpm. `npm pack`
  * leaves `workspace:^` verbatim, which fails to install with EUNSUPPORTEDPROTOCOL.
  */
@@ -72,38 +72,38 @@ let libDest;
 let dbDest;
 let coreDest;
 try {
-  // --- 1. pack @knext/lib → @knext/db → @knext/core -------------------------
-  // Pack ALL THREE: @knext/core declares `@knext/lib` AND `@knext/db` as (rewritten)
-  // versioned deps, and @knext/db declares `@knext/lib` — but nothing is published to
+  // --- 1. pack @getknext/lib → @getknext/db → @getknext/core -------------------------
+  // Pack ALL THREE: @getknext/core declares `@getknext/lib` AND `@getknext/db` as (rewritten)
+  // versioned deps, and @getknext/db declares `@getknext/lib` — but nothing is published to
   // npm yet (E1-4 — publish is gated until NPM_TOKEN is set). Installing the tarballs
   // together lets the local deps resolve without hitting npm, so the smoke proves the
   // packed CLI artifact works pre-publish.
-  // @knext/lib + @knext/db ship only dist/ — build before packing or the tarball is
-  // empty. Order lib → db → core: @knext/db imports @knext/lib types, and @knext/core's
-  // build imports both (the `kn-next db migrate` runner lives in @knext/db/migrate, #242).
-  console.log('[smoke:cli] building @knext/lib (ships dist/ only) ...');
-  execFileSync('pnpm', ['--filter', '@knext/lib', 'build'], {
+  // @getknext/lib + @getknext/db ship only dist/ — build before packing or the tarball is
+  // empty. Order lib → db → core: @getknext/db imports @getknext/lib types, and @getknext/core's
+  // build imports both (the `kn-next db migrate` runner lives in @getknext/db/migrate, #242).
+  console.log('[smoke:cli] building @getknext/lib (ships dist/ only) ...');
+  execFileSync('pnpm', ['--filter', '@getknext/lib', 'build'], {
     cwd: repoRoot,
     stdio: ['ignore', 'inherit', 'inherit'],
   });
-  console.log('[smoke:cli] building @knext/db (ships dist/ only) ...');
-  execFileSync('pnpm', ['--filter', '@knext/db', 'build'], {
+  console.log('[smoke:cli] building @getknext/db (ships dist/ only) ...');
+  execFileSync('pnpm', ['--filter', '@getknext/db', 'build'], {
     cwd: repoRoot,
     stdio: ['ignore', 'inherit', 'inherit'],
   });
-  // #68: @knext/core now ships a bundled dist/ bin — build it before packing or the
+  // #68: @getknext/core now ships a bundled dist/ bin — build it before packing or the
   // tarball has no dist/cli/kn-next.js and the bin symlink is broken.
-  console.log('[smoke:cli] building @knext/core (ships dist/ bin) ...');
-  execFileSync('pnpm', ['--filter', '@knext/core', 'build'], {
+  console.log('[smoke:cli] building @getknext/core (ships dist/ bin) ...');
+  execFileSync('pnpm', ['--filter', '@getknext/core', 'build'], {
     cwd: repoRoot,
     stdio: ['ignore', 'inherit', 'inherit'],
   });
   libDest = mkdtempSync(join(tmpdir(), 'knext-pack-lib-'));
   dbDest = mkdtempSync(join(tmpdir(), 'knext-pack-db-'));
   coreDest = mkdtempSync(join(tmpdir(), 'knext-pack-core-'));
-  const libTarball = pnpmPack(libPkgDir, libDest, '@knext/lib');
-  const dbTarball = pnpmPack(dbPkgDir, dbDest, '@knext/db');
-  const coreTarball = pnpmPack(corePkgDir, coreDest, '@knext/core');
+  const libTarball = pnpmPack(libPkgDir, libDest, '@getknext/lib');
+  const dbTarball = pnpmPack(dbPkgDir, dbDest, '@getknext/db');
+  const coreTarball = pnpmPack(corePkgDir, coreDest, '@getknext/core');
   console.log(`[smoke:cli] core tarball: ${coreTarball}`);
   console.log(`[smoke:cli] db   tarball: ${dbTarball}`);
   console.log(`[smoke:cli] lib  tarball: ${libTarball}`);
@@ -115,7 +115,9 @@ try {
     cwd: workDir,
     stdio: ['ignore', 'inherit', 'inherit'],
   });
-  console.log('[smoke:cli] installing tarballs (@knext/lib + @knext/db + @knext/core) ...');
+  console.log(
+    '[smoke:cli] installing tarballs (@getknext/lib + @getknext/db + @getknext/core) ...',
+  );
   execFileSync('npm', ['install', libTarball, dbTarball, coreTarball], {
     cwd: workDir,
     stdio: ['ignore', 'inherit', 'inherit'],
@@ -169,7 +171,7 @@ try {
     console.log('[smoke:cli] bun not on PATH — skipping optional bun leg');
   }
 
-  finish(PASS, 'packed @knext/core installs and `kn-next --help` works under node');
+  finish(PASS, 'packed @getknext/core installs and `kn-next --help` works under node');
 } catch (err) {
   finish(FAIL, `unexpected error: ${err?.message ? err.message : err}`);
 } finally {

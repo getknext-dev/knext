@@ -1,7 +1,7 @@
 # Next.js deployment-adapter listing — DRAFT (HELD on ONE gate: npm publish)
 
 > **STATUS: HELD on a single box.** The verification gates have cleared. Do not submit until
-> `@knext/core` is published to npm (`npx kn-next` must work for an outside user, or the listing
+> `@getknext/core` is published to npm (`npx kn-next` must work for an outside user, or the listing
 > points at a package nobody can install). The moment npm publish lands, this entry is
 > submit-ready as written.
 
@@ -16,7 +16,7 @@ parked here so it can be submitted the moment the last gate clears.
 - [x] **Compatibility-matrix promotion:** the "Official Next.js compatibility suite" row is ✅ in
       [`docs/compat-matrix.md`](https://github.com/getknext-dev/knext/blob/main/docs/compat-matrix.md),
       under an evidence contract enforced by a guard test (run-cited, revocable on any red nightly).
-- [ ] **npm publish:** `@knext/core` is published so `npx kn-next` works for outside users.
+- [ ] **npm publish:** `@getknext/core` is published so `npx kn-next` works for outside users.
       **← the one remaining box.**
 
 ## Draft entry (submit-ready once the box above is checked)
@@ -42,7 +42,7 @@ against the official Next.js compatibility suite.
 > SBOM-attested, cosign-signed, and carry SLSA provenance. Object storage via GCS, S3, or MinIO.
 > Apache-2.0.
 
-**Adapter wiring:** `adapterPath: '@knext/core/adapter'` (top-level since Next.js 16.2;
+**Adapter wiring:** `adapterPath: '@getknext/core/adapter'` (top-level since Next.js 16.2;
 `experimental.adapterPath` on 16.0.x–16.1.x) — the `NextAdapter` shape.
 
 **Repo:** https://github.com/getknext-dev/knext

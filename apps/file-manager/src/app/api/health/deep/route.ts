@@ -1,4 +1,4 @@
-import { checkDeepHealth } from '@knext/lib/health';
+import { checkDeepHealth } from '@getknext/lib/health';
 import { withRedMetrics } from '../../_metrics/registry';
 
 // Deep dependency endpoint — observability/alerting ONLY (#338, ADR-0026).

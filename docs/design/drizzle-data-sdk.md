@@ -1,14 +1,14 @@
-# Design — `@knext/db`, the knext Drizzle data SDK
+# Design — `@getknext/db`, the knext Drizzle data SDK
 
 Companion to **ADR-0021**. This doc holds the concrete API sketches, package shape,
 and the request/migration flows. The ADR holds the decisions + open questions.
 Snippets are illustrative, not final.
 
-> **Status — core landed (#238/#236/#237).** `packages/db` (`@knext/db`) is
+> **Status — core landed (#238/#236/#237).** `packages/db` (`@getknext/db`) is
 > scaffolded and the two client accessors are shipped: `getDb()` (writer) +
 > `getDbRO()` (reader, with writer fallback + one-time warning), over a new
-> `@knext/lib` read-only pool (`getDbPoolRO`/`closeDbPoolRO`). The re-exported
-> drizzle query surface (`§6`) is live. The `@knext/db/migrate` runner (#242) has
+> `@getknext/lib` read-only pool (`getDbPoolRO`/`closeDbPoolRO`). The re-exported
+> drizzle query surface (`§6`) is live. The `@getknext/db/migrate` runner (#242) has
 > landed: `runMigrations()` + the `kn-next db migrate` one-shot subcommand + the Job
 > recipe (writer-only, idempotent, fail-loud). **Still to land:** the TimescaleDB /
 > pgvector extension helpers (#240/#241).
@@ -18,18 +18,18 @@ Snippets are illustrative, not final.
 ```
 apps/<app>/src/db/schema.ts      author-owned schema (drizzle pgTable)
 apps/<app>/src/app/**            server components / route handlers / actions
-        │  import { getDb, getDbRO } from '@knext/db'
+        │  import { getDb, getDbRO } from '@getknext/db'
         ▼
-@knext/db          drizzle-orm wrapper + extension helpers + migrate runner
+@getknext/db          drizzle-orm wrapper + extension helpers + migrate runner
         │  reuses the pool
         ▼
-@knext/lib clients getDbPool()  (writer)   +  getDbPoolRO()  (NEW, reader)
+@getknext/lib clients getDbPool()  (writer)   +  getDbPoolRO()  (NEW, reader)
         │  DATABASE_URL / DATABASE_URL_RO   (injected by the operator, ADR-0018/0019)
         ▼
 scale-zero-pg gateway  pggw:55432 (writer)  ·  pggw:55434 (RO pool, ~9s stale)
 ```
 
-`@knext/db` depends on `@knext/lib` (`workspace:^`), `drizzle-orm`, and (dev)
+`@getknext/db` depends on `@getknext/lib` (`workspace:^`), `drizzle-orm`, and (dev)
 `drizzle-kit`. It provisions nothing and mutates no cluster resource — it is a
 client library (ADR-0021 §5 / ADR-0001 boundary).
 
@@ -38,7 +38,7 @@ client library (ADR-0021 §5 / ADR-0001 boundary).
 ```jsonc
 // packages/db/package.json  (illustrative; versions pinned at scaffold time)
 {
-  "name": "@knext/db",
+  "name": "@getknext/db",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -48,7 +48,7 @@ client library (ADR-0021 §5 / ADR-0001 boundary).
     "./migrate": { "types": "./dist/migrate.d.ts", "import": "./dist/migrate.js" }
   },
   "knext": { "publicApi": { "public": [".", "./schema", "./migrate"] } },
-  "dependencies": { "@knext/lib": "workspace:^", "drizzle-orm": "^x" },
+  "dependencies": { "@getknext/lib": "workspace:^", "drizzle-orm": "^x" },
   "peerDependencies": { "drizzle-orm": "^x" },
   "devDependencies": { "drizzle-kit": "^x", "vitest": "...", "typescript": "..." }
 }
@@ -61,9 +61,9 @@ Structure mirrors `packages/lib`: `src/`, colocated `src/__tests__/*.test.ts`
 ## 3. Clients
 
 ```ts
-// @knext/db  (index)
+// @getknext/db  (index)
 import { drizzle } from 'drizzle-orm/node-postgres';
-import { getDbPool, getDbPoolRO } from '@knext/lib/clients';
+import { getDbPool, getDbPoolRO } from '@getknext/lib/clients';
 
 let _db: ReturnType<typeof drizzle> | null = null;
 let _dbRO: ReturnType<typeof drizzle> | null = null;
@@ -83,7 +83,7 @@ export function getDbRO<TSchema extends Record<string, unknown>>(schema?: TSchem
 }
 ```
 
-New in `@knext/lib/clients` (additive, semver-minor):
+New in `@getknext/lib/clients` (additive, semver-minor):
 
 ```ts
 // mirrors getDbPool(): same scale-to-zero defaults, DB_POOL_RO_* overrides,
@@ -103,8 +103,8 @@ The runtime's SIGTERM drain (`registerShutdownDrain`) calls both `closeDbPool()`
 
 ```ts
 // apps/shop/src/db/schema.ts
-import { pgTable, serial, text, timestamp, doublePrecision } from '@knext/db/schema';
-import { hypertable, vector, hnsw } from '@knext/db/schema';
+import { pgTable, serial, text, timestamp, doublePrecision } from '@getknext/db/schema';
+import { hypertable, vector, hnsw } from '@getknext/db/schema';
 
 export const orders = pgTable('orders', {
   id: serial('id').primaryKey(),
@@ -134,12 +134,12 @@ export const docs = pgTable('docs', {
 Similarity query helper:
 
 ```ts
-import { cosineDistance } from '@knext/db';           // <=> ; also l2Distance (<->)
+import { cosineDistance } from '@getknext/db';           // <=> ; also l2Distance (<->)
 const near = await getDbRO({ docs }).select()
   .from(docs).orderBy(cosineDistance(docs.embedding, queryEmbedding)).limit(5);
 ```
 
-`@knext/db/schema` re-exports drizzle's `pg-core` primitives so an app imports from
+`@getknext/db/schema` re-exports drizzle's `pg-core` primitives so an app imports from
 one place; `hypertable`/retention are knext additions, `vector`/`hnsw`/`ivfflat`/
 distance ops are re-exports of drizzle's own vector support wired into our migration
 + extension gating.
@@ -147,8 +147,8 @@ distance ops are re-exports of drizzle's own vector support wired into our migra
 ## 5. Migrations
 
 ```ts
-// drizzle.config.ts  (app root) — @knext/db ships defineDrizzleConfig()
-import { defineDrizzleConfig } from '@knext/db/migrate';
+// drizzle.config.ts  (app root) — @getknext/db ships defineDrizzleConfig()
+import { defineDrizzleConfig } from '@getknext/db/migrate';
 export default defineDrizzleConfig({ schema: './src/db/schema.ts', out: './drizzle' });
 //   dialect: 'postgresql', url: process.env.DATABASE_URL (writer), sane defaults.
 ```
@@ -184,9 +184,9 @@ AppDatabase (on scale-zero-pg, kubectl/CI) provisions branch (template schema, ~
 ```ts
 // route handler — staleness-tolerant read → RO pool
 // app/api/orders/route.ts
-import { getDbRO } from '@knext/db';
+import { getDbRO } from '@getknext/db';
 import { orders } from '@/db/schema';
-import { eq } from '@knext/db';
+import { eq } from '@getknext/db';
 export async function GET(req: Request) {
   const uid = new URL(req.url).searchParams.get('u')!;
   const rows = await getDbRO({ orders }).select().from(orders).where(eq(orders.userId, uid));
@@ -198,7 +198,7 @@ export async function GET(req: Request) {
 // server action — write → writer pool, read-your-writes
 // app/orders/actions.ts
 'use server';
-import { getDb } from '@knext/db';
+import { getDb } from '@getknext/db';
 import { orders } from '@/db/schema';
 export async function createOrder(userId: string, total: number) {
   const [row] = await getDb({ orders }).insert(orders).values({ userId, total }).returning();
@@ -206,14 +206,14 @@ export async function createOrder(userId: string, total: number) {
 }
 ```
 
-No bespoke query DSL: `@knext/db` re-exports drizzle's `eq/and/or/…` and the query
+No bespoke query DSL: `@getknext/db` re-exports drizzle's `eq/and/or/…` and the query
 builder. The knext value-add is client selection + extensions + migrate.
 
 ## 7. Testing strategy
 
 - **Unit (vitest, no DB):** client singletons + fallback, `defineDrizzleConfig`
   defaults, `hypertable`/retention SQL emission, vector column/index/DDL emission,
-  RO-fallback warning. Mock `@knext/lib` pools.
+  RO-fallback warning. Mock `@getknext/lib` pools.
 - **Integration (gated):** against a real scale-zero-pg DB —
   writer/RO round-trip + staleness, migrate runner idempotency, TimescaleDB
   create_hypertable + drop_chunks. **pgvector integration is skipped until

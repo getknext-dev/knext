@@ -23,7 +23,7 @@
  * Deferring *work* therefore does nothing for the module GRAPH — it loads before
  * the spawn regardless. The supervisor's heavy graphs are:
  *
- *  - `@knext/lib/clients` → `@cerbos/grpc` + `minio` + `pg` (needed only to close
+ *  - `@getknext/lib/clients` → `@cerbos/grpc` + `minio` + `pg` (needed only to close
  *    two pools at SIGTERM) — moved to a dynamic import in `db-drain.ts`;
  *  - `./metrics` → `@opentelemetry/api` + `prom-client` (needed only to serve
  *    :9091) — moved behind {@link createLazyMetricsEndpoint};
@@ -47,7 +47,7 @@
  * `http.createServer(...).listen()` is free (it samples nothing and pulls no heavy
  * module), so the FIRST attempt's regression was deferring the `listen()` itself.
  * The expensive thing is the ~790ms module GRAPH (`prom-client` +
- * `@opentelemetry/api` via `./metrics`, plus the `@knext/lib` clients via
+ * `@opentelemetry/api` via `./metrics`, plus the `@getknext/lib` clients via
  * `db-drain`), NOT binding a socket. So the split is:
  *
  *  - {@link LazyMetricsEndpoint.ensureListening} binds :9091 EARLY with a

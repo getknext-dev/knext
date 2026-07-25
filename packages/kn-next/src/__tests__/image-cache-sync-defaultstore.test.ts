@@ -1,7 +1,7 @@
 /**
  * image-cache-sync — the DEFAULT MinIO-backed store (defaultStore()). When no
  * store is injected, the module lazily builds an ImageVariantStore over
- * @knext/lib/clients' getMinioClient() (listObjectsV2 stream → keys; fGetObject
+ * @getknext/lib/clients' getMinioClient() (listObjectsV2 stream → keys; fGetObject
  * → download; fPutObject → upload). These tests mock that client so the real
  * closures run without a live MinIO, covering restore/push through the default
  * store, plus the "client unavailable" degrade path.
@@ -16,7 +16,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 // Mutable client double the mock resolves to; swapped per test.
 const clientRef = vi.hoisted(() => ({ current: null as unknown }));
 const getMinioClient = vi.hoisted(() => vi.fn(() => clientRef.current));
-vi.mock("@knext/lib/clients", () => ({ getMinioClient }));
+vi.mock("@getknext/lib/clients", () => ({ getMinioClient }));
 
 import {
     restoreImageCache,

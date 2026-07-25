@@ -222,7 +222,7 @@ if (process.versions.bun) {
 // is a no-op when its pool was never opened. Extracted to ./db-drain so the lib
 // pools stay free of any dependency on the runtime — no circular dep.
 //
-// #441: the HOOK is registered here, eagerly. Only `@knext/lib/clients` itself
+// #441: the HOOK is registered here, eagerly. Only `@getknext/lib/clients` itself
 // (@cerbos/grpc + minio + pg — the supervisor's heaviest graph, needed solely to
 // close two pools) is loaded lazily, inside the drain. That closes no safety
 // window: the handler exists from this point on.

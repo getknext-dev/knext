@@ -55,14 +55,14 @@ const nextConfig: NextConfig = {
   // `src/instrumentation-node.ts`, loaded via a dynamic import guarded at
   // RUNTIME behind `process.env.NEXT_RUNTIME === 'nodejs'` — but webpack
   // STATICALLY traces that dynamic import into BOTH runtime bundles, so the
-  // edge compile would pull in `@knext/lib/clients` →
+  // edge compile would pull in `@getknext/lib/clients` →
   // `@cerbos/grpc`/`@grpc/grpc-js`/`pg`/`minio` and fail with
   // `Module not found`.
   //
   // The load-bearing edge exclusion — an `IgnorePlugin` replacing
   // `instrumentation-node` with an empty module on the EDGE compile ONLY — is
   // PLATFORM-OWNED since #356: the knext adapter's `modifyConfig` injects it
-  // (see `./next-adapter.ts` → `@knext/core/adapter`, wired via `adapterPath`
+  // (see `./next-adapter.ts` → `@getknext/core/adapter`, wired via `adapterPath`
   // above; unit-guarded by `adapter-edge-ignore-plugin.test.ts`). This app
   // deliberately does NOT hand-write that webpack hook; the adapter composes
   // the fence after any app-owned webpack fn. The guard in

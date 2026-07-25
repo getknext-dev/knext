@@ -1,25 +1,25 @@
-# @knext/db — Public API
+# @getknext/db — Public API
 
 > **Status:** finalized for the shipped surface (ADR-0021, epic #235 complete —
 > clients #245, schema #247, migrate runner #242/#248, extensions #240/#241/#249).
 > The user guide is [`docs/guides/drizzle-sdk.md`](../../../docs/guides/drizzle-sdk.md).
 
-`@knext/db` follows semver. Only the subpaths listed below are public; anything
+`@getknext/db` follows semver. Only the subpaths listed below are public; anything
 not listed is internal and may change without a major bump.
 
 ## Stable subpaths
 
 | Subpath | Status | Exports |
 |---|---|---|
-| `@knext/db` (`.`) | **public** | `getDb`, `getDbRO`, and the re-exported drizzle-orm query surface (`eq`, `and`, `or`, `sql`, the query builder, …). |
-| `@knext/db/schema` | **public** | drizzle `pg-core` primitives (`pgTable`, column + index + constraint builders) plus `relations`/`sql`, re-exported from one place, **and** the TimescaleDB + pgvector extension helpers (`hypertable`/`dropChunks`/`createTimescaleExtension`, `hnsw`/`ivfflat`/`createVectorExtension`, `cosineDistance`/`l2Distance`/`innerProduct`). |
-| `@knext/db/migrate` | **public** | `defineDrizzleConfig()`, the one-shot writer-only runner `runMigrations()` / `resolveWriterDsn()`, `RO_GATEWAY_PORT`, and `DEFAULT_SCHEMA_PATH` / `DEFAULT_MIGRATIONS_DIR`. |
+| `@getknext/db` (`.`) | **public** | `getDb`, `getDbRO`, and the re-exported drizzle-orm query surface (`eq`, `and`, `or`, `sql`, the query builder, …). |
+| `@getknext/db/schema` | **public** | drizzle `pg-core` primitives (`pgTable`, column + index + constraint builders) plus `relations`/`sql`, re-exported from one place, **and** the TimescaleDB + pgvector extension helpers (`hypertable`/`dropChunks`/`createTimescaleExtension`, `hnsw`/`ivfflat`/`createVectorExtension`, `cosineDistance`/`l2Distance`/`innerProduct`). |
+| `@getknext/db/migrate` | **public** | `defineDrizzleConfig()`, the one-shot writer-only runner `runMigrations()` / `resolveWriterDsn()`, `RO_GATEWAY_PORT`, and `DEFAULT_SCHEMA_PATH` / `DEFAULT_MIGRATIONS_DIR`. |
 
-### `@knext/db` (`.`)
+### `@getknext/db` (`.`)
 
 - **`getDb<TSchema>(schema?): NodePgDatabase<TSchema>`** — drizzle client over the
-  `@knext/lib` **writer** pool (`DATABASE_URL`). Read-your-writes, single-writer.
-  Lazy singleton per pod; the pool drains on SIGTERM via `@knext/lib`'s
+  `@getknext/lib` **writer** pool (`DATABASE_URL`). Read-your-writes, single-writer.
+  Lazy singleton per pod; the pool drains on SIGTERM via `@getknext/lib`'s
   `closeDbPool()`.
 - **`getDbRO<TSchema>(schema?): NodePgDatabase<TSchema>`** — drizzle client over the
   **read-only** pool (`DATABASE_URL_RO`, bounded-staleness ~9s, no read-your-writes).
@@ -27,14 +27,14 @@ not listed is internal and may change without a major bump.
   writer** and emits a one-time warning.
 - **drizzle-orm re-exports** — the package root re-exports drizzle-orm's operators
   and query builder (`export * from 'drizzle-orm'`). drizzle-orm's own semver +
-  docs govern these; `@knext/db` declares drizzle-orm a **hard `dependency`** (it is
+  docs govern these; `@getknext/db` declares drizzle-orm a **hard `dependency`** (it is
   a real runtime dep — it is NOT an optional peer, ADR-0021 amendment 2026-07-14).
-  The re-exported drizzle-orm **range is part of `@knext/db`'s semver contract**: a
+  The re-exported drizzle-orm **range is part of `@getknext/db`'s semver contract**: a
   range change that could move an app to an incompatible drizzle-orm is at least a
-  **minor** `@knext/db` release. To pin a specific drizzle-orm yourself, use your
+  **minor** `@getknext/db` release. To pin a specific drizzle-orm yourself, use your
   package manager's `overrides` / `resolutions`.
 
-### `@knext/db/schema`
+### `@getknext/db/schema`
 
 - The one place an app imports its table/column vocabulary from — a thin re-export
   of drizzle-orm's `pg-core` (`pgTable`, the column builders incl. `vector`,
@@ -43,7 +43,7 @@ not listed is internal and may change without a major bump.
   apply directly.
 - **Extension helpers** slot in **on top of** this surface without changing it —
   they are migration **SQL emitters** (strings), since drizzle-kit does not model
-  these. All are exported from `@knext/db/schema` (and the distance operators from
+  these. All are exported from `@getknext/db/schema` (and the distance operators from
   the package root too):
   - **TimescaleDB (#240)** — `hypertable(table, { by, chunkInterval?, ifNotExists?,
     migrateData? }): string` (emits `create_hypertable`), `dropChunks(table, {
@@ -60,7 +60,7 @@ not listed is internal and may change without a major bump.
     from drizzle: `cosineDistance` (`<=>`), `l2Distance` (`<->`), `innerProduct`
     (`<#>`). Requires scale-zero-pg ≥ v1.4.0.
 
-### `@knext/db/migrate`
+### `@getknext/db/migrate`
 
 - **`defineDrizzleConfig(options?): Config`** — builds a valid `drizzle.config.ts`
   for a NextApp: dialect `postgresql`, the **writer** DSN (`process.env.DATABASE_URL`
@@ -87,7 +87,7 @@ not listed is internal and may change without a major bump.
   value import** at module top-level. `defineDrizzleConfig()` lazily probes that the
   peer resolves and, when it is absent, throws an **actionable named-peer error**
   ("drizzle-kit is required for defineDrizzleConfig — install it as a devDependency"),
-  never a bare `ERR_MODULE_NOT_FOUND`. The `@knext/db` main entry (`.`) and
+  never a bare `ERR_MODULE_NOT_FOUND`. The `@getknext/db` main entry (`.`) and
   `runMigrations()` load without drizzle-kit installed; `runMigrations()` uses
   drizzle-**orm**'s migrator + `pg` (runtime). Pinned by
   `packages/db/src/__tests__/peer-shape.test.ts`.
@@ -99,4 +99,4 @@ not listed is internal and may change without a major bump.
   behaviour, or the path defaults require a major bump.
 - The re-exported drizzle surface (root query operators + `./schema` builders)
   tracks the pinned `drizzle-orm` range; a drizzle major bump that changes those
-  exports is a `@knext/db` major bump.
+  exports is a `@getknext/db` major bump.

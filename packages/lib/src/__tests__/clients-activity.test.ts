@@ -33,7 +33,7 @@ vi.mock('pg', () => ({
   },
 }));
 
-describe('@knext/lib/clients — DB activity tracking (#348 gate fix)', () => {
+describe('@getknext/lib/clients — DB activity tracking (#348 gate fix)', () => {
   beforeEach(async () => {
     vi.resetModules();
     vi.useRealTimers();

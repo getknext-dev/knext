@@ -127,7 +127,7 @@ describe('compat-suite workflow pnpm pin (test-e2e-deploy.yml)', () => {
   });
 
   // ── Engine-clash regression guard (the #137 follow-up) ──────────────────────
-  // build-next pins action-setup pnpm to 10.4.1 for the knext @knext/lib/core
+  // build-next pins action-setup pnpm to 10.4.1 for the knext @getknext/lib/core
   // builds, but next.js v16.0.3 declares `packageManager: pnpm@9.6.0`. A single
   // global pnpm cannot satisfy both: running `pnpm install` inside next.js under
   // 10.4.1 fails the engine check and every deploy-tests shard SKIPs. The fix is
@@ -2731,9 +2731,9 @@ describe('compat-suite sandbox-fetch REALM debug (path 3 containment, #188)', ()
     ).toBe(false);
   });
 
-  it('the realm-debug module resolves from the installed @knext/core tarball (with in-repo fallback)', () => {
+  it('the realm-debug module resolves from the installed @getknext/core tarball (with in-repo fallback)', () => {
     expect(
-      /@knext\/core\/internal\/sandbox-fetch-realm-debug/.test(deployScript),
+      /@getknext\/core\/internal\/sandbox-fetch-realm-debug/.test(deployScript),
       'the deploy script must resolve the realm-debug module from the installed package',
     ).toBe(true);
     expect(

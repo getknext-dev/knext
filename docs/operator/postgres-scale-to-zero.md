@@ -202,7 +202,7 @@ invariant** rather than a convention, declare `spec.scaling.poolMax` on the `Nex
   connection budget = the scale-zero-pg gateway's `GW_MAX_CONNS` 90 minus admin/replication reserve —
   ADR-0028).
 - When `poolMax` is declared, the operator **injects it into the app container as
-  `KNEXT_DB_POOL_MAX`**, and `@knext/lib`'s `getDbPool()` **caps the pg pool `max` at that value**.
+  `KNEXT_DB_POOL_MAX`**, and `@getknext/lib`'s `getDbPool()` **caps the pg pool `max` at that value**.
   This closes the declared-vs-runtime drift: the number the operator gated at admission is the number
   the pool actually opens at runtime. **Precedence: the minimum of the app's `DB_POOL_MAX` (or the
   default 5) and `KNEXT_DB_POOL_MAX` wins** — an app may be *more* conservative than the budget, never

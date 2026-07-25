@@ -88,7 +88,7 @@ in-core-vs-recipe split, and never treat an unbuilt generator as shipping.
 
 - **Official adapter, not a fork.** Built on the official Deployment Adapter API (`NextAdapter`,
   top-level `adapterPath` on Next.js 16.2+, `output: 'standalone'`). knext ships the adapter as a
-  reusable package export (`@knext/core/adapter`). See [Official adapter](/docs/official-adapter).
+  reusable package export (`@getknext/core/adapter`). See [Official adapter](/docs/official-adapter).
 - **Verified compatibility.** The official `vercel/next.js` deploy-mode e2e suite runs against
   knext nightly: 778 tests, zero failures on Node. See
   [Verified compatibility](/docs/compat-suite).
@@ -105,7 +105,7 @@ in-core-vs-recipe split, and never treat an unbuilt generator as shipping.
   into a Knative Service, reports honest `Ready`/`Degraded` conditions, and rejects
   non-digest-pinned (`:latest`) images. See [Operator & the NextApp CRD](/docs/operator).
 - **Bring-your-own database.** knext is engine-agnostic: bind an existing Postgres by supplying a
-  `DATABASE_URL` from a Kubernetes Secret — knext provisions nothing. The optional `@knext/db`
+  `DATABASE_URL` from a Kubernetes Secret — knext provisions nothing. The optional `@getknext/db`
   layer wraps drizzle-orm over that DSN with a typed schema, one-shot writer-only migrations
   (`kn-next db migrate`), and explicit read/write clients (`getDb()` / `getDbRO()`). See
   [Databases](/docs/databases) and the [Data SDK](/docs/data-sdk).
@@ -125,7 +125,7 @@ in this repo.
 
 <Callout type="info">
 **Honest status.** Right now this site is served on **Vercel** at `knext.dev` as an interim host
-while the self-host cluster and the `@knext/core` npm package are provisioned. Without
+while the self-host cluster and the `@getknext/core` npm package are provisioned. Without
 `KNEXT_ADAPTER=1` the repo builds as a vanilla Next.js app (which is what the managed host runs).
 **Migrating it onto knext is the dogfood target** — not yet the live deployment.
 </Callout>

@@ -5,15 +5,15 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { defineDrizzleConfig } from '../migrate';
 
-// v3-P3c — the @knext/db peer/dependency shape contract (ADR-0021 amendment,
+// v3-P3c — the @getknext/db peer/dependency shape contract (ADR-0021 amendment,
 // supersedes Open decision 6). Two invariants:
 //
 //   1. `drizzle-orm` is a HARD `dependency` (the package re-exports it — it is a
 //      real runtime dep) and is NOT also declared an optional peer. A dependency
 //      cannot coherently be both; the duplicate is dropped and the re-exported
-//      range is part of @knext/db's semver contract.
+//      range is part of @getknext/db's semver contract.
 //   2. `drizzle-kit` stays an OPTIONAL peer, LAZILY resolved only inside
-//      `defineDrizzleConfig`. The main entry (`@knext/db`) and the migration
+//      `defineDrizzleConfig`. The main entry (`@getknext/db`) and the migration
 //      runner (`runMigrations`) must import + run WITHOUT drizzle-kit installed;
 //      touching `defineDrizzleConfig` without it yields an ACTIONABLE named-peer
 //      error, never a bare ERR_MODULE_NOT_FOUND.
@@ -22,7 +22,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const pkgDir = join(__dirname, '..', '..');
 const pkg = JSON.parse(readFileSync(join(pkgDir, 'package.json'), 'utf8'));
 
-describe('@knext/db package.json — dependency / peer shape (v3-P3c)', () => {
+describe('@getknext/db package.json — dependency / peer shape (v3-P3c)', () => {
   it('declares drizzle-orm as a hard runtime dependency', () => {
     expect(pkg.dependencies?.['drizzle-orm']).toBeTruthy();
     expect(typeof pkg.dependencies['drizzle-orm']).toBe('string');
@@ -39,7 +39,7 @@ describe('@knext/db package.json — dependency / peer shape (v3-P3c)', () => {
   });
 });
 
-describe('@knext/db — defineDrizzleConfig drizzle-kit peer guard (v3-P3c)', () => {
+describe('@getknext/db — defineDrizzleConfig drizzle-kit peer guard (v3-P3c)', () => {
   it('produces a config when drizzle-kit resolves (present)', () => {
     const cfg = defineDrizzleConfig({}, { resolveDrizzleKit: () => '/some/path/drizzle-kit' });
     expect(cfg.dialect).toBe('postgresql');
@@ -69,16 +69,16 @@ describe('@knext/db — defineDrizzleConfig drizzle-kit peer guard (v3-P3c)', ()
   });
 });
 
-// The real-world contract: load the BUILT @knext/db main entry + the migrate
+// The real-world contract: load the BUILT @getknext/db main entry + the migrate
 // runner in a subprocess where `drizzle-kit` cannot resolve, and prove:
-//   - `require('@knext/db')` succeeds (re-exports drizzle-orm) — no drizzle-kit.
+//   - `require('@getknext/db')` succeeds (re-exports drizzle-orm) — no drizzle-kit.
 //   - `runMigrations` is importable and reachable (guards the DSN with no db).
 //   - `defineDrizzleConfig()` (the ONE surface that needs drizzle-kit) throws the
 //     actionable named error, NOT a bare MODULE_NOT_FOUND / ERR_MODULE_NOT_FOUND.
 // Mechanism: a child node process with a CJS `--require` preload that patches
 // Module._resolveFilename so `drizzle-kit` (and only it) is unresolvable — the
 // same choke point the compiled `require.resolve('drizzle-kit')` probe hits.
-describe('@knext/db — built main entry loads with drizzle-kit ABSENT (v3-P3c)', () => {
+describe('@getknext/db — built main entry loads with drizzle-kit ABSENT (v3-P3c)', () => {
   const distIndex = join(pkgDir, 'dist', 'index.js');
   const distMigrate = join(pkgDir, 'dist', 'migrate.js');
   const preload = join(pkgDir, 'src', '__tests__', 'fixtures', 'hide-drizzle-kit.cjs');

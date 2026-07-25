@@ -4,7 +4,7 @@
  *
  * Container images are Trivy-gated before push (.github/workflows/supply-chain.yml,
  * operator-supply-chain.yml). The npm TARBALLS the release workflows publish —
- * `@knext/{core,lib,db}` on npmjs (release.yml) and `@getknext-dev/{core,lib,db}`
+ * `@getknext/{core,lib,db}` on npmjs (release.yml) and `@getknext-dev/{core,lib,db}`
  * on GitHub Packages (release-ghp.yml) — had NO equivalent gate. This script is
  * that gate, run as a publish-BLOCKING job in BOTH workflows (the publish job
  * `needs:` the audit job), closing a real .claude/rules/security.md gap ("scan
@@ -27,7 +27,7 @@
  *   4. Generate a CycloneDX JS SBOM (`@cyclonedx/cyclonedx-npm`, prod-only) per
  *      published package into sbom/ for the workflow to upload as an artifact.
  *
- * SCOPE = the PUBLISHED set {@knext/core, @knext/lib, @knext/db} (ADR-0020).
+ * SCOPE = the PUBLISHED set {@getknext/core, @getknext/lib, @getknext/db} (ADR-0020).
  * The private/changeset-ignored UI package (packages/ui) is deliberately OUT of
  * scope — it is never published, so it carries no consumer supply-chain risk.
  *
@@ -56,9 +56,9 @@ const sbomOutDir = resolve(repoRoot, 'sbom');
 // The PUBLISHED package set (ADR-0020), in dependency order (lib → db → core).
 // The private UI package is excluded — it is in the changeset ignore list, never shipped.
 const PUBLISHED = [
-  { name: '@knext/lib', dir: join(repoRoot, 'packages', 'lib') },
-  { name: '@knext/db', dir: join(repoRoot, 'packages', 'db') },
-  { name: '@knext/core', dir: join(repoRoot, 'packages', 'kn-next') },
+  { name: '@getknext/lib', dir: join(repoRoot, 'packages', 'lib') },
+  { name: '@getknext/db', dir: join(repoRoot, 'packages', 'db') },
+  { name: '@getknext/core', dir: join(repoRoot, 'packages', 'kn-next') },
 ];
 
 // The audit threshold — HIGH and CRITICAL fail the gate (mirror security.md +

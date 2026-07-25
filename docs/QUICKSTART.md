@@ -2,7 +2,7 @@
 
 This guide takes you from an empty cluster to a deployed Next.js app that scales
 to zero when idle and cold-starts on the next request. It uses only published
-artifacts: the `kn-next-operator` install bundle and the `@knext/core` CLI.
+artifacts: the `kn-next-operator` install bundle and the `@getknext/core` CLI.
 
 **The flow:** install the operator once per cluster → install the CLI → add a
 small config to your Next.js app → `kn-next deploy` builds and pushes your image
@@ -35,11 +35,11 @@ Service with `minScale: 0`.
 ## Step 0 — Preflight the cluster with `kn-next doctor`
 
 Before (and after) installing anything, let the CLI check the cluster for you.
-Once the CLI is available (Step 2 — or just `npx --package @knext/core kn-next
+Once the CLI is available (Step 2 — or just `npx --package @getknext/core kn-next
 doctor` without installing), run:
 
 ```sh
-npx @knext/core doctor
+npx @getknext/core doctor
 ```
 
 It verifies, read-only, everything the deploy path depends on: Knative Serving
@@ -94,19 +94,19 @@ cosign verify ghcr.io/getknext-dev/kn-next-operator@sha256:<digest> \
 
 ## Step 2 — Install the CLI
 
-Add `@knext/core` to your Next.js app as a dev dependency (this also gives you
+Add `@getknext/core` to your Next.js app as a dev dependency (this also gives you
 the config types):
 
 ```sh
-npm install --save-dev @knext/core
+npm install --save-dev @getknext/core
 ```
 
-This installs the `kn-next` command, runnable with `npx @knext/core`. You can also
-install it globally (`npm install -g @knext/core`) if you prefer a bare
+This installs the `kn-next` command, runnable with `npx @getknext/core`. You can also
+install it globally (`npm install -g @getknext/core`) if you prefer a bare
 `kn-next` on your PATH. Sanity check:
 
 ```sh
-npx @knext/core --help
+npx @getknext/core --help
 ```
 
 ## Step 3 — Prepare your Next.js app
@@ -206,7 +206,7 @@ Create `kn-next.config.ts` next to your `package.json`. This is the smallest
 config that works — `name`, `registry`, and `storage` are required:
 
 ```ts
-import type { KnativeNextConfig } from "@knext/core";
+import type { KnativeNextConfig } from "@getknext/core";
 
 const config: KnativeNextConfig = {
   // App name — becomes the NextApp resource and Knative Service name.
@@ -234,13 +234,13 @@ the cluster apply, and prints the `NextApp` resource the CLI would submit. It
 still runs `next build` — add `--skip-build` to skip that too:
 
 ```sh
-npx @knext/core deploy --dry-run --skip-build
+npx @getknext/core deploy --dry-run --skip-build
 ```
 
 Then deploy for real:
 
 ```sh
-npx @knext/core deploy
+npx @getknext/core deploy
 ```
 
 One command does all of it, in order:
@@ -270,10 +270,10 @@ that never programs), `Degraded`, and the database binding. `kn-next status`
 renders it without a `kubectl describe`:
 
 ```sh
-npx @knext/core status
+npx @getknext/core status
 ```
 
-Pass the app name explicitly (`npx @knext/core status hello-knext -n default`) when
+Pass the app name explicitly (`npx @getknext/core status hello-knext -n default`) when
 you're outside the app directory. Useful flags:
 
 - `--watch` — poll every 5 s until the app is Ready (bounded at 10 minutes).
@@ -338,7 +338,7 @@ kubectl patch serviceaccount hello-knext-sa \
   -p '{"imagePullSecrets": [{"name": "ghcr-pull"}]}'
 ```
 
-Then re-run `npx @knext/core deploy --skip-build --skip-upload` to roll a fresh
+Then re-run `npx @getknext/core deploy --skip-build --skip-upload` to roll a fresh
 revision.
 
 ## Cleaning up

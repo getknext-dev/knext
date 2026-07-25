@@ -622,7 +622,7 @@ A single pod runs the real application image
 (`me-abudhabi-1.ocir.io/.../file-manager:ht-bdfa2fa`) with an `emptyDir` mounted at `/ccache` as the
 compile-cache directory. Inside that pod:
 
-1. Boot the **same runtime entry the image's `CMD` boots** — `node -e import('@knext/core/internal/node-server')`
+1. Boot the **same runtime entry the image's `CMD` boots** — `node -e import('@getknext/core/internal/node-server')`
    with `STANDALONE_SERVER_PATH=apps/file-manager/server.js` — not a proxy script.
 2. Wait on the **shallow, dependency-free `/api/health` route**, so the timing measures server boot
    rather than database or Redis readiness.
@@ -1107,7 +1107,7 @@ unmeasured; run 13 is the closest apples-to-apples build/boot comparison to date
 ## Run 14 (2026-07-21) — supervisor non-safety init deferred off cold-start (#441/#443)
 
 The node/official-adapter path's own cold-start optimization: the knext supervisor's heavy import
-graphs (`@knext/lib/clients` → `@cerbos/grpc`+`minio`+`pg`; `./metrics` → `prom-client`+OTel;
+graphs (`@getknext/lib/clients` → `@cerbos/grpc`+`minio`+`pg`; `./metrics` → `prom-client`+OTel;
 `./image-cache-sync`) are converted from **static to dynamic imports** so they load **after** the
 child is serving rather than before the spawn. `:9091` still binds eagerly (lightweight listener,
 heavy collector lazy on first scrape) and all SIGTERM shutdown-safety wiring stays eager.
@@ -1344,8 +1344,8 @@ parent overhead with the current code (it does **not**, and cannot, re-measure t
 **fast fixture** stands in for Next's `server.js` (binds `$PORT` and answers `/api/health`
 instantly) so the ~1957 ms Next boot is removed and only the supervisor's own overhead remains.
 - **DIRECT** — `node <fast-fixture>` binding `$PORT`.
-- **SUPERVISOR** — the shipped CMD `node -e "import('@knext/core/internal/node-server')"` (from a
-  self-contained `pnpm --filter @knext/core --prod deploy`, mirroring the drain-e2e runner) spawning
+- **SUPERVISOR** — the shipped CMD `node -e "import('@getknext/core/internal/node-server')"` (from a
+  self-contained `pnpm --filter @getknext/core --prod deploy`, mirroring the drain-e2e runner) spawning
   the same fixture via `STANDALONE_SERVER_PATH`.
 Each pair times spawn → first `/api/health` 200.
 

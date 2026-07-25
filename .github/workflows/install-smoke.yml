@@ -1,6 +1,6 @@
 name: Install smoke (outside consumer)
 
-# PK2 / #115 — the OUTSIDE-CONSUMER gate. Packs the real @knext/lib + @knext/core
+# PK2 / #115 — the OUTSIDE-CONSUMER gate. Packs the real @getknext/lib + @getknext/core
 # tarballs and installs them in a clean dir OUTSIDE the workspace on plain npm + Node,
 # with NO Bun on PATH, then proves BOTH consumer paths work: the `kn-next` CLI runs AND
 # an app can import the public library/adapter surface (resolving to real JS, no raw .ts).
@@ -33,8 +33,8 @@ jobs:
         with:
           node-version: '24'
 
-      # pnpm is needed ONLY to build + pack (it rewrites @knext/core's `workspace:^`
-      # dep on @knext/lib the same way `changeset publish` does). The INSTALL + RUN
+      # pnpm is needed ONLY to build + pack (it rewrites @getknext/core's `workspace:^`
+      # dep on @getknext/lib the same way `changeset publish` does). The INSTALL + RUN
       # legs use plain npm + node — the outside-consumer experience.
       - name: Setup pnpm
         uses: pnpm/action-setup@v4

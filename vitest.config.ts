@@ -2,17 +2,17 @@ import { resolve } from 'node:path';
 import react from '@vitejs/plugin-react';
 import { configDefaults, defineConfig } from 'vitest/config';
 
-// Resolve @knext/lib subpaths to source (not dist) in tests.
+// Resolve @getknext/lib subpaths to source (not dist) in tests.
 // CI runs `pnpm install` then `vitest` without building lib first, so dist/ is absent.
 // This alias is test-only: `next build` and the standalone runtime still use real dist.
 const LIB_SRC = resolve(import.meta.dirname, 'packages/lib/src');
-// Same rationale for @knext/db — the apps/db-demo example's unit test imports the
+// Same rationale for @getknext/db — the apps/db-demo example's unit test imports the
 // SDK before any dist exists (clean-from-root run). Test-only; the real build uses dist.
 const DB_SRC = resolve(import.meta.dirname, 'packages/db/src');
-// Same rationale for the pure `@knext/core/validate` surface — the docs
+// Same rationale for the pure `@getknext/core/validate` surface — the docs
 // config-quality gate (apps/docs/scripts/config.test.ts) imports validateConfig
-// before any @knext/core dist exists on a clean run, so resolve it to source.
-// Only the pure validate subpath is aliased (never bare `@knext/core`, whose
+// before any @getknext/core dist exists on a clean run, so resolve it to source.
+// Only the pure validate subpath is aliased (never bare `@getknext/core`, whose
 // many dist subpaths must keep resolving normally). The dist-surface contract
 // tests read dist by path, so they are unaffected.
 const CORE_SRC = resolve(import.meta.dirname, 'packages/kn-next/src');
@@ -21,15 +21,15 @@ export default defineConfig({
   plugins: [react()],
   resolve: {
     alias: {
-      '@knext/lib/clients': resolve(LIB_SRC, 'clients.ts'),
-      '@knext/lib/context': resolve(LIB_SRC, 'context/index.ts'),
-      '@knext/lib/health': resolve(LIB_SRC, 'health/index.ts'),
-      '@knext/lib/logger': resolve(LIB_SRC, 'logger/index.ts'),
-      '@knext/lib': resolve(LIB_SRC, 'index.ts'),
-      '@knext/db/schema': resolve(DB_SRC, 'schema.ts'),
-      '@knext/db/migrate': resolve(DB_SRC, 'migrate.ts'),
-      '@knext/db': resolve(DB_SRC, 'index.ts'),
-      '@knext/core/validate': resolve(CORE_SRC, 'validate-public.ts'),
+      '@getknext/lib/clients': resolve(LIB_SRC, 'clients.ts'),
+      '@getknext/lib/context': resolve(LIB_SRC, 'context/index.ts'),
+      '@getknext/lib/health': resolve(LIB_SRC, 'health/index.ts'),
+      '@getknext/lib/logger': resolve(LIB_SRC, 'logger/index.ts'),
+      '@getknext/lib': resolve(LIB_SRC, 'index.ts'),
+      '@getknext/db/schema': resolve(DB_SRC, 'schema.ts'),
+      '@getknext/db/migrate': resolve(DB_SRC, 'migrate.ts'),
+      '@getknext/db': resolve(DB_SRC, 'index.ts'),
+      '@getknext/core/validate': resolve(CORE_SRC, 'validate-public.ts'),
       // The bare `server-only` specifier is provided by the Next compiler at
       // build time (next/dist/compiled/server-only) and is not resolvable at the
       // repo root. Alias it to a no-op stub so server-only modules (e.g. the
@@ -70,15 +70,15 @@ export default defineConfig({
         '**/*.config.{ts,js,mjs}',
       ],
       // Regression ratchet: floors set just below the measured baseline
-      // (@knext/core ~78% lines / ~72% branches on 2026-07-24; lib/db/ui already
+      // (@getknext/core ~78% lines / ~72% branches on 2026-07-24; lib/db/ui already
       // >90%). CI fails if coverage drops below these — they are RAISED toward 90
-      // as the @knext/core coverage push lands. See docs/benchmarks/coverage-baseline.md.
+      // as the @getknext/core coverage push lands. See docs/benchmarks/coverage-baseline.md.
       thresholds: {
         statements: 77,
         branches: 70,
         functions: 74,
         lines: 77,
-        // Per-package floor for @knext/core (packages/kn-next). The @knext/core
+        // Per-package floor for @getknext/core (packages/kn-next). The @getknext/core
         // coverage push (2026-07) raised its lines to ~90% (from ~78%); this glob
         // threshold pins that per-package so the aggregate ratchet above can no
         // longer mask a regression in this one package (reviewers flagged

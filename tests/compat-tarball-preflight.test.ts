@@ -8,18 +8,18 @@ import { describe, expect, it } from 'vitest';
  * GUARD TESTS for #147 A3-3 fix round 1 (triage of baseline run 28558576615).
  *
  * That run's 491 "failures" carried ZERO adapter signal: `scripts/e2e-deploy.sh`
- * packed @knext/core with `npm pack`, which ships pnpm's raw `workspace:^` dep on
- * @knext/lib verbatim (npm does NOT rewrite the workspace protocol on pack) → the
+ * packed @getknext/core with `npm pack`, which ships pnpm's raw `workspace:^` dep on
+ * @getknext/lib verbatim (npm does NOT rewrite the workspace protocol on pack) → the
  * per-fixture `npm install <tarball>` died with EUNSUPPORTEDPROTOCOL in EVERY
  * fixture, `next build` ran ZERO times, and 472/473 real failing files were this
  * ONE bug. These tests pin the fix:
  *
  *  1. Tarballs are packed with `pnpm pack` (rewrites `workspace:^` → real semver)
- *     for BOTH @knext/lib AND @knext/core, ONCE in the workflow (not per test —
+ *     for BOTH @getknext/lib AND @getknext/core, ONCE in the workflow (not per test —
  *     per-test packing also raced at runner concurrency 2), staged at a stable
  *     path the deploy script reuses via KNEXT_E2E_TARBALLS_DIR.
  *  2. Both tarballs are installed in ONE `npm install` so npm satisfies the
- *     rewritten `@knext/lib@^x` dep from the local lib tarball (it is not on npm
+ *     rewritten `@getknext/lib@^x` dep from the local lib tarball (it is not on npm
  *     yet — #53 is human-blocked).
  *  3. A fail-fast PREFLIGHT gate (scripts/e2e-preflight.mjs: scratch npm install
  *     + adapter resolve smoke) runs in build-next BEFORE the 16 shards spawn and
@@ -58,7 +58,7 @@ function jobBlock(jobId: string): string {
   expect(start, `job "${jobId}" must exist in the workflow`).toBeGreaterThanOrEqual(0);
   let end = lines.length;
   for (let i = start + 1; i < lines.length; i++) {
-    if (/^  \S/.test(lines[i])) {
+    if (/^ {2}\S/.test(lines[i])) {
       end = i;
       break;
     }
@@ -93,9 +93,9 @@ function findStep(job: string, namePattern: RegExp): string {
 }
 
 describe('compat-suite installable adapter tarball — pack once with pnpm pack (#147 fix round 1)', () => {
-  it('build-next packs @knext/lib, @knext/db AND @knext/core with `pnpm pack` into a stable knext-tarballs dir', () => {
-    // #255/#256: @knext/core depends on @knext/db (workspace:^ → ^0.1.0 on pack);
-    // @knext/db is unpublished, so a lib+core-only pack set 404s every install.
+  it('build-next packs @getknext/lib, @getknext/db AND @getknext/core with `pnpm pack` into a stable knext-tarballs dir', () => {
+    // #255/#256: @getknext/core depends on @getknext/db (workspace:^ → ^0.1.0 on pack);
+    // @getknext/db is unpublished, so a lib+core-only pack set 404s every install.
     const job = jobBlock('build-next');
     const pack = findStep(job, /[Pp]ack .*(tarball|adapter)/);
     expect(pack).toMatch(/pnpm pack/);
@@ -142,10 +142,10 @@ describe('compat-suite fail-fast preflight gate (#147 fix round 1)', () => {
     const text = readFileSync(PREFLIGHT_MJS, 'utf8');
     // The gate must do a REAL dependency-resolving npm install + a resolve smoke.
     expect(text).toMatch(/npm/);
-    expect(text).toMatch(/@knext\/core\/adapter/);
+    expect(text).toMatch(/@getknext\/core\/adapter/);
     // #255/#256: the db probe targets the EXACT subpath `kn-next db migrate`
-    // dynamically imports (db-migrate.ts: `await import("@knext/db/migrate")`).
-    expect(text).toMatch(/@knext\/db\/migrate/);
+    // dynamically imports (db-migrate.ts: `await import("@getknext/db/migrate")`).
+    expect(text).toMatch(/@getknext\/db\/migrate/);
     expect(text).toMatch(/::error::/);
   });
 
@@ -259,14 +259,14 @@ describe('scripts/e2e-deploy.sh installs an npm-installable dual tarball (#147 f
     expect(deployShText()).toMatch(/pnpm pack/);
   });
 
-  it('the local fallback + missing-tarball guard cover the @knext/db tarball (#255/#256)', () => {
+  it('the local fallback + missing-tarball guard cover the @getknext/db tarball (#255/#256)', () => {
     const text = deployShText();
-    expect(text).toMatch(/find_tarball "\$\{TARBALLS_DIR\}" knext-db/);
-    expect(text).toMatch(/knext-db-\*\.tgz/);
+    expect(text).toMatch(/find_tarball "\$\{TARBALLS_DIR\}" getknext-db/);
+    expect(text).toMatch(/getknext-db-\*\.tgz/);
   });
 
-  it('installs the lib, db AND core tarballs in ONE npm install (npm satisfies @knext/lib + @knext/db from the local tarballs)', () => {
-    // #255/#256: @knext/core's packed manifest carries `@knext/db@^0.1.0`
+  it('installs the lib, db AND core tarballs in ONE npm install (npm satisfies @getknext/lib + @getknext/db from the local tarballs)', () => {
+    // #255/#256: @getknext/core's packed manifest carries `@getknext/db@^0.1.0`
     // (unpublished) — without the db tarball in the SAME install, every
     // fixture install 404s exactly like the lib bug of run 28558576615.
     const line = deployShText()

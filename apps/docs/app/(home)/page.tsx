@@ -168,7 +168,7 @@ spec:
                 <li>
                   <span>03</span> query it with typed{' '}
                   <a href="/docs/databases">
-                    <code>@knext/db</code>
+                    <code>@getknext/db</code>
                   </a>{' '}
                   (Drizzle) — writer / bounded-stale reader split
                 </li>

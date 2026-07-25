@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-// Sentinel pools returned by the mocked @knext/lib clients — we assert which
+// Sentinel pools returned by the mocked @getknext/lib clients — we assert which
 // pool each drizzle client is wrapped over WITHOUT a real database.
 const WRITER_POOL = { id: 'writer-pool' };
 const RO_POOL = { id: 'ro-pool' };
@@ -9,11 +9,13 @@ const getDbPool = vi.fn(() => WRITER_POOL);
 const getDbPoolRO = vi.fn<() => unknown>(() => null);
 const warn = vi.fn();
 
-vi.mock('@knext/lib/clients', () => ({
+vi.mock('@getknext/lib/clients', () => ({
   getDbPool: () => getDbPool(),
   getDbPoolRO: () => getDbPoolRO(),
 }));
-vi.mock('@knext/lib/logger', () => ({ logger: { warn: (m: string) => warn(m), info: vi.fn() } }));
+vi.mock('@getknext/lib/logger', () => ({
+  logger: { warn: (m: string) => warn(m), info: vi.fn() },
+}));
 
 // Mock drizzle so no driver is touched; the returned client records its pool +
 // schema so tests can assert the wiring.
@@ -28,7 +30,7 @@ vi.mock('drizzle-orm/node-postgres', () => ({
   drizzle: (p: unknown, o?: { schema?: unknown }) => drizzle(p, o),
 }));
 
-describe('@knext/db — client accessors over the @knext/lib pools', () => {
+describe('@getknext/db — client accessors over the @getknext/lib pools', () => {
   beforeEach(() => {
     vi.resetModules(); // resets the module-level writer/reader singletons
     getDbPool.mockClear();
@@ -39,7 +41,7 @@ describe('@knext/db — client accessors over the @knext/lib pools', () => {
   });
 
   describe('getDb() — writer', () => {
-    it('wraps the @knext/lib writer pool (DATABASE_URL)', async () => {
+    it('wraps the @getknext/lib writer pool (DATABASE_URL)', async () => {
       const { getDb } = await import('../index');
       const db = getDb() as unknown as { pool: unknown };
       expect(getDbPool).toHaveBeenCalledTimes(1);

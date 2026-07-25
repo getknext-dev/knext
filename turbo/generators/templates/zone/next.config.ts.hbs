@@ -20,7 +20,7 @@ const nextConfig: NextConfig = {
   // (#342/#356, ADR-0031) — do NOT hand-write that webpack hook here; the
   // adapter composes the fence after any webpack fn you add yourself.
   adapterPath: path.resolve(import.meta.dirname, "next-adapter.ts"),
-  // ADR-0027 / #352: NEVER add @knext/lib to serverExternalPackages — it must
+  // ADR-0027 / #352: NEVER add @getknext/lib to serverExternalPackages — it must
   // stay bundled (not externalized) so the globalThis-anchored seam state
   // (`Symbol.for('knext.lib.*')`) survives the standalone bundle's webpack-layer
   // duplication.

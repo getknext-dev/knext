@@ -36,48 +36,48 @@ jobs:
       - name: Guard — no .ts/.tsx import extensions (TS5097)
         run: pnpm run lint:ts-imports
 
-      # @knext/core ships only dist/ and its exports resolve to ./dist/* (#114).
+      # @getknext/core ships only dist/ and its exports resolve to ./dist/* (#114).
       # The publish-surface test asserts every exports subpath exists in dist, so
-      # core MUST be built before vitest runs. @knext/lib must be built first —
-      # core's dts build imports @knext/lib/clients types (next-adapter.ts:122),
+      # core MUST be built before vitest runs. @getknext/lib must be built first —
+      # core's dts build imports @getknext/lib/clients types (next-adapter.ts:122),
       # so without lib's dist the core build hard-fails (TS2307). Same lib→core
       # order as the compat-smoke and bytecode jobs.
-      - name: Build @knext/lib
-        run: pnpm --filter @knext/lib build
+      - name: Build @getknext/lib
+        run: pnpm --filter @getknext/lib build
 
-      # @knext/core type-imports @knext/db (the `kn-next db migrate` runner lives
-      # in @knext/db/migrate, #242), so without db's dist the core build hard-fails
+      # @getknext/core type-imports @getknext/db (the `kn-next db migrate` runner lives
+      # in @getknext/db/migrate, #242), so without db's dist the core build hard-fails
       # (TS2307). db depends on lib, so the order is lib→db→core.
-      - name: Build @knext/db
-        run: pnpm --filter @knext/db build
+      - name: Build @getknext/db
+        run: pnpm --filter @getknext/db build
 
-      - name: Build @knext/core
-        run: pnpm --filter @knext/core build
+      - name: Build @getknext/core
+        run: pnpm --filter @getknext/core build
 
       # Typecheck gate (#261): per-package `tsc --noEmit` so the strict-mode
       # baseline can never regrow silently. Runs AFTER the lib→db→core builds
       # above because the checks are dist-dependent (core's cli/db-migrate.ts
-      # imports @knext/db/migrate, next-adapter.ts imports @knext/lib/clients —
+      # imports @getknext/db/migrate, next-adapter.ts imports @getknext/lib/clients —
       # both TS2307 without the upstream dist). lib/db typecheck through
       # tsconfig.typecheck.json, which (unlike their build tsconfigs) pulls the
       # test files into scope — the exact gap this gate closes.
-      - name: Typecheck @knext/lib (tsc --noEmit, tests in scope)
-        run: pnpm --filter @knext/lib typecheck
+      - name: Typecheck @getknext/lib (tsc --noEmit, tests in scope)
+        run: pnpm --filter @getknext/lib typecheck
 
-      - name: Typecheck @knext/db (tsc --noEmit, tests in scope)
-        run: pnpm --filter @knext/db typecheck
+      - name: Typecheck @getknext/db (tsc --noEmit, tests in scope)
+        run: pnpm --filter @getknext/db typecheck
 
-      - name: Typecheck @knext/core (tsc --noEmit, tests in scope)
-        run: pnpm --filter @knext/core typecheck
+      - name: Typecheck @getknext/core (tsc --noEmit, tests in scope)
+        run: pnpm --filter @getknext/core typecheck
 
-      # @knext/ui (private component lib) — self-contained, no dist deps; the
+      # @getknext/ui (private component lib) — self-contained, no dist deps; the
       # P6c coverage guard (ci-typecheck-contract.test.ts) requires every TS
       # workspace member be gated or documented-excluded.
-      - name: Typecheck @knext/ui (tsc --noEmit)
-        run: pnpm --filter @knext/ui typecheck
+      - name: Typecheck @getknext/ui (tsc --noEmit)
+        run: pnpm --filter @getknext/ui typecheck
 
-      # apps/db-demo — dist-dependent on @knext/db + @knext/core (imports
-      # @knext/db and @knext/db/schema), so it runs AFTER those builds above.
+      # apps/db-demo — dist-dependent on @getknext/db + @getknext/core (imports
+      # @getknext/db and @getknext/db/schema), so it runs AFTER those builds above.
       - name: Typecheck db-demo (tsc --noEmit)
         run: pnpm --filter db-demo typecheck
 
@@ -125,21 +125,21 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      # @knext/lib and @knext/core both ship only dist/ — they MUST be built
-      # before the app. file-manager imports @knext/core/adapters/otel-config and
-      # the KnativeNextConfig type, and @knext/core's exports now resolve to
+      # @getknext/lib and @getknext/core both ship only dist/ — they MUST be built
+      # before the app. file-manager imports @getknext/core/adapters/otel-config and
+      # the KnativeNextConfig type, and @getknext/core's exports now resolve to
       # ./dist/* (#114), so a missing core build breaks `next build`.
-      - name: Build @knext/lib
-        run: pnpm --filter @knext/lib build
+      - name: Build @getknext/lib
+        run: pnpm --filter @getknext/lib build
 
-      # @knext/core type-imports @knext/db (the `kn-next db migrate` runner lives
-      # in @knext/db/migrate, #242), so without db's dist the core build hard-fails
+      # @getknext/core type-imports @getknext/db (the `kn-next db migrate` runner lives
+      # in @getknext/db/migrate, #242), so without db's dist the core build hard-fails
       # (TS2307). db depends on lib, so the order is lib→db→core.
-      - name: Build @knext/db
-        run: pnpm --filter @knext/db build
+      - name: Build @getknext/db
+        run: pnpm --filter @getknext/db build
 
-      - name: Build @knext/core
-        run: pnpm --filter @knext/core build
+      - name: Build @getknext/core
+        run: pnpm --filter @getknext/core build
 
       - name: Build file-manager via adapter
         run: pnpm --filter file-manager build
@@ -174,20 +174,20 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      # @knext/lib and @knext/core both ship only dist/ — they MUST be built
-      # before the app. @knext/core's exports now resolve to ./dist/* (#114), and
+      # @getknext/lib and @getknext/core both ship only dist/ — they MUST be built
+      # before the app. @getknext/core's exports now resolve to ./dist/* (#114), and
       # file-manager imports it, so a missing core build breaks `next build`.
-      - name: Build @knext/lib
-        run: pnpm --filter @knext/lib build
+      - name: Build @getknext/lib
+        run: pnpm --filter @getknext/lib build
 
-      # @knext/core type-imports @knext/db (the `kn-next db migrate` runner lives
-      # in @knext/db/migrate, #242), so without db's dist the core build hard-fails
+      # @getknext/core type-imports @getknext/db (the `kn-next db migrate` runner lives
+      # in @getknext/db/migrate, #242), so without db's dist the core build hard-fails
       # (TS2307). db depends on lib, so the order is lib→db→core.
-      - name: Build @knext/db
-        run: pnpm --filter @knext/db build
+      - name: Build @getknext/db
+        run: pnpm --filter @getknext/db build
 
-      - name: Build @knext/core
-        run: pnpm --filter @knext/core build
+      - name: Build @getknext/core
+        run: pnpm --filter @getknext/core build
 
       - name: Build file-manager standalone (next build --webpack)
         run: pnpm --filter file-manager build
@@ -199,14 +199,14 @@ jobs:
         run: pnpm exec vitest run apps/file-manager/bytecode-cache-reuse.test.ts
 
       # #344 seam-alive gate (reuses the standalone build above — no extra build):
-      # asserts the @knext/lib module-state SEAMS survive the standalone bundle.
-      # #352 shipped with db_wake + correlation DEAD in prod because @knext/lib is
+      # asserts the @getknext/lib module-state SEAMS survive the standalone bundle.
+      # #352 shipped with db_wake + correlation DEAD in prod because @getknext/lib is
       # DUPLICATED across the instrumentation vs app-server webpack layers and the
       # seam was not shared. The fix backs the seam with globalThis Symbol.for(...)
       # cells; this artifact assertion checks those symbols co-occur in BOTH the
       # instrumentation (writer) chunk AND an app-server (reader) chunk of the
       # real `next build --webpack` output — so a re-broken seam (or moving
-      # @knext/lib into serverExternalPackages) fails the gate, not the deploy.
+      # @getknext/lib into serverExternalPackages) fails the gate, not the deploy.
       - name: Run seam-alive artifact gate (#352/#344, must NOT skip)
         env:
           KNEXT_REQUIRE_STANDALONE: '1'
@@ -215,11 +215,11 @@ jobs:
   sigterm-drain-shipped:
     # Per-PR GATE: proves the SHIPPED container layout actually boots the knext
     # runtime entry and drains in-flight requests on SIGTERM (security.md graceful
-    # shutdown). The image CMD is `node -e import('@knext/core/internal/node-server')`,
+    # shutdown). The image CMD is `node -e import('@getknext/core/internal/node-server')`,
     # but Next's standalone output is import-graph driven and NOTHING imports
     # node-server.js — so neither it nor its hard deps (prom-client, pino) are
     # traced into `.next/standalone`. The Dockerfile fixes this with a
-    # `pnpm --prod deploy` of @knext/core into the runner; this job proves the fix
+    # `pnpm --prod deploy` of @getknext/core into the runner; this job proves the fix
     # by assembling that exact layout and running the real CMD. Without it, the
     # image crash-loops at boot (ERR_MODULE_NOT_FOUND) while CI stays green —
     # exactly the regression this guards. KNEXT_REQUIRE_STANDALONE=1 hard-fails
@@ -242,19 +242,19 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      # @knext/lib and @knext/core ship only dist/ and must be built before the
-      # app; the test also `pnpm deploy`s @knext/core (needs its dist present).
-      - name: Build @knext/lib
-        run: pnpm --filter @knext/lib build
+      # @getknext/lib and @getknext/core ship only dist/ and must be built before the
+      # app; the test also `pnpm deploy`s @getknext/core (needs its dist present).
+      - name: Build @getknext/lib
+        run: pnpm --filter @getknext/lib build
 
-      # @knext/core type-imports @knext/db (the `kn-next db migrate` runner lives
-      # in @knext/db/migrate, #242), so without db's dist the core build hard-fails
+      # @getknext/core type-imports @getknext/db (the `kn-next db migrate` runner lives
+      # in @getknext/db/migrate, #242), so without db's dist the core build hard-fails
       # (TS2307). db depends on lib, so the order is lib→db→core.
-      - name: Build @knext/db
-        run: pnpm --filter @knext/db build
+      - name: Build @getknext/db
+        run: pnpm --filter @getknext/db build
 
-      - name: Build @knext/core
-        run: pnpm --filter @knext/core build
+      - name: Build @getknext/core
+        run: pnpm --filter @getknext/core build
 
       - name: Build file-manager standalone (next build --webpack)
         run: pnpm --filter file-manager build
@@ -432,7 +432,7 @@ jobs:
         run: docker rm -f knext-prod || true
 
   db-live-integration:
-    # Plan P2 (ADR-0021): the @knext/db live-Postgres lane — the first place the
+    # Plan P2 (ADR-0021): the @getknext/db live-Postgres lane — the first place the
     # SDK's product claims (migrations apply + idempotent, read-your-writes, RO
     # routing, the one-shot CLI runner) touch a REAL database.
     #
@@ -442,7 +442,7 @@ jobs:
     # (tests/db-live-workflow.test.ts enforces it), so no real database DSN can
     # ever enter this lane; the suite's own host guard (live-dsn-guard.ts)
     # additionally refuses any non-loopback host before connecting.
-    name: '@knext/db live Postgres integration'
+    name: '@getknext/db live Postgres integration'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     services:
@@ -481,7 +481,7 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       # The live suite + its hermetic guards (DSN host guard, workflow contract).
-      - name: Run the live @knext/db suite
+      - name: Run the live @getknext/db suite
         run: >-
           pnpm exec vitest run
           packages/db/src/__tests__/integration/live-postgres.test.ts
@@ -490,10 +490,10 @@ jobs:
 
   docs-site:
     # Docs site (apps/docs, knext.dev) build gate — mirrors the compat-smoke
-    # file-manager pattern: root workspace-aware install, build the @knext chain
-    # (lib→db→core) then knext-docs. The docs app consumes @knext/core via
-    # `workspace:*` (it imports @knext/core, @knext/core/adapter, and
-    # @knext/core/validate), so the chain MUST build before `next build`.
+    # file-manager pattern: root workspace-aware install, build the @getknext chain
+    # (lib→db→core) then knext-docs. The docs app consumes @getknext/core via
+    # `workspace:*` (it imports @getknext/core, @getknext/core/adapter, and
+    # @getknext/core/validate), so the chain MUST build before `next build`.
     #
     # Two build legs, BOTH required:
     #   1. vanilla (KNEXT_ADAPTER unset) — the managed-host build (what Vercel
@@ -503,7 +503,7 @@ jobs:
     #      drift under the monorepo's pinned Next is caught in CI. Asserts the
     #      standalone server at .next/standalone/apps/docs/server.js.
     #
-    # Path-filtered: only runs when the docs app OR the public @knext/core surface
+    # Path-filtered: only runs when the docs app OR the public @getknext/core surface
     # changes (turbo-cache-friendly — an unrelated PR skips the ~minutes-long
     # Fumadocs build).
     name: Docs site build (apps/docs → knext.dev)
@@ -541,23 +541,23 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       # lib→db→core, same ordering rationale as compat-smoke: core's dts build
-      # type-imports @knext/lib/clients and @knext/db/migrate, so both must ship
+      # type-imports @getknext/lib/clients and @getknext/db/migrate, so both must ship
       # dist first or core's build hard-fails (TS2307). knext-docs then resolves
-      # @knext/core (and its ./adapter + ./validate subpaths) against that dist.
-      - name: Build @knext/lib
+      # @getknext/core (and its ./adapter + ./validate subpaths) against that dist.
+      - name: Build @getknext/lib
         if: steps.filter.outputs.docs == 'true'
-        run: pnpm --filter @knext/lib build
+        run: pnpm --filter @getknext/lib build
 
-      - name: Build @knext/db
+      - name: Build @getknext/db
         if: steps.filter.outputs.docs == 'true'
-        run: pnpm --filter @knext/db build
+        run: pnpm --filter @getknext/db build
 
-      - name: Build @knext/core
+      - name: Build @getknext/core
         if: steps.filter.outputs.docs == 'true'
-        run: pnpm --filter @knext/core build
+        run: pnpm --filter @getknext/core build
 
       # Config-validate gate: run the docs dogfood kn-next.config.ts through the
-      # REAL @knext/core/validate (the public surface), same code path
+      # REAL @getknext/core/validate (the public surface), same code path
       # `kn-next deploy` uses. Proves the workspace `./validate` export resolves.
       - name: Validate the docs kn-next.config.ts (real validateConfig)
         if: steps.filter.outputs.docs == 'true'
@@ -589,7 +589,7 @@ jobs:
       # workspace shares ONE root pnpm-lock.yaml and node_modules hoists to the
       # root — so `scan-ref: apps/docs` finds NOTHING (no local lockfile). Instead
       # `turbo prune` emits a pruned workspace whose pnpm-lock.yaml contains ONLY
-      # knext-docs + its @knext/{core,db,lib} closure. Trivy scans THAT lockfile,
+      # knext-docs + its @getknext/{core,db,lib} closure. Trivy scans THAT lockfile,
       # so the npm→pnpm transitive shifts (and the root pnpm.overrides Trivy
       # remediations) are checked against the docs-only tree, not the whole repo.
       - name: Prune docs dependency closure (turbo prune → scoped lockfile)
@@ -642,7 +642,7 @@ jobs:
           SURFACE="$(echo "$CHANGED" | grep -E '^packages/kn-next/src/|^packages/kn-next/package.json' || true)"
           DOCS="$(echo "$CHANGED" | grep -E '^apps/docs/content/' || true)"
           if [ -n "$SURFACE" ] && [ -z "$DOCS" ]; then
-            echo "::warning title=Docs may need an update::Public @knext/core surface changed but apps/docs/content/** was not touched. knext.dev is user-facing — did the docs need an update? (Judgment-based reminder, not a gate.)"
+            echo "::warning title=Docs may need an update::Public @getknext/core surface changed but apps/docs/content/** was not touched. knext.dev is user-facing — did the docs need an update? (Judgment-based reminder, not a gate.)"
           else
             echo "No public-surface-without-docs drift detected."
           fi

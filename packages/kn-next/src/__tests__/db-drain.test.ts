@@ -8,7 +8,7 @@
  * closed, the RO close must be a safe no-op when no RO pool ever existed, and a
  * slow/failing RO close must NOT throw or wedge the drain past the grace cap.
  *
- * @knext/lib/clients is mocked so the drain is exercised without a real Postgres.
+ * @getknext/lib/clients is mocked so the drain is exercised without a real Postgres.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -17,7 +17,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const closeDbPool = vi.fn(async (..._args: unknown[]) => {});
 const closeDbPoolRO = vi.fn(async (..._args: unknown[]) => {});
 
-vi.mock("@knext/lib/clients", () => ({
+vi.mock("@getknext/lib/clients", () => ({
     closeDbPool: (...args: unknown[]) => closeDbPool(...args),
     closeDbPoolRO: (...args: unknown[]) => closeDbPoolRO(...args),
 }));

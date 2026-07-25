@@ -6,7 +6,7 @@ import {
     resetTraceIdProvider,
     setCorrelationIdProvider,
     setTraceIdProvider,
-} from "@knext/lib/context";
+} from "@getknext/lib/context";
 import { context, SpanKind, trace } from "@opentelemetry/api";
 import { AsyncLocalStorageContextManager } from "@opentelemetry/context-async-hooks";
 import {
@@ -48,7 +48,7 @@ import {
  *      span as `knext.correlation_id` for TRACE EXPORT (so a backend can index /
  *      echo it). Logs are NOT resolved from this attribute.
  *   3. `installCorrelationIdProvider()` / `installTraceIdProvider()` — injected
- *      into `@knext/lib/context`. At log time the logger mixin resolves
+ *      into `@getknext/lib/context`. At log time the logger mixin resolves
  *      `correlation_id` from the active OTel CONTEXT KEY (constant across the
  *      whole trace incl. child spans) and `trace_id` from the active span.
  *
@@ -192,7 +192,7 @@ describe("#346 acceptance: in-request log line is auto-correlated on the real pa
         // the SERVER-level correlation id (and the same trace_id).
         let atServer: Record<string, string | undefined> = {};
         let inChild: Record<string, string | undefined> = {};
-        const tracer = trace.getTracer("@knext/core");
+        const tracer = trace.getTracer("@getknext/core");
 
         await handleRequest(
             "GET /files",
@@ -218,7 +218,7 @@ describe("#346 acceptance: in-request log line is auto-correlated on the real pa
 
     it("nested child spans all resolve the same correlation_id (context descends)", async () => {
         const seen: (string | undefined)[] = [];
-        const tracer = trace.getTracer("@knext/core");
+        const tracer = trace.getTracer("@getknext/core");
         await handleRequest(
             "GET /files",
             { "x-request-id": "req-nested-1" },

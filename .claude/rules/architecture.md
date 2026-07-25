@@ -42,13 +42,13 @@ Recommend an option — don't just enumerate.
   as OTel `SpanProcessor`s are passed into `registerOTel(...)` (the path that
   never broke) — over a module-state setter seam. A module-state seam is a last
   resort, permitted only when direct-pass is genuinely impossible (e.g. keeping
-  `@knext/lib` OTel-free via dependency inversion). Such a seam's mutable state
+  `@getknext/lib` OTel-free via dependency inversion). Such a seam's mutable state
   MUST be anchored on `globalThis` via a namespaced `Symbol.for('knext.lib.*')`
   key — **NEVER a bare module-level `let`** — because Next.js duplicates
-  `@knext/lib` across webpack layers in the standalone bundle, giving each copy
+  `@getknext/lib` across webpack layers in the standalone bundle, giving each copy
   independent module state (the #352 bug). Any such seam MUST be covered by the
   build-artifact guard (`apps/file-manager/standalone-seam-alive.test.ts`, #344)
-  and `@knext/lib` MUST stay bundled — never added to `serverExternalPackages`.
+  and `@getknext/lib` MUST stay bundled — never added to `serverExternalPackages`.
 
 ## 5. Honesty about scope and fit
 Positioning is a **narrow, verified Next.js-on-Knative adapter — not a general PaaS**, on a

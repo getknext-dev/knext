@@ -14,5 +14,5 @@ We have a quick list of common questions to get you started engaging with this p
 - On merge to `main`, the release workflow opens a "Version Packages" PR that consumes the changesets,
   bumps versions, and updates changelogs. Merging that PR publishes (once `NPM_TOKEN` is configured).
 
-Publishable packages: `@knext/core`, `@knext/lib`. Private packages
-(`@knext/ui`, `file-manager`, `spike-bun-bytecode`) are ignored.
+Publishable packages: `@getknext/core`, `@getknext/lib`. Private packages
+(`@getknext/ui`, `file-manager`, `spike-bun-bytecode`) are ignored.

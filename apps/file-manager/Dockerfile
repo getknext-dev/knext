@@ -18,41 +18,41 @@ RUN npm install -g pnpm
 WORKDIR /app
 COPY . .
 RUN pnpm install --frozen-lockfile
-# Build the workspace lib (@knext/lib ships only dist/) BEFORE the app, in a
+# Build the workspace lib (@getknext/lib ships only dist/) BEFORE the app, in a
 # SEPARATE step so its dist/ is fully emitted before `next build` resolves it.
 # (A combined recursive build can race the app's build ahead of the lib's emit.)
-RUN pnpm --filter "@knext/lib" build
-# @knext/db ships only dist/ and depends on @knext/lib; @knext/core type-imports it
-# (the `kn-next db migrate` runner lives in @knext/db/migrate, #242), so db must be
+RUN pnpm --filter "@getknext/lib" build
+# @getknext/db ships only dist/ and depends on @getknext/lib; @getknext/core type-imports it
+# (the `kn-next db migrate` runner lives in @getknext/db/migrate, #242), so db must be
 # built after lib and before core or core's dts build hard-fails (TS2307).
-RUN pnpm --filter "@knext/db" build
-# @knext/core also ships only dist/ and its exports resolve to ./dist/* (#114);
-# file-manager imports @knext/core (adapter + KnativeNextConfig), so core must be
+RUN pnpm --filter "@getknext/db" build
+# @getknext/core also ships only dist/ and its exports resolve to ./dist/* (#114);
+# file-manager imports @getknext/core (adapter + KnativeNextConfig), so core must be
 # built (after lib + db, whose types core's build needs) BEFORE `next build`
 # resolves it from dist. Order: lib → db → core → file-manager.
-RUN pnpm --filter "@knext/core" build
+RUN pnpm --filter "@getknext/core" build
 RUN pnpm --filter file-manager build
 
-# Produce a SELF-CONTAINED @knext/core for the runner. The container CMD boots the
-# knext runtime entry (`@knext/core/internal/node-server`), but Next's standalone
+# Produce a SELF-CONTAINED @getknext/core for the runner. The container CMD boots the
+# knext runtime entry (`@getknext/core/internal/node-server`), but Next's standalone
 # output is import-graph driven and NOTHING in app code imports node-server.js — so
 # neither node-server.js, its build chunks, NOR its hard runtime deps (prom-client,
 # pino) land in `.next/standalone`. Without this the image's CMD resolves
-# `@knext/core/internal/node-server` → MODULE_NOT_FOUND and crash-loops at boot.
+# `@getknext/core/internal/node-server` → MODULE_NOT_FOUND and crash-loops at boot.
 #
 # `pnpm deploy --prod` emits a flat, self-contained package dir (dist + a real
 # node_modules with prom-client/pino resolved) that we drop into the runner at
-# node_modules/@knext/core, so the package specifier resolves with its deps.
-RUN pnpm --filter "@knext/core" --prod deploy --legacy /knext-core-runtime
+# node_modules/@getknext/core, so the package specifier resolves with its deps.
+RUN pnpm --filter "@getknext/core" --prod deploy --legacy /knext-core-runtime
 
 # Prune BUILD TOOLING that `pnpm deploy --prod` wrongly carries into the runtime
-# package. @knext/db declares drizzle-kit as an OPTIONAL peerDependency and pnpm
+# package. @getknext/db declares drizzle-kit as an OPTIONAL peerDependency and pnpm
 # resolves it from the workspace (it is db's devDependency), so the deployed
 # "prod" tree ships drizzle-kit's dependency graph: @esbuild-kit/esm-loader →
 # esbuild@0.18.20 (a Go 1.20.7-built binary — 20 HIGH/CRITICAL Go-stdlib
 # findings, 2 CRITICAL), drizzle-kit's own esbuild@0.25.12 (Go 1.23.12 — 15
 # findings), tsx → esbuild@0.28.0, and @drizzle-team/brocli. None of it is
-# runtime code: this image's CMD only boots @knext/core/internal/node-server
+# runtime code: this image's CMD only boots @getknext/core/internal/node-server
 # (prom-client + pino); `kn-next db migrate` runs CLI-side in the app's own
 # tree, never inside this image. Same discipline as the npm/corepack strip in
 # the runner stage below (#199): remove what we don't run, don't suppress the
@@ -126,10 +126,10 @@ COPY --from=builder /app/apps/file-manager/.next/static ./apps/file-manager/.nex
 # Copy public assets
 COPY --from=builder /app/apps/file-manager/public ./apps/file-manager/public
 # Copy the self-contained knext runtime package (node-server entry + its prod deps:
-# prom-client, pino). Placed at node_modules/@knext/core so the CMD's
-# `@knext/core/internal/node-server` specifier resolves from /app with its own
+# prom-client, pino). Placed at node_modules/@getknext/core so the CMD's
+# `@getknext/core/internal/node-server` specifier resolves from /app with its own
 # nested node_modules — the standalone trace omits it (see builder stage).
-COPY --from=builder /knext-core-runtime ./node_modules/@knext/core
+COPY --from=builder /knext-core-runtime ./node_modules/@getknext/core
 
 # Place the flat musl sharp install — sharp itself, its @img native platform
 # packages, AND sharp's own runtime deps (detect-libc, semver, color, …) — into the
@@ -190,7 +190,7 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
 # Drop privileges
 USER node
 
-# Runtime entry: boot the knext runtime (@knext/core node-server), NOT bare
+# Runtime entry: boot the knext runtime (@getknext/core node-server), NOT bare
 # `node server.js`. The runtime entry is the ONLY thing that (1) installs the
 # SIGTERM handler that forwards the signal so Next drains in-flight requests +
 # runs `after()` callbacks on scale-down (security.md graceful shutdown), and
@@ -198,7 +198,7 @@ USER node
 # bypasses both, so a real knext deploy must run the runtime entry — matching
 # how the operator-managed image runs. The entry then SPAWNS server.js itself.
 #
-# @knext/core is COPY'd into node_modules/@knext/core as a self-contained package
+# @getknext/core is COPY'd into node_modules/@getknext/core as a self-contained package
 # (the runner stage above — Next's standalone trace omits node-server.js + its
 # prom-client/pino deps), so the package specifier resolves via its `exports` map
 # (./internal/node-server) with its own nested node_modules.
@@ -214,4 +214,4 @@ USER node
 # EXPORT so the value reaches the exec'd node process (a bare `${VAR:=default}` only sets a shell
 # variable, not an env var). The operator's externally-injected value (PVC path) still wins via
 # `:-`; the Dockerfile only supplies the fallback when the env var is unset at runtime.
-CMD ["sh", "-c", "export NODE_COMPILE_CACHE=\"${NODE_COMPILE_CACHE:-/app/apps/file-manager/.next/compile-cache}\"; export STANDALONE_SERVER_PATH=\"${STANDALONE_SERVER_PATH:-apps/file-manager/server.js}\"; exec node -e \"import('@knext/core/internal/node-server')\""]
+CMD ["sh", "-c", "export NODE_COMPILE_CACHE=\"${NODE_COMPILE_CACHE:-/app/apps/file-manager/.next/compile-cache}\"; export STANDALONE_SERVER_PATH=\"${STANDALONE_SERVER_PATH:-apps/file-manager/server.js}\"; exec node -e \"import('@getknext/core/internal/node-server')\""]

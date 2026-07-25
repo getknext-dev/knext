@@ -1,14 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import * as schema from '../schema';
 
-// `@knext/db/schema` is the one place an app imports its table/column builders
+// `@getknext/db/schema` is the one place an app imports its table/column builders
 // from — a thin re-export of drizzle-orm's `pg-core` (plus `relations`/`sql`),
 // pinned at a compatible version. These tests prove the surface is present and
 // that the re-exported builders actually build a real drizzle table (not just a
 // name that type-checks) — the platform value-add helpers (#240 TimescaleDB,
 // #241 pgvector) slot in on top of this surface later.
 
-describe('@knext/db/schema — re-exported drizzle surface', () => {
+describe('@getknext/db/schema — re-exported drizzle surface', () => {
   it('re-exports pgTable + the common column builders', () => {
     for (const name of [
       'pgTable',

@@ -10,9 +10,9 @@ knext (aka **kn-next**) is a **scale-to-zero Next.js deployment framework for Kn
 ## 2. Architecture
 
 Monorepo (`pnpm-workspace.yaml`, `turbo.json`) under `packages/`:
-- `kn-next` (`@knext/core`) — adapter, generators, TS CLI (`src/cli/{deploy,cr-builder,preview,cleanup}.ts`)
+- `kn-next` (`@getknext/core`) — adapter, generators, TS CLI (`src/cli/{deploy,cr-builder,preview,cleanup}.ts`)
 - `kn-next-operator` — Go operator (kubebuilder)
-- `lib` (`@knext/lib`) — runtime clients incl. `getDbPool`
+- `lib` (`@getknext/lib`) — runtime clients incl. `getDbPool`
 - `ui`; dead `admin`/`knext`
 - Example app: `apps/file-manager` (Next.js 16, uses Postgres+MinIO+Redis)
 

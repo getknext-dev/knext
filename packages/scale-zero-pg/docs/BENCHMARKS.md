@@ -23,7 +23,7 @@ k8s on an M-series laptop (decommissioned 2026-07-03); **OKE** = Oracle OKE
 ### Cold-start under concurrency — single-flight DB wake (#339), OKE, 2026-07-17
 
 N concurrent first-connects from a knext app each independently blocked on the 0→1
-compute wake. #339 single-flights the wake in `@knext/lib` `getDbPool` (globalThis /
+compute wake. #339 single-flights the wake in `@getknext/lib` `getDbPool` (globalThis /
 `Symbol.for` inflight-promise cell, fail-open on rejection) so N concurrent
 first-connects collapse onto **one** shared wake. Measured on OKE via the file-manager
 app hitting `/users` (`unstable_noStore` → a DB query on every request); latencies are
@@ -62,7 +62,7 @@ still stamps `lastDbActivityAt`) is unit-covered, not a cluster metric.
 
 ### Wake-path resilience — request-during-wake returns 200, not 5xx (#310), OKE, 2026-07-17
 
-#310 adds a knext-client-side bounded retry/backoff in `@knext/lib` getDbPool (inner to
+#310 adds a knext-client-side bounded retry/backoff in `@getknext/lib` getDbPool (inner to
 #339's single-flight; the client complement to the gateway wake-retry #190). A request
 arriving during a `compute-<app>` 0→1 wake retries transient connect failures
 (`ECONNREFUSED`/`ECONNRESET`/"Connection terminated", non-`28xxx`) within a bounded

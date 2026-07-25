@@ -8,7 +8,7 @@ export const dynamic = 'force-dynamic';
  * The read path: a server component that lists messages on the **read-only**
  * gateway (`getDbRO()`, bounded-stale). The `<form>` posts to a server action
  * that writes on the **writer** (`getDb()`). One page proves both halves of the
- * `@knext/db` read/write split, both waking their scale-to-zero compute on the
+ * `@getknext/db` read/write split, both waking their scale-to-zero compute on the
  * first request.
  */
 export default async function Home() {
@@ -16,7 +16,7 @@ export default async function Home() {
 
   return (
     <main style={{ maxWidth: 640, margin: '2rem auto', fontFamily: 'system-ui' }}>
-      <h1>db-demo — @knext/db guestbook</h1>
+      <h1>db-demo — @getknext/db guestbook</h1>
       <p>
         Reads run on the RO gateway (<code>getDbRO()</code>, bounded-stale); the form writes on the
         single writer (<code>getDb()</code>). Both wake from zero on the first request.

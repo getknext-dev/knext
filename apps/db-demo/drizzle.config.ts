@@ -1,4 +1,4 @@
-import { defineDrizzleConfig } from '@knext/db/migrate';
+import { defineDrizzleConfig } from '@getknext/db/migrate';
 
 /**
  * drizzle-kit config for db-demo. `defineDrizzleConfig()` wires dialect

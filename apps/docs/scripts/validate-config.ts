@@ -5,7 +5,7 @@
  *
  * Run: npm run config:validate
  */
-import { validateConfig } from '@knext/core/validate';
+import { validateConfig } from '@getknext/core/validate';
 import config from '../kn-next.config';
 
 try {

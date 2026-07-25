@@ -11,7 +11,7 @@ import {
 } from '../extensions/pgvector';
 import * as schema from '../schema';
 
-// pgvector helpers (#241) sit on the same `@knext/db/schema` seam. The `vector`
+// pgvector helpers (#241) sit on the same `@getknext/db/schema` seam. The `vector`
 // column is drizzle's own (already re-exported); the knext value-add is the index
 // DDL emitters (hnsw / ivfflat with the right ops class) — which drizzle does not
 // model as standalone SQL — plus the distance-operator query builders (<-> / <=> /
@@ -28,14 +28,14 @@ const docs = pgTable('docs', {
 const dialect = new PgDialect();
 const toSql = (v: unknown) => dialect.sqlToQuery(v as never).sql;
 
-describe('@knext/db pgvector — CREATE EXTENSION guidance', () => {
+describe('@getknext/db pgvector — CREATE EXTENSION guidance', () => {
   it('emits the self-service, idempotent enable statement', () => {
     expect(createVectorExtension()).toBe('CREATE EXTENSION IF NOT EXISTS vector;');
     expect(CREATE_VECTOR_EXTENSION).toBe('CREATE EXTENSION IF NOT EXISTS vector;');
   });
 });
 
-describe('@knext/db pgvector — hnsw() index DDL', () => {
+describe('@getknext/db pgvector — hnsw() index DDL', () => {
   it('defaults to cosine ops and emits an idempotent CREATE INDEX', () => {
     expect(hnsw('emb_idx', docs.embedding)).toBe(
       'CREATE INDEX IF NOT EXISTS "emb_idx" ON "docs" USING hnsw ("embedding" vector_cosine_ops);',
@@ -58,7 +58,7 @@ describe('@knext/db pgvector — hnsw() index DDL', () => {
   });
 });
 
-describe('@knext/db pgvector — ivfflat() index DDL', () => {
+describe('@getknext/db pgvector — ivfflat() index DDL', () => {
   it('emits the ivfflat access method with the lists build param', () => {
     expect(ivfflat('emb_ivf', docs.embedding, { ops: 'vector_l2_ops', lists: 100 })).toBe(
       'CREATE INDEX IF NOT EXISTS "emb_ivf" ON "docs" USING ivfflat ("embedding" vector_l2_ops) ' +
@@ -67,7 +67,7 @@ describe('@knext/db pgvector — ivfflat() index DDL', () => {
   });
 });
 
-describe('@knext/db pgvector — distance-operator query builders', () => {
+describe('@getknext/db pgvector — distance-operator query builders', () => {
   it('cosineDistance builds the <=> operator', () => {
     expect(toSql(cosineDistance(docs.embedding, [1, 2, 3]))).toContain('<=>');
   });
@@ -79,7 +79,7 @@ describe('@knext/db pgvector — distance-operator query builders', () => {
   });
 });
 
-describe('@knext/db pgvector — quote hardening (#278)', () => {
+describe('@getknext/db pgvector — quote hardening (#278)', () => {
   // The index name / table / column are SQL identifiers → double-quoted with any
   // embedded `"` doubled, so a hostile name cannot break out of the identifier.
   const weird = pgTable('we"ird', {
@@ -113,7 +113,7 @@ describe('@knext/db pgvector — quote hardening (#278)', () => {
   });
 });
 
-describe('@knext/db/schema — re-exports the pgvector helpers on the seam', () => {
+describe('@getknext/db/schema — re-exports the pgvector helpers on the seam', () => {
   it('exposes hnsw / ivfflat / createVectorExtension + distance ops', () => {
     for (const name of [
       'hnsw',

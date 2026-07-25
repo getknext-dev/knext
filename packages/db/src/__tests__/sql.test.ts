@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { quoteIdent, quoteLiteral } from '../sql';
 
-// #278: shared quote helpers for the `@knext/db` migration-SQL emitters. The
+// #278: shared quote helpers for the `@getknext/db` migration-SQL emitters. The
 // threat model is build-time-only (the developer already holds arbitrary-SQL
 // power), but consistent quoting is correct hygiene and prevents a footgun — a
 // table/column name (or interval literal) carrying a quote or special char must
@@ -13,7 +13,7 @@ import { quoteIdent, quoteLiteral } from '../sql';
 // A NUL byte constructed without a literal control char in source.
 const NUL = String.fromCharCode(0);
 
-describe('@knext/db sql — quoteIdent()', () => {
+describe('@getknext/db sql — quoteIdent()', () => {
   it('double-quotes a simple identifier (always-quote convention)', () => {
     expect(quoteIdent('metrics')).toBe('"metrics"');
     expect(quoteIdent('created_at')).toBe('"created_at"');
@@ -43,7 +43,7 @@ describe('@knext/db sql — quoteIdent()', () => {
   });
 });
 
-describe('@knext/db sql — quoteLiteral()', () => {
+describe('@getknext/db sql — quoteLiteral()', () => {
   it('single-quotes a simple literal (no E-prefix when no backslash)', () => {
     expect(quoteLiteral('7 days')).toBe("'7 days'");
     expect(quoteLiteral('metrics')).toBe("'metrics'");

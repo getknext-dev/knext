@@ -71,10 +71,10 @@ importers:
 
   apps/db-demo:
     dependencies:
-      '@knext/db':
+      '@getknext/db':
         specifier: workspace:*
         version: link:../../packages/db
-      '@knext/lib':
+      '@getknext/lib':
         specifier: workspace:*
         version: link:../../packages/lib
       next:
@@ -87,7 +87,7 @@ importers:
         specifier: ^19.0.0
         version: 19.2.5(react@19.2.5)
     devDependencies:
-      '@knext/core':
+      '@getknext/core':
         specifier: workspace:*
         version: link:../../packages/kn-next
       '@types/node':
@@ -108,7 +108,7 @@ importers:
 
   apps/docs:
     dependencies:
-      '@knext/core':
+      '@getknext/core':
         specifier: workspace:*
         version: link:../../packages/kn-next
       fumadocs-core:
@@ -157,10 +157,10 @@ importers:
 
   apps/file-manager:
     dependencies:
-      '@knext/lib':
+      '@getknext/lib':
         specifier: workspace:*
         version: link:../../packages/lib
-      '@knext/ui':
+      '@getknext/ui':
         specifier: workspace:*
         version: link:../../packages/ui
       '@opentelemetry/api':
@@ -215,7 +215,7 @@ importers:
         specifier: ^0.35.2
         version: 0.35.2
     devDependencies:
-      '@knext/core':
+      '@getknext/core':
         specifier: workspace:*
         version: link:../../packages/kn-next
       '@tailwindcss/postcss':
@@ -270,7 +270,7 @@ importers:
 
   packages/db:
     dependencies:
-      '@knext/lib':
+      '@getknext/lib':
         specifier: workspace:^
         version: link:../lib
       drizzle-orm:
@@ -298,10 +298,10 @@ importers:
       '@google-cloud/storage':
         specifier: ^7.18.0
         version: 7.19.0
-      '@knext/db':
+      '@getknext/db':
         specifier: workspace:^
         version: link:../db
-      '@knext/lib':
+      '@getknext/lib':
         specifier: workspace:^
         version: link:../lib
       '@opentelemetry/api':

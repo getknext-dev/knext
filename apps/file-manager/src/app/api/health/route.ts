@@ -1,4 +1,4 @@
-import { checkShallowHealth } from '@knext/lib/health';
+import { checkShallowHealth } from '@getknext/lib/health';
 import { withRedMetrics } from '../_metrics/registry';
 
 // Shallow readiness/liveness endpoint for Knative probes (#338, ADR-0026).

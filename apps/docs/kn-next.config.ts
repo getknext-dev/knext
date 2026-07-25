@@ -1,4 +1,4 @@
-import type { KnativeNextConfig } from '@knext/core';
+import type { KnativeNextConfig } from '@getknext/core';
 
 /**
  * kn-next deploy config for the knext docs site (dogfood target, issue #55).

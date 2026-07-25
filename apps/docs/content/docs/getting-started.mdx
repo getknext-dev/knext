@@ -13,10 +13,10 @@ container registry, and an object-storage bucket (`gcs`, `s3`, or `minio`).
 
 ## 0 · Install the packages (interim channel)
 
-The `@knext/*` packages' permanent home on the **public npm registry** is still being set up.
+The `@getknext/*` packages' permanent home on the **public npm registry** is still being set up.
 Until it goes live, knext ships on an **interim distribution channel on GitHub Packages**, under
 the `@getknext-dev` scope — the same packages, republished under the org-matching scope GitHub
-Packages requires. When `@knext/*` goes live, the `@getknext-dev/*` names will be deprecated in
+Packages requires. When `@getknext/*` goes live, the `@getknext-dev/*` names will be deprecated in
 its favor; existing installs keep working.
 
 GitHub Packages requires authentication **even for public packages** — an anonymous install gets a
@@ -35,7 +35,7 @@ npx kn-next --version              # or one-shot: npx @getknext-dev/core <subcom
 
 <Callout type="warn">
 **Scope substitution.** Under the interim channel the package scope is `@getknext-dev`, so
-substitute it anywhere these docs say `@knext/*`: `adapterPath: '@getknext-dev/core/adapter'` in
+substitute it anywhere these docs say `@getknext/*`: `adapterPath: '@getknext-dev/core/adapter'` in
 `next.config.ts`, `import type { KnativeNextConfig } from '@getknext-dev/core'`, and
 `@getknext-dev/db` for the [Data SDK](/docs/data-sdk). No token at hand? Running the CLI from a
 checkout of the knext repo still works as the token-less alternative.
@@ -52,7 +52,7 @@ import type { NextConfig } from 'next';
 const config: NextConfig = {
   // knext ships the official NextAdapter as a package export.
   // adapterPath is top-level config on Next.js 16.2+.
-  adapterPath: '@knext/core/adapter',
+  adapterPath: '@getknext/core/adapter',
 };
 
 export default config;
@@ -60,18 +60,18 @@ export default config;
 
 <Callout type="info">
 **Next.js 16.0.x–16.1.x:** the option lives under `experimental` on those versions
-(`experimental: { adapterPath: '@knext/core/adapter' }`). Next.js 16.2+ auto-migrates the old
+(`experimental: { adapterPath: '@getknext/core/adapter' }`). Next.js 16.2+ auto-migrates the old
 `experimental` key with a warning; 16.0.x does **not** recognize the top-level form.
 </Callout>
 
 ## 2 · Write the deploy config
 
 knext reads a typed `kn-next.config.ts`. The config type is `KnativeNextConfig`, exported from
-`@knext/core`. The minimum valid config requires `name`, `registry`, and a `storage` block with
+`@getknext/core`. The minimum valid config requires `name`, `registry`, and a `storage` block with
 `provider`, `bucket`, and `publicUrl`.
 
 ```ts title="kn-next.config.ts"
-import type { KnativeNextConfig } from '@knext/core';
+import type { KnativeNextConfig } from '@getknext/core';
 
 const config: KnativeNextConfig = {
   name: 'storefront',

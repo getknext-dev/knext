@@ -12,7 +12,7 @@ import { describe, expect, it } from 'vitest';
  *   - `packages: write` but NO `id-token` — the GHP path publishes WITHOUT
  *     provenance (provenance needs npmjs/OIDC).
  *   - Builds + publishes lib BEFORE db BEFORE core (core depends on both;
- *     db depends on lib) — #255/#256 added @knext/db to the publish set.
+ *     db depends on lib) — #255/#256 added @getknext/db to the publish set.
  *   - Runs the rename script so publishes carry the @getknext-dev scope.
  *   - Does NOT touch the clean npmjs release.yml.
  *
@@ -51,7 +51,7 @@ describe('.github/workflows/release-ghp.yml', () => {
   it('builds lib and db before core', () => {
     const text = workflowText();
     expect(text).toContain(
-      'pnpm --filter @knext/lib build && pnpm --filter @knext/db build && pnpm --filter @knext/core build',
+      'pnpm --filter @getknext/lib build && pnpm --filter @getknext/db build && pnpm --filter @getknext/core build',
     );
   });
 
@@ -64,7 +64,7 @@ describe('.github/workflows/release-ghp.yml', () => {
   });
 
   it('publishes lib, then db, then core staging dirs (dependency order)', () => {
-    // #255/#256: @knext/core depends on @knext/db (which depends on @knext/lib)
+    // #255/#256: @getknext/core depends on @getknext/db (which depends on @getknext/lib)
     // — publishing without db shipped an uninstallable @getknext-dev/core.
     const text = workflowText();
     const libIdx = text.indexOf('.ghp-staging/lib');

@@ -4,7 +4,7 @@
 > GitHub Actions. This is NOT the user-facing docs site — it may reference issues and workflow
 > internals. Related: issue #53 (first npm publish, the #1 adoption blocker).
 >
-> Two paths exist: (a) the **canonical npmjs path** (`@knext/*`, Changesets → `release.yml`,
+> Two paths exist: (a) the **canonical npmjs path** (`@getknext/*`, Changesets → `release.yml`,
 > blocked on a human `NPM_TOKEN`) documented first, and (b) an **interim GitHub Packages channel**
 > (`@getknext-dev/*`, `release-ghp.yml`) for use until npmjs goes live — see
 > [Interim channel — GitHub Packages](#interim-channel--github-packages-getknext-dev).
@@ -17,12 +17,12 @@ registry:
 
 | Package       | Path               | Public? | Provenance |
 | ------------- | ------------------ | ------- | ---------- |
-| `@knext/core` | `packages/kn-next` | yes     | yes        |
-| `@knext/lib`  | `packages/lib`     | yes     | yes        |
-| `@knext/db`   | `packages/db`      | yes     | yes        |
+| `@getknext/core` | `packages/kn-next` | yes     | yes        |
+| `@getknext/lib`  | `packages/lib`     | yes     | yes        |
+| `@getknext/db`   | `packages/db`      | yes     | yes        |
 
-`@knext/core` depends on **both** `@knext/lib` and `@knext/db` (and `@knext/db` depends on
-`@knext/lib`), so the three must always ship as a set — publishing core without db is exactly
+`@getknext/core` depends on **both** `@getknext/lib` and `@getknext/db` (and `@getknext/db` depends on
+`@getknext/lib`), so the three must always ship as a set — publishing core without db is exactly
 the #255/#256 incident (every consumer install 404s on the missing member).
 
 All three carry `"publishConfig": { "access": "public", "provenance": true }`, so `changeset publish`
@@ -31,7 +31,7 @@ publishes them publicly and CI attaches a signed provenance attestation (via the
 
 **Does NOT publish:**
 
-- `@knext/ui`, `file-manager`, `spike-bun-bytecode` — listed in `ignore` in
+- `@getknext/ui`, `file-manager`, `spike-bun-bytecode` — listed in `ignore` in
   `.changeset/config.json`, so Changesets never versions or publishes them.
 - `apps/*` — private application code, not libraries.
 - The Go operator (`packages/kn-next-operator`) — released as a container image, not via npm.
@@ -53,14 +53,14 @@ for publishing — it is safe by default and cannot accidentally publish.
 
 The first publish ships the current **0.1.0** directly. There are intentionally **no pending
 changesets**: when `.changeset/*.md` is empty, `changesets/action` skips the Version PR and runs
-`changeset publish` directly, publishing the unpublished `@knext/core@0.1.0` and
-`@knext/lib@0.1.0`. (Adding a changeset here would wrongly open a Version PR that bumps past
+`changeset publish` directly, publishing the unpublished `@getknext/core@0.1.0` and
+`@getknext/lib@0.1.0`. (Adding a changeset here would wrongly open a Version PR that bumps past
 0.1.0 before the first release — do not add one.)
 
 ### Step 1 — Claim the npm org (required for both auth paths)
 
 On [npmjs.com](https://www.npmjs.com/), create/claim the npm **organization `knext`**. This owns
-the `@knext` scope. Without it, publishing any `@knext/*` package fails.
+the `@getknext` scope. Without it, publishing any `@getknext/*` package fails.
 
 ### Step 2 — Set up auth
 
@@ -70,14 +70,14 @@ publisher at until the package exists.
 
 #### Path A — `NPM_TOKEN` (recommended for the first publish)
 
-1. On npmjs.com, create a **Granular Access / Automation token** scoped to the `@knext` packages
+1. On npmjs.com, create a **Granular Access / Automation token** scoped to the `@getknext` packages
    with **read + write** permission.
 2. In the GitHub repo: **Settings → Secrets and variables → Actions → New repository secret**,
    name it exactly `NPM_TOKEN`, paste the token.
 3. Trigger a release: either push any commit to `main`, OR run the **Release** workflow manually
    (**Actions → Release → Run workflow**, i.e. `workflow_dispatch`).
 4. With `NPM_TOKEN` present and no pending changesets, `changesets/action` runs `changeset
-   publish`, publishing `@knext/core@0.1.0` and `@knext/lib@0.1.0` with provenance.
+   publish`, publishing `@getknext/core@0.1.0` and `@getknext/lib@0.1.0` with provenance.
 
 #### Path B — OIDC Trusted Publishing (migrate to this AFTER the first publish)
 
@@ -91,14 +91,14 @@ Once the packages exist on npm, you can drop the long-lived `NPM_TOKEN` secret:
 ### Step 3 — Verify
 
 ```sh
-npm view @knext/core version   # → 0.1.0
-npm view @knext/lib version    # → 0.1.0
-npx @knext/core --help         # from a clean directory (the published bin is kn-next)
+npm view @getknext/core version   # → 0.1.0
+npm view @getknext/lib version    # → 0.1.0
+npx @getknext/core --help         # from a clean directory (the published bin is kn-next)
 ```
 
-> Note on invocation: the **npm package** is `@knext/core`; its **bin** is `kn-next`. There is no
+> Note on invocation: the **npm package** is `@getknext/core`; its **bin** is `kn-next`. There is no
 > package literally named `kn-next` on npm, so the published-package invocation is
-> `npx @knext/core <subcommand>` (npx resolves the package and runs its single `kn-next` bin).
+> `npx @getknext/core <subcommand>` (npx resolves the package and runs its single `kn-next` bin).
 > `npx kn-next` only works once a package by that exact name exists — it does not.
 
 Also confirm both packages show a provenance / "Published via GitHub Actions" badge on npmjs.com.
@@ -113,14 +113,14 @@ The normal flow after the first publish:
    PR that applies the version bumps and updates changelogs.
 3. Merging the **"Version Packages"** PR (a second push to `main`) runs `changeset publish` and
    publishes the bumped versions. The workflow also creates one **GitHub Release** per published
-   package (`createGithubReleases: true`), tagged `@knext/<pkg>@x.y.z` — the hand-made `v0.1.0`
+   package (`createGithubReleases: true`), tagged `@getknext/<pkg>@x.y.z` — the hand-made `v0.1.0`
    release used a different tag format, so the formats never collide.
 
 ## Interim channel — GitHub Packages (`@getknext-dev/*`)
 
 Until the npmjs path above is unblocked (it needs a human `NPM_TOKEN`, issue #53), the maintainer
 directive is to ship an **interim** release channel on **GitHub Packages**
-(`npm.pkg.github.com`). This is a stopgap — **`@knext/*` on npmjs remains the canonical future
+(`npm.pkg.github.com`). This is a stopgap — **`@getknext/*` on npmjs remains the canonical future
 home**; the GHP names are temporary.
 
 ### Why the packages are renamed
@@ -130,34 +130,34 @@ override a package name or a dependency name. So this channel republishes under 
 
 | npmjs (canonical) | GitHub Packages (interim) |
 | ----------------- | ------------------------- |
-| `@knext/core`     | `@getknext-dev/core`      |
-| `@knext/lib`      | `@getknext-dev/lib`       |
-| `@knext/db`       | `@getknext-dev/db`        |
+| `@getknext/core`     | `@getknext-dev/core`      |
+| `@getknext/lib`      | `@getknext-dev/lib`       |
+| `@getknext/db`       | `@getknext-dev/db`        |
 
 The rename is done by `scripts/rename-for-ghp.mjs`, which stages **copies** (it never mutates the
 working tree) and rewrites:
 
 - each package `name` → `@getknext-dev/*`;
-- the inter-package dependency keys (`@knext/lib`, `@knext/db`) → `@getknext-dev/*`, and any
+- the inter-package dependency keys (`@getknext/lib`, `@getknext/db`) → `@getknext-dev/*`, and any
   `workspace:` specifier → a concrete version range (since `npm publish` from a staging dir
   cannot rewrite the pnpm `workspace:` protocol like `pnpm publish` would);
-- **every hardcoded `@knext/` import string inside the staged `dist/**`** — this is the critical
-  hazard: `@knext/lib` **and `@knext/db`** are externalized in
-  `packages/kn-next/tsup.config.ts` (and `@knext/db`'s plain-tsc build preserves its
-  `@knext/lib` imports), so the compiled outputs (`dist/adapters/node-server.js`,
-  `dist/cli/db-migrate.js`, `packages/db/dist/index.js`) contain literal `@knext/lib/...` +
-  `@knext/db/...` imports. Renaming only `package.json` would publish packages whose runtime
-  imports the never-published `@knext/*` names. The script **fails loudly, per dependency**: for
-  every `@knext/*` dep a staged package declares, its dist must contain at least one occurrence
+- **every hardcoded `@getknext/` import string inside the staged `dist/**`** — this is the critical
+  hazard: `@getknext/lib` **and `@getknext/db`** are externalized in
+  `packages/kn-next/tsup.config.ts` (and `@getknext/db`'s plain-tsc build preserves its
+  `@getknext/lib` imports), so the compiled outputs (`dist/adapters/node-server.js`,
+  `dist/cli/db-migrate.js`, `packages/db/dist/index.js`) contain literal `@getknext/lib/...` +
+  `@getknext/db/...` imports. Renaming only `package.json` would publish packages whose runtime
+  imports the never-published `@getknext/*` names. The script **fails loudly, per dependency**: for
+  every `@getknext/*` dep a staged package declares, its dist must contain at least one occurrence
   of that exact specifier (a zero signals the externalization layout changed). It also refuses
-  any `@knext/*` dependency that is not itself in the publish set;
+  any `@getknext/*` dependency that is not itself in the publish set;
 - `publishConfig.provenance` is **stripped** — provenance needs npmjs/OIDC and fails on GHP.
 
 ### Publishing
 
 Run the **Release (GitHub Packages, interim)** workflow manually
-(**Actions → Release (GitHub Packages, interim) → Run workflow**). It builds `@knext/lib`, then
-`@knext/db`, then `@knext/core`, stages the renamed copies, and publishes **lib, then db, then
+(**Actions → Release (GitHub Packages, interim) → Run workflow**). It builds `@getknext/lib`, then
+`@getknext/db`, then `@getknext/core`, stages the renamed copies, and publishes **lib, then db, then
 core** to `npm.pkg.github.com` using the built-in `GITHUB_TOKEN` (`packages: write`, no id-token). Re-running
 with an unchanged version fails with a clear "already published — bump versions via changesets
 first" message; bump versions before re-releasing.
@@ -186,27 +186,27 @@ npx @getknext-dev/core --help    # runs the kn-next bin from the GHP package
 ```
 
 > Caveat: anonymous installs get a `401` — the auth line above is mandatory. Once the npmjs
-> release goes live, migrate consumers back to `npx @knext/core` / `@knext/*`; the GHP scope is
+> release goes live, migrate consumers back to `npx @getknext/core` / `@getknext/*`; the GHP scope is
 > interim only.
 
 ### Deprecation plan for `@getknext-dev/*` (execute when npmjs goes live)
 
 Decided 2026-07 (architect sign-off on the interim channel): the GHP scope is **deprecated the
-day `@knext/*` publishes to npmjs** (issue #53). When that happens, a maintainer should:
+day `@getknext/*` publishes to npmjs** (issue #53). When that happens, a maintainer should:
 
-1. Publish one final `@getknext-dev/*` patch whose README/description points at `@knext/*` on
+1. Publish one final `@getknext-dev/*` patch whose README/description points at `@getknext/*` on
    npmjs, **or** simply mark the existing GHP versions deprecated:
 
    ```sh
-   npm deprecate @getknext-dev/core "moved to @knext/core on registry.npmjs.org" \
+   npm deprecate @getknext-dev/core "moved to @getknext/core on registry.npmjs.org" \
      --registry=https://npm.pkg.github.com
-   npm deprecate @getknext-dev/lib "moved to @knext/lib on registry.npmjs.org" \
+   npm deprecate @getknext-dev/lib "moved to @getknext/lib on registry.npmjs.org" \
      --registry=https://npm.pkg.github.com
    ```
 
 2. Stop dispatching `release-ghp.yml` (leave the workflow in place for history; it is manual-only
    so it cannot fire accidentally).
-3. Update this doc and any consumer `.npmrc` snippets to the `@knext/*` install path.
+3. Update this doc and any consumer `.npmrc` snippets to the `@getknext/*` install path.
 
 Do **not** unpublish the GHP versions — existing consumers keep working; deprecation warns them
 to migrate.

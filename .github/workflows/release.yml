@@ -11,8 +11,8 @@
 #   2. On merge to main, changesets/action opens a "Version Packages" PR (version bump + changelog).
 #   3. Merging that PR (a second push to main) runs `changeset publish` IF NPM_TOKEN exists.
 #
-# Publishable packages: @knext/core (packages/kn-next), @knext/lib (packages/lib),
-# @knext/db (packages/db) — core depends on lib AND db, db depends on lib; all
+# Publishable packages: @getknext/core (packages/kn-next), @getknext/lib (packages/lib),
+# @getknext/db (packages/db) — core depends on lib AND db, db depends on lib; all
 # three must ship together or consumers 404 on the missing member (#255/#256).
 # Provenance is enabled via each package's publishConfig.provenance + id-token permission.
 
@@ -35,7 +35,7 @@ permissions:
 jobs:
   # npm/JS supply-chain gate (v4-P3). The image Trivy gate scans containers; this
   # scans the PUBLISHED npm tarballs' PRODUCTION closure (--omit=dev) of
-  # @knext/{core,lib,db}, FAILS on HIGH/CRITICAL (mirrors security.md's Trivy
+  # @getknext/{core,lib,db}, FAILS on HIGH/CRITICAL (mirrors security.md's Trivy
   # rule), and emits a CycloneDX SBOM per package. It is PUBLISH-BLOCKING: the
   # `release` job `needs: audit`, so a failed audit stops the publish — never
   # advisory/after. scripts/audit-published.mjs is the single source of truth for
@@ -63,7 +63,7 @@ jobs:
       # db → core) — audit-published.mjs pnpm-packs each (rewriting workspace:^
       # exactly like changeset publish) and audits the resolved prod closure.
       - name: Build publishable packages
-        run: pnpm --filter @knext/lib build && pnpm --filter @knext/db build && pnpm --filter @knext/core build
+        run: pnpm --filter @getknext/lib build && pnpm --filter @getknext/db build && pnpm --filter @getknext/core build
 
       # Audits the PUBLISHED production closure (--omit=dev, HIGH/CRITICAL) and
       # writes sbom/*.cdx.json. Non-zero exit here fails the job → blocks publish.
@@ -102,11 +102,11 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      # Build in dependency order: @knext/lib, then @knext/db (depends on lib and
-      # holds the `kn-next db migrate` runner, #242), then @knext/core (type-imports
-      # both). @knext/lib/@knext/db ship only dist/, so they must build first.
+      # Build in dependency order: @getknext/lib, then @getknext/db (depends on lib and
+      # holds the `kn-next db migrate` runner, #242), then @getknext/core (type-imports
+      # both). @getknext/lib/@getknext/db ship only dist/, so they must build first.
       - name: Build publishable packages
-        run: pnpm --filter @knext/lib build && pnpm --filter @knext/db build && pnpm --filter @knext/core build
+        run: pnpm --filter @getknext/lib build && pnpm --filter @getknext/db build && pnpm --filter @getknext/core build
 
       # Gate the publish command WITHOUT referencing `secrets` inside the action's
       # `with:` input (that expression caused GitHub startup-failure runs). When
@@ -135,7 +135,7 @@ jobs:
           commit: 'chore: version packages'
           title: 'chore: version packages'
           # On publish, create one GitHub Release per published package, tagged
-          # `@knext/<pkg>@x.y.z`. The hand-made `v0.1.0` release predates this and
+          # `@getknext/<pkg>@x.y.z`. The hand-made `v0.1.0` release predates this and
           # uses a different tag format, so there is no tag collision.
           createGithubReleases: true
         env:

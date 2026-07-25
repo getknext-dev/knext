@@ -1,5 +1,5 @@
 import { ServerResponse } from "node:http";
-import { CORRELATION_HEADER } from "@knext/lib/context";
+import { CORRELATION_HEADER } from "@getknext/lib/context";
 import { context, trace } from "@opentelemetry/api";
 import { AsyncLocalStorageContextManager } from "@opentelemetry/context-async-hooks";
 import { BasicTracerProvider } from "@opentelemetry/sdk-trace-base";

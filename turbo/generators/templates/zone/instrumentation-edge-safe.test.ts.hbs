@@ -4,7 +4,7 @@
  * Regression guard for #342, graduated from `apps/file-manager` (#344) so EVERY
  * generated app carries the gate: `next build` compiles `instrumentation.ts`
  * for BOTH the nodejs AND the edge runtimes. Any TOP-LEVEL static import of a
- * Node-only client module (e.g. `@knext/lib/clients`, which transitively pulls
+ * Node-only client module (e.g. `@getknext/lib/clients`, which transitively pulls
  * in `@cerbos/grpc` → `@grpc/grpc-js` needing `zlib`/`stream`/`net`/`tls`/`fs`)
  * lands in the edge bundle and fails the production build with
  * `Module not found: Can't resolve 'stream'` etc.
@@ -36,10 +36,10 @@ const nextConfigSrc = readFileSync(join(here, 'next.config.ts'), 'utf8');
  * must NEVER be reached from a top-level static import in instrumentation.ts,
  * because instrumentation is compiled for the edge runtime too.
  *
- * `@knext/lib/clients` is the primary offender: it transitively imports
+ * `@getknext/lib/clients` is the primary offender: it transitively imports
  * `@cerbos/grpc`, `pg`, and `minio`.
  */
-const NODE_ONLY_MODULES = ['@knext/lib/clients', 'pg', '@cerbos/grpc', 'minio'];
+const NODE_ONLY_MODULES = ['@getknext/lib/clients', 'pg', '@cerbos/grpc', 'minio'];
 
 /**
  * Extract the set of module specifiers reached by TOP-LEVEL *static* imports.
@@ -91,17 +91,17 @@ describe('edge IgnorePlugin fence — platform-owned via the knext adapter (#342
     expect(nextConfigSrc).toMatch(/adapterPath\s*:/);
   });
 
-  it('the app adapter is the package-shipped @knext/core adapter', () => {
+  it('the app adapter is the package-shipped @getknext/core adapter', () => {
     const appAdapterSrc = readFileSync(join(here, 'next-adapter.ts'), 'utf8');
-    expect(appAdapterSrc).toMatch(/from\s+['"]@knext\/core\/adapter['"]/);
+    expect(appAdapterSrc).toMatch(/from\s+['"]@getknext\/core\/adapter['"]/);
   });
 
   it('does NOT hand-write the IgnorePlugin webpack hook (graduated to the adapter modifyConfig)', () => {
     expect(nextConfigSrc).not.toMatch(/new\s+webpack\.IgnorePlugin\s*\(/);
   });
 
-  it('never externalizes @knext/lib (ADR-0027: would re-split the globalThis seam state)', () => {
+  it('never externalizes @getknext/lib (ADR-0027: would re-split the globalThis seam state)', () => {
     const externals = nextConfigSrc.match(/serverExternalPackages:\s*\[([^\]]*)\]/s)?.[1] ?? '';
-    expect(externals).not.toMatch(/@knext\/lib/);
+    expect(externals).not.toMatch(/@getknext\/lib/);
   });
 });

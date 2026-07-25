@@ -117,7 +117,7 @@ For write-heavy apps specifically:
    pressure.
 2. **Pool idle timeout < `GW_IDLE_MS`.** This is the critical scale-to-zero rule:
    set the pool's idle timeout **below** the deployed gateway idle window (60s) so
-   an idle app releases its connections and lets the DB sleep. `@knext/lib`'s
+   an idle app releases its connections and lets the DB sleep. `@getknext/lib`'s
    `getDbPool()` already ships scale-to-zero-sane defaults (`DB_POOL_MAX=5`, idle
    timeout **10 s**) — see [connecting → knext apps](connecting.md#knext-apps).
 3. **Keep `min`/`minIdle` at 0** for apps that should let the DB sleep — a warm

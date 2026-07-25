@@ -4,7 +4,7 @@
  * Extracted from apps/file-manager/next-adapter.ts (#89) so the adapter is a
  * REUSABLE, package-shipped artifact. The official compatibility harness builds
  * arbitrary fixture apps and needs an adapter it can point at via NEXT_ADAPTER_PATH
- * — that requires the adapter to live in @knext/core, not in one app.
+ * — that requires the adapter to live in @getknext/core, not in one app.
  *
  * Hooks:
  *  - modifyConfig: force output:'standalone' on phase-production-build, and
@@ -17,7 +17,7 @@
  *      2. Best-effort upload staticFiles + prerenders to MinIO/S3 keyed by buildId
  *         (guarded by STORAGE_BUCKET env var; skips cleanly if not set)
  *
- * Upload uses getMinioClient() from @knext/lib/clients.
+ * Upload uses getMinioClient() from @getknext/lib/clients.
  * Files are uploaded under: <buildId>/<pathname> in the configured bucket.
  *
  * Out of scope: request routing, bun --compile, operator changes.
@@ -76,7 +76,7 @@ const adapter: NextAdapter = {
         // The edge-clean entry guards EXECUTION behind `NEXT_RUNTIME ===
         // 'nodejs'`, but webpack still STATICALLY traces the dynamic
         // `import('./instrumentation-node')` into the edge bundle — pulling in
-        // `@knext/lib/clients` → `@cerbos/grpc`/`pg`/`minio` and failing the
+        // `@getknext/lib/clients` → `@cerbos/grpc`/`pg`/`minio` and failing the
         // build with `Module not found`. For the EDGE compile ONLY we replace
         // `instrumentation-node` with an empty module via `IgnorePlugin`, so its
         // Node-only subtree never enters the edge bundle; the nodejs compile is
@@ -244,7 +244,7 @@ async function uploadBuildArtifacts({
         stream: Readable,
     ) => Promise<unknown>;
     try {
-        const { getMinioClient } = await import("@knext/lib/clients");
+        const { getMinioClient } = await import("@getknext/lib/clients");
         const client = getMinioClient();
         putObject = (b, k, s) => client.putObject(b, k, s);
     } catch (err) {

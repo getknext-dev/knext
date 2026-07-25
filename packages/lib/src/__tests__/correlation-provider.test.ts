@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it } from 'vitest';
  *
  * On the real path knext-core does NOT own the Next.js route-handler chain, so
  * nothing wraps the handler in `runWithRequestContext`; the ambient
- * AsyncLocalStorage store is therefore empty. The OTel-aware `@knext/core`
+ * AsyncLocalStorage store is therefore empty. The OTel-aware `@getknext/core`
  * instead installs a CORRELATION-ID provider (dependency-inversion seam, twin of
  * `setTraceIdProvider`) that resolves the id from the ACTIVE OTel context/span at
  * log time. `correlationLogFields()` must fall through to that provider (and the
@@ -22,7 +22,7 @@ import {
   setTraceIdProvider,
 } from '../context';
 
-describe('@knext/lib correlation — correlation-id provider seam (#346)', () => {
+describe('@getknext/lib correlation — correlation-id provider seam (#346)', () => {
   afterEach(() => {
     resetCorrelationIdProvider();
     resetTraceIdProvider();

@@ -21,7 +21,7 @@ pointing at the gateway Service — the entire knext integration contract
 | Path | What |
 |---|---|
 | `app/` | A minimal Next.js app (`output: 'standalone'`). One page: `INSERT` a visit + `SELECT now(), count(*)`. Health at `/api/health` (never touches the DB). |
-| `app/lib/db.js` | pg pool mirroring `@knext/lib` `getDbPool` — max 5, **idle 10s < gateway's 60s** idle window. |
+| `app/lib/db.js` | pg pool mirroring `@getknext/lib` `getDbPool` — max 5, **idle 10s < gateway's 60s** idle window. |
 | `manifests/00-namespace.yaml` | `knext-demo` namespace (the app's own ns; separate from the DB platform). |
 | `manifests/10-database-secret.yaml` | The `DATABASE_URL` Secret → `pggw.scale-zero-pg.svc:55432`. |
 | `manifests/20-nextapp.yaml` | The `NextApp` CR. `minScale: 0` (app scales to zero). Injects `DATABASE_URL` via `spec.secrets.envMap`. |

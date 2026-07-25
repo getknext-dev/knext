@@ -6,7 +6,7 @@ import { describe, expect, it } from 'vitest';
  * GUARD TESTS for the docs dependency-closure NIGHTLY Trivy scan (#320).
  *
  * The per-PR `docs-site` job in ci.yml scans the docs closure, but it is
- * PATH-FILTERED (only runs when apps/docs/** or the @knext/core surface
+ * PATH-FILTERED (only runs when apps/docs/** or the @getknext/core surface
  * changes) AND report-on-PR / fail-on-main. So a transitive HIGH/CRITICAL
  * introduced by a PR that DOESN'T touch apps/docs escapes the gate entirely
  * and only turns main red on the next push that happens to touch docs — the

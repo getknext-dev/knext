@@ -255,10 +255,10 @@ var _ = Describe("kn-next CLI against a live cluster", Ordered, func() {
 		By("building the CLI from source with pnpm (plain-Node dist, no Bun)")
 		// Requires `pnpm install` to have run at the repo root (CI does; see the
 		// Makefile target's doc). tsup emits dist/cli/kn-next.js — the bin entry.
-		// The `...` filter suffix builds @knext/core's WORKSPACE DEPENDENCIES
-		// first (@knext/lib ships only dist/, and core's dts build imports
-		// @knext/lib/clients — on a clean checkout the bare filter fails TS2307).
-		_, err := utils.RunAtRepoRoot("pnpm", "--filter", "@knext/core...", "build")
+		// The `...` filter suffix builds @getknext/core's WORKSPACE DEPENDENCIES
+		// first (@getknext/lib ships only dist/, and core's dts build imports
+		// @getknext/lib/clients — on a clean checkout the bare filter fails TS2307).
+		_, err := utils.RunAtRepoRoot("pnpm", "--filter", "@getknext/core...", "build")
 		Expect(err).NotTo(HaveOccurred(),
 			"failed to build the CLI — run `pnpm install --frozen-lockfile` at the repo root first")
 		bin, err := utils.CLIBin()

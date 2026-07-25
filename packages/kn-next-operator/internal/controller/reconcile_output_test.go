@@ -161,7 +161,7 @@ var _ = Describe("NextApp Controller reconcile output", func() {
 			// #378 (W3, ADR-0029): close the declared-vs-runtime poolMax drift.
 			// spec.scaling.poolMax was validation-only (ADR-0028) — the operator
 			// gated maxScale × poolMax ≤ 80 at admission but never told the app
-			// what its per-pod cap was, so @knext/lib's pg Pool could open more
+			// what its per-pod cap was, so @getknext/lib's pg Pool could open more
 			// than poolMax connections/pod and blow the budget at runtime. The
 			// operator now injects the declared cap as KNEXT_DB_POOL_MAX so
 			// getDbPool() can enforce it. maxScale(7) × poolMax(5) = 35 ≤ 80.

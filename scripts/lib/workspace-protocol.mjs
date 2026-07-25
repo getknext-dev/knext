@@ -2,8 +2,8 @@
  * scripts/lib/workspace-protocol.mjs — shared pure guard (#147 A3-3 fix round 1).
  *
  * WHY THIS EXISTS: baseline compat run 28558576615 burned 16 shards because the
- * packed @knext/core tarball still carried pnpm's raw `workspace:^` dep on
- * @knext/lib (`npm pack` does NOT rewrite the workspace protocol — only
+ * packed @getknext/core tarball still carried pnpm's raw `workspace:^` dep on
+ * @getknext/lib (`npm pack` does NOT rewrite the workspace protocol — only
  * `pnpm pack` / `pnpm publish` do). npm then fails any install of that tarball
  * with EUNSUPPORTEDPROTOCOL. This helper lets both gates (install-smoke and the
  * compat preflight) inspect a packed manifest and NAME the leak directly,

@@ -10,7 +10,7 @@ scaffolding per language, CLI-generated Next.js glue (server-only typed clients,
 JSON-over-HTTP routes), and each backend deployable as its own scale-to-zero Knative service.
 
 ## Decision
-**Design now, build later as an optional, separately-versioned module** (`@knext/grpc` package +
+**Design now, build later as an optional, separately-versioned module** (`@getknext/grpc` package +
 a `BackendService` CRD). Contract-first: `.proto` is the single source of truth; all codegen
 flows from it (consistent with ADR-0001's single-source principle). Default tooling **Connect +
 buf** (ADR-0003); deployment via a new **`BackendService` CRD** reconciled by the operator
@@ -30,7 +30,7 @@ Phases 0–5.** When built, keep it opt-in and isolated so it never gates or com
 adapter. Recommendation: **build later**, module-shaped, behind a feature flag/CRD.
 
 ## Consequences
-- New package `packages/grpc` (`@knext/grpc`): codegen orchestration, generated client runtime,
+- New package `packages/grpc` (`@getknext/grpc`): codegen orchestration, generated client runtime,
   generators for gateway glue.
 - New `kn-next generate` CLI command (mirrors `build.ts`/`deploy.ts`) running `buf generate`.
 - New `BackendService` CRD + operator controller (ADR-0004); env-based service discovery

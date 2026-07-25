@@ -1,5 +1,5 @@
 # Plain-k8s image for the OKE deploy: vanilla Next.js build (KNEXT_ADAPTER unset)
-# + `next start`. No knext adapter, no standalone, no @knext/core — fully self-contained.
+# + `next start`. No knext adapter, no standalone, no @getknext/core — fully self-contained.
 FROM node:22-alpine AS build
 WORKDIR /app
 COPY . .

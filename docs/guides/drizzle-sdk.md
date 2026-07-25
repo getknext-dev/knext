@@ -1,13 +1,13 @@
-# The knext data SDK: `@knext/db` (drizzle)
+# The knext data SDK: `@getknext/db` (drizzle)
 
-> **Status:** implemented (ADR-0021, epic #235). `@knext/db` is the typed
+> **Status:** implemented (ADR-0021, epic #235). `@getknext/db` is the typed
 > data-access layer for knext apps — a **thin** [drizzle-orm](https://orm.drizzle.team)
 > wrapper over the scale-to-zero Postgres pools the operator binds into your app.
 
 knext and [scale-zero-pg](https://github.com/getknext-dev/scale-zero-pg) are **one
 platform, two layers**: knext scales your *application* (Next.js on Knative),
 scale-zero-pg scales its *database* (a wake-on-connect Postgres gateway). Both sleep
-at zero and **wake together on one visitor request**. `@knext/db` gives that database
+at zero and **wake together on one visitor request**. `@getknext/db` gives that database
 a typed schema, migrations, and queries — without building any database machinery of
 its own (it provisions nothing and mutates no cluster resource; ADR-0021 §5).
 
@@ -22,11 +22,11 @@ A complete, runnable version of everything below lives in
 ## 1. Install
 
 ```bash
-npm i @knext/db
+npm i @getknext/db
 npm i -D drizzle-kit        # dev-only: generates SQL migrations
 ```
 
-`@knext/db` depends on `drizzle-orm` and re-exports it, so you get one
+`@getknext/db` depends on `drizzle-orm` and re-exports it, so you get one
 pinned-compatible drizzle. `drizzle-kit` is a **dev tool** (a type-only peer) — it
 runs `generate` at dev time and ships no runtime code.
 
@@ -35,13 +35,13 @@ runs `generate` at dev time and ships no runtime code.
 ## 2. Define your schema
 
 Put your tables in `src/db/schema.ts` (the knext convention) and import the builders
-from `@knext/db/schema` — a thin re-export of drizzle's `pg-core` (plus
+from `@getknext/db/schema` — a thin re-export of drizzle's `pg-core` (plus
 `relations`/`sql`). No bespoke DSL, so [drizzle's schema
 docs](https://orm.drizzle.team/docs/sql-schema-declaration) apply directly.
 
 ```ts
 // src/db/schema.ts
-import { pgTable, serial, text, timestamp } from '@knext/db/schema';
+import { pgTable, serial, text, timestamp } from '@getknext/db/schema';
 
 export const messages = pgTable('messages', {
   id: serial('id').primaryKey(),
@@ -55,7 +55,7 @@ export type Message = typeof messages.$inferSelect; // row shape
 export type NewMessage = typeof messages.$inferInsert; // insert shape
 ```
 
-`@knext/db/schema` re-exports `pgTable`, the column builders (`serial`/`text`/
+`@getknext/db/schema` re-exports `pgTable`, the column builders (`serial`/`text`/
 `integer`/`timestamp`/`jsonb`/`uuid`/`vector`/…), `index`/`uniqueIndex`,
 `primaryKey`/`foreignKey`, `pgEnum`/`pgSchema`, and `relations`/`sql`. The
 TimescaleDB and pgvector helpers (§6) slot in **on top of** this surface.
@@ -71,7 +71,7 @@ Migrations answer *"who migrates a single-writer, scale-to-zero database?"* — 
 
 ```ts
 // drizzle.config.ts (app root)
-import { defineDrizzleConfig } from '@knext/db/migrate';
+import { defineDrizzleConfig } from '@getknext/db/migrate';
 
 // dialect: 'postgresql', schema: './src/db/schema.ts', out: './drizzle',
 // dbCredentials.url: process.env.DATABASE_URL (the WRITER, injected by the operator).
@@ -179,13 +179,13 @@ into your pipeline so a failed migration blocks the rollout.
 ## 4. Typed queries + mutations in the App Router
 
 Reads run in server components / route handlers; mutations run in `'use server'`
-actions. `@knext/db` re-exports drizzle's query builder and operators (`eq`, `and`,
+actions. `@getknext/db` re-exports drizzle's query builder and operators (`eq`, `and`,
 `or`, `desc`, `sql`, …) — no bespoke DSL. Keep the data-access functions plain (no
 `next/*`) so they import and unit-test cleanly, then wrap the write in an action.
 
 ```ts
 // src/db/queries.ts — the read/write split, explicit clients
-import { desc, getDb, getDbRO } from '@knext/db';
+import { desc, getDb, getDbRO } from '@getknext/db';
 import { type Message, type NewMessage, messages } from './schema';
 
 // staleness-tolerant list → the READER (bounded-stale RO gateway)
@@ -284,7 +284,7 @@ that migration.
 import {
   pgTable, timestamp, text, doublePrecision,
   hypertable, dropChunks, createTimescaleExtension,
-} from '@knext/db/schema';
+} from '@getknext/db/schema';
 
 export const metrics = pgTable('metrics', {
   ts: timestamp('ts', { withTimezone: true }).notNull(),
@@ -317,7 +317,7 @@ dropChunks(metrics, { olderThan: '30 days' });
 import {
   pgTable, serial, text, vector,
   hnsw, ivfflat, createVectorExtension,
-} from '@knext/db/schema';
+} from '@getknext/db/schema';
 
 export const docs = pgTable('docs', {
   id: serial('id').primaryKey(),
@@ -341,7 +341,7 @@ the index's ops class**: `cosineDistance` (`<=>`) ⇄ `vector_cosine_ops`, `l2Di
 (`<->`) ⇄ `vector_l2_ops`, `innerProduct` (`<#>`) ⇄ `vector_ip_ops`.
 
 ```ts
-import { getDbRO, cosineDistance } from '@knext/db';
+import { getDbRO, cosineDistance } from '@getknext/db';
 import { docs } from '@/db/schema';
 
 const nearest = await getDbRO({ docs })
@@ -363,14 +363,14 @@ compute); it persists across scale-to-zero like any other table.
 
 ## 7. Pooling / wake contract
 
-Both pools live in `@knext/lib` and inherit the scale-to-zero contract (ADR-0019,
+Both pools live in `@getknext/lib` and inherit the scale-to-zero contract (ADR-0019,
 measured):
 
 - **Pool idle timeout < the gateway's 60s idle** — so the app never holds an idle
   socket open across the gateway's `GW_IDLE_MS`, and never keeps the database awake.
-  (`@knext/lib` default: idle 10s.)
+  (`@getknext/lib` default: idle 10s.)
 - **Connect timeout ≥ 10s** — to absorb the ~2.5s cold wake with margin.
-  (`@knext/lib` default: connect 15s.)
+  (`@getknext/lib` default: connect 15s.)
 
 The defaults already satisfy both — you rarely tune them. Override the writer with
 `DB_POOL_*` and the reader with `DB_POOL_RO_*` if you must. Because the connect

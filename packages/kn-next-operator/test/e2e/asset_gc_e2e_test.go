@@ -544,7 +544,7 @@ var _ = Describe("asset retention GC against a live cluster (ADR-0011)", Ordered
 			"the aws CLI is required (preinstalled on GitHub runners; `brew install awscli` locally)")
 
 		By("building the CLI from source with pnpm (plain-Node dist, no Bun)")
-		_, err = utils.RunAtRepoRoot("pnpm", "--filter", "@knext/core...", "build")
+		_, err = utils.RunAtRepoRoot("pnpm", "--filter", "@getknext/core...", "build")
 		Expect(err).NotTo(HaveOccurred(),
 			"failed to build the CLI — run `pnpm install --frozen-lockfile` at the repo root first")
 		bin, err := utils.CLIBin()

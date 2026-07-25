@@ -45,7 +45,7 @@ the pod (flagged in PR #179's gate review; folded here per #180; details in ADR-
 
 ## Track P — Promotion (parallel, fame-first)
 GitHub org, landing page, **docs site (dogfooded on knext)**, examples, npm publishing
-(`@knext/*` — unblocks `npx kn-next` for outside users), Next.js-docs adapter listing.
+(`@getknext/*` — unblocks `npx kn-next` for outside users), Next.js-docs adapter listing.
 
 ## Optional module — gRPC business-logic layer
 **Design now, build later (after Tier A).** Polyglot backends as cluster-local scale-to-zero

@@ -1,6 +1,6 @@
-# ADR-0021 — Drizzle-based data SDK: `@knext/db` (typed schema · migrations · queries · extensions)
+# ADR-0021 — Drizzle-based data SDK: `@getknext/db` (typed schema · migrations · queries · extensions)
 
-- **Status:** Accepted (implemented — `@knext/db` shipped; **amended 2026-07-14**:
+- **Status:** Accepted (implemented — `@getknext/db` shipped; **amended 2026-07-14**:
   drizzle dependency/peer shape settled before the first npmjs publish — see the
   *Amendment* below, which SUPERSEDES Open decision 6)
 - **Date:** 2026-07-11 (amended 2026-07-14)
@@ -16,7 +16,7 @@
 
 ADR-0018/0019 solved **binding** a NextApp to a Postgres — the operator injects
 `DATABASE_URL` (and optionally `DATABASE_URL_RO`) into the app container. But the
-**app-side data-access story stops at a raw `pg.Pool`**: `@knext/lib`'s `getDbPool()`
+**app-side data-access story stops at a raw `pg.Pool`**: `@getknext/lib`'s `getDbPool()`
 (`packages/lib/src/clients.ts`) returns an untyped `pg.Pool` reading `DATABASE_URL`.
 An app author who wants tables, migrations, typed queries, or the platform's
 Postgres extensions is on their own — hand-written SQL, no schema-as-code, no
@@ -39,7 +39,7 @@ in the platform and are easy to get wrong:
    must not silently route.
 3. **Scale-to-zero pooling contract** (ADR-0019, measured): pool idle timeout **<
    gateway idle 60s** (else dead sockets), connect timeout **≥ 10s** (a cold wake is
-   ~2.5s, now settled via scale-zero-pg #132). `@knext/lib`'s defaults already encode
+   ~2.5s, now settled via scale-zero-pg #132). `@getknext/lib`'s defaults already encode
    this (max 5, idle 10s, connect 15s); the SDK must inherit them, not re-derive them.
 4. **Extension bounds are real.** TimescaleDB hypertables + `drop_chunks()` retention
    work today, but **columnar compression and continuous aggregates do not** —
@@ -55,8 +55,8 @@ in the platform and are easy to get wrong:
 
 ## Decision
 
-Ship **`@knext/db`** — a new `@knext/*` package (sibling to `@knext/lib`) that wraps
-**drizzle-orm** over the existing `@knext/lib` pool. **Thin, not a framework:** we
+Ship **`@getknext/db`** — a new `@getknext/*` package (sibling to `@getknext/lib`) that wraps
+**drizzle-orm** over the existing `@getknext/lib` pool. **Thin, not a framework:** we
 re-export drizzle-orm and add only the knext-specific ergonomics the platform needs
 (client wiring, RO routing, extensions, a migration runner). Apps keep drizzle's own
 docs and lose no power.
@@ -64,19 +64,19 @@ docs and lose no power.
 ### 1. Clients — writer / reader are explicit, never auto-routed
 
 ```ts
-import { getDb, getDbRO } from '@knext/db';
+import { getDb, getDbRO } from '@getknext/db';
 import { schema } from '@/db/schema';
 
 const db   = getDb();     // writer  — DATABASE_URL      (read-your-writes)
 const dbRO = getDbRO();   // reader  — DATABASE_URL_RO   (bounded-stale, ~9s ceiling)
 ```
 
-- `getDb()` drizzle-wraps `@knext/lib`'s `getDbPool()` singleton
+- `getDb()` drizzle-wraps `@getknext/lib`'s `getDbPool()` singleton
   (`drizzle-orm/node-postgres`, `drizzle(pool, { schema })`). **One pool per pod**,
   shared with any raw-`pg` use, drained by the existing `closeDbPool()` SIGTERM hook.
-- `getDbRO()` wraps a **new** RO pool. `@knext/lib` gains `getDbPoolRO()` /
+- `getDbRO()` wraps a **new** RO pool. `@getknext/lib` gains `getDbPoolRO()` /
   `closeDbPoolRO()` (env `DB_POOL_RO_*`, DSN `DATABASE_URL_RO`) so pool lifecycle +
-  drain stay in `@knext/lib`, its established job. `@knext/db` only drizzle-wraps.
+  drain stay in `@getknext/lib`, its established job. `@getknext/db` only drizzle-wraps.
 - **No SQL parsing, no automatic read/write split.** Two clients, the author picks —
   mirroring scale-zero-pg's explicit two-DSN stance. `getDbRO()` when
   `DATABASE_URL_RO` is unset **falls back to the writer with a one-time warning**
@@ -85,8 +85,8 @@ const dbRO = getDbRO();   // reader  — DATABASE_URL_RO   (bounded-stale, ~9s c
 ### 2. Schema — expose drizzle, add extension helpers
 
 Apps define schema in `src/db/schema.ts` with drizzle's `pgTable`, re-exported from
-`@knext/db/schema` so the app has **one** dependency at a pinned-compatible version.
-`@knext/db` adds only what the platform's extensions require:
+`@getknext/db/schema` so the app has **one** dependency at a pinned-compatible version.
+`@getknext/db` adds only what the platform's extensions require:
 
 - **TimescaleDB** — `hypertable(table, { by, chunkInterval })` is a **migration
   helper** (emits `SELECT create_hypertable(...)` after the table DDL) plus a
@@ -125,14 +125,14 @@ k8s-idiomatic answer to *"who migrates a single-writer, scale-to-zero DB?"*:
 
 Reads via route handlers / server components use `getDb()` (or `getDbRO()` for
 staleness-tolerant reads); mutations use drizzle's typed `insert/update/delete` inside
-`'use server'` actions, always on the writer. `@knext/db` re-exports drizzle's query
+`'use server'` actions, always on the writer. `@getknext/db` re-exports drizzle's query
 builder and `eq`/`and`/… operators; it does **not** wrap them in a bespoke DSL
 (Open decision 3). Ergonomic sugar is limited to the client accessors + extension
 helpers above.
 
 ### 5. Pooling — inherit ADR-0019, add a symmetric RO pool
 
-Writer pool is unchanged (`@knext/lib` defaults: max 5, idle 10s < 60s, connect 15s ≥
+Writer pool is unchanged (`@getknext/lib` defaults: max 5, idle 10s < 60s, connect 15s ≥
 10s). The RO pool mirrors those defaults with `DB_POOL_RO_*` overrides and wakes only
 the RO compute. Both drain on SIGTERM. The 15s connect timeout already tolerates the
 ~2.5s cold wake with margin, so **no app-side wake retry is needed**.
@@ -145,13 +145,13 @@ the RO compute. Both drain on SIGTERM. The 15s connect timeout already tolerates
 | Abstraction level | **Re-export drizzle + thin helpers** / knext-bespoke query API | **Thin** — drizzle's docs stay applicable, low lock-in, we add only platform-specific value (clients, RO, extensions, migrate). A bespoke API is a maintenance sink with no upside. |
 | RO routing | **Explicit `getDb`/`getDbRO`** / per-query hint / auto-route by statement | **Explicit two clients** — matches scale-zero-pg's "nothing is automatic" contract; auto-routing would silently serve stale reads and break read-your-writes. |
 | Migration execution | **One-shot `kn-next db migrate` (CLI/Job)** / on-boot in-app / operator-run | **One-shot runner** — single writer, no request-path penalty, no N-pod race, no operator↔schema coupling. |
-| Pool ownership | **Reuse/extend `@knext/lib`** / `@knext/db` owns its own pool | **Reuse** — one pool per pod, one SIGTERM drain, one home for the ADR-0019 contract. `@knext/lib` gains the RO pool; `@knext/db` only wraps. |
+| Pool ownership | **Reuse/extend `@getknext/lib`** / `@getknext/db` owns its own pool | **Reuse** — one pool per pod, one SIGTERM drain, one home for the ADR-0019 contract. `@getknext/lib` gains the RO pool; `@getknext/db` only wraps. |
 
 ## Consequences
 
-- `@knext/db` becomes the **recommended** app data path; raw `@knext/lib`
+- `@getknext/db` becomes the **recommended** app data path; raw `@getknext/lib`
   `getDbPool()` remains the escape hatch (a drizzle client *is* that pool).
-- `@knext/lib` grows a **read-only pool** (`getDbPoolRO`/`closeDbPoolRO`) — a small,
+- `@getknext/lib` grows a **read-only pool** (`getDbPoolRO`/`closeDbPoolRO`) — a small,
   additive, semver-minor change with its own tests; the runtime SIGTERM drain wires it
   alongside `closeDbPool`.
 - A new **`kn-next db migrate`** CLI surface + Job recipe; documented as a per-deploy
@@ -159,9 +159,9 @@ the RO compute. Both drain on SIGTERM. The 15s connect timeout already tolerates
 - **Extension parity is version-coupled to scale-zero-pg**, and the guide says so:
   TimescaleDB minus compression/continuous-aggregates today; pgvector only once #178
   ships. A cross-repo tracking note lives in both the guide and issue #178.
-- New user guide `docs/guides/drizzle-sdk.md`; `@knext/db/docs/PUBLIC_API.md` declares
+- New user guide `docs/guides/drizzle-sdk.md`; `@getknext/db/docs/PUBLIC_API.md` declares
   the stable subpaths (`.`, `./schema`, `./migrate`); released via changesets on the
-  next `@knext/*` publish.
+  next `@getknext/*` publish.
 - Positioning stays honest (`.claude/rules/architecture.md §5`): this is the app
   **data-access** layer, not a PaaS and not database machinery — provisioning and
   scale-to-zero stay with scale-zero-pg.
@@ -177,26 +177,26 @@ Open decision 6 was implemented **literally**, producing a contradictory
 resolver already installs it (the hard dep), so the "optional peer" duplicate is
 dead metadata that only misleads consumers and tooling. `drizzle-kit` was correctly
 an optional peer, but its lazy-import discipline was undocumented and unverified.
-With the first `@knext/*` npmjs publish imminent (issue #53 may unblock any day) and
-`@knext/db` in the published set (ADR-0020 amendment), the shape must be coherent
+With the first `@getknext/*` npmjs publish imminent (issue #53 may unblock any day) and
+`@getknext/db` in the published set (ADR-0020 amendment), the shape must be coherent
 **before** it is frozen on the registry.
 
-The technical reality that drove the recommendation: `@knext/db`'s main entry
+The technical reality that drove the recommendation: `@getknext/db`'s main entry
 (`.`) **re-exports drizzle-orm** (`export * from 'drizzle-orm'`) and `getDb`/`getDbRO`
 call `drizzle(...)` at runtime — drizzle-orm is a **real runtime dependency**, not an
 app-supplied peer. drizzle-**kit**, by contrast, is only ever a **type** in the
 source (`Config`) and a **dev/CI tool** the app runs against the generated
-`drizzle.config.ts`; the `@knext/db` main entry and the `kn-next db migrate` runner
+`drizzle.config.ts`; the `@getknext/db` main entry and the `kn-next db migrate` runner
 never load it.
 
 ### Decision
 
 1. **`drizzle-orm` is a hard `dependency` only.** Drop the `peerDependencies` /
    `peerDependenciesMeta` duplicate. The re-exported drizzle-orm range
-   (`^0.45.2`) is **part of `@knext/db`'s semver contract**: because apps import
-   drizzle's query surface *through* `@knext/db`, a range change that could move an
+   (`^0.45.2`) is **part of `@getknext/db`'s semver contract**: because apps import
+   drizzle's query surface *through* `@getknext/db`, a range change that could move an
    app to an incompatible drizzle-orm major/minor is itself at least a **minor**
-   `@knext/db` release (a major-range bump ⇒ a `@knext/db` major). This is stated in
+   `@getknext/db` release (a major-range bump ⇒ a `@getknext/db` major). This is stated in
    the README and PUBLIC_API stability note.
 2. **`drizzle-kit` stays the sole optional peer**
    (`peerDependencies.drizzle-kit` + `peerDependenciesMeta.drizzle-kit.optional: true`),
@@ -225,7 +225,7 @@ never load it.
   range bumps are gated at ≥ minor, documented in README + PUBLIC_API.md.
 - The `defineDrizzleConfig` peer guard turns a confusing downstream loader failure
   into a one-line fix instruction, verified by the contract test and an
-  install-smoke leg (`scripts/install-smoke.mjs`) that proves `@knext/db` installs +
+  install-smoke leg (`scripts/install-smoke.mjs`) that proves `@getknext/db` installs +
   its main entry imports + `runMigrations` resolves **without** drizzle-kit in the
   tree.
 - Change is runtime-neutral (dropping dead metadata + a lazy guard that only fires on
@@ -248,25 +248,25 @@ never load it.
 4. **pgvector sequencing.** Recommend **ship vector helpers now, gated** (designed +
    unit-tested, live test skipped until scale-zero-pg #178 enables `CREATE EXTENSION
    vector`). Alternative: **defer** all vector code until #178 merges. Owner call.
-5. **Package name.** Recommend **`@knext/db`**. Alternatives: `@knext/data`,
-   `@knext/orm`. Confirm.
-6. **drizzle dependency shape.** ~~Recommend `@knext/db` **re-exports** drizzle-orm
+5. **Package name.** Recommend **`@getknext/db`**. Alternatives: `@getknext/data`,
+   `@getknext/orm`. Confirm.
+6. **drizzle dependency shape.** ~~Recommend `@getknext/db` **re-exports** drizzle-orm
    (apps get one pinned dep) **and** declares it a peer range, so apps may pin their
    own compatible drizzle. Confirm vs. hard-pinning.~~ **SUPERSEDED by the
    2026-07-14 amendment (see below): drizzle-orm is a hard `dependency` only (a dep
    cannot coherently be both a dep and an optional peer); drizzle-kit stays the sole
    optional peer.**
 7. **Example app.** Recommend porting an existing sample (`apps/file-manager`) to
-   `@knext/db` as the runnable proof, vs. a fresh minimal `apps/db-demo`. Owner
+   `@getknext/db` as the runnable proof, vs. a fresh minimal `apps/db-demo`. Owner
    preference.
 
 ## Action items
 
 - [ ] Owner review of this ADR + the open decisions above.
-- [ ] Scaffold `packages/db` (`@knext/db`) — package.json, tsconfig, biome, vitest,
+- [ ] Scaffold `packages/db` (`@getknext/db`) — package.json, tsconfig, biome, vitest,
       PUBLIC_API.md, changeset (issue: scaffold).
-- [ ] `getDb()` writer client over `@knext/lib` pool + SIGTERM drain (issue: writer).
-- [ ] `getDbPoolRO`/`closeDbPoolRO` in `@knext/lib` + `getDbRO()` (issue: RO routing).
+- [ ] `getDb()` writer client over `@getknext/lib` pool + SIGTERM drain (issue: writer).
+- [ ] `getDbPoolRO`/`closeDbPoolRO` in `@getknext/lib` + `getDbRO()` (issue: RO routing).
 - [ ] Schema surface + `drizzle-kit` config helper (issue: schema).
 - [ ] TimescaleDB `hypertable`/retention helpers + bounds docs (issue: timescale).
 - [ ] pgvector column/index/similarity helpers, gated on #178 (issue: pgvector).

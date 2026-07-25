@@ -155,7 +155,7 @@ jobs:
           cache-dependency-path: packages/kn-next-operator/go.sum
 
       # The suite shells out to the built CLI with plain `node` and builds it
-      # via `pnpm --filter @knext/core build` — so the job needs Node + pnpm
+      # via `pnpm --filter @getknext/core build` — so the job needs Node + pnpm
       # (version pinned by `packageManager` in package.json) + workspace deps.
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -241,7 +241,7 @@ jobs:
           cache-dependency-path: packages/kn-next-operator/go.sum
 
       # The suite shells out to the built CLI with plain `node` and builds it
-      # via `pnpm --filter @knext/core build` — so the job needs Node + pnpm
+      # via `pnpm --filter @getknext/core build` — so the job needs Node + pnpm
       # (version pinned by `packageManager` in package.json) + workspace deps.
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -336,7 +336,7 @@ jobs:
           cache-dependency-path: packages/kn-next-operator/go.sum
 
       # The suite shells out to the built CLI with plain `node` and builds it
-      # via `pnpm --filter @knext/core build` — so the job needs Node + pnpm
+      # via `pnpm --filter @getknext/core build` — so the job needs Node + pnpm
       # (version pinned by `packageManager` in package.json) + workspace deps.
       # The `aws` CLI (the s3 storage provider's data plane) is preinstalled
       # on ubuntu-latest runners and honors AWS_ENDPOINT_URL (v2.13+).

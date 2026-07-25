@@ -230,7 +230,7 @@ export default config;
 ./deploy.sh
 
 # Or using the CLI
-npx @knext/core deploy
+npx @getknext/core deploy
 ```
 
 This single command:
@@ -488,7 +488,7 @@ Next.js emits **shared-cache** directives on prerendered/ISR responses (e.g.
 never revalidate). Those directives are meant to be consumed by a deployment
 platform's cache layer — they are not what a browser should see. On a knext
 deployment, Knative serves clients directly, so the runtime entry
-(`@knext/core/internal/node-server`) normalizes them by default, exactly like
+(`@getknext/core/internal/node-server`) normalizes them by default, exactly like
 the official reference adapter does in its serving layer:
 
 - Applies to `GET`/`HEAD` responses only.
@@ -789,18 +789,18 @@ pnpm dev
 
 ```bash
 # Full deployment with defaults
-npx @knext/core deploy
+npx @getknext/core deploy
 
 # Or step-by-step
-npx @knext/core build       # next build (standalone) + adapter
-npx @knext/core deploy      # Deploy to cluster
-npx @knext/core cleanup     # Remove from cluster
+npx @getknext/core build       # next build (standalone) + adapter
+npx @getknext/core deploy      # Deploy to cluster
+npx @getknext/core cleanup     # Remove from cluster
 ```
 
 ### CLI Reference
 
 ```bash
-npx @knext/core deploy [options]
+npx @getknext/core deploy [options]
 ```
 
 | Option | Short | Description |
@@ -839,14 +839,14 @@ These environment variables can be used instead of CLI flags:
     KN_NAMESPACE: production
     KN_REDIS_URL: ${{ secrets.REDIS_URL }}
     KN_DATABASE_URL: ${{ secrets.DATABASE_URL }}
-  run: npx @knext/core deploy
+  run: npx @getknext/core deploy
 ```
 
 **GitLab CI:**
 ```yaml
 deploy:
   script:
-    - npx @knext/core deploy --tag $CI_COMMIT_SHA --namespace production
+    - npx @getknext/core deploy --tag $CI_COMMIT_SHA --namespace production
   variables:
     KN_REGISTRY: gcr.io/my-project
     KN_REDIS_URL: $REDIS_URL
@@ -854,12 +854,12 @@ deploy:
 
 **Production with specific tag:**
 ```bash
-npx @knext/core deploy --tag v1.2.3 --namespace production
+npx @getknext/core deploy --tag v1.2.3 --namespace production
 ```
 
 **Preview manifest only:**
 ```bash
-npx @knext/core deploy --dry-run
+npx @getknext/core deploy --dry-run
 ```
 
 ---

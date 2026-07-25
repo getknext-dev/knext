@@ -91,26 +91,26 @@ describe('scripts/e2e-deploy.sh — fixture-shipped node_modules survive the tar
     mkdirSync(tarballsDir, { recursive: true });
 
     // Stand-ins for the real pnpm-packed tarballs (same names find_tarball
-    // globs for; @knext/core keeps its real "./adapter" export shape so the
-    // script's require.resolve("@knext/core/adapter") is exercised for real).
+    // globs for; @getknext/core keeps its real "./adapter" export shape so the
+    // script's require.resolve("@getknext/core/adapter") is exercised for real).
     packStub(
       stageDir,
       tarballsDir,
-      { name: '@knext/lib', version: '0.0.0-test', main: 'index.js' },
+      { name: '@getknext/lib', version: '0.0.0-test', main: 'index.js' },
       { 'index.js': 'module.exports = {};\n' },
     );
-    // #255/#256: the script now requires + installs the @knext/db tarball too.
+    // #255/#256: the script now requires + installs the @getknext/db tarball too.
     packStub(
       stageDir,
       tarballsDir,
-      { name: '@knext/db', version: '0.0.0-test', main: 'index.js' },
+      { name: '@getknext/db', version: '0.0.0-test', main: 'index.js' },
       { 'index.js': 'module.exports = {};\n' },
     );
     packStub(
       stageDir,
       tarballsDir,
       {
-        name: '@knext/core',
+        name: '@getknext/core',
         version: '0.0.0-test',
         exports: {
           './adapter': './dist/adapters/next-adapter.js',
@@ -121,7 +121,7 @@ describe('scripts/e2e-deploy.sh — fixture-shipped node_modules survive the tar
           // #188: same for the Bun ≤1.3.x keep-alive guard preload.
           './internal/bun-keepalive-guard': './dist/adapters/bun-keepalive-guard.cjs',
         },
-        dependencies: { '@knext/lib': '0.0.0-test' },
+        dependencies: { '@getknext/lib': '0.0.0-test' },
       },
       {
         'dist/adapters/next-adapter.js': 'module.exports = {};\n',
@@ -192,14 +192,14 @@ describe('scripts/e2e-deploy.sh — fixture-shipped node_modules survive the tar
     expect(() => new URL(lines[0])).not.toThrow();
   });
 
-  it('the adapter tarballs really installed (@knext/core/adapter resolves from the fixture)', () => {
+  it('the adapter tarballs really installed (@getknext/core/adapter resolves from the fixture)', () => {
     const r = spawnSync(
       'node',
-      ['-e', 'process.stdout.write(require.resolve("@knext/core/adapter"))'],
+      ['-e', 'process.stdout.write(require.resolve("@getknext/core/adapter"))'],
       { cwd: appDir, encoding: 'utf8' },
     );
     expect(r.status, r.stderr).toBe(0);
-    expect(r.stdout).toContain(join('@knext', 'core'));
+    expect(r.stdout).toContain(join('@getknext', 'core'));
   });
 
   it("fixture-shipped node_modules/example survives the install and resolves (npm's reify pruned it before)", () => {

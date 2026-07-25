@@ -3,7 +3,7 @@
  *
  * Next.js compiles `instrumentation.ts` for BOTH the `nodejs` AND the `edge`
  * runtimes (this app has `middleware.ts`, which forces an edge build). ALL of
- * this wiring is Node-only by nature: `@knext/lib/clients` transitively imports
+ * this wiring is Node-only by nature: `@getknext/lib/clients` transitively imports
  * `@cerbos/grpc` (→ `@grpc/grpc-js`, needing `zlib`/`stream`/`net`/`tls`/`fs`),
  * plus `pg` and `minio`. If any of it is reachable from the edge bundle the
  * production `next build` fails with `Module not found`.
@@ -24,7 +24,7 @@
  * enforces both halves of the fence.
  */
 
-import { installCorrelationResponseEcho } from '@knext/core/adapters/correlation-response';
+import { installCorrelationResponseEcho } from '@getknext/core/adapters/correlation-response';
 import {
   GoldenSignalMetricsProcessor,
   initRuntimeMetrics,
@@ -32,8 +32,8 @@ import {
   recordColdStart,
   recordDbWake,
   startChildMetricsServer,
-} from '@knext/core/adapters/metrics';
-import { resolveOtelOptions } from '@knext/core/adapters/otel-config';
+} from '@getknext/core/adapters/metrics';
+import { resolveOtelOptions } from '@getknext/core/adapters/otel-config';
 import {
   ColdStartSpanProcessor,
   CorrelationContextPropagator,
@@ -41,10 +41,10 @@ import {
   installCorrelationIdProvider,
   installTraceIdProvider,
   instrumentPoolForDbWake,
-} from '@knext/core/adapters/tracing';
-import { isDbRecentlyActive, setPoolInstrumentor } from '@knext/lib/clients';
-import { setCorrelationIdProvider, setTraceIdProvider } from '@knext/lib/context';
-import { checkDeepHealth } from '@knext/lib/health';
+} from '@getknext/core/adapters/tracing';
+import { isDbRecentlyActive, setPoolInstrumentor } from '@getknext/lib/clients';
+import { setCorrelationIdProvider, setTraceIdProvider } from '@getknext/lib/context';
+import { checkDeepHealth } from '@getknext/lib/health';
 import { registerOTel } from '@vercel/otel';
 import { Registry } from 'prom-client';
 

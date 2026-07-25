@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-// #317 — the pool-instrumentor seam. `@knext/lib/clients` stays OTel-free (a
+// #317 — the pool-instrumentor seam. `@getknext/lib/clients` stays OTel-free (a
 // dependency-inversion seam, mirroring `setTraceIdProvider` in ./context): an
 // OTel-aware layer installs an instrumentor that is invoked ONCE per pool as it
 // is created, with the pool + its role ('writer' | 'reader'). The tracing
@@ -17,7 +17,7 @@ class FakePool {
 }
 vi.mock('pg', () => ({ Pool: FakePool }));
 
-describe('@knext/lib/clients — pool instrumentor seam (#317)', () => {
+describe('@getknext/lib/clients — pool instrumentor seam (#317)', () => {
   beforeEach(() => {
     vi.resetModules();
     process.env.DATABASE_URL = 'postgres://u:p@localhost:5432/db';

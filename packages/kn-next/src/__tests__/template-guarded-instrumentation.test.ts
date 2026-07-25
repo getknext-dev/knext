@@ -15,10 +15,10 @@
  *      `next.config.ts` wires `adapterPath` and must NOT hand-write the hook.
  *
  *   2. SEAM-ALIVE (#352/ADR-0027): the generated `instrumentation-node.ts`
- *      wires the `@knext/lib` collaborator seams (`setPoolInstrumentor`,
+ *      wires the `@getknext/lib` collaborator seams (`setPoolInstrumentor`,
  *      `setTraceIdProvider`, `setCorrelationIdProvider`) whose state is
  *      anchored on `globalThis` via `Symbol.for('knext.lib.*')`, and the
- *      generated `next.config.ts` never externalizes `@knext/lib`.
+ *      generated `next.config.ts` never externalizes `@getknext/lib`.
  *
  *   3. GRADUATED GUARDS: file-manager's per-app static guards
  *      (`instrumentation-edge-safe.test.ts`, `standalone-seam-alive.test.ts`,
@@ -54,7 +54,12 @@ function readTemplate(rel: string): string | null {
  * import in the generated `instrumentation.ts` (edge-compiled). Mirrors the
  * list in `apps/file-manager/instrumentation-edge-safe.test.ts`.
  */
-const NODE_ONLY_MODULES = ["@knext/lib/clients", "pg", "@cerbos/grpc", "minio"];
+const NODE_ONLY_MODULES = [
+    "@getknext/lib/clients",
+    "pg",
+    "@cerbos/grpc",
+    "minio",
+];
 
 /** Top-level *static* import specifiers (dynamic `await import()` excluded). */
 function topLevelStaticImportSpecifiers(source: string): string[] {
@@ -117,9 +122,9 @@ describe("app template — seam-alive instrumentation-node.ts (#352/ADR-0027/#35
     });
 
     it.each([
-        { mod: "@knext/lib/clients", fn: "setPoolInstrumentor" },
-        { mod: "@knext/lib/context", fn: "setTraceIdProvider" },
-        { mod: "@knext/lib/context", fn: "setCorrelationIdProvider" },
+        { mod: "@getknext/lib/clients", fn: "setPoolInstrumentor" },
+        { mod: "@getknext/lib/context", fn: "setTraceIdProvider" },
+        { mod: "@getknext/lib/context", fn: "setCorrelationIdProvider" },
     ])("wires the globalThis-anchored seam $fn from $mod", ({ mod, fn }) => {
         const escaped = mod.replace(/\//g, "\\/");
         expect(instrumentationNode).toMatch(
@@ -148,11 +153,11 @@ describe("app template — seam-alive instrumentation-node.ts (#352/ADR-0027/#35
             libFile: join(LIB_SRC, "context", "index.ts"),
             symbol: "knext.lib.context.state",
         },
-    ])("the seam it wires stays anchored on globalThis in @knext/lib ($symbol)", ({
+    ])("the seam it wires stays anchored on globalThis in @getknext/lib ($symbol)", ({
         libFile,
         symbol,
     }) => {
-        // The anchor itself is owned (and unit-guarded) by @knext/lib; this
+        // The anchor itself is owned (and unit-guarded) by @getknext/lib; this
         // pins that the seams the template wires are the anchored ones.
         const src = readFileSync(libFile, "utf8");
         expect(src).toContain(`Symbol.for('${symbol}')`);
@@ -177,20 +182,20 @@ describe("app template — next.config wires the platform fence, never hand-writ
         expect(nextConfig).not.toMatch(/^\s*webpack\s*[:(]/m);
     });
 
-    it("never externalizes @knext/lib (ADR-0027: would re-split the seam state)", () => {
+    it("never externalizes @getknext/lib (ADR-0027: would re-split the seam state)", () => {
         const externals =
             nextConfig?.match(/serverExternalPackages:\s*\[([^\]]*)\]/s)?.[1] ??
             "";
-        expect(externals).not.toMatch(/@knext\/lib/);
+        expect(externals).not.toMatch(/@getknext\/lib/);
     });
 
-    it("ships the thin app adapter re-exporting @knext/core/adapter", () => {
+    it("ships the thin app adapter re-exporting @getknext/core/adapter", () => {
         const appAdapter = readTemplate("next-adapter.ts.hbs");
         expect(
             appAdapter,
             "next-adapter.ts.hbs missing from the zone template",
         ).not.toBeNull();
-        expect(appAdapter).toMatch(/from\s*['"]@knext\/core\/adapter['"]/);
+        expect(appAdapter).toMatch(/from\s*['"]@getknext\/core\/adapter['"]/);
     });
 });
 
@@ -203,7 +208,7 @@ describe("app template — graduated per-app guards ship with every generated ap
         ).not.toBeNull();
         // The generated guard must carry BOTH halves of the edge-safety check…
         expect(guard).toContain("NEXT_RUNTIME");
-        expect(guard).toContain("@knext/lib/clients");
+        expect(guard).toContain("@getknext/lib/clients");
         // …and assert the fence is adapter-owned (adapterPath wired, no
         // hand-written IgnorePlugin in the app's next.config).
         expect(guard).toContain("adapterPath");
@@ -240,7 +245,7 @@ describe("app template — package.json carries the instrumentation contract (#3
         expect(pkg).toContain(`"${dep}"`);
     });
 
-    it("declares @knext/core (the adapter + core-owned instrumentation adapters)", () => {
-        expect(pkg).toContain('"@knext/core"');
+    it("declares @getknext/core (the adapter + core-owned instrumentation adapters)", () => {
+        expect(pkg).toContain('"@getknext/core"');
     });
 });

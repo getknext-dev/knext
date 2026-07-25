@@ -1,13 +1,13 @@
 /**
- * Export-pinning contract for the PUBLIC `@knext/core/validate` subpath.
+ * Export-pinning contract for the PUBLIC `@getknext/core/validate` subpath.
  *
  * A consumer (e.g. a docs / config-quality CI gate) imports `validateConfig`
- * from `@knext/core/validate` inside their own build/test process. That means
+ * from `@getknext/core/validate` inside their own build/test process. That means
  * two things this test pins:
  *
  *  1. RESOLVABILITY — the subpath is declared in the exports map and resolves to
  *     real compiled JS + `.d.ts` in `dist/`. (The published 0.2.0 only exposed
- *     `./internal/cli-validate`, so a consumer using `@knext/core/validate` hit
+ *     `./internal/cli-validate`, so a consumer using `@getknext/core/validate` hit
  *     ERR_PACKAGE_PATH_NOT_EXPORTED — this locks the fix.)
  *  2. PURITY — importing the module runs NO side effects: no `process.exit`, no
  *     kubectl, no I/O. A consumer imports it into their own process; a stray
@@ -45,11 +45,11 @@ function dtsTargetOf(value: unknown): string | undefined {
     return undefined;
 }
 
-describe("@knext/core/validate — public export pinning", () => {
+describe("@getknext/core/validate — public export pinning", () => {
     it("declares the ./validate subpath in the exports map", () => {
         expect(
             corePkg.exports,
-            "@knext/core must publicly export ./validate",
+            "@getknext/core must publicly export ./validate",
         ).toHaveProperty("./validate");
     });
 

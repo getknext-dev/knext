@@ -156,7 +156,7 @@ red shard itself: an opt-in debug lane on the compat workflow
 weekly bun lane stay byte-identical).
 
 **What the instrumentation is** (`packages/kn-next/src/adapters/sandbox-fetch-debug.cjs`,
-`@knext/core/internal/sandbox-fetch-debug`):
+`@getknext/core/internal/sandbox-fetch-debug`):
 
 - Pre-run ground-truth probe against the published `next@16.2.0` tarball: the
   edge sandbox's `fetch` is the undici bundled into
@@ -262,7 +262,7 @@ Executed as PR #207: the debug lane (same dispatch-only `sandboxFetchDebug` inpu
 plumbing) additionally patches the FIXTURE's staged standalone
 `next/dist/server/web/sandbox/context.js` (v16.2.0, two verified-unique anchors:
 `const __fetch = context.fetch;` and `return context;` inside `extend`) with a hook that
-loads `@knext/core/internal/sandbox-fetch-realm-debug` and wraps
+loads `@getknext/core/internal/sandbox-fetch-realm-debug` and wraps
 
 - next's host-realm `context.fetch` wrapper (entry/settled), and
 - the base primitives `__fetch` (entry/settled + `body.<method>()` start/done),

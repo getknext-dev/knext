@@ -25,7 +25,7 @@
  *   GITHUB_TOKEN=<token-with-read:packages> \
  *     node scripts/ghp-install-smoke.mjs [--version 0.2.0]
  *
- * The version defaults to the workspace @knext/core version (the version this
+ * The version defaults to the workspace @getknext/core version (the version this
  * commit would publish); the release-ghp workflow passes the just-published
  * version explicitly via --version.
  *
@@ -66,7 +66,7 @@ function run(cmd, args, opts = {}) {
   return spawnSync(cmd, args, { encoding: 'utf8', ...opts });
 }
 
-/** --version <v>, else the workspace @knext/core version (what this commit publishes). */
+/** --version <v>, else the workspace @getknext/core version (what this commit publishes). */
 function resolveVersion() {
   const argv = process.argv.slice(2);
   const i = argv.indexOf('--version');

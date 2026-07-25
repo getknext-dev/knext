@@ -206,7 +206,7 @@ spec:
         secretKey: DATABASE_URL
 ```
 
-`@knext/lib`'s `getDbPool()` reads `DATABASE_URL` and already uses scale-to-zero-sane
+`@getknext/lib`'s `getDbPool()` reads `DATABASE_URL` and already uses scale-to-zero-sane
 defaults (`DB_POOL_MAX=5`, idle timeout **10s**). Sizing rule: `maxScale × DB_POOL_MAX`
 bounds the connections that can hit the gateway; keep the pool's idle timeout below
 `GW_IDLE_MS`. App and database then sleep and wake together — the app's cold start

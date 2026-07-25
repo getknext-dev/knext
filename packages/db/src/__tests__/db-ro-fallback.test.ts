@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 /**
  * P1 — prove the previously-UNTESTED-at-the-DSN-level `getDbRO()` writer
  * fallback (packages/db/src/index.ts ~L56-76). db.test.ts already proves the
- * OBJECT-identity fallback with a fully mocked `@knext/lib`; this file proves
+ * OBJECT-identity fallback with a fully mocked `@getknext/lib`; this file proves
  * the OBSERVABLE routing: which DSN the real `pg` pool is actually told to
  * connect to, plus the one-time warning gated by the module-level
  * `warnedNoReadReplica` flag.
@@ -49,7 +49,7 @@ vi.mock('drizzle-orm/node-postgres', () => ({
 
 // Capture the one-time warning.
 const warn = vi.fn();
-vi.mock('@knext/lib/logger', () => ({
+vi.mock('@getknext/lib/logger', () => ({
   logger: { warn: (m: string) => warn(m), info: vi.fn(), error: vi.fn(), debug: vi.fn() },
 }));
 

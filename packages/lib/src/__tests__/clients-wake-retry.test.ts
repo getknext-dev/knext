@@ -67,7 +67,7 @@ vi.mock('pg', () => ({ Pool: FakePool }));
 const TRANSIENT = () =>
   Object.assign(new Error('ECONNREFUSED gateway waking'), { code: 'ECONNREFUSED' });
 
-describe('@knext/lib/clients — wake-path retry/backoff (#310)', () => {
+describe('@getknext/lib/clients — wake-path retry/backoff (#310)', () => {
   beforeEach(async () => {
     vi.resetModules();
     vi.useRealTimers();

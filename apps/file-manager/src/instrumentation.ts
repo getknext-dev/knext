@@ -6,7 +6,7 @@
 // #342: Next.js compiles `instrumentation.ts` for BOTH the `nodejs` AND the
 // `edge` runtimes (this app has `middleware.ts`, which forces an edge build).
 // All of our observability/db-wake wiring is Node-only by nature — the
-// `./instrumentation-node` body reaches `@knext/lib/clients` (→ `@cerbos/grpc`
+// `./instrumentation-node` body reaches `@getknext/lib/clients` (→ `@cerbos/grpc`
 // → `@grpc/grpc-js`, needing `zlib`/`stream`/`net`/`tls`/`fs`), plus `pg` and
 // `minio`. If any of that is reachable from the edge bundle the production
 // `next build` fails with `Module not found`.
@@ -22,7 +22,7 @@
 // stops it EXECUTING on the edge, NOT from being BUNDLED. The LOAD-BEARING edge
 // exclusion is the `IgnorePlugin` the knext adapter injects from its
 // `modifyConfig` (#356/ADR-0031, wired via `adapterPath` in next.config.ts →
-// `./next-adapter.ts` → `@knext/core/adapter`), which — for the edge compile
+// `./next-adapter.ts` → `@getknext/core/adapter`), which — for the edge compile
 // ONLY — replaces `./instrumentation-node` with an empty module so its Node-only
 // subtree never enters the edge bundle. On the edge runtime `register()` is a
 // no-op anyway — the knext runtime runs the app on Node (the standalone

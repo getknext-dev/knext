@@ -133,7 +133,7 @@ function startServer() {
   if (!existsSync(SERVER_PATH)) {
     throw new Error(
       `standalone server not found at ${SERVER_PATH}. Build first:\n` +
-        `  pnpm --filter @knext/lib build && pnpm --filter file-manager build`,
+        `  pnpm --filter @getknext/lib build && pnpm --filter file-manager build`,
     );
   }
   // `output:'standalone'` does NOT copy `.next/static` or `public/` into the standalone

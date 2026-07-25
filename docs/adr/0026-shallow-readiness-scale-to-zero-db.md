@@ -76,7 +76,7 @@ readiness on deep DB reachability directly defeats scale-to-zero.
   itself from rotation). ADR-0023's fail-closed intent moves to the deep
   observability signal.
 - `HealthStatus.status` gains a `waking` member and `checks.postgres` gains a
-  `waking` member — additive to the `@knext/lib/health` public API.
+  `waking` member — additive to the `@getknext/lib/health` public API.
 - The operator adds a `deepHealthPath` (`<readinessPath>/deep`) used only for
   documentation/monitoring wiring; it is never attached to a probe.
 - The NextApp CR's `.status.scaledToZero` field (#312) surfaces this same

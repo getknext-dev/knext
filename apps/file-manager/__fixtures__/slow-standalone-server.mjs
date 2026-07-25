@@ -2,7 +2,7 @@
  * Test fixture that stands in for Next.js's `output:'standalone'` server.js.
  *
  * Used by sigterm-drain-e2e.test.ts to prove the knext runtime entry
- * (@knext/core node-server) actually drains in-flight requests on SIGTERM
+ * (@getknext/core node-server) actually drains in-flight requests on SIGTERM
  * end-to-end — exercising the REAL signal-forwarding code path, not a unit
  * double.
  *

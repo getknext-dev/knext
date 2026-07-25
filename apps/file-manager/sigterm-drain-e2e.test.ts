@@ -21,36 +21,36 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
  * NOT catch the real container bug: Next's standalone output is import-graph
  * driven, NOTHING in app code imports node-server.js, so neither the runtime
  * entry NOR its hard deps (prom-client, pino) are traced into `.next/standalone`.
- * The shipped image's CMD — `node -e "import('@knext/core/internal/node-server')"`
+ * The shipped image's CMD — `node -e "import('@getknext/core/internal/node-server')"`
  * — therefore resolved to MODULE_NOT_FOUND and crash-looped at boot, while CI
  * stayed green because no job ran that CMD against the real bundle.
  *
  * This test reproduces the REAL container resolution layout:
  *   1. Build an ISOLATED runner dir OUTSIDE the workspace whose ONLY way to find
- *      `@knext/core` is the package we place in it — so Node's module resolution
+ *      `@getknext/core` is the package we place in it — so Node's module resolution
  *      cannot escape upward into the repo's node_modules (the dev-machine false
  *      positive the reviewers flagged). Without step 2 below, the CMD here fails
- *      with `ERR_MODULE_NOT_FOUND: Cannot find package '@knext/core'` — exactly
+ *      with `ERR_MODULE_NOT_FOUND: Cannot find package '@getknext/core'` — exactly
  *      the container crash-loop.
- *   2. Replicate the Dockerfile's runtime COPY: `pnpm --filter @knext/core
- *      --prod deploy` a self-contained @knext/core into
- *      `<runner>/node_modules/@knext/core` (dist + a real node_modules with
+ *   2. Replicate the Dockerfile's runtime COPY: `pnpm --filter @getknext/core
+ *      --prod deploy` a self-contained @getknext/core into
+ *      `<runner>/node_modules/@getknext/core` (dist + a real node_modules with
  *      prom-client/pino). This is the fix under test.
- *   3. Run the EXACT Dockerfile CMD (`node -e import('@knext/core/internal/node-server')`)
+ *   3. Run the EXACT Dockerfile CMD (`node -e import('@getknext/core/internal/node-server')`)
  *      from the runner root, pointed at a slow fixture server via
  *      STANDALONE_SERVER_PATH, send SIGTERM mid-inflight-request, and assert the
  *      request drains (200 "drained") + the process exits cleanly.
  *
  * The runner intentionally does NOT copy the (huge) `.next/standalone` tree: the
  * app server.js is replaced by the slow fixture via STANDALONE_SERVER_PATH, and
- * the property under test is purely whether the runtime ENTRY (`@knext/core` +
+ * the property under test is purely whether the runtime ENTRY (`@getknext/core` +
  * prom-client + pino) resolves from a container-shaped layout. We still GATE on
  * the standalone build existing (below) so this only runs when an image could
  * actually be built — i.e. it tracks the real shipped artifact.
  *
  * RED proof (verified manually before the fix): without the deploy COPY, the
  * isolated runner's CMD fails with `ERR_MODULE_NOT_FOUND: Cannot find package
- * '@knext/core'`. The `resolves the runtime entry from the shipped bundle` case
+ * '@getknext/core'`. The `resolves the runtime entry from the shipped bundle` case
  * below FAILS (not skips) if that resolution gap ever returns.
  *
  * Skips (does not fail) only when the standalone build is entirely absent — a
@@ -66,7 +66,7 @@ const PORT = 39187; // unlikely-to-collide test port
 const METRICS_PORT = 9091;
 
 // The CMD specifier the container boots — the EXACT string from the Dockerfile.
-const RUNTIME_IMPORT = "import('@knext/core/internal/node-server')";
+const RUNTIME_IMPORT = "import('@getknext/core/internal/node-server')";
 
 /**
  * Locate the standalone "tracing-root mirror" that contains the app's server.js.
@@ -117,19 +117,19 @@ beforeAll(() => {
   if (skipReason !== null || mirrorRoot === null) return;
 
   // 1. An isolated runner dir OUTSIDE the workspace. The CMD runs from here, so
-  //    `@knext/core` resolution cannot escape up into the repo node_modules —
-  //    the only @knext/core it can find is the one we deploy into it (step 2).
+  //    `@getknext/core` resolution cannot escape up into the repo node_modules —
+  //    the only @getknext/core it can find is the one we deploy into it (step 2).
   runnerRoot = mkdtempSync(join(tmpdir(), 'knext-shipped-runner-'));
 
-  // 2. Replicate the Dockerfile runtime COPY: a self-contained @knext/core with
-  //    its prod deps (prom-client, pino) at node_modules/@knext/core. We run the
+  // 2. Replicate the Dockerfile runtime COPY: a self-contained @getknext/core with
+  //    its prod deps (prom-client, pino) at node_modules/@getknext/core. We run the
   //    SAME `pnpm deploy` the Dockerfile uses so the test exercises the actual
   //    fix, not a hand-assembled stand-in.
   const deployDir = mkdtempSync(join(tmpdir(), 'knext-core-deploy-'));
   const repoRoot = resolve(APP_DIR, '../..');
   const dep = spawnSync(
     'pnpm',
-    ['--filter', '@knext/core', '--prod', 'deploy', '--legacy', deployDir],
+    ['--filter', '@getknext/core', '--prod', 'deploy', '--legacy', deployDir],
     { cwd: repoRoot, encoding: 'utf8', env: childEnv() },
   );
   if (
@@ -138,7 +138,7 @@ beforeAll(() => {
     !existsSync(join(deployDir, 'node_modules/pino'))
   ) {
     throw new Error(
-      `pnpm deploy did not produce a self-contained @knext/core ` +
+      `pnpm deploy did not produce a self-contained @getknext/core ` +
         `(node-server.js + prom-client + pino). stderr:\n${dep.stderr}`,
     );
   }
@@ -146,7 +146,7 @@ beforeAll(() => {
   // (false) rewrites them to ABSOLUTE paths pointing back at deployDir, which we
   // then delete → dangling links → MODULE_NOT_FOUND for prom-client/pino. The
   // Dockerfile `COPY` preserves them verbatim, so we must too.
-  cpSync(deployDir, join(runnerRoot, 'node_modules/@knext/core'), {
+  cpSync(deployDir, join(runnerRoot, 'node_modules/@getknext/core'), {
     recursive: true,
     verbatimSymlinks: true,
   });
@@ -241,7 +241,7 @@ describe('SIGTERM drain e2e (SHIPPED bundle): knext runtime entry drains in-flig
   it.skipIf(skipReason !== null)(
     'resolves the runtime entry from the shipped standalone bundle (no MODULE_NOT_FOUND)',
     async () => {
-      // This is the regression the reviewers found: if @knext/core (or its hard
+      // This is the regression the reviewers found: if @getknext/core (or its hard
       // deps) is missing from the shipped layout, the CMD crash-loops at boot.
       // Booting it and reaching LISTENING proves the specifier + prom-client +
       // pino all resolve from the bundle. A MODULE_NOT_FOUND would surface as an

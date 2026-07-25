@@ -4,7 +4,7 @@
  * onBuildComplete logs output/routing counts and best-effort uploads
  * staticFiles + prerenders to the object store (guarded by STORAGE_BUCKET). These
  * tests drive the real hook with a fake AdapterOutputs ctx and a mocked
- * @knext/lib/clients so the upload path runs WITHOUT MinIO/network:
+ * @getknext/lib/clients so the upload path runs WITHOUT MinIO/network:
  *  - STORAGE_BUCKET unset → upload skipped cleanly,
  *  - STORAGE_BUCKET set → staticFiles/prerenders uploaded under <buildId>/<path>,
  *    a missing filePath is skipped, a putObject failure is counted (not thrown),
@@ -32,7 +32,7 @@ const putObject = vi.hoisted(() =>
 );
 const getMinioClient = vi.hoisted(() => vi.fn(() => ({ putObject })));
 
-vi.mock("@knext/lib/clients", () => ({ getMinioClient }));
+vi.mock("@getknext/lib/clients", () => ({ getMinioClient }));
 
 import adapter from "../adapters/next-adapter";
 

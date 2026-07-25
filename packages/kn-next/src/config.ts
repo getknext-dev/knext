@@ -145,7 +145,7 @@ export interface ScalingConfig {
     // Per-pod DATABASE_URL connection-pool maximum (ADR-0028/ADR-0029). When
     // set (> 0) the operator enforces `maxScale × poolMax ≤ 80` (the app
     // connection budget) at admission, and injects `KNEXT_DB_POOL_MAX` so
-    // `@knext/lib`'s `getDbPool()` caps the pg pool at runtime. Default
+    // `@getknext/lib`'s `getDbPool()` caps the pg pool at runtime. Default
     // (operator): unset — no check, no env.
     poolMax?: number;
 

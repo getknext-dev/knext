@@ -106,11 +106,11 @@ defer bucket 1.
   no finalizer" note was stale. Still true: API at `v1alpha1`.
 - **License inconsistency:** README says MIT; operator source headers say Apache-2.0
   (`nextapp_types.go:4`) — pick one.
-- npm: packages are unified under the **`@knext/*`** scope (`@knext/core`, `@knext/lib`, `@knext/ui`)
+- npm: packages are unified under the **`@getknext/*`** scope (`@getknext/core`, `@getknext/lib`, `@getknext/ui`)
   — the earlier `@kn-next`/`@knative-next` drift is resolved. The `kn-next` CLI bin name is unchanged.
   **No npm release published yet** — that final `npm publish` step (requires npm auth) still blocks
   `npx kn-next` for outside users.
-- **(RESOLVED 2026-06-21)** The `kn-next` **TS CLI in `@knext/core` (`packages/kn-next/src/cli`) is the
+- **(RESOLVED 2026-06-21)** The `kn-next` **TS CLI in `@getknext/core` (`packages/kn-next/src/cli`) is the
   single CLI of record.** The old Go `packages/cli` and the `admin`/`knext` packages have **no tracked
   files** (already gone from git) — the "duplicate CLI" was stale local cruft, not repo debt.
   Caveat: the CLI is **Bun-only** (`#!/usr/bin/env bun`, imports `bun`), so `npx kn-next` requires Bun

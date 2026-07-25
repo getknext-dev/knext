@@ -3,9 +3,9 @@
 ## Docs live with the code (`apps/docs/`)
 
 The user-facing docs site (knext.dev) lives in this monorepo at **`apps/docs/`** and consumes
-`@knext/core` via `workspace:*` (see `docs/adr/0024-docs-site-in-monorepo.md`).
+`@getknext/core` via `workspace:*` (see `docs/adr/0024-docs-site-in-monorepo.md`).
 
-- **If your PR changes documented behavior — public surface** (`@knext/core` exports, the
+- **If your PR changes documented behavior — public surface** (`@getknext/core` exports, the
   `KnativeNextConfig` / `NextApp` schema, CLI flags, or generated code) — **update
   `apps/docs/content/**` in the same PR**, or say why the change is invisible to users.
   This is judgment-based, not a hard gate: a soft CI reminder (`docs-drift-reminder`) will post a
@@ -25,7 +25,7 @@ From the repo root (workspace-aware install/build):
 
 ```bash
 pnpm install
-pnpm --filter @knext/lib build && pnpm --filter @knext/db build && pnpm --filter @knext/core build
+pnpm --filter @getknext/lib build && pnpm --filter @getknext/db build && pnpm --filter @getknext/core build
 pnpm --filter knext-docs build            # vanilla (managed-host / Vercel) build
 KNEXT_ADAPTER=1 pnpm --filter knext-docs build   # self-host / adapter dogfood build
 ```

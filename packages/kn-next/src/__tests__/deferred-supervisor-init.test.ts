@@ -18,7 +18,7 @@
  *
  * The decisive detail: **static ESM imports are evaluated before the module body
  * runs**, so deferring *work* is not enough — the heavy module GRAPH loads before
- * the spawn either way. `@knext/lib/clients` (imported only so SIGTERM can drain
+ * the spawn either way. `@getknext/lib/clients` (imported only so SIGTERM can drain
  * the pools) statically pulls `@cerbos/grpc`, `minio` and `pg`; `./metrics` pulls
  * `@opentelemetry/api` and `prom-client`. None of that is needed to spawn a child.
  *
@@ -80,11 +80,13 @@ describe("pre-spawn module graph (the actual ~1 CPU-second)", () => {
         expect(hasStaticImport(nodeServer, "./image-cache-sync")).toBe(false);
     });
 
-    it("db-drain.ts loads @knext/lib/clients lazily, not at module scope", () => {
+    it("db-drain.ts loads @getknext/lib/clients lazily, not at module scope", () => {
         // The heaviest graph in the supervisor: @cerbos/grpc + minio + pg, all
         // pulled in purely so SIGTERM can close two pools.
-        expect(hasStaticImport(dbDrain, "@knext/lib/clients")).toBe(false);
-        expect(dbDrain).toMatch(/import\(\s*["']@knext\/lib\/clients["']\s*\)/);
+        expect(hasStaticImport(dbDrain, "@getknext/lib/clients")).toBe(false);
+        expect(dbDrain).toMatch(
+            /import\(\s*["']@getknext\/lib\/clients["']\s*\)/,
+        );
     });
 
     it("the deferral modules themselves stay free of the heavy graphs", () => {

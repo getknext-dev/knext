@@ -1,6 +1,6 @@
 /**
- * `@knext/db` TimescaleDB helpers (#240) — migration SQL emitters on the
- * `@knext/db/schema` extension seam (ADR-0021 §2).
+ * `@getknext/db` TimescaleDB helpers (#240) — migration SQL emitters on the
+ * `@getknext/db/schema` extension seam (ADR-0021 §2).
  *
  * drizzle does not model TimescaleDB hypertables, so these helpers do the one thing
  * drizzle-kit cannot: emit the exact `create_hypertable(...)` / `drop_chunks(...)`
@@ -86,7 +86,7 @@ export interface HypertableOptions {
  * deliberately no legacy escape hatch — a new SDK has no pre-2.13 installed base.
  *
  * ```ts
- * import { hypertable } from '@knext/db/schema';
+ * import { hypertable } from '@getknext/db/schema';
  * export const metrics = pgTable('metrics', {
  *   ts: timestamp('ts', { withTimezone: true }).notNull(),
  *   value: doublePrecision('value').notNull(),

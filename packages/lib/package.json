@@ -1,5 +1,5 @@
 {
-  "name": "@knext/lib",
+  "name": "@getknext/lib",
   "version": "0.2.0",
   "description": "Shared runtime library for knext (logging, clients, health).",
   "license": "Apache-2.0",
@@ -44,7 +44,7 @@
   "knext": {
     "publicApi": {
       "doc": "docs/PUBLIC_API.md",
-      "stability": "All @knext/lib subpaths are public and follow semver.",
+      "stability": "All @getknext/lib subpaths are public and follow semver.",
       "public": [
         ".",
         "./logger",

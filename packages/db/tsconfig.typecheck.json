@@ -1,7 +1,7 @@
 {
   // #261 typecheck-gate config: unlike tsconfig.json (the build config, which
   // EXCLUDES tests so they never reach dist/), this pulls the test files into
-  // strict typecheck scope. CI runs `pnpm --filter @knext/db typecheck`.
+  // strict typecheck scope. CI runs `pnpm --filter @getknext/db typecheck`.
   //
   // module/moduleResolution are overridden to bundler semantics because the
   // vitest suites are loaded by vite (extensionless relative imports,
