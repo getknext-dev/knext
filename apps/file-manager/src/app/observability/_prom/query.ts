@@ -274,6 +274,39 @@ export function instantValue(result: PromResult<PromVectorSample[]>): number | n
   return Number.isFinite(value) ? value : null;
 }
 
+/**
+ * The latest sample of every series in an INSTANT result, keyed by one of its
+ * labels (e.g. `deployment` for the per-revision deployment history). Returns
+ * `[]` when the result is not `ok` or carries no series — callers then render an
+ * explicit state rather than an empty table that reads "nothing exists".
+ */
+export function instantByLabel(
+  result: PromResult<PromVectorSample[]>,
+  label: string,
+): LabeledValue[] {
+  if (result.status !== 'ok') {
+    return [];
+  }
+  const out: LabeledValue[] = [];
+  for (const sample of result.data) {
+    const value = Number(sample.value[1]);
+    if (!Number.isFinite(value)) {
+      continue;
+    }
+    out.push({ key: sample.metric[label] ?? 'unknown', value });
+  }
+  return out;
+}
+
+/**
+ * `true` when an instant query succeeded but Prometheus knows no series at all —
+ * the signal that a cluster-provided (kube-state-metrics) series is absent, as
+ * opposed to a measured zero.
+ */
+export function hasNoInstantSeries(result: PromResult<PromVectorSample[]>): boolean {
+  return result.status === 'ok' && result.data.length === 0;
+}
+
 /** Operator-injected app identity (`nextApp.Name`) — the metric scope. */
 export const APP_NAME_ENV = 'KN_APP_NAME';
 
@@ -348,6 +381,49 @@ export function overviewQueries(app: string): OverviewQueries {
     latencyP99: `histogram_quantile(0.99, sum by (le) (rate(knext_http_request_duration_seconds_bucket${byApp}[5m])))`,
     /** Current in-flight requests (saturation). */
     inFlight: `sum(knext_http_inflight_requests${byApp})`,
+  };
+}
+
+/** The PromQL for the Prometheus-DERIVED deployment history (P1.4), per app. */
+export interface DeploymentQueries {
+  readonly revisionCreated: string;
+  readonly revisionReplicas: string;
+  readonly revisionAvailable: string;
+}
+
+/**
+ * Build the deployment-history PromQL for `app` (P1.4).
+ *
+ * This is the LOW-FIDELITY, zero-new-trust-surface half of the Deployments page's
+ * data-path fork (plan §7): Knative creates one Deployment per Revision, so
+ * kube-state-metrics' per-Deployment series already encode "which revisions
+ * exist, when each appeared, and which one is carrying pods" — with **no RBAC
+ * grant on the app's ServiceAccount** and over exactly the same data path as
+ * P1.2/P1.3.
+ *
+ * What it CANNOT tell you (and the page must say so rather than imply): the
+ * rollback pin/reason, the image digest, or the operator's Ready/Progressing
+ * conditions. Those need the `NextApp` CR (`_k8s/nextapp.ts`, opt-in).
+ *
+ * Provenance: `kube_deployment_*` is **cluster-provided by kube-state-metrics**,
+ * not emitted by knext. Absent kube-state-metrics the queries succeed with ZERO
+ * series — which the page renders as "requires kube-state-metrics", NEVER as an
+ * empty history table implying the app has never been deployed.
+ *
+ * @param app a name already validated by {@link observabilityAppName} (which also
+ *   blocks PromQL injection into the selector below).
+ */
+export function deploymentQueries(app: string): DeploymentQueries {
+  // Knative appends a revision suffix to the Deployment name (`app-00003-deployment`).
+  const byDeployment = `{deployment=~"${app}.*"}`;
+
+  return {
+    /** Creation timestamp (unix seconds) per revision Deployment. */
+    revisionCreated: `max by (deployment) (kube_deployment_created${byDeployment})`,
+    /** Desired replicas per revision Deployment (0 under scale-to-zero). */
+    revisionReplicas: `max by (deployment) (kube_deployment_status_replicas${byDeployment})`,
+    /** Available (ready) replicas per revision Deployment. */
+    revisionAvailable: `max by (deployment) (kube_deployment_status_replicas_available${byDeployment})`,
   };
 }
 
