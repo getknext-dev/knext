@@ -776,17 +776,24 @@ Options:
   -h, --help  Show this help
 `;
 
-/** Entry for `kn-next doctor`. Returns the process exit code. */
-export async function doctorMain(argv: readonly string[]): Promise<number> {
+/**
+ * Entry for `kn-next doctor`. Returns the process exit code.
+ *
+ * `deps` defaults to the production kubectl runner + registry probe; tests
+ * inject fakes so the unit suite never shells out to a real kubectl or dials
+ * a real registry (a real probe cost ~7s of connection timeouts under CI
+ * load and flaked the 5s test budget).
+ */
+export async function doctorMain(
+    argv: readonly string[],
+    deps: DoctorDeps = { kubectl: kubectlRunner, probeImage: probeManifest },
+): Promise<number> {
     const args = parseDoctorArgs(argv);
     if (args.help) {
         writeSync(1, DOCTOR_HELP);
         return 0;
     }
-    const report = await runDoctor({
-        kubectl: kubectlRunner,
-        probeImage: probeManifest,
-    });
+    const report = await runDoctor(deps);
     if (args.json) {
         writeSync(1, `${JSON.stringify(report, null, 2)}\n`);
     } else {
