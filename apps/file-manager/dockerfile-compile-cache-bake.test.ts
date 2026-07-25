@@ -48,6 +48,26 @@ function cmdDefault(varName: string): string {
   return m[1];
 }
 
+/** The warm-up RUN block's `NODE_COMPILE_CACHE=<value>` (build-time bake target). */
+function warmupNodeCompileCache(): string {
+  const df = dockerfile();
+  const runBlock = df.slice(0, df.indexOf('CMD ['));
+  const m = runBlock.match(/NODE_COMPILE_CACHE=(\S+)/);
+  if (!m) throw new Error('warm-up RUN block must set NODE_COMPILE_CACHE');
+  return m[1];
+}
+
+/**
+ * The WORKDIR in effect for the runtime CMD = the LAST `WORKDIR` directive in the
+ * Dockerfile (the runner stage's). The runtime resolves STANDALONE_SERVER_PATH
+ * against process.cwd(), which the container starts at this WORKDIR.
+ */
+function dockerfileRunnerWorkdir(): string {
+  const matches = [...dockerfile().matchAll(/^\s*WORKDIR\s+(\S+)\s*$/gm)];
+  if (matches.length === 0) throw new Error('Dockerfile has no WORKDIR directive');
+  return matches[matches.length - 1][1];
+}
+
 /** Run the warm-up script with a stubbed boot command, return {status, output}. */
 function runWarmup(opts: {
   cacheDir: string;
@@ -144,6 +164,38 @@ describe('#437 — the compile cache is baked into the image at build time', () 
     const runBlock = df.slice(0, df.indexOf('CMD ['));
     expect(runBlock).toContain(`NODE_COMPILE_CACHE=${cacheDir}`);
     expect(runBlock).toContain(`STANDALONE_SERVER_PATH=${serverPath}`);
+  });
+
+  it('#507 — the THREE compile-cache paths (warm-up RUN, CMD default, runtime-derived) resolve to ONE dir', () => {
+    // The baked cold-start win (ADR-0035, ~393ms) only materializes if THREE paths
+    // agree on ONE directory. Nothing else in CI asserts this EQUALITY, so a future
+    // WORKDIR / STANDALONE_SERVER_PATH / Dockerfile-path change could silently bake
+    // the cache where the runtime never reads it — the win vanishes with NO build
+    // failure, caught only by the runtime #450 shadow-warning (needs a live pod).
+    //
+    // All three are DERIVED from the parsed Dockerfile (never hardcoded), so the
+    // test tracks a real WORKDIR/STANDALONE_SERVER_PATH edit instead of pinning a
+    // literal `/app/apps/file-manager/.next/compile-cache`.
+
+    // 1. Dockerfile warm-up RUN — the build-time bake target (already absolute).
+    const warmupDir = resolve(warmupNodeCompileCache());
+
+    // 2. Dockerfile CMD default — where the runtime's NODE_COMPILE_CACHE points
+    //    when the operator injects nothing (also absolute in the shipped image).
+    const cmdDir = resolve(cmdDefault('NODE_COMPILE_CACHE'));
+
+    // 3. Runtime-derived dir — mirror node-server.ts's `bakedCompileCacheDir`:
+    //      serverJs             = resolve(cwd, STANDALONE_SERVER_PATH)
+    //      bakedCompileCacheDir = resolve(dirname(serverJs), '.next', 'compile-cache')
+    //    cwd is the container WORKDIR and STANDALONE_SERVER_PATH is the CMD default.
+    const workdir = dockerfileRunnerWorkdir();
+    const serverPath = cmdDefault('STANDALONE_SERVER_PATH');
+    const serverJs = resolve(workdir, serverPath);
+    const runtimeDir = resolve(dirname(serverJs), '.next', 'compile-cache');
+
+    // The tripwire: any divergence between the three fails the build in unit CI.
+    expect(cmdDir).toBe(warmupDir);
+    expect(runtimeDir).toBe(warmupDir);
   });
 
   it('keeps the NODE_COMPILE_CACHE default-substitution so an injected value still wins', () => {
