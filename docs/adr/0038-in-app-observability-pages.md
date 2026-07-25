@@ -86,8 +86,11 @@ shipped Grafana overlay instead of rebuilding cluster dashboards — faithful to
 
 - [x] **P1.1 Web Vitals page** — `apps/file-manager/src/app/observability/web-vitals/page.tsx` +
   `vitals.ts` (registry read + quantile) + `observability/auth.ts` (fail-closed Bearer gate) + tests.
-- [ ] **P1.2 Overview (RED)** + `_prom/query.ts` (server-only Prometheus `query_range`, graceful
-  empty state when `OBSERVABILITY_PROMETHEUS_URL` unset/unreachable).
+- [x] **P1.2 Overview (RED)** — `apps/file-manager/src/app/observability/page.tsx` +
+  `_prom/query.ts` (server-only Prometheus `query_range`/`query`, uncached + short abort timeout,
+  typed `ok | unconfigured | unreachable` results). Graceful empty state when
+  `OBSERVABILITY_PROMETHEUS_URL` is unset (no fetch) and an error state when unreachable; PromQL is
+  parity-tested against `adapters/metrics.ts` so it only references real `knext_*` series.
 - [ ] **P1.3 Cold-start & Scaling** page (knext's unique page; same degrade contract).
 - [ ] **P1.4 Deployments** page (read-only `NextApp` status; resolve the RBAC vs status-mirror fork).
 - [ ] **Cross-cutting:** `/observability` layout with tab nav + Grafana link-out card.

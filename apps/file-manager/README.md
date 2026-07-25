@@ -151,6 +151,24 @@ Real-time visualization of:
 - Hit rate statistics
 - Tag invalidation testing
 
+### Overview / RED page (`/observability`)
+
+Server-rendered "Observability overview" showing the golden **RED** signals for the app over the
+last hour: request rate (req/s), 5xx error rate (%), p75 + p99 latency, and current in-flight
+concurrency — computed from the core `knext_http_*` metrics. Unlike the Web Vitals page, these are
+range/rate aggregates only Prometheus can compute, so the page queries an in-cluster Prometheus
+**server-side** (never from the browser) via `OBSERVABILITY_PROMETHEUS_URL`.
+
+It **degrades closed, never crashing or hanging**:
+- `OBSERVABILITY_PROMETHEUS_URL` **unset** ⇒ a clear "not configured" empty state (naming the
+  variable); no network call is made.
+- Prometheus **unreachable / slow** ⇒ an error state (the fetch is uncached and bounded by a short
+  timeout); the page still returns 200.
+- Otherwise ⇒ the live numbers.
+
+A link-out row points to the shipped turnkey **Grafana dashboards** for deep, cluster-wide analysis
+(no embedded iframe — the app renders its own aggregates).
+
 ### Web Vitals page (`/observability/web-vitals`)
 
 Server-rendered "Speed Insights" page showing the current **p75** for each Core Web Vital
@@ -167,6 +185,7 @@ server-side; the browser receives the rendered aggregate, never raw metrics.
 | Variable | Description |
 |----------|-------------|
 | `OBSERVABILITY_TOKEN` | Bearer token gating `/observability/*` (unset ⇒ deny-all) |
+| `OBSERVABILITY_PROMETHEUS_URL` | In-cluster Prometheus base URL for the Overview/RED page (unset ⇒ graceful "not configured" empty state; server-side only, never sent to the browser) |
 
 ### Events API (`/api/cache/events`)
 
