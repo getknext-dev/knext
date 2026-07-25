@@ -32,7 +32,7 @@ Complements `.claude/rules/architecture.md`. These run through **every** phase â
   both `release.yml` and `release-ghp.yml`); accepted advisories go in the dated+justified
   `security/npm-audit-allowlist.json` (mirrors the Trivy triage pattern).
 - **Sign** images (cosign) + attestation; aim for reproducible builds. **Caveat (ADR-0035, #440):**
-  the image-baked V8 compile-cache layer (`apps/*/scripts/warm-compile-cache.sh`) is stable but
+  the image-baked V8 compile-cache layer (shared `scripts/warm-compile-cache.sh`, #439) is stable but
   **not bit-reproducible** â€” across three bakes the entry count was identical (1106) while byte
   totals varied within ~100 (4,246,088 / 4,246,032 / 4,245,984). Any reproducible-builds work MUST
   **exclude or normalise** this layer rather than flag it as a regression; it is a build-time
