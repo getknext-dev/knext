@@ -122,6 +122,11 @@ per above.
 2. **Fix `apps/docs/Dockerfile` (#439)**, which has the identical empty-compile-cache bug. When
    wiring it, **promote `warm-compile-cache.sh` out of `apps/file-manager/scripts/` to a shared
    location** so the second consumer inherits the guards instead of copy-pasting them.
+   **(Done — issue #439.)** The script now lives at the repo root (`scripts/warm-compile-cache.sh`,
+   single source of truth; file-manager COPYs it from the monorepo-root build context, the docs
+   single-package image vendors it — documented in `apps/docs/DEPLOY.md`), and the docs Dockerfile
+   bakes a real cache (bare `node server.js` boot via the `KNEXT_WARMUP_BOOT_CMD` seam, `/` via the
+   new `KNEXT_WARMUP_HEALTH_PATH` seam, docs-sized floors, absolute paths per the #440 guard).
 3. **Re-scope or retire ADR-0034 action items 1, 3 and 4** (verify the operator-managed path on
    default flags; surface a status condition for an unmountable cache; document the cluster
    prerequisite). All three assume the PVC mechanism, which this ADR supersedes as the
