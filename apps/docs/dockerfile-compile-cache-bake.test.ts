@@ -1,9 +1,14 @@
-import { execFileSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import {
+  runWarmup,
+  STUB_FLOOR,
+  stubServer,
+  WARMUP_SCRIPT,
+} from '../../tests/helpers/warm-compile-cache-harness';
 
 /**
  * #439 — apps/docs has the IDENTICAL empty-compile-cache bug as apps/file-manager
@@ -26,9 +31,10 @@ import { describe, expect, it } from 'vitest';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DOCKERFILE = resolve(__dirname, 'Dockerfile');
-// Promoted out of apps/file-manager/scripts/ to a shared repo-root location so
-// both consumers (file-manager + docs) inherit the same guarded script (#439).
-const WARMUP_SCRIPT = resolve(__dirname, '../../scripts/warm-compile-cache.sh');
+// WARMUP_SCRIPT is the SHARED, promoted script (out of apps/file-manager/scripts/
+// into a repo-root location) so both consumers inherit the same guards (#439). It
+// and the runner harness now live in tests/helpers/ — see that module for why the
+// stub's port is kernel-allocated rather than hardcoded (CI-flake fix).
 
 function dockerfile(): string {
   return readFileSync(DOCKERFILE, 'utf8');
@@ -55,62 +61,6 @@ function warmupNodeCompileCache(): string {
   const m = runBlock.match(/NODE_COMPILE_CACHE=(\S+)/);
   if (!m) throw new Error('warm-up RUN block must set NODE_COMPILE_CACHE');
   return m[1];
-}
-
-/** Run the warm-up script with a stubbed boot command, return {status, output}. */
-function runWarmup(opts: {
-  cacheDir: string;
-  bootCmd: string;
-  port: number;
-  healthPath: string;
-  env?: Record<string, string>;
-}): { status: number; output: string } {
-  const env = { ...process.env };
-  delete env.NODE_OPTIONS; // harness artifact; keep the child shell clean
-  try {
-    const output = execFileSync('sh', [WARMUP_SCRIPT], {
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'pipe'],
-      env: {
-        ...env,
-        NODE_COMPILE_CACHE: opts.cacheDir,
-        CACHE_PROBE_DIR: opts.cacheDir,
-        PORT: String(opts.port),
-        KNEXT_WARMUP_BOOT_CMD: opts.bootCmd,
-        KNEXT_WARMUP_HEALTH_PATH: opts.healthPath,
-        KNEXT_WARMUP_TIMEOUT_S: '30',
-        ...opts.env,
-      },
-    });
-    return { status: 0, output };
-  } catch (err) {
-    const e = err as { status?: number; stdout?: string; stderr?: string };
-    return { status: e.status ?? 1, output: `${e.stdout ?? ''}${e.stderr ?? ''}` };
-  }
-}
-
-/** A floor of 1/1 — for stubs whose "cache" is a single 8-byte file. */
-const STUB_FLOOR = { KNEXT_WARMUP_MIN_FILES: '1', KNEXT_WARMUP_MIN_BYTES: '1' };
-
-/**
- * A stub "server": listens on PORT, answers any path (incl. the docs health path
- * `/`), and — when `populate` is true — writes a file into NODE_COMPILE_CACHE on
- * SIGTERM (standing in for V8 flushing real cache entries). `env -u
- * NODE_COMPILE_CACHE` keeps the stub's OWN cache out of the dir under test.
- */
-function stubServer(populate: boolean): string {
-  return `env -u NODE_COMPILE_CACHE node -e "${[
-    'const http=require(\\"http\\");',
-    'const fs=require(\\"fs\\");',
-    'const path=require(\\"path\\");',
-    'const s=http.createServer((q,r)=>r.end(\\"ok\\"));',
-    's.listen(Number(process.env.PORT));',
-    'process.on(\\"SIGTERM\\",()=>{',
-    populate
-      ? 'fs.writeFileSync(path.join(process.env.CACHE_PROBE_DIR,\\"entry.bin\\"),\\"bytecode\\");'
-      : '',
-    's.close();process.exit(0);});',
-  ].join('')}"`;
 }
 
 const DOCS_HEALTH = '/';
@@ -180,18 +130,17 @@ describe('#439 — the docs compile cache is baked into the image at build time'
     }
   });
 
-  it("the warm-up's absolute path PASSES the freshness guard end-to-end (#440)", () => {
+  it("the warm-up's absolute path PASSES the freshness guard end-to-end (#440)", async () => {
     const probeDir = mkdtempSync(join(tmpdir(), 'knext-docs-cc-abs-'));
-    const { status, output } = runWarmup({
+    const { status, output, diagnostic } = await runWarmup({
       cacheDir: probeDir,
       bootCmd: stubServer(true),
-      port: 34485,
       healthPath: DOCS_HEALTH,
       env: STUB_FLOOR,
     });
-    expect(status).toBe(0);
-    expect(output).not.toMatch(/not an absolute path/i);
-    expect(output).toMatch(/baked/);
+    expect(status, diagnostic).toBe(0);
+    expect(output, diagnostic).not.toMatch(/not an absolute path/i);
+    expect(output, diagnostic).toMatch(/baked/);
   });
 
   it('makes the baked cache readable by the runtime `node` user', () => {
@@ -221,44 +170,41 @@ describe('#439 — the docs compile cache is baked into the image at build time'
     expect(Number(bytes[1])).toBeLessThan(4_246_032);
   });
 
-  it('FAILS the build when the warm-up leaves the cache empty (the shipped bug)', () => {
+  it('FAILS the build when the warm-up leaves the cache empty (the shipped bug)', async () => {
     const cacheDir = mkdtempSync(join(tmpdir(), 'knext-docs-cc-empty-'));
-    const { status, output } = runWarmup({
+    const { status, output, diagnostic } = await runWarmup({
       cacheDir,
       bootCmd: stubServer(false),
-      port: 34471,
       healthPath: DOCS_HEALTH,
       env: STUB_FLOOR,
     });
-    expect(status).not.toBe(0);
-    expect(output).toMatch(/empty|no .*entries/i);
+    expect(status, diagnostic).not.toBe(0);
+    expect(output, diagnostic).toMatch(/empty|no .*entries/i);
   });
 
-  it('SUCCEEDS and reports the entry count when the warm-up populates the cache', () => {
+  it('SUCCEEDS and reports the entry count when the warm-up populates the cache', async () => {
     const cacheDir = mkdtempSync(join(tmpdir(), 'knext-docs-cc-full-'));
-    const { status, output } = runWarmup({
+    const { status, output, diagnostic } = await runWarmup({
       cacheDir,
       bootCmd: stubServer(true),
-      port: 34472,
       healthPath: DOCS_HEALTH,
       env: STUB_FLOOR,
     });
-    expect(status).toBe(0);
-    expect(output).toMatch(/baked 1 entries, 8 bytes/);
+    expect(status, diagnostic).toBe(0);
+    expect(output, diagnostic).toMatch(/baked 1 entries, 8 bytes/);
   });
 
-  it('reads readiness from the configured health path (the docs home page)', () => {
+  it('reads readiness from the configured health path (the docs home page)', async () => {
     // Prove the KNEXT_WARMUP_HEALTH_PATH seam actually drives the probe: a stub
     // that only ever answers is reached on `/`, and the run reaches "ready".
     const cacheDir = mkdtempSync(join(tmpdir(), 'knext-docs-cc-health-'));
-    const { status, output } = runWarmup({
+    const { status, output, diagnostic } = await runWarmup({
       cacheDir,
       bootCmd: stubServer(true),
-      port: 34473,
       healthPath: DOCS_HEALTH,
       env: STUB_FLOOR,
     });
-    expect(status).toBe(0);
-    expect(output).toMatch(/ready/i);
+    expect(status, diagnostic).toBe(0);
+    expect(output, diagnostic).toMatch(/ready/i);
   });
 });
