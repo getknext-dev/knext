@@ -156,6 +156,40 @@ shipped Grafana overlay instead of rebuilding cluster dashboards — faithful to
 
   Not shipped here: a deploy *event* timeline (the CR carries current state + condition transition
   times, not a history), and the `/observability` nav (see the cross-cutting item below).
+
+  **Post-review amendments (PR #520 code review + system-design sign-off):**
+  - **Row-level scoping is part of the honesty contract.** Because this page *enumerates* rows and
+    labels the newest "current" (P1.3 only aggregates), the derived selector is anchored to Knative's
+    naming — `deployment=~"<app>-[0-9]+-deployment"` — and namespace-pinned when the namespace is
+    known. The open `"<app>.*"` prefix let a sibling `<app>-api` revision render as this app's
+    *current* deploy. Rows are keyed by `(namespace, deployment)`, never by name alone.
+  - **`KN_APP_NAMESPACE`** is the (app-level, `spec.env`-supplied) namespace scope. The operator
+    injects no namespace env — it deliberately refuses downward-API `fieldRef` on Knative — so unset
+    is tolerated: one matching namespace renders with an explicit "not namespace-pinned" caveat,
+    **more than one renders a distinct "namespace scope is ambiguous" state and no table**.
+  - **P1.3 keeps the looser selector deliberately.** `scalingQueries` is compared verbatim against the
+    shipped `scale-to-zero` dashboard by the parity gate, and that dashboard uses `$app.*`; anchoring
+    only the page would drift the two apart. It aggregates rather than enumerates, so a sibling app
+    inflates a sum instead of renaming "current". A paired dashboard+page fix is a follow-up in the
+    operator config tree, out of scope for an app-level page.
+  - **The Role narrowed to `get` + `resourceNames`** (no `list`/`watch`): the page reads exactly one
+    object by name.
+  - **HONEST LIMITATION — the CR source is unreachable on a stock knext deploy.** The operator
+    reconciles the app's ServiceAccount with `automountServiceAccountToken: false` (via
+    `CreateOrUpdate`, so a manual flip is reverted) and does not opt the pod template back in, so no
+    token is projected and the reader can only return `not-in-cluster`. The high-fidelity source is
+    therefore usable only on a non-operator-managed deployment, or after an operator change that lets
+    a `NextApp` opt its ServiceAccount into token projection — **not made here**: widening the default
+    pod's credentials is an operator decision, and this is an app-level recipe. It fails closed (no
+    security impact); the manifest and the module say so plainly instead of promising a two-step that
+    cannot work.
+  - **Cluster CA is scoped per request** (`node:https` `ca` option) rather than via a process-global
+    `NODE_EXTRA_CA_CERTS`, so trusting the cluster CA for one read does not widen the app's whole TLS
+    trust store. Verification is never disabled; no new dependency was added.
+  - **New gates:** a CRD contract test (projected field paths ↔ `nextapp_types.go` JSON tags + API
+    group/version, so an alpha-API rename is a red build, not a silent "no data yet"), direct unit
+    tests for `deploymentQueries` / `instantByLabel` / `hasNoInstantSeries`, and a real
+    operator-bundle scan replacing a tautological assertion that could never fail.
 - [ ] **Cross-cutting:** `/observability` layout with tab nav + Grafana link-out card.
 - [ ] **Phase 2 (gated on founder greenlight):** promote the recipe to a scaffoldable `--observability`
   flag — deferred until after the official-adapter migration + Tier-A correctness (scs-zones sequencing).

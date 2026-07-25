@@ -1,15 +1,21 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   APP_NAME_ENV,
+  APP_NAMESPACE_ENV,
+  deploymentQueries,
+  hasNoInstantSeries,
   hasNoSeries,
+  instantByLabel,
   instantValue,
   latestMatrixByLabel,
   latestMatrixValue,
   observabilityAppName,
+  observabilityAppNamespace,
   overviewQueries,
   PROMETHEUS_URL_ENV,
   type PromMatrixSeries,
   type PromResult,
+  type PromVectorSample,
   prometheusBaseUrl,
   queryInstant,
   queryRange,
@@ -335,5 +341,140 @@ describe('scalingQueries — every series is scoped to THIS app', () => {
     // Clamped so a cold-start burst with no served requests cannot render a
     // negative / infinite "ratio".
     expect(q.warmStartRatioPct).toContain('clamp');
+  });
+});
+
+/**
+ * P1.4 helpers (PR-520 review): the Deployments page ENUMERATES one row per
+ * matched series and calls the newest one "current", so a selector that is one
+ * character too loose is not a rounding error — it is another workload's deploy
+ * presented as this app's. These pin the selector shape itself.
+ */
+describe('deploymentQueries — the selector cannot match a sibling workload', () => {
+  const q = deploymentQueries('demo', 'demo-ns');
+
+  it('anchors on Knative revision-Deployment naming, not an open prefix', () => {
+    for (const promql of Object.values(q)) {
+      expect(promql).toContain('deployment=~"demo-[0-9]+-deployment"');
+      // The open prefix is the bug: it matches `demo-api-00007-deployment`.
+      expect(promql).not.toContain('deployment=~"demo.*"');
+    }
+  });
+
+  it('excludes a sibling app name under the anchored pattern (regex proof)', () => {
+    // Prometheus fully anchors regex label matchers, so mirror that here.
+    const pattern = /^demo-[0-9]+-deployment$/;
+    expect(pattern.test('demo-00007-deployment')).toBe(true);
+    expect(pattern.test('demo-api-00007-deployment')).toBe(false);
+    expect(pattern.test('demo-api')).toBe(false);
+    expect(pattern.test('demo-00007-deployment-extra')).toBe(false);
+  });
+
+  it('adds the namespace selector when the namespace is known', () => {
+    for (const promql of Object.values(q)) {
+      expect(promql).toContain('namespace="demo-ns"');
+    }
+  });
+
+  it('omits the namespace selector (rather than inventing one) when unknown', () => {
+    const unscoped = deploymentQueries('demo');
+    for (const promql of Object.values(unscoped)) {
+      expect(promql).not.toContain('namespace=');
+      expect(promql).toContain('deployment=~"demo-[0-9]+-deployment"');
+    }
+  });
+
+  it('groups by (namespace, deployment) so same-named apps cannot merge', () => {
+    for (const promql of Object.values(q)) {
+      expect(promql).toContain('max by (namespace, deployment)');
+    }
+  });
+
+  it('uses only cluster-provided kube_deployment_* series', () => {
+    expect(q.revisionCreated).toContain('kube_deployment_created');
+    expect(q.revisionReplicas).toContain('kube_deployment_status_replicas{');
+    expect(q.revisionAvailable).toContain('kube_deployment_status_replicas_available');
+  });
+});
+
+describe('observabilityAppNamespace — validated namespace scope', () => {
+  const ORIGINAL_NS = process.env[APP_NAMESPACE_ENV];
+
+  afterEach(() => {
+    if (ORIGINAL_NS === undefined) delete process.env[APP_NAMESPACE_ENV];
+    else process.env[APP_NAMESPACE_ENV] = ORIGINAL_NS;
+  });
+
+  it('returns the trimmed namespace when it is a valid k8s label', () => {
+    process.env[APP_NAMESPACE_ENV] = '  demo-ns  ';
+    expect(observabilityAppNamespace()).toBe('demo-ns');
+  });
+
+  it('returns undefined when unset or empty (never a guessed default)', () => {
+    delete process.env[APP_NAMESPACE_ENV];
+    expect(observabilityAppNamespace()).toBeUndefined();
+    process.env[APP_NAMESPACE_ENV] = '  ';
+    expect(observabilityAppNamespace()).toBeUndefined();
+  });
+
+  it('rejects an injection-shaped value rather than escaping it', () => {
+    process.env[APP_NAMESPACE_ENV] = 'ns"} or on() up{';
+    expect(observabilityAppNamespace()).toBeUndefined();
+  });
+});
+
+describe('instantByLabel / hasNoInstantSeries — instant-vector helpers', () => {
+  const ok = (
+    samples: ReadonlyArray<{ metric: Record<string, string>; value: string }>,
+  ): PromResult<PromVectorSample[]> => ({
+    status: 'ok',
+    data: samples.map((s) => ({ metric: s.metric, value: [0, s.value] as const })),
+  });
+
+  it('keys by a single label', () => {
+    const result = ok([{ metric: { deployment: 'demo-00001-deployment' }, value: '2' }]);
+    expect(instantByLabel(result, 'deployment')).toEqual([
+      { key: 'demo-00001-deployment', value: 2 },
+    ]);
+  });
+
+  it('joins MULTIPLE labels so two namespaces cannot collapse into one key', () => {
+    const result = ok([
+      { metric: { namespace: 'a', deployment: 'demo-00001-deployment' }, value: '2' },
+      { metric: { namespace: 'b', deployment: 'demo-00001-deployment' }, value: '5' },
+    ]);
+    const rows = instantByLabel(result, 'namespace', 'deployment');
+    expect(rows).toEqual([
+      { key: 'a/demo-00001-deployment', value: 2 },
+      { key: 'b/demo-00001-deployment', value: 5 },
+    ]);
+    expect(new Set(rows.map((r) => r.key)).size).toBe(2);
+  });
+
+  it('renders a missing label as "unknown" instead of dropping the series', () => {
+    const result = ok([{ metric: {}, value: '3' }]);
+    expect(instantByLabel(result, 'deployment')).toEqual([{ key: 'unknown', value: 3 }]);
+  });
+
+  it('skips non-finite samples (a NaN row would render as a fake value)', () => {
+    const result = ok([
+      { metric: { deployment: 'a' }, value: 'NaN' },
+      { metric: { deployment: 'b' }, value: '7' },
+    ]);
+    expect(instantByLabel(result, 'deployment')).toEqual([{ key: 'b', value: 7 }]);
+  });
+
+  it('returns [] for non-ok results (caller renders an explicit state)', () => {
+    expect(instantByLabel({ status: 'unreachable', errorSummary: 'x' }, 'deployment')).toEqual([]);
+    expect(instantByLabel({ status: 'unconfigured', envVar: 'X' }, 'deployment')).toEqual([]);
+  });
+
+  it('hasNoInstantSeries is true ONLY for a successful, empty result', () => {
+    expect(hasNoInstantSeries({ status: 'ok', data: [] })).toBe(true);
+    expect(hasNoInstantSeries(ok([{ metric: {}, value: '0' }]))).toBe(false);
+    // A FAILED query is not "the series does not exist" — the page must render
+    // "unreachable", not "requires kube-state-metrics".
+    expect(hasNoInstantSeries({ status: 'unreachable', errorSummary: 'x' })).toBe(false);
+    expect(hasNoInstantSeries({ status: 'unconfigured', envVar: 'X' })).toBe(false);
   });
 });

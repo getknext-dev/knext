@@ -275,14 +275,21 @@ export function instantValue(result: PromResult<PromVectorSample[]>): number | n
 }
 
 /**
- * The latest sample of every series in an INSTANT result, keyed by one of its
- * labels (e.g. `deployment` for the per-revision deployment history). Returns
- * `[]` when the result is not `ok` or carries no series — callers then render an
- * explicit state rather than an empty table that reads "nothing exists".
+ * The latest sample of every series in an INSTANT result, keyed by one or more
+ * of its labels (e.g. `('namespace', 'deployment')` for the per-revision
+ * deployment history). Multiple labels are joined with `/` so the key is unique
+ * across namespaces — keying on `deployment` alone silently merges two
+ * same-named apps in different namespaces into one row (wrong values, duplicate
+ * React keys), which is exactly the collision the PR-520 review caught.
+ *
+ * Returns `[]` when the result is not `ok` or carries no series — callers then
+ * render an explicit state rather than an empty table that reads "nothing
+ * exists". A series missing the label reads `unknown` (never silently dropped);
+ * a non-finite sample is skipped (a `NaN` row would render as a fake value).
  */
 export function instantByLabel(
   result: PromResult<PromVectorSample[]>,
-  label: string,
+  ...labels: string[]
 ): LabeledValue[] {
   if (result.status !== 'ok') {
     return [];
@@ -293,7 +300,7 @@ export function instantByLabel(
     if (!Number.isFinite(value)) {
       continue;
     }
-    out.push({ key: sample.metric[label] ?? 'unknown', value });
+    out.push({ key: labels.map((l) => sample.metric[l] ?? 'unknown').join('/'), value });
   }
   return out;
 }
@@ -334,6 +341,37 @@ const APP_NAME_PATTERN = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/;
  */
 export function observabilityAppName(): string | undefined {
   const raw = process.env[APP_NAME_ENV];
+  if (!raw) {
+    return undefined;
+  }
+  const trimmed = raw.trim();
+  return APP_NAME_PATTERN.test(trimmed) ? trimmed : undefined;
+}
+
+/**
+ * The app's own Kubernetes namespace — the second half of the metric scope.
+ *
+ * NOT operator-injected: the operator deliberately refuses downward-API
+ * (`fieldRef`) env on the Knative Service (`nextapp_controller.go` — the
+ * `kubernetes.podspec-fieldref` feature gate is off on stock Knative), and this
+ * page is app-level, so it cannot add one. The deployer sets it through the
+ * CR's pass-through `spec.env` (`KN_APP_NAMESPACE: <ns>`).
+ *
+ * Unset is NOT fatal — the Deployments page falls back to detecting the
+ * namespace from the returned series and refuses to render only when they span
+ * MORE THAN ONE namespace (where guessing which one is "this app" would be the
+ * lying panel).
+ */
+export const APP_NAMESPACE_ENV = 'KN_APP_NAMESPACE';
+
+/**
+ * The validated namespace this app runs in, or `undefined` when unset/invalid.
+ * Same RFC1123-label validation as {@link observabilityAppName} — it is likewise
+ * interpolated into a PromQL selector, so rejection (not escaping) is the
+ * injection guard.
+ */
+export function observabilityAppNamespace(): string | undefined {
+  const raw = process.env[APP_NAMESPACE_ENV];
   if (!raw) {
     return undefined;
   }
@@ -410,20 +448,40 @@ export interface DeploymentQueries {
  * series — which the page renders as "requires kube-state-metrics", NEVER as an
  * empty history table implying the app has never been deployed.
  *
+ * SCOPING (PR-520 review — this page ENUMERATES rows, it does not only aggregate,
+ * so a stray series becomes a *row* and, if newest, this app's "current"
+ * revision):
+ *  - the deployment selector is **anchored to Knative's naming**,
+ *    `<app>-<digits>-deployment`, NOT the open prefix `"<app>.*"` — otherwise a
+ *    sibling workload called `<app>-api` renders as one of this app's deploys;
+ *  - a `namespace=` selector is added whenever the namespace is known, because
+ *    Deployment names are only unique WITHIN a namespace — two same-named apps
+ *    in two namespaces otherwise collide into one row.
+ * Both are matched by the by-`(namespace, deployment)` grouping, so the page can
+ * still detect (and refuse to guess about) a multi-namespace result when the
+ * namespace is unknown.
+ *
  * @param app a name already validated by {@link observabilityAppName} (which also
  *   blocks PromQL injection into the selector below).
+ * @param namespace an optional namespace already validated by
+ *   {@link observabilityAppNamespace}.
  */
-export function deploymentQueries(app: string): DeploymentQueries {
-  // Knative appends a revision suffix to the Deployment name (`app-00003-deployment`).
-  const byDeployment = `{deployment=~"${app}.*"}`;
+export function deploymentQueries(app: string, namespace?: string): DeploymentQueries {
+  // Knative names a revision's Deployment `<app>-<5-digit revision>-deployment`.
+  // `[0-9]+` is anchored on both sides by Prometheus (regex selectors are fully
+  // anchored), so `demo-api-00007-deployment` cannot match `demo`.
+  const selector = namespace
+    ? `{deployment=~"${app}-[0-9]+-deployment",namespace="${namespace}"}`
+    : `{deployment=~"${app}-[0-9]+-deployment"}`;
+  const by = 'max by (namespace, deployment)';
 
   return {
     /** Creation timestamp (unix seconds) per revision Deployment. */
-    revisionCreated: `max by (deployment) (kube_deployment_created${byDeployment})`,
+    revisionCreated: `${by} (kube_deployment_created${selector})`,
     /** Desired replicas per revision Deployment (0 under scale-to-zero). */
-    revisionReplicas: `max by (deployment) (kube_deployment_status_replicas${byDeployment})`,
+    revisionReplicas: `${by} (kube_deployment_status_replicas${selector})`,
     /** Available (ready) replicas per revision Deployment. */
-    revisionAvailable: `max by (deployment) (kube_deployment_status_replicas_available${byDeployment})`,
+    revisionAvailable: `${by} (kube_deployment_status_replicas_available${selector})`,
   };
 }
 
@@ -460,6 +518,19 @@ export interface ScalingQueries {
  * kube-state-metrics**, not emitted by knext. When kube-state-metrics is absent
  * the query succeeds with zero series — which the page must render as "requires
  * kube-state-metrics", NEVER as "0 replicas".
+ *
+ * KNOWN, DELIBERATE INCONSISTENCY with {@link deploymentQueries} (PR-520): the
+ * P1.4 deployment selector is anchored (`<app>-[0-9]+-deployment`) and
+ * namespace-pinned, while this one keeps the open `"<app>.*"` prefix and no
+ * namespace. That is NOT an oversight — these strings are compared **verbatim**
+ * against the shipped `scale-to-zero` Grafana dashboard by the parity test, and
+ * the dashboard's own expression is `kube_deployment_status_replicas{deployment=~"$app.*"}`.
+ * Anchoring here without changing the dashboard would silently drift the two
+ * apart (the exact failure the parity gate exists to catch), and the dashboard
+ * lives in the operator's config tree — out of scope for an app-level page.
+ * Severity differs too: P1.3 only AGGREGATES (a sibling app inflates a replica
+ * SUM), whereas P1.4 ENUMERATES rows and names one "current". Fixing both needs
+ * a paired dashboard + page change; tracked as a follow-up.
  *
  * @param app a name already validated by {@link observabilityAppName}.
  */

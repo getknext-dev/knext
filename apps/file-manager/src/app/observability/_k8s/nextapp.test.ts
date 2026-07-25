@@ -13,6 +13,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
  */
 
 const readFileSyncMock = vi.fn<(path: string, enc?: unknown) => string>();
+const httpsRequestMock =
+  vi.fn<(url: string, opts: HttpsOptions, cb: (res: FakeResponse) => void) => FakeRequest>();
 
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>();
@@ -20,9 +22,86 @@ vi.mock('node:fs', async (importOriginal) => {
   return { ...actual, readFileSync, default: { ...actual, readFileSync } };
 });
 
+vi.mock('node:https', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:https')>();
+  const request = (url: string, opts: HttpsOptions, cb: (res: FakeResponse) => void) =>
+    httpsRequestMock(url, opts, cb);
+  return { ...actual, request, default: { ...actual, request } };
+});
+
+interface HttpsOptions {
+  method?: string;
+  ca?: string[];
+  headers?: Record<string, string>;
+  timeout?: number;
+}
+type Handler = (arg?: unknown) => void;
+interface FakeResponse {
+  statusCode: number;
+  on: (event: string, handler: Handler) => void;
+}
+interface FakeRequest {
+  on: (event: string, handler: Handler) => FakeRequest;
+  end: () => void;
+  destroy: (err?: Error) => void;
+}
+
+/** Make the fake API server answer with `status` + `body`. */
+function respondWith(status: number, body: unknown) {
+  httpsRequestMock.mockImplementation((_url, _opts, cb) => {
+    queueMicrotask(() => {
+      const handlers: Record<string, Handler[]> = {};
+      const res: FakeResponse = {
+        statusCode: status,
+        on: (event, handler) => {
+          const list = handlers[event] ?? [];
+          handlers[event] = list;
+          list.push(handler);
+        },
+      };
+      cb(res);
+      for (const h of handlers.data ?? []) h(Buffer.from(JSON.stringify(body)));
+      for (const h of handlers.end ?? []) h();
+    });
+    return fakeRequest();
+  });
+}
+
+/** Make the fake API server fail at the socket level. */
+function failWith(error: Error) {
+  httpsRequestMock.mockImplementation(() => {
+    const req = fakeRequest();
+    queueMicrotask(() => req.emit('error', error));
+    return req;
+  });
+}
+
+interface EmittingRequest extends FakeRequest {
+  emit: (event: string, arg?: unknown) => void;
+}
+
+function fakeRequest(): EmittingRequest {
+  const handlers: Record<string, Handler[]> = {};
+  const req: EmittingRequest = {
+    on: (event, handler) => {
+      const list = handlers[event] ?? [];
+      handlers[event] = list;
+      list.push(handler);
+      return req;
+    },
+    end: () => {},
+    destroy: () => {},
+    emit: (event, arg) => {
+      for (const h of handlers[event] ?? []) h(arg);
+    },
+  };
+  return req;
+}
+
 const SA_DIR = '/var/run/secrets/kubernetes.io/serviceaccount';
 const TOKEN = 'sa-projected-token-value';
 const NAMESPACE = 'demo-ns';
+const CA_CERT = '-----BEGIN CERTIFICATE-----\nclusterca\n-----END CERTIFICATE-----';
 
 const ORIGINAL_SOURCE = process.env.OBSERVABILITY_NEXTAPP_SOURCE;
 const ORIGINAL_HOST = process.env.KUBERNETES_SERVICE_HOST;
@@ -32,14 +111,8 @@ function seedServiceAccount() {
   readFileSyncMock.mockImplementation((path: string) => {
     if (path === `${SA_DIR}/token`) return TOKEN;
     if (path === `${SA_DIR}/namespace`) return NAMESPACE;
+    if (path === `${SA_DIR}/ca.crt`) return CA_CERT;
     throw new Error(`ENOENT: ${path}`);
-  });
-}
-
-function jsonResponse(body: unknown, status = 200): Response {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { 'content-type': 'application/json' },
   });
 }
 
@@ -74,6 +147,7 @@ const NEXTAPP_BODY = {
 beforeEach(() => {
   vi.resetModules();
   readFileSyncMock.mockReset();
+  httpsRequestMock.mockReset();
   process.env.KUBERNETES_SERVICE_HOST = '10.96.0.1';
   process.env.KUBERNETES_SERVICE_PORT = '443';
   delete process.env.OBSERVABILITY_NEXTAPP_SOURCE;
@@ -95,23 +169,21 @@ async function load() {
 
 describe('NextApp reader — opt-in by default (smallest trust surface)', () => {
   it('is disabled when the source env var is unset: no fs read, no network call', async () => {
-    const fetchSpy = vi.spyOn(globalThis, 'fetch');
     const { readNextAppStatus } = await load();
 
     const result = await readNextAppStatus('demo');
 
     expect(result.status).toBe('disabled');
-    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(httpsRequestMock).not.toHaveBeenCalled();
     expect(readFileSyncMock).not.toHaveBeenCalled();
   });
 
   it('stays disabled for any value other than the explicit opt-in', async () => {
     process.env.OBSERVABILITY_NEXTAPP_SOURCE = 'yes-please';
-    const fetchSpy = vi.spyOn(globalThis, 'fetch');
     const { readNextAppStatus } = await load();
 
     expect((await readNextAppStatus('demo')).status).toBe('disabled');
-    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(httpsRequestMock).not.toHaveBeenCalled();
   });
 });
 
@@ -122,27 +194,42 @@ describe('NextApp reader — enabled path', () => {
 
   it('reads the CR from the namespaced NextApp endpoint with the ServiceAccount token', async () => {
     seedServiceAccount();
-    const fetchSpy = vi
-      .spyOn(globalThis, 'fetch')
-      .mockResolvedValue(jsonResponse(NEXTAPP_BODY) as never);
+    respondWith(200, NEXTAPP_BODY);
     const { readNextAppStatus } = await load();
 
     const result = await readNextAppStatus('demo');
 
     expect(result.status).toBe('ok');
-    const [url, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
+    const [url, opts] = httpsRequestMock.mock.calls[0];
     expect(url).toContain('/apis/apps.kn-next.dev/v1alpha1/');
     expect(url).toContain(`/namespaces/${NAMESPACE}/nextapps/demo`);
-    expect((init.headers as Record<string, string>).authorization).toBe(`Bearer ${TOKEN}`);
-    // Never cached — status must reflect the live cluster.
-    expect(init.cache).toBe('no-store');
+    expect(url.startsWith('https://')).toBe(true);
+    expect(opts.headers?.authorization).toBe(`Bearer ${TOKEN}`);
     // GET only: these pages never mutate cluster state (ADR-0001).
-    expect(init.method ?? 'GET').toBe('GET');
+    expect(opts.method).toBe('GET');
+    // Bounded: a hung API server degrades the page instead of hanging it.
+    expect(opts.timeout).toBeGreaterThan(0);
+  });
+
+  it('scopes the cluster CA to THIS request and never disables verification', async () => {
+    seedServiceAccount();
+    respondWith(200, NEXTAPP_BODY);
+    const { readNextAppStatus } = await load();
+
+    await readNextAppStatus('demo');
+
+    const [, opts] = httpsRequestMock.mock.calls[0];
+    // Per-request CA (node:https `ca`) — NOT a process-global trust widening.
+    expect(opts.ca).toEqual([CA_CERT]);
+    expect(readFileSyncMock).toHaveBeenCalledWith(`${SA_DIR}/ca.crt`, 'utf8');
+    // TLS verification is never turned off.
+    expect('rejectUnauthorized' in opts).toBe(false);
+    expect(process.env.NODE_TLS_REJECT_UNAUTHORIZED).not.toBe('0');
   });
 
   it('projects the deploy-relevant status/spec fields', async () => {
     seedServiceAccount();
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(jsonResponse(NEXTAPP_BODY) as never);
+    respondWith(200, NEXTAPP_BODY);
     const { readNextAppStatus } = await load();
 
     const result = await readNextAppStatus('demo');
@@ -165,33 +252,29 @@ describe('NextApp reader — enabled path', () => {
     readFileSyncMock.mockImplementation(() => {
       throw new Error('ENOENT');
     });
-    const fetchSpy = vi.spyOn(globalThis, 'fetch');
     const { readNextAppStatus } = await load();
 
     const result = await readNextAppStatus('demo');
 
     expect(result).toMatchObject({ status: 'source-unavailable', reason: 'not-in-cluster' });
-    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(httpsRequestMock).not.toHaveBeenCalled();
   });
 
   it('reports not-in-cluster when KUBERNETES_SERVICE_HOST is unset', async () => {
     delete process.env.KUBERNETES_SERVICE_HOST;
     seedServiceAccount();
-    const fetchSpy = vi.spyOn(globalThis, 'fetch');
     const { readNextAppStatus } = await load();
 
     expect(await readNextAppStatus('demo')).toMatchObject({
       status: 'source-unavailable',
       reason: 'not-in-cluster',
     });
-    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(httpsRequestMock).not.toHaveBeenCalled();
   });
 
   it('maps 404 to crd-absent (the CRD is not installed / the object is gone)', async () => {
     seedServiceAccount();
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
-      jsonResponse({ kind: 'Status', code: 404 }, 404) as never,
-    );
+    respondWith(404, { kind: 'Status', code: 404 });
     const { readNextAppStatus } = await load();
 
     expect(await readNextAppStatus('demo')).toMatchObject({
@@ -205,9 +288,7 @@ describe('NextApp reader — enabled path', () => {
     const { readNextAppStatus } = await load();
 
     for (const code of [401, 403]) {
-      vi.spyOn(globalThis, 'fetch').mockResolvedValue(
-        jsonResponse({ kind: 'Status', code }, code) as never,
-      );
+      respondWith(code, { kind: 'Status', code });
       expect(await readNextAppStatus('demo')).toMatchObject({
         status: 'source-unavailable',
         reason: 'forbidden',
@@ -217,9 +298,7 @@ describe('NextApp reader — enabled path', () => {
 
   it('maps a network failure to unreachable and never throws or leaks the error', async () => {
     seedServiceAccount();
-    vi.spyOn(globalThis, 'fetch').mockRejectedValue(
-      new Error('connect ECONNREFUSED 10.96.0.1:443'),
-    );
+    failWith(new Error('connect ECONNREFUSED 10.96.0.1:443'));
     const { readNextAppStatus } = await load();
 
     const result = await readNextAppStatus('demo');
@@ -231,9 +310,7 @@ describe('NextApp reader — enabled path', () => {
 
   it('maps a 500 to unreachable (distinct from crd-absent and forbidden)', async () => {
     seedServiceAccount();
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
-      jsonResponse({ kind: 'Status', code: 500 }, 500) as never,
-    );
+    respondWith(500, { kind: 'Status', code: 500 });
     const { readNextAppStatus } = await load();
 
     expect(await readNextAppStatus('demo')).toMatchObject({
@@ -244,11 +321,12 @@ describe('NextApp reader — enabled path', () => {
 
   it('never puts the ServiceAccount token in the returned value', async () => {
     seedServiceAccount();
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(jsonResponse(NEXTAPP_BODY) as never);
+    respondWith(200, NEXTAPP_BODY);
     const { readNextAppStatus } = await load();
 
     const result = await readNextAppStatus('demo');
 
     expect(JSON.stringify(result)).not.toContain(TOKEN);
+    expect(JSON.stringify(result)).not.toContain(CA_CERT);
   });
 });
