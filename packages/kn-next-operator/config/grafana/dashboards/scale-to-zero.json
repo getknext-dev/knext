@@ -81,9 +81,7 @@
         "colorMode": "value",
         "graphMode": "area",
         "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ]
+          "calcs": ["lastNotNull"]
         }
       },
       "targets": [
@@ -217,12 +215,7 @@
   "refresh": "30s",
   "schemaVersion": 39,
   "style": "dark",
-  "tags": [
-    "knext",
-    "scale-to-zero",
-    "cold-start",
-    "knative"
-  ],
+  "tags": ["knext", "scale-to-zero", "cold-start", "knative"],
   "templating": {
     "list": [
       {

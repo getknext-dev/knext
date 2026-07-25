@@ -20,12 +20,7 @@
   "liveNow": false,
   "uid": "kn-next-loadtest",
   "title": "knext \u2014 Load Testing",
-  "tags": [
-    "knext",
-    "knative",
-    "nextjs",
-    "load-test"
-  ],
+  "tags": ["knext", "knative", "nextjs", "load-test"],
   "timezone": "",
   "schemaVersion": 39,
   "refresh": "5s",
@@ -56,9 +51,7 @@
         "graphMode": "area",
         "justifyMode": "auto",
         "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ]
+          "calcs": ["lastNotNull"]
         }
       }
     },
