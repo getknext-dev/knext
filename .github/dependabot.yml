@@ -1,0 +1,20 @@
+# Dependabot — keeps the SHA-pinned GitHub Actions on the publish path current (#522).
+#
+# The publish-path workflows (release.yml, release-ghp.yml) pin every `uses:` to a
+# full commit SHA because those jobs run with live publish credentials in scope.
+# Pinning without a bump channel just trades a supply-chain risk for staleness, so
+# Dependabot owns the bumps: it rewrites the SHA and the trailing `# vX.Y.Z`
+# comment together, which keeps tests/release-action-pins.test.ts honest (that test
+# asserts the SHA of record, so a Dependabot PR has to update it too — a
+# deliberate human review point on the credential-bearing path).
+version: 2
+updates:
+  - package-ecosystem: 'github-actions'
+    directory: '/'
+    schedule:
+      interval: 'weekly'
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: 'ci'
+    labels:
+      - 'reliability'
