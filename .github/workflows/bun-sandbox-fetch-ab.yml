@@ -55,7 +55,7 @@ jobs:
         runtime: [node, bun]
     steps:
       - name: Checkout knext
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup Node.js
         uses: actions/setup-node@v7
@@ -105,7 +105,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Checkout knext
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup Node.js
         uses: actions/setup-node@v7

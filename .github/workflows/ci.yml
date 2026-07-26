@@ -13,7 +13,7 @@ jobs:
     
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
       
       - name: Setup Node.js
         uses: actions/setup-node@v7
@@ -106,7 +106,7 @@ jobs:
         runtime: [node, bun]
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup Node.js
         uses: actions/setup-node@v7
@@ -161,7 +161,7 @@ jobs:
     timeout-minutes: 12
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup Node.js
         uses: actions/setup-node@v7
@@ -229,7 +229,7 @@ jobs:
     timeout-minutes: 12
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup Node.js
         uses: actions/setup-node@v7
@@ -278,7 +278,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
       - name: Check operator manifests are digest-pinned
         run: bash packages/kn-next-operator/hack/check-no-latest.sh --quiet
       # Base-image-pin guard (refs #117): the operator runtime is distroless/static
@@ -300,7 +300,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
       - name: Setup Go
         uses: actions/setup-go@v7
         with:
@@ -333,7 +333,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
       - name: Setup Go
         uses: actions/setup-go@v7
         with:
@@ -379,7 +379,7 @@ jobs:
     timeout-minutes: 25
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup Node.js (to run the probe on the host)
         uses: actions/setup-node@v7
@@ -467,7 +467,7 @@ jobs:
       DATABASE_URL: postgres://knext:knext-ci-throwaway@127.0.0.1:5432/knext
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup Node.js
         uses: actions/setup-node@v7
@@ -511,7 +511,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Detect relevant changes
         id: filter
@@ -629,7 +629,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 

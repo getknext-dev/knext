@@ -24,7 +24,7 @@ jobs:
     timeout-minutes: 12
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       # Project Node version (24 — matches ci.yml / release.yml). v1 is single-OS,
       # single-Node on purpose to keep it cheap; a Node matrix is later hardening.
