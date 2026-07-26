@@ -63,6 +63,24 @@ const API_VERSION = 'v1alpha1';
 /** Short abort budget: a slow API server must degrade the page, never hang it. */
 const DEFAULT_TIMEOUT_MS = 4000;
 
+/**
+ * Hard cap on the buffered response body (PR-520 review round 3 observation).
+ *
+ * The read is bounded in *time*; without this it was not bounded in *bytes*, so a
+ * response that streams forever below the inactivity threshold would grow the
+ * buffer until the deadline — memory pressure on a pod whose whole job is to serve
+ * pages. 1 MiB is far above a `NextApp` document (a few KB even with
+ * `managedFields`) and below the ~1.5 MiB etcd object limit, so no legitimate CR
+ * can hit it. Exceeding it fails **closed**, reusing the existing
+ * unreadable-response outcome — no new rendered state.
+ *
+ * Exported so the test asserts against the real cap rather than a retyped literal.
+ */
+export const MAX_RESPONSE_BYTES = 1024 * 1024;
+
+/** Internal sentinel: the body exceeded {@link MAX_RESPONSE_BYTES}. */
+const OVERSIZE = 'oversize';
+
 /** One traffic target as mirrored into `status.currentTraffic`. */
 export interface TrafficTargetView {
   readonly revisionName?: string;
@@ -173,6 +191,9 @@ interface RawResponse {
  *    claim true for this read too, not just for the Prometheus queries.
  * The promise is rejected directly (rather than relying on `destroy()` surfacing
  * an `error` event) so the bound holds even if the socket is already gone.
+ *
+ * A third bound is on SIZE ({@link MAX_RESPONSE_BYTES}) — being bounded in time
+ * still allowed an unbounded buffer to grow for the whole budget.
  */
 function getJson(
   url: string,
@@ -209,7 +230,18 @@ function getJson(
       },
       (res) => {
         const chunks: Buffer[] = [];
-        res.on('data', (chunk: Buffer) => chunks.push(chunk));
+        let bytes = 0;
+        res.on('data', (chunk: Buffer) => {
+          bytes += chunk.length;
+          // Bounded in bytes as well as in time: stop reading (and destroy the
+          // socket) rather than buffer an unbounded body until the deadline.
+          if (bytes > MAX_RESPONSE_BYTES) {
+            request.destroy(new Error(OVERSIZE));
+            fail(new Error(OVERSIZE));
+            return;
+          }
+          chunks.push(chunk);
+        });
         res.on('end', () =>
           succeed({
             statusCode: res.statusCode ?? 0,
@@ -382,7 +414,13 @@ export async function readNextAppStatus(
   let response: RawResponse;
   try {
     response = await getJson(url, token, readSecretFile('ca.crt'), { timeoutMs });
-  } catch {
+  } catch (error) {
+    // An over-cap body is a response we refused to read, not a server we failed to
+    // reach — so it reuses the existing unreadable-response wording (and its
+    // `unreachable` reason) rather than adding a state the page would have to render.
+    if (error instanceof Error && error.message === OVERSIZE) {
+      return unavailable('unreachable', 'the Kubernetes API returned an unreadable response');
+    }
     // Deliberately no error message: it can carry the API server host/IP.
     return unavailable('unreachable', 'the Kubernetes API server could not be reached');
   }
