@@ -59,10 +59,12 @@ its own risk.
 
 ### 2.1 A CR applied against an older operator — the worst mode in the system
 The CRD is structural and carries **no** `x-kubernetes-preserve-unknown-fields`, so an unknown field
-is dropped rather than stored. A user on a newer `@getknext/core` who sets
-`spec.security.networkPolicy` against an older operator would get: apply **accepted**, field
-**silently dropped**, `NextApp` **`Ready=True`** — a security invariant downgraded to a no-op,
-reported as success.
+is dropped rather than stored. Take a field the CLI really emits and that an older CRD plausibly
+predates: a user on a newer `@getknext/core` who sets `spec.database.roSecretRef` against an older
+operator would get apply **accepted**, field **silently dropped**, `NextApp` **`Ready=True`** — and
+because `DATABASE_URL_RO` is then never injected, `getDbRO()` falls back to the writer pool
+(`packages/db/src/index.ts`) and staleness-tolerant reads run on the read-**write** primary
+credential. A least-privilege downgrade, reported as success.
 
 **Corrected by measurement (live cluster, server-side dry-run against the structural CRD):** whether
 the field is pruned depends entirely on the *validation mode of the apply*, not on the CRD:
@@ -72,14 +74,21 @@ the field is pruned depends entirely on the *validation mode of the apply*, not 
 - `kubectl apply --validate=ignore` — accepted, field pruned, no error.
 
 `strict` has been kubectl's default since 1.25 (server-side field validation GA in 1.27), so the
-common case was already protected — but only by **an external binary's default**, which disappears
-silently under an old kubectl, a shell alias, a kubeconfig default, or a wrapper passing
-`--validate=ignore`.
+common case was already protected — but only by **an external binary's default**. Two vectors take
+that away, and only two: an **old kubectl** on PATH, or a **wrapper/shim binary named `kubectl`**
+(asdf/krew/kubie shims, corporate wrappers) that passes `--validate=ignore`. A shell alias is *not*
+one — the CLI spawns kubectl through `execFile` with `shell: false`, so no interactive alias is ever
+in the path — and kubectl exposes no kubeconfig key or environment variable for `--validate`.
 
-**Mitigation landed:** `deploy.ts` now passes `--validate=strict` **explicitly** on the CR apply
-(the guarantee is knext's, not the user's kubectl's) and surfaces an actionable "the operator's CRD
-may be older than this CLI" message when the apply is rejected; `kn-next doctor` reports when the
-local client is older than v1.25, where that flag value does not exist.
+**Mitigation landed:** **every** `kubectl apply` the CLI issues now passes `--validate=strict`
+explicitly — the prod CR apply (`deploy.ts`), the preview CR apply (`preview.ts`, the path CI runs
+most often), and the k6 load-test Job (`loadtest.ts`) — so the guarantee is knext's, not the user's
+kubectl's. A failed apply is rewrapped with a diagnosis that names a cause only when knext can
+establish one (see the kubectl ≤ 1.24 residual) and otherwise offers a differential; `kn-next
+doctor` reports when the local client is older than v1.25, where that flag value does not exist.
+A generalised argv guard (`cr-apply-strict-validation.test.ts`) scans **every** `kubectl apply`
+literal under `src/cli/`, so a fourth apply site added later fails the suite rather than slipping
+through — enumerating the known call sites is exactly how `preview.ts` was missed the first time.
 
 **Residual, not closed:**
 
@@ -89,8 +98,14 @@ local client is older than v1.25, where that flag value does not exist.
   path, not an edge case. (`kubectl apply --server-side` and `kubectl replace` *are* covered — both
   set `fieldValidation=Strict` from kubectl 1.25.)
 - **kubectl ≤ 1.24 users** fail at flag parsing rather than being protected — `--validate` is a
-  boolean before 1.25, so `deploy` errors before contacting the apiserver. Fail-closed and
-  acceptable (1.24 is long EOL), surfaced by `doctor`.
+  boolean before 1.25, so `deploy` errors before contacting the apiserver. This is a **behaviour
+  change**: deploys that previously succeeded on kubectl ≤ 1.24 now hard-fail. Fail-closed is the
+  right call (1.24 is long EOL); it is surfaced by `doctor`, and on a failed apply `deploy` probes
+  the local client so it reports *the client is too old* rather than blaming the CRD.
+- **A `kubectl` shim on PATH still wins.** pflag takes the **last** occurrence of a string flag, so a
+  wrapper appending `--validate=ignore` overrides knext's argv, and `exec.ts` hardcodes the binary
+  name with no path/digest pinning. The flag guarantees knext's own argv, not the binary that
+  receives it.
 - `doctor` still checks only that the CRD *exists*, not that its schema covers every field this CLI
   emits — the schema-diff preflight (#314) remains the complete fix.
 

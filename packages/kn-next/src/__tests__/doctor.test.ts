@@ -25,6 +25,7 @@ import {
     type ManifestProbeFn,
     parseDoctorArgs,
     parseImageRef,
+    parseKubectlClientVersion,
     probeManifest,
     runDoctor,
 } from "../cli/doctor";
@@ -399,8 +400,8 @@ describe("runDoctor — check (f) Knative Serving", () => {
 // (g) client kubectl strict-validation support.
 //
 // `kn-next deploy` now passes `--validate=strict` EXPLICITLY on the NextApp CR
-// apply, so an unknown field (e.g. a `spec.security.networkPolicy` the operator's
-// CRD does not know) is REJECTED by the apiserver instead of silently pruned.
+// apply, so a field the operator's CRD does not know (e.g. `spec.database.roSecretRef`
+// against a CRD that predates it) is REJECTED by the apiserver, not silently pruned.
 // That flag VALUE only exists from kubectl v1.25 — on an older client the deploy
 // cannot assert strict validation at all. This check is purely LOCAL (kubectl
 // version --client) and read-only, so it runs even when the cluster is
@@ -512,6 +513,50 @@ describe("runDoctor — check (g) kubectl strict-validation support", () => {
         expect(byId(gkeReport.checks)["kubectl-validation"].status).toBe(
             "fail",
         );
+    });
+
+    // The gitVersion regex above always matches when gitVersion is present, so
+    // the DISCRETE-field fallback (the `Number.parseInt("29+")` strip) is only
+    // reached when gitVersion is ABSENT — a shape some vendored/managed clients
+    // really emit, and one no test exercised before.
+    it("falls back to the discrete major/minor fields when gitVersion is absent", async () => {
+        const noGit = (major: string, minor: string) =>
+            JSON.stringify({ clientVersion: { major, minor } });
+
+        expect(parseKubectlClientVersion(noGit("1", "29+"))).toEqual({
+            major: 1,
+            minor: 29,
+            display: "v1.29",
+        });
+        expect(parseKubectlClientVersion(noGit("1", "24+"))).toEqual({
+            major: 1,
+            minor: 24,
+            display: "v1.24",
+        });
+        // Nothing numeric anywhere → undefined, so the caller WARNs.
+        expect(
+            parseKubectlClientVersion(noGit("stable", "unknown")),
+        ).toBeUndefined();
+
+        const modern = healthyStubs();
+        modern[VERSION_KEY] = { ok: true, stdout: noGit("1", "29+") };
+        const modernReport = await runDoctor({
+            kubectl: stubKubectl(modern),
+            probeImage: okProbe,
+        });
+        const pass = byId(modernReport.checks)["kubectl-validation"];
+        expect(pass.status).toBe("pass");
+        expect(pass.detail).toMatch(/v1\.29/);
+
+        const old = healthyStubs();
+        old[VERSION_KEY] = { ok: true, stdout: noGit("1", "24+") };
+        const oldReport = await runDoctor({
+            kubectl: stubKubectl(old),
+            probeImage: okProbe,
+        });
+        const fail = byId(oldReport.checks)["kubectl-validation"];
+        expect(fail.status).toBe("fail");
+        expect(fail.detail).toMatch(/v1\.24/);
     });
 
     it("WARNS (never fails, never lies) when the version cannot be determined", async () => {

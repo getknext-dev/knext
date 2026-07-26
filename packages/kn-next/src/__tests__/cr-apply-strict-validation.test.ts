@@ -1,0 +1,633 @@
+/**
+ * EVERY `kubectl apply` this CLI can issue must ASSERT strict field validation
+ * — it must not inherit it from whatever `kubectl` happens to be on the user's
+ * PATH.
+ *
+ * Empirically (live cluster, server-side dry-run against the structural CRD):
+ *   - `kubectl apply --validate=strict` (kubectl's own default since 1.25)
+ *     REJECTS an unknown field:
+ *       Error from server (BadRequest): ... strict decoding error:
+ *       unknown field "spec.template.spec.thisFieldDoesNotExistAnywhere"
+ *   - `kubectl apply --validate=ignore` ACCEPTS it and the apiserver PRUNES it
+ *     silently. Concretely, for a field this CLI really emits: a pruned
+ *     `spec.database.roSecretRef` means the operator never injects
+ *     DATABASE_URL_RO, so `getDbRO()` falls back to the writer pool
+ *     (packages/db/src/index.ts) and read traffic runs on the read-WRITE
+ *     primary credential — a least-privilege downgrade on a CR that still
+ *     reports Ready=True.
+ *
+ * So the protection exists, but it was an EXTERNAL BINARY'S DEFAULT. The
+ * vectors that can actually take it away are narrower than they look: the CLI
+ * spawns kubectl through `execFile` with `shell: false` (cli/exec.ts), so no
+ * interactive shell alias is ever in the path, and kubectl exposes no
+ * kubeconfig key or environment variable for `--validate`. What remains real:
+ *   - a kubectl older than v1.25 on PATH (there the flag value did not exist);
+ *   - a wrapper/shim binary NAMED `kubectl` on PATH (asdf/krew/kubie shims,
+ *     corporate wrappers). That one is NOT closed by this flag: pflag takes the
+ *     LAST occurrence of a string flag, so a shim appending `--validate=ignore`
+ *     still wins.
+ * Passing the flag explicitly makes the guarantee knext's for the argv knext
+ * controls.
+ *
+ * The argv guard below is GENERALISED on purpose — it scans every `kubectl
+ * apply` argv literal under `src/cli/` instead of enumerating known call sites,
+ * because enumerating is precisely how the `preview deploy` apply was missed
+ * the first time. A third apply site added later must fail this suite.
+ *
+ * Hermetic — every side-effecting seam of deploy.ts is module-mocked (same
+ * pattern as deploy-orchestrator.test.ts); no cluster, no docker, no build.
+ */
+
+import { createRequire } from "node:module";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { KnativeNextConfig } from "../config";
+
+type AnyFn = (...args: unknown[]) => unknown;
+
+const runQuiet = vi.fn<AnyFn>();
+const runInherit = vi.fn<AnyFn>();
+const runCapture = vi.fn<AnyFn>(() => "");
+const isEntrypoint = vi.fn<AnyFn>(() => false);
+
+vi.mock("../cli/exec", () => ({
+    runQuiet: (...a: unknown[]) => runQuiet(...a),
+    runInherit: (...a: unknown[]) => runInherit(...a),
+    runCapture: (...a: unknown[]) => runCapture(...a),
+    runQuietAllowFail: vi.fn(),
+    isEntrypoint: (...a: unknown[]) => isEntrypoint(...a),
+}));
+
+const uploadAssets = vi.fn<AnyFn>(async () => {});
+const getAssetPrefix = vi.fn<AnyFn>(() => "https://cdn.example.com/_next");
+const reclaimBuildPrefix = vi.fn<AnyFn>();
+
+vi.mock("../utils/asset-upload", () => ({
+    uploadAssets: (...a: unknown[]) => uploadAssets(...a),
+    getAssetPrefix: (...a: unknown[]) => getAssetPrefix(...a),
+    reclaimBuildPrefix: (...a: unknown[]) => reclaimBuildPrefix(...a),
+}));
+
+const renderNextAppCR = vi.fn<AnyFn>(() => "kind: NextApp\n");
+const resolveDigest = vi.fn<AnyFn>(
+    async () => "registry.example.com/my-app@sha256:deadbeef",
+);
+const validateCRImageRef = vi.fn<AnyFn>();
+
+vi.mock("../cli/cr-builder", () => ({
+    renderNextAppCR: (...a: unknown[]) => renderNextAppCR(...a),
+    resolveDigest: (...a: unknown[]) => resolveDigest(...a),
+    validateCRImageRef: (...a: unknown[]) => validateCRImageRef(...a),
+}));
+
+const runAssetGC = vi.fn<AnyFn>(() => ({ pruned: true }));
+
+vi.mock("../cli/gc", () => ({
+    runAssetGC: (...a: unknown[]) => runAssetGC(...a),
+    gcMain: vi.fn(),
+}));
+
+const baseConfig: KnativeNextConfig = {
+    name: "my-app",
+    registry: "registry.example.com",
+    storage: {
+        provider: "gcs",
+        bucket: "my-bucket",
+        publicUrl: "https://storage.googleapis.com/my-bucket",
+    },
+    cache: {
+        provider: "redis",
+        url: "redis://redis:6379",
+        keyPrefix: "my-app",
+    },
+    scaling: { minScale: 0, maxScale: 5 },
+};
+
+const loadConfig = vi.fn<AnyFn>(async () => baseConfig);
+vi.mock("../cli/shared", () => ({
+    loadConfig: (...a: unknown[]) => loadConfig(...a),
+    excerpt: (s: string) => s,
+}));
+
+const readFileSyncMock = vi.fn<(...a: unknown[]) => string>(() => "");
+vi.mock("node:fs", async (importOriginal) => {
+    const actual = await importOriginal<typeof import("node:fs")>();
+    const overrides = {
+        readFileSync: (...a: unknown[]) => readFileSyncMock(...(a as [string])),
+        writeFileSync: vi.fn(),
+        mkdirSync: vi.fn(),
+        writeSync: vi.fn(),
+    };
+    return {
+        ...actual,
+        ...overrides,
+        default: { ...(actual as { default?: object }).default, ...overrides },
+    };
+});
+
+function argvOf(call: unknown[]): string[] {
+    return (call[0] as string[]) ?? [];
+}
+
+/** The single mutating call: `kubectl apply …` of the NextApp CR. */
+function applyArgv(): string[] | undefined {
+    const call = runInherit.mock.calls.find(
+        (c) => argvOf(c)[0] === "kubectl" && argvOf(c)[1] === "apply",
+    );
+    return call ? argvOf(call) : undefined;
+}
+
+async function importDeploy(): Promise<() => Promise<void>> {
+    const mod = (await import("../cli/deploy")) as {
+        deploy: () => Promise<void>;
+    };
+    return mod.deploy;
+}
+
+function setArgv(flags: string[]): void {
+    process.argv = ["node", "/path/to/kn-next.js", ...flags];
+}
+
+const savedArgv = process.argv;
+const savedEnv = { ...process.env };
+
+beforeEach(() => {
+    vi.resetModules();
+    vi.clearAllMocks();
+    runCapture.mockReturnValue("");
+    resolveDigest.mockResolvedValue(
+        "registry.example.com/my-app@sha256:deadbeef",
+    );
+    renderNextAppCR.mockReturnValue("kind: NextApp\n");
+    runAssetGC.mockReturnValue({ pruned: true });
+    loadConfig.mockResolvedValue(baseConfig);
+    readFileSyncMock.mockReturnValue("deploytag");
+});
+
+afterEach(() => {
+    process.argv = savedArgv;
+    process.env = { ...savedEnv };
+});
+
+/* ------------------------------------------------------------------ *
+ * Generalised guard: every `kubectl apply` argv literal under src/cli/  *
+ * ------------------------------------------------------------------ */
+
+// The real fs — this file module-mocks node:fs for the deploy tests, and the
+// source-scanning guards below must read from disk regardless.
+const realFs = createRequire(import.meta.url)(
+    "node:fs",
+) as typeof import("node:fs");
+
+const TEST_FILE = fileURLToPath(import.meta.url);
+const CLI_DIR = join(dirname(TEST_FILE), "..", "cli");
+
+/** Blank out comments while preserving line numbers (so failures point home). */
+function stripComments(src: string): string {
+    return src
+        .replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, " "))
+        .replace(/(^|[^:"'`\\])\/\/.*$/gm, "$1");
+}
+
+/** Index of the string terminator starting at `start` (quote char at start). */
+function skipString(s: string, start: number): number {
+    const quote = s[start];
+    for (let i = start + 1; i < s.length; i++) {
+        if (s[i] === "\\") {
+            i++;
+            continue;
+        }
+        if (s[i] === quote) return i;
+    }
+    return s.length;
+}
+
+/** Index of the `]` matching the `[` at `start`, or -1. */
+function matchBracket(s: string, start: number): number {
+    let depth = 0;
+    for (let i = start; i < s.length; i++) {
+        const c = s[i];
+        if (c === '"' || c === "'" || c === "`") {
+            i = skipString(s, i);
+            continue;
+        }
+        if (c === "[") depth++;
+        else if (c === "]" && --depth === 0) return i;
+    }
+    return -1;
+}
+
+interface ApplySite {
+    file: string;
+    line: number;
+    args: string[];
+}
+
+/**
+ * Find every flat argv array literal that spawns `kubectl apply`, in both
+ * shapes the CLI uses: `run*(["kubectl", "apply", …])` and
+ * `execFileSync("kubectl", ["apply", …])`. Non-literal argv entries (paths,
+ * namespaces) are simply absent from `args` — we only assert over the flags,
+ * which are always literals.
+ */
+function scanApplySites(file: string, rawSource: string): ApplySite[] {
+    const src = stripComments(rawSource);
+    const sites: ApplySite[] = [];
+    for (let i = 0; i < src.length; i++) {
+        if (src[i] !== "[") continue;
+        const end = matchBracket(src, i);
+        if (end < 0) continue;
+        const region = src.slice(i + 1, end);
+        if (region.includes("[")) continue; // not a flat argv literal
+        const args = [...region.matchAll(/(['"])((?:\\.|(?!\1).)*)\1/g)].map(
+            (m) => m[2] as string,
+        );
+        const isApplyArgv =
+            (args[0] === "kubectl" && args[1] === "apply") ||
+            (args[0] === "apply" &&
+                /["']kubectl["']\s*,\s*$/.test(src.slice(0, i)));
+        if (!isApplyArgv) continue;
+        sites.push({
+            file,
+            line: src.slice(0, i).split("\n").length,
+            args,
+        });
+    }
+    return sites;
+}
+
+describe("kubectl apply — asserted strict field validation at EVERY call site", () => {
+    function readCliSources(): Map<string, string> {
+        const out = new Map<string, string>();
+        for (const name of realFs.readdirSync(CLI_DIR)) {
+            if (!name.endsWith(".ts")) continue;
+            out.set(name, realFs.readFileSync(join(CLI_DIR, name), "utf-8"));
+        }
+        return out;
+    }
+
+    it("no `kubectl apply` argv in src/cli/ omits or weakens --validate=strict", () => {
+        const sources = readCliSources();
+        const sites = [...sources].flatMap(([name, src]) =>
+            scanApplySites(name, src),
+        );
+        // Non-vacuity: the CLI has at least three apply sites today (deploy's
+        // NextApp CR, preview's NextApp CR, loadtest's k6 Job). If the scanner
+        // ever stops finding them this must fail, not silently pass.
+        expect(
+            sites.length,
+            "the argv scanner found no kubectl apply sites — the guard has gone vacuous",
+        ).toBeGreaterThanOrEqual(3);
+
+        for (const site of sites) {
+            const where = `${site.file}:${site.line} (${site.args.join(" ")})`;
+            expect(site.args, `${where} — missing --validate=strict`).toContain(
+                "--validate=strict",
+            );
+            expect(
+                site.args.filter((a) => a.startsWith("--validate")),
+                `${where} — exactly one --validate flag (pflag takes the last)`,
+            ).toHaveLength(1);
+        }
+    });
+
+    it("the scanner sees every file that spawns kubectl apply (no silent parse miss)", () => {
+        const sources = readCliSources();
+        for (const [name, raw] of sources) {
+            const src = stripComments(raw);
+            const spawnsApply =
+                /["']kubectl["']/.test(src) && /["']apply["']/.test(src);
+            if (!spawnsApply) continue;
+            expect(
+                scanApplySites(name, raw).length,
+                `${name} spawns a kubectl apply the argv scanner failed to parse`,
+            ).toBeGreaterThan(0);
+        }
+    });
+});
+
+describe("NextApp CR apply — asserted strict field validation", () => {
+    it("passes --validate=strict explicitly on the kubectl apply argv", async () => {
+        setArgv(["deploy", "--tag", "deploytag"]);
+        const deploy = await importDeploy();
+        await deploy();
+
+        const argv = applyArgv();
+        expect(argv, "the mutating kubectl apply must have run").toBeDefined();
+        // THE regression guard: one word, trivially lost in a refactor.
+        expect(argv).toContain("--validate=strict");
+    });
+
+    it("never weakens validation (no --validate=ignore/warn/false in the apply argv)", async () => {
+        setArgv(["deploy", "--tag", "deploytag"]);
+        const deploy = await importDeploy();
+        await deploy();
+
+        const argv = applyArgv() ?? [];
+        for (const weak of [
+            "--validate=ignore",
+            "--validate=warn",
+            "--validate=false",
+        ]) {
+            expect(argv).not.toContain(weak);
+        }
+        // Exactly one --validate flag — a second one would silently win.
+        expect(argv.filter((a) => a.startsWith("--validate")).length).toBe(1);
+    });
+
+    it("still applies the right file into the right namespace (the flag is additive)", async () => {
+        setArgv(["deploy", "--tag", "deploytag", "--namespace", "prod"]);
+        const deploy = await importDeploy();
+        await deploy();
+
+        const argv = applyArgv() ?? [];
+        expect(argv[0]).toBe("kubectl");
+        expect(argv[1]).toBe("apply");
+        expect(argv).toContain("-f");
+        expect(argv[argv.indexOf("-f") + 1]).toMatch(/nextapp-cr\.yaml$/);
+        expect(argv[argv.indexOf("-n") + 1]).toBe("prod");
+    });
+});
+
+describe("NextApp CR apply — a rejected apply is never swallowed", () => {
+    /** Make ONLY the `kubectl apply` leg fail, like a real strict rejection. */
+    function failApplyWith(message: string): Error {
+        const err = new Error(message);
+        runInherit.mockImplementation((...a: unknown[]) => {
+            const argv = a[0] as string[];
+            if (argv?.[0] === "kubectl" && argv?.[1] === "apply") throw err;
+        });
+        return err;
+    }
+
+    it("fails loudly with an actionable message naming the likely cause (operator CRD older than the CLI)", async () => {
+        setArgv(["deploy", "--tag", "deploytag"]);
+        failApplyWith(
+            'Command failed: kubectl apply -f nextapp-cr.yaml\nError from server (BadRequest): ... strict decoding error: unknown field "spec.security.networkPolicy"',
+        );
+        const deploy = await importDeploy();
+
+        await expect(deploy()).rejects.toThrow(
+            /unknown field|strict decoding/i,
+        );
+        await expect(deploy()).rejects.toThrow(/older than this CLI/i);
+        // Actionable: tells the user how to check the installed CRD.
+        await expect(deploy()).rejects.toThrow(
+            /kubectl get crd nextapps\.apps\.kn-next\.dev/,
+        );
+    });
+
+    it("preserves the original kubectl error as `cause` (nothing is swallowed)", async () => {
+        setArgv(["deploy", "--tag", "deploytag"]);
+        const original = failApplyWith("Command failed: kubectl apply ...");
+        const deploy = await importDeploy();
+
+        const caught = await deploy().then(
+            () => undefined,
+            (e: unknown) => e as Error,
+        );
+        expect(caught).toBeInstanceOf(Error);
+        expect((caught as Error & { cause?: unknown }).cause).toBe(original);
+    });
+
+    it("does not reach the post-apply status read when the apply is rejected", async () => {
+        setArgv(["deploy", "--tag", "deploytag"]);
+        failApplyWith("Command failed: kubectl apply ...");
+        const deploy = await importDeploy();
+
+        await expect(deploy()).rejects.toThrow();
+        expect(
+            runCapture.mock.calls.some(
+                (c) => argvOf(c)[0] === "kubectl" && argvOf(c)[1] === "get",
+            ),
+        ).toBe(false);
+    });
+});
+
+describe("NextApp CR apply — the failure is attributed to the right side", () => {
+    function failApply(): Error {
+        const err = new Error("Command failed: kubectl apply ...");
+        runInherit.mockImplementation((...a: unknown[]) => {
+            const argv = a[0] as string[];
+            if (argv?.[0] === "kubectl" && argv?.[1] === "apply") throw err;
+        });
+        return err;
+    }
+
+    /** Answer the post-failure `kubectl version --client` probe. */
+    function clientVersion(gitVersion: string): void {
+        runCapture.mockImplementation((...a: unknown[]) => {
+            const argv = a[0] as string[];
+            if (argv?.[1] === "version")
+                return JSON.stringify({ clientVersion: { gitVersion } });
+            return "";
+        });
+    }
+
+    it("blames the CLIENT, not the CRD, when the local kubectl predates --validate=strict", async () => {
+        // The ONE failure this PR introduces: on kubectl <= 1.24 `--validate`
+        // is a bool, so `--validate=strict` dies at flag parse and the apply
+        // never reaches the apiserver. Saying "the CRD is older than the CLI"
+        // there is exactly backwards.
+        setArgv(["deploy", "--tag", "deploytag"]);
+        failApply();
+        clientVersion("v1.24.17");
+        const deploy = await importDeploy();
+
+        const caught = await deploy().then(
+            () => undefined,
+            (e: unknown) => e as Error,
+        );
+        expect(caught?.message).toMatch(/v1\.24\.17/);
+        expect(caught?.message).toMatch(/older than v1\.25/i);
+        expect(caught?.message).toMatch(
+            /never reached|before it contacts|flag pars/i,
+        );
+        // It must NOT tell this user to go looking at the CRD.
+        expect(caught?.message).not.toMatch(/CRD/);
+    });
+
+    it("names no single cause when it cannot know one (offers a differential)", async () => {
+        // Cluster unreachable / RBAC / bad namespace all land here with stdio
+        // inherited, so knext has no stderr to classify.
+        setArgv(["deploy", "--tag", "deploytag"]);
+        const original = failApply();
+        clientVersion("v1.31.0");
+        const deploy = await importDeploy();
+
+        const caught = await deploy().then(
+            () => undefined,
+            (e: unknown) => e as Error,
+        );
+        // The headline states the FACT (the apply failed); it must not lead
+        // with a cause knext cannot see.
+        const headline = (caught?.message ?? "").split("\n")[0] as string;
+        expect(headline).not.toMatch(/CRD/);
+        // The CRD-skew cause appears ONLY as one conditional candidate.
+        expect(caught?.message).toMatch(
+            /If it reads[\s\S]*NextApp CRD is older than this CLI/,
+        );
+        // Still actionable: the candidate causes and how to check each.
+        expect(caught?.message).toMatch(/strict decoding error/);
+        expect(caught?.message).toMatch(
+            /kubectl get crd nextapps\.apps\.kn-next\.dev/,
+        );
+        expect(caught?.message).toMatch(/kn-next doctor/);
+        expect((caught as Error & { cause?: unknown }).cause).toBe(original);
+    });
+
+    it("survives a kubectl version probe that itself fails (no diagnosis crash)", async () => {
+        setArgv(["deploy", "--tag", "deploytag"]);
+        const original = failApply();
+        runCapture.mockImplementation(() => {
+            throw new Error("kubectl: command not found");
+        });
+        const deploy = await importDeploy();
+
+        const caught = await deploy().then(
+            () => undefined,
+            (e: unknown) => e as Error,
+        );
+        expect(caught).toBeInstanceOf(Error);
+        expect((caught as Error & { cause?: unknown }).cause).toBe(original);
+    });
+});
+
+describe("preview deploy — the OTHER NextApp CR apply (same CR, same skew)", () => {
+    const digestImage = `registry.example.com/my-app-pr-42:t@sha256:${"a".repeat(64)}`;
+
+    async function runPreview(): Promise<string[]> {
+        const { runPreviewDeploy } = await import("../cli/preview");
+        const apply = vi.fn<(argv: readonly string[]) => void>();
+        await runPreviewDeploy(
+            baseConfig,
+            { prId: "42", branch: "feat/x", namespace: "previews" },
+            {
+                apply,
+                capture: () => "https://my-app-pr-42.example.com",
+                buildAndPush: async () => digestImage,
+            },
+        );
+        return (apply.mock.calls[0]?.[0] ?? []) as string[];
+    }
+
+    it("passes --validate=strict explicitly (it renders the SAME CR as deploy)", async () => {
+        const argv = await runPreview();
+        expect(argv).toContain("--validate=strict");
+    });
+
+    it("never weakens validation and applies the preview CR into the right namespace", async () => {
+        const argv = await runPreview();
+        expect(argv[0]).toBe("kubectl");
+        expect(argv[1]).toBe("apply");
+        for (const weak of [
+            "--validate=ignore",
+            "--validate=warn",
+            "--validate=false",
+        ]) {
+            expect(argv).not.toContain(weak);
+        }
+        expect(argv.filter((a) => a.startsWith("--validate"))).toHaveLength(1);
+        expect(argv[argv.indexOf("-f") + 1]).toMatch(
+            /nextapp-preview-cr\.yaml$/,
+        );
+        expect(argv[argv.indexOf("-n") + 1]).toBe("previews");
+    });
+});
+
+/* ------------------------------------------------------------------ *
+ * The cited pruning example must be a field the CLI actually EMITS.    *
+ * A fabricated concrete example in a security note is worse than none: *
+ * it invites verification and loses the reader's trust in the rest.    *
+ * ------------------------------------------------------------------ */
+
+/**
+ * Backticked `spec.…` paths that deliberately name a field NOTHING emits —
+ * they illustrate what an UNKNOWN field looks like, quoted from a real kubectl
+ * rejection. Anything else cited in the strict-validation prose must be a path
+ * `buildNextAppCRObject` really produces.
+ */
+const DELIBERATELY_UNKNOWN_FIELD_EXAMPLES = new Set([
+    "spec.template.spec.thisFieldDoesNotExistAnywhere",
+]);
+
+function citedSpecPaths(text: string): string[] {
+    return [...text.matchAll(/`(spec\.[A-Za-z][A-Za-z0-9_.]*)`/g)]
+        .map((m) => m[1] as string)
+        .filter((p) => !DELIBERATELY_UNKNOWN_FIELD_EXAMPLES.has(p));
+}
+
+function hasPath(root: unknown, path: string): boolean {
+    let node: unknown = root;
+    for (const key of path.split(".")) {
+        if (typeof node !== "object" || node === null) return false;
+        if (!(key in (node as Record<string, unknown>))) return false;
+        node = (node as Record<string, unknown>)[key];
+    }
+    return node !== undefined;
+}
+
+describe("strict-validation prose — every cited spec field is one the CLI emits", () => {
+    /** A config exercising the optional blocks the CR builder can emit. */
+    const maximalConfig: KnativeNextConfig = {
+        ...baseConfig,
+        database: {
+            secretRef: { name: "app-db" },
+            roSecretRef: { name: "app-db", key: "DATABASE_URL_RO" },
+        },
+    };
+
+    async function builtCR(): Promise<Record<string, unknown>> {
+        const actual =
+            await vi.importActual<typeof import("../cli/cr-builder")>(
+                "../cli/cr-builder",
+            );
+        return actual.buildNextAppCRObject(
+            maximalConfig,
+            `registry.example.com/my-app@sha256:${"b".repeat(64)}`,
+            "prod",
+            "build-1",
+        );
+    }
+
+    function proseSources(): Map<string, string> {
+        const root = join(dirname(TEST_FILE), "..", "..", "..", "..");
+        const files = [
+            join(CLI_DIR, "deploy.ts"),
+            join(CLI_DIR, "doctor.ts"),
+            join(dirname(TEST_FILE), "doctor.test.ts"),
+            TEST_FILE,
+        ];
+        const out = new Map<string, string>();
+        for (const f of files) out.set(f, realFs.readFileSync(f, "utf-8"));
+        // Only §2.1 of the roadmap — the section that makes this claim.
+        const roadmap = realFs.readFileSync(
+            join(root, "docs", "V1_ROADMAP.md"),
+            "utf-8",
+        );
+        const start = roadmap.indexOf("### 2.1");
+        const end = roadmap.indexOf("### 2.2", start);
+        out.set("docs/V1_ROADMAP.md#2.1", roadmap.slice(start, end));
+        return out;
+    }
+
+    it("cites at least one concrete field (the prose is worth checking)", () => {
+        const sources = proseSources();
+        const cited = [...sources.values()].flatMap(citedSpecPaths);
+        expect(cited.length).toBeGreaterThan(0);
+    });
+
+    it("every cited `spec.…` example is emitted by buildNextAppCRObject", async () => {
+        const cr = await builtCR();
+        const sources = proseSources();
+        for (const [file, text] of sources) {
+            for (const path of new Set(citedSpecPaths(text))) {
+                expect(
+                    hasPath(cr, path),
+                    `${file} cites \`${path}\` as a field this CLI emits, but buildNextAppCRObject never produces it`,
+                ).toBe(true);
+            }
+        }
+    });
+});

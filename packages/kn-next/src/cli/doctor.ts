@@ -21,8 +21,11 @@
  *   (g) the LOCAL kubectl is new enough (>= v1.25) for `--validate=strict` —
  *       the flag `kn-next deploy` passes explicitly on the NextApp CR apply so
  *       a field the operator's CRD does not know is rejected, not silently
- *       pruned (a pruned `spec.security.networkPolicy` is a security invariant
- *       degraded to a no-op on a CR that still reports Ready=True)
+ *       pruned. Concretely, for a field the CLI emits and an older CRD may
+ *       predate: a pruned `spec.database.roSecretRef` drops DATABASE_URL_RO,
+ *       so `getDbRO()` falls back to the writer pool and reads run on the
+ *       read-WRITE primary credential — a least-privilege downgrade on a CR
+ *       that still reports Ready=True
  *
  * READ-ONLY by construction (ADR-0001): every kubectl call is a `get` or a
  * client-side `version`; the registry probe is an HTTP manifest HEAD.
@@ -875,7 +878,8 @@ const DOCTOR_HELP = `kn-next doctor — cluster-prereq preflight (read-only)
 
 Checks: NextApp CRD, operator readiness, cert-manager webhook, Knative
 ingress-class vs its reconciler (#208), operator-image pullability (#198),
-Knative Serving, and the local kubectl's --validate=strict support. Exit 1 on hard FAILs and on probe ERRORs (a check's kubectl
+Knative Serving, and the local kubectl's --validate=strict support. Exit 1 on
+hard FAILs and on probe ERRORs (a check's kubectl
 probe hit a network/TLS/credential/RBAC failure — the cluster state could not
 be verified); WARN/SKIP never fail; a fully unreachable cluster SKIPs (exit 0).
 

@@ -168,6 +168,73 @@ function applyOverrides(
 }
 
 /**
+ * Read the LOCAL kubectl client version, or undefined if it cannot be read.
+ * Read-only and local (never touches the apiserver); reuses doctor's parser and
+ * threshold instead of restating them. Dynamically imported because doctor is a
+ * bin-dispatched module (see the self-entry hazard note at the bottom of this
+ * file) and this runs only on a failure path.
+ */
+async function localKubectlTooOldForStrict(): Promise<string | undefined> {
+    try {
+        const { parseKubectlClientVersion, supportsStrictValidation } =
+            await import("./doctor");
+        const parsed = parseKubectlClientVersion(
+            runCapture(["kubectl", "version", "--client", "-o", "json"]),
+        );
+        if (!parsed || supportsStrictValidation(parsed)) return undefined;
+        return parsed.display;
+    } catch {
+        // A probe that cannot run must not replace the real error.
+        return undefined;
+    }
+}
+
+/**
+ * Diagnose a failed `kubectl apply` of the NextApp CR.
+ *
+ * The apply runs under `runInherit`, which INHERITS stdio — kubectl's stderr
+ * has already streamed to the terminal and knext never sees it, so it cannot
+ * classify the failure from the text (doctor's `classifyKubectlFailure` needs
+ * stderr). Exactly one cause is establishable locally, and it is the one the
+ * strict flag itself introduces: before kubectl 1.25 `--validate` is a BOOLEAN,
+ * so `--validate=strict` fails at flag PARSING and the apply never reaches the
+ * apiserver — reporting "the CRD is older than this CLI" there is backwards
+ * (the CLIENT is the old part). Probe the client; when it is not the cause,
+ * offer a differential and name no single one.
+ */
+async function describeFailedCRApply(): Promise<string> {
+    const oldClient = await localKubectlTooOldForStrict();
+    if (oldClient) {
+        return (
+            `kubectl apply of the NextApp CR FAILED, and your kubectl client (${oldClient}) is ` +
+            "older than v1.25.\n" +
+            "Before v1.25 `--validate` is a BOOLEAN flag, so the `--validate=strict` that " +
+            "kn-next passes is rejected at flag parsing and the apply never reached the " +
+            "cluster — nothing was applied and nothing was changed. This is deliberate " +
+            "(fail-closed): on that client knext cannot guarantee an unknown CR field is " +
+            "rejected rather than silently pruned.\n" +
+            "Fix: upgrade kubectl to >= v1.25 (v1.24 is long EOL), then re-run.\n" +
+            "  kubectl version --client\n" +
+            "  kn-next doctor"
+        );
+    }
+    return (
+        "kubectl apply of the NextApp CR FAILED (kubectl's own error is printed above; " +
+        "knext inherits its stdio and cannot read it, so it will not guess at the cause).\n" +
+        'If it reads `strict decoding error: unknown field "spec…"`, the installed NextApp ' +
+        "CRD is older than this CLI and does not know that field — the apply was REJECTED " +
+        "(deliberately: kn-next applies with --validate=strict) rather than the field being " +
+        "silently pruned. Upgrade the operator bundle to match this CLI:\n" +
+        "  kubectl get crd nextapps.apps.kn-next.dev -o jsonpath='{.spec.versions[*].name}'\n" +
+        "  kubectl -n kn-next-operator-system get deploy -o wide   # operator image\n" +
+        'Anything else — connection refused, Unauthorized, (Forbidden), `namespaces "x" not ' +
+        "found`, a YAML parse error — is an ordinary apply failure with the cause kubectl " +
+        "printed; it is not a field-validation problem.\n" +
+        "  kn-next doctor"
+    );
+}
+
+/**
  * The deploy orchestrator: build → upload assets → push image → apply the
  * NextApp CR (ADR-0001: operator is the single source of truth). Exported at
  * the MODULE level (not a package `exports` subpath) so the sibling
@@ -398,21 +465,32 @@ export async function deploy() {
     writeFileSync(crPath, crYaml, "utf-8");
 
     log.info({ cr: crPath }, "Applying NextApp CR to cluster...");
-    // `--validate=strict` is passed EXPLICITLY, not inherited.
+    // `--validate=strict` is passed EXPLICITLY, not inherited. Every other
+    // `kubectl apply` this CLI issues does the same (preview.ts, loadtest.ts);
+    // the argv guard in cr-apply-strict-validation.test.ts scans for new ones.
     //
     // Measured on a live cluster (server-side dry-run, structural CRD): with
     // strict validation the apiserver REJECTS a field the CRD does not know
     // (`Error from server (BadRequest): ... strict decoding error: unknown
     // field "…"`), while `--validate=ignore` accepts the object and PRUNES the
-    // field silently. A pruned `spec.security.networkPolicy` is a security
-    // invariant downgraded to a no-op on a CR that still reports Ready=True.
+    // field silently. Take a field this CLI really emits and that an older CRD
+    // plausibly predates: a pruned `spec.database.roSecretRef` means the
+    // operator never binds DATABASE_URL_RO, so `getDbRO()` falls back to the
+    // writer pool (packages/db/src/index.ts) and staleness-tolerant reads run
+    // on the read-WRITE primary credential — a least-privilege downgrade on a
+    // CR that still reports Ready=True.
     //
     // kubectl's own default has been `strict` since 1.25, so the common case
-    // was already protected — but only by an EXTERNAL BINARY'S DEFAULT, which
-    // vanishes silently under an old kubectl, a shell alias, a kubeconfig-level
-    // default, or a wrapper passing `--validate=ignore`. Asserting the flag
-    // makes the guarantee knext's. `kn-next doctor` reports when the local
-    // client is too old for the flag to mean anything.
+    // was already protected — but only by an EXTERNAL BINARY'S DEFAULT. Two
+    // vectors take that away (and only two: this CLI spawns kubectl through
+    // execFile with `shell: false`, so an interactive shell alias is never in
+    // the path, and kubectl exposes no kubeconfig key or env var for
+    // `--validate`): a kubectl older than 1.25, or a wrapper/shim binary NAMED
+    // `kubectl` on PATH. Asserting the flag makes the guarantee knext's for the
+    // argv knext controls — a shim appending `--validate=ignore` still wins,
+    // because pflag takes the LAST occurrence of a string flag.
+    // `kn-next doctor` reports when the local client is too old for the flag to
+    // mean anything.
     try {
         runInherit([
             "kubectl",
@@ -424,24 +502,14 @@ export async function deploy() {
             options.namespace,
         ]);
     } catch (err) {
-        // Never swallow a rejected apply — the most likely cause is a field
-        // skew (operator CRD older than this CLI), which kubectl reports as
-        // `strict decoding error: unknown field "…"`. kubectl's own stderr has
-        // already streamed to the terminal (runInherit inherits stdio); this
-        // wrapper adds the diagnosis and the check, and keeps the original
-        // error as `cause`.
-        throw new Error(
-            "kubectl apply of the NextApp CR was REJECTED (kubectl's error is printed above).\n" +
-                'If it reads `strict decoding error: unknown field "spec…"`, the installed ' +
-                "NextApp CRD is older than this CLI and does not know that field — the apply is " +
-                "rejected (deliberately: kn-next applies with --validate=strict) rather than the " +
-                "field being silently pruned. Check the installed CRD and upgrade the operator " +
-                "bundle to match this CLI:\n" +
-                "  kubectl get crd nextapps.apps.kn-next.dev -o jsonpath='{.spec.versions[*].name}'\n" +
-                "  kubectl -n kn-next-operator-system get deploy -o wide   # operator image\n" +
-                "  kn-next doctor",
-            { cause: err },
-        );
+        // Never swallow a failed apply — but do not name a cause knext cannot
+        // establish. `runInherit` INHERITS stdio, so kubectl's stderr went
+        // straight to the terminal and is not available here; doctor's
+        // `classifyKubectlFailure` needs that text, so it cannot help. The one
+        // cause this CLI can establish on its own is the failure the strict
+        // flag itself introduces (see below), so probe for that and otherwise
+        // hand the user a differential rather than a confident wrong answer.
+        throw new Error(await describeFailedCRApply(), { cause: err });
     }
 
     // Wait briefly for the operator to begin reconciling, then read the URL.
