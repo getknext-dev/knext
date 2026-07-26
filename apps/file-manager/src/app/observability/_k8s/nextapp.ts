@@ -113,7 +113,15 @@ export type NextAppUnavailableReason =
    * `unreachable`) because the page must not blame the API server for a local
    * input problem — see PR-520 review finding 5.
    */
-  | 'invalid-name';
+  | 'invalid-name'
+  /**
+   * The shared page budget handed to {@link readNextAppStatus} was already spent,
+   * so NO request was issued (PR-520 review finding 3). Its own reason for the
+   * same reason `deadline-exceeded` is its own Prometheus result: a read that
+   * never happened establishes nothing about the API server, so it must not be
+   * reported as `unreachable`.
+   */
+  | 'deadline-exceeded';
 
 export type NextAppReadResult =
   | { readonly status: 'ok'; readonly data: NextAppStatusView }
@@ -146,12 +154,25 @@ interface RawResponse {
 }
 
 /**
- * One read-only HTTPS GET with a **per-request** CA and a hard timeout.
+ * One read-only HTTPS GET with a **per-request** CA and a hard TOTAL-duration
+ * bound.
  *
  * `node:https` is used instead of global `fetch` for exactly one reason: it
  * accepts the cluster CA per request (`ca`), so the app's process-wide TLS trust
  * store is never widened for this single read (PR-520 sysdesign follow-up). No
  * response caching exists on this path at all, so there is nothing to opt out of.
+ *
+ * TWO bounds, deliberately (PR-520 review finding 2):
+ *  - `timeout` — `node:https`' option, which is a **socket-INACTIVITY** timer:
+ *    every received chunk resets it. On its own it does NOT bound the call, so an
+ *    API server that trickles one byte per second holds this request open forever
+ *    while the page's shared budget silently passes;
+ *  - `deadlineTimer` — a real **total-duration** bound: `timeoutMs` after the
+ *    request is issued the promise rejects and the socket is destroyed, whatever
+ *    the server is doing. This is what makes the page's "bounded end to end"
+ *    claim true for this read too, not just for the Prometheus queries.
+ * The promise is rejected directly (rather than relying on `destroy()` surfacing
+ * an `error` event) so the bound holds even if the socket is already gone.
  */
 function getJson(
   url: string,
@@ -160,6 +181,23 @@ function getJson(
   opts: { readonly timeoutMs: number },
 ): Promise<RawResponse> {
   return new Promise((resolve, reject) => {
+    let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
+    let settled = false;
+    const settle = <T>(fn: (value: T) => void) => {
+      return (value: T) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        if (deadlineTimer) {
+          clearTimeout(deadlineTimer);
+        }
+        fn(value);
+      };
+    };
+    const succeed = settle(resolve);
+    const fail = settle<unknown>(reject);
+
     const request = httpsRequest(
       url,
       {
@@ -173,17 +211,22 @@ function getJson(
         const chunks: Buffer[] = [];
         res.on('data', (chunk: Buffer) => chunks.push(chunk));
         res.on('end', () =>
-          resolve({
+          succeed({
             statusCode: res.statusCode ?? 0,
             body: Buffer.concat(chunks).toString('utf8'),
           }),
         );
-        res.on('error', reject);
+        res.on('error', fail);
       },
     );
-    // A hung API server must degrade the page, never hang the request.
+    // The TOTAL bound: a trickling API server must not outlive the page's budget.
+    deadlineTimer = setTimeout(() => {
+      request.destroy(new Error('deadline'));
+      fail(new Error('deadline'));
+    }, opts.timeoutMs);
+    // A hung (silent) API server must degrade the page, never hang the request.
     request.on('timeout', () => request.destroy(new Error('timeout')));
-    request.on('error', reject);
+    request.on('error', fail);
     request.end();
   });
 }
@@ -288,6 +331,24 @@ export async function readNextAppStatus(
     return { status: 'disabled' };
   }
 
+  /**
+   * REFUSE TO START on an exhausted budget (PR-520 review finding 3), mirroring
+   * `runQuery`'s guard in `_prom/query.ts`.
+   *
+   * `PageDeadline.remainingMs()` is floored at 0, and the caller forwards it as
+   * `timeoutMs`. Without this guard `0 ?? DEFAULT_TIMEOUT_MS` is `0` — and
+   * `timeout: 0` on `https.request` means NO timeout at all, so the exhausted-
+   * budget path would fail OPEN into an unbounded read: the exact inverse of what
+   * the caller asked for.
+   */
+  const timeoutMs = opts?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  if (timeoutMs <= 0) {
+    return unavailable(
+      'deadline-exceeded',
+      'the page ran out of its shared time budget before this read could start',
+    );
+  }
+
   // Defensive re-check before ANY credential read or request: an unvalidated name
   // is the only thing this module interpolates into a URL path. The detail
   // deliberately echoes neither the name nor the host.
@@ -320,9 +381,7 @@ export async function readNextAppStatus(
 
   let response: RawResponse;
   try {
-    response = await getJson(url, token, readSecretFile('ca.crt'), {
-      timeoutMs: opts?.timeoutMs ?? DEFAULT_TIMEOUT_MS,
-    });
+    response = await getJson(url, token, readSecretFile('ca.crt'), { timeoutMs });
   } catch {
     // Deliberately no error message: it can carry the API server host/IP.
     return unavailable('unreachable', 'the Kubernetes API server could not be reached');

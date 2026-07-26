@@ -461,3 +461,85 @@ describe('NextApp reader — API-server URL portability + defensive name check',
     expect(JSON.stringify(result)).not.toContain('10.96.0.1');
   });
 });
+
+/**
+ * The page's shared budget must be a TOTAL-duration bound on this read too, not
+ * merely a socket-inactivity one (PR-520 review finding 2), and an already-spent
+ * budget must refuse to start rather than fail open (finding 3).
+ */
+describe('NextApp reader — the page budget is a real bound, and a spent one starts nothing', () => {
+  beforeEach(() => {
+    process.env.OBSERVABILITY_NEXTAPP_SOURCE = 'kubernetes';
+  });
+
+  it('cuts off an API server that TRICKLES bytes for longer than the budget', async () => {
+    seedServiceAccount();
+    // A server that keeps sending data and never ends. `node:https`' `timeout`
+    // option is reset by every received chunk, so the inactivity timer alone would
+    // hold this connection open forever — only a total-duration bound ends it.
+    let trickle: ReturnType<typeof setInterval> | undefined;
+    httpsRequestMock.mockImplementation((_url, _opts, cb) => {
+      const req = fakeRequest();
+      // A real socket stops producing data once destroyed.
+      req.destroy = () => clearInterval(trickle);
+      queueMicrotask(() => {
+        const handlers: Record<string, Handler[]> = {};
+        cb({
+          statusCode: 200,
+          on: (event, handler) => {
+            const list = handlers[event] ?? [];
+            handlers[event] = list;
+            list.push(handler);
+          },
+        });
+        trickle = setInterval(() => {
+          for (const h of handlers.data ?? []) h(Buffer.from('{'));
+        }, 5);
+      });
+      return req;
+    });
+    const { readNextAppStatus } = await load();
+
+    const startedAt = performance.now();
+    const result = await readNextAppStatus('demo', { timeoutMs: 60 });
+    const elapsed = performance.now() - startedAt;
+    clearInterval(trickle);
+
+    expect(result).toEqual({
+      status: 'source-unavailable',
+      reason: 'unreachable',
+      detail: 'the Kubernetes API server could not be reached',
+    });
+    // The point of the bound: it ended near the budget rather than never.
+    expect(elapsed).toBeLessThan(2000);
+  });
+
+  it('refuses to start a read once the shared budget is spent (never timeout: 0)', async () => {
+    seedServiceAccount();
+    respondWith(200, NEXTAPP_BODY);
+    const { readNextAppStatus } = await load();
+
+    const result = await readNextAppStatus('demo', { timeoutMs: 0 });
+
+    // `timeout: 0` on https.request means NO timeout — the exact inverse of a
+    // spent budget. So no request may be issued at all…
+    expect(httpsRequestMock).not.toHaveBeenCalled();
+    // …and the outcome says the page ran out of time, never that the API server is
+    // unreachable (a cause this read never established).
+    expect(result).toEqual({
+      status: 'source-unavailable',
+      reason: 'deadline-exceeded',
+      detail: 'the page ran out of its shared time budget before this read could start',
+    });
+  });
+
+  it('still uses the caller budget as the request timeout when budget is left', async () => {
+    seedServiceAccount();
+    respondWith(200, NEXTAPP_BODY);
+    const { readNextAppStatus } = await load();
+
+    await readNextAppStatus('demo', { timeoutMs: 1234 });
+
+    expect(httpsRequestMock.mock.calls[0]?.[1].timeout).toBe(1234);
+  });
+});

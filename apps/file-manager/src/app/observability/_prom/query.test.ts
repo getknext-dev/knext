@@ -566,6 +566,62 @@ describe('startPageDeadline — one shared budget, not a per-call sum', () => {
     expect(elapsed).toBeLessThan(1500);
   });
 
+  /**
+   * The attribution must be a FACT captured at request time, not a clock reading
+   * in the `catch` (PR-520 review finding 1).
+   *
+   * This is the deterministic reproduction of the load-sensitive flake: the clock
+   * is FROZEN, so at the moment the abort arrives `remainingMs()` still reports the
+   * full budget — exactly what a busy event loop does to a real timer, whose
+   * schedule is based on libuv's cached (stale) loop time. An implementation that
+   * asks "is the budget gone NOW?" answers "no" and reports `unreachable`, i.e. it
+   * asserts that Prometheus is down when only the page's own budget expired.
+   */
+  it('attributes a deadline-bounded abort to the deadline even when the clock still shows budget left', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(
+      (_url, init) =>
+        new Promise((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () =>
+            reject(new DOMException('The operation was aborted', 'AbortError')),
+          );
+        }),
+    );
+
+    // A clock that never advances: `remainingMs()` is 20 for the whole call, so
+    // nothing about the outcome may be derived from it.
+    const deadline = startPageDeadline(20, () => 0);
+    expect(deadline.remainingMs()).toBe(20);
+
+    const r = await queryInstant('up', { deadline });
+
+    expect(r.status).toBe('deadline-exceeded');
+    if (r.status === 'deadline-exceeded') {
+      expect(r.budgetMs).toBe(20);
+    }
+    // Still true after the fact — proving the verdict did NOT come from the clock.
+    expect(deadline.remainingMs()).toBe(20);
+  });
+
+  it('leaves attribution to the per-call budget when the deadline is NOT the binding bound', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(
+      (_url, init) =>
+        new Promise((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () =>
+            reject(new DOMException('The operation was aborted', 'AbortError')),
+          );
+        }),
+    );
+
+    // 20 ms per-call budget under a 4 s page budget: the CALL is what ran out, so
+    // the honest answer is about Prometheus, not about the page's deadline.
+    const r = await queryInstant('up', {
+      timeoutMs: 20,
+      deadline: startPageDeadline(4000, () => 0),
+    });
+
+    expect(r.status).toBe('unreachable');
+  });
+
   it('still reports an abort that is not the deadline as unreachable', async () => {
     vi.spyOn(globalThis, 'fetch').mockRejectedValue(
       new DOMException('The operation was aborted', 'AbortError'),

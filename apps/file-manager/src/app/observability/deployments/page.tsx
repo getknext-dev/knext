@@ -179,7 +179,10 @@ function NextAppSourceNotice({ result }: { result: NextAppReadResult }) {
           : result.reason === 'invalid-name'
             ? // Not the cluster's fault, so it must not be reported as such.
               'this app’s configured name is not a valid Kubernetes object name, so no read was attempted'
-            : 'the Kubernetes API could not be reached';
+            : result.reason === 'deadline-exceeded'
+              ? // A read that never started establishes nothing about the cluster.
+                'the page’s shared time budget was already spent, so this read was never started — that is a statement about this page, not about the cluster'
+              : 'the Kubernetes API could not be reached';
 
   return (
     <p style={{ fontSize: '0.9rem' }}>
@@ -231,6 +234,27 @@ function buildRevisionRows(
       };
     })
     .sort((a, b) => b.createdSec - a.createdSec);
+}
+
+/**
+ * The budget carried by the FIRST result that ran out of it, or `undefined` when
+ * none did (PR-520 review finding 4).
+ *
+ * The page reports the budget that actually applied to the render, taken from the
+ * result, instead of re-printing the {@link PAGE_DEADLINE_MS} constant: the two are
+ * the same number today, but only one of them is a measurement — and the union
+ * member exists precisely so the message cannot drift from the bound that was
+ * enforced.
+ */
+function exhaustedBudgetMs(
+  results: ReadonlyArray<PromResult<unknown> | undefined>,
+): number | undefined {
+  for (const result of results) {
+    if (result?.status === 'deadline-exceeded') {
+      return result.budgetMs;
+    }
+  }
+  return undefined;
 }
 
 function formatCount(value: number | null): string {
@@ -392,7 +416,11 @@ export default async function DeploymentsPage() {
   // The Kubernetes read runs CONCURRENTLY with the Prometheus queries — awaiting
   // it first would add its full timeout to page latency on a hung API server. It
   // gets the page's remaining budget as its timeout (the same 4 s it defaults to
-  // today), so no single read in this wave can outlive the page's deadline either.
+  // today), and that budget is a TOTAL-duration bound inside the reader (PR-520
+  // review finding 2: `node:https`' own `timeout` is only socket-inactivity, which
+  // a trickling API server resets forever), so no single read in this wave can
+  // outlive the page's deadline either. An already-spent budget starts no read at
+  // all — it reports `deadline-exceeded`, mirroring `runQuery` (finding 3).
   const promConfigured = Boolean(prometheusBaseUrl());
   const queries = promConfigured ? deploymentQueries(app, namespace) : undefined;
   const [nextApp, created, replicas, available] = await Promise.all([
@@ -414,10 +442,11 @@ export default async function DeploymentsPage() {
 
   // Same rule for the shared budget: a call that never ran (or was cut short) says
   // nothing about the cluster, so it can neither be trusted as data nor blamed on
-  // Prometheus.
-  const scopedQueriesTimedOut = [created, replicas, available].some(
-    (r) => r?.status === 'deadline-exceeded',
-  );
+  // Prometheus. The BUDGET THAT ACTUALLY APPLIED is carried by the result itself —
+  // read from there rather than re-printing the PAGE_DEADLINE_MS constant, which is
+  // only the default and would misreport any other budget (review finding 4).
+  const scopedQueriesBudgetMs = exhaustedBudgetMs([created, replicas, available]);
+  const scopedQueriesTimedOut = scopedQueriesBudgetMs !== undefined;
 
   // Zero series for THIS app has two causes, and the anchored selector makes them
   // indistinguishable from this result alone: kube-state-metrics is absent, or it
@@ -438,7 +467,8 @@ export default async function DeploymentsPage() {
   // The page's own budget ran out: report THAT, and nothing else. Timing out is
   // not "kube-state-metrics is absent", not "Prometheus is unreachable", and not
   // a zero — so it suppresses every one of those claims below.
-  const deadlineExhausted = scopedQueriesTimedOut || probe?.status === 'deadline-exceeded';
+  const exhaustedBudget = scopedQueriesBudgetMs ?? exhaustedBudgetMs([probe]);
+  const deadlineExhausted = exhaustedBudget !== undefined;
 
   // A failed probe proves nothing either way, so it degrades to "unreachable"
   // rather than picking one of the two causes.
@@ -494,7 +524,7 @@ export default async function DeploymentsPage() {
 
       {deadlineExhausted ? (
         <p>
-          Building the revision history <strong>{DEADLINE_EXHAUSTED}</strong> ({PAGE_DEADLINE_MS}
+          Building the revision history <strong>{DEADLINE_EXHAUSTED}</strong> ({exhaustedBudget}
           &nbsp;ms for the whole page), so it was stopped rather than left to run. What that means
           precisely: one of the reads did not answer in time — the page does <em>not</em> know
           whether Prometheus is down, whether kube-state-metrics is installed, or how many revisions
