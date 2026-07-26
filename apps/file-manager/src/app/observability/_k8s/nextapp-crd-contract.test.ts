@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { type NextAppStatusView, toView } from './nextapp';
 
 /**
  * P1.4 (ADR-0038) — CRD CONTRACT gate (PR-520 sysdesign follow-up).
@@ -46,6 +47,73 @@ const PROJECTED = [
   'latestRevision',
 ] as const;
 
+/**
+ * A representative `NextApp` document with EVERY projected field populated with a
+ * distinct value, so a dropped or mis-wired projection changes the built view.
+ */
+const FIXTURE = {
+  spec: {
+    image: 'registry.example.com/demo@sha256:feedface',
+    traffic: { revisionName: 'demo-00002', canaryPercent: 10 },
+  },
+  status: {
+    observedRevision: 'demo-00003',
+    lastSuccessfulDeployTime: '2026-07-24T15:30:00Z',
+    scaledToZero: true,
+    currentTraffic: [{ revisionName: 'demo-00002', percent: 90, latestRevision: false }],
+    conditions: [
+      {
+        type: 'Ready',
+        status: 'True',
+        reason: 'ServiceReady',
+        message: 'Knative Service is ready',
+        lastTransitionTime: '2026-07-24T15:30:05Z',
+      },
+    ],
+  },
+} as const;
+
+/** The exact view {@link FIXTURE} must produce — nothing dropped, nothing renamed. */
+const EXPECTED_VIEW: NextAppStatusView = {
+  observedRevision: 'demo-00003',
+  lastSuccessfulDeployTime: '2026-07-24T15:30:00Z',
+  scaledToZero: true,
+  image: 'registry.example.com/demo@sha256:feedface',
+  pinnedRevision: 'demo-00002',
+  canaryPercent: 10,
+  currentTraffic: [{ revisionName: 'demo-00002', percent: 90, latestRevision: false }],
+  conditions: [
+    {
+      type: 'Ready',
+      status: 'True',
+      reason: 'ServiceReady',
+      message: 'Knative Service is ready',
+      lastTransitionTime: '2026-07-24T15:30:05Z',
+    },
+  ],
+};
+
+/**
+ * Where each CRD JSON tag must surface in the built view. This ties {@link
+ * PROJECTED} (a list of *operator* field names) to observable *view* state, so
+ * the list cannot claim a field the reader no longer carries.
+ */
+const OBSERVED_IN_VIEW: Record<(typeof PROJECTED)[number], (view: NextAppStatusView) => unknown> = {
+  image: (v) => v.image,
+  // `spec.traffic` has no view key of its own: it is observable only through the
+  // two fields the reader lifts out of it.
+  traffic: (v) => v.pinnedRevision ?? v.canaryPercent,
+  revisionName: (v) => v.pinnedRevision,
+  canaryPercent: (v) => v.canaryPercent,
+  observedRevision: (v) => v.observedRevision,
+  lastSuccessfulDeployTime: (v) => v.lastSuccessfulDeployTime,
+  scaledToZero: (v) => v.scaledToZero,
+  currentTraffic: (v) => v.currentTraffic[0]?.revisionName,
+  conditions: (v) => v.conditions[0]?.type,
+  percent: (v) => v.currentTraffic[0]?.percent,
+  latestRevision: (v) => v.currentTraffic[0]?.latestRevision,
+};
+
 describe('NextApp CRD contract — the reader cannot silently drift', () => {
   it('every projected field is a real JSON tag on the operator API type', () => {
     const tags = jsonTags();
@@ -53,10 +121,25 @@ describe('NextApp CRD contract — the reader cannot silently drift', () => {
     expect(missing).toEqual([]);
   });
 
-  it('the reader still projects every field in this contract list', () => {
-    const src = read(READER);
-    const dropped = PROJECTED.filter((field) => !src.includes(field));
-    expect(dropped).toEqual([]);
+  it('the reader still projects every field in this contract list — on the BUILT view', () => {
+    // Asserted against the OBJECT `toView` builds, not the source text: a
+    // substring scan of `nextapp.ts` also matches its doc comments (which name
+    // every field) and `'percent'` matches `canaryPercent`, so deleting the whole
+    // projection left that version green (PR-520 review finding).
+    const view = toView(FIXTURE);
+
+    expect(view).toEqual(EXPECTED_VIEW);
+
+    const unobservable = PROJECTED.filter((field) => OBSERVED_IN_VIEW[field](view) === undefined);
+    expect(unobservable).toEqual([]);
+  });
+
+  it('a dropped projection is observable through this gate', () => {
+    // Guards the gate itself: an object built WITHOUT one projected field must
+    // fail the same assertions the test above makes.
+    const { image: _dropped, ...withoutImage } = toView(FIXTURE);
+    expect(withoutImage).not.toEqual(EXPECTED_VIEW);
+    expect(OBSERVED_IN_VIEW.image(withoutImage as NextAppStatusView)).toBeUndefined();
   });
 
   it('a field the API does NOT declare would fail this gate', () => {

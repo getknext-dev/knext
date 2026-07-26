@@ -11,6 +11,7 @@ import {
   deploymentQueries,
   hasNoInstantSeries,
   instantByLabel,
+  KUBE_STATE_PROBE,
   observabilityAppName,
   observabilityAppNamespace,
   PROMETHEUS_URL_ENV,
@@ -59,8 +60,13 @@ import { isObservabilityAuthorized, observabilityToken } from '../auth';
  *    ServiceAccount token ever reaches the browser.
  *  - Distinct honest states, never a fake-empty table implying "no deployments":
  *    unconfigured · unreachable · source-unavailable (CRD absent / RBAC denied /
- *    not in cluster) · source not enabled · kube-state-metrics absent · app scope
- *    unknown · NAMESPACE scope ambiguous.
+ *    not in cluster / invalid configured name) · source not enabled ·
+ *    kube-state-metrics absent · kube-state-metrics present but no Deployment
+ *    matches this app · app scope unknown · NAMESPACE scope ambiguous.
+ *    The last two Prometheus-side states are told apart by ONE app-agnostic probe
+ *    ({@link KUBE_STATE_PROBE}) rather than by assuming the likelier cause — after
+ *    anchoring the selector, an empty scoped result no longer implies a missing
+ *    exporter (PR-520 review finding 4).
  *  - Row-level scoping is part of that contract (PR-520): this page ENUMERATES
  *    rows and calls the newest "current", so the derived selector is anchored to
  *    Knative's `<app>-<digits>-deployment` naming and namespace-pinned when the
@@ -76,6 +82,12 @@ const GRAFANA_SCALE_TO_ZERO =
 const NO_SOURCE = 'no deployment history source is configured';
 const BACKEND_UNREACHABLE = 'could not reach the observability backend';
 const KUBE_STATE_ABSENT = 'requires kube-state-metrics';
+/**
+ * The OTHER cause of a zero-series result, told apart from the one above by the
+ * app-agnostic {@link KUBE_STATE_PROBE} (PR-520 review): the exporter answers, so
+ * the emptiness is about THIS app, not about the cluster's instrumentation.
+ */
+const NO_REVISION_MATCH = 'no Deployment for this app is known to it';
 const NEXTAPP_UNAVAILABLE = 'NextApp status source unavailable';
 const NEXTAPP_NOT_ENABLED = 'NextApp status reads are not enabled';
 const PROM_SOURCE_LABEL = 'Prometheus (kube-state-metrics)';
@@ -150,7 +162,10 @@ function NextAppSourceNotice({ result }: { result: NextAppReadResult }) {
         ? 'read access to NextApp is denied — the opt-in, read-only Role is not bound to this app’s ServiceAccount'
         : result.reason === 'not-in-cluster'
           ? 'there is no in-cluster ServiceAccount mounted in this pod, so the Kubernetes API cannot be called'
-          : 'the Kubernetes API could not be reached';
+          : result.reason === 'invalid-name'
+            ? // Not the cluster's fault, so it must not be reported as such.
+              'this app’s configured name is not a valid Kubernetes object name, so no read was attempted'
+            : 'the Kubernetes API could not be reached';
 
   return (
     <p style={{ fontSize: '0.9rem' }}>
@@ -368,10 +383,28 @@ export default async function DeploymentsPage() {
   // ANY failed query means the timeline cannot be trusted, so the page says
   // "could not reach" rather than drawing a partial history that silently omits
   // revisions.
-  const promUnreachable = [created, replicas, available].some((r) => r?.status === 'unreachable');
-  const kubeStateAbsent = created !== undefined && !promUnreachable && hasNoInstantSeries(created);
+  const scopedQueriesFailed = [created, replicas, available].some(
+    (r) => r?.status === 'unreachable',
+  );
+
+  // Zero series for THIS app has two causes, and the anchored selector makes them
+  // indistinguishable from this result alone: kube-state-metrics is absent, or it
+  // is present and simply knows no `<app>-<digits>-deployment`. Asserting the
+  // first (as this page did) is a cause claim we have not established — so probe
+  // ONCE, app-agnostically, and only on this already-degraded path.
+  const appSeriesEmpty =
+    created !== undefined && !scopedQueriesFailed && hasNoInstantSeries(created);
+  const probe = appSeriesEmpty ? await queryInstant(KUBE_STATE_PROBE) : undefined;
+
+  // A failed probe proves nothing either way, so it degrades to "unreachable"
+  // rather than picking one of the two causes.
+  const promUnreachable = scopedQueriesFailed || probe?.status === 'unreachable';
+  const kubeStatePresent = probe?.status === 'ok' && !hasNoInstantSeries(probe);
+  const kubeStateAbsent = appSeriesEmpty && !promUnreachable && !kubeStatePresent;
+  const noRevisionMatch = appSeriesEmpty && !promUnreachable && kubeStatePresent;
+
   const allRows =
-    created && replicas && available && !promUnreachable && !kubeStateAbsent
+    created && replicas && available && !promUnreachable && !appSeriesEmpty
       ? buildRevisionRows(created, replicas, available)
       : [];
 
@@ -424,9 +457,35 @@ export default async function DeploymentsPage() {
         <p>
           The derived revision history <strong>{KUBE_STATE_ABSENT}</strong>. The per-revision
           Deployment series (<code>kube_deployment_created</code>) is provided by the cluster, not
-          by knext, and Prometheus knows no such series — so no deploy timeline can be built. This
-          is <em>not</em> a report of zero deployments. Install kube-state-metrics and scrape it, or
-          opt into the <code>NextApp</code> source above.
+          by knext, and Prometheus knows no such series <em>for any workload</em> — probed without
+          any app selector, so this is the exporter being absent, not this app being unknown to it.
+          No deploy timeline can be built. This is <em>not</em> a report of zero deployments.
+          Install kube-state-metrics and scrape it, or opt into the <code>NextApp</code> source
+          above.
+        </p>
+      ) : null}
+
+      {noRevisionMatch ? (
+        <p>
+          kube-state-metrics <strong>is</strong> present — the app-agnostic probe of{' '}
+          <code>kube_deployment_created</code> answered — but <strong>{NO_REVISION_MATCH}</strong>:
+          no Deployment named <code>{app}-&lt;revision&gt;-deployment</code>{' '}
+          {namespace ? (
+            <>
+              exists in <code>{namespace}</code>
+            </>
+          ) : (
+            'exists anywhere Prometheus can see'
+          )}
+          . Either no revision has been created yet, or this app is deployed under a different name
+          or namespace than <code>{APP_NAME_ENV}</code>
+          {namespace ? (
+            <>
+              /<code>{APP_NAMESPACE_ENV}</code>
+            </>
+          ) : null}{' '}
+          says. The page reports this as its own state rather than blaming the exporter, because the
+          probe rules that cause out.
         </p>
       ) : null}
 
@@ -453,17 +512,13 @@ export default async function DeploymentsPage() {
         </p>
       ) : null}
 
-      {promConfigured &&
-      !promUnreachable &&
-      !kubeStateAbsent &&
-      !namespaceAmbiguous &&
-      rows.length === 0 ? (
-        <p>
-          The revision query succeeded but returned {NO_DATA} for this app&rsquo;s Deployments — no
-          revision has been observed yet.
-        </p>
-      ) : null}
-
+      {/*
+       * There is deliberately no generic "query succeeded but empty" branch left:
+       * an empty scoped result is now always attributed by the probe to exactly
+       * ONE of `kubeStateAbsent` / `noRevisionMatch` above (and a failed probe
+       * falls into `promUnreachable`), so this page can never fall through to a
+       * silent nothing — nor print two overlapping explanations of the same zero.
+       */}
       <GrafanaLinkOut />
     </main>
   );

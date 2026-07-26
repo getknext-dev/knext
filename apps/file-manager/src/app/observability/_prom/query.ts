@@ -485,6 +485,25 @@ export function deploymentQueries(app: string, namespace?: string): DeploymentQu
   };
 }
 
+/**
+ * The APP-AGNOSTIC kube-state-metrics presence probe (PR-520 review finding 4).
+ *
+ * Once {@link deploymentQueries} anchors its selector, a zero-series answer has
+ * **two** causes that the scoped result alone cannot separate:
+ *  1. kube-state-metrics is absent (or not scraped) — nothing at all to derive;
+ *  2. it IS present, but no Deployment is named `<app>-<digits>-deployment`.
+ * Reporting (1) whenever the scoped query is empty would assert a cause the page
+ * has not established — precisely the misleading state the Deployments page
+ * exists to avoid. This query carries **no** `deployment`/`namespace` selector, so
+ * a non-empty answer proves the exporter is there and the emptiness is (2).
+ *
+ * `count(...)` keeps it a single scalar-ish series regardless of cluster size, and
+ * the page issues it **only** on the already-degraded path — never on the happy
+ * path. It is deliberately not part of {@link DeploymentQueries}: every query in
+ * there must stay app-scoped.
+ */
+export const KUBE_STATE_PROBE = 'count(kube_deployment_created)';
+
 /** The PromQL for the Cold-start & Scaling page, scoped to one app. */
 export interface ScalingQueries {
   readonly replicas: string;

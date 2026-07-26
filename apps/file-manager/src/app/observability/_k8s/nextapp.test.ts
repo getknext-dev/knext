@@ -329,4 +329,135 @@ describe('NextApp reader — enabled path', () => {
     expect(JSON.stringify(result)).not.toContain(TOKEN);
     expect(JSON.stringify(result)).not.toContain(CA_CERT);
   });
+
+  it('reports an unreadable API response distinctly instead of throwing', async () => {
+    seedServiceAccount();
+    httpsRequestMock.mockImplementation((_url, _opts, cb) => {
+      queueMicrotask(() => {
+        const handlers: Record<string, Handler[]> = {};
+        cb({
+          statusCode: 200,
+          on: (event, handler) => {
+            const list = handlers[event] ?? [];
+            handlers[event] = list;
+            list.push(handler);
+          },
+        });
+        for (const h of handlers.data ?? []) h(Buffer.from('{not json'));
+        for (const h of handlers.end ?? []) h();
+      });
+      return fakeRequest();
+    });
+    const { readNextAppStatus } = await load();
+
+    expect(await readNextAppStatus('demo')).toMatchObject({
+      status: 'source-unavailable',
+      reason: 'unreachable',
+    });
+  });
+});
+
+/**
+ * PR-520 review finding 5. Both halves are defence-in-depth, not a live hole:
+ * the caller already validates the name and a malformed URL fails closed. But
+ * "fails closed with the wrong reason" is still a wrong answer on a page whose
+ * contract is never to show a misleading state, and an IPv6 cluster is a real
+ * deployment shape.
+ */
+describe('NextApp reader — API-server URL portability + defensive name check', () => {
+  beforeEach(() => {
+    process.env.OBSERVABILITY_NEXTAPP_SOURCE = 'kubernetes';
+  });
+
+  it('brackets an IPv6 API-server host so the URL is parseable', async () => {
+    process.env.KUBERNETES_SERVICE_HOST = 'fd00::1';
+    seedServiceAccount();
+    respondWith(200, NEXTAPP_BODY);
+    const { readNextAppStatus } = await load();
+
+    const result = await readNextAppStatus('demo');
+
+    expect(result.status).toBe('ok');
+    const url = httpsRequestMock.mock.calls[0]?.[0] ?? '';
+    expect(url).toContain('https://[fd00::1]:443/');
+    // The bracketed form must be a URL Node can actually parse.
+    expect(() => new URL(url)).not.toThrow();
+    // WHATWG keeps the brackets on an IPv6 hostname; the point is that it parses
+    // at all and the path survives intact.
+    expect(new URL(url).hostname).toBe('[fd00::1]');
+    expect(new URL(url).pathname).toContain('/nextapps/demo');
+  });
+
+  it('does not double-bracket an already-bracketed host', async () => {
+    process.env.KUBERNETES_SERVICE_HOST = '[fd00::1]';
+    seedServiceAccount();
+    respondWith(200, NEXTAPP_BODY);
+    const { readNextAppStatus } = await load();
+
+    expect((await readNextAppStatus('demo')).status).toBe('ok');
+    expect(httpsRequestMock.mock.calls[0]?.[0]).toContain('https://[fd00::1]:443/');
+  });
+
+  it('leaves an IPv4 host / DNS name unbracketed', async () => {
+    seedServiceAccount();
+    respondWith(200, NEXTAPP_BODY);
+    const { readNextAppStatus } = await load();
+
+    await readNextAppStatus('demo');
+    expect(httpsRequestMock.mock.calls[0]?.[0]).toContain('https://10.96.0.1:443/');
+  });
+
+  it('rejects a non-numeric port as unreachable WITHOUT issuing a request', async () => {
+    process.env.KUBERNETES_SERVICE_PORT = 'tcp://10.96.0.1:443';
+    seedServiceAccount();
+    respondWith(200, NEXTAPP_BODY);
+    const { readNextAppStatus } = await load();
+
+    expect(await readNextAppStatus('demo')).toMatchObject({
+      status: 'source-unavailable',
+      reason: 'unreachable',
+    });
+    expect(httpsRequestMock).not.toHaveBeenCalled();
+  });
+
+  it('rejects a name that is not a DNS-1123 subdomain, without any request', async () => {
+    seedServiceAccount();
+    respondWith(200, NEXTAPP_BODY);
+    const { readNextAppStatus } = await load();
+
+    for (const bad of [
+      '../../secrets/admin',
+      'demo/nextapps/other',
+      'Demo',
+      'demo name',
+      '-demo',
+      '',
+      'a'.repeat(254),
+    ]) {
+      const result = await readNextAppStatus(bad);
+      expect(result).toMatchObject({ status: 'source-unavailable', reason: 'invalid-name' });
+    }
+    // Not one request escaped with an unvalidated name in the path.
+    expect(httpsRequestMock).not.toHaveBeenCalled();
+  });
+
+  it('still accepts the names a NextApp can actually have', async () => {
+    seedServiceAccount();
+    respondWith(200, NEXTAPP_BODY);
+    const { readNextAppStatus } = await load();
+
+    for (const good of ['demo', 'demo-api', 'a', 'demo.example', 'demo-0']) {
+      expect((await readNextAppStatus(good)).status).toBe('ok');
+    }
+  });
+
+  it('leaks neither the name nor the API-server host in the invalid-name detail', async () => {
+    seedServiceAccount();
+    const { readNextAppStatus } = await load();
+
+    const result = await readNextAppStatus('../../etc/passwd');
+
+    expect(JSON.stringify(result)).not.toContain('etc/passwd');
+    expect(JSON.stringify(result)).not.toContain('10.96.0.1');
+  });
 });

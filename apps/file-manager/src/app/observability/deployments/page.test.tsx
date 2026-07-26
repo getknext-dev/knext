@@ -5,6 +5,7 @@ import {
   APP_NAME_ENV,
   APP_NAMESPACE_ENV,
   deploymentQueries,
+  KUBE_STATE_PROBE,
   PROMETHEUS_URL_ENV,
 } from '../_prom/query';
 
@@ -302,6 +303,75 @@ describe('deployments page degradation — kube-state-metrics absent', () => {
     mockFetch();
     const html = await renderPage();
     expect(html).not.toContain('requires kube-state-metrics');
+  });
+
+  it('proves the "absent" claim with an app-agnostic probe rather than asserting it', async () => {
+    const spy = mockFetch({ kubeStateAbsent: true });
+
+    await renderPage();
+
+    // Exactly one probe, carrying no app selector: without it, "the exporter is
+    // missing" and "the exporter is there but this app has no Deployment" are
+    // indistinguishable, and only the first would be reported.
+    const probes = sentQueries(spy).filter((q) => q === KUBE_STATE_PROBE);
+    expect(probes).toHaveLength(1);
+  });
+
+  it('issues NO probe on the happy path (it is a degradation-only query)', async () => {
+    const spy = mockFetch();
+    await renderPage();
+    expect(sentQueries(spy)).not.toContain(KUBE_STATE_PROBE);
+  });
+});
+
+describe('deployments page degradation — kube-state-metrics PRESENT but nothing matches', () => {
+  /**
+   * The second cause of a zero-series result, which the anchored selector made
+   * possible and which the page must NOT report as "kube-state-metrics is
+   * missing": the exporter is scraped (the probe answers) but no Deployment is
+   * named `<app>-<digits>-deployment`. `ghost` is a valid app name that the
+   * seeded universe contains no revision for.
+   */
+  it('says no Deployment matches this app, NOT that kube-state-metrics is absent', async () => {
+    process.env[APP_NAME_ENV] = 'ghost';
+    mockFetch();
+
+    const html = await renderPage();
+
+    expect(html).toContain('no Deployment for this app is known');
+    // The wrong cause must not be asserted…
+    expect(html).not.toContain('requires kube-state-metrics');
+    // …nor any of the other honest states.
+    expect(html).not.toContain('could not reach the observability backend');
+    expect(html).not.toContain('no deployment history source is configured');
+    // And still no table implying a deploy history.
+    expect(html).not.toContain('<table');
+  });
+
+  it('reaches that state via the app-agnostic probe answering non-empty', async () => {
+    process.env[APP_NAME_ENV] = 'ghost';
+    const spy = mockFetch();
+
+    await renderPage();
+
+    expect(sentQueries(spy).filter((q) => q === KUBE_STATE_PROBE)).toHaveLength(1);
+  });
+
+  it('falls back to "could not reach" (never a cause claim) when the probe itself fails', async () => {
+    process.env[APP_NAME_ENV] = 'ghost';
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (u) => {
+      const promql = decodeURIComponent(new URL(String(u)).searchParams.get('query') ?? '');
+      if (promql === KUBE_STATE_PROBE) {
+        throw new Error('connect ECONNREFUSED');
+      }
+      return seededFetch(u);
+    });
+
+    const html = await renderPage();
+
+    expect(html).toContain('could not reach the observability backend');
+    expect(html).not.toContain('requires kube-state-metrics');
+    expect(html).not.toContain('no Deployment for this app is known');
   });
 });
 
