@@ -14,11 +14,13 @@ import {
   KUBE_STATE_PROBE,
   observabilityAppName,
   observabilityAppNamespace,
+  PAGE_DEADLINE_MS,
   PROMETHEUS_URL_ENV,
   type PromResult,
   type PromVectorSample,
   prometheusBaseUrl,
   queryInstant,
+  startPageDeadline,
 } from '../_prom/query';
 import { NO_DATA } from '../_ui/format';
 import { isObservabilityAuthorized, observabilityToken } from '../auth';
@@ -62,11 +64,17 @@ import { isObservabilityAuthorized, observabilityToken } from '../auth';
  *    unconfigured · unreachable · source-unavailable (CRD absent / RBAC denied /
  *    not in cluster / invalid configured name) · source not enabled ·
  *    kube-state-metrics absent · kube-state-metrics present but no Deployment
- *    matches this app · app scope unknown · NAMESPACE scope ambiguous.
+ *    matches this app · app scope unknown · NAMESPACE scope ambiguous · the page's
+ *    shared time budget exhausted.
  *    The last two Prometheus-side states are told apart by ONE app-agnostic probe
  *    ({@link KUBE_STATE_PROBE}) rather than by assuming the likelier cause — after
  *    anchoring the selector, an empty scoped result no longer implies a missing
  *    exporter (PR-520 review finding 4).
+ *  - Bounded END TO END, not just per call (PR-520 sysdesign follow-up): one
+ *    {@link startPageDeadline} budget is shared by every read this render makes, so
+ *    the concurrent query wave plus the sequential presence probe can no longer
+ *    sum their individual ~4 s timeouts into ~8 s of page latency. Exhausting it
+ *    is its own honest state — never reported as a missing exporter or a zero.
  *  - Row-level scoping is part of that contract (PR-520): this page ENUMERATES
  *    rows and calls the newest "current", so the derived selector is anchored to
  *    Knative's `<app>-<digits>-deployment` naming and namespace-pinned when the
@@ -88,6 +96,12 @@ const KUBE_STATE_ABSENT = 'requires kube-state-metrics';
  * the emptiness is about THIS app, not about the cluster's instrumentation.
  */
 const NO_REVISION_MATCH = 'no Deployment for this app is known to it';
+/**
+ * The page's own time budget ran out (PR-520 sysdesign follow-up). Its own state
+ * because a timeout establishes NOTHING: it is not "the exporter is absent", not
+ * "the backend is unreachable", and certainly not a zero.
+ */
+const DEADLINE_EXHAUSTED = 'ran out of its time budget';
 const NEXTAPP_UNAVAILABLE = 'NextApp status source unavailable';
 const NEXTAPP_NOT_ENABLED = 'NextApp status reads are not enabled';
 const PROM_SOURCE_LABEL = 'Prometheus (kube-state-metrics)';
@@ -368,23 +382,41 @@ export default async function DeploymentsPage() {
   // namespace-pinned, so an ambiguous result is refused below rather than guessed.
   const namespace = observabilityAppNamespace();
 
+  // ONE budget for the whole render (PR-520 sysdesign follow-up). Every read
+  // below spends from it, so the page's worst case is PAGE_DEADLINE_MS — not the
+  // SUM of the per-call budgets, which the concurrent wave + the sequential probe
+  // below could previously stretch to ~8 s with no page-level cap at all.
+  const deadline = startPageDeadline(PAGE_DEADLINE_MS);
+
   // Degrade closed before any network call: Prometheus unset ⇒ no fetch.
   // The Kubernetes read runs CONCURRENTLY with the Prometheus queries — awaiting
-  // it first would add its full 4 s timeout to page latency on a hung API server.
+  // it first would add its full timeout to page latency on a hung API server. It
+  // gets the page's remaining budget as its timeout (the same 4 s it defaults to
+  // today), so no single read in this wave can outlive the page's deadline either.
   const promConfigured = Boolean(prometheusBaseUrl());
   const queries = promConfigured ? deploymentQueries(app, namespace) : undefined;
   const [nextApp, created, replicas, available] = await Promise.all([
-    readNextAppStatus(app),
-    queries ? queryInstant(queries.revisionCreated) : undefined,
-    queries ? queryInstant(queries.revisionReplicas) : undefined,
-    queries ? queryInstant(queries.revisionAvailable) : undefined,
+    readNextAppStatus(app, { timeoutMs: deadline.remainingMs() }),
+    queries ? queryInstant(queries.revisionCreated, { deadline }) : undefined,
+    queries ? queryInstant(queries.revisionReplicas, { deadline }) : undefined,
+    queries ? queryInstant(queries.revisionAvailable, { deadline }) : undefined,
   ]);
 
   // ANY failed query means the timeline cannot be trusted, so the page says
   // "could not reach" rather than drawing a partial history that silently omits
-  // revisions.
+  // revisions. This is deliberately ASYMMETRY-PROOF: the three queries fail
+  // independently, so `revisionCreated` can answer while the replica queries do
+  // not — rendering then would draw a table that looks complete (every revision,
+  // one of them "current") with quietly blank replica columns.
   const scopedQueriesFailed = [created, replicas, available].some(
     (r) => r?.status === 'unreachable',
+  );
+
+  // Same rule for the shared budget: a call that never ran (or was cut short) says
+  // nothing about the cluster, so it can neither be trusted as data nor blamed on
+  // Prometheus.
+  const scopedQueriesTimedOut = [created, replicas, available].some(
+    (r) => r?.status === 'deadline-exceeded',
   );
 
   // Zero series for THIS app has two causes, and the anchored selector makes them
@@ -393,18 +425,33 @@ export default async function DeploymentsPage() {
   // first (as this page did) is a cause claim we have not established — so probe
   // ONCE, app-agnostically, and only on this already-degraded path.
   const appSeriesEmpty =
-    created !== undefined && !scopedQueriesFailed && hasNoInstantSeries(created);
-  const probe = appSeriesEmpty ? await queryInstant(KUBE_STATE_PROBE) : undefined;
+    created !== undefined &&
+    !scopedQueriesFailed &&
+    !scopedQueriesTimedOut &&
+    hasNoInstantSeries(created);
+  // The probe is the ONLY sequential read on this page, i.e. the one that used to
+  // add a second full timeout to the page. It now spends what is left of the
+  // shared budget — and if nothing is left, `queryInstant` issues no request at
+  // all and answers `deadline-exceeded`.
+  const probe = appSeriesEmpty ? await queryInstant(KUBE_STATE_PROBE, { deadline }) : undefined;
+
+  // The page's own budget ran out: report THAT, and nothing else. Timing out is
+  // not "kube-state-metrics is absent", not "Prometheus is unreachable", and not
+  // a zero — so it suppresses every one of those claims below.
+  const deadlineExhausted = scopedQueriesTimedOut || probe?.status === 'deadline-exceeded';
 
   // A failed probe proves nothing either way, so it degrades to "unreachable"
   // rather than picking one of the two causes.
-  const promUnreachable = scopedQueriesFailed || probe?.status === 'unreachable';
+  const promUnreachable =
+    !deadlineExhausted && (scopedQueriesFailed || probe?.status === 'unreachable');
   const kubeStatePresent = probe?.status === 'ok' && !hasNoInstantSeries(probe);
-  const kubeStateAbsent = appSeriesEmpty && !promUnreachable && !kubeStatePresent;
-  const noRevisionMatch = appSeriesEmpty && !promUnreachable && kubeStatePresent;
+  const kubeStateAbsent =
+    appSeriesEmpty && !deadlineExhausted && !promUnreachable && !kubeStatePresent;
+  const noRevisionMatch =
+    appSeriesEmpty && !deadlineExhausted && !promUnreachable && kubeStatePresent;
 
   const allRows =
-    created && replicas && available && !promUnreachable && !appSeriesEmpty
+    created && replicas && available && !deadlineExhausted && !promUnreachable && !appSeriesEmpty
       ? buildRevisionRows(created, replicas, available)
       : [];
 
@@ -442,6 +489,17 @@ export default async function DeploymentsPage() {
           high-fidelity source with <code>{NEXTAPP_SOURCE_ENV}</code> plus the read-only{' '}
           <code>NextApp</code> Role. Nothing is being shown because nothing can be read — this app
           may well have deployments.
+        </p>
+      ) : null}
+
+      {deadlineExhausted ? (
+        <p>
+          Building the revision history <strong>{DEADLINE_EXHAUSTED}</strong> ({PAGE_DEADLINE_MS}
+          &nbsp;ms for the whole page), so it was stopped rather than left to run. What that means
+          precisely: one of the reads did not answer in time — the page does <em>not</em> know
+          whether Prometheus is down, whether kube-state-metrics is installed, or how many revisions
+          exist, and it will not guess any of them from a timeout. Reload to try again; if this
+          persists, the observability backend is slow rather than absent.
         </p>
       ) : null}
 

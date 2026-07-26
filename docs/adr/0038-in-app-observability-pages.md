@@ -216,6 +216,32 @@ shipped Grafana overlay instead of rebuilding cluster dashboards — faithful to
     gate asserts the object `toView()` builds (deep-equal against a full fixture) instead of
     substring-matching the reader's source — where the doc comments alone kept it green. Both, plus
     the new probe state, were mutation-proved RED before landing.
+
+  **Third-round amendments (PR #520 system-design sign-off):**
+  - **The page latency budget is now a bound, not a sum.** Every Prometheus call carried its own ~4 s
+    abort budget, so the concurrent query wave plus the degraded-path presence probe could hold the
+    page for ~8 s with no page-level cap — a page whose whole contract is "never mislead the reader"
+    must not be able to hang. One shared **page deadline** (`startPageDeadline` /
+    `QueryOptions.deadline` in `_prom/query.ts`) is created once per render and threaded through every
+    read: each call is bounded by `min(per-call, remaining)`, an exhausted budget issues **no request
+    at all**, and the total is `PAGE_DEADLINE_MS = 4000` ms — deliberately the same number as the
+    existing per-call budget ("a page never takes longer than the slowest single backend call it
+    makes"). The per-call `DEFAULT_TIMEOUT_MS` is **unchanged**, so the Overview (P1.2) and Scaling
+    (P1.3) pages, which pass no deadline, keep their exact previous behaviour: shrinking per-call
+    timeouts would make every happy path more fragile without bounding any total.
+  - **A timeout is its own honest state.** Exhausting the budget yields a typed
+    `deadline-exceeded` result (never folded into `unreachable`) and the page renders
+    `ran out of its time budget`, which **suppresses** every cause claim it did not establish — not
+    "requires kube-state-metrics", not "could not reach the observability backend", not a zero-row
+    table. This matters most for the probe: the one read that can be cut short is the one that decides
+    *why* a scoped result was empty.
+  - **Two gates the sign-off found missing.** (1) The **asymmetric** partial Prometheus failure —
+    `revisionCreated` succeeds while the two replica queries come back `unreachable` — is now pinned:
+    the whole timeline is suppressed rather than drawn half-populated (mutation-proved: gating only on
+    `revisionCreated` renders the partial table and fails the test). (2) The deadline-exhausted state
+    is pinned end to end, including that the probe is never even issued once the budget is gone
+    (mutation-proved twice: dropping the shared deadline from the page, and ignoring the remaining
+    budget in the per-call `min`, each turn it RED).
 - [ ] **Cross-cutting:** `/observability` layout with tab nav + Grafana link-out card.
 - [ ] **Phase 2 (gated on founder greenlight):** promote the recipe to a scaffoldable `--observability`
   flag — deferred until after the official-adapter migration + Tier-A correctness (scs-zones sequencing).

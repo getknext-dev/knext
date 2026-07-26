@@ -13,6 +13,7 @@ import {
   observabilityAppName,
   observabilityAppNamespace,
   overviewQueries,
+  PAGE_DEADLINE_MS,
   PROMETHEUS_URL_ENV,
   type PromMatrixSeries,
   type PromResult,
@@ -21,6 +22,7 @@ import {
   queryInstant,
   queryRange,
   scalingQueries,
+  startPageDeadline,
   totalLatestMatrixValue,
 } from './query';
 
@@ -496,5 +498,92 @@ describe('instantByLabel / hasNoInstantSeries — instant-vector helpers', () =>
     // "unreachable", not "requires kube-state-metrics".
     expect(hasNoInstantSeries({ status: 'unreachable', errorSummary: 'x' })).toBe(false);
     expect(hasNoInstantSeries({ status: 'unconfigured', envVar: 'X' })).toBe(false);
+  });
+});
+
+/**
+ * The shared PAGE-LEVEL deadline (PR-520 sysdesign follow-up).
+ *
+ * Every call already had its own ~4 s abort budget, but a page that makes a
+ * concurrent wave and then a sequential probe SUMS those budgets — ~8 s of wall
+ * clock with no cap. One deadline threaded through every call of one render turns
+ * the total into a bound instead of a sum.
+ */
+describe('startPageDeadline — one shared budget, not a per-call sum', () => {
+  it('reports the remaining budget from an injected monotonic clock, floored at 0', () => {
+    let now = 1000;
+    const deadline = startPageDeadline(4000, () => now);
+
+    expect(deadline.totalMs).toBe(4000);
+    expect(deadline.remainingMs()).toBe(4000);
+    now = 2500;
+    expect(deadline.remainingMs()).toBe(2500);
+    now = 99_999;
+    expect(deadline.remainingMs()).toBe(0);
+  });
+
+  it('defaults to the page budget constant', () => {
+    expect(startPageDeadline().totalMs).toBe(PAGE_DEADLINE_MS);
+  });
+
+  it('does NOT fetch at all once the budget is gone, returning a typed deadline result', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+    let now = 0;
+    const deadline = startPageDeadline(4000, () => now);
+    now = 4000;
+
+    const r = await queryInstant('up', { deadline });
+
+    expect(r.status).toBe('deadline-exceeded');
+    if (r.status === 'deadline-exceeded') {
+      expect(r.budgetMs).toBe(4000);
+    }
+    expect(fetchSpy).not.toHaveBeenCalled();
+    // Distinct from every other degradation: not a zero, not "no series".
+    expect(instantValue(r)).toBeNull();
+    expect(hasNoInstantSeries(r)).toBe(false);
+  });
+
+  it('caps a per-call timeout at the REMAINING budget and attributes that abort to the deadline', async () => {
+    // A hung Prometheus: the request ends only when its signal aborts. Under the
+    // per-call 4 s budget that takes ~4 s and reports "unreachable"; with a 30 ms
+    // shared budget left it must end in ~30 ms and say "deadline".
+    vi.spyOn(globalThis, 'fetch').mockImplementation(
+      (_url, init) =>
+        new Promise((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () =>
+            reject(new DOMException('The operation was aborted', 'AbortError')),
+          );
+        }),
+    );
+
+    const startedAt = performance.now();
+    const r = await queryInstant('up', { deadline: startPageDeadline(30) });
+    const elapsed = performance.now() - startedAt;
+
+    expect(r.status).toBe('deadline-exceeded');
+    // Far below the per-call default (4000 ms): the SHARED budget bounded it.
+    expect(elapsed).toBeLessThan(1500);
+  });
+
+  it('still reports an abort that is not the deadline as unreachable', async () => {
+    vi.spyOn(globalThis, 'fetch').mockRejectedValue(
+      new DOMException('The operation was aborted', 'AbortError'),
+    );
+    let now = 0;
+    const deadline = startPageDeadline(4000, () => now);
+    now = 100; // plenty of budget left — this abort came from somewhere else.
+
+    const r = await queryInstant('up', { deadline });
+
+    expect(r.status).toBe('unreachable');
+  });
+
+  it('changes nothing for callers that pass no deadline (the other pages)', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      jsonResponse({ status: 'success', data: { resultType: 'vector', result: [] } }),
+    );
+    const r = await queryInstant('up');
+    expect(r.status).toBe('ok');
   });
 });
