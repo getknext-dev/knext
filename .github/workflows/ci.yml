@@ -302,7 +302,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version-file: packages/kn-next-operator/go.mod
           cache: true
@@ -335,7 +335,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version-file: packages/kn-next-operator/go.mod
           cache: true
