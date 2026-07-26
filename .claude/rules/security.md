@@ -41,6 +41,15 @@ Complements `.claude/rules/architecture.md`. These run through **every** phase �
 - **Pin images by digest; reject `:latest`.** The operator already rejects `:latest`
   (`nextapp_controller.go:66`); fix the remaining placeholder
   (`config/manager/manager.yaml` → `controller:latest`).
+- **Pin third-party GitHub Actions by full commit SHA in any workflow where a write-scoped
+  credential is in scope** — the same rule as pinning images by digest, applied to CI. A version
+  ref is not immutable: `changesets/action@v1` resolves to `refs/heads/v1`, a **branch**
+  (`git/ref/tags/v1` 404s), and that ref is handed `NODE_AUTH_TOKEN` — so whoever can move that
+  branch runs code with a live npm publish token in scope. Pin as `uses: owner/repo@<40-hex-sha>
+  # vX.Y.Z` so the pin stays auditable, and let **Dependabot** (`github-actions` ecosystem) own the
+  bumps so pinning does not decay into staleness. Enforced for the publish path by
+  `tests/release-action-pins.test.ts`; the remaining workflows are being pinned in blast-radius
+  order (cosign/OIDC signing next — those use short-lived keyless tokens, no standing secret).
 
 ## Runtime hardening
 - **Reverse proxy** (nginx/Envoy) in front for rate limiting, payload-size limits, and
