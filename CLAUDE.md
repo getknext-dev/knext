@@ -47,10 +47,18 @@
   `cr-builder.ts` builds the CR. Do not re-file consolidation as open work.
 - **Known gap that consolidation did NOT close (see `docs/V1_ROADMAP.md` §2.1):** `cr-builder.ts:364`
   hardcodes `apiVersion: apps.kn-next.dev/v1alpha1` and nothing in `src/cli/` negotiates the version
-  against the cluster. The CRD is structural with **zero** `x-kubernetes-preserve-unknown-fields`, so
-  a newer CLI against an older operator has its unknown fields **pruned silently** — apply accepted,
-  field dropped, `Ready=True`. For `spec.security.networkPolicy` that is a security invariant
-  downgraded to a no-op while reporting success. A prune preflight is a v1.0 blocker.
+  against the cluster, so a newer CLI can emit a field an older operator's CRD does not know.
+  **Measured, not assumed** (live cluster, server-side dry-run): whether that field is *pruned* or
+  *rejected* depends on the apply's validation mode, not on the CRD —
+  `kubectl apply --validate=strict` makes the apiserver **reject** it (`strict decoding error:
+  unknown field …`), `--validate=ignore` accepts and prunes it. **Mitigated (#547):** every
+  `kubectl apply` the CLI issues now passes `--validate=strict` explicitly, so the guarantee is
+  knext's rather than the user's kubectl's, and `doctor` reports a client older than v1.25 (where
+  that flag value does not exist). **Still open:** GitOps controllers (Argo CD, Flux) do not assert
+  strict validation, a `kubectl` shim on PATH can append `--validate=ignore` and win (pflag takes the
+  last occurrence), and `doctor` checks only that the CRD *exists*, not that its schema covers what
+  the CLI emits — the schema-diff preflight (#314) is the complete fix. Upgrade order is therefore
+  load-bearing: **operator/CRD first, then CLI** (#548).
 - Enforce **`:latest` rejection / digest pinning everywhere.** (Verified: the operator already
   rejects `:latest` in `nextapp_controller.go:66`; the kubebuilder manager image in
   `config/manager/manager.yaml:66` is still `controller:latest` — fix that placeholder.)
