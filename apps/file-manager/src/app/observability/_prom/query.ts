@@ -26,6 +26,54 @@ export const PROMETHEUS_URL_ENV = 'OBSERVABILITY_PROMETHEUS_URL';
 /** Short abort budget: a slow Prometheus must degrade the page, never hang it. */
 const DEFAULT_TIMEOUT_MS = 4000;
 
+/**
+ * The TOTAL budget for every request ONE page render makes (PR-520 sysdesign
+ * follow-up).
+ *
+ * Why a page-level number at all: {@link DEFAULT_TIMEOUT_MS} bounds each call
+ * individually, so a page that issues a concurrent wave and THEN a sequential
+ * follow-up query (as the Deployments page does on its degraded path) can spend
+ * ~4 s + ~4 s. Each call is bounded; the page is not.
+ *
+ * Why exactly the per-call number, rather than more: "a page must never take
+ * longer than the slowest single backend call it makes" is a rule a reader can
+ * hold, and 4 s is the budget already in production here. Deliberately NOT done:
+ * shrinking {@link DEFAULT_TIMEOUT_MS} — that would make the happy path of every
+ * page more fragile (a genuinely slow-but-alive Prometheus starts failing) while
+ * still leaving the total unbounded.
+ */
+export const PAGE_DEADLINE_MS = 4000;
+
+/**
+ * A monotonic budget shared by every call of one render. Threaded through
+ * {@link QueryOptions.deadline}; each call spends at most what is LEFT, so the
+ * total is a bound rather than the sum of the per-call budgets.
+ */
+export interface PageDeadline {
+  /** The total budget this deadline was created with (for honest messaging). */
+  readonly totalMs: number;
+  /** Milliseconds left, floored at 0 (0 ⇒ do not start another request). */
+  remainingMs(): number;
+}
+
+/**
+ * Start a page-level deadline.
+ *
+ * The clock is `performance.now()` (monotonic — a wall-clock jump must not
+ * lengthen or shorten a request budget) and is injectable so tests can exhaust a
+ * budget deterministically without sleeping.
+ */
+export function startPageDeadline(
+  totalMs: number = PAGE_DEADLINE_MS,
+  now: () => number = () => performance.now(),
+): PageDeadline {
+  const startedAt = now();
+  return {
+    totalMs,
+    remainingMs: () => Math.max(0, totalMs - (now() - startedAt)),
+  };
+}
+
 /** A single Prometheus `matrix` (range) series: labels + [ts, value] samples. */
 export interface PromMatrixSeries {
   readonly metric: Record<string, string>;
@@ -40,18 +88,29 @@ export interface PromVectorSample {
 
 /**
  * Typed query outcome. Callers switch on `status` — no raw error ever surfaces:
- *  - `ok`           — data available,
- *  - `unconfigured` — the Prometheus URL env is unset (names the var),
- *  - `unreachable`  — network/timeout/HTTP/Prometheus-error (summary only).
+ *  - `ok`                — data available,
+ *  - `unconfigured`      — the Prometheus URL env is unset (names the var),
+ *  - `unreachable`       — network/HTTP/Prometheus-error (summary only),
+ *  - `deadline-exceeded` — the shared PAGE budget ran out, so this call was cut
+ *    short or never started. Deliberately NOT folded into `unreachable`: the page
+ *    established nothing about Prometheus here, so it must not claim the backend
+ *    is unreachable (nor, worse, that a series is absent).
  */
 export type PromResult<T> =
   | { readonly status: 'ok'; readonly data: T }
   | { readonly status: 'unconfigured'; readonly envVar: string }
-  | { readonly status: 'unreachable'; readonly errorSummary: string };
+  | { readonly status: 'unreachable'; readonly errorSummary: string }
+  | { readonly status: 'deadline-exceeded'; readonly budgetMs: number };
 
 /** Options (test seam for the abort budget). */
 export interface QueryOptions {
   readonly timeoutMs?: number;
+  /**
+   * A budget SHARED with every other call of the same render. When present the
+   * effective timeout is `min(per-call, remaining)`, and an exhausted budget
+   * means no request is issued at all.
+   */
+  readonly deadline?: PageDeadline;
 }
 
 /**
@@ -77,11 +136,15 @@ const UNCONFIGURED = { status: 'unconfigured', envVar: PROMETHEUS_URL_ENV } as c
  * do NOT echo `error.message` (it can contain internal hosts/IPs) — only a stable
  * category the page can display safely.
  */
+function isAbort(err: unknown): boolean {
+  return (
+    (err instanceof DOMException && err.name === 'AbortError') ||
+    (err instanceof Error && (err.name === 'TimeoutError' || err.name === 'AbortError'))
+  );
+}
+
 function summarize(err: unknown): string {
-  if (err instanceof DOMException && err.name === 'AbortError') {
-    return 'Prometheus query timed out';
-  }
-  if (err instanceof Error && err.name === 'TimeoutError') {
+  if (isAbort(err)) {
     return 'Prometheus query timed out';
   }
   return 'Prometheus is unreachable';
@@ -99,7 +162,21 @@ async function runQuery<T>(
   }
 
   const url = `${base}${path}?${params.toString()}`;
-  const timeoutMs = opts?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const deadline = opts?.deadline;
+  const remainingMs = deadline?.remainingMs();
+
+  // The shared budget is already gone: starting another request would push the
+  // page past its total, and the answer would arrive too late to be shown anyway.
+  if (deadline && remainingMs !== undefined && remainingMs <= 0) {
+    return { status: 'deadline-exceeded', budgetMs: deadline.totalMs };
+  }
+
+  // Bound this call by whichever is smaller — its own budget or what is left of
+  // the page's. The per-call default is unchanged for callers without a deadline.
+  const timeoutMs = Math.min(
+    opts?.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+    remainingMs ?? Number.POSITIVE_INFINITY,
+  );
 
   try {
     const response = await fetch(url, {
@@ -122,6 +199,12 @@ async function runQuery<T>(
 
     return { status: 'ok', data: extract(body.data) };
   } catch (err) {
+    // An abort with nothing left on the shared clock is the PAGE deadline, not a
+    // verdict about Prometheus — attribute it as such so the caller does not
+    // report a cause it never established.
+    if (deadline && isAbort(err) && deadline.remainingMs() <= 0) {
+      return { status: 'deadline-exceeded', budgetMs: deadline.totalMs };
+    }
     return { status: 'unreachable', errorSummary: summarize(err) };
   }
 }

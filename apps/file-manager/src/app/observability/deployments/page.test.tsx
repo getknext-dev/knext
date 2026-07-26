@@ -6,6 +6,7 @@ import {
   APP_NAMESPACE_ENV,
   deploymentQueries,
   KUBE_STATE_PROBE,
+  PAGE_DEADLINE_MS,
   PROMETHEUS_URL_ENV,
 } from '../_prom/query';
 
@@ -44,6 +45,25 @@ const readNextAppStatus = vi.fn<() => Promise<NextAppReadResult>>(async () => ({
 vi.mock('../_k8s/nextapp', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../_k8s/nextapp')>();
   return { ...actual, readNextAppStatus: () => readNextAppStatus() };
+});
+
+/**
+ * Virtual clock for the page-level deadline.
+ *
+ * The deadline logic itself is NOT mocked — only its clock is injected, so the
+ * real `startPageDeadline` / remaining-budget / "don't even fetch" code runs. A
+ * test advances `clock.now` from inside the fake Prometheus to say "that call
+ * consumed N ms of the shared budget", which makes budget exhaustion
+ * deterministic without sleeping for seconds.
+ */
+const clock = { now: 0 };
+
+vi.mock('../_prom/query', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../_prom/query')>();
+  return {
+    ...actual,
+    startPageDeadline: (totalMs?: number) => actual.startPageDeadline(totalMs, () => clock.now),
+  };
 });
 
 const ORIGINAL_TOKEN = process.env.OBSERVABILITY_TOKEN;
@@ -180,6 +200,7 @@ const OK_DATA: NextAppStatusView = {
 const OK_NEXTAPP: NextAppReadResult = { status: 'ok', data: OK_DATA };
 
 beforeEach(() => {
+  clock.now = 0;
   authHeader.mockReturnValue(`Bearer ${TOKEN}`);
   readNextAppStatus.mockResolvedValue({ status: 'disabled' });
   process.env.OBSERVABILITY_TOKEN = TOKEN;
@@ -282,6 +303,103 @@ describe('deployments page degradation — Prometheus unreachable', () => {
     expect(html).toContain('could not reach the observability backend');
     expect(html).not.toContain('no deployment history source is configured');
     expect(html).not.toContain('requires kube-state-metrics');
+  });
+});
+
+describe('deployments page degradation — ASYMMETRIC partial Prometheus failure', () => {
+  /**
+   * The timeline is a JOIN of three independent queries, so they can fail
+   * independently: `kube_deployment_created` answers while the two replica
+   * queries do not. Rendering the rows anyway would produce a table that looks
+   * complete (every revision, "current" and all) with silently null replica
+   * columns — a half-truth is the one thing this page must never draw. So a
+   * partial failure suppresses the WHOLE timeline and says "could not reach".
+   */
+  it('suppresses the whole timeline when only the replica queries fail', async () => {
+    const spy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (u) => {
+      const promql = decodeURIComponent(new URL(String(u)).searchParams.get('query') ?? '');
+      if (promql.includes('kube_deployment_status_replicas')) {
+        throw new Error('connect ECONNREFUSED');
+      }
+      return seededFetch(u);
+    });
+
+    const html = await renderPage();
+
+    // The created-timestamps query DID succeed — proving the failure is partial,
+    // not total, so this is not just the all-queries-failed path again.
+    expect(sentQueries(spy)).toContain(deploymentQueries(APP, NAMESPACE).revisionCreated);
+
+    expect(html).toContain('could not reach the observability backend');
+    // NOT a half-populated history: no rows, no table, nothing called "current".
+    expect(html).not.toContain('demo-00003-deployment');
+    expect(html).not.toContain('<table');
+    expect(html).not.toContain('>current<');
+    // …and no other cause is claimed.
+    expect(html).not.toContain('requires kube-state-metrics');
+    expect(html).not.toContain('no Deployment for this app is known');
+    expect(html).not.toContain('ran out of its time budget');
+  });
+});
+
+describe('deployments page — the page-level deadline is honest when exhausted', () => {
+  /**
+   * The page makes one CONCURRENT wave of queries and then, only on the degraded
+   * path, a sequential probe — each with its own ~4 s abort budget, so the total
+   * used to be able to reach ~8 s. One shared deadline bounds the total instead;
+   * exhausting it must render its OWN state, never a cause the page never
+   * established ("kube-state-metrics is absent") and never a zero.
+   */
+  it('renders a distinct deadline state and issues NO probe once the budget is gone', async () => {
+    const spy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (u) => {
+      // The wave consumes the whole shared budget between them (1500 ms each of
+      // the 4000 ms total)…
+      clock.now += PAGE_DEADLINE_MS / 2 - 500;
+      // …and answers with an empty scoped result, which is exactly the path that
+      // would otherwise spend a SECOND full timeout on the presence probe.
+      return seededFetch(u, { kubeStateAbsent: true });
+    });
+
+    const html = await renderPage();
+
+    expect(html).toContain('ran out of its time budget');
+    // The probe never ran, so its cause claims must not appear…
+    expect(html).not.toContain('requires kube-state-metrics');
+    expect(html).not.toContain('no Deployment for this app is known');
+    // …nor may a timeout be reported as an unreachable backend.
+    expect(html).not.toContain('could not reach the observability backend');
+    // …nor a zero-row table implying "never deployed".
+    expect(html).not.toContain('<table');
+
+    // The bound is the point: the probe was not even attempted.
+    expect(sentQueries(spy)).not.toContain(KUBE_STATE_PROBE);
+    expect(spy).toHaveBeenCalledTimes(3);
+  });
+
+  it('reports a probe that itself ran out of budget as the deadline, not as unreachable', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (u) => {
+      const promql = decodeURIComponent(new URL(String(u)).searchParams.get('query') ?? '');
+      if (promql === KUBE_STATE_PROBE) {
+        // The probe was issued with the budget that was left, and that budget ran
+        // out mid-flight: an abort, with nothing left on the clock.
+        clock.now = PAGE_DEADLINE_MS;
+        throw new DOMException('The operation was aborted', 'AbortError');
+      }
+      return seededFetch(u, { kubeStateAbsent: true });
+    });
+
+    const html = await renderPage();
+
+    expect(html).toContain('ran out of its time budget');
+    expect(html).not.toContain('requires kube-state-metrics');
+    expect(html).not.toContain('could not reach the observability backend');
+  });
+
+  it('says nothing about a deadline on the happy path', async () => {
+    mockFetch();
+    const html = await renderPage();
+    expect(html).not.toContain('ran out of its time budget');
+    expect(html).toContain('demo-00003-deployment');
   });
 });
 
