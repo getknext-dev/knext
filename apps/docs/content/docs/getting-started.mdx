@@ -11,34 +11,38 @@ Take an existing Next.js app from `next build` to a scale-to-zero Knative servic
 container registry, and an object-storage bucket (`gcs`, `s3`, or `minio`).
 </Callout>
 
-## 0 · Install the packages (interim channel)
+## 0 · Install the packages
 
-The `@getknext/*` packages' permanent home on the **public npm registry** is still being set up.
-Until it goes live, knext ships on an **interim distribution channel on GitHub Packages**, under
-the `@getknext-dev` scope — the same packages, republished under the org-matching scope GitHub
-Packages requires. When `@getknext/*` goes live, the `@getknext-dev/*` names will be deprecated in
-its favor; existing installs keep working.
-
-GitHub Packages requires authentication **even for public packages** — an anonymous install gets a
-`401`. Create a GitHub personal access token with the `read:packages` scope and add an `.npmrc` to
-your project:
-
-```ini title=".npmrc"
-@getknext-dev:registry=https://npm.pkg.github.com
-//npm.pkg.github.com/:_authToken=${GITHUB_TOKEN}
-```
+knext ships on the **public npm registry** under the `@getknext` scope. No registry
+configuration, no auth token — a plain `npm i` is all it takes.
 
 ```bash title="shell"
-npm install @getknext-dev/core     # installs the CLI too — the bin is `kn-next`
-npx kn-next --version              # or one-shot: npx @getknext-dev/core <subcommand>
+npm i @getknext/core        # the adapter, the config type, and the CLI (bin: kn-next)
+npx kn-next --version       # the CLI is on your PATH via node_modules/.bin
 ```
 
-<Callout type="warn">
-**Scope substitution.** Under the interim channel the package scope is `@getknext-dev`, so
-substitute it anywhere these docs say `@getknext/*`: `adapterPath: '@getknext-dev/core/adapter'` in
-`next.config.ts`, `import type { KnativeNextConfig } from '@getknext-dev/core'`, and
-`@getknext-dev/db` for the [Data SDK](/docs/data-sdk). No token at hand? Running the CLI from a
-checkout of the knext repo still works as the token-less alternative.
+Two optional packages complete the picture — add them only if you need them:
+
+```bash title="shell"
+npm i @getknext/db          # typed drizzle-orm data layer over your DATABASE_URL
+npm i @getknext/lib         # runtime helpers: pooled DB clients, health checks, logger
+```
+
+| Package | What it is for | Canonical imports |
+|---|---|---|
+| `@getknext/core` | The official Next.js adapter, the typed deploy config, the ISR cache handler, and the `kn-next` CLI. **Required.** | `'@getknext/core'` (`KnativeNextConfig`), `'@getknext/core/adapter'`, `'@getknext/core/validate'` |
+| `@getknext/lib` | Runtime helpers for an app running on knext: pooled Postgres clients, a MinIO client, a Cerbos client, health checks, and a preconfigured logger. | `'@getknext/lib/clients'`, `'@getknext/lib/health'`, `'@getknext/lib/logger'`, `'@getknext/lib/context'` |
+| [`@getknext/db`](/docs/data-sdk) | The Data SDK — a thin drizzle-orm layer over your `DATABASE_URL`, with schema builders and one-shot writer-only migrations. | `'@getknext/db'`, `'@getknext/db/schema'`, `'@getknext/db/migrate'` |
+
+<Callout type="info">
+**What each package exports.** `@getknext/core` exports the `KnativeNextConfig` type from its root,
+the adapter from `/adapter` (what `adapterPath` points at), the ISR cache handler from
+`/adapters/cache-handler`, and the pure config validator (`validateConfig`,
+`ConfigValidationError`) from `/validate`. `@getknext/lib` exports `getDbPool()` / `getDbPoolRO()`
+/ `closeDbPool()`, `getMinioClient()`, `getCerbosClient()`, `checkDeepHealth()` /
+`checkShallowHealth()`, the `logger`, and the request-correlation helpers — all also re-exported
+from the package root. `@getknext/db` exports `getDb()` / `getDbRO()` plus the whole of
+`drizzle-orm`.
 </Callout>
 
 ## 1 · Point Next.js at the adapter
@@ -132,17 +136,31 @@ volume, and rejecting any image that is not digest-pinned. See
 [Operator & the NextApp CRD](/docs/operator).
 </Callout>
 
-## Other commands
+## The whole CLI at a glance
 
-The full surface is on the [CLI reference](/docs/cli). Highlights:
+Every command below is `npx kn-next <verb>`. Anything that is **not** one of these words runs the
+default `deploy` flow. Full flag tables are on the [CLI reference](/docs/cli).
 
-- `kn-next doctor` — read-only cluster-prereq preflight, with honest failure classes (a network
-  flake is never reported as a missing CRD).
-- `kn-next status [app] [--json|--watch]` — the operator's honest conditions; exit 1 iff
-  `Ready=False`.
-- `kn-next rollback [app] --to <revision>` (optionally `--canary <n>`, 1–99) — shift traffic on
-  the `NextApp` CR's `spec.traffic` back to a prior revision.
-- `kn-next db bind` / `kn-next db migrate` — bind an existing Postgres Secret; apply
-  drizzle migrations against the writer, once. See the [Data SDK](/docs/data-sdk).
-- `kn-next gc` — reap old static-asset prefixes under the skew-protection retention rule
-  (over-keep, never over-delete).
+| Command | What it does | What it writes |
+|---|---|---|
+| `npx kn-next deploy` | Build → push → apply the digest-pinned `NextApp` CR. The default. | Applies the `NextApp` CR; uploads static assets to your bucket. |
+| `npx kn-next doctor` | Cluster-prereq preflight: CRD, operator, admission webhook, ingress class, Knative Serving. | Nothing — read-only. |
+| `npx kn-next status` | The operator's honest `Ready` / `Degraded` / `Reconciling` / `DatabaseReady` conditions. | Nothing — read-only. |
+| `npx kn-next rollback` | Pin serving traffic to a prior Knative Revision (or clear the pin). | One merge-patch of `spec.traffic` on the `NextApp` CR. |
+| `npx kn-next db bind` | Bind an existing Postgres Secret as `DATABASE_URL`. | One merge-patch of `spec.database.secretRef` on the `NextApp` CR. |
+| `npx kn-next db migrate` | Apply pending drizzle migrations against the **writer**, once. | Your database only — no cluster write. |
+| `npx kn-next gc` | Reap superseded `_next/static/<build-id>/` prefixes (over-keep, never over-delete). | Deletes old asset prefixes from your bucket; reads the CR only. |
+
+```bash title="shell"
+npx kn-next doctor                                             # before your first deploy
+npx kn-next deploy -r registry.example.com/storefront          # build → push → apply
+npx kn-next status storefront --watch                          # poll until Ready=True
+npx kn-next rollback storefront --to storefront-00002          # pin 100% to a prior revision
+npx kn-next db bind storefront --secret storefront-db          # DATABASE_URL from a Secret
+npx kn-next db migrate --dir ./drizzle                         # writer-only, idempotent
+npx kn-next gc --dry-run                                       # print the reap/keep plan only
+```
+
+`build`, `cleanup`, `preview`, and `loadtest` are **not** `kn-next` subcommands — they ship as
+directly runnable entries in the package. See
+[Directly runnable entries](/docs/cli#directly-runnable-entries).
