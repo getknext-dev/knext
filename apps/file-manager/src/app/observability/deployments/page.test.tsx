@@ -58,11 +58,21 @@ vi.mock('../_k8s/nextapp', async (importOriginal) => {
  */
 const clock = { now: 0 };
 
+/**
+ * The budget the page's deadline is actually created with. `undefined` = whatever
+ * the page asks for (PAGE_DEADLINE_MS). Overriding it is how the "the page reports
+ * the budget that APPLIED, not the constant" test distinguishes the two — they are
+ * the same number by default, which is exactly why the constant could drift
+ * unnoticed (PR-520 review finding 4).
+ */
+const budget: { totalMs?: number } = {};
+
 vi.mock('../_prom/query', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../_prom/query')>();
   return {
     ...actual,
-    startPageDeadline: (totalMs?: number) => actual.startPageDeadline(totalMs, () => clock.now),
+    startPageDeadline: (totalMs?: number) =>
+      actual.startPageDeadline(budget.totalMs ?? totalMs, () => clock.now),
   };
 });
 
@@ -201,6 +211,7 @@ const OK_NEXTAPP: NextAppReadResult = { status: 'ok', data: OK_DATA };
 
 beforeEach(() => {
   clock.now = 0;
+  delete budget.totalMs;
   authHeader.mockReturnValue(`Bearer ${TOKEN}`);
   readNextAppStatus.mockResolvedValue({ status: 'disabled' });
   process.env.OBSERVABILITY_TOKEN = TOKEN;
@@ -377,15 +388,24 @@ describe('deployments page — the page-level deadline is honest when exhausted'
   });
 
   it('reports a probe that itself ran out of budget as the deadline, not as unreachable', async () => {
-    vi.spyOn(globalThis, 'fetch').mockImplementation(async (u) => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation((u, init) => {
       const promql = decodeURIComponent(new URL(String(u)).searchParams.get('query') ?? '');
       if (promql === KUBE_STATE_PROBE) {
-        // The probe was issued with the budget that was left, and that budget ran
-        // out mid-flight: an abort, with nothing left on the clock.
-        clock.now = PAGE_DEADLINE_MS;
-        throw new DOMException('The operation was aborted', 'AbortError');
+        // The probe was issued with the ~100 ms the wave left, and then HANGS: the
+        // only thing that can end it is the shared budget's own abort signal.
+        // Aborting through the signal (rather than throwing an `AbortError`
+        // outright) is what a hung backend actually does, and it is what makes the
+        // attribution provable: the verdict comes from the page's own timeout
+        // having fired, not from re-reading a clock (PR-520 review finding 1).
+        return new Promise((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () =>
+            reject(new DOMException('The operation was aborted', 'AbortError')),
+          );
+        });
       }
-      return seededFetch(u, { kubeStateAbsent: true });
+      // The concurrent wave spends all but ~100 ms of the shared budget.
+      clock.now += PAGE_DEADLINE_MS / 3 - 33;
+      return Promise.resolve(seededFetch(u, { kubeStateAbsent: true }));
     });
 
     const html = await renderPage();
@@ -400,6 +420,45 @@ describe('deployments page — the page-level deadline is honest when exhausted'
     const html = await renderPage();
     expect(html).not.toContain('ran out of its time budget');
     expect(html).toContain('demo-00003-deployment');
+  });
+
+  /**
+   * The number in that message must be the budget that ACTUALLY applied — the one
+   * the query result carries — not the {@link PAGE_DEADLINE_MS} constant re-read at
+   * render time (PR-520 review finding 4). Here the render runs under a 1500 ms
+   * budget, so printing the 4000 ms constant would state a bound that was never
+   * enforced.
+   */
+  it('reports the budget that actually applied, not the module constant', async () => {
+    budget.totalMs = 1500;
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (u) => {
+      clock.now += 600;
+      return seededFetch(u, { kubeStateAbsent: true });
+    });
+
+    const html = await renderPage();
+
+    expect(html).toContain('ran out of its time budget');
+    expect(html).toContain('1500');
+    expect(html).not.toContain(`${PAGE_DEADLINE_MS}`);
+  });
+});
+
+describe('deployments page — a NextApp read that never started is not a cluster verdict', () => {
+  it('reports a budget-exhausted NextApp read as its own reason, not as unreachable', async () => {
+    readNextAppStatus.mockResolvedValue({
+      status: 'source-unavailable',
+      reason: 'deadline-exceeded',
+      detail: 'the page ran out of its shared time budget before this read could start',
+    });
+    mockFetch();
+
+    const html = await renderPage();
+
+    expect(html).toContain('shared time budget was already spent');
+    // A read that never happened says NOTHING about the API server.
+    expect(html).not.toContain('the Kubernetes API could not be reached');
+    expect(html).not.toContain('CRD is not installed');
   });
 });
 

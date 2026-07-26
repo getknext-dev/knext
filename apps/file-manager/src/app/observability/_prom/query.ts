@@ -173,10 +173,43 @@ async function runQuery<T>(
 
   // Bound this call by whichever is smaller — its own budget or what is left of
   // the page's. The per-call default is unchanged for callers without a deadline.
-  const timeoutMs = Math.min(
-    opts?.timeoutMs ?? DEFAULT_TIMEOUT_MS,
-    remainingMs ?? Number.POSITIVE_INFINITY,
-  );
+  const perCallMs = opts?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const timeoutMs = Math.min(perCallMs, remainingMs ?? Number.POSITIVE_INFINITY);
+
+  /**
+   * ATTRIBUTION IS DECIDED HERE, BEFORE THE REQUEST (PR-520 review finding 1).
+   *
+   * Which of the two bounds is the binding one is a fact about the budgets, known
+   * at request time: the shared deadline binds exactly when what is LEFT of it is
+   * no more than this call's own budget. The previous version instead re-read the
+   * clock in the `catch` (`deadline.remainingMs() <= 0`) — and that is a race, not
+   * a check: an abort timer is scheduled on libuv's CACHED loop time, which lags
+   * `performance.now()` when the loop is busy, so under CPU contention the abort
+   * fires while `remainingMs()` is still > 0 and a page-deadline abort got
+   * reported as "Prometheus is unreachable" — a cause the page never established
+   * (the ADR-0038 violation this whole state exists to prevent), non
+   * deterministically, only on loaded machines.
+   *
+   * `<=` (not `<`) deliberately: when the two bounds are equal the deadline is at
+   * least as binding, and attributing to it is the honest-closed choice — it makes
+   * the page say "my budget ran out" rather than assert something about the
+   * backend.
+   */
+  const boundByDeadline = remainingMs !== undefined && remainingMs <= perCallMs;
+
+  /**
+   * The second half of the attribution: only OUR timeout may be attributed at all.
+   * An `AbortError` that arrives without our timer having fired came from
+   * elsewhere and says nothing about either budget, so it stays `unreachable`.
+   * Recorded as a fact (the timer callback runs before the rejection it causes),
+   * never re-derived from a clock.
+   */
+  let abortedByOurTimeout = false;
+  const controller = new AbortController();
+  const timer = setTimeout(() => {
+    abortedByOurTimeout = true;
+    controller.abort(new DOMException('The query timed out', 'TimeoutError'));
+  }, timeoutMs);
 
   try {
     const response = await fetch(url, {
@@ -184,7 +217,7 @@ async function runQuery<T>(
       // reflect the live cluster (mirrors the auth/mutation no-cache rule).
       cache: 'no-store',
       // Bound the wait so a hung Prometheus degrades the page, never hangs it.
-      signal: AbortSignal.timeout(timeoutMs),
+      signal: controller.signal,
       headers: { accept: 'application/json' },
     });
 
@@ -199,13 +232,14 @@ async function runQuery<T>(
 
     return { status: 'ok', data: extract(body.data) };
   } catch (err) {
-    // An abort with nothing left on the shared clock is the PAGE deadline, not a
-    // verdict about Prometheus — attribute it as such so the caller does not
-    // report a cause it never established.
-    if (deadline && isAbort(err) && deadline.remainingMs() <= 0) {
+    // Our own timeout fired AND the deadline was the binding bound ⇒ this is the
+    // PAGE's budget, not a verdict about Prometheus.
+    if (deadline && boundByDeadline && abortedByOurTimeout && isAbort(err)) {
       return { status: 'deadline-exceeded', budgetMs: deadline.totalMs };
     }
     return { status: 'unreachable', errorSummary: summarize(err) };
+  } finally {
+    clearTimeout(timer);
   }
 }
 

@@ -242,6 +242,42 @@ shipped Grafana overlay instead of rebuilding cluster dashboards — faithful to
     is pinned end to end, including that the probe is never even issued once the budget is gone
     (mutation-proved twice: dropping the shared deadline from the page, and ignoring the remaining
     budget in the per-call `min`, each turn it RED).
+
+  **Fourth-round amendments (PR #520 review round 3 — the deadline delta):**
+  - **Deadline attribution is decided at REQUEST time, not by re-reading a clock in the `catch`.**
+    The first cut asked `deadline.remainingMs() <= 0` after an abort, which is a race rather than a
+    check: an abort timer is scheduled on libuv's *cached* loop time, so on a busy event loop the
+    abort fires while `performance.now()` still shows budget left — and a page-deadline abort was
+    then reported as "could not reach the observability backend", i.e. a cause the page never
+    established. That is the exact honest-status violation this state exists to prevent, and it was
+    load-dependent (the test failed 1–4 runs in 6 in parallel workers, always green alone; a busy CI
+    machine is *more* likely to hit it). `runQuery` now captures two facts instead:
+    `boundByDeadline` (is what is LEFT of the shared budget ≤ this call's own budget?) *before*
+    issuing the request, and whether **our own** timeout fired (an `AbortController` we own, so an
+    unrelated `AbortError` is still `unreachable`). Attribution is therefore deterministic under any
+    load. Pinned by a frozen-clock test — `remainingMs()` reports the full budget throughout, so any
+    implementation that consults the clock answers `unreachable` — plus the counter-case where the
+    per-call budget is the binding one. Mutation-proved: restoring the clock check turns it RED with
+    the original flake's message; 12/12 green afterwards, including 12/12 under 8 competing CPU
+    burners.
+  - **"Bounded end to end" is now true for the `NextApp` read too, not just narrowed.** The opt-in
+    Kubernetes read forwarded the remaining budget as `node:https`' `timeout`, which is a
+    socket-**inactivity** timer that every received chunk resets — an API server that trickles bytes
+    could hold the read (and the page) open indefinitely while the shared budget passed unnoticed.
+    The reader now also arms a real **total-duration** bound that rejects and destroys the socket
+    `timeoutMs` after the request is issued, whatever the server is doing. Pinned by a trickling-server
+    test (mutation-proved: removing the bound makes it hang until the test times out).
+  - **An exhausted budget refuses to start the Kubernetes read, instead of failing OPEN.**
+    `remainingMs()` is floored at 0 and `0 ?? DEFAULT_TIMEOUT_MS` is `0` — and `timeout: 0` on
+    `https.request` means *no* timeout, so the exhausted-budget path was the one path with no bound at
+    all. It now returns its own `deadline-exceeded` reason (never `unreachable`: a read that never
+    happened establishes nothing about the API server), mirroring `runQuery`'s guard, and the page
+    renders that as its own sentence.
+  - **The rendered budget is the one that applied.** The deadline message printed the imported
+    `PAGE_DEADLINE_MS` constant while `deadline-exceeded` carried a `budgetMs` no production code
+    read. The page now renders `budgetMs` from the result, so the number can never drift from the
+    bound actually enforced (mutation-proved: printing the constant fails a render under a 1500 ms
+    budget).
 - [ ] **Cross-cutting:** `/observability` layout with tab nav + Grafana link-out card.
 - [ ] **Phase 2 (gated on founder greenlight):** promote the recipe to a scaffoldable `--observability`
   flag — deferred until after the official-adapter migration + Tier-A correctness (scs-zones sequencing).
