@@ -344,7 +344,7 @@ jobs:
         working-directory: packages/kn-next-operator
         run: echo "ENVTEST_K8S_VERSION=$(make print-envtest-version)" >> "$GITHUB_ENV"
       - name: Cache envtest + tool binaries
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: packages/kn-next-operator/bin
           key: ${{ runner.os }}-envtest-${{ env.ENVTEST_K8S_VERSION }}-${{ hashFiles('packages/kn-next-operator/go.sum') }}
