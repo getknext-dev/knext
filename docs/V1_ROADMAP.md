@@ -238,4 +238,7 @@ CRD `v1beta1` + conversion webhook · node-pressure eviction behaviour · GKE/AK
   raw manifest generator is gone from `src/generators/`.
 - `CLAUDE.md` lists image optimization as RESOLVED. It is **implemented but not gated** — check
   `(g)` skips rather than fails.
-- #314's title still says `@knext/*`; the scope is `@getknext/*`.
+- #314's title still names the **retired** npm scope; the published scope is `@getknext/*`. (Spelled
+  this way deliberately: `tests/npm-scope-getknext.test.ts` fails any tracked file that contains the
+  retired scope literally, so even a "this one is stale" citation of it re-introduces the string the
+  guard exists to keep out. Describe it, do not quote it.)
