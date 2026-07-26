@@ -62,7 +62,16 @@ describe("runLoadTest", () => {
         expect(execFileSync).toHaveBeenCalledTimes(1);
         const [bin, args] = execFileSync.mock.calls[0];
         expect(bin).toBe("kubectl");
-        expect(args).toEqual(["apply", "-f", manifestPath]);
+        // --validate=strict on EVERY apply the CLI issues (see
+        // cr-apply-strict-validation.test.ts): a typo'd field in the generated
+        // Job must be rejected, not pruned into a Job that runs but measures
+        // something other than what the manifest says.
+        expect(args).toEqual([
+            "apply",
+            "--validate=strict",
+            "-f",
+            manifestPath,
+        ]);
     });
 
     it("wires the in-cluster Prometheus URL only when observability is enabled", async () => {

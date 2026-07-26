@@ -60,9 +60,16 @@ export async function runLoadTest(
 
     // Apply via kubectl using execFile (ARGV array — no shell, no injection).
     log.info({ appName, type, namespace }, "Applying k6 load-test Job");
-    execFileSync("kubectl", ["apply", "-f", manifestPath], {
-        stdio: "inherit",
-    });
+    // `--validate=strict` on every apply this CLI issues (see deploy.ts): a
+    // typo'd field in the generated k6 Job must be rejected, not pruned into a
+    // Job that runs but does not measure what the manifest says it measures.
+    execFileSync(
+        "kubectl",
+        ["apply", "--validate=strict", "-f", manifestPath],
+        {
+            stdio: "inherit",
+        },
+    );
     log.info(
         {
             tail: `kubectl logs -n ${namespace} -l app=k6-loadtest,target=${appName} -f`,

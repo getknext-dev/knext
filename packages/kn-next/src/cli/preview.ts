@@ -166,7 +166,19 @@ export async function runPreviewDeploy(
     mkdirSync(join(process.cwd(), ".output"), { recursive: true });
     writeFileSync(crPath, crYaml, "utf-8");
 
-    deps.apply(["kubectl", "apply", "-f", crPath, "-n", options.namespace]);
+    // `--validate=strict` is asserted here for the same reason as on the prod
+    // CR apply (see deploy.ts): a preview renders the SAME NextApp CR from the
+    // same builder against the same CRD, so it carries the same field-skew
+    // risk — and CI/PR-bot runs hit this path far more often than `deploy`.
+    deps.apply([
+        "kubectl",
+        "apply",
+        "--validate=strict",
+        "-f",
+        crPath,
+        "-n",
+        options.namespace,
+    ]);
 
     const url = deps
         .capture([

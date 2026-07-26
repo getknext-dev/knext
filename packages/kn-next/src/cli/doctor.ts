@@ -18,9 +18,17 @@
  *   (e) operator-image anonymous pullability — #198: a private ghcr package
  *       ImagePullBackOffs every fresh cluster the quickstart touches
  *   (f) Knative Serving installed
+ *   (g) the LOCAL kubectl is new enough (>= v1.25) for `--validate=strict` —
+ *       the flag `kn-next deploy` passes explicitly on the NextApp CR apply so
+ *       a field the operator's CRD does not know is rejected, not silently
+ *       pruned. Concretely, for a field the CLI emits and an older CRD may
+ *       predate: a pruned `spec.database.roSecretRef` drops DATABASE_URL_RO,
+ *       so `getDbRO()` falls back to the writer pool and reads run on the
+ *       read-WRITE primary credential — a least-privilege downgrade on a CR
+ *       that still reports Ready=True
  *
- * READ-ONLY by construction (ADR-0001): every kubectl call is a `get`; the
- * registry probe is an HTTP manifest HEAD.
+ * READ-ONLY by construction (ADR-0001): every kubectl call is a `get` or a
+ * client-side `version`; the registry probe is an HTTP manifest HEAD.
  *
  * Exit-code contract:
  *   - 1 on hard FAILs (a cluster-state fact is wrong) AND on probe ERRORs
@@ -343,6 +351,66 @@ export async function probeManifest(image: string): Promise<ProbeOutcome> {
 
 const SKIP_UNREACHABLE = "cluster unreachable — check skipped";
 
+/**
+ * Minimum kubectl CLIENT version for which `--validate=strict` is meaningful.
+ *
+ * WHY 1.25 and not 1.27: `kn-next deploy` passes `--validate=strict` explicitly
+ * on the NextApp CR apply, and the STRING form of that flag
+ * (`strict|warn|ignore`) only exists from kubectl **v1.25** — that same release
+ * also made `strict` kubectl's default. On v1.24 and older `--validate` is a
+ * boolean, so the flag value we pass is not understood: the deploy cannot
+ * assert strict validation at all. (Server-side field validation went GA in
+ * apiserver 1.27, but it is on-by-default from 1.25 as beta, and the apiserver
+ * is the cluster's business, not the client's — this check is deliberately
+ * scoped to the LOCAL binary, the part knext can observe read-only.)
+ */
+export const MIN_STRICT_VALIDATION_KUBECTL = { major: 1, minor: 25 } as const;
+
+/**
+ * Parse `kubectl version --client -o json` into {major, minor}.
+ *
+ * Prefers `clientVersion.gitVersion` ("v1.29.3-eks-a1b2c3") and falls back to
+ * the discrete major/minor fields, which on managed distros carry a `+` suffix
+ * ("29+"). Returns undefined when nothing numeric can be read — the caller then
+ * WARNs rather than guessing.
+ */
+export function parseKubectlClientVersion(
+    stdout: string,
+): { major: number; minor: number; display: string } | undefined {
+    const parsed = safeJson<{
+        clientVersion?: { major?: string; minor?: string; gitVersion?: string };
+    }>(stdout);
+    const cv = parsed?.clientVersion;
+    if (!cv) {
+        return undefined;
+    }
+    const git = cv.gitVersion ?? "";
+    const m = /^v?(\d+)\.(\d+)/.exec(git);
+    if (m?.[1] && m[2]) {
+        return {
+            major: Number(m[1]),
+            minor: Number(m[2]),
+            display: git,
+        };
+    }
+    // Fallback: discrete fields; strip the managed-distro "+"/non-digit tail.
+    const major = Number.parseInt(cv.major ?? "", 10);
+    const minor = Number.parseInt(cv.minor ?? "", 10);
+    if (Number.isNaN(major) || Number.isNaN(minor)) {
+        return undefined;
+    }
+    return { major, minor, display: git || `v${major}.${minor}` };
+}
+
+/** True iff this client understands `--validate=strict` (>= v1.25). */
+export function supportsStrictValidation(v: {
+    major: number;
+    minor: number;
+}): boolean {
+    const { major, minor } = MIN_STRICT_VALIDATION_KUBECTL;
+    return v.major > major || (v.major === major && v.minor >= minor);
+}
+
 /** Run every preflight check. Pure orchestration over the injected deps. */
 export async function runDoctor(deps: DoctorDeps): Promise<DoctorReport> {
     const checks: CheckResult[] = [];
@@ -372,6 +440,49 @@ export async function runDoctor(deps: DoctorDeps): Promise<DoctorReport> {
         );
     }
     const skipAll = !reachable;
+
+    // (g) client kubectl strict-validation support. LOCAL and read-only, so it
+    // runs even when the cluster is unreachable (it never touches the
+    // apiserver). `kn-next deploy` applies the NextApp CR with an explicit
+    // `--validate=strict` so a field the operator's CRD does not know is
+    // REJECTED instead of silently pruned; on kubectl < v1.25 that flag value
+    // does not exist, so the deploy cannot make that guarantee.
+    {
+        const ver = deps.kubectl([
+            "kubectl",
+            "version",
+            "--client",
+            "-o",
+            "json",
+        ]);
+        const parsed = ver.ok
+            ? parseKubectlClientVersion(ver.stdout)
+            : undefined;
+        if (!parsed) {
+            push(
+                "kubectl-validation",
+                "kubectl strict validation",
+                "warn",
+                "could not determine the kubectl client version — unable to confirm that the CR apply can be strictly validated",
+                "run `kubectl version --client` and upgrade to >= v1.25 if older",
+            );
+        } else if (supportsStrictValidation(parsed)) {
+            push(
+                "kubectl-validation",
+                "kubectl strict validation",
+                "pass",
+                `client ${parsed.display} — the CR apply asserts --validate=strict (unknown fields are rejected, never silently pruned)`,
+            );
+        } else {
+            push(
+                "kubectl-validation",
+                "kubectl strict validation",
+                "fail",
+                `client ${parsed.display} is older than v${MIN_STRICT_VALIDATION_KUBECTL.major}.${MIN_STRICT_VALIDATION_KUBECTL.minor} — before v1.25 --validate is a BOOLEAN, so \`kn-next deploy\` fails on this client at flag parsing, before it contacts the apiserver. Upgrade kubectl`,
+                `upgrade kubectl to >= v${MIN_STRICT_VALIDATION_KUBECTL.major}.${MIN_STRICT_VALIDATION_KUBECTL.minor}`,
+            );
+        }
+    }
 
     // (a) NextApp CRD present + served version
     if (skipAll) {
@@ -767,7 +878,8 @@ const DOCTOR_HELP = `kn-next doctor — cluster-prereq preflight (read-only)
 
 Checks: NextApp CRD, operator readiness, cert-manager webhook, Knative
 ingress-class vs its reconciler (#208), operator-image pullability (#198),
-Knative Serving. Exit 1 on hard FAILs and on probe ERRORs (a check's kubectl
+Knative Serving, and the local kubectl's --validate=strict support. Exit 1 on
+hard FAILs and on probe ERRORs (a check's kubectl
 probe hit a network/TLS/credential/RBAC failure — the cluster state could not
 be verified); WARN/SKIP never fail; a fully unreachable cluster SKIPs (exit 0).
 
