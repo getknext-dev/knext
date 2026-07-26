@@ -104,8 +104,14 @@ defer bucket 1.
   `SetStatusCondition` sites across the reconcilers, `conditions_test.go`) and finalizer logic
   EXISTS (`internal/controller/finalizer.go` + envtest coverage) — the earlier "not populated /
   no finalizer" note was stale. Still true: API at `v1alpha1`.
-- **License inconsistency:** README says MIT; operator source headers say Apache-2.0
-  (`nextapp_types.go:4`) — pick one.
+- **(RESOLVED 2026-07-26, stale-doc fix)** The "license inconsistency: README says MIT" note was
+  **wrong** — nothing in the repo claims MIT. The apparent README hit is a substring match inside
+  `$CI_COMMIT_SHA` (`README.md:849`, `docs/ARCHITECTURE.md:627`). The licence is **Apache-2.0
+  everywhere and consistently**: root `LICENSE`, a per-package `LICENSE` in each of
+  `packages/{kn-next,lib,db}`, `"license": "Apache-2.0"` on all three publishable manifests, and the
+  operator source headers (`nextapp_types.go:4`). npm always includes `LICENSE` in a tarball
+  regardless of the `files` allowlist, so the published packages carry it. Nothing to pick; do not
+  re-file this as a pre-publish blocker.
 - npm: packages are unified under the **`@getknext/*`** scope. The **publishable** three are
   `@getknext/core`, `@getknext/lib`, `@getknext/db` — they must ship together or consumers 404 on the
   missing member. `@getknext/ui` is **private** and never publishes; don't list it as a released
