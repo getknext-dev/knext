@@ -1534,6 +1534,127 @@ config lives only in the running process, so a `SIGKILL` loses it — the restor
 trap-based and `SIGKILL` cannot be trapped. Persisting the captured config at capture time would let
 any later invocation detect and offer to restore it.
 
+## Run 24 (2026-07-26) — ADR-0036 P1b A/B re-measured on a verified-comparable pair: both arms bimodal, delta unconfirmed
+
+**What this is.** A re-run of the Run 17 bun-exec vs node cold-start A/B on the live OKE cluster
+(`context-ckmva7v7zvq`, `default/p1b-node` and `default/p1b-bunexec`), 10 cold samples per arm, run
+**sequentially** (never concurrently), same harness invocation and same extractor for both arms.
+
+### This corrects Run 17's stated premise
+
+Run 17 says both arms were deployed "0-CPU-request". **That was not true of the node arm.** Inspection
+of the live services found `p1b-node` carrying `requests.cpu=100m`, `limits.cpu=1`, `128Mi`/`512Mi`,
+while `p1b-bunexec` had `resources: {}`. The node arm's revision `p1b-node-00002` was created
+2026-07-21, before Run 17 ran on 07-22, so that resource block was in force for Run 17. On a cluster
+Run 17 itself describes as "heavily contended", it therefore measured **build target and CPU guarantee
+together**, with two opposing distortions: a guaranteed CPU floor favouring node, and an uncapped
+bun arm favouring bun on an idle node. Run 17's numbers should not be read as a runtime comparison.
+
+**A second confound Run 17 did not state** surfaced in this run's pre-flight check: the arms' readiness
+probes differed. node used `httpGet /api/health` with `periodSeconds: 1, timeoutSeconds: 1,
+failureThreshold: 3`; bun-exec used a bare `tcpSocket` probe with Knative defaults. That is not
+cosmetic for a scale-from-zero measurement — a `tcpSocket` probe passes as soon as the process binds
+the listener, while an `httpGet` on a real route additionally requires the app to serve a request, so
+the arms were gated on different definitions of "ready", in bun's favour. (Knock-on: the `queue-proxy`
+readiness `periodSeconds` was 1 on node vs 10 on bun.) Both arms were equalized to the **same**
+`httpGet /api/health` probe before measuring, and both were given a fresh revision within one second
+of each other so neither arm had a staleness or image-residency advantage.
+
+### Comparability gate (run before measuring, not after)
+
+Each service's latest READY revision was diffed field-by-field by script — env (names *and* values),
+resources, containerConcurrency, timeoutSeconds, ports, readinessProbe, command, args, volumes,
+serviceAccount. Verdict on the measured pair (`p1b-node-00005` / `p1b-bunexec-00008`): **identical in
+every compared field except `container.image`.** Both `resources: {}`, both `env: []`, both
+`containerConcurrency: 0`, `timeoutSeconds: 300`, `min-scale 0`, `max-scale 10`.
+
+### Results — both arms are bimodal
+
+Samples (`http_req_duration` median per k6 run, one request per sample, in run order). All 20 samples
+returned a genuine `200` (`checks 100 %`, `http_req_failed 0 %`); none is an error artifact.
+
+- **node**:    10.32, 10.62, 10.28, 10.99, 11.01, 2.77, 2.45, 10.99, 2.17, 10.66
+- **bun-exec**: 1.65, 10.75, 1.99, 2.45, 10.77, 1.97, 1.65, 10.77, 2.13, 10.42
+
+| arm | n | min | **p50** | mean | p90 | max |
+|---|---|---|---|---|---|---|
+| node (Next standalone) | 10 | 2.17 s | **10.47 s** | 8.23 s | 10.99 s | 11.01 s |
+| bun-exec (compiled binary) | 10 | 1.65 s | **2.29 s** | 5.46 s | 10.77 s | 10.77 s |
+
+Every sample falls into one of two well-separated clusters with nothing in between (2.77 s → 10.28 s):
+
+| mode | node | bun-exec | verdict |
+|---|---|---|---|
+| **slow** (≥ 6 s) | 7/10, range 10.28–11.01 s, p50 10.66 s | 4/10, range 10.42–10.77 s, p50 10.76 s | **indistinguishable — overlapping** |
+| **fast** (< 6 s) | 3/10, range 2.17–2.77 s, p50 2.45 s | 6/10, range 1.65–2.45 s, p50 1.98 s | **overlapping** |
+
+### The headline p50 is an artifact and must not be quoted
+
+Naively, p50 10.47 s → 2.29 s reads as "bun-exec is 4.6× faster". **It is not a runtime result.** The
+two arms' slow modes are the same speed (10.66 s vs 10.76 s); the whole p50 gap comes from *how many*
+samples landed in the slow mode — 7/10 for node vs 4/10 for bun-exec. Fisher's exact test on that 2×2
+gives **p = 0.37**: the mode mix is entirely consistent with chance at n=10. Do not quote the 4.6×, and
+do not quote the p50 delta.
+
+**Nothing here clears this document's bar.** By the Run 6 precedent (see Caveat) a latency delta counts
+when the *distributions separate*. These distributions overlap grossly — both arms span ~1.7–11.0 s.
+Even restricted to the fast mode, where a runtime difference would have to live, the ranges overlap
+(node 2.17–2.77 s, bun-exec 1.65–2.45 s; bun-exec's slowest fast sample equals node's median). The
+**fast-mode median delta of 2.45 s → 1.98 s (~470 ms) is provisional and must not be quoted** until a
+repeat run reproduces it.
+
+### What this run does establish
+
+**The ~11 s tail is target-independent.** Run 17 recorded an "~11 s intermittent tail" as a property of
+the *node* arm. This run shows the bun-exec arm has the same tail at the same magnitude
+(10.42–10.77 s vs node's 10.28–11.01 s). Whatever produces it — pod scheduling, activator queueing, or
+image pull on this contended 2-node cluster — it is **not** a property of the build target, and it
+dominates end-to-end cold start whenever it fires. That is consistent with Run 16/17's "shared floor"
+reasoning, and it is now measured on both arms rather than inferred from one. This run does **not**
+attribute the tail to a specific cause; the pods were gone before their placement could be inspected.
+
+Secondary: node's fast mode (p50 2.45 s) reproduces Run 17's node figure (2.79 s) despite the CPU
+guarantee having been removed, so the removal did not obviously shift the fast mode — but with 3 fast
+node samples that is an observation, not a measurement.
+
+### Limitations, stated plainly
+
+- **The two images are not the same application, and this is not correctable by config.** `crane config`
+  on both digests shows node = `alpine-minirootfs-3.24.1`, entrypoint `docker-entrypoint.sh` +
+  `node server.js` over a `.next/standalone` build, Node 22.23.1; bun-exec = `alpine-minirootfs-3.20.10`,
+  entrypoint `/app/knext-bin`, a compiled single-executable built from `examples/bun-exec`. Their `/`
+  responses differ in kind (a 4000-byte RSC-rendered document vs a 1397-byte hand-written page). So this
+  comparison measures **runtime + application + base image**, not runtime alone.
+- **Source commits could not be confirmed.** Both images are 4–5 days old (node built 2026-07-21,
+  bun-exec 2026-07-22) and neither carries source-commit annotations in the registry. If they were built
+  from different commits, the comparison measures more than the runtime — and per the point above, it
+  already does.
+- **Single cluster, n=10 per arm, one sitting.** The bimodality means an n=10 arm is really ~3–6 samples
+  of each mode, which is why no delta here is quotable.
+- The probe equalization changed bun-exec's readiness semantics relative to how Run 17 measured it, so
+  Run 24's bun-exec numbers are not directly comparable to Run 17's bun-exec numbers either.
+
+### Cluster state at hand-off
+
+Both services scaled to zero. The harness's capture/restore path reported success on both runs and both
+services are back to their captured autoscaling config (`max-scale=10`, `containerConcurrency=0`,
+burst/panic annotations absent). `resources: {}` and `env: []` are unchanged on both — the harness never
+touches them (it captures and restores only the five autoscaling annotations plus
+`containerConcurrency`). Two deliberate, documented deviations from the pre-run state remain, both made
+to create the comparable pair: **both arms now carry the same `httpGet /api/health` readiness probe**
+(bun-exec's was `tcpSocket`) and an explicit `containerPort: 8080`, plus a `run24` annotation. Leaving
+them is intentional — reverting would re-break comparability for the repeat run. Side effect worth
+knowing: each harness restore issues several template patches, so each run mints ~4 extra Knative
+revisions (`p1b-node` is at 10, `p1b-bunexec` at 13); they are unrouted and scaled to zero. The three
+leftover k6 Jobs in the namespace (`cc-measure`, `fm-loadtest`, `vinext-bench`) predate this run.
+
+### What would settle it
+
+Run both arms again, unchanged, and see whether the fast-mode delta reproduces — and separately, find
+the cause of the ~11 s mode (capture pod `nodeName` and the kubelet pull/scheduling events per sample).
+Until the tail is understood or eliminated it swamps a ~470 ms runtime difference, and no ADR-0036
+ship/don't-ship decision should rest on an end-to-end cold-start number from this cluster.
+
 ## Caveat
 
 These are **point-in-time measurements on a specific small (2-node) OKE cluster** with a
