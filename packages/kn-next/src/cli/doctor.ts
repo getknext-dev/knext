@@ -475,7 +475,7 @@ export async function runDoctor(deps: DoctorDeps): Promise<DoctorReport> {
                 "kubectl-validation",
                 "kubectl strict validation",
                 "fail",
-                `client ${parsed.display} is older than v${MIN_STRICT_VALIDATION_KUBECTL.major}.${MIN_STRICT_VALIDATION_KUBECTL.minor} — it does not understand --validate=strict, so an unknown NextApp field (e.g. spec.security.networkPolicy on an older CRD) can be pruned silently`,
+                `client ${parsed.display} is older than v${MIN_STRICT_VALIDATION_KUBECTL.major}.${MIN_STRICT_VALIDATION_KUBECTL.minor} — before v1.25 --validate is a BOOLEAN, so \`kn-next deploy\` fails on this client at flag parsing, before it contacts the apiserver. Upgrade kubectl`,
                 `upgrade kubectl to >= v${MIN_STRICT_VALIDATION_KUBECTL.major}.${MIN_STRICT_VALIDATION_KUBECTL.minor}`,
             );
         }

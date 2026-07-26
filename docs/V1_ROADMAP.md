@@ -81,10 +81,27 @@ silently under an old kubectl, a shell alias, a kubeconfig default, or a wrapper
 may be older than this CLI" message when the apply is rejected; `kn-next doctor` reports when the
 local client is older than v1.25, where that flag value does not exist.
 
-**Residual, not closed:** a programmatic client that applies the CR without kubectl, and any
-apiserver too old for server-side field validation. `doctor` still checks only that the CRD
-*exists*, not that its schema covers every field this CLI emits — the schema-diff preflight (#314)
-remains the complete fix.
+**Residual, not closed:**
+
+- **GitOps controllers — name them, because "programmatic client" understates this.** Argo CD's
+  apply and Flux's kustomize-controller server-side apply do **not** assert strict field validation
+  by default, so a GitOps-managed `NextApp` is still prunable. That is the mainstream production
+  path, not an edge case. (`kubectl apply --server-side` and `kubectl replace` *are* covered — both
+  set `fieldValidation=Strict` from kubectl 1.25.)
+- **kubectl ≤ 1.24 users** fail at flag parsing rather than being protected — `--validate` is a
+  boolean before 1.25, so `deploy` errors before contacting the apiserver. Fail-closed and
+  acceptable (1.24 is long EOL), surfaced by `doctor`.
+- `doctor` still checks only that the CRD *exists*, not that its schema covers every field this CLI
+  emits — the schema-diff preflight (#314) remains the complete fix.
+
+Not a gap: an apiserver too old for server-side field validation. kubectl ≥ 1.25 falls back to
+client-side OpenAPI schema validation, which still catches an unknown CRD field.
+
+**Upgrade ordering is now load-bearing and undocumented.** Strict validation makes a
+newer-CLI-against-older-CRD apply fail loudly instead of silently dropping the field, so the
+required order is **operator/CRD first, then CLI**. knext documents no ordering anywhere today
+(`db-bind` merely assumes it in an error string). This PR does not create the skew — it makes it
+visible — but the ordering belongs in the release-channel doc (ADR-0020) as one sentence.
 
 ### 2.2 Operator upgrade while CRs exist
 `config/webhook/manifests.yaml` sets `failurePolicy: Fail` on a webhook served by the operator
