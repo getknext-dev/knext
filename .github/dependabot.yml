@@ -4,9 +4,33 @@
 # full commit SHA because those jobs run with live publish credentials in scope.
 # Pinning without a bump channel just trades a supply-chain risk for staleness, so
 # Dependabot owns the bumps: it rewrites the SHA and the trailing `# vX.Y.Z`
-# comment together, which keeps tests/release-action-pins.test.ts honest (that test
-# asserts the SHA of record, so a Dependabot PR has to update it too — a
-# deliberate human review point on the credential-bearing path).
+# comment together.
+#
+# Division of responsibility — read this before assuming a check exists:
+#   - Dependabot owns the SHA and its version comment.
+#   - tests/release-action-pins.test.ts asserts IMMUTABILITY and SCOPE — every
+#     publish-path `uses:` is a 40-hex commit SHA carrying a `# vX.Y.Z` comment,
+#     and only allowlisted ACTIONS appear on the credential-bearing path. It does
+#     NOT assert the SHA value.
+#   - Therefore a SHA that does not actually belong to its commented tag is caught
+#     by HUMAN REVIEW of the Dependabot diff, not by CI. Read the SHA against the
+#     tag before approving a bump on release.yml / release-ghp.yml.
+#
+# An earlier revision of that test asserted the exact SHA of record, described here
+# as "a deliberate human review point". That was reversed deliberately, not
+# accidentally: it made every correct Dependabot bump go red (see #530/#532, which
+# preserved the pin form exactly as required), and the only way to green a correct
+# bump was to edit the guard's expectations — training the reader to edit a
+# supply-chain guard without reading it.
+#
+# Be precise about what that trade cost: the review point is retained as
+# DOCUMENTED PRACTICE, not as ENFORCEMENT. A gate blocks and can be mutation-
+# proved; a documented expectation degrades — under time pressure, under a bot
+# bump that looks like the last four, under a reviewer who never opened this
+# file — and its efficacy is unobservable until it has already failed. So
+# enforcement of SHA-belongs-to-tag is ABSENT until the nightly correspondence
+# check lands. Treat that as near-term work, not backlog: it is what converts
+# this comment back into a gate.
 version: 2
 updates:
   - package-ecosystem: 'github-actions'
