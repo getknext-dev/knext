@@ -91,7 +91,7 @@ jobs:
             --out "ab-results-${{ matrix.runtime }}.json"
 
       - name: Upload results
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ab-results-${{ matrix.runtime }}
           path: ab-results-${{ matrix.runtime }}.json
@@ -126,7 +126,7 @@ jobs:
           cat ab-verdict.md >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload verdict
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ab-verdict
           path: ab-verdict.md
