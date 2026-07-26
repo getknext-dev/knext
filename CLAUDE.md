@@ -104,17 +104,37 @@ defer bucket 1.
   `SetStatusCondition` sites across the reconcilers, `conditions_test.go`) and finalizer logic
   EXISTS (`internal/controller/finalizer.go` + envtest coverage) — the earlier "not populated /
   no finalizer" note was stale. Still true: API at `v1alpha1`.
-- **License inconsistency:** README says MIT; operator source headers say Apache-2.0
-  (`nextapp_types.go:4`) — pick one.
-- npm: packages are unified under the **`@getknext/*`** scope (`@getknext/core`, `@getknext/lib`, `@getknext/ui`)
-  — the earlier `@kn-next`/`@knative-next` drift is resolved. The `kn-next` CLI bin name is unchanged.
+- **(RESOLVED 2026-07-26, stale-doc fix)** The "license inconsistency: README says MIT" note was
+  **wrong** — nothing in the repo claims MIT. The apparent README hit is a substring match inside
+  `$CI_COMMIT_SHA` (`README.md:849`, `docs/ARCHITECTURE.md:627`). The licence is **Apache-2.0
+  everywhere and consistently**: root `LICENSE`, a per-package `LICENSE` in each of
+  `packages/{kn-next,lib,db}`, `"license": "Apache-2.0"` on all three publishable manifests, and the
+  operator source headers (`nextapp_types.go:4`). npm always includes `LICENSE` in a tarball
+  regardless of the `files` allowlist, so the published packages carry it. Nothing to pick; do not
+  re-file this as a pre-publish blocker.
+- npm: packages are unified under the **`@getknext/*`** scope. The **publishable** three are
+  `@getknext/core`, `@getknext/lib`, `@getknext/db` — they must ship together or consumers 404 on the
+  missing member. `@getknext/ui` is **private** and never publishes; don't list it as a released
+  package. The earlier `@kn-next`/`@knative-next` drift is resolved; the `kn-next` bin name is unchanged.
   **No npm release published yet** — that final `npm publish` step (requires npm auth) still blocks
   `npx kn-next` for outside users.
 - **(RESOLVED 2026-06-21)** The `kn-next` **TS CLI in `@getknext/core` (`packages/kn-next/src/cli`) is the
   single CLI of record.** The old Go `packages/cli` and the `admin`/`knext` packages have **no tracked
   files** (already gone from git) — the "duplicate CLI" was stale local cruft, not repo debt.
-  Caveat: the CLI is **Bun-only** (`#!/usr/bin/env bun`, imports `bun`), so `npx kn-next` requires Bun
-  installed; porting it to run under plain Node is the remaining E1 adoption work.
+  **(RESOLVED 2026-07-26, stale-doc fix)** The earlier "the CLI is Bun-only (`#!/usr/bin/env bun`,
+  imports `bun`), so `npx kn-next` requires Bun" caveat is **wrong for the shipped artifact** — do not
+  propagate it, and do not re-file "port the CLI to Node" as E1 work. The published bin is
+  `dist/cli/kn-next.js` (`packages/kn-next/package.json:10`), tsup-bundled from `src/cli/deploy.ts`
+  (`tsup.config.ts:25`); it carries `#!/usr/bin/env node`, every file in `src/cli/` has the same
+  Node shebang, and nothing under `src/cli/` imports `bun`. Proven, not just read: the
+  `install-smoke.yml` gate asserts **no bun on PATH**, then packs + `npm install`s the three tarballs
+  in a clean dir and runs `kn-next --help` to exit 0 (`scripts/install-smoke.mjs:212-223`), and
+  `packages/kn-next/src/__tests__/cli-node-runtime.test.ts` (18 tests) guards the whole claim locally —
+  Bun-free static closure, node shebang on every entry, `node kn-next.js <verb> --help` exit 0 for each
+  dispatched verb, plus node/bun output parity on the same bundle. So
+  `npx kn-next` works under plain Node the moment the packages are published. (Bun is still required
+  to run the CLI **from a source checkout**, where the TS is executed directly — that is a contributor
+  concern, not a consumer one.)
 
 ## 10. Hard rules (enforce in all work)
 Official adapter API, not Nitro reverse-engineering · operator = single source of truth ·
