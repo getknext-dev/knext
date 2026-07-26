@@ -1,6 +1,7 @@
 import { renderToStaticMarkup } from 'react-dom/server';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { observeWebVital, register } from '../../api/_metrics/registry';
+import { NO_DATA } from '../_ui/format';
 
 /**
  * P1.1 (obs-pages plan) / ADR-0038 — the /observability/web-vitals page:
@@ -79,5 +80,17 @@ describe('web-vitals page authorized render', () => {
     expect(html).toContain('1750');
     // Sample count for LCP is 4.
     expect(html).toMatch(/>4</);
+  });
+
+  it('marks vitals with no samples using the shared "no data yet" marker (#516)', async () => {
+    // Nothing observed for CLS/FCP/TTFB in this fresh registry.
+    authHeader.mockReturnValue('Bearer s3cret');
+
+    const html = await renderPage();
+
+    // The three pages must agree: an absent p75 is NEVER a bare dash (which
+    // reads like a measured zero).
+    expect(html).toContain(NO_DATA);
+    expect(html).not.toMatch(/>\s*[—–-]\s*</);
   });
 });
