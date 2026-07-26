@@ -18,6 +18,17 @@
 #
 # This is manual-only (workflow_dispatch) and relates to — does NOT close — #53.
 # Full runbook: docs/RELEASING.md.
+#
+# ┌─ DO NOT SHA-PIN-STRIP: KEEP THESE PINS (#522) ─────────────────────────┐
+# │ Every `uses:` below is pinned to a full 40-char commit SHA with the human    │
+# │ version in a trailing comment. Load-bearing, not style: publish-ghp runs     │
+# │ with `packages: write` and hands NODE_AUTH_TOKEN = GITHUB_TOKEN to the       │
+# │ publish step, so any action on a mutable ref in this file runs alongside a   │
+# │ live registry-write credential. Same rule security.md applies to container   │
+# │ images ("pin by digest; reject :latest"). Bumps come from Dependabot's       │
+# │ github-actions ecosystem (.github/dependabot.yml). Guarded by                │
+# │ tests/release-action-pins.test.ts.                                           │
+# └──────────────────────────────────────────────────────────────────────────────┘
 
 name: Release (GitHub Packages, interim)
 
@@ -45,15 +56,15 @@ jobs:
     if: github.repository == 'getknext-dev/knext'
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '24'
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -65,7 +76,7 @@ jobs:
         run: node scripts/audit-published.mjs
 
       - name: Upload JS SBOMs (CycloneDX)
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: npm-sbom-ghp
           path: sbom/*.cdx.json
@@ -85,10 +96,10 @@ jobs:
       core-version: ${{ steps.published-version.outputs.core-version }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '24'
           # Writes an .npmrc scoping @getknext-dev to GitHub Packages and wiring
@@ -97,7 +108,7 @@ jobs:
           scope: '@getknext-dev'
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -175,10 +186,10 @@ jobs:
       packages: read
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '24'
 
