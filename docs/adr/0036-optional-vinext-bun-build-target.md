@@ -233,6 +233,28 @@ RuntimeContract-entry routing bug is shared by both vinext cells.
     `.output/public` (~90–110 MB), not binary-only. **`bun-exec` status: recipe self-contained (#460
     resolved); the P1b distribution-separated-win A/B is now runnable and still PENDING** — no
     cold-start win is claimed until that A/B runs (and the ~600 ms regime also needs image caching).
+  - **P1b RECORD CORRECTION (2026-07-26, benchmark Run 24 — a record update, NOT an amendment to this
+    decision):**
+    1. **Run 17 is SUPERSEDED/CONFOUNDED and must not be cited as the P1b A/B result.** It states both
+       arms were deployed "0-CPU-request"; that was false for the node arm, which carried
+       `requests.cpu=100m` / `limits.cpu=1` (revision `p1b-node-00002`, created before Run 17 ran), so
+       it measured build target and CPU guarantee together on a cluster it itself calls "heavily
+       contended". A second confound Run 17 did not state: the arms used **different readiness probes**
+       (node `httpGet /api/health`, bun-exec a bare `tcpSocket`) — a tcpSocket probe passes as soon as
+       the process binds a listener, while an httpGet additionally requires serving a request, so the
+       arms were gated on different definitions of "ready", in bun's favour.
+    2. **The "~11 s intermittent tail" is TARGET-INDEPENDENT, not a node-arm property.** The
+       attribution above (sourced to run 16) is corrected: Run 24 measured the same tail at the same
+       magnitude on the **bun-exec** arm (10.42–10.77 s, sitting inside node's 10.28–11.01 s). This is
+       an existence claim, which the sample count supports; no claim is made about the *rate* in each
+       arm — Fisher's exact on the mode mix gives p = 0.37, consistent with chance at n=10.
+    3. **The P1b gate now has a PRECONDITION:** the tail must be understood or eliminated (ADR-0037
+       image-caching / pre-pull territory) before *any* end-to-end cold-start number from this cluster
+       can settle it. While the tail fires it swamps any runtime delta — Run 24's arms both span
+       ~1.7–11.0 s, so distribution separation is unreachable regardless of build target.
+    **`bun-exec` status is unchanged: PENDING.** Run 24 claims no win — its headline p50 delta
+    (10.47 s → 2.29 s) is explicitly an artifact of mode mix and is marked not-quotable; the fast-mode
+    delta (~470 ms) is provisional pending reproduction.
 - **P4 — compat gate.** Official compat suite against the bun image; document supported feature subset +
   fallback-to-node guidance.
 - **P5 — docs + benchmark.** User-facing "choosing a build target" page (qualitative); benchmark A/B.
