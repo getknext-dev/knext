@@ -40,11 +40,13 @@
   CR; operator reconciles.
 - **(RESOLVED 2026-07-26, stale-doc fix)** The "CLI must stop generating raw Knative manifests —
   `deploy.ts` mutates the cluster directly and the manifest generator hardcodes
-  `containerConcurrency: 100`" note is **done, not outstanding**. Verified: `deploy.ts`'s only
-  cluster mutation is `kubectl apply -f <NextApp CR>` (`deploy.ts:401`), its header documents the
-  removal of both the raw-ksvc apply (was :176) and the infrastructure-manifest apply (was :153),
-  `packages/kn-next/src/generators/` contains only `loadtest-job.ts` (no `knative-manifest.ts`), and
-  `cr-builder.ts` builds the CR. Do not re-file consolidation as open work.
+  `containerConcurrency: 100`" note is **done, not outstanding**, and the invariant holds in its
+  strong form: **every CLI cluster write targets the `NextApp` CR and nothing else** —
+  `deploy.ts:500` (apply), `preview.ts:175` (apply), `db-bind.ts:383` (`patch nextapp`). No raw
+  Knative objects anywhere. `deploy.ts`'s header documents the removal of both the raw-ksvc apply
+  (was :176) and the infrastructure-manifest apply (was :153); `packages/kn-next/src/generators/`
+  contains only `loadtest-job.ts` (no `knative-manifest.ts`); `cr-builder.ts` builds the CR. Do not
+  re-file consolidation as open work.
 - **Known gap that consolidation did NOT close (see `docs/V1_ROADMAP.md` §2.1):** `cr-builder.ts:364`
   hardcodes `apiVersion: apps.kn-next.dev/v1alpha1` and nothing in `src/cli/` negotiates the version
   against the cluster, so a newer CLI can emit a field an older operator's CRD does not know.
@@ -113,13 +115,10 @@ defer bucket 1.
 - **(RESOLVED)** Image optimization is **implemented** per ADR-0006
   (`packages/kn-next/src/adapters/image-cache-sync.ts` + tests) — the earlier "missing / biggest
   functional gap" note is stale; don't re-propose it as a work item.
-  **But implemented ≠ gated (2026-07-26):** `compat-smoke` check `(g)` calls `skip()` when the image
-  optimizer returns a non-200 (`apps/file-manager/scripts/compat-smoke.mjs:263`), so the suite
-  **cannot catch an image-optimization regression** — a broken optimizer skips rather than fails.
-  Three sibling rows are unbacked the same way and `docs/compat-matrix.md` is honest about each: ISR
-  runs with `REDIS_URL=""` and asserts nothing about revalidate-freshness (⚠️), Server Actions are
-  "configured, not verified" (⚠️), streaming/Suspense has no evidence at all (❌). Converting these
-  four to hard, red-on-fail checks is a v1.0 blocker (`docs/V1_ROADMAP.md` §3).
+  **But implemented ≠ gated:** its `compat-smoke` check skips rather than fails, as do three sibling
+  capability rows. `docs/compat-matrix.md` is the single source of truth for which rows are actually
+  backed by a red-on-fail check — read it there rather than duplicating the detail here, and see
+  `docs/V1_ROADMAP.md` §3, which makes converting them a v1.0 blocker.
 - **(RESOLVED 2026-06-20)** `packages/kn-next/src/adapters/node-server.ts` is **Nitro-free** — it
   spawns the standalone `server.js` (`STANDALONE_SERVER_PATH`, default `.next/standalone/server.js`),
   no `.output/server`/`index.mjs`. Enforced by `adapter-migration.test.ts` (asserts no `.output/server`).
