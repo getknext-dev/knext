@@ -398,7 +398,51 @@ export async function deploy() {
     writeFileSync(crPath, crYaml, "utf-8");
 
     log.info({ cr: crPath }, "Applying NextApp CR to cluster...");
-    runInherit(["kubectl", "apply", "-f", crPath, "-n", options.namespace]);
+    // `--validate=strict` is passed EXPLICITLY, not inherited.
+    //
+    // Measured on a live cluster (server-side dry-run, structural CRD): with
+    // strict validation the apiserver REJECTS a field the CRD does not know
+    // (`Error from server (BadRequest): ... strict decoding error: unknown
+    // field "…"`), while `--validate=ignore` accepts the object and PRUNES the
+    // field silently. A pruned `spec.security.networkPolicy` is a security
+    // invariant downgraded to a no-op on a CR that still reports Ready=True.
+    //
+    // kubectl's own default has been `strict` since 1.25, so the common case
+    // was already protected — but only by an EXTERNAL BINARY'S DEFAULT, which
+    // vanishes silently under an old kubectl, a shell alias, a kubeconfig-level
+    // default, or a wrapper passing `--validate=ignore`. Asserting the flag
+    // makes the guarantee knext's. `kn-next doctor` reports when the local
+    // client is too old for the flag to mean anything.
+    try {
+        runInherit([
+            "kubectl",
+            "apply",
+            "--validate=strict",
+            "-f",
+            crPath,
+            "-n",
+            options.namespace,
+        ]);
+    } catch (err) {
+        // Never swallow a rejected apply — the most likely cause is a field
+        // skew (operator CRD older than this CLI), which kubectl reports as
+        // `strict decoding error: unknown field "…"`. kubectl's own stderr has
+        // already streamed to the terminal (runInherit inherits stdio); this
+        // wrapper adds the diagnosis and the check, and keeps the original
+        // error as `cause`.
+        throw new Error(
+            "kubectl apply of the NextApp CR was REJECTED (kubectl's error is printed above).\n" +
+                'If it reads `strict decoding error: unknown field "spec…"`, the installed ' +
+                "NextApp CRD is older than this CLI and does not know that field — the apply is " +
+                "rejected (deliberately: kn-next applies with --validate=strict) rather than the " +
+                "field being silently pruned. Check the installed CRD and upgrade the operator " +
+                "bundle to match this CLI:\n" +
+                "  kubectl get crd nextapps.apps.kn-next.dev -o jsonpath='{.spec.versions[*].name}'\n" +
+                "  kubectl -n kn-next-operator-system get deploy -o wide   # operator image\n" +
+                "  kn-next doctor",
+            { cause: err },
+        );
+    }
 
     // Wait briefly for the operator to begin reconciling, then read the URL.
     const result = runCapture([

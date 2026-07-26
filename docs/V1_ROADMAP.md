@@ -58,12 +58,33 @@ its own risk.
 ## 2. The failure modes that block 1.0
 
 ### 2.1 A CR applied against an older operator — the worst mode in the system
-The CRD is structural and carries **no** `x-kubernetes-preserve-unknown-fields`, so the apiserver
-**prunes unknown fields without error**. A user on a newer `@getknext/core` who sets
-`spec.security.networkPolicy` against an older operator gets: apply **accepted**, field **silently
-dropped**, `NextApp` **`Ready=True`** — a security invariant downgraded to a no-op, reported as
-success. Nothing mitigates this today: no version negotiation anywhere in `src/cli/`, and
-`doctor.ts` checks only that the CRD *exists*, not its schema.
+The CRD is structural and carries **no** `x-kubernetes-preserve-unknown-fields`, so an unknown field
+is dropped rather than stored. A user on a newer `@getknext/core` who sets
+`spec.security.networkPolicy` against an older operator would get: apply **accepted**, field
+**silently dropped**, `NextApp` **`Ready=True`** — a security invariant downgraded to a no-op,
+reported as success.
+
+**Corrected by measurement (live cluster, server-side dry-run against the structural CRD):** whether
+the field is pruned depends entirely on the *validation mode of the apply*, not on the CRD:
+
+- `kubectl apply --validate=strict` — the apiserver **REJECTS** the object:
+  `Error from server (BadRequest): … strict decoding error: unknown field "spec.…"`.
+- `kubectl apply --validate=ignore` — accepted, field pruned, no error.
+
+`strict` has been kubectl's default since 1.25 (server-side field validation GA in 1.27), so the
+common case was already protected — but only by **an external binary's default**, which disappears
+silently under an old kubectl, a shell alias, a kubeconfig default, or a wrapper passing
+`--validate=ignore`.
+
+**Mitigation landed:** `deploy.ts` now passes `--validate=strict` **explicitly** on the CR apply
+(the guarantee is knext's, not the user's kubectl's) and surfaces an actionable "the operator's CRD
+may be older than this CLI" message when the apply is rejected; `kn-next doctor` reports when the
+local client is older than v1.25, where that flag value does not exist.
+
+**Residual, not closed:** a programmatic client that applies the CR without kubectl, and any
+apiserver too old for server-side field validation. `doctor` still checks only that the CRD
+*exists*, not that its schema covers every field this CLI emits — the schema-diff preflight (#314)
+remains the complete fix.
 
 ### 2.2 Operator upgrade while CRs exist
 `config/webhook/manifests.yaml` sets `failurePolicy: Fail` on a webhook served by the operator
