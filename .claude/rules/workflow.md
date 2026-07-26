@@ -5,17 +5,76 @@ The standing pipeline for any non-trivial change. Complements `architecture.md` 
 
 Until now this lived only in session context, which is why its last step kept being skipped.
 
-## The pipeline
+## Sprint model — the architect and system designer meet ONCE per sprint
 
-1. **Plan** — architect + system designer, *before* implementing. Both pinned to Opus; subagents
-   otherwise inherit the session model and silently downgrade on a task where judgement is the
-   product. Skip only for changes with no design content (a generated version bump, a Dependabot
-   PR, a typo).
+Running both design gates on every PR does not scale: a single one-file change here consumed six
+Opus gate runs. They found real defects every time, so the answer is not to drop them — it is to
+**move them from per-PR to per-sprint, and keep a trigger that pulls them back in.**
+
+**Sprint planning (once, both gates, Opus).** Produces one artifact: a **task graph** — the sprint's
+scope, each task's exit criteria, and the **dependency edges** between them. This is where the
+expensive judgement is spent, and spending it here is what buys the parallelism below. The plan
+must also name, explicitly, which tasks are expected to touch the escalation triggers.
+
+**During the sprint, teams do not re-summon the design gates** — except on a trigger. A team hitting
+one stops and escalates rather than deciding for itself:
+
+- a change that contradicts, or would require amending, an **ADR**;
+- a **security invariant** (`security.md`) — auth, secrets, supply chain, cluster-write surface;
+- the **public API**, `kn-next.config.ts` schema, CLI surface, or the **CRD**;
+- a **discovered fact that invalidates the sprint plan** — the most important trigger and the one
+  most likely to be rationalised away. Measuring something that contradicts the plan's premise is
+  not a reason to quietly adjust; it is a reason to stop. (A measurement this project ran collapsed
+  a planned subsystem into a single flag — worth far more than the plan it broke.)
+
+**Sprint close (once, both gates).** Review the sprint's aggregate, not each PR: did the task graph
+hold, what did the escalations reveal, which exit criteria are actually met.
+
+### Per-PR, always — this is what is NOT reduced
+
+Code review and spec review run on **every** PR. They are cheap, parallelisable, and they are what
+caught the defects here. **Reviewers hold the escalation power**: a reviewer who believes a change
+crosses a trigger says so, and the design gate is summoned for that PR. The saving comes from not
+running design gates by default — never from running fewer reviews.
+
+### Be honest about what this trades
+
+Per-sprint design review means an architectural mistake can live for a sprint instead of a PR. That
+is acceptable **only** because the triggers above are enforced and because the task graph was
+designed up front. It stops being acceptable the moment teams start deciding for themselves that a
+trigger "doesn't really apply" — which is the failure mode to watch for, not gate latency.
+
+## Parallel teams
+
+Work the task graph, not the backlog order.
+
+- **Independent tasks run concurrently**, one team each. A team is an implementer plus its two
+  reviewers, running the per-PR half of the pipeline.
+- **Dependent tasks wait.** If B's exit criteria depend on A's behaviour, B does not start on a
+  guess about A.
+- **Disjoint blast radius is a hard requirement, not a preference.** Two teams must not hold the
+  same file, and preferably not the same package. Overlap on a shared module (`_prom/query.ts`
+  here) means one team owns it and the other consumes the result.
+- **`isolation: "worktree"` is mandatory for concurrent implementers.** Without it they `git switch`
+  in a shared tree and corrupt each other's state — this has happened here.
+- **One branch, one worktree.** Two worktrees on a branch forces `--ignore-other-worktrees` and
+  leaves a stale copy that later reads as authoritative.
+- **Serialise anything that mutates shared external state.** Two benchmark runs against the same
+  cluster silently invalidate each other — concurrent traffic keeps pods warm, so a "cold" start is
+  not cold. Cluster work is a queue of one regardless of how many teams are running.
+
+## The pipeline (per task)
+
+1. **Plan** — from the sprint task graph. Design gates only at sprint boundaries or on a trigger
+   above. Both pinned to Opus when summoned; subagents otherwise inherit the session model and
+   silently downgrade on a task where judgement is the product.
 2. **Implement — TDD.** Failing test first, for the reason you expect it to fail. Then make it pass.
 3. **Verify on OKE** for any feature or critical update. Standing requirement, not optional.
 4. **Review** — code review *and* spec review, in parallel.
-5. **Sign off** — architect *and* system designer, both Opus-pinned. A gate returning `BLOCK` or
-   `ISSUES_FOUND` means another round, not a judgement call about whether it matters.
+5. **Sign off** — normally the two reviews above are the gate. Summon architect and/or system
+   designer **only** when a trigger fired or a reviewer escalated; the sprint-close review covers
+   the rest. Whatever gates ran, a `BLOCK` or `ISSUES_FOUND` means another round — never a
+   judgement call about whether it matters, and never "the sprint plan already approved this".
 6. **Merge** on clearance.
 7. **Clean up** — see below. This step is part of the workflow, not housekeeping after it.
 
