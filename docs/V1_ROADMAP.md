@@ -58,12 +58,70 @@ its own risk.
 ## 2. The failure modes that block 1.0
 
 ### 2.1 A CR applied against an older operator — the worst mode in the system
-The CRD is structural and carries **no** `x-kubernetes-preserve-unknown-fields`, so the apiserver
-**prunes unknown fields without error**. A user on a newer `@getknext/core` who sets
-`spec.security.networkPolicy` against an older operator gets: apply **accepted**, field **silently
-dropped**, `NextApp` **`Ready=True`** — a security invariant downgraded to a no-op, reported as
-success. Nothing mitigates this today: no version negotiation anywhere in `src/cli/`, and
-`doctor.ts` checks only that the CRD *exists*, not its schema.
+The CRD is structural and carries **no** `x-kubernetes-preserve-unknown-fields`, so an unknown field
+is dropped rather than stored. Take a field the CLI really emits and that an older CRD plausibly
+predates: a user on a newer `@getknext/core` who sets `spec.database.roSecretRef` against an older
+operator would get apply **accepted**, field **silently dropped**, `NextApp` **`Ready=True`** — and
+because `DATABASE_URL_RO` is then never injected, `getDbRO()` falls back to the writer pool
+(`packages/db/src/index.ts`) and staleness-tolerant reads run on the read-**write** primary
+credential. A least-privilege downgrade, reported as success.
+
+**Corrected by measurement (live cluster, server-side dry-run against the structural CRD):** whether
+the field is pruned depends entirely on the *validation mode of the apply*, not on the CRD:
+
+- `kubectl apply --validate=strict` — the apiserver **REJECTS** the object:
+  `Error from server (BadRequest): … strict decoding error: unknown field "spec.…"`.
+- `kubectl apply --validate=ignore` — accepted, field pruned, no error.
+
+`strict` has been kubectl's default since 1.25 (server-side field validation GA in 1.27), so the
+common case was already protected — but only by **an external binary's default**. Two vectors take
+that away, and only two: an **old kubectl** on PATH, or a **wrapper/shim binary named `kubectl`**
+(asdf/krew/kubie shims, corporate wrappers) that passes `--validate=ignore`. A shell alias is *not*
+one — the CLI spawns kubectl through `execFile` with `shell: false`, so no interactive alias is ever
+in the path — and kubectl exposes no kubeconfig key or environment variable for `--validate`.
+
+**Mitigation landed:** **every** `kubectl apply` the CLI issues now passes `--validate=strict`
+explicitly — the prod CR apply (`deploy.ts`), the preview CR apply (`preview.ts`, the path CI runs
+most often), and the k6 load-test Job (`loadtest.ts`) — so the guarantee is knext's, not the user's
+kubectl's. A failed apply is rewrapped with a diagnosis that names a cause only when knext can
+establish one (see the kubectl ≤ 1.24 residual) and otherwise offers a differential; `kn-next
+doctor` reports when the local client is older than v1.25, where that flag value does not exist.
+A generalised argv guard (`cr-apply-strict-validation.test.ts`) scans source rather than
+enumerating call sites — enumerating is exactly how `preview.ts` was missed the first time. Its
+scope is precise: the `*.ts` files **directly inside** `packages/kn-next/src/cli/` (top level, no
+recursion), which is where all three applies live today; nothing outside that directory is checked.
+Within it the guard is per-**site**, not per-file: every quoted `apply` verb must correspond to an
+argv the scanner parsed and asserted, so a fourth apply site — including a second one in an
+already-covered file, or one written in a construct the scanner cannot read — fails the suite
+instead of slipping through.
+
+**Residual, not closed:**
+
+- **GitOps controllers — name them, because "programmatic client" understates this.** Argo CD's
+  apply and Flux's kustomize-controller server-side apply do **not** assert strict field validation
+  by default, so a GitOps-managed `NextApp` is still prunable. That is the mainstream production
+  path, not an edge case. (`kubectl apply --server-side` and `kubectl replace` *are* covered — both
+  set `fieldValidation=Strict` from kubectl 1.25.)
+- **kubectl ≤ 1.24 users** fail at flag parsing rather than being protected — `--validate` is a
+  boolean before 1.25, so `deploy` errors before contacting the apiserver. This is a **behaviour
+  change**: deploys that previously succeeded on kubectl ≤ 1.24 now hard-fail. Fail-closed is the
+  right call (1.24 is long EOL); it is surfaced by `doctor`, and on a failed apply `deploy` probes
+  the local client so it reports *the client is too old* rather than blaming the CRD.
+- **A `kubectl` shim on PATH still wins.** pflag takes the **last** occurrence of a string flag, so a
+  wrapper appending `--validate=ignore` overrides knext's argv, and `exec.ts` hardcodes the binary
+  name with no path/digest pinning. The flag guarantees knext's own argv, not the binary that
+  receives it.
+- `doctor` still checks only that the CRD *exists*, not that its schema covers every field this CLI
+  emits — the schema-diff preflight (#314) remains the complete fix.
+
+Not a gap: an apiserver too old for server-side field validation. kubectl ≥ 1.25 falls back to
+client-side OpenAPI schema validation, which still catches an unknown CRD field.
+
+**Upgrade ordering is now load-bearing and undocumented.** Strict validation makes a
+newer-CLI-against-older-CRD apply fail loudly instead of silently dropping the field, so the
+required order is **operator/CRD first, then CLI**. knext documents no ordering anywhere today
+(`db-bind` merely assumes it in an error string). This PR does not create the skew — it makes it
+visible — but the ordering belongs in the release-channel doc (ADR-0020) as one sentence.
 
 ### 2.2 Operator upgrade while CRs exist
 `config/webhook/manifests.yaml` sets `failurePolicy: Fail` on a webhook served by the operator
@@ -180,4 +238,7 @@ CRD `v1beta1` + conversion webhook · node-pressure eviction behaviour · GKE/AK
   raw manifest generator is gone from `src/generators/`.
 - `CLAUDE.md` lists image optimization as RESOLVED. It is **implemented but not gated** — check
   `(g)` skips rather than fails.
-- #314's title still says `@knext/*`; the scope is `@getknext/*`.
+- #314's title still names the **retired** npm scope; the published scope is `@getknext/*`. (Spelled
+  this way deliberately: `tests/npm-scope-getknext.test.ts` fails any tracked file that contains the
+  retired scope literally, so even a "this one is stale" citation of it re-introduces the string the
+  guard exists to keep out. Describe it, do not quote it.)

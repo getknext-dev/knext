@@ -25,6 +25,7 @@ import {
     type ManifestProbeFn,
     parseDoctorArgs,
     parseImageRef,
+    parseKubectlClientVersion,
     probeManifest,
     runDoctor,
 } from "../cli/doctor";
@@ -76,6 +77,17 @@ function healthyStubs(): Record<
 > {
     return {
         "kubectl get --raw /version": { ok: true, stdout: "{}" },
+        // (g) local client version — modern enough for --validate=strict.
+        "kubectl version --client -o json": {
+            ok: true,
+            stdout: JSON.stringify({
+                clientVersion: {
+                    major: "1",
+                    minor: "31",
+                    gitVersion: "v1.31.2",
+                },
+            }),
+        },
         "kubectl get crd nextapps.apps.kn-next.dev -o json": {
             ok: true,
             stdout: JSON.stringify({
@@ -130,6 +142,7 @@ describe("runDoctor — healthy cluster", () => {
         const ids = report.checks.map((c) => c.id);
         expect(ids).toEqual([
             "cluster",
+            "kubectl-validation",
             "crd",
             "operator",
             "cert-manager",
@@ -380,6 +393,235 @@ describe("runDoctor — check (f) Knative Serving", () => {
             probeImage: okProbe,
         });
         expect(byId(report.checks).knative.status).toBe("fail");
+    });
+});
+
+// ---------------------------------------------------------------------------
+// (g) client kubectl strict-validation support.
+//
+// `kn-next deploy` now passes `--validate=strict` EXPLICITLY on the NextApp CR
+// apply, so a field the operator's CRD does not know (e.g. `spec.database.roSecretRef`
+// against a CRD that predates it) is REJECTED by the apiserver, not silently pruned.
+// That flag VALUE only exists from kubectl v1.25 — on an older client the deploy
+// cannot assert strict validation at all. This check is purely LOCAL (kubectl
+// version --client) and read-only, so it runs even when the cluster is
+// unreachable.
+// ---------------------------------------------------------------------------
+const VERSION_KEY = "kubectl version --client -o json";
+
+const clientVersionJson = (gitVersion: string, major = "", minor = "") =>
+    JSON.stringify({
+        clientVersion: {
+            ...(major ? { major } : {}),
+            ...(minor ? { minor } : {}),
+            gitVersion,
+        },
+    });
+
+describe("runDoctor — check (g) kubectl strict-validation support", () => {
+    it("passes on a modern client and says the deploy asserts --validate=strict", async () => {
+        const stubs = healthyStubs();
+        stubs[VERSION_KEY] = {
+            ok: true,
+            stdout: clientVersionJson("v1.31.2", "1", "31"),
+        };
+        const report = await runDoctor({
+            kubectl: stubKubectl(stubs),
+            probeImage: okProbe,
+        });
+        const check = byId(report.checks)["kubectl-validation"];
+        expect(check.status).toBe("pass");
+        expect(check.detail).toMatch(/1\.31/);
+        expect(check.detail).toMatch(/--validate=strict/);
+        expect(report.exitCode).toBe(0);
+    });
+
+    it("passes at the v1.25.0 boundary exactly (the release that introduced the flag value)", async () => {
+        const stubs = healthyStubs();
+        stubs[VERSION_KEY] = { ok: true, stdout: clientVersionJson("v1.25.0") };
+        const report = await runDoctor({
+            kubectl: stubKubectl(stubs),
+            probeImage: okProbe,
+        });
+        expect(byId(report.checks)["kubectl-validation"].status).toBe("pass");
+    });
+
+    it("FAILS on v1.24.17 — one minor below the boundary — and names the upgrade", async () => {
+        const stubs = healthyStubs();
+        stubs[VERSION_KEY] = {
+            ok: true,
+            stdout: clientVersionJson("v1.24.17"),
+        };
+        const report = await runDoctor({
+            kubectl: stubKubectl(stubs),
+            probeImage: okProbe,
+        });
+        const check = byId(report.checks)["kubectl-validation"];
+        expect(check.status).toBe("fail");
+        expect(check.detail).toMatch(/1\.24\.17/);
+        expect(check.detail).toMatch(/1\.25/);
+        expect(check.hint).toMatch(/upgrade/i);
+        // A client that cannot strictly validate must not report green.
+        expect(report.exitCode).toBe(1);
+    });
+
+    it("compares MAJOR too — a v0.x client fails and a v2.x client passes", async () => {
+        const old = healthyStubs();
+        old[VERSION_KEY] = { ok: true, stdout: clientVersionJson("v0.99.0") };
+        const oldReport = await runDoctor({
+            kubectl: stubKubectl(old),
+            probeImage: okProbe,
+        });
+        expect(byId(oldReport.checks)["kubectl-validation"].status).toBe(
+            "fail",
+        );
+
+        const future = healthyStubs();
+        future[VERSION_KEY] = { ok: true, stdout: clientVersionJson("v2.0.0") };
+        const futureReport = await runDoctor({
+            kubectl: stubKubectl(future),
+            probeImage: okProbe,
+        });
+        expect(byId(futureReport.checks)["kubectl-validation"].status).toBe(
+            "pass",
+        );
+    });
+
+    it("reads distro-suffixed and non-numeric-minor builds (v1.29.3-eks-…, minor '27+')", async () => {
+        const eks = healthyStubs();
+        eks[VERSION_KEY] = {
+            ok: true,
+            stdout: clientVersionJson("v1.29.3-eks-a1b2c3", "1", "29+"),
+        };
+        const eksReport = await runDoctor({
+            kubectl: stubKubectl(eks),
+            probeImage: okProbe,
+        });
+        expect(byId(eksReport.checks)["kubectl-validation"].status).toBe(
+            "pass",
+        );
+
+        const gke = healthyStubs();
+        gke[VERSION_KEY] = {
+            ok: true,
+            stdout: clientVersionJson("v1.22.17-gke.3400", "1", "22+"),
+        };
+        const gkeReport = await runDoctor({
+            kubectl: stubKubectl(gke),
+            probeImage: okProbe,
+        });
+        expect(byId(gkeReport.checks)["kubectl-validation"].status).toBe(
+            "fail",
+        );
+    });
+
+    // The gitVersion regex above always matches when gitVersion is present, so
+    // the DISCRETE-field fallback (the `Number.parseInt("29+")` strip) is only
+    // reached when gitVersion is ABSENT — a shape some vendored/managed clients
+    // really emit, and one no test exercised before.
+    it("falls back to the discrete major/minor fields when gitVersion is absent", async () => {
+        const noGit = (major: string, minor: string) =>
+            JSON.stringify({ clientVersion: { major, minor } });
+
+        expect(parseKubectlClientVersion(noGit("1", "29+"))).toEqual({
+            major: 1,
+            minor: 29,
+            display: "v1.29",
+        });
+        expect(parseKubectlClientVersion(noGit("1", "24+"))).toEqual({
+            major: 1,
+            minor: 24,
+            display: "v1.24",
+        });
+        // Nothing numeric anywhere → undefined, so the caller WARNs.
+        expect(
+            parseKubectlClientVersion(noGit("stable", "unknown")),
+        ).toBeUndefined();
+
+        const modern = healthyStubs();
+        modern[VERSION_KEY] = { ok: true, stdout: noGit("1", "29+") };
+        const modernReport = await runDoctor({
+            kubectl: stubKubectl(modern),
+            probeImage: okProbe,
+        });
+        const pass = byId(modernReport.checks)["kubectl-validation"];
+        expect(pass.status).toBe("pass");
+        expect(pass.detail).toMatch(/v1\.29/);
+
+        const old = healthyStubs();
+        old[VERSION_KEY] = { ok: true, stdout: noGit("1", "24+") };
+        const oldReport = await runDoctor({
+            kubectl: stubKubectl(old),
+            probeImage: okProbe,
+        });
+        const fail = byId(oldReport.checks)["kubectl-validation"];
+        expect(fail.status).toBe("fail");
+        expect(fail.detail).toMatch(/v1\.24/);
+    });
+
+    it("WARNS (never fails, never lies) when the version cannot be determined", async () => {
+        for (const bad of [
+            { ok: false, stderr: "exec: kubectl: not found" },
+            { ok: true, stdout: "not json at all" },
+            { ok: true, stdout: JSON.stringify({ clientVersion: {} }) },
+        ]) {
+            const stubs = healthyStubs();
+            stubs[VERSION_KEY] = bad;
+            const report = await runDoctor({
+                kubectl: stubKubectl(stubs),
+                probeImage: okProbe,
+            });
+            const check = byId(report.checks)["kubectl-validation"];
+            expect(check.status, JSON.stringify(bad)).toBe("warn");
+            expect(check.detail).toMatch(/could not determine|unknown/i);
+            expect(report.exitCode).toBe(0);
+        }
+    });
+
+    it("is LOCAL: it still runs (does not SKIP) when the cluster is unreachable", async () => {
+        const kubectl: KubectlFn = (args) => {
+            if (args.join(" ") === VERSION_KEY) {
+                return {
+                    ok: true,
+                    stdout: clientVersionJson("v1.30.0"),
+                    stderr: "",
+                };
+            }
+            return {
+                ok: false,
+                stdout: "",
+                stderr: "The connection to the server 10.0.0.1:6443 was refused",
+            };
+        };
+        const report = await runDoctor({ kubectl, probeImage: okProbe });
+        const check = byId(report.checks)["kubectl-validation"];
+        expect(check.status).toBe("pass");
+        expect(report.exitCode).toBe(0);
+    });
+
+    it("is READ-ONLY: the only kubectl verbs doctor runs are get/version", async () => {
+        const seen: string[][] = [];
+        const kubectl: KubectlFn = (args) => {
+            seen.push([...args]);
+            const key = args.join(" ");
+            if (key === VERSION_KEY) {
+                return {
+                    ok: true,
+                    stdout: clientVersionJson("v1.30.0"),
+                    stderr: "",
+                };
+            }
+            const hit = healthyStubs()[key];
+            return {
+                ok: hit?.ok ?? false,
+                stdout: hit?.stdout ?? "",
+                stderr: hit?.stderr ?? "",
+            };
+        };
+        await runDoctor({ kubectl, probeImage: okProbe });
+        for (const argv of seen) {
+            expect(["get", "version"]).toContain(argv[1]);
+        }
     });
 });
 
