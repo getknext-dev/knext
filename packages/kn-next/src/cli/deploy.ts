@@ -466,8 +466,11 @@ export async function deploy() {
 
     log.info({ cr: crPath }, "Applying NextApp CR to cluster...");
     // `--validate=strict` is passed EXPLICITLY, not inherited. Every other
-    // `kubectl apply` this CLI issues does the same (preview.ts, loadtest.ts);
-    // the argv guard in cr-apply-strict-validation.test.ts scans for new ones.
+    // `kubectl apply` this CLI issues does the same (preview.ts, loadtest.ts).
+    // The argv guard in cr-apply-strict-validation.test.ts scans the `*.ts`
+    // files directly inside `src/cli/` (top level, no recursion — that is where
+    // all three live) and fails on any quoted `apply` verb it cannot match to a
+    // parsed argv carrying the flag, so a new site cannot slip through silently.
     //
     // Measured on a live cluster (server-side dry-run, structural CRD): with
     // strict validation the apiserver REJECTS a field the CRD does not know

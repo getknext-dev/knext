@@ -86,9 +86,14 @@ most often), and the k6 load-test Job (`loadtest.ts`) — so the guarantee is kn
 kubectl's. A failed apply is rewrapped with a diagnosis that names a cause only when knext can
 establish one (see the kubectl ≤ 1.24 residual) and otherwise offers a differential; `kn-next
 doctor` reports when the local client is older than v1.25, where that flag value does not exist.
-A generalised argv guard (`cr-apply-strict-validation.test.ts`) scans **every** `kubectl apply`
-literal under `src/cli/`, so a fourth apply site added later fails the suite rather than slipping
-through — enumerating the known call sites is exactly how `preview.ts` was missed the first time.
+A generalised argv guard (`cr-apply-strict-validation.test.ts`) scans source rather than
+enumerating call sites — enumerating is exactly how `preview.ts` was missed the first time. Its
+scope is precise: the `*.ts` files **directly inside** `packages/kn-next/src/cli/` (top level, no
+recursion), which is where all three applies live today; nothing outside that directory is checked.
+Within it the guard is per-**site**, not per-file: every quoted `apply` verb must correspond to an
+argv the scanner parsed and asserted, so a fourth apply site — including a second one in an
+already-covered file, or one written in a construct the scanner cannot read — fails the suite
+instead of slipping through.
 
 **Residual, not closed:**
 

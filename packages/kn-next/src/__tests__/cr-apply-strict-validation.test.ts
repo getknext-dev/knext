@@ -1,7 +1,7 @@
 /**
- * EVERY `kubectl apply` this CLI can issue must ASSERT strict field validation
- * — it must not inherit it from whatever `kubectl` happens to be on the user's
- * PATH.
+ * Every `kubectl apply` issued from `packages/kn-next/src/cli/*.ts` must ASSERT
+ * strict field validation — it must not inherit it from whatever `kubectl`
+ * happens to be on the user's PATH.
  *
  * Empirically (live cluster, server-side dry-run against the structural CRD):
  *   - `kubectl apply --validate=strict` (kubectl's own default since 1.25)
@@ -29,10 +29,16 @@
  * Passing the flag explicitly makes the guarantee knext's for the argv knext
  * controls.
  *
- * The argv guard below is GENERALISED on purpose — it scans every `kubectl
- * apply` argv literal under `src/cli/` instead of enumerating known call sites,
- * because enumerating is precisely how the `preview deploy` apply was missed
- * the first time. A third apply site added later must fail this suite.
+ * The argv guard below is GENERALISED on purpose — instead of enumerating the
+ * known call sites (precisely how the `preview deploy` apply was missed the
+ * first time) it scans source. Its exact, non-recursive scope: the `*.ts` files
+ * directly inside `packages/kn-next/src/cli/` (`readdirSync`, top level only) —
+ * that is where every apply this CLI issues lives today, and nothing outside it
+ * is checked. Within that scope the guard is per-SITE: every quoted `apply`
+ * verb must correspond to an argv the scanner actually parsed and asserted, so
+ * a later apply site — including a second one in an already-covered file, or
+ * one written in a construct the scanner cannot read — fails this suite rather
+ * than slipping through.
  *
  * Hermetic — every side-effecting seam of deploy.ts is module-mocked (same
  * pattern as deploy-orchestrator.test.ts); no cluster, no docker, no build.
@@ -240,13 +246,13 @@ function scanApplySites(file: string, rawSource: string): ApplySite[] {
         if (end < 0) continue;
         const region = src.slice(i + 1, end);
         if (region.includes("[")) continue; // not a flat argv literal
-        const args = [...region.matchAll(/(['"])((?:\\.|(?!\1).)*)\1/g)].map(
+        const args = [...region.matchAll(/(['"`])((?:\\.|(?!\1).)*)\1/g)].map(
             (m) => m[2] as string,
         );
         const isApplyArgv =
             (args[0] === "kubectl" && args[1] === "apply") ||
             (args[0] === "apply" &&
-                /["']kubectl["']\s*,\s*$/.test(src.slice(0, i)));
+                /["'`]kubectl["'`]\s*,\s*$/.test(src.slice(0, i)));
         if (!isApplyArgv) continue;
         sites.push({
             file,
@@ -255,6 +261,25 @@ function scanApplySites(file: string, rawSource: string): ApplySite[] {
         });
     }
     return sites;
+}
+
+/**
+ * Every occurrence of the bare verb literal `apply` — in ANY quote form
+ * (`'apply'`, `"apply"`, `` `apply` ``) — in comment-stripped source.
+ *
+ * This is the counting half of the anti-vacuity guard: `scanApplySites` only
+ * understands ONE construct (a flat argv array literal), so anything else that
+ * spawns an apply — `argv.push("apply", …)`, `execFileSync(BIN, ["apply", …])`
+ * with a non-literal binary, an argv containing a nested `[` — is invisible to
+ * it. Counting the verb makes those constructs FAIL LOUDLY (literal present,
+ * no parsed site) instead of passing silently, which is the whole point.
+ */
+function applyVerbLines(src: string): number[] {
+    const out: number[] = [];
+    for (const m of src.matchAll(/(['"`])apply\1/g)) {
+        out.push(src.slice(0, m.index).split("\n").length);
+    }
+    return out;
 }
 
 describe("kubectl apply — asserted strict field validation at EVERY call site", () => {
@@ -292,18 +317,30 @@ describe("kubectl apply — asserted strict field validation at EVERY call site"
         }
     });
 
-    it("the scanner sees every file that spawns kubectl apply (no silent parse miss)", () => {
+    it("every `apply` verb literal in src/cli/*.ts is a site the scanner parsed (an unparsed construct fails, it does not slip through)", () => {
         const sources = readCliSources();
+        // Per-SITE, not per-file: a SECOND apply in an already-covered file
+        // used to be satisfied by the first one. The verb count must match the
+        // parsed-site count in EVERY file, so an apply the parser cannot see
+        // (`.push("apply", …)`, `execFileSync(BIN, ["apply", …])`, a nested
+        // `[` in the argv, a backticked verb) fails here instead of hiding.
         for (const [name, raw] of sources) {
-            const src = stripComments(raw);
-            const spawnsApply =
-                /["']kubectl["']/.test(src) && /["']apply["']/.test(src);
-            if (!spawnsApply) continue;
+            const verbLines = applyVerbLines(stripComments(raw));
+            const sites = scanApplySites(name, raw);
             expect(
-                scanApplySites(name, raw).length,
-                `${name} spawns a kubectl apply the argv scanner failed to parse`,
-            ).toBeGreaterThan(0);
+                verbLines.length,
+                `${name}: ${verbLines.length} \`apply\` verb literal(s) (line(s) ${verbLines.join(", ") || "-"}) but only ${sites.length} argv the scanner could parse (line(s) ${sites.map((s) => s.line).join(", ") || "-"}). Either the argv is not a flat literal array the scanner understands — rewrite it as one — or it is not a kubectl apply at all. It is NOT allowed to be unverifiable.`,
+            ).toBe(sites.length);
         }
+        // Non-vacuity of the counter itself: it must be finding verbs at all.
+        const total = [...sources.values()].reduce(
+            (n, raw) => n + applyVerbLines(stripComments(raw)).length,
+            0,
+        );
+        expect(
+            total,
+            "no `apply` verb literal found anywhere in src/cli/ — the counting guard has gone vacuous",
+        ).toBeGreaterThanOrEqual(3);
     });
 });
 
@@ -361,7 +398,11 @@ describe("NextApp CR apply — a rejected apply is never swallowed", () => {
         return err;
     }
 
-    it("fails loudly with an actionable message naming the likely cause (operator CRD older than the CLI)", async () => {
+    // Sibling at "names no single cause …" asserts the SHAPE of the differential
+    // (headline blames nothing, CRD skew appears only as a conditional). This one
+    // asserts the harder guarantee: the rejection PROPAGATES — deploy() rejects
+    // rather than resolving — and the thrown message is actionable.
+    it("rejects rather than resolving, with an actionable message the user can act on", async () => {
         setArgv(["deploy", "--tag", "deploytag"]);
         failApplyWith(
             'Command failed: kubectl apply -f nextapp-cr.yaml\nError from server (BadRequest): ... strict decoding error: unknown field "spec.security.networkPolicy"',
@@ -543,19 +584,18 @@ describe("preview deploy — the OTHER NextApp CR apply (same CR, same skew)", (
  * ------------------------------------------------------------------ */
 
 /**
- * Backticked `spec.…` paths that deliberately name a field NOTHING emits —
- * they illustrate what an UNKNOWN field looks like, quoted from a real kubectl
- * rejection. Anything else cited in the strict-validation prose must be a path
- * `buildNextAppCRObject` really produces.
+ * Every BACKTICKED `spec.…` path in the strict-validation prose is a claim that
+ * the CLI emits that field. There is deliberately NO allowlist: the one path
+ * that names a field nothing emits (`spec.template.spec.thisFieldDoesNotExist…`,
+ * quoted from a real kubectl rejection) is written inside double quotes, as part
+ * of the quoted error text, so it is not a claim and is not matched here. An
+ * allowlist would be a pre-authorised hole — backticking an unemitted path later
+ * would silently become legal.
  */
-const DELIBERATELY_UNKNOWN_FIELD_EXAMPLES = new Set([
-    "spec.template.spec.thisFieldDoesNotExistAnywhere",
-]);
-
 function citedSpecPaths(text: string): string[] {
-    return [...text.matchAll(/`(spec\.[A-Za-z][A-Za-z0-9_.]*)`/g)]
-        .map((m) => m[1] as string)
-        .filter((p) => !DELIBERATELY_UNKNOWN_FIELD_EXAMPLES.has(p));
+    return [...text.matchAll(/`(spec\.[A-Za-z][A-Za-z0-9_.]*)`/g)].map(
+        (m) => m[1] as string,
+    );
 }
 
 function hasPath(root: unknown, path: string): boolean {
