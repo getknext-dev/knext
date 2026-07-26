@@ -161,7 +161,7 @@ jobs:
     timeout-minutes: 90
     steps:
       - name: Checkout knext
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           path: knext
 
@@ -247,7 +247,7 @@ jobs:
           echo "version=${NEXT_NPM_VERSION}" >> "$GITHUB_OUTPUT"
 
       - name: Checkout vercel/next.js (pinned ref — supplies the test harness)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: vercel/next.js
           ref: ${{ env.NEXTJS_REF }}
