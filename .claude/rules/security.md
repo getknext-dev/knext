@@ -50,6 +50,12 @@ Complements `.claude/rules/architecture.md`. These run through **every** phase �
   bumps so pinning does not decay into staleness. Enforced for the publish path by
   `tests/release-action-pins.test.ts`; the remaining workflows are being pinned in blast-radius
   order (cosign/OIDC signing next — those use short-lived keyless tokens, no standing secret).
+  **Know what CI does and does not check:** that test asserts *immutability and scope* — a 40-hex
+  SHA, an auditable `# vX.Y.Z` comment, and an allowlist of which actions may touch a
+  credential-bearing workflow. It deliberately does **not** assert the SHA *value*, because doing so
+  reddened every correct Dependabot bump and made editing the guard the routine way to get green.
+  So **a SHA that does not belong to its commented tag is caught by human review of the Dependabot
+  diff, not by CI** — read the SHA against the tag before approving a bump on the publish path.
 
 ## Runtime hardening
 - **Reverse proxy** (nginx/Envoy) in front for rate limiting, payload-size limits, and
