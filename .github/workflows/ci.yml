@@ -515,7 +515,7 @@ jobs:
 
       - name: Detect relevant changes
         id: filter
-        uses: dorny/paths-filter@v3
+        uses: dorny/paths-filter@v4
         with:
           # For push (main) the base is the previous commit; on PRs the action
           # diffs against the PR base automatically.
