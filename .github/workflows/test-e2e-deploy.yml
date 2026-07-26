@@ -479,7 +479,7 @@ jobs:
           fi
 
       - name: Upload workspace
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: compat-workspace
           path: ${{ runner.temp }}/compat-workspace.tgz
@@ -1331,7 +1331,7 @@ jobs:
 
       - name: Upload summary artifact (consumed by #41 matrix publisher)
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: compat-suite-summary-${{ strategy.job-index }}
           path: knext/compat-suite-summary-*.json
