@@ -158,7 +158,7 @@ jobs:
       # via `pnpm --filter @getknext/core build` — so the job needs Node + pnpm
       # (version pinned by `packageManager` in package.json) + workspace deps.
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: '24'
 
@@ -244,7 +244,7 @@ jobs:
       # via `pnpm --filter @getknext/core build` — so the job needs Node + pnpm
       # (version pinned by `packageManager` in package.json) + workspace deps.
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: '24'
 
@@ -341,7 +341,7 @@ jobs:
       # The `aws` CLI (the s3 storage provider's data plane) is preinstalled
       # on ubuntu-latest runners and honors AWS_ENDPOINT_URL (v2.13+).
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: '24'
 
