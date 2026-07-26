@@ -1,0 +1,101 @@
+# OPT-IN, least-privilege RBAC for the in-app Deployments page (ADR-0038 P1.4).
+#
+# DO NOT apply this by default, and do NOT add it to the operator's install
+# bundle (`packages/kn-next-operator/config/**`). It exists so an operator can
+# DELIBERATELY buy the higher-fidelity deployment history — rollback pin, image
+# digest, Ready/Progressing conditions — by granting this app's ServiceAccount a
+# read-only view of its OWN NextApp resource.
+#
+# Without it, /observability/deployments still works: it falls back to the
+# Prometheus/kube-state-metrics-derived revision history (no cluster credential,
+# no RBAC) and says so on the page. With the CRD absent (e.g. the OKE cluster)
+# or this Role unbound, the page renders an explicit "NextApp status source
+# unavailable" state — never an empty table implying "no deployments".
+#
+# ---------------------------------------------------------------------------
+# HONEST LIMITATION — NOT REACHABLE UNDER AN OPERATOR-MANAGED DEPLOY (PR-520)
+#
+# The knext operator reconciles this app's ServiceAccount with
+# `automountServiceAccountToken: false` and does NOT set
+# `automountServiceAccountToken: true` on the Knative Service's pod template.
+# Because the SA is reconciled with CreateOrUpdate, flipping it by hand is
+# reverted on the next reconcile. No ServiceAccount token is therefore projected
+# into the pod, and this reader can only ever return `not-in-cluster` — applying
+# this Role changes nothing on that path.
+#
+# So the high-fidelity source is usable ONLY with either:
+#   (a) a deployment NOT managed by the knext operator (a plain Deployment /
+#       Knative Service you control, with the token projected), or
+#   (b) an operator change that lets a NextApp opt its ServiceAccount into token
+#       projection — deliberately NOT made here (this is an app-level recipe,
+#       and widening the default pod's credentials is an operator decision).
+#
+# This fails CLOSED — no security impact, the page just renders its honest
+# "no in-cluster ServiceAccount" state — but do not expect the CR-backed panel
+# to light up on a stock knext deploy.
+# ---------------------------------------------------------------------------
+#
+# Enabling it (on a deployment where the token IS projected) takes BOTH steps:
+#   1. apply this file (after substituting the namespace, ServiceAccount and
+#      NextApp name);
+#   2. set on the app's pod spec:
+#        OBSERVABILITY_NEXTAPP_SOURCE=kubernetes
+#      The cluster CA is read per-request from the projected
+#      /var/run/secrets/kubernetes.io/serviceaccount/ca.crt and passed to that
+#      single HTTPS request — the process-wide trust store is NOT widened by a
+#      global extra-CA env var, and TLS verification is NEVER disabled.
+#
+# Scope of the grant (deliberately as small as it can be):
+#   - a namespaced Role, NOT a ClusterRole — this app cannot see other
+#     namespaces' NextApps;
+#   - `get` only — no list/watch (the page reads exactly one object by name, so
+#     list/watch would grant enumeration of every NextApp in the namespace for
+#     no benefit), and no create/update/patch/delete, so the page can never
+#     mutate cluster state (ADR-0001: the operator is the single source of truth);
+#   - `resourceNames` pinned to THIS app's NextApp — the grant does not extend to
+#     a sibling app's CR in the same namespace;
+#   - one apiGroup, one resource family (nextapps + nextapps/status). No Secrets,
+#     no Pods, no ConfigMaps, no Knative resources.
+#
+# Revoke by deleting the RoleBinding; the page degrades honestly on the next
+# request (it is force-dynamic, never cached).
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: file-manager-observability-nextapp-read
+  namespace: REPLACE_WITH_APP_NAMESPACE
+  labels:
+    app.kubernetes.io/part-of: knext
+    app.kubernetes.io/component: observability
+  annotations:
+    knext.dev/opt-in: "true"
+    knext.dev/purpose: >-
+      Read-only NextApp access for the in-app /observability/deployments page
+      (ADR-0038 P1.4). Not part of the operator's default install.
+rules:
+  - apiGroups: ["apps.kn-next.dev"]
+    resources: ["nextapps", "nextapps/status"]
+    # `get` by name only: the page reads exactly one object. resourceNames is
+    # valid for get (it is NOT for list/watch — another reason not to grant them).
+    resourceNames: ["REPLACE_WITH_NEXTAPP_NAME"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: file-manager-observability-nextapp-read
+  namespace: REPLACE_WITH_APP_NAMESPACE
+  labels:
+    app.kubernetes.io/part-of: knext
+    app.kubernetes.io/component: observability
+  annotations:
+    knext.dev/opt-in: "true"
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: file-manager-observability-nextapp-read
+subjects:
+  - kind: ServiceAccount
+    name: REPLACE_WITH_APP_SERVICE_ACCOUNT
+    namespace: REPLACE_WITH_APP_NAMESPACE
