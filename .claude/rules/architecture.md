@@ -60,7 +60,10 @@ rather than silently building it. Reconcile against actual code; treat older doc
   established** — the strategic direction above previously existed only verbally, not in-repo.
 - Stale docs to fix/retire: `docs/VINEXT_MIGRATION_PLAN.md`, vinext mentions in
   `docs/ARCHITECTURE.md` (README already migrated).
-- Known structural debt: duplicate CLIs (`packages/cli` Go vs `packages/kn-next/src/cli` TS);
-  the TS `deploy.ts` mutates the cluster directly (`kubectl apply`), **violating ADR-001** —
-  must consolidate behind the operator + `NextApp` CR. `admin`/`knext` packages appear
-  dead/duplicated vs `kn-next` (naming drift) — audit and remove.
+- ~~Known structural debt: duplicate CLIs; `deploy.ts` mutates the cluster directly, violating
+  ADR-001~~ — **both RESOLVED (2026-07-26), do not re-file.** ADR-0001 consolidation is complete:
+  every CLI cluster write targets the `NextApp` CR and nothing else (`deploy.ts:500` apply,
+  `preview.ts:175` apply, `db-bind.ts:383` `patch nextapp`), and `src/generators/` no longer
+  contains `knative-manifest.ts`. The "duplicate CLI" was stale local cruft — the Go `packages/cli`
+  and the `admin`/`knext` packages have no tracked files. See `CLAUDE.md` §4 and §9, which carry the
+  verification detail; this file should not duplicate it.

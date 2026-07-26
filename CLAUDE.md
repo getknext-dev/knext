@@ -36,10 +36,31 @@
   (spawns `next build`'s `server.js` + a metrics sidecar), not a Nitro entry.
 
 ## 4. Control plane (ADR-0001)
-- The **Go operator is the single source of truth** for cluster state. The TS CLI must stop
-  generating raw Knative manifests — `deploy.ts` mutates the cluster directly (`kubectl apply`)
-  and the manifest generator **hardcodes values** (`packages/kn-next/src/generators/knative-manifest.ts:183`
-  → `containerConcurrency: 100`). CLI = build/publish + emit a CR; operator reconciles.
+- The **Go operator is the single source of truth** for cluster state. CLI = build/publish + emit a
+  CR; operator reconciles.
+- **(RESOLVED 2026-07-26, stale-doc fix)** The "CLI must stop generating raw Knative manifests —
+  `deploy.ts` mutates the cluster directly and the manifest generator hardcodes
+  `containerConcurrency: 100`" note is **done, not outstanding**, and the invariant holds in its
+  strong form: **every CLI cluster write targets the `NextApp` CR and nothing else** —
+  `deploy.ts:500` (apply), `preview.ts:175` (apply), `db-bind.ts:383` (`patch nextapp`). No raw
+  Knative objects anywhere. `deploy.ts`'s header documents the removal of both the raw-ksvc apply
+  (was :176) and the infrastructure-manifest apply (was :153); `packages/kn-next/src/generators/`
+  contains only `loadtest-job.ts` (no `knative-manifest.ts`); `cr-builder.ts` builds the CR. Do not
+  re-file consolidation as open work.
+- **Known gap that consolidation did NOT close (see `docs/V1_ROADMAP.md` §2.1):** `cr-builder.ts:364`
+  hardcodes `apiVersion: apps.kn-next.dev/v1alpha1` and nothing in `src/cli/` negotiates the version
+  against the cluster, so a newer CLI can emit a field an older operator's CRD does not know.
+  **Measured, not assumed** (live cluster, server-side dry-run): whether that field is *pruned* or
+  *rejected* depends on the apply's validation mode, not on the CRD —
+  `kubectl apply --validate=strict` makes the apiserver **reject** it (`strict decoding error:
+  unknown field …`), `--validate=ignore` accepts and prunes it. **Mitigated (#547):** every
+  `kubectl apply` the CLI issues now passes `--validate=strict` explicitly, so the guarantee is
+  knext's rather than the user's kubectl's, and `doctor` reports a client older than v1.25 (where
+  that flag value does not exist). **Still open:** GitOps controllers (Argo CD, Flux) do not assert
+  strict validation, a `kubectl` shim on PATH can append `--validate=ignore` and win (pflag takes the
+  last occurrence), and `doctor` checks only that the CRD *exists*, not that its schema covers what
+  the CLI emits — the schema-diff preflight (#314) is the complete fix. Upgrade order is therefore
+  load-bearing: **operator/CRD first, then CLI** (#548).
 - Enforce **`:latest` rejection / digest pinning everywhere.** (Verified: the operator already
   rejects `:latest` in `nextapp_controller.go:66`; the kubebuilder manager image in
   `config/manager/manager.yaml:66` is still `controller:latest` — fix that placeholder.)
@@ -94,6 +115,10 @@ defer bucket 1.
 - **(RESOLVED)** Image optimization is **implemented** per ADR-0006
   (`packages/kn-next/src/adapters/image-cache-sync.ts` + tests) — the earlier "missing / biggest
   functional gap" note is stale; don't re-propose it as a work item.
+  **But implemented ≠ gated:** its `compat-smoke` check skips rather than fails, as do three sibling
+  capability rows. `docs/compat-matrix.md` is the single source of truth for which rows are actually
+  backed by a red-on-fail check — read it there rather than duplicating the detail here, and see
+  `docs/V1_ROADMAP.md` §3, which makes converting them a v1.0 blocker.
 - **(RESOLVED 2026-06-20)** `packages/kn-next/src/adapters/node-server.ts` is **Nitro-free** — it
   spawns the standalone `server.js` (`STANDALONE_SERVER_PATH`, default `.next/standalone/server.js`),
   no `.output/server`/`index.mjs`. Enforced by `adapter-migration.test.ts` (asserts no `.output/server`).

@@ -14,11 +14,14 @@ deprecated Vinext/Nitro runtime (`node-server.ts`); wire `@next/routing` where n
 ## Tier A — Correctness (the north star)
 The credibility gate. Nothing in later tiers ships before this is green.
 - **Official Next.js compatibility suite in CI**, on every PR (the verified-adapter lever).
-- **Image optimization** (biggest functional gap; currently missing).
-- **Graceful shutdown** — drain in-flight requests + run `after()` callbacks on SIGTERM.
-- **Control-plane consolidation (ADR-0001)** — CLI emits a `NextApp` CR only; operator is the
-  sole cluster writer; remove `deploy.ts` raw-manifest path + `containerConcurrency` drift;
-  `:latest` rejection / digest pinning everywhere.
+- **Image optimization** — ✅ **implemented** per ADR-0006. Not yet *gated*: its `compat-smoke`
+  check skips instead of failing, so a regression would pass. See `docs/compat-matrix.md` for which
+  capability rows are backed by a red-on-fail check.
+- **Graceful shutdown** — ✅ drain in-flight requests + run `after()` callbacks on SIGTERM (CI-gated).
+- **Control-plane consolidation (ADR-0001)** — ✅ **done.** Every CLI cluster write targets the
+  `NextApp` CR and nothing else (`deploy.ts:500`, `preview.ts:175`, `db-bind.ts:383`); the
+  raw-manifest path and the `containerConcurrency` hardcode are gone. `:latest` rejection / digest
+  pinning is enforced by the operator (`nextapp_controller.go:66`).
   - *Kafka ISR revalidator — DEFERRED / build-later (#95):* the `{app}-revalidator` consumer is
     unbuilt and PR #27 (ADR-0003 routing) was closed unmerged. The operator no longer provisions a
     dangling `KafkaSource` by default; it is gated behind `spec.revalidation.provisionKafkaSource`
