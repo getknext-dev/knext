@@ -46,8 +46,13 @@ interface FakeRequest {
   destroy: (err?: Error) => void;
 }
 
-/** Make the fake API server answer with `status` + `body`. */
-function respondWith(status: number, body: unknown) {
+/**
+ * Make the fake API server answer with `status` + `body`.
+ *
+ * `configure` gets the fake request before it is returned, so a test can spy on
+ * `destroy` — the socket-cleanup half of the total-duration bound.
+ */
+function respondWith(status: number, body: unknown, configure?: (req: EmittingRequest) => void) {
   httpsRequestMock.mockImplementation((_url, _opts, cb) => {
     queueMicrotask(() => {
       const handlers: Record<string, Handler[]> = {};
@@ -63,7 +68,9 @@ function respondWith(status: number, body: unknown) {
       for (const h of handlers.data ?? []) h(Buffer.from(JSON.stringify(body)));
       for (const h of handlers.end ?? []) h();
     });
-    return fakeRequest();
+    const req = fakeRequest();
+    configure?.(req);
+    return req;
   });
 }
 
@@ -154,6 +161,8 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  // Tests that pin the deadline timer opt into fake timers; nobody else sees them.
+  vi.useRealTimers();
   vi.restoreAllMocks();
   if (ORIGINAL_SOURCE === undefined) delete process.env.OBSERVABILITY_NEXTAPP_SOURCE;
   else process.env.OBSERVABILITY_NEXTAPP_SOURCE = ORIGINAL_SOURCE;
@@ -472,16 +481,34 @@ describe('NextApp reader — the page budget is a real bound, and a spent one st
     process.env.OBSERVABILITY_NEXTAPP_SOURCE = 'kubernetes';
   });
 
-  it('cuts off an API server that TRICKLES bytes for longer than the budget', async () => {
+  /**
+   * Three properties in one test, because they are one behaviour (PR-520 review
+   * round 3):
+   *  1. the total-duration bound fires at all (a trickling server is cut off);
+   *  2. it fires at the CALLER's budget — asserted by advancing a fake clock to
+   *     1 ms short of it and finding nothing settled. The previous form
+   *     (`elapsed < 2000` against a 60 ms budget) would have passed with a
+   *     hard-coded 1000 ms timer, so it pinned the bound to nothing;
+   *  3. the socket is destroyed BEFORE the promise settles. A rejected promise
+   *     with a live socket is precisely the leak this bound exists to prevent, so
+   *     the ordering is part of the assertion, not an implementation detail.
+   */
+  it('cuts off a TRICKLING API server at exactly the caller budget, destroying the socket before it settles', async () => {
+    vi.useFakeTimers();
     seedServiceAccount();
     // A server that keeps sending data and never ends. `node:https`' `timeout`
     // option is reset by every received chunk, so the inactivity timer alone would
     // hold this connection open forever — only a total-duration bound ends it.
     let trickle: ReturnType<typeof setInterval> | undefined;
+    const order: string[] = [];
+    const destroy = vi.fn((_err?: Error) => {
+      order.push('destroy');
+      // A real socket stops producing data once destroyed.
+      clearInterval(trickle);
+    });
     httpsRequestMock.mockImplementation((_url, _opts, cb) => {
       const req = fakeRequest();
-      // A real socket stops producing data once destroyed.
-      req.destroy = () => clearInterval(trickle);
+      req.destroy = destroy;
       queueMicrotask(() => {
         const handlers: Record<string, Handler[]> = {};
         cb({
@@ -500,18 +527,89 @@ describe('NextApp reader — the page budget is a real bound, and a spent one st
     });
     const { readNextAppStatus } = await load();
 
-    const startedAt = performance.now();
-    const result = await readNextAppStatus('demo', { timeoutMs: 60 });
-    const elapsed = performance.now() - startedAt;
-    clearInterval(trickle);
+    const pending = readNextAppStatus('demo', { timeoutMs: 60 }).then((value) => {
+      order.push('settled');
+      return value;
+    });
 
-    expect(result).toEqual({
+    // 1 ms short of the caller's budget: the request is in flight and trickling,
+    // and NOTHING has happened yet. Any bound not derived from `timeoutMs` fails
+    // here (too early) or at the next step (never fires).
+    await vi.advanceTimersByTimeAsync(59);
+    expect(order).toEqual([]);
+
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(await pending).toEqual({
       status: 'source-unavailable',
       reason: 'unreachable',
       detail: 'the Kubernetes API server could not be reached',
     });
-    // The point of the bound: it ended near the budget rather than never.
-    expect(elapsed).toBeLessThan(2000);
+    // Destroyed, and destroyed FIRST — no live socket outlives the rejection.
+    expect(destroy).toHaveBeenCalled();
+    expect(destroy.mock.calls[0]?.[0]).toBeInstanceOf(Error);
+    expect(order).toEqual(['destroy', 'settled']);
+    clearInterval(trickle);
+  });
+
+  it('leaves no armed deadline timer behind after a SUCCESSFUL read', async () => {
+    vi.useFakeTimers();
+    seedServiceAccount();
+    const destroy = vi.fn();
+    respondWith(200, NEXTAPP_BODY, (req) => {
+      req.destroy = destroy;
+    });
+    const { readNextAppStatus } = await load();
+
+    const result = await readNextAppStatus('demo', { timeoutMs: 1500 });
+
+    expect(result.status).toBe('ok');
+    // The total-duration timer is armed unconditionally, so a success path that
+    // does not clear it leaks a ref'd timer per read…
+    expect(vi.getTimerCount()).toBe(0);
+    // …which would later destroy an already-completed request.
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(destroy).not.toHaveBeenCalled();
+  });
+
+  it('refuses an oversized response body instead of buffering it without bound', async () => {
+    seedServiceAccount();
+    const { readNextAppStatus, MAX_RESPONSE_BYTES } = await load();
+    const destroy = vi.fn();
+    // Two chunks that together exceed the cap: the read must fail closed while the
+    // body is still streaming, without ever waiting for `end`.
+    const half = Buffer.alloc(Math.ceil(MAX_RESPONSE_BYTES / 2) + 1, 0x20);
+    httpsRequestMock.mockImplementation((_url, _opts, cb) => {
+      const req = fakeRequest();
+      req.destroy = destroy;
+      queueMicrotask(() => {
+        const handlers: Record<string, Handler[]> = {};
+        cb({
+          statusCode: 200,
+          on: (event, handler) => {
+            const list = handlers[event] ?? [];
+            handlers[event] = list;
+            list.push(handler);
+          },
+        });
+        for (const h of handlers.data ?? []) h(half);
+        for (const h of handlers.data ?? []) h(half);
+        // Deliberately NO `end`: a real oversized/hostile body need never finish.
+      });
+      return req;
+    });
+
+    const result = await readNextAppStatus('demo', { timeoutMs: 60 });
+
+    // Reuses the existing unreadable-response outcome — the page renders no new
+    // state for this, and the detail names neither a size nor the host.
+    expect(result).toEqual({
+      status: 'source-unavailable',
+      reason: 'unreachable',
+      detail: 'the Kubernetes API returned an unreadable response',
+    });
+    expect(destroy).toHaveBeenCalled();
+    expect(destroy.mock.calls[0]?.[0]).toBeInstanceOf(Error);
   });
 
   it('refuses to start a read once the shared budget is spent (never timeout: 0)', async () => {

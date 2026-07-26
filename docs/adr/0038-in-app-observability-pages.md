@@ -278,6 +278,33 @@ shipped Grafana overlay instead of rebuilding cluster dashboards — faithful to
     read. The page now renders `budgetMs` from the result, so the number can never drift from the
     bound actually enforced (mutation-proved: printing the constant fails a render under a 1500 ms
     budget).
+
+  **Fifth-round amendments (PR #520 review round 3 — the cleanup the code did but no test pinned):**
+  - **The `NextApp` read's CLEANUP is now asserted, not merely written.** All three of the previous
+    round's cleanup steps were unverified: deleting `request.destroy(new Error('deadline'))` left the
+    whole suite green, so "bounded end to end, with no live socket left behind" was two-thirds
+    unproved. The trickling-server test now runs on a **fake clock** and pins the three properties as
+    one behaviour — the bound fires, it fires at the **caller's** `timeoutMs` (advancing to 1 ms short
+    of the budget must settle nothing; the old `elapsed < 2000` against a 60 ms budget would have
+    passed with a hard-coded 1000 ms timer, i.e. it pinned the bound to nothing), and the socket is
+    destroyed **before** the promise settles (a rejected promise with a live socket *is* the leak, so
+    the ordering is the assertion). A second test pins the success path: after a successful read no
+    armed timer remains and advancing past the budget never destroys the completed request. Each was
+    mutation-proved RED by deleting exactly the production line it covers — dropping `destroy` →
+    "expected vi.fn() to be called at least once"; dropping `clearTimeout(deadlineTimer)` →
+    "expected 1 to be +0" timer count.
+  - **The read is now bounded in BYTES as well as in time.** The body accumulator had no cap, so a
+    response streaming below the inactivity threshold could grow the buffer for the whole budget —
+    awkward next to a claim that the read is bounded, even though the source is one CR from a trusted
+    API server over verified TLS. `MAX_RESPONSE_BYTES = 1 MiB` (far above a `NextApp` document, below
+    the ~1.5 MiB etcd object limit, so no legitimate CR can hit it) destroys the socket and fails
+    **closed**, deliberately reusing the existing `unreachable` + "returned an unreadable response"
+    outcome rather than inventing a state the page would have to render. Mutation-proved: removing the
+    cap makes the read hang to the deadline and answer "could not be reached" instead.
+  - **Fake timers also removed the last wall-clock assertion** from this file, so the new tests cannot
+    become the next load-sensitive flake. Determinism re-verified after the change: 12/12 for
+    `_prom/query.test.ts` + `deployments/page.test.tsx` together, and 12/12 for the whole
+    `observability` suite.
 - [ ] **Cross-cutting:** `/observability` layout with tab nav + Grafana link-out card.
 - [ ] **Phase 2 (gated on founder greenlight):** promote the recipe to a scaffoldable `--observability`
   flag — deferred until after the official-adapter migration + Tier-A correctness (scs-zones sequencing).
