@@ -21,8 +21,16 @@
 # accidentally: it made every correct Dependabot bump go red (see #530/#532, which
 # preserved the pin form exactly as required), and the only way to green a correct
 # bump was to edit the guard's expectations — training the reader to edit a
-# supply-chain guard without reading it. The review point is retained above, moved
-# from the test to the reviewer, where it cannot be silenced by an edit.
+# supply-chain guard without reading it.
+#
+# Be precise about what that trade cost: the review point is retained as
+# DOCUMENTED PRACTICE, not as ENFORCEMENT. A gate blocks and can be mutation-
+# proved; a documented expectation degrades — under time pressure, under a bot
+# bump that looks like the last four, under a reviewer who never opened this
+# file — and its efficacy is unobservable until it has already failed. So
+# enforcement of SHA-belongs-to-tag is ABSENT until the nightly correspondence
+# check lands. Treat that as near-term work, not backlog: it is what converts
+# this comment back into a gate.
 version: 2
 updates:
   - package-ecosystem: 'github-actions'

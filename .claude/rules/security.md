@@ -56,6 +56,13 @@ Complements `.claude/rules/architecture.md`. These run through **every** phase �
   reddened every correct Dependabot bump and made editing the guard the routine way to get green.
   So **a SHA that does not belong to its commented tag is caught by human review of the Dependabot
   diff, not by CI** — read the SHA against the tag before approving a bump on the publish path.
+  State this precisely rather than comfortably: that review point is **documented practice, not
+  enforcement**. A gate blocks and is mutation-provable; a documented expectation degrades, and its
+  efficacy is unobservable until it has already failed. Enforcement of SHA↔tag correspondence is
+  therefore **absent** until the nightly upstream-resolution check lands — near-term work, not
+  backlog. Note also that form validity does not establish provenance: GitHub resolves any SHA in a
+  repository's **fork network** from the parent path, so a well-formed pin can address a commit
+  pushed to a fork of the action.
 
 ## Runtime hardening
 - **Reverse proxy** (nginx/Envoy) in front for rate limiting, payload-size limits, and
