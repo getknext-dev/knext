@@ -29,16 +29,50 @@ const REPO_ROOT = resolve(import.meta.dirname, '..');
 const PINNED_WORKFLOWS = ['release.yml', 'release-ghp.yml'] as const;
 
 /**
- * The pins of record, resolved from the real upstream repositories (see the PR
- * body for the `gh api` resolution trail). Locking the exact SHA here means a
- * silent re-point of a pin also fails the suite, not just a tag regression.
+ * The actions ALLOWED to run on the publish path — the credentialed surface, so
+ * a new third-party action appearing here is a supply-chain change that must be
+ * a deliberate edit, not a silent addition.
+ *
+ * Deliberately an allowlist of ACTIONS, not of SHAs. An earlier version pinned
+ * the exact SHA + version of each entry, which made every legitimate Dependabot
+ * bump fail this suite (proven: PRs #530/#532 bumped `actions/setup-node` from
+ * v4.4.0 to v7.0.0 and CORRECTLY preserved the `@<40-hex> # vX.Y.Z` form, yet
+ * went red here). That inverted the rule's intent: the point is that a ref is
+ * IMMUTABLE and that Dependabot owns the bumps, not that a pin is frozen
+ * forever. Worse, it trained the reader to edit this file to get green, which
+ * is precisely how a supply-chain guard decays into a rubber stamp.
+ *
+ * Immutability and the auditable version comment are asserted structurally by
+ * the tests below, which hold regardless of which version is current.
  */
-const EXPECTED_PINS: Record<string, { sha: string; version: string }> = {
-  'actions/checkout': { sha: '11d5960a326750d5838078e36cf38b85af677262', version: 'v4.4.0' },
-  'actions/setup-node': { sha: '49933ea5288caeca8642d1e84afbd3f7d6820020', version: 'v4.4.0' },
-  'actions/upload-artifact': { sha: 'ea165f8d65b6e75b540449e92b4886f43607fa02', version: 'v4.6.2' },
-  'pnpm/action-setup': { sha: 'b906affcce14559ad1aafd4ab0e942779e9f58b1', version: 'v4.3.0' },
-  'changesets/action': { sha: 'a45c4d594aa4e2c509dc14a9f2b3b67ba3780d0d', version: 'v1.9.0' },
+const EXPECTED_ACTIONS: ReadonlySet<string> = new Set([
+  'actions/checkout',
+  'actions/setup-node',
+  'actions/upload-artifact',
+  'pnpm/action-setup',
+  'changesets/action',
+]);
+
+/**
+ * The same allowlist, resolved PER WORKFLOW. Only `release.yml` runs
+ * `changesets/action` — the step handed `NODE_AUTH_TOKEN` — so asserting the
+ * union of both files would let that action vanish from where it matters while
+ * the set still looked complete.
+ */
+const EXPECTED_ACTIONS_BY_FILE: Record<(typeof PINNED_WORKFLOWS)[number], ReadonlySet<string>> = {
+  'release.yml': new Set([
+    'actions/checkout',
+    'actions/setup-node',
+    'actions/upload-artifact',
+    'pnpm/action-setup',
+    'changesets/action',
+  ]),
+  'release-ghp.yml': new Set([
+    'actions/checkout',
+    'actions/setup-node',
+    'actions/upload-artifact',
+    'pnpm/action-setup',
+  ]),
 };
 
 /** `uses: owner/repo[/path]@<ref>` with an optional trailing comment. */
@@ -76,23 +110,22 @@ function allUsesRefs(): UsesRef[] {
 }
 
 describe('publish-path workflows SHA-pin every third-party action (#522)', () => {
-  it('finds the expected `uses:` steps in both publish-path workflows', () => {
-    // Sanity: if the extraction regex ever stops matching, the assertions below
-    // would vacuously pass over an empty list.
-    for (const file of PINNED_WORKFLOWS) {
-      expect(usesRefs(file).length).toBeGreaterThan(0);
-    }
-    const actions = new Set(allUsesRefs().map((entry) => entry.action));
-    expect([...actions].sort()).toEqual(Object.keys(EXPECTED_PINS).sort());
-  });
-
-  it.each(PINNED_WORKFLOWS)('%s pins every `uses:` to a 40-hex commit SHA', (file) => {
-    for (const entry of usesRefs(file)) {
-      expect(
-        entry.ref,
-        `${file}:${entry.line} — ${entry.action}@${entry.ref} is not a 40-hex commit SHA`,
-      ).toMatch(/^[0-9a-f]{40}$/);
-    }
+  it.each(PINNED_WORKFLOWS)('%s uses exactly its expected set of actions', (file) => {
+    const entries = usesRefs(file);
+    // Sanity: if the extraction regex ever stops matching, every per-entry
+    // assertion below would pass vacuously over an empty list.
+    expect(entries.length, `${file} — no \`uses:\` steps parsed at all`).toBeGreaterThan(0);
+    // Per FILE, not over the union of both. A union check cannot see an action
+    // disappearing from one workflow while the other still supplies the name:
+    // deleting every pnpm/action-setup step from release-ghp.yml left the old
+    // union assertion green. Both directions matter — an unexpected action on a
+    // credentialed path is a supply-chain change, and a vanished one means a
+    // step stopped running where we believe it runs.
+    // Array.from, not spread: `tests/` is type-checked by no repo script today
+    // (see the open typecheck-gap issue), so a bare Set spread fails only under
+    // a default-target tsc — don't depend on that being fixed.
+    const actions = Array.from(new Set(entries.map((entry) => entry.action))).sort();
+    expect(actions).toEqual(Array.from(EXPECTED_ACTIONS_BY_FILE[file]).sort());
   });
 
   it.each(PINNED_WORKFLOWS)('%s has no `uses:` on a mutable tag or branch', (file) => {
@@ -116,14 +149,17 @@ describe('publish-path workflows SHA-pin every third-party action (#522)', () =>
     }
   });
 
-  it('pins each action to the SHA of record, and the comment matches that version', () => {
+  it('admits only allowlisted actions onto the credentialed publish path', () => {
+    // The per-file set check above catches an action appearing or vanishing in a
+    // KNOWN workflow. This catches the case that set can't: a brand-new action
+    // name showing up anywhere on the credentialed path.
     for (const entry of allUsesRefs()) {
-      const expected = EXPECTED_PINS[entry.action];
-      expect(expected, `unexpected action ${entry.action} on the publish path`).toBeDefined();
-      expect(entry.ref, `${entry.file}:${entry.line} — ${entry.action}`).toBe(expected?.sha);
-      expect(entry.comment, `${entry.file}:${entry.line} — ${entry.action}`).toBe(
-        expected?.version,
-      );
+      expect(
+        EXPECTED_ACTIONS.has(entry.action),
+        `${entry.file}:${entry.line} — ${entry.action} is not allowlisted for the publish path. ` +
+          'Adding a third-party action to a workflow that holds a registry-write credential is a ' +
+          'supply-chain decision: review it, then add it to EXPECTED_ACTIONS deliberately.',
+      ).toBe(true);
     }
   });
 
@@ -133,10 +169,17 @@ describe('publish-path workflows SHA-pin every third-party action (#522)', () =>
       (entry) => entry.action === 'changesets/action',
     );
     expect(changesets).toHaveLength(1);
-    expect(changesets[0]?.ref).toBe(EXPECTED_PINS['changesets/action']?.sha);
+    const ref = changesets[0]?.ref ?? '';
+    // Structural, not value-based: whatever version Dependabot has moved this to,
+    // the ref must be an immutable SHA. `changesets/action@v1` resolves to
+    // refs/heads/v1 — a BRANCH — so a tag-looking ref here is the worst case in
+    // the repo, not a cosmetic lapse.
+    expect(ref, 'the changesets/action ref must be an immutable 40-hex SHA').toMatch(
+      /^[0-9a-f]{40}$/,
+    );
     // The step still receives the publish credential — that is exactly why the
     // pin is load-bearing, so assert the pairing has not drifted apart.
-    const stepIdx = text.indexOf(`changesets/action@${EXPECTED_PINS['changesets/action']?.sha}`);
+    const stepIdx = text.indexOf(`changesets/action@${ref}`);
     expect(stepIdx).toBeGreaterThan(-1);
     expect(text.slice(stepIdx)).toContain('NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}');
   });

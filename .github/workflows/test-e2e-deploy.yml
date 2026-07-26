@@ -283,7 +283,7 @@ jobs:
       # This is the pnpm STORE only — the turbo BUILD cache stays gone (no source
       # build to persist).
       - name: Cache next.js pnpm store
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ${{ steps.pnpm-store.outputs.path }}
           key: nextjs-pnpm-store-${{ env.NEXTJS_REF }}-${{ hashFiles('next.js/pnpm-lock.yaml') }}
@@ -399,7 +399,7 @@ jobs:
 
       - name: Cache Playwright browsers
         id: pw-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cache/ms-playwright
           key: playwright-chromium-${{ runner.os }}-${{ steps.pw.outputs.version }}
@@ -603,7 +603,7 @@ jobs:
         run: echo "path=$(corepack pnpm store path --silent)" >> "$GITHUB_OUTPUT"
 
       - name: Restore next.js pnpm store
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ${{ steps.pnpm-store.outputs.path }}
           key: nextjs-pnpm-store-${{ env.NEXTJS_REF }}-${{ hashFiles('next.js/pnpm-lock.yaml') }}
@@ -678,7 +678,7 @@ jobs:
 
       - name: Cache Playwright browsers
         id: pw-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cache/ms-playwright
           key: playwright-chromium-${{ runner.os }}-${{ steps.pw.outputs.version }}

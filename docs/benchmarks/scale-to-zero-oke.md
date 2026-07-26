@@ -1464,6 +1464,76 @@ now pino all off that path, the supervisor's remaining pre-spawn work is small l
 builtins; further cold-start levers are the ones Run 21 named (Knative infra path, in-process
 architecture), which need OKE.
 
+## Run 23 (2026-07-26) — OKE cold start, 6-day-old image vs current: variance collapsed, median delta unconfirmed
+
+**What this is.** Two 10-sample cold-start arms on the live OKE cluster (`context-ckmva7v7zvq`,
+`default/file-manager`), same harness invocation, same extractor, run ~17 h apart.
+
+| arm | image | min | **p50** | mean | p90 | max |
+|---|---|---|---|---|---|---|
+| before | `file-manager:ht-bdfa2fa` (built 2026-07-20) | 3.42 s | **3.97 s** | 4.33 s | 5.74 s | 7.27 s |
+| after | `file-manager@sha256:ede0a34…` (`obs-p13-db1c759`) | 3.02 s | **3.38 s** | 3.35 s | 3.56 s | 3.56 s |
+
+Samples (`http_req_duration` median per k6 run, one request per sample):
+- before: 7.27, 4.05, 5.57, 3.45, 4.22, 3.90, 4.01, 3.93, 3.42, 3.52
+- after: 3.38, 3.36, 3.11, 3.02, 3.42, 3.56, 3.26, 3.47, 3.56, 3.39
+
+**The robust finding is the variance, not the median.** The after-arm's whole range (3.02–3.56 s)
+is narrower than the before-arm's interquartile spread; p90 fell 38 % and max 51 %. Seven of ten
+before-arm samples exceed the after-arm's *maximum*. That is the signal worth keeping, because this
+document's own bar (see Caveat, and Run 6) is that a latency delta counts when the distributions
+separate rather than when the medians differ — and a harness whose cold-start figures previously
+ranged 3.42–7.27 s on one image could not have detected a sub-second regression at all.
+
+**The medians do NOT clear that bar.** The two arms overlap at 3.42–3.56 s, so this is not the
+complete separation Run 6 had. Treat **p50 3.97 → 3.38 s as provisional** and do not quote it until a
+repeat run reproduces it. Weak corroboration only: an earlier partial after-arm (4 valid samples,
+same image, discarded for the reason below) read 3.43 / 3.42 / 3.40 after a 6.57 s first sample,
+consistent with the 3.4 s cluster seen here.
+
+**This run does not attribute the improvement to anything.** The after image is *current `main` plus
+the P1.3 branch*, not an isolated change — it carries everything merged between 2026-07-20 and
+2026-07-26, including the Run 22 lazy-pino work (~13 ms, which cannot explain ~600 ms), the docs
+compile-cache bake, and unrelated merges. So this is a **"6-day-old image vs current" comparison, not
+a measurement of any one change**, and it does **not** close the #441 supervisor-overhead question:
+that arc asks whether removing supervisor pre-spawn CPU moves the observed wrapper overhead, and
+nothing here isolates the supervisor. The cause of the variance collapse is **unknown** and worth a
+dedicated bisect if anyone wants to claim it.
+
+**Confounder to state plainly.** Both arms ran with their image already resident on both nodes, so
+neither includes a cold image pull — except the before-arm's first sample (7.27 s) and the discarded
+attempt's first sample (6.57 s), both of which look pull-influenced. The after-arm had additionally
+been exercised by two prior benchmark attempts, so its node page cache was warmer than the
+before-arm's. That asymmetry favours the after-arm and is not corrected for. Run 18 measured
+image-pull cost separately; this run does not re-measure it.
+
+### Two attempts were discarded, and why
+
+Recorded because both failure modes produce *plausible* numbers, which is the dangerous kind.
+
+1. **Container env wiped by a merge patch.** Rolling the service to the new image with
+   `kubectl patch ksvc --type=merge` and a `{"containers":[{"image":…}]}` body **replaced the whole
+   container list element**, dropping all 11 env vars (`NODE_ENV`, `DATABASE_URL`, `REDIS_URL`,
+   `GCS_BUCKET_NAME`, …). The revision still went **Ready** — the readiness probe passes without
+   them — so nothing looked wrong, and the arm measured an app booting with no database, no Redis and
+   `NODE_ENV` unset: **p50 11.36 s across 10 samples, range 10.99–11.54 s**. The tight variance was
+   the tell; deterministic added cost means missing configuration far more often than a real
+   regression. Use `--type=json` with a path replace, or rebuild the container from the last-good
+   revision, and **diff the new revision's container against the previous one before trusting any
+   measurement** (`kubectl get revision <r> -o json | jq '.spec.containers[0] | {image, env:(.env|length)}'`).
+2. **Two runs racing the same service.** A liveness check of `pgrep -f "scale-to-zero-oke/run.sh"`
+   never matches, because the process cmdline is `./run.sh` (relative). A live run was therefore
+   declared dead, its cluster was patched mid-flight, and a second run was started on top of it.
+   Concurrent traffic keeps pods warm, so a "cold" start may not be cold — samples 5-10 of that
+   attempt and all of the second run were discarded. Discriminate real duplicates from a transient
+   subshell fork by **elapsed time**, not by cmdline: `ps -eo etime,command`.
+
+The harness's own restore path behaved correctly throughout, including its `RESTORE FAILED` warning
+when keys it meant to remove were already absent. One gap it cannot cover: the captured original
+config lives only in the running process, so a `SIGKILL` loses it — the restore warning is
+trap-based and `SIGKILL` cannot be trapped. Persisting the captured config at capture time would let
+any later invocation detect and offer to restore it.
+
 ## Caveat
 
 These are **point-in-time measurements on a specific small (2-node) OKE cluster** with a

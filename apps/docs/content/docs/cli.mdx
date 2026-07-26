@@ -3,9 +3,11 @@ title: CLI reference
 description: The kn-next CLI — deploy, doctor, status, rollback, db bind, db migrate, gc.
 ---
 
-The `kn-next` binary is a small dispatcher around one job: **build → push → apply the `NextApp`
-CR**. Everything on the cluster is reconciled by the operator; the CLI's cluster writes are limited
-to applying or patching the CR, and its diagnostic commands are strictly read-only.
+The `kn-next` binary ships in **`@getknext/core`** (`npm i @getknext/core`), so it is available as
+`npx kn-next` in any project that depends on it. It is a small dispatcher around one job:
+**build → push → apply the `NextApp` CR**. Everything on the cluster is reconciled by the operator;
+the CLI's cluster writes are limited to applying or patching the CR, and its diagnostic commands
+are strictly read-only.
 
 ```bash
 kn-next [deploy]       # default — build → push → apply the NextApp CR
@@ -186,12 +188,15 @@ or manual runs.
 ```bash
 kn-next gc                          # prune using the config's app + retention
 kn-next gc --build-id 20260711-1    # treat this build-id as the newest
+kn-next gc --dry-run                # print the full reap/keep plan, delete nothing
 ```
 
 | Flag | Notes |
 |---|---|
 | `--build-id <id>` | Build-id to treat as the newest (e.g. a tag just deployed). |
 | `-n`, `--namespace` | Namespace of the `NextApp` (default `default`). |
+| `--dry-run` | Compute and print the full reap/keep plan; issue **zero** deletes. Composes with `--build-id` and `-n`. |
+| `-h`, `--help` | Show the usage help. |
 
 **Fail-safe: over-keep, never over-delete.** If any live revision cannot be resolved to a
 build-id, the GC skips entirely — the only possible failure mode is keeping assets too long.
