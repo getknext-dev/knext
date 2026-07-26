@@ -7,6 +7,7 @@ import {
   hasNoSeries,
   instantByLabel,
   instantValue,
+  KUBE_STATE_PROBE,
   latestMatrixByLabel,
   latestMatrixValue,
   observabilityAppName,
@@ -362,12 +363,31 @@ describe('deploymentQueries — the selector cannot match a sibling workload', (
   });
 
   it('excludes a sibling app name under the anchored pattern (regex proof)', () => {
-    // Prometheus fully anchors regex label matchers, so mirror that here.
-    const pattern = /^demo-[0-9]+-deployment$/;
+    // Derived FROM the production query, never retyped: a regex literal copied
+    // into the test would keep passing after the selector regressed to `demo.*`.
+    // Prometheus fully anchors regex label matchers, so mirror that with `^…$`.
+    const matcher = /deployment=~"([^"]+)"/.exec(q.revisionCreated)?.[1];
+    expect(matcher).toBeTruthy();
+    const pattern = new RegExp(`^${matcher}$`);
+
     expect(pattern.test('demo-00007-deployment')).toBe(true);
     expect(pattern.test('demo-api-00007-deployment')).toBe(false);
     expect(pattern.test('demo-api')).toBe(false);
     expect(pattern.test('demo-00007-deployment-extra')).toBe(false);
+  });
+
+  it('exposes an app-agnostic kube-state-metrics probe, so a zero result has one cause', () => {
+    // The probe is what lets the page tell "kube-state-metrics is absent" apart
+    // from "present, but no Deployment matches this app" — it must therefore
+    // carry NO app/namespace selector at all, or it would answer the same
+    // question as the scoped query and prove nothing.
+    expect(KUBE_STATE_PROBE).toContain('kube_deployment_created');
+    expect(KUBE_STATE_PROBE).not.toContain('deployment=~');
+    expect(KUBE_STATE_PROBE).not.toContain('namespace=');
+    expect(KUBE_STATE_PROBE).not.toContain('demo');
+    // …and it is deliberately NOT one of the per-app queries: every value in
+    // `DeploymentQueries` must stay app-scoped (asserted above).
+    expect(Object.values(q)).not.toContain(KUBE_STATE_PROBE);
   });
 
   it('adds the namespace selector when the namespace is known', () => {

@@ -106,7 +106,14 @@ export type NextAppUnavailableReason =
   | 'not-in-cluster'
   | 'crd-absent'
   | 'forbidden'
-  | 'unreachable';
+  | 'unreachable'
+  /**
+   * The name handed to {@link readNextAppStatus} is not a valid Kubernetes object
+   * name, so no request was made. Its own reason (rather than folding into
+   * `unreachable`) because the page must not blame the API server for a local
+   * input problem — see PR-520 review finding 5.
+   */
+  | 'invalid-name';
 
 export type NextAppReadResult =
   | { readonly status: 'ok'; readonly data: NextAppStatusView }
@@ -185,7 +192,62 @@ function unavailable(reason: NextAppUnavailableReason, detail: string): NextAppR
   return { status: 'source-unavailable', reason, detail };
 }
 
-function toView(body: unknown): NextAppStatusView {
+/**
+ * RFC 1123 subdomain — the shape every Kubernetes object name (including a
+ * `NextApp`) must have, and the ONLY shape allowed into the request path.
+ */
+const DNS1123_SUBDOMAIN = /^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$/;
+
+/** Defence-in-depth: the caller validates too, but this module does not rely on it. */
+function isValidObjectName(name: string): boolean {
+  return name.length > 0 && name.length <= 253 && DNS1123_SUBDOMAIN.test(name);
+}
+
+/**
+ * The API-server origin, or `undefined` when the injected env cannot form a URL.
+ *
+ * An IPv6 `KUBERNETES_SERVICE_HOST` (e.g. `fd00::1`, normal on an IPv6 cluster)
+ * MUST be bracketed inside a URL authority; plain interpolation yields an
+ * unparseable URL that fails closed as "unreachable" and looks like a broken
+ * cluster (PR-520 review finding 5). The port is validated rather than trusted so
+ * a garbage value is refused here instead of becoming part of a request URL.
+ */
+function apiServerOrigin(host: string, port: string): string | undefined {
+  const bare = host.replace(/^\[/, '').replace(/\]$/, '');
+  // A colon in the host can only be an IPv6 literal — hostnames cannot contain one.
+  const authority = bare.includes(':') ? `[${bare}]` : bare;
+
+  const portNumber = Number(port);
+  if (!/^[0-9]{1,5}$/.test(port) || portNumber < 1 || portNumber > 65535) {
+    return undefined;
+  }
+
+  const origin = `https://${authority}:${portNumber}`;
+  try {
+    const parsed = new URL(origin);
+    // Refuse anything that is not a bare authority: a host carrying a path,
+    // query or credentials would otherwise reshape the request URL below.
+    const bare =
+      parsed.pathname === '/' &&
+      parsed.search === '' &&
+      parsed.hash === '' &&
+      parsed.username === '' &&
+      parsed.password === '';
+    return bare ? origin : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Project the raw `NextApp` document onto {@link NextAppStatusView}.
+ *
+ * Exported ONLY so the CRD contract gate (`nextapp-crd-contract.test.ts`) can
+ * assert the BUILT view rather than substring-matching this source — a source
+ * scan also matches the doc comments above, which name every field, so it would
+ * stay green even if this projection were deleted (PR-520 review finding).
+ */
+export function toView(body: unknown): NextAppStatusView {
   const doc = (body ?? {}) as {
     spec?: { image?: string; traffic?: { revisionName?: string; canaryPercent?: number } };
     status?: {
@@ -212,8 +274,10 @@ function toView(body: unknown): NextAppStatusView {
 /**
  * Read this app's `NextApp` CR, read-only, from the in-cluster API server.
  *
- * @param name the `NextApp` name — already validated as a k8s label by
- *   `observabilityAppName()`, so it is safe to interpolate into the path.
+ * @param name the `NextApp` name. Callers validate it (`observabilityAppName()`),
+ *   but this function does NOT rely on that: it re-checks the DNS-1123 shape
+ *   itself before the name reaches the request path, so the safety of the URL is a
+ *   property of this module rather than of every call site (PR-520 finding 5).
  */
 export async function readNextAppStatus(
   name: string,
@@ -224,18 +288,35 @@ export async function readNextAppStatus(
     return { status: 'disabled' };
   }
 
+  // Defensive re-check before ANY credential read or request: an unvalidated name
+  // is the only thing this module interpolates into a URL path. The detail
+  // deliberately echoes neither the name nor the host.
+  if (!isValidObjectName(name)) {
+    return unavailable('invalid-name', 'the requested NextApp name is not a valid Kubernetes name');
+  }
+
   const host = process.env.KUBERNETES_SERVICE_HOST;
   const port = process.env.KUBERNETES_SERVICE_PORT ?? '443';
   const token = readSecretFile('token');
   const namespace = readSecretFile('namespace');
-  if (!host || !token || !namespace) {
+  // The namespace comes from the projected SA volume and is interpolated into the
+  // same path, so it gets the same shape check rather than implicit trust.
+  if (!host || !token || !namespace || !isValidObjectName(namespace)) {
     return unavailable(
       'not-in-cluster',
-      'no in-cluster ServiceAccount credentials are mounted in this pod',
+      'no usable in-cluster ServiceAccount credentials are mounted in this pod',
     );
   }
 
-  const url = `https://${host}:${port}/apis/${API_GROUP}/${API_VERSION}/namespaces/${namespace}/nextapps/${name}`;
+  const origin = apiServerOrigin(host, port);
+  if (!origin) {
+    return unavailable(
+      'unreachable',
+      'the injected Kubernetes API server address is not a usable URL',
+    );
+  }
+
+  const url = `${origin}/apis/${API_GROUP}/${API_VERSION}/namespaces/${namespace}/nextapps/${name}`;
 
   let response: RawResponse;
   try {
