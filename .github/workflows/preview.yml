@@ -115,7 +115,7 @@ jobs:
 
       - name: Upsert sticky preview comment
         if: steps.deploy.outputs.url != ''
-        uses: marocchino/sticky-pull-request-comment@v2
+        uses: marocchino/sticky-pull-request-comment@v3
         with:
           header: knext-preview
           number: ${{ github.event.pull_request.number || github.event.inputs.pr }}
@@ -175,7 +175,7 @@ jobs:
           node dist/cli/preview.js destroy --pr "$PR_NUMBER" -n "$PREVIEW_NAMESPACE"
 
       - name: Update sticky comment (torn down)
-        uses: marocchino/sticky-pull-request-comment@v2
+        uses: marocchino/sticky-pull-request-comment@v3
         with:
           header: knext-preview
           number: ${{ github.event.pull_request.number }}
