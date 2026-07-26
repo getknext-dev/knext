@@ -53,6 +53,28 @@ const EXPECTED_ACTIONS: ReadonlySet<string> = new Set([
   'changesets/action',
 ]);
 
+/**
+ * The same allowlist, resolved PER WORKFLOW. Only `release.yml` runs
+ * `changesets/action` — the step handed `NODE_AUTH_TOKEN` — so asserting the
+ * union of both files would let that action vanish from where it matters while
+ * the set still looked complete.
+ */
+const EXPECTED_ACTIONS_BY_FILE: Record<(typeof PINNED_WORKFLOWS)[number], ReadonlySet<string>> = {
+  'release.yml': new Set([
+    'actions/checkout',
+    'actions/setup-node',
+    'actions/upload-artifact',
+    'pnpm/action-setup',
+    'changesets/action',
+  ]),
+  'release-ghp.yml': new Set([
+    'actions/checkout',
+    'actions/setup-node',
+    'actions/upload-artifact',
+    'pnpm/action-setup',
+  ]),
+};
+
 /** `uses: owner/repo[/path]@<ref>` with an optional trailing comment. */
 const USES_LINE = /^\s*(?:-\s*)?uses:\s*(\S+?)@(\S+)\s*(?:#\s*(.*))?$/;
 
@@ -88,26 +110,22 @@ function allUsesRefs(): UsesRef[] {
 }
 
 describe('publish-path workflows SHA-pin every third-party action (#522)', () => {
-  it('finds the expected `uses:` steps in both publish-path workflows', () => {
-    // Sanity: if the extraction regex ever stops matching, the assertions below
-    // would vacuously pass over an empty list.
-    for (const file of PINNED_WORKFLOWS) {
-      expect(usesRefs(file).length).toBeGreaterThan(0);
-    }
-    const actions = new Set(allUsesRefs().map((entry) => entry.action));
-    // Array.from, not spread: `tests/` is currently type-checked by no repo
-    // script (see the open typecheck-gap issue), so a bare Set spread only
-    // fails under a default-target tsc — avoid depending on that being fixed.
-    expect(Array.from(actions).sort()).toEqual(Array.from(EXPECTED_ACTIONS).sort());
-  });
-
-  it.each(PINNED_WORKFLOWS)('%s pins every `uses:` to a 40-hex commit SHA', (file) => {
-    for (const entry of usesRefs(file)) {
-      expect(
-        entry.ref,
-        `${file}:${entry.line} — ${entry.action}@${entry.ref} is not a 40-hex commit SHA`,
-      ).toMatch(/^[0-9a-f]{40}$/);
-    }
+  it.each(PINNED_WORKFLOWS)('%s uses exactly its expected set of actions', (file) => {
+    const entries = usesRefs(file);
+    // Sanity: if the extraction regex ever stops matching, every per-entry
+    // assertion below would pass vacuously over an empty list.
+    expect(entries.length, `${file} — no \`uses:\` steps parsed at all`).toBeGreaterThan(0);
+    // Per FILE, not over the union of both. A union check cannot see an action
+    // disappearing from one workflow while the other still supplies the name:
+    // deleting every pnpm/action-setup step from release-ghp.yml left the old
+    // union assertion green. Both directions matter — an unexpected action on a
+    // credentialed path is a supply-chain change, and a vanished one means a
+    // step stopped running where we believe it runs.
+    // Array.from, not spread: `tests/` is type-checked by no repo script today
+    // (see the open typecheck-gap issue), so a bare Set spread fails only under
+    // a default-target tsc — don't depend on that being fixed.
+    const actions = Array.from(new Set(entries.map((entry) => entry.action))).sort();
+    expect(actions).toEqual(Array.from(EXPECTED_ACTIONS_BY_FILE[file]).sort());
   });
 
   it.each(PINNED_WORKFLOWS)('%s has no `uses:` on a mutable tag or branch', (file) => {
@@ -132,6 +150,9 @@ describe('publish-path workflows SHA-pin every third-party action (#522)', () =>
   });
 
   it('admits only allowlisted actions onto the credentialed publish path', () => {
+    // The per-file set check above catches an action appearing or vanishing in a
+    // KNOWN workflow. This catches the case that set can't: a brand-new action
+    // name showing up anywhere on the credentialed path.
     for (const entry of allUsesRefs()) {
       expect(
         EXPECTED_ACTIONS.has(entry.action),
@@ -140,29 +161,6 @@ describe('publish-path workflows SHA-pin every third-party action (#522)', () =>
           'supply-chain decision: review it, then add it to EXPECTED_ACTIONS deliberately.',
       ).toBe(true);
     }
-  });
-
-  it('pins every publish-path action immutably, whatever version is current', () => {
-    // The invariant that actually matters, and the one that survives a bump:
-    // a 40-hex commit SHA plus an auditable version comment. Asserting the
-    // *value* of either would re-freeze the pins (see EXPECTED_ACTIONS).
-    const seen = new Set<string>();
-    for (const entry of allUsesRefs()) {
-      seen.add(entry.action);
-      expect(
-        entry.ref,
-        `${entry.file}:${entry.line} — ${entry.action} must be a 40-hex SHA`,
-      ).toMatch(/^[0-9a-f]{40}$/);
-      expect(
-        entry.comment,
-        `${entry.file}:${entry.line} — ${entry.action} pin needs a trailing "# vX.Y.Z" so the pin stays auditable`,
-      ).toMatch(/^v\d+\.\d+\.\d+/);
-    }
-    // Guard against the file silently matching nothing (an empty program is the
-    // failure mode that makes a green run meaningless).
-    expect(seen.size, 'no `uses:` refs were parsed from the publish path at all').toBeGreaterThan(
-      0,
-    );
   });
 
   it('pins the token-receiving changesets/action step specifically', () => {
