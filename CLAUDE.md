@@ -36,10 +36,21 @@
   (spawns `next build`'s `server.js` + a metrics sidecar), not a Nitro entry.
 
 ## 4. Control plane (ADR-0001)
-- The **Go operator is the single source of truth** for cluster state. The TS CLI must stop
-  generating raw Knative manifests — `deploy.ts` mutates the cluster directly (`kubectl apply`)
-  and the manifest generator **hardcodes values** (`packages/kn-next/src/generators/knative-manifest.ts:183`
-  → `containerConcurrency: 100`). CLI = build/publish + emit a CR; operator reconciles.
+- The **Go operator is the single source of truth** for cluster state. CLI = build/publish + emit a
+  CR; operator reconciles.
+- **(RESOLVED 2026-07-26, stale-doc fix)** The "CLI must stop generating raw Knative manifests —
+  `deploy.ts` mutates the cluster directly and the manifest generator hardcodes
+  `containerConcurrency: 100`" note is **done, not outstanding**. Verified: `deploy.ts`'s only
+  cluster mutation is `kubectl apply -f <NextApp CR>` (`deploy.ts:401`), its header documents the
+  removal of both the raw-ksvc apply (was :176) and the infrastructure-manifest apply (was :153),
+  `packages/kn-next/src/generators/` contains only `loadtest-job.ts` (no `knative-manifest.ts`), and
+  `cr-builder.ts` builds the CR. Do not re-file consolidation as open work.
+- **Known gap that consolidation did NOT close (see `docs/V1_ROADMAP.md` §2.1):** `cr-builder.ts:364`
+  hardcodes `apiVersion: apps.kn-next.dev/v1alpha1` and nothing in `src/cli/` negotiates the version
+  against the cluster. The CRD is structural with **zero** `x-kubernetes-preserve-unknown-fields`, so
+  a newer CLI against an older operator has its unknown fields **pruned silently** — apply accepted,
+  field dropped, `Ready=True`. For `spec.security.networkPolicy` that is a security invariant
+  downgraded to a no-op while reporting success. A prune preflight is a v1.0 blocker.
 - Enforce **`:latest` rejection / digest pinning everywhere.** (Verified: the operator already
   rejects `:latest` in `nextapp_controller.go:66`; the kubebuilder manager image in
   `config/manager/manager.yaml:66` is still `controller:latest` — fix that placeholder.)
@@ -94,6 +105,13 @@ defer bucket 1.
 - **(RESOLVED)** Image optimization is **implemented** per ADR-0006
   (`packages/kn-next/src/adapters/image-cache-sync.ts` + tests) — the earlier "missing / biggest
   functional gap" note is stale; don't re-propose it as a work item.
+  **But implemented ≠ gated (2026-07-26):** `compat-smoke` check `(g)` calls `skip()` when the image
+  optimizer returns a non-200 (`apps/file-manager/scripts/compat-smoke.mjs:263`), so the suite
+  **cannot catch an image-optimization regression** — a broken optimizer skips rather than fails.
+  Three sibling rows are unbacked the same way and `docs/compat-matrix.md` is honest about each: ISR
+  runs with `REDIS_URL=""` and asserts nothing about revalidate-freshness (⚠️), Server Actions are
+  "configured, not verified" (⚠️), streaming/Suspense has no evidence at all (❌). Converting these
+  four to hard, red-on-fail checks is a v1.0 blocker (`docs/V1_ROADMAP.md` §3).
 - **(RESOLVED 2026-06-20)** `packages/kn-next/src/adapters/node-server.ts` is **Nitro-free** — it
   spawns the standalone `server.js` (`STANDALONE_SERVER_PATH`, default `.next/standalone/server.js`),
   no `.output/server`/`index.mjs`. Enforced by `adapter-migration.test.ts` (asserts no `.output/server`).
