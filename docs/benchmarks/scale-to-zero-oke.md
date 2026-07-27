@@ -1911,6 +1911,220 @@ interval it lives in.
   Run 24 left it: unconfirmed, and not decidable from end-to-end cold-start numbers on this cluster
   while an intermittent multi-second mode is unexplained.
 
+## Run 26 (2026-07-27) — ADR-0036 P1b A/B, **interleaved**: the arms are indistinguishable, and the ~10.5 s mode is caught with the instrument attached
+
+**What this is.** The bun-exec vs node cold-start A/B again, on the live OKE cluster
+(`context-ckmva7v7zvq`, `default/p1b-node` and `default/p1b-bunexec`) — but with the arms
+**interleaved sample by sample** rather than run one after the other. 13 pairs attempted, 12
+complete. Same harness invocation, same extractor for both arms, strictly sequential throughout
+(the cluster is a queue of one; concurrent traffic keeps pods warm and a "cold" start stops being
+cold). The read-only attribution collector from Run 25 ran alongside every one of the 26 samples.
+
+### Why interleaving, and why the earlier comparisons could not be rescued
+
+Run 25 established that the ~10.5 s mode is intermittent **across sittings**: same service, same
+image digest, same probe, one day apart, Run 24 saw it in 7 of 10 samples and Run 25 in 0 of 10.
+The Caveat's third rule follows from that — *a comparison whose signal is mode mixture is invalid
+unless the arms were interleaved* — and it is why Run 24's Fisher test is withdrawn as inapplicable
+rather than merely weak. Sequential arms cannot separate an arm effect from drift in the sitting.
+
+Interleaving makes any sitting-level drift land on both arms equally. It also buys **pairing**:
+sample *i* of node is comparable to sample *i* of bun-exec because they ran minutes apart under the
+same conditions, so the paired difference is the estimate to read, not the two marginal medians.
+
+The order was **ABBA rather than ABAB** — node first on odd pairs, bun-exec first on even pairs.
+Plain alternation cancels drift between pairs but leaves position-within-pair perfectly confounded
+with arm, since one arm would always run first. This run's results make that precaution look
+justified rather than fussy: the sitting did in fact change regime partway through.
+
+### Comparability gate (run before measuring, and again after)
+
+Each service's latest READY revision was diffed field-by-field by script — env names *and* values,
+resources, containerConcurrency, timeoutSeconds, ports, readinessProbe, command, args, volumes,
+serviceAccount, autoscaling annotations.
+
+| when | pair | verdict |
+|---|---|---|
+| before | `p1b-node-00015` / `p1b-bunexec-00013` | identical in every compared field except `container.image` |
+| after | `p1b-node-00080` / `p1b-bunexec-00078` | identical in every compared field except `container.image`, **same two digests** |
+
+Both `resources: {}`, both `env: []`, both `containerConcurrency: 0`, `timeoutSeconds: 300`,
+`min-scale 0`, `max-scale 10`, both `httpGet /api/health` with `periodSeconds: 1`,
+`timeoutSeconds: 1`, `failureThreshold: 3`. Checking again afterwards matters because the harness
+mints revisions as it captures and restores config; the check confirms it minted them without
+drifting the thing under test.
+
+### Every sample was verified cold by the instrument, not by the harness
+
+This needs stating because the harness cannot support the claim. `run.sh`'s `wait_zero` printed
+`-> still 1 pod(s) after 150s (continuing anyway)` on **all 26 samples of this run — and on all 10
+samples of Run 25's committed results file**. It is a standing property of this harness on this
+cluster, not a Run 26 defect, and it means the harness's own pod count certifies nothing.
+
+The collector does certify it. For each sample it recorded every pod with its uid and creation
+timestamp, and a sample counts as cold only if the pod that served the request was **created after
+the request window opened** — a warm hit reuses a pod that already exists. **26 of 26 samples:
+COLD.** No sample was served by a pre-existing pod.
+
+### Results — the full sample arrays
+
+`http_req_duration` median per k6 run, one request per sample, in wall-clock pair order. All
+reported samples returned a genuine `200` (`http_req_failed 0.00 %`).
+
+| pair | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| **node** | 2.23 | 2.75 | 2.29 | 1.78 | 1.87 | 2.08 | *2.58* | 1.92 | 4.09 | **10.97** | **10.14** | **10.48** | **10.64** |
+| **bun-exec** | 2.43 | 1.69 | 2.23 | 1.82 | 2.65 | 1.98 | — | 2.30 | 2.31 | 2.05 | **11.44** | **10.23** | **10.57** |
+
+Pair 7's bun-exec rep is **excluded**: the harness itself flagged it `k6 metrics INCOMPLETE —
+missing: http_reqs` and exited non-zero. Its node partner (2.58 s, italic) was measured cleanly but
+is dropped from the paired analysis, because a pair needs both halves. Everything below is the 12
+complete pairs.
+
+| arm | n | min | p50 | mean | p90 | max |
+|---|---|---|---|---|---|---|
+| node (Next standalone) | 12 | 1.78 s | 2.52 s | 5.10 s | 10.62 s | 10.97 s |
+| bun-exec (compiled binary) | 12 | 1.69 s | 2.30 s | 4.31 s | 10.54 s | 11.44 s |
+
+**No median is a headline here.** Both arms are mixtures of two modes and the marginal medians only
+report how many samples of each arm happened to land in which mode.
+
+### The paired differences — what interleaving was for
+
+node − bun-exec, per pair, seconds:
+
+| pair | 1 | 2 | 3 | 4 | 5 | 6 | 8 | 9 | 10 | 11 | 12 | 13 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| **Δ** | −0.20 | +1.06 | +0.06 | −0.04 | −0.78 | +0.10 | −0.38 | +1.78 | **+8.92** | **−1.30** | +0.25 | +0.07 |
+
+Median Δ **+0.07 s**, mean **+0.80 s**, range **−1.30 s … +8.92 s**. Sign split: node slower in
+7 of 12, bun-exec slower in 5 of 12 — which is what a fair coin looks like.
+
+The mean is dragged by exactly **one** pair — pair 10 (Δ +8.92 s), the only pair in which the two
+arms were in *different* modes, because the switch described below fell between them. That pair is
+not evidence about runtimes; it is evidence about when the regime changed. Drop it and the mean
+delta falls to **+0.06 s** over the remaining 11 pairs, all of which sit within ±1.8 s of zero with
+no consistent sign. Note that pair 11's Δ of −1.30 s is *not* such a straddle: both arms were slow
+there (10.14 vs 11.44), so it is a comparison within the slow mode, not across modes.
+
+### Does it clear ADR-0036's bar? No — the distributions do not separate
+
+ADR-0036 does not ask which median is lower; it asks for a **distribution-separated win**, the bar
+Run 6 cleared on the strength of complete separation rather than the size of its delta.
+
+| | node | bun-exec | separated? |
+|---|---|---|---|
+| full range | 1.78 – 10.97 s | 1.69 – 11.44 s | **no — near-total overlap** |
+| fast mode only (< 6 s) | n=8, 1.78 – 4.09 s, p50 2.16 s | n=9, 1.69 – 2.65 s, p50 2.23 s | **no — overlap** |
+
+**The delta is not quotable, regardless of its size.** That holds for the full distributions and it
+holds for the fast mode, which is the only place a runtime difference could live.
+
+One thing this does settle, in the negative: **Run 24's provisional fast-mode advantage to bun-exec
+(~470 ms) did not reproduce — the sign reversed.** Run 24 measured node 2.45 s vs bun-exec 1.98 s;
+this run measures node 2.16 s vs bun-exec 2.23 s. Run 24 marked that figure "must not be quoted
+until a repeat run reproduces it." The repeat run did not reproduce it. It should now be treated as
+withdrawn, not pending.
+
+### Slow-mode occurrence, this sitting only
+
+Per arm, out of the 12 complete pairs. **Not pooled with Run 24 or Run 25** — per the Caveat, these
+are reported as a sitting, and the across-sitting rate is a range, not an average.
+
+| arm | slow (≥ 6 s) | samples |
+|---|---|---|
+| node | **4 / 12** | 10.97, 10.14, 10.48, 10.64 |
+| bun-exec | **3 / 12** | 11.44, 10.23, 10.57 |
+
+The empty band is real in this run and was checked rather than assumed from Run 24: the largest gap
+in the sitting's pooled samples is **4.09 s → 10.14 s**, a 6.05 s void with nothing in it.
+
+### The finding: the slow mode is a regime, not a per-sample coin flip
+
+The mode did not scatter through the sitting. It switched on, in both arms, and stayed on:
+
+| arm | pair 1 → 13 |
+|---|---|
+| node | fast fast fast fast fast fast fast fast fast **SLOW SLOW SLOW SLOW** |
+| bun-exec | fast fast fast fast fast fast — fast fast fast **SLOW SLOW SLOW** |
+
+Not one slow sample before pair 10; not one fast sample after pair 11. Both arms crossed over
+within one pair of each other, i.e. within a few minutes of the same wall-clock moment.
+
+**This is the result that matters, and it invalidates a whole class of analysis.** Every treatment
+of this mode so far — including Run 24's withdrawn Fisher test — has modelled it as a per-sample
+Bernoulli draw with some base rate. It is not. Within a single sitting it behaves as a **regime that
+switches and persists**, so samples are not independent and "7 of 10" or "4 of 12" are not estimates
+of a probability. They are descriptions of where the switch happened to fall relative to the run.
+
+That also dissolves the Run 24 vs Run 25 puzzle without needing either to be wrong: 7/10 and 0/10
+are what you get from sittings that caught different sides of a switch.
+
+It is also the vindication of interleaving. Had this run used sequential arms — all of one, then all
+of the other — the switch at pair 10 of 13 would have put whichever arm ran **first** almost entirely
+inside the fast regime and whichever ran **second** almost entirely inside the slow one. The run
+would then have reported a several-fold win for the arm that happened to go first (~2.2 s vs
+~10.5 s), in whichever direction the running order fell. That number would have been an artifact of
+*when* each arm ran and nothing else — and nothing in the sequential design would have revealed it.
+
+### Attribution — where the extra ~8.5 s is not, and where it looks like it is
+
+Run 25 closed by naming what was missing: pull, connection setup and scheduling were excluded "for
+the fast samples measured here, which does not exclude them for the slow mode nobody has yet caught
+with an instrument attached." This run caught it. Across all 26 samples:
+
+- **Scheduling is excluded.** `pod created → PodScheduled` was **0.00 s on all 26 samples**, slow
+  and fast alike. The scheduler is not where the time goes.
+- **Image pull is excluded.** **Zero image pulls across all 26 samples** — every pull event reads
+  `already present on machine`, for the app image and the queue-proxy alike.
+- **Node placement does not predict the mode.** Both cluster nodes produced both modes
+  (`10.0.1.253`: 5 slow / 15 fast; `10.0.1.78`: 2 slow / 3 fast — the 25 samples that carry a
+  duration, i.e. all but the excluded pair-7 rep).
+
+Where it *does* look like it goes, stated with its sample size rather than dressed up: on the four
+samples where the collector captured the complete in-pod chain, the extra time sits between the
+**user container starting and the pod being marked Ready**.
+
+| | n | pod created → Ready | user-container start → Ready |
+|---|---|---|---|
+| slow (≥ 6 s) | 2 | 11.00 s | **9.00 s** |
+| fast (< 6 s) | 2 | 2.50 s | **1.50 s** |
+
+**Read this as indicative, not established.** It is 2 samples against 2, and both slow samples with
+complete timing are **bun-exec** — so the in-pod attribution is measured on one arm only. What is
+established across all 26 is the negative half: not the scheduler, not image pull, not placement.
+The positive half needs a run that captures the in-pod chain on every sample, which means a poll
+tighter than the transitions it is trying to observe.
+
+### Cluster state at hand-off
+
+- **Both services are byte-identical to their pre-run baselines.** Captured before the first sample
+  and re-fetched after the last, then compared on template annotations, containers,
+  `containerConcurrency`, `timeoutSeconds` and traffic: **identical for both `p1b-node` and
+  `p1b-bunexec`.** The run changed no product code and no service spec.
+- Both `p1b-*` services scaled to zero; no k6 Jobs or ConfigMaps left behind (`bench-run` label
+  selector returns nothing).
+- Side effect, same as Run 24 noted: each harness capture/restore mints Knative revisions, so 26
+  samples took `p1b-node` to 78 revisions and `p1b-bunexec` to 72. They are unrouted and scaled to
+  zero, but this accumulates and is worth pruning before it becomes its own confound.
+- The `cc-measure`, `cc-probe`, `fm-loadtest` and `vinext-bench` pods in the namespace predate this
+  run, as they predated Run 24.
+
+### What would settle it
+
+- **The ADR-0036 P1b question is still not decidable from end-to-end cold start on this cluster.**
+  A regime that adds ~8.5 s and, here, persisted for the final ~35 minutes of the sitting swamps
+  any plausible runtime difference. The
+  arms are indistinguishable here, and that is the honest answer this run supports.
+- **Measure the switch, not the samples.** The useful experiment is no longer "n more cold starts";
+  it is a standing collector running across hours, recording when the regime flips and what else on
+  the cluster changes at that moment. A cheap standing collector across many runs beats a longer
+  single run, because the thing that varies is the sitting — and it now appears the thing that
+  varies *within* a sitting is a switch with a timestamp, which is a far more tractable target.
+- **If a P1b decision is needed sooner**, measure in-pod server boot directly, as Run 6 did. That
+  comparison cleared the bar precisely because it measured a quantity this cluster's scheduling and
+  readiness behaviour cannot swamp.
+
 ## Caveat
 
 These are **point-in-time measurements on a specific small (2-node) OKE cluster** with a
@@ -1936,6 +2150,18 @@ Three rules follow, and they are stricter than "repeat the run":
 
 The practical consequence for anyone measuring here: a cheap standing collector across many runs
 beats a longer single run, because the thing that varies is the sitting.
+
+**Run 26 sharpens rule 1 and undercuts the model all three rules are phrased in.** Those rules treat
+the mode as a per-sample draw with some base rate — rule 1 even quotes a miss probability computed
+that way. It does not behave like one. Interleaved across a single sitting, the mode switched on
+in both arms within one pair of each other and then persisted to the end of the run: no slow sample
+before pair 10, no fast sample after pair 11. **Within a sitting it is a regime with a timestamp,
+not a coin flip**, so samples are not independent and a count like "7 of 10" or "4 of 12" is not an
+estimate of a probability — it records where the switch fell relative to the run. Rule 2 survives
+unchanged and rule 3 is strengthened: had Run 26's arms run sequentially, the switch would have
+handed a spurious several-fold win to whichever arm happened to run first. Read the "20 % base
+rate" arithmetic in rule 1 as
+superseded, and treat *when* a sample ran as data rather than as noise.
 
 Run 2 additionally showed that **even the "relative effect" half of that claim needs a repeated
 run to stand up**: the burst A/B's median delta reversed between two runs of the same A/B against
