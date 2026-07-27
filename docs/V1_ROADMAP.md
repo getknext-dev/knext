@@ -176,9 +176,26 @@ at all. Each needs a red-on-fail check before 1.0.
   start *is* the product, and the credibility strategy dies the first time an outsider measures it.
 
 Run 24 established the mode is **target-independent**, killing the two convenient explanations
-(runtime, build target). The cheapest hypothesis to falsify — and the best fit for the clean
-bimodality, since a discrete event either fires or does not — is a **probe/readiness retry cycle**:
-check `periodSeconds × failureThreshold` and Knative's activator retry against the ~8 s gap.
+(runtime, build target).
+
+**Superseded by Run 25 (2026-07-27).** This section previously named a **probe/readiness retry
+cycle** as the cheapest hypothesis to falsify. It was falsified — on its premise, before any run:
+the services that showed the mode carry `periodSeconds: 1` with **no `initialDelaySeconds`**, and no
+operator is installed on that cluster, so the operator's `2s`/`3s` source values have never executed
+there. The mechanism's ceiling is ~3 s against an observed ~8 s gap. **Do not re-propose it.**
+
+Run 25 also changed the shape of the problem. Instrumented, on the same service, image digest and
+probe one day after Run 24, the slow mode occurred **zero times in ten samples** — where Run 24 saw
+seven. So the mode is **intermittent across sittings**, not a property of the service, the build
+target, or the probe. Two consequences:
+
+- **No single sitting characterises cold start.** Run 24 and Run 25 would each satisfy an "≥ 20
+  samples, publish the distribution" criterion and they disagree about whether a 10 s mode exists.
+  Any 1.0 latency statement must be measured **across sittings**, stratified, with the per-sitting
+  slow-mode rate reported as a range — pooling hides exactly what Run 25 found.
+- **Cross-arm comparisons built on mode mixture were never sound.** With a time-varying base rate
+  and arms run sequentially rather than interleaved, Run 24's Fisher test is *inapplicable*, not
+  merely weak.
 
 **1.0 ships** saying: *scales to zero and wakes reliably; cold-start latency is workload- and
 cluster-dependent — here is the full distribution and the cluster it came from.* Publish the
