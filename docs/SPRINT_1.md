@@ -114,6 +114,49 @@ the socket binds, an httpGet requires the app to serve a request. That is discre
 which fits. It is **confounded** (the apps differ in more than their probe) and must be tested by
 asking which interval the ~8 s lives in, not by asserting it.
 
+## Amendment 2 — the A/B arms are not the same application (trigger 5)
+
+Escalated under the **discovered-fact** trigger, which is the one `workflow.md` says is most likely
+to be rationalised away. It is filed rather than quietly absorbed.
+
+Verified live against `context-ckmva7v7zvq`:
+
+| | `p1b-node` | `p1b-bunexec` |
+|---|---|---|
+| body at `/` | `hello from next-node` | the `examples/bun-exec` sample page |
+| raw bytes | 4000 | 1397 |
+| `<script>` tags | 11 | 4 |
+| DOCTYPE + RSC marker | yes | no |
+
+At `/api/health` the two are equivalent (36 vs 35 bytes, differing only in the `target` string).
+**The arms are two different applications, not one application built two ways.**
+
+**And the measured endpoint is `/`, where they differ.** Recovered from the committed results file
+`results/p1b-node-20260727T003502Z.txt`: `url=http://p1b-node.default.svc.cluster.local` — the
+service root, no path. So the runs exercised exactly the request where the two apps diverge, not the
+`/api/health` path where they match. (That file is Run 25's; Run 26 used the same harness, services
+and operator, so this is direct evidence for Run 25 and strong inference for Run 26 — not proof for
+Run 26, which is itself the point of the next paragraph.)
+
+**Correction to an earlier claim of mine:** I asserted the harness does not record the requested
+endpoint. It does — `run.sh:491` logs `url=` into the results file. The gap is narrower and more
+fixable: the *document* does not carry it forward, and **Run 26's per-sample results files were not
+persisted at all** — only one `p1b-*` results file exists on disk where 26 should. That is #536
+(T11) precisely, and it is now a demonstrated loss rather than a hypothetical one.
+
+### Consequences for track D
+
+- The httpGet-vs-tcpSocket lead is **doubly confounded** — different probe predicate *and* different
+  application. It cannot be tested on this pair.
+- T10's attribution cannot cleanly assign the ~8 s while the arms differ in application.
+- ADR-0036's null result is **not invalidated** — the node arm is the *simpler* page, so any bias
+  from the mismatch plausibly favoured node and bun-exec still tied. But "no separated win between
+  these two apps" is a weaker statement than "no separated win", and only the weaker one is earned.
+
+**Blocking fix before any further track-D attribution:** deploy the *same* application on both
+targets, and record the requested endpoint in the run's own section. Until then, track-D runs
+measure a pair that cannot answer the question.
+
 ## What each task must assert — the "silently useless" list
 
 For each task, the one way it could be marked done and still protect nobody. These belong in the
