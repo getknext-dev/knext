@@ -257,7 +257,7 @@ function stagePackage(pkg, rootDir, stagingRoot, versionByName) {
 /**
  * Stage all packages for the GHP channel.
  * @param {{ rootDir: string, stagingRoot: string, packages?: typeof DEFAULT_PACKAGES }} opts
- * @returns {{ stagingRoot: string, order: string[], staged: Record<string, object> }}
+ * @returns {{ stagingRoot: string, order: string[], staged: Record<string, ReturnType<typeof stagePackage>> }}
  */
 export function stageForGhp({ rootDir, stagingRoot, packages = DEFAULT_PACKAGES }) {
   mkdirSync(stagingRoot, { recursive: true });

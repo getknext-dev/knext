@@ -1,0 +1,91 @@
+{
+  // #527 root typecheck gate — the tier that NOTHING else owns.
+  //
+  // Vitest transpiles TS with esbuild: types are stripped, never checked. The
+  // per-package `tsconfig.typecheck.json` files cover packages/* and apps/*,
+  // but the ROOT `tests/` tree (workflow guards, the compat-lane ledger, the
+  // release-action pins, the e2e-deploy contracts) plus the root `scripts/`,
+  // `turbo/` and `vitest.*.ts` files were checked by no repo script and no CI
+  // job. `pnpm run typecheck` closes that hole; ci.yml runs it in the
+  // `typecheck-root` job, alongside (not after) Lint & Test.
+  //
+  // STRICTNESS: `strict: true` — the strictest level the per-package configs
+  // already use (packages/{lib,db,kn-next}/tsconfig.json all set it, and none
+  // enables noUncheckedIndexedAccess/exactOptionalPropertyTypes). The whole
+  // covered set passes at that level today, so there is NO ratchet floor to
+  // document here: this config is at the repo's strictest existing baseline,
+  // not below it. Raising the bar further (noUncheckedIndexedAccess et al) is
+  // a separate, repo-wide decision — do not weaken this one to land a change.
+  //
+  // SCOPE: root-level only. Deliberately NO packages/**, apps/** or
+  // examples/** — those have their own gates, and pulling them in here would
+  // produce duplicate/conflicting diagnostics. Guarded by
+  // tests/root-typecheck-gate.test.ts, which asserts via `tsc --showConfig`
+  // that the root test files are ACTUALLY in the program (an include that
+  // silently matches nothing is a permanently-green gate that checks nothing).
+  //
+  // SCOPE RATCHET (the one floor this config sits below, stated rather than
+  // hidden): the standalone `scripts/*.ts` ENTRY POINTS are not in `include`.
+  // They carry pre-existing debt that is out of scope for #527 — notably
+  // scripts/print-config.ts imports `../packages/cn-next/src/loader`, a path
+  // that does not exist (a dead file), plus TS7017/TS18046/TS7006 in
+  // resolve-client-manifest.ts and test-isolate-dashboard.ts. Ratchet them in
+  // once that debt is fixed; do NOT lower `strict` to swallow it. Note this is
+  // a floor on SCOPE, not on strictness, and it is narrower than it looks:
+  // scripts/lib/*.ts (manifest-patch.ts, names.ts) ARE checked, because the
+  // root tests import them and tsc follows imports into the program.
+  //
+  // `allowJs: true` + `checkJs: false`: the root tests import untyped
+  // `scripts/**/*.mjs` helpers. Without allowJs every such import is an
+  // implicit `any` (TS7016) — the gate would be blind exactly where these
+  // tests do their work. With it, tsc infers real types from the JS while
+  // still not error-checking the JS itself (that is not this issue's scope).
+  //
+  // NOT covered, deliberately: vitest.workspace.ts. It is dead — it imports
+  // `defineWorkspace`, removed in vitest 4 (the repo is on vitest 4, and
+  // nothing references the file). Deleting it is a separate change; including
+  // it here would mean landing this gate red.
+  //
+  // module/moduleResolution are bundler semantics for the same reason
+  // packages/db/tsconfig.typecheck.json uses them: these files are loaded by
+  // vite, so extensionless relative imports and `import.meta` are how they
+  // actually resolve. Checking them under Node16/CJS would report config
+  // artifacts, not defects.
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2023"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "noEmit": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "allowJs": true,
+    "checkJs": false,
+    // typeRoots is PINNED to this repo's own node_modules on purpose. Without
+    // it tsc walks PARENT directories for @types, so running from a git
+    // worktree nested inside the main checkout silently resolves @types/node
+    // from the parent repo and passes — while CI, which has no parent, fails
+    // with TS2688. That false green happened on the first CI run of this very
+    // gate. The pin makes the local run fail the same way CI does.
+    "typeRoots": ["./node_modules/@types"],
+    // `node` only. `vitest/globals` is deliberately NOT listed: it is a package
+    // subpath, not a @types/* directory, so it cannot resolve under the pinned
+    // typeRoots above — and it is not needed, because every root test imports
+    // describe/expect/it explicitly from 'vitest' rather than relying on the
+    // config's `globals: true`. If a future root test does rely on the globals,
+    // add a `/// <reference types="vitest/globals" />` to that file instead of
+    // unpinning typeRoots.
+    "types": ["node"]
+  },
+  "include": [
+    "tests/**/*.ts",
+    "turbo/**/*.ts",
+    "vitest.config.ts",
+    "vitest.setup.ts",
+    "vitest.server-only-stub.ts"
+  ],
+  "exclude": ["node_modules", "dist", "packages", "apps", "examples", "benchmarks", "**/.claude/**"]
+}

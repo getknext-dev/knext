@@ -92,6 +92,40 @@ jobs:
           fail_ci_if_error: false
           token: ${{ secrets.CODECOV_TOKEN }}
 
+  # #527 (Sprint 1, T0) — the root `tests/` tier is type-checked by nothing else.
+  # Vitest strips types with esbuild without checking them, so a root test file
+  # can be green under `vitest run` while `tsc` rejects it; that shipped twice
+  # (PR #500's four implicit-`any`s, PR #526's non-assignable type predicate).
+  #
+  # This is its OWN top-level job, deliberately WITHOUT `needs:` — it runs
+  # ALONGSIDE Lint & Test so a type error fails as early as a lint error rather
+  # than waiting on that job's lib->db->core builds. It can: tsconfig.typecheck.json
+  # is scoped to root-level TS only, so nothing here is dist-dependent.
+  # The contract (config scope, real program contents via `tsc --showConfig`,
+  # script, and this job's placement) is guarded by tests/root-typecheck-gate.test.ts.
+  typecheck-root:
+    name: Typecheck (root tests/)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck root tests/ (tsc --noEmit)
+        run: pnpm run typecheck
+
   compat-smoke:
     # knext adapter SMOKE suite — NOT the official Next.js compatibility suite (ADR-0007,
     # option C). Builds apps/file-manager through the knext adapter (output:'standalone'),
