@@ -24,7 +24,7 @@
 
 import { execFileSync } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
-import { join, relative, resolve } from 'node:path';
+import { join, relative, resolve, sep } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 const REPO_ROOT = resolve(import.meta.dirname, '..');
@@ -40,24 +40,107 @@ function readJsonc(path: string): Record<string, unknown> {
   return JSON.parse(raw) as Record<string, unknown>;
 }
 
-/** Every tracked `.ts` file directly under the root `tests/` tree. */
-function rootTestFiles(): string[] {
+/** Every `.ts` file under `dir`, recursively. */
+function tsFilesUnder(dir: string): string[] {
   const out: string[] = [];
-  const walk = (dir: string) => {
-    for (const entry of readdirSync(dir, { withFileTypes: true })) {
-      const full = join(dir, entry.name);
+  const walk = (d: string) => {
+    for (const entry of readdirSync(d, { withFileTypes: true })) {
+      const full = join(d, entry.name);
       if (entry.isDirectory()) walk(full);
       else if (entry.name.endsWith('.ts')) out.push(full);
     }
   };
-  walk(join(REPO_ROOT, 'tests'));
+  walk(dir);
   return out;
 }
+
+/**
+ * The tiers this gate CLAIMS to cover, enumerated from the FILESYSTEM and
+ * declared HERE rather than read back from `tsconfig.typecheck.json`.
+ *
+ * A guard that derives its expectation from its subject cannot notice the
+ * subject shrinking: with the expectation read from `include`, dropping
+ * `turbo/**\/*.ts` (or the three root `vitest.*.ts` entries) left every
+ * assertion green — 34 files became 30, still over any count floor, and three
+ * of the four declared scopes were unenforced.
+ */
+const COVERED_TIERS: Array<{ label: string; files: () => string[] }> = [
+  { label: 'tests/**/*.ts', files: () => tsFilesUnder(join(REPO_ROOT, 'tests')) },
+  { label: 'turbo/**/*.ts', files: () => tsFilesUnder(join(REPO_ROOT, 'turbo')) },
+  {
+    // vitest.workspace.ts is the one documented exclusion: it is dead code
+    // (imports `defineWorkspace`, removed in vitest 4) — see the config comment.
+    label: 'root vitest.*.ts',
+    files: () =>
+      readdirSync(REPO_ROOT)
+        .filter((f) => /^vitest\..+\.ts$/.test(f) && f !== 'vitest.workspace.ts')
+        .map((f) => join(REPO_ROOT, f)),
+  },
+];
 
 interface ShownConfig {
   compilerOptions?: Record<string, unknown>;
   files?: string[];
 }
+
+/**
+ * Translate a tsconfig `include` glob into an anchored RegExp over
+ * repo-relative POSIX paths. Only the two forms this config uses are
+ * supported: `**\/` (zero or more directories) and `*` (within one segment).
+ */
+function globToRegExp(glob: string): RegExp {
+  const DIRSTAR = '\u0000';
+  const body = glob
+    .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+    .replace(/\*\*\//g, DIRSTAR)
+    .replace(/\*/g, '[^/]*')
+    // split/join rather than String.replaceAll: this file is itself checked by
+    // the gate, whose `lib` is not guaranteed to carry ES2021.
+    .split(DIRSTAR)
+    .join('(?:[^/]+/)*');
+  return new RegExp(`^${body}$`);
+}
+
+interface CiJob {
+  key: string;
+  body: string;
+}
+
+/**
+ * The top-level jobs of ci.yml, each with its KEY CAPTURED.
+ *
+ * The key matters as much as the body: an earlier version of this file split
+ * on the two-space indent and thereby consumed it, so every block started at
+ * column 0 and `/^ {2}lint-and-test:/m.test(block)` could never be true —
+ * a tautology that stayed green when the typecheck job was deleted and its
+ * step inlined into `lint-and-test`. Keeping the key lets the assertions name
+ * the job they mean instead of pattern-matching for its absence.
+ */
+function ciJobs(yml: string): CiJob[] {
+  const jobsIdx = yml.indexOf('\njobs:');
+  const jobs: CiJob[] = [];
+  let current: CiJob | undefined;
+  for (const line of yml
+    .slice(jobsIdx + 1)
+    .split('\n')
+    .slice(1)) {
+    // A column-0 non-comment key ends the `jobs:` mapping.
+    if (/^[^\s#]/.test(line)) break;
+    const key = /^ {2}([A-Za-z0-9_-]+):\s*$/.exec(line);
+    if (key) {
+      current = { key: key[1], body: `${line}\n` };
+      jobs.push(current);
+    } else if (current) {
+      current.body += `${line}\n`;
+    }
+  }
+  return jobs;
+}
+
+/** The step that actually invokes the root typecheck. */
+const TYPECHECK_RUN = /run:\s*pnpm run typecheck\b/;
+/** The job that must own it. */
+const TYPECHECK_JOB = 'typecheck-root';
 
 let cachedShowConfig: ShownConfig | undefined;
 
@@ -107,20 +190,40 @@ describe('root typecheck config (#527)', () => {
 });
 
 describe('the covered set is real, not an include that matches nothing (#527)', () => {
-  it('every root tests/**/*.ts file is in the tsc program', () => {
+  it.each(COVERED_TIERS)('every $label file is in the tsc program', ({ label, files }) => {
+    const onDisk = files();
+    expect(
+      onDisk.length,
+      `no ${label} files on disk — this tier assertion would be vacuous`,
+    ).toBeGreaterThan(0);
     const inProgram = new Set((showConfig().files ?? []).map((f) => resolve(REPO_ROOT, f)));
-    const missing = rootTestFiles()
-      .filter((f) => !inProgram.has(f))
-      .map((f) => relative(REPO_ROOT, f));
+    const missing = onDisk.filter((f) => !inProgram.has(f)).map((f) => relative(REPO_ROOT, f));
     expect(
       missing,
-      'these root test files are type-checked by nothing — the include does not reach them',
+      `these ${label} files are type-checked by nothing — the include does not reach them`,
     ).toEqual([]);
   });
 
   it('the program is non-trivially populated (a silently-empty include is the failure mode)', () => {
     const files = showConfig().files ?? [];
     expect(files.length).toBeGreaterThanOrEqual(25);
+  });
+
+  it('EVERY include entry contributes at least one file — not just tests/**', () => {
+    // A file-count floor only covers the biggest entry: dropping `turbo/**/*.ts`
+    // or the three `vitest.*.ts` entries still leaves 30 files, comfortably over
+    // any floor, so three quarters of the declared scope was unguarded. Assert
+    // per-entry instead: an include the program never reaches is dead scope.
+    const include = (readJsonc(TSCONFIG_PATH).include ?? []) as string[];
+    expect(include.length).toBeGreaterThanOrEqual(4);
+    const files = (showConfig().files ?? []).map((f) =>
+      relative(REPO_ROOT, resolve(REPO_ROOT, f)).split(sep).join('/'),
+    );
+    const barren = include.filter((entry) => !files.some((f) => globToRegExp(entry).test(f)));
+    expect(
+      barren,
+      'these tsconfig `include` entries match nothing in the program — the scope they claim is not actually checked',
+    ).toEqual([]);
   });
 });
 
@@ -141,17 +244,22 @@ describe('root typecheck script + CI wiring (#527)', () => {
   });
 
   it('it runs ALONGSIDE Lint & Test — its own job, not gated behind it', () => {
-    // Extract the top-level job blocks (2-space-indented keys under `jobs:`).
-    const jobsSection = ciYml.slice(ciYml.indexOf('\njobs:'));
-    const blocks = jobsSection.split(/\n {2}(?=[a-z0-9-]+:\n)/);
-    const typecheckBlock = blocks.find((b) => /run:\s*pnpm run typecheck\b/.test(b));
-    expect(typecheckBlock, 'the root typecheck must live in its own top-level job').toBeDefined();
+    // Assert on the job KEY, not on the absence of a pattern inside a block:
+    // if the step is inlined into `lint-and-test`, the owning key changes and
+    // this fails by naming the wrong job. (The previous form of this assertion
+    // matched `/^ {2}lint-and-test:/m` against a block whose indent had already
+    // been consumed by the split — it could never fire.)
+    const owners = ciJobs(ciYml)
+      .filter((job) => TYPECHECK_RUN.test(job.body))
+      .map((job) => job.key);
     expect(
-      /^ {2}lint-and-test:/m.test(typecheckBlock ?? ''),
-      'the root typecheck must NOT be a step inside the lint-and-test job',
-    ).toBe(false);
+      owners,
+      `the root typecheck must run in exactly one top-level job, \`${TYPECHECK_JOB}\` — not as a step inside lint-and-test (or any other job)`,
+    ).toEqual([TYPECHECK_JOB]);
+
+    const job = ciJobs(ciYml).find((j) => j.key === TYPECHECK_JOB);
     expect(
-      /\n\s*needs:/.test(typecheckBlock ?? ''),
+      /^ {4}needs:/m.test(job?.body ?? ''),
       'the typecheck job must not `needs:` another job — it runs alongside Lint & Test so a type error fails as early as a lint error',
     ).toBe(false);
   });
@@ -163,9 +271,17 @@ describe('root typecheck script + CI wiring (#527)', () => {
     // a repo-wide gap, not a T0-specific one). What IS enforceable from in here
     // is that the job stays fail-closed: `continue-on-error: true` or an `if:`
     // that skips it would make it green-by-construction even when tsc fails.
-    const jobsSection = ciYml.slice(ciYml.indexOf('\njobs:'));
-    const blocks = jobsSection.split(/\n {2}(?=[a-z0-9-]+:\n)/);
-    const block = blocks.find((b) => /run:\s*pnpm run typecheck\b/.test(b)) ?? '';
+    //
+    // Addressed by KEY: if the typecheck step were relocated, these guards
+    // would otherwise silently start describing whatever block happened to
+    // contain it — covering a different job than the one they name.
+    const job = ciJobs(ciYml).find((j) => j.key === TYPECHECK_JOB);
+    expect(job, `ci.yml must have a \`${TYPECHECK_JOB}\` job`).toBeDefined();
+    const block = job?.body ?? '';
+    expect(
+      TYPECHECK_RUN.test(block),
+      `the \`${TYPECHECK_JOB}\` job must be the one that runs the root typecheck`,
+    ).toBe(true);
     expect(
       /continue-on-error/.test(block),
       'continue-on-error makes the typecheck job report success while tsc fails',
