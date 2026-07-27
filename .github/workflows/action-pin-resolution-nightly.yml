@@ -1,0 +1,129 @@
+name: Action pin SHA↔tag resolution (nightly)
+
+# ── #539: does each pinned action SHA actually BELONG to its commented tag? ────
+# `tests/release-action-pins.test.ts` enforces the FORM and SCOPE of every pin on
+# the publish path (`release.yml`, `release-ghp.yml`): a 40-hex SHA, an auditable
+# `# vX.Y.Z` comment, and an allowlist of which actions may touch a workflow that
+# holds `secrets.NPM_TOKEN`. It deliberately does NOT assert the SHA VALUE — an
+# earlier revision did, and it reddened every CORRECT Dependabot bump (#530/#532
+# preserved the pin form exactly and still failed), which made editing the
+# supply-chain guard the routine way to get green.
+#
+# That left one real gap: `uses: actions/setup-node@<40-hex> # v7.0.0` passes CI
+# whether or not that SHA is v7.0.0 — or is even in that repository. Until this
+# workflow, the only thing between a mismatched pin and a live npm publish
+# credential was a human reading the Dependabot diff: documented practice, not
+# enforcement (`.claude/rules/security.md`).
+#
+# WHY NIGHTLY, NOT A PR GATE: the answer lives UPSTREAM and legitimately changes,
+# so it must be resolved at RUN time against the GitHub API. Baking a resolved
+# value into a committed assertion recreates exactly the staleness that got the
+# value assertion removed, and making it PR-blocking would couple every merge to
+# a third-party API's availability.
+#
+# The resolution logic (annotated-tag dereference, missing tags, fork-network
+# commits) lives in `scripts/verify-action-pins.mjs` and is unit-tested offline
+# against an injected API double by `tests/action-pin-sha-tag-nightly.test.ts`.
+#
+# HUMAN PRECONDITION: the alert-issue create/pin needs "Settings → Actions →
+# General → Workflow permissions → Allow GitHub Actions to create and approve
+# pull requests" ENABLED (it also governs issue creation by the default token).
+
+on:
+  # 05:11 UTC nightly — offset from the compat nightly (03:17) and the docs
+  # closure nightly (04:23) so the security-signal jobs don't queue behind
+  # each other.
+  schedule:
+    - cron: '11 5 * * *'
+  # Manual re-runs after fixing a pin; the alert job is scheduled-only (below)
+  # so a dispatch experiment never files or updates the pinned issue.
+  workflow_dispatch: {}
+
+# Least privilege: resolution needs only a token for the API rate limit; only
+# the alert job gets issues:write.
+permissions:
+  contents: read
+
+jobs:
+  resolve-action-pins:
+    name: Resolve every publish-path pin against its commented tag
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      # No dependencies, no setup-node: the script is dependency-free ESM on the
+      # runner's built-in Node, so this job cannot itself become a supply-chain
+      # surface while auditing one.
+      - name: Verify SHA↔tag correspondence (FAIL on any finding)
+        env:
+          # The workflow token, not an anonymous request: 60 req/h anonymously
+          # would rate-limit this into a flaky red.
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node scripts/verify-action-pins.mjs
+
+  # ── Idempotent pinned alert (same pattern as docs-closure-nightly.yml) ───────
+  # A silent nightly is the same as no check. On a failed SCHEDULED run,
+  # create-or-update ONE pinned issue carrying the run link; an already-open
+  # alert gets a COMMENT per red night rather than a duplicate issue.
+  nightly-red-alert:
+    name: Nightly red alert (pinned issue)
+    needs: [resolve-action-pins]
+    # always() so this is not skipped when the check fails; the needs-result
+    # check fires it ONLY on failure; the event check scopes it to the schedule.
+    if: >-
+      always() &&
+      github.event_name == 'schedule' &&
+      needs.resolve-action-pins.result == 'failure'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      - name: Create or update the "Action pin SHA↔tag mismatch" issue (idempotent)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          CHECK_RESULT: ${{ needs.resolve-action-pins.result }}
+        run: |
+          set -euo pipefail
+          # The idempotency KEY is this fixed literal title — the lookup and the
+          # create MUST share it, so keep it a constant (never interpolated).
+          title='Action pin SHA<->tag resolution RED'
+          body="The nightly SHA↔tag resolution check FAILED: at least one action pinned on the
+          publish path (\`release.yml\` / \`release-ghp.yml\`) does not resolve to the tag its
+          comment claims.
+
+          - Run (full per-pin report in the job log): ${RUN_URL}
+          - Check job result: ${CHECK_RESULT}
+
+          These workflows run with a live npm publish credential in scope, so a pin that does not
+          belong to its claimed tag is a supply-chain finding, not a typo. The report names,
+          per pin: the action, the workflow and line, the claimed tag, the pinned SHA, and
+          what that tag currently resolves to upstream.
+
+          **Triage**
+          - *SHA mismatch* — repoint the pin at the resolved SHA, or explain the divergence.
+            A tag that MOVED upstream on a credentialed path is worth investigating on its own.
+          - *Tag not found* — the tag was deleted or renamed, or it was never a tag (a moving
+            major like \`v1\` is often a BRANCH). Re-pin against a real tag.
+          - *API error* — treated as a failure, never a pass. Re-run to confirm before
+            assuming it was transient.
+
+          Re-run this workflow to confirm green, then close this issue."
+          # Idempotency: exactly-one open alert issue. --limit 100 explicitly
+          # (gh defaults to 30) so the pinned alert cannot fall off the first
+          # page and make every red night file a NEW issue.
+          existing="$(gh issue list --repo "${GITHUB_REPOSITORY}" --state open --limit 100 \
+            --json number,title \
+            --jq "[.[] | select(.title == \"${title}\")][0].number // empty")"
+          if [ -n "${existing}" ]; then
+            echo "updating existing alert issue #${existing}"
+            gh issue comment "${existing}" --repo "${GITHUB_REPOSITORY}" --body "${body}"
+          else
+            echo "creating the alert issue"
+            new_url="$(gh issue create --repo "${GITHUB_REPOSITORY}" --title "${title}" --body "${body}")"
+            new_num="${new_url##*/}"
+            gh issue pin "${new_num}" --repo "${GITHUB_REPOSITORY}" || echo "::warning::could not pin issue #${new_num} (non-fatal)"
+          fi
