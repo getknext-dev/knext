@@ -70,10 +70,44 @@ import { readFileSync, writeFileSync } from 'node:fs';
 const FILE_TOKEN = String.raw`test\/[^\r\n]*?\.test\.`;
 
 /**
+ * How a failing test FILE failed (#545). Coarse on purpose — see the shape
+ * comment inside summarize() for what each value does and does not claim.
+ * @typedef {'timeout' | 'assertion' | 'unclassified'} FailureKind
+ */
+
+/**
+ * One failing test FILE's attribution record.
+ * @typedef {object} ShardFailure
+ * @property {string} file repo-root-relative test file (run-tests.js's own key)
+ * @property {FailureKind} kind
+ * @property {number} [timeoutMs] present only when kind === 'timeout'
+ * @property {string[]} cases failing case names, de-duplicated across retries
+ */
+
+/**
+ * The summary artifact shape. Every optional key is OMITTED (not undefined)
+ * when it does not apply, which is what keeps a green node artifact byte-stable
+ * for the #41 matrix publisher — a consumer contract, not a style choice.
+ * @typedef {object} ShardSummary
+ * @property {number} passed
+ * @property {number} failed
+ * @property {number} notRun
+ * @property {number} excluded
+ * @property {string} ref
+ * @property {string} shard
+ * @property {string} runtime
+ * @property {string} [runtimeVersion]
+ * @property {number} [expectedTotal]
+ * @property {boolean} [truncated]
+ * @property {ShardFailure[]} [failures] #545 — present only on a RED shard
+ * @property {string[]} [notRunFiles] #545 — present only when a phantom abort occurred
+ */
+
+/**
  * Parse jest-style runner output + run metadata into the summary artifact shape.
  * @param {string} runnerOutput raw stdout from run-tests.js
  * @param {{ref:string, shard:string, excluded:number, runtime?:string, runtimeVersion?:string, expectedTotal?:number}} meta
- * @returns {{passed:number, failed:number, notRun:number, excluded:number, ref:string, shard:string, runtime:string, runtimeVersion?:string, expectedTotal?:number, truncated?:boolean}}
+ * @returns {ShardSummary}
  */
 export function summarize(runnerOutput, meta) {
   const text = String(runnerOutput ?? '');
@@ -237,7 +271,12 @@ export function summarize(runnerOutput, meta) {
   };
 }
 
-/** Build the per-file failure record from its scanned output group. */
+/**
+ * Build the per-file failure record from its scanned output group.
+ * @param {string} file
+ * @param {Map<string, {noTestsFound:boolean, cases:Set<string>, timeoutMs:number|undefined}>} groups
+ * @returns {ShardFailure}
+ */
 function attributeFailure(file, groups) {
   const g = groups.get(file);
   const cases = g ? [...g.cases].sort() : [];

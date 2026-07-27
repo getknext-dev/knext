@@ -1,9 +1,12 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-// @ts-expect-error — .mjs script without types
+// Both scripts are untyped `.mjs`, but the root typecheck gate runs with
+// `allowJs`, so tsc infers their real shapes from JSDoc. That is why these
+// imports need no `@ts-expect-error` — and why `failures[]`/`notRunFiles[]`
+// have to be declared on ShardSummary in e2e-summary.mjs rather than asserted
+// away here. The gate exists to keep `tests/` honest (#527).
 import { classifyRuns, renderLedgerTable } from '../scripts/e2e-shard-history.mjs';
-// @ts-expect-error — .mjs script without types (same import style as deploy-summary.test.ts)
 import { summarize } from '../scripts/e2e-summary.mjs';
 
 const WORKFLOW = readFileSync(join(process.cwd(), '.github/workflows/test-e2e-deploy.yml'), 'utf8');
@@ -78,6 +81,28 @@ test/e2e/app-dir/b/b.test.ts finished on retry 0/2 in 9.0s
 
 const meta = { ref: 'v16.2.0', shard: '2/16', excluded: 44, runtime: 'node' };
 
+type ShardSummary = ReturnType<typeof summarize>;
+type ShardFailure = NonNullable<ShardSummary['failures']>[number];
+
+/**
+ * `failures` is OPTIONAL by contract — it is omitted on a green shard so the
+ * node artifact stays byte-stable for the #41 publisher. These narrow it by
+ * throwing rather than by casting: if attribution ever stops being emitted the
+ * test fails loudly with a real message, which is what makes the mutation proof
+ * meaningful. A cast would have swallowed exactly that.
+ */
+function failuresOf(s: ShardSummary): ShardFailure[] {
+  const failures = s.failures;
+  if (!failures) throw new Error('expected the shard summary to carry named failures');
+  return failures;
+}
+
+function firstFailure(s: ShardSummary): ShardFailure {
+  const [first] = failuresOf(s);
+  if (!first) throw new Error('expected at least one named failure');
+  return first;
+}
+
 describe('#545 — a red shard NAMES its failing tests (summary artifact is the ledger)', () => {
   it('lists the failing test FILE, not just a count', () => {
     const s = summarize(DYNAMIC_ON_HOVER_RED, meta);
@@ -90,23 +115,24 @@ describe('#545 — a red shard NAMES its failing tests (summary artifact is the 
   });
 
   it('classifies the bare per-case jest timeout as kind "timeout" (the #95301 hang signature)', () => {
-    const s = summarize(DYNAMIC_ON_HOVER_RED, meta);
-    expect(s.failures[0].kind).toBe('timeout');
-    expect(s.failures[0].timeoutMs).toBe(60000);
+    const failure = firstFailure(summarize(DYNAMIC_ON_HOVER_RED, meta));
+    expect(failure.kind).toBe('timeout');
+    expect(failure.timeoutMs).toBe(60000);
   });
 
   it('names the failing CASE, de-duplicated across retries', () => {
     // The real log prints the ✕ line once per retry (3 retries). One entry.
     const thrice = DYNAMIC_ON_HOVER_RED.repeat(3);
-    const s = summarize(thrice, meta);
-    expect(s.failures[0].cases).toEqual(['prefetches the dynamic data for a Link on hover']);
+    expect(firstFailure(summarize(thrice, meta)).cases).toEqual([
+      'prefetches the dynamic data for a Link on hover',
+    ]);
   });
 
   it('classifies a non-timeout failure as kind "assertion" (so the two are never conflated)', () => {
-    const s = summarize(BUN_ASSERTION_RED, { ...meta, runtime: 'bun' });
-    expect(s.failures[0].kind).toBe('assertion');
-    expect(s.failures[0].timeoutMs).toBeUndefined();
-    expect(s.failures[0].cases).toContain('should handle dynamicParams: false correctly');
+    const failure = firstFailure(summarize(BUN_ASSERTION_RED, { ...meta, runtime: 'bun' }));
+    expect(failure.kind).toBe('assertion');
+    expect(failure.timeoutMs).toBeUndefined();
+    expect(failure.cases).toContain('should handle dynamicParams: false correctly');
   });
 
   it('OMITS the failures key on a green shard (node artifact stays byte-stable for the #41 publisher)', () => {
@@ -169,16 +195,23 @@ describe('#545 AC1 — per-shard outcomes are queryable across scheduled runs, l
     },
   ];
 
+  /** Look a row up by run id, throwing rather than silently comparing undefined. */
+  function row(rows: ReturnType<typeof classifyRuns>, runId: number) {
+    const found = rows.find((r) => r.runId === runId);
+    if (!found) throw new Error(`no ledger row for run ${runId}`);
+    return found;
+  }
+
   it('extracts the failing SHARD IDs per run', () => {
     const rows = classifyRuns(runs);
-    expect(rows.find((r: any) => r.runId === 30193384289).failedShards).toEqual(['6/16', '8/16']);
-    expect(rows.find((r: any) => r.runId === 29984259723).failedShards).toEqual(['2/16']);
-    expect(rows.find((r: any) => r.runId === 30243647123).failedShards).toEqual([]);
+    expect(row(rows, 30193384289).failedShards).toEqual(['6/16', '8/16']);
+    expect(row(rows, 29984259723).failedShards).toEqual(['2/16']);
+    expect(row(rows, 30243647123).failedShards).toEqual([]);
   });
 
   it('labels every row with the lane it came from', () => {
     const rows = classifyRuns(runs);
-    expect(rows.map((r: any) => r.lane).sort()).toEqual(['bun', 'node', 'node']);
+    expect(rows.map((r) => r.lane).sort()).toEqual(['bun', 'node', 'node']);
   });
 
   it('never GUESSES the lane — an unattributable run is reported as unknown, not as node', () => {
@@ -187,13 +220,13 @@ describe('#545 AC1 — per-shard outcomes are queryable across scheduled runs, l
     // against; a silent "node" default would launder a bun red into the
     // credential lane's flake rate.
     const rows = classifyRuns([{ ...runs[1], lane: undefined }]);
-    expect(rows[0].lane).toBe('unknown');
+    expect(row(rows, 29984259723).lane).toBe('unknown');
   });
 
   it('computes a per-lane flake rate from stable-vs-rotating shard evidence', () => {
     const rows = classifyRuns(runs);
-    const node = rows.filter((r: any) => r.lane === 'node');
-    expect(node.filter((r: any) => r.failedShards.length > 0)).toHaveLength(1);
+    const node = rows.filter((r) => r.lane === 'node');
+    expect(node.filter((r) => r.failedShards.length > 0)).toHaveLength(1);
     expect(node).toHaveLength(2);
   });
 
