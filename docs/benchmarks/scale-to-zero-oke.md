@@ -1661,6 +1661,26 @@ These are **point-in-time measurements on a specific small (2-node) OKE cluster*
 zero-CPU-request target app — they demonstrate behavior and relative effect, not portable
 absolute numbers or a performance guarantee for other clusters, node pools, or workloads.
 
+**Run 25 adds the strongest version of that caveat this document has, and it applies backwards to
+every entry here.** A *distribution* measured in one sitting is not *the* distribution. On the same
+service, image digest and probe, one day apart, Run 24 saw a ~10.5 s mode in 7 of 10 samples and
+Run 25 saw it in **0 of 10**. Both are honest measurements; neither describes the system on its own.
+
+Three rules follow, and they are stricter than "repeat the run":
+
+1. **A single sitting cannot establish that a mode exists, and cannot establish that it does not.**
+   At n=10, a mode with a 20 % base rate is missed entirely about 11 % of the time. Report the
+   sitting, not the system.
+2. **Never pool across sittings.** Pooling would have averaged Run 24 and Run 25 into a mode that
+   fires ~35 % of the time — a number describing no observed reality. Report per-sitting rates as a
+   **range**.
+3. **A comparison whose signal is mode *mixture* is invalid unless the arms were interleaved.**
+   Run 24's arms ran sequentially, so its Fisher test assumed a fixed base rate that Run 25 showed
+   moves. That statistic is withdrawn, not weakened.
+
+The practical consequence for anyone measuring here: a cheap standing collector across many runs
+beats a longer single run, because the thing that varies is the sitting.
+
 Run 2 additionally showed that **even the "relative effect" half of that claim needs a repeated
 run to stand up**: the burst A/B's median delta reversed between two runs of the same A/B against
 the same cluster and app. Latency deltas here should be reported only when they reproduce across
