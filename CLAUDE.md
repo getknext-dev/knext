@@ -2,6 +2,8 @@
 
 > This is the persistent source of truth for **direction**. Detailed roadmap: `ROADMAP.md`.
 > Architect operating discipline: `.claude/rules/architecture.md`. Decisions: `docs/adr/`.
+> Delivery pipeline (plan → TDD → OKE → review → sign-off → merge → **clean up**):
+> `.claude/rules/workflow.md`.
 > SCS / Multi-Zones / PWA architecture: rule `.claude/rules/scs-zones.md`, skills `scs-zones` + `pwa-zones`.
 > The context-mode operational rules (context-window protection) are retained at the bottom.
 
