@@ -155,6 +155,16 @@ Two things the graph does not do, recorded so nobody re-derives them
 Automating this as a git `post-commit` hook is a plausible next step, but installing one changes
 every future commit in the repo for every contributor — ask before adding it.
 
+**This step is unenforced, and by this file's own standard that means it will decay.** Nothing
+blocks a merge whose AST pass never ran, and a stale graph fails silently — it answers, just from
+last sprint's tree, which is worse than refusing to answer. That is precisely the "documented
+expectation degrades, and its efficacy is unobservable until it has already failed" case argued
+above, so it gets stated here rather than left for someone to discover. The mitigation available
+today is cheap and belongs to whoever reads the graph, not whoever merged: `graph.json` carries
+`built_at_commit`, so **check it against `main` before trusting a traversal**, and treat a
+divergence as "re-run the AST pass", not as a reason to distrust the whole graph. The hook above
+is what would convert this from an expectation into a gate.
+
 ## Step 10 — clean up after every successful merge
 
 Do all four. Each has bitten this project.

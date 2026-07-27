@@ -15,6 +15,14 @@ graph could and **could not** answer, so the next planner does not re-run dead q
 
 458 files had changed since the previous graph (298 code, 160 prose), 19 source files deleted.
 
+**Provenance caveat — this graph is not a graph of `main`.** `graph.json` records
+`built_at_commit: 33ff4c6`, which is one commit *ahead* of `main` (`49af9ae`): the tip of the
+unmerged docs branch behind PR #557. The extra commit is docs-only, so no finding below is
+affected, but the general point is the one that matters — **a graph silently inherits whatever
+tree was checked out when it was built.** This was caught by the `built_at_commit`-vs-`main`
+check the workflow rule now prescribes, on the check's first use, against the graph its own
+author had just built. That is the argument for the check.
+
 ## Finding 1 — the compat gate is a structural island
 
 The two communities backing the compatibility suite (`Compat Suite Workflow Guard`,
