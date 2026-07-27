@@ -1536,6 +1536,12 @@ any later invocation detect and offer to restore it.
 
 ## Run 24 (2026-07-26) — ADR-0036 P1b A/B re-measured on a verified-comparable pair: both arms bimodal, delta unconfirmed
 
+> **Undercut by Run 25 — read that entry before quoting anything from the mode-mixture table below.**
+> Run 25 measured the same service, digest and probe one day later and saw the slow mode **zero times
+> in ten samples**, so this run's mode mixture is a property of that sitting rather than of the arms.
+> The `p = 0.37` Fisher figure below is **withdrawn as a statistic** (see the correction in
+> "The headline p50 is an artifact"), not merely weakened. Every other conclusion here stands.
+
 **What this is.** A re-run of the Run 17 bun-exec vs node cold-start A/B on the live OKE cluster
 (`context-ckmva7v7zvq`, `default/p1b-node` and `default/p1b-bunexec`), 10 cold samples per arm, run
 **sequentially** (never concurrently), same harness invocation and same extractor for both arms.
@@ -1592,9 +1598,18 @@ Every sample falls into one of two well-separated clusters with nothing in betwe
 
 Naively, p50 10.47 s → 2.29 s reads as "bun-exec is 4.6× faster". **It is not a runtime result.** The
 two arms' slow modes are the same speed (10.66 s vs 10.76 s); the whole p50 gap comes from *how many*
-samples landed in the slow mode — 7/10 for node vs 4/10 for bun-exec. Fisher's exact test on that 2×2
-gives **p = 0.37**: the mode mix is entirely consistent with chance at n=10. Do not quote the 4.6×, and
+samples landed in the slow mode — 7/10 for node vs 4/10 for bun-exec. Do not quote the 4.6×, and
 do not quote the p50 delta.
+
+> **Correction (Run 25): the `p = 0.37` this section originally quoted is withdrawn.** Fisher's exact
+> test was applied to the 7/10-vs-4/10 mode mixture, and its null hypothesis is that both arms draw
+> from one *fixed* base rate. Run 25 shows that base rate **moves between sittings** (the same arm
+> went 7/10 slow to 0/10 slow overnight), and the two arms here were run **sequentially, not
+> interleaved** — so the arms sampled different stretches of a time-varying process. Under those
+> conditions Fisher's null is **inapplicable, not merely weak**: `p = 0.37` was never the right
+> statistic and should not be cited as evidence for or against a mode-mixture difference. The
+> conclusion it was used to support — do not quote the 4.6× — is unchanged and rests on the
+> overlapping distributions below, which need no test.
 
 **Nothing here clears this document's bar.** By the Run 6 precedent (see Caveat) a latency delta counts
 when the *distributions separate*. These distributions overlap grossly — both arms span ~1.7–11.0 s.
@@ -1654,6 +1669,247 @@ Run both arms again, unchanged, and see whether the fast-mode delta reproduces �
 the cause of the ~11 s mode (capture pod `nodeName` and the kubelet pull/scheduling events per sample).
 Until the tail is understood or eliminated it swamps a ~470 ms runtime difference, and no ADR-0036
 ship/don't-ship decision should rest on an end-to-end cold-start number from this cluster.
+
+## Run 25 (2026-07-27) — cold-start attribution, instrumented: the bimodality did not reproduce, and the probe-cadence hypothesis is dead
+
+**What this is.** The first run on this cluster built to *attribute* cold start rather than only time
+it. Two services measured sequentially (never concurrently), same harness invocation, same extractor:
+`default/p1b-node` — the service Run 24's bimodality was actually observed on — and `default/file-manager`.
+A read-only observer ran alongside, started before the request rather than queried after.
+
+It also closes a hypothesis that was heading for an experiment it did not deserve.
+
+### The probe-cadence hypothesis is refuted, on the premise rather than the result
+
+The proposal was that the operator pins the ksvc readiness probe to `initialDelaySeconds: 2` /
+`periodSeconds: 3` with no `failureThreshold` (defaulting to 3), that Knative's queue-proxy only
+polls aggressively when `periodSeconds` is unpinned, and that an app with a ~1.96 s boot floor
+therefore misses the first tick and pays `2 + 3 (+3) ≈ 8 s` — discrete, so it would explain clean
+bimodality, and ~8 s, so it would match the observed gap.
+
+Four independent checks against the running system, before measuring:
+
+1. **There is no operator on this cluster.** No `NextApp` CRD (`kubectl -n default get nextapp` →
+   `the server doesn't have a resource type "nextapp"`), and no `kn-next-operator` Deployment in any
+   namespace. `nextapp_controller.go:977-986` has never emitted a probe here. All three benchmarked
+   ksvcs are hand-applied — they carry `kubectl.kubernetes.io/last-applied-configuration` and no
+   `ownerReferences`.
+2. **The values are real in the operator source and absent from the cluster.** The hypothesis was
+   derived by reading the source and treating it as a description of the running system.
+3. **The services that showed the bimodality run `periodSeconds: 1`, not 3, and no
+   `initialDelaySeconds` at all.** Live on both Run 24 arms, confirmed in three places — the ksvc
+   spec, the revision spec, and the queue-proxy's `SERVING_READINESS_PROBE` env, which is what the
+   queue-proxy actually executes:
+
+   ```json
+   {"failureThreshold":3,"httpGet":{"path":"/api/health","port":0},
+    "periodSeconds":1,"successThreshold":1,"timeoutSeconds":1}
+   ```
+
+   This matches Run 24's own text, which records the arms being equalized to
+   `periodSeconds: 1, timeoutSeconds: 1, failureThreshold: 3`.
+4. **The arithmetic does not survive the substitution.** With `initialDelay = 0` and `period = 1`, a
+   missed first tick costs ~1 s and the worst case before the probe fails is `3 × 1 s = 3 s`, against
+   an observed gap of ~8 s. The mechanism is short by nearly 3×. No A/B can rescue it.
+
+The A/B originally proposed — pinned `2/3` versus unpinned — would have characterised a configuration
+**nothing on this cluster runs**, and was not performed. Recorded here so it is not re-proposed.
+
+A second, weaker version of the idea also failed its premise: `file-manager` was proposed as the A/B
+subject with "probe as-is" as the control, but its probe is *already* unpinned
+(`{"successThreshold":1,"tcpSocket":{"port":0}}` — Knative's default), so control and treatment were
+the same configuration.
+
+### What was measured
+
+`p1b-node` needed no mutation: it already carried exactly the Run 24 configuration — `httpGet
+/api/health`, `periodSeconds: 1`, `timeoutSeconds: 1`, `failureThreshold: 3`, `resources: {}`,
+`containerConcurrency: 0`, `containerPort: 8080`, `min-scale 0` / `max-scale 10`. Measuring it as-is
+removes the whole class of patch risk that a `--type=merge` container patch introduces.
+
+The harness's `apply_autoscaling` rolled `p1b-node-00010` → `00011` at run start. The two revisions'
+containers were diffed field by field and are **identical** — same image digest, probe, `env: []`,
+`resources: {}`, ports, `containerConcurrency`, `timeoutSeconds`, no command/args/serviceAccount
+override. Only autoscaling annotations differ (`max-scale 10→6`, `target-burst-capacity` unset→`200`,
+panic window/threshold set). **All ten samples were served by one revision, `p1b-node-00011`**,
+asserted by the report rather than assumed.
+
+### Results — 10/10 fast, no slow mode
+
+Samples are `http_req_duration` medians per k6 run, one request per sample, in run order. All
+returned a genuine `200`.
+
+- **`p1b-node`** (n=10): 2.24, 2.71, 2.29, 2.02, 2.17, 2.07, 2.81, 2.26, 2.35, 2.24 — **range 2.02–2.81 s**
+- **`file-manager`** (n=10): 6.65, 3.39, 3.44, 3.62, 3.69, 2.99, 3.20, 3.80, 3.44, 3.37 — **range 2.99–6.65 s**
+
+No central tendency is quoted for either arm, deliberately: a single number over a possibly-bimodal
+sample describes a value that may never occur, which is how Run 24's "4.6× faster" artifact arose.
+
+**The headline is a negative result.** Run 24 measured `p1b-node` at 7/10 in a slow mode of
+10.28–11.01 s, with a clean gap and nothing between 2.77 s and 10.28 s. One day later, on the same
+cluster, the same service, the same image digest and the same probe configuration, **the slow mode
+did not occur once in ten samples.** `file-manager` likewise shows no 10.5 s mode, and its one
+elevated sample (6.65 s) is the first of the run, not a separate cluster.
+
+That is not a refutation of Run 24 — those samples were real and returned 200s. It means the ~11 s
+mode is **intermittent across sittings**, so it is a property of the cluster's state on a given day
+rather than a stable property of the service, the build target, or the probe. It also means Run 24's
+n=10 arms were sampling something whose base rate moves between runs, which invalidates any delta
+computed from mode mixture — including the one Run 24 already declined to quote. Run 24 has been
+back-annotated accordingly, and its Fisher `p = 0.37` is **withdrawn as a statistic**: that test
+assumes one fixed base rate, and its arms were run sequentially rather than interleaved, so its null
+is inapplicable here rather than merely weak.
+
+### Attribution: what the instrument excluded — for the fast samples, in this sitting only
+
+With no slow samples there was nothing to attribute, so the run's value is in what it rules out.
+All ten samples were admissible — every required lifecycle field captured.
+
+**Read the scope before the bullets.** Every exclusion below is a statement about **the fast samples
+measured in this sitting** — the ten on `p1b-node` and the ten on `file-manager`, none of which
+reached the ~10.5 s mode — and about nothing else. The slow mode was not observed here, so
+none of this excludes anything as a cause *of the slow mode*: **you cannot exclude a cause of a
+phenomenon you did not observe.** Run 24's slow samples were a different day and were collected with
+no residency sampling, no per-sample kubelet events and no k6 splits — so image pull in particular is
+**not** excluded for them, and cannot be from this run's data.
+
+- **Image pull did not contribute to these fast samples**, measured rather than assumed. The target
+  digest `sha256:b6b80e81…` was **already resident on both nodes** before the run started, sampled
+  from `node.status.images[]` *before* each request (post-hoc this is always true and proves
+  nothing). Every sample's kubelet `Pulled` event reads *"already present on machine"*. This says
+  nothing about residency during Run 24's slow samples, which was never sampled.
+- **Connection establishment did not contribute to these fast samples.** For the six samples whose
+  full k6 summary was captured, `http_req_connecting` was 412–680 **µs** and `http_req_waiting`
+  equalled `http_req_duration` to two decimals in every one of the six. Those six cold starts are
+  entirely server-side; none of that time is Kourier/activator connection setup. Scoped to 6/10
+  samples of one arm, on one day.
+- **Scheduling did not contribute to these fast samples**, at this resolution: `create→scheduled`
+  was 0 s on all ten.
+- **Node placement was not a variable in this run** — all ten pods, and all ten k6 driver pods,
+  landed on `10.0.1.253`. Nothing exercised `10.0.1.78`.
+
+### Limitations, stated plainly
+
+- **A negative result at n=10 does not disprove an intermittent mode.** If the slow mode's base rate
+  were 20%, ten samples would miss it entirely about 11% of the time. This run shows the mode is not
+  reliably reproducible; it does not show it is gone.
+- **The lifecycle intervals are quantized to one second.** Kubernetes condition `lastTransitionTime`
+  values have second resolution, so `scheduled→started`, `started→ready` and `ready→response` come
+  out as 0 s, 1 s or 2 s on a ~2.2 s cold start. That is too coarse to apportion a fast sample, and it
+  is why the per-interval columns are reported but not used to draw a conclusion here. They would be
+  adequate for an ~8 s excess; they are not adequate for a ~2 s total.
+- **One node, one day, one revision.** Every sample ran on `10.0.1.253` on 2026-07-27 against
+  `p1b-node-00011`. A distribution from that scope can be literally honest and still describe an
+  artifact of that node. Both nodes were, at the time, ~83–85% of allocatable CPU *requested* with
+  limits oversubscribed to 388–404% — the "heavily contended" condition earlier runs describe, and a
+  plausible home for an intermittent multi-second stall.
+- **Split metrics were captured for 6 of 10 samples.** The other four report `—`, which is missing
+  data, not zero (see the harness note below).
+- **The harness alters the service config it measures**: `max-scale 10→6`, `target-burst-capacity`
+  unset→`200`, and panic window/threshold set, restored afterwards. For the **cold** phase this is
+  believed not to change the request path — a scale-from-zero request has no pods, so the activator
+  buffers it by necessity at any `target-burst-capacity`, and TBC governs activator retention once
+  pods exist. That reasoning is from Knative semantics and **was not verified by measurement here**;
+  it is stated as an open point rather than a finding. It would be a live caveat for the soak and
+  burst phases, which do run with pods available.
+
+### A harness limitation this run exposed
+
+`run.sh:1021` filters each k6 summary through
+`grep -E 'http_req_duration|http_req_failed|http_reqs|iteration_duration|checks\.\.\.|vus_max|dropped'`
+before it reaches the results file. `http_req_connecting`, `http_req_waiting` and
+`http_req_tls_handshaking` are dropped there. Those splits are what separate "connection/routing" from
+"server side", so **no run in this document before this one could have attributed a latency mode from
+its own artifacts** — the harness was built to measure, not to attribute, and this is the second half
+of that gap. (The first half: the only pod observation is `running_pods()` at `run.sh:809`, a *count*
+polled every 3 s — no pod name, no `nodeName`, no timestamps, no events, no revision identity.)
+
+This run did not modify the harness. The collector reads each k6 driver pod's **full log** the moment
+it reaches `Succeeded`, which carries the complete summary; `run.sh:1098` deletes the Job at the end of
+each rep, so it must be polled during the run and cannot be recovered afterwards. Four of ten were
+reaped before capture — hence 6/10 coverage — which is itself an argument for widening the grep rather
+than relying on the workaround.
+
+### Instrumentation added
+
+- `benchmarks/scale-to-zero-oke/cold-attribution-collector.sh` — read-only observer (get/list only;
+  it does **not** raise the scale-to-zero grace period, which would mutate what is being measured).
+  Captures pod identity/placement/lifecycle conditions, `startedAt` for **both** `user-container` and
+  `queue-proxy` (queue-proxy readiness is what gates traffic, so omitting it attributes sidecar time
+  to the app), the rewritten on-pod probe stanza, node-level target-digest residency sampled before
+  each request, PodAutoscaler `Active`/`Activating` and replica timeline, kubelet events, k6 driver
+  pod `nodeName`, and full k6 logs.
+- `benchmarks/scale-to-zero-oke/cold-attribution-report.mjs` — per-sample fast/slow with admissibility
+  enforcement, serving-revision constancy assertion, stratification by node / image residency /
+  readiness predicate / same-node-vs-cross-node, and a per-interval excess table. Its attribution
+  arithmetic is a separate module (`cold-attribution-attribute.mjs`) so it can be tested against
+  synthetic samples the cluster has never produced, rather than only against what it happened to
+  emit.
+
+Two deliberate design choices in the report, both aimed at a failure mode rather than a feature:
+
+- **Attribution can return `UNATTRIBUTABLE`, and that bucket is expected to be non-empty.** An earlier
+  version picked the largest interval as the cause, which would have classified 100% of samples by
+  construction and described its own classifier rather than the cluster. A cause is now named only if
+  **one** interval accounts for ≥50% of a sample's excess over the *worst* fast sample by itself —
+  applying that floor to the *sum* of the intervals was not enough, because five intervals at ~20%
+  each sum to 100% while the named bucket still explains 20%. Three further ways the tool could have
+  named a cause it had not measured are closed with it: the summed intervals are now a
+  **non-overlapping** decomposition (`pulling→pulled` sits *inside* `scheduled→started`, so counting
+  both double-counted the pull); `ready→response` is a **diagnostic, never a cause**, because its end
+  marker is the k6 driver pod's container termination — summary write and teardown included — which
+  makes it the largest interval by construction; and per-interval excess is **signed** rather than
+  clipped at zero, so quantization noise across five one-second-resolution intervals can no longer
+  only push the explained share upward. An excess inside that 1 s quantization names nothing.
+  Guarded by `tests/cold-attribution-attribute.test.ts`, including a synthetic five-way-split sample
+  run end-to-end through the report — the case this cluster has not yet produced.
+- **The arm-integrity check asserts the serving revision, not the ksvc generation.** The generation
+  legitimately moves twice per run (apply before sample 1, restore after sample N), so flagging that
+  reported a clean arm as contaminated — which trains readers to ignore the check.
+
+### The readiness-predicate lead: still standing, still untested
+
+The sprint plan's surviving lead is the readiness **predicate** — every observation of the slow mode
+so far has been on an arm probing with `httpGet /api/health`, and every unimodal arm has used a bare
+`tcpSocket` probe; a tcpSocket probe passes when the socket binds, an httpGet additionally requires
+the app to serve a request. This run **does not test it**, because testing it means locating which
+interval a slow sample's ~8 s lives in, and there was no slow sample to locate. The predicate is
+recorded as a stratification column here and nothing more.
+
+Two data points from this run bear on it anyway, and both point the same way — away from it:
+
+- **`p1b-node` is an `httpGet` arm and came back 10/10 fast.** An `httpGet` predicate is therefore
+  not *sufficient* for the slow mode: the same predicate, service, digest and probe cadence that were
+  7/10 slow a day earlier produced no slow sample at all.
+- **The run's one elevated sample (6.65 s, `file-manager`) is on a `tcpSocket` arm** — the wrong side
+  of the hypothesis. It is a single sample, and being the first of its run it carries an unresolved
+  run-order/warm-up confound, so it is weak evidence; it is stated because it is evidence *against*,
+  and omitting it would be selective.
+
+The honest status: **untested, not weakened to death, and not promising.** Neither point falsifies
+the lead — the hypothesis was always that the predicate *interacts* with something else, and a
+necessary-but-not-sufficient condition survives an arm that stayed fast. But nothing here supports it
+either, and it should not be carried forward as though this run had strengthened it. It is settled
+the same way everything else here is: catch a slow sample with the instrument attached and read the
+interval it lives in.
+
+### What would settle it
+
+- **Repeat sittings, not more samples in one sitting.** The mode's base rate moves between days, so
+  three runs of 10 on three days discriminates better than one run of 30. Re-running the same arms
+  unchanged is the cheapest next step.
+- **Catch one slow sample with the instrument attached.** Everything needed to attribute it is now
+  captured; this run simply had no slow sample to attribute. A standing collector across several runs
+  is more likely to catch one than a longer single run.
+- **Correlate with cluster contention at sample time.** Both nodes sat near 85% requested CPU with
+  heavily oversubscribed limits. Node-level CPU pressure and steal time at t0 are not yet captured.
+  Contention is a plausible candidate, but it is not a candidate *by elimination*: pull, connection
+  setup and scheduling **were excluded for the fast samples measured here**, which does not exclude
+  them for the slow mode nobody has yet caught with an instrument attached. Call this a hypothesis
+  worth instrumenting, not a remainder.
+- **Do not read a build-target conclusion into any of this.** ADR-0036's P1b question remains where
+  Run 24 left it: unconfirmed, and not decidable from end-to-end cold-start numbers on this cluster
+  while an intermittent multi-second mode is unexplained.
 
 ## Caveat
 
