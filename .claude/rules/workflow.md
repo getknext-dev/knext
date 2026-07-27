@@ -1,7 +1,13 @@
 # Delivery workflow (knext)
 
-The standing pipeline for any non-trivial change. Complements `architecture.md` (how to design),
-`security.md` (what is never acceptable), and `scs-zones.md` (where the boundaries are).
+The standing pipeline for any non-trivial change. Complements `security.md` (what is never
+acceptable) and `scs-zones.md` (where the boundaries are).
+
+**Amends `architecture.md` §1.** That rule says "do not implement until the plan is approved",
+framed per-change. Under the sprint model below, plan approval is **per-sprint**, granted once via
+the task graph, with the escalation triggers pulling the design gates back mid-sprint. Stated here
+because two rules files giving different answers to the same question means whichever is read first
+wins.
 
 Until now this lived only in session context, which is why its last step kept being skipped.
 
@@ -11,6 +17,12 @@ Running both design gates on every PR does not scale: a single one-file change h
 Opus gate runs. They found real defects every time, so the answer is not to drop them — it is to
 **move them from per-PR to per-sprint, and keep a trigger that pulls them back in.**
 
+**A sprint** is the unit this trades against, so it needs a size: **roughly two weeks of delivery**,
+opened by the planning meeting below and closed by the review at the end. The lead opens and closes
+it. That bound is what makes the trade legible — "a mistake can live for a sprint" means about two
+weeks, not indefinitely. Some work sets its own clock and the sprint must accommodate it rather than
+the reverse: the compat gate needs 14 consecutive nightly runs, so it spans sprints by construction.
+
 **Sprint planning (once, both gates, Opus).** Produces one artifact: a **task graph** — the sprint's
 scope, each task's exit criteria, and the **dependency edges** between them. This is where the
 expensive judgement is spent, and spending it here is what buys the parallelism below. The plan
@@ -19,13 +31,31 @@ must also name, explicitly, which tasks are expected to touch the escalation tri
 **During the sprint, teams do not re-summon the design gates** — except on a trigger. A team hitting
 one stops and escalates rather than deciding for itself:
 
-- a change that contradicts, or would require amending, an **ADR**;
+- a change that contradicts, or would require amending, **an ADR *or* a hard rule in
+  `architecture.md` / `scs-zones.md`**. Not every hard rule has an ADR number, and the gap is live:
+  landing a capability behind a compat check that **skips rather than fails** contradicts "gate
+  every feature on the official compatibility suite" while tripping no other trigger — and four
+  capability rows are in exactly that state today. Same hole covers "don't rewrite the runtime
+  twice" and "never make anything but the official-adapter target the default";
 - a **security invariant** (`security.md`) — auth, secrets, supply chain, cluster-write surface;
+- **the core-vs-app boundary or zone data sovereignty** (`scs-zones.md`) — moving Service Worker /
+  Module-Federation / PWA code into `packages/kn-next` or the operator, or a zone reading another
+  zone's database. Both have dedicated hooks, which is this repo's own signal that they are
+  trigger-class; neither is reachable through the other triggers;
 - the **public API**, `kn-next.config.ts` schema, CLI surface, or the **CRD**;
 - a **discovered fact that invalidates the sprint plan** — the most important trigger and the one
   most likely to be rationalised away. Measuring something that contradicts the plan's premise is
-  not a reason to quietly adjust; it is a reason to stop. (A measurement this project ran collapsed
-  a planned subsystem into a single flag — worth far more than the plan it broke.)
+  not a reason to quietly adjust; it is a reason to stop. Two precedents, both from one day: a
+  measurement collapsed a planned preflight subsystem into a single flag, and a sprint plan's
+  highest-value hypothesis died on contact with the cluster because it had been derived from
+  operator *source* that was not deployed there.
+
+**Three of these are mechanically detectable, so detect them** rather than relying on someone to
+self-report against their own interest. A `git diff --name-only` against the merge base catching
+`docs/adr/`, `api/v1alpha1/nextapp_types.go`, `packages/kn-next/src/config.ts`,
+`packages/kn-next/src/cli/`, or the public subpaths in `packages/kn-next/package.json` covers the
+ADR, config/CLI/CRD and public-API triggers. The remaining two — a discovered fact, and a hard-rule
+contradiction that touches no tracked path — are judgement, and cannot be automated.
 
 **Sprint close (once, both gates).** Review the sprint's aggregate, not each PR: did the task graph
 hold, what did the escalations reveal, which exit criteria are actually met.
@@ -39,10 +69,24 @@ running design gates by default — never from running fewer reviews.
 
 ### Be honest about what this trades
 
-Per-sprint design review means an architectural mistake can live for a sprint instead of a PR. That
-is acceptable **only** because the triggers above are enforced and because the task graph was
-designed up front. It stops being acceptable the moment teams start deciding for themselves that a
-trigger "doesn't really apply" — which is the failure mode to watch for, not gate latency.
+Per-sprint design review means an architectural mistake can live for a sprint instead of a PR.
+
+Do not dress that up. Three of the five triggers are mechanically detectable; **the other two are
+documented practice, not enforcement** — self-reported by the team that would have to escalate
+against its own interest. This file says elsewhere that a guard which stays green when its subject
+is removed is decoration, and `security.md` says a documented expectation degrades and its efficacy
+is unobservable until it has already failed. Both apply here, to this model.
+
+**The strongest argument against this model is in this file.** Six per-PR gate runs on one change
+found a real defect every time; the only reason given for reducing them is price. And on one PR,
+three consecutive rounds each fixed the previous round's defect and introduced the next — a
+successive-round regression class that trips **none** of the triggers, so it is exactly what
+per-sprint gating stops catching. Nothing in this model covers it; reviewer escalation is the only
+backstop, and reviewers are not design gates. That is the accepted risk, stated rather than
+suppressed.
+
+It stops being acceptable the moment a team decides for itself that a trigger "doesn't really
+apply" — that, not gate latency, is the failure mode to watch.
 
 ## Parallel teams
 
@@ -69,16 +113,22 @@ Work the task graph, not the backlog order.
    above. Both pinned to Opus when summoned; subagents otherwise inherit the session model and
    silently downgrade on a task where judgement is the product.
 2. **Implement — TDD.** Failing test first, for the reason you expect it to fail. Then make it pass.
-3. **Verify on OKE** for any feature or critical update. Standing requirement, not optional.
-4. **Review** — code review *and* spec review, in parallel.
-5. **Sign off** — normally the two reviews above are the gate. Summon architect and/or system
+3. **Integration test on kind** — the k8s integration gate. Lead-owned, gates the PR.
+4. **Verify on OKE** for any feature or critical update. Standing requirement, not optional.
+   Remember the distinction the cluster has already taught us twice: this verifies the **running
+   system**, which is not the same as the source. Confirm what is actually deployed before
+   attributing behaviour to code you read.
+5. **Update the docs** for anything user-visible — the docs site is dogfooded, so it is part of
+   delivery, not a follow-up. A feature whose docs land "later" ships undocumented.
+6. **Review** — code review *and* spec review, in parallel.
+7. **Sign off** — normally the two reviews above are the gate. Summon architect and/or system
    designer **only** when a trigger fired or a reviewer escalated; the sprint-close review covers
    the rest. Whatever gates ran, a `BLOCK` or `ISSUES_FOUND` means another round — never a
    judgement call about whether it matters, and never "the sprint plan already approved this".
-6. **Merge** on clearance.
-7. **Clean up** — see below. This step is part of the workflow, not housekeeping after it.
+8. **Merge** on clearance.
+9. **Clean up** — see below. This step is part of the workflow, not housekeeping after it.
 
-## Step 7 — clean up after every successful merge
+## Step 9 — clean up after every successful merge
 
 Do all four. Each has bitten this project.
 
@@ -114,9 +164,18 @@ herdr pane list            # only your live panes
 
 ## Branch discipline (the guard that saved nothing because it was not run)
 
-A blocked compound command can leave you on the wrong branch, because the parts before the block
-never ran. **Re-establish state after any blocked command rather than re-running the pieces**, and
-put the guard in the command itself:
+When a hook blocks a command, **nothing in it ran** — not even the parts before the offending
+clause. So the danger is not that the command moved you; it is that you *assumed* the `git switch`
+at the front of it succeeded, then re-ran only the tail. You were already wherever you started, and
+the commit lands there.
+
+That is the real mechanism, and it is worth stating correctly: the incident that motivated this rule
+was a `git switch -c … && git commit && git push` blocked on its message text. Nothing ran, the
+branch was never created, and re-running just the commit and push put a docs file straight onto the
+trunk.
+
+**Re-establish state after any blocked command rather than re-running its pieces**, and put the
+guard in the command itself:
 
 ```
 test "$(git branch --show-current)" != "main" && git commit … && git push …
@@ -127,7 +186,7 @@ three commits, so every open PR showed an inherited failure unrelated to its own
 
 ## Reviewing: ask the gate to attack, not to confirm
 
-A gate asked "is this correct?" tends to agree. A gate asked "defeat this" finds the hole. On one
+A reviewer asked "is this correct?" tends to agree. One asked "defeat this" finds the hole. On one
 PR here, three consecutive rounds each *fixed* the previous round's defect and *introduced* the
 next one; every one was caught by an adversarial prompt, none by a confirmatory one.
 
