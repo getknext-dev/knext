@@ -126,9 +126,36 @@ Work the task graph, not the backlog order.
    the rest. Whatever gates ran, a `BLOCK` or `ISSUES_FOUND` means another round — never a
    judgement call about whether it matters, and never "the sprint plan already approved this".
 8. **Merge** on clearance.
-9. **Clean up** — see below. This step is part of the workflow, not housekeeping after it.
+9. **Refresh the knowledge graph** — AST only, per merge. See the cadence rule below.
+10. **Clean up** — see below. This step is part of the workflow, not housekeeping after it.
 
-## Step 9 — clean up after every successful merge
+## Step 9 — graph refresh cadence (AST per merge, semantic per sprint)
+
+The graph in `graphify-out/` is a planning input, so it has to track `main`. But the two halves
+of a rebuild have wildly different costs, and conflating them is what makes "update it after
+every merge" unaffordable:
+
+- **AST extraction is deterministic and free** — no LLM, seconds to run. Do this after every
+  merge. It keeps code structure, call graphs, and file membership current.
+- **Semantic extraction costs a fan-out of subagents** — the 2026-07-27 incremental rebuild
+  needed eight of them for 458 changed files. Do this **once per sprint**, on the same boundary
+  where the design gates already meet.
+
+So: `graphify --update` in full belongs to sprint close; the per-merge step is the AST pass only.
+
+Two things the graph does not do, recorded so nobody re-derives them
+(`docs/GRAPH_PLANNING_NOTES.md` has the evidence):
+
+- It **cannot** answer what the compat gate depends on. Those guards assert on workflow YAML as
+  text, so no edge ever connects the runtime to the gate protecting it. Read the workflow.
+- It **cannot** answer which decisions still stand. Extraction is pinned to a fixed relation
+  vocabulary; `supersedes`/`amends`/`reverses` are collapsed into `references`. ADR supersession
+  comes from the ADR front-matter, not from traversal.
+
+Automating this as a git `post-commit` hook is a plausible next step, but installing one changes
+every future commit in the repo for every contributor — ask before adding it.
+
+## Step 10 — clean up after every successful merge
 
 Do all four. Each has bitten this project.
 
