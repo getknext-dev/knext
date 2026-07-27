@@ -1,5 +1,6 @@
 // cold-attribution-report.mjs — turn cold-attribution-collector.sh output into a per-sample
-// attribution table: every cold-start sample labelled fast/slow WITH a named cause.
+// attribution table: every cold-start sample labelled fast/slow, with a named cause ONLY where one
+// interval's own excess supports naming it — otherwise UNATTRIBUTABLE plus a ranked list.
 //
 // Usage: node cold-attribution-report.mjs <collector.jsonl> [k6-result.txt]
 //
@@ -10,6 +11,7 @@
 // than a run of 10 that quietly includes them.
 
 import { readFileSync } from 'node:fs';
+import { attributeSlowSample, fastBaseline } from './cold-attribution-attribute.mjs';
 
 const [, , jsonlPath, k6Path] = process.argv;
 if (!jsonlPath) {
@@ -243,6 +245,11 @@ for (const i of [...k6.keys()].sort((a, b) => a - b)) {
   // samples by construction — the classifier would always find *a* largest bucket and the run
   // would look fully explained whether or not it was. Attribution happens in a second pass
   // (below), against the fast-mode distribution, and is allowed to return UNATTRIBUTABLE.
+  //
+  // These five are NOT a partition. `pullDelta` is contained inside `startDelay`, and `postReady`
+  // ends at the k6 driver pod's termination rather than at the response. The attribution pass
+  // sums only the contiguous chain and treats those two as diagnostics — see
+  // cold-attribution-attribute.mjs.
   const intervals = { schedDelay, pullDelta, startDelay, boot, postReady };
 
   results.push({
@@ -274,81 +281,24 @@ for (const i of [...k6.keys()].sort((a, b) => a - b)) {
 }
 
 // ---- attribution pass: allowed to say "I cannot tell you why" --------------------------------
-// A slow sample is attributed only if measured intervals actually account for its excess over the
+// A slow sample is attributed only if the NAMED interval actually accounts for its excess over the
 // fast mode. Otherwise the ~8 s is somewhere the instrument does not see, and the honest output is
 // UNATTRIBUTABLE. A run with zero unattributable samples and no falsification experiment is
 // suspicious, not good.
-const ATTRIBUTION_FLOOR = 0.5; // measured intervals must explain >=50% of the excess to name a cause
-
-const INTERVAL_LABELS = {
-  schedDelay: 'create→scheduled (scheduling)',
-  pullDelta: 'pulling→pulled (image pull)',
-  startDelay: 'scheduled→started (container start)',
-  boot: 'started→ready (becoming servable)',
-  postReady: 'ready→response (routing / activator)',
-};
-
+//
+// The arithmetic lives in cold-attribution-attribute.mjs so it can be tested against synthetic
+// samples (tests/cold-attribution-attribute.test.ts) rather than only against what the cluster
+// happened to produce — including the case this report cannot generate on its own: five intervals
+// each contributing ~20%, which must come out UNATTRIBUTABLE rather than naming the largest.
 {
   const admRows = results.filter((r) => r.admissible);
-  const fast = admRows.filter((r) => r.mode === 'fast');
-  // Baseline = the WORST fast sample per interval. Excess is measured beyond anything the fast
-  // mode ever did, so normal variation is never mistaken for a cause. No medians involved.
-  const fastCeil = {};
-  for (const k of Object.keys(INTERVAL_LABELS)) {
-    const vals = fast.map((r) => r.intervals?.[k]).filter((v) => v != null);
-    fastCeil[k] = vals.length ? Math.max(...vals) : null;
-  }
-  const fastDurCeil = fast.length
-    ? Math.max(...fast.map((r) => r.dur).filter((v) => v != null))
-    : null;
+  const baseline = fastBaseline(admRows.filter((r) => r.mode === 'fast'));
 
   for (const r of admRows) {
-    if (r.mode !== 'SLOW') {
-      r.attribution = { cause: null, note: 'fast sample — nothing to attribute' };
-      continue;
-    }
-    if (fastDurCeil == null) {
-      r.attribution = {
-        cause: 'UNATTRIBUTABLE',
-        note: 'no fast samples in this arm to form a baseline',
-      };
-      continue;
-    }
-    const totalExcess = r.dur - fastDurCeil;
-    const excesses = Object.entries(INTERVAL_LABELS)
-      .map(([k, label]) => {
-        const v = r.intervals?.[k];
-        const ceil = fastCeil[k];
-        // An interval with no fast baseline cannot be scored; treat as unmeasured, not as zero.
-        const excess = v != null && ceil != null ? Math.max(0, v - ceil) : null;
-        return { k, label, value: v, excess };
-      })
-      .sort((a, b) => (b.excess ?? -1) - (a.excess ?? -1));
-    const explained = excesses.reduce((a, e) => a + (e.excess ?? 0), 0);
-    const share = totalExcess > 0 ? explained / totalExcess : 0;
-    const unmeasured = excesses.filter((e) => e.excess == null).map((e) => e.k);
-
-    if (totalExcess <= 0) {
-      r.attribution = { cause: null, note: 'not in excess of the fast mode' };
-    } else if (share < ATTRIBUTION_FLOOR) {
-      r.attribution = {
-        cause: 'UNATTRIBUTABLE',
-        note: `measured intervals explain only ${(share * 100).toFixed(0)}% of ${totalExcess.toFixed(2)}s excess`,
-        totalExcess,
-        explained,
-        unmeasured,
-        excesses,
-      };
-    } else {
-      r.attribution = {
-        cause: excesses[0].label,
-        note: `${(share * 100).toFixed(0)}% of ${totalExcess.toFixed(2)}s excess explained`,
-        totalExcess,
-        explained,
-        unmeasured,
-        excesses,
-      };
-    }
+    r.attribution =
+      r.mode === 'SLOW'
+        ? attributeSlowSample(r, baseline)
+        : { cause: null, note: 'fast sample — nothing to attribute' };
   }
 }
 
@@ -481,16 +431,29 @@ if (!slowRows.length) {
   );
 
   console.log(
-    '\n  per-slow-sample excess breakdown (baseline = the WORST fast sample, no medians):',
+    '\n  per-slow-sample excess breakdown (baseline = the WORST fast sample, no medians).' +
+      '\n  A cause is named only if ONE interval clears the 50% floor by itself; otherwise the' +
+      '\n  ranking below is the whole answer and the sample stays UNATTRIBUTABLE.',
   );
   for (const r of slowRows) {
     console.log(
       `\n   sample ${r.sample}  dur=${fmt(r.dur)}  node=${r.node ?? '?'}  predicate=${r.predicate}` +
         `\n     ${r.attribution?.cause ?? 'UNATTRIBUTABLE'} — ${r.attribution?.note ?? ''}`,
     );
-    for (const e of r.attribution?.excesses ?? []) {
+    const pct = (s) => (s == null ? '   —' : `${(s * 100).toFixed(0)}%`.padStart(4));
+    for (const e of r.attribution?.ranked ?? []) {
       const mark = e.excess == null ? 'unmeasured' : `${fmt(e.excess)} beyond worst fast`;
-      console.log(`       ${e.label.padEnd(38)} value=${fmt(e.value).padEnd(8)} ${mark}`);
+      console.log(
+        `       ${e.label.padEnd(38)} value=${fmt(e.value).padEnd(8)} ${pct(e.share)} ${mark}`,
+      );
+    }
+    // Printed, but never summed and never named: one is contained in another interval, the other
+    // is an upper bound whose end marker is the driver pod's teardown.
+    for (const e of r.attribution?.diagnostics ?? []) {
+      console.log(
+        `       [diagnostic] ${e.label.padEnd(25)} value=${fmt(e.value).padEnd(8)}` +
+          ` ${fmt(e.excess)} — not scoreable: ${e.reason}`,
+      );
     }
   }
 }
