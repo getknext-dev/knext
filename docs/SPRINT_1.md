@@ -25,7 +25,7 @@ are deliberately held to sprint 2.
 | T0 | root `tests/` type-checked | #527 | gate-zero | root tests tsconfig, `package.json`, `ci.yml` |
 | T1 | compat shard flakiness — named mechanism | #545 | A | `test-e2e-deploy.yml`, `scripts/e2e-*.sh` |
 | T2 | quarantine entries require a real upstream ref | #512 | A | `tests/compat-lane-ledger*.ts`, deploy-tests manifest |
-| T3 | open + police the 14-night window (no code) | #410 | A (lead) | window log under `docs/compat/` |
+| T3 | open + police the 14-night window (no code) | #410 (node lane) | A (lead) | window log under `docs/compat/` |
 | T4 | close the four unbacked matrix rows | — | B | `scripts/compat-smoke.mjs`, `docs/compat-matrix.md` |
 | T5 | emitted-fields extractor + live-CRD schema reader | #314 | C1 | new `src/cli/schema/*` |
 | T6 | prune preflight + `doctor` schema coverage | #314 | C1 | `deploy.ts`, `preview.ts`, `doctor.ts` |
@@ -42,6 +42,49 @@ are deliberately held to sprint 2.
 
 **Critical path:** `T0 → T1 → T2 → T3 → 14 nights`. It completes mid-sprint-2 and *is* the 1.0
 critical path.
+
+### Exit criteria — red-on-fail, per task
+
+A task is done when its criterion fails on purpose and you have watched it.
+
+- **T0** — an unresolved import or type error anywhere under `tests/` exits non-zero, **and the CI
+  job carrying it is required to pass**. Mutation-proof: point one test's import at a bogus path → red.
+- **T1** — a **named mechanism** per observed red shard, not "re-ran green"; a guard that reds when
+  the mechanism recurs; the mechanism reproducible on demand. **A new quarantine entry is not a fix.**
+- **T2** — an entry whose upstream half is only a run ID fails `compat-lane-ledger.test.ts`; every
+  surviving entry cites a real `vercel/next.js#NNNNN` or knext `#NNN`; any red caused by removals is
+  observed in a dispatch run **before** T3 opens the window.
+- **T3** — recorded start ref plus a per-night tally; freeze violations detectable from the log, not
+  from memory. Window completes in sprint 2.
+- **T4** — four checks, each mutation-proved: break the optimizer → red (**no `skip()` path left on
+  the node lane**); break a Server Action round-trip → red; remove the Suspense flush → red; a stale
+  ISR response with a real `REDIS_URL` → red. Each row flips only on its own named evidence.
+- **T5** — the field set is derived by **scanning** `cr-builder.ts`, never enumerated: add a field to
+  the builder with no extractor coverage → red. (Enumeration is how `preview.ts` was missed once.)
+- **T6** — with a field deleted from a live CRD (kind/envtest), `deploy` exits non-zero **naming the
+  field**; `doctor` reports *schema coverage*, not CRD existence; the strict-validation argv guard
+  still passes.
+- **T7** — CI regenerates the artifacts and fails on a dirty tree; emitted ⊆ CRD schema asserted;
+  hand-editing the generated doc → red.
+- **T8** — an accepted ADR stating the CRD is versioned **separately** from the npm packages, its
+  alpha guarantee, its graduation trigger and the upgrade order; `PUBLIC_API.md` cross-links it; a
+  test asserts the emitted `apiVersion` equals the ADR-declared one.
+- **T9** — "operator/CRD first, then CLI" in `RELEASING.md` and ADR-0020, asserted by a docs guard;
+  the `db-bind` error string cites it.
+- **T10** — the mode attributed by evidence or declared unattributable; ≥ 20 samples, **full
+  distribution published, no median anywhere**.
+- **T11** — every sample row carries `nodeName`, scheduled→pulled→ready deltas, kubelet events and a
+  pod-YAML snapshot persisted **before** teardown; a SIGKILL mid-run cannot lose the restore (#536),
+  proven by a test that kills the harness; "no sampler data" ≠ "peak = 0" (#425).
+- **T12** — conditional on T10 producing a hypothesis and an ADR; lands with an envtest and the
+  distribution attached.
+- **T13** — SIGTERM injected mid-`set` leaves the entry fully written or absent, never partial;
+  `after()` completes. Mutation-proof by removing the atomicity guard.
+- **T14** — Redis absent / refusing / timing out / returning garbage ⇒ fail-open plus an origin
+  response in all four, table-driven, each mutation-proved.
+- **T15** — the nightly resolves every pinned SHA against its commented tag and reds on mismatch;
+  proven with a fixture pin that is well-formed but wrong.
+- **T16** — credentials and budget granted, or explicitly declined. Zero code.
 
 ## Amendment — T10's hypothesis died on day one
 
@@ -78,6 +121,10 @@ exit criteria, not in a reviewer's head.
 
 | task | how it fails silently | therefore assert |
 |---|---|---|
+| **T0** gate-zero | a tsconfig that includes `tests/` but with `strict: false`, or a CI job that runs and is **not required to pass** — green over exactly the errors it exists to catch | a deliberate type error **reds a required check**, not merely a non-zero script |
+| **T3** the window | the gate is *purchased*: a shard reports `failed:0, notRun:0` because it enumerated **no tests** | a **per-shard test-count floor** alongside ledger-growth = 0. A pass count alone is buyable |
+| **T4** matrix rows | ISR asserts two 200s rather than that the **content changed**; streaming asserts the final body, which a **buffered response reproduces identically** | ISR asserts changed content; streaming asserts **chunk arrival ordering**; and no `skip()` path survives on the node lane |
+| **T8** the ADR | accepted, and referenced by nothing — `cr-builder.ts:364` still hardcodes the version with no link to it | a test that the emitted `apiVersion` equals the ADR-declared one, plus a code pointer at the hardcode site |
 | **T6** prune preflight | compares emitted fields against a schema derived from the same source as the emitter, so both move together and skew is undetectable; or downgrades to a warning when the CRD read is denied — exactly when it matters | a CRD fixture with a field **removed**, authored independently of the generator, causes a **non-zero exit**; RBAC denial is a **hard failure** |
 | **T7** generated artifacts | generated, then diffed against a checked-in copy the same job just rewrote — self-consistent and permanently green | a **dirty-tree check** after generation reds CI, **and** a hand-broken artifact fails the `⊆` assertion |
 | **T10/T11** attribution | every sample gets a `cause` from a heuristic, so 100 % are "classified" and nothing is discriminated | an **`unattributable` bucket that may be non-empty and must be reported**. Zero unattributable samples with no falsification experiment is *suspicious, not good* |
@@ -87,8 +134,24 @@ exit criteria, not in a reviewer's head.
 
 ## Parallelism
 
-Tracks A–F run concurrently with disjoint owner-exclusive files (above). Constraints that are not
-negotiable:
+Tracks A–F run concurrently with **mostly** disjoint files. Two pairs genuinely overlap, and both
+have an owner call — do not treat the track table as proof of disjointness:
+
+| file | claimants | resolution |
+|---|---|---|
+| `.github/workflows/ci.yml` | **T0** (new typecheck job) and **T4** (compat-smoke job — the ISR-freshness row needs a live Redis `services:` block, which that job lacks today) | **T0 merges first; T4 rebases.** |
+| `apps/file-manager/cache-handler.js` | **T4** (ISR) and **T13/T14** | **Track E owns it.** T4 edits only the smoke script, the CI job and an app fixture route. |
+
+T4's real file footprint is therefore wider than the task table shows — `ci.yml` and an app fixture
+route as well as `compat-smoke.mjs` and the matrix. That understatement is how the `ci.yml`
+collision stayed invisible through a first pass; state a task's full footprint, not its headline
+files.
+
+Also worth naming so it stays true: **T3 and T7 both write under `docs/compat/`** — the window log
+and `cr-fields.md` respectively. Distinct files, different tracks, low risk, but keep the filenames
+distinct rather than relying on it.
+
+Other constraints, not negotiable:
 
 - **T0 is gate-zero.** Nothing else starts on a tier whose own guards are unchecked.
 - **The OKE cluster is a queue of one**, regardless of team count. Two runs against it silently
