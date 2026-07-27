@@ -1335,7 +1335,12 @@ jobs:
         with:
           name: compat-suite-summary-${{ strategy.job-index }}
           path: knext/compat-suite-summary-*.json
-          retention-days: 14
+          # #545 (sprint-1 T1): 14 days could not even span the v1.0 gate's OWN
+          # 14-consecutive-night window, so the per-shard evidence expired before
+          # the streak it is supposed to attest to finished — the flake rate was
+          # unauditable after the fact BY CONSTRUCTION. These are small JSON
+          # files; 90 days covers the window plus triage.
+          retention-days: 90
 
       # ── Fail-on-red gate (#182 code gate: revocation teeth) ────────────────
       # Run 28552585087 carried 8 REAL test failures yet the workflow concluded
@@ -1373,6 +1378,22 @@ jobs:
               " expectedTotal=" + (s.expectedTotal ?? "n/a") +
               " truncated=" + (s.truncated ?? false) + " (ref " + s.ref + ")"
             );
+            // #545 (sprint-1 T1) — ATTRIBUTION, printed at the point of failure.
+            // A red shard must NAME the tests that failed and how they failed;
+            // without this the only record is the job log, which is exactly what
+            // makes "re-run until green" free and turns a flaky gate into a
+            // permanently-green meaningless one. `failures` is written by
+            // scripts/e2e-summary.mjs and rides in the retained artifact too.
+            for (const f of s.failures ?? []) {
+              console.error(
+                "::error::red test — " + f.file + " [kind=" + f.kind +
+                (f.timeoutMs !== undefined ? " timeoutMs=" + f.timeoutMs : "") + "]" +
+                (f.cases?.length ? " cases: " + f.cases.join(" | ") : "")
+              );
+            }
+            for (const file of s.notRunFiles ?? []) {
+              console.error("::error::not-run file (jest infra abort, NOT a test result) — " + file);
+            }
             if ((s.failed ?? 0) > 0 || (s.notRun ?? 0) > 0) {
               console.error(
                 "::error::red shard — failed=" + s.failed + " notRun=" + s.notRun +
@@ -1397,6 +1418,131 @@ jobs:
             }
           ' "${SUMMARY}"
 
+  # ── Per-shard ledger (#545, sprint-1 T1) ───────────────────────────────────
+  # The flake-attribution record. Before this, a run's per-shard outcome lived
+  # only in 16 separate artifacts and 16 job conclusions, so "is the failing
+  # shard set STABLE or ROTATING?" — the first question #545 asks — could only be
+  # answered by hand, one job log at a time. That cost is why re-running until
+  # green erased the signal.
+  #
+  # This job collapses the run into ONE lane-labelled record: every shard's
+  # counts, every failing test file, its failing cases and its failure KIND. It
+  # renders that into the run's job summary (permanent, human-queryable) and
+  # uploads it as `compat-run-ledger` (90d, machine-queryable, and what
+  # scripts/e2e-shard-history.mjs aggregates across runs).
+  #
+  # It also carries the PER-SHARD TEST-COUNT FLOOR. `failed:0 / notRun:0` is
+  # buyable by a shard that enumerated NO tests — a green that means nothing.
+  # The per-shard gate already rejects a TRUNCATED shard; this rejects the other
+  # end: a shard whose selection was empty in the first place.
+  shard-ledger:
+    name: Per-shard ledger (flake attribution)
+    needs: deploy-tests
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      red_detail: ${{ steps.ledger.outputs.red_detail }}
+    steps:
+      - name: Download every shard summary
+        uses: actions/download-artifact@v4
+        with:
+          pattern: compat-suite-summary-*
+          merge-multiple: true
+          path: summaries
+
+      - name: Build the per-shard ledger
+        id: ledger
+        env:
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          node <<'LEDGER'
+          const fs = require('node:fs');
+          const dir = 'summaries';
+          const files = fs.existsSync(dir)
+            ? fs.readdirSync(dir).filter((f) => f.startsWith('compat-suite-summary') && f.endsWith('.json'))
+            : [];
+          const shards = files
+            .map((f) => JSON.parse(fs.readFileSync(`${dir}/${f}`, 'utf8')))
+            .sort((a, b) => Number(String(a.shard).split('/')[0]) - Number(String(b.shard).split('/')[0]));
+
+          // The lane is READ from the shards' own artifacts, never inferred from
+          // cron timing (#545: the two schedules are 90 minutes apart on the same
+          // ref, so a timing heuristic would launder a bun red into the node
+          // credential lane's flake rate).
+          const lanes = [...new Set(shards.map((s) => s.runtime))];
+          const lane = lanes.length === 1 ? lanes[0] : `mixed(${lanes.join('+')})`;
+
+          const ledger = {
+            runId: process.env.RUN_ID,
+            runAttempt: process.env.RUN_ATTEMPT,
+            event: process.env.EVENT_NAME,
+            lane,
+            ref: shards[0]?.ref ?? null,
+            shards,
+          };
+          fs.writeFileSync('compat-run-ledger.json', `${JSON.stringify(ledger, null, 2)}\n`);
+
+          const rows = shards.map((s) => {
+            const named = (s.failures ?? [])
+              .map((f) => `${f.file} [${f.kind}${f.timeoutMs !== undefined ? ` ${f.timeoutMs}ms` : ''}]`)
+              .join('<br>');
+            return `| ${s.shard} | ${s.runtime}${s.runtimeVersion ? ` ${s.runtimeVersion}` : ''} | ${s.passed} | ${s.failed} | ${s.notRun} | ${s.expectedTotal ?? 'n/a'} | ${named || '—'} |`;
+          });
+          const table = [
+            `### Compat per-shard ledger — lane \`${lane}\`, ref \`${ledger.ref}\``,
+            '',
+            '| shard | lane | passed | failed | notRun | expected | named failures |',
+            '|---|---|---|---|---|---|---|',
+            ...rows,
+          ].join('\n');
+          fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `${table}\n`);
+
+          // The detail the red alert quotes, so a red night's ISSUE names the
+          // tests — not just "shards 6 and 8 failed".
+          const redDetail = shards
+            .filter((s) => (s.failed ?? 0) > 0 || (s.notRun ?? 0) > 0)
+            .map((s) => {
+              const named = (s.failures ?? [])
+                .map((f) => `    - \`${f.file}\` kind=${f.kind}${f.timeoutMs !== undefined ? ` timeoutMs=${f.timeoutMs}` : ''}${f.cases?.length ? ` — ${f.cases.join('; ')}` : ''}`)
+                .join('\n');
+              const phantom = (s.notRunFiles ?? []).map((f) => `    - \`${f}\` (jest infra abort, never ran)`).join('\n');
+              return `  - shard ${s.shard} (${s.runtime}): failed=${s.failed} notRun=${s.notRun}\n${[named, phantom].filter(Boolean).join('\n')}`;
+            })
+            .join('\n');
+          const out = process.env.GITHUB_OUTPUT;
+          fs.appendFileSync(out, `red_detail<<KNEXT_EOF\n${redDetail || '  (no shard summary carried named failures — check the job logs)'}\nKNEXT_EOF\n`);
+
+          // ── Per-shard test-count floor (the "buyable green" guard) ──────────
+          // A shard reporting failed:0/notRun:0 over ZERO executed tests is not
+          // green, it is empty. Fail loudly rather than let the v1.0 streak
+          // accrue a night that asserted nothing.
+          const empty = shards.filter((s) => (s.passed ?? 0) + (s.failed ?? 0) + (s.notRun ?? 0) === 0);
+          if (shards.length === 0) {
+            console.error('::error::no shard summaries at all — the run produced no ledger; that is NOT green');
+            process.exit(1);
+          }
+          if (empty.length > 0) {
+            console.error(
+              `::error::per-shard test-count floor violated — shard(s) ${empty.map((s) => s.shard).join(', ')} reported ZERO executed tests. A pass count of 0 is buyable and must never count toward the v1.0 streak.`
+            );
+            process.exit(1);
+          }
+          LEDGER
+
+      - name: Upload the run ledger
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: compat-run-ledger
+          path: compat-run-ledger.json
+          # Same rationale as the per-shard summaries: the evidence must outlive
+          # the 14-night window it attests to (#545).
+          retention-days: 90
+
   # ── Red-nightly alert (#147 A3-3 graduation follow-up) ─────────────────────
   # The compat-matrix official-suite ✅ decays SILENTLY if the nightly goes red
   # and nobody notices. On a failed SCHEDULED run (never a red workflow_dispatch
@@ -1409,14 +1555,17 @@ jobs:
   # only the ✅ direction needs run evidence.
   nightly-red-alert:
     name: Nightly red alert (pinned issue)
-    needs: [build-next, deploy-tests]
+    needs: [build-next, deploy-tests, shard-ledger]
     # always() so this job is not skipped when a needed job fails; the
     # needs-result checks make it fire ONLY on failure; the event check scopes
     # it to the nightly schedule.
+    # #545: shard-ledger is a needs BOTH for its `red_detail` output AND because
+    # its per-shard test-count floor is itself a red condition worth alerting on.
     if: >-
       always() &&
       github.event_name == 'schedule' &&
-      (needs.build-next.result == 'failure' || needs.deploy-tests.result == 'failure')
+      (needs.build-next.result == 'failure' || needs.deploy-tests.result == 'failure' ||
+       needs.shard-ledger.result == 'failure')
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -1429,6 +1578,12 @@ jobs:
           BUILD_RESULT: ${{ needs.build-next.result }}
           SHARDS_RESULT: ${{ needs.deploy-tests.result }}
           NEXTJS_REF_TESTED: ${{ env.NEXTJS_REF }}
+          # #545 (sprint-1 T1) — the alert must NAME the failing tests. "shards 6
+          # and 8 failed" is the shape of a report you re-run; a per-case list
+          # with a failure kind is the shape of one you triage. This is what
+          # makes the flake rate attributable instead of folklore.
+          RED_SHARD_DETAIL: ${{ needs.shard-ledger.outputs.red_detail }}
+          LEDGER_RESULT: ${{ needs.shard-ledger.result }}
         run: |
           set -euo pipefail
           # #147 item 4 — NAME the lane. The two schedules share this workflow:
@@ -1449,9 +1604,17 @@ jobs:
           - Runtime lane: ${KNEXT_RUNTIME}
           - build-next (Prepare): ${BUILD_RESULT}
           - deploy-tests shards: ${SHARDS_RESULT}
+          - shard-ledger (attribution + test-count floor): ${LEDGER_RESULT}
           - Pinned ref: ${NEXTJS_REF_TESTED}
 
           ${lane_note}
+
+          **Named failures** (from the per-shard ledger — \`compat-run-ledger\`
+          artifact, 90d; \`kind=timeout\` means a bare per-case jest timeout, i.e.
+          a HANG, which is the #214 / vercel/next.js#95301 family signature, not
+          runner slowness):
+
+          ${RED_SHARD_DETAIL}
 
           **Policy** (docs/compat-matrix.md, Maintenance & honesty): if the red persists,
           flip this lane's matrix row back to ❌ citing this red run — the matrix

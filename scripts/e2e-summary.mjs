@@ -70,10 +70,44 @@ import { readFileSync, writeFileSync } from 'node:fs';
 const FILE_TOKEN = String.raw`test\/[^\r\n]*?\.test\.`;
 
 /**
+ * How a failing test FILE failed (#545). Coarse on purpose — see the shape
+ * comment inside summarize() for what each value does and does not claim.
+ * @typedef {'timeout' | 'assertion' | 'unclassified'} FailureKind
+ */
+
+/**
+ * One failing test FILE's attribution record.
+ * @typedef {object} ShardFailure
+ * @property {string} file repo-root-relative test file (run-tests.js's own key)
+ * @property {FailureKind} kind
+ * @property {number} [timeoutMs] present only when kind === 'timeout'
+ * @property {string[]} cases failing case names, de-duplicated across retries
+ */
+
+/**
+ * The summary artifact shape. Every optional key is OMITTED (not undefined)
+ * when it does not apply, which is what keeps a green node artifact byte-stable
+ * for the #41 matrix publisher — a consumer contract, not a style choice.
+ * @typedef {object} ShardSummary
+ * @property {number} passed
+ * @property {number} failed
+ * @property {number} notRun
+ * @property {number} excluded
+ * @property {string} ref
+ * @property {string} shard
+ * @property {string} runtime
+ * @property {string} [runtimeVersion]
+ * @property {number} [expectedTotal]
+ * @property {boolean} [truncated]
+ * @property {ShardFailure[]} [failures] #545 — present only on a RED shard
+ * @property {string[]} [notRunFiles] #545 — present only when a phantom abort occurred
+ */
+
+/**
  * Parse jest-style runner output + run metadata into the summary artifact shape.
  * @param {string} runnerOutput raw stdout from run-tests.js
  * @param {{ref:string, shard:string, excluded:number, runtime?:string, runtimeVersion?:string, expectedTotal?:number}} meta
- * @returns {{passed:number, failed:number, notRun:number, excluded:number, ref:string, shard:string, runtime:string, runtimeVersion?:string, expectedTotal?:number, truncated?:boolean}}
+ * @returns {ShardSummary}
  */
 export function summarize(runnerOutput, meta) {
   const text = String(runnerOutput ?? '');
@@ -119,7 +153,12 @@ export function summarize(runnerOutput, meta) {
   // (no `next build`, no server boot, no assertion). Those must NOT inflate
   // `failed` — they are surfaced as `notRun`. A file with NO such marker in its
   // output group ran for real and its failure is genuine.
-  const phantomFiles = filesWithNoTestsFound(text);
+  // #545 (sprint-1 T1) — ONE scan of the run-tests.js output groups now yields
+  // both the phantom set AND the per-file failure ATTRIBUTION (case names +
+  // failure kind). See scanOutputGroups() for why attribution has to be
+  // group-scoped rather than line-global.
+  const groups = scanOutputGroups(text);
+  const phantomFiles = new Set([...groups].filter(([, g]) => g.noTestsFound).map(([file]) => file));
   const runTestsNotRun = new Set();
   const runTestsFailed = new Set();
   for (const file of runTestsFailedAll) {
@@ -204,52 +243,85 @@ export function summarize(runnerOutput, meta) {
     ...(expectedTotal !== undefined
       ? { expectedTotal, truncated: passed + failed + notRun < expectedTotal }
       : {}),
+    // #545 (sprint-1 T1) — ATTRIBUTION. Counts alone made "which test flaked?"
+    // answerable only by downloading job logs, so a re-run erased the signal and
+    // the flake rate stayed folklore. A red shard now NAMES its failing files,
+    // their failing cases, and the failure KIND, in the same lane-labelled
+    // artifact the matrix publisher already consumes.
+    //
+    // `kind` is deliberately coarse and honest:
+    //   'timeout'  — the group contains jest's bare `Exceeded timeout of N ms
+    //                for a test.` throw. That is a HANG signature, not slowness:
+    //                the node lane's only shard-level red since 2026-07-05 (run
+    //                29984259723, segment-cache/dynamic-on-hover) hit exactly
+    //                60000 ms on all three retries, which is the #214 family
+    //                signature upstream root-caused as vercel/next.js#95301.
+    //                It means "at least one case in this file timed out", never
+    //                "all did" — `cases` carries the rest.
+    //   'assertion' — failing cases, no timeout throw.
+    //   'unclassified' — the file failed with neither marker (e.g. a build
+    //                abort). Named rather than swallowed.
+    //
+    // Both keys are OMITTED when empty so a GREEN shard's artifact stays
+    // byte-stable for existing consumers (the #41 matrix publisher).
+    ...(runTestsFailed.size > 0
+      ? { failures: [...runTestsFailed].sort().map((file) => attributeFailure(file, groups)) }
+      : {}),
+    ...(runTestsNotRun.size > 0 ? { notRunFiles: [...runTestsNotRun].sort() } : {}),
   };
 }
 
 /**
- * Identify the set of test FILES whose run-tests.js output group reported jest's
- * `No tests found, exiting with code 1` — i.e. jest never located the file, so the
- * "failure" is a phantom infra-abort, not a real deploy-test result.
- *
- * GROUND TRUTH (run 28318485456 — the fix the prior version got wrong): scope must
- * follow run-tests.js's OWN output-group boundaries, NOT the last `.test.` token on
- * any line. run-tests.js (CI, concurrent) interleaves files and brackets each
- * file's captured child output between:
- *   open:  `❌ <file> output:`  /  `##[group]❌ <file> output`        (run-tests.js:624/628)
- *   close: `end of <file> output`                                     (run-tests.js:644/646)
- * The `<file>` in BOTH boundaries is the SLASH form — the SAME key the
- * `<file> failed to pass within N retries` failure marker uses. The previous tracker
- * instead grabbed any `\S*.test.\w+` token, which (a) captured the UNDERSCORE-joined
- * `JEST_JUNIT_OUTPUT_NAME=test_e2e_…_index.test.ts` echo (run-tests.js:555,
- * `replaceAll('/','_')`) — a key that never matches the slash-form failure marker,
- * so the phantom was mis-counted as a real `failed` — and (b) mis-attributed lines
- * across the concurrent interleave. We now ONLY (re)scope on the group boundaries,
- * and we credit a `No tests found` line ONLY while a group is OPEN (the abort always
- * prints inside the failing file's own group), so neither the underscore echo nor
- * interleaving can corrupt the attribution.
- * @param {string} text
- * @returns {Set<string>}
+ * Build the per-file failure record from its scanned output group.
+ * @param {string} file
+ * @param {Map<string, {noTestsFound:boolean, cases:Set<string>, timeoutMs:number|undefined}>} groups
+ * @returns {ShardFailure}
  */
-function filesWithNoTestsFound(text) {
-  const phantom = new Set();
-  const lines = text.split('\n');
-  // run-tests.js output-group OPEN header (with or without the GHA ##[group] prefix
-  // and the trailing colon variant). Captures the SLASH-form file path — anchored
-  // to the repo-root-relative `test/` prefix so group keys always equal the
-  // failure-marker keys (A3-3 fix round 1 tightened both the same way; #212 made
-  // the token space-tolerant the same way as the markers — same FILE_TOKEN).
+function attributeFailure(file, groups) {
+  const g = groups.get(file);
+  const cases = g ? [...g.cases].sort() : [];
+  const kind =
+    g?.timeoutMs !== undefined ? 'timeout' : cases.length > 0 ? 'assertion' : 'unclassified';
+  return {
+    file,
+    kind,
+    ...(g?.timeoutMs !== undefined ? { timeoutMs: g.timeoutMs } : {}),
+    cases,
+  };
+}
+
+/**
+ * Scan run-tests.js's per-file output groups ONCE, collecting everything the
+ * summary attributes per file.
+ *
+ * GROUP SCOPING IS LOAD-BEARING (A3-3, run 28318485456 — the ground truth this
+ * parser is regression-tested against). run-tests.js runs files CONCURRENTLY
+ * (-c 2) and interleaves their captured child output, bracketing each file's
+ * slice between:
+ *   open:  `❌ <file> output:`  /  `##[group]❌ <file> output`
+ *   close: `end of <file> output`
+ * Attributing a `✕ …` or a timeout throw by "nearest .test. token on the line"
+ * would mis-assign a sibling's failure under concurrency — the same class of bug
+ * that once counted the underscore JEST_JUNIT_OUTPUT_NAME echo as a distinct
+ * file. Everything below is credited ONLY while a group is open.
+ *
+ * @param {string} text
+ * @returns {Map<string, {noTestsFound:boolean, cases:Set<string>, timeoutMs:number|undefined}>}
+ */
+function scanOutputGroups(text) {
+  const groups = new Map();
+  const lines = String(text ?? '').split('\n');
   const groupOpenRe = new RegExp(String.raw`❌\s+(${FILE_TOKEN}(?:js|ts|jsx|tsx))\s+output\b`);
-  // run-tests.js output-group CLOSE marker.
   const groupCloseRe = new RegExp(
     String.raw`^(?:.*\bend of\s+)(${FILE_TOKEN}(?:js|ts|jsx|tsx))\s+output\b`,
   );
   const noTestsRe = /No tests found, exiting with code 1/;
+  // jest --verbose per-case FAIL line: `    ✕ <name> (<n> ms)`.
+  const failedCaseRe = /✕\s+(.+?)\s+\(\d+(?:\.\d+)?\s*ms\)\s*$/;
+  // jest's bare per-case timeout throw (the hardcoded 60s individualTestTimeout).
+  const timeoutRe = /Exceeded timeout of (\d+) ms for a test/;
   let current = null;
   for (const line of lines) {
-    // A close marker ends the current scope (after we've had a chance to credit a
-    // No-tests abort inside it). Match close BEFORE open: a single line is never
-    // both, but ordering keeps intent explicit.
     const close = line.match(groupCloseRe);
     if (close) {
       current = null;
@@ -258,13 +330,22 @@ function filesWithNoTestsFound(text) {
     const open = line.match(groupOpenRe);
     if (open) {
       current = open[1];
+      if (!groups.has(current)) {
+        groups.set(current, { noTestsFound: false, cases: new Set(), timeoutMs: undefined });
+      }
       continue;
     }
-    if (current && noTestsRe.test(line)) {
-      phantom.add(current);
-    }
+    if (!current) continue;
+    const g = groups.get(current);
+    if (noTestsRe.test(line)) g.noTestsFound = true;
+    const failedCase = line.match(failedCaseRe);
+    // De-dup is inherent: run-tests.js reprints the ✕ line once per retry and
+    // `cases` is a Set, so a 3-retry failure is ONE case, not three.
+    if (failedCase) g.cases.add(failedCase[1].trim());
+    const timeout = line.match(timeoutRe);
+    if (timeout && g.timeoutMs === undefined) g.timeoutMs = Number(timeout[1]);
   }
-  return phantom;
+  return groups;
 }
 
 function matchCount(text, re) {
