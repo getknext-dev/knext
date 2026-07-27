@@ -18,8 +18,9 @@ graph could and **could not** answer, so the next planner does not re-run dead q
 ## Finding 1 — the compat gate is a structural island
 
 The two communities backing the compatibility suite (`Compat Suite Workflow Guard`,
-`Next.js Compat Quarantine`, 70 nodes) have **zero** cross-community edges once
-`package.json`/workflow-key hub nodes are excluded. They are backed by five files:
+`Next.js Compat Quarantine`, 70 nodes) have **zero** cross-community edges — with or without
+excluding `package.json`/workflow-key hub nodes, which is worth stating because the hub
+exclusion was expected to matter and does not. They are backed by five files:
 
 ```
 tests/compat-suite-workflow.test.ts       36 nodes
@@ -81,10 +82,14 @@ constraints.
    survive — they were collapsed into `references`/`cites`. Consequence: *"which decisions
    are still standing?"* is not answerable by traversal. ADR supersession must be read from
    the ADR front-matter directly. 148 ADR nodes exist; only 34 carry a `rationale`.
-2. **ADR-0001 is duplicated** (`ADR-0001 — Operator is the Single Source of Truth` and
-   `ADR-0001: Operator is single source of truth` are separate nodes). Node dedup is by
-   exact id, so restatements across documents fork. Any centrality measure over ADR nodes
-   is therefore understated.
+2. **ADR-0001 is fragmented across six nodes**, not two — `adr_0001`,
+   `adr_0001_operator_single_source_of_truth`,
+   `docs_adr_0001_operator_single_source_of_truth`,
+   `docs_adr_0001_operator_source_of_truth`, `claude_skills_scs_zones_skill_adr_0001`, and
+   `claude_md_operator_single_source_of_truth`. Node dedup is by exact id, so every document
+   that restates the decision mints its own node. Any centrality measure over ADR nodes is
+   therefore understated, and the most-cited decision in the repo is the worst affected
+   because restatement count and fragmentation count are the same number.
 3. **Hub nodes poison BFS.** A natural-language `graphify query` anchors on `package.json`,
    `scripts`, `dependencies` and returns nothing but manifest keys. Useful traversals need
    those ids excluded explicitly.
