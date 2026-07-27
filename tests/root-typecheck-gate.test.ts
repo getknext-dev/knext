@@ -155,4 +155,24 @@ describe('root typecheck script + CI wiring (#527)', () => {
       'the typecheck job must not `needs:` another job — it runs alongside Lint & Test so a type error fails as early as a lint error',
     ).toBe(false);
   });
+
+  it('the job cannot be neutered in-repo: no continue-on-error, no conditional skip', () => {
+    // "A CI job that runs but is not required to pass" is the second way this
+    // gate becomes decoration. Branch protection is configured OUTSIDE the repo
+    // (see the PR body — main currently has NO required checks at all, which is
+    // a repo-wide gap, not a T0-specific one). What IS enforceable from in here
+    // is that the job stays fail-closed: `continue-on-error: true` or an `if:`
+    // that skips it would make it green-by-construction even when tsc fails.
+    const jobsSection = ciYml.slice(ciYml.indexOf('\njobs:'));
+    const blocks = jobsSection.split(/\n {2}(?=[a-z0-9-]+:\n)/);
+    const block = blocks.find((b) => /run:\s*pnpm run typecheck\b/.test(b)) ?? '';
+    expect(
+      /continue-on-error/.test(block),
+      'continue-on-error makes the typecheck job report success while tsc fails',
+    ).toBe(false);
+    expect(
+      /\n\s{4}if:/.test(block),
+      'a job-level `if:` can skip the typecheck entirely — it must run on every PR',
+    ).toBe(false);
+  });
 });
