@@ -64,7 +64,21 @@
     "resolveJsonModule": true,
     "allowJs": true,
     "checkJs": false,
-    "types": ["node", "vitest/globals"]
+    // typeRoots is PINNED to this repo's own node_modules on purpose. Without
+    // it tsc walks PARENT directories for @types, so running from a git
+    // worktree nested inside the main checkout silently resolves @types/node
+    // from the parent repo and passes — while CI, which has no parent, fails
+    // with TS2688. That false green happened on the first CI run of this very
+    // gate. The pin makes the local run fail the same way CI does.
+    "typeRoots": ["./node_modules/@types"],
+    // `node` only. `vitest/globals` is deliberately NOT listed: it is a package
+    // subpath, not a @types/* directory, so it cannot resolve under the pinned
+    // typeRoots above — and it is not needed, because every root test imports
+    // describe/expect/it explicitly from 'vitest' rather than relying on the
+    // config's `globals: true`. If a future root test does rely on the globals,
+    // add a `/// <reference types="vitest/globals" />` to that file instead of
+    // unpinning typeRoots.
+    "types": ["node"]
   },
   "include": [
     "tests/**/*.ts",
