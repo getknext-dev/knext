@@ -52,6 +52,57 @@ hardcoded** — `--service` is the only required flag; everything else (context,
 namespace, URL, autoscaling knobs, k6 image, output path) has a documented default
 you're expected to override for your own cluster.
 
+## Admissibility — what a run must record to be publishable
+
+Results from this harness keep having to be withdrawn: a variance-collapse claim, a
+Fisher test, a ~470 ms delta. Then a worse one — the two arms of an A/B **served
+different applications**, and the measured endpoint was the service root, which is
+exactly where they differ (`p1b-node` renders a 4000-byte Next document at `/`,
+`p1b-bunexec` a 1397-byte vinext page; they agree only at `/api/health`). Separately,
+one run's per-sample results files were never persisted: **one file exists on disk
+where 26 should**, so its endpoint had to be recovered from a *different* run's file.
+
+The framing that stops this is **admissibility**: a run missing these facts is
+*inadmissible*, not merely weaker. The sprint-2 checklist has fifteen items (D1–D15).
+This harness mechanises the ones it can and **names the ones it cannot** — the split
+is the point, because an unenforced expectation degrades and its failure is
+unobservable until after it has mattered.
+
+### Enforced by the harness (a run that violates these FAILS)
+
+| # | requirement | how |
+|---|---|---|
+| D1 | arms run the same application | `--peer <ksvc>` resolves BOTH arms' running image digests from their ready Revisions and **aborts before any mutation** unless it can prove one application. Two build targets are two images by construction, so digest equality can never hold for them: pass `--app-id-label dev.knext.app.id` and the gate compares a **declared** app id read from the image instead. Unreadable, absent or differing → abort. |
+| D2 | the requested endpoint is recorded | every results file opens with a `## PROVENANCE` block containing `endpoint=`, written **before** the first cluster call so even an aborted run carries it. `provenance.sh extract` turns it into the block to paste into the write-up, and `provenance.sh verify-writeup` fails a Run section that omits it. |
+| D4 | sitting identity | `--sitting <id>`, recorded with `sitting-source=` so an auto-derived value is never mistaken for a deliberate one. |
+| D14 | durable capture before teardown | every run appends a `STARTED` row to `results/INDEX.tsv` before it measures and a terminal row when it ends. A run killed mid-flight leaves a STARTED with no partner and `provenance.sh audit` reports it — along with any indexed run whose results file has since vanished. |
+| — | build-flag provenance | `examples/bun-exec/build.sh --print-labels` emits the exact `bun build --compile --minify --bytecode …` command as an OCI label, from the same array the build executes. The harness reads `dev.knext.build.command` off the deployed image into the provenance block, so tying a digest to its build flags is a lookup rather than binary forensics. |
+| — | latency metric | `provenance.sh medians` is anchored on `http_req_duration` and **refuses** to report anything when it is absent. `iteration_duration` runs ~10 ms longer here and is never substituted. |
+
+### NOT enforced — write-up discipline, and it will decay
+
+Nothing in this directory checks these. They are stated so they are at least visible:
+
+| # | requirement | why the harness can't |
+|---|---|---|
+| D3 | arms interleaved, ABBA within pair | interleaving is a property of how you *invoke* the harness (one arm per run), not of a run. |
+| D5 | no pooling across sittings | pooling happens in the analysis, after the harness has exited. `sitting=` gives a reader what they need to catch it. |
+| D6, D7 | no bare median across a mode mixture; stratify by mode | requires deciding a run is bimodal — a judgement about a distribution, not a check. |
+| D8 | an explicit unattributable bucket | belongs to the attribution instrument, not the load driver. |
+| D9, D10 | no stationarity assumption; pre-registration of the claim | pre-registration is by definition something recorded *before* the run exists. |
+| D11 | a confound register | prose. |
+| D12 | exclusive cluster access | the harness cannot see other traffic; concurrent load keeps pods warm, so a "cold" start silently is not one. **Cluster work is a queue of one.** |
+| D13 | no contesting controller reconciling the subject mid-run | the harness patches the ksvc directly, which is an ADR-0001 exemption that holds **only** while no operator is installed on that cluster — and nothing checks that condition. If one is, it will silently revert harness mutations mid-run. |
+| D15 | retraction discipline | a property of the document's history. |
+
+A word about D1's default. Digest equality is the strongest identity available from
+the cluster alone and it is the right check for a **configuration** A/B. It is the
+wrong one for a **build-target** A/B, and refusing to admit that would just push
+people to skip the flag — hence `--app-id-label`, which moves the claim onto
+something the image itself declares. That is weaker than a digest: it trusts whoever
+stamped the label. It is nonetheless what makes the difference between "these two
+images assert they are one app" and Run 25/26, where nothing asserted anything.
+
 ## Phases
 
 | Phase | What it does | Maps to |
@@ -367,15 +418,27 @@ result, not a blip.
 
 ## Tests
 
-Three paths here can produce real damage or a real lie, so all three have tests:
+Four paths here can produce real damage or a real lie, so all four have tests:
 
 ```bash
 bash benchmarks/scale-to-zero-oke/capture-restore.test.sh      # can damage a service
 bash benchmarks/scale-to-zero-oke/k6-metrics-integrity.test.sh # can publish a false result
 bash benchmarks/scale-to-zero-oke/api-retry.test.sh            # can mask an unreachable cluster
+bash benchmarks/scale-to-zero-oke/provenance.test.sh           # can publish an inadmissible run
 ```
 
-All three drive `run.sh` against a stub `kubectl` (via the `KUBECTL_BIN` +
+`provenance` asserts the Admissibility section above: the endpoint reaches the
+results file before the first cluster call and survives an abort, an A/B whose arms
+resolve to different images (or to differing/absent/unreadable app-id labels)
+**aborts without issuing a single patch**, an unresolvable digest never reads as a
+same-app verdict, the durable index gains a STARTED row before the run measures and
+a terminal row after, `audit` catches both a missing file and a run that never
+ended, median extraction is anchored on `http_req_duration` and refuses to
+substitute `iteration_duration`, and the bun-exec build stamps the command it
+actually runs. Each of those guards was mutation-proved: the behaviour was deleted
+and the suite went red.
+
+The first three drive `run.sh` against a stub `kubectl` (via the `KUBECTL_BIN` +
 `DRY_RUN_EXERCISE_KC=1` test seam). `capture-restore` asserts that a failed
 capture aborts without issuing a single `patch`, and that a successful capture
 restores the exact original values. `k6-metrics-integrity` asserts the honest-
