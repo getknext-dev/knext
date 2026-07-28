@@ -20,7 +20,9 @@
  *      enforces the entry SHAPE that keeps quarantine honest: every entry must
  *      carry (a) a DATED justification — an ISO date OR a CI run id (a timestamped,
  *      auditable artifact) — AND (b) an UPSTREAM reference (a vercel/next.js issue,
- *      a knext issue/PR, or a run id). Criterion 4: a quarantine may only cover a
+ *      a knext issue/PR, or a github issue/pull URL). Since #512 a run id counts
+ *      for the DATED half ONLY: it timestamps a failure but names no cause, and a
+ *      regression's own red run carries one too. Criterion 4: a quarantine may only cover a
  *      KNOWN-UPSTREAM gap — an entry with no upstream cause is a REGRESSION being
  *      hidden and is rejected. The per-family CAP is enforced separately by
  *      {@link ./compat-quarantine-bounds} (deploy-manifest-lanes.test.ts).
@@ -133,14 +135,41 @@ export function renderLaneSummaryMarkdown(summaries: LaneSummary[]): string {
 
 /** An ISO date token, e.g. "2026-07-05". */
 const ISO_DATE_RE = /\b20\d{2}-\d{2}-\d{2}\b/;
-/** A CI run id — a timestamped, auditable artifact that counts as dated evidence. */
+/**
+ * A CI run id — a timestamped, auditable artifact that counts as dated evidence.
+ * It counts for the DATED half ONLY; see {@link UPSTREAM_RE}.
+ */
 const RUN_ID_RE = /\brun\s+\d{6,}\b/i;
 /**
- * An UPSTREAM reference: a vercel/next.js issue/PR, a bare next.js#NNNNN, a knext
- * issue/PR (#NNN), or a CI run id. A quarantine with none of these is not pinned
- * to a known-upstream gap — it is a regression being hidden.
+ * An UPSTREAM reference (#512): a vercel/next.js issue/PR, a bare next.js#NNNNN,
+ * a knext issue/PR (#NNN), or a GitHub issue/pull URL. A quarantine with none of
+ * these is not pinned to a known-upstream gap — it is a regression being hidden.
+ *
+ * A CI RUN ID IS DELIBERATELY NOT ACCEPTED HERE. It used to be, which let one
+ * `run NNNNN` satisfy BOTH halves — but a regression's own red run has a run id
+ * too, so that shape pinned a quarantine to nothing but the failure it hid. A run
+ * id remains fully valid as DATED evidence ({@link RUN_ID_RE}); it just cannot
+ * stand in for a cause. Note the URL form excludes `/actions/runs/NNNN` for the
+ * same reason: only `/issues/N` and `/pull/N` name a cause.
  */
-const UPSTREAM_RE = /(vercel\/next\.js#\d+|next\.js#\d+|#\d{3,6}|\brun\s+\d{6,})/i;
+const UPSTREAM_RE =
+  /(vercel\/next\.js#\d+|next\.js#\d+|#\d{3,6}|https?:\/\/github\.com\/[\w.-]+\/[\w.-]+\/(?:issues|pull)\/\d+)/gi;
+
+/**
+ * Every upstream reference an entry cites, deduped (empty === the entry rests on
+ * no named cause). Exported so guards can SCAN the ledger and report which ref
+ * each entry stands on, rather than trusting a boolean over an enumerated list.
+ */
+export function upstreamRefs(e: QuarantineEntry): string[] {
+  return [...new Set(entryBlob(e).match(UPSTREAM_RE) ?? [])];
+}
+
+/** The free-text fields a quarantine's justification may live in. */
+function entryBlob(e: QuarantineEntry): string {
+  return [e.dated, e.evidence, e.provenance, e.mechanism, e.reaudited, e.nextjsRef]
+    .filter(Boolean)
+    .join(' ');
+}
 
 /**
  * The problems (empty === valid) with a quarantine entry's SHAPE (#282, criterion 4):
@@ -149,9 +178,7 @@ const UPSTREAM_RE = /(vercel\/next\.js#\d+|next\.js#\d+|#\d{3,6}|\brun\s+\d{6,})
  *     only ever cover a known-upstream gap, never silently hide a regression.
  */
 export function quarantineEntryProblems(e: QuarantineEntry): string[] {
-  const blob = [e.dated, e.evidence, e.provenance, e.mechanism, e.reaudited, e.nextjsRef]
-    .filter(Boolean)
-    .join(' ');
+  const blob = entryBlob(e);
   const problems: string[] = [];
   const isDated = ISO_DATE_RE.test(blob) || RUN_ID_RE.test(blob);
   if (!isDated) {
@@ -160,10 +187,12 @@ export function quarantineEntryProblems(e: QuarantineEntry): string[] {
         `run id (run 28593534713) in evidence/provenance/dated`,
     );
   }
-  if (!UPSTREAM_RE.test(blob)) {
+  if (upstreamRefs(e).length === 0) {
     problems.push(
       `${e.test}: quarantine needs an UPSTREAM reference (vercel/next.js#NNNNN, a knext #NNN, ` +
-        `or a run id) — a quarantine may only cover a known-upstream gap, never hide a regression`,
+        `or a github issue/pull URL) — a CI run id is NOT one (#512): it timestamps the failure ` +
+        `but names no cause, and a regression's own red run has one too. A quarantine may only ` +
+        `cover a known-upstream gap, never hide a regression`,
     );
   }
   return problems;

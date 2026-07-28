@@ -104,7 +104,9 @@ _(This per-lane block is derived from `renderLaneSummaryMarkdown(summarizeLedger
   message — a growing blanket skip is not a policy (guarded by `tests/deploy-manifest-lanes.test.ts`).
 - **Dated + upstream-referenced — never hide a regression.** Every quarantine entry must carry a
   **dated justification** (an ISO date *or* a CI run ID — a timestamped, auditable artifact) **and**
-  an **upstream reference** (a `vercel/next.js#NNNNN` issue/PR, a knext `#NNN`, or a run ID). An
+  an **upstream reference** (a `vercel/next.js#NNNNN` issue/PR, a knext `#NNN`, or a GitHub
+  issue/pull URL). A **run ID is not** an upstream reference: it timestamps a failure but names no
+  cause, and a regression's own red run carries one too — so it counts for the dated half only. An
   entry with no upstream cause is a regression being hidden, and is rejected
   (`quarantineEntryProblems`, guarded by `tests/compat-lane-ledger.test.ts`). A quarantine may only
   ever cover a **known-upstream gap**, and expires on the first `NEXTJS_REF` containing the fix.
