@@ -129,7 +129,15 @@ describe("CRD apiVersion is the one ADR-0017 declares", () => {
         ).toEqual([]);
     });
 
-    it("PUBLIC_API.md cross-links ADR-0017 for the CRD versioning policy", () => {
+    /**
+     * The link is asserted by its PATH, deliberately — not by the string
+     * "ADR-0017". `PUBLIC_API.md` is a user-facing document and
+     * `public-api-surface.test.ts` (PK5) forbids `/ADR-\d{4}/`, `/\bPK\d\b/` and
+     * `/#\d{2,}/` inside it. Asserting the jargon here would put the two guards in
+     * direct conflict and make one of them the thing someone edits to get green.
+     * The path satisfies both: it resolves for a reader and names no internal id.
+     */
+    it("PUBLIC_API.md links the CRD versioning policy, by path not by jargon", () => {
         const publicApi = readFileSync(PUBLIC_API_PATH, "utf8");
         expect(publicApi).toMatch(
             /0017-crd-stays-v1alpha1-conversion-webhook-deferred\.md/,

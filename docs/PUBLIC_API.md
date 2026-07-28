@@ -403,14 +403,17 @@ the Kubernetes `v1alpha1` → `v1beta1` → `v1` ladder — and it ships with th
 does not graduate the CRD, and graduating the CRD does not force a major npm
 version.
 
-The declared CRD API version, the (deliberately stronger-than-alpha) guarantee
-that comes with it, and the named triggers for graduating it are in
-[ADR-0017](adr/0017-crd-stays-v1alpha1-conversion-webhook-deferred.md). The short
-version: write `apiVersion: apps.kn-next.dev/v1alpha1`; within that version the
-schema is **additive-only**, so a CR that applies today keeps applying against
-later operators; there is **no conversion webhook**, so if the version string ever
-changes, hand-authored and GitOps-managed manifests must be updated by hand.
+In short: write `apiVersion: apps.kn-next.dev/v1alpha1`. Within that version the
+schema is **additive-only**, so a `NextApp` that applies today keeps applying
+against later operators. There is **no conversion webhook**, so if the version
+string ever changes, hand-authored and GitOps-managed manifests must be updated
+by hand.
+
+The declared version, the full guarantee that comes with it, and what would make
+us move off `v1alpha1` are written up in
+[the CRD versioning policy](adr/0017-crd-stays-v1alpha1-conversion-webhook-deferred.md).
 
 **Upgrade order: the operator (and its CRD) first, then the CLI.** An older CLI
 against a newer CRD is always valid; the reverse is unsupported. See
-[ADR-0020](adr/0020-release-channels.md) and `docs/RELEASING.md` § "Upgrade order".
+[the release and upgrade policy](adr/0020-release-channels.md) and
+`docs/RELEASING.md` § "Upgrade order".
