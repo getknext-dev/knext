@@ -121,6 +121,12 @@ test-e2e-bundle: manifests generate fmt vet ## Run the install-BUNDLE e2e (#117)
 	# must surface as a Ginkgo failure, not a deadline goroutine-dump panic.
 	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) go test -tags=e2e_bundle ./test/e2e/ -v -ginkgo.v -run TestBundleE2E -timeout 30m
 
+.PHONY: test-e2e-webhook-down
+test-e2e-webhook-down: setup-test-e2e manifests generate fmt vet ## Run the WEBHOOK-DOWN DEPLOY-FREEZE e2e (#314 / S11): scales the operator to zero, PROVES the validating webhook is actually unreachable (no ready endpoints + a server dry-run that hits the unreachability class), then asserts deploys FREEZE — CREATE persists nothing, an in-place image bump of a running app is rejected with its stored spec unchanged, DELETE still works (the freeze's exact scope) — and that a skew-shaped payload is still diagnosed as SKEW, not as a webhook outage, in that same frozen state. Ends by restoring the webhook and replaying the identical frozen apply, which must now succeed (in-band mutation proof). CLUSTER-WIDE DESTRUCTIVE while it runs (every NextApp write on the cluster is frozen) — kind-only; needs cert-manager and a `knative-serving` namespace (auto-created), NOT a Knative Serving install.
+	# Explicit -timeout (>> Go's silent 600s default): a genuine assertion failure
+	# must surface as a Ginkgo failure, not a deadline goroutine-dump panic.
+	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) go test -tags=e2e_webhook_down ./test/e2e/ -v -ginkgo.v -run TestWebhookDownE2E -timeout 30m
+
 .PHONY: test-e2e-cli
 test-e2e-cli: manifests generate fmt vet ## Run the CLI e2e suite: the REAL built kn-next CLI (plain Node) runs doctor / db bind / status against a live cluster. Default mode builds+installs the operator on kind — requires a kind+cert-manager+Knative+Kourier cluster AND `pnpm install --frozen-lockfile` at the repo root (the suite builds the CLI itself). Set KNEXT_E2E_KUBE_CONTEXT=<context> to instead run READ-ONLY against an EXISTING cluster's already-installed operator (no install; all writes confined to one fresh throwaway namespace).
 	# Explicit -timeout (>> Go's silent 600s default): a genuine assertion failure
