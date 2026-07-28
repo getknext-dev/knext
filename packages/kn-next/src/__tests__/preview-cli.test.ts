@@ -67,7 +67,7 @@ describe("runPreviewDeploy (#91)", () => {
         const url = await runPreviewDeploy(
             baseConfig,
             { prId: "42", branch: "feat/x", namespace: "previews" },
-            { apply, capture, buildAndPush },
+            { apply, capture, buildAndPush, preflight: () => {} },
         );
 
         expect(url).toBe("https://my-app-pr-42.previews.example.com");
@@ -120,7 +120,7 @@ describe("runPreviewDeploy (#91)", () => {
         await runPreviewDeploy(
             prodConfig,
             { prId: "42", branch: "feat/x", namespace: "previews" },
-            { apply, capture, buildAndPush },
+            { apply, capture, buildAndPush, preflight: () => {} },
         );
 
         // The config handed to the build/render step must carry the preview's OWN
@@ -152,7 +152,7 @@ describe("runPreviewDeploy (#91)", () => {
         await runPreviewDeploy(
             baseConfig,
             { prId: "42", branch: "feat/x", namespace: "previews" },
-            { apply, capture, buildAndPush },
+            { apply, capture, buildAndPush, preflight: () => {} },
         );
 
         const previewConfig = buildAndPush.mock
@@ -168,7 +168,7 @@ describe("runPreviewDeploy (#91)", () => {
         await runPreviewDeploy(
             baseConfig,
             { prId: "42", branch: "feat/x", namespace: "previews" },
-            { apply, capture, buildAndPush },
+            { apply, capture, buildAndPush, preflight: () => {} },
         );
 
         const forbidden = [
@@ -203,7 +203,7 @@ describe("runPreviewDeploy (#91)", () => {
             runPreviewDeploy(
                 longConfig,
                 { prId: "42", branch: "feat/x", namespace: "previews" },
-                { apply, capture, buildAndPush },
+                { apply, capture, buildAndPush, preflight: () => {} },
             ),
         ).rejects.toThrow(/63/);
 

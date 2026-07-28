@@ -38,6 +38,11 @@ import {
     validateCRImageRef,
 } from "./cr-builder";
 import { isEntrypoint, runCapture, runInherit, runQuiet } from "./exec";
+import { captureKubectl } from "./schema/kubectl-capture";
+import {
+    assertCRSchemaCompatible,
+    preflightImageRef,
+} from "./schema/preflight";
 import { loadConfig } from "./shared";
 
 const log = createLogger({ module: "preview" });
@@ -94,11 +99,29 @@ export interface PreviewDeployOptions {
     namespace: string;
 }
 
+/**
+ * Prune preflight (#314). Receives the path of a rendered preflight CR and the
+ * namespace; MUST THROW when the installed CRD would reject or prune a field.
+ * Injected so tests drive it without a cluster.
+ */
+export type PreviewPreflight = (crPath: string, namespace: string) => void;
+
 export interface PreviewDeployDeps {
     apply: PreviewExec;
     capture: PreviewCapture;
     buildAndPush: PreviewBuildAndPush;
+    /** Defaults to the real server-side dry-run preflight. */
+    preflight?: PreviewPreflight;
 }
+
+/** The real preflight: server-side dry-run apply, hard failure (#314, T6). */
+const defaultPreflight: PreviewPreflight = (crPath, namespace) => {
+    assertCRSchemaCompatible({
+        crPath,
+        namespace,
+        kubectl: captureKubectl,
+    });
+};
 
 /**
  * Deploy a preview: derive `<app>-pr-<n>`, validate it, build+push a digest-pinned
@@ -139,6 +162,32 @@ export async function runPreviewDeploy(
         name: previewName,
         cache: previewCache,
     };
+
+    // #314 (T6) PRUNE PREFLIGHT — the FIRST cluster-touching step, and it runs
+    // BEFORE the build/push so a CRD that would prune a field costs nothing but
+    // the round-trip. The preflight CR is byte-identical to the one applied
+    // below except for the image ref, which cannot exist yet (see
+    // preflightImageRef): the apiserver validates the FIELD SET, not the value.
+    const preflightCrPath = join(
+        process.cwd(),
+        ".output",
+        "nextapp-preview-preflight-cr.yaml",
+    );
+    mkdirSync(join(process.cwd(), ".output"), { recursive: true });
+    writeFileSync(
+        preflightCrPath,
+        renderNextAppCR(
+            previewConfig,
+            preflightImageRef(
+                `${previewConfig.registry}/${previewName}:preflight`,
+            ),
+            options.namespace,
+            "preflight",
+            { prId: options.prId, branch: options.branch },
+        ),
+        "utf-8",
+    );
+    (deps.preflight ?? defaultPreflight)(preflightCrPath, options.namespace);
 
     const imageRef = await deps.buildAndPush(
         previewName,

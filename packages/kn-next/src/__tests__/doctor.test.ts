@@ -15,7 +15,11 @@
  * cluster degrades every check to a clear SKIP (never a crash, never exit 1).
  */
 
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
+import YAML from "yaml";
 import {
     type CheckResult,
     classifyKubectlFailure,
@@ -124,7 +128,44 @@ function healthyStubs(): Record<
             ok: true,
             stdout: JSON.stringify({ spec: {} }),
         },
+        // (a2, #314) schema coverage: serve the REAL bundled CRD schema through
+        // the aggregated OpenAPI v3 document, so a healthy cluster is one whose
+        // CRD actually defines every field this CLI emits. A stub that merely
+        // said "the CRD exists" is exactly the check #314 replaces.
+        "kubectl get --raw /openapi/v3/apis/apps.kn-next.dev/v1alpha1": {
+            ok: true,
+            stdout: JSON.stringify({
+                components: {
+                    schemas: {
+                        "dev.kn-next.apps.v1alpha1.NextApp": bundledCRDSchema(),
+                    },
+                },
+            }),
+        },
     };
+}
+
+/** The v1alpha1 structural schema from the CRD this repo ships. */
+function bundledCRDSchema(): unknown {
+    const crd = YAML.parse(
+        readFileSync(
+            join(
+                dirname(fileURLToPath(import.meta.url)),
+                "..",
+                "..",
+                "..",
+                "..",
+                "packages",
+                "kn-next-operator",
+                "config",
+                "crd",
+                "bases",
+                "apps.kn-next.dev_nextapps.yaml",
+            ),
+            "utf-8",
+        ),
+    ) as { spec: { versions: { schema: { openAPIV3Schema: unknown } }[] } };
+    return crd.spec.versions[0]?.schema.openAPIV3Schema;
 }
 
 const okProbe: ManifestProbeFn = async () => "ok";
@@ -144,6 +185,7 @@ describe("runDoctor — healthy cluster", () => {
             "cluster",
             "kubectl-validation",
             "crd",
+            "crd-schema",
             "operator",
             "cert-manager",
             "ingress",

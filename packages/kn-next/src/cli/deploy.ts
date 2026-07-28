@@ -34,6 +34,12 @@ import {
 } from "./cr-builder";
 import { isEntrypoint, runCapture, runInherit, runQuiet } from "./exec";
 import { runAssetGC } from "./gc";
+import { captureKubectl } from "./schema/kubectl-capture";
+import {
+    formatPreflightFailure,
+    preflightCRSchema,
+    preflightImageRef,
+} from "./schema/preflight";
 import { loadConfig } from "./shared";
 
 const log = createLogger({ module: "deploy" });
@@ -235,6 +241,69 @@ async function describeFailedCRApply(): Promise<string> {
 }
 
 /**
+ * #314 (T6) PRUNE PREFLIGHT — the FIRST cluster-touching step of a deploy, and
+ * it runs before `next build`, before `uploadAssets` and before the push.
+ *
+ * WHY THE ORDER IS PART OF THE FIX. Before this, `uploadAssets` ran at
+ * deploy.ts:332 and the CR apply at :500 — so since #547 a skew-affected apply
+ * hard-failed AFTER the assets were already in the bucket, orphaning
+ * `_next/static/<build-id>/` for a build that never became a revision. GC
+ * reclaims it, so this was waste rather than corruption, but the user's first
+ * experience of the new hard failure was "it failed *and* it wrote things."
+ *
+ * WHY IT COSTS NO NEW PERMISSION (docs/SPRINT_2.md D-3). The verdict is a
+ * server-side `--dry-run=server --validate=strict` apply, which needs
+ * `create`/`patch` on `nextapps` in the target namespace — precisely what the
+ * real apply below needs. No kubeconfig can deploy but not preflight, so
+ * failing hard here can only fail a deploy that was going to fail anyway. The
+ * schema READS (OpenAPI v3, then the CRD) are diagnosis only: they name the
+ * field, and their failure degrades the message, never the verdict.
+ *
+ * The preflight CR differs from the applied CR in exactly one value — the image
+ * ref, which cannot exist before the push (see `preflightImageRef`). The
+ * apiserver validates the FIELD SET, which is identical.
+ */
+async function runPrunePreflight(
+    config: KnativeNextConfig,
+    namespace: string,
+    buildId: string,
+): Promise<void> {
+    const { writeFileSync, mkdirSync } = await import("node:fs");
+    const crPath = join(process.cwd(), ".output", "nextapp-preflight-cr.yaml");
+    mkdirSync(join(process.cwd(), ".output"), { recursive: true });
+    writeFileSync(
+        crPath,
+        renderNextAppCR(
+            config,
+            preflightImageRef(`${config.registry}/${config.name}:preflight`),
+            namespace,
+            buildId,
+        ),
+        "utf-8",
+    );
+
+    const outcome = preflightCRSchema(
+        { kubectl: captureKubectl },
+        { crPath, namespace },
+    );
+    if (outcome.verdict === "ok") {
+        log.info(
+            { namespace },
+            "CR schema preflight passed — this cluster stores every field this CLI emits",
+        );
+        return;
+    }
+    // A kubectl too old for `--validate=strict` fails at flag parsing; probe it
+    // so the message blames the CLIENT rather than the CRD (that would be
+    // exactly backwards, and the probe is the only cause knext can establish).
+    const oldClient =
+        outcome.reason === "client-too-old"
+            ? await localKubectlTooOldForStrict()
+            : undefined;
+    throw new Error(formatPreflightFailure(outcome, { oldClient }));
+}
+
+/**
  * The deploy orchestrator: build → upload assets → push image → apply the
  * NextApp CR (ADR-0001: operator is the single source of truth). Exported at
  * the MODULE level (not a package `exports` subpath) so the sibling
@@ -261,6 +330,12 @@ export async function deploy() {
     // lock-step. MUST be set BEFORE `next build`.
     const buildId = options.tag || `${Date.now()}`;
     process.env.NEXT_DEPLOYMENT_ID = buildId;
+
+    // #314 (T6): the prune preflight, BEFORE any side effect (see the block
+    // comment on runPrunePreflight). A dry run makes no cluster calls at all.
+    if (!options.dryRun) {
+        await runPrunePreflight(config, options.namespace, buildId);
+    }
 
     if (!options.skipBuild) {
         const assetPrefix = getAssetPrefix(config);
