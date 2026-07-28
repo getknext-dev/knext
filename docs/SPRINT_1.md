@@ -175,6 +175,39 @@ exit criteria, not in a reviewer's head.
 | **T13** SIGTERM | the signal lands when nothing is mid-write, so the race is never hit and a real torn write still ships | a deterministic seam pauses the write mid-flight, and **the test fails without the fix** |
 | **T14** failure injection | injected at the client wrapper, so "Redis timing out" is a mocked rejection — while the case that actually hurts is a socket that **hangs and never rejects**, which a mock cannot produce | at least the hang case is driven at the socket level, not the client API |
 
+## Tasks that change a contract — ship a statement, not just a test
+
+A passing test proves the new behaviour works. It does not tell a user what they may now rely on,
+or what just broke for them. These tasks need both.
+
+| task | contract touched | statement required |
+|---|---|---|
+| **T6** prune preflight | **CLI exit codes** — 1.0-committed, and a previously-succeeding `deploy` now hard-fails. Plus **new RBAC**: reading the live CRD schema needs cluster-scoped `get customresourcedefinitions` | the documented exit code; an explicit decision on an escape-hatch flag (**if one exists it is committed CLI surface**); and the documented behaviour when the CRD read is *denied* |
+| **T7** generated artifacts | the JSON becomes a **published, consumed artifact** — its schema is itself a contract | version the schema from day one; state what consumers may rely on |
+| **T12** any probe change | operator-emitted **ksvc shape**, probably a new **CRD** field | design-gate trigger; do not land it as an implementation detail |
+| **T8** ADR-0017 amendment | the CRD-vs-npm versioning promise 1.0 ships under | this task **is** the statement — land it first |
+| **T14** cache-handler fail-open | runtime behaviour under Redis failure | state what fail-open does **not** do: never serve a torn or partial entry |
+| **T9** upgrade ordering | the release-channel contract | one sentence in ADR-0020 |
+| **T16 → sprint 2** second cloud | a **supported-platform matrix** | say what EKS support means, and what is untested |
+
+### The RBAC tension in T6 — resolve it before building
+
+T6 must fail **hard** when the CRD read is denied (a warning is useless precisely when it matters).
+But reading the live CRD schema requires **cluster-scoped `get customresourcedefinitions`**, which
+many restricted kubeconfigs do not have. Taken together those two requirements mean **a user with a
+namespace-scoped kubeconfig cannot deploy at all.**
+
+That is a real product decision, not an implementation detail, and it is on the 1.0-committed CLI
+surface. Decide it up front — degrade to a named, documented state that is neither a silent warning
+nor a hard block; or require the permission and say so in the docs; or gate the preflight behind an
+explicit flag. Do not discover it at review time.
+
+### One anti-item
+
+**Do not add `namespaceSelector` to the admission webhook to make the upgrade e2e easier to write.**
+It is a production admission-surface change wearing a test-convenience disguise, and it narrows the
+blast radius of a security control. If the test is hard to write, that is a fact about the test.
+
 ## Parallelism
 
 Tracks A–F run concurrently with **mostly** disjoint files. Two pairs genuinely overlap, and both
