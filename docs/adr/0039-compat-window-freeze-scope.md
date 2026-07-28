@@ -1,6 +1,7 @@
 # ADR-0039: The compat-window freeze scope — what "the harness unchanged" means
 
-- **Status:** Accepted (2026-07-28; sprint-2 decision D-1, `docs/SPRINT_2.md`). Implemented by
+- **Status:** Accepted (2026-07-28; sprint-2 decision D-1, `docs/SPRINT_2.md`). **Amends D-1's
+  `dist/cli/**` exclusion, which is not implementable as written** — see the Decision. Implemented by
   `scripts/compat-window-fingerprint.mjs` + `scripts/adapter-import-closure.mjs` and wired into
   `.github/workflows/test-e2e-deploy.yml` (#545, task S1).
 - **Depends on:** ADR-0007 (the official-suite compat gate), `docs/V1_ROADMAP.md` (which makes the
@@ -27,18 +28,30 @@ unchanged across a night that exercised different code.
 
 ## Decision
 
-**Freeze the adapter-executed surface, and prove it with a per-run digest.**
+**Freeze the harness plus each packed `@getknext/*` tarball in full, and prove it with a per-run
+digest.** The digest is over **shipped bytes** — what the night actually installed — not over the
+adapter's execution closure. The two are different claims, and the distinction is the whole content
+of the correction below.
 
 **The frozen set** — the digest's two components:
 
 | component | contents | scanned how |
 |---|---|---|
 | `harness` | `.github/workflows/test-e2e-deploy.yml`; `scripts/e2e-*.{sh,mjs,cjs,js}`; `test/deploy-tests-manifest.*.json` | directory scan + pattern, never a file list |
-| `packed` | every `*.tgz` in the run's tarballs dir — the `@getknext/*` closure, hashed by **extracted contents** | scan the dir, then scan each package tree |
+| `packed` | every `*.tgz` in the run's tarballs dir — each `@getknext/*` package **in full**, hashed by **extracted contents** | scan the dir, then scan each package tree, **no filter** |
 
-**Explicitly excluded: `dist/cli/**`.** CLI work (notably the S10 prune preflight, the largest
-remaining P1 item) may land while the window is open. Without this exclusion the whole of sprint 2
-would have to wait out 14 nights.
+**`dist/cli/**` is INSIDE the frozen set, not excluded.** An earlier draft of this ADR claimed the
+opposite; it was wrong, and the correction matters more than the claim did (architect gate, PR #574):
+
+- `packages/kn-next/package.json` has `files: ["dist"]` and `bin: ./dist/cli/kn-next.js`, so
+  **`dist/cli/**` ships inside the tarball under test** — the very artifact each fixture installs;
+- a path-prefix filter could not rescue the exclusion even if we wanted one: of the 9 chunks
+  `dist/cli/*` references, **8 are also referenced by non-CLI dist files**. A CLI change that
+  perturbs a shared chunk rotates its content-hashed filename, which rewrites import specifiers in
+  adapter entries too. There is no seam to cut along.
+
+**So a CLI change resets the window.** The sequencing cost D-1 was trying to avoid is already paid:
+S10 landed in #572 and the window is not open, so nothing is lost by stating this correctly.
 
 **Explicitly not in the frozen set:** `scripts/compat-smoke.mjs` and `ci.yml` — a *different*, PR-time,
 app-side gate. Confusing the two is the most likely way to widen this scope by accident.
@@ -48,19 +61,33 @@ and maintainers may rely on, and it is now checkable: each scheduled run records
 `windowFingerprint` in `compat-run-ledger.json` and in the job summary, retained 90 days — long
 enough to outlive the window it attests to.
 
-### Why the exclusion is not free, and what keeps it honest
+### What the closure guard proves — and what it does not
 
-`packages/kn-next/package.json` exports `./internal/cli-validate` and `./internal/cli-shared` from
-`dist/cli/`. So "the adapter never executes CLI code" is a property of today's imports, not of the
-package layout — one import would silently void it, and the freeze would then be excluding code the
-night actually ran.
-
-Checked rather than assumed: `src/adapters/next-adapter.ts` imports only node builtins, `next` types
-and `./standalone-bun-exports`, whose own closure stays inside `src/adapters/`. `scripts/adapter-
-import-closure.mjs` walks that closure transitively — static, dynamic `import()`, and `require()`
-alike — and fails if any member resolves under a `cli/` directory, including via those two subpath
+`scripts/adapter-import-closure.mjs` walks `src/adapters/next-adapter.ts`'s transitive import
+closure — static, dynamic `import()` and `require()` alike — and fails if any member resolves under
+a `cli/` directory, including via the `./internal/cli-validate` and `./internal/cli-shared` subpath
 exports. An unresolvable relative import is a **hard error**, not a skip: a walker that drops what it
 cannot resolve is a permanently-green guard.
+
+**Be precise about the claim it supports.** It proves the adapter never *executes* CLI code. That
+makes `src/cli/` **review-safe** — a CLI defect cannot corrupt a compat result — but it does **not**
+make CLI changes **window-safe**, because the digest hashes *shipped bytes*, not the execution
+closure. Two different claims; conflating them is exactly the error this ADR shipped with and the
+architect gate caught. The guard is kept for the execution claim, which is worth having on its own:
+it is what would catch an adapter quietly gaining a CLI dependency.
+
+### Suite provenance: recorded, not frozen
+
+`NEXTJS_REF: v16.2.0` is a git **tag**, resolved fresh each night, and that checkout supplies
+`run-tests.js` and the compat suite itself. A retag therefore moves what "green" means while the
+fingerprint stays identical — a real hole, and one the frozen set cannot close, since the suite is
+not ours to freeze.
+
+The fingerprint artifact records `recorded.suite.nextJsCommit` (the resolved `git rev-parse HEAD` of
+the `next.js` checkout) and `recorded.suite.nextTarballSha256`, and the ledger carries them.
+Deliberately **outside the digest**: folding them in would make every legitimate suite bump a silent
+window reset, when it should be a visible decision. `recorded.suite.frozen: false` is written into
+the JSON so a reader cannot mistake the fields for frozen ones.
 
 ### Why the digest hashes tarball CONTENTS, not tarball bytes
 
@@ -80,43 +107,57 @@ matches **zero** files is a hard error rather than a quietly-empty component.
 
 | option | pro | con | verdict |
 |---|---|---|---|
-| **Freeze the adapter-executed surface, exclude `dist/cli/**`, prove with a scanned digest** | window is checkable; sprint keeps its capacity; the exclusion is guarded, not asserted | one more script + guard to maintain | **chosen** |
+| **Freeze the harness + each packed tarball in full, prove with a scanned digest** | window is checkable; the digest covers exactly what the night installed, with no seam to argue about | a CLI-only change resets the window | **chosen** |
 | Freeze everything in the repo (`git rev-parse HEAD` as the fingerprint) | trivial to implement; nothing can slip | every merge — docs, ADRs, operator, benchmarks — resets the clock. The window becomes a merge freeze, and 1.0 becomes unreachable for organisational reasons | rejected |
 | Freeze the harness only (workflow + scripts + manifest) | small, obvious | omits the packed `@getknext/*` closure — the adapter under test. The digest would be stable across a night that ran different code: the exact silent failure this ADR exists to prevent | rejected |
-| Exclude `dist/cli/**` on the strength of reading the imports | no new code | "verified once" decays silently; the two `dist/cli/` subpath exports make one import enough to void it | rejected |
+| Exclude `dist/cli/**` from the packed digest (this ADR's first draft) | CLI work could land mid-window, preserving sprint capacity | **not implementable**: `files: ["dist"]` + `bin: ./dist/cli/kn-next.js` ship the CLI in the tarball under test, and 8 of 9 chunks `dist/cli/*` references are shared with non-CLI dist files, so a path filter cannot separate them. It also conflated "the adapter does not *execute* CLI code" with "the tarball does not *contain* it" | rejected (corrected on #574) |
+| Fold the suite provenance into the digest | a retag would reset the window automatically | every legitimate suite bump becomes a silent 14-night reset with no decision recorded anywhere | rejected — record it instead |
 | Hash tarball bytes | simplest packed digest | not reproducible; the window would never hold | rejected |
 | No fingerprint; keep a hand-written window log | zero work | the status quo, and the reason this ADR exists | rejected |
 
 ## Consequences
 
-- **May now rely on:** "green" names a specific, digested artifact set; each night's entry in the
-  window log (`docs/compat/window-node-lane.md`, S2) carries the fingerprint, and a mismatch voids
-  the window loudly instead of being negotiated after the fact.
+- **May now rely on:** "green" names a specific, digested artifact set, and every scheduled run
+  emits **retained, tamper-evident evidence** of which set it ran — the digest, its two component
+  digests, a per-package digest, and the recorded suite provenance, kept 90 days so it outlives the
+  window it attests to. That is what makes the 14-night claim *checkable after the fact* by someone
+  other than the person who wrote the log.
+- **Precisely what this does NOT do, stated because the first draft overclaimed it:** nothing
+  compares tonight's digest to last night's. CI fails on a **missing** fingerprint only. A
+  mid-window change therefore produces a *different recorded digest*, not an automatic alarm —
+  detection still requires someone (or S2's log) to read the two. Cross-run comparison is the
+  follow-up below, and only once it lands is "a mismatch voids the window loudly" a true sentence.
 - **What just broke:** any change inside the frozen set restarts the 14 nights — including a
-  comment-only edit to `test-e2e-deploy.yml`. This is deliberate: a fingerprint that tries to be
-  clever about which changes "matter" is a fingerprint someone can argue with.
+  comment-only edit to `test-e2e-deploy.yml`, and including a CLI-only change, since `dist/cli/**`
+  ships in the tarball. Deliberate: a fingerprint that tries to be clever about which changes
+  "matter" is one someone can argue with.
 - A scheduled run that records **no** fingerprint fails the ledger job. A night with no recorded
   harness identity cannot count toward the streak.
-- The window is **not** protected against a mid-window merge landing on `main` — branch protection
-  (#555) is a separate, human-only gate. The fingerprint makes such a merge *detectable*, not
-  impossible. Stated rather than implied: this ADR buys falsifiability, not prevention.
-- Not covered: the fingerprint says nothing about the **runner environment** (ubuntu image, Node
-  24.x patch, the pinned `next@16.2.0` tarball's registry bytes). Those can move under a stable
-  digest. `NEXTJS_REF` is inside the workflow file and therefore inside the digest, but the resolved
-  tarball is not.
+- **Branch protection (#555) is not a precondition for this ADR's guarantee.** Without it, a
+  mid-window merge does not make the 14-night claim *false* — the digest changes and the streak
+  restarts. Detection suffices for **truth**; prevention is about **schedulability**, i.e. whether
+  the streak can be completed in reasonable wall-clock time. This ADR buys falsifiability, not
+  prevention, and that is enough for correctness.
+- Not covered: the **runner environment** (ubuntu image, Node 24.x patch) can still move under a
+  stable digest. The suite half of that gap is now *recorded* (see above) rather than merely noted;
+  the runner-image half is not.
 
 ## Action items
 
 - [x] `scripts/compat-window-fingerprint.mjs` — scanned digest over both components, hard-failing on
       an empty or foreign packed set.
 - [x] `scripts/adapter-import-closure.mjs` + `tests/compat-window-cli-exclusion.test.ts` — the
-      `dist/cli/**` exclusion guard, mutation-proved against relative, transitive, dynamic and
-      subpath-export imports.
+      adapter **execution**-closure guard (never a freeze exclusion), mutation-proved against
+      relative, transitive, dynamic and subpath-export imports.
 - [x] Wire the fingerprint into `test-e2e-deploy.yml`: computed in `build-next` from the same packed
       tarballs the shards install, uploaded 90 days, carried in `compat-run-ledger.json`.
+- [x] Record suite provenance (`next.js` HEAD + `next` tarball sha256) as **recorded, not frozen**.
+- [ ] **Cross-run comparison** — the ledger job reads the previous scheduled run's fingerprint
+      artifact and fails loudly on a mismatch mid-window. This is what makes "a mismatch voids the
+      window loudly" true; until it lands, the fingerprint is evidence, not an alarm.
 - [ ] **S2** — open the window and record the fingerprint per night in
       `docs/compat/window-node-lane.md`; a mismatch restarts the count.
-- [ ] **S3 (#555)** — branch protection on `main`, so a mid-window merge is prevented and not merely
-      detected.
-- [ ] Consider extending the digest to the resolved `next` tarball digest if a version-skew incident
-      ever makes the runner-environment gap concrete.
+- [ ] **S3 (#555)** — branch protection on `main`. Improves *schedulability* of the streak; not a
+      precondition for the guarantee (see Consequences).
+- [ ] Consider recording the runner image identity if an environment-skew incident ever makes that
+      residual gap concrete.

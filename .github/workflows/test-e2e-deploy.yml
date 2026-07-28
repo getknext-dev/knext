@@ -229,48 +229,6 @@ jobs:
       - name: Preflight — packed tarballs must npm-install + adapter must resolve (fail-fast)
         run: node knext/scripts/e2e-preflight.mjs --tarballs-dir "${GITHUB_WORKSPACE}/knext-tarballs"
 
-      # ── Compat-window fingerprint (#545, sprint-2 S1) ───────────────────────
-      # The v1.0 gate is "14 consecutive scheduled node-lane runs with the
-      # harness UNCHANGED". Nothing recorded what "unchanged" meant, so the
-      # guarantee was unfalsifiable — the window would be policed by a human
-      # reading a log they also wrote. This step digests the FROZEN SET
-      # (docs/adr/0039): the workflow + scripts/e2e-* + the deploy manifest,
-      # AND the packed @getknext/* closure that IS the adapter under test.
-      #
-      # It runs HERE — after the pack + preflight, before the workspace is
-      # tarred — because this is the only point where both halves of the frozen
-      # set exist in one place. The digest hashes tarball CONTENTS, not tarball
-      # bytes: pnpm pack is not bit-reproducible, so a byte digest would churn
-      # nightly for reasons that are not code changes and no window could ever
-      # hold. `dist/cli/**` is deliberately OUT of scope (D-1), kept honest by
-      # scripts/adapter-import-closure.mjs, which fails if the adapter's
-      # transitive import closure ever reaches a cli/ file.
-      - name: Fingerprint the frozen compat-window set
-        run: |
-          set -euo pipefail
-          node knext/scripts/compat-window-fingerprint.mjs \
-            --repo-root knext \
-            --tarballs-dir "${GITHUB_WORKSPACE}/knext-tarballs" \
-            --out "${GITHUB_WORKSPACE}/compat-window-fingerprint.json" \
-            | tee "${RUNNER_TEMP}/fingerprint.txt"
-          {
-            echo '### Compat-window fingerprint'
-            echo
-            echo '```'
-            cat "${RUNNER_TEMP}/fingerprint.txt"
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      # Retained for 90 days like the shard summaries: the evidence has to
-      # outlive the 14-night window it attests to, or the streak is once again
-      # only as good as somebody's memory.
-      - name: Upload the compat-window fingerprint
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: compat-window-fingerprint
-          path: compat-window-fingerprint.json
-          retention-days: 90
-
       # #147 (round 4) — derive the published npm VERSION from the git tag ref
       # (`v16.0.3` → `16.0.3`), then `npm pack` the PREBUILT `next` from the npm
       # registry. This tarball replaces the source build entirely. We stage it at
@@ -294,6 +252,58 @@ jobs:
           repository: vercel/next.js
           ref: ${{ env.NEXTJS_REF }}
           path: next.js
+
+      # ── Compat-window fingerprint (#545, sprint-2 S1) ───────────────────────
+      # The v1.0 gate is "14 consecutive scheduled node-lane runs with the
+      # harness UNCHANGED". Nothing recorded what "unchanged" meant, so the
+      # guarantee was unfalsifiable — the window would be policed by a human
+      # reading a log they also wrote. This step digests the FROZEN SET
+      # (docs/adr/0039): the workflow + scripts/e2e-* + the deploy manifest, AND
+      # each packed @getknext/* tarball IN FULL — the adapter under test,
+      # `dist/cli/**` and shared `dist/chunk-*.js` included. The digest hashes
+      # tarball CONTENTS, not tarball bytes: pnpm pack is not bit-reproducible,
+      # so a byte digest would churn nightly for reasons that are not code
+      # changes and no window could ever hold.
+      #
+      # It runs HERE — after the pack + preflight AND after the next.js checkout,
+      # before the workspace is tarred — because this is the first point where
+      # everything it reads exists: both halves of the frozen set, plus the
+      # RECORDED-NOT-FROZEN suite provenance below.
+      #
+      # NEXTJS_REF is a git TAG resolved fresh each night, and that checkout
+      # supplies run-tests.js and the compat suite itself — so a retag would move
+      # what "green" means under a stable fingerprint. The resolved commit and
+      # the `next` tarball digest are therefore RECORDED into the artifact and
+      # deliberately kept OUT of the digest: a legitimate suite bump must be a
+      # visible decision, not a silent window reset.
+      - name: Fingerprint the frozen compat-window set
+        run: |
+          set -euo pipefail
+          node knext/scripts/compat-window-fingerprint.mjs \
+            --repo-root knext \
+            --tarballs-dir "${GITHUB_WORKSPACE}/knext-tarballs" \
+            --next-js-dir "${GITHUB_WORKSPACE}/next.js" \
+            --next-tarball "${GITHUB_WORKSPACE}/next-prebuilt/next.tgz" \
+            --next-ref "${NEXTJS_REF}" \
+            --out "${GITHUB_WORKSPACE}/compat-window-fingerprint.json" \
+            | tee "${RUNNER_TEMP}/fingerprint.txt"
+          {
+            echo '### Compat-window fingerprint'
+            echo
+            echo '```'
+            cat "${RUNNER_TEMP}/fingerprint.txt"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # Retained for 90 days like the shard summaries: the evidence has to
+      # outlive the 14-night window it attests to, or the streak is once again
+      # only as good as somebody's memory.
+      - name: Upload the compat-window fingerprint
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: compat-window-fingerprint
+          path: compat-window-fingerprint.json
+          retention-days: 90
 
       # IMPORTANT (the #137 follow-up): next.js v16.0.3 declares its OWN required
       # pnpm (`packageManager: pnpm@9.6.0`), which CLASHES with the knext pin
@@ -1551,6 +1561,12 @@ jobs:
             windowFingerprint: fp?.fingerprint ?? null,
             windowFingerprintComponents: fp?.components ?? null,
             windowFingerprintPackages: fp?.packages ?? null,
+            // RECORDED, NOT FROZEN (#574 architect gate): the resolved next.js
+            // commit + next-tarball digest. They do not feed the fingerprint —
+            // a suite bump must be a visible decision, not a silent reset — but
+            // the window log needs them to tell "the suite moved" apart from
+            // "knext moved" when a night behaves differently at a stable digest.
+            suiteProvenance: fp?.recorded?.suite ?? null,
             shards,
           };
           fs.writeFileSync('compat-run-ledger.json', `${JSON.stringify(ledger, null, 2)}\n`);
@@ -1565,6 +1581,8 @@ jobs:
             `### Compat per-shard ledger — lane \`${lane}\`, ref \`${ledger.ref}\``,
             '',
             `frozen-set fingerprint: \`${ledger.windowFingerprint ?? 'MISSING'}\``,
+            '',
+            `suite provenance (recorded, NOT frozen): next.js \`${ledger.suiteProvenance?.nextJsCommit ?? 'n/a'}\` (ref \`${ledger.suiteProvenance?.nextRef ?? 'n/a'}\`), next tarball sha256 \`${ledger.suiteProvenance?.nextTarballSha256 ?? 'n/a'}\``,
             '',
             '| shard | lane | passed | failed | notRun | expected | named failures |',
             '|---|---|---|---|---|---|---|',

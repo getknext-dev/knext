@@ -5,15 +5,19 @@ import { afterAll, describe, expect, it } from 'vitest';
 import { computeAdapterClosure } from '../scripts/adapter-import-closure.mjs';
 
 /**
- * S1 / #545 — the `dist/cli/**` EXCLUSION GUARD.
+ * S1 / #545 — the adapter EXECUTION-CLOSURE guard.
  *
- * The compat-window freeze covers the adapter-executed surface and explicitly
- * excludes `dist/cli/**`, so `src/cli/` work may land mid-window. That
- * exclusion is only honest while the adapter's transitive import closure
- * genuinely does not reach the CLI — and `packages/kn-next/package.json` DOES
- * export `./internal/cli-validate` and `./internal/cli-shared` from `dist/cli/`,
- * so the exclusion is not free. This guard is what keeps it true as the code
- * moves: a `dist/cli/` file entering the adapter closure makes it red.
+ * The claim under test is narrow and worth stating exactly: **the adapter never
+ * executes CLI code.** That makes `src/cli/` review-safe — a CLI defect cannot
+ * corrupt a compat result. It does NOT make CLI changes window-safe: the
+ * compat-window digest hashes shipped bytes, and `dist/cli/**` ships inside the
+ * tarball under test (`files: ["dist"]`, `bin: ./dist/cli/kn-next.js`), so a CLI
+ * change resets the window. An earlier draft of ADR-0039 conflated the two;
+ * corrected on PR #574.
+ *
+ * The claim is not free to keep true — `packages/kn-next/package.json` exports
+ * `./internal/cli-validate` and `./internal/cli-shared` from `dist/cli/`, so one
+ * import would void it. This guard is what keeps it true as the code moves.
  */
 
 const REPO_ROOT = resolve(import.meta.dirname, '..');
@@ -30,7 +34,7 @@ function tempDir(prefix: string): string {
   return dir;
 }
 
-describe('adapter closure excludes the CLI (freeze-scope D-1)', () => {
+describe('the adapter executes no CLI code (ADR-0039 execution claim)', () => {
   it('the real adapter entry reaches no cli/ file', () => {
     const closure = computeAdapterClosure(ADAPTER_ENTRY, { packageRoot: PKG_ROOT });
     expect(closure.violations, closure.violations.map((v) => v.detail).join('\n')).toEqual([]);

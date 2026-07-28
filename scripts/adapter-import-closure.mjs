@@ -1,13 +1,18 @@
 #!/usr/bin/env node
 /**
- * adapter-import-closure.mjs — the `dist/cli/**` EXCLUSION GUARD (S1, #545).
+ * adapter-import-closure.mjs — the adapter EXECUTION-CLOSURE guard (S1, #545).
  *
- * The compat-window freeze (docs/adr/0039) covers the adapter-executed surface
- * and explicitly EXCLUDES `dist/cli/**`, so CLI work may land while the 14-night
- * window is open. That exclusion is only honest while the adapter's transitive
- * import closure genuinely does not reach the CLI — and it is not free:
- * packages/kn-next/package.json exports `./internal/cli-validate` and
- * `./internal/cli-shared` from `dist/cli/`, so one import is all it would take.
+ * WHAT THIS PROVES, EXACTLY: the adapter never *executes* CLI code. That makes
+ * `src/cli/` REVIEW-SAFE — a CLI defect cannot corrupt a compat result. It does
+ * NOT make CLI changes WINDOW-safe: the compat-window digest hashes SHIPPED
+ * BYTES, and `dist/cli/**` ships inside the tarball under test
+ * (`files: ["dist"]` + `bin: ./dist/cli/kn-next.js`), so a CLI change resets the
+ * window. An earlier draft of ADR-0039 conflated the two claims; do not
+ * reintroduce that reading (corrected on PR #574).
+ *
+ * The claim is not free to keep true: packages/kn-next/package.json exports
+ * `./internal/cli-validate` and `./internal/cli-shared` from `dist/cli/`, so one
+ * import is all it would take to make the adapter execute CLI code.
  *
  * This module computes the closure from SOURCE (the built dist is not available
  * in a plain `pnpm install` tree) and reports any member under a `cli/`
@@ -19,8 +24,8 @@
  *     the runtime reaches them either way.
  *
  * Bare specifiers to OTHER packages (`next`, `node:*`) are not traversed: they
- * are not knext's frozen surface. Bare specifiers to the package's OWN name are
- * resolved through its `exports` map, which is precisely the drift path above.
+ * are not knext's code. Bare specifiers to the package's OWN name are resolved
+ * through its `exports` map, which is precisely the drift path above.
  */
 
 import { existsSync, readFileSync, statSync } from 'node:fs';
@@ -32,7 +37,7 @@ const BUILTINS = new Set(builtinModules);
 /** Extensions tried, in order, for an extensionless relative specifier. */
 const EXTENSIONS = ['.ts', '.tsx', '.mts', '.cts', '.js', '.jsx', '.mjs', '.cjs', '.json'];
 
-/** Any file living under a `cli/` directory is out of the frozen adapter surface. */
+/** Any file living under a `cli/` directory is CLI code the adapter must not execute. */
 const CLI_DIR = /(^|\/)cli\//;
 
 /**
@@ -123,7 +128,7 @@ export function computeAdapterClosure(entryFile, { packageRoot }) {
         kind,
         file: relative(packageRoot, fromFile).split('\\').join('/'),
         specifier,
-        detail: `${relative(packageRoot, fromFile)} imports "${specifier}" → ${rel}, which is under a cli/ directory and therefore OUTSIDE the frozen adapter surface (compat-window freeze scope)`,
+        detail: `${relative(packageRoot, fromFile)} imports "${specifier}" → ${rel}, which is CLI code under a cli/ directory: the adapter must never EXECUTE the CLI (ADR-0039). Note this is the execution claim, not a freeze exclusion — dist/cli/** ships in the tarball and IS inside the compat-window digest`,
       });
     }
   };
@@ -190,6 +195,6 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     for (const v of violations) console.error(`::error::${v.detail}`);
     process.exit(1);
   }
-  console.log('no cli/ file in the adapter closure — the dist/cli/** freeze exclusion holds');
+  console.log('no cli/ file in the adapter closure — the adapter executes no CLI code (ADR-0039)');
 }
 /* c8 ignore stop */

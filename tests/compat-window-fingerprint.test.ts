@@ -20,6 +20,14 @@ import { afterAll, describe, expect, it } from 'vitest';
  * 2. It SCANS rather than enumerates. An enumerated file list is how the second
  *    file gets missed; a newly-added `scripts/e2e-*.sh` or a newly-packed
  *    tarball must move the digest with no edit to the script.
+ *
+ * A third property, added after the architect gate on PR #574: SUITE PROVENANCE
+ * is RECORDED, NOT FROZEN. `NEXTJS_REF: v16.2.0` is a git TAG resolved fresh
+ * each night, and that checkout supplies `run-tests.js` and the suite itself —
+ * so a retag moves what "green" means under a stable fingerprint. The resolved
+ * commit and the `next` tarball digest are therefore written into the artifact,
+ * but deliberately kept OUT of the digest: a legitimate suite bump should be a
+ * visible decision, not a silent window reset.
  */
 
 const REPO_ROOT = resolve(import.meta.dirname, '..');
@@ -217,6 +225,169 @@ describe('compat-window fingerprint — the frozen set is digestible and complet
   });
 });
 
+describe('compat-window fingerprint — the packed tarball is covered IN FULL', () => {
+  // Architect gate, PR #574: an earlier draft of ADR-0039 claimed `dist/cli/**`
+  // was "explicitly excluded" from the frozen set. It is not, and cannot be:
+  // `packages/kn-next/package.json` has `files: ["dist"]` and
+  // `bin: ./dist/cli/kn-next.js`, so `dist/cli/**` SHIPS inside the tarball
+  // under test — and 8 of the 9 chunks `dist/cli/*` references are shared with
+  // non-CLI dist files, so a path-prefix filter would not separate them either
+  // (a CLI change perturbing a shared chunk rotates its hashed filename and
+  // rewrites import specifiers in adapter entries too). The digest hashes
+  // SHIPPED BYTES; `adapter-import-closure.mjs` proves a different thing — that
+  // the adapter never EXECUTES CLI code. These tests pin the honest claim.
+  it('a change under dist/cli/ inside the tarball DOES move the digest', () => {
+    const { repoRoot, tarballsDir } = makeFixture();
+    packFixtureTarball(tarballsDir, 'core-cli', '0.3.0', {
+      'dist/cli/kn-next.js': '#!/usr/bin/env node\nconsole.log("v1");\n',
+    });
+    const before = fingerprint(repoRoot, tarballsDir);
+    rmSync(join(tarballsDir, 'getknext-core-cli-0.3.0.tgz'));
+    packFixtureTarball(tarballsDir, 'core-cli', '0.3.0', {
+      'dist/cli/kn-next.js': '#!/usr/bin/env node\nconsole.log("v2");\n',
+    });
+    const after = fingerprint(repoRoot, tarballsDir);
+    expect(after.components.packed).not.toBe(before.components.packed);
+    expect(after.fingerprint).not.toBe(before.fingerprint);
+  });
+
+  it('a change to a SHARED dist chunk moves the digest (no path-prefix filter)', () => {
+    const { repoRoot, tarballsDir } = makeFixture();
+    packFixtureTarball(tarballsDir, 'core-chunk', '0.3.0', {
+      'dist/chunk-C7XL7PTE.js': 'export const shared = 1;\n',
+    });
+    const before = fingerprint(repoRoot, tarballsDir);
+    rmSync(join(tarballsDir, 'getknext-core-chunk-0.3.0.tgz'));
+    packFixtureTarball(tarballsDir, 'core-chunk', '0.3.0', {
+      'dist/chunk-C7XL7PTE.js': 'export const shared = 2;\n',
+    });
+    expect(fingerprint(repoRoot, tarballsDir).fingerprint).not.toBe(before.fingerprint);
+  });
+});
+
+describe('compat-window fingerprint — suite provenance is RECORDED, not frozen', () => {
+  /** A throwaway git repo standing in for the nightly `next.js` checkout. */
+  function fakeNextJsCheckout(): { dir: string; head: string } {
+    const dir = tempDir('knext-fp-nextjs-');
+    writeFileSync(join(dir, 'run-tests.js'), 'console.log("harness");\n');
+    const git = (...args: string[]) =>
+      execFileSync('git', ['-C', dir, ...args], { encoding: 'utf8' });
+    git('init', '-q');
+    git('config', 'user.email', 'test@example.com');
+    git('config', 'user.name', 'test');
+    git('add', '-A');
+    git('commit', '-qm', 'harness');
+    return { dir, head: git('rev-parse', 'HEAD').trim() };
+  }
+
+  function withProvenance(
+    repoRoot: string,
+    tarballsDir: string,
+    nextJsDir: string,
+    nextTarball: string,
+  ) {
+    const out = execFileSync(
+      process.execPath,
+      [
+        SCRIPT,
+        '--repo-root',
+        repoRoot,
+        '--tarballs-dir',
+        tarballsDir,
+        '--next-js-dir',
+        nextJsDir,
+        '--next-tarball',
+        nextTarball,
+        '--next-ref',
+        'v16.2.0',
+        '--json',
+      ],
+      { encoding: 'utf8' },
+    );
+    return JSON.parse(out) as {
+      fingerprint: string;
+      recorded: {
+        suite: {
+          nextRef: string | null;
+          nextJsCommit: string | null;
+          nextTarballSha256: string | null;
+          frozen: boolean;
+        };
+      };
+    };
+  }
+
+  it('records the resolved next.js commit and the next tarball digest', () => {
+    const { repoRoot, tarballsDir } = makeFixture();
+    const { dir, head } = fakeNextJsCheckout();
+    const tarball = join(tempDir('knext-fp-nexttgz-'), 'next.tgz');
+    writeFileSync(tarball, 'pretend-next-tarball-v1');
+
+    const result = withProvenance(repoRoot, tarballsDir, dir, tarball);
+    expect(result.recorded.suite.nextJsCommit).toBe(head);
+    expect(result.recorded.suite.nextTarballSha256).toMatch(/^[0-9a-f]{64}$/);
+    expect(result.recorded.suite.nextRef).toBe('v16.2.0');
+    // Named in the artifact itself, so a reader cannot mistake it for frozen.
+    expect(result.recorded.suite.frozen).toBe(false);
+  });
+
+  it('does NOT fold provenance into the digest — a suite bump is a visible decision, not a silent reset', () => {
+    const { repoRoot, tarballsDir } = makeFixture();
+    const baseline = fingerprint(repoRoot, tarballsDir).fingerprint;
+
+    const a = fakeNextJsCheckout();
+    const tarballA = join(tempDir('knext-fp-nexttgz-a-'), 'next.tgz');
+    writeFileSync(tarballA, 'pretend-next-tarball-v1');
+    const withA = withProvenance(repoRoot, tarballsDir, a.dir, tarballA);
+
+    // A DIFFERENT suite commit and a DIFFERENT next tarball…
+    const b = fakeNextJsCheckout();
+    writeFileSync(join(b.dir, 'run-tests.js'), 'console.log("harness v2");\n');
+    execFileSync('git', ['-C', b.dir, 'commit', '-aqm', 'retag']);
+    const tarballB = join(tempDir('knext-fp-nexttgz-b-'), 'next.tgz');
+    writeFileSync(tarballB, 'pretend-next-tarball-v2');
+    const withB = withProvenance(repoRoot, tarballsDir, b.dir, tarballB);
+
+    expect(withB.recorded.suite.nextJsCommit).not.toBe(withA.recorded.suite.nextJsCommit);
+    expect(withB.recorded.suite.nextTarballSha256).not.toBe(withA.recorded.suite.nextTarballSha256);
+    // …must leave the digest exactly where it was, with or without the flags.
+    expect(withA.fingerprint).toBe(baseline);
+    expect(withB.fingerprint).toBe(baseline);
+  });
+
+  it('records nulls rather than guessing when provenance is not supplied', () => {
+    const { repoRoot, tarballsDir } = makeFixture();
+    const out = execFileSync(
+      process.execPath,
+      [SCRIPT, '--repo-root', repoRoot, '--tarballs-dir', tarballsDir, '--json'],
+      { encoding: 'utf8' },
+    );
+    const parsed = JSON.parse(out) as { recorded: { suite: Record<string, unknown> } };
+    expect(parsed.recorded.suite.nextJsCommit).toBeNull();
+    expect(parsed.recorded.suite.nextTarballSha256).toBeNull();
+  });
+
+  it('FAILS rather than recording a null when a supplied provenance path is wrong', () => {
+    const { repoRoot, tarballsDir } = makeFixture();
+    expect(() =>
+      execFileSync(
+        process.execPath,
+        [
+          SCRIPT,
+          '--repo-root',
+          repoRoot,
+          '--tarballs-dir',
+          tarballsDir,
+          '--next-tarball',
+          join(tarballsDir, 'does-not-exist.tgz'),
+          '--json',
+        ],
+        { encoding: 'utf8', stdio: 'pipe' },
+      ),
+    ).toThrow();
+  });
+});
+
 describe('compat-window fingerprint — wired into the scheduled run', () => {
   const workflow = readFileSync(WORKFLOW, 'utf8');
 
@@ -224,6 +395,14 @@ describe('compat-window fingerprint — wired into the scheduled run', () => {
     expect(workflow).toContain('scripts/compat-window-fingerprint.mjs');
     const step = workflow.slice(workflow.indexOf('scripts/compat-window-fingerprint.mjs'));
     expect(step).toContain('knext-tarballs');
+  });
+
+  it('the fingerprint step records the SUITE provenance the digest deliberately omits', () => {
+    const idx = workflow.indexOf('scripts/compat-window-fingerprint.mjs');
+    const step = workflow.slice(idx, idx + 900);
+    expect(step).toContain('--next-js-dir');
+    expect(step).toContain('--next-tarball');
+    expect(step).toContain('--next-ref');
   });
 
   it('the fingerprint is recorded durably enough to outlive the 14-night window', () => {

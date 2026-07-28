@@ -16,24 +16,46 @@
  *             scripts the reference harness shells out to, and the deploy-tests
  *             manifest that selects what runs.
  *   packed  — the `@getknext/*` tarballs the workflow packs and installs into
- *             every fixture. This is THE ADAPTER UNDER TEST. A fingerprint that
- *             covers only the harness would go unchanged across a night that
- *             tested different code — the exact silent failure this exists to
- *             prevent — so an empty or non-@getknext packed set is a hard error,
- *             never a quietly-omitted component.
+ *             every fixture, each covered IN FULL. This is THE ADAPTER UNDER
+ *             TEST. A fingerprint that covers only the harness would go
+ *             unchanged across a night that tested different code — the exact
+ *             silent failure this exists to prevent — so an empty or
+ *             non-@getknext packed set is a hard error, never a quietly-omitted
+ *             component.
+ *
+ * "IN FULL" is literal and load-bearing: `dist/cli/**` and the shared
+ * `dist/chunk-*.js` are INSIDE the digest. `packages/kn-next/package.json` has
+ * `files: ["dist"]` and `bin: ./dist/cli/kn-next.js`, so the CLI ships in the
+ * tarball under test, and 8 of the 9 chunks `dist/cli/*` references are shared
+ * with non-CLI dist files — a path-prefix filter could not separate them even if
+ * we wanted one, because a CLI change perturbing a shared chunk rotates its
+ * hashed filename and rewrites import specifiers in adapter entries too.
+ * A CLI change therefore RESETS the window. What
+ * `scripts/adapter-import-closure.mjs` proves is a different claim — that the
+ * adapter never *executes* CLI code, which makes `src/cli/` review-safe, not
+ * window-safe. Do not conflate the two (ADR-0039, corrected on PR #574).
+ *
+ * SUITE PROVENANCE is RECORDED, NOT FROZEN. `NEXTJS_REF` is a git TAG resolved
+ * fresh each night and that checkout supplies `run-tests.js` and the suite
+ * itself, so a retag moves what "green" means under a stable fingerprint. The
+ * resolved commit + the `next` tarball digest are written into the artifact and
+ * deliberately kept OUT of the digest: a legitimate suite bump should be a
+ * visible decision, not a silent window reset.
  *
  * SCANNED, NOT ENUMERATED. The roots below are directories + patterns, not a
  * file list: a newly-added `scripts/e2e-*.sh`, a second manifest lane, or a
  * fourth packed package moves the digest with no edit here. An enumerated list
  * is how the second file gets missed.
  *
- * NOT in the frozen set: `dist/cli/**` (excluded by D-1 so CLI work can land
- * mid-window — kept honest by scripts/adapter-import-closure.mjs) and
- * `scripts/compat-smoke.mjs`, which is a DIFFERENT gate, in ci.yml, app-side.
+ * NOT in the frozen set: `scripts/compat-smoke.mjs` and `ci.yml` — a DIFFERENT
+ * gate, PR-time and app-side. Confusing the two is the likeliest way to widen
+ * this scope by accident.
  *
  * Usage:
  *   node scripts/compat-window-fingerprint.mjs \
  *     --repo-root . --tarballs-dir "$GITHUB_WORKSPACE/knext-tarballs" \
+ *     [--next-js-dir next.js] [--next-tarball next-prebuilt/next.tgz] \
+ *     [--next-ref v16.2.0] \
  *     [--out compat-window-fingerprint.json] [--json] [--files]
  */
 
@@ -198,9 +220,58 @@ function collectPacked(tarballsDir) {
 }
 
 /**
- * @param {{ repoRoot: string, tarballsDir: string }} options
+ * Suite provenance — RECORDED, NEVER DIGESTED.
+ *
+ * The nightly resolves `NEXTJS_REF` (a git TAG) fresh, and that checkout is the
+ * compat suite itself. Recording the resolved commit + the `next` tarball digest
+ * makes a retag visible in the log; folding them into the fingerprint would make
+ * every legitimate suite bump a silent window reset instead of a decision.
+ *
+ * A SUPPLIED path that cannot be read is a hard error — recording `null` for a
+ * path someone asked us to record would be a fingerprint that quietly forgets.
+ *
+ * @param {{ nextJsDir?: string | null, nextTarball?: string | null, nextRef?: string | null }} options
  */
-export function computeFingerprint({ repoRoot, tarballsDir }) {
+function collectSuiteProvenance({ nextJsDir, nextTarball, nextRef }) {
+  /** @type {string | null} */
+  let nextJsCommit = null;
+  if (nextJsDir) {
+    if (!existsSync(nextJsDir)) {
+      throw new Error(`compat-window fingerprint: --next-js-dir ${nextJsDir} does not exist`);
+    }
+    nextJsCommit = execFileSync('git', ['-C', nextJsDir, 'rev-parse', 'HEAD'], {
+      encoding: 'utf8',
+    }).trim();
+  }
+
+  /** @type {string | null} */
+  let nextTarballSha256 = null;
+  /** @type {number | null} */
+  let nextTarballBytes = null;
+  if (nextTarball) {
+    if (!existsSync(nextTarball)) {
+      throw new Error(`compat-window fingerprint: --next-tarball ${nextTarball} does not exist`);
+    }
+    const bytes = readFileSync(nextTarball);
+    nextTarballSha256 = sha256(bytes);
+    nextTarballBytes = bytes.length;
+  }
+
+  return {
+    // Stated in the artifact so a reader cannot mistake these for frozen fields.
+    frozen: false,
+    note: 'Recorded, not frozen: a suite retag or a next-tarball change does NOT reset the 14-night window. It is a visible decision, made here rather than silently.',
+    nextRef: nextRef ?? null,
+    nextJsCommit,
+    nextTarballSha256,
+    nextTarballBytes,
+  };
+}
+
+/**
+ * @param {{ repoRoot: string, tarballsDir: string, nextJsDir?: string | null, nextTarball?: string | null, nextRef?: string | null }} options
+ */
+export function computeFingerprint({ repoRoot, tarballsDir, nextJsDir, nextTarball, nextRef }) {
   const harness = collectHarness(repoRoot);
   const { entries: packed, packages } = collectPacked(tarballsDir);
 
@@ -216,6 +287,9 @@ export function computeFingerprint({ repoRoot, tarballsDir }) {
     schema: SCHEMA,
     fingerprint,
     components,
+    // Outside `fingerprint` by construction: it is derived from `components`
+    // only, so nothing under `recorded` can move the digest.
+    recorded: { suite: collectSuiteProvenance({ nextJsDir, nextTarball, nextRef }) },
     counts: { harness: harness.length, packed: packed.length },
     packages,
     files: [...harness, ...packed].map((e) => ({ component: e.component, path: e.path })),
@@ -242,7 +316,14 @@ if (import.meta.url === `file://${process.argv[1]}`) {
 
   let result;
   try {
-    result = computeFingerprint({ repoRoot, tarballsDir });
+    result = computeFingerprint({
+      repoRoot,
+      tarballsDir,
+      // Recorded, not frozen — see collectSuiteProvenance().
+      nextJsDir: arg('next-js-dir', null),
+      nextTarball: arg('next-tarball', null),
+      nextRef: arg('next-ref', null),
+    });
   } catch (error) {
     console.error(`::error::${error instanceof Error ? error.message : String(error)}`);
     process.exit(1);
@@ -262,6 +343,13 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     for (const p of result.packages) {
       console.log(`    ${p.name}@${p.version} ${p.sha256} (${p.files} files)`);
     }
+    const suite = result.recorded.suite;
+    console.log(
+      '  suite provenance (RECORDED, not frozen — a bump here does not reset the window):',
+    );
+    console.log(`    next ref            ${suite.nextRef ?? 'n/a'}`);
+    console.log(`    next.js checkout    ${suite.nextJsCommit ?? 'n/a'}`);
+    console.log(`    next tarball sha256 ${suite.nextTarballSha256 ?? 'n/a'}`);
     if (out) console.log(`  written to ${relative(process.cwd(), resolve(out))}`);
   }
 }
