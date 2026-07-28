@@ -116,6 +116,61 @@ The normal flow after the first publish:
    package (`createGithubReleases: true`), tagged `@getknext/<pkg>@x.y.z` — the hand-made `v0.1.0`
    release used a different tag format, so the formats never collide.
 
+## Upgrade order
+
+**Upgrade the operator (and therefore the CRD) BEFORE upgrading `@getknext/core`: operator/CRD
+first, then CLI.** This is an ordering rule, not a lockstep requirement — see the safe direction
+below.
+
+### Why
+
+`kn-next` emits a `NextApp` custom resource and applies it with an explicit `--validate=strict`
+(so the guarantee is knext's, not a property of whichever `kubectl` happens to be on `PATH`). A
+newer CLI can emit a spec field that an older CRD's schema does not contain, and with strict
+validation the apiserver **rejects** that apply rather than silently pruning the field:
+
+```
+Error from server (BadRequest): error when creating "…": NextApp in version "v1alpha1" cannot be
+handled as a NextApp: strict decoding error: unknown field "spec.…"
+```
+
+If you see `strict decoding error: unknown field` on `kn-next deploy`, `kn-next preview`, or
+`kn-next db bind`, the most likely cause is that the CLI is newer than the installed CRD. Fix it by
+upgrading the operator bundle first, then re-running:
+
+```sh
+kubectl apply -f https://github.com/getknext-dev/knext/releases/latest/download/install.yaml
+kubectl get crd nextapps.apps.kn-next.dev -o jsonpath='{.spec.versions[*].name}'
+```
+
+The rejection is deliberate and is the better failure: before the CLI asserted strict validation,
+the wrong order produced a **silently pruned** field — the apply exited 0, the CR looked applied,
+and the setting simply never took effect.
+
+### The safe direction
+
+**An older CLI against a newer CRD is always valid**, so you are not required to keep the two in
+lockstep — only to avoid CLI-ahead-of-CRD. Unknown-field validation is one-directional: it rejects
+fields the schema does not know, and a client that emits a *subset* of the schema never trips it. A
+cluster whose operator is ahead of every developer's CLI is a fine steady state.
+
+### What strict validation does NOT buy
+
+Stated plainly, because these are the reason the ordering rule matters rather than being a nicety:
+
+- **GitOps controllers do not assert strict validation.** If Argo CD or Flux applies your `NextApp`
+  CRs, the strict flag `kn-next` passes is not in play; an unknown field is pruned silently there,
+  exactly as it was before. Ordering is your only protection on that path.
+- **A `kubectl` shim on `PATH` can defeat it.** `kn-next` passes `--validate=strict`, but a wrapper
+  that appends `--validate=ignore` wins, because pflag takes the **last** occurrence of a string
+  flag.
+- **`kn-next doctor` checks only that the CRD *exists*,** not that its schema covers the fields this
+  CLI emits. It will pass against an older CRD. (A schema-diff preflight that closes this is tracked
+  as #314.)
+
+The decision and its measured basis are recorded in
+[ADR-0020](adr/0020-release-channels.md#amendment-2026-07-28--upgrade-order-operatorcrd-first-then-cli).
+
 ## Interim channel — GitHub Packages (`@getknext-dev/*`)
 
 Until the npmjs path above is unblocked (it needs a human `NPM_TOKEN`, issue #53), the maintainer
