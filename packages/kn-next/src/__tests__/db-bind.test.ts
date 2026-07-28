@@ -310,7 +310,8 @@ describe("runDbBind — CR-only write (ADR-0001)", () => {
         await expect(
             runDbBind("my-app", opts(), { exec, write: vi.fn() }),
         ).rejects.toThrow(
-            "operator predates spec.database.secretRef — upgrade the operator bundle (kubectl apply the latest install.yaml), then re-run",
+            "operator predates spec.database.secretRef — upgrade the operator bundle (kubectl apply the latest install.yaml), then re-run. " +
+                "Upgrade order: operator/CRD first, then CLI (docs/RELEASING.md#upgrade-order)",
         );
         expect(exec).toHaveBeenCalledTimes(3);
     });

@@ -1,6 +1,7 @@
 # ADR-0020 — Release channels: npmjs `@getknext/*` canonical, GitHub Packages `@getknext-dev/*` interim
 
-- **Status:** Accepted (amended 2026-07-12: `@getknext/db` joins the package set)
+- **Status:** Accepted (amended 2026-07-12: `@getknext/db` joins the package set;
+  amended 2026-07-28: upgrade order — operator/CRD first, then CLI)
 - **Date:** 2026-07-10
 - **Relates to:** the E1 adoption workstream (issue #53 — first npm publish, the
   #1 adoption blocker), PR #226 (interim GitHub Packages channel), PR #227
@@ -83,6 +84,56 @@ therefore **{core, lib, db}** on both channels:
   ALL THREE `@getknext-dev/*` packages (`core`, `lib`, `db`) — not just the
   original two.
 
+## Amendment (2026-07-28) — upgrade order: operator/CRD first, then CLI
+
+A release channel decides *how* the packages reach a user; it did not say in what **order** a user
+may take them relative to the cluster-side operator. #547 made that order load-bearing, so it is
+recorded here (issue #548).
+
+**Decision: upgrade the operator (and therefore the CRD) BEFORE upgrading `@getknext/core` —
+operator/CRD first, then CLI.** The CRD is versioned independently of the npm packages, so this is
+an ordering rule, not a lockstep requirement.
+
+### Measured, not assumed
+
+The rule follows from an apiserver behaviour that was **measured on a live cluster** (server-side
+dry-run), not inferred: whether a field the CLI emits that the installed CRD does not know is
+*pruned* or *rejected* depends on the **apply's validation mode**, not on the CRD.
+
+| apply mode | apiserver behaviour on an unknown field |
+| --- | --- |
+| `kubectl apply --validate=strict` | **rejected** — `strict decoding error: unknown field "spec.…"` |
+| `kubectl apply --validate=ignore` | accepted, field silently **pruned** |
+
+Since #547 every `kubectl apply` the CLI issues passes `--validate=strict` explicitly, so the
+guarantee belongs to knext rather than to whichever `kubectl` is on the user's `PATH`, and
+`kn-next doctor` reports a client older than v1.25 (where that flag value does not exist). The
+consequence is the ordering rule: a CLI ahead of the CRD now **fails the apply** instead of
+appearing to work.
+
+### The safe direction
+
+**An older CLI against a newer CRD is always valid.** Unknown-field validation is one-directional —
+a client emitting a subset of the schema never trips it — so operator-ahead-of-CLI is a legitimate
+steady state and nobody should over-constrain a rollout into lockstep.
+
+### What this does not buy (residuals)
+
+Strict validation converts a silent failure into a loud one on the CLI's own apply path. It does
+not make the ordering rule enforceable:
+
+- **GitOps controllers (Argo CD, Flux) do not assert strict validation.** On that path an unknown
+  field is still pruned silently; the ordering rule is the only protection.
+- **A `kubectl` shim on `PATH` can append `--validate=ignore` and win**, because pflag takes the
+  **last** occurrence of a string flag.
+- **`kn-next doctor` checks only that the CRD *exists***, not that its schema covers what the CLI
+  emits, so it passes against an older CRD.
+
+The complete fix is the schema-diff preflight (#314), which compares the emitted field set against
+the live CRD schema; until it lands the rule is documented practice on those three paths, not
+enforcement. The user-facing runbook — including the error text to search for and the recovery
+command — lives in `docs/RELEASING.md` under "Upgrade order"; it is not duplicated here.
+
 ## Options considered
 
 | Option | Installable now? | Human secrets | Anonymous `npx` | Long-term fit |
@@ -115,6 +166,9 @@ not a channel.
 
 ## Action items
 
+- [x] Upgrade order documented in `docs/RELEASING.md` + this ADR and cited by the `db-bind`
+      error string, asserted by `tests/upgrade-order-docs.test.ts` (#548).
+- [ ] Replace the documented ordering rule with enforcement: the schema-diff preflight (#314).
 - [x] Interim channel shipped and published (PR #226, run 28829862963).
 - [x] Auto GitHub Releases + deprecation runbook (PR #227).
 - [ ] On #53: execute the deprecation plan in `docs/RELEASING.md` for ALL
