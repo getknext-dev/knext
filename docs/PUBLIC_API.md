@@ -371,6 +371,7 @@ in any release, including patch releases.
 | `@getknext/core/internal/logger` | Internal CLI/runtime logger (apps use `@getknext/lib/logger`). |
 | `@getknext/core/internal/cli-validate` | CLI config validation helpers. |
 | `@getknext/core/internal/cli-shared` | Shared CLI utilities. |
+| `@getknext/core/internal/cache-drain` | Cache-write registry the runtime drains on shutdown; wiring, not an app API. |
 
 `@getknext/lib` exposes no internal subpaths — its entire surface is public.
 
@@ -392,3 +393,27 @@ The **public surface** above follows [semantic versioning](https://semver.org/):
 this document) carry **no stability guarantee**. They may change or be removed in
 any release. If you find yourself needing one, please open an issue describing
 the use case so the capability can be considered for the public surface.
+
+### The `NextApp` CRD is versioned separately
+
+The semver rules above cover the **npm packages only**. The `NextApp` custom
+resource the CLI emits and the operator reconciles is on its own version axis —
+the Kubernetes `v1alpha1` → `v1beta1` → `v1` ladder — and it ships with the
+**operator image**, not with an npm package. A major version of `@getknext/core`
+does not graduate the CRD, and graduating the CRD does not force a major npm
+version.
+
+In short: write `apiVersion: apps.kn-next.dev/v1alpha1`. Within that version the
+schema is **additive-only**, so a `NextApp` that applies today keeps applying
+against later operators. There is **no conversion webhook**, so if the version
+string ever changes, hand-authored and GitOps-managed manifests must be updated
+by hand.
+
+The declared version, the full guarantee that comes with it, and what would make
+us move off `v1alpha1` are written up in
+[the CRD versioning policy](adr/0017-crd-stays-v1alpha1-conversion-webhook-deferred.md).
+
+**Upgrade order: the operator (and its CRD) first, then the CLI.** An older CLI
+against a newer CRD is always valid; the reverse is unsupported. See
+[the release and upgrade policy](adr/0020-release-channels.md) and
+`docs/RELEASING.md` § "Upgrade order".
