@@ -96,6 +96,24 @@ SCHEDULE_CHECK_TIMEOUT="${SCHEDULE_CHECK_TIMEOUT:-20}" # seconds before warning 
 APPLY_SETTLE_SECONDS="${APPLY_SETTLE_SECONDS:-8}"   # settle time after an autoscaling patch (0 in tests)
 OUT="${OUT:-}"                                      # results file; default computed below
 DRY_RUN="${DRY_RUN:-0}"
+# ── measurement provenance / admissibility (S8, #551; sprint-2 track D) ──────
+# A run that cannot say WHICH APPLICATION it measured, at WHICH ENDPOINT, in
+# WHICH SITTING is inadmissible, not merely weaker. These knobs make the harness
+# record that, and REFUSE an A/B whose arms cannot be shown to be one app.
+SITTING="${SITTING:-}"                             # D4: sitting identity; auto-derived when unset
+PEER="${PEER:-}"                                   # D1: the other arm of the A/B (a ksvc name)
+PEER_NS="${PEER_NS:-}"                             # peer namespace (default: --namespace)
+# D1 identity source. Empty = image DIGEST equality (the strongest available and
+# the right check for a config A/B). Set to a label key to compare a DECLARED app
+# identity instead — the only way a build-target A/B (two images by
+# construction) can ever be admissible.
+APP_ID_LABEL="${APP_ID_LABEL:-}"
+BUILD_COMMAND_LABEL="${BUILD_COMMAND_LABEL:-dev.knext.build.command}" # build-flag provenance
+# How image labels are read. Default: `crane config <ref>`. Override with a
+# command taking `<pinned-image-ref> <label-key>` on argv and printing the value
+# (also the test seam). An unavailable resolver is a FAILURE, never a pass.
+IMAGE_LABEL_RESOLVER="${IMAGE_LABEL_RESOLVER:-}"
+RESULTS_INDEX="${RESULTS_INDEX:-}"                 # D14: append-only run index; default below
 # ── bounded retry for TRANSIENT control-plane errors (#427) ──────────────────
 # Two of the three OKE runs behind docs/benchmarks/scale-to-zero-oke.md died on
 # "Unable to connect to the server: net/http: TLS handshake timeout" while
@@ -169,6 +187,23 @@ Phase sizing:
 
 Output:
   --out <path>                results file (default: ./results/<service>-<UTC timestamp>.txt)
+  --results-index <path>      append-only run index (default: ./results/INDEX.tsv; \$RESULTS_INDEX).
+                              A STARTED row is written before the first measurement and a terminal
+                              row when the run ends, so a run killed mid-flight is DETECTABLE
+                              (\`provenance.sh audit\`) instead of silently absent.
+
+Measurement provenance / admissibility (track D — see README "Admissibility"):
+  --sitting <id>              sitting identity recorded in the results file (default: auto-derived
+                              from the UTC date + host; \$SITTING). Results may never be pooled
+                              across sittings, which you cannot obey without recording it.
+  --peer <ksvc>               the OTHER arm of an A/B. When set, the harness resolves BOTH arms'
+                              deployed images and ABORTS — before touching the cluster — unless it
+                              can PROVE they serve the same application.
+  --peer-namespace <ns>       peer's namespace (default: --namespace; \$PEER_NS)
+  --app-id-label <key>        compare the value of this image label instead of the image digest
+                              (\$APP_ID_LABEL). Required for a build-target A/B, where the two arms
+                              are two images by construction and digest equality can never hold.
+                              An unreadable, empty or differing label ABORTS the run.
 
 Transient-API retry (see README "Transient API retry"):
   --api-retry-attempts <n>    total attempts per API operation, 1 = no retry (default: 4;
@@ -220,6 +255,11 @@ while [ $# -gt 0 ]; do
     --burst-hold) BURST_HOLD="$2"; shift 2 ;;
     --burst-reps) BURST_REPS="$2"; shift 2 ;;
     --out) OUT="$2"; shift 2 ;;
+    --results-index) RESULTS_INDEX="$2"; shift 2 ;;
+    --sitting) SITTING="$2"; shift 2 ;;
+    --peer) PEER="$2"; shift 2 ;;
+    --peer-namespace) PEER_NS="$2"; shift 2 ;;
+    --app-id-label) APP_ID_LABEL="$2"; shift 2 ;;
     --api-retry-attempts) API_RETRY_ATTEMPTS="$2"; shift 2 ;;
     --api-call-timeout-s) API_CALL_TIMEOUT_S="$2"; shift 2 ;;
     --api-retry-base-ms) API_RETRY_BASE_MS="$2"; shift 2 ;;
@@ -273,6 +313,17 @@ else
   mkdir -p "$(dirname "$OUT")"
 fi
 : > "$OUT"
+
+if [ -z "$RESULTS_INDEX" ]; then RESULTS_INDEX="${SCRIPT_DIR}/results/INDEX.tsv"; fi
+[ -z "$PEER_NS" ] && PEER_NS="$NS"
+# D4. Auto-derivation is a fallback, not a substitute: several runs that belong
+# to ONE sitting must be given the same --sitting by hand, and the block records
+# which of the two happened so a reader is never guessing.
+SITTING_SOURCE="explicit"
+if [ -z "$SITTING" ]; then
+  SITTING="$(date -u +%Y%m%d)-$(hostname -s 2>/dev/null || echo host)"
+  SITTING_SOURCE="auto-derived (UTC date + host) — pass --sitting to group runs that share one sitting"
+fi
 
 IFS=',' read -r BASELINE_TBC BASELINE_PW BASELINE_PT <<< "$BASELINE_CFG"
 IFS=',' read -r TUNED_TBC TUNED_PW TUNED_PT <<< "$TUNED_CFG"
@@ -563,12 +614,23 @@ capture_original() {
   # is untouched: retrying a blip before CONCLUDING failure is fine, silently
   # proceeding with an unread config is not. On exhaustion (or on any terminal
   # error, which is not retried at all) we still abort BEFORE any mutation.
-  local json rc
-  api_retry "capture-original" kc get ksvc "$SERVICE" -n "$NS" -o json
-  rc=$?
-  json="$API_RETRY_LAST_OUT"
+  local json rc attempts
+  # The provenance gate already took THIS read a moment ago (resolve_image, op
+  # "capture-original") and cached its outcome. Reuse it: re-reading would make
+  # capture two reads that can disagree — the failure this function was
+  # rewritten to remove — and would spend the retry budget twice. The
+  # fail-closed contract is unchanged: a cached FAILURE still aborts here,
+  # before any mutation.
+  if [ "${SELF_KSVC_READ_DONE:-0}" = "1" ]; then
+    json="$SELF_KSVC_JSON"; rc="$SELF_KSVC_RC"; attempts="$SELF_KSVC_ATTEMPTS"
+  else
+    api_retry "capture-original" kc get ksvc "$SERVICE" -n "$NS" -o json
+    rc=$?
+    json="$API_RETRY_LAST_OUT"
+    attempts="$API_RETRY_LAST_ATTEMPTS"
+  fi
   if [ "$rc" -ne 0 ] || [ -z "$json" ]; then
-    log "FATAL: could not read ksvc '${SERVICE}' in namespace '${NS}' (kubectl get exited ${rc} after ${API_RETRY_LAST_ATTEMPTS} attempt(s))."
+    log "FATAL: could not read ksvc '${SERVICE}' in namespace '${NS}' (kubectl get exited ${rc} after ${attempts} attempt(s))."
     log "       ABORTING before any mutation — restoring a config we never captured would"
     log "       silently destroy this service's real autoscaling settings."
     log "       kubectl said: ${json:-<no output>}"
@@ -780,6 +842,19 @@ cleanup() {
     log "run integrity: no reps ran; no data collected — this file is NOT a dataset"
   else
     log "run integrity: k6 metrics captured for all ${REPS_RUN} rep(s) — dataset is complete"
+  fi
+  # D14 — close the durable index row. A run that is SIGKILLed never reaches
+  # here, which is exactly the point: its STARTED row has no terminal partner, so
+  # `provenance.sh audit` reports it instead of the loss being invisible (Run 26
+  # lost 25 of 26 results files and nothing said so).
+  if [ "${PROVENANCE_EMITTED:-0}" = "1" ]; then
+    local run_status
+    if [ "$PHASES_COMPLETED" -ne 1 ]; then run_status="ABORTED"
+    elif [ -n "$INCOMPLETE_REPS" ]; then run_status="INCOMPLETE"
+    elif [ "$REPS_RUN" -eq 0 ]; then run_status="NO-DATA"
+    else run_status="COMPLETE"; fi
+    index_append "$run_status"
+    log "  run indexed as ${run_status} in ${RESULTS_INDEX}"
   fi
   log "=== DONE (results: $OUT) ==="
 }
@@ -1098,6 +1173,258 @@ YAML
   kc delete job,configmap -n "$NS" "${name}" >/dev/null 2>&1 || true
 }
 
+# ── measurement provenance + the same-app gate (S8 / #551) ───────────────────
+# Track D calls this ADMISSIBILITY: a run missing these facts is inadmissible,
+# not merely weaker. Three losses motivate each piece, all of them observed:
+#
+#   D1  Run 25/26's two arms served DIFFERENT APPLICATIONS and nothing noticed.
+#       The measured endpoint was the service root — exactly where they differ.
+#   D2  `url=` reached the results file but never the write-up, so a published
+#       run's endpoint had to be recovered from a DIFFERENT run's file.
+#   D14 Run 26's per-sample results files were never persisted: one `p1b-*` file
+#       exists on disk where 26 should.
+#
+# Everything below runs BEFORE `capture_original`, i.e. before the first
+# mutation, so a refused A/B never leaves a patched service behind.
+PROVENANCE_EMITTED=0
+APP_IMAGE_REF=""; APP_IMAGE_DIGEST=""; APP_ID=""; BUILD_COMMAND=""
+PEER_IMAGE_REF=""; PEER_IMAGE_DIGEST=""; PEER_APP_ID=""
+SELF_KSVC_READ_DONE=0; SELF_KSVC_JSON=""; SELF_KSVC_RC=1; SELF_KSVC_ATTEMPTS=0
+
+# pin_ref <image-ref> <digest> -> repo@digest (a tag is not an identity)
+pin_ref() {
+  local base="${1%%@*}"
+  case "${base##*/}" in *:*) base="${base%:*}" ;; esac
+  printf '%s@%s' "$base" "$2"
+}
+
+# resolve_image <service> <namespace>
+# Sets RI_REF / RI_DIGEST on success; RI_ERR and non-zero on failure. The digest
+# comes from the READY REVISION's status, i.e. what is actually serving — not
+# from the tag in the spec, which can move under a running service.
+resolve_image() {
+  local svc="$1" ns="$2" json rjson rev rc op is_self=0
+  RI_REF=""; RI_DIGEST=""; RI_ERR=""
+  if ! kc_live; then RI_ERR="not checked (dry run — no cluster was read)"; return 1; fi
+  if ! command -v jq >/dev/null 2>&1; then RI_ERR="'jq' is required to resolve the deployed image"; return 1; fi
+
+  # For the TARGET service this read IS capture_original's read — taken once,
+  # here, and handed on. Two reads would mean capture is no longer the single
+  # atomic snapshot it was rewritten to be (five racy reads was the bug), they
+  # could disagree about the config we promise to restore, and the retry budget
+  # would be spent twice. The op keeps its original name so the retry accounting
+  # still says which operation the cluster misbehaved on.
+  op="resolve-image:${svc}"
+  if [ "$svc" = "$SERVICE" ] && [ "$ns" = "$NS" ]; then op="capture-original"; is_self=1; fi
+  api_retry "$op" kc get ksvc "$svc" -n "$ns" -o json
+  rc=$?; json="$API_RETRY_LAST_OUT"
+  if [ "$is_self" = "1" ]; then
+    # Cache the OUTCOME, success or failure. Caching only successes would let a
+    # failed read be retried a second time by capture_original — the same
+    # double-spend of the retry budget, just on the unhappy path.
+    SELF_KSVC_READ_DONE=1; SELF_KSVC_JSON="$json"; SELF_KSVC_RC="$rc"
+    SELF_KSVC_ATTEMPTS="$API_RETRY_LAST_ATTEMPTS"
+  fi
+  if [ "$rc" -ne 0 ] || [ -z "$json" ]; then
+    RI_ERR="could not read ksvc '${svc}' in '${ns}' (kubectl exited ${rc}): ${json:-<no output>}"; return 1
+  fi
+  RI_REF=$(printf '%s' "$json" | jq -r '.spec.template.spec.containers[0].image // ""' 2>/dev/null)
+  rev=$(printf '%s' "$json" | jq -r '.status.latestReadyRevisionName // ""' 2>/dev/null)
+  if [ -z "$rev" ] || [ "$rev" = "null" ]; then
+    RI_ERR="ksvc '${svc}' has no latestReadyRevisionName — nothing is serving, so there is no measured application"; return 1
+  fi
+  api_retry "resolve-revision:${rev}" kc get revision "$rev" -n "$ns" -o json
+  rc=$?; rjson="$API_RETRY_LAST_OUT"
+  if [ "$rc" -ne 0 ] || [ -z "$rjson" ]; then
+    RI_ERR="could not read revision '${rev}' in '${ns}' (kubectl exited ${rc}): ${rjson:-<no output>}"; return 1
+  fi
+  RI_DIGEST=$(printf '%s' "$rjson" | jq -r '.status.containerStatuses[0].imageDigest // ""' 2>/dev/null)
+  [ "$RI_DIGEST" = "null" ] && RI_DIGEST=""
+  [ -z "$RI_REF" ] && RI_REF=$(printf '%s' "$rjson" | jq -r '.spec.containers[0].image // ""' 2>/dev/null)
+  if [ -z "$RI_DIGEST" ]; then
+    RI_ERR="revision '${rev}' reports no resolved image digest — the running image cannot be identified"; return 1
+  fi
+  return 0
+}
+
+# resolve_image_label <ref> <digest> <label-key>
+# Sets RL_VALUE on success; RL_ERR and non-zero otherwise. "Could not look it up"
+# and "the label is absent" are DIFFERENT facts and are reported differently: an
+# unreachable resolver must never read as an agreeing (empty) label.
+resolve_image_label() {
+  local pinned out rc
+  RL_VALUE=""; RL_ERR=""
+  pinned=$(pin_ref "$1" "$2")
+  if [ -n "$IMAGE_LABEL_RESOLVER" ]; then
+    out=$("$IMAGE_LABEL_RESOLVER" "$pinned" "$3" 2>&1); rc=$?
+  elif command -v crane >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+    out=$(crane config "$pinned" 2>&1 | jq -r --arg k "$3" '.config.Labels[$k] // ""' 2>&1); rc=$?
+  else
+    RL_ERR="no image-label resolver available — install 'crane' (+jq) or set IMAGE_LABEL_RESOLVER to a command taking '<image-ref> <label-key>'"
+    return 2
+  fi
+  if [ "$rc" -ne 0 ]; then
+    RL_ERR="image-label lookup failed for ${pinned} (label '${3}'): ${out:-<no output>}"; return 1
+  fi
+  RL_VALUE=$(printf '%s' "$out" | head -n 1 | tr -d '\r')
+  [ "$RL_VALUE" = "null" ] && RL_VALUE=""
+  return 0
+}
+
+# index_append <status> — one durable, append-only row per run event (D14).
+index_append() {
+  [ -n "$RESULTS_INDEX" ] || return 0
+  mkdir -p "$(dirname "$RESULTS_INDEX")" 2>/dev/null || return 0
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${RUN_ID:-unknown}" "${SITTING}" "${SERVICE}" \
+    "${URL}" "${APP_IMAGE_DIGEST:-unresolved}" "${OUT}" "$1" >> "$RESULTS_INDEX" 2>/dev/null || true
+}
+
+# The one FATAL that must not be a warning: an A/B whose arms cannot be shown to
+# be the same application produces a number that answers no question.
+_provenance_fatal() {
+  log ""
+  log "*** FATAL — INADMISSIBLE A/B: $1 ***"
+  log "*** Nothing has been mutated and nothing will be measured. Deploy the SAME application on both arms (or pass --app-id-label <key> if the two images legitimately declare one app id) and re-run. ***"
+  exit 1
+}
+
+provenance_and_identity_gate() {
+  local app_err="" peer_err="" app_id_err="" peer_id_err="" build_err=""
+
+  if resolve_image "$SERVICE" "$NS"; then
+    APP_IMAGE_REF="$RI_REF"; APP_IMAGE_DIGEST="$RI_DIGEST"
+  else
+    app_err="$RI_ERR"
+  fi
+
+  if [ -n "$PEER" ]; then
+    if resolve_image "$PEER" "$PEER_NS"; then
+      PEER_IMAGE_REF="$RI_REF"; PEER_IMAGE_DIGEST="$RI_DIGEST"
+    else
+      peer_err="$RI_ERR"
+    fi
+  fi
+
+  # Declared app identity (only when asked for) + build-command provenance
+  # (always attempted when a resolver exists — it is the difference between a
+  # one-line lookup and extracting the binary to fingerprint it).
+  if [ -n "$APP_ID_LABEL" ] && [ -n "$APP_IMAGE_DIGEST" ]; then
+    if resolve_image_label "$APP_IMAGE_REF" "$APP_IMAGE_DIGEST" "$APP_ID_LABEL"; then
+      APP_ID="$RL_VALUE"
+    else
+      app_id_err="$RL_ERR"
+    fi
+  fi
+  if [ -n "$APP_ID_LABEL" ] && [ -n "$PEER" ] && [ -n "$PEER_IMAGE_DIGEST" ]; then
+    if resolve_image_label "$PEER_IMAGE_REF" "$PEER_IMAGE_DIGEST" "$APP_ID_LABEL"; then
+      PEER_APP_ID="$RL_VALUE"
+    else
+      peer_id_err="$RL_ERR"
+    fi
+  fi
+  if [ -n "$APP_IMAGE_DIGEST" ] && { [ -n "$IMAGE_LABEL_RESOLVER" ] || command -v crane >/dev/null 2>&1; }; then
+    if resolve_image_label "$APP_IMAGE_REF" "$APP_IMAGE_DIGEST" "$BUILD_COMMAND_LABEL"; then
+      BUILD_COMMAND="$RL_VALUE"
+    else
+      build_err="$RL_ERR"
+    fi
+  fi
+
+  # ── the same-app verdict ────────────────────────────────────────────────────
+  local verdict fatal=""
+  if [ -z "$PEER" ]; then
+    verdict="n/a (single-arm run — this file makes no A/B identity claim)"
+  elif ! kc_live; then
+    verdict="not checked (dry run — no measurement was produced either)"
+  elif [ -n "$app_err" ] || [ -n "$peer_err" ]; then
+    verdict="UNPROVEN — ${app_err:-}${app_err:+ | }${peer_err:-}"
+    fatal="the arms' running images could not be resolved: ${app_err:-}${app_err:+ | }${peer_err:-}"
+  elif [ -n "$APP_ID_LABEL" ]; then
+    if [ -n "$app_id_err" ] || [ -n "$peer_id_err" ]; then
+      verdict="UNPROVEN — ${app_id_err:-}${app_id_err:+ | }${peer_id_err:-}"
+      fatal="the declared app id could not be read: ${app_id_err:-}${app_id_err:+ | }${peer_id_err:-}"
+    elif [ -z "$APP_ID" ] || [ -z "$PEER_APP_ID" ]; then
+      # Two unlabelled images are not "equal": empty == empty would turn the gate
+      # into a rubber stamp for exactly the images nobody stamped.
+      verdict="UNPROVEN — label '${APP_ID_LABEL}' is absent/empty on ${SERVICE}='${APP_ID:-<absent>}' ${PEER}='${PEER_APP_ID:-<absent>}'"
+      fatal="label '${APP_ID_LABEL}' is absent or empty on at least one arm (${SERVICE}='${APP_ID:-<absent>}', ${PEER}='${PEER_APP_ID:-<absent>}') — an unstamped image declares nothing, so two of them are not proof of anything"
+    elif [ "$APP_ID" != "$PEER_APP_ID" ]; then
+      verdict="NO — declared app ids differ: ${SERVICE}='${APP_ID}' vs ${PEER}='${PEER_APP_ID}'"
+      fatal="the arms declare DIFFERENT applications: ${SERVICE}='${APP_ID}' vs ${PEER}='${PEER_APP_ID}'"
+    else
+      verdict="yes (identical declared app id '${APP_ID}' from label '${APP_ID_LABEL}'; images differ by build target: ${APP_IMAGE_DIGEST} vs ${PEER_IMAGE_DIGEST})"
+    fi
+  elif [ "$APP_IMAGE_DIGEST" != "$PEER_IMAGE_DIGEST" ]; then
+    verdict="NO — different images: ${SERVICE}=${APP_IMAGE_DIGEST} vs ${PEER}=${PEER_IMAGE_DIGEST}"
+    fatal="the arms run DIFFERENT images — ${SERVICE}=${APP_IMAGE_DIGEST}, ${PEER}=${PEER_IMAGE_DIGEST}. This is the Run 25/26 defect: two applications compared as if they were one"
+  else
+    verdict="yes (identical image digest ${APP_IMAGE_DIGEST})"
+  fi
+
+  # The block is written BEFORE any abort, so a refused run still records why.
+  log ""
+  log "## PROVENANCE (machine-readable; read by provenance.sh — see README 'Admissibility')"
+  log "  provenance-version=1"
+  log "  run-id=${RUN_ID}"
+  log "  sitting=${SITTING}"
+  log "  sitting-source=${SITTING_SOURCE}"
+  log "  started-utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  log "  service=${SERVICE}"
+  log "  namespace=${NS}"
+  log "  context=${KCTX:-<current>}"
+  log "  endpoint=${URL}"
+  log "  latency-metric=http_req_duration"
+  log "  app-image=${APP_IMAGE_REF:-unresolved: ${app_err:-unknown}}"
+  log "  app-image-digest=${APP_IMAGE_DIGEST:-unresolved: ${app_err:-unknown}}"
+  local app_id_render
+  if   [ -n "$APP_ID" ];      then app_id_render="$APP_ID"
+  elif [ -n "$app_id_err" ];  then app_id_render="unresolved: ${app_id_err}"
+  elif [ -n "$APP_ID_LABEL" ];then app_id_render="absent (label '${APP_ID_LABEL}' is not set on this image)"
+  else                             app_id_render="not-checked (no --app-id-label)"
+  fi
+  log "  app-id=${app_id_render}"
+  # "Not looked up", "looked up and failed", and "looked up and absent" are three
+  # different facts. Collapsing them into one blank is how an unchecked thing
+  # comes to read as a checked one.
+  local build_render
+  if   [ -n "$BUILD_COMMAND" ]; then build_render="$BUILD_COMMAND"
+  elif [ -n "$build_err" ];     then build_render="unrecorded: ${build_err}"
+  elif [ -z "$APP_IMAGE_DIGEST" ]; then build_render="unrecorded: the running image was not resolved, so no label could be read"
+  elif [ -z "$IMAGE_LABEL_RESOLVER" ] && ! command -v crane >/dev/null 2>&1; then
+    build_render="unrecorded: no image-label resolver — install 'crane' or set IMAGE_LABEL_RESOLVER"
+  else build_render="unrecorded: this image carries no '${BUILD_COMMAND_LABEL}' label (see examples/bun-exec/build.sh --print-labels)"
+  fi
+  log "  build-command=${build_render}"
+  log "  peer=${PEER:-none}"
+  if [ -z "$PEER" ]; then
+    log "  peer-image-digest=n/a (no peer arm)"
+  else
+    log "  peer-image-digest=${PEER_IMAGE_DIGEST:-unresolved: ${peer_err:-unknown}}"
+  fi
+  log "  arms-same-app=${verdict}"
+  log "  results-file=${OUT}"
+  log "## END PROVENANCE"
+  log ""
+  PROVENANCE_EMITTED=1
+  index_append "STARTED"
+
+  # D14, the part the harness CANNOT fix by writing more carefully: this results
+  # directory is gitignored (`benchmarks/**/results/`), so "durable" means "as
+  # durable as this working tree". A run driven from a throwaway git worktree
+  # loses every file the moment the worktree is removed — the most plausible
+  # account of how one run kept 1 of its 26 results files. Say it at run time,
+  # while there is still something to copy out.
+  if command -v git >/dev/null 2>&1 && git -C "$(dirname "$OUT")" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
+     && git -C "$(dirname "$OUT")" check-ignore -q "$OUT" 2>/dev/null; then
+    log "NOTE: '${OUT}' is GITIGNORED — it exists only in this working tree. Copy this directory (and ${RESULTS_INDEX}) somewhere durable BEFORE removing the tree, or the run is lost with it."
+    log ""
+  fi
+
+  [ -n "$fatal" ] && _provenance_fatal "$fatal"
+  return 0
+}
+
 # ── phases ────────────────────────────────────────────────────────────────────
 phase_cold() {
   log ""
@@ -1161,6 +1488,10 @@ phase_burst() {
 if [ "${BASH_SOURCE[0]}" != "${0}" ]; then return 0; fi
 
 # ── main ──────────────────────────────────────────────────────────────────────
+# Provenance + the same-app gate run FIRST: before the original config is even
+# captured, so a refused A/B cannot have mutated anything, and so a run that
+# aborts for any later reason still records what it was going to measure.
+provenance_and_identity_gate
 capture_original
 
 IFS=',' read -ra PHASE_LIST <<< "$PHASES"
