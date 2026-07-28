@@ -8,11 +8,13 @@ import { describe, expect, it } from 'vitest';
  * This test mechanically prevents OVERCLAIMING in the compatibility matrix. Every ✅
  * ("supported") row must be backed by REAL, on-disk evidence:
  *   - a file path that exists in the repo, OR
- *   - a compat-smoke check id (a–g) that actually exists in compat-smoke.mjs, OR
+ *   - a compat-smoke check id (a–z) that actually exists in compat-smoke.mjs, OR
  *   - the `compat-smoke` CI job in .github/workflows/ci.yml.
  *
  * It also enforces the project honesty rules:
- *   - No ✅ row may rely on the `next/image` SKIP check (g) — that check is skip-on-fail.
+ *   - A ✅ row may only cite a HARD (red-on-fail) smoke check. Sprint 1 / T4 removed the last
+ *     skip-on-fail path from the runner, so `next/image` (g) is now hard — but the rule that
+ *     produced that work stands: a skip-on-fail citation can never back a ✅.
  *   - The "official" compat suite row may be ✅ ONLY with verifiable run evidence: a GitHub
  *     Actions run ID, the pinned vercel/next.js ref, and an explicit "N passed / 0 failed"
  *     result (A3-3 graduation, #147). An evidence-less flip fails this test. The evidence is
@@ -74,13 +76,14 @@ function parseMatrix(md: string): MatrixRow[] {
  * The compat-smoke check ids that are HARD (red-on-fail).
  *
  * A check is declared as `await check('a. ...', async () => { ... })`. A check is HARD
- * only if its body does NOT call `skip(...)` — `next/image` (g) calls skip() and is
- * therefore skip-on-fail, NOT a hard gate, so it must be excluded.
+ * only if its body does NOT call `skip(...)`. As of Sprint 1 / T4 no check does — the
+ * runner has no skip-on-fail mechanism left — but the derivation stays SCANNED rather than
+ * enumerated, so reintroducing one silently demotes that id instead of going unnoticed.
  */
 function hardSmokeCheckIds(smokeSrc: string): Set<string> {
   const ids = new Set<string>();
   // Match each `check('<id>. <title>', ...` and the body up to the next `await check(` or `// ──`.
-  const re = /check\(\s*['"]([a-g])\.[\s\S]*?(?=await check\(|\/\/ ─{2,}|printReport\()/g;
+  const re = /check\(\s*['"]([a-z])\.[\s\S]*?(?=await check\(|\/\/ ─{2,}|printReport\()/g;
   let m: RegExpExecArray | null;
   m = re.exec(smokeSrc);
   while (m !== null) {
@@ -142,7 +145,7 @@ describe('docs/compat-matrix.md — honesty guard (issue #41)', () => {
         // (1) compat-smoke check id like "smoke a" / "smoke (a)" / "check a".
         // The `smoke`/`check` prefix is REQUIRED so a bare trailing letter on a file
         // path (e.g. ".../a") can never be misread as a hard smoke-id citation.
-        const idMatch = cite.match(/(?:smoke|check)\s*\(?([a-g])\)?$/i);
+        const idMatch = cite.match(/(?:smoke|check)\s*\(?([a-z])\)?$/i);
         if (idMatch && hardIds.has(idMatch[1].toLowerCase())) return true;
         // (2) the compat-smoke CI job
         if (/compat-smoke/i.test(cite) && hasComptSmokeJob) return true;
@@ -156,18 +159,29 @@ describe('docs/compat-matrix.md — honesty guard (issue #41)', () => {
     }
   });
 
-  it('no ✅ row relies on the next/image SKIP check (g)', () => {
+  it('the four T4 capability checks are HARD, so a ✅ row may cite them', () => {
+    // next/image (g), Server Actions (i), Streaming/Suspense (j), ISR (k) — the four rows
+    // that were implemented-but-unbacked. `hardIds` is SCANNED from the runner, so if any
+    // of them regains a skip-on-fail path this assertion is what reds.
+    for (const id of ['g', 'i', 'j', 'k']) {
+      expect(hardIds.has(id), `compat-smoke check (${id}) is not a hard, red-on-fail check`).toBe(
+        true,
+      );
+    }
+  });
+
+  it('no ✅ row cites a skip-on-fail smoke check', () => {
     const supported = rows.filter((r) => r.status.includes('✅'));
     for (const row of supported) {
-      const cites = citations(row.evidence);
-      const usesSkipCheck = cites.some((cite) => /(?:smoke|check)?\s*\(?g\)?$/i.test(cite.trim()));
-      expect(
-        usesSkipCheck,
-        `✅ row "${row.feature}" cites the skip-on-fail next/image check (g)`,
-      ).toBe(false);
+      for (const cite of citations(row.evidence)) {
+        const idMatch = cite.match(/(?:smoke|check)\s*\(?([a-z])\)?$/i);
+        if (!idMatch) continue;
+        const id = idMatch[1].toLowerCase();
+        expect(hardIds.has(id), `✅ row "${row.feature}" cites skip-on-fail check (${id})`).toBe(
+          true,
+        );
+      }
     }
-    // and (g) must indeed NOT be in the hard set, proving it is skip-on-fail
-    expect(hardIds.has('g')).toBe(false);
   });
 
   // ── Official-suite evidence contract (A3-3 graduation, #147) ──────────────────────────

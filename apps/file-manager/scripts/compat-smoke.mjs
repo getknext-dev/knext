@@ -8,8 +8,14 @@
  * (docs/adr/0007-compat-suite.md, option C, the per-PR `compat-smoke` gate). The official
  * deploy-test harness lives behind A3-2 (`compat-suite-full`), not here.
  *
+ * NO CHECK IN HERE MAY SKIP ON FAILURE (Sprint 1, T4). A capability whose check downgrades a
+ * failure to SKIP is indistinguishable from a broken one — that is exactly how four rows of
+ * docs/compat-matrix.md ended up implemented-but-unbacked. The only SKIP this script emits is
+ * the runtime-LANE filter, which declares "this check does not apply to this runtime".
+ *
  * What it does:
- *   1. Boots the prebuilt standalone server on a free port with REDIS_URL="" HOSTNAME=0.0.0.0.
+ *   1. Boots the prebuilt standalone server on a free port with HOSTNAME=0.0.0.0 and the
+ *      REDIS_URL it inherits (check (k) requires a real one; CI supplies a service container).
  *   2. Polls until ready.
  *   3. Runs real HTTP assertions against routes that actually exist in src/app/.
  *   4. Kills the server and exits non-zero if any check FAILED.
@@ -27,6 +33,7 @@ import assert from 'node:assert';
 import { execFileSync, spawn } from 'node:child_process';
 import { cpSync, existsSync } from 'node:fs';
 import http from 'node:http';
+import net from 'node:net';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -50,8 +57,20 @@ const BUN_GUARD_CANDIDATES = [
 ];
 const BUN_GUARD_PRELOAD = BUN_GUARD_CANDIDATES.find((p) => existsSync(p));
 
-// A public asset shipped specifically for the image-optimization check.
-const IMAGE_ASSET = '/knext-smoke.png';
+// A public asset shipped specifically for the image-optimization check. It is deliberately a
+// LARGE png (~180 KB): check (g) asserts the optimized output is materially SMALLER than the
+// source, which an 82-byte placeholder cannot demonstrate.
+const IMAGE_ASSET = '/knext-optimize-fixture.png';
+
+// compat-smoke fixture routes (apps/file-manager/src/app/knext-smoke/**). They exist only to
+// give checks (i), (j) and (k) their own named evidence.
+const FIXTURE_STREAM = '/knext-smoke/stream';
+const FIXTURE_ISR = '/knext-smoke/isr';
+
+// A REAL Redis. Unlike every other knob here this one is NOT defaulted to "" any more: check
+// (k) asserts ISR against a real cache backend, and CI (.github/workflows/ci.yml, the
+// compat-smoke job) provides one as a service container. Absence is a FAILURE, never a skip.
+const REDIS_URL = process.env.REDIS_URL || '';
 
 // ── tiny HTTP helper ───────────────────────────────────────────────────────
 function request(reqPath, { headers = {}, raw = false } = {}) {
@@ -71,6 +90,114 @@ function request(reqPath, { headers = {}, raw = false } = {}) {
     });
     req.on('error', reject);
     req.setTimeout(15000, () => req.destroy(new Error('request timeout')));
+  });
+}
+
+/**
+ * Like `request()`, but records the ARRIVAL TIME of every response chunk.
+ *
+ * Check (j) needs this: a buffered (non-streamed) response reproduces the final body
+ * byte-for-byte, so the only observable difference between "streamed" and "buffered" is
+ * WHEN each byte arrives. Returns `{ status, headers, chunks: [{ at, text }], body }`
+ * where `at` is ms since the request was issued.
+ */
+function requestChunks(reqPath, { headers = {} } = {}) {
+  return new Promise((resolve, reject) => {
+    const t0 = Date.now();
+    const req = http.get({ hostname: HOST, port: PORT, path: reqPath, headers }, (res) => {
+      const chunks = [];
+      res.on('data', (d) => chunks.push({ at: Date.now() - t0, text: d.toString('utf8') }));
+      res.on('end', () =>
+        resolve({
+          status: res.statusCode,
+          headers: res.headers,
+          chunks,
+          body: chunks.map((c) => c.text).join(''),
+        }),
+      );
+      res.on('error', reject);
+    });
+    req.on('error', reject);
+    req.setTimeout(30000, () => req.destroy(new Error('request timeout')));
+  });
+}
+
+/** POST a body with explicit headers (used for the Server Action form submit). */
+function post(reqPath, body, headers = {}) {
+  return new Promise((resolve, reject) => {
+    const req = http.request(
+      {
+        hostname: HOST,
+        port: PORT,
+        path: reqPath,
+        method: 'POST',
+        headers: { ...headers, 'content-length': Buffer.byteLength(body) },
+      },
+      (res) => {
+        const chunks = [];
+        res.on('data', (d) => chunks.push(d));
+        res.on('end', () =>
+          resolve({
+            status: res.statusCode,
+            headers: res.headers,
+            body: Buffer.concat(chunks).toString('utf8'),
+          }),
+        );
+      },
+    );
+    req.on('error', reject);
+    req.setTimeout(30000, () => req.destroy(new Error('request timeout')));
+    req.write(body);
+    req.end();
+  });
+}
+
+/**
+ * Build a `multipart/form-data` body — the encoding React uses for a `<form action={fn}>`
+ * server-action submit in the no-JavaScript progressive-enhancement path.
+ */
+function multipart(fields) {
+  const boundary = `----knextsmoke${Math.random().toString(36).slice(2)}`;
+  const parts = Object.entries(fields).map(
+    ([name, value]) =>
+      `--${boundary}\r\nContent-Disposition: form-data; name="${name}"\r\n\r\n${value}\r\n`,
+  );
+  return { boundary, body: `${parts.join('')}--${boundary}--\r\n` };
+}
+
+/**
+ * `DBSIZE` against a real Redis, spoken as raw RESP over a socket (no dependency).
+ * Check (k) uses it as the NAMED evidence that the ISR cache landed in the configured
+ * Redis rather than the in-memory fallback.
+ */
+function redisDbSize(url, timeoutMs = 5000) {
+  return new Promise((resolve, reject) => {
+    let parsed;
+    try {
+      parsed = new URL(url);
+    } catch {
+      reject(new Error(`REDIS_URL is not a URL: ${url}`));
+      return;
+    }
+    const sock = net.createConnection({
+      host: parsed.hostname,
+      port: Number(parsed.port || 6379),
+    });
+    sock.setTimeout(timeoutMs, () => sock.destroy(new Error('redis DBSIZE timeout')));
+    let buf = '';
+    sock.on('connect', () => sock.write('*1\r\n$6\r\nDBSIZE\r\n'));
+    sock.on('data', (d) => {
+      buf += d.toString('utf8');
+      if (!buf.includes('\r\n')) return;
+      sock.end();
+      const line = buf.slice(0, buf.indexOf('\r\n'));
+      if (!line.startsWith(':')) {
+        reject(new Error(`unexpected DBSIZE reply: ${JSON.stringify(line)}`));
+        return;
+      }
+      resolve(Number(line.slice(1)));
+    });
+    sock.on('error', reject);
   });
 }
 
@@ -109,22 +236,17 @@ async function check(name, fn, lanes = ['node', 'bun']) {
     const note = await fn();
     results.push({ name, status: 'PASS', lane: LANE, note: note || '' });
   } catch (err) {
-    if (err && err.__skip) {
-      results.push({ name, status: 'SKIP', lane: LANE, note: err.message });
-    } else {
-      results.push({
-        name,
-        status: 'FAIL',
-        lane: LANE,
-        note: err && err.message ? err.message : String(err),
-      });
-    }
+    // NO skip-on-fail path (Sprint 1, T4). A capability check that downgrades its own
+    // failure to SKIP is indistinguishable from a broken capability, which is exactly why
+    // four matrix rows were unbacked. The ONLY SKIP this runner can emit is the lane
+    // filter above — a deliberate, declared "this check does not apply to this runtime".
+    results.push({
+      name,
+      status: 'FAIL',
+      lane: LANE,
+      note: err && err.message ? err.message : String(err),
+    });
   }
-}
-function skip(message) {
-  const e = new Error(message);
-  e.__skip = true;
-  throw e;
 }
 
 // ── server lifecycle ─────────────────────────────────────────────────────────
@@ -160,7 +282,9 @@ function startServer() {
     cwd: path.dirname(SERVER_PATH),
     env: {
       ...process.env,
-      REDIS_URL: '',
+      // A REAL Redis when one is provided (CI supplies a service container). The old
+      // hard-coded "" forced the in-memory fallback, which is why ISR was unverifiable.
+      REDIS_URL,
       HOSTNAME: '0.0.0.0',
       PORT: String(PORT),
       NODE_ENV: 'production',
@@ -251,22 +375,34 @@ async function main() {
     return `x-knext-smoke=${v}`;
   });
 
-  // (g) next/image optimization: GET /_next/image?url=...&w=128&q=75 → 200, content-type image/*.
-  await check('g. next/image optimization', async () => {
-    if (!existsSync(path.join(APP_DIR, 'public', IMAGE_ASSET.replace(/^\//, '')))) {
-      skip(`asset ${IMAGE_ASSET} missing from public/`);
-    }
+  // (g) next/image optimization — HARD (Sprint 1, T4). Previously this check downgraded
+  // a missing asset AND any non-200 to SKIP, so a dead optimizer was reported as SKIP and the
+  // matrix row could never be ✅. It now reds, and it asserts the optimizer's OWN named
+  // evidence rather than "some bytes came back":
+  //   - the format was NEGOTIATED (Accept: image/webp → content-type image/webp), which a
+  //     static-file passthrough cannot produce (it would return image/png);
+  //   - the output is materially SMALLER than the source asset, i.e. it was re-encoded.
+  await check('g. next/image optimization (transcode + resize)', async () => {
+    const assetFile = path.join(APP_DIR, 'public', IMAGE_ASSET.replace(/^\//, ''));
+    assert.ok(existsSync(assetFile), `optimizer fixture ${IMAGE_ASSET} missing from public/`);
+
+    const source = await request(IMAGE_ASSET, { raw: true });
+    assert.strictEqual(source.status, 200, `source asset ${IMAGE_ASSET}: ${source.status}`);
+
     const url = `/_next/image?url=${encodeURIComponent(IMAGE_ASSET)}&w=128&q=75`;
-    const res = await request(url, { raw: true });
-    if (res.status !== 200) {
-      // Distinguish "unsupported in this build" from a hard failure.
-      skip(
-        `image optimizer returned ${res.status} (optimization may be unsupported in this build)`,
-      );
-    }
+    const res = await request(url, { raw: true, headers: { accept: 'image/webp,image/*,*/*' } });
+    assert.strictEqual(res.status, 200, `image optimizer returned ${res.status}, expected 200`);
     const ct = res.headers['content-type'] || '';
-    assert.ok(ct.startsWith('image/'), `content-type not image/*: ${ct}`);
-    return `200 ${ct} ${res.bytes}B`;
+    assert.strictEqual(
+      ct,
+      'image/webp',
+      `optimizer did not honour the negotiated format (Accept: image/webp), got: ${ct}`,
+    );
+    assert.ok(
+      res.bytes > 0 && res.bytes < source.bytes,
+      `optimized output (${res.bytes}B) is not smaller than the source (${source.bytes}B) — not re-encoded`,
+    );
+    return `200 ${ct} ${res.bytes}B (source ${source.bytes}B)`;
   });
 
   // (h) #188 — Bun keep-alive guard contract. Bun ≤1.3.14 resets a reused
@@ -319,6 +455,131 @@ async function main() {
     } finally {
       agent.destroy();
     }
+  });
+
+  // (i) Server Actions — a REAL round-trip over the no-JS progressive-enhancement path.
+  // The action id is read out of the rendered form (React emits a `$ACTION_ID_*` hidden
+  // field for the JS-less submit), the form is POSTed as multipart, and the action's effect
+  // is then observed on a SUBSEQUENT render. A per-run random nonce means only genuine
+  // execution of the action can produce the asserted output.
+  await check('i. Server Action round-trip (no-JS form POST)', async () => {
+    const page = await request(FIXTURE_STREAM);
+    assert.strictEqual(page.status, 200, `${FIXTURE_STREAM}: ${page.status}`);
+    const idMatch = page.body.match(/name="(\$ACTION_ID_[0-9a-fA-F]+)"/);
+    assert.ok(
+      idMatch,
+      'no $ACTION_ID_* field in the rendered form — the Server Action was not wired into the HTML',
+    );
+    const actionId = idMatch[1];
+
+    const nonce = `act-${Math.random().toString(36).slice(2, 12)}`;
+    const { boundary, body } = multipart({ [actionId]: '', knextEcho: nonce });
+    const res = await post(FIXTURE_STREAM, body, {
+      'content-type': `multipart/form-data; boundary=${boundary}`,
+      accept: 'text/html,application/xhtml+xml',
+    });
+    assert.ok(
+      res.status >= 200 && res.status < 400,
+      `Server Action POST returned ${res.status} (a 404/405 means the action endpoint is gone)`,
+    );
+
+    // The action's ONLY effect is a cookie on the caller's own response (security.md: it
+    // mutates no server state). Its presence proves the action body executed.
+    const setCookie = [].concat(res.headers['set-cookie'] || []).join('; ');
+    assert.ok(
+      setCookie.includes(nonce),
+      `the Server Action did not run: no cookie carrying the submitted nonce (set-cookie: ${setCookie || 'none'})`,
+    );
+
+    // …and the effect must be observable on a real render, not just in a header.
+    const back = await request(FIXTURE_STREAM, {
+      headers: { cookie: `knext-smoke-echo=${nonce}` },
+    });
+    assert.ok(
+      back.body.includes(`data-knext-action-echo="${nonce}"`),
+      'the action-applied value is not rendered back — the round-trip is not observable',
+    );
+    return `action ${actionId.slice(0, 22)}… echoed ${nonce}`;
+  });
+
+  // (j) Streaming / Suspense — asserted on CHUNK ARRIVAL ORDERING. Asserting the final body
+  // would prove nothing: a fully buffered response reproduces it byte-for-byte. The shell
+  // must land in an EARLIER chunk than the Suspense payload, with a real time gap.
+  await check('j. Streaming / Suspense incremental flush', async () => {
+    const res = await requestChunks(FIXTURE_STREAM);
+    assert.strictEqual(res.status, 200, `${FIXTURE_STREAM}: ${res.status}`);
+
+    const firstChunkWith = (needle) => {
+      let seen = '';
+      for (let i = 0; i < res.chunks.length; i++) {
+        seen += res.chunks[i].text;
+        if (seen.includes(needle)) return i;
+      }
+      return -1;
+    };
+    const shellIdx = firstChunkWith('knext-stream-shell');
+    const lateIdx = firstChunkWith('knext-stream-late');
+    assert.ok(shellIdx >= 0, 'shell marker never arrived');
+    assert.ok(lateIdx >= 0, 'suspended content never arrived');
+    assert.ok(
+      lateIdx > shellIdx,
+      `shell and suspended content arrived in the same chunk (#${shellIdx}) — the response was buffered, not streamed`,
+    );
+    const gap = res.chunks[lateIdx].at - res.chunks[shellIdx].at;
+    assert.ok(
+      gap >= 300,
+      `suspended content arrived only ${gap}ms after the shell — the boundary did not flush early`,
+    );
+    return `shell chunk #${shellIdx} @${res.chunks[shellIdx].at}ms, suspended chunk #${lateIdx} @${res.chunks[lateIdx].at}ms (+${gap}ms)`;
+  });
+
+  // (k) ISR / Data Cache against a REAL Redis. Two 200s would prove nothing, so this asserts
+  // the CONTENT: identical across back-to-back requests (it is cached, not re-rendered), then
+  // CHANGED after the revalidate window (it is revalidated, not frozen) — and finally that the
+  // configured Redis actually holds keys (the cache was not the in-memory fallback).
+  await check('k. ISR revalidation with a real REDIS_URL', async () => {
+    assert.ok(
+      REDIS_URL,
+      'REDIS_URL is not set — ISR cannot be verified against the real cache backend. ' +
+        'This check never skips: start a Redis and set REDIS_URL (CI provides a service container).',
+    );
+    const readValue = async () => {
+      const res = await request(FIXTURE_ISR);
+      assert.strictEqual(res.status, 200, `${FIXTURE_ISR}: ${res.status}`);
+      const m = res.body.match(/data-knext-isr-value="([\w-]+)"/);
+      assert.ok(m, 'ISR fixture did not render its value marker');
+      return m[1];
+    };
+
+    const first = await readValue();
+    const immediate = await readValue();
+    assert.strictEqual(
+      immediate,
+      first,
+      'back-to-back requests rendered DIFFERENT values — the route is not being cached at all',
+    );
+
+    // Past the 1s window each request serves stale and kicks off a background regeneration,
+    // so the change shows up on a later poll.
+    const deadline = Date.now() + 20000;
+    let current = first;
+    await new Promise((r) => setTimeout(r, 1500));
+    while (Date.now() < deadline && current === first) {
+      current = await readValue();
+      if (current === first) await new Promise((r) => setTimeout(r, 500));
+    }
+    assert.notStrictEqual(
+      current,
+      first,
+      'the cached value never changed within 20s — ISR did not revalidate',
+    );
+
+    const keys = await redisDbSize(REDIS_URL);
+    assert.ok(
+      keys > 0,
+      `Redis at ${REDIS_URL} holds ${keys} keys — the ISR cache did not reach the configured Redis`,
+    );
+    return `cached ${first} → revalidated ${current}; redis keys=${keys}`;
   });
 
   // ── report ──────────────────────────────────────────────────────────────

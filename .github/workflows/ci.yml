@@ -138,6 +138,20 @@ jobs:
       fail-fast: false
       matrix:
         runtime: [node, bun]
+    # Sprint 1, T4: check (k) asserts ISR against a REAL cache backend and FAILS (never
+    # skips) without one. The smoke used to boot the server with REDIS_URL="" — the
+    # in-memory fallback — which is precisely why the ISR row was unbacked. Digest-pinned
+    # per security.md ("pin images by digest").
+    services:
+      redis:
+        image: redis:7-alpine@sha256:e7723ff73d963f5cc6d9c4643ea3d989527a402a319239054e9472a7fb9219a2
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
@@ -182,6 +196,8 @@ jobs:
         working-directory: apps/file-manager
         env:
           RUNTIME: ${{ matrix.runtime }}
+          # The service container above, reachable on localhost from the job.
+          REDIS_URL: redis://127.0.0.1:6379
         run: node scripts/compat-smoke.mjs
 
   bytecode-cache-reuse:
