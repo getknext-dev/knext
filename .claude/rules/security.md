@@ -54,15 +54,31 @@ Complements `.claude/rules/architecture.md`. These run through **every** phase �
   SHA, an auditable `# vX.Y.Z` comment, and an allowlist of which actions may touch a
   credential-bearing workflow. It deliberately does **not** assert the SHA *value*, because doing so
   reddened every correct Dependabot bump and made editing the guard the routine way to get green.
-  So **a SHA that does not belong to its commented tag is caught by human review of the Dependabot
-  diff, not by CI** — read the SHA against the tag before approving a bump on the publish path.
-  State this precisely rather than comfortably: that review point is **documented practice, not
-  enforcement**. A gate blocks and is mutation-provable; a documented expectation degrades, and its
-  efficacy is unobservable until it has already failed. Enforcement of SHA↔tag correspondence is
-  therefore **absent** until the nightly upstream-resolution check lands — near-term work, not
-  backlog. Note also that form validity does not establish provenance: GitHub resolves any SHA in a
-  repository's **fork network** from the parent path, so a well-formed pin can address a commit
-  pushed to a fork of the action.
+  **(RESOLVED 2026-07-28, #539.)** SHA↔tag correspondence used to be documented practice rather than
+  enforcement — caught only by human review of the Dependabot diff, which degrades and whose efficacy
+  is unobservable until it has already failed. It is now a **gate**:
+  `.github/workflows/action-pin-resolution-nightly.yml` runs `scripts/verify-action-pins.mjs`
+  nightly, resolving every pin on the publish path against the tag its comment claims and failing on
+  mismatch, missing tag, missing comment, or an unpinned ref. It **dereferences annotated tags**
+  (`object.type === 'tag'` → the commit), which is required, not optional — `pnpm/action-setup@v4.3.0`
+  and `changesets/action@v1.9.0` are both annotated and would otherwise false-positive. An
+  unreachable API is a **failure, never a pass**: a checker that goes green when it cannot reach
+  upstream is worse than none. Mutation-proved against a *real but wrong* upstream commit, not a
+  fabricated SHA.
+  Division of labour, deliberately kept separate: `tests/release-action-pins.test.ts` asserts **form
+  and scope** at PR time and still does **not** assert the SHA *value* — collapsing the two is what
+  made value-pinning unworkable, since it reddened every correct Dependabot bump and made editing the
+  guard the routine way to get green. Resolution happens at **run time**, never baked into a
+  committed assertion.
+  This also closes the fork-network hole rather than merely noting it. Form validity does not
+  establish provenance — GitHub resolves any SHA in a repository's **fork network** from the parent
+  path, so a well-formed pin can address a commit pushed to a fork. The nightly is immune by
+  construction: it never asks "does this SHA exist in the repo", it resolves the **tag in the
+  canonical repo** and compares, so a fork-pushed commit cannot match.
+  **Still not enforced:** the check trusts the version comment as a statement of intent, so a
+  correctly-pinned *malicious tag* is out of scope, and it cannot distinguish "wrong pin" from
+  "upstream retagged" — it reports both, and a retag on a credentialed path is itself worth
+  investigating.
 
 ## Runtime hardening
 - **Reverse proxy** (nginx/Envoy) in front for rate limiting, payload-size limits, and
