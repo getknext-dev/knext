@@ -42,6 +42,13 @@ vi.mock("../cli/cr-builder", () => ({
 }));
 
 const runAssetGC = vi.fn<AnyFn>(() => ({ pruned: true }));
+// #314: deploy runs a server-side dry-run prune preflight BEFORE any side
+// effect. Stub its kubectl boundary so this suite stays hermetic; the preflight
+// itself is covered by cr-prune-preflight.test.ts + deploy-preflight-ordering.test.ts.
+vi.mock("../cli/schema/kubectl-capture", () => ({
+    captureKubectl: () => ({ ok: true, stdout: "", stderr: "" }),
+}));
+
 vi.mock("../cli/gc", () => ({
     runAssetGC: (...a: unknown[]) => runAssetGC(...a),
     gcMain: vi.fn(),

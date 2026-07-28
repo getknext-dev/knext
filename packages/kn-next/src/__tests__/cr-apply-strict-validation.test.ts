@@ -87,6 +87,14 @@ vi.mock("../cli/cr-builder", () => ({
     validateCRImageRef: (...a: unknown[]) => validateCRImageRef(...a),
 }));
 
+// #314: deploy now runs a server-side dry-run preflight BEFORE any side effect.
+// Stub the kubectl boundary it uses so this suite stays hermetic and keeps
+// asserting the real APPLY argv; the preflight itself is covered by
+// cr-prune-preflight.test.ts and deploy-preflight-ordering.test.ts.
+vi.mock("../cli/schema/kubectl-capture", () => ({
+    captureKubectl: () => ({ ok: true, stdout: "", stderr: "" }),
+}));
+
 const runAssetGC = vi.fn<AnyFn>(() => ({ pruned: true }));
 
 vi.mock("../cli/gc", () => ({
@@ -283,12 +291,34 @@ function applyVerbLines(src: string): number[] {
 }
 
 describe("kubectl apply — asserted strict field validation at EVERY call site", () => {
+    /**
+     * Every `*.ts` under `src/cli/`, RECURSIVELY.
+     *
+     * It used to be top-level only, on the reasoning that "that is where all
+     * three applies live today". #314 added a fourth — the prune preflight's
+     * server-side dry-run apply in `cli/schema/preflight.ts` — one directory
+     * down, i.e. in exactly the blind spot that reasoning created. Scope by
+     * construction, not by where the current call sites happen to sit.
+     */
     function readCliSources(): Map<string, string> {
         const out = new Map<string, string>();
-        for (const name of realFs.readdirSync(CLI_DIR)) {
-            if (!name.endsWith(".ts")) continue;
-            out.set(name, realFs.readFileSync(join(CLI_DIR, name), "utf-8"));
-        }
+        const walk = (dir: string, prefix: string): void => {
+            for (const entry of realFs.readdirSync(dir, {
+                withFileTypes: true,
+            })) {
+                const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
+                if (entry.isDirectory()) {
+                    walk(join(dir, entry.name), rel);
+                    continue;
+                }
+                if (!entry.name.endsWith(".ts")) continue;
+                out.set(
+                    rel,
+                    realFs.readFileSync(join(dir, entry.name), "utf-8"),
+                );
+            }
+        };
+        walk(CLI_DIR, "");
         return out;
     }
 
@@ -548,6 +578,11 @@ describe("preview deploy — the OTHER NextApp CR apply (same CR, same skew)", (
                 apply,
                 capture: () => "https://my-app-pr-42.example.com",
                 buildAndPush: async () => digestImage,
+                // Hermetic: the #314 prune preflight is a real cluster call
+                // (server-side dry run) and is covered by
+                // cr-prune-preflight.test.ts. Here it is stubbed so this suite
+                // keeps asserting the APPLY argv and nothing else.
+                preflight: () => {},
             },
         );
         return (apply.mock.calls[0]?.[0] ?? []) as string[];

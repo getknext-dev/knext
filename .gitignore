@@ -1,5 +1,14 @@
 # Dependencies
 node_modules/
+# …and the same name WITHOUT the trailing slash. A trailing slash matches
+# DIRECTORIES ONLY, so a `node_modules` SYMLINK (mode 120000) is a file and the
+# pattern above never applied to it. Three separate tasks in one sprint created
+# such symlinks — pointing at a sibling checkout, to make typecheck/build run in
+# a git worktree — and one of them was committed, because `git status` showed it
+# as an ordinary new file and `git check-ignore` returned nothing. On a CI runner
+# the symlink then occupies the path pnpm must create:
+#   ENOENT: no such file or directory, mkdir '.../packages/db/node_modules'
+node_modules
 .pnpm-store
 
 # Next.js

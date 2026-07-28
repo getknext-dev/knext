@@ -14,6 +14,8 @@
     "test:coverage": "vitest --coverage",
     "ci": "biome check . && pnpm run typecheck && vitest run --coverage",
     "generate": "turbo gen",
+    "gen:cr-fields": "bun scripts/gen-cr-fields.ts",
+    "check:cr-fields": "bun scripts/gen-cr-fields.ts --check",
     "changeset": "changeset",
     "changeset:version": "changeset version",
     "changeset:status": "changeset status",
