@@ -33,6 +33,11 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 import YAML from "yaml";
+import {
+    crdSchemaFromOpenApiV3Doc,
+    flattenSchemaPaths,
+    unknownEmittedFields,
+} from "../cli/schema/crd-schema";
 import type { KubectlCapture } from "../cli/schema/preflight";
 import {
     formatPreflightFailure,
@@ -317,6 +322,59 @@ describe("readKnownCRDFields — the shared schema read (doctor uses the same on
         // An empty known-set would report EVERY field as missing — a confident
         // wrong answer is worse than an admitted unknown.
         expect(read.detail).toMatch(/forbidden|denied|could not/i);
+    });
+});
+
+describe("the aggregated document's own shapes (observed on a live cluster, not guessed)", () => {
+    // Discovered by running the real preflight against kind with a restricted
+    // kubeconfig: the apiserver does NOT inline the envelope's `metadata` the
+    // way the CRD file does — it emits
+    //   metadata: { description: …, allOf: [ { $ref: …ObjectMeta } ] }
+    // With `allOf` unhandled, `metadata.name` reads as a field the CRD does not
+    // define, and doctor reports a FAIL on a perfectly healthy cluster. A
+    // false positive on the honest-status path is not a cosmetic bug.
+    it("resolves `allOf` + `$ref` so envelope fields are not reported missing", () => {
+        const doc = JSON.parse(
+            JSON.stringify({
+                components: {
+                    schemas: {
+                        "io.k8s.apimachinery.pkg.apis.meta.v1.ObjectMeta": {
+                            type: "object",
+                            properties: {
+                                name: { type: "string" },
+                                namespace: { type: "string" },
+                            },
+                        },
+                        "dev.kn-next.apps.v1alpha1.NextApp": {
+                            type: "object",
+                            properties: {
+                                metadata: {
+                                    description: "Standard object's metadata.",
+                                    allOf: [
+                                        {
+                                            $ref: "#/components/schemas/io.k8s.apimachinery.pkg.apis.meta.v1.ObjectMeta",
+                                        },
+                                    ],
+                                },
+                            },
+                        },
+                    },
+                },
+            }),
+        ) as unknown;
+        const found = crdSchemaFromOpenApiV3Doc(doc);
+        if (!found) throw new Error("no NextApp schema in the fixture");
+        const known = flattenSchemaPaths(found.schema, {
+            resolveRef: found.resolveRef,
+        });
+        expect(known.has("metadata.name")).toBe(true);
+        expect(known.has("metadata.namespace")).toBe(true);
+        expect(
+            unknownEmittedFields(
+                ["metadata.name", "metadata.namespace"],
+                known,
+            ),
+        ).toEqual([]);
     });
 });
 

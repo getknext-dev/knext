@@ -54,14 +54,35 @@ export function flattenSchemaPaths(
 
     const walk = (node: unknown, path: string, depth: number): void => {
         if (!isObject(node) || depth > maxDepth) return;
-        let current: Json = node;
+        const current: Json = node;
         const ref = current.$ref;
         if (typeof ref === "string" && resolveRef) {
             const resolved = resolveRef(ref);
+            // `seen` is a RECURSION STACK, not a visited-set: the same schema
+            // (ObjectMeta, say) is legitimately referenced from several paths,
+            // and a permanent visited-set would silently drop every occurrence
+            // after the first — reporting real fields as missing.
             if (!isObject(resolved) || seen.has(resolved)) return;
             seen.add(resolved);
-            current = resolved;
+            walk(resolved, path, depth + 1);
+            seen.delete(resolved);
+            return;
         }
+        // Composition keywords. The apiserver's aggregated document does NOT
+        // inline the envelope the way a CRD file does — `metadata` arrives as
+        // `{ description, allOf: [ { $ref: …ObjectMeta } ] }` (observed live on
+        // kind). Unhandled, `metadata.name` reads as a field the CRD does not
+        // define and `doctor` reports a FAIL on a healthy cluster.
+        let composed = false;
+        for (const key of ["allOf", "oneOf", "anyOf"] as const) {
+            const branch = current[key];
+            if (!Array.isArray(branch)) continue;
+            for (const sub of branch) {
+                composed = true;
+                walk(sub, path, depth + 1);
+            }
+        }
+
         const props = current.properties;
         if (isObject(props)) {
             for (const [key, child] of Object.entries(props)) {
@@ -91,7 +112,10 @@ export function flattenSchemaPaths(
         // prunable. Marked with `.**` so the subset check can see it rather
         // than special-casing a field name.
         const declaresChildren =
-            isObject(props) || isObject(additional) || isObject(items);
+            isObject(props) ||
+            isObject(additional) ||
+            isObject(items) ||
+            composed;
         const isObjectNode =
             current.type === "object" ||
             current["x-kubernetes-preserve-unknown-fields"] === true;
