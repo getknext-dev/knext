@@ -25,6 +25,24 @@ export interface Closable {
  * DB pool's `end()` so in-flight transactions settle before connections close.
  * Must resolve (or reject) on its own; `gracefulShutdown` still force-exits at
  * the grace cap if a hook hangs.
+ *
+ * ISR cache writes (T13). `cache-handler.js` exports `drainCacheWrites()` for
+ * registration here, so an in-flight revalidation write commits rather than
+ * being abandoned. Be precise about WHERE that applies:
+ *
+ *   - **node target** — this module runs in the SUPERVISOR process
+ *     (`node-server.ts`), while `cache-handler.js` is loaded by the Next.js
+ *     standalone server in a CHILD process. This registry cannot see the child's
+ *     writes. There the protection against a torn entry is the cache handler's
+ *     own MULTI/EXEC atomicity (a transmission cut short applies nothing), plus
+ *     the SIGTERM this module forwards so Next drains and runs `after()`.
+ *   - **single-process target** (ADR-0036 `bun-exec`) — handler and shutdown
+ *     share a process, and registering `drainCacheWrites` here is what makes the
+ *     write survive the signal. Covered by
+ *     `__tests__/shutdown-cache-drain.test.ts`.
+ *
+ * Either way the grace cap below is the backstop: a cache that will not commit
+ * must never push the pod past its terminationGracePeriodSeconds.
  */
 export type ShutdownDrain = () => Promise<void>;
 
