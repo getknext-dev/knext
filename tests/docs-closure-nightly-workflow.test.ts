@@ -274,13 +274,19 @@ describe('#320 per-PR docs-site behavior is UNCHANGED', () => {
 // never suppress. These tests lock in the floors so a later `pnpm update` cannot
 // silently regress the closure back under a fixed version.
 //
-// NOT covered here, deliberately: `next@16.2.10` itself carries 4 HIGH CVEs
-// (CVE-2026-64641/64642/64645/64649) fixed in 16.2.11. That bump changes the
-// `next` tarball digest, which is an INPUT to the compat-window fingerprint
-// (tests/compat-window-fingerprint.test.ts), so it is a frozen-set change and a
-// lead decision — see the #465 report. Note also that 16.2.11 still pins
-// `postcss: 8.4.31` and `sharp: ^0.34.5`, so it would NOT subsume the two
-// overrides below.
+// The `next` bump itself is NOT covered here — it is an exact pin per workspace
+// member, not an override, so it is guarded by `tests/next-version-floor.test.ts`.
+// History: `next@16.2.10` carried 4 HIGH CVEs (CVE-2026-64641/64642/64645/64649)
+// fixed in 16.2.11, and this file used to record that bump as deferred, because it
+// changes `packages/kn-next/package.json` — a file that SHIPS in the packed
+// `@getknext/core` tarball and is therefore an input to the compat-window
+// fingerprint (ADR-0039). It was taken in #579, while the 14-night window was still
+// closed, precisely so the frozen-set change costs nothing.
+//
+// Still true and still load-bearing: 16.2.11 pins `postcss: 8.4.31` exactly and
+// `sharp: ^0.34.5` optionally — byte-identical to 16.2.10 — so the bump does NOT
+// subsume the two overrides below. Re-verified against the published manifest on
+// the #579 bump; do not retire them as redundant.
 
 describe('#465 docs-closure HIGH remediation is by BUMP, not suppression', () => {
   const ROOT_PKG_PATH = resolve(REPO_ROOT, 'package.json');
