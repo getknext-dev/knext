@@ -264,3 +264,92 @@ describe('#320 per-PR docs-site behavior is UNCHANGED', () => {
     ).toBe(true);
   });
 });
+
+// ── #465: the advisories that turned this nightly RED ─────────────────────────
+// Run 29897760606 reported 2 HIGH findings in the pruned docs closure; re-running
+// the SAME scan locally against a current Trivy DB (2026-07-29) surfaced 8 — the
+// set grows as advisories are published, not as our tree changes.
+//
+// Remediation discipline (#155/#199/#319/#320): BUMP via the root `pnpm.overrides`,
+// never suppress. These tests lock in the floors so a later `pnpm update` cannot
+// silently regress the closure back under a fixed version.
+//
+// NOT covered here, deliberately: `next@16.2.10` itself carries 4 HIGH CVEs
+// (CVE-2026-64641/64642/64645/64649) fixed in 16.2.11. That bump changes the
+// `next` tarball digest, which is an INPUT to the compat-window fingerprint
+// (tests/compat-window-fingerprint.test.ts), so it is a frozen-set change and a
+// lead decision — see the #465 report. Note also that 16.2.11 still pins
+// `postcss: 8.4.31` and `sharp: ^0.34.5`, so it would NOT subsume the two
+// overrides below.
+
+describe('#465 docs-closure HIGH remediation is by BUMP, not suppression', () => {
+  const ROOT_PKG_PATH = resolve(REPO_ROOT, 'package.json');
+  const ROOT_LOCK_PATH = resolve(REPO_ROOT, 'pnpm-lock.yaml');
+
+  /** Lowest version a `>=X.Y.Z <A` style override range admits, as [maj,min,pat]. */
+  function floorOf(range: string): [number, number, number] {
+    const m = range.match(/>=\s*(\d+)\.(\d+)\.(\d+)/);
+    if (!m) throw new Error(`override range "${range}" has no >=X.Y.Z floor`);
+    return [Number(m[1]), Number(m[2]), Number(m[3])];
+  }
+
+  function gte(a: [number, number, number], b: [number, number, number]): boolean {
+    for (let i = 0; i < 3; i++) {
+      if (a[i] !== b[i]) return a[i] > b[i];
+    }
+    return true;
+  }
+
+  // [override selector, first FIXED version, advisory, observed vulnerable version]
+  const REQUIRED: Array<[string, [number, number, number], string, string]> = [
+    // next → (optional) sharp 0.34.5; libvips CVE-2026-33327/33328/35590/35591.
+    ['sharp', [0, 35, 0], 'GHSA-f88m-g3jw-g9cj', '0.34.5'],
+    // next → postcss 8.4.31 (an exact pin, still exact in 16.2.11).
+    ['postcss', [8, 5, 18], 'CVE-2026-45623 + GHSA-r28c-9q8g-f849', '8.4.31'],
+    // @getknext/core → @google-cloud/storage → fast-xml-parser 5.
+    ['fast-xml-parser@5', [5, 10, 1], 'GHSA-8r6m-32jq-jx6q', '5.9.3'],
+  ];
+
+  it('root pnpm.overrides floor every flagged docs-closure package at its fixed version', () => {
+    const pkg = JSON.parse(readFileSync(ROOT_PKG_PATH, 'utf8')) as {
+      pnpm?: { overrides?: Record<string, string> };
+    };
+    const overrides = pkg.pnpm?.overrides ?? {};
+    for (const [selector, fixed, advisory] of REQUIRED) {
+      const range = overrides[selector];
+      expect(range, `expected a pnpm override for "${selector}" (${advisory})`).toBeTruthy();
+      expect(
+        gte(floorOf(range as string), fixed),
+        `override "${selector}": "${range}" must admit nothing below ${fixed.join('.')} (${advisory})`,
+      ).toBe(true);
+    }
+  });
+
+  it('the root lockfile no longer resolves the vulnerable versions', () => {
+    const lock = readFileSync(ROOT_LOCK_PATH, 'utf8');
+    for (const [selector, , advisory, badVersion] of REQUIRED) {
+      const name = selector.includes('@', 1)
+        ? selector.slice(0, selector.lastIndexOf('@'))
+        : selector;
+      const banned = `${name}@${badVersion}:`;
+      expect(
+        lock.includes(banned),
+        `lockfile must not resolve ${banned.slice(0, -1)} (${advisory})`,
+      ).toBe(false);
+    }
+  });
+
+  it('the nightly gate itself is NOT weakened (no ignorefile, no severity relaxation)', () => {
+    const nightly = read(NIGHTLY_WORKFLOW_PATH);
+    expect(/severity:\s*HIGH,CRITICAL/.test(nightly), 'severity must stay HIGH,CRITICAL').toBe(
+      true,
+    );
+    expect(/exit-code:\s*'1'/.test(nightly), 'the nightly must keep failing on a finding').toBe(
+      true,
+    );
+    expect(
+      /trivyignores?:|TRIVY_IGNOREFILE|\.trivyignore|skip-(dirs|files):/.test(nightly),
+      'remediation must be by bump — no ignorefile/skip may be introduced',
+    ).toBe(false);
+  });
+});

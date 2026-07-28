@@ -361,8 +361,11 @@ describe('file-manager image CVE remediation (#199)', () => {
       [/^fast-xml-parser@.*4/, /4\.5\.([5-9]|\d{2,})/, 'CVE-2026-25896/26278/33036 fixed in 4.5.5'],
       [
         /^fast-xml-parser@.*5/,
-        /5\.(5\.([6-9]|\d{2,})|[6-9]\.)/,
-        'CVE-2026-26278/33036 fixed in 5.5.6',
+        // ≥5.5.6. The minor is NOT single-digit-only: #465 raised this floor to
+        // 5.10.1 (GHSA-8r6m-32jq-jx6q) and the old `[6-9]\.` alternative could
+        // not express a two-digit minor, so a STRICTER pin read as a regression.
+        /5\.(5\.([6-9]|\d{2,})|([6-9]|\d{2,})\.)/,
+        'CVE-2026-26278/33036 fixed in 5.5.6 (floor since raised to 5.10.1, #465)',
       ],
       [/^form-data/, /2\.5\.([6-9]|\d{2,})/, 'CVE-2026-12143 fixed in 2.5.6'],
       [/^lodash/, /4\.(1[8-9]|[2-9]\d)\./, 'CVE-2026-4800 fixed in 4.18.0'],
