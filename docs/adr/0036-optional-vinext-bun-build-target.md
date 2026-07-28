@@ -1,6 +1,8 @@
 # ADR-0036: Optional vinext + Bun single-executable build target
 
-- **Status:** Proposed (founder-directed 2026-07-20; node/turbopack remains the default)
+- **Status:** **Rejected for 1.0 (measured)** — 2026-07-28. Proposed 2026-07-20 (founder-directed);
+  node/turbopack was and remains the default. See the close-out at the bottom of this file for the
+  measurements, what they do and do not establish, and the **named re-open trigger**.
 - **Supersedes (in part):** the blanket "vinext/`bun --compile` path is deprecated" stance in
   `.claude/rules/architecture.md` §4 and `CLAUDE.md` §3 — narrowly, for a *compiled build target*,
   not a return to hand-rolling a Nitro runtime.
@@ -264,3 +266,86 @@ RuntimeContract-entry routing bug is shared by both vinext cells.
 - A second CRD, operator, or config surface for the bun path.
 - Resurrecting the old vinext epic (#11) wholesale, or a bespoke Nitro runtime.
 - Presenting `bun-exec` as faster before the P1 OKE A/B produces a separated result.
+
+---
+
+## Close-out (2026-07-28) — Rejected for 1.0, with a named re-open trigger
+
+This ADR proposed an **opt-in, compat-gated** compiled build target, and made its own ship test
+explicit: `bun-exec` ships only if the P1 OKE A/B shows a **distribution-separated win**. Two runs
+have now measured it. The bar is not met, so the target does not ship for 1.0.
+
+### What was measured
+
+| run | design | result |
+|---|---|---|
+| Run 24 | arms **sequential** | node p50 10.47 s vs bun-exec 2.29 s — later **withdrawn** |
+| Run 26 | arms **interleaved**, ABBA within pair, 12 complete pairs | node p50 **2.52 s**, bun-exec **2.30 s**; paired median (node − bun) **+0.07 s**; sign split 7/5; ranges overlapping end to end |
+
+Run 24's apparent 4.5× win was an artifact of *when* each arm ran, not what it was: the ~10.5 s slow
+mode switched on mid-run. That is also the finding that makes the sequential design invalid here —
+a comparison whose signal is mode mixture cannot be read unless the arms were interleaved. Run 24's
+provisional ~470 ms bun-exec fast-mode advantage did not reproduce either; the sign reversed, so it
+is **withdrawn rather than pending**.
+
+### The reasoning, including the argument against this decision
+
+Three independent reasons, any one sufficient:
+
+- **It cannot address the dominant risk.** The threat to the cold-start claim is the ~10.5 s regime,
+  and Run 26 shows it switching on in **both arms within one pair of each other**. It is
+  cluster-level, not runtime-level. A build target that moves the fast mode by 0.07 s buys nothing
+  against a 4× effect.
+- **The cost is structural, not incremental.** A bespoke bun entry re-providing `RuntimeContract`;
+  `next/image` optimization is **lost** under vinext, so ADR-0006 apps are `bun-exec`-ineligible and
+  fall back to node; and the bun compat lane has never been green. This ADR permits the target only
+  as **compat-gated** — it has no green gate, so it is not shippable regardless of any benchmark.
+- **An indefinitely-open ADR is an attention tax.** It reappears in every sprint plan and benchmark
+  discussion and consumes design-gate time on a target nobody is authorised to ship.
+
+**The strongest argument against rejecting** is recorded here rather than omitted: the A/B has a
+real comparability defect — the two arms **served different applications** (`p1b-node` renders a
+4000-byte Next document at `/`, `p1b-bunexec` a 1397-byte vinext page; they agree only at
+`/api/health`), and the measured endpoint was the service root, where they differ. The node arm was
+the *simpler* page, so the bias plausibly favoured node — meaning a fair rerun could move toward
+bun-exec. That is a genuine reason for doubt, and it loses only because the three reasons above do
+not depend on the delta's sign.
+
+### What is honestly established, and what is not
+
+- **Established:** on these two apps, at this endpoint, interleaved in one sitting, the arms do not
+  separate. The measured artifact **was** bytecode-compiled — verified by extracting the binary from
+  the deployed digest and fingerprinting it against **version-matched** controls (Bun 1.3.14), so
+  this tested the artifact the ADR actually proposes.
+- **Not established:** that `bun-exec` cannot win. "No separated win **between these two apps**" is
+  weaker than "no separated win", and only the weaker claim is earned.
+- Separately confirmed by microbenchmark (Run 13): a vinext build boots far faster than Next
+  standalone — ~317 ms on node, ~237 ms compiled, against ~852 ms. **That advantage is real and does
+  not survive to end-to-end cold start**, because boot is a small fraction of it. Most of that win is
+  vinext, not bun.
+
+### Re-open trigger (falsifiable, not "if someone feels like it")
+
+Re-open this ADR when a benchmark run satisfies **all** of:
+
+1. **same application on both arms**, asserted by image digest, not by inspection;
+2. the **requested endpoint recorded** in the run's own write-up;
+3. arms **interleaved**, ABBA within pair;
+4. **build-flag provenance tied to the deployed digest** (a build label, not forensics);
+5. results reported **per sitting and stratified by mode**, never pooled;
+
+and then shows **distribution separation** — not a median difference with overlapping ranges.
+
+Those conditions are the Track D admissibility checklist in `docs/SPRINT_2.md`; the harness work
+that makes them cheap to satisfy is tracked as S8 and is worth doing on its own merits, since the
+same defects would corrupt any future A/B.
+
+### Consequences
+
+- `examples/bun-exec` **stays as an example**, not a build target. It is a working reference for the
+  compiled path and its drain ordering, and it is where the load-bearing metrics-stopped-last
+  behaviour is documented.
+- The default remains the official Next.js adapter on node. `.claude/rules/architecture.md` §4's
+  amendment permitting an opt-in compiled target is unchanged in principle — it is simply not
+  exercised for 1.0.
+- No runtime code is removed by this decision.

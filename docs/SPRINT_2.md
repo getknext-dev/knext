@@ -39,16 +39,16 @@ carryover and is scoped that way deliberately.
 | S1 | window fingerprint: prove the harness identical across 14 nights | #545 | G (gate-zero) | `test-e2e-deploy.yml`, new `tests/compat-window-*.ts`, fingerprint script |
 | S2 | open + police the window to completion (no code) | #410 | G (lead) | `docs/compat/window-node-lane.md` |
 | S3 | branch protection on `main` | #555 | G (**human**) | — |
-| S4 | ADR-0017 amendment — CRD versioning at 1.0 | — | H | `docs/adr/0017-*`, `docs/PUBLIC_API.md` |
+| S4 | **DONE (#570)** — ADR-0017 amendment — CRD versioning at 1.0 | — | H | `docs/adr/0017-*`, `docs/PUBLIC_API.md` |
 | S5 | ADR-0036 close-out — rejected for 1.0 (measured) | — | H | `docs/adr/0036-*` |
-| S6 | upgrade order: operator/CRD first, then CLI | #548 | H | `docs/adr/0020-*`, `docs/RELEASING.md` |
-| S7 | close the four unbacked matrix rows | — | I | `compat-smoke.mjs`, `ci.yml`, `docs/compat-matrix.md`, one app fixture route |
+| S6 | **DONE (#567)** — upgrade order: operator/CRD first, then CLI | #548 | H | `docs/adr/0020-*`, `docs/RELEASING.md` |
+| S7 | **DONE (#571)** — close the four unbacked matrix rows | — | I | `compat-smoke.mjs`, `ci.yml`, `docs/compat-matrix.md`, one app fixture route |
 | S8 | benchmark provenance: same app, recorded endpoint, tied build flags | #551 | K | `benchmarks/scale-to-zero-oke/**` |
 | S9 | the 1.0 cold-start statement — across sittings, stratified | #309 | K | `docs/benchmarks/scale-to-zero-oke.md` + OKE runs |
-| S10 | prune preflight + generated CR/CRD artifacts (T5/T6/T7 carryover) | #314 | J | `src/cli/schema/*`, `deploy.ts`, `preview.ts`, `doctor.ts`, `scripts/gen-*` |
+| S10 | **DONE (#572)** — prune preflight + generated CR/CRD artifacts (T5/T6/T7 carryover) | #314 | J | `src/cli/schema/*`, `deploy.ts`, `preview.ts`, `doctor.ts`, `scripts/gen-*` |
 | S11 | webhook-down deploy freeze: skew + upgrade-under-load e2e | #314 | L | operator e2e, `config/webhook/**` |
 | S12 | docs closure nightly RED | #465 | H | docs-site closure job |
-| S13 | SIGTERM-during-revalidation + cache-handler failure injection | #448 | M (**merge-held**) | `adapters/shutdown.ts`, `adapters/cache-handler.js` |
+| S13 | **DONE (#568)** — SIGTERM-during-revalidation + cache-handler failure injection | #448 | M (**merge-held**) | `adapters/shutdown.ts`, `adapters/cache-handler.js` |
 
 **Critical path:** `S1 → S2 → 14 nights`, in parallel with `S8 → S9`. Both land near sprint end and
 both are 1.0 gates.
@@ -147,13 +147,13 @@ The section sprint 1's synthesis lost entirely. Every task changing a contract o
 
 | task | may now rely on | what just broke |
 |---|---|---|
-| S10 | a deploy either stores the CR intact or fails; no silent pruning | deploys that previously "succeeded" while losing fields now exit non-zero; a reserved exit code is added to `PUBLIC_API.md` |
-| S10 | **no new RBAC** — preflight needs only what deploy needs | nothing; stated because the opposite was assumed |
-| S4 | a declared CRD version policy for 1.0 | `apiVersion` is now asserted, so emitting an undeclared one fails |
-| S6 | documented upgrade order: operator/CRD first, then CLI | upgrading CLI-first is now explicitly unsupported rather than undefined |
+| S10 | **DONE (#572)** — a deploy either stores the CR intact or fails; no silent pruning | deploys that previously "succeeded" while losing fields now exit non-zero; a reserved exit code is added to `PUBLIC_API.md` |
+| S10 | **DONE (#572)** — **no new RBAC** — preflight needs only what deploy needs | nothing; stated because the opposite was assumed |
+| S4 | **DONE (#570)** — a declared CRD version policy for 1.0 | `apiVersion` is now asserted, so emitting an undeclared one fails |
+| S6 | **DONE (#567)** — documented upgrade order: operator/CRD first, then CLI | upgrading CLI-first is now explicitly unsupported rather than undefined |
 | S1 | "green" names a specific frozen artifact set | any change inside that set restarts the 14 nights |
-| S7 | four capability rows backed by red-on-fail checks | apps relying on a row that only ever skipped may now fail CI |
-| S13 | ISR revalidation is never torn by SIGTERM | shutdown may take longer; drain ordering becomes load-bearing |
+| S7 | **DONE (#571)** — four capability rows backed by red-on-fail checks | apps relying on a row that only ever skipped may now fail CI |
+| S13 | **DONE (#568)** — ISR revalidation is never torn by SIGTERM | shutdown may take longer; drain ordering becomes load-bearing |
 
 ### The contract nobody has written down
 
@@ -174,12 +174,12 @@ For each task, the one way it is marked done and still protects nobody.
 |---|---|---|
 | S1 | the fingerprint covers files nobody changes and misses the packed closure | mutate a packed `@getknext/*` file → fingerprint changes → window flagged |
 | S2 | the log records runs but never proves the fingerprint held | each night's entry carries the fingerprint; a mismatch voids the window loudly |
-| S7 | a row's check skips on the path that matters | delete the capability → the check goes **red**, not skipped |
+| S7 | **DONE (#571)** — a row's check skips on the path that matters | delete the capability → the check goes **red**, not skipped |
 | S8 | the harness records provenance but the arms still differ | arms assert identical app digest; run aborts otherwise |
 | S9 | a statement is published from one sitting | refuse to publish without ≥2 sittings, stratified |
-| S10 | the preflight warns instead of failing, or runs after assets upload | skew-inducing CRD → non-zero exit **and the bucket unchanged** |
+| S10 | **DONE (#572)** — the preflight warns instead of failing, or runs after assets upload | skew-inducing CRD → non-zero exit **and the bucket unchanged** |
 | S11 | the e2e passes because the webhook was never actually down | assert the webhook is down, then assert deploy freezes |
-| S13 | injection tests exercise only the clean-shutdown path | kill mid-write → cache entry is absent or whole, never partial |
+| S13 | **DONE (#568)** — injection tests exercise only the clean-shutdown path | kill mid-write → cache entry is absent or whole, never partial |
 
 ### Two silent modes worth naming separately
 
@@ -301,3 +301,44 @@ D1–D15 ✓ · §5.2 where it lives ✓ · §6 RBAC decision ✓ (D-3) · §6.2
 recommendation ✓ · §6.4 rejected options — **declined**, see source · §6.5 residuals — **partially**:
 GitOps kept as open question 3; kubectl shim and ≤1.24 stay in source · §6.6 obliged contract
 statement ✓ · §7 anti-items ✓ · §8 open questions ✓ · §9 manifest — this section.
+
+## Human-gated work — deferred here by decision (2026-07-28)
+
+Everything an agent cannot do without a human is collected here rather than left scattered across
+task rows, so the set is reviewable in one place and nothing silently blocks a track.
+
+| item | why it needs a human | what it blocks |
+|---|---|---|
+| **S3 — branch protection on `main`** (#555) | a repository-settings change on the trunk; outward-facing permission change | nothing formally — but until it lands **every CI gate is advisory**, and the 14-night window can be voided by a red PR merging mid-window. Highest leverage item in the sprint. |
+| **EKS credentials + budget** (#306, was T16) | provisioning an AWS account and committing spend | the second-cloud validation, and therefore the honesty of the multi-cloud claim. The *request* is carried, costed (~$75 bounded run); the work is out of scope until granted. |
+| **T6 kind cluster teardown** | cluster/infra teardown is blocked by `block-dangerous-bash.sh` by design | nothing; it is cleanup owed from #572's live verification. |
+
+**Why they are deferred rather than dropped.** Each has a real consequence and none is optional
+long-term. Grouping them makes the *cost of not doing them* visible: two of the three directly
+weaken claims the 1.0 will make (enforceable gates, multi-cloud portability), and stating that is
+better than letting them expire quietly in a task row.
+
+**What this changes about sprint 2's shape.** Every remaining track is agent-doable, so the sprint
+does not stall on a human. But **S2 cannot honestly complete without S3** — opening a 14-night
+window on a trunk where a red PR can merge means the window measures something other than what it
+claims. S2 may open the window and record nights; it may not *certify* the result until branch
+protection exists. That is stated here rather than discovered at sprint close.
+
+## Reconciliation with sprint 1 (2026-07-28)
+
+Sprint 1 overran into this plan and completed five of its tasks: **S4** (#570), **S6** (#567),
+**S7** (#571), **S10** (#572), **S13** (#568). They are marked in the task table above.
+
+Sprint 1 landed 13 of 17 — not the 3 of 17 the plan was drafted against — so this sprint is smaller
+than scoped. The remaining agent-doable set is **S1, S5, S8, S9, S11, S12**, with S2 lead-owned and
+gated on S3.
+
+Two corrections owed to `docs/SPRINT_1.md`, recorded here so they are not lost:
+
+- **T8's exit criterion is unsatisfiable as written.** It requires `docs/PUBLIC_API.md` to
+  "cross-link" the ADR, but that file is guarded as user-facing and the guard forbids `ADR-\d{4}`,
+  internal check ids, and issue numbers in it. The intent is satisfiable — a link whose text is
+  user-facing and whose path carries no forbidden literal — but the criterion must say so.
+- **Typecheck from the repo root, never from a worktree**, and for changes under `packages/*/src/**`
+  run the **package** typecheck too. Three separate failures this sprint traced to a check measured
+  in the wrong place reading green.
