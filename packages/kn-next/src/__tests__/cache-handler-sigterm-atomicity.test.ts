@@ -221,6 +221,7 @@ describe("T13 — in-flight cache writes are drainable", () => {
     const original = { ...process.env };
     const CACHE_HANDLER: string = "../adapters/cache-handler.js";
     let fake: FakeRedis | undefined;
+    const REGISTRY: string = "../adapters/cache-write-registry.js";
 
     beforeEach(() => {
         vi.resetModules();
@@ -252,12 +253,13 @@ describe("T13 — in-flight cache writes are drainable", () => {
         process.env.REDIS_URL = fake.url;
 
         const mod = await import(CACHE_HANDLER);
+        const registry = await import(REGISTRY);
         const handler = new mod.default({});
 
         const writing = handler.set("/k", { kind: "PAGE" }, { revalidate: 30 });
 
         let drained = false;
-        const draining = mod.drainCacheWrites(5000).then(() => {
+        const draining = registry.drainCacheWrites(5000).then(() => {
             drained = true;
         });
 
@@ -283,16 +285,17 @@ describe("T13 — in-flight cache writes are drainable", () => {
         process.env.REDIS_URL = fake.url;
 
         const mod = await import(CACHE_HANDLER);
+        const registry = await import(REGISTRY);
         const handler = new mod.default({});
         void handler.set("/hung", { kind: "PAGE" }, { revalidate: 30 });
 
         const startedAt = Date.now();
-        await mod.drainCacheWrites(200);
+        await registry.drainCacheWrites(200);
         expect(Date.now() - startedAt).toBeLessThan(2000);
     });
 
     it("drainCacheWrites() resolves immediately when nothing is in flight", async () => {
-        const mod = await import(CACHE_HANDLER);
-        await expect(mod.drainCacheWrites(1000)).resolves.toBeUndefined();
+        const registry = await import(REGISTRY);
+        await expect(registry.drainCacheWrites(1000)).resolves.toBeUndefined();
     });
 });

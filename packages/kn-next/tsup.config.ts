@@ -62,6 +62,14 @@ export default defineConfig([
       'adapters/standalone-bun-exports': 'src/adapters/standalone-bun-exports.ts',
       // cache-handler is plain JS (untyped) — bundled to dist, no .d.ts emitted
       'adapters/cache-handler': 'src/adapters/cache-handler.js',
+      // The in-flight cache-write registry (`./internal/cache-drain`).
+      // Measured, not assumed: tsup hoists it into a SHARED chunk that both
+      // this entry and adapters/cache-handler.js import, so the published
+      // artifacts hold one module record, not two. The duplication hazard is
+      // downstream — Next re-bundles the handler (loaded by file path) across
+      // webpack layers — which is why the registry's state is anchored on
+      // `globalThis` per ADR-0027 §3 regardless of what this bundler does.
+      'adapters/cache-write-registry': 'src/adapters/cache-write-registry.js',
       'adapters/otel-config': 'src/adapters/otel-config.ts',
       'adapters/tracing': 'src/adapters/tracing.ts',
       'adapters/metrics': 'src/adapters/metrics.ts',

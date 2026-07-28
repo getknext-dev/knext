@@ -13,6 +13,13 @@
  * Reference: https://nextjs.org/docs/app/api-reference/config/next-config-js/incrementalCacheHandlerPath
  */
 
+// In-flight write accounting (T13) lives in its own module because its state
+// must be anchored on `globalThis` — see the header of cache-write-registry.js.
+// This module imports `trackWrite` and re-exports NOTHING new: the
+// `@getknext/core/adapters/cache-handler` subpath stays default-only, because
+// it exists to be handed to Next's `cacheHandler` option by path, not called.
+import { trackWrite } from './cache-write-registry.js';
+
 // ─── Cache Event Logger ───
 
 if (!globalThis.cacheEvents) globalThis.cacheEvents = [];
@@ -337,53 +344,6 @@ function cloneCacheValue(data) {
   return cloned;
 }
 
-// ─── In-flight write accounting (T13) ───
-//
-// Atomicity guarantees an interrupted write is never PARTIAL. It does not give
-// a shutdown path any way to know a write is still outstanding — so a
-// revalidation write that had already started could still be abandoned on
-// SIGTERM, losing an entry that was seconds from committing.
-//
-// `drainCacheWrites()` is that handle. It is what a SIGTERM path awaits (see
-// `registerShutdownDrain` in adapters/shutdown.ts) so in-flight ISR writes
-// settle before exit, and it is BOUNDED so a hung cache can never push the pod
-// past its terminationGracePeriod — the grace cap, not the cache, decides when
-// the process dies.
-const inFlightWrites = new Set();
-
-function trackWrite(promise) {
-  inFlightWrites.add(promise);
-  promise.then(
-    () => inFlightWrites.delete(promise),
-    () => inFlightWrites.delete(promise),
-  );
-  return promise;
-}
-
-/**
- * Await every in-flight cache write, or `timeoutMs`, whichever comes first.
- * Never rejects: a failed write must not turn a graceful shutdown into a crash.
- *
- * @param {number} [timeoutMs] hard cap; keep below the pod's grace period.
- * @returns {Promise<void>}
- */
-export async function drainCacheWrites(timeoutMs = 5000) {
-  if (inFlightWrites.size === 0) return;
-  const settled = Promise.allSettled([...inFlightWrites]);
-  let timer;
-  const capped = new Promise((resolve) => {
-    timer = setTimeout(resolve, timeoutMs);
-    if (typeof timer?.unref === 'function') timer.unref();
-  });
-  await Promise.race([settled, capped]);
-  if (timer) clearTimeout(timer);
-}
-
-/** How many cache writes are currently in flight. Exposed for tests/telemetry. */
-export function inFlightCacheWriteCount() {
-  return inFlightWrites.size;
-}
-
 // ─── CacheHandler Class ───
 
 class CacheHandler {
@@ -432,7 +392,11 @@ class CacheHandler {
     }
   }
 
-  // Registered in the in-flight set so a SIGTERM drain can await it (T13).
+  // Registered in the in-flight set so that a SIGTERM drain CAN await it (T13).
+  // Stated conditionally on purpose: no shipping path awaits it today. On the
+  // node target the shutdown supervisor is a different process from this
+  // handler, so the drain is only composable on a single-process target — see
+  // the `ShutdownDrain` declaration in adapters/shutdown.ts for the full scope.
   // Next may or may not await this call; the accounting must not depend on it.
   set(key, data, ctx) {
     return trackWrite(this.#set(key, data, ctx));
@@ -481,6 +445,15 @@ class CacheHandler {
         // when revalidation writes. Anyone replacing `multi()` with `pipeline()`
         // reintroduces the torn write — cache-handler-sigterm-atomicity.test.ts
         // reds on it.
+        //
+        // TOPOLOGY CAVEAT: a Redis transaction requires every key in ONE hash
+        // slot, and the entry key and tag keys hash to different slots. So this
+        // narrows the supported topology to a single-node (or slot-tolerant)
+        // endpoint. Not a regression in practice — the handler builds a
+        // single-node `new Redis(REDIS_URL)` and would already take `MOVED`
+        // errors on a cluster — and `redisCall` now trips the breaker into a
+        // clean fail-open rather than a hang. Stated here so it is read, not
+        // discovered by whoever first points knext at a Redis Cluster.
         const tx = client.multi();
         tx.set(cacheKey(key), JSON.stringify(redisEntry), 'EX', ttl);
         if (ctx?.tags?.length) {

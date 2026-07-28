@@ -29,6 +29,7 @@ import { type FakeRedis, startFakeRedis } from "./helpers/fake-redis";
 describe("T13 — gracefulShutdown awaits in-flight ISR writes when they are registered", () => {
     const original = { ...process.env };
     const CACHE_HANDLER: string = "../adapters/cache-handler.js";
+    const REGISTRY: string = "../adapters/cache-write-registry.js";
     let fake: FakeRedis | undefined;
 
     beforeEach(() => {
@@ -85,6 +86,7 @@ describe("T13 — gracefulShutdown awaits in-flight ISR writes when they are reg
         process.env.REDIS_URL = fake.url;
 
         const mod = await import(CACHE_HANDLER);
+        const registry = await import(REGISTRY);
         const handler = new mod.default({});
         const writing = handler.set(
             "/late-revalidation",
@@ -92,7 +94,7 @@ describe("T13 — gracefulShutdown awaits in-flight ISR writes when they are reg
             { revalidate: 60, tags: ["t"] },
         );
 
-        registerShutdownDrain(() => mod.drainCacheWrites(5000));
+        registerShutdownDrain(() => registry.drainCacheWrites(5000));
 
         const exit = vi.fn();
         const child = fakeChild();
@@ -135,10 +137,11 @@ describe("T13 — gracefulShutdown awaits in-flight ISR writes when they are reg
         process.env.REDIS_URL = fake.url;
 
         const mod = await import(CACHE_HANDLER);
+        const registry = await import(REGISTRY);
         const handler = new mod.default({});
         void handler.set("/never", { kind: "PAGE" }, { revalidate: 60 });
 
-        registerShutdownDrain(() => mod.drainCacheWrites(60_000));
+        registerShutdownDrain(() => registry.drainCacheWrites(60_000));
 
         const exit = vi.fn();
         const child = fakeChild();
