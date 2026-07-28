@@ -319,10 +319,23 @@ weaken claims the 1.0 will make (enforceable gates, multi-cloud portability), an
 better than letting them expire quietly in a task row.
 
 **What this changes about sprint 2's shape.** Every remaining track is agent-doable, so the sprint
-does not stall on a human. But **S2 cannot honestly complete without S3** — opening a 14-night
-window on a trunk where a red PR can merge means the window measures something other than what it
-claims. S2 may open the window and record nights; it may not *certify* the result until branch
-protection exists. That is stated here rather than discovered at sprint close.
+does not stall on a human.
+
+**Correction (2026-07-28, architect gate on #574).** An earlier version of this section claimed
+**S2 cannot honestly complete without S3**, and that the window may not be *certified* until branch
+protection exists. That is **stronger than the facts support**, and the gate tested it rather than
+inheriting it.
+
+Without branch protection a mid-window merge does not make the 14-night claim *false*. It changes
+the harness fingerprint, the streak restarts, and the claim stays true of whatever artifact set it
+names. **Detection is sufficient for truth; prevention is about schedulability** — the risk is an
+unbounded number of restarts, not a false certificate. ADR-0039's framing — *falsifiability, not
+prevention* — is the accurate one.
+
+So: **S3 is not a logical precondition for certifying the window.** It remains **strongly
+recommended before S2 opens it**, because once the sprint is in a real 14-night merge freeze, branch
+protection is what stops "we'll just not count that merge" from being negotiable. That is a
+discipline argument, not a correctness one, and the two should not be conflated.
 
 ## Reconciliation with sprint 1 (2026-07-28)
 
