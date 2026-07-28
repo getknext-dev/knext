@@ -11,6 +11,7 @@ import {
   quarantineEntryProblems,
   renderLaneSummaryMarkdown,
   summarizeLedger,
+  upstreamRefs,
 } from './compat-lane-ledger';
 
 /**
@@ -178,5 +179,79 @@ describe('#282 quarantine entry shape — dated justification + upstream ref (ne
       lane: 'bun',
     };
     expect(quarantineEntryProblems(viaIso)).toEqual([]);
+  });
+});
+
+describe('#512 the UPSTREAM half needs a real issue/PR ref — a run id is DATED evidence only', () => {
+  /**
+   * The softening #512 closes: `UPSTREAM_RE` used to accept a bare `run NNNNN`,
+   * so one run id satisfied BOTH halves. A regression's own red run has a run id
+   * too, so that shape could pin a quarantine to nothing but the failure it hides.
+   */
+  it('an entry whose UPSTREAM half is ONLY a run id FAILS (and is still counted as dated)', () => {
+    const runIdOnly: QuarantineEntry = {
+      test: 'test/e2e/synthetic/run-id-only.test.ts',
+      mechanism: '60s timeout, no assertion diff',
+      evidence: 'run 28593534713: failed 3/3 attempts',
+      lane: 'node',
+    };
+    const problems = quarantineEntryProblems(runIdOnly);
+    expect(problems.length, `a run-id-only entry must be rejected: ${problems.join(' | ')}`).toBe(
+      1,
+    );
+    expect(problems[0]).toMatch(/upstream/i);
+    // The run id is still legitimate DATED evidence — only the upstream half rejects it.
+    expect(problems.join(' ')).not.toMatch(/dated/i);
+    expect(upstreamRefs(runIdOnly)).toEqual([]);
+  });
+
+  it('a run id remains the ONLY dated evidence an entry needs when a real upstream ref is present', () => {
+    const ok: QuarantineEntry = {
+      test: 'test/e2e/synthetic/run-id-dated.test.ts',
+      evidence: 'run 28593534713: failed 3/3 attempts', // no ISO date anywhere
+      provenance: 'root cause fixed upstream in vercel/next.js#95301',
+      lane: 'node',
+    };
+    expect(quarantineEntryProblems(ok)).toEqual([]);
+    expect(upstreamRefs(ok)).toContain('vercel/next.js#95301');
+  });
+
+  it('an ACTIONS-RUN url is not an upstream ref, but an issue/PR url is', () => {
+    const actionsUrl: QuarantineEntry = {
+      test: 'test/e2e/synthetic/actions-url.test.ts',
+      evidence: 'https://github.com/vercel/next.js/actions/runs/28593534713 on 2026-07-20',
+      lane: 'node',
+    };
+    expect(upstreamRefs(actionsUrl)).toEqual([]);
+    expect(quarantineEntryProblems(actionsUrl).join(' ')).toMatch(/upstream/i);
+
+    const issueUrl: QuarantineEntry = {
+      test: 'test/e2e/synthetic/issue-url.test.ts',
+      evidence: 'first observed 2026-07-20',
+      provenance: 'https://github.com/vercel/next.js/pull/95301',
+      lane: 'node',
+    };
+    expect(quarantineEntryProblems(issueUrl)).toEqual([]);
+    expect(upstreamRefs(issueUrl)).toContain('https://github.com/vercel/next.js/pull/95301');
+  });
+
+  it('a version pin (nextjsRef "v16.2.0") does NOT count as an upstream reference', () => {
+    const versionOnly: QuarantineEntry = {
+      test: 'test/e2e/synthetic/version-pin.test.ts',
+      nextjsRef: 'v16.2.0',
+      evidence: 'run 28593534713: failed 3/3',
+      lane: 'node',
+    };
+    expect(upstreamRefs(versionOnly)).toEqual([]);
+    expect(quarantineEntryProblems(versionOnly).join(' ')).toMatch(/upstream/i);
+  });
+
+  it('every LIVE entry is SCANNED (not enumerated) and rests on a named issue/PR ref', () => {
+    expect(quarantines.length).toBeGreaterThan(0);
+    const unbacked = quarantines.filter((e) => upstreamRefs(e).length === 0).map((e) => e.test);
+    expect(
+      unbacked,
+      `these live quarantines cite no real issue/PR ref (a run id no longer counts): ${unbacked.join(', ')}`,
+    ).toEqual([]);
   });
 });
