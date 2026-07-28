@@ -46,6 +46,7 @@
       "import": "./dist/validate-public.js",
       "default": "./dist/validate-public.js"
     },
+    "./internal/cache-drain": "./dist/adapters/cache-write-registry.js",
     "./internal/cache-control-normalize": "./dist/adapters/cache-control-normalize.cjs",
     "./internal/bun-keepalive-guard": "./dist/adapters/bun-keepalive-guard.cjs",
     "./internal/sandbox-fetch-debug": "./dist/adapters/sandbox-fetch-debug.cjs",
