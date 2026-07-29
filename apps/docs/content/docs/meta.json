@@ -13,6 +13,7 @@
     "bun-runtime",
     "image-optimization",
     "---Deploy lifecycle---",
+    "upgrading",
     "rollback",
     "previews",
     "skew-protection",
