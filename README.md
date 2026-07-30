@@ -191,7 +191,7 @@ pnpm install
 Create `kn-next.config.ts` in your app directory:
 
 ```typescript
-import type { KnativeNextConfig } from '@kn-next/config';
+import type { KnativeNextConfig } from '@getknext/core';
 
 const config: KnativeNextConfig = {
   name: 'my-app',

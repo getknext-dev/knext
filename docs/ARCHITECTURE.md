@@ -54,7 +54,7 @@ The `next-adapter.ts` (`NextAdapter`) hooks into `modifyConfig` (enforce standal
 
 ### 2. kn-next Package
 
-The `@kn-next/config` package provides pluggable adapters:
+The `@getknext/core` package provides pluggable adapters:
 
 | Adapter | Purpose | Implementation |
 | --------- | --------- | ---------------- |
