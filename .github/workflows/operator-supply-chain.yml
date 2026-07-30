@@ -32,8 +32,9 @@ name: Operator Supply Chain
 # hack/check-no-latest.sh — that guard rejects :latest, not unreachable digests).
 # After the push, the "Build installer + pin real digest" step rewrites
 # dist/install.yaml with the real pushed digest and attaches it to the GitHub
-# Release tagged `operator-latest`, so the README's
-# releases/latest/download/install.yaml URL resolves.
+# Release tagged `operator-latest`. Docs address that asset by its OWN tag
+# (releases/download/operator-latest/install.yaml) and must keep doing so —
+# see the note on the release step below for why /releases/latest/ is not usable.
 #
 # Path discipline (review fix): this job does NOT set a run.working-directory
 # default. A job-level default only applies to `run:` steps, NOT to `uses:` action
@@ -303,11 +304,19 @@ jobs:
           name: operator-install-bundle-${{ github.sha }}
           path: packages/kn-next-operator/dist/install.yaml
 
-      # User-facing install path (review fix): attach the digest-pinned bundle to a
-      # GitHub Release so `releases/latest/download/install.yaml` resolves (the URL the
-      # operator README documents). The tag is a moving `operator-latest` release that
-      # is re-pointed to the current main on every publish; make_latest keeps the
-      # `releases/latest/...` redirect resolving to it.
+      # User-facing install path: attach the digest-pinned bundle to a GitHub Release
+      # tagged `operator-latest`, re-pointed to the current main on every publish.
+      #
+      # `make_latest` below does NOT make `/releases/latest/download/install.yaml` a
+      # dependable URL, and the docs must not use it. GitHub resolves /releases/latest/
+      # to the most RECENTLY PUBLISHED release repo-wide — and this repo also cuts npm
+      # package releases (`@getknext/core@…`, `@getknext/db@…`). Each of those steals the
+      # pointer, and they carry no assets, so the URL returns 404 until the next operator
+      # publish. That is exactly what happened: after the 2026-07-26 package releases the
+      # documented install command 404'd for every user. Docs now address the asset by
+      # tag (`releases/download/operator-latest/install.yaml`), which no other release
+      # can steal. make_latest is kept only so the operator release is the repo's default
+      # view immediately after a publish — never rely on it for asset URLs.
       - name: Publish install.yaml as a Release asset (main only)
         if: github.ref == 'refs/heads/main'
         uses: softprops/action-gh-release@v2

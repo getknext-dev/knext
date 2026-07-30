@@ -44,8 +44,17 @@
      `dist/install.yaml` with the **real** `@sha256:` digest;
    - runs **`hack/check-published-digest.sh`** — fails the run if the all-zeros
      placeholder somehow survived the re-pin (so a placeholder can never ship);
-   - publishes `dist/install.yaml` as the `operator-latest` GitHub Release asset,
-     so `releases/latest/download/install.yaml` resolves.
+   - publishes `dist/install.yaml` as the `operator-latest` GitHub Release asset.
+
+   **The asset is addressed by its own tag, NOT by `/releases/latest/`.** That
+   distinction is load-bearing and was learned the hard way: GitHub's
+   `/releases/latest/` resolves to the most **recently published** release in the
+   repo, not to a release named "latest". Because this repo also cuts npm package
+   releases (`@getknext/core@…`, `@getknext/db@…`), every package publish steals the
+   `latest` pointer from `operator-latest` — and those package releases carry no
+   assets, so `releases/latest/download/install.yaml` returns **HTTP 404** (verified).
+   Always publish and document the tag-addressed URL:
+   `https://github.com/getknext-dev/knext/releases/download/operator-latest/install.yaml`
 
 3. **Commit the real digest back to the repo.** The workflow re-pins
    `dist/install.yaml` for the Release asset, but the **committed**
@@ -77,7 +86,7 @@ bash packages/kn-next-operator/hack/check-published-digest.sh \
 
 # 3) Clean-cluster install (cert-manager + Knative Serving + Kourier present):
 kubectl apply --server-side -f \
-  https://github.com/getknext-dev/knext/releases/latest/download/install.yaml
+  https://github.com/getknext-dev/knext/releases/download/operator-latest/install.yaml
 kubectl wait --for=condition=Available --timeout=300s \
   -n kn-next-operator-system deployment/kn-next-operator-controller-manager
 
