@@ -81,6 +81,12 @@ node-compile-cache/
 # Local scratch / planning artifacts (never part of the repo)
 knext-plan-out/
 .superteam/
+# Agent gate verdicts and per-task worktrees. Both are per-session artifacts of
+# how the work was done, not the work. `.claude/worktrees/` was only ever ignored
+# via `.git/info/exclude`, which is local to one clone and shared with nobody —
+# so every other contributor saw it as untracked. Ignore both here instead.
+.claude/verdicts/
+.claude/worktrees/
 .maturity-brief.md
 .migration-spec.md
 skills-lock.json
