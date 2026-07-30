@@ -24,16 +24,17 @@
   // that the root test files are ACTUALLY in the program (an include that
   // silently matches nothing is a permanently-green gate that checks nothing).
   //
-  // SCOPE RATCHET (the one floor this config sits below, stated rather than
-  // hidden): the standalone `scripts/*.ts` ENTRY POINTS are not in `include`.
-  // They carry pre-existing debt that is out of scope for #527 — notably
-  // scripts/print-config.ts imports `../packages/cn-next/src/loader`, a path
-  // that does not exist (a dead file), plus TS7017/TS18046/TS7006 in
-  // resolve-client-manifest.ts and test-isolate-dashboard.ts. Ratchet them in
-  // once that debt is fixed; do NOT lower `strict` to swallow it. Note this is
-  // a floor on SCOPE, not on strictness, and it is narrower than it looks:
-  // scripts/lib/*.ts (manifest-patch.ts, names.ts) ARE checked, because the
-  // root tests import them and tsc follows imports into the program.
+  // SCOPE RATCHET — the debt this floor existed for is GONE, not deferred. The
+  // three standalone `scripts/*.ts` entry points that carried it were deleted as
+  // dead code: print-config.ts (imported `../packages/cn-next/src/loader`, a path
+  // that never existed), resolve-client-manifest.ts and test-isolate-dashboard.ts
+  // (TS7017/TS18046/TS7006, and nothing invoked either one). The ratchet this
+  // comment asked for was therefore satisfied by removal rather than by fixing.
+  // Any NEW standalone `scripts/*.ts` entry point should go straight into
+  // `include`; do NOT re-open a scope floor here, and never lower `strict` to
+  // swallow a diagnostic. Note the surviving nuance: scripts/lib/*.ts
+  // (manifest-patch.ts, names.ts) ARE checked, because the root tests import them
+  // and tsc follows imports into the program.
   //
   // `allowJs: true` + `checkJs: false`: the root tests import untyped
   // `scripts/**/*.mjs` helpers. Without allowJs every such import is an
@@ -41,10 +42,16 @@
   // tests do their work. With it, tsc infers real types from the JS while
   // still not error-checking the JS itself (that is not this issue's scope).
   //
-  // NOT covered, deliberately: vitest.workspace.ts. It is dead — it imports
-  // `defineWorkspace`, removed in vitest 4 (the repo is on vitest 4, and
-  // nothing references the file). Deleting it is a separate change; including
-  // it here would mean landing this gate red.
+  // NOT covered, deliberately: vitest.workspace.ts. It stays excluded — but the
+  // reason this comment used to give was WRONG and is corrected here rather than
+  // repeated. It said the file "is dead — it imports `defineWorkspace`, removed in
+  // vitest 4 ... and nothing references the file", and invited deleting it as "a
+  // separate change". That was measured and is false: on vitest 4.0.18 the file is
+  // still loaded, and it is what puts `apps/**` tests under happy-dom. Deleting it
+  // (with nothing else changed) turns apps/file-manager/bun-portability.test.ts RED
+  // — restoring only that file turns it green again. So the exclusion here is a
+  // typecheck-scope decision about a LIVE file, not a headstone for a dead one.
+  // Do not delete vitest.workspace.ts on the strength of the old note.
   //
   // module/moduleResolution are bundler semantics for the same reason
   // packages/db/tsconfig.typecheck.json uses them: these files are loaded by
