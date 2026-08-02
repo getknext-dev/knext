@@ -5,7 +5,7 @@ description: Public-surface, contract, and versioning discipline for knext as a 
 
 # Framework Design Discipline (knext)
 
-knext is consumed by **outside users** (`npx kn-next`, `@kn-next/*` packages, the `NextApp` CRD).
+knext is consumed by **outside users** (`npx kn-next`, `@getknext/*` packages, the `NextApp` CRD).
 Once published, its **surfaces are contracts**. Treat changes to them with versioning discipline.
 
 ## Define the public surface explicitly

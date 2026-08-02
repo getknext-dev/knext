@@ -24,6 +24,13 @@ bundles/
 *.tar.gz
 # scripts/rename-for-ghp.mjs staging output (interim GitHub Packages channel)
 .ghp-staging/
+# `bootstrap.js` / `bootstrap` / `server` were the output of the Bun
+# bootstrap→bytecode-binary spike (scripts/build-bootstrap.sh, bundle-assets.ts,
+# generate-bun-manifest.ts, spike-pipeline.sh). All four scripts are deleted, so
+# nothing produces these names any longer. The current opt-in Bun single-executable
+# path is examples/bun-exec/ (ADR-0036), whose output is covered by the
+# `apps/*/**/*-server` rule below. Kept only so a stale local file from the old
+# pipeline cannot be committed by someone with an old checkout; safe to drop later.
 bootstrap.js
 bootstrap
 server
@@ -81,6 +88,19 @@ node-compile-cache/
 # Local scratch / planning artifacts (never part of the repo)
 knext-plan-out/
 .superteam/
+# Knowledge-graph output. It was ignored only by one maintainer's *global*
+# ~/.gitignore_global, which protects exactly one machine: on any other clone
+# `graphify-out/` shows as untracked and is one `git add .` away from committing a
+# multi-megabyte generated graph. It also made the repo's own `pnpm run lint` fail
+# locally after any graphify run, because biome's `useIgnoreFile` reads .gitignore
+# and never saw it.
+graphify-out/
+# Agent gate verdicts and per-task worktrees. Both are per-session artifacts of
+# how the work was done, not the work. `.claude/worktrees/` was only ever ignored
+# via `.git/info/exclude`, which is local to one clone and shared with nobody —
+# so every other contributor saw it as untracked. Ignore both here instead.
+.claude/verdicts/
+.claude/worktrees/
 .maturity-brief.md
 .migration-spec.md
 skills-lock.json

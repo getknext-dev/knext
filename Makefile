@@ -66,12 +66,20 @@ port-forward:
 	kubectl port-forward -n observability svc/jaeger-query 16686:16686 &
 	@echo "Port-forwards started in background. Press Ctrl+C to stop."
 
+# Local build-output cleanup only.
+#
+# This target used to `kubectl delete -f ./apps/file-manager/.output/{knative-service,
+# knative-image-cache,postgres,redis,observability}.yaml`. Nothing generates those
+# files any more: ADR-0001 consolidation removed the CLI's raw-manifest emission, so
+# every cluster write now goes through the NextApp CR. The deletes were silently
+# no-ops (`--ignore-not-found=true` hid that), which is worse than absent — it read
+# as "this tears the deployment down" while tearing nothing down.
+#
+# Deleting a knext deployment now means deleting the CR that owns it:
+#   kubectl delete nextapp <name>
+# The operator reconciles the owned Knative/infra objects away. Do NOT reintroduce
+# raw `kubectl delete -f` of generated manifests here.
 clean:
-	@echo "Cleaning up resources..."
-	kubectl delete -f ./apps/file-manager/.output/knative-service.yaml --ignore-not-found=true
-	kubectl delete -f ./apps/file-manager/.output/knative-image-cache.yaml --ignore-not-found=true
-	kubectl delete -f ./apps/file-manager/.output/postgres.yaml --ignore-not-found=true
-	kubectl delete -f ./apps/file-manager/.output/redis.yaml --ignore-not-found=true
-	kubectl delete -f ./apps/file-manager/.output/observability.yaml --ignore-not-found=true
+	@echo "Removing local build output..."
 	rm -rf ./apps/file-manager/.output
-	@echo "Cleanup complete!"
+	@echo "Done. To remove a deployment: kubectl delete nextapp <name>"

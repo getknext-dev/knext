@@ -68,8 +68,12 @@ const COVERED_TIERS: Array<{ label: string; files: () => string[] }> = [
   { label: 'tests/**/*.ts', files: () => tsFilesUnder(join(REPO_ROOT, 'tests')) },
   { label: 'turbo/**/*.ts', files: () => tsFilesUnder(join(REPO_ROOT, 'turbo')) },
   {
-    // vitest.workspace.ts is the one documented exclusion: it is dead code
-    // (imports `defineWorkspace`, removed in vitest 4) — see the config comment.
+    // vitest.workspace.ts is the one documented exclusion. NOTE: it is excluded
+    // from TYPECHECK SCOPE, not because it is dead — the older note here claimed
+    // it was dead code and safe to delete, which was measured and is false. On
+    // vitest 4.0.18 it is still loaded and is what puts `apps/**` under happy-dom;
+    // deleting it turns apps/file-manager/bun-portability.test.ts red. See the
+    // corrected explanation in tsconfig.typecheck.json.
     label: 'root vitest.*.ts',
     files: () =>
       readdirSync(REPO_ROOT)
