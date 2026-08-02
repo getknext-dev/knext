@@ -256,6 +256,76 @@ connection string as `DATABASE_URL_RO`, so bounded-stale reads can go to a repli
 carrying both keys can serve both fields. See [Databases](/docs/databases).
 </Callout>
 
+## 11 · Make the database scale to zero too
+
+So far ACME sleeps but its database does not — you are still paying for an always-on Postgres behind
+an app that costs nothing while idle. That is the wrong shape, and it is the one most self-hosted
+setups are stuck with.
+
+**`scale-zero-pg`** closes it: native PostgreSQL that consumes **zero compute while idle** and wakes
+on the first client connection. It is native Postgres 17 on Neon's open-source storage stack
+(Apache-2.0); the only bespoke piece is a small Go gateway that holds the connection while the
+database wakes. It ships in this repository under `packages/scale-zero-pg`.
+
+Deploy it:
+
+```bash title="shell"
+kubectl apply -f packages/scale-zero-pg/deploy/
+```
+
+That creates a `scale-zero-pg` namespace containing durable WAL storage (three safekeepers at a 2/3
+write quorum), a pageserver, object storage, a wake-on-connect gateway — and the Postgres compute
+itself at **`replicas: 0`**.
+
+<Callout type="info">
+Zero replicas is not a broken deploy. The database is asleep and correct: it wakes on the first
+connection. This is the same idea as `minScale: 0` for the app, applied to Postgres.
+</Callout>
+
+Point ACME at the gateway rather than at Postgres directly — the gateway is what makes waking
+transparent:
+
+```bash title="shell"
+kubectl create secret generic acme-db \
+  --from-literal=DATABASE_URL='postgres://cloud_admin:cloud_admin@pggw.scale-zero-pg.svc:55432/postgres?sslmode=disable'
+```
+
+Your `kn-next.config.ts` does not change at all — it still just names the Secret. That is the point
+of binding by reference: **swapping an always-on Postgres for a scale-to-zero one is a Secret
+change**, with no change to ACME's code or config.
+
+### Watch both tiers sleep
+
+Two terminals. The app:
+
+```bash title="shell"
+kubectl get pods -l serving.knative.dev/service=acme -w
+```
+
+And the database:
+
+```bash title="shell"
+kubectl -n scale-zero-pg get pods -l app=compute -w
+```
+
+Leave it alone. The app pod goes after ~90 seconds; the database compute goes after ~60 seconds
+idle. Both lists empty. **Nothing is running, and nothing is billing compute.**
+
+Now make one request that touches the database. Both wake: the app cold-starts, its first query
+opens a connection, the gateway holds it while the compute scales 0→1, and the query returns.
+
+Measured on the project's own clusters: the database's cold wake is **~2.5s**, or **~0.4s** on the
+opt-in warm tier. That is on top of the app's own cold start — so a first request after full idle
+pays both, and it is worth knowing that before you decide idle cost matters more than tail latency.
+The [benchmarks](/docs/scale-to-zero) publish distributions rather than a single number.
+
+<Callout type="info">
+**Want a database per app rather than one shared instance?** `scale-zero-pg` supports DB-per-app
+multi-tenancy — each app gets its own branch on one storage plane, sleeping and waking
+independently, declared with an `AppDatabase` custom resource. See
+`packages/scale-zero-pg/docs/getting-started.md`.
+</Callout>
+
 ### The part that surprises people
 
 Scale-to-zero and databases interact, and the interaction is the thing worth understanding:
@@ -274,7 +344,7 @@ Scale-to-zero and databases interact, and the interaction is the thing worth und
 [Databases](/docs/databases) has the pooler settings, the timeout guidance, and the typed
 `@getknext/db` client for querying with a writer/reader split.
 
-## 11 · When something goes wrong
+## 12 · When something goes wrong
 
 | Symptom | First thing to run |
 |---|---|
@@ -282,9 +352,9 @@ Scale-to-zero and databases interact, and the interaction is the thing worth und
 | Deploy succeeds, app never becomes Ready | `npx kn-next status` — it reports the real condition |
 | Apply is rejected for an unknown field | Your operator is probably older than your CLI. Upgrade the operator first, then the CLI — see [Upgrading](/docs/upgrading) |
 | Assets 404 in the browser | Check `storage.publicUrl` matches where the bucket actually serves, and that the provider CLI was authenticated during the build |
-| Database errors only on the first request after idle | A cold-wake timeout, not a database fault — see step 10 |
+| Database errors only on the first request after idle | A cold-wake timeout, not a database fault — see steps 10–11 |
 
-## 12 · Clean up
+## 13 · Clean up
 
 ```bash title="shell"
 kubectl delete nextapp acme
