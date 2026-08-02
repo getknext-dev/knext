@@ -449,7 +449,7 @@ jobs:
       # Build the production image. The Dockerfile's `RUN node -e require('sharp')`
       # verification (AC#3) fails the build here if sharp's musl runtime is missing.
       - name: Build production Docker image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: apps/file-manager/Dockerfile
