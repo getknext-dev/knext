@@ -1,0 +1,97 @@
+---
+title: Upgrading knext
+description: Upgrade the operator and CRD before the CLI, and what the deploy-time schema check does when you don't.
+---
+
+knext has two pieces that version independently: the **operator** (with its `NextApp` CRD) running
+in your cluster, and the **CLI** (`@getknext/core`) running on your machine or in CI.
+
+They are deliberately not lockstep — but when you upgrade them, the order matters.
+
+> **Upgrade the operator and its CRD first, then the CLI.**
+
+## Why the order matters
+
+`kn-next deploy` describes your app as a `NextApp` custom resource and applies it to the cluster.
+The CRD installed by the operator defines which fields that resource may contain.
+
+A **newer CLI** can emit a field a **older CRD** has never heard of. knext applies with strict
+validation on purpose, so the cluster **rejects** that resource rather than silently accepting it
+and dropping the field. Silently dropping it would be worse: your deploy would report success while
+the setting you asked for simply vanished — a TLS setting, a database credential reference, a
+scaling bound.
+
+So the failure you get from upgrading in the wrong order is loud and safe. It is still a failure.
+
+## The safe direction
+
+An **older CLI against a newer CRD is always fine.** A newer CRD understands every field an older
+CLI knows how to emit. You do not need to upgrade both at once, and you do not need to keep them on
+matching versions — you only need to avoid the CLI running ahead of the cluster.
+
+That is what makes "operator first" a rule you can follow incrementally: upgrade the cluster when it
+suits you, and upgrade CLIs afterwards at whatever pace your team and CI move.
+
+## What it looks like when the order is wrong
+
+`kn-next deploy` stops **before it changes anything** and names the field:
+
+```
+PREFLIGHT FAILED: the NextApp CRD installed on this cluster does not know field(s) this
+CLI emits, so the CR would be rejected (or, under a client that does not assert strict
+validation, SILENTLY PRUNED):
+  - spec.database.roSecretRef
+Upgrade order is load-bearing: upgrade the OPERATOR/CRD first, THEN the CLI.
+Nothing was built, uploaded or applied — this ran before any side effect.
+  kubectl get crd nextapps.apps.kn-next.dev -o jsonpath='{.spec.versions[*].name}'
+  kn-next doctor
+```
+
+Three things to note.
+
+**Nothing was uploaded.** The check runs as the very first step that touches your cluster — before
+the build is pushed and before any assets are uploaded to object storage. A failed deploy leaves no
+half-written state behind and no orphaned files to clean up.
+
+**It names the field.** You get the specific setting your cluster cannot store, not a generic
+validation error, so you can tell immediately whether the gap matters for this deploy.
+
+**For some fields it also tells you what the gap would have cost.** If the missing field is one
+where silently dropping it would weaken your setup rather than merely change it, the message says
+so. `spec.database.roSecretRef` is the clearest example: without it the operator never injects a
+read-only database URL, so reads that were meant for a replica fall back to the read-write
+credential — and the app would still report healthy.
+
+## Checking before you deploy
+
+`kn-next doctor` reports whether the cluster's CRD covers the fields your CLI emits, so you can
+find a version gap without running a deploy at all:
+
+```bash
+npx kn-next doctor
+```
+
+If `doctor` cannot read your cluster's full schema — some restricted credentials cannot — it will
+say so rather than guess. The deploy-time check does not depend on that permission: it works with
+exactly the access a deploy already needs, so a restricted credential can still deploy safely.
+
+## Upgrading the operator
+
+Apply the operator release for the version you want, then confirm the CRD is in place:
+
+```bash
+kubectl get crd nextapps.apps.kn-next.dev
+```
+
+Once that reports the version you expect, upgrade the CLI:
+
+```bash
+npm install -D @getknext/core@latest
+```
+
+## What this does not cover
+
+Deployment tools that apply manifests directly to your cluster — GitOps controllers, for example —
+do not go through `kn-next deploy`, so they do not get the preflight check described above. If you
+apply `NextApp` resources through such a tool, keep the same upgrade order yourself: the cluster is
+still the thing that decides which fields it can store.
