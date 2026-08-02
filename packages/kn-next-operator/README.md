@@ -19,7 +19,7 @@ ksvc — issue #59 / ADR-0010).
 Install knext's control plane with a single apply:
 
 ```sh
-kubectl apply --server-side -f https://github.com/getknext-dev/knext/releases/latest/download/install.yaml
+kubectl apply --server-side -f https://github.com/getknext-dev/knext/releases/download/operator-latest/install.yaml
 ```
 
 > Use `--server-side` so the bundle's `config-network` **and** `config-features`
@@ -197,7 +197,7 @@ Users can just run 'kubectl apply -f <URL for YAML BUNDLE>' to install
 the project, i.e.:
 
 ```sh
-kubectl apply -f https://github.com/getknext-dev/knext/releases/latest/download/install.yaml
+kubectl apply -f https://github.com/getknext-dev/knext/releases/download/operator-latest/install.yaml
 ```
 
 ### By providing a Helm Chart
