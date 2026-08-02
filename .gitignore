@@ -121,3 +121,4 @@ skills-lock.json
 # benchmarks/scale-to-zero-oke/run.sh default output — a per-run artifact
 # against a live cluster, never checked in (#423).
 benchmarks/**/results/
+.vercel

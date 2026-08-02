@@ -93,8 +93,10 @@ export default function HomePage() {
               <div className={styles.n}>04</div>
               <h3>Multi-cloud, no lock-in</h3>
               <p>
-                One Go operator + a <code>NextApp</code> CRD reconciles your app on GKE, EKS, AKS,
-                OKE, or bare-metal. Object storage via gcs, s3, or minio. Your manifests are yours.
+                One Go operator + a <code>NextApp</code> CRD, on any Kubernetes cluster running
+                Knative Serving. Verified end-to-end on <strong>GKE, OKE and kind</strong>; portable
+                to EKS, AKS and bare-metal by design, not yet certified there. Object storage via
+                gcs, s3, azure or minio. Your manifests are yours.
               </p>
             </div>
           </div>

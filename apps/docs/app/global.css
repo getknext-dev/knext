@@ -20,11 +20,27 @@
   --display: 'Bricolage Grotesque', 'Times New Roman', serif;
   --mono: 'JetBrains Mono', ui-monospace, monospace;
 
-  /* Map the brand onto Fumadocs theme tokens (dark-first). */
-  --color-fd-background: var(--void);
-  --color-fd-foreground: var(--ink);
-  --color-fd-primary: var(--signal);
-  --color-fd-border: var(--line);
+  /* Light-theme brand mapping.
+   *
+   * `:root` IS the light theme in Fumadocs — `.dark` layers over it. This block
+   * previously carried the DARK brand values ("dark-first"), which set a near-black
+   * background and near-white text while the ~17 OTHER Fumadocs light tokens from
+   * neutral.css stayed light. The result was an unreadable hybrid: dark canvas,
+   * light-theme cards, muted text and borders. Dark mode looked fine only because
+   * there every token agreed.
+   *
+   * Acid lime cannot be the light-theme primary as-is: #ccff00 on white is ~1.4:1
+   * contrast, far under the 4.5:1 needed for text. --signal-ink is the same hue
+   * darkened until it passes, so the brand survives the theme switch. */
+  --signal-ink: #4d6600;
+
+  --color-fd-background: #fbfbfa;
+  --color-fd-foreground: #16181d;
+  --color-fd-primary: var(--signal-ink);
+  --color-fd-border: #e3e4e8;
+
+  /* Grid overlay tint — dark hairlines on a light canvas. */
+  --grid-line: #0000000a;
 }
 
 .dark {
@@ -32,13 +48,18 @@
   --color-fd-foreground: var(--ink);
   --color-fd-primary: var(--signal);
   --color-fd-border: var(--line);
+
+  /* Light hairlines on the void. */
+  --grid-line: #ffffff06;
 }
 
 body {
   font-family: var(--mono);
+  /* The grid must invert with the theme; a white-on-white grid is invisible and a
+   * dark-on-dark one is mud, so the colour is a token rather than a literal. */
   background-image:
-    linear-gradient(transparent 0 calc(100% - 1px), #ffffff06 100%),
-    linear-gradient(90deg, transparent 0 calc(100% - 1px), #ffffff06 100%);
+    linear-gradient(transparent 0 calc(100% - 1px), var(--grid-line) 100%),
+    linear-gradient(90deg, transparent 0 calc(100% - 1px), var(--grid-line) 100%);
   background-size: 64px 64px;
 }
 
