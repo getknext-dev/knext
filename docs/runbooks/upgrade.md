@@ -65,7 +65,7 @@ un-pinned ref sneaks in. So an upgrade is: apply a **newer** bundle.
 # (Recommended) verify the image signature before trusting the new bundle.
 # cosign keyless-signed via Sigstore (operator-supply-chain.yml):
 curl -sL -o install-new.yaml \
-  https://github.com/getknext-dev/knext/releases/latest/download/install.yaml
+  https://github.com/getknext-dev/knext/releases/download/operator-latest/install.yaml
 grep 'image: ghcr.io/getknext-dev/kn-next-operator' install-new.yaml   # note the @sha256 digest
 
 cosign verify ghcr.io/getknext-dev/kn-next-operator@sha256:<digest> \

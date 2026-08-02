@@ -1092,9 +1092,55 @@ YAML
   # TTL and see different output.
   local raw_logs metrics
   raw_logs=$(kc logs -n "$NS" "job/${name}" 2>/dev/null)
+
+  # (#551) Keep EVERY k6 metric row, not a hand-picked subset.
+  #
+  # The old filter named six metrics and silently dropped the rest — including
+  # http_req_connecting, http_req_waiting and http_req_tls_handshaking, which are
+  # exactly the fields that separate the candidate causes of a slow sample:
+  #   connecting / tls_handshaking spike  => the ingress/activator path; the
+  #                                          request is waiting for capacity.
+  #   waiting spike                       => the pod path; the app itself is slow
+  #                                          once connected.
+  # Recording only http_req_duration makes those indistinguishable, so this
+  # harness was STRUCTURALLY unable to attribute a cold start from the day it was
+  # written. Run 24 measured a bimodal distribution (~2.5s vs ~10.5s, a clean ~8s
+  # gap) and could not say which interval the 8s went into — and those artifacts
+  # cannot be re-analysed, because the data was never written down.
+  #
+  # The rule this encodes: filter at READ time, never at write time. Anything
+  # dropped before it hits disk is unrecoverable, and cold-start runs are
+  # expensive to repeat. The volume is a few lines per sample.
+  #
+  # The pattern matches k6's summary rows (`  metric_name.........: values`) plus
+  # the two non-dotted lines the old filter kept. It stays anchored so it cannot
+  # swallow arbitrary application log output.
   metrics=$(printf '%s\n' "$raw_logs" \
-    | grep -E 'http_req_duration|http_req_failed|http_reqs|iteration_duration|checks\.\.\.|vus_max|dropped' \
+    | grep -E '^[[:space:]]*[a-z][a-z0-9_]*\.\.\.+:|checks\.\.\.|dropped' \
     | sed 's/^/    /')
+
+  # An ABSENT split is not a zero split. k6 omits these rows entirely on some
+  # versions and on a truncated flush; writing nothing would let a reader assume
+  # the field was measured and happened to be small, and writing 0 would assert
+  # "no time was spent connecting" — the opposite of the truth. Name the field
+  # and mark it unmeasured, so its absence is visible in the artifact itself.
+  #
+  # ONLY when the rep captured real metrics. Annotating an EMPTY capture would
+  # make `metrics` non-empty and silently defeat the "no k6 metrics captured"
+  # guard below (#425) — a rep that produced nothing would then look like a rep
+  # that produced something, which is the exact partial-dataset-masquerading-as-
+  # complete failure this harness exists to prevent. Caught by
+  # k6-metrics-integrity.test.sh, which is why that test is worth its runtime.
+  if [ -n "$metrics" ]; then
+    local split_key
+    for split_key in http_req_connecting http_req_waiting http_req_tls_handshaking; do
+      if ! printf '%s\n' "$metrics" | grep -qE "^[[:space:]]*${split_key}[^[:alnum:]_]"; then
+        metrics="${metrics}
+    ${split_key}.....: — <not reported by k6 — NOT measured, not zero>"
+      fi
+    done
+  fi
+
   [ -n "$metrics" ] && printf '%s\n' "$metrics" >> "$OUT"
 
   # Completeness is a check for an expected SET of keys, NOT a line count.

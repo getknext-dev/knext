@@ -6,8 +6,10 @@ deployed as its own Next.js app — behind a single public origin. This guide re
 provide as a control-plane primitive.
 
 > Related reading:
-> - `README-MULTI-ZONE.md` — the per-zone monorepo layout (`apps/main`, `apps/dashboard`,
->   `apps/users`, …) and the `basePath` / `assetPrefix` conventions this guide builds on.
+> - `README-MULTI-ZONE.md` — a **worked example** of a three-zone monorepo layout and the
+>   `basePath` / `assetPrefix` conventions this guide builds on. The zone names used there
+>   and here (`apps/main`, `apps/dashboard`, `apps/users`) are illustrative: they are not
+>   directories in this repo, and knext does not scaffold them for you yet.
 > - Skill `scs-zones` (`.claude/skills/scs-zones/SKILL.md`) and contract
 >   `.claude/rules/scs-zones.md` — the SCS macro-architecture: data sovereignty, per-zone
 >   PostgreSQL (CloudNativePG), cross-zone integration via async Kafka events + the browser.

@@ -61,7 +61,7 @@ Every `main` build of the operator publishes a digest-pinned install bundle
 GitHub release asset. Install it with one apply:
 
 ```sh
-kubectl apply --server-side -f https://github.com/getknext-dev/knext/releases/latest/download/install.yaml
+kubectl apply --server-side -f https://github.com/getknext-dev/knext/releases/download/operator-latest/install.yaml
 ```
 
 Use `--server-side` so the bundle's `config-network` and `config-features`
@@ -80,7 +80,7 @@ The operator image is signed with cosign (keyless, Sigstore). To verify before
 trusting it, read the pinned digest out of the bundle and check the signature:
 
 ```sh
-curl -sL -o install.yaml https://github.com/getknext-dev/knext/releases/latest/download/install.yaml
+curl -sL -o install.yaml https://github.com/getknext-dev/knext/releases/download/operator-latest/install.yaml
 grep 'image: ghcr.io/getknext-dev/kn-next-operator' install.yaml
 ```
 
