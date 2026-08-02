@@ -139,7 +139,7 @@ If you see `strict decoding error: unknown field` on `kn-next deploy`, `kn-next 
 upgrading the operator bundle first, then re-running:
 
 ```sh
-kubectl apply -f https://github.com/getknext-dev/knext/releases/latest/download/install.yaml
+kubectl apply -f https://github.com/getknext-dev/knext/releases/download/operator-latest/install.yaml
 kubectl get crd nextapps.apps.kn-next.dev -o jsonpath='{.spec.versions[*].name}'
 ```
 
