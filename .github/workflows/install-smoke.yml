@@ -37,7 +37,7 @@ jobs:
       # dep on @getknext/lib the same way `changeset publish` does). The INSTALL + RUN
       # legs use plain npm + node — the outside-consumer experience.
       - name: Setup pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
 
       - name: Install workspace dependencies
         run: pnpm install --frozen-lockfile

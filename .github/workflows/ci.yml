@@ -21,7 +21,7 @@ jobs:
           node-version: '24'
       
       - name: Setup pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
       
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -118,7 +118,7 @@ jobs:
           node-version: '24'
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -162,7 +162,7 @@ jobs:
           node-version: '24'
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
 
       - name: Setup Bun
         if: matrix.runtime == 'bun'
@@ -219,7 +219,7 @@ jobs:
           node-version: '24'
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -287,7 +287,7 @@ jobs:
           node-version: '24'
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -525,7 +525,7 @@ jobs:
           node-version: '24'
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -584,7 +584,7 @@ jobs:
 
       - name: Setup pnpm
         if: steps.filter.outputs.docs == 'true'
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
 
       - name: Install dependencies
         if: steps.filter.outputs.docs == 'true'
