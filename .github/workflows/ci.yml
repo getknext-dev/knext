@@ -444,7 +444,7 @@ jobs:
         run: node apps/file-manager/scripts/prod-image-probe.selftest.mjs
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       # Build the production image. The Dockerfile's `RUN node -e require('sharp')`
       # verification (AC#3) fails the build here if sharp's musl runtime is missing.
