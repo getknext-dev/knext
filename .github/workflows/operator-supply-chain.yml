@@ -96,7 +96,7 @@ jobs:
       # --input accepts an OCI layout directory but not an OCI tarball.
       - name: Build operator image (local OCI layout — pushed after the Trivy gate)
         id: build
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: packages/kn-next-operator
           file: packages/kn-next-operator/Dockerfile
