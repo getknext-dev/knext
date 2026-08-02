@@ -21,19 +21,19 @@ Knative Route     →  shifts revision traffic
 
 ```bash
 # Revert to the latest-ready revision (clear any pin)
-kn-next rollback storefront
+kn-next rollback acme
 
 # Pin 100% of traffic to a specific prior revision
-kn-next rollback storefront --to storefront-00002
+kn-next rollback acme --to acme-00002
 
 # Canary: send 20% to latest-ready, 80% to the pinned revision
-kn-next rollback storefront --to storefront-00002 --canary 20
+kn-next rollback acme --to acme-00002 --canary 20
 ```
 
 | Flag | Notes |
 |---|---|
 | `<app>` | Positional, optional. Defaults to `name` from your `kn-next.config`. |
-| `--to <revision>` | Pin to a named Knative Revision (e.g. `storefront-00002`). Omit to revert to latest-ready. |
+| `--to <revision>` | Pin to a named Knative Revision (e.g. `acme-00002`). Omit to revert to latest-ready. |
 | `--canary <n>` | Integer **1–99** only. Percentage sent to **latest-ready**; the remainder goes to the pinned revision. `0` is not "no canary" (omit the flag) and `100` would not be a rollback at all — both are rejected. Requires `--to`. |
 | `-n`, `--namespace` | Target namespace (default `default`). |
 
@@ -46,22 +46,22 @@ silently fall through to the opposite mutation (un-pinning when you asked to pin
 The `TrafficSpec` on the CR has two fields — `revisionName` and `canaryPercent`:
 
 ```yaml
-# kn-next rollback storefront --to storefront-00002
+# kn-next rollback acme --to acme-00002
 spec:
   traffic:
-    revisionName: storefront-00002
+    revisionName: acme-00002
 ```
 
 ```yaml
-# kn-next rollback storefront --to storefront-00002 --canary 20
+# kn-next rollback acme --to acme-00002 --canary 20
 spec:
   traffic:
-    revisionName: storefront-00002
+    revisionName: acme-00002
     canaryPercent: 20
 ```
 
 ```yaml
-# kn-next rollback storefront  (no --to)
+# kn-next rollback acme  (no --to)
 spec:
   traffic: null        # cleared → operator emits no spec.traffic → 100% latest-ready
 ```
@@ -82,7 +82,7 @@ The operator mirrors the Knative Service's observed traffic back into
 `NextApp.status.currentTraffic`, so the live split is readable straight off the CR:
 
 ```bash
-kubectl get nextapp storefront -o jsonpath='{.status.currentTraffic}'
+kubectl get nextapp acme -o jsonpath='{.status.currentTraffic}'
 ```
 
 Each entry carries `revisionName`, `percent`, and `latestRevision`. `kn-next status` renders the

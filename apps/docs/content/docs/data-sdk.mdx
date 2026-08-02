@@ -116,7 +116,7 @@ the database being ready and completed before app pods serve:
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: storefront-migrate
+  name: acme-migrate
   namespace: my-apps
 spec:
   backoffLimit: 2               # fail loud — never ship a half-applied schema
@@ -126,7 +126,7 @@ spec:
       restartPolicy: Never
       containers:
         - name: migrate
-          image: registry.example/storefront:<same-digest-as-the-deploy>
+          image: registry.example/acme:<same-digest-as-the-deploy>
           command: ['kn-next', 'db', 'migrate']
           env:
             # The WRITER DSN — the same Secret the operator injects into the app.
@@ -134,13 +134,13 @@ spec:
             - name: DATABASE_URL
               valueFrom:
                 secretKeyRef:
-                  name: storefront-db
+                  name: acme-db
                   key: DATABASE_URL
 ```
 
 ```bash
 kubectl apply -f migrate-job.yaml -n my-apps
-kubectl wait --for=condition=Complete job/storefront-migrate -n my-apps --timeout=300s
+kubectl wait --for=condition=Complete job/acme-migrate -n my-apps --timeout=300s
 ```
 
 `kubectl wait --for=condition=Complete` returns non-zero if the Job fails — wire it into your

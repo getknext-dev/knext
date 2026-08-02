@@ -26,9 +26,9 @@ digest-pinned.
 apiVersion: apps.kn-next.dev/v1alpha1
 kind: NextApp
 metadata:
-  name: storefront
+  name: acme
 spec:
-  image: registry/storefront@sha256:9f1c...   # required, digest-pinned
+  image: registry/acme@sha256:9f1c...   # required, digest-pinned
   scaling:
     minScale: 0
     maxScale: 20
@@ -38,11 +38,11 @@ spec:
                                                # the image by default; you no longer need this
   storage:
     provider: gcs
-    bucket: storefront-assets
+    bucket: acme-assets
   security:
     networkPolicy: {}                          # default-on internal-only isolation
 status:
-  url: https://storefront.apps.example.com
+  url: https://acme.apps.example.com
   conditions: []                               # Ready / Degraded / Reconciling
 ```
 
@@ -95,7 +95,7 @@ spec:
   secrets:
     envMap:
       DATABASE_URL:
-        secretName: storefront-db-app
+        secretName: acme-db-app
         secretKey: pooler-url
 ```
 
@@ -119,8 +119,8 @@ the [CLI reference](/docs/cli#kn-next-db-bind)).
 ```yaml title="nextapp.yaml (BYO database)"
 spec:
   database:
-    secretRef: { name: storefront-db }          # key defaults to DATABASE_URL
-    roSecretRef: { name: storefront-db }        # key defaults to DATABASE_URL_RO
+    secretRef: { name: acme-db }          # key defaults to DATABASE_URL
+    roSecretRef: { name: acme-db }        # key defaults to DATABASE_URL_RO
 ```
 
 A NextApp only binds a Secret in its **own** namespace — it can never name or reach into another

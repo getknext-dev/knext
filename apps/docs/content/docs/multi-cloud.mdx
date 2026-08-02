@@ -32,8 +32,8 @@ itself — it invokes the already-authenticated CLI.
 ```ts title="kn-next.config.ts"
 storage: {
   provider: 's3',                 // gcs | s3 | minio | azure
-  bucket: 'storefront-assets',    // bucket name — for azure, the blob container
-  publicUrl: 'https://cdn.example.com/storefront-assets',
+  bucket: 'acme-assets',    // bucket name — for azure, the blob container
+  publicUrl: 'https://cdn.example.com/acme-assets',
   // s3-compatible stores: set region / endpoint as needed
 },
 ```

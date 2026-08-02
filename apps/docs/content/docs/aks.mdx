@@ -64,7 +64,7 @@ Redis instance (or a self-hosted Redis Service). `cache.url` is required when th
 
 ## 5 · Registry — ACR
 
-Push the app image to Azure Container Registry, e.g. `<registry>.azurecr.io/storefront`. Attach ACR
+Push the app image to Azure Container Registry, e.g. `<registry>.azurecr.io/acme`. Attach ACR
 to the cluster (`az aks update --attach-acr`) so nodes can pull. The operator **rejects any image
 that is not digest-pinned** (`@sha256:…`); `kn-next deploy` resolves the digest automatically.
 
@@ -74,14 +74,14 @@ that is not digest-pinned** (`@sha256:…`); `kn-next deploy` resolves the diges
 import type { KnativeNextConfig } from '@getknext/core';
 
 const config: KnativeNextConfig = {
-  name: 'storefront',
-  registry: '<registry>.azurecr.io/storefront',
+  name: 'acme',
+  registry: '<registry>.azurecr.io/acme',
 
   storage: {
     provider: 'minio', // self-hosted MinIO (S3-API). Azure Blob is NOT supported.
-    bucket: 'storefront-assets',
+    bucket: 'acme-assets',
     endpoint: 'http://minio.minio.svc.cluster.local:9000',
-    publicUrl: 'https://assets.example.com/storefront-assets',
+    publicUrl: 'https://assets.example.com/acme-assets',
     accessKey: process.env.MINIO_ACCESS_KEY,
     secretKey: process.env.MINIO_SECRET_KEY,
   },
@@ -89,7 +89,7 @@ const config: KnativeNextConfig = {
   cache: {
     provider: 'redis',
     url: process.env.REDIS_URL || 'rediss://<name>.redis.cache.windows.net:6380',
-    keyPrefix: 'storefront',
+    keyPrefix: 'acme',
   },
 
   scaling: { minScale: 0, maxScale: 20 }, // minScale 0 = scale to zero
@@ -106,9 +106,9 @@ true` alongside the `rediss://` URL.
 ## 7 · Deploy
 
 ```sh
-kn-next deploy --registry <registry>.azurecr.io/storefront
+kn-next deploy --registry <registry>.azurecr.io/acme
 ```
 
 `kn-next deploy` builds the standalone image, pushes it (resolving the digest), and applies the
 `NextApp` CR; the operator reconciles it into a scale-to-zero Knative Service. Verify the resolved
-URL with `kubectl get ksvc storefront -o jsonpath='{.status.url}'`.
+URL with `kubectl get ksvc acme -o jsonpath='{.status.url}'`.

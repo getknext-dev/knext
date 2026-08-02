@@ -79,17 +79,17 @@ digest-pinned** (`@sha256:…`); `kn-next deploy` resolves the digest automatica
 import type { KnativeNextConfig } from '@getknext/core';
 
 const config: KnativeNextConfig = {
-  name: 'storefront',
-  registry: '<region-key>.ocir.io/<tenancy-namespace>/storefront',
+  name: 'acme',
+  registry: '<region-key>.ocir.io/<tenancy-namespace>/acme',
 
   storage: {
     provider: 's3', // OCI Object Storage is S3-compatible
-    bucket: 'storefront-assets',
+    bucket: 'acme-assets',
     region: '<region>', // e.g. us-ashburn-1
     endpoint:
       'https://<namespace>.compat.objectstorage.<region>.oraclecloud.com',
     publicUrl:
-      'https://<namespace>.compat.objectstorage.<region>.oraclecloud.com/storefront-assets',
+      'https://<namespace>.compat.objectstorage.<region>.oraclecloud.com/acme-assets',
     // S3-compatible access key / secret (an OCI Customer Secret Key). Prefer
     // injecting these via env/Secrets rather than committing them.
     accessKey: process.env.OCI_S3_ACCESS_KEY,
@@ -98,8 +98,8 @@ const config: KnativeNextConfig = {
 
   cache: {
     provider: 'redis',
-    url: process.env.REDIS_URL || 'redis://storefront-redis.default.svc.cluster.local:6379',
-    keyPrefix: 'storefront',
+    url: process.env.REDIS_URL || 'redis://acme-redis.default.svc.cluster.local:6379',
+    keyPrefix: 'acme',
   },
 
   scaling: { minScale: 0, maxScale: 20 }, // minScale 0 = scale to zero
@@ -111,7 +111,7 @@ export default config;
 ## 7 · Deploy and verify scale-to-zero
 
 ```sh
-kn-next deploy --registry <region-key>.ocir.io/<tenancy-namespace>/storefront
+kn-next deploy --registry <region-key>.ocir.io/<tenancy-namespace>/acme
 ```
 
 `kn-next deploy` builds the standalone image, pushes it (resolving the digest), and applies the
@@ -120,11 +120,11 @@ when idle:
 
 ```sh
 # After the idle window, the app's pods should be gone:
-kubectl get pods -l serving.knative.dev/service=storefront
+kubectl get pods -l serving.knative.dev/service=acme
 # (no resources) — the ksvc scaled to zero
 
 # The next request cold-starts a pod; the URL resolves either way:
-kubectl get ksvc storefront -o jsonpath='{.status.url}'
+kubectl get ksvc acme -o jsonpath='{.status.url}'
 ```
 
 A cold request reprovisions a pod; the compile cache baked into your image shortens that cold start

@@ -1,14 +1,34 @@
 ---
-title: "Tutorial: your first project"
-description: Build a Next.js project from an empty directory to a scale-to-zero Knative service, and watch it sleep and wake.
+title: "Tutorial: deploy ACME"
+description: Build ACME — a small Next.js storefront — from an empty directory to a scale-to-zero Knative service with a Postgres database, and watch it sleep and wake.
 ---
 
-A start-to-finish walkthrough: empty directory → a running Next.js app that **scales to zero** when
-idle and wakes on the next request. Roughly 20 minutes, most of it waiting on a container build.
+You are going to deploy **ACME**, a small storefront, and watch it fall asleep when nobody is using
+it and wake up when somebody is. Then you will give it a database and see how that changes the
+picture.
 
-[Getting started](/docs/getting-started) is the reference version of these steps for an app you
-already have. This page is the guided one, and it ends by proving the app really does sleep — which
-is the part worth seeing.
+ACME is the same example used across [Getting started](/docs/getting-started), the
+[CLI reference](/docs/cli) and the rest of these docs, so anything you learn here transfers.
+
+**You do not need to be a Kubernetes expert.** You do need a cluster to deploy to — the section
+after next is honest about how to get one.
+
+## New to Kubernetes? Six words, then we start
+
+Every term you meet below, in one line each. Skip this if they are already familiar.
+
+| Word | What it means here |
+|---|---|
+| **Cluster** | A pool of machines that runs your containers. You rent one from a cloud, or run a small one locally. |
+| **Pod** | One running copy of your app. Scale-to-zero means the number of pods can drop to **none**. |
+| **Knative** | Software installed *into* the cluster that starts and stops pods for you based on traffic. It is what makes zero possible. |
+| **Operator** | A program running in the cluster that watches for your instructions and carries them out. knext ships one. |
+| **Custom resource** | Your instructions, as a file. You write "I want ACME, scaled to zero"; the operator makes it so. |
+| **Ready** | The cluster's own word for "this is actually serving traffic". Not "deployed" — *working*. |
+
+The shape of the whole thing: **you describe what you want, the operator makes it true.** You will
+never create a Knative Service by hand in this tutorial, because the CLI does not either — it hands
+the operator a `NextApp` resource and the operator owns everything downstream of that.
 
 ## What you need first
 
@@ -16,24 +36,28 @@ This tutorial deploys to a **real cluster**. Three things must exist before step
 is knext:
 
 1. **A Kubernetes cluster with Knative Serving**, and the knext operator installed on it — see
-   [Install](/docs/install). Without Knative there is nothing to scale to zero.
+   [Install](/docs/install). Without Knative there is nothing to scale to zero. Any cluster works:
+   a managed one (GKE, EKS, AKS, OKE) or a local one.
 2. **A container registry** you can push to, and that your cluster can pull from.
 3. **An object-storage bucket** on `gcs`, `s3`, `minio`, or `azure`, with that provider's CLI
    (`gsutil` / `aws` / `mc` / `az`) installed **and authenticated** where you run the build. knext
-   shells out to it to upload static assets.
+   shells out to it to upload your static files.
 
 <Callout type="warn">
 There is no local-only path in this tutorial. Everything below assumes a cluster you can reach with
 `kubectl`. If `kubectl get ksvc` fails, stop and fix that first — every later step depends on it.
 </Callout>
 
+If that list looks like a lot: it is the standing cost of self-hosting. You are buying no vendor
+lock-in with it, and you pay it once per cluster, not once per app.
+
 ## 1 · Create the Next.js app
 
 Nothing knext-specific yet. Any Next.js 16 app works; this is just to have something real to deploy.
 
 ```bash title="shell"
-npx create-next-app@latest my-first-knext-app --ts --app
-cd my-first-knext-app
+npx create-next-app@latest acme --ts --app
+cd acme
 ```
 
 ## 2 · Add knext
@@ -101,12 +125,12 @@ Create `kn-next.config.ts` next to `next.config.ts`. Only three things are requi
 import type { KnativeNextConfig } from '@getknext/core';
 
 const config: KnativeNextConfig = {
-  name: 'my-first-knext-app',
-  registry: 'registry.example.com/my-first-knext-app',
+  name: 'acme',
+  registry: 'registry.example.com/acme',
   storage: {
     provider: 'gcs',
-    bucket: 'my-first-knext-app-assets',
-    publicUrl: 'https://storage.googleapis.com/my-first-knext-app-assets',
+    bucket: 'acme-assets',
+    publicUrl: 'https://storage.googleapis.com/acme-assets',
   },
   scaling: { minScale: 0, maxScale: 10 },
 };
@@ -165,7 +189,7 @@ curl -sSf <the-URL-status-printed>/ > /dev/null && echo OK
 This is what you came for. Leave the app alone and watch its pods:
 
 ```bash title="shell"
-kubectl get pods -l serving.knative.dev/service=my-first-knext-app -w
+kubectl get pods -l serving.knative.dev/service=acme -w
 ```
 
 Give it about **90 seconds** — Knative waits out a 60s stable window and then a 30s grace period
@@ -192,19 +216,78 @@ measured distributions rather than a single headline number, because on a conten
 spread is wide enough that a median would mislead you. See [Scale to zero](/docs/scale-to-zero).
 </Callout>
 
-## 10 · When something goes wrong
+## 10 · Give ACME a database
+
+A storefront needs to remember things. This is where scale-to-zero gets interesting, because **an
+app that sleeps has to reconnect every time it wakes.**
+
+knext **provisions nothing**. It is engine-agnostic by design: you bring a Postgres — managed,
+serverless, or a CloudNativePG cluster in the same Kubernetes cluster — and knext binds its
+connection string into your pods. Swapping providers later is a change to one Secret, with no change
+to your app or your config.
+
+**First, put the connection string in a Kubernetes Secret.** A Secret is just a named bag of values
+the cluster holds for you, so the DSN never sits in your repo or your image:
+
+```bash title="shell"
+kubectl create secret generic acme-db \
+  --from-literal=DATABASE_URL='postgres://user:pass@host:5432/acme'
+```
+
+**Then reference it by name.** Add a `database` block to `kn-next.config.ts`:
+
+```ts title="kn-next.config.ts"
+const config: KnativeNextConfig = {
+  name: 'acme',
+  // …registry, storage, scaling as above…
+  database: {
+    secretRef: { name: 'acme-db' },
+  },
+};
+```
+
+Redeploy with `npx kn-next` and your pods come up with `DATABASE_URL` in their environment. Note
+what you did *not* do: you never put the password in a file, and the app never learned which
+provider it is talking to.
+
+<Callout type="info">
+Reads and writes can be split. Add `roSecretRef` alongside `secretRef` and knext binds a second
+connection string as `DATABASE_URL_RO`, so bounded-stale reads can go to a replica. One Secret
+carrying both keys can serve both fields. See [Databases](/docs/databases).
+</Callout>
+
+### The part that surprises people
+
+Scale-to-zero and databases interact, and the interaction is the thing worth understanding:
+
+- **Every cold start is a fresh connection.** A pod that was terminated took its connection pool
+  with it. Put a **connection pooler** (PgBouncer, pgcat) between ACME and Postgres, and point the
+  DSN at the pooler rather than the primary — otherwise a burst of waking pods opens a burst of
+  connections and the database, not the app, becomes the bottleneck.
+- **If your database also sleeps** — many serverless Postgres providers scale to zero too — then the
+  first request after an idle period wakes *both*. Set the client's connect timeout comfortably
+  above your database's own cold-wake time, or the app gives up before the database has finished
+  waking and reports an error that looks like a database fault but is a timeout you chose.
+- **A burst of cold pods shares one wake.** The pool single-flights the 0→1 database wake: the first
+  request triggers it and the rest wait on the same wake rather than each starting their own.
+
+[Databases](/docs/databases) has the pooler settings, the timeout guidance, and the typed
+`@getknext/db` client for querying with a writer/reader split.
+
+## 11 · When something goes wrong
 
 | Symptom | First thing to run |
 |---|---|
 | Deploy fails before the build | `npx kn-next doctor` |
 | Deploy succeeds, app never becomes Ready | `npx kn-next status` — it reports the real condition |
-| Apply is rejected for an unknown field | Your operator is probably older than your CLI. Upgrade the operator first, then the CLI |
+| Apply is rejected for an unknown field | Your operator is probably older than your CLI. Upgrade the operator first, then the CLI — see [Upgrading](/docs/upgrading) |
 | Assets 404 in the browser | Check `storage.publicUrl` matches where the bucket actually serves, and that the provider CLI was authenticated during the build |
+| Database errors only on the first request after idle | A cold-wake timeout, not a database fault — see step 10 |
 
-## 11 · Clean up
+## 12 · Clean up
 
 ```bash title="shell"
-kubectl delete nextapp my-first-knext-app
+kubectl delete nextapp acme
 ```
 
 Delete the `NextApp` and the operator removes what it created — and read the next sentence before
@@ -214,13 +297,15 @@ you run this against anything you care about.
 **Deleting the `NextApp` also reaps app-scoped external state.** A finalizer clears the object-store
 keys under this app's own `<app-name>/` prefix, and the Redis keys under its cache key prefix. If you
 have parked anything else under that prefix in the same bucket, it goes too. **Registry images are
-not touched** — those remain yours.
+not touched** — those remain yours, and **your database is never touched**: knext did not create it
+and does not delete it.
 </Callout>
 
 ## Where to go next
 
 - [Scale to zero](/docs/scale-to-zero) — the autoscaling knobs, and what to change when cold start
   matters more than cost
-- [Databases](/docs/databases) — bind an existing Postgres by Secret
+- [Databases](/docs/databases) — poolers, the writer/reader split, and the typed client
+- [Upgrading](/docs/upgrading) — why the operator is upgraded before the CLI
 - [Rollback](/docs/rollback) and [Previews](/docs/previews) — the rest of the deploy lifecycle
 - [CLI reference](/docs/cli) — every verb and flag

@@ -78,12 +78,12 @@ knext reads a typed `kn-next.config.ts`. The config type is `KnativeNextConfig`,
 import type { KnativeNextConfig } from '@getknext/core';
 
 const config: KnativeNextConfig = {
-  name: 'storefront',
-  registry: 'registry.example.com/storefront',
+  name: 'acme',
+  registry: 'registry.example.com/acme',
   storage: {
     provider: 'gcs', // one of: gcs | s3 | minio | azure
-    bucket: 'storefront-assets',
-    publicUrl: 'https://storage.googleapis.com/storefront-assets',
+    bucket: 'acme-assets',
+    publicUrl: 'https://storage.googleapis.com/acme-assets',
   },
   scaling: { minScale: 0, maxScale: 20 }, // minScale 0 = scale to zero
   // runtime: 'bun',  // optional — run the standalone server under Bun, with
@@ -111,11 +111,11 @@ automatically when the config loads.
 
 ```bash title="shell"
 # build + push (digest is resolved automatically) and apply the NextApp CR
-$ kn-next deploy --registry registry.example.com/storefront
+$ kn-next deploy --registry registry.example.com/acme
 
-✓ image  registry.example.com/storefront@sha256:9f1c...
-✓ NextApp/storefront applied
-✓ url    https://storefront.apps.example.com  (scaled to 0)
+✓ image  registry.example.com/acme@sha256:9f1c...
+✓ NextApp/acme applied
+✓ url    https://acme.apps.example.com  (scaled to 0)
 ```
 
 `kn-next deploy` flags: `-r/--registry`, `-b/--bucket`, `-t/--tag`, `-n/--namespace`,
@@ -126,7 +126,7 @@ Then watch the rollout to real readiness — `status` exits non-zero if the app 
 this pair works as a CI gate:
 
 ```bash title="shell"
-$ kn-next status storefront --watch   # polls until Ready=True (bounded)
+$ kn-next status acme --watch   # polls until Ready=True (bounded)
 ```
 
 <Callout type="info">
@@ -153,10 +153,10 @@ default `deploy` flow. Full flag tables are on the [CLI reference](/docs/cli).
 
 ```bash title="shell"
 npx kn-next doctor                                             # before your first deploy
-npx kn-next deploy -r registry.example.com/storefront          # build → push → apply
-npx kn-next status storefront --watch                          # poll until Ready=True
-npx kn-next rollback storefront --to storefront-00002          # pin 100% to a prior revision
-npx kn-next db bind storefront --secret storefront-db          # DATABASE_URL from a Secret
+npx kn-next deploy -r registry.example.com/acme          # build → push → apply
+npx kn-next status acme --watch                          # poll until Ready=True
+npx kn-next rollback acme --to acme-00002          # pin 100% to a prior revision
+npx kn-next db bind acme --secret acme-db          # DATABASE_URL from a Secret
 npx kn-next db migrate --dir ./drizzle                         # writer-only, idempotent
 npx kn-next gc --dry-run                                       # print the reap/keep plan only
 ```

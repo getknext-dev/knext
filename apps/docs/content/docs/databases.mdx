@@ -21,8 +21,8 @@ The whole contract is one Kubernetes Secret carrying a DSN, referenced from the 
 ```yaml title="nextapp.yaml (database binding)"
 spec:
   database:
-    secretRef: { name: storefront-db }          # key defaults to DATABASE_URL
-    roSecretRef: { name: storefront-db }         # optional; key defaults to DATABASE_URL_RO
+    secretRef: { name: acme-db }          # key defaults to DATABASE_URL
+    roSecretRef: { name: acme-db }         # optional; key defaults to DATABASE_URL_RO
 ```
 
 - `secretRef` binds a Secret in the app's own namespace as **`DATABASE_URL`** (the writer).
@@ -44,11 +44,11 @@ file**:
 import type { KnativeNextConfig } from '@getknext/core';
 
 const config: KnativeNextConfig = {
-  name: 'storefront',
+  name: 'acme',
   // …storage, registry, scaling, etc.
   database: {
-    secretRef: { name: 'storefront-db' },     // key defaults to DATABASE_URL
-    roSecretRef: { name: 'storefront-db' },    // optional; key defaults to DATABASE_URL_RO
+    secretRef: { name: 'acme-db' },     // key defaults to DATABASE_URL
+    roSecretRef: { name: 'acme-db' },    // optional; key defaults to DATABASE_URL_RO
   },
 };
 
@@ -74,7 +74,7 @@ spec:
   secrets:
     envMap:
       DATABASE_URL:
-        secretName: storefront-db
+        secretName: acme-db
         secretKey: pooler-url
 ```
 
@@ -93,13 +93,13 @@ the DSN's host at its **pooler** Service (not the primary).
 apiVersion: v1
 kind: Secret
 metadata:
-  name: storefront-db
+  name: acme-db
   namespace: my-apps
 type: Opaque
 stringData:
   # transaction-mode pooler in front of Postgres, NOT the primary directly
-  DATABASE_URL: "postgresql://app:PASSWORD@storefront-pooler.my-apps.svc:6432/storefront"
-  DATABASE_URL_RO: "postgresql://app:PASSWORD@storefront-reader-pooler.my-apps.svc:6432/storefront"
+  DATABASE_URL: "postgresql://app:PASSWORD@acme-pooler.my-apps.svc:6432/acme"
+  DATABASE_URL_RO: "postgresql://app:PASSWORD@acme-reader-pooler.my-apps.svc:6432/acme"
 ```
 
 Two settings keep the pooler friendly to a scale-to-zero app that reconnects on every cold start:
