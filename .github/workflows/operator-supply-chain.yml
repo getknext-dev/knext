@@ -84,7 +84,7 @@ jobs:
         env:
           OWNER: ${{ github.repository_owner }}
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
 
       # Build into a LOCAL OCI-layout directory on every ref — never push here.
       # The Trivy gate below scans this exact layout; publication (main only)
