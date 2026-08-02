@@ -319,7 +319,7 @@ jobs:
       # view immediately after a publish — never rely on it for asset URLs.
       - name: Publish install.yaml as a Release asset (main only)
         if: github.ref == 'refs/heads/main'
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: operator-latest
           name: kn-next-operator (latest)
