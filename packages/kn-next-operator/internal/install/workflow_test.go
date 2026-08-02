@@ -94,20 +94,41 @@ func TestInstallBundlePublishedAsReleaseAsset(t *testing.T) {
 // mechanism agree on where the bundle lands (latest vs a specific tag).
 func TestReadmeUrlMatchesReleaseTag(t *testing.T) {
 	readme := repoFile(t, "README.md")
-	if !strings.Contains(readme, "releases/latest/download/install.yaml") {
-		t.Fatalf("README must document the releases/latest/download/install.yaml URL")
-	}
 	wf := readWorkflow(t)
-	// If the release is keyed to a fixed non-"latest" tag, `releases/latest/...` only
-	// resolves when that release is also marked latest. Require either a moving tag
-	// strategy that keeps a "latest"-resolvable release, or make_latest: true.
+
+	// The invariant is "the URL the README tells users to fetch actually resolves".
+	// This guard used to encode that as "the README contains
+	// releases/latest/download/install.yaml", plus a make_latest heuristic. Both
+	// were wrong, and the bug they permitted shipped:
+	//
+	// GitHub resolves /releases/latest/ to the most RECENTLY PUBLISHED release
+	// REPO-WIDE, not to a release named "latest". This repo also cuts npm package
+	// releases (@getknext/core@…, @getknext/db@…) which carry no assets. Each such
+	// publish steals the pointer from `operator-latest`, and the documented install
+	// URL then returns HTTP 404 — which it did, from 2026-07-26 until it was fixed.
+	// `make_latest: true` does not defend against this: it only wins until the next
+	// release of ANY kind, so the heuristic asserted a property that cannot hold.
+	//
+	// The correct invariant is a TAG-ADDRESSED asset URL, which no other release can
+	// steal. Assert that, and assert the broken form is absent so it cannot creep back.
 	tag := firstSubmatch(wf, `tag_name:\s*(\S+)`)
-	if tag != "" && !strings.Contains(tag, "${{") {
-		// A literal fixed tag: must be marked as latest for releases/latest to resolve.
-		if !regexp.MustCompile(`make_latest:\s*["']?true`).MatchString(wf) {
-			t.Errorf("fixed release tag %q but no make_latest: true — releases/latest URL "+
-				"may not resolve", tag)
-		}
+	if tag == "" {
+		t.Fatalf("could not read tag_name from the release step — cannot verify the documented URL")
+	}
+	if strings.Contains(tag, "${{") {
+		t.Skipf("release tag is templated (%q); tag-addressed URL cannot be checked statically", tag)
+	}
+
+	wantURL := "releases/download/" + tag + "/install.yaml"
+	if !strings.Contains(readme, wantURL) {
+		t.Errorf("README must document the TAG-ADDRESSED install URL %q.\n"+
+			"A tag-addressed asset URL is the only form no other release can steal.", wantURL)
+	}
+	if strings.Contains(readme, "releases/latest/download/") {
+		t.Errorf("README uses releases/latest/download/… — that URL 404s whenever any other "+
+			"release (e.g. an npm package release) is published more recently than %q, "+
+			"because /releases/latest/ means most-recently-published repo-wide. "+
+			"Use releases/download/%s/… instead.", tag, tag)
 	}
 }
 
