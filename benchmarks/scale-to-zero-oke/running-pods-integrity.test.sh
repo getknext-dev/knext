@@ -73,6 +73,15 @@ case "\$args" in
     n=\$(cat "${dir}/pods_count" 2>/dev/null || echo 0); n=\$((n + 1))
     echo "\$n" > "${dir}/pods_count"
     failn=\$(cat "${dir}/pods_fail_count" 2>/dev/null || echo 0)
+    # pods_fail_after=N: succeed for the first N polls, then fail every one after.
+    # The mirror of pods_fail_count, and the only way to build a run whose FINAL
+    # poll failed after earlier polls observed pods.
+    failafter=\$(cat "${dir}/pods_fail_after" 2>/dev/null || echo 0)
+    if [ "\$failafter" -gt 0 ] && [ "\$n" -gt "\$failafter" ]; then
+      mode=\$(cat "${dir}/pods_fail_mode" 2>/dev/null || echo transient)
+      if [ "\$mode" = "terminal" ]; then echo "\$terminal_msg" >&2; else echo "\$transient_msg" >&2; fi
+      exit 1
+    fi
     if [ "\$n" -le "\$failn" ]; then
       mode=\$(cat "${dir}/pods_fail_mode" 2>/dev/null || echo transient)
       if [ "\$mode" = "terminal" ]; then echo "\$terminal_msg" >&2; else echo "\$transient_msg" >&2; fi
@@ -239,6 +248,13 @@ if [ "$TA_RC" -ne 0 ]; then
 else
   nope "an unconfirmed run exited 0 — every automated caller reads it as a clean dataset"
 fi
+# The index status and exit code are not the only verdicts in the file. Round 2
+# set both to UNCONFIRMED while these two lines still asserted the data was good
+# -- three verdicts, two contradicting the one that had just been added.
+assert_not_contains "${TA}/results.txt" "The data is valid" \
+  "the 'data is valid' claim is not made about an UNCONFIRMED dataset"
+assert_not_contains "${TA}/results.txt" "dataset is complete" \
+  "the authoritative run-integrity verdict does not call an UNCONFIRMED dataset complete"
 
 # -- Test B (#453 item 2): SCALE_DOWN_POLL_S=0 must not spin forever --
 # Unsanitised, `t=$((t + 0))` never advances and wait_zero hangs. A benchmark that
@@ -311,8 +327,52 @@ SCALE_DOWN_TIMEOUT=4 SCALE_DOWN_POLL_S=1 API_RETRY_ATTEMPTS=1 \
   run_bench "$TD" --phases cold --cold-samples 1
 assert_not_contains "${TD}/results.txt" "NEVER OBSERVED" \
   "a run that DID observe pods is not reported as never having observed a count"
-assert_contains "${TD}/results.txt" "scale-to-zero did NOT happen" \
-  "the disproof is stated plainly, not downgraded to 'unconfirmed'"
+assert_contains "${TD}/results.txt" "last OBSERVED 2 pod(s)" \
+  "the count it actually saw is reported, by value"
+
+# -- Test G (round-3 defect 2): the banner must not assert a failure CLASS --
+# API_UNOBSERVED_COUNT carries no class information. Round 1 called a TERMINAL
+# failure transient; round 2 then hardcoded "terminally" on a branch that purely
+# TRANSIENT failures reach -- the same defect mirrored. Test A only covers the
+# terminal cause, so nothing saw it.
+echo
+echo "[G] an unobserved run caused by TRANSIENT errors is not described as terminal"
+TG="$(mktemp -d)"
+make_stub "$TG"
+echo 999 > "${TG}/pods_fail_count"; echo transient > "${TG}/pods_fail_mode"
+SCALE_DOWN_TIMEOUT=3 SCALE_DOWN_POLL_S=1 API_RETRY_ATTEMPTS=1 \
+  run_bench "$TG" --phases cold --cold-samples 1
+assert_contains "${TG}/results.txt" "NEVER OBSERVED" \
+  "an all-transient failure still reports that no count was observed"
+assert_not_contains "${TG}/results.txt" "terminally" \
+  "the banner does not claim a failure class it cannot know"
+# The "data is valid" line lives INSIDE the transient branch, so only a run with
+# BOTH abandonment and an unobserved wait can reach it -- test A (terminal-only)
+# never does, which is why the gate looked like decoration under mutation.
+assert_not_contains "${TG}/results.txt" "The data is valid" \
+  "'the data is valid' is not claimed when a scale-down wait went unobserved"
+
+# -- Test F (round-3 defect 1): a run whose LAST poll failed --
+# `n` holds the last poll's RAW OUTPUT, so when the final poll fails it holds
+# kubectl's error text. Round 2 printed it where the pod count belongs --
+# "still Unable to connect to the server: ... pod(s)" -- and asserted
+# "scale-to-zero did NOT happen" from an observation already seconds stale.
+# Test D cannot see this: its failure LEADS, so its last poll succeeds.
+echo
+echo "[F] a trailing poll failure never prints error text as a pod count"
+TF="$(mktemp -d)"
+make_stub "$TF"
+echo 2 > "${TF}/pods_fail_after"       # polls 1-2 observe pods, 3+ fail
+echo transient > "${TF}/pods_fail_mode"
+echo nonzero > "${TF}/pods_mode"
+SCALE_DOWN_TIMEOUT=5 SCALE_DOWN_POLL_S=1 API_RETRY_ATTEMPTS=1 \
+  run_bench "$TF" --phases cold --cold-samples 1
+assert_not_contains "${TF}/results.txt" "Unable to connect to the server: net/http: TLS handshake timeout pod(s)" \
+  "kubectl error text is never interpolated into the pod-count sentence"
+assert_contains "${TF}/results.txt" "last OBSERVED 2 pod(s)" \
+  "the last OBSERVED count is reported, not the last raw output"
+assert_not_contains "${TF}/results.txt" "scale-to-zero did NOT happen" \
+  "no confident disproof is drawn from a stale observation"
 
 # -- Test E (finding 5): a failed mktemp must not present as a query failure --
 # `errf=$(mktemp)` returning empty made `2>"$errf"` an AMBIGUOUS REDIRECT, which
@@ -330,6 +390,53 @@ assert_contains "${TE}/results.txt" "scaled to 0" \
 assert_not_contains "${TE}/results.txt" "pod query FAILED" \
   "a failed mktemp is not misreported as a failed pod query"
 
+# -- Test J (round-3 defect 6): the mktemp seam is DRY_RUN-gated --
+# SOURCE-LEVEL, and weaker than the rest of this file on purpose: every test here
+# runs with DRY_RUN=1, so no behavioural test in this suite can distinguish a
+# gated seam from an ungated one -- that needs a real cluster. Stated plainly
+# rather than dressed up as behavioural coverage. It still fails if the gate is
+# removed, which is the regression that matters: an exported
+# DRY_RUN_EXERCISE_MKTEMP_FAIL would otherwise silently degrade a REAL run.
+echo
+echo "[J] DRY_RUN_EXERCISE_MKTEMP_FAIL cannot take effect on a real run"
+if grep -q 'if \[ "\${DRY_RUN:-0}" = "1" \] && \[ "\${DRY_RUN_EXERCISE_MKTEMP_FAIL:-0}" = "1" \]' "$RUN_SH"; then
+  ok "the mktemp-failure seam is gated on DRY_RUN=1"
+else
+  nope "DRY_RUN_EXERCISE_MKTEMP_FAIL is NOT gated on DRY_RUN — it can degrade a real measurement run"
+fi
+
+# -- Test H (round-3 defect 7): SCALE_DOWN_TIMEOUT=0 polls nothing --
+# The loop body never runs, so observed=0 AND qfail=0. The old tail fell through
+# to "still <unknown> pod(s)", asserting pods were up on zero observations.
+echo
+echo "[H] a zero-length scale-down window says nothing was polled"
+TH="$(mktemp -d)"
+make_stub "$TH"
+SCALE_DOWN_TIMEOUT=0 SCALE_DOWN_POLL_S=1 \
+  run_bench "$TH" --phases cold --cold-samples 1
+assert_contains "${TH}/results.txt" "no scale-down poll was made" \
+  "a window that polled nothing says so"
+assert_not_contains "${TH}/results.txt" "still unknown pod(s)" \
+  "no claim about pods is made from zero observations"
+
+# -- Test I (round-3 defect 5): mktemp failure must not blind error classification --
+# Falling back to /dev/null discarded stderr, handing classify_api_error a BLANK
+# string -- which run.sh:1055 says is worse than an imprecise one. Every failure
+# would classify terminal: no retry, no diagnostic, on exactly the box (full /tmp)
+# where the fallback exists. Test E cannot see it: its query SUCCEEDS.
+echo
+echo "[I] when mktemp fails, a transient error is still classified and retried"
+TI="$(mktemp -d)"
+make_stub "$TI"
+echo 1 > "${TI}/pods_fail_count"; echo transient > "${TI}/pods_fail_mode"
+echo zero > "${TI}/pods_mode"
+DRY_RUN_EXERCISE_MKTEMP_FAIL=1 SCALE_DOWN_TIMEOUT=4 SCALE_DOWN_POLL_S=1 API_RETRY_ATTEMPTS=3 \
+  run_bench "$TI" --phases cold --cold-samples 1
+assert_contains "${TI}/results.txt" "TLS handshake timeout" \
+  "kubectl's diagnostic survives the mktemp-failure path"
+assert_contains "${TI}/results.txt" "api-retry:" \
+  "a transient error is still classified transient and RETRIED when mktemp fails"
+
 # -- Test C (#453 item 3): a stderr warning is not counted as a pod --
 # running_pods used 2>&1 and counted combined output on success, so a kubectl
 # deprecation notice read as a pod: the count never reaches zero and a perfectly
@@ -345,7 +452,7 @@ SCALE_DOWN_TIMEOUT=3 SCALE_DOWN_POLL_S=1 \
 assert_contains "${TC}/results.txt" "scaled to 0" \
   "a genuine zero is still confirmed when kubectl also writes a warning to stderr"
 
-rm -rf "$T1" "$T3" "$T4" "$T5" "$TA" "$TB" "$TC" "$TD" "$TE"
+rm -rf "$T1" "$T3" "$T4" "$T5" "$TA" "$TB" "$TC" "$TD" "$TE" "$TF" "$TG" "$TH" "$TI"
 
 echo
 echo "== ${PASS} passed, ${FAIL} failed =="

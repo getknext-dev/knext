@@ -298,7 +298,9 @@ run integrity: ABORTED after 6 rep(s) — partial dataset, NOT the configured ex
 ```
 
 with exit code **1** (the harness's "aborted part-way through" code, distinct from exit **2** for
-"finished, but a rep lost data"). Cleanup restored the service exactly as captured —
+"finished, but a rep lost data", and from exit **3** for "finished with all metrics, but at least
+one scale-down wait never confirmed scale-to-zero, so timings may be biased LOW" — the latter is
+filed as `UNCONFIRMED` in `INDEX.tsv`). Cleanup restored the service exactly as captured —
 `containerConcurrency=20`, `max-scale=10`, burst/panic annotations restored/removed to the captured
 originals — and deleted every k6 Job/ConfigMap for the run, leaving **0 leftover artifacts**.
 

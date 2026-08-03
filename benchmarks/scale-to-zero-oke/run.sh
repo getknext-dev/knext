@@ -923,7 +923,7 @@ cleanup() {
   # lines that do not exist -- because a terminal failure appends to neither OPS
   # string. Same "reads cleaner than reality" class as #424-#427.
   if [ "$API_UNOBSERVED_COUNT" -gt 0 ]; then
-    log "*** RUN DEGRADED — ${API_UNOBSERVED_COUNT} scale-down wait(s) NEVER OBSERVED a pod count (every poll failed, terminally). Scale-to-zero is UNCONFIRMED for those reps, not disproven: any 'cold' sample taken after one may have hit a WARM pod and be biased LOW. ***"
+    log "*** RUN DEGRADED — ${API_UNOBSERVED_COUNT} scale-down wait(s) ended without observing a pod count. Scale-to-zero is UNCONFIRMED for those reps, not disproven: any 'cold' sample taken after one may have hit a WARM pod and be biased LOW. ***"
   fi
   if [ "$API_RETRY_COUNT" -gt 0 ] || [ "$API_ABANDONED_COUNT" -gt 0 ]; then
     local ops_summary
@@ -934,7 +934,8 @@ cleanup() {
     # there IS complete data. Printed unconditionally it contradicted the
     # authoritative verdict two lines below on a zero-rep or data-losing run —
     # the fifth "reads cleaner than reality" bug in this harness.
-    if [ "$REPS_RUN" -gt 0 ] && [ -z "$INCOMPLETE_REPS" ] && [ "$PHASES_COMPLETED" -eq 1 ]; then
+    if [ "$REPS_RUN" -gt 0 ] && [ -z "$INCOMPLETE_REPS" ] && [ "$PHASES_COMPLETED" -eq 1 ] \
+       && [ "$API_UNOBSERVED_COUNT" -eq 0 ]; then
       log "*** The control plane was flaky during this run. The data is valid (every config was verified applied), but timings may include control-plane stalls — see the 'api-retry:'/'api-abandoned:' lines above. ***"
     else
       log "*** The control plane was flaky during this run. Every config that WAS applied was verified applied, but this run did not produce a complete dataset — see the run-integrity verdict below, and the 'api-retry:' lines above. ***"
@@ -974,6 +975,11 @@ cleanup() {
     # designated integrity verdict asserted completeness for a run that
     # collected nothing.
     log "run integrity: no reps ran; no data collected — this file is NOT a dataset"
+  elif [ "$API_UNOBSERVED_COUNT" -gt 0 ]; then
+    # The authoritative verdict must carry the trust dimension too. Round 2 filed
+    # the run as UNCONFIRMED in the index and exited 3, while this line -- the one
+    # the block above calls authoritative -- still said "dataset is complete".
+    log "run integrity: k6 metrics captured for all ${REPS_RUN} rep(s), but ${API_UNOBSERVED_COUNT} scale-down wait(s) never confirmed scale-to-zero — timings may be biased LOW; dataset is UNCONFIRMED"
   else
     log "run integrity: k6 metrics captured for all ${REPS_RUN} rep(s) — dataset is complete"
   fi
@@ -1034,18 +1040,32 @@ running_pods() {
   # below is REACHABLE by a test. Same family as DRY_RUN_EXERCISE_KC /
   # DRY_RUN_EXERCISE_PENDING: without a seam this branch is unprovable, and an
   # unproved branch is decoration by this repo's own standard.
-  if [ "${DRY_RUN_EXERCISE_MKTEMP_FAIL:-0}" = "1" ]; then
+  # The seam is honoured ONLY under DRY_RUN. Its siblings are gated the same way
+  # (DRY_RUN_EXERCISE_KC via kc_live, DRY_RUN_EXERCISE_PENDING at :653); leaving
+  # this one ungated meant an exported value could silently degrade a REAL
+  # measurement run with nothing in the results file saying so.
+  if [ "${DRY_RUN:-0}" = "1" ] && [ "${DRY_RUN_EXERCISE_MKTEMP_FAIL:-0}" = "1" ]; then
     errf=""
   else
     errf=$(mktemp 2>/dev/null) || errf=""
   fi
-  [ -n "$errf" ] || errf=/dev/null
-  out=$(kc get pods -n "$NS" -l "serving.knative.dev/service=${SERVICE}" \
-    --field-selector=status.phase=Running --no-headers 2>"$errf")
-  rc=$?
-  if [ "$errf" != "/dev/null" ]; then
+  if [ -n "$errf" ]; then
+    out=$(kc get pods -n "$NS" -l "serving.knative.dev/service=${SERVICE}" \
+      --field-selector=status.phase=Running --no-headers 2>"$errf")
+    rc=$?
     err=$(cat "$errf" 2>/dev/null); rm -f "$errf"
   else
+    # mktemp FAILED (full /tmp, bad TMPDIR). Redirecting to /dev/null would hand
+    # classify_api_error a BLANK string -- and :1055 says a blank classification
+    # input is worse than an imprecise one, so that fallback guaranteed the very
+    # thing it was meant to avoid: every failure classified terminal, no retry,
+    # no diagnostic. Fall back to the PRE-#453 behaviour instead (combined
+    # capture). It can over-count if kubectl warns while SUCCEEDING, but that is
+    # fail-safe -- it keeps waiting and never fabricates a zero -- whereas losing
+    # classification is not.
+    out=$(kc get pods -n "$NS" -l "serving.knative.dev/service=${SERVICE}" \
+      --field-selector=status.phase=Running --no-headers 2>&1)
+    rc=$?
     err=""
   fi
   if [ "$rc" -ne 0 ]; then
@@ -1081,8 +1101,9 @@ wait_zero() {
   if ! kc_live; then log "  [dry-run] skip wait-for-zero"; return 0; fi
   # n MUST be initialised: with SCALE_DOWN_TIMEOUT=0 the loop body never runs and
   # the trailing log line would abort the script under `set -u`.
-  local t=0 n="" rc qfail=0 observed=0
+  local t=0 n="" rc qfail=0 observed=0 last_n="" polled=0
   while [ "$t" -lt "$SCALE_DOWN_TIMEOUT" ]; do
+    polled=1
     # api_retry sets globals it needs the caller to read, so it cannot run inside
     # $(...). Wrap the query in it so a transient blip is retried (and RECORDED
     # like every other poller in this harness), then read the count it captured.
@@ -1108,6 +1129,12 @@ wait_zero() {
     # run where a single early poll failed, and asserted "not disproven" about a
     # scale-to-zero that had been positively disproven three polls running.
     observed=1
+    # Keep the last OBSERVED count separately. `n` is the last poll's raw output,
+    # so on a run whose FINAL poll failed it holds kubectl's error text -- which
+    # round 2 then printed where a pod count belongs ("still Unable to connect to
+    # the server: ... pod(s)"), and a multi-line error would have broken the line
+    # outright.
+    last_n="$n"
     if [ "$n" = "0" ]; then
       log "  -> scaled to 0 after ${t}s"
       return 0
@@ -1115,18 +1142,26 @@ wait_zero() {
     sleep "$SCALE_DOWN_POLL_S"
     t=$((t + SCALE_DOWN_POLL_S))
   done
-  if [ "$observed" -eq 0 ] && [ "$qfail" -gt 0 ]; then
-    # Never observed a count at all, and the reason was query failure rather than
-    # pods still running. Say so at the TOP level, not only per-poll.
+  if [ "$polled" -eq 0 ]; then
+    # SCALE_DOWN_TIMEOUT=0: the loop body never ran, so NOTHING was polled. The
+    # old tail claimed "still <unknown> pod(s)", asserting pods were up on the
+    # strength of zero observations.
+    log "  -> no scale-down poll was made (SCALE_DOWN_TIMEOUT=${SCALE_DOWN_TIMEOUT}) — scale-to-zero was not checked"
+  elif [ "$observed" -eq 0 ]; then
+    # Never observed a count at all. Say so at the TOP level, not only per-poll.
     API_UNOBSERVED_COUNT=$((API_UNOBSERVED_COUNT + 1))
     log "  -> NEVER OBSERVED a pod count after ${t}s — all ${qfail} poll(s) failed. Scale-to-zero is UNCONFIRMED for this rep, not disproven (continuing anyway)."
   elif [ "$qfail" -gt 0 ]; then
-    # MIXED: some polls failed, but others returned. We DID observe pods, so
-    # scale-to-zero is disproven, not unconfirmed. Both facts get reported --
-    # reporting only the failures would bury the more important one.
-    log "  -> still ${n:-unknown} pod(s) after ${t}s — scale-to-zero did NOT happen (${qfail} poll(s) also failed) (continuing anyway)"
+    # MIXED. We saw pods at some point, but later poll(s) failed, so the state at
+    # the END of the window was never observed. Round 2 asserted "scale-to-zero
+    # did NOT happen" here -- a confident disproof drawn from a STALE observation.
+    # Report what was actually seen, and that the final state is unknown. This
+    # still counts as unconfirmed: a 'cold' sample taken after it may hit a warm
+    # pod, which is the bias the whole mechanism exists to catch.
+    API_UNOBSERVED_COUNT=$((API_UNOBSERVED_COUNT + 1))
+    log "  -> last OBSERVED ${last_n:-unknown} pod(s) within ${t}s, then ${qfail} poll(s) failed — the final state was never observed, so scale-to-zero is UNCONFIRMED (continuing anyway)"
   else
-    log "  -> still ${n:-unknown} pod(s) after ${t}s (continuing anyway)"
+    log "  -> still ${last_n:-unknown} pod(s) after ${t}s (continuing anyway)"
   fi
 }
 
