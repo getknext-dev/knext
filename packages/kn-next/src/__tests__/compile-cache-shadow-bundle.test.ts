@@ -106,18 +106,43 @@ const MODELLED_TSUP_KEYS = new Set([
     "external",
 ]);
 
-/** Extract the `[...]` that follows `steps:`, by balanced-bracket scan. */
+/**
+ * Extract the `[...]` that follows `steps:`, by balanced-bracket scan.
+ *
+ * The scan is bracket-counting, NOT a parser, so it is worth stating both
+ * failure directions rather than pretending it is exact:
+ *  - an unmatched `]` inside a string literal truncates the slice early — the
+ *    assertions then fail loudly, which is the safe direction;
+ *  - an unmatched `[` inside a string literal means the depth never returns to
+ *    zero at the real end, the scan closes on a LATER `]`, and the slice
+ *    silently WIDENS — degrading "both names live in the same array" toward
+ *    "somewhere in the file".
+ *
+ * The second direction is the dangerous one, so it is bounded rather than
+ * assumed away: a slice that is implausibly large for a step list, or a bundle
+ * carrying more than one `steps:` array (which would make "the" array
+ * ambiguous), fails the caller instead of quietly widening. Today there is
+ * exactly one match and the slice is ~1.2 KB.
+ */
+const MAX_PLAUSIBLE_STEPS_BYTES = 8_000;
+
 function stepsArraySlice(source: string): string {
-    const match = /steps:\s*\[/.exec(source);
-    if (match === null) return "";
-    const open = source.indexOf("[", match.index);
+    const matches = [...source.matchAll(/steps:\s*\[/g)];
+    // More than one candidate makes "the steps array" ambiguous — refuse
+    // rather than pick the first and assert against a guess.
+    if (matches.length !== 1) return "";
+    const open = source.indexOf("[", matches[0].index);
     let depth = 0;
     for (let i = open; i < source.length; i++) {
         const ch = source[i];
         if (ch === "[") depth++;
         else if (ch === "]") {
             depth--;
-            if (depth === 0) return source.slice(open, i + 1);
+            if (depth === 0) {
+                const slice = source.slice(open, i + 1);
+                // Bound the silent-widening direction described above.
+                return slice.length > MAX_PLAUSIBLE_STEPS_BYTES ? "" : slice;
+            }
         }
     }
     return "";
@@ -264,8 +289,34 @@ describe("#451 shipped supervisor bundle: compile-cache-shadow-check survives bu
                 new RegExp(`\\b${receiver}\\.ensureStarted\\(`, "g"),
             ),
         ];
-        // The child-readiness path, the probe-error fallback, and the
-        // deferral-disabled opt-out — the steps never run if none fires.
-        expect(calls.length).toBeGreaterThanOrEqual(2);
+
+        // EACH of the three call sites is required BY NAME, not a count of two.
+        // The round-2 review deleted only the readiness path — the one that
+        // fires on every normal boot with deferral enabled (the default) —
+        // leaving the probe-error catch and the deferral-disabled else, and a
+        // `>= 2` assertion stayed green while the deferred steps never ran on a
+        // healthy boot. The reason (`child-${outcome}`) is a template literal in
+        // the source, so match its prefix rather than a whole string.
+        const requiredCallSites: Array<{ reason: string; why: string }> = [
+            {
+                reason: "`child-",
+                why: "the child-readiness path — the ONLY one that fires on a normal, healthy boot with deferral enabled (the default)",
+            },
+            {
+                reason: '"probe-error"',
+                why: "the readiness-probe failure fallback",
+            },
+            {
+                reason: '"deferral-disabled"',
+                why: "the operator opt-out path (pre-#441 behaviour)",
+            },
+        ];
+        for (const { reason, why } of requiredCallSites) {
+            expect(
+                bundle.includes(`${receiver}.ensureStarted(${reason}`),
+                `missing ${receiver}.ensureStarted(${reason}…) — ${why}`,
+            ).toBe(true);
+        }
+        expect(calls.length).toBeGreaterThanOrEqual(requiredCallSites.length);
     });
 });

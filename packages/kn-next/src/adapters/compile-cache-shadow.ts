@@ -84,6 +84,16 @@ export type StatFn = (path: string) => FsNodeIdentity;
  * Fail-open in the same direction as the rest of the module: if either stat
  * throws (path absent, unreadable parent, ELOOP), we report "not the same",
  * which at worst yields the pre-#451 spurious warning and never an exception.
+ *
+ * `(dev, ino)` is a strong signal, not a proof, and the two known caveats both
+ * fail toward a false "same" — i.e. toward suppressing a diagnostic, never
+ * toward breaking anything:
+ *  - **overlayfs** (the container storage driver this actually runs under) can
+ *    report colliding `st_ino` values across layers when `xino` is off;
+ *  - Node's `Stats.ino` is a JS `number`, so an inode above 2^53 loses
+ *    precision (the `bigint: true` stat variant exists for exactly this).
+ * Both are accepted: the worst outcome is a missed shadow warning, which is
+ * strictly better than the false warning this replaced.
  */
 export function isSameDirectory(
     a: string,
