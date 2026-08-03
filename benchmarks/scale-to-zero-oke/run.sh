@@ -49,14 +49,18 @@ NS="${NS:-default}"                                # namespace
 RESTORE_PENDING_ONLY="${RESTORE_PENDING_ONLY:-0}"
 SERVICE="${SERVICE:-}"                             # ksvc name — REQUIRED
 URL="${URL:-}"                                     # target URL; default derived from SERVICE/NS
-# k6 image. NOTE: .claude/rules/security.md asks for digest pinning. This is left
-# tag-pinned deliberately: resolving the real digest for grafana/k6:0.49.0
-# requires a registry round-trip that was not available in the environment this
-# was written in, and inventing a digest would be worse than an honest tag.
-# TODO(#423): replace with grafana/k6@sha256:<digest> once resolvable
-# (`docker buildx imagetools inspect grafana/k6:0.49.0`). Overridable via --k6-image,
-# so a digest can be passed today without editing this file.
-IMG="${IMG:-grafana/k6:0.49.0}"                     # k6 image
+# k6 image, DIGEST-PINNED per .claude/rules/security.md (#425, closing the #423
+# TODO). The tag is kept alongside the digest so the pin stays auditable — a bare
+# digest tells a reader nothing about which version they are running.
+#
+# Resolved against the live registry rather than copied from anywhere:
+#   grafana/k6:0.49.0 -> sha256:8cd78f9d0de5f50bc8821cceecf356d5d9e839e6611c226a3fcf13c591080fbd
+# Verified addressable BY DIGEST (not merely reported for the tag), and confirmed
+# to be the multi-arch index carrying linux/amd64 + linux/arm64 — so this pin does
+# not quietly break arm64 runners.
+#
+# Still overridable via --k6-image.
+IMG="${IMG:-grafana/k6:0.49.0@sha256:8cd78f9d0de5f50bc8821cceecf356d5d9e839e6611c226a3fcf13c591080fbd}"
 KUBECTL_BIN="${KUBECTL_BIN:-kubectl}"              # kubectl binary (test seam; see below)
 # Test seam: with DRY_RUN=1, kc() normally echoes instead of running. Setting
 # DRY_RUN_EXERCISE_KC=1 makes kc() actually invoke $KUBECTL_BIN, so the
