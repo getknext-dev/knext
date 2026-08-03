@@ -1,4 +1,4 @@
-import { readdirSync, readFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { discoverPinnableFiles, mentionsUses } from '../scripts/verify-action-pins.mjs';
@@ -36,7 +36,6 @@ import { discoverPinnableFiles, mentionsUses } from '../scripts/verify-action-pi
  */
 
 const REPO_ROOT = resolve(import.meta.dirname, '..');
-const WORKFLOW_DIR = resolve(REPO_ROOT, '.github/workflows');
 
 /**
  * Deliberate exceptions, each of which must be JUSTIFIED here. Empty is the
