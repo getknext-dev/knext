@@ -6,6 +6,7 @@
     "tutorial",
     "install",
     "cli",
+    "github-action",
     "---Runtime---",
     "official-adapter",
     "scale-to-zero",

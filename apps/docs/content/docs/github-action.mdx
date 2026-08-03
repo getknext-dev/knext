@@ -1,0 +1,159 @@
+---
+title: GitHub Action
+description: Deploy ACME from GitHub Actions with a kubeconfig — no cloud credentials, no provisioning.
+---
+
+Deploy on every push, from your own CI, to your own cluster.
+
+```yaml title=".github/workflows/deploy.yml"
+name: Deploy
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+
+      - uses: docker/login-action@v3
+        with:
+          registry: registry.example.com
+          username: ${{ secrets.REGISTRY_USER }}
+          password: ${{ secrets.REGISTRY_TOKEN }}
+
+      - uses: getknext-dev/knext@v1
+        with:
+          kubeconfig: ${{ secrets.KUBECONFIG_B64 }}
+          registry: registry.example.com/acme
+          skip-upload: 'true'
+```
+
+That is the whole thing. Push to `main`, and ACME redeploys.
+
+## What this action deliberately does not do
+
+**It never asks for cloud-account credentials, and it does not create clusters.**
+
+That is a design decision, not an omission. Creating managed Kubernetes requires permissions that
+cannot be scoped down. On AWS, `eksctl`'s own documented minimum grants `iam:CreateRole` +
+`iam:AttachRolePolicy` + `iam:PassRole` — which together are the textbook privilege-escalation
+primitive, with no conditions attached to stop it. A credential that can create a cluster can
+generally do anything in the account, and the bill arrives either way.
+
+A **kubeconfig** is different in kind. It is scoped to one cluster, and can be scoped further to one
+namespace. Leaked, it costs you that cluster — not your cloud account.
+
+So: you bring a cluster, this action does everything after it.
+
+## Two shapes, and which to pick
+
+### Credential-free — `skip-upload: 'true'`
+
+Needs only a kubeconfig and registry auth. Nothing cloud-specific.
+
+You lose static-asset offload to object storage and the post-deploy asset GC. The app still builds,
+deploys, serves and scales to zero. **Start here** — it is the shortest path to a working pipeline,
+and you can add uploads later without changing anything else.
+
+### Full parity — assets uploaded
+
+knext shells out to your storage provider's CLI, so authenticate it before the deploy step, using
+whichever action your provider already publishes:
+
+```yaml title=".github/workflows/deploy.yml (GCS example)"
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_SA }}
+
+      - uses: getknext-dev/knext@v1
+        with:
+          kubeconfig: ${{ secrets.KUBECONFIG_B64 }}
+          registry: registry.example.com/acme
+          bucket: acme-assets
+```
+
+The equivalents are `aws-actions/configure-aws-credentials`, `azure/login`, or `mc alias set` for
+MinIO. In every case the action authenticates to a bucket **you already own** — it never creates one.
+
+<Callout type="info">
+Prefer workload identity / OIDC over long-lived keys where your provider offers it. The knext action
+does not care which you use; it only needs the provider CLI to be authenticated when it runs.
+</Callout>
+
+## Getting the kubeconfig
+
+Base64-encode it and store it as an encrypted repository secret:
+
+```bash title="shell"
+base64 -w0 < ~/.kube/config    # macOS: base64 -i ~/.kube/config
+```
+
+Paste the output into **Settings → Secrets and variables → Actions** as `KUBECONFIG_B64`.
+
+<Callout type="warn">
+**Do not reuse your personal admin kubeconfig.** Create a ServiceAccount scoped to the namespace you
+deploy into and build a kubeconfig from its token. This action never needs cluster-admin, and a CI
+secret is a wider blast radius than a laptop.
+</Callout>
+
+## Inputs
+
+| Input | Required | Default | Notes |
+|---|---|---|---|
+| `kubeconfig` | **yes** | — | Base64-encoded, scoped to the target cluster |
+| `registry` | no | from config | Log in separately with `docker/login-action` |
+| `namespace` | no | `default` | |
+| `tag` | no | timestamp | Prefer `${{ github.sha }}` for traceability |
+| `bucket` | no | from config | |
+| `skip-upload` | no | `false` | `true` = the credential-free path |
+| `dry-run` | no | `false` | Prints the `NextApp` CR, applies nothing |
+| `working-directory` | no | `.` | Where `kn-next.config.ts` lives |
+| `doctor` | no | `true` | Read-only preflight; fails fast on an unready cluster |
+
+**Output:** `url` — the deployed app URL as reported by the cluster. Empty on a dry run, because a
+dry run applies nothing and there is no URL to report.
+
+## Preview deploys on pull requests
+
+`dry-run` prints the `NextApp` custom resource that *would* be applied, without touching the cluster:
+
+```yaml title=".github/workflows/pr.yml"
+on: pull_request
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - run: npm ci
+      - uses: getknext-dev/knext@v1
+        with:
+          kubeconfig: ${{ secrets.KUBECONFIG_B64 }}
+          dry-run: 'true'
+```
+
+This makes the diff reviewable before it lands — the same instinct as `terraform plan`.
+
+## Why `doctor` runs first
+
+By default the action runs the read-only `kn-next doctor` preflight and fails the job if the cluster
+is not ready. It checks that the CRD exists, the operator is Ready, Knative Serving is installed, and
+the ingress class matches the controller actually serving traffic.
+
+These failures are much cheaper to read here than halfway through a container build. Set
+`doctor: 'false'` to skip it, though there is rarely a good reason to.
+
+## Related
+
+- [Tutorial: deploy ACME](/docs/tutorial) — the manual path this automates
+- [CLI reference](/docs/cli) — every verb and flag the action wraps
+- [Upgrading](/docs/upgrading) — why the operator is upgraded before the CLI

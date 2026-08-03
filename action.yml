@@ -1,0 +1,143 @@
+name: 'Deploy with knext'
+description: 'Build a Next.js app and deploy it to Knative as a scale-to-zero NextApp, from your own CI, against your own cluster.'
+author: 'getknext-dev'
+
+branding:
+  icon: 'upload-cloud'
+  color: 'green'
+
+# WHAT THIS ACTION DOES NOT DO, stated first because it is the design decision:
+#
+# It does NOT create a cluster, and it never asks for cloud-account credentials.
+# Creating managed Kubernetes requires permissions that cannot be scoped down —
+# on AWS, `iam:CreateRole` + `AttachRolePolicy` + `PassRole` is the textbook
+# privilege-escalation primitive, and eksctl's own documented minimum grants it
+# with no conditions attached. This action therefore deploys to a cluster you
+# already have, using a kubeconfig scoped to that cluster and nothing else.
+#
+# Leaked, a kubeconfig compromises one cluster. A provisioning credential would
+# compromise the cloud account, the billing, and everything else in it.
+# See docs/wayfinder/p3-provisioning-cost.md for the measured detail.
+
+inputs:
+  kubeconfig:
+    description: >
+      Base64-encoded kubeconfig for the target cluster. Store it as an encrypted
+      secret and pass it as `${{ secrets.KUBECONFIG_B64 }}`. Scope it to the
+      namespace you deploy into — this action never needs cluster-admin.
+    required: true
+
+  registry:
+    description: 'Container registry to push to (overrides kn-next.config.ts). Log in with docker/login-action before this step.'
+    required: false
+
+  namespace:
+    description: 'Kubernetes namespace to deploy into.'
+    required: false
+    default: 'default'
+
+  tag:
+    description: 'Image tag. Defaults to the CLI default (a timestamp). Prefer the commit SHA for traceability.'
+    required: false
+
+  bucket:
+    description: 'Object-storage bucket for static assets (overrides kn-next.config.ts).'
+    required: false
+
+  skip-upload:
+    description: >
+      Skip the static-asset upload. Set to "true" when you have not configured
+      object-storage credentials in this workflow. The deploy still succeeds and
+      the app still serves — you lose asset offload to the bucket and the
+      post-deploy asset GC. This is the credential-free path.
+    required: false
+    default: 'false'
+
+  dry-run:
+    description: 'Print the NextApp CR that would be applied, and apply nothing. Useful on pull requests.'
+    required: false
+    default: 'false'
+
+  working-directory:
+    description: 'Directory containing kn-next.config.ts.'
+    required: false
+    default: '.'
+
+  doctor:
+    description: >
+      Run the read-only `kn-next doctor` preflight before deploying, and fail the
+      job if the cluster is not ready. Catches the failures that are much cheaper
+      to read here than halfway through a container build.
+    required: false
+    default: 'true'
+
+outputs:
+  url:
+    description: 'The deployed app URL, as reported by the cluster.'
+    value: ${{ steps.deploy.outputs.url }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Write kubeconfig
+      shell: bash
+      env:
+        KUBECONFIG_B64: ${{ inputs.kubeconfig }}
+      run: |
+        set -euo pipefail
+        if [ -z "${KUBECONFIG_B64}" ]; then
+          echo "::error::kubeconfig input is empty. Pass a base64-encoded kubeconfig, e.g. \${{ secrets.KUBECONFIG_B64 }}."
+          exit 1
+        fi
+        mkdir -p "${HOME}/.kube"
+        # `base64 -d` is GNU; macOS runners need -D. Try both rather than assume.
+        printf '%s' "${KUBECONFIG_B64}" | base64 -d > "${HOME}/.kube/config" 2>/dev/null \
+          || printf '%s' "${KUBECONFIG_B64}" | base64 -D > "${HOME}/.kube/config"
+        chmod 600 "${HOME}/.kube/config"
+        # Never echo the file. Prove it parses without printing its contents.
+        if ! kubectl config current-context >/dev/null 2>&1; then
+          echo "::error::kubeconfig decoded but kubectl cannot read a current-context from it."
+          exit 1
+        fi
+        echo "KUBECONFIG=${HOME}/.kube/config" >> "${GITHUB_ENV}"
+
+    - name: Preflight (kn-next doctor)
+      if: inputs.doctor == 'true'
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        set -euo pipefail
+        npx --yes kn-next doctor
+
+    - name: Deploy
+      id: deploy
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        set -euo pipefail
+        args=()
+        [ -n "${{ inputs.registry }}" ]  && args+=( --registry  "${{ inputs.registry }}" )
+        [ -n "${{ inputs.bucket }}" ]    && args+=( --bucket    "${{ inputs.bucket }}" )
+        [ -n "${{ inputs.tag }}" ]       && args+=( --tag       "${{ inputs.tag }}" )
+        [ -n "${{ inputs.namespace }}" ] && args+=( --namespace "${{ inputs.namespace }}" )
+        [ "${{ inputs.skip-upload }}" = "true" ] && args+=( --skip-upload )
+        [ "${{ inputs.dry-run }}" = "true" ]     && args+=( --dry-run )
+
+        # `"${args[@]}"` on an EMPTY array is an unbound-variable error under
+        # `set -u` in bash 3.2, which is what macOS runners still ship. GitHub's
+        # ubuntu images are bash 5 and would not notice. The `+` guard expands to
+        # nothing when the array is empty, which is correct on both.
+        npx --yes kn-next ${args[@]+"${args[@]}"}
+
+        # A dry run applies nothing, so there is no URL to report. Emitting an
+        # empty output here is correct; emitting a stale or invented one is not.
+        if [ "${{ inputs.dry-run }}" = "true" ]; then
+          echo "url=" >> "${GITHUB_OUTPUT}"
+          exit 0
+        fi
+
+        url="$(npx --yes kn-next status --json 2>/dev/null | jq -r '.url // empty')"
+        echo "url=${url}" >> "${GITHUB_OUTPUT}"
+        if [ -n "${url}" ]; then
+          echo "Deployed: ${url}" >> "${GITHUB_STEP_SUMMARY}"
+        fi
