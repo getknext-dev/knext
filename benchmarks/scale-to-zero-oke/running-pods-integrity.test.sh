@@ -78,6 +78,10 @@ case "\$args" in
       if [ "\$mode" = "terminal" ]; then echo "\$terminal_msg" >&2; else echo "\$transient_msg" >&2; fi
       exit 1
     fi
+    # Optional: emit a warning on STDERR while SUCCEEDING, so the count path can
+    # be tested for stderr contamination (#453 item 3).
+    [ -f "${dir}/pods_warn_on_stderr" ] && \
+      echo "W0000 00:00:00.000000   1 warnings.go:70] some/api is deprecated" >&2
     mode=\$(cat "${dir}/pods_mode" 2>/dev/null || echo nonzero)
     if [ "\$mode" = "zero" ]; then
       # genuine zero: kubectl succeeds, prints NOTHING (--no-headers, no pods)
@@ -189,7 +193,83 @@ assert_contains "${T5}/results.txt" "scaled to 0" \
 assert_contains "${T5}/results.txt" "DEGRADED" \
   "the transient blip is still surfaced — the run is marked degraded, not clean"
 
-rm -rf "$T1" "$T3" "$T4" "$T5"
+# -- Test A (#453 item 1): a PERSISTENTLY TERMINAL query still degrades the run --
+# api_retry's terminal fast-return increments neither API_RETRY_COUNT nor
+# API_ABANDONED_COUNT -- correctly, since a terminal error is usually the caller's
+# business. But wait_zero then timed out "continuing anyway" with the truth only in
+# per-poll lines and NO top-level signal. The stub's terminal path existed and
+# nothing exercised it.
+echo
+echo "[A] a persistently TERMINAL pod query degrades the run and says it never observed a count"
+TA="$(mktemp -d)"
+make_stub "$TA"
+echo 999 > "${TA}/pods_fail_count"; echo terminal > "${TA}/pods_fail_mode"
+SCALE_DOWN_TIMEOUT=2 SCALE_DOWN_POLL_S=1 API_RETRY_ATTEMPTS=2 \
+  run_bench "$TA" --phases cold --cold-samples 1
+assert_not_contains "${TA}/results.txt" "scaled to 0" \
+  "a terminal query never fabricates a scale-to-zero confirmation"
+assert_contains "${TA}/results.txt" "NEVER OBSERVED" \
+  "the timeout says it never observed a count, not 'still N pods'"
+assert_contains "${TA}/results.txt" "DEGRADED" \
+  "a purely-terminal failure trips the top-level DEGRADED banner (#453 item 1)"
+
+# -- Test B (#453 item 2): SCALE_DOWN_POLL_S=0 must not spin forever --
+# Unsanitised, `t=$((t + 0))` never advances and wait_zero hangs. A benchmark that
+# hangs is worse than one that errors, because CI just sits there.
+echo
+echo "[B] SCALE_DOWN_POLL_S=0 is clamped rather than hanging"
+TB="$(mktemp -d)"
+make_stub "$TB"
+echo 999 > "${TB}/pods_fail_count"; echo transient > "${TB}/pods_fail_mode"
+# HARD-BOUND the run. Measuring elapsed time AFTER run_bench returns cannot detect
+# a hang -- if the loop truly spins, run_bench never returns and the TEST hangs
+# too. A test that hangs is worse than one that fails: CI sits there burning a
+# runner with no signal. Proven the hard way while mutation-proving this fix, when
+# removing the clamp wedged the harness instead of turning it red.
+#
+# `timeout` returns 124 when it had to kill the run, which is the hang signal.
+#
+# If `timeout` is ABSENT the command fails with 127, which is not 124, so the
+# check would report "ok" having tested nothing -- a vacuous green, which is
+# worse than a skip because it reads as coverage. Detect that and say so.
+# (ubuntu-latest ships coreutils; a bare macOS box does not.)
+TIMEOUT_BIN=""
+for c in timeout gtimeout; do
+  if command -v "$c" >/dev/null 2>&1; then TIMEOUT_BIN="$c"; break; fi
+done
+TB_RC=0
+if [ -z "$TIMEOUT_BIN" ]; then
+  echo "  SKIP  [B] needs timeout(1) (coreutils) to bound the run -- not asserting a vacuous pass"
+else
+"$TIMEOUT_BIN" 45 env DRY_RUN=1 DRY_RUN_EXERCISE_KC=1 KUBECTL_BIN="${TB}/kubectl" \
+  OUT="${TB}/results.txt" SCALE_DOWN_TIMEOUT=2 SCALE_DOWN_POLL_S=0 \
+  APPLY_SETTLE_SECONDS=0 POD_SAMPLE_BUDGET=1 SCHEDULE_CHECK_TIMEOUT=0 \
+  K6_JOB_TIMEOUT=5 API_RETRY_BASE_MS=5 API_RETRY_MAX_MS=20 API_RETRY_ATTEMPTS=1 \
+  bash "$RUN_SH" --service demo-svc --namespace bench --phases cold --cold-samples 1 \
+    > "${TB}/out.txt" 2>&1 || TB_RC=$?
+if [ "$TB_RC" = "124" ]; then
+  nope "SCALE_DOWN_POLL_S=0 HUNG -- the clamp is missing (timeout had to kill it)"
+else
+  ok "the run terminated instead of spinning forever (exit ${TB_RC})"
+fi
+fi
+
+# -- Test C (#453 item 3): a stderr warning is not counted as a pod --
+# running_pods used 2>&1 and counted combined output on success, so a kubectl
+# deprecation notice read as a pod: the count never reaches zero and a perfectly
+# healthy scale-to-zero looks broken.
+echo
+echo "[C] a kubectl warning on stderr is not counted as a running pod"
+TC="$(mktemp -d)"
+make_stub "$TC"
+echo zero > "${TC}/pods_mode"
+echo 1 > "${TC}/pods_warn_on_stderr"
+SCALE_DOWN_TIMEOUT=3 SCALE_DOWN_POLL_S=1 \
+  run_bench "$TC" --phases cold --cold-samples 1
+assert_contains "${TC}/results.txt" "scaled to 0" \
+  "a genuine zero is still confirmed when kubectl also writes a warning to stderr"
+
+rm -rf "$T1" "$T3" "$T4" "$T5" "$TA" "$TB" "$TC"
 
 echo
 echo "== ${PASS} passed, ${FAIL} failed =="

@@ -295,6 +295,11 @@ fi
 # 1 attempt at a 60s cap. Announcing a TIGHTER bound than is enforced is the same
 # "reads cleaner than reality" direction as #424/#425/#426.
 [ "$API_RETRY_ATTEMPTS" -ge 1 ] 2>/dev/null || API_RETRY_ATTEMPTS=1
+# Same class, same fix (#453 item 2): SCALE_DOWN_POLL_S=0 makes wait_zero's
+# `t=$((t + 0))` loop spin forever without advancing its own clock — a hang, not
+# an error, which is the worst shape for a benchmark to fail in. Only tests shrink
+# this, but an unsanitised knob is one typo away from a wedged run.
+[ "$SCALE_DOWN_POLL_S" -ge 1 ] 2>/dev/null || SCALE_DOWN_POLL_S=1
 # The deadline needs the SAME treatment, for a sharper reason than cosmetics: a
 # 0/negative/non-numeric deadline made api_call_cap return 0, which means kc()
 # adds NO timeout wrapper at all — so a hung call was completely unbounded while
@@ -437,6 +442,14 @@ API_RETRY_OPS=""   # newline-separated op names, one line per retry performed
 # control-plane run". Abandonments are therefore counted separately and
 # reported, and the "clean" claim requires BOTH counters to be zero.
 API_ABANDONED_COUNT=0
+# #453 item 1. api_retry's TERMINAL fast-return increments neither counter, by
+# design — a terminal error is usually the caller's business (a NotFound on a
+# delete is not a degraded run). But when wait_zero exhausts its timeout having
+# NEVER observed a pod count because every poll failed, the run continued "anyway"
+# with no top-level signal: the truth lived only in per-poll log lines. Counted
+# separately from ABANDONED because the causes differ — abandoned means
+# "transient, we stopped fighting"; this means "we never got an answer at all".
+API_UNOBSERVED_COUNT=0
 API_ABANDONED_OPS=""
 
 # record_api_abandon <op-label> <why> — a transient failure we stopped fighting.
@@ -903,7 +916,7 @@ cleanup() {
   # recovered by retrying or gave up. Keying this on the retry count alone meant
   # a run killed by a stalled apiserver (0 retries, 1 abandonment) printed the
   # "clean control-plane run" line.
-  if [ "$API_RETRY_COUNT" -gt 0 ] || [ "$API_ABANDONED_COUNT" -gt 0 ]; then
+  if [ "$API_RETRY_COUNT" -gt 0 ] || [ "$API_ABANDONED_COUNT" -gt 0 ] || [ "$API_UNOBSERVED_COUNT" -gt 0 ]; then
     local ops_summary
     ops_summary=$(printf '%s%s' "$API_RETRY_OPS" "$API_ABANDONED_OPS" | grep -v '^$' | sort | uniq -c \
       | awk '{ printf "%s%s x%s", (NR>1 ? ", " : ""), $2, $1 }')
@@ -990,14 +1003,24 @@ RUN_ID="s2z-$(date -u +%s)-$$"
 # api_retry can wrap this to retry transient blips and RECORD them, and callers
 # that capture stdout via $(...) see an EMPTY string on failure — never a false 0.
 running_pods() {
-  local out rc
+  local out err rc errf
+  # #453 item 3: capture stdout and stderr SEPARATELY. This used to be `2>&1`, so
+  # on success the count was taken over combined output — and any kubectl warning
+  # on stderr (a deprecation notice, say) would be counted as a pod. That inflates
+  # the count and prevents a genuine zero from ever being confirmed. Fail-safe
+  # (it keeps waiting, never fabricates a zero) but wrong, and it would present as
+  # "scale-to-zero is broken" on a cluster where it was working perfectly.
+  errf=$(mktemp)
   out=$(kc get pods -n "$NS" -l "serving.knative.dev/service=${SERVICE}" \
-    --field-selector=status.phase=Running --no-headers 2>&1)
+    --field-selector=status.phase=Running --no-headers 2>"$errf")
   rc=$?
+  err=$(cat "$errf" 2>/dev/null); rm -f "$errf"
   if [ "$rc" -ne 0 ]; then
     # Surface kubectl's message on stderr so api_retry (2>&1) can classify it and
-    # keep its verbatim "the API said: ..." reporting truthful.
-    printf '%s\n' "$out" >&2
+    # keep its verbatim "the API said: ..." reporting truthful. Prefer stderr, but
+    # fall back to stdout: some kubectl errors land there, and a blank
+    # classification input is worse than an imprecise one.
+    printf '%s\n' "${err:-$out}" >&2
     return "$rc"
   fi
   # --no-headers => one line per pod; an empty result is a genuine zero.
@@ -1009,7 +1032,7 @@ wait_zero() {
   if ! kc_live; then log "  [dry-run] skip wait-for-zero"; return 0; fi
   # n MUST be initialised: with SCALE_DOWN_TIMEOUT=0 the loop body never runs and
   # the trailing log line would abort the script under `set -u`.
-  local t=0 n="" rc
+  local t=0 n="" rc qfail=0
   while [ "$t" -lt "$SCALE_DOWN_TIMEOUT" ]; do
     # api_retry sets globals it needs the caller to read, so it cannot run inside
     # $(...). Wrap the query in it so a transient blip is retried (and RECORDED
@@ -1024,6 +1047,7 @@ wait_zero() {
       # retried and the abandonment RECORDED by api_retry (visible as DEGRADED in
       # the results file). Keep polling until the timeout rather than silently
       # proceeding as if scaled — never log a confirmation we did not observe.
+      qfail=$((qfail + 1))
       log "  -> pod query FAILED at ${t}s — NOT confirming scale-to-zero (query error, not an observed zero); the API said: $(printf '%s' "$n" | head -n 1)"
       sleep "$SCALE_DOWN_POLL_S"
       t=$((t + SCALE_DOWN_POLL_S))
@@ -1036,7 +1060,14 @@ wait_zero() {
     sleep "$SCALE_DOWN_POLL_S"
     t=$((t + SCALE_DOWN_POLL_S))
   done
-  log "  -> still ${n:-unknown} pod(s) after ${t}s (continuing anyway)"
+  if [ "$qfail" -gt 0 ]; then
+    # Never observed a count, and the reason was query failure rather than pods
+    # still running. Say so at the TOP level, not only per-poll.
+    API_UNOBSERVED_COUNT=$((API_UNOBSERVED_COUNT + 1))
+    log "  -> NEVER OBSERVED a pod count after ${t}s — ${qfail} poll(s) failed. Scale-to-zero is UNCONFIRMED for this rep, not disproven (continuing anyway)."
+  else
+    log "  -> still ${n:-unknown} pod(s) after ${t}s (continuing anyway)"
+  fi
 }
 
 # apply_autoscaling tbc pw pt [cc]  — cc omitted => containerConcurrency untouched
