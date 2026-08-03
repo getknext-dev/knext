@@ -554,11 +554,27 @@ T15_PID=$!
 # gate is asserted, not assumed: if apply never started, the TERM would land
 # somewhere else entirely (e.g. mid-cleanup) and the test would "pass" without
 # ever exercising the leak it exists to catch.
+# The bound is generous ON PURPOSE. run.sh must start, emit provenance, capture the
+# service config and reach the tuned-burst patch before the stub writes the marker,
+# and on a loaded machine that took longer than the previous 15s ceiling — which is
+# what made this test fail ~20% of the time (#597) with T15_ARMED=0. The failure was
+# never the behaviour under test; it was the harness giving up too early.
+#
+# A generous bound costs nothing on a healthy run (the loop exits the moment the
+# marker appears) and only spends its budget when something is genuinely wrong. On
+# timeout it prints run.sh's own output, so "slow machine" is distinguishable from
+# "run.sh never reached the apply" — the previous version failed with neither the
+# marker nor any explanation.
 T15_ARMED=0
-for _ in $(seq 1 150); do
+for _ in $(seq 1 600); do
   [ -f "${T15}/apply_started" ] && { T15_ARMED=1; break; }
   sleep 0.1
 done
+if [ "$T15_ARMED" != "1" ]; then
+  echo "  --- run.sh never signalled apply_started within 60s; its output was: ---"
+  sed 's/^/      /' "${T15}/out.txt" 2>/dev/null | tail -20
+  echo "  --- end run.sh output ---"
+fi
 sleep 0.3
 kill -TERM "$T15_PID" 2>/dev/null
 wait "$T15_PID"; T15_RC=$?
