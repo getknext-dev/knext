@@ -314,6 +314,13 @@ esac
 # Probed ONCE, here, rather than inside running_pods: that function runs inside
 # `$("$@" 2>&1)` (a subshell), so a global set there cannot reach the banner, and
 # a degradation nothing can record is a degradation nothing will report.
+# Written by running_pods (a subshell, so it cannot set a global) and promoted by
+# wait_zero. NOT derived from OUT: OUT is still empty here (:102, "default computed
+# below"), which would have put a stray dotfile in the CWD. PID-scoped so concurrent
+# runs cannot collide, and a plain path because the facility it reports on -- mktemp
+# -- is by definition unavailable when it is needed.
+MKTEMP_MARKER="${TMPDIR:-/tmp}/knext-bench-mktemp-degraded.$$"
+rm -f "$MKTEMP_MARKER" 2>/dev/null || true
 POD_QUERY_STDERR_MERGED=0
 if [ "${DRY_RUN:-0}" = "1" ] && [ "${DRY_RUN_EXERCISE_MKTEMP_FAIL:-0}" = "1" ]; then
   POD_QUERY_STDERR_MERGED=1
@@ -824,6 +831,7 @@ CLEANED_UP=0
 RESTORE_PENDING=""
 _restore_attempted() { RESTORE_PENDING="${RESTORE_PENDING/ $1/}"; }
 cleanup() {
+  rm -f "${MKTEMP_MARKER:-}" 2>/dev/null || true
   # FIRST statement, before anything else can call kc(): this is the SIGNAL-path
   # reset of the per-call cap. api_retry arms KC_TIMEOUT_S around each attempt and
   # clears it on the line after the call returns — but bash defers a trapped
@@ -975,6 +983,11 @@ cleanup() {
     # Must not print the "clean control-plane run" line: a reader grepping for it
     # would read a run whose scale-to-zero was never observed as clean.
     log "api retries: 0, api calls abandoned after transient failure(s): 0 — but ${API_UNOBSERVED_COUNT} scale-down wait(s) never observed a pod count (this run is NOT clean)"
+  elif [ "$POD_QUERY_STDERR_MERGED" = "1" ]; then
+    # The sibling cause already suppresses this line (and a test pins it). A
+    # reader grepping for "clean control-plane run" must not find it on a run
+    # whose pod counts may be inflated by kubectl warnings.
+    log "api retries: 0 (no transient API errors) — but pod queries ran with stderr MERGED, so this run is NOT clean"
   else
     log "api retries: 0 (no transient API errors — clean control-plane run)"
   fi
@@ -1006,7 +1019,14 @@ cleanup() {
     # The authoritative verdict must carry the trust dimension too. Round 2 filed
     # the run as UNCONFIRMED in the index and exited 3, while this line -- the one
     # the block above calls authoritative -- still said "dataset is complete".
-    log "run integrity: k6 metrics captured for all ${REPS_RUN} rep(s), but ${API_UNOBSERVED_COUNT} scale-down wait(s) never confirmed scale-to-zero — timings may be biased LOW; dataset is UNCONFIRMED"
+    if [ "$API_UNOBSERVED_COUNT" -gt 0 ]; then
+      log "run integrity: k6 metrics captured for all ${REPS_RUN} rep(s), but ${API_UNOBSERVED_COUNT} scale-down wait(s) never confirmed scale-to-zero — timings may be biased LOW; dataset is UNCONFIRMED"
+    else
+      # Keying the MESSAGE on API_UNOBSERVED_COUNT while the BRANCH also fired on
+      # merged stderr produced "but 0 scale-down wait(s) never confirmed" -- the
+      # line this file calls authoritative, naming a cause that did not occur.
+      log "run integrity: k6 metrics captured for all ${REPS_RUN} rep(s), but pod queries could not separate kubectl's stderr (mktemp unavailable), so any pod count may be an over-count — dataset is UNCONFIRMED"
+    fi
   else
     log "run integrity: k6 metrics captured for all ${REPS_RUN} rep(s) — dataset is complete"
   fi
@@ -1023,7 +1043,8 @@ cleanup() {
     # pod recorded as cold). That is a claim about DATA TRUSTWORTHINESS, so it
     # belongs in the durable verdict and the exit code -- not only in prose that
     # an automated caller never reads.
-    elif [ "$API_UNOBSERVED_COUNT" -gt 0 ] || [ "$POD_QUERY_STDERR_MERGED" = "1" ]; then run_status="UNCONFIRMED"
+    elif [ "$REPS_RUN" -gt 0 ] \
+         && { [ "$API_UNOBSERVED_COUNT" -gt 0 ] || [ "$POD_QUERY_STDERR_MERGED" = "1" ]; }; then run_status="UNCONFIRMED"
     else run_status="COMPLETE"; fi
     index_append "$run_status"
     log "  run indexed as ${run_status} in ${RESULTS_INDEX}"
@@ -1081,14 +1102,15 @@ running_pods() {
     rc=$?
     err=$(cat "$errf" 2>/dev/null); rm -f "$errf"
   else
-    # mktemp FAILED (full /tmp, bad TMPDIR). Redirecting to /dev/null would hand
-    # classify_api_error a BLANK string -- and :1055 says a blank classification
-    # input is worse than an imprecise one, so that fallback guaranteed the very
-    # thing it was meant to avoid: every failure classified terminal, no retry,
-    # no diagnostic. Fall back to the PRE-#453 behaviour instead (combined
-    # capture). It can over-count if kubectl warns while SUCCEEDING, but that is
-    # fail-safe -- it keeps waiting and never fabricates a zero -- whereas losing
-    # classification is not.
+    # mktemp is unavailable (known at startup, or the disk filled just now). Leave
+    # the MARKER so wait_zero can promote this into the run-level degradation --
+    # without it, a disk that filled mid-run was completely silent and a fabricated
+    # count got published, filed COMPLETE, exit 0.
+    : > "$MKTEMP_MARKER" 2>/dev/null || true
+    # Merged capture keeps classify_api_error's input non-blank, which :1055 says
+    # matters more than an over-count. The over-count is fail-safe -- it keeps
+    # waiting and never fabricates a ZERO -- and the count is barred from
+    # supporting a disproof once the flag is set.
     out=$(kc get pods -n "$NS" -l "serving.knative.dev/service=${SERVICE}" \
       --field-selector=status.phase=Running --no-headers 2>&1)
     rc=$?
@@ -1136,6 +1158,19 @@ wait_zero() {
     api_retry "wait-zero-pods" running_pods
     rc=$?
     n="$API_RETRY_LAST_OUT"
+    # MUST come after `rc=$?`. Putting it between the call and the capture made
+    # `rc` the exit status of the `if`, not of the query -- every failed poll then
+    # read as a success and 18 assertions went red at once. Caught by this suite.
+    #
+    # running_pods runs in a subshell so it cannot set a global, but it CAN leave a
+    # marker on disk, and wait_zero (not in a subshell) promotes it. This replaces
+    # a per-poll re-probe that consumed an mktemp immediately before running_pods
+    # consumed its own: which branch ran then depended on which side of the failure
+    # boundary each call landed -- parity, not behaviour.
+    if [ -f "$MKTEMP_MARKER" ]; then
+      POD_QUERY_STDERR_MERGED=1
+      rm -f "$MKTEMP_MARKER"
+    fi
     if [ "$rc" -ne 0 ]; then
       # DECISION (#429): a query that FAILED is NOT progress toward zero and MUST
       # NOT be coerced to "0 pods" — that false zero was the whole bug. We do not
@@ -1189,12 +1224,26 @@ wait_zero() {
     # LAST poll, not about any poll.
     API_UNOBSERVED_COUNT=$((API_UNOBSERVED_COUNT + 1))
     log "  -> last OBSERVED ${last_n:-unknown} pod(s), then the window ended on a FAILED poll after ${t}s — the final state was never observed, so scale-to-zero is UNCONFIRMED (continuing anyway)"
-  else
+  elif [ -n "$last_n" ] && [ "$POD_QUERY_STDERR_MERGED" = "1" ]; then
+    # We have a count, but stderr is merged into it, so a kubectl WARNING may be
+    # what we counted. Measured: on a genuine zero with one warning on stderr this
+    # printed "still 1 pod(s) ... did NOT happen" -- a DISPROOF asserted from a
+    # fabricated count. A count we cannot trust cannot support the harness's
+    # strongest claim.
+    API_UNOBSERVED_COUNT=$((API_UNOBSERVED_COUNT + 1))
+    log "  -> read ${last_n} pod(s) after ${t}s, but stderr was MERGED into the count so it may be an over-count — scale-to-zero is UNCONFIRMED, not disproven (continuing anyway)"
+  elif [ -n "$last_n" ]; then
     # The last poll RETURNED and it was not zero. That is a positive disproof:
     # pods were up at the end of the window. Say so -- round 3 removed the only
     # sentence in the harness that stated a disproof, leaving it able to report
     # "unconfirmed" but never "this did not happen".
-    log "  -> still ${last_n:-unknown} pod(s) after ${t}s — scale-to-zero did NOT happen within the window (continuing anyway)"
+    log "  -> still ${last_n} pod(s) after ${t}s — scale-to-zero did NOT happen within the window (continuing anyway)"
+  else
+    # Belt and braces: a DISPROOF must never be asserted from an unknown count.
+    # `observed=1` should guarantee last_n is a number, so this is unreachable
+    # today -- but the fallback must not survive on a branch that now ASSERTS.
+    log "  -> scale-down window ended with an unknown pod count after ${t}s — scale-to-zero is UNCONFIRMED (continuing anyway)"
+    API_UNOBSERVED_COUNT=$((API_UNOBSERVED_COUNT + 1))
   fi
 }
 
@@ -1296,7 +1345,14 @@ YAML
 
   local samp_pid="" peak_file=""
   if [ "$sample" = "1" ]; then
-    peak_file=$(mktemp)
+    # Unguarded, this became an ambiguous redirect when mktemp failed and the
+    # sampler silently lost every peak-pod reading. The run already KNOWS mktemp
+    # is broken by this point (:317), so say so rather than losing data quietly.
+    peak_file=$(mktemp 2>/dev/null) || peak_file=""
+    if [ -z "$peak_file" ]; then
+      POD_QUERY_STDERR_MERGED=1
+      log "  WARNING: mktemp failed — pod-fan-out sampling is DISABLED for this rep (peak pods will read as unknown, not zero)."
+    fi
     (
       local t=0 mx=0 f2="" fmax=""
       # POD_SAMPLE_BUDGET is an upper bound, not a target: the parent kills this
@@ -1864,7 +1920,12 @@ fi
 # have recorded a warm pod as cold. Exiting 0 tells every automated caller the
 # dataset is trustworthy when it is not. Distinct code so callers can tell the
 # two apart.
-if [ "$API_UNOBSERVED_COUNT" -gt 0 ] || [ "$POD_QUERY_STDERR_MERGED" = "1" ]; then
+# Exit 3 means "there IS a dataset, but its trust is compromised". A run that
+# produced no reps at all (--phases none, an early abort) has no dataset to
+# distrust, and claiming otherwise makes the code ambiguous for the automated
+# callers it exists for.
+if [ "$REPS_RUN" -gt 0 ] \
+   && { [ "$API_UNOBSERVED_COUNT" -gt 0 ] || [ "$POD_QUERY_STDERR_MERGED" = "1" ]; }; then
   exit 3
 fi
 # Explicit: falling off the end would leak the exit status of the test above (1),

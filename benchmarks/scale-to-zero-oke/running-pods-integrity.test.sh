@@ -393,8 +393,9 @@ echo "[E] a failed mktemp falls back to /dev/null instead of breaking the query"
 TE="$(mktemp -d)"
 make_stub "$TE"
 echo zero > "${TE}/pods_mode"
+TE_RC=0
 DRY_RUN_EXERCISE_MKTEMP_FAIL=1 SCALE_DOWN_TIMEOUT=3 SCALE_DOWN_POLL_S=1 \
-  run_bench "$TE" --phases cold --cold-samples 1
+  run_bench "$TE" --phases cold --cold-samples 1 || TE_RC=$?
 assert_contains "${TE}/results.txt" "scaled to 0" \
   "a genuine zero is still confirmed when mktemp fails"
 assert_not_contains "${TE}/results.txt" "pod query FAILED" \
@@ -406,6 +407,20 @@ assert_contains "${TE}/results.txt" "mktemp is unavailable" \
   "the merged-stderr degradation is announced, not silent"
 assert_contains "${TE}/results.txt" "run indexed as UNCONFIRMED" \
   "a run with merged stderr is filed UNCONFIRMED, not COMPLETE"
+if [ "$TE_RC" = "3" ]; then
+  ok "a merged-stderr run exits 3, the documented UNCONFIRMED code"
+else
+  nope "a merged-stderr run exited ${TE_RC}, not 3 — automated callers read it as trustworthy"
+fi
+assert_not_contains "${TE}/results.txt" "clean control-plane run" \
+  "a merged-stderr run is never reported as a clean control-plane run"
+# The authoritative verdict must name the cause that ACTUALLY occurred. Keying the
+# message on API_UNOBSERVED_COUNT while the branch also fired on merged stderr
+# printed "but 0 scale-down wait(s) never confirmed" -- a reason that did not happen.
+assert_contains "${TE}/results.txt" "could not separate kubectl" \
+  "the run-integrity verdict names merged stderr as the cause, not a zero count"
+assert_not_contains "${TE}/results.txt" "but 0 scale-down wait(s)" \
+  "the verdict never cites a cause with a count of zero"
 
 # -- Test K (round-4 defect 4): a suffixed SCALE_DOWN_TIMEOUT is refused --
 # `150s` was read as 0, which silently disabled the scale-to-zero check for the
@@ -475,6 +490,116 @@ assert_contains "${TI}/results.txt" "TLS handshake timeout" \
 assert_contains "${TI}/results.txt" "api-retry:" \
   "a transient error is still classified transient and RETRIED when mktemp fails"
 
+# -- Test M (round-5): a MERGED count never supports a disproof --
+# Deterministic counterpart to test L, whose shim timing varies. With stderr
+# merged, kubectl's warning IS the count: measured "still 1 pod(s) ... scale-to-zero
+# did NOT happen" on a GENUINE ZERO. The harness's strongest claim must not rest
+# on a count it has just announced it cannot trust.
+echo
+echo "[M] a count read with stderr merged is UNCONFIRMED, never a disproof"
+TM="$(mktemp -d)"
+make_stub "$TM"
+echo zero > "${TM}/pods_mode"          # genuine zero
+echo 1 > "${TM}/pods_warn_on_stderr"   # ...plus a warning that merging counts as a pod
+TM_RC=0
+DRY_RUN_EXERCISE_MKTEMP_FAIL=1 SCALE_DOWN_TIMEOUT=3 SCALE_DOWN_POLL_S=1 \
+  run_bench "$TM" --phases cold --cold-samples 1 || TM_RC=$?
+assert_not_contains "${TM}/results.txt" "scale-to-zero did NOT happen" \
+  "a merged (untrustworthy) count never supports a DISPROOF"
+assert_contains "${TM}/results.txt" "UNCONFIRMED" \
+  "the merged count is reported as unconfirmed instead"
+# The authoritative verdict must name the cause that ACTUALLY occurred. Keying the
+# message on API_UNOBSERVED_COUNT while the branch also fired on merged stderr
+# printed "but 0 scale-down wait(s) never confirmed" -- a reason that did not happen.
+
+
+# -- Test L (round-5 finding 1): mktemp failing MID-RUN is never silent --
+# The startup probe is a one-shot, so a disk that fills DURING a long run was
+# invisible to it: running_pods silently merged stderr, a kubectl warning was
+# counted as a pod, and "still 1 pod(s)" was published on a GENUINE ZERO, filed
+# COMPLETE, exit 0. A PATH-shadowing shim reproduces it: mktemp succeeds long
+# enough to get past startup, then fails.
+echo
+echo "[L] mktemp failing part-way through a run never publishes a fabricated count"
+TL="$(mktemp -d)"
+make_stub "$TL"
+echo zero > "${TL}/pods_mode"          # a GENUINE zero...
+echo 1 > "${TL}/pods_warn_on_stderr"   # ...with a warning kubectl writes to stderr
+mkdir -p "${TL}/bin"
+cat > "${TL}/bin/mktemp" <<MKSHIM
+#!/usr/bin/env bash
+# Succeed for the first N calls (startup probe + harness scaffolding), then fail
+# like a full disk would.
+c=\$(cat "${TL}/mktemp_calls" 2>/dev/null || echo 0); c=\$((c + 1))
+echo "\$c" > "${TL}/mktemp_calls"
+limit=\$(cat "${TL}/mktemp_ok_until" 2>/dev/null || echo 3)
+if [ "\$c" -gt "\$limit" ]; then echo "mktemp: failed to create file: No space left on device" >&2; exit 1; fi
+exec /usr/bin/mktemp "\$@"
+MKSHIM
+chmod +x "${TL}/bin/mktemp"
+# 1, not 3: call #1 is run.sh's startup probe, which must SUCCEED so the run
+# begins believing mktemp works -- that is what makes this the MID-RUN case rather
+# than the startup case (test E). Every call after it fails. A larger threshold
+# made the test depend on how many mktemp calls a given code path happens to make,
+# which is why it passed here while the same scenario failed in a standalone rig.
+echo 1 > "${TL}/mktemp_ok_until"
+TL_RC=0
+PATH="${TL}/bin:$PATH" SCALE_DOWN_TIMEOUT=3 SCALE_DOWN_POLL_S=1 API_RETRY_ATTEMPTS=1 \
+  run_bench "$TL" --phases cold --cold-samples 1 || TL_RC=$?
+assert_not_contains "${TL}/results.txt" "scale-to-zero did NOT happen" \
+  "no DISPROOF is asserted from a count that could not be measured safely"
+assert_not_contains "${TL}/results.txt" "run indexed as COMPLETE" \
+  "a run whose pod queries could not be performed safely is not filed COMPLETE"
+assert_contains "${TL}/results.txt" "mktemp is unavailable" \
+  "a mid-run mktemp failure is promoted to a run-level degradation, not silently merged"
+if [ "$TL_RC" -ne 0 ]; then
+  ok "a mid-run mktemp failure makes the run exit non-zero (${TL_RC})"
+else
+  nope "a mid-run mktemp failure exited 0 — the fabricated-count path is silent again"
+fi
+
+# -- Test N (round-5 f6): mktemp failing EVERYWHERE disables sampling loudly --
+# peak_file=$(mktemp) was unguarded, so a failed mktemp made `echo > "$peak_file"`
+# an ambiguous redirect and every peak-pod reading was lost SILENTLY.
+echo
+echo "[N] a wholly-unavailable mktemp disables fan-out sampling loudly"
+TN="$(mktemp -d)"
+make_stub "$TN"
+echo zero > "${TN}/pods_mode"
+mkdir -p "${TN}/bin"
+sed "s|__DIR__|${TN}|" > "${TN}/bin/mktemp" <<'MKN'
+#!/usr/bin/env bash
+# Every call fails, as a full disk would.
+echo "mktemp: failed to create file: No space left on device" >&2
+exit 1
+MKN
+chmod +x "${TN}/bin/mktemp"
+TN_RC=0
+PATH="${TN}/bin:$PATH" SCALE_DOWN_TIMEOUT=2 SCALE_DOWN_POLL_S=1 API_RETRY_ATTEMPTS=1 \
+  run_bench "$TN" --phases cold --cold-samples 1 || TN_RC=$?
+assert_contains "${TN}/results.txt" "pod-fan-out sampling is DISABLED" \
+  "a failed sampler mktemp says so instead of silently losing every peak reading"
+assert_contains "${TN}/results.txt" "peak pods will read as unknown, not zero" \
+  "the lost data is named as unknown rather than reported as zero"
+
+# -- Test O (round-5 f5): a run with NO reps is not filed UNCONFIRMED --
+# Exit 3 means "there IS a dataset, but its trust is compromised". A run that
+# produced no reps has no dataset to distrust; claiming otherwise makes the exit
+# code ambiguous for the automated callers it exists for.
+echo
+echo "[O] a run that produced no reps is not filed UNCONFIRMED"
+TO="$(mktemp -d)"
+make_stub "$TO"
+TO_RC=0
+DRY_RUN_EXERCISE_MKTEMP_FAIL=1 run_bench "$TO" --phases none || TO_RC=$?
+assert_not_contains "${TO}/results.txt" "run indexed as UNCONFIRMED" \
+  "a no-rep run is NO-DATA, not UNCONFIRMED — there is no dataset to distrust"
+if [ "$TO_RC" = "3" ]; then
+  nope "a run with no reps exited 3, which documents a compromised DATASET that does not exist"
+else
+  ok "a run with no reps does not claim exit 3 (got ${TO_RC})"
+fi
+
 # -- Test C (#453 item 3): a stderr warning is not counted as a pod --
 # running_pods used 2>&1 and counted combined output on success, so a kubectl
 # deprecation notice read as a pod: the count never reaches zero and a perfectly
@@ -490,7 +615,7 @@ SCALE_DOWN_TIMEOUT=3 SCALE_DOWN_POLL_S=1 \
 assert_contains "${TC}/results.txt" "scaled to 0" \
   "a genuine zero is still confirmed when kubectl also writes a warning to stderr"
 
-rm -rf "$T1" "$T3" "$T4" "$T5" "$TA" "$TB" "$TC" "$TD" "$TE" "$TF" "$TG" "$TH" "$TI" "$TK"
+rm -rf "$T1" "$T3" "$T4" "$T5" "$TA" "$TB" "$TC" "$TD" "$TE" "$TF" "$TG" "$TH" "$TI" "$TK" "$TL" "$TM" "$TN" "$TO"
 
 echo
 echo "== ${PASS} passed, ${FAIL} failed =="
