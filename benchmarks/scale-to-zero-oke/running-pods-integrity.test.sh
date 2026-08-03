@@ -115,7 +115,11 @@ LOGS
 # keeps the wait_zero loop fast; retry backoff is tiny.
 run_bench() {
   local dir="$1"; shift
+  # Isolate the durable index: inheriting the default appended a row to the
+  # repo's real results/INDEX.tsv on every test run (it is now ~962 KB).
+  # provenance.test.sh already isolates it; follow that convention.
   DRY_RUN=1 DRY_RUN_EXERCISE_KC=1 KUBECTL_BIN="${dir}/kubectl" \
+  RESULTS_INDEX="${dir}/INDEX.tsv" \
   OUT="${dir}/results.txt" SCALE_DOWN_TIMEOUT="${SCALE_DOWN_TIMEOUT:-1}" \
   SCALE_DOWN_POLL_S="${SCALE_DOWN_POLL_S:-1}" APPLY_SETTLE_SECONDS=0 \
   POD_SAMPLE_BUDGET=1 SCHEDULE_CHECK_TIMEOUT=0 K6_JOB_TIMEOUT=5 \
@@ -204,14 +208,37 @@ echo "[A] a persistently TERMINAL pod query degrades the run and says it never o
 TA="$(mktemp -d)"
 make_stub "$TA"
 echo 999 > "${TA}/pods_fail_count"; echo terminal > "${TA}/pods_fail_mode"
+TA_RC=0
 SCALE_DOWN_TIMEOUT=2 SCALE_DOWN_POLL_S=1 API_RETRY_ATTEMPTS=2 \
-  run_bench "$TA" --phases cold --cold-samples 1
+  run_bench "$TA" --phases cold --cold-samples 1 || TA_RC=$?
 assert_not_contains "${TA}/results.txt" "scaled to 0" \
   "a terminal query never fabricates a scale-to-zero confirmation"
 assert_contains "${TA}/results.txt" "NEVER OBSERVED" \
   "the timeout says it never observed a count, not 'still N pods'"
 assert_contains "${TA}/results.txt" "DEGRADED" \
   "a purely-terminal failure trips the top-level DEGRADED banner (#453 item 1)"
+# A substring check on "DEGRADED" was satisfied by a banner that was factually
+# WRONG: it called a terminal failure TRANSIENT, printed "0 retry/retries, 0
+# abandoned call(s):" with an empty ops list, and pointed at 'api-retry:' lines
+# that a terminal failure never writes. Pin the properties, not the word.
+assert_not_contains "${TA}/results.txt" "RUN DEGRADED BY TRANSIENT API ERRORS" \
+  "a TERMINAL failure is not reported as a TRANSIENT one"
+assert_not_contains "${TA}/results.txt" "clean control-plane run" \
+  "a run that never observed a pod count is never reported as clean"
+assert_contains "${TA}/results.txt" "NEVER OBSERVED a pod count" \
+  "the degraded banner names the actual cause"
+# Pin the INDEX line, not the bare word: "UNCONFIRMED" also occurs in wait_zero's
+# own per-rep message, so a substring check passed even with the run-status branch
+# reverted -- it proved nothing. Caught by mutation, which is the point of doing it.
+assert_contains "${TA}/results.txt" "run indexed as UNCONFIRMED" \
+  "the durable run status records the dataset as UNCONFIRMED, not COMPLETE"
+# The EXIT CODE is the half that automated callers actually read. Prose in a
+# results file does not stop a CI job from treating a biased dataset as good.
+if [ "$TA_RC" -ne 0 ]; then
+  ok "an unconfirmed run exits NON-ZERO (${TA_RC}), so a caller cannot read it as clean"
+else
+  nope "an unconfirmed run exited 0 — every automated caller reads it as a clean dataset"
+fi
 
 # -- Test B (#453 item 2): SCALE_DOWN_POLL_S=0 must not spin forever --
 # Unsanitised, `t=$((t + 0))` never advances and wait_zero hangs. A benchmark that
@@ -242,6 +269,7 @@ if [ -z "$TIMEOUT_BIN" ]; then
   echo "  SKIP  [B] needs timeout(1) (coreutils) to bound the run -- not asserting a vacuous pass"
 else
 "$TIMEOUT_BIN" 45 env DRY_RUN=1 DRY_RUN_EXERCISE_KC=1 KUBECTL_BIN="${TB}/kubectl" \
+  RESULTS_INDEX="${TB}/INDEX.tsv" \
   OUT="${TB}/results.txt" SCALE_DOWN_TIMEOUT=2 SCALE_DOWN_POLL_S=0 \
   APPLY_SETTLE_SECONDS=0 POD_SAMPLE_BUDGET=1 SCHEDULE_CHECK_TIMEOUT=0 \
   K6_JOB_TIMEOUT=5 API_RETRY_BASE_MS=5 API_RETRY_MAX_MS=20 API_RETRY_ATTEMPTS=1 \
@@ -252,7 +280,55 @@ if [ "$TB_RC" = "124" ]; then
 else
   ok "the run terminated instead of spinning forever (exit ${TB_RC})"
 fi
+# "did not hang" is NOT the same as "the clamp worked": ANY non-124 exit passed
+# the check above, including a run that FATALed in setup and never reached
+# wait_zero at all. Proven vacuous by review -- corrupting the stub's ksvc.json
+# gave exit 1 and a green check over an empty results file. Pin that the code
+# under test actually executed.
+assert_contains "${TB}/results.txt" "pod query FAILED" \
+  "the run actually reached wait_zero (not a vacuous pass on an early exit)"
 fi
+
+# -- Test D (finding 3): a MIXED run reports the pods it DID see --
+# The first cut of item 1 keyed "never observed" on qfail>0, so one early failed
+# poll suppressed "still N pod(s)" -- the load-bearing fact that scale-to-zero
+# genuinely did NOT happen -- and claimed it was "not disproven" when it had been
+# positively disproven. This is #429's confusion mirrored: that bug read a failed
+# query as observed state; this one read observed state as a failed query.
+echo
+echo "[D] a run that fails SOME polls but observes pods reports the pods, not 'never observed'"
+TD="$(mktemp -d)"
+make_stub "$TD"
+echo 1 > "${TD}/pods_fail_count"      # exactly one failure, then it recovers
+echo transient > "${TD}/pods_fail_mode"
+echo nonzero > "${TD}/pods_mode"      # ...and thereafter reports 2 pods
+# ATTEMPTS=1 deliberately: with retries enabled api_retry ABSORBS the single
+# transient failure, wait_zero never sees a failed poll, and the mixed state this
+# test exists to cover is never reached -- the test would pass without proving
+# anything. One attempt means the failure reaches wait_zero as a failed poll,
+# and the polls after it succeed.
+SCALE_DOWN_TIMEOUT=4 SCALE_DOWN_POLL_S=1 API_RETRY_ATTEMPTS=1 \
+  run_bench "$TD" --phases cold --cold-samples 1
+assert_not_contains "${TD}/results.txt" "NEVER OBSERVED" \
+  "a run that DID observe pods is not reported as never having observed a count"
+assert_contains "${TD}/results.txt" "scale-to-zero did NOT happen" \
+  "the disproof is stated plainly, not downgraded to 'unconfirmed'"
+
+# -- Test E (finding 5): a failed mktemp must not present as a query failure --
+# `errf=$(mktemp)` returning empty made `2>"$errf"` an AMBIGUOUS REDIRECT, which
+# fails the command -- so a full disk or a bad TMPDIR would have read as "the
+# pod query failed" and blocked every scale-to-zero confirmation.
+echo
+echo "[E] a failed mktemp falls back to /dev/null instead of breaking the query"
+TE="$(mktemp -d)"
+make_stub "$TE"
+echo zero > "${TE}/pods_mode"
+DRY_RUN_EXERCISE_MKTEMP_FAIL=1 SCALE_DOWN_TIMEOUT=3 SCALE_DOWN_POLL_S=1 \
+  run_bench "$TE" --phases cold --cold-samples 1
+assert_contains "${TE}/results.txt" "scaled to 0" \
+  "a genuine zero is still confirmed when mktemp fails"
+assert_not_contains "${TE}/results.txt" "pod query FAILED" \
+  "a failed mktemp is not misreported as a failed pod query"
 
 # -- Test C (#453 item 3): a stderr warning is not counted as a pod --
 # running_pods used 2>&1 and counted combined output on success, so a kubectl
@@ -269,7 +345,7 @@ SCALE_DOWN_TIMEOUT=3 SCALE_DOWN_POLL_S=1 \
 assert_contains "${TC}/results.txt" "scaled to 0" \
   "a genuine zero is still confirmed when kubectl also writes a warning to stderr"
 
-rm -rf "$T1" "$T3" "$T4" "$T5" "$TA" "$TB" "$TC"
+rm -rf "$T1" "$T3" "$T4" "$T5" "$TA" "$TB" "$TC" "$TD" "$TE"
 
 echo
 echo "== ${PASS} passed, ${FAIL} failed =="

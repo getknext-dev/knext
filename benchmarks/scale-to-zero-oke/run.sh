@@ -916,7 +916,16 @@ cleanup() {
   # recovered by retrying or gave up. Keying this on the retry count alone meant
   # a run killed by a stalled apiserver (0 retries, 1 abandonment) printed the
   # "clean control-plane run" line.
-  if [ "$API_RETRY_COUNT" -gt 0 ] || [ "$API_ABANDONED_COUNT" -gt 0 ] || [ "$API_UNOBSERVED_COUNT" -gt 0 ]; then
+  # The unobserved case gets its OWN line rather than being folded into the
+  # retry banner. Folding it there produced a self-contradicting report: the word
+  # TRANSIENT on a failure that was terminal by construction, "0 retry/retries, 0
+  # abandoned call(s):" with an empty ops list, and a pointer to 'api-retry:'
+  # lines that do not exist -- because a terminal failure appends to neither OPS
+  # string. Same "reads cleaner than reality" class as #424-#427.
+  if [ "$API_UNOBSERVED_COUNT" -gt 0 ]; then
+    log "*** RUN DEGRADED — ${API_UNOBSERVED_COUNT} scale-down wait(s) NEVER OBSERVED a pod count (every poll failed, terminally). Scale-to-zero is UNCONFIRMED for those reps, not disproven: any 'cold' sample taken after one may have hit a WARM pod and be biased LOW. ***"
+  fi
+  if [ "$API_RETRY_COUNT" -gt 0 ] || [ "$API_ABANDONED_COUNT" -gt 0 ]; then
     local ops_summary
     ops_summary=$(printf '%s%s' "$API_RETRY_OPS" "$API_ABANDONED_OPS" | grep -v '^$' | sort | uniq -c \
       | awk '{ printf "%s%s x%s", (NR>1 ? ", " : ""), $2, $1 }')
@@ -934,6 +943,10 @@ cleanup() {
     # stand alone on a run that stalled and was abandoned — a reader grepping
     # for that line would have read it as "clean".
     log "api retries: ${API_RETRY_COUNT}, api calls abandoned after transient failure(s): ${API_ABANDONED_COUNT} (the control plane misbehaved — this run is NOT a clean first-try run)"
+  elif [ "$API_UNOBSERVED_COUNT" -gt 0 ]; then
+    # Must not print the "clean control-plane run" line: a reader grepping for it
+    # would read a run whose scale-to-zero was never observed as clean.
+    log "api retries: 0, api calls abandoned after transient failure(s): 0 — but ${API_UNOBSERVED_COUNT} scale-down wait(s) never observed a pod count (this run is NOT clean)"
   else
     log "api retries: 0 (no transient API errors — clean control-plane run)"
   fi
@@ -973,6 +986,11 @@ cleanup() {
     if [ "$PHASES_COMPLETED" -ne 1 ]; then run_status="ABORTED"
     elif [ -n "$INCOMPLETE_REPS" ]; then run_status="INCOMPLETE"
     elif [ "$REPS_RUN" -eq 0 ]; then run_status="NO-DATA"
+    # A dataset whose scale-to-zero was never observed may be biased LOW (a warm
+    # pod recorded as cold). That is a claim about DATA TRUSTWORTHINESS, so it
+    # belongs in the durable verdict and the exit code -- not only in prose that
+    # an automated caller never reads.
+    elif [ "$API_UNOBSERVED_COUNT" -gt 0 ]; then run_status="UNCONFIRMED"
     else run_status="COMPLETE"; fi
     index_append "$run_status"
     log "  run indexed as ${run_status} in ${RESULTS_INDEX}"
@@ -1010,19 +1028,50 @@ running_pods() {
   # the count and prevents a genuine zero from ever being confirmed. Fail-safe
   # (it keeps waiting, never fabricates a zero) but wrong, and it would present as
   # "scale-to-zero is broken" on a cluster where it was working perfectly.
-  errf=$(mktemp)
+  # A failed mktemp left errf empty, making `2>"$errf"` an ambiguous redirect --
+  # which fails the command and presents as a query error. Fall back to /dev/null.
+  # DRY_RUN_EXERCISE_MKTEMP_FAIL forces the mktemp-failed path so the fallback
+  # below is REACHABLE by a test. Same family as DRY_RUN_EXERCISE_KC /
+  # DRY_RUN_EXERCISE_PENDING: without a seam this branch is unprovable, and an
+  # unproved branch is decoration by this repo's own standard.
+  if [ "${DRY_RUN_EXERCISE_MKTEMP_FAIL:-0}" = "1" ]; then
+    errf=""
+  else
+    errf=$(mktemp 2>/dev/null) || errf=""
+  fi
+  [ -n "$errf" ] || errf=/dev/null
   out=$(kc get pods -n "$NS" -l "serving.knative.dev/service=${SERVICE}" \
     --field-selector=status.phase=Running --no-headers 2>"$errf")
   rc=$?
-  err=$(cat "$errf" 2>/dev/null); rm -f "$errf"
+  if [ "$errf" != "/dev/null" ]; then
+    err=$(cat "$errf" 2>/dev/null); rm -f "$errf"
+  else
+    err=""
+  fi
   if [ "$rc" -ne 0 ]; then
     # Surface kubectl's message on stderr so api_retry (2>&1) can classify it and
     # keep its verbatim "the API said: ..." reporting truthful. Prefer stderr, but
     # fall back to stdout: some kubectl errors land there, and a blank
     # classification input is worse than an imprecise one.
-    printf '%s\n' "${err:-$out}" >&2
+    # Prefer stderr, but include stdout when BOTH are populated: the old `2>&1`
+    # gave classify_api_error both streams, and narrowing its input loses
+    # classifications. `${err:-$out}` alone DROPPED stdout whenever stderr existed.
+    if [ -n "$err" ] && [ -n "$out" ]; then
+      printf '%s\n%s\n' "$err" "$out" >&2
+    else
+      printf '%s\n' "${err:-$out}" >&2
+    fi
     return "$rc"
   fi
+  # On SUCCESS, stderr is deliberately DISCARDED, and that is forced rather than
+  # an oversight. There is no safe channel to report it on:
+  #   - stdout IS the data channel (the caller parses the pod count from it);
+  #   - api_retry runs this function as `$("$@" 2>&1)` (run.sh:512), so anything
+  #     written to stderr is MERGED BACK into that same count -- which is the very
+  #     contamination this function exists to prevent;
+  #   - that `$(...)` is a subshell, so a global set here cannot reach the caller.
+  # Surfacing a throttling notice here would corrupt the measurement it annotates.
+  # Proved by test C, which went red when a `log` line was added on this path.
   # --no-headers => one line per pod; an empty result is a genuine zero.
   printf '%s' "$out" | grep -c '[^[:space:]]' 2>/dev/null || true
   return 0
@@ -1032,7 +1081,7 @@ wait_zero() {
   if ! kc_live; then log "  [dry-run] skip wait-for-zero"; return 0; fi
   # n MUST be initialised: with SCALE_DOWN_TIMEOUT=0 the loop body never runs and
   # the trailing log line would abort the script under `set -u`.
-  local t=0 n="" rc qfail=0
+  local t=0 n="" rc qfail=0 observed=0
   while [ "$t" -lt "$SCALE_DOWN_TIMEOUT" ]; do
     # api_retry sets globals it needs the caller to read, so it cannot run inside
     # $(...). Wrap the query in it so a transient blip is retried (and RECORDED
@@ -1053,6 +1102,12 @@ wait_zero() {
       t=$((t + SCALE_DOWN_POLL_S))
       continue
     fi
+    # A poll that RETURNED is an observation, whatever it says. This flag is the
+    # difference between "we never saw a count" and "we saw pods" -- conflating
+    # them (with qfail>0) suppressed the load-bearing "still N pod(s)" fact on any
+    # run where a single early poll failed, and asserted "not disproven" about a
+    # scale-to-zero that had been positively disproven three polls running.
+    observed=1
     if [ "$n" = "0" ]; then
       log "  -> scaled to 0 after ${t}s"
       return 0
@@ -1060,11 +1115,16 @@ wait_zero() {
     sleep "$SCALE_DOWN_POLL_S"
     t=$((t + SCALE_DOWN_POLL_S))
   done
-  if [ "$qfail" -gt 0 ]; then
-    # Never observed a count, and the reason was query failure rather than pods
-    # still running. Say so at the TOP level, not only per-poll.
+  if [ "$observed" -eq 0 ] && [ "$qfail" -gt 0 ]; then
+    # Never observed a count at all, and the reason was query failure rather than
+    # pods still running. Say so at the TOP level, not only per-poll.
     API_UNOBSERVED_COUNT=$((API_UNOBSERVED_COUNT + 1))
-    log "  -> NEVER OBSERVED a pod count after ${t}s — ${qfail} poll(s) failed. Scale-to-zero is UNCONFIRMED for this rep, not disproven (continuing anyway)."
+    log "  -> NEVER OBSERVED a pod count after ${t}s — all ${qfail} poll(s) failed. Scale-to-zero is UNCONFIRMED for this rep, not disproven (continuing anyway)."
+  elif [ "$qfail" -gt 0 ]; then
+    # MIXED: some polls failed, but others returned. We DID observe pods, so
+    # scale-to-zero is disproven, not unconfirmed. Both facts get reported --
+    # reporting only the failures would bury the more important one.
+    log "  -> still ${n:-unknown} pod(s) after ${t}s — scale-to-zero did NOT happen (${qfail} poll(s) also failed) (continuing anyway)"
   else
     log "  -> still ${n:-unknown} pod(s) after ${t}s (continuing anyway)"
   fi
@@ -1731,6 +1791,13 @@ PHASES_COMPLETED=1
 # A partial result must be loud in the exit code too, not just in the text.
 if [ -n "$INCOMPLETE_REPS" ]; then
   exit 2
+fi
+# Same reasoning, different cause: a run that never observed a scale-to-zero may
+# have recorded a warm pod as cold. Exiting 0 tells every automated caller the
+# dataset is trustworthy when it is not. Distinct code so callers can tell the
+# two apart.
+if [ "$API_UNOBSERVED_COUNT" -gt 0 ]; then
+  exit 3
 fi
 # Explicit: falling off the end would leak the exit status of the test above (1),
 # turning every clean run into a spurious failure.
