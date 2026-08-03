@@ -18,13 +18,20 @@
  * so there is no "build not present" branch that could go green by skipping
  * (the anti-pattern #408 exists to remove).
  *
+ * `esbuild` is declared in this package's OWN devDependencies (matching the
+ * `^0.28.0` specifier already used in the workspace) rather than leaned on via
+ * hoisting: the package-scoped `tsc --noEmit` job installs only this package's
+ * declared deps, and an undeclared import fails there even when it resolves in
+ * a hoisted local tree. devDependencies are not installed by consumers, so the
+ * published surface is unchanged.
+ *
  * Mutation-proved: deleting the step registration from `node-server.ts` turns
  * every assertion below RED.
  */
 
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { build } from "esbuild";
+import { build, type OutputFile } from "esbuild";
 import { beforeAll, describe, expect, it } from "vitest";
 import tsupConfig from "../../tsup.config";
 
@@ -80,7 +87,7 @@ beforeAll(async () => {
         // package's own dependencies at install time.
         external: (libraryPass?.external as string[]) ?? [],
     });
-    bundle = result.outputFiles.map((f) => f.text).join("\n");
+    bundle = result.outputFiles.map((file: OutputFile) => file.text).join("\n");
     expect(bundle.length).toBeGreaterThan(0);
 }, 60_000);
 
