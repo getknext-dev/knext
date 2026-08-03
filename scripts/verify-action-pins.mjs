@@ -55,6 +55,7 @@
 
 import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 /**
  * The credential-bearing workflows. Kept in sync with the publish path by
@@ -156,6 +157,11 @@ export function discoverPinnableFiles(repoRoot) {
 
 /** `uses: owner/repo[/path]@<ref>` with an optional trailing `# comment`. */
 const USES_LINE = /^\s*(?:-\s*)?uses:\s*(\S+?)@(\S+)\s*(?:#\s*(.*))?$/;
+/**
+ * The `uses:` KEY plus whatever value follows, quoted or not. Used only by
+ * `mentionsUses`, which must stay independent of (and weaker than) `USES_LINE`.
+ */
+const USES_KEY = /["']?\buses["']?\s*:\s*(\S+)?/;
 /** The auditable version comment the form guard already requires. */
 const VERSION_COMMENT = /^(v\d+\.\d+\.\d+[\w.+-]*)/;
 
@@ -313,7 +319,21 @@ export async function verifyPin(pin, { api = githubApi } = {}) {
  * produced ZERO findings from both guards instead of a `no-pins-parsed` alarm.
  */
 export function mentionsUses(text) {
-  return text.split('\n').some((line) => !/^\s*#/.test(line) && /["']?\buses["']?\s*:/.test(line));
+  return text.split('\n').some((line) => {
+    if (/^\s*#/.test(line)) return false;
+    const match = USES_KEY.exec(line);
+    if (!match) return false;
+    // A LOCAL composite-action ref (`uses: ./.github/actions/foo`) invokes this
+    // repository's own code at the commit already checked out. There is no
+    // upstream tag to resolve and no SHA to pin — pinning it is impossible, not
+    // merely unnecessary. `USES_LINE` requires an `@` so it parses nothing,
+    // which without this exclusion made the pair report a `no-pins-parsed`
+    // FALSE RED. Keyed on the REF, never on the line merely containing `./`, so
+    // `uses: evil/action@main # ./x` is still caught.
+    const value = match[1];
+    if (value && /^\.{1,2}\//.test(value)) return false;
+    return true;
+  });
 }
 
 /**
@@ -508,7 +528,32 @@ async function main() {
 }
 
 // Only run when executed directly; importing for tests must have no side effects.
-if (process.argv[1] && import.meta.url === `file://${process.argv[1]}`) {
+//
+// Both normalisations below are load-bearing, and each is its own fail-open:
+// when the comparison is wrong, main() never runs and the process exits 0
+// having verified NOTHING — silently contradicting this file's own header.
+//
+//  1. `pathToFileURL`, not a `file://${argv[1]}` template: `import.meta.url` is
+//     PERCENT-ENCODED, so any space or non-ASCII character in the path breaks a
+//     raw string compare.
+//  2. `realpathSync`: Node resolves a module's REAL path for `import.meta.url`,
+//     while `argv[1]` is the path as typed. Invoked through a symlinked
+//     directory — macOS's own `/var` → `/private/var`, or a symlinked bin — the
+//     two differ even with correct encoding.
+//
+// Neither is reachable on the GH runner today, which is exactly why they need
+// the correct comparison rather than a note.
+function invokedDirectly() {
+  const argv1 = process.argv[1];
+  if (!argv1) return false;
+  try {
+    return import.meta.url === pathToFileURL(realpathSync(argv1)).href;
+  } catch {
+    return false;
+  }
+}
+
+if (invokedDirectly()) {
   try {
     process.exitCode = await main();
   } catch (error) {

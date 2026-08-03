@@ -45,8 +45,21 @@ updates:
     # `.github/actions/<name>/action.yml`. Our pin guard covers those files by
     # directory walk, so without the glob below one could be pinned-by-default
     # yet never bumped: pinned and frozen, which is the staleness failure with
-    # extra steps. The glob matches nothing today (the directory does not exist)
-    # and starts working the moment one is added — no config edit needed.
+    # extra steps.
+    #
+    # Be precise about what is VERIFIED versus ASSUMED here, because the guard
+    # in tests/workflow-action-pins.test.ts is a TEXT match — it can tell you
+    # this entry exists, and cannot tell an honoured entry from an errored one:
+    #   - VERIFIED: the schema. `directories` takes a string array and supports
+    #     `*` (GitHub's reference is explicit that `directory` does not).
+    #   - ASSUMED: that a glob matching NOTHING — which is the case today, since
+    #     `.github/actions/` does not exist — is accepted rather than erroring
+    #     the whole config, and that it begins matching when a directory is
+    #     added. That is the documented intent, not something we have observed.
+    # So CHECK THE DEPENDABOT JOB STATUS after this merges (Insights →
+    # Dependency graph → Dependabot → last checked / any error banner). If an
+    # empty glob turns out to error, drop this entry and re-add it with the
+    # first real composite action.
     directories:
       - '/'
       - '/.github/actions/*'

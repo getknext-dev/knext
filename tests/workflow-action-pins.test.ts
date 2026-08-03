@@ -196,6 +196,13 @@ describe('every workflow SHA-pins every action (#528)', () => {
     // directory, not a tree. Without this, a composite action added there would
     // be pinned-by-default by the guard above yet never BUMPED: pinned and
     // frozen, which is the staleness failure with extra steps.
+    //
+    // KNOW WHAT THIS ASSERTION IS WORTH: it is a TEXT match. It proves the entry
+    // is present and cannot tell an entry Dependabot HONOURED from one it
+    // ERRORED on — only the Dependabot job status can, and dependabot.yml says
+    // so and says to check it after merge. Asserting presence is still worth
+    // doing (a silent deletion reds here); mistaking it for runtime proof is
+    // not.
     const dependabot = readFileSync(resolve(REPO_ROOT, '.github/dependabot.yml'), 'utf8');
     expect(dependabot, 'nested composite actions need their own directory entry').toMatch(
       /\.github\/actions/,

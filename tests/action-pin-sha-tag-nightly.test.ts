@@ -1,5 +1,6 @@
 import { spawnSync } from 'node:child_process';
 import {
+  copyFileSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
@@ -55,6 +56,16 @@ const NIGHTLY = resolve(WORKFLOW_DIR, 'action-pin-resolution-nightly.yml');
 
 function read(path: string): string {
   return readFileSync(path, 'utf8');
+}
+
+/**
+ * Run the real script as a subprocess. The exit code is the entire contract
+ * with the nightly, and no in-process import can observe it.
+ */
+function runScript(args: string[]): { status: number | null; output: string } {
+  const script = resolve(REPO_ROOT, 'scripts/verify-action-pins.mjs');
+  const result = spawnSync(process.execPath, [script, ...args], { encoding: 'utf8' });
+  return { status: result.status, output: `${result.stdout}${result.stderr}` };
 }
 
 /** A canned GitHub API double: `path -> { status, body }`. */
@@ -508,14 +519,68 @@ describe('nightly SHA↔tag resolution — scope is every workflow (#528)', () =
     expect(`${result.stdout}${result.stderr}`).toMatch(/no workflow or action files/i);
   });
 
-  it('exits NON-ZERO on an unrecognised flag rather than silently scanning cwd', () => {
+  it('exits NON-ZERO on the RETIRED --dir flag rather than silently scanning cwd', () => {
     // `--dir` was the round-1 flag and is now unsupported. Ignoring it silently
     // would scan the wrong tree and print green — the same fail-open family as
-    // the zero-file case.
-    const script = resolve(REPO_ROOT, 'scripts/verify-action-pins.mjs');
-    const result = spawnSync(process.execPath, [script, '--dir', '/tmp'], { encoding: 'utf8' });
+    // the zero-file case. This hits the DEDICATED --dir branch; the catch-all
+    // and the missing-value branch are separate paths, tested below. (An earlier
+    // revision named this test "unrecognised flag" while only ever exercising
+    // the --dir branch, so the catch-all's `return 1` could be deleted with the
+    // suite still green.)
+    const result = runScript(['--dir', '/tmp']);
     expect(result.status).not.toBe(0);
-    expect(`${result.stdout}${result.stderr}`).toMatch(/--dir|unrecognised|unknown/i);
+    expect(result.output).toMatch(/--dir/);
+  });
+
+  it.each([
+    ['--nope'],
+    ['-x'],
+    ['/some/positional/path'],
+    ['--root=/tmp'],
+  ])('exits NON-ZERO on the unrecognised argument %s (the CATCH-ALL branch)', (arg) => {
+    // Reaches the catch-all, not the --dir branch. `--root=/tmp` is included
+    // deliberately: the parser accepts `--root <value>`, NOT `--root=value`,
+    // so the equals form must be rejected rather than silently scanning cwd.
+    const result = runScript([arg]);
+    expect(result.status, `${arg} must not be silently ignored`).not.toBe(0);
+    expect(result.output).toMatch(/unrecognised argument/i);
+  });
+
+  it.each([
+    [['--root']],
+    [['--root', '--nope']],
+  ])('exits NON-ZERO when --root has no value (%s)', (args) => {
+    // The missing-value branch. Without it, `--root` alone resolved '' to cwd
+    // and scanned the wrong tree — green from an invocation that asked for
+    // something else entirely.
+    const result = runScript(args);
+    expect(result.status).not.toBe(0);
+    expect(result.output).toMatch(/--root requires a path/i);
+  });
+
+  it('exits NON-ZERO from a path containing a SPACE or non-ASCII character', () => {
+    // The direct-execution guard compares `import.meta.url` (percent-encoded)
+    // against a raw `file://${process.argv[1]}`. From `/dir with space/`, those
+    // differ, main() never runs, and the process exits 0 having verified
+    // NOTHING — a genuine fail-open, and the exact claim this script's header
+    // makes. Not reachable on the GH runner today, which is precisely why it
+    // needs a test rather than an assumption.
+    for (const dirName of ['dir with space', 'dir-ünïcode-✓']) {
+      const home = mkdtempSync(join(tmpdir(), 'knext-pin-path-'));
+      const scriptDir = join(home, dirName);
+      mkdirSync(scriptDir, { recursive: true });
+      const copied = join(scriptDir, 'verify-action-pins.mjs');
+      copyFileSync(resolve(REPO_ROOT, 'scripts/verify-action-pins.mjs'), copied);
+      // An empty tree, so a script that RUNS must fail on the zero-file floor.
+      // Exit 0 here means it never executed main() at all.
+      const empty = mkdtempSync(join(tmpdir(), 'knext-pin-path-cwd-'));
+      const result = spawnSync(process.execPath, [copied, '--root', empty], {
+        encoding: 'utf8',
+        cwd: empty,
+      });
+      expect(result.status, `${dirName}: the script must actually RUN and fail`).not.toBe(0);
+      expect(`${result.stdout}${result.stderr}`).toMatch(/no workflow or action files/i);
+    }
   });
 
   it('flags a QUOTED-key `uses:` that the extractor cannot read', async () => {
@@ -532,6 +597,58 @@ describe('nightly SHA↔tag resolution — scope is every workflow (#528)', () =
     const findings = await verifyPins({ repoRoot: root, api: fakeApi({}).api });
     expect(findings).toHaveLength(1);
     expect(findings[0]).toMatchObject({ reason: 'no-pins-parsed' });
+  });
+
+  it('does NOT flag a LOCAL composite-action ref, which has nothing to pin', async () => {
+    // `uses: ./.github/actions/foo` invokes THIS repository's own code at the
+    // commit already checked out. There is no upstream tag to resolve and no SHA
+    // to pin — pinning it is not merely unnecessary, it is impossible. But
+    // `USES_LINE` needs an `@` so it parses nothing, and `mentionsUses` saw the
+    // key, so the pair produced a `no-pins-parsed` FALSE RED. No such ref exists
+    // in the tree today; this PR widens scope precisely toward local composite
+    // actions, so the false red would arrive with the first one.
+    const root = mkdtempSync(join(tmpdir(), 'knext-pin-local-'));
+    mkdirSync(join(root, '.github', 'workflows'), { recursive: true });
+    writeFileSync(
+      join(root, '.github', 'workflows', 'ci.yml'),
+      ['jobs:', '  x:', '    steps:', '      - uses: ./.github/actions/foo'].join('\n'),
+    );
+    expect(await verifyPins({ repoRoot: root, api: fakeApi({}).api })).toEqual([]);
+  });
+
+  it('still flags a REMOTE ref in a file that also has a local one', async () => {
+    // The exclusion must be per-REF, not per-file: one local `uses:` must not
+    // grant the rest of the file an exemption.
+    const root = mkdtempSync(join(tmpdir(), 'knext-pin-local-mixed-'));
+    mkdirSync(join(root, '.github', 'workflows'), { recursive: true });
+    writeFileSync(
+      join(root, '.github', 'workflows', 'ci.yml'),
+      [
+        'jobs:',
+        '  x:',
+        '    steps:',
+        '      - uses: ./.github/actions/foo',
+        '      - uses: actions/checkout@v7',
+      ].join('\n'),
+    );
+    const findings = await verifyPins({ repoRoot: root, api: fakeApi({}).api });
+    expect(findings).toHaveLength(1);
+    expect(findings[0]).toMatchObject({ reason: 'not-sha-pinned', action: 'actions/checkout' });
+  });
+
+  it('does not let a local-looking ref smuggle in an unpinned REMOTE action', async () => {
+    // The exclusion keys on the REF starting with `./` or `../`, never on the
+    // line merely containing one — otherwise `uses: evil/action@main # ./x`
+    // would be waved through.
+    const root = mkdtempSync(join(tmpdir(), 'knext-pin-local-smuggle-'));
+    mkdirSync(join(root, '.github', 'workflows'), { recursive: true });
+    writeFileSync(
+      join(root, '.github', 'workflows', 'ci.yml'),
+      ['steps:', '  - uses: evil/action@main # ./.github/actions/foo'].join('\n'),
+    );
+    const findings = await verifyPins({ repoRoot: root, api: fakeApi({}).api });
+    expect(findings).toHaveLength(1);
+    expect(findings[0]).toMatchObject({ reason: 'not-sha-pinned', action: 'evil/action' });
   });
 
   it('flags a single-quoted key too', async () => {
