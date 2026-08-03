@@ -1,0 +1,84 @@
+---
+title: "3 · Configure the deploy"
+description: The health route that everyone forgets, and the config file that describes the deployment.
+---
+
+Two files. One of them is the single most common reason a first deploy sits at `Ready=False`.
+
+## The health route — do not skip this
+
+```ts title="app/api/health/route.ts"
+export const dynamic = 'force-dynamic';
+
+export function GET() {
+  return Response.json({ status: 'ok' });
+}
+```
+
+**Why it matters more than it looks.** The operator points Knative's readiness *and* liveness probes
+at `/api/health` by default. `create-next-app` does not generate that route.
+
+Without it, the probe gets a 404. The revision never becomes Ready. Your deploy "succeeds", the pod
+starts, and then `kn-next status` reports `Ready=False` forever — with nothing obviously wrong in
+your application logs, because nothing *is* wrong with your application. It is being asked a
+question it cannot answer.
+
+That is enough to go Ready. For a real app you want a health check that reports on its dependencies
+too — `@getknext/lib` ships `checkShallowHealth()` and `checkDeepHealth()` for that.
+
+<Callout type="info">
+Prefer a different path? Set `healthCheckPath` in the config below and the operator points the probes
+there instead.
+</Callout>
+
+## Describe the deployment
+
+Create `kn-next.config.ts` beside `next.config.ts`:
+
+```ts title="kn-next.config.ts"
+import type { KnativeNextConfig } from '@getknext/core';
+
+const config: KnativeNextConfig = {
+  name: 'acme',
+  registry: 'registry.example.com/acme',
+  storage: {
+    provider: 'gcs',
+    bucket: 'acme-assets',
+    publicUrl: 'https://storage.googleapis.com/acme-assets',
+  },
+  scaling: { minScale: 0, maxScale: 10 },
+};
+
+export default config;
+```
+
+Only three things are required: `name`, `registry`, and a `storage` block with `provider`, `bucket`
+and `publicUrl`.
+
+<Callout type="warn">
+**Substitute your own registry, bucket and `publicUrl`.** The values above are placeholders and will
+fail — deliberately, rather than appearing to work against something that is not yours.
+</Callout>
+
+## The one line that matters most
+
+```ts
+scaling: { minScale: 0, maxScale: 10 }
+```
+
+**`minScale: 0` is what makes this a scale-to-zero deployment.** Change it to `1` and you have an
+ordinary always-on service — same app, same everything else, completely different cost and latency
+character.
+
+It is worth knowing that it is a single knob, because it means the choice is reversible. If cold
+starts turn out to matter more than idle cost for ACME, you change one number and redeploy.
+
+`maxScale: 10` caps how far Knative will fan out under load. It is a spend guard as much as a
+capacity setting.
+
+## What you have now
+
+Two config files and a route handler. Nothing has touched a cluster yet — and if you do not have one
+ready, this is a good place to pause and set that up ([Install](/docs/install)).
+
+**[Chapter 4: Your first deploy →](/docs/learn/first-deploy)**

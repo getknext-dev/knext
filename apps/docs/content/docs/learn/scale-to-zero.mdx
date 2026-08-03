@@ -1,0 +1,79 @@
+---
+title: "5 · Scale to zero"
+description: Watch ACME sleep, then wake it — and understand what the first request actually paid for.
+---
+
+This is the chapter worth doing slowly. Everything else is deployment mechanics; this is the
+behaviour you came for.
+
+## Watch it sleep
+
+Leave ACME alone and watch its pods:
+
+```bash title="shell"
+kubectl get pods -l serving.knative.dev/service=acme -w
+```
+
+**Give it about 90 seconds.** Knative waits out a 60-second stable window, then a 30-second grace
+period, before terminating the pod. People watching for "about a minute" conclude it is broken and
+stop — this is the single most common false alarm.
+
+Then the list empties. No pod. No container compute for ACME.
+
+<Callout type="info">
+**Your nodes keep running and billing.** Scale-to-zero reclaims the *pod*, not the machine. On a
+managed cluster the nodes only go away if a cluster autoscaler independently reclaims them. The
+saving is real but it is per-app, not per-cluster.
+</Callout>
+
+## Wake it
+
+In another terminal:
+
+```bash title="shell"
+curl -sSf <the-URL-status-printed>/ > /dev/null && echo "awake"
+```
+
+Watch the pod reappear in the first terminal.
+
+What happened: Knative's **activator** held your request, started a pod, waited for the readiness
+probe, and forwarded the request. You got a slower response rather than an error.
+
+**It is not a guarantee.** A cold wake can still return 503 if the revision or the readiness probe
+does not come up in time — and the `-sSf` above will exit non-zero if that happens. Knowing that in
+advance is better than discovering it under load.
+
+## What the first request actually cost
+
+That request paid a **cold start**, and how long depends on your cluster, node sizing, whether the
+image is already cached on the node, and the app itself.
+
+knext publishes **measured distributions rather than a headline number**, because on a contended
+cluster the spread is wide enough that a median misleads. One measured example: on a two-node
+cluster, cold starts came out bimodal — a cluster of samples around ~2.5s and another around ~10.5s,
+with a clean gap between them. A single "average" of those two groups would describe neither.
+
+See [Scale to zero](/docs/scale-to-zero) for the numbers and how they were taken.
+
+## The knob, and when to turn it
+
+If cold starts matter more than idle cost for ACME:
+
+```ts title="kn-next.config.ts"
+scaling: { minScale: 1, maxScale: 10 }
+```
+
+One pod stays warm. No cold start, and you pay for it continuously. That is the whole trade, and it
+is one line either way.
+
+There is a middle setting worth knowing about: keeping a warm floor only during hours you expect
+traffic. That is a scheduling question rather than a config flag — see
+[Scale to zero](/docs/scale-to-zero).
+
+## Check your understanding
+
+- Why did the pod take ~90 seconds to disappear rather than immediately?
+- If ACME gets one request per hour, how many pods are running most of the time?
+- What would `minScale: 1` change about the answer to the previous question — and about the bill?
+
+**[Chapter 6: Add a database →](/docs/learn/add-a-database)**

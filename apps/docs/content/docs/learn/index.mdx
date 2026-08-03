@@ -1,0 +1,56 @@
+---
+title: Learn knext
+description: Build ACME — a Next.js storefront — and deploy it to your own cluster, scaled to zero, with a database that sleeps too.
+---
+
+You are going to build and deploy **ACME**, a small storefront, onto a real Kubernetes cluster. By
+the end it will sleep when nobody is using it, wake on the first request, and have a Postgres
+database that does the same.
+
+**You do not need to know Kubernetes.** Chapter 1 gives you the six words you need, and every term
+after that is explained where it first appears.
+
+## What you will have built
+
+- A Next.js app deployed to Knative, serving on a real URL
+- **Scaled to zero** — no pods, no container compute, when idle
+- A **Postgres database** bound by Kubernetes Secret, which knext never provisions and never deletes
+- That database **also scaled to zero**, so an idle ACME costs nothing at either tier
+- A **CI pipeline** that redeploys on every push, with no cloud credentials in it
+
+## The chapters
+
+| # | Chapter | What you get out of it |
+|---|---|---|
+| 1 | [What you're building](/docs/learn/what-youre-building) | The six words, and the shape of the system |
+| 2 | [Create the app](/docs/learn/create-the-app) | A Next.js app wired to the knext adapter |
+| 3 | [Configure the deploy](/docs/learn/configure-the-deploy) | The health route and `kn-next.config.ts` |
+| 4 | [Your first deploy](/docs/learn/first-deploy) | ACME live on a URL |
+| 5 | [Scale to zero](/docs/learn/scale-to-zero) | Watch it sleep and wake — the part worth seeing |
+| 6 | [Add a database](/docs/learn/add-a-database) | Postgres bound by Secret, no DSN in your repo |
+| 7 | [A database that sleeps](/docs/learn/scale-to-zero-database) | Both tiers at zero |
+| 8 | [Automate with CI](/docs/learn/automate-with-ci) | Deploy on push, no cloud credentials |
+| 9 | [Going further](/docs/learn/going-further) | Rollback, previews, observability, and what to read next |
+
+## Before you start
+
+This course deploys to a **real cluster**, and that is the one thing knext cannot hand you.
+
+<Callout type="warn">
+**There is no local-only path.** You need a Kubernetes cluster with Knative Serving and the knext
+operator installed, a container registry, and an object-storage bucket. Chapter 1 explains what each
+of those is and why it is needed; [Install](/docs/install) covers setting them up.
+
+If `kubectl get ksvc` does not work, stop and fix that first — every chapter after 3 depends on it.
+</Callout>
+
+**Why knext doesn't do this part for you** is a deliberate decision, not a gap:  creating a cluster
+requires cloud credentials that cannot be narrowed. On AWS the minimum documented permission set
+includes `iam:CreateRole` + `iam:PassRole`, which together let the holder become account
+administrator. A tool that creates clusters for you must ask for that. knext asks for a kubeconfig
+instead — scoped to one cluster, and nothing else.
+
+Managed Kubernetes is a few clicks in every cloud console now. That part is genuinely easier than it
+was, and it stays under your control.
+
+Ready? **[Start with chapter 1 →](/docs/learn/what-youre-building)**

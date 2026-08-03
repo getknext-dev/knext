@@ -23,7 +23,7 @@ export default function HomePage() {
             request, with <b>bytecode-cached</b> cold starts. One operator. Any cloud. No lock-in.
           </p>
           <div className={styles.cta}>
-            <Link className={`${styles.btn} ${styles.btnPrimary}`} href="/docs/tutorial">
+            <Link className={`${styles.btn} ${styles.btnPrimary}`} href="/docs/learn">
               Deploy ACME — step by step
             </Link>
             <Link className={`${styles.btn} ${styles.btnGhost}`} href="/docs">

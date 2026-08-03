@@ -1,0 +1,73 @@
+---
+title: "9 · Going further"
+description: What you built, how to take it down, and what to read next.
+---
+
+## What you built
+
+- ACME, deployed to Knative on your own cluster, on a real URL
+- **Scaled to zero** — no pods, no container compute, when idle
+- A Postgres database bound by Secret, which knext neither created nor manages
+- That database **also scaled to zero**, so idle ACME costs nothing at either tier
+- A CI pipeline that redeploys on every push, with **no cloud credentials in it**
+
+The through-line: **you describe what you want, the operator makes it true.** You never created a
+Knative Service by hand, and nothing edited the cluster behind the `NextApp` resource's back.
+
+## Taking it down
+
+```bash title="shell"
+kubectl delete nextapp acme
+```
+
+The operator removes what it created.
+
+<Callout type="warn">
+**Deleting the `NextApp` also reaps app-scoped external state.** A finalizer clears the object-store
+keys under ACME's own `<app-name>/` prefix and the Redis keys under its cache prefix. If you have
+parked anything else under that prefix in the same bucket, it goes too.
+
+**Registry images are not touched** — those remain yours. **Your database is never touched** — knext
+did not create it and does not delete it.
+</Callout>
+
+To remove scale-zero-pg as well, delete its namespace. That *does* destroy the data, because that
+data lives in the storage plane you deployed in chapter 7.
+
+## Where to go next
+
+**Operating it**
+- [Scale to zero](/docs/scale-to-zero) — the autoscaling knobs, and what to change when cold start matters more than idle cost
+- [Rollback](/docs/rollback) — pin traffic to a previous revision when a deploy goes wrong
+- [Previews](/docs/previews) — per-branch environments
+- [Observability](/docs/observability) — Prometheus metrics and Grafana dashboards
+
+**Understanding it**
+- [Official adapter](/docs/official-adapter) — why knext is not a fork, and what that buys you
+- [Operator & the NextApp CRD](/docs/operator) — the full resource schema and the operator's security defaults
+- [Compatibility matrix](/docs/compat-matrix) — which Next.js features are backed by a red-on-fail check, and which are not
+
+**Running it well**
+- [Databases](/docs/databases) — poolers, the writer/reader split, the typed client
+- [Security](/docs/security) — digest pinning, NetworkPolicy defaults, supply chain
+- [Upgrading](/docs/upgrading) — why the operator is upgraded before the CLI
+- [Multi-cloud](/docs/multi-cloud) — what is verified where
+
+## Two honest caveats
+
+**Cold start is environment-dependent.** The numbers in chapter 5 and chapter 7 were measured on
+specific clusters and are published as distributions rather than headline figures. Measure your own
+before designing around a number.
+
+**Verified is not the same as claimed.** The [compatibility matrix](/docs/compat-matrix) is explicit
+about which capability rows are backed by a check that goes red on failure and which are not. When
+you need a guarantee, read that page rather than a feature list.
+
+## Building something real
+
+You have the whole path now: adapter, config, deploy, scale-to-zero, database, CI. The natural next
+step is to build an actual app on it rather than a scaffold — a repo of your own, using these tools
+end to end.
+
+If you hit something this course did not prepare you for, that is a documentation bug worth
+[telling us about](https://github.com/getknext-dev/knext/issues).

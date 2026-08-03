@@ -1,0 +1,71 @@
+---
+title: "1 · What you're building"
+description: The six Kubernetes words you need, and the shape of the system you are about to use.
+---
+
+Before any commands, six words and one idea. Skip to [chapter 2](/docs/learn/create-the-app) if
+Kubernetes is already familiar.
+
+## The six words
+
+| Word | What it means here |
+|---|---|
+| **Cluster** | A pool of machines that runs your containers. You rent one from a cloud, or run a small one locally. |
+| **Pod** | One running copy of your app. Scale-to-zero means the number of pods can drop to **none**. |
+| **Knative** | Software installed *into* the cluster that starts and stops pods based on traffic. It is what makes zero possible. |
+| **Operator** | A program running inside the cluster that watches for your instructions and carries them out. knext ships one. |
+| **Custom resource** | Your instructions, as a file. You write "I want ACME, scaled to zero"; the operator makes it so. |
+| **Ready** | The cluster's own word for "this is actually serving traffic". Not "deployed" — *working*. |
+
+## The one idea
+
+**You describe what you want. The operator makes it true.**
+
+That is the whole shape. In this course you will never create a Knative Service by hand — because
+the knext CLI does not either. It builds your app, pushes the image, and hands the cluster a single
+`NextApp` resource. The operator owns everything downstream of that.
+
+```
+   you                    knext CLI              the operator          the cluster
+   ───                    ─────────              ────────────          ───────────
+   kn-next     ──────▶    builds image
+                          pushes image
+                          applies NextApp  ──▶   reads it
+                                                 creates the
+                                                 Knative Service  ──▶  runs pods
+                                                 wires scale-to-zero    (or none)
+```
+
+Why it matters: **there is exactly one place cluster state comes from.** If you want to change how
+ACME is deployed, you change the `NextApp`. Nothing else edits the cluster behind its back, which
+is why `kn-next status` can tell you the truth rather than a guess.
+
+## What scale-to-zero actually means
+
+An ordinary deployment keeps at least one copy of your app running at all times, waiting. You pay
+for that waiting.
+
+Scale-to-zero removes the copy when traffic stops. When a request finally arrives, Knative **holds
+the request**, starts a pod, and forwards it. The visitor waits a little longer; you paid nothing in
+between.
+
+The trade is real and worth naming now: **the first request after idle is slower.** That is the
+cold start. Chapter 5 has you watch one happen and measure it, rather than take a number on trust.
+
+## What you need before chapter 4
+
+Chapters 2 and 3 are local — no cluster required. From chapter 4 you need three things, and none of
+them is knext:
+
+1. **A Kubernetes cluster with Knative Serving**, and the knext operator installed — see
+   [Install](/docs/install).
+2. **A container registry** you can push to, and that your cluster can pull from.
+3. **An object-storage bucket** (`gcs`, `s3`, `minio`, or `azure`) with that provider's CLI
+   installed and authenticated where you run the build. knext uploads your static files to it.
+
+<Callout type="info">
+You can start chapters 2 and 3 right now and sort the cluster out afterwards. Nothing before
+chapter 4 touches one.
+</Callout>
+
+**[Chapter 2: Create the app →](/docs/learn/create-the-app)**

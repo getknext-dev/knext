@@ -1,0 +1,115 @@
+---
+title: "8 · Automate with CI"
+description: Deploy ACME on every push with a kubeconfig — and no cloud credentials in your pipeline.
+---
+
+You have deployed ACME by hand. Now make it happen on every push.
+
+## The workflow
+
+```yaml title=".github/workflows/deploy.yml"
+name: Deploy
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+
+      - uses: docker/login-action@v3
+        with:
+          registry: registry.example.com
+          username: ${{ secrets.REGISTRY_USER }}
+          password: ${{ secrets.REGISTRY_TOKEN }}
+
+      - uses: getknext-dev/knext@v1
+        with:
+          kubeconfig: ${{ secrets.KUBECONFIG_B64 }}
+          registry: registry.example.com/acme
+          skip-upload: 'true'
+```
+
+Push to `main`, and ACME redeploys.
+
+## Getting the kubeconfig in
+
+```bash title="shell"
+base64 -w0 < ~/.kube/config    # macOS: base64 -i ~/.kube/config
+```
+
+Paste the output into **Settings → Secrets and variables → Actions** as `KUBECONFIG_B64`.
+
+<Callout type="warn">
+**Do not reuse your personal admin kubeconfig.** Create a ServiceAccount scoped to the namespace ACME
+deploys into and build a kubeconfig from its token. The action never needs cluster-admin, and a CI
+secret has a wider blast radius than your laptop.
+</Callout>
+
+## Why there are no cloud credentials here
+
+This is the part worth understanding, because it is a deliberate design decision rather than a
+missing feature.
+
+**The action deploys to a cluster you already have. It does not create clusters, and it never asks
+for cloud-account credentials.**
+
+Creating managed Kubernetes requires permissions that cannot be narrowed. On AWS, `eksctl`'s own
+documented minimum grants `iam:CreateRole` + `iam:AttachRolePolicy` + `iam:PassRole` — and those
+three together are the textbook privilege-escalation primitive. The holder can create a role, attach
+administrator access to it, and use it. Checked against the live policy document: there is no
+condition attached that prevents this. It is not sloppiness — creating a cluster *inherently*
+requires creating and passing IAM roles.
+
+So a tool that provisions clusters for you must ask for effectively-admin access to your cloud
+account. **A kubeconfig is different in kind**: scoped to one cluster, further scopable to one
+namespace. Leaked, it costs you that cluster rather than your cloud account and its billing.
+
+## `skip-upload`, and when to drop it
+
+`skip-upload: 'true'` is the **credential-free path** — kubeconfig plus registry auth, nothing
+cloud-specific. You lose static-asset offload to the bucket and the post-deploy asset GC. ACME still
+builds, deploys, serves, and scales to zero.
+
+Start there. When you want assets uploaded, authenticate your storage provider *before* the deploy
+step using whichever action they publish:
+
+```yaml title=".github/workflows/deploy.yml (GCS)"
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_SA }}
+
+      - uses: getknext-dev/knext@v1
+        with:
+          kubeconfig: ${{ secrets.KUBECONFIG_B64 }}
+          registry: registry.example.com/acme
+          bucket: acme-assets
+```
+
+The equivalents are `aws-actions/configure-aws-credentials`, `azure/login`, or `mc alias set`. In
+every case you authenticate to a bucket **you already own** — the action never creates one.
+
+## Plan before you land
+
+On pull requests, `dry-run` prints the `NextApp` resource that *would* be applied and touches
+nothing:
+
+```yaml title=".github/workflows/pr.yml"
+      - uses: getknext-dev/knext@v1
+        with:
+          kubeconfig: ${{ secrets.KUBECONFIG_B64 }}
+          dry-run: 'true'
+```
+
+Same instinct as `terraform plan`: make the diff reviewable before it lands.
+
+Full input reference: [GitHub Action](/docs/github-action).
+
+**[Chapter 9: Going further →](/docs/learn/going-further)**
