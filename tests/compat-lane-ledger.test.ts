@@ -205,6 +205,30 @@ describe('#512 the UPSTREAM half needs a real issue/PR ref — a run id is DATED
     expect(upstreamRefs(runIdOnly)).toEqual([]);
   });
 
+  it('the HASHED run-id spelling ("run #28599745695") is not an upstream ref either', () => {
+    // Residual hole found reviewing #512: `#\d{3,6}` had no trailing boundary, so an
+    // 11-digit run id written with a hash yielded the PREFIX "#285997" — a knext issue
+    // number that does not exist — and the entry passed. All three run-id spellings
+    // (`run N`, `.../actions/runs/N`, `run #N`) must fail the upstream half alike.
+    const hashedRunId: QuarantineEntry = {
+      test: 'test/e2e/synthetic/hashed-run-id.test.ts',
+      mechanism: '60s timeout, no assertion diff',
+      evidence: 'first observed 2026-07-20 in run #28599745695',
+      lane: 'node',
+    };
+    expect(upstreamRefs(hashedRunId)).toEqual([]);
+    const problems = quarantineEntryProblems(hashedRunId);
+    expect(
+      problems.length,
+      `a hashed run id must not satisfy upstream: ${problems.join(' | ')}`,
+    ).toBe(1);
+    expect(problems[0]).toMatch(/upstream/i);
+    // …while a genuine 3–6 digit knext ref in the same shape still counts.
+    expect(upstreamRefs({ test: 't', evidence: 'first observed 2026-07-20, see #214' })).toEqual([
+      '#214',
+    ]);
+  });
+
   it('a run id remains the ONLY dated evidence an entry needs when a real upstream ref is present', () => {
     const ok: QuarantineEntry = {
       test: 'test/e2e/synthetic/run-id-dated.test.ts',

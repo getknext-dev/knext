@@ -36,7 +36,7 @@ import http from 'node:http';
 import net from 'node:net';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { loadQuarantineLedger, smokeQuarantineCount } from './compat-smoke-quarantines.mjs';
+import { formatLaneSummary, loadQuarantineLedger } from './compat-smoke-quarantines.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const APP_DIR = path.resolve(__dirname, '..');
@@ -611,17 +611,19 @@ function printReport() {
   console.log(`PASS=${pass}  FAIL=${fail}  SKIP=${sk}  (total ${results.length})`);
   // Per-lane summary (#281): this run's verdict is attributed to a single lane, so
   // a red here reds ONLY this lane — the other lane's gate stays independent.
-  // The quarantine count is DERIVED from the real `$knextQuarantines` ledger (#512) — it
-  // was a hardcoded 0, which would silently under-report the day this lane gains one. A
-  // ledger this runner cannot read, or an entry it cannot attribute, THROWS out of
-  // smokeQuarantineCount rather than degrading to 0.
-  const quarantined = smokeQuarantineCount({
-    ledger: loadQuarantineLedger(REPO_ROOT),
-    lane: LANE,
-    checkNames: results.map((r) => r.name),
-  });
+  // The line is FORMATTED BY the shared module (#512), which derives its quarantine count
+  // from the real `$knextQuarantines` ledger. It used to be a hardcoded 0 here — and a
+  // source-text guard could not tell that apart from `${0}`, so the whole line moved to
+  // where a test can assert the returned string. Do NOT rebuild this line locally: a ledger
+  // this runner cannot read, or an entry it cannot attribute, must THROW rather than print.
   console.log(
-    `LANE=${LANE}  passing=${pass}  quarantined=${quarantined}  failing=${fail}  (per-lane; the other lane runs separately)`,
+    formatLaneSummary({
+      lane: LANE,
+      passing: pass,
+      failing: fail,
+      ledger: loadQuarantineLedger(REPO_ROOT),
+      checkNames: results.map((r) => r.name),
+    }),
   );
   console.log('━'.repeat(72));
 }

@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 // The plain-ESM helper the smoke runner itself imports (tsconfig.typecheck's `allowJs`
 // infers its types from the JSDoc) — the guard exercises the SAME code, not a copy.
 import {
+  formatLaneSummary,
   loadQuarantineLedger,
   smokeQuarantineCount,
 } from '../apps/file-manager/scripts/compat-smoke-quarantines.mjs';
@@ -37,15 +38,15 @@ const CHECK_NAMES = ['a. app router SSR', 'g. next/image optimization'];
 describe('#512 — the smoke runner derives its quarantine count from the real ledger', () => {
   it('counts a smoke-lane ledger entry against the lane it declares', () => {
     const ledger = [
-      { test: 'compat-smoke:g. next/image optimization', lane: 'node' },
-      { test: 'compat-smoke:a. app router SSR', lane: 'bun' },
+      { test: 'g. next/image optimization', lane: 'node' },
+      { test: 'a. app router SSR', lane: 'bun' },
     ];
     expect(smokeQuarantineCount({ ledger, lane: 'node', checkNames: CHECK_NAMES })).toBe(1);
     expect(smokeQuarantineCount({ ledger, lane: 'bun', checkNames: CHECK_NAMES })).toBe(1);
   });
 
   it('defaults a smoke entry with no lane to the node lane (the ledger default)', () => {
-    const ledger = [{ test: 'compat-smoke:a. app router SSR' }];
+    const ledger = [{ test: 'a. app router SSR' }];
     expect(smokeQuarantineCount({ ledger, lane: 'node', checkNames: CHECK_NAMES })).toBe(1);
     expect(smokeQuarantineCount({ ledger, lane: 'bun', checkNames: CHECK_NAMES })).toBe(0);
   });
@@ -58,7 +59,7 @@ describe('#512 — the smoke runner derives its quarantine count from the real l
   });
 
   it('THROWS on an entry attributable to neither suite — never a quiet zero', () => {
-    const ledger = [{ test: 'compat-smoke:z. a check that does not exist', lane: 'node' }];
+    const ledger = [{ test: 'z. a check that does not exist', lane: 'node' }];
     expect(() => smokeQuarantineCount({ ledger, lane: 'node', checkNames: CHECK_NAMES })).toThrow(
       /unattributable|unknown/i,
     );
@@ -89,15 +90,52 @@ describe('#512 — the smoke runner derives its quarantine count from the real l
   });
 });
 
-describe('#512 — the printed count is an interpolation, not a literal', () => {
-  it('the summary line interpolates a variable for quarantined=', () => {
-    expect(smokeSrc).toMatch(/quarantined=\$\{[^}]+\}/);
-    expect(smokeSrc).not.toMatch(/quarantined=\d/);
+describe('#512 — the PRINTED summary line tracks the ledger (behavioural, not text)', () => {
+  /**
+   * The first round of this guard asserted only SOURCE TEXT (`quarantined=${…}` present,
+   * no `quarantined=<digit>`). A reviewer defeated it by changing the interpolation to
+   * `${0}` — every test stayed green. Text cannot tell a derived value from a fake one, so
+   * the summary line is now BUILT by `formatLaneSummary()` and asserted as a RETURNED
+   * STRING over ledgers of different sizes: a constant cannot satisfy 0, 1 and 2 at once.
+   */
+  const line = (ledger: unknown, lane = 'node') =>
+    formatLaneSummary({ lane, passing: 7, failing: 0, ledger, checkNames: CHECK_NAMES });
+
+  it('prints the count the ledger actually implies — 0, 1 and 2 all differ', () => {
+    expect(line([])).toMatch(/quarantined=0\b/);
+    expect(line([{ test: 'a. app router SSR', lane: 'node' }])).toMatch(/quarantined=1\b/);
+    expect(
+      line([
+        { test: 'a. app router SSR', lane: 'node' },
+        { test: 'g. next/image optimization', lane: 'node' },
+      ]),
+    ).toMatch(/quarantined=2\b/);
   });
 
-  it('the runner actually calls the shared derivation', () => {
+  it('is lane-scoped: the other lane’s entries do not inflate this lane’s line', () => {
+    const ledger = [
+      { test: 'a. app router SSR', lane: 'node' },
+      { test: 'g. next/image optimization', lane: 'bun' },
+    ];
+    expect(line(ledger, 'node')).toMatch(/LANE=node {2}passing=7 {2}quarantined=1 {2}failing=0/);
+    expect(line(ledger, 'bun')).toMatch(/LANE=bun {2}passing=7 {2}quarantined=1 {2}failing=0/);
+  });
+
+  it('propagates the loud failures instead of printing a line it cannot back', () => {
+    expect(() => line(undefined)).toThrow(/ledger/i);
+    expect(() => line([{ test: 'not a check and not test/…' }])).toThrow(/unattributable/i);
+  });
+
+  it('prints the REAL ledger as quarantined=0 today (structurally, see the module header)', () => {
+    expect(line(loadQuarantineLedger(REPO_ROOT))).toMatch(/quarantined=0\b/);
+  });
+
+  it('the runner delegates the whole line — it may not format `quarantined=` itself', () => {
+    // Structural backstop for the behavioural assertions above: if the runner ever
+    // rebuilt the line locally, the tests above would be checking code nobody calls.
+    expect(smokeSrc).not.toMatch(/quarantined=/);
     expect(smokeSrc).toMatch(/compat-smoke-quarantines\.mjs/);
-    expect(smokeSrc).toMatch(/smokeQuarantineCount\(/);
+    expect(smokeSrc).toMatch(/formatLaneSummary\(/);
     expect(smokeSrc).toMatch(/loadQuarantineLedger\(/);
   });
 });
