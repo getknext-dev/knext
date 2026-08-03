@@ -151,9 +151,15 @@ const RUN_ID_RE = /\brun\s+\d{6,}\b/i;
  * id remains fully valid as DATED evidence ({@link RUN_ID_RE}); it just cannot
  * stand in for a cause. Note the URL form excludes `/actions/runs/NNNN` for the
  * same reason: only `/issues/N` and `/pull/N` name a cause.
+ *
+ * The `(?!\d)` after `#\d{3,6}` is LOAD-BEARING, not cosmetic. Without it the
+ * third run-id spelling — `run #28599745695` — matched its own 6-digit PREFIX
+ * `#285997` (a knext issue number that does not exist) and PASSED the upstream
+ * half, reopening the exact hole this rule closes. The boundary makes an 11-digit
+ * run id match nothing, since every shorter backtrack is also followed by a digit.
  */
 const UPSTREAM_RE =
-  /(vercel\/next\.js#\d+|next\.js#\d+|#\d{3,6}|https?:\/\/github\.com\/[\w.-]+\/[\w.-]+\/(?:issues|pull)\/\d+)/gi;
+  /(vercel\/next\.js#\d+|next\.js#\d+|#\d{3,6}(?!\d)|https?:\/\/github\.com\/[\w.-]+\/[\w.-]+\/(?:issues|pull)\/\d+)/gi;
 
 /**
  * Every upstream reference an entry cites, deduped (empty === the entry rests on

@@ -93,6 +93,18 @@ Bun-runtime-axis rows above. Lane isolation is enforced in code
 failure never reds the bun lane, and vice-versa**. The `compat-smoke` runner filters checks by the
 active lane and prints a per-lane summary (`LANE=<lane> passing=… quarantined=… failing=…`).
 
+That whole summary line is **built by `apps/file-manager/scripts/compat-smoke-quarantines.mjs`**
+(#512), which derives `quarantined=` from the `$knextQuarantines` ledger rather than printing a
+literal. Be precise about what the number means: for the smoke lane it is **0 structurally**, not
+"0 so far". The smoke runner has **no quarantine mechanism at all** — a check may only PASS or FAIL
+(plus the declared runtime-lane SKIP) — and every `$knextQuarantines` entry is bound by the manifest
+guards to an **official-suite test path**, which the smoke runner does not run. A real smoke
+quarantine would need both a runner-level quarantine status (a deliberate decision — it re-opens
+the skip-on-fail hole those checks exist to close) and its own ledger file; it must **not** be
+smuggled into Next's run-tests manifest. What the derivation buys today is **falsifiability**: a
+ledger the runner cannot read, or an entry that is neither an official-suite path nor a known smoke
+check, **fails the run** instead of degrading to a quiet `0`.
+
 | Lane | Role | Quarantined entries |
 | --- | --- | --- |
 | node | the Node 778/0 credential | the `runtime-prefetch` §d family (file-level) |
