@@ -14,7 +14,7 @@
  *    empty) ⇒ SILENT, fail-open, never throws.
  */
 
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -174,5 +174,106 @@ describe("warnOnCompileCacheShadow (logger)", () => {
                 log,
             }),
         ).not.toThrow();
+    });
+});
+
+/**
+ * #451 item 1 — symlink / bind-mount ALIAS false-warn.
+ *
+ * The comparison used to be purely lexical (`resolve`), so an operator-injected
+ * NODE_COMPILE_CACHE that is a SYMLINK to (or another mount alias of) the baked
+ * dir compared as a DIFFERENT path and produced a spurious WARNING. The paths
+ * are now canonicalised with `realpathSync` before the inequality check —
+ * best-effort: a realpath that throws (a path that does not exist, an
+ * unreadable mount) must fall back to the lexical value and NEVER break the
+ * check or the boot. This only ever fails toward a false warn, never toward
+ * breakage — keep it that way.
+ */
+describe("#451 realpath aliasing (symlinks / bind-mount aliases)", () => {
+    function bakedDir(files: number): string {
+        const dir = mkdtempSync(join(tmpdir(), "knext-baked-alias-"));
+        for (let i = 0; i < files; i++) {
+            writeFileSync(join(dir, `entry-${i}.bin`), "bytecode");
+        }
+        return dir;
+    }
+
+    /** A REAL symlink on disk pointing at `target` — not a mocked realpath. */
+    function symlinkTo(target: string): string {
+        const link = join(
+            mkdtempSync(join(tmpdir(), "knext-alias-link-")),
+            "compile-cache",
+        );
+        symlinkSync(target, link, "dir");
+        return link;
+    }
+
+    it("does NOT shadow when the override is a symlink to the baked dir (pure)", () => {
+        const baked = bakedDir(3);
+        const alias = symlinkTo(baked);
+        expect(alias).not.toBe(baked); // genuinely a different lexical path
+        expect(isCompileCacheShadowed(alias, baked, true)).toBe(false);
+    });
+
+    it("does NOT shadow when the BAKED path is reached through a symlink (pure)", () => {
+        const baked = bakedDir(3);
+        const alias = symlinkTo(baked);
+        expect(isCompileCacheShadowed(baked, alias, true)).toBe(false);
+    });
+
+    it("still shadows when the symlink points somewhere ELSE", () => {
+        const baked = bakedDir(3);
+        const other = bakedDir(1);
+        const alias = symlinkTo(other);
+        expect(isCompileCacheShadowed(alias, baked, true)).toBe(true);
+    });
+
+    it("detect + warn stay SILENT for a symlinked override (filesystem)", () => {
+        const baked = bakedDir(3);
+        const alias = symlinkTo(baked);
+        const result = detectCompileCacheShadow({
+            nodeCompileCache: alias,
+            bakedDefaultPath: baked,
+        });
+        expect(result.shadowed).toBe(false);
+
+        const log = { warn: vi.fn(), info: vi.fn() };
+        warnOnCompileCacheShadow({
+            env: { NODE_COMPILE_CACHE: alias },
+            bakedDefaultPath: baked,
+            log,
+        });
+        expect(log.warn).not.toHaveBeenCalled();
+    });
+
+    it("FAILS OPEN when realpath throws: a non-existent override still warns", () => {
+        // `realpathSync` throws ENOENT for this override. The check must fall
+        // back to the lexical path rather than losing the diagnostic (or
+        // throwing) — a genuine shadow of a populated bake is still reported.
+        const baked = bakedDir(2);
+        const missing = join(tmpdir(), "knext-451-no-such-dir-abc123");
+        expect(existsSync(missing)).toBe(false);
+        expect(isCompileCacheShadowed(missing, baked, true)).toBe(true);
+
+        const log = { warn: vi.fn(), info: vi.fn() };
+        expect(() =>
+            warnOnCompileCacheShadow({
+                env: { NODE_COMPILE_CACHE: missing },
+                bakedDefaultPath: baked,
+                log,
+            }),
+        ).not.toThrow();
+        expect(log.warn).toHaveBeenCalledTimes(1);
+    });
+
+    it("FAILS OPEN when realpath throws for BOTH paths (never throws)", () => {
+        const missingA = join(tmpdir(), "knext-451-missing-a");
+        const missingB = join(tmpdir(), "knext-451-missing-b");
+        expect(() =>
+            isCompileCacheShadowed(missingA, missingB, true),
+        ).not.toThrow();
+        expect(isCompileCacheShadowed(missingA, missingB, true)).toBe(true);
+        // Same lexical path, both unresolvable ⇒ still recognised as the same.
+        expect(isCompileCacheShadowed(missingA, missingA, true)).toBe(false);
     });
 });

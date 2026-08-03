@@ -28,11 +28,31 @@
  * stat + a shallow readdir count.
  */
 
-import { readdirSync, statSync } from "node:fs";
+import { readdirSync, realpathSync, statSync } from "node:fs";
 import { resolve } from "node:path";
 
 interface ShadowLogger {
     warn(obj: object, msg: string): void;
+}
+
+/**
+ * Canonicalise a path for comparison: absolute (`resolve`), then resolved
+ * through symlinks / mount aliases (`realpathSync`) on a BEST-EFFORT basis
+ * (#451).
+ *
+ * `realpathSync` throws for a path that does not exist (the common case for an
+ * injected-but-not-yet-mounted NODE_COMPILE_CACHE) and for an unreadable mount.
+ * Those must NOT break the check or the boot, so a throw falls back to the
+ * lexical value — exactly the pre-#451 behaviour. The failure mode of this
+ * whole module is a spurious WARN, never breakage; keep it that way.
+ */
+function canonicalPath(p: string): string {
+    const abs = resolve(p);
+    try {
+        return realpathSync(abs);
+    } catch {
+        return abs;
+    }
 }
 
 /**
@@ -42,7 +62,9 @@ interface ShadowLogger {
  * baked-default compile-cache dir AND a populated baked cache exists at the
  * baked-default path (a real baked layer is being bypassed). Paths are
  * normalized (via `resolve`) so a trailing slash / `.` segment is not mistaken
- * for a different dir.
+ * for a different dir, and canonicalised through `realpathSync` (#451) so an
+ * operator-injected value that is a SYMLINK to — or a bind-mount alias of — the
+ * baked dir is recognised as the same dir instead of producing a false warn.
  */
 export function isCompileCacheShadowed(
     nodeCompileCache: string | undefined,
@@ -51,7 +73,7 @@ export function isCompileCacheShadowed(
 ): boolean {
     if (!nodeCompileCache) return false;
     if (!bakedPopulated) return false;
-    return resolve(nodeCompileCache) !== resolve(bakedDefaultPath);
+    return canonicalPath(nodeCompileCache) !== canonicalPath(bakedDefaultPath);
 }
 
 export interface CompileCacheShadowResult {
