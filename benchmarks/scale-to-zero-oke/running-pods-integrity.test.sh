@@ -325,10 +325,16 @@ echo nonzero > "${TD}/pods_mode"      # ...and thereafter reports 2 pods
 # and the polls after it succeed.
 SCALE_DOWN_TIMEOUT=4 SCALE_DOWN_POLL_S=1 API_RETRY_ATTEMPTS=1 \
   run_bench "$TD" --phases cold --cold-samples 1
-assert_not_contains "${TD}/results.txt" "NEVER OBSERVED" \
-  "a run that DID observe pods is not reported as never having observed a count"
-assert_contains "${TD}/results.txt" "last OBSERVED 2 pod(s)" \
-  "the count it actually saw is reported, by value"
+# Round 3 removed this assertion and substituted a weaker one, which is how it
+# shipped the defect this test exists to prevent. Restored, and strengthened: the
+# ordering matters, so we also pin that an EARLY failure is not treated as an
+# unobserved final state.
+assert_contains "${TD}/results.txt" "still 2 pod(s)" \
+  "the pods it actually saw at the end of the window are reported, by value"
+assert_contains "${TD}/results.txt" "scale-to-zero did NOT happen" \
+  "an observed final state is a positive DISPROOF, not 'unconfirmed'"
+assert_not_contains "${TD}/results.txt" "UNCONFIRMED" \
+  "a run whose LAST poll succeeded is not downgraded to unconfirmed by an EARLIER failure"
 
 # -- Test G (round-3 defect 2): the banner must not assert a failure CLASS --
 # API_UNOBSERVED_COUNT carries no class information. Round 1 called a TERMINAL
@@ -371,8 +377,12 @@ assert_not_contains "${TF}/results.txt" "Unable to connect to the server: net/ht
   "kubectl error text is never interpolated into the pod-count sentence"
 assert_contains "${TF}/results.txt" "last OBSERVED 2 pod(s)" \
   "the last OBSERVED count is reported, not the last raw output"
+assert_contains "${TF}/results.txt" "window ended on a FAILED poll" \
+  "the reason the final state is unknown is stated"
 assert_not_contains "${TF}/results.txt" "scale-to-zero did NOT happen" \
   "no confident disproof is drawn from a stale observation"
+assert_contains "${TF}/results.txt" "run indexed as UNCONFIRMED" \
+  "a window ending on a failed poll is filed UNCONFIRMED"
 
 # -- Test E (finding 5): a failed mktemp must not present as a query failure --
 # `errf=$(mktemp)` returning empty made `2>"$errf"` an AMBIGUOUS REDIRECT, which
@@ -389,6 +399,32 @@ assert_contains "${TE}/results.txt" "scaled to 0" \
   "a genuine zero is still confirmed when mktemp fails"
 assert_not_contains "${TE}/results.txt" "pod query FAILED" \
   "a failed mktemp is not misreported as a failed pod query"
+# It must not be SILENT either. Merging stderr into stdout means a kubectl warning
+# can be counted as a pod, so the run has to say so rather than publishing a
+# number nobody can trust and exiting 0.
+assert_contains "${TE}/results.txt" "mktemp is unavailable" \
+  "the merged-stderr degradation is announced, not silent"
+assert_contains "${TE}/results.txt" "run indexed as UNCONFIRMED" \
+  "a run with merged stderr is filed UNCONFIRMED, not COMPLETE"
+
+# -- Test K (round-4 defect 4): a suffixed SCALE_DOWN_TIMEOUT is refused --
+# `150s` was read as 0, which silently disabled the scale-to-zero check for the
+# WHOLE run while still filing it COMPLETE and exiting 0. The neighbouring knobs
+# are written `3m`/`20s`, so the typo is plausible rather than exotic.
+echo
+echo "[K] a suffixed SCALE_DOWN_TIMEOUT is refused loudly, not read as 0"
+TK="$(mktemp -d)"
+make_stub "$TK"
+TK_RC=0
+SCALE_DOWN_TIMEOUT=150s SCALE_DOWN_POLL_S=1 \
+  run_bench "$TK" --phases cold --cold-samples 1 || TK_RC=$?
+if [ "$TK_RC" -ne 0 ]; then
+  ok "a non-numeric SCALE_DOWN_TIMEOUT aborts (exit ${TK_RC}) instead of silently skipping the check"
+else
+  nope "SCALE_DOWN_TIMEOUT=150s was accepted — the scale-to-zero check is silently disabled"
+fi
+assert_contains "${TK}/out.txt" "must be a whole number of SECONDS" \
+  "the abort says what was wrong with the value"
 
 # -- Test J (round-3 defect 6): the mktemp seam is DRY_RUN-gated --
 # SOURCE-LEVEL, and weaker than the rest of this file on purpose: every test here
@@ -399,7 +435,9 @@ assert_not_contains "${TE}/results.txt" "pod query FAILED" \
 # DRY_RUN_EXERCISE_MKTEMP_FAIL would otherwise silently degrade a REAL run.
 echo
 echo "[J] DRY_RUN_EXERCISE_MKTEMP_FAIL cannot take effect on a real run"
-if grep -q 'if \[ "\${DRY_RUN:-0}" = "1" \] && \[ "\${DRY_RUN_EXERCISE_MKTEMP_FAIL:-0}" = "1" \]' "$RUN_SH"; then
+# Tolerant of spacing/order so a harmless reformat cannot false-red it: it asserts
+# only that the seam and DRY_RUN appear together on one line.
+if grep -E 'DRY_RUN_EXERCISE_MKTEMP_FAIL' "$RUN_SH" | grep -q 'DRY_RUN:-0'; then
   ok "the mktemp-failure seam is gated on DRY_RUN=1"
 else
   nope "DRY_RUN_EXERCISE_MKTEMP_FAIL is NOT gated on DRY_RUN — it can degrade a real measurement run"
@@ -452,7 +490,7 @@ SCALE_DOWN_TIMEOUT=3 SCALE_DOWN_POLL_S=1 \
 assert_contains "${TC}/results.txt" "scaled to 0" \
   "a genuine zero is still confirmed when kubectl also writes a warning to stderr"
 
-rm -rf "$T1" "$T3" "$T4" "$T5" "$TA" "$TB" "$TC" "$TD" "$TE" "$TF" "$TG" "$TH" "$TI"
+rm -rf "$T1" "$T3" "$T4" "$T5" "$TA" "$TB" "$TC" "$TD" "$TE" "$TF" "$TG" "$TH" "$TI" "$TK"
 
 echo
 echo "== ${PASS} passed, ${FAIL} failed =="

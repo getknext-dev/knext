@@ -300,6 +300,27 @@ fi
 # an error, which is the worst shape for a benchmark to fail in. Only tests shrink
 # this, but an unsanitised knob is one typo away from a wedged run.
 [ "$SCALE_DOWN_POLL_S" -ge 1 ] 2>/dev/null || SCALE_DOWN_POLL_S=1
+# SCALE_DOWN_TIMEOUT is NOT clamped -- 0 is a legitimate "skip the wait", used by
+# the sibling test suites. But a NON-NUMERIC value silently behaved as 0 and
+# disabled the scale-to-zero check for a whole run, and `150s` is a plausible typo
+# given the 3m/20s style of the neighbouring knobs. Refuse it loudly instead.
+case "$SCALE_DOWN_TIMEOUT" in
+  ''|*[!0-9]*)
+    echo "FATAL: SCALE_DOWN_TIMEOUT must be a whole number of SECONDS, got '${SCALE_DOWN_TIMEOUT}'." >&2
+    echo "       Suffixed values like '150s' are not accepted -- they used to be read as 0, which" >&2
+    echo "       silently disabled the scale-to-zero check for the entire run." >&2
+    exit 1 ;;
+esac
+# Probed ONCE, here, rather than inside running_pods: that function runs inside
+# `$("$@" 2>&1)` (a subshell), so a global set there cannot reach the banner, and
+# a degradation nothing can record is a degradation nothing will report.
+POD_QUERY_STDERR_MERGED=0
+if [ "${DRY_RUN:-0}" = "1" ] && [ "${DRY_RUN_EXERCISE_MKTEMP_FAIL:-0}" = "1" ]; then
+  POD_QUERY_STDERR_MERGED=1
+else
+  _probe=$(mktemp 2>/dev/null) || POD_QUERY_STDERR_MERGED=1
+  [ -n "${_probe:-}" ] && rm -f "$_probe"
+fi
 # The deadline needs the SAME treatment, for a sharper reason than cosmetics: a
 # 0/negative/non-numeric deadline made api_call_cap return 0, which means kc()
 # adds NO timeout wrapper at all — so a hung call was completely unbounded while
@@ -922,8 +943,14 @@ cleanup() {
   # abandoned call(s):" with an empty ops list, and a pointer to 'api-retry:'
   # lines that do not exist -- because a terminal failure appends to neither OPS
   # string. Same "reads cleaner than reality" class as #424-#427.
+  if [ "$POD_QUERY_STDERR_MERGED" = "1" ]; then
+    # Without this the run published a pod count that was never observed (a
+    # kubectl warning counted as a pod), filed COMPLETE, and exited 0 -- the only
+    # degraded path in this harness that left no trace at all.
+    log "*** RUN DEGRADED — mktemp is unavailable, so pod queries merged stderr into stdout. A kubectl warning can be COUNTED AS A POD, so any 'still N pod(s)' line may be an over-count and scale-to-zero may never confirm. Fix the temp dir (TMPDIR / disk space) before trusting these numbers. ***"
+  fi
   if [ "$API_UNOBSERVED_COUNT" -gt 0 ]; then
-    log "*** RUN DEGRADED — ${API_UNOBSERVED_COUNT} scale-down wait(s) ended without observing a pod count. Scale-to-zero is UNCONFIRMED for those reps, not disproven: any 'cold' sample taken after one may have hit a WARM pod and be biased LOW. ***"
+    log "*** RUN DEGRADED — ${API_UNOBSERVED_COUNT} scale-down wait(s) ended WITHOUT OBSERVING THE FINAL POD COUNT (every poll failed, or the window ended on a failed poll). Scale-to-zero is UNCONFIRMED for those reps, not disproven: any 'cold' sample taken after one may have hit a WARM pod and be biased LOW. ***"
   fi
   if [ "$API_RETRY_COUNT" -gt 0 ] || [ "$API_ABANDONED_COUNT" -gt 0 ]; then
     local ops_summary
@@ -935,7 +962,7 @@ cleanup() {
     # authoritative verdict two lines below on a zero-rep or data-losing run —
     # the fifth "reads cleaner than reality" bug in this harness.
     if [ "$REPS_RUN" -gt 0 ] && [ -z "$INCOMPLETE_REPS" ] && [ "$PHASES_COMPLETED" -eq 1 ] \
-       && [ "$API_UNOBSERVED_COUNT" -eq 0 ]; then
+       && [ "$API_UNOBSERVED_COUNT" -eq 0 ] && [ "$POD_QUERY_STDERR_MERGED" != "1" ]; then
       log "*** The control plane was flaky during this run. The data is valid (every config was verified applied), but timings may include control-plane stalls — see the 'api-retry:'/'api-abandoned:' lines above. ***"
     else
       log "*** The control plane was flaky during this run. Every config that WAS applied was verified applied, but this run did not produce a complete dataset — see the run-integrity verdict below, and the 'api-retry:' lines above. ***"
@@ -975,7 +1002,7 @@ cleanup() {
     # designated integrity verdict asserted completeness for a run that
     # collected nothing.
     log "run integrity: no reps ran; no data collected — this file is NOT a dataset"
-  elif [ "$API_UNOBSERVED_COUNT" -gt 0 ]; then
+  elif [ "$API_UNOBSERVED_COUNT" -gt 0 ] || [ "$POD_QUERY_STDERR_MERGED" = "1" ]; then
     # The authoritative verdict must carry the trust dimension too. Round 2 filed
     # the run as UNCONFIRMED in the index and exited 3, while this line -- the one
     # the block above calls authoritative -- still said "dataset is complete".
@@ -996,7 +1023,7 @@ cleanup() {
     # pod recorded as cold). That is a claim about DATA TRUSTWORTHINESS, so it
     # belongs in the durable verdict and the exit code -- not only in prose that
     # an automated caller never reads.
-    elif [ "$API_UNOBSERVED_COUNT" -gt 0 ]; then run_status="UNCONFIRMED"
+    elif [ "$API_UNOBSERVED_COUNT" -gt 0 ] || [ "$POD_QUERY_STDERR_MERGED" = "1" ]; then run_status="UNCONFIRMED"
     else run_status="COMPLETE"; fi
     index_append "$run_status"
     log "  run indexed as ${run_status} in ${RESULTS_INDEX}"
@@ -1040,11 +1067,10 @@ running_pods() {
   # below is REACHABLE by a test. Same family as DRY_RUN_EXERCISE_KC /
   # DRY_RUN_EXERCISE_PENDING: without a seam this branch is unprovable, and an
   # unproved branch is decoration by this repo's own standard.
-  # The seam is honoured ONLY under DRY_RUN. Its siblings are gated the same way
-  # (DRY_RUN_EXERCISE_KC via kc_live, DRY_RUN_EXERCISE_PENDING at :653); leaving
-  # this one ungated meant an exported value could silently degrade a REAL
-  # measurement run with nothing in the results file saying so.
-  if [ "${DRY_RUN:-0}" = "1" ] && [ "${DRY_RUN_EXERCISE_MKTEMP_FAIL:-0}" = "1" ]; then
+  # POD_QUERY_STDERR_MERGED is decided ONCE at startup (see the probe near :302),
+  # never here -- this function runs in a subshell, so a decision made here could
+  # not be reported by the banner.
+  if [ "$POD_QUERY_STDERR_MERGED" = "1" ]; then
     errf=""
   else
     errf=$(mktemp 2>/dev/null) || errf=""
@@ -1101,7 +1127,7 @@ wait_zero() {
   if ! kc_live; then log "  [dry-run] skip wait-for-zero"; return 0; fi
   # n MUST be initialised: with SCALE_DOWN_TIMEOUT=0 the loop body never runs and
   # the trailing log line would abort the script under `set -u`.
-  local t=0 n="" rc qfail=0 observed=0 last_n="" polled=0
+  local t=0 n="" rc qfail=0 observed=0 last_n="" polled=0 last_failed=0
   while [ "$t" -lt "$SCALE_DOWN_TIMEOUT" ]; do
     polled=1
     # api_retry sets globals it needs the caller to read, so it cannot run inside
@@ -1118,6 +1144,7 @@ wait_zero() {
       # the results file). Keep polling until the timeout rather than silently
       # proceeding as if scaled — never log a confirmation we did not observe.
       qfail=$((qfail + 1))
+      last_failed=1
       log "  -> pod query FAILED at ${t}s — NOT confirming scale-to-zero (query error, not an observed zero); the API said: $(printf '%s' "$n" | head -n 1)"
       sleep "$SCALE_DOWN_POLL_S"
       t=$((t + SCALE_DOWN_POLL_S))
@@ -1129,6 +1156,7 @@ wait_zero() {
     # run where a single early poll failed, and asserted "not disproven" about a
     # scale-to-zero that had been positively disproven three polls running.
     observed=1
+    last_failed=0
     # Keep the last OBSERVED count separately. `n` is the last poll's raw output,
     # so on a run whose FINAL poll failed it holds kubectl's error text -- which
     # round 2 then printed where a pod count belongs ("still Unable to connect to
@@ -1151,17 +1179,22 @@ wait_zero() {
     # Never observed a count at all. Say so at the TOP level, not only per-poll.
     API_UNOBSERVED_COUNT=$((API_UNOBSERVED_COUNT + 1))
     log "  -> NEVER OBSERVED a pod count after ${t}s — all ${qfail} poll(s) failed. Scale-to-zero is UNCONFIRMED for this rep, not disproven (continuing anyway)."
-  elif [ "$qfail" -gt 0 ]; then
-    # MIXED. We saw pods at some point, but later poll(s) failed, so the state at
-    # the END of the window was never observed. Round 2 asserted "scale-to-zero
-    # did NOT happen" here -- a confident disproof drawn from a STALE observation.
-    # Report what was actually seen, and that the final state is unknown. This
-    # still counts as unconfirmed: a 'cold' sample taken after it may hit a warm
-    # pod, which is the bias the whole mechanism exists to catch.
+  elif [ "$last_failed" -eq 1 ]; then
+    # The window ENDED on a failed poll, so the final state was never observed.
+    # Keying this on `qfail > 0` (round 3) was wrong: a run whose failures were
+    # EARLY and whose last poll SUCCEEDED had its final state observed, and was
+    # still told "the final state was never observed" and downgraded from a proven
+    # disproof to UNCONFIRMED. That is the round-1 defect re-introduced through a
+    # different sentence -- ordering matters, so the predicate must be about the
+    # LAST poll, not about any poll.
     API_UNOBSERVED_COUNT=$((API_UNOBSERVED_COUNT + 1))
-    log "  -> last OBSERVED ${last_n:-unknown} pod(s) within ${t}s, then ${qfail} poll(s) failed — the final state was never observed, so scale-to-zero is UNCONFIRMED (continuing anyway)"
+    log "  -> last OBSERVED ${last_n:-unknown} pod(s), then the window ended on a FAILED poll after ${t}s — the final state was never observed, so scale-to-zero is UNCONFIRMED (continuing anyway)"
   else
-    log "  -> still ${last_n:-unknown} pod(s) after ${t}s (continuing anyway)"
+    # The last poll RETURNED and it was not zero. That is a positive disproof:
+    # pods were up at the end of the window. Say so -- round 3 removed the only
+    # sentence in the harness that stated a disproof, leaving it able to report
+    # "unconfirmed" but never "this did not happen".
+    log "  -> still ${last_n:-unknown} pod(s) after ${t}s — scale-to-zero did NOT happen within the window (continuing anyway)"
   fi
 }
 
@@ -1831,7 +1864,7 @@ fi
 # have recorded a warm pod as cold. Exiting 0 tells every automated caller the
 # dataset is trustworthy when it is not. Distinct code so callers can tell the
 # two apart.
-if [ "$API_UNOBSERVED_COUNT" -gt 0 ]; then
+if [ "$API_UNOBSERVED_COUNT" -gt 0 ] || [ "$POD_QUERY_STDERR_MERGED" = "1" ]; then
   exit 3
 fi
 # Explicit: falling off the end would leak the exit status of the test above (1),
