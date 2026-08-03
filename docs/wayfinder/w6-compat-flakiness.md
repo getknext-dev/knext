@@ -1,0 +1,213 @@
+# W6 (#594) — Is the compat-suite flakiness in #545 runtime-caused or harness-caused?
+
+**Wayfinder ticket:** W6, child of map #588.
+**Question:** does the flakiness described in issue #545 originate in the **knext runtime** (→ in scope
+for the stability plan #588) or in the **harness / CI environment** (→ out of scope, belongs to a
+separate feedback-loop effort)?
+
+**Verdict up front: neither, as #545 frames it — and the framing is wrong.**
+See §5. Confidence: **high** for the per-lane numbers and the bun-lane classification, **medium-high**
+for the single node-lane red.
+
+---
+
+## 1. Method and window
+
+Evidence is the **actual run history**, not a reading of the harness.
+
+- Workflow: `.github/workflows/test-e2e-deploy.yml` — "Compat suite (official Next.js deploy harness)".
+  Two lanes from one workflow file, selected by which cron fired:
+  `KNEXT_RUNTIME: ${{ github.event.inputs.runtime || (github.event.schedule == '17 5 * * 0' && 'bun') || 'node' }}`
+  — **node** daily (`17 3 * * *`), **bun** weekly Sunday (`17 5 * * 0`). 16 shards, `fail-fast: false`.
+- Window examined: **2026-07-02 → 2026-08-01** (last 60 runs listed; 35 of them `schedule`).
+  `workflow_dispatch` runs are excluded from the rates below — they are debugging dispatches on
+  feature branches, not the gate.
+- **Lane attribution is measured, not inferred from cron timing.** Every
+  `compat-suite-summary-<n>-16.json` artifact carries a `"runtime"` key; I downloaded the 16 summaries
+  for runs 30193384289, 29678368535 and 29984259723 and read it directly
+  (`runtime=bun`, `runtime=bun`, `runtime=node` respectively).
+
+---
+
+## 2. Per-lane failure rate
+
+### Node lane (daily) — the compat-matrix credential
+
+| window | scheduled node runs | red | rate |
+|---|---|---|---|
+| 2026-07-02 → 2026-08-01 (full) | 31 | 4 | 12.9 % |
+| **2026-07-05 → 2026-08-01 (post-graduation)** | **28** | **2** | **7.1 %** |
+| post-graduation, excluding the deterministic packaging break | 28 | **1** | **3.6 %** |
+
+The three windows differ because two of the four reds pre-date the state the gate is actually in:
+
+- `28571240186` (07-02) and `28697744187` (07-04, **16/16 shards red**) both pre-date the
+  compat-matrix ✅ credential, which is run **28702729595** (2026-07-04, `workflow_dispatch`,
+  778 passed / 0 failed). Counting reds from before the suite was ever green inflates the rate with
+  the graduation campaign itself. The 07-04 red is also plainly not a flake: every shard failed with
+  **25–37 failures each** and **30 `MODULE_NOT_FOUND`** occurrences in the logs — a systemic module-
+  resolution break, resolved the same day by the dispatch run that earned the credential.
+- `29182334221` (07-12) failed at **`Prepare prebuilt next + harness` → "adapter-tarball preflight
+  FAILED: npm install of the packed tarballs exited 1"**. Zero shards ran, zero adapter signal. This is
+  the #255/#256 packaging incident (fixed by PR #266), already recorded as such in
+  `docs/compat-matrix.md:50`. It is a **deterministic build break**, not a flake — it hit *both* lanes
+  on the same commit that day.
+
+**That leaves exactly one genuine node-lane red in the 28-run post-graduation window:**
+`29984259723` (2026-07-23), shard 2 of 16, `failed=1 / notRun=0 / passed=48`.
+
+**Current streak: 9 consecutive green node-lane runs** (2026-07-24 → 2026-08-01), every shard green.
+
+### Bun lane (weekly, Sundays)
+
+| run | date | result | shards red |
+|---|---|---|---|
+| 28734528961 | 2026-07-05 | ❌ | 6, 8 |
+| 29184529993 | 2026-07-12 | ❌ | *(none — died at Prepare, packaging incident)* |
+| 29678368535 | 2026-07-19 | ❌ | 6, 8 (`failed=1` / `failed=2`) |
+| 30193384289 | 2026-07-26 | ❌ | 6, 8 (`failed=1` / `failed=2`) |
+
+**4 scheduled runs, 4 red — a 100 % failure rate.** The bun lane has **never been green**; the matrix
+row is honestly ❌ and says so ("No green `runtime=bun` run has been observed").
+
+---
+
+## 3. Do the failures cluster? Yes — and not the way "flaky" implies
+
+**By lane:** overwhelmingly. Bun 4/4; node 1/28.
+
+**By shard, on the bun lane:** the reds are **identical across runs, to the test count**.
+07-19 and 07-26 both produced `shard 6: passed=48 failed=1` and `shard 8: passed=47 failed=2`.
+07-05 produced the same shards 6+8. That is not rotation, and it is not timing — that is a
+**deterministic, reproducible result**.
+
+**By test, on the bun lane** (from `--log-failed` on run 30193384289):
+
+| test file | failing cases | signature |
+|---|---|---|
+| `test/e2e/middleware-fetches-with-any-http-method/index.test.ts` | `passes the method on a direct fetch request`, `passes the method when providing a Request object` | **60000 ms** timeout |
+| `test/e2e/app-dir/app-static/app-static.test.ts` | `should cache correctly with post method and revalidate edge`, `should not cache correctly with POST method request init` | **60000 ms** timeout |
+| `test/e2e/app-dir/app-static/app-static.test.ts` | `should handle dynamicParams: false correctly`, `…partial-gen-params with layout/page dynamicParams = false` | **9–59 ms** assertion failure |
+| `test/e2e/app-dir/parallel-routes-root-param-dynamic-child/…test.ts` | `should render a 404 for /es/gsp/stories/{static,dynamic}-123` | **4 ms** assertion failure |
+
+These are **exactly the three documented Bun red files** already written up in
+`docs/compat-matrix.md:50`, with two named mechanisms:
+1. **edge-sandbox outbound `fetch()` never resolves** under Bun (the 60 s hangs) — proven *not*
+   version-gated: it persists on Bun canary 1.4.0 (run 28622051531);
+2. **the instrumented not-found `invariant` class** (the millisecond assertion diffs) — partially
+   clears on canary 1.4.0.
+
+**By test, on the node lane:** the single 07-23 red is one test —
+`test/e2e/app-dir/segment-cache/dynamic-on-hover/dynamic-on-hover.test.ts ›
+dynamic on hover › prefetches the dynamic data for a Link on hover`, failing with
+`Exceeded timeout of 60000 ms for a test`, on both the initial attempt and the retry.
+
+**By time:** the reds cluster in early July (the graduation campaign + the 07-12 packaging break) and
+then stop. Nothing in the last 9 node runs.
+
+---
+
+## 4. Classification of every inspectable failure
+
+| run | lane | cause | class |
+|---|---|---|---|
+| 28571240186 (07-02) | node | pre-graduation campaign red, shard 10 | **pre-credential; not evidence of flakiness of the current gate** |
+| 28697744187 (07-04) | node | 16/16 shards red, 25–37 failures per shard, 30× `MODULE_NOT_FOUND` — systemic module-resolution break, pre-graduation | **pre-credential; deterministic, not a flake** |
+| 29182334221 (07-12) | node | `adapter-tarball preflight FAILED: npm install of the packed tarballs exited 1` | **knext packaging break — deterministic, not a flake** (#255/#256, fixed by #266) |
+| 29184529993 (07-12) | bun | same preflight failure, same commit | **same packaging break** |
+| 28734528961 (07-05) | bun | shards 6+8, the 3 documented red files | **Bun-runtime gap — deterministic** |
+| 29678368535 (07-19) | bun | shards 6+8, identical counts | **Bun-runtime gap — deterministic** |
+| 30193384289 (07-26) | bun | shards 6+8, identical counts | **Bun-runtime gap — deterministic** |
+| 29984259723 (07-23) | node | `segment-cache/dynamic-on-hover` — 60 s jest timeout, failed on retry too | **upstream Next.js race amplified by runner CPU contention — quarantine-bookkeeping gap** |
+
+### The 07-23 node red in detail — this is the one that matters
+
+`segment-cache/dynamic-on-hover` is **not** in `$knextQuarantines`. But **eight of its immediate
+siblings are**, all at `level: "file"`, all with the *same* recorded mechanism:
+
+```
+segment-cache/basic, segment-cache/cached-navigations, segment-cache/refresh,
+segment-cache/search-params, segment-cache/staleness (×2), segment-cache/vary-params,
+segment-cache/prefetch-layout-sharing
+  → "60s jest timeout ... via createRouterAct", root cause recorded in docs/compat-matrix.md as
+    upstream's client segment-cache race under CPU contention, fixed upstream AFTER the pinned ref
+    (vercel/next.js#95301). Upstream itself suite-skipped five of these files as "too flaky".
+```
+
+So the one node-lane red in 28 runs is the **same already-diagnosed upstream mechanism**, in a sibling
+file that simply has not been added to the ledger yet. It is not a new or unexplained defect.
+
+---
+
+## 5. Verdict
+
+**#545's central framing — "the gate is flaky at shard level", implying a broadly unstable suite whose
+node lane flakes at ~1-in-12 — is not supported by the run history.** The numbers say:
+
+- The bun lane is not *flaky*; it is **deterministically red**, on the same two shards, on the same
+  three files, with the same failure counts, every single run. Reruns do not turn it green. The
+  "re-run until green" failure mode #545 warns about **cannot occur on this lane**.
+- The node lane over the 28 scheduled runs since the credential was earned has **one** genuine red —
+  **3.6 %**, or 1 in 28 — and is currently **9 consecutive runs green**. #545's "~1-in-12 node-lane
+  flake rate" comes from an 8-run sample that (a) straddles the graduation campaign and (b) counts a
+  bun-lane red and a deterministic packaging break toward a node-lane rate.
+- #545's own §2 ("Separate lane flakiness from suite flakiness … If the node lane is stable and only
+  bun flakes, that is a much smaller problem and #410 covers it") sets exactly the right test.
+  **The evidence answers it: the node lane is stable and only the bun lane is red, and #410 does cover
+  it.** #545's remedy is therefore mostly already discharged by the answer, not by the work it proposes.
+
+**Scope verdict — three-way split, not the binary the ticket assumed:**
+
+| source | share of reds | in scope for #588? |
+|---|---|---|
+| **Bun runtime gaps** (edge-sandbox `fetch()`, not-found `invariant`) | 3 of 4 bun reds | **Out of scope for #588** — this is the **bun lane**, tracked by **#410**, and the matrix row is already honestly ❌. It is a real runtime defect, but it belongs to the bun-target track, not the node stability plan. |
+| **Upstream Next.js segment-cache race under runner CPU contention** | the only post-graduation node red | **Out of scope as a runtime defect** — the root cause is upstream, fixed after the pinned ref. What *is* in scope is the **quarantine-bookkeeping gap**: `dynamic-on-hover` is an unquarantined member of an already-quarantined family. That is a small, tractable ledger edit, not a stability workstream. |
+| **knext packaging break** (07-12 preflight) | 2 reds, one per lane | Already fixed (PR #266). Deterministic, not flakiness. |
+
+**Therefore: the flakiness described in #545 is NOT runtime-caused in the sense that would put it in
+map #588's scope.** There is no evidence of a knext *node* runtime defect producing intermittent
+compat-suite reds. Nor is it cleanly "harness/environment-caused" — the dominant cause (bun lane) is a
+real, deterministic runtime gap that is simply on a different lane and already owned by #410.
+
+**Recommended disposition:**
+1. **Do not** carry #545 into #588 as a runtime-stability workstream. Re-scope or close it against the
+   measured numbers here.
+2. The one genuinely actionable item is **~30 minutes of ledger work**: add
+   `test/e2e/app-dir/segment-cache/dynamic-on-hover/dynamic-on-hover.test.ts` to `$knextQuarantines`
+   at `level: "file"` with run 29984259723 as the observed evidence and vercel/next.js#95301 as the
+   upstream provenance — matching its eight already-quarantined siblings. **Check the ≤15 family cap
+   first** (`tests/compat-quarantine-bounds.ts`): the ledger currently holds 14 entries, so this lands
+   at the boundary and may need the escalation path rather than a silent add.
+3. #545's item 3 — *make flakiness visible rather than incidental*, i.e. record per-shard outcomes
+   durably so the rate is a number rather than folklore — is **still worth doing and is genuinely
+   feedback-loop work, not runtime work.** This investigation had to reconstruct the rate by
+   downloading artifacts run-by-run; that is exactly the gap. It belongs to the separate feedback-loop
+   effort, not to #588.
+4. The v1.0 gate ("14 consecutive node-lane runs, every shard `failed:0`/`notRun:0`") is, on this
+   evidence, **reachable by waiting** — contrary to #545's claim. At 9 green and counting, and with the
+   only observed blocker being a one-line ledger addition, the streak is a scheduling question, not a
+   defect-fixing one.
+
+---
+
+## 6. Confidence and what would change the answer
+
+- **High confidence** on the per-lane rates and lane attribution: read from the `"runtime"` key in the
+  shard summary artifacts, not from cron timing.
+- **High confidence** that the bun lane is deterministic, not flaky: three independent scheduled runs
+  produced byte-identical shard/pass/fail shapes.
+- **Medium-high** on the single node red. One data point is one data point. The attribution to the
+  upstream segment-cache family rests on the mechanism match (identical 60 s `createRouterAct` timeout
+  signature, same directory, eight quarantined siblings) rather than on a root-cause trace of that
+  specific file.
+- **What would overturn this:** a node-lane red in the next few weeks whose cause is *not* the
+  segment-cache/prefetch family. That would mean the node lane has a second, unexplained failure mode
+  and the scope question should be reopened. One more red of the same family would not — it would just
+  confirm the ledger gap.
+
+---
+
+*Evidence: `gh run list --workflow=test-e2e-deploy.yml --limit 60`; 16 `compat-suite-summary-*.json`
+artifacts each from runs 30193384289 / 29678368535 / 29984259723; `gh run view --log-failed` on runs
+30193384289, 29984259723, 29182334221, 28571240186; `docs/compat-matrix.md` rows 49–50;
+`test/deploy-tests-manifest.knext.json` `$knextQuarantines`; `.github/workflows/test-e2e-deploy.yml`.*
