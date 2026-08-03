@@ -345,6 +345,46 @@ jobs:
       - name: Check all Dockerfile base images are digest-pinned
         run: bash scripts/check-base-images-pinned.sh --quiet
 
+  bench-harness-guards:
+    name: Benchmark harness guards (no cluster)
+    runs-on: ubuntu-latest
+    # #425 item 3. These suites were documented as MANUAL-ONLY, which means
+    # nothing caught a regression in them — and they cover the most dangerous path
+    # in the harness: capture/restore of a live service's autoscaling config. A
+    # broken restore leaves a cluster mis-tuned in a way that silently corrupts
+    # every later measurement rather than failing.
+    #
+    # They are cheap to run here because they need NO cluster: each stubs kubectl
+    # via the documented DRY_RUN + DRY_RUN_EXERCISE_KC seam. The only extra
+    # dependency is jq, which ubuntu-latest already ships.
+    #
+    # Worth stating why this is not optional: during the #536 work these suites
+    # caught a regression the new feature's own (green) tests could not see —
+    # a pending-restore file leaking out of dry runs and blocking every
+    # subsequent run. Without them in CI that ships.
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+      - name: Run harness guard suites
+        working-directory: benchmarks/scale-to-zero-oke
+        run: |
+          set -euo pipefail
+          failed=0
+          for t in capture-restore k6-metrics-integrity running-pods-integrity \
+                   api-retry provenance k6-latency-splits pending-restore; do
+            echo "::group::${t}.test.sh"
+            if bash "${t}.test.sh"; then
+              echo "PASS ${t}"
+            else
+              echo "::error::${t}.test.sh FAILED"
+              failed=1
+            fi
+            echo "::endgroup::"
+          done
+          # Run every suite before failing, so one red suite does not hide the
+          # state of the other six.
+          exit "$failed"
+
   operator-codegen-check:
     name: Operator codegen is up-to-date (make generate + make manifests)
     runs-on: ubuntu-latest
