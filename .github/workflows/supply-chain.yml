@@ -38,7 +38,7 @@ jobs:
       packages: write # push to GHCR on main
       id-token: write # cosign keyless signing via OIDC
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # GHCR repository names must be lowercase; the owner can be mixed-case.
       - name: Compute lowercase image name
@@ -46,7 +46,7 @@ jobs:
         env:
           OWNER: ${{ github.repository_owner }}
 
-      - uses: docker/setup-buildx-action@v4
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
       # Reproducible-build inputs: pin SOURCE_DATE_EPOCH to the commit time so
       # buildkit can rewrite layer timestamps deterministically (below). This is a
@@ -66,7 +66,7 @@ jobs:
       # accepts an OCI layout directory but not an OCI tarball.
       - name: Build image (local OCI layout — pushed after the Trivy gate)
         id: build
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           file: apps/file-manager/Dockerfile
@@ -116,7 +116,7 @@ jobs:
           output-file: sbom.spdx.json
 
       - name: Upload SBOM artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: sbom-${{ github.sha }}
           path: sbom.spdx.json
@@ -140,7 +140,7 @@ jobs:
 
       - name: Log in to GHCR
         if: github.ref == 'refs/heads/main'
-        uses: docker/login-action@v4
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -211,7 +211,7 @@ jobs:
 
       - name: Install cosign
         if: github.ref == 'refs/heads/main'
-        uses: sigstore/cosign-installer@v3
+        uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5 # v3.10.1
 
       - name: Sign image + attest SBOM (keyless)
         if: github.ref == 'refs/heads/main'
