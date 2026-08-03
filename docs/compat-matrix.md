@@ -91,7 +91,10 @@ attributed to exactly one runtime lane — **node** or **bun** — mirroring the
 Bun-runtime-axis rows above. Lane isolation is enforced in code
 (`tests/compat-lane-ledger.ts` — `laneVerdict` reads only one lane's results), so **a node-lane
 failure never reds the bun lane, and vice-versa**. The `compat-smoke` runner filters checks by the
-active lane and prints a per-lane summary (`LANE=<lane> passing=… quarantined=… failing=…`).
+active lane and prints a per-lane summary (`LANE=<lane> passing=… quarantined=… failing=…`). That
+`quarantined=` count is **derived from the `$knextQuarantines` ledger**, never hardcoded
+(`apps/file-manager/scripts/compat-smoke-quarantines.mjs`, #512): a ledger the runner cannot read,
+or an entry it cannot attribute to either suite, **fails** rather than degrading to a quiet `0`.
 
 | Lane | Role | Quarantined entries |
 | --- | --- | --- |
