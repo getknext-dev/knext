@@ -1,20 +1,25 @@
-# Dependabot — keeps the SHA-pinned GitHub Actions on the publish path current (#522).
+# Dependabot — keeps the SHA-pinned GitHub Actions current (#522, scope widened #528).
 #
-# The publish-path workflows (release.yml, release-ghp.yml) pin every `uses:` to a
-# full commit SHA because those jobs run with live publish credentials in scope.
+# EVERY workflow now pins every `uses:` to a full commit SHA, not just the publish
+# path: release.yml / release-ghp.yml hold live publish credentials, and
+# supply-chain.yml / operator-supply-chain.yml run cosign KEYLESS signing under an
+# `id-token: write` OIDC identity able to sign artifacts as this repo. `directory: '/'`
+# below already covers `.github/workflows` as a whole, so no per-file entry is needed
+# — asserted, not assumed, by tests/workflow-action-pins.test.ts.
 # Pinning without a bump channel just trades a supply-chain risk for staleness, so
 # Dependabot owns the bumps: it rewrites the SHA and the trailing `# vX.Y.Z`
 # comment together.
 #
 # Division of responsibility — read this before assuming a check exists:
 #   - Dependabot owns the SHA and its version comment.
-#   - tests/release-action-pins.test.ts asserts IMMUTABILITY and SCOPE — every
-#     publish-path `uses:` is a 40-hex commit SHA carrying a `# vX.Y.Z` comment,
-#     and only allowlisted ACTIONS appear on the credential-bearing path. It does
-#     NOT assert the SHA value.
-#   - Therefore a SHA that does not actually belong to its commented tag is caught
-#     by HUMAN REVIEW of the Dependabot diff, not by CI. Read the SHA against the
-#     tag before approving a bump on release.yml / release-ghp.yml.
+#   - tests/release-action-pins.test.ts asserts IMMUTABILITY and SCOPE on the
+#     publish path, plus the ACTION allowlist for the credential-bearing jobs.
+#   - tests/workflow-action-pins.test.ts asserts the same FORM (40-hex SHA +
+#     `# vX.Y.Z` comment) across EVERY workflow, discovered by directory scan so a
+#     newly added workflow is covered without editing a list.
+#   - Neither asserts the SHA VALUE. That is resolved UPSTREAM at run time by
+#     scripts/verify-action-pins.mjs, run nightly by
+#     .github/workflows/action-pin-resolution-nightly.yml over every workflow.
 #
 # An earlier revision of that test asserted the exact SHA of record, described here
 # as "a deliberate human review point". That was reversed deliberately, not
@@ -27,16 +32,52 @@
 # DOCUMENTED PRACTICE, not as ENFORCEMENT. A gate blocks and can be mutation-
 # proved; a documented expectation degrades — under time pressure, under a bot
 # bump that looks like the last four, under a reviewer who never opened this
-# file — and its efficacy is unobservable until it has already failed. So
-# enforcement of SHA-belongs-to-tag is ABSENT until the nightly correspondence
-# check lands. Treat that as near-term work, not backlog: it is what converts
-# this comment back into a gate.
+# file — and its efficacy is unobservable until it has already failed. That gap
+# is now CLOSED by the nightly correspondence check (#539), extended in #528 to
+# resolve every workflow's pins, not just the publish path. What the nightly
+# still does NOT check: it trusts the version comment as a statement of intent,
+# so a correctly-pinned MALICIOUS tag remains a human-review concern.
 version: 2
 updates:
   - package-ecosystem: 'github-actions'
-    directory: '/'
+    # `/` covers `.github/workflows/*` AND the root `action.yml`, but Dependabot
+    # scans a DIRECTORY, not a tree — it does not reach a composite action at
+    # `.github/actions/<name>/action.yml`. Our pin guard covers those files by
+    # directory walk, so without the glob below one could be pinned-by-default
+    # yet never bumped: pinned and frozen, which is the staleness failure with
+    # extra steps.
+    #
+    # Be precise about what is VERIFIED versus ASSUMED here, because the guard
+    # in tests/workflow-action-pins.test.ts is a TEXT match — it can tell you
+    # this entry exists, and cannot tell an honoured entry from an errored one:
+    #   - VERIFIED: the schema. `directories` takes a string array and supports
+    #     `*` (GitHub's reference is explicit that `directory` does not).
+    #   - ASSUMED: that a glob matching NOTHING — which is the case today, since
+    #     `.github/actions/` does not exist — is accepted rather than erroring
+    #     the whole config, and that it begins matching when a directory is
+    #     added. That is the documented intent, not something we have observed.
+    # So CHECK THE DEPENDABOT JOB STATUS after this merges (Insights →
+    # Dependency graph → Dependabot → last checked / any error banner). If an
+    # empty glob turns out to error, drop this entry and re-add it with the
+    # first real composite action.
+    directories:
+      - '/'
+      - '/.github/actions/*'
     schedule:
       interval: 'weekly'
+    # ~20 distinct actions are pinned across every workflow (#528). Ungrouped,
+    # a week's bumps can exceed open-pull-requests-limit and the surplus waits
+    # silently — reintroducing the staleness half of the pinning trade by SCALE
+    # rather than by decision. One grouped PR per week keeps the channel open
+    # and keeps the review a single readable diff.
+    #
+    # A catch-all pattern, not a list of action names: a newly pinned action
+    # must join the group without a config edit, or the first forgotten entry
+    # is the one that goes stale.
+    groups:
+      github-actions:
+        patterns:
+          - '*'
     open-pull-requests-limit: 5
     commit-message:
       prefix: 'ci'
