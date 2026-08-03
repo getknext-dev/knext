@@ -16,11 +16,13 @@
 
 import { existsSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import {
     detectCompileCacheShadow,
     isCompileCacheShadowed,
+    isSameDirectory,
+    type StatFn,
     warnOnCompileCacheShadow,
 } from "../adapters/compile-cache-shadow";
 
@@ -182,14 +184,19 @@ describe("warnOnCompileCacheShadow (logger)", () => {
  *
  * The comparison used to be purely lexical (`resolve`), so an operator-injected
  * NODE_COMPILE_CACHE that is a SYMLINK to (or another mount alias of) the baked
- * dir compared as a DIFFERENT path and produced a spurious WARNING. The paths
- * are now canonicalised with `realpathSync` before the inequality check —
- * best-effort: a realpath that throws (a path that does not exist, an
- * unreadable mount) must fall back to the lexical value and NEVER break the
- * check or the boot. This only ever fails toward a false warn, never toward
- * breakage — keep it that way.
+ * dir compared as a DIFFERENT path and produced a spurious WARNING.
+ *
+ * Sameness is now decided by TWO mechanisms, and they cover different cases:
+ *  - canonical path equality (`realpathSync`) — trailing slash, `.`/`..`,
+ *    SYMLINKS;
+ *  - filesystem-node identity (`dev` + `ino`) — BIND MOUNTS, which
+ *    `realpathSync` alone cannot see because it never reads the mount table.
+ *
+ * Both stay best-effort: a realpath or a stat that throws (path absent,
+ * unreadable parent, ELOOP) falls back to "not the same", which at worst
+ * restores the old spurious warning and NEVER breaks the check or the boot.
  */
-describe("#451 realpath aliasing (symlinks / bind-mount aliases)", () => {
+describe("#451 realpath aliasing (symlinks)", () => {
     function bakedDir(files: number): string {
         const dir = mkdtempSync(join(tmpdir(), "knext-baked-alias-"));
         for (let i = 0; i < files; i++) {
@@ -275,5 +282,92 @@ describe("#451 realpath aliasing (symlinks / bind-mount aliases)", () => {
         expect(isCompileCacheShadowed(missingA, missingB, true)).toBe(true);
         // Same lexical path, both unresolvable ⇒ still recognised as the same.
         expect(isCompileCacheShadowed(missingA, missingA, true)).toBe(false);
+    });
+});
+
+/**
+ * #451 item 1, second mechanism — BIND-MOUNT aliases.
+ *
+ * `realpathSync` resolves symlinks and `.`/`..`; it does NOT consult the mount
+ * table. Two separate bind mounts of the same directory are two real paths that
+ * each canonicalise to themselves, so path comparison alone still reports a
+ * false shadow. What identifies them is the filesystem node: same `dev`, same
+ * `ino`.
+ *
+ * A bind mount cannot be created from a unit test (it needs root), so the stat
+ * function is injected. This is the ONLY seam — production always uses
+ * `statSync`, and the symlink cases above exercise the real filesystem.
+ */
+describe("#451 bind-mount aliases (dev/ino identity)", () => {
+    const BAKED_MOUNT = "/app/.next/compile-cache";
+    const ALIAS_MOUNT = "/mnt/compile-cache";
+
+    /** Both paths are the same fs node — what a bind mount looks like. */
+    const sameNode: StatFn = () => ({ dev: 66, ino: 1234 });
+
+    /** Genuinely different directories. */
+    const distinctNodes: StatFn = (p) =>
+        p === BAKED_MOUNT ? { dev: 66, ino: 1234 } : { dev: 66, ino: 9999 };
+
+    it("does NOT shadow when two distinct paths are the same fs node", () => {
+        // Sanity: these are unequal as paths, so only dev/ino can save them.
+        expect(resolve(ALIAS_MOUNT)).not.toBe(resolve(BAKED_MOUNT));
+        expect(
+            isCompileCacheShadowed(ALIAS_MOUNT, BAKED_MOUNT, true, sameNode),
+        ).toBe(false);
+        expect(isSameDirectory(ALIAS_MOUNT, BAKED_MOUNT, sameNode)).toBe(true);
+    });
+
+    it("still shadows when the fs nodes differ (diagnostic not weakened)", () => {
+        expect(
+            isCompileCacheShadowed(
+                ALIAS_MOUNT,
+                BAKED_MOUNT,
+                true,
+                distinctNodes,
+            ),
+        ).toBe(true);
+        expect(isSameDirectory(ALIAS_MOUNT, BAKED_MOUNT, distinctNodes)).toBe(
+            false,
+        );
+    });
+
+    it("requires BOTH dev and ino to match (same ino on another device)", () => {
+        const sameInoOtherDev: StatFn = (p) =>
+            p === BAKED_MOUNT ? { dev: 66, ino: 1234 } : { dev: 77, ino: 1234 };
+        expect(
+            isCompileCacheShadowed(
+                ALIAS_MOUNT,
+                BAKED_MOUNT,
+                true,
+                sameInoOtherDev,
+            ),
+        ).toBe(true);
+    });
+
+    it("FAILS OPEN when the stat throws (never throws, keeps the warning)", () => {
+        const throwing: StatFn = () => {
+            throw new Error("EACCES");
+        };
+        expect(() =>
+            isCompileCacheShadowed(ALIAS_MOUNT, BAKED_MOUNT, true, throwing),
+        ).not.toThrow();
+        expect(
+            isCompileCacheShadowed(ALIAS_MOUNT, BAKED_MOUNT, true, throwing),
+        ).toBe(true);
+        // ...but an identical path still short-circuits on canonical equality,
+        // so a throwing stat cannot manufacture a warning either.
+        expect(
+            isCompileCacheShadowed(BAKED_MOUNT, BAKED_MOUNT, true, throwing),
+        ).toBe(false);
+    });
+
+    it("defaults to the real statSync when no seam is passed", () => {
+        // Two real, genuinely different dirs must still shadow with the
+        // production stat — i.e. the default parameter is wired.
+        const a = mkdtempSync(join(tmpdir(), "knext-451-devino-a-"));
+        const b = mkdtempSync(join(tmpdir(), "knext-451-devino-b-"));
+        expect(isCompileCacheShadowed(a, b, true)).toBe(true);
+        expect(isSameDirectory(a, a)).toBe(true);
     });
 });
