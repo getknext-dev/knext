@@ -43,6 +43,19 @@ updates:
     directory: '/'
     schedule:
       interval: 'weekly'
+    # ~20 distinct actions are pinned across every workflow (#528). Ungrouped,
+    # a week's bumps can exceed open-pull-requests-limit and the surplus waits
+    # silently — reintroducing the staleness half of the pinning trade by SCALE
+    # rather than by decision. One grouped PR per week keeps the channel open
+    # and keeps the review a single readable diff.
+    #
+    # A catch-all pattern, not a list of action names: a newly pinned action
+    # must join the group without a config edit, or the first forgotten entry
+    # is the one that goes stale.
+    groups:
+      github-actions:
+        patterns:
+          - '*'
     open-pull-requests-limit: 5
     commit-message:
       prefix: 'ci'

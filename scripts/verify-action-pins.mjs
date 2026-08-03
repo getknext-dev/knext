@@ -49,8 +49,8 @@
  * Exits 1 (with an actionable report) if there is any finding.
  */
 
-import { readdirSync, readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 
 /**
  * The credential-bearing workflows. Kept in sync with the publish path by
@@ -73,6 +73,55 @@ export function discoverWorkflows(dir) {
   return readdirSync(dir)
     .filter((file) => file.endsWith('.yml') || file.endsWith('.yaml'))
     .sort();
+}
+
+const YAML = (file) => file.endsWith('.yml') || file.endsWith('.yaml');
+
+/**
+ * Every file in the repo that may carry a `uses:`, relative to `repoRoot`
+ * (#528 review). `.github/workflows` is NOT the whole boundary:
+ *
+ *   - `.github/workflows/*.yml`      — the workflows themselves;
+ *   - `.github/actions/** /action.yml` — local composite actions;
+ *   - `action.yml` at the repo root  — the published `Deploy with knext` action.
+ *
+ * A composite action's steps run INSIDE the caller's job, with the caller's
+ * token, so a floating ref there is as credential-adjacent as one in a
+ * workflow. Leaving it outside the scan would make "pinned by default" false
+ * for a whole class of file while every guard stayed green.
+ *
+ * This is the single definition of the boundary — the form guard imports it
+ * rather than re-deriving one, because two definitions drift.
+ */
+export function discoverPinnableFiles(repoRoot) {
+  const found = [];
+
+  const workflowDir = resolve(repoRoot, '.github/workflows');
+  if (existsSync(workflowDir)) {
+    for (const file of readdirSync(workflowDir).filter(YAML)) {
+      found.push(`.github/workflows/${file}`);
+    }
+  }
+
+  // Composite actions nest arbitrarily deep under .github/actions.
+  const walk = (absolute, relative) => {
+    for (const entry of readdirSync(absolute, { withFileTypes: true })) {
+      const childAbs = join(absolute, entry.name);
+      const childRel = `${relative}/${entry.name}`;
+      if (entry.isDirectory()) walk(childAbs, childRel);
+      else if (YAML(entry.name)) found.push(childRel);
+    }
+  };
+  const actionsDir = resolve(repoRoot, '.github/actions');
+  if (existsSync(actionsDir) && statSync(actionsDir).isDirectory()) {
+    walk(actionsDir, '.github/actions');
+  }
+
+  for (const name of ['action.yml', 'action.yaml']) {
+    if (existsSync(resolve(repoRoot, name))) found.push(name);
+  }
+
+  return found.sort();
 }
 
 /** `uses: owner/repo[/path]@<ref>` with an optional trailing `# comment`. */
@@ -139,7 +188,24 @@ export async function githubApi(path) {
  *   { kind: 'unexpected-object', type }
  */
 export async function resolveTagCommit({ owner, repo, tag, api = githubApi }) {
-  const ref = await api(`repos/${owner}/${repo}/git/ref/tags/${encodeURIComponent(tag)}`);
+  /**
+   * A transport can THROW rather than return a status — DNS failure, TLS
+   * failure, an offline runner: `fetch` rejects, it does not hand back a 5xx.
+   * Left uncaught that still exits non-zero (an unhandled top-level-await
+   * rejection), so the VERDICT was never wrong, but the operator got a raw
+   * stack trace instead of the per-pin report. Normalise it to the same
+   * `api-error` shape so every failure mode reads identically — and, as ever,
+   * a failure, NEVER a pass.
+   */
+  const call = async (path) => {
+    try {
+      return await api(path);
+    } catch (error) {
+      return { status: 0, body: { message: error instanceof Error ? error.message : `${error}` } };
+    }
+  };
+
+  const ref = await call(`repos/${owner}/${repo}/git/ref/tags/${encodeURIComponent(tag)}`);
   if (ref.status === 404) return { kind: 'tag-missing' };
   if (ref.status !== 200) {
     return { kind: 'api-error', status: ref.status, message: ref.body?.message };
@@ -148,7 +214,7 @@ export async function resolveTagCommit({ owner, repo, tag, api = githubApi }) {
   if (object?.type === 'commit') return { kind: 'commit', sha: object.sha, annotated: false };
   if (object?.type === 'tag') {
     // Annotated tag: one more hop to the commit.
-    const tagObject = await api(`repos/${owner}/${repo}/git/tags/${object.sha}`);
+    const tagObject = await call(`repos/${owner}/${repo}/git/tags/${object.sha}`);
     if (tagObject.status !== 200) {
       return { kind: 'api-error', status: tagObject.status, message: tagObject.body?.message };
     }
@@ -203,23 +269,34 @@ export async function verifyPin(pin, { api = githubApi } = {}) {
  * failure for every pin that depends on it, never quietly a pass for the second
  * one (security.md).
  */
-export async function verifyWorkflows({
-  dir = resolve(process.cwd(), '.github/workflows'),
-  api = githubApi,
-  workflows,
-} = {}) {
-  const files = workflows ?? discoverWorkflows(dir);
+/** Does this text contain a `uses:` OUTSIDE a comment? */
+function mentionsUses(text) {
+  return text.split('\n').some((line) => !/^\s*#/.test(line) && /\buses:/.test(line));
+}
+
+/**
+ * The shared core: verify `files` (label → absolute path). Everything else is a
+ * thin wrapper choosing WHICH files.
+ */
+async function verifyFileSet(files, api) {
   const cache = new Map();
   const memoApi = (path) => {
     if (!cache.has(path)) cache.set(path, api(path));
     return cache.get(path);
   };
   const findings = [];
-  for (const file of files) {
-    const text = readFileSync(resolve(dir, file), 'utf8');
+  for (const [file, absolute] of files) {
+    const text = readFileSync(absolute, 'utf8');
     const pins = parsePins(text, file);
     if (pins.length === 0) {
-      findings.push({ file, line: 0, action: '(none)', reason: 'no-pins-parsed' });
+      // `no-pins-parsed` is a REGEX-BREAKAGE alarm, not a coverage rule: it must
+      // fire when a file plainly says `uses:` yet nothing extracts (the silent-
+      // vacuum failure), and must NOT fire on a file that legitimately has
+      // nothing to pin — the repo's root composite action is all `run:` steps
+      // today. A false red here is how a nightly gets ignored.
+      if (mentionsUses(text)) {
+        findings.push({ file, line: 0, action: '(none)', reason: 'no-pins-parsed' });
+      }
       continue;
     }
     for (const pin of pins) {
@@ -228,6 +305,30 @@ export async function verifyWorkflows({
     }
   }
   return findings;
+}
+
+export async function verifyWorkflows({
+  dir = resolve(process.cwd(), '.github/workflows'),
+  api = githubApi,
+  workflows,
+} = {}) {
+  const files = workflows ?? discoverWorkflows(dir);
+  return verifyFileSet(
+    files.map((file) => [file, resolve(dir, file)]),
+    api,
+  );
+}
+
+/**
+ * Verify every pinnable file in the repo — workflows AND composite actions
+ * (#528 review). This is what the nightly runs; `verifyWorkflows` remains for
+ * the narrower directory-scoped case.
+ */
+export async function verifyPins({ repoRoot = process.cwd(), api = githubApi } = {}) {
+  return verifyFileSet(
+    discoverPinnableFiles(repoRoot).map((file) => [file, resolve(repoRoot, file)]),
+    api,
+  );
 }
 
 /**
@@ -260,11 +361,19 @@ export function formatFinding(finding) {
     case 'no-version-comment':
       return `${head}\n  pinned SHA  : ${finding.ref}\n  No \`# vX.Y.Z\` comment — nothing to resolve the pin against.`;
     case 'not-sha-pinned':
-      return `${head}\n  ref         : ${finding.ref}\n  Not a 40-hex SHA — this ref is MUTABLE on a credentialed workflow.`;
+      // Says MUTABLE, not "on a credentialed workflow": since #528 this runs
+      // over every workflow and composite action, so asserting a credential is
+      // in scope would overstate a finding on a build/lint file.
+      return `${head}\n  ref         : ${finding.ref}\n  Not a 40-hex SHA — this ref is MUTABLE, so whoever can move it decides what runs here.`;
     case 'unexpected-object':
       return `${head}\n  claimed tag : ${finding.tag}\n  refs/tags/${finding.tag} resolves to a \`${finding.objectType}\` object, not a commit.`;
     case 'api-error':
-      return `${head}\n  claimed tag : ${finding.tag}\n  GitHub API error ${finding.status}: ${finding.message ?? '(no message)'} — treated as a FAILURE, not a pass.`;
+      // status 0 = the transport THREW (DNS, TLS, offline). Rendering that as
+      // "API error 0" sends the reader looking for an HTTP status that does not
+      // exist; name the actual failure instead.
+      return finding.status === 0
+        ? `${head}\n  claimed tag : ${finding.tag}\n  Could not REACH the GitHub API: ${finding.message ?? '(no message)'}\n  Treated as a FAILURE, not a pass — an unresolved pin is unverified, not verified.`
+        : `${head}\n  claimed tag : ${finding.tag}\n  GitHub API error ${finding.status}: ${finding.message ?? '(no message)'} — treated as a FAILURE, not a pass.`;
     case 'no-pins-parsed':
       return `${finding.file} — no \`uses:\` pins parsed at all; the extraction regex or the workflow changed shape.`;
     default:
@@ -274,29 +383,43 @@ export function formatFinding(finding) {
 
 async function main() {
   const argv = process.argv.slice(2);
-  const dirFlag = argv.indexOf('--dir');
-  const dir =
-    dirFlag === -1 ? resolve(process.cwd(), '.github/workflows') : resolve(argv[dirFlag + 1] ?? '');
+  const rootFlag = argv.indexOf('--root');
+  const repoRoot = rootFlag === -1 ? process.cwd() : resolve(argv[rootFlag + 1] ?? '');
 
-  const files = discoverWorkflows(dir);
-  const findings = await verifyWorkflows({ dir, workflows: files });
+  const files = discoverPinnableFiles(repoRoot);
+  const findings = await verifyPins({ repoRoot });
   if (findings.length === 0) {
     console.log(
-      `✔ every pin across ${files.length} workflow(s) resolves to the tag its comment claims`,
+      `✔ every pin across ${files.length} workflow/action file(s) resolves to the tag its comment claims`,
     );
     return 0;
   }
-  console.error(`✖ ${findings.length} action-pin finding(s) across ${files.length} workflow(s):\n`);
-  for (const finding of findings) console.error(`${formatFinding(finding)}\n`);
   console.error(
-    `A pin that does not resolve to its claimed tag is a supply-chain finding, not a typo.\n` +
-      `${PINNED_WORKFLOWS.join(', ')} run with a registry-write credential in scope; the\n` +
-      "cosign workflows run keyless signing under this repo's OIDC identity (#528).",
+    `✖ ${findings.length} action-pin finding(s) across ${files.length} workflow/action file(s):\n`,
+  );
+  for (const finding of findings) console.error(`${formatFinding(finding)}\n`);
+  // Deliberately does NOT assert that a credential is in scope: since #528 this
+  // covers every workflow, so a finding on a build/lint workflow would have that
+  // claim overstate its severity. Name where the credentials actually are and
+  // let the per-finding file name above decide which case the reader is in.
+  console.error(
+    'A pin that does not resolve to its claimed tag is a supply-chain finding, not a typo.\n' +
+      `Severity depends on which file tripped: ${PINNED_WORKFLOWS.join(', ')} hold a live npm\n` +
+      'publish credential; supply-chain.yml / operator-supply-chain.yml sign artifacts under\n' +
+      "this repo's OIDC identity; the rest are build/test/lint (#528).",
   );
   return 1;
 }
 
 // Only run when executed directly; importing for tests must have no side effects.
 if (process.argv[1] && import.meta.url === `file://${process.argv[1]}`) {
-  process.exitCode = await main();
+  try {
+    process.exitCode = await main();
+  } catch (error) {
+    // Last-resort net. A thrown transport is already normalised into an
+    // `api-error` finding; anything reaching here is a bug in this script, and
+    // it must still exit NON-ZERO — a checker that cannot run is never a pass.
+    console.error(`✖ verify-action-pins failed to complete: ${error?.stack ?? error}`);
+    process.exitCode = 1;
+  }
 }

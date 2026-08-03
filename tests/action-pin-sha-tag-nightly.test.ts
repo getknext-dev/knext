@@ -1,12 +1,14 @@
-import { mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
+  discoverPinnableFiles,
   formatFinding,
   PINNED_WORKFLOWS,
   parsePins,
   resolveTagCommit,
+  verifyPins,
   verifyWorkflows,
 } from '../scripts/verify-action-pins.mjs';
 
@@ -114,6 +116,36 @@ describe('nightly SHA↔tag resolution — the workflow (#539)', () => {
     expect(read(NIGHTLY)).toMatch(
       /GITHUB_TOKEN: \$\{\{ (github\.token|secrets\.GITHUB_TOKEN) \}\}/,
     );
+  });
+
+  it('does not overstate severity in the alert issue it files (#528 review)', () => {
+    // The alert body is read by whoever triages a red night, BEFORE they open
+    // the log. Since the check covers all workflows, a red caused by `ci.yml`
+    // must not announce that a live npm publish credential is in scope —
+    // overstating severity in exactly the direction this work exists to correct,
+    // and misdirecting triage toward the release path.
+    const alert = read(NIGHTLY).split(/^\s{2}\S+-alert:/m)[1] ?? '';
+    expect(
+      alert,
+      'the alert body must not assert the finding is on the publish path — the check is repo-wide',
+    ).not.toMatch(/publish path \(`release\.yml`/);
+    expect(
+      alert,
+      'the alert body must not claim a live npm publish credential is in scope unconditionally',
+    ).not.toMatch(/These workflows run with a live npm publish credential in scope/);
+    // And positively: it must tell the reader that severity DEPENDS on which
+    // workflow tripped, which is the actual triage question.
+    expect(alert, 'the alert body must say severity depends on which workflow tripped').toMatch(
+      /depends on which workflow/i,
+    );
+  });
+
+  it('does not describe its own scope as publish-path-only', () => {
+    const text = read(NIGHTLY);
+    const header = text.split(/^on:/m)[0] ?? '';
+    expect(header, 'the header must state the repo-wide scope').toMatch(/every workflow/i);
+    const jobName = /^\s{4}name: (.+)$/m.exec(text.split(/^jobs:/m)[1] ?? '')?.[1] ?? '';
+    expect(jobName, 'the job name must not still say "publish-path"').not.toMatch(/publish-path/i);
   });
 
   it('covers every workflow that holds the npm publish credential', () => {
@@ -233,6 +265,50 @@ describe('nightly SHA↔tag resolution — upstream resolution (#539)', () => {
       resolveTagCommit({ owner: 'actions', repo: 'checkout', tag: 'v5.0.0', api }),
     ).resolves.toMatchObject({ kind: 'api-error', status: 500 });
   });
+
+  it('turns a THROWN transport error into the same actionable report, not a stack trace', async () => {
+    // DNS failure, TLS failure, offline runner: `fetch` REJECTS rather than
+    // returning a 5xx. The verdict was already correct (exit 1 via an unhandled
+    // rejection) but the operator got a raw stack trace instead of the per-pin
+    // report — the same information gap the formatted findings exist to close.
+    const api = async () => {
+      throw new TypeError('fetch failed');
+    };
+    const resolved = await resolveTagCommit({
+      owner: 'actions',
+      repo: 'checkout',
+      tag: 'v5.0.0',
+      api,
+    });
+    expect(resolved).toMatchObject({ kind: 'api-error' });
+    expect((resolved as { message?: string }).message).toMatch(/fetch failed/);
+  });
+
+  it('reports a thrown transport error per pin, and never as a pass', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'knext-pin-throw-'));
+    writeFileSync(
+      join(dir, 'ci.yml'),
+      ['jobs:', '  x:', '    steps:', `      - uses: actions/checkout@${SHA_A} # v5.0.0`].join(
+        '\n',
+      ),
+    );
+    const findings = await verifyWorkflows({
+      dir,
+      api: async () => {
+        throw new Error('getaddrinfo ENOTFOUND api.github.com');
+      },
+    });
+    expect(findings).toHaveLength(1);
+    expect(findings[0]).toMatchObject({ reason: 'api-error' });
+    const message = formatFinding(findings[0]);
+    // The underlying cause must survive into the report, and the verdict must be
+    // unambiguous. "API error 0" would send the reader hunting an HTTP status
+    // that does not exist, so the transport case gets its own wording.
+    expect(message).toContain('ENOTFOUND');
+    expect(message).toMatch(/Could not REACH the GitHub API/);
+    expect(message).toMatch(/FAILURE, not a pass/);
+    expect(message).not.toMatch(/API error 0/);
+  });
 });
 
 describe('nightly SHA↔tag resolution — scope is every workflow (#528)', () => {
@@ -333,6 +409,69 @@ describe('nightly SHA↔tag resolution — scope is every workflow (#528)', () =
     expect(findings.every((finding: { reason: string }) => finding.reason === 'api-error')).toBe(
       true,
     );
+  });
+
+  it('covers composite actions, not only .github/workflows (#528 review)', () => {
+    // The scan boundary, asserted rather than documented. `.github/workflows` is
+    // not the only place a `uses:` can live: this repo ships a ROOT `action.yml`
+    // composite action, and `.github/actions/**` is the conventional home for
+    // more. A pin added there must be resolved too, or "pinned by default" is
+    // false for a whole class of file.
+    const files = discoverPinnableFiles(REPO_ROOT);
+    expect(files, 'the root composite action must be inside the scan').toContain('action.yml');
+    for (const file of ['supply-chain.yml', 'operator-supply-chain.yml']) {
+      expect(files, `${file} must be inside the scan`).toContain(`.github/workflows/${file}`);
+    }
+  });
+
+  it('discovers a composite action dropped into .github/actions/**', () => {
+    // The directory does not exist today. Assert the RULE, not the current tree,
+    // so creating it later is covered without anyone remembering this file.
+    const root = mkdtempSync(join(tmpdir(), 'knext-pin-composite-'));
+    mkdirSync(join(root, '.github', 'workflows'), { recursive: true });
+    mkdirSync(join(root, '.github', 'actions', 'nested'), { recursive: true });
+    writeFileSync(join(root, '.github', 'workflows', 'ci.yml'), 'jobs: {}\n');
+    writeFileSync(join(root, '.github', 'actions', 'nested', 'action.yml'), 'runs: {}\n');
+    writeFileSync(join(root, 'action.yml'), 'runs: {}\n');
+    expect(discoverPinnableFiles(root).sort()).toEqual([
+      '.github/actions/nested/action.yml',
+      '.github/workflows/ci.yml',
+      'action.yml',
+    ]);
+  });
+
+  it('REDS on an unpinned `uses:` inside a composite action', async () => {
+    // The mutation that matters for the boundary: a floating ref in a composite
+    // action must be a finding, exactly as it is in a workflow.
+    const root = mkdtempSync(join(tmpdir(), 'knext-pin-composite-red-'));
+    mkdirSync(join(root, '.github', 'workflows'), { recursive: true });
+    writeFileSync(
+      join(root, 'action.yml'),
+      ['runs:', '  using: composite', '  steps:', '    - uses: actions/checkout@v7'].join('\n'),
+    );
+    const findings = await verifyPins({ repoRoot: root, api: fakeApi({}).api });
+    expect(findings).toHaveLength(1);
+    expect(findings[0]).toMatchObject({ file: 'action.yml', reason: 'not-sha-pinned' });
+  });
+
+  it('does not invent a finding for a composite action that legitimately has no `uses:`', async () => {
+    // The root action.yml is all `run:` steps today. "No pins parsed" is a
+    // REGEX-BREAKAGE alarm, so it must not fire on a file that genuinely has
+    // nothing to pin — a false red here trains people to ignore the nightly.
+    const root = mkdtempSync(join(tmpdir(), 'knext-pin-nouses-'));
+    mkdirSync(join(root, '.github', 'workflows'), { recursive: true });
+    writeFileSync(join(root, 'action.yml'), ['runs:', '  using: composite'].join('\n'));
+    expect(await verifyPins({ repoRoot: root, api: fakeApi({}).api })).toEqual([]);
+  });
+
+  it('STILL reds when a file mentions `uses:` but nothing parses (regex breakage)', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'knext-pin-regex-'));
+    mkdirSync(join(root, '.github', 'workflows'), { recursive: true });
+    // A `uses:` present in the text but in a shape the extractor cannot read is
+    // exactly the silent-vacuum failure the alarm exists for.
+    writeFileSync(join(root, '.github', 'workflows', 'ci.yml'), 'steps:\n  - uses:\n');
+    const findings = await verifyPins({ repoRoot: root, api: fakeApi({}).api });
+    expect(findings[0]).toMatchObject({ reason: 'no-pins-parsed' });
   });
 
   it('covers the OIDC-signing workflows in the real repo', () => {

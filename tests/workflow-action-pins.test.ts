@@ -1,6 +1,7 @@
 import { readdirSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { discoverPinnableFiles } from '../scripts/verify-action-pins.mjs';
 
 /**
  * GUARD TESTS for action SHA-pinning across EVERY workflow (#528).
@@ -157,5 +158,49 @@ describe('every workflow SHA-pins every action (#528)', () => {
     const dependabot = readFileSync(resolve(REPO_ROOT, '.github/dependabot.yml'), 'utf8');
     expect(dependabot).toContain("package-ecosystem: 'github-actions'");
     expect(dependabot).toMatch(/directory: '\/'/);
+  });
+
+  it('gives Dependabot a bump channel wide enough for the pins it now owns', () => {
+    // ~20 distinct actions across every workflow. With the default
+    // `open-pull-requests-limit: 5` and no grouping, a week's bumps can exceed
+    // the limit and the surplus silently waits — which is the staleness half of
+    // the trade this file warns about, reintroduced by scale rather than by
+    // decision. A group collapses them into one PR.
+    const dependabot = readFileSync(resolve(REPO_ROOT, '.github/dependabot.yml'), 'utf8');
+    expect(dependabot, 'the github-actions ecosystem needs a `groups:` entry').toMatch(
+      /^\s*groups:/m,
+    );
+    // Scanned, not enumerated: the group must match every action, so a newly
+    // pinned one joins it without a config edit.
+    expect(dependabot, "the group's patterns must be a catch-all, not a list").toMatch(/'\*'/);
+  });
+
+  it('pins every action the repo ships OUTSIDE .github/workflows too', () => {
+    // Scan boundary, asserted. The repo ships a root `action.yml` composite
+    // action; `.github/actions/**` is the conventional home for more. A `uses:`
+    // there is as credential-adjacent as one in a workflow (a composite runs
+    // inside the caller's job, with the caller's token), so "pinned by default"
+    // has to mean those files as well. The boundary is defined ONCE, in
+    // scripts/verify-action-pins.mjs, and consumed here — two definitions would
+    // drift.
+    const pinnable = discoverPinnableFiles(REPO_ROOT) as string[];
+    expect(pinnable, 'the root composite action must be in scope').toContain('action.yml');
+    for (const file of pinnable) {
+      const text = readFileSync(resolve(REPO_ROOT, file), 'utf8');
+      for (const [index, line] of text.split('\n').entries()) {
+        if (/^\s*#/.test(line)) continue;
+        const match = USES_LINE.exec(line);
+        if (match === undefined || match === null) continue;
+        const [, action, ref, comment] = match;
+        expect(
+          /^[0-9a-f]{40}$/.test(ref ?? ''),
+          `${file}:${index + 1} — ${action}@${ref} is a MUTABLE ref`,
+        ).toBe(true);
+        expect(
+          comment?.trim(),
+          `${file}:${index + 1} — ${action} needs a trailing "# vX.Y.Z" comment`,
+        ).toMatch(/^v\d+\.\d+\.\d+/);
+      }
+    }
   });
 });

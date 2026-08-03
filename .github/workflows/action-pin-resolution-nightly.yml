@@ -1,10 +1,16 @@
 name: Action pin SHA↔tag resolution (nightly)
 
 # ── #539: does each pinned action SHA actually BELONG to its commented tag? ────
+# SCOPE (widened in #528): EVERY workflow in `.github/workflows`, plus the repo's
+# composite actions (root `action.yml`, `.github/actions/**`) — not just the
+# publish path. The file set is DISCOVERED by `discoverPinnableFiles`, never
+# enumerated, so a file added tomorrow is resolved tonight.
+#
 # `tests/release-action-pins.test.ts` enforces the FORM and SCOPE of every pin on
 # the publish path (`release.yml`, `release-ghp.yml`): a 40-hex SHA, an auditable
 # `# vX.Y.Z` comment, and an allowlist of which actions may touch a workflow that
-# holds `secrets.NPM_TOKEN`. It deliberately does NOT assert the SHA VALUE — an
+# holds `secrets.NPM_TOKEN`; `tests/workflow-action-pins.test.ts` enforces the
+# same FORM everywhere else. Neither asserts the SHA VALUE — an
 # earlier revision did, and it reddened every CORRECT Dependabot bump (#530/#532
 # preserved the pin form exactly and still failed), which made editing the
 # supply-chain guard the routine way to get green.
@@ -46,7 +52,9 @@ permissions:
 
 jobs:
   resolve-action-pins:
-    name: Resolve every publish-path pin against its commented tag
+    # Not a required-check name: this workflow is `schedule` + `workflow_dispatch`
+    # only, so renaming the job cannot orphan a branch-protection rule.
+    name: Resolve every pinned action against its commented tag
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -91,17 +99,25 @@ jobs:
           # The idempotency KEY is this fixed literal title — the lookup and the
           # create MUST share it, so keep it a constant (never interpolated).
           title='Action pin SHA<->tag resolution RED'
-          body="The nightly SHA↔tag resolution check FAILED: at least one action pinned on the
-          publish path (\`release.yml\` / \`release-ghp.yml\`) does not resolve to the tag its
-          comment claims.
+          body="The nightly SHA↔tag resolution check FAILED: at least one pinned action does not
+          resolve to the tag its comment claims. The check covers EVERY workflow plus the repo's
+          composite actions (#528), so **read the job log for the file name before triaging** —
+          it names, per pin: the action, the file and line, the claimed tag, the pinned SHA, and
+          what that tag currently resolves to upstream.
 
           - Run (full per-pin report in the job log): ${RUN_URL}
           - Check job result: ${CHECK_RESULT}
 
-          These workflows run with a live npm publish credential in scope, so a pin that does not
-          belong to its claimed tag is a supply-chain finding, not a typo. The report names,
-          per pin: the action, the workflow and line, the claimed tag, the pinned SHA, and
-          what that tag currently resolves to upstream.
+          **Severity depends on which workflow tripped** — do not assume the worst case, and do
+          not assume the mildest:
+          - \`release.yml\` / \`release-ghp.yml\` hold a **live npm publish credential**.
+          - \`supply-chain.yml\` / \`operator-supply-chain.yml\` run **cosign keyless signing**
+            under this repo's OIDC identity.
+          - the rest are build/test/lint workflows, and the repo's composite actions run inside
+            **the caller's** job with the caller's token.
+
+          In every case a pin that does not belong to its claimed tag is a supply-chain finding
+          rather than a typo; only the blast radius differs.
 
           **Triage**
           - *SHA mismatch* — repoint the pin at the resolved SHA, or explain the divergence.
