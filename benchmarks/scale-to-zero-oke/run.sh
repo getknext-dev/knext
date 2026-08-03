@@ -46,6 +46,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # ── defaults (all overridable via flags; see --help) ─────────────────────────
 KCTX="${KCTX:-}"                                   # kube context; empty = current context
 NS="${NS:-default}"                                # namespace
+RESTORE_PENDING_ONLY="${RESTORE_PENDING_ONLY:-0}"
 SERVICE="${SERVICE:-}"                             # ksvc name — REQUIRED
 URL="${URL:-}"                                     # target URL; default derived from SERVICE/NS
 # k6 image. NOTE: .claude/rules/security.md asks for digest pinning. This is left
@@ -225,6 +226,7 @@ Transient-API retry (see README "Transient API retry"):
                               NotFound/Forbidden/Invalid and anything unrecognised fail fast.
 
 Other:
+  --restore-pending           apply an outstanding pending-restore file and exit (idempotent)
   --dry-run                   print the actions/manifests that would run; never touch a cluster
   -h, --help                   show this help
 
@@ -235,6 +237,7 @@ EOF
 
 while [ $# -gt 0 ]; do
   case "$1" in
+    --restore-pending) RESTORE_PENDING_ONLY=1; shift ;;
     --context) KCTX="$2"; shift 2 ;;
     --namespace) NS="$2"; shift 2 ;;
     --service) SERVICE="$2"; shift 2 ;;
@@ -598,6 +601,102 @@ RAW_LOG_TAIL_LINES="${RAW_LOG_TAIL_LINES:-200}"
 # RBAC that denies `get` but allows `patch` was enough to trigger it.
 #
 # Rule: never mutate a target whose original state you could not read.
+# ── pending-restore file: survives SIGKILL, which a trap cannot (#536) ───────
+# The captured config lived only in this process's variables, and the restore was
+# trap-based. SIGKILL cannot be trapped, so killing the process outright destroyed
+# the knowledge of what to restore and left the service in benchmark configuration
+# with nothing on disk saying what it used to be. That happened during Run 23; the
+# originals were recovered by hand from a log line that happened to still exist.
+#
+# The blast radius is the quiet kind: a lowered max-scale silently caps a later
+# load test, and panic-window settings change autoscaler behaviour for every
+# subsequent measurement on that service. The next benchmark then produces
+# plausible-but-wrong numbers.
+#
+# So: write the capture to disk BEFORE the first mutation, and treat the file's
+# EXISTENCE as "a restore is outstanding". Lives under results/, already gitignored
+# (.gitignore: benchmarks/**/results/), so it can never land in a commit.
+PENDING_DIR="${SCRIPT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}/results"
+
+# Keyed on context+namespace+service: a pending restore for one service must not
+# block benchmarking a different one.
+pending_restore_path() {
+  local ctx="${KCTX:-default}"
+  printf '%s/.pending-restore-%s.json' "$PENDING_DIR" \
+    "$(printf '%s_%s_%s' "$ctx" "$NS" "$SERVICE" | tr -c 'A-Za-z0-9_.-' '_')"
+}
+
+# A DRY RUN mutates nothing, so it must not create a restore obligation. Without
+# this gate every harness test that exercises a partial run left a pending file
+# behind, and the startup refusal below then blocked every subsequent test — which
+# is exactly what happened, and what the sibling suites caught.
+#
+# DRY_RUN_EXERCISE_PENDING=1 forces the machinery on under DRY_RUN so this feature
+# can be tested at all, mirroring the existing DRY_RUN_EXERCISE_KC seam.
+pending_restore_active() {
+  [ "${DRY_RUN:-0}" != "1" ] || [ "${DRY_RUN_EXERCISE_PENDING:-0}" = "1" ]
+}
+
+write_pending_restore() {
+  pending_restore_active || return 0
+  mkdir -p "$PENDING_DIR" 2>/dev/null || return 0
+  local f; f=$(pending_restore_path)
+  cat > "$f" <<PENDING
+{
+  "service": "${SERVICE}",
+  "namespace": "${NS}",
+  "context": "${KCTX:-}",
+  "capturedAt": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "pid": $$,
+  "original": {
+    "maxScale": "${ORIG_MAXSCALE}",
+    "containerConcurrency": "${ORIG_CC}",
+    "targetBurstCapacity": "${ORIG_TBC}",
+    "panicWindowPercentage": "${ORIG_PW}",
+    "panicThresholdPercentage": "${ORIG_PT}"
+  }
+}
+PENDING
+}
+
+clear_pending_restore() { rm -f "$(pending_restore_path)" 2>/dev/null || true; }
+
+# Load a pending file back into the ORIG_* variables so the normal restore path
+# can act on it unchanged — one restore implementation, not two.
+load_pending_restore() {
+  local f="$1" v
+  for v in maxScale:ORIG_MAXSCALE containerConcurrency:ORIG_CC \
+           targetBurstCapacity:ORIG_TBC panicWindowPercentage:ORIG_PW \
+           panicThresholdPercentage:ORIG_PT; do
+    printf -v "${v#*:}" '%s' "$(jq -r --arg k "${v%%:*}" '.original[$k] // ""' "$f" 2>/dev/null)"
+  done
+  CAPTURED=1
+}
+
+# Refuse to start over a service with an outstanding restore. Refusing is the
+# right default: a fresh capture would read the BENCHMARK's own values as the
+# "original" and overwrite the true one, losing it permanently — worse than the
+# failure this guard exists for. Loud, with an obvious escape hatch, or it gets
+# worked around with `rm`.
+check_pending_restore() {
+  pending_restore_active || return 0
+  local f; f=$(pending_restore_path)
+  [ -f "$f" ] || return 0
+  log "*** REFUSING TO START: an unfinished restore is outstanding for '${SERVICE}' in '${NS}'. ***"
+  log "    A previous run was killed before it could restore this service, so it is"
+  log "    probably still in BENCHMARK configuration. Starting now would capture those"
+  log "    values as the new 'original' and lose the real one permanently."
+  log ""
+  log "    Captured originals still on disk:"
+  sed 's/^/      /' "$f" 2>/dev/null
+  log ""
+  log "    Apply them and exit:"
+  log "      $0 --context '${KCTX:-}' --namespace '${NS}' --service '${SERVICE}' --restore-pending"
+  log ""
+  log "    (If you are certain the service is already correct, delete ${f})"
+  exit 1
+}
+
 capture_original() {
   if ! kc_live; then
     log "captured original config: (dry-run — no cluster read, nothing will be mutated)"
@@ -663,6 +762,8 @@ capture_original() {
   done
 
   CAPTURED=1
+  # BEFORE any mutation — that ordering is the whole point.
+  write_pending_restore
   log "captured original config: max-scale='${ORIG_MAXSCALE:-<unset>}' containerConcurrency='${ORIG_CC:-<unset(0=unbounded)>}' target-burst-capacity='${ORIG_TBC:-<unset>}' panic-window-pct='${ORIG_PW:-<unset>}' panic-threshold-pct='${ORIG_PT:-<unset>}'"
 }
 
@@ -767,6 +868,9 @@ cleanup() {
     # annotated — but over-reporting a restore is the safe direction; silently
     # claiming one is not.
     if [ -z "$restore_failed" ]; then
+      # Only now is the restore outstanding no longer. A partial restore KEEPS the
+      # file: a key that did not apply is exactly when the next run must refuse.
+      clear_pending_restore
       log "  restored: containerConcurrency=${cc_restore}, max-scale=${ORIG_MAXSCALE:-<removed>}, burst/panic annotations restored/removed to captured originals"
     else
       log "*** RESTORE FAILED — these keys did NOT apply:${restore_failed} ***"
@@ -1537,6 +1641,29 @@ if [ "${BASH_SOURCE[0]}" != "${0}" ]; then return 0; fi
 # Provenance + the same-app gate run FIRST: before the original config is even
 # captured, so a refused A/B cannot have mutated anything, and so a run that
 # aborts for any later reason still records what it was going to measure.
+# --restore-pending: apply an outstanding restore and exit. Deliberately BEFORE
+# the provenance gate and the capture — this mode measures nothing, mutates
+# nothing new, and must work on a service the gate might refuse.
+if [ "$RESTORE_PENDING_ONLY" = "1" ]; then
+  _pending=$(pending_restore_path)
+  if [ ! -f "$_pending" ]; then
+    # Idempotent: nothing outstanding is SUCCESS, not an error. Running it twice
+    # must be safe, or people will stop trusting it and reach for `rm`.
+    log "no pending restore for '${SERVICE}' in '${NS}' — nothing to do."
+    exit 0
+  fi
+  log "applying pending restore for '${SERVICE}' in '${NS}' from ${_pending}"
+  load_pending_restore "$_pending"
+  # cleanup() owns the only restore implementation; reuse it rather than writing a
+  # second one that could drift from it.
+  cleanup
+  exit 0
+fi
+
+# Refuse over an outstanding restore BEFORE capturing, or the capture would read
+# the previous run's benchmark values as this run's "original".
+check_pending_restore
+
 provenance_and_identity_gate
 capture_original
 
