@@ -1,7 +1,7 @@
 import { readdirSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { discoverPinnableFiles } from '../scripts/verify-action-pins.mjs';
+import { discoverPinnableFiles, mentionsUses } from '../scripts/verify-action-pins.mjs';
 
 /**
  * GUARD TESTS for action SHA-pinning across EVERY workflow (#528).
@@ -49,10 +49,16 @@ const PIN_EXEMPT: ReadonlyMap<string, string> = new Map();
 /** `uses: owner/repo[/path]@<ref>` with an optional trailing comment. */
 const USES_LINE = /^\s*(?:-\s*)?uses:\s*(\S+?)@(\S+)\s*(?:#\s*(.*))?$/;
 
+/**
+ * The file set, from the SHARED discovery in scripts/verify-action-pins.mjs —
+ * never a second `readdirSync` here. An earlier revision re-derived the workflow
+ * half locally and imported the shared function for one test; the two agreed
+ * only by luck, which is exactly the drift a single definition is supposed to
+ * remove. Paths are repo-root-relative, so they cover `action.yml` and
+ * `.github/actions/**` as well as `.github/workflows`.
+ */
 function workflowFiles(): string[] {
-  return readdirSync(WORKFLOW_DIR)
-    .filter((file) => file.endsWith('.yml') || file.endsWith('.yaml'))
-    .sort();
+  return (discoverPinnableFiles(REPO_ROOT) as string[]).slice().sort();
 }
 
 interface UsesRef {
@@ -65,7 +71,7 @@ interface UsesRef {
 
 function usesRefs(file: string): UsesRef[] {
   const refs: UsesRef[] = [];
-  const text = readFileSync(resolve(WORKFLOW_DIR, file), 'utf8');
+  const text = readFileSync(resolve(REPO_ROOT, file), 'utf8');
   for (const [index, line] of text.split('\n').entries()) {
     // Skip comment lines: a header that DISCUSSES `uses: actions/setup-node@…`
     // (several of ours do, explaining the rule) is documentation, not a step.
@@ -88,6 +94,9 @@ describe('every workflow SHA-pins every action (#528)', () => {
     // pass vacuously over an empty list.
     expect(FILES.length).toBeGreaterThan(5);
     expect(COVERED.length).toBeGreaterThan(0);
+    // And the composite-action half of the boundary is really in the set — a
+    // regression that dropped it would otherwise only show as a smaller number.
+    expect(FILES, 'the root composite action must be in the scanned set').toContain('action.yml');
   });
 
   it.each(COVERED)('%s pins every `uses:` to an immutable 40-hex SHA', (file) => {
@@ -112,14 +121,31 @@ describe('every workflow SHA-pins every action (#528)', () => {
     }
   });
 
-  it('parses at least one `uses:` in every scanned workflow', () => {
+  it('parses a `uses:` from every file that has one — including quoted keys', () => {
     // Mutation-safety: if the extraction regex ever stops matching (a YAML style
-    // change, say), the two suites above would go green over nothing.
+    // change, a quoted key), the two suites above would go green over nothing.
+    //
+    // Conditional on `mentionsUses`, not unconditional, because a composite
+    // action may legitimately have no steps to pin — the repo's own `action.yml`
+    // is all `run:` steps today. `mentionsUses` is the SHARED, deliberately
+    // weaker matcher from the script: it accepts `"uses":` and `'uses' :` as
+    // well, so a step written in quoted-key form REDS here instead of vanishing
+    // from both guards.
+    let parsed = 0;
     for (const file of COVERED) {
-      expect(usesRefs(file).length, `${file} — no \`uses:\` steps parsed at all`).toBeGreaterThan(
-        0,
-      );
+      const text = readFileSync(resolve(REPO_ROOT, file), 'utf8');
+      const found = usesRefs(file).length;
+      parsed += found;
+      if (mentionsUses(text)) {
+        expect(found, `${file} — mentions \`uses:\` but nothing parsed`).toBeGreaterThan(0);
+      }
     }
+    // Global non-vacuity floor: the per-file check above is silent on a tree
+    // where NOTHING mentions `uses:` at all.
+    expect(
+      parsed,
+      'no pins parsed anywhere — the extractor or the tree changed shape',
+    ).toBeGreaterThan(20);
   });
 
   it('carries no stale pin exemption', () => {
@@ -134,9 +160,15 @@ describe('every workflow SHA-pins every action (#528)', () => {
     // cosign KEYLESS signing: the job holds an OIDC token that can sign
     // artifacts under this repo's identity, so a movable action ref there is the
     // highest remaining exposure after the publish path.
-    const signing = ['supply-chain.yml', 'operator-supply-chain.yml'];
+    const signing = [
+      '.github/workflows/supply-chain.yml',
+      '.github/workflows/operator-supply-chain.yml',
+    ];
     for (const file of signing) {
-      const text = readFileSync(resolve(WORKFLOW_DIR, file), 'utf8');
+      // Membership in the scanned set, not just on disk: a file the discovery
+      // stopped returning would otherwise still pass this test.
+      expect(COVERED, `${file} must be inside the scanned set`).toContain(file);
+      const text = readFileSync(resolve(REPO_ROOT, file), 'utf8');
       expect(text, `${file} must still be the OIDC-signing workflow this guard targets`).toContain(
         'id-token: write',
       );
@@ -152,12 +184,23 @@ describe('every workflow SHA-pins every action (#528)', () => {
 
   it('keeps the github-actions ecosystem under Dependabot so pins do not go stale', () => {
     // Pinning without a bump channel just trades a supply-chain risk for
-    // staleness. Dependabot's `directory: '/'` covers .github/workflows as a
-    // whole, so newly pinned files need no config change — assert that rather
-    // than assume it.
+    // staleness. `/` covers .github/workflows and the ROOT action.yml — assert
+    // that rather than assume it.
     const dependabot = readFileSync(resolve(REPO_ROOT, '.github/dependabot.yml'), 'utf8');
     expect(dependabot).toContain("package-ecosystem: 'github-actions'");
-    expect(dependabot).toMatch(/directory: '\/'/);
+    expect(dependabot).toMatch(/(directory|directories):/);
+    expect(dependabot, 'the repo root must be a scanned directory').toMatch(/'\/'/);
+  });
+
+  it("covers NESTED composite actions in Dependabot's directory scope", () => {
+    // `/` does NOT reach `.github/actions/**/action.yml` — Dependabot scans a
+    // directory, not a tree. Without this, a composite action added there would
+    // be pinned-by-default by the guard above yet never BUMPED: pinned and
+    // frozen, which is the staleness failure with extra steps.
+    const dependabot = readFileSync(resolve(REPO_ROOT, '.github/dependabot.yml'), 'utf8');
+    expect(dependabot, 'nested composite actions need their own directory entry').toMatch(
+      /\.github\/actions/,
+    );
   });
 
   it('gives Dependabot a bump channel wide enough for the pins it now owns', () => {
@@ -175,32 +218,19 @@ describe('every workflow SHA-pins every action (#528)', () => {
     expect(dependabot, "the group's patterns must be a catch-all, not a list").toMatch(/'\*'/);
   });
 
-  it('pins every action the repo ships OUTSIDE .github/workflows too', () => {
-    // Scan boundary, asserted. The repo ships a root `action.yml` composite
-    // action; `.github/actions/**` is the conventional home for more. A `uses:`
-    // there is as credential-adjacent as one in a workflow (a composite runs
-    // inside the caller's job, with the caller's token), so "pinned by default"
-    // has to mean those files as well. The boundary is defined ONCE, in
-    // scripts/verify-action-pins.mjs, and consumed here — two definitions would
-    // drift.
+  it('applies the SAME assertions to composite actions as to workflows', () => {
+    // Previously this test re-implemented the per-match checks over a separately
+    // obtained file list, which meant the composite-action half was covered by a
+    // WEAKER, duplicated rule — per-match only, with no "mentions uses but
+    // nothing parsed" alarm. Now that COVERED comes from the shared discovery,
+    // every suite above already runs over those files; this test's job is to
+    // assert that membership rather than to re-check the contents.
     const pinnable = discoverPinnableFiles(REPO_ROOT) as string[];
     expect(pinnable, 'the root composite action must be in scope').toContain('action.yml');
     for (const file of pinnable) {
-      const text = readFileSync(resolve(REPO_ROOT, file), 'utf8');
-      for (const [index, line] of text.split('\n').entries()) {
-        if (/^\s*#/.test(line)) continue;
-        const match = USES_LINE.exec(line);
-        if (match === undefined || match === null) continue;
-        const [, action, ref, comment] = match;
-        expect(
-          /^[0-9a-f]{40}$/.test(ref ?? ''),
-          `${file}:${index + 1} — ${action}@${ref} is a MUTABLE ref`,
-        ).toBe(true);
-        expect(
-          comment?.trim(),
-          `${file}:${index + 1} — ${action} needs a trailing "# vX.Y.Z" comment`,
-        ).toMatch(/^v\d+\.\d+\.\d+/);
-      }
+      expect(COVERED, `${file} must be inside the assertion set, not merely discovered`).toContain(
+        file,
+      );
     }
   });
 });

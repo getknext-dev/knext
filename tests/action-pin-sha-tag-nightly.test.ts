@@ -1,4 +1,12 @@
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import {
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -472,6 +480,93 @@ describe('nightly SHA↔tag resolution — scope is every workflow (#528)', () =
     writeFileSync(join(root, '.github', 'workflows', 'ci.yml'), 'steps:\n  - uses:\n');
     const findings = await verifyPins({ repoRoot: root, api: fakeApi({}).api });
     expect(findings[0]).toMatchObject({ reason: 'no-pins-parsed' });
+  });
+
+  it('FAILS when it can see no files at all — a checker that cannot reach its subject is not a pass', async () => {
+    // security.md, quoted by this script at its own head: "a checker that goes
+    // green when it cannot reach upstream is worse than none." The same applies
+    // to its INPUT. Round 2's existsSync guards turned "no .github here" into
+    // `✔ 0 file(s)` and exit 0, so a `working-directory:`, a checkout with
+    // `path:`, or moving the script would have left the nightly permanently and
+    // silently green. The PR-time form guard cannot protect the nightly — it
+    // asserts over the repo tree at PR time, not over whatever the runner sees.
+    const empty = mkdtempSync(join(tmpdir(), 'knext-pin-empty-'));
+    const findings = await verifyPins({ repoRoot: empty, api: fakeApi({}).api });
+    expect(findings).toHaveLength(1);
+    expect(findings[0]).toMatchObject({ reason: 'no-files-discovered' });
+    expect(formatFinding(findings[0])).toMatch(/no workflow or action files/i);
+  });
+
+  it('exits NON-ZERO at run time when pointed at a tree with nothing to check', () => {
+    // The run-time floor, proved by actually running the script — the unit test
+    // above cannot see main()'s exit code, and the exit code is the whole
+    // contract with the nightly.
+    const empty = mkdtempSync(join(tmpdir(), 'knext-pin-empty-run-'));
+    const script = resolve(REPO_ROOT, 'scripts/verify-action-pins.mjs');
+    const result = spawnSync(process.execPath, [script, '--root', empty], { encoding: 'utf8' });
+    expect(result.status, 'scanning zero files must FAIL, never report success').not.toBe(0);
+    expect(`${result.stdout}${result.stderr}`).toMatch(/no workflow or action files/i);
+  });
+
+  it('exits NON-ZERO on an unrecognised flag rather than silently scanning cwd', () => {
+    // `--dir` was the round-1 flag and is now unsupported. Ignoring it silently
+    // would scan the wrong tree and print green — the same fail-open family as
+    // the zero-file case.
+    const script = resolve(REPO_ROOT, 'scripts/verify-action-pins.mjs');
+    const result = spawnSync(process.execPath, [script, '--dir', '/tmp'], { encoding: 'utf8' });
+    expect(result.status).not.toBe(0);
+    expect(`${result.stdout}${result.stderr}`).toMatch(/--dir|unrecognised|unknown/i);
+  });
+
+  it('flags a QUOTED-key `uses:` that the extractor cannot read', async () => {
+    // `- "uses": evil/action@main` is a VALID Actions step that matches neither
+    // regex. Round 2's narrowing lost this: it yielded zero findings where round
+    // 1 reported `no-pins-parsed`. The alarm must key on the quoted form too, or
+    // a composite action written entirely this way passes every guard silently.
+    const root = mkdtempSync(join(tmpdir(), 'knext-pin-quoted-'));
+    mkdirSync(join(root, '.github', 'workflows'), { recursive: true });
+    writeFileSync(
+      join(root, '.github', 'workflows', 'ci.yml'),
+      ['jobs:', '  x:', '    steps:', '      - "uses": evil/action@main'].join('\n'),
+    );
+    const findings = await verifyPins({ repoRoot: root, api: fakeApi({}).api });
+    expect(findings).toHaveLength(1);
+    expect(findings[0]).toMatchObject({ reason: 'no-pins-parsed' });
+  });
+
+  it('flags a single-quoted key too', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'knext-pin-quoted1-'));
+    mkdirSync(join(root, '.github', 'workflows'), { recursive: true });
+    writeFileSync(join(root, '.github', 'workflows', 'ci.yml'), "steps:\n  - 'uses' : a/b@main\n");
+    const findings = await verifyPins({ repoRoot: root, api: fakeApi({}).api });
+    expect(findings[0]).toMatchObject({ reason: 'no-pins-parsed' });
+  });
+
+  it('descends a SYMLINKED directory under .github/actions', async () => {
+    // `entry.isDirectory()` is FALSE for a symlink Dirent, so a symlinked
+    // directory was never walked. Safe by omission, but it is a silent gap in a
+    // boundary the commit message calls complete.
+    const root = mkdtempSync(join(tmpdir(), 'knext-pin-symlink-'));
+    mkdirSync(join(root, '.github', 'workflows'), { recursive: true });
+    mkdirSync(join(root, '.github', 'actions'), { recursive: true });
+    mkdirSync(join(root, 'real-action'), { recursive: true });
+    writeFileSync(
+      join(root, 'real-action', 'action.yml'),
+      ['runs:', '  steps:', '    - uses: actions/checkout@v7'].join('\n'),
+    );
+    symlinkSync(join(root, 'real-action'), join(root, '.github', 'actions', 'linked'), 'dir');
+    expect(discoverPinnableFiles(root)).toContain('.github/actions/linked/action.yml');
+    const findings = await verifyPins({ repoRoot: root, api: fakeApi({}).api });
+    expect(findings).toHaveLength(1);
+    expect(findings[0]).toMatchObject({ reason: 'not-sha-pinned' });
+  });
+
+  it('does not loop forever on a symlink cycle', () => {
+    const root = mkdtempSync(join(tmpdir(), 'knext-pin-cycle-'));
+    mkdirSync(join(root, '.github', 'actions', 'a'), { recursive: true });
+    // A directory that contains a link back to its own ancestor.
+    symlinkSync(join(root, '.github', 'actions'), join(root, '.github', 'actions', 'a', 'loop'));
+    expect(() => discoverPinnableFiles(root)).not.toThrow();
   });
 
   it('covers the OIDC-signing workflows in the real repo', () => {

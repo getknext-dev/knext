@@ -45,11 +45,15 @@
  * of type `tag` whose own sha is the tag object, not the commit. Comparing that
  * to the pin would red every correct annotated-tag pin.
  *
- * Usage: node scripts/verify-action-pins.mjs [--dir <workflow-dir>]
- * Exits 1 (with an actionable report) if there is any finding.
+ * Usage: node scripts/verify-action-pins.mjs [--root <repo-root>]
+ *   --root  repository root to scan (default: cwd). The scan covers
+ *           .github/workflows, .github/actions/** and the root action.yml.
+ * Exits 1 (with an actionable report) if there is any finding, if it can see NO
+ * files to check, or on an unrecognised argument. There is no combination of
+ * arguments that makes this script exit 0 without having verified something.
  */
 
-import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 
 /**
@@ -104,11 +108,37 @@ export function discoverPinnableFiles(repoRoot) {
   }
 
   // Composite actions nest arbitrarily deep under .github/actions.
+  //
+  // SYMLINKED directories are descended, which `entry.isDirectory()` alone does
+  // NOT do — that predicate is false for a symlink Dirent, so a symlinked
+  // directory would be silently skipped. Skipping is safe-by-omission but it is
+  // still a hole in a boundary we describe as complete, and "the scan quietly
+  // ignores this shape" is the failure mode this whole file exists to avoid.
+  // Following symlinks means cycles are possible, so track REAL paths and never
+  // visit one twice.
+  const visited = new Set();
   const walk = (absolute, relative) => {
+    let real;
+    try {
+      real = realpathSync(absolute);
+    } catch {
+      return; // broken symlink: nothing to read, and not a finding about pins
+    }
+    if (visited.has(real)) return;
+    visited.add(real);
+
     for (const entry of readdirSync(absolute, { withFileTypes: true })) {
       const childAbs = join(absolute, entry.name);
       const childRel = `${relative}/${entry.name}`;
-      if (entry.isDirectory()) walk(childAbs, childRel);
+      let isDirectory = entry.isDirectory();
+      if (entry.isSymbolicLink()) {
+        try {
+          isDirectory = statSync(childAbs).isDirectory(); // statSync FOLLOWS the link
+        } catch {
+          continue; // broken link
+        }
+      }
+      if (isDirectory) walk(childAbs, childRel);
       else if (YAML(entry.name)) found.push(childRel);
     }
   };
@@ -269,9 +299,21 @@ export async function verifyPin(pin, { api = githubApi } = {}) {
  * failure for every pin that depends on it, never quietly a pass for the second
  * one (security.md).
  */
-/** Does this text contain a `uses:` OUTSIDE a comment? */
-function mentionsUses(text) {
-  return text.split('\n').some((line) => !/^\s*#/.test(line) && /\buses:/.test(line));
+/**
+ * Does this text contain a `uses:` key OUTSIDE a comment?
+ *
+ * Deliberately WEAKER than `USES_LINE`, and independent of it: this is the
+ * alarm that says "something here looks like a step but the extractor read
+ * nothing", so implementing it in terms of the extractor would make it
+ * self-referential and permanently silent.
+ *
+ * It accepts QUOTED keys — `- "uses": evil/action@main` and `- 'uses' : …` are
+ * valid Actions steps that `USES_LINE` cannot read. An earlier revision matched
+ * only the bare `uses:` literal, so a file written entirely in quoted-key form
+ * produced ZERO findings from both guards instead of a `no-pins-parsed` alarm.
+ */
+export function mentionsUses(text) {
+  return text.split('\n').some((line) => !/^\s*#/.test(line) && /["']?\buses["']?\s*:/.test(line));
 }
 
 /**
@@ -279,6 +321,18 @@ function mentionsUses(text) {
  * thin wrapper choosing WHICH files.
  */
 async function verifyFileSet(files, api) {
+  // A checker that goes green when it cannot SEE its subject is worse than none
+  // (security.md, quoted at the head of this file). An earlier revision guarded
+  // the directory reads with `existsSync` and therefore reported
+  // `✔ 0 file(s)` + exit 0 when pointed anywhere without a `.github` — so a
+  // `working-directory:`, a checkout with `path:`, or moving this script would
+  // have left the nightly permanently and silently green. The PR-time form
+  // guard cannot cover this: it asserts over the repo tree at PR time, not over
+  // whatever the runner actually sees at 05:11 UTC.
+  if (files.length === 0) {
+    return [{ file: '(scan)', line: 0, action: '(none)', reason: 'no-files-discovered' }];
+  }
+
   const cache = new Map();
   const memoApi = (path) => {
     if (!cache.has(path)) cache.set(path, api(path));
@@ -375,7 +429,15 @@ export function formatFinding(finding) {
         ? `${head}\n  claimed tag : ${finding.tag}\n  Could not REACH the GitHub API: ${finding.message ?? '(no message)'}\n  Treated as a FAILURE, not a pass — an unresolved pin is unverified, not verified.`
         : `${head}\n  claimed tag : ${finding.tag}\n  GitHub API error ${finding.status}: ${finding.message ?? '(no message)'} — treated as a FAILURE, not a pass.`;
     case 'no-pins-parsed':
-      return `${finding.file} — no \`uses:\` pins parsed at all; the extraction regex or the workflow changed shape.`;
+      return `${finding.file} — mentions \`uses:\` but no pins parsed; the extraction regex or the file changed shape (a quoted key, say).`;
+    case 'no-files-discovered':
+      return [
+        'Discovered NO workflow or action files to check.',
+        '  Nothing was verified, so this is a FAILURE, not a pass — a checker that goes',
+        '  green when it cannot see its subject is worse than no checker at all.',
+        '  Most likely the working directory is wrong (pass --root <repo-root>), the',
+        '  checkout landed under a `path:`, or this script moved relative to the tree.',
+      ].join('\n');
     default:
       return `${head} — ${finding.reason}`;
   }
@@ -383,8 +445,36 @@ export function formatFinding(finding) {
 
 async function main() {
   const argv = process.argv.slice(2);
-  const rootFlag = argv.indexOf('--root');
-  const repoRoot = rootFlag === -1 ? process.cwd() : resolve(argv[rootFlag + 1] ?? '');
+  let repoRoot = process.cwd();
+
+  // Strict parsing: an unrecognised argument is a FAILURE, never something to
+  // ignore. `--dir` was the round-1 flag; silently ignoring it would scan the
+  // wrong tree and print green — the same fail-open family as scanning zero
+  // files.
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = argv[index];
+    if (arg === '--root') {
+      const value = argv[index + 1];
+      if (!value || value.startsWith('--')) {
+        console.error('✖ --root requires a path argument.');
+        return 1;
+      }
+      repoRoot = resolve(value);
+      index += 1;
+      continue;
+    }
+    if (arg === '--dir') {
+      console.error(
+        '✖ --dir is no longer supported: the scan covers .github/workflows, .github/actions/**\n' +
+          '  and the root action.yml, so it takes a REPOSITORY ROOT. Use --root <repo-root>.',
+      );
+      return 1;
+    }
+    console.error(
+      `✖ unrecognised argument: ${arg}\n  Usage: verify-action-pins.mjs [--root <repo-root>]`,
+    );
+    return 1;
+  }
 
   const files = discoverPinnableFiles(repoRoot);
   const findings = await verifyPins({ repoRoot });
@@ -398,16 +488,22 @@ async function main() {
     `✖ ${findings.length} action-pin finding(s) across ${files.length} workflow/action file(s):\n`,
   );
   for (const finding of findings) console.error(`${formatFinding(finding)}\n`);
-  // Deliberately does NOT assert that a credential is in scope: since #528 this
-  // covers every workflow, so a finding on a build/lint workflow would have that
-  // claim overstate its severity. Name where the credentials actually are and
-  // let the per-finding file name above decide which case the reader is in.
-  console.error(
-    'A pin that does not resolve to its claimed tag is a supply-chain finding, not a typo.\n' +
-      `Severity depends on which file tripped: ${PINNED_WORKFLOWS.join(', ')} hold a live npm\n` +
-      'publish credential; supply-chain.yml / operator-supply-chain.yml sign artifacts under\n' +
-      "this repo's OIDC identity; the rest are build/test/lint (#528).",
-  );
+  // The severity footer is about PINS. Printing it under a "nothing was scanned"
+  // failure would tell the reader to go inspect a pin that was never read — the
+  // same misdirection the alert body was corrected for.
+  if (!findings.every((finding) => finding.reason === 'no-files-discovered')) {
+    // Deliberately does NOT assert that a credential is in scope: since #528
+    // this covers every workflow, so a finding on a build/lint workflow would
+    // have that claim overstate its severity. Name where the credentials
+    // actually are and let the per-finding file name decide which case applies.
+    console.error(
+      'A pin that does not resolve to its claimed tag is a supply-chain finding, not a typo.\n' +
+        `Severity depends on which file tripped: ${PINNED_WORKFLOWS.join(', ')} hold a live npm\n` +
+        'publish credential; supply-chain.yml / operator-supply-chain.yml sign artifacts under\n' +
+        "this repo's OIDC identity; the root action.yml is PUBLISHED and runs in every\n" +
+        'downstream consumer job; the rest are build/test/lint (#528).',
+    );
+  }
   return 1;
 }
 

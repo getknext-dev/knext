@@ -40,7 +40,16 @@
 version: 2
 updates:
   - package-ecosystem: 'github-actions'
-    directory: '/'
+    # `/` covers `.github/workflows/*` AND the root `action.yml`, but Dependabot
+    # scans a DIRECTORY, not a tree — it does not reach a composite action at
+    # `.github/actions/<name>/action.yml`. Our pin guard covers those files by
+    # directory walk, so without the glob below one could be pinned-by-default
+    # yet never bumped: pinned and frozen, which is the staleness failure with
+    # extra steps. The glob matches nothing today (the directory does not exist)
+    # and starts working the moment one is added — no config edit needed.
+    directories:
+      - '/'
+      - '/.github/actions/*'
     schedule:
       interval: 'weekly'
     # ~20 distinct actions are pinned across every workflow (#528). Ungrouped,

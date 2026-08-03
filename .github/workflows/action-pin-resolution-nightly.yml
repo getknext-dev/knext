@@ -113,8 +113,10 @@ jobs:
           - \`release.yml\` / \`release-ghp.yml\` hold a **live npm publish credential**.
           - \`supply-chain.yml\` / \`operator-supply-chain.yml\` run **cosign keyless signing**
             under this repo's OIDC identity.
-          - the rest are build/test/lint workflows, and the repo's composite actions run inside
-            **the caller's** job with the caller's token.
+          - the root \`action.yml\` is the **PUBLISHED** \`Deploy with knext\` action: a bad pin
+            there runs in **every downstream consumer's** job, with their token — the blast
+            radius leaves this repo entirely, so treat it as high, not as \"the rest\".
+          - the rest are build/test/lint workflows.
 
           In every case a pin that does not belong to its claimed tag is a supply-chain finding
           rather than a typo; only the blast radius differs.
