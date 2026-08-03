@@ -49,7 +49,7 @@
  * Exits 1 (with an actionable report) if there is any finding.
  */
 
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 /**
@@ -57,8 +57,23 @@ import { resolve } from 'node:path';
  * tests/action-pin-sha-tag-nightly.test.ts, which SCANS every workflow for
  * `secrets.NPM_TOKEN` and requires each hit to appear here — so a third
  * credentialed workflow cannot escape the nightly by being forgotten.
+ *
+ * NOTE (#528): this is no longer the SCOPE of the check — every workflow in the
+ * directory is resolved now. It remains the named subset that holds a live npm
+ * publish credential, which is what the credentialed-coverage test asserts on.
  */
 export const PINNED_WORKFLOWS = ['release.yml', 'release-ghp.yml'];
+
+/**
+ * Every workflow in `dir`, DISCOVERED rather than enumerated (#528). A list is
+ * how the twelfth workflow gets missed; a directory scan means a workflow added
+ * tomorrow is resolved tonight without anyone editing this file.
+ */
+export function discoverWorkflows(dir) {
+  return readdirSync(dir)
+    .filter((file) => file.endsWith('.yml') || file.endsWith('.yaml'))
+    .sort();
+}
 
 /** `uses: owner/repo[/path]@<ref>` with an optional trailing `# comment`. */
 const USES_LINE = /^\s*(?:-\s*)?uses:\s*(\S+?)@(\S+)\s*(?:#\s*(.*))?$/;
@@ -178,14 +193,29 @@ export async function verifyPin(pin, { api = githubApi } = {}) {
   return undefined;
 }
 
-/** Verify every publish-path workflow in `dir`. Silent (empty) when all pins hold. */
+/**
+ * Verify every workflow in `dir`. Silent (empty) when all pins hold.
+ *
+ * The API transport is MEMOISED per request path: ~100 pins across the repo's
+ * workflows resolve to well under 20 distinct `<owner>/<repo>@<tag>` pairs, and
+ * one request per pin would rate-limit the nightly into a flaky red. The cache
+ * stores the RESPONSE, including a failure — an unreachable API must stay a
+ * failure for every pin that depends on it, never quietly a pass for the second
+ * one (security.md).
+ */
 export async function verifyWorkflows({
   dir = resolve(process.cwd(), '.github/workflows'),
   api = githubApi,
-  workflows = PINNED_WORKFLOWS,
+  workflows,
 } = {}) {
+  const files = workflows ?? discoverWorkflows(dir);
+  const cache = new Map();
+  const memoApi = (path) => {
+    if (!cache.has(path)) cache.set(path, api(path));
+    return cache.get(path);
+  };
   const findings = [];
-  for (const file of workflows) {
+  for (const file of files) {
     const text = readFileSync(resolve(dir, file), 'utf8');
     const pins = parsePins(text, file);
     if (pins.length === 0) {
@@ -193,7 +223,7 @@ export async function verifyWorkflows({
       continue;
     }
     for (const pin of pins) {
-      const finding = await verifyPin(pin, { api });
+      const finding = await verifyPin(pin, { api: memoApi });
       if (finding) findings.push(finding);
     }
   }
@@ -248,18 +278,20 @@ async function main() {
   const dir =
     dirFlag === -1 ? resolve(process.cwd(), '.github/workflows') : resolve(argv[dirFlag + 1] ?? '');
 
-  const findings = await verifyWorkflows({ dir });
+  const files = discoverWorkflows(dir);
+  const findings = await verifyWorkflows({ dir, workflows: files });
   if (findings.length === 0) {
     console.log(
-      `✔ every pin on ${PINNED_WORKFLOWS.join(', ')} resolves to the tag its comment claims`,
+      `✔ every pin across ${files.length} workflow(s) resolves to the tag its comment claims`,
     );
     return 0;
   }
-  console.error(`✖ ${findings.length} action-pin finding(s) on the publish path:\n`);
+  console.error(`✖ ${findings.length} action-pin finding(s) across ${files.length} workflow(s):\n`);
   for (const finding of findings) console.error(`${formatFinding(finding)}\n`);
   console.error(
-    'Each of these workflows runs with a registry-write credential in scope, so a pin\n' +
-      'that does not resolve to its claimed tag is a supply-chain finding, not a typo.',
+    `A pin that does not resolve to its claimed tag is a supply-chain finding, not a typo.\n` +
+      `${PINNED_WORKFLOWS.join(', ')} run with a registry-write credential in scope; the\n` +
+      "cosign workflows run keyless signing under this repo's OIDC identity (#528).",
   );
   return 1;
 }

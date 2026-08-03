@@ -235,6 +235,118 @@ describe('nightly SHA↔tag resolution — upstream resolution (#539)', () => {
   });
 });
 
+describe('nightly SHA↔tag resolution — scope is every workflow (#528)', () => {
+  it('DISCOVERS workflows from the directory rather than an enumerated list', async () => {
+    // #528 extended the nightly past the publish path to every workflow — the
+    // cosign/OIDC signing jobs first. Scanned, not enumerated: a workflow added
+    // tomorrow must be resolved tonight without anyone editing a list. This is
+    // the assertion that would go red if the default were re-pinned to
+    // PINNED_WORKFLOWS.
+    const dir = mkdtempSync(join(tmpdir(), 'knext-pin-scope-'));
+    // A name that appears in NO hard-coded list anywhere in the repo.
+    writeFileSync(
+      join(dir, 'brand-new-workflow.yml'),
+      ['jobs:', '  x:', '    steps:', `      - uses: actions/checkout@${SHA_B} # v5.0.0`].join(
+        '\n',
+      ),
+    );
+    const findings = await verifyWorkflows({
+      dir,
+      api: fakeApi({
+        'repos/actions/checkout/git/ref/tags/v5.0.0': {
+          status: 200,
+          body: { object: { type: 'commit', sha: SHA_A } },
+        },
+      }).api,
+    });
+    expect(findings).toHaveLength(1);
+    expect(findings[0]).toMatchObject({ file: 'brand-new-workflow.yml', reason: 'sha-mismatch' });
+  });
+
+  it('resolves each distinct action+tag ONCE across all workflows', async () => {
+    // ~100 pins across 14 workflows; without de-duplication the nightly makes a
+    // request per pin and rate-limits itself into a flaky red. De-duplication
+    // must not change verdicts — the per-file findings below still hold.
+    const dir = mkdtempSync(join(tmpdir(), 'knext-pin-dedupe-'));
+    for (const file of ['a.yml', 'b.yml', 'c.yml']) {
+      writeFileSync(
+        join(dir, file),
+        ['jobs:', '  x:', '    steps:', `      - uses: actions/checkout@${SHA_A} # v5.0.0`].join(
+          '\n',
+        ),
+      );
+    }
+    const { api, seen } = fakeApi({
+      'repos/actions/checkout/git/ref/tags/v5.0.0': {
+        status: 200,
+        body: { object: { type: 'commit', sha: SHA_A } },
+      },
+    });
+    expect(await verifyWorkflows({ dir, api })).toEqual([]);
+    expect(seen).toHaveLength(1);
+  });
+
+  it('still REDS every file when a de-duplicated resolution mismatches', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'knext-pin-dedupe-red-'));
+    for (const file of ['a.yml', 'b.yml']) {
+      writeFileSync(
+        join(dir, file),
+        ['jobs:', '  x:', '    steps:', `      - uses: actions/checkout@${SHA_B} # v5.0.0`].join(
+          '\n',
+        ),
+      );
+    }
+    const findings = await verifyWorkflows({
+      dir,
+      api: fakeApi({
+        'repos/actions/checkout/git/ref/tags/v5.0.0': {
+          status: 200,
+          body: { object: { type: 'commit', sha: SHA_A } },
+        },
+      }).api,
+    });
+    expect(findings.map((finding: { file: string }) => finding.file).sort()).toEqual([
+      'a.yml',
+      'b.yml',
+    ]);
+  });
+
+  it('treats an unreachable API as a FAILURE for every affected pin, never a pass', async () => {
+    // security.md: "a checker that goes green when it cannot reach upstream is
+    // worse than none." De-duplication must cache the FAILURE too, not drop it.
+    const dir = mkdtempSync(join(tmpdir(), 'knext-pin-unreachable-'));
+    for (const file of ['a.yml', 'b.yml']) {
+      writeFileSync(
+        join(dir, file),
+        ['jobs:', '  x:', '    steps:', `      - uses: actions/checkout@${SHA_A} # v5.0.0`].join(
+          '\n',
+        ),
+      );
+    }
+    const findings = await verifyWorkflows({
+      dir,
+      api: fakeApi({
+        'repos/actions/checkout/git/ref/tags/v5.0.0': { status: 503, body: { message: 'down' } },
+      }).api,
+    });
+    expect(findings).toHaveLength(2);
+    expect(findings.every((finding: { reason: string }) => finding.reason === 'api-error')).toBe(
+      true,
+    );
+  });
+
+  it('covers the OIDC-signing workflows in the real repo', () => {
+    // The blast-radius argument #528 makes, asserted against the real tree: the
+    // cosign keyless-signing workflows must be inside the nightly's scan. A
+    // directory scan gives this for free — this test is what notices if the
+    // scan is ever narrowed back to a list.
+    const scanned = readdirSync(WORKFLOW_DIR).filter((file) => file.endsWith('.yml'));
+    for (const file of ['supply-chain.yml', 'operator-supply-chain.yml']) {
+      expect(scanned, `${file} must be inside the nightly's scan`).toContain(file);
+    }
+  });
+});
+
 describe('nightly SHA↔tag resolution — verdicts (#539)', () => {
   function workflowDirWith(uses: string): string {
     const dir = mkdtempSync(join(tmpdir(), 'knext-pin-'));
@@ -301,7 +413,13 @@ describe('nightly SHA↔tag resolution — verdicts (#539)', () => {
     // "SHA mismatch" alone is not actionable: whoever reads the red nightly
     // must be able to act without re-deriving anything.
     const dir = workflowDirWith(`actions/checkout@${SHA_B} # v5.0.0`);
-    const [finding] = await verifyWorkflows({ dir, api: matchingApi() });
+    const findings = await verifyWorkflows({ dir, api: matchingApi() });
+    // Select the file under assertion rather than taking findings[0]: since
+    // #528 the scan is a sorted DIRECTORY listing, so `release-ghp.yml` sorts
+    // first. Indexing by position would assert on whichever file happens to
+    // come first, which is not what this test is about.
+    const finding = findings.find((entry: { file: string }) => entry.file === 'release.yml');
+    expect(finding, 'expected a finding on release.yml').toBeDefined();
     const message = formatFinding(finding);
     expect(message).toContain('actions/checkout');
     expect(message).toContain('release.yml');
