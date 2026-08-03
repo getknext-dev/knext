@@ -14,7 +14,23 @@ FROM node:22-alpine@sha256:16e22a550f3863206a3f701448c45f7912c6896a62de43add43bb
 ARG SOURCE_DATE_EPOCH
 ENV PNPM_HOME="/pnpm"
 ENV PATH="$PNPM_HOME:$PATH"
-RUN npm install -g pnpm
+# PIN pnpm to the version in the root package.json's `packageManager` field.
+#
+# This was `npm install -g pnpm` — unpinned — which meant every image build
+# installed whatever pnpm was latest at that moment. It broke without a single
+# repo change when pnpm shipped a release that requires `@pnpm/exe` native
+# binaries to be recorded in the lockfile: the committed lockfile was generated
+# by 10.4.1 and has none, so `--frozen-lockfile` below failed with
+# "Cannot verify the identity of the @pnpm/exe.linux-x64 native binary".
+#
+# It also contradicted this repo's own discipline. Base images are pinned by
+# digest and GitHub Actions by commit SHA precisely so an upstream change cannot
+# alter a build — and then the package manager that resolves the entire
+# dependency tree was installed unpinned.
+#
+# MUST match `packageManager` in the root package.json. Guarded by
+# tests/dockerfile-pnpm-pin.test.ts, which fails if the two drift.
+RUN npm install -g pnpm@10.4.1
 WORKDIR /app
 COPY . .
 RUN pnpm install --frozen-lockfile

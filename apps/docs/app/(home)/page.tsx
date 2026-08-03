@@ -23,7 +23,10 @@ export default function HomePage() {
             request, with <b>bytecode-cached</b> cold starts. One operator. Any cloud. No lock-in.
           </p>
           <div className={styles.cta}>
-            <Link className={`${styles.btn} ${styles.btnPrimary}`} href="/docs">
+            <Link className={`${styles.btn} ${styles.btnPrimary}`} href="/docs/learn">
+              Deploy ACME — step by step
+            </Link>
+            <Link className={`${styles.btn} ${styles.btnGhost}`} href="/docs">
               Read the docs
             </Link>
             <a
@@ -33,6 +36,10 @@ export default function HomePage() {
               Star on GitHub
             </a>
           </div>
+          <p className={styles.ctaNote}>
+            New to Kubernetes? The tutorial starts with the six words you need, then deploys ACME —
+            a small storefront — and gives it a database.
+          </p>
 
           <div className={styles.meter}>
             <div className={styles.meterBar}>
@@ -132,9 +139,9 @@ export default function HomePage() {
 apiVersion: apps.kn-next.dev/v1alpha1
 kind: NextApp
 metadata:
-  name: storefront
+  name: acme
 spec:
-  image: registry/storefront@sha256:9f1c...   # digest-pinned (required)
+  image: registry/acme@sha256:9f1c...   # digest-pinned (required)
   scaling:
     minScale: 0      # scale to zero
     maxScale: 20
@@ -185,14 +192,14 @@ spec:
 apiVersion: apps.kn-next.dev/v1alpha1
 kind: NextApp
 metadata:
-  name: storefront
+  name: acme
 spec:
-  image: registry/storefront@sha256:9f1c...
+  image: registry/acme@sha256:9f1c...
   scaling:
     minScale: 0                      # the app scales to zero
   database:
-    secretRef: { name: storefront-db }   # → DATABASE_URL from a K8s Secret
-    roSecretRef: { name: storefront-db }  # optional → DATABASE_URL_RO
+    secretRef: { name: acme-db }   # → DATABASE_URL from a K8s Secret
+    roSecretRef: { name: acme-db }  # optional → DATABASE_URL_RO
     # point the DSN at a pooler, not the primary`}</code>
             </pre>
           </div>

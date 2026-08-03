@@ -58,6 +58,15 @@
   gap: 14px;
   flex-wrap: wrap;
 }
+/* One line under the CTAs telling a non-Kubernetes reader that the tutorial is
+   for them. Muted so it reads as a caption, not a second lede. */
+.ctaNote {
+  margin-top: 16px;
+  max-width: 52ch;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--color-fd-muted-foreground);
+}
 .btn {
   font-family: var(--mono);
   font-size: 13px;

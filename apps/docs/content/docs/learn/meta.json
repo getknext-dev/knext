@@ -1,0 +1,16 @@
+{
+  "title": "Learn knext",
+  "description": "Build and deploy ACME, step by step",
+  "pages": [
+    "index",
+    "what-youre-building",
+    "create-the-app",
+    "configure-the-deploy",
+    "first-deploy",
+    "scale-to-zero",
+    "add-a-database",
+    "scale-to-zero-database",
+    "automate-with-ci",
+    "going-further"
+  ]
+}

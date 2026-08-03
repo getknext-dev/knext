@@ -1,0 +1,74 @@
+---
+title: "2 · Create the app"
+description: Scaffold ACME with create-next-app, add knext, and point Next.js at the adapter.
+---
+
+Nothing in this chapter touches a cluster. You can do all of it now.
+
+## Scaffold ACME
+
+```bash title="shell"
+npx create-next-app@latest acme --ts --app
+cd acme
+```
+
+Any Next.js 16 app works. This is just to have something real to deploy.
+
+## Add knext
+
+```bash title="shell"
+npm i @getknext/core
+npx kn-next --version
+```
+
+`@getknext/core` is the whole deploy path in one package: the official Next.js adapter, the typed
+config, and the `kn-next` CLI. The CLI lands on your `PATH` via `node_modules/.bin`, so `npx
+kn-next` works without a global install.
+
+## Point Next.js at the adapter
+
+This is the line that makes it a knext app:
+
+```ts title="next.config.ts"
+import type { NextConfig } from 'next';
+
+const config: NextConfig = {
+  adapterPath: '@getknext/core/adapter',
+};
+
+export default config;
+```
+
+<Callout type="info">
+On Next.js 16.0.x–16.1.x this option lives under `experimental`
+(`experimental: { adapterPath: '@getknext/core/adapter' }`). 16.2+ accepts it at the top level.
+</Callout>
+
+## What just happened
+
+You used Next.js's **official Deployment Adapter API**. That deserves a sentence, because it is the
+main architectural claim knext makes.
+
+knext is **not a fork of Next.js** and **not a custom runtime**. `adapterPath` is a supported
+extension point that Next.js itself provides for deployment targets. At build time the adapter:
+
+- forces `output: 'standalone'`, so `next build` emits a self-contained server — you do not add this
+  yourself;
+- wires the Redis cache handler, if you configure one;
+- uploads your static assets after the build, keyed by build ID.
+
+The practical consequence: **your app is a normal Next.js app.** If you removed knext tomorrow, the
+same source builds and runs on anything that runs Next.js. There is no lock-in to undo, which is
+also why knext can be verified against Next.js's own compatibility suite rather than asking you to
+take its word.
+
+## Check it still builds
+
+```bash title="shell"
+npm run build
+```
+
+If that succeeds, the adapter is wired correctly. You should see standalone output — Next.js
+reporting a `.next/standalone` directory — which is the adapter doing its first job.
+
+**[Chapter 3: Configure the deploy →](/docs/learn/configure-the-deploy)**

@@ -1,0 +1,76 @@
+---
+title: "4 · Your first deploy"
+description: Preflight, deploy, and read what the cluster actually says.
+---
+
+From here you need a cluster. If `kubectl get ksvc` fails, fix that first — see
+[Install](/docs/install).
+
+## Preflight
+
+```bash title="shell"
+npx kn-next doctor
+```
+
+`doctor` is **read-only**. It never changes anything. It checks the things that make a first deploy
+fail for reasons that have nothing to do with your app:
+
+- the `NextApp` CRD is installed
+- the operator is Ready
+- Knative Serving is present
+- the ingress class matches the controller actually serving traffic
+- your local `kubectl` is recent enough
+
+Fix whatever it reports before continuing. These failures are far easier to read here than they are
+halfway through a container build.
+
+<Callout type="info">
+That ingress-class check exists because of a real incident: routes that never became reachable
+because Knative's `ingress-class` was set to a value that did not match the installed Kourier. Every
+individual component looked healthy. `doctor` now catches it in seconds.
+</Callout>
+
+## Deploy
+
+```bash title="shell"
+npx kn-next
+```
+
+One command. It builds the image, pushes it, uploads static assets to your bucket, and applies a
+`NextApp` custom resource.
+
+**Expect the first run to be slow** — it is a full container build.
+
+Notice what it did *not* do: it never created a Knative Service, Route, or Configuration. It handed
+the cluster one resource and let the operator own the rest. That is the single-source-of-truth rule
+in practice, and it is why nothing drifts behind your back.
+
+## Check what the cluster says
+
+```bash title="shell"
+npx kn-next status
+```
+
+This prints ACME's conditions and its URL.
+
+**Read it rather than assuming.** `status` reports what the cluster actually says — if something is
+wrong it tells you so, rather than showing a green tick because the command exited 0. A deploy that
+"succeeded" and an app that is *serving* are different facts, and this is the command that
+distinguishes them.
+
+Then hit it:
+
+```bash title="shell"
+curl -sSf <the-URL-status-printed>/ > /dev/null && echo OK
+```
+
+## If it is not Ready
+
+| Symptom | First thing to check |
+|---|---|
+| `Ready=False`, app logs look fine | The health route from chapter 3. This is the most common cause by a distance. |
+| Apply rejected, unknown field | Your operator is older than your CLI — see [Upgrading](/docs/upgrading) |
+| Assets 404 in the browser | `storage.publicUrl` does not match where the bucket actually serves, or the provider CLI was not authenticated during the build |
+| Deploy failed before building | Re-run `npx kn-next doctor` |
+
+**[Chapter 5: Scale to zero →](/docs/learn/scale-to-zero)**

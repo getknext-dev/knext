@@ -1,0 +1,91 @@
+---
+title: "6 · Add a database"
+description: Bind Postgres to ACME with a Kubernetes Secret — no DSN in your repo, no provider in your code.
+---
+
+A storefront needs to remember things. This chapter gives ACME a database without putting a password
+anywhere near your repository.
+
+## knext provisions nothing
+
+Worth stating before the commands, because it explains the shape of everything below.
+
+**knext is engine-agnostic and creates no databases.** You bring a Postgres — managed, serverless, or
+a CloudNativePG cluster in the same Kubernetes cluster — and knext binds its connection string into
+your pods.
+
+That is a deliberate boundary, and it buys you something concrete: **swapping providers later is a
+Secret change**, with no change to ACME's code or config. Your app never learns which provider it is
+talking to.
+
+## Put the DSN in a Secret
+
+A Kubernetes **Secret** is a named bag of values the cluster holds for you:
+
+```bash title="shell"
+kubectl create secret generic acme-db \
+  --from-literal=DATABASE_URL='postgres://user:pass@host:5432/acme'
+```
+
+The connection string now lives in the cluster. Not in your repo, not in your image, not in an
+environment file someone might commit.
+
+## Reference it by name
+
+```ts title="kn-next.config.ts"
+const config: KnativeNextConfig = {
+  name: 'acme',
+  // …registry, storage, scaling as before…
+  database: {
+    secretRef: { name: 'acme-db' },
+  },
+};
+```
+
+Redeploy:
+
+```bash title="shell"
+npx kn-next
+```
+
+ACME's pods now come up with `DATABASE_URL` in their environment.
+
+Notice what you did not do: you never wrote the password in a file, and you never told the app which
+database provider it is using.
+
+## Reads and writes, separately
+
+Add `roSecretRef` and knext binds a second connection string as `DATABASE_URL_RO`:
+
+```ts title="kn-next.config.ts"
+  database: {
+    secretRef: { name: 'acme-db' },     // → DATABASE_URL   (writer)
+    roSecretRef: { name: 'acme-db' },   // → DATABASE_URL_RO (reader)
+  },
+```
+
+One Secret carrying both keys can serve both fields — the key names default to the variable names.
+This is how you send bounded-stale reads to a replica without your application code learning
+anything about topology.
+
+<Callout type="warn">
+`spec.database` owns `DATABASE_URL` and `DATABASE_URL_RO`. If you also try to set those names through
+`secrets.envMap`, the apply is **rejected** rather than one silently overriding the other. A conflict
+you can see beats a precedence rule you have to remember.
+</Callout>
+
+## Querying it
+
+`@getknext/db` is a typed client (Drizzle) that understands the writer/reader split — it routes
+writes to `DATABASE_URL` and bounded-stale reads to `DATABASE_URL_RO` when present. See
+[Databases](/docs/databases).
+
+## What is still wrong
+
+ACME now sleeps. Its database does not — you are paying for an always-on Postgres behind an app that
+costs nothing while idle. That is the wrong shape, and it is the one most self-hosted setups are
+stuck with.
+
+The next chapter fixes it.
+
+**[Chapter 7: A database that sleeps →](/docs/learn/scale-to-zero-database)**

@@ -87,8 +87,8 @@ verbatim when something is wrong (e.g. `IngressNotProgrammed`, `PinnedRevisionNo
 Conditions an older operator does not report render as `not reported`.
 
 ```bash
-kn-next status storefront                 # one-shot
-kn-next status storefront --json          # structured subset (absent conditions are explicit nulls)
+kn-next status acme                 # one-shot
+kn-next status acme --json          # structured subset (absent conditions are explicit nulls)
 kn-next deploy && kn-next status --watch  # CI gate: poll until Ready=True
 ```
 
@@ -110,9 +110,9 @@ Shifts serving traffic to a prior Knative Revision by patching **only** the `Nex
 [Rollback & traffic split](/docs/rollback) for the full semantics.
 
 ```bash
-kn-next rollback storefront --to storefront-00002              # pin 100% to a prior revision
-kn-next rollback storefront --to storefront-00002 --canary 20  # 20% to latest-ready, 80% pinned
-kn-next rollback storefront                                    # clear the pin — back to latest-ready
+kn-next rollback acme --to acme-00002              # pin 100% to a prior revision
+kn-next rollback acme --to acme-00002 --canary 20  # 20% to latest-ready, 80% pinned
+kn-next rollback acme                                    # clear the pin — back to latest-ready
 ```
 
 | Flag | Notes |
@@ -133,9 +133,9 @@ cluster write. The operator wires the env injection. See
 [Operator & the NextApp CRD → Databases](/docs/operator#databases-specdatabase).
 
 ```bash
-kn-next db bind storefront --secret storefront-db
-kn-next db bind storefront --secret storefront-db --ro-secret storefront-db   # same Secret, both keys
-kn-next db bind storefront --secret storefront-db --dry-run                   # print the patch, write nothing
+kn-next db bind acme --secret acme-db
+kn-next db bind acme --secret acme-db --ro-secret acme-db   # same Secret, both keys
+kn-next db bind acme --secret acme-db --dry-run                   # print the patch, write nothing
 ```
 
 | Flag | Notes |

@@ -1,0 +1,97 @@
+---
+title: "7 · A database that sleeps"
+description: Deploy scale-zero-pg so ACME's Postgres consumes zero compute while idle and wakes on the first connection.
+---
+
+An app that sleeps behind a database that never does is only half the saving. This chapter closes
+the other half.
+
+## What scale-zero-pg is
+
+**Native PostgreSQL that consumes zero compute while idle and wakes on the first client connection.**
+
+It is Postgres 17 on Neon's open-source storage stack (Apache-2.0). The only bespoke piece is a small
+Go gateway that holds a connection while the database wakes. It ships in the knext repository under
+`packages/scale-zero-pg`.
+
+## Deploy it
+
+```bash title="shell"
+kubectl apply -f packages/scale-zero-pg/deploy/
+```
+
+That creates a `scale-zero-pg` namespace containing durable WAL storage (three safekeepers at a 2/3
+write quorum), a pageserver, object storage, a wake-on-connect gateway — and the Postgres compute
+itself at **`replicas: 0`**.
+
+<Callout type="info">
+**Zero replicas is not a broken deploy.** The database is asleep and correct — it wakes on the first
+connection. This is `minScale: 0`, applied to Postgres.
+</Callout>
+
+## Point ACME at the gateway
+
+The gateway is what makes waking transparent, so ACME connects to it rather than to Postgres
+directly:
+
+```bash title="shell"
+kubectl create secret generic acme-db \
+  --from-literal=DATABASE_URL='postgres://cloud_admin:cloud_admin@pggw.scale-zero-pg.svc:55432/postgres?sslmode=disable'
+```
+
+**Your `kn-next.config.ts` does not change at all.** It still just names the Secret.
+
+That is the payoff of binding by reference from chapter 6: swapping an always-on Postgres for a
+scale-to-zero one is a **Secret change**. No application change. No config change. No redeploy of
+anything but the Secret's consumers.
+
+## Watch both tiers sleep
+
+Two terminals. The app:
+
+```bash title="shell"
+kubectl get pods -l serving.knative.dev/service=acme -w
+```
+
+The database:
+
+```bash title="shell"
+kubectl -n scale-zero-pg get pods -l app=compute -w
+```
+
+Leave it alone. The app pod goes after ~90 seconds; the database compute after ~60 seconds idle.
+**Both lists empty. Nothing is running, and nothing is billing compute.**
+
+Now make one request that touches the database. Both wake: ACME cold-starts, its first query opens a
+connection, the gateway holds it while the compute scales 0→1, and the query returns.
+
+## What that cost
+
+Measured on the project's own clusters: the database's cold wake is **~2.5s**, or **~0.4s** on the
+opt-in warm tier.
+
+**That is on top of ACME's own cold start.** A first request after full idle pays both. Decide
+whether idle cost matters more than tail latency for your app — and note you can make that choice
+per tier: a warm app floor with a sleeping database, or the reverse.
+
+## The three things that surprise people
+
+**Every cold start is a fresh connection.** A pod that terminated took its connection pool with it.
+Put a **connection pooler** (PgBouncer, pgcat) between ACME and Postgres and point the DSN at the
+pooler — otherwise a burst of waking pods opens a burst of connections and the *database* becomes the
+bottleneck instead of the app.
+
+**Connect timeouts must exceed the database's wake time.** If your client gives up after 2 seconds
+and the database takes 2.5 to wake, you get an error that looks like a database fault and is
+actually a timeout you chose.
+
+**A burst of cold pods shares one wake.** The pool single-flights the 0→1 wake: the first request
+triggers it, the rest wait on the same wake rather than each starting their own.
+
+<Callout type="info">
+**A database per app?** scale-zero-pg supports DB-per-app multi-tenancy — each app on its own branch
+of one storage plane, sleeping and waking independently, declared with an `AppDatabase` custom
+resource. See `packages/scale-zero-pg/docs/getting-started.md`.
+</Callout>
+
+**[Chapter 8: Automate with CI →](/docs/learn/automate-with-ci)**
