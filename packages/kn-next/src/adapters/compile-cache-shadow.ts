@@ -28,7 +28,7 @@
  * stat + a shallow readdir count.
  */
 
-import { readdirSync, statSync } from "node:fs";
+import { readdirSync, realpathSync, statSync } from "node:fs";
 import { resolve } from "node:path";
 
 interface ShadowLogger {
@@ -36,22 +36,103 @@ interface ShadowLogger {
 }
 
 /**
+ * Canonicalise a path for comparison: absolute (`resolve`), then resolved
+ * through SYMLINKS and `.`/`..` segments (`realpathSync`) on a BEST-EFFORT
+ * basis (#451).
+ *
+ * `realpathSync` throws for a path that does not exist (the common case for an
+ * injected-but-not-yet-mounted NODE_COMPILE_CACHE) and for an unreadable mount.
+ * Those must NOT break the check or the boot, so a throw falls back to the
+ * lexical value — exactly the pre-#451 behaviour. The failure mode of this
+ * whole module is a spurious WARN, never breakage; keep it that way.
+ *
+ * NOTE what this does NOT do: `realpathSync` does not consult the mount table,
+ * so two separate bind mounts of the same directory canonicalise to themselves
+ * and still compare unequal. That case is covered by the inode identity check
+ * in {@link isSameDirectory}, not here.
+ */
+function canonicalPath(p: string): string {
+    const abs = resolve(p);
+    try {
+        return realpathSync(abs);
+    } catch {
+        return abs;
+    }
+}
+
+/** The only two `statSync` fields this module needs; a seam for tests. */
+export interface FsNodeIdentity {
+    readonly dev: number;
+    readonly ino: number;
+}
+
+export type StatFn = (path: string) => FsNodeIdentity;
+
+/**
+ * Are these two paths the SAME directory? (#451)
+ *
+ * Two independent mechanisms, in cost order:
+ *
+ *  1. **Canonical path equality** — catches trailing slashes, `.`/`..`, and
+ *     SYMLINKS (`realpathSync`).
+ *  2. **Filesystem-node identity** (`dev` + `ino`) — catches what step 1
+ *     cannot: a **bind mount** (or any other mount alias) of the same
+ *     directory. `realpathSync` does not read the mount table, so `/app/cache`
+ *     and `/mnt/cache` bind-mounted to the same dir both canonicalise to
+ *     themselves; their `(dev, ino)` pair is identical.
+ *
+ * Fail-open in the same direction as the rest of the module: if either stat
+ * throws (path absent, unreadable parent, ELOOP), we report "not the same",
+ * which at worst yields the pre-#451 spurious warning and never an exception.
+ *
+ * `(dev, ino)` is a strong signal, not a proof, and the two known caveats both
+ * fail toward a false "same" — i.e. toward suppressing a diagnostic, never
+ * toward breaking anything:
+ *  - **overlayfs** (the container storage driver this actually runs under) can
+ *    report colliding `st_ino` values across layers when `xino` is off;
+ *  - Node's `Stats.ino` is a JS `number`, so an inode above 2^53 loses
+ *    precision (the `bigint: true` stat variant exists for exactly this).
+ * Both are accepted: the worst outcome is a missed shadow warning, which is
+ * strictly better than the false warning this replaced.
+ */
+export function isSameDirectory(
+    a: string,
+    b: string,
+    statFn: StatFn = statSync,
+): boolean {
+    if (canonicalPath(a) === canonicalPath(b)) return true;
+    try {
+        const left = statFn(a);
+        const right = statFn(b);
+        return left.dev === right.dev && left.ino === right.ino;
+    } catch {
+        return false;
+    }
+}
+
+/**
  * Pure shadow decision — unit-testable without a filesystem.
  *
  * A shadow exists when NODE_COMPILE_CACHE is set to a path that is NOT the
  * baked-default compile-cache dir AND a populated baked cache exists at the
- * baked-default path (a real baked layer is being bypassed). Paths are
- * normalized (via `resolve`) so a trailing slash / `.` segment is not mistaken
- * for a different dir.
+ * baked-default path (a real baked layer is being bypassed). "Not the same
+ * dir" is decided by {@link isSameDirectory}, so a trailing slash, a `.`
+ * segment, a SYMLINK, or a BIND-MOUNT alias of the baked dir is recognised as
+ * the same dir instead of producing a false warn (#451).
+ *
+ * `statFn` exists so the inode-identity branch is testable — a bind mount
+ * cannot be created in a unit test without root. Production always uses
+ * `statSync`.
  */
 export function isCompileCacheShadowed(
     nodeCompileCache: string | undefined,
     bakedDefaultPath: string,
     bakedPopulated: boolean,
+    statFn: StatFn = statSync,
 ): boolean {
     if (!nodeCompileCache) return false;
     if (!bakedPopulated) return false;
-    return resolve(nodeCompileCache) !== resolve(bakedDefaultPath);
+    return !isSameDirectory(nodeCompileCache, bakedDefaultPath, statFn);
 }
 
 export interface CompileCacheShadowResult {
