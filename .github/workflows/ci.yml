@@ -36,6 +36,15 @@ jobs:
       - name: Guard — no .ts/.tsx import extensions (TS5097)
         run: pnpm run lint:ts-imports
 
+      # Mutation residue (#645): a mutation-testing proof that was never restored
+      # leaves the INVERSE of the fix in the tree, under a commit message
+      # describing the fix. `git status --porcelain` cannot catch it when the file
+      # is one the PR legitimately modifies — it reads `M` either way — so this
+      # scans every tracked file for the marker instead. This step is red-on-fail
+      # and carries no soft-failure escape: it happened twice in one session.
+      - name: Guard — no mutation residue in tracked files (#645)
+        run: pnpm run lint:mutation-residue
+
       # @getknext/core ships only dist/ and its exports resolve to ./dist/* (#114).
       # The publish-surface test asserts every exports subpath exists in dist, so
       # core MUST be built before vitest runs. @getknext/lib must be built first —
