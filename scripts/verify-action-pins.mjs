@@ -330,7 +330,17 @@ export function mentionsUses(text) {
     // which without this exclusion made the pair report a `no-pins-parsed`
     // FALSE RED. Keyed on the REF, never on the line merely containing `./`, so
     // `uses: evil/action@main # ./x` is still caught.
-    const value = match[1];
+    //
+    // The ref is UNQUOTED before that test (#630). Keying on the raw token left
+    // the identical false red one quoting level away — `uses:
+    // './.github/actions/foo'` is a valid step with nothing to pin and still
+    // reported `no-pins-parsed`. This file already read a quoted KEY, so the
+    // quoted VALUE was the same class of gap, unclosed. Only a MATCHED
+    // surrounding pair is stripped, so a stray quote cannot be used to dress a
+    // remote ref up as a local one. `docker://` refs stay flagged in both forms,
+    // deliberately: that names a container image, and an unpinned one is exactly
+    // what the digest-pinning rule wants loud.
+    const value = match[1]?.replace(/^(["'])(.*)\1$/, '$2');
     if (value && /^\.{1,2}\//.test(value)) return false;
     return true;
   });
