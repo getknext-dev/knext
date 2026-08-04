@@ -839,3 +839,42 @@ jobs:
           else
             echo "No internal references detected in added content/** lines."
           fi
+
+  # ---------------------------------------------------------------------------
+  # The bun-exec SIGTERM hardcap gate (#448).
+  #
+  # WHY THIS JOB EXISTS AT ALL: the e2e carries its own hard-fail guard
+  # (KNEXT_REQUIRE_BUN=1 makes a missing `bun` throw instead of skip), but a
+  # guard nothing invokes is decoration. Before this job, NO workflow ran
+  # examples/bun-exec's tests, so the `describe.skipIf(!bunAvailable)` meant the
+  # hardcap suite was green-by-skip everywhere -- the exact shape #408 was closed
+  # for, in a different subsystem.
+  #
+  # examples/bun-exec is OUTSIDE the pnpm workspace (it has its own bun.lock and
+  # pins nitro/vinext prereleases the workspace must not inherit), so its deps
+  # are installed with bun, in-directory, not by the root `pnpm install`.
+  bun-exec-hardcap:
+    name: bun-exec SIGTERM hardcap (real sockets)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: latest
+
+      - name: Install example dependencies
+        working-directory: examples/bun-exec
+        run: bun install --frozen-lockfile
+
+      # KNEXT_REQUIRE_BUN=1 is load-bearing: it converts "bun is missing" from a
+      # silent skip into a thrown error. Removing it from this line does not make
+      # the job fail -- it makes the gate stop gating, which is why
+      # tests/bun-exec-hardcap-ci.test.ts asserts this env var is present here.
+      - name: SIGTERM hardcap e2e
+        working-directory: examples/bun-exec
+        env:
+          KNEXT_REQUIRE_BUN: '1'
+        run: bun run test
