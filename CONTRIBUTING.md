@@ -1,5 +1,19 @@
 # Contributing to knext
 
+## Mutation-proving a guard
+
+Every new guard is mutation-proved (delete the behaviour it protects, watch it go RED, restore).
+**Restore from a byte snapshot and run the residue scan** — `git status --porcelain` cannot see
+residue in a file your PR legitimately modifies, which is how two near-misses happened in one
+session:
+
+```bash
+pnpm run lint:mutation-residue     # red-on-fail in CI; run it before you commit
+```
+
+Read [`docs/guides/mutation-testing.md`](docs/guides/mutation-testing.md) before writing a harness;
+it ships one (`scripts/lib/mutation-harness.mjs`) so you do not hand-roll the restore.
+
 ## Docs live with the code (`apps/docs/`)
 
 The user-facing docs site (knext.dev) lives in this monorepo at **`apps/docs/`** and consumes
