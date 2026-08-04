@@ -79,8 +79,16 @@ export const PAGE_TOTAL_BUDGET_MS = PAGE_DEADLINE_MS + KUBE_STATE_PROBE_RESERVE_
  */
 export interface PageDeadline {
   /**
-   * The page CEILING this deadline enforces, reserve included (for honest
-   * messaging: it is what the render could actually spend end to end).
+   * The page CEILING this deadline enforces, reserve included — what the render
+   * can spend end to end.
+   *
+   * Honest about its status (PR-636 round-2 review): **no production code reads
+   * this today.** Every rendered number comes from {@link budgetMs}, which is the
+   * bound actually enforced on the read that ran out. It is kept as the deadline's
+   * own statement of the ceiling — the two views agree on it, which is what makes
+   * "the reserve is a slice, not a second budget" checkable — and the tests pin it
+   * for exactly that reason. If a future message needs the page-wide number, this
+   * is the field to use; until then, do not mistake it for the enforced bound.
    */
   readonly totalMs: number;
   /**

@@ -571,6 +571,73 @@ describe('deployments page — the page-level deadline is honest when exhausted'
     expect(html).not.toContain('could not reach the observability backend');
   });
 
+  /**
+   * The CR read is the gap the first cut of this flag left (PR-636 round-2 review)
+   * — and it is the read this whole issue names as the realistic trigger. With the
+   * opt-in Kubernetes read erroring outright, the page rendered
+   * "the Kubernetes API could not be reached" in one paragraph and
+   * "none of them errored … slow rather than absent" in the next: two adjacent
+   * assertions of opposite things in a single render.
+   */
+  it('counts the OPT-IN CR read as a read that failed outright', async () => {
+    budget.totalMs = 30;
+    readNextAppStatus.mockResolvedValue({
+      status: 'source-unavailable',
+      reason: 'unreachable',
+      detail: 'connect ECONNREFUSED',
+    });
+    vi.spyOn(globalThis, 'fetch').mockImplementation(
+      (_u, init) =>
+        new Promise((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () =>
+            reject(new DOMException('The operation was aborted', 'AbortError')),
+          );
+        }),
+    );
+
+    const html = await renderPage();
+
+    // The render DID time out, and it DOES say the API server could not be reached…
+    expect(html).toContain('ran out of its time budget');
+    expect(html).toContain('the Kubernetes API could not be reached');
+    // …so the very next paragraph must not claim the opposite.
+    expect(html).not.toContain('none of them errored');
+    expect(html).not.toContain('slow rather than absent');
+    expect(html).toContain('failed outright');
+  });
+
+  /**
+   * The exclusions are the point, so they are pinned too: these CR-read reasons
+   * are ANSWERS or non-reads, not errors, and must not be laundered into "a read
+   * failed outright" — that would be the same invented-cause mistake in yet
+   * another direction. `crd-absent`/`forbidden` are authoritative answers;
+   * `not-in-cluster`/`invalid-name` mean no request was made; `deadline-exceeded`
+   * is the cut-short case the banner is already about.
+   */
+  it.each([
+    'crd-absent',
+    'forbidden',
+    'not-in-cluster',
+    'invalid-name',
+    'deadline-exceeded',
+  ])('does NOT count a CR read that answered or never ran (%s) as an outright failure', async (reason) => {
+    readNextAppStatus.mockResolvedValue({
+      status: 'source-unavailable',
+      reason: reason as 'crd-absent',
+      detail: 'detail',
+    });
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (u) => {
+      clock.now += PAGE_TOTAL_BUDGET_MS / 3;
+      return seededFetch(u, { kubeStateAbsent: true });
+    });
+
+    const html = await renderPage();
+
+    expect(html).toContain('ran out of its time budget');
+    expect(html).not.toContain('failed outright');
+    expect(html).toContain('slow rather than absent');
+  });
+
   it('keeps the "slow rather than absent" reading when NO read failed outright', async () => {
     vi.spyOn(globalThis, 'fetch').mockImplementation(async (u) => {
       clock.now += PAGE_TOTAL_BUDGET_MS / 3;

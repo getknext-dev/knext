@@ -371,6 +371,28 @@ shipped Grafana overlay instead of rebuilding cluster dashboards — faithful to
     read in the same render did fail outright the banner now says so and declines to call the render
     merely slow, while still **not** promoting the failure to the page's cause (`unreachable` stays
     unclaimed). Both branches are pinned, and the flag is mutation-proved.
+
+  **Eighth-round amendment (PR #636 round-2 review — the same defect class, one read further):**
+  - **"A read that failed outright" now includes the OPT-IN Kubernetes read.** The first cut of that
+    flag inspected only the four Prometheus results, so when the **CR read** was the one that errored
+    — the read this whole issue names as the realistic trigger — the page printed "the Kubernetes API
+    could not be reached" in one paragraph and "none of them errored … slow rather than absent" in
+    the next: two adjacent assertions of opposite things in a single render. Reproduced, then fixed
+    by adding `nextApp.status === 'source-unavailable' && nextApp.reason === 'unreachable'` to the
+    disjunction. **This corrects the seventh-round bullet above**, which claimed the banner already
+    said so for any read; it did not, and only does now.
+  - **The exclusions are the substance, so they are pinned.** Only `unreachable` counts. `crd-absent`
+    and `forbidden` are authoritative ANSWERS from the API server; `not-in-cluster` and
+    `invalid-name` mean no request was ever made; `deadline-exceeded` is the cut-short case the
+    banner is already about. Folding any of them in would invent a cause in a third direction, so a
+    parameterised test asserts each of the five leaves the banner's "slow rather than absent" reading
+    intact. Also removed: `probe` from that disjunction — it can only run when the scoped queries did
+    NOT time out, and reaching `deadlineExhausted` through it requires it to be `deadline-exceeded`,
+    so the branch was unreachable code rather than defence.
+  - **`PageDeadline.totalMs` has no production reader**, and the comment now says so instead of
+    claiming it is used for messaging. Every rendered number is `budgetMs`. It stays as the
+    deadline's own statement of the ceiling (both views agree on it, which is what makes "a slice,
+    not a second budget" checkable) and the tests pin it for that.
 - [ ] **Cross-cutting:** `/observability` layout with tab nav + Grafana link-out card.
 - [ ] **Phase 2 (gated on founder greenlight):** promote the recipe to a scaffoldable `--observability`
   flag — deferred until after the official-adapter migration + Tier-A correctness (scs-zones sequencing).

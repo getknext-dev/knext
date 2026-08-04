@@ -496,9 +496,27 @@ export default async function DeploymentsPage() {
   // came back ECONNREFUSED is the same kind of invented cause, pointed the other
   // way. This flag only softens the timeout banner; it never promotes the failure
   // to a cause claim (`promUnreachable` stays false above).
+  //
+  // "Any read", deliberately including the OPT-IN Kubernetes one: it is the read
+  // this whole issue names as the realistic trigger, and leaving it out made the
+  // page print "the Kubernetes API could not be reached" one paragraph above
+  // "none of them errored" (PR-636 round-2 review).
+  //
+  // The EXCLUSIONS are as deliberate as the inclusion — only `unreachable` counts.
+  // `crd-absent` and `forbidden` are authoritative ANSWERS from the API server,
+  // `not-in-cluster` and `invalid-name` mean no request was ever made, and
+  // `deadline-exceeded` is the cut-short case this banner is already about.
+  // Folding any of them into "a read failed outright" would invent a cause in a
+  // third direction.
+  //
+  // `probe` is deliberately NOT in this list: it only runs when the scoped queries
+  // did NOT time out, and reaching `deadlineExhausted` through it requires it to be
+  // `deadline-exceeded`, so a `probe.status === 'unreachable'` here is unreachable
+  // code rather than defence.
   const someReadFailedOutright =
     deadlineExhausted &&
-    [created, replicas, available, probe].some((r) => r?.status === 'unreachable');
+    ([created, replicas, available].some((r) => r?.status === 'unreachable') ||
+      (nextApp.status === 'source-unavailable' && nextApp.reason === 'unreachable'));
   const kubeStatePresent = probe?.status === 'ok' && !hasNoInstantSeries(probe);
   const kubeStateAbsent =
     appSeriesEmpty && !deadlineExhausted && !promUnreachable && !kubeStatePresent;
