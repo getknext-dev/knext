@@ -472,6 +472,36 @@ describe('deployments page — the page-level deadline is honest when exhausted'
   });
 
   /**
+   * The number rendered must be the bound that was ENFORCED on the read that ran
+   * out, not the page ceiling (the #520 round-4 rule, re-checked for the reserve).
+   * A wave query is cut at the SHARE and could never have spent the reserve, so
+   * printing the ceiling would state a bound 500 ms larger than the one applied —
+   * the existing "budget that actually applied" test does not cover this path,
+   * because there all three queries answer `ok` and the number comes from the
+   * probe, whose bound genuinely IS the ceiling.
+   */
+  it('prints the SHARE, not the ceiling, when an ordinary wave read is the one cut short', async () => {
+    budget.totalMs = 37; // distinctive: 37 is the share, 537 would be the ceiling
+    vi.spyOn(globalThis, 'fetch').mockImplementation(
+      (_u, init) =>
+        // Hangs until the wave's own budget aborts it ⇒ deadline-exceeded.
+        new Promise((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () =>
+            reject(new DOMException('The operation was aborted', 'AbortError')),
+          );
+        }),
+    );
+
+    const html = await renderPage();
+
+    expect(html).toContain('ran out of its time budget');
+    expect(html).toContain('37');
+    // The ceiling was NOT the bound on these reads, so it must not be printed as
+    // though it were.
+    expect(html).not.toContain('537');
+  });
+
+  /**
    * A MIXED wave: one query establishes `unreachable`, the others never ran
    * (`deadline-exceeded`). The established fact is deliberately NOT surfaced —
    * a timeout suppresses cause claims, because the page cannot tell whether the
@@ -505,6 +535,53 @@ describe('deployments page — the page-level deadline is honest when exhausted'
     expect(html).not.toContain('requires kube-state-metrics');
     expect(html).not.toContain('no Deployment for this app is known');
     expect(html).not.toContain('<table');
+  });
+
+  /**
+   * Suppressing the cause CLAIM is right; asserting its opposite is not (PR-636
+   * review finding 3). In the mixed wave above two of three reads came back
+   * `ECONNREFUSED`, so a banner reading "the observability backend is slow rather
+   * than absent" would guarantee that a real outage is described as slowness — the
+   * page inventing a cause in the other direction. The page still refuses to name
+   * the cause; it just stops ruling one out that it has evidence for.
+   */
+  it('does not claim "slow rather than absent" when a read in the same wave DID fail outright', async () => {
+    budget.totalMs = 30;
+    vi.spyOn(globalThis, 'fetch').mockImplementation((u, init) => {
+      const promql = decodeURIComponent(new URL(String(u)).searchParams.get('query') ?? '');
+      if (promql.includes('kube_deployment_created')) {
+        return new Promise((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () =>
+            reject(new DOMException('The operation was aborted', 'AbortError')),
+          );
+        });
+      }
+      return Promise.reject(new Error('connect ECONNREFUSED'));
+    });
+
+    const html = await renderPage();
+
+    expect(html).toContain('ran out of its time budget');
+    // The opposite-of-the-evidence sentence is gone…
+    expect(html).not.toContain('slow rather than absent');
+    // …replaced by one that reports the observation without promoting it to the
+    // render's cause.
+    expect(html).toContain('failed outright');
+    // …and it is still NOT the unreachable state: no cause claim is made.
+    expect(html).not.toContain('could not reach the observability backend');
+  });
+
+  it('keeps the "slow rather than absent" reading when NO read failed outright', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (u) => {
+      clock.now += PAGE_TOTAL_BUDGET_MS / 3;
+      return seededFetch(u, { kubeStateAbsent: true });
+    });
+
+    const html = await renderPage();
+
+    expect(html).toContain('ran out of its time budget');
+    expect(html).toContain('slow rather than absent');
+    expect(html).not.toContain('failed outright');
   });
 });
 
@@ -600,21 +677,86 @@ describe('deployments page — the kube-state probe has a reserved slice (#534)'
   });
 
   /**
-   * SCANNED, not enumerated: a new query on this page that forgets the shared
-   * budget re-opens the unbounded-total hole, so an unbudgeted call site fails
-   * here rather than being caught by whoever remembers to update a list.
+   * SCANNED, not enumerated (#534, hardened by the PR-636 review).
+   *
+   * Two halves, and the second is the one that matters. The POSITIVE half — every
+   * query carries the shared budget — keeps the total bounded. The NEGATIVE half —
+   * NOTHING but the probe may take the reserved view — is what makes the reserve
+   * mean anything: the first cut asserted only the positive half, and two
+   * mutations stayed green under it, one of them (`readNextAppStatus(app, {
+   * timeoutMs: deadline.reserved().remainingMs() })`) silently reinstating #534 in
+   * its original form, since a hung CR read would then spend the whole ceiling and
+   * leave the probe nothing.
+   *
+   * So the negative half scans the WHOLE (comment-stripped) source, not the query
+   * call sites: the CR read is not a `queryInstant` at all, which is exactly why it
+   * slipped through a query-shaped scan.
    */
-  it('gives every query on this page a deadline, and the probe the reserved one', () => {
-    const source = readFileSync(resolve(import.meta.dirname, 'page.tsx'), 'utf8');
-    const callSites = source.split('\n').filter((line) => /\bquery(?:Instant|Range)\(/.test(line));
+  const PAGE_SOURCE = resolve(import.meta.dirname, 'page.tsx');
 
-    // Green-by-skip guard (#408): a scan that matched nothing would pass vacuously.
-    expect(callSites.length).toBeGreaterThanOrEqual(4);
-    expect(callSites.filter((line) => !/\bdeadline\b/.test(line))).toEqual([]);
+  /** Source with comments removed — a doc comment must not satisfy a guard. */
+  function pageSource(): string {
+    return readFileSync(PAGE_SOURCE, 'utf8')
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/^[ \t]*\/\/.*$/gm, '');
+  }
 
-    const probeSites = callSites.filter((line) => line.includes('KUBE_STATE_PROBE'));
-    expect(probeSites).toHaveLength(1);
-    expect(probeSites[0]).toMatch(/deadline\.reserved\(\)/);
+  /**
+   * Every `queryInstant(`/`queryRange(` call site as `[start, end)` offsets plus
+   * its argument text, found by balancing parentheses — so a call reflowed across
+   * lines (by biome or by hand) is still ONE site rather than a spurious failure.
+   */
+  function queryCallSites(source: string): { args: string; start: number; end: number }[] {
+    const sites: { args: string; start: number; end: number }[] = [];
+    for (const m of source.matchAll(/\bquery(?:Instant|Range)\(/g)) {
+      const open = m.index + m[0].length - 1;
+      let depth = 0;
+      for (let i = open; i < source.length; i++) {
+        if (source[i] === '(') depth++;
+        else if (source[i] === ')') {
+          depth--;
+          if (depth === 0) {
+            sites.push({ args: source.slice(open + 1, i), start: m.index, end: i + 1 });
+            break;
+          }
+        }
+      }
+    }
+    return sites;
+  }
+
+  it('gives every query on this page the SHARED deadline (positive half)', () => {
+    const sites = queryCallSites(pageSource());
+
+    // Green-by-skip guard (#408): a scan that found nothing would pass vacuously.
+    expect(sites.length).toBeGreaterThanOrEqual(4);
+
+    // The budget must be THE shared one, spelled either `{ deadline }` or
+    // `{ deadline: deadline.reserved() }` — a freshly minted
+    // `{ deadline: startPageDeadline(9999) }` is not a share of this page's
+    // ceiling and must not pass.
+    const offenders = sites
+      .map((s) => s.args)
+      .filter((args) => !/\{\s*deadline\s*\}/.test(args) && !/deadline:\s*deadline\./.test(args));
+    expect(offenders).toEqual([]);
+  });
+
+  it('lets NOTHING but the probe take the reserved view (negative half)', () => {
+    const source = pageSource();
+    const sites = queryCallSites(source);
+
+    const probe = sites.filter((s) => s.args.includes('KUBE_STATE_PROBE'));
+    expect(probe).toHaveLength(1);
+    expect(probe[0]?.args).toMatch(/deadline\.reserved\(\)/);
+
+    // EVERY `reserved()` anywhere in the file — not just inside a query call —
+    // must sit within the probe's call site. This is what catches a read that is
+    // not a query at all (the opt-in `readNextAppStatus`) helping itself to the
+    // slice the probe is supposed to be guaranteed.
+    const uses = [...source.matchAll(/\breserved\(\)/g)].map((m) => m.index);
+    expect(uses.length).toBeGreaterThanOrEqual(1);
+    const outside = uses.filter((i) => !probe.some((p) => i >= p.start && i < p.end));
+    expect(outside.map((i) => source.slice(Math.max(0, i - 70), i + 12).trim())).toEqual([]);
   });
 });
 

@@ -707,6 +707,59 @@ describe('startPageDeadline — a reserved slice the ordinary reads cannot spend
     expect(reserved.reserved().remainingMs()).toBe(0);
   });
 
+  /**
+   * The reported budget must be the bound that was ENFORCED on the read that ran
+   * out — the #520 round-4 rule ("never print a bound that was never enforced")
+   * applied to the two views. An ordinary read is cut at the SHARE and could never
+   * have spent the reserve, so reporting the ceiling overstates its bound by 500 ms;
+   * the reserved read really is bounded by the ceiling, so it reports that.
+   * `totalMs` stays the ceiling for messaging about the page as a whole.
+   */
+  it('reports the bound that applied to the READ, not the page ceiling, when an ordinary read runs out', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+    let now = 0;
+    const deadline = startPageDeadline(4000, () => now, 500);
+    now = 4000;
+
+    const ordinary = await queryInstant('up', { deadline });
+    expect(ordinary.status).toBe('deadline-exceeded');
+    if (ordinary.status === 'deadline-exceeded') {
+      expect(ordinary.budgetMs).toBe(4000);
+    }
+
+    now = 4500;
+    const reserved = await queryInstant('up', { deadline: deadline.reserved() });
+    expect(reserved.status).toBe('deadline-exceeded');
+    if (reserved.status === 'deadline-exceeded') {
+      expect(reserved.budgetMs).toBe(4500);
+    }
+
+    // Both views still describe the same page ceiling.
+    expect(deadline.totalMs).toBe(4500);
+    expect(deadline.reserved().totalMs).toBe(4500);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('reports the applied bound for a read the deadline CUT SHORT, too', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(
+      (_url, init) =>
+        new Promise((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () =>
+            reject(new DOMException('The operation was aborted', 'AbortError')),
+          );
+        }),
+    );
+
+    // A 30 ms share under a 30 + 20 ms ceiling: the hung request is aborted by
+    // the SHARE, so 30 is the number that bound it.
+    const r = await queryInstant('up', { deadline: startPageDeadline(30, () => 0, 20) });
+
+    expect(r.status).toBe('deadline-exceeded');
+    if (r.status === 'deadline-exceeded') {
+      expect(r.budgetMs).toBe(30);
+    }
+  });
+
   it('lets a reserved query run when the ordinary share is spent, and reports the ceiling when even the reserve is gone', async () => {
     const fetchSpy = vi
       .spyOn(globalThis, 'fetch')

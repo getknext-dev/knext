@@ -488,6 +488,17 @@ export default async function DeploymentsPage() {
   // rather than picking one of the two causes.
   const promUnreachable =
     !deadlineExhausted && (scopedQueriesFailed || probe?.status === 'unreachable');
+
+  // Did any read in this render actually FAIL (as opposed to not answering in
+  // time)? On a timed-out render the page still refuses to name a cause — but it
+  // must not assert the OPPOSITE of what it saw either (PR-636 review): telling a
+  // reader "the backend is slow rather than absent" while two of three queries
+  // came back ECONNREFUSED is the same kind of invented cause, pointed the other
+  // way. This flag only softens the timeout banner; it never promotes the failure
+  // to a cause claim (`promUnreachable` stays false above).
+  const someReadFailedOutright =
+    deadlineExhausted &&
+    [created, replicas, available, probe].some((r) => r?.status === 'unreachable');
   const kubeStatePresent = probe?.status === 'ok' && !hasNoInstantSeries(probe);
   const kubeStateAbsent =
     appSeriesEmpty && !deadlineExhausted && !promUnreachable && !kubeStatePresent;
@@ -539,11 +550,23 @@ export default async function DeploymentsPage() {
       {deadlineExhausted ? (
         <p>
           Building the revision history <strong>{DEADLINE_EXHAUSTED}</strong> ({exhaustedBudget}
-          &nbsp;ms for the whole page), so it was stopped rather than left to run. What that means
-          precisely: one of the reads did not answer in time — the page does <em>not</em> know
-          whether Prometheus is down, whether kube-state-metrics is installed, or how many revisions
-          exist, and it will not guess any of them from a timeout. Reload to try again; if this
-          persists, the observability backend is slow rather than absent.
+          &nbsp;ms was the budget that applied to the read which ran out), so it was stopped rather
+          than left to run. What that means precisely: one of the reads did not answer in time — the
+          page does <em>not</em> know whether kube-state-metrics is installed or how many revisions
+          exist, and it will not guess either from a timeout.{' '}
+          {someReadFailedOutright ? (
+            <>
+              It will not tell you the render was merely slow, either: another read in the same wave{' '}
+              <strong>failed outright</strong>, so a backend problem is possible — but a cut-short
+              render is not what establishes one. Reload to try again.
+            </>
+          ) : (
+            <>
+              Reload to try again; every read this render made either answered or was cut short by
+              the budget — none of them errored — so if this persists, the observability backend is
+              slow rather than absent.
+            </>
+          )}
         </p>
       ) : null}
 

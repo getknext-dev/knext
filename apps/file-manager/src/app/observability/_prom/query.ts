@@ -83,7 +83,16 @@ export interface PageDeadline {
    * messaging: it is what the render could actually spend end to end).
    */
   readonly totalMs: number;
-  /** Milliseconds left of the ORDINARY share, floored at 0 (0 ⇒ do not start). */
+  /**
+   * The bound THIS VIEW enforces: the ordinary share, or the ceiling for a
+   * {@link reserved} view. Distinct from {@link totalMs} on purpose — an ordinary
+   * read is cut short at the share and could never have spent the reserve, so
+   * reporting the ceiling as *its* budget would print a bound that was never
+   * enforced on it (the #520 round-4 rule). This is the number a
+   * `deadline-exceeded` result carries.
+   */
+  readonly budgetMs: number;
+  /** Milliseconds left of THIS VIEW's budget, floored at 0 (0 ⇒ do not start). */
   remainingMs(): number;
   /**
    * The same clock and the same ceiling, seen by a read that may ALSO spend the
@@ -115,6 +124,8 @@ export function startPageDeadline(
   const view = (budgetMs: number): PageDeadline => ({
     // Always the ceiling: the number the page can actually spend end to end.
     totalMs: ceilingMs,
+    // What THIS view may spend — what a timed-out read reports.
+    budgetMs,
     remainingMs: () => Math.max(0, budgetMs - (now() - startedAt)),
     // A reserved view is already reserved — `reserved()` cannot compound.
     reserved: () => view(ceilingMs),
@@ -216,7 +227,7 @@ async function runQuery<T>(
   // The shared budget is already gone: starting another request would push the
   // page past its total, and the answer would arrive too late to be shown anyway.
   if (deadline && remainingMs !== undefined && remainingMs <= 0) {
-    return { status: 'deadline-exceeded', budgetMs: deadline.totalMs };
+    return { status: 'deadline-exceeded', budgetMs: deadline.budgetMs };
   }
 
   // Bound this call by whichever is smaller — its own budget or what is left of
@@ -283,7 +294,7 @@ async function runQuery<T>(
     // Our own timeout fired AND the deadline was the binding bound ⇒ this is the
     // PAGE's budget, not a verdict about Prometheus.
     if (deadline && boundByDeadline && abortedByOurTimeout && isAbort(err)) {
-      return { status: 'deadline-exceeded', budgetMs: deadline.totalMs };
+      return { status: 'deadline-exceeded', budgetMs: deadline.budgetMs };
     }
     return { status: 'unreachable', errorSummary: summarize(err) };
   } finally {

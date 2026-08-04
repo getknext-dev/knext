@@ -341,6 +341,36 @@ shipped Grafana overlay instead of rebuilding cluster dashboards — faithful to
     a **mixed** wave (one query establishes `unreachable`, the others `deadline-exceeded`) still
     suppresses the established cause claim — intended honest behaviour that nothing covered, so it
     could have silently inverted into reporting a cause the render did not establish.
+
+  **Seventh-round amendments (PR #636 review — the three the reserve's first cut got wrong):**
+  - **The scan needed its NEGATIVE half; the positive half alone proved nothing.** The first guard
+    asserted that the probe *has* the reserved view, never that nothing else does — and two mutations
+    stayed fully green under it. One of them, `readNextAppStatus(app, { timeoutMs:
+    deadline.reserved().remainingMs() })`, **silently reinstates #534 in its original form**: a hung
+    CR read then spends the whole 4500 ms ceiling and leaves the probe zero, with every new test
+    passing. It slipped through because the CR read is not a `queryInstant` at all, so a
+    query-shaped scan could never see it. The guard now (1) balances parentheses instead of matching
+    lines, so a reflowed call is one site rather than a spurious failure; (2) requires each site's
+    budget to be *the shared one* (a freshly minted `startPageDeadline(9999)` fails); and (3) scans
+    the **whole comment-stripped source** for `reserved()`, requiring every occurrence to lie inside
+    the probe's call site. Mutation-proved with both of the review's mutations plus the own-budget
+    one.
+  - **A timed-out ordinary read reported the CEILING as its budget** — the #520 round-4 rule ("never
+    print a bound that was never enforced") re-entering through the reserve. Measured before:
+    `WAVE-EXHAUSTED rendered budget = 4500` while the wave was bound and cut at 4000. `PageDeadline`
+    now carries `budgetMs` **per view** (the share for ordinary reads, the ceiling for the reserved
+    one) and `deadline-exceeded` reports that; `totalMs` remains the ceiling for messaging about the
+    page as a whole. Measured after, same rig and shipped constants:
+    `WAVE-EXHAUSTED rendered budget = 4000`. The existing "budget that actually applied" test did
+    **not** cover this path — there all three queries answer `ok`, so its number comes from the
+    probe, whose bound genuinely is the ceiling — hence a new test for the cut-short wave.
+  - **The timeout banner stopped asserting the opposite of an established fact.** Suppressing the
+    cause *claim* is right, but the copy went on to say the backend is "slow rather than absent" —
+    which, in the very mixed-wave case this PR pinned (two of three reads `ECONNREFUSED`), guarantees
+    a real outage is described as slowness. That is a cause invented in the other direction. When a
+    read in the same render did fail outright the banner now says so and declines to call the render
+    merely slow, while still **not** promoting the failure to the page's cause (`unreachable` stays
+    unclaimed). Both branches are pinned, and the flag is mutation-proved.
 - [ ] **Cross-cutting:** `/observability` layout with tab nav + Grafana link-out card.
 - [ ] **Phase 2 (gated on founder greenlight):** promote the recipe to a scaffoldable `--observability`
   flag — deferred until after the official-adapter migration + Tier-A correctness (scs-zones sequencing).
