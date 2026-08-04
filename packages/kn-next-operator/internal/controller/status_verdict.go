@@ -318,7 +318,45 @@ func computeStatusVerdict(
 	// else False/Pulling. When disabled, drop the condition — but only if it was
 	// previously present, so a never-prewarmed app's removeConditions/order stays
 	// byte-identical (the #98 no-op guard).
-	if ic.enabled {
+	//
+	// #471 item 4 — a prewarm RECONCILE failure (typically missing DaemonSet
+	// RBAC) is DEGRADING, not fatal. Reconcile no longer returns that error, so
+	// this branch is the only place it becomes visible: the condition carries the
+	// underlying message, a bounded requeue is the only retry, and a
+	// transition-gated Warning event keeps it from being silent. Ready/Degraded
+	// are deliberately untouched — an opt-in cold-start optimisation must not
+	// make the app look unhealthy.
+	switch {
+	case ic.reconcileErrMsg != "":
+		reason := ReasonReconcileFailed
+		what := "image prewarm DaemonSet could not be reconciled"
+		if !ic.enabled {
+			// Disabled but the leftover DaemonSet could not be deleted. Removing
+			// the condition here would hide an orphaned DaemonSet still pinning
+			// the image on every node.
+			reason = ReasonCleanupFailed
+			what = "image prewarm is disabled but its DaemonSet could not be deleted"
+		}
+		message := fmt.Sprintf("%s: %s", what, ic.reconcileErrMsg)
+		v.conditions = append(v.conditions, metav1.Condition{
+			Type:               ConditionImageCacheReady,
+			Status:             metav1.ConditionFalse,
+			ObservedGeneration: app.Generation,
+			Reason:             reason,
+			Message:            message,
+		})
+		// Retried only by this requeue — never let it override a tighter one.
+		if v.requeueAfter == 0 || v.requeueAfter > imagePrewarmFailureRequeueAfter {
+			v.requeueAfter = imagePrewarmFailureRequeueAfter
+		}
+		// Transition-gated: fire once on entry, not on every requeue.
+		prev := apimeta.FindStatusCondition(app.Status.Conditions, ConditionImageCacheReady)
+		if prev == nil || prev.Status != metav1.ConditionFalse || prev.Reason != reason {
+			v.events = append(v.events, verdictEvent{
+				corev1.EventTypeWarning, ReasonImagePrewarmFailed, message,
+			})
+		}
+	case ic.enabled:
 		if ic.desired > 0 && ic.ready == ic.desired {
 			v.conditions = append(v.conditions, metav1.Condition{
 				Type:               ConditionImageCacheReady,
@@ -340,7 +378,7 @@ func computeStatusVerdict(
 					ic.ready, ic.desired),
 			})
 		}
-	} else if apimeta.FindStatusCondition(app.Status.Conditions, ConditionImageCacheReady) != nil {
+	case apimeta.FindStatusCondition(app.Status.Conditions, ConditionImageCacheReady) != nil:
 		v.removeConditions = append(v.removeConditions, ConditionImageCacheReady)
 	}
 

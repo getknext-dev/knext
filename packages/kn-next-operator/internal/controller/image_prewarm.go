@@ -234,4 +234,11 @@ type imageCacheState struct {
 	enabled bool
 	desired int32
 	ready   int32
+	// reconcileErrMsg is non-empty when reconciling (or, when disabled, deleting)
+	// the prewarm DaemonSet failed on this pass. #471 item 4: that failure is
+	// DEGRADING, not fatal — Reconcile carries it here instead of returning it,
+	// so an opt-in cold-start optimisation can no longer block the app's status
+	// convergence. computeStatusVerdict turns it into ImageCacheReady=False plus
+	// a bounded requeue and a transition-gated Warning event.
+	reconcileErrMsg string
 }

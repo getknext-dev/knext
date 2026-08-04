@@ -77,6 +77,15 @@ const (
 // converges toward the ksvc's real health even if a status event is missed.
 const ksvcNotReadyRequeueAfter = 30 * time.Second
 
+// imagePrewarmFailureRequeueAfter bounds the retry of a FAILED image-prewarm
+// DaemonSet reconcile (#471 item 4). Because that failure no longer returns out
+// of Reconcile, controller-runtime's error backoff no longer retries it — this
+// requeue is the ONLY thing that does. It is deliberately looser than
+// ksvcNotReadyRequeueAfter: the app is healthy, only an opt-in cold-start
+// optimisation is not, and the usual cause (missing DaemonSet RBAC) needs
+// operator action rather than fast polling.
+const imagePrewarmFailureRequeueAfter = 2 * time.Minute
+
 // defaultContainerConcurrency is the per-pod concurrent-request soft target
 // stamped on the generated Knative Service when spec.scaling.containerConcurrency
 // is unset (#377, ADR-0028). Lowered from 100 → 20: at 100 a single pod
@@ -136,6 +145,12 @@ const (
 	// rollback/canary can never resolve — Knative keeps serving the last-good
 	// route with only an opaque RevisionMissing condition (ADR-0014 follow-up).
 	ReasonPinnedRevisionNotFound = "PinnedRevisionNotFound"
+	// ReasonImagePrewarmFailed marks a failure to reconcile (or, when the feature
+	// is turned off, to delete) the opt-in image-prewarm DaemonSet — typically
+	// missing DaemonSet RBAC. It is a WARNING event only: the failure degrades
+	// ImageCacheReady and nothing else, so an opt-in cold-start optimisation
+	// never blocks the app's status convergence (#471, ADR-0037).
+	ReasonImagePrewarmFailed = "ImagePrewarmFailed"
 )
 
 // pinnedRevisionStallWindow is how long the child ksvc's RoutesReady/Ready
@@ -445,11 +460,22 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 	// spec.scaling.imagePrewarm=true it pulls+pins the app's digest-pinned image
 	// on every node so scale-from-zero skips the image pull; on false/unset any
 	// previously-created DaemonSet is deleted.
+	//
+	// DECOUPLED FROM THE PASS (#471 item 4): unlike the ksvc (which IS the app)
+	// and the NetworkPolicy (a security control), image prewarm is an OPT-IN
+	// cold-start optimisation. Returning its error here made a persistent
+	// failure — in practice, missing DaemonSet RBAC — abort the pass BEFORE the
+	// status verdict ran, so the app's Ready was never written and the object sat
+	// in controller-runtime's exponential backoff: the optimisation taking the
+	// app's status convergence down with it. The error is instead carried into
+	// the verdict (below), where it degrades ImageCacheReady ONLY, with a bounded
+	// requeue for the retry and a transition-gated Warning event so it is loud
+	// rather than swallowed.
+	prewarmErrMsg := ""
 	if err := r.reconcileImagePrewarmDaemonSet(ctx, &nextApp); err != nil {
-		logger.Error(err, "Failed to reconcile image-prewarm DaemonSet")
-		r.emitEvent(&nextApp, corev1.EventTypeWarning, ReasonReconcileFailed,
-			fmt.Sprintf("Failed to reconcile image-prewarm DaemonSet: %s", err.Error()))
-		return ctrl.Result{}, err
+		logger.Error(err, "Failed to reconcile image-prewarm DaemonSet; "+
+			"degrading ImageCacheReady instead of failing the reconcile pass")
+		prewarmErrMsg = err.Error()
 	}
 
 	// 5. Create/Update KafkaSource for ISR revalidation.
@@ -572,8 +598,8 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 	// the verdict can report ImageCacheReady honestly (desired vs ready). Only
 	// meaningful when prewarm is enabled; best-effort GET (a not-yet-created or
 	// unreadable DaemonSet leaves it Pulling, never fatal).
-	ic := imageCacheState{enabled: imagePrewarmEnabled(&nextApp)}
-	if ic.enabled {
+	ic := imageCacheState{enabled: imagePrewarmEnabled(&nextApp), reconcileErrMsg: prewarmErrMsg}
+	if ic.enabled && ic.reconcileErrMsg == "" {
 		prewarmDS := &appsv1.DaemonSet{}
 		dsKey := client.ObjectKey{Namespace: nextApp.Namespace, Name: nextApp.Name + "-imgcache"}
 		if getErr := r.Get(ctx, dsKey, prewarmDS); getErr == nil {
