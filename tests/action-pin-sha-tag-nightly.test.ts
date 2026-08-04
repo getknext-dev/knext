@@ -541,9 +541,54 @@ describe('nightly SHA↔tag resolution — scope is every workflow (#528)', () =
     // Reaches the catch-all, not the --dir branch. `--root=/tmp` is included
     // deliberately: the parser accepts `--root <value>`, NOT `--root=value`,
     // so the equals form must be rejected rather than silently scanning cwd.
-    const result = runScript([arg]);
+    //
+    // The exit code alone is NOT a mutation proof, and asserting only on it made
+    // this test depend on ambient network state (#630). Mutate the catch-all's
+    // `return 1` to `continue` and the script falls through and SCANS — and that
+    // scan's own exit code is whatever the network says. Both polarities have
+    // been OBSERVED on the same mutant: where api.github.com rate-limited an
+    // unauthenticated caller the scan exited non-zero and the old assertions
+    // stayed GREEN; on a machine where it did not, the scan found every pin
+    // valid, exited 0, and the old assertions went RED. Neither reading is the
+    // rule — the point is that the verdict was decided by ambient network state
+    // rather than by the code under test, in EITHER direction.
+    //
+    // Two changes make it deterministic and offline:
+    //   1. `--root <empty dir>` — a fall-through scan then finds zero files, so
+    //      it reaches the no-files floor WITHOUT firing ~140 live GitHub API
+    //      calls from a unit-test run (the second half of #630).
+    //   2. assert the output IS the usage block, nothing more. An absence-match
+    //      on scan wording would couple this to unrelated output text — the
+    //      usage string could plausibly grow the words "workflow/action files"
+    //      and false-red four tests for no behavioural reason. Equality proves
+    //      strictly more: nothing was scanned AND nothing else was printed.
+    const empty = mkdtempSync(join(tmpdir(), 'knext-pin-catchall-'));
+    const result = runScript(['--root', empty, arg]);
     expect(result.status, `${arg} must not be silently ignored`).not.toBe(0);
-    expect(result.output).toMatch(/unrecognised argument/i);
+    expect(
+      result.output,
+      `${arg} must abort BEFORE scanning — a fall-through that happens to exit non-zero is not a rejection`,
+    ).toBe(
+      `✖ unrecognised argument: ${arg}\n  Usage: verify-action-pins.mjs [--root <repo-root>]\n`,
+    );
+  });
+
+  it('rejects an unrecognised argument given ALONE, with no --root ahead of it', () => {
+    // Coverage the case above cannot give: every entry there is
+    // `['--root', empty, arg]`, so the bad flag is never the SOLE or FIRST
+    // argument. The code is correct today — this keeps it that way without
+    // making the test depend on the network. `cwd` is an empty tree, so a
+    // mutated fall-through scans nothing and stays offline exactly as above.
+    const empty = mkdtempSync(join(tmpdir(), 'knext-pin-catchall-alone-'));
+    const script = resolve(REPO_ROOT, 'scripts/verify-action-pins.mjs');
+    const result = spawnSync(process.execPath, [script, '--nope'], {
+      encoding: 'utf8',
+      cwd: empty,
+    });
+    expect(result.status).not.toBe(0);
+    expect(`${result.stdout}${result.stderr}`).toBe(
+      '✖ unrecognised argument: --nope\n  Usage: verify-action-pins.mjs [--root <repo-root>]\n',
+    );
   });
 
   it.each([
@@ -614,6 +659,127 @@ describe('nightly SHA↔tag resolution — scope is every workflow (#528)', () =
       ['jobs:', '  x:', '    steps:', '      - uses: ./.github/actions/foo'].join('\n'),
     );
     expect(await verifyPins({ repoRoot: root, api: fakeApi({}).api })).toEqual([]);
+  });
+
+  it.each([
+    ["      - uses: './.github/actions/foo'", 'single-quoted value'],
+    ['      - uses: "./.github/actions/foo"', 'double-quoted value'],
+    ["      - uses: '../shared/action'", 'quoted parent-relative value'],
+  ])('does NOT flag a local ref written as a %s (#630)', async (line) => {
+    // The exclusion above keyed on an UNQUOTED ref, so the same false red
+    // survived one quoting level away: `uses: './.github/actions/foo'` is a
+    // valid step, has nothing to pin, and still produced `no-pins-parsed`. The
+    // file already handled a quoted KEY, which is what makes the quoted VALUE
+    // worth closing rather than leaving as a curiosity.
+    const root = mkdtempSync(join(tmpdir(), 'knext-pin-local-quoted-'));
+    mkdirSync(join(root, '.github', 'workflows'), { recursive: true });
+    writeFileSync(
+      join(root, '.github', 'workflows', 'ci.yml'),
+      ['jobs:', '  x:', '    steps:', line].join('\n'),
+    );
+    expect(await verifyPins({ repoRoot: root, api: fakeApi({}).api })).toEqual([]);
+  });
+
+  it('still flags a REMOTE ref in a file that also holds a QUOTED local one (#630)', async () => {
+    // The widened exclusion must stay per-REF. A quoted local ref must not buy
+    // the rest of the file an exemption.
+    const root = mkdtempSync(join(tmpdir(), 'knext-pin-local-quoted-mixed-'));
+    mkdirSync(join(root, '.github', 'workflows'), { recursive: true });
+    writeFileSync(
+      join(root, '.github', 'workflows', 'ci.yml'),
+      [
+        'jobs:',
+        '  x:',
+        '    steps:',
+        "      - uses: './.github/actions/foo'",
+        '      - uses: actions/checkout@v7',
+      ].join('\n'),
+    );
+    const findings = await verifyPins({ repoRoot: root, api: fakeApi({}).api });
+    expect(findings).toHaveLength(1);
+    expect(findings[0]).toMatchObject({ reason: 'not-sha-pinned', action: 'actions/checkout' });
+  });
+
+  it.each([
+    ['      - uses: "./x', 'double-quote opened, never closed'],
+    ["      - uses: './.github/actions/x", 'single-quote opened, never closed'],
+    ['      - uses: "./x\'', 'MISMATCHED pair'],
+  ])('still flags a ref whose quoting is broken (%s) — only a MATCHED pair is stripped', async (line) => {
+    // The one new behavioural property the unquoting introduced, and previously
+    // the only unproven one: `/^(["'])(.*)\1$/` requires the SAME quote at both
+    // ends. Relaxing it to `/^["']?(.*?)["']?$/` leaves every other test green
+    // while silently treating `uses: "./x` as a local ref — a stray quote
+    // becoming a way to dress a ref up as local.
+    //
+    // Exploitability is near zero (an unterminated quote is invalid YAML, and
+    // anything carrying an `@` is caught by `parsePins` regardless), so this is
+    // hygiene. It is asserted anyway because an unproven claim attached to a
+    // good test is the exact pattern this change exists to correct.
+    const root = mkdtempSync(join(tmpdir(), 'knext-pin-badquote-'));
+    mkdirSync(join(root, '.github', 'workflows'), { recursive: true });
+    writeFileSync(
+      join(root, '.github', 'workflows', 'ci.yml'),
+      ['jobs:', '  x:', '    steps:', line].join('\n'),
+    );
+    const findings = await verifyPins({ repoRoot: root, api: fakeApi({}).api });
+    expect(findings).toHaveLength(1);
+    expect(findings[0]).toMatchObject({ reason: 'no-pins-parsed' });
+  });
+
+  it.each([
+    ['      - uses: docker://alpine:3.18', 'unquoted'],
+    ["      - uses: 'docker://alpine:3.18'", 'quoted'],
+  ])('STILL flags a %s docker:// ref — an unpinned image is loud by design', async (line) => {
+    // Deliberate, not an oversight: `docker://` names a container image, and the
+    // digest-pinning rule (security.md) wants an unpinned one noisy. Widening
+    // the local-ref exclusion must not swallow it in either quoting form.
+    const root = mkdtempSync(join(tmpdir(), 'knext-pin-docker-'));
+    mkdirSync(join(root, '.github', 'workflows'), { recursive: true });
+    writeFileSync(
+      join(root, '.github', 'workflows', 'ci.yml'),
+      ['jobs:', '  x:', '    steps:', line].join('\n'),
+    );
+    const findings = await verifyPins({ repoRoot: root, api: fakeApi({}).api });
+    expect(findings).toHaveLength(1);
+    expect(findings[0]).toMatchObject({ reason: 'docker-ref-unpinned' });
+  });
+
+  it('tells a docker:// reader about the IMAGE, not about a regex bug', async () => {
+    // Pre-existing mismatch this change is the first to codify: an unpinned
+    // container image was reported as `no-pins-parsed`, whose text says "the
+    // extraction regex or the file changed shape (a quoted key, say)" — sending
+    // the reader after a regex bug when the real finding is an unpinned image.
+    // This file has already been corrected twice for exactly that class of
+    // misdirection, so it gets its own finding rather than a note.
+    const root = mkdtempSync(join(tmpdir(), 'knext-pin-docker-text-'));
+    mkdirSync(join(root, '.github', 'workflows'), { recursive: true });
+    writeFileSync(
+      join(root, '.github', 'workflows', 'ci.yml'),
+      ['jobs:', '  x:', '    steps:', '      - uses: docker://alpine:3.18'].join('\n'),
+    );
+    const [finding] = await verifyPins({ repoRoot: root, api: fakeApi({}).api });
+    const text = formatFinding(finding);
+    expect(text, 'the offending image must be named').toContain('docker://alpine:3.18');
+    expect(text, 'say what it is: an unpinned container image').toMatch(/container image/i);
+    expect(text, 'must not send the reader after the extraction regex').not.toMatch(
+      /extraction regex/i,
+    );
+  });
+
+  it('keeps the regex-breakage alarm distinct from the docker one in a MIXED file', async () => {
+    // A file can hold both. Collapsing them would let one mask the other — the
+    // silent-vacuum failure the `no-pins-parsed` alarm exists for.
+    const root = mkdtempSync(join(tmpdir(), 'knext-pin-docker-mixed-'));
+    mkdirSync(join(root, '.github', 'workflows'), { recursive: true });
+    writeFileSync(
+      join(root, '.github', 'workflows', 'ci.yml'),
+      ['steps:', '  - uses: docker://alpine:3.18', '  - "uses": evil/action@main'].join('\n'),
+    );
+    const findings = await verifyPins({ repoRoot: root, api: fakeApi({}).api });
+    expect(findings.map((finding) => finding.reason).sort()).toEqual([
+      'docker-ref-unpinned',
+      'no-pins-parsed',
+    ]);
   });
 
   it('still flags a REMOTE ref in a file that also has a local one', async () => {

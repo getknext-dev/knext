@@ -209,6 +209,35 @@ describe('every workflow SHA-pins every action (#528)', () => {
     );
   });
 
+  it('records the empty-glob question as OBSERVED, not assumed (#630)', () => {
+    // dependabot.yml carried an explicit ASSUMED: that `directories` with a glob
+    // matching nothing is accepted rather than erroring the whole
+    // `github-actions` entry — which, if wrong, kills the bump channel silently,
+    // worse than the staleness it closes. That has now been answered in
+    // practice: Dependabot opened a grouped PR from this config. The comment
+    // must say so, with the evidence, so nobody re-derives it — and must NOT
+    // still ask the reader to go find out.
+    //
+    // Deliberately narrow about what the evidence proves: the entry is honoured
+    // and grouping works. It does NOT prove `/.github/actions/*` matches
+    // anything — no composite action exists yet — and the comment must not
+    // claim it does.
+    const dependabot = readFileSync(resolve(REPO_ROOT, '.github/dependabot.yml'), 'utf8');
+    expect(dependabot, 'the observation needs its evidence attached').toMatch(/#631/);
+    // The half this guard previously only DESCRIBED. Replacing the STILL
+    // UNPROVEN paragraph with a false `ALSO VERIFIED: /.github/actions/* matches
+    // composite actions` left all 39 tests green — a guard enforcing half its
+    // own stated purpose is the pattern this whole change exists to correct.
+    expect(
+      dependabot,
+      'the limit of the evidence must survive too: #631 does not prove the glob MATCHES anything',
+    ).toMatch(/STILL UNPROVEN/);
+    expect(
+      dependabot,
+      'the empty-glob question is answered, so stop calling it ASSUMED',
+    ).not.toMatch(/ASSUMED: that a glob matching NOTHING/);
+  });
+
   it('gives Dependabot a bump channel wide enough for the pins it now owns', () => {
     // ~20 distinct actions across every workflow. With the default
     // `open-pull-requests-limit: 5` and no grouping, a week's bumps can exceed
