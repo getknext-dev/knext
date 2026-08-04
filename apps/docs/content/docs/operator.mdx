@@ -186,20 +186,19 @@ spec:
   revalidation:
     queue: kafka
     kafkaBrokerUrl: kafka-cluster-kafka-bootstrap.kafka.svc:9092
-    provisionKafkaSource: true   # explicit opt-in; default is NOT provisioned
 ```
 
-When `queue: kafka` **and** `provisionKafkaSource: true`, the operator provisions a Knative
-`KafkaSource` that consumes the `<app>-revalidation` topic and routes events to an
-`<app>-revalidator` consumer.
-
 <Callout type="warn">
-**Honest scope.** This is **not** a turnkey feature. By default `provisionKafkaSource` is unset, so
-**no `KafkaSource` is provisioned** — the `<app>-revalidator` consumer that events would sink into
-is **not yet shipped by knext**. Setting `provisionKafkaSource: true` is an assertion that you have
-deployed your own external consumer for the `<app>-revalidation` topic. If you enable `queue: kafka`
-without opting in, the operator records a non-fatal `RevalidationDeferred` status condition (`Ready`
-stays `True`) and provisions nothing.
+**Honest scope — `provisionKafkaSource: true` is rejected.** The `KafkaSource` this field would
+provision sinks into an `<app>-revalidator` consumer that knext **does not build**, so enabling it
+could only produce a source pointing at a Service that never comes up, with revalidation silently
+inert. The operator therefore rejects `provisionKafkaSource: true` at admission with a
+`not implemented` error until that consumer ships; the field stays in the API so enabling it later
+is not a breaking change.
+
+`queue: kafka` on its own is accepted and provisions nothing: the operator records a non-fatal
+`RevalidationDeferred` status condition (`Ready` stays `True`) so the gap is visible in `status`
+rather than silently green.
 </Callout>
 
 ## Security defaults

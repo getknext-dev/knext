@@ -789,42 +789,15 @@ var _ = Describe("NextApp Controller reconcile output", func() {
 			Expect(ready.Status).To(Equal(metav1.ConditionTrue))
 		})
 
-		It("IS created with the topic/brokers/sink when kafka + ProvisionKafkaSource=true", func() {
-			nn := reconcileOnce("kafka-on", appsv1alpha1.NextAppSpec{
-				Image: validImage,
-				Revalidation: &appsv1alpha1.RevalidationSpec{
-					Queue:                "kafka",
-					KafkaBrokerUrl:       "kafka-broker:9092",
-					ProvisionKafkaSource: ptr.To(true),
-				},
-			})
-
-			ks := newKafkaSourceObj()
-			ksName := types.NamespacedName{Name: nn.Name + "-revalidation-source", Namespace: namespace}
-			Expect(k8sClient.Get(ctx, ksName, ks)).To(Succeed())
-
-			spec, found, err := unstructured.NestedMap(ks.Object, "spec")
-			Expect(err).NotTo(HaveOccurred())
-			Expect(found).To(BeTrue())
-
-			By("targeting the per-app revalidation topic")
-			topics, _, _ := unstructured.NestedStringSlice(ks.Object, "spec", "topics")
-			Expect(topics).To(ContainElement(nn.Name + "-revalidation"))
-
-			By("pointing at the configured Kafka broker")
-			brokers, _, _ := unstructured.NestedStringSlice(ks.Object, "spec", "bootstrapServers")
-			Expect(brokers).To(ContainElement("kafka-broker:9092"))
-
-			By("setting the consumer group")
-			Expect(spec["consumerGroup"]).To(Equal(nn.Name + "-revalidation"))
-
-			By("sinking events to the revalidator ksvc")
-			sinkName, _, _ := unstructured.NestedString(ks.Object, "spec", "sink", "ref", "name")
-			Expect(sinkName).To(Equal(nn.Name + "-revalidator"))
-
-			By("being owner-referenced by the NextApp")
-			Expect(ownedBy(ks.GetOwnerReferences(), nn.Name)).To(BeTrue())
-		})
+		// The ProvisionKafkaSource=true case used to assert the source's
+		// topic/brokers/sink shape here. Since #475 that shape is unreachable:
+		// the opt-in is rejected as NOT IMPLEMENTED on the shared validation path
+		// (webhook + fail-closed reconciler), because the sink it hardcodes —
+		// the `{app}-revalidator` Service — is not built by knext. The gate's
+		// behaviour (rejection, no dangling source, Degraded/InvalidSpec, and the
+		// unchanged honest RevalidationDeferred surface for the OFF case) is
+		// covered in kafka_source_gate_envtest_test.go. When the consumer ships,
+		// restore a shape assertion here alongside removing the gate.
 	})
 
 	// Scheduled warm-floor (ADR-0030, W5/#380): the OPERATOR is the SINGLE writer

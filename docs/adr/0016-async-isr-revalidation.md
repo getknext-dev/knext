@@ -57,5 +57,13 @@ consumer design-now / build-later.**
 - [x] `provisionKafkaSource` opt-in + `RevalidationDeferred` condition in the reconciler (#95/#99).
 - [x] Docs (`docs/operator/kafka-eventing.md`, the docs-site operator page) state the consumer is
   build-later.
+- [x] **Amended by #475:** the opt-in is now **rejected at admission** as `not implemented`, not
+  merely defaulted off. Defaulting off left an accepted flag for an unbuilt consumer — a user could
+  set `provisionKafkaSource: true` and get a KafkaSource sinking into a Service that never comes up.
+  The gate lives in `validation.ValidateNextAppSpec` (shared by the webhook and the fail-closed
+  reconciler), so "no dangling source" is a property of the operator, not of the webhook being
+  reachable. The FIELD is retained so the item below stays non-breaking.
 - [ ] Build the cluster-local, authenticated `{app}-revalidator` consumer (after Tier-A correctness;
-  re-evaluate whether closed PR #27 is salvageable first).
+  re-evaluate whether closed PR #27 is salvageable first). **Shipping it is what removes the #475
+  gate** — delete `validateProvisionKafkaSource` and the reconciler's KafkaSource block goes live
+  again.

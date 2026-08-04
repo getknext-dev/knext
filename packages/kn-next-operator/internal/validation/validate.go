@@ -150,6 +150,8 @@ func ValidateImageRef(image string) error {
 //     when set, is >= 110 (ADR-0033, #413).
 //   - Storage.Provider / Cache.Provider / Revalidation.Queue, when set, are
 //     recognized enum values.
+//   - Revalidation.ProvisionKafkaSource is not true — the opt-in is rejected as
+//     not implemented until the `{app}-revalidator` consumer ships (#475).
 //
 // This is the shared entry point used by both the webhook and the reconciler.
 func ValidateNextAppSpec(spec *appsv1alpha1.NextAppSpec) error {
@@ -339,6 +341,11 @@ func ValidateNextAppSpec(spec *appsv1alpha1.NextAppSpec) error {
 			)
 		}
 	}
+	// provisionKafkaSource (#475): reject the opt-in outright until the consumer
+	// it points at exists. See validateProvisionKafkaSource.
+	if err := validateProvisionKafkaSource(spec); err != nil {
+		return err
+	}
 
 	// Database (ADR-0019): mode exclusivity + BYO binding shape + no silent
 	// DATABASE_URL precedence against spec.secrets.envMap. Mirrors the CRD CEL
@@ -411,6 +418,43 @@ func validateDatabase(spec *appsv1alpha1.NextAppSpec) error {
 	}
 
 	return nil
+}
+
+// validateProvisionKafkaSource rejects spec.revalidation.provisionKafkaSource=true
+// as NOT IMPLEMENTED (#475).
+//
+// The opt-in (ADR-0016) asserts that a consumer for the ISR-revalidation topic
+// exists, and the KafkaSource the operator would create hardcodes its sink to a
+// Knative Service named `{app}-revalidator` — a service knext does not build and
+// has no way to create. So the only thing turning the flag on can produce is a
+// KafkaSource wired to a sink that will never come up: accepted config for an
+// unbuilt feature, with ISR revalidation silently inert. Honest status
+// (`RevalidationDeferred`) already reported the OFF case; this closes the ON case
+// by refusing the write instead of acting on it.
+//
+// Deliberately NOT ratcheted (unlike the DATABASE_URL collision rules): a stored
+// CR carrying the flag forward is rejected too, because the whole point is that
+// the operator must never provision the dangling source. Living on the SHARED
+// validation path (webhook + fail-closed reconciler) is what makes that a
+// property of the operator rather than of the webhook being reachable.
+//
+// The FIELD stays in the API so shipping the `{app}-revalidator` consumer later
+// (the open ADR-0016 action item) is a non-breaking change: deleting this
+// function is then the whole migration. Scope note (scs-zones.md):
+// spec.revalidation.kafka is ISR-revalidation wiring only — this is a gate, not
+// a step toward a cross-zone domain-event bus.
+func validateProvisionKafkaSource(spec *appsv1alpha1.NextAppSpec) error {
+	if spec.Revalidation == nil || spec.Revalidation.ProvisionKafkaSource == nil ||
+		!*spec.Revalidation.ProvisionKafkaSource {
+		return nil
+	}
+	return fmt.Errorf(
+		"spec.revalidation.provisionKafkaSource=true is not implemented: the KafkaSource's sink, " +
+			"the {app}-revalidator consumer Service, is not built by knext, so provisioning the source " +
+			"would leave it pointing at a Service that never comes up and ISR revalidation silently " +
+			"inert. Unset the field (or set it to false) — Kafka revalidation stays honestly deferred " +
+			"via the RevalidationDeferred status condition until the consumer ships (ADR-0016)",
+	)
 }
 
 // validateBytecodeCacheSize rejects a spec.cache.bytecodeCacheSize that is not

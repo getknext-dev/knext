@@ -104,6 +104,76 @@ func TestValidateDeleteIsNoOp(t *testing.T) {
 	}
 }
 
+// #475 — `spec.revalidation.provisionKafkaSource: true` is config accepted for a
+// feature that does not exist: the sink the KafkaSource would target (the
+// `{app}-revalidator` Knative Service) is unbuilt (ADR-0016 action item still
+// open), so enabling it can only ever produce a dangling source whose ISR
+// revalidation events go nowhere. The webhook rejects it with an explicit
+// "not implemented" message on CREATE and on UPDATE (deliberately unratcheted —
+// the operator must never act on the flag, so carrying it forward is not
+// grandfathered). The field stays in the API so shipping the consumer later is
+// non-breaking.
+func TestProvisionKafkaSourceRejectedAtAdmission(t *testing.T) {
+	v := &NextAppCustomValidator{}
+	ctx := context.Background()
+
+	enabled := true
+	disabled := false
+
+	withProvision := func(p *bool) *appsv1alpha1.NextApp {
+		return newNextApp(appsv1alpha1.NextAppSpec{
+			Image: digestImage,
+			Revalidation: &appsv1alpha1.RevalidationSpec{
+				Queue:                "kafka",
+				KafkaBrokerUrl:       "kafka.default.svc:9092",
+				ProvisionKafkaSource: p,
+			},
+		})
+	}
+
+	assertNotImplemented := func(t *testing.T, err error) {
+		t.Helper()
+		if err == nil {
+			t.Fatalf("expected a not-implemented rejection, got nil")
+		}
+		for _, want := range []string{"provisionKafkaSource", "not implemented", "revalidator"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("rejection message %q must mention %q", err.Error(), want)
+			}
+		}
+	}
+
+	t.Run("CREATE with provisionKafkaSource=true is rejected", func(t *testing.T) {
+		_, err := v.ValidateCreate(ctx, withProvision(&enabled))
+		assertNotImplemented(t, err)
+	})
+
+	t.Run("UPDATE that turns provisionKafkaSource on is rejected", func(t *testing.T) {
+		_, err := v.ValidateUpdate(ctx, withProvision(nil), withProvision(&enabled))
+		assertNotImplemented(t, err)
+	})
+
+	t.Run("UPDATE carrying a pre-existing provisionKafkaSource=true forward is still rejected", func(t *testing.T) {
+		_, err := v.ValidateUpdate(ctx, withProvision(&enabled), withProvision(&enabled))
+		assertNotImplemented(t, err)
+	})
+
+	t.Run("provisionKafkaSource=false and unset are accepted (honest-deferred path unchanged)", func(t *testing.T) {
+		if _, err := v.ValidateCreate(ctx, withProvision(&disabled)); err != nil {
+			t.Errorf("provisionKafkaSource=false must be accepted, got %v", err)
+		}
+		if _, err := v.ValidateCreate(ctx, withProvision(nil)); err != nil {
+			t.Errorf("unset provisionKafkaSource must be accepted, got %v", err)
+		}
+	})
+
+	t.Run("DELETE of a stored CR with the flag on is still allowed", func(t *testing.T) {
+		if _, err := v.ValidateDelete(ctx, withProvision(&enabled)); err != nil {
+			t.Errorf("a gated CR must remain deletable, got %v", err)
+		}
+	})
+}
+
 // ADR-0019 — DATABASE_URL(_RO) collision enforcement lives HERE (webhook), with
 // TRUE ratcheting: reject on CREATE, reject an UPDATE only when it ADDS a
 // collision; an update that merely carries a pre-existing collision forward

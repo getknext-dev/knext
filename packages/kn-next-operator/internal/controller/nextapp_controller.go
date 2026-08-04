@@ -461,6 +461,16 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 	// to a non-existent service and deliver revalidation events nowhere. When kafka is
 	// requested but opt-in is off, we record a non-fatal RevalidationDeferred condition
 	// (Ready stays True) below instead of creating a dangling source.
+	//
+	// SINCE #475 THIS BLOCK IS UNREACHABLE, DELIBERATELY. The opt-in is now rejected
+	// as NOT IMPLEMENTED by validation.ValidateNextAppSpec, which both the admission
+	// webhook and the fail-closed gate above call — so a CR that reaches here can
+	// never have provisionKafkaSource=true, and the operator cannot create a source
+	// pointing at the unbuilt consumer (that is the property, and it is asserted in
+	// kafka_source_gate_envtest_test.go). The code is retained rather than deleted
+	// because building the `{app}-revalidator` consumer is an open ADR-0016 action
+	// item: shipping it means dropping validateProvisionKafkaSource, at which point
+	// this block becomes live again.
 	kafkaRequested := nextApp.Spec.Revalidation != nil && nextApp.Spec.Revalidation.Queue == "kafka"
 	if kafkaRequested && !revalidationDeferred(&nextApp) {
 		// Unstructured to avoid Eventing proto deps.
