@@ -734,7 +734,10 @@ func (r *NextAppReconciler) reconcileBytecodeCachePVC(ctx context.Context, nextA
 	// (validateBytecodeCacheSize) rejects bad sizes upstream; this
 	// error-returning parse is the defense-in-depth for stored CRs that
 	// predate that check.
-	quantity, err := resource.ParseQuantity(size)
+	// #635: and it is the BOUNDED parse, because resource.ParseQuantity itself
+	// does not return on some user-typable values — an error-returning call is
+	// no defense if the call never comes back.
+	quantity, err := validation.ParseQuantityBounded(size)
 	if err != nil {
 		return fmt.Errorf(
 			"spec.cache.bytecodeCacheSize %q is not a valid Kubernetes quantity: %w", size, err,
@@ -947,29 +950,32 @@ func (r *NextAppReconciler) buildDesiredKsvc(nextApp *appsv1alpha1.NextApp, ksvc
 		// values upstream at admission / as a status condition; these
 		// error-returning parses are the defense-in-depth for stored CRs that
 		// predate that check.
+		// #635: BOUNDED parses — resource.ParseQuantity itself does not return
+		// on some user-typable values ("1e2147483648"), so an error-returning
+		// call that never comes back is no defense at all.
 		if v := nextApp.Spec.Resources.CPURequest; v != "" {
-			q, err := resource.ParseQuantity(v)
+			q, err := validation.ParseQuantityBounded(v)
 			if err != nil {
 				return fmt.Errorf("spec.resources.cpuRequest %q is not a valid Kubernetes quantity: %w", v, err)
 			}
 			resourceRequests[corev1.ResourceCPU] = q
 		}
 		if v := nextApp.Spec.Resources.MemoryRequest; v != "" {
-			q, err := resource.ParseQuantity(v)
+			q, err := validation.ParseQuantityBounded(v)
 			if err != nil {
 				return fmt.Errorf("spec.resources.memoryRequest %q is not a valid Kubernetes quantity: %w", v, err)
 			}
 			resourceRequests[corev1.ResourceMemory] = q
 		}
 		if v := nextApp.Spec.Resources.CPULimit; v != "" {
-			q, err := resource.ParseQuantity(v)
+			q, err := validation.ParseQuantityBounded(v)
 			if err != nil {
 				return fmt.Errorf("spec.resources.cpuLimit %q is not a valid Kubernetes quantity: %w", v, err)
 			}
 			resourceLimits[corev1.ResourceCPU] = q
 		}
 		if v := nextApp.Spec.Resources.MemoryLimit; v != "" {
-			q, err := resource.ParseQuantity(v)
+			q, err := validation.ParseQuantityBounded(v)
 			if err != nil {
 				return fmt.Errorf("spec.resources.memoryLimit %q is not a valid Kubernetes quantity: %w", v, err)
 			}

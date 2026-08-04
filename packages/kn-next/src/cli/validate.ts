@@ -69,8 +69,23 @@ export class ConfigValidationError extends Error {
 // a property of the callers, not of this string, and a third one would be a
 // silent bug.
 const MANTISSA_RE_SRC = String.raw`(?:\d+(?:\.\d*)?|\.\d+)`;
+
+// #635 — the decimal exponent is BOUNDED, and this is the one place the mirror
+// is deliberately NARROWER than apimachinery. `resource.ParseQuantity` does not
+// return for some exponents a user can type: MEASURED, "1e999999" parses in
+// ~1 µs but "1e2147483648" was still running after 45 s, so the operator now
+// refuses any exponent beyond ±9999 before parsing
+// (kn-next-operator/internal/validation/quantity.go). The CLI mirrors that bound
+// so `kn-next deploy` fails on the value instead of shipping it to a cluster.
+// `0*` first, so leading zeros are not counted: "1e0000009" is exponent 9 and
+// stays valid, while "1e00000002147483648" does not.
+const MAX_EXPONENT_DIGITS = 4;
+// Same reason, second cost axis: a mantissa long enough to be slow on its own
+// (MEASURED: a 1,000,000-digit mantissa parses in ~1.2 s). The longest quantity
+// anyone writes is ~20 characters ("9223372036854775807Ki" is 21).
+const MAX_QUANTITY_LENGTH = 64;
 const QUANTITY_RE = new RegExp(
-    `^\\+?${MANTISSA_RE_SRC}(Ki|Mi|Gi|Ti|Pi|Ei|[numkMGTPE]|[eE][+-]?\\d+)?$`,
+    `^\\+?${MANTISSA_RE_SRC}(Ki|Mi|Gi|Ti|Pi|Ei|[numkMGTPE]|[eE][+-]?0*\\d{1,${MAX_EXPONENT_DIGITS}})?$`,
 );
 
 /**
@@ -84,7 +99,9 @@ function checkQuantity(value: string): {
     parseable: boolean;
     positive: boolean;
 } {
-    if (!QUANTITY_RE.test(value)) {
+    // #635: length bound FIRST, so an adversarially long value never reaches
+    // the regex engine either.
+    if (value.length > MAX_QUANTITY_LENGTH || !QUANTITY_RE.test(value)) {
         return { parseable: false, positive: false };
     }
     // Same mantissa source as QUANTITY_RE — shared so the two cannot drift
