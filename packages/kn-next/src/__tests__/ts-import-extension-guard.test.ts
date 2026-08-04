@@ -146,6 +146,31 @@ describe("no-.ts-import-extension guard (#289, TS5097 class)", () => {
         }
     });
 
+    it("does NOT flag DECLARATION specifiers (`.d.ts`/`.d.mts`/`.d.cts`) — TypeScript permits them", () => {
+        // #408 follow-up. The rule this guard enforces is TS5097, and TS5097 does
+        // NOT fire on a declaration specifier — MEASURED with the repo's own tsc:
+        // `import "./types.d.ts"` and `import type { A } from "./types.d.ts"`
+        // compile clean under moduleResolution:bundler, while `"./other.ts"`
+        // errors. Flagging them was a FALSE POSITIVE, and it fired for real:
+        // Next generates `import "./.next/dev/types/routes.d.ts"` into every
+        // app's `next-env.d.ts`. Fix the matcher, not the one file that tripped it.
+        const { path, cleanup } = withTempFile(
+            [
+                'import "./types.d.ts";',
+                'import type { A } from "./shape.d.ts";',
+                'import type { B } from "./shape.d.mts";',
+                'import type { C } from "./shape.d.cts";',
+                "export type { A, B, C };",
+            ].join("\n") + "\n",
+        );
+        try {
+            const { code, out } = runGuard([path]);
+            expect(code, out).toBe(0);
+        } finally {
+            cleanup();
+        }
+    });
+
     it("does NOT flag a `.ts` specifier that appears only in a comment", () => {
         const { path, cleanup } = withTempFile(
             [
