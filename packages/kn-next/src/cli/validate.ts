@@ -64,9 +64,13 @@ export class ConfigValidationError extends Error {
 // accepts, i.e. it blocked deploys that would have worked. The shared fixture
 // (packages/kn-next-operator/test/fixtures/quantity-grammar.json) now walks the
 // sign × mantissa × suffix cross-product, so this class cannot hide again.
-const MANTISSA_RE_SRC = String.raw`\d+(\.\d*)?|\.\d+`;
+// Self-grouping (`(?:…)`), so the top-level `|` cannot escape into whatever
+// wraps it. Both current call sites happen to add their own parentheses; that is
+// a property of the callers, not of this string, and a third one would be a
+// silent bug.
+const MANTISSA_RE_SRC = String.raw`(?:\d+(?:\.\d*)?|\.\d+)`;
 const QUANTITY_RE = new RegExp(
-    `^\\+?(${MANTISSA_RE_SRC})(Ki|Mi|Gi|Ti|Pi|Ei|[numkMGTPE]|[eE][+-]?\\d+)?$`,
+    `^\\+?${MANTISSA_RE_SRC}(Ki|Mi|Gi|Ti|Pi|Ei|[numkMGTPE]|[eE][+-]?\\d+)?$`,
 );
 
 /**

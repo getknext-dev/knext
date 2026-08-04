@@ -107,6 +107,10 @@ is refined: **the build system and the runtime are independent user choices.** T
   operator's handling of any pre-existing stored `runtime: bun`+standalone CR (reject-with-guidance
   via `computeStatusVerdict`, not panic) must be specified. Acceptable at `v1alpha1` (ADR-0017); that
   combo was measured to only tie node, not win.
+  **Amended by ADR-0040 (2026-08-04):** "not panic" stands; "via `computeStatusVerdict`" does not.
+  That rejection is a **spec precondition** — decidable from the spec alone, before any child state
+  is observed — so it belongs in `validation.ValidateNextAppSpec` and surfaces through the single
+  pre-existing inline branch, not as a new verdict input. See ADR-0040 §"Where the code goes".
 
 **RuntimeContract applies to all three cells, via exactly TWO implementations:**
 - **turbopack → the supervisor** (node+turbopack, today): supervisor spawns `server.js`, `:9091` in the supervisor.

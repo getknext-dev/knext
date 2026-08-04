@@ -3,6 +3,9 @@
 - **Status:** Accepted (2026-08-04, #455). Codifies a shape already used three times — #431
   (`spec.cache.bytecodeCacheSize`), #433 (scaling knobs), #435 (`spec.resources.*`) — so the fourth
   field follows it by rule instead of by precedent.
+- **Amends:** ADR-0036 §"Retires the pre-existing `runtime: bun` + Next-standalone combo" (0036:108)
+  — its "reject-with-guidance **via `computeStatusVerdict`**" destination only; the "not panic"
+  intent stands. See §"Where the code goes".
 - **Depends on:** ADR-0001 (the operator is the single source of truth for cluster state)
 - **Governs:** every new free-text / numeric field added to `NextAppSpec` that the reconciler turns
   into a Kubernetes object
@@ -56,16 +59,33 @@ the following. Not two.
 ### Where the code goes
 
 - Validation rules: `internal/validation/validate.go`, called from `ValidateNextAppSpec`.
-- Status conditions / events / requeues: `computeStatusVerdict` (`status_verdict.go`) — never as a
-  new branch in `Reconcile` (`.claude/rules/architecture.md`). **One documented exception, and it is
-  the one this ADR generalises:** the spec-validation gate itself is a *precondition*, not a
-  verdict — it runs before the reconciler has observed any child state, so there is nothing for
-  `computeStatusVerdict` to compose from. It therefore emits its Warning event and sets
-  `Degraded`/`Ready=False` inline in `Reconcile` (`nextapp_controller.go:322-346`) and returns. Do
-  not read that branch as licence to add others: a new rule of the kind this ADR describes belongs
-  *inside* `validation.ValidateNextAppSpec`, reusing that single existing branch, and anything that
-  reports on OBSERVED state (child ksvc, revisions, database, prewarm) still goes in
-  `computeStatusVerdict`.
+- Status conditions / events / requeues: `computeStatusVerdict` (`status_verdict.go`). The hard rule
+  in `.claude/rules/architecture.md` is **absolute and stays absolute** — it governs **new** branches
+  in `Reconcile`, and **this ADR carves no exception to it.**
+
+  The spec-validation gate at `nextapp_controller.go:322-346` sets `Degraded`/`Ready=False` inline
+  and is **not** a new branch: it landed in `2b1de76` (#85, 2026-06-22); the rule landed in
+  `35c259b` (#274, 2026-07-13), a month later. The rule's own wording therefore already excludes it,
+  and it stays where it is on the merits — it is a **precondition**, not a verdict. It runs before
+  any child state has been observed, so routing it through `computeStatusVerdict` would force that
+  function to short-circuit every other input, destroying the pure-composition contract the #254
+  extraction exists to protect.
+
+  **The invariant is a count: inline status-condition branches in `Reconcile` are, and stay,
+  exactly one.** That is not left as prose —
+  `internal/controller/inline_status_branch_guard_test.go` walks the AST of
+  `nextapp_controller.go` and fails on any `SetStatusCondition` outside `applyStatusVerdict` and
+  that single pre-existing branch. A new rule of the kind this ADR describes belongs *inside*
+  `validation.ValidateNextAppSpec`, reusing that one branch; anything reporting on OBSERVED state
+  (child ksvc, revisions, database, prewarm) goes in `computeStatusVerdict`.
+
+  **Amends ADR-0036 §"stored `runtime: bun`" (0036:108)**, which prescribes handling a stored
+  `runtime: bun` + standalone-artifact CR as "reject-with-guidance **via `computeStatusVerdict`**,
+  not panic". The intent there was *don't panic*, and it stands; the specific destination does not.
+  That case is a **spec precondition** — it is decidable from the spec alone, before any child is
+  observed — so under this ADR it belongs in `validation.ValidateNextAppSpec`, surfacing through the
+  one existing branch. ADR-0037's restatement of the rule is **unchanged and unconflicted**:
+  `ImageCacheReady` reports OBSERVED DaemonSet state, which is `computeStatusVerdict`'s job.
 - Coverage: **scan, do not enumerate.** `TestEveryResourcesFieldIsQuantityChecked` reflects over
   `ResourcesSpec` and fails on any field a malformed value gets past, so adding a fifth field
   without wiring it in is red. A hand-written list of checked fields is how the next field gets
@@ -93,6 +113,9 @@ the following. Not two.
   (`internal/controller/blast_radius_envtest_test.go`, #455): a stored-malformed CR leaves a sibling
   `NextApp` reaching `Ready=True`, produces no reconcile panic, and settles into rate-limited
   backoff.
+- The "exactly one inline branch" count is now a **gate**, not a convention
+  (`inline_status_branch_guard_test.go`). Anyone adding a second one gets a failing test naming the
+  file, line and function, and pointing at the two legitimate destinations.
 - **Honest limit:** controller-runtime defaults `RecoverPanic` to true, so a `MustParse` regression
   today degrades to a recovered panic rather than a crashed manager. That is a safety net, not the
   guarantee — it is per-reconcile, it depends on a default this project does not own, and a panic in
@@ -104,4 +127,7 @@ the following. Not two.
 - [x] Reflective coverage scan over `ResourcesSpec` (#455).
 - [x] Fix the drift the fixture found on landing: the CLI mantissa now accepts the trailing-dot
       form, and the fixture walks the full cross-product so that class cannot hide again (#455).
+- [x] Guard the "exactly one inline branch" count with an AST scan (#455).
+- [ ] When ADR-0036's `bun-exec` target is implemented, put the stored-`runtime: bun` rejection in
+      `ValidateNextAppSpec` per the amendment above — not in `computeStatusVerdict`.
 - [ ] When a **fourth** rule gets mirrored in the CLI, re-open the codegen option in the table above.
