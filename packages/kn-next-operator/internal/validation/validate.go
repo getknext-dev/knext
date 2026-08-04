@@ -437,7 +437,9 @@ func validateBytecodeCacheSize(spec *appsv1alpha1.NextAppSpec) error {
 		return nil // unset → reconciler default of 512Mi
 	}
 	size := spec.Cache.BytecodeCacheSize
-	q, err := resource.ParseQuantity(size)
+	// #635: bounded parse — resource.ParseQuantity does not return on some
+	// user-typable values (see internal/validation/quantity.go).
+	q, err := ParseQuantityBounded(size)
 	if err != nil {
 		return fmt.Errorf(
 			"spec.cache.bytecodeCacheSize %q is not a valid Kubernetes quantity (e.g. \"512Mi\", \"1Gi\"): %v",
@@ -524,7 +526,8 @@ func parsePositiveQuantity(field, value string) (*resource.Quantity, error) {
 	if value == "" {
 		return nil, nil // unset → reconciler default
 	}
-	q, err := resource.ParseQuantity(value)
+	// #635: bounded parse — see internal/validation/quantity.go.
+	q, err := ParseQuantityBounded(value)
 	if err != nil {
 		return nil, fmt.Errorf(
 			"%s %q is not a valid Kubernetes quantity (e.g. CPU \"250m\"/\"1\", memory \"512Mi\"/\"1Gi\"): %v",
@@ -538,13 +541,6 @@ func parsePositiveQuantity(field, value string) (*resource.Quantity, error) {
 		)
 	}
 	return &q, nil
-}
-
-// mustBeParseableQuantity is the test seam that pins the reconcile-site
-// contract: any size ValidateNextAppSpec accepts must round-trip through the
-// same parser the PVC sizing path uses, without panicking.
-func mustBeParseableQuantity(size string) resource.Quantity {
-	return resource.MustParse(size)
 }
 
 // DatabaseEnvMapCollisions returns, in deterministic order, the env var names

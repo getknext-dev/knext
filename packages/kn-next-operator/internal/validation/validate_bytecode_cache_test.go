@@ -20,6 +20,8 @@ import (
 	"strings"
 	"testing"
 
+	"k8s.io/apimachinery/pkg/api/resource"
+
 	appsv1alpha1 "github.com/AhmedElBanna80/knext/packages/kn-next-operator/api/v1alpha1"
 )
 
@@ -109,4 +111,15 @@ func TestAcceptedBytecodeCacheSizesNeverPanicOnParse(t *testing.T) {
 			_ = mustBeParseableQuantity(size)
 		}()
 	}
+}
+
+// mustBeParseableQuantity is the test seam that pins the reconcile-site
+// contract: any size ValidateNextAppSpec accepts must round-trip through the
+// parser the PVC sizing path uses, without panicking. It lives in the test file
+// because it is only ever called from one (#635): production code may not call
+// resource.MustParse/ParseQuantity on CR-derived input at all — it must go
+// through validation.ParseQuantityBounded, which
+// TestEveryQuantityParseOfCRInputGoesThroughTheBoundedHelper scans for.
+func mustBeParseableQuantity(size string) resource.Quantity {
+	return resource.MustParse(size)
 }
