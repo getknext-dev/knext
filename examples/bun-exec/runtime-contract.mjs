@@ -156,7 +156,10 @@ export async function drainPending() {
 //   2. `server.stop()` (no arg) — stop accepting new conns, let in-flight
 //      requests FINISH; the returned Promise resolves when they do (the drain).
 //   3. Await after()/waitUntil background tasks.
-//   4. Stop the metrics listener LAST, so a scrape is answerable during drain.
+//   4. Stop the metrics listener LAST — load-bearing: it is what holds the
+//      event loop open so the `unref()`ed hardcap can fire (and, secondarily,
+//      it keeps a scrape answerable throughout the drain). See the DO-NOT-
+//      REORDER note at the drain site.
 //   5. Exit 0. `server.stop(true)` (force) is the hardcap path only.
 // Idempotent: a second signal while draining is ignored.
 /**
@@ -200,6 +203,15 @@ export function createGracefulShutdown({
     try {
       await Promise.all(appServers.map((s) => s.stop()));
       await drainTasks();
+      // ── DO NOT REORDER: the metrics listener is stopped LAST, and that is
+      // LOAD-BEARING, not cosmetic (#448). The hardcap timer above is
+      // `unref()`ed, so it can only fire while something ELSE keeps the event
+      // loop alive; during the drain that something is this metrics listener.
+      // Stop it before the app drain / `drainTasks()` and the loop can empty,
+      // bun exits before the hardcap fires, and a hung request is silently NOT
+      // force-terminated within grace — the SIGTERM guarantee regresses with
+      // every unit test still green. (Serving a scrape throughout the drain is
+      // the second, lesser reason.) Guarded by test/sigterm-hardcap-e2e.test.ts.
       if (metricsServer) await metricsServer.stop();
       clearTimeout(hardcap);
       log('DRAINED cleanly');
