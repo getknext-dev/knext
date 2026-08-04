@@ -17,6 +17,7 @@ import {
   scalingQueries,
   totalLatestMatrixValue,
 } from '../_prom/query';
+import { denyObservabilityAccess } from '../_ui/access-denied';
 import { formatMillis, formatNumber, NO_DATA, UNAVAILABLE } from '../_ui/format';
 import { isObservabilityAuthorized, observabilityToken } from '../auth';
 
@@ -61,15 +62,6 @@ const shell = { padding: '2rem', fontFamily: 'system-ui, sans-serif' } as const;
 const cell = { padding: '0.5rem 1rem' } as const;
 const labelCell = { ...cell, fontWeight: 600 } as const;
 const valueCell = { ...cell, textAlign: 'right' } as const;
-
-function AccessDenied() {
-  return (
-    <main style={shell}>
-      <h1>401 — Unauthorized</h1>
-      <p>The observability pages require a valid bearer token.</p>
-    </main>
-  );
-}
 
 function GrafanaLinkOut() {
   return (
@@ -193,7 +185,7 @@ export default async function ScalingPage() {
     observabilityToken(),
   );
   if (!authorized) {
-    return <AccessDenied />;
+    denyObservabilityAccess(); // real HTTP 401, never returns (#525)
   }
 
   // Degrade closed BEFORE any network call: unconfigured ⇒ no fetch.

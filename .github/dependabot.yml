@@ -47,19 +47,23 @@ updates:
     # yet never bumped: pinned and frozen, which is the staleness failure with
     # extra steps.
     #
-    # Be precise about what is VERIFIED versus ASSUMED here, because the guard
-    # in tests/workflow-action-pins.test.ts is a TEXT match — it can tell you
-    # this entry exists, and cannot tell an honoured entry from an errored one:
+    # Be precise about what is VERIFIED versus still UNPROVEN here, because the
+    # guard in tests/workflow-action-pins.test.ts is a TEXT match — it can tell
+    # you this entry exists, and cannot tell an honoured entry from an errored
+    # one:
     #   - VERIFIED: the schema. `directories` takes a string array and supports
     #     `*` (GitHub's reference is explicit that `directory` does not).
-    #   - ASSUMED: that a glob matching NOTHING — which is the case today, since
-    #     `.github/actions/` does not exist — is accepted rather than erroring
-    #     the whole config, and that it begins matching when a directory is
-    #     added. That is the documented intent, not something we have observed.
-    # So CHECK THE DEPENDABOT JOB STATUS after this merges (Insights →
-    # Dependency graph → Dependabot → last checked / any error banner). If an
-    # empty glob turns out to error, drop this entry and re-add it with the
-    # first real composite action.
+    #   - VERIFIED IN PRACTICE (#630, evidence: PR #631 "bump the github-actions
+    #     group across 1 directory with 3 updates"): a glob matching NOTHING —
+    #     the case today, since `.github/actions/` does not exist — does NOT
+    #     error the `github-actions` entry. Dependabot ran this config and opened
+    #     a grouped bump PR from it. That was the open risk: an errored entry
+    #     kills the bump channel SILENTLY, which is worse than the staleness the
+    #     glob closes. It is answered; do not re-file it as a thing to go check.
+    #   - STILL UNPROVEN, and #631 does not touch it: that `/.github/actions/*`
+    #     MATCHES anything once a composite action lands there. Nothing has ever
+    #     matched it — the "1 directory" in that PR title is `/`. The first
+    #     composite action added is when to look again.
     directories:
       - '/'
       - '/.github/actions/*'

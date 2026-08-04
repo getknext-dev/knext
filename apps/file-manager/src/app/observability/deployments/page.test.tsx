@@ -30,6 +30,11 @@ import {
  * and no token/URL/kubeconfig leaking into the HTML.
  */
 
+// #525: `unauthorized()` is gated on the flag Next's compiler sets from
+// `experimental.authInterrupts`; vitest does not run that compiler, so mirror
+// it. `_ui/access-denied.test.tsx` asserts the app really enables the flag.
+process.env.__NEXT_EXPERIMENTAL_AUTH_INTERRUPTS = '1';
+
 const authHeader = vi.fn<() => string | null>(() => null);
 
 vi.mock('next/headers', () => ({
@@ -239,6 +244,21 @@ async function renderPage(): Promise<string> {
   return renderToStaticMarkup(el);
 }
 
+/**
+ * #525 — a denied request must raise Next's 401 access-fallback, so the HTTP
+ * STATUS is 401 instead of a 200 whose body claims 401. The literal's
+ * correspondence to Next's own value is pinned in `_ui/access-denied.test.tsx`.
+ */
+const UNAUTHORIZED_DIGEST = 'NEXT_HTTP_ERROR_FALLBACK;401';
+
+/** The digest of the denial, or a description of the page that failed to deny. */
+async function denialDigest(): Promise<string | undefined> {
+  return renderPage().then(
+    (html) => `rendered a 200 instead of denying: ${html.slice(0, 120)}`,
+    (error: { digest?: string }) => error.digest,
+  );
+}
+
 describe('deployments page route config', () => {
   it('is force-dynamic (never cached)', async () => {
     const mod = await import('./page');
@@ -247,23 +267,19 @@ describe('deployments page route config', () => {
 });
 
 describe('deployments page auth gate (fail-closed)', () => {
-  it('denies an unauthenticated request, leaks no data, and performs NO read at all', async () => {
+  it('denies with a real 401, leaks no data, and performs NO read at all', async () => {
     authHeader.mockReturnValue(null);
     const fetchSpy = vi.spyOn(globalThis, 'fetch');
 
-    const html = await renderPage();
-
-    expect(html).toMatch(/unauthorized|forbidden|denied/i);
-    expect(html).not.toContain('demo-00003');
+    expect(await denialDigest()).toBe(UNAUTHORIZED_DIGEST);
     expect(fetchSpy).not.toHaveBeenCalled();
     expect(readNextAppStatus).not.toHaveBeenCalled();
   });
 
-  it('denies when no token is configured, even with a Bearer header', async () => {
+  it('denies with a real 401 when no token is configured, even with a Bearer header', async () => {
     delete process.env.OBSERVABILITY_TOKEN;
     authHeader.mockReturnValue('Bearer anything');
-    const html = await renderPage();
-    expect(html).toMatch(/unauthorized|forbidden|denied/i);
+    expect(await denialDigest()).toBe(UNAUTHORIZED_DIGEST);
   });
 
   it('never renders the token, the Prometheus URL or a kubeconfig into the HTML', async () => {

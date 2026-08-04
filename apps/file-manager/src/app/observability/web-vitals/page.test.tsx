@@ -11,6 +11,11 @@ import { NO_DATA } from '../_ui/format';
  *  - is force-dynamic / never cached.
  */
 
+// #525: `unauthorized()` is gated on the flag Next's compiler sets from
+// `experimental.authInterrupts`; vitest does not run that compiler, so mirror
+// it. `_ui/access-denied.test.tsx` asserts the app really enables the flag.
+process.env.__NEXT_EXPERIMENTAL_AUTH_INTERRUPTS = '1';
+
 const authHeader = vi.fn<() => string | null>(() => null);
 
 vi.mock('next/headers', () => ({
@@ -39,6 +44,21 @@ async function renderPage(): Promise<string> {
   return renderToStaticMarkup(el);
 }
 
+/**
+ * #525 — a denied request must raise Next's 401 access-fallback, so the HTTP
+ * STATUS is 401 instead of a 200 whose body claims 401. The literal's
+ * correspondence to Next's own value is pinned in `_ui/access-denied.test.tsx`.
+ */
+const UNAUTHORIZED_DIGEST = 'NEXT_HTTP_ERROR_FALLBACK;401';
+
+/** The digest of the denial, or a description of the page that failed to deny. */
+async function denialDigest(): Promise<string | undefined> {
+  return renderPage().then(
+    (html) => `rendered a 200 instead of denying: ${html.slice(0, 120)}`,
+    (error: { digest?: string }) => error.digest,
+  );
+}
+
 describe('web-vitals page route config', () => {
   it('is force-dynamic (never cached)', async () => {
     const mod = await import('./page');
@@ -47,20 +67,16 @@ describe('web-vitals page route config', () => {
 });
 
 describe('web-vitals page auth gate (fail-closed)', () => {
-  it('denies an unauthenticated request and leaks no metric data', async () => {
+  it('denies with a real 401 and leaks no metric data', async () => {
     observeWebVital({ metric: 'LCP', route: '/dashboard', rating: 'good', value: 1200 });
     authHeader.mockReturnValue(null);
-    const html = await renderPage();
-    expect(html.toLowerCase()).not.toContain('p75');
-    expect(html).not.toContain('kn_next_web_vitals');
-    expect(html).toMatch(/unauthorized|forbidden|denied/i);
+    expect(await denialDigest()).toBe(UNAUTHORIZED_DIGEST);
   });
 
-  it('denies when no token is configured, even with a Bearer header', async () => {
+  it('denies with a real 401 when no token is configured, even with a Bearer header', async () => {
     delete process.env.OBSERVABILITY_TOKEN;
     authHeader.mockReturnValue('Bearer anything');
-    const html = await renderPage();
-    expect(html).toMatch(/unauthorized|forbidden|denied/i);
+    expect(await denialDigest()).toBe(UNAUTHORIZED_DIGEST);
   });
 });
 
