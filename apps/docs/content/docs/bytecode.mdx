@@ -52,6 +52,30 @@ compilation is a smaller slice of the total than on a fast, warm-image cluster.
 Treat it as a real but **environment-dependent** improvement, not a guaranteed number. Measure your
 own cold start if it matters to your service-level objectives.
 
+## If the cache directory is unavailable
+
+Bytecode caching is an **optimisation, never a dependency**: if the cache directory cannot be used,
+your app still boots and serves normally — it simply pays full compile cost on each cold start.
+
+That covers every way the directory can go wrong: it was never created, it points at a volume that
+did not mount, it is read-only or otherwise unwritable, it is a file rather than a directory, or it
+holds a half-written entry left behind by a pod that was killed mid-write. None of these fail a
+boot, and none of them need a fallback setting from you.
+
+The trade-off is that a broken cache directory is otherwise **silent** — the app looks healthy and
+is just slower forever. So knext logs a single warning shortly after startup when it detects that
+the cache directory it was given was refused:
+
+```
+NODE_COMPILE_CACHE=/mnt/cache/bytecode was refused by the runtime (unwritable, unmounted, or not a
+directory); the server is serving normally but WITHOUT bytecode reuse, so every cold start pays full
+compile cost.
+```
+
+If you see it, check the path you pointed the cache at — most often a volume that is mounted
+read-only or is missing entirely. If you have not overridden the cache location at all, you will
+never see this: the default lives inside the image, where it is always readable.
+
 ## Node vs Bun
 
 Both runtimes get a compile cache, built at image build time, via different mechanisms:

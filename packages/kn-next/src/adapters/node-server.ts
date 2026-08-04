@@ -18,6 +18,7 @@ import { type ChildProcess, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { createLogger } from "../utils/logger";
+import { warnOnDegradedCompileCache } from "./compile-cache-health";
 import { warnOnCompileCacheShadow } from "./compile-cache-shadow";
 import { registerDbPoolDrain } from "./db-drain";
 import {
@@ -130,6 +131,20 @@ const deferredInit = createDeferredSupervisorInit({
                 warnOnCompileCacheShadow({
                     env: process.env,
                     bakedDefaultPath: bakedCompileCacheDir,
+                    log,
+                }),
+        },
+        {
+            // Diagnostics-only (#309): a broken cache VOLUME (unwritable,
+            // unmounted, not a directory) makes V8 disable the compile cache
+            // and say nothing — the pod boots fine and then pays a full
+            // compile on every cold start, forever, with no signal. Warn once
+            // when an injected NODE_COMPILE_CACHE was refused. Fail-open and
+            // deferred, exactly like the shadow check above.
+            name: "compile-cache-health-check",
+            run: () =>
+                warnOnDegradedCompileCache({
+                    env: process.env,
                     log,
                 }),
         },
