@@ -27,8 +27,9 @@ export const PROMETHEUS_URL_ENV = 'OBSERVABILITY_PROMETHEUS_URL';
 const DEFAULT_TIMEOUT_MS = 4000;
 
 /**
- * The TOTAL budget for every request ONE page render makes (PR-520 sysdesign
- * follow-up).
+ * The share of the page budget the ORDINARY reads of one render may spend
+ * (PR-520 sysdesign follow-up). The page's documented ceiling is
+ * {@link PAGE_TOTAL_BUDGET_MS} — this share plus {@link KUBE_STATE_PROBE_RESERVE_MS}.
  *
  * Why a page-level number at all: {@link DEFAULT_TIMEOUT_MS} bounds each call
  * individually, so a page that issues a concurrent wave and THEN a sequential
@@ -45,15 +46,51 @@ const DEFAULT_TIMEOUT_MS = 4000;
 export const PAGE_DEADLINE_MS = 4000;
 
 /**
+ * The slice of the ceiling that ONLY a reserved read may spend (#534).
+ *
+ * One shared budget makes a page's total a bound, but it also makes the LAST
+ * read pay for every read before it. On the Deployments page that last read is
+ * the app-agnostic {@link KUBE_STATE_PROBE} — the one that turns "zero series"
+ * into a diagnosis (`kube-state-absent` vs `no-revision-match`). Issued with
+ * ~0 ms left it degrades to the budget banner, so an OPT-IN, hung Kubernetes
+ * read in the same wave costs the reader the diagnosis of a DEFAULT source that
+ * answered promptly the whole time.
+ *
+ * 500 ms because the probe is one `count(...)` against a Prometheus that has
+ * already answered three queries in this render — if it cannot answer in half a
+ * second, the backend is slow rather than the diagnosis wrong.
+ */
+export const KUBE_STATE_PROBE_RESERVE_MS = 500;
+
+/**
+ * The page's documented CEILING: the ordinary share plus the reserved slice.
+ *
+ * "A page never takes longer than its slowest single backend call" now means
+ * "…plus the short reserved probe". The reserve is a slice OF this number, never
+ * an extra budget bolted on after the fact — {@link PageDeadline.reserved} runs
+ * out here too.
+ */
+export const PAGE_TOTAL_BUDGET_MS = PAGE_DEADLINE_MS + KUBE_STATE_PROBE_RESERVE_MS;
+
+/**
  * A monotonic budget shared by every call of one render. Threaded through
  * {@link QueryOptions.deadline}; each call spends at most what is LEFT, so the
  * total is a bound rather than the sum of the per-call budgets.
  */
 export interface PageDeadline {
-  /** The total budget this deadline was created with (for honest messaging). */
+  /**
+   * The page CEILING this deadline enforces, reserve included (for honest
+   * messaging: it is what the render could actually spend end to end).
+   */
   readonly totalMs: number;
-  /** Milliseconds left, floored at 0 (0 ⇒ do not start another request). */
+  /** Milliseconds left of the ORDINARY share, floored at 0 (0 ⇒ do not start). */
   remainingMs(): number;
+  /**
+   * The same clock and the same ceiling, seen by a read that may ALSO spend the
+   * reserved slice. Not a second budget: it drains with the page and reaches 0
+   * at {@link totalMs}, so calling it cannot lift the page's bound.
+   */
+  reserved(): PageDeadline;
 }
 
 /**
@@ -62,16 +99,27 @@ export interface PageDeadline {
  * The clock is `performance.now()` (monotonic — a wall-clock jump must not
  * lengthen or shorten a request budget) and is injectable so tests can exhaust a
  * budget deterministically without sleeping.
+ *
+ * @param totalMs the ordinary share, spendable by every read.
+ * @param reserveMs a slice ON TOP of that share which only {@link PageDeadline.reserved}
+ *   views may spend. Defaults to 0, so every caller that does not ask for one
+ *   (the Overview and Scaling pages pass no deadline at all) is unaffected.
  */
 export function startPageDeadline(
   totalMs: number = PAGE_DEADLINE_MS,
   now: () => number = () => performance.now(),
+  reserveMs = 0,
 ): PageDeadline {
   const startedAt = now();
-  return {
-    totalMs,
-    remainingMs: () => Math.max(0, totalMs - (now() - startedAt)),
-  };
+  const ceilingMs = totalMs + reserveMs;
+  const view = (budgetMs: number): PageDeadline => ({
+    // Always the ceiling: the number the page can actually spend end to end.
+    totalMs: ceilingMs,
+    remainingMs: () => Math.max(0, budgetMs - (now() - startedAt)),
+    // A reserved view is already reserved — `reserved()` cannot compound.
+    reserved: () => view(ceilingMs),
+  });
+  return view(totalMs);
 }
 
 /** A single Prometheus `matrix` (range) series: labels + [ts, value] samples. */

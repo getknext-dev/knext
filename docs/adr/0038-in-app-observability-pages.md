@@ -224,11 +224,13 @@ shipped Grafana overlay instead of rebuilding cluster dashboards — faithful to
     must not be able to hang. One shared **page deadline** (`startPageDeadline` /
     `QueryOptions.deadline` in `_prom/query.ts`) is created once per render and threaded through every
     read: each call is bounded by `min(per-call, remaining)`, an exhausted budget issues **no request
-    at all**, and the total is `PAGE_DEADLINE_MS = 4000` ms — deliberately the same number as the
-    existing per-call budget ("a page never takes longer than the slowest single backend call it
-    makes"). The per-call `DEFAULT_TIMEOUT_MS` is **unchanged**, so the Overview (P1.2) and Scaling
-    (P1.3) pages, which pass no deadline, keep their exact previous behaviour: shrinking per-call
-    timeouts would make every happy path more fragile without bounding any total.
+    at all**, and the ordinary share is `PAGE_DEADLINE_MS = 4000` ms — deliberately the same number
+    as the existing per-call budget ("a page never takes longer than the slowest single backend call
+    it makes"; **amended below (#534)**: the documented total is now that share plus a 500 ms probe
+    reserve, `PAGE_TOTAL_BUDGET_MS = 4500` ms). The per-call `DEFAULT_TIMEOUT_MS` is **unchanged**, so
+    the Overview (P1.2) and Scaling (P1.3) pages, which pass no deadline, keep their exact previous
+    behaviour: shrinking per-call timeouts would make every happy path more fragile without bounding
+    any total.
   - **A timeout is its own honest state.** Exhausting the budget yields a typed
     `deadline-exceeded` result (never folded into `unreachable`) and the page renders
     `ran out of its time budget`, which **suppresses** every cause claim it did not establish — not
@@ -305,6 +307,40 @@ shipped Grafana overlay instead of rebuilding cluster dashboards — faithful to
     become the next load-sensitive flake. Determinism re-verified after the change: 12/12 for
     `_prom/query.test.ts` + `deployments/page.test.tsx` together, and 12/12 for the whole
     `observability` suite.
+  **Sixth-round amendment (#534 — the kube-state probe gets a reserved slice of the budget):**
+  - **The problem was diagnostic quality, not correctness.** One shared budget makes the page's total
+    a bound, but it also makes the LAST read pay for every read before it — and on this page that
+    read is the app-agnostic `KUBE_STATE_PROBE`, the one that decides *why* a scoped result was
+    empty (`kube-state-absent` vs `no-revision-match`). The realistic trigger is **not** a slow
+    Prometheus (an empty scoped query answers fast) but the **opt-in** `NextApp` read in the same
+    concurrent wave: a hung or trickling API server spent the budget, the probe was issued with ~0 ms
+    left, and the page reported "ran out of its time budget" instead of the diagnosis it had the time
+    to fetch. Nothing dishonest was ever rendered — the budget banner explicitly disclaims knowing
+    whether kube-state-metrics is installed — but the reader lost the answer the page went and asked
+    for, because of a *different, opt-in* backend.
+  - **The fix is a reserved slice of a documented ceiling, not a bigger budget.** `startPageDeadline`
+    takes an optional `reserveMs`; ordinary reads see only the share (`remainingMs()`), while
+    `deadline.reserved()` is a view of the **same clock and the same ceiling** that may also spend
+    the reserve. The Deployments page passes `KUBE_STATE_PROBE_RESERVE_MS = 500` and gives the probe
+    — and only the probe — the reserved view. The page total is therefore
+    `PAGE_TOTAL_BUDGET_MS = PAGE_DEADLINE_MS + KUBE_STATE_PROBE_RESERVE_MS = 4500` ms, which is what
+    `deadline-exceeded` now reports as the budget that applied, so the rendered number still matches
+    the bound actually enforced. Deliberately NOT done: shrinking the per-call default to buy the
+    same headroom — that makes every page's happy path more fragile.
+  - **The end-to-end bound survives.** The reserve is carved OUT of the ceiling: a wave that runs past
+    the share into the reserve leaves the probe nothing and the page falls back to the budget state,
+    so the total can never exceed `PAGE_TOTAL_BUDGET_MS`. `reserved()` is idempotent (it cannot
+    compound into a third slice), and `reserveMs` defaults to 0, so the Overview and Scaling pages —
+    which pass no deadline at all — are untouched.
+  - **Gates.** The reserve is pinned behaviourally: a **hung `NextApp` read** that spends the whole
+    share after Prometheus answered promptly with zero series must still render the kube-state
+    diagnosis (both variants), and the ceiling is pinned by a wave that spends share + reserve and
+    gets no probe. The call sites are **scanned, not enumerated** — every `queryInstant`/`queryRange`
+    on the page must carry a deadline and the probe must carry the reserved view, so a new unbudgeted
+    query fails the test rather than being caught by whoever remembers a list. Also newly pinned:
+    a **mixed** wave (one query establishes `unreachable`, the others `deadline-exceeded`) still
+    suppresses the established cause claim — intended honest behaviour that nothing covered, so it
+    could have silently inverted into reporting a cause the render did not establish.
 - [ ] **Cross-cutting:** `/observability` layout with tab nav + Grafana link-out card.
 - [ ] **Phase 2 (gated on founder greenlight):** promote the recipe to a scaffoldable `--observability`
   flag — deferred until after the official-adapter migration + Tier-A correctness (scs-zones sequencing).

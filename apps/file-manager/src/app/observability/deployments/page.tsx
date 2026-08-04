@@ -12,6 +12,7 @@ import {
   hasNoInstantSeries,
   instantByLabel,
   KUBE_STATE_PROBE,
+  KUBE_STATE_PROBE_RESERVE_MS,
   observabilityAppName,
   observabilityAppNamespace,
   PAGE_DEADLINE_MS,
@@ -76,6 +77,14 @@ import { isObservabilityAuthorized, observabilityToken } from '../auth';
  *    the concurrent query wave plus the sequential presence probe can no longer
  *    sum their individual ~4 s timeouts into ~8 s of page latency. Exhausting it
  *    is its own honest state — never reported as a missing exporter or a zero.
+ *    The documented ceiling is {@link PAGE_TOTAL_BUDGET_MS}: an ordinary share
+ *    ({@link PAGE_DEADLINE_MS}) that every read spends from, plus a
+ *    {@link KUBE_STATE_PROBE_RESERVE_MS} slice only the presence probe may spend
+ *    (#534). Without that slice the probe — last in line — could be issued with
+ *    ~0 ms left after a hung OPT-IN Kubernetes read, so a slow backend nobody
+ *    asked about would cost the reader the diagnosis of a default one that
+ *    answered promptly. The reserve is carved OUT of the ceiling, never added to
+ *    it, so the end-to-end bound still holds.
  *  - Row-level scoping is part of that contract (PR-520): this page ENUMERATES
  *    rows and calls the newest "current", so the derived selector is anchored to
  *    Knative's `<app>-<digits>-deployment` naming and namespace-pinned when the
@@ -398,11 +407,20 @@ export default async function DeploymentsPage() {
   // namespace-pinned, so an ambiguous result is refused below rather than guessed.
   const namespace = observabilityAppNamespace();
 
-  // ONE budget for the whole render (PR-520 sysdesign follow-up). Every read
-  // below spends from it, so the page's worst case is PAGE_DEADLINE_MS — not the
-  // SUM of the per-call budgets, which the concurrent wave + the sequential probe
-  // below could previously stretch to ~8 s with no page-level cap at all.
-  const deadline = startPageDeadline(PAGE_DEADLINE_MS);
+  // ONE budget for the whole render (PR-520 sysdesign follow-up), with a slice of
+  // it RESERVED for the kube-state probe (#534). Every read below spends from it,
+  // so the page's worst case is PAGE_TOTAL_BUDGET_MS (= PAGE_DEADLINE_MS +
+  // KUBE_STATE_PROBE_RESERVE_MS) — not the SUM of the per-call budgets, which the
+  // concurrent wave + the sequential probe below could previously stretch to ~8 s
+  // with no page-level cap at all.
+  //
+  // Why the reserve: the probe is last in line, so without it a hung OPT-IN
+  // Kubernetes read in the wave below spends the whole budget and the page loses
+  // the diagnosis of the DEFAULT source that answered promptly — reporting "ran
+  // out of its time budget" where it could have said which of the two causes of
+  // an empty result applies. The reserve is carved out of the documented ceiling,
+  // not added to it: once PAGE_TOTAL_BUDGET_MS is gone the probe is refused too.
+  const deadline = startPageDeadline(PAGE_DEADLINE_MS, undefined, KUBE_STATE_PROBE_RESERVE_MS);
 
   // Degrade closed before any network call: Prometheus unset ⇒ no fetch.
   // The Kubernetes read runs CONCURRENTLY with the Prometheus queries — awaiting
@@ -451,10 +469,14 @@ export default async function DeploymentsPage() {
     !scopedQueriesTimedOut &&
     hasNoInstantSeries(created);
   // The probe is the ONLY sequential read on this page, i.e. the one that used to
-  // add a second full timeout to the page. It now spends what is left of the
-  // shared budget — and if nothing is left, `queryInstant` issues no request at
-  // all and answers `deadline-exceeded`.
-  const probe = appSeriesEmpty ? await queryInstant(KUBE_STATE_PROBE, { deadline }) : undefined;
+  // add a second full timeout to the page. It spends what is left of the shared
+  // budget PLUS the slice reserved for it (#534) — so a slow, opt-in backend in
+  // the wave above cannot leave it with ~0 ms and cost the reader the diagnosis.
+  // If even the reserve is gone (the ceiling reached), `queryInstant` issues no
+  // request at all and answers `deadline-exceeded`.
+  const probe = appSeriesEmpty
+    ? await queryInstant(KUBE_STATE_PROBE, { deadline: deadline.reserved() })
+    : undefined;
 
   // The page's own budget ran out: report THAT, and nothing else. Timing out is
   // not "kube-state-metrics is absent", not "Prometheus is unreachable", and not

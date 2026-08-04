@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { NextAppReadResult, NextAppStatusView } from '../_k8s/nextapp';
@@ -6,7 +8,9 @@ import {
   APP_NAMESPACE_ENV,
   deploymentQueries,
   KUBE_STATE_PROBE,
+  KUBE_STATE_PROBE_RESERVE_MS,
   PAGE_DEADLINE_MS,
+  PAGE_TOTAL_BUDGET_MS,
   PROMETHEUS_URL_ENV,
 } from '../_prom/query';
 
@@ -76,8 +80,11 @@ vi.mock('../_prom/query', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../_prom/query')>();
   return {
     ...actual,
-    startPageDeadline: (totalMs?: number) =>
-      actual.startPageDeadline(budget.totalMs ?? totalMs, () => clock.now),
+    // Only the CLOCK is injected — the requested budget AND the reserved slice
+    // are forwarded untouched, so a page that stopped asking for the reserve
+    // fails these tests instead of being silently given one by the mock.
+    startPageDeadline: (totalMs?: number, _now?: () => number, reserveMs?: number) =>
+      actual.startPageDeadline(budget.totalMs ?? totalMs, () => clock.now, reserveMs),
   };
 });
 
@@ -379,8 +386,8 @@ describe('deployments page — the page-level deadline is honest when exhausted'
    */
   it('renders a distinct deadline state and issues NO probe once the budget is gone', async () => {
     const spy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (u) => {
-      // The wave consumes the whole shared budget between them (1500 ms each of
-      // the 4000 ms total)…
+      // The wave consumes the whole page CEILING between them — 1500 ms each,
+      // i.e. the 4000 ms ordinary share AND the 500 ms probe reserve (#534)…
       clock.now += PAGE_DEADLINE_MS / 2 - 500;
       // …and answers with an empty scoped result, which is exactly the path that
       // would otherwise spend a SECOND full timeout on the presence probe.
@@ -448,15 +455,166 @@ describe('deployments page — the page-level deadline is honest when exhausted'
   it('reports the budget that actually applied, not the module constant', async () => {
     budget.totalMs = 1500;
     vi.spyOn(globalThis, 'fetch').mockImplementation(async (u) => {
-      clock.now += 600;
+      // 3 × 700 ms = 2100 ms — past the 1500 + reserve ceiling, so even the
+      // reserved probe is refused and the budget state is the honest answer.
+      clock.now += 700;
       return seededFetch(u, { kubeStateAbsent: true });
     });
 
     const html = await renderPage();
 
     expect(html).toContain('ran out of its time budget');
-    expect(html).toContain('1500');
+    // The CEILING that applied to this render (share + reserve), derived here
+    // rather than read from the module — the constants are what could drift.
+    expect(html).toContain(`${1500 + KUBE_STATE_PROBE_RESERVE_MS}`);
     expect(html).not.toContain(`${PAGE_DEADLINE_MS}`);
+    expect(html).not.toContain(`${PAGE_TOTAL_BUDGET_MS}`);
+  });
+
+  /**
+   * A MIXED wave: one query establishes `unreachable`, the others never ran
+   * (`deadline-exceeded`). The established fact is deliberately NOT surfaced —
+   * a timeout suppresses cause claims, because the page cannot tell whether the
+   * rest of the history would have contradicted the one failure it saw. That
+   * suppression is intended, and nothing pinned it until now (#534), so it could
+   * have silently inverted into reporting a cause the page did not establish for
+   * the render as a whole.
+   */
+  it('suppresses an established "unreachable" when the same wave also ran out of budget', async () => {
+    budget.totalMs = 30;
+    const spy = vi.spyOn(globalThis, 'fetch').mockImplementation((u, init) => {
+      const promql = decodeURIComponent(new URL(String(u)).searchParams.get('query') ?? '');
+      if (promql.includes('kube_deployment_created')) {
+        // Hangs until the SHARED budget's own signal aborts it ⇒ deadline-exceeded.
+        return new Promise((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () =>
+            reject(new DOMException('The operation was aborted', 'AbortError')),
+          );
+        });
+      }
+      // The other two ESTABLISH that Prometheus is unreachable ⇒ unreachable.
+      return Promise.reject(new Error('connect ECONNREFUSED'));
+    });
+
+    const html = await renderPage();
+
+    // All three ran — this is a genuinely MIXED wave, not all-unreachable.
+    expect(spy).toHaveBeenCalledTimes(3);
+    expect(html).toContain('ran out of its time budget');
+    expect(html).not.toContain('could not reach the observability backend');
+    expect(html).not.toContain('requires kube-state-metrics');
+    expect(html).not.toContain('no Deployment for this app is known');
+    expect(html).not.toContain('<table');
+  });
+});
+
+/**
+ * #534 — the reserved slice for the kube-state probe.
+ *
+ * The probe is the read that turns "zero series" into a diagnosis, and it is last
+ * in line for the shared budget. The realistic trigger is NOT a slow Prometheus
+ * (an empty scoped query answers fast) — it is the OPT-IN Kubernetes read
+ * consuming the budget inside the same wave. A slow, opt-in backend must not cost
+ * the reader the diagnosis of a different, default one that answered promptly.
+ */
+describe('deployments page — the kube-state probe has a reserved slice (#534)', () => {
+  /**
+   * Prometheus answers all three scoped queries at t=0 (promptly, zero series);
+   * only THEN does the hung `NextApp` read give up, having spent the whole
+   * ordinary share. Gating the CR read on the last scoped answer is what makes
+   * the ordering deterministic rather than a microtask-scheduling accident.
+   */
+  function hungNextAppReadAfterPromptProm(opts: SeedOptions = {}) {
+    let released: () => void = () => {};
+    const crRead = new Promise<void>((resolve) => {
+      released = resolve;
+    });
+    let answered = 0;
+
+    const spy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (u) => {
+      const promql = decodeURIComponent(new URL(String(u)).searchParams.get('query') ?? '');
+      const response = seededFetch(u, opts);
+      if (promql !== KUBE_STATE_PROBE && ++answered === 3) {
+        // The scoped wave is done and cost ~nothing; the hung CR read then burns
+        // the ENTIRE ordinary share before failing.
+        clock.now += PAGE_DEADLINE_MS;
+        released();
+      }
+      return response;
+    });
+
+    readNextAppStatus.mockImplementation(async () => {
+      await crRead;
+      return {
+        status: 'source-unavailable',
+        reason: 'deadline-exceeded',
+        detail: 'the page ran out of its shared time budget before this read could start',
+      };
+    });
+
+    return spy;
+  }
+
+  it('still reaches the kube-state-absent diagnosis when a hung CR read spent the whole share', async () => {
+    const spy = hungNextAppReadAfterPromptProm({ kubeStateAbsent: true });
+
+    const html = await renderPage();
+
+    // The probe RAN — on the reserve, with the ordinary share already at zero.
+    expect(sentQueries(spy).filter((q) => q === KUBE_STATE_PROBE)).toHaveLength(1);
+    // …so the reader gets the answer the page went and asked for…
+    expect(html).toContain('requires kube-state-metrics');
+    // …instead of a budget banner that knows nothing.
+    expect(html).not.toContain('ran out of its time budget');
+    expect(html).not.toContain('could not reach the observability backend');
+  });
+
+  it('still reaches the no-Deployment-matches diagnosis in the same conditions', async () => {
+    process.env[APP_NAME_ENV] = 'ghost';
+    const spy = hungNextAppReadAfterPromptProm();
+
+    const html = await renderPage();
+
+    expect(sentQueries(spy).filter((q) => q === KUBE_STATE_PROBE)).toHaveLength(1);
+    expect(html).toContain('no Deployment for this app is known');
+    expect(html).not.toContain('ran out of its time budget');
+    expect(html).not.toContain('requires kube-state-metrics');
+  });
+
+  /**
+   * The reserve is a slice of a documented CEILING, not an extra budget bolted on:
+   * a wave that runs past the ordinary share into the reserve leaves the probe
+   * nothing, and the page falls back to the honest budget state.
+   */
+  it('does not hand out a reserve the ceiling has already spent', async () => {
+    const spy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (u) => {
+      clock.now += PAGE_TOTAL_BUDGET_MS / 3;
+      return seededFetch(u, { kubeStateAbsent: true });
+    });
+
+    const html = await renderPage();
+
+    expect(sentQueries(spy)).not.toContain(KUBE_STATE_PROBE);
+    expect(html).toContain('ran out of its time budget');
+    expect(html).not.toContain('requires kube-state-metrics');
+  });
+
+  /**
+   * SCANNED, not enumerated: a new query on this page that forgets the shared
+   * budget re-opens the unbounded-total hole, so an unbudgeted call site fails
+   * here rather than being caught by whoever remembers to update a list.
+   */
+  it('gives every query on this page a deadline, and the probe the reserved one', () => {
+    const source = readFileSync(resolve(import.meta.dirname, 'page.tsx'), 'utf8');
+    const callSites = source.split('\n').filter((line) => /\bquery(?:Instant|Range)\(/.test(line));
+
+    // Green-by-skip guard (#408): a scan that matched nothing would pass vacuously.
+    expect(callSites.length).toBeGreaterThanOrEqual(4);
+    expect(callSites.filter((line) => !/\bdeadline\b/.test(line))).toEqual([]);
+
+    const probeSites = callSites.filter((line) => line.includes('KUBE_STATE_PROBE'));
+    expect(probeSites).toHaveLength(1);
+    expect(probeSites[0]).toMatch(/deadline\.reserved\(\)/);
   });
 });
 
