@@ -95,8 +95,11 @@ spec:
   (`[secretName]`) — the **only** way to inject `DATABASE_URL`, tokens, etc.
   Secrets live in K8s Secrets, never in config/images/URLs.
 - **`cache.enableBytecodeCache`** — persist V8 bytecode on a PVC across cold pods.
-- **`revalidation`** — `{ queue: kafka, kafkaBrokerUrl, provisionKafkaSource }` for
-  ISR revalidation (opt-in; the consumer is design-now/build-later).
+- **`revalidation`** — `{ queue: kafka, kafkaBrokerUrl }` for ISR revalidation.
+  `provisionKafkaSource` is INERT (#475) — accepted but ignored on every value, since
+  the BYO `{app}-revalidator` consumer path is withdrawn. No KafkaSource is created;
+  `queue: kafka` surfaces the non-fatal `RevalidationDeferred` condition, and setting
+  the flag adds reason `ProvisionKafkaSourceInert` + a Warning event.
 - **`traffic`** — `{ revisionName, canaryPercent }` (set by `kn-next rollback`).
 - **`security.networkPolicy`** — default-on internal-only NetworkPolicy.
 - **`observability`** — metrics/RUM/tracing (default-off tracing).
