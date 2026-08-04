@@ -2,7 +2,9 @@
 
 - **Status:** Accepted (amended 2026-08-04, #408: the edge fence applies in EVERY
   phase, not only `phase-production-build`; `output: 'standalone'` stays
-  production-build-only — see Decision §2)
+  production-build-only — see Decision §2. Amended again 2026-08-04 by
+  **ADR-0041** (#407): the options table's deferred "CLI `kn-next create`
+  scaffolding command" row is now Accepted and built)
 - **Date:** 2026-07-18
 - **Issue:** #356 (deferred from #344 item 3; Tier-A correctness).
 - **Relates to / upholds:** ADR-0027 (the `globalThis`-anchored seam pattern the
@@ -127,7 +129,7 @@ break observability. This ADR makes generated apps correct by construction.
 | Template emits pair + adapter injects fence | yes | yes | **Accepted** |
 | Template emits pair + hand-written webpack hook in generated `next.config.ts` | yes, but the fence is one deletion away from silently breaking the build | **no** | Rejected — keeps the footgun load-bearing in app code |
 | Written rule only (#354) | **no** | no | Rejected — documents, does not enforce |
-| CLI `kn-next create` scaffolding command | yes | yes | Deferred — the template is the existing scaffolding path; a CLI create flow can adopt the same emitted shape later |
+| CLI `kn-next create` scaffolding command | yes | yes | **Accepted 2026-08-04 (ADR-0041, #407)** — was "Deferred"; the CLI now emits the same shape from the published package, with a fail-closed drift guard against this template tree |
 
 ## Consequences
 

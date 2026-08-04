@@ -223,6 +223,31 @@ try {
     finish(FAIL, "kn-next --help: exit 0 but output lacked 'kn-next'/'Usage'/'Options'");
   }
 
+  // --- 3a-bis. CLI: `create` scaffolds from the INSTALLED package (#407) -----
+  // `kn-next create` reads its templates from <package>/templates, so it works
+  // only if the `files` allowlist actually ships them. A repo-local test cannot
+  // observe that — the source tree has the directory either way — so the
+  // packed-and-installed path is the only place this can be proven.
+  console.log('[install-smoke] running `node <bin> create` against the installed package ...');
+  const scaffoldDir = join(workDir, 'scaffolded-app');
+  const create = run('node', [binPath, 'create', scaffoldDir, '--name', 'smoke-app'], {
+    cwd: workDir,
+  });
+  const createOut = `${create.stdout || ''}${create.stderr || ''}`;
+  console.log(createOut.trim());
+  if (create.status !== 0) finish(FAIL, `kn-next create exited ${create.status} (expected 0)`);
+  for (const rel of [
+    'src/instrumentation.ts',
+    'src/instrumentation-node.ts',
+    'next-adapter.ts',
+    'instrumentation-edge-safe.test.ts',
+    'standalone-seam-alive.test.ts',
+  ]) {
+    if (!existsSync(join(scaffoldDir, rel))) {
+      finish(FAIL, `kn-next create did not emit ${rel} — templates missing from the tarball?`);
+    }
+  }
+
   // --- 3b. CLI: exercise the config `validate` path (zero-exit assertion) ----
   // The deploy bin's validate path needs a built Next app + cluster, so it cannot give
   // a clean zero-exit here. Instead drive the SAME validateConfig() the bin uses via the

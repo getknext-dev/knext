@@ -39,7 +39,7 @@
  * both halves; call it from your CI:
  *
  *     pnpm test:seam                        # from this directory
- *     pnpm --filter ./apps/{{ name }} test:seam   # from a workspace root
+ *     npm run test:seam --workspace {{ name }}   # from a workspace root
  *
  * Locally, with no standalone build present and the flag unset, it skips cleanly.
  */
@@ -57,7 +57,7 @@ const nextConfigSrc = readFileSync(join(here, 'next.config.ts'), 'utf8');
 // state survive `@getknext/lib` being duplicated across webpack layers.
 const SEAM_SYMBOLS = ['knext.lib.clients.poolInstrumentor', 'knext.lib.context.state'] as const;
 
-const STANDALONE_SERVER_DIR = resolve(here, '.next/standalone/apps/{{ name }}/.next/server');
+const STANDALONE_SERVER_DIR = resolve(here, '.next/standalone/{{ standalonePrefix }}.next/server');
 const INSTRUMENTATION_LOADER = join(STANDALONE_SERVER_DIR, 'instrumentation.js');
 const CHUNKS_DIR = join(STANDALONE_SERVER_DIR, 'chunks');
 const APP_DIR = join(STANDALONE_SERVER_DIR, 'app');
@@ -147,7 +147,7 @@ describe.skipIf(skipReason)('#352/#344 seam survives the standalone bundle', () 
     if (!buildPresent) {
       throw new Error(
         'KNEXT_REQUIRE_STANDALONE=1 but no standalone build present — ' +
-          'run `pnpm --filter {{ name }} build` before this gate.',
+          'run `npm run build` in {{ name }} before this gate.',
       );
     }
     expect(buildPresent).toBe(true);

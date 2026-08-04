@@ -1,0 +1,32 @@
+import type { KnativeNextConfig } from "@getknext/core";
+
+// NextApp Operator declarative configuration — see the knext QUICKSTART Step 4.
+const config: KnativeNextConfig = {
+  // App name — becomes the NextApp resource and Knative Service name.
+  name: "{{ name }}",
+
+  // Registry to push the image to (the app name is appended).
+  registry: "ghcr.io/<your-user>",
+
+  // Object storage for static assets; publicUrl is where browsers fetch them.
+  storage: {
+    provider: "gcs", // "gcs" | "s3" | "minio" | "azure"
+    bucket: "<your-assets-bucket>",
+    publicUrl: "https://storage.googleapis.com/<your-assets-bucket>",
+  },
+
+  // Knative autoscaling. minScale: 0 (the default) keeps scale-to-zero on.
+  scaling: {
+    minScale: 0,
+    maxScale: 10,
+    containerConcurrency: 100,
+  },
+
+  // Bring-your-own database binding (optional). knext provisions no database —
+  // this only binds an EXISTING Secret's DSN into the app as DATABASE_URL.
+  // database: {
+  //   secretRef: { name: "<your-db-secret>" },
+  // },
+};
+
+export default config;

@@ -117,6 +117,7 @@ function parseCliArgs(): DeployOptions {
                 "",
                 "Commands:",
                 "  deploy (default)  build → push → apply the NextApp CR",
+                "  create            scaffold an app with guarded instrumentation (no cluster writes)",
                 "  db bind           bind an existing Postgres Secret to the NextApp CR",
                 "  db migrate        apply pending migrations against the writer, once",
                 "  doctor            cluster-prereq preflight (read-only; --json)",
@@ -655,7 +656,10 @@ export async function deploy() {
 if (isEntrypoint(import.meta.url)) {
     const sub = process.argv[2];
     try {
-        if (sub === "doctor") {
+        if (sub === "create") {
+            const { createMain } = await import("./create");
+            process.exit(await createMain(process.argv.slice(3)));
+        } else if (sub === "doctor") {
             const { doctorMain } = await import("./doctor");
             process.exit(await doctorMain(process.argv.slice(3)));
         } else if (sub === "status") {
@@ -675,17 +679,19 @@ if (isEntrypoint(import.meta.url)) {
         }
     } catch (err) {
         const label =
-            sub === "db"
-                ? "db command failed"
-                : sub === "doctor"
-                  ? "doctor failed"
-                  : sub === "status"
-                    ? "status failed"
-                    : sub === "rollback"
-                      ? "rollback failed"
-                      : sub === "gc"
-                        ? "gc failed"
-                        : "Deployment failed";
+            sub === "create"
+                ? "create failed"
+                : sub === "db"
+                  ? "db command failed"
+                  : sub === "doctor"
+                    ? "doctor failed"
+                    : sub === "status"
+                      ? "status failed"
+                      : sub === "rollback"
+                        ? "rollback failed"
+                        : sub === "gc"
+                          ? "gc failed"
+                          : "Deployment failed";
         log.fatal({ err }, label);
         process.exit(1);
     }
