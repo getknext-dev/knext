@@ -89,23 +89,40 @@ function guardPathApps(): { workflow: string; app: string }[] {
   );
 }
 
-/** Run the scanner against an arbitrary tree; returns its exit code + stdout. */
-function runScanner(root: string): { code: number; stdout: string } {
+/**
+ * The ONLY shell form this guard accepts for invoking the scanner. A bare
+ * assignment's exit status is the command substitution's, so the scanner's
+ * empty-matrix refusal fails the step; every other shape measured (echo, printf,
+ * backticks, a pipe under GitHub's non-pipefail `bash -e`) discards it.
+ */
+const SCANNER_INVOCATION_RE = /^\s*apps=\$\(node scripts\/seam-alive-apps\.mjs\)\s*$/;
+
+/** Run the scanner against an arbitrary tree; returns its exit code. */
+function runScannerExitCode(root: string): number {
   try {
-    const stdout = execFileSync('node', [SCANNER, `--root=${root}`], {
-      encoding: 'utf8',
-      stdio: 'pipe',
-    });
-    return { code: 0, stdout };
+    execFileSync('node', [SCANNER, `--root=${root}`], { encoding: 'utf8', stdio: 'pipe' });
+    return 0;
   } catch (err) {
-    const e = err as { status?: number; stdout?: string };
-    return { code: e.status ?? -1, stdout: e.stdout ?? '' };
+    return (err as { status?: number }).status ?? -1;
   }
 }
 
-/** Materialise a synthetic app tree so the negative cases are EXECUTED, not asserted. */
+type SynthApp = {
+  /** Which extension the instrumentation entry uses, if any (Next accepts many). */
+  instrumentation?: 'ts' | 'tsx' | 'mts' | 'js' | 'mjs';
+  /** Package names the app declares. */
+  deps?: string[];
+  guard?: boolean;
+};
+
+/**
+ * Materialise a synthetic tree so the negative cases are EXECUTED, not asserted.
+ * `packages` is a name → deps map, so the transitive `@getknext/lib` edge can be
+ * exercised the way the real workspace has it (`@getknext/core` → `@getknext/lib`).
+ */
 function synthTree(
-  apps: Record<string, { instrumentation?: boolean; lib?: boolean; guard?: boolean }>,
+  apps: Record<string, SynthApp>,
+  packages: Record<string, string[]> = {},
 ): { root: string; cleanup: () => void } {
   const root = mkdtempSync(join(tmpdir(), 'seam-alive-tree-'));
   for (const [name, spec] of Object.entries(apps)) {
@@ -115,12 +132,23 @@ function synthTree(
       join(dir, 'package.json'),
       JSON.stringify({
         name,
-        dependencies: spec.lib ? { '@getknext/lib': 'workspace:*' } : {},
+        dependencies: Object.fromEntries((spec.deps ?? []).map((d) => [d, 'workspace:*'])),
       }),
     );
-    if (spec.instrumentation) writeFileSync(join(dir, 'src/instrumentation.ts'), 'export {};\n');
+    if (spec.instrumentation) {
+      writeFileSync(join(dir, 'src', `instrumentation.${spec.instrumentation}`), 'export {};\n');
+    }
     if (spec.guard) writeFileSync(join(dir, GUARD_FILENAME), '// guard\n');
   }
+  Object.entries(packages).forEach(([name, deps], i) => {
+    // Directory name deliberately != package name: the graph is keyed by NAME.
+    const dir = join(root, 'packages', `pkg-${i}`);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, 'package.json'),
+      JSON.stringify({ name, dependencies: Object.fromEntries(deps.map((d) => [d, '*'])) }),
+    );
+  });
   return { root, cleanup: () => rmSync(root, { recursive: true, force: true }) };
 }
 
@@ -149,7 +177,7 @@ describe('#408 — seam-alive gate covers EVERY app, by scanning (not by enumera
     const empty = mkdtempSync(join(tmpdir(), 'seam-alive-empty-'));
     try {
       expect(
-        runScanner(empty).code,
+        runScannerExitCode(empty),
         'the scanner emitted an empty matrix instead of failing',
       ).toBeGreaterThan(0);
     } finally {
@@ -165,23 +193,36 @@ describe('#408 — seam-alive gate covers EVERY app, by scanning (not by enumera
     );
   });
 
-  it('the workflow does NOT swallow the scanner exit code in a command substitution', () => {
-    // `echo "apps=$(node scripts/seam-alive-apps.mjs)" >> "$GITHUB_OUTPUT"` exits 0
-    // even when the scanner exits 1: a command substitution's status is DISCARDED
-    // and `echo` succeeds. That silently re-opens the vacuous-matrix hole in the
-    // deployed wiring while the script-level test above stays green — a guard that
-    // does not guard the thing that ships. Verified in a real `bash -eo pipefail`:
-    // the swallowing form exits 0, `apps=$(…)` exits 1.
+  it('every workflow invocation of the scanner is the exact exit-code-propagating form', () => {
+    // ALLOWLIST, deliberately — the first version of this guard was a blocklist
+    // (`echo` + `$( … )`) and it let three other swallowing shapes through, all
+    // verified in a real bash:
+    //   printf "apps=%s\n" "$(node …)"   -> rc 0 under `set -e` (substitution status dropped)
+    //   apps=`node …`                    -> no `$(` to match at all
+    //   node … | tee …                   -> pipeline status is the LAST command's, and
+    //                                       GitHub's step shell is `bash -e {0}` with NO pipefail
+    // Enumerating the bad shapes is how the fourth one gets in. Require the one
+    // form known to propagate instead, so an unrecognised construct FAILS rather
+    // than passes. A bare assignment's exit status IS the substitution's, which is
+    // what makes the scanner's empty-matrix refusal actually fail the step.
+    const hits: { workflow: string; line: number; text: string }[] = [];
     for (const { name, text } of workflows()) {
-      for (const line of text.split('\n')) {
-        if (!line.includes('seam-alive-apps.mjs')) continue;
-        expect(
-          /\$\(.*seam-alive-apps\.mjs.*\)/.test(line) && /\becho\b/.test(line),
-          `${name} wraps the scanner in a command substitution inside \`echo\` — ` +
-            `its non-zero exit is discarded there. Assign first ` +
-            `(\`apps=$(node scripts/seam-alive-apps.mjs)\`), then echo. Line: ${line.trim()}`,
-        ).toBe(false);
-      }
+      text.split('\n').forEach((line, i) => {
+        if (!line.includes('seam-alive-apps.mjs')) return;
+        if (/^\s*#/.test(line)) return; // YAML/shell comment, not an invocation
+        hits.push({ workflow: name, line: i + 1, text: line });
+      });
+    }
+    expect(hits.length, 'no workflow invokes the scanner at all').toBeGreaterThan(0);
+    for (const hit of hits) {
+      expect(
+        SCANNER_INVOCATION_RE.test(hit.text),
+        `${hit.workflow}:${hit.line} invokes the scanner in a form this guard cannot ` +
+          `prove propagates its exit code: "${hit.text.trim()}". Use exactly ` +
+          '`apps=$(node scripts/seam-alive-apps.mjs)` on its own line, then echo `$apps` ' +
+          'into $GITHUB_OUTPUT. (echo/printf/backticks/pipes all DISCARD the non-zero ' +
+          'exit, which silently re-opens the vacuous-matrix hole in the deployed wiring.)',
+      ).toBe(true);
     }
   });
 
@@ -231,14 +272,57 @@ describe('#408 — seam-alive gate covers EVERY app, by scanning (not by enumera
     // Executed against a synthetic tree, so this case is proven rather than argued.
     const { appsRequiringSeamGuard, discoverSeamAliveApps } = await loadScanner();
     const { root, cleanup } = synthTree({
-      exposed: { instrumentation: true, lib: true, guard: false },
-      guarded: { instrumentation: true, lib: true, guard: true },
-      'no-instrumentation': { instrumentation: false, lib: true, guard: false },
-      'no-lib': { instrumentation: true, lib: false, guard: false },
+      exposed: { instrumentation: 'ts', deps: ['@getknext/lib'], guard: false },
+      guarded: { instrumentation: 'ts', deps: ['@getknext/lib'], guard: true },
+      'no-instrumentation': { deps: ['@getknext/lib'], guard: false },
+      'no-lib': { instrumentation: 'ts', deps: ['some-other-pkg'], guard: false },
     });
     try {
       expect(appsRequiringSeamGuard(root)).toEqual(['exposed', 'guarded']);
       expect(discoverSeamAliveApps(root)).toEqual(['guarded']);
+    } finally {
+      cleanup();
+    }
+  });
+
+  it('exposure follows the TRANSITIVE @getknext/lib edge, not just a direct declaration', async () => {
+    // `packages/kn-next` (@getknext/core) declares "@getknext/lib": "workspace:^" as
+    // a RUNTIME dep, so an app declaring only @getknext/core still bundles
+    // @getknext/lib and is still exposed to the layer duplication. That is
+    // apps/docs' shape today — exempt only because it has no instrumentation entry,
+    // which is exactly the kind of accident that becomes a hole later.
+    const { appsRequiringSeamGuard } = await loadScanner();
+    const { root, cleanup } = synthTree(
+      {
+        'via-core': { instrumentation: 'ts', deps: ['@getknext/core'], guard: false },
+        'via-nothing': { instrumentation: 'ts', deps: ['@getknext/ui'], guard: false },
+      },
+      {
+        '@getknext/core': ['@getknext/lib'],
+        '@getknext/ui': ['react'],
+      },
+    );
+    try {
+      expect(appsRequiringSeamGuard(root)).toEqual(['via-core']);
+    } finally {
+      cleanup();
+    }
+  });
+
+  it.each([
+    'tsx',
+    'mts',
+    'js',
+    'mjs',
+  ] as const)('recognises an instrumentation entry written as instrumentation.%s', async (ext) => {
+    // Next resolves `instrumentation` with any of these; probing only `.ts` would
+    // let a JS app slip past the exposure rule entirely.
+    const { appsRequiringSeamGuard } = await loadScanner();
+    const { root, cleanup } = synthTree({
+      app: { instrumentation: ext, deps: ['@getknext/lib'], guard: false },
+    });
+    try {
+      expect(appsRequiringSeamGuard(root)).toEqual(['app']);
     } finally {
       cleanup();
     }

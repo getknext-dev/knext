@@ -292,7 +292,11 @@ describe("app template — package.json carries the instrumentation contract (#3
             ...manifest.devDependencies,
         };
         const binaries = script
-            .split("&&")
+            // Every shell separator, not just `&&` — splitting on `&&` alone hides
+            // every command after a `;`, `||` or `|`, which is the one way an
+            // undeclared binary could still slip through this scan. (`||` is listed
+            // before `|` so the alternation matches the two-char form first.)
+            .split(/&&|\|\||;|\|/)
             .map((segment) =>
                 segment
                     .trim()
