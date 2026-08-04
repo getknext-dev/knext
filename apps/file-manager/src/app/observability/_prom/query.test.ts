@@ -643,3 +643,149 @@ describe('startPageDeadline — one shared budget, not a per-call sum', () => {
     expect(r.status).toBe('ok');
   });
 });
+
+/**
+ * The RESERVED slice (#534).
+ *
+ * One shared budget makes the page's total a bound, but it also makes the LAST
+ * read the one that pays for everything before it — on the Deployments page that
+ * is the app-agnostic kube-state probe, i.e. precisely the read that turns
+ * "empty" into a diagnosis. A reserve carves a slice out of the ceiling that only
+ * a reserved view may spend, so an unrelated slow backend cannot eat it.
+ *
+ * The reserve must be part of a documented ceiling, never an extra budget bolted
+ * on after the fact: `totalMs` is the CEILING (ordinary share + reserve), and the
+ * reserved view runs out at that ceiling too.
+ */
+describe('startPageDeadline — a reserved slice the ordinary reads cannot spend', () => {
+  it('reports the ceiling (share + reserve) as the total, and no reserve by default', () => {
+    expect(startPageDeadline(4000, () => 0, 500).totalMs).toBe(4500);
+    // Unchanged for every caller that asks for no reserve — the other two pages.
+    expect(startPageDeadline(4000, () => 0).totalMs).toBe(4000);
+    expect(startPageDeadline().totalMs).toBe(PAGE_DEADLINE_MS);
+  });
+
+  it('never lets an ordinary read see the reserve, however early it runs', () => {
+    let now = 0;
+    const deadline = startPageDeadline(4000, () => now, 500);
+
+    expect(deadline.remainingMs()).toBe(4000);
+    now = 3900;
+    expect(deadline.remainingMs()).toBe(100);
+    now = 4000;
+    expect(deadline.remainingMs()).toBe(0);
+  });
+
+  it('keeps the reserved slice available after the ordinary share is gone', () => {
+    let now = 0;
+    const deadline = startPageDeadline(4000, () => now, 500);
+    const reserved = deadline.reserved();
+
+    now = 4000;
+    expect(deadline.remainingMs()).toBe(0);
+    expect(reserved.remainingMs()).toBe(500);
+    // Same clock, not a second budget: it drains with the page, not from zero.
+    now = 4200;
+    expect(reserved.remainingMs()).toBe(300);
+  });
+
+  it('bounds the reserved view at the ceiling — a reserve is not an extra budget', () => {
+    let now = 0;
+    const deadline = startPageDeadline(4000, () => now, 500);
+    const reserved = deadline.reserved();
+
+    // Read EARLY it is still only the ceiling, never share + reserve on top of
+    // whatever is left, and never more than the total.
+    expect(reserved.remainingMs()).toBe(4500);
+    expect(reserved.remainingMs()).toBeLessThanOrEqual(reserved.totalMs);
+    now = 4500;
+    expect(reserved.remainingMs()).toBe(0);
+    now = 9999;
+    expect(reserved.remainingMs()).toBe(0);
+    // The reserved view is itself reserved — `reserved().reserved()` cannot
+    // compound into a third slice.
+    expect(reserved.reserved().remainingMs()).toBe(0);
+  });
+
+  /**
+   * The reported budget must be the bound that was ENFORCED on the read that ran
+   * out — the #520 round-4 rule ("never print a bound that was never enforced")
+   * applied to the two views. An ordinary read is cut at the SHARE and could never
+   * have spent the reserve, so reporting the ceiling overstates its bound by 500 ms;
+   * the reserved read really is bounded by the ceiling, so it reports that.
+   * `totalMs` stays the ceiling for messaging about the page as a whole.
+   */
+  it('reports the bound that applied to the READ, not the page ceiling, when an ordinary read runs out', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+    let now = 0;
+    const deadline = startPageDeadline(4000, () => now, 500);
+    now = 4000;
+
+    const ordinary = await queryInstant('up', { deadline });
+    expect(ordinary.status).toBe('deadline-exceeded');
+    if (ordinary.status === 'deadline-exceeded') {
+      expect(ordinary.budgetMs).toBe(4000);
+    }
+
+    now = 4500;
+    const reserved = await queryInstant('up', { deadline: deadline.reserved() });
+    expect(reserved.status).toBe('deadline-exceeded');
+    if (reserved.status === 'deadline-exceeded') {
+      expect(reserved.budgetMs).toBe(4500);
+    }
+
+    // Both views still describe the same page ceiling.
+    expect(deadline.totalMs).toBe(4500);
+    expect(deadline.reserved().totalMs).toBe(4500);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('reports the applied bound for a read the deadline CUT SHORT, too', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(
+      (_url, init) =>
+        new Promise((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () =>
+            reject(new DOMException('The operation was aborted', 'AbortError')),
+          );
+        }),
+    );
+
+    // A 30 ms share under a 30 + 20 ms ceiling: the hung request is aborted by
+    // the SHARE, so 30 is the number that bound it.
+    const r = await queryInstant('up', { deadline: startPageDeadline(30, () => 0, 20) });
+
+    expect(r.status).toBe('deadline-exceeded');
+    if (r.status === 'deadline-exceeded') {
+      expect(r.budgetMs).toBe(30);
+    }
+  });
+
+  it('lets a reserved query run when the ordinary share is spent, and reports the ceiling when even the reserve is gone', async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(
+        jsonResponse({ status: 'success', data: { resultType: 'vector', result: [] } }),
+      );
+    let now = 0;
+    const deadline = startPageDeadline(4000, () => now, 500);
+    now = 4000; // the ordinary wave spent its whole share
+
+    // An ordinary read is refused…
+    expect((await queryInstant('up', { deadline })).status).toBe('deadline-exceeded');
+    expect(fetchSpy).not.toHaveBeenCalled();
+
+    // …while the reserved read still happens: this is the diagnosis the reserve exists for.
+    expect((await queryInstant('up', { deadline: deadline.reserved() })).status).toBe('ok');
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+
+    // And once the CEILING is reached the reserved read stops too, reporting the
+    // ceiling as the budget that applied (never the ordinary share alone).
+    now = 4500;
+    const r = await queryInstant('up', { deadline: deadline.reserved() });
+    expect(r.status).toBe('deadline-exceeded');
+    if (r.status === 'deadline-exceeded') {
+      expect(r.budgetMs).toBe(4500);
+    }
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+});
