@@ -74,8 +74,8 @@ break observability. This ADR makes generated apps correct by construction.
      generated app carries the gate file-manager had to grow by hand.
 
 2. **The edge `IgnorePlugin` fence moves INTO the knext adapter's
-   `modifyConfig`** (`packages/kn-next/src/adapters/next-adapter.ts`). On
-   `phase-production-build` the adapter now returns a `webpack` fn that —
+   `modifyConfig`** (`packages/kn-next/src/adapters/next-adapter.ts`). The
+   adapter returns a `webpack` fn that —
    composed AFTER any webpack hook the app still owns — pushes
    `IgnorePlugin({ resourceRegExp: /instrumentation-node(\.[cm]?[jt]s)?$/ })`
    on the edge compile only. App authors never hand-write the webpack hook; any
@@ -84,6 +84,17 @@ break observability. This ADR makes generated apps correct by construction.
    `instrumentation-node` becomes a RESERVED module name on the edge compile
    for adapter-wired apps (the pattern's own name — same as when it was
    hand-written).
+
+   **Amended by #408 (2026-08-04): the fence applies in EVERY phase, not only
+   `phase-production-build`.** As first landed it was production-build-gated,
+   while the hand-written hook it replaced also covered `next dev`. Measured on
+   next 16.2.11 against `packages/kn-next/src/__tests__/fixtures/dev-edge-fence`:
+   plain `next dev` (Turbopack, the 16.2 default) never consults
+   `config.webpack` and is unaffected either way, but `next dev --webpack`
+   **fails** the edge compile of `instrumentation-node`
+   (`UnhandledSchemeError: Reading from "node:fs" …`) — the same class as #342.
+   Only `output: 'standalone'` stays gated on `phase-production-build`. Pinned
+   by a real dev-server run (`adapter-dev-edge-fence.test.ts`).
 
 3. **file-manager's hand-written hook is removed** (graduated to the adapter);
    its guard now asserts the fence is adapter-owned (`adapterPath` wired, the

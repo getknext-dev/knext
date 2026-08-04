@@ -30,9 +30,15 @@
  * a seam symbol stops co-occurring with its seam API in any reader chunk and
  * this gate fails, instead of the deploy.
  *
- * CI wires this behind KNEXT_REQUIRE_STANDALONE=1 in the standalone-building
- * job so a missing build HARD-FAILS (never silently skips). Locally, with no
- * standalone build present, it skips cleanly.
+ * CI MUST wire this behind KNEXT_REQUIRE_STANDALONE=1 with a standalone build
+ * present, so a missing build HARD-FAILS. Without both, this guard SKIPS — and a
+ * skip is not a pass (#408 item 2: a guard that silently passes when its
+ * precondition is absent is decoration). This app ships the one-liner that does
+ * both halves; call it from your CI:
+ *
+ *     pnpm --filter {{ name }} test:seam
+ *
+ * Locally, with no standalone build present and the flag unset, it skips cleanly.
  */
 
 import { existsSync, readdirSync, readFileSync } from 'node:fs';

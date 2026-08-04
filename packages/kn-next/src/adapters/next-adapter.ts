@@ -59,16 +59,14 @@ const adapter: NextAdapter = {
     name: "knext-adapter",
 
     modifyConfig(config, { phase }) {
-        if (phase !== "phase-production-build") {
-            return config;
-        }
+        const isProductionBuild = phase === "phase-production-build";
 
-        console.log(
-            "[knext-adapter] modifyConfig fired for phase-production-build",
-        );
+        console.log(`[knext-adapter] modifyConfig fired for ${phase}`);
 
         // Ensure standalone output is set (already set in next.config.ts but we
         // enforce it here so the adapter is self-contained in later phases).
+        // `output` stays PRODUCTION-BUILD-ONLY: `next dev` must not be told to
+        // emit a standalone tree.
         //
         // #356 / ADR-0031 — the edge `IgnorePlugin` fence is PLATFORM-OWNED.
         // #342/#344: Next compiles `instrumentation.ts` for BOTH the nodejs and
@@ -86,10 +84,23 @@ const adapter: NextAdapter = {
         // re-broke the build. Every app wired through `adapterPath` now gets the
         // fence by construction, composed AFTER any webpack hook the app still
         // owns (guarded by adapter-edge-ignore-plugin.test.ts).
+        //
+        // #408 item 1 — the fence ships in EVERY phase, not only
+        // `phase-production-build`. MEASURED on next 16.2.11 against
+        // `src/__tests__/fixtures/dev-edge-fence` (a middleware app with guarded
+        // instrumentation): `next dev --webpack` fails the EDGE compile of
+        // `instrumentation-node` with `Module build failed: UnhandledSchemeError:
+        // Reading from "node:fs" is not handled by plugins` — the same class the
+        // production build hit before #356 — while plain `next dev` (Turbopack,
+        // the 16.2 default) is unaffected because Turbopack never consults
+        // `config.webpack`. The app's hand-written hook this replaced covered dev,
+        // so gating on the production build silently regressed `pnpm dev` for any
+        // app on the webpack bundler. Pinned by `adapter-dev-edge-fence.test.ts`
+        // (real dev server) and `adapter-edge-ignore-plugin.test.ts` (unit).
         const appWebpack = config.webpack;
         return {
             ...config,
-            output: "standalone",
+            ...(isProductionBuild ? { output: "standalone" as const } : {}),
             webpack(webpackConfig, ctx) {
                 const cfg = appWebpack
                     ? appWebpack(webpackConfig, ctx)

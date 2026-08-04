@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build --webpack",
-    "start": "NODE_COMPILE_CACHE=.next/compile-cache node .next/standalone/apps/{{ name }}/server.js"
+    "start": "NODE_COMPILE_CACHE=.next/compile-cache node .next/standalone/apps/{{ name }}/server.js",
+    "test:seam": "next build --webpack && KNEXT_REQUIRE_STANDALONE=1 vitest run standalone-seam-alive.test.ts"
   },
   "dependencies": {
     "@getknext/lib": "workspace:*",

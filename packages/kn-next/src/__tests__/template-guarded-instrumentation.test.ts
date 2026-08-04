@@ -248,4 +248,29 @@ describe("app template — package.json carries the instrumentation contract (#3
     it("declares @getknext/core (the adapter + core-owned instrumentation adapters)", () => {
         expect(pkg).toContain('"@getknext/core"');
     });
+
+    /**
+     * #408 item 2 — the generated app must be able to run its seam-alive guard
+     * for REAL, not green-by-skip. The guard hard-fails only under
+     * KNEXT_REQUIRE_STANDALONE=1 AND with a standalone build present; a generated
+     * app whose CI just runs `vitest` gets neither, so the guard silently passes
+     * while the seam it protects can be dead. The template therefore ships ONE
+     * script that does both halves, so the app's CI has something to call.
+     */
+    it("ships a `test:seam` script that BUILDS and then hard-fails (no green-by-skip)", () => {
+        const seamScript = JSON.parse(pkg ?? "{}").scripts?.["test:seam"] as
+            | string
+            | undefined;
+        expect(
+            seamScript,
+            "package.json.hbs is missing the `test:seam` script — without it a " +
+                "generated app's seam guard can only ever run build-less and skip",
+        ).toBeDefined();
+        const script = seamScript as string;
+        // It must build the standalone output the guard reads…
+        expect(script).toContain("next build --webpack");
+        // …and force the hard-fail mode, so a missing build FAILS instead of skipping.
+        expect(script).toContain("KNEXT_REQUIRE_STANDALONE=1");
+        expect(script).toContain("standalone-seam-alive.test.ts");
+    });
 });
