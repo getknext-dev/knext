@@ -93,15 +93,25 @@ describe("#644 — build context = the lockfile-inferred tracing root", () => {
     });
 
     it("create.ts and deploy.ts resolve the SAME root (one rule, not two)", () => {
-        for (const files of [
-            { "pnpm-lock.yaml": "", "package.json": "{}" },
-            { "pnpm-lock.yaml": "", "apps/web/package.json": "{}" },
-            { "bun.lock": "", "a/b/c/web/package.json": "{}" },
-        ]) {
+        // Annotated at the point of declaration. Left to inference, TypeScript
+        // widens the array into a UNION of these object literals, giving each
+        // member the others' keys as `undefined` — which `Record<string,
+        // string>` rightly rejects. Loosening `repo`'s parameter instead would
+        // let a genuinely absent file through, which is the opposite of what
+        // these cases assert.
+        const cases: { files: Record<string, string>; app: string }[] = [
+            { files: { "pnpm-lock.yaml": "", "package.json": "{}" }, app: "" },
+            {
+                files: { "pnpm-lock.yaml": "", "apps/web/package.json": "{}" },
+                app: "apps/web",
+            },
+            {
+                files: { "bun.lock": "", "a/b/c/web/package.json": "{}" },
+                app: "a/b/c/web",
+            },
+        ];
+        for (const { files, app } of cases) {
             const root = repo(files);
-            const app = Object.keys(files)
-                .find((f) => f.endsWith("package.json"))
-                ?.replace(/\/?package\.json$/, "");
             const appDir = app ? join(root, app) : root;
             expect(resolveLayout(appDir).root).toBe(
                 requireBuildContext(appDir),
