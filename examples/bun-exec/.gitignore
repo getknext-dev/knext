@@ -8,3 +8,5 @@ next-env.d.ts
 # compiled single-executable binaries (arch-specific, ~90-110 MB)
 knext-bun-exec-*
 *.log
+# spike/verification scratch (build outputs are 60-100 MB)
+.spike/
