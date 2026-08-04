@@ -842,7 +842,7 @@ RESTORE_PENDING=""
 _restore_attempted() { RESTORE_PENDING="${RESTORE_PENDING/ $1/}"; }
 cleanup() {
   # PROMOTE before deleting. running_pods is called from TWO places -- wait_zero
-  # (which promotes at :1170) and the fan-out sampler subshell (which cannot,
+  # (which promotes it) and the fan-out sampler subshell (which cannot,
   # being a subshell). Every phase ends `wait_zero; run_k6`, so the run's LAST
   # action is a sampler with no wait_zero after it: a blind `rm` here destroyed
   # the evidence before the verdict block read it, and a disk that filled during
@@ -1115,9 +1115,12 @@ running_pods() {
   # below is REACHABLE by a test. Same family as DRY_RUN_EXERCISE_KC /
   # DRY_RUN_EXERCISE_PENDING: without a seam this branch is unprovable, and an
   # unproved branch is decoration by this repo's own standard.
-  # POD_QUERY_STDERR_MERGED is decided ONCE at startup (see the probe near :302),
-  # never here -- this function runs in a subshell, so a decision made here could
-  # not be reported by the banner.
+  # POD_QUERY_STDERR_MERGED is never decided HERE: this function runs in a subshell
+  # (api_retry calls it as `$("$@" 2>&1)`), so an assignment made here could not
+  # reach the banner. It is set by the startup probe, or promoted from the marker
+  # below by wait_zero / cleanup / the pre-exit check. (It used to say "decided
+  # ONCE at startup", which rounds 5-6 made false -- three sites now promote it
+  # mid-run. Corrected rather than left for the next reader to take as fact.)
   if [ "$POD_QUERY_STDERR_MERGED" = "1" ]; then
     errf=""
   else
@@ -1134,7 +1137,7 @@ running_pods() {
     # without it, a disk that filled mid-run was completely silent and a fabricated
     # count got published, filed COMPLETE, exit 0.
     : > "$MKTEMP_MARKER" 2>/dev/null || true
-    # Merged capture keeps classify_api_error's input non-blank, which :1055 says
+    # Merged capture keeps classify_api_error's input non-blank, which the failure branch below says
     # matters more than an over-count. The over-count is fail-safe -- it keeps
     # waiting and never fabricates a ZERO -- and the count is barred from
     # supporting a disproof once the flag is set.
@@ -1374,7 +1377,7 @@ YAML
   if [ "$sample" = "1" ]; then
     # Unguarded, this became an ambiguous redirect when mktemp failed and the
     # sampler silently lost every peak-pod reading. The run already KNOWS mktemp
-    # is broken by this point (:317), so say so rather than losing data quietly.
+    # is broken by this point (the startup probe), so say so rather than losing data quietly.
     peak_file=$(mktemp 2>/dev/null) || peak_file=""
     if [ -z "$peak_file" ]; then
       mark_merged "failed MID-RUN"
