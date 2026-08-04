@@ -322,10 +322,20 @@ esac
 MKTEMP_MARKER="${TMPDIR:-/tmp}/knext-bench-mktemp-degraded.$$"
 rm -f "$MKTEMP_MARKER" 2>/dev/null || true
 POD_QUERY_STDERR_MERGED=0
-if [ "${DRY_RUN:-0}" = "1" ] && [ "${DRY_RUN_EXERCISE_MKTEMP_FAIL:-0}" = "1" ]; then
+# WHERE the degradation was detected. Not cosmetic: "mktemp was already broken
+# when the run started" and "the disk filled during the run" are different
+# operational problems, and without this the two are indistinguishable in the
+# artifact -- which also made them indistinguishable to a test, so the guard for
+# the mid-run path could not tell it apart from the startup path.
+POD_QUERY_MERGE_ORIGIN=""
+mark_merged() {
   POD_QUERY_STDERR_MERGED=1
+  if [ -z "$POD_QUERY_MERGE_ORIGIN" ]; then POD_QUERY_MERGE_ORIGIN="$1"; fi
+}
+if [ "${DRY_RUN:-0}" = "1" ] && [ "${DRY_RUN_EXERCISE_MKTEMP_FAIL:-0}" = "1" ]; then
+  mark_merged "detected AT STARTUP"
 else
-  _probe=$(mktemp 2>/dev/null) || POD_QUERY_STDERR_MERGED=1
+  _probe=$(mktemp 2>/dev/null) || mark_merged "detected AT STARTUP"
   [ -n "${_probe:-}" ] && rm -f "$_probe"
 fi
 # The deadline needs the SAME treatment, for a sharper reason than cosmetics: a
@@ -846,7 +856,7 @@ cleanup() {
   # signalled run here. Deleting it would silently make a SIGTERMed degraded run
   # report as clean.
   if [ -n "${MKTEMP_MARKER:-}" ] && [ -f "$MKTEMP_MARKER" ]; then
-    POD_QUERY_STDERR_MERGED=1
+    mark_merged "failed MID-RUN"
   fi
   rm -f "${MKTEMP_MARKER:-}" 2>/dev/null || true
   # FIRST statement, before anything else can call kc(): this is the SIGNAL-path
@@ -972,7 +982,7 @@ cleanup() {
     # Without this the run published a pod count that was never observed (a
     # kubectl warning counted as a pod), filed COMPLETE, and exited 0 -- the only
     # degraded path in this harness that left no trace at all.
-    log "*** RUN DEGRADED — mktemp is unavailable, so pod queries merged stderr into stdout. A kubectl warning can be COUNTED AS A POD, so any 'still N pod(s)' line may be an over-count and scale-to-zero may never confirm. Fix the temp dir (TMPDIR / disk space) before trusting these numbers. ***"
+    log "*** RUN DEGRADED — mktemp is unavailable (${POD_QUERY_MERGE_ORIGIN:-origin unknown}), so pod queries merged stderr into stdout. A kubectl warning can be COUNTED AS A POD, so any 'still N pod(s)' line may be an over-count and scale-to-zero may never confirm. Fix the temp dir (TMPDIR / disk space) before trusting these numbers. ***"
   fi
   if [ "$API_UNOBSERVED_COUNT" -gt 0 ]; then
     log "*** RUN DEGRADED — ${API_UNOBSERVED_COUNT} scale-down wait(s) ended WITHOUT OBSERVING THE FINAL POD COUNT (every poll failed, or the window ended on a failed poll). Scale-to-zero is UNCONFIRMED for those reps, not disproven: any 'cold' sample taken after one may have hit a WARM pod and be biased LOW. ***"
@@ -1185,7 +1195,7 @@ wait_zero() {
     # consumed its own: which branch ran then depended on which side of the failure
     # boundary each call landed -- parity, not behaviour.
     if [ -f "$MKTEMP_MARKER" ]; then
-      POD_QUERY_STDERR_MERGED=1
+      mark_merged "failed MID-RUN"
       rm -f "$MKTEMP_MARKER"
     fi
     if [ "$rc" -ne 0 ]; then
@@ -1367,7 +1377,7 @@ YAML
     # is broken by this point (:317), so say so rather than losing data quietly.
     peak_file=$(mktemp 2>/dev/null) || peak_file=""
     if [ -z "$peak_file" ]; then
-      POD_QUERY_STDERR_MERGED=1
+      mark_merged "failed MID-RUN"
       log "  WARNING: mktemp failed — pod-fan-out sampling is DISABLED for this rep (peak pods will read as unknown, not zero)."
     fi
     (
@@ -1948,7 +1958,7 @@ fi
 # check below had already evaluated with the flag still 0, and a run whose VERDICT
 # said UNCONFIRMED still exited 0. Caught by test P failing on the fixed tree.
 if [ -n "${MKTEMP_MARKER:-}" ] && [ -f "$MKTEMP_MARKER" ]; then
-  POD_QUERY_STDERR_MERGED=1
+  mark_merged "failed MID-RUN"
 fi
 # Exit 3 means "there IS a dataset, but its trust is compromised". A run that
 # produced no reps at all (--phases none, an early abort) has no dataset to

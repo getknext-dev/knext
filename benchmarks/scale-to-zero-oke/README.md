@@ -161,7 +161,7 @@ mistaken for a complete one:
 | `api retries: 0 (no transient API errors) — but pod queries ran with stderr MERGED, so this run is NOT clean` | The control plane behaved, but `mktemp` was unavailable so pod counts may include kubectl warning lines. Deliberately does **not** say "clean" — that is the string a reader greps for. |
 | `run integrity: ... but pod queries could not separate kubectl's stderr (mktemp unavailable), so any pod count may be an over-count — dataset is UNCONFIRMED` | The authoritative verdict when the cause was merged stderr rather than an unobserved wait. **Exit code 3.** |
 | `*** RUN DEGRADED — N scale-down wait(s) ended WITHOUT OBSERVING THE FINAL POD COUNT ... ***` | At least one scale-down wait ended without seeing the final pod count — either every poll failed, or the window ended on a failed poll. Deliberately says nothing about whether the cause was transient or terminal: the counter carries no class information. Scale-to-zero is **unconfirmed, not disproven**. A wait whose LAST poll succeeded and saw pods is *not* this case — that is a positive disproof and is reported as `scale-to-zero did NOT happen within the window`. |
-| `*** RUN DEGRADED — mktemp is unavailable, so pod queries merged stderr into stdout ... ***` | The temp dir is unusable (no space, bad `TMPDIR`), so pod queries cannot separate kubectl's stderr from its stdout. A warning line can then be **counted as a pod**, inflating `still N pod(s)` and preventing scale-to-zero from ever confirming. **Exit code 3**, filed `UNCONFIRMED`. Fix the temp dir before trusting the numbers. |
+| `*** RUN DEGRADED — mktemp is unavailable (detected AT STARTUP \| failed MID-RUN), so pod queries merged stderr into stdout ... ***` | The temp dir is unusable (no space, bad `TMPDIR`), so pod queries cannot separate kubectl's stderr from its stdout. A warning line can then be **counted as a pod**, inflating `still N pod(s)` and preventing scale-to-zero from ever confirming. **Exit code 3**, filed `UNCONFIRMED`. Fix the temp dir before trusting the numbers. |
 | `-> no scale-down poll was made (SCALE_DOWN_TIMEOUT=0) — scale-to-zero was not checked` | The scale-down window was zero-length, so nothing was polled. No claim is made about pods either way. A **non-numeric** value (e.g. `150s`) is refused outright with a `FATAL:` abort rather than being read as `0`. |
 | `api retries: N (transient API errors were retried — this run is NOT a clean first-try run)` | Printed with a `*** RUN DEGRADED BY TRANSIENT API ERRORS ***` block naming each retried operation. Every config that was applied was verified applied before it was measured, so if the run also completed all its reps the data is valid — the banner says so only in that case — but the control plane was flaky, so wall-clock timings may include control-plane stalls. If the run aborted or lost a rep, the banner says that instead and the `run integrity:` verdict below it is authoritative. See "Transient API retry" below. |
 
@@ -487,3 +487,16 @@ nothing.
 - p99 cold-start **under concurrency** (N simultaneous requests hitting a 0-pod
   service) — the `cold` phase here is N *sequential* single-request samples, matching
   the published methodology. The concurrent thundering-herd case is a follow-on.
+
+### Known limitation of the merged-stderr detection
+
+The marker that records "mktemp failed mid-run" is written into `${TMPDIR:-/tmp}` —
+**the same filesystem whose exhaustion the mechanism exists to detect**. On a
+genuinely full disk that write can fail too, and the detection then degrades
+silently into the bug it guards.
+
+The startup probe is unaffected (it reports before anything is written), and the
+banner now says which case it saw — `detected AT STARTUP` versus `failed MID-RUN` —
+so the two are distinguishable in the artifact. But a disk that fills *during* a run
+and is *completely* full can defeat the mid-run half. Treat `peak=` figures from a
+run on a nearly-full volume as suspect even when nothing is flagged.

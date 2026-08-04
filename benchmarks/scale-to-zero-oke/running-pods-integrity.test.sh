@@ -407,6 +407,8 @@ assert_contains "${TE}/results.txt" "mktemp is unavailable" \
   "the merged-stderr degradation is announced, not silent"
 assert_contains "${TE}/results.txt" "run indexed as UNCONFIRMED" \
   "a run with merged stderr is filed UNCONFIRMED, not COMPLETE"
+assert_contains "${TE}/results.txt" "detected AT STARTUP" \
+  "a startup-detected failure is reported as such, not as mid-run"
 if [ "$TE_RC" = "3" ]; then
   ok "a merged-stderr run exits 3, the documented UNCONFIRMED code"
 else
@@ -549,12 +551,17 @@ assert_not_contains "${TL}/results.txt" "run indexed as COMPLETE" \
 assert_contains "${TL}/results.txt" "mktemp is unavailable" \
   "a mid-run mktemp failure is promoted to a run-level degradation, not silently merged"
 # Every assertion above also holds in the STARTUP case that test E covers, so the
-# mktemp_ok_until=1 threshold was load-bearing but unguarded: if a future edit adds
-# an mktemp call before the startup probe, call #1 stops being the probe and this
-# test silently degenerates into a duplicate of E. Pin a string only the MID-RUN
-# path can emit -- in the startup case merged mode is set before the first poll, so
-# a count is never read un-merged and this line cannot appear.
-assert_contains "${TL}/results.txt" "stderr was MERGED into the count" \
+# mktemp_ok_until=1 threshold is load-bearing: if a future edit adds an mktemp call
+# before the startup probe, call #1 stops being the probe and this test degenerates
+# into a duplicate of E.
+#
+# The FIRST attempt at anchoring this asserted "stderr was MERGED into the count",
+# on the reasoning that startup-merged runs never read a count un-merged. That
+# reasoning was WRONG -- run.sh keys that branch on the flag's VALUE, not on when it
+# was set -- and setting mktemp_ok_until=0 (the exact degeneration this is meant to
+# catch) left all five assertions green. The harness now reports WHERE it detected
+# the failure, which is the only thing that actually distinguishes them.
+assert_contains "${TL}/results.txt" "failed MID-RUN" \
   "this is genuinely the MID-RUN path, not a duplicate of the startup case"
 if [ "$TL_RC" -ne 0 ]; then
   ok "a mid-run mktemp failure makes the run exit non-zero (${TL_RC})"
@@ -644,10 +651,20 @@ PATH="${TP}/bin:$PATH" SCALE_DOWN_TIMEOUT=2 SCALE_DOWN_POLL_S=1 \
   run_bench "$TP" --phases cold --cold-samples 1 || TP_RC=$?
 assert_not_contains "${TP}/results.txt" "run indexed as COMPLETE" \
   "a sampler-side mktemp failure is not filed COMPLETE"
-if [ "$TP_RC" -ne 0 ]; then
-  ok "a sampler-side mktemp failure still makes the run exit non-zero (${TP_RC})"
+# THRESHOLD ANCHOR. `pods: peak=` is emitted only when peak_file SUCCEEDED (round 6
+# made the sampler emit nothing otherwise), so its presence proves the parent did
+# NOT take the direct path and the flag can only have come from the sampler's
+# marker. Without this, threshold 3 is load-bearing and unguarded: one added mktemp
+# call anywhere before the sampler turns this into a test of the parent-direct path,
+# the round-6 fix becomes revertable with the suite green, and nothing notices.
+assert_contains "${TP}/results.txt" "pods: peak=" \
+  "peak_file succeeded, so the SAMPLER set the flag — not the parent's direct path"
+assert_contains "${TP}/results.txt" "failed MID-RUN" \
+  "the degradation is reported as mid-run, not startup"
+if [ "$TP_RC" = "3" ]; then
+  ok "a sampler-side mktemp failure exits 3, the documented UNCONFIRMED code"
 else
-  nope "a sampler-side mktemp failure exited 0 — cleanup destroyed the marker instead of promoting it"
+  nope "a sampler-side mktemp failure exited ${TP_RC}, not 3 — a FATAL(1) or data-loss(2) would satisfy a mere non-zero check"
 fi
 
 # -- Test C (#453 item 3): a stderr warning is not counted as a pod --
