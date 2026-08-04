@@ -32,6 +32,7 @@ import (
 	"knative.dev/pkg/apis"
 	servingv1 "knative.dev/serving/pkg/apis/serving/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
@@ -131,12 +132,35 @@ var _ = Describe("Blast radius of a stored-malformed NextApp (#455)", func() {
 
 		By("starting the REAL controller wiring (SetupWithManager) against envtest")
 		mgrCtx, mgrCancel := context.WithCancel(ctx)
+		mgrDone := make(chan struct{})
+		mgrErr := make(chan error, 1)
 		// Registered FIRST so it runs LAST (Ginkgo cleanup is LIFO): the object
 		// deletions below must be reconciled by a manager that is still running.
-		DeferCleanup(func() { mgrCancel() })
+		// The cleanup WAITS for Start to return — this manager shares one
+		// apiserver with every other spec in the suite, and a still-draining
+		// manager keeps reconciling (and finalizing) objects those specs own.
+		DeferCleanup(func() {
+			mgrCancel()
+			Eventually(mgrDone, "30s").Should(BeClosed(),
+				"the manager must fully stop before the next spec runs")
+			select {
+			case err := <-mgrErr:
+				Expect(err).NotTo(HaveOccurred(), "manager.Start returned an error")
+			default: // already drained by the fast-fail check below
+			}
+		})
 
 		mgr, err := ctrl.NewManager(cfg, ctrl.Options{
-			Scheme:                 k8sClient.Scheme(),
+			Scheme: k8sClient.Scheme(),
+			// Namespace-scoped cache: LEG 4 counts reconciles, and a cluster-wide
+			// cache makes those counts a function of what OTHER specs happen to
+			// have left in the apiserver (measured: 14 reconciles for this spec
+			// alone vs 99 in a full-suite run, from ~85 leftover NextApps the
+			// manager picks up and finalizes). Scoping the cache makes both
+			// bounds functions of this spec's own two objects.
+			Cache: cache.Options{
+				DefaultNamespaces: map[string]cache.Config{blastNamespace: {}},
+			},
 			Metrics:                metricsserver.Options{BindAddress: "0"},
 			HealthProbeBindAddress: "0",
 		})
@@ -147,11 +171,23 @@ var _ = Describe("Blast radius of a stored-malformed NextApp (#455)", func() {
 			Recorder: mgr.GetEventRecorderFor("nextapp-controller"),
 		}).SetupWithManager(mgr)).To(Succeed())
 
-		mgrDone := make(chan struct{})
 		go func() {
 			defer close(mgrDone)
-			_ = mgr.Start(mgrCtx)
+			mgrErr <- mgr.Start(mgrCtx)
 		}()
+
+		// Fail FAST on a Start that never gets going. Swallowing the Start error
+		// makes a bad manager config surface as an unexplained 30s/60s Eventually
+		// timeout further down, which reads as a product bug rather than a
+		// harness bug.
+		Consistently(func() error {
+			select {
+			case err := <-mgrErr:
+				return fmt.Errorf("manager.Start returned before the spec ran: %v", err)
+			default:
+				return nil
+			}
+		}, "2s", "100ms").Should(Succeed())
 		DeferCleanup(func() {
 			for _, nn := range []types.NamespacedName{badNN, goodNN} {
 				cur := &appsv1alpha1.NextApp{}
@@ -238,9 +274,10 @@ var _ = Describe("Blast radius of a stored-malformed NextApp (#455)", func() {
 		// tight RequeueAfter loop (that is AddAfter, a different code path) — so
 		// this bound fails in BOTH of the wrong-behaviour directions, without
 		// depending on where in the exponential ramp the sample happens to land.
-		// Measured, not guessed: 13 rate-limited retries on the real tree in this
-		// window vs 2 (incidental conflict retries) when the malformed object is
-		// dropped with `return ctrl.Result{}, nil`. The bound sits between them.
+		// Measured, not guessed (cluster-wide cache and namespace-scoped alike):
+		// 13 rate-limited retries on the real tree in this window vs 2–3
+		// (incidental conflict retries) when the malformed object is dropped with
+		// `return ctrl.Result{}, nil`. The bound sits between them.
 		Expect(workqueueCounter("workqueue_retries_total")-retriesBefore).
 			To(BeNumerically(">=", 8),
 				"the bad object must keep being RE-QUEUED through the rate limiter — "+

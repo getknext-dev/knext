@@ -47,12 +47,25 @@ the following. Not two.
    by a **shared fixture** — `packages/kn-next-operator/test/fixtures/quantity-grammar.json` is the
    pattern: the Go suite re-derives every row from the real parser, and the CLI suite asserts the
    same verdict on the same rows. No fixture, no mirror.
+   **The fixture must be a cross-product, not a curated sample.** A hand-picked 59-row version of
+   that file passed while the CLI regex was rejecting 22 values apimachinery accepts (the
+   trailing-dot mantissa `"1."`, `"1.Gi"`, `"+1.e3"`) — the parity claim was true of the rows it
+   checked and false of the grammar. Enumerate the axes (sign × mantissa × suffix) and assert the
+   fixture covers their product.
 
 ### Where the code goes
 
 - Validation rules: `internal/validation/validate.go`, called from `ValidateNextAppSpec`.
 - Status conditions / events / requeues: `computeStatusVerdict` (`status_verdict.go`) — never as a
-  new branch in `Reconcile` (`.claude/rules/architecture.md`).
+  new branch in `Reconcile` (`.claude/rules/architecture.md`). **One documented exception, and it is
+  the one this ADR generalises:** the spec-validation gate itself is a *precondition*, not a
+  verdict — it runs before the reconciler has observed any child state, so there is nothing for
+  `computeStatusVerdict` to compose from. It therefore emits its Warning event and sets
+  `Degraded`/`Ready=False` inline in `Reconcile` (`nextapp_controller.go:322-346`) and returns. Do
+  not read that branch as licence to add others: a new rule of the kind this ADR describes belongs
+  *inside* `validation.ValidateNextAppSpec`, reusing that single existing branch, and anything that
+  reports on OBSERVED state (child ksvc, revisions, database, prewarm) still goes in
+  `computeStatusVerdict`.
 - Coverage: **scan, do not enumerate.** `TestEveryResourcesFieldIsQuantityChecked` reflects over
   `ResourcesSpec` and fails on any field a malformed value gets past, so adding a fifth field
   without wiring it in is red. A hand-written list of checked fields is how the next field gets
@@ -89,4 +102,6 @@ the following. Not two.
 
 - [x] Shared quantity fixture + both halves of the parity contract (#455).
 - [x] Reflective coverage scan over `ResourcesSpec` (#455).
+- [x] Fix the drift the fixture found on landing: the CLI mantissa now accepts the trailing-dot
+      form, and the fixture walks the full cross-product so that class cannot hide again (#455).
 - [ ] When a **fourth** rule gets mirrored in the CLI, re-open the codegen option in the table above.

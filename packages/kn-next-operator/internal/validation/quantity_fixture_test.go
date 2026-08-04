@@ -40,6 +40,15 @@ import (
 // dependency bump). The CLI-side half of the contract lives in
 // packages/kn-next/src/__tests__/validate-quantity-grammar-parity.test.ts,
 // which asserts the CLI's verdict on the SAME rows.
+//
+// The fixture's BREADTH is a guard in its own right, and it is the half that was
+// wrong first: a curated 59-row sample let 22 live CLI divergences (apimachinery
+// accepts a TRAILING-DOT mantissa — "1.", "1.Gi", "+1.e3" — the CLI regex did
+// not) sit unnoticed under a test that claimed parity. So the value set is the
+// systematic sign × mantissa × suffix cross-product, and
+// TestQuantityFixtureCoversTheGrammarCrossProduct rebuilds it here and fails on
+// any missing combination. Shrinking the fixture back to a hand-picked sample is
+// therefore red, not silent.
 const quantityFixturePath = "../../test/fixtures/quantity-grammar.json"
 
 type quantityFixture struct {
@@ -65,6 +74,52 @@ func loadQuantityFixture(t *testing.T) quantityFixture {
 			"grammar's corners (suffixes, exponents, sign, whitespace, junk)", len(fx.Cases))
 	}
 	return fx
+}
+
+// quantityGrammarAxes is the fixture's value set, stated as the axes it is the
+// cross-product of. Widening an axis here is how you widen the fixture; the
+// coverage test below then names every combination that is missing from it.
+var quantityGrammarAxes = struct {
+	signs, mantissas, suffixes []string
+}{
+	signs:     []string{"", "+", "-"},
+	mantissas: []string{"0", "1", "10", "1.5", "0.5", ".5", "1.", "0.", "1.0", "123456", ""},
+	suffixes: []string{
+		"", "m", "k", "K", "M", "G", "T", "P", "E", "n", "u",
+		"Ki", "Mi", "Gi", "Ti", "Pi", "Ei", "i", "Mib", "GB", "gi", "B",
+		"e3", "E3", "e+3", "e-3", "e", "e+", ".e3", "1", " Mi", "Mi ",
+	},
+}
+
+// TestQuantityFixtureCoversTheGrammarCrossProduct makes the fixture's BREADTH
+// scannable instead of a matter of taste. Every sign × mantissa × suffix
+// combination must be present; a fixture trimmed back to hand-picked "corners"
+// fails here rather than quietly narrowing what parity means.
+func TestQuantityFixtureCoversTheGrammarCrossProduct(t *testing.T) {
+	fx := loadQuantityFixture(t)
+	present := make(map[string]bool, len(fx.Cases))
+	for _, c := range fx.Cases {
+		present[c.Value] = true
+	}
+	missing := []string{}
+	for _, s := range quantityGrammarAxes.signs {
+		for _, m := range quantityGrammarAxes.mantissas {
+			for _, sf := range quantityGrammarAxes.suffixes {
+				if v := s + m + sf; !present[v] {
+					missing = append(missing, v)
+				}
+			}
+		}
+	}
+	if len(missing) > 0 {
+		shown := missing
+		if len(shown) > 10 {
+			shown = shown[:10]
+		}
+		t.Errorf("shared quantity fixture is missing %d grammar combinations, e.g. %q — "+
+			"regenerate it rather than curating it; a curated sample is what hid the "+
+			"trailing-dot divergence", len(missing), shown)
+	}
 }
 
 // TestQuantityFixtureMatchesApimachinery is the oracle half: the fixture is only
