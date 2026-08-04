@@ -127,7 +127,18 @@ vi.mock("../cli/shared", () => ({
 const readFileSyncMock = vi.fn<(...a: unknown[]) => string>(() => "");
 vi.mock("node:fs", async (importOriginal) => {
     const actual = await importOriginal<typeof import("node:fs")>();
+    // #644: deploy now infers the docker build context from the real
+    // filesystem (the lockfile walk in tracing-root.ts). Spreading
+    // `importOriginal()` does NOT carry node-builtin named exports under
+    // vitest, so every fs function the code touches must be listed here —
+    // `existsSync` is passed through to the REAL one rather than stubbed, so
+    // the walk still answers about the actual tree.
+    const { createRequire } = await import("node:module");
+    const realFs = createRequire(import.meta.url)(
+        "node:fs",
+    ) as typeof import("node:fs");
     const overrides = {
+        existsSync: realFs.existsSync,
         readFileSync: (...a: unknown[]) => readFileSyncMock(...(a as [string])),
         writeFileSync: vi.fn(),
         mkdirSync: vi.fn(),

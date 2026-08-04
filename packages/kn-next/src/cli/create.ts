@@ -30,6 +30,7 @@ import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { createLogger } from "../utils/logger";
+import { findTracingRoot, NO_LOCKFILE_INSTALL } from "./tracing-root";
 
 const log = createLogger({ module: "create" });
 
@@ -85,38 +86,10 @@ export function templateRoot(): string {
  * which is not a pass (#408).
  */
 /**
- * EXACTLY the lockfiles next 16.2.11's `findRootDirAndLockFiles` considers.
- *
- * `pnpm-workspace.yaml` is deliberately NOT here even though it looks like a
- * workspace-root marker: Next does not consult it, so treating it as one made
- * us emit `apps/a/` where Next produces a FLAT `.next/standalone/` — and the
- * emitted seam guard would then point at a directory that never exists and
- * SKIP. Diverging from Next here does not "fix" anything; it just moves the
- * error somewhere quieter.
- *
- * Each entry also names the package manager, because the generated Dockerfile
- * must install with the manager whose lockfile it found (`npm ci` cannot
- * consume a `pnpm-lock.yaml`).
+ * The lockfile list and the walk itself live in `tracing-root.ts` (#644): the
+ * same rule decides `deploy`/`preview`'s docker build context, and two copies
+ * of it agreed only for `apps/<name>`.
  */
-const LOCKFILES: ReadonlyArray<{ file: string; install: string }> = [
-    {
-        file: "pnpm-lock.yaml",
-        install: "corepack enable && pnpm install --frozen-lockfile",
-    },
-    { file: "package-lock.json", install: "npm ci" },
-    {
-        file: "yarn.lock",
-        install: "corepack enable && yarn install --immutable",
-    },
-    // The node base image has no bun. Rather than emit a command the image
-    // cannot run, install with npm from package.json and say so in the emitted
-    // Dockerfile — switch the base image if you want bun's lockfile honoured.
-    { file: "bun.lock", install: "npm install --no-audit --no-fund" },
-    { file: "bun.lockb", install: "npm install --no-audit --no-fund" },
-];
-
-/** No lockfile anywhere: nothing to be frozen against. */
-const NO_LOCKFILE_INSTALL = "npm install --no-audit --no-fund";
 
 export interface Layout {
     /**
@@ -137,22 +110,13 @@ export interface Layout {
 /** Resolve the layout facts every emitted path depends on, once. */
 export function resolveLayout(appDir: string): Layout {
     const app = resolve(appDir);
-    let dir = app;
-    let root = app;
-    let installCmd = NO_LOCKFILE_INSTALL;
-    // Walk up to the OUTERMOST lockfile-bearing ancestor: with a lockfile in
-    // both the workspace root and (rarely) the app, Next traces from the outer
-    // one, and guessing the inner one silently mislocates every emitted path.
-    for (;;) {
-        const hit = LOCKFILES.find((l) => existsSync(join(dir, l.file)));
-        if (hit) {
-            root = dir;
-            installCmd = hit.install;
-        }
-        const parent = dirname(dir);
-        if (parent === dir) break;
-        dir = parent;
-    }
+    // Same walk `deploy`/`preview` use for the docker build context (#644).
+    // `create` tolerates the no-lockfile case that `requireBuildContext`
+    // rejects: an app is scaffolded BEFORE anything is installed, and with no
+    // lockfile anywhere Next traces from the app directory itself — which is
+    // exactly what the null root falls back to here.
+    const { root: found, installCmd } = findTracingRoot(app);
+    const root = found ?? app;
     const rel = relative(root, app);
     const standalonePrefix =
         !rel || rel.startsWith("..") ? "" : `${rel.split(sep).join("/")}/`;
