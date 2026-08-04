@@ -315,7 +315,10 @@ jobs:
     # app (including every app `turbo gen zone` generates) ran its copy of the
     # guard build-less and passed by SKIPPING. An enumerated list is how the
     # second app gets missed; this scans the tree instead, and the scanner exits
-    # non-zero rather than emitting an empty (vacuous) matrix.
+    # non-zero rather than emitting an empty (vacuous) matrix. It discovers GUARD
+    # FILES, so an app is covered the moment it CARRIES the guard — a companion
+    # assertion in tests/seam-alive-app-coverage.test.ts is what makes an app that
+    # NEEDS the guard (instrumentation + @getknext/lib) but lacks it fail.
     # Guarded by tests/seam-alive-app-coverage.test.ts.
     name: Discover apps carrying the seam-alive guard
     runs-on: ubuntu-latest
@@ -332,7 +335,14 @@ jobs:
 
       - name: Scan apps/ for standalone-seam-alive.test.ts
         id: scan
-        run: echo "apps=$(node scripts/seam-alive-apps.mjs)" >> "$GITHUB_OUTPUT"
+        # TWO statements, deliberately. `echo "apps=$(node …)"` would DISCARD the
+        # scanner's exit status — a command substitution's status is dropped and
+        # `echo` succeeds — so an empty-matrix refusal would exit 0 and the gate
+        # would go vacuous exactly where it must not. A bare assignment propagates
+        # the failure under bash -e. Guarded by tests/seam-alive-app-coverage.test.ts.
+        run: |
+          apps=$(node scripts/seam-alive-apps.mjs)
+          echo "apps=$apps" >> "$GITHUB_OUTPUT"
 
   seam-alive:
     # PER-APP build + gate: #352 shipped with db_wake + correlation DEAD in prod
@@ -378,8 +388,12 @@ jobs:
       - name: Build @getknext/core
         run: pnpm --filter @getknext/core build
 
+      # PATH filter, not a name filter: the matrix carries DIRECTORY names and
+      # `pnpm --filter <name>` matches on PACKAGE NAME — which already differs for
+      # apps/docs (package "knext-docs"). A name miss prints "No projects matched
+      # the filters" and exits 0, i.e. builds nothing while looking fine.
       - name: Build ${{ matrix.app }} standalone (next build --webpack)
-        run: pnpm --filter ${{ matrix.app }} build
+        run: pnpm --filter ./apps/${{ matrix.app }} build
 
       - name: Run seam-alive artifact gate (#352/#344, must NOT skip)
         env:

@@ -105,6 +105,19 @@ const adapter: NextAdapter = {
                 const cfg = appWebpack
                     ? appWebpack(webpackConfig, ctx)
                     : webpackConfig;
+                // A webpack hook that mutates and forgets to `return config` is a
+                // common authoring slip. Without this, the fence below dereferences
+                // `undefined` and throws a bare TypeError from inside knext —
+                // during `next dev --webpack` too, since #408 — which reads as a
+                // knext bug rather than the app's missing return. Name it.
+                if (cfg == null) {
+                    throw new Error(
+                        "[knext-adapter] the app's own `webpack(...)` hook in next.config " +
+                            "returned undefined — it must RETURN the (possibly modified) " +
+                            "webpack config. The adapter composes that return value before " +
+                            "appending the edge instrumentation-node fence.",
+                    );
+                }
                 if (ctx.nextRuntime === "edge") {
                     cfg.plugins = cfg.plugins || [];
                     cfg.plugins.push(

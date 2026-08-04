@@ -162,6 +162,19 @@ describe("knext-adapter modifyConfig — the fence covers next dev too (#408)", 
         ).toBe(true);
     });
 
+    it("an app webpack hook that forgets to return gets a NAMED error, not a bare TypeError", async () => {
+        // Common authoring slip: `webpack(config) { config.plugins.push(x); }` with
+        // no return. Before the fix the fence dereferenced `cfg.plugins` on
+        // `undefined` and threw a bare `TypeError` from inside knext's code — and
+        // since #408 the fence runs in dev too, so that now surfaces during
+        // `next dev --webpack`, where it is even harder to attribute.
+        const forgetful = (() => undefined) as unknown as NextConfig["webpack"];
+        const out = await modify({ webpack: forgetful }, DEVELOPMENT_SERVER);
+        expect(() => runWebpackHook(out.webpack as WebpackFn, "edge")).toThrow(
+            /knext-adapter.*webpack.*returned undefined/i,
+        );
+    });
+
     it("dev nodejs compile: leaves the config untouched", async () => {
         const out = await modify({}, DEVELOPMENT_SERVER);
         const result = runWebpackHook(out.webpack as WebpackFn, "nodejs");

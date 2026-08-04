@@ -273,4 +273,45 @@ describe("app template — package.json carries the instrumentation contract (#3
         expect(script).toContain("KNEXT_REQUIRE_STANDALONE=1");
         expect(script).toContain("standalone-seam-alive.test.ts");
     });
+
+    it("declares every binary `test:seam` invokes (it must work OUTSIDE this monorepo)", () => {
+        // The script knext hands users is prescribed for "an app generated into
+        // your own repo — wire it into your CI". Inside this workspace a missing
+        // binary resolves by root hoisting, so the gap is invisible here and only
+        // shows up as command-not-found in the exact scenario the docs describe.
+        // SCAN the script for the binaries it runs rather than checking a known
+        // name — a future `test:seam` that adds a tool is covered automatically.
+        const manifest = JSON.parse(pkg ?? "{}") as {
+            scripts?: Record<string, string>;
+            dependencies?: Record<string, string>;
+            devDependencies?: Record<string, string>;
+        };
+        const script = manifest.scripts?.["test:seam"] ?? "";
+        const declared = {
+            ...manifest.dependencies,
+            ...manifest.devDependencies,
+        };
+        const binaries = script
+            .split("&&")
+            .map((segment) =>
+                segment
+                    .trim()
+                    .split(/\s+/)
+                    // Drop leading `VAR=value` env assignments (KNEXT_REQUIRE_STANDALONE=1).
+                    .find((token) => !/^[A-Z_][A-Z0-9_]*=/.test(token)),
+            )
+            .filter((bin): bin is string => Boolean(bin));
+        expect(
+            binaries.length,
+            `no binary parsed out of test:seam: "${script}"`,
+        ).toBeGreaterThan(0);
+        for (const bin of binaries) {
+            expect(
+                Object.hasOwn(declared, bin),
+                `test:seam runs \`${bin}\` but the template never declares it — the ` +
+                    "script resolves by root hoisting inside this monorepo and dies with " +
+                    "command-not-found in a generated app's own repo",
+            ).toBe(true);
+        }
+    });
 });

@@ -286,15 +286,26 @@ chunk-level drift could never fail the app that introduced it.
 CI therefore **scans** for the guard (`scripts/seam-alive-apps.mjs` →
 `apps/*/standalone-seam-alive.test.ts`) and runs a per-app job that builds that
 app and then runs its guard with `KNEXT_REQUIRE_STANDALONE=1`. A new app is
-covered the moment it exists; the scanner exits non-zero rather than emitting an
-empty matrix; and `tests/seam-alive-app-coverage.test.ts` fails if the workflow
-ever hard-codes an app again.
+covered the moment it **carries the guard**; the scanner exits non-zero rather
+than emitting an empty matrix; and `tests/seam-alive-app-coverage.test.ts` fails
+if any workflow hard-codes an app again.
+
+Be precise about what that scan can and cannot see: it discovers guard *files*, so
+an app that NEEDS the guard and has none is invisible to it. The companion
+assertion in the same test closes that direction — every app with an
+`instrumentation.ts` layer **and** a `@getknext/lib` dependency (the two
+preconditions for the #352 module-state split) must carry the guard, or the test
+names it and fails.
 
 For an app generated into **your own** repo, the template ships the equivalent
 one-liner — wire it into your CI:
 
 ```bash
-pnpm --filter <app> test:seam   # next build --webpack && KNEXT_REQUIRE_STANDALONE=1 vitest run standalone-seam-alive.test.ts
+# from the app directory — works in a standalone repo and in a workspace:
+pnpm test:seam                        # next build --webpack && KNEXT_REQUIRE_STANDALONE=1 vitest run standalone-seam-alive.test.ts
+# from a workspace root, filter by PATH (`--filter <name>` matches on PACKAGE
+# NAME and silently matches NOTHING — exit 0 — when it differs from the directory):
+pnpm --filter ./apps/<app> test:seam
 ```
 
 Running the guard as part of a plain `vitest` run with no build is **not** a
