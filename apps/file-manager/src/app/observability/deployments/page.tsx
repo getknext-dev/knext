@@ -22,6 +22,7 @@ import {
   queryInstant,
   startPageDeadline,
 } from '../_prom/query';
+import { denyObservabilityAccess } from '../_ui/access-denied';
 import { NO_DATA } from '../_ui/format';
 import { isObservabilityAuthorized, observabilityToken } from '../auth';
 
@@ -113,15 +114,6 @@ const shell = { padding: '2rem', fontFamily: 'system-ui, sans-serif' } as const;
 const cell = { padding: '0.5rem 1rem' } as const;
 const labelCell = { ...cell, fontWeight: 600 } as const;
 const headCell = { ...cell, textAlign: 'left', borderBottom: '1px solid #ccc' } as const;
-
-function AccessDenied() {
-  return (
-    <main style={shell}>
-      <h1>401 — Unauthorized</h1>
-      <p>The observability pages require a valid bearer token.</p>
-    </main>
-  );
-}
 
 function GrafanaLinkOut() {
   return (
@@ -391,7 +383,7 @@ export default async function DeploymentsPage() {
     observabilityToken(),
   );
   if (!authorized) {
-    return <AccessDenied />;
+    denyObservabilityAccess(); // real HTTP 401, never returns (#525)
   }
 
   // Before ANY read: both sources are per-app, so an unknown scope means we say

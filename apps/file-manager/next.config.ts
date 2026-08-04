@@ -45,6 +45,12 @@ const nextConfig: NextConfig = {
   // with a warning, but the app's own type-check rejects the old key).
   adapterPath: path.resolve(import.meta.dirname, 'next-adapter.ts'),
   experimental: {
+    // #525: lets the /observability pages deny with a REAL HTTP 401
+    // (`unauthorized()` + `observability/unauthorized.tsx`) instead of rendering
+    // "401 — Unauthorized" inside a 200. Without this flag `unauthorized()`
+    // throws E411 and the denial path would 500, so it is pinned by
+    // `observability/_ui/access-denied.test.tsx`.
+    authInterrupts: true,
     serverActions: {
       allowedOrigins: ['localhost:8080', 'next-home.default.136.111.227.195.sslip.io'],
     },
