@@ -5,9 +5,17 @@
 > [`docs/RELEASE_POLICY.md`](RELEASE_POLICY.md). The user-facing version of this page is the docs
 > site's *Versioning & compatibility*.
 >
-> **Who updates it, and when:** whoever merges the **"version packages"** PR, in that same PR. It is
-> not left to discipline — `tests/release-policy-matrix.test.ts` asserts the matrix carries a row
-> for the version in the tree, so the release PR is red until the row is added.
+> **Who updates it, and when:** the maintainer cutting the release, **on `main`, before the
+> "version packages" PR merges.** `tests/release-policy-matrix.test.ts` asserts the matrix carries a
+> row for the version in the tree, so the release PR is red until the row exists — but the guard
+> only checks that a row is *there*, not where it was added, and **where matters:**
+>
+> Do **not** hand-edit the row into the `changeset-release/main` PR. `changesets/action` recreates
+> that branch and **force-pushes** it on every subsequent push to `main`, so a row added there is
+> silently discarded the moment anything else merges first — and the loss looks like a flaky guard
+> rather than a lost commit. The durable path is to add the next row to this file on `main` ahead of
+> the release; the version is predictable (`changeset status --output` prints the exact
+> `newVersion`), so the row can always be written before the bump lands.
 
 ## The three axes
 
@@ -68,8 +76,9 @@ Checked (`tests/release-policy-matrix.test.ts`, plus
 
 - the three published packages carry one version, and Changesets is configured to keep it that way;
 - no fourth publishable package exists — the workspace is **scanned**, not enumerated;
-- the CRD `apiVersion` in this matrix equals the one ADR-0017 declares **and** the one the
-  operator's generated CRD manifests + Go API package actually serve;
+- **every row's** CRD `apiVersion` cell equals the one ADR-0017 declares **and** the one the
+  operator's generated CRD manifests + Go API package actually serve (per row, parsed out of the
+  table — an earlier whole-file substring check passed with either cell falsified);
 - the CLI names no other CRD `apiVersion` anywhere under `src/cli/`;
 - a row exists for the version currently in the tree.
 
@@ -85,3 +94,6 @@ side effect** if the cluster cannot store one, naming the field.
   practical protection is the ordering rule plus the deploy-time preflight above — not this table.
 - **nothing here verifies a registry.** The guard reads this repo; it cannot confirm what is
   actually installed on npm or in a cluster.
+- **the prose is checked at heading and name level, not for correctness.** The policy and the
+  user-facing page are asserted to have their sections and to name the three packages — a stub
+  satisfying that would pass. These checks catch deletion, not a wrong claim.

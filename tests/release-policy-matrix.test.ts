@@ -69,10 +69,28 @@ type Manifest = {
 
 type WorkspacePackage = { dir: string; manifest: Manifest };
 
-/** The workspace globs, read from pnpm-workspace.yaml rather than hardcoded. */
+/**
+ * The workspace globs, read from the `packages:` block of pnpm-workspace.yaml.
+ *
+ * Scoped to that ONE key deliberately. Matching every YAML list item in the file
+ * looks equivalent today and is a landmine: `pnpm approve-builds` writes an
+ * `onlyBuiltDependencies:` stanza (pnpm 10 does this routinely, and this repo is on
+ * pnpm@10.4.1), whose items are package NAMES. Those would be read as globs and the
+ * scan would abort with `unsupported workspace glob "esbuild"` — CI red, on a
+ * message pointing at the wrong thing entirely.
+ */
 function workspaceGlobs(): string[] {
-  const yaml = readFileSync(resolve(REPO_ROOT, 'pnpm-workspace.yaml'), 'utf8');
-  return [...yaml.matchAll(/^\s*-\s*['"]?([^'"\n]+)['"]?\s*$/gm)].map((m) => m[1].trim());
+  const lines = readFileSync(resolve(REPO_ROOT, 'pnpm-workspace.yaml'), 'utf8').split('\n');
+  const start = lines.findIndex((l) => /^packages:\s*$/.test(l));
+  if (start === -1) throw new Error('pnpm-workspace.yaml has no top-level `packages:` key');
+  const globs: string[] = [];
+  for (const line of lines.slice(start + 1)) {
+    // A new top-level key ends the block; blanks and comments do not.
+    if (/^\S/.test(line)) break;
+    const item = line.match(/^\s+-\s*['"]?([^'"#\n]+?)['"]?\s*$/);
+    if (item) globs.push(item[1].trim());
+  }
+  return globs;
 }
 
 /**
@@ -133,6 +151,35 @@ function slug(heading: string): string {
 }
 
 /**
+ * The DATA rows of the table under `## The matrix`, as arrays of trimmed cells.
+ *
+ * Scoped to that one section on purpose: `COMPATIBILITY.md` has other tables (the
+ * three-axes table), and a check that swept them all would either be vague or would
+ * break every time an unrelated table gained a row.
+ */
+function matrixTableRows(md: string): string[][] {
+  const lines = md.split('\n');
+  const start = lines.findIndex((l) => /^##\s+The matrix\s*$/.test(l));
+  if (start === -1) return [];
+  const rows: string[][] = [];
+  for (const line of lines.slice(start + 1)) {
+    if (/^##\s/.test(line)) break;
+    const trimmed = line.trim();
+    if (!trimmed.startsWith('|')) continue;
+    const cells = trimmed
+      .replace(/^\|/, '')
+      .replace(/\|$/, '')
+      .split('|')
+      .map((c) => c.trim());
+    // Skip the header row and the `| --- |` separator.
+    if (cells.every((c) => /^-{2,}$/.test(c.replace(/[\s:]/g, '')))) continue;
+    if (cells[0] === 'Package set') continue;
+    rows.push(cells);
+  }
+  return rows;
+}
+
+/**
  * The version each matrix ROW is keyed by — the leading cell of a Markdown table
  * row, and only when that cell is a bare backticked version.
  *
@@ -143,10 +190,8 @@ function slug(heading: string): string {
  */
 function matrixRowVersions(md: string): string[] {
   const out: string[] = [];
-  for (const line of md.split('\n')) {
-    if (!line.trimStart().startsWith('|')) continue;
-    const firstCell = line.split('|')[1] ?? '';
-    for (const m of firstCell.matchAll(/`(\d+\.\d+\.\d+(?:-[\w.]+)?)`/g)) out.push(m[1]);
+  for (const row of matrixTableRows(md)) {
+    for (const m of (row[0] ?? '').matchAll(/`(\d+\.\d+\.\d+(?:-[\w.]+)?)`/g)) out.push(m[1]);
   }
   return out;
 }
@@ -304,8 +349,27 @@ describe('docs/COMPATIBILITY.md — the matrix agrees with the code', () => {
     for (const name of RELEASE_SET) expect(matrix).toContain(name);
   });
 
-  it('names the CRD apiVersion the ADR declares (read from the ADR, not re-typed)', () => {
-    expect(matrix).toContain(declaredCrdApiVersion());
+  /**
+   * EVERY row's apiVersion cell, not a whole-file substring.
+   *
+   * The first shape of this check was `expect(matrix).toContain(declared)`, which
+   * the reviewer mutation-proved as decoration: `apps.kn-next.dev/v1alpha1` occurs
+   * in both rows, so falsifying EITHER cell left the assertion green. Exactly the
+   * defect already fixed one column to the left, in `matrixRowVersions`.
+   */
+  it('every matrix row names the CRD apiVersion the ADR declares', () => {
+    const declared = declaredCrdApiVersion();
+    const rows = matrixTableRows(matrix);
+    // Both halves: a parser that finds no rows would pass the loop vacuously.
+    expect(
+      rows.length,
+      'no data rows parsed out of the `## The matrix` table',
+    ).toBeGreaterThanOrEqual(2);
+    const cells = rows.map((r) => r[1]);
+    expect(
+      cells,
+      'each row states the CRD apiVersion it is compatible with; all must be the declared one',
+    ).toEqual(rows.map(() => `\`${declared}\``));
   });
 
   it('the operator SERVES exactly that apiVersion (scanned from the CRD manifests)', () => {

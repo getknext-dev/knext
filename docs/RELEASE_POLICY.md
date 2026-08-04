@@ -85,8 +85,16 @@ written — but the npm ecosystem's default range for a `0.x` dependency (`^0.3.
 - **Within `v1alpha1` the CRD schema is additive-only** (ADR-0017 §2.1): fields are added, never
   removed or narrowed, so a `NextApp` that applies today keeps applying against later operators.
   What is *not* frozen is a field's **meaning** — a field may become inert, and that is announced in
-  the **release notes** and surfaced as a status condition, never as a rejected write. A support
-  policy promising frozen behaviour would be promising something the CRD cannot keep.
+  the **release notes**, never as a rejected write. A support policy promising frozen behaviour
+  would be promising something the CRD cannot keep.
+
+  The mechanism, stated at the level it actually exists: ADR-0017 commits to the **release notes**
+  and nothing more. The one shipped precedent — `spec.cache.enableBytecodeCache`, superseded by the
+  image-baked compile cache — also emits a **Warning Event** on the resource
+  (`DeprecatedBytecodeCachePVC`, `nextapp_controller.go:726`). There is **no** deprecation status
+  condition, and do not write one into a policy: a new condition has to go through
+  `computeStatusVerdict` per `.claude/rules/architecture.md`, so promising one here would commit
+  someone to unplanned work.
 - **It does not pin your images.** Deployed apps are pinned by digest; the operator rejects
   `:latest`.
 
@@ -107,8 +115,10 @@ What that means in practice for someone operating knext:
 - **the upgrade is not all-or-nothing.** Operator and CLI version independently — see the
   compatibility matrix — so a cluster-side fix can be taken without moving every CI pipeline's CLI
   on the same day, provided the ordering rule is kept;
-- **advisories** are published as GitHub Security Advisories on the repo and referenced from the
-  release notes.
+- **(aspirational)** advisories go out as **GitHub Security Advisories** on the repo, referenced
+  from the release notes. Labelled aspirational for the same reason as the items below: the
+  advisory list is currently **empty** (`gh api /repos/getknext-dev/knext/security-advisories` →
+  `0`), so this is the intended channel, not an established practice.
 
 **(aspirational)** At 1.0, adopt a documented N-1 window: the current minor plus the previous one
 receive security fixes for a stated number of months. Do not write that into user-facing docs
@@ -127,6 +137,18 @@ Removing something is a two-release process, never a single one:
 
 Applies to: public imports, CLI verbs and flags, and `kn-next.config.ts` keys.
 
+> **UNRESOLVED — needs an architect call, do not read this as settled.** Combine step 2 ("no earlier
+> than the next major") with the pre-1.0 caveat above ("knext does not use semver's 0.x allowance")
+> and the result is that **nothing public can be removed before 1.0** — on a CLI and config surface
+> that is still actively churning. That is a real constraint nobody has agreed to, and it was
+> reached by composing two reasonable-looking rules rather than by deciding it.
+>
+> The three plausible resolutions, none chosen here: (a) accept the freeze and let the surface grow
+> until 1.0; (b) take semver's 0.x allowance explicitly — removals permitted in a `0.x` **minor**
+> after a deprecation minor — and say so loudly on the user-facing page; (c) reach 1.0 sooner so the
+> normal major cadence applies. Until this is decided, treat a proposed removal as an escalation,
+> not as something this document already permits or forbids.
+
 CRD fields are the exception, and deliberately so: within `v1alpha1` a field is **never removed**
 (additive-only), so the deprecation path for a CRD field is to make it inert and say so in the
 release notes. Removing it requires a new API version.
@@ -137,13 +159,22 @@ executes the day the npmjs publish lands — it lives in
 
 ## Keeping this honest
 
-`docs/COMPATIBILITY.md` is updated **in the "version packages" PR**, by whoever merges it — the same
-PR that bumps the versions adds the matrix row. This is not left to discipline: the guard asserts
-the matrix carries a row for the version currently in the tree, so the release PR stays red until
-the row exists. The guard also checks that the CRD `apiVersion` named in the matrix equals both the
+`docs/COMPATIBILITY.md` gains its row **on `main`, before the "version packages" PR merges** — not
+inside that PR. `changesets/action` force-pushes the `changeset-release/main` branch on every
+subsequent push to `main`, so a row hand-added there disappears if anything merges ahead of it, and
+the loss reads as a flaky guard rather than a lost commit. `changeset status --output` prints the
+exact `newVersion` ahead of time, so the row can always be written first.
+
+The guard asserts the matrix carries a row for the version currently in the tree, so a release
+without its row stays red. It also checks that **every** row's CRD `apiVersion` cell equals both the
 one ADR-0017 declares and the one the operator's manifests actually serve, so the matrix cannot
 agree only with itself.
 
-What the guard does **not** check, so nobody assumes it does: it cannot verify that a version on a
-registry matches this tree, and it cannot tell whether a support-window promise was kept. Those
-remain human commitments.
+What the guard does **not** check, so nobody assumes it does:
+
+- it cannot verify that a version on a registry matches this tree, and it cannot tell whether a
+  support-window promise was kept — those remain human commitments;
+- **the prose checks are heading- and name-level, not comprehension.** Replacing the user-facing
+  page with a stub that names the three packages keeps them green. That is close to the ceiling for
+  asserting on prose, but it means these checks catch *deletion*, not *wrongness* — the substance
+  of a policy still needs a reader.

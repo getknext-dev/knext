@@ -65,7 +65,7 @@ pre-1.0, and a maintenance promise that went unmet would be worse than none.
 In practice that means: **upgrade forward to get a fix.** Because minors never break the public
 surface, that is a version bump and a redeploy.
 
-Security advisories are published on the knext repository and referenced from the release notes.
+Security fixes are called out in the release notes for the release that carries them.
 
 ## The cluster side versions separately
 
@@ -84,8 +84,13 @@ force a major of the packages.
 Within `apps.kn-next.dev/v1alpha1` the schema is **additive-only**: fields are added, never removed
 or narrowed. A `NextApp` you write today keeps applying against later operators. What can change is
 what a field *does* — a setting for a capability that has been superseded may become inert. That is
-always called out in the release notes and surfaced on the resource as a status condition; it never
-turns into a rejected apply.
+called out in the release notes, and the operator may also record a warning event on the resource:
+
+```sh
+kubectl describe nextapp my-app   # check the Events section after an upgrade
+```
+
+It never turns into a rejected apply.
 
 ### Keeping the two in step
 
