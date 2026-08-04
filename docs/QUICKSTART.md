@@ -111,14 +111,24 @@ npx @getknext/core --help
 
 ## Step 3 — Prepare your Next.js app
 
-`kn-next deploy` expects a monorepo-style layout: your app lives **two directory
-levels below the repository root** (for example `my-repo/apps/hello-knext`), and
-the Docker build runs with the **repository root as the build context** and the
-**`Dockerfile` in your app directory**. If your app currently sits at the top of
-its own repo, move it under `apps/<name>/` first:
+`kn-next deploy` runs the Docker build with your **project root as the build
+context** and the **`Dockerfile` in your app directory**. The project root is
+the outermost directory containing a lockfile (`pnpm-lock.yaml`,
+`package-lock.json`, `yarn.lock`, `bun.lock`/`bun.lockb`) — the same rule
+Next.js uses to pick the root it traces the standalone output from, so the
+context always contains what the build produced.
+
+Both layouts work, and you do **not** need to restructure an existing app:
 
 ```text
-my-repo/
+my-app/                     # flat single-app repo (what `kn-next create` makes)
+├── package-lock.json       # ← the lockfile: this directory is the context
+├── Dockerfile
+├── kn-next.config.ts
+└── ...                     # run kn-next from here
+
+my-repo/                    # monorepo
+├── pnpm-lock.yaml          # ← the lockfile: this directory is the context
 └── apps/
     └── hello-knext/        # run kn-next from here
         ├── Dockerfile
@@ -127,6 +137,10 @@ my-repo/
         ├── package.json
         └── src/ or app/ ...
 ```
+
+If there is no lockfile in the app directory or any parent, `kn-next deploy`
+stops and says so rather than guessing a context: run your package manager's
+install in the project root, and commit the lockfile.
 
 Your app needs three things:
 

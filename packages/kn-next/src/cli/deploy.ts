@@ -41,6 +41,7 @@ import {
     preflightImageRef,
 } from "./schema/preflight";
 import { loadConfig } from "./shared";
+import { requireBuildContext } from "./tracing-root";
 
 const log = createLogger({ module: "deploy" });
 
@@ -423,7 +424,11 @@ export async function deploy() {
         log.info("Building & pushing Docker image");
         tasks.push(
             (async () => {
-                const repoRoot = resolve(process.cwd(), "../..");
+                // #644: the context is Next's file-tracing root (outermost
+                // lockfile), NOT a fixed `../..` — that hardcode assumed an
+                // `apps/<name>` layout and pointed outside the project for a
+                // flat repo, which is what `kn-next create` produces.
+                const repoRoot = requireBuildContext(process.cwd());
                 // --metadata-file writes the buildx result JSON (includes containerimage.digest).
                 // ARGV array, no shell — taggedRef etc. arrive as single tokens.
                 runInherit([

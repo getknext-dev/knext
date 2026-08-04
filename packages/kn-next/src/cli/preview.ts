@@ -44,6 +44,7 @@ import {
     preflightImageRef,
 } from "./schema/preflight";
 import { loadConfig } from "./shared";
+import { requireBuildContext } from "./tracing-root";
 
 const log = createLogger({ module: "preview" });
 
@@ -316,7 +317,10 @@ async function defaultBuildAndPush(
         ".output",
         "buildx-metadata.json",
     );
-    const repoRoot = resolve(process.cwd(), "../..");
+    // #644: same rule as `deploy` — the docker context is Next's file-tracing
+    // root, inferred from the outermost lockfile rather than assumed to be two
+    // directories up.
+    const repoRoot = requireBuildContext(process.cwd());
     runInherit([
         "docker",
         "buildx",
