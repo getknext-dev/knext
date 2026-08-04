@@ -57,8 +57,21 @@ export class ConfigValidationError extends Error {
 //   decimalExponent e|E followed by a signed integer, e.g. "1e3"
 // A leading `-` is intentionally NOT matched, so a negative quantity fails as
 // "not parseable" (the same net result the operator reaches by Sign() <= 0).
-const QUANTITY_RE =
-    /^\+?(\d+(\.\d+)?|\.\d+)(Ki|Mi|Gi|Ti|Pi|Ei|[numkMGTPE]|[eE][+-]?\d+)?$/;
+//
+// The mantissa's fraction is `\.\d*`, NOT `\.\d+`: apimachinery accepts the
+// TRAILING-DOT form ("1.", "1.Gi", "1.e3", "+123456.e3"). #455 found this as
+// live drift — the earlier `\.\d+` made the CLI reject 22 values the cluster
+// accepts, i.e. it blocked deploys that would have worked. The shared fixture
+// (packages/kn-next-operator/test/fixtures/quantity-grammar.json) now walks the
+// sign × mantissa × suffix cross-product, so this class cannot hide again.
+// Self-grouping (`(?:…)`), so the top-level `|` cannot escape into whatever
+// wraps it. Both current call sites happen to add their own parentheses; that is
+// a property of the callers, not of this string, and a third one would be a
+// silent bug.
+const MANTISSA_RE_SRC = String.raw`(?:\d+(?:\.\d*)?|\.\d+)`;
+const QUANTITY_RE = new RegExp(
+    `^\\+?${MANTISSA_RE_SRC}(Ki|Mi|Gi|Ti|Pi|Ei|[numkMGTPE]|[eE][+-]?\\d+)?$`,
+);
 
 /**
  * checkQuantity mirrors the operator's two-step quantity gate: is the value a
@@ -74,7 +87,10 @@ function checkQuantity(value: string): {
     if (!QUANTITY_RE.test(value)) {
         return { parseable: false, positive: false };
     }
-    const mantissa = value.match(/^\+?((?:\d+(?:\.\d+)?|\.\d+))/);
+    // Same mantissa source as QUANTITY_RE — shared so the two cannot drift
+    // from each other (a value the pattern admits but this fails to extract
+    // would read as "not positive" and be rejected for the wrong reason).
+    const mantissa = value.match(new RegExp(`^\\+?(${MANTISSA_RE_SRC})`));
     const positive = mantissa != null && Number.parseFloat(mantissa[1]) > 0;
     return { parseable: true, positive };
 }
