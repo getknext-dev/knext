@@ -205,6 +205,12 @@ request the page with `Authorization: Bearer <token>`. **If `OBSERVABILITY_TOKEN
 deny every request** — they fail closed rather than exposing metrics. Metric data is only read
 server-side; the browser receives the rendered aggregate, never raw metrics.
 
+**A denied request gets a real HTTP `401`** (not a `200` whose body says "unauthorized"), so a
+monitor or probe can read the status rather than the page text. Two caveats worth knowing before you
+alert on it: the response carries **no `WWW-Authenticate` challenge** (Next's `unauthorized()`
+cannot set a response header), and the `401` applies to **document requests** — the same route
+fetched as an RSC navigation returns `200` with the denial as its payload. Neither leaks data.
+
 | Variable | Description |
 |----------|-------------|
 | `OBSERVABILITY_TOKEN` | Bearer token gating `/observability/*` (unset ⇒ deny-all) |

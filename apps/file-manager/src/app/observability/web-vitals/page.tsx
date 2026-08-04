@@ -1,4 +1,5 @@
 import { headers } from 'next/headers';
+import { denyObservabilityAccess } from '../_ui/access-denied';
 import { NO_DATA } from '../_ui/format';
 import { isObservabilityAuthorized, observabilityToken } from '../auth';
 import { computeVitalsSummary, type VitalSummaryRow } from './vitals';
@@ -21,15 +22,6 @@ import { computeVitalsSummary, type VitalSummaryRow } from './vitals';
  */
 export const dynamic = 'force-dynamic';
 
-function AccessDenied() {
-  return (
-    <main style={{ padding: '2rem', fontFamily: 'system-ui, sans-serif' }}>
-      <h1>401 — Unauthorized</h1>
-      <p>The observability pages require a valid bearer token.</p>
-    </main>
-  );
-}
-
 function formatValue(row: VitalSummaryRow): string {
   if (row.p75 === null) {
     // Shared marker (`_ui/format.ts`): a bare dash reads like a measured zero,
@@ -47,7 +39,7 @@ export default async function WebVitalsPage() {
     observabilityToken(),
   );
   if (!authorized) {
-    return <AccessDenied />;
+    denyObservabilityAccess(); // real HTTP 401, never returns (#525)
   }
 
   const rows = await computeVitalsSummary();
