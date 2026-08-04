@@ -1,0 +1,311 @@
+{
+  "$comment": [
+    "SHARED quantity-grammar fixture (#455). The Kubernetes quantity grammar is",
+    "asserted in two places: the operator (internal/validation, resource.ParseQuantity",
+    "-- the single source of truth per ADR-0001) and the CLI's advisory pre-flight",
+    "regex in packages/kn-next/src/cli/validate.ts. This file is the contract that",
+    "keeps them from drifting.",
+    "'accepted' means: resource.ParseQuantity succeeds AND Quantity.Sign() > 0,",
+    "i.e. the operator accepts the string as a positive resource quantity.",
+    "GENERATED from apimachinery, not hand-written; quantity_fixture_test.go",
+    "re-derives every row from resource.ParseQuantity on each run, so a row that",
+    "disagrees with the real parser fails the operator suite."
+  ],
+  "cases": [
+    {
+      "value": "250m",
+      "accepted": true,
+      "note": ""
+    },
+    {
+      "value": "1",
+      "accepted": true,
+      "note": ""
+    },
+    {
+      "value": "0.5",
+      "accepted": true,
+      "note": ""
+    },
+    {
+      "value": "512Mi",
+      "accepted": true,
+      "note": ""
+    },
+    {
+      "value": "1Gi",
+      "accepted": true,
+      "note": ""
+    },
+    {
+      "value": "1Ti",
+      "accepted": true,
+      "note": ""
+    },
+    {
+      "value": "1Pi",
+      "accepted": true,
+      "note": ""
+    },
+    {
+      "value": "1Ei",
+      "accepted": true,
+      "note": ""
+    },
+    {
+      "value": "1Ki",
+      "accepted": true,
+      "note": ""
+    },
+    {
+      "value": "1k",
+      "accepted": true,
+      "note": ""
+    },
+    {
+      "value": "1K",
+      "accepted": false,
+      "note": "ParseQuantity rejects it"
+    },
+    {
+      "value": "1M",
+      "accepted": true,
+      "note": ""
+    },
+    {
+      "value": "1G",
+      "accepted": true,
+      "note": ""
+    },
+    {
+      "value": "1T",
+      "accepted": true,
+      "note": ""
+    },
+    {
+      "value": "1P",
+      "accepted": true,
+      "note": ""
+    },
+    {
+      "value": "1E",
+      "accepted": true,
+      "note": ""
+    },
+    {
+      "value": "1n",
+      "accepted": true,
+      "note": ""
+    },
+    {
+      "value": "1u",
+      "accepted": true,
+      "note": ""
+    },
+    {
+      "value": "1m",
+      "accepted": true,
+      "note": ""
+    },
+    {
+      "value": "1e3",
+      "accepted": true,
+      "note": ""
+    },
+    {
+      "value": "2E3",
+      "accepted": true,
+      "note": ""
+    },
+    {
+      "value": "1e-3",
+      "accepted": true,
+      "note": ""
+    },
+    {
+      "value": "1.5",
+      "accepted": true,
+      "note": ""
+    },
+    {
+      "value": "0.001",
+      "accepted": true,
+      "note": ""
+    },
+    {
+      "value": ".5",
+      "accepted": true,
+      "note": ""
+    },
+    {
+      "value": "+5",
+      "accepted": true,
+      "note": ""
+    },
+    {
+      "value": "10",
+      "accepted": true,
+      "note": ""
+    },
+    {
+      "value": "100",
+      "accepted": true,
+      "note": ""
+    },
+    {
+      "value": "1.5Gi",
+      "accepted": true,
+      "note": ""
+    },
+    {
+      "value": "2500m",
+      "accepted": true,
+      "note": ""
+    },
+    {
+      "value": "0",
+      "accepted": false,
+      "note": "parses, but is not strictly positive"
+    },
+    {
+      "value": "0.0",
+      "accepted": false,
+      "note": "parses, but is not strictly positive"
+    },
+    {
+      "value": "0Mi",
+      "accepted": false,
+      "note": "parses, but is not strictly positive"
+    },
+    {
+      "value": "-1",
+      "accepted": false,
+      "note": "parses, but is not strictly positive"
+    },
+    {
+      "value": "-250m",
+      "accepted": false,
+      "note": "parses, but is not strictly positive"
+    },
+    {
+      "value": "-1Gi",
+      "accepted": false,
+      "note": "parses, but is not strictly positive"
+    },
+    {
+      "value": "1GB",
+      "accepted": false,
+      "note": "ParseQuantity rejects it"
+    },
+    {
+      "value": "1gi",
+      "accepted": false,
+      "note": "ParseQuantity rejects it"
+    },
+    {
+      "value": "1mi",
+      "accepted": false,
+      "note": "ParseQuantity rejects it"
+    },
+    {
+      "value": "512K",
+      "accepted": false,
+      "note": "ParseQuantity rejects it"
+    },
+    {
+      "value": "0.5 CPU",
+      "accepted": false,
+      "note": "ParseQuantity rejects it"
+    },
+    {
+      "value": " 250m",
+      "accepted": false,
+      "note": "ParseQuantity rejects it"
+    },
+    {
+      "value": "250m ",
+      "accepted": false,
+      "note": "ParseQuantity rejects it"
+    },
+    {
+      "value": "1..5",
+      "accepted": false,
+      "note": "ParseQuantity rejects it"
+    },
+    {
+      "value": "abc",
+      "accepted": false,
+      "note": "ParseQuantity rejects it"
+    },
+    {
+      "value": "",
+      "accepted": false,
+      "note": "ParseQuantity rejects it"
+    },
+    {
+      "value": "m",
+      "accepted": false,
+      "note": "parses, but is not strictly positive"
+    },
+    {
+      "value": "Mi",
+      "accepted": false,
+      "note": "parses, but is not strictly positive"
+    },
+    {
+      "value": "1Mib",
+      "accepted": false,
+      "note": "ParseQuantity rejects it"
+    },
+    {
+      "value": "1e",
+      "accepted": false,
+      "note": "ParseQuantity rejects it"
+    },
+    {
+      "value": "1e+",
+      "accepted": false,
+      "note": "ParseQuantity rejects it"
+    },
+    {
+      "value": "1,5",
+      "accepted": false,
+      "note": "ParseQuantity rejects it"
+    },
+    {
+      "value": "0x10",
+      "accepted": false,
+      "note": "ParseQuantity rejects it"
+    },
+    {
+      "value": "1Gi1",
+      "accepted": false,
+      "note": "ParseQuantity rejects it"
+    },
+    {
+      "value": "5e2Mi",
+      "accepted": false,
+      "note": "ParseQuantity rejects it"
+    },
+    {
+      "value": "1 Mi",
+      "accepted": false,
+      "note": "ParseQuantity rejects it"
+    },
+    {
+      "value": "1_000",
+      "accepted": false,
+      "note": "ParseQuantity rejects it"
+    },
+    {
+      "value": "1Gi ",
+      "accepted": false,
+      "note": "ParseQuantity rejects it"
+    },
+    {
+      "value": "١٢٣",
+      "accepted": false,
+      "note": "ParseQuantity rejects it"
+    }
+  ]
+}
