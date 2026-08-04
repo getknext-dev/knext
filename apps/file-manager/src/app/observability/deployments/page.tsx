@@ -12,6 +12,7 @@ import {
   hasNoInstantSeries,
   instantByLabel,
   KUBE_STATE_PROBE,
+  KUBE_STATE_PROBE_RESERVE_MS,
   observabilityAppName,
   observabilityAppNamespace,
   PAGE_DEADLINE_MS,
@@ -76,6 +77,14 @@ import { isObservabilityAuthorized, observabilityToken } from '../auth';
  *    the concurrent query wave plus the sequential presence probe can no longer
  *    sum their individual ~4 s timeouts into ~8 s of page latency. Exhausting it
  *    is its own honest state — never reported as a missing exporter or a zero.
+ *    The documented ceiling is {@link PAGE_TOTAL_BUDGET_MS}: an ordinary share
+ *    ({@link PAGE_DEADLINE_MS}) that every read spends from, plus a
+ *    {@link KUBE_STATE_PROBE_RESERVE_MS} slice only the presence probe may spend
+ *    (#534). Without that slice the probe — last in line — could be issued with
+ *    ~0 ms left after a hung OPT-IN Kubernetes read, so a slow backend nobody
+ *    asked about would cost the reader the diagnosis of a default one that
+ *    answered promptly. The reserve is carved OUT of the ceiling, never added to
+ *    it, so the end-to-end bound still holds.
  *  - Row-level scoping is part of that contract (PR-520): this page ENUMERATES
  *    rows and calls the newest "current", so the derived selector is anchored to
  *    Knative's `<app>-<digits>-deployment` naming and namespace-pinned when the
@@ -398,11 +407,20 @@ export default async function DeploymentsPage() {
   // namespace-pinned, so an ambiguous result is refused below rather than guessed.
   const namespace = observabilityAppNamespace();
 
-  // ONE budget for the whole render (PR-520 sysdesign follow-up). Every read
-  // below spends from it, so the page's worst case is PAGE_DEADLINE_MS — not the
-  // SUM of the per-call budgets, which the concurrent wave + the sequential probe
-  // below could previously stretch to ~8 s with no page-level cap at all.
-  const deadline = startPageDeadline(PAGE_DEADLINE_MS);
+  // ONE budget for the whole render (PR-520 sysdesign follow-up), with a slice of
+  // it RESERVED for the kube-state probe (#534). Every read below spends from it,
+  // so the page's worst case is PAGE_TOTAL_BUDGET_MS (= PAGE_DEADLINE_MS +
+  // KUBE_STATE_PROBE_RESERVE_MS) — not the SUM of the per-call budgets, which the
+  // concurrent wave + the sequential probe below could previously stretch to ~8 s
+  // with no page-level cap at all.
+  //
+  // Why the reserve: the probe is last in line, so without it a hung OPT-IN
+  // Kubernetes read in the wave below spends the whole budget and the page loses
+  // the diagnosis of the DEFAULT source that answered promptly — reporting "ran
+  // out of its time budget" where it could have said which of the two causes of
+  // an empty result applies. The reserve is carved out of the documented ceiling,
+  // not added to it: once PAGE_TOTAL_BUDGET_MS is gone the probe is refused too.
+  const deadline = startPageDeadline(PAGE_DEADLINE_MS, undefined, KUBE_STATE_PROBE_RESERVE_MS);
 
   // Degrade closed before any network call: Prometheus unset ⇒ no fetch.
   // The Kubernetes read runs CONCURRENTLY with the Prometheus queries — awaiting
@@ -451,10 +469,14 @@ export default async function DeploymentsPage() {
     !scopedQueriesTimedOut &&
     hasNoInstantSeries(created);
   // The probe is the ONLY sequential read on this page, i.e. the one that used to
-  // add a second full timeout to the page. It now spends what is left of the
-  // shared budget — and if nothing is left, `queryInstant` issues no request at
-  // all and answers `deadline-exceeded`.
-  const probe = appSeriesEmpty ? await queryInstant(KUBE_STATE_PROBE, { deadline }) : undefined;
+  // add a second full timeout to the page. It spends what is left of the shared
+  // budget PLUS the slice reserved for it (#534) — so a slow, opt-in backend in
+  // the wave above cannot leave it with ~0 ms and cost the reader the diagnosis.
+  // If even the reserve is gone (the ceiling reached), `queryInstant` issues no
+  // request at all and answers `deadline-exceeded`.
+  const probe = appSeriesEmpty
+    ? await queryInstant(KUBE_STATE_PROBE, { deadline: deadline.reserved() })
+    : undefined;
 
   // The page's own budget ran out: report THAT, and nothing else. Timing out is
   // not "kube-state-metrics is absent", not "Prometheus is unreachable", and not
@@ -466,6 +488,35 @@ export default async function DeploymentsPage() {
   // rather than picking one of the two causes.
   const promUnreachable =
     !deadlineExhausted && (scopedQueriesFailed || probe?.status === 'unreachable');
+
+  // Did any read in this render actually FAIL (as opposed to not answering in
+  // time)? On a timed-out render the page still refuses to name a cause — but it
+  // must not assert the OPPOSITE of what it saw either (PR-636 review): telling a
+  // reader "the backend is slow rather than absent" while two of three queries
+  // came back ECONNREFUSED is the same kind of invented cause, pointed the other
+  // way. This flag only softens the timeout banner; it never promotes the failure
+  // to a cause claim (`promUnreachable` stays false above).
+  //
+  // "Any read", deliberately including the OPT-IN Kubernetes one: it is the read
+  // this whole issue names as the realistic trigger, and leaving it out made the
+  // page print "the Kubernetes API could not be reached" one paragraph above
+  // "none of them errored" (PR-636 round-2 review).
+  //
+  // The EXCLUSIONS are as deliberate as the inclusion — only `unreachable` counts.
+  // `crd-absent` and `forbidden` are authoritative ANSWERS from the API server,
+  // `not-in-cluster` and `invalid-name` mean no request was ever made, and
+  // `deadline-exceeded` is the cut-short case this banner is already about.
+  // Folding any of them into "a read failed outright" would invent a cause in a
+  // third direction.
+  //
+  // `probe` is deliberately NOT in this list: it only runs when the scoped queries
+  // did NOT time out, and reaching `deadlineExhausted` through it requires it to be
+  // `deadline-exceeded`, so a `probe.status === 'unreachable'` here is unreachable
+  // code rather than defence.
+  const someReadFailedOutright =
+    deadlineExhausted &&
+    ([created, replicas, available].some((r) => r?.status === 'unreachable') ||
+      (nextApp.status === 'source-unavailable' && nextApp.reason === 'unreachable'));
   const kubeStatePresent = probe?.status === 'ok' && !hasNoInstantSeries(probe);
   const kubeStateAbsent =
     appSeriesEmpty && !deadlineExhausted && !promUnreachable && !kubeStatePresent;
@@ -517,11 +568,23 @@ export default async function DeploymentsPage() {
       {deadlineExhausted ? (
         <p>
           Building the revision history <strong>{DEADLINE_EXHAUSTED}</strong> ({exhaustedBudget}
-          &nbsp;ms for the whole page), so it was stopped rather than left to run. What that means
-          precisely: one of the reads did not answer in time — the page does <em>not</em> know
-          whether Prometheus is down, whether kube-state-metrics is installed, or how many revisions
-          exist, and it will not guess any of them from a timeout. Reload to try again; if this
-          persists, the observability backend is slow rather than absent.
+          &nbsp;ms was the budget that applied to the read which ran out), so it was stopped rather
+          than left to run. What that means precisely: one of the reads did not answer in time — the
+          page does <em>not</em> know whether kube-state-metrics is installed or how many revisions
+          exist, and it will not guess either from a timeout.{' '}
+          {someReadFailedOutright ? (
+            <>
+              It will not tell you the render was merely slow, either: another read in the same wave{' '}
+              <strong>failed outright</strong>, so a backend problem is possible — but a cut-short
+              render is not what establishes one. Reload to try again.
+            </>
+          ) : (
+            <>
+              Reload to try again; every read this render made either answered or was cut short by
+              the budget — none of them errored — so if this persists, the observability backend is
+              slow rather than absent.
+            </>
+          )}
         </p>
       ) : null}
 

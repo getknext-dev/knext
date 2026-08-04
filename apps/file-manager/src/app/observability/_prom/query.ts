@@ -27,8 +27,9 @@ export const PROMETHEUS_URL_ENV = 'OBSERVABILITY_PROMETHEUS_URL';
 const DEFAULT_TIMEOUT_MS = 4000;
 
 /**
- * The TOTAL budget for every request ONE page render makes (PR-520 sysdesign
- * follow-up).
+ * The share of the page budget the ORDINARY reads of one render may spend
+ * (PR-520 sysdesign follow-up). The page's documented ceiling is
+ * {@link PAGE_TOTAL_BUDGET_MS} — this share plus {@link KUBE_STATE_PROBE_RESERVE_MS}.
  *
  * Why a page-level number at all: {@link DEFAULT_TIMEOUT_MS} bounds each call
  * individually, so a page that issues a concurrent wave and THEN a sequential
@@ -45,15 +46,68 @@ const DEFAULT_TIMEOUT_MS = 4000;
 export const PAGE_DEADLINE_MS = 4000;
 
 /**
+ * The slice of the ceiling that ONLY a reserved read may spend (#534).
+ *
+ * One shared budget makes a page's total a bound, but it also makes the LAST
+ * read pay for every read before it. On the Deployments page that last read is
+ * the app-agnostic {@link KUBE_STATE_PROBE} — the one that turns "zero series"
+ * into a diagnosis (`kube-state-absent` vs `no-revision-match`). Issued with
+ * ~0 ms left it degrades to the budget banner, so an OPT-IN, hung Kubernetes
+ * read in the same wave costs the reader the diagnosis of a DEFAULT source that
+ * answered promptly the whole time.
+ *
+ * 500 ms because the probe is one `count(...)` against a Prometheus that has
+ * already answered three queries in this render — if it cannot answer in half a
+ * second, the backend is slow rather than the diagnosis wrong.
+ */
+export const KUBE_STATE_PROBE_RESERVE_MS = 500;
+
+/**
+ * The page's documented CEILING: the ordinary share plus the reserved slice.
+ *
+ * "A page never takes longer than its slowest single backend call" now means
+ * "…plus the short reserved probe". The reserve is a slice OF this number, never
+ * an extra budget bolted on after the fact — {@link PageDeadline.reserved} runs
+ * out here too.
+ */
+export const PAGE_TOTAL_BUDGET_MS = PAGE_DEADLINE_MS + KUBE_STATE_PROBE_RESERVE_MS;
+
+/**
  * A monotonic budget shared by every call of one render. Threaded through
  * {@link QueryOptions.deadline}; each call spends at most what is LEFT, so the
  * total is a bound rather than the sum of the per-call budgets.
  */
 export interface PageDeadline {
-  /** The total budget this deadline was created with (for honest messaging). */
+  /**
+   * The page CEILING this deadline enforces, reserve included — what the render
+   * can spend end to end.
+   *
+   * Honest about its status (PR-636 round-2 review): **no production code reads
+   * this today.** Every rendered number comes from {@link budgetMs}, which is the
+   * bound actually enforced on the read that ran out. It is kept as the deadline's
+   * own statement of the ceiling — the two views agree on it, which is what makes
+   * "the reserve is a slice, not a second budget" checkable — and the tests pin it
+   * for exactly that reason. If a future message needs the page-wide number, this
+   * is the field to use; until then, do not mistake it for the enforced bound.
+   */
   readonly totalMs: number;
-  /** Milliseconds left, floored at 0 (0 ⇒ do not start another request). */
+  /**
+   * The bound THIS VIEW enforces: the ordinary share, or the ceiling for a
+   * {@link reserved} view. Distinct from {@link totalMs} on purpose — an ordinary
+   * read is cut short at the share and could never have spent the reserve, so
+   * reporting the ceiling as *its* budget would print a bound that was never
+   * enforced on it (the #520 round-4 rule). This is the number a
+   * `deadline-exceeded` result carries.
+   */
+  readonly budgetMs: number;
+  /** Milliseconds left of THIS VIEW's budget, floored at 0 (0 ⇒ do not start). */
   remainingMs(): number;
+  /**
+   * The same clock and the same ceiling, seen by a read that may ALSO spend the
+   * reserved slice. Not a second budget: it drains with the page and reaches 0
+   * at {@link totalMs}, so calling it cannot lift the page's bound.
+   */
+  reserved(): PageDeadline;
 }
 
 /**
@@ -62,16 +116,29 @@ export interface PageDeadline {
  * The clock is `performance.now()` (monotonic — a wall-clock jump must not
  * lengthen or shorten a request budget) and is injectable so tests can exhaust a
  * budget deterministically without sleeping.
+ *
+ * @param totalMs the ordinary share, spendable by every read.
+ * @param reserveMs a slice ON TOP of that share which only {@link PageDeadline.reserved}
+ *   views may spend. Defaults to 0, so every caller that does not ask for one
+ *   (the Overview and Scaling pages pass no deadline at all) is unaffected.
  */
 export function startPageDeadline(
   totalMs: number = PAGE_DEADLINE_MS,
   now: () => number = () => performance.now(),
+  reserveMs = 0,
 ): PageDeadline {
   const startedAt = now();
-  return {
-    totalMs,
-    remainingMs: () => Math.max(0, totalMs - (now() - startedAt)),
-  };
+  const ceilingMs = totalMs + reserveMs;
+  const view = (budgetMs: number): PageDeadline => ({
+    // Always the ceiling: the number the page can actually spend end to end.
+    totalMs: ceilingMs,
+    // What THIS view may spend — what a timed-out read reports.
+    budgetMs,
+    remainingMs: () => Math.max(0, budgetMs - (now() - startedAt)),
+    // A reserved view is already reserved — `reserved()` cannot compound.
+    reserved: () => view(ceilingMs),
+  });
+  return view(totalMs);
 }
 
 /** A single Prometheus `matrix` (range) series: labels + [ts, value] samples. */
@@ -168,7 +235,7 @@ async function runQuery<T>(
   // The shared budget is already gone: starting another request would push the
   // page past its total, and the answer would arrive too late to be shown anyway.
   if (deadline && remainingMs !== undefined && remainingMs <= 0) {
-    return { status: 'deadline-exceeded', budgetMs: deadline.totalMs };
+    return { status: 'deadline-exceeded', budgetMs: deadline.budgetMs };
   }
 
   // Bound this call by whichever is smaller — its own budget or what is left of
@@ -235,7 +302,7 @@ async function runQuery<T>(
     // Our own timeout fired AND the deadline was the binding bound ⇒ this is the
     // PAGE's budget, not a verdict about Prometheus.
     if (deadline && boundByDeadline && abortedByOurTimeout && isAbort(err)) {
-      return { status: 'deadline-exceeded', budgetMs: deadline.totalMs };
+      return { status: 'deadline-exceeded', budgetMs: deadline.budgetMs };
     }
     return { status: 'unreachable', errorSummary: summarize(err) };
   } finally {
