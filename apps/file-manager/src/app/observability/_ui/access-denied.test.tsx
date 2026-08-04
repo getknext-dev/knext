@@ -63,9 +63,24 @@ describe('shared observability AccessDenied (#525)', () => {
     expect(offenders).toEqual([]);
   });
 
-  it('routes every gated page through denyObservabilityAccess()', () => {
+  it('lets NO page render <AccessDenied/> itself — only unauthorized.tsx may', () => {
+    // The regression #525 exists to kill is a page that RENDERS the denial in a
+    // 200. Importing the shared component and returning it re-creates exactly
+    // that, while satisfying every other check here — the two above pass, since
+    // the page defines no component and repeats no wording. So rendering it from
+    // a page is banned outright: `unauthorized.tsx` is the only renderer, and a
+    // page's only denial verb is `denyObservabilityAccess()`.
+    const offenders = authGatedPages()
+      .filter(({ source }) => /<AccessDenied\b/.test(source))
+      .map(({ path }) => path);
+    expect(offenders).toEqual([]);
+  });
+
+  it('routes every gated page through a denyObservabilityAccess() CALL', () => {
+    // A call, not a mention: `source.includes('denyObservabilityAccess')` is
+    // satisfied by an unused import, so it is not evidence the page denies.
     const missing = authGatedPages()
-      .filter(({ source }) => !source.includes('denyObservabilityAccess'))
+      .filter(({ source }) => !/\bdenyObservabilityAccess\s*\(/.test(source))
       .map(({ path }) => path);
     expect(missing).toEqual([]);
   });
@@ -116,10 +131,14 @@ describe('the denied response carries a real 401 (#525)', () => {
     expect(ourDigest).toBe(nextDigest);
   });
 
-  it('is backed by an unauthorized.tsx that renders the shared component', () => {
-    const source = readFileSync(resolve(OBSERVABILITY_DIR, 'unauthorized.tsx'), 'utf8');
-    expect(source).toContain('AccessDenied');
-    expect(source).toMatch(/_ui\/access-denied|\.\/_ui\/access-denied/);
+  it('is backed by an unauthorized.tsx that RENDERS the shared component', async () => {
+    // Rendered, not string-matched: a source grep passes on a file that imports
+    // the component and renders something else.
+    const mod = await import('../unauthorized');
+    const html = renderToStaticMarkup(mod.default());
+    const { AccessDenied } = await import('./access-denied');
+    expect(html).toBe(renderToStaticMarkup(AccessDenied()));
+    expect(html).toContain('401');
   });
 
   it('enables experimental.authInterrupts, without which a denial 500s', () => {

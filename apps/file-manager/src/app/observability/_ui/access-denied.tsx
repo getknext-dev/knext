@@ -23,6 +23,24 @@ import { unauthorized } from 'next/navigation';
  * Prometheus/Kubernetes detail, nothing that distinguishes "wrong token" from
  * "token not configured". Fail-closed is unchanged — the gate in `auth.ts` still
  * denies everything when `OBSERVABILITY_TOKEN` is unset.
+ *
+ * **Two limits, measured on a live build rather than assumed — stated because a
+ * change whose thesis is "the denial path is the last place that may lie" cannot
+ * be quiet about where it is still imprecise:**
+ *
+ *  1. **The 401 carries no `WWW-Authenticate` challenge**, which RFC 9110 §11.6.1
+ *     requires of a 401. `unauthorized()` raises a render-time fallback and has
+ *     no way to set a response header; only middleware could, and middleware runs
+ *     BEFORE the handler, so it cannot know the eventual status and would have to
+ *     stamp the challenge on successful 200s too (or duplicate the whole auth gate
+ *     at the edge, where `timingSafeEqual` is unavailable). Neither is worth it
+ *     for a demo-app page set, so the gap is documented, not papered over.
+ *  2. **The status is exact for DOCUMENT requests.** The same route fetched as an
+ *     RSC navigation (`RSC: 1`) returns 200 with a flight payload — Next's
+ *     behaviour, not this module's. That payload is the denial, so no metric data
+ *     leaks either way; it is only the status code that is uninformative there.
+ *     So "a monitor or probe sees the denial" is true of a document request, and
+ *     is the claim this component actually makes.
  */
 export function AccessDenied() {
   return (
