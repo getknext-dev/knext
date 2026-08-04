@@ -26,9 +26,12 @@
  * dedup and re-split the state) — a seam symbol stops co-occurring with its seam
  * API in any reader chunk and this gate fails, instead of the deploy.
  *
- * CI wires this behind KNEXT_REQUIRE_STANDALONE=1 in the standalone-building
- * job so a missing build HARD-FAILS (never silently skips). Locally, with no
- * standalone build present, it skips cleanly.
+ * CI wires this behind KNEXT_REQUIRE_STANDALONE=1 in a job that BUILDS this app
+ * first, so a missing build HARD-FAILS (never silently skips). Since #408 that
+ * job is per-app and scan-driven (`scripts/seam-alive-apps.mjs` finds every
+ * `apps/<x>/standalone-seam-alive.test.ts`), so a NEW app cannot be green-by-skip
+ * the way every non-file-manager app used to be. Locally, with no standalone
+ * build present, it skips cleanly.
  */
 
 import { existsSync, readdirSync, readFileSync } from 'node:fs';

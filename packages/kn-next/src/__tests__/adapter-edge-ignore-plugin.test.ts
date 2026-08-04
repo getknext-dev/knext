@@ -31,6 +31,8 @@ type ModifyCtx = Parameters<ModifyConfig>[1];
 type WebpackFn = NonNullable<NextConfig["webpack"]>;
 
 const PRODUCTION_BUILD = "phase-production-build" as ModifyCtx["phase"];
+const DEVELOPMENT_SERVER = "phase-development-server" as ModifyCtx["phase"];
+const PRODUCTION_SERVER = "phase-production-server" as ModifyCtx["phase"];
 
 /** Stand-in for the webpack module Next hands to the config.webpack ctx. */
 class FakeIgnorePlugin {
@@ -115,13 +117,84 @@ describe("knext-adapter modifyConfig — platform-owned edge IgnorePlugin fence 
         expect(out.output).toBe("standalone");
     });
 
-    it("is a no-op outside phase-production-build", async () => {
-        const appConfig = { reactStrictMode: true };
-        const out = await modify(
-            appConfig,
-            "phase-development-server" as ModifyCtx["phase"],
+    it("does NOT force output:'standalone' outside phase-production-build", async () => {
+        const out = await modify({ reactStrictMode: true }, DEVELOPMENT_SERVER);
+        expect(out.output).toBeUndefined();
+        expect(out.reactStrictMode).toBe(true);
+    });
+});
+
+/**
+ * #408 item 1 — the fence must cover `next dev` too, NOT only the production
+ * build. MEASURED against next 16.2.11 with a middleware + guarded-instrumentation
+ * fixture (`__tests__/fixtures/dev-edge-fence`, exercised end-to-end by
+ * `adapter-dev-edge-fence.test.ts`):
+ *
+ *   next dev            (Turbopack, the 16.2 default) → compiles clean; `config.webpack`
+ *                        is not consulted by Turbopack at all.
+ *   next dev --webpack  → the EDGE compile of `instrumentation-node` FAILS exactly the
+ *                        way the production build did before #356:
+ *                        `Module build failed: UnhandledSchemeError: Reading from
+ *                        "node:fs" is not handled by plugins`.
+ *
+ * So "dev is unaffected" is TRUE only for the Turbopack default and FALSE for the
+ * webpack bundler — which is the bundler this repo's apps build with
+ * (`next build --webpack`). The fence therefore ships in EVERY phase; only
+ * `output: 'standalone'` stays production-gated.
+ */
+describe("knext-adapter modifyConfig — the fence covers next dev too (#408)", () => {
+    it("returns a webpack fn on phase-development-server (dev carries the fence)", async () => {
+        const out = await modify({}, DEVELOPMENT_SERVER);
+        expect(typeof out.webpack).toBe("function");
+    });
+
+    it.each([
+        ["phase-development-server", DEVELOPMENT_SERVER],
+        ["phase-production-server", PRODUCTION_SERVER],
+    ])("%s edge compile: appends the instrumentation-node IgnorePlugin", async (_label, phase) => {
+        const out = await modify({}, phase);
+        const result = runWebpackHook(out.webpack as WebpackFn, "edge");
+        expect(result.plugins).toHaveLength(1);
+        const plugin = result.plugins[0] as FakeIgnorePlugin;
+        expect(plugin).toBeInstanceOf(FakeIgnorePlugin);
+        expect(
+            plugin.options.resourceRegExp.test("instrumentation-node.ts"),
+        ).toBe(true);
+    });
+
+    it("an app webpack hook that forgets to return gets a NAMED error, not a bare TypeError", async () => {
+        // Common authoring slip: `webpack(config) { config.plugins.push(x); }` with
+        // no return. Before the fix the fence dereferenced `cfg.plugins` on
+        // `undefined` and threw a bare `TypeError` from inside knext's code — and
+        // since #408 the fence runs in dev too, so that now surfaces during
+        // `next dev --webpack`, where it is even harder to attribute.
+        const forgetful = (() => undefined) as unknown as NextConfig["webpack"];
+        const out = await modify({ webpack: forgetful }, DEVELOPMENT_SERVER);
+        expect(() => runWebpackHook(out.webpack as WebpackFn, "edge")).toThrow(
+            /knext-adapter.*webpack.*returned undefined/i,
         );
-        expect(out).toEqual(appConfig);
-        expect(out.webpack == null).toBe(true);
+    });
+
+    it("dev nodejs compile: leaves the config untouched", async () => {
+        const out = await modify({}, DEVELOPMENT_SERVER);
+        const result = runWebpackHook(out.webpack as WebpackFn, "nodejs");
+        expect(result.plugins).toHaveLength(0);
+    });
+
+    it("dev: composes the app's own webpack hook instead of replacing it", async () => {
+        const appWebpack = vi.fn((config: { plugins: unknown[] }) => {
+            config.plugins.push("app-owned-plugin");
+            return config;
+        });
+        const out = await modify(
+            { webpack: appWebpack as unknown as NextConfig["webpack"] },
+            DEVELOPMENT_SERVER,
+        );
+        const result = runWebpackHook(out.webpack as WebpackFn, "edge");
+        expect(appWebpack).toHaveBeenCalledTimes(1);
+        expect(result.plugins).toEqual([
+            "app-owned-plugin",
+            expect.any(FakeIgnorePlugin),
+        ]);
     });
 });

@@ -248,20 +248,6 @@ jobs:
           KNEXT_REQUIRE_STANDALONE: '1'
         run: pnpm exec vitest run apps/file-manager/bytecode-cache-reuse.test.ts
 
-      # #344 seam-alive gate (reuses the standalone build above — no extra build):
-      # asserts the @getknext/lib module-state SEAMS survive the standalone bundle.
-      # #352 shipped with db_wake + correlation DEAD in prod because @getknext/lib is
-      # DUPLICATED across the instrumentation vs app-server webpack layers and the
-      # seam was not shared. The fix backs the seam with globalThis Symbol.for(...)
-      # cells; this artifact assertion checks those symbols co-occur in BOTH the
-      # instrumentation (writer) chunk AND an app-server (reader) chunk of the
-      # real `next build --webpack` output — so a re-broken seam (or moving
-      # @getknext/lib into serverExternalPackages) fails the gate, not the deploy.
-      - name: Run seam-alive artifact gate (#352/#344, must NOT skip)
-        env:
-          KNEXT_REQUIRE_STANDALONE: '1'
-        run: pnpm exec vitest run apps/file-manager/standalone-seam-alive.test.ts
-
   sigterm-drain-shipped:
     # Per-PR GATE: proves the SHIPPED container layout actually boots the knext
     # runtime entry and drains in-flight requests on SIGTERM (security.md graceful
@@ -322,6 +308,99 @@ jobs:
           pnpm exec vitest run
           apps/file-manager/sigterm-drain-e2e.test.ts
           apps/file-manager/sigterm-hardcap-e2e.test.ts
+
+  seam-alive-discover:
+    # #408 item 2 — DISCOVER which apps carry the #352/#344 seam-alive guard.
+    # The gate used to be one hard-coded step for file-manager, so every other
+    # app (including every app `turbo gen zone` generates) ran its copy of the
+    # guard build-less and passed by SKIPPING. An enumerated list is how the
+    # second app gets missed; this scans the tree instead, and the scanner exits
+    # non-zero rather than emitting an empty (vacuous) matrix. It discovers GUARD
+    # FILES, so an app is covered the moment it CARRIES the guard — a companion
+    # assertion in tests/seam-alive-app-coverage.test.ts is what makes an app that
+    # NEEDS the guard (instrumentation + @getknext/lib) but lacks it fail.
+    # Guarded by tests/seam-alive-app-coverage.test.ts.
+    name: Discover apps carrying the seam-alive guard
+    runs-on: ubuntu-latest
+    outputs:
+      apps: ${{ steps.scan.outputs.apps }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+
+      - name: Scan apps/ for standalone-seam-alive.test.ts
+        id: scan
+        # TWO statements, deliberately. `echo "apps=$(node …)"` would DISCARD the
+        # scanner's exit status — a command substitution's status is dropped and
+        # `echo` succeeds — so an empty-matrix refusal would exit 0 and the gate
+        # would go vacuous exactly where it must not. A bare assignment propagates
+        # the failure under bash -e. Guarded by tests/seam-alive-app-coverage.test.ts.
+        run: |
+          apps=$(node scripts/seam-alive-apps.mjs)
+          echo "apps=$apps" >> "$GITHUB_OUTPUT"
+
+  seam-alive:
+    # PER-APP build + gate: #352 shipped with db_wake + correlation DEAD in prod
+    # because @getknext/lib is DUPLICATED across the instrumentation vs app-server
+    # webpack layers and the seam was not shared. The fix backs the seam with
+    # globalThis Symbol.for(...) cells; the artifact assertion checks those symbols
+    # co-occur in BOTH the instrumentation (writer) chunk AND an app-server
+    # (reader) chunk of the real `next build --webpack` output. The guard needs a
+    # standalone build, which is gitignored — so this job BUILDS the app it gates
+    # and runs the guard with KNEXT_REQUIRE_STANDALONE=1, making a missing build a
+    # HARD failure. Chunk-level drift therefore fails the app that introduced it.
+    name: Seam-alive artifact gate (${{ matrix.app }})
+    needs: seam-alive-discover
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        app: ${{ fromJSON(needs.seam-alive-discover.outputs.apps) }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # @getknext/lib and @getknext/core ship only dist/ and must be built before any
+      # app; @getknext/core type-imports @getknext/db, so the order is lib→db→core.
+      - name: Build @getknext/lib
+        run: pnpm --filter @getknext/lib build
+
+      - name: Build @getknext/db
+        run: pnpm --filter @getknext/db build
+
+      - name: Build @getknext/core
+        run: pnpm --filter @getknext/core build
+
+      # PATH filter, not a name filter: the matrix carries DIRECTORY names and
+      # `pnpm --filter <name>` matches on PACKAGE NAME — which already differs for
+      # apps/docs (package "knext-docs"). A name miss prints "No projects matched
+      # the filters" and exits 0, i.e. builds nothing while looking fine.
+      - name: Build ${{ matrix.app }} standalone (next build --webpack)
+        run: pnpm --filter ./apps/${{ matrix.app }} build
+
+      - name: Run seam-alive artifact gate (#352/#344, must NOT skip)
+        env:
+          # Converts the skipIf guard into a HARD failure if the build is missing,
+          # so a green check can never mean "skipped".
+          KNEXT_REQUIRE_STANDALONE: '1'
+        run: pnpm exec vitest run apps/${{ matrix.app }}/standalone-seam-alive.test.ts
 
   no-latest-guard:
     name: No :latest images in operator manifests

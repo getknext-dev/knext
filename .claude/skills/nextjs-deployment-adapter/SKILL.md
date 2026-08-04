@@ -18,9 +18,16 @@ import type { NextAdapter } from 'next';
 const adapter: NextAdapter = {
   name: 'knext',
   async modifyConfig(config, { phase /*, nextVersion */ }) {
-    if (phase !== 'phase-production-build') return config; // guard — runs for every CLI cmd
-    return { ...config, output: 'standalone',
-             cacheHandler: require.resolve('./cache-handler') };
+    // Gate BUILD-ARTIFACT instructions on the build phase…
+    const build = phase === 'phase-production-build';
+    return {
+      ...config,
+      ...(build ? { output: 'standalone',
+                    cacheHandler: require.resolve('./cache-handler') } : {}),
+      // …but a COMPILE-CORRECTNESS fence must apply wherever the bundler runs,
+      // dev included — see the phase guidance below.
+      webpack: composeFence(config.webpack),
+    };
   },
   async onBuildComplete(ctx) { /* see below */ },
 };
@@ -28,9 +35,21 @@ export default adapter;
 ```
 
 ### `modifyConfig(config, context)`
-Called for **any** command that loads `next.config` (build, dev, start). Always guard
-target-specific mutations with `context.phase === 'phase-production-build'`. Good home for forcing
+Called for **any** command that loads `next.config` (build, dev, start). Good home for forcing
 `output:'standalone'`, injecting the `cacheHandler`, asset prefix, basePath.
+
+**Phase-gate by what the mutation IS, not reflexively.** A blanket
+`if (phase !== 'phase-production-build') return config` is wrong for anything that must hold
+wherever the bundler runs:
+
+- **Build-artifact instructions** (`output:'standalone'`, `generateBuildId`) — gate on
+  `phase-production-build`; they are meaningless outside a build.
+- **Compile-correctness fences** (e.g. knext's edge-scoped `IgnorePlugin` excluding
+  `instrumentation-node` from the edge bundle) — apply in EVERY phase. Measured on next 16.2.11:
+  `next dev --webpack` fails the edge compile without the fence
+  (`UnhandledSchemeError: Reading from "node:fs"`), exactly as the production build did; plain
+  `next dev` (Turbopack) is unaffected only because Turbopack never reads `config.webpack`.
+  Production-only gating there is a silent dev/prod parity gap (knext #408, ADR-0031 amendment).
 
 ### `onBuildComplete(context)` — fires **once** after `next build`
 `context` fields:

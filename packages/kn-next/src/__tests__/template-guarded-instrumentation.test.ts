@@ -248,4 +248,74 @@ describe("app template — package.json carries the instrumentation contract (#3
     it("declares @getknext/core (the adapter + core-owned instrumentation adapters)", () => {
         expect(pkg).toContain('"@getknext/core"');
     });
+
+    /**
+     * #408 item 2 — the generated app must be able to run its seam-alive guard
+     * for REAL, not green-by-skip. The guard hard-fails only under
+     * KNEXT_REQUIRE_STANDALONE=1 AND with a standalone build present; a generated
+     * app whose CI just runs `vitest` gets neither, so the guard silently passes
+     * while the seam it protects can be dead. The template therefore ships ONE
+     * script that does both halves, so the app's CI has something to call.
+     */
+    it("ships a `test:seam` script that BUILDS and then hard-fails (no green-by-skip)", () => {
+        const seamScript = JSON.parse(pkg ?? "{}").scripts?.["test:seam"] as
+            | string
+            | undefined;
+        expect(
+            seamScript,
+            "package.json.hbs is missing the `test:seam` script — without it a " +
+                "generated app's seam guard can only ever run build-less and skip",
+        ).toBeDefined();
+        const script = seamScript as string;
+        // It must build the standalone output the guard reads…
+        expect(script).toContain("next build --webpack");
+        // …and force the hard-fail mode, so a missing build FAILS instead of skipping.
+        expect(script).toContain("KNEXT_REQUIRE_STANDALONE=1");
+        expect(script).toContain("standalone-seam-alive.test.ts");
+    });
+
+    it("declares every binary `test:seam` invokes (it must work OUTSIDE this monorepo)", () => {
+        // The script knext hands users is prescribed for "an app generated into
+        // your own repo — wire it into your CI". Inside this workspace a missing
+        // binary resolves by root hoisting, so the gap is invisible here and only
+        // shows up as command-not-found in the exact scenario the docs describe.
+        // SCAN the script for the binaries it runs rather than checking a known
+        // name — a future `test:seam` that adds a tool is covered automatically.
+        const manifest = JSON.parse(pkg ?? "{}") as {
+            scripts?: Record<string, string>;
+            dependencies?: Record<string, string>;
+            devDependencies?: Record<string, string>;
+        };
+        const script = manifest.scripts?.["test:seam"] ?? "";
+        const declared = {
+            ...manifest.dependencies,
+            ...manifest.devDependencies,
+        };
+        const binaries = script
+            // Every shell separator, not just `&&` — splitting on `&&` alone hides
+            // every command after a `;`, `||` or `|`, which is the one way an
+            // undeclared binary could still slip through this scan. (`||` is listed
+            // before `|` so the alternation matches the two-char form first.)
+            .split(/&&|\|\||;|\|/)
+            .map((segment) =>
+                segment
+                    .trim()
+                    .split(/\s+/)
+                    // Drop leading `VAR=value` env assignments (KNEXT_REQUIRE_STANDALONE=1).
+                    .find((token) => !/^[A-Z_][A-Z0-9_]*=/.test(token)),
+            )
+            .filter((bin): bin is string => Boolean(bin));
+        expect(
+            binaries.length,
+            `no binary parsed out of test:seam: "${script}"`,
+        ).toBeGreaterThan(0);
+        for (const bin of binaries) {
+            expect(
+                Object.hasOwn(declared, bin),
+                `test:seam runs \`${bin}\` but the template never declares it — the ` +
+                    "script resolves by root hoisting inside this monorepo and dies with " +
+                    "command-not-found in a generated app's own repo",
+            ).toBe(true);
+        }
+    });
 });
