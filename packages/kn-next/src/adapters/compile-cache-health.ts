@@ -20,11 +20,23 @@
  * ## Same discipline as its sibling: diagnostics, fail-open, off the hot path
  *
  * Never throws, never delays boot, never changes behaviour, and stays SILENT on
- * any uncertainty — NODE_COMPILE_CACHE unset, or a runtime that cannot report a
- * cache dir at all (Bun has no `module.getCompileCacheDir`, so "no dir" there
- * means "cannot tell", not "refused"; warning on it would fire on every Bun
- * pod). Wired into the supervisor's DEFERRED init, so it runs only once the
- * child is already serving.
+ * every case that is not a genuine refusal:
+ *
+ *  - `NODE_COMPILE_CACHE` unset — nothing was asked for;
+ *  - `NODE_DISABLE_COMPILE_CACHE` present — Node's documented opt-out; the
+ *    operator turned bytecode caching off deliberately and must not be sent
+ *    hunting a volume problem;
+ *  - **Bun** — Bun does not implement `NODE_COMPILE_CACHE`, and, importantly,
+ *    it DOES export `module.getCompileCacheDir`, returning `undefined`
+ *    unconditionally (verified against bun 1.3.5 on a healthy writable dir).
+ *    Feature-detecting the function is therefore NOT enough to decide the
+ *    answer is meaningful; the runtime is checked explicitly, or every Bun pod
+ *    would be told its healthy volume "was refused". `node-server.ts` branches
+ *    on `process.versions.bun`, so Bun is a supported target and this path is
+ *    reachable in production, not hypothetical.
+ *
+ * Wired into the supervisor's DEFERRED init, so it runs only once the child is
+ * already serving.
  *
  * ## What the signal actually proves
  *
@@ -38,33 +50,73 @@
 
 import * as nodeModule from "node:module";
 
-export type CompileCacheStatus = "unset" | "active" | "degraded" | "unknown";
+export type CompileCacheStatus =
+    | "unset"
+    | "active"
+    | "degraded"
+    | "disabled"
+    | "unknown";
 
 interface HealthLogger {
     warn(obj: object, msg: string): void;
 }
 
 /**
- * Pure status decision.
- *
- * @param requested       the injected NODE_COMPILE_CACHE (or undefined)
- * @param effective       what the runtime reports it actually used
- * @param probeSupported  false when the runtime has no way to report one
+ * Everything the verdict depends on, gathered explicitly so the decision is
+ * pure and every branch is reachable in a test.
  */
-export function evaluateCompileCacheStatus(
-    requested: string | undefined,
-    effective: string | undefined,
-    probeSupported = true,
-): CompileCacheStatus {
-    if (!requested) return "unset";
-    if (!probeSupported) return "unknown";
-    return effective ? "active" : "degraded";
+export interface CompileCacheSignals {
+    /** The injected NODE_COMPILE_CACHE (or undefined). */
+    readonly requested: string | undefined;
+    /** What the runtime reports it actually used. */
+    readonly effective: string | undefined;
+    /** The runtime exposes a `getCompileCacheDir` at all. */
+    readonly probeSupported: boolean;
+    /**
+     * The runtime IMPLEMENTS `NODE_COMPILE_CACHE`. This is NOT the same as
+     * `probeSupported`, and conflating them was a real false-alarm bug: **Bun
+     * exports `module.getCompileCacheDir` and returns `undefined`
+     * unconditionally**, even for a perfectly healthy writable directory
+     * (verified against bun 1.3.5). Feature-detecting the function therefore
+     * proves nothing, and every Bun pod would be told its healthy cache volume
+     * "was refused".
+     */
+    readonly runtimeHonoursCompileCache: boolean;
+    /**
+     * `NODE_DISABLE_COMPILE_CACHE` is PRESENT in the environment — Node's
+     * documented opt-out. Presence, not truthiness: verified on node 24, the
+     * cache is disabled for `1`, `0`, and the empty string alike, so an
+     * operator who set `=0` expecting "off means on" still gets it off, and
+     * telling them a volume was "refused" would send them hunting a problem
+     * that does not exist.
+     */
+    readonly disabledByRequest: boolean;
 }
 
 /**
- * The production probe: `module.getCompileCacheDir` exists on Node ≥22.8 and
- * NOT under Bun, so it is read off a NAMESPACE import (a named import of a
- * missing export is a load-time error) and feature-detected.
+ * Pure status decision. Order matters: every "we cannot tell" case must be
+ * decided BEFORE the degraded verdict, since degraded is the only one that
+ * speaks.
+ */
+export function evaluateCompileCacheStatus(
+    signals: CompileCacheSignals,
+): CompileCacheStatus {
+    if (!signals.requested) return "unset";
+    // Deliberately off ⇒ report it, never warn about it.
+    if (signals.disabledByRequest) return "disabled";
+    // Cannot tell ⇒ silent. Both directions: no probe at all, or a runtime
+    // whose probe cannot answer this question (Bun).
+    if (!signals.probeSupported) return "unknown";
+    if (!signals.runtimeHonoursCompileCache) return "unknown";
+    return signals.effective ? "active" : "degraded";
+}
+
+/**
+ * The production probe. Read off a NAMESPACE import (a named import of a
+ * possibly-missing export is a load-time error) and feature-detected.
+ *
+ * Feature detection alone is NOT sufficient to decide whether the answer is
+ * meaningful — see {@link CompileCacheSignals.runtimeHonoursCompileCache}.
  */
 function defaultCompileCacheProbe(): (() => string | undefined) | undefined {
     const probe = (
@@ -73,6 +125,21 @@ function defaultCompileCacheProbe(): (() => string | undefined) | undefined {
         }
     ).getCompileCacheDir;
     return typeof probe === "function" ? () => probe() : undefined;
+}
+
+/**
+ * Does THIS runtime implement `NODE_COMPILE_CACHE`?
+ *
+ * Bun does not: it ships the `module.getCompileCacheDir` export as a stub that
+ * always returns `undefined`. Anything Bun-like is therefore "cannot tell",
+ * which is the safe direction — a missed diagnostic, never a false alarm. If a
+ * future Bun implements the cache for real, this stays silent rather than
+ * warning wrongly, and can be narrowed by version then.
+ */
+export function runtimeHonoursCompileCache(
+    versions: { bun?: string } = process.versions as { bun?: string },
+): boolean {
+    return versions.bun === undefined;
 }
 
 /**
@@ -85,11 +152,14 @@ function defaultCompileCacheProbe(): (() => string | undefined) | undefined {
  *
  * Omit `getCompileCacheDir` entirely to use the production probe; pass it
  * explicitly (including as `undefined`) to simulate a runtime without one.
+ * `versions` is the seam for the Bun check — production reads
+ * `process.versions`.
  */
 export function warnOnDegradedCompileCache(opts: {
     env: Record<string, string | undefined>;
     log: HealthLogger;
     getCompileCacheDir?: (() => string | undefined) | undefined;
+    versions?: { bun?: string };
 }): CompileCacheStatus {
     let status: CompileCacheStatus = "unknown";
     try {
@@ -99,11 +169,18 @@ export function warnOnDegradedCompileCache(opts: {
                 ? opts.getCompileCacheDir
                 : defaultCompileCacheProbe();
         const effective = probe ? probe() : undefined;
-        status = evaluateCompileCacheStatus(
+        status = evaluateCompileCacheStatus({
             requested,
             effective,
-            probe !== undefined,
-        );
+            probeSupported: probe !== undefined,
+            runtimeHonoursCompileCache: runtimeHonoursCompileCache(
+                opts.versions ?? (process.versions as { bun?: string }),
+            ),
+            // PRESENCE, not truthiness — Node disables the cache for any
+            // value, including "0" and "".
+            disabledByRequest:
+                opts.env.NODE_DISABLE_COMPILE_CACHE !== undefined,
+        });
         if (status !== "degraded") return status;
         opts.log.warn(
             { nodeCompileCache: requested, compileCacheStatus: status },

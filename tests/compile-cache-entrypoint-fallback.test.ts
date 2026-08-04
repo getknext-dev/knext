@@ -1,27 +1,45 @@
 /**
- * #309 (one of four criteria) — the container ENTRYPOINT must never gate boot
- * on the compile-cache directory.
+ * #309 — the container entry must never gate boot on the compile-cache dir.
  *
  * V8 itself is fail-open about a broken NODE_COMPILE_CACHE
  * (`packages/kn-next/src/__tests__/compile-cache-volume-fallback.test.ts`
- * proves the shapes), so the only way knext can turn a cache-volume problem
+ * proves every shape), so the only way knext can turn a cache-volume problem
  * into a CRASHLOOP is by adding a check of its own in front of `exec node` —
  * an `mkdir -p "$NODE_COMPILE_CACHE"` on a read-only mount, a `test -w`, a
  * `set -e` with any failing probe. That is a one-line edit away at all times
- * and would be invisible in every existing test: the bake tests run against a
- * WRITABLE build-stage directory, where such a check passes.
+ * and is invisible to every other test: the bake tests run against a WRITABLE
+ * build-stage directory, where such a check passes.
  *
- * This guard SCANS rather than enumerates (the repo rule): it discovers every
- * Dockerfile whose runtime CMD mentions NODE_COMPILE_CACHE and applies both
- * halves to each —
- *   - SANCTIONED present: the CMD exports the var with the `${NODE_COMPILE_CACHE:-<abs default>}`
- *     override-wins form (ADR-0035 / #440) and hands off with `exec`;
- *   - UNSANCTIONED absent: no boot-gating construct in that CMD, and, proved by
- *     EXECUTION rather than by reading, the CMD's shell still reaches its
- *     `exec node` when NODE_COMPILE_CACHE points at an UNWRITABLE directory.
+ * ## What is scanned (round 2 — the boundary was too narrow)
  *
- * The behavioural half is the one that cannot be fooled by a construct nobody
- * thought to blocklist.
+ * Round 1 discovered only `CMD ["sh","-c",…]`. A review probe defeated it with
+ * `ENTRYPOINT ["/entrypoint.sh"]` whose script did `set -e; mkdir -p
+ * "$NODE_COMPILE_CACHE"` — the exact crashloop this exists to prevent — and all
+ * seven assertions stayed green, because the Dockerfile was simply never
+ * discovered. So discovery now covers every RUNTIME SHELL SURFACE:
+ *
+ *   - exec-form `CMD`/`ENTRYPOINT` with an `sh -c` / `bash -c` script string;
+ *   - SHELL-form `CMD`/`ENTRYPOINT` (the bare-text form, which docker wraps in
+ *     `/bin/sh -c` itself);
+ *   - exec-form `CMD`/`ENTRYPOINT` naming a SCRIPT — the script's contents are
+ *     resolved from the repo and scanned as a surface in their own right.
+ *
+ * A referenced script that cannot be resolved is a FAILURE, never a pass: "we
+ * could not read it" must not read as "it is fine".
+ *
+ * ## What is asserted, per in-scope surface
+ *
+ *   - SANCTIONED present (per Dockerfile): the `${NODE_COMPILE_CACHE:-<abs
+ *     default>}` override-wins export form (ADR-0035 / #440);
+ *   - UNSANCTIONED absent: no boot-gating construct;
+ *   - and — the half no blocklist can fake — the surface is EXECUTED with an
+ *     unwritable cache dir and must still reach its handoff.
+ *
+ * ## Boundary, stated rather than implied
+ *
+ * This reads shell text. It does not evaluate `RUN`-built wrappers, binaries,
+ * or a script fetched at build time; a Dockerfile whose entry is a compiled
+ * binary is out of scope and would need a container-level test.
  */
 
 import { execFileSync } from 'node:child_process';
@@ -35,46 +53,152 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterAll, describe, expect, it } from 'vitest';
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const SCAN_ROOTS = ['apps', 'packages', 'examples'];
+const SKIP_DIRS = new Set(['node_modules', '.next', 'dist', '.git', '.turbo']);
 
-/** Directories worth scanning for app Dockerfiles (never node_modules). */
-const SCAN_ROOTS = ['apps', 'packages'];
-
-function findDockerfiles(dir: string, found: string[] = []): string[] {
+function walk(dir: string, visit: (file: string) => void): void {
   let entries: Dirent[];
   try {
     entries = readdirSync(dir, { withFileTypes: true });
   } catch {
-    return found;
+    return;
   }
   for (const entry of entries) {
-    if (entry.name === 'node_modules' || entry.name === '.next' || entry.name === 'dist') continue;
+    if (SKIP_DIRS.has(entry.name)) continue;
     const full = join(dir, entry.name);
-    if (entry.isDirectory()) findDockerfiles(full, found);
-    else if (entry.isFile() && /^Dockerfile(\..+)?$/.test(entry.name)) found.push(full);
+    if (entry.isDirectory()) walk(full, visit);
+    else if (entry.isFile()) visit(full);
+  }
+}
+
+function findDockerfiles(): string[] {
+  const found: string[] = [];
+  for (const root of SCAN_ROOTS) {
+    walk(join(REPO_ROOT, root), (file) => {
+      if (/^Dockerfile(\..+)?$/.test(basename(file))) found.push(file);
+    });
   }
   return found;
 }
 
-/** The runtime `CMD ["sh","-c","…"]` shell string, or null when there is none. */
-function runtimeCmd(dockerfile: string): string | null {
-  const df = readFileSync(dockerfile, 'utf8');
-  const m = df.match(/CMD\s*\[\s*"sh"\s*,\s*"-c"\s*,\s*"((?:[^"\\]|\\.)*)"\s*\]/);
-  if (!m) return null;
-  return m[1].replace(/\\"/g, '"').replace(/\\\\/g, '\\');
+/** A runtime shell surface: where it came from, and the shell text itself. */
+interface Surface {
+  readonly origin: string;
+  readonly shell: string;
 }
 
-const cacheCmds = findDockerfiles(join(REPO_ROOT, SCAN_ROOTS[0]))
-  .concat(findDockerfiles(join(REPO_ROOT, SCAN_ROOTS[1])))
-  .map((file) => ({ file, cmd: runtimeCmd(file) }))
-  .filter(
-    (entry): entry is { file: string; cmd: string } =>
-      entry.cmd !== null && entry.cmd.includes('NODE_COMPILE_CACHE'),
+/** Unescape a JSON-array element as written inside a Dockerfile line. */
+function unescapeJsonElement(value: string): string {
+  return value.replace(/\\"/g, '"').replace(/\\\\/g, '\\');
+}
+
+/**
+ * Resolve a script named by an exec-form entry (e.g. `/entrypoint.sh`) to a
+ * file in the repo. Docker copies it in from the build context, so match on the
+ * basename anywhere under the app's own directory first, then the repo.
+ */
+function resolveScript(dockerfile: string, scriptPath: string): string | null {
+  const name = basename(scriptPath);
+  const candidates: string[] = [];
+  walk(dirname(dockerfile), (file) => {
+    if (basename(file) === name) candidates.push(file);
+  });
+  if (candidates.length === 0) {
+    for (const root of SCAN_ROOTS) {
+      walk(join(REPO_ROOT, root), (file) => {
+        if (basename(file) === name) candidates.push(file);
+      });
+    }
+  }
+  return candidates[0] ?? null;
+}
+
+/**
+ * Every runtime shell surface a Dockerfile hands the container. Returns the
+ * surfaces plus any script reference that could NOT be resolved — the caller
+ * fails on those rather than ignoring them.
+ */
+function runtimeSurfaces(dockerfile: string): {
+  surfaces: Surface[];
+  unresolved: string[];
+} {
+  // A HEALTHCHECK carries its own `CMD`, which is NOT a runtime entry: it runs
+  // periodically against an already-booted container and `|| exit 1` is its
+  // CONTRACT, not a boot gate. Drop those instructions (including line
+  // continuations) before scanning, or the guard reports the healthcheck's
+  // `exit 1` as a crashloop risk and its own docs page as a violation.
+  const df = readFileSync(dockerfile, 'utf8').replace(
+    /^\s*HEALTHCHECK\b(?:[^\n]*\\\n)*[^\n]*\n(?:\s*CMD\b(?:[^\n]*\\\n)*[^\n]*\n)?/gim,
+    '',
   );
+  const surfaces: Surface[] = [];
+  const unresolved: string[] = [];
+
+  for (const instruction of ['CMD', 'ENTRYPOINT'] as const) {
+    // Exec form: CMD/ENTRYPOINT [ "…", "…" ]
+    const execForm = new RegExp(`^\\s*${instruction}\\s*\\[(.*)\\]\\s*$`, 'gmi');
+    for (const match of df.matchAll(execForm)) {
+      const parts = [...match[1].matchAll(/"((?:[^"\\]|\\.)*)"/g)].map((m) =>
+        unescapeJsonElement(m[1]),
+      );
+      if (parts.length === 0) continue;
+      const shellIndex = parts.findIndex((p) => /(^|\/)(sh|bash)$/.test(p));
+      const dashC = parts.indexOf('-c');
+      if (shellIndex !== -1 && dashC === shellIndex + 1 && parts[dashC + 1] !== undefined) {
+        surfaces.push({ origin: `${instruction} sh -c`, shell: parts[dashC + 1] });
+        continue;
+      }
+      // Not a shell invocation: it may name a script we can read.
+      const target = parts[0];
+      if (/\.(sh|bash)$/.test(target)) {
+        const script = resolveScript(dockerfile, target);
+        if (script === null) unresolved.push(target);
+        else
+          surfaces.push({
+            origin: `${instruction} script ${target}`,
+            shell: readFileSync(script, 'utf8'),
+          });
+      }
+    }
+
+    // Shell form: CMD/ENTRYPOINT <text>  (docker wraps this in /bin/sh -c)
+    const shellForm = new RegExp(`^\\s*${instruction}\\s+(?!\\[)(.+)$`, 'gmi');
+    for (const match of df.matchAll(shellForm)) {
+      surfaces.push({ origin: `${instruction} shell-form`, shell: match[1].trim() });
+    }
+  }
+
+  return { surfaces, unresolved };
+}
+
+interface Target {
+  readonly file: string;
+  readonly label: string;
+  readonly surfaces: Surface[];
+  readonly unresolved: string[];
+}
+
+const allTargets: Target[] = findDockerfiles().map((file) => {
+  const { surfaces, unresolved } = runtimeSurfaces(file);
+  return {
+    file,
+    label: file.slice(REPO_ROOT.length + 1),
+    surfaces,
+    unresolved,
+  };
+});
+
+/** Only Dockerfiles that actually deal with the compile cache are in scope. */
+const targets = allTargets.filter(
+  (target) =>
+    target.surfaces.some((s) => s.shell.includes('NODE_COMPILE_CACHE')) ||
+    readFileSync(target.file, 'utf8').includes('NODE_COMPILE_CACHE'),
+);
 
 const scratchDirs: string[] = [];
 afterAll(() => {
@@ -108,65 +232,108 @@ function unwritableDir(): string {
   return dir;
 }
 
-describe('#309 the container entrypoint never gates boot on the compile-cache dir', () => {
-  it('found the runtime CMDs to guard (a vacuous scan is a failed scan)', () => {
+/** Constructs that turn a bad cache dir into a non-zero exit. */
+const FORBIDDEN: Array<[RegExp, string]> = [
+  [/\bmkdir\b/, 'mkdir fails on a read-only mount and would abort the boot'],
+  [/\brm\b/, 'removing cache contents can fail on a read-only mount'],
+  [/\btest\s+-[a-z]/, 'a `test` probe on the cache dir gates the boot'],
+  [/\[\s+-[a-z]/, 'a `[ -w … ]` probe on the cache dir gates the boot'],
+  [/\bset\s+-[eu]/, '`set -e`/`set -u` turns any probe failure into an exit'],
+  [/\bexit\b/, 'an explicit exit before the handoff is a boot gate'],
+  [/\btouch\b/, 'a write probe fails on a read-only mount'],
+  [/\bcd\s+["$]/, 'a `cd` into the cache dir fails when it does not exist'],
+];
+
+/**
+ * Patch a surface so the handoff is observable: replace the `exec …` line with
+ * a marker, or append the marker when there is none (a script that gates and
+ * then runs something else must still REACH the end).
+ */
+function withProbe(shell: string): string {
+  const probe = `exec node -e "process.stdout.write('REACHED:' + (process.env.NODE_COMPILE_CACHE || '__UNSET__'))"`;
+  if (/\bexec\s/.test(shell)) return shell.replace(/exec .*$/m, probe);
+  return `${shell}\n${probe}`;
+}
+
+describe('#309 the container entry never gates boot on the compile-cache dir', () => {
+  it('found runtime surfaces to guard (a vacuous scan is a failed scan)', () => {
     expect(
-      cacheCmds.length,
-      'no Dockerfile runtime CMD mentions NODE_COMPILE_CACHE — the scan matched nothing, ' +
-        'so every assertion below would pass vacuously. Fix the scan, not this expectation.',
+      allTargets.length,
+      'no Dockerfiles were discovered at all — the scan matched nothing',
     ).toBeGreaterThanOrEqual(2);
+    expect(
+      targets.length,
+      'no Dockerfile deals with NODE_COMPILE_CACHE — every assertion below would pass vacuously',
+    ).toBeGreaterThanOrEqual(2);
+    // Every in-scope Dockerfile must have yielded at least one READABLE
+    // surface. A Dockerfile that mentions the cache but whose entry we cannot
+    // read is exactly the round-1 blind spot; fail rather than skip it.
+    for (const target of targets) {
+      expect(
+        target.surfaces.length,
+        `${target.label} mentions NODE_COMPILE_CACHE but no runtime shell surface was found ` +
+          '(exec-form sh -c, shell form, or a resolvable script). It cannot be guarded — ' +
+          'either it is a binary entry (out of scope, state it) or discovery is broken.',
+      ).toBeGreaterThan(0);
+      expect(
+        target.unresolved,
+        `${target.label} references entry script(s) that could not be resolved in the repo: ` +
+          `${target.unresolved.join(', ')}. "Unreadable" must not read as "fine".`,
+      ).toEqual([]);
+    }
   });
 
-  for (const { file, cmd } of cacheCmds) {
-    const label = file.slice(REPO_ROOT.length + 1);
-
-    it(`${label}: exports the override-wins default and execs`, () => {
-      // SANCTIONED half. `${VAR:-default}` (not `:=`, not a bare assignment)
-      // is what makes an operator-injected value win while an absolute baked
-      // default still applies when nothing is injected.
-      expect(cmd).toMatch(/export\s+NODE_COMPILE_CACHE="\$\{NODE_COMPILE_CACHE:-\/[^}]+\}"/);
-      expect(cmd).toContain('exec ');
-    });
-
-    it(`${label}: contains no construct that could fail the boot on a bad cache dir`, () => {
-      // UNSANCTIONED half. Each of these turns an unwritable/read-only/absent
-      // cache volume into a non-zero exit — i.e. a crashloop — instead of a
-      // slower cold start.
-      const forbidden: Array<[RegExp, string]> = [
-        [/\bmkdir\b/, 'mkdir fails on a read-only mount and would abort the boot'],
-        [/\brm\b/, 'removing cache contents can fail on a read-only mount'],
-        [/\btest\s+-[a-z]/, 'a `test` probe on the cache dir gates the boot'],
-        [/\[\s+-[a-z]/, 'a `[ -w … ]` probe on the cache dir gates the boot'],
-        [/\bset\s+-[eu]/, '`set -e`/`set -u` turns any probe failure into an exit'],
-        [/\bexit\b/, 'an explicit exit before `exec node` is a boot gate'],
-        [/\btouch\b/, 'a write probe fails on a read-only mount'],
-      ];
-      for (const [pattern, why] of forbidden) {
-        expect(pattern.test(cmd), `${label} runtime CMD contains ${pattern}: ${why}`).toBe(false);
+  for (const target of targets) {
+    it(`${target.label}: sets the cache path in an override-wins form`, () => {
+      // SANCTIONED half, per Dockerfile rather than per surface: the value may
+      // be set by the CMD, by an entry script, or by a plain `ENV` (which the
+      // process inherits directly and an operator-injected value overrides for
+      // free). Exactly one of those must be true — and when a SHELL sets it, it
+      // must use `${VAR:-default}`, never `:=` or a bare assignment, or an
+      // injected value would be ignored.
+      const combined = target.surfaces.map((s) => s.shell).join('\n');
+      const shellSets = combined.includes('NODE_COMPILE_CACHE');
+      if (shellSets) {
+        expect(combined).toMatch(
+          /export\s+NODE_COMPILE_CACHE="?\$\{NODE_COMPILE_CACHE:-\/[^}]+\}"?/,
+        );
+        // The other half: the forms that silently ignore an injected value.
+        expect(combined).not.toMatch(/NODE_COMPILE_CACHE:=/);
+      } else {
+        // No shell touches it, so the image must set it declaratively with an
+        // ABSOLUTE path. Asserted rather than waved through: "not applicable"
+        // is how a case goes unchecked.
+        expect(
+          readFileSync(target.file, 'utf8'),
+          `${target.label} mentions NODE_COMPILE_CACHE but neither its entry shell nor an ENV sets it`,
+        ).toMatch(/^\s*ENV\s+NODE_COMPILE_CACHE=\/\S+/m);
       }
     });
 
-    it(`${label}: still reaches its exec with an UNWRITABLE NODE_COMPILE_CACHE`, () => {
-      // The half that no blocklist can fake: run the REAL CMD shell, with the
-      // final `exec …` replaced by a marker, against a read-only cache dir.
-      const probe = `exec node -e "process.stdout.write('REACHED:' + (process.env.NODE_COMPILE_CACHE || '__UNSET__'))"`;
-      const patched = cmd.replace(/exec .*$/, probe);
-      expect(
-        patched,
-        'the exec substitution did not apply — the guard would pass vacuously',
-      ).not.toBe(cmd);
-      expect(patched).toContain('REACHED:');
+    for (const surface of target.surfaces) {
+      const label = `${target.label} [${surface.origin}]`;
 
-      const cache = join(unwritableDir(), 'bytecode');
-      const env: NodeJS.ProcessEnv = { ...process.env, NODE_COMPILE_CACHE: cache };
-      delete env.NODE_OPTIONS; // harness artifact; keep the child clean
-      const out = execFileSync('sh', ['-c', patched], { encoding: 'utf8', env }).trim();
+      it(`${label}: contains no construct that could fail the boot on a bad cache dir`, () => {
+        for (const [pattern, why] of FORBIDDEN) {
+          expect(pattern.test(surface.shell), `${label} contains ${pattern}: ${why}`).toBe(false);
+        }
+      });
 
-      // Booted, and with the injected (broken) value intact — the entrypoint
-      // neither aborted nor silently rewrote it.
-      expect(out).toBe(`REACHED:${cache}`);
-      // And it really was unwritable for the duration of the run.
-      expect(statSync(dirname(cache)).mode & 0o200).toBe(0);
-    });
+      it(`${label}: still reaches its handoff with an UNWRITABLE NODE_COMPILE_CACHE`, () => {
+        const patched = withProbe(surface.shell);
+        expect(patched, 'the probe substitution did not apply').not.toBe(surface.shell);
+        expect(patched).toContain('REACHED:');
+
+        const cache = join(unwritableDir(), 'bytecode');
+        const env: NodeJS.ProcessEnv = { ...process.env, NODE_COMPILE_CACHE: cache };
+        delete env.NODE_OPTIONS; // harness artifact; keep the child clean
+        const out = execFileSync('sh', ['-c', patched], { encoding: 'utf8', env }).trim();
+
+        // Booted, with the injected (broken) value intact — the entry neither
+        // aborted nor silently rewrote it.
+        expect(out.split('\n').pop()).toBe(`REACHED:${cache}`);
+        expect(statSync(dirname(cache)).mode & 0o200).toBe(0);
+      });
+    }
   }
 });

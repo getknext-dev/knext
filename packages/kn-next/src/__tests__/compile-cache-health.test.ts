@@ -9,11 +9,21 @@
  * (`compile-cache-shadow.ts`); this makes the UNAVAILABLE case observable, with
  * the same discipline:
  *
- *   diagnostics only · never throws · never delays boot · SILENT on any
- *   uncertainty (unset env, or a runtime that cannot report a cache dir).
+ *   diagnostics only · never throws · never delays boot · SILENT on anything
+ *   that is not a genuine refusal.
  *
  * The signal is `module.getCompileCacheDir()`: a string when V8 accepted the
  * directory, `undefined` when it refused it and silently disabled the cache.
+ *
+ * Two ways that signal lies, both covered below because both produce a FALSE
+ * ALARM — the failure class #451 spent a round removing from the sibling
+ * diagnostic:
+ *  - **Bun** exports `getCompileCacheDir` and returns `undefined` even for a
+ *    healthy writable dir, so feature-detection is not enough. Asserted here
+ *    against the pure decision AND, in `compile-cache-health-bun.test.ts`,
+ *    against a REAL bun process running this module.
+ *  - **`NODE_DISABLE_COMPILE_CACHE`** is Node's documented opt-out: the cache
+ *    is off by request while the CMD still exports `NODE_COMPILE_CACHE`.
  */
 
 import { readFileSync } from "node:fs";
@@ -22,7 +32,9 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 import {
+    type CompileCacheSignals,
     evaluateCompileCacheStatus,
+    runtimeHonoursCompileCache,
     warnOnDegradedCompileCache,
 } from "../adapters/compile-cache-health";
 
@@ -33,30 +45,89 @@ const NODE_SERVER_SRC = resolve(
 
 const PVC = "/mnt/bytecode-cache/latest";
 
+/** A healthy Node pod: probe present, runtime honours the cache, no opt-out. */
+function signals(over: Partial<CompileCacheSignals> = {}): CompileCacheSignals {
+    return {
+        requested: PVC,
+        effective: `${PVC}/v24-arm64`,
+        probeSupported: true,
+        runtimeHonoursCompileCache: true,
+        disabledByRequest: false,
+        ...over,
+    };
+}
+
 describe("evaluateCompileCacheStatus (pure)", () => {
     it("is 'active' when the requested dir was accepted", () => {
-        expect(evaluateCompileCacheStatus(PVC, `${PVC}/v24-arm64`)).toBe(
-            "active",
-        );
+        expect(evaluateCompileCacheStatus(signals())).toBe("active");
     });
 
     it("is 'degraded' when a requested dir was silently refused", () => {
-        expect(evaluateCompileCacheStatus(PVC, undefined)).toBe("degraded");
-        expect(evaluateCompileCacheStatus(PVC, "")).toBe("degraded");
+        expect(
+            evaluateCompileCacheStatus(signals({ effective: undefined })),
+        ).toBe("degraded");
+        expect(evaluateCompileCacheStatus(signals({ effective: "" }))).toBe(
+            "degraded",
+        );
     });
 
     it("is 'unset' when NODE_COMPILE_CACHE was never injected", () => {
-        expect(evaluateCompileCacheStatus(undefined, undefined)).toBe("unset");
-        expect(evaluateCompileCacheStatus("", undefined)).toBe("unset");
+        expect(
+            evaluateCompileCacheStatus(
+                signals({ requested: undefined, effective: undefined }),
+            ),
+        ).toBe("unset");
+        expect(
+            evaluateCompileCacheStatus(
+                signals({ requested: "", effective: undefined }),
+            ),
+        ).toBe("unset");
     });
 
-    it("is 'unknown' when the runtime cannot report a cache dir at all", () => {
-        // Bun has no `module.getCompileCacheDir`, so "no dir reported" there
-        // means "cannot tell", NOT "refused". Reporting that as degraded would
-        // warn on every Bun pod — a false alarm, which is exactly the failure
-        // mode #451 spent a round removing from the sibling diagnostic.
-        expect(evaluateCompileCacheStatus(PVC, undefined, false)).toBe(
-            "unknown",
+    it("is 'unknown' when the runtime exposes no probe at all", () => {
+        expect(
+            evaluateCompileCacheStatus(
+                signals({ probeSupported: false, effective: undefined }),
+            ),
+        ).toBe("unknown");
+    });
+
+    it("is 'unknown' on a runtime that does not IMPLEMENT the cache (Bun)", () => {
+        // The real Bun shape: the probe EXISTS (probeSupported true) and
+        // returns undefined for a healthy dir. Deciding on the probe alone
+        // would say 'degraded' and warn on every Bun pod.
+        expect(
+            evaluateCompileCacheStatus(
+                signals({
+                    probeSupported: true,
+                    runtimeHonoursCompileCache: false,
+                    effective: undefined,
+                }),
+            ),
+        ).toBe("unknown");
+    });
+
+    it("is 'disabled' when NODE_DISABLE_COMPILE_CACHE opted out", () => {
+        // Deliberately off is not "refused" — reporting it as degraded sends
+        // the operator hunting a volume problem that does not exist.
+        expect(
+            evaluateCompileCacheStatus(
+                signals({ disabledByRequest: true, effective: undefined }),
+            ),
+        ).toBe("disabled");
+    });
+});
+
+describe("runtimeHonoursCompileCache", () => {
+    it("is false under Bun and true under Node", () => {
+        expect(runtimeHonoursCompileCache({ bun: "1.3.5" })).toBe(false);
+        expect(runtimeHonoursCompileCache({})).toBe(true);
+    });
+
+    it("reads process.versions by default", () => {
+        // The suite runs under Node, so the production default must agree.
+        expect(runtimeHonoursCompileCache()).toBe(
+            process.versions.bun === undefined,
         );
     });
 });
@@ -109,7 +180,9 @@ describe("warnOnDegradedCompileCache", () => {
         expect(log.warn).not.toHaveBeenCalled();
     });
 
-    it("is SILENT on a runtime with no getCompileCacheDir (Bun)", () => {
+    it("is SILENT on a runtime with no getCompileCacheDir at all", () => {
+        // A hypothetical runtime, kept only because the branch exists. The
+        // REAL Bun shape is the next test — do not mistake this one for it.
         const log = logger();
         const status = warnOnDegradedCompileCache({
             env: { NODE_COMPILE_CACHE: PVC },
@@ -118,6 +191,56 @@ describe("warnOnDegradedCompileCache", () => {
         });
         expect(status).toBe("unknown");
         expect(log.warn).not.toHaveBeenCalled();
+    });
+
+    it("is SILENT under REAL Bun semantics: probe present, returns undefined", () => {
+        // bun 1.3.5, verified: `typeof module.getCompileCacheDir === "function"`
+        // and it returns undefined even for a healthy writable dir. Deciding on
+        // the probe's existence alone warns on every Bun pod that its perfectly
+        // good cache volume "was refused".
+        const log = logger();
+        const status = warnOnDegradedCompileCache({
+            env: { NODE_COMPILE_CACHE: PVC },
+            getCompileCacheDir: () => undefined,
+            versions: { bun: "1.3.5" },
+            log,
+        });
+        expect(status).toBe("unknown");
+        expect(log.warn).not.toHaveBeenCalled();
+    });
+
+    it("is SILENT when NODE_DISABLE_COMPILE_CACHE opted out", () => {
+        const log = logger();
+        const status = warnOnDegradedCompileCache({
+            env: {
+                NODE_COMPILE_CACHE: PVC,
+                NODE_DISABLE_COMPILE_CACHE: "1",
+            },
+            getCompileCacheDir: () => undefined,
+            log,
+        });
+        expect(status).toBe("disabled");
+        expect(log.warn).not.toHaveBeenCalled();
+    });
+
+    it("treats NODE_DISABLE_COMPILE_CACHE as PRESENCE, not truthiness", () => {
+        // Verified on node 24: the cache is disabled for "0" and "" too, so a
+        // truthiness check would warn exactly the operators who wrote `=0`.
+        for (const value of ["0", "", "false"]) {
+            const log = logger();
+            const status = warnOnDegradedCompileCache({
+                env: {
+                    NODE_COMPILE_CACHE: PVC,
+                    NODE_DISABLE_COMPILE_CACHE: value,
+                },
+                getCompileCacheDir: () => undefined,
+                log,
+            });
+            expect(status, `NODE_DISABLE_COMPILE_CACHE=${value}`).toBe(
+                "disabled",
+            );
+            expect(log.warn).not.toHaveBeenCalled();
+        }
     });
 
     it("never throws when the probe throws", () => {

@@ -36,10 +36,9 @@
  * cache" path exercised by the EACCES and read-only-dir cases below.
  */
 
-import { execFileSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import {
     chmodSync,
-    mkdirSync,
     mkdtempSync,
     readdirSync,
     statSync,
@@ -76,12 +75,19 @@ function scratch(prefix: string): string {
     return dir;
 }
 
-/** Writes the fixture app into a fresh dir and returns the entry path. */
-function makeApp(): string {
+/**
+ * Writes the fixture app into a fresh dir and returns the entry path.
+ * `stderrNoise` exists only for the harness-honesty test below: it proves the
+ * stderr channel is really captured and really asserted on.
+ */
+function makeApp(stderrNoise?: string): string {
     const dir = scratch("app");
     writeFileSync(join(dir, "helper.js"), HELPER_SOURCE);
     const entry = join(dir, "app.js");
-    writeFileSync(entry, APP_SOURCE);
+    const noise = stderrNoise
+        ? `process.stderr.write(${JSON.stringify(stderrNoise)});\n`
+        : "";
+    writeFileSync(entry, noise + APP_SOURCE);
     return entry;
 }
 
@@ -94,11 +100,17 @@ interface BootResult {
 /**
  * Boot the fixture with the given NODE_COMPILE_CACHE and assert the SANCTIONED
  * half: it exited 0, ran its real work, and printed nothing alarming.
- * `execFileSync` throws on a non-zero exit, so a crash fails the test here.
+ *
+ * `spawnSync`, deliberately, NOT `execFileSync`: the latter returns only stdout
+ * and surfaces the child's stderr solely on the thrown error, so a
+ * `let stderr = ""` next to it is never assigned and every stderr assertion
+ * compares the empty string to itself. That tautology shipped in round 1 and
+ * was mutation-disproved by writing an error line from the fixture and watching
+ * all ten tests stay green. Here stderr is the REAL captured stream, and the
+ * failing-exit path reports it instead of hiding it.
  */
 function boot(entry: string, nodeCompileCache: string): BootResult {
-    let stderr = "";
-    const stdout = execFileSync(process.execPath, [entry], {
+    const result = spawnSync(process.execPath, [entry], {
         encoding: "utf8",
         env: {
             ...process.env,
@@ -106,6 +118,15 @@ function boot(entry: string, nodeCompileCache: string): BootResult {
         },
         stdio: ["ignore", "pipe", "pipe"],
     });
+    const stderr = result.stderr ?? "";
+    const stdout = result.stdout ?? "";
+
+    // Crash-free boot is the whole point, so report WHY when it is not.
+    expect(
+        result.status,
+        `child exited ${result.status} for NODE_COMPILE_CACHE=${nodeCompileCache}\nstderr: ${stderr}`,
+    ).toBe(0);
+
     const parsed = JSON.parse(stdout) as {
         booted: boolean;
         work: number;
@@ -114,8 +135,12 @@ function boot(entry: string, nodeCompileCache: string): BootResult {
     expect(parsed.booted).toBe(true);
     // The process did REAL work, not just "started and printed something".
     expect(parsed.work).toBe(EXPECTED_WORK);
-    // Nothing unsanctioned: no thrown/uncaught error surfaced to stderr.
-    expect(stderr).not.toMatch(/Error|throw|ENOENT|EACCES|ENOTDIR/);
+    // Nothing unsanctioned: no thrown/uncaught error surfaced to stderr. This
+    // now reads a stream that is actually populated.
+    expect(
+        stderr,
+        `unexpected stderr for NODE_COMPILE_CACHE=${nodeCompileCache}`,
+    ).not.toMatch(/Error|throw|ENOENT|EACCES|ENOTDIR|ENOSPC|EROFS/);
     return { stdout, stderr, compileCacheDir: parsed.compileCacheDir };
 }
 
@@ -293,5 +318,22 @@ describe("#309 the fixture itself is honest", () => {
         expect(compileCacheDir).not.toBeNull();
         expect(statSync(cache).isDirectory()).toBe(true);
         expect(fileCountRecursive(cache)).toBeGreaterThan(0);
+    });
+
+    it("really captures child stderr, and really fails on it", () => {
+        // Round 1's stderr assertion was a tautology: `execFileSync` returns
+        // only stdout, so the `stderr` variable it compared was the empty
+        // string forever. Writing an error line from the fixture left all ten
+        // tests green. This pins the plumbing directly — the channel is
+        // captured, non-empty, and the assertion inside `boot` rejects it.
+        const noisy = makeApp("Error: uncaught EACCES\n");
+        const cache = scratch("stderr-honesty");
+
+        expect(() => boot(noisy, cache)).toThrow(/unexpected stderr/);
+
+        // ...and the same fixture without the noise passes, so the assertion
+        // rejects the NOISE rather than everything.
+        const quiet = makeApp();
+        expect(() => boot(quiet, scratch("stderr-quiet"))).not.toThrow();
     });
 });

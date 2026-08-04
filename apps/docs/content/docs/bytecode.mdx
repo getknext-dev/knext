@@ -73,8 +73,17 @@ compile cost.
 ```
 
 If you see it, check the path you pointed the cache at — most often a volume that is mounted
-read-only or is missing entirely. If you have not overridden the cache location at all, you will
-never see this: the default lives inside the image, where it is always readable.
+read-only or is missing entirely.
+
+The warning is deliberately narrow, so these cases stay quiet:
+
+- **You did not override the cache location.** The default lives inside the image, where it is
+  always readable.
+- **You turned bytecode caching off** with Node's `NODE_DISABLE_COMPILE_CACHE`. That is a
+  deliberate choice, not a broken volume, so it is reported as disabled rather than warned about —
+  and note that Node treats the variable's *presence* as "off", including `NODE_DISABLE_COMPILE_CACHE=0`.
+- **You run the Bun runtime.** Bun does not implement this cache at all (it has its own mechanism,
+  below), so there is nothing to report either way.
 
 ## Node vs Bun
 
