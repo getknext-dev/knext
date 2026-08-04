@@ -326,8 +326,35 @@ func computeStatusVerdict(
 	// transition-gated Warning event keeps it from being silent. Ready/Degraded
 	// are deliberately untouched — an opt-in cold-start optimisation must not
 	// make the app look unhealthy.
+	prevImageCache := apimeta.FindStatusCondition(app.Status.Conditions, ConditionImageCacheReady)
+
+	// A prewarm failure only deserves a VERDICT when there is something for the
+	// verdict to be about: the feature is on, or we previously reported on it.
+	//
+	// This gate is load-bearing, not defensive. The delete issued when prewarm is
+	// disabled is unconditional, so on the very upgrade path the amendment above
+	// cites — an operator running without its new DaemonSet RBAC — a Forbidden
+	// reaches here for EVERY NextApp in the cluster, including every app that
+	// never opted in. Without the gate each of them grows a CleanupFailed
+	// condition asserting a DaemonSet that never existed, a Warning, and a forced
+	// 2-minute poll, which also breaks the byte-identical-conditions invariant the
+	// disabled branch exists to protect (#98). The failure is NOT lost: it still
+	// increments knext_nextapp_image_prewarm_errors_total and still fires the
+	// KnextImagePrewarmFailing alert, which is where a cluster-wide RBAC problem
+	// belongs — in the operator's own metrics, not smeared across every app's status.
+	prewarmFailureIsReportable := ic.reconcileErrMsg != "" && (ic.enabled || prevImageCache != nil)
+
+	// A lost optimistic-concurrency race is retried, never reported: it says
+	// nothing about the DaemonSet's health, and degrading on it would flap the
+	// condition (True -> False -> True) on routine write contention.
+	if ic.transientErr && (ic.enabled || prevImageCache != nil) {
+		if v.requeueAfter == 0 || v.requeueAfter > ksvcNotReadyRequeueAfter {
+			v.requeueAfter = ksvcNotReadyRequeueAfter
+		}
+	}
+
 	switch {
-	case ic.reconcileErrMsg != "":
+	case prewarmFailureIsReportable:
 		reason := ReasonReconcileFailed
 		what := "image prewarm DaemonSet could not be reconciled"
 		if !ic.enabled {
@@ -338,6 +365,13 @@ func computeStatusVerdict(
 			what = "image prewarm is disabled but its DaemonSet could not be deleted"
 		}
 		message := fmt.Sprintf("%s: %s", what, ic.reconcileErrMsg)
+		if ic.enabled {
+			// Coverage is still READ on the failure path, so report it: "nothing is
+			// cached" and "9 of 10 nodes are cached and the 10th update was
+			// rejected" are very different incidents, and dropping the numbers
+			// discarded live, still-accurate data.
+			message = fmt.Sprintf("%s (observed coverage: %d/%d node(s))", message, ic.ready, ic.desired)
+		}
 		v.conditions = append(v.conditions, metav1.Condition{
 			Type:               ConditionImageCacheReady,
 			Status:             metav1.ConditionFalse,
@@ -350,8 +384,8 @@ func computeStatusVerdict(
 			v.requeueAfter = imagePrewarmFailureRequeueAfter
 		}
 		// Transition-gated: fire once on entry, not on every requeue.
-		prev := apimeta.FindStatusCondition(app.Status.Conditions, ConditionImageCacheReady)
-		if prev == nil || prev.Status != metav1.ConditionFalse || prev.Reason != reason {
+		if prevImageCache == nil || prevImageCache.Status != metav1.ConditionFalse ||
+			prevImageCache.Reason != reason {
 			v.events = append(v.events, verdictEvent{
 				corev1.EventTypeWarning, ReasonImagePrewarmFailed, message,
 			})
@@ -378,7 +412,7 @@ func computeStatusVerdict(
 					ic.ready, ic.desired),
 			})
 		}
-	case apimeta.FindStatusCondition(app.Status.Conditions, ConditionImageCacheReady) != nil:
+	case prevImageCache != nil:
 		v.removeConditions = append(v.removeConditions, ConditionImageCacheReady)
 	}
 

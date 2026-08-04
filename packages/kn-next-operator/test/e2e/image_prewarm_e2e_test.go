@@ -21,31 +21,51 @@ limitations under the License.
 //
 // WHAT THIS PROVES, ON A REAL NODE (which envtest cannot):
 //
-//	The distroless / shell-less safety invariant. The prewarm pod runs the APP
-//	IMAGE — a distroless image with no /bin/sh — with its command pointed at a
-//	static busybox staged by an initContainer. If that mechanism is wrong (a
-//	`sleep infinity` main command, a helper that never lands in the emptyDir, a
-//	non-root/readOnlyRootFilesystem conflict), the container CrashLoopBackOffs.
-//	envtest has no kubelet and no container runtime, so it cannot see that at
-//	all: it happily reports a DaemonSet whose pods would never start. Here the
-//	pods must actually reach Running with ZERO restarts on every node.
+//	That the staged-helper mechanism actually runs under a real kubelet and
+//	container runtime. The initContainer copies a static busybox into a shared
+//	emptyDir and the MAIN container runs the APP IMAGE with its command pointed
+//	at that copied binary. If any part of that hand-off is wrong — the helper
+//	never lands in the emptyDir, the copied binary is not executable, the
+//	non-root uid conflicts with readOnlyRootFilesystem, the app's own ENTRYPOINT
+//	runs instead — the pod CrashLoopBackOffs. envtest has no kubelet and no
+//	container runtime, so it sees none of that: it happily reports a DaemonSet
+//	whose pods would never start. Here the pods must reach Ready on every node
+//	with ZERO restarts.
 //
-//	It also proves the app server never boots inside the prewarmer, and the
+//	It also proves the app server never boots inside the prewarmer, that the pin
+//	container references the APP image (so the right digest is pinned), and the
 //	enable -> disable lifecycle (DaemonSet removed, condition dropped).
 //
-// WHAT THIS DELIBERATELY DOES NOT CLAIM:
+// WHAT THIS DOES **NOT** PROVE — read this before citing it:
 //
-//	The no-`Pulling`-on-cold-start proof and the warm-vs-cold ~2 s delta are NOT
-//	assertable on kind. kind side-loads images into every node's containerd, so
-//	"no Pulling event" is trivially true there whether or not the prewarmer
-//	works — a green that proves nothing. That measurement needs a multi-node
-//	cluster pulling from a real registry (OKE) and remains an open follow-up;
-//	asserting it here would be exactly the kind of decorative check this repo
-//	keeps deleting.
+//  1. NOT the distroless / shell-less case. The app image under test is
+//     SCALE_TEST_IMAGE, i.e. the file-manager image, whose runner stage is
+//     `node:22-alpine` (apps/file-manager/Dockerfile) — Alpine ships busybox and
+//     /bin/sh, so a naive `sleep infinity` command would work there too. This
+//     spec therefore CANNOT distinguish the shell-free mechanism from a
+//     shell-dependent one. Closing that gap needs a genuinely distroless,
+//     digest-pinned app image (e.g. a knext runtime image on
+//     gcr.io/distroless/nodejs) plumbed in as the e2e app image; until then the
+//     ADR-0037 action item stays unchecked. Do not let the presence of this file
+//     be read as the distroless proof.
 //
-// NOTHING HERE SKIPS. A missing cluster, a missing image or a DaemonSet that
-// never schedules FAILS. A check that goes green when its precondition is
-// absent is worse than no check.
+//  2. NOT the no-`Pulling`-on-cold-start proof, and not the warm-vs-cold ~2 s
+//     delta. kind side-loads images into every node's containerd, so "no
+//     Pulling event" is trivially true there whether or not the prewarmer
+//     works — a green that proves nothing. That measurement needs a multi-node
+//     cluster pulling from a real registry (OKE).
+//
+// AND KNOW WHERE IT RUNS: `make test-e2e-scale` on the nightly gates the whole
+// scale suite on `vars.SCALE_TEST_IMAGE`, which is UNSET on this repo
+// (`gh api repos/getknext-dev/knext/actions/variables` → total_count 0), and an
+// unset value only logs a `::warning::` and skips the step. So as the repo is
+// configured today this spec does NOT run on the schedule — it runs only on a
+// manual `workflow_dispatch` that supplies an image. Setting that variable is
+// what makes it a live gate.
+//
+// NOTHING INSIDE THE SPEC SKIPS. A missing cluster, a missing image or a
+// DaemonSet that never schedules FAILS. (The workflow-level skip above is a
+// separate, real gap — stated rather than papered over.)
 package e2e
 
 import (
@@ -85,7 +105,7 @@ var _ = Describe("Image prewarm on a live cluster (#471)", Ordered, func() {
 		_, _ = utils.Kubectl("delete", "ns", prewarmNamespace, "--ignore-not-found")
 	})
 
-	It("runs the prewarmer on every node without CrashLooping the distroless app image", func() {
+	It("runs the prewarmer on every node without CrashLooping the app image", func() {
 		By("waiting for the imgcache DaemonSet to be scheduled on every node")
 		var desired int
 		Eventually(func(g Gomega) {
@@ -202,9 +222,13 @@ var _ = Describe("Image prewarm on a live cluster (#471)", Ordered, func() {
 })
 
 // prewarmImage is the digest-pinned app image under test. It reuses the same
-// SCALE_TEST_IMAGE the rest of the e2e_scale suite builds and pushes, which is
-// the distroless runtime image — that is precisely the case this spec exists to
-// exercise.
+// SCALE_TEST_IMAGE the rest of the e2e_scale suite builds and pushes — the
+// file-manager image, whose runner stage is `node:22-alpine`.
+//
+// Alpine is NOT distroless: it ships busybox and /bin/sh. So this image
+// exercises the staged-helper hand-off on a real kubelet, but it does NOT
+// exercise the shell-less case (see the package doc, point 1). Swapping this for
+// a genuinely distroless app image is what closes that ADR-0037 action item.
 func prewarmImage() string {
 	if v := os.Getenv("SCALE_TEST_IMAGE"); v != "" {
 		return v

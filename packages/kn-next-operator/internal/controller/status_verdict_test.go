@@ -584,3 +584,111 @@ func TestComputeStatusVerdict_ImagePrewarmErrorDoesNotOverrideKsvcRequeue(t *tes
 			v.requeueAfter, ksvcNotReadyRequeueAfter)
 	}
 }
+
+// Review finding 2 — the DELETE issued when prewarm is disabled is
+// unconditional, so a Forbidden on the "operator upgraded without its new
+// ClusterRole" path reached this branch for EVERY NextApp in the cluster,
+// including every app that never opted in. Those apps would each grow a
+// condition asserting a DaemonSet that never existed, a Warning, and a forced
+// 2-minute poll — and it broke the byte-identical-conditions invariant the
+// disabled branch exists to protect (#98).
+func TestComputeStatusVerdict_ImagePrewarmCleanupErrorOnNeverPrewarmedAppIsSilent(t *testing.T) {
+	now := time.Now()
+	app := verdictApp() // no spec.scaling, no prior ImageCacheReady condition
+
+	v := computeStatusVerdict(app, readyKsvc(now), databaseCheckState{mode: databaseModeNone},
+		revisionCheck{}, imageCacheState{enabled: false, reconcileErrMsg: "delete forbidden"}, now)
+
+	for _, c := range v.conditions {
+		if c.Type == ConditionImageCacheReady {
+			t.Fatalf("a never-prewarmed app must not grow an ImageCacheReady condition from a "+
+				"failed delete of a DaemonSet it never had, got %+v", c)
+		}
+	}
+	for _, rc := range v.removeConditions {
+		if rc == ConditionImageCacheReady {
+			t.Fatalf("must not remove a never-present condition (breaks the #98 no-op guard)")
+		}
+	}
+	for _, e := range v.events {
+		if e.reason == ReasonImagePrewarmFailed {
+			t.Fatalf("must not warn about an orphan that cannot exist, got %+v", e)
+		}
+	}
+	if v.requeueAfter != 0 {
+		t.Fatalf("must not force a poll on an app that never opted in, got %v", v.requeueAfter)
+	}
+}
+
+// ...but the orphan case this branch exists for MUST still surface: prewarm was
+// on (so the condition is present), it is turned off, and the delete fails.
+func TestComputeStatusVerdict_ImagePrewarmCleanupErrorStillSurfacesForARealOrphan(t *testing.T) {
+	now := time.Now()
+	app := verdictApp()
+	app.Status.Conditions = []metav1.Condition{{
+		Type: ConditionImageCacheReady, Status: metav1.ConditionTrue, Reason: "Cached",
+	}}
+
+	v := computeStatusVerdict(app, readyKsvc(now), databaseCheckState{mode: databaseModeNone},
+		revisionCheck{}, imageCacheState{enabled: false, reconcileErrMsg: "delete forbidden"}, now)
+
+	c := findVerdictCondition(t, v, ConditionImageCacheReady)
+	if c.Status != metav1.ConditionFalse || c.Reason != ReasonCleanupFailed {
+		t.Fatalf("ImageCacheReady: got %+v, want False/%s", c, ReasonCleanupFailed)
+	}
+}
+
+// Review finding 3a — CreateOrUpdate is Get-then-Update, so a Conflict is
+// ROUTINE. Degrading on it would flip a healthy True/Cached to
+// False/ReconcileFailed, emit a Warning, write status, and flip back next pass:
+// exactly the condition flapping the #98 no-op guard exists to prevent.
+func TestComputeStatusVerdict_ImagePrewarmTransientConflictDoesNotFlapTheCondition(t *testing.T) {
+	now := time.Now()
+	app := verdictApp()
+	app.Spec.Scaling = &appsv1alpha1.ScalingSpec{ImagePrewarm: true}
+	app.Status.Conditions = []metav1.Condition{{
+		Type: ConditionImageCacheReady, Status: metav1.ConditionTrue, Reason: "Cached",
+	}}
+
+	// Coverage is still complete and still observed — a Conflict says nothing
+	// about the DaemonSet's health.
+	v := computeStatusVerdict(app, readyKsvc(now), databaseCheckState{mode: databaseModeNone},
+		revisionCheck{}, imageCacheState{enabled: true, desired: 3, ready: 3, transientErr: true}, now)
+
+	c := findVerdictCondition(t, v, ConditionImageCacheReady)
+	if c.Status != metav1.ConditionTrue || c.Reason != "Cached" {
+		t.Fatalf("a routine write Conflict must not degrade a healthy cache, got %+v", c)
+	}
+	for _, e := range v.events {
+		if e.reason == ReasonImagePrewarmFailed {
+			t.Fatalf("a routine Conflict must not emit a Warning, got %+v", e)
+		}
+	}
+	// It must still be retried — the write did not land.
+	if v.requeueAfter <= 0 {
+		t.Fatalf("a conflicted write must still be retried, got %v", v.requeueAfter)
+	}
+}
+
+// Review finding 3b — skipping the DaemonSet GET on error threw away live,
+// still-accurate coverage. The failure message must carry it, so an operator
+// reading the condition can tell "nothing is cached" from "9 of 10 nodes are
+// cached and the 10th update was rejected".
+func TestComputeStatusVerdict_ImagePrewarmErrorMessageCarriesObservedCoverage(t *testing.T) {
+	now := time.Now()
+	app := verdictApp()
+	app.Spec.Scaling = &appsv1alpha1.ScalingSpec{ImagePrewarm: true}
+
+	v := computeStatusVerdict(app, readyKsvc(now), databaseCheckState{mode: databaseModeNone},
+		revisionCheck{}, imageCacheState{
+			enabled: true, desired: 10, ready: 9, reconcileErrMsg: "forbidden",
+		}, now)
+
+	c := findVerdictCondition(t, v, ConditionImageCacheReady)
+	if !strings.Contains(c.Message, "9/10") {
+		t.Fatalf("failure message must report the observed coverage, got %q", c.Message)
+	}
+	if !strings.Contains(c.Message, "forbidden") {
+		t.Fatalf("failure message must still carry the underlying error, got %q", c.Message)
+	}
+}

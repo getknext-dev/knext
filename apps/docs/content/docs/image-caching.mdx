@@ -71,9 +71,14 @@ kubectl get nextapp shop -o jsonpath='{.status.conditions[?(@.type=="ImageCacheR
   `3/10 prewarm node(s) have the app image pulled+pinned`. This is the normal state for a minute or
   two after a deploy, and again briefly after every new build, since each new image digest has to
   be pulled to each node before it is cached.
-- **`False` / `ReconcileFailed`** — knext could not create the prewarmer at all. The most common
+- **`False` / `ReconcileFailed`** — knext could not create or update the prewarmer. The most common
   cause is that the operator's service account is not permitted to manage DaemonSets in the
-  cluster; the condition message carries the underlying error.
+  cluster, which usually means the operator was upgraded without updating its permissions. The
+  condition message carries the underlying error and the coverage reached so far, so you can tell
+  "nothing is cached" from "nine of ten nodes are cached and the tenth update was rejected".
+- **`False` / `CleanupFailed`** — you turned prewarming **off**, but knext could not delete the
+  cached copies. They are still occupying disk and a pod slot on every node until this clears. Same
+  usual cause as above: the operator lacks permission to delete DaemonSets.
 
 **`ImageCacheReady` never affects your app's `Ready` status.** If prewarming is failing or still
 catching up, the app is still healthy and still serving — cold starts simply pay the image pull, as

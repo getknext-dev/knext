@@ -49,10 +49,32 @@ var (
 			Help: "Total number of NextApp reconcile loops that ended in error.",
 		},
 	)
+
+	// imagePrewarmErrors counts FAILED image-prewarm DaemonSet reconciles
+	// (create/update, or the delete issued when the feature is turned off).
+	//
+	// WHY IT EXISTS (#471 item 4): the prewarm failure is deliberately NOT
+	// returned out of Reconcile any more, so it no longer increments
+	// reconcileErrors and no longer fires the critical KnextOperatorReconcileErrors
+	// page — correct, because the app itself is healthy. But that removed the
+	// ONLY alerting surface: what remained was a transition-gated Warning event
+	// (which expires with event TTL) and an ImageCacheReady condition nothing
+	// scrapes. This counter is what the (warning-severity) KnextImagePrewarmFailing
+	// alert keys on, so the decoupling trades a false-critical for a visible
+	// warning rather than for a silent failure.
+	//
+	// Unlabeled, matching the low-cardinality rule above: never per-object.
+	imagePrewarmErrors = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "knext_nextapp_image_prewarm_errors_total",
+			Help: "Total number of failed image-prewarm DaemonSet reconciles. These do NOT fail " +
+				"the NextApp reconcile pass (the app stays Ready); they degrade ImageCacheReady.",
+		},
+	)
 )
 
 func init() {
 	// Register with controller-runtime's global registry so the series are served on
 	// the existing /metrics endpoint alongside the built-in controller metrics.
-	metrics.Registry.MustRegister(reconcileTotal, reconcileDuration, reconcileErrors)
+	metrics.Registry.MustRegister(reconcileTotal, reconcileDuration, reconcileErrors, imagePrewarmErrors)
 }

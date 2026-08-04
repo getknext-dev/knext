@@ -190,6 +190,10 @@ func (r *NextAppReconciler) reconcileImagePrewarmDaemonSet(ctx context.Context, 
 	if !imagePrewarmEnabled(nextApp) {
 		// Disabled: best-effort delete of any previously-created DaemonSet.
 		if err := r.Delete(ctx, ds); err != nil && !errors.IsNotFound(err) {
+			// Counted here as well as on the create/update path: the error no
+			// longer reaches Reconcile's return, so this counter is the only
+			// alertable signal (#471 follow-up, review finding 1).
+			imagePrewarmErrors.Inc()
 			return err
 		}
 		return nil
@@ -212,6 +216,9 @@ func (r *NextAppReconciler) reconcileImagePrewarmDaemonSet(ctx context.Context, 
 		ds.Spec.Template = desired.Spec.Template
 		return ctrl.SetControllerReference(nextApp, ds, r.Scheme)
 	})
+	if err != nil {
+		imagePrewarmErrors.Inc()
+	}
 	return err
 }
 
@@ -241,4 +248,11 @@ type imageCacheState struct {
 	// convergence. computeStatusVerdict turns it into ImageCacheReady=False plus
 	// a bounded requeue and a transition-gated Warning event.
 	reconcileErrMsg string
+	// transientErr marks a write that lost an optimistic-concurrency race
+	// (Conflict). CreateOrUpdate is Get-then-Update, so a Conflict is ROUTINE and
+	// says NOTHING about the DaemonSet's health — degrading on it would flip a
+	// healthy True/Cached to False and back on the next pass, which is exactly
+	// the condition flapping the #98 no-op guard exists to prevent. It only
+	// schedules a retry.
+	transientErr bool
 }

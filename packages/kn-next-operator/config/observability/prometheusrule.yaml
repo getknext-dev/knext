@@ -46,6 +46,29 @@ spec:
               10m. Desired cluster state may not be applied.
             runbook_url: "https://github.com/getknext-dev/knext/blob/main/docs/runbooks/incident.md#scenario-4-rollback--bad-revision"
 
+        # Image prewarm (opt-in cold-start optimisation) is failing to reconcile
+        # its DaemonSet — almost always missing DaemonSet RBAC after an operator
+        # upgrade. Deliberately WARNING, not critical: this failure no longer
+        # fails the NextApp reconcile pass, the app stays Ready and keeps
+        # serving, and the only consequence is that cold starts pay the image
+        # pull again. It gets its OWN series precisely because it no longer
+        # trips KnextOperatorReconcileErrors above — without this rule the
+        # decoupling would have traded a false-critical for a silent failure.
+        - alert: KnextImagePrewarmFailing
+          expr: increase(knext_nextapp_image_prewarm_errors_total[15m]) > 0
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "knext image prewarm is failing to reconcile"
+            description: >-
+              The operator failed {{ $value }} image-prewarm DaemonSet
+              reconcile(s) in the last 15m. Affected apps stay Ready but their
+              ImageCacheReady condition is False and cold starts pay the image
+              pull. Most likely the operator's ClusterRole is missing
+              daemonsets create/update/delete.
+            runbook_url: "https://github.com/getknext-dev/knext/blob/main/docs/runbooks/troubleshooting.md"
+
         # SLO: reconcile latency. A slow control loop delays scale-up and
         # rollbacks. p95 over 30s sustained is degraded.
         - alert: KnextOperatorReconcileSlow

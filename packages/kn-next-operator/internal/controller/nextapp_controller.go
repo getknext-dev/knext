@@ -470,12 +470,28 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 	// app's status convergence down with it. The error is instead carried into
 	// the verdict (below), where it degrades ImageCacheReady ONLY, with a bounded
 	// requeue for the retry and a transition-gated Warning event so it is loud
-	// rather than swallowed.
+	// rather than swallowed. The failure ALSO increments
+	// knext_nextapp_image_prewarm_errors_total, which is what the (warning, not
+	// critical) alert keys on now that it no longer trips the reconcile-error page.
+	//
+	// A Conflict is classified apart from a real failure: CreateOrUpdate is
+	// Get-then-Update, so losing that race is ROUTINE and says nothing about the
+	// DaemonSet's health. Degrading on it would flip a healthy ImageCacheReady to
+	// False and back on the next pass — the condition flapping the #98 no-op guard
+	// exists to prevent. It only earns a retry.
 	prewarmErrMsg := ""
+	prewarmTransient := false
 	if err := r.reconcileImagePrewarmDaemonSet(ctx, &nextApp); err != nil {
-		logger.Error(err, "Failed to reconcile image-prewarm DaemonSet; "+
-			"degrading ImageCacheReady instead of failing the reconcile pass")
-		prewarmErrMsg = err.Error()
+		switch {
+		case errors.IsConflict(err):
+			logger.V(1).Info("image-prewarm DaemonSet write lost an optimistic-concurrency race; "+
+				"retrying without degrading ImageCacheReady", "error", err.Error())
+			prewarmTransient = true
+		default:
+			logger.Error(err, "Failed to reconcile image-prewarm DaemonSet; "+
+				"degrading ImageCacheReady instead of failing the reconcile pass")
+			prewarmErrMsg = err.Error()
+		}
 	}
 
 	// 5. Create/Update KafkaSource for ISR revalidation.
@@ -598,8 +614,16 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 	// the verdict can report ImageCacheReady honestly (desired vs ready). Only
 	// meaningful when prewarm is enabled; best-effort GET (a not-yet-created or
 	// unreadable DaemonSet leaves it Pulling, never fatal).
-	ic := imageCacheState{enabled: imagePrewarmEnabled(&nextApp), reconcileErrMsg: prewarmErrMsg}
-	if ic.enabled && ic.reconcileErrMsg == "" {
+	// The GET happens even when the reconcile above FAILED: coverage observed on
+	// the cluster is still accurate, and reporting "9/10 nodes cached, the 10th
+	// update was rejected" is a different (and far more actionable) incident than
+	// "nothing is cached". Skipping it threw that data away.
+	ic := imageCacheState{
+		enabled:         imagePrewarmEnabled(&nextApp),
+		reconcileErrMsg: prewarmErrMsg,
+		transientErr:    prewarmTransient,
+	}
+	if ic.enabled {
 		prewarmDS := &appsv1.DaemonSet{}
 		dsKey := client.ObjectKey{Namespace: nextApp.Namespace, Name: nextApp.Name + "-imgcache"}
 		if getErr := r.Get(ctx, dsKey, prewarmDS); getErr == nil {
