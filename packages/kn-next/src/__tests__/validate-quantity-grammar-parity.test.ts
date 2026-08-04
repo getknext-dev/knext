@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { parse as parseYaml } from "yaml";
 import { validateConfig } from "../cli/validate";
-import type { KnativeNextConfig } from "../config";
+import type { KnativeNextConfig, ScalingConfig } from "../config";
 
 /**
  * #455 (2) — CLI-regex ↔ operator ParseQuantity parity.
@@ -85,15 +85,31 @@ function resourceFieldsFromCRD(): string[] {
 const resourceFields = resourceFieldsFromCRD();
 
 function configWith(field: string, value: string): KnativeNextConfig {
+    // Built WITHOUT an `as` cast: the field name arrives from the CRD as a
+    // string, so it is assigned onto a real `ScalingConfig`, and the config
+    // itself is checked with `satisfies`. A cast here would let this test go on
+    // passing against a config shape the product no longer accepts — which is
+    // the exact failure mode the rest of this PR argues against.
+    const scaling: ScalingConfig = {};
+    // The CLI carries these four under `scaling`, the CR under `spec.resources`;
+    // the leaf names are identical, which is what makes the CRD usable as the
+    // field list here. An unrecognised name lands as an unread property — the
+    // CLI then checks nothing, every rejected fixture row diverges, and the
+    // scan fails loudly. That is the intended signal, not a hole.
+    Object.assign(scaling, { [field]: value });
+
     return {
         name: "app",
         registry: "registry",
-        storage: { provider: "gcs", bucket: "bucket" },
-        // The CLI carries these four under `scaling`, the CR under
-        // `spec.resources`; the leaf names are identical, which is what makes
-        // the CRD usable as the field list here.
-        scaling: { [field]: value },
-    } as KnativeNextConfig;
+        storage: {
+            provider: "gcs",
+            bucket: "bucket",
+            // Required by StorageConfig. Not exercised by the quantity checks,
+            // but a config missing it is not a config the product accepts.
+            publicUrl: "https://storage.example.invalid/bucket",
+        },
+        scaling,
+    } satisfies KnativeNextConfig;
 }
 
 /** The CLI's verdict on a quantity, read through its PUBLIC surface. */
