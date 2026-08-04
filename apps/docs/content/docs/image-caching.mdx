@@ -15,9 +15,12 @@ Sometimes it is not:
 - the container runtime **garbage-collected** the image while the app sat idle at zero — exactly
   what happens to an app that scales to zero and stays there.
 
-On a measured ~105 MB image the pull costs roughly **2 seconds**, which is about the same again as
-the rest of a warm cold start. So the worst cold start your users see is close to double the
-typical one, and which one they get is luck.
+Measured on a two-node cluster waking a 370 MB image from a registry in the same region: a cold
+start that has to pull took **about 2.3 seconds longer** at the median than the same cold start with
+the image already on the node — and in the slowest of twenty runs, 11 seconds longer. That is on top
+of scheduling and server boot, which you pay either way. So the worst cold start your users see can
+be several times the typical one, and which one they get is luck. Expect more from a larger image or
+a registry further away, and less from a smaller or closer one.
 
 `imagePrewarm` removes that luck.
 
