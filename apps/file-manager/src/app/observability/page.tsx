@@ -13,6 +13,7 @@ import {
   queryInstant,
   queryRange,
 } from './_prom/query';
+import { denyObservabilityAccess } from './_ui/access-denied';
 import { formatMillis, formatNumber, NO_DATA, UNAVAILABLE } from './_ui/format';
 import { isObservabilityAuthorized, observabilityToken } from './auth';
 
@@ -49,15 +50,6 @@ const GRAFANA_DOCS =
   'https://github.com/getknext-dev/knext/tree/main/packages/kn-next-operator/config/grafana';
 
 const shell = { padding: '2rem', fontFamily: 'system-ui, sans-serif' } as const;
-
-function AccessDenied() {
-  return (
-    <main style={shell}>
-      <h1>401 — Unauthorized</h1>
-      <p>The observability pages require a valid bearer token.</p>
-    </main>
-  );
-}
 
 function GrafanaLinkOut() {
   return (
@@ -145,7 +137,7 @@ export default async function OverviewPage() {
     observabilityToken(),
   );
   if (!authorized) {
-    return <AccessDenied />;
+    denyObservabilityAccess(); // real HTTP 401, never returns (#525)
   }
 
   // Degrade closed BEFORE any network call: unconfigured ⇒ no fetch.
