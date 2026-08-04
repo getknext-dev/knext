@@ -27,7 +27,14 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import {
+    existsSync,
+    mkdtempSync,
+    readdirSync,
+    readFileSync,
+    rmSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { beforeAll, describe, expect, it } from "vitest";
@@ -351,6 +358,61 @@ describe("built bin (dist/cli/kn-next.js) is Node-runnable", () => {
         expect(r.stdout).toContain("kn-next db bind");
         expect(r.stdout).toContain("--secret");
         expect(r.stdout).toContain("--ro-secret");
+    });
+
+    it("`node kn-next.js create --help` dispatches and exits 0", () => {
+        // #407: `create` must route to createMain, NOT fall through to the
+        // deploy flow (which would try to build + push + apply a CR). The
+        // discriminators below appear only in create's help.
+        const r = run(process.execPath, [distBin, "create", "--help"]);
+        expect(r.error).toBeUndefined();
+        expect(r.status).toBe(0);
+        expect(r.stdout).toContain("kn-next create");
+        expect(r.stdout).toContain("--dry-run");
+        expect(r.stdout).toContain("guarded instrumentation");
+        expect(r.stdout).toContain("standalone-seam-alive");
+    });
+
+    it("`node kn-next.js create` scaffolds through the BUNDLED bin (templates ship with the package)", () => {
+        // The bundle resolves its templates from <package>/templates — a path
+        // that only exists if `files` ships them AND the dist layout resolves
+        // the same as the source layout. Running the REAL bin is the only way
+        // to observe that; a unit test on renderScaffold cannot.
+        const dir = mkdtempSync(join(tmpdir(), "kn-next-create-bin-"));
+        try {
+            const r = run(process.execPath, [
+                distBin,
+                "create",
+                dir,
+                "--name",
+                "smoke",
+            ]);
+            expect(r.error).toBeUndefined();
+            expect(r.stderr + r.stdout, "create failed").not.toMatch(
+                /create failed/,
+            );
+            expect(r.status).toBe(0);
+            for (const rel of [
+                "src/instrumentation.ts",
+                "src/instrumentation-node.ts",
+                "next-adapter.ts",
+                "instrumentation-edge-safe.test.ts",
+                "standalone-seam-alive.test.ts",
+            ]) {
+                expect(
+                    existsSync(join(dir, rel)),
+                    `${rel} not scaffolded`,
+                ).toBe(true);
+            }
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
+    });
+
+    it("`node kn-next.js create --unknown-flag` exits non-zero (strict parser through the real dispatch)", () => {
+        const r = run(process.execPath, [distBin, "create", "--unknown-flag"]);
+        expect(r.error).toBeUndefined();
+        expect(r.status).toBe(1);
     });
 
     it("`node kn-next.js --version` exits 0 and prints a version", () => {

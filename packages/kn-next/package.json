@@ -115,7 +115,8 @@
     "test:coverage": "vitest run --coverage"
   },
   "files": [
-    "dist"
+    "dist",
+    "templates"
   ],
   "keywords": [
     "knative",

@@ -162,16 +162,23 @@ const nextConfig: NextConfig = {
 export default nextConfig;
 ```
 
-> **Instrumentation.** Apps generated inside this repo with `pnpm generate`
-> (`turbo gen zone`) ship the platform's guarded observability instrumentation
-> by default — an edge-clean `src/instrumentation.ts` + Node-only
-> `src/instrumentation-node.ts`, the knext adapter wired via `adapterPath`
-> (whose `modifyConfig` injects the edge `IgnorePlugin` fence), and the two
-> static/build-artifact guards — so tracing, metrics, and db-wake spans work
-> once enabled on the NextApp CR, with no app wiring (#356, ADR-0031).
-> Hand-rolled apps (like this guide's) opt in by following
+> **Instrumentation — let the CLI scaffold it.** Run
+> `npx kn-next create apps/hello-knext` instead of hand-writing this wiring. It
+> emits the platform's guarded observability instrumentation: an edge-clean
+> `src/instrumentation.ts` + Node-only `src/instrumentation-node.ts`, the knext
+> adapter wired via `adapterPath` (whose `modifyConfig` injects the edge
+> `IgnorePlugin` fence), both per-app guards, and a `test:seam` script — so
+> tracing, metrics, and db-wake spans work once enabled on the NextApp CR, with
+> no app wiring. It never touches your cluster, and it refuses to overwrite an
+> existing file unless you pass `--force` (use `--dry-run` to see the file list
+> first). Apps generated inside this repo with `pnpm generate`
+> (`turbo gen zone`) get the identical shape.
+>
+> If you wire an app by hand instead, follow
 > [docs/observability/tracing.md](./observability/tracing.md) — including the
-> edge-safety rules there if you add a `middleware.ts`.
+> edge-safety rules there if you add a `middleware.ts`. Getting that fence wrong
+> fails the production build; getting the seam wiring wrong kills observability
+> silently, which is why the scaffolded path exists.
 >
 > The adapter injects that edge fence in **`next dev` as well as `next build`**.
 > Measured on next 16.2.11: plain `next dev` (Turbopack) never consults the
@@ -179,7 +186,7 @@ export default nextConfig;
 > the edge compile without the fence (`UnhandledSchemeError` on a Node core
 > module). Only `output: 'standalone'` is production-build-only.
 >
-> A generated app also ships `pnpm test:seam` (run it from the app directory) —
+> A scaffolded app also ships `test:seam` (run it from the app directory) —
 > build + run the standalone seam guard in hard-fail mode. From a workspace root,
 > filter by PATH: `pnpm --filter ./apps/<app> test:seam`, because `--filter <name>`
 > matches on package name and silently matches nothing when that differs from the
