@@ -172,6 +172,19 @@ export default nextConfig;
 > Hand-rolled apps (like this guide's) opt in by following
 > [docs/observability/tracing.md](./observability/tracing.md) — including the
 > edge-safety rules there if you add a `middleware.ts`.
+>
+> The adapter injects that edge fence in **`next dev` as well as `next build`**.
+> Measured on next 16.2.11: plain `next dev` (Turbopack) never consults the
+> webpack config so it is unaffected either way, but `next dev --webpack` fails
+> the edge compile without the fence (`UnhandledSchemeError` on a Node core
+> module). Only `output: 'standalone'` is production-build-only.
+>
+> A generated app also ships `pnpm test:seam` (run it from the app directory) —
+> build + run the standalone seam guard in hard-fail mode. From a workspace root,
+> filter by PATH: `pnpm --filter ./apps/<app> test:seam`, because `--filter <name>`
+> matches on package name and silently matches nothing when that differs from the
+> directory. Wire it into your CI: running that guard without a build is a *skip*,
+> not a pass.
 
 **3. A `Dockerfile`** in the app directory. A minimal one for the layout above
 (remember: `COPY` paths are relative to the **repository root**):

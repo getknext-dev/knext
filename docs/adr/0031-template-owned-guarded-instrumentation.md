@@ -1,6 +1,8 @@
 # ADR-0031 — The app template owns guarded-instrumentation; the adapter owns the edge `IgnorePlugin` fence
 
-- **Status:** Accepted
+- **Status:** Accepted (amended 2026-08-04, #408: the edge fence applies in EVERY
+  phase, not only `phase-production-build`; `output: 'standalone'` stays
+  production-build-only — see Decision §2)
 - **Date:** 2026-07-18
 - **Issue:** #356 (deferred from #344 item 3; Tier-A correctness).
 - **Relates to / upholds:** ADR-0027 (the `globalThis`-anchored seam pattern the
@@ -74,8 +76,8 @@ break observability. This ADR makes generated apps correct by construction.
      generated app carries the gate file-manager had to grow by hand.
 
 2. **The edge `IgnorePlugin` fence moves INTO the knext adapter's
-   `modifyConfig`** (`packages/kn-next/src/adapters/next-adapter.ts`). On
-   `phase-production-build` the adapter now returns a `webpack` fn that —
+   `modifyConfig`** (`packages/kn-next/src/adapters/next-adapter.ts`). The
+   adapter returns a `webpack` fn that —
    composed AFTER any webpack hook the app still owns — pushes
    `IgnorePlugin({ resourceRegExp: /instrumentation-node(\.[cm]?[jt]s)?$/ })`
    on the edge compile only. App authors never hand-write the webpack hook; any
@@ -84,6 +86,24 @@ break observability. This ADR makes generated apps correct by construction.
    `instrumentation-node` becomes a RESERVED module name on the edge compile
    for adapter-wired apps (the pattern's own name — same as when it was
    hand-written).
+
+   **Amended by #408 (2026-08-04): the fence applies in EVERY phase, not only
+   `phase-production-build`.** As first landed it was production-build-gated,
+   while the hand-written hook it replaced also covered `next dev`. Measured on
+   next 16.2.11 against `packages/kn-next/src/__tests__/fixtures/dev-edge-fence`:
+   plain `next dev` (Turbopack, the 16.2 default) never consults
+   `config.webpack` and is unaffected either way, but `next dev --webpack`
+   **fails** the edge compile of `instrumentation-node`
+   (`UnhandledSchemeError: Reading from "node:fs" …`) — the same class as #342.
+   Only `output: 'standalone'` stays gated on `phase-production-build`. Pinned
+   by a real dev-server run (`adapter-dev-edge-fence.test.ts`).
+
+   **Re-check on every Next bump (ADR-0039 compat window):** Next has historically
+   warned when a `webpack` fn is present while Turbopack is the active bundler.
+   Measured CLEAN on 16.2.11 — plain `next dev` emits no such warning and still
+   serves 200 — but that is a per-version observation, not a guarantee. If a bump
+   reintroduces the warning, gate the fence on the webpack bundler rather than on
+   the phase; do NOT narrow it back to `phase-production-build`.
 
 3. **file-manager's hand-written hook is removed** (graduated to the adapter);
    its guard now asserts the fence is adapter-owned (`adapterPath` wired, the

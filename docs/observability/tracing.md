@@ -165,8 +165,8 @@ every checkout.
 >
 > **CI keeps this fixed (#344):** the unit guard above is complemented by a
 > build-artifact gate, `apps/file-manager/standalone-seam-alive.test.ts`, run in
-> the `bytecode-cache-reuse` CI job (which already produces the standalone
-> build, so no extra build cost). It asserts the `Symbol.for('knext.lib.*')`
+> the scan-driven per-app `seam-alive` CI job, which builds each app that carries
+> the guard and runs it in hard-fail mode. It asserts the `Symbol.for('knext.lib.*')`
 > seam keys co-occur in BOTH the instrumentation (writer) chunk AND an app-server
 > (reader) chunk of the real `next build --webpack` output, and that `@getknext/lib`
 > is never added to `serverExternalPackages` (which would re-split the dedup). A
@@ -243,6 +243,22 @@ deploy` and no `adapterPath` in its `next.config.ts`) must still hand-write the
 edge-scoped `IgnorePlugin` in its own `next.config.ts` exactly as
 `apps/file-manager` did pre-#356.
 
+**The fence applies in `next dev` too, not only the production build.** This was
+measured, not assumed, on next 16.2.11 against a middleware app with guarded
+instrumentation:
+
+| dev command | edge compile of `instrumentation-node` |
+| --- | --- |
+| `next dev` (Turbopack — the Next 16 default) | fine. Turbopack never consults `config.webpack`, so the fence is moot there. |
+| `next dev --webpack` | **fails** without the fence: `Module build failed: UnhandledSchemeError: Reading from "node:fs" is not handled by plugins` — the same class the production build hit before #356. |
+
+So `modifyConfig` injects the webpack fence in **every** phase; only
+`output: 'standalone'` stays gated on `phase-production-build` (dev must not emit
+a standalone tree). A real `next dev --webpack` run against
+`packages/kn-next/src/__tests__/fixtures/dev-edge-fence` pins this
+(`adapter-dev-edge-fence.test.ts`) — if the fence is ever narrowed back to the
+production build, that test goes red instead of `pnpm dev` breaking silently.
+
 A fast static-analysis guard fails the gate if EITHER half of the fence breaks:
 (a) `instrumentation.ts` regains a top-level import of a Node-only client
 module, OR (b) the adapter wiring disappears (or a hand-written `IgnorePlugin`
@@ -257,6 +273,43 @@ gate** — `pnpm --filter file-manager build` runs in the `compat-smoke`,
 `bytecode-cache-reuse`, and `sigterm-drain-shipped` jobs, so an edge-bundle
 regression that slips past the static guard still fails `next build` in CI
 before merge (#344).
+
+### The seam-alive gate runs per app, not just for one app
+
+The second guard every app ships — `standalone-seam-alive.test.ts` — asserts the
+`@getknext/lib` module-state seams survive the real standalone bundle. It hard-fails
+only when `KNEXT_REQUIRE_STANDALONE=1` **and** a standalone build is present;
+otherwise it skips. That is a trap: CI used to set the flag for one hard-coded
+app, so every other app's copy ran build-less and passed by *skipping*, and
+chunk-level drift could never fail the app that introduced it.
+
+CI therefore **scans** for the guard (`scripts/seam-alive-apps.mjs` →
+`apps/*/standalone-seam-alive.test.ts`) and runs a per-app job that builds that
+app and then runs its guard with `KNEXT_REQUIRE_STANDALONE=1`. A new app is
+covered the moment it **carries the guard**; the scanner exits non-zero rather
+than emitting an empty matrix; and `tests/seam-alive-app-coverage.test.ts` fails
+if any workflow hard-codes an app again.
+
+Be precise about what that scan can and cannot see: it discovers guard *files*, so
+an app that NEEDS the guard and has none is invisible to it. The companion
+assertion in the same test closes that direction — every app with an
+`instrumentation.ts` layer **and** a `@getknext/lib` dependency (the two
+preconditions for the #352 module-state split) must carry the guard, or the test
+names it and fails.
+
+For an app generated into **your own** repo, the template ships the equivalent
+one-liner — wire it into your CI:
+
+```bash
+# from the app directory — works in a standalone repo and in a workspace:
+pnpm test:seam                        # next build --webpack && KNEXT_REQUIRE_STANDALONE=1 vitest run standalone-seam-alive.test.ts
+# from a workspace root, filter by PATH (`--filter <name>` matches on PACKAGE
+# NAME and silently matches NOTHING — exit 0 — when it differs from the directory):
+pnpm --filter ./apps/<app> test:seam
+```
+
+Running the guard as part of a plain `vitest` run with no build is **not** a
+pass — it is a skip.
 
 ### Manual bracketing (optional)
 

@@ -42,9 +42,19 @@ const DEFAULT_DIR = join(REPO_ROOT, 'packages', 'kn-next', 'src');
 const SOURCE_EXT = /\.(?:ts|tsx|mts|cts)$/;
 const SKIP_DIRS = new Set(['node_modules', 'dist', '.next', '.open-next', 'coverage', '.turbo']);
 
+/**
+ * DECLARATION specifiers are PERMITTED by TypeScript — TS5097 does not fire on
+ * them. Measured with this repo's tsc under moduleResolution:bundler:
+ * `import './types.d.ts'` and `import type { A } from './types.d.mts'` compile
+ * clean, while `import { b } from './other.ts'` errors TS5097. Treating them as
+ * offenders was a false positive, and it fired for real: Next GENERATES
+ * `import './.next/dev/types/routes.d.ts'` into every app's `next-env.d.ts` (#408).
+ */
+const DECLARATION_EXT = /\.d\.[cm]?ts$/;
+
 /** A relative specifier that must be resolved without a TS extension. */
 function isForbiddenSpecifier(spec) {
-  return spec.startsWith('.') && SOURCE_EXT.test(spec);
+  return spec.startsWith('.') && SOURCE_EXT.test(spec) && !DECLARATION_EXT.test(spec);
 }
 
 /**
