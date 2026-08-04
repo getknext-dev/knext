@@ -15,6 +15,7 @@
     "bun-runtime",
     "image-optimization",
     "---Deploy lifecycle---",
+    "versioning",
     "upgrading",
     "rollback",
     "previews",

@@ -1,0 +1,98 @@
+---
+title: Versioning & compatibility
+description: What a knext version number promises, which releases get fixes, and how the CLI, the packages and the operator fit together.
+---
+
+knext gives you one number to pin, and a small set of rules about what that number means.
+
+## One number covers three packages
+
+knext publishes three packages, and they are always released together at the **same version**:
+
+- `@getknext/core` — the `kn-next` CLI, the Next.js adapter and the runtime
+- `@getknext/lib` — the app-facing helpers (clients, health, logging)
+- `@getknext/db` — the data SDK and migration runner
+
+`@getknext/core` depends on the other two, so they are versioned in lockstep. Pin one and you have
+pinned all three:
+
+```json
+{
+  "dependencies": {
+    "@getknext/core": "0.3.0"
+  }
+}
+```
+
+<Callout type="info">
+  Releases before this rule took effect carry different numbers for the three packages. Those
+  versions are internally consistent — a matching set always resolves — so nothing needs changing
+  on your side.
+</Callout>
+
+## What the number promises
+
+The version follows [semantic versioning](https://semver.org/) over the documented public API:
+
+- **Patch and minor releases never break a public import.** New capabilities arrive in minors.
+- **Anything that removes or changes the shape of a public import requires a major.** That covers
+  the `kn-next` CLI too: a removed flag, or a `kn-next.config.ts` key that stops being accepted, is
+  a major change.
+- **Imports under `@getknext/core/internal/` carry no guarantee.** They are framework wiring and can
+  change in any release. If you need something that only exists there, open an issue — that is a
+  signal the capability belongs on the public surface.
+
+While the leading digit is `0`, npm's default range for a dependency (`^0.3.0`) will not pick up
+`0.4.0`. So either pin exactly, or expect to bump minors by hand.
+
+## Before a capability is removed
+
+Removal always takes two releases:
+
+1. It is marked deprecated in a **minor** release — visible in your editor through the types, named
+   in the changelog, with a replacement to move to.
+2. It is removed no earlier than the next **major**.
+
+So there is always a version you can run that has both the warning and the old behaviour, which is
+your migration window.
+
+## Which releases get fixes
+
+**The latest release line is the supported one.** Fixes, including security fixes, land in the next
+release. There are no maintenance branches and no patches cut against an older minor — knext is
+pre-1.0, and a maintenance promise that went unmet would be worse than none.
+
+In practice that means: **upgrade forward to get a fix.** Because minors never break the public
+surface, that is a version bump and a redeploy.
+
+Security advisories are published on the knext repository and referenced from the release notes.
+
+## The cluster side versions separately
+
+The operator that runs in your cluster, and the `NextApp` resource it reconciles, are **not** on the
+npm version line. The operator ships as a container image with its own install bundle, and the
+resource is on the Kubernetes API ladder:
+
+```yaml
+apiVersion: apps.kn-next.dev/v1alpha1
+kind: NextApp
+```
+
+A major version of `@getknext/core` does not change that value, and a change to that value does not
+force a major of the packages.
+
+Within `apps.kn-next.dev/v1alpha1` the schema is **additive-only**: fields are added, never removed
+or narrowed. A `NextApp` you write today keeps applying against later operators. What can change is
+what a field *does* — a setting for a capability that has been superseded may become inert. That is
+always called out in the release notes and surfaced on the resource as a status condition; it never
+turns into a rejected apply.
+
+### Keeping the two in step
+
+You do not need matching versions on the two sides. You need one ordering rule:
+
+> **Upgrade the operator and its CRD first, then the CLI.**
+
+An older CLI against a newer cluster is always fine. The reverse is not, and `kn-next deploy` stops
+before it changes anything when it detects it. See [Upgrading](/docs/upgrading) for what that looks
+like and how to fix it.

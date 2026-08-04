@@ -2,7 +2,12 @@
 
 > Internal maintainer doc. Describes how knext's npm packages are published via Changesets +
 > GitHub Actions. This is NOT the user-facing docs site — it may reference issues and workflow
-> internals. Related: issue #53 (first npm publish, the #1 adoption blocker).
+> internals. Related: issue #53 (publish mechanics).
+>
+> This file is the **mechanics**. The **policy** those mechanics serve — release cadence, what a
+> version number promises, the support window, and the deprecation process — is
+> [`docs/RELEASE_POLICY.md`](RELEASE_POLICY.md), and the version-by-version compatibility table is
+> [`docs/COMPATIBILITY.md`](COMPATIBILITY.md).
 >
 > Two paths exist: (a) the **canonical npmjs path** (`@getknext/*`, Changesets → `release.yml`,
 > blocked on a human `NPM_TOKEN`) documented first, and (b) an **interim GitHub Packages channel**
@@ -49,26 +54,40 @@ publish gate in the "Determine publish gate" step:
 So until a maintainer configures auth (Path A or Path B below), the Release workflow is a no-op
 for publishing — it is safe by default and cannot accidentally publish.
 
-## First publish (0.1.0) — exact human steps
+## First publish — DONE (2026-07-26)
 
-The first publish ships the current **0.1.0** directly. There are intentionally **no pending
-changesets**: when `.changeset/*.md` is empty, `changesets/action` skips the Version PR and runs
-`changeset publish` directly, publishing the unpublished `@getknext/core@0.1.0` and
-`@getknext/lib@0.1.0`. (Adding a changeset here would wrongly open a Version PR that bumps past
-0.1.0 before the first release — do not add one.)
+**The first npmjs publish has happened.** Verified against the registry:
 
-### Step 1 — Claim the npm org (required for both auth paths)
+| Package          | Published version | Date       |
+| ---------------- | ----------------- | ---------- |
+| `@getknext/core` | `0.3.0`           | 2026-07-26 |
+| `@getknext/lib`  | `0.2.0`           | 2026-07-26 |
+| `@getknext/db`   | `0.2.1`           | 2026-07-26 |
 
-On [npmjs.com](https://www.npmjs.com/), create/claim the npm **organization `knext`**. This owns
-the `@getknext` scope. Without it, publishing any `@getknext/*` package fails.
+Two things to know before reading the steps below, which are kept as the record of how it was done
+(and as the runbook for re-establishing auth):
+
+- **The three shipped at different version numbers.** That contradicts the ship-as-a-set rule those
+  releases themselves stated. The published set is internally consistent (`@getknext/core@0.3.0`
+  depends on `@getknext/lib@^0.2.0` and `@getknext/db@^0.2.1`, both published), so no consumer is
+  broken — but from the next release on the three are a Changesets **`fixed` group** and move
+  together. See [`docs/COMPATIBILITY.md`](COMPATIBILITY.md).
+- **`npx kn-next` still does not resolve.** The bin is `kn-next`; the package is `@getknext/core`.
+  There is no npm package literally named `kn-next`, so the published invocation is
+  `npx @getknext/core <subcommand>`.
+
+### Step 1 — the npm org (record; required for both auth paths)
+
+The npm **organization `getknext`** owns the `@getknext` scope. Without it, publishing any
+`@getknext/*` package fails.
 
 ### Step 2 — Set up auth
 
-Two options. **Use Path A for the FIRST publish**, because npm OIDC Trusted Publishing (Path B)
-can only be configured on an **already-existing** package — there is nothing to point a trusted
-publisher at until the package exists.
+Two options. Path A was used for the first publish, because npm OIDC Trusted Publishing (Path B)
+can only be configured on an **already-existing** package — there was nothing to point a trusted
+publisher at until the packages existed. **Now that they exist, Path B is the migration to make.**
 
-#### Path A — `NPM_TOKEN` (recommended for the first publish)
+#### Path A — `NPM_TOKEN` (what the first publish used)
 
 1. On npmjs.com, create a **Granular Access / Automation token** scoped to the `@getknext` packages
    with **read + write** permission.
@@ -77,7 +96,8 @@ publisher at until the package exists.
 3. Trigger a release: either push any commit to `main`, OR run the **Release** workflow manually
    (**Actions → Release → Run workflow**, i.e. `workflow_dispatch`).
 4. With `NPM_TOKEN` present and no pending changesets, `changesets/action` runs `changeset
-   publish`, publishing `@getknext/core@0.1.0` and `@getknext/lib@0.1.0` with provenance.
+   publish`, publishing every package whose tree version is not already on the registry, with
+   provenance.
 
 #### Path B — OIDC Trusted Publishing (migrate to this AFTER the first publish)
 
@@ -91,10 +111,15 @@ Once the packages exist on npm, you can drop the long-lived `NPM_TOKEN` secret:
 ### Step 3 — Verify
 
 ```sh
-npm view @getknext/core version   # → 0.1.0
-npm view @getknext/lib version    # → 0.1.0
+npm view @getknext/core version   # → the version just released
+npm view @getknext/lib version    # → the same version (they are a `fixed` group)
+npm view @getknext/db version     # → the same version
 npx @getknext/core --help         # from a clean directory (the published bin is kn-next)
 ```
+
+All three must report the same number. If one is missing or behind, the set is partial and every
+consumer install 404s or resolves the wrong pair — publish the stragglers before doing anything
+else.
 
 > Note on invocation: the **npm package** is `@getknext/core`; its **bin** is `kn-next`. There is no
 > package literally named `kn-next` on npm, so the published-package invocation is
@@ -164,9 +189,12 @@ Stated plainly, because these are the reason the ordering rule matters rather th
 - **A `kubectl` shim on `PATH` can defeat it.** `kn-next` passes `--validate=strict`, but a wrapper
   that appends `--validate=ignore` wins, because pflag takes the **last** occurrence of a string
   flag.
-- **`kn-next doctor` checks only that the CRD *exists*,** not that its schema covers the fields this
-  CLI emits. It will pass against an older CRD. (A schema-diff preflight that closes this is tracked
-  as #314.)
+- **`kn-next doctor` on its own does not prove the CRD covers what this CLI emits.** The
+  schema-diff preflight that closes this now exists (`src/cli/schema/preflight.ts`): `kn-next
+  deploy` compares the fields this CLI emits against the CRD installed on the target cluster and
+  refuses **before any side effect**, naming the missing field. It runs at deploy time against the
+  cluster in front of it — it is not a substitute for upgrading in the right order, and it does not
+  help a GitOps controller applying CRs without the CLI.
 
 The decision and its measured basis are recorded in
 [ADR-0020](adr/0020-release-channels.md#amendment-2026-07-28--upgrade-order-operatorcrd-first-then-cli).
