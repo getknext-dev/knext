@@ -181,7 +181,7 @@ flowchart TB
     op --> ksvc["Knative Service (ksvc)<br/>runtime: node | bun"]
     op -->|"security.networkPolicy (default-on)"| np["NetworkPolicy<br/>internal-only"]
     op -->|"scaling.imagePrewarm (opt-in)"| ds["image-prewarm DaemonSet<br/>pins digest per node · ADR-0037"]
-    op -->|"revalidation.provisionKafkaSource (opt-in)"| ksrc["KafkaSource<br/>(ISR revalidation only)"]
+    op -.->|"revalidation.provisionKafkaSource<br/>INERT — ignored (#475)"| ksrc["KafkaSource<br/>(ISR revalidation only)<br/>never provisioned: consumer unbuilt"]
     op -->|"honest status"| verdict["computeStatusVerdict<br/>Conditions + Events"]
     verdict --> cr
     ksvc --> pods["App pods · 0..maxScale"]

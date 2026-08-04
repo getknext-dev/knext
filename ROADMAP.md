@@ -24,9 +24,11 @@ The credibility gate. Nothing in later tiers ships before this is green.
   pinning is enforced by the operator (`nextapp_controller.go:66`).
   - *Kafka ISR revalidator — DEFERRED / build-later (#95):* the `{app}-revalidator` consumer is
     unbuilt and PR #27 (ADR-0003 routing) was closed unmerged. The operator no longer provisions a
-    dangling `KafkaSource` by default; it is gated behind `spec.revalidation.provisionKafkaSource`
-    and surfaces a non-fatal `RevalidationDeferred` condition otherwise. Build the consumer
-    (ADR-0003 Option A) after Tier-A correctness.
+    dangling `KafkaSource`: `spec.revalidation.provisionKafkaSource` is **inert** (#475) — the BYO
+    external-consumer path is withdrawn (its sink contract was never specified), so no source is
+    created on any value and the app keeps reconciling, with `RevalidationDeferred` reporting it.
+    Build the consumer (ADR-0003 Option A) after Tier-A correctness — that is what makes the flag
+    live again.
 *Exit:* compat suite green; image optimization shipped; operator = sole writer; e2e deploy via CR.
 
 ## Tier B — Platform

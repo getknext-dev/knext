@@ -136,6 +136,17 @@ const (
 	// rollback/canary can never resolve — Knative keeps serving the last-good
 	// route with only an opaque RevisionMissing condition (ADR-0014 follow-up).
 	ReasonPinnedRevisionNotFound = "PinnedRevisionNotFound"
+	// ReasonProvisionKafkaSourceInert marks a NextApp that sets
+	// spec.revalidation.provisionKafkaSource=true, which the operator IGNORES
+	// (#475). The BYO external-consumer path that flag opted into is WITHDRAWN:
+	// the sink contract (a Knative Service named `{app}-revalidator` consuming
+	// the revalidation CloudEvents) was never specified or tested, so honouring
+	// the flag would create a source pointing at a Service that may never exist.
+	// The field still applies — rejecting it would narrow v1alpha1 in place
+	// (ADR-0017 §2.1) and, on the shared fail-closed validation path, stop the
+	// whole app from reconciling — so the withdrawal is surfaced as this
+	// non-fatal condition reason + a Warning event instead.
+	ReasonProvisionKafkaSourceInert = "ProvisionKafkaSourceInert"
 )
 
 // pinnedRevisionStallWindow is how long the child ksvc's RoutesReady/Ready
@@ -454,41 +465,26 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 
 	// 5. Create/Update KafkaSource for ISR revalidation.
 	//
-	// We provision the KafkaSource ONLY when kafka is selected AND the operator is
-	// explicitly opted in via spec.revalidation.provisionKafkaSource=true. The sink
-	// the source targets — the `{app}-revalidator` Knative Service — is not yet built
-	// (design-now/build-later, issue #95). Provisioning by default would wire eventing
-	// to a non-existent service and deliver revalidation events nowhere. When kafka is
-	// requested but opt-in is off, we record a non-fatal RevalidationDeferred condition
-	// (Ready stays True) below instead of creating a dangling source.
-	kafkaRequested := nextApp.Spec.Revalidation != nil && nextApp.Spec.Revalidation.Queue == "kafka"
-	if kafkaRequested && !revalidationDeferred(&nextApp) {
-		// Unstructured to avoid Eventing proto deps.
-		topic := fmt.Sprintf("%s-revalidation", nextApp.Name)
-		kafkaSource := &unstructured.Unstructured{}
-		kafkaSource.SetAPIVersion("sources.knative.dev/v1beta1")
-		kafkaSource.SetKind("KafkaSource")
-		kafkaSource.SetName(nextApp.Name + "-revalidation-source")
-		kafkaSource.SetNamespace(nextApp.Namespace)
+	// CURRENTLY UNREACHABLE, DELIBERATELY (#475). revalidationDeferred is true for
+	// EVERY `queue: kafka` app — it ignores spec.revalidation.provisionKafkaSource,
+	// because the sink this source targets (a `{app}-revalidator` Knative Service)
+	// is not built by knext and its contract was never specified, so honouring the
+	// opt-in could only aim a source at a Service that may never exist. The flag is
+	// inert rather than rejected: rejecting it would narrow v1alpha1 in place
+	// (ADR-0017 §2.1) and, on the shared fail-closed validation path, would stop the
+	// whole app from reconciling. The withdrawal is reported as the
+	// RevalidationDeferred condition + a Warning event (status_verdict.go).
+	//
+	// The construction is retained, not deleted, because building the consumer is an
+	// open ADR-0016 action item — that is what makes revalidationDeferred consult the
+	// flag again and re-opens this branch. Retained-but-untested code rots, so the
+	// object's shape is pinned by build_kafka_source_test.go.
+	if !revalidationDeferred(&nextApp) && kafkaRevalidationRequested(&nextApp) {
+		kafkaSource := buildKafkaSource(&nextApp)
+		desiredSpec := kafkaSource.Object["spec"]
 
 		_, err = controllerutil.CreateOrUpdate(ctx, r.Client, kafkaSource, func() error {
-			spec := map[string]interface{}{
-				"consumerGroup": nextApp.Name + "-revalidation",
-				"bootstrapServers": []interface{}{
-					nextApp.Spec.Revalidation.KafkaBrokerUrl,
-				},
-				"topics": []interface{}{
-					topic,
-				},
-				"sink": map[string]interface{}{
-					"ref": map[string]interface{}{
-						"apiVersion": "serving.knative.dev/v1",
-						"kind":       "Service",
-						"name":       nextApp.Name + "-revalidator",
-					},
-				},
-			}
-			kafkaSource.Object["spec"] = spec
+			kafkaSource.Object["spec"] = desiredSpec
 			return ctrl.SetControllerReference(&nextApp, kafkaSource, r.Scheme)
 		})
 		if err != nil {

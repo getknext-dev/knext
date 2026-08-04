@@ -186,20 +186,22 @@ spec:
   revalidation:
     queue: kafka
     kafkaBrokerUrl: kafka-cluster-kafka-bootstrap.kafka.svc:9092
-    provisionKafkaSource: true   # explicit opt-in; default is NOT provisioned
 ```
 
-When `queue: kafka` **and** `provisionKafkaSource: true`, the operator provisions a Knative
-`KafkaSource` that consumes the `<app>-revalidation` topic and routes events to an
-`<app>-revalidator` consumer.
-
 <Callout type="warn">
-**Honest scope.** This is **not** a turnkey feature. By default `provisionKafkaSource` is unset, so
-**no `KafkaSource` is provisioned** — the `<app>-revalidator` consumer that events would sink into
-is **not yet shipped by knext**. Setting `provisionKafkaSource: true` is an assertion that you have
-deployed your own external consumer for the `<app>-revalidation` topic. If you enable `queue: kafka`
-without opting in, the operator records a non-fatal `RevalidationDeferred` status condition (`Ready`
-stays `True`) and provisions nothing.
+**Honest scope — `provisionKafkaSource` no longer does anything.** This field used to opt into
+provisioning a `KafkaSource`, on the understanding that you had deployed your own
+`<app>-revalidator` consumer. **That bring-your-own path is withdrawn:** the sink contract — what
+the consumer must be called, which events it receives, how it authenticates — was never specified
+or tested, so the option could only aim events at a Service that might never exist.
+
+No `KafkaSource` is provisioned for any value of the field. Your manifest still applies and your
+app still deploys normally; setting the field reports a `RevalidationDeferred` condition with
+reason `ProvisionKafkaSourceInert` plus a warning event, so an ignored setting is visible rather
+than silent. `queue: kafka` on its own behaves the same way, with reason `ConsumerNotProvisioned`.
+
+Cache invalidation is unaffected — `revalidateTag()` is already fleet-wide through the shared
+Redis-backed cache. Kafka-driven revalidation returns when knext ships the consumer itself.
 </Callout>
 
 ## Security defaults
