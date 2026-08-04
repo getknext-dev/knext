@@ -26,8 +26,19 @@
  *  - a pin naming a tag that does not exist upstream (deleted, or never a tag:
  *    `changesets/action@v1` is a BRANCH, `git/ref/tags/v1` 404s) — a legitimate
  *    finding, not an error to swallow;
- *  - an unpinned `docker://` container image, reported as itself rather than as
- *    a regex-breakage alarm (#630 review);
+ *  - an unpinned `docker://` container image IN A FILE WHERE NOTHING ELSE PARSED
+ *    AS A PIN — reported as itself rather than as a regex-breakage alarm (#630
+ *    review). Read that scope literally: the detection sits inside the
+ *    `pins.length === 0` branch below, so ONE normally-pinned action anywhere in
+ *    the same file makes this path unreachable and the docker ref is reported
+ *    NOWHERE. Measured, not inferred — a file holding
+ *    `actions/checkout@<40-hex> # v4.0.0` next to `docker://alpine:3.18` yields
+ *    ZERO findings. The gap is PRE-EXISTING (this reporting split changed which
+ *    finding carries the case, never which cases are seen) and is left open
+ *    deliberately: hoisting the check naively would false-red a correctly
+ *    DIGEST-pinned image, because `unreadableUsesValues` returns
+ *    `docker://img@sha256:…` too. Closing it properly needs an `@`/digest guard,
+ *    its own mutation proof, and a fixture where `pins.length > 0`;
  *  - a FORK-NETWORK commit. security.md notes GitHub serves any SHA in a repo's
  *    fork network from the parent path, so "does this SHA exist in the repo"
  *    proves nothing. This check never asks that question: it compares the pin
@@ -396,16 +407,35 @@ async function verifyFileSet(files, api) {
       // real finding is an unpinned container image. This file has already been
       // corrected twice for that class of misdirection. Both findings are
       // emitted when a file holds both, so neither can mask the other.
-      // (A DIGEST-pinned `docker://image@sha256:…` never reaches here at all —
-      // it carries an `@`, so `parsePins` reads it as a pin.)
+      //
+      // SCOPE, stated where it can be checked against the code beside it: this
+      // whole branch runs only when NOTHING in the file parsed as a pin, so a
+      // docker ref sharing a file with one ordinary pinned action is reported
+      // nowhere. See the header bullet — pre-existing, deliberately not fixed
+      // here, and not fixable by hoisting alone.
+      //
+      // A DIGEST-pinned `docker://image@sha256:…` never reaches here — it
+      // carries an `@`, so `parsePins` reads it as a pin. Do NOT read that as
+      // "handled": what it then emits is `not-sha-pinned`, rendering as "Not a
+      // 40-hex SHA — this ref is MUTABLE, so whoever can move it decides what
+      // runs here", i.e. it tells a maintainer their CORRECTLY digest-pinned
+      // image is mutable. Verified on this branch, not inferred. Also
+      // pre-existing (a `sha256:` digest is simply not a 40-hex git SHA, and
+      // `verifyPin` has no notion of a container digest), also out of scope for
+      // a reporting-split change — but it is a false red on a correct input,
+      // which is the class this file keeps having to correct, so it is written
+      // down rather than left to be rediscovered.
       const unreadable = unreadableUsesValues(text);
       const docker = unreadable.filter((entry) => entry.value.startsWith('docker://'));
       for (const entry of docker) {
+        // `action` carries the ref because that is what `formatFinding` renders
+        // in the head line. No separate `ref` field: it duplicated `action`
+        // exactly and nothing ever read it, and a field that looks meaningful
+        // but is dead is how the next reader is misled.
         findings.push({
           file,
           line: entry.line,
           action: entry.value,
-          ref: entry.value,
           reason: 'docker-ref-unpinned',
         });
       }
