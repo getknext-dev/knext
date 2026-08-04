@@ -7,6 +7,7 @@
     "dev": "turbo run dev",
     "lint": "biome check .",
     "lint:ts-imports": "node scripts/check-ts-import-extensions.mjs",
+    "lint:mutation-residue": "node scripts/scan-mutation-residue.mjs",
     "typecheck": "tsc -p tsconfig.typecheck.json",
     "format": "biome format --write .",
     "test": "vitest",
