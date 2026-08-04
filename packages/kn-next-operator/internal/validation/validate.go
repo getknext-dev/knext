@@ -339,6 +339,15 @@ func ValidateNextAppSpec(spec *appsv1alpha1.NextAppSpec) error {
 			)
 		}
 	}
+	// NOTE (#475): spec.revalidation.provisionKafkaSource is deliberately NOT
+	// validated here, on any value. The capability behind it is withdrawn (the
+	// `{app}-revalidator` sink was never specified or tested), but rejecting the
+	// flag would (a) narrow v1alpha1 in place, which ADR-0017 §2.1 reserves for a
+	// new API version, and (b) wedge stored CRs — this function is shared with the
+	// FAIL-CLOSED reconciler, so the rejection would stop the whole app from
+	// reconciling on operator upgrade with no user action. The withdrawal is
+	// enforced by making the field INERT and reporting it:
+	// controller.revalidationDeferred + the RevalidationDeferred condition.
 
 	// Database (ADR-0019): mode exclusivity + BYO binding shape + no silent
 	// DATABASE_URL precedence against spec.secrets.envMap. Mirrors the CRD CEL

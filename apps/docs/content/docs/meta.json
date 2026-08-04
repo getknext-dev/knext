@@ -10,6 +10,7 @@
     "---Runtime---",
     "official-adapter",
     "scale-to-zero",
+    "image-caching",
     "bytecode",
     "bun-runtime",
     "image-optimization",

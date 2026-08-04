@@ -57,5 +57,42 @@ consumer design-now / build-later.**
 - [x] `provisionKafkaSource` opt-in + `RevalidationDeferred` condition in the reconciler (#95/#99).
 - [x] Docs (`docs/operator/kafka-eventing.md`, the docs-site operator page) state the consumer is
   build-later.
+- [x] **Amended by #475 — the BYO opt-in is WITHDRAWN (see the amendment section below).**
 - [ ] Build the cluster-local, authenticated `{app}-revalidator` consumer (after Tier-A correctness;
-  re-evaluate whether closed PR #27 is salvageable first).
+  re-evaluate whether closed PR #27 is salvageable first). **Shipping it is what makes the flag live
+  again** — `revalidationDeferred` starts consulting `provisionKafkaSource` and the reconciler's
+  retained, unit-tested `buildKafkaSource` call site re-opens.
+
+## Amendment (2026-08, #475): the bring-your-own consumer path is withdrawn
+
+**This is a capability removal, not a defaulting change.** The decision above kept
+`provisionKafkaSource` as a real, documented option: setting it asserted that *you* had deployed the
+consumer, and the operator would then create the `KafkaSource` for you. The docs stated that contract
+plainly ("setting it is an assertion that you have deployed your own external consumer").
+
+That contract was never real. knext never specified what the consumer had to be beyond its **name**
+(`{app}-revalidator`) — not the CloudEvent types it receives, not its authentication, not how it is
+expected to call `revalidateTag()`, and nothing tested any of it. An option whose only specification
+is a Service name cannot be implemented against, so the honest description is that the path is
+**withdrawn**, not that it was "gated" or "deferred".
+
+**Instrument: inertness, not rejection.** `revalidationDeferred` now ignores the field entirely, so
+no `KafkaSource` is created on any value. The field is still **accepted**:
+
+- Rejecting it would narrow `v1alpha1` **in place**, which ADR-0017 §2.1 reserves for a new API
+  version — admission rejection is observably identical to a CEL `self != true` rule, and the CLI
+  never emitted this field, so hand-authored and GitOps manifests are the entire affected population.
+- The same validator gates the **fail-closed reconciler**, so a rejection would stop a stored CR from
+  being reconciled *at all* — no database binding, no ksvc, no NetworkPolicy, no warm-floor — firing
+  on operator upgrade with **no user action**. `ValidateNextAppSpecUpdate`'s own doc comment already
+  refuses the weaker version of that outcome.
+- ADR-0017 explicitly permits the semantic change: a field for a capability that has not shipped may
+  become inert, announced in release notes and surfaced as a status condition.
+
+**Observability.** `queue: kafka` keeps the non-fatal `RevalidationDeferred` condition
+(`ConsumerNotProvisioned`); setting the withdrawn flag reports reason `ProvisionKafkaSourceInert`
+plus a transition-gated Warning event, so an ignored setting is visible in `kubectl describe` rather
+than silent. The condition message no longer instructs anyone to set the flag.
+
+**What is not lost.** Cache invalidation was never dependent on this: `revalidateTag()` is fleet-wide
+through the shared Redis-backed cache. What is deferred is *asynchronous* revalidation over a queue.

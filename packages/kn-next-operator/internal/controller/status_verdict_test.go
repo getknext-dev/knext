@@ -17,6 +17,7 @@ limitations under the License.
 package controller
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -348,19 +349,71 @@ func TestComputeStatusVerdict_RevalidationDeferred(t *testing.T) {
 	if c.Status != metav1.ConditionTrue || c.Reason != "ConsumerNotProvisioned" {
 		t.Fatalf("RevalidationDeferred: got %+v", c)
 	}
-	wantMsg := "revalidation.queue=kafka requested but no KafkaSource was provisioned: " +
-		"the {app}-revalidator consumer is design-now/build-later (#95). Set " +
-		"spec.revalidation.provisionKafkaSource=true once you deploy an external consumer."
-	if c.Message != wantMsg {
-		t.Fatalf("RevalidationDeferred message: got %q", c.Message)
+	// The message must NOT tell the user to set provisionKafkaSource: the flag is
+	// inert (#475), so instructing them to set it would be the operator advising a
+	// value it then ignores.
+	if strings.Contains(c.Message, "provisionKafkaSource=true") {
+		t.Errorf("RevalidationDeferred message still instructs setting the inert flag: %q", c.Message)
+	}
+	if !strings.Contains(c.Message, "{app}-revalidator") {
+		t.Errorf("RevalidationDeferred message must name the unbuilt consumer: %q", c.Message)
+	}
+	if len(v.events) != 0 {
+		t.Fatalf("events: got %+v, want none when the flag is unset", v.events)
+	}
+}
+
+// #475 — the flag is INERT, not rejected. Rejecting it narrowed v1alpha1 in place
+// (ADR-0017 §2.1 forbids that) and wedged stored CRs on the fail-closed reconciler:
+// the app stopped being reconciled entirely on operator upgrade, with no user
+// action. So the verdict IGNORES the flag and reports it: still deferred, with a
+// distinct reason plus a transition-gated Warning naming the withdrawal.
+func TestComputeStatusVerdict_ProvisionKafkaSourceIsInert(t *testing.T) {
+	now := time.Now()
+	app := verdictApp()
+	app.Spec.Revalidation = &appsv1alpha1.RevalidationSpec{
+		Queue:                "kafka",
+		ProvisionKafkaSource: ptr.To(true),
 	}
 
-	// Opt-in flips it back to not-deferred.
-	app.Spec.Revalidation.ProvisionKafkaSource = ptr.To(true)
+	v := computeStatusVerdict(app, readyKsvc(now), databaseCheckState{mode: databaseModeNone},
+		revisionCheck{}, imageCacheState{}, now)
+
+	c := findVerdictCondition(t, v, ConditionRevalidationDeferred)
+	if c.Status != metav1.ConditionTrue || c.Reason != ReasonProvisionKafkaSourceInert {
+		t.Fatalf("RevalidationDeferred with the flag set: got %+v, want True/%s",
+			c, ReasonProvisionKafkaSourceInert)
+	}
+	// Honest about the WITHDRAWAL: the BYO external-consumer path was a documented
+	// functional contract, and it is gone — not merely defaulted off.
+	for _, want := range []string{"provisionKafkaSource", "ignored", "withdrawn"} {
+		if !strings.Contains(c.Message, want) {
+			t.Errorf("inert message %q must contain %q", c.Message, want)
+		}
+	}
+
+	// Ready must stay True — the whole point is that the app keeps reconciling.
+	if ready := findVerdictCondition(t, v, ConditionReady); ready.Status != metav1.ConditionTrue {
+		t.Fatalf("Ready: got %+v, want True (an inert flag must never degrade the app)", ready)
+	}
+
+	// A Warning event fires so the withdrawal is visible in `kubectl describe`.
+	if len(v.events) != 1 || v.events[0].eventType != corev1.EventTypeWarning ||
+		v.events[0].reason != ReasonProvisionKafkaSourceInert {
+		t.Fatalf("events: got %+v, want one Warning/%s", v.events, ReasonProvisionKafkaSourceInert)
+	}
+
+	// Transition-gated: a pass whose observed status already carries the reason
+	// must not re-emit (the #98 idle-hot-loop contract).
+	app.Status.Conditions = []metav1.Condition{{
+		Type:   ConditionRevalidationDeferred,
+		Status: metav1.ConditionTrue,
+		Reason: ReasonProvisionKafkaSourceInert,
+	}}
 	v = computeStatusVerdict(app, readyKsvc(now), databaseCheckState{mode: databaseModeNone},
 		revisionCheck{}, imageCacheState{}, now)
-	if c := findVerdictCondition(t, v, ConditionRevalidationDeferred); c.Status != metav1.ConditionFalse {
-		t.Fatalf("RevalidationDeferred with opt-in: got %+v", c)
+	if len(v.events) != 0 {
+		t.Fatalf("events on a repeat pass: got %+v, want none (transition-gated)", v.events)
 	}
 }
 
@@ -445,5 +498,249 @@ func TestComputeStatusVerdict_ImageCacheDisabledRemovesStaleCondition(t *testing
 	}
 	if !found {
 		t.Fatalf("a stale ImageCacheReady must be removed when prewarm is disabled, removeConditions=%v", v.removeConditions)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// #471 item 4 — image-prewarm reconcile failures are DEGRADING, not FATAL.
+//
+// Before this, a persistent prewarm/RBAC failure returned an error out of
+// Reconcile, so an OPT-IN cold-start optimisation blocked the whole app's
+// status convergence (Ready never got written on that pass, and the app was
+// stuck in the controller's exponential backoff). The decoupling: the failure
+// is carried into the pure verdict and surfaces ONLY on ImageCacheReady, with
+// a bounded requeue so it is retried and a transition-gated Warning event so
+// it is never silent.
+// ---------------------------------------------------------------------------
+
+func TestComputeStatusVerdict_ImagePrewarmReconcileErrorDegradesOnlyImageCache(t *testing.T) {
+	now := time.Now()
+	app := verdictApp()
+	app.Spec.Scaling = &appsv1alpha1.ScalingSpec{ImagePrewarm: true}
+
+	v := computeStatusVerdict(app, readyKsvc(now), databaseCheckState{mode: databaseModeNone},
+		revisionCheck{}, imageCacheState{
+			enabled:         true,
+			reconcileErrMsg: `daemonsets.apps is forbidden: User "system:serviceaccount:kn-next-operator-system:controller-manager" cannot create resource "daemonsets"`,
+		}, now)
+
+	c := findVerdictCondition(t, v, ConditionImageCacheReady)
+	if c.Status != metav1.ConditionFalse || c.Reason != ReasonReconcileFailed {
+		t.Fatalf("ImageCacheReady: got %+v, want False/%s", c, ReasonReconcileFailed)
+	}
+	if !strings.Contains(c.Message, "cannot create resource") {
+		t.Fatalf("ImageCacheReady message must carry the underlying error, got %q", c.Message)
+	}
+
+	// The whole point: the app's own readiness is untouched by a prewarm failure.
+	if r := findVerdictCondition(t, v, ConditionReady); r.Status != metav1.ConditionTrue {
+		t.Fatalf("Ready must stay True when only the prewarmer failed, got %+v", r)
+	}
+	for _, cond := range v.conditions {
+		if cond.Type == ConditionDegraded && cond.Status == metav1.ConditionTrue {
+			t.Fatalf("a prewarm failure must not set Degraded=True, got %+v", cond)
+		}
+	}
+
+	// Retried, not dropped: Reconcile no longer returns an error, so the ONLY
+	// thing that brings the operator back to fix it is this requeue.
+	if v.requeueAfter <= 0 {
+		t.Fatalf("a prewarm reconcile failure must schedule a bounded requeue, got %v", v.requeueAfter)
+	}
+
+	// Never silent: a Warning event fires on entry into the failed state.
+	var warned bool
+	for _, e := range v.events {
+		if e.eventType == corev1.EventTypeWarning && e.reason == ReasonImagePrewarmFailed {
+			warned = true
+		}
+	}
+	if !warned {
+		t.Fatalf("expected a Warning/%s event, got %+v", ReasonImagePrewarmFailed, v.events)
+	}
+}
+
+func TestComputeStatusVerdict_ImagePrewarmErrorEventIsTransitionGated(t *testing.T) {
+	now := time.Now()
+	app := verdictApp()
+	app.Spec.Scaling = &appsv1alpha1.ScalingSpec{ImagePrewarm: true}
+	// Already reported as failing on the previous pass.
+	app.Status.Conditions = []metav1.Condition{{
+		Type:   ConditionImageCacheReady,
+		Status: metav1.ConditionFalse,
+		Reason: ReasonReconcileFailed,
+	}}
+
+	v := computeStatusVerdict(app, readyKsvc(now), databaseCheckState{mode: databaseModeNone},
+		revisionCheck{}, imageCacheState{enabled: true, reconcileErrMsg: "still forbidden"}, now)
+
+	for _, e := range v.events {
+		if e.reason == ReasonImagePrewarmFailed {
+			t.Fatalf("event must fire only on TRANSITION into the failed state; a persistent "+
+				"failure would otherwise flood the event stream every requeue (got %+v)", e)
+		}
+	}
+	// The condition itself still reports the current failure.
+	c := findVerdictCondition(t, v, ConditionImageCacheReady)
+	if c.Status != metav1.ConditionFalse || c.Reason != ReasonReconcileFailed {
+		t.Fatalf("ImageCacheReady: got %+v, want False/%s", c, ReasonReconcileFailed)
+	}
+}
+
+func TestComputeStatusVerdict_ImagePrewarmCleanupErrorSurfacesInsteadOfRemoving(t *testing.T) {
+	now := time.Now()
+	app := verdictApp()
+	// Prewarm turned OFF, but deleting the leftover DaemonSet failed. Silently
+	// removing ImageCacheReady here would leave an orphaned DaemonSet pinning the
+	// image on every node with NOTHING in status saying so.
+	app.Status.Conditions = []metav1.Condition{{
+		Type:   ConditionImageCacheReady,
+		Status: metav1.ConditionTrue,
+		Reason: "Cached",
+	}}
+
+	v := computeStatusVerdict(app, readyKsvc(now), databaseCheckState{mode: databaseModeNone},
+		revisionCheck{}, imageCacheState{enabled: false, reconcileErrMsg: "delete forbidden"}, now)
+
+	c := findVerdictCondition(t, v, ConditionImageCacheReady)
+	if c.Status != metav1.ConditionFalse || c.Reason != ReasonCleanupFailed {
+		t.Fatalf("ImageCacheReady: got %+v, want False/%s", c, ReasonCleanupFailed)
+	}
+	for _, rc := range v.removeConditions {
+		if rc == ConditionImageCacheReady {
+			t.Fatalf("must NOT remove ImageCacheReady while the cleanup is still failing")
+		}
+	}
+	if v.requeueAfter <= 0 {
+		t.Fatalf("a failed prewarm cleanup must schedule a bounded requeue, got %v", v.requeueAfter)
+	}
+	if r := findVerdictCondition(t, v, ConditionReady); r.Status != metav1.ConditionTrue {
+		t.Fatalf("Ready must stay True when only the prewarm cleanup failed, got %+v", r)
+	}
+}
+
+func TestComputeStatusVerdict_ImagePrewarmErrorDoesNotOverrideKsvcRequeue(t *testing.T) {
+	now := time.Now()
+	app := verdictApp()
+	app.Spec.Scaling = &appsv1alpha1.ScalingSpec{ImagePrewarm: true}
+	ksvc := ksvcWithCondition(servingv1.ServiceConditionReady, corev1.ConditionFalse,
+		"RevisionFailed", time.Minute, now)
+
+	v := computeStatusVerdict(app, ksvc, databaseCheckState{mode: databaseModeNone},
+		revisionCheck{}, imageCacheState{enabled: true, reconcileErrMsg: "forbidden"}, now)
+
+	// The ksvc-not-ready requeue is the tighter, more urgent one; the prewarm
+	// failure must not lengthen it.
+	if v.requeueAfter != ksvcNotReadyRequeueAfter {
+		t.Fatalf("requeueAfter: got %v, want the ksvc-not-ready requeue %v",
+			v.requeueAfter, ksvcNotReadyRequeueAfter)
+	}
+}
+
+// Review finding 2 — the DELETE issued when prewarm is disabled is
+// unconditional, so a Forbidden on the "operator upgraded without its new
+// ClusterRole" path reached this branch for EVERY NextApp in the cluster,
+// including every app that never opted in. Those apps would each grow a
+// condition asserting a DaemonSet that never existed, a Warning, and a forced
+// 2-minute poll — and it broke the byte-identical-conditions invariant the
+// disabled branch exists to protect (#98).
+func TestComputeStatusVerdict_ImagePrewarmCleanupErrorOnNeverPrewarmedAppIsSilent(t *testing.T) {
+	now := time.Now()
+	app := verdictApp() // no spec.scaling, no prior ImageCacheReady condition
+
+	v := computeStatusVerdict(app, readyKsvc(now), databaseCheckState{mode: databaseModeNone},
+		revisionCheck{}, imageCacheState{enabled: false, reconcileErrMsg: "delete forbidden"}, now)
+
+	for _, c := range v.conditions {
+		if c.Type == ConditionImageCacheReady {
+			t.Fatalf("a never-prewarmed app must not grow an ImageCacheReady condition from a "+
+				"failed delete of a DaemonSet it never had, got %+v", c)
+		}
+	}
+	for _, rc := range v.removeConditions {
+		if rc == ConditionImageCacheReady {
+			t.Fatalf("must not remove a never-present condition (breaks the #98 no-op guard)")
+		}
+	}
+	for _, e := range v.events {
+		if e.reason == ReasonImagePrewarmFailed {
+			t.Fatalf("must not warn about an orphan that cannot exist, got %+v", e)
+		}
+	}
+	if v.requeueAfter != 0 {
+		t.Fatalf("must not force a poll on an app that never opted in, got %v", v.requeueAfter)
+	}
+}
+
+// ...but the orphan case this branch exists for MUST still surface: prewarm was
+// on (so the condition is present), it is turned off, and the delete fails.
+func TestComputeStatusVerdict_ImagePrewarmCleanupErrorStillSurfacesForARealOrphan(t *testing.T) {
+	now := time.Now()
+	app := verdictApp()
+	app.Status.Conditions = []metav1.Condition{{
+		Type: ConditionImageCacheReady, Status: metav1.ConditionTrue, Reason: "Cached",
+	}}
+
+	v := computeStatusVerdict(app, readyKsvc(now), databaseCheckState{mode: databaseModeNone},
+		revisionCheck{}, imageCacheState{enabled: false, reconcileErrMsg: "delete forbidden"}, now)
+
+	c := findVerdictCondition(t, v, ConditionImageCacheReady)
+	if c.Status != metav1.ConditionFalse || c.Reason != ReasonCleanupFailed {
+		t.Fatalf("ImageCacheReady: got %+v, want False/%s", c, ReasonCleanupFailed)
+	}
+}
+
+// Review finding 3a — CreateOrUpdate is Get-then-Update, so a Conflict is
+// ROUTINE. Degrading on it would flip a healthy True/Cached to
+// False/ReconcileFailed, emit a Warning, write status, and flip back next pass:
+// exactly the condition flapping the #98 no-op guard exists to prevent.
+func TestComputeStatusVerdict_ImagePrewarmTransientConflictDoesNotFlapTheCondition(t *testing.T) {
+	now := time.Now()
+	app := verdictApp()
+	app.Spec.Scaling = &appsv1alpha1.ScalingSpec{ImagePrewarm: true}
+	app.Status.Conditions = []metav1.Condition{{
+		Type: ConditionImageCacheReady, Status: metav1.ConditionTrue, Reason: "Cached",
+	}}
+
+	// Coverage is still complete and still observed — a Conflict says nothing
+	// about the DaemonSet's health.
+	v := computeStatusVerdict(app, readyKsvc(now), databaseCheckState{mode: databaseModeNone},
+		revisionCheck{}, imageCacheState{enabled: true, desired: 3, ready: 3, transientErr: true}, now)
+
+	c := findVerdictCondition(t, v, ConditionImageCacheReady)
+	if c.Status != metav1.ConditionTrue || c.Reason != "Cached" {
+		t.Fatalf("a routine write Conflict must not degrade a healthy cache, got %+v", c)
+	}
+	for _, e := range v.events {
+		if e.reason == ReasonImagePrewarmFailed {
+			t.Fatalf("a routine Conflict must not emit a Warning, got %+v", e)
+		}
+	}
+	// It must still be retried — the write did not land.
+	if v.requeueAfter <= 0 {
+		t.Fatalf("a conflicted write must still be retried, got %v", v.requeueAfter)
+	}
+}
+
+// Review finding 3b — skipping the DaemonSet GET on error threw away live,
+// still-accurate coverage. The failure message must carry it, so an operator
+// reading the condition can tell "nothing is cached" from "9 of 10 nodes are
+// cached and the 10th update was rejected".
+func TestComputeStatusVerdict_ImagePrewarmErrorMessageCarriesObservedCoverage(t *testing.T) {
+	now := time.Now()
+	app := verdictApp()
+	app.Spec.Scaling = &appsv1alpha1.ScalingSpec{ImagePrewarm: true}
+
+	v := computeStatusVerdict(app, readyKsvc(now), databaseCheckState{mode: databaseModeNone},
+		revisionCheck{}, imageCacheState{
+			enabled: true, desired: 10, ready: 9, reconcileErrMsg: "forbidden",
+		}, now)
+
+	c := findVerdictCondition(t, v, ConditionImageCacheReady)
+	if !strings.Contains(c.Message, "9/10") {
+		t.Fatalf("failure message must report the observed coverage, got %q", c.Message)
+	}
+	if !strings.Contains(c.Message, "forbidden") {
+		t.Fatalf("failure message must still carry the underlying error, got %q", c.Message)
 	}
 }

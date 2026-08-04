@@ -26,6 +26,7 @@ const KNOWN_SERIES = [
   'knext_nextapp_reconcile_total',
   'knext_nextapp_reconcile_duration_seconds',
   'knext_nextapp_reconcile_errors_total',
+  'knext_nextapp_image_prewarm_errors_total',
   'kn_next_http_requests_total',
   'kn_next_http_request_duration_seconds',
   'kn_next_startup_duration_seconds',
@@ -126,5 +127,40 @@ describe('PrometheusRule manifest', () => {
     expect(Number(m?.[1])).toBeGreaterThanOrEqual(2);
     expect(stuck?.labels?.severity).toMatch(/^(critical|warning)$/);
     expect(stuck?.annotations?.runbook_url ?? stuck?.annotations?.runbook).toBeTruthy();
+  });
+
+  // A failing image-prewarm reconcile used to return an error out of the
+  // operator's Reconcile, so it incremented knext_nextapp_reconcile_errors_total
+  // and fired the CRITICAL KnextOperatorReconcileErrors page. Decoupling it (so
+  // an opt-in optimisation stops blocking app status convergence) removed that
+  // page, and left only a condition nothing scrapes. Its own alert is what keeps
+  // the failure visible — otherwise the decoupling trades a false-critical for a
+  // silent failure.
+  it('alerts on image-prewarm failures, at warning severity (the app is still healthy)', () => {
+    const { docs } = loadRule();
+    const rule = docs.find((d) => d?.kind === 'PrometheusRule');
+    const alerts: (Rule & { for?: string })[] = rule.spec.groups.flatMap(
+      (g: { rules: Rule[] }) => g.rules,
+    );
+    const prewarm = alerts.find((a) => a.alert === 'KnextImagePrewarmFailing');
+
+    expect(prewarm, 'KnextImagePrewarmFailing alert must exist').toBeDefined();
+    expect(prewarm?.expr).toContain('knext_nextapp_image_prewarm_errors_total');
+    // Warning, NOT critical: the app serves fine, it just pays the image pull on
+    // cold start. Paging at 3am for a latency optimisation is how alerts get muted.
+    expect(prewarm?.labels?.severity).toBe('warning');
+    expect(prewarm?.for).toBeTruthy();
+    expect(prewarm?.annotations?.runbook_url ?? prewarm?.annotations?.runbook).toBeTruthy();
+  });
+
+  // The reconcile-error page must stay CRITICAL — the decoupling narrowed what
+  // reaches it, and if that alert were softened too, nothing would page on a
+  // genuinely failing control loop.
+  it('keeps the reconcile-error alert at critical severity', () => {
+    const { docs } = loadRule();
+    const rule = docs.find((d) => d?.kind === 'PrometheusRule');
+    const alerts: Rule[] = rule.spec.groups.flatMap((g: { rules: Rule[] }) => g.rules);
+    const reconcile = alerts.find((a) => a.alert === 'KnextOperatorReconcileErrors');
+    expect(reconcile?.labels?.severity).toBe('critical');
   });
 });

@@ -101,11 +101,34 @@ type statusVerdict struct {
 
 // revalidationDeferred reports whether Kafka-based ISR revalidation was
 // requested (spec.revalidation.queue == "kafka") but the operator must NOT
-// provision a KafkaSource because the `{app}-revalidator` consumer is not yet
-// built (issue #95) and opt-in (spec.revalidation.provisionKafkaSource) is off.
+// provision a KafkaSource, because the `{app}-revalidator` consumer the source
+// would sink into is not built (issue #95).
+//
+// It deliberately IGNORES spec.revalidation.provisionKafkaSource (#475). That
+// opt-in used to flip this to false and let the reconciler create the source, on
+// the premise that the user had deployed their own consumer — but that BYO path
+// was never a real contract: the sink shape was never specified or tested, so
+// the flag could only produce a source aimed at a Service that may never exist.
+// The capability is therefore WITHDRAWN, and inertness is the instrument:
+// rejecting the flag instead would narrow v1alpha1 in place (ADR-0017 §2.1) and,
+// because the shared validator is also the fail-closed reconciler's gate, would
+// stop the entire app from reconciling on operator upgrade with no user action.
+//
+// Consequence, deliberately: the KafkaSource block in Reconcile is unreachable
+// through the guard it already has. Building the consumer (the open ADR-0016
+// action item) is what makes this function consult the flag again.
 func revalidationDeferred(app *appsv1alpha1.NextApp) bool {
-	return app.Spec.Revalidation != nil && app.Spec.Revalidation.Queue == "kafka" &&
-		!ptr.Deref(app.Spec.Revalidation.ProvisionKafkaSource, false)
+	return app.Spec.Revalidation != nil && app.Spec.Revalidation.Queue == "kafka"
+}
+
+// provisionKafkaSourceRequested reports whether the app asks for the WITHDRAWN
+// opt-in, which the operator ignores. Split from revalidationDeferred because
+// the two answer different questions: "is revalidation deferred" (always, for
+// kafka) versus "is the user asking for something that no longer does anything"
+// (the case that must be reported loudly).
+func provisionKafkaSourceRequested(app *appsv1alpha1.NextApp) bool {
+	return app.Spec.Revalidation != nil &&
+		ptr.Deref(app.Spec.Revalidation.ProvisionKafkaSource, false)
 }
 
 // computeStatusVerdict is the single, pure seam for the NextApp status verdict:
@@ -291,16 +314,42 @@ func computeStatusVerdict(
 	}
 
 	// Non-fatal RevalidationDeferred condition: surface (but don't fail on) a kafka
-	// revalidation request whose consumer hasn't been provisioned yet (issue #95).
+	// revalidation request whose consumer hasn't been built yet (issue #95).
+	//
+	// Two reasons, because two different things are being reported. The plain
+	// deferral says "kafka revalidation does nothing yet". The inert reason
+	// additionally says "and the field you set to fix that was withdrawn" — the
+	// message must NOT tell anyone to set provisionKafkaSource, which the operator
+	// now ignores (#475); an operator that advises a value it then discards is the
+	// same false-green this condition exists to prevent.
 	if revalidationDeferred(app) {
+		reason := "ConsumerNotProvisioned"
+		message := "revalidation.queue=kafka requested but no KafkaSource was provisioned: " +
+			"the {app}-revalidator consumer is design-now/build-later (#95), so ISR revalidation " +
+			"over kafka is inert. Cache invalidation still works fleet-wide through the shared " +
+			"Redis-backed cache; no action is available or needed here."
+		if provisionKafkaSourceRequested(app) {
+			reason = ReasonProvisionKafkaSourceInert
+			message = "spec.revalidation.provisionKafkaSource=true is ignored: the bring-your-own " +
+				"external-consumer path it opted into is withdrawn — the {app}-revalidator sink " +
+				"contract was never specified or tested, so no KafkaSource is created (#475). The " +
+				"field still applies and the rest of this app reconciles normally; remove it to " +
+				"silence this. Kafka ISR revalidation returns when knext ships the consumer (ADR-0016)."
+			// Transition-gated (the #98 no-op contract): fire only when the verdict
+			// newly enters the inert state, never on every converged pass.
+			prev := apimeta.FindStatusCondition(app.Status.Conditions, ConditionRevalidationDeferred)
+			if prev == nil || prev.Reason != ReasonProvisionKafkaSourceInert {
+				v.events = append(v.events, verdictEvent{
+					corev1.EventTypeWarning, ReasonProvisionKafkaSourceInert, message,
+				})
+			}
+		}
 		v.conditions = append(v.conditions, metav1.Condition{
 			Type:               ConditionRevalidationDeferred,
 			Status:             metav1.ConditionTrue,
 			ObservedGeneration: app.Generation,
-			Reason:             "ConsumerNotProvisioned",
-			Message: "revalidation.queue=kafka requested but no KafkaSource was provisioned: " +
-				"the {app}-revalidator consumer is design-now/build-later (#95). Set " +
-				"spec.revalidation.provisionKafkaSource=true once you deploy an external consumer.",
+			Reason:             reason,
+			Message:            message,
 		})
 	} else {
 		v.conditions = append(v.conditions, metav1.Condition{
@@ -318,7 +367,79 @@ func computeStatusVerdict(
 	// else False/Pulling. When disabled, drop the condition — but only if it was
 	// previously present, so a never-prewarmed app's removeConditions/order stays
 	// byte-identical (the #98 no-op guard).
-	if ic.enabled {
+	//
+	// #471 item 4 — a prewarm RECONCILE failure (typically missing DaemonSet
+	// RBAC) is DEGRADING, not fatal. Reconcile no longer returns that error, so
+	// this branch is the only place it becomes visible: the condition carries the
+	// underlying message, a bounded requeue is the only retry, and a
+	// transition-gated Warning event keeps it from being silent. Ready/Degraded
+	// are deliberately untouched — an opt-in cold-start optimisation must not
+	// make the app look unhealthy.
+	prevImageCache := apimeta.FindStatusCondition(app.Status.Conditions, ConditionImageCacheReady)
+
+	// A prewarm failure only deserves a VERDICT when there is something for the
+	// verdict to be about: the feature is on, or we previously reported on it.
+	//
+	// This gate is load-bearing, not defensive. The delete issued when prewarm is
+	// disabled is unconditional, so on the very upgrade path the amendment above
+	// cites — an operator running without its new DaemonSet RBAC — a Forbidden
+	// reaches here for EVERY NextApp in the cluster, including every app that
+	// never opted in. Without the gate each of them grows a CleanupFailed
+	// condition asserting a DaemonSet that never existed, a Warning, and a forced
+	// 2-minute poll, which also breaks the byte-identical-conditions invariant the
+	// disabled branch exists to protect (#98). The failure is NOT lost: it still
+	// increments knext_nextapp_image_prewarm_errors_total and still fires the
+	// KnextImagePrewarmFailing alert, which is where a cluster-wide RBAC problem
+	// belongs — in the operator's own metrics, not smeared across every app's status.
+	prewarmFailureIsReportable := ic.reconcileErrMsg != "" && (ic.enabled || prevImageCache != nil)
+
+	// A lost optimistic-concurrency race is retried, never reported: it says
+	// nothing about the DaemonSet's health, and degrading on it would flap the
+	// condition (True -> False -> True) on routine write contention.
+	if ic.transientErr && (ic.enabled || prevImageCache != nil) {
+		if v.requeueAfter == 0 || v.requeueAfter > ksvcNotReadyRequeueAfter {
+			v.requeueAfter = ksvcNotReadyRequeueAfter
+		}
+	}
+
+	switch {
+	case prewarmFailureIsReportable:
+		reason := ReasonReconcileFailed
+		what := "image prewarm DaemonSet could not be reconciled"
+		if !ic.enabled {
+			// Disabled but the leftover DaemonSet could not be deleted. Removing
+			// the condition here would hide an orphaned DaemonSet still pinning
+			// the image on every node.
+			reason = ReasonCleanupFailed
+			what = "image prewarm is disabled but its DaemonSet could not be deleted"
+		}
+		message := fmt.Sprintf("%s: %s", what, ic.reconcileErrMsg)
+		if ic.enabled {
+			// Coverage is still READ on the failure path, so report it: "nothing is
+			// cached" and "9 of 10 nodes are cached and the 10th update was
+			// rejected" are very different incidents, and dropping the numbers
+			// discarded live, still-accurate data.
+			message = fmt.Sprintf("%s (observed coverage: %d/%d node(s))", message, ic.ready, ic.desired)
+		}
+		v.conditions = append(v.conditions, metav1.Condition{
+			Type:               ConditionImageCacheReady,
+			Status:             metav1.ConditionFalse,
+			ObservedGeneration: app.Generation,
+			Reason:             reason,
+			Message:            message,
+		})
+		// Retried only by this requeue — never let it override a tighter one.
+		if v.requeueAfter == 0 || v.requeueAfter > imagePrewarmFailureRequeueAfter {
+			v.requeueAfter = imagePrewarmFailureRequeueAfter
+		}
+		// Transition-gated: fire once on entry, not on every requeue.
+		if prevImageCache == nil || prevImageCache.Status != metav1.ConditionFalse ||
+			prevImageCache.Reason != reason {
+			v.events = append(v.events, verdictEvent{
+				corev1.EventTypeWarning, ReasonImagePrewarmFailed, message,
+			})
+		}
+	case ic.enabled:
 		if ic.desired > 0 && ic.ready == ic.desired {
 			v.conditions = append(v.conditions, metav1.Condition{
 				Type:               ConditionImageCacheReady,
@@ -340,7 +461,7 @@ func computeStatusVerdict(
 					ic.ready, ic.desired),
 			})
 		}
-	} else if apimeta.FindStatusCondition(app.Status.Conditions, ConditionImageCacheReady) != nil {
+	case prevImageCache != nil:
 		v.removeConditions = append(v.removeConditions, ConditionImageCacheReady)
 	}
 

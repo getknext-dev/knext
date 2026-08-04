@@ -96,16 +96,83 @@ against containerd GC) — every node. Scale-from-zero then never waits on the p
   digest updates too; there is a brief window where the new digest is pulling on the prewarmer while an
   old-revision cold start could still pay a pull — acceptable, and no worse than status quo.
 
+## Amendment (2026-08-04, #471 item 4): a prewarm failure DEGRADES, it does not FAIL the pass
+
+As first implemented, `reconcileImagePrewarmDaemonSet`'s error was returned out of `Reconcile`,
+mirroring the PVC/NetworkPolicy siblings. That coupling is wrong for **this** child, and the
+asymmetry is the point: the ksvc *is* the app and the NetworkPolicy is a security control, whereas
+`imagePrewarm` is an **opt-in latency optimisation**. A persistent failure — in practice, an
+operator ServiceAccount without DaemonSet RBAC, e.g. an operator upgraded without its new ClusterRole
+— aborted the pass **before `computeStatusVerdict` ran**, so `Ready` was never written and the object
+sat in controller-runtime's exponential backoff. An optimisation nobody had to enable took the app's
+whole status convergence down with it.
+
+**Decision:** the error is carried into `imageCacheState.reconcileErrMsg` and surfaces **only** on
+`ImageCacheReady` (`False`, reason `ReconcileFailed`; reason `CleanupFailed` when prewarm is disabled
+but the leftover DaemonSet could not be deleted — removing the condition there would hide an orphaned
+DaemonSet still pinning the image and a pod slot on every node). `Ready`/`Degraded` are untouched.
+Because Reconcile no longer returns the error, controller-runtime's backoff no longer retries it, so
+the verdict carries its own bounded `imagePrewarmFailureRequeueAfter` (2 min, deliberately looser than
+the ksvc requeue and never allowed to override a tighter one) plus a transition-gated Warning event
+(`ImagePrewarmFailed`) so the failure is loud rather than swallowed.
+
+**What the decoupling costs, and what pays for it.** Removing the error from the return path also
+removes it from `knext_nextapp_reconcile_errors_total`, and therefore from the **critical**
+`KnextOperatorReconcileErrors` page. That is correct — the app is healthy — but it left the failure
+visible only in an event (which expires with event TTL) and a condition nothing scrapes. So the
+failure gets its **own** unlabeled counter, `knext_nextapp_image_prewarm_errors_total`, incremented at
+the point of failure, and its own **warning**-severity `KnextImagePrewarmFailing` rule. Without that
+the decoupling would trade a false-critical for a silent failure.
+
+**Two failure-shape rules that fall out of it, both learned the hard way in review:**
+
+- The `Delete` issued when prewarm is disabled is unconditional, so on the very "operator upgraded
+  without its new ClusterRole" path this amendment cites, a `Forbidden` reaches the verdict for
+  **every** `NextApp` in the cluster — including every app that never opted in. The verdict therefore
+  reports a prewarm failure **only when the feature is enabled or the condition was already present**;
+  otherwise every never-prewarmed app would grow a `CleanupFailed` condition asserting a DaemonSet
+  that never existed, plus a Warning and a forced 2-minute poll, breaking the byte-identical-conditions
+  invariant (#98). The failure is not lost — it still increments the counter and fires the alert, which
+  is where a cluster-wide RBAC problem belongs.
+- `CreateOrUpdate` is Get-then-Update, so a `Conflict` is **routine** and says nothing about the
+  DaemonSet's health. It is classified as transient: retried, never reported, never degrading. And the
+  DaemonSet coverage GET runs even on the failure path, with the observed coverage folded into the
+  condition message — "9/10 nodes cached and the 10th update was rejected" is a different incident
+  from "nothing is cached".
+
+**Guarded, not documented:** `reconcile_fatality_guard_test.go` scans `Reconcile`'s AST for every
+`r.reconcile*`/`r.ensure*` child call and asserts both halves against a fail-closed allowlist — the
+prewarmer's error must NOT reach a `return`, and every other child's error MUST. A new child that
+silently swallows its error fails the guard because it is not on the allowlist.
+
 ## Action items
 
-- [ ] `spec.scaling.imagePrewarm` field + CRD regen (`make manifests`/`make generate`); CLI config
+- [x] `spec.scaling.imagePrewarm` field + CRD regen (`make manifests`/`make generate`); CLI config
       passthrough + validator (no CEL invariant needed — it's a plain bool).
-- [ ] Operator reconciler: create/update/delete the `<app>-imgcache` DaemonSet from the field + digest;
+- [x] Operator reconciler: create/update/delete the `<app>-imgcache` DaemonSet from the field + digest;
       honest status condition via `computeStatusVerdict` (e.g. `ImageCacheReady`).
-- [ ] e2e: DaemonSet lifecycle + the no-`Pulling`-on-cold-start proof (extends the scale-to-zero
-      suite). **Must include a distroless/shell-less app-image case** so the container mechanism is
-      verified not to CrashLoopBackOff (the failure both sign-off gates flagged), and assert the app
-      server never actually boots in the prewarmer.
-- [ ] Docs: user-facing "cold start & image caching" guidance (the N×image-size node cost is the
-      honest trade); benchmark the warm-vs-cold delta on a clean cluster (blocked today by cluster
-      clutter — see runs 17–18).
+- [x] Digest-pin the operator-owned busybox helper image (#479).
+- [x] Decouple the prewarm reconcile from app-reconcile success (#471 item 4 — see the amendment above).
+- [x] e2e, live-cluster half: `test/e2e/image_prewarm_e2e_test.go` (`e2e_scale`) — DaemonSet
+      lifecycle enable→disable, the staged-helper hand-off working under a **real kubelet** (every
+      prewarm pod Ready on every node with restartCount 0, which envtest cannot see for lack of a
+      kubelet or container runtime), the pin container running the APP image under the staged static
+      helper, and the app server never booting.
+      **Caveat on where it runs:** the nightly gates the whole scale suite on `vars.SCALE_TEST_IMAGE`,
+      which is **unset on this repo** (`gh api …/actions/variables` → `total_count: 0`) and an unset
+      value only logs a `::warning::` and skips. So today it runs only on a manual `workflow_dispatch`
+      supplying an image; setting that variable is what turns it into a live gate.
+- [ ] **STILL OPEN — the distroless / shell-less app-image case.** The e2e above runs against
+      `SCALE_TEST_IMAGE` = the file-manager image, whose runner stage is `node:22-alpine`
+      (`apps/file-manager/Dockerfile:105`). **Alpine ships busybox and `/bin/sh`**, so a naive
+      `sleep infinity` would work there too — that spec cannot distinguish the shell-free mechanism
+      from a shell-dependent one, and must not be cited as the distroless proof. Closing it needs a
+      genuinely distroless, digest-pinned app image (e.g. a knext runtime image on
+      `gcr.io/distroless/nodejs`) plumbed in as the e2e app image.
+- [ ] **STILL OPEN — the no-`Pulling`-on-cold-start proof + the warm-vs-cold ~2 s delta.** NOT
+      assertable on kind: kind side-loads images into every node's containerd, so "no `Pulling` event"
+      is trivially true there whether or not the prewarmer works. Needs a multi-node cluster pulling
+      from a real registry (OKE) on a clean cluster (blocked today by cluster clutter — see runs 17–18).
+- [x] Docs: user-facing "cold start & image caching" guidance
+      (`apps/docs/content/docs/image-caching.mdx`), carrying the N×image-size disk cost and the M×N
+      pod-slot cost as the honest trade.

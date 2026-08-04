@@ -409,6 +409,17 @@ against later operators. There is **no conversion webhook**, so if the version
 string ever changes, hand-authored and GitOps-managed manifests must be updated
 by hand.
 
+**Additive-only covers the schema, not behaviour.** A field's *meaning* is not
+frozen: a field for a capability that has not shipped may become **inert** — the
+manifest still applies and the operator still reconciles the app, but the field
+stops doing anything. When that happens it is announced in the release notes and
+surfaced on the resource as a status condition (and an event), never as a
+rejected write. `spec.revalidation.provisionKafkaSource` is the current example.
+The distinction is deliberate and is spelled out in
+[the CRD versioning policy](adr/0017-crd-stays-v1alpha1-conversion-webhook-deferred.md):
+narrowing what the schema *accepts* needs a new API version, while changing what
+an accepted value *does* does not.
+
 The declared version, the full guarantee that comes with it, and what would make
 us move off `v1alpha1` are written up in
 [the CRD versioning policy](adr/0017-crd-stays-v1alpha1-conversion-webhook-deferred.md).

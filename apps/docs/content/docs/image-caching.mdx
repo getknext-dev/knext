@@ -1,0 +1,105 @@
+---
+title: Cold starts & image caching
+description: Keep your application image resident on every node so a pod waking from zero never waits on an image pull — and the node cost of doing it.
+---
+
+An app that has scaled to zero pays a cold start on the next request. That cold start has two
+parts: getting your **image onto the node**, and **booting the server**. This page is about the
+first part.
+
+Most of the time the image is already on the node from a previous pod, and you never notice.
+Sometimes it is not:
+
+- the cluster added or replaced a **node**, which starts with an empty image cache;
+- you shipped a **new build**, so the first pod of that revision on each node pulls a new digest;
+- the container runtime **garbage-collected** the image while the app sat idle at zero — exactly
+  what happens to an app that scales to zero and stays there.
+
+On a measured ~105 MB image the pull costs roughly **2 seconds**, which is about the same again as
+the rest of a warm cold start. So the worst cold start your users see is close to double the
+typical one, and which one they get is luck.
+
+`imagePrewarm` removes that luck.
+
+## Turning it on
+
+```ts title="kn-next.config.ts"
+import { defineConfig } from '@getknext/core';
+
+export default defineConfig({
+  name: 'shop',
+  scaling: { minScale: 0, imagePrewarm: true },
+});
+```
+
+Deploy as usual. knext then keeps a copy of your application image **pulled and resident on every
+node**, so a pod waking from zero starts from an image that is already there.
+
+<Callout type="info">
+This complements, and does not replace, the other half of a cold start. Once the image is on the
+node, what is left is scheduling and server boot — see [Scale to zero](/docs/scale-to-zero) and
+[Bytecode caching](/docs/bytecode).
+</Callout>
+
+## What it costs — read this before enabling it
+
+This is opt-in, per app, and off by default, because it is a real trade and not a free win.
+
+- **A copy of your image lands on every schedulable node** — including the nodes your app
+  never serves from. A 105 MB image across a 10-node cluster is about 1 GB of node disk, not 105 MB.
+- **It also places one very small pod on every node** (a few millicores and a few MB of memory).
+  That pod exists to hold the image resident; it never runs your server.
+- **Those pods count against each node's max-pods limit.** One app is one pod per node. Five
+  prewarmed apps on a 10-node cluster is 50 pods of the cluster's scheduling capacity spent on
+  caching. On managed clusters where the per-node pod limit is low, enabling this on many apps at
+  once can crowd out your own application pods.
+
+A good rule: turn it on for the handful of apps whose cold-start latency users actually feel, not
+across the board.
+
+## Checking that it worked
+
+The app reports its cache coverage as a condition on the deployed app:
+
+```bash
+kubectl get nextapp shop -o jsonpath='{.status.conditions[?(@.type=="ImageCacheReady")]}'
+```
+
+- **`True`** — every targeted node has your image pulled and held resident. A cold start on any of
+  them skips the pull.
+- **`False` / `Pulling`** — still populating. The message tells you how many nodes are done, e.g.
+  `3/10 prewarm node(s) have the app image pulled+pinned`. This is the normal state for a minute or
+  two after a deploy, and again briefly after every new build, since each new image digest has to
+  be pulled to each node before it is cached.
+- **`False` / `ReconcileFailed`** — knext could not create or update the prewarmer. The most common
+  cause is that the operator's service account is not permitted to manage DaemonSets in the
+  cluster, which usually means the operator was upgraded without updating its permissions. The
+  condition message carries the underlying error and the coverage reached so far, so you can tell
+  "nothing is cached" from "nine of ten nodes are cached and the tenth update was rejected".
+- **`False` / `CleanupFailed`** — you turned prewarming **off**, but knext could not delete the
+  cached copies. They are still occupying disk and a pod slot on every node until this clears. Same
+  usual cause as above: the operator lacks permission to delete DaemonSets.
+
+**`ImageCacheReady` never affects your app's `Ready` status.** If prewarming is failing or still
+catching up, the app is still healthy and still serving — cold starts simply pay the image pull, as
+they would if you had never enabled it. An optional latency optimisation is never allowed to make a
+working app look broken.
+
+## Turning it off
+
+Set `imagePrewarm: false` (or remove it) and redeploy. The cached copies and their pods are removed
+from every node; nothing else about the app changes. Cold starts go back to pulling the image when
+the node does not happen to have it.
+
+## What it does not do
+
+- **It does not keep a pod of your app warm.** The app still scales to zero and still cold-starts;
+  it just does not wait on the image. If you need to eliminate the cold start itself, keep a
+  replica running with `minScale: 1` — a very different cost, since that is a full copy of your
+  app rather than a cached image.
+- **It does not speed up the first pull after a new build.** A new build is a new image digest, so
+  it must reach each node once. Prewarming means that pull happens in the background right after
+  you deploy, rather than in front of a user's first request.
+- **It does not run your application.** The pod that holds the image resident never starts your
+  server, opens a port, connects to your database, or serves traffic. It works even on minimal
+  images that contain no shell.

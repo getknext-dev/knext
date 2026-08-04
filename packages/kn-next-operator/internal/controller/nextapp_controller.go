@@ -77,6 +77,15 @@ const (
 // converges toward the ksvc's real health even if a status event is missed.
 const ksvcNotReadyRequeueAfter = 30 * time.Second
 
+// imagePrewarmFailureRequeueAfter bounds the retry of a FAILED image-prewarm
+// DaemonSet reconcile (#471 item 4). Because that failure no longer returns out
+// of Reconcile, controller-runtime's error backoff no longer retries it — this
+// requeue is the ONLY thing that does. It is deliberately looser than
+// ksvcNotReadyRequeueAfter: the app is healthy, only an opt-in cold-start
+// optimisation is not, and the usual cause (missing DaemonSet RBAC) needs
+// operator action rather than fast polling.
+const imagePrewarmFailureRequeueAfter = 2 * time.Minute
+
 // defaultContainerConcurrency is the per-pod concurrent-request soft target
 // stamped on the generated Knative Service when spec.scaling.containerConcurrency
 // is unset (#377, ADR-0028). Lowered from 100 → 20: at 100 a single pod
@@ -136,6 +145,23 @@ const (
 	// rollback/canary can never resolve — Knative keeps serving the last-good
 	// route with only an opaque RevisionMissing condition (ADR-0014 follow-up).
 	ReasonPinnedRevisionNotFound = "PinnedRevisionNotFound"
+	// ReasonImagePrewarmFailed marks a failure to reconcile (or, when the feature
+	// is turned off, to delete) the opt-in image-prewarm DaemonSet — typically
+	// missing DaemonSet RBAC. It is a WARNING event only: the failure degrades
+	// ImageCacheReady and nothing else, so an opt-in cold-start optimisation
+	// never blocks the app's status convergence (#471, ADR-0037).
+	ReasonImagePrewarmFailed = "ImagePrewarmFailed"
+	// ReasonProvisionKafkaSourceInert marks a NextApp that sets
+	// spec.revalidation.provisionKafkaSource=true, which the operator IGNORES
+	// (#475). The BYO external-consumer path that flag opted into is WITHDRAWN:
+	// the sink contract (a Knative Service named `{app}-revalidator` consuming
+	// the revalidation CloudEvents) was never specified or tested, so honouring
+	// the flag would create a source pointing at a Service that may never exist.
+	// The field still applies — rejecting it would narrow v1alpha1 in place
+	// (ADR-0017 §2.1) and, on the shared fail-closed validation path, stop the
+	// whole app from reconciling — so the withdrawal is surfaced as this
+	// non-fatal condition reason + a Warning event instead.
+	ReasonProvisionKafkaSourceInert = "ProvisionKafkaSourceInert"
 )
 
 // pinnedRevisionStallWindow is how long the child ksvc's RoutesReady/Ready
@@ -445,50 +471,62 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 	// spec.scaling.imagePrewarm=true it pulls+pins the app's digest-pinned image
 	// on every node so scale-from-zero skips the image pull; on false/unset any
 	// previously-created DaemonSet is deleted.
+	//
+	// DECOUPLED FROM THE PASS (#471 item 4): unlike the ksvc (which IS the app)
+	// and the NetworkPolicy (a security control), image prewarm is an OPT-IN
+	// cold-start optimisation. Returning its error here made a persistent
+	// failure — in practice, missing DaemonSet RBAC — abort the pass BEFORE the
+	// status verdict ran, so the app's Ready was never written and the object sat
+	// in controller-runtime's exponential backoff: the optimisation taking the
+	// app's status convergence down with it. The error is instead carried into
+	// the verdict (below), where it degrades ImageCacheReady ONLY, with a bounded
+	// requeue for the retry and a transition-gated Warning event so it is loud
+	// rather than swallowed. The failure ALSO increments
+	// knext_nextapp_image_prewarm_errors_total, which is what the (warning, not
+	// critical) alert keys on now that it no longer trips the reconcile-error page.
+	//
+	// A Conflict is classified apart from a real failure: CreateOrUpdate is
+	// Get-then-Update, so losing that race is ROUTINE and says nothing about the
+	// DaemonSet's health. Degrading on it would flip a healthy ImageCacheReady to
+	// False and back on the next pass — the condition flapping the #98 no-op guard
+	// exists to prevent. It only earns a retry.
+	prewarmErrMsg := ""
+	prewarmTransient := false
 	if err := r.reconcileImagePrewarmDaemonSet(ctx, &nextApp); err != nil {
-		logger.Error(err, "Failed to reconcile image-prewarm DaemonSet")
-		r.emitEvent(&nextApp, corev1.EventTypeWarning, ReasonReconcileFailed,
-			fmt.Sprintf("Failed to reconcile image-prewarm DaemonSet: %s", err.Error()))
-		return ctrl.Result{}, err
+		switch {
+		case errors.IsConflict(err):
+			logger.V(1).Info("image-prewarm DaemonSet write lost an optimistic-concurrency race; "+
+				"retrying without degrading ImageCacheReady", "error", err.Error())
+			prewarmTransient = true
+		default:
+			logger.Error(err, "Failed to reconcile image-prewarm DaemonSet; "+
+				"degrading ImageCacheReady instead of failing the reconcile pass")
+			prewarmErrMsg = err.Error()
+		}
 	}
 
 	// 5. Create/Update KafkaSource for ISR revalidation.
 	//
-	// We provision the KafkaSource ONLY when kafka is selected AND the operator is
-	// explicitly opted in via spec.revalidation.provisionKafkaSource=true. The sink
-	// the source targets — the `{app}-revalidator` Knative Service — is not yet built
-	// (design-now/build-later, issue #95). Provisioning by default would wire eventing
-	// to a non-existent service and deliver revalidation events nowhere. When kafka is
-	// requested but opt-in is off, we record a non-fatal RevalidationDeferred condition
-	// (Ready stays True) below instead of creating a dangling source.
-	kafkaRequested := nextApp.Spec.Revalidation != nil && nextApp.Spec.Revalidation.Queue == "kafka"
-	if kafkaRequested && !revalidationDeferred(&nextApp) {
-		// Unstructured to avoid Eventing proto deps.
-		topic := fmt.Sprintf("%s-revalidation", nextApp.Name)
-		kafkaSource := &unstructured.Unstructured{}
-		kafkaSource.SetAPIVersion("sources.knative.dev/v1beta1")
-		kafkaSource.SetKind("KafkaSource")
-		kafkaSource.SetName(nextApp.Name + "-revalidation-source")
-		kafkaSource.SetNamespace(nextApp.Namespace)
+	// CURRENTLY UNREACHABLE, DELIBERATELY (#475). revalidationDeferred is true for
+	// EVERY `queue: kafka` app — it ignores spec.revalidation.provisionKafkaSource,
+	// because the sink this source targets (a `{app}-revalidator` Knative Service)
+	// is not built by knext and its contract was never specified, so honouring the
+	// opt-in could only aim a source at a Service that may never exist. The flag is
+	// inert rather than rejected: rejecting it would narrow v1alpha1 in place
+	// (ADR-0017 §2.1) and, on the shared fail-closed validation path, would stop the
+	// whole app from reconciling. The withdrawal is reported as the
+	// RevalidationDeferred condition + a Warning event (status_verdict.go).
+	//
+	// The construction is retained, not deleted, because building the consumer is an
+	// open ADR-0016 action item — that is what makes revalidationDeferred consult the
+	// flag again and re-opens this branch. Retained-but-untested code rots, so the
+	// object's shape is pinned by build_kafka_source_test.go.
+	if !revalidationDeferred(&nextApp) && kafkaRevalidationRequested(&nextApp) {
+		kafkaSource := buildKafkaSource(&nextApp)
+		desiredSpec := kafkaSource.Object["spec"]
 
 		_, err = controllerutil.CreateOrUpdate(ctx, r.Client, kafkaSource, func() error {
-			spec := map[string]interface{}{
-				"consumerGroup": nextApp.Name + "-revalidation",
-				"bootstrapServers": []interface{}{
-					nextApp.Spec.Revalidation.KafkaBrokerUrl,
-				},
-				"topics": []interface{}{
-					topic,
-				},
-				"sink": map[string]interface{}{
-					"ref": map[string]interface{}{
-						"apiVersion": "serving.knative.dev/v1",
-						"kind":       "Service",
-						"name":       nextApp.Name + "-revalidator",
-					},
-				},
-			}
-			kafkaSource.Object["spec"] = spec
+			kafkaSource.Object["spec"] = desiredSpec
 			return ctrl.SetControllerReference(&nextApp, kafkaSource, r.Scheme)
 		})
 		if err != nil {
@@ -572,7 +610,15 @@ func (r *NextAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 	// the verdict can report ImageCacheReady honestly (desired vs ready). Only
 	// meaningful when prewarm is enabled; best-effort GET (a not-yet-created or
 	// unreadable DaemonSet leaves it Pulling, never fatal).
-	ic := imageCacheState{enabled: imagePrewarmEnabled(&nextApp)}
+	// The GET happens even when the reconcile above FAILED: coverage observed on
+	// the cluster is still accurate, and reporting "9/10 nodes cached, the 10th
+	// update was rejected" is a different (and far more actionable) incident than
+	// "nothing is cached". Skipping it threw that data away.
+	ic := imageCacheState{
+		enabled:         imagePrewarmEnabled(&nextApp),
+		reconcileErrMsg: prewarmErrMsg,
+		transientErr:    prewarmTransient,
+	}
 	if ic.enabled {
 		prewarmDS := &appsv1.DaemonSet{}
 		dsKey := client.ObjectKey{Namespace: nextApp.Namespace, Name: nextApp.Name + "-imgcache"}

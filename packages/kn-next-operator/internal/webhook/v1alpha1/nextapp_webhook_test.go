@@ -104,6 +104,67 @@ func TestValidateDeleteIsNoOp(t *testing.T) {
 	}
 }
 
+// #475 — the capability behind `spec.revalidation.provisionKafkaSource` is
+// withdrawn (the `{app}-revalidator` sink contract was never specified or
+// tested), but admission must keep ACCEPTING the field on every value. Rejecting
+// it would narrow `v1alpha1` in place, which ADR-0017 §2.1 reserves for a new API
+// version — a manifest that applied before must keep applying. The withdrawal is
+// enforced by making the flag INERT and surfacing it as a `RevalidationDeferred`
+// condition plus a Warning event (see internal/controller/status_verdict.go).
+//
+// This test is the regression guard against re-introducing the rejection.
+func TestProvisionKafkaSourceStillAcceptedAtAdmission(t *testing.T) {
+	v := &NextAppCustomValidator{}
+	ctx := context.Background()
+
+	enabled := true
+	disabled := false
+
+	withProvision := func(p *bool) *appsv1alpha1.NextApp {
+		return newNextApp(appsv1alpha1.NextAppSpec{
+			Image: digestImage,
+			Revalidation: &appsv1alpha1.RevalidationSpec{
+				Queue:                "kafka",
+				KafkaBrokerUrl:       "kafka.default.svc:9092",
+				ProvisionKafkaSource: p,
+			},
+		})
+	}
+
+	t.Run("CREATE with provisionKafkaSource=true is accepted (no in-place v1alpha1 narrowing)", func(t *testing.T) {
+		if _, err := v.ValidateCreate(ctx, withProvision(&enabled)); err != nil {
+			t.Fatalf("ValidateCreate() = %v; want nil — ADR-0017 §2.1 forbids narrowing v1alpha1 in place", err)
+		}
+	})
+
+	t.Run("UPDATE that turns provisionKafkaSource on is accepted", func(t *testing.T) {
+		if _, err := v.ValidateUpdate(ctx, withProvision(nil), withProvision(&enabled)); err != nil {
+			t.Errorf("ValidateUpdate() = %v; want nil", err)
+		}
+	})
+
+	t.Run("UPDATE carrying a pre-existing provisionKafkaSource=true forward is accepted", func(t *testing.T) {
+		if _, err := v.ValidateUpdate(ctx, withProvision(&enabled), withProvision(&enabled)); err != nil {
+			t.Errorf("a stored CR carrying the withdrawn flag must stay updatable, got %v", err)
+		}
+	})
+
+	t.Run("false and unset are accepted", func(t *testing.T) {
+		if _, err := v.ValidateCreate(ctx, withProvision(&disabled)); err != nil {
+			t.Errorf("provisionKafkaSource=false must be accepted, got %v", err)
+		}
+		if _, err := v.ValidateCreate(ctx, withProvision(nil)); err != nil {
+			t.Errorf("unset provisionKafkaSource must be accepted, got %v", err)
+		}
+	})
+
+	t.Run("DELETE is still allowed", func(t *testing.T) {
+		if _, err := v.ValidateDelete(ctx, withProvision(&enabled)); err != nil {
+			t.Errorf("ValidateDelete() = %v; want nil", err)
+		}
+	})
+}
+
 // ADR-0019 — DATABASE_URL(_RO) collision enforcement lives HERE (webhook), with
 // TRUE ratcheting: reject on CREATE, reject an UPDATE only when it ADDS a
 // collision; an update that merely carries a pre-existing collision forward
