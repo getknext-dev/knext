@@ -84,14 +84,80 @@ export function templateRoot(): string {
  * guard aimed at the wrong directory finds no build and SKIPS — green-by-skip,
  * which is not a pass (#408).
  */
-const LOCKFILES = [
-    "pnpm-lock.yaml",
-    "package-lock.json",
-    "yarn.lock",
-    "bun.lockb",
-    "bun.lock",
-    "pnpm-workspace.yaml",
+/**
+ * EXACTLY the lockfiles next 16.2.11's `findRootDirAndLockFiles` considers.
+ *
+ * `pnpm-workspace.yaml` is deliberately NOT here even though it looks like a
+ * workspace-root marker: Next does not consult it, so treating it as one made
+ * us emit `apps/a/` where Next produces a FLAT `.next/standalone/` — and the
+ * emitted seam guard would then point at a directory that never exists and
+ * SKIP. Diverging from Next here does not "fix" anything; it just moves the
+ * error somewhere quieter.
+ *
+ * Each entry also names the package manager, because the generated Dockerfile
+ * must install with the manager whose lockfile it found (`npm ci` cannot
+ * consume a `pnpm-lock.yaml`).
+ */
+const LOCKFILES: ReadonlyArray<{ file: string; install: string }> = [
+    {
+        file: "pnpm-lock.yaml",
+        install: "corepack enable && pnpm install --frozen-lockfile",
+    },
+    { file: "package-lock.json", install: "npm ci" },
+    {
+        file: "yarn.lock",
+        install: "corepack enable && yarn install --immutable",
+    },
+    // The node base image has no bun. Rather than emit a command the image
+    // cannot run, install with npm from package.json and say so in the emitted
+    // Dockerfile — switch the base image if you want bun's lockfile honoured.
+    { file: "bun.lock", install: "npm install --no-audit --no-fund" },
+    { file: "bun.lockb", install: "npm install --no-audit --no-fund" },
 ];
+
+/** No lockfile anywhere: nothing to be frozen against. */
+const NO_LOCKFILE_INSTALL = "npm install --no-audit --no-fund";
+
+export interface Layout {
+    /**
+     * `.next/standalone/<prefix>server.js` — the app's path relative to the
+     * tracing root, slash-terminated, or "" when the app IS that root.
+     * ALSO the app's path inside the docker build context, because the
+     * generated Dockerfile's context IS the tracing root (see `Dockerfile.hbs`).
+     * Those two meanings coincide only under that choice of context — which is
+     * why the context is stated in the emitted file rather than assumed.
+     */
+    standalonePrefix: string;
+    /** Absolute path of the inferred tracing root (= the docker build context). */
+    root: string;
+    /** Install command matching the lockfile actually found at `root`. */
+    installCmd: string;
+}
+
+/** Resolve the layout facts every emitted path depends on, once. */
+export function resolveLayout(appDir: string): Layout {
+    const app = resolve(appDir);
+    let dir = app;
+    let root = app;
+    let installCmd = NO_LOCKFILE_INSTALL;
+    // Walk up to the OUTERMOST lockfile-bearing ancestor: with a lockfile in
+    // both the workspace root and (rarely) the app, Next traces from the outer
+    // one, and guessing the inner one silently mislocates every emitted path.
+    for (;;) {
+        const hit = LOCKFILES.find((l) => existsSync(join(dir, l.file)));
+        if (hit) {
+            root = dir;
+            installCmd = hit.install;
+        }
+        const parent = dirname(dir);
+        if (parent === dir) break;
+        dir = parent;
+    }
+    const rel = relative(root, app);
+    const standalonePrefix =
+        !rel || rel.startsWith("..") ? "" : `${rel.split(sep).join("/")}/`;
+    return { standalonePrefix, root, installCmd };
+}
 
 /**
  * The `.next/standalone/<prefix>server.js` path prefix for an app at `appDir`.
@@ -99,23 +165,35 @@ const LOCKFILES = [
  * repo); otherwise the app's slash-terminated path relative to that root.
  */
 export function standalonePrefixFor(appDir: string): string {
-    const app = resolve(appDir);
-    let dir = app;
-    let root = app;
-    // Walk up to the OUTERMOST lockfile-bearing ancestor: with a lockfile in
-    // both the workspace root and (rarely) the app, Next traces from the outer
-    // one, and guessing the inner one silently mislocates every emitted path.
-    for (;;) {
-        if (LOCKFILES.some((f) => existsSync(join(dir, f)))) {
-            root = dir;
-        }
-        const parent = dirname(dir);
-        if (parent === dir) break;
-        dir = parent;
+    return resolveLayout(appDir).standalonePrefix;
+}
+
+/**
+ * RFC1123 label: the app name becomes the NextApp resource AND the Knative
+ * Service name, so Kubernetes rejects anything else — and the name is
+ * interpolated into JSON, TypeScript and JSX, where an unvalidated value is a
+ * broken (or hostile) file rather than a late error.
+ */
+const RFC1123_LABEL = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/;
+
+/**
+ * Validate the app name, or THROW.
+ *
+ * REJECT, never escape. Escaping `My App` would produce a valid `package.json`
+ * carrying a name Kubernetes refuses at deploy time — the failure just moves
+ * further from its cause. This mirrors `renderScaffold`'s refusal to emit an
+ * unsubstituted placeholder: the scaffolder does not ship something it knows
+ * is wrong.
+ */
+export function assertValidAppName(name: string): void {
+    if (name.length === 0 || name.length > 63 || !RFC1123_LABEL.test(name)) {
+        throw new Error(
+            `invalid app name ${JSON.stringify(name)} — it becomes the NextApp / ` +
+                "Knative Service name, so it must be an RFC1123 label: lowercase " +
+                "alphanumerics and '-', starting and ending alphanumeric, at most " +
+                "63 characters (e.g. 'hello-knext'). Pass --name to choose one.",
+        );
     }
-    const rel = relative(root, app);
-    if (!rel || rel.startsWith("..")) return "";
-    return `${rel.split(sep).join("/")}/`;
 }
 
 /** Reads the CLI's own version — the range the scaffold pins its deps to. */
@@ -163,6 +241,8 @@ export interface RenderOptions {
     name: string;
     standalonePrefix: string;
     version: string;
+    /** Install command matching the lockfile at the tracing root. */
+    installCmd?: string;
     templates?: Map<string, string>;
 }
 
@@ -173,10 +253,15 @@ export interface RenderOptions {
  * skip forever).
  */
 export function renderScaffold(opts: RenderOptions): Map<string, string> {
+    // Validate BEFORE substituting: the name lands in JSON, TS and JSX, and an
+    // invalid one produces files that do not parse (verified: `ev"il` emitted a
+    // package.json that is not JSON) or a Service name Kubernetes refuses.
+    assertValidAppName(opts.name);
     const vars: Record<string, string> = {
         name: opts.name,
         standalonePrefix: opts.standalonePrefix,
         version: opts.version,
+        installCmd: opts.installCmd ?? NO_LOCKFILE_INSTALL,
     };
     const templates = opts.templates ?? loadTemplates();
     const rendered = new Map<string, string>();
@@ -217,9 +302,11 @@ export interface ScaffoldOptions {
 export function writeScaffold(opts: ScaffoldOptions): Map<string, string> {
     const appDir = resolve(opts.appDir);
     const name = opts.name ?? appDir.split(sep).filter(Boolean).pop() ?? "app";
+    const layout = resolveLayout(appDir);
     const files = renderScaffold({
         name,
-        standalonePrefix: standalonePrefixFor(appDir),
+        standalonePrefix: layout.standalonePrefix,
+        installCmd: layout.installCmd,
         version: opts.version ?? cliVersion(),
         templates: opts.templates,
     });
@@ -295,6 +382,16 @@ export async function createMain(argv: string[]): Promise<number> {
         return 0;
     }
 
+    if (positionals.length > 1) {
+        // A silently-ignored extra positional is how `create app --name x y`
+        // scaffolds somewhere the user did not mean. Same discipline as the
+        // strict flag parser above.
+        process.stderr.write(
+            `unexpected extra argument(s): ${positionals.slice(1).join(" ")}\n\n${HELP}`,
+        );
+        return 1;
+    }
+
     const appDir = resolve(positionals[0] ?? ".");
     try {
         const files = writeScaffold({
@@ -314,6 +411,11 @@ export async function createMain(argv: string[]): Promise<number> {
         );
         return 0;
     } catch (err) {
+        // Write the REASON to stderr directly, not only through the logger:
+        // pino's transport is async and its object rendering buries the message
+        // the user needs ("invalid app name … must be an RFC1123 label"), which
+        // turns an actionable rejection into a bare "create failed".
+        process.stderr.write(`kn-next create: ${(err as Error).message}\n`);
         log.error({ err }, "create failed");
         return 1;
     }

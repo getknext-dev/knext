@@ -22,6 +22,8 @@
  * Written RED-first: `src/cli/create.ts` did not exist, so every assertion here
  * failed on the missing module.
  */
+
+import { execFileSync } from "node:child_process";
 import {
     existsSync,
     mkdirSync,
@@ -214,8 +216,26 @@ describe("kn-next create — graduated per-app guards ship with the app (#344/#4
             join(appDir, "standalone-seam-alive.test.ts"),
             "utf8",
         );
-        expect(guard).toContain("knext.lib.clients.poolInstrumentor");
-        expect(guard).toContain("knext.lib.context.state");
+        // STRUCTURAL, not substring: assert the symbols appear in the ARRAY the
+        // guard actually asserts over (`SEAM_SYMBOLS`), and the API pairing in
+        // `SEAM_FAMILIES`. A plain `toContain` is satisfied by the docblock,
+        // which names both symbols in prose — so gutting the array while
+        // leaving the comments would keep a substring check green while the
+        // shipped guard asserts nothing.
+        const symbols =
+            guard.match(/const\s+SEAM_SYMBOLS\s*=\s*\[([^\]]*)\]/s)?.[1] ?? "";
+        expect(
+            symbols,
+            "the emitted guard has no SEAM_SYMBOLS array to assert over",
+        ).not.toBe("");
+        expect(symbols).toContain("knext.lib.clients.poolInstrumentor");
+        expect(symbols).toContain("knext.lib.context.state");
+
+        const families =
+            guard.match(/const\s+SEAM_FAMILIES[^=]*=\s*\[(.*?)\];/s)?.[1] ?? "";
+        expect(families).toContain("setPoolInstrumentor");
+        expect(families).toContain("correlationLogFields");
+
         expect(guard).toContain("KNEXT_REQUIRE_STANDALONE");
     });
 
@@ -253,6 +273,19 @@ describe("kn-next create — graduated per-app guards ship with the app (#344/#4
         mkdirSync(nested, { recursive: true });
         expect(standalonePrefixFor(nested)).toBe("apps/z/");
         expect(standalonePrefixFor(root)).toBe("");
+    });
+
+    it("considers ONLY the lockfiles Next considers — pnpm-workspace.yaml is NOT one", () => {
+        // next 16.2.11's findRootDirAndLockFiles looks for
+        // pnpm-lock.yaml / package-lock.json / yarn.lock / bun.lock / bun.lockb.
+        // Treating `pnpm-workspace.yaml` as a root marker made us emit
+        // `apps/a/` where Next produces a FLAT `.next/standalone/` — the seam
+        // guard would then point at a directory that never exists and SKIP,
+        // which is the green-by-skip this whole command argues against.
+        writeFileSync(join(root, "pnpm-workspace.yaml"), "packages:\n  - a\n");
+        const app = join(root, "apps", "a");
+        mkdirSync(app, { recursive: true });
+        expect(standalonePrefixFor(app)).toBe("");
     });
 });
 
@@ -348,6 +381,203 @@ describe("kn-next create — the generated package.json is runnable OUTSIDE this
     });
 });
 
+/**
+ * The Dockerfile is the one emitted artifact whose correctness is a SEQUENCE,
+ * not a substring: `npm ci` must run where the lockfile is, the build must run
+ * where the app is, and the runtime must boot the knext entry. A `toContain`
+ * check passes on a Dockerfile that cannot build, which is what shipped in the
+ * first round. These tests interpret the instruction stream instead.
+ */
+describe("kn-next create — the generated Dockerfile actually builds (structurally)", () => {
+    interface Docker {
+        /** WORKDIR in effect for each RUN, paired with the command. */
+        runs: { cwd: string; cmd: string }[];
+        copies: { from: string; src: string; dest: string }[];
+        froms: string[];
+        user: string | null;
+        cmd: string | null;
+    }
+
+    /** Interpret the Dockerfile's instruction stream, tracking WORKDIR state. */
+    function parseDockerfile(src: string): Docker {
+        const out: Docker = {
+            runs: [],
+            copies: [],
+            froms: [],
+            user: null,
+            cmd: null,
+        };
+        let cwd = "/";
+        // Join line continuations so a multi-line RUN is one command.
+        const lines = src
+            .replace(/\\\n\s*/g, " ")
+            .split("\n")
+            .map((l) => l.trim())
+            .filter((l) => l && !l.startsWith("#"));
+        for (const line of lines) {
+            const [verbRaw, ...rest] = line.split(/\s+/);
+            const verb = verbRaw.toUpperCase();
+            const arg = rest.join(" ");
+            if (verb === "FROM") {
+                out.froms.push(arg);
+                cwd = "/";
+            } else if (verb === "WORKDIR") {
+                const p = rest[0];
+                // Normalise the trailing slash `/repo/{{prefix}}` leaves when
+                // the prefix is empty — Docker treats `/repo/` and `/repo` the
+                // same, so the parser must too.
+                cwd = (p.startsWith("/") ? p : join(cwd, p)).replace(
+                    /(.)\/$/,
+                    "$1",
+                );
+            } else if (verb === "RUN") {
+                out.runs.push({ cwd, cmd: arg });
+            } else if (verb === "COPY") {
+                const m = line.match(
+                    /^COPY\s+(?:--from=(\S+)\s+)?(\S+)\s+(\S+)\s*$/i,
+                );
+                if (m) {
+                    out.copies.push({
+                        from: m[1] ?? "",
+                        src: m[2],
+                        dest: m[3],
+                    });
+                }
+            } else if (verb === "USER") {
+                out.user = rest[0];
+            } else if (verb === "CMD") {
+                out.cmd = arg;
+            }
+        }
+        return out;
+    }
+
+    /** Scaffold at `<root>/<sub>` with the lockfile at `<lockAt>`. */
+    function dockerfileFor(
+        sub: string,
+        lockAt: string,
+        lockName = "package-lock.json",
+    ): { docker: Docker; text: string; appDir: string } {
+        mkdirSync(join(root, lockAt), { recursive: true });
+        writeFileSync(join(root, lockAt, lockName), "{}\n");
+        const appDir = join(root, sub);
+        mkdirSync(appDir, { recursive: true });
+        writeScaffold({ appDir, name: "hello-knext" });
+        const text = readFileSync(join(appDir, "Dockerfile"), "utf8");
+        return { docker: parseDockerfile(text), text, appDir };
+    }
+
+    it("runs the dependency install in the directory that HAS the lockfile (nested layout)", () => {
+        // `npm ci` does not walk up. Running it in the app dir of a workspace,
+        // where only the root has a package-lock.json, is a hard build failure.
+        const { docker } = dockerfileFor("apps/hello-knext", ".");
+        const install = docker.runs.find((r) =>
+            /npm ci|npm install/.test(r.cmd),
+        );
+        expect(
+            install,
+            "no dependency-install RUN in the Dockerfile",
+        ).toBeDefined();
+        expect(
+            (install as { cwd: string }).cwd,
+            "the install must run at the build context root, where the lockfile is",
+        ).toBe("/repo");
+    });
+
+    it("runs `npm run build` in the APP directory, not the context root (nested layout)", () => {
+        const { docker } = dockerfileFor("apps/hello-knext", ".");
+        const build = docker.runs.find((r) => /npm run build/.test(r.cmd));
+        expect(build).toBeDefined();
+        expect((build as { cwd: string }).cwd).toBe("/repo/apps/hello-knext");
+    });
+
+    it("FLAT layout: install AND build both run at the context root", () => {
+        // App carries its own lockfile, nothing above — the layout QUICKSTART's
+        // `npm ci` in the app dir implies. Here the app IS the context root, so
+        // a `/repo/<prefix>` that still carried a prefix would point at nothing.
+        const { docker } = dockerfileFor("flat", "flat");
+        const install = docker.runs.find((r) =>
+            /npm ci|npm install/.test(r.cmd),
+        );
+        const build = docker.runs.find((r) => /npm run build/.test(r.cmd));
+        expect((install as { cwd: string }).cwd).toBe("/repo");
+        expect((build as { cwd: string }).cwd).toBe("/repo");
+        const standaloneCopy = docker.copies.find((c) =>
+            c.src.includes(".next/standalone"),
+        );
+        expect((standaloneCopy as { src: string }).src).toBe(
+            "/repo/.next/standalone",
+        );
+    });
+
+    it("emits the install command matching the lockfile it found (pnpm ≠ npm)", () => {
+        // Deriving the root from a pnpm-lock.yaml and then running `npm ci`
+        // against it fails: npm cannot consume a pnpm lockfile.
+        const { docker } = dockerfileFor(
+            "apps/hello-knext",
+            ".",
+            "pnpm-lock.yaml",
+        );
+        const install = docker.runs.find((r) =>
+            /npm ci|npm install|pnpm install|yarn install|bun install/.test(
+                r.cmd,
+            ),
+        );
+        expect((install as { cmd: string }).cmd).toMatch(/pnpm install/);
+    });
+
+    it("pins every base image by digest (security.md supply chain)", () => {
+        const { docker } = dockerfileFor("apps/hello-knext", ".");
+        const external = docker.froms.filter(
+            (f) => !/^(builder|runner|scratch)\b/i.test(f),
+        );
+        expect(external.length).toBeGreaterThan(0);
+        for (const from of external) {
+            expect(from, `floating base image: ${from}`).toMatch(
+                /@sha256:[0-9a-f]{64}/,
+            );
+        }
+    });
+
+    it("drops privileges to a non-root USER before CMD (security.md)", () => {
+        const { docker } = dockerfileFor("apps/hello-knext", ".");
+        expect(docker.user).toBe("node");
+    });
+
+    it("boots the knext runtime entry, NOT a bare `node server.js` (graceful shutdown)", () => {
+        // adapters/node-server.ts is the ONLY thing that installs the SIGTERM
+        // handler draining in-flight requests + running after() callbacks on
+        // scale-down. Bare-exec'ing the standalone server bypasses it, so every
+        // created app would ship without the graceful-shutdown invariant.
+        const { docker } = dockerfileFor("apps/hello-knext", ".");
+        expect(docker.cmd).toContain("@getknext/core/internal/node-server");
+        expect(
+            docker.cmd,
+            "CMD bare-execs server.js — that bypasses the SIGTERM drain",
+        ).not.toMatch(/\bnode(\\?")?\s*,?\s*(\\?")?[^"]*server\.js/);
+        // The runtime entry needs to be told where the standalone server is.
+        expect(docker.cmd).toContain("STANDALONE_SERVER_PATH");
+        expect(docker.cmd).toContain("apps/hello-knext/server.js");
+    });
+
+    it("is covered by the repo's base-image pin guard (scan, not an enumerated list)", () => {
+        // The guard's default file list used to enumerate file-manager + the
+        // operator, so this template escaped it entirely — the enumerate-vs-scan
+        // trap. Run the guard with NO arguments and assert it reached this file.
+        const out = execFileSync(
+            "bash",
+            [
+                resolve(
+                    import.meta.dirname,
+                    "../../../../scripts/check-base-images-pinned.sh",
+                ),
+            ],
+            { encoding: "utf8" },
+        );
+        expect(out).toContain("packages/kn-next/templates/app/Dockerfile.hbs");
+    });
+});
+
 describe("kn-next create — the CLI entry (createMain)", () => {
     /** Capture what createMain writes to stdout/stderr for one invocation. */
     async function capture(
@@ -432,6 +662,95 @@ describe("kn-next create — the CLI entry (createMain)", () => {
             readFileSync(join(appDir, "package.json"), "utf8"),
         ) as { name?: string };
         expect(pkg.name).toBe("chosen-name");
+    });
+});
+
+describe("kn-next create — the app name is VALIDATED, never escaped-and-shipped", () => {
+    /**
+     * The name is interpolated into JSON (`package.json`), TypeScript
+     * (`kn-next.config.ts`) and JSX (the page) — and it becomes the NextApp /
+     * Knative Service name, which Kubernetes requires to be an RFC1123 label.
+     * `renderScaffold` already refuses to emit an unsubstituted placeholder;
+     * the same discipline applies here. REJECT, do not escape: an escaped
+     * `My App` would still be an invalid Service name at deploy time, just
+     * later and further from the cause.
+     */
+    const INVALID = [
+        [
+            'ev"il',
+            "breaks package.json out of JSON and kn-next.config out of TS",
+        ],
+        ["My App", "spaces are not RFC1123"],
+        ["UPPER_Case", "uppercase + underscore are not RFC1123"],
+        ["../escape", "path traversal"],
+        ["<script>", "lands verbatim in a JSX text node"],
+        ["-leading", "must start alphanumeric"],
+        ["trailing-", "must end alphanumeric"],
+        ["a".repeat(64), "RFC1123 labels cap at 63 characters"],
+    ] as const;
+
+    it.each(INVALID)("rejects %j (%s)", (name) => {
+        const appDir = join(root, "apps", "victim");
+        mkdirSync(appDir, { recursive: true });
+        expect(() => writeScaffold({ appDir, name })).toThrow(/RFC1123|name/i);
+        // …and nothing is written: a rejected name must not leave a half-app.
+        expect(existsSync(join(appDir, "package.json"))).toBe(false);
+    });
+
+    it("the CLI exits NON-ZERO on an invalid name (a broken app must never be exit 0)", async () => {
+        const appDir = join(root, "apps", "cli-victim");
+        mkdirSync(appDir, { recursive: true });
+        const errSpy = vi
+            .spyOn(process.stderr, "write")
+            .mockImplementation(() => true);
+        const outSpy = vi
+            .spyOn(process.stdout, "write")
+            .mockImplementation(() => true);
+        let err = "";
+        errSpy.mockImplementation((chunk) => {
+            err += String(chunk);
+            return true;
+        });
+        try {
+            expect(await createMain([appDir, "--name", 'ev"il'])).toBe(1);
+        } finally {
+            errSpy.mockRestore();
+            outSpy.mockRestore();
+        }
+        expect(existsSync(join(appDir, "package.json"))).toBe(false);
+        // The user must be told WHY, on stderr — a bare "create failed" is not
+        // actionable, and pino's async transport buries the message.
+        expect(err).toMatch(/RFC1123/);
+    });
+
+    it("rejects an invalid DIRECTORY-derived name too (no hostile flag needed)", () => {
+        // The name defaults to the directory basename, so the invalid-name path
+        // is reachable without anyone passing --name.
+        const appDir = join(root, "apps", "My App");
+        mkdirSync(appDir, { recursive: true });
+        expect(() => writeScaffold({ appDir })).toThrow(/RFC1123|name/i);
+    });
+
+    it("accepts ordinary RFC1123 names", () => {
+        for (const name of ["a", "hello-knext", "app123", "a-b-c-1"]) {
+            const appDir = join(root, "apps", `ok-${name}`);
+            mkdirSync(appDir, { recursive: true });
+            expect(() => writeScaffold({ appDir, name })).not.toThrow();
+            const pkg = JSON.parse(
+                readFileSync(join(appDir, "package.json"), "utf8"),
+            ) as { name?: string };
+            expect(pkg.name).toBe(name);
+        }
+    });
+
+    it("every emitted file parses as what it claims to be (JSON stays JSON)", () => {
+        const { appDir } = scaffoldApp("hello-knext");
+        expect(() =>
+            JSON.parse(readFileSync(join(appDir, "package.json"), "utf8")),
+        ).not.toThrow();
+        expect(() =>
+            JSON.parse(readFileSync(join(appDir, "tsconfig.json"), "utf8")),
+        ).not.toThrow();
     });
 });
 

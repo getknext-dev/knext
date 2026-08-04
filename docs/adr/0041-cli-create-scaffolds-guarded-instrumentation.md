@@ -90,6 +90,37 @@ unnoticed is the published one, because nobody in this repo builds it.
 5. **No cluster writes.** `create` only writes files, and refuses to overwrite
    an existing one (aborting before touching anything) unless `--force`.
 
+6. **The app name is VALIDATED as an RFC1123 label, and rejected — never
+   escaped.** It is interpolated into JSON (`package.json`), TypeScript
+   (`kn-next.config.ts`) and JSX (the page), *and* it becomes the NextApp /
+   Knative Service name. Measured against the shipped bin before the fix:
+   `--name 'ev"il'` **exited 0** and wrote a `package.json` that is not valid
+   JSON. Escaping would only move the failure later — `My App` escapes fine and
+   is still a Service name Kubernetes refuses — so the scaffolder refuses up
+   front, the same discipline `renderScaffold` already applies to an
+   unsubstituted placeholder. The name defaults to the directory basename, so
+   this path is reachable with no flag at all.
+
+7. **The generated `Dockerfile` builds from the TRACING ROOT, and boots the
+   knext runtime entry.** Three decisions, each of which was wrong in the first
+   round:
+   - **Build context = the inferred tracing root** (the outermost lockfile
+     ancestor), stated in the emitted file rather than assumed. The install runs
+     at that root — where the lockfile actually is, since none of `npm ci` /
+     `pnpm install` / `yarn install` walk up — and the *build* runs in the app
+     directory. In a workspace those are different places; conflating them made
+     the emitted Dockerfile unbuildable in both common layouts.
+   - **The install command matches the lockfile that was found** (`npm ci` vs
+     `pnpm install --frozen-lockfile` vs `yarn install --immutable`); `npm ci`
+     cannot consume a `pnpm-lock.yaml`.
+   - **`CMD` boots `@getknext/core/internal/node-server`, not a bare
+     `node server.js`.** That entry is the only thing installing the SIGTERM
+     handler which drains in-flight requests and runs `after()` callbacks
+     (`security.md`, graceful shutdown). A bare exec bypasses it, so every
+     created app would have shipped without that invariant. The base image is
+     digest-pinned and the runtime drops to the non-root `node` user, per the
+     same rules file.
+
 ## Options considered
 
 | Approach | Single shape | Drift-proof | Works outside the monorepo | Verdict |
@@ -117,3 +148,17 @@ unnoticed is the published one, because nobody in this repo builds it.
   trigger). It is deliberately minimal — no framework choices, no cluster
   contact, no interactive prompts — so the surface it adds is one verb and three
   flags.
+- **Known divergence, tracked separately:** `kn-next deploy` hardcodes the docker
+  build context as two directories above the app (`resolve(cwd, "../..")`),
+  which assumes an `apps/<name>` layout, while `create` derives the context from
+  the nearest lockfile. The two AGREE for `apps/<name>` — the layout QUICKSTART
+  prescribes — and DISAGREE for a flat single-app repo, which `create` now makes
+  an ordinary case. The generated Dockerfile therefore states its required
+  context explicitly rather than relying on the caller's default.
+- The base-image pin guard (`scripts/check-base-images-pinned.sh`) now **scans**
+  for Dockerfiles instead of enumerating two of them — the template Dockerfile
+  was invisible to it purely by omission. The scan surfaced four pre-existing
+  unpinned Dockerfiles; they are listed as tracked exceptions that are REPORTED
+  on every run (and the summary line refuses to claim "all pinned" while any
+  remain), so they cannot quietly become permanent. Anything not on that list
+  and not pinned fails: the scan fails closed.

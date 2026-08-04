@@ -43,6 +43,13 @@ export default defineConfig([
       // `kn-next db migrate`'s subcommand dispatch; own entry so the dynamic
       // import resolves in dist.
       'cli/db-migrate': 'src/cli/db-migrate.ts',
+      // #407 `kn-next create` — bin-dispatched only (no self-entry block). Own
+      // entry for the same reason as its siblings: the dispatcher's dynamic
+      // import resolves to a STABLE dist path instead of a hash-named split
+      // chunk. (`create.ts` locates its templates by walking UP to the package
+      // manifest, so it is correct either way — this is layout consistency, and
+      // the walk still covers any future re-split.)
+      'cli/create': 'src/cli/create.ts',
       // CLI helpers exported as library subpaths (./cli/validate, ./cli/shared)
       'cli/validate': 'src/cli/validate.ts',
       'cli/shared': 'src/cli/shared.ts',

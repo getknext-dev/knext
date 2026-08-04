@@ -42,15 +42,55 @@ for arg in "$@"; do
     esac
 done
 
-# Default set: every Dockerfile whose base images we ship/sign.
+# Default set: SCAN for Dockerfiles, do not enumerate them.
+#
+# This used to be a hard-coded pair (file-manager + operator). An enumerated list
+# is how the second file gets missed: `packages/kn-next/templates/app/Dockerfile.hbs`
+# — the Dockerfile shipped to EVERY app created by `kn-next create` — was invisible
+# to this guard purely because nobody added it to the list. Scanning makes a new
+# Dockerfile covered the moment it exists, which is the whole point of a guard.
+#
+# `Dockerfile*` also catches the `.hbs` templates and variants like `Dockerfile.oke`.
 if [[ "${#FILES[@]}" -eq 0 ]]; then
-    FILES=(
-        "$REPO_ROOT/apps/file-manager/Dockerfile"
-        "$REPO_ROOT/packages/kn-next-operator/Dockerfile"
+    while IFS= read -r found; do
+        FILES+=("$found")
+    done < <(
+        find "$REPO_ROOT" \
+            \( -name node_modules -o -name .git -o -name dist -o -name .next \
+               -o -name .turbo -o -name .claude \) -prune -o \
+            -type f -name 'Dockerfile*' -print | sort
     )
+    if [[ "${#FILES[@]}" -eq 0 ]]; then
+        echo "ERROR: scan found no Dockerfiles — refusing to pass vacuously." >&2
+        exit 1
+    fi
 fi
 
+# PRE-EXISTING unpinned Dockerfiles, recorded rather than silently un-scanned.
+#
+# Switching from an enumerated list to a scan surfaced four floating base tags
+# that predate this guard's default set. They are REPORTED on every run and
+# tracked for pinning; they do not fail the build yet, because pinning
+# golang/distroless digests is a separate change with its own verification.
+# A file NOT on this list and NOT pinned still FAILS — the scan fails closed.
+KNOWN_UNPINNED=(
+    "apps/docs/Dockerfile"
+    "apps/docs/Dockerfile.oke"
+    "packages/scale-zero-pg/gateway/Dockerfile"
+    "packages/scale-zero-pg/demo/app/Dockerfile"
+)
+
+is_known_unpinned() {
+    local rel="${1#"$REPO_ROOT"/}"
+    local known
+    for known in "${KNOWN_UNPINNED[@]}"; do
+        [[ "$rel" == "$known" ]] && return 0
+    done
+    return 1
+}
+
 VIOLATIONS=0
+EXEMPTED=0
 # Track stage aliases declared via `AS <name>` so `FROM <alias>` is not flagged.
 declare -A STAGES=()
 
@@ -94,6 +134,11 @@ for file in "${FILES[@]}"; do
         # External base image — MUST be digest-pinned.
         if [[ "$image" == *"@sha256:"* ]]; then
             $QUIET || echo "OK:   $file:$lineno  $image (digest-pinned)"
+        elif is_known_unpinned "$file"; then
+            # Reported ALWAYS (even with --quiet): a tracked exception that
+            # nobody sees is just an un-scanned file with extra steps.
+            echo "KNOWN-UNPINNED: $file:$lineno  $image (pre-existing; tracked for pinning)"
+            EXEMPTED=$((EXEMPTED + 1))
         else
             echo "FAIL: $file:$lineno  floating base image (no @sha256: digest): $image"
             file_violations=$((file_violations + 1))
@@ -112,4 +157,10 @@ if [[ "$VIOLATIONS" -gt 0 ]]; then
     exit 1
 fi
 
-echo "All Dockerfile base images are digest-pinned."
+if [[ "$EXEMPTED" -gt 0 ]]; then
+    # Do NOT claim everything is pinned when it is not — an inaccurate green is
+    # how a tracked exception turns into a forgotten one.
+    echo "Scanned ${#FILES[@]} Dockerfile(s): all pinned EXCEPT $EXEMPTED known-unpinned FROM line(s) listed above."
+else
+    echo "All Dockerfile base images are digest-pinned (scanned ${#FILES[@]} file(s))."
+fi

@@ -68,6 +68,39 @@ const LAYOUT: Record<string, string> = {
         "the zone layout imports the private @getknext/ui",
 };
 
+/**
+ * Files that exist ONLY in the CLI tree, each with the reason. The zone app is
+ * built and imaged by this monorepo's own pipeline, so it needs neither.
+ */
+const CLI_ONLY: Record<string, string> = {
+    "Dockerfile.hbs":
+        "the zone app is built by this repo's pipeline; a created app needs its own image recipe",
+    "public/.gitkeep.hbs":
+        "keeps the generated Dockerfile's `COPY … public` layer resolvable before the app has assets",
+};
+
+/**
+ * The SAFETY-CRITICAL files: the #342 fence pair, the adapter wiring, and the
+ * two graduated guards. **Their bucket is frozen.**
+ *
+ * Without this, the whole parity guard is one line from being switched off:
+ * move `standalone-seam-alive.test.ts.hbs` from NORMALIZED to LAYOUT with any
+ * string as the "reason", and the CLI copy is compared against NOTHING — you
+ * can then gut its `SEAM_SYMBOLS` and every suite stays green. That is the
+ * "editing the guard is the routine way to get green" failure this repo has
+ * already been bitten by, so the membership is asserted, not assumed.
+ *
+ * Moving one of these into LAYOUT is not a refactor: it is a decision to stop
+ * comparing a file whose whole purpose is to be compared.
+ */
+const SHAPE_FROZEN = [
+    "next-adapter.ts.hbs",
+    "instrumentation-edge-safe.test.ts.hbs",
+    "standalone-seam-alive.test.ts.hbs",
+    "src/instrumentation.ts.hbs",
+    "src/instrumentation-node.ts.hbs",
+] as const;
+
 /** Every `.hbs` under `dir`, as POSIX-ish relative paths, sorted. */
 function templateFiles(dir: string): string[] {
     const out: string[] = [];
@@ -130,6 +163,44 @@ describe("kn-next create — no drift from the turbo zone template (#356/#407)",
             "new zone template file(s) — classify each as VERBATIM, NORMALIZED " +
                 "or LAYOUT (with a reason) in create-scaffold-parity.test.ts",
         ).toEqual([]);
+    });
+
+    it("classifies EVERY CLI template file too (the published tree is the one that drifts unnoticed)", () => {
+        // Enumerating only the ZONE side left the published tree unguarded —
+        // exactly the tree this file's own docblock calls "the copy that drifts
+        // unnoticed, which nobody in this repo builds". A new file added there
+        // would ship to every created app, unclassified and uncompared.
+        const classified = new Set<string>([
+            ...VERBATIM,
+            ...NORMALIZED,
+            ...Object.keys(LAYOUT),
+            ...Object.keys(CLI_ONLY),
+        ]);
+        const unclassified = templateFiles(CLI_TEMPLATE).filter(
+            (f) => !classified.has(f),
+        );
+        expect(
+            unclassified,
+            "new CLI template file(s) — classify each as VERBATIM, NORMALIZED, " +
+                "LAYOUT or CLI_ONLY (with a reason) in create-scaffold-parity.test.ts",
+        ).toEqual([]);
+    });
+
+    it.each(
+        SHAPE_FROZEN,
+    )("%s stays in VERBATIM/NORMALIZED — its bucket is frozen", (rel) => {
+        const compared = new Set<string>([...VERBATIM, ...NORMALIZED]);
+        expect(
+            compared.has(rel),
+            `${rel} was moved out of the compared buckets. That is not a ` +
+                "refactor — it stops comparing a safety-critical file against " +
+                "the other tree. Re-classify it back, or delete it from " +
+                "SHAPE_FROZEN only with a decision recorded in an ADR.",
+        ).toBe(true);
+        expect(
+            Object.hasOwn(LAYOUT, rel),
+            `${rel} must never be LAYOUT-bucketed (LAYOUT means "compared on nothing")`,
+        ).toBe(false);
     });
 
     it.each(VERBATIM)("%s is byte-identical in both template trees", (rel) => {

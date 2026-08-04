@@ -193,7 +193,19 @@ export default nextConfig;
 > directory. Wire it into your CI: running that guard without a build is a *skip*,
 > not a pass.
 
-**3. A `Dockerfile`** in the app directory. A minimal one for the layout above
+**3. A `Dockerfile`** in the app directory. `kn-next create` writes one for you,
+matched to your layout and to the rules the platform enforces: the base image is
+digest-pinned, the image drops to the non-root `node` user, and the `CMD` boots
+the knext runtime entry rather than `node server.js` directly — that entry is
+what drains in-flight requests and runs `after()` callbacks on SIGTERM, so a
+bare `node server.js` silently drops requests on every scale-to-zero.
+
+Its build context is the directory your lockfile sits in (the same directory
+Next traces the standalone output from); the file says so at the top. For the
+`apps/<name>` layout above that is the repository root, which is also what
+`kn-next deploy` uses.
+
+If you write one by hand instead, a minimal version for the layout above
 (remember: `COPY` paths are relative to the **repository root**):
 
 ```dockerfile
