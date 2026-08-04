@@ -26,6 +26,8 @@
  *  - a pin naming a tag that does not exist upstream (deleted, or never a tag:
  *    `changesets/action@v1` is a BRANCH, `git/ref/tags/v1` 404s) — a legitimate
  *    finding, not an error to swallow;
+ *  - an unpinned `docker://` container image, reported as itself rather than as
+ *    a regex-breakage alarm (#630 review);
  *  - a FORK-NETWORK commit. security.md notes GitHub serves any SHA in a repo's
  *    fork network from the parent path, so "does this SHA exist in the repo"
  *    proves nothing. This check never asks that question: it compares the pin
@@ -306,7 +308,9 @@ export async function verifyPin(pin, { api = githubApi } = {}) {
  * one (security.md).
  */
 /**
- * Does this text contain a `uses:` key OUTSIDE a comment?
+ * Every `uses:` value in `text` that `USES_LINE` could NOT read, as
+ * `{ value, line }` — the raw material for both the regex-breakage alarm and
+ * the `docker://` finding, which need to be told apart (#630 review).
  *
  * Deliberately WEAKER than `USES_LINE`, and independent of it: this is the
  * alarm that says "something here looks like a step but the extractor read
@@ -318,11 +322,12 @@ export async function verifyPin(pin, { api = githubApi } = {}) {
  * only the bare `uses:` literal, so a file written entirely in quoted-key form
  * produced ZERO findings from both guards instead of a `no-pins-parsed` alarm.
  */
-export function mentionsUses(text) {
-  return text.split('\n').some((line) => {
-    if (/^\s*#/.test(line)) return false;
+export function unreadableUsesValues(text) {
+  const values = [];
+  for (const [index, line] of text.split('\n').entries()) {
+    if (/^\s*#/.test(line)) continue;
     const match = USES_KEY.exec(line);
-    if (!match) return false;
+    if (!match) continue;
     // A LOCAL composite-action ref (`uses: ./.github/actions/foo`) invokes this
     // repository's own code at the commit already checked out. There is no
     // upstream tag to resolve and no SHA to pin — pinning it is impossible, not
@@ -336,14 +341,20 @@ export function mentionsUses(text) {
     // './.github/actions/foo'` is a valid step with nothing to pin and still
     // reported `no-pins-parsed`. This file already read a quoted KEY, so the
     // quoted VALUE was the same class of gap, unclosed. Only a MATCHED
-    // surrounding pair is stripped, so a stray quote cannot be used to dress a
-    // remote ref up as a local one. `docker://` refs stay flagged in both forms,
-    // deliberately: that names a container image, and an unpinned one is exactly
-    // what the digest-pinning rule wants loud.
+    // surrounding pair is stripped — `/^["']?(.*?)["']?$/` would treat
+    // `uses: "./x` as local, letting a stray quote dress a ref up as one. That
+    // is asserted, not merely claimed: the mismatched-pair cases in
+    // tests/action-pin-sha-tag-nightly.test.ts red on exactly that relaxation.
     const value = match[1]?.replace(/^(["'])(.*)\1$/, '$2');
-    if (value && /^\.{1,2}\//.test(value)) return false;
-    return true;
-  });
+    if (value && /^\.{1,2}\//.test(value)) continue;
+    values.push({ value: value ?? '', line: index + 1 });
+  }
+  return values;
+}
+
+/** Does this text contain a `uses:` key, outside a comment, that nothing read? */
+export function mentionsUses(text) {
+  return unreadableUsesValues(text).length > 0;
 }
 
 /**
@@ -378,7 +389,27 @@ async function verifyFileSet(files, api) {
       // vacuum failure), and must NOT fire on a file that legitimately has
       // nothing to pin — the repo's root composite action is all `run:` steps
       // today. A false red here is how a nightly gets ignored.
-      if (mentionsUses(text)) {
+      //
+      // A `docker://` ref gets its OWN finding (#630 review). It used to be
+      // carried by `no-pins-parsed`, whose text says "the extraction regex or
+      // the file changed shape" — sending the reader after a regex bug when the
+      // real finding is an unpinned container image. This file has already been
+      // corrected twice for that class of misdirection. Both findings are
+      // emitted when a file holds both, so neither can mask the other.
+      // (A DIGEST-pinned `docker://image@sha256:…` never reaches here at all —
+      // it carries an `@`, so `parsePins` reads it as a pin.)
+      const unreadable = unreadableUsesValues(text);
+      const docker = unreadable.filter((entry) => entry.value.startsWith('docker://'));
+      for (const entry of docker) {
+        findings.push({
+          file,
+          line: entry.line,
+          action: entry.value,
+          ref: entry.value,
+          reason: 'docker-ref-unpinned',
+        });
+      }
+      if (unreadable.length > docker.length) {
         findings.push({ file, line: 0, action: '(none)', reason: 'no-pins-parsed' });
       }
       continue;
@@ -458,6 +489,13 @@ export function formatFinding(finding) {
       return finding.status === 0
         ? `${head}\n  claimed tag : ${finding.tag}\n  Could not REACH the GitHub API: ${finding.message ?? '(no message)'}\n  Treated as a FAILURE, not a pass — an unresolved pin is unverified, not verified.`
         : `${head}\n  claimed tag : ${finding.tag}\n  GitHub API error ${finding.status}: ${finding.message ?? '(no message)'} — treated as a FAILURE, not a pass.`;
+    case 'docker-ref-unpinned':
+      return [
+        `${head}`,
+        '  A container IMAGE, not an action — and it is not pinned to a digest.',
+        '  Pin it as `docker://<image>@sha256:<digest>`: a tag is mutable, so whoever can',
+        '  push it decides what runs in this job (security.md: pin by digest, reject :latest).',
+      ].join('\n');
     case 'no-pins-parsed':
       return `${finding.file} — mentions \`uses:\` but no pins parsed; the extraction regex or the file changed shape (a quoted key, say).`;
     case 'no-files-discovered':

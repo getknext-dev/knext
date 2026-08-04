@@ -224,6 +224,14 @@ describe('every workflow SHA-pins every action (#528)', () => {
     // claim it does.
     const dependabot = readFileSync(resolve(REPO_ROOT, '.github/dependabot.yml'), 'utf8');
     expect(dependabot, 'the observation needs its evidence attached').toMatch(/#631/);
+    // The half this guard previously only DESCRIBED. Replacing the STILL
+    // UNPROVEN paragraph with a false `ALSO VERIFIED: /.github/actions/* matches
+    // composite actions` left all 39 tests green — a guard enforcing half its
+    // own stated purpose is the pattern this whole change exists to correct.
+    expect(
+      dependabot,
+      'the limit of the evidence must survive too: #631 does not prove the glob MATCHES anything',
+    ).toMatch(/STILL UNPROVEN/);
     expect(
       dependabot,
       'the empty-glob question is answered, so stop calling it ASSUMED',
