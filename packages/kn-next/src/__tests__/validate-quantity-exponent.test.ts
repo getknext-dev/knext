@@ -39,7 +39,12 @@ function configWithBytecodeCacheSize(value: string): KnativeNextConfig {
             bucket: "bucket",
             publicUrl: "https://storage.example.invalid/bucket",
         },
-        bytecodeCache: { size: value },
+        // `enabled` is required by BytecodeCacheConfig — set, not cast. The
+        // operator validates the size whether or not the cache is switched on
+        // (a dormant typo must not become a reconcile failure the moment
+        // someone flips the flag), so `true` here keeps the fixture the shape
+        // the product actually accepts.
+        bytecodeCache: { enabled: true, size: value },
     } satisfies KnativeNextConfig;
 }
 
