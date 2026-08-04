@@ -831,6 +831,23 @@ CLEANED_UP=0
 RESTORE_PENDING=""
 _restore_attempted() { RESTORE_PENDING="${RESTORE_PENDING/ $1/}"; }
 cleanup() {
+  # PROMOTE before deleting. running_pods is called from TWO places -- wait_zero
+  # (which promotes at :1170) and the fan-out sampler subshell (which cannot,
+  # being a subshell). Every phase ends `wait_zero; run_k6`, so the run's LAST
+  # action is a sampler with no wait_zero after it: a blind `rm` here destroyed
+  # the evidence before the verdict block read it, and a disk that filled during
+  # the final rep published a kubectl warning as "peak=1" and exited 0.
+  #
+  # NOT mutation-proved, and that is stated rather than glossed: on the NORMAL
+  # path the promotion before the exit-code check (near the end of this file) has
+  # already run, so reverting this one leaves the suite green. It is load-bearing
+  # only on the SIGNAL path (INT/TERM), where the script never reaches that check
+  # and this trap is the only thing that runs -- and the suite does not exercise a
+  # signalled run here. Deleting it would silently make a SIGTERMed degraded run
+  # report as clean.
+  if [ -n "${MKTEMP_MARKER:-}" ] && [ -f "$MKTEMP_MARKER" ]; then
+    POD_QUERY_STDERR_MERGED=1
+  fi
   rm -f "${MKTEMP_MARKER:-}" 2>/dev/null || true
   # FIRST statement, before anything else can call kc(): this is the SIGNAL-path
   # reset of the per-call cap. api_retry arms KC_TIMEOUT_S around each attempt and
@@ -1364,6 +1381,12 @@ YAML
         # flush, leaving peak_file empty — the branch the parent must NOT round
         # down to a measured "0".
         [ "$SAMPLER_SIMULATE_LOST" = "1" ] && exit 0
+        # No peak_file means mktemp failed and the parent has ALREADY said
+        # "sampling is DISABLED ... peak pods will read as unknown, not zero".
+        # Publishing `pods: peak=N` anyway made the results file contradict itself
+        # on the one number a reader takes away -- and with stderr merged that N
+        # can BE a kubectl warning. Emit nothing; unknown must stay unknown.
+        [ -z "$peak_file" ] && exit 0
         echo "$mx" > "$peak_file"
         echo "    pods: peak=${mx}  time_to_2pods=${f2:->${POD_SAMPLE_BUDGET}}s  time_to_${MAXSCALE}pods=${fmax:-not-reached}" >> "$OUT"
       }
@@ -1920,6 +1943,13 @@ fi
 # have recorded a warm pod as cold. Exiting 0 tells every automated caller the
 # dataset is trustworthy when it is not. Distinct code so callers can tell the
 # two apart.
+# Promote a sampler-written marker HERE as well as in cleanup(). cleanup runs on
+# the EXIT trap, which fires only once `exit` has already been reached -- so the
+# check below had already evaluated with the flag still 0, and a run whose VERDICT
+# said UNCONFIRMED still exited 0. Caught by test P failing on the fixed tree.
+if [ -n "${MKTEMP_MARKER:-}" ] && [ -f "$MKTEMP_MARKER" ]; then
+  POD_QUERY_STDERR_MERGED=1
+fi
 # Exit 3 means "there IS a dataset, but its trust is compromised". A run that
 # produced no reps at all (--phases none, an early abort) has no dataset to
 # distrust, and claiming otherwise makes the code ambiguous for the automated

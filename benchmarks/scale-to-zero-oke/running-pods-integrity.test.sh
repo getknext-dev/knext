@@ -508,10 +508,6 @@ assert_not_contains "${TM}/results.txt" "scale-to-zero did NOT happen" \
   "a merged (untrustworthy) count never supports a DISPROOF"
 assert_contains "${TM}/results.txt" "UNCONFIRMED" \
   "the merged count is reported as unconfirmed instead"
-# The authoritative verdict must name the cause that ACTUALLY occurred. Keying the
-# message on API_UNOBSERVED_COUNT while the branch also fired on merged stderr
-# printed "but 0 scale-down wait(s) never confirmed" -- a reason that did not happen.
-
 
 # -- Test L (round-5 finding 1): mktemp failing MID-RUN is never silent --
 # The startup probe is a one-shot, so a disk that fills DURING a long run was
@@ -552,6 +548,14 @@ assert_not_contains "${TL}/results.txt" "run indexed as COMPLETE" \
   "a run whose pod queries could not be performed safely is not filed COMPLETE"
 assert_contains "${TL}/results.txt" "mktemp is unavailable" \
   "a mid-run mktemp failure is promoted to a run-level degradation, not silently merged"
+# Every assertion above also holds in the STARTUP case that test E covers, so the
+# mktemp_ok_until=1 threshold was load-bearing but unguarded: if a future edit adds
+# an mktemp call before the startup probe, call #1 stops being the probe and this
+# test silently degenerates into a duplicate of E. Pin a string only the MID-RUN
+# path can emit -- in the startup case merged mode is set before the first poll, so
+# a count is never read un-merged and this line cannot appear.
+assert_contains "${TL}/results.txt" "stderr was MERGED into the count" \
+  "this is genuinely the MID-RUN path, not a duplicate of the startup case"
 if [ "$TL_RC" -ne 0 ]; then
   ok "a mid-run mktemp failure makes the run exit non-zero (${TL_RC})"
 else
@@ -567,7 +571,7 @@ TN="$(mktemp -d)"
 make_stub "$TN"
 echo zero > "${TN}/pods_mode"
 mkdir -p "${TN}/bin"
-sed "s|__DIR__|${TN}|" > "${TN}/bin/mktemp" <<'MKN'
+cat > "${TN}/bin/mktemp" <<'MKN'
 #!/usr/bin/env bash
 # Every call fails, as a full disk would.
 echo "mktemp: failed to create file: No space left on device" >&2
@@ -581,6 +585,12 @@ assert_contains "${TN}/results.txt" "pod-fan-out sampling is DISABLED" \
   "a failed sampler mktemp says so instead of silently losing every peak reading"
 assert_contains "${TN}/results.txt" "peak pods will read as unknown, not zero" \
   "the lost data is named as unknown rather than reported as zero"
+# The wording above is not the point -- the BEHAVIOUR is. Previously the sampler
+# still ran and still published `pods: peak=N` on the very next line, so the file
+# contradicted itself on the one number a reader takes away, and with stderr merged
+# that N could BE the kubectl warning.
+assert_not_contains "${TN}/results.txt" "pods: peak=" \
+  "a sampler reported as DISABLED publishes no peak figure at all"
 
 # -- Test O (round-5 f5): a run with NO reps is not filed UNCONFIRMED --
 # Exit 3 means "there IS a dataset, but its trust is compromised". A run that
@@ -600,6 +610,46 @@ else
   ok "a run with no reps does not claim exit 3 (got ${TO_RC})"
 fi
 
+# -- Test P (round-6 finding 1): a marker written by the SAMPLER is promoted --
+# running_pods is called from two places: wait_zero (which promotes the marker)
+# and the fan-out sampler subshell (which cannot -- it is a subshell). Every phase
+# ends `wait_zero; run_k6`, so the run's LAST action is a sampler with no wait_zero
+# after it. cleanup() used to `rm` the marker blindly, destroying the evidence
+# before the verdict read it: a disk filling during the final rep published a
+# kubectl warning as a pod and exited 0.
+echo
+echo "[P] mktemp failing during the SAMPLER still degrades the run"
+TP="$(mktemp -d)"
+make_stub "$TP"
+echo zero > "${TP}/pods_mode"          # genuine zero: scale-to-zero confirms on poll 1
+echo 1 > "${TP}/pods_warn_on_stderr"   # ...with a warning merging would count as a pod
+mkdir -p "${TP}/bin"
+cat > "${TP}/bin/mktemp" <<MKP
+#!/usr/bin/env bash
+c=\$(cat "${TP}/mktemp_calls" 2>/dev/null || echo 0); c=\$((c + 1))
+echo "\$c" > "${TP}/mktemp_calls"
+lim=\$(cat "${TP}/mktemp_ok_until" 2>/dev/null || echo 3)
+if [ "\$c" -gt "\$lim" ]; then echo "mktemp: No space left on device" >&2; exit 1; fi
+exec /usr/bin/mktemp "\$@"
+MKP
+chmod +x "${TP}/bin/mktemp"
+# Three: the startup probe, the single wait_zero poll, and peak_file. peak_file
+# MUST succeed -- if it fails, the PARENT sets the flag directly and the marker
+# path is never exercised, so the test passes for the wrong reason (it did, until
+# mutation showed the cleanup fix could be reverted with the suite still green).
+# From call 4 on, only the sampler's own running_pods calls remain.
+echo 3 > "${TP}/mktemp_ok_until"
+TP_RC=0
+PATH="${TP}/bin:$PATH" SCALE_DOWN_TIMEOUT=2 SCALE_DOWN_POLL_S=1 \
+  run_bench "$TP" --phases cold --cold-samples 1 || TP_RC=$?
+assert_not_contains "${TP}/results.txt" "run indexed as COMPLETE" \
+  "a sampler-side mktemp failure is not filed COMPLETE"
+if [ "$TP_RC" -ne 0 ]; then
+  ok "a sampler-side mktemp failure still makes the run exit non-zero (${TP_RC})"
+else
+  nope "a sampler-side mktemp failure exited 0 — cleanup destroyed the marker instead of promoting it"
+fi
+
 # -- Test C (#453 item 3): a stderr warning is not counted as a pod --
 # running_pods used 2>&1 and counted combined output on success, so a kubectl
 # deprecation notice read as a pod: the count never reaches zero and a perfectly
@@ -615,7 +665,7 @@ SCALE_DOWN_TIMEOUT=3 SCALE_DOWN_POLL_S=1 \
 assert_contains "${TC}/results.txt" "scaled to 0" \
   "a genuine zero is still confirmed when kubectl also writes a warning to stderr"
 
-rm -rf "$T1" "$T3" "$T4" "$T5" "$TA" "$TB" "$TC" "$TD" "$TE" "$TF" "$TG" "$TH" "$TI" "$TK" "$TL" "$TM" "$TN" "$TO"
+rm -rf "$T1" "$T3" "$T4" "$T5" "$TA" "$TB" "$TC" "$TD" "$TE" "$TF" "$TG" "$TH" "$TI" "$TK" "$TL" "$TM" "$TN" "$TO" "$TP"
 
 echo
 echo "== ${PASS} passed, ${FAIL} failed =="
