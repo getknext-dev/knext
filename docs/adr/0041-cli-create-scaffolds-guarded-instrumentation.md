@@ -47,7 +47,7 @@ unnoticed is the published one, because nobody in this repo builds it.
    added to the `files` allowlist) as `.hbs` files, so this repo's own
    vitest/biome/tsc never collect them as sources.
 
-3. **The two template trees are pinned against drift, not trusted**
+3. **The two template trees' SHAPE files are pinned against drift, not trusted**
    (`create-scaffold-parity.test.ts`). Every file in
    `turbo/generators/templates/zone/` must be classified as:
    - **VERBATIM** — byte-identical in both trees (`next-adapter.ts`,
@@ -63,6 +63,23 @@ unnoticed is the published one, because nobody in this repo builds it.
    The classification is an allowlist and **fails closed**: a new zone template
    file reddens the guard until someone classifies it.
 
+   **What this does NOT pin — say it plainly.** The guard covers the VERBATIM
+   and NORMALIZED buckets, i.e. the *shape*: the instrumentation pair, the
+   adapter wiring, and the two guards. Files in the **LAYOUT** bucket are
+   compared on nothing at all — being in that bucket means "allowed to differ",
+   and the guard cannot tell an intended difference from an accidental one.
+   Dependency VERSIONS live there, in `package.json.hbs`.
+
+   That is not hypothetical, and the counterexample is in the tree at the time
+   of writing: `turbo/generators/templates/zone/package.json.hbs:16` pins
+   `next: 16.2.10` while the workspace and the CLI template are on `16.2.11`
+   (#579 bumped the workspace, not the zone template). Live drift, in the exact
+   bucket this guard exempts — so `turbo gen zone` currently scaffolds an app
+   onto a Next version the compat suite is no longer verifying. A guard
+   asserting both trees' `next` pin equals the workspace's compat-verified
+   version is the fix, and is tracked separately; until it lands, "pinned
+   against drift" must be read as *shape only*.
+
 4. **The emitted standalone path is derived from the app's layout**, not
    assumed. Next infers `outputFileTracingRoot` from the nearest lockfile and
    nests `.next/standalone/<app-path-relative-to-it>/`. `standalonePrefixFor()`
@@ -77,7 +94,7 @@ unnoticed is the published one, because nobody in this repo builds it.
 
 | Approach | Single shape | Drift-proof | Works outside the monorepo | Verdict |
 | --- | --- | --- | --- | --- |
-| Ship templates in `@getknext/core` + byte-parity guard against the zone tree | yes | **enforced** (allowlist, fails closed) | yes | **Accepted** |
+| Ship templates in `@getknext/core` + byte-parity guard against the zone tree | yes | **enforced for the shape** (allowlist, fails closed); **NOT** for the LAYOUT bucket, where dependency versions live — see §3 | yes | **Accepted** |
 | Point the turbo generator at the package templates (one physical tree) | yes | trivially | yes | Rejected *for now* — strictly better on paper, but it moves the `pnpm generate` inputs and the zone-specific files (`workspace:*` deps, `basePath`) still cannot be shared, so it buys less than it risks in this issue's blast radius. Worth revisiting if the LAYOUT bucket ever empties. |
 | Embed the templates as TS string constants in the bundle | yes | same guard possible | yes | Rejected — 400 lines of guard source inside a shipped module, and diffs become unreadable |
 | Docs-only ("copy these files") | no | no | yes | Rejected — that is today's state; it is what #407 exists to fix |
@@ -89,7 +106,9 @@ unnoticed is the published one, because nobody in this repo builds it.
   `appsRequiringSeamGuard()` and `discoverSeamAliveApps()`, so it can never open
   a coverage hole (asserted in `create-scaffold.test.ts`).
 - Editing the guarded-instrumentation shape now means editing it **twice** —
-  deliberately, with a red test until both trees agree.
+  deliberately, with a red test until both trees agree. Editing a LAYOUT-bucket
+  file (a dependency bump, notably `next`) means editing it twice **with nothing
+  telling you**, which is how the two trees are already out of step (§3).
 - The generated `package.json` pins `@getknext/core` / `@getknext/lib` to the
   CLI's own version. Until the packages are published to npm, `npm install` in a
   generated app cannot resolve them — the scaffold is correct but not yet
