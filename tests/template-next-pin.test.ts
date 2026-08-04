@@ -1,6 +1,15 @@
-import { readdirSync, readFileSync, statSync } from 'node:fs';
-import { join, relative, resolve, sep } from 'node:path';
+import { readdirSync } from 'node:fs';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import {
+  type Manifest,
+  nextRange,
+  REPO_ROOT,
+  readManifest,
+  WORKSPACE_DIRS,
+  workspaceGlobs,
+  workspaceManifests,
+} from './helpers/workspace-manifests';
 
 /**
  * #643 — every SCAFFOLDER's `next` pin equals the workspace's.
@@ -33,12 +42,12 @@ import { describe, expect, it } from 'vitest';
  * And it SCANS for template manifests instead of listing the two we know about
  * — "we added a scaffolder and forgot the pin" IS this bug, so a third template
  * tree is covered the moment it lands.
+ *
+ * The workspace half of the scan lives in `helpers/workspace-manifests.ts`,
+ * shared with `next-version-floor.test.ts`. Two copies of one scan is the same
+ * defect class as the two copies of one root rule that the other half of this
+ * PR removes.
  */
-
-const REPO_ROOT = resolve(__dirname, '..');
-
-/** Workspace globs from `pnpm-workspace.yaml` — asserted in sync below. */
-const WORKSPACE_DIRS = ['apps', 'packages'];
 
 /** Directories a template tree is never found under. */
 const SKIP_DIRS = new Set([
@@ -59,48 +68,11 @@ const KNOWN_TEMPLATE_MANIFESTS = [
   'turbo/generators/templates/zone/package.json.hbs',
 ];
 
-type Manifest = { path: string; pkg: Record<string, unknown> };
-
-function readManifest(abs: string): Manifest {
-  return {
-    path: relative(REPO_ROOT, abs).split(sep).join('/'),
-    // A `package.json.hbs` is JSON with `{{placeholders}}` inside string
-    // values, so it parses as JSON only after they are neutralised.
-    pkg: JSON.parse(readFileSync(abs, 'utf8').replace(/\{\{[^}]*\}\}/g, 'placeholder')),
-  };
-}
-
-/** The `next` range a manifest declares, from either dependency field. */
-function nextRange(pkg: Record<string, unknown>): string | undefined {
-  for (const field of ['dependencies', 'devDependencies'] as const) {
-    const range = (pkg[field] as Record<string, string> | undefined)?.next;
-    if (range) return range;
-  }
-  return undefined;
-}
-
 /** The exact `X.Y.Z` a `1.2.3` / `^1.2.3` / `>=1.2.3` range is anchored on. */
 function versionOf(range: string): string {
   const m = range.match(/(\d+\.\d+\.\d+)/);
   if (!m) throw new Error(`next range "${range}" has no X.Y.Z to compare`);
   return m[1];
-}
-
-/** Every workspace-member manifest, found by scanning the globs. */
-function workspaceManifests(): Manifest[] {
-  const found: Manifest[] = [];
-  for (const dir of WORKSPACE_DIRS) {
-    for (const entry of readdirSync(resolve(REPO_ROOT, dir))) {
-      const manifest = join(REPO_ROOT, dir, entry, 'package.json');
-      try {
-        if (!statSync(manifest).isFile()) continue;
-      } catch {
-        continue;
-      }
-      found.push(readManifest(manifest));
-    }
-  }
-  return found;
 }
 
 /**
@@ -128,15 +100,17 @@ function templateManifests(): Manifest[] {
 
 /** The single `next` version the workspace is built and compat-run against. */
 function workspaceNextVersion(): string {
-  const versions = new Set(
-    workspaceManifests().flatMap(({ pkg }) => {
-      const range = nextRange(pkg);
-      return range ? [versionOf(range)] : [];
-    }),
-  );
+  const pinned = workspaceManifests().flatMap(({ path, pkg }) => {
+    const range = nextRange(pkg);
+    return range ? [{ path, version: versionOf(range) }] : [];
+  });
+  const versions = new Set(pinned.map((p) => p.version));
   if (versions.size !== 1) {
+    // Name the manifests, not just the versions: "16.2.10, 16.2.11" says there
+    // is a disagreement without saying which file to edit.
+    const byManifest = pinned.map(({ path, version }) => `\n   * ${path}: ${version}`).join('');
     throw new Error(
-      `the workspace does not agree on ONE next version: ${[...versions].sort().join(', ') || '(none found)'}`,
+      `the workspace does not agree on ONE next version:${byManifest || ' (no manifest declares next)'}`,
     );
   }
   return [...versions][0];
@@ -144,9 +118,7 @@ function workspaceNextVersion(): string {
 
 describe('#643 — template `next` pins track the workspace', () => {
   it('scans the same workspace globs pnpm-workspace.yaml declares', () => {
-    const yaml = readFileSync(resolve(REPO_ROOT, 'pnpm-workspace.yaml'), 'utf8');
-    const globs = [...yaml.matchAll(/^\s*-\s*'([^']+)'/gm)].map((m) => m[1]);
-    expect(globs.sort()).toEqual(WORKSPACE_DIRS.map((d) => `${d}/*`).sort());
+    expect(workspaceGlobs()).toEqual(WORKSPACE_DIRS.map((d) => `${d}/*`).sort());
   });
 
   it('derives ONE next version from the workspace (no hardcoded expectation)', () => {

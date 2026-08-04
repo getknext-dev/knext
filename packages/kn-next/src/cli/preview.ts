@@ -27,7 +27,7 @@
  */
 
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import { parseArgs } from "node:util";
 import type { KnativeNextConfig } from "../config";
 import { getAssetPrefix } from "../utils/asset-upload";
@@ -301,6 +301,12 @@ async function defaultBuildAndPush(
     const tag = `${previewName}-${Date.now()}`;
     process.env.NEXT_DEPLOYMENT_ID = tag;
 
+    // #644: same rule as `deploy`, and resolved at the same point — BEFORE the
+    // build. The docker context is Next's file-tracing root (an explicit
+    // `outputFileTracingRoot`, else the outermost lockfile), never a fixed
+    // `../..`. Filesystem-only, so failing here costs the user nothing.
+    const repoRoot = requireBuildContext(process.cwd());
+
     if (config.storage?.publicUrl) {
         process.env.ASSET_PREFIX = getAssetPrefix(config);
     }
@@ -317,10 +323,6 @@ async function defaultBuildAndPush(
         ".output",
         "buildx-metadata.json",
     );
-    // #644: same rule as `deploy` — the docker context is Next's file-tracing
-    // root, inferred from the outermost lockfile rather than assumed to be two
-    // directories up.
-    const repoRoot = requireBuildContext(process.cwd());
     runInherit([
         "docker",
         "buildx",

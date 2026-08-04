@@ -1,6 +1,7 @@
-import { readdirSync, readFileSync, statSync } from 'node:fs';
-import { join, relative, resolve } from 'node:path';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { REPO_ROOT, WORKSPACE_DIRS, workspaceManifests } from './helpers/workspace-manifests';
 
 /**
  * The `next` version FLOOR across the workspace (#579).
@@ -29,13 +30,16 @@ import { describe, expect, it } from 'vitest';
  *     moving it is a lead decision about what "green" means, not a security bump.
  */
 
-const REPO_ROOT = resolve(__dirname, '..');
-
-/** The lowest `next` version any workspace manifest may admit. */
+/**
+ * The lowest `next` version any workspace manifest may admit.
+ *
+ * A FLOOR, deliberately — this asserts `>=`, not equality, because its subject
+ * is a CVE, not a pin. `template-next-pin.test.ts` (#643) is the one that
+ * asserts equality, and it derives its expectation from the workspace rather
+ * than from this constant for exactly that reason: a tree sitting at the floor
+ * while the workspace has moved on satisfies this and is still drift.
+ */
 const FLOOR: [number, number, number] = [16, 2, 11];
-
-/** Workspace globs from `pnpm-workspace.yaml` — kept in sync by the test below. */
-const WORKSPACE_DIRS = ['apps', 'packages'];
 
 type Version = [number, number, number];
 
@@ -51,27 +55,6 @@ function gte(a: Version, b: Version): boolean {
     if (a[i] !== b[i]) return a[i] > b[i];
   }
   return true;
-}
-
-/** Every workspace-member manifest, found by scanning the globs. */
-function workspaceManifests(): { path: string; pkg: Record<string, unknown> }[] {
-  const found: { path: string; pkg: Record<string, unknown> }[] = [];
-  for (const dir of WORKSPACE_DIRS) {
-    const abs = resolve(REPO_ROOT, dir);
-    for (const entry of readdirSync(abs)) {
-      const manifest = join(abs, entry, 'package.json');
-      try {
-        if (!statSync(manifest).isFile()) continue;
-      } catch {
-        continue;
-      }
-      found.push({
-        path: relative(REPO_ROOT, manifest),
-        pkg: JSON.parse(readFileSync(manifest, 'utf8')),
-      });
-    }
-  }
-  return found;
 }
 
 describe('#579 — the workspace `next` floor is 16.2.11', () => {

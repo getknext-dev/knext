@@ -333,6 +333,15 @@ export async function deploy() {
     const buildId = options.tag || `${Date.now()}`;
     process.env.NEXT_DEPLOYMENT_ID = buildId;
 
+    // #644: resolve the Docker build context HERE, in the same before-any-side-
+    // effect phase as the prune preflight. "Which directory does Next trace
+    // from?" is answerable at t=0 from the filesystem — deferring it into the
+    // docker task meant a user with no lockfile paid for a full `next build`,
+    // and on --skip-build the asset upload had already started, leaving the
+    // orphaned `_next/static/<id>/` prefix T6 exists to avoid. Purely local: no
+    // cluster call, so a dry run resolves it too (and thus reports it).
+    const buildContext = requireBuildContext(process.cwd());
+
     // #314 (T6): the prune preflight, BEFORE any side effect (see the block
     // comment on runPrunePreflight). A dry run makes no cluster calls at all.
     if (!options.dryRun) {
@@ -424,11 +433,12 @@ export async function deploy() {
         log.info("Building & pushing Docker image");
         tasks.push(
             (async () => {
-                // #644: the context is Next's file-tracing root (outermost
-                // lockfile), NOT a fixed `../..` — that hardcode assumed an
-                // `apps/<name>` layout and pointed outside the project for a
-                // flat repo, which is what `kn-next create` produces.
-                const repoRoot = requireBuildContext(process.cwd());
+                // #644: `buildContext` was resolved in the preflight above —
+                // Next's file-tracing root, NOT a fixed `../..`. That hardcode
+                // assumed an `apps/<name>` layout and pointed outside the
+                // project for a flat repo, which is what `kn-next create`
+                // produces. Nothing is inferred at this point.
+                const repoRoot = buildContext;
                 // --metadata-file writes the buildx result JSON (includes containerimage.digest).
                 // ARGV array, no shell — taggedRef etc. arrive as single tokens.
                 runInherit([

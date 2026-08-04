@@ -19,6 +19,9 @@
  * so this also covers the classification path end-to-end from deploy's side.
  */
 
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { KnativeNextConfig } from "../config";
 
@@ -124,6 +127,8 @@ vi.mock("node:fs", async (importOriginal) => {
     ) as typeof import("node:fs");
     const overrides = {
         existsSync: realFs.existsSync,
+        // This suite also uses mkdtempSync itself (the lockfile-free cwd).
+        mkdtempSync: realFs.mkdtempSync,
         readFileSync: (...a: unknown[]) => readFileSyncMock(...(a as [string])),
         writeFileSync: vi.fn(),
         mkdirSync: vi.fn(),
@@ -260,5 +265,58 @@ describe("deploy — the preflight is the first cluster call and precedes every 
 
         expect(kubectl).not.toHaveBeenCalled();
         expect(bucket).toEqual([]);
+    });
+});
+
+/**
+ * #644 — the build-context resolution belongs in the SAME preflight phase.
+ *
+ * "Is there a lockfile above me?" is answerable at t=0, from the filesystem,
+ * with no cluster and no build. Resolving it inside the docker task — after
+ * `next build` has run and while the asset upload is already in flight — costs
+ * the user a full build to learn a fact we had before we started, and on
+ * `--skip-build`/split-stage CI it can leave exactly the orphaned
+ * `_next/static/<id>/` prefix the block comment above exists to avoid.
+ *
+ * The real `requireBuildContext` runs here (no stub): the test moves cwd into a
+ * lockfile-free temp directory, which is the genuine failing condition.
+ */
+describe("deploy — an unresolvable build context fails in preflight, before any side effect", () => {
+    const savedCwd = process.cwd();
+    let lockfileFreeDir: string;
+
+    beforeEach(() => {
+        // mkdtemp under the OS temp dir: no lockfile in it or above it.
+        lockfileFreeDir = mkdtempSync(join(tmpdir(), "knext-no-lock-"));
+        process.chdir(lockfileFreeDir);
+    });
+
+    afterEach(() => {
+        process.chdir(savedCwd);
+    });
+
+    it("throws before next build, the upload, the push and the apply", async () => {
+        setArgv(["deploy", "--tag", "deploytag"]);
+        const deploy = await importDeploy();
+
+        await expect(deploy()).rejects.toThrow(/lockfile/i);
+
+        expect(effects).toEqual([]);
+        expect(bucket).toEqual([]);
+        expect(runQuiet).not.toHaveBeenCalled(); // no `next build`
+        expect(uploadAssets).not.toHaveBeenCalled();
+        expect(runInherit).not.toHaveBeenCalled(); // no docker build/push
+        expect(reclaimBuildPrefix).not.toHaveBeenCalled();
+    });
+
+    it("--skip-build fails the same way (the split-stage CI case)", async () => {
+        // The leg where deferring the check is worst: nothing to rebuild, so
+        // the first thing that happens is the upload.
+        setArgv(["deploy", "--tag", "deploytag", "--skip-build"]);
+        const deploy = await importDeploy();
+
+        await expect(deploy()).rejects.toThrow(/lockfile/i);
+        expect(bucket).toEqual([]);
+        expect(uploadAssets).not.toHaveBeenCalled();
     });
 });
