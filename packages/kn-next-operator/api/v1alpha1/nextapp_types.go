@@ -473,22 +473,26 @@ type RevalidationSpec struct {
 	Queue          string `json:"queue,omitempty"`
 	KafkaBrokerUrl string `json:"kafkaBrokerUrl,omitempty"`
 
-	// ProvisionKafkaSource gates whether the operator provisions a Knative
-	// KafkaSource for `queue: kafka`.
+	// ProvisionKafkaSource is INERT — the operator ignores it on every value
+	// (issue #475).
 	//
-	// nil/false (DEFAULT) => no KafkaSource is provisioned. The `{app}-revalidator`
-	// consumer that the source would sink into is design-now/build-later (issue #95):
-	// provisioning the source by default would point eventing at a service that is
-	// never deployed (events delivered nowhere). When kafka is selected but this is
-	// not opted in, the operator surfaces a non-fatal `RevalidationDeferred` status
-	// condition instead.
+	// It used to opt into provisioning a Knative KafkaSource for `queue: kafka`,
+	// on the premise that the user had deployed their own consumer. That
+	// bring-your-own path is WITHDRAWN: the sink contract (a Knative Service named
+	// `{app}-revalidator`, what CloudEvents it consumes, how it authenticates) was
+	// never specified or tested, so honouring the flag could only aim a source at
+	// a Service that may never exist.
 	//
-	// true => REJECTED AT ADMISSION as not implemented (issue #475). The
-	// KafkaSource the operator would create hardcodes its sink to a
-	// `{app}-revalidator` Knative Service that knext does not build, so the opt-in
-	// can only produce a source pointing at a Service that never comes up, with
-	// ISR revalidation silently inert. The field is retained (not removed) so that
-	// shipping the consumer later is a non-breaking change.
+	// No KafkaSource is provisioned for any value. `queue: kafka` surfaces the
+	// non-fatal `RevalidationDeferred` status condition; setting this field
+	// additionally reports reason `ProvisionKafkaSourceInert` plus a Warning
+	// event. The field is deliberately still ACCEPTED — rejecting it would narrow
+	// v1alpha1 in place (ADR-0017 §2.1) and, since the same validator gates the
+	// fail-closed reconciler, would stop the whole app from reconciling. Manifests
+	// that applied before keep applying; only the behaviour changed.
+	//
+	// Kafka ISR revalidation returns when knext ships the `{app}-revalidator`
+	// consumer (the open ADR-0016 action item).
 	// +optional
 	ProvisionKafkaSource *bool `json:"provisionKafkaSource,omitempty"`
 }

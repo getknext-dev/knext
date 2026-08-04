@@ -17,7 +17,6 @@ limitations under the License.
 package validation
 
 import (
-	"strings"
 	"testing"
 
 	"k8s.io/utils/ptr"
@@ -27,54 +26,63 @@ import (
 
 const kafkaTestImage = "registry.example.com/app:v1@sha256:abc123def456"
 
-// #475: spec.revalidation.provisionKafkaSource=true is accepted-config-for-an-
-// unbuilt-feature — the sink the KafkaSource would target (the
-// `{app}-revalidator` Knative Service) is not built (ADR-0016 action item still
-// open). Setting it can only ever produce a dangling source, so it is rejected
-// at admission with an explicit "not implemented" message until the consumer
-// ships. The FIELD stays in the API so building the consumer later is
-// non-breaking.
-func TestProvisionKafkaSourceRejectedAsNotImplemented(t *testing.T) {
+// #475 — spec.revalidation.provisionKafkaSource must NEVER be a validation error,
+// on ANY value. The capability it enabled is withdrawn (the `{app}-revalidator`
+// sink contract was never specified or tested), but the instrument for that is
+// INERTNESS + an honest status condition, not rejection. Two independent reasons,
+// and this test is the regression guard for both:
+//
+//  1. ADR-0017 §2.1: within `v1alpha1`, NextApp schema changes are additive-only.
+//     Rejecting a value that previously validated narrows the schema IN PLACE —
+//     observably identical to adding a CEL `self != true` rule — and would require
+//     a new API version. ADR-0017 separately PERMITS a semantic change (a field for
+//     an unshipped capability becoming inert), announced in release notes and
+//     surfaced as a status condition. That is the route taken.
+//
+//  2. This function is shared with the FAIL-CLOSED reconciler, so a rejection here
+//     is not merely an admission gate: a stored CR carrying the flag stops being
+//     reconciled ENTIRELY — no database binding, no ksvc, no NetworkPolicy, no
+//     warm-floor — and errors forever. That wedge fires on operator upgrade with NO
+//     user action at all, which is strictly worse than the case
+//     ValidateNextAppSpecUpdate's own doc comment already refuses ("otherwise
+//     upgrading the operator would brick running apps on their next unrelated
+//     update").
+//
+// The inert behaviour itself lives in the verdict, not here:
+// controller.revalidationDeferred + computeStatusVerdict.
+func TestProvisionKafkaSourceIsNeverAValidationError(t *testing.T) {
 	tests := []struct {
 		name         string
 		revalidation *appsv1alpha1.RevalidationSpec
-		wantErr      bool
 	}{
 		{
-			name: "provisionKafkaSource=true with queue=kafka is rejected",
+			name: "true with queue=kafka (the withdrawn opt-in) still validates",
 			revalidation: &appsv1alpha1.RevalidationSpec{
 				Queue:                "kafka",
 				ProvisionKafkaSource: ptr.To(true),
 				KafkaBrokerUrl:       "kafka.default.svc:9092",
 			},
-			wantErr: true,
 		},
 		{
-			name: "provisionKafkaSource=true without a queue is rejected too",
+			name: "true without a queue still validates",
 			revalidation: &appsv1alpha1.RevalidationSpec{
 				ProvisionKafkaSource: ptr.To(true),
 			},
-			wantErr: true,
 		},
 		{
-			name: "provisionKafkaSource=false is accepted",
+			name: "false validates",
 			revalidation: &appsv1alpha1.RevalidationSpec{
 				Queue:                "kafka",
 				ProvisionKafkaSource: ptr.To(false),
 			},
-			wantErr: false,
 		},
 		{
-			name: "provisionKafkaSource unset with queue=kafka is accepted (the honest-deferred path)",
-			revalidation: &appsv1alpha1.RevalidationSpec{
-				Queue: "kafka",
-			},
-			wantErr: false,
+			name:         "unset validates",
+			revalidation: &appsv1alpha1.RevalidationSpec{Queue: "kafka"},
 		},
 		{
-			name:         "no revalidation block at all is accepted",
+			name:         "absent revalidation block validates",
 			revalidation: nil,
-			wantErr:      false,
 		},
 	}
 
@@ -84,43 +92,34 @@ func TestProvisionKafkaSourceRejectedAsNotImplemented(t *testing.T) {
 				Image:        kafkaTestImage,
 				Revalidation: tc.revalidation,
 			}
-			err := ValidateNextAppSpec(spec)
-			if tc.wantErr != (err != nil) {
-				t.Fatalf("ValidateNextAppSpec() err=%v, wantErr=%v", err, tc.wantErr)
-			}
-			if !tc.wantErr {
-				return
-			}
-			msg := err.Error()
-			if !strings.Contains(msg, "provisionKafkaSource") {
-				t.Errorf("error must name the offending field, got %q", msg)
-			}
-			if !strings.Contains(msg, "not implemented") {
-				t.Errorf("error must say the feature is not implemented, got %q", msg)
-			}
-			if !strings.Contains(msg, "revalidator") {
-				t.Errorf("error must name the unbuilt {app}-revalidator consumer, got %q", msg)
+			if err := ValidateNextAppSpec(spec); err != nil {
+				t.Fatalf("ValidateNextAppSpec() = %v; want nil — rejecting narrows v1alpha1 "+
+					"in place (ADR-0017 §2.1) and wedges stored CRs on the fail-closed reconciler", err)
 			}
 		})
 	}
 }
 
-// The gate must be UNRATCHETED on update as well: an UPDATE that carries a
-// pre-existing provisionKafkaSource=true forward is still rejected, because the
-// point of the gate is that the operator must never act on it. Both admission
-// entry points therefore reject it (they both delegate to ValidateNextAppSpec).
-func TestProvisionKafkaSourceRejectedOnBothAdmissionEntryPoints(t *testing.T) {
-	bad := &appsv1alpha1.NextAppSpec{
+// Both admission entry points must accept it too, on CREATE and on UPDATE —
+// including the case that matters most: an UPDATE carrying the flag forward on a
+// CR stored before the capability was withdrawn.
+func TestProvisionKafkaSourceAcceptedOnBothAdmissionEntryPoints(t *testing.T) {
+	stored := &appsv1alpha1.NextAppSpec{
 		Image: kafkaTestImage,
 		Revalidation: &appsv1alpha1.RevalidationSpec{
 			Queue:                "kafka",
 			ProvisionKafkaSource: ptr.To(true),
 		},
 	}
-	if err := ValidateNextAppSpecCreate(bad); err == nil {
-		t.Errorf("ValidateNextAppSpecCreate() = nil; want a not-implemented rejection")
+	if err := ValidateNextAppSpecCreate(stored); err != nil {
+		t.Errorf("ValidateNextAppSpecCreate() = %v; want nil", err)
 	}
-	if err := ValidateNextAppSpecUpdate(bad, bad); err == nil {
-		t.Errorf("ValidateNextAppSpecUpdate() carrying the flag forward = nil; want a not-implemented rejection")
+
+	// An unrelated image bump on a stored CR that carries the flag must succeed:
+	// this is the exact "brick on the next unrelated update" case.
+	bumped := stored.DeepCopy()
+	bumped.Image = "registry.example.com/app:v2@sha256:def456abc123"
+	if err := ValidateNextAppSpecUpdate(stored, bumped); err != nil {
+		t.Errorf("ValidateNextAppSpecUpdate() image bump = %v; want nil", err)
 	}
 }

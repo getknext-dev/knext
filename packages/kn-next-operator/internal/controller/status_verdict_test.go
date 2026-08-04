@@ -17,6 +17,7 @@ limitations under the License.
 package controller
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -348,19 +349,71 @@ func TestComputeStatusVerdict_RevalidationDeferred(t *testing.T) {
 	if c.Status != metav1.ConditionTrue || c.Reason != "ConsumerNotProvisioned" {
 		t.Fatalf("RevalidationDeferred: got %+v", c)
 	}
-	wantMsg := "revalidation.queue=kafka requested but no KafkaSource was provisioned: " +
-		"the {app}-revalidator consumer is design-now/build-later (#95). Set " +
-		"spec.revalidation.provisionKafkaSource=true once you deploy an external consumer."
-	if c.Message != wantMsg {
-		t.Fatalf("RevalidationDeferred message: got %q", c.Message)
+	// The message must NOT tell the user to set provisionKafkaSource: the flag is
+	// inert (#475), so instructing them to set it would be the operator advising a
+	// value it then ignores.
+	if strings.Contains(c.Message, "provisionKafkaSource=true") {
+		t.Errorf("RevalidationDeferred message still instructs setting the inert flag: %q", c.Message)
+	}
+	if !strings.Contains(c.Message, "{app}-revalidator") {
+		t.Errorf("RevalidationDeferred message must name the unbuilt consumer: %q", c.Message)
+	}
+	if len(v.events) != 0 {
+		t.Fatalf("events: got %+v, want none when the flag is unset", v.events)
+	}
+}
+
+// #475 — the flag is INERT, not rejected. Rejecting it narrowed v1alpha1 in place
+// (ADR-0017 §2.1 forbids that) and wedged stored CRs on the fail-closed reconciler:
+// the app stopped being reconciled entirely on operator upgrade, with no user
+// action. So the verdict IGNORES the flag and reports it: still deferred, with a
+// distinct reason plus a transition-gated Warning naming the withdrawal.
+func TestComputeStatusVerdict_ProvisionKafkaSourceIsInert(t *testing.T) {
+	now := time.Now()
+	app := verdictApp()
+	app.Spec.Revalidation = &appsv1alpha1.RevalidationSpec{
+		Queue:                "kafka",
+		ProvisionKafkaSource: ptr.To(true),
 	}
 
-	// Opt-in flips it back to not-deferred.
-	app.Spec.Revalidation.ProvisionKafkaSource = ptr.To(true)
+	v := computeStatusVerdict(app, readyKsvc(now), databaseCheckState{mode: databaseModeNone},
+		revisionCheck{}, imageCacheState{}, now)
+
+	c := findVerdictCondition(t, v, ConditionRevalidationDeferred)
+	if c.Status != metav1.ConditionTrue || c.Reason != ReasonProvisionKafkaSourceInert {
+		t.Fatalf("RevalidationDeferred with the flag set: got %+v, want True/%s",
+			c, ReasonProvisionKafkaSourceInert)
+	}
+	// Honest about the WITHDRAWAL: the BYO external-consumer path was a documented
+	// functional contract, and it is gone — not merely defaulted off.
+	for _, want := range []string{"provisionKafkaSource", "ignored", "withdrawn"} {
+		if !strings.Contains(c.Message, want) {
+			t.Errorf("inert message %q must contain %q", c.Message, want)
+		}
+	}
+
+	// Ready must stay True — the whole point is that the app keeps reconciling.
+	if ready := findVerdictCondition(t, v, ConditionReady); ready.Status != metav1.ConditionTrue {
+		t.Fatalf("Ready: got %+v, want True (an inert flag must never degrade the app)", ready)
+	}
+
+	// A Warning event fires so the withdrawal is visible in `kubectl describe`.
+	if len(v.events) != 1 || v.events[0].eventType != corev1.EventTypeWarning ||
+		v.events[0].reason != ReasonProvisionKafkaSourceInert {
+		t.Fatalf("events: got %+v, want one Warning/%s", v.events, ReasonProvisionKafkaSourceInert)
+	}
+
+	// Transition-gated: a pass whose observed status already carries the reason
+	// must not re-emit (the #98 idle-hot-loop contract).
+	app.Status.Conditions = []metav1.Condition{{
+		Type:   ConditionRevalidationDeferred,
+		Status: metav1.ConditionTrue,
+		Reason: ReasonProvisionKafkaSourceInert,
+	}}
 	v = computeStatusVerdict(app, readyKsvc(now), databaseCheckState{mode: databaseModeNone},
 		revisionCheck{}, imageCacheState{}, now)
-	if c := findVerdictCondition(t, v, ConditionRevalidationDeferred); c.Status != metav1.ConditionFalse {
-		t.Fatalf("RevalidationDeferred with opt-in: got %+v", c)
+	if len(v.events) != 0 {
+		t.Fatalf("events on a repeat pass: got %+v, want none (transition-gated)", v.events)
 	}
 }
 

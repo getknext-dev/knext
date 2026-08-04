@@ -96,9 +96,10 @@ spec:
   Secrets live in K8s Secrets, never in config/images/URLs.
 - **`cache.enableBytecodeCache`** — persist V8 bytecode on a PVC across cold pods.
 - **`revalidation`** — `{ queue: kafka, kafkaBrokerUrl }` for ISR revalidation.
-  `provisionKafkaSource: true` is REJECTED at admission (#475): the `{app}-revalidator`
-  consumer it sinks into is unbuilt, so `queue: kafka` alone only surfaces the
-  non-fatal `RevalidationDeferred` condition.
+  `provisionKafkaSource` is INERT (#475) — accepted but ignored on every value, since
+  the BYO `{app}-revalidator` consumer path is withdrawn. No KafkaSource is created;
+  `queue: kafka` surfaces the non-fatal `RevalidationDeferred` condition, and setting
+  the flag adds reason `ProvisionKafkaSourceInert` + a Warning event.
 - **`traffic`** — `{ revisionName, canaryPercent }` (set by `kn-next rollback`).
 - **`security.networkPolicy`** — default-on internal-only NetworkPolicy.
 - **`observability`** — metrics/RUM/tracing (default-off tracing).

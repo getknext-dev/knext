@@ -189,16 +189,19 @@ spec:
 ```
 
 <Callout type="warn">
-**Honest scope — `provisionKafkaSource: true` is rejected.** The `KafkaSource` this field would
-provision sinks into an `<app>-revalidator` consumer that knext **does not build**, so enabling it
-could only produce a source pointing at a Service that never comes up, with revalidation silently
-inert. The operator therefore rejects `provisionKafkaSource: true` at admission with a
-`not implemented` error until that consumer ships; the field stays in the API so enabling it later
-is not a breaking change.
+**Honest scope — `provisionKafkaSource` no longer does anything.** This field used to opt into
+provisioning a `KafkaSource`, on the understanding that you had deployed your own
+`<app>-revalidator` consumer. **That bring-your-own path is withdrawn:** the sink contract — what
+the consumer must be called, which events it receives, how it authenticates — was never specified
+or tested, so the option could only aim events at a Service that might never exist.
 
-`queue: kafka` on its own is accepted and provisions nothing: the operator records a non-fatal
-`RevalidationDeferred` status condition (`Ready` stays `True`) so the gap is visible in `status`
-rather than silently green.
+No `KafkaSource` is provisioned for any value of the field. Your manifest still applies and your
+app still deploys normally; setting the field reports a `RevalidationDeferred` condition with
+reason `ProvisionKafkaSourceInert` plus a warning event, so an ignored setting is visible rather
+than silent. `queue: kafka` on its own behaves the same way, with reason `ConsumerNotProvisioned`.
+
+Cache invalidation is unaffected — `revalidateTag()` is already fleet-wide through the shared
+Redis-backed cache. Kafka-driven revalidation returns when knext ships the consumer itself.
 </Callout>
 
 ## Security defaults

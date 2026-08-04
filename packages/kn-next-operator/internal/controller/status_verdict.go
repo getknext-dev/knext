@@ -101,11 +101,34 @@ type statusVerdict struct {
 
 // revalidationDeferred reports whether Kafka-based ISR revalidation was
 // requested (spec.revalidation.queue == "kafka") but the operator must NOT
-// provision a KafkaSource because the `{app}-revalidator` consumer is not yet
-// built (issue #95) and opt-in (spec.revalidation.provisionKafkaSource) is off.
+// provision a KafkaSource, because the `{app}-revalidator` consumer the source
+// would sink into is not built (issue #95).
+//
+// It deliberately IGNORES spec.revalidation.provisionKafkaSource (#475). That
+// opt-in used to flip this to false and let the reconciler create the source, on
+// the premise that the user had deployed their own consumer — but that BYO path
+// was never a real contract: the sink shape was never specified or tested, so
+// the flag could only produce a source aimed at a Service that may never exist.
+// The capability is therefore WITHDRAWN, and inertness is the instrument:
+// rejecting the flag instead would narrow v1alpha1 in place (ADR-0017 §2.1) and,
+// because the shared validator is also the fail-closed reconciler's gate, would
+// stop the entire app from reconciling on operator upgrade with no user action.
+//
+// Consequence, deliberately: the KafkaSource block in Reconcile is unreachable
+// through the guard it already has. Building the consumer (the open ADR-0016
+// action item) is what makes this function consult the flag again.
 func revalidationDeferred(app *appsv1alpha1.NextApp) bool {
-	return app.Spec.Revalidation != nil && app.Spec.Revalidation.Queue == "kafka" &&
-		!ptr.Deref(app.Spec.Revalidation.ProvisionKafkaSource, false)
+	return app.Spec.Revalidation != nil && app.Spec.Revalidation.Queue == "kafka"
+}
+
+// provisionKafkaSourceRequested reports whether the app asks for the WITHDRAWN
+// opt-in, which the operator ignores. Split from revalidationDeferred because
+// the two answer different questions: "is revalidation deferred" (always, for
+// kafka) versus "is the user asking for something that no longer does anything"
+// (the case that must be reported loudly).
+func provisionKafkaSourceRequested(app *appsv1alpha1.NextApp) bool {
+	return app.Spec.Revalidation != nil &&
+		ptr.Deref(app.Spec.Revalidation.ProvisionKafkaSource, false)
 }
 
 // computeStatusVerdict is the single, pure seam for the NextApp status verdict:
@@ -291,16 +314,42 @@ func computeStatusVerdict(
 	}
 
 	// Non-fatal RevalidationDeferred condition: surface (but don't fail on) a kafka
-	// revalidation request whose consumer hasn't been provisioned yet (issue #95).
+	// revalidation request whose consumer hasn't been built yet (issue #95).
+	//
+	// Two reasons, because two different things are being reported. The plain
+	// deferral says "kafka revalidation does nothing yet". The inert reason
+	// additionally says "and the field you set to fix that was withdrawn" — the
+	// message must NOT tell anyone to set provisionKafkaSource, which the operator
+	// now ignores (#475); an operator that advises a value it then discards is the
+	// same false-green this condition exists to prevent.
 	if revalidationDeferred(app) {
+		reason := "ConsumerNotProvisioned"
+		message := "revalidation.queue=kafka requested but no KafkaSource was provisioned: " +
+			"the {app}-revalidator consumer is design-now/build-later (#95), so ISR revalidation " +
+			"over kafka is inert. Cache invalidation still works fleet-wide through the shared " +
+			"Redis-backed cache; no action is available or needed here."
+		if provisionKafkaSourceRequested(app) {
+			reason = ReasonProvisionKafkaSourceInert
+			message = "spec.revalidation.provisionKafkaSource=true is ignored: the bring-your-own " +
+				"external-consumer path it opted into is withdrawn — the {app}-revalidator sink " +
+				"contract was never specified or tested, so no KafkaSource is created (#475). The " +
+				"field still applies and the rest of this app reconciles normally; remove it to " +
+				"silence this. Kafka ISR revalidation returns when knext ships the consumer (ADR-0016)."
+			// Transition-gated (the #98 no-op contract): fire only when the verdict
+			// newly enters the inert state, never on every converged pass.
+			prev := apimeta.FindStatusCondition(app.Status.Conditions, ConditionRevalidationDeferred)
+			if prev == nil || prev.Reason != ReasonProvisionKafkaSourceInert {
+				v.events = append(v.events, verdictEvent{
+					corev1.EventTypeWarning, ReasonProvisionKafkaSourceInert, message,
+				})
+			}
+		}
 		v.conditions = append(v.conditions, metav1.Condition{
 			Type:               ConditionRevalidationDeferred,
 			Status:             metav1.ConditionTrue,
 			ObservedGeneration: app.Generation,
-			Reason:             "ConsumerNotProvisioned",
-			Message: "revalidation.queue=kafka requested but no KafkaSource was provisioned: " +
-				"the {app}-revalidator consumer is design-now/build-later (#95). Set " +
-				"spec.revalidation.provisionKafkaSource=true once you deploy an external consumer.",
+			Reason:             reason,
+			Message:            message,
 		})
 	} else {
 		v.conditions = append(v.conditions, metav1.Condition{

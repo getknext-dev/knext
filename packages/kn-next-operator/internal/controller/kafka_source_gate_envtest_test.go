@@ -21,12 +21,14 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	corev1 "k8s.io/api/core/v1"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/utils/ptr"
+	servingv1 "knative.dev/serving/pkg/apis/serving/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
@@ -34,17 +36,24 @@ import (
 )
 
 // #475 — the operator must NEVER create a KafkaSource whose sink is the unbuilt
-// `{app}-revalidator` Knative Service. The gate is a spec PRECONDITION in
-// validation.ValidateNextAppSpec, so the admission webhook rejects the write AND
-// the fail-closed reconciler refuses to act on a CR that predates the gate —
-// which is what makes "never creates a dangling source" a property of the
-// operator rather than of the webhook being reachable.
+// `{app}-revalidator` Knative Service. The instrument is INERTNESS, not
+// rejection: `revalidationDeferred` ignores `provisionKafkaSource` entirely, so
+// the reconciler's KafkaSource block is unreachable through the guard it already
+// has, while the CR keeps applying and the app keeps reconciling.
+//
+// Rejecting instead would have narrowed `v1alpha1` in place (ADR-0017 §2.1) and
+// wedged stored CRs: the validation gate returns before database binding, the
+// ksvc, the NetworkPolicy and the warm-floor, so an app carrying the flag would
+// stop being reconciled entirely on operator upgrade with no user action. The
+// "still reconciles" assertions below are the regression guard for that wedge —
+// they are the half that would go green again if someone re-added a rejection,
+// so they assert the ksvc EXISTS, not merely that no error was returned.
 //
 // The envtest environment DOES install a KafkaSource CRD fixture
 // (config/testdata/crds/kafkasources.sources.knative.dev.yaml), so the
 // reconciler is genuinely able to create one here: an empty list is evidence
-// the gate held, not evidence the kind was unresolvable.
-var _ = Describe("KafkaSource admission gate (#475)", func() {
+// the flag is inert, not evidence the kind was unresolvable.
+var _ = Describe("KafkaSource inertness (#475)", func() {
 	ctx := context.Background()
 	const image = "registry.example.com/app@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
 
@@ -64,7 +73,7 @@ var _ = Describe("KafkaSource admission gate (#475)", func() {
 		return list
 	}
 
-	It("refuses to reconcile a stored CR with provisionKafkaSource=true and creates no KafkaSource", func() {
+	It("ignores provisionKafkaSource=true: no KafkaSource, app still fully reconciled, withdrawal surfaced", func() {
 		nn := types.NamespacedName{Name: "kafka-gate-on", Namespace: "default"}
 		app := &appsv1alpha1.NextApp{
 			ObjectMeta: metav1.ObjectMeta{Name: nn.Name, Namespace: nn.Namespace},
@@ -80,22 +89,43 @@ var _ = Describe("KafkaSource admission gate (#475)", func() {
 		Expect(k8sClient.Create(ctx, app)).To(Succeed())
 		defer deleteAndFinalize(ctx, nn)
 
-		r := newReconciler()
+		recorder := record.NewFakeRecorder(64)
+		r := &NextAppReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Recorder: recorder}
 		_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: nn})
-		Expect(err).To(HaveOccurred())
-		Expect(err.Error()).To(ContainSubstring("provisionKafkaSource"))
-		Expect(err.Error()).To(ContainSubstring("not implemented"))
+		Expect(err).NotTo(HaveOccurred())
 
 		// No dangling source anywhere in the namespace.
 		Expect(listKafkaSources(nn.Namespace).Items).To(BeEmpty())
 
-		// The single sanctioned inline precondition branch reports it honestly.
+		// ANTI-WEDGE: the app is still reconciled end-to-end. A rejection on the
+		// shared validation path returns before this child is created, so the ksvc
+		// existing is what proves the CR did not stop being reconciled.
+		ksvc := &servingv1.Service{}
+		Expect(k8sClient.Get(ctx, nn, ksvc)).To(Succeed())
+		Expect(ksvc.Spec.Template.Spec.Containers[0].Image).To(Equal(image))
+
 		fetched := &appsv1alpha1.NextApp{}
 		Expect(k8sClient.Get(ctx, nn, fetched)).To(Succeed())
+
+		// An inert field is NOT an invalid spec: whatever the child ksvc's health
+		// says (envtest runs no Knative controllers, so it is legitimately not
+		// Ready here), the app must never be degraded for InvalidSpec — that reason
+		// is the fingerprint of the rejection this change replaced.
 		degraded := apimeta.FindStatusCondition(fetched.Status.Conditions, ConditionDegraded)
 		Expect(degraded).NotTo(BeNil())
-		Expect(degraded.Status).To(Equal(metav1.ConditionTrue))
-		Expect(degraded.Reason).To(Equal("InvalidSpec"))
+		Expect(degraded.Reason).NotTo(Equal("InvalidSpec"))
+
+		// The withdrawal is surfaced honestly, with its own reason.
+		deferredCond := apimeta.FindStatusCondition(fetched.Status.Conditions, ConditionRevalidationDeferred)
+		Expect(deferredCond).NotTo(BeNil())
+		Expect(deferredCond.Status).To(Equal(metav1.ConditionTrue))
+		Expect(deferredCond.Reason).To(Equal(ReasonProvisionKafkaSourceInert))
+
+		// ...and as a Warning event, so `kubectl describe nextapp` shows it.
+		Expect(drainEvents(recorder)).To(ContainElement(SatisfyAll(
+			ContainSubstring(corev1.EventTypeWarning),
+			ContainSubstring(ReasonProvisionKafkaSourceInert),
+		)))
 	})
 
 	It("leaves the honest RevalidationDeferred status untouched for the unset case", func() {

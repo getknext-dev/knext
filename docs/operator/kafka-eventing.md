@@ -1,14 +1,16 @@
 # Kafka Eventing & Revalidation
 
-> **Status (issues #95, #475): DEFERRED — and the opt-in is now REJECTED.** The
+> **Status (issues #95, #475): DEFERRED — and the BYO opt-in is WITHDRAWN.** The
 > `{app}-revalidator` consumer service described below is **not yet shipped** (no tracked
-> implementation; the routing PR #27 was closed without merging). Because the KafkaSource hardcodes
-> that unbuilt Service as its sink, `spec.revalidation.provisionKafkaSource: true` is **rejected at
-> admission with a `not implemented` error** (#475) — it could only ever create a source pointing at
-> a Service that never comes up, leaving ISR revalidation silently inert. The field is **kept** in
-> the API so shipping the consumer later is non-breaking. With `queue: kafka` (and no opt-in), the
-> operator records a non-fatal `RevalidationDeferred` status condition (`Ready` stays `True`) and
-> creates nothing. See ADR-0003 ("Revalidation status") and ADR-0016.
+> implementation; the routing PR #27 was closed without merging). The opt-in
+> `spec.revalidation.provisionKafkaSource` used to say "I have deployed that consumer myself" — but
+> knext never specified or tested that sink contract, so the option is **withdrawn** and the field
+> is now **INERT**: it is still accepted (rejecting it would narrow `v1alpha1` in place, which
+> ADR-0017 §2.1 reserves for a new API version, and would wedge stored CRs on the fail-closed
+> reconciler), but **no KafkaSource is created on any value**. `queue: kafka` records a non-fatal
+> `RevalidationDeferred` condition (`Ready` stays `True`); setting the flag additionally reports
+> reason `ProvisionKafkaSourceInert` and a Warning event. See ADR-0003 ("Revalidation status") and
+> ADR-0016.
 
 Integrating deeply with Next.js' App Router architecture, the Operator manages the complex infrastructure required for **Asynchronous Incremental Static Regeneration (ISR)**.
 
@@ -22,8 +24,8 @@ To achieve parity on Kubernetes, the `kn-next-operator` relies on an Event-Drive
 spec:
   revalidation:
     queue: "kafka"
-    # provisionKafkaSource is REJECTED at admission while it is `true` (#475): the
-    # {app}-revalidator consumer it sinks into is not built by knext. Leave it unset.
+    # provisionKafkaSource is INERT (#475): the BYO {app}-revalidator consumer path is
+    # withdrawn, so the field is ignored on every value. Leave it unset.
     kafkaBrokerUrl: "kafka-cluster-kafka-bootstrap.kafka.svc:9092"
 ```
 
@@ -31,8 +33,9 @@ spec:
 
 When `queue: "kafka"` **and** `provisionKafkaSource: true`, the Reconciler would dynamically
 scaffold a Knative `KafkaSource` — the shape described below. That path is currently **unreachable**:
-the opt-in is rejected at admission (#475) until the sink consumer ships, so the operator provisions
-nothing and sets `RevalidationDeferred`.
+the flag is ignored (#475) until the sink consumer ships, so the operator provisions nothing and
+sets `RevalidationDeferred`. The construction is retained and unit-tested
+(`internal/controller/kafka_source.go`) so it is ready for that day.
 
 Instead of adding heavy Knative Eventing Go-module dependencies to the controller binary, the Operator integrates via generic `unstructured.Unstructured` mappings:
 
@@ -40,10 +43,11 @@ Instead of adding heavy Knative Eventing Go-module dependencies to the controlle
 2. **Topic**: Instructs the KafkaSource to consume explicitly from `[app-name]-revalidation`.
 3. **Sink Routing**: Routes all consumed events to a `myapp-revalidator` Knative Service.
 
-> **Caveat (#95, #475):** the `myapp-revalidator` sink is **not shipped by knext**, which is why
-> the opt-in is refused rather than merely defaulted off — an accepted flag for an unbuilt consumer
-> is config that cannot work. A first-class, knext-built revalidator remains design-now/build-later
-> (ADR-0003 Option A), revisited after Tier-A correctness; shipping it is what removes the gate.
+> **Caveat (#95, #475):** the `myapp-revalidator` sink is **not shipped by knext**, and the
+> bring-your-own alternative is withdrawn rather than merely defaulted off — knext never specified
+> what that consumer had to be, so it was a contract in name only. A first-class, knext-built
+> revalidator remains design-now/build-later (ADR-0003 Option A), revisited after Tier-A
+> correctness; shipping it is what makes the flag live again.
 
 ## Scope: ISR revalidation vs cross-zone domain events
 
@@ -60,12 +64,12 @@ Instead of adding heavy Knative Eventing Go-module dependencies to the controlle
 | Purpose | Trigger Next.js ISR / data-cache revalidation | Propagate business facts between zones |
 | Topic | `{app-name}-revalidation` (operator-named) | You define them |
 | Consumer | `{app}-revalidator` — **not built; deferred (#95)** | You deploy producers + consumers |
-| Provisioned by knext | **Nothing today** — `provisionKafkaSource: true` is rejected at admission (#475) | **Nothing** — no broker, no topic, no consumer |
+| Provisioned by knext | **Nothing today** — `provisionKafkaSource` is inert/ignored (#475) | **Nothing** — no broker, no topic, no consumer |
 | Delivery guarantee | None promised; ISR is best-effort/idempotent by nature | **Your responsibility** (see idempotency below) |
 
 Routing domain events through `spec.revalidation` hits a dead end: the topic is ISR-scoped, the
-consumer is not built by knext (so the opt-in is rejected outright), and the operator provisions
-only a `KafkaSource` (never a broker). The fields involved are exactly (from `api/v1alpha1/nextapp_types.go`, `RevalidationSpec`):
+consumer is not built by knext (so the opt-in is inert), and the operator provisions only a
+`KafkaSource` (never a broker) even when it is live. The fields involved are exactly (from `api/v1alpha1/nextapp_types.go`, `RevalidationSpec`):
 `queue`, `kafkaBrokerUrl`, `provisionKafkaSource` — nothing about domain topics or your consumer groups.
 
 ### Cross-zone domain events are an application concern
