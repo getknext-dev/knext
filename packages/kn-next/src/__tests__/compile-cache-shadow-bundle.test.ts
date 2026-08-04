@@ -320,3 +320,37 @@ describe("#451 shipped supervisor bundle: compile-cache-shadow-check survives bu
         expect(calls.length).toBeGreaterThanOrEqual(requiredCallSites.length);
     });
 });
+
+/**
+ * #309 — the SIBLING diagnostic (an injected NODE_COMPILE_CACHE the runtime
+ * silently REFUSED) has exactly the same tree-shaking exposure: it is a
+ * side-effect-free module reached only from its deferred-step registration, so
+ * losing the registration would delete it from the shipped artifact with no
+ * source-level symptom. Guarded here rather than in a second bundling harness,
+ * against the same bundle this file already builds.
+ */
+describe("#309 shipped supervisor bundle: compile-cache-health-check survives bundling", () => {
+    it("registers the step in the SAME deferred-init steps array", () => {
+        expect(steps, "no `steps: [...]` array found in the bundle").not.toBe(
+            "",
+        );
+        expect(steps).toContain('name: "compile-cache-health-check"');
+        // The other half: it did not displace its sibling diagnostics.
+        expect(steps).toContain('name: "compile-cache-shadow-check"');
+        expect(steps).toContain('name: "metrics-collector"');
+    });
+
+    it("wires the step's own run callback to the diagnostic", () => {
+        const body = stepBody(steps, "compile-cache-health-check");
+        expect(body, "health step not found in the steps array").not.toBe("");
+        expect(body).toContain("run:");
+        expect(body).toContain("warnOnDegradedCompileCache(");
+    });
+
+    it("keeps the health module BODY in the bundle (not tree-shaken away)", () => {
+        // Only survives if something reachable calls it — the assertion a
+        // dropped registration cannot fake.
+        expect(bundle).toContain("was refused by the runtime");
+        expect(bundle).toContain("getCompileCacheDir");
+    });
+});
