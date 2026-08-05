@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -155,24 +156,56 @@ describe('the `test:image` chain actually reaches the suite (both halves)', () =
 /**
  * Renaming the suite is now part of the contract (the `*.docker-e2e.test.ts`
  * convention is what routes it to the right runner), and a rename leaves DEAD
- * POINTERS behind: after `alpine-image-e2e.test.ts` became
- * `alpine-image.docker-e2e.test.ts`, ci.yml, the README, the Dockerfile and this
- * file were updated while `vite.config.ts` and — worse — `vitest.image.config.ts`,
- * the file that DEFINES the pattern, kept naming a file that no longer exists.
+ * POINTERS behind: when the suite took its current `.docker-e2e` name, ci.yml,
+ * the README, the Dockerfile and this file were updated while `vite.config.ts`
+ * and — worse — `vitest.image.config.ts`, the file that DEFINES the pattern,
+ * kept naming the old file, which no longer exists.
+ *
+ * (This comment deliberately does not spell the old name out: under the scan
+ * below, a historical mention IS a dead pointer, and it would fail here — as it
+ * did on the first run of this guard.)
  *
  * Prose that names a non-existent file is not cosmetic here: these comments are
  * the only explanation of why the split exists, so a reader chasing the named
  * file finds nothing and concludes the guard is gone.
  *
- * SCANNED, not enumerated — the whole example tree, so a fourth stale pointer in
- * a file nobody listed still fails.
+ * SCANNED, not enumerated — the whole example tree PLUS the two files outside it
+ * that name the suite (ci.yml and this file's sibling guard), so a stale pointer
+ * in a file nobody listed still fails.
  */
 describe('no stale test-file pointer survives a rename (both halves)', () => {
   const EXAMPLE = resolve(REPO_ROOT, 'examples/bun-exec');
 
-  /** Every tracked text file in the example, minus build output and deps. */
+  /**
+   * Every tracked `*.test.ts` basename in the repo. A bare filename in prose
+   * (`compile-cache-health-bun.test.ts`) carries no directory, so existence is
+   * the only question that can honestly be asked of it — and asking it against
+   * one guessed directory would fail on every correct reference to another.
+   */
+  function trackedTestBasenames(): Set<string> {
+    const out = execFileSync('git', ['ls-files', '-z', '*.test.ts'], {
+      cwd: REPO_ROOT,
+      maxBuffer: 64 * 1024 * 1024,
+    })
+      .toString('utf8')
+      .split('\0')
+      .filter(Boolean)
+      .map((p) => p.split('/').pop() as string);
+    // Non-vacuity: a collapsed file list would make every bare reference "valid".
+    expect(
+      out.length,
+      'git ls-files found no test files — the index is not readable',
+    ).toBeGreaterThan(50);
+    return new Set(out);
+  }
+
+  /** Every text file in the example, minus build output and deps, + the outside namers. */
   function scannedFiles(): string[] {
-    const out: string[] = [];
+    const out: string[] = [
+      resolve(REPO_ROOT, '.github/workflows/ci.yml'),
+      resolve(REPO_ROOT, 'tests/bun-exec-hardcap-ci.test.ts'),
+      __filename,
+    ];
     const walk = (dir: string) => {
       for (const entry of readdirSync(dir, { withFileTypes: true })) {
         if (['node_modules', '.output', '.nitro', 'dist', '.next'].includes(entry.name)) continue;
@@ -206,16 +239,17 @@ describe('no stale test-file pointer survives a rename (both halves)', () => {
       'the scan never saw the alpine e2e, so it is not reading the files it claims to',
     ).toBe(true);
 
+    const basenames = trackedTestBasenames();
     for (const [ref, file] of refs) {
-      // A reference with a path is relative to the example or to the repo root;
-      // a bare filename means the example's own test dir.
-      const candidates = ref.includes('/')
-        ? [resolve(EXAMPLE, ref), resolve(REPO_ROOT, ref)]
-        : [resolve(EXAMPLE, 'test', ref)];
-      expect(
-        candidates.some((c) => existsSync(c)),
-        `${file} names ${ref}, which does not exist (stale pointer after a rename)`,
-      ).toBe(true);
+      // A reference WITH a path must resolve — relative to the example or to the
+      // repo root. A BARE filename can only be checked for existence somewhere,
+      // which is what the basename index is for.
+      const ok = ref.includes('/')
+        ? [resolve(EXAMPLE, ref), resolve(REPO_ROOT, ref)].some((c) => existsSync(c))
+        : basenames.has(ref) || existsSync(resolve(EXAMPLE, 'test', ref));
+      expect(ok, `${file} names ${ref}, which does not exist (stale pointer after a rename)`).toBe(
+        true,
+      );
     }
   });
 });
