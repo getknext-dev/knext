@@ -232,7 +232,7 @@ Three things worth keeping from how this was missed:
       `env:`) *and* asserts nothing opts the job out — no `continue-on-error` (literal or `${{ }}`),
       no `if:` (parsed YAML, so a quoted `"if":` cannot evade it, #661), no upstream `needs:`, the
       scale job's `needs:` edge, and the absence of any `::warning::` in either job of this lane.
-      Mutation-proved: seven mutations, including restoring the original skip, each turn it red —
+      Mutation-proved: thirteen mutations, including restoring the original skip, each turn it red —
       plus the shape check both ways (`:latest`, a bare tag, whitespace-only, a wrong-length digest
       and a multi-line step-output injection each go red; a real `@sha256:<64 hex>` stays green).
       **Checked, with the residual stated:** what this closes is the *silence*, not the coverage —
