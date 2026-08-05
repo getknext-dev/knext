@@ -258,7 +258,33 @@ From #606, sourced to vinext's own repo and registry data:
     the application **interpreted from disk**, with no equivalent app-covering mechanism identified or
     measured on the bun path. This is the single most decision-relevant fact on the table and it
     contradicts the founder's own sentence; it is escalated as **Escalation 2′**, not resolved here.
-13. **The only shape known to embed the application is the one this ADR forbids shipping.** Phase 0's
+13. **The SSR-embedding blocker is a Vite 8 regression, not a vinext design property — mechanism
+    ESTABLISHED (#663).** Two founder-proposed experiments settled it.
+    **The split SSR sub-entry is NOT the cause and is not new** — `vinext@0.0.1` already emits
+    `dist/server/ssr/index.js` and lazily imports it, exactly like beta.4. **The cause is Vite.**
+    Single-variable test, vinext + `@vitejs/plugin-rsc@0.5.32` + `react-server-dom-webpack@19.2.8`
+    held fixed: `vinext@0.0.30 + vite 7.3.6` → `require("react-dom")` count **0**;
+    `vinext@0.0.30 + vite 8.2.0` → **1**. End-to-end, same bespoke entry over two builds, in a
+    container with **no `node_modules` and no server JS**: **vite 7 serves every route 200 with real
+    SSR** (`<h1 id="slug">alpha</h1>`) and a correct 404; **vite 8 500s on every render.**
+    **Mechanism:** the Vite-8 SSR chunk reaches react-dom via
+    `createRequire(import.meta.url)("react-dom")`. Bun does **not** rewrite `createRequire` requires
+    to bundled modules — react-dom *is* in the bundle; this one path bypasses it — and under
+    `--compile`, `import.meta.url` is the **build-host source path**. Replacing that single call
+    removes the resolver error and exposes a second layer (`h6.default` undefined). Controls: a bare
+    `react-dom` import compiles and runs (8 modules), and the same probe inside
+    `dist/server/ssr/` also works, so it is not directory-dependent.
+    **Not a shipping plan:** beta.4 peer-requires `vite@^8`, and the old line's `prod-server` imports
+    `../index.js` → Vite **and** `@rollup/rollup-linux-x64-musl` (a native addon), which is *worse*
+    for compiling. The Vite-7 arm is a **diagnostic control**, not a proposal.
+    **What it changes:** Escalation 3′/7 no longer point at "fork vinext to fix an unexplained
+    bundler-graph interaction". The interaction is explained, and the fix is plausibly upstream — in
+    Vite, in rolldown, or in vinext's SSR-env config under Vite 8. **Not established** which.
+    **The founder-proposed post-build static-import rewrite does NOT work** (#663 Experiment 1):
+    module count identical at 140, and the failure merely **moved from first render to startup** —
+    proving the SSR chunk was already in the graph, so the rewrite changed *when* it evaluates, not
+    *whether* it bundles.
+14. **The only shape known to embed the application is the one this ADR forbids shipping.** Phase 0's
     embedding result came from `vinext@^0.0.19` + the nitro bun preset, and *What must NOT be done*
     bans that pin as a shipping dependency. Recorded because the tension is otherwise invisible.
 
@@ -397,7 +423,7 @@ first, then CLI**.
 - **Do not ship an opaque compiled binary without** the pre-compile-closure SBOM, the HIGH/CRITICAL scan
   against it, and the cosign attestation.
 - **Do not pin `nitro@3.0.1-alpha.2` / `vinext@^0.0.19` as shipping dependencies.** Phase 0 reference
-  points, not a product. *(See Consequence 13: this is currently the only shape known to embed the
+  points, not a product. *(See Consequence 14: this is currently the only shape known to embed the
   application, so the ban has a real cost that must stay visible.)*
 - **NEVER validate a `bun --compile` artifact on the build host.** *(Finding B, #658.)*
   `bun build --compile --minify` **constant-folds `import.meta.dirname` to the build-host absolute
@@ -409,7 +435,17 @@ first, then CLI**.
   **Binding form:** validation runs **in a container**, at an **absolute path that does not exist on
   the build host**, with the build tree **renamed**, exercising **SSR/dynamic** — not boot, not `/`.
   The rename is a **required negative control**: the test must be shown to go **red** without it.
+  **CORRECTION (2026-08-05, #663): renaming the BUILD TREE is not sufficient, and this rule as first
+  written would have passed a false green.** Measured: renaming `dist-e1` left the host arm **fully
+  green** (SSR 200) while the same binary 500s in a container. The leak is not the build tree — it is
+  the build host's **ancestor `node_modules`**, which a binary resolving `createRequire` paths still
+  finds. Renaming **`node_modules`** goes red with the exact container error, and restoring it goes
+  green; mutation-proved in both directions. **So the negative control must rename `node_modules`, not
+  only the build tree** — and a container run remains the primary check, because that is what caught
+  this. A rule that names the wrong artifact is worse than no rule: it certifies the thing it missed.
   A9's "runs from a clean alpine" is too weak on its own — #658's false green *served correctly*.
+  **#658's claim that "the SSR chunk alone bundles cleanly (52 modules) and runs" was itself a
+  build-host false green** — red in a container (#663). That is the **fourth** instance in this ADR.
   **A SECOND, INDEPENDENT INSTANCE confirms the rule is not theoretical (#657, 2026-08-05).** Adding a
   static-asset probe to the Phase 0 e2e went red immediately: **every asset 500'd**. Cause — nitro
   reads public assets relative to `globalThis.__nitro_main__ = import.meta.url`, and
