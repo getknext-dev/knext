@@ -261,10 +261,20 @@ From #606, sourced to vinext's own repo and registry data:
 13. **The SSR-embedding blocker is a Vite 8 regression, not a vinext design property — mechanism
     ESTABLISHED (#663).** Two founder-proposed experiments settled it.
     **The split SSR sub-entry is NOT the cause and is not new** — `vinext@0.0.1` already emits
-    `dist/server/ssr/index.js` and lazily imports it, exactly like beta.4. **The cause is Vite.**
-    Single-variable test, vinext + `@vitejs/plugin-rsc@0.5.32` + `react-server-dom-webpack@19.2.8`
-    held fixed: `vinext@0.0.30 + vite 7.3.6` → `require("react-dom")` count **0**;
-    `vinext@0.0.30 + vite 8.2.0` → **1**. End-to-end, same bespoke entry over two builds, in a
+    `dist/server/ssr/index.js` and lazily imports it, exactly like beta.4. That half is solid: it was
+    confirmed independently by building 0.0.19.
+    **⚠️ "The cause is Vite" is NOT YET ISOLATED — the arms differed by two variables.** The
+    comparison (`vinext@0.0.30 + vite 7.3.6` → `require("react-dom")` **0**; `+ vite 8.2.0` → **1**)
+    was run with `@vitejs/plugin-react` varying **^5 → ^6** alongside vite, and the harness printed
+    only the vite and plugin-rsc versions so the confound did not appear in the output. That matters:
+    `@vitejs/plugin-react@6` peer-requires `@rolldown/plugin-babel` and `babel-plugin-react-compiler`,
+    so **arm 8 ran a different transform pipeline, not merely a different bundler**. The held-fixed
+    list also named `react-server-dom-webpack@19.2.8`, a version no committed script recorded for
+    these arms (both installed a floating range, no lockfile).
+    **A corrected single-variable run is in flight** — `@vitejs/plugin-react@5.2.0` peer-accepts
+    `vite ^8`, so one version is valid on both arms. Until it reports, the honest claim is: **a
+    regression exists between these two dependency sets, and which input causes it is not
+    established.** Do not cite "it's Vite" as settled. End-to-end, same bespoke entry over two builds, in a
     container with **no `node_modules` and no server JS**: **vite 7 serves every route 200 with real
     SSR** (`<h1 id="slug">alpha</h1>`) and a correct 404; **vite 8 500s on every render.**
     **Mechanism:** the Vite-8 SSR chunk reaches react-dom via
@@ -277,9 +287,12 @@ From #606, sourced to vinext's own repo and registry data:
     **Not a shipping plan:** beta.4 peer-requires `vite@^8`, and the old line's `prod-server` imports
     `../index.js` → Vite **and** `@rollup/rollup-linux-x64-musl` (a native addon), which is *worse*
     for compiling. The Vite-7 arm is a **diagnostic control**, not a proposal.
-    **What it changes:** Escalation 3′/7 no longer point at "fork vinext to fix an unexplained
-    bundler-graph interaction". The interaction is explained, and the fix is plausibly upstream — in
-    Vite, in rolldown, or in vinext's SSR-env config under Vite 8. **Not established** which.
+    **What it changes, stated at the strength it has earned:** the *first* layer is explained, so
+    Escalation 3′/7 no longer point at a wholly unexplained interaction. But **whether one upstream
+    change closes it is NOT established** — replacing the `createRequire` call with the chunk's
+    already-present static namespace (exactly the remedy an upstream fix would apply) exposes a second
+    failure, `h6.default` undefined, whose cause is unknown. An earlier draft here said the blocker
+    was "one upstream defect away"; that contradicted the spike's own mutation and is withdrawn.
     **The founder-proposed post-build static-import rewrite does NOT work** (#663 Experiment 1):
     module count identical at 140, and the failure merely **moved from first render to startup** —
     proving the SSR chunk was already in the graph, so the rewrite changed *when* it evaluates, not
