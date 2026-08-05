@@ -354,6 +354,10 @@ describe('publish/sign workflows never cancel in progress (#674)', () => {
  * directory, where the answer is already known. That shape cannot reveal a hole:
  * round 1 had four, and all four were found by executing it against inputs it
  * had never been given. These are those inputs.
+ *
+ * `scripts/mutation-prove-publish-markers.mjs` is the standing proof that they
+ * bite: it restores each round-1 behaviour from a byte snapshot and requires
+ * this file to go red.
  */
 describe('publish/sign marker classification (#674 round 2)', () => {
   it('treats a `docker/build-push-action` push EXPRESSION as publishing', () => {
