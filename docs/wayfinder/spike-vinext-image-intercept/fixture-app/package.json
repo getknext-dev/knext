@@ -1,0 +1,47 @@
+{
+  "name": "knext-spike-vinext-image-intercept-fixture",
+  "private": true,
+  "type": "module",
+  "//": [
+    "SPIKE ONLY. Every version is pinned EXACTLY (no ^, no ~) because this is the",
+    "reproduction record for docs/wayfinder/p3-vinext-image-intercept.md, and a range",
+    "would let a re-run silently measure something else. These are the versions that",
+    "were installed when the numbers in that document were taken.",
+    "",
+    "Note the vinext pin: 1.0.0-beta.4. examples/bun-exec/package.json pins ^0.0.19,",
+    "which CANNOT resolve to this. See the cost section of the document — adopting this",
+    "result is a major bump of the shipping recipe, not a no-op.",
+    "",
+    "No vite.config.ts is present, deliberately: none was used. `vinext build` under",
+    "beta.4 ran without one, and adding one here would not be the thing that was measured.",
+    "",
+    "The @jsquash codecs were installed into the spike tree without being recorded in a",
+    "manifest at the time; these are the versions that were actually resolved, read back",
+    "out of the installed node_modules.",
+    "",
+    "`sharp` is listed because its FAILURE under `bun build --compile` is one of the",
+    "findings — knext-entry.mjs (the sharp arm) needs it to reproduce that failure."
+  ],
+  "scripts": {
+    "build": "vinext build"
+  },
+  "dependencies": {
+    "@jsquash/avif": "2.1.0",
+    "@jsquash/jpeg": "1.6.0",
+    "@jsquash/png": "3.1.1",
+    "@jsquash/resize": "2.1.1",
+    "@jsquash/webp": "1.5.0",
+    "next": "16.2.11",
+    "react": "19.2.6",
+    "react-dom": "19.2.6",
+    "sharp": "0.35.3",
+    "vinext": "1.0.0-beta.4"
+  },
+  "devDependencies": {
+    "@mdx-js/rollup": "3.1.1",
+    "@vitejs/plugin-react": "6.0.1",
+    "@vitejs/plugin-rsc": "0.5.26",
+    "react-server-dom-webpack": "19.2.6",
+    "vite": "8.2.0"
+  }
+}
