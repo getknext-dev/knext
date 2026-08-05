@@ -136,8 +136,28 @@ function isUniversalBranchFilter(value: unknown): boolean {
  *
  * `github.head_ref` and a PR-number key are accepted as ref scoping for the same
  * reason `github.ref` is: all three vary per pull request.
+ *
+ * The interpolation body must be EXACTLY one of those contexts, and that
+ * strictness is the round-2 fix. The first version was
+ * `/\$\{\{[^}]*github\.(ref|ref_name|head_ref)[^}]*\}\}|pull_request\.number/`
+ * — "an interpolation CONTAINING `github.ref` somewhere" — which was measured to
+ * accept three groups that scope nothing:
+ *
+ *   - `ci-${{ github.ref_protected }}` — a BOOLEAN. Two buckets for the whole
+ *     repository, so every PR shares a group with roughly half the others;
+ *   - `ci-${{ github.ref == 'refs/heads/main' }}` — also a boolean, and it reads
+ *     more like ref scoping than the last one;
+ *   - the bare literal `pull_request.number` — no `${{ }}` at all, because the
+ *     second alternation was unanchored. A fixed string scopes nothing, and it
+ *     is the fixed-string case this function exists to reject, accepted by the
+ *     branch meant to permit PR scoping.
+ *
+ * Each collapses every PR into one group, i.e. exactly the cross-PR disarm, in a
+ * check documented as failing closed. So this enumerates the contexts that DO
+ * vary per pull request and rejects everything else, including an expression
+ * over one of them — a comparison's value is not its operand.
  */
-const REF_SCOPED = /\$\{\{[^}]*github\.(ref|ref_name|head_ref)[^}]*\}\}|pull_request\.number/;
+const REF_SCOPED = /\$\{\{\s*github\.(ref|ref_name|head_ref|event\.pull_request\.number)\s*\}\}/;
 
 function concurrencyProblem(container: Job, where: string): string | null {
   if (!('concurrency' in container)) return null;

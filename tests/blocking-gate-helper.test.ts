@@ -490,6 +490,66 @@ jobs:
       expect(a.problems.join('\n')).toMatch(/concurrency/);
     });
 
+    it('rejects an interpolation that merely CONTAINS `github.ref` as a substring', () => {
+      // Round 1's `REF_SCOPED` was `/\$\{\{[^}]*github\.(ref|ref_name|head_ref)[^}]*\}\}/`,
+      // so any expression with `github.ref` ANYWHERE in it was accepted.
+      // `github.ref_protected` is a boolean — two possible values across the
+      // whole repository — so this group collapses every PR into one of two
+      // buckets, which is exactly the cross-PR disarm this check exists to
+      // reject, in a check documented as failing closed.
+      const a = audit(
+        withWorkflowConcurrency(
+          'concurrency:\n  group: ci-${{ github.ref_protected }}\n  cancel-in-progress: true\n',
+        ),
+      );
+      expect(a.problems.join('\n')).toMatch(/concurrency/);
+    });
+
+    it('rejects a COMPARISON on `github.ref`, which is a boolean, not a ref', () => {
+      // `${{ github.ref == 'refs/heads/main' }}` renders `true` or `false`. Same
+      // collapse, and it reads even more like ref scoping than the last one.
+      const a = audit(
+        withWorkflowConcurrency(
+          "concurrency:\n  group: ci-${{ github.ref == 'refs/heads/main' }}\n  cancel-in-progress: true\n",
+        ),
+      );
+      expect(a.problems.join('\n')).toMatch(/concurrency/);
+    });
+
+    it('rejects the bare literal `pull_request.number` with no interpolation', () => {
+      // Round 1's second alternation was unanchored, so the FIXED STRING
+      // `pull_request.number` — no `${{ }}` at all, therefore identical for
+      // every PR — was accepted as PR scoping. A literal cannot scope anything.
+      const a = audit(
+        withWorkflowConcurrency(
+          'concurrency:\n  group: pull_request.number\n  cancel-in-progress: true\n',
+        ),
+      );
+      expect(a.problems.join('\n')).toMatch(/concurrency/);
+    });
+
+    it('NEGATIVE CONTROL: a real PR-number interpolation is still accepted', () => {
+      // The form the round-1 alternation was presumably reaching for. It varies
+      // per pull request, so it scopes.
+      const a = audit(
+        withWorkflowConcurrency(
+          'concurrency:\n  group: preview-${{ github.event.pull_request.number }}\n  cancel-in-progress: true\n',
+        ),
+      );
+      expect(a.problems, a.problems.join('\n')).toEqual([]);
+    });
+
+    it('NEGATIVE CONTROL: `github.head_ref` and `github.ref_name` still scope', () => {
+      for (const key of ['github.head_ref', 'github.ref_name']) {
+        const a = audit(
+          withWorkflowConcurrency(
+            `concurrency:\n  group: ci-\${{ ${key} }}\n  cancel-in-progress: true\n`,
+          ),
+        );
+        expect(a.problems, `${key}: ${a.problems.join('\n')}`).toEqual([]);
+      }
+    });
+
     it('NEGATIVE CONTROL: a ref-scoped cancelling group is permitted', () => {
       const a = audit(
         withWorkflowConcurrency(

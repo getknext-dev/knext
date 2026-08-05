@@ -28,9 +28,19 @@ on:
 # a cancelled release or cosign run is worse than a duplicate. `ci.yml` pushes
 # no image (its docker build is `load: true`), signs nothing and touches no
 # cluster; `tests/ci-concurrency-group.test.ts` holds both halves of that.
+#
+# Cancellation is scoped to `pull_request`, and that is a deliberate narrowing.
+# Keying the GROUP on `event_name` stops the two triggers cancelling each other,
+# but it does not stop the `push`->`main` group cancelling ITSELF: two merges
+# landing inside one CI duration would cancel `main`'s run for the intermediate
+# commit and leave it with no verdict. `main` has already been red across three
+# consecutive commits here, and a per-commit result is what makes that
+# bisectable. The saving #674 is for is entirely in the `pull_request` group, so
+# it is taken there and nowhere else. The cost, stated: consecutive merges to
+# `main` are billed in full.
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   lint-and-test:
