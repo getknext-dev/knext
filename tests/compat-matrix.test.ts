@@ -17,9 +17,13 @@ import { describe, expect, it } from 'vitest';
  *     `next/image` (g) is now hard — but the rule that produced that work stands, and it has
  *     TWO halves (#655): a check may duck a failure by calling `skip(...)` in its body, or by
  *     declaring a narrowed `lanes` third argument (#281) that makes it a declared no-op on the
- *     other runtime lane. Neither can back an unconditional ✅. A row that honestly states its
- *     lane scope ("bun lane only") may cite a lane-scoped check — that is the escape valve for
- *     a genuinely runtime-specific contract like (h), the bun keep-alive guard.
+ *     other runtime lane. Neither can back an unconditional ✅. A row that honestly declares its
+ *     lane scope with the structured marker `(lane: bun)` in its Feature cell may cite a
+ *     lane-scoped check — that is the escape valve for a genuinely runtime-specific contract
+ *     like (h), the bun keep-alive guard. The declaration is a marker rather than free prose
+ *     so that ordinary wording ("the bun lane only runs weekly") can never silently narrow a
+ *     row's claim, and a repeated check id is AMBIGUOUS rather than last-write-wins, so a
+ *     `check(` occurrence inside a comment or a string cannot redefine a real check.
  *   - The "official" compat suite row may be ✅ ONLY with verifiable run evidence: a GitHub
  *     Actions run ID, the pinned vercel/next.js ref, and an explicit "N passed / 0 failed"
  *     result (A3-3 graduation, #147). An evidence-less flip fails this test. The evidence is
@@ -89,6 +93,12 @@ function parseMatrix(md: string): MatrixRow[] {
 
 type Lane = 'node' | 'bun';
 const ALL_LANES: readonly Lane[] = ['node', 'bun'] as const;
+
+/**
+ * The check ids the runner is known to declare today. Asserted as a SUBSET of what the
+ * derivation finds, never as an equality — see the "NOT GREEN BY SKIP" test.
+ */
+const KNOWN_SMOKE_IDS = [...'abcdefghijk'];
 
 interface SmokeCheck {
   id: string;
@@ -238,6 +248,14 @@ function laneScope(laneArg: string | null): { lanes: Set<Lane>; reason: string }
  *
  * The derivation stays SCANNED rather than enumerated, so reintroducing either skip path
  * demotes that id instead of going unnoticed.
+ *
+ * AMBIGUITY FAILS CLOSED (round 2). The scan is context-aware only INSIDE a call it has
+ * already entered — nothing decides whether the `check(` it entered was code. A later
+ * occurrence inside a comment or a string therefore used to overwrite the real entry
+ * (last-write-wins) with an unrestricted, both-lanes one, so a documentation comment
+ * restating a check could silently return this guard to green while the runner genuinely
+ * read `}, ['node']);`. An id declared more than once is now hard on NO lane: a mis-parse
+ * costs a red, never a false pass.
  */
 function parseSmokeChecks(smokeSrc: string): Map<string, SmokeCheck> {
   const checks = new Map<string, SmokeCheck>();
@@ -248,6 +266,17 @@ function parseSmokeChecks(smokeSrc: string): Map<string, SmokeCheck> {
     const open = m.index + m[0].length - 1;
     const args = splitCallArgs(smokeSrc, open);
     const idMatch = args?.[0]?.match(/^\s*['"]([a-z])\.\s/);
+    if (args && idMatch && checks.has(idMatch[1])) {
+      checks.set(idMatch[1], {
+        id: idMatch[1],
+        hardLanes: new Set<Lane>(),
+        reason:
+          'ambiguous — declared more than once; a second `check(` occurrence for this id ' +
+          '(including one inside a comment or a string) must never redefine it',
+      });
+      m = callRe.exec(smokeSrc);
+      continue;
+    }
     if (args && idMatch) {
       const id = idMatch[1];
       const body = args[1] ?? '';
@@ -269,15 +298,34 @@ function parseSmokeChecks(smokeSrc: string): Map<string, SmokeCheck> {
 }
 
 /**
- * The lanes a matrix row CLAIMS. Both, unless the row says otherwise in its own text —
- * that opt-out is what keeps a genuinely runtime-specific check (h, the bun keep-alive
- * guard contract) expressible without weakening the guard: it may back a ✅ row, but only
- * a row that states the restriction instead of reading as unconditional.
+ * The STRUCTURED marker a row uses to declare that its claim is scoped to one lane, e.g.
+ * `| Bun keep-alive guard (lane: bun) | ✅ | …`. Deliberately not free prose (round 2):
+ * keying the scope on wording across feature+evidence+notes misfired both ways — the old
+ * `/(node|bun)[\s-]lane[\s-]only/` matched `the bun lane only runs weekly (schedule), not
+ * per-PR`, entirely plausible prose for THIS matrix, and silently WEAKENED that row, while
+ * `only on the bun lane` and `verified on bun only` did not open the valve at all. That is
+ * the "encodes yesterday's wording" class this repo rejects elsewhere.
+ */
+const LANE_MARKER_RE = /\(\s*lane:\s*(node|bun)\s*\)/gi;
+/** Named in every failure message, so a legitimately scoped row is discoverable. */
+const LANE_MARKER_FORM = "the marker `(lane: node)` / `(lane: bun)` in the row's Feature cell";
+
+/**
+ * The lanes a matrix row CLAIMS. Both, unless the FEATURE cell carries exactly one lane
+ * marker — that opt-out is what keeps a genuinely runtime-specific check (h, the bun
+ * keep-alive guard contract) expressible without weakening the guard: it may back a ✅ row,
+ * but only a row that declares the restriction instead of reading as unconditional.
+ *
+ * FAILS CLOSED: no marker, an unreadable one, or two conflicting ones all yield the
+ * STRICTEST claim (both lanes). Only the Feature cell counts — Evidence and Notes are
+ * prose, and prose must never narrow a claim.
  */
 function claimedLanes(row: MatrixRow): Lane[] {
-  const cell = `${row.feature} ${row.evidence} ${row.notes}`;
-  const m = cell.match(/\b(node|bun)[\s-]lane[\s-]only\b/i);
-  return m ? [m[1].toLowerCase() as Lane] : [...ALL_LANES];
+  const found = new Set<Lane>();
+  for (const m of row.feature.matchAll(LANE_MARKER_RE)) {
+    found.add(m[1].toLowerCase() as Lane);
+  }
+  return found.size === 1 ? [...found] : [...ALL_LANES];
 }
 
 /**
@@ -301,7 +349,9 @@ function smokeCitationProblems(row: MatrixRow, checks: Map<string, SmokeCheck>):
     if (missing.length > 0) {
       problems.push(
         `cites check (${id}), which is not a hard, red-on-fail gate on lane(s) ` +
-          `${missing.join(', ')}${check.reason ? ` — ${check.reason}` : ''}`,
+          `${missing.join(', ')}${check.reason ? ` — ${check.reason}` : ''}. ` +
+          `If this row is genuinely scoped to one lane, declare it with ${LANE_MARKER_FORM} ` +
+          '— free prose such as "bun lane only" does NOT scope a row.',
       );
     }
   }
@@ -430,8 +480,82 @@ async function main() {
       // pass vacuously over an empty map. This is what makes that impossible.
       expect(existsSync(SMOKE_PATH)).toBe(true);
       expect(smokeSrc.length).toBeGreaterThan(1000);
-      const ids = [...smokeChecks.keys()].sort().join('');
-      expect(ids, 'the runner parse lost or invented check ids').toBe('abcdefghijk');
+      // SUPERSET, not an equality on the id string: adding a twelfth check (l) is a
+      // legitimate change and must not red this guard, because "edit the guard to get
+      // green" is exactly the antipattern `security.md` names for release-action-pins.
+      // Losing or renaming one of the known ids still reds.
+      const ids = new Set(smokeChecks.keys());
+      for (const id of KNOWN_SMOKE_IDS) {
+        expect(ids.has(id), `the runner parse lost compat-smoke check (${id})`).toBe(true);
+      }
+      // …and the COUNT is DERIVED from the runner rather than written down, so an
+      // invented or swallowed id still reds while growth stays free.
+      const declared = (smokeSrc.match(/^\s*await check\(/gm) ?? []).length;
+      expect(declared, 'no `await check(` declarations found in the runner').toBeGreaterThanOrEqual(
+        KNOWN_SMOKE_IDS.length,
+      );
+      expect(smokeChecks.size, 'the runner parse lost or invented check ids').toBe(declared);
+    });
+
+    // ── A `check(` occurrence that is not CODE (round 2) ───────────────────────────────
+    //
+    // The scanner is context-aware INSIDE a call it has entered, but nothing decides
+    // whether the `check(` it entered was code at all. Combined with a last-write-wins
+    // map, a later occurrence inside a comment or a string silently overwrote the real
+    // entry with an unrestricted, both-lanes one — a documentation comment could return
+    // the guard to green while the runner genuinely read `}, ['node']);`. A repeated id
+    // is now AMBIGUOUS and hard on no lane: a silent mis-parse fails closed.
+
+    const NODE_ONLY_G = `await check('g. next/image optimization (transcode + resize)', async () => {
+    return 'ok';
+  }, ['node']);`;
+
+    it('a COMMENT restating a check cannot launder a lane-narrowed id back to both lanes', () => {
+      const checks = parseSmokeChecks(
+        fixture(`${NODE_ONLY_G}
+
+  // NOTE: the canonical form of this check is
+  //   await check('g. next/image optimization (transcode + resize)', imageFn);`),
+      );
+      expect([...(checks.get('g')?.hardLanes ?? [])]).toEqual([]);
+      expect(checks.get('g')?.reason).toMatch(/declared more than once/);
+    });
+
+    it('a STRING containing a check call is equally powerless', () => {
+      const checks = parseSmokeChecks(
+        fixture(`${NODE_ONLY_G}
+
+  const HELP = "await check('g. next/image optimization (transcode + resize)', imageFn);";`),
+      );
+      expect([...(checks.get('g')?.hardLanes ?? [])]).toEqual([]);
+      expect(checks.get('g')?.reason).toMatch(/declared more than once/);
+    });
+
+    it('a duplicate id fails closed even when BOTH occurrences are real code', () => {
+      const checks = parseSmokeChecks(
+        fixture(`${NODE_ONLY_G}
+
+  await check('g. next/image optimization (transcode + resize)', async () => {
+    return 'ok';
+  });`),
+      );
+      expect([...(checks.get('g')?.hardLanes ?? [])]).toEqual([]);
+    });
+
+    it('a ✅ row citing an ambiguously-declared check FAILS the guard', () => {
+      const checks = parseSmokeChecks(
+        fixture(`${NODE_ONLY_G}
+
+  //   await check('g. next/image optimization (transcode + resize)', imageFn);`),
+      );
+      const row: MatrixRow = {
+        feature: 'next/image optimization',
+        status: '✅',
+        evidence: 'smoke g',
+        notes: '',
+      };
+      expect(smokeCitationProblems(row, checks).length).toBe(1);
+      expect(backsRow(row, 'g', checks)).toBe(false);
     });
 
     it('a check with no lanes argument is hard on both lanes', () => {
@@ -513,6 +637,76 @@ async function main() {
       expect(backsRow(row, 'z', checks)).toBe(false);
     });
 
+    // ── The lane opt-out is a STRUCTURED MARKER, not free prose (round 2) ──────────────
+    //
+    // Keying the row's scope on prose across feature+evidence+notes misfired in BOTH
+    // directions: `the bun lane only runs weekly (schedule), not per-PR` — entirely
+    // plausible prose for THIS matrix, whose Bun row documents a weekly schedule — matched
+    // and silently WEAKENED the row, while `only on the bun lane` did not open the valve at
+    // all and the failure message never named the phrase that would. That is the "encodes
+    // yesterday's wording" class this repo rejects elsewhere. The declaration is now the
+    // marker `(lane: bun)` in the FEATURE cell, and the failure message names it.
+
+    it('incidental PROSE about a lane never narrows a row (the false-positive half)', () => {
+      const checks = parseSmokeChecks(
+        fixture(`await check('z. node-only check', async () => {
+    return 'ok';
+  }, ['node']);`),
+      );
+      for (const notes of [
+        'the bun lane only runs weekly (schedule), not per-PR',
+        'only on the bun lane',
+        'verified on bun only',
+        'node lane only',
+      ]) {
+        const row: MatrixRow = {
+          feature: 'Some capability',
+          status: '✅',
+          evidence: 'smoke z',
+          notes,
+        };
+        expect([...claimedLanes(row)].sort(), `prose narrowed the row: "${notes}"`).toEqual([
+          'bun',
+          'node',
+        ]);
+        expect(smokeCitationProblems(row, checks).length).toBe(1);
+      }
+    });
+
+    it('the declaration is the marker `(lane: …)` and only in the Feature cell', () => {
+      const base: MatrixRow = { feature: 'x', status: '✅', evidence: '', notes: '' };
+      expect(claimedLanes({ ...base, feature: 'Bun keep-alive guard (lane: bun)' })).toEqual([
+        'bun',
+      ]);
+      expect(claimedLanes({ ...base, feature: 'Something (lane: node)' })).toEqual(['node']);
+      // Evidence/Notes are prose cells; a marker there does NOT scope the row.
+      expect(
+        [...claimedLanes({ ...base, evidence: '(lane: bun)', notes: '(lane: bun)' })].sort(),
+      ).toEqual(['bun', 'node']);
+      // Two conflicting markers are ambiguous — fail closed to the strictest claim.
+      expect([...claimedLanes({ ...base, feature: 'x (lane: bun) (lane: node)' })].sort()).toEqual([
+        'bun',
+        'node',
+      ]);
+    });
+
+    it('the failure message NAMES the marker form, so a scoped row is discoverable', () => {
+      const checks = parseSmokeChecks(
+        fixture(`await check('z. node-only check', async () => {
+    return 'ok';
+  }, ['node']);`),
+      );
+      const row: MatrixRow = {
+        feature: 'Some capability',
+        status: '✅',
+        evidence: 'smoke z',
+        notes: '',
+      };
+      const [problem] = smokeCitationProblems(row, checks);
+      expect(problem).toMatch(/\(lane: bun\)/);
+      expect(problem).toMatch(/Feature cell/i);
+    });
+
     it('a genuinely runtime-specific check stays expressible if the row SAYS so (h)', () => {
       // The escape valve that keeps this from pushing authors toward deleting (h) or faking
       // a lane: a lane-scoped check may back a ✅ row that declares the same lane scope.
@@ -522,7 +716,7 @@ async function main() {
   }, ['bun']);`),
       );
       const scoped: MatrixRow = {
-        feature: 'Bun keep-alive guard (bun lane only)',
+        feature: 'Bun keep-alive guard (lane: bun)',
         status: '✅',
         evidence: 'smoke z',
         notes: 'A node-lane claim would be dishonest; the row says so.',
