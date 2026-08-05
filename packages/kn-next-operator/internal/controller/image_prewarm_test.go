@@ -60,6 +60,75 @@ func TestPrewarmHelperImage_DigestPinned(t *testing.T) {
 	}
 }
 
+// staticBusyboxVariant reports whether a busybox reference names one of the
+// STATICALLY LINKED official variants. Docker's official busybox ships several
+// libc builds under one repository and only the `-uclibc` / `-musl` ones are
+// `FROM scratch` static binaries; the DEFAULT tag (`busybox:<ver>`) is the
+// **glibc** build, which is dynamically linked against `/lib64/ld-linux-*`.
+func staticBusyboxVariant(ref string) bool {
+	tag := ref
+	if i := strings.Index(ref, "@"); i >= 0 {
+		tag = ref[:i]
+	}
+	return strings.HasSuffix(tag, "-uclibc") || strings.HasSuffix(tag, "-musl")
+}
+
+// TestPrewarmHelperImage_IsStaticallyLinkedVariant guards the invariant the file's
+// own DISTROLESS-SAFETY comment claims — "the helper image, guaranteed to ship a
+// static busybox" — which the first pin did NOT satisfy.
+//
+// Measured on a live OKE node (#471), not reasoned about: with the default-tag
+// (glibc) busybox staged, the pin container in an Alpine-based app image exits 255
+// immediately with `exec /knext-pin/busybox: no such file or directory` (the
+// missing dynamic loader), the DaemonSet sits in CrashLoopBackOff, and
+// ImageCacheReady never leaves False/Pulling. The same staging from
+// `busybox:1.36.1-uclibc` runs `busybox sleep` in that same app image and exits 0.
+// Linkage cannot be asserted without a container runtime, so this guards the one
+// property that predicts it: which official variant the pin names.
+//
+// WHAT THIS DOES NOT PROVE, stated because an earlier revision left it implicit
+// and a reviewer BUILT AND RAN the bypass: this asserts the TAG TEXT, and the
+// kubelet resolves the DIGEST and never reads the tag. So
+// `busybox:1.36.1-uclibc@sha256:73aaf090…` — the uclibc tag carrying the glibc
+// digest that crash-looped on OKE — passes this test AND
+// TestPrewarmHelperImage_DigestPinned while containerd pulls the broken image,
+// and the documented bump procedure (`crane digest busybox:<tag>`) makes that a
+// single copy-paste. These two tests prove the LABEL. The ARTIFACT is proved by
+// resolving the tag upstream at RUN time — `scripts/verify-image-pins.mjs`,
+// wired to `.github/workflows/image-pin-resolution-nightly.yml`, which fails on a
+// digest that is not what its tag resolves to (and on an unreachable registry,
+// never a pass). That value cannot be frozen into an assertion here: doing so for
+// the equivalent action-pin check reddened every correct bump and made editing
+// the guard the routine way to get green (security.md). Form at PR time, value
+// at run time — do not collapse the two.
+func TestPrewarmHelperImage_IsStaticallyLinkedVariant(t *testing.T) {
+	// The predicate must actually discriminate, or the assertion below is vacuous.
+	digest := "@sha256:" + strings.Repeat("a", 64)
+	for ref, want := range map[string]bool{
+		"busybox:1.36.1" + digest:        false, // Docker's default tag == the glibc build
+		"busybox:1.36.1-glibc" + digest:  false,
+		"busybox:latest" + digest:        false,
+		"busybox:1.36.1-uclibc" + digest: true,
+		"busybox:1.37.0-musl" + digest:   true,
+		"busybox:1.36.1-uclibc":          true, // digest-pinning is a separate guard
+	} {
+		if got := staticBusyboxVariant(ref); got != want {
+			t.Fatalf("staticBusyboxVariant(%q) = %v, want %v", ref, got, want)
+		}
+	}
+
+	if !staticBusyboxVariant(prewarmHelperImage) {
+		t.Fatalf(
+			"prewarmHelperImage %q is not a statically linked busybox variant (-uclibc/-musl): "+
+				"the initContainer stages this binary into an emptyDir and the MAIN container execs it "+
+				"inside the APP image, so a dynamically linked build fails with "+
+				"`exec %s: no such file or directory` on every musl/distroless app image and the "+
+				"prewarm DaemonSet CrashLoopBackOffs (#471, measured on OKE)",
+			prewarmHelperImage, prewarmHelperBinary,
+		)
+	}
+}
+
 // TestBuildImagePrewarmDaemonSet_InitContainerUsesDigestPinnedHelper asserts the
 // built DaemonSet's initContainer actually consumes the digest-pinned constant
 // (not some other reference).

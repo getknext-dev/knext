@@ -40,7 +40,8 @@
     "tsup": "^8.5.1",
     "turbo": "latest",
     "typescript": "^5.9.3",
-    "vitest": "^4.0.16"
+    "vitest": "^4.0.16",
+    "yaml": "^2.7.1"
   },
   "workspaces": [
     "apps/*",
