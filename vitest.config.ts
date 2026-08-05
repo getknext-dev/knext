@@ -47,7 +47,21 @@ export default defineConfig({
     // Never collect tests from throwaway agent git worktrees under .claude/ — they
     // are stale full-repo copies (often without node_modules) that pollute the run
     // with duplicate + resolve-error "failures". Preserve vitest's own defaults.
-    exclude: [...configDefaults.exclude, '**/.claude/**'],
+    //
+    // `*.docker-e2e.test.ts` — suites that build and run a CONTAINER, and that
+    // deliberately have no skip path (a missing docker or bun FAILS, per #408 /
+    // #448). This root run is `Lint & Test`, which installs node+pnpm and no
+    // bun/docker, so collecting one here reddens the main gate for a reason that
+    // has nothing to do with the change under test. A per-example
+    // `vitest.config.ts` exclude does NOT cover this: it only applies when
+    // vitest runs with that example as its cwd, and this run collects
+    // `examples/**` from the repo root.
+    //
+    // Excluded by PATTERN, not by filename, so a future container e2e is covered
+    // the moment it is named — and the suites this pattern hides still run, in
+    // their own jobs (`bun-exec-alpine-image` runs `bun run test:image`).
+    // `tests/bun-exec-alpine-image-ci.test.ts` asserts this entry is here.
+    exclude: [...configDefaults.exclude, '**/.claude/**', '**/*.docker-e2e.test.ts'],
     coverage: {
       provider: 'v8',
       reporter: ['text', 'text-summary', 'json', 'json-summary', 'html'],

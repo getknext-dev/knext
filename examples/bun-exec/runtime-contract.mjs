@@ -16,6 +16,12 @@
 // app routes / the env contract / the globalThis anchor below, or explicitly
 // deferred — see README.md.
 
+// The only imports are node: builtins, which resolve identically under node,
+// under bun, and inside the compiled binary — the "dependency-free" property
+// above is about bun/nitro/vinext coupling, not about the standard library.
+import { basename, dirname, resolve } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+
 // ── (6) Bind-host resolution — never bind to a k8s pod name ─────────────────
 // Kubernetes injects HOSTNAME=<pod-name> (e.g. `recipe-validate-fn252`) into
 // EVERY pod. A pod name is an identity, not a bind address: binding
@@ -48,6 +54,171 @@ function isBindOrLoopback(value) {
 export function resolveBindHost(env = process.env) {
   const h = env.HOSTNAME;
   return h && isBindOrLoopback(h) ? h : '0.0.0.0';
+}
+
+// ── (#460 bug 3) Where the runtime reads `.output/public` from ──────────────
+//
+// Nitro prepends `globalThis.__nitro_main__ = import.meta.url` to the server
+// entry and its public-asset reader does
+// `readFile(resolve(dirname(fileURLToPath(__nitro_main__)), '../public/…'))`.
+// `bun build --compile` BAKES that URL as the absolute path on the machine that
+// built the binary, so a shipped container asks for
+// `/Users/<builder>/…/.output/public/_next/static/…` and 500s (ENOENT) on every
+// asset — while `/` still returns correct SSR HTML. That is why it survived five
+// verifications: the page renders and never hydrates.
+//
+// The decision is factored out here, away from the entry, for two reasons: the
+// entry cannot be imported by a test (it pulls in nitro + vinext), and the only
+// failure mode of getting this wrong is SILENCE. Both are addressed by making it
+// a pure function with an injected `exists`.
+//
+// Candidate order, and why:
+//   1. the BAKED root, if its `../public` is actually there AND this is not a
+//      compiled binary. A non-compiled `bun run /abs/path/.output/server/
+//      index.mjs` has a CORRECT baked value, and it must win over anything
+//      discovered from the environment.
+//   2. `dirname(process.execPath)` — the compiled case. The ship shape is the
+//      executable next to `.output/public` (README + Dockerfile), so anchoring
+//      on the EXECUTABLE makes the binary portable. cwd deliberately is NOT a
+//      candidate: it would both miss (`docker run -w /elsewhere`) and misfire
+//      (an unrelated `.output/public` under cwd hijacking a correct baked root).
+//   3. nothing → keep the baked value and WARN LOUDLY. Serving is already broken
+//      at this point; the only thing left to get right is not being silent.
+//
+// `isCompiled` is load-bearing and NOT an optimisation. Without it, "a baked
+// root that exists" wins unconditionally, and on the BUILD MACHINE — the one
+// place a human verifies the ship shape — a compiled binary then serves the
+// build tree's assets instead of its own co-located ones, with no warning. That
+// makes "I copied binary + .output/public to /tmp/ship and it served" prove
+// nothing (delete the shipped public/ and it still serves), lets a moved binary
+// serve a rebuilt tree's content-hashed chunks against old HTML, and — because
+// `exists` is DIRECTORY-level — lets a stale or emptied baked public/ shadow a
+// complete co-located one. The premise "a baked root that exists ⇒ non-compiled"
+// is false by construction on the builder; the honest discriminator is that a
+// non-compiled run's execPath is the bun/node RUNTIME, not the app.
+const PUBLIC_REL = '.output/public';
+const SERVER_ENTRY_REL = '.output/server/index.mjs';
+
+// A plain `bun run entry.mjs` reports the RUNTIME as `process.execPath`; a
+// `bun build --compile` binary reports ITSELF. Basename is the only signal that
+// does not depend on a bun internal, and it is used solely to pick which root
+// wins / whether to warn — never to break a path that would otherwise serve.
+// Overridable via the `isCompiled` parameter for a binary named `bun`, or if a
+// future bun exposes something better.
+//
+// KNOWN RESIDUAL, stated rather than left to be rediscovered: this is a
+// heuristic on a basename, so a compiled binary whose basename is EXACTLY one
+// of these (`OUT=node ./build.sh`) classifies as non-compiled and takes the
+// baked-root branch silently — the pre-fix behaviour, restored, for that one
+// naming. `build.sh` defaults `OUT` to `knext-bun-exec-$ARCH`, so only an
+// explicit `OUT=` override can reach it; do not name the binary after a
+// language runtime. The inverse (`nodejs`, `bun-1.3.14`, `node18`) is benign:
+// a non-compiled run so named yields at worst a spurious warning, and only if
+// the runtime's OWN directory happens to hold a `.output/public`.
+const RUNTIME_BASENAMES = new Set(['bun', 'bun-debug', 'bunx', 'node', 'deno']);
+
+/**
+ * @param {string} execPath `process.execPath`.
+ * @returns {boolean} true when execPath is the app itself, not a language runtime.
+ */
+export function isCompiledExecutable(execPath) {
+  const base = basename(execPath).replace(/\.exe$/i, '');
+  return !RUNTIME_BASENAMES.has(base);
+}
+
+/**
+ * @param {object} opts
+ * @param {string | undefined} opts.bakedMain `globalThis.__nitro_main__` as baked at build time.
+ * @param {string} opts.execPath              `process.execPath`.
+ * @param {(path: string) => boolean} opts.exists
+ * @param {boolean} [opts.isCompiled]         Defaults to `isCompiledExecutable(execPath)`.
+ * @param {string} [opts.cwd]                 Reported in the warning only — never a candidate.
+ * @returns {{ mainUrl: string | null, source: 'baked' | 'execdir' | 'unresolved', warning: string | null }}
+ *   `mainUrl` is null when `__nitro_main__` must be left alone (candidate 1 or 3).
+ */
+export function resolveAssetAnchor({ bakedMain, execPath, exists, isCompiled, cwd }) {
+  // A malformed/absent baked value must degrade, never throw — this runs at
+  // module init of the entry, so throwing here kills the process before it listens.
+  let bakedDir = null;
+  try {
+    if (bakedMain) bakedDir = dirname(fileURLToPath(bakedMain));
+  } catch {
+    bakedDir = null;
+  }
+  const bakedPublic = bakedDir ? resolve(bakedDir, '../public') : null;
+  const bakedOk = Boolean(bakedPublic && exists(bakedPublic));
+
+  const execDir = dirname(execPath);
+  const execPublic = resolve(execDir, PUBLIC_REL);
+  const execOk = exists(execPublic);
+  const compiled = isCompiled ?? isCompiledExecutable(execPath);
+
+  // Candidate 1 — the baked root wins ONLY when this is not a compiled binary.
+  // For a compiled binary the baked root is the BUILD MACHINE's tree, which is
+  // a different artifact that merely happens to be reachable on the builder.
+  if (bakedOk && !compiled) {
+    return { mainUrl: null, source: 'baked', warning: null };
+  }
+
+  // Compiled, and BOTH roots are present: the co-located one is what shipped,
+  // so it wins — but this is the case that used to resolve silently, so say so.
+  if (bakedOk && execOk && bakedPublic !== execPublic) {
+    return {
+      mainUrl: pathToFileURL(resolve(execDir, SERVER_ENTRY_REL)).href,
+      source: 'execdir',
+      warning:
+        'knext bun-exec: TWO static-asset roots are present — anchoring on the one shipped beside ' +
+        `the executable (${execPublic}) and IGNORING the build tree it was compiled from ` +
+        `(${bakedPublic}). If assets look stale, you are running a binary next to a stale ` +
+        '`.output/public`, or on the machine that built it.',
+    };
+  }
+
+  // Compiled, but ONLY the build tree is there — `!execOk` is what makes that
+  // "only" true, and it is load-bearing, not redundant with the branch above.
+  // `build.sh` drops the binary INTO the example dir beside the very
+  // `.output/public` it was built from (the README's documented first run), so
+  // `bakedPublic === execPublic` is a NORMAL layout: one root, reached two
+  // ways, both `bakedOk` and `execOk`. Without `!execOk` that lands here and
+  // prints the same path twice — "found NO .output/public beside itself (<P>)
+  // … fell back to (<P>)" — telling the user to do what they already did.
+  // Serving is unaffected (the roots coincide), but this whole resolver exists
+  // because the failure mode was silence, and a warning that cries wolf on the
+  // first run is how the real one gets ignored. With the guard, coincident
+  // roots fall through to the plain `execOk` branch: same directory, no noise.
+  // The genuine case — a compiled binary whose co-located root is absent —
+  // serves HERE and nowhere else, so keep the baked value whole (never
+  // partially rewritten) and warn.
+  if (bakedOk && !execOk) {
+    return {
+      mainUrl: null,
+      source: 'baked',
+      warning:
+        'knext bun-exec: this executable found NO `.output/public` beside itself ' +
+        `(${execPublic}) and fell back to the tree it was BUILT from (${bakedPublic}). ` +
+        'It will serve here and 500 on every static asset anywhere else. Ship the executable ' +
+        'NEXT TO its `.output/public` directory.',
+    };
+  }
+
+  if (execOk) {
+    return {
+      mainUrl: pathToFileURL(resolve(execDir, SERVER_ENTRY_REL)).href,
+      source: 'execdir',
+      warning: null,
+    };
+  }
+
+  return {
+    mainUrl: null,
+    source: 'unresolved',
+    warning:
+      'knext bun-exec: no static-asset root found — every /_next/static request will 500 ' +
+      '(the page will render but never hydrate). Ship the executable NEXT TO its `.output/public` ' +
+      `directory. Looked for: ${resolve(execDir, PUBLIC_REL)}` +
+      (bakedPublic ? ` and ${bakedPublic}` : ' (no baked __nitro_main__ to fall back on)') +
+      (cwd ? ` [cwd: ${cwd}]` : ''),
+  };
 }
 
 // ── (2) Prometheus metrics ─────────────────────────────────────────────────

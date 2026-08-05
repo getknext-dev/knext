@@ -24,7 +24,9 @@
 
 import { execFileSync } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { builtinModules } from 'node:module';
 import { join, relative, resolve, sep } from 'node:path';
+import ts from 'typescript';
 import { describe, expect, it } from 'vitest';
 
 const REPO_ROOT = resolve(import.meta.dirname, '..');
@@ -294,5 +296,80 @@ describe('root typecheck script + CI wiring (#527)', () => {
       /\n\s{4}if:/.test(block),
       'a job-level `if:` can skip the typecheck entirely — it must run on every PR',
     ).toBe(false);
+  });
+});
+
+/**
+ * The gate above proves the root tests are IN the tsc program. This one proves
+ * the program can be BUILT on a machine that is not this one.
+ *
+ * A bare specifier that resolves only because pnpm hoisted it for some other
+ * workspace package is a PHANTOM dependency: `tsc` and `vitest` both find it in
+ * a local checkout and both fail in CI, where the hoist is not guaranteed. That
+ * is not hypothetical — `import { parse } from 'yaml'` landed in
+ * `tests/operator-image-pin-resolution.test.ts` while the root manifest had no
+ * `yaml`. It reddened BOTH `Typecheck (root tests/)` (TS2307) and `Lint & Test`
+ * ("Failed to resolve import"), and because a module-level import fails the
+ * whole file, it took that entire suite offline — including the guards that were
+ * the point of the PR.
+ *
+ * Scanned in both dimensions: every `.ts` under `tests/` is read from disk (a
+ * new file cannot dodge this by not being on a list) and every bare specifier in
+ * it is resolved against the root manifest.
+ */
+describe('the root test tree imports only DECLARED root dependencies', () => {
+  const manifest = JSON.parse(readFileSync(join(REPO_ROOT, 'package.json'), 'utf8')) as {
+    dependencies?: Record<string, string>;
+    devDependencies?: Record<string, string>;
+  };
+  const declared = new Set([
+    ...Object.keys(manifest.dependencies ?? {}),
+    ...Object.keys(manifest.devDependencies ?? {}),
+  ]);
+  const builtin = new Set(builtinModules);
+
+  /** `@scope/pkg/sub` -> `@scope/pkg`; `pkg/sub` -> `pkg`. */
+  const packageName = (specifier: string): string => {
+    const parts = specifier.split('/');
+    return specifier.startsWith('@') ? parts.slice(0, 2).join('/') : (parts[0] ?? specifier);
+  };
+
+  /**
+   * Every module specifier in `source`, from static and dynamic imports alike.
+   *
+   * TypeScript's own pre-processor, not a regex. These files write FIXTURE
+   * sources into template literals (`import x from 'next'` inside a string that
+   * is written to a temp dir), and a regex cannot tell that from a real import —
+   * it reported six false positives on the first run. `preProcessFile` runs the
+   * real scanner, for which a template literal is one token.
+   */
+  const specifiersIn = (source: string): string[] =>
+    ts.preProcessFile(source, true, true).importedFiles.map((f) => f.fileName);
+
+  const files = tsFilesUnder(join(REPO_ROOT, 'tests'));
+
+  it('the scan itself finds files and specifiers — an empty scan proves nothing', () => {
+    // Both halves. Without this a broken walk (or a broken regex) would report
+    // "no undeclared imports" forever, which is the permanently-green gate this
+    // file's own header warns about.
+    expect(files.length).toBeGreaterThan(20);
+    const all = files.flatMap((f) => specifiersIn(readFileSync(f, 'utf8')));
+    expect(all).toContain('vitest');
+    expect(all.some((s) => s.startsWith('node:'))).toBe(true);
+    expect(all.some((s) => s.startsWith('.'))).toBe(true);
+  });
+
+  it.each(files.map((f) => [relative(REPO_ROOT, f), f]))('%s', (label, file) => {
+    const undeclaredHere = specifiersIn(readFileSync(file, 'utf8'))
+      .filter((s): s is string => typeof s === 'string')
+      .filter((s) => !s.startsWith('.') && !s.startsWith('/') && !s.startsWith('node:'))
+      .map(packageName)
+      .filter((name) => !builtin.has(name) && !declared.has(name));
+    expect(
+      [...new Set(undeclaredHere)],
+      `${label} imports package(s) that the ROOT package.json does not declare. ` +
+        'They resolve here only because pnpm hoisted them for another workspace ' +
+        'package; CI has no such hoist and both tsc and vite will fail.',
+    ).toEqual([]);
   });
 });

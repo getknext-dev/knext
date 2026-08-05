@@ -67,7 +67,19 @@ const ConditionImageCacheReady = "ImageCacheReady"
 // operator digest-pins every image it runs, and this helper is no exception
 // (#471). The human-readable tag is retained alongside the digest for legibility;
 // the digest is what kubelet resolves. To bump: `crane digest busybox:<tag>`.
-const prewarmHelperImage = "busybox:1.36.1@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662"
+//
+// THE VARIANT IS LOAD-BEARING, not cosmetic. Docker's official busybox publishes
+// several libc builds in one repository, and the DEFAULT tag (`busybox:<ver>`) is
+// the **glibc** one — dynamically linked. Staged into an emptyDir and exec'd
+// inside a musl (Alpine) or libc-free (distroless) APP image it cannot start:
+// measured on a live OKE node (#471), the pin container exited 255 immediately
+// with `exec /knext-pin/busybox: no such file or directory`, the DaemonSet sat in
+// CrashLoopBackOff and ImageCacheReady never left False/Pulling. Only the
+// `-uclibc` / `-musl` variants are `FROM scratch` static binaries; the same
+// staging from `-uclibc` ran `busybox sleep` in that same app image and exited 0.
+// Any bump MUST stay on a static variant — `TestPrewarmHelperImage_IsStaticallyLinkedVariant`
+// enforces it.
+const prewarmHelperImage = "busybox:1.36.1-uclibc@sha256:0872fb3a7632ba9d0ae46a8e832a62b30ce83a6f220b8bb52903d9cf477dabe3"
 
 // prewarmHelperMountPath is where the shared emptyDir carrying the copied static
 // helper binary is mounted in BOTH the initContainer and the main container.
