@@ -38,9 +38,15 @@
  * Usage:  node scripts/mutation-prove-ci-blocking-gates.mjs
  */
 
-import { spawnSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  declaredTestTitles,
+  GATE_TEST_NAME,
+  GATES,
+  runGateTest as runGateTestIn,
+} from './lib/ci-blocking-gate-proof.mjs';
 import { mutate, restore, snapshot } from './lib/mutation-harness.mjs';
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -57,33 +63,11 @@ const CI_YML = resolve(REPO_ROOT, '.github/workflows/ci.yml');
  */
 const SKIPPABLE_JOB = 'docs-drift-reminder';
 
-/**
- * The name every converted blocking-gate assertion carries. The proof runs ONLY
- * that test (`vitest -t`), which is not a convenience — it is what keeps the
- * result attributable.
- *
- * `tests/mutation-residue-scan.test.ts` proved that the hard way: it also scans
- * every tracked file for the residue marker, and the harness stamps that marker
- * into `ci.yml` on every mutation. Run whole, that spec goes RED under all five
- * disarms — including ones it cannot see — because the marker it just found is
- * its own. A proof that cannot tell "the gate is disarmed" from "the mutation
- * marker is present" proves nothing, so the run is narrowed to the one assertion
- * whose subject is being removed.
+/*
+ * `GATE_TEST_NAME` and `GATES` now live in `./lib/ci-blocking-gate-proof.mjs`,
+ * so `tests/ci-blocking-gate-proof-runnable.test.ts` can assert this proof is
+ * still runnable without importing this script and running all 25 mutations.
  */
-const GATE_TEST_NAME = 'runs unconditionally on a PR and its failure fails the run';
-
-/**
- * Every ci.yml job whose guard claims it is a blocking gate, and the spec that
- * makes the claim. Adding a converted guard here is what keeps this proof from
- * describing only the jobs someone remembered.
- */
-const GATES = [
-  { jobId: 'compile-cache-bun-probe', spec: 'tests/compile-cache-health-bun-ci.test.ts' },
-  { jobId: 'typecheck-root', spec: 'tests/root-typecheck-gate.test.ts' },
-  { jobId: 'lint-and-test', spec: 'tests/mutation-residue-scan.test.ts' },
-  { jobId: 'bun-exec-hardcap', spec: 'tests/bun-exec-hardcap-ci.test.ts' },
-  { jobId: 'bun-exec-alpine-image', spec: 'tests/bun-exec-alpine-image-ci.test.ts' },
-];
 
 /**
  * The disarms. Each is a single valid-YAML edit that neutralises the job while
@@ -104,36 +88,38 @@ const DISARMS = [
   },
 ];
 
-/**
- * SGR colour codes in vitest's output, so the summary line can be parsed.
- *
- * Built with `String.fromCharCode(27)` rather than written as `\x1b` in a regex
- * literal: biome's `noControlCharactersInRegex` is an ERROR here, and the point
- * of that rule (a control character nobody intended) does not apply to a
- * deliberate ANSI strip.
- */
-const ANSI = new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*m`, 'g');
-
 let pass = 0;
 let fail = 0;
 
+const runGateTest = (spec) => runGateTestIn(REPO_ROOT, spec);
+
 /**
- * Run the ONE blocking-gate assertion in `spec`.
+ * Say WHY nothing ran, naming what was expected and what was found.
  *
- * Returns how many tests actually ran alongside the verdict, because `vitest -t`
- * with a name that matches nothing exits 0 — so "green" and "there was nothing
- * to run" are the same status code, and a renamed assertion would turn this
- * whole proof into a no-op that reports success.
+ * The first version printed a bare `FATAL: <spec> has no test named "…"` for
+ * both causes. It was the wrong one: the assertion had never been renamed, the
+ * RUNNER had failed to start (`pnpm exec vitest` resolves nothing in a tree
+ * without its own `node_modules`). A misattributed FATAL sends the next reader
+ * looking for a rename that does not exist, which is how the proof stayed
+ * offline for a whole PR.
  */
-function runGateTest(spec) {
-  const res = spawnSync('pnpm', ['exec', 'vitest', 'run', spec, '-t', GATE_TEST_NAME], {
-    cwd: REPO_ROOT,
-    encoding: 'utf8',
-  });
-  const out = `${res.stdout ?? ''}${res.stderr ?? ''}`.replace(ANSI, '');
-  const passed = Number(out.match(/Tests\s+(\d+) passed/)?.[1] ?? 0);
-  const failed = Number(out.match(/Tests\s+.*?(\d+) failed/)?.[1] ?? 0);
-  return { ok: res.status === 0, ran: passed + failed };
+function explainNothingRan(spec, result) {
+  if (!result.launched) {
+    return [
+      `FATAL: the test runner never started, so NOTHING was proved.`,
+      `  runner: ${result.runner.command} ${result.runner.args.join(' ')}`,
+      `  fix:    install dependencies in ${REPO_ROOT} (a git worktree has no node_modules of its own)`,
+      `  output: ${result.out.trim().split('\n').slice(-3).join(' | ')}`,
+    ].join('\n');
+  }
+  const titles = declaredTestTitles(readFileSync(resolve(REPO_ROOT, spec), 'utf8'));
+  return [
+    `FATAL: ${spec} declares no test whose name contains the one this proof selects.`,
+    `  expected (substring): ${JSON.stringify(GATE_TEST_NAME)}`,
+    `  found in ${spec}:`,
+    ...titles.map((t) => `    - ${JSON.stringify(t)}`),
+    `  fix: restore the name, or update GATE_TEST_NAME in scripts/lib/ci-blocking-gate-proof.mjs`,
+  ].join('\n');
 }
 
 /** The assertion must be RED while the job is disarmed, and GREEN once restored. */
@@ -146,9 +132,10 @@ function prove(jobId, spec, disarm) {
     // the job's body looks like — no dependence on which line happens to be
     // first, which is how an anchored-on-a-neighbour mutation silently no-ops.
     mutate(snap, anchor, `${anchor}${disarm.inject}\n`);
-    const { ok, ran } = runGateTest(spec);
+    const result = runGateTest(spec);
+    const { ok, ran } = result;
     if (ran === 0) {
-      console.error(`   FATAL: no test named ${JSON.stringify(GATE_TEST_NAME)} ran in ${spec}`);
+      console.error(explainNothingRan(spec, result));
       restore(snap);
       process.exit(1);
     }
@@ -170,9 +157,10 @@ function prove(jobId, spec, disarm) {
 
 console.log('Baseline: every gate assertion must be GREEN against the real ci.yml.');
 for (const { spec } of GATES) {
-  const { ok, ran } = runGateTest(spec);
+  const result = runGateTest(spec);
+  const { ok, ran } = result;
   if (ran === 0) {
-    console.error(`FATAL: ${spec} has no test named ${JSON.stringify(GATE_TEST_NAME)}`);
+    console.error(explainNothingRan(spec, result));
     process.exit(1);
   }
   if (!ok) {
