@@ -10,9 +10,17 @@
 #   ... ~30 more relocation errors, container exits 127
 #
 # It was never caught because every prior validation ran the binary somewhere
-# those libraries already existed. `test/alpine-image-e2e.test.ts` builds THIS
+# those libraries already existed. `test/alpine-image.docker-e2e.test.ts` builds THIS
 # file and runs the container, so deleting the line below turns red.
-FROM alpine:3.22
+#
+# Digest-pinned per security.md ("pin images by digest; reject :latest") and
+# enforced by scripts/check-base-images-pinned.sh (CI: base-image-pin-guard) —
+# which SCANS every Dockerfile* in the tree, so this file was covered the moment
+# it existed. The tag lives in a full-line comment because Docker rejects a
+# trailing comment on a FROM line. This is the multi-arch INDEX digest, so the
+# same pin resolves on linux/amd64 (CI) and linux/arm64 (local).
+# alpine:3.22
+FROM alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce
 
 RUN apk add --no-cache libstdc++ libgcc
 

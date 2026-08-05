@@ -10,10 +10,12 @@ import { defineConfig } from 'vitest/config';
 export default defineConfig({
   test: {
     include: ['test/**/*.test.ts'],
-    // The alpine image e2e compiles a ~100 MB binary and builds+runs a
-    // container; it belongs to `bun run test:image` (vitest.image.config.ts),
-    // not to this fast suite. Excluded here, NOT disabled — it has no skip path
-    // and its own CI job runs it.
-    exclude: ['test/alpine-image-e2e.test.ts', '**/node_modules/**'],
+    // `*.docker-e2e.test.ts` compiles a ~100 MB binary and builds+runs a
+    // container; those belong to `bun run test:image` (vitest.image.config.ts),
+    // not to this fast suite. Excluded here, NOT disabled — they have no skip
+    // path and their own CI job runs them. The ROOT vitest.config.ts carries the
+    // same pattern, because this exclude only applies when vitest's cwd is this
+    // directory and the root run collects `examples/**` too.
+    exclude: ['**/*.docker-e2e.test.ts', '**/node_modules/**'],
   },
 });

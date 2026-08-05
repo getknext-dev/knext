@@ -894,7 +894,7 @@ jobs:
   #        binary + `.output/public` with NO `.output/server`) was verified by
   #        hand during #460 and never again.
   #
-  # `examples/bun-exec/test/alpine-image-e2e.test.ts` has NO skip path -- a
+  # `examples/bun-exec/test/alpine-image.docker-e2e.test.ts` has NO skip path -- a
   # missing docker or bun is a failure, not a skip -- but it is excluded from the
   # example's fast `bun run test` (it compiles a ~100 MB binary and builds a
   # container). This job is the only thing that runs it, which is why

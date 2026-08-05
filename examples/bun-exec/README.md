@@ -4,11 +4,16 @@
 > on the CURRENT toolchain, ADR-0042 A1).**
 > The compiled binary embeds all routes and serves them from ANY directory — ship it as
 > **`binary` + `.output/public`** (the static-asset dir), not binary-only. This is no longer a
-> hand-run claim: `test/alpine-image-e2e.test.ts` (`bun run test:image`, CI job
+> hand-run claim: `test/alpine-image.docker-e2e.test.ts` (`bun run test:image`, CI job
 > `bun-exec-alpine-image`) builds the binary, builds `Dockerfile`, runs the container with `/app`
 > holding ONLY the binary + `.output/public` (`.output/server` asserted absent), and probes SSR, a
-> route handler, a **dynamic** page and handler, a 404, the fail-closed
-> `POST /api/cache/invalidate`, and `:9091/metrics`. Two root causes were fixed (both proven on OKE):
+> route handler, a **dynamic** page and handler, a 404, a **static asset fetched from the page's own
+> `<script src>`**, the fail-closed `POST /api/cache/invalidate`, and `:9091/metrics`.
+>
+> **Three** root causes have now been fixed. The third (below) was found by adding that static-asset
+> probe — until then, the shipped image served correct SSR HTML and **500'd every single JS chunk**,
+> so the page rendered and never hydrated. Every earlier verification, including #460's, probed only
+> `/`, `/api/health`, `:9091/metrics` and the auth route, so nothing ever noticed:
 >
 > 1. **Versions / bundling.** `vinext@1.0.0-beta.2` emitted a runtime-CHUNKED server
 >    (`.output/server/index.mjs` a ~7 KB loader that reads route chunks from `.output/server/` at
@@ -23,6 +28,17 @@
 >    (registers `globalThis.__nitro_vite_envs__` → the ssr/rsc render chunks). It also now serves the
 >    app through srvx's `serve` (`srvx/bun`) — the SAME path nitro's default bun entry uses — instead
 >    of a raw `Bun.serve` → `useNitroApp().fetch`, which answered a framework 404 for every route.
+> 3. **Static assets resolved against the BUILD MACHINE's absolute path.** Nitro prepends
+>    `globalThis.__nitro_main__ = import.meta.url` to the entry and reads public assets from
+>    `dirname(fileURLToPath(__nitro_main__))/../public/…`. `bun build --compile` **bakes** that URL,
+>    so the shipped container tried to open
+>    `/Users/<whoever-built-it>/…/examples/bun-exec/.output/public/_next/static/chunks/index-*.js`
+>    and returned `500 {"error":true,"unhandled":true}` (ENOENT) for **every** asset. The entry now
+>    re-anchors `__nitro_main__` on the runtime cwd when `./.output/public` exists, which is exactly
+>    the layout this README and the `Dockerfile` document. Note what this means for the word
+>    "self-contained": the **routes** are embedded in the binary, but `.output/public` is read from
+>    disk at runtime — so the binary is portable, the *asset root* is cwd-relative, and the two must
+>    ship together.
 
 > **Maintainer example.** This directory is an in-repo recipe for knext
 > maintainers, not user-facing documentation — so it references ADRs and the
@@ -150,7 +166,7 @@ where `./.output/public` resolves.
 > **not statically linked**. Without `libstdc++`/`libgcc` the container dies with
 > `Error loading shared library libstdc++.so.6`, ~30 relocation errors, and **exit 127** — so the
 > image row in ADR-0036 ("`FROM alpine` + the single binary") is wrong as written. The `Dockerfile`
-> here carries `RUN apk add --no-cache libstdc++ libgcc` (+~2 MB), and `test/alpine-image-e2e.test.ts`
+> here carries `RUN apk add --no-cache libstdc++ libgcc` (+~2 MB), and `test/alpine-image.docker-e2e.test.ts`
 > fails with that container's own exit code if the line is removed (mutation-proved).
 Because the binary is opaque to Trivy/syft, the SBOM + HIGH/CRITICAL scan run against the
 **pre-compile dependency closure** (lockfile), not the binary (ADR-0036 supply-chain consequence).
@@ -197,7 +213,7 @@ root causes (the `#nitro/virtual/polyfills` import and srvx-based app serving) s
 neither can silently regress.
 
 `bun run test:image` is the **compiled-binary** half, and it is no longer out of
-scope for CI: `test/alpine-image-e2e.test.ts` compiles the binary (via `build.sh`
+scope for CI: `test/alpine-image.docker-e2e.test.ts` compiles the binary (via `build.sh`
 if absent), builds the reference `Dockerfile`, and probes the running container.
 It has **no skip path** — a missing docker or bun is a failure, never a silent
 pass — which is why it is kept out of the fast `bun run test` and given its own

@@ -26,7 +26,9 @@
 // `vitest.config.ts` exclude) and run by `bun run test:image`, which the
 // `bun-exec-alpine-image` CI job invokes. That wiring has its own guard:
 // `tests/bun-exec-alpine-image-ci.test.ts` (removing the job reddens it).
+
 import { spawnSync } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { resolve } from 'node:path';
@@ -34,7 +36,11 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 const EXAMPLE_DIR = resolve(__dirname, '..');
 const TOKEN = 'alpine-e2e-token';
-const CONTAINER = 'knext-bunexec-alpine-e2e';
+// UNIQUE per run. A fixed name plus the `docker rm --force` below meant two
+// concurrent runs — two git worktrees, which this repo's workflow actively
+// encourages — killed each other's container mid-probe and reported it as an A9
+// failure. The container is removed in afterAll, so unique names do not leak.
+const CONTAINER = `knext-bunexec-alpine-e2e-${randomBytes(4).toString('hex')}`;
 
 /** Build for the host's own architecture — emulation is minutes, native is seconds. */
 const ARCH = process.arch === 'arm64' ? 'linux-arm64' : 'linux-x64';
@@ -74,13 +80,19 @@ beforeAll(async () => {
     );
   }
 
-  // 2. The binary under test. Built here rather than assumed, so a green run
-  //    can never be a stale artifact from a previous toolchain.
-  if (!existsSync(resolve(EXAMPLE_DIR, BINARY))) {
-    const build = run('./build.sh', [ARCH]);
-    if (build.status !== 0) {
-      throw new Error(`./build.sh ${ARCH} failed:\n${build.stdout}\n${build.stderr}`);
-    }
+  // 2. The binary under test — built UNCONDITIONALLY, every run.
+  //
+  //    This used to reuse an existing binary, which quietly contradicted the
+  //    claim it exists to support. A1's entire content is "the CURRENT toolchain
+  //    is self-contained", and `knext-bun-exec-*` is gitignored, so it survives
+  //    branch switches: a reviewer reproducing A1 with a binary left over from
+  //    the `vinext@0.0.19` pin would have got a green "beta.4 is self-contained"
+  //    run without beta.4 ever being built. `.output/public` is equally stale,
+  //    and `build.sh` regenerates both. The reuse saved seconds and could
+  //    validate the wrong artifact, so it is gone.
+  const build = run('./build.sh', [ARCH]);
+  if (build.status !== 0) {
+    throw new Error(`./build.sh ${ARCH} failed:\n${build.stdout}\n${build.stderr}`);
   }
   expect(existsSync(resolve(EXAMPLE_DIR, BINARY)), `${BINARY} was not produced`).toBe(true);
   expect(
@@ -219,6 +231,28 @@ describe('A1 — self-contained on the current vinext/vite pins', () => {
     const res = await fetch(`http://127.0.0.1:${appPort}/api/health`);
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ status: 'ok', target: 'bun-exec' });
+  });
+
+  it('SERVES a static asset out of .output/public', async () => {
+    // The ship shape is binary + `.output/public`, so "does it serve statics" is
+    // half the claim — and nothing tested it. Dropping the `COPY .output/public`
+    // line, or a regression where the binary stops serving that directory, left
+    // every other assertion green: `GET /` still returns the SSR text, it just
+    // arrives with no JS and no hydration.
+    //
+    // The asset is discovered from the page's own <script src>, not hardcoded:
+    // the filenames are content-hashed, and asserting on the URL the page
+    // actually asks the browser to load is what makes this a hydration check
+    // rather than a file-exists check.
+    const html = await (await fetch(`http://127.0.0.1:${appPort}/`)).text();
+    const src = html.match(/<script[^>]+src="(\/_next\/static\/[^"]+\.js)"/)?.[1];
+    expect(src, 'the SSR page referenced no /_next/static script to load').toBeTruthy();
+
+    const asset = await fetch(`http://127.0.0.1:${appPort}${src}`);
+    expect(asset.status, `the page's own module ${src} is not served`).toBe(200);
+    expect(asset.headers.get('content-type') ?? '').toMatch(/javascript/);
+    // Non-vacuity: a 200 with an empty or error body would satisfy the above.
+    expect((await asset.text()).length).toBeGreaterThan(100);
   });
 
   it('serves a dynamic page and binds its param', async () => {

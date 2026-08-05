@@ -15,7 +15,13 @@ import { defineConfig } from 'vitest/config';
 // the test runner.
 export default defineConfig({
   test: {
-    include: ['test/alpine-image-e2e.test.ts'],
+    // The `*.docker-e2e.test.ts` convention, matched here and EXCLUDED by both
+    // the example's fast config and the ROOT config. One pattern, three places,
+    // so a new container e2e lands in the right runner by name alone. If the
+    // pattern matched nothing, vitest exits 1 — the suite cannot silently
+    // vanish, and `tests/bun-exec-alpine-image-ci.test.ts` asserts a file
+    // matching it actually exists.
+    include: ['test/**/*.docker-e2e.test.ts'],
     // One container, one set of ports, one docker daemon.
     fileParallelism: false,
     testTimeout: 120_000,

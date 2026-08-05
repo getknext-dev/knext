@@ -42,6 +42,9 @@
 // every app route (no `_ssr` chunks are even emitted). With it, routes are bundled
 // and the binary is self-contained.
 import '#nitro/virtual/polyfills';
+import { existsSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { useNitroApp } from 'nitro/app';
 import { serve } from 'srvx/bun';
 import {
@@ -52,6 +55,37 @@ import {
   renderMetrics,
   resolveBindHost,
 } from './runtime-contract.mjs';
+
+// ── #460 bug 3: static assets resolved against the BUILD MACHINE's path ─────
+//
+// Nitro prepends `globalThis.__nitro_main__ = import.meta.url` to this entry,
+// and its public-asset reader does:
+//
+//     const serverDir = dirname(fileURLToPath(globalThis.__nitro_main__))
+//     return fsp.readFile(resolve(serverDir, assets[id].path))   // ../public/…
+//
+// `bun build --compile` BAKES that `import.meta.url` as the absolute
+// `file:///…/examples/bun-exec/.output/server/index.mjs` of the machine that
+// built the binary. So the shipped container asked for
+// `/Users/<builder>/…/.output/public/_next/static/chunks/index-*.js` and every
+// single static asset 500'd with ENOENT — while `/` still returned correct SSR
+// HTML, which is exactly why nobody noticed: the page renders, then loads no
+// JS and never hydrates.
+//
+// The routes themselves ARE embedded in the binary (that is what #460 fixed and
+// what self-containment means); this is the OTHER half of the ship shape, the
+// `.output/public` dir that travels beside the binary. Re-anchor the asset root
+// on the RUNTIME cwd so `resolve(serverDir, '../public/…')` lands on
+// `<cwd>/.output/public` — precisely the layout README and Dockerfile document.
+//
+// Guarded, not unconditional: if the runtime layout is not there we leave the
+// baked value alone, so a non-compiled `bun run .output/server/index.mjs` from
+// some other cwd keeps working. `<cwd>/.output/server` need NOT exist — only its
+// dirname is used — which is why the container ships public/ and no server/.
+const RUNTIME_SERVER_ENTRY = resolve(process.cwd(), '.output/server/index.mjs');
+if (existsSync(resolve(process.cwd(), '.output/public'))) {
+  globalThis.__nitro_main__ = pathToFileURL(RUNTIME_SERVER_ENTRY).href;
+}
 
 const PORT = Number(process.env.PORT ?? 3000);
 // Bind to 0.0.0.0 unless HOSTNAME is an EXPLICIT bind/loopback address. k8s sets
