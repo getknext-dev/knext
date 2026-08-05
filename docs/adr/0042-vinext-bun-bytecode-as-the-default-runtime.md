@@ -381,6 +381,18 @@ first, then CLI**.
   the build host**, with the build tree **renamed**, exercising **SSR/dynamic** — not boot, not `/`.
   The rename is a **required negative control**: the test must be shown to go **red** without it.
   A9's "runs from a clean alpine" is too weak on its own — #658's false green *served correctly*.
+  **A SECOND, INDEPENDENT INSTANCE confirms the rule is not theoretical (#657, 2026-08-05).** Adding a
+  static-asset probe to the Phase 0 e2e went red immediately: **every asset 500'd**. Cause — nitro
+  reads public assets relative to `globalThis.__nitro_main__ = import.meta.url`, and
+  `bun build --compile` **bakes** that URL, so the container opened
+  `/Users/<builder>/…/.output/public/…` and got ENOENT. `GET /` still returned **correct SSR HTML**,
+  so the page rendered and never hydrated — **#460 and four later verifications never probed an
+  asset.** Two different symbols (`import.meta.dirname`, `import.meta.url`), two different projects
+  (vinext, nitro), same failure mode, both invisible to a boot-or-`/` smoke test. This is why the rule
+  names the symbol class rather than one symbol, and why it requires SSR/dynamic **and asset** probes.
+  **It also narrows A1's claim:** routes are embedded in the binary, but `.output/public` is read from
+  **disk at runtime** — a portable binary with a **cwd-relative asset root**. The two must ship
+  together; "self-contained" was true of the route table and not of the asset root.
 - **Do not cite #607's macOS boot numbers, ADR-0036's Run 24, or the Phase 0 spike's 241.9 ms as
   cold-start A/B evidence.** #607 §8 disclaims transferability; Run 24 is withdrawn; the spike is not an A/B.
 - **Do not claim "passes the official compatibility suite"** once the corpus is reduced. Name the delta.
