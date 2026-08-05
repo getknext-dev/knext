@@ -14,6 +14,8 @@ import { describe, expect, it } from 'vitest';
 import {
   discoverPinnableFiles,
   formatFinding,
+  GIT_FALLBACK_STATUSES,
+  gitLsRemoteTag,
   PINNED_WORKFLOWS,
   parsePins,
   resolveTagCommit,
@@ -952,5 +954,389 @@ describe('nightly SHA↔tag resolution — verdicts (#539)', () => {
     const findings = await verifyWorkflows({ dir, api: matchingApi() });
     const files = new Set(findings.map((finding: { file: string }) => finding.file));
     expect(Array.from(files).sort()).toEqual(Array.from(PINNED_WORKFLOWS as string[]).sort());
+  });
+});
+
+/**
+ * #640 — the org IP-allow-list hole.
+ *
+ * MEASURED, not assumed: the nightly went red on 2026-08-04/05 with FOUR
+ * findings, all of them `aquasecurity/trivy-action # v0.36.0`, all of them
+ *
+ *   GitHub API error 403: Although you appear to have the correct authorization
+ *   credentials, the `aquasecurity` organization has an IP allow list enabled,
+ *   and your IP address is not permitted to access this resource.
+ *
+ * The pins are CORRECT — `git ls-remote --tags https://github.com/aquasecurity/
+ * trivy-action` returns `ed142fd…` for `refs/tags/v0.36.0^{}`, which is exactly
+ * what all four workflows pin. The check was behaving correctly per security.md
+ * ("an unreachable API is a FAILURE, never a pass"); it simply had NO WAY to
+ * reach those four pins from a GitHub-hosted runner, so it was permanently red
+ * — and a permanently-red gate is one people learn to ignore, which is worse
+ * than the failure it was built to catch.
+ *
+ * The fix is to RESOLVE them another way, never to downgrade the failure. The
+ * anonymous git protocol is not subject to the org's API IP allow list, and it
+ * gives the SAME guarantee the API path gives: `refs/tags/<tag>^{}` is the
+ * annotated-tag dereference, and the refs come from the CANONICAL repository, so
+ * the fork-network immunity is preserved.
+ *
+ * What must NOT change, and is asserted below:
+ *   - a 403 is not a pass — it is a REDIRECT to a second resolver, and if that
+ *     resolver cannot answer either, the finding stands;
+ *   - the fallback is reachable ONLY from 403/451. Any other status — 404, 429,
+ *     500, a thrown transport — resolves or fails exactly as before, so this
+ *     cannot silently cover a real mismatch on some other repo;
+ *   - a genuine mismatch on an allowlisted-out repo STILL REDS, through the
+ *     fallback.
+ */
+describe('nightly SHA↔tag resolution — org IP allow list (#640)', () => {
+  const TRIVY_REF = 'repos/aquasecurity/trivy-action/git/ref/tags/v0.36.0';
+  const IP_ALLOW_LIST_403 = {
+    status: 403,
+    body: {
+      message:
+        'Although you appear to have the correct authorization credentials, the `aquasecurity` organization has an IP allow list enabled, and your IP address is not permitted to access this resource.',
+    },
+  };
+
+  /** A canned `git ls-remote` double that records what it was asked. */
+  function fakeLsRemote(result: unknown) {
+    const seen: Array<{ owner: string; repo: string; tag: string }> = [];
+    const lsRemote = (request: { owner: string; repo: string; tag: string }) => {
+      seen.push(request);
+      return result;
+    };
+    return { lsRemote, seen };
+  }
+
+  it('resolves a 403-blocked repo over the anonymous git protocol instead of failing blind', async () => {
+    const { lsRemote, seen } = fakeLsRemote({ kind: 'commit', sha: SHA_A, annotated: true });
+    const resolved = await resolveTagCommit({
+      owner: 'aquasecurity',
+      repo: 'trivy-action',
+      tag: 'v0.36.0',
+      api: fakeApi({ [TRIVY_REF]: IP_ALLOW_LIST_403 }).api,
+      lsRemote,
+    });
+    expect(resolved).toMatchObject({ kind: 'commit', sha: SHA_A, via: 'git-ls-remote' });
+    expect(seen).toEqual([{ owner: 'aquasecurity', repo: 'trivy-action', tag: 'v0.36.0' }]);
+  });
+
+  it('STILL REDS a genuine mismatch on a 403-blocked repo — the fallback verifies, it does not excuse', async () => {
+    // The property that makes this a fix rather than a hole. If the fallback
+    // resolved and then shrugged, #640 would have traded a noisy gate for a
+    // silent one on precisely the four pins it stopped covering.
+    const dir = mkdtempSync(join(tmpdir(), 'knext-pin-403-mismatch-'));
+    writeFileSync(
+      join(dir, 'supply-chain.yml'),
+      [
+        'jobs:',
+        '  x:',
+        '    steps:',
+        `      - uses: aquasecurity/trivy-action@${SHA_B} # v0.36.0`,
+      ].join('\n'),
+    );
+    const findings = await verifyWorkflows({
+      dir,
+      api: fakeApi({ [TRIVY_REF]: IP_ALLOW_LIST_403 }).api,
+      lsRemote: fakeLsRemote({ kind: 'commit', sha: SHA_A, annotated: true }).lsRemote,
+    });
+    expect(findings).toHaveLength(1);
+    expect(findings[0]).toMatchObject({
+      reason: 'sha-mismatch',
+      pinnedSha: SHA_B,
+      actualSha: SHA_A,
+    });
+  });
+
+  it('goes GREEN on the four real trivy pins only because they genuinely resolve', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'knext-pin-403-green-'));
+    writeFileSync(
+      join(dir, 'supply-chain.yml'),
+      [
+        'jobs:',
+        '  x:',
+        '    steps:',
+        `      - uses: aquasecurity/trivy-action@${SHA_A} # v0.36.0`,
+      ].join('\n'),
+    );
+    const findings = await verifyWorkflows({
+      dir,
+      api: fakeApi({ [TRIVY_REF]: IP_ALLOW_LIST_403 }).api,
+      lsRemote: fakeLsRemote({ kind: 'commit', sha: SHA_A, annotated: true }).lsRemote,
+    });
+    expect(findings).toEqual([]);
+  });
+
+  it('keeps a 403 a FAILURE when the git fallback cannot answer either, and names BOTH causes', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'knext-pin-403-blocked-'));
+    writeFileSync(
+      join(dir, 'supply-chain.yml'),
+      [
+        'jobs:',
+        '  x:',
+        '    steps:',
+        `      - uses: aquasecurity/trivy-action@${SHA_A} # v0.36.0`,
+      ].join('\n'),
+    );
+    const findings = await verifyWorkflows({
+      dir,
+      api: fakeApi({ [TRIVY_REF]: IP_ALLOW_LIST_403 }).api,
+      lsRemote: fakeLsRemote({ kind: 'transport-error', message: 'Could not read from remote' })
+        .lsRemote,
+    });
+    expect(findings).toHaveLength(1);
+    expect(findings[0]).toMatchObject({ reason: 'api-error', status: 403 });
+    const message = formatFinding(findings[0]);
+    expect(message).toMatch(/IP allow list/);
+    expect(message).toMatch(/git ls-remote/);
+    expect(message).toMatch(/Could not read from remote/);
+    expect(message).toMatch(/FAILURE, not a pass/);
+  });
+
+  it('reports a tag the git fallback cannot find as tag-missing, not as an API error', async () => {
+    const resolved = await resolveTagCommit({
+      owner: 'aquasecurity',
+      repo: 'trivy-action',
+      tag: 'v9.9.9',
+      api: fakeApi({ 'repos/aquasecurity/trivy-action/git/ref/tags/v9.9.9': IP_ALLOW_LIST_403 })
+        .api,
+      lsRemote: fakeLsRemote({ kind: 'tag-missing' }).lsRemote,
+    });
+    expect(resolved).toMatchObject({ kind: 'tag-missing' });
+  });
+
+  it('NEVER reaches for the fallback on any status other than 403/451', async () => {
+    // The "both halves" scan. A fallback wired to a broader set of statuses
+    // would quietly cover a real mismatch, a rate limit, or an outage on EVERY
+    // other repo — the exact hole security.md names.
+    expect(Array.from(GIT_FALLBACK_STATUSES as Iterable<number>).sort()).toEqual([403, 451]);
+    for (const status of [401, 404, 422, 429, 500, 502, 503]) {
+      const { lsRemote, seen } = fakeLsRemote({ kind: 'commit', sha: SHA_A, annotated: false });
+      const resolved = await resolveTagCommit({
+        owner: 'actions',
+        repo: 'checkout',
+        tag: 'v5.0.0',
+        api: fakeApi({
+          'repos/actions/checkout/git/ref/tags/v5.0.0': { status, body: { message: 'nope' } },
+        }).api,
+        lsRemote,
+      });
+      expect(seen, `status ${status} must not reach the git fallback`).toEqual([]);
+      expect(resolved).toMatchObject(
+        status === 404 ? { kind: 'tag-missing' } : { kind: 'api-error', status },
+      );
+    }
+  });
+
+  it('does NOT reach for the fallback when the transport THREW rather than returned 403', async () => {
+    const { lsRemote, seen } = fakeLsRemote({ kind: 'commit', sha: SHA_A, annotated: false });
+    const resolved = await resolveTagCommit({
+      owner: 'actions',
+      repo: 'checkout',
+      tag: 'v5.0.0',
+      api: async () => {
+        throw new TypeError('fetch failed');
+      },
+      lsRemote,
+    });
+    expect(seen).toEqual([]);
+    expect(resolved).toMatchObject({ kind: 'api-error', status: 0 });
+  });
+
+  it('falls back on a 403 at the ANNOTATED-TAG hop too, not only the first one', async () => {
+    // The second API call is as blockable as the first, and a fallback wired to
+    // only one of them would leave the same permanently-red gate for any repo
+    // whose ref read succeeds and whose tag-object read does not.
+    const { lsRemote, seen } = fakeLsRemote({ kind: 'commit', sha: SHA_A, annotated: true });
+    const resolved = await resolveTagCommit({
+      owner: 'aquasecurity',
+      repo: 'trivy-action',
+      tag: 'v0.36.0',
+      api: fakeApi({
+        [TRIVY_REF]: { status: 200, body: { object: { type: 'tag', sha: SHA_TAGOBJ } } },
+        [`repos/aquasecurity/trivy-action/git/tags/${SHA_TAGOBJ}`]: IP_ALLOW_LIST_403,
+      }).api,
+      lsRemote,
+    });
+    expect(resolved).toMatchObject({ kind: 'commit', sha: SHA_A, via: 'git-ls-remote' });
+    expect(seen).toHaveLength(1);
+  });
+
+  it('resolves each 403-blocked action+tag ONCE, however many files pin it', async () => {
+    // Four workflows pin trivy-action today. One subprocess per pin would make
+    // the nightly pay for the outage four times over; caching the FAILURE too is
+    // what keeps an unreachable fallback a failure for every dependent pin.
+    const dir = mkdtempSync(join(tmpdir(), 'knext-pin-403-memo-'));
+    for (const file of ['a.yml', 'b.yml', 'c.yml', 'd.yml']) {
+      writeFileSync(
+        join(dir, file),
+        [
+          'jobs:',
+          '  x:',
+          '    steps:',
+          `      - uses: aquasecurity/trivy-action@${SHA_A} # v0.36.0`,
+        ].join('\n'),
+      );
+    }
+    const { lsRemote, seen } = fakeLsRemote({ kind: 'commit', sha: SHA_A, annotated: true });
+    const findings = await verifyWorkflows({
+      dir,
+      api: fakeApi({ [TRIVY_REF]: IP_ALLOW_LIST_403 }).api,
+      lsRemote,
+    });
+    expect(findings).toEqual([]);
+    expect(seen).toHaveLength(1);
+  });
+});
+
+describe('nightly SHA↔tag resolution — the git ls-remote resolver itself (#640)', () => {
+  /** A canned `git` runner: `{ status, stdout, stderr }`, plus the argv it saw. */
+  function fakeGit(result: { status: number; stdout?: string; stderr?: string }) {
+    const calls: string[][] = [];
+    const run = (args: string[]) => {
+      calls.push(args);
+      return { status: result.status, stdout: result.stdout ?? '', stderr: result.stderr ?? '' };
+    };
+    return { run, calls };
+  }
+
+  it('DEREFERENCES an annotated tag — the `^{}` ref, never the tag object', () => {
+    // Real output, captured from `git ls-remote --tags
+    // https://github.com/aquasecurity/trivy-action refs/tags/v0.36.0*`:
+    // a9c7b0f… is the TAG OBJECT and ed142fd… is the commit the workflows pin.
+    // Taking the first line would red all four correct pins.
+    const { run } = fakeGit({
+      status: 0,
+      stdout: [
+        'a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8\trefs/tags/v0.36.0',
+        'ed142fd0673e97e23eac54620cfb913e5ce36c25\trefs/tags/v0.36.0^{}',
+        '',
+      ].join('\n'),
+    });
+    expect(
+      gitLsRemoteTag({ owner: 'aquasecurity', repo: 'trivy-action', tag: 'v0.36.0', run }),
+    ).toEqual({
+      kind: 'commit',
+      sha: 'ed142fd0673e97e23eac54620cfb913e5ce36c25',
+      annotated: true,
+    });
+  });
+
+  it('resolves a LIGHTWEIGHT tag, which has no `^{}` line at all', () => {
+    const { run } = fakeGit({ status: 0, stdout: `${SHA_A}\trefs/tags/v1.2.3\n` });
+    expect(gitLsRemoteTag({ owner: 'some', repo: 'action', tag: 'v1.2.3', run })).toEqual({
+      kind: 'commit',
+      sha: SHA_A,
+      annotated: false,
+    });
+  });
+
+  it('does not accept a PREFIX match — v1.2.3 must not be answered by v1.2.30', () => {
+    const { run } = fakeGit({ status: 0, stdout: `${SHA_B}\trefs/tags/v1.2.30\n` });
+    expect(gitLsRemoteTag({ owner: 'some', repo: 'action', tag: 'v1.2.3', run })).toMatchObject({
+      kind: 'tag-missing',
+    });
+  });
+
+  it('reports a git failure as a transport error — never as a resolved or missing tag', () => {
+    const { run } = fakeGit({
+      status: 128,
+      stderr: 'fatal: could not read from remote repository',
+    });
+    expect(
+      gitLsRemoteTag({ owner: 'some', repo: 'action', tag: 'v1.2.3', run, sleep: () => {} }),
+    ).toMatchObject({
+      kind: 'transport-error',
+    });
+  });
+
+  it('reports an EMPTY successful listing as a missing tag', () => {
+    const { run } = fakeGit({ status: 0, stdout: '' });
+    expect(gitLsRemoteTag({ owner: 'some', repo: 'action', tag: 'v9.9.9', run })).toMatchObject({
+      kind: 'tag-missing',
+    });
+  });
+
+  it('REFUSES to shell out for an owner, repo or tag that is not a plain identifier', () => {
+    // This is the one place the checker builds a command line out of repository
+    // content. A `uses:` line is attacker-influenced in a fork PR, so the ref is
+    // validated BEFORE it can become argv — and refusing is a failure, never a
+    // pass.
+    for (const unsafe of [
+      { owner: '--upload-pack=touch /tmp/pwned', repo: 'action', tag: 'v1.0.0' },
+      { owner: 'some', repo: '../../etc', tag: 'v1.0.0' },
+      { owner: 'some', repo: 'action', tag: '--upload-pack=sh' },
+      { owner: 'some', repo: 'action', tag: 'v1.0.0;rm -rf /' },
+      { owner: 'some', repo: 'action', tag: 'v1.0.0 --exec' },
+    ]) {
+      const { run, calls } = fakeGit({ status: 0, stdout: `${SHA_A}\trefs/tags/v1.0.0\n` });
+      const resolved = gitLsRemoteTag({ ...unsafe, run });
+      expect(resolved, `${JSON.stringify(unsafe)} must not resolve`).toMatchObject({
+        kind: 'transport-error',
+      });
+      expect(calls, `${JSON.stringify(unsafe)} must never reach git`).toEqual([]);
+    }
+  });
+
+  it('RETRIES a transport failure once — measured flakiness, not a hypothetical', () => {
+    // Measured on this branch: the same `git ls-remote` that answers in ~0.7 s
+    // intermittently times out when called repeatedly in quick succession
+    // (upstream throttling). A single transient timeout would re-red the whole
+    // nightly, which is the failure mode #640 exists to end. Retrying is NOT
+    // softening the verdict — a second failure still fails.
+    let attempt = 0;
+    const run = () => {
+      attempt += 1;
+      return attempt === 1
+        ? { status: -1, stdout: '', stderr: 'spawnSync git ETIMEDOUT' }
+        : { status: 0, stdout: `${SHA_A}\trefs/tags/v1.2.3\n`, stderr: '' };
+    };
+    expect(
+      gitLsRemoteTag({ owner: 'some', repo: 'action', tag: 'v1.2.3', run, sleep: () => {} }),
+    ).toEqual({ kind: 'commit', sha: SHA_A, annotated: false });
+    expect(attempt).toBe(2);
+  });
+
+  it('gives up after the retry — a second failure is still a FAILURE', () => {
+    let attempt = 0;
+    const run = () => {
+      attempt += 1;
+      return { status: -1, stdout: '', stderr: 'spawnSync git ETIMEDOUT' };
+    };
+    expect(
+      gitLsRemoteTag({ owner: 'some', repo: 'action', tag: 'v1.2.3', run, sleep: () => {} }),
+    ).toMatchObject({ kind: 'transport-error' });
+    expect(attempt).toBe(2);
+  });
+
+  it('does NOT retry a successful listing that simply has no such tag', () => {
+    // `tag-missing` is an ANSWER, and retrying an answer would double the cost
+    // of the one case that is already conclusive.
+    let attempt = 0;
+    const run = () => {
+      attempt += 1;
+      return { status: 0, stdout: '', stderr: '' };
+    };
+    expect(
+      gitLsRemoteTag({ owner: 'some', repo: 'action', tag: 'v9.9.9', run, sleep: () => {} }),
+    ).toMatchObject({ kind: 'tag-missing' });
+    expect(attempt).toBe(1);
+  });
+
+  it('asks git ANONYMOUSLY — no credential helper, no token, no interactive prompt', () => {
+    // The whole reason this path works is that it is NOT an authenticated
+    // request: the org's IP allow list is evaluated against an authenticated
+    // identity. A helper silently attaching the runner's token would put the
+    // fallback right back behind the allow list it exists to get around.
+    const { run, calls } = fakeGit({ status: 0, stdout: `${SHA_A}\trefs/tags/v1.2.3\n` });
+    gitLsRemoteTag({ owner: 'some', repo: 'action', tag: 'v1.2.3', run });
+    expect(calls).toHaveLength(1);
+    const argv = calls[0];
+    expect(argv).toContain('credential.helper=');
+    expect(argv).toContain('ls-remote');
+    expect(argv.join(' ')).toContain('https://github.com/some/action');
+    expect(argv.join(' ')).not.toMatch(/@github\.com|token|Bearer/i);
   });
 });

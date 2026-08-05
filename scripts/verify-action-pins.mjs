@@ -58,6 +58,32 @@
  * of type `tag` whose own sha is the tag object, not the commit. Comparing that
  * to the pin would red every correct annotated-tag pin.
  *
+ * TWO ROUTES TO THE SAME ANSWER (#640)
+ * ------------------------------------
+ * The nightly was permanently red for four pins because `aquasecurity` (the
+ * Trivy actions) enables an organisation IP ALLOW LIST, and a GitHub-hosted
+ * runner's address is not on it:
+ *
+ *   403: … the `aquasecurity` organization has an IP allow list enabled, and
+ *        your IP address is not permitted to access this resource.
+ *
+ * The check was right to fail — an unreachable API is a failure, never a pass —
+ * but it had no way to resolve those pins AT ALL from CI, and a permanently-red
+ * gate is one people learn to ignore, which is worse than the failure it was
+ * built to catch. The fix is a SECOND ROUTE, never a downgraded verdict: on a
+ * 403/451 only, resolve the same tag with an anonymous `git ls-remote` (the git
+ * protocol is not behind the org's API allow list). `refs/tags/<tag>^{}` is the
+ * annotated-tag dereference, and the refs come from the canonical repository, so
+ * the guarantee is identical — including the fork-network immunity below. If
+ * that route fails too, the 403 stands and BOTH causes are reported.
+ *
+ * Deliberately NOT done: downgrading a 403 to a pass, or allowlisting "API
+ * errors" in general. Either would silently cover a real mismatch on every other
+ * repo. The diversion set is `GIT_FALLBACK_STATUSES` and nothing else reaches
+ * it. Note that GitHub also returns 403 for an exhausted rate limit, which
+ * therefore diverts too — that is still a genuine RESOLUTION, not a skip.
+ * Requires `git` on PATH; the nightly checks out the repo, so it has one.
+ *
  * Usage: node scripts/verify-action-pins.mjs [--root <repo-root>]
  *   --root  repository root to scan (default: cwd). The scan covers
  *           .github/workflows, .github/actions/** and the root action.yml.
@@ -66,6 +92,7 @@
  * arguments that makes this script exit 0 without having verified something.
  */
 
+import { spawnSync } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -229,14 +256,165 @@ export async function githubApi(path) {
 }
 
 /**
+ * The ONLY API statuses that may divert to the git fallback below (#640).
+ *
+ * 403 is what an organisation IP allow list returns to an authenticated request
+ * from an address it does not permit; 451 is the unavailable-for-legal-reasons
+ * sibling. Both mean "this identity, from here, may not ask" — NOT "the answer
+ * is fine". Anything else keeps its existing verdict exactly: a 404 is still a
+ * missing tag, a 429/5xx and a thrown transport are still failures. Widening
+ * this set to "API errors" would silently cover a real mismatch on every other
+ * repo, which is the hole security.md names.
+ */
+export const GIT_FALLBACK_STATUSES = new Set([403, 451]);
+
+/** A plain GitHub owner/repo segment. Anything else never becomes argv. */
+const SAFE_PATH_SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+/** A plain tag. Deliberately narrower than git allows — this is a command line. */
+const SAFE_TAG = /^[A-Za-z0-9][A-Za-z0-9._+-]*$/;
+
+/**
+ * Block for `ms`. Synchronous on purpose: `gitLsRemoteTag` is a synchronous
+ * function called from an async one, and making it async to hold a backoff
+ * would ripple through every caller and every test double for no gain.
+ */
+function sleepSync(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/** Default `git` runner: argv in, `{ status, stdout, stderr }` out. */
+function runGit(args) {
+  const result = spawnSync('git', args, {
+    encoding: 'utf8',
+    timeout: 30_000,
+    env: {
+      ...process.env,
+      // Never let git wait for, or find, a credential. See the anonymity note
+      // in `gitLsRemoteTag`.
+      GIT_TERMINAL_PROMPT: '0',
+      GIT_ASKPASS: '',
+      GCM_INTERACTIVE: 'never',
+      GIT_CONFIG_NOSYSTEM: '1',
+    },
+  });
+  if (result.error) {
+    return { status: -1, stdout: '', stderr: result.error.message };
+  }
+  return { status: result.status ?? -1, stdout: result.stdout ?? '', stderr: result.stderr ?? '' };
+}
+
+/**
+ * Resolve `<owner>/<repo>` tag `<tag>` to a commit over the ANONYMOUS git
+ * protocol (#640) — the second resolver, reached only from
+ * `GIT_FALLBACK_STATUSES`.
+ *
+ * WHY THIS IS EQUIVALENT, NOT WEAKER
+ * ----------------------------------
+ *  - `refs/tags/<tag>^{}` IS the annotated-tag dereference: git peels the tag
+ *    object to the commit and advertises it under that suffix. A lightweight tag
+ *    has no `^{}` line and its own line is already the commit. So this path
+ *    makes the same distinction the API path makes with its second hop.
+ *  - The refs come from the CANONICAL repository URL, so the fork-network
+ *    immunity is preserved verbatim: this never asks "does this SHA exist", it
+ *    asks "what does this tag point at, there".
+ *
+ * ANONYMITY IS THE POINT, not an incidental detail. The org's IP allow list is
+ * evaluated against an AUTHENTICATED identity; the whole reason this route works
+ * from a GitHub-hosted runner is that it carries no credential. Hence
+ * `-c credential.helper=` (an EMPTY value clears any inherited helper) and the
+ * prompt-suppressing environment in `runGit`.
+ *
+ * INJECTION: this is the one place repository content becomes a command line,
+ * and a `uses:` line is attacker-influenced in a fork PR. `owner`, `repo` and
+ * `tag` are validated against plain-identifier patterns FIRST; anything else is
+ * refused, and refusing is a `transport-error` — a failure, never a pass.
+ *
+ * Returns { kind: 'commit', sha, annotated } | { kind: 'tag-missing' }
+ *       | { kind: 'transport-error', message }
+ */
+export function gitLsRemoteTag({
+  owner,
+  repo,
+  tag,
+  run = runGit,
+  attempts = 2,
+  sleep = sleepSync,
+}) {
+  if (!SAFE_PATH_SEGMENT.test(owner ?? '') || !SAFE_PATH_SEGMENT.test(repo ?? '')) {
+    return {
+      kind: 'transport-error',
+      message: `refusing to resolve unsafe repo ref: ${owner}/${repo}`,
+    };
+  }
+  if (!SAFE_TAG.test(tag ?? '')) {
+    return { kind: 'transport-error', message: `refusing to resolve unsafe tag ref: ${tag}` };
+  }
+
+  const url = `https://github.com/${owner}/${repo}`;
+  const argv = [
+    '-c',
+    'credential.helper=',
+    'ls-remote',
+    '--tags',
+    url,
+    `refs/tags/${tag}`,
+    `refs/tags/${tag}^{}`,
+  ];
+
+  let failure;
+  // MEASURED flakiness, not a hypothetical: on this branch the same `ls-remote`
+  // that answers in ~0.7 s intermittently timed out when called repeatedly in
+  // quick succession (upstream throttling of anonymous git). One transient
+  // timeout would re-red the entire nightly, which is the very failure mode this
+  // change exists to end. A retry is not a softened verdict — a second failure
+  // still fails, and only a TRANSPORT failure is retried: `tag-missing` is an
+  // ANSWER and is returned immediately.
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    if (attempt > 0) sleep(2_000);
+    const result = run(argv);
+    if (result.status !== 0) {
+      const detail = (result.stderr || result.stdout || '').trim();
+      failure = {
+        kind: 'transport-error',
+        message: detail || `git ls-remote exited ${result.status}`,
+      };
+      continue;
+    }
+
+    // Exact ref match only: `refs/tags/v1.2.3` must never be answered by
+    // `refs/tags/v1.2.30`. git's own pattern matching is looser than that, so
+    // the filtering happens here rather than being trusted to the refspec.
+    let lightweight;
+    let peeled;
+    for (const line of result.stdout.split('\n')) {
+      const [sha, ref] = line.trim().split(/\s+/);
+      if (!sha || !ref || !/^[0-9a-f]{40}$/.test(sha)) continue;
+      if (ref === `refs/tags/${tag}`) lightweight = sha;
+      else if (ref === `refs/tags/${tag}^{}`) peeled = sha;
+    }
+    if (peeled) return { kind: 'commit', sha: peeled, annotated: true };
+    if (lightweight) return { kind: 'commit', sha: lightweight, annotated: false };
+    return { kind: 'tag-missing' };
+  }
+  return failure ?? { kind: 'transport-error', message: 'git ls-remote was never attempted' };
+}
+
+/**
  * Resolve `<owner>/<repo>` tag `<tag>` to the COMMIT it points at.
  * Returns one of:
- *   { kind: 'commit', sha, annotated }  — resolved
+ *   { kind: 'commit', sha, annotated, via? } — resolved (`via` names the git
+ *                                              fallback when the API was blocked)
  *   { kind: 'tag-missing' }             — no such tag upstream (or it's a branch)
  *   { kind: 'api-error', status, message }
  *   { kind: 'unexpected-object', type }
  */
-export async function resolveTagCommit({ owner, repo, tag, api = githubApi }) {
+export async function resolveTagCommit({
+  owner,
+  repo,
+  tag,
+  api = githubApi,
+  lsRemote = gitLsRemoteTag,
+}) {
   /**
    * A transport can THROW rather than return a status — DNS failure, TLS
    * failure, an offline runner: `fetch` rejects, it does not hand back a 5xx.
@@ -254,8 +432,29 @@ export async function resolveTagCommit({ owner, repo, tag, api = githubApi }) {
     }
   };
 
+  /**
+   * The API said "not from this address" (#640). That is not an answer, so this
+   * does NOT downgrade to a pass — it asks the SAME question over a route the
+   * allow list does not govern, and keeps the original 403 as the verdict if
+   * that route cannot answer either. Both causes are reported, because "the API
+   * blocked us AND git failed" is a different operational problem from either
+   * alone.
+   */
+  const viaGit = (status, message) => {
+    const resolved = lsRemote({ owner, repo, tag });
+    if (resolved.kind === 'commit') return { ...resolved, via: 'git-ls-remote' };
+    if (resolved.kind === 'tag-missing') return { kind: 'tag-missing', via: 'git-ls-remote' };
+    return {
+      kind: 'api-error',
+      status,
+      message,
+      gitFallbackMessage: resolved.message,
+    };
+  };
+
   const ref = await call(`repos/${owner}/${repo}/git/ref/tags/${encodeURIComponent(tag)}`);
   if (ref.status === 404) return { kind: 'tag-missing' };
+  if (GIT_FALLBACK_STATUSES.has(ref.status)) return viaGit(ref.status, ref.body?.message);
   if (ref.status !== 200) {
     return { kind: 'api-error', status: ref.status, message: ref.body?.message };
   }
@@ -264,6 +463,11 @@ export async function resolveTagCommit({ owner, repo, tag, api = githubApi }) {
   if (object?.type === 'tag') {
     // Annotated tag: one more hop to the commit.
     const tagObject = await call(`repos/${owner}/${repo}/git/tags/${object.sha}`);
+    // The second hop is as blockable as the first, and a fallback wired to only
+    // one of them leaves the same permanently-red gate one API call further in.
+    if (GIT_FALLBACK_STATUSES.has(tagObject.status)) {
+      return viaGit(tagObject.status, tagObject.body?.message);
+    }
     if (tagObject.status !== 200) {
       return { kind: 'api-error', status: tagObject.status, message: tagObject.body?.message };
     }
@@ -275,14 +479,20 @@ export async function resolveTagCommit({ owner, repo, tag, api = githubApi }) {
 }
 
 /** Verify one parsed pin. Returns a finding, or undefined when it checks out. */
-export async function verifyPin(pin, { api = githubApi } = {}) {
+export async function verifyPin(pin, { api = githubApi, lsRemote = gitLsRemoteTag } = {}) {
   if (!pin.sha) {
     return { ...pin, reason: 'not-sha-pinned' };
   }
   if (!pin.tag) {
     return { ...pin, reason: 'no-version-comment' };
   }
-  const resolved = await resolveTagCommit({ owner: pin.owner, repo: pin.repo, tag: pin.tag, api });
+  const resolved = await resolveTagCommit({
+    owner: pin.owner,
+    repo: pin.repo,
+    tag: pin.tag,
+    api,
+    lsRemote,
+  });
   if (resolved.kind === 'tag-missing') return { ...pin, reason: 'tag-missing', pinnedSha: pin.sha };
   if (resolved.kind === 'api-error') {
     return {
@@ -291,6 +501,7 @@ export async function verifyPin(pin, { api = githubApi } = {}) {
       pinnedSha: pin.sha,
       status: resolved.status,
       message: resolved.message,
+      gitFallbackMessage: resolved.gitFallbackMessage,
     };
   }
   if (resolved.kind === 'unexpected-object') {
@@ -303,6 +514,9 @@ export async function verifyPin(pin, { api = githubApi } = {}) {
       pinnedSha: pin.sha,
       actualSha: resolved.sha,
       annotated: resolved.annotated,
+      // Which resolver answered. A mismatch found through the git fallback is
+      // the same finding, but the reader should know the API never answered.
+      via: resolved.via,
     };
   }
   return undefined;
@@ -372,7 +586,7 @@ export function mentionsUses(text) {
  * The shared core: verify `files` (label → absolute path). Everything else is a
  * thin wrapper choosing WHICH files.
  */
-async function verifyFileSet(files, api) {
+async function verifyFileSet(files, api, lsRemote = gitLsRemoteTag) {
   // A checker that goes green when it cannot SEE its subject is worse than none
   // (security.md, quoted at the head of this file). An earlier revision guarded
   // the directory reads with `existsSync` and therefore reported
@@ -389,6 +603,18 @@ async function verifyFileSet(files, api) {
   const memoApi = (path) => {
     if (!cache.has(path)) cache.set(path, api(path));
     return cache.get(path);
+  };
+  // The git fallback is memoised on the same terms and for the same reasons
+  // (#640): four workflows pin the same allow-listed-out action today, and one
+  // subprocess per pin would make the nightly pay for the block four times over.
+  // The cache stores the RESULT, INCLUDING a failure — an unreachable fallback
+  // must stay a failure for every pin that depends on it, never quietly a pass
+  // for the second one.
+  const gitCache = new Map();
+  const memoLsRemote = ({ owner, repo, tag }) => {
+    const key = `${owner}/${repo}@${tag}`;
+    if (!gitCache.has(key)) gitCache.set(key, lsRemote({ owner, repo, tag }));
+    return gitCache.get(key);
   };
   const findings = [];
   for (const [file, absolute] of files) {
@@ -445,7 +671,7 @@ async function verifyFileSet(files, api) {
       continue;
     }
     for (const pin of pins) {
-      const finding = await verifyPin(pin, { api: memoApi });
+      const finding = await verifyPin(pin, { api: memoApi, lsRemote: memoLsRemote });
       if (finding) findings.push(finding);
     }
   }
@@ -455,12 +681,14 @@ async function verifyFileSet(files, api) {
 export async function verifyWorkflows({
   dir = resolve(process.cwd(), '.github/workflows'),
   api = githubApi,
+  lsRemote = gitLsRemoteTag,
   workflows,
 } = {}) {
   const files = workflows ?? discoverWorkflows(dir);
   return verifyFileSet(
     files.map((file) => [file, resolve(dir, file)]),
     api,
+    lsRemote,
   );
 }
 
@@ -469,10 +697,15 @@ export async function verifyWorkflows({
  * (#528 review). This is what the nightly runs; `verifyWorkflows` remains for
  * the narrower directory-scoped case.
  */
-export async function verifyPins({ repoRoot = process.cwd(), api = githubApi } = {}) {
+export async function verifyPins({
+  repoRoot = process.cwd(),
+  api = githubApi,
+  lsRemote = gitLsRemoteTag,
+} = {}) {
   return verifyFileSet(
     discoverPinnableFiles(repoRoot).map((file) => [file, resolve(repoRoot, file)]),
     api,
+    lsRemote,
   );
 }
 
@@ -516,9 +749,24 @@ export function formatFinding(finding) {
       // status 0 = the transport THREW (DNS, TLS, offline). Rendering that as
       // "API error 0" sends the reader looking for an HTTP status that does not
       // exist; name the actual failure instead.
-      return finding.status === 0
-        ? `${head}\n  claimed tag : ${finding.tag}\n  Could not REACH the GitHub API: ${finding.message ?? '(no message)'}\n  Treated as a FAILURE, not a pass — an unresolved pin is unverified, not verified.`
-        : `${head}\n  claimed tag : ${finding.tag}\n  GitHub API error ${finding.status}: ${finding.message ?? '(no message)'} — treated as a FAILURE, not a pass.`;
+      if (finding.status === 0) {
+        return `${head}\n  claimed tag : ${finding.tag}\n  Could not REACH the GitHub API: ${finding.message ?? '(no message)'}\n  Treated as a FAILURE, not a pass — an unresolved pin is unverified, not verified.`;
+      }
+      return [
+        `${head}`,
+        `  claimed tag : ${finding.tag}`,
+        `  GitHub API error ${finding.status}: ${finding.message ?? '(no message)'} — treated as a FAILURE, not a pass.`,
+        // Both causes, never one (#640). A 403/451 diverts to the anonymous git
+        // protocol; reaching this line means THAT failed too, and "the API
+        // blocked us AND git could not answer" is a different operational
+        // problem from either alone.
+        ...(finding.gitFallbackMessage
+          ? [
+              `  The anonymous \`git ls-remote\` fallback ALSO failed: ${finding.gitFallbackMessage}`,
+              '  Both routes to the upstream tag are unavailable, so this pin is UNVERIFIED.',
+            ]
+          : []),
+      ].join('\n');
     case 'docker-ref-unpinned':
       return [
         `${head}`,

@@ -31,6 +31,16 @@ name: Action pin SHA↔tag resolution (nightly)
 # commits) lives in `scripts/verify-action-pins.mjs` and is unit-tested offline
 # against an injected API double by `tests/action-pin-sha-tag-nightly.test.ts`.
 #
+# #640 — TWO ROUTES, NEVER A DOWNGRADED VERDICT: `aquasecurity` (the Trivy
+# actions) enables an organisation IP ALLOW LIST that this runner's address is
+# not on, so the API answers 403 and four correct pins were unverifiable — a
+# permanently-red gate, which people learn to ignore. Those pins are now resolved
+# over an ANONYMOUS `git ls-remote` (not behind the org's API allow list), which
+# gives the same guarantee: `refs/tags/<tag>^{}` is the annotated-tag
+# dereference, from the canonical repo. Reached ONLY from a 403/451; if it fails
+# too, the finding stands and names both causes. `git` is on PATH because the
+# checkout step above put it there.
+#
 # HUMAN PRECONDITION: the alert-issue create/pin needs "Settings → Actions →
 # General → Workflow permissions → Allow GitHub Actions to create and approve
 # pull requests" ENABLED (it also governs issue creation by the default token).
