@@ -270,16 +270,36 @@ each arm's `node_modules` after install:
 
 A "held fixed" claim is only as good as what was recorded, so the script does not stop at the
 enumerated list above — it dumps the **entire resolved package set** of each arm's `node_modules`
-and diffs them, which catches an input nobody thought to enumerate. The complete diff is:
+and diffs them, which catches an input nobody thought to enumerate. The complete diff, **verbatim**
+(`diff /tmp/fix78-resolved-7.txt /tmp/fix78-resolved-8.txt`, hunk headers included — an earlier
+version of this file reformatted it into two columns, which is faithful in content but is not what
+the tool printed, and in a document whose currency is exactly that distinction the reformatting is
+the defect):
 
 ```
-< @esbuild/darwin-arm64@0.28.1          > @oxc-project/types@0.143.0
-< @rollup/rollup-darwin-arm64@4.62.4    > @rolldown/binding-darwin-arm64@1.2.3
-< esbuild@0.28.1                        > detect-libc@2.1.2
-< rollup@4.62.4                         > lightningcss@1.33.0
-< vite@7.3.6                            > lightningcss-darwin-arm64@1.33.0
-                                        > rolldown@1.2.3
-                                        > vite@8.2.0
+20d19
+< @esbuild/darwin-arm64@0.28.1
+29a29
+> @oxc-project/types@0.143.0
+30a31
+> @rolldown/binding-darwin-arm64@1.2.3
+33d33
+< @rollup/rollup-darwin-arm64@4.62.4
+88a89
+> detect-libc@2.1.2
+94d94
+< esbuild@0.28.1
+124a125,126
+> lightningcss-darwin-arm64@1.33.0
+> lightningcss@1.33.0
+151c153
+< rollup@4.62.4
+---
+> rolldown@1.2.3
+182c184
+< vite@7.3.6
+---
+> vite@8.2.0
 ```
 
 Every differing package is **vite itself or vite's own transitive bundler/CSS closure**. Nothing
@@ -303,12 +323,45 @@ vite 7: `0.0.20 · 0.0.24 · 0.0.28 · 0.0.29 · 0.0.30 · 0.0.31 · 0.0.32`; an
 `vinext-externals.json`; that is a *different* boundary and is **not** the one that matters —
 `0.0.38` has no externals file and still emits the shim under vite 8.)
 
-**Caveat on those supporting points, stated rather than buried.** They come from `e2-bisect.sh`
-via `e2-build-version.sh`, which hardcodes `@vitejs/plugin-react: ^6.0.5` for **every** arm. That
-makes the bisect internally consistent (plugin-react constant across its own points) but it is a
-*different* plugin-react from the corrected test above, and pairing plugin-react 6 with vite 7
-violates 6.x's own peer range. They are corroboration, not evidence: the single-variable claim
-rests on `e2-vite78-fixed.sh` alone.
+**Caveat on those supporting points, stated rather than buried — and the first version of this
+caveat gave the WRONG REASON.** It said the points come from `e2-bisect.sh` via
+`e2-build-version.sh`, "which hardcodes `@vitejs/plugin-react: ^6.0.5` for **every** arm", pairing
+plugin-react 6 with vite 7 in violation of 6.x's own peer range. **That did not happen.**
+`e2-build-version.sh:26` does write `^6.0.5` into the probe manifest, but `e2-bisect.sh:27` then
+overrides it with `npm pkg set 'dependencies.@vitejs/plugin-react=^5.0.0'`, reinstalls, and
+**rebuilds** before anything is measured — so the `^6.0.5` never reaches a measured artifact on the
+vite-7 line. Read off disk, all seven surviving probe dirs (`pb0020` `pb0024` `pb0028` `pb0029`
+`pb0030` `pb0031` `pb0032`) resolve `@vitejs/plugin-react=5.2.0` with `vite=7.3.6` — the same
+plugin-react as the corrected test, not a different one.
+
+**The real limitation is worse, and it is the one that belongs here: no committed script produces
+the vite-8 bisect points** (`0.0.30 · 0.0.32 · 0.0.38 · 1.0.0-beta.4`). `e2-bisect.sh` is
+**vite-7-only** (it passes `^7.0.0` and pins plugin-react `^5`), and the only committed 7-vs-8
+driver is the **superseded** `e2-vite78.sh`, whose vite-8 arm sets plugin-react `^6.0.0`. For the
+one vite-8 point whose probe dir survives this is not inference but a reading: `v78-0030-vite8`
+resolves `@vitejs/plugin-react=6.0.5, vite=8.2.0`, against `v78-0030-vite7`'s `5.2.0, 7.3.6`. For
+the remaining three (`0.0.32 · 0.0.38 · beta.4`) no probe dir survives, so which script produced
+them is **not established** — but no committed script could have produced them single-variable.
+So the bisect's 7-vs-8 comparison most likely varies plugin-react **between the groups**: the exact
+round-1 confound shape, one level up.
+
+The conclusion is unchanged — **corroboration, not evidence; cite `e2-vite78-fixed.sh`, never the
+bisect** — and the single-variable claim in the table above is untouched, because it never rested on
+the bisect. The wrong reason is recorded rather than silently swapped: a record whose whole currency
+is evidentiary accuracy cannot afford a second wrong description of what a script does, even one
+that errs against its own interest. (`e2-vite78-fixed.sh` takes the vinext version as `$1`, so
+producing genuinely single-variable vite-8 points for `0.0.32`/`0.0.38`/`beta.4` is a re-run away —
+it has only ever been run for `0.0.30`, the one pair of `fix78-*` dirs that exists.)
+
+One thing the surviving dirs establish that the script as originally committed could not: the
+override ran as a silent `&&` chain, so a failed `npm install` would have skipped the rebuild and
+left the measurement reading the previous plugin-react-`^6` `dist`, indistinguishably. It did not
+bite — `5.2.0` is on disk in all seven dirs — but that was luck plus after-the-fact inspection, not
+something the output proved. `e2-bisect.sh` is now fail-loud: each step is checked and aborts the
+point with a printed reason, `dist/` is deleted before the rebuild so a skipped rebuild cannot be
+measured at all, and every line prints the `vite` and `@vitejs/plugin-react` versions resolved on
+disk, so the output certifies itself instead of requiring someone to go looking. **No measurement
+in this document changed** — the hardening is to what a future run can prove, not to what was run.
 
 ### 3.3 Does an older build embed cleanly end-to-end? **YES — with the right entry.**
 

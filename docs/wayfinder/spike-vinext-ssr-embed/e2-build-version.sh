@@ -1,6 +1,10 @@
 #!/bin/bash
 # Build the SAME probe app against an old vinext and report the emitted dist/server layout.
-# usage: e2-build19.sh <vinext-version> <vite-range> <plugin-rsc-range> <dirname>
+# usage: e2-build-version.sh <vinext-version> <vite-range> <plugin-rsc-range> <dirname>
+#
+# NOTE: this writes `@vitejs/plugin-react: ^6.0.5` into the probe manifest. Callers that need a
+# different plugin-react (e2-bisect.sh pins ^5 for the vite-7 line) MUST override it, reinstall
+# and REBUILD -- see e2-bisect.sh, which does exactly that and fails loudly if either step fails.
 set -uo pipefail
 SC=/private/tmp/claude-501/-Users-banna-alpheya-pocs-knext/2989138f-7d2a-4034-b420-39e8b43cb645/scratchpad
 S="$SC/pcprobe"
