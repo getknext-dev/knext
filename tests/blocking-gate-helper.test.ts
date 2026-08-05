@@ -450,6 +450,68 @@ jobs:
     });
   });
 
+  describe('workflow-level concurrency (#674)', () => {
+    // A JOB-level `concurrency` is already reported by the fail-closed
+    // allowlist. The WORKFLOW-level one was invisible to this audit, and #674
+    // adds exactly such a block to `ci.yml` — where two audited gates live. So
+    // the question the audit now has to answer is not "is there a group" but
+    // "can anything OTHER than a superseding push to this same ref cancel the
+    // gate". A ref-scoped group cannot: the only canceller is a newer commit on
+    // the same PR, whose own run must go green on the new head SHA. A group that
+    // is NOT ref-scoped can be tripped by an unrelated ref, and that is a
+    // genuine disarm.
+    const withWorkflowConcurrency = (block: string) => `${block}${CLEAN}`;
+
+    it('reports a cancelling workflow-level group that is not ref-scoped', () => {
+      const a = audit(
+        withWorkflowConcurrency('concurrency:\n  group: ci\n  cancel-in-progress: true\n'),
+      );
+      expect(a.problems.join('\n')).toMatch(/concurrency/);
+      expect(a.problems.join('\n')).toMatch(/cancel/i);
+    });
+
+    it('reports a cancelling group keyed on something other than the ref', () => {
+      // `github.workflow` alone is constant across every ref, so this is the
+      // fixed-string case wearing an expression.
+      const a = audit(
+        withWorkflowConcurrency(
+          'concurrency:\n  group: ${{ github.workflow }}\n  cancel-in-progress: true\n',
+        ),
+      );
+      expect(a.problems.join('\n')).toMatch(/concurrency/);
+    });
+
+    it('treats a non-literal `cancel-in-progress` as cancelling', () => {
+      // Same class as `continue-on-error: ${{ true }}` — an expression is not
+      // the literal `false`, so it is not a reason to wave the group through.
+      const a = audit(
+        withWorkflowConcurrency('concurrency:\n  group: ci\n  cancel-in-progress: ${{ true }}\n'),
+      );
+      expect(a.problems.join('\n')).toMatch(/concurrency/);
+    });
+
+    it('NEGATIVE CONTROL: a ref-scoped cancelling group is permitted', () => {
+      const a = audit(
+        withWorkflowConcurrency(
+          'concurrency:\n  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}\n  cancel-in-progress: true\n',
+        ),
+      );
+      expect(a.problems, a.problems.join('\n')).toEqual([]);
+    });
+
+    it('NEGATIVE CONTROL: a non-cancelling group needs no ref scope', () => {
+      const a = audit(
+        withWorkflowConcurrency('concurrency:\n  group: ci\n  cancel-in-progress: false\n'),
+      );
+      expect(a.problems, a.problems.join('\n')).toEqual([]);
+    });
+
+    it('NEGATIVE CONTROL: the shorthand string form queues, it does not cancel', () => {
+      const a = audit(withWorkflowConcurrency('concurrency: ci\n'));
+      expect(a.problems, a.problems.join('\n')).toEqual([]);
+    });
+  });
+
   describe('structural non-vacuity', () => {
     it('fails a workflow with no `jobs:` mapping rather than passing by absence', () => {
       const a = audit('on:\n  pull_request:\n');

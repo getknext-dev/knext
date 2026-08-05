@@ -6,6 +6,32 @@ on:
   push:
     branches: [main]
 
+# Supersede this workflow's own in-flight runs (#674). #673 fixed the
+# `pull_request` filter from `['*']` to `['**']`, which took stacked PRs — this
+# repo's normal working mode — from ZERO ci.yml jobs per push to all 19; without
+# a group, every superseded push kept running and kept being billed.
+#
+# The key, MEASURED rather than reasoned about (actions/checkout fetch refspecs
+# in real run logs): a `pull_request` run's ref is `refs/pull/<n>/merge`
+# (run 31047101359) and a `push` run's is `refs/heads/main` (run 31047831835),
+# so the two triggers cannot collide on `github.ref` and do not cancel each
+# other. `event_name` is in the key so that stays true by construction if
+# `push:` is ever widened past `[main]`, and `workflow` so another workflow
+# copying this idiom cannot join CI's group.
+#
+# Ref scoping is also what keeps this compatible with the #667 blocking-gate
+# audit (tests/helpers/blocking-gate.ts): the only run that can cancel a gate
+# here is a newer push to the SAME PR, whose own run must go green on the new
+# head SHA. That helper now fails closed on a group that is NOT ref-scoped.
+#
+# Deliberately NOT applied to any workflow that publishes, signs, or deploys —
+# a cancelled release or cosign run is worse than a duplicate. `ci.yml` pushes
+# no image (its docker build is `load: true`), signs nothing and touches no
+# cluster; `tests/ci-concurrency-group.test.ts` holds both halves of that.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   lint-and-test:
     name: Lint & Test

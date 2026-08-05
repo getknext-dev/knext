@@ -115,6 +115,45 @@ function isUniversalBranchFilter(value: unknown): boolean {
   return list.some((entry) => entry === '**');
 }
 
+/**
+ * A WORKFLOW-level `concurrency` block reaches every job in the file, including
+ * an audited gate — so #674, which adds one to `ci.yml` where two audited gates
+ * live, would otherwise have slipped past this audit entirely. `concurrency` is
+ * absent from `ALLOWED_JOB_KEYS` for exactly this reason at job level; the
+ * workflow level had no equivalent check at all.
+ *
+ * The question is not "is there a group" but "can anything OTHER than a
+ * superseding push to this same ref cancel the gate":
+ *
+ *   - a REF-SCOPED cancelling group is safe. Its only canceller is a newer
+ *     commit on the same PR, which starts a fresh run whose gates must go green
+ *     on the new head SHA. Nothing is disarmed; the superseded run's result was
+ *     about a SHA that is no longer the head.
+ *   - a group that is not ref-scoped (a fixed string, or keyed only on
+ *     `github.workflow`) can be tripped by an UNRELATED ref, so one PR's push
+ *     cancels another PR's gate run. A cancelled check is not a failed check,
+ *     and that is the disarm.
+ *
+ * `github.head_ref` and a PR-number key are accepted as ref scoping for the same
+ * reason `github.ref` is: all three vary per pull request.
+ */
+const REF_SCOPED = /\$\{\{[^}]*github\.(ref|ref_name|head_ref)[^}]*\}\}|pull_request\.number/;
+
+function concurrencyProblem(container: Job, where: string): string | null {
+  if (!('concurrency' in container)) return null;
+  const value = container.concurrency;
+  // The shorthand string form sets a group only; it queues, it never cancels.
+  if (typeof value === 'string') return null;
+  if (value === null || typeof value !== 'object') return null;
+  const block = value as Record<string, unknown>;
+  // Every form except a literal `false`/absent counts as cancelling — the same
+  // inversion `continue-on-error` uses, so `${{ true }}` is not a hiding place.
+  if (!('cancel-in-progress' in block) || block['cancel-in-progress'] === false) return null;
+  const group = typeof block.group === 'string' ? block.group : '';
+  if (REF_SCOPED.test(group)) return null;
+  return `${where} carries a cancelling \`concurrency\` group (${JSON.stringify(group)}) that is not scoped to the ref — an unrelated ref can cancel this gate, and a cancelled check is not a failed check`;
+}
+
 /** `continue-on-error` is a problem in every form except a literal `false`. */
 function continueOnErrorProblem(container: Job, where: string): string | null {
   if (!('continue-on-error' in container)) return null;
@@ -254,6 +293,12 @@ export function auditBlockingGate(options: BlockingGateOptions): BlockingGateAud
       );
     }
   }
+
+  // The workflow-level `concurrency` half (#674). Job-level `concurrency` is
+  // already reported by the fail-closed allowlist; this is the one that reaches
+  // the gate from outside the job definition.
+  const concurrency = concurrencyProblem(doc as Job, `${workflowPath} (workflow-level)`);
+  if (concurrency) problems.push(concurrency);
 
   const needsClosure = auditJobCanNotSkip(jobs, jobId, problems);
 
