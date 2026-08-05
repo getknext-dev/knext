@@ -69,10 +69,18 @@ reject_image() {
 # the safe direction. Everything else is checked.
 # ENUMERATED, per the rule stated above — this pair shipped as the range form
 # `[!a-zA-Z0-9._/:@-]`, i.e. the file broke its own invariant 30 lines below the
-# sentence stating it. It was not exploitable (both forms rejected newline, tab,
-# CR, space, `;`, `"`, `{`, `,`, `+`, `é` and `$` under glibc `C`, en_US.UTF-8
-# and macOS), but "not exploitable under the locales we happened to test" is the
-# guarantee the enumerated form makes unnecessary. tests/image-prewarm-harness.test.ts
+# sentence stating it. Measured per shell/locale CELL, not asserted in aggregate:
+#   glibc bash 5.2 (`C`, `C.UTF-8`, `en_US.UTF-8`) — both forms REJECT all of
+#     newline, tab, CR, space, `;`, `"`, `{`, `,`, `+`, `$`, `é`, `É`, `ø`, `å`,
+#     `ñ`, `ß`.
+#   macOS bash 3.2 — the shell the `#!/bin/bash` shebang above actually selects
+#     there — under `C`: same, both forms reject all of them. Under
+#     `en_US.UTF-8`: the OLD RANGE **ACCEPTED** `é`, `É`, `ø`, `å`, `ñ`, `ß`; the
+#     enumeration rejects all six. (macOS bash 5.3 from Homebrew rejects them,
+#     so the cell is bash-3.2-specific, and 3.2 is what /bin/bash is.)
+# So the range was not merely "unproven outside the locales we tested" — it was
+# measurably weaker in a cell this script actually runs in, and the enumeration
+# is strictly stricter everywhere measured. tests/image-prewarm-harness.test.ts
 # SCANS every `[!…]` class in this file for a range, so the rule is now a gate.
 case "$NODESH_IMAGE" in
   *[!0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ._/:@-]* | *' '*) reject_image "illegal character" ;;
