@@ -1,12 +1,16 @@
-# P3 — vinext capability blockers: image optimisation, static generation, dev React
+# ADR-0042 Phase 3 — vinext capability blockers: image optimisation, static generation, dev React
 
-**ADR-0042 Phase 3.** Findings only. No shipped code, CRD, CLI, or operator was modified.
+**ADR-0042 Phase 3 / action item A4.** Findings only. No shipped code, CRD, CLI, or operator was
+modified.
+
+> Filename note: `p3-` in `docs/wayfinder/p3-provisioning-cost.md` means *wayfinder question 3*, not
+> ADR-0042 Phase 3. This file is prefixed `adr-0042-` so the two are not conflated.
 
 **Status per question**
 
 | # | Question | Verdict |
 |---|---|---|
-| 1 | `next/image` optimisation | **Reproduced.** Passthrough confirmed. **No in-process path exists** on the Node/standalone target; two candidate paths were built and both failed, and the reason is structural. |
+| 1 | `next/image` optimisation | **Reproduced.** Passthrough confirmed. **vinext exposes no optimizer *registration* hook on the Node target** — two registration paths were built and both failed, for a structural reason. An **interception** path in a knext-owned entry is structurally available and **was not measured here**. |
 | 2 | Build-time static generation | **Refuted as a defect — it is a configuration gap, with a hard conflict.** `--prerender-all` works and prerenders `generateStaticParams` routes. It is **mutually exclusive with `output: 'standalone'`**, which is the shape the bun-compile bridge consumes. |
 | 3 | Dev React in a production server | **Reproduced.** `react.development.js`, `react-jsx-runtime.development.js` **and** `react-dom.development.js` load in the vinext production standalone server. The Next control loads none. |
 
@@ -16,36 +20,38 @@
 
 **One machine, all arms.** macOS 26.5.2, Apple Silicon arm64 · Node **v24.14.0** · npm.
 
-| Arm | Toolchain |
-|---|---|
-| **A — control** | `next@16.2.11`, Turbopack, `output: 'standalone'`, `react@19.2.8`, `sharp@0.34.5` |
-| **B — vinext** | **`vinext@1.0.0-beta.4` on `vite@8.2.0`**, `react@19.2.8`, `next@16.2.11` present as a peer |
+| Arm | Toolchain | `sharp` |
+|---|---|---|
+| **A — control** | `next@16.2.11`, Turbopack, `output: 'standalone'`, `react@19.2.8` | declared `^0.34.2`; **resolved version not recorded** |
+| **B — vinext** | **`vinext@1.0.0-beta.4` on `vite@8.2.0`**, `react@19.2.8`, `next@16.2.11` present as a peer | **absent** for the §1.1 passthrough measurement; **`0.34.5`, installed by me**, for the §1.3 adapter experiments |
 
-**Every answer below applies to `vinext@1.0.0-beta.4` + Vite 8.2.0 only.** The older
-`vinext@^0.0.19` + `nitro@3.0.1-alpha.2` pin was **not** tested — ADR-0042 forbids shipping it, so
-the current combination is the one that decides the flip. Whether the older pin behaves differently
-is **not established**.
+That `sharp` column is the first thing a skeptic should check, because "vinext auto-stubs `sharp`" is
+the stated mechanism for the loss. The honest answer is that **arm B's passthrough result in §1.1 was
+produced with no `sharp` in the tree at all** — so §1.1 alone cannot distinguish "stubbed" from
+"absent". §1.3 closes that: `sharp@0.34.5` was then installed and wired two different ways, and the
+passthrough did not change. §1.4 gives the reason, which is neither stubbing nor absence.
 
 **Subject app** — a purpose-built minimal probe rather than `apps/file-manager`, so that each answer
-turns on one variable. Identical sources in both arms:
+turns on one variable. **Byte-identical `app/` trees in both arms** (§5.1 carries them in full):
 
 - `app/page.tsx` — static
 - `app/blog/[slug]/page.tsx` — `generateStaticParams()` returning `alpha`, `beta`, `gamma`
 - `app/isr/page.tsx` — `export const revalidate = 60`
 - `app/img/page.tsx` — `next/image` on `/knext-optimize-fixture.png`
 - `app/api/health/route.ts` — `force-dynamic`
-- `public/knext-optimize-fixture.png` — **the same 181,277 B fixture #607 used**
-  (`apps/file-manager/public/knext-optimize-fixture.png`)
+- `public/knext-optimize-fixture.png` — **the same 181,277 B fixture #607 used**, copied from
+  `apps/file-manager/public/knext-optimize-fixture.png`
 
-Reproduction scripts and the app live under `knext-plan-out/` (gitignored, machine-local). They are
-listed verbatim in §5 so the runs can be rebuilt from this document alone.
+**The probe app and all scripts lived in a machine-local scratch directory that has since been
+deleted.** §5 therefore carries every source file **in full**, not by description — for question 3 in
+particular the result depends on the probe's semantics, and this document is now the only surviving
+record of them.
 
-`curl` is blocked by this repo's hooks, so probes go through a 15-line `fetch` script that prints
-status, `content-type`, and byte length.
+`curl` is blocked by this repo's hooks, so probes go through the `fetch` scripts in §5.2.
 
 ---
 
-## 1. `next/image` — reproduced; no in-process path found
+## 1. `next/image` — reproduced; no *registration* hook on the Node target
 
 ### 1.1 The measurement reproduces
 
@@ -92,7 +98,7 @@ imply different fixes. Full headers from arm B:
 The 400 on a disallowed width and the image-specific security headers prove the handler runs. It
 validates the request and then serves the original.
 
-### 1.3 Two candidate recovery paths were built. Both failed.
+### 1.3 Two *registration* paths were built. Both failed.
 
 **Path A — vinext's own `images.optimizer` adapter config.** vinext ships a *runtime-agnostic*
 optimizer contract, not a Cloudflare-only one
@@ -104,8 +110,9 @@ images: { optimizer: { adapter: "<module>", options } }
    → registered via setImageOptimizer() from "vinext/server/image-optimization"
 ```
 
-I wrote a `sharp`-backed adapter to that contract and configured it in `vite.config.ts`. The build
-succeeded and the behaviour did not change: still 181,277 B `image/png` on every `Accept` variant.
+I wrote a `sharp`-backed adapter to that contract (§5.3) and configured it in `vite.config.ts`. The
+build succeeded and the behaviour did not change: still 181,277 B `image/png` on every `Accept`
+variant.
 
 Cause, from the built artifact and the package:
 
@@ -129,8 +136,8 @@ const _gImageOptimizer = globalThis;
 ```
 
 so a knext-owned entry could in principle register across the bundled-copy boundary without any
-plugin support. I wrote that entry (set the global, then `await import('./dist/standalone/server.js')`).
-Still 181,277 B `image/png`.
+plugin support. I wrote that entry (§5.3: set the global, then
+`await import('./dist/standalone/server.js')`). Still 181,277 B `image/png`.
 
 Cause:
 
@@ -143,7 +150,7 @@ dist/standalone/dist/server/index.js:0
 
 The symbol never appears in the built server, because the Node production server never reads it.
 
-### 1.4 Why both failed — the structural reason
+### 1.4 Why both failed — the structural reason, stated at its true width
 
 `node_modules/vinext/dist/server/prod-server.js:870-889` — vinext's **Node** production server:
 
@@ -160,22 +167,45 @@ It never calls `getImageOptimizer()` or `handleConfiguredImageOptimization`. Tho
 `server/app-router-entry.js:28` and `server/pages-router-entry.js:87` — the Cloudflare Worker
 entries, which fetch assets through `env.ASSETS`.
 
-**So on the Node/standalone target there is no registration point at all.** It is not that no
-optimiser is configured; it is that the code path never asks for one. That is the same target
-`bun build --compile --bytecode` consumes, so the compiled default path inherits it.
+**The claim this earns, exactly:** on the Node/standalone target — the same target
+`bun build --compile --bytecode` consumes — **vinext exposes no optimizer *registration* hook.** It
+is not that no optimiser is configured; it is that the code path never asks for one, so neither the
+documented config surface nor the `globalThis` seam can reach it.
 
-### 1.5 What paths remain, and what they cost
+**The claim it does NOT earn:** that no in-process optimisation is possible. An earlier revision of
+this document said "no in-process path exists". **That was an inference from an absence, and it is
+withdrawn.** Interception is a different mechanism from registration, and it is structurally
+available — verified against a fresh `vinext@1.0.0-beta.4` tarball:
 
-Neither of these was built or measured. Stated as options with their cost, not as recommendations.
+- `dist/standalone/server.js` is a **generated ~15-line shim**
+  (`dist/build/standalone.js:105-121`) whose entire body is
+  `startProdServer({ port, host, outDir: join(import.meta.dirname, "dist") })`;
+- **`./server/prod-server` and `./server/fetch-handler` are public `exports`** of the package;
+- `startProdServer` **returns the server**:
+  `declare function startProdServer(options?): Promise<{ server: import("node:http").Server; port: number }>`
+  (`dist/server/prod-server.d.ts:119-122`).
+
+So a knext-owned entry can call `startProdServer` itself and handle `/_next/image` ahead of vinext's
+listener — no fork, no sidecar, no per-app change. **Path B already proved knext can run code inside
+that process**; I used that foothold for a registration that does not exist rather than for
+interception. And **ADR-0042 Consequence 4 already mandates "a bespoke knext bun entry wrapping
+vinext's handler"**, so a blanket "not recoverable in-process" would have contradicted a premise of
+the ADR this document is answering.
+
+**Whether interception actually works end-to-end is NOT established here** — it was not built, not
+measured, and the open risk is `sharp` as a native module under `bun build --compile`. A separate
+spike is measuring it. Nothing in this document should be read as pre-empting that result.
+
+### 1.5 The candidate paths, and what each costs
+
+**None of these was built or measured.** Options with their costs, not recommendations.
 
 | Path | Cost | Assessment |
 |---|---|---|
-| **Patch vinext upstream** — have `prod-server.js` consult `getImageOptimizer()`, as the CF entries do | Small diff (~5 lines), but it is a **fork or an upstream PR** on a beta project with no stability promise. ADR-0042 §7 already names drift as knext's problem. | Cheapest *technically*. Adds a standing upstream dependency on a change knext does not control. |
-| **Intercept `/_next/image` in front of vinext** — knext-owned optimiser in the reverse proxy or a sidecar | New long-lived component that decodes/re-encodes images. This is ADR-0042 Escalation 1 option (c), and `CLAUDE.md` §1 calls that class of scope PaaS drift. | Works without touching vinext. Largest new scope. |
+| **In-process interception** — knext entry calls `startProdServer` (public export, returns the `http.Server`) and handles `/_next/image` before vinext's listener | No fork, no extra process, no per-app change. Adds an optimiser dependency (`sharp` or equivalent) to the knext entry; **the open risk is a native module under `bun --compile`.** Structurally verified above; **behaviour unmeasured.** | Cheapest *if* it works, and it is the variant an earlier revision of this document omitted entirely. Being measured by a separate spike. |
+| **Patch vinext upstream** — have `prod-server.js` consult `getImageOptimizer()`, as the CF entries do | Small diff (~5 lines), but it is a **fork or an upstream PR** on a beta project with no stability promise. ADR-0042 §7 already names drift as knext's problem. | Cheapest *diff*. Adds a standing dependency on a change knext does not control. |
+| **Intercept in front of the process** — knext-owned optimiser in the reverse proxy or a sidecar | New long-lived component that decodes/re-encodes images. This is ADR-0042 Escalation 1 option (c), and `CLAUDE.md` §1 calls that class of scope PaaS drift. | The **expensive** variant of interception. Only worth considering if the in-process variant fails. |
 | **Per-component `loader` prop** — vinext's `Image` shim honours `loader` (`shims/image.js:426`) | **`images.loaderFile` is not supported** — `grep loaderFile node_modules/vinext/dist/shims/*.js` → no hits. So it cannot be applied globally from config; it is an edit to **every `<Image>` in every user app**, plus an external optimiser to point at. | Not viable as a framework-level answer. |
-
-**No path preserves ADR-0006 on the default path without either forking vinext or building a
-knext-owned optimiser.** That is the answer Escalation 1 was waiting for.
 
 ---
 
@@ -276,7 +306,10 @@ scheduling problem or a real loss.
 
 Probe: `module.registerHooks({ load })` in a `--require` preload (sees **both** CJS and ESM), dumped
 on `SIGUSR2` after `/api/health`, `/`, and `/blog/alpha` have each returned 200. `NODE_ENV=production`
-on both arms.
+on both arms. **The probe's exact semantics matter to this result and are in §5.2**: the hook is
+installed by a `--require` preload before any application module loads, records the `url` argument
+into a `Set` (so the counts are **de-duplicated module identities**, not load events), and the dump
+is triggered *after* the three requests complete.
 
 **Arm B — `node dist/standalone/server.js`:**
 
@@ -328,10 +361,15 @@ resolution** of the externalised `react` / `react-dom` (both listed in
 
 Reported as findings. Sequencing is the sprint gate's call, not this document's.
 
-1. **ADR-0042 Escalation 1 now has its answer.** Image optimisation is not recoverable in-process on
-   the compiled default path. Every remaining option is a fork, a new knext-owned component, or a
-   per-app source change. Option (b) in the ADR — keep node+turbopack for image apps — remains the
-   only one that preserves ADR-0006 without new scope, and it makes dual-track permanent.
+1. **ADR-0042 Escalation 1 is narrowed, not closed.** What is settled: the documented config surface
+   and the `globalThis` seam are both dead on the Node target, so image optimisation cannot be
+   restored by *configuring* vinext. What is **not** settled is whether a knext-owned entry can
+   intercept `/_next/image` in-process (§1.4) — that is being measured separately, and until it
+   reports, no option should be described as the only one. **Three** candidates preserve ADR-0006
+   without a permanent dual track: in-process interception, an upstream patch/fork, and a
+   proxy/sidecar. They differ by roughly an order of magnitude in cost and **none has been measured**.
+   ADR-0042 option (b) — keep node+turbopack for image apps — remains the only option that needs *no*
+   new work, at the price of making dual-track permanent.
 2. **Escalation 2 changes shape.** The question is no longer "is losing static generation
    acceptable"; it is "can the artifact that prerenders also be compiled". That is a cheap
    experiment and it should run before the founder is asked anything.
@@ -340,20 +378,229 @@ Reported as findings. Sequencing is the sprint gate's call, not this document's.
 
 ---
 
-## 5. Exact commands (reproducible)
+## 5. Sources, in full
+
+The scratch directory these lived in has been deleted. Everything needed to rebuild the runs is
+below.
+
+### 5.1 The probe app (identical `app/` tree in both arms)
+
+`app/layout.tsx`
+```tsx
+export default function RootLayout({ children }: { children: React.ReactNode }) {
+  return (
+    <html lang="en">
+      <body>{children}</body>
+    </html>
+  );
+}
+```
+
+`app/page.tsx`
+```tsx
+export default function Home() {
+  return <main>p3-static-home</main>;
+}
+```
+
+`app/blog/[slug]/page.tsx`
+```tsx
+export function generateStaticParams() {
+  return [{ slug: 'alpha' }, { slug: 'beta' }, { slug: 'gamma' }];
+}
+
+export default async function BlogPost({ params }: { params: Promise<{ slug: string }> }) {
+  const { slug } = await params;
+  return <main>p3-blog-{slug}</main>;
+}
+```
+
+`app/isr/page.tsx`
+```tsx
+export const revalidate = 60;
+
+export default function Isr() {
+  return <main>p3-isr {new Date().toISOString()}</main>;
+}
+```
+
+`app/img/page.tsx`
+```tsx
+import Image from 'next/image';
+
+export default function ImgPage() {
+  return (
+    <main>
+      <Image src="/knext-optimize-fixture.png" alt="fixture" width={640} height={480} />
+    </main>
+  );
+}
+```
+
+`app/api/health/route.ts`
+```ts
+export const dynamic = 'force-dynamic';
+
+export function GET() {
+  return Response.json({ ok: true });
+}
+```
+
+`public/knext-optimize-fixture.png` — copied verbatim from
+`apps/file-manager/public/knext-optimize-fixture.png` (181,277 B).
+
+**Arm A `next.config.ts`**
+```ts
+import path from 'node:path';
+import type { NextConfig } from 'next';
+
+const nextConfig: NextConfig = {
+  output: 'standalone',
+  // Without this, tracing walks up to the monorepo root and .next/standalone/server.js
+  // is never emitted at the app root.
+  outputFileTracingRoot: path.resolve(import.meta.dirname),
+};
+
+export default nextConfig;
+```
+
+**Arm B `next.config.ts`** — `{ output: 'standalone' }` for §1 and §2.1/§2.2; `{}` (the field
+removed) for the §2.3 prerender run.
+
+**Arm B `vite.config.ts`** — plain for §1.1/§2/§3; with the adapter for §1.3 Path A:
+```ts
+import { fileURLToPath } from 'node:url';
+import vinext from 'vinext';
+import { defineConfig } from 'vite';
+
+const optimizerAdapter = fileURLToPath(new URL('./knext-sharp-optimizer.mjs', import.meta.url));
+
+export default defineConfig({
+  plugins: [vinext({ images: { optimizer: { adapter: optimizerAdapter } } })],
+  ssr: { external: ['sharp'] },
+});
+```
+
+### 5.2 The probe scripts
+
+`probe.mjs` — status / content-type / byte length. (`curl` is hook-blocked in this repo.)
+```js
+const [, , url, accept = 'image/avif,image/webp,image/apng,*/*'] = process.argv;
+
+const res = await fetch(url, { headers: { Accept: accept } });
+const buf = Buffer.from(await res.arrayBuffer());
+console.log(
+  JSON.stringify({
+    url,
+    status: res.status,
+    contentType: res.headers.get('content-type'),
+    bytes: buf.length,
+    xNextCache: res.headers.get('x-nextjs-cache'),
+    vary: res.headers.get('vary'),
+  }),
+);
+```
+
+`headers.mjs` — full response headers (used for §1.2).
+```js
+const [, , url, accept = 'image/avif,image/webp,*/*'] = process.argv;
+const res = await fetch(url, { headers: { Accept: accept } });
+const buf = Buffer.from(await res.arrayBuffer());
+console.log(res.status, buf.length);
+for (const [k, v] of res.headers) console.log(`  ${k}: ${v}`);
+```
+
+`waitup.mjs` — poll until the server answers at all.
+```js
+const [, , url, timeout = '30000'] = process.argv;
+const deadline = Date.now() + Number(timeout);
+while (Date.now() < deadline) {
+  try {
+    await fetch(url);
+    console.log('up');
+    process.exit(0);
+  } catch {
+    await new Promise((r) => setTimeout(r, 100));
+  }
+}
+console.log('timeout');
+process.exit(1);
+```
+
+`count-modules.cjs` — **the §3 module census.** Loaded via `--require`, so the hook is installed
+before any application module. `registerHooks` sees **both CJS and ESM**; a `Module._load` hook alone
+under-counts ESM output by ~2×. The `Set` means the totals are **de-duplicated module identities**,
+not load events.
+```js
+const module_ = require('node:module');
+const fs = require('node:fs');
+
+const seen = new Set();
+module_.registerHooks({
+  load(url, context, nextLoad) {
+    seen.add(url);
+    return nextLoad(url, context);
+  },
+});
+
+process.on('SIGUSR2', () => {
+  fs.writeFileSync(process.env.MODLIST_OUT || 'modlist.txt', [...seen].sort().join('\n'));
+});
+```
+
+### 5.3 The two image-recovery attempts
+
+`knext-sharp-optimizer.mjs` — Path A, written to vinext's documented adapter contract.
+```js
+import sharp from 'sharp';
+
+const EXT = {
+  'image/avif': 'avif',
+  'image/webp': 'webp',
+  'image/jpeg': 'jpeg',
+};
+
+export default function knextSharpOptimizer({ options } = {}) {
+  return {
+    async transformImage(body, { width, format, quality }) {
+      const input = Buffer.from(await new Response(body).arrayBuffer());
+      const ext = EXT[format] ?? 'jpeg';
+      const out = await sharp(input)
+        .resize({ width, withoutEnlargement: true })
+        [ext]({ quality, ...(options?.[ext] ?? {}) })
+        .toBuffer();
+      return new Response(out, { headers: { 'Content-Type': format } });
+    },
+  };
+}
+```
+
+`knext-entry.mjs` — Path B, the `globalThis` seam.
+```js
+import sharp from 'sharp';
+
+const EXT = { 'image/avif': 'avif', 'image/webp': 'webp', 'image/jpeg': 'jpeg' };
+
+globalThis[Symbol.for('vinext.imageOptimizer')] = {
+  async transformImage(body, { width, format, quality }) {
+    const input = Buffer.from(await new Response(body).arrayBuffer());
+    const ext = EXT[format] ?? 'jpeg';
+    const out = await sharp(input)
+      .resize({ width, withoutEnlargement: true })
+      [ext]({ quality })
+      .toBuffer();
+    return new Response(out, { headers: { 'Content-Type': format } });
+  },
+};
+
+await import('./dist/standalone/server.js');
+```
+
+### 5.4 Exact commands
 
 ```bash
-# ---- probe app (identical sources in both arms) -----------------------------
-# app/page.tsx, app/blog/[slug]/page.tsx (generateStaticParams -> alpha,beta,gamma),
-# app/isr/page.tsx (revalidate = 60), app/img/page.tsx (next/image),
-# app/api/health/route.ts (force-dynamic), public/knext-optimize-fixture.png (181,277 B,
-# copied from apps/file-manager/public/).
-
 # ---- Arm A: control ---------------------------------------------------------
 npm i next@16.2.11 react@^19.2.6 react-dom@^19.2.6 sharp@^0.34.2
-# next.config.ts: { output: 'standalone', outputFileTracingRoot: path.resolve(import.meta.dirname) }
-#   (without outputFileTracingRoot, tracing walks up to the monorepo root and
-#    .next/standalone/server.js is never emitted at the app root)
 NODE_ENV=production npx next build
 cp -R public .next/standalone/public && cp -R .next/static .next/standalone/.next/static
 PORT=3111 NODE_ENV=production node .next/standalone/server.js
@@ -362,36 +609,45 @@ find .next/server -name '*.html' | wc -l          # -> 10
 # ---- Arm B: vinext ----------------------------------------------------------
 npm i -D vinext@1.0.0-beta.4 vite@^8.0.0 @vitejs/plugin-react@^6.0.0 \
          @vitejs/plugin-rsc@^0.5.0 react-server-dom-webpack@^19.2.6
-# vite.config.ts: defineConfig({ plugins: [vinext()] })
 NODE_ENV=production npx vinext build                      # output:'standalone'  -> 0 HTML
 NODE_ENV=production npx vinext build --prerender-all      # output:'standalone'  -> 0 HTML (flag ignored)
 # remove output:'standalone' from next.config.ts:
 NODE_ENV=production npx vinext build --prerender-all      # -> "Prerendered 7 routes (1 skipped)"
 find dist -name '*.html' | wc -l                          # -> 7
 
-# ---- image probe (curl is hook-blocked; 15-line fetch script instead) -------
+# ---- image probe ------------------------------------------------------------
 node probe.mjs 'http://127.0.0.1:PORT/_next/image?url=%2Fknext-optimize-fixture.png&w=640&q=75'
 #   arm A : 200 image/webp 1,880 B      arm B : 200 image/png 181,277 B
 node headers.mjs 'http://127.0.0.1:PORT/_next/image?url=...&w=637&q=75'   # -> 400 (handler runs)
 
-# ---- image recovery attempts -----------------------------------------------
+# ---- image recovery attempts (both registration-based; both failed) ---------
+npm i sharp@^0.34.2                                                      # -> resolved 0.34.5
 # Path A: vinext({ images: { optimizer: { adapter: './knext-sharp-optimizer.mjs' } } })
 grep -c sharp dist/server/index.js                                       # -> 0  (never wired)
 grep -rn generateImageAdaptersModule node_modules/vinext/dist \
   | grep -v image-adapters-virtual.js                                    # -> no callers
-# Path B: knext-entry.mjs sets globalThis[Symbol.for('vinext.imageOptimizer')] then imports the server
+# Path B:
+PORT=3226 NODE_ENV=production node knext-entry.mjs
 grep -c "vinext.imageOptimizer" dist/standalone/server.js dist/server/index.js   # -> 0, 0
 # root cause:
 sed -n '868,890p' node_modules/vinext/dist/server/prod-server.js         # tryServeStatic, no optimizer
+
+# ---- the interception path (structural check only; NOT measured) ------------
+npm pack vinext@1.0.0-beta.4 && tar xzf vinext-1.0.0-beta.4.tgz
+sed -n '105,121p' package/dist/build/standalone.js       # generated shim -> startProdServer(...)
+sed -n '119,122p' package/dist/server/prod-server.d.ts   # -> Promise<{ server: http.Server; port }>
+node -p "Object.keys(JSON.parse(require('fs').readFileSync('package/package.json')).exports) \
+  .filter(k => /prod-server|fetch-handler/.test(k)).join(', ')"
+#   -> ./server/prod-server, ./server/fetch-handler
 
 # ---- prerender/standalone exclusivity --------------------------------------
 sed -n '368,392p' node_modules/vinext/dist/cli.js   # standalone branch process.exit(0)s first
 
 # ---- dev-React probe (CJS + ESM) -------------------------------------------
-# count-modules.cjs registers module.registerHooks({load}) into a Set, dumps on SIGUSR2
 MODLIST_OUT=modlist.txt NODE_ENV=production PORT=3223 \
   node --require ./count-modules.cjs dist/standalone/server.js &
-# ...probe /api/health, /, /blog/alpha... then:
+node waitup.mjs http://127.0.0.1:3223/api/health 40000
+node probe.mjs http://127.0.0.1:3223/ ; node probe.mjs http://127.0.0.1:3223/blog/alpha
 kill -USR2 $!; grep -i development modlist.txt
 #   arm B: 3 hits (react, react-jsx-runtime, react-dom)     arm A: none
 ```
@@ -402,6 +658,9 @@ kill -USR2 $!; grep -i development modlist.txt
 
 Listed so nobody reads absence as a negative result.
 
+- **Whether in-process interception of `/_next/image` works.** Structurally available (§1.4) but not
+  built and not measured; the open risk is `sharp` as a native module under `bun build --compile`. A
+  separate spike is measuring it. This is the single most consequential open item in this document.
 - Behaviour under **`vinext@^0.0.19` + `nitro@3.0.1-alpha.2`**. Not tested. All three answers above
   are beta.4/Vite-8 answers.
 - Whether the **non-standalone `dist/` layout compiles** under `bun build --compile --bytecode`.
@@ -412,4 +671,5 @@ Listed so nobody reads absence as a negative result.
   Node v24.14.0 against the uncompiled standalone output; the compiled binary was not built.
 - Whether an **upstream patch to `prod-server.js` would be accepted**, and what a knext fork of
   vinext would cost to maintain.
+- Arm A's **resolved `sharp` version** (declared `^0.34.2`; not recorded at run time).
 - Nothing here was run **against a cluster**, per the Phase 3 brief.
