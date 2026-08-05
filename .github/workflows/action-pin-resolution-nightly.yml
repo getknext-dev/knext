@@ -31,6 +31,16 @@ name: Action pin SHA↔tag resolution (nightly)
 # commits) lives in `scripts/verify-action-pins.mjs` and is unit-tested offline
 # against an injected API double by `tests/action-pin-sha-tag-nightly.test.ts`.
 #
+# #640 — TWO ROUTES, NEVER A DOWNGRADED VERDICT: `aquasecurity` (the Trivy
+# actions) enables an organisation IP ALLOW LIST that this runner's address is
+# not on, so the API answers 403 and four correct pins were unverifiable — a
+# permanently-red gate, which people learn to ignore. Those pins are now resolved
+# over an ANONYMOUS `git ls-remote` (not behind the org's API allow list), which
+# gives the same guarantee: `refs/tags/<tag>^{}` is the annotated-tag
+# dereference, from the canonical repo. Reached ONLY from a 403/451; if it fails
+# too, the finding stands and names both causes. `git` is on PATH because the
+# checkout step above put it there.
+#
 # HUMAN PRECONDITION: the alert-issue create/pin needs "Settings → Actions →
 # General → Workflow permissions → Allow GitHub Actions to create and approve
 # pull requests" ENABLED (it also governs issue creation by the default token).
@@ -60,6 +70,19 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The `git ls-remote` fallback below is only useful because it is
+          # ANONYMOUS. `persist-credentials: true` (the DEFAULT) writes
+          # `http.https://github.com/.extraheader = AUTHORIZATION: basic <token>`
+          # into this checkout's LOCAL .git/config, and that header is keyed on
+          # the github.com PREFIX — so every github.com request made from the
+          # workspace carries the runner's token, including the fallback. That is
+          # the identity the org IP allow list already 403'd, i.e. the fix would
+          # be a no-op in the one environment it targets (#666 review, measured).
+          # The resolver ALSO runs git from a repo-less cwd; both, because either
+          # alone is one edit from silently re-authenticating, and the failure is
+          # invisible from the log.
+          persist-credentials: false
 
       # No dependencies, no setup-node: the script is dependency-free ESM on the
       # runner's built-in Node, so this job cannot itself become a supply-chain
