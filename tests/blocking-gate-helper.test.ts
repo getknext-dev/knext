@@ -450,6 +450,204 @@ jobs:
     });
   });
 
+  describe('workflow-level concurrency (#674)', () => {
+    // A JOB-level `concurrency` is already reported by the fail-closed
+    // allowlist. The WORKFLOW-level one was invisible to this audit, and #674
+    // adds exactly such a block to `ci.yml` — where two audited gates live. So
+    // the question the audit now has to answer is not "is there a group" but
+    // "can anything OTHER than a superseding push to this same ref cancel the
+    // gate". A ref-scoped group cannot: the only canceller is a newer commit on
+    // the same PR, whose own run must go green on the new head SHA. A group that
+    // is NOT ref-scoped can be tripped by an unrelated ref, and that is a
+    // genuine disarm.
+    const withWorkflowConcurrency = (block: string) => `${block}${CLEAN}`;
+
+    it('reports a cancelling workflow-level group that is not ref-scoped', () => {
+      const a = audit(
+        withWorkflowConcurrency('concurrency:\n  group: ci\n  cancel-in-progress: true\n'),
+      );
+      expect(a.problems.join('\n')).toMatch(/concurrency/);
+      expect(a.problems.join('\n')).toMatch(/cancel/i);
+    });
+
+    it('reports a cancelling group keyed on something other than the ref', () => {
+      // `github.workflow` alone is constant across every ref, so this is the
+      // fixed-string case wearing an expression.
+      const a = audit(
+        withWorkflowConcurrency(
+          'concurrency:\n  group: ${{ github.workflow }}\n  cancel-in-progress: true\n',
+        ),
+      );
+      expect(a.problems.join('\n')).toMatch(/concurrency/);
+    });
+
+    it('treats a non-literal `cancel-in-progress` as cancelling', () => {
+      // Same class as `continue-on-error: ${{ true }}` — an expression is not
+      // the literal `false`, so it is not a reason to wave the group through.
+      const a = audit(
+        withWorkflowConcurrency('concurrency:\n  group: ci\n  cancel-in-progress: ${{ true }}\n'),
+      );
+      expect(a.problems.join('\n')).toMatch(/concurrency/);
+    });
+
+    it('rejects an interpolation that merely CONTAINS `github.ref` as a substring', () => {
+      // Round 1's `REF_SCOPED` was `/\$\{\{[^}]*github\.(ref|ref_name|head_ref)[^}]*\}\}/`,
+      // so any expression with `github.ref` ANYWHERE in it was accepted.
+      // `github.ref_protected` is a boolean — two possible values across the
+      // whole repository — so this group collapses every PR into one of two
+      // buckets, which is exactly the cross-PR disarm this check exists to
+      // reject, in a check documented as failing closed.
+      const a = audit(
+        withWorkflowConcurrency(
+          'concurrency:\n  group: ci-${{ github.ref_protected }}\n  cancel-in-progress: true\n',
+        ),
+      );
+      expect(a.problems.join('\n')).toMatch(/concurrency/);
+    });
+
+    it('rejects a COMPARISON on `github.ref`, which is a boolean, not a ref', () => {
+      // `${{ github.ref == 'refs/heads/main' }}` renders `true` or `false`. Same
+      // collapse, and it reads even more like ref scoping than the last one.
+      const a = audit(
+        withWorkflowConcurrency(
+          "concurrency:\n  group: ci-${{ github.ref == 'refs/heads/main' }}\n  cancel-in-progress: true\n",
+        ),
+      );
+      expect(a.problems.join('\n')).toMatch(/concurrency/);
+    });
+
+    it('rejects the bare literal `pull_request.number` with no interpolation', () => {
+      // Round 1's second alternation was unanchored, so the FIXED STRING
+      // `pull_request.number` — no `${{ }}` at all, therefore identical for
+      // every PR — was accepted as PR scoping. A literal cannot scope anything.
+      const a = audit(
+        withWorkflowConcurrency(
+          'concurrency:\n  group: pull_request.number\n  cancel-in-progress: true\n',
+        ),
+      );
+      expect(a.problems.join('\n')).toMatch(/concurrency/);
+    });
+
+    it('NEGATIVE CONTROL: a real PR-number interpolation is still accepted', () => {
+      // The form the round-1 alternation was presumably reaching for. It varies
+      // per pull request, so it scopes.
+      const a = audit(
+        withWorkflowConcurrency(
+          'concurrency:\n  group: preview-${{ github.event.pull_request.number }}\n  cancel-in-progress: true\n',
+        ),
+      );
+      expect(a.problems, a.problems.join('\n')).toEqual([]);
+    });
+
+    it('NEGATIVE CONTROL: `github.head_ref` and `github.ref_name` still scope', () => {
+      for (const key of ['github.head_ref', 'github.ref_name']) {
+        const a = audit(
+          withWorkflowConcurrency(
+            `concurrency:\n  group: ci-\${{ ${key} }}\n  cancel-in-progress: true\n`,
+          ),
+        );
+        expect(a.problems, `${key}: ${a.problems.join('\n')}`).toEqual([]);
+      }
+    });
+
+    it('NEGATIVE CONTROL: an `||` fallback chain of per-PR contexts still scopes', () => {
+      // The round-2 tightening ("the body must be EXACTLY one context") was a
+      // COVERAGE REGRESSION on the canonical GitHub idiom, measured: both of
+      // these render a per-PR value and both were rejected, with a message
+      // saying "not scoped to the ref" that is FALSE for them. `||` here is
+      // OPERAND FALLBACK — the expression's value IS one of its operands — which
+      // is the opposite of the `==` case the tightening exists to reject, where
+      // the value is a boolean that is not any operand.
+      for (const body of [
+        'github.head_ref || github.ref',
+        'github.event.pull_request.number || github.ref',
+        'github.head_ref || github.ref_name || github.ref',
+      ]) {
+        const a = audit(
+          withWorkflowConcurrency(
+            `concurrency:\n  group: ci-\${{ ${body} }}\n  cancel-in-progress: true\n`,
+          ),
+        );
+        expect(a.problems, `${body}: ${a.problems.join('\n')}`).toEqual([]);
+      }
+    });
+
+    it("NEGATIVE CONTROL: `preview.yml`'s real group is accepted", () => {
+      // `.github/workflows/preview.yml:47` already uses this shape. It does not
+      // red today only because `preview.yml` carries no audited gate; when one
+      // lands, a guard that rejects a correct group is how "edit the guard"
+      // becomes the routine fix. A `workflow_dispatch` input is accepted as a
+      // FALLBACK operand only — see the sole-operand rejection below.
+      const a = audit(
+        withWorkflowConcurrency(
+          'concurrency:\n  group: preview-${{ github.event.pull_request.number || github.event.inputs.pr }}\n  cancel-in-progress: true\n',
+        ),
+      );
+      expect(a.problems, a.problems.join('\n')).toEqual([]);
+    });
+
+    it('rejects a dispatch input as the SOLE operand — it need not vary per PR', () => {
+      // The permissive direction is the one that matters. `github.event.inputs.*`
+      // is an arbitrary user-supplied string; on its own it can be a constant
+      // (`environment`, a default value), which collapses every ref into one
+      // group. It is admissible only behind a real per-PR operand.
+      for (const body of [
+        'github.event.inputs.env',
+        'github.event.inputs.a || github.event.inputs.b',
+      ]) {
+        const a = audit(
+          withWorkflowConcurrency(
+            `concurrency:\n  group: ci-\${{ ${body} }}\n  cancel-in-progress: true\n`,
+          ),
+        );
+        expect(a.problems.join('\n'), body).toMatch(/concurrency/);
+      }
+    });
+
+    it('rejects an `||` chain containing a non-per-PR operand', () => {
+      // Fail closed on the chain as a whole: `github.ref_protected` is still a
+      // boolean, and admitting a chain because ONE operand is fine would let the
+      // rejected forms back in through the fallback slot.
+      const a = audit(
+        withWorkflowConcurrency(
+          'concurrency:\n  group: ci-${{ github.ref_protected || github.workflow }}\n  cancel-in-progress: true\n',
+        ),
+      );
+      expect(a.problems.join('\n')).toMatch(/concurrency/);
+    });
+
+    it('the rejection message states what IS accepted, not a claim about the ref', () => {
+      // "not scoped to the ref" was false for the `||` forms above, and a guard
+      // whose message misdescribes the defect trains readers to edit the guard.
+      const a = audit(
+        withWorkflowConcurrency('concurrency:\n  group: ci\n  cancel-in-progress: true\n'),
+      );
+      expect(a.problems.join('\n')).toMatch(/github\.event\.pull_request\.number/);
+      expect(a.problems.join('\n')).toMatch(/github\.head_ref/);
+    });
+
+    it('NEGATIVE CONTROL: a ref-scoped cancelling group is permitted', () => {
+      const a = audit(
+        withWorkflowConcurrency(
+          'concurrency:\n  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}\n  cancel-in-progress: true\n',
+        ),
+      );
+      expect(a.problems, a.problems.join('\n')).toEqual([]);
+    });
+
+    it('NEGATIVE CONTROL: a non-cancelling group needs no ref scope', () => {
+      const a = audit(
+        withWorkflowConcurrency('concurrency:\n  group: ci\n  cancel-in-progress: false\n'),
+      );
+      expect(a.problems, a.problems.join('\n')).toEqual([]);
+    });
+
+    it('NEGATIVE CONTROL: the shorthand string form queues, it does not cancel', () => {
+      const a = audit(withWorkflowConcurrency('concurrency: ci\n'));
+      expect(a.problems, a.problems.join('\n')).toEqual([]);
+    });
+  });
+
   describe('structural non-vacuity', () => {
     it('fails a workflow with no `jobs:` mapping rather than passing by absence', () => {
       const a = audit('on:\n  pull_request:\n');
