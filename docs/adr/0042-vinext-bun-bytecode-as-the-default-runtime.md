@@ -4,17 +4,30 @@
   accepted. Delivery is phased (below); the flip itself lands at Phase 5 and is gated on the exit
   criteria there, not on this ADR alone.
 - **Amends:** **ADR-0036** — its `Status` line, its close-out verdict *"Rejected for 1.0 (measured)"*,
-  and its clause *"What is explicitly NOT authorised: making `bun-exec` the default."* It does **not**
-  supersede ADR-0036: that document remains the load-bearing engineering record — the `RuntimeContract`
-  enumeration, the opaque-binary supply-chain rule, the one-CRD invariant, and the two benchmark runs
-  that argued *against* this decision. Superseding it would retire exactly the evidence that must stay
-  visible.
+  its clause *"What is explicitly NOT authorised: making `bun-exec` the default."*, and its
+  **2026-07-22 build×runtime matrix**, which this ADR reduces from three valid cells to two by
+  excluding `node + vinext` (see Decision 2). It does **not** supersede ADR-0036: that document remains
+  the load-bearing engineering record — the `RuntimeContract` enumeration, the opaque-binary
+  supply-chain rule, the one-CRD invariant, and the two benchmark runs that argued *against* this
+  decision. Superseding it would retire exactly the evidence that must stay visible.
+- **Conflicts with (unresolved, pending Escalation 1):** **ADR-0006** (image optimization). ADR-0006 is
+  Accepted and its implementation ships today on the node path. With `node + vinext` excluded and
+  `--compile` mandatory, an ADR-0006 app has **no in-band fallback** on the default runtime. ADR-0006
+  is not amended here and must not be read as standing unqualified: it is conflicted until Phase 3(a)
+  resolves and the founder answers Escalation 1.
 - **Depends on:** ADR-0001 (operator = single source of truth), ADR-0007 (the official-suite gate),
   ADR-0017 (`v1alpha1` additive-only), ADR-0035 (baked compile cache), ADR-0037 (image caching),
   ADR-0040 (CR field validation pattern).
-- **Requires amendment of (Phase 5, not now):** `.claude/rules/architecture.md` §4 and `CLAUDE.md`
-  §3/§10, which currently make the official Next.js Deployment Adapter API the default and only
-  all-apps-verified path.
+- **Requires amendment of (Phase 5, not now):**
+  - `.claude/rules/architecture.md` §4 — both the *"official adapter API is the DEFAULT and only
+    all-apps-verified path"* bullet **and** the *"gate every feature on the official Next.js
+    compatibility suite"* bullet. The second is listed because Phase 5 moves the default onto a target
+    the per-PR `compat-smoke` gate does not currently cover (see Phase 2).
+  - `CLAUDE.md` §3 and §10 — same default-path claim.
+  - `CLAUDE.md` §2 — **verified-adapter status** as the north-star credibility lever, which
+    Consequence 8 concedes is forfeited on the default path.
+  - `CLAUDE.md` §9 — records image optimization as RESOLVED and says *"don't re-propose it as a work
+    item"*; that is true of the node path and not of the default path after Phase 5.
 
 ## Context
 
@@ -73,6 +86,20 @@ arms **served different applications**, and the measured endpoint was the servic
 differ. The node arm was the *simpler* page, so the bias plausibly favoured node, and a fair rerun
 could move toward bun-exec. ADR-0036 earned only the narrow claim: *no separated win between these two
 apps*.
+
+**The measured artifact really was the one this ADR proposes** — the escape hatch "Run 26 never tested
+the bytecode path" is closed, and closing it makes Run 26 *harder* to dismiss, not easier. ADR-0036,
+verbatim: *"The measured artifact **was** bytecode-compiled — verified by extracting the binary from
+the deployed digest and fingerprinting it against **version-matched** controls (Bun 1.3.14), so this
+tested the artifact the ADR actually proposes."* Since this ADR's whole reframe is that **bytecode is
+the objective**, that sentence bears directly against it and is carried here rather than left in the
+predecessor.
+
+**The microbenchmark win does not reach the user.** Run 13 is quoted above for the decomposition that
+supports the reframe; ADR-0036's very next clause qualifies it and is carried with equal precision:
+*"That advantage is real and does **not** survive to end-to-end cold start"*, because boot is a small
+fraction of it. Quoting the first half without the second is the specific way this record could have
+been made to look better-supported than it is.
 
 **The re-open trigger did not fire.** ADR-0036 named a falsifiable trigger (same app by digest,
 endpoint recorded, ABBA-interleaved, build-flag provenance tied to the deployed digest, stratified by
@@ -207,6 +234,29 @@ While that tail fires, no end-to-end number from that cluster is admissible.
 where every entry carries observed run IDs, mechanism and upstream provenance, **pinned per run** — never
 a read-time-applied classification like vinext's own; `docs/compat-matrix.md` updated with the delta.
 
+**Also in Phase 2, and easy to miss because Decision 4 only names the nightly corpus: the per-PR
+`compat-smoke` gate is bound to Next standalone and does not cover vinext at all.**
+`apps/file-manager/scripts/compat-smoke.mjs:48` resolves its server as
+`process.env.SERVER_PATH || …/.next/standalone/apps/file-manager/server.js`. It defines **eleven**
+checks (`a`–`k`); **ten** of them (all but `h`) are cited as evidence by **ten ✅ rows** in
+`docs/compat-matrix.md` — of twelve ✅ rows total — and `tests/compat-matrix.test.ts` scans the runner
+to prove no `skip()` exists. Under a vinext default there is no `standalone/server.js`, so at Phase 5
+those ten rows would keep their ✅ while losing their red-on-fail backing **on the default path** —
+precisely the "capability behind a check that skips rather than fails" hole `.claude/rules/workflow.md`
+names as trigger-class, and a direct contradiction of `architecture.md` §4's compat-gate bullet.
+
+**The axis that is already parameterised is the wrong one.** `compat-smoke` runs a **Node + Bun**
+matrix per PR (ADR-0007 / A3-1) with the lanes independently red — so the *runtime* axis is covered
+and the *build* axis is not. Both lanes boot the same Next-standalone `server.js`. Adopting Bun as the
+runtime therefore proves nothing about adopting vinext as the build, and the existing matrix must not
+be mistaken for coverage of this flip.
+
+**Additional exit:** `compat-smoke` parameterised over the **build** axis onto the vinext artifact
+(`SERVER_PATH` is already a documented override, so this is wiring, not a rewrite), all eleven checks
+hard on both targets, and `tests/compat-matrix.test.ts` updated so **each ✅ row names which build
+target its evidence covers**. A row backed on one target and unbacked on the other must not read as a
+single ✅.
+
 **Phase 3 — resolve the capability blockers. (Reversible — produces findings.)** **Exit:** (a) image
 optimisation — a working path under vinext on Knative, or an accepted documented regression with a
 fail-closed rule the CLI and operator both enforce; (b) build-time static generation — works, or the loss
@@ -223,8 +273,18 @@ parameterised over both images.
 ignored. First step that cannot be fully unwound.
 
 **Phase 5 — the default flip. (Irreversible in practice.)** Exit: Phase 1 separation shown; Phase 2 lane
-green or honestly scoped; Phase 3 resolved; `architecture.md` §4 and `CLAUDE.md` §3/§10 amended; breaking
-change in release notes; upgrade order **operator/CRD first, then CLI**.
+green **and its corpus delta within a ceiling the founder has set (Escalation 6)**; Phase 2's
+`compat-smoke` parameterisation landed; Phase 3 resolved; `architecture.md` §4 (both bullets) and
+`CLAUDE.md` §2/§3/§9/§10 amended; breaking change in release notes; upgrade order **operator/CRD
+first, then CLI**.
+
+> An earlier draft of this exit read *"Phase 2 lane green **or honestly scoped**"*. That was the only
+> unfalsifiable criterion in an otherwise falsifiable plan, and it gated the **irreversible** step —
+> "honestly scoped" can be satisfied by any exclusion set, however large, provided it is documented.
+> Given vinext's own self-reported 93.3%, it would have permitted flipping the default onto a lane
+> excluding ~7% of the corpus for product gaps, inverting ADR-0007's "shrink the ledger to zero" into a
+> ledger large by construction. The ceiling is a founder decision, not an architect's, so it is
+> escalated rather than invented here — but Phase 5 does not pass without one.
 
 **Phase 6 — decide the node track's fate.** Only after Phase 5 has data.
 
@@ -263,6 +323,12 @@ change in release notes; upgrade order **operator/CRD first, then CLI**.
 5. **What happens to the official node compat lane** — completed for the credential, paused, or
    abandoned? Note the streak reset to 1 on 2026-08-03 and that run's log has expired, so its cause is
    unrecoverable.
+6. **What corpus delta is acceptable at the Phase 5 flip?** Phase 2's lane will exclude some tests. A
+   ceiling has to exist before the irreversible step, or "honestly scoped" becomes a criterion that any
+   exclusion set satisfies. vinext self-reports 93.3%, so ~7% is the shape of the question. State it as
+   a number (e.g. "no more than N excluded, none of them Tier-A capability rows"), because ADR-0007's
+   ledger is meant to shrink to zero and a delta with no ceiling inverts it. Coupled to Escalation 4:
+   ADR-0017 §3.1's 1.0-graduation question now depends on this answer.
 
 ## Action items
 
@@ -272,7 +338,12 @@ change in release notes; upgrade order **operator/CRD first, then CLI**.
 - **A4** Resolve image optimisation, static generation, dev-React (feeds Escalation 1 and 2).
 - **A5** Additive `build` field per ADR-0040; both drain e2e gates parameterised.
 - **A6** Record vinext's licence, maintenance posture, and abandonment exit stance.
-- **A7** Amend `architecture.md` §4 and `CLAUDE.md` §3/§10 — **gated on Phase 5**.
+- **A7** Amend `architecture.md` §4 (**both** bullets — default-path *and* compat-gate) and `CLAUDE.md`
+  §2/§3/§9/§10 — **gated on Phase 5**.
 - **A8** Name an owner for vinext upstream health.
 - **A9** Add `apk add libstdc++ libgcc` to the compiled image, with a test that the binary runs from a
   clean alpine.
+- **A10** Parameterise `apps/file-manager/scripts/compat-smoke.mjs` over the vinext artifact via
+  `SERVER_PATH`, keep all eleven checks hard on both targets, and update `tests/compat-matrix.test.ts`
+  so every ✅ row records which build target backs it. **Part of Phase 2 — must land before Phase 5.**
+- **A11** Get a founder answer on the Phase 5 corpus-delta ceiling (Escalation 6). Blocks Phase 5.
