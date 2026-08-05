@@ -87,6 +87,17 @@ for (const [mode, rs] of Object.entries(arms)) {
       `node work s       ${JSON.stringify(stats(pre.map((r) => Math.round(r.precondition_ms / 1000))))}`,
     );
   }
+  // WHICH symmetry the floor buys, stated rather than left derivable. The floor
+  // starts after the precondition work, so QUIET is equal across arms — and
+  // therefore TOTAL time at zero is NOT: the `off` arm's eviction Jobs run
+  // inside that window, so it sits at zero ~60 s longer. Both quantities cannot
+  // be equal at once; this is the one that was traded away, so it is printed.
+  const az = rs.filter((r) => typeof r.at_zero_ms === 'number');
+  if (az.length) {
+    console.log(
+      `time at zero s    ${JSON.stringify(stats(az.map((r) => Math.round(r.at_zero_ms / 1000))))}`,
+    );
+  }
   console.log(`cold samples      ${JSON.stringify(rs.map((r) => r.cold_ttfb_ms))}\n`);
 }
 

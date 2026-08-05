@@ -167,22 +167,36 @@ export function assertSingleApplication({ pwImage, revisionImage, revision }) {
  * degrade to `pulling: false` — which is the value the headline claim wants, so
  * a transient events-API failure on a no-prewarm replicate silently converted
  * 10/10 into 9/10 in the favourable direction.
+ *
+ * WHICH KIND OF FAILURE, and why the two are not the same:
+ *
+ *   - A MISSING observation (no pod in the window, a failed events query, no
+ *     boolean `pulling`) fails THE REPLICATE. It is recorded as failed, never as
+ *     the favourable value, and the loop steps over it. It is deliberately NOT a
+ *     `FatalError`: nothing about a transient `kubectl get events` hiccup makes
+ *     the next replicate wrong, and aborting discards a ~100 minute booking on a
+ *     shared cluster. An earlier revision threw `FatalError` here while three
+ *     doc sites said "fails the replicate" — the code and the prose taught
+ *     different rules.
+ *   - A WRONG IMAGE is fatal. It means the two arms are not one application, so
+ *     every remaining replicate would measure a different program under the same
+ *     label — the run itself is invalid, not one row of it.
  */
 export function assertPodFacts(facts, { expectImage } = {}) {
   if (!facts) {
-    throw new FatalError(
+    throw new Error(
       'no pod matched the request window: the cold start cannot be attributed, so the replicate ' +
         'is failed rather than recorded without its `Pulling` observation',
     );
   }
   if (facts.eventsError) {
-    throw new FatalError(
+    throw new Error(
       `the kubelet events query failed (${facts.eventsError}): "no Pulling event" would be an ` +
         'absent observation reported as the favourable one',
     );
   }
   if (typeof facts.pulling !== 'boolean') {
-    throw new FatalError('pod facts carry no boolean `pulling` observation');
+    throw new Error('pod facts carry no boolean `pulling` observation');
   }
   if (expectImage) {
     const images = (facts.containers ?? []).map((c) => c.image);
@@ -245,6 +259,9 @@ export async function runReplicates({
   }
 }
 
+/** The exit code convention for a process killed by signal N: 128 + N. */
+const SIGNAL_EXIT = { SIGINT: 130, SIGTERM: 143 };
+
 /**
  * Run `body` and put back whatever `read()` reported before it — then read back
  * and PROVE the restore landed.
@@ -254,9 +271,62 @@ export async function runReplicates({
  * DaemonSet and a warm image on every node. The next benchmark on that cluster
  * inherits it and cannot tell — and this harness's own README says exactly that,
  * as a human checklist item. A checklist is not a restore.
+ *
+ * SIGNALS ARE PART OF THAT, not a footnote. A full run is ~100 minutes on a
+ * shared cluster, so Ctrl-C is a LIKELY exit path, not an exotic one — and an
+ * interrupted run that skipped the restore leaves exactly the state above:
+ * `imagePrewarm=true` plus a warm image on every node. `SIGINT`/`SIGTERM` are
+ * therefore handled and perform the same write + READ-BACK; only `SIGKILL`,
+ * which no process can handle, remains uncovered.
  */
-export async function withRestore({ read, write, body, log = (_message) => {} }) {
+export async function withRestore({
+  read,
+  write,
+  body,
+  log = (_message) => {},
+  // Injected so the signal path can be exercised rather than merely registered.
+  proc = process,
+  signals = ['SIGINT', 'SIGTERM'],
+}) {
   const before = read();
+
+  /** Put it back and prove it. Idempotent: the signal and the normal path share it. */
+  let done = false;
+  const restore = () => {
+    if (done) return { restored: true, after: before };
+    done = true;
+    let restoreError;
+    let after;
+    try {
+      write(before);
+      after = read();
+    } catch (error) {
+      restoreError = error;
+    }
+    const restored = restoreError === undefined && after === before;
+    log(
+      restored
+        ? `restored pre-run state (imagePrewarm=${before}), verified by read-back`
+        : `RESTORE FAILED: wanted imagePrewarm=${before}, read back ${after}${restoreError ? ` (${restoreError})` : ''}`,
+    );
+    return { restored, after, restoreError };
+  };
+
+  const handlers = signals.map((signal) => {
+    const handler = () => {
+      log(`${signal} received — restoring before exit`);
+      const { restored } = restore();
+      // A failed restore is not a clean interrupt: exit 1 so a wrapper script
+      // cannot read "the operator just pressed Ctrl-C" and move on.
+      proc.exit(restored ? (SIGNAL_EXIT[signal] ?? 1) : 1);
+    };
+    proc.on(signal, handler);
+    return [signal, handler];
+  });
+  const unregister = () => {
+    for (const [signal, handler] of handlers) proc.off(signal, handler);
+  };
+
   let result;
   let bodyError;
   try {
@@ -264,21 +334,9 @@ export async function withRestore({ read, write, body, log = (_message) => {} })
   } catch (error) {
     bodyError = error;
   }
+  unregister();
 
-  let restoreError;
-  let after;
-  try {
-    write(before);
-    after = read();
-  } catch (error) {
-    restoreError = error;
-  }
-  const restored = restoreError === undefined && after === before;
-  log(
-    restored
-      ? `restored pre-run state (imagePrewarm=${before}), verified by read-back`
-      : `RESTORE FAILED: wanted imagePrewarm=${before}, read back ${after}${restoreError ? ` (${restoreError})` : ''}`,
-  );
+  const { restored, after, restoreError } = restore();
 
   if (bodyError) throw bodyError;
   if (!restored) {

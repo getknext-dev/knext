@@ -189,6 +189,14 @@ The harness has since been changed so the floor starts **after** the preconditio
 distributions so an asymmetry like this is visible rather than reconstructed from a log. The numbers
 above are that reconstruction, for a run made before the fix.
 
+**Which symmetry that buys, stated plainly, because the two cannot both hold.** The floor now
+equalises **quiet before the request** — the quantity that plausibly affects a cold start, since it
+is what lets the cluster go idle. It therefore *un*equalises **total time at zero**: the `off` arm's
+eviction Jobs run inside that window, so it sits at zero roughly 60 s longer than the `on` arm. That
+is a deliberate trade, not an oversight, and it is no longer only derivable from the two published
+distributions — `at_zero_ms` is recorded per replicate and `analyze.mjs` prints `time at zero`
+per arm alongside `settle` and `node work`. Anyone re-reading this comparison can see both.
+
 So the ~2 s estimate ADR-0037 carried is right at the median. The tail is worse, and comparisons of it
 have to be like-for-like: **p75 to p75 is 3.9 s** (6696 vs 2818), **max to max is 10.7 s** (13812 vs
 3068). An earlier revision of this page said "the worst replicate 11.3 s more", which pairs the

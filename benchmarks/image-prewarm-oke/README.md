@@ -86,14 +86,22 @@ the fatal-vs-recorded split, and the restore.
 - **An observation that did not happen is not an observation.** `Pulling` is the
   headline criterion, and "no `Pulling` event" is also what you get from a pod
   that could not be found or an events query that failed. Both now FAIL the
-  replicate; `analyze.mjs` refuses to count a row without a boolean `pulling`.
-  Getting this wrong is invisible because it fails toward the desired answer.
+  replicate — recorded as failed, stepped over, and never counted as the
+  favourable value; `analyze.mjs` refuses to count a row without a boolean
+  `pulling`. Getting this wrong is invisible because it fails toward the desired
+  answer. Deliberately *not* fatal: a transient events query says nothing about
+  the next replicate, and aborting throws away hours on a shared cluster. What
+  *is* fatal is a **wrong image** — the arms are then not one application, so
+  every remaining replicate would measure a different program.
 
 ## Cleanup
 
 The harness restores the `spec.scaling.imagePrewarm` value it found before the
 run and **reads it back to prove the restore landed**; a restore that does not
-take effect aborts loudly. `nodesh.sh` Jobs carry `ttlSecondsAfterFinished`, so
+take effect aborts loudly. That includes an **interrupted** run: `SIGINT`
+(Ctrl-C) and `SIGTERM` restore and read back before exiting `130`/`143`, which
+matters because a full run is ~100 minutes and Ctrl-C is therefore a likely exit
+path, not an exotic one. `nodesh.sh` Jobs carry `ttlSecondsAfterFinished`, so
 they reap themselves.
 
 This used to be a line in this README instead: `ORDER` ends with `on`, so every
@@ -104,6 +112,9 @@ that cluster inherits it and cannot tell. A checklist is not a restore.
 Still yours to do when you are finished with the cluster: **remove the app and
 its namespace**, and delete the content-unique image from the registry.
 
-**Not covered:** a `SIGKILL`ed run cannot restore anything. Check
+**Not covered — and now only this:** `SIGKILL` (and a power loss), the one signal
+no process can handle. `SIGINT`/`SIGTERM` used to sit in this same bucket, which
+made an honest-looking caveat cover the *unfixable* case while the likely and
+fixable one hid behind it. After a `SIGKILL`, check
 `kubectl get nextapp <app> -o jsonpath='{.spec.scaling.imagePrewarm}'` before
 trusting a later measurement on the same cluster.

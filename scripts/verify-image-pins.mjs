@@ -1,7 +1,13 @@
 #!/usr/bin/env node
 /**
- * verify-image-pins — resolve every image the OPERATOR pins against the tag its
- * own reference claims, UPSTREAM, at run time (#471).
+ * verify-image-pins — resolve every image THIS REPO RUNS ON A CLUSTER against
+ * the tag its own reference claims, UPSTREAM, at run time (#471).
+ *
+ * Scope is the operator's Go sources AND the benchmark harnesses' YAML/shell.
+ * The second half is not incidental: the two most privileged pins in the tree
+ * are a benchmark's PRIVILEGED hostPID `nsenter` pod and its kaniko builder,
+ * which holds the registry PUSH credential. A check whose scope excludes those
+ * does not carry the finding it exists for.
  *
  * WHY THIS IS NOT A UNIT TEST
  * ---------------------------
@@ -89,15 +95,62 @@ export function discoverGoSources(repoRoot) {
 }
 
 /**
- * Every image reference inside a Go string literal.
+ * The BENCHMARK sources that carry an image this repo RUNS on a cluster.
+ *
+ * Scope is not an implementation detail here, it is the check. The original walk
+ * covered only the operator's Go sources — which excluded the two most
+ * privileged pins in the tree: `nodesh.sh`'s image (a PRIVILEGED, hostPID pod
+ * that `nsenter`s the host) and `build-unique-image.job.yaml`'s kaniko builder
+ * (which holds the registry PUSH credential). The finding this whole check
+ * exists to carry is that the artifact behind a tag is mutable and load-bearing;
+ * a scope that skips those two does not carry it.
+ *
+ * Discovered by extension, not enumerated, for the same reason as the Go walk.
+ */
+export function discoverBenchmarkSources(repoRoot) {
+  const root = resolve(repoRoot, 'benchmarks');
+  if (!existsSync(root)) return [];
+  const found = [];
+  const walk = (dir) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (entry.name === 'results' || entry.name === 'node_modules' || entry.name.startsWith('.')) {
+        continue;
+      }
+      const child = join(dir, entry.name);
+      if (entry.isDirectory()) walk(child);
+      else if (/\.(ya?ml|sh)$/.test(entry.name)) found.push(relative(repoRoot, child));
+    }
+  };
+  walk(root);
+  return found.sort();
+}
+
+/** Every source whose pins this check owns. */
+export function discoverSources(repoRoot) {
+  return [...discoverGoSources(repoRoot), ...discoverBenchmarkSources(repoRoot)];
+}
+
+/** The reference grammar, shared by the quoted (Go) and bare (YAML/shell) forms. */
+const REF =
+  '(?:[a-zA-Z0-9][a-zA-Z0-9._-]*(?::\\d+)?\\/)?(?:[a-z0-9]+(?:[._-][a-z0-9]+)*)' +
+  '(?:\\/[a-z0-9]+(?:[._-][a-z0-9]+)*)*(?::[\\w][\\w.-]*)?@sha256:[0-9a-f]{64}';
+
+/**
+ * Every image reference in a source file.
  *
  * Both shapes are captured: `repo:tag@sha256:…` (checkable) and `repo@sha256:…`
  * (a finding — see the header). A bare `repo:tag` with no digest is NOT this
  * script's business: `TestPrewarmHelperImage_DigestPinned` and the operator's
  * own `:latest` rejection already make an undigested pin fail at PR time.
+ *
+ * Go pins live inside a string literal; YAML and shell pins do not (`image:
+ * alpine:3.20@sha256:…`, `${NODESH_IMAGE:-alpine:3.20@sha256:…}`), so the bare
+ * form is matched too. The left boundary excludes the characters that would make
+ * the match a SUFFIX of a longer reference — but deliberately allows `-`, `{`
+ * and `:` -adjacent shell expansion, which is how the shell default above is
+ * written.
  */
-const IMAGE_LITERAL =
-  /"((?:[a-zA-Z0-9][a-zA-Z0-9._-]*(?::\d+)?\/)?(?:[a-z0-9]+(?:[._-][a-z0-9]+)*)(?:\/[a-z0-9]+(?:[._-][a-z0-9]+)*)*(?::[\w][\w.-]*)?@sha256:[0-9a-f]{64})"/g;
+const IMAGE_LITERAL = new RegExp(`(?<![\\w@./])(${REF})`, 'g');
 
 /** Split `[registry/]repo[:tag]@digest` into its parts, Docker-Hub defaults applied. */
 export function parseImageRef(ref) {
@@ -216,12 +269,14 @@ export async function verifyImagePin(pin, { api = resolveTagDigest } = {}) {
 }
 
 export async function verifyRepo(repoRoot, { api = resolveTagDigest } = {}) {
-  const files = discoverGoSources(repoRoot);
+  const files = discoverSources(repoRoot);
   if (files.length === 0) {
     return {
       files,
       pins: [],
-      findings: [{ reason: 'no-sources', detail: `no operator Go sources under ${repoRoot}` }],
+      findings: [
+        { reason: 'no-sources', detail: `no operator or benchmark sources under ${repoRoot}` },
+      ],
     };
   }
   const pins = files.flatMap((file) =>
@@ -253,7 +308,7 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
 
   const { files, pins, findings } = await verifyRepo(root);
   console.log(
-    `scanned ${files.length} operator source file(s), ${pins.length} digest-pinned image(s)`,
+    `scanned ${files.length} operator + benchmark source file(s), ${pins.length} digest-pinned image(s)`,
   );
   for (const pin of pins) {
     console.log(`  ${pin.file}:${pin.line}  ${pin.ref}`);

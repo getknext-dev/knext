@@ -21,12 +21,15 @@
  *     one withdrawn 4.5x result.
  *   - Every replicate asserts its own PRECONDITION (image present / absent on
  *     every node) and fails loudly rather than measuring the wrong thing. An
- *     ABSENT observation — no pod, a failed events query — FAILS the replicate;
- *     it is never recorded as the favourable value.
- *   - A condition that would damage the cluster or the next run (node disk at the
- *     kubelet's image-GC threshold, a lost restore) is a `FatalError` and aborts
- *     the RUN. The caller catches ordinary failures, so an abort that is not
- *     distinguishable from one is not an abort.
+ *     ABSENT observation — no pod, a failed events query — FAILS the replicate:
+ *     recorded as failed, stepped over, and never recorded as the favourable
+ *     value. It is not fatal, because a transient events query says nothing
+ *     about the next replicate and aborting discards hours on a shared cluster.
+ *   - A condition that would damage the cluster or invalidate what follows (node
+ *     disk at the kubelet's image-GC threshold, a lost restore, the measured pod
+ *     running a DIFFERENT image) is a `FatalError` and aborts the RUN. The caller
+ *     catches ordinary failures, so an abort that is not distinguishable from one
+ *     is not an abort.
  *   - Both arms are held to the same QUIET floor before the request, measured
  *     from the end of the precondition work — not from scale-to-zero. The `off`
  *     arm spends 60-85 s in privileged node Jobs evicting the image and the `on`
@@ -447,6 +450,8 @@ const main = async () => {
   // and the restore is READ BACK, not assumed. `ORDER` ends with `on`, so
   // without this every run left a prewarm DaemonSet and a warm image resident
   // on every node, and the next benchmark on this cluster inherits it silently.
+  // This covers Ctrl-C too (SIGINT/SIGTERM restore, then exit 130/143): a run is
+  // ~100 minutes, so interrupting one is a likely exit path, not an exotic one.
   await withRestore({
     read: readPrewarm,
     write: patchPrewarm,

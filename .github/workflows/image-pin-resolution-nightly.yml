@@ -14,23 +14,48 @@ name: Operator image pin resolution (nightly)
 # looped, and the documented bump procedure (`crane digest busybox:<tag>`) makes
 # that one copy-paste. Those tests prove the LABEL; this proves the ARTIFACT.
 #
-# WHY NIGHTLY, NOT A PR GATE: the answer lives UPSTREAM and legitimately changes,
-# so it must be resolved at RUN time. Baking a resolved value into a committed
-# assertion is what made the equivalent action-pin check decay into "edit the
-# guard to get green" (security.md), and making it PR-blocking would couple every
-# merge to a third-party registry's availability. Same division of labour as
-# `action-pin-resolution-nightly.yml`, deliberately.
+# WHY NIGHTLY AND NOT ON EVERY MERGE: the answer lives UPSTREAM and legitimately
+# changes, so it must be resolved at RUN time. Baking a resolved value into a
+# committed assertion is what made the equivalent action-pin check decay into
+# "edit the guard to get green" (security.md). And running it on every PR would
+# couple every merge to a third-party registry: anonymous Docker Hub manifest
+# resolution is rate-limited PER SOURCE IP, and GitHub's shared runners share
+# those — so a repo-wide gate would go red for reasons that are not findings, and
+# a flaky gate trains people to bypass it.
+#
+# WHY THERE IS A `pull_request` TRIGGER ANYWAY, scoped by `paths`: nightly-only
+# leaves the window from 05:41 to the next night, in which a bad pin is merged
+# and unreported. The only diffs that can INTRODUCE one are those touching a file
+# that carries a pin, and there are a handful of them a day at most — so those
+# specific PRs pay the registry call and nothing else does. The nightly still
+# owns the "upstream moved under us" case, which no PR can detect.
 #
 # An unreachable registry is a FAILURE, never a pass. The resolution logic (the
 # OCI token dance, missing tags, digest mismatch) lives in
 # `scripts/verify-image-pins.mjs` and is unit-tested OFFLINE against an injected
 # transport by `tests/operator-image-pin-resolution.test.ts`.
+#
+# SCOPE: every image this repo RUNS on a cluster — the operator's Go sources AND
+# the benchmark harnesses' YAML/shell. The latter is not incidental: the two most
+# privileged pins in the tree are a benchmark's PRIVILEGED hostPID `nsenter` pod
+# and its kaniko builder, which holds the registry PUSH credential.
 
 on:
   # 05:41 UTC — offset from the action-pin nightly (05:11) so the two
   # supply-chain signals do not queue behind each other.
   schedule:
     - cron: '41 5 * * *'
+  # Only the diffs that can introduce a pin. These paths MUST stay in step with
+  # `discoverSources()` in scripts/verify-image-pins.mjs — the test
+  # `tests/operator-image-pin-resolution.test.ts` asserts both halves.
+  pull_request:
+    paths:
+      - 'packages/kn-next-operator/**/*.go'
+      - 'benchmarks/**/*.yaml'
+      - 'benchmarks/**/*.yml'
+      - 'benchmarks/**/*.sh'
+      - 'scripts/verify-image-pins.mjs'
+      - '.github/workflows/image-pin-resolution-nightly.yml'
   workflow_dispatch: {}
 
 permissions:

@@ -20,9 +20,11 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { parse } from 'yaml';
 
 import {
   discoverGoSources,
+  discoverSources,
   parseImagePins,
   resolveTagDigest,
   verifyImagePin,
@@ -151,6 +153,49 @@ describe('scope: the operator sources are discovered, not enumerated', () => {
   });
 });
 
+describe('scope covers every image this repo RUNS, not only the Go ones', () => {
+  // The nightly's original walk was `packages/kn-next-operator/**.go` — which
+  // excludes the two pins the same PR added: the harness's privileged hostPID
+  // `nsenter` pod (`nodesh.sh`) and the in-cluster builder (kaniko, which holds
+  // the registry PUSH credential). The PR's own finding is that the artifact
+  // behind a tag is mutable and load-bearing; a scope that misses the most
+  // privileged pins in the tree does not carry that finding.
+  const files = discoverSources(ROOT);
+
+  it('discovers the benchmark shell and YAML sources alongside the Go ones', () => {
+    expect(files).toContain('packages/kn-next-operator/internal/controller/image_prewarm.go');
+    expect(files).toContain('benchmarks/image-prewarm-oke/nodesh.sh');
+    expect(files).toContain('benchmarks/image-prewarm-oke/build-unique-image.job.yaml');
+  });
+
+  it('actually yields the privileged and credential-bearing pins from them', () => {
+    // Both halves: discovery must see the files AND parsing must produce the
+    // pins — a walk that returns files nothing parses is decoration.
+    const pins = files.flatMap((file) =>
+      parseImagePins(readFileSync(resolve(ROOT, file), 'utf8'), file),
+    );
+    const alpine = pins.find((p) => p.file.endsWith('nodesh.sh'));
+    expect(alpine, 'the privileged hostPID pod image is unchecked').toBeDefined();
+    expect(alpine?.tag).toBeTruthy();
+    expect(alpine?.digest).toMatch(/^sha256:[0-9a-f]{64}$/);
+
+    const kaniko = pins.find((p) => p.repository.includes('kaniko'));
+    expect(kaniko, 'the image holding the registry push credential is unchecked').toBeDefined();
+    expect(kaniko?.registry).toBe('gcr.io');
+    expect(kaniko?.tag).toBeTruthy();
+  });
+
+  it('parses an unquoted YAML/shell reference, not only a Go string literal', () => {
+    const digest = `sha256:${'e'.repeat(64)}`;
+    const yaml = parseImagePins(`        image: alpine:3.20@${digest}\n`, 'x.yaml');
+    expect(yaml).toHaveLength(1);
+    expect(yaml[0]).toMatchObject({ repository: 'library/alpine', tag: '3.20', digest });
+
+    const sh = parseImagePins(`image: \${NODESH_IMAGE:-alpine:3.20@${digest}}\n`, 'x.sh');
+    expect(sh[0]).toMatchObject({ repository: 'library/alpine', tag: '3.20', digest });
+  });
+});
+
 describe('the check is actually wired to run', () => {
   const workflow = readFileSync(
     resolve(ROOT, '.github/workflows/image-pin-resolution-nightly.yml'),
@@ -160,6 +205,45 @@ describe('the check is actually wired to run', () => {
   it('a nightly workflow runs the checker', () => {
     expect(workflow).toMatch(/node scripts\/verify-image-pins\.mjs/);
     expect(workflow).toMatch(/schedule:/);
+  });
+
+  it('a diff that could INTRODUCE a bad pin is checked at proposal time', () => {
+    // Nightly-only leaves a window from 05:41 to the next night in which a bad
+    // pin is merged and unreported. A `pull_request` trigger scoped to the
+    // paths that can carry a pin closes it without putting a third-party
+    // registry in front of every merge (which is what would make the gate
+    // flaky — anonymous Docker Hub resolution is rate-limited per source IP,
+    // and shared runners share one).
+    // PARSED, not grepped. A substring match for `pull_request:` is satisfied by
+    // `_disabled_pull_request:` and by a commented-out block — mutation-proved:
+    // renaming the key left the grep form green, which is the "guard that stays
+    // green when its subject is removed" this repo calls decoration.
+    const triggers =
+      (parse(workflow) as { true?: unknown; on?: unknown }).true ?? // YAML 1.1: `on` is a boolean key
+      (parse(workflow) as { on?: unknown }).on;
+    const pr = (triggers as { pull_request?: { paths?: string[] } })?.pull_request;
+    expect(pr, 'no pull_request trigger: nothing checks a pin at proposal time').toBeDefined();
+    expect(pr?.paths).toBeDefined();
+    for (const path of [
+      'packages/kn-next-operator/**/*.go',
+      'benchmarks/**/*.yaml',
+      'benchmarks/**/*.sh',
+      'scripts/verify-image-pins.mjs',
+    ]) {
+      expect(pr?.paths).toContain(path);
+    }
+    // The paths must stay in step with what the script actually walks: a path
+    // list that misses a scanned directory is a window nobody can see.
+    const scanned = discoverSources(ROOT);
+    expect(scanned.some((f) => f.startsWith('benchmarks/'))).toBe(true);
+    expect(scanned.some((f) => f.startsWith('packages/kn-next-operator/'))).toBe(true);
+  });
+
+  it('the red-alert issue is only raised by the NIGHTLY, never by a PR run', () => {
+    // Both halves: the alert job must exist AND be gated to the schedule — a PR
+    // that trips the check reports on the PR, it does not pin a repo issue.
+    expect(workflow).toMatch(/nightly-red-alert:/);
+    expect(workflow).toMatch(/github\.event_name == 'schedule'/);
   });
 
   it('nothing lets a finding pass: no continue-on-error, no `|| true`', () => {
