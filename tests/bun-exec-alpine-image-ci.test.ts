@@ -254,6 +254,95 @@ describe('no stale test-file pointer survives a rename (both halves)', () => {
   });
 });
 
+/**
+ * The alpine e2e reaps its own leaked artifacts on the next run, and the IMAGE
+ * half of that sweep needs `--all` to do anything at all: `docker image prune`
+ * without it removes only DANGLING images, and every image the suite leaks is
+ * TAGGED (`knext-bunexec-alpine-e2e:<arch>-<runid>`), hence never dangling.
+ * Measured on docker 29.4.0 with the suite's own label and `until=0s`, so age
+ * could not be the excuse: without the flag, "Total reclaimed space: 0B" and
+ * the image survives; with it, the image is deleted.
+ *
+ * That flag is therefore load-bearing and looks like tidiness, which is the
+ * exact profile of a line a future edit drops in passing — and dropping it
+ * fails SILENTLY: the sweep still runs, still exits 0, and reaps nothing while
+ * ~150 MB leaks per aborted run. Nothing else in the tree would go red.
+ *
+ * BOTH HALVES, because a one-sided assertion is the defect class this suite has
+ * spent five review rounds on: the sanctioned invocation must carry the flag,
+ * AND no other `image prune` may exist in the example tree without it. The
+ * second half is a SCAN rather than an enumeration, so a second sweep added
+ * later cannot be the one nobody listed.
+ *
+ * Scoped to `examples/bun-exec` deliberately — unlike the stale-pointer scan
+ * above it must NOT read this file, whose own regexes and prose contain the
+ * very patterns it searches for.
+ */
+describe('the alpine e2e image sweep can actually reap (both halves)', () => {
+  const EXAMPLE_DIR = resolve(REPO_ROOT, 'examples/bun-exec');
+  const E2E = resolve(EXAMPLE_DIR, 'test/alpine-image.docker-e2e.test.ts');
+
+  /** `run('docker', ['image', 'prune', …])` — the argv-array form the suite uses. */
+  const ARGV_PRUNE = /\[\s*'image',\s*'prune'[^\]]*\]/g;
+  /** `docker image prune …` — the shell form, in case a script or doc grows one. */
+  const SHELL_PRUNE = /docker\s+image\s+prune[^\n;&|]*/g;
+
+  function exampleTextFiles(): string[] {
+    const out: string[] = [];
+    const walk = (dir: string) => {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        if (['node_modules', '.output', '.nitro', 'dist', '.next'].includes(entry.name)) continue;
+        const full = resolve(dir, entry.name);
+        if (entry.isDirectory()) walk(full);
+        else if (/\.(ts|tsx|mjs|js|md|sh|json|ya?ml)$|^Dockerfile/.test(entry.name)) out.push(full);
+      }
+    };
+    walk(EXAMPLE_DIR);
+    return out;
+  }
+
+  it('the sanctioned sweep passes --all, or it reaps nothing', () => {
+    const src = readFileSync(E2E, 'utf8');
+    const invocations = src.match(ARGV_PRUNE) ?? [];
+    // Non-vacuity: a renamed helper or a reworked call shape must fail here
+    // rather than let "no invocation found" read as "the flag is present".
+    expect(
+      invocations.length,
+      'no `image prune` invocation in the alpine e2e — the image half of the leak sweep is gone',
+    ).toBe(1);
+    expect(
+      invocations[0],
+      'the image sweep dropped --all, so it reaps only DANGLING images and the suite leaks TAGGED ones',
+    ).toContain("'--all'");
+    // The filters are what bound the blast radius once `--all` is in play —
+    // label scopes it to this suite, `until` spares a concurrent run.
+    expect(invocations[0], 'the sweep is no longer scoped by label').toContain('label=');
+    expect(invocations[0], 'the sweep is no longer bounded by age').toContain('until=');
+  });
+
+  it('NO `image prune` anywhere in the example omits --all', () => {
+    let seen = 0;
+    for (const file of exampleTextFiles()) {
+      const src = readFileSync(file, 'utf8');
+      for (const call of [...(src.match(ARGV_PRUNE) ?? []), ...(src.match(SHELL_PRUNE) ?? [])]) {
+        seen++;
+        expect(
+          /'--all'|\s--all\b|\s-a\b/.test(call),
+          `${file} prunes images without --all, which removes only dangling images: ${call.trim()}`,
+        ).toBe(true);
+      }
+    }
+    // Non-vacuity: a broken regex or a walk that skipped the tree would
+    // otherwise pass by finding nothing to check. Deliberately a floor, not an
+    // exact count — a second, CORRECT sweep added later must not redden this,
+    // or editing the guard becomes the routine way to get green.
+    expect(
+      seen,
+      'the scan found no image-prune call at all — it is not reading the tree',
+    ).toBeGreaterThan(0);
+  });
+});
+
 describe('the reference image keeps the C++ runtime libraries (ADR-0042 A9)', () => {
   const dockerfile = readFileSync(resolve(REPO_ROOT, 'examples/bun-exec/Dockerfile'), 'utf8');
 
