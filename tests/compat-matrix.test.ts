@@ -22,8 +22,10 @@ import { describe, expect, it } from 'vitest';
  *     lane-scoped check — that is the escape valve for a genuinely runtime-specific contract
  *     like (h), the bun keep-alive guard. The declaration is a marker rather than free prose
  *     so that ordinary wording ("the bun lane only runs weekly") can never silently narrow a
- *     row's claim, and a repeated check id is AMBIGUOUS rather than last-write-wins, so a
- *     `check(` occurrence inside a comment or a string cannot redefine a real check.
+ *     row's claim. Declarations are counted over a CODE-ONLY view of the runner, so a
+ *     `check(` written inside a comment or a string declares nothing — it can neither
+ *     redefine a real check nor back a ✅ row on its own (a check commented out is a check
+ *     that does not exist) — and a repeated id is AMBIGUOUS rather than last-write-wins.
  *   - The "official" compat suite row may be ✅ ONLY with verifiable run evidence: a GitHub
  *     Actions run ID, the pinned vercel/next.js ref, and an explicit "N passed / 0 failed"
  *     result (A3-3 graduation, #147). An evidence-less flip fails this test. The evidence is
@@ -109,23 +111,37 @@ interface SmokeCheck {
 }
 
 /**
- * Split the argument list of a call whose `(` sits at `open`, at TOP-LEVEL commas.
- * Quote-, template-, comment- and bracket-aware, so the third argument is extracted as
- * written rather than guessed at from the tail of a regex capture. Returns `null` if the
- * call never closes — the caller then treats the check as unparseable (fail closed).
+ * Blank everything in `src` that is NOT code, preserving length and line structure so every
+ * offset in the result still addresses the same character of the original.
+ *
+ * This is the single tokenizer (round 4). It is what makes an occurrence check CODE-ONLY:
+ * comment bodies (line AND block, delimiters included) and the CONTENTS of string and
+ * template literals become spaces, so a `check(` written inside a comment or a string is
+ * simply not there when the scan runs. Round 2 closed only the case where such an occurrence
+ * REDEFINED a real id (repeated-id ⇒ ambiguous); a check commented OUT — or an id that exists
+ * *only* inside a comment — still read as declared, hard and both-lane, and BOTH derivations
+ * agreed on that wrong answer because the count regex matched the commented line too.
+ *
+ * Quote characters and backticks are KEPT so the bracket/comma structure a call's argument
+ * split needs survives; `${…}` holes stay code, since they are.
  */
-function splitCallArgs(src: string, open: number): string[] | null {
-  const args: string[] = [];
-  let start = open + 1;
-  let depth = 0;
-  let i = open;
-  /** Nesting of template literals ('tmpl') and their `${…}` holes ('expr:<depth>'). */
-  const stack: string[] = [];
+function blankNonCode(src: string): string {
+  const out = [...src];
+  const blank = (from: number, to: number) => {
+    for (let k = Math.max(from, 0); k < Math.min(to, src.length); k++) {
+      if (out[k] !== '\n') out[k] = ' ';
+    }
+  };
+  /** Template-literal nesting: a template, or a `${…}` hole with its own brace depth. */
+  const stack: Array<{ kind: 'tmpl' } | { kind: 'hole'; depth: number }> = [];
+  let i = 0;
   while (i < src.length) {
+    const top = stack[stack.length - 1];
     const c = src[i];
     const n = src[i + 1];
-    if (stack[stack.length - 1] === 'tmpl') {
+    if (top?.kind === 'tmpl') {
       if (c === '\\') {
+        blank(i, i + 2);
         i += 2;
         continue;
       }
@@ -135,10 +151,11 @@ function splitCallArgs(src: string, open: number): string[] | null {
         continue;
       }
       if (c === '$' && n === '{') {
-        stack.push(`expr:${depth}`);
+        stack.push({ kind: 'hole', depth: 0 });
         i += 2;
         continue;
       }
+      blank(i, i + 1);
       i++;
       continue;
     }
@@ -149,60 +166,88 @@ function splitCallArgs(src: string, open: number): string[] | null {
       continue;
     }
     if (c === "'" || c === '"') {
-      i++;
-      while (i < src.length) {
-        if (src[i] === '\\') {
-          i += 2;
+      let j = i + 1;
+      while (j < src.length) {
+        if (src[j] === '\\') {
+          j += 2;
           continue;
         }
-        if (src[i] === c) break;
-        i++;
+        if (src[j] === c) break;
+        j++;
       }
-      i++;
+      blank(i + 1, j);
+      i = j + 1;
       continue;
     }
     if (c === '`') {
-      stack.push('tmpl');
+      stack.push({ kind: 'tmpl' });
       i++;
       continue;
     }
     if (c === '/' && n === '/') {
       const nl = src.indexOf('\n', i);
-      i = nl === -1 ? src.length : nl;
+      const end = nl === -1 ? src.length : nl;
+      blank(i, end);
+      i = end;
       continue;
     }
     if (c === '/' && n === '*') {
-      const end = src.indexOf('*/', i);
-      i = end === -1 ? src.length : end + 2;
+      const close = src.indexOf('*/', i);
+      const end = close === -1 ? src.length : close + 2;
+      blank(i, end);
+      i = end;
       continue;
     }
+    if (top?.kind === 'hole') {
+      if (c === '{') {
+        top.depth++;
+        i++;
+        continue;
+      }
+      if (c === '}') {
+        if (top.depth === 0) stack.pop();
+        else top.depth--;
+        i++;
+        continue;
+      }
+    }
+    i++;
+  }
+  return out.join('');
+}
+
+/**
+ * Split the argument list of a call whose `(` sits at `open`, at TOP-LEVEL commas, returning
+ * `[start, end)` offsets into the original source. Returns `null` if the call never closes —
+ * the caller then treats the check as unparseable (fail closed).
+ *
+ * MUST be given a `blankNonCode(...)` view: it is bracket-aware only, because in that view no
+ * comment or literal content survives to confuse it. Offsets are preserved by the blanking,
+ * so the caller slices the ORIGINAL source with what this returns.
+ */
+function splitCallArgs(blanked: string, open: number): Array<[number, number]> | null {
+  const args: Array<[number, number]> = [];
+  let start = open + 1;
+  let depth = 0;
+  for (let i = open; i < blanked.length; i++) {
+    const c = blanked[i];
     if (c === '(' || c === '[' || c === '{') {
       depth++;
-      i++;
-      continue;
-    }
-    if (c === '}' && stack[stack.length - 1] === `expr:${depth}`) {
-      stack.pop();
-      i++;
       continue;
     }
     if (c === ')' || c === ']' || c === '}') {
       depth--;
       if (depth === 0) {
         if (c !== ')') return null;
-        args.push(src.slice(start, i));
+        args.push([start, i]);
         return args;
       }
-      i++;
       continue;
     }
     if (c === ',' && depth === 1) {
-      args.push(src.slice(start, i));
+      args.push([start, i]);
       start = i + 1;
-      i++;
-      continue;
     }
-    i++;
   }
   return null;
 }
@@ -244,6 +289,21 @@ function laneScope(laneArg: string | null): { lanes: Set<Lane>; reason: string }
 }
 
 /**
+ * How many `check(...)` declarations the runner actually makes, derived independently of the
+ * parse below so an invented or swallowed id reds.
+ *
+ * ONE derivation, over the same code-only view the parse uses (round 4). The previous
+ * line-anchored `^\s*await check\(` was wrong in both directions: it MISSED a legitimate
+ * `if (process.env.X) await check(...)` one-liner — a false red whose message ("the runner
+ * parse lost or invented check ids") sent the author hunting the parse rather than the
+ * regex — and it COUNTED a commented-out declaration, so it agreed with the pre-round-4
+ * parse on the wrong answer instead of contradicting it.
+ */
+function declaredCheckCount(src: string): number {
+  return (blankNonCode(src).match(/\bawait\s+check\(/g) ?? []).length;
+}
+
+/**
  * Parse every `check('<id>. …', fn[, lanes])` in the runner into its per-lane hardness.
  *
  * The derivation stays SCANNED rather than enumerated, so reintroducing either skip path
@@ -258,13 +318,17 @@ function laneScope(laneArg: string | null): { lanes: Set<Lane>; reason: string }
  * costs a red, never a false pass.
  */
 function parseSmokeChecks(smokeSrc: string): Map<string, SmokeCheck> {
+  // Scan the CODE-ONLY view, then slice the ORIGINAL at the offsets it yields: a `check(`
+  // inside a comment or a string is not an occurrence at all, while the id and the lanes
+  // argument are still read as literally written.
+  const code = blankNonCode(smokeSrc);
   const checks = new Map<string, SmokeCheck>();
   const callRe = /\bcheck\(/g;
   let m: RegExpExecArray | null;
-  m = callRe.exec(smokeSrc);
+  m = callRe.exec(code);
   while (m !== null) {
     const open = m.index + m[0].length - 1;
-    const args = splitCallArgs(smokeSrc, open);
+    const args = splitCallArgs(code, open)?.map(([s, e]) => smokeSrc.slice(s, e));
     const idMatch = args?.[0]?.match(/^\s*['"]([a-z])\.\s/);
     if (args && idMatch && checks.has(idMatch[1])) {
       checks.set(idMatch[1], {
@@ -274,7 +338,7 @@ function parseSmokeChecks(smokeSrc: string): Map<string, SmokeCheck> {
           'ambiguous — declared more than once; a second `check(` occurrence for this id ' +
           '(including one inside a comment or a string) must never redefine it',
       });
-      m = callRe.exec(smokeSrc);
+      m = callRe.exec(code);
       continue;
     }
     if (args && idMatch) {
@@ -292,7 +356,7 @@ function parseSmokeChecks(smokeSrc: string): Map<string, SmokeCheck> {
         reason: skips ? 'body calls skip() — a skip-on-fail check is never hard' : scoped.reason,
       });
     }
-    m = callRe.exec(smokeSrc);
+    m = callRe.exec(code);
   }
   return checks;
 }
@@ -490,21 +554,28 @@ async function main() {
       }
       // …and the COUNT is DERIVED from the runner rather than written down, so an
       // invented or swallowed id still reds while growth stays free.
-      const declared = (smokeSrc.match(/^\s*await check\(/gm) ?? []).length;
+      const declared = declaredCheckCount(smokeSrc);
       expect(declared, 'no `await check(` declarations found in the runner').toBeGreaterThanOrEqual(
         KNOWN_SMOKE_IDS.length,
       );
-      expect(smokeChecks.size, 'the runner parse lost or invented check ids').toBe(declared);
+      expect(
+        smokeChecks.size,
+        'the runner parse lost or invented check ids: the code-only `await check(` declaration ' +
+          'count disagrees with the parse (a duplicated id, or a call whose id is unparseable)',
+      ).toBe(declared);
     });
 
-    // ── A `check(` occurrence that is not CODE (round 2) ───────────────────────────────
+    // ── A `check(` occurrence that is not CODE (round 2, strengthened in round 4) ──────
     //
-    // The scanner is context-aware INSIDE a call it has entered, but nothing decides
-    // whether the `check(` it entered was code at all. Combined with a last-write-wins
-    // map, a later occurrence inside a comment or a string silently overwrote the real
-    // entry with an unrestricted, both-lanes one — a documentation comment could return
-    // the guard to green while the runner genuinely read `}, ['node']);`. A repeated id
-    // is now AMBIGUOUS and hard on no lane: a silent mis-parse fails closed.
+    // The scanner used to be context-aware only INSIDE a call it had entered; nothing
+    // decided whether the `check(` it entered was code at all. Combined with a
+    // last-write-wins map, a later occurrence inside a comment or a string silently
+    // overwrote the real entry with an unrestricted, both-lanes one — a documentation
+    // comment could return the guard to green while the runner genuinely read
+    // `}, ['node']);`. Round 2 made a repeated id AMBIGUOUS; round 4 removed the premise
+    // instead, by scanning a code-only view, so a non-code occurrence is not an
+    // occurrence. The assertion that matters is unchanged and is the reason these tests
+    // exist: a comment or a string must never widen `g` back to the bun lane.
 
     const NODE_ONLY_G = `await check('g. next/image optimization (transcode + resize)', async () => {
     return 'ok';
@@ -517,8 +588,9 @@ async function main() {
   // NOTE: the canonical form of this check is
   //   await check('g. next/image optimization (transcode + resize)', imageFn);`),
       );
-      expect([...(checks.get('g')?.hardLanes ?? [])]).toEqual([]);
-      expect(checks.get('g')?.reason).toMatch(/declared more than once/);
+      expect([...(checks.get('g')?.hardLanes ?? [])]).toEqual(['node']);
+      expect(checks.get('g')?.hardLanes.has('bun')).toBe(false);
+      expect(checks.get('g')?.reason).toMatch(/lane-scoped/);
     });
 
     it('a STRING containing a check call is equally powerless', () => {
@@ -527,8 +599,9 @@ async function main() {
 
   const HELP = "await check('g. next/image optimization (transcode + resize)', imageFn);";`),
       );
-      expect([...(checks.get('g')?.hardLanes ?? [])]).toEqual([]);
-      expect(checks.get('g')?.reason).toMatch(/declared more than once/);
+      expect([...(checks.get('g')?.hardLanes ?? [])]).toEqual(['node']);
+      expect(checks.get('g')?.hardLanes.has('bun')).toBe(false);
+      expect(checks.get('g')?.reason).toMatch(/lane-scoped/);
     });
 
     it('a duplicate id fails closed even when BOTH occurrences are real code', () => {
@@ -540,13 +613,16 @@ async function main() {
   });`),
       );
       expect([...(checks.get('g')?.hardLanes ?? [])]).toEqual([]);
+      expect(checks.get('g')?.reason).toMatch(/declared more than once/);
     });
 
     it('a ✅ row citing an ambiguously-declared check FAILS the guard', () => {
       const checks = parseSmokeChecks(
         fixture(`${NODE_ONLY_G}
 
-  //   await check('g. next/image optimization (transcode + resize)', imageFn);`),
+  await check('g. next/image optimization (transcode + resize)', async () => {
+    return 'ok';
+  });`),
       );
       const row: MatrixRow = {
         feature: 'next/image optimization',
@@ -556,6 +632,74 @@ async function main() {
       };
       expect(smokeCitationProblems(row, checks).length).toBe(1);
       expect(backsRow(row, 'g', checks)).toBe(false);
+    });
+
+    // ── A `check(` occurrence that is not CODE, part 2: BLOCK comments (round 4) ───────
+    //
+    // Round 2 closed the case where a non-code occurrence REDEFINED an existing id, via the
+    // repeated-id⇒ambiguous rule. It did not close the case where the non-code occurrence is
+    // the ONLY one for that id — a check commented out (`/* TEMPORARILY DISABLED … */`) still
+    // read as declared, hard, and both-lane, and a ✅ row could cite an id that exists only
+    // inside a comment. Both derivations agreed on the wrong answer, because the count regex
+    // matched the commented line too. Occurrences are now scanned over a CODE-ONLY view of
+    // the source, so a comment or a string declares nothing at all.
+
+    it('a check commented OUT with a block comment is not declared at all', () => {
+      const checks = parseSmokeChecks(
+        fixture(`/* TEMPORARILY DISABLED (flaky on CI runners):
+  await check('g. next/image optimization (transcode + resize)', async () => {
+    return 'ok';
+  });
+  */`),
+      );
+      expect(checks.has('g'), 'a block-commented check must not read as declared').toBe(false);
+      // …and the baseline check in the fixture is still parsed, so this is not a total misparse.
+      expect([...(checks.get('a')?.hardLanes ?? [])].sort()).toEqual(['bun', 'node']);
+    });
+
+    it('a ✅ row citing a check that exists only inside a block comment FAILS the guard', () => {
+      const checks = parseSmokeChecks(
+        fixture(`/* new capability, landing next sprint:
+  await check('l. brand-new capability', async () => {
+    return 'ok';
+  });
+  */`),
+      );
+      const row: MatrixRow = {
+        feature: 'Brand-new capability',
+        status: '✅',
+        evidence: 'smoke l',
+        notes: '',
+      };
+      expect(smokeCitationProblems(row, checks)).toEqual([
+        'cites compat-smoke check (l), which does not exist in the runner',
+      ]);
+      expect(backsRow(row, 'l', checks)).toBe(false);
+    });
+
+    it('a block comment INSIDE a live check body does not swallow the checks after it', () => {
+      const checks = parseSmokeChecks(
+        fixture(`await check('z. node-only check', async () => {
+    /* explanatory note, with an unbalanced ( paren and a ' quote */
+    return 'ok';
+  }, ['node']);`),
+      );
+      expect([...(checks.get('z')?.hardLanes ?? [])]).toEqual(['node']);
+      expect([...(checks.get('a')?.hardLanes ?? [])].sort()).toEqual(['bun', 'node']);
+    });
+
+    it('the derived declaration COUNT is code-only and not line-anchored (round 4)', () => {
+      // Two shapes the anchored `^\s*await check\(` regex got wrong, in opposite directions:
+      // it MISSED a legitimate conditional one-liner (a false red whose message blamed the
+      // parse), and it COUNTED a commented-out declaration (agreeing with the pre-round-4
+      // parse on the wrong answer). One derivation, over the same code-only view.
+      expect(
+        declaredCheckCount(`  if (process.env.EXTRA) await check('z. conditional', fn);`),
+      ).toBe(1);
+      expect(declaredCheckCount(`  // await check('z. commented out', fn);`)).toBe(0);
+      expect(declaredCheckCount(`  /* await check('z. commented out', fn); */`)).toBe(0);
+      expect(declaredCheckCount(`  const HELP = "await check('z. in a string', fn);";`)).toBe(0);
+      expect(declaredCheckCount(`  await check('z. plain', fn);`)).toBe(1);
     });
 
     it('a check with no lanes argument is hard on both lanes', () => {
