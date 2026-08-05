@@ -99,6 +99,20 @@ import {
  * them from `ci.yml`. A cancelled or missing required context is not `success`,
  * so a cancelled run BLOCKS the merge rather than passing it.
  *
+ * ## The cancellation itself is OBSERVED, not only guarded
+ *
+ * The guards below prove the config; they cannot prove GitHub honours it. Round
+ * 1 had no superseded run to point at, because the branch had a single push. So
+ * one was produced: two pushes to this PR inside one CI duration, both
+ * `pull_request`, on `ci.yml` as it stands here.
+ *
+ *   - run 31052852836, head `c9e0502` -> `completed` / **`cancelled`**
+ *   - run 31052899155, head `490369b` -> the superseding run
+ *
+ * Cancellation therefore happens, it is scoped to this ref, and the surviving
+ * run is the one on the new head SHA — which is the whole argument for why a
+ * ref-scoped group does not disarm the #667-audited gates that live in here.
+ *
  * ## Relationship to the #667 blocking-gate audit — checked, not assumed
  *
  * `tests/helpers/blocking-gate.ts` rejects JOB-level `concurrency` on an audited
