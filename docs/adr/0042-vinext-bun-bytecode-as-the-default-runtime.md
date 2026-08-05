@@ -10,13 +10,17 @@
   the load-bearing engineering record — the `RuntimeContract` enumeration, the opaque-binary
   supply-chain rule, the one-CRD invariant, and the two benchmark runs that argued *against* this
   decision. Superseding it would retire exactly the evidence that must stay visible.
-- **~~Conflicts with~~ RECONCILED with ADR-0006 (2026-08-05, #660).** An earlier draft of this line
+- **~~Conflicts with~~ PARTLY RECONCILED with ADR-0006 (2026-08-05, #660; qualified on review).**
+  **Reconciled for LOCAL image sources; NOT reconciled for remote ones** — `parseImageParams` rejects
+  every non-root-relative URL unconditionally and the export has no `remotePatterns` support, so that
+  Next capability 400s by construction and belongs in the exclusion set.
+  Remaining detail: An earlier draft of this line
   said an ADR-0006 app has *"no in-band fallback"* on the default runtime, pending a founder answer to
   Escalation 1. **That was wrong — an inference from an absence.** Image optimisation works on the
   compiled default path (124× better than passthrough, verified through `--compile --bytecode` in a
   container) using vinext's **public** `handleImageOptimization` export and the bespoke knext entry
-  Consequence 4 already mandates. ADR-0006 stands unqualified on both paths. What remains is
-  engineering with known costs, not a conflict: **a cache** (no caching today — ~40× repeat
+  Consequence 4 already mandates. ADR-0006 stands for **local** sources on both paths; the remote-source
+  gap above is real and unreconciled. What otherwise remains is engineering with known costs: **a cache** (no caching today — ~40× repeat
   regression *and* an unauthenticated CPU-exhaustion surface), a proxy rate limit, and a decode
   timeout, all prerequisites before this ships. `sharp` cannot be used — structural, see Escalation 1 —
   so the codec is `@jsquash/*` WASM.
@@ -424,11 +428,29 @@ first, then CLI**.
 
    **What both earlier spikes missed:** vinext **publicly exports a complete, runtime-agnostic
    optimiser** — `vinext/server/image-optimization` → `handleImageOptimization(request, {fetchAsset,
-   transformImage}, allowedWidths, imageConfig)`. Its own doc comment names *"the App Router worker,
-   Pages worker, **Node prod server**"* as its callers; the Node seam is simply the one that does not
-   call it. **Nothing to fork, nothing to register**, and it uses the bespoke entry Consequence 4
-   already mandates — so **no new scope**. #656's "only option (b) preserves ADR-0006" and this ADR's
+   transformImage}, allowedWidths?, imageConfig?)`. Verified independently against a packed
+   `vinext@1.0.0-beta.4`: genuine public export, that exact 4-arg signature, body runtime-agnostic
+   (no Cloudflare bindings — only the two callbacks). **No fork needed**, and it runs in the bespoke
+   entry Consequence 4 already mandates. #656's "only option (b) preserves ADR-0006" and this ADR's
    earlier "no in-band fallback" were both wrong, in the same direction: an inference from an absence.
+
+   **Correction (review of #660): an earlier draft of this entry said "nothing to fork, nothing to
+   register" and attributed a doc comment to the wrong function.** The comment naming *"the App
+   Router worker, Pages worker, **Node prod server**"* sits on **`handleConfiguredImageOptimization`**
+   (`image-optimization.d.ts:173-184`), **not** on `handleImageOptimization` (`:134`), whose own
+   comment says nothing about Node. And `handleConfiguredImageOptimization` **is** the registration
+   seam Phase 3 went looking for — it reads the optimizer set via `setImageOptimizer` / the
+   `images.optimizer` plugin option. The operational conclusion survives (only
+   `app-router-entry.js` / `pages-router-entry.js` reference it, so registering **is** inert on Node,
+   which is why direct invocation is the right call) — but this ADR overturned two spikes that were
+   wrong by inference, and its single piece of upstream-intent evidence was misattributed. Recorded
+   rather than quietly repaired.
+
+   **Adopting this is a MAJOR bump of the shipping recipe, not a drop-in.** `examples/bun-exec`
+   pins `vinext@^0.0.19`, and the spike entry cannot run there: `isImageOptimizationPath` and
+   `sendWebResponse` are not exported in 0.0.19, there is no `ImageConfig`, the signature is the
+   3-arg form, and the path constant is `/_vinext/image`. `^0.0.19` cannot resolve to `1.0.0-beta.4`.
+   The "no new scope" claim is true of the *architecture* and false of the *dependency*.
 
    **`sharp` cannot ship, and that is structural** (measured on darwin-arm64 *and* linuxmusl-arm64):
    `sharp/dist/sharp.mjs:13` does `createRequire(import.meta.url)` then `require("@img/sharp-*/sharp.node")`
@@ -439,11 +461,38 @@ first, then CLI**.
 
    **Costs, stated rather than buried — these are the remaining work, and one is a security item:**
    - **No cache at all.** Same URL ×3: 38/41/40 ms against Next's **1/1/1 ms** — a ~40× repeat
-     regression **and an unauthenticated CPU-exhaustion surface**. The spike adds a concurrency
-     semaphore, 20 MB / 40 MP caps and traversal refusal; **a cache, a proxy rate limit and a decode
-     timeout are still prerequisites** before this ships. `security.md`'s runtime-hardening rule
+     regression **and an unauthenticated CPU-exhaustion surface**. **A cache, a proxy rate limit and
+     a decode timeout are prerequisites** before this ships. `security.md`'s runtime-hardening rule
      applies directly.
-   - `--bytecode` rejects top-level `await`.
+   - **THE SPIKE'S RESOURCE CAPS DO NOT FAIL CLOSED — do not port them as-is.** An earlier draft of
+     this entry credited the spike with "a concurrency semaphore, 20 MB / 40 MP caps and traversal
+     refusal" as if they bounded anything. `handleImageOptimization` wraps `transformImage` in
+     `try { … } catch (e) { console.error(…) }` and then falls through to
+     `createPassthroughImageResponse` (`image-optimization.js:213-233`). So **every** guard placed
+     inside `transformImage` — the 40 MP cap, the non-PNG/JPEG rejection — yields **HTTP 200 with the
+     full unoptimized source and `Cache-Control: public, max-age=31536000, immutable`**. They are
+     silent degradations to a **year-cached passthrough**, not refusals. A production port must
+     enforce limits *outside* that catch.
+   - **The 40 MP cap is checked AFTER the decode it exists to bound** — `await decodePng(ab)` runs
+     first, then `width * height` is tested. The decode is the expensive step of a decompression
+     bomb; the check only saves the resize+encode. Real exposure is bounded today because
+     `parseImageParams` admits only root-relative URLs, but that is not the reason the spike gives.
+   - **`remotePatterns` is unsupported, and that is an ADR-0006 capability gap, not validation
+     working.** `parseImageParams` rejects **every** non-root-relative URL unconditionally
+     (`image-optimization.js:112-119`); there is no `remotePatterns` support in the export at all.
+     The spike scored `url=https://example.com/a.png → 400` in its "honoured" column. In a document
+     reconciling ADR-0006, a Next capability that 400s **by construction** belongs in the exclusion
+     set — so ADR-0006 is reconciled for **local** sources and **not** for remote ones.
+   - `--bytecode` rejects top-level `await` — a constraint on the shipping entry, not just the spike.
+   - **`--bytecode` was NOT verified by extraction on the measured artifact.** That the flag was
+     *processed* is shown by the top-level-`await` rejection; that the linux-musl binary which
+     produced 1,463 B *carries* bytecode is not established. Same gap as #658, and Phase 3(d) item 1
+     covers both.
+   - **The spike is not reproducible as published.** Its "artifacts for reproduction" are the entry
+     plus two print-only probes; the `bun build --compile` invocation, the alpine step, the fixture
+     app, the vite/next configs and any lockfile pinning `@jsquash/*` or `vinext@1.0.0-beta.4` are
+     prose only, and the probes assert nothing so nothing can go red. **This is exactly how the two
+     prior spikes' wrong conclusions went unchallenged**, so it matters more here than usual.
    - A defect the measurement caught that "does it optimise?" would have passed: the first cut passed
      `{ cqLevel }` to `@jsquash/avif`, which silently ignored it — `q=20` and `q=75` both returned
      exactly 1,077 B.
@@ -452,9 +501,18 @@ first, then CLI**.
    Images need no fork. Only SSR application-embedding (Consequence 11) does.
 2. **~~Is losing build-time static generation acceptable~~ — WITHDRAWN AS FRAMED (2026-08-05, #658).**
    Prerendering and compiling are **not** mutually exclusive. Verified in-container: all six
-   prerendered routes served **byte-identical** (sha256 + `Buffer.equals`, `x-vinext-cache: HIT`), all
-   `generateStaticParams` slugs, a correct 404, and ISR revalidating (HIT → STALE at +65 s → HIT with
-   new bytes rendered in-container). This escalation does not need the founder. It is **replaced** by:
+   prerendered routes served **byte-identical** (sha256 + `Buffer.equals` against the on-disk
+   `dist/server/prerendered-routes/*`, `x-vinext-cache: HIT`), all `generateStaticParams` slugs, and
+   ISR revalidating (HIT → STALE at +65 s → HIT with new bytes rendered in-container).
+   **Six of seven, and the seventh is the interesting one.** The build emits **7** prerendered HTML
+   files; the comparison enumerated 6 and omitted `404.html` — which is precisely the one that would
+   **not** have matched: served **3,947 B** against **3,971 B** on disk, and with **no
+   `x-vinext-cache` header at all**, i.e. the 404 is *not* served from the prerender cache. #658's
+   own table was honest ("all 6"); its summary bullet and commit message said "every"/"all 7". The
+   mechanism that let it through is an enumeration where a scan belonged — `compare-prerender.mjs`
+   hard-codes a 6-entry list instead of walking `prerendered-routes/**`, which is the
+   *prefer-scanning-to-enumerating* rule in `workflow.md`, and it is why the withdrawal of this
+   escalation is scoped to the six routes actually compared. This escalation does not need the founder. It is **replaced** by:
 
    **2′. Does the flip stand if the application is not bytecode-compiled?** This is the founder's own
    sentence being contradicted by measurement, so only the founder can answer it. The stated motive
