@@ -352,9 +352,29 @@ first, then CLI**.
 - **A4** Resolve image optimisation, static generation, dev-React (feeds Escalation 1 and 2).
 - **A5** Additive `build` field per ADR-0040; both drain e2e gates parameterised. **And re-point
   `tests/compat-matrix.test.ts`'s default-build-target source at the `build` field's default,
-  replacing the Phase 2 interim constant. A10(3) is NOT satisfied until this lands** — it is the one
-  requirement guarding the irreversible step, so the hand-off is a stated dependency here rather than
-  an expectation living between two phases, which `workflow.md` says decays unobservably.
+  replacing the Phase 2 interim constant. A10(3) is NOT satisfied until this lands.**
+  A5 must re-point the runner's and the CI lane's defaults at the same time, not only the guard's:
+  A10(3) scopes the interim constant to *the guard's* only encoding, but "which build target is
+  default" is also encoded in `compat-smoke.mjs` (`:49` `SERVER_PATH`, `:45` `RUNTIME`, plus whatever
+  build default A10 adds) and in the CI job's lane matrix. That gap is thin — requirement (1) forces
+  all eleven checks to run red-on-fail on the vinext lane, so the lane is a real gate whichever target
+  is nominally default — but it only stays thin while the vinext lane is **required**.
+
+  > **This hand-off is DOCUMENTED, NOT ENFORCED, and by `workflow.md`'s own standard it will degrade
+  > unobservably.** A5 is an action item, not a gate: nothing mechanically fails if the re-pointing
+  > never happens, and Phase 5's exit asserts the Phase 2 parameterisation landed by **human
+  > attestation, not detection**. Recorded as a known weakness rather than left reading as closed —
+  > an earlier draft of this line claimed the hand-off was "a stated dependency here rather than an
+  > expectation living between two phases", which cited `workflow.md`'s critique while remaining fully
+  > subject to it. The harm from that phrasing is specific: a reader at Phase 4 concludes the hand-off
+  > is safe and does not add a backstop, the re-pointing is missed, and the guard asserts against the
+  > **ex-default** at Phase 5 with nothing red — reopening exactly what A10(3) closed.
+  >
+  > **The mechanical backstop, if someone wants to close it properly:** annotate the interim constant
+  > `// A10(3) INTERIM — owned by A5` and add a test asserting that annotation is **absent** once
+  > `build` exists in `NextAppSpec` — the same shape as ADR-0017 §1's `<!-- CRD_API_VERSION: -->`
+  > anchor read by `crd-api-version.test.ts`. It fires exactly when Phase 4 lands. Not required for
+  > this ADR; recorded so it is a choice someone makes, not an option nobody knew about.
 - **A6** Record vinext's licence, maintenance posture, and abandonment exit stance.
 - **A7** Amend `architecture.md` §4 (**both** bullets — default-path *and* compat-gate) and `CLAUDE.md`
   §2/§3/§9/§10 — **gated on Phase 5**.
