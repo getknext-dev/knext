@@ -36,6 +36,46 @@ import { parse } from 'yaml';
  *
  * `yaml` is a root dependency (#653), so the older "read as text, the root
  * package has no yaml dependency" convention no longer has its reason.
+ *
+ * WHO CALLS THIS, AND WHO DELIBERATELY DOES NOT (#672)
+ * ---------------------------------------------------
+ * #667 wired two callers and left the siblings behind, which is the whole reason
+ * #672 existed. So the triage is recorded here, next to the engine, rather than
+ * in a PR body nobody re-reads.
+ *
+ * Converted — every guard claiming a `ci.yml` job is a blocking PR gate:
+ * `bun-exec-hardcap`, `bun-exec-alpine-image`, `compile-cache-bun-probe`,
+ * `typecheck-root`, and `lint-and-test` (the mutation-residue scan's step).
+ * `scripts/mutation-prove-ci-blocking-gates.mjs` disarms all five, five ways.
+ *
+ * NOT converted, and each for a reason that is not "we ran out of diff":
+ *
+ *   - `tests/compat-shard-flake-attribution.test.ts` (test-e2e-deploy.yml),
+ *     `tests/operator-image-pin-resolution.test.ts`
+ *     (image-pin-resolution-nightly.yml),
+ *     `tests/operator-e2e-scale-image-preflight.test.ts`
+ *     (operator-e2e-nightly.yml),
+ *     `tests/docs-closure-nightly-workflow.test.ts` (docs-closure-nightly.yml)
+ *     — these workflows are SCHEDULED, not `pull_request`. This audit asserts a
+ *     `pull_request` trigger, so pointing them here would red for a reason that
+ *     is not a defect, and the fix would be to weaken the trigger half. A
+ *     nightly is not a PR gate and must not be described as one. (The operator
+ *     preflight already parses rather than text-matches; its bespoke checks are
+ *     a subset of these, minus the trigger half.)
+ *   - `tests/supply-chain-workflow.test.ts`,
+ *     `tests/operator-supply-chain-workflow.test.ts`, and the `docs-site` half of
+ *     `tests/docs-closure-nightly-workflow.test.ts` — these assert a
+ *     `continue-on-error` is PRESENT and constrained to the PR phase
+ *     (report-on-PR / fail-on-main). That is the OPPOSITE claim to the one this
+ *     audit makes, not a weaker form of it.
+ *
+ * A scan was written to enforce the first list mechanically and was DROPPED: it
+ * flagged the phased-rollout guards, because file-level text cannot tell which
+ * workflow a `continue-on-error` pattern is applied to, and the only ways to keep
+ * it were an allowlist or a heuristic that would be edited rather than obeyed.
+ * Both are the silent-exemption shape this repo has already had to unwind. This
+ * list is documented practice, not enforcement, and by `security.md`'s own
+ * standard that means it can decay — stated rather than dressed up.
  */
 
 /**

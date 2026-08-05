@@ -28,6 +28,7 @@ import { builtinModules } from 'node:module';
 import { join, relative, resolve, sep } from 'node:path';
 import ts from 'typescript';
 import { describe, expect, it } from 'vitest';
+import { auditBlockingGate } from './helpers/blocking-gate';
 
 const REPO_ROOT = resolve(import.meta.dirname, '..');
 const TSCONFIG = 'tsconfig.typecheck.json';
@@ -143,7 +144,9 @@ function ciJobs(yml: string): CiJob[] {
   return jobs;
 }
 
-/** The step that actually invokes the root typecheck. */
+/** The command the gate step runs, matched against a PARSED `run:` value. */
+const TYPECHECK_COMMAND = /(?:^|\s)pnpm run typecheck\b/;
+/** The same step, matched against the raw YAML text of a job block. */
 const TYPECHECK_RUN = /run:\s*pnpm run typecheck\b/;
 /** The job that must own it. */
 const TYPECHECK_JOB = 'typecheck-root';
@@ -270,32 +273,38 @@ describe('root typecheck script + CI wiring (#527)', () => {
     ).toBe(false);
   });
 
-  it('the job cannot be neutered in-repo: no continue-on-error, no conditional skip', () => {
+  it('runs unconditionally on a PR and its failure fails the run (#661)', () => {
     // "A CI job that runs but is not required to pass" is the second way this
     // gate becomes decoration. Branch protection is configured OUTSIDE the repo
-    // (see the PR body — main currently has NO required checks at all, which is
-    // a repo-wide gap, not a T0-specific one). What IS enforceable from in here
-    // is that the job stays fail-closed: `continue-on-error: true` or an `if:`
-    // that skips it would make it green-by-construction even when tsc fails.
+    // (main currently has NO required checks at all, which is a repo-wide gap,
+    // not a T0-specific one). What IS enforceable from in here is that the job
+    // stays fail-closed.
     //
-    // Addressed by KEY: if the typecheck step were relocated, these guards
-    // would otherwise silently start describing whatever block happened to
-    // contain it — covering a different job than the one they name.
-    const job = ciJobs(ciYml).find((j) => j.key === TYPECHECK_JOB);
-    expect(job, `ci.yml must have a \`${TYPECHECK_JOB}\` job`).toBeDefined();
-    const block = job?.body ?? '';
+    // PARSED, not text-matched (#672). The predecessor of this assertion read
+    // the job's LINES for `/continue-on-error/` and `/\n\s{4}if:/`, and #672
+    // measured it GREEN under a quoted `"if": false` key (an exactly equivalent
+    // YAML mapping key the four-space anchor does not match) and under a
+    // job-level `strategy:` whose matrix can expand to zero jobs. The audit asks
+    // the semantic question of the parsed workflow and FAILS CLOSED on any
+    // job-level key it does not recognise, so the next form nobody enumerated
+    // reddens instead of passing.
+    const audit = auditBlockingGate({
+      workflowPath: join(REPO_ROOT, '.github', 'workflows', 'ci.yml'),
+      jobId: TYPECHECK_JOB,
+      gateCommand: TYPECHECK_COMMAND,
+    });
+    // Non-vacuity: an audit that parsed nothing must not pass by finding no
+    // problem to report, and the job must really be the one running `tsc`.
+    expect(audit.jobsSeen, 'the audit parsed no jobs at all').toBeGreaterThan(5);
     expect(
-      TYPECHECK_RUN.test(block),
+      audit.gateStepsSeen,
       `the \`${TYPECHECK_JOB}\` job must be the one that runs the root typecheck`,
-    ).toBe(true);
-    expect(
-      /continue-on-error/.test(block),
-      'continue-on-error makes the typecheck job report success while tsc fails',
-    ).toBe(false);
-    expect(
-      /\n\s{4}if:/.test(block),
-      'a job-level `if:` can skip the typecheck entirely — it must run on every PR',
-    ).toBe(false);
+    ).toBe(1);
+    // Also the machine-checked half of "it runs ALONGSIDE Lint & Test": an empty
+    // closure beyond itself is exactly "no `needs:`", asserted by the walk
+    // rather than by a regex over the block.
+    expect(audit.needsClosure, 'the `needs` closure the audit walked').toEqual([TYPECHECK_JOB]);
+    expect(audit.problems, audit.problems.join('\n')).toEqual([]);
   });
 });
 

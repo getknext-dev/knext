@@ -8,13 +8,27 @@
  * #408 item 2 verbatim ("the flag exists, CI never sets it"), which is what the
  * sibling guard `bun-exec-hardcap-ci.test.ts` exists for in another subsystem.
  *
- * These assertions guard the WIRING, not the behaviour. Read as TEXT, matching
- * the convention that guard establishes (no root `yaml` dependency).
+ * These assertions guard the WIRING, not the behaviour.
+ *
+ * The CONTENT half is read as TEXT — a SHA-pinned `uses:`, an env var, a test
+ * path are all textual facts. The "is this job actually blocking?" half is NOT
+ * textual and is no longer asked that way (#672): #661 measured four single-edit
+ * disarms a text anchor misses, and this file was GREEN under all four of them
+ * (`"if": false`, `'if': false`, `continue-on-error: ${{ true }}`, `needs:` on a
+ * skippable job) plus a job-level `strategy:`. That half now goes through the
+ * parsed audit in `tests/helpers/blocking-gate.ts`, which reads KEYS and fails
+ * closed on any job-level key it does not recognise. `yaml` is a root dependency
+ * as of #653, so the older "no root yaml dependency" convention no longer has
+ * its reason.
+ *
+ * `scripts/mutation-prove-ci-blocking-gates.mjs` is the standing proof that the
+ * conversion bit: it disarms this job five ways and requires this file to red.
  */
 
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { auditBlockingGate } from './helpers/blocking-gate';
 
 const REPO_ROOT = resolve(__dirname, '..');
 const CI_YML = resolve(REPO_ROOT, '.github/workflows/ci.yml');
@@ -61,11 +75,27 @@ describe('the real-bun compile-cache probe is wired into CI (#309)', () => {
     expect(jobBlock(), 'the job never installs workspace dependencies').toMatch(/pnpm install/);
   });
 
-  it('does not disarm itself with continue-on-error', () => {
-    expect(
-      jobBlock(),
-      'the probe job is continue-on-error, so it cannot fail the workflow',
-    ).not.toMatch(/continue-on-error:\s*true/);
+  it('runs unconditionally on a PR and its failure fails the run (#661)', () => {
+    // PARSED, not text-matched — see the header. The predecessor of this
+    // assertion was `not.toMatch(/continue-on-error:\s*true/)` over the job's
+    // lines, and it stayed green under every measured disarm.
+    const audit = auditBlockingGate({
+      workflowPath: CI_YML,
+      jobId: 'compile-cache-bun-probe',
+      gateCommand: /compile-cache-health-bun\.test\.ts/,
+    });
+    // Non-vacuity: an audit that parsed nothing must not pass by finding no
+    // problem to report.
+    expect(audit.jobsSeen, 'the audit parsed no jobs at all').toBeGreaterThan(5);
+    expect(audit.gateStepsSeen, 'the audit never found the step that runs the probe').toBe(1);
+    // The transitive `needs` closure that was actually walked. Asserting it is
+    // what keeps `needs:` audited rather than merely reported: if this job grows
+    // a dependency, this list changes and someone has to look at whether the new
+    // upstream can skip.
+    expect(audit.needsClosure, 'the `needs` closure the audit walked').toEqual([
+      'compile-cache-bun-probe',
+    ]);
+    expect(audit.problems, audit.problems.join('\n')).toEqual([]);
   });
 
   it('the test file it points at really exists', () => {

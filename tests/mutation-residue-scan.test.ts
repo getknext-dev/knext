@@ -5,6 +5,7 @@ import { join, resolve } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
 import { MUTATION_MARKER } from '../scripts/lib/mutation-harness.mjs';
 import { scanForResidue, scanTracked } from '../scripts/scan-mutation-residue.mjs';
+import { auditBlockingGate } from './helpers/blocking-gate';
 
 /**
  * Mutation-residue scan (#645, proposal A).
@@ -137,13 +138,27 @@ describe('mutation-residue scan (#645 A)', () => {
 
     const ci = readFileSync(CI_WORKFLOW, 'utf8');
     expect(ci).toContain('lint:mutation-residue');
-    // No `continue-on-error` anywhere near the step: a guard that cannot fail the
-    // build is decoration.
-    const idx = ci.indexOf('lint:mutation-residue');
-    // The KEY form, not the bare word: the step's own comment says why it carries
-    // no soft-failure escape, and a substring match on the prose would be a guard
-    // that fails on its own documentation.
-    expect(ci.slice(Math.max(0, idx - 400), idx + 400)).not.toMatch(/continue-on-error\s*:/);
+  });
+
+  it('runs unconditionally on a PR and its failure fails the run (#661)', () => {
+    // A guard that cannot fail the build is decoration, and the predecessor of
+    // this assertion asked that of a +/-400-character TEXT WINDOW around the
+    // step — which sees neither a job-level disarm outside the window nor a
+    // quoted `"if":` key inside it. PARSED instead (#672): the audit reads keys,
+    // walks the transitive `needs` closure, scans every step for
+    // `continue-on-error`, and FAILS CLOSED on any job-level key it does not
+    // recognise.
+    const audit = auditBlockingGate({
+      workflowPath: CI_WORKFLOW,
+      jobId: 'lint-and-test',
+      gateCommand: /\blint:mutation-residue\b/,
+    });
+    // Non-vacuity: an audit that parsed nothing, or that found no step running
+    // the scan, must not pass by having no problem to report.
+    expect(audit.jobsSeen, 'the audit parsed no jobs at all').toBeGreaterThan(5);
+    expect(audit.gateStepsSeen, 'no step in `lint-and-test` runs the residue scan').toBe(1);
+    expect(audit.needsClosure, 'the `needs` closure the audit walked').toEqual(['lint-and-test']);
+    expect(audit.problems, audit.problems.join('\n')).toEqual([]);
   });
 
   it('is documented where a harness author will look', () => {
