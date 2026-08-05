@@ -61,6 +61,12 @@ Environment: `KUBE_CONTEXT`, `NAMESPACE`, `APP`, `PW_IMAGE`, `PW_ENDPOINT`
 (default `/api/health`), `PW_PAIRS`, `PW_SETTLE_FLOOR_MS` (default 150000),
 `PW_DISK_ABORT_PCT` (default 85), `PW_OUT`, `PW_PAIR_START`.
 
+`NAMESPACE`, `PW_IMAGE` and `NODESH_IMAGE` are all **validated, not escaped**:
+each is interpolated into `nodesh.sh`'s privileged `hostPID` pod spec, which
+`nsenter`s the host as root, so `NAMESPACE` must be a plain DNS-1123 label and
+the two image references must be digest-pinned. Anything else exits 2 before
+anything is applied.
+
 `analyze.mjs` reports each arm's full distribution (n, min, p25, median, p75,
 max, mean, sd), the per-pair ABBA deltas, and whether the distributions overlap.
 It never pools the arms and never reports a median alone.

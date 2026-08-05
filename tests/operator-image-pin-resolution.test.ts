@@ -202,6 +202,48 @@ describe('the check is actually wired to run', () => {
     'utf8',
   );
 
+  // PARSED, not grepped. A substring match for `pull_request:` is satisfied by
+  // `_disabled_pull_request:` and by a commented-out block — mutation-proved:
+  // renaming the key left the grep form green, which is the "guard that stays
+  // green when its subject is removed" this repo calls decoration.
+  const triggers =
+    (parse(workflow) as { true?: unknown; on?: unknown }).true ?? // YAML 1.1: `on` is a boolean key
+    (parse(workflow) as { on?: unknown }).on;
+  const pr = (triggers as { pull_request?: { paths?: string[] } })?.pull_request;
+
+  /**
+   * A GitHub `paths:` glob as a RegExp over repo-relative POSIX paths.
+   * `**` crosses `/` (and may match zero directories); `*` and `?` do not.
+   */
+  const globToRegExp = (glob: string): RegExp => {
+    const body = glob
+      .split(/(\*\*\/|\*\*|\*|\?)/)
+      .map((part) => {
+        if (part === '**/') return '(?:[^/]+/)*';
+        if (part === '**') return '.*';
+        if (part === '*') return '[^/]*';
+        if (part === '?') return '[^/]';
+        return part.replace(/[.+^${}()|[\]\\]/g, '\\$&');
+      })
+      .join('');
+    return new RegExp(`^${body}$`);
+  };
+
+  it('the glob translation itself is right — the comparison below rests on it', () => {
+    // Both halves: it must match what GitHub matches and reject what it does not.
+    const re = globToRegExp('benchmarks/**/*.yaml');
+    expect(re.test('benchmarks/image-prewarm-oke/build-unique-image.job.yaml')).toBe(true);
+    expect(re.test('benchmarks/a.yaml')).toBe(true); // `**` may match zero directories
+    expect(re.test('benchmarks/image-prewarm-oke/nodesh.sh')).toBe(false);
+    expect(re.test('benchmarks/deep/er/still.yaml')).toBe(true);
+    expect(re.test('other/a.yaml')).toBe(false);
+    expect(
+      globToRegExp('scripts/verify-image-pins.mjs').test('scripts/verify-image-pinsXmjs'),
+    ).toBe(
+      false, // the `.` is escaped, not a wildcard
+    );
+  });
+
   it('a nightly workflow runs the checker', () => {
     expect(workflow).toMatch(/node scripts\/verify-image-pins\.mjs/);
     expect(workflow).toMatch(/schedule:/);
@@ -214,14 +256,6 @@ describe('the check is actually wired to run', () => {
     // registry in front of every merge (which is what would make the gate
     // flaky — anonymous Docker Hub resolution is rate-limited per source IP,
     // and shared runners share one).
-    // PARSED, not grepped. A substring match for `pull_request:` is satisfied by
-    // `_disabled_pull_request:` and by a commented-out block — mutation-proved:
-    // renaming the key left the grep form green, which is the "guard that stays
-    // green when its subject is removed" this repo calls decoration.
-    const triggers =
-      (parse(workflow) as { true?: unknown; on?: unknown }).true ?? // YAML 1.1: `on` is a boolean key
-      (parse(workflow) as { on?: unknown }).on;
-    const pr = (triggers as { pull_request?: { paths?: string[] } })?.pull_request;
     expect(pr, 'no pull_request trigger: nothing checks a pin at proposal time').toBeDefined();
     expect(pr?.paths).toBeDefined();
     for (const path of [
@@ -232,11 +266,40 @@ describe('the check is actually wired to run', () => {
     ]) {
       expect(pr?.paths).toContain(path);
     }
-    // The paths must stay in step with what the script actually walks: a path
-    // list that misses a scanned directory is a window nobody can see.
-    const scanned = discoverSources(ROOT);
-    expect(scanned.some((f) => f.startsWith('benchmarks/'))).toBe(true);
-    expect(scanned.some((f) => f.startsWith('packages/kn-next-operator/'))).toBe(true);
+  });
+
+  it('EVERY file the checker walks is covered by the `paths:` filter', () => {
+    // The half the previous version claimed and did not have. It asserted four
+    // hardcoded path strings plus `scanned.some(f => f.startsWith('benchmarks/'))`
+    // — both of which stay green while the two lists drift apart, because
+    // neither compares them. Extending `discoverBenchmarkSources` to another
+    // extension or directory left the `paths:` filter stale and the test green:
+    // a gate that cannot fire on the diffs that matter, under a comment saying
+    // it asserts both halves.
+    //
+    // This compares them: every file the walk yields must be matched by at
+    // least one glob in the trigger, so the two can only diverge loudly. The
+    // extensions happen to line up today (`.go`, `.yaml`, `.yml`, `.sh` are all
+    // in both) — that is the point. Nothing was asserting it, so the next
+    // extension or directory added to the walk would have lined up with nothing.
+    const patterns = (pr?.paths ?? []).map(globToRegExp);
+    const uncovered = discoverSources(ROOT).filter((file) =>
+      patterns.every((re) => !re.test(file)),
+    );
+    expect(
+      uncovered,
+      'these sources are scanned by verify-image-pins.mjs but a PR that changes them does not ' +
+        'trigger the check — the pin can be introduced and merged unreported',
+    ).toEqual([]);
+  });
+
+  it('the coverage check can actually fail — proved on the walk it polices', () => {
+    // Mutation-proof in-test, so the assertion above is not decoration: a file
+    // the walk could plausibly grow (the harness's own `.mjs` sources) is NOT
+    // matched by any pattern in the trigger today.
+    const patterns = (pr?.paths ?? []).map(globToRegExp);
+    expect(patterns.some((re) => re.test('benchmarks/image-prewarm-oke/lib.mjs'))).toBe(false);
+    expect(patterns.some((re) => re.test('benchmarks/image-prewarm-oke/nodesh.sh'))).toBe(true);
   });
 
   it('the red-alert issue is only raised by the NIGHTLY, never by a PR run', () => {

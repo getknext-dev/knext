@@ -29,11 +29,12 @@
  *       the file's header comment and by nothing in the file.
  */
 import { execFileSync, spawn } from 'node:child_process';
-import { mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
-
+import { parse as parseYaml } from 'yaml';
+import type { PodFacts } from '../benchmarks/image-prewarm-oke/lib.mjs';
 import {
   assertPodFacts,
   assertSafeImageRef,
@@ -53,6 +54,24 @@ import {
 
 const HARNESS = resolve(import.meta.dirname, '../benchmarks/image-prewarm-oke');
 const read = (f: string) => readFileSync(resolve(HARNESS, f), 'utf8');
+
+/**
+ * Every executable source in the harness TREE, harness-relative, recursively.
+ *
+ * The scans below are only as wide as this walk: a flat `readdirSync` made the
+ * first subdirectory anyone adds invisible to them, and nothing would have said
+ * so.
+ */
+const harnessSources = (dir: string = HARNESS, prefix = ''): string[] =>
+  readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+    if (entry.isDirectory()) {
+      if (entry.name === 'node_modules' || entry.name === 'results' || entry.name.startsWith('.')) {
+        return [];
+      }
+      return harnessSources(join(dir, entry.name), `${prefix}${entry.name}/`);
+    }
+    return /\.(mjs|js|sh)$/.test(entry.name) ? [`${prefix}${entry.name}`] : [];
+  });
 
 const DIGEST = `sha256:${'a'.repeat(64)}`;
 const REF = `registry.example.com/knext/pw@${DIGEST}`;
@@ -141,14 +160,19 @@ describe('node image matching is anchored to the exact repository (E)', () => {
 
   it('the shipped harness sources contain no unanchored repo grep', () => {
     // Scanned, not enumerated, in BOTH dimensions: every executable file in the
-    // harness directory is read from disk (a new file cannot dodge the guard by
-    // not being on a list), and the pattern above is spelling-agnostic.
+    // harness TREE is read from disk (a new file cannot dodge the guard by not
+    // being on a list), and the pattern above is spelling-agnostic.
+    //
+    // RECURSIVE, which it was not: a flat `readdirSync(HARNESS)` means the first
+    // subdirectory anyone adds escapes the guard silently, with only a
+    // `toBeGreaterThanOrEqual(4)` floor standing in for the missing files — and
+    // that floor is satisfied by the four top-level files that already exist.
     //
     // Comment lines are stripped first — every one of these files now DESCRIBES
     // the construct it removed, and a scan that cannot tell the description from
     // the thing would force the explanation out of the code. Executable lines
     // only, which is also the only place the defect could live.
-    const files = readdirSync(HARNESS).filter((f) => /\.(mjs|js|sh)$/.test(f));
+    const files = harnessSources();
     expect(files.length).toBeGreaterThanOrEqual(4); // the discovery itself must work
     for (const file of files) {
       const code = read(file)
@@ -215,7 +239,9 @@ describe('missing observations fail the replicate, never default to favourable (
   // over it — which is also what three doc sites always claimed it did. Only a
   // WRONG IMAGE is fatal: it means the two arms are not one application, so
   // every remaining replicate would measure something else.
-  const missing: Array<[string, unknown]> = [
+  // Typed against the function's declared parameter, not `unknown` behind a
+  // cast: `as never` disables checking on the very argument under test.
+  const missing: Array<[string, PodFacts | null]> = [
     ['no pod matched the request window', null],
     ['the events query failed', { ...facts, eventsError: 'connection refused' }],
     ['`pulling` is not a boolean', { ...facts, pulling: undefined }],
@@ -224,9 +250,9 @@ describe('missing observations fail the replicate, never default to favourable (
   it.each(missing)('fails the replicate — not the run — when %s', (_label, input) => {
     // Both halves: it must THROW (never silently return a favourable default)
     // and the throw must NOT be of the run-aborting kind.
-    expect(() => assertPodFacts(input as never, { expectImage: REF })).toThrow();
+    expect(() => assertPodFacts(input, { expectImage: REF })).toThrow();
     try {
-      assertPodFacts(input as never, { expectImage: REF });
+      assertPodFacts(input, { expectImage: REF });
     } catch (error) {
       expect(error).toBeInstanceOf(Error);
       expect(error).not.toBeInstanceOf(FatalError);
@@ -248,7 +274,7 @@ describe('missing observations fail the replicate, never default to favourable (
       first: 1,
       pairs: 1,
       order: ['on', 'off'],
-      record: (r) => recorded.push(r as never),
+      record: (r) => recorded.push(r),
       run: async () => {
         calls++;
         if (calls === 1) assertPodFacts(null, { expectImage: REF });
@@ -350,7 +376,7 @@ describe('fatal conditions abort the whole run (C)', () => {
         first: 1,
         pairs: 2,
         order,
-        record: (r) => recorded.push(r as never),
+        record: (r) => recorded.push(r),
         run: async () => {
           calls++;
           if (calls === 2) throw new FatalError('node disk at 86%');
@@ -484,7 +510,7 @@ describe('an INTERRUPTED run restores the pre-run imagePrewarm state (A2)', () =
           released = r;
         });
       },
-    } as never);
+    });
     // let the body start and set the cluster state it must not leave behind
     await new Promise((r) => setTimeout(r, 0));
     expect(h.state.value).toBe(true);
@@ -496,7 +522,9 @@ describe('an INTERRUPTED run restores the pre-run imagePrewarm state (A2)', () =
     expect(h.log.join('\n')).toMatch(/restored/i);
     expect(h.exits).toEqual([signal === 'SIGINT' ? 130 : 143]);
     released();
-    await running.catch(() => {});
+    // The promise is ASSERTED, not swallowed. `await running.catch(() => {})`
+    // discards exactly the outcome the sibling test below exists to observe.
+    await expect(running).resolves.toBeUndefined();
   });
 
   it('the signal restore is READ BACK, and a write that does nothing is loud', async () => {
@@ -511,13 +539,19 @@ describe('an INTERRUPTED run restores the pre-run imagePrewarm state (A2)', () =
           released = r;
         });
       },
-    } as never);
+    });
     await new Promise((r) => setTimeout(r, 0));
     h.listeners.SIGINT?.();
     expect(h.log.join('\n')).toMatch(/RESTORE FAILED/);
     expect(h.exits).toEqual([1]); // a failed restore is not a clean interrupt
     released();
-    await running.catch(() => {});
+    // …and the FAILURE must leave the function, not just the log. The memo used
+    // to hardcode `{ restored: true }` for the second caller, so a handler-path
+    // restore that genuinely failed produced a clean resolve here. Production
+    // is masked from that only by `process.exit(1)` in the handler — and moving
+    // `unregister()` after the final restore makes the window live.
+    await expect(running).rejects.toThrow(FatalError);
+    await expect(running).rejects.toThrow(/RESTORE FAILED/);
   });
 
   it('removes its handlers on the normal path, and restores exactly once', async () => {
@@ -532,10 +566,37 @@ describe('an INTERRUPTED run restores the pre-run imagePrewarm state (A2)', () =
       body: async () => {
         h.state.value = true;
       },
-    } as never);
+    });
     expect(h.state.value).toBe(false);
     expect(writes).toEqual([false]); // the handler did not also fire
     expect(Object.keys(h.listeners)).toEqual([]); // no leaked process listeners
+  });
+
+  it('the FINAL restore runs with its signal protection still installed', async () => {
+    // The single most important write in the harness used to execute with its
+    // own protection deliberately removed one line earlier: `unregister()` sat
+    // BEFORE the final `restore()`. That write is a slow synchronous
+    // `execFileSync` kubectl patch, so a Ctrl-C landing in it — the likeliest
+    // Ctrl-C moment there is, an operator waiting out the tail of a ~100 minute
+    // run — hit the default disposition and killed the process mid-restore,
+    // leaving `imagePrewarm=true`: exactly the state the mechanism exists to
+    // prevent, and with no handler log to say so.
+    //
+    // Both halves: installed DURING the write, and gone once it has landed.
+    const h = harness();
+    let installedDuringWrite: string[] = [];
+    await withRestore({
+      ...h.opts,
+      write: (v: boolean) => {
+        installedDuringWrite = Object.keys(h.listeners);
+        h.state.value = v;
+      },
+      body: async () => {
+        h.state.value = true;
+      },
+    });
+    expect(installedDuringWrite).toEqual(expect.arrayContaining(['SIGINT', 'SIGTERM']));
+    expect(Object.keys(h.listeners)).toEqual([]);
   });
 
   it('a REAL SIGINT to a REAL process restores the state (signal path proved end to end)', async () => {
@@ -592,6 +653,63 @@ describe('an INTERRUPTED run restores the pre-run imagePrewarm state (A2)', () =
     expect(out).toMatch(/restored/i);
     expect(code).toBe(130);
   }, 20000);
+
+  it('a REAL SIGINT DURING the final restore still lands the restore', async () => {
+    // The window the unit test above pins, proved the way the reviewer proved
+    // it: a real signal to a real process, arriving while the restoring write
+    // is in flight. The write here is SLOW and SYNCHRONOUS on purpose — that is
+    // what `execFileSync('kubectl', ['patch', …])` is.
+    //
+    // With `unregister()` before the restore, the SIGINT hits the default
+    // disposition and kills the process mid-write: the file stays 'true' and
+    // nothing is logged. With it after, the same signal is harmless.
+    const dir = mkdtempSync(join(tmpdir(), 'prewarm-sigint-restore-'));
+    const statePath = join(dir, 'imagePrewarm');
+    const restoringPath = join(dir, 'restoring');
+    writeFileSync(statePath, 'false');
+    const script = join(dir, 'run.mjs');
+    writeFileSync(
+      script,
+      `import { readFileSync, writeFileSync } from 'node:fs';
+       import { withRestore } from ${JSON.stringify(resolve(HARNESS, 'lib.mjs'))};
+       await withRestore({
+         read: () => readFileSync(${JSON.stringify(statePath)}, 'utf8') === 'true',
+         write: (v) => {
+           // Announce that the restoring write has STARTED, then block for a
+           // while: this is the slow synchronous kubectl patch.
+           writeFileSync(${JSON.stringify(restoringPath)}, 'now');
+           const until = Date.now() + 3000;
+           while (Date.now() < until) {}
+           writeFileSync(${JSON.stringify(statePath)}, String(v));
+         },
+         log: (m) => console.log(m),
+         body: async () => { writeFileSync(${JSON.stringify(statePath)}, 'true'); },
+       });`,
+    );
+
+    const child = spawn(process.execPath, [script], { stdio: ['ignore', 'pipe', 'pipe'] });
+    let out = '';
+    child.stdout.on('data', (d) => {
+      out += d;
+    });
+    child.stderr.on('data', (d) => {
+      out += d;
+    });
+
+    const deadline = Date.now() + 15000;
+    while (!existsSync(restoringPath)) {
+      if (Date.now() > deadline) throw new Error(`child never reached its restore: ${out}`);
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    child.kill('SIGINT'); // squarely inside the restoring write
+    await new Promise<void>((r) => child.on('exit', () => r()));
+
+    expect(
+      readFileSync(statePath, 'utf8'),
+      'the process was killed mid-restore and left imagePrewarm set',
+    ).toBe('false');
+    expect(out).toMatch(/restored/i);
+  }, 25000);
 });
 
 // ── F: the settle floor is measured from the end of the node work ───────────
@@ -655,23 +773,74 @@ describe('the settle floor is symmetric across arms (F)', () => {
   });
 });
 
-// ── E (third half): nodesh.sh's OWN image reaches the same privileged spec ──
-describe('the nodesh pod image is validated before it is interpolated (E3)', () => {
+// ── E (third half): EVERY value interpolated into the privileged pod spec ───
+describe('every value interpolated into the nodesh pod spec is validated (E3)', () => {
   const NODESH = resolve(HARNESS, 'nodesh.sh');
   const PINNED = `alpine:3.20@sha256:${'d'.repeat(64)}`;
 
-  /** Run nodesh.sh with a stub `kubectl` first on PATH, so nothing reaches a cluster. */
-  const runNodesh = (env: Record<string, string>) => {
+  /**
+   * A stub `kubectl` (captures what would be applied) and a stub `mktemp` with
+   * GNU coreutils semantics, both first on PATH.
+   *
+   * The `mktemp` stub is not scenery. `mktemp -t nodesh` is BSD syntax: macOS
+   * accepts it, GNU coreutils answers "too few X's in template" and, under
+   * `set -e`, nodesh.sh dies BEFORE applying anything. Every positive-path
+   * assertion below therefore passed on a developer Mac while the whole
+   * no-prewarm arm (image eviction) was dead on every Linux runner and on any
+   * Linux host the harness is driven from. Imposing GNU semantics here makes
+   * this suite fail the same way CI does.
+   */
+  const stubs = () => {
     const dir = mkdtempSync(join(tmpdir(), 'nodesh-'));
     const applied = join(dir, 'applied.yaml');
     writeFileSync(
       join(dir, 'kubectl'),
-      `#!/bin/sh\nfor a in "$@"; do case "$a" in *.yaml|/*nodesh*) [ -f "$a" ] && cat "$a" >> ${applied};; esac; done\nexit 0\n`,
+      `#!/bin/sh\nfor a in "$@"; do case "$a" in *.yaml|*nodesh*) [ -f "$a" ] && cat "$a" >> ${applied};; esac; done\nexit 0\n`,
       { mode: 0o755 },
     );
-    const res = execFileSync(
+    writeFileSync(
+      join(dir, 'mktemp'),
+      [
+        '#!/bin/sh',
+        '# GNU coreutils semantics: the template needs at least three trailing X.',
+        'tmpl=',
+        'while [ $# -gt 0 ]; do',
+        '  case "$1" in',
+        '    -t) shift; tmpl="${TMPDIR:-/tmp}/$1" ;;',
+        '    -*) ;;',
+        '    *) tmpl="$1" ;;',
+        '  esac',
+        '  shift',
+        'done',
+        '[ -n "$tmpl" ] || tmpl="${TMPDIR:-/tmp}/tmp.XXXXXXXXXX"',
+        'body=$tmpl; n=0',
+        'while [ "${body%X}" != "$body" ]; do body="${body%X}"; n=$((n+1)); done',
+        'if [ "$n" -lt 3 ]; then',
+        "  echo \"mktemp: too few X's in template '${tmpl##*/}'\" >&2",
+        '  exit 1',
+        'fi',
+        'i=0',
+        'while [ -e "$body$$-$i" ]; do i=$((i+1)); done',
+        'f="$body$$-$i"',
+        ': > "$f"',
+        'chmod 600 "$f"',
+        'echo "$f"',
+        '',
+      ].join('\n'),
+      { mode: 0o755 },
+    );
+    return { dir, applied };
+  };
+
+  /** Run nodesh.sh against those stubs, so nothing reaches a cluster. */
+  const runNodesh = (
+    env: Record<string, string> = {},
+    { node = 'node-1.example.com', cmd = 'echo hi' }: { node?: string; cmd?: string } = {},
+  ) => {
+    const { dir, applied } = stubs();
+    const out = execFileSync(
       'sh',
-      ['-c', `"$1" node-1.example.com 'echo hi' 2>&1; echo "EXIT=$?"`, 'sh', NODESH],
+      ['-c', `"$1" "$2" "$3" 2>&1; echo "EXIT=$?"`, 'sh', NODESH, node, cmd],
       {
         encoding: 'utf8',
         env: { ...process.env, PATH: `${dir}:${process.env.PATH}`, ...env },
@@ -683,8 +852,50 @@ describe('the nodesh pod image is validated before it is interpolated (E3)', () 
     } catch {
       spec = '';
     }
-    return { out: res, spec };
+    return { out, spec };
   };
+
+  interface PodSpecDoc {
+    metadata: { name: string; namespace: string };
+    spec: {
+      template: {
+        spec: {
+          hostPID: boolean;
+          nodeName: string;
+          containers: Array<{ image: string; command: string[] }>;
+        };
+      };
+    };
+  }
+  const parseSpec = (spec: string) => parseYaml(spec) as PodSpecDoc;
+
+  it('the mktemp stub really rejects a BSD-only template (the guard is not decoration)', () => {
+    // Mutation-proof of the instrument itself: a stub that quietly accepted
+    // `-t nodesh` would make every assertion below prove nothing about Linux.
+    const { dir } = stubs();
+    const out = execFileSync('sh', ['-c', 'mktemp -t nodesh 2>&1; echo "EXIT=$?"'], {
+      encoding: 'utf8',
+      env: { ...process.env, PATH: `${dir}:${process.env.PATH}` },
+    });
+    expect(out).toMatch(/too few X's in template/);
+    expect(out).toMatch(/EXIT=1/);
+    // …and it accepts the portable form, so a correct script is not blocked.
+    const ok = execFileSync('sh', ['-c', 'mktemp "$TMPDIR/nodesh.XXXXXX" 2>&1; echo "EXIT=$?"'], {
+      encoding: 'utf8',
+      env: { ...process.env, PATH: `${dir}:${process.env.PATH}`, TMPDIR: dir },
+    });
+    expect(ok).toMatch(/EXIT=0/);
+  });
+
+  it('nodesh.sh creates its spec file with a template GNU mktemp accepts', () => {
+    // The whole no-prewarm arm runs through this line. `set -e` + a BSD-only
+    // template means nodesh.sh exits 1 before `kubectl apply`, so the eviction
+    // never happens and nothing downstream can tell.
+    const { out, spec } = runNodesh({});
+    expect(out).not.toMatch(/mktemp:|too few X/);
+    expect(out).toMatch(/EXIT=0/);
+    expect(spec, 'nothing was applied — the script died before its kubectl apply').not.toBe('');
+  });
 
   it.each([
     ['a chained command', 'alpine:3.20@sha256:aaa"}; rm -rf /'],
@@ -728,6 +939,102 @@ describe('the nodesh pod image is validated before it is interpolated (E3)', () 
     const { out, spec } = runNodesh({});
     expect(out).toMatch(/EXIT=0/);
     expect(spec).toMatch(/image: [a-z0-9./:-]+@sha256:[0-9a-f]{64}/);
+  });
+
+  // ── the SCAN: no interpolation may be hardened by being forgotten ──────────
+  //
+  // The finding this replaces was "harden NODESH_IMAGE", and it was carried out
+  // exactly as written: 64 lines of validation for the second of THREE values
+  // interpolated into the same privileged, hostPID, `nsenter -t 1` spec. The
+  // third — `NS`, from `$NAMESPACE` — went straight into `namespace: $NS`
+  // unvalidated, so `NAMESPACE=$'default\n  labels:\n    evil: yes'` injected
+  // arbitrary YAML into the applied Job. The finding READ as complete while
+  // being hardened at two of three points.
+  //
+  // So the list is not written here. It is SCANNED out of the heredoc, and a
+  // variable with no guard fails — which is the half an enumeration cannot have.
+  const HEREDOC = (() => {
+    const src = read('nodesh.sh');
+    const match = src.match(/\ncat > "\$TMP" <<YAML\n([\s\S]*?)\nYAML\n/);
+    if (!match?.[1]) {
+      throw new Error(
+        'nodesh.sh no longer writes its pod spec with a `cat > "$TMP" <<YAML` heredoc, so this ' +
+          'scan can no longer see what the spec interpolates. Update the scan WITH the script — ' +
+          'do not delete it.',
+      );
+    }
+    return match[1];
+  })();
+
+  const interpolated = [
+    ...new Set(
+      [...HEREDOC.matchAll(/\$\{?([A-Za-z_][A-Za-z0-9_]*)/g)].flatMap((m) => (m[1] ? [m[1]] : [])),
+    ),
+  ].sort();
+
+  /** A value that ends the current YAML line and starts a key of its own. */
+  const YAML_BREAKOUT = 'x\n      hostPID: false';
+
+  /** An executable proof, per interpolated variable, that it cannot break out. */
+  const GUARDS: Record<string, () => void> = {
+    NODE: () => {
+      const { out, spec } = runNodesh({}, { node: YAML_BREAKOUT });
+      expect(out).toMatch(/refusing node name/i);
+      expect(out).toMatch(/EXIT=2/);
+      expect(spec).toBe('');
+    },
+    NS: () => {
+      const { out, spec } = runNodesh({ NAMESPACE: 'default\n  labels:\n    evil: injected' });
+      expect(out).toMatch(/refusing namespace/i);
+      expect(out).toMatch(/EXIT=2/);
+      expect(spec).toBe('');
+    },
+    NODESH_IMAGE: () => {
+      const { out, spec } = runNodesh({ NODESH_IMAGE: YAML_BREAKOUT });
+      expect(out).toMatch(/refusing NODESH_IMAGE/i);
+      expect(out).toMatch(/EXIT=2/);
+      expect(spec).toBe('');
+    },
+    NAME: () => {
+      // Derived from `$NODE` (rejected above) plus `$RANDOM`; the proof is that
+      // the value that reaches the spec is inert for every ACCEPTED node name.
+      const { spec } = runNodesh({}, { node: 'node-1.sub.example.com' });
+      expect(parseSpec(spec).metadata.name).toMatch(/^nodesh-[a-z0-9-]+$/);
+    },
+    B64: () => {
+      // The command is base64'd precisely so it cannot express a YAML break —
+      // its alphabet has no newline. Proved with a command that contains one.
+      const { out, spec } = runNodesh({}, { cmd: "echo 'a'\n      hostPID: false\n#" });
+      expect(out).toMatch(/EXIT=0/);
+      const doc = parseSpec(spec);
+      expect(doc.spec.template.spec.hostPID).toBe(true);
+      const command = doc.spec.template.spec.containers[0]?.command ?? [];
+      const script = command[command.length - 1] ?? '';
+      expect(script).toMatch(/^echo [A-Za-z0-9+/=]+ \| base64 -d \| sh$/);
+    },
+  };
+
+  it('the scan can see the interpolations it is supposed to police', () => {
+    // Both halves: a scan that finds nothing would make every check below vacuous.
+    expect(interpolated.length).toBeGreaterThanOrEqual(4);
+    expect(interpolated).toEqual(expect.arrayContaining(['NODE', 'NODESH_IMAGE']));
+  });
+
+  it('EVERY interpolated variable has a guard — a new one cannot be added silently', () => {
+    expect(
+      interpolated.filter((name) => !(name in GUARDS)),
+      'these values reach the privileged pod spec with nothing proving they cannot break out of it',
+    ).toEqual([]);
+  });
+
+  it('every guard names a variable the spec really interpolates — no dead entries', () => {
+    // The other direction: a guard for a variable the spec stopped using reads
+    // as coverage while covering nothing.
+    expect(Object.keys(GUARDS).filter((name) => !interpolated.includes(name))).toEqual([]);
+  });
+
+  it.each(Object.keys(GUARDS))('%s cannot break out of the privileged pod spec', (name) => {
+    GUARDS[name]?.();
   });
 });
 

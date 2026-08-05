@@ -46,8 +46,12 @@ on:
   schedule:
     - cron: '41 5 * * *'
   # Only the diffs that can introduce a pin. These paths MUST stay in step with
-  # `discoverSources()` in scripts/verify-image-pins.mjs — the test
-  # `tests/operator-image-pin-resolution.test.ts` asserts both halves.
+  # `discoverSources()` in scripts/verify-image-pins.mjs, and the claim is now
+  # backed rather than asserted: `tests/operator-image-pin-resolution.test.ts`
+  # translates each glob below to a RegExp and requires EVERY file the walk
+  # yields to match at least one of them. It previously only checked that four
+  # of these strings were present and that the walk returned *something* under
+  # `benchmarks/` — both of which stay green while the two lists drift apart.
   pull_request:
     paths:
       - 'packages/kn-next-operator/**/*.go'

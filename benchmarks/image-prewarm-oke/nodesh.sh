@@ -27,11 +27,24 @@ NODE="$1"
 shift
 CMD="$*"
 
+# EVERY value interpolated into the pod spec below is validated here. That is
+# stated as a rule rather than as a list because the list is how this went
+# wrong: the image was hardened in 64 lines while `$NAMESPACE`, the third
+# interpolated value in the SAME privileged hostPID spec, went in untouched —
+# `NAMESPACE=$'default\n  labels:\n    evil: yes'` injected arbitrary YAML into
+# an applied Job. tests/image-prewarm-harness.test.ts SCANS the heredoc for
+# `$VAR` and fails on any without a proof, so a new one cannot be forgotten.
+#
+# Character sets are ENUMERATED, never written as the range `[!a-z0-9]`: `case`
+# glob ranges use the locale's COLLATION order, in which `a-z` spans `aAbBcC…`
+# and therefore silently admits uppercase. The digest check below learned this
+# the hard way (it accepted `sha256:AAAA…`); the same lesson applies here.
+
 # The node name lands in `nodeName:` and in a Job name, both interpolated into
 # YAML — and the command itself runs as root under `nsenter -t 1` on that node.
 # Defence in depth: lib.mjs validates the same shape before calling this.
 case "$NODE" in
-  *[!a-z0-9.-]* | "" | [!a-z0-9]*)
+  *[!0123456789abcdefghijklmnopqrstuvwxyz.-]* | "" | [!0123456789abcdefghijklmnopqrstuvwxyz]*)
     echo "nodesh.sh: refusing node name '$NODE' (expected a DNS-1123 name)" >&2
     exit 2
     ;;
@@ -89,10 +102,34 @@ CTX_ARGS=()
 # KUBE_CONTEXT died on its first kubectl call with "CTX_ARGS[@]: unbound
 # variable". The `${a[@]+…}` form expands to nothing when the array is empty and
 # is portable to both; it is used at every kubectl call below.
+
+# `$NAMESPACE` lands in `namespace: $NS`, in the same spec and with the same
+# consequences as the two values already validated above. A DNS-1123 LABEL is
+# the whole grammar Kubernetes allows for a namespace, so anything else is
+# rejected rather than escaped.
 NS="${NAMESPACE:-knext-prewarm}"
+reject_ns() {
+  echo "nodesh.sh: refusing namespace '$NS' ($1)" >&2
+  echo "nodesh.sh: expected a DNS-1123 label — it is interpolated into a privileged hostPID pod" >&2
+  echo "nodesh.sh: spec that nsenters the host as root, so anything else is rejected." >&2
+  exit 2
+}
+case "$NS" in
+  *[!0123456789abcdefghijklmnopqrstuvwxyz-]*) reject_ns "illegal character" ;;
+  "") reject_ns "empty" ;;
+  -* | *-) reject_ns "must start and end with an alphanumeric" ;;
+esac
+[ "${#NS}" -le 63 ] || reject_ns "longer than the 63-character DNS-1123 label limit"
+
 B64=$(printf '%s' "$CMD" | base64 | tr -d '\n')
 NAME="nodesh-$(echo "$NODE" | tr '.' '-')-$RANDOM$RANDOM"
-TMP="$(mktemp -t nodesh)"
+# `mktemp -t nodesh` is BSD syntax. GNU coreutils — every Linux CI runner, and
+# every Linux host this harness is driven from — requires at least three
+# trailing `X` and otherwise fails with "too few X's in template". Under
+# `set -e` that killed nodesh.sh BEFORE its `kubectl apply`, so the no-prewarm
+# arm's image eviction never ran at all while every macOS run stayed green.
+# The explicit template is accepted by both.
+TMP="$(mktemp "${TMPDIR:-/tmp}/nodesh.XXXXXX")"
 
 cat > "$TMP" <<YAML
 apiVersion: batch/v1

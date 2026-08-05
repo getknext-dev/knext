@@ -163,6 +163,17 @@ export function assertSingleApplication({ pwImage, revisionImage, revision }) {
 }
 
 /**
+ * What one measured pod contributes to a replicate.
+ *
+ * @typedef {object} PodFacts
+ * @property {string} [pod]
+ * @property {string} [node]
+ * @property {boolean} [pulling]
+ * @property {string} [eventsError]
+ * @property {Array<{name?: string, image?: string}>} [containers]
+ */
+
+/**
  * An observation is complete or the replicate failed. Every branch here used to
  * degrade to `pulling: false` — which is the value the headline claim wants, so
  * a transient events-API failure on a no-prewarm replicate silently converted
@@ -181,6 +192,10 @@ export function assertSingleApplication({ pwImage, revisionImage, revision }) {
  *   - A WRONG IMAGE is fatal. It means the two arms are not one application, so
  *     every remaining replicate would measure a different program under the same
  *     label — the run itself is invalid, not one row of it.
+ *
+ * @param {PodFacts | null | undefined} facts
+ * @param {{expectImage?: string}} [options]
+ * @returns {PodFacts}
  */
 export function assertPodFacts(facts, { expectImage } = {}) {
   if (!facts) {
@@ -230,6 +245,24 @@ export function isUsableRow(row) {
  * stepped over; a `FatalError` is recorded and then re-thrown, which is the
  * whole difference between "one bad replicate" and "keep pulling 370 MB onto a
  * node past the kubelet's image-GC threshold".
+ *
+ * @typedef {object} FailedRow
+ * @property {string} ts
+ * @property {number} pair
+ * @property {number} idx
+ * @property {string} mode
+ * @property {string} failed
+ * @property {boolean} fatal
+ *
+ * @param {object} options
+ * @param {number} [options.first]
+ * @param {number} options.pairs
+ * @param {string[]} options.order
+ * @param {(replicate: {pair: number, idx: number, mode: string}) => Promise<unknown>} options.run
+ * @param {(row: FailedRow) => void} [options.record]
+ * @param {(message: string) => void} [options.log]
+ * @param {() => string} [options.now]
+ * @returns {Promise<void>}
  */
 export async function runReplicates({
   first = 1,
@@ -263,6 +296,16 @@ export async function runReplicates({
 const SIGNAL_EXIT = { SIGINT: 130, SIGTERM: 143 };
 
 /**
+ * The slice of `process` `withRestore` needs — declared structurally so a test
+ * double is a first-class caller rather than something a cast has to smuggle in.
+ *
+ * @typedef {object} SignalHost
+ * @property {(signal: string, handler: () => void) => unknown} on
+ * @property {(signal: string, handler: () => void) => unknown} off
+ * @property {(code: number) => unknown} exit
+ */
+
+/**
  * Run `body` and put back whatever `read()` reported before it — then read back
  * and PROVE the restore landed.
  *
@@ -278,6 +321,24 @@ const SIGNAL_EXIT = { SIGINT: 130, SIGTERM: 143 };
  * `imagePrewarm=true` plus a warm image on every node. `SIGINT`/`SIGTERM` are
  * therefore handled and perform the same write + READ-BACK; only `SIGKILL`,
  * which no process can handle, remains uncovered.
+ *
+ * TYPES ARE DECLARED, not left to inference. The callers are TypeScript and are
+ * checked by the root `typecheck` gate; with `proc` inferred from its
+ * `= process` default, every test that injects a signal-host double became a
+ * type error, and the casts that silenced it (`as never`) turned type-checking
+ * OFF for the whole options object — on exactly the function whose contract was
+ * being changed. A minimal structural `SignalHost` is what the code actually
+ * needs, and `process` satisfies it.
+ *
+ * @template T
+ * @param {object} options
+ * @param {() => boolean} options.read
+ * @param {(value: boolean) => void} options.write
+ * @param {(before: boolean) => Promise<T>} options.body
+ * @param {(message: string) => void} [options.log]
+ * @param {SignalHost} [options.proc]
+ * @param {string[]} [options.signals]
+ * @returns {Promise<T>}
  */
 export async function withRestore({
   read,
@@ -290,10 +351,22 @@ export async function withRestore({
 }) {
   const before = read();
 
-  /** Put it back and prove it. Idempotent: the signal and the normal path share it. */
+  /**
+   * Put it back and prove it. Idempotent: the signal and the normal path share it.
+   *
+   * The memo holds the OBSERVED OUTCOME, not `{ restored: true }`. It used to
+   * hardcode success for the second caller, which meant a handler-path restore
+   * that genuinely failed — state left dirty, `RESTORE FAILED` logged — was
+   * reported to the normal path as a clean restore, and `withRestore` resolved
+   * instead of raising its `FatalError`. Nothing but `process.exit(1)` inside
+   * the handler kept that off production, and the ordering fix below (which
+   * lets the handler and the final restore genuinely race) makes it live.
+   */
   let done = false;
+  /** @type {{restored: boolean, after?: boolean, restoreError?: unknown}} */
+  let outcome = { restored: false };
   const restore = () => {
-    if (done) return { restored: true, after: before };
+    if (done) return outcome;
     done = true;
     let restoreError;
     let after;
@@ -309,7 +382,8 @@ export async function withRestore({
         ? `restored pre-run state (imagePrewarm=${before}), verified by read-back`
         : `RESTORE FAILED: wanted imagePrewarm=${before}, read back ${after}${restoreError ? ` (${restoreError})` : ''}`,
     );
-    return { restored, after, restoreError };
+    outcome = { restored, after, restoreError };
+    return outcome;
   };
 
   const handlers = signals.map((signal) => {
@@ -334,9 +408,19 @@ export async function withRestore({
   } catch (error) {
     bodyError = error;
   }
-  unregister();
 
+  // The final restore runs WITH its signal protection still installed, and
+  // `unregister()` comes after it. The other order — which is what shipped —
+  // stripped the handlers one line before the single most important write in
+  // the harness, and that write is a slow synchronous `execFileSync` kubectl
+  // patch. A Ctrl-C landing in it (an operator waiting out the tail of a ~100
+  // minute run: the LIKELIEST Ctrl-C moment there is) therefore met the default
+  // disposition, killed the process mid-write, and left `imagePrewarm=true` —
+  // precisely the state this function exists to prevent, with no handler log to
+  // say it happened. `done` already makes `restore()` idempotent, so the
+  // handler firing here is harmless; it re-reads the memoised outcome.
   const { restored, after, restoreError } = restore();
+  unregister();
 
   if (bodyError) throw bodyError;
   if (!restored) {

@@ -238,7 +238,15 @@ committed as JSONL. (`measure.mjs` creates that directory itself — an earlier 
 the command above failed with `ENOENT` on its first write in a fresh clone.)
 
 The harness restores whatever `spec.scaling.imagePrewarm` it found before the run, verified by
-read-back, and aborts the run rather than the replicate on a node-disk or restore failure.
+read-back, and aborts the run rather than the replicate on a node-disk or restore failure. That
+restore also runs on `SIGINT`/`SIGTERM`, and — since the restoring write is a slow synchronous
+`kubectl patch` — the signal handlers stay installed *through* it, so a Ctrl-C arriving mid-restore
+cannot leave `imagePrewarm=true` behind. Only `SIGKILL` remains uncovered.
+
+`NAMESPACE`, `PW_IMAGE` and `NODESH_IMAGE` are validated rather than escaped: all three are
+interpolated into the privileged `hostPID` pod spec `nodesh.sh` applies (it `nsenter`s the host as
+root), so the namespace must be a plain DNS-1123 label and the image references must be
+digest-pinned. Anything else exits 2 before anything is applied.
 
 ## Appendix — every replicate
 
