@@ -37,6 +37,10 @@
     Consequence 8 concedes is forfeited on the default path.
   - `CLAUDE.md` §9 — records image optimization as RESOLVED and says *"don't re-propose it as a work
     item"*; that is true of the node path and not of the default path after Phase 5.
+  - **Conditional on Escalation 7's answer:** `.claude/rules/architecture.md` §4's *"is NOT a return to
+    reverse-engineering Nitro/Vinext as a runtime"* clause. Listed rather than assumed — if the founder
+    permits patching vinext internals for the SSR-embedding seam, that clause must be amended; if not,
+    no edit is needed and the seam is off the table.
 
 ## Context
 
@@ -186,17 +190,26 @@ From #606, sourced to vinext's own repo and registry data:
 
 **Structural capability losses — consequences, not footnotes.**
 
-1. **`next/image` optimization is LOST.** vinext auto-stubs `sharp`; request-time optimisation exists
-   only via a Cloudflare Images binding, which does not exist on Knative. Measured (#607 §5):
-   `/_next/image` returns **200 `image/png`, 181,277 B — byte-for-byte the source**, against Next's
-   **1,609 B `image/avif` (112× reduction)**. ADR-0006 declares image optimisation shipped and required.
-   **Because `node + vinext` is not a supported cell and bytecode is mandatory, the usual escape —
-   "image apps fall back to node" — means falling back to the *old* default entirely.** This is the
-   sharpest open question and is escalated below.
-2. **Build-time static generation was not observed.** #607 §5 measured **0 prerendered HTML files** from
-   the vinext arm vs Next's **15 routes / 14 HTML files**. vinext documents `generateStaticParams` as
-   supported, so this is **not established** as a defect versus a configuration gap — but for a
-   scale-to-zero product, prerendered HTML is precisely what makes a cold path cheap. Resolve in Phase 3.
+1. **`next/image` optimization is lost on UNMODIFIED vinext — and RECOVERED on the shipping shape.**
+   *Baseline (#607 §5), still the correct description of stock vinext:* `/_next/image` returns
+   **200 `image/png`, 181,277 B — byte-for-byte the source**, against Next's **1,609 B `image/avif`
+   (112× reduction)**; vinext auto-stubs `sharp` and request-time optimisation exists only via a
+   Cloudflare Images binding, absent on Knative.
+   **This is no longer the sharpest open question and is NO LONGER ESCALATED** — Escalation 1's premise
+   is refuted (#660): the knext entry Consequence 4 already mandates calls vinext's **public**
+   `handleImageOptimization`, giving **1,463 B avif (124×)** through `--compile --minify --bytecode`,
+   mutation-proved (interception removed → 181,277 B). ADR-0006 is reconciled for **local** sources;
+   `remotePatterns` remains unsupported by construction. See Escalation 1 for the costs that are still
+   real — no cache, `sharp` structurally unshippable, a major dependency bump.
+2. **Build-time static generation was not observed on the STANDALONE shape — and WORKS on the
+   non-standalone one.** *Baseline (#607 §5):* **0 prerendered HTML files** from the vinext arm vs
+   Next's **15 routes / 14 HTML files**. **Resolved (#658), so Escalation 2 is withdrawn as framed:**
+   `cli.js:370-378` `process.exit(0)`s on `output: 'standalone'` **before** the prerender block, so the
+   flag is parsed and silently ignored. Without standalone, `--prerender-all` emits 7 HTML + 6 `.rsc`
+   and the compiled binary serves **six of seven byte-identical** in-container with ISR revalidating.
+   The seventh (`404.html`) is **not** served from the prerender cache — 3,947 B served vs 3,971 B on
+   disk, no `x-vinext-cache` header. **What replaces this concern is Consequence 11**, not the
+   prerendering itself.
 3. **Dev React observed in a production server** — #607 saw the vinext production standalone server
    loading `react/cjs/react.development.js`. If it reproduces, it is a shipping blocker on its own.
 4. **knext's webpack/turbopack adapter hooks do not apply.** vinext is Vite/rolldown and **silently
@@ -250,8 +263,9 @@ From #606, sourced to vinext's own repo and registry data:
 
 ## Phased plan
 
-Ordered by risk retired per unit of work. Phases 2 and 3 run concurrently with 1 — both are cheap and
-either can invalidate the flip.
+Ordered by risk retired per unit of work. Phase 2 runs concurrently with 1. **Phase 3 no longer runs
+concurrently with 1** — 3(d) was inserted (2026-08-05) and *gates* Phase 1, because a separation result
+on an artifact whose bytecode coverage is uncharacterised can neither confirm nor refute the objective.
 
 **Phase 0 — bridge proof. DONE (2026-08-04), residual REOPENED (2026-08-05).** NO-GO trigger did not
 fire. Residual was: reproduce self-containment on **current** vinext (beta.4 + Vite 8) rather than the
@@ -328,12 +342,15 @@ evidence covers** — the floor is a minimum, not a substitute for that disclosu
 **"All eleven checks hard on both targets" is NOT sufficient and must not be substituted here.** In
 this runner, *hard* means only *no skip-on-fail*; the `lanes` filter is a separate, sanctioned SKIP
 path. Lane-filtering `g. next/image` onto turbopack would satisfy "hard", pass the guard, and leave
-its ✅ standing on the target where it is measured to fail 112×. A10 states the three requirements
+its ✅ standing on the target where **unmodified** vinext is measured to fail 112×. A10 states the three requirements
 that actually close this.
 
 **Phase 3 — resolve the capability blockers. (Reversible — produces findings.)** **Exit:** (a) image
-optimisation — a working path under vinext on Knative, or an accepted documented regression with a
-fail-closed rule the CLI and operator both enforce. **Resolving (a) by weakening check (g)'s assertion
+optimisation — a working path under vinext on Knative **with a cache, a proxy rate limit and a decode
+timeout in place** (Escalation 1 names these as prerequisites: without them the optimiser is an
+**unauthenticated CPU-exhaustion surface**, and the spike shape satisfies "a working path" while having
+none of them), or an accepted documented regression with a fail-closed rule the CLI and operator both
+enforce. **Resolving (a) by weakening check (g)'s assertion
 until it passes under vinext is the undocumented-regression case this exit forbids.** Recorded because
 A10 closes the two obvious doors — lane-filtering (g) and deleting it (deletion already reds:
 `hardIds.has('g')` goes false at `tests/compat-matrix.test.ts:173`) — and "HARD" asserts *no
@@ -350,8 +367,9 @@ parameterised over both images.
 **Irreversibility:** a shipped `v1alpha1` field cannot be removed (ADR-0017 §2.1), only deprecated and
 ignored. First step that cannot be fully unwound.
 
-**Phase 5 — the default flip. (Irreversible in practice.)** Exit: Phase 1 separation shown; Phase 2 lane
-green **and its corpus delta within a ceiling the founder has set (Escalation 6)**; Phase 2's
+**Phase 5 — the default flip. (Irreversible in practice.)** Exit: **a founder answer to Escalation 2′
+(A12) — does the flip stand if the application is not bytecode-compiled?**; Phase 1 separation shown;
+Phase 2 lane green **and its corpus delta within a ceiling the founder has set (Escalation 6)**; Phase 2's
 `compat-smoke` parameterisation landed; Phase 3 resolved; `architecture.md` §4 (both bullets) and
 `CLAUDE.md` §2/§3/§9/§10 amended; breaking change in release notes; upgrade order **operator/CRD
 first, then CLI**.
@@ -524,9 +542,8 @@ first, then CLI**.
    Phase 3(d) converts this from qualitative to a number before the question is put; it should not be
    answered on today's evidence.
 
-   *(Historic framing, kept because the ADR's phasing referenced it:* was losing build-time static
-   generation acceptable? For a
-   scale-to-zero product this may matter more than images.
+   *(Historic framing, kept because the ADR's phasing referenced it — was losing build-time static
+   generation acceptable? For a scale-to-zero product this may matter more than images.)*
 3′. **REFRAMED (2026-08-05), then PARTLY UNWOUND the same day (#660).** The reframing said two
    capability gaps had converged on one remedy — a fork. **That is now halved: images need no fork**
    (Escalation 1, refuted — vinext publicly exports the optimiser). **Only SSR application-embedding
@@ -547,6 +564,13 @@ first, then CLI**.
 5. **What happens to the official node compat lane** — completed for the credential, paused, or
    abandoned? Note the streak reset to 1 on 2026-08-03 and that run's log has expired, so its cause is
    unrecoverable.
+6. **What corpus delta is acceptable at the Phase 5 flip?** Phase 2's lane will exclude some tests. A
+   ceiling has to exist before the irreversible step, or "honestly scoped" becomes a criterion that any
+   exclusion set satisfies. vinext self-reports 93.3%, so ~7% is the shape of the question. State it as
+   a number (e.g. "no more than N excluded, none of them Tier-A capability rows"), because ADR-0007's
+   ledger is meant to shrink to zero and a delta with no ceiling inverts it. Coupled to Escalation 4:
+   ADR-0017 §3.1's 1.0-graduation question now depends on this answer.
+
 7. **Is patching vinext INTERNALS permitted at all?** *(New, 2026-08-05 — a `workflow.md` trigger-1
    escalation: it contradicts a hard rule, and is independent of Escalation 3′'s cost question.)*
    `.claude/rules/architecture.md` §4 permits vinext as a **build target** on the explicit basis that
@@ -558,12 +582,6 @@ first, then CLI**.
    toward *co-maintainer of a Next.js reimplementation* — engineering that is neither Knative nor the
    adapter, on a fame-first timeline whose north star is verified-adapter status. **This needs a rules
    amendment, not an architect's call.**
-6. **What corpus delta is acceptable at the Phase 5 flip?** Phase 2's lane will exclude some tests. A
-   ceiling has to exist before the irreversible step, or "honestly scoped" becomes a criterion that any
-   exclusion set satisfies. vinext self-reports 93.3%, so ~7% is the shape of the question. State it as
-   a number (e.g. "no more than N excluded, none of them Tier-A capability rows"), because ADR-0007's
-   ledger is meant to shrink to zero and a delta with no ceiling inverts it. Coupled to Escalation 4:
-   ADR-0017 §3.1's 1.0-graduation question now depends on this answer.
 
 ## Action items
 
@@ -576,7 +594,9 @@ first, then CLI**.
   binary shown to contain the application, else the run is labelled shell-only). Preconditions:
   ADR-0037 prewarm **and Phase 3(d)** — do not run it before artifact provenance is established.
 - **A3** `KNEXT_BUILD=vinext` lane, red-on-fail, evidence-carrying exclusions, compat-matrix delta.
-- **A4** Resolve image optimisation, static generation, dev-React (feeds Escalation 1 and 2).
+- **A4** Resolve image optimisation, static generation, dev-React. **Escalations 1 and 2 are both
+  WITHDRAWN as of 2026-08-05** — A4 now feeds Phase 3(a)'s security prerequisites (cache, proxy rate
+  limit, decode timeout) and the dev-React question, which is the only one of the three still open.
 - **A5** Additive `build` field per ADR-0040; both drain e2e gates parameterised. **And re-point
   `tests/compat-matrix.test.ts`'s default-build-target source at the `build` field's default,
   replacing the Phase 2 interim constant. A10(3) is NOT satisfied until this lands.**
@@ -603,8 +623,10 @@ first, then CLI**.
   > anchor read by `crd-api-version.test.ts`. It fires exactly when Phase 4 lands. Not required for
   > this ADR; recorded so it is a choice someone makes, not an option nobody knew about.
 - **A6** Record vinext's licence, maintenance posture, and abandonment exit stance.
-- **A7** Amend `architecture.md` §4 (**both** bullets — default-path *and* compat-gate) and `CLAUDE.md`
-  §2/§3/§9/§10 — **gated on Phase 5**.
+- **A7** Amend `architecture.md` §4 (**both** bullets — default-path *and* compat-gate), `CLAUDE.md`
+  §2/§3/§9/§10, **and ADR-0036 itself** — its `Status` line and its *"what is explicitly NOT
+  authorised: making `bun-exec` the default"* clause. This ADR's `Amends:` line already claims those,
+  so leaving ADR-0036 unedited at Phase 5 would make the claim false in the tree. **Gated on Phase 5.**
 - **A8** Name an owner for vinext upstream health.
 - **A9** Add `apk add libstdc++ libgcc` to the compiled image, with a test that the binary runs from a
   clean alpine — **strengthened**: a clean alpine alone is too weak, because #658's false green
@@ -674,7 +696,7 @@ first, then CLI**.
   > declared 'this check does not apply to this runtime'"*. So `check('g. next/image …', fn,
   > ['turbopack'])` satisfies "hard", passes the guard, emits a declared SKIP on the vinext lane, reds
   > nothing — and leaves the `next/image` ✅ row standing on a target where it is measured to fail
-  > 112×. That is not hypothetical: (g) is precisely the check that fails under vinext, so extending
+  > 112×. That is not hypothetical: (g) is precisely the check that fails under **unmodified** vinext (Consequence 1), so extending
   > the lane filter to the build axis is the **path of least resistance** at Phase 3(a), and the
   > existing comment reads as prior authorisation for it. Requirement (1) forbids it and (2) makes the
   > forbidding observable.
@@ -684,3 +706,9 @@ first, then CLI**.
   `.next/static` and `public/` into the standalone tree (`compat-smoke.mjs:~263`); that is
   Next-standalone-shaped and needs a `.output/public` branch for vinext.
 - **A11** Get a founder answer on the Phase 5 corpus-delta ceiling (Escalation 6). Blocks Phase 5.
+- **A12** Get a founder answer to **Escalation 2′** once Phase 3(d) reports — *does the flip stand if
+  the application is not bytecode-compiled?* **Blocks Phase 5.** Added 2026-08-05 because 2′ was
+  otherwise **orphaned**: Consequence 12 calls its finding "the single most decision-relevant fact on
+  the table" and it contradicts the founder's stated motive, yet nothing consumed the answer — Phase
+  3(d) produced the number and no gate read it, so Phase 5 could have passed with 2′ unanswered.
+  Mirrors A11/Escalation 6 deliberately.
