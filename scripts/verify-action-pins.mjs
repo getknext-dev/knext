@@ -351,11 +351,28 @@ export function runGit(args) {
       GIT_TERMINAL_PROMPT: '0',
       GIT_ASKPASS: '',
       GCM_INTERACTIVE: 'never',
-      // All three config scopes, not one: a credential in ANY of them
-      // de-anonymises the request identically.
+      // ALL FOUR config scopes, not one: a credential in ANY of them
+      // de-anonymises the request identically. Local is closed by the repo-less
+      // `cwd` above, system and global here — and `env` below, which is the one
+      // that outranks all three.
       GIT_CONFIG_NOSYSTEM: '1',
       GIT_CONFIG_SYSTEM: '/dev/null',
       GIT_CONFIG_GLOBAL: '/dev/null',
+      // The ENV scope — git's HIGHEST-PRECEDENCE config source, and the one the
+      // other three lines do not touch. MEASURED on git 2.51: both forms put an
+      // `http.…extraheader` into the supposedly anonymous request. Nothing on a
+      // GitHub runner sets these today, which is exactly the status the LOCAL
+      // scope had before #666 found it live in the one environment this targets.
+      GIT_CONFIG_COUNT: '0',
+      GIT_CONFIG_PARAMETERS: '',
+      // NOT config at all, and therefore untouched by everything above: git sets
+      // libcurl's `CURLOPT_NETRC` to OPTIONAL, so `~/.netrc` answers a 401
+      // challenge for the host. MEASURED against real github.com — a repo that
+      // does not exist is answered 401 rather than confirmed absent, and one
+      // `Authorization: Basic` header went out. Reachable from here: a private
+      // or deleted `uses:` repo challenges exactly this way. HOME has no config
+      // override, so redirecting it at the empty dir is the only lever.
+      HOME: cwd,
       // Discovery must not climb out of the empty directory and find a
       // repository above it (a temp dir nested under a checkout, say).
       GIT_CEILING_DIRECTORIES: cwd,
@@ -492,7 +509,8 @@ export function gitLsRemoteTag({
  * Returns one of:
  *   { kind: 'commit', sha, annotated, via? } — resolved (`via` names the git
  *                                              fallback when the API was blocked)
- *   { kind: 'tag-missing' }             — no such tag upstream (or it's a branch)
+ *   { kind: 'tag-missing', via? }       — no such tag upstream (or it's a branch);
+ *                                         `via` likewise names the fallback
  *   { kind: 'api-error', status, message }
  *   { kind: 'unexpected-object', type }
  */
@@ -586,7 +604,13 @@ export async function verifyPin(pin, { api = githubApi, lsRemote = gitLsRemoteTa
     api,
     lsRemote,
   });
-  if (resolved.kind === 'tag-missing') return { ...pin, reason: 'tag-missing', pinnedSha: pin.sha };
+  if (resolved.kind === 'tag-missing') {
+    // `via` must survive to the finding here too (#666 round 3). Dropping it
+    // made `formatFinding` render "refs/tags/X 404s" for a tag the API had
+    // 403'd and the FALLBACK could not find — a confident claim about the route
+    // that was never taken.
+    return { ...pin, reason: 'tag-missing', pinnedSha: pin.sha, via: resolved.via };
+  }
   if (resolved.kind === 'api-error') {
     return {
       ...pin,
@@ -836,7 +860,13 @@ export function formatFinding(finding) {
     case 'tag-missing':
       return [
         `${head}`,
-        `  claimed tag : ${finding.tag} — NOT FOUND upstream (refs/tags/${finding.tag} 404s)`,
+        // WHICH resolver failed to find it (#666 round 3). Saying "404s" when the
+        // API was BLOCKED and it was git that advertised nothing sends the reader
+        // to the wrong upstream. The verdict is red either way — only the triage
+        // story differs, and it has to be the true one.
+        finding.via === 'git-ls-remote'
+          ? `  claimed tag : ${finding.tag} — NOT FOUND upstream (\`git ls-remote\` advertised no\n                refs/tags/${finding.tag}; the GitHub API never answered — 403/451, e.g. an\n                organisation IP allow list — so this is the fallback's verdict)`
+          : `  claimed tag : ${finding.tag} — NOT FOUND upstream (refs/tags/${finding.tag} 404s)`,
         `  pinned SHA  : ${finding.pinnedSha}`,
         '  The tag was deleted, renamed, or never existed (a moving major like `v1`',
         '  is often a BRANCH, not a tag). The comment no longer documents anything.',

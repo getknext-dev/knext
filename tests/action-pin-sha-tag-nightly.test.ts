@@ -1186,6 +1186,57 @@ describe('nightly SHA↔tag resolution — org IP allow list (#640)', () => {
     expect(resolved).toMatchObject({ kind: 'tag-missing' });
   });
 
+  it('does not blame a 404 for a tag the FALLBACK could not find (#666 round 3)', async () => {
+    // `resolveTagCommit` set `via: 'git-ls-remote'` on the tag-missing branch,
+    // `verifyPin` dropped it, and `formatFinding`'s tag-missing case never read
+    // it — a dead field, and the rendering it would have corrected was wrong:
+    // "NOT FOUND upstream (refs/tags/X 404s)" when the API actually 403'd and it
+    // was git that returned an empty advertisement. Same confident-claim-from-
+    // the-wrong-route defect just fixed for `unreadable-listing`. The verdict is
+    // red either way; only the triage story was wrong.
+    const dir = mkdtempSync(join(tmpdir(), 'knext-pin-tagmissing-via-'));
+    writeFileSync(
+      join(dir, 'supply-chain.yml'),
+      [
+        'jobs:',
+        '  x:',
+        '    steps:',
+        `      - uses: aquasecurity/trivy-action@${SHA_B} # v0.36.0`,
+      ].join('\n'),
+    );
+    const findings = await verifyWorkflows({
+      dir,
+      api: fakeApi({ [TRIVY_REF]: IP_ALLOW_LIST_403 }).api,
+      lsRemote: fakeLsRemote({ kind: 'tag-missing' }).lsRemote,
+    });
+    expect(findings[0]).toMatchObject({ reason: 'tag-missing', via: 'git-ls-remote' });
+    const text = formatFinding(findings[0]);
+    expect(text, 'must not claim a 404 the API never returned').not.toMatch(/404/);
+    expect(text, 'must name the route that actually answered').toMatch(/ls-remote/);
+  });
+
+  it('still says 404 for a tag the API ITSELF reported missing', async () => {
+    // Both halves. The correction above must not relabel the ordinary case: when
+    // the API returned the 404, "404s" is the accurate story and there was no
+    // fallback to name.
+    const dir = mkdtempSync(join(tmpdir(), 'knext-pin-tagmissing-api-'));
+    writeFileSync(
+      join(dir, 'ci.yml'),
+      ['jobs:', '  x:', '    steps:', `      - uses: some/action@${SHA_B} # v1.2.3`].join('\n'),
+    );
+    const findings = await verifyWorkflows({
+      dir,
+      api: fakeApi({ 'repos/some/action/git/ref/tags/v1.2.3': { status: 404, body: {} } }).api,
+      lsRemote: () => {
+        throw new Error('the fallback must never be reached on a 404');
+      },
+    });
+    expect(findings[0]).toMatchObject({ reason: 'tag-missing' });
+    const text = formatFinding(findings[0]);
+    expect(text).toMatch(/404/);
+    expect(text, 'no fallback ran, so none may be named').not.toMatch(/ls-remote/);
+  });
+
   it('NEVER reaches for the fallback on any status other than 403/451', async () => {
     // The "both halves" scan. A fallback wired to a broader set of statuses
     // would quietly cover a real mismatch, a rate limit, or an outage on EVERY
@@ -1536,7 +1587,7 @@ describe('nightly SHA↔tag resolution — the fallback must be anonymous IN FAC
     cwd: string,
     args: string[],
     env: NodeJS.ProcessEnv = {},
-  ): { status: number; stdout: string } {
+  ): { status: number; stdout: string; stderr: string } {
     const source = `
       const m = await import(${JSON.stringify(pathToFileURL(SCRIPT).href)});
       console.log(JSON.stringify(m.runGit(${JSON.stringify(args)})));
@@ -1597,6 +1648,51 @@ describe('nightly SHA↔tag resolution — the fallback must be anonymous IN FAC
     );
   });
 
+  it('sees NO credential from the ENV config scope (GIT_CONFIG_COUNT / _PARAMETERS)', () => {
+    // The THIRD scope, and git's HIGHEST-PRECEDENCE one — it outranks local,
+    // global and system alike. `GIT_CONFIG_NOSYSTEM` + `GIT_CONFIG_SYSTEM` +
+    // `GIT_CONFIG_GLOBAL` + a repo-less cwd close the other three and touch this
+    // one not at all. MEASURED on git 2.51 against the round-2 resolver: BOTH
+    // forms below put an `http.…extraheader` into the supposedly anonymous
+    // request. Nothing on a GitHub runner sets these today, which is exactly the
+    // status the LOCAL scope had before #666 proved otherwise in the one
+    // environment this fallback targets.
+    const dir = mkdtempSync(join(tmpdir(), 'knext-pin-envconfig-'));
+    const KEY = 'http.https://github.com/.extraheader';
+
+    // Form 1: the counted key/value form.
+    const counted = {
+      GIT_CONFIG_COUNT: '1',
+      GIT_CONFIG_KEY_0: KEY,
+      GIT_CONFIG_VALUE_0: FIXTURE_HEADER,
+    };
+    expect(
+      runGitFrom(dir, ['config', '--list'], counted).stdout,
+      'a GIT_CONFIG_COUNT credential must not reach the anonymous fallback',
+    ).not.toMatch(/extraheader/i);
+
+    // Form 2: the serialised `-c` form git uses to pass config to subprocesses.
+    const params = { GIT_CONFIG_PARAMETERS: `'${KEY}'='${FIXTURE_HEADER}'` };
+    expect(
+      runGitFrom(dir, ['config', '--list'], params).stdout,
+      'a GIT_CONFIG_PARAMETERS credential must not reach the anonymous fallback',
+    ).not.toMatch(/extraheader/i);
+
+    // VACUITY CONTROL, one per form: a plain git in identical conditions MUST
+    // see each credential, or neither assertion above proves anything.
+    for (const [label, env] of [
+      ['GIT_CONFIG_COUNT', counted],
+      ['GIT_CONFIG_PARAMETERS', params],
+    ] as const) {
+      const plain = spawnSync('git', ['config', '--list'], {
+        cwd: dir,
+        encoding: 'utf8',
+        env: { ...process.env, ...env },
+      });
+      expect(plain.stdout, `control: an ordinary git DOES read ${label}`).toMatch(/extraheader/i);
+    }
+  });
+
   it('is not saved by the DEV machine happening to have no such config', () => {
     // Both halves, again: the guard above would pass on a laptop even with the
     // isolation removed IF the ambient config were clean. It is the fixture that
@@ -1606,6 +1702,56 @@ describe('nightly SHA↔tag resolution — the fallback must be anonymous IN FAC
     const plain = spawnSync('git', ['config', '--list'], { cwd: dir, encoding: 'utf8' });
     expect(plain.stdout, 'control: an ordinary git in this cwd DOES see it').toMatch(
       /extraheader/i,
+    );
+  });
+
+  it('does not run with a HOME whose `~/.netrc` could answer a challenge (#666 round 3)', () => {
+    // `~/.netrc` is NOT git config, so every guard above leaves it untouched:
+    // git sets `CURLOPT_NETRC` to OPTIONAL, and libcurl then answers a 401
+    // challenge from the netrc entry for that host. MEASURED against the round-2
+    // resolver on git 2.51 (real github.com, a repo that does not exist, which
+    // GitHub answers with a 401 rather than confirm non-existence): one
+    // `Authorization: Basic` header went out. The 403 fallback path can reach a
+    // challenged request — a private or deleted `uses:` repo does exactly that —
+    // so this is reachable, not theoretical.
+    //
+    // The only lever over netrc is HOME — libcurl resolves the file from it, and
+    // git exposes no config for it. So the property asserted here is that the
+    // resolver's git subprocess does NOT run with the ambient HOME.
+    //
+    // Asserted OFFLINE, and on the REAL subprocess rather than a constructed env
+    // object: `GIT_SSH_COMMAND` survives the `...process.env` spread, so pointing
+    // an `ssh://` remote at a command that echoes `$HOME` makes git itself report
+    // the HOME it actually ran with. No network, no loopback (`git-remote-http`
+    // cannot reach 127.0.0.1 under this repo's sandbox), and no dependency on
+    // whether the DEV machine happens to have a `~/.netrc`.
+    const ambientHome = mkdtempSync(join(tmpdir(), 'knext-pin-netrc-home-'));
+    writeFileSync(join(ambientHome, '.netrc'), 'machine github.com login do-not-use password x\n', {
+      mode: 0o600,
+    });
+    const probe = { GIT_SSH_COMMAND: "sh -c 'echo OBSERVED_HOME=$HOME >&2; exit 1'" };
+    const argv = ['ls-remote', 'ssh://github.com/getknext-dev/knext'];
+
+    const seen = runGitFrom(ambientHome, argv, { ...probe, HOME: ambientHome });
+    expect(
+      seen.stderr,
+      'the anonymous fallback must not run with a HOME that has a ~/.netrc in it',
+    ).not.toContain(`OBSERVED_HOME=${ambientHome}`);
+    expect(seen.stderr, 'git must still have reported the HOME it ran with').toMatch(
+      /OBSERVED_HOME=/,
+    );
+
+    // VACUITY CONTROL: an ordinary git, same cwd, same env, MUST report the
+    // ambient HOME — otherwise the assertion above passes for the wrong reason
+    // (e.g. GIT_SSH_COMMAND never fired and the stderr was empty either way).
+    const plain = spawnSync('git', argv, {
+      cwd: ambientHome,
+      encoding: 'utf8',
+      timeout: 30_000,
+      env: { ...process.env, ...probe, HOME: ambientHome },
+    });
+    expect(plain.stderr, 'control: an ordinary git DOES run with the ambient HOME').toContain(
+      `OBSERVED_HOME=${ambientHome}`,
     );
   });
 });
