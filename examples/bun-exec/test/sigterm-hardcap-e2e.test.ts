@@ -43,10 +43,13 @@ const CONTRACT_SRC = resolve(__dirname, '../runtime-contract.mjs');
 // never resolves — so a graceful close CANNOT drain it and only the cap can exit.
 const SRVX_HARNESS = resolve(__dirname, 'srvx-close-harness.mjs');
 
-// Ports distinct from runtime-contract.test.ts's (39287/39291) so the two files
-// can run in one vitest invocation without EADDRINUSE.
-const PORT = 39388;
-const METRICS_PORT = 39392;
+// PORTS ARE OS-ASSIGNED, NEVER LITERAL (#678). These used to be literals "distinct
+// from runtime-contract.test.ts's" — which only deconflicted OUR OWN files and did
+// nothing about the real collision: two CI jobs on one runner (how the node-side
+// sibling gate flaked with `EADDRINUSE :::39188` on PR #676). The harness binds
+// what the OS gives it and prints `LISTENING:<port> METRICS:<port>`, so the spec
+// reads the ports back instead of assuming them.
+const EPHEMERAL = '0';
 // Short cap so the e2e is fast, but long enough that "exited at the cap" is
 // distinguishable from "exited immediately" given process-spawn jitter.
 const GRACE_MS = 2500;
@@ -127,8 +130,8 @@ function spawnHarness(extraEnv: Record<string, string> = {}) {
   return spawn('bun', [SRVX_HARNESS], {
     env: {
       ...process.env,
-      PORT: String(PORT),
-      METRICS_PORT: String(METRICS_PORT),
+      PORT: EPHEMERAL,
+      METRICS_PORT: EPHEMERAL,
       CACHE_INVALIDATE_TOKEN: 'test-invalidate-token',
       ...extraEnv,
     },
@@ -136,7 +139,11 @@ function spawnHarness(extraEnv: Record<string, string> = {}) {
   });
 }
 
-function waitForListening(proc: ReturnType<typeof spawn>): Promise<void> {
+// Returns the app port the harness ACTUALLY bound (PORT=0 → the OS picks it).
+// It must still fail LOUDLY on a real startup failure: a harness that exits early
+// or never announces rejects here — never hangs to the vitest timeout, never skips
+// (the green-by-skip class closed in #408/#448/#659).
+function waitForListeningPort(proc: ReturnType<typeof spawn>): Promise<number> {
   return new Promise((resolvePromise, reject) => {
     const timeout = setTimeout(
       () => reject(new Error(`harness never listened. stderr:\n${stderr}`)),
@@ -149,9 +156,10 @@ function waitForListening(proc: ReturnType<typeof spawn>): Promise<void> {
     });
     proc.stdout?.on('data', (d: Buffer) => {
       buf += d.toString();
-      if (buf.includes(`LISTENING:${PORT}`)) {
+      const m = buf.match(/LISTENING:(\d+)/);
+      if (m) {
         clearTimeout(timeout);
-        resolvePromise();
+        resolvePromise(Number(m[1]));
       }
     });
     proc.once('exit', (code) => {
@@ -170,12 +178,13 @@ describe.skipIf(!bunAvailable)(
       child.stdout?.on('data', (d: Buffer) => {
         stdout += d.toString();
       });
-      await waitForListening(child);
+      const port = await waitForListeningPort(child);
+      expect(port).toBeGreaterThan(0);
       expect(child.exitCode).toBeNull();
 
       // A genuinely hung request over a real socket: `/hang` awaits a promise
       // that never settles, so srvx's graceful `close()` can never resolve.
-      const hung = fetch(`http://127.0.0.1:${PORT}/hang`).catch(() => 'errored');
+      const hung = fetch(`http://127.0.0.1:${port}/hang`).catch(() => 'errored');
       await new Promise((r) => setTimeout(r, 300)); // let it be accepted
 
       const t0 = Date.now();

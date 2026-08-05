@@ -11,6 +11,12 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 
+// Shared port plumbing (#678). waitForListeningPort REJECTS — promptly, with the
+// child's stderr — when the runtime entry exits early or never announces a port,
+// so swapping a fixed port for discovery cannot turn a real boot failure into a
+// hang or a skip. Its own guard: apps/file-manager/child-ports.test.ts.
+import { waitForListeningPort } from './e2e-support/child-ports';
+
 /**
  * SHIPPED-PATH SIGTERM HARD-CAP (force-kill / safety-net) e2e for the knext
  * runtime entry.
@@ -64,12 +70,21 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const APP_DIR = __dirname;
 const IGNORE_SERVER = resolve(__dirname, '__fixtures__/ignore-sigterm-standalone-server.mjs');
 
-const PORT = 39188; // distinct from the drain e2e's port to avoid collisions
-// Distinct metrics port too: the drain e2e binds the default 9091. Without this
-// override, running both files in one vitest invocation makes the second runtime
-// entry die with EADDRINUSE on 9091 (the runtime exits early → nondeterministic).
-// METRICS_PORT is a real production knob in node-server.ts (default 9091).
-const METRICS_PORT = 9092;
+// PORTS ARE OS-ASSIGNED, NEVER LITERAL (#678). This file used to pin 39188/9092
+// "to avoid collisions" with the drain e2e — which fixed collisions between OUR
+// two files and did nothing about the real one: two CI jobs on the same runner.
+// That is exactly how this gate failed on PR #676 (`EADDRINUSE :::39188`) and then
+// passed unchanged on re-run. Both ports are now 0:
+//   - PORT=0 → the fixture binds an OS-assigned port and reports it on stdout; the
+//     spec reads it back (waitForListeningPort) instead of assuming it.
+//   - METRICS_PORT=0 → the supervisor's Prometheus sidecar takes an OS-assigned
+//     port too. Nothing here scrapes it, so it needs no readback; it only must not
+//     collide (the drain e2e, which DOES scrape, reserves one via freePort()).
+// Note the supervisor's child-readiness TCP probe (waitForChildServing) reads $PORT
+// and so cannot connect to "0" — its deferred init lands via its own deadline
+// instead. Nothing in this file asserts on that path (no scrape, no metrics
+// assertion); the drain e2e is where the metrics sidecar is proven.
+const EPHEMERAL = '0';
 const GRACE_MS = 3000; // SHORT hard cap so the e2e is fast (default is 25s)
 
 // The CMD specifier the container boots — the EXACT string from the Dockerfile.
@@ -153,7 +168,7 @@ afterAll(() => {
 
 // The runtime entry SPAWNS the fixture as a grandchild. We launch it `detached`
 // in its own process group so teardown can SIGKILL the WHOLE group — otherwise
-// the ignore-SIGTERM fixture keeps the metrics port (9091) bound and the next
+// the ignore-SIGTERM fixture keeps its listening sockets bound and the next
 // case dies with EADDRINUSE.
 async function killTree(): Promise<void> {
   const proc = child;
@@ -190,41 +205,14 @@ function spawnShippedRuntime(extraEnv: Record<string, string>): ReturnType<typeo
   return spawn('node', ['-e', RUNTIME_IMPORT], {
     cwd: runnerRoot,
     env: childEnv({
-      PORT: String(PORT),
-      METRICS_PORT: String(METRICS_PORT), // distinct from the drain e2e's 9091
+      PORT: EPHEMERAL, // OS-assigned; the fixture reports what it got (#678)
+      METRICS_PORT: EPHEMERAL, // OS-assigned; nothing here scrapes it
       STANDALONE_SERVER_PATH: IGNORE_SERVER,
       STORAGE_BUCKET: '', // disable image-cache sync side effects
       ...extraEnv,
     }),
     detached: true, // own group so teardown can reap the grandchild fixture
     stdio: ['ignore', 'pipe', 'pipe'],
-  });
-}
-
-function waitForListening(proc: ReturnType<typeof spawn>): Promise<void> {
-  return new Promise((resolvePromise, reject) => {
-    const timeout = setTimeout(
-      () => reject(new Error(`runtime never reported LISTENING. stderr:\n${stderr}`)),
-      25_000,
-    );
-    let buf = '';
-    let stderr = '';
-    proc.stderr?.on('data', (d: Buffer) => {
-      stderr += d.toString();
-    });
-    proc.stdout?.on('data', (d: Buffer) => {
-      buf += d.toString();
-      if (buf.includes(`LISTENING:${PORT}`)) {
-        clearTimeout(timeout);
-        resolvePromise();
-      }
-    });
-    proc.once('exit', (code) => {
-      clearTimeout(timeout);
-      reject(
-        new Error(`runtime entry exited early (code ${code}) before listening. stderr:\n${stderr}`),
-      );
-    });
   });
 }
 
@@ -238,7 +226,10 @@ describe('SIGTERM hard-cap e2e (SHIPPED bundle): runtime entry force-exits at gr
         stdout += d.toString();
       });
 
-      await waitForListening(child);
+      // Discovery, not assumption: the port comes from the fixture's own socket.
+      // A runtime entry that fails to boot rejects here rather than hanging.
+      const port = await waitForListeningPort(child, { label: 'runtime entry' });
+      expect(port).toBeGreaterThan(0);
       expect(child.exitCode).toBeNull(); // booted & running
 
       // SIGTERM the runtime entry and start the clock. The forwarded SIGTERM hits

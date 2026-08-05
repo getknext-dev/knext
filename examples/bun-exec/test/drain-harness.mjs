@@ -19,8 +19,11 @@ import {
   renderMetrics,
 } from '../runtime-contract.mjs';
 
-const PORT = Number(process.env.PORT ?? 3000);
-const METRICS_PORT = Number(process.env.METRICS_PORT ?? 9091);
+// 0 → the OS assigns a free port (#678). A fixed fallback is how two concurrent
+// CI jobs on one runner collide; the LISTENING line below reports what was
+// actually bound, so the spec never has to assume.
+const PORT = Number(process.env.PORT ?? 0);
+const METRICS_PORT = Number(process.env.METRICS_PORT ?? 0);
 const GRACE_MS = Number(process.env.SHUTDOWN_GRACE_MS ?? 25_000);
 
 const metrics = createMetricsState();

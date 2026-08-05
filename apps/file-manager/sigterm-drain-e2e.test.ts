@@ -11,6 +11,13 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 
+// Shared port plumbing (#678). waitForListeningPort REJECTS — promptly, with the
+// child's stderr — when the runtime entry exits early (the MODULE_NOT_FOUND
+// regression this file exists for) or never announces a port, so swapping a fixed
+// port for discovery cannot turn a real boot failure into a hang or a skip. Its
+// own guard: apps/file-manager/child-ports.test.ts.
+import { freePort, waitForListeningPort } from './e2e-support/child-ports';
+
 /**
  * SHIPPED-PATH SIGTERM-drain e2e for the knext runtime entry.
  *
@@ -62,8 +69,23 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const APP_DIR = __dirname;
 const SLOW_SERVER = resolve(__dirname, '__fixtures__/slow-standalone-server.mjs');
 
-const PORT = 39187; // unlikely-to-collide test port
-const METRICS_PORT = 9091;
+// PORTS ARE OS-ASSIGNED, NEVER LITERAL (#678). "Unlikely to collide" is not the
+// same as "cannot collide": this gate failed on PR #676 with `EADDRINUSE :::39188`
+// (the hard-cap e2e's twin of the port that used to live here) and passed on a
+// re-run, and #673 turned CI on for stacked PRs so concurrent jobs are now more
+// common, not less.
+//
+// Two mechanisms, because the two ports differ in one respect only — whether the
+// process that binds echoes the port back:
+//   - The app port has a readback channel: PORT=0, the fixture binds what the OS
+//     gives it and prints `LISTENING:<port>`, and the spec reads that. No window
+//     in which anything could take the port between choosing and binding.
+//   - The supervisor's METRICS_PORT does not: it is bound by the runtime entry
+//     itself and echoed only into a pino log whose FORMAT differs between
+//     production (JSON) and dev (pino-pretty), which is too brittle to parse. So
+//     it gets an OS-assigned reservation via freePort() — the same approach the
+//     alpine docker e2e already uses for its `--publish` host ports.
+const EPHEMERAL = '0';
 
 // The CMD specifier the container boots — the EXACT string from the Dockerfile.
 const RUNTIME_IMPORT = "import('@getknext/core/internal/node-server')";
@@ -104,6 +126,9 @@ if (requireStandalone && skipReason !== null) {
 // Assembled once: an isolated runner mirroring the Dockerfile runner stage.
 let runnerRoot: string | undefined;
 let child: ReturnType<typeof spawn> | undefined;
+// Reserved per-case (see afterEach/spawn) so a re-spawn never reuses a port the
+// previous, still-dying supervisor holds.
+let metricsPort = 0;
 
 function childEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
   // The runtime entry is plain Node; clear any harness NODE_OPTIONS preload so
@@ -159,7 +184,7 @@ afterAll(() => {
 
 // The runtime entry SPAWNS the fixture server as a grandchild. We launch it in
 // its own process group (`detached`) so teardown can SIGKILL the WHOLE group —
-// otherwise an orphaned fixture keeps the fixed metrics port (9091) bound and the
+// otherwise an orphaned fixture keeps its OS-assigned ports bound and the
 // next case dies with EADDRINUSE. Wait for the ports to actually free before the
 // next case runs.
 async function killTree(): Promise<void> {
@@ -177,7 +202,7 @@ async function killTree(): Promise<void> {
       }
     }
   }
-  // Give the OS a moment to release the bound ports (3000-range + 9091).
+  // Give the OS a moment to release the bound (OS-assigned) ports.
   await new Promise((r) => setTimeout(r, 500));
 }
 
@@ -190,11 +215,16 @@ afterEach(async () => {
  * entry by its published package specifier (NOT the dist file path), so the test
  * proves resolution from the shipped bundle, not the source tree.
  */
-function spawnShippedRuntime(extraEnv: Record<string, string>): ReturnType<typeof spawn> {
+async function spawnShippedRuntime(
+  extraEnv: Record<string, string>,
+): Promise<ReturnType<typeof spawn>> {
+  // Reserved fresh per spawn: the metrics port has no readback channel (#678).
+  metricsPort = await freePort();
   return spawn('node', ['-e', RUNTIME_IMPORT], {
     cwd: runnerRoot,
     env: childEnv({
-      PORT: String(PORT),
+      PORT: EPHEMERAL, // OS-assigned; the fixture reports what it got (#678)
+      METRICS_PORT: String(metricsPort),
       STANDALONE_SERVER_PATH: SLOW_SERVER,
       STORAGE_BUCKET: '', // disable image-cache sync side effects
       ...extraEnv,
@@ -208,35 +238,6 @@ function spawnShippedRuntime(extraEnv: Record<string, string>): ReturnType<typeo
   });
 }
 
-function waitForListening(proc: ReturnType<typeof spawn>): Promise<void> {
-  return new Promise((resolvePromise, reject) => {
-    const timeout = setTimeout(
-      () => reject(new Error(`runtime never reported LISTENING. stderr:\n${stderr}`)),
-      25_000,
-    );
-    let buf = '';
-    let stderr = '';
-    proc.stderr?.on('data', (d: Buffer) => {
-      stderr += d.toString();
-    });
-    proc.stdout?.on('data', (d: Buffer) => {
-      buf += d.toString();
-      if (buf.includes(`LISTENING:${PORT}`)) {
-        clearTimeout(timeout);
-        resolvePromise();
-      }
-    });
-    proc.once('exit', (code) => {
-      clearTimeout(timeout);
-      reject(
-        new Error(
-          `runtime entry exited early (code ${code}) before listening. ` + `stderr:\n${stderr}`,
-        ),
-      );
-    });
-  });
-}
-
 describe('SIGTERM drain e2e (SHIPPED bundle): knext runtime entry drains in-flight requests', () => {
   it.skipIf(skipReason !== null)(
     'resolves the runtime entry from the shipped standalone bundle (no MODULE_NOT_FOUND)',
@@ -246,8 +247,9 @@ describe('SIGTERM drain e2e (SHIPPED bundle): knext runtime entry drains in-flig
       // Booting it and reaching LISTENING proves the specifier + prom-client +
       // pino all resolve from the bundle. A MODULE_NOT_FOUND would surface as an
       // early exit here and FAIL (not skip) this test.
-      child = spawnShippedRuntime({});
-      await waitForListening(child);
+      child = await spawnShippedRuntime({});
+      const port = await waitForListeningPort(child, { label: 'runtime entry' });
+      expect(port).toBeGreaterThan(0);
       expect(child.exitCode).toBeNull(); // still running → resolved & booted
       child.kill('SIGTERM');
     },
@@ -258,15 +260,16 @@ describe('SIGTERM drain e2e (SHIPPED bundle): knext runtime entry drains in-flig
     'completes an in-flight request after SIGTERM and exits cleanly',
     async () => {
       let stdout = '';
-      child = spawnShippedRuntime({ SHUTDOWN_GRACE_MS: '10000' });
+      child = await spawnShippedRuntime({ SHUTDOWN_GRACE_MS: '10000' });
       child.stdout?.on('data', (d: Buffer) => {
         stdout += d.toString();
       });
 
-      await waitForListening(child);
+      const port = await waitForListeningPort(child, { label: 'runtime entry' });
 
-      // Fire a slow in-flight request; do NOT await it yet.
-      const inFlight = fetch(`http://127.0.0.1:${PORT}/slow`).then((r) => r.text());
+      // Fire a slow in-flight request; do NOT await it yet. The port is the one
+      // the fixture's socket actually got — never an assumed constant.
+      const inFlight = fetch(`http://127.0.0.1:${port}/slow`).then((r) => r.text());
 
       // Let the request be accepted, then SIGTERM the runtime entry.
       await new Promise((r) => setTimeout(r, 300));
@@ -296,10 +299,12 @@ describe('SIGTERM drain e2e (SHIPPED bundle): knext runtime entry drains in-flig
   it.skipIf(skipReason !== null)(
     'serves the Prometheus metrics sidecar while the runtime entry is up',
     async () => {
-      child = spawnShippedRuntime({});
-      await waitForListening(child);
+      child = await spawnShippedRuntime({});
+      await waitForListeningPort(child, { label: 'runtime entry' });
 
-      const res = await fetch(`http://127.0.0.1:${METRICS_PORT}/metrics`);
+      // metricsPort was RESERVED for this spawn (freePort), so it is known without
+      // parsing a log — but it is still OS-assigned, never a literal.
+      const res = await fetch(`http://127.0.0.1:${metricsPort}/metrics`);
       expect(res.status).toBe(200);
       const text = await res.text();
       expect(text).toMatch(/process_cpu|nodejs_/); // default metrics present

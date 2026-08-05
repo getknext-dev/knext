@@ -386,8 +386,12 @@ const bunAvailable =
   spawnSync('bun', ['--version'], {
     encoding: 'utf8',
   }).status === 0;
-const PORT = 39287;
-const METRICS_PORT = 39291;
+// PORTS ARE OS-ASSIGNED, NEVER LITERAL (#678). Literals here deconflicted only our
+// own files; the collision that actually bit was two CI jobs on one runner
+// (`EADDRINUSE :::39188` on PR #676). The harnesses print
+// `LISTENING:<port> METRICS:<port>` from the sockets they actually bound, so every
+// case reads both ports back rather than assuming them.
+const EPHEMERAL = '0';
 const TOKEN = 'test-invalidate-token';
 
 let child: ReturnType<typeof spawn> | undefined;
@@ -409,8 +413,8 @@ function spawnHarness(extraEnv: Record<string, string> = {}, harness: string = H
   const proc = spawn('bun', [harness], {
     env: {
       ...process.env,
-      PORT: String(PORT),
-      METRICS_PORT: String(METRICS_PORT),
+      PORT: EPHEMERAL,
+      METRICS_PORT: EPHEMERAL,
       CACHE_INVALIDATE_TOKEN: TOKEN,
       ...extraEnv,
     },
@@ -419,7 +423,18 @@ function spawnHarness(extraEnv: Record<string, string> = {}, harness: string = H
   return proc;
 }
 
-function waitForListening(proc: ReturnType<typeof spawn>): Promise<void> {
+/**
+ * Both ports the harness ACTUALLY bound, parsed from its
+ * `LISTENING:<port> METRICS:<port>` line (#678 — with PORT/METRICS_PORT=0 the OS
+ * assigns them, so this line is the only source of truth).
+ *
+ * It must still fail LOUDLY on a real startup failure: a harness that exits early
+ * or never announces rejects here, with stderr — never hangs to the vitest
+ * timeout, never skips (the green-by-skip class closed in #408/#448/#659).
+ */
+function waitForListeningPorts(
+  proc: ReturnType<typeof spawn>,
+): Promise<{ port: number; metricsPort: number }> {
   return new Promise((resolvePromise, reject) => {
     const timeout = setTimeout(
       () => reject(new Error(`harness never listened. stderr:\n${stderr}`)),
@@ -432,38 +447,10 @@ function waitForListening(proc: ReturnType<typeof spawn>): Promise<void> {
     });
     proc.stdout?.on('data', (d: Buffer) => {
       buf += d.toString();
-      if (buf.includes(`LISTENING:${PORT}`)) {
-        clearTimeout(timeout);
-        resolvePromise();
-      }
-    });
-    proc.once('exit', (code) => {
-      clearTimeout(timeout);
-      reject(new Error(`harness exited early (${code}). stderr:\n${stderr}`));
-    });
-  });
-}
-
-// Like waitForListening but returns the app port parsed from the LISTENING line —
-// used to exercise the PORT=0 ephemeral path (#467), where the reported port comes
-// from srvx's OS-resolved `.bun.server.port`, the one internal we still read.
-function waitForListeningPort(proc: ReturnType<typeof spawn>): Promise<number> {
-  return new Promise((resolvePromise, reject) => {
-    const timeout = setTimeout(
-      () => reject(new Error(`harness never listened. stderr:\n${stderr}`)),
-      15000,
-    );
-    let stderr = '';
-    let buf = '';
-    proc.stderr?.on('data', (d: Buffer) => {
-      stderr += d.toString();
-    });
-    proc.stdout?.on('data', (d: Buffer) => {
-      buf += d.toString();
-      const m = buf.match(/LISTENING:(\d+) /);
+      const m = buf.match(/LISTENING:(\d+) METRICS:(\d+)/);
       if (m) {
         clearTimeout(timeout);
-        resolvePromise(Number(m[1]));
+        resolvePromise({ port: Number(m[1]), metricsPort: Number(m[2]) });
       }
     });
     proc.once('exit', (code) => {
@@ -478,10 +465,10 @@ describe.skipIf(!bunAvailable)(
   () => {
     it('completes an in-flight /slow request after SIGTERM and exits 0', async () => {
       child = spawnHarness({ SHUTDOWN_GRACE_MS: '10000' });
-      await waitForListening(child);
+      const { port } = await waitForListeningPorts(child);
 
       const started = Date.now();
-      const inFlight = fetch(`http://127.0.0.1:${PORT}/slow`).then((r) => r.text());
+      const inFlight = fetch(`http://127.0.0.1:${port}/slow`).then((r) => r.text());
       // let the request be accepted, then SIGTERM mid-flight
       await new Promise((r) => setTimeout(r, 400));
       child.kill('SIGTERM');
@@ -497,11 +484,11 @@ describe.skipIf(!bunAvailable)(
       expect(exitCode).toBe(0);
     }, 30000);
 
-    it('serves a valid Prometheus exposition on :9091 while up', async () => {
+    it('serves a valid Prometheus exposition on its metrics port while up', async () => {
       child = spawnHarness();
-      await waitForListening(child);
+      const { metricsPort } = await waitForListeningPorts(child);
 
-      const res = await fetch(`http://127.0.0.1:${METRICS_PORT}/metrics`);
+      const res = await fetch(`http://127.0.0.1:${metricsPort}/metrics`);
       expect(res.status).toBe(200);
       expect(res.headers.get('content-type')).toMatch(/version=0\.0\.4/);
       const text = await res.text();
@@ -513,20 +500,20 @@ describe.skipIf(!bunAvailable)(
 
     it('401s /api/cache/invalidate without a token, 200s with it', async () => {
       child = spawnHarness();
-      await waitForListening(child);
+      const { port } = await waitForListeningPorts(child);
 
-      const unauth = await fetch(`http://127.0.0.1:${PORT}/api/cache/invalidate`, {
+      const unauth = await fetch(`http://127.0.0.1:${port}/api/cache/invalidate`, {
         method: 'POST',
       });
       expect(unauth.status).toBe(401);
 
-      const wrong = await fetch(`http://127.0.0.1:${PORT}/api/cache/invalidate`, {
+      const wrong = await fetch(`http://127.0.0.1:${port}/api/cache/invalidate`, {
         method: 'POST',
         headers: { authorization: 'Bearer nope' },
       });
       expect(wrong.status).toBe(401);
 
-      const ok = await fetch(`http://127.0.0.1:${PORT}/api/cache/invalidate`, {
+      const ok = await fetch(`http://127.0.0.1:${port}/api/cache/invalidate`, {
         method: 'POST',
         headers: { authorization: `Bearer ${TOKEN}` },
       });
@@ -546,10 +533,10 @@ describe.skipIf(!bunAvailable)(
 describe.skipIf(!bunAvailable)('bun-exec entry e2e (REAL srvx close): drain + hardcap', () => {
   it('srvx close() drains an in-flight /slow request on SIGTERM and exits 0', async () => {
     child = spawnHarness({ SHUTDOWN_GRACE_MS: '10000' }, SRVX_HARNESS);
-    await waitForListening(child);
+    const { port } = await waitForListeningPorts(child);
 
     const started = Date.now();
-    const inFlight = fetch(`http://127.0.0.1:${PORT}/slow`).then((r) => r.text());
+    const inFlight = fetch(`http://127.0.0.1:${port}/slow`).then((r) => r.text());
     await new Promise((r) => setTimeout(r, 400)); // land SIGTERM mid-flight
     child.kill('SIGTERM');
 
@@ -567,11 +554,11 @@ describe.skipIf(!bunAvailable)('bun-exec entry e2e (REAL srvx close): drain + ha
 
   it('srvx close(true) force-exits 1 when an in-flight request exceeds the hardcap', async () => {
     child = spawnHarness({ SHUTDOWN_GRACE_MS: '800' }, SRVX_HARNESS);
-    await waitForListening(child);
+    const { port } = await waitForListeningPorts(child);
 
     // /hang never resolves, so graceful srvx close() cannot drain it; the
     // hardcap must fire close(true) (force) and exit 1.
-    const hung = fetch(`http://127.0.0.1:${PORT}/hang`).catch(() => 'errored');
+    const hung = fetch(`http://127.0.0.1:${port}/hang`).catch(() => 'errored');
     await new Promise((r) => setTimeout(r, 300));
     child.kill('SIGTERM');
 
@@ -584,11 +571,14 @@ describe.skipIf(!bunAvailable)('bun-exec entry e2e (REAL srvx close): drain + ha
   }, 30000);
 
   it('PORT=0 resolves the ephemeral port via srvx and serves on it', async () => {
-    // The one path still reading srvx's internal `.bun.server.port`: with PORT=0
-    // the OS assigns the port, so `appServer.port` falls back to the srvx-resolved
-    // value. This pins that fallback so an srvx internal-shape change is caught.
+    // Since #678 EVERY case in this file runs with PORT=0, so the srvx-resolved
+    // `.bun.server.port` fallback is on the common path rather than exercised only
+    // here. This case is still the one that PINS it explicitly: it sets PORT=0
+    // itself (not via the shared default) and asserts the reported port actually
+    // serves, so an srvx internal-shape change is caught by a named test rather
+    // than by every other case going mysteriously red.
     child = spawnHarness({ PORT: '0', METRICS_PORT: '0' }, SRVX_HARNESS);
-    const port = await waitForListeningPort(child);
+    const { port } = await waitForListeningPorts(child);
     expect(port).toBeGreaterThan(0);
 
     const r = await fetch(`http://127.0.0.1:${port}/api/health`);

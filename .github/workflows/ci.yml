@@ -345,9 +345,13 @@ jobs:
           # Converts the skipIf guard into a HARD failure if the build is missing,
           # so a green check genuinely proves BOTH the graceful-drain path
           # (sigterm-drain-e2e) and the force-kill hard-cap safety net
-          # (sigterm-hardcap-e2e). Both boot the shipped runtime entry; the drain
-          # e2e binds the default metrics port 9091 and the hard-cap e2e overrides
-          # METRICS_PORT=9092, so they coexist in one invocation without EADDRINUSE.
+          # (sigterm-hardcap-e2e). Both boot the shipped runtime entry, and since
+          # #678 every port either of them binds is OS-assigned (PORT=0 with the
+          # port read back off the fixture's own socket; the metrics port reserved
+          # via freePort). They therefore coexist in one invocation — and, unlike
+          # the old hand-deconflicted 9091/9092 literals, with any OTHER job that
+          # happens to share this runner. That collision is what made this gate
+          # flake with `EADDRINUSE :::39188` on PR #676.
           KNEXT_REQUIRE_STANDALONE: '1'
         run: >-
           pnpm exec vitest run
