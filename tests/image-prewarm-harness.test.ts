@@ -1020,9 +1020,53 @@ describe('every value interpolated into the nodesh pod spec is validated (E3)', 
    *
    * A construct the scan cannot validate is REJECTED OUTRIGHT rather than
    * ignored — the only answer that does not silently narrow the guarantee.
+   *
+   * …and this check was ITSELF an enumeration until #662 — of the opaque forms
+   * someone thought of. It listed `\$[0-9@*#?]`, which sees `$1` but NOT `${1}`,
+   * the same parameter written the other legal way and equally caller-controlled
+   * after a `shift`. `$$`, `$!` and `${#VAR}` were missed too. That was the THIRD
+   * instance of this shape in one file (first the variables, then the syntaxes,
+   * then the positional forms), so it is no longer fixed by adding a form:
+   *
+   *   the check now enumerates what the `$VAR` scan below CAN validate — `$NAME`,
+   *   `${NAME}`, `${NAME:-d}` and the other `:-`/`:=`/`:+`/`:?` defaults — and
+   *   flags EVERY other `$`-introduced construct plus every backtick, whether or
+   *   not anyone has thought of it. An unlisted form now fails closed instead of
+   *   passing silently, which is the half an enumeration of dangers cannot have.
+   *
+   * Deliberately flagged even though inert: `${VAR##…}` / `${VAR/…/…}` and a
+   * backslash-escaped literal `\$`. The `$VAR` scan below matches a bare variable
+   * name out of all three, so letting them through would let it demand — or
+   * believe it had — a guard over a value it is not actually seeing.
    */
-  const opaqueInterpolations = (text: string): string[] =>
-    [...text.matchAll(/\$\(|`|\$[0-9@*#?]/g)].map((m) => m[0]);
+  const VALIDATABLE_INTERPOLATION =
+    /^\$(?:[A-Za-z_][A-Za-z0-9_]*|\{[A-Za-z_][A-Za-z0-9_]*(?::?[-=+?][^{}]*)?\})/;
+
+  const opaqueInterpolations = (text: string): string[] => {
+    const found: string[] = [];
+    let consumedTo = 0;
+    for (const m of text.matchAll(/[`$]/g)) {
+      const at = m.index;
+      if (at < consumedTo) continue; // the second `$` of an already-reported `$$`
+      if (m[0] === '`') {
+        found.push('`');
+        continue;
+      }
+      const rest = text.slice(at);
+      if (text[at - 1] === '\\') {
+        found.push('\\$');
+        consumedTo = at + 1;
+        continue;
+      }
+      if (VALIDATABLE_INTERPOLATION.test(rest)) continue;
+      // Report the construct's opening shape — `$(`, `$1`, `$$`, `${1`, `${#` —
+      // so the failure names the syntax rather than just the offending line.
+      const shape = rest.slice(0, /^\$\{./.test(rest) ? 3 : 2);
+      found.push(shape);
+      consumedTo = at + shape.length;
+    }
+    return found;
+  };
 
   it('interpolation the scan CANNOT see is rejected outright, not ignored', () => {
     expect(
@@ -1042,6 +1086,29 @@ describe('every value interpolated into the nodesh pod spec is validated (E3)', 
     expect(opaqueInterpolations('  ttlSecondsAfterFinished: $((60 * 2))')).toEqual(['$(']);
     expect(opaqueInterpolations('  nodeName: $1')).toEqual(['$1']);
     expect(opaqueInterpolations('  name: $NAME-${NS}-${X:-d}')).toEqual([]);
+
+    // The BRACED positional — caller-controlled after a `shift`, and the form the
+    // enumeration `\$[0-9@*#?]` missed for exactly as long as it was an enumeration.
+    expect(opaqueInterpolations('  nodeName: ${1}')).toEqual(['${1']);
+    expect(opaqueInterpolations('  nodeName: ${11}')).toEqual(['${1']);
+    expect(opaqueInterpolations('  nodeName: ${@}')).toEqual(['${@']);
+    // …and the forms nobody listed, which is the point: the scan does not decide
+    // whether a construct is dangerous, only whether it can VALIDATE it.
+    expect(opaqueInterpolations('  nodeName: $$')).toEqual(['$$']);
+    expect(opaqueInterpolations('  nodeName: $!')).toEqual(['$!']);
+    expect(opaqueInterpolations('  nodeName: ${#NS}')).toEqual(['${#']);
+    expect(opaqueInterpolations('  nodeName: ${NS##*/}')).toEqual(['${N']);
+    expect(opaqueInterpolations('  nodeName: ${NS/x/y}')).toEqual(['${N']);
+    expect(opaqueInterpolations('  nodeName: $')).toEqual(['$']);
+    // Inert, but the `$VAR` scan below reads `NAME` out of it, so it may not pass
+    // silently — it would demand a guard for a variable that is never expanded.
+    expect(opaqueInterpolations('  nodeName: \\$NAME')).toEqual(['\\$']);
+
+    // …and the legitimate forms stay legitimate, singly and together.
+    expect(opaqueInterpolations('  name: $NAME')).toEqual([]);
+    expect(opaqueInterpolations('  namespace: ${NS}')).toEqual([]);
+    expect(opaqueInterpolations('  image: ${X:-d}')).toEqual([]);
+    expect(opaqueInterpolations('  x: ${X:=d} ${X:+d} ${X:?d} ${X-d}')).toEqual([]);
   });
 
   /** A value that ends the current YAML line and starts a key of its own. */
