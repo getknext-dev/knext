@@ -919,10 +919,11 @@ jobs:
         working-directory: examples/bun-exec
         run: bun install --frozen-lockfile
 
-      # The suite compiles the binary itself (via ./build.sh) if it is absent,
-      # so a green run can never be a stale artifact, and builds + runs the
-      # reference Dockerfile. Deleting its `apk add libstdc++ libgcc` line makes
-      # this step fail with the container's own exit code 127 -- mutation-proved.
+      # The suite compiles the binary itself (via ./build.sh) UNCONDITIONALLY --
+      # reusing a pre-existing one is what let a green run validate the wrong
+      # artifact -- and builds + runs the reference Dockerfile. Deleting its
+      # `apk add libstdc++ libgcc` line makes this step fail with the
+      # container's own exit code 127 -- mutation-proved.
       - name: Alpine image e2e (compiled binary, clean container)
         working-directory: examples/bun-exec
         run: bun run test:image

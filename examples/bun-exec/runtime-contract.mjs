@@ -19,7 +19,7 @@
 // The only imports are node: builtins, which resolve identically under node,
 // under bun, and inside the compiled binary — the "dependency-free" property
 // above is about bun/nitro/vinext coupling, not about the standard library.
-import { dirname, resolve } from 'node:path';
+import { basename, dirname, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 // ── (6) Bind-host resolution — never bind to a k8s pod name ─────────────────
@@ -73,9 +73,10 @@ export function resolveBindHost(env = process.env) {
 // a pure function with an injected `exists`.
 //
 // Candidate order, and why:
-//   1. the BAKED root, if its `../public` is actually there. A non-compiled
-//      `bun run /abs/path/.output/server/index.mjs` has a CORRECT baked value,
-//      and it must win over anything discovered from the environment.
+//   1. the BAKED root, if its `../public` is actually there AND this is not a
+//      compiled binary. A non-compiled `bun run /abs/path/.output/server/
+//      index.mjs` has a CORRECT baked value, and it must win over anything
+//      discovered from the environment.
 //   2. `dirname(process.execPath)` — the compiled case. The ship shape is the
 //      executable next to `.output/public` (README + Dockerfile), so anchoring
 //      on the EXECUTABLE makes the binary portable. cwd deliberately is NOT a
@@ -83,19 +84,49 @@ export function resolveBindHost(env = process.env) {
 //      (an unrelated `.output/public` under cwd hijacking a correct baked root).
 //   3. nothing → keep the baked value and WARN LOUDLY. Serving is already broken
 //      at this point; the only thing left to get right is not being silent.
+//
+// `isCompiled` is load-bearing and NOT an optimisation. Without it, "a baked
+// root that exists" wins unconditionally, and on the BUILD MACHINE — the one
+// place a human verifies the ship shape — a compiled binary then serves the
+// build tree's assets instead of its own co-located ones, with no warning. That
+// makes "I copied binary + .output/public to /tmp/ship and it served" prove
+// nothing (delete the shipped public/ and it still serves), lets a moved binary
+// serve a rebuilt tree's content-hashed chunks against old HTML, and — because
+// `exists` is DIRECTORY-level — lets a stale or emptied baked public/ shadow a
+// complete co-located one. The premise "a baked root that exists ⇒ non-compiled"
+// is false by construction on the builder; the honest discriminator is that a
+// non-compiled run's execPath is the bun/node RUNTIME, not the app.
 const PUBLIC_REL = '.output/public';
 const SERVER_ENTRY_REL = '.output/server/index.mjs';
+
+// A plain `bun run entry.mjs` reports the RUNTIME as `process.execPath`; a
+// `bun build --compile` binary reports ITSELF. Basename is the only signal that
+// does not depend on a bun internal, and it is used solely to pick which root
+// wins / whether to warn — never to break a path that would otherwise serve.
+// Overridable via the `isCompiled` parameter for a binary named `bun`, or if a
+// future bun exposes something better.
+const RUNTIME_BASENAMES = new Set(['bun', 'bun-debug', 'bunx', 'node', 'deno']);
+
+/**
+ * @param {string} execPath `process.execPath`.
+ * @returns {boolean} true when execPath is the app itself, not a language runtime.
+ */
+export function isCompiledExecutable(execPath) {
+  const base = basename(execPath).replace(/\.exe$/i, '');
+  return !RUNTIME_BASENAMES.has(base);
+}
 
 /**
  * @param {object} opts
  * @param {string | undefined} opts.bakedMain `globalThis.__nitro_main__` as baked at build time.
  * @param {string} opts.execPath              `process.execPath`.
  * @param {(path: string) => boolean} opts.exists
+ * @param {boolean} [opts.isCompiled]         Defaults to `isCompiledExecutable(execPath)`.
  * @param {string} [opts.cwd]                 Reported in the warning only — never a candidate.
  * @returns {{ mainUrl: string | null, source: 'baked' | 'execdir' | 'unresolved', warning: string | null }}
  *   `mainUrl` is null when `__nitro_main__` must be left alone (candidate 1 or 3).
  */
-export function resolveAssetAnchor({ bakedMain, execPath, exists, cwd }) {
+export function resolveAssetAnchor({ bakedMain, execPath, exists, isCompiled, cwd }) {
   // A malformed/absent baked value must degrade, never throw — this runs at
   // module init of the entry, so throwing here kills the process before it listens.
   let bakedDir = null;
@@ -105,12 +136,50 @@ export function resolveAssetAnchor({ bakedMain, execPath, exists, cwd }) {
     bakedDir = null;
   }
   const bakedPublic = bakedDir ? resolve(bakedDir, '../public') : null;
-  if (bakedPublic && exists(bakedPublic)) {
+  const bakedOk = Boolean(bakedPublic && exists(bakedPublic));
+
+  const execDir = dirname(execPath);
+  const execPublic = resolve(execDir, PUBLIC_REL);
+  const execOk = exists(execPublic);
+  const compiled = isCompiled ?? isCompiledExecutable(execPath);
+
+  // Candidate 1 — the baked root wins ONLY when this is not a compiled binary.
+  // For a compiled binary the baked root is the BUILD MACHINE's tree, which is
+  // a different artifact that merely happens to be reachable on the builder.
+  if (bakedOk && !compiled) {
     return { mainUrl: null, source: 'baked', warning: null };
   }
 
-  const execDir = dirname(execPath);
-  if (exists(resolve(execDir, PUBLIC_REL))) {
+  // Compiled, and BOTH roots are present: the co-located one is what shipped,
+  // so it wins — but this is the case that used to resolve silently, so say so.
+  if (bakedOk && execOk && bakedPublic !== execPublic) {
+    return {
+      mainUrl: pathToFileURL(resolve(execDir, SERVER_ENTRY_REL)).href,
+      source: 'execdir',
+      warning:
+        'knext bun-exec: TWO static-asset roots are present — anchoring on the one shipped beside ' +
+        `the executable (${execPublic}) and IGNORING the build tree it was compiled from ` +
+        `(${bakedPublic}). If assets look stale, you are running a binary next to a stale ` +
+        '`.output/public`, or on the machine that built it.',
+    };
+  }
+
+  // Compiled, but only the build tree is there: serving works HERE and nowhere
+  // else. That is the "worked on my machine" false green — keep the baked value
+  // whole (never partially rewritten) and warn.
+  if (bakedOk) {
+    return {
+      mainUrl: null,
+      source: 'baked',
+      warning:
+        'knext bun-exec: this executable found NO `.output/public` beside itself ' +
+        `(${execPublic}) and fell back to the tree it was BUILT from (${bakedPublic}). ` +
+        'It will serve here and 500 on every static asset anywhere else. Ship the executable ' +
+        'NEXT TO its `.output/public` directory.',
+    };
+  }
+
+  if (execOk) {
     return {
       mainUrl: pathToFileURL(resolve(execDir, SERVER_ENTRY_REL)).href,
       source: 'execdir',

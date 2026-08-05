@@ -57,6 +57,62 @@ const BINARY = `knext-bun-exec-${ARCH}`;
 // Removed in afterAll, so unique tags do not leak images onto the host.
 const IMAGE = `knext-bunexec-alpine-e2e:${ARCH}-${RUN_ID}`;
 
+// The unique tag above fixed a real collision but cost the one property the
+// fixed tag had for free: SELF-REPLACEMENT. `afterAll` still runs when
+// `beforeAll` throws (verified — the file reports FAIL with exit 1, so its
+// "skipped" tests can never read as a pass), but a HARD abort — cancelled CI
+// job, Ctrl-C on a dev host, which is where the leak was actually observed —
+// skips it entirely, and now every abort leaks a DISTINCT ~150 MB image plus a
+// detached container instead of overwriting the previous one. These labels make
+// the leftovers findable so a later run can reap them.
+const LABEL_KEY = 'dev.knext.test';
+const LABEL = `${LABEL_KEY}=bunexec-alpine-e2e`;
+// The epoch is carried as a label rather than derived from `docker`'s own
+// CreatedAt string, which is not reliably `Date`-parseable ("… +0200 CEST").
+const EPOCH_LABEL_KEY = `${LABEL_KEY}.epoch`;
+const EPOCH_LABEL = `${EPOCH_LABEL_KEY}=${Date.now()}`;
+// Only leftovers OLDER than this are swept. A concurrent run's artifacts are
+// seconds old, so this cannot reintroduce the cross-run kill the unique names
+// fixed — including the window where a concurrent run has built its image but
+// has not yet started a container to hold it.
+const LEAK_AGE_MS = 2 * 60 * 60 * 1000;
+
+/**
+ * Reap labelled leftovers from ABORTED earlier runs. Containers first: an image
+ * cannot be removed while a container of it exists.
+ */
+function sweepLeakedArtifacts() {
+  const listed = run(
+    'docker',
+    [
+      'ps',
+      '--all',
+      '--filter',
+      `label=${LABEL}`,
+      '--format',
+      `{{.ID}} {{.Label "${EPOCH_LABEL_KEY}"}}`,
+    ],
+    { timeout: 60_000 },
+  );
+  if (listed.status === 0) {
+    for (const line of listed.stdout.split('\n')) {
+      const [id, epoch] = line.trim().split(/\s+/);
+      const startedAt = Number(epoch);
+      if (!id || !Number.isFinite(startedAt)) continue;
+      if (Date.now() - startedAt > LEAK_AGE_MS) {
+        run('docker', ['rm', '--force', id], { timeout: 60_000 });
+      }
+    }
+  }
+  // `image prune` only ever removes images no container holds, and `until`
+  // bounds it by age, so a concurrent run's in-flight image is safe twice over.
+  run(
+    'docker',
+    ['image', 'prune', '--force', '--filter', `label=${LABEL}`, '--filter', 'until=2h'],
+    { timeout: 120_000 },
+  );
+}
+
 function run(cmd: string, args: string[], opts: { timeout?: number } = {}) {
   return spawnSync(cmd, args, {
     cwd: EXAMPLE_DIR,
@@ -89,6 +145,9 @@ beforeAll(async () => {
     );
   }
 
+  // 1b. Reap what earlier ABORTED runs leaked, before adding this run's own.
+  sweepLeakedArtifacts();
+
   // 2. The binary under test — built UNCONDITIONALLY, every run.
   //
   //    This used to reuse an existing binary, which quietly contradicted the
@@ -116,6 +175,10 @@ beforeAll(async () => {
     PLATFORM,
     '--build-arg',
     `BINARY=${BINARY}`,
+    '--label',
+    LABEL,
+    '--label',
+    EPOCH_LABEL,
     '--tag',
     IMAGE,
     '.',
@@ -124,8 +187,10 @@ beforeAll(async () => {
     throw new Error(`docker build failed:\n${image.stdout}\n${image.stderr}`);
   }
 
-  // 4. Run it. Any prior container from an aborted run is cleared first.
-  run('docker', ['rm', '--force', CONTAINER], { timeout: 60_000 });
+  // 4. Run it. `docker rm --force ${CONTAINER}` used to sit here to clear a
+  //    prior run's leftovers; with a per-run-unique name it could never match
+  //    anything and was dead code. The age-bounded label sweep above is what
+  //    actually reaps them.
   appPort = await freePort();
   metricsPort = await freePort();
   const started = run(
@@ -135,6 +200,10 @@ beforeAll(async () => {
       '--detach',
       '--name',
       CONTAINER,
+      '--label',
+      LABEL,
+      '--label',
+      EPOCH_LABEL,
       '--platform',
       PLATFORM,
       '--publish',

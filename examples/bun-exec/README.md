@@ -35,9 +35,14 @@
 >    `/Users/<whoever-built-it>/…/examples/bun-exec/.output/public/_next/static/chunks/index-*.js`
 >    and returned `500 {"error":true,"unhandled":true}` (ENOENT) for **every** asset. The entry now
 >    re-anchors `__nitro_main__` through `resolveAssetAnchor` (`runtime-contract.mjs`), which
->    prefers a baked root that really exists — so a non-compiled `bun run …/.output/server/index.mjs`
->    from any cwd is untouched — and otherwise anchors on **`dirname(process.execPath)`**: the
->    executable's own directory, which is the layout this README and the `Dockerfile` document.
+>    keeps a baked root that really exists **only when this is not a compiled binary** — so a
+>    non-compiled `bun run …/.output/server/index.mjs` from any cwd is untouched — and otherwise
+>    anchors on **`dirname(process.execPath)`**: the executable's own directory, which is the layout
+>    this README and the `Dockerfile` document. The compiled-binary carve-out matters most on the
+>    machine that BUILT it, where the baked build tree still exists: without it the binary would
+>    silently serve the build tree's assets rather than the ones shipped beside it, so "I copied the
+>    binary and `.output/public` somewhere and it served" would prove nothing. When both roots are
+>    present the co-located one wins and the runtime says so.
 >    Anchoring on the EXECUTABLE rather than the working directory is what makes the binary
 >    portable (`docker run -w /elsewhere` still serves). If neither has `.output/public`, it
 >    **warns loudly on startup** instead of failing silently — being silent is the whole reason

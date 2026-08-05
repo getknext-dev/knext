@@ -16,7 +16,9 @@
 # `.output/server/index.mjs` (vinext 1.0.0-beta.4 / vite 8 / nitro
 # 3.0.260610-beta — the abandoned `vinext@^0.0.19` / `nitro@3.0.1-alpha.2` pin is
 # retired, ADR-0042 A1). SHIP the binary alongside `.output/public` (static
-# assets), run it from a dir where `./.output/public` resolves. See README.md.
+# assets): the runtime anchors static assets on the EXECUTABLE's own directory,
+# NOT on the working directory, so `<dir>/server` + `<dir>/.output/public` serves
+# from any cwd. See README.md.
 #
 # The `-musl` targets are NOT statically linked: the image MUST `apk add
 # libstdc++ libgcc` or the binary exits 127 (ADR-0042 A9). Use the `Dockerfile`

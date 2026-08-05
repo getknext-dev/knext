@@ -80,9 +80,13 @@ import {
 // nitro + vinext — and because its only failure mode is silence. Exactly what
 // it does, in order:
 //
-//   1. If the BAKED root really has `../public`, keep it. A non-compiled
-//      `bun run /abs/path/.output/server/index.mjs` from an unrelated cwd has a
-//      CORRECT baked value and is left completely alone.
+//   1. If the BAKED root really has `../public` AND this is not a compiled
+//      binary, keep it. A non-compiled `bun run /abs/path/.output/server/
+//      index.mjs` from an unrelated cwd has a CORRECT baked value and is left
+//      completely alone. The compiled carve-out is what stops a binary run on
+//      the machine that BUILT it from silently serving the build tree instead
+//      of the assets shipped beside it; when both roots exist the co-located
+//      one wins and the runtime warns.
 //   2. Otherwise anchor on `dirname(process.execPath)` — the executable's own
 //      directory, which is the ship shape README and Dockerfile document
 //      (binary beside `.output/public`). Anchoring on the EXECUTABLE rather than

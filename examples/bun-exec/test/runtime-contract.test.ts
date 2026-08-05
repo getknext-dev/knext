@@ -109,6 +109,73 @@ describe('resolveAssetAnchor — the asset root travels with the binary (#460 bu
     expect(anchor.warning).toBeNull();
   });
 
+  // ── The COMPILED-ON-THE-BUILDER case (#658 false-green class) ─────────────
+  // Every case above is either "compiled, baked root gone" or "not compiled".
+  // The one left over is the one humans actually stand in: a compiled binary
+  // run ON THE MACHINE THAT BUILT IT, where the baked build-tree root DOES
+  // still exist. If the baked root wins there unconditionally, the binary
+  // serves the BUILD TREE's assets instead of the ones shipped beside it —
+  // and `warning: null` means nothing says so. Consequences, all silent:
+  // "I copied the binary + .output/public to /tmp/ship and it served" proves
+  // nothing (delete the shipped public/ and it still serves); after a rebuild
+  // a moved binary serves the NEW tree's content-hashed chunks against old
+  // HTML; and because `exists` is directory-level, a stale or emptied baked
+  // public/ SHADOWS a complete co-located one — a partial anchor, which is
+  // worse than no anchor. The two cases are distinguishable: a non-compiled
+  // run's execPath is the bun/node RUNTIME, a compiled one's is the binary.
+  it('prefers the CO-LOCATED root over the build tree when compiled and BOTH exist', () => {
+    const anchor = resolveAssetAnchor({
+      bakedMain: bakedUrl('/Users/dev/knext/examples/bun-exec'),
+      execPath: '/tmp/ship/server',
+      exists: existsIn([
+        '/Users/dev/knext/examples/bun-exec/.output/public',
+        '/tmp/ship/.output/public',
+      ]),
+    });
+    expect(
+      anchor.mainUrl,
+      'a compiled binary silently served the BUILD TREE assets, not its own',
+    ).toBe(bakedUrl('/tmp/ship'));
+    expect(anchor.source).toBe('execdir');
+    expect(anchor.warning, 'the build-tree/co-located ambiguity resolved silently').toBeTruthy();
+    // Both roots must be named or the operator cannot tell which one it got.
+    expect(anchor.warning).toContain('/tmp/ship/.output/public');
+    expect(anchor.warning).toContain('/Users/dev/knext/examples/bun-exec/.output/public');
+  });
+
+  it('WARNS when a compiled binary can only anchor on the build tree', () => {
+    // Same builder machine, but nothing was shipped beside the binary. Serving
+    // is not broken (the baked root is right there), so we keep it — but this
+    // is exactly the "it worked on my machine" false green, so it must be loud.
+    const anchor = resolveAssetAnchor({
+      bakedMain: bakedUrl('/Users/dev/knext/examples/bun-exec'),
+      execPath: '/tmp/ship/server',
+      exists: existsIn(['/Users/dev/knext/examples/bun-exec/.output/public']),
+    });
+    expect(anchor.source).toBe('baked');
+    expect(
+      anchor.mainUrl,
+      'the baked value must be kept whole, never partially rewritten',
+    ).toBeNull();
+    expect(
+      anchor.warning,
+      'a compiled binary anchored on its build tree without saying so',
+    ).toBeTruthy();
+  });
+
+  it('honours an explicitly injected isCompiled over the execPath heuristic', () => {
+    // The discriminator is injectable so a binary named `bun`, or a future bun
+    // signal, does not have to be guessed at by basename.
+    const anchor = resolveAssetAnchor({
+      bakedMain: bakedUrl('/srv/realapp'),
+      execPath: '/opt/homebrew/bin/bun',
+      isCompiled: true,
+      exists: existsIn(['/srv/realapp/.output/public', '/opt/homebrew/bin/.output/public']),
+    });
+    expect(anchor.source).toBe('execdir');
+    expect(anchor.warning).toBeTruthy();
+  });
+
   it('is LOUD when no candidate has the layout — never silently keeps a dead root', () => {
     // The failure this whole PR exists to have discovered. Nothing can be
     // served, so the one thing that must not happen is silence.

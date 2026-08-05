@@ -85,19 +85,34 @@ describe('#460 bug 3 — the asset root travels with the binary', () => {
     );
   });
 
-  it('SCANS every __nitro_main__ assignment — none may bypass the resolver', () => {
-    // Enumerating the one known assignment is how the second one gets missed.
-    // Every write to the global must come from the resolver's verdict, so an
-    // added `globalThis.__nitro_main__ = pathToFileURL(resolve(process.cwd(), …))`
-    // fails here rather than passing alongside the good one.
-    const writes = CODE.match(/globalThis\.__nitro_main__\s*=\s*[^;\n]+/g) ?? [];
-    expect(writes.length, 'the entry never re-anchors __nitro_main__ at all').toBeGreaterThan(0);
-    for (const write of writes) {
-      expect(
-        write,
-        `__nitro_main__ assigned from something other than the resolver: ${write}`,
-      ).toMatch(/\.mainUrl\b/);
-    }
+  it('SCANS every __nitro_main__ occurrence — none may bypass the resolver', () => {
+    // Enumerating the one known assignment is how the second one gets missed —
+    // and matching only `globalThis.__nitro_main__ =` IS an enumeration, of one
+    // syntax. `globalThis['__nitro_main__'] = …`, `Object.assign(globalThis,
+    // { __nitro_main__: … })` and `const g = globalThis; g.__nitro_main__ = …`
+    // all sail past it. So scan the IDENTIFIER instead: the entry may touch the
+    // global in exactly two places, and any third occurrence — whatever its
+    // syntax — fails here rather than passing alongside the good ones.
+    const lines = CODE.split('\n').filter((l) => l.includes('__nitro_main__'));
+    const occurrences = CODE.match(/__nitro_main__/g) ?? [];
+    expect(
+      occurrences.length,
+      `__nitro_main__ is touched in an unexpected number of places:\n${lines.join('\n')}`,
+    ).toBe(2);
+
+    // Site 1: the READ of the baked value, fed to the resolver as `bakedMain`.
+    expect(
+      lines.filter((l) => /bakedMain:\s*globalThis\.__nitro_main__/.test(l)),
+      'the baked __nitro_main__ is no longer read into the resolver',
+    ).toHaveLength(1);
+
+    // Site 2: the WRITE, and its value must be the resolver's verdict.
+    const writes = lines.filter((l) => /__nitro_main__\s*(\]\s*)?=[^=]/.test(l));
+    expect(writes, 'the entry never re-anchors __nitro_main__ at all').toHaveLength(1);
+    expect(
+      writes[0],
+      `__nitro_main__ assigned from something other than the resolver: ${writes[0]}`,
+    ).toMatch(/\.mainUrl\b/);
   });
 
   it('is LOUD when the resolver finds no asset layout', () => {
