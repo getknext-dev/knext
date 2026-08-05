@@ -50,32 +50,56 @@ import { parse } from 'yaml';
  *
  * NOT converted, and each for a reason that is not "we ran out of diff":
  *
- *   - `tests/compat-shard-flake-attribution.test.ts` (test-e2e-deploy.yml),
+ *   - NO `pull_request` TRIGGER — `tests/compat-shard-flake-attribution.test.ts`
+ *     (test-e2e-deploy.yml: workflow_dispatch + schedule),
+ *     `tests/operator-e2e-scale-image-preflight.test.ts` (operator-e2e-nightly.yml),
+ *     `tests/docs-closure-nightly-workflow.test.ts` (docs-closure-nightly.yml).
+ *     This audit asserts a `pull_request` trigger, so pointing them here would
+ *     red for a reason that is not a defect, and the fix would be to weaken the
+ *     trigger half. A nightly is not a PR gate and must not be described as one.
+ *     (The operator preflight already parses rather than text-matches; its
+ *     bespoke checks are a subset of these, minus the trigger half.)
+ *   - PR-TRIGGERED BUT DELIBERATELY `paths:`-SCOPED —
  *     `tests/operator-image-pin-resolution.test.ts`
- *     (image-pin-resolution-nightly.yml),
- *     `tests/operator-e2e-scale-image-preflight.test.ts`
- *     (operator-e2e-nightly.yml),
- *     `tests/docs-closure-nightly-workflow.test.ts` (docs-closure-nightly.yml)
- *     — these workflows are SCHEDULED, not `pull_request`. This audit asserts a
- *     `pull_request` trigger, so pointing them here would red for a reason that
- *     is not a defect, and the fix would be to weaken the trigger half. A
- *     nightly is not a PR gate and must not be described as one. (The operator
- *     preflight already parses rather than text-matches; its bespoke checks are
- *     a subset of these, minus the trigger half.)
- *   - `tests/supply-chain-workflow.test.ts`,
+ *     (image-pin-resolution-nightly.yml). This category exists because the
+ *     round-2 review MEASURED the reason first recorded for this entry to be
+ *     false: it was filed above as "scheduled, not `pull_request`", but the
+ *     workflow does carry `pull_request:` — under a `paths:` filter
+ *     (`.github/workflows/image-pin-resolution-nightly.yml:55-56`), and
+ *     `auditBlockingGate` against its `resolve-image-pins` job reports exactly
+ *     one problem, "the `pull_request` trigger carries a `paths` filter", NOT a
+ *     missing trigger. The exemption survives — a paths-scoped run is not the
+ *     unconditional gate this audit certifies — but the reason did not, and a
+ *     wrong reason in a self-reported exemption list is the silent-exemption
+ *     shape `workflow.md` says to watch for. Its guard still carries the
+ *     evadable text form (`operator-image-pin-resolution.test.ts:324`,
+ *     `not.toMatch(/continue-on-error:\s*true/)`) on a workflow that DOES run on
+ *     PRs — a live #661-class instance, tracked as #677 rather than smuggled
+ *     into this diff.
+ *   - THE OPPOSITE CLAIM — `tests/supply-chain-workflow.test.ts`,
  *     `tests/operator-supply-chain-workflow.test.ts`, and the `docs-site` half of
  *     `tests/docs-closure-nightly-workflow.test.ts` — these assert a
  *     `continue-on-error` is PRESENT and constrained to the PR phase
  *     (report-on-PR / fail-on-main). That is the OPPOSITE claim to the one this
  *     audit makes, not a weaker form of it.
  *
- * A scan was written to enforce the first list mechanically and was DROPPED: it
- * flagged the phased-rollout guards, because file-level text cannot tell which
- * workflow a `continue-on-error` pattern is applied to, and the only ways to keep
- * it were an allowlist or a heuristic that would be edited rather than obeyed.
- * Both are the silent-exemption shape this repo has already had to unwind. This
- * list is documented practice, not enforcement, and by `security.md`'s own
- * standard that means it can decay — stated rather than dressed up.
+ * HOW MUCH OF THIS IS ENFORCED. The two trigger categories are claims about a
+ * workflow's `on:` block, so they are now DERIVED FROM THE PARSE and compared —
+ * `UNCONVERTED_GUARD_TRIAGE` below is the list as data and
+ * `tests/blocking-gate-triage.test.ts` reds if any recorded reason stops being
+ * the real one, or if an exempt workflow gains an unconditional `pull_request`
+ * trigger. Fixing only the entry the review named would have been this repo's
+ * own enumerate-rather-than-scan defect one level up.
+ *
+ * The `opposite-claim` third stays documented practice. A scan was written to
+ * enforce it and was DROPPED: it flagged the phased-rollout guards, because
+ * file-level text cannot tell which workflow a `continue-on-error` pattern is
+ * applied to — `docs-closure-nightly-workflow.test.ts:257-263` asserts such a
+ * step is PRESENT and PR-gated while `:142-149` asserts its ABSENCE on the
+ * nightly, in one file. The only ways to keep the scan were an allowlist or a
+ * heuristic that would be edited rather than obeyed, both the silent-exemption
+ * shape this repo has already had to unwind. By `security.md`'s own standard
+ * that third can decay — stated rather than dressed up.
  */
 
 /**
@@ -112,6 +136,118 @@ const ALLOWED_JOB_KEYS = new Set([
   'services',
   'container',
 ]);
+
+/**
+ * Why a guard that asserts something about a workflow is NOT pointed at
+ * `auditBlockingGate`.
+ *
+ * `no-pull-request-trigger` and `paths-scoped-pull-request` are claims about the
+ * workflow's `on:` block, so they are MEASURED — see
+ * `tests/blocking-gate-triage.test.ts`. `opposite-claim` is a claim about what
+ * the guard asserts, which file-level text cannot establish, so it stays
+ * documented practice.
+ */
+export type TriageCategory =
+  | 'no-pull-request-trigger'
+  | 'paths-scoped-pull-request'
+  | 'opposite-claim';
+
+export interface TriageEntry {
+  /** Repo-relative path of the guard that is not converted. */
+  test: string;
+  /** Repo-relative path of the workflow it guards. */
+  workflow: string;
+  category: TriageCategory;
+  why: string;
+}
+
+/**
+ * The triage in the header above, as DATA so it can be checked rather than
+ * merely read.
+ *
+ * The round-2 review found the reason recorded for one entry was measurably
+ * false: `image-pin-resolution-nightly.yml` was filed under "SCHEDULED, not
+ * `pull_request`", but it carries a `pull_request:` trigger with a `paths:`
+ * filter. The exemption survives — a deliberately paths-scoped gate is not an
+ * unconditional PR gate — but the reason was wrong, and a wrong reason in a
+ * self-reported exemption list is exactly the silent-exemption shape
+ * `workflow.md` says to watch for.
+ *
+ * Fixing only the named entry would be the enumerate-not-scan defect one level
+ * up, so the trigger half of every entry is now asserted against the parse.
+ */
+export const UNCONVERTED_GUARD_TRIAGE: readonly TriageEntry[] = [
+  {
+    test: 'tests/compat-shard-flake-attribution.test.ts',
+    workflow: '.github/workflows/test-e2e-deploy.yml',
+    category: 'no-pull-request-trigger',
+    why: 'workflow_dispatch + schedule only; a nightly is not a PR gate',
+  },
+  {
+    test: 'tests/operator-image-pin-resolution.test.ts',
+    workflow: '.github/workflows/image-pin-resolution-nightly.yml',
+    category: 'paths-scoped-pull-request',
+    why: 'runs on pull_request, but only under a paths: filter — deliberately scoped, so it is not an unconditional PR gate',
+  },
+  {
+    test: 'tests/operator-e2e-scale-image-preflight.test.ts',
+    workflow: '.github/workflows/operator-e2e-nightly.yml',
+    category: 'no-pull-request-trigger',
+    why: 'schedule + workflow_dispatch only',
+  },
+  {
+    test: 'tests/docs-closure-nightly-workflow.test.ts',
+    workflow: '.github/workflows/docs-closure-nightly.yml',
+    category: 'no-pull-request-trigger',
+    why: 'schedule + workflow_dispatch only',
+  },
+  {
+    test: 'tests/supply-chain-workflow.test.ts',
+    workflow: '.github/workflows/supply-chain.yml',
+    category: 'opposite-claim',
+    why: 'asserts a continue-on-error is PRESENT and constrained to the PR phase',
+  },
+  {
+    test: 'tests/operator-supply-chain-workflow.test.ts',
+    workflow: '.github/workflows/operator-supply-chain.yml',
+    category: 'opposite-claim',
+    why: 'asserts a continue-on-error is PRESENT and constrained to the PR phase',
+  },
+];
+
+/** What a workflow's `pull_request:` trigger actually is, from the parse. */
+export type TriggerShape =
+  | 'no-pull-request-trigger'
+  | 'paths-scoped-pull-request'
+  | 'unconditional-pull-request'
+  | 'otherwise-filtered-pull-request';
+
+/**
+ * Classify a workflow's `pull_request:` trigger.
+ *
+ * Deliberately narrower than `auditBlockingGate`'s trigger half, which asks "can
+ * this gate be skipped" and so fails closed on every filter key. This asks the
+ * triage's question — "is the recorded reason for exempting this guard the real
+ * one" — and therefore has to tell a `paths:` filter apart from a `branches:`
+ * one rather than collapsing both to "has a problem".
+ */
+export function classifyTriggerShape(workflowPath: string): TriggerShape {
+  const doc = parse(readFileSync(workflowPath, 'utf8')) as Record<string, unknown> | null;
+  const on = (doc?.on ?? doc?.[true as unknown as string]) as Record<string, unknown> | undefined;
+  if (!on || typeof on !== 'object' || !('pull_request' in on)) return 'no-pull-request-trigger';
+
+  const pr = on.pull_request;
+  if (pr === null || typeof pr !== 'object') return 'unconditional-pull-request';
+
+  const keys = Object.keys(pr as Record<string, unknown>).filter(
+    (key) => !(key === 'branches' && isUniversalBranchFilter((pr as Record<string, unknown>)[key])),
+  );
+  if (keys.length === 0) return 'unconditional-pull-request';
+  if (keys.every((key) => key === 'paths' || key === 'paths-ignore')) {
+    return 'paths-scoped-pull-request';
+  }
+  return 'otherwise-filtered-pull-request';
+}
 
 export interface BlockingGateOptions {
   /** Absolute path to the workflow file. */

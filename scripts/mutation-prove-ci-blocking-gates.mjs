@@ -15,6 +15,22 @@
  * decoration, and the only way to know which of those a guard is, is to remove
  * the subject and look.
  *
+ * PRE-CONVERSION BASELINE, per guard — recorded here because #672's own PR body
+ * UNDER-CLAIMED it and a commit message cannot be corrected in place. The
+ * round-2 review caught the error; the number below was then re-measured by
+ * replaying the five disarms against the HEAD~1 text guard:
+ *
+ *   - `compile-cache-bun-probe` (compile-cache-health-bun-ci): GREEN under all
+ *     five.
+ *   - `typecheck-root` (root-typecheck-gate): GREEN under FOUR — `"if": false`,
+ *     `'if': false`, `needs: <skippable>`, and the zero-expansion `strategy:`.
+ *     The PR body listed only the quoted key and `strategy:`. Its one catch was
+ *     `continue-on-error: ${{ true }}`, and only by accident of breadth: that
+ *     guard matched a bare `/continue-on-error/` rather than the
+ *     `/continue-on-error:\s*true/` its siblings used. Understating a guard's
+ *     blind spots is the same failure as overstating its coverage, so the
+ *     measured figure lives in the tree rather than in a PR body.
+ *
  * The mutations are applied to `.github/workflows/ci.yml` through the byte-
  * snapshot harness, so the workflow is restored content-addressed rather than by
  * replaying inverse edits, and every mutation carries the residue marker.
