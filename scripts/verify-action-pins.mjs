@@ -93,7 +93,15 @@
  */
 
 import { spawnSync } from 'node:child_process';
-import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
+import {
+  existsSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  statSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -282,11 +290,60 @@ function sleepSync(ms) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
-/** Default `git` runner: argv in, `{ status, stdout, stderr }` out. */
-function runGit(args) {
+/**
+ * An empty directory, outside any repository, to run `git` from.
+ *
+ * THIS IS THE ANONYMITY MECHANISM, not a tidiness detail (#666 review).
+ * `actions/checkout` defaults to `persist-credentials: true`, which writes into
+ * the CHECKOUT'S LOCAL `.git/config`:
+ *
+ *   [http "https://github.com/"]
+ *       extraheader = AUTHORIZATION: basic <token>
+ *
+ * A `run:` step's cwd is `$GITHUB_WORKSPACE`, `spawnSync` inherits it, and git
+ * reads local config from the repository it discovers there. That header is
+ * keyed on the `https://github.com/` PREFIX, so it applies to EVERY github.com
+ * URL — `aquasecurity/trivy-action` included. Measured on git 2.51: the round-1
+ * resolver, run from such a checkout, returned
+ * `fatal: could not read Username for 'https://github.com'` — an AUTHENTICATED
+ * request, which is precisely the identity the org IP allow list had already
+ * 403'd. The fallback was a no-op in the one environment it was built for.
+ *
+ * `-c credential.helper=` does NOT cover this: it clears HELPERS, not
+ * `http.extraheader`. Neither does `-c http.extraheader=` — on git 2.51 that
+ * leaves an EMPTY entry in the list rather than resetting it, and the
+ * authenticated request still goes out (measured, not assumed). The thing that
+ * works is denying git the repository: run from a directory that contains none,
+ * with a ceiling so discovery cannot walk up into one.
+ *
+ * The workflow ALSO sets `persist-credentials: false`. Belt and braces on
+ * purpose — either alone is one edit away from silently re-authenticating the
+ * request, and the failure is invisible (it looks like a transport error, or on
+ * an allow-listed repo like the 403 this exists to route around).
+ */
+let anonymousGitCwd;
+function anonymousGitDir() {
+  if (!anonymousGitCwd) {
+    anonymousGitCwd = mkdtempSync(join(tmpdir(), 'knext-verify-action-pins-'));
+  }
+  return anonymousGitCwd;
+}
+
+/**
+ * Default `git` runner: argv in, `{ status, stdout, stderr }` out.
+ *
+ * EXPORTED so a guard can execute it and assert on what git actually saw. The
+ * round-1 anonymity test asserted argv against an injected double, which cannot
+ * observe ambient config — and ambient config is what decides anonymity. See
+ * `tests/action-pin-sha-tag-nightly.test.ts`, "anonymous IN FACT".
+ */
+export function runGit(args) {
+  const cwd = anonymousGitDir();
   const result = spawnSync('git', args, {
     encoding: 'utf8',
     timeout: 30_000,
+    // No repository here, so no local config — see `anonymousGitDir`.
+    cwd,
     env: {
       ...process.env,
       // Never let git wait for, or find, a credential. See the anonymity note
@@ -294,7 +351,14 @@ function runGit(args) {
       GIT_TERMINAL_PROMPT: '0',
       GIT_ASKPASS: '',
       GCM_INTERACTIVE: 'never',
+      // All three config scopes, not one: a credential in ANY of them
+      // de-anonymises the request identically.
       GIT_CONFIG_NOSYSTEM: '1',
+      GIT_CONFIG_SYSTEM: '/dev/null',
+      GIT_CONFIG_GLOBAL: '/dev/null',
+      // Discovery must not climb out of the empty directory and find a
+      // repository above it (a temp dir nested under a checkout, say).
+      GIT_CEILING_DIRECTORIES: cwd,
     },
   });
   if (result.error) {
@@ -331,6 +395,7 @@ function runGit(args) {
  *
  * Returns { kind: 'commit', sha, annotated } | { kind: 'tag-missing' }
  *       | { kind: 'transport-error', message }
+ *       | { kind: 'unreadable-listing', message } — exited 0, output unparseable
  */
 export function gitLsRemoteTag({
   owner,
@@ -386,14 +451,37 @@ export function gitLsRemoteTag({
     // the filtering happens here rather than being trusted to the refspec.
     let lightweight;
     let peeled;
+    let readableLines = 0;
     for (const line of result.stdout.split('\n')) {
       const [sha, ref] = line.trim().split(/\s+/);
       if (!sha || !ref || !/^[0-9a-f]{40}$/.test(sha)) continue;
+      readableLines += 1;
       if (ref === `refs/tags/${tag}`) lightweight = sha;
       else if (ref === `refs/tags/${tag}^{}`) peeled = sha;
     }
     if (peeled) return { kind: 'commit', sha: peeled, annotated: true };
     if (lightweight) return { kind: 'commit', sha: lightweight, annotated: false };
+    // An exit-0 listing that parses into NOTHING is an unreadable ANSWER, not an
+    // upstream fact (#666 review). Reporting it as `tag-missing` printed "the
+    // tag was deleted, renamed, or never existed" about a tag that may be
+    // perfectly present — a confident claim derived from noise. The verdict is
+    // red either way (this maps to the fail-closed `api-error` + both-causes
+    // rendering, exactly like a transport failure); only the story changes.
+    //
+    // An EMPTY listing keeps `tag-missing`: an empty advertisement IS git's
+    // answer to "is this ref there", and so is a listing whose lines parsed but
+    // held some other ref (`v1.2.30` for `v1.2.3`). Conflating those with noise
+    // would lose the only conclusive negative this resolver can give.
+    //
+    // Deliberately NOT retried, like `tag-missing`: the audited property is
+    // that ONLY a non-zero exit is retried, and a retry loop here would be one
+    // more path a future edit could turn into a mask.
+    if (readableLines === 0 && result.stdout.trim() !== '') {
+      return {
+        kind: 'unreadable-listing',
+        message: `git ls-remote exited 0 but its output was UNREADABLE (no ref line parsed): ${JSON.stringify(result.stdout.slice(0, 200))}`,
+      };
+    }
     return { kind: 'tag-missing' };
   }
   return failure ?? { kind: 'transport-error', message: 'git ls-remote was never attempted' };
@@ -444,6 +532,11 @@ export async function resolveTagCommit({
     const resolved = lsRemote({ owner, repo, tag });
     if (resolved.kind === 'commit') return { ...resolved, via: 'git-ls-remote' };
     if (resolved.kind === 'tag-missing') return { kind: 'tag-missing', via: 'git-ls-remote' };
+    // Everything else — a transport failure, or an exit-0 listing that could
+    // not be READ (#666 review) — is not an answer, so the 403 stands and the
+    // fallback's own message rides along. Only `commit` and `tag-missing` are
+    // answers; keeping this an else-branch rather than an enumerated set means
+    // a kind added later fails closed instead of silently resolving.
     return {
       kind: 'api-error',
       status,
@@ -724,6 +817,18 @@ export function formatFinding(finding) {
         `  claimed tag : ${finding.tag}`,
         `  pinned SHA  : ${finding.pinnedSha}`,
         `  ${finding.tag} resolves to : ${finding.actualSha}${finding.annotated ? ' (annotated tag, dereferenced)' : ''}`,
+        // WHICH resolver produced that number (#666 review). `via` was recorded
+        // and rendered nowhere, under a comment promising the reader would know
+        // the API never answered. Printed only when the fallback was used —
+        // printing it unconditionally would assert a block on every ordinary
+        // mismatch, the same misdirection pointing the other way.
+        ...(finding.via === 'git-ls-remote'
+          ? [
+              '  resolved via : anonymous `git ls-remote` — the GitHub API never answered',
+              '                 (403/451, e.g. an organisation IP allow list), so the tag was',
+              '                 resolved over the git protocol from the SAME canonical repo.',
+            ]
+          : []),
         '  MISMATCH — the pin does not point at the commit this tag names upstream.',
         '  Either the pin is wrong (repoint it at the resolved SHA) or the tag moved',
         '  upstream (a retag on a credentialed path is itself worth investigating).',
