@@ -1,0 +1,77 @@
+# Builds a CONTENT-UNIQUE app image in-cluster (kaniko) and pushes it to the
+# registry the cluster already pulls from.
+#
+# Why this exists: the no-prewarm arm must be a REAL pull. Any image that shares
+# layers with something already cached on a node would make that arm mostly local,
+# and any image already on the nodes cannot be evicted without disturbing images
+# the benchmark does not own. So the harness publishes its own image: a real knext
+# app image plus one incompressible pad layer, under a dedicated repository name.
+#
+# It also builds where the bandwidth is. Pushing a few hundred MB from a laptop to
+# a same-region registry timed out repeatedly here; in-cluster it took 22 seconds.
+#
+# Substitute:
+#   __BASE_IMAGE__   digest-pinned app image to build on top of
+#   __DESTINATION__  registry/repo:tag to push
+#   __PULL_SECRET__  dockerconfigjson Secret in this namespace (base + destination)
+#   __PAD_BYTES__    size of the unique layer (e.g. 125829120 = 120 MiB)
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: pw-image-build
+  namespace: knext-prewarm
+  labels:
+    knext.dev/benchmark: image-prewarm
+spec:
+  backoffLimit: 1
+  template:
+    metadata:
+      labels:
+        knext.dev/benchmark: image-prewarm
+    spec:
+      restartPolicy: Never
+      initContainers:
+        - name: gen-context
+          # Digest-pinned (security.md). Bump with: crane digest alpine:<tag>
+          image: alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              cd /workspace
+              head -c __PAD_BYTES__ /dev/urandom > pad.bin
+              cat > Dockerfile <<EOF
+              FROM __BASE_IMAGE__
+              COPY pad.bin /opt/knext-prewarm-pad.bin
+              EOF
+              ls -l /workspace
+          volumeMounts:
+            - { name: workspace, mountPath: /workspace }
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+      containers:
+        - name: kaniko
+          # Digest-pinned (security.md): this container holds the registry push
+          # credential. Bump with: crane digest gcr.io/kaniko-project/executor:<tag>
+          image: gcr.io/kaniko-project/executor:v1.23.2@sha256:9e69fd4330ec887829c780f5126dd80edc663df6def362cd22e79bcdf00ac53f
+          args:
+            - --dockerfile=/workspace/Dockerfile
+            - --context=dir:///workspace
+            - --destination=__DESTINATION__
+            - --single-snapshot
+            - --compressed-caching=false
+          volumeMounts:
+            - { name: workspace, mountPath: /workspace }
+            - { name: docker, mountPath: /kaniko/.docker }
+          resources:
+            requests: { cpu: 100m, memory: 512Mi }
+      volumes:
+        - name: workspace
+          emptyDir: {}
+        - name: docker
+          secret:
+            secretName: __PULL_SECRET__
+            items:
+              - key: .dockerconfigjson
+                path: config.json

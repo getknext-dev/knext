@@ -145,6 +145,49 @@ the decoupling would trade a false-critical for a silent failure.
 prewarmer's error must NOT reach a `return`, and every other child's error MUST. A new child that
 silently swallows its error fails the guard because it is not on the allowlist.
 
+## Amendment (2026-08-04, #471 item 1): the helper's libc variant is load-bearing
+
+The first live-node run of this design did not measure anything — it found the mechanism **broken**,
+on the very case the design exists for.
+
+`prewarmHelperImage` was pinned as `busybox:1.36.1@sha256:73aaf09…` (#479, "digest-pin the helper").
+That digest is Docker's **default** busybox tag, which is the **glibc** build — dynamically linked.
+The design stages that binary into an emptyDir and execs it *inside the app image*, so on any app
+image without glibc it cannot start. Measured on OKE with an Alpine-based (musl) knext app image:
+
+- the pin container exited **255 immediately** with `exec /knext-pin/busybox: no such file or
+  directory`, the `<app>-imgcache` DaemonSet sat in **CrashLoopBackOff** (2 desired, 0 ready), and
+  `ImageCacheReady` stayed `False/Pulling` indefinitely;
+- staging the same way from `busybox:1.36.1-uclibc` (which is `FROM scratch`, statically linked) ran
+  `busybox sleep` in that **same** app image and exited 0; with it pinned, the DaemonSet reached
+  **2/2 Ready, restartCount 0**, and `ImageCacheReady` went `True/Cached`.
+
+**Decision:** the helper pin must name a **statically linked** official variant (`-uclibc`/`-musl`),
+not the default tag; it is now `busybox:1.36.1-uclibc@sha256:0872fb3a…`.
+`TestPrewarmHelperImage_IsStaticallyLinkedVariant` enforces it, with the predicate table-tested so the
+assertion cannot go vacuous. Linkage itself is not assertable without a container runtime, so the guard
+asserts the one property that predicts it — which variant is pinned.
+
+Three things worth keeping from how this was missed:
+
+- **The degrade-not-fail amendment above worked exactly as designed, and that is why nobody noticed.**
+  `Ready` stayed `True`, `Degraded` stayed `False`, the app served traffic normally; the only signal
+  was `ImageCacheReady=False/Pulling`. An opt-in optimisation failing quietly is the intended
+  behaviour — which makes the condition, the `knext_nextapp_image_prewarm_errors_total` counter and
+  the `KnextImagePrewarmFailing` alert the *only* things standing between "not cached" and "believed
+  cached". Note the failure shape here does not increment that counter: the reconcile **succeeded**
+  (the DaemonSet was created as specified); it was the *pods* that never ran. Coverage is what
+  distinguishes them, and only the condition carries it.
+- **The pull still happened.** A CrashLoopBackOff pod has already pulled the image and still
+  references it, so even broken the prewarmer pulled and pinned. That is precisely why a
+  "no `Pulling` event" assertion alone would have passed over a feature whose DaemonSet was
+  crash-looping on every node — the criterion has to be read together with `ImageCacheReady` and the
+  pods' restart counts.
+- **The existing e2e would have caught it; it had never been executed.** `test/e2e/image_prewarm_e2e_test.go`
+  asserts every prewarm pod Ready with `restartCount == 0`, against an Alpine app image — the exact
+  failing configuration. It only runs on a manual `workflow_dispatch` supplying `SCALE_TEST_IMAGE`
+  (unset on this repo), so it has never run. A spec that cannot run is not a guard.
+
 ## Action items
 
 - [x] `spec.scaling.imagePrewarm` field + CRD regen (`make manifests`/`make generate`); CLI config
@@ -162,6 +205,17 @@ silently swallows its error fails the guard because it is not on the allowlist.
       which is **unset on this repo** (`gh api …/actions/variables` → `total_count: 0`) and an unset
       value only logs a `::warning::` and skips. So today it runs only on a manual `workflow_dispatch`
       supplying an image; setting that variable is what turns it into a live gate.
+- [ ] **STILL OPEN ([#659](https://github.com/getknext-dev/knext/issues/659)) — turn the e2e's SKIP
+      into a FAIL.** The item above is checked because the spec
+      exists and is correct; this one is unchecked because **the spec still cannot run**, which is the
+      root cause this ADR's own amendment identified (*"a spec that cannot run is not a guard"*). It
+      is the only guard that would have caught the glibc-helper regression end to end, and it is
+      exactly the shape `.claude/rules/workflow.md` names as a trigger: a capability landed behind a
+      check that **skips rather than fails**. Closing it means either setting `vars.SCALE_TEST_IMAGE`
+      on this repo, or making an unset value **fail** the scale lane instead of warning — not leaving
+      the decision to whoever next reads the warning. Recorded here as an open action item rather than
+      absorbed into the checked one, because a checked box with an unrunnable guard behind it is how
+      this regression reached a cluster in the first place.
 - [ ] **STILL OPEN — the distroless / shell-less app-image case.** The e2e above runs against
       `SCALE_TEST_IMAGE` = the file-manager image, whose runner stage is `node:22-alpine`
       (`apps/file-manager/Dockerfile:105`). **Alpine ships busybox and `/bin/sh`**, so a naive
@@ -169,10 +223,28 @@ silently swallows its error fails the guard because it is not on the allowlist.
       from a shell-dependent one, and must not be cited as the distroless proof. Closing it needs a
       genuinely distroless, digest-pinned app image (e.g. a knext runtime image on
       `gcr.io/distroless/nodejs`) plumbed in as the e2e app image.
-- [ ] **STILL OPEN — the no-`Pulling`-on-cold-start proof + the warm-vs-cold ~2 s delta.** NOT
-      assertable on kind: kind side-loads images into every node's containerd, so "no `Pulling` event"
-      is trivially true there whether or not the prewarmer works. Needs a multi-node cluster pulling
-      from a real registry (OKE) on a clean cluster (blocked today by cluster clutter — see runs 17–18).
+      **Partial evidence added 2026-08-04 (OKE, live node):** the staged static helper does run in a
+      **libc-free, shell-free** image — `gcr.io/distroless/static-debian12:nonroot`, as a stand-in app
+      image, executed `/knext-pin/busybox sleep 15` to completion, exit 0, restarts 0 — and the glibc
+      helper's failure on an Alpine app image shows the staged binary really is the only thing exec'd
+      (a shell-dependent `sleep infinity` would have worked there). That is the *mechanism* proven on a
+      real kubelet; the open item remains the *e2e* running against a distroless knext app image.
+- [x] **The no-`Pulling`-on-cold-start proof + the warm-vs-cold delta — measured on OKE 2026-08-04**
+      ([`docs/benchmarks/image-prewarm-oke.md`](../benchmarks/image-prewarm-oke.md), harness in
+      `benchmarks/image-prewarm-oke/`). Still not assertable on kind, which side-loads images into every
+      node's containerd; this ran on a 2-node OKE cluster pulling a content-unique 370 MB image from a
+      same-region registry, ABBA-interleaved, one digest on both arms, 10 replicates per arm.
+      **`Pulling` events: 0/10 with prewarm, 10/10 without.** Cold-start TTFB medians **2490 ms vs
+      4782 ms** (delta 2293 ms; 2193 ms when restricted to the one node that took 19 of 20 pods), with
+      **non-overlapping distributions** and positive deltas in all five pairs. The ~2 s estimate holds at
+      the median and understates the tail, compared like for like: p75 to p75 is +3.9 s and max to max
+      +10.7 s. The write-up records one caveat on the tail specifically — the harness's own privileged
+      eviction Jobs ran only on the no-prewarm arm and ate into that arm's quiet time before the
+      request, which this run cannot separate from the pull (the harness has since been fixed; the
+      mechanism result, 0/10 vs 10/10, is unaffected).
+      **Read this criterion together with `ImageCacheReady` and the prewarm pods' restart counts** — see
+      the 2026-08-04 amendment: a crash-looping prewarmer still pulls the image, so "no `Pulling` event"
+      alone does not establish that the feature works.
 - [x] Docs: user-facing "cold start & image caching" guidance
       (`apps/docs/content/docs/image-caching.mdx`), carrying the N×image-size disk cost and the M×N
       pod-slot cost as the honest trade.
