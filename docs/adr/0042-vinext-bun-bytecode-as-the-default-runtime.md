@@ -289,9 +289,17 @@ From #606, sourced to vinext's own repo and registry data:
     peer-requires `@rolldown/plugin-babel` and `babel-plugin-react-compiler`, so that arm ran a
     different *transform pipeline*, not merely a different bundler. Recorded because the conclusion
     survived re-testing and could therefore have been left looking better-evidenced than it was.
-    **Corroboration, not evidence:** the supporting bisect points still come from
-    `e2-build-version.sh`, which hardcodes plugin-react `^6.0.5` for every arm — pairing plugin-react
-    6 with vite 7 in violation of its own peer range. Cite the fixed script, not the bisect. End-to-end, same bespoke entry over two builds, in a
+    **Corroboration, not evidence — and an earlier draft of this line gave the WRONG REASON.** It
+    said `e2-build-version.sh` "hardcodes plugin-react `^6.0.5` for every arm". It does not:
+    `e2-bisect.sh:9` sets `^5.0.0`, reinstalls and **rebuilds**, and all seven surviving probe dirs
+    resolve `plugin-react=5.2.0, vite=7.3.6`. The **real** limitation is worse: **no committed script
+    produces the vite-8 bisect points** (`0.0.30 · 0.0.32 · 0.0.38 · beta.4`) — `e2-bisect.sh` is
+    vite-7-only, and the only 7-vs-8 driver is the **superseded** `e2-vite78.sh`, which used
+    plugin-react `^6` on its vite-8 arm. So the bisect's 7-vs-8 comparison most likely varies
+    plugin-react **between the groups** — the exact round-1 confound shape, one level up.
+    **Cite `e2-vite78-fixed.sh`, never the bisect.** Recorded at length because a record whose whole
+    currency is evidentiary accuracy cannot afford a second wrong description of what a script does,
+    even one that errs against its own interest. End-to-end, same bespoke entry over two builds, in a
     container with **no `node_modules` and no server JS**: **vite 7 serves every route 200 with real
     SSR** (`<h1 id="slug">alpha</h1>`) and a correct 404; **vite 8 500s on every render.**
     **Mechanism:** the Vite-8 SSR chunk reaches react-dom via
