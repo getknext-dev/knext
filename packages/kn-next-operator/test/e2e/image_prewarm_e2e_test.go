@@ -55,17 +55,20 @@ limitations under the License.
 //     works — a green that proves nothing. That measurement needs a multi-node
 //     cluster pulling from a real registry (OKE).
 //
-// AND KNOW WHERE IT RUNS: `make test-e2e-scale` on the nightly gates the whole
-// scale suite on `vars.SCALE_TEST_IMAGE`, which is UNSET on this repo
-// (`gh api repos/getknext-dev/knext/actions/variables` → total_count 0), and an
-// unset value only logs a `::warning::` and skips the step. So as the repo is
-// configured today this spec does NOT run on the schedule — it runs only on a
-// manual `workflow_dispatch` that supplies an image. Setting that variable is
-// what makes it a live gate.
+// AND KNOW WHERE IT RUNS: `make test-e2e-scale` on the nightly needs
+// `vars.SCALE_TEST_IMAGE`, which is UNSET on this repo
+// (`gh api repos/getknext-dev/knext/actions/variables` → total_count 0). That
+// used to make the nightly log a `::warning::` and SKIP, so this spec had never
+// executed — the exact "a spec that cannot run is not a guard" hole ADR-0037's
+// amendment names. Since #659 the unset value FAILS the lane instead: the
+// `scale-image-preflight` job in .github/workflows/operator-e2e-nightly.yml
+// exits non-zero, carries no `continue-on-error`/`if:`, and the scale job
+// `needs:` it. So the gap is loud on every nightly until someone sets the
+// variable to a real, pushed, digest-pinned file-manager image — which is what
+// turns this spec into a live gate.
 //
-// NOTHING INSIDE THE SPEC SKIPS. A missing cluster, a missing image or a
-// DaemonSet that never schedules FAILS. (The workflow-level skip above is a
-// separate, real gap — stated rather than papered over.)
+// NOTHING INSIDE THE SPEC SKIPS EITHER. A missing cluster, a missing image or a
+// DaemonSet that never schedules FAILS.
 package e2e
 
 import (
