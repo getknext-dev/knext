@@ -66,6 +66,18 @@ describe('bun-exec alpine-image gate is wired into CI (ADR-0042 A1/A9)', () => {
       'the alpine-image job is continue-on-error, so it cannot fail the workflow',
     ).not.toMatch(/continue-on-error:\s*true/);
   });
+
+  it('is not gated behind a job-level `if:` — it must run on every PR', () => {
+    // The remaining single-edit disarm. `if: github.ref == 'refs/heads/main'` on
+    // this job leaves the whole chain below green while the alpine e2e never
+    // runs on a pull request — the same class as continue-on-error, one key
+    // along. Job-level keys sit at four spaces; a STEP-level `if:` is deeper and
+    // is legitimate, so the anchor is the indentation, not the word.
+    expect(
+      jobBlock(),
+      'the alpine-image job carries a job-level `if:`, so it can be conditioned off a PR',
+    ).not.toMatch(/^ {4}if:/m);
+  });
 });
 
 /**
@@ -137,6 +149,74 @@ describe('the `test:image` chain actually reaches the suite (both halves)', () =
     const cfg = readFileSync(resolve(EXAMPLE, 'vitest.config.ts'), 'utf8');
     const exclude = cfg.match(/exclude:\s*\[([^\]]*)\]/)?.[1] ?? '';
     expect(exclude).toContain(PATTERN);
+  });
+});
+
+/**
+ * Renaming the suite is now part of the contract (the `*.docker-e2e.test.ts`
+ * convention is what routes it to the right runner), and a rename leaves DEAD
+ * POINTERS behind: after `alpine-image-e2e.test.ts` became
+ * `alpine-image.docker-e2e.test.ts`, ci.yml, the README, the Dockerfile and this
+ * file were updated while `vite.config.ts` and — worse — `vitest.image.config.ts`,
+ * the file that DEFINES the pattern, kept naming a file that no longer exists.
+ *
+ * Prose that names a non-existent file is not cosmetic here: these comments are
+ * the only explanation of why the split exists, so a reader chasing the named
+ * file finds nothing and concludes the guard is gone.
+ *
+ * SCANNED, not enumerated — the whole example tree, so a fourth stale pointer in
+ * a file nobody listed still fails.
+ */
+describe('no stale test-file pointer survives a rename (both halves)', () => {
+  const EXAMPLE = resolve(REPO_ROOT, 'examples/bun-exec');
+
+  /** Every tracked text file in the example, minus build output and deps. */
+  function scannedFiles(): string[] {
+    const out: string[] = [];
+    const walk = (dir: string) => {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        if (['node_modules', '.output', '.nitro', 'dist', '.next'].includes(entry.name)) continue;
+        const full = resolve(dir, entry.name);
+        if (entry.isDirectory()) walk(full);
+        else if (/\.(ts|tsx|mjs|js|md|sh|json)$|^Dockerfile/.test(entry.name)) out.push(full);
+      }
+    };
+    walk(EXAMPLE);
+    return out;
+  }
+
+  it('every `*.test.ts` a comment or doc names actually exists', () => {
+    // Must start at a real token boundary, so neither glob fragments
+    // (`**/*.docker-e2e.test.ts` — a PATTERN, not a path) nor a suffix of a
+    // longer filename is mistaken for a file reference.
+    const REF = /(?<![A-Za-z0-9._/*-])[A-Za-z0-9][A-Za-z0-9._/-]*\.test\.ts/g;
+    const refs = new Map<string, string>(); // reference -> first file naming it
+
+    for (const file of scannedFiles()) {
+      for (const ref of readFileSync(file, 'utf8').match(REF) ?? []) {
+        if (!refs.has(ref)) refs.set(ref, file);
+      }
+    }
+
+    // BOTH HALVES. Without this, a scan that matched nothing — a broken regex, a
+    // walk that skipped the tree — would pass by finding no stale pointer.
+    expect(refs.size, 'the scan found no test-file references at all').toBeGreaterThan(3);
+    expect(
+      [...refs.keys()].some((r) => r.endsWith('alpine-image.docker-e2e.test.ts')),
+      'the scan never saw the alpine e2e, so it is not reading the files it claims to',
+    ).toBe(true);
+
+    for (const [ref, file] of refs) {
+      // A reference with a path is relative to the example or to the repo root;
+      // a bare filename means the example's own test dir.
+      const candidates = ref.includes('/')
+        ? [resolve(EXAMPLE, ref), resolve(REPO_ROOT, ref)]
+        : [resolve(EXAMPLE, 'test', ref)];
+      expect(
+        candidates.some((c) => existsSync(c)),
+        `${file} names ${ref}, which does not exist (stale pointer after a rename)`,
+      ).toBe(true);
+    }
   });
 });
 

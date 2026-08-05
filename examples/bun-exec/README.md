@@ -34,11 +34,16 @@
 >    so the shipped container tried to open
 >    `/Users/<whoever-built-it>/…/examples/bun-exec/.output/public/_next/static/chunks/index-*.js`
 >    and returned `500 {"error":true,"unhandled":true}` (ENOENT) for **every** asset. The entry now
->    re-anchors `__nitro_main__` on the runtime cwd when `./.output/public` exists, which is exactly
->    the layout this README and the `Dockerfile` document. Note what this means for the word
->    "self-contained": the **routes** are embedded in the binary, but `.output/public` is read from
->    disk at runtime — so the binary is portable, the *asset root* is cwd-relative, and the two must
->    ship together.
+>    re-anchors `__nitro_main__` through `resolveAssetAnchor` (`runtime-contract.mjs`), which
+>    prefers a baked root that really exists — so a non-compiled `bun run …/.output/server/index.mjs`
+>    from any cwd is untouched — and otherwise anchors on **`dirname(process.execPath)`**: the
+>    executable's own directory, which is the layout this README and the `Dockerfile` document.
+>    Anchoring on the EXECUTABLE rather than the working directory is what makes the binary
+>    portable (`docker run -w /elsewhere` still serves). If neither has `.output/public`, it
+>    **warns loudly on startup** instead of failing silently — being silent is the whole reason
+>    this bug survived five verifications. Note what this means for the word "self-contained": the
+>    **routes** are embedded in the binary, but `.output/public` is read from disk at runtime — so
+>    the binary is portable and the two must ship **together, side by side**.
 
 > **Maintainer example.** This directory is an in-repo recipe for knext
 > maintainers, not user-facing documentation — so it references ADRs and the

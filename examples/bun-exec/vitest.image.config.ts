@@ -5,7 +5,7 @@ import { defineConfig } from 'vitest/config';
 // container — minutes, not milliseconds — so it must not ride the fast suite
 // the `bun-exec-hardcap` CI job runs.
 //
-// Splitting it out is NOT a way to make it optional: `test/alpine-image-e2e.test.ts`
+// Splitting it out is NOT a way to make it optional: `test/alpine-image.docker-e2e.test.ts`
 // has no skip path (a missing docker or bun FAILS), and the
 // `bun-exec-alpine-image` CI job runs this config on every push. That job's
 // existence is itself guarded by `tests/bun-exec-alpine-image-ci.test.ts`.

@@ -18,7 +18,7 @@
 // composition is proven by the P1a/P2 spikes and re-proven on OKE — see README.
 import { spawn, spawnSync } from 'node:child_process';
 import { dirname, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   checkBearer,
@@ -26,6 +26,7 @@ import {
   createMetricsState,
   METRICS_CONTENT_TYPE,
   renderMetrics,
+  resolveAssetAnchor,
   resolveBindHost,
 } from '../runtime-contract.mjs';
 
@@ -49,6 +50,89 @@ describe('renderMetrics — Prometheus exposition', () => {
     expect(text).toContain('knext_bunexec_http_requests_total 3');
     expect(text).toContain('knext_bunexec_http_inflight_requests 1');
     expect(METRICS_CONTENT_TYPE).toMatch(/version=0\.0\.4/);
+  });
+});
+
+// ── #460 bug 3 — where the runtime reads `.output/public` from ───────────────
+//
+// The regression these lock in is SILENT by construction: when the asset root
+// is wrong, `/` still returns correct SSR HTML and only the JS chunks 500, so
+// the page renders and never hydrates. Only the minutes-long container e2e
+// catches it end-to-end, so the decision itself is factored out of the entry
+// (which cannot be imported here — it pulls in nitro/vinext) into this pure
+// resolver, and BOTH directions are asserted.
+describe('resolveAssetAnchor — the asset root travels with the binary (#460 bug 3)', () => {
+  const bakedUrl = (dir: string) => pathToFileURL(resolve(dir, '.output/server/index.mjs')).href;
+  /** exists() over an explicit allowlist — no filesystem, so both directions are expressible. */
+  const existsIn = (present: string[]) => (p: string) => present.includes(resolve(p));
+
+  it('re-anchors on the EXECUTABLE dir when the baked path is gone (the shipped container)', () => {
+    // The compiled binary's baked `__nitro_main__` is the BUILD MACHINE's path,
+    // which does not exist in the image. `/app/server` + `/app/.output/public`
+    // is the shape the Dockerfile ships.
+    const anchor = resolveAssetAnchor({
+      bakedMain: bakedUrl('/Users/whoever/knext/examples/bun-exec'),
+      execPath: '/app/server',
+      exists: existsIn(['/app/.output/public']),
+    });
+    expect(anchor.mainUrl).toBe(bakedUrl('/app'));
+    expect(anchor.warning).toBeNull();
+  });
+
+  it('is NOT cwd-dependent — the same executable resolves from any working directory', () => {
+    // The whole point of anchoring on execPath: `docker run -w /somewhere-else`,
+    // or a systemd unit with an unrelated WorkingDirectory, must still serve.
+    const anchor = resolveAssetAnchor({
+      bakedMain: bakedUrl('/Users/whoever/knext/examples/bun-exec'),
+      execPath: '/opt/knext/server',
+      exists: existsIn(['/opt/knext/.output/public']),
+      cwd: '/var/empty',
+    });
+    expect(anchor.mainUrl).toBe(bakedUrl('/opt/knext'));
+  });
+
+  it('KEEPS a valid baked value — a non-compiled run from an unrelated cwd is untouched', () => {
+    // `bun run /abs/path/.output/server/index.mjs` from somewhere else: the
+    // baked `import.meta.url` is CORRECT there, and an unrelated `.output/public`
+    // under cwd (or beside the `bun` executable) must not hijack it.
+    const anchor = resolveAssetAnchor({
+      bakedMain: bakedUrl('/srv/realapp'),
+      execPath: '/opt/homebrew/bin/bun',
+      exists: existsIn([
+        '/srv/realapp/.output/public',
+        '/elsewhere/.output/public',
+        '/opt/homebrew/bin/.output/public',
+      ]),
+      cwd: '/elsewhere',
+    });
+    expect(anchor.mainUrl, 'a correct baked asset root was overwritten').toBeNull();
+    expect(anchor.warning).toBeNull();
+  });
+
+  it('is LOUD when no candidate has the layout — never silently keeps a dead root', () => {
+    // The failure this whole PR exists to have discovered. Nothing can be
+    // served, so the one thing that must not happen is silence.
+    const anchor = resolveAssetAnchor({
+      bakedMain: bakedUrl('/Users/whoever/knext/examples/bun-exec'),
+      execPath: '/app/server',
+      exists: existsIn([]),
+    });
+    expect(anchor.mainUrl).toBeNull();
+    expect(anchor.warning, 'a missing asset layout resolved silently').toBeTruthy();
+    // The message has to name both candidates, or it cannot be acted on.
+    expect(anchor.warning).toContain('/app/.output/public');
+    expect(anchor.warning).toContain('/Users/whoever/knext/examples/bun-exec/.output/public');
+  });
+
+  it('is loud, not throwing, when there is no baked value at all', () => {
+    // Dev / a preset change that stops prepending `__nitro_main__`.
+    const anchor = resolveAssetAnchor({
+      bakedMain: undefined,
+      execPath: '/app/server',
+      exists: existsIn([]),
+    });
+    expect(anchor.warning).toBeTruthy();
+    expect(anchor.mainUrl).toBeNull();
   });
 });
 

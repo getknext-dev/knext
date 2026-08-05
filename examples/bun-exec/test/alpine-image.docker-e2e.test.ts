@@ -40,13 +40,22 @@ const TOKEN = 'alpine-e2e-token';
 // concurrent runs — two git worktrees, which this repo's workflow actively
 // encourages — killed each other's container mid-probe and reported it as an A9
 // failure. The container is removed in afterAll, so unique names do not leak.
-const CONTAINER = `knext-bunexec-alpine-e2e-${randomBytes(4).toString('hex')}`;
+const RUN_ID = randomBytes(4).toString('hex');
+const CONTAINER = `knext-bunexec-alpine-e2e-${RUN_ID}`;
 
 /** Build for the host's own architecture — emulation is minutes, native is seconds. */
 const ARCH = process.arch === 'arm64' ? 'linux-arm64' : 'linux-x64';
 const PLATFORM = process.arch === 'arm64' ? 'linux/arm64' : 'linux/amd64';
 const BINARY = `knext-bun-exec-${ARCH}`;
-const IMAGE = `knext-bunexec-alpine-e2e:${ARCH}`;
+// UNIQUE per run, for the SAME reason the container name is — and it is the same
+// defect one link further along. A fixed tag is mutable shared state: between
+// this suite's `docker build --tag` and its `docker run`, a concurrent run (two
+// worktrees, which this repo's workflow actively encourages) can rebuild the tag
+// from ITS tree, so run A probes the artifact run B built and reports green for
+// something it never compiled. That is exactly the "a green run validated the
+// wrong artifact" class the unconditional `./build.sh` below exists to close.
+// Removed in afterAll, so unique tags do not leak images onto the host.
+const IMAGE = `knext-bunexec-alpine-e2e:${ARCH}-${RUN_ID}`;
 
 function run(cmd: string, args: string[], opts: { timeout?: number } = {}) {
   return spawnSync(cmd, args, {
@@ -175,7 +184,10 @@ beforeAll(async () => {
 }, 900_000);
 
 afterAll(() => {
+  // The container first — an image cannot be removed while a container of it
+  // exists. Both are per-run unique, so neither removal can reap another run's.
   run('docker', ['rm', '--force', CONTAINER], { timeout: 60_000 });
+  run('docker', ['rmi', '--force', IMAGE], { timeout: 60_000 });
 });
 
 describe('A9 — the compiled binary runs from a clean alpine image', () => {

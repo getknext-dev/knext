@@ -17,7 +17,7 @@ import { defineConfig } from 'vite';
 // chunked (`_ssr/rsc.mjs`, `_ssr/ssr.mjs`) and `bun build` bundles and embeds it
 // anyway — chunked-on-disk no longer implies not-embeddable. That is what
 // retired the abandoned `vinext@^0.0.19` / `nitro@3.0.1-alpha.2` pin.
-// `test/alpine-image-e2e.test.ts` is what keeps this claim honest.
+// `test/alpine-image.docker-e2e.test.ts` is what keeps this claim honest.
 export default defineConfig({
   plugins: [vinext(), nitro({ preset: 'bun', entry: './knext-bun-entry.mjs' })],
 });

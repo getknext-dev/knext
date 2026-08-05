@@ -43,8 +43,6 @@
 // and the binary is self-contained.
 import '#nitro/virtual/polyfills';
 import { existsSync } from 'node:fs';
-import { resolve } from 'node:path';
-import { pathToFileURL } from 'node:url';
 import { useNitroApp } from 'nitro/app';
 import { serve } from 'srvx/bun';
 import {
@@ -53,6 +51,7 @@ import {
   drainPending,
   METRICS_CONTENT_TYPE,
   renderMetrics,
+  resolveAssetAnchor,
   resolveBindHost,
 } from './runtime-contract.mjs';
 
@@ -74,18 +73,40 @@ import {
 //
 // The routes themselves ARE embedded in the binary (that is what #460 fixed and
 // what self-containment means); this is the OTHER half of the ship shape, the
-// `.output/public` dir that travels beside the binary. Re-anchor the asset root
-// on the RUNTIME cwd so `resolve(serverDir, '../public/…')` lands on
-// `<cwd>/.output/public` — precisely the layout README and Dockerfile document.
+// `.output/public` dir that travels beside the binary.
 //
-// Guarded, not unconditional: if the runtime layout is not there we leave the
-// baked value alone, so a non-compiled `bun run .output/server/index.mjs` from
-// some other cwd keeps working. `<cwd>/.output/server` need NOT exist — only its
-// dirname is used — which is why the container ships public/ and no server/.
-const RUNTIME_SERVER_ENTRY = resolve(process.cwd(), '.output/server/index.mjs');
-if (existsSync(resolve(process.cwd(), '.output/public'))) {
-  globalThis.__nitro_main__ = pathToFileURL(RUNTIME_SERVER_ENTRY).href;
-}
+// The decision lives in `resolveAssetAnchor` (runtime-contract.mjs), not here,
+// because it cannot be tested from this file — importing this entry pulls in
+// nitro + vinext — and because its only failure mode is silence. Exactly what
+// it does, in order:
+//
+//   1. If the BAKED root really has `../public`, keep it. A non-compiled
+//      `bun run /abs/path/.output/server/index.mjs` from an unrelated cwd has a
+//      CORRECT baked value and is left completely alone.
+//   2. Otherwise anchor on `dirname(process.execPath)` — the executable's own
+//      directory, which is the ship shape README and Dockerfile document
+//      (binary beside `.output/public`). Anchoring on the EXECUTABLE rather than
+//      cwd is what makes the binary portable: `docker run -w /elsewhere`, a
+//      systemd unit with an unrelated WorkingDirectory, or `cd / && /app/server`
+//      all still serve. `<dir>/.output/server` need NOT exist — only its dirname
+//      is used — which is why the container ships public/ and no server/.
+//   3. If neither has the layout, WARN LOUDLY and keep the baked value. Assets
+//      are unservable either way; the one thing that must not happen is the
+//      silent version of this bug shipping twice.
+//
+// This assignment has no ordering hazard: nitro's `globalThis.__nitro_main__ =
+// import.meta.url` is PREPENDED to this module (so it has already run when this
+// statement executes, which is what makes reading the baked value here sound),
+// and nitro's asset reader dereferences the global inside `readAsset()`, per
+// request — never at module init.
+const assetAnchor = resolveAssetAnchor({
+  bakedMain: globalThis.__nitro_main__,
+  execPath: process.execPath,
+  exists: existsSync,
+  cwd: process.cwd(),
+});
+if (assetAnchor.warning) console.warn(assetAnchor.warning);
+if (assetAnchor.mainUrl) globalThis.__nitro_main__ = assetAnchor.mainUrl;
 
 const PORT = Number(process.env.PORT ?? 3000);
 // Bind to 0.0.0.0 unless HOSTNAME is an EXPLICIT bind/loopback address. k8s sets

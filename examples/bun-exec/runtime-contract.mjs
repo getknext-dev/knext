@@ -16,6 +16,12 @@
 // app routes / the env contract / the globalThis anchor below, or explicitly
 // deferred — see README.md.
 
+// The only imports are node: builtins, which resolve identically under node,
+// under bun, and inside the compiled binary — the "dependency-free" property
+// above is about bun/nitro/vinext coupling, not about the standard library.
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+
 // ── (6) Bind-host resolution — never bind to a k8s pod name ─────────────────
 // Kubernetes injects HOSTNAME=<pod-name> (e.g. `recipe-validate-fn252`) into
 // EVERY pod. A pod name is an identity, not a bind address: binding
@@ -48,6 +54,80 @@ function isBindOrLoopback(value) {
 export function resolveBindHost(env = process.env) {
   const h = env.HOSTNAME;
   return h && isBindOrLoopback(h) ? h : '0.0.0.0';
+}
+
+// ── (#460 bug 3) Where the runtime reads `.output/public` from ──────────────
+//
+// Nitro prepends `globalThis.__nitro_main__ = import.meta.url` to the server
+// entry and its public-asset reader does
+// `readFile(resolve(dirname(fileURLToPath(__nitro_main__)), '../public/…'))`.
+// `bun build --compile` BAKES that URL as the absolute path on the machine that
+// built the binary, so a shipped container asks for
+// `/Users/<builder>/…/.output/public/_next/static/…` and 500s (ENOENT) on every
+// asset — while `/` still returns correct SSR HTML. That is why it survived five
+// verifications: the page renders and never hydrates.
+//
+// The decision is factored out here, away from the entry, for two reasons: the
+// entry cannot be imported by a test (it pulls in nitro + vinext), and the only
+// failure mode of getting this wrong is SILENCE. Both are addressed by making it
+// a pure function with an injected `exists`.
+//
+// Candidate order, and why:
+//   1. the BAKED root, if its `../public` is actually there. A non-compiled
+//      `bun run /abs/path/.output/server/index.mjs` has a CORRECT baked value,
+//      and it must win over anything discovered from the environment.
+//   2. `dirname(process.execPath)` — the compiled case. The ship shape is the
+//      executable next to `.output/public` (README + Dockerfile), so anchoring
+//      on the EXECUTABLE makes the binary portable. cwd deliberately is NOT a
+//      candidate: it would both miss (`docker run -w /elsewhere`) and misfire
+//      (an unrelated `.output/public` under cwd hijacking a correct baked root).
+//   3. nothing → keep the baked value and WARN LOUDLY. Serving is already broken
+//      at this point; the only thing left to get right is not being silent.
+const PUBLIC_REL = '.output/public';
+const SERVER_ENTRY_REL = '.output/server/index.mjs';
+
+/**
+ * @param {object} opts
+ * @param {string | undefined} opts.bakedMain `globalThis.__nitro_main__` as baked at build time.
+ * @param {string} opts.execPath              `process.execPath`.
+ * @param {(path: string) => boolean} opts.exists
+ * @param {string} [opts.cwd]                 Reported in the warning only — never a candidate.
+ * @returns {{ mainUrl: string | null, source: 'baked' | 'execdir' | 'unresolved', warning: string | null }}
+ *   `mainUrl` is null when `__nitro_main__` must be left alone (candidate 1 or 3).
+ */
+export function resolveAssetAnchor({ bakedMain, execPath, exists, cwd }) {
+  // A malformed/absent baked value must degrade, never throw — this runs at
+  // module init of the entry, so throwing here kills the process before it listens.
+  let bakedDir = null;
+  try {
+    if (bakedMain) bakedDir = dirname(fileURLToPath(bakedMain));
+  } catch {
+    bakedDir = null;
+  }
+  const bakedPublic = bakedDir ? resolve(bakedDir, '../public') : null;
+  if (bakedPublic && exists(bakedPublic)) {
+    return { mainUrl: null, source: 'baked', warning: null };
+  }
+
+  const execDir = dirname(execPath);
+  if (exists(resolve(execDir, PUBLIC_REL))) {
+    return {
+      mainUrl: pathToFileURL(resolve(execDir, SERVER_ENTRY_REL)).href,
+      source: 'execdir',
+      warning: null,
+    };
+  }
+
+  return {
+    mainUrl: null,
+    source: 'unresolved',
+    warning:
+      'knext bun-exec: no static-asset root found — every /_next/static request will 500 ' +
+      '(the page will render but never hydrate). Ship the executable NEXT TO its `.output/public` ' +
+      `directory. Looked for: ${resolve(execDir, PUBLIC_REL)}` +
+      (bakedPublic ? ` and ${bakedPublic}` : ' (no baked __nitro_main__ to fall back on)') +
+      (cwd ? ` [cwd: ${cwd}]` : ''),
+  };
 }
 
 // ── (2) Prometheus metrics ─────────────────────────────────────────────────
