@@ -254,9 +254,12 @@ be mistaken for coverage of this flip.
 **Additional exit (see A10 for the binding wording):** `compat-smoke` parameterised over the **build**
 axis onto the vinext artifact, with all eleven checks **actually running** on the vinext lane — the
 build axis must **not** be added to the `check()` lane filter at `compat-smoke.mjs:230`, and
-`hardSmokeCheckIds` must be taught to read a check's third argument so that violating this is
-*visible*. A ✅ row must be backed on the **default** build target; backed only on the non-default
-target is ⚠️ or ❌.
+`hardSmokeCheckIds` must gain a **second predicate** over the span it already captures so that
+violating this is *visible* — widening the capture is a no-op, the third argument is already in it.
+A ✅ row must be backed on the **default** build target, with "default" **derived** from Phase 4's
+`build`-field default rather than hard-coded, so the Phase 5 flip re-points the assertion; backed only
+on the non-default target is ⚠️ or ❌; and **every ✅ row must record which build target(s) its
+evidence covers** — the floor is a minimum, not a substitute for that disclosure.
 
 **"All eleven checks hard on both targets" is NOT sufficient and must not be substituted here.** In
 this runner, *hard* means only *no skip-on-fail*; the `lanes` filter is a separate, sanctioned SKIP
@@ -266,7 +269,11 @@ that actually close this.
 
 **Phase 3 — resolve the capability blockers. (Reversible — produces findings.)** **Exit:** (a) image
 optimisation — a working path under vinext on Knative, or an accepted documented regression with a
-fail-closed rule the CLI and operator both enforce; (b) build-time static generation — works, or the loss
+fail-closed rule the CLI and operator both enforce. **Resolving (a) by weakening check (g)'s assertion
+until it passes under vinext is the undocumented-regression case this exit forbids.** Recorded because
+A10 closes the two obvious doors — lane-filtering (g) and deleting it (deletion already reds:
+`hardIds.has('g')` goes false at `tests/compat-matrix.test.ts:173`) — and "HARD" asserts *no
+skip-on-fail*, **not assertion strength**, so a softened (g) would pass every guard in the file; (b) build-time static generation — works, or the loss
 is measured and accepted; (c) the dev-React observation reproduced or refuted. **This phase is most likely
 to invalidate the flip. Run it early.**
 
@@ -351,17 +358,49 @@ first, then CLI**.
 - **A9** Add `apk add libstdc++ libgcc` to the compiled image, with a test that the binary runs from a
   clean alpine.
 - **A10** Parameterise `apps/file-manager/scripts/compat-smoke.mjs` over the vinext artifact via
-  `SERVER_PATH` / `SERVER_CMD`. **Part of Phase 2 — must land before Phase 5.** Three requirements,
-  worded to close a loophole an earlier draft of this item left open (see below):
+  `SERVER_PATH` / `SERVER_CMD`. **Part of Phase 2 — must land before Phase 5.** Four requirements,
+  worded to close loopholes that earlier drafts of this item left open (see below):
   1. **The build axis must NOT be added to the `check()` lane filter**
      (`compat-smoke.mjs:230`). A capability check that does not *run* on the vinext lane is an
      **unbacked row on that target**, not a declared N/A.
-  2. **`hardSmokeCheckIds` (`tests/compat-matrix.test.ts:83`) must read each check's third argument,
-     not only its body.** Today it classifies a check as hard iff its body contains no `skip(`; the
-     lane list is passed as `check(name, fn, lanes)`, so a lane-filtered check reads as **HARD** and
-     the guard passes. Until this is fixed the guard cannot see the loophole in (1).
-  3. **A ✅ row must be backed on the DEFAULT build target.** Backed only on the non-default target is
-     ⚠️ or ❌ — never ✅ with an annotation.
+  2. **`hardSmokeCheckIds` (`tests/compat-matrix.test.ts:83`) needs a SECOND PREDICATE over the span
+     it already captures** — one that declassifies a check carrying a **build**-axis lane list while
+     leaving a **runtime**-axis one (`['node']` / `['bun']`, #281) hard.
+     **Do not widen the capture — that is a no-op that produces a decoration guard.** The regex at
+     `:87` lookaheads to the next `await check(`, so the third argument is **already inside** `body`.
+     The defect is not that the guard cannot see the lane list; it is that line 93 tests only
+     `/\bskip\(/` and nothing tests the lane list. An implementer told to "read the third argument"
+     will widen the capture, watch the test stay green, and conclude the loophole is not real —
+     exactly the *"guard that stays green when its subject is removed is decoration"* failure
+     `workflow.md` forbids. The new predicate sits **alongside** `/\bskip\(/`, not in place of it.
+     Requirement (1) is what makes the build/runtime distinction necessary here: (1) permits the
+     runtime axis, so (2) must not declassify it — `h. bun keep-alive guard contract (#188)` is its
+     natural future user.
+  3. **A ✅ row must be backed on the DEFAULT build target**, and **the guard must derive "default"
+     from the same single source as Phase 4's `build`-field default — never a literal.** "Default" is
+     a **moving value**: A10 lands at Phase 2, the flip happens at Phase 5. A guard that hard-codes
+     turbopack-as-default keeps asserting against the **ex-default** after the flip, so every row
+     reads ✅ backed on a target that is no longer default and nothing reds — an unbacked ✅ on the
+     default path reached **without violating (1), (2) or (3)**. Deriving it means the Phase 5 flip
+     mechanically re-points the assertion.
+     Backed only on the non-default target is ⚠️ or ❌ — never ✅ with an annotation.
+     **This is not a smoke-row-only requirement**, and scoping it to smoke rows would miss the case
+     that proves it: the **Graceful shutdown (SIGTERM drain)** ✅ row cites
+     `packages/kn-next/src/adapters/shutdown.ts` — the node/turbopack runtime entry. Under a vinext
+     default that file is off the default path entirely, because per Consequence 4 the drain is
+     re-provided by the bespoke bun entry. (3) correctly catches it.
+  4. **Every ✅ row must additionally RECORD which build target(s) its evidence covers.** The floor in
+     (3) is a **minimum, not a substitute** for this disclosure. (3) says what happens to a row backed
+     only on the *non-default* target; it says nothing about a row backed only on the *default* one,
+     which would read ✅ with no indication that the other supported target is unbacked. That window
+     is real and spans Phases 4–6: Phase 4 ships `build: vinext` as a deployable opt-in and Phase 6
+     leaves node's fate undecided, so a user on the non-default target would read a ✅ that does not
+     hold for them. That is ADR-0007's named *"compat-smoke creates false confidence"* risk applied to
+     the non-default target, and the disclosure is also what makes ADR-0036's fall-back-to-the-other-
+     target model actionable at all.
+     *(Round 3 dropped this clause while fixing the lane-filter loophole — a strictly-better floor
+     that was not a superset. Recorded because it is this repo's documented successive-round failure
+     mode: each round fixes the last defect and introduces the next.)*
 
   > **Why this wording, and not "keep all eleven checks hard on both targets".** That was the earlier
   > draft, and it does not close the hole. In this runner's vocabulary **hard** means *no skip-on-fail*
