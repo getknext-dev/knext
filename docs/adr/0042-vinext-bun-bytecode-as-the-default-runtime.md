@@ -464,19 +464,20 @@ first, then CLI**.
      regression **and an unauthenticated CPU-exhaustion surface**. **A cache, a proxy rate limit and
      a decode timeout are prerequisites** before this ships. `security.md`'s runtime-hardening rule
      applies directly.
-   - **THE SPIKE'S RESOURCE CAPS DO NOT FAIL CLOSED — do not port them as-is.** An earlier draft of
-     this entry credited the spike with "a concurrency semaphore, 20 MB / 40 MP caps and traversal
-     refusal" as if they bounded anything. `handleImageOptimization` wraps `transformImage` in
-     `try { … } catch (e) { console.error(…) }` and then falls through to
-     `createPassthroughImageResponse` (`image-optimization.js:213-233`). So **every** guard placed
-     inside `transformImage` — the 40 MP cap, the non-PNG/JPEG rejection — yields **HTTP 200 with the
-     full unoptimized source and `Cache-Control: public, max-age=31536000, immutable`**. They are
-     silent degradations to a **year-cached passthrough**, not refusals. A production port must
-     enforce limits *outside* that catch.
-   - **The 40 MP cap is checked AFTER the decode it exists to bound** — `await decodePng(ab)` runs
-     first, then `width * height` is tested. The decode is the expensive step of a decompression
-     bomb; the check only saves the resize+encode. Real exposure is bounded today because
-     `parseImageParams` admits only root-relative URLs, but that is not the reason the spike gives.
+   - **Resource caps must be enforced OUTSIDE vinext's catch — a production port must do the same.**
+     `handleImageOptimization` wraps `transformImage` in `try { … } catch (e) { console.error(…) }`
+     and falls through to `createPassthroughImageResponse` (`image-optimization.js:213-233`), so any
+     guard placed *inside* `transformImage` yields **HTTP 200 with the full unoptimized source and
+     `Cache-Control: public, max-age=31536000, immutable`** — a silent degradation to a year-cached
+     passthrough, not a refusal. The spike originally had exactly that defect and it is now fixed by
+     moving enforcement into `fetchAsset`; **mutation-proved by execution** — a decompression bomb
+     went from `200 / image/png / 97,276 B / year-immutable` to **404**, and text-served-as-png from
+     `200` to **404**, with the control unchanged at 1,463 B AVIF. Carried here because the failure
+     mode is invisible and the next implementer will otherwise place the cap where it looks natural.
+   - **Bound dimensions from the header, not after decoding.** The spike's first cut tested
+     `width * height` *after* `await decodePng(ab)` — the decode being the expensive step of a
+     decompression bomb, so the cap only saved the resize+encode. Now read from a header prefix
+     (PNG `IHDR`, JPEG `SOFn`) with no decode, and a JPEG with no SOF in the probe window is refused.
    - **`remotePatterns` is unsupported, and that is an ADR-0006 capability gap, not validation
      working.** `parseImageParams` rejects **every** non-root-relative URL unconditionally
      (`image-optimization.js:112-119`); there is no `remotePatterns` support in the export at all.
