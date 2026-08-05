@@ -40,7 +40,8 @@
   - **Conditional on Escalation 7's answer:** `.claude/rules/architecture.md` §4's *"is NOT a return to
     reverse-engineering Nitro/Vinext as a runtime"* clause. Listed rather than assumed — if the founder
     permits patching vinext internals for the SSR-embedding seam, that clause must be amended; if not,
-    no edit is needed and the seam is off the table.
+    no edit is needed and the **downstream fork** is off the table — note Escalation 3′ prices
+    **upstream contribution** as a distinct option, which a "no" here does not forbid.
 
 ## Context
 
@@ -345,7 +346,8 @@ path. Lane-filtering `g. next/image` onto turbopack would satisfy "hard", pass t
 its ✅ standing on the target where **unmodified** vinext is measured to fail 112×. A10 states the three requirements
 that actually close this.
 
-**Phase 3 — resolve the capability blockers. (Reversible — produces findings.)** **Exit:** (a) image
+**Phase 3 — resolve the capability blockers. (Reversible — produces findings, *except* 3(a), which
+now also requires three implemented mitigations; see its exit.)** **Exit:** (a) image
 optimisation — a working path under vinext on Knative **with a cache, a proxy rate limit and a decode
 timeout in place** (Escalation 1 names these as prerequisites: without them the optimiser is an
 **unauthenticated CPU-exhaustion surface**, and the spike shape satisfies "a working path" while having
@@ -711,4 +713,7 @@ first, then CLI**.
   otherwise **orphaned**: Consequence 12 calls its finding "the single most decision-relevant fact on
   the table" and it contradicts the founder's stated motive, yet nothing consumed the answer — Phase
   3(d) produced the number and no gate read it, so Phase 5 could have passed with 2′ unanswered.
-  Mirrors A11/Escalation 6 deliberately.
+  Mirrors A11/Escalation 6 deliberately. **Record Phase 3(d)'s bytecode-coverage figure alongside
+  the answer**, so a later reader can see what the answer was given against — the ADR can put the
+  number on the table before the question, which is what A12 enforces; it cannot compel a *responsive*
+  answer, and no phrasing could. That limit is stated rather than papered over.
