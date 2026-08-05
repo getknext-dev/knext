@@ -251,11 +251,18 @@ and the *build* axis is not. Both lanes boot the same Next-standalone `server.js
 runtime therefore proves nothing about adopting vinext as the build, and the existing matrix must not
 be mistaken for coverage of this flip.
 
-**Additional exit:** `compat-smoke` parameterised over the **build** axis onto the vinext artifact
-(`SERVER_PATH` is already a documented override, so this is wiring, not a rewrite), all eleven checks
-hard on both targets, and `tests/compat-matrix.test.ts` updated so **each ✅ row names which build
-target its evidence covers**. A row backed on one target and unbacked on the other must not read as a
-single ✅.
+**Additional exit (see A10 for the binding wording):** `compat-smoke` parameterised over the **build**
+axis onto the vinext artifact, with all eleven checks **actually running** on the vinext lane — the
+build axis must **not** be added to the `check()` lane filter at `compat-smoke.mjs:230`, and
+`hardSmokeCheckIds` must be taught to read a check's third argument so that violating this is
+*visible*. A ✅ row must be backed on the **default** build target; backed only on the non-default
+target is ⚠️ or ❌.
+
+**"All eleven checks hard on both targets" is NOT sufficient and must not be substituted here.** In
+this runner, *hard* means only *no skip-on-fail*; the `lanes` filter is a separate, sanctioned SKIP
+path. Lane-filtering `g. next/image` onto turbopack would satisfy "hard", pass the guard, and leave
+its ✅ standing on the target where it is measured to fail 112×. A10 states the three requirements
+that actually close this.
 
 **Phase 3 — resolve the capability blockers. (Reversible — produces findings.)** **Exit:** (a) image
 optimisation — a working path under vinext on Knative, or an accepted documented regression with a
@@ -344,6 +351,32 @@ first, then CLI**.
 - **A9** Add `apk add libstdc++ libgcc` to the compiled image, with a test that the binary runs from a
   clean alpine.
 - **A10** Parameterise `apps/file-manager/scripts/compat-smoke.mjs` over the vinext artifact via
-  `SERVER_PATH`, keep all eleven checks hard on both targets, and update `tests/compat-matrix.test.ts`
-  so every ✅ row records which build target backs it. **Part of Phase 2 — must land before Phase 5.**
+  `SERVER_PATH` / `SERVER_CMD`. **Part of Phase 2 — must land before Phase 5.** Three requirements,
+  worded to close a loophole an earlier draft of this item left open (see below):
+  1. **The build axis must NOT be added to the `check()` lane filter**
+     (`compat-smoke.mjs:230`). A capability check that does not *run* on the vinext lane is an
+     **unbacked row on that target**, not a declared N/A.
+  2. **`hardSmokeCheckIds` (`tests/compat-matrix.test.ts:83`) must read each check's third argument,
+     not only its body.** Today it classifies a check as hard iff its body contains no `skip(`; the
+     lane list is passed as `check(name, fn, lanes)`, so a lane-filtered check reads as **HARD** and
+     the guard passes. Until this is fixed the guard cannot see the loophole in (1).
+  3. **A ✅ row must be backed on the DEFAULT build target.** Backed only on the non-default target is
+     ⚠️ or ❌ — never ✅ with an annotation.
+
+  > **Why this wording, and not "keep all eleven checks hard on both targets".** That was the earlier
+  > draft, and it does not close the hole. In this runner's vocabulary **hard** means *no skip-on-fail*
+  > — it does **not** mean *runs on every lane*. `compat-smoke.mjs:230` has a sanctioned, declared SKIP
+  > path (the `lanes` filter, #281), and the runner's own comment blesses it as *"a deliberate,
+  > declared 'this check does not apply to this runtime'"*. So `check('g. next/image …', fn,
+  > ['turbopack'])` satisfies "hard", passes the guard, emits a declared SKIP on the vinext lane, reds
+  > nothing — and leaves the `next/image` ✅ row standing on a target where it is measured to fail
+  > 112×. That is not hypothetical: (g) is precisely the check that fails under vinext, so extending
+  > the lane filter to the build axis is the **path of least resistance** at Phase 3(a), and the
+  > existing comment reads as prior authorisation for it. Requirement (1) forbids it and (2) makes the
+  > forbidding observable.
+
+  **Honest scope note:** "wiring, not a rewrite" holds for *invoking* the artifact — `SERVER_PATH` and
+  `SERVER_CMD` already cover a compiled binary. It does **not** hold for `startServer`, which stages
+  `.next/static` and `public/` into the standalone tree (`compat-smoke.mjs:~263`); that is
+  Next-standalone-shaped and needs a `.output/public` branch for vinext.
 - **A11** Get a founder answer on the Phase 5 corpus-delta ceiling (Escalation 6). Blocks Phase 5.
