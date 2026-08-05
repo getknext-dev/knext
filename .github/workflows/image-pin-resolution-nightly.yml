@@ -1,0 +1,112 @@
+name: Operator image pin resolution (nightly)
+
+# ── #471: does each image the OPERATOR pins actually BELONG to its tag? ────────
+# The prewarm helper is written `busybox:1.36.1-uclibc@sha256:0872…`. Two Go unit
+# tests guard it at PR time: one asserts a 64-hex digest is present, the other
+# asserts the TAG TEXT names a statically linked variant (`-uclibc`/`-musl`) —
+# the property that predicts whether the staged helper can exec inside a musl or
+# distroless app image at all. Measured on OKE: with the glibc build staged, the
+# pin container exits 255 and the DaemonSet CrashLoopBackOffs on every node.
+#
+# The kubelet resolves the DIGEST and never reads the tag. So
+# `busybox:1.36.1-uclibc@sha256:73aaf090…` — the uclibc tag carrying the glibc
+# digest — passes both Go tests while containerd pulls the image that crash-
+# looped, and the documented bump procedure (`crane digest busybox:<tag>`) makes
+# that one copy-paste. Those tests prove the LABEL; this proves the ARTIFACT.
+#
+# WHY NIGHTLY, NOT A PR GATE: the answer lives UPSTREAM and legitimately changes,
+# so it must be resolved at RUN time. Baking a resolved value into a committed
+# assertion is what made the equivalent action-pin check decay into "edit the
+# guard to get green" (security.md), and making it PR-blocking would couple every
+# merge to a third-party registry's availability. Same division of labour as
+# `action-pin-resolution-nightly.yml`, deliberately.
+#
+# An unreachable registry is a FAILURE, never a pass. The resolution logic (the
+# OCI token dance, missing tags, digest mismatch) lives in
+# `scripts/verify-image-pins.mjs` and is unit-tested OFFLINE against an injected
+# transport by `tests/operator-image-pin-resolution.test.ts`.
+
+on:
+  # 05:41 UTC — offset from the action-pin nightly (05:11) so the two
+  # supply-chain signals do not queue behind each other.
+  schedule:
+    - cron: '41 5 * * *'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  resolve-image-pins:
+    name: Resolve every operator-pinned image against its tag
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # No dependencies and no setup-node: the script is dependency-free ESM on
+      # the runner's built-in Node, so this job cannot itself become a
+      # supply-chain surface while auditing one.
+      - name: Verify tag↔digest correspondence (FAIL on any finding)
+        run: node scripts/verify-image-pins.mjs
+
+  nightly-red-alert:
+    name: Nightly red alert (pinned issue)
+    needs: [resolve-image-pins]
+    if: >-
+      always() &&
+      github.event_name == 'schedule' &&
+      needs.resolve-image-pins.result == 'failure'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      - name: Create or update the "Operator image pin mismatch" issue (idempotent)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          CHECK_RESULT: ${{ needs.resolve-image-pins.result }}
+        run: |
+          set -euo pipefail
+          # The idempotency KEY is this fixed literal title — the lookup and the
+          # create MUST share it, so keep it a constant (never interpolated).
+          title='Operator image pin tag<->digest resolution RED'
+          body="The nightly operator image-pin resolution check FAILED: at least one image the
+          operator RUNS does not resolve to the tag its own reference claims. The job log names,
+          per pin: the file and line, the reference, the pinned digest, and what that tag
+          currently resolves to upstream.
+
+          - Run (full per-pin report in the job log): ${RUN_URL}
+          - Check job result: ${CHECK_RESULT}
+
+          **Why this is not cosmetic.** The kubelet resolves the digest and ignores the tag, so a
+          reference whose tag and digest disagree runs something other than what it says. For the
+          prewarm helper specifically, the wrong variant cannot exec inside a musl or distroless
+          app image at all: the DaemonSet CrashLoopBackOffs on every node, \`ImageCacheReady\`
+          sits at \`False/Pulling\`, and the app's own \`Ready\` stays \`True\` — the failure is
+          silent by design.
+
+          **Triage**
+          - *digest-mismatch* — repoint the pin at the resolved digest, or explain the divergence.
+            A tag that MOVED upstream is worth investigating on its own.
+          - *tag-missing* — the tag was deleted or renamed. Re-pin against a real tag.
+          - *no-tag* — a digest-only reference states no intent, so nothing can check it. Write it
+            as \`repo:<tag>@sha256:<digest>\`.
+          - *api-error* — treated as a failure, never a pass. Re-run to confirm before assuming
+            it was transient.
+
+          Re-run this workflow to confirm green, then close this issue."
+          existing="$(gh issue list --repo "${GITHUB_REPOSITORY}" --state open --limit 100 \
+            --json number,title \
+            --jq "[.[] | select(.title == \"${title}\")][0].number // empty")"
+          if [ -n "${existing}" ]; then
+            echo "updating existing alert issue #${existing}"
+            gh issue comment "${existing}" --repo "${GITHUB_REPOSITORY}" --body "${body}"
+          else
+            echo "creating the alert issue"
+            new_url="$(gh issue create --repo "${GITHUB_REPOSITORY}" --title "${title}" --body "${body}")"
+            new_num="${new_url##*/}"
+            gh issue pin "${new_num}" --repo "${GITHUB_REPOSITORY}" || echo "::warning::could not pin issue #${new_num} (non-fatal)"
+          fi

@@ -8,16 +8,31 @@
  * prewarmer works. It needs a real cluster pulling from a real registry.
  *
  * Design constraints (this repo's admissibility bar for benchmark evidence — see
- * docs/benchmarks/ and ADR-0036's withdrawn runs for why each one is here):
+ * docs/benchmarks/ and ADR-0036's withdrawn runs for why each one is here). Each
+ * is CODE, in `lib.mjs`, unit-tested by `tests/image-prewarm-harness.test.ts` —
+ * an earlier revision of this header claimed the first of them while nothing in
+ * the file implemented it, which is the defect class the workflow rules name:
  *
- *   - ONE application on both arms, asserted by image DIGEST, not by inspection.
+ *   - ONE application on both arms, asserted by image DIGEST against the running
+ *     Revision, BEFORE any mutation (`assertSingleApplication`), and again per
+ *     replicate against the pod that actually served the cold request.
  *   - The arms are INTERLEAVED (ABBA within a pair). A sequential A-then-B design
  *     is invalid: a cluster-level slow mode switching on mid-run already produced
  *     one withdrawn 4.5x result.
  *   - Every replicate asserts its own PRECONDITION (image present / absent on
- *     every node) and fails loudly rather than measuring the wrong thing.
- *   - Both arms are held to the same time-at-zero floor before the request, and
- *     the actual gap is recorded per replicate.
+ *     every node) and fails loudly rather than measuring the wrong thing. An
+ *     ABSENT observation — no pod, a failed events query — FAILS the replicate;
+ *     it is never recorded as the favourable value.
+ *   - A condition that would damage the cluster or the next run (node disk at the
+ *     kubelet's image-GC threshold, a lost restore) is a `FatalError` and aborts
+ *     the RUN. The caller catches ordinary failures, so an abort that is not
+ *     distinguishable from one is not an abort.
+ *   - Both arms are held to the same QUIET floor before the request, measured
+ *     from the end of the precondition work — not from scale-to-zero. The `off`
+ *     arm spends 60-85 s in privileged node Jobs evicting the image and the `on`
+ *     arm 12-15 s, so a floor measured from scale-to-zero gives the two arms
+ *     different amounts of quiet (measured: run 2, 2026-08-04).
+ *   - Whatever the run changes on the CR it puts back, verified by read-back.
  *   - Raw per-replicate rows are written as JSONL; analyze.mjs reports the
  *     distribution stratified by arm, never a pooled median.
  *
@@ -30,15 +45,28 @@
  *   PW_IMAGE=registry/repo@sha256:… node measure.mjs
  */
 import { execFileSync } from 'node:child_process';
-import { appendFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+
+import {
+  assertPodFacts,
+  assertSafeImageRef,
+  assertSafeNodeName,
+  assertSingleApplication,
+  FatalError,
+  imageRepo,
+  nodeEvictCmd,
+  nodeProbeCmd,
+  parseNodeProbe,
+  runReplicates,
+  withRestore,
+} from './lib.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CTX = process.env.KUBE_CONTEXT ?? '';
 const NS = process.env.NAMESPACE ?? 'knext-prewarm';
 const APP = process.env.APP ?? 'pw';
-const IMAGE = process.env.PW_IMAGE; // digest-pinned app image, same on both arms
 const ENDPOINT = process.env.PW_ENDPOINT ?? '/api/health';
 const OUT = process.env.PW_OUT ?? join(HERE, 'results', 'results.jsonl');
 const PAIRS = Number(process.env.PW_PAIRS ?? 5);
@@ -46,10 +74,16 @@ const SETTLE_FLOOR_MS = Number(process.env.PW_SETTLE_FLOOR_MS ?? 150000);
 const DISK_ABORT_PCT = Number(process.env.PW_DISK_ABORT_PCT ?? 85);
 const ORDER = ['on', 'off', 'off', 'on']; // ABBA within pair
 
-if (!IMAGE || !IMAGE.includes('@sha256:')) {
-  console.error('PW_IMAGE must be a digest-pinned app image (registry/repo@sha256:…)');
-  process.exit(1);
-}
+// `results/` is gitignored and therefore absent in a fresh clone — the first
+// writeFileSync below used to throw ENOENT on line 1 of the documented
+// "Reproducing this" command. The sibling scale-to-zero harness mkdir -p's for
+// the same reason (run.sh:360).
+mkdirSync(dirname(OUT), { recursive: true });
+
+// digest-pinned app image, same on both arms. Validated, not merely sniffed for
+// "@sha256:": it is interpolated into a ROOT nsenter shell on every node.
+const IMAGE = assertSafeImageRef(process.env.PW_IMAGE);
+const REPO = imageRepo(IMAGE);
 
 const kc = (...args) =>
   execFileSync('kubectl', CTX ? [...args, '--context', CTX] : args, { encoding: 'utf8' });
@@ -59,7 +93,7 @@ const now = () => new Date().toISOString();
 const log = (...m) => console.log(`[${now()}]`, ...m);
 
 const nodesh = (node, cmd) =>
-  execFileSync(join(HERE, 'nodesh.sh'), [node, cmd], {
+  execFileSync(join(HERE, 'nodesh.sh'), [assertSafeNodeName(node), cmd], {
     encoding: 'utf8',
     maxBuffer: 8 * 1024 * 1024,
     env: { ...process.env, KUBE_CONTEXT: CTX, NAMESPACE: NS },
@@ -68,46 +102,35 @@ const nodesh = (node, cmd) =>
 const NODES = kc('get', 'nodes', '-o', 'jsonpath={range .items[*]}{.metadata.name}{"\\n"}{end}')
   .trim()
   .split('\n')
-  .filter(Boolean);
+  .filter(Boolean)
+  .map(assertSafeNodeName);
 
 // --- node image cache -------------------------------------------------------
-const REPO = IMAGE.split('@')[0];
 const nodeDisk = {};
 
 // NOTE: `crictl images -q <repo>` returns NOTHING for a digest-only (untagged)
 // image even when it IS present. Trusting it silently invalidated a whole run
 // (the "no prewarm" arm never actually evicted anything, so every replicate
 // reported "already present on machine"). `crictl inspecti <ref>` is the
-// authoritative presence check; the id table is only for logging.
+// authoritative presence check; the id table is only for logging and eviction,
+// and it is selected by EXACT repository (see repoIdSelector).
 function imageOnNode(node) {
-  const out = nodesh(
-    node,
-    `crictl inspecti -q ${IMAGE} >/dev/null 2>&1 && echo PRESENT || echo ABSENT; ` +
-      `crictl images --digests 2>/dev/null | grep ${REPO} | awk '{print "ID="$4}'; ` +
-      `df --output=pcent / | tail -1`,
-  );
-  const pct = out.match(/(\d+)%/);
-  if (pct) nodeDisk[node] = Number(pct[1]);
-  const ids = [...out.matchAll(/ID=([0-9a-f]{8,})/g)].map((m) => m[1]);
-  if (out.includes('PRESENT')) return ids.length ? ids : ['present'];
-  if (out.includes('ABSENT')) return [];
-  throw new Error(`could not determine image presence on ${node}: ${out}`);
+  const probe = parseNodeProbe(nodesh(node, nodeProbeCmd(IMAGE)));
+  if (probe.diskPct != null) nodeDisk[node] = probe.diskPct;
+  if (!probe.present) return [];
+  return probe.ids.length ? probe.ids : ['present'];
 }
 
 async function removeImageFromNode(node) {
-  // Only ever touches the harness's OWN repository, never a pre-existing image.
+  // Only ever touches the harness's OWN repository — matched EXACTLY on the
+  // repository column, never `grep <repo>`, which also matched `<repo>-app` and
+  // `<repo>x` and would then have `crictl rmi`'d them by image id.
   // cri-o refuses to remove an image still referenced by an (even exited)
   // container, so retry while the previous replicate's containers are reaped —
   // that reaping routinely takes two minutes here.
   let last = '';
   for (let attempt = 0; attempt < 16; attempt++) {
-    last = nodesh(
-      node,
-      `crictl rmi ${IMAGE} 2>&1 | tail -1; ` +
-        `ids=$(crictl images --digests 2>/dev/null | grep ${REPO} | awk '{print $4}'); ` +
-        `for i in $ids; do crictl rmi $i 2>&1 | tail -1; done; ` +
-        `crictl inspecti -q ${IMAGE} >/dev/null 2>&1 && echo "STILL-PRESENT" || echo "removed"`,
-    );
+    last = nodesh(node, nodeEvictCmd(IMAGE));
     if (imageOnNode(node).length === 0) return last;
     await sleep(10000);
   }
@@ -115,6 +138,10 @@ async function removeImageFromNode(node) {
 }
 
 // --- CR-driven state (ADR-0001: the CR is the only thing the harness writes) --
+const readPrewarm = () =>
+  kc('get', 'nextapp', APP, '-n', NS, '-o', 'jsonpath={.spec.scaling.imagePrewarm}').trim() ===
+  'true';
+
 const patchPrewarm = (on) =>
   kc(
     'patch',
@@ -167,6 +194,26 @@ const REVISION =
   kc('get', 'ksvc', APP, '-n', NS, '-o', 'jsonpath={.status.latestReadyRevisionName}').trim();
 const URL_BASE = kc('get', 'ksvc', APP, '-n', NS, '-o', 'jsonpath={.status.url}').trim();
 
+// The header's first design constraint, as an assertion: the Revision that will
+// serve BOTH arms must run exactly the digest under test. Read and checked
+// BEFORE any patch, so a mismatch aborts without having mutated anything.
+const REVISION_IMAGE = (() => {
+  try {
+    return kc(
+      'get',
+      'revision',
+      REVISION,
+      '-n',
+      NS,
+      '-o',
+      'jsonpath={.spec.containers[0].image}',
+    ).trim();
+  } catch {
+    return '';
+  }
+})();
+assertSingleApplication({ pwImage: IMAGE, revisionImage: REVISION_IMAGE, revision: REVISION });
+
 const appPods = () =>
   kcj('get', 'pods', '-n', NS, '-l', `serving.knative.dev/revision=${REVISION}`).items.filter(
     (i) => i.status?.phase !== 'Succeeded' && !i.metadata.deletionTimestamp,
@@ -203,6 +250,10 @@ function podFacts(sinceIso) {
     )[0];
   if (!pod) return null;
   let events = [];
+  // A FAILED events query is recorded as such and fails the replicate. It used
+  // to be swallowed, leaving `events = []` and therefore `pulling: false` — the
+  // value the headline claim wants, from an observation that never happened.
+  let eventsError = null;
   try {
     events = kcj(
       'get',
@@ -216,7 +267,9 @@ function podFacts(sinceIso) {
       msg: (e.message ?? '').slice(0, 220),
       t: e.firstTimestamp ?? e.eventTime,
     }));
-  } catch {}
+  } catch (e) {
+    eventsError = String(e);
+  }
   return {
     pod: pod.metadata.name,
     node: pod.spec.nodeName,
@@ -232,9 +285,10 @@ function podFacts(sinceIso) {
       startedAt: c.state?.running?.startedAt ?? null,
     })),
     events,
+    eventsError,
     // THE criterion: with the image already staged by the prewarm DaemonSet the
     // kubelet must not emit `Pulling` at all.
-    pulling: events.some((e) => e.reason === 'Pulling'),
+    pulling: eventsError ? null : events.some((e) => e.reason === 'Pulling'),
     pulledMsgs: events.filter((e) => e.reason === 'Pulled').map((e) => e.msg),
   };
 }
@@ -269,7 +323,11 @@ async function replicate({ pair, idx, mode }) {
   log(`  image ids per node: ${JSON.stringify(cacheBefore)}`);
   for (const [n, pct] of Object.entries(nodeDisk)) {
     if (pct >= DISK_ABORT_PCT) {
-      throw new Error(
+      // FATAL, not a failed replicate: the caller catches ordinary errors and
+      // steps to the next replicate, which would pull another few hundred MB
+      // onto a node already at the kubelet's image-GC high-water mark — at
+      // which point the kubelet evicts images this harness does not own.
+      throw new FatalError(
         `ABORT: ${n} root disk at ${pct}% — too close to the kubelet image-GC high threshold ` +
           `to keep pulling (GC would start evicting images this harness does not own)`,
       );
@@ -285,13 +343,20 @@ async function replicate({ pair, idx, mode }) {
     }
   }
 
-  // 4. symmetric settle: the arms otherwise differ in how long the app has been at
-  // zero before the request (the off arm spends minutes waiting for cri-o to
-  // release the image). Hold both to the same floor and record the real gap.
-  const waitMore = SETTLE_FLOOR_MS - (Date.now() - scaledAt);
+  // 4. symmetric QUIET floor. The clock starts HERE — after the precondition
+  // work — not at scale-to-zero: the `off` arm spends 60-85 s in privileged
+  // node Jobs evicting the image while the `on` arm spends 12-15 s probing, so
+  // a floor measured from scale-to-zero leaves the two arms with materially
+  // different amounts of quiet before the request (60-90 s vs 135-138 s in run
+  // 2). Both the quiet time and the node work are recorded per replicate.
+  const quietFrom = Date.now();
+  const preconditionMs = quietFrom - scaledAt;
+  const waitMore = SETTLE_FLOOR_MS - (Date.now() - quietFrom);
   if (waitMore > 0) await sleep(waitMore);
-  const settleMs = Date.now() - scaledAt;
-  log(`  settled ${Math.round(settleMs / 1000)}s at zero`);
+  const settleMs = Date.now() - quietFrom;
+  log(
+    `  precondition work ${Math.round(preconditionMs / 1000)}s, then quiet ${Math.round(settleMs / 1000)}s`,
+  );
 
   // 5. the cold request, then an immediately-following warm one as this
   // replicate's own baseline (it cancels client↔cluster RTT)
@@ -315,11 +380,12 @@ async function replicate({ pair, idx, mode }) {
   }
   log(`  warm ttfb=${warm.ttfb_ms}ms`);
 
-  // 6. what the kubelet actually did
+  // 6. what the kubelet actually did — asserted complete, and asserted to be
+  // the SAME application by digest, before it is written as a data point
   await sleep(3000);
-  const facts = podFacts(sinceIso);
+  const facts = assertPodFacts(podFacts(sinceIso), { expectImage: IMAGE });
   log(
-    `  pod=${facts?.pod} node=${facts?.node} Pulling=${facts?.pulling} pulled=${JSON.stringify(facts?.pulledMsgs)}`,
+    `  pod=${facts.pod} node=${facts.node} Pulling=${facts.pulling} pulled=${JSON.stringify(facts.pulledMsgs)}`,
   );
 
   const row = {
@@ -330,6 +396,7 @@ async function replicate({ pair, idx, mode }) {
     // 'off' = imagePrewarm=false, image evicted from every node → kubelet must pull
     mode,
     image: IMAGE,
+    repo: REPO,
     endpoint: ENDPOINT,
     url,
     cold_ttfb_ms: cold.ttfb_ms,
@@ -338,13 +405,21 @@ async function replicate({ pair, idx, mode }) {
     warm_ttfb_ms: warm?.ttfb_ms ?? null,
     node_cache_before: cacheBefore,
     node_disk_pct: { ...nodeDisk },
+    // precondition_ms = privileged node work (eviction + probes); settle_ms =
+    // the QUIET time between that work and the request. Published per arm by
+    // analyze.mjs, because an asymmetry here is an alternative explanation for
+    // the tail.
+    precondition_ms: preconditionMs,
     settle_ms: settleMs,
+    at_zero_ms: Date.now() - scaledAt,
     revision: REVISION,
     ...facts,
   };
   appendFileSync(OUT, `${JSON.stringify(row)}\n`);
   return row;
 }
+
+const record = (row) => appendFileSync(OUT, `${JSON.stringify(row)}\n`);
 
 const main = async () => {
   writeFileSync(
@@ -356,6 +431,7 @@ const main = async () => {
         endpoint: ENDPOINT,
         url: URL_BASE,
         revision: REVISION,
+        revisionImage: REVISION_IMAGE,
         pairs: PAIRS,
         order: ORDER,
         nodes: NODES,
@@ -366,23 +442,30 @@ const main = async () => {
   );
   log(`image under test: ${IMAGE}`);
   log(`url: ${URL_BASE}${ENDPOINT}  revision: ${REVISION}  nodes: ${NODES.join(',')}`);
-  const first = Number(process.env.PW_PAIR_START ?? 1);
-  let n = (first - 1) * ORDER.length;
-  for (let pair = first; pair <= first + PAIRS - 1; pair++) {
-    for (const mode of ORDER) {
-      n++;
-      try {
-        await replicate({ pair, idx: n, mode });
-      } catch (e) {
-        // A failed replicate is RECORDED, never silently retried into the dataset.
-        log(`  REPLICATE FAILED: ${e}`);
-        appendFileSync(
-          OUT,
-          `${JSON.stringify({ ts: now(), pair, idx: n, mode, failed: String(e) })}\n`,
-        );
-      }
-    }
-  }
+
+  // Whatever imagePrewarm was set to before this run, it is set back to that —
+  // and the restore is READ BACK, not assumed. `ORDER` ends with `on`, so
+  // without this every run left a prewarm DaemonSet and a warm image resident
+  // on every node, and the next benchmark on this cluster inherits it silently.
+  await withRestore({
+    read: readPrewarm,
+    write: patchPrewarm,
+    log: (m) => log(m),
+    body: () =>
+      runReplicates({
+        first: Number(process.env.PW_PAIR_START ?? 1),
+        pairs: PAIRS,
+        order: ORDER,
+        run: replicate,
+        record,
+        log,
+        now,
+      }),
+  });
   log('done');
 };
-main();
+
+main().catch((e) => {
+  log(`RUN ABORTED: ${e}`);
+  process.exitCode = 1;
+});

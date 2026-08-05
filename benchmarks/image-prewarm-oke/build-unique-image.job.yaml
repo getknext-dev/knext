@@ -32,7 +32,8 @@ spec:
       restartPolicy: Never
       initContainers:
         - name: gen-context
-          image: alpine:3.20
+          # Digest-pinned (security.md). Bump with: crane digest alpine:<tag>
+          image: alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc
           command:
             - sh
             - -c
@@ -51,7 +52,9 @@ spec:
             requests: { cpu: 50m, memory: 64Mi }
       containers:
         - name: kaniko
-          image: gcr.io/kaniko-project/executor:v1.23.2
+          # Digest-pinned (security.md): this container holds the registry push
+          # credential. Bump with: crane digest gcr.io/kaniko-project/executor:<tag>
+          image: gcr.io/kaniko-project/executor:v1.23.2@sha256:9e69fd4330ec887829c780f5126dd80edc663df6def362cd22e79bcdf00ac53f
           args:
             - --dockerfile=/workspace/Dockerfile
             - --context=dir:///workspace

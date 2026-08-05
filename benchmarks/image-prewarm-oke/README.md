@@ -65,7 +65,12 @@ Environment: `KUBE_CONTEXT`, `NAMESPACE`, `APP`, `PW_IMAGE`, `PW_ENDPOINT`
 max, mean, sd), the per-pair ABBA deltas, and whether the distributions overlap.
 It never pools the arms and never reports a median alone.
 
-## Two ways it can lie to you, both learned the hard way
+The pure half of the harness (`lib.mjs`) is unit-tested offline by
+`tests/image-prewarm-harness.test.ts` — the reference/node-name validation, the
+exact-repository selector, the "an absent observation fails the replicate" rule,
+the fatal-vs-recorded split, and the restore.
+
+## Three ways it can lie to you, all learned the hard way
 
 - **`crictl images -q <repo>` returns nothing for a digest-only image even when
   the image is present.** The first run of this harness trusted it, so the "no
@@ -75,12 +80,30 @@ It never pools the arms and never reports a median alone.
   the kubelet's image-GC high threshold, at which point the kubelet starts
   evicting images the benchmark does not own — which both corrupts later
   measurements and damages other work on the cluster. The harness reads each
-  node's root-disk usage every replicate and aborts at `PW_DISK_ABORT_PCT`.
+  node's root-disk usage every replicate and aborts the **run** at
+  `PW_DISK_ABORT_PCT` (it used to abort the replicate, which the caller caught,
+  so the next replicate pulled another few hundred MB onto the same node).
+- **An observation that did not happen is not an observation.** `Pulling` is the
+  headline criterion, and "no `Pulling` event" is also what you get from a pod
+  that could not be found or an events query that failed. Both now FAIL the
+  replicate; `analyze.mjs` refuses to count a row without a boolean `pulling`.
+  Getting this wrong is invisible because it fails toward the desired answer.
 
 ## Cleanup
 
-The harness itself leaves nothing running: `nodesh.sh` Jobs carry
-`ttlSecondsAfterFinished`, and the last `imagePrewarm` value it wrote is whatever
-the final replicate used — **set it back to `false` and remove the app** when
-done. A leftover prewarm DaemonSet holds a pod slot and an image copy on every
-node and silently changes every later measurement on that cluster.
+The harness restores the `spec.scaling.imagePrewarm` value it found before the
+run and **reads it back to prove the restore landed**; a restore that does not
+take effect aborts loudly. `nodesh.sh` Jobs carry `ttlSecondsAfterFinished`, so
+they reap themselves.
+
+This used to be a line in this README instead: `ORDER` ends with `on`, so every
+run exited leaving a prewarm DaemonSet — and therefore a warm image — resident on
+every node, delegated to a human remembering to undo it. The next benchmark on
+that cluster inherits it and cannot tell. A checklist is not a restore.
+
+Still yours to do when you are finished with the cluster: **remove the app and
+its namespace**, and delete the content-unique image from the registry.
+
+**Not covered:** a `SIGKILL`ed run cannot restore anything. Check
+`kubectl get nextapp <app> -o jsonpath='{.spec.scaling.imagePrewarm}'` before
+trusting a later measurement on the same cluster.

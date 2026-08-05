@@ -85,6 +85,22 @@ func staticBusyboxVariant(ref string) bool {
 // `busybox:1.36.1-uclibc` runs `busybox sleep` in that same app image and exits 0.
 // Linkage cannot be asserted without a container runtime, so this guards the one
 // property that predicts it: which official variant the pin names.
+//
+// WHAT THIS DOES NOT PROVE, stated because an earlier revision left it implicit
+// and a reviewer BUILT AND RAN the bypass: this asserts the TAG TEXT, and the
+// kubelet resolves the DIGEST and never reads the tag. So
+// `busybox:1.36.1-uclibc@sha256:73aaf090…` — the uclibc tag carrying the glibc
+// digest that crash-looped on OKE — passes this test AND
+// TestPrewarmHelperImage_DigestPinned while containerd pulls the broken image,
+// and the documented bump procedure (`crane digest busybox:<tag>`) makes that a
+// single copy-paste. These two tests prove the LABEL. The ARTIFACT is proved by
+// resolving the tag upstream at RUN time — `scripts/verify-image-pins.mjs`,
+// wired to `.github/workflows/image-pin-resolution-nightly.yml`, which fails on a
+// digest that is not what its tag resolves to (and on an unreachable registry,
+// never a pass). That value cannot be frozen into an assertion here: doing so for
+// the equivalent action-pin check reddened every correct bump and made editing
+// the guard the routine way to get green (security.md). Form at PR time, value
+// at run time — do not collapse the two.
 func TestPrewarmHelperImage_IsStaticallyLinkedVariant(t *testing.T) {
 	// The predicate must actually discriminate, or the assertion below is vacuous.
 	digest := "@sha256:" + strings.Repeat("a", 64)
