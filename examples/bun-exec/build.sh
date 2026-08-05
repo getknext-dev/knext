@@ -5,17 +5,28 @@
 #   ./build.sh [arch]
 #     arch ∈ linux-x64 | linux-arm64 | darwin-arm64 | darwin-x64
 #     (default: linux-x64 — the ship target; alpine needs the -musl variants)
-#     OUT=<path>  override the output binary name.
+#     OUT=<path>  override the output binary name. NEVER name it after a
+#                 language runtime (`node`/`bun`/`bunx`/`bun-debug`/`deno`): the
+#                 asset-root resolver classifies a compiled binary by basename,
+#                 so those names make it read the BUILD TREE's assets silently
+#                 (runtime-contract.mjs, RUNTIME_BASENAMES).
 #
 #   ./build.sh --print-labels [arch]
 #     print the OCI image labels for this build and exit WITHOUT building.
 #     Feed them to the image build so the deployed digest carries its own build
 #     provenance (see "Build provenance" below).
 #
-# The output is a self-contained binary: routes are bundled into
-# `.output/server/index.mjs` (nitro 3.0.1-alpha.2 / vinext 0.0.19) so `--compile`
-# embeds them. SHIP the binary alongside `.output/public` (static assets), run
-# it from a dir where `./.output/public` resolves. See README.md.
+# The output is a self-contained binary: `--compile` embeds every route from
+# `.output/server/index.mjs` (vinext 1.0.0-beta.4 / vite 8 / nitro
+# 3.0.260610-beta — the abandoned `vinext@^0.0.19` / `nitro@3.0.1-alpha.2` pin is
+# retired, ADR-0042 A1). SHIP the binary alongside `.output/public` (static
+# assets): the runtime anchors static assets on the EXECUTABLE's own directory,
+# NOT on the working directory, so `<dir>/server` + `<dir>/.output/public` serves
+# from any cwd. See README.md.
+#
+# The `-musl` targets are NOT statically linked: the image MUST `apk add
+# libstdc++ libgcc` or the binary exits 127 (ADR-0042 A9). Use the `Dockerfile`
+# in this directory; `bun run test:image` proves the result actually runs.
 #
 # ── Build provenance (S8 / #551) ─────────────────────────────────────────────
 # Nothing used to tie a deployed image digest to the flags it was built with, so

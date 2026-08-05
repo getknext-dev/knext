@@ -17,10 +17,12 @@ Sometimes it is not:
 
 Measured on a two-node cluster waking a 370 MB image from a registry in the same region: a cold
 start that has to pull took **about 2.3 seconds longer** at the median than the same cold start with
-the image already on the node — and in the slowest of twenty runs, 11 seconds longer. That is on top
-of scheduling and server boot, which you pay either way. So the worst cold start your users see can
-be several times the typical one, and which one they get is luck. Expect more from a larger image or
-a registry further away, and less from a smaller or closer one.
+the image already on the node. The gap is wider further out in the distribution — comparing like
+with like, the slowest quarter of runs was about **3.9 seconds** apart and the slowest single run of
+each about **10.7 seconds**. That is on top of scheduling and server boot, which you pay either way.
+So the worst cold start your users see can be several times the typical one, and which one they get
+is luck. Expect more from a larger image or a registry further away, and less from a smaller or
+closer one.
 
 `imagePrewarm` removes that luck.
 
@@ -73,7 +75,8 @@ kubectl get nextapp shop -o jsonpath='{.status.conditions[?(@.type=="ImageCacheR
 - **`False` / `Pulling`** — still populating. The message tells you how many nodes are done, e.g.
   `3/10 prewarm node(s) have the app image pulled+pinned`. This is the normal state for a minute or
   two after a deploy, and again briefly after every new build, since each new image digest has to
-  be pulled to each node before it is cached.
+  be pulled to each node before it is cached. **If it does not clear, read the next section** —
+  a permanently stuck `Pulling` is how a broken prewarmer looks, not how a slow one looks.
 - **`False` / `ReconcileFailed`** — knext could not create or update the prewarmer. The most common
   cause is that the operator's service account is not permitted to manage DaemonSets in the
   cluster, which usually means the operator was upgraded without updating its permissions. The
@@ -82,6 +85,31 @@ kubectl get nextapp shop -o jsonpath='{.status.conditions[?(@.type=="ImageCacheR
 - **`False` / `CleanupFailed`** — you turned prewarming **off**, but knext could not delete the
   cached copies. They are still occupying disk and a pod slot on every node until this clears. Same
   usual cause as above: the operator lacks permission to delete DaemonSets.
+
+### When `Pulling` never clears
+
+`False` / `Pulling` that stays put — especially at **`0/N` nodes**, hours after a deploy — is not a
+slow pull. It is the shape a prewarmer takes when its pods cannot start at all: they are restarted,
+they pull the image, they fail, and coverage never moves off zero.
+
+Nothing else will tell you. The app stays `Ready` and keeps serving (by design — see below), and
+this particular failure does **not** raise the prewarm error count, because creating the cache
+succeeded; it was the pods that never ran. `ImageCacheReady` is the only signal, so treat a stuck
+value as a real fault rather than as something that will resolve itself:
+
+```bash
+# does the count move at all, over a few minutes?
+kubectl get nextapp shop -o jsonpath='{.status.conditions[?(@.type=="ImageCacheReady")].message}'
+
+# are the cache pods actually running, or restarting?
+kubectl get pods -l app.kubernetes.io/component=image-prewarm
+```
+
+Restart counts climbing with `0/N` coverage means the cache pods are crash-looping. Nothing about
+your application is broken and nothing is being lost — cold starts simply pay the image pull, as
+they did before you turned prewarming on. Turn `imagePrewarm` off to remove the pods while you
+investigate, and if the pods are crash-looping on an image knext manages rather than on yours,
+please report it.
 
 **`ImageCacheReady` never affects your app's `Ready` status.** If prewarming is failing or still
 catching up, the app is still healthy and still serving — cold starts simply pay the image pull, as

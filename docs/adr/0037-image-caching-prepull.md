@@ -205,6 +205,17 @@ Three things worth keeping from how this was missed:
       which is **unset on this repo** (`gh api …/actions/variables` → `total_count: 0`) and an unset
       value only logs a `::warning::` and skips. So today it runs only on a manual `workflow_dispatch`
       supplying an image; setting that variable is what turns it into a live gate.
+- [ ] **STILL OPEN ([#659](https://github.com/getknext-dev/knext/issues/659)) — turn the e2e's SKIP
+      into a FAIL.** The item above is checked because the spec
+      exists and is correct; this one is unchecked because **the spec still cannot run**, which is the
+      root cause this ADR's own amendment identified (*"a spec that cannot run is not a guard"*). It
+      is the only guard that would have caught the glibc-helper regression end to end, and it is
+      exactly the shape `.claude/rules/workflow.md` names as a trigger: a capability landed behind a
+      check that **skips rather than fails**. Closing it means either setting `vars.SCALE_TEST_IMAGE`
+      on this repo, or making an unset value **fail** the scale lane instead of warning — not leaving
+      the decision to whoever next reads the warning. Recorded here as an open action item rather than
+      absorbed into the checked one, because a checked box with an unrunnable guard behind it is how
+      this regression reached a cluster in the first place.
 - [ ] **STILL OPEN — the distroless / shell-less app-image case.** The e2e above runs against
       `SCALE_TEST_IMAGE` = the file-manager image, whose runner stage is `node:22-alpine`
       (`apps/file-manager/Dockerfile:105`). **Alpine ships busybox and `/bin/sh`**, so a naive
@@ -224,9 +235,13 @@ Three things worth keeping from how this was missed:
       node's containerd; this ran on a 2-node OKE cluster pulling a content-unique 370 MB image from a
       same-region registry, ABBA-interleaved, one digest on both arms, 10 replicates per arm.
       **`Pulling` events: 0/10 with prewarm, 10/10 without.** Cold-start TTFB medians **2490 ms vs
-      4782 ms** (delta 2293 ms; 2200 ms when restricted to the one node that took 19 of 20 pods), with
+      4782 ms** (delta 2293 ms; 2193 ms when restricted to the one node that took 19 of 20 pods), with
       **non-overlapping distributions** and positive deltas in all five pairs. The ~2 s estimate holds at
-      the median and understates the tail (worst replicate +11.3 s).
+      the median and understates the tail, compared like for like: p75 to p75 is +3.9 s and max to max
+      +10.7 s. The write-up records one caveat on the tail specifically — the harness's own privileged
+      eviction Jobs ran only on the no-prewarm arm and ate into that arm's quiet time before the
+      request, which this run cannot separate from the pull (the harness has since been fixed; the
+      mechanism result, 0/10 vs 10/10, is unaffected).
       **Read this criterion together with `ImageCacheReady` and the prewarm pods' restart counts** — see
       the 2026-08-04 amendment: a crash-looping prewarmer still pulls the image, so "no `Pulling` event"
       alone does not establish that the feature works.

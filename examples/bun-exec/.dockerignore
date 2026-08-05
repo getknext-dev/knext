@@ -1,0 +1,38 @@
+# Bounds the build context to what the Dockerfile actually COPYs: the binary
+# named by the BINARY build arg, and `.output/public`. Everything else here —
+# `node_modules/` (~200 packages), `.output/server/`, the test suite — is
+# irrelevant to the image.
+#
+# MEASURED, because the obvious rationale for this file turned out to be wrong
+# on the builder we use. The claim "without a .dockerignore, docker uploads
+# node_modules and the ~100 MB binaries before the first instruction runs" is
+# NOT true under BuildKit, which transfers context lazily, per COPY: building
+# this image with and without this file reported `transferring context: 1.09kB`
+# and `2B` respectively — no measurable difference.
+#
+# It is kept anyway, for the cases where that laziness does not apply: a remote
+# or non-BuildKit builder (DOCKER_BUILDKIT=0) sends the whole directory, and
+# `docker build` still walks the tree to evaluate patterns. Treat it as a
+# correctness bound on what CAN enter the image, not as the speed fix it was
+# first proposed as.
+node_modules/
+.output/server/
+.output/nitro.json
+.nitro/
+.next/
+dist/
+test/
+app/
+*.md
+*.ts
+*.mjs
+*.log
+bun.lock
+tsconfig.json
+
+# NOT excluded: `knext-bun-exec-*` itself. The Dockerfile COPYs whichever one
+# `--build-arg BINARY=...` names, and a .dockerignore cannot be parameterised by
+# a build arg — so on a tree that has built several arches, every one of them is
+# still uploaded. Stated rather than silently accepted; the alternative is a
+# per-arch staging dir, which is more machinery than the saving justifies.
+*.build-provenance.json

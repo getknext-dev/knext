@@ -61,11 +61,22 @@ Environment: `KUBE_CONTEXT`, `NAMESPACE`, `APP`, `PW_IMAGE`, `PW_ENDPOINT`
 (default `/api/health`), `PW_PAIRS`, `PW_SETTLE_FLOOR_MS` (default 150000),
 `PW_DISK_ABORT_PCT` (default 85), `PW_OUT`, `PW_PAIR_START`.
 
+`NAMESPACE`, `PW_IMAGE` and `NODESH_IMAGE` are all **validated, not escaped**:
+each is interpolated into `nodesh.sh`'s privileged `hostPID` pod spec, which
+`nsenter`s the host as root, so `NAMESPACE` must be a plain DNS-1123 label and
+the two image references must be digest-pinned. Anything else exits 2 before
+anything is applied.
+
 `analyze.mjs` reports each arm's full distribution (n, min, p25, median, p75,
 max, mean, sd), the per-pair ABBA deltas, and whether the distributions overlap.
 It never pools the arms and never reports a median alone.
 
-## Two ways it can lie to you, both learned the hard way
+The pure half of the harness (`lib.mjs`) is unit-tested offline by
+`tests/image-prewarm-harness.test.ts` — the reference/node-name validation, the
+exact-repository selector, the "an absent observation fails the replicate" rule,
+the fatal-vs-recorded split, and the restore.
+
+## Three ways it can lie to you, all learned the hard way
 
 - **`crictl images -q <repo>` returns nothing for a digest-only image even when
   the image is present.** The first run of this harness trusted it, so the "no
@@ -75,12 +86,41 @@ It never pools the arms and never reports a median alone.
   the kubelet's image-GC high threshold, at which point the kubelet starts
   evicting images the benchmark does not own — which both corrupts later
   measurements and damages other work on the cluster. The harness reads each
-  node's root-disk usage every replicate and aborts at `PW_DISK_ABORT_PCT`.
+  node's root-disk usage every replicate and aborts the **run** at
+  `PW_DISK_ABORT_PCT` (it used to abort the replicate, which the caller caught,
+  so the next replicate pulled another few hundred MB onto the same node).
+- **An observation that did not happen is not an observation.** `Pulling` is the
+  headline criterion, and "no `Pulling` event" is also what you get from a pod
+  that could not be found or an events query that failed. Both now FAIL the
+  replicate — recorded as failed, stepped over, and never counted as the
+  favourable value; `analyze.mjs` refuses to count a row without a boolean
+  `pulling`. Getting this wrong is invisible because it fails toward the desired
+  answer. Deliberately *not* fatal: a transient events query says nothing about
+  the next replicate, and aborting throws away hours on a shared cluster. What
+  *is* fatal is a **wrong image** — the arms are then not one application, so
+  every remaining replicate would measure a different program.
 
 ## Cleanup
 
-The harness itself leaves nothing running: `nodesh.sh` Jobs carry
-`ttlSecondsAfterFinished`, and the last `imagePrewarm` value it wrote is whatever
-the final replicate used — **set it back to `false` and remove the app** when
-done. A leftover prewarm DaemonSet holds a pod slot and an image copy on every
-node and silently changes every later measurement on that cluster.
+The harness restores the `spec.scaling.imagePrewarm` value it found before the
+run and **reads it back to prove the restore landed**; a restore that does not
+take effect aborts loudly. That includes an **interrupted** run: `SIGINT`
+(Ctrl-C) and `SIGTERM` restore and read back before exiting `130`/`143`, which
+matters because a full run is ~100 minutes and Ctrl-C is therefore a likely exit
+path, not an exotic one. `nodesh.sh` Jobs carry `ttlSecondsAfterFinished`, so
+they reap themselves.
+
+This used to be a line in this README instead: `ORDER` ends with `on`, so every
+run exited leaving a prewarm DaemonSet — and therefore a warm image — resident on
+every node, delegated to a human remembering to undo it. The next benchmark on
+that cluster inherits it and cannot tell. A checklist is not a restore.
+
+Still yours to do when you are finished with the cluster: **remove the app and
+its namespace**, and delete the content-unique image from the registry.
+
+**Not covered — and now only this:** `SIGKILL` (and a power loss), the one signal
+no process can handle. `SIGINT`/`SIGTERM` used to sit in this same bucket, which
+made an honest-looking caveat cover the *unfixable* case while the likely and
+fixable one hid behind it. After a `SIGKILL`, check
+`kubectl get nextapp <app> -o jsonpath='{.spec.scaling.imagePrewarm}'` before
+trusting a later measurement on the same cluster.

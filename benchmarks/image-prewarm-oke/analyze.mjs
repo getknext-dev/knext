@@ -2,6 +2,8 @@
 // Stratified report over results.jsonl: never pools the arms, never reports a median alone.
 import { readFileSync } from 'node:fs';
 
+import { unusableReason } from './lib.mjs';
+
 const rows = readFileSync(
   process.argv[2] ?? new URL('./results/results.jsonl', import.meta.url).pathname,
   'utf8',
@@ -10,8 +12,14 @@ const rows = readFileSync(
   .split('\n')
   .map((l) => JSON.parse(l));
 
-const ok = rows.filter((r) => !r.failed && r.cold_ttfb_ms != null);
-const failed = rows.filter((r) => r.failed);
+// A row without a boolean `pulling` is NOT usable. It used to be: `ok` only
+// required a cold TTFB, and the Pulling tally below is `filter(r => r.pulling)`
+// — so a replicate whose events query failed, or whose pod could not be found,
+// counted as "no Pulling event". On the no-prewarm arm that silently turns
+// 10/10 into 9/10, in the direction of the desired conclusion. Absent
+// observations are reported as absent.
+const ok = rows.filter((r) => unusableReason(r) === null);
+const failed = rows.filter((r) => unusableReason(r) !== null);
 
 const q = (xs, p) => {
   const s = [...xs].sort((a, b) => a - b);
@@ -41,8 +49,10 @@ const label = {
 };
 
 console.log('# image-prewarm OKE measurement\n');
-console.log(`replicates: ${rows.length} attempted, ${ok.length} usable, ${failed.length} failed`);
-for (const f of failed) console.log(`  FAILED idx=${f.idx} mode=${f.mode}: ${f.failed}`);
+console.log(`replicates: ${rows.length} attempted, ${ok.length} usable, ${failed.length} unusable`);
+for (const f of failed) {
+  console.log(`  UNUSABLE idx=${f.idx} mode=${f.mode}: ${unusableReason(f)}`);
+}
 console.log(`image:    ${ok[0]?.image}`);
 console.log(`endpoint: ${ok[0]?.endpoint}`);
 console.log(`revision: ${ok[0]?.revision}\n`);
@@ -65,9 +75,29 @@ for (const [mode, rs] of Object.entries(arms)) {
   const size = rs.flatMap((r) => r.pulledMsgs ?? []).find((m) => /Image size: (\d+)/.test(m));
   if (size) console.log(`image size        ${size.match(/Image size: (\d+)/)[1]} bytes`);
   console.log(`nodes             ${JSON.stringify([...new Set(rs.map((r) => r.node))])}`);
+  // Both of these are per-ARM on purpose: the `off` arm alone runs privileged
+  // eviction Jobs on every node, so an asymmetry in either is an alternative
+  // explanation for that arm's tail and must be visible, not inferred.
   console.log(
-    `settle s          ${JSON.stringify(stats(rs.map((r) => Math.round(r.settle_ms / 1000))))}`,
+    `settle (quiet) s  ${JSON.stringify(stats(rs.map((r) => Math.round(r.settle_ms / 1000))))}`,
   );
+  const pre = rs.filter((r) => typeof r.precondition_ms === 'number');
+  if (pre.length) {
+    console.log(
+      `node work s       ${JSON.stringify(stats(pre.map((r) => Math.round(r.precondition_ms / 1000))))}`,
+    );
+  }
+  // WHICH symmetry the floor buys, stated rather than left derivable. The floor
+  // starts after the precondition work, so QUIET is equal across arms — and
+  // therefore TOTAL time at zero is NOT: the `off` arm's eviction Jobs run
+  // inside that window, so it sits at zero ~60 s longer. Both quantities cannot
+  // be equal at once; this is the one that was traded away, so it is printed.
+  const az = rs.filter((r) => typeof r.at_zero_ms === 'number');
+  if (az.length) {
+    console.log(
+      `time at zero s    ${JSON.stringify(stats(az.map((r) => Math.round(r.at_zero_ms / 1000))))}`,
+    );
+  }
   console.log(`cold samples      ${JSON.stringify(rs.map((r) => r.cold_ttfb_ms))}\n`);
 }
 

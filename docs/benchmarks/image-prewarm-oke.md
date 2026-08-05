@@ -19,6 +19,32 @@ is it worth?** It is not assertable on kind — kind side-loads images into ever
 
 ## Environment
 
+### Run identity (endpoint · image digest · sitting)
+
+`benchmarks/scale-to-zero-oke/README.md` defines the bar a published run has to clear to be
+admissible here, and `provenance.sh verify-writeup` enforces it for that harness: **endpoint,
+image digest and sitting, or the run is inadmissible rather than merely weaker.** This section
+carries them, because `benchmarks/**/results/` is gitignored — as published, nothing else in this
+repository identifies what was measured.
+
+| fact | value |
+|---|---|
+| sitting | 2026-08-04, run 2 (run 1 withdrawn — see the correction below) |
+| endpoint | `GET /api/health` |
+| app image (both arms) | `me-abudhabi-1.ocir.io/axfqznklsd2t/knext-prewarm-e2e@sha256:22aa05ad332b80137b7b426b60c8b9388ddcfa06b1a5f7abd5abdf01396f8678` |
+| registry repository | `me-abudhabi-1.ocir.io/axfqznklsd2t/knext-prewarm-e2e` (OCIR, cluster's own region) |
+| Knative revision (both arms) | `pw-00002` |
+| operator source | the working tree that became `698f963` on `feat/471-oke-prewarm-proof`, run **out-of-cluster** — see the caveat below |
+| prewarm helper under test | `busybox:1.36.1-uclibc@sha256:0872fb3a7632ba9d0ae46a8e832a62b30ce83a6f220b8bb52903d9cf477dabe3` |
+| nodes | `10.0.1.253`, `10.0.1.78` |
+
+**One application on both arms, checked rather than asserted:** every one of the 20 recorded
+replicates reports its serving container's `imageID` as that same digest — a single distinct value
+across the whole dataset, on both arms. The harness now *aborts* on this before it mutates anything
+(`assertSingleApplication`); for this run it is a re-analysis of the recorded rows, which is weaker
+than a precondition but is evidence rather than assertion. The sibling harness exists because an A/B
+there once served two different applications.
+
 - **Cluster:** OKE, 2 worker nodes (Oracle Linux 8.10, 1830m allocatable CPU each), Kubernetes
   1.33.10, **cri-o** 1.33.10, Knative Serving with Kourier.
 - **Registry:** OCIR in the cluster's own region, pulled with the app ServiceAccount's
@@ -42,6 +68,14 @@ is it worth?** It is not assertable on kind — kind side-loads images into ever
   (`go run ./cmd/main.go` with a kubeconfig pinned to that context), because pushing an operator image
   from this workstation to the in-region registry timed out repeatedly. Cluster state is still authored
   solely by the operator, from the CR (ADR-0001); only the process location differs.
+  **What that costs, stated plainly:** there is no operator *image digest* to record, because no image
+  was published — so unlike the app image, the control plane is identified by source rather than by
+  artifact. The run predates the commit by about an hour and a half, so what was running is attested by
+  the change set (a one-line helper repin, the only operator-source delta from `main` on this branch),
+  not by a SHA. This repo has already lost a sprint hypothesis to a source-vs-deployed gap; the
+  mitigation here is that the *observable* the run turns on — the helper actually starting — is
+  reported directly (`2/2 Ready, restartCount 0`), and the DaemonSet's own container image is the
+  digest in the table above.
 
 ## Method
 
@@ -116,19 +150,57 @@ Cold-start TTFB, `GET /api/health`, measured from outside the cluster:
   positive in all five pairs: 8065, 2320, 1656, 5574, 1648 ms.
 - **Stratified by node**, since scheduling was not balanced (19 of 20 pods landed on `10.0.1.253`; the
   single `10.0.1.78` sample is the 11.6 s no-prewarm outlier): on `10.0.1.253` alone the medians are
-  **2483 ms (prewarm, n=10)** vs **4683 ms (no prewarm, n=9)** — a **2200 ms** same-node delta. The
-  node asymmetry is therefore not what produces the result.
+  **2490 ms (prewarm, n=10)** vs **4683 ms (no prewarm, n=9)** — a **2193 ms** same-node delta. The
+  node asymmetry is therefore not what produces the result. (All ten prewarm samples are on that node,
+  so its prewarm median is the same 2490 ms as the table above; both are `analyze.mjs`'s interpolated
+  quantile of 2489.5. An earlier revision of this line quoted 2483 — the lower of the two middle
+  samples — which is a different convention from the one the table uses, and immaterial to the
+  conclusion but not to "does the harness produce these numbers".)
 - Warm baselines were stable and indistinguishable between arms (median 410 ms vs 392 ms), which is the
   client↔cluster RTT; subtracting it, the cold-start cost itself is **2091 ms** with prewarm vs
   **4326 ms** without.
 - The kubelet's own reported pull duration (median **2148 ms**, min 1639, max 4673) accounts for most
   of the median delta but **not** the tail: replicates 3 and 15 took 13.8 s and 11.6 s end-to-end while
-  the kubelet reported 2.4 s and 1.6 s of pulling. Whatever produces those — scheduling, layer
-  extraction, or contention on a cluster already at ~84% of CPU requests — is *additional* to the pull
-  and only ever happens on the no-prewarm arm here.
+  the kubelet reported 2.4 s and 1.6 s of pulling. Something *additional* to the pull happens on the
+  no-prewarm arm — but see the next point before attributing it to the cluster.
 
-So the ~2 s estimate ADR-0037 carried is right at the median, and understates the tail: the 75th
-percentile costs 3.9 s and the worst replicate 11.3 s more than the prewarmed arm.
+### The tail has a second candidate explanation: the harness itself
+
+Both arms were held to the same 150 s floor at zero, and the recorded `settle_ms` is exactly 150 s for
+all 20 replicates. That floor was measured **from scale-to-zero**, which is not the same as measuring
+quiet — and the two arms do very different things inside it. Timed from this run's own log, the
+privileged node Jobs that establish each arm's precondition took:
+
+| arm | node work (eviction + presence probes) | quiet before the request |
+|---|---|---|
+| prewarm | 12–15 s (probes only) | ~135–138 s |
+| no prewarm | 60–84 s (evict on both nodes, then probe) | ~66–90 s |
+
+So the no-prewarm arm reached its request after materially less quiet, having just run privileged
+`nsenter` Jobs on both nodes. That is an alternative explanation for its tail that this run cannot
+separate from the pull, and it applies **only to the arm with the tail**. The headline result is not
+in doubt — 0/10 vs 10/10 `Pulling` events is a mechanism observation, not a timing one, the
+distributions do not overlap by 1 s, and the kubelet's own pull duration covers the median delta on
+its own — but the *tail* specifically should be read as "no-prewarm replicates can be much worse",
+not as "the pull costs 11 s".
+
+The harness has since been changed so the floor starts **after** the precondition work
+(`measure.mjs`, `quietFrom`), and `analyze.mjs` now publishes per-arm `settle` and `node work`
+distributions so an asymmetry like this is visible rather than reconstructed from a log. The numbers
+above are that reconstruction, for a run made before the fix.
+
+**Which symmetry that buys, stated plainly, because the two cannot both hold.** The floor now
+equalises **quiet before the request** — the quantity that plausibly affects a cold start, since it
+is what lets the cluster go idle. It therefore *un*equalises **total time at zero**: the `off` arm's
+eviction Jobs run inside that window, so it sits at zero roughly 60 s longer than the `on` arm. That
+is a deliberate trade, not an oversight, and it is no longer only derivable from the two published
+distributions — `at_zero_ms` is recorded per replicate and `analyze.mjs` prints `time at zero`
+per arm alongside `settle` and `node work`. Anyone re-reading this comparison can see both.
+
+So the ~2 s estimate ADR-0037 carried is right at the median. The tail is worse, and comparisons of it
+have to be like-for-like: **p75 to p75 is 3.9 s** (6696 vs 2818), **max to max is 10.7 s** (13812 vs
+3068). An earlier revision of this page said "the worst replicate 11.3 s more", which pairs the
+no-prewarm *maximum* against the prewarm *median* — a mixed comparison that overstates it.
 
 ### Correction: run 1 is withdrawn
 
@@ -162,7 +234,19 @@ node analyze.mjs results/results.jsonl
 ```
 
 `benchmarks/**/results/` is gitignored, so the raw rows are reproduced below rather than
-committed as JSONL.
+committed as JSONL. (`measure.mjs` creates that directory itself — an earlier revision did not, so
+the command above failed with `ENOENT` on its first write in a fresh clone.)
+
+The harness restores whatever `spec.scaling.imagePrewarm` it found before the run, verified by
+read-back, and aborts the run rather than the replicate on a node-disk or restore failure. That
+restore also runs on `SIGINT`/`SIGTERM`, and — since the restoring write is a slow synchronous
+`kubectl patch` — the signal handlers stay installed *through* it, so a Ctrl-C arriving mid-restore
+cannot leave `imagePrewarm=true` behind. Only `SIGKILL` remains uncovered.
+
+`NAMESPACE`, `PW_IMAGE` and `NODESH_IMAGE` are validated rather than escaped: all three are
+interpolated into the privileged `hostPID` pod spec `nodesh.sh` applies (it `nsenter`s the host as
+root), so the namespace must be a plain DNS-1123 label and the image references must be
+digest-pinned. Anything else exits 2 before anything is applied.
 
 ## Appendix — every replicate
 
