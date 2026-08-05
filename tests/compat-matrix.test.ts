@@ -12,9 +12,14 @@ import { describe, expect, it } from 'vitest';
  *   - the `compat-smoke` CI job in .github/workflows/ci.yml.
  *
  * It also enforces the project honesty rules:
- *   - A ✅ row may only cite a HARD (red-on-fail) smoke check. Sprint 1 / T4 removed the last
- *     skip-on-fail path from the runner, so `next/image` (g) is now hard — but the rule that
- *     produced that work stands: a skip-on-fail citation can never back a ✅.
+ *   - A ✅ row may only cite a smoke check that is HARD (red-on-fail) ON EVERY LANE THE ROW
+ *     CLAIMS. Sprint 1 / T4 removed the last skip-on-fail path from the runner, so
+ *     `next/image` (g) is now hard — but the rule that produced that work stands, and it has
+ *     TWO halves (#655): a check may duck a failure by calling `skip(...)` in its body, or by
+ *     declaring a narrowed `lanes` third argument (#281) that makes it a declared no-op on the
+ *     other runtime lane. Neither can back an unconditional ✅. A row that honestly states its
+ *     lane scope ("bun lane only") may cite a lane-scoped check — that is the escape valve for
+ *     a genuinely runtime-specific contract like (h), the bun keep-alive guard.
  *   - The "official" compat suite row may be ✅ ONLY with verifiable run evidence: a GitHub
  *     Actions run ID, the pinned vercel/next.js ref, and an explicit "N passed / 0 failed"
  *     result (A3-3 graduation, #147). An evidence-less flip fails this test. The evidence is
@@ -72,28 +77,242 @@ function parseMatrix(md: string): MatrixRow[] {
   return rows;
 }
 
+// ── compat-smoke check hardness, PER LANE (#655) ───────────────────────────────────────
+//
+// The runner has TWO sanctioned ways for a check not to red a run, and a guard that scans
+// for only one of them is the same one-sided-scan defect it exists to prevent:
+//   1. `skip(...)` in the body — a skip-on-fail downgrade (none exist today, T4 removed them);
+//   2. the LANE FILTER (#281) — `await check(name, fn, ['node'])`, whose lane list is the
+//      THIRD ARGUMENT, so it never appears in the body and reads as "hard" to a body scan.
+// A check narrowed to one lane emits a declared SKIP on the other and reds nothing there, so
+// it cannot back a ✅ row that claims both lanes.
+
+type Lane = 'node' | 'bun';
+const ALL_LANES: readonly Lane[] = ['node', 'bun'] as const;
+
+interface SmokeCheck {
+  id: string;
+  /** The lanes on which this check is a HARD, red-on-fail gate. */
+  hardLanes: Set<Lane>;
+  /** Why it is not hard on every lane ('' when it is). */
+  reason: string;
+}
+
 /**
- * The compat-smoke check ids that are HARD (red-on-fail).
- *
- * A check is declared as `await check('a. ...', async () => { ... })`. A check is HARD
- * only if its body does NOT call `skip(...)`. As of Sprint 1 / T4 no check does — the
- * runner has no skip-on-fail mechanism left — but the derivation stays SCANNED rather than
- * enumerated, so reintroducing one silently demotes that id instead of going unnoticed.
+ * Split the argument list of a call whose `(` sits at `open`, at TOP-LEVEL commas.
+ * Quote-, template-, comment- and bracket-aware, so the third argument is extracted as
+ * written rather than guessed at from the tail of a regex capture. Returns `null` if the
+ * call never closes — the caller then treats the check as unparseable (fail closed).
  */
-function hardSmokeCheckIds(smokeSrc: string): Set<string> {
-  const ids = new Set<string>();
-  // Match each `check('<id>. <title>', ...` and the body up to the next `await check(` or `// ──`.
-  const re = /check\(\s*['"]([a-z])\.[\s\S]*?(?=await check\(|\/\/ ─{2,}|printReport\()/g;
-  let m: RegExpExecArray | null;
-  m = re.exec(smokeSrc);
-  while (m !== null) {
-    const id = m[1];
-    const body = m[0];
-    // skip-on-fail checks call `skip(...)` to downgrade a failure; they are NOT hard gates.
-    if (!/\bskip\(/.test(body)) ids.add(id);
-    m = re.exec(smokeSrc);
+function splitCallArgs(src: string, open: number): string[] | null {
+  const args: string[] = [];
+  let start = open + 1;
+  let depth = 0;
+  let i = open;
+  /** Nesting of template literals ('tmpl') and their `${…}` holes ('expr:<depth>'). */
+  const stack: string[] = [];
+  while (i < src.length) {
+    const c = src[i];
+    const n = src[i + 1];
+    if (stack[stack.length - 1] === 'tmpl') {
+      if (c === '\\') {
+        i += 2;
+        continue;
+      }
+      if (c === '`') {
+        stack.pop();
+        i++;
+        continue;
+      }
+      if (c === '$' && n === '{') {
+        stack.push(`expr:${depth}`);
+        i += 2;
+        continue;
+      }
+      i++;
+      continue;
+    }
+    // An escape in code position only occurs inside a regex literal, e.g. `/^\//` —
+    // whose trailing `\/` + `/` would otherwise read as the start of a line comment.
+    if (c === '\\') {
+      i += 2;
+      continue;
+    }
+    if (c === "'" || c === '"') {
+      i++;
+      while (i < src.length) {
+        if (src[i] === '\\') {
+          i += 2;
+          continue;
+        }
+        if (src[i] === c) break;
+        i++;
+      }
+      i++;
+      continue;
+    }
+    if (c === '`') {
+      stack.push('tmpl');
+      i++;
+      continue;
+    }
+    if (c === '/' && n === '/') {
+      const nl = src.indexOf('\n', i);
+      i = nl === -1 ? src.length : nl;
+      continue;
+    }
+    if (c === '/' && n === '*') {
+      const end = src.indexOf('*/', i);
+      i = end === -1 ? src.length : end + 2;
+      continue;
+    }
+    if (c === '(' || c === '[' || c === '{') {
+      depth++;
+      i++;
+      continue;
+    }
+    if (c === '}' && stack[stack.length - 1] === `expr:${depth}`) {
+      stack.pop();
+      i++;
+      continue;
+    }
+    if (c === ')' || c === ']' || c === '}') {
+      depth--;
+      if (depth === 0) {
+        if (c !== ')') return null;
+        args.push(src.slice(start, i));
+        return args;
+      }
+      i++;
+      continue;
+    }
+    if (c === ',' && depth === 1) {
+      args.push(src.slice(start, i));
+      start = i + 1;
+      i++;
+      continue;
+    }
+    i++;
   }
-  return ids;
+  return null;
+}
+
+/**
+ * The lanes a `check(...)` call's third argument scopes it to.
+ *
+ * FAIL CLOSED: anything that is not a literal array of known lane strings (a variable, a
+ * spread, a computed expression) yields NO lanes, so a citation of it reds. Laundering a
+ * lane restriction through indirection must never read as "hard on both lanes".
+ */
+function laneScope(laneArg: string | null): { lanes: Set<Lane>; reason: string } {
+  if (laneArg === null) return { lanes: new Set(ALL_LANES), reason: '' };
+  const arr = laneArg.match(/^\s*\[([^\]]*)\]\s*$/);
+  if (!arr) {
+    return {
+      lanes: new Set(),
+      reason: `lanes argument is not a literal lane array: \`${laneArg.trim()}\``,
+    };
+  }
+  const tokens = arr[1]
+    .split(',')
+    .map((t) => t.trim())
+    .filter(Boolean);
+  const lanes = new Set<Lane>();
+  for (const token of tokens) {
+    const lit = token.match(/^['"]([a-z]+)['"]$/);
+    if (!lit || !ALL_LANES.includes(lit[1] as Lane)) {
+      return { lanes: new Set(), reason: `unrecognised lane token \`${token}\`` };
+    }
+    lanes.add(lit[1] as Lane);
+  }
+  if (lanes.size === 0) return { lanes, reason: 'lanes argument is an empty array' };
+  const excluded = ALL_LANES.filter((l) => !lanes.has(l));
+  return {
+    lanes,
+    reason: excluded.length ? `lane-scoped to ${[...lanes].join('+')} (#281 lane filter)` : '',
+  };
+}
+
+/**
+ * Parse every `check('<id>. …', fn[, lanes])` in the runner into its per-lane hardness.
+ *
+ * The derivation stays SCANNED rather than enumerated, so reintroducing either skip path
+ * demotes that id instead of going unnoticed.
+ */
+function parseSmokeChecks(smokeSrc: string): Map<string, SmokeCheck> {
+  const checks = new Map<string, SmokeCheck>();
+  const callRe = /\bcheck\(/g;
+  let m: RegExpExecArray | null;
+  m = callRe.exec(smokeSrc);
+  while (m !== null) {
+    const open = m.index + m[0].length - 1;
+    const args = splitCallArgs(smokeSrc, open);
+    const idMatch = args?.[0]?.match(/^\s*['"]([a-z])\.\s/);
+    if (args && idMatch) {
+      const id = idMatch[1];
+      const body = args[1] ?? '';
+      // A third argument may itself be split across top-level commas only if it is not a
+      // lane array; re-joining keeps such a case unparseable, i.e. fail-closed.
+      const laneArg = args.length > 2 ? args.slice(2).join(',') : null;
+      const scoped = laneScope(laneArg);
+      // skip-on-fail checks call `skip(...)` to downgrade a failure; hard on NO lane.
+      const skips = /\bskip\(/.test(body);
+      checks.set(id, {
+        id,
+        hardLanes: skips ? new Set<Lane>() : scoped.lanes,
+        reason: skips ? 'body calls skip() — a skip-on-fail check is never hard' : scoped.reason,
+      });
+    }
+    m = callRe.exec(smokeSrc);
+  }
+  return checks;
+}
+
+/**
+ * The lanes a matrix row CLAIMS. Both, unless the row says otherwise in its own text —
+ * that opt-out is what keeps a genuinely runtime-specific check (h, the bun keep-alive
+ * guard contract) expressible without weakening the guard: it may back a ✅ row, but only
+ * a row that states the restriction instead of reading as unconditional.
+ */
+function claimedLanes(row: MatrixRow): Lane[] {
+  const cell = `${row.feature} ${row.evidence} ${row.notes}`;
+  const m = cell.match(/\b(node|bun)[\s-]lane[\s-]only\b/i);
+  return m ? [m[1].toLowerCase() as Lane] : [...ALL_LANES];
+}
+
+/**
+ * Problems with a ✅ row's compat-smoke citations: a cited check must be a hard,
+ * red-on-fail gate on EVERY lane the row claims. Non-✅ rows are never a problem.
+ */
+function smokeCitationProblems(row: MatrixRow, checks: Map<string, SmokeCheck>): string[] {
+  if (!row.status.includes('✅')) return [];
+  const claimed = claimedLanes(row);
+  const problems: string[] = [];
+  for (const cite of citations(row.evidence)) {
+    const idMatch = cite.match(/(?:smoke|check)\s*\(?([a-z])\)?$/i);
+    if (!idMatch) continue;
+    const id = idMatch[1].toLowerCase();
+    const check = checks.get(id);
+    if (!check) {
+      problems.push(`cites compat-smoke check (${id}), which does not exist in the runner`);
+      continue;
+    }
+    const missing = claimed.filter((lane) => !check.hardLanes.has(lane));
+    if (missing.length > 0) {
+      problems.push(
+        `cites check (${id}), which is not a hard, red-on-fail gate on lane(s) ` +
+          `${missing.join(', ')}${check.reason ? ` — ${check.reason}` : ''}`,
+      );
+    }
+  }
+  return problems;
+}
+
+/** True iff the cited check backs this row on every lane the row claims. */
+function backsRow(row: MatrixRow, id: string, checks: Map<string, SmokeCheck>): boolean {
+  const check = checks.get(id);
+  if (!check) return false;
+  return claimedLanes(row).every((lane) => check.hardLanes.has(lane));
 }
 
 /** Resolve an Evidence cell to a list of citation tokens (paths, check ids, ci-job refs). */
@@ -116,7 +335,7 @@ describe('docs/compat-matrix.md — honesty guard (issue #41)', () => {
   const smokeSrc = readFileSync(SMOKE_PATH, 'utf8');
   const ciSrc = readFileSync(CI_PATH, 'utf8');
   const rows = parseMatrix(md);
-  const hardIds = hardSmokeCheckIds(smokeSrc);
+  const smokeChecks = parseSmokeChecks(smokeSrc);
   const hasComptSmokeJob = /^\s*compat-smoke:/m.test(ciSrc);
 
   it('has a non-trivial table with the expected columns', () => {
@@ -146,7 +365,7 @@ describe('docs/compat-matrix.md — honesty guard (issue #41)', () => {
         // The `smoke`/`check` prefix is REQUIRED so a bare trailing letter on a file
         // path (e.g. ".../a") can never be misread as a hard smoke-id citation.
         const idMatch = cite.match(/(?:smoke|check)\s*\(?([a-z])\)?$/i);
-        if (idMatch && hardIds.has(idMatch[1].toLowerCase())) return true;
+        if (idMatch && backsRow(row, idMatch[1].toLowerCase(), smokeChecks)) return true;
         // (2) the compat-smoke CI job
         if (/compat-smoke/i.test(cite) && hasComptSmokeJob) return true;
         // (3) an on-disk file path (allow a trailing :line or anchor)
@@ -159,29 +378,175 @@ describe('docs/compat-matrix.md — honesty guard (issue #41)', () => {
     }
   });
 
-  it('the four T4 capability checks are HARD, so a ✅ row may cite them', () => {
+  it('the four T4 capability checks are HARD ON BOTH LANES, so a ✅ row may cite them', () => {
     // next/image (g), Server Actions (i), Streaming/Suspense (j), ISR (k) — the four rows
-    // that were implemented-but-unbacked. `hardIds` is SCANNED from the runner, so if any
-    // of them regains a skip-on-fail path this assertion is what reds.
+    // that were implemented-but-unbacked. Hardness is SCANNED from the runner, so if any of
+    // them regains a skip-on-fail path OR is narrowed to one lane, this assertion is what reds.
     for (const id of ['g', 'i', 'j', 'k']) {
-      expect(hardIds.has(id), `compat-smoke check (${id}) is not a hard, red-on-fail check`).toBe(
-        true,
-      );
+      const check = smokeChecks.get(id);
+      expect(check, `compat-smoke check (${id}) is not present in the runner`).toBeDefined();
+      expect(
+        [...ALL_LANES].filter((lane) => !check?.hardLanes.has(lane)),
+        `compat-smoke check (${id}) is not a hard, red-on-fail check on every lane` +
+          `${check?.reason ? ` — ${check.reason}` : ''}`,
+      ).toEqual([]);
     }
   });
 
-  it('no ✅ row cites a skip-on-fail smoke check', () => {
-    const supported = rows.filter((r) => r.status.includes('✅'));
-    for (const row of supported) {
-      for (const cite of citations(row.evidence)) {
-        const idMatch = cite.match(/(?:smoke|check)\s*\(?([a-z])\)?$/i);
-        if (!idMatch) continue;
-        const id = idMatch[1].toLowerCase();
-        expect(hardIds.has(id), `✅ row "${row.feature}" cites skip-on-fail check (${id})`).toBe(
-          true,
-        );
-      }
+  it('no ✅ row cites a check that skips — on failure OR by lane (#655)', () => {
+    for (const row of rows) {
+      expect(
+        smokeCitationProblems(row, smokeChecks),
+        `✅ row "${row.feature}" is not backed on every lane it claims`,
+      ).toEqual([]);
     }
+  });
+
+  // ── Lane-aware hardness derivation (#655) ─────────────────────────────────────────────
+  //
+  // BOTH HALVES. The real-source assertions above go green whether or not the derivation can
+  // actually SEE a lane restriction — a parser hardwired to "both lanes" satisfies every one
+  // of them, because no check is lane-narrowed today. The synthetic fixtures below are the
+  // other half: they feed the derivation a restriction and assert it is observed. Without
+  // them the guard is decoration.
+
+  describe('the derivation reads the lanes argument, not just the body (#655)', () => {
+    /** A minimal but structurally faithful excerpt of the runner. */
+    const fixture = (call: string) => `
+async function main() {
+  await check('a. baseline both-lane check', async () => {
+    assert.equal(res.status, 200);
+    return \`200 \${res.bytes}B\`;
+  });
+
+  ${call}
+
+  printReport();
+}
+`;
+
+    it('NOT GREEN BY SKIP: the real runner is actually parsed (a–k all present)', () => {
+      // If SMOKE_PATH ever stops being readable/parseable, every lane assertion above would
+      // pass vacuously over an empty map. This is what makes that impossible.
+      expect(existsSync(SMOKE_PATH)).toBe(true);
+      expect(smokeSrc.length).toBeGreaterThan(1000);
+      const ids = [...smokeChecks.keys()].sort().join('');
+      expect(ids, 'the runner parse lost or invented check ids').toBe('abcdefghijk');
+    });
+
+    it('a check with no lanes argument is hard on both lanes', () => {
+      const checks = parseSmokeChecks(fixture(''));
+      expect([...(checks.get('a')?.hardLanes ?? [])].sort()).toEqual(['bun', 'node']);
+    });
+
+    it('a check narrowed to ["node"] is NOT hard on the bun lane', () => {
+      const checks = parseSmokeChecks(
+        fixture(`await check('z. node-only check', async () => {
+    assert.ok(true);
+  }, ['node']);`),
+      );
+      expect([...(checks.get('z')?.hardLanes ?? [])]).toEqual(['node']);
+      expect(checks.get('z')?.reason).toMatch(/lane-scoped/);
+    });
+
+    it('a check narrowed to ["bun"] is NOT hard on the node lane', () => {
+      const checks = parseSmokeChecks(
+        fixture(`await check('z. bun-only check', async () => {
+    return 'ok';
+  }, ['bun']);`),
+      );
+      expect([...(checks.get('z')?.hardLanes ?? [])]).toEqual(['bun']);
+    });
+
+    it('FAILS CLOSED on a lanes argument laundered through indirection', () => {
+      // `['node']` behind a variable must not read as "hard on both lanes" — that would be
+      // the same loophole with one extra step.
+      const checks = parseSmokeChecks(
+        fixture(`await check('z. indirect lanes', async () => {
+    return 'ok';
+  }, NODE_ONLY);`),
+      );
+      expect([...(checks.get('z')?.hardLanes ?? [])]).toEqual([]);
+      expect(checks.get('z')?.reason).toMatch(/not a literal lane array/);
+    });
+
+    it('FAILS CLOSED on an empty or unknown lane list', () => {
+      const empty = parseSmokeChecks(
+        fixture(`await check('z. empty lanes', async () => {
+    return 'ok';
+  }, []);`),
+      );
+      expect([...(empty.get('z')?.hardLanes ?? [])]).toEqual([]);
+      const unknown = parseSmokeChecks(
+        fixture(`await check('z. unknown lane', async () => {
+    return 'ok';
+  }, ['deno']);`),
+      );
+      expect([...(unknown.get('z')?.hardLanes ?? [])]).toEqual([]);
+    });
+
+    it('still demotes a skip-on-fail body (the original half is not lost)', () => {
+      const checks = parseSmokeChecks(
+        fixture(`await check('z. skip-on-fail check', async () => {
+    if (!process.env.REDIS_URL) return skip('no redis');
+    return 'ok';
+  });`),
+      );
+      expect([...(checks.get('z')?.hardLanes ?? [])]).toEqual([]);
+    });
+
+    it('a ✅ row citing a lane-narrowed check FAILS the guard', () => {
+      const checks = parseSmokeChecks(
+        fixture(`await check('z. node-only check', async () => {
+    return 'ok';
+  }, ['node']);`),
+      );
+      const row: MatrixRow = {
+        feature: 'Some capability',
+        status: '✅',
+        evidence: 'smoke z',
+        notes: 'reads as unconditional, but never runs on the bun lane',
+      };
+      const problems = smokeCitationProblems(row, checks);
+      expect(problems.length).toBe(1);
+      expect(problems[0]).toMatch(/not a hard, red-on-fail gate on lane\(s\) bun/);
+      expect(backsRow(row, 'z', checks)).toBe(false);
+    });
+
+    it('a genuinely runtime-specific check stays expressible if the row SAYS so (h)', () => {
+      // The escape valve that keeps this from pushing authors toward deleting (h) or faking
+      // a lane: a lane-scoped check may back a ✅ row that declares the same lane scope.
+      const checks = parseSmokeChecks(
+        fixture(`await check('z. bun keep-alive guard contract', async () => {
+    return 'ok';
+  }, ['bun']);`),
+      );
+      const scoped: MatrixRow = {
+        feature: 'Bun keep-alive guard (bun lane only)',
+        status: '✅',
+        evidence: 'smoke z',
+        notes: 'A node-lane claim would be dishonest; the row says so.',
+      };
+      expect(smokeCitationProblems(scoped, checks)).toEqual([]);
+      expect(backsRow(scoped, 'z', checks)).toBe(true);
+      // …but the SAME check cannot back an unscoped row.
+      const unscoped: MatrixRow = { ...scoped, feature: 'Keep-alive', notes: '' };
+      expect(smokeCitationProblems(unscoped, checks).length).toBe(1);
+    });
+
+    it('a non-✅ row is never a problem (an honest ⚠️/❌ needs no lane backing)', () => {
+      const checks = parseSmokeChecks(
+        fixture(`await check('z. node-only check', async () => {
+    return 'ok';
+  }, ['node']);`),
+      );
+      expect(
+        smokeCitationProblems(
+          { feature: 'x', status: '⚠️', evidence: 'smoke z', notes: '' },
+          checks,
+        ),
+      ).toEqual([]);
+    });
   });
 
   // ── Official-suite evidence contract (A3-3 graduation, #147) ──────────────────────────

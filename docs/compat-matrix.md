@@ -53,7 +53,7 @@ gate, not the official suite — the official suite has its own row, own workflo
 
 - **Every ✅ is mechanically gated.** `tests/compat-matrix.test.ts` parses this table and fails if a
   ✅ row's Evidence does not resolve to a real on-disk file, a **hard** `compat-smoke` check id, or
-  the `compat-smoke` CI job. Every smoke check is now HARD — the runner has no skip-on-fail path — and the guard asserts that for the four T4 capability checks (g, i, j, k) by SCANNING the runner, so reintroducing a `skip()` reds CI. For the **official-suite row** it additionally requires the ✅ to cite
+  the `compat-smoke` CI job. Every smoke check is now HARD — the runner has no skip-on-fail path — and the guard asserts that for the four T4 capability checks (g, i, j, k) by SCANNING the runner, so reintroducing a `skip()` reds CI. **Hardness is per lane.** The runner has a second, sanctioned way for a check not to red a run: the `lanes` third argument (`await check(name, fn, ['node'])`, the #281 lane filter), which makes the check a declared no-op on the other lane. The guard reads that argument too, so a check narrowed to one lane **cannot back a ✅ row that reads as unconditional** — and a `lanes` value laundered through a variable fails closed rather than reading as "hard on both". A genuinely runtime-specific check stays expressible: a row that **states its lane scope in its own text** ("bun lane only") may cite a check scoped to that lane. For the **official-suite row** it additionally requires the ✅ to cite
   a workflow **run ID**, the **pinned `vercel/next.js` ref**, and an explicit **"N passed / 0
   failed"** result — an evidence-less flip fails CI.
 - **The `compat-smoke` caveats that were load-bearing are GONE (Sprint 1 / T4).** It used to run with
