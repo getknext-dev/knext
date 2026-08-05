@@ -10,11 +10,16 @@
   the load-bearing engineering record — the `RuntimeContract` enumeration, the opaque-binary
   supply-chain rule, the one-CRD invariant, and the two benchmark runs that argued *against* this
   decision. Superseding it would retire exactly the evidence that must stay visible.
-- **Conflicts with (unresolved, pending Escalation 1):** **ADR-0006** (image optimization). ADR-0006 is
-  Accepted and its implementation ships today on the node path. With `node + vinext` excluded and
-  `--compile` mandatory, an ADR-0006 app has **no in-band fallback** on the default runtime. ADR-0006
-  is not amended here and must not be read as standing unqualified: it is conflicted until Phase 3(a)
-  resolves and the founder answers Escalation 1.
+- **~~Conflicts with~~ RECONCILED with ADR-0006 (2026-08-05, #660).** An earlier draft of this line
+  said an ADR-0006 app has *"no in-band fallback"* on the default runtime, pending a founder answer to
+  Escalation 1. **That was wrong — an inference from an absence.** Image optimisation works on the
+  compiled default path (124× better than passthrough, verified through `--compile --bytecode` in a
+  container) using vinext's **public** `handleImageOptimization` export and the bespoke knext entry
+  Consequence 4 already mandates. ADR-0006 stands unqualified on both paths. What remains is
+  engineering with known costs, not a conflict: **a cache** (no caching today — ~40× repeat
+  regression *and* an unauthenticated CPU-exhaustion surface), a proxy rate limit, and a decode
+  timeout, all prerequisites before this ships. `sharp` cannot be used — structural, see Escalation 1 —
+  so the codec is `@jsquash/*` WASM.
 - **Depends on:** ADR-0001 (operator = single source of truth), ADR-0007 (the official-suite gate),
   ADR-0017 (`v1alpha1` additive-only), ADR-0035 (baked compile cache), ADR-0037 (image caching),
   ADR-0040 (CR field validation pattern).
@@ -401,16 +406,50 @@ first, then CLI**.
 
 ## Escalated — still needs the founder
 
-1. **What happens to `next/image` apps?** Measured loss is 112×. With `node + vinext` excluded and
-   bytecode mandatory, the options are: (a) accept the regression, reversing ADR-0006 for the default
-   path; (b) keep the **node + turbopack** track alive for image apps — which makes dual-track permanent
-   and is the only option that preserves ADR-0006; (c) build a knext-owned optimiser — new scope, and the
-   closest thing here to PaaS drift. **Now read jointly with Escalation 3′ and 7 — it is one
-   fork/upstream decision, not two.** Also note #656's "only one option preserves ADR-0006" was
-   withdrawn on review: an in-process interception path exists that the spike had the foothold for and
-   never tried (`startProdServer` returns the `http.Server`; `./server/prod-server` is a public
-   export), and ADR-0042 Consequence 4 already mandates a bespoke knext entry. It is **being measured**,
-   not assumed, and the open risk is `sharp` as a native module under `bun --compile`.
+1. **~~What happens to `next/image` apps?~~ — PREMISE REFUTED (2026-08-05, #660). No longer a
+   founder escalation; it is now an engineering task with known costs.**
+   Image optimisation **works** on the compiled default path, verified end to end through
+   `bun build --compile --minify --bytecode` on `bun-linux-arm64-musl` in `alpine:3.20`:
+
+   | arm | | bytes |
+   |---|---|---:|
+   | Next control | `image/webp` | **1,880** |
+   | vinext unmodified | `image/png` | **181,277** |
+   | vinext compiled, **interception removed** | `image/png` | **181,277** ← mutation proof |
+   | knext interception, compiled + bytecode | `image/avif` | **1,463** (124× better) |
+
+   `w` and `q` both honoured (`w=640`→1,463 vs `w=64`→732; `q=75`→1,463 vs `q=20`→648), three
+   invalid-param cases → 400 through vinext's **own** `parseImageParams`, and non-image traffic
+   byte-identical to unmodified vinext.
+
+   **What both earlier spikes missed:** vinext **publicly exports a complete, runtime-agnostic
+   optimiser** — `vinext/server/image-optimization` → `handleImageOptimization(request, {fetchAsset,
+   transformImage}, allowedWidths, imageConfig)`. Its own doc comment names *"the App Router worker,
+   Pages worker, **Node prod server**"* as its callers; the Node seam is simply the one that does not
+   call it. **Nothing to fork, nothing to register**, and it uses the bespoke entry Consequence 4
+   already mandates — so **no new scope**. #656's "only option (b) preserves ADR-0006" and this ADR's
+   earlier "no in-band fallback" were both wrong, in the same direction: an inference from an absence.
+
+   **`sharp` cannot ship, and that is structural** (measured on darwin-arm64 *and* linuxmusl-arm64):
+   `sharp/dist/sharp.mjs:13` does `createRequire(import.meta.url)` then `require("@img/sharp-*/sharp.node")`
+   at runtime, so the bundler never sees it and the base is frozen to the build machine's path — the
+   same constant-folding family as Finding B. Bun *can* embed an N-API addon (proved), but then fails
+   on `@rpath/libvips-cpp`, a sibling package it does not embed. **`@jsquash/*` WASM survives fully**
+   and is the shipping choice.
+
+   **Costs, stated rather than buried — these are the remaining work, and one is a security item:**
+   - **No cache at all.** Same URL ×3: 38/41/40 ms against Next's **1/1/1 ms** — a ~40× repeat
+     regression **and an unauthenticated CPU-exhaustion surface**. The spike adds a concurrency
+     semaphore, 20 MB / 40 MP caps and traversal refusal; **a cache, a proxy rate limit and a decode
+     timeout are still prerequisites** before this ships. `security.md`'s runtime-hardening rule
+     applies directly.
+   - `--bytecode` rejects top-level `await`.
+   - A defect the measurement caught that "does it optimise?" would have passed: the first cut passed
+     `{ cqLevel }` to `@jsquash/avif`, which silently ignored it — `q=20` and `q=75` both returned
+     exactly 1,077 B.
+
+   **Consequence for Escalations 3′ and 7:** the two-gaps-converge-on-a-fork argument is **halved**.
+   Images need no fork. Only SSR application-embedding (Consequence 11) does.
 2. **~~Is losing build-time static generation acceptable~~ — WITHDRAWN AS FRAMED (2026-08-05, #658).**
    Prerendering and compiling are **not** mutually exclusive. Verified in-container: all six
    prerendered routes served **byte-identical** (sha256 + `Buffer.equals`, `x-vinext-cache: HIT`), all
@@ -429,12 +468,14 @@ first, then CLI**.
    *(Historic framing, kept because the ADR's phasing referenced it:* was losing build-time static
    generation acceptable? For a
    scale-to-zero product this may matter more than images.
-3′. **REFRAMED (2026-08-05) — this is now a MAINTAINER commitment, not a consumer risk.** Two
-   capability gaps have converged on the same remedy: image optimisation (#656 §1.5) and SSR
-   application-embedding (#658, Consequence 11). As originally written this asked *"is depending on a
+3′. **REFRAMED (2026-08-05), then PARTLY UNWOUND the same day (#660).** The reframing said two
+   capability gaps had converged on one remedy — a fork. **That is now halved: images need no fork**
+   (Escalation 1, refuted — vinext publicly exports the optimiser). **Only SSR application-embedding
+   (Consequence 11) still points at a fork or upstream PR.** The question survives at reduced weight:
+   one gap with an unestablished mechanism, not two. As originally written this asked *"is depending on a
    beta project acceptable"*. With two forks converging it asks instead whether knext will **carry**
-   a `prod-server.js` seam, an image-optimizer registration hook, and a bundler-graph fix **whose
-   mechanism is not established** — against an upstream with 72% two-author concentration and zero
+   a `prod-server.js` seam and a bundler-graph fix **whose mechanism is not established** (the
+   image-optimizer hook is no longer needed) — against an upstream with 72% two-author concentration and zero
    labelled breaking changes. The option set the old wording lacked: **upstream contribution as
    strategy** vs **downstream fork** vs **accept both losses**, each priced against A6's
    abandonment-exit stance, which a fork sharply raises.
@@ -451,7 +492,9 @@ first, then CLI**.
    escalation: it contradicts a hard rule, and is independent of Escalation 3′'s cost question.)*
    `.claude/rules/architecture.md` §4 permits vinext as a **build target** on the explicit basis that
    it *"is NOT a return to reverse-engineering Nitro/Vinext as a runtime."* Patching vinext's internal
-   production server to route around an unexplained bundler failure is precisely that activity. It is
+   production server to route around an unexplained bundler failure is precisely that activity.
+   **Narrowed by #660:** image optimisation no longer requires touching vinext internals at all — it
+   uses a **public export** — so this escalation is now solely about the SSR-embedding seam. It is
    also the clearest positioning drift on the table: it moves knext from *an adapter that uses vinext*
    toward *co-maintainer of a Next.js reimplementation* — engineering that is neither Knative nor the
    adapter, on a fame-first timeline whose north star is verified-adapter status. **This needs a rules
