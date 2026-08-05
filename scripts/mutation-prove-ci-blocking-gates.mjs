@@ -38,12 +38,10 @@
  * Usage:  node scripts/mutation-prove-ci-blocking-gates.mjs
  */
 
-import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  declaredTestTitles,
-  GATE_TEST_NAME,
+  explainNothingRan as explainNothingRanIn,
   GATES,
   runGateTest as runGateTestIn,
 } from './lib/ci-blocking-gate-proof.mjs';
@@ -94,33 +92,16 @@ let fail = 0;
 const runGateTest = (spec) => runGateTestIn(REPO_ROOT, spec);
 
 /**
- * Say WHY nothing ran, naming what was expected and what was found.
+ * Say WHY nothing ran — or say the cause was not determined.
  *
- * The first version printed a bare `FATAL: <spec> has no test named "…"` for
- * both causes. It was the wrong one: the assertion had never been renamed, the
- * RUNNER had failed to start (`pnpm exec vitest` resolves nothing in a tree
- * without its own `node_modules`). A misattributed FATAL sends the next reader
- * looking for a rename that does not exist, which is how the proof stayed
- * offline for a whole PR.
+ * The diagnosis itself lives in `./lib/ci-blocking-gate-proof.mjs` so
+ * `tests/ci-blocking-gate-proof-diagnosis.test.ts` can assert each cause is
+ * attributed on POSITIVE evidence without importing this script and running all
+ * 25 mutations. Three causes have been misattributed here, each by a branch that
+ * defaulted to the most common one (#680); the fallback now says it does not
+ * know and prints what it observed.
  */
-function explainNothingRan(spec, result) {
-  if (!result.launched) {
-    return [
-      `FATAL: the test runner never started, so NOTHING was proved.`,
-      `  runner: ${result.runner.command} ${result.runner.args.join(' ')}`,
-      `  fix:    install dependencies in ${REPO_ROOT} (a git worktree has no node_modules of its own)`,
-      `  output: ${result.out.trim().split('\n').slice(-3).join(' | ')}`,
-    ].join('\n');
-  }
-  const titles = declaredTestTitles(readFileSync(resolve(REPO_ROOT, spec), 'utf8'));
-  return [
-    `FATAL: ${spec} declares no test whose name contains the one this proof selects.`,
-    `  expected (substring): ${JSON.stringify(GATE_TEST_NAME)}`,
-    `  found in ${spec}:`,
-    ...titles.map((t) => `    - ${JSON.stringify(t)}`),
-    `  fix: restore the name, or update GATE_TEST_NAME in scripts/lib/ci-blocking-gate-proof.mjs`,
-  ].join('\n');
-}
+const explainNothingRan = (spec, result) => explainNothingRanIn(REPO_ROOT, spec, result);
 
 /** The assertion must be RED while the job is disarmed, and GREEN once restored. */
 function prove(jobId, spec, disarm) {
