@@ -163,6 +163,48 @@ describe('resolveAssetAnchor — the asset root travels with the binary (#460 bu
     ).toBeTruthy();
   });
 
+  // ── The DOCUMENTED FIRST RUN: one root, reached two ways ──────────────────
+  // `build.sh` drops the binary INTO `examples/bun-exec/`, beside the very
+  // `.output/public` it was built from, and the README tells you to run it
+  // there. So `dirname(execPath)/.output/public` and the baked
+  // `dirname(__nitro_main__)/../public` are THE SAME DIRECTORY. Nothing is
+  // ambiguous and nothing is missing — there is one root and it is correct.
+  // Treating that as "no co-located root, fell back to the build tree" prints
+  // the same path twice and tells the user to do what they already did. This
+  // PR exists because the failure mode was SILENCE; a warning that cries wolf
+  // on the documented first run is how the real one gets ignored.
+  it('does NOT warn when the two roots are the SAME directory (binary built in place)', () => {
+    const dir = '/Users/dev/knext/examples/bun-exec';
+    const anchor = resolveAssetAnchor({
+      bakedMain: bakedUrl(dir),
+      execPath: `${dir}/knext-bun-exec-darwin-arm64`,
+      exists: existsIn([`${dir}/.output/public`]),
+    });
+    expect(anchor.source, 'the single real root was reported as a build-tree fallback').toBe(
+      'execdir',
+    );
+    expect(anchor.mainUrl).toBe(bakedUrl(dir));
+    expect(
+      anchor.warning,
+      'warned about a build-tree fallback while the co-located root IS that directory',
+    ).toBeNull();
+  });
+
+  it('is still LOUD when the two roots are the same directory and it does not exist', () => {
+    // Same coincident-roots layout, nothing built. One path, named once, and
+    // the "ship it next to .output/public" advice is genuinely actionable here.
+    const dir = '/Users/dev/knext/examples/bun-exec';
+    const anchor = resolveAssetAnchor({
+      bakedMain: bakedUrl(dir),
+      execPath: `${dir}/knext-bun-exec-darwin-arm64`,
+      exists: existsIn([]),
+    });
+    expect(anchor.source).toBe('unresolved');
+    expect(anchor.mainUrl).toBeNull();
+    expect(anchor.warning, 'a missing asset layout resolved silently').toBeTruthy();
+    expect(anchor.warning).toContain(`${dir}/.output/public`);
+  });
+
   it('honours an explicitly injected isCompiled over the execPath heuristic', () => {
     // The discriminator is injectable so a binary named `bun`, or a future bun
     // signal, does not have to be guessed at by basename.

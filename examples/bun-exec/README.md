@@ -169,8 +169,10 @@ and ADR-0042 (A6/A8).
 "5 MB alpine" idea is wrong). **Ship the binary + the `.output/public` static-asset dir**
 (the routes are IN the binary; only static assets live outside it — that is exactly what the
 founder's original working build shipped). The ship path is the `Dockerfile` in this directory
-(cosign-signed, digest-pinned in production) copying `binary` + `.output/public`, run from a dir
-where `./.output/public` resolves.
+(cosign-signed, digest-pinned in production) copying `binary` + `.output/public` **into the same
+directory**. The runtime anchors static assets on the EXECUTABLE's own directory, not on the
+working directory, so any cwd works (`docker run -w /elsewhere` included) as long as the two
+travel together.
 
 > ⚠️ **`FROM alpine` + the binary alone DOES NOT RUN (ADR-0042 A9).** bun's `-musl` targets are
 > **not statically linked**. Without `libstdc++`/`libgcc` the container dies with
@@ -191,8 +193,9 @@ Requires [Bun](https://bun.sh) (≥1.3).
 ./build.sh linux-x64
 # → ./knext-bun-exec-linux-x64  (~90-110 MB) + ./.output/public (static assets)
 
-# Run it (operator injects these envs in production). Run from a dir where
-# ./.output/public resolves — SHIP the binary + .output/public together:
+# Run it (operator injects these envs in production). Any cwd works — assets are
+# anchored on the BINARY's own directory — but SHIP the binary and .output/public
+# side by side, in one directory:
 PORT=3000 METRICS_PORT=9091 CACHE_INVALIDATE_TOKEN=changeme \
   ./knext-bun-exec-linux-x64
 ```

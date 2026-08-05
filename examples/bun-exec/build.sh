@@ -5,7 +5,11 @@
 #   ./build.sh [arch]
 #     arch ∈ linux-x64 | linux-arm64 | darwin-arm64 | darwin-x64
 #     (default: linux-x64 — the ship target; alpine needs the -musl variants)
-#     OUT=<path>  override the output binary name.
+#     OUT=<path>  override the output binary name. NEVER name it after a
+#                 language runtime (`node`/`bun`/`bunx`/`bun-debug`/`deno`): the
+#                 asset-root resolver classifies a compiled binary by basename,
+#                 so those names make it read the BUILD TREE's assets silently
+#                 (runtime-contract.mjs, RUNTIME_BASENAMES).
 #
 #   ./build.sh --print-labels [arch]
 #     print the OCI image labels for this build and exit WITHOUT building.

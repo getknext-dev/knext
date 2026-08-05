@@ -104,11 +104,20 @@ function sweepLeakedArtifacts() {
       }
     }
   }
-  // `image prune` only ever removes images no container holds, and `until`
-  // bounds it by age, so a concurrent run's in-flight image is safe twice over.
+  // `--all` is REQUIRED, not tidiness: without it `image prune` removes only
+  // DANGLING images, and every image this suite leaks is TAGGED
+  // (`knext-bunexec-alpine-e2e:${ARCH}-${RUN_ID}`), hence never dangling — so
+  // the ~150 MB-per-abort leak this exists to reap survived the sweep entirely.
+  // Measured on docker 29.4.0 with `until=0s`, so age could not be the excuse:
+  // without `--all` → "Total reclaimed space: 0B", image still listed; with
+  // `--all` → deleted. What still bounds the blast radius is the pair of
+  // filters, not the flag: `label=` restricts it to this suite's own images,
+  // and `until=2h` spares a concurrent run's seconds-old one. Docker also
+  // refuses to remove an image a container still holds, which is why the
+  // container sweep above runs first.
   run(
     'docker',
-    ['image', 'prune', '--force', '--filter', `label=${LABEL}`, '--filter', 'until=2h'],
+    ['image', 'prune', '--force', '--all', '--filter', `label=${LABEL}`, '--filter', 'until=2h'],
     { timeout: 120_000 },
   );
 }

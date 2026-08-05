@@ -105,6 +105,16 @@ const SERVER_ENTRY_REL = '.output/server/index.mjs';
 // wins / whether to warn — never to break a path that would otherwise serve.
 // Overridable via the `isCompiled` parameter for a binary named `bun`, or if a
 // future bun exposes something better.
+//
+// KNOWN RESIDUAL, stated rather than left to be rediscovered: this is a
+// heuristic on a basename, so a compiled binary whose basename is EXACTLY one
+// of these (`OUT=node ./build.sh`) classifies as non-compiled and takes the
+// baked-root branch silently — the pre-fix behaviour, restored, for that one
+// naming. `build.sh` defaults `OUT` to `knext-bun-exec-$ARCH`, so only an
+// explicit `OUT=` override can reach it; do not name the binary after a
+// language runtime. The inverse (`nodejs`, `bun-1.3.14`, `node18`) is benign:
+// a non-compiled run so named yields at worst a spurious warning, and only if
+// the runtime's OWN directory happens to hold a `.output/public`.
 const RUNTIME_BASENAMES = new Set(['bun', 'bun-debug', 'bunx', 'node', 'deno']);
 
 /**
@@ -164,10 +174,22 @@ export function resolveAssetAnchor({ bakedMain, execPath, exists, isCompiled, cw
     };
   }
 
-  // Compiled, but only the build tree is there: serving works HERE and nowhere
-  // else. That is the "worked on my machine" false green — keep the baked value
-  // whole (never partially rewritten) and warn.
-  if (bakedOk) {
+  // Compiled, but ONLY the build tree is there — `!execOk` is what makes that
+  // "only" true, and it is load-bearing, not redundant with the branch above.
+  // `build.sh` drops the binary INTO the example dir beside the very
+  // `.output/public` it was built from (the README's documented first run), so
+  // `bakedPublic === execPublic` is a NORMAL layout: one root, reached two
+  // ways, both `bakedOk` and `execOk`. Without `!execOk` that lands here and
+  // prints the same path twice — "found NO .output/public beside itself (<P>)
+  // … fell back to (<P>)" — telling the user to do what they already did.
+  // Serving is unaffected (the roots coincide), but this whole resolver exists
+  // because the failure mode was silence, and a warning that cries wolf on the
+  // first run is how the real one gets ignored. With the guard, coincident
+  // roots fall through to the plain `execOk` branch: same directory, no noise.
+  // The genuine case — a compiled binary whose co-located root is absent —
+  // serves HERE and nowhere else, so keep the baked value whole (never
+  // partially rewritten) and warn.
+  if (bakedOk && !execOk) {
     return {
       mainUrl: null,
       source: 'baked',
