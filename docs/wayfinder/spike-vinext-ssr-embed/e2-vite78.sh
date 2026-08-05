@@ -1,5 +1,16 @@
 #!/bin/bash
-# Single-variable test: hold vinext + plugin-rsc + react fixed, vary ONLY vite 7 vs 8.
+# SUPERSEDED BY e2-vite78-fixed.sh -- DO NOT CITE THIS SCRIPT AS A SINGLE-VARIABLE TEST.
+#
+# It is NOT single-variable: the loop below varies `@vitejs/plugin-react` ^5 -> ^6 alongside
+# vite ^7 -> ^8, and prints only `vite=` and `plugin-rsc=`, so the confound is invisible in its
+# output. @vitejs/plugin-react@6 peer-requires vite ^8 AND pulls @rolldown/plugin-babel +
+# babel-plugin-react-compiler, so the vite-8 arm ran a different TRANSFORM PIPELINE, not just a
+# different bundler. It was avoidable: @vitejs/plugin-react@5.2.0 peer-accepts vite ^7 and ^8.
+#
+# Kept committed, unaltered apart from this header and the e2-build-version.sh filename fix,
+# because it is the record of what was actually run for the original (withdrawn) §3.2 claim.
+# The re-run with plugin-react genuinely fixed is e2-vite78-fixed.sh; it reaches the same
+# conclusion, but only that one is evidence for it.
 set -uo pipefail
 SC=/private/tmp/claude-501/-Users-banna-alpheya-pocs-knext/2989138f-7d2a-4034-b420-39e8b43cb645/scratchpad
 V="$1"
@@ -7,7 +18,7 @@ for pair in "7:^7.0.0:^5.0.0" "8:^8.0.0:^6.0.0"; do
   major="${pair%%:*}"; rest="${pair#*:}"; vite="${rest%%:*}"; preact="${rest##*:}"
   d="v78-$(echo "$V" | tr -d '.')-vite$major"
   D="$SC/$d"
-  bash "$SC/e2-build19.sh" "$V" "$vite" "^0.5.32" "$d" > "/tmp/v78-$V-$major.log" 2>&1
+  bash "$SC/e2-build-version.sh" "$V" "$vite" "^0.5.32" "$d" > "/tmp/v78-$V-$major.log" 2>&1
   (cd "$D" && npm pkg set "dependencies.@vitejs/plugin-react=$preact" >/dev/null 2>&1 \
      && npm install --no-audit --no-fund --silent >/dev/null 2>&1 \
      && NODE_ENV=production npx vinext build >> "/tmp/v78-$V-$major.log" 2>&1)

@@ -14,16 +14,17 @@
 | | verdict | one line |
 |---|---|---|
 | **Experiment 1** | **NO** | Same 140 modules, same defect; the failure **moved from first render to startup**, with the canonical `Cannot find package 'react-dom' from <build-host path>/ssr/index.js`. |
-| **Experiment 2** | **NO on the premise — but YES on the thing the premise was reaching for** | The split SSR sub-entry has existed since **`vinext@0.0.1`**, so it is *not* a regression. The **actual blocker is**, and it is not vinext's: holding vinext and `@vitejs/plugin-rsc` **fixed**, a **Vite 7** build embeds and serves real SSR from a clean container with no `node_modules`, and a **Vite 8** build does not. |
+| **Experiment 2** | **NO on the premise — but YES on the thing the premise was reaching for** | The split SSR sub-entry has existed since **`vinext@0.0.1`**, so it is *not* a regression. The **actual blocker is**, and it is not vinext's: holding vinext, `@vitejs/plugin-react`, `@vitejs/plugin-rsc` and the whole React closure **fixed at recorded exact versions**, a **Vite 7** build embeds and serves real SSR from a clean container with no `node_modules`, and a **Vite 8** build does not. |
 | **Mechanism** | **ESTABLISHED** (mutation-proved) | Vite 8's SSR sub-entry reaches `react-dom` through `createRequire(import.meta.url)("react-dom")`. Bun's bundler does **not** rewrite `createRequire` requires to bundled modules; in a `--compile` binary `import.meta.url` is the **build-host source path**, so the resolver walks up from a directory that does not exist off the build host. Vite 7 emits no such call. |
 
 **A YES on either was said to change Consequence 11 and Escalation 2′. One of them does — but not by
 the route proposed.** Nothing here licenses shipping an old vinext: ADR-0042's *What must NOT be
 done* forbids pinning `vinext@^0.0.19` as a shipping dependency, and beta.4 **peer-requires
 `vite@^8`**, so "use Vite 7" is not available on the version this ADR targets. The finding reframes
-the remedy from **"fork vinext"** to **"one upstream bug, in Vite 8 or in how vinext configures its
+the remedy from **"fork vinext"** to **"an upstream fix, in Vite 8 or in how vinext configures its
 SSR environment under it"** — a far cheaper conversation, and one that is not knext's to own
-permanently.
+permanently. **Not "one bug":** the first failure layer is mutation-proved (§2), the second is
+not, and §4.1 states plainly that whether a single upstream change closes both is **unestablished**.
 
 Environment: bun **1.3.5**, node **v24.14.0**, darwin 25.5.0 / Apple Silicon, OrbStack Docker
 29.4.0, `alpine:3.22` + `apk add libstdc++ libgcc`, all container arms `--platform=linux/amd64`
@@ -200,12 +201,18 @@ isolated.
 72 published versions (`npm view vinext versions`). Scanning the published tarballs for the
 emitting-side evidence, and reading `prod-server`'s own doc comment:
 
-| vinext | references `ssr/index.js` | note |
+| vinext | **files in the tarball containing** `ssr/index.js` | note |
 |---|---|---|
 | `0.0.0` | 0 | 1 MB placeholder; no deps, no `prod-server` |
 | **`0.0.1`** | **2** | `dist/server/ssr/index.js — SSR entry (imported by RSC entry at runtime)` |
 | `0.0.3` … `0.0.19` | 3 | unchanged |
 | `0.0.40` … `1.0.0-beta.4` | 4–8 | unchanged in kind |
+
+**Column label corrected.** `e2-scan.sh` computes `grep -rl … | wc -l` — that is the number of
+**files containing** the string, not the number of references. The counts above are therefore
+file counts, and a version that mentions the sub-entry twice in one file scores 1. The conclusion
+does not depend on the metric: it is independently confirmed by **building** `0.0.19` below, which
+emits the sub-entry on disk.
 
 Confirmed by **building the same probe app against `vinext@0.0.19`** (vite 7.3.6):
 
@@ -225,22 +232,83 @@ Escalation 3′ does not get cheaper by this route.
 ### 3.2 …but the *blocker* IS new, and it is **Vite's**, not vinext's
 
 `0.0.19`'s emitted SSR chunk contains **zero** `createRequire` and **zero** `require("react-dom")`.
-beta.4's contains both. Crucially, both probes installed **the same `@vitejs/plugin-rsc@0.5.32` and
-the same `react-server-dom-webpack@19.2.8`** — so the shim is not coming from a plugin bump.
+beta.4's contains both.
 
-Bisecting builds (not tarball greps) narrowed it, and the boundary is not a vinext version at all.
-Single-variable test, **vinext and plugin-rsc held fixed**:
+> ### ⚠ First attempt was CONFOUNDED — retracted, then re-run and re-established
+>
+> The original single-variable claim rested on `e2-vite78.sh`, whose loop reads
+> `for pair in "7:^7.0.0:^5.0.0" "8:^8.0.0:^6.0.0"`. That varies **`@vitejs/plugin-react` ^5 → ^6
+> alongside vite ^7 → ^8**, and the script printed only `vite=` and `plugin-rsc=`, so the confound
+> was **invisible in the output this section quoted**. It is not cosmetic:
+> `@vitejs/plugin-react@6.0.5` peer-requires `@rolldown/plugin-babel` and
+> `babel-plugin-react-compiler`, which npm auto-installs — so the vite-8 arm ran a **different
+> transform pipeline**, not merely a different bundler. It was also avoidable:
+> `@vitejs/plugin-react@5.2.0` peer-accepts `vite ^4.2.0 || ^5 || ^6 || ^7 || ^8`, one version
+> valid on **both** arms.
+>
+> The claim was withdrawn and the experiment re-run as a genuine single-variable test
+> (`e2-vite78-fixed.sh`). **The result survives**, and is now backed by recorded resolved
+> versions rather than by ranges in a manifest.
+
+**The corrected test.** Every dependency is an **exact** pin, `@vitejs/plugin-react` is held at
+**5.2.0 on both arms**, and vite is the only input that differs. Resolved versions, read out of
+each arm's `node_modules` after install:
+
+| resolved package | vite-7 arm | vite-8 arm |
+|---|---|---|
+| `vinext` | 0.0.30 | 0.0.30 |
+| **`vite`** | **7.3.6** | **8.2.0** |
+| `@vitejs/plugin-react` | 5.2.0 | 5.2.0 |
+| `@vitejs/plugin-rsc` | 0.5.32 | 0.5.32 |
+| `react` | 19.2.8 | 19.2.8 |
+| `react-dom` | 19.2.8 | 19.2.8 |
+| `react-server-dom-webpack` | 19.2.8 | 19.2.8 |
+| `@rolldown/plugin-babel` | ABSENT | **ABSENT** |
+| `babel-plugin-react-compiler` | ABSENT | **ABSENT** |
+| bundler | `rollup@4.62.4`, `esbuild@0.28.1` | `rolldown@1.2.3` |
+| native bindings | `@rollup/rollup-darwin-arm64@4.62.4`, `@esbuild/darwin-arm64@0.28.1` | `@rolldown/binding-darwin-arm64@1.2.3` |
+
+A "held fixed" claim is only as good as what was recorded, so the script does not stop at the
+enumerated list above — it dumps the **entire resolved package set** of each arm's `node_modules`
+and diffs them, which catches an input nobody thought to enumerate. The complete diff is:
 
 ```
-vinext@0.0.30  vite=7.3.6  plugin-rsc=0.5.32  ssrChunk=87362  require("react-dom")=0  createRequire=0
-vinext@0.0.30  vite=8.2.0  plugin-rsc=0.5.32  ssrChunk=86220  require("react-dom")=1  createRequire=2
+< @esbuild/darwin-arm64@0.28.1          > @oxc-project/types@0.143.0
+< @rollup/rollup-darwin-arm64@4.62.4    > @rolldown/binding-darwin-arm64@1.2.3
+< esbuild@0.28.1                        > detect-libc@2.1.2
+< rollup@4.62.4                         > lightningcss@1.33.0
+< vite@7.3.6                            > lightningcss-darwin-arm64@1.33.0
+                                        > rolldown@1.2.3
+                                        > vite@8.2.0
 ```
+
+Every differing package is **vite itself or vite's own transitive bundler/CSS closure**. Nothing
+in the React or plugin closure varies. *This* is what makes it a single-variable test.
+
+**Result — unchanged, and now established:**
+
+```
+vinext@0.0.30  vite=7.3.6  plugin-react=5.2.0  plugin-rsc=0.5.32  ssrChunk=87362  require("react-dom")=0  createRequire=0
+vinext@0.0.30  vite=8.2.0  plugin-react=5.2.0  plugin-rsc=0.5.32  ssrChunk=86220  require("react-dom")=1  createRequire=2
+```
+
+The SSR-chunk byte counts (87362 / 86220) are **identical to the confounded run's**, which says
+the plugin-react difference never reached this artifact — but that is an observation after the
+fact, not what licensed the claim. What licenses it is the resolved-version table and the diff
+above.
 
 **The boundary is Vite 7 → Vite 8.** Supporting bisect points, all `require("react-dom")`=0 under
 vite 7: `0.0.20 · 0.0.24 · 0.0.28 · 0.0.29 · 0.0.30 · 0.0.31 · 0.0.32`; and =1 under vite 8:
 `0.0.30 · 0.0.32 · 0.0.38 · 1.0.0-beta.4`. (`vinext@0.0.39` is separately the first version to emit
 `vinext-externals.json`; that is a *different* boundary and is **not** the one that matters —
 `0.0.38` has no externals file and still emits the shim under vite 8.)
+
+**Caveat on those supporting points, stated rather than buried.** They come from `e2-bisect.sh`
+via `e2-build-version.sh`, which hardcodes `@vitejs/plugin-react: ^6.0.5` for **every** arm. That
+makes the bisect internally consistent (plugin-react constant across its own points) but it is a
+*different* plugin-react from the corrected test above, and pairing plugin-react 6 with vite 7
+violates 6.x's own peer range. They are corroboration, not evidence: the single-variable claim
+rests on `e2-vite78-fixed.sh` alone.
 
 ### 3.3 Does an older build embed cleanly end-to-end? **YES — with the right entry.**
 
@@ -261,27 +329,99 @@ the opposite of the hoped-for shape.
 ~20 lines: static `import * as rscModule from './dist/server/index.js'`, serve `dist/client`
 statics, delegate everything else to `rscModule.default`. No `vinext/server/prod-server`.
 
-The controlled comparison. **Same entry file, byte-identical, over two builds:**
+The controlled comparison. **Re-run under the corrected matrix of §3.2, and made single-variable
+in the process.** The original version of this table compared `vinext@0.0.30`+vite7 against
+`vinext@1.0.0-beta.4`+vite8 — two varying inputs. The arms below hold **vinext at 0.0.30** and
+`@vitejs/plugin-react` at **5.2.0** on both sides, so vite is again the only difference. Same
+entry file, byte-identical, over the two builds from `e2-vite78-fixed.sh`
+(`e2e-container-arm.sh`, `alpine:3.22`, `--platform=linux/amd64`):
 
-| build | modules | container, clean dir, **no `node_modules`**, no server JS |
-|---|---|---|
-| `vinext@0.0.30` + **vite 7.3.6** | 15 | `/` 200 · `/blog/alpha` 200 · `/blog/gamma` 200 · `/isr` 200 · `/img` 200 · `/api/health` 200 · dynamic `/blog/spike-…` **200** · unknown route **404** |
-| `vinext@1.0.0-beta.4` + **vite 8.2.0** | 52 | `/api/health` 200; **every render 500** — `TypeError: undefined is not an object (evaluating 'rF.preload')` |
+| build (all else pinned identical) | container, clean dir, **no `node_modules`**, no server JS |
+|---|---|
+| `vinext@0.0.30` + **vite 7.3.6** | `/` 200 · `/blog/alpha` 200 · `/blog/beta` 200 · `/blog/gamma` 200 · `/isr` 200 MISS · `/img` 200 · `/api/health` 200 · dynamic `/blog/spike-…` **200** · unknown route **404** |
+| `vinext@0.0.30` + **vite 8.2.0** | `/api/health` 200 · unknown route 404 · **every render 500**, container log: `error: Cannot find package 'react-dom' from '<build-host path>/fix78-0030-vite8/dist/server/ssr/index.js'` |
 
-And it is real SSR, not a shell — the dynamic segment is rendered server-side:
+This is a **stronger** result than the original table: with vinext held fixed, the 200-with-real-SSR
+vs 500 split is attributable to vite alone. Note also that the failure now presents as the
+*resolver* error rather than the `rF.preload` `TypeError` — §0's two layers, selected by whether
+the SSR chunk is reached statically or lazily, exactly as §0 predicts.
+
+Both arms compile to **15 modules**. The `52` that appeared in the original table belonged to the
+beta.4 build, not to a vite-8 build as such; see §3.4 for what that number does and does not mean.
+
+**And it is real SSR, not a shell.** The original claim rested on a 1565 B document while §0's
+comparable documents are 8306–8899 B, a ~5× gap the doc did not address. Measured rather than
+asserted, on the same container response:
 
 ```
-GET /blog/alpha   200  text/html  1565 B     (container path /opt/knextbare30, absent on the host)
-<!DOCTYPE html>…<main><h1 id="slug">alpha</h1><p data-marker="blog-static-marker">blog-<!-- -->alpha</p></main>
+GET /blog/alpha   200  text/html  1565 B    (container path /opt/knext-fix7, absent on the host)
+  references a /assets/ or /_next/ client bundle : true
+  carries an RSC/flight payload inline           : true   (self.__VINEXT_RSC_CHUNKS__)
+  <script> tags: 5   script bytes: 996   markup outside scripts: 569 B
 ```
 
-App marker in the binary: **3**. Clean dir: **0** `node_modules`, **0** server `.js`.
+The document carries three `modulepreload` links to `/assets/…`, an
+`<script id="_R_">import("/assets/index-….js")</script>` bootstrap, and the full flight payload
+(`__VINEXT_RSC_CHUNKS__` with the rendered `main`/`h1`/`p` tree). So the claim holds in its strong
+form: server-rendered **and** hydratable, not a shell.
+
+**The ~5× gap is fully accounted for, and it is not a rendering difference.** Breaking both
+documents down:
+
+| | markup outside `<script>` | inline script bytes | total |
+|---|---|---|---|
+| beta.4 prerendered `/blog/alpha` (§0) | 524 B | 7973 B (16 tags) | 8497 B |
+| `0.0.30`+vite7 live-rendered `/blog/alpha` | **569 B** | 996 B (5 tags) | 1565 B |
+
+The **rendered markup is the same size** (569 B vs 524 B). The entire difference is beta.4's
+inline `vinext.navigationRuntime` client-navigation bootstrap — 14 script tags, one of them 5021 B
+of route manifest — which `0.0.30` does not emit. That is a **vinext version difference in the
+client-navigation payload**, not evidence about SSR.
+
+App marker in the binary: **3**. Clean dir: **0** `node_modules`, **0** server `.js` — both asserted
+by `e2e-container-arm.sh`, which aborts rather than proceeding if either is non-zero, and which
+also aborts if the container `WORKDIR` exists on the build host.
 `--compile --minify --bytecode` completed with **no** bytecode warning on this arm (whether bytecode
 is actually present is Phase 3(d)'s question — see §5).
 
 The container is a stronger control than any rename: the host filesystem, ancestors included, is
-simply not present. And the beta.4 row is the proven-red negative control for the entry itself —
-same entry, same flags, same probe app, red.
+simply not present. And the vite-8 row is the proven-red negative control for the entry itself —
+same entry, same flags, same probe app, same vinext, red.
+
+### 3.4 The two "52 modules" — reconciled
+
+§3.3's original table and §6 both reported **52 modules**, for the bespoke-entry graph and for the
+SSR chunk **alone**. The challenge was that one graph must contain the other, so they cannot both
+be 52 — and that one number was therefore probably a reused measurement.
+
+**It was not reused.** Both were separately built and both genuinely print 52. Two facts explain
+it, and the second is the one that matters:
+
+1. **The two chunks are mutually reachable**, so both roots have the *same* closure:
+
+   ```
+   dist/server/index.js      ->  import(`./ssr/index.js`)   (lazy)
+   dist/server/ssr/index.js  ->  import(`../index.js`)      (lazy)   <- the cycle
+   ```
+
+   Containment holds in **both** directions, so equality is the correct answer, not a defect.
+
+2. **bun's headline "N modules" is not a graph size**, so it should never have been quoted as if it
+   distinguished the arms. Three different roots all print 52 under `--compile`, while the module
+   list that actually differs — the sourcemap `sources` array, i.e. modules with emitted output —
+   is not equal at all:
+
+   | root | `bun --compile` headline | sourcemap `sources` |
+   |---|---|---|
+   | SSR chunk alone | 52 modules | **20** |
+   | RSC entry alone | 52 modules | **50** |
+   | bespoke entry (§3.3) | 52 modules | **50** |
+
+   Containment then verifies directly: every module in the SSR-chunk-alone set is in the
+   bespoke-entry set except its own entry file, and the bespoke-entry set has **31** the
+   SSR-chunk set does not.
+
+`module-count-reconcile.sh` is committed and reproduces all of the above.
 
 ---
 
@@ -289,11 +429,24 @@ same entry, same flags, same probe app, red.
 
 Findings only; sequencing is the sprint gate's call.
 
-1. **Consequence 11's remedy line — *"Remedy: a vinext fork or upstream PR"* — is too pessimistic
-   and mis-aimed.** The application **can** be embedded, with SSR working, in a compiled binary
-   today; it is one upstream defect away, and that defect is in the **Vite 8 / rolldown** SSR output
-   (or in how vinext configures its SSR environment under it), not in vinext's architecture. A
-   `vinext` **fork** would fork the wrong project.
+1. **Consequence 11's remedy line — *"Remedy: a vinext fork or upstream PR"* — is mis-aimed, and
+   less pessimistic than it looks, but "one defect away" is NOT established.** What *is*
+   established: the application **can** be embedded, with SSR working, in a compiled binary today
+   (§3.3, Vite-7 arm, container, no `node_modules`), and the **first** failure layer under Vite 8
+   is `createRequire(import.meta.url)("react-dom")` in the emitted SSR chunk — mutation-proved in
+   §2. That defect is in the **Vite 8 / rolldown** SSR output (or in how vinext configures its SSR
+   environment under it), not in vinext's architecture, so a `vinext` **fork** would fork the wrong
+   project.
+
+   **What is not established is that one upstream change closes both layers.** §2 replaced that
+   `createRequire` call with the chunk's already-present static namespace `(h.default ?? h)` —
+   which is precisely the remedy §4.3 proposes upstream — and the resolver error was replaced by
+   `TypeError: undefined is not an object (evaluating 'h6.default')`. §5 lists the cause of that
+   second layer as **not established**. An earlier draft of this section said the second layer was
+   unexplained *and* that embedding was "one upstream defect away", while proposing as the fix the
+   transformation it had measured failing. Corrected: **the first layer is established; whether a
+   single upstream change closes both is not.** The honest statement of the ask is "file the
+   `require("react-dom")` issue and find out", not "it is one patch away".
 2. **Consequence 11's stated mechanism needs amending.** It reads *"a dynamic import of a computed
    path is unbundleable by construction, so this is a design property of beta.4's production
    server."* The dynamic import is **not** the blocker: Experiment 1 removed it entirely and the
@@ -338,6 +491,17 @@ Listed so absence is not read as a negative result.
 - **Whether an upstream issue would be accepted**, and by whom.
 - **arm64 containers.** All container arms ran emulated `linux/amd64` on Apple Silicon.
 - **Nothing was run against a cluster.**
+- **Whether ONE upstream change closes both failure layers.** §2 applied the very transformation
+  §4.3 proposes upstream and hit the second layer. The first layer's cause is established; the
+  sufficiency of fixing it is not. (Previously this doc asserted "one upstream defect away" while
+  simultaneously listing the second layer as unexplained — that contradiction is now removed.)
+- **Whether the same Vite 7 → 8 boundary holds on `1.0.0-beta.4`.** It cannot be tested the same
+  way: beta.4 peer-requires `vite@^8`, so no single-variable arm exists on that version. The
+  corrected §3.2/§3.3 tests are on `vinext@0.0.30`, which accepts both.
+- **`@vitejs/plugin-react` 5 vs 6 as an independent factor.** The corrected test holds it at 5.2.0
+  on both arms, which removes it as a confound but does not measure it. Whether plugin-react 6's
+  babel/react-compiler pipeline *also* changes the SSR chunk is untested and not claimed.
+- **Anything on the vite-8 arm beyond the nine probed routes**, on either arm. No compat suite ran.
 
 ---
 
@@ -367,7 +531,8 @@ mv pcprobe/node_modules pcprobe/node_modules-MOVED
 bun build --compile --target=bun-linux-x64-musl ./mech-plain.mjs   # 8 modules -> preload: function
 # the vinext SSR chunk ALONE cannot (this is #658's "52 modules and runs" arm --
 # it was a build-host false green; in a container it is red):
-bun build --compile --target=bun-linux-x64-musl ./mech-ssr.mjs     # 52 modules
+bun build --compile --target=bun-linux-x64-musl ./mech-ssr.mjs     # headline "52 modules" -- but
+#      that headline is NOT a graph size (§3.4); this graph's emitted module list is 20.
 #   -> error: Cannot find package 'react-dom' from '…/dist/server/ssr/index.js'
 # replace the ONE createRequire call, anchor asserted unique:
 #   var t=D(`react-dom`)   ->   var t=(h.default??h)
@@ -376,20 +541,38 @@ bun build --compile --target=bun-linux-x64-musl ./mech-ssr.mjs     # 52 modules
 
 # ---- Experiment 2 (§3) -----------------------------------------------------
 npm view vinext versions --json                       # 72 versions
-bash e2-scan.sh 0.0.0 0.0.1 … 1.0.0-beta.4            # ssr/index.js referenced from 0.0.1 on
-bash e2-build19.sh 0.0.19 "^7.0.0" "^0.5.19" p19      # emits dist/server/ssr/index.js, 245 kB
+bash e2-scan.sh 0.0.0 0.0.1 … 1.0.0-beta.4            # FILES CONTAINING ssr/index.js, 0.0.1 on
+bash e2-build-version.sh 0.0.19 "^7.0.0" "^0.5.19" p19   # emits dist/server/ssr/index.js, 245 kB
 #   grep createRequire -> 0 ; grep 'X("react-dom")' -> 0
 
-# the single-variable test: vinext + plugin-rsc fixed, ONLY vite varies
-bash e2-vite78.sh 0.0.30
-#   vite=7.3.6  plugin-rsc=0.5.32  require("react-dom")=0  createRequire=0
-#   vite=8.2.0  plugin-rsc=0.5.32  require("react-dom")=1  createRequire=2
+# the single-variable test. e2-vite78.sh is SUPERSEDED -- it varied @vitejs/plugin-react ^5 -> ^6
+# alongside vite and printed neither, so its output could not show the confound. Use:
+bash e2-vite78-fixed.sh 0.0.30 5.2.0
+#   vite=7.3.6  plugin-react=5.2.0  plugin-rsc=0.5.32  require("react-dom")=0  createRequire=0
+#   vite=8.2.0  plugin-react=5.2.0  plugin-rsc=0.5.32  require("react-dom")=1  createRequire=2
+#   + a full resolved-package diff of the two node_modules trees: the ONLY differing packages
+#     are vite and vite's own bundler/CSS closure (rollup+esbuild vs rolldown+lightningcss).
 
-# the bespoke-entry arms (§3.3): SAME entry file over two builds
-bun build --compile --minify --bytecode --target=bun-linux-x64-musl ./knext-bare-entry.mjs …
-#   vinext@0.0.30 + vite7   -> 15 modules; container /opt/knextbare30, no node_modules:
-#       /blog/alpha 200 "<h1 id=\"slug\">alpha</h1>"  · /api/health 200 · unknown 404
-#   vinext@beta.4 + vite8   -> 52 modules; container /opt/knextbarebeta:
-#       /api/health 200 · every render 500
-#       TypeError: undefined is not an object (evaluating 'rF.preload')
+# the bespoke-entry arms (§3.3), re-run single-variable: SAME entry, SAME vinext, only vite varies.
+# The container invocation is committed (Dockerfile generated inline) rather than elided:
+bash e2e-container-arm.sh "$SC/fix78-0030-vite7" fix7 3441
+#   15 modules; asserts clean dir (0 node_modules, 0 server .js) and that /opt/knext-fix7 is
+#   ABSENT on the build host, then alpine:3.22 --platform=linux/amd64:
+#       / 200 · /blog/{alpha,beta,gamma} 200 · /isr 200 MISS · /img 200 · /api/health 200
+#       · /blog/spike-dynamic-not-prerendered 200 · unknown 404
+#       /blog/alpha 1565 B: client bundle referenced=true, __VINEXT_RSC_CHUNKS__=true,
+#                           markup outside scripts 569 B
+bash e2e-container-arm.sh "$SC/fix78-0030-vite8" fix8 3442
+#   15 modules; /api/health 200 · unknown 404 · every render 500
+#       container log: error: Cannot find package 'react-dom' from
+#                      '<build-host>/fix78-0030-vite8/dist/server/ssr/index.js'
+
+# ---- reconciling the two "52 modules" (§3.4) -------------------------------
+bash module-count-reconcile.sh
+#   dist/server/index.js <-> dist/server/ssr/index.js are MUTUALLY lazy-imported (a cycle),
+#   so both roots have the same closure. And bun's headline count is not a graph size:
+#     SSR chunk alone   52 modules headline / 20 sourcemap sources
+#     RSC entry alone   52 modules headline / 50 sourcemap sources
+#     bespoke entry     52 modules headline / 50 sourcemap sources
+#   containment verified: SSR-chunk set \ bespoke-entry set = {its own entry file}
 ```
