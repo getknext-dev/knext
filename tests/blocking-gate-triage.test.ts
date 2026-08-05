@@ -76,15 +76,17 @@ describe('the unconverted-guard triage checks itself', () => {
     expect(classifyTriggerShape(resolve(REPO_ROOT, entry.workflow))).toBe(entry.category);
   });
 
-  it.each(triggerEntries)('$test — is not exempting an unconditional PR gate', (entry) => {
-    // Belt-and-braces on the assertion above, stated as the invariant that
-    // actually matters: no entry may be exempt because of its trigger while
-    // running unconditionally on every pull request. Such a workflow IS a PR
-    // gate and belongs in `auditBlockingGate`, not in this list.
-    expect(classifyTriggerShape(resolve(REPO_ROOT, entry.workflow))).not.toBe(
-      'unconditional-pull-request',
-    );
-  });
+  // There was a fourth `it.each` here asserting
+  // `.not.toBe('unconditional-pull-request')` on the same workflows. It is gone
+  // rather than reworded: `triggerEntries` is filtered to the two trigger
+  // categories, so `toBe(entry.category)` above ALREADY excludes
+  // `'unconditional-pull-request'` — the extra assertion was true by
+  // construction and could not fail while its sibling passed. It read as
+  // coverage of the headline invariant ("an exempt workflow that later gains an
+  // unconditional PR trigger reds") while being the one assertion that could
+  // never fire. That invariant is real and is carried by the sibling; what it
+  // needed was a classifier that can SEE all three `on:` syntaxes, which is the
+  // `classifyTriggerShape` block below.
 });
 
 /**
@@ -104,9 +106,13 @@ describe('classifyTriggerShape', () => {
   const TMP = mkdtempSync(join(tmpdir(), 'triage-shape-'));
   let seq = 0;
 
-  const shapeOf = (on: string) => {
+  /** `on:` in its MAPPING form — the block is indented under a bare `on:`. */
+  const shapeOf = (on: string) => shapeOfRaw(`on:\n${on}`);
+
+  /** `on:` written out in full, so the LIST and SCALAR forms are reachable too. */
+  const shapeOfRaw = (onBlock: string) => {
     const path = join(TMP, `wf-${seq++}.yml`);
-    writeFileSync(path, `name: fixture\non:\n${on}\njobs:\n  gate:\n    runs-on: ubuntu-latest\n`);
+    writeFileSync(path, `name: fixture\n${onBlock}\njobs:\n  gate:\n    runs-on: ubuntu-latest\n`);
     return classifyTriggerShape(path);
   };
 
@@ -150,6 +156,73 @@ describe('classifyTriggerShape', () => {
     // could ride in behind a legitimate `paths:`.
     expect(shapeOf('  pull_request:\n    paths: ["src/**"]\n    branches: ["main"]')).toBe(
       'otherwise-filtered-pull-request',
+    );
+  });
+
+  /**
+   * `on:` has THREE syntaxes, and only one of them is a mapping (#676 round 4).
+   *
+   * GitHub accepts `on: [pull_request, push]` (sequence) and `on: pull_request`
+   * (scalar) as well as the block mapping every workflow in this repo happens to
+   * use today. The first version of this classifier tested `'pull_request' in on`
+   * against the parse without normalising, so both non-mapping forms fell out as
+   * `no-pull-request-trigger` — MEASURED by rewriting `docs-closure-nightly.yml`
+   * three ways in a sandbox: list form GREEN, scalar form GREEN, mapping form
+   * (control) RED. An exempt guard could therefore keep asserting "this workflow
+   * has no `pull_request` trigger" about a workflow that had become an
+   * unconditional PR gate — the stays-green-when-its-subject-is-removed shape.
+   *
+   * Note the POLARITY, because the identical `'pull_request' in on` test inside
+   * `auditBlockingGate` is not a bug: there a missing trigger is REPORTED as a
+   * problem, so mis-reading a list form fails safe (over-strict). Here "absent"
+   * means "wave this exemption through", so the same code fails UNSAFE. Same
+   * pattern, opposite polarity.
+   */
+  it('the LIST form of `on:` is seen — `on: [pull_request, push]`', () => {
+    expect(shapeOfRaw('on: [pull_request, push]')).toBe('unconditional-pull-request');
+  });
+
+  it('the LIST form without a PR trigger is still no-trigger', () => {
+    expect(shapeOfRaw('on: [push, workflow_dispatch]')).toBe('no-pull-request-trigger');
+  });
+
+  it('the SCALAR form of `on:` is seen — `on: pull_request`', () => {
+    expect(shapeOfRaw('on: pull_request')).toBe('unconditional-pull-request');
+  });
+
+  it('the SCALAR form without a PR trigger is still no-trigger', () => {
+    expect(shapeOfRaw('on: schedule')).toBe('no-pull-request-trigger');
+  });
+
+  /**
+   * `pull_request_target` is IN SCOPE, deliberately.
+   *
+   * It is the more dangerous of the two — it runs with the base repository's
+   * secrets and write-scoped token against the head ref's changes — so a guard
+   * exempt on the grounds of "no `pull_request` trigger" while the workflow runs
+   * unconditionally on `pull_request_target` is the same silent exemption, on the
+   * trigger it matters more for. Treating it as out of scope would leave exactly
+   * the hole this round is closing, for the worse case.
+   */
+  it('`pull_request_target:` counts as a PR trigger', () => {
+    expect(shapeOf('  pull_request_target:')).toBe('unconditional-pull-request');
+  });
+
+  it('`pull_request_target:` counts in the list form too', () => {
+    expect(shapeOfRaw('on: [pull_request_target]')).toBe('unconditional-pull-request');
+  });
+
+  it('a paths-scoped `pull_request_target:` is paths-scoped', () => {
+    expect(shapeOf('  pull_request_target:\n    paths: ["src/**"]')).toBe(
+      'paths-scoped-pull-request',
+    );
+  });
+
+  it('with both triggers, the LEAST exempt classification wins', () => {
+    // A `paths:`-scoped `pull_request` does not launder an unconditional
+    // `pull_request_target` sitting beside it.
+    expect(shapeOf('  pull_request:\n    paths: ["src/**"]\n  pull_request_target:')).toBe(
+      'unconditional-pull-request',
     );
   });
 

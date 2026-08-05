@@ -223,7 +223,82 @@ export type TriggerShape =
   | 'otherwise-filtered-pull-request';
 
 /**
- * Classify a workflow's `pull_request:` trigger.
+ * The PR-triggering keys this classifier answers about.
+ *
+ * `pull_request_target` is IN SCOPE, deliberately: it is the more dangerous of
+ * the two — it runs with the BASE repository's secrets and write-scoped token —
+ * so a guard exempted on the grounds of "no `pull_request` trigger" while its
+ * workflow runs unconditionally on `pull_request_target` is the same silent
+ * exemption on the trigger that matters more.
+ */
+const PR_TRIGGER_KEYS = ['pull_request', 'pull_request_target'] as const;
+
+/**
+ * `on:` has THREE syntaxes and only one of them is a mapping (#676 round 4).
+ *
+ * GitHub accepts `on: pull_request` (scalar) and `on: [pull_request, push]`
+ * (sequence) as well as the block mapping every workflow in this repo happens to
+ * use today. Testing `'pull_request' in on` against the raw parse therefore
+ * MISSES two of the three forms — measured: rewriting `docs-closure-nightly.yml`
+ * into either form left the "no `pull_request` trigger" exemption GREEN while
+ * the workflow had become an unconditional PR gate.
+ *
+ * So normalise first: every form becomes a map from trigger name to its filter
+ * block (`undefined` where the form cannot carry one, which is exactly what
+ * unconditional means).
+ *
+ * POLARITY, because the identical `'pull_request' in on` test at the bottom of
+ * `auditBlockingGate` is NOT this bug: there a missing trigger is REPORTED as a
+ * problem, so mis-reading a list form fails safe (over-strict on a form no
+ * workflow here uses). Inside an EXEMPTION checker the same code fails UNSAFE,
+ * because "absent" flips meaning from "flag this" to "wave this through". Same
+ * pattern, correct in one context and wrong in the other.
+ */
+function normalizeTriggers(on: unknown): Map<string, unknown> {
+  const triggers = new Map<string, unknown>();
+  if (typeof on === 'string') {
+    triggers.set(on, undefined);
+  } else if (Array.isArray(on)) {
+    for (const entry of on) if (typeof entry === 'string') triggers.set(entry, undefined);
+  } else if (on !== null && typeof on === 'object') {
+    for (const [key, value] of Object.entries(on as Record<string, unknown>)) {
+      triggers.set(key, value);
+    }
+  }
+  return triggers;
+}
+
+/** One trigger's filter block, classified. */
+function classifyFilters(filters: unknown): TriggerShape {
+  if (filters === undefined || filters === null || typeof filters !== 'object') {
+    return 'unconditional-pull-request';
+  }
+  const record = filters as Record<string, unknown>;
+  const keys = Object.keys(record).filter(
+    (key) => !(key === 'branches' && isUniversalBranchFilter(record[key])),
+  );
+  if (keys.length === 0) return 'unconditional-pull-request';
+  if (keys.every((key) => key === 'paths' || key === 'paths-ignore')) {
+    return 'paths-scoped-pull-request';
+  }
+  return 'otherwise-filtered-pull-request';
+}
+
+/**
+ * How exempt-able each shape is. When a workflow carries BOTH `pull_request` and
+ * `pull_request_target`, the LEAST exempt one wins — a `paths:`-scoped
+ * `pull_request` must not launder an unconditional `pull_request_target` beside
+ * it.
+ */
+const SHAPE_SEVERITY: Record<TriggerShape, number> = {
+  'unconditional-pull-request': 0,
+  'otherwise-filtered-pull-request': 1,
+  'paths-scoped-pull-request': 2,
+  'no-pull-request-trigger': 3,
+};
+
+/**
+ * Classify a workflow's pull-request trigger.
  *
  * Deliberately narrower than `auditBlockingGate`'s trigger half, which asks "can
  * this gate be skipped" and so fails closed on every filter key. This asks the
@@ -233,20 +308,15 @@ export type TriggerShape =
  */
 export function classifyTriggerShape(workflowPath: string): TriggerShape {
   const doc = parse(readFileSync(workflowPath, 'utf8')) as Record<string, unknown> | null;
-  const on = (doc?.on ?? doc?.[true as unknown as string]) as Record<string, unknown> | undefined;
-  if (!on || typeof on !== 'object' || !('pull_request' in on)) return 'no-pull-request-trigger';
+  const triggers = normalizeTriggers(doc?.on ?? doc?.[true as unknown as string]);
 
-  const pr = on.pull_request;
-  if (pr === null || typeof pr !== 'object') return 'unconditional-pull-request';
-
-  const keys = Object.keys(pr as Record<string, unknown>).filter(
-    (key) => !(key === 'branches' && isUniversalBranchFilter((pr as Record<string, unknown>)[key])),
-  );
-  if (keys.length === 0) return 'unconditional-pull-request';
-  if (keys.every((key) => key === 'paths' || key === 'paths-ignore')) {
-    return 'paths-scoped-pull-request';
+  let shape: TriggerShape = 'no-pull-request-trigger';
+  for (const key of PR_TRIGGER_KEYS) {
+    if (!triggers.has(key)) continue;
+    const candidate = classifyFilters(triggers.get(key));
+    if (SHAPE_SEVERITY[candidate] < SHAPE_SEVERITY[shape]) shape = candidate;
   }
-  return 'otherwise-filtered-pull-request';
+  return shape;
 }
 
 export interface BlockingGateOptions {
