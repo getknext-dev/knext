@@ -263,18 +263,35 @@ From #606, sourced to vinext's own repo and registry data:
     **The split SSR sub-entry is NOT the cause and is not new** — `vinext@0.0.1` already emits
     `dist/server/ssr/index.js` and lazily imports it, exactly like beta.4. That half is solid: it was
     confirmed independently by building 0.0.19.
-    **⚠️ "The cause is Vite" is NOT YET ISOLATED — the arms differed by two variables.** The
-    comparison (`vinext@0.0.30 + vite 7.3.6` → `require("react-dom")` **0**; `+ vite 8.2.0` → **1**)
-    was run with `@vitejs/plugin-react` varying **^5 → ^6** alongside vite, and the harness printed
-    only the vite and plugin-rsc versions so the confound did not appear in the output. That matters:
-    `@vitejs/plugin-react@6` peer-requires `@rolldown/plugin-babel` and `babel-plugin-react-compiler`,
-    so **arm 8 ran a different transform pipeline, not merely a different bundler**. The held-fixed
-    list also named `react-server-dom-webpack@19.2.8`, a version no committed script recorded for
-    these arms (both installed a floating range, no lockfile).
-    **A corrected single-variable run is in flight** — `@vitejs/plugin-react@5.2.0` peer-accepts
-    `vite ^8`, so one version is valid on both arms. Until it reports, the honest claim is: **a
-    regression exists between these two dependency sets, and which input causes it is not
-    established.** Do not cite "it's Vite" as settled. End-to-end, same bespoke entry over two builds, in a
+    **The cause is Vite — ESTABLISHED, on the corrected single-variable run
+    (`e2-vite78-fixed.sh`, not the superseded `e2-vite78.sh`).**
+
+    | resolved | vite-7 arm | vite-8 arm |
+    |---|---|---|
+    | `vinext` | 0.0.30 | 0.0.30 |
+    | **`vite`** | **7.3.6** | **8.2.0** |
+    | `@vitejs/plugin-react` | 5.2.0 | 5.2.0 |
+    | `@vitejs/plugin-rsc` | 0.5.32 | 0.5.32 |
+    | `react` / `react-dom` / `react-server-dom-webpack` | 19.2.8 | 19.2.8 |
+    | `@rolldown/plugin-babel`, `babel-plugin-react-compiler` | absent | **absent** |
+    | bundler | rollup 4.62.4 + esbuild 0.28.1 | rolldown 1.2.3 |
+
+    `require("react-dom")` **0 → 1**; `createRequire` **0 → 2**. Rather than trusting an enumerated
+    held-fixed list, the script **diffs the full resolved package set of both `node_modules` trees**:
+    every differing package is vite or vite's own closure. Nothing in the React or plugin closure
+    varies. The end-to-end container arm was re-run single-variable too (vinext held at 0.0.30 on both
+    sides, where the original had compared 0.0.30+vite7 against beta.4+vite8): vite 7 → all nine
+    routes correct; vite 8 → `/api/health` 200, 404 correct, **every render 500**.
+
+    **An earlier draft of this entry cited a two-variable run** in which `@vitejs/plugin-react` varied
+    ^5 → ^6 alongside vite, while the harness printed only the vite and plugin-rsc versions so the
+    confound never appeared in the quoted output. That mattered — `@vitejs/plugin-react@6`
+    peer-requires `@rolldown/plugin-babel` and `babel-plugin-react-compiler`, so that arm ran a
+    different *transform pipeline*, not merely a different bundler. Recorded because the conclusion
+    survived re-testing and could therefore have been left looking better-evidenced than it was.
+    **Corroboration, not evidence:** the supporting bisect points still come from
+    `e2-build-version.sh`, which hardcodes plugin-react `^6.0.5` for every arm — pairing plugin-react
+    6 with vite 7 in violation of its own peer range. Cite the fixed script, not the bisect. End-to-end, same bespoke entry over two builds, in a
     container with **no `node_modules` and no server JS**: **vite 7 serves every route 200 with real
     SSR** (`<h1 id="slug">alpha</h1>`) and a correct 404; **vite 8 500s on every render.**
     **Mechanism:** the Vite-8 SSR chunk reaches react-dom via
