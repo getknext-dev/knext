@@ -1,18 +1,23 @@
 # `bun-exec` build recipe (opt-in, experimental)
 
-> **✅ SELF-CONTAINED (fixed in [#460](https://github.com/getknext-dev/knext/issues/460)).**
+> **✅ SELF-CONTAINED (fixed in [#460](https://github.com/getknext-dev/knext/issues/460); re-proved
+> on the CURRENT toolchain, ADR-0042 A1).**
 > The compiled binary embeds all routes and serves them from ANY directory — ship it as
-> **`binary` + `.output/public`** (the static-asset dir), not binary-only. Verified locally by
-> running the binary from a clean dir containing only `.output/public`: `/`, `/api/health`,
-> `:9091/metrics`, and the Bearer-auth `/api/cache/invalidate` all respond correctly, and SIGTERM
-> drains an in-flight request then exits 0. Two root causes were fixed (both proven on OKE):
+> **`binary` + `.output/public`** (the static-asset dir), not binary-only. This is no longer a
+> hand-run claim: `test/alpine-image-e2e.test.ts` (`bun run test:image`, CI job
+> `bun-exec-alpine-image`) builds the binary, builds `Dockerfile`, runs the container with `/app`
+> holding ONLY the binary + `.output/public` (`.output/server` asserted absent), and probes SSR, a
+> route handler, a **dynamic** page and handler, a 404, the fail-closed
+> `POST /api/cache/invalidate`, and `:9091/metrics`. Two root causes were fixed (both proven on OKE):
 >
-> 1. **Versions / bundling.** The old pins (`nitro@3.0.260610-beta` / `vinext@1.0.0-beta.2`) emitted
->    a runtime-CHUNKED server (`.output/server/index.mjs` a ~7 KB loader that reads route chunks from
->    `.output/server/` at runtime), so `bun --compile` couldn't embed the routes. This recipe now pins
->    `nitro@3.0.1-alpha.2` / `vinext@0.0.19` / `vite@7` / `@vitejs/plugin-rsc@0.5.x` — the combo that
->    BUNDLES the server so `--compile` embeds every route (the versions the founder's original working
->    single-binary shipped).
+> 1. **Versions / bundling.** `vinext@1.0.0-beta.2` emitted a runtime-CHUNKED server
+>    (`.output/server/index.mjs` a ~7 KB loader that reads route chunks from `.output/server/` at
+>    runtime), so `bun --compile` couldn't embed the routes. The fix at the time was to pin back to
+>    `nitro@3.0.1-alpha.2` / `vinext@0.0.19` / `vite@7`. **That pin is gone (ADR-0042 A1):
+>    `vinext@1.0.0-beta.4` + `vite@8` + `nitro@3.0.260610-beta` is self-contained** — see
+>    "Toolchain / version risk" below for the measurement. Chunked-on-disk no longer implies
+>    not-embeddable: beta.4's `.output/server/` still shows `_ssr/rsc.mjs` / `_ssr/ssr.mjs`, and
+>    `bun build` bundles and embeds them anyway.
 > 2. **The custom entry dropped the route wiring.** `knext-bun-entry.mjs` overrides nitro's `entry`,
 >    which drops vinext's route injection unless the entry re-imports `#nitro/virtual/polyfills`
 >    (registers `globalThis.__nitro_vite_envs__` → the ssr/rsc render chunks). It also now serves the
@@ -64,7 +69,8 @@ suite (a later P3/P4 increment), not by this recipe. When in doubt, use `node`.
 
 | File | Role |
 |---|---|
-| `app/` | Minimal App-Router sample: home page, `GET /api/health` (shallow), `GET /slow` (~2s, for the drain test), `POST /api/cache/invalidate` (Bearer-auth, fail-closed). |
+| `app/` | Minimal App-Router sample: home page, `GET /api/health` (shallow), `GET /slow` (~2s, for the drain test), `POST /api/cache/invalidate` (Bearer-auth, fail-closed), and — added for ADR-0042 A1 — a **dynamic page** `GET /item/[id]` and a **dynamic handler** `GET /api/echo/[slug]`, the dimension the self-containment proof was previously missing. |
+| `Dockerfile` | The reference ship image: `FROM alpine` **+ `apk add libstdc++ libgcc`** (mandatory — see the warning under "Binary size") + the binary + `.output/public`, non-root. |
 | `knext-bun-entry.mjs` | The bespoke **Nitro server entry**. Imports `#nitro/virtual/polyfills` (keeps vinext's routes in the bundle), serves the app through srvx's `serve` (nitro's real request path) with an in-flight-counting middleware, runs a second `Bun.serve` for in-process `:9091` metrics, and owns SIGTERM/SIGINT graceful drain. |
 | `runtime-contract.mjs` | Pure, dependency-free contract helpers (Prometheus exposition, fail-closed Bearer guard, drain orchestration + `after()`/waitUntil registry). Shared by the entry **and** the tests, so the binary and the tests enforce identical logic. |
 | `vite.config.ts` | Wires `nitro({ preset: "bun", entry: "./knext-bun-entry.mjs" })` so the build inlines our entry. |
@@ -108,16 +114,27 @@ follow-up for the OKE validation.
 
 ## Toolchain / version risk ⚠️
 
-The pipeline rides an **early nitro/vinext** combo, chosen because it BUNDLES the
-server so `bun --compile` embeds all routes (self-containment, #460): `nitro@3.0.1-alpha.2`
-/ `vinext@0.0.19` / `vite@^7` / `@vitejs/plugin-rsc@0.5.x` — the versions the founder's
-original working single-binary shipped. The committed `bun.lock` + `bun install --frozen-lockfile`
-pin the resolved graph. **The newer betas do NOT work for this recipe:** `nitro@3.0.260610-beta`
-/ `vinext@1.0.0-beta.2` emit a runtime-CHUNKED server (routes loaded from `.output/server/` at
-runtime) that `--compile` cannot embed → the binary 404s outside its build dir. **Re-validate
-self-containment (build, run the binary from a clean dir with only `.output/public`, hit `/`) on
-every pin bump.** vinext is MIT but beta; a shipping target cannot ride an unmaintained upstream —
-that exit stance is tracked in ADR-0036 P1b.
+The pipeline rides the **current** vinext line: `vinext@1.0.0-beta.4` / `vite@^8` /
+`nitro@3.0.260610-beta` / `@vitejs/plugin-rsc@0.5.x`. The committed `bun.lock` +
+`bun install --frozen-lockfile` pin the resolved graph.
+
+**The `vinext@^0.0.19` / `nitro@3.0.1-alpha.2` pin is GONE (ADR-0042 A1).** It existed because
+`vinext@1.0.0-beta.2` emitted a runtime-chunked server `--compile` could not embed (#460), and
+pinning a shipping recipe to two abandoned pre-releases was never a defensible posture. Measured on
+beta.4, x64-musl: `vite build` → `bun build --compile --minify --bytecode
+--target=bun-linux-x64-musl .output/server/index.mjs` bundles **34 modules** and the container
+serves every probed route from a `/app` that contains only the binary + `.output/public`.
+
+Upgrading vinext is a **toolchain migration, not a bump**: beta.4 fails on Vite 7
+(`does not provide an export named 'parseSync'`) and hard-requires **Vite 8**. It also no longer
+depends on `nitro` — this recipe still uses the nitro Vite plugin (`nitro({ preset: 'bun', entry })`)
+because that is what lets the bespoke `knext-bun-entry.mjs` provide the `RuntimeContract`; nitro is
+now a direct devDependency of the example rather than something vinext drags in.
+
+**Self-containment no longer needs re-validating by hand on a pin bump** — `bun run test:image`
+does it, and the `bun-exec-alpine-image` CI job runs that on every push. vinext is MIT but beta; a
+shipping target cannot ride an unmaintained upstream — that exit stance is tracked in ADR-0036 P1b
+and ADR-0042 (A6/A8).
 
 ## Binary size
 
@@ -125,8 +142,16 @@ that exit stance is tracked in ADR-0036 P1b.
 (the pre-compile `.output/` tree is ~1 MB — the size is entirely the runtime; the
 "5 MB alpine" idea is wrong). **Ship the binary + the `.output/public` static-asset dir**
 (the routes are IN the binary; only static assets live outside it — that is exactly what the
-founder's original working build shipped). The ship path is a bare `FROM alpine` image (cosign-signed,
-digest-pinned) copying `binary` + `.output/public`, run from a dir where `./.output/public` resolves.
+founder's original working build shipped). The ship path is the `Dockerfile` in this directory
+(cosign-signed, digest-pinned in production) copying `binary` + `.output/public`, run from a dir
+where `./.output/public` resolves.
+
+> ⚠️ **`FROM alpine` + the binary alone DOES NOT RUN (ADR-0042 A9).** bun's `-musl` targets are
+> **not statically linked**. Without `libstdc++`/`libgcc` the container dies with
+> `Error loading shared library libstdc++.so.6`, ~30 relocation errors, and **exit 127** — so the
+> image row in ADR-0036 ("`FROM alpine` + the single binary") is wrong as written. The `Dockerfile`
+> here carries `RUN apk add --no-cache libstdc++ libgcc` (+~2 MB), and `test/alpine-image-e2e.test.ts`
+> fails with that container's own exit code if the line is removed (mutation-proved).
 Because the binary is opaque to Trivy/syft, the SBOM + HIGH/CRITICAL scan run against the
 **pre-compile dependency closure** (lockfile), not the binary (ADR-0036 supply-chain consequence).
 
@@ -161,6 +186,7 @@ Then:
 ```bash
 bun install
 bun run test        # vitest: contract unit tests + bun-harness drain/metrics/auth e2e
+bun run test:image  # the compiled binary in a clean alpine container (needs docker + bun)
 ```
 
 The e2e spawns `test/drain-harness.mjs` under bun — the **same** two listeners +
@@ -168,9 +194,14 @@ shared `runtime-contract.mjs` as the real entry, with a stub router in place of
 vinext's handler. It proves the net-new knext code (metrics, drain, auth) over
 real sockets. `test/self-contained-entry.test.ts` additionally guards the two #460
 root causes (the `#nitro/virtual/polyfills` import and srvx-based app serving) so
-neither can silently regress. The **full vinext handler composition served from a
-self-contained binary run in a clean dir** was verified manually during #460 (build
-→ run binary + `.output/public` from `/tmp` → `/`, `/api/health`, `:9091/metrics`,
-Bearer `/api/cache/invalidate`, and SIGTERM drain all correct); the OKE cold-start
-A/B is the **pending P1b gate**. Running the full compiled-binary e2e in CI is
-deliberately out of scope here (too heavy for the main gates).
+neither can silently regress.
+
+`bun run test:image` is the **compiled-binary** half, and it is no longer out of
+scope for CI: `test/alpine-image-e2e.test.ts` compiles the binary (via `build.sh`
+if absent), builds the reference `Dockerfile`, and probes the running container.
+It has **no skip path** — a missing docker or bun is a failure, never a silent
+pass — which is why it is kept out of the fast `bun run test` and given its own
+`bun-exec-alpine-image` CI job. `tests/bun-exec-alpine-image-ci.test.ts` guards
+that wiring, so deleting the job reddens the main suite instead of quietly
+disarming the gate. The OKE cold-start A/B remains the **pending P1b gate**; this
+proves the artifact runs, not that it is faster.

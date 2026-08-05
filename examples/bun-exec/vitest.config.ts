@@ -10,5 +10,10 @@ import { defineConfig } from 'vitest/config';
 export default defineConfig({
   test: {
     include: ['test/**/*.test.ts'],
+    // The alpine image e2e compiles a ~100 MB binary and builds+runs a
+    // container; it belongs to `bun run test:image` (vitest.image.config.ts),
+    // not to this fast suite. Excluded here, NOT disabled — it has no skip path
+    // and its own CI job runs it.
+    exclude: ['test/alpine-image-e2e.test.ts', '**/node_modules/**'],
   },
 });
