@@ -213,15 +213,70 @@ From #606, sourced to vinext's own repo and registry data:
 9. **The image needs `apk add libstdc++ libgcc`** — the musl targets are not statically linked.
 10. **Nothing is removed by this decision.** `examples/bun-exec` stays, the node path stays until
     Phase 6 decides its fate, ADR-0035's baked compile cache stays.
+11. **On `vinext@1.0.0-beta.4` the APPLICATION IS NOT IN THE BINARY.** Measured (#658), and the
+    mechanism is read from source rather than inferred: `prod-server.js:634-657` derives
+    `rscEntryPath = <outDir>/server/index.js` and `import()`s it at runtime
+    (`importServerEntryModule`, `:120-122`). **A dynamic import of a computed path is unbundleable by
+    construction**, so this is a design property of beta.4's production server — it is **not** a
+    property of the prerendering shape, and it must therefore hold for the **standalone** shape this
+    ADR's action items assume. The working artifact is binary + `dist/` + `node_modules/` (143 MB);
+    remove `node_modules` and every rendering path 500s while prerendered routes keep serving, so **a
+    smoke test hitting only `/` passes**. A 3-line `prod-server` seam does embed the app (140 modules,
+    marker present) but then every SSR path 500s in-container — the SSR sub-entry's `react-dom` stays
+    a runtime-external reference to a build-host path, with **no build-time warning**; four
+    independent workarounds failed. Remedy: **a vinext fork or upstream PR**.
+    *Earned claim only:* the application is not in the binary. Whether the **shell** is
+    bytecode-compiled was **not** verified by extraction — see Phase 3(d).
+12. **The flip may REDUCE the precompiled fraction of the boot path — the inverse of the stated
+    motive.** The incumbent node path already ships **app-covering** compiled-code caching:
+    `scripts/warm-compile-cache.sh` bakes 1106 V8 entries covering the *grandchild* standalone
+    `server.js` — the application — measured at **393 ms / 12.4% with complete distribution
+    separation** (ADR-0035). The proposed default, on beta.4, precompiles vinext's shell and leaves
+    the application **interpreted from disk**, with no equivalent app-covering mechanism identified or
+    measured on the bun path. This is the single most decision-relevant fact on the table and it
+    contradicts the founder's own sentence; it is escalated as **Escalation 2′**, not resolved here.
+13. **The only shape known to embed the application is the one this ADR forbids shipping.** Phase 0's
+    embedding result came from `vinext@^0.0.19` + the nitro bun preset, and *What must NOT be done*
+    bans that pin as a shipping dependency. Recorded because the tension is otherwise invisible.
 
 ## Phased plan
 
 Ordered by risk retired per unit of work. Phases 2 and 3 run concurrently with 1 — both are cheap and
 either can invalidate the flip.
 
-**Phase 0 — bridge proof. DONE (2026-08-04).** See above. NO-GO trigger did not fire. Residual: reproduce
-self-containment on **current** vinext (beta.4 + Vite 8) rather than the `^0.0.19` pin, since pinning to
-abandoned pre-releases is not a shipping posture. The spike indicates beta.4 *is* self-contained.
+**Phase 0 — bridge proof. DONE (2026-08-04), residual REOPENED (2026-08-05).** NO-GO trigger did not
+fire. Residual was: reproduce self-containment on **current** vinext (beta.4 + Vite 8) rather than the
+`^0.0.19` pin, since pinning to abandoned pre-releases is not a shipping posture.
+
+**An earlier draft of this line read "the spike indicates beta.4 *is* self-contained." That is now
+wrong and is corrected, not softened.** #658 answers it in the negative in the sense that matters:
+beta.4 serves from binary + `dist/` + `node_modules/`, and **the application is not in the binary**
+(Consequence 11). Two further corrections follow:
+
+- **`dist/standalone/server.js` is NOT compilable**, and every action item that assumed it is must be
+  read against Finding B below. A **knext-owned entry resolving from `process.execPath`** is
+  mandatory, not stylistic.
+- **Phase 0's clean-directory self-containment claim must be RE-VERIFIED under the container rule** in
+  *What must NOT be done*. It is the result that closed ADR-0036's NO-GO trigger and therefore carries
+  this whole ADR; #658 reasons it is *probably* safe because Phase 0 used a bespoke entry, and
+  probably is not verification.
+
+**Phase 3(d) — artifact provenance. NEW, and it gates Phase 1 (A2).** Phase 1's exit is "distribution
+separation", and a separation result on an artifact whose bytecode coverage is uncharacterised can
+**neither confirm nor refute the stated objective** — a win would be attributed to bytecode that mostly
+is not there, a loss blamed on a shape nobody intends to ship. This is a precondition, the same shape
+as the existing ADR-0037 one, not a halt. Three cheap items:
+1. Verify `--bytecode` by **binary extraction on the cross-compiled musl target** — ADR-0036 Run 26's
+   method (extract from the deployed digest, fingerprint against version-matched controls). This is the
+   largest hole in #658 and is hours of work.
+2. Measure **bytecode coverage**: what fraction of modules on the cold first request come from the
+   binary versus disk. Converts "the app isn't bytecode" from qualitative to a number, and answers
+   whether shell-only bytecode is most of the win or none of it.
+3. Confirm from a knext-owned entry that the **standalone** shape also fails to embed the app. Source
+   says it must (Consequence 11); proving it is ~20 minutes.
+
+**Sixth admissibility condition**, added to ADR-0036's five: the vinext arm's binary must be **shown to
+contain the application**, or the run is labelled as measuring the **shell-only** shape.
 
 **Phase 1 — measure the axis. (Reversible.)** Two arms: `node+turbopack` (control) and
 `bun+vinext-compiled`. **Precondition:** ADR-0037 image prewarm in place — now proven on OKE to remove a
@@ -313,7 +368,19 @@ first, then CLI**.
 - **Do not ship an opaque compiled binary without** the pre-compile-closure SBOM, the HIGH/CRITICAL scan
   against it, and the cosign attestation.
 - **Do not pin `nitro@3.0.1-alpha.2` / `vinext@^0.0.19` as shipping dependencies.** Phase 0 reference
-  points, not a product.
+  points, not a product. *(See Consequence 13: this is currently the only shape known to embed the
+  application, so the ban has a real cost that must stay visible.)*
+- **NEVER validate a `bun --compile` artifact on the build host.** *(Finding B, #658.)*
+  `bun build --compile --minify` **constant-folds `import.meta.dirname` to the build-host absolute
+  path** (without `--minify`: `/$bunfs/root`). Compiling vinext's own `dist/standalone/server.js`
+  yields a binary that runs **only on the build machine** — exit 1 in a container, and on the host a
+  **false green** that serves SSR/dynamic/404 from an *empty* directory by silently reading the build
+  tree. The hazard is general, not specific to one symbol: `import.meta.dirname`, `__dirname`,
+  `import.meta.url`, and module-scope `process.cwd()` are all constant-folding hazards.
+  **Binding form:** validation runs **in a container**, at an **absolute path that does not exist on
+  the build host**, with the build tree **renamed**, exercising **SSR/dynamic** — not boot, not `/`.
+  The rename is a **required negative control**: the test must be shown to go **red** without it.
+  A9's "runs from a clean alpine" is too weak on its own — #658's false green *served correctly*.
 - **Do not cite #607's macOS boot numbers, ADR-0036's Run 24, or the Phase 0 spike's 241.9 ms as
   cold-start A/B evidence.** #607 §8 disclaims transferability; Run 24 is withdrawn; the spike is not an A/B.
 - **Do not claim "passes the official compatibility suite"** once the corpus is reduced. Name the delta.
@@ -326,10 +393,41 @@ first, then CLI**.
    bytecode mandatory, the options are: (a) accept the regression, reversing ADR-0006 for the default
    path; (b) keep the **node + turbopack** track alive for image apps — which makes dual-track permanent
    and is the only option that preserves ADR-0006; (c) build a knext-owned optimiser — new scope, and the
-   closest thing here to PaaS drift. **This is the sharpest open question.**
-2. **Is losing build-time static generation acceptable**, if Phase 3 finds it is a real loss? For a
+   closest thing here to PaaS drift. **Now read jointly with Escalation 3′ and 7 — it is one
+   fork/upstream decision, not two.** Also note #656's "only one option preserves ADR-0006" was
+   withdrawn on review: an in-process interception path exists that the spike had the foothold for and
+   never tried (`startProdServer` returns the `http.Server`; `./server/prod-server` is a public
+   export), and ADR-0042 Consequence 4 already mandates a bespoke knext entry. It is **being measured**,
+   not assumed, and the open risk is `sharp` as a native module under `bun --compile`.
+2. **~~Is losing build-time static generation acceptable~~ — WITHDRAWN AS FRAMED (2026-08-05, #658).**
+   Prerendering and compiling are **not** mutually exclusive. Verified in-container: all six
+   prerendered routes served **byte-identical** (sha256 + `Buffer.equals`, `x-vinext-cache: HIT`), all
+   `generateStaticParams` slugs, a correct 404, and ISR revalidating (HIT → STALE at +65 s → HIT with
+   new bytes rendered in-container). This escalation does not need the founder. It is **replaced** by:
+
+   **2′. Does the flip stand if the application is not bytecode-compiled?** This is the founder's own
+   sentence being contradicted by measurement, so only the founder can answer it. The stated motive
+   was *"the compile is required because the bytecode is mandatory."* On beta.4 the compiled binary
+   contains vinext's HTTP shell and **not the application** (Consequence 11), while the incumbent node
+   path already precompiles the application — 1106 V8 entries, 393 ms, complete distribution
+   separation (Consequence 12). **The flip may reduce the precompiled fraction of the boot path.**
+   Phase 3(d) converts this from qualitative to a number before the question is put; it should not be
+   answered on today's evidence.
+
+   *(Historic framing, kept because the ADR's phasing referenced it:* was losing build-time static
+   generation acceptable? For a
    scale-to-zero product this may matter more than images.
-3. **Is being downstream of vinext acceptable on these terms** — beta, no stability promise, two-author
+3′. **REFRAMED (2026-08-05) — this is now a MAINTAINER commitment, not a consumer risk.** Two
+   capability gaps have converged on the same remedy: image optimisation (#656 §1.5) and SSR
+   application-embedding (#658, Consequence 11). As originally written this asked *"is depending on a
+   beta project acceptable"*. With two forks converging it asks instead whether knext will **carry**
+   a `prod-server.js` seam, an image-optimizer registration hook, and a bundler-graph fix **whose
+   mechanism is not established** — against an upstream with 72% two-author concentration and zero
+   labelled breaking changes. The option set the old wording lacked: **upstream contribution as
+   strategy** vs **downstream fork** vs **accept both losses**, each priced against A6's
+   abandonment-exit stance, which a fork sharply raises.
+   *Original framing, still the underlying risk:* is being downstream of vinext acceptable on these
+   terms — beta, no stability promise, two-author
    concentration, zero labelled breaking changes despite a breaking Vite 8 bump, a project that
    recommends OpenNext for mature use, and peers that become *users'* migration burden?
 4. **Does 1.0 ship on this?** `docs/V1_ROADMAP.md` does not commit the `bun-exec` target; making it the
@@ -337,6 +435,15 @@ first, then CLI**.
 5. **What happens to the official node compat lane** — completed for the credential, paused, or
    abandoned? Note the streak reset to 1 on 2026-08-03 and that run's log has expired, so its cause is
    unrecoverable.
+7. **Is patching vinext INTERNALS permitted at all?** *(New, 2026-08-05 — a `workflow.md` trigger-1
+   escalation: it contradicts a hard rule, and is independent of Escalation 3′'s cost question.)*
+   `.claude/rules/architecture.md` §4 permits vinext as a **build target** on the explicit basis that
+   it *"is NOT a return to reverse-engineering Nitro/Vinext as a runtime."* Patching vinext's internal
+   production server to route around an unexplained bundler failure is precisely that activity. It is
+   also the clearest positioning drift on the table: it moves knext from *an adapter that uses vinext*
+   toward *co-maintainer of a Next.js reimplementation* — engineering that is neither Knative nor the
+   adapter, on a fame-first timeline whose north star is verified-adapter status. **This needs a rules
+   amendment, not an architect's call.**
 6. **What corpus delta is acceptable at the Phase 5 flip?** Phase 2's lane will exclude some tests. A
    ceiling has to exist before the irreversible step, or "honestly scoped" becomes a criterion that any
    exclusion set satisfies. vinext self-reports 93.3%, so ~7% is the shape of the question. State it as
@@ -346,8 +453,14 @@ first, then CLI**.
 
 ## Action items
 
-- **A1** Reproduce self-containment on current vinext + Vite 8 (Phase 0 residual).
-- **A2** Two-arm OKE A/B under the five admissibility conditions. Precondition: ADR-0037 prewarm.
+- **A1** Reproduce self-containment on current vinext + Vite 8 (Phase 0 residual). **Answered in the
+  NEGATIVE in the sense that matters (#658): the application is not in the binary.** Re-scope to
+  re-verify Phase 0's clean-directory claim **under the container rule** (renamed build tree as a
+  required negative control, SSR/dynamic exercised) — it is the result that closed ADR-0036's NO-GO
+  trigger, so it carries this ADR.
+- **A2** Two-arm OKE A/B under the **six** admissibility conditions (the sixth: the vinext arm's
+  binary shown to contain the application, else the run is labelled shell-only). Preconditions:
+  ADR-0037 prewarm **and Phase 3(d)** — do not run it before artifact provenance is established.
 - **A3** `KNEXT_BUILD=vinext` lane, red-on-fail, evidence-carrying exclusions, compat-matrix delta.
 - **A4** Resolve image optimisation, static generation, dev-React (feeds Escalation 1 and 2).
 - **A5** Additive `build` field per ADR-0040; both drain e2e gates parameterised. **And re-point
@@ -380,7 +493,9 @@ first, then CLI**.
   §2/§3/§9/§10 — **gated on Phase 5**.
 - **A8** Name an owner for vinext upstream health.
 - **A9** Add `apk add libstdc++ libgcc` to the compiled image, with a test that the binary runs from a
-  clean alpine.
+  clean alpine — **strengthened**: a clean alpine alone is too weak, because #658's false green
+  *served correctly*. The test must run at an absolute path absent on the build host, with the build
+  tree renamed as a negative control proven to go red, exercising SSR/dynamic rather than boot.
 - **A10** Parameterise `apps/file-manager/scripts/compat-smoke.mjs` over the vinext artifact via
   `SERVER_PATH` / `SERVER_CMD`. **Part of Phase 2 — must land before Phase 5.** Four requirements,
   worded to close loopholes that earlier drafts of this item left open (see below):
