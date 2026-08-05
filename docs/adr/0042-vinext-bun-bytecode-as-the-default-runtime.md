@@ -350,7 +350,11 @@ first, then CLI**.
 - **A2** Two-arm OKE A/B under the five admissibility conditions. Precondition: ADR-0037 prewarm.
 - **A3** `KNEXT_BUILD=vinext` lane, red-on-fail, evidence-carrying exclusions, compat-matrix delta.
 - **A4** Resolve image optimisation, static generation, dev-React (feeds Escalation 1 and 2).
-- **A5** Additive `build` field per ADR-0040; both drain e2e gates parameterised.
+- **A5** Additive `build` field per ADR-0040; both drain e2e gates parameterised. **And re-point
+  `tests/compat-matrix.test.ts`'s default-build-target source at the `build` field's default,
+  replacing the Phase 2 interim constant. A10(3) is NOT satisfied until this lands** — it is the one
+  requirement guarding the irreversible step, so the hand-off is a stated dependency here rather than
+  an expectation living between two phases, which `workflow.md` says decays unobservably.
 - **A6** Record vinext's licence, maintenance posture, and abandonment exit stance.
 - **A7** Amend `architecture.md` §4 (**both** bullets — default-path *and* compat-gate) and `CLAUDE.md`
   §2/§3/§9/§10 — **gated on Phase 5**.
@@ -388,7 +392,19 @@ first, then CLI**.
      that proves it: the **Graceful shutdown (SIGTERM drain)** ✅ row cites
      `packages/kn-next/src/adapters/shutdown.ts` — the node/turbopack runtime entry. Under a vinext
      default that file is off the default path entirely, because per Consequence 4 the drain is
-     re-provided by the bespoke bun entry. (3) correctly catches it.
+     re-provided by the bespoke bun entry. (3) correctly catches it — **and so does the official
+     Next.js compatibility-suite ✅ row, for the same reason**: it cites `test-e2e-deploy.yml`, whose
+     lane is node/turbopack, so post-flip it must read ⚠️/❌ unless the `KNEXT_BUILD=vinext` lane (A3)
+     is green. Two examples, not one, because an implementer generalising from a single exception will
+     treat it as the only one.
+     **Ordering — how (3) is satisfiable at Phase 2, when the `build` field does not exist until
+     Phase 4.** At Phase 2 there is exactly one build target, so "default" is unambiguous: the guard
+     **may** read a single named constant, provided that constant is the guard's **only** encoding of
+     the default and is annotated as owned by **A5**. Without this, an implementer's three options are
+     to block A10 on Phase 4 (contradicting "Part of Phase 2"), hard-code turbopack with a TODO
+     (literally the literal (3) forbids, and exactly how an ex-default assertion survives a flip), or
+     invent an interim constant unannotated (a literal by another name). The hand-off is recorded in
+     A5 so it is a stated dependency rather than an unenforced expectation between two phases.
   4. **Every ✅ row must additionally RECORD which build target(s) its evidence covers.** The floor in
      (3) is a **minimum, not a substitute** for this disclosure. (3) says what happens to a row backed
      only on the *non-default* target; it says nothing about a row backed only on the *default* one,
