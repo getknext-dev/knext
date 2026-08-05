@@ -67,9 +67,16 @@ reject_image() {
 # `:-` above substitutes the pinned default for UNSET *and EMPTY*, so there is no
 # empty case to reject here — an empty override falls back to the pin, which is
 # the safe direction. Everything else is checked.
+# ENUMERATED, per the rule stated above — this pair shipped as the range form
+# `[!a-zA-Z0-9._/:@-]`, i.e. the file broke its own invariant 30 lines below the
+# sentence stating it. It was not exploitable (both forms rejected newline, tab,
+# CR, space, `;`, `"`, `{`, `,`, `+`, `é` and `$` under glibc `C`, en_US.UTF-8
+# and macOS), but "not exploitable under the locales we happened to test" is the
+# guarantee the enumerated form makes unnecessary. tests/image-prewarm-harness.test.ts
+# SCANS every `[!…]` class in this file for a range, so the rule is now a gate.
 case "$NODESH_IMAGE" in
-  *[!a-zA-Z0-9._/:@-]* | *' '*) reject_image "illegal character" ;;
-  [!a-zA-Z0-9]*) reject_image "must start with an alphanumeric" ;;
+  *[!0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ._/:@-]* | *' '*) reject_image "illegal character" ;;
+  [!0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ]*) reject_image "must start with an alphanumeric" ;;
   *@sha256:*) ;;
   *) reject_image "not digest-pinned" ;;
 esac

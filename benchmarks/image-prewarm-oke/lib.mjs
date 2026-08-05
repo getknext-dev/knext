@@ -358,9 +358,17 @@ export async function withRestore({
    * hardcode success for the second caller, which meant a handler-path restore
    * that genuinely failed — state left dirty, `RESTORE FAILED` logged — was
    * reported to the normal path as a clean restore, and `withRestore` resolved
-   * instead of raising its `FatalError`. Nothing but `process.exit(1)` inside
-   * the handler kept that off production, and the ordering fix below (which
-   * lets the handler and the final restore genuinely race) makes it live.
+   * instead of raising its `FatalError`.
+   *
+   * Stated as measured, not as it reads: with `proc = process` that path is
+   * NOT reachable. The handler calls `proc.exit()` and never returns, and a
+   * signal delivered during the final synchronous `restore()` is dispatched
+   * only after `unregister()` — the very next statement, same tick — has
+   * removed the listener. So this fix is DEFENSIVE: it is the injected-`proc`
+   * path (which the suite exercises) and any future caller that keeps running
+   * after a handler that it makes honest. The ordering fix below earns its
+   * place on a different mechanism — see the comment there — not on a race
+   * with this memo.
    */
   let done = false;
   /** @type {{restored: boolean, after?: boolean, restoreError?: unknown}} */

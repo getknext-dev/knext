@@ -293,12 +293,21 @@ describe('the check is actually wired to run', () => {
     ).toEqual([]);
   });
 
-  it('the coverage check can actually fail — proved on the walk it polices', () => {
-    // Mutation-proof in-test, so the assertion above is not decoration: a file
-    // the walk could plausibly grow (the harness's own `.mjs` sources) is NOT
-    // matched by any pattern in the trigger today.
+  it('the coverage check can actually fail — the trigger match discriminates', () => {
+    // Mutation-proof in-test, so the assertion above is not decoration: the
+    // matcher must be able to answer BOTH ways, or `uncovered` is empty for the
+    // trivial reason that nothing can ever miss.
+    //
+    // The false half is a SYNTHETIC path, deliberately not a real file. It used
+    // to name `benchmarks/image-prewarm-oke/lib.mjs` — so a legitimate future
+    // widening of the trigger to `benchmarks/**/*.mjs` (a CORRECT change, and
+    // one the check above would then require) turned this red, making "edit the
+    // guard" the way back to green. That is the anti-pattern security.md names
+    // by name for the action pins. This path is under no scanned directory and
+    // carries an extension the checker will never walk, so no correct widening
+    // of the trigger can ever cover it.
     const patterns = (pr?.paths ?? []).map(globToRegExp);
-    expect(patterns.some((re) => re.test('benchmarks/image-prewarm-oke/lib.mjs'))).toBe(false);
+    expect(patterns.some((re) => re.test('.mutation-probe/never-scanned.unscanned'))).toBe(false);
     expect(patterns.some((re) => re.test('benchmarks/image-prewarm-oke/nodesh.sh'))).toBe(true);
   });
 

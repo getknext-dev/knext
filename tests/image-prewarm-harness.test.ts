@@ -547,9 +547,14 @@ describe('an INTERRUPTED run restores the pre-run imagePrewarm state (A2)', () =
     released();
     // …and the FAILURE must leave the function, not just the log. The memo used
     // to hardcode `{ restored: true }` for the second caller, so a handler-path
-    // restore that genuinely failed produced a clean resolve here. Production
-    // is masked from that only by `process.exit(1)` in the handler — and moving
-    // `unregister()` after the final restore makes the window live.
+    // restore that genuinely failed produced a clean resolve here.
+    //
+    // Honest about reach: under the real `process` that path is unreachable —
+    // the handler exits and never returns. This test reaches it through the
+    // injected `proc` double, which is a real caller of the same code, and the
+    // fix is defensive rather than a live production window. Do not read the
+    // `unregister()` ordering fix as what opens it; that fix earns its place by
+    // keeping the default SIGINT disposition off the final synchronous write.
     await expect(running).rejects.toThrow(FatalError);
     await expect(running).rejects.toThrow(/RESTORE FAILED/);
   });
@@ -941,6 +946,37 @@ describe('every value interpolated into the nodesh pod spec is validated (E3)', 
     expect(spec).toMatch(/image: [a-z0-9./:-]+@sha256:[0-9a-f]{64}/);
   });
 
+  // ── the ENUMERATION rule the script states about itself ───────────────────
+  //
+  // nodesh.sh's header states "Character sets are ENUMERATED, never written as
+  // the range `[!a-z0-9]`" — `case` glob ranges use the locale's COLLATION
+  // order, in which `a-z` spans `aAbBcC…` and so silently admits uppercase.
+  // That is not theory here: the digest check shipped as `[!0-9a-f]` and
+  // accepted `sha256:AAAA…`.
+  //
+  // The rule had NO test, and the file broke it 30 lines below the sentence
+  // stating it (`*[!a-zA-Z0-9._/:@-]*`). A stated invariant with no test,
+  // violated in its own file, is exactly the "documented expectation degrades"
+  // case — so it is a scan, not a list of the classes that exist today.
+  const CASE_CLASSES = read('nodesh.sh')
+    .split('\n')
+    .filter((line) => !/^\s*#/.test(line)) // the header QUOTES the banned form
+    .flatMap((line) => [...line.matchAll(/\[!([^\]]*)\]/g)].map((m) => m[0]));
+
+  it('the class scan can see the character classes it polices', () => {
+    // Both halves: a scan that finds nothing would make the assertion below vacuous.
+    expect(CASE_CLASSES.length).toBeGreaterThanOrEqual(5);
+  });
+
+  it('every character class is ENUMERATED — no locale-dependent ranges', () => {
+    expect(
+      CASE_CLASSES.filter((klass) => /[A-Za-z0-9]-[A-Za-z0-9]/.test(klass)),
+      'a `case` glob range is resolved by the locale collation order, in which `a-z` spans ' +
+        '`aAbBcC…` — this is how the digest check came to accept `sha256:AAAA…`. Enumerate the ' +
+        "set, as nodesh.sh's own header requires.",
+    ).toEqual([]);
+  });
+
   // ── the SCAN: no interpolation may be hardened by being forgotten ──────────
   //
   // The finding this replaces was "harden NODESH_IMAGE", and it was carried out
@@ -971,6 +1007,42 @@ describe('every value interpolated into the nodesh pod spec is validated (E3)', 
       [...HEREDOC.matchAll(/\$\{?([A-Za-z_][A-Za-z0-9_]*)/g)].flatMap((m) => (m[1] ? [m[1]] : [])),
     ),
   ].sort();
+
+  /**
+   * …and the scan above is ITSELF an enumeration — of ONE of the four ways a
+   * shell interpolates. `$VAR` / `${VAR}` / `${VAR:-d}` are seen; `$(cmd)`,
+   * `` `cmd` ``, `$((expr))` and `$1` are all INVISIBLE to it, and every one of
+   * them reaches the same privileged `hostPID` / `nsenter -t 1` spec. That is
+   * not hypothetical grammar: nodesh.sh already uses `$( )` at line ~125, so an
+   * author adding one INSIDE the heredoc gets zero coverage from a scan whose
+   * script says "EVERY value interpolated into the pod spec below is validated
+   * here".
+   *
+   * A construct the scan cannot validate is REJECTED OUTRIGHT rather than
+   * ignored — the only answer that does not silently narrow the guarantee.
+   */
+  const opaqueInterpolations = (text: string): string[] =>
+    [...text.matchAll(/\$\(|`|\$[0-9@*#?]/g)].map((m) => m[0]);
+
+  it('interpolation the scan CANNOT see is rejected outright, not ignored', () => {
+    expect(
+      opaqueInterpolations(HEREDOC),
+      'the pod spec uses an interpolation syntax the `$VAR` scan below is blind to, so the ' +
+        'value reaches a privileged hostPID spec with nothing proving it cannot break out — ' +
+        'either express it as a validated `$VAR`, or teach the scan to police it',
+    ).toEqual([]);
+  });
+
+  it('that rejection can actually fire — proved on each syntax it must catch', () => {
+    // Mutation-proof in-test, so the assertion above is not decoration: every
+    // syntax it claims to catch is shown to be caught, and the syntaxes the
+    // `$VAR` scan already covers are shown NOT to be flagged twice.
+    expect(opaqueInterpolations('  namespace: $(cat /etc/evil)')).toEqual(['$(']);
+    expect(opaqueInterpolations('  namespace: `cat /etc/evil`')).toEqual(['`', '`']);
+    expect(opaqueInterpolations('  ttlSecondsAfterFinished: $((60 * 2))')).toEqual(['$(']);
+    expect(opaqueInterpolations('  nodeName: $1')).toEqual(['$1']);
+    expect(opaqueInterpolations('  name: $NAME-${NS}-${X:-d}')).toEqual([]);
+  });
 
   /** A value that ends the current YAML line and starts a key of its own. */
   const YAML_BREAKOUT = 'x\n      hostPID: false';
