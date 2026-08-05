@@ -1,8 +1,29 @@
 # P3 — Can a knext-owned bun entry recover `next/image` under vinext, in-process?
 
 **ADR-0042 Escalation 1 / Consequence 1.** Investigation only: no shipped code, CRD, CLI or
-operator was touched, and nothing was run against a cluster. Artifacts for reproduction are in
-`docs/wayfinder/spike-vinext-image-intercept/`.
+operator was touched, and nothing was run against a cluster.
+
+**Reproduction.** `docs/wayfinder/spike-vinext-image-intercept/` holds everything needed to re-run
+this, which the first revision of this document did not: it shipped three probe scripts and
+described the build, the container and the app in prose, so nobody could actually re-run it. That is
+the same condition under which the two earlier spikes' wrong conclusions went unchallenged, so it is
+fixed rather than noted.
+
+| file | what it is |
+|---|---|
+| `fixture-app/` | the app under test — `/`, `/api/hello`, `/blog/[slug]`, `/img`, plus `next.config.ts` (`output: 'standalone'`, `images.qualities: [20, 75]`) |
+| `fixture-app/package.json` | **every dependency pinned exactly**, including `vinext@1.0.0-beta.4` and the five `@jsquash/*` codecs, read back out of the installed tree |
+| `knext-entry-wasm.mjs` | the interception entry (WASM codecs) |
+| `build.sh` | the `bun build --compile --minify --bytecode [--target=bun-linux-arm64-musl]` invocations, previously prose only |
+| `run-alpine.sh` | the `alpine:3.20` + `apk add libstdc++ libgcc` container arm, previously prose only |
+| `probe.mjs` / `load.mjs` | Q1/Q2 correctness and the no-cache latency numbers |
+| `cap-probe.mjs`, `make-bomb.py` | the Q4 fail-closed check and its decompression-bomb fixture |
+
+Two honest gaps in that record: there is **no lockfile**, only exact pins in `package.json` — the
+transitive closure is therefore not frozen; and there is **no `vite.config.ts`**, because none was
+used. `vinext build` under beta.4 ran without one, and inventing one here would not be what was
+measured. The 256×256 source is the repo's own
+`apps/file-manager/public/knext-optimize-fixture.png` (181,277 B).
 
 ## Answer
 
@@ -11,12 +32,15 @@ operator was touched, and nothing was run against a cluster. Artifacts for repro
 | 1 | Interception returns an **optimised** image, not the passthrough | **YES** |
 | 2 | Delegation intact — SSR, route handler, dynamic route, 404 | **YES** (byte-identical to unmodified vinext) |
 | 3 | Survives `bun build --compile --minify --bytecode` | **YES with WASM codecs. NO with `sharp`** — and the `sharp` failure is structural |
-| 4 | The optimisation itself is correct | **YES for `w`, `q`, `Accept`, and invalid-param rejection.** Two real gaps: no cache at all, and one format-negotiation delta vs Next |
+| 4 | The optimisation itself is correct | **YES for `w`, `q`, `Accept`, and invalid-param rejection.** Four gaps: no cache at all; a format-negotiation delta vs Next; **no `remotePatterns` support at all** (remote sources 400 by construction); and the entry's resource caps **did not fail closed** as first written — found, measured, and fixed here |
 
 **Phase 3's conclusion that image optimisation is "not recoverable in-process" does not hold.** The
-reviewer's correction is the right one: what Phase 3 established is that vinext exposes no optimizer
-*registration* hook on the Node target. It does not follow that no in-process implementation is
-reachable — and measurement says one is.
+reviewer's correction is the right one. What Phase 3 established is narrower than its conclusion:
+vinext *does* expose an optimizer-registration path (`setImageOptimizer`, the `images.optimizer`
+plugin option, `handleConfiguredImageOptimization`), but the **Node prod server never consults it**,
+so registering is inert there. It does not follow that no in-process implementation is reachable —
+and measurement says one is, because the underlying handler is separately exported and can simply be
+called.
 
 ## Why it works — the thing Phase 3 missed
 
@@ -28,25 +52,59 @@ export** that anyone can call directly:
 node_modules/vinext/package.json  "./server/image-optimization"  ->  dist/server/image-optimization.js
 ```
 
-`image-optimization.d.ts:186` exports, publicly:
+`image-optimization.d.ts:186` — the module's `export {…}` statement — makes public, among others:
 
 ```
-handleImageOptimization(request, handlers, allowedWidths, imageConfig)
-parseImageParams, negotiateImageFormat, isImageOptimizationPath, isSafeImageContentType,
-IMAGE_CACHE_CONTROL, IMAGE_CONTENT_SECURITY_POLICY, DEFAULT_DEVICE_SIZES, DEFAULT_IMAGE_SIZES
+handleImageOptimization(request, handlers, allowedWidths, imageConfig)          // declared at :134
+handleConfiguredImageOptimization(request, fetchAsset, allowedWidths, config)   // declared at :184
+setImageOptimizer, getImageOptimizer, parseImageParams, negotiateImageFormat,
+isImageOptimizationPath, isSafeImageContentType, IMAGE_CACHE_CONTROL,
+IMAGE_CONTENT_SECURITY_POLICY, DEFAULT_DEVICE_SIZES, DEFAULT_IMAGE_SIZES
 ```
 
-`handleImageOptimization` (`image-optimization.js:203-240`) is complete and runtime-agnostic: it
-validates params, fetches the source through a caller-supplied `fetchAsset`, negotiates the output
-format from `Accept`, refuses unsafe content types, calls a caller-supplied `transformImage`, and sets
-the cache + security headers. The **only** thing missing on the Node target is the two callbacks. Its
-own doc comment names Node as an intended caller — *"the single entry point every runtime/router seam
-(App Router worker, Pages worker, **Node prod server**) should call"* — and the Node prod server is
-simply the seam that does not call it (`prod-server.js:870-889`, `tryServeStatic` then `404`, exactly
-as Phase 3 reported).
+`handleImageOptimization` (declared `image-optimization.d.ts:134`, impl `image-optimization.js:203-240`)
+is complete and runtime-agnostic: it validates params, fetches the source through a caller-supplied
+`fetchAsset`, negotiates the output format from `Accept`, refuses unsafe content types, calls a
+caller-supplied `transformImage`, and sets the cache + security headers. The **only** thing missing
+on the Node target is the two callbacks.
 
-So there is nothing to fork and nothing to register. A knext entry supplies `fetchAsset` (filesystem)
-and `transformImage` (an encoder) and calls the public function.
+### The upstream-intent evidence, attributed correctly
+
+An earlier revision of this document hung the quote *"the single entry point every runtime/router
+seam (App Router worker, Pages worker, **Node prod server**) should call"* on
+`handleImageOptimization` and concluded from it that there is "nothing to register". **That quote is
+from a different function.** It sits at `image-optimization.d.ts:176-184`, on
+**`handleConfiguredImageOptimization`** — which is precisely the registration seam Phase 3 went
+looking for: it *reads the optimizer registered via `setImageOptimizer` / the `images.optimizer`
+option on the `vinext()` plugin* and wires its `transformImage` into `handleImageOptimization`.
+`handleImageOptimization`'s own comment (`:127-133`) says nothing about Node or about seams. So the
+quote documents the **opposite** shape from the one it was used to support: upstream *does* intend a
+registration path, and it names the Node prod server as one of its callers.
+
+What is actually established — and what the operational conclusion should rest on — is narrower and
+is a fact about the shipped `dist/`, not about intent:
+
+```
+$ grep -rl "handleConfiguredImageOptimization" node_modules/vinext/dist
+dist/server/image-optimization.d.ts
+dist/server/image-optimization.js
+dist/server/app-router-entry.js
+dist/server/pages-router-entry.js          # <- and nothing else
+$ grep -c "handleConfiguredImageOptimization\|getImageOptimizer\|setImageOptimizer" \
+      node_modules/vinext/dist/server/prod-server.js
+0
+```
+
+Only the two worker entries call it; `prod-server.js` references neither it nor the registry. **So
+registering an optimizer is inert on the Node target** — not because upstream has no registration
+seam, but because the Node seam does not consult it (`prod-server.js:870-889`, `tryServeStatic` then
+`404`, exactly as Phase 3 reported). That is why a knext entry calls `handleImageOptimization`
+directly with both callbacks rather than registering: registration would be a no-op *today*, and
+`handleConfiguredImageOptimization` becoming reachable on Node is the upstream change that would
+make registration the better path.
+
+Nothing here requires a fork. A knext entry supplies `fetchAsset` (filesystem) and `transformImage`
+(an encoder) and calls the public function.
 
 The listener swap the reviewer described is exactly what the shim permits — `startProdServer` returns
 `{ server, port }` (`prod-server.js:1394-1398`) and the server is built with a single anonymous
@@ -174,6 +232,13 @@ byte-identical to the JIT run. The full server binary then produced the 1,463 B 
 `dist/standalone/server.js` happens to avoid TLA; a knext entry must too. Cheap to satisfy, easy to
 regress, so it belongs in whatever guards the entry.
 
+**But note what that does and does not prove.** The TLA rejection shows bun **processed** the flag.
+It does **not** establish that the `bun-linux-arm64-musl` binary which produced the 1,463 B AVIF
+actually carries bytecode. The flag was passed; **bytecode was not verified by extraction** on any
+cross-compiled target here, as ADR-0036 Run 26 did. Read every "compiled bytecode binary" phrase in
+this document as *"`--compile --minify --bytecode` was requested and the build succeeded"* — the
+capability result does not depend on the difference, but a cold-start claim would.
+
 ### Self-containment: a correction that is NOT caused by the interception
 
 ADR-0042 Phase 0 recorded self-containment as **binary + `.output/public`**. That was the **nitro bun
@@ -202,16 +267,31 @@ Phase 0's row should not be read as covering `dist/standalone`.
 | `Accept: image/*` | `image/jpeg` |
 | `w=637` (not an allowed width) | **400** |
 | missing `url` | **400** |
-| `url=https://example.com/a.png` (absolute) | **400** |
 
 The 400s are vinext's own `parseImageParams`, unchanged — the interception inherits them rather than
 re-implementing them, which is the point of calling `handleImageOptimization`.
+
+**Not honoured — a capability gap, previously mis-scored as validation working.**
+`url=https://example.com/a.png` returns **400**, and an earlier revision listed that in the table
+above as a correct rejection. It is not. `parseImageParams` rejects **every** non-root-relative
+`url` unconditionally, and there is **no `remotePatterns` support anywhere in the export** — no
+config field, no allowlist check, nothing to configure. So Next's `images.remotePatterns` is not
+"validated strictly" on this path, it is **absent by construction**: an app that optimises remote
+images gets a 400 no matter what it configures. In a document reconciling ADR-0006 that belongs in
+the **exclusion set** alongside animated/SVG/16-bit sources, not in the honoured column.
 
 **A defect this spike introduced and measurement caught**, recorded because it is the whole argument
 for measuring: the first cut passed `{ cqLevel }` to `@jsquash/avif`, which **silently ignores unknown
 options** and encodes at its default quality 50. `q=20` and `q=75` both returned exactly 1,077 B. The
 option is `{ quality }`. A "does it optimise?" check would have passed; only comparing `q` values
 caught it.
+
+**A second dead-code hazard in the entry, removed.** The `switch` on the negotiated format carried a
+`case 'image/png'` calling `encodePng`. That case is **unreachable** — `negotiateImageFormat`
+(`image-optimization.js:130-135`) returns only avif, webp or jpeg — and `encodePng` is the one
+`@jsquash` codec `initCodecs` never initialises. So had anything ever reached it, it would have
+thrown, and (per the section below) vinext would have swallowed the throw into a year-cached
+passthrough: a silent wrong answer. The branch and its import are gone, with a comment saying why.
 
 **Format-negotiation delta vs Next — real, and not fixed by this spike.** vinext's
 `negotiateImageFormat` (`image-optimization.js:130-135`) is three lines: avif → webp → **jpeg**. So a
@@ -236,11 +316,63 @@ cache; knext has none, so an unauthenticated caller can pin CPU with `w`/`q` per
 hit anything. The `deviceSizes × imageSizes × qualities` product bounds the *distinct* key space, but
 nothing bounds the *rate*.
 
-Bounds implemented in the spike entry and exercised by the concurrency run: a
-`MAX_CONCURRENT_TRANSFORMS` semaphore (default 4 — visible in the 16-concurrent wall time, where
-per-request latency spreads 43→575 ms as requests queue rather than the process melting), a 20 MB
-source-size refusal, and a 40 MP decoded-pixel refusal. Path traversal out of the client dir is
-refused before `stat`.
+### The caps as first written did NOT fail closed — measured, and fixed
+
+An earlier revision of this document called the 20 MB and 40 MP limits "refusals" and said "bounds
+implemented". The 20 MB one was — it already ran inside `fetchAsset`. **The 40 MP cap and the
+`unsupported source encoding` check were not refusals at all**, and that is the security-relevant
+finding of Q4. Which side of vinext's `try` a check sits on is the entire difference, and nothing in
+the code said so.
+
+`handleImageOptimization` wraps the call to `transformImage` in
+`try { … } catch (e) { console.error(…) }` and then **falls through to
+`createPassthroughImageResponse`** (`image-optimization.js:213-233`). So anything the entry threw
+from inside `transformImage` — the 40 MP cap and the `unsupported source encoding` check both did —
+did not refuse anything. Measured against the entry as first written (`bun`, darwin, same app and
+`dist/`):
+
+| probe | as first written | after the fix |
+|---|---|---|
+| `/knext-bomb.png` — 10000×10000 PNG, **100 MP**, 97,276 B on disk | **200** `image/png` **97,276 B**, `Cache-Control: public, max-age=31536000, immutable` | **404** |
+| text file named `.png` (unsupported encoding) | **200** `image/png` 62 B, same year-immutable header | **404** |
+| control — the real 256×256 fixture | 200 `image/avif` **1,463 B** | 200 `image/avif` **1,463 B** |
+
+A **silent degradation to a year-cached passthrough of the full source**, not a refusal — and the
+year-long `immutable` makes it worse than a plain miss, because a CDN or browser will hold the
+unoptimised bytes. The bomb row is the one that matters: the response was the thing the cap exists
+to prevent.
+
+**A second defect in the same place:** the 40 MP cap was checked *after* `await decodePng(ab)` — the
+decode is the expensive step of a decompression bomb, so the cap bounded nothing it was meant to
+bound. (Real exposure was limited, but not for the reason the document gave: `parseImageParams`
+admits only root-relative URLs, so the source must already be a file the build shipped. That is the
+honest reason, and it is a property of the *app's own assets*, not of the cap.)
+
+**Fixed, in the mechanism rather than the wording.** Every check that must refuse now runs in
+`fetchAsset`, which vinext calls **outside** that try/catch — a non-ok `Response` there
+short-circuits before any transform. Dimensions come from a **header-prefix read** (PNG `IHDR`,
+JPEG `SOFn`), not from a decode, so the bomb is refused without being decompressed; a JPEG whose
+`SOF` is not within the 1 MiB probe window is refused rather than admitted. The copies inside
+`transformImage` are kept as defence in depth and are now commented as **degradations, not
+refusals**. The right column above is the re-run; the control row is byte-identical, and the whole
+Q4 "Honoured" table re-measured unchanged (1,463 / 732 / 648 B, `image/*`→jpeg, three 400s).
+
+Note the general rule this leaves for a production port: **`handleImageOptimization` swallows every
+throw from `transformImage` into a year-cached passthrough**, so no limit, timeout, or policy check
+can be enforced from inside that callback. It has to be enforced in `fetchAsset` or ahead of the
+call entirely.
+
+Bounds that ARE implemented and exercised: a `MAX_CONCURRENT_TRANSFORMS` semaphore (default 4 —
+visible in the 16-concurrent wall time, where per-request latency spreads 43→575 ms as requests
+queue rather than the process melting), the 20 MB source-size limit and the 40 MP pixel limit (both
+now enforcing, per above), and path-traversal refusal out of the client dir before `stat`.
+
+**Two things the traversal check does not do**, stated so a production port does not inherit them
+silently. Neither is a live bug here. (a) `fetchAsset` calls `decodeURIComponent` on a value vinext
+already decoded out of `URLSearchParams`, so a double-encoded `%252e%252e%252f` arrives at
+`path.resolve` as `../`; the `startsWith(clientDir + sep)` check is what stops it, and it is the
+**only** thing that does. (b) There is no `realpath`, so a symlink under `dist/client` pointing
+outside it would be followed. Nothing in the built tree is a symlink, so nothing was exploitable.
 
 Bounds that would still be needed to ship, none of them measured here: **a cache** (this is the one
 that matters — ADR-0006's `image-cache-sync.ts` and ADR-0037 are the obvious homes), a per-IP or
@@ -251,13 +383,39 @@ exposure is CPU, not state.
 ## What this means for ADR-0042
 
 **Escalation 1's premise — that an ADR-0006 app has no in-band fallback on the default runtime — is
-refuted.** Image optimisation is recoverable in-process, in the compiled bytecode binary, on the
-deployment target, without forking vinext, without an upstream patch, without a sidecar, and without a
-per-app source change. It uses the bespoke knext bun entry that **Consequence 4 already mandates**, so
-it adds no architectural scope.
+refuted.** Image optimisation is recoverable in-process, in the compiled binary, on the deployment
+target, without forking vinext, without an upstream patch, without a sidecar, and without a per-app
+source change. It uses the bespoke knext bun entry that **Consequence 4 already mandates**, so it
+adds no *architectural* scope.
+
+**"No new scope" is a statement about the architecture only, and must not be read further.** It is
+false of the dependency: this requires the shipping recipe to move from `vinext@^0.0.19` to a
+`1.0.0-beta`, which is the first cost below and not a detail. It is also not a statement about
+correctness — see the four gaps in row 4.
 
 What it costs, stated plainly rather than buried:
 
+- **It is a major bump of the shipping recipe's vinext pin — "no new scope" is true of the
+  architecture and false of the dependency.** `examples/bun-exec/package.json:16` pins
+  `"vinext": "^0.0.19"`, which **cannot resolve to `1.0.0-beta.4`**. The entry in
+  `spike-vinext-image-intercept/knext-entry-wasm.mjs` does not merely perform worse on 0.0.19 — it
+  **cannot run** there. Verified against the published `vinext@0.0.19` tarball:
+
+  | what the entry uses | 0.0.19 | beta.4 |
+  |---|---|---|
+  | `isImageOptimizationPath` (`:29`) | **not exported** | exported |
+  | `sendWebResponse` from `prod-server` (`:31`) | **not exported** | exported |
+  | `handleImageOptimization` signature (`:197`) | 3-arg, **no `imageConfig`** | 4-arg |
+  | `ImageConfig` / `imageConfig.qualities` (`:44`) | **does not exist** | exists |
+  | image path constant | `/_vinext/image` | `/_next/image` (`/_vinext/image` kept as an alias) |
+  | `startProdServer` return | the `Server` itself | `{ server, port }` — the entry destructures `{ server }` (`:172`) |
+
+  The absent `imageConfig` is not cosmetic: `imageConfig.qualities` is what produces **both** the
+  `q`-allowlist 400s **and** the measured `q=20` vs `q=75` differentiation in the Q4 table. So
+  adopting this result means moving the recipe from `^0.0.19` to a `1.0.0-beta` — a major bump onto
+  a pre-release, carrying every other beta.4 behaviour change with it, of which this spike measured
+  only the image surface. Sequencing consequence: the `^0.0.19` + nitro pin is not merely "untested"
+  here, it is **incompatible** with the thing being proposed.
 - **`sharp` is off the table on the default path** (structural, measured on both targets). knext would
   own a WASM codec stack — a new dependency surface, ~5.4 MB of embedded `.wasm` (binary 62.2 MB →
   67.7 MB darwin; 99.8 MB linux-musl), and a **second** image implementation to keep at parity with
@@ -279,6 +437,15 @@ default runtime could not do image optimisation at all. It can.
 ## Not established
 
 Layer-2 (`dlopen`/libvips) failure on linux · whether the **nitro-preset** `.output` shape is still
-self-contained under beta.4 · large-source encode cost · animated/16-bit/SVG/remote sources · anything
+self-contained under beta.4 · large-source encode cost · animated/16-bit/SVG sources · anything
 under load beyond 16 concurrent requests on one laptop · anything on a cluster · whether a cache can
-be added without violating ADR-0037 · the `^0.0.19` + nitro pin, which was not tested here either.
+be added without violating ADR-0037 · whether the cross-compiled binaries actually **carry bytecode**
+(the flag was passed and the build succeeded; nothing was extracted) · the behaviour of the
+`^0.0.19` + nitro combination, which was not exercised.
+
+Distinguish these from things that were **measured to be absent**, which are not open questions but
+results: **remote sources** (`remotePatterns`) do not exist on this path at all — every
+non-root-relative `url` is a 400 by construction — and `sharp` does not survive the compile.
+
+And distinguish both from the `^0.0.19` pin, which is neither: adopting this result **requires**
+moving off it, because the entry cannot run on 0.0.19. See the cost section.
