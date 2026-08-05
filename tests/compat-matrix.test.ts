@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { blankNonCode } from '../scripts/lib/blank-non-code.mjs';
 
 /**
  * GUARD TEST for docs/compat-matrix.md (issue #41 / A3-2).
@@ -108,112 +109,6 @@ interface SmokeCheck {
   hardLanes: Set<Lane>;
   /** Why it is not hard on every lane ('' when it is). */
   reason: string;
-}
-
-/**
- * Blank everything in `src` that is NOT code, preserving length and line structure so every
- * offset in the result still addresses the same character of the original.
- *
- * This is the single tokenizer (round 4). It is what makes an occurrence check CODE-ONLY:
- * comment bodies (line AND block, delimiters included) and the CONTENTS of string and
- * template literals become spaces, so a `check(` written inside a comment or a string is
- * simply not there when the scan runs. Round 2 closed only the case where such an occurrence
- * REDEFINED a real id (repeated-id ⇒ ambiguous); a check commented OUT — or an id that exists
- * *only* inside a comment — still read as declared, hard and both-lane, and BOTH derivations
- * agreed on that wrong answer because the count regex matched the commented line too.
- *
- * Quote characters and backticks are KEPT so the bracket/comma structure a call's argument
- * split needs survives; `${…}` holes stay code, since they are.
- */
-function blankNonCode(src: string): string {
-  const out = [...src];
-  const blank = (from: number, to: number) => {
-    for (let k = Math.max(from, 0); k < Math.min(to, src.length); k++) {
-      if (out[k] !== '\n') out[k] = ' ';
-    }
-  };
-  /** Template-literal nesting: a template, or a `${…}` hole with its own brace depth. */
-  const stack: Array<{ kind: 'tmpl' } | { kind: 'hole'; depth: number }> = [];
-  let i = 0;
-  while (i < src.length) {
-    const top = stack[stack.length - 1];
-    const c = src[i];
-    const n = src[i + 1];
-    if (top?.kind === 'tmpl') {
-      if (c === '\\') {
-        blank(i, i + 2);
-        i += 2;
-        continue;
-      }
-      if (c === '`') {
-        stack.pop();
-        i++;
-        continue;
-      }
-      if (c === '$' && n === '{') {
-        stack.push({ kind: 'hole', depth: 0 });
-        i += 2;
-        continue;
-      }
-      blank(i, i + 1);
-      i++;
-      continue;
-    }
-    // An escape in code position only occurs inside a regex literal, e.g. `/^\//` —
-    // whose trailing `\/` + `/` would otherwise read as the start of a line comment.
-    if (c === '\\') {
-      i += 2;
-      continue;
-    }
-    if (c === "'" || c === '"') {
-      let j = i + 1;
-      while (j < src.length) {
-        if (src[j] === '\\') {
-          j += 2;
-          continue;
-        }
-        if (src[j] === c) break;
-        j++;
-      }
-      blank(i + 1, j);
-      i = j + 1;
-      continue;
-    }
-    if (c === '`') {
-      stack.push({ kind: 'tmpl' });
-      i++;
-      continue;
-    }
-    if (c === '/' && n === '/') {
-      const nl = src.indexOf('\n', i);
-      const end = nl === -1 ? src.length : nl;
-      blank(i, end);
-      i = end;
-      continue;
-    }
-    if (c === '/' && n === '*') {
-      const close = src.indexOf('*/', i);
-      const end = close === -1 ? src.length : close + 2;
-      blank(i, end);
-      i = end;
-      continue;
-    }
-    if (top?.kind === 'hole') {
-      if (c === '{') {
-        top.depth++;
-        i++;
-        continue;
-      }
-      if (c === '}') {
-        if (top.depth === 0) stack.pop();
-        else top.depth--;
-        i++;
-        continue;
-      }
-    }
-    i++;
-  }
-  return out.join('');
 }
 
 /**
