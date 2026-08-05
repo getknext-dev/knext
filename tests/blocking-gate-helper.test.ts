@@ -550,6 +550,82 @@ jobs:
       }
     });
 
+    it('NEGATIVE CONTROL: an `||` fallback chain of per-PR contexts still scopes', () => {
+      // The round-2 tightening ("the body must be EXACTLY one context") was a
+      // COVERAGE REGRESSION on the canonical GitHub idiom, measured: both of
+      // these render a per-PR value and both were rejected, with a message
+      // saying "not scoped to the ref" that is FALSE for them. `||` here is
+      // OPERAND FALLBACK — the expression's value IS one of its operands — which
+      // is the opposite of the `==` case the tightening exists to reject, where
+      // the value is a boolean that is not any operand.
+      for (const body of [
+        'github.head_ref || github.ref',
+        'github.event.pull_request.number || github.ref',
+        'github.head_ref || github.ref_name || github.ref',
+      ]) {
+        const a = audit(
+          withWorkflowConcurrency(
+            `concurrency:\n  group: ci-\${{ ${body} }}\n  cancel-in-progress: true\n`,
+          ),
+        );
+        expect(a.problems, `${body}: ${a.problems.join('\n')}`).toEqual([]);
+      }
+    });
+
+    it("NEGATIVE CONTROL: `preview.yml`'s real group is accepted", () => {
+      // `.github/workflows/preview.yml:47` already uses this shape. It does not
+      // red today only because `preview.yml` carries no audited gate; when one
+      // lands, a guard that rejects a correct group is how "edit the guard"
+      // becomes the routine fix. A `workflow_dispatch` input is accepted as a
+      // FALLBACK operand only — see the sole-operand rejection below.
+      const a = audit(
+        withWorkflowConcurrency(
+          'concurrency:\n  group: preview-${{ github.event.pull_request.number || github.event.inputs.pr }}\n  cancel-in-progress: true\n',
+        ),
+      );
+      expect(a.problems, a.problems.join('\n')).toEqual([]);
+    });
+
+    it('rejects a dispatch input as the SOLE operand — it need not vary per PR', () => {
+      // The permissive direction is the one that matters. `github.event.inputs.*`
+      // is an arbitrary user-supplied string; on its own it can be a constant
+      // (`environment`, a default value), which collapses every ref into one
+      // group. It is admissible only behind a real per-PR operand.
+      for (const body of [
+        'github.event.inputs.env',
+        'github.event.inputs.a || github.event.inputs.b',
+      ]) {
+        const a = audit(
+          withWorkflowConcurrency(
+            `concurrency:\n  group: ci-\${{ ${body} }}\n  cancel-in-progress: true\n`,
+          ),
+        );
+        expect(a.problems.join('\n'), body).toMatch(/concurrency/);
+      }
+    });
+
+    it('rejects an `||` chain containing a non-per-PR operand', () => {
+      // Fail closed on the chain as a whole: `github.ref_protected` is still a
+      // boolean, and admitting a chain because ONE operand is fine would let the
+      // rejected forms back in through the fallback slot.
+      const a = audit(
+        withWorkflowConcurrency(
+          'concurrency:\n  group: ci-${{ github.ref_protected || github.workflow }}\n  cancel-in-progress: true\n',
+        ),
+      );
+      expect(a.problems.join('\n')).toMatch(/concurrency/);
+    });
+
+    it('the rejection message states what IS accepted, not a claim about the ref', () => {
+      // "not scoped to the ref" was false for the `||` forms above, and a guard
+      // whose message misdescribes the defect trains readers to edit the guard.
+      const a = audit(
+        withWorkflowConcurrency('concurrency:\n  group: ci\n  cancel-in-progress: true\n'),
+      );
+      expect(a.problems.join('\n')).toMatch(/github\.event\.pull_request\.number/);
+      expect(a.problems.join('\n')).toMatch(/github\.head_ref/);
+    });
+
     it('NEGATIVE CONTROL: a ref-scoped cancelling group is permitted', () => {
       const a = audit(
         withWorkflowConcurrency(

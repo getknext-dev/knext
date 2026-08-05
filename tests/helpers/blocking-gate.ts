@@ -156,8 +156,65 @@ function isUniversalBranchFilter(value: unknown): boolean {
  * check documented as failing closed. So this enumerates the contexts that DO
  * vary per pull request and rejects everything else, including an expression
  * over one of them — a comparison's value is not its operand.
+ *
+ * ROUND 3: "exactly one context" was too strict, and being too strict here is
+ * not a safe error. It rejected the canonical GitHub idiom — measured,
+ * `${{ github.head_ref || github.ref }}` and
+ * `${{ github.event.pull_request.number || github.ref }}` both returned false —
+ * and `.github/workflows/preview.yml:47` already uses that shape. It does not
+ * red today only because `preview.yml` carries no audited gate; when one lands,
+ * the guard would report a CORRECTLY scoped group as "not scoped to the ref",
+ * and editing the guard becomes the natural fix. That is the antipattern
+ * `workflow.md` names, so the guard is the thing that has to be right.
+ *
+ * The distinction that makes both rounds correct at once is OPERAND FALLBACK vs
+ * VALUE COMPUTATION. `a || b` in a GitHub expression evaluates to `a` or to `b`
+ * — its value IS one of its operands, so if every operand varies per PR, so does
+ * the result. `a == b` evaluates to a BOOLEAN that is not either operand, which
+ * is why `${{ github.ref == 'refs/heads/main' }}` collapses and stays rejected.
  */
-const REF_SCOPED = /\$\{\{\s*github\.(ref|ref_name|head_ref|event\.pull_request\.number)\s*\}\}/;
+
+/** Contexts whose value provably differs between two open pull requests. */
+const PER_PR_CONTEXTS = [
+  'github.ref',
+  'github.ref_name',
+  'github.head_ref',
+  'github.event.pull_request.number',
+] as const;
+
+const PER_PR_OPERAND = new Set<string>(PER_PR_CONTEXTS);
+
+/**
+ * Admissible only as a LATER operand, never alone.
+ *
+ * `github.event.inputs.*` is an arbitrary user-supplied `workflow_dispatch`
+ * string. As `preview.yml`'s fallback behind a real PR number it is fine; on its
+ * own it can be a constant (an environment name, an input default), which is the
+ * every-ref-in-one-group collapse this function exists to reject. The permissive
+ * direction is the one that costs something, so it is gated on at least one
+ * genuine per-PR operand being present.
+ */
+const DISPATCH_INPUT = /^github\.event\.inputs\.[A-Za-z_][A-Za-z0-9_-]*$/;
+
+/**
+ * Does this `${{ }}` body evaluate to a value that differs per pull request?
+ *
+ * Split on `||` only. `&&` is deliberately absent: `a && b` evaluates to `b`
+ * when `a` is truthy, so its value does not follow from all operands varying,
+ * and no workflow here uses it in a group.
+ */
+function bodyIsPerPr(body: string): boolean {
+  const operands = body.split('||').map((s) => s.trim());
+  if (operands.some((o) => o.length === 0)) return false;
+  const admissible = operands.every((o) => PER_PR_OPERAND.has(o) || DISPATCH_INPUT.test(o));
+  return admissible && operands.some((o) => PER_PR_OPERAND.has(o));
+}
+
+/** Is any interpolation in this group string a per-PR value? */
+function isRefScopedGroup(group: string): boolean {
+  const bodies = [...group.matchAll(/\$\{\{([^}]*)\}\}/g)].map((m) => m[1] as string);
+  return bodies.some(bodyIsPerPr);
+}
 
 function concurrencyProblem(container: Job, where: string): string | null {
   if (!('concurrency' in container)) return null;
@@ -170,8 +227,12 @@ function concurrencyProblem(container: Job, where: string): string | null {
   // inversion `continue-on-error` uses, so `${{ true }}` is not a hiding place.
   if (!('cancel-in-progress' in block) || block['cancel-in-progress'] === false) return null;
   const group = typeof block.group === 'string' ? block.group : '';
-  if (REF_SCOPED.test(group)) return null;
-  return `${where} carries a cancelling \`concurrency\` group (${JSON.stringify(group)}) that is not scoped to the ref — an unrelated ref can cancel this gate, and a cancelled check is not a failed check`;
+  if (isRefScopedGroup(group)) return null;
+  // The message names what IS accepted. "not scoped to the ref" alone was a
+  // claim the guard could not back — false for every `||` form above — and a
+  // message that misdescribes the defect is how a reader learns to edit the
+  // guard instead of the workflow.
+  return `${where} carries a cancelling \`concurrency\` group (${JSON.stringify(group)}) in which no interpolation evaluates to a per-PR value, so an unrelated ref can cancel this gate and a cancelled check is not a failed check — accepted: \`\${{ <ctx> }}\` or an \`||\` chain of them, where <ctx> is one of ${PER_PR_CONTEXTS.join(', ')} (a \`github.event.inputs.*\` fallback is allowed behind one of those)`;
 }
 
 /** `continue-on-error` is a problem in every form except a literal `false`. */

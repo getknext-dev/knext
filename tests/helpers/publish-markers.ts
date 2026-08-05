@@ -60,6 +60,25 @@ export function effectiveWorkflowText(raw: string): string {
  * `docker/build-push-action` step from the parsed document, and fails closed on
  * everything except a literal `false`.
  *
+ * ## The structured half is a FLOOR too — same framing, stated rather than implied
+ *
+ * "Scanned, not enumerated" describes HOW it reads (`with.push` by key, from the
+ * parse) and not WHAT it covers. Probed and working: a pinned-SHA `uses:`, an
+ * absent `with:`, quoted `"true"`/`"false"`, and a matrix-templated `push:`
+ * (which fails closed). Blind, by construction:
+ *
+ *   - a composite action that wraps `docker/build-push-action` — the wrapper's
+ *     `uses:` does not name it and its steps are in another repository;
+ *   - a TEMPLATED `uses:` (`docker/${{ matrix.action }}@v6`);
+ *   - any OTHER publishing action — the walk is keyed on one action name;
+ *   - `jobs.<id>.uses:` reusable-workflow calls, which are invisible to BOTH
+ *     halves: the walk only descends `jobs.*.steps`, and a job that delegates to
+ *     another file has no `steps` to descend.
+ *
+ * None of these exists in this repo today, so this is honesty about the claim,
+ * not a live hole. It is written down because the round-1 defect was exactly a
+ * coverage claim that outran its implementation.
+ *
  * The mitigations for the list's incompleteness, in place of a false coverage
  * claim: it is deliberately over-broad (a false positive only costs a workflow
  * the right to `cancel-in-progress`), and `ci-concurrency-group.test.ts` carries
@@ -111,7 +130,15 @@ function isStepList(value: unknown): value is Array<Record<string, unknown>> {
  *
  * A regex cannot do this job at all, in either direction: `push:` is also the
  * name of a workflow TRIGGER (`on: push:`), so a text rule broad enough to catch
- * the expression form flags every workflow in the repo.
+ * the expression form flags every workflow carrying that trigger. MEASURED over
+ * the 15 workflows in `.github/workflows`: 7 carry a `push:` key — `ci.yml`,
+ * `install-smoke.yml`, `operator-bundle-e2e.yml`, `operator-supply-chain.yml`,
+ * `release.yml`, `scale-zero-pg.yml`, `supply-chain.yml`. Not all 15, and the
+ * number is what makes the point load-bearing rather than rhetorical: `ci.yml`
+ * is one of the 7, so such a rule would flag the very file this check has to
+ * leave unflagged. (The negative-control test asserts the CURRENT classifier
+ * returns `[]` for an `on: push:` trigger; it does not run the counterfactual
+ * text rule, so this count is the evidence for that half.)
  */
 export function buildPushActionPublishes(doc: Record<string, unknown>): string[] {
   const found: string[] = [];

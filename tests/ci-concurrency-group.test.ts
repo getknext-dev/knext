@@ -107,7 +107,10 @@ import {
  * `pull_request`, on `ci.yml` as it stands here.
  *
  *   - run 31052852836, head `c9e0502` -> `completed` / **`cancelled`**
- *   - run 31052899155, head `490369b` -> the superseding run
+ *   - run 31052899155, head `490369b` -> the run that superseded it, and which
+ *     is ITSELF `cancelled`, having in turn been superseded by `5ca6a8a`. A
+ *     reader checking these two therefore sees `cancelled` twice; that is the
+ *     mechanism working three times over, not a contradiction.
  *
  * Cancellation therefore happens, it is scoped to this ref, and the surviving
  * run is the one on the new head SHA — which is the whole argument for why a
@@ -491,13 +494,56 @@ jobs:
     expect(markers).toEqual([]);
   });
 
-  it('non-vacuity: every marker id is distinct and every regex matches something', () => {
-    // A marker whose regex can never match is decoration, and a duplicated id
-    // silently merges two exemptions into one.
+  it('non-vacuity: every marker id is distinct', () => {
+    // A duplicated id silently merges two exemptions into one.
     const ids = RUN_MARKERS.map((m) => m.id);
     expect(new Set(ids).size, 'duplicate marker id').toBe(ids.length);
-    for (const { id, re } of RUN_MARKERS) {
-      expect(re.source.length, `marker \`${id}\` has an empty pattern`).toBeGreaterThan(0);
+  });
+
+  it('non-vacuity: every marker classifies a synthetic workflow that uses it', () => {
+    // Round 2 asserted `re.source.length > 0` here and sold it as non-vacuity.
+    // It is a TAUTOLOGY: `new RegExp('').source` is `(?:)`, length 4, so the
+    // assertion can never fail. Its consequence was real — `pnpm publish`,
+    // `docker push` and `helm upgrade` match no workflow in this repo and were
+    // exercised by no test, so a typo in any of them was invisible.
+    //
+    // Every marker now gets a positive case, and the coverage assertion below
+    // makes ADDING a marker without one red rather than silently unexercised.
+    const samples: Record<string, string> = {
+      'npm publish': 'jobs:\n  p:\n    steps:\n      - run: npm publish --access public\n',
+      'pnpm publish': 'jobs:\n  p:\n    steps:\n      - run: pnpm publish -r --no-git-checks\n',
+      'npm dist-tag':
+        'jobs:\n  p:\n    steps:\n      - run: npm dist-tag add @getknext/core@1.0.0 latest\n',
+      'changesets/action': 'jobs:\n  p:\n    steps:\n      - uses: changesets/action@v1.9.0\n',
+      cosign:
+        'jobs:\n  p:\n    steps:\n      - run: cosign sign --yes ghcr.io/org/app@sha256:abc\n',
+      'docker push': 'jobs:\n  p:\n    steps:\n      - run: docker push ghcr.io/org/app:1.0.0\n',
+      'crane push':
+        'jobs:\n  p:\n    steps:\n      - run: crane push image-oci ghcr.io/org/app:1.0.0\n',
+      'skopeo copy':
+        'jobs:\n  p:\n    steps:\n      - run: skopeo copy oci:layout docker://ghcr.io/org/app:1.0.0\n',
+      'oras push':
+        'jobs:\n  p:\n    steps:\n      - run: oras push ghcr.io/org/app:1.0.0 sbom.json\n',
+      'gh release': 'jobs:\n  p:\n    steps:\n      - run: gh release create v1.0.0 dist.tgz\n',
+      'softprops/action-gh-release':
+        'jobs:\n  p:\n    steps:\n      - uses: softprops/action-gh-release@v2\n',
+      'kubectl apply': 'jobs:\n  p:\n    steps:\n      - run: kubectl apply -f nextapp.yaml\n',
+      'helm upgrade':
+        'jobs:\n  p:\n    steps:\n      - run: helm upgrade --install knext ./chart\n',
+      'preview.js deploy':
+        'jobs:\n  p:\n    steps:\n      - run: node scripts/preview.js deploy --pr 1\n',
+    };
+
+    // Coverage, asserted rather than assumed: a marker added without a sample
+    // reds here instead of joining the unexercised set this test was written to
+    // eliminate.
+    expect(Object.keys(samples).sort(), 'every RUN_MARKERS id needs a sample').toEqual(
+      RUN_MARKERS.map((m) => m.id).sort(),
+    );
+
+    for (const { id } of RUN_MARKERS) {
+      const { markers } = classifyWorkflowSource(samples[id] as string);
+      expect(markers, `marker \`${id}\` classifies nothing`).toContain(id);
     }
   });
 
