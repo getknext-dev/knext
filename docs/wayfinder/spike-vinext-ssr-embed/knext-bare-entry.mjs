@@ -1,11 +1,13 @@
 // Bespoke knext entry: NO vinext/server/prod-server. Statically imports the RSC
 // entry so bun bundles it, serves dist/client statics, delegates everything else
 // to the RSC handler.
-import { join, dirname, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import * as rscModule from './dist/server/index.js';
 
 const handler = rscModule.default;
-const root = process.env.VINEXT_OUT_DIR ? resolve(process.env.VINEXT_OUT_DIR) : join(dirname(process.execPath), 'dist');
+const root = process.env.VINEXT_OUT_DIR
+  ? resolve(process.env.VINEXT_OUT_DIR)
+  : join(dirname(process.execPath), 'dist');
 const clientDir = join(root, 'client');
 console.log(`[bare] clientDir=${clientDir} handler=${typeof handler}`);
 
