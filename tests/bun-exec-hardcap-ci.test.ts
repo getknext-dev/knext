@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { auditBlockingGate } from './helpers/blocking-gate';
 
 /**
  * #448 — the SIGTERM hardcap e2e has a hard-fail guard; this asserts it has
@@ -19,9 +20,13 @@ import { describe, expect, it } from 'vitest';
  * that env var is a one-line edit that disarms the gate without reddening
  * anything else — this test is what makes that edit visible.
  *
- * Read as TEXT rather than parsed: the root package has no direct `yaml`
- * dependency, and `tests/compat-suite-workflow.test.ts` establishes the same
- * convention for the same reason ("stays trivially portable across CI runners").
+ * The CONTENT assertions below read the job as TEXT — a SHA-pinned `uses:`, an
+ * env var, a script name are all textual facts and stay trivially portable.
+ * The "is this job actually blocking?" question is NOT textual and is no longer
+ * asked that way: #661 measured three single-edit disarms that a text anchor
+ * misses, so that half is parsed (`tests/helpers/blocking-gate.ts`). `yaml` is a
+ * root dependency as of #653, so the reason the older convention gave for
+ * avoiding a parse no longer holds.
  */
 
 const REPO_ROOT = resolve(__dirname, '..');
@@ -66,21 +71,24 @@ describe('bun-exec hardcap gate is wired into CI (#448)', () => {
     ).toMatch(/oven-sh\/setup-bun@[0-9a-f]{40}/);
   });
 
-  it('does not disarm itself with continue-on-error', () => {
-    expect(
-      jobBlock(),
-      'the hardcap job is continue-on-error, so it cannot fail the workflow',
-    ).not.toMatch(/continue-on-error:\s*true/);
-  });
-
-  it('is not gated behind a job-level `if:` — it must run on every PR', () => {
-    // Same hole as continue-on-error, one key along: `if: github.ref ==
-    // 'refs/heads/main'` here leaves every other assertion in this file green
-    // while the hardcap suite never runs on a pull request. Job-level keys sit
-    // at four spaces; a deeper, STEP-level `if:` is legitimate and untouched.
-    expect(
-      jobBlock(),
-      'the hardcap job carries a job-level `if:`, so it can be conditioned off a PR',
-    ).not.toMatch(/^ {4}if:/m);
+  it('runs unconditionally on a PR and its failure fails the run (#661)', () => {
+    // PARSED, not text-matched. The text form of this assertion was a regex
+    // anchored on four-space indentation plus `continue-on-error:\s*true`, and
+    // #661 measured three single-edit disarms it let through with every
+    // assertion in this file green: a quoted `"if":` key, `continue-on-error:
+    // ${{ true }}`, and `needs:` on a job that can skip. Adding three more
+    // patterns is the same defect one level up, so the audit asks the semantic
+    // question of the parsed workflow and FAILS CLOSED on any job-level key it
+    // does not recognise.
+    const audit = auditBlockingGate({
+      workflowPath: CI_YML,
+      jobId: 'bun-exec-hardcap',
+      gateCommand: /bun run test\b|vitest/,
+    });
+    // Non-vacuity: an audit that parsed nothing must not pass by finding no
+    // problem to report.
+    expect(audit.jobsSeen, 'the audit parsed no jobs at all').toBeGreaterThan(5);
+    expect(audit.gateStepsSeen, 'the audit never found the step that runs the suite').toBe(1);
+    expect(audit.problems, audit.problems.join('\n')).toEqual([]);
   });
 });
