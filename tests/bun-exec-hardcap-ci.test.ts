@@ -72,4 +72,15 @@ describe('bun-exec hardcap gate is wired into CI (#448)', () => {
       'the hardcap job is continue-on-error, so it cannot fail the workflow',
     ).not.toMatch(/continue-on-error:\s*true/);
   });
+
+  it('is not gated behind a job-level `if:` — it must run on every PR', () => {
+    // Same hole as continue-on-error, one key along: `if: github.ref ==
+    // 'refs/heads/main'` here leaves every other assertion in this file green
+    // while the hardcap suite never runs on a pull request. Job-level keys sit
+    // at four spaces; a deeper, STEP-level `if:` is legitimate and untouched.
+    expect(
+      jobBlock(),
+      'the hardcap job carries a job-level `if:`, so it can be conditioned off a PR',
+    ).not.toMatch(/^ {4}if:/m);
+  });
 });

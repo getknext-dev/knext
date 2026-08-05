@@ -42,6 +42,7 @@
 // every app route (no `_ssr` chunks are even emitted). With it, routes are bundled
 // and the binary is self-contained.
 import '#nitro/virtual/polyfills';
+import { existsSync } from 'node:fs';
 import { useNitroApp } from 'nitro/app';
 import { serve } from 'srvx/bun';
 import {
@@ -50,8 +51,66 @@ import {
   drainPending,
   METRICS_CONTENT_TYPE,
   renderMetrics,
+  resolveAssetAnchor,
   resolveBindHost,
 } from './runtime-contract.mjs';
+
+// ── #460 bug 3: static assets resolved against the BUILD MACHINE's path ─────
+//
+// Nitro prepends `globalThis.__nitro_main__ = import.meta.url` to this entry,
+// and its public-asset reader does:
+//
+//     const serverDir = dirname(fileURLToPath(globalThis.__nitro_main__))
+//     return fsp.readFile(resolve(serverDir, assets[id].path))   // ../public/…
+//
+// `bun build --compile` BAKES that `import.meta.url` as the absolute
+// `file:///…/examples/bun-exec/.output/server/index.mjs` of the machine that
+// built the binary. So the shipped container asked for
+// `/Users/<builder>/…/.output/public/_next/static/chunks/index-*.js` and every
+// single static asset 500'd with ENOENT — while `/` still returned correct SSR
+// HTML, which is exactly why nobody noticed: the page renders, then loads no
+// JS and never hydrates.
+//
+// The routes themselves ARE embedded in the binary (that is what #460 fixed and
+// what self-containment means); this is the OTHER half of the ship shape, the
+// `.output/public` dir that travels beside the binary.
+//
+// The decision lives in `resolveAssetAnchor` (runtime-contract.mjs), not here,
+// because it cannot be tested from this file — importing this entry pulls in
+// nitro + vinext — and because its only failure mode is silence. Exactly what
+// it does, in order:
+//
+//   1. If the BAKED root really has `../public` AND this is not a compiled
+//      binary, keep it. A non-compiled `bun run /abs/path/.output/server/
+//      index.mjs` from an unrelated cwd has a CORRECT baked value and is left
+//      completely alone. The compiled carve-out is what stops a binary run on
+//      the machine that BUILT it from silently serving the build tree instead
+//      of the assets shipped beside it; when both roots exist the co-located
+//      one wins and the runtime warns.
+//   2. Otherwise anchor on `dirname(process.execPath)` — the executable's own
+//      directory, which is the ship shape README and Dockerfile document
+//      (binary beside `.output/public`). Anchoring on the EXECUTABLE rather than
+//      cwd is what makes the binary portable: `docker run -w /elsewhere`, a
+//      systemd unit with an unrelated WorkingDirectory, or `cd / && /app/server`
+//      all still serve. `<dir>/.output/server` need NOT exist — only its dirname
+//      is used — which is why the container ships public/ and no server/.
+//   3. If neither has the layout, WARN LOUDLY and keep the baked value. Assets
+//      are unservable either way; the one thing that must not happen is the
+//      silent version of this bug shipping twice.
+//
+// This assignment has no ordering hazard: nitro's `globalThis.__nitro_main__ =
+// import.meta.url` is PREPENDED to this module (so it has already run when this
+// statement executes, which is what makes reading the baked value here sound),
+// and nitro's asset reader dereferences the global inside `readAsset()`, per
+// request — never at module init.
+const assetAnchor = resolveAssetAnchor({
+  bakedMain: globalThis.__nitro_main__,
+  execPath: process.execPath,
+  exists: existsSync,
+  cwd: process.cwd(),
+});
+if (assetAnchor.warning) console.warn(assetAnchor.warning);
+if (assetAnchor.mainUrl) globalThis.__nitro_main__ = assetAnchor.mainUrl;
 
 const PORT = Number(process.env.PORT ?? 3000);
 // Bind to 0.0.0.0 unless HOSTNAME is an EXPLICIT bind/loopback address. k8s sets
