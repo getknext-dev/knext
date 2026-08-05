@@ -2,6 +2,7 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { auditBlockingGate } from './helpers/blocking-gate';
 
 /**
  * ADR-0042 A9 — the alpine-image e2e has no skip path; this asserts it has
@@ -16,9 +17,10 @@ import { describe, expect, it } from 'vitest';
  * protects could be dropped again with the same silence that let ADR-0036 ship
  * an image row describing a container that exits 127.
  *
- * These assertions therefore guard the WIRING, not the behaviour. Read as TEXT
- * for the same reason `tests/bun-exec-hardcap-ci.test.ts` does: the root package
- * has no direct `yaml` dependency.
+ * These assertions therefore guard the WIRING, not the behaviour. The CONTENT
+ * half reads the job as TEXT (a SHA-pinned `uses:`, a script name); the "is this
+ * job actually blocking?" half is PARSED — see `tests/helpers/blocking-gate.ts`
+ * and #661, which measured the disarms a text anchor misses.
  */
 
 const REPO_ROOT = resolve(__dirname, '..');
@@ -61,23 +63,29 @@ describe('bun-exec alpine-image gate is wired into CI (ADR-0042 A1/A9)', () => {
     );
   });
 
-  it('does not disarm itself with continue-on-error', () => {
-    expect(
-      jobBlock(),
-      'the alpine-image job is continue-on-error, so it cannot fail the workflow',
-    ).not.toMatch(/continue-on-error:\s*true/);
-  });
-
-  it('is not gated behind a job-level `if:` — it must run on every PR', () => {
-    // The remaining single-edit disarm. `if: github.ref == 'refs/heads/main'` on
-    // this job leaves the whole chain below green while the alpine e2e never
-    // runs on a pull request — the same class as continue-on-error, one key
-    // along. Job-level keys sit at four spaces; a STEP-level `if:` is deeper and
-    // is legitimate, so the anchor is the indentation, not the word.
-    expect(
-      jobBlock(),
-      'the alpine-image job carries a job-level `if:`, so it can be conditioned off a PR',
-    ).not.toMatch(/^ {4}if:/m);
+  it('runs unconditionally on a PR and its failure fails the run (#661)', () => {
+    // PARSED, not text-matched — see tests/helpers/blocking-gate.ts. The text
+    // form (a four-space-anchored `^ {4}if:` plus `continue-on-error:\s*true`)
+    // let three single-edit disarms through with every other assertion here
+    // green: a quoted `"if":` key, `continue-on-error: ${{ true }}`, and
+    // `needs:` on a job that can skip. Enumerating three more patterns is the
+    // same defect one level up, so this asks the semantic question of the
+    // parsed workflow and FAILS CLOSED on any unrecognised job-level key.
+    const audit = auditBlockingGate({
+      workflowPath: CI_YML,
+      jobId: 'bun-exec-alpine-image',
+      gateCommand: /\btest:image\b/,
+    });
+    expect(audit.jobsSeen, 'the audit parsed no jobs at all').toBeGreaterThan(5);
+    expect(audit.gateStepsSeen, 'the audit never found the step that runs `test:image`').toBe(1);
+    // The transitive `needs` closure that was actually walked. Asserting it is
+    // what keeps `needs:` audited rather than merely reported: if this job grows
+    // a dependency, this list changes and someone has to look at whether the new
+    // upstream can skip.
+    expect(audit.needsClosure, 'the `needs` closure the audit walked').toEqual([
+      'bun-exec-alpine-image',
+    ]);
+    expect(audit.problems, audit.problems.join('\n')).toEqual([]);
   });
 });
 
