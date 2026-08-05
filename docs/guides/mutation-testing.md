@@ -95,6 +95,20 @@ miniature: it plants residue in a file that is *also* legitimately modified, pri
 `git status --porcelain` reporting **the identical thing either way**, and shows the scan going red
 regardless.
 
+Three more standing proofs, each covering a guard whose subject is absent from a clean tree — the
+shape most likely to be decoration, because nothing on the happy path ever exercises it:
+
+- `node scripts/mutation-prove-blocking-gate.mjs` — removes each detection from the blocking-gate
+  audit engine (`tests/helpers/blocking-gate.ts`) and requires its spec to red.
+- `node scripts/mutation-prove-ci-blocking-gates.mjs` — the other direction, on the real workflow:
+  disarms each guarded `ci.yml` job five ways (`"if": false`, `'if': false`,
+  `continue-on-error: ${{ true }}`, `needs:` on a skippable job, a zero-expansion `strategy:`) and
+  requires the guard that calls it a blocking gate to red. It runs only the one assertion by name,
+  because one of those specs also scans for the residue marker the harness plants and would
+  otherwise red for its own reason.
+- `node scripts/mutation-prove-stale-pointer-scan.mjs` — plants an ambiguous bare test-file
+  reference, discovering a duplicated basename from `git ls-files` rather than hardcoding one.
+
 ## Checklist
 
 - Snapshot bytes before the first mutation.

@@ -185,26 +185,52 @@ describe('no stale test-file pointer survives a rename (both halves)', () => {
   const EXAMPLE = resolve(REPO_ROOT, 'examples/bun-exec');
 
   /**
-   * Every tracked `*.test.ts` basename in the repo. A bare filename in prose
-   * (`compile-cache-health-bun.test.ts`) carries no directory, so existence is
-   * the only question that can honestly be asked of it — and asking it against
-   * one guessed directory would fail on every correct reference to another.
+   * Every tracked `*.test.ts` in the repo, indexed basename -> ALL paths with
+   * that basename.
+   *
+   * A bare filename in prose (`compile-cache-health-bun.test.ts`) carries no
+   * directory, so existence is the only question that can honestly be asked of
+   * it — asking it against one guessed directory would fail on every correct
+   * reference to another. But "does SOMETHING with this name exist" is not the
+   * question either: #661 item 3 recorded that a bare reference to a RENAMED
+   * file can be satisfied by a same-named file elsewhere, so the pointer reads
+   * as live when it is stale.
+   *
+   * So the index keeps the paths rather than collapsing to a Set, and an
+   * ambiguous basename FAILS CLOSED below rather than resolving. Not an
+   * exception list: an exception list is the silent-exemption shape this repo
+   * has already had to unwind twice.
+   *
+   * #661 called this latent on the grounds that "every reference in the scanned
+   * tree is path-qualified". RE-MEASURED for #672, and that half is NO LONGER
+   * TRUE: five bare references resolve through this index today (three in
+   * `ci.yml`, one here, one in the example's own suite). None of them is
+   * currently a duplicated basename — the five duplicates are elsewhere — so the
+   * hole is still unexercised, but it is one rename away rather than one bare
+   * reference away, which is a different distance than the issue recorded.
    */
-  function trackedTestBasenames(): Set<string> {
-    const out = execFileSync('git', ['ls-files', '-z', '*.test.ts'], {
+  function trackedTestPathsByBasename(): Map<string, string[]> {
+    const paths = execFileSync('git', ['ls-files', '-z', '*.test.ts'], {
       cwd: REPO_ROOT,
       maxBuffer: 64 * 1024 * 1024,
     })
       .toString('utf8')
       .split('\0')
-      .filter(Boolean)
-      .map((p) => p.split('/').pop() as string);
+      .filter(Boolean);
     // Non-vacuity: a collapsed file list would make every bare reference "valid".
     expect(
-      out.length,
+      paths.length,
       'git ls-files found no test files — the index is not readable',
     ).toBeGreaterThan(50);
-    return new Set(out);
+
+    const index = new Map<string, string[]>();
+    for (const path of paths) {
+      const base = path.split('/').pop() as string;
+      const bucket = index.get(base);
+      if (bucket) bucket.push(path);
+      else index.set(base, [path]);
+    }
+    return index;
   }
 
   /** Every text file in the example, minus build output and deps, + the outside namers. */
@@ -247,17 +273,51 @@ describe('no stale test-file pointer survives a rename (both halves)', () => {
       'the scan never saw the alpine e2e, so it is not reading the files it claims to',
     ).toBe(true);
 
-    const basenames = trackedTestBasenames();
+    const index = trackedTestPathsByBasename();
+    // Non-vacuity for the index itself: an index that lost its duplicates would
+    // make the ambiguity check below unable to fire, and nothing else in this
+    // file would notice. The repo HAS same-named test files — five basenames at
+    // the time of writing — and if it ever stops having them this reddens, so
+    // whoever removed the last one retires this line deliberately.
+    //
+    // (Naming one of them here would be self-defeating: this file is inside the
+    // scanned tree, so a bare duplicated basename in this very comment is the
+    // ambiguous reference the check exists to reject. It fired on exactly that
+    // in the first draft.)
+    expect(
+      [...index.values()].filter((paths) => paths.length > 1).length,
+      'no basename in the index is duplicated — the ambiguity check cannot fire, so it is decoration',
+    ).toBeGreaterThan(0);
+
     for (const [ref, file] of refs) {
       // A reference WITH a path must resolve — relative to the example or to the
-      // repo root. A BARE filename can only be checked for existence somewhere,
-      // which is what the basename index is for.
-      const ok = ref.includes('/')
-        ? [resolve(EXAMPLE, ref), resolve(REPO_ROOT, ref)].some((c) => existsSync(c))
-        : basenames.has(ref) || existsSync(resolve(EXAMPLE, 'test', ref));
-      expect(ok, `${file} names ${ref}, which does not exist (stale pointer after a rename)`).toBe(
-        true,
-      );
+      // repo root. Unambiguous by construction.
+      if (ref.includes('/')) {
+        const ok = [resolve(EXAMPLE, ref), resolve(REPO_ROOT, ref)].some((c) => existsSync(c));
+        expect(
+          ok,
+          `${file} names ${ref}, which does not exist (stale pointer after a rename)`,
+        ).toBe(true);
+        continue;
+      }
+
+      // A BARE filename carries no directory, so it is resolved through the
+      // index — and that resolution must be UNAMBIGUOUS. Two files with this
+      // name means the reference could be satisfied by the wrong one, which is
+      // precisely how a renamed file's pointer reads as live (#661 item 3). Fail
+      // closed and demand a path, rather than picking one and being right by
+      // luck.
+      const matches = index.get(ref) ?? [];
+      const local = existsSync(resolve(EXAMPLE, 'test', ref))
+        ? [`examples/bun-exec/test/${ref}`]
+        : [];
+      const candidates = [...new Set([...matches, ...local])];
+      expect(
+        candidates.length,
+        candidates.length === 0
+          ? `${file} names ${ref}, which does not exist (stale pointer after a rename)`
+          : `${file} names ${ref} WITHOUT a path, and ${candidates.length} files share that name (${candidates.join(', ')}) — a rename of the intended one would still resolve here, so write the reference path-qualified`,
+      ).toBe(1);
     }
   });
 });

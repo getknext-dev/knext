@@ -321,6 +321,17 @@ describe('the check is actually wired to run', () => {
   it('nothing lets a finding pass: no continue-on-error, no `|| true`', () => {
     // Both halves — the invocation must be present AND unable to be green while
     // the script exits non-zero. A guard wired with `|| true` is decoration.
+    //
+    // TODO(#677): this line is the evadable TEXT form #661 eliminated elsewhere.
+    // It stays green under `continue-on-error: ${{ true }}`, a quoted `"if"` /
+    // `'if'` key, a `needs:` on a skippable job, and a zero-expansion
+    // `strategy:`. #672 exempted it from the parsed audit on the recorded
+    // grounds that this workflow is "scheduled, not `pull_request`" — MEASURED
+    // FALSE: it carries `pull_request:` under a `paths:` filter
+    // (`.github/workflows/image-pin-resolution-nightly.yml:55-56`), so this is a
+    // live instance on a PR-triggered workflow, not a latent one. The exemption
+    // survives only because a paths-scoped run is not the UNCONDITIONAL gate
+    // `auditBlockingGate` certifies; converting it is #677's job.
     expect(workflow).not.toMatch(/continue-on-error:\s*true/);
     expect(workflow).not.toMatch(/verify-image-pins\.mjs[^\n]*\|\|/);
   });
