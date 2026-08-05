@@ -7,8 +7,50 @@ import {
   buildPushActionPublishes,
   classifyWorkflowSource,
   effectiveWorkflowText,
+  enumerateMarkerBranches,
   RUN_MARKERS,
 } from './helpers/publish-markers';
+
+/**
+ * A synthetic workflow per marker — one entry per ALTERNATION BRANCH, not one
+ * per marker id (#679 item 3).
+ *
+ * Two assertions run off this single map, and they pull in opposite directions:
+ * every branch needs a sample, and every sample must exercise a branch.
+ */
+const MARKER_SAMPLES: Record<string, string[]> = {
+  'npm publish': ['jobs:\n  p:\n    steps:\n      - run: npm publish --access public\n'],
+  'pnpm publish': ['jobs:\n  p:\n    steps:\n      - run: pnpm publish -r --no-git-checks\n'],
+  'npm dist-tag': [
+    'jobs:\n  p:\n    steps:\n      - run: npm dist-tag add @getknext/core@1.0.0 latest\n',
+  ],
+  'changesets/action': ['jobs:\n  p:\n    steps:\n      - uses: changesets/action@v1.9.0\n'],
+  cosign: ['jobs:\n  p:\n    steps:\n      - run: cosign sign --yes ghcr.io/org/app@sha256:abc\n'],
+  'docker push': ['jobs:\n  p:\n    steps:\n      - run: docker push ghcr.io/org/app:1.0.0\n'],
+  'crane push': [
+    'jobs:\n  p:\n    steps:\n      - run: crane push image-oci ghcr.io/org/app:1.0.0\n',
+    'jobs:\n  p:\n    steps:\n      - run: crane copy ghcr.io/org/app:1.0.0 ghcr.io/org/app:stable\n',
+  ],
+  'skopeo copy': [
+    'jobs:\n  p:\n    steps:\n      - run: skopeo copy oci:layout docker://ghcr.io/org/app:1.0.0\n',
+  ],
+  'oras push': [
+    'jobs:\n  p:\n    steps:\n      - run: oras push ghcr.io/org/app:1.0.0 sbom.json\n',
+  ],
+  'gh release': [
+    'jobs:\n  p:\n    steps:\n      - run: gh release create v1.0.0 dist.tgz\n',
+    'jobs:\n  p:\n    steps:\n      - run: gh release upload v1.0.0 dist.tgz\n',
+    'jobs:\n  p:\n    steps:\n      - run: gh release edit v1.0.0 --draft=false\n',
+  ],
+  'softprops/action-gh-release': [
+    'jobs:\n  p:\n    steps:\n      - uses: softprops/action-gh-release@v2\n',
+  ],
+  'kubectl apply': ['jobs:\n  p:\n    steps:\n      - run: kubectl apply -f nextapp.yaml\n'],
+  'helm upgrade': ['jobs:\n  p:\n    steps:\n      - run: helm upgrade --install knext ./chart\n'],
+  'preview.js deploy': [
+    'jobs:\n  p:\n    steps:\n      - run: node scripts/preview.js deploy --pr 1\n',
+  ],
+};
 
 /**
  * GUARD TESTS for GitHub Actions `concurrency` (#674).
@@ -509,41 +551,57 @@ jobs:
     //
     // Every marker now gets a positive case, and the coverage assertion below
     // makes ADDING a marker without one red rather than silently unexercised.
-    const samples: Record<string, string> = {
-      'npm publish': 'jobs:\n  p:\n    steps:\n      - run: npm publish --access public\n',
-      'pnpm publish': 'jobs:\n  p:\n    steps:\n      - run: pnpm publish -r --no-git-checks\n',
-      'npm dist-tag':
-        'jobs:\n  p:\n    steps:\n      - run: npm dist-tag add @getknext/core@1.0.0 latest\n',
-      'changesets/action': 'jobs:\n  p:\n    steps:\n      - uses: changesets/action@v1.9.0\n',
-      cosign:
-        'jobs:\n  p:\n    steps:\n      - run: cosign sign --yes ghcr.io/org/app@sha256:abc\n',
-      'docker push': 'jobs:\n  p:\n    steps:\n      - run: docker push ghcr.io/org/app:1.0.0\n',
-      'crane push':
-        'jobs:\n  p:\n    steps:\n      - run: crane push image-oci ghcr.io/org/app:1.0.0\n',
-      'skopeo copy':
-        'jobs:\n  p:\n    steps:\n      - run: skopeo copy oci:layout docker://ghcr.io/org/app:1.0.0\n',
-      'oras push':
-        'jobs:\n  p:\n    steps:\n      - run: oras push ghcr.io/org/app:1.0.0 sbom.json\n',
-      'gh release': 'jobs:\n  p:\n    steps:\n      - run: gh release create v1.0.0 dist.tgz\n',
-      'softprops/action-gh-release':
-        'jobs:\n  p:\n    steps:\n      - uses: softprops/action-gh-release@v2\n',
-      'kubectl apply': 'jobs:\n  p:\n    steps:\n      - run: kubectl apply -f nextapp.yaml\n',
-      'helm upgrade':
-        'jobs:\n  p:\n    steps:\n      - run: helm upgrade --install knext ./chart\n',
-      'preview.js deploy':
-        'jobs:\n  p:\n    steps:\n      - run: node scripts/preview.js deploy --pr 1\n',
-    };
-
     // Coverage, asserted rather than assumed: a marker added without a sample
     // reds here instead of joining the unexercised set this test was written to
     // eliminate.
-    expect(Object.keys(samples).sort(), 'every RUN_MARKERS id needs a sample').toEqual(
+    expect(Object.keys(MARKER_SAMPLES).sort(), 'every RUN_MARKERS id needs a sample').toEqual(
       RUN_MARKERS.map((m) => m.id).sort(),
     );
 
     for (const { id } of RUN_MARKERS) {
-      const { markers } = classifyWorkflowSource(samples[id] as string);
-      expect(markers, `marker \`${id}\` classifies nothing`).toContain(id);
+      for (const sample of MARKER_SAMPLES[id] as string[]) {
+        const { markers } = classifyWorkflowSource(sample);
+        expect(markers, `marker \`${id}\` classifies nothing for:\n${sample}`).toContain(id);
+      }
+    }
+  });
+
+  it('non-vacuity: every ALTERNATION BRANCH of every marker classifies a sample', () => {
+    // #679 item 3. The per-marker samples above leave the marker's own
+    // alternation unexercised: `crane (push|copy)` and
+    // `gh release (create|upload|edit)` are five commands behind two ids, and a
+    // marker-level sample reaches one branch of each — so a typo in `copy` or
+    // in `edit` was exactly as invisible as the typos #675's per-marker samples
+    // were introduced to expose. Same motivation, one level down.
+    //
+    // The branch regex is the marker NARROWED to that branch, which is what
+    // makes a per-branch sample necessary rather than incidental: `crane copy …`
+    // satisfies the whole-marker regex on its own.
+    for (const marker of RUN_MARKERS) {
+      for (const { branch, re } of enumerateMarkerBranches(marker)) {
+        const samples = MARKER_SAMPLES[marker.id] as string[];
+        const matching = samples.filter((s) => re.test(effectiveWorkflowText(s)));
+        expect(
+          matching.length,
+          `branch \`${branch}\` of marker \`${marker.id}\` has no sample that exercises it`,
+        ).toBeGreaterThan(0);
+      }
+    }
+  });
+
+  it('non-vacuity: no sample is dead weight — each exercises a branch of its marker', () => {
+    // The other direction. A sample that matches no branch of the marker it is
+    // filed under proves nothing about that marker, and would let the coverage
+    // assertion above be satisfied by padding.
+    for (const marker of RUN_MARKERS) {
+      const branches = enumerateMarkerBranches(marker);
+      for (const sample of MARKER_SAMPLES[marker.id] as string[]) {
+        const text = effectiveWorkflowText(sample);
+        expect(
+          branches.some((b) => b.re.test(text)),
+          `a sample filed under \`${marker.id}\` exercises none of its branches:\n${sample}`,
+        ).toBe(true);
+      }
     }
   });
 

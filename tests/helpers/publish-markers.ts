@@ -108,6 +108,59 @@ export const RUN_MARKERS: Array<{ id: string; re: RegExp }> = [
 /** The one marker id produced structurally rather than by a text match. */
 export const BUILD_PUSH_ACTION_MARKER = 'docker/build-push-action push:';
 
+/** One alternation branch of one marker, as its own regex. */
+export interface MarkerBranch {
+  /** The marker this branch belongs to. */
+  id: string;
+  /** The branch text, or the whole source for a marker with no alternation. */
+  branch: string;
+  /** The marker regex with the alternation narrowed to THIS branch alone. */
+  re: RegExp;
+}
+
+/** A group containing a `|`, with no nesting. Two markers here have one each. */
+const ALTERNATION_GROUP = /\(([^()]*\|[^()]*)\)/g;
+
+/**
+ * Split a marker into its alternation branches, so coverage can be asserted
+ * BELOW marker granularity (#679 item 3).
+ *
+ * #675 replaced an unfalsifiable `re.source.length > 0` non-vacuity check with a
+ * per-marker sample, because a typo in a marker matching nothing in this repo
+ * was otherwise invisible. That motivation does not stop at the marker: `crane
+ * (push|copy)` and `gh release (create|upload|edit)` are five commands behind
+ * two ids, and a per-MARKER sample exercises one branch of each. A typo in
+ * `copy` or `edit` would have been just as invisible.
+ *
+ * Narrowing to one branch — rather than merely asserting some sample matches the
+ * whole marker — is what makes a per-branch sample necessary: `crane copy …`
+ * matches `\bcrane (push|copy)\b` and so would satisfy a marker-level check on
+ * its own.
+ *
+ * FAILS CLOSED on a marker with more than one alternation group: the cross
+ * product is not what a caller would mean by "branch", so widening this is a
+ * deliberate edit rather than a silent under-count.
+ */
+export function enumerateMarkerBranches(marker: { id: string; re: RegExp }): MarkerBranch[] {
+  const source = marker.re.source;
+  const groups = [...source.matchAll(ALTERNATION_GROUP)];
+  if (groups.length === 0) return [{ id: marker.id, branch: source, re: marker.re }];
+  if (groups.length > 1) {
+    throw new Error(
+      `marker \`${marker.id}\` has ${groups.length} alternation groups; this enumerator handles one — widen it deliberately`,
+    );
+  }
+  const group = groups[0] as RegExpMatchArray;
+  const at = group.index as number;
+  const before = source.slice(0, at);
+  const after = source.slice(at + group[0].length);
+  return (group[1] as string).split('|').map((branch) => ({
+    id: marker.id,
+    branch,
+    re: new RegExp(`${before}(${branch})${after}`),
+  }));
+}
+
 function isStepList(value: unknown): value is Array<Record<string, unknown>> {
   return Array.isArray(value);
 }

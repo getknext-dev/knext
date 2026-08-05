@@ -117,5 +117,17 @@ prove(
   '  return true;',
 );
 
+// 8. #679 item 1: `bodyIsPerPr` splits on `&&` as well as `||`. That is the
+//    "fix the apparent inconsistency" edit a future author would reach for, and
+//    it WIDENS the rule — `${{ github.head_ref && github.ref }}` flips from
+//    rejected to accepted, admitting a group whose per-PR-ness the audit never
+//    established (`a && b` evaluates to `b`, so all-operands-vary proves
+//    nothing about the result).
+prove(
+  'splitting the concurrency-group body on `&&` as well as `||`',
+  "  const operands = body.split('||').map((s) => s.trim());",
+  '  const operands = body.split(/\\|\\||&&/).map((s) => s.trim());',
+);
+
 console.log(`\n${pass} mutation(s) went red as required, ${fail} stayed green.`);
 process.exit(fail === 0 ? 0 : 1);

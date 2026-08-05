@@ -100,15 +100,23 @@ prove({
   replacement: '  cancel-in-progress: true',
 });
 
-// Item 5: REF_SCOPED accepted any interpolation merely CONTAINING `github.ref`.
+// Item 5: the round-1 group check accepted any interpolation merely CONTAINING
+// `github.ref`.
+//
+// RETARGETED (#679). The anchor this item carried,
+// `const REF_SCOPED = /\$\{\{\s*github\.(ref|ref_name|head_ref|...)\s*\}\}/;`,
+// stopped existing when #675 replaced the single regex with
+// `PER_PR_CONTEXTS` + `bodyIsPerPr`, and `mutate` aborts on an anchor it cannot
+// find exactly once — so this script has not run to completion since. Restoring
+// the round-1 SUBSTRING behaviour is still the right mutation; it just has to be
+// expressed against the construct that exists now.
 prove({
-  label: 'item 5 — REF_SCOPED accepts a substring match again',
+  label: 'item 5 — the group check accepts a substring match again',
   file: GATE_HELPER,
   spec: GATE_SPEC,
   anchor:
-    'const REF_SCOPED = /\\$\\{\\{\\s*github\\.(ref|ref_name|head_ref|event\\.pull_request\\.number)\\s*\\}\\}/;',
-  replacement:
-    'const REF_SCOPED = /\\$\\{\\{[^}]*github\\.(ref|ref_name|head_ref)[^}]*\\}\\}|pull_request\\.number/;',
+    '  const admissible = operands.every((o) => PER_PR_OPERAND.has(o) || DISPATCH_INPUT.test(o));\n  return admissible && operands.some((o) => PER_PR_OPERAND.has(o));',
+  replacement: '  return /github\\.(ref|ref_name|head_ref)/.test(body);',
 });
 
 // Item 6: the exemption is per-marker, not per-file.
@@ -118,6 +126,57 @@ prove({
   spec: CONCURRENCY_SPEC,
   anchor: '  return markers.filter((m) => !excused.has(m));',
   replacement: '  return excused.size > 0 ? [] : markers;',
+});
+
+// Item 7 (#679): a typo in a marker's NON-FIRST alternation branch. This is the
+// exact invisibility #675's per-marker samples removed at marker granularity and
+// left open one level down — `crane copy` matched no sample, so `copy` could be
+// misspelled without any test noticing.
+prove({
+  label: 'item 7 — misspell the `copy` branch of the crane marker',
+  file: MARKERS,
+  spec: CONCURRENCY_SPEC,
+  anchor: "  { id: 'crane push', re: /\\bcrane (push|copy)\\b/ },",
+  replacement: "  { id: 'crane push', re: /\\bcrane (push|kopy)\\b/ },",
+});
+
+// Item 8 (#679): the same for `gh release`, whose `upload` and `edit` branches
+// were likewise unexercised.
+prove({
+  label: 'item 8 — misspell the `edit` branch of the gh-release marker',
+  file: MARKERS,
+  spec: CONCURRENCY_SPEC,
+  anchor: "  { id: 'gh release', re: /\\bgh release (create|upload|edit)\\b/ },",
+  replacement: "  { id: 'gh release', re: /\\bgh release (create|upload|edti)\\b/ },",
+});
+
+// Item 9 (#679): the branch-coverage assertion itself. Deleting a branch sample
+// must red rather than silently shrink what is exercised.
+prove({
+  label: 'item 9 — delete the `crane copy` branch sample',
+  file: resolve(REPO_ROOT, CONCURRENCY_SPEC),
+  spec: CONCURRENCY_SPEC,
+  anchor:
+    "    'jobs:\\n  p:\\n    steps:\\n      - run: crane copy ghcr.io/org/app:1.0.0 ghcr.io/org/app:stable\\n',",
+  replacement: '',
+});
+
+// Item 10 (#679): the mutation ONLY the branch-coverage assertion catches, and
+// the reason items 7-9 are not the whole story.
+//
+// MEASURED: the two typo mutations above also red the pre-existing
+// "covers THIS repo's registry-publish commands" test, which lists those
+// commands by hand — so `crane copy` and `gh release upload|edit` were already
+// exercised, just not by anything that ASSERTS coverage. That list is an
+// enumeration, and this is how the next branch gets missed: adding one to an
+// existing marker leaves it unexercised and reds nothing. Under the branch-level
+// assertion it reds immediately.
+prove({
+  label: 'item 10 — add an unexercised alternation branch to an existing marker',
+  file: MARKERS,
+  spec: CONCURRENCY_SPEC,
+  anchor: "  { id: 'crane push', re: /\\bcrane (push|copy)\\b/ },",
+  replacement: "  { id: 'crane push', re: /\\bcrane (push|copy|mutate)\\b/ },",
 });
 
 console.log(`\n${pass} passed, ${fail} failed`);
