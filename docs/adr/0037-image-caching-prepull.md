@@ -201,21 +201,38 @@ Three things worth keeping from how this was missed:
       prewarm pod Ready on every node with restartCount 0, which envtest cannot see for lack of a
       kubelet or container runtime), the pin container running the APP image under the staged static
       helper, and the app server never booting.
-      **Caveat on where it runs:** the nightly gates the whole scale suite on `vars.SCALE_TEST_IMAGE`,
-      which is **unset on this repo** (`gh api …/actions/variables` → `total_count: 0`) and an unset
-      value only logs a `::warning::` and skips. So today it runs only on a manual `workflow_dispatch`
-      supplying an image; setting that variable is what turns it into a live gate.
-- [ ] **STILL OPEN ([#659](https://github.com/getknext-dev/knext/issues/659)) — turn the e2e's SKIP
-      into a FAIL.** The item above is checked because the spec
-      exists and is correct; this one is unchecked because **the spec still cannot run**, which is the
-      root cause this ADR's own amendment identified (*"a spec that cannot run is not a guard"*). It
-      is the only guard that would have caught the glibc-helper regression end to end, and it is
-      exactly the shape `.claude/rules/workflow.md` names as a trigger: a capability landed behind a
-      check that **skips rather than fails**. Closing it means either setting `vars.SCALE_TEST_IMAGE`
-      on this repo, or making an unset value **fail** the scale lane instead of warning — not leaving
-      the decision to whoever next reads the warning. Recorded here as an open action item rather than
-      absorbed into the checked one, because a checked box with an unrunnable guard behind it is how
-      this regression reached a cluster in the first place.
+      **Caveat on where it runs:** the nightly needs `vars.SCALE_TEST_IMAGE`, which is **unset on this
+      repo** (`gh api …/actions/variables` → `total_count: 0`). Since #659 an unset value **fails** the
+      lane rather than skipping it (see the checked item below), so the spec still executes only on a
+      `workflow_dispatch` supplying an image — but the gap is now loud on every nightly instead of
+      silent. Setting that variable is what turns it into a live gate.
+- [x] **The e2e's SKIP is now a FAIL ([#659](https://github.com/getknext-dev/knext/issues/659),
+      landed 2026-08-05).** The nightly used to resolve
+      `inputs.scale_test_image || vars.SCALE_TEST_IMAGE`, log a `::warning::` on an empty result and
+      set `skip=true`; the job then reported SUCCESS in ~90 seconds having executed nothing (observed
+      on run 30979879905). That is the shape `.claude/rules/workflow.md` names as a trigger — a
+      capability landed behind a check that **skips rather than fails** — and the third instance
+      closed in this repo (#408, #448).
+      **What landed:** a dedicated `scale-image-preflight` job in
+      `.github/workflows/operator-e2e-nightly.yml` that **exits non-zero** when no image resolves (and
+      when the value is the deliberately-unpullable all-zeros placeholder), with
+      `scale-to-zero-cache` consuming its output via `needs:`. It is a separate job **because the
+      scale job carries `continue-on-error: true`** for genuine Knative scale-timing flake — leaving
+      the precondition inside it would have let that swallow the failure and report success exactly
+      as the skip did. Failing is safe because the workflow has **no `pull_request`/`push` trigger**
+      (repo variables: `total_count: 0`, and the nightly's own annotation proves nothing resolves it
+      at org level either), so it cannot red PR CI.
+      **Both halves are guarded** by `tests/operator-e2e-scale-image-preflight.test.ts`, which
+      executes the workflow's own resolve script (hence the script is expression-free, values via
+      `env:`) *and* asserts nothing opts the job out — no `continue-on-error` (literal or `${{ }}`),
+      no `if:` (parsed YAML, so a quoted `"if":` cannot evade it, #661), no upstream `needs:`, the
+      scale job's `needs:` edge, and the absence of any `::warning::` in any script. Mutation-proved:
+      seven mutations, including restoring the original skip, each turn it red.
+      **Checked, with the residual stated:** what this closes is the *silence*, not the coverage —
+      `vars.SCALE_TEST_IMAGE` is still unset, so the spec still does not execute on the schedule; the
+      nightly is now RED about it every night instead of green. Setting that variable to a real,
+      pushed, digest-pinned file-manager image (#39's TODO: a publish job that updates it) is what
+      makes this spec a live gate.
 - [ ] **STILL OPEN — the distroless / shell-less app-image case.** The e2e above runs against
       `SCALE_TEST_IMAGE` = the file-manager image, whose runner stage is `node:22-alpine`
       (`apps/file-manager/Dockerfile:105`). **Alpine ships busybox and `/bin/sh`**, so a naive

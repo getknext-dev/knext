@@ -69,8 +69,10 @@ const (
 	// that serves /api/health, so the nightly workflow MUST set SCALE_TEST_IMAGE to
 	// a freshly built+pushed, digest-pinned image. If this default is ever used the
 	// ksvc ErrImagePulls and the spec fails at "ksvc not Ready" — the
-	// operator-e2e-nightly workflow guards against that by skipping the run when no
-	// SCALE_TEST_IMAGE is provided.
+	// operator-e2e-nightly workflow's `scale-image-preflight` job guards against
+	// that by FAILING the lane when no SCALE_TEST_IMAGE is provided, or when the
+	// provided value is this placeholder (#659; it used to skip, which meant the
+	// whole lane reported success having executed nothing).
 	// TODO(#39): wire a publish job that sets vars.SCALE_TEST_IMAGE to the latest
 	// file-manager digest so the nightly schedule always has a real image.
 	scaleFromZeroImageDefault = "dev.local/file-manager@sha256:0000000000000000000000000000000000000000000000000000000000000000"
