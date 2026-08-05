@@ -136,6 +136,77 @@ describe('e2e_scale image precondition FAILS rather than skips (#659)', () => {
     expect(res.status, 'the placeholder digest must FAIL the lane').not.toBe(0);
   });
 
+  it('rejects every value that is not a digest-pinned reference', () => {
+    // The all-zeros check above enumerates ONE bad value. A MIS-SET
+    // vars.SCALE_TEST_IMAGE — wrong shape, `:latest`, stray whitespace — used to
+    // pass the preflight and die later inside scale-to-zero-cache on
+    // ErrImagePull or the operator's `:latest` rejection, where
+    // `continue-on-error: true` SWALLOWS it and the workflow reports success
+    // having proven nothing. That is #659's own failure re-entering by another
+    // door, so the check is a positive scan (`@sha256:` + 64 hex) rather than a
+    // blocklist, which also enforces the repo's digest-pin / reject-`:latest`
+    // rule at the point the value is first accepted.
+    const { input, variable } = preflightEnvNames();
+    const rejected: Array<[string, string]> = [
+      ['a mutable :latest tag', 'ghcr.io/getknext-dev/file-manager:latest'],
+      ['a bare mutable tag', 'ghcr.io/getknext-dev/file-manager:v1.2.3'],
+      ['no tag and no digest', 'file-manager'],
+      ['not an image reference at all', 'not-an-image'],
+      ['whitespace only', '   '],
+      ['a truncated digest', `ghcr.io/getknext-dev/file-manager@sha256:${'a'.repeat(40)}`],
+      ['an over-long digest', `ghcr.io/getknext-dev/file-manager@sha256:${'a'.repeat(65)}`],
+      ['a non-hex digest', `ghcr.io/getknext-dev/file-manager@sha256:${'g'.repeat(64)}`],
+      ['a non-sha256 digest algorithm', `ghcr.io/getknext-dev/file-manager@md5:${'a'.repeat(64)}`],
+      ['an internal space', `ghcr.io/get knext/file-manager@sha256:${'a'.repeat(64)}`],
+    ];
+
+    for (const [label, value] of rejected) {
+      const res = runPreflightScript({ [input]: '', [variable]: value });
+      expect(res.status, `${label} must FAIL the lane, not reach the cluster`).not.toBe(0);
+      expect(res.githubOutput, `${label} must never be exported as an image`).not.toContain(
+        'image=',
+      );
+    }
+  });
+
+  it('refuses a multi-line value instead of injecting extra step outputs', () => {
+    // `echo "image=$img" >> "$GITHUB_OUTPUT"` with an unvalidated value is
+    // arbitrary step-output injection: a multi-line workflow_dispatch input
+    // writes `image=…`, `image=evil`, `foo=bar` and the LAST assignment wins.
+    // The shape check closes it because a valid reference contains no newline.
+    const { input, variable } = preflightEnvNames();
+    const injected = `ghcr.io/getknext-dev/file-manager@sha256:${'a'.repeat(64)}\nimage=evil\nfoo=bar`;
+
+    const res = runPreflightScript({ [input]: injected, [variable]: '' });
+    expect(res.status, 'a multi-line image reference must FAIL, not be exported').not.toBe(0);
+    expect(res.githubOutput, 'no attacker-chosen step output may be written').not.toContain('evil');
+    expect(res.githubOutput).not.toContain('foo=bar');
+  });
+
+  it('does not let a whitespace-only dispatch input shadow a valid repo variable', () => {
+    // A blank-but-not-empty input is a dispatch typo, not a deliberate override.
+    // Treating it as "provided" would fail a lane the repo variable could run.
+    const { input, variable } = preflightEnvNames();
+    const img = `ghcr.io/getknext-dev/file-manager@sha256:${'d'.repeat(64)}`;
+
+    const res = runPreflightScript({ [input]: '   \n', [variable]: img });
+    expect(res.status, 'a blank input must fall through to vars.SCALE_TEST_IMAGE').toBe(0);
+    expect(res.githubOutput.trim()).toBe(`image=${img}`);
+  });
+
+  it('accepts a digest-pinned image carrying stray surrounding whitespace, trimmed', () => {
+    // A trailing newline in a repo variable is the likeliest honest mis-set; it
+    // must be normalised, not rejected, and must not reach GITHUB_OUTPUT raw.
+    const { input, variable } = preflightEnvNames();
+    const img = `ghcr.io/getknext-dev/file-manager@sha256:${'c'.repeat(64)}`;
+
+    const res = runPreflightScript({ [input]: '', [variable]: `  ${img}\n` });
+    expect(res.status, 'surrounding whitespace is not a reason to fail the lane').toBe(0);
+    expect(res.githubOutput.trim(), 'the exported image must be the trimmed value').toBe(
+      `image=${img}`,
+    );
+  });
+
   it('resolves and exports a real image, with the dispatch input taking precedence', () => {
     const { input, variable } = preflightEnvNames();
     const fromVar = 'ghcr.io/getknext-dev/file-manager@sha256:' + 'a'.repeat(64);
@@ -222,21 +293,32 @@ describe('nothing silently opts the precondition out (#659 / #661)', () => {
     ).toContain('outputs.image');
   });
 
-  it('emits no ::warning:: annotation from any script in the workflow', () => {
+  it('emits no ::warning:: annotation from the e2e_scale lane', () => {
     // A warning annotation is precisely what let every nightly read as green
     // while the lane executed nothing. Failing loudly replaces it; it must not
-    // sit alongside. Scanned over every `run:` in the file (not just the
-    // preflight's) so the pattern cannot reappear in a sibling job.
-    // biome-ignore lint/suspicious/noExplicitAny: workflow YAML has no schema type here.
-    const scripts = Object.values(workflow.jobs as Record<string, any>).flatMap((job) =>
-      // biome-ignore lint/suspicious/noExplicitAny: see above.
-      (job.steps ?? []).filter((s: any) => typeof s.run === 'string').map((s: any) => s.run),
-    );
-    expect(scripts.length).toBeGreaterThan(0);
-    for (const script of scripts) {
-      expect(script, 'a ::warning:: is how a missing precondition stayed green').not.toContain(
-        '::warning::',
-      );
+    // sit alongside. Scanned across BOTH jobs of the e2e_scale lane — the
+    // preflight and the suite it gates — so the pattern cannot simply move one
+    // job sideways and keep working.
+    //
+    // Scoped to those two jobs on purpose: the sibling cli-e2e / gc-e2e lanes
+    // are not this guard's subject, and a legitimate warning there is not the
+    // defect (#659) this pins. Widening it to the whole file would red this
+    // suite for a change it has nothing to say about.
+    for (const jobId of [PREFLIGHT_JOB, SCALE_JOB]) {
+      const job = workflow.jobs[jobId];
+      expect(job, `workflow has no \`${jobId}\` job`).toBeTruthy();
+      const scripts = (job.steps ?? [])
+        // biome-ignore lint/suspicious/noExplicitAny: workflow YAML has no schema type here.
+        .filter((s: any) => typeof s.run === 'string')
+        // biome-ignore lint/suspicious/noExplicitAny: see above.
+        .map((s: any) => s.run);
+      expect(scripts.length, `\`${jobId}\` has no run steps to scan`).toBeGreaterThan(0);
+      for (const script of scripts) {
+        expect(
+          script,
+          `a ::warning:: in \`${jobId}\` is how a missing precondition stayed green`,
+        ).not.toContain('::warning::');
+      }
     }
   });
 });

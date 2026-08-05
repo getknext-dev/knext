@@ -64,7 +64,13 @@ jobs:
   #
   # TO MAKE THE LANE GREEN, set `vars.SCALE_TEST_IMAGE` on the repository to a
   # freshly built + pushed, digest-pinned file-manager image that serves
-  # /api/health (a publish job should update it) — or pass one to a dispatch.
+  # /api/health — or pass one to a dispatch.
+  #
+  # UNTIL THEN THIS NIGHTLY IS RED, DELIBERATELY, AND #670 OWNS THAT RED. A
+  # permanently-red nightly with no owner and no close condition is how a gate
+  # becomes background noise, so the red has a name: #670 wires a publish job to
+  # set the variable from an image it just pushed (and adds the pinned-issue
+  # alert job this workflow, unlike image-pin-resolution-nightly.yml, lacks).
   scale-image-preflight:
     name: e2e_scale precondition — a real SCALE_TEST_IMAGE (#659)
     runs-on: ubuntu-latest
@@ -88,15 +94,38 @@ jobs:
           placeholder_digest="0000000000000000000000000000000000000000000000000000000000000000"
 
           img="${SCALE_TEST_IMAGE_INPUT:-}"
-          if [ -z "$img" ]; then
+          if [ -z "${img//[[:space:]]/}" ]; then
             img="${SCALE_TEST_IMAGE_VAR:-}"
           fi
+
+          # Trim surrounding whitespace (a trailing newline in a repo variable is
+          # the likeliest honest mis-set). Internal whitespace is NOT stripped —
+          # it must fail the shape check below, not be silently glued together.
+          img="${img#"${img%%[![:space:]]*}"}"
+          img="${img%"${img##*[![:space:]]}"}"
 
           if [ -z "$img" ]; then
             echo "::error::No SCALE_TEST_IMAGE resolved (dispatch input empty and vars.SCALE_TEST_IMAGE unset)." >&2
             echo "The e2e_scale lane needs a real, pullable, digest-pinned file-manager image that serves /api/health." >&2
             echo "Set the repository variable SCALE_TEST_IMAGE, or pass scale_test_image to a workflow_dispatch." >&2
             echo "Failing rather than skipping: the image-prewarm e2e is the only end-to-end guard on #471, and a spec that cannot run is not a guard (#659)." >&2
+            exit 1
+          fi
+
+          # POSITIVE shape check — a scan, not an enumeration. A MIS-SET value
+          # (wrong shape, `:latest`, a truncated digest, an embedded newline)
+          # would otherwise pass here and die inside scale-to-zero-cache on
+          # ErrImagePull or the operator's own digest-pinning admission — where
+          # `continue-on-error: true` SWALLOWS it and the workflow reports
+          # success having proven nothing, which is #659's defect by another
+          # door. This also enforces the repo's digest-pin / reject-`:latest`
+          # rule (nextapp_controller.go rejects `:latest` and tag-only refs) at
+          # the point the value is first accepted, and it is what makes
+          # `echo "image=$img" >> "$GITHUB_OUTPUT"` below safe: a reference
+          # containing a newline cannot forge extra step outputs.
+          if [[ ! "$img" =~ ^[^[:space:]]+@sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::SCALE_TEST_IMAGE is not a digest-pinned image reference: '$img'" >&2
+            echo "Expected <registry>/<repo>@sha256:<64 hex>. A tag (including :latest) is mutable, so a green run would not pin what it tested." >&2
             exit 1
           fi
 
@@ -166,8 +195,15 @@ jobs:
       # that serves /api/health (the #39 activation spec asserts an HTTP 200 from a
       # woken pod; #38 scrapes /api/metrics). It is resolved — and its absence
       # FAILED, never skipped — in the scale-image-preflight job above (#659), so
-      # by the time this job runs the image is known good-shaped and this step
-      # cannot be conditioned away.
+      # by the time this job runs the value has passed a `@sha256:<64 hex>` shape
+      # check and is not the all-zeros placeholder, and this step cannot be
+      # conditioned away.
+      #
+      # SHAPE IS NOT PULLABILITY, and the difference matters here: a well-formed
+      # digest for an image that was never pushed still ErrImagePulls in this job,
+      # where `continue-on-error: true` swallows it. The preflight cannot close
+      # that — only a publish job that sets vars.SCALE_TEST_IMAGE from an image it
+      # just pushed can (#670).
       - name: Run scale-to-zero e2e suite (cache #38 + activation #39)
         working-directory: packages/kn-next-operator
         env:

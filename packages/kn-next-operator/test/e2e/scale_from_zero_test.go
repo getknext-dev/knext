@@ -71,10 +71,13 @@ const (
 	// ksvc ErrImagePulls and the spec fails at "ksvc not Ready" — the
 	// operator-e2e-nightly workflow's `scale-image-preflight` job guards against
 	// that by FAILING the lane when no SCALE_TEST_IMAGE is provided, or when the
-	// provided value is this placeholder (#659; it used to skip, which meant the
+	// provided value is this placeholder, or when it is not a digest-pinned
+	// @sha256:<64 hex> reference at all (#659; it used to skip, which meant the
 	// whole lane reported success having executed nothing).
-	// TODO(#39): wire a publish job that sets vars.SCALE_TEST_IMAGE to the latest
-	// file-manager digest so the nightly schedule always has a real image.
+	// TODO(#670): wire a publish job that sets vars.SCALE_TEST_IMAGE to the latest
+	// file-manager digest so the nightly schedule always has a real image. Until
+	// then the nightly is deliberately RED, and #670 is the owner of that red —
+	// the preflight checks shape, which is not pullability.
 	scaleFromZeroImageDefault = "dev.local/file-manager@sha256:0000000000000000000000000000000000000000000000000000000000000000"
 )
 

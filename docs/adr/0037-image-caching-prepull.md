@@ -205,7 +205,8 @@ Three things worth keeping from how this was missed:
       repo** (`gh api …/actions/variables` → `total_count: 0`). Since #659 an unset value **fails** the
       lane rather than skipping it (see the checked item below), so the spec still executes only on a
       `workflow_dispatch` supplying an image — but the gap is now loud on every nightly instead of
-      silent. Setting that variable is what turns it into a live gate.
+      silent. Setting that variable is what turns it into a live gate, and
+      [#670](https://github.com/getknext-dev/knext/issues/670) owns doing so.
 - [x] **The e2e's SKIP is now a FAIL ([#659](https://github.com/getknext-dev/knext/issues/659),
       landed 2026-08-05).** The nightly used to resolve
       `inputs.scale_test_image || vars.SCALE_TEST_IMAGE`, log a `::warning::` on an empty result and
@@ -214,8 +215,12 @@ Three things worth keeping from how this was missed:
       capability landed behind a check that **skips rather than fails** — and the third instance
       closed in this repo (#408, #448).
       **What landed:** a dedicated `scale-image-preflight` job in
-      `.github/workflows/operator-e2e-nightly.yml` that **exits non-zero** when no image resolves (and
-      when the value is the deliberately-unpullable all-zeros placeholder), with
+      `.github/workflows/operator-e2e-nightly.yml` that **exits non-zero** when no image resolves,
+      when the value is not a digest-pinned `@sha256:<64 hex>` reference (a positive scan, so a
+      mis-set `:latest`/tag-only/truncated/whitespace-bearing value fails *here* rather than
+      `ErrImagePull`ing inside the `continue-on-error` job — and it enforces the repo's
+      digest-pinning rule at the point of first acceptance, mirroring the operator's own admission),
+      and when the value is the deliberately-unpullable all-zeros placeholder, with
       `scale-to-zero-cache` consuming its output via `needs:`. It is a separate job **because the
       scale job carries `continue-on-error: true`** for genuine Knative scale-timing flake — leaving
       the precondition inside it would have let that swallow the failure and report success exactly
@@ -226,13 +231,18 @@ Three things worth keeping from how this was missed:
       executes the workflow's own resolve script (hence the script is expression-free, values via
       `env:`) *and* asserts nothing opts the job out — no `continue-on-error` (literal or `${{ }}`),
       no `if:` (parsed YAML, so a quoted `"if":` cannot evade it, #661), no upstream `needs:`, the
-      scale job's `needs:` edge, and the absence of any `::warning::` in any script. Mutation-proved:
-      seven mutations, including restoring the original skip, each turn it red.
+      scale job's `needs:` edge, and the absence of any `::warning::` in either job of this lane.
+      Mutation-proved: seven mutations, including restoring the original skip, each turn it red —
+      plus the shape check both ways (`:latest`, a bare tag, whitespace-only, a wrong-length digest
+      and a multi-line step-output injection each go red; a real `@sha256:<64 hex>` stays green).
       **Checked, with the residual stated:** what this closes is the *silence*, not the coverage —
       `vars.SCALE_TEST_IMAGE` is still unset, so the spec still does not execute on the schedule; the
-      nightly is now RED about it every night instead of green. Setting that variable to a real,
-      pushed, digest-pinned file-manager image (#39's TODO: a publish job that updates it) is what
-      makes this spec a live gate.
+      nightly is now RED about it every night instead of green. **That red has an owner and a close
+      condition: [#670](https://github.com/getknext-dev/knext/issues/670)** — a publish job that sets
+      the variable from an image it just pushed, plus the pinned-issue alert job this workflow
+      (unlike `image-pin-resolution-nightly.yml`) lacks. Note the limit of the preflight: it checks
+      **shape, not pullability**, so a well-formed digest for an image that was never pushed still
+      dies inside the `continue-on-error` job. Only #670 closes that.
 - [ ] **STILL OPEN — the distroless / shell-less app-image case.** The e2e above runs against
       `SCALE_TEST_IMAGE` = the file-manager image, whose runner stage is `node:22-alpine`
       (`apps/file-manager/Dockerfile:105`). **Alpine ships busybox and `/bin/sh`**, so a naive
