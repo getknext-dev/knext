@@ -78,6 +78,13 @@ describe('bun-exec alpine-image gate is wired into CI (ADR-0042 A1/A9)', () => {
     });
     expect(audit.jobsSeen, 'the audit parsed no jobs at all').toBeGreaterThan(5);
     expect(audit.gateStepsSeen, 'the audit never found the step that runs `test:image`').toBe(1);
+    // The transitive `needs` closure that was actually walked. Asserting it is
+    // what keeps `needs:` audited rather than merely reported: if this job grows
+    // a dependency, this list changes and someone has to look at whether the new
+    // upstream can skip.
+    expect(audit.needsClosure, 'the `needs` closure the audit walked').toEqual([
+      'bun-exec-alpine-image',
+    ]);
     expect(audit.problems, audit.problems.join('\n')).toEqual([]);
   });
 });

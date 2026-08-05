@@ -89,6 +89,13 @@ describe('bun-exec hardcap gate is wired into CI (#448)', () => {
     // problem to report.
     expect(audit.jobsSeen, 'the audit parsed no jobs at all').toBeGreaterThan(5);
     expect(audit.gateStepsSeen, 'the audit never found the step that runs the suite').toBe(1);
+    // The transitive `needs` closure that was actually walked. Asserting it is
+    // what keeps `needs:` audited rather than merely reported: if this job grows
+    // a dependency, this list changes and someone has to look at whether the new
+    // upstream can skip.
+    expect(audit.needsClosure, 'the `needs` closure the audit walked').toEqual([
+      'bun-exec-hardcap',
+    ]);
     expect(audit.problems, audit.problems.join('\n')).toEqual([]);
   });
 });

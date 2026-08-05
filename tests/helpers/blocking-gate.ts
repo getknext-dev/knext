@@ -50,7 +50,15 @@ import { parse } from 'yaml';
  * runs nothing), `concurrency` (`cancel-in-progress` can cancel it),
  * `environment` (a protection rule can hold or reject it), `uses`/`with`/`secrets`
  * (a reusable workflow moves the whole definition somewhere this audit is not
- * looking).
+ * looking), and `defaults`.
+ *
+ * `defaults` was allowlisted in the first round and that was a misclassification
+ * in the PERMISSIVE direction, which is the direction that matters here: the
+ * allowlist's correctness IS the design. `defaults: run: shell: bash {0}`
+ * replaces GitHub's default `bash -eo pipefail {0}`, and `-e`/`pipefail` are
+ * exactly what make an intermediate command in a multi-line `run:` fail the
+ * step. So it can stop a failure from failing the run, which is the one thing
+ * this list certifies cannot happen.
  */
 const ALLOWED_JOB_KEYS = new Set([
   'name',
@@ -58,7 +66,6 @@ const ALLOWED_JOB_KEYS = new Set([
   'steps',
   'needs',
   'env',
-  'defaults',
   'permissions',
   'timeout-minutes',
   'outputs',
@@ -92,6 +99,22 @@ export interface BlockingGateAudit {
 
 type Job = Record<string, unknown>;
 
+/**
+ * Is this `branches:` value provably equivalent to having no filter at all?
+ *
+ * Only `**` is. `*` is NOT, and the difference is the live defect this audit was
+ * extended to catch: GitHub filter patterns give `*` "zero or more characters,
+ * but NOT `/`", so `branches: ['*']` matches `main` and misses every slashed
+ * branch. Measured, not read: PR #583 (base `chore/gitignore-agent-artifacts`)
+ * ran ZERO jobs from a workflow carrying `branches: ['*']`, while
+ * `install-smoke.yml` — which uses `['**']` — ran normally on the same PR.
+ * Stacked PRs onto slashed branches are this repo's normal mode.
+ */
+function isUniversalBranchFilter(value: unknown): boolean {
+  const list = Array.isArray(value) ? value : [value];
+  return list.some((entry) => entry === '**');
+}
+
 /** `continue-on-error` is a problem in every form except a literal `false`. */
 function continueOnErrorProblem(container: Job, where: string): string | null {
   if (!('continue-on-error' in container)) return null;
@@ -100,8 +123,18 @@ function continueOnErrorProblem(container: Job, where: string): string | null {
   return `${where} carries continue-on-error: ${JSON.stringify(value)} — its failure cannot fail the run`;
 }
 
-/** The checks that apply to the gate job AND to everything it `needs`. */
-function auditJobCanNotSkip(jobs: Record<string, Job>, jobId: string, problems: string[]): void {
+/**
+ * The checks that apply to the gate job AND to everything it `needs`.
+ *
+ * Returns the transitive `needs` closure it walked. That is the SAME walk the
+ * caller used to repeat in a second `collect` recursion; two implementations of
+ * one rule can only diverge, so there is now one.
+ */
+function auditJobCanNotSkip(
+  jobs: Record<string, Job>,
+  jobId: string,
+  problems: string[],
+): string[] {
   const seen = new Set<string>();
   const queue: Array<{ id: string; via: string[] }> = [{ id: jobId, via: [] }];
 
@@ -147,7 +180,10 @@ function auditJobCanNotSkip(jobs: Record<string, Job>, jobId: string, problems: 
         const stepCoe = continueOnErrorProblem(step as Job, stepLabel);
         if (stepCoe) problems.push(stepCoe);
       });
-    } else if (!('uses' in job)) {
+    } else {
+      // No `uses:` exemption here: a reusable-workflow job is ALREADY reported by
+      // the allowlist above (`uses` is deliberately not in ALLOWED_JOB_KEYS), so
+      // the guard this branch used to carry could never change an outcome.
       problems.push(`${label} has no \`steps:\` list — it cannot be running anything`);
     }
 
@@ -161,6 +197,8 @@ function auditJobCanNotSkip(jobs: Record<string, Job>, jobId: string, problems: 
       queue.push({ id: dep, via: [...via, id] });
     }
   }
+
+  return [...seen];
 }
 
 /**
@@ -197,16 +235,27 @@ export function auditBlockingGate(options: BlockingGateOptions): BlockingGateAud
   if (on === undefined || !(on && typeof on === 'object' && 'pull_request' in on)) {
     problems.push(`${workflowPath} does not trigger on \`pull_request\` — nothing here gates a PR`);
   } else if (pr !== null && typeof pr === 'object') {
-    for (const filter of ['paths', 'paths-ignore']) {
-      if (filter in (pr as Record<string, unknown>)) {
-        problems.push(
-          `the \`pull_request\` trigger carries a \`${filter}\` filter, so a PR can be merged without this gate ever running`,
-        );
+    // Fail closed on EVERY key under the trigger, the same inversion used for
+    // job-level keys. The first round checked only `paths`/`paths-ignore`, and
+    // the three siblings it left out are all live disarms — measured GREEN on
+    // both real gate jobs: `branches: ['no-such-branch']`, `branches-ignore:
+    // ['**']`, `types: [labeled]`.
+    //
+    // The sole exemption is a `branches` list that is UNIVERSAL, because that is
+    // provably equivalent to omitting the filter. Anything else, including a
+    // future trigger key nobody predicted here, lands as a problem and whoever
+    // adds it widens this deliberately.
+    for (const key of Object.keys(pr as Record<string, unknown>)) {
+      if (key === 'branches' && isUniversalBranchFilter((pr as Record<string, unknown>)[key])) {
+        continue;
       }
+      problems.push(
+        `the \`pull_request\` trigger carries a \`${key}\` filter, so a PR can be merged without this gate ever running`,
+      );
     }
   }
 
-  auditJobCanNotSkip(jobs, jobId, problems);
+  const needsClosure = auditJobCanNotSkip(jobs, jobId, problems);
 
   // The gate step itself. A step-level `if:` is legitimate in general — but not
   // on the step the whole job exists to run.
@@ -225,21 +274,10 @@ export function auditBlockingGate(options: BlockingGateOptions): BlockingGateAud
     }
   }
 
-  const closure: string[] = [];
-  const collect = (id: string) => {
-    if (closure.includes(id)) return;
-    closure.push(id);
-    const j = jobs[id];
-    const n = j?.needs;
-    const deps = typeof n === 'string' ? [n] : Array.isArray(n) ? n : [];
-    for (const d of deps) if (typeof d === 'string') collect(d);
-  };
-  collect(jobId);
-
   return {
     problems,
     jobsSeen: Object.keys(jobs).length,
     gateStepsSeen: gateSteps.length,
-    needsClosure: closure,
+    needsClosure,
   };
 }
