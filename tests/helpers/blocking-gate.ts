@@ -420,7 +420,62 @@ function isUniversalBranchFilter(value: unknown): boolean {
  * is why `${{ github.ref == 'refs/heads/main' }}` collapses and stays rejected.
  */
 
-/** Contexts whose value provably differs between two open pull requests. */
+/**
+ * Contexts whose value differs between two open pull requests.
+ *
+ * FORK-PR CAVEAT ON `github.head_ref`, decided rather than inherited (#679).
+ *
+ * `github.head_ref` is the head BRANCH NAME, not a repository-qualified ref, so
+ * two pull requests from different FORKS whose branches are both named `patch-1`
+ * share it — and with `cancel-in-progress`, one would cancel the other's gate
+ * run. A cancelled check is not a failed check, which is the exact disarm
+ * `concurrencyProblem` exists to reject. The same holds for the canonical
+ * `${{ github.head_ref || github.ref }}` idiom, because on a `pull_request`
+ * event `head_ref` is non-empty and `||` therefore yields IT, not `github.ref`.
+ *
+ * DECISION: `head_ref` stays accepted. Measured before deciding, on
+ * `getknext-dev/knext`: 0 forks, and 0 of the 407 pull requests ever opened were
+ * cross-repository — so no fork PR has ever run these gates. And the collision
+ * is theoretical HERE for a second, independent reason: **no workflow in this
+ * repo scopes a concurrency group on `head_ref` at all** (`grep -rn head_ref
+ * .github/workflows/` returns nothing), so there is no group for a fork to
+ * collide on. Rejecting it would tighten a rule that no workflow exercises.
+ *
+ * ROUND 2 (#681) CORRECTS THE RECORD, not the decision. Round 1 justified
+ * acceptance with a claim that is FALSE: that rejecting `head_ref` "would red
+ * the canonical idiom that `.github/workflows/preview.yml:47` already uses".
+ * `preview.yml:47` is `preview-${{ github.event.pull_request.number ||
+ * github.event.inputs.pr }}` — no `head_ref` in it. The line above at "ROUND 3"
+ * is the correct one: what `preview.yml:47` shares is the `X || dispatch-input`
+ * FALLBACK SHAPE, and round 1 silently upgraded that to `head_ref ||
+ * github.ref`, a different claim the repo does not support. A comment asserting
+ * something the tree does not back is the defect class this very PR deletes
+ * elsewhere, so the stated cost of the tightening is withdrawn: it does not
+ * exist, and the decision rests on the two measured facts above instead.
+ *
+ * WHAT WOULD REOPEN IT, stated so the decision is falsifiable rather than
+ * permanent: the repo gaining forks (`gh repo view --json forkCount`) or its
+ * first cross-repository PR, while an AUDITED gate's group rests on `head_ref`.
+ * No audited gate does today — `ci.yml:42` keys on `github.ref`, which on a
+ * `pull_request` event is `refs/pull/<n>/merge` and is unique per PR even across
+ * forks. `github.event.pull_request.number` is likewise collision-free; both are
+ * the scoping to prefer when writing a new group.
+ *
+ * HOW MUCH OF THAT IS ENFORCED — half, and the half is named rather than left
+ * to read as a gate:
+ *
+ *   - ENFORCED. "No group here rests on `head_ref`" is a tripwire, not a
+ *     sentence: `tests/ci-concurrency-group.test.ts` scans every workflow-level
+ *     and job-level `concurrency.group` and reds on the first `head_ref`. It
+ *     does not forbid one — this function still accepts it deliberately — it
+ *     forces whoever lands one to re-take this decision instead of inheriting
+ *     it.
+ *   - NOT ENFORCED, no owner, no check. The fork half. `forkCount` and
+ *     "has a cross-repository PR ever been opened" are external state that no
+ *     offline test can read, and this repo's own rule is that a documented
+ *     expectation degrades and its efficacy is unobservable until it has
+ *     already failed. That applies here, to this paragraph.
+ */
 const PER_PR_CONTEXTS = [
   'github.ref',
   'github.ref_name',
@@ -431,7 +486,7 @@ const PER_PR_CONTEXTS = [
 const PER_PR_OPERAND = new Set<string>(PER_PR_CONTEXTS);
 
 /**
- * Admissible only as a LATER operand, never alone.
+ * Admissible, but never sufficient on its own.
  *
  * `github.event.inputs.*` is an arbitrary user-supplied `workflow_dispatch`
  * string. As `preview.yml`'s fallback behind a real PR number it is fine; on its
@@ -439,6 +494,15 @@ const PER_PR_OPERAND = new Set<string>(PER_PR_CONTEXTS);
  * every-ref-in-one-group collapse this function exists to reject. The permissive
  * direction is the one that costs something, so it is gated on at least one
  * genuine per-PR operand being present.
+ *
+ * POSITION IS NOT ENFORCED, and this comment used to say it was ("admissible
+ * only as a LATER operand, never alone"). Measured: `bodyIsPerPr` accepts
+ * `${{ github.event.inputs.env || github.ref }}` — a dispatch input FIRST — the
+ * same as the other order, because the rule is a count over the operand set, not
+ * an order over it. Harmless in practice (inputs are empty on `pull_request`,
+ * and this audit requires that trigger), but a comment asserting a constraint
+ * the code does not enforce is the defect class #675 spent three rounds on, so
+ * the claim is gone rather than restated more carefully.
  */
 const DISPATCH_INPUT = /^github\.event\.inputs\.[A-Za-z_][A-Za-z0-9_-]*$/;
 
@@ -447,11 +511,20 @@ const DISPATCH_INPUT = /^github\.event\.inputs\.[A-Za-z_][A-Za-z0-9_-]*$/;
  *
  * Split on `||` only. `&&` is deliberately absent: `a && b` evaluates to `b`
  * when `a` is truthy, so its value does not follow from all operands varying,
- * and no workflow here uses it in a group.
+ * and no workflow here uses it in a group. That omission is now PINNED by a
+ * negative test ("rejects an `&&` chain", #679) and mutation-proved — splitting
+ * on `&&` flips `${{ github.head_ref && github.ref }}` from rejected to
+ * accepted, so "fixing" the apparent inconsistency with `||` silently widens the
+ * rule.
+ *
+ * There is no separate empty-operand guard, and its absence is deliberate
+ * (#679): an empty operand is in neither admissible set, so `every` already
+ * returns false. Removing the guard that said so changed ZERO of the 37 review
+ * outcomes, and a branch that cannot change an outcome reads as a rule when it
+ * is really a restatement.
  */
 function bodyIsPerPr(body: string): boolean {
   const operands = body.split('||').map((s) => s.trim());
-  if (operands.some((o) => o.length === 0)) return false;
   const admissible = operands.every((o) => PER_PR_OPERAND.has(o) || DISPATCH_INPUT.test(o));
   return admissible && operands.some((o) => PER_PR_OPERAND.has(o));
 }

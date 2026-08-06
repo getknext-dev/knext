@@ -7,8 +7,50 @@ import {
   buildPushActionPublishes,
   classifyWorkflowSource,
   effectiveWorkflowText,
+  enumerateMarkerBranches,
   RUN_MARKERS,
 } from './helpers/publish-markers';
+
+/**
+ * A synthetic workflow per marker — one entry per ALTERNATION BRANCH, not one
+ * per marker id (#679 item 3).
+ *
+ * Two assertions run off this single map, and they pull in opposite directions:
+ * every branch needs a sample, and every sample must exercise a branch.
+ */
+const MARKER_SAMPLES: Record<string, string[]> = {
+  'npm publish': ['jobs:\n  p:\n    steps:\n      - run: npm publish --access public\n'],
+  'pnpm publish': ['jobs:\n  p:\n    steps:\n      - run: pnpm publish -r --no-git-checks\n'],
+  'npm dist-tag': [
+    'jobs:\n  p:\n    steps:\n      - run: npm dist-tag add @getknext/core@1.0.0 latest\n',
+  ],
+  'changesets/action': ['jobs:\n  p:\n    steps:\n      - uses: changesets/action@v1.9.0\n'],
+  cosign: ['jobs:\n  p:\n    steps:\n      - run: cosign sign --yes ghcr.io/org/app@sha256:abc\n'],
+  'docker push': ['jobs:\n  p:\n    steps:\n      - run: docker push ghcr.io/org/app:1.0.0\n'],
+  'crane push': [
+    'jobs:\n  p:\n    steps:\n      - run: crane push image-oci ghcr.io/org/app:1.0.0\n',
+    'jobs:\n  p:\n    steps:\n      - run: crane copy ghcr.io/org/app:1.0.0 ghcr.io/org/app:stable\n',
+  ],
+  'skopeo copy': [
+    'jobs:\n  p:\n    steps:\n      - run: skopeo copy oci:layout docker://ghcr.io/org/app:1.0.0\n',
+  ],
+  'oras push': [
+    'jobs:\n  p:\n    steps:\n      - run: oras push ghcr.io/org/app:1.0.0 sbom.json\n',
+  ],
+  'gh release': [
+    'jobs:\n  p:\n    steps:\n      - run: gh release create v1.0.0 dist.tgz\n',
+    'jobs:\n  p:\n    steps:\n      - run: gh release upload v1.0.0 dist.tgz\n',
+    'jobs:\n  p:\n    steps:\n      - run: gh release edit v1.0.0 --draft=false\n',
+  ],
+  'softprops/action-gh-release': [
+    'jobs:\n  p:\n    steps:\n      - uses: softprops/action-gh-release@v2\n',
+  ],
+  'kubectl apply': ['jobs:\n  p:\n    steps:\n      - run: kubectl apply -f nextapp.yaml\n'],
+  'helm upgrade': ['jobs:\n  p:\n    steps:\n      - run: helm upgrade --install knext ./chart\n'],
+  'preview.js deploy': [
+    'jobs:\n  p:\n    steps:\n      - run: node scripts/preview.js deploy --pr 1\n',
+  ],
+};
 
 /**
  * GUARD TESTS for GitHub Actions `concurrency` (#674).
@@ -509,42 +551,115 @@ jobs:
     //
     // Every marker now gets a positive case, and the coverage assertion below
     // makes ADDING a marker without one red rather than silently unexercised.
-    const samples: Record<string, string> = {
-      'npm publish': 'jobs:\n  p:\n    steps:\n      - run: npm publish --access public\n',
-      'pnpm publish': 'jobs:\n  p:\n    steps:\n      - run: pnpm publish -r --no-git-checks\n',
-      'npm dist-tag':
-        'jobs:\n  p:\n    steps:\n      - run: npm dist-tag add @getknext/core@1.0.0 latest\n',
-      'changesets/action': 'jobs:\n  p:\n    steps:\n      - uses: changesets/action@v1.9.0\n',
-      cosign:
-        'jobs:\n  p:\n    steps:\n      - run: cosign sign --yes ghcr.io/org/app@sha256:abc\n',
-      'docker push': 'jobs:\n  p:\n    steps:\n      - run: docker push ghcr.io/org/app:1.0.0\n',
-      'crane push':
-        'jobs:\n  p:\n    steps:\n      - run: crane push image-oci ghcr.io/org/app:1.0.0\n',
-      'skopeo copy':
-        'jobs:\n  p:\n    steps:\n      - run: skopeo copy oci:layout docker://ghcr.io/org/app:1.0.0\n',
-      'oras push':
-        'jobs:\n  p:\n    steps:\n      - run: oras push ghcr.io/org/app:1.0.0 sbom.json\n',
-      'gh release': 'jobs:\n  p:\n    steps:\n      - run: gh release create v1.0.0 dist.tgz\n',
-      'softprops/action-gh-release':
-        'jobs:\n  p:\n    steps:\n      - uses: softprops/action-gh-release@v2\n',
-      'kubectl apply': 'jobs:\n  p:\n    steps:\n      - run: kubectl apply -f nextapp.yaml\n',
-      'helm upgrade':
-        'jobs:\n  p:\n    steps:\n      - run: helm upgrade --install knext ./chart\n',
-      'preview.js deploy':
-        'jobs:\n  p:\n    steps:\n      - run: node scripts/preview.js deploy --pr 1\n',
-    };
-
     // Coverage, asserted rather than assumed: a marker added without a sample
     // reds here instead of joining the unexercised set this test was written to
     // eliminate.
-    expect(Object.keys(samples).sort(), 'every RUN_MARKERS id needs a sample').toEqual(
+    expect(Object.keys(MARKER_SAMPLES).sort(), 'every RUN_MARKERS id needs a sample').toEqual(
       RUN_MARKERS.map((m) => m.id).sort(),
     );
 
     for (const { id } of RUN_MARKERS) {
-      const { markers } = classifyWorkflowSource(samples[id] as string);
-      expect(markers, `marker \`${id}\` classifies nothing`).toContain(id);
+      for (const sample of MARKER_SAMPLES[id] as string[]) {
+        const { markers } = classifyWorkflowSource(sample);
+        expect(markers, `marker \`${id}\` classifies nothing for:\n${sample}`).toContain(id);
+      }
     }
+  });
+
+  it('non-vacuity: every ALTERNATION BRANCH of every marker classifies a sample', () => {
+    // #679 item 3. The per-marker samples above leave the marker's own
+    // alternation unexercised: `crane (push|copy)` and
+    // `gh release (create|upload|edit)` are five commands behind two ids, and a
+    // marker-level sample reaches one branch of each — so a typo in `copy` or
+    // in `edit` was exactly as invisible as the typos #675's per-marker samples
+    // were introduced to expose. Same motivation, one level down.
+    //
+    // The branch regex is the marker NARROWED to that branch, which is what
+    // makes a per-branch sample necessary rather than incidental: `crane copy …`
+    // satisfies the whole-marker regex on its own.
+    for (const marker of RUN_MARKERS) {
+      for (const { branch, re } of enumerateMarkerBranches(marker)) {
+        const samples = MARKER_SAMPLES[marker.id] as string[];
+        const matching = samples.filter((s) => re.test(effectiveWorkflowText(s)));
+        expect(
+          matching.length,
+          `branch \`${branch}\` of marker \`${marker.id}\` has no sample that exercises it`,
+        ).toBeGreaterThan(0);
+      }
+    }
+  });
+
+  it('non-vacuity: samples and branches correspond ONE-TO-ONE, so no sample is padding', () => {
+    // The other direction, and round 2 had to strengthen it to earn its place.
+    //
+    // The first version asserted only that each sample matches SOME branch of
+    // its marker. MEASURED: that is ENTAILED by the per-marker test above — the
+    // branch regexes are the marker narrowed one alternative at a time, so
+    // their union IS the marker, and any sample matching the marker matches a
+    // branch. Inserting a non-matching sample reddened both tests; this one
+    // could not red alone, which by `workflow.md`'s rule made it decoration.
+    //
+    // The property that is NOT entailed is the count. A DUPLICATE sample —
+    // e.g. a second `crane push` — matches a branch, keeps every branch
+    // covered, and satisfies both other assertions while exercising nothing
+    // new. That is exactly the padding this test is named for, so it is the
+    // thing asserted: as many samples as branches, plus every sample matching
+    // one, which with the coverage assertion above forces a bijection.
+    for (const marker of RUN_MARKERS) {
+      const branches = enumerateMarkerBranches(marker);
+      const samples = MARKER_SAMPLES[marker.id] as string[];
+      for (const sample of samples) {
+        const text = effectiveWorkflowText(sample);
+        expect(
+          branches.some((b) => b.re.test(text)),
+          `a sample filed under \`${marker.id}\` exercises none of its branches:\n${sample}`,
+        ).toBe(true);
+      }
+      expect(
+        samples.length,
+        `marker \`${marker.id}\` has ${samples.length} samples for ${branches.length} alternation branches (${branches.map((b) => b.branch).join(', ')}) — a surplus sample duplicates a branch and exercises nothing new`,
+      ).toBe(branches.length);
+    }
+  });
+
+  it('the branch enumerator FAILS CLOSED on an alternation it cannot narrow', () => {
+    // #681 item 2. The enumerator's documented contract was "fails closed on
+    // more than one alternation GROUP", and that left the natural way the next
+    // marker gets written failing OPEN instead.
+    //
+    // MEASURED on the pre-fix enumerator: `/\bfoo\b|\bbar\b/` — an UNGROUPED
+    // top-level alternation — produced ONE "branch" equal to the whole source,
+    // so a single sample satisfied the branch-coverage assertion above and
+    // `bar` went unexercised. Silently, which is precisely the invisibility
+    // this enumerator exists to remove: it would have reported full coverage of
+    // a marker half of which no test touches.
+    //
+    // So the cross-check is on the `|` itself, not on the group count: a `|`
+    // anywhere outside the single narrowable group means the enumeration is not
+    // the marker's alternatives, and that is a throw rather than an under-count.
+    expect(() => enumerateMarkerBranches({ id: 'ungrouped', re: /\bfoo\b|\bbar\b/ })).toThrow(
+      /alternation/,
+    );
+    // A grouped alternation ALONGSIDE a top-level one: the group is narrowable,
+    // the enumeration would still miss `\bbaz\b` entirely.
+    expect(() => enumerateMarkerBranches({ id: 'mixed', re: /\bgh (a|b)\b|\bbaz\b/ })).toThrow(
+      /alternation/,
+    );
+    // The pre-existing contract, kept: more than one group is a cross product,
+    // which is not what a caller means by "branch".
+    expect(() => enumerateMarkerBranches({ id: 'two groups', re: /\b(a|b) (c|d)\b/ })).toThrow(
+      /alternation groups/,
+    );
+    // The two shapes that ARE handled stay handled — otherwise the fix could be
+    // "throw on everything", which passes the three assertions above.
+    expect(enumerateMarkerBranches({ id: 'plain', re: /\bcosign\b/ }).map((b) => b.branch)).toEqual(
+      ['\\bcosign\\b'],
+    );
+    expect(
+      enumerateMarkerBranches({ id: 'one group', re: /\bcrane (push|copy)\b/ }).map(
+        (b) => b.branch,
+      ),
+    ).toEqual(['push', 'copy']);
   });
 
   it('the structural check reads the real ci.yml build step and finds no push', () => {
@@ -556,5 +671,47 @@ jobs:
       /docker\/build-push-action/,
     );
     expect(buildPushActionPublishes(parse(raw) as Record<string, unknown>)).toEqual([]);
+  });
+});
+
+describe('the fork-PR `head_ref` decision rests on a checkable premise (#679, #681)', () => {
+  it('no concurrency group in this repo is scoped on `github.head_ref`', () => {
+    // `tests/helpers/blocking-gate.ts` ACCEPTS `github.head_ref` as per-PR
+    // scoping, and that acceptance is unsafe in exactly one situation: two pull
+    // requests from different FORKS whose head branches share a name collide on
+    // it, and with `cancel-in-progress` one cancels the other's gate run.
+    //
+    // The decision to accept it anyway rests on a premise about THIS repo —
+    // nothing here scopes a group on `head_ref`, so no gate can be disarmed
+    // that way today. Round 1 of #679 wrote that premise down as prose and
+    // supported it with a claim that was FALSE: that rejecting `head_ref` would
+    // red the idiom `preview.yml:47` uses. It does not; `preview.yml:47` is
+    // `preview-${{ github.event.pull_request.number || github.event.inputs.pr }}`
+    // and `head_ref` appears in NO workflow in this repo.
+    //
+    // So the premise becomes a tripwire instead of a sentence. This test does
+    // NOT say a `head_ref`-scoped group is wrong — the helper still accepts one
+    // deliberately. It says the recorded decision was made on the basis that no
+    // such group exists, and the first one to land must revisit it rather than
+    // inherit it.
+    //
+    // HALF of the reopen condition, and only half: the other half — the repo
+    // gaining forks or its first cross-repository PR — is external state that
+    // no offline test can read, so it stays documented practice with no owner
+    // and no check, and it will degrade the way this repo says such
+    // expectations degrade.
+    const offenders: string[] = [];
+    for (const file of workflowFiles()) {
+      const { doc } = readWorkflow(file);
+      for (const { where, value } of allConcurrencies(doc)) {
+        const group =
+          typeof value === 'string' ? value : String((value as { group?: unknown })?.group ?? '');
+        if (group.includes('head_ref')) offenders.push(`${file} ${where}: ${group}`);
+      }
+    }
+    expect(
+      offenders,
+      'a concurrency group now rests on `github.head_ref`. That is not automatically wrong, but it invalidates the premise the #679 fork-PR decision was recorded on. Re-measure `gh repo view --json forkCount` and whether any cross-repository PR exists, then update the DECISION block in tests/helpers/blocking-gate.ts — do not delete this assertion to get green.',
+    ).toEqual([]);
   });
 });

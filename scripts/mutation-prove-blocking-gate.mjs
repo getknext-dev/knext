@@ -25,6 +25,7 @@
 import { spawnSync } from 'node:child_process';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { resolveTestRunner } from './lib/ci-blocking-gate-proof.mjs';
 import { mutate, restore, snapshot } from './lib/mutation-harness.mjs';
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -34,10 +35,22 @@ const SPEC = 'tests/blocking-gate-helper.test.ts';
 let pass = 0;
 let fail = 0;
 
+/**
+ * `pnpm exec vitest` resolves NOTHING in a tree without its own `node_modules`
+ * — a git worktree, a fresh clone before install. MEASURED here (#681): this
+ * prover FATALed with "is not green to begin with" in an agent worktree, which
+ * names the wrong cause, and the baseline check is the only reason it stopped
+ * instead of scoring every mutation off a runner that never started. Same
+ * failure and same resolver as #672 round 5.
+ */
+const RUNNER = resolveTestRunner(REPO_ROOT);
+
 function vitest(spec) {
   return (
-    spawnSync('pnpm', ['exec', 'vitest', 'run', spec], { cwd: REPO_ROOT, encoding: 'utf8' })
-      .status === 0
+    spawnSync(RUNNER.command, [...RUNNER.args, 'run', spec], {
+      cwd: REPO_ROOT,
+      encoding: 'utf8',
+    }).status === 0
   );
 }
 
@@ -115,6 +128,18 @@ prove(
   'the `*` vs `**` distinction in isUniversalBranchFilter',
   "  return list.some((entry) => entry === '**');",
   '  return true;',
+);
+
+// 8. #679 item 1: `bodyIsPerPr` splits on `&&` as well as `||`. That is the
+//    "fix the apparent inconsistency" edit a future author would reach for, and
+//    it WIDENS the rule — `${{ github.head_ref && github.ref }}` flips from
+//    rejected to accepted, admitting a group whose per-PR-ness the audit never
+//    established (`a && b` evaluates to `b`, so all-operands-vary proves
+//    nothing about the result).
+prove(
+  'splitting the concurrency-group body on `&&` as well as `||`',
+  "  const operands = body.split('||').map((s) => s.trim());",
+  '  const operands = body.split(/\\|\\||&&/).map((s) => s.trim());',
 );
 
 console.log(`\n${pass} mutation(s) went red as required, ${fail} stayed green.`);

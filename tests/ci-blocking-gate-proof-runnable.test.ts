@@ -22,13 +22,20 @@ import {
  *
  * "A spec that cannot run is not a guard" is the finding #659 closed and the
  * reason #640 existed, and a prover that FATALs is WORSE than no prover because
- * its result is quoted as evidence. So the two ways it can go offline are now
+ * its result is quoted as evidence. So the three ways it can go offline are now
  * checked here, cheaply, on every test run:
  *
  *   1. THE RUNNER CANNOT START — the launcher the prover uses is exercised.
  *   2. AN ASSERTION WAS RENAMED — the prover selects by `vitest -t <name>`, and
  *      `vitest -t` with a name that matches nothing EXITS 0, so a rename turns
- *      the whole proof into a no-op that reports success.
+ *      the whole proof into a no-op that reports success. The declaration is
+ *      read from a CODE-ONLY view of the spec (#680), so a title left behind in
+ *      a comment or a string does not satisfy this.
+ *   3. A GATES SPEC MOVED — the `existsSync` below. That is the third cause of
+ *      "nothing ran", and until #680 the prover misreported it as a dead runner.
+ *
+ * What it does NOT check is the prover's own attribution logic; that lives in
+ * `tests/ci-blocking-gate-proof-diagnosis.test.ts`.
  *
  * This does not re-run the 25 mutations (that is minutes of vitest); it asserts
  * the proof is not offline, which is the failure that actually happened.
@@ -78,8 +85,10 @@ describe('the ci.yml blocking-gate mutation proof is runnable', () => {
 
   it.each(GATES)('$spec declares the assertion the proof selects by name', ({ spec }) => {
     // `vitest -t <no match>` exits 0, so a rename would silently make the proof
-    // a no-op. Asserted against the spec's DECLARED titles, so a rename reds
-    // here instead of being discovered the next time someone runs the prover.
+    // a no-op. Asserted against the spec's DECLARED titles — code only, so a
+    // rename reds here even when the old title survives in a comment or a string
+    // (measured: that combination used to leave this guard 7/7 green, #680) —
+    // instead of being discovered the next time someone runs the prover.
     const path = resolve(REPO_ROOT, spec);
     expect(existsSync(path), `${spec} is missing`).toBe(true);
     const titles = declaredTestTitles(readFileSync(path, 'utf8'));
