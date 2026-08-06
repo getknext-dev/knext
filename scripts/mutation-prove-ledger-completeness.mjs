@@ -83,8 +83,8 @@ const MUTATIONS = [
     // the unguarded `JSON.parse` mapped over the directory, which is exactly
     // what died before the ledger was written.
     anchor:
-      '        return { shard: null, readError: `${f}: ${err instanceof Error ? err.message : err}` };',
-    replacement: '        throw err;',
+      '    return { value: null, error: `${label}: ${err instanceof Error ? err.message : err}` };',
+    replacement: '    throw err;',
   },
   {
     label: 'the ledger is written only when the run is clean',
@@ -161,6 +161,59 @@ const MUTATIONS = [
     anchor: '          EVENT_NAME: ${{ github.event_name }}\n',
     replacement:
       '          EVENT_NAME: ${{ github.event_name }}\n          OUT_FILE: /tmp/l.json\n',
+  },
+  // ── Round 3: the same boundaries, one level out from where they were drawn ─
+  // Every one of these passed the round-2 guards. The pattern is identical each
+  // time: the VALUE was checked and the PRESENCE was not, or the STEP was
+  // checked and the level above it was not.
+  {
+    label: 'the job-level `if: always()` is DELETED — with `needs:`, the job simply skips',
+    file: WORKFLOW,
+    spec: WORKFLOW_SPEC,
+    test: 'the load-bearing wiring is PRESENT',
+    anchor: '    needs: deploy-tests\n    if: always()\n',
+    replacement: '    needs: deploy-tests\n',
+  },
+  {
+    label: 'the job stops exporting red_detail — the alert quotes an empty string',
+    file: WORKFLOW,
+    spec: WORKFLOW_SPEC,
+    test: 'the load-bearing wiring is PRESENT',
+    anchor: '    outputs:\n      red_detail: ${{ steps.ledger.outputs.red_detail }}\n',
+    replacement: '    outputs: {}\n',
+  },
+  {
+    label: 'the audited step stops setting EVENT_NAME — provenance silently becomes undefined',
+    file: WORKFLOW,
+    spec: WORKFLOW_SPEC,
+    test: 'the load-bearing wiring is PRESENT',
+    anchor: '          EVENT_NAME: ${{ github.event_name }}\n',
+    replacement: '          # EVENT_NAME removed\n',
+  },
+  {
+    label: 'WORKFLOW-level `env: OUT_FILE` — inherited by the step, relocates the evidence',
+    file: WORKFLOW,
+    spec: WORKFLOW_SPEC,
+    test: 'no INHERITED env or defaults can redirect the evidence',
+    anchor: "  COMPAT_SHARD_TOTAL: '16'\n",
+    replacement: "  COMPAT_SHARD_TOTAL: '16'\n  OUT_FILE: /tmp/laundered.json\n",
+  },
+  {
+    label: 'WORKFLOW-level `defaults: run: working-directory` — the step-level form one level up',
+    file: WORKFLOW,
+    spec: WORKFLOW_SPEC,
+    test: 'no INHERITED env or defaults can redirect the evidence',
+    anchor: 'jobs:\n  build-next:',
+    replacement: 'defaults:\n  run:\n    working-directory: /tmp\njobs:\n  build-next:',
+  },
+  {
+    label: 'the FINGERPRINT artifact is read unguarded again — a damaged one kills the write',
+    file: LEDGER_SCRIPT,
+    spec: COMPLETENESS_SPEC,
+    test: 'a FINGERPRINT artifact that is',
+    anchor:
+      "    ? readJsonObject(fingerprintFile, fingerprintFile.split('/').pop() ?? fingerprintFile)",
+    replacement: "    ? { value: JSON.parse(readFileSync(fingerprintFile, 'utf8')), error: null }",
   },
   {
     label: 'the red alert stops covering CANCELLED (silence becomes success again)',

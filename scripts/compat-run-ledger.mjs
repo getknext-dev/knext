@@ -175,7 +175,15 @@ const missingRow = (shard) => ({
  * @param {string} [input.event]
  * @returns {{ledger:Ledger, errors:string[], redDetail:string, table:string}}
  */
-export function buildLedger({ shards, shardTotal, fingerprint, runId, runAttempt, event }) {
+export function buildLedger({
+  shards,
+  shardTotal,
+  fingerprint,
+  fingerprintError,
+  runId,
+  runAttempt,
+  event,
+}) {
   /** @type {string[]} */
   const errors = [];
   // Problems that make the SHARD SET untrustworthy, as opposed to the other
@@ -313,6 +321,18 @@ export function buildLedger({ shards, shardTotal, fingerprint, runId, runAttempt
   if (seen === 0) {
     errors.push('no shard summaries at all — the run produced no ledger; that is NOT green');
   }
+  // Damaged and ABSENT are different causes and are reported differently. The
+  // workflow used to claim the `windowFingerprint: null` branch was
+  // "defense-in-depth for a present-but-malformed artifact" — it was
+  // unreachable for that case, because `existsSync` was true and `JSON.parse`
+  // threw first. Both are reachable now, and each says which one happened.
+  if (fingerprintError) {
+    errors.push(
+      `the compat-window fingerprint artifact is UNREADABLE (${fingerprintError}) — this night has ` +
+        'no provable harness identity and cannot count toward the v1.0 14-night window. The shard ' +
+        'evidence below is still recorded; re-run and triage the build-next upload.',
+    );
+  }
   if (!ledger.windowFingerprint) {
     errors.push(
       'no compat-window fingerprint recorded for this run — the frozen set (workflow + ' +
@@ -422,16 +442,37 @@ export function readSummaries(dir) {
   return readdirSync(dir)
     .filter((f) => f.startsWith('compat-suite-summary') && f.endsWith('.json'))
     .map((f) => {
-      try {
-        const parsed = JSON.parse(readFileSync(`${dir}/${f}`, 'utf8'));
-        if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
-          return { shard: null, readError: `${f}: parsed to ${typeof parsed}, not an object` };
-        }
-        return parsed;
-      } catch (err) {
-        return { shard: null, readError: `${f}: ${err instanceof Error ? err.message : err}` };
-      }
+      const { value, error } = readJsonObject(`${dir}/${f}`, f);
+      return error ? { shard: null, readError: error } : value;
     });
+}
+
+/**
+ * Parse ONE JSON artifact into an object, reporting damage instead of throwing.
+ *
+ * Shared by both artifacts this job downloads, and that sharing is the fix, not
+ * a tidy-up. Round 2 guarded the summaries and left the FINGERPRINT read
+ * unguarded — the same `JSON.parse`, on the sibling artifact, in the same
+ * script, evaluated inside the `buildLedger(...)` argument list and therefore
+ * BEFORE the write. A truncated or zero-byte fingerprint killed the process on
+ * a night whose sixteen shards were all healthy, and produced no evidence at
+ * all. One reader means the next artifact this job learns to read cannot
+ * reintroduce that by omission.
+ *
+ * @param {string} path
+ * @param {string} label Human name for the error message (the artifact filename).
+ * @returns {{value: Record<string, any>|null, error: string|null}}
+ */
+export function readJsonObject(path, label) {
+  try {
+    const parsed = JSON.parse(readFileSync(path, 'utf8'));
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return { value: null, error: `${label}: parsed to ${typeof parsed}, not an object` };
+    }
+    return { value: parsed, error: null };
+  } catch (err) {
+    return { value: null, error: `${label}: ${err instanceof Error ? err.message : err}` };
+  }
 }
 
 // ── CLI ──────────────────────────────────────────────────────────────────────
@@ -440,16 +481,23 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   const fingerprintFile = process.env.FINGERPRINT_FILE || DEFAULT_FINGERPRINT_FILE;
   const outFile = process.env.OUT_FILE || DEFAULT_OUT_FILE;
 
+  // #545 (S1) — the frozen-set fingerprint for THIS night, READ from the
+  // artifact the build-next job wrote and never recomputed here: the shard jobs
+  // run against the workspace that job packed, so recomputing from a fresh
+  // checkout would fingerprint a tree the run never used.
+  //
+  // Read BEFORE the build and through the same guard as the summaries: this
+  // parse used to sit inside the `buildLedger(...)` argument list, so a damaged
+  // fingerprint threw before the ledger was ever written.
+  const fingerprintRead = existsSync(fingerprintFile)
+    ? readJsonObject(fingerprintFile, fingerprintFile.split('/').pop() ?? fingerprintFile)
+    : { value: null, error: null };
+
   const { ledger, errors, redDetail, table } = buildLedger({
     shards: readSummaries(summaryDir),
     shardTotal: process.env.COMPAT_SHARD_TOTAL,
-    // #545 (S1) — the frozen-set fingerprint for THIS night, READ from the
-    // artifact the build-next job wrote and never recomputed here: the shard
-    // jobs run against the workspace that job packed, so recomputing from a
-    // fresh checkout would fingerprint a tree the run never used.
-    fingerprint: existsSync(fingerprintFile)
-      ? JSON.parse(readFileSync(fingerprintFile, 'utf8'))
-      : null,
+    fingerprint: fingerprintRead.value,
+    fingerprintError: fingerprintRead.error,
     runId: process.env.RUN_ID,
     runAttempt: process.env.RUN_ATTEMPT,
     event: process.env.EVENT_NAME,

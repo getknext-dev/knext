@@ -286,7 +286,12 @@ describe('#695 — the artifact path is one fact, shared with the workflow', () 
 
 describe('#695 — end to end, in the shape the shard-ledger job runs it', () => {
   /** Lay out a fake job workspace: `summaries/`, `fingerprint/`, and run the CLI. */
-  function runCli(shards: Shard[], corrupt: Record<string, string> = {}) {
+  function runCli(
+    shards: Shard[],
+    corrupt: Record<string, string> = {},
+    /** `undefined` = a healthy fingerprint, `null` = no fingerprint file at all. */
+    fingerprintBody?: string | null,
+  ) {
     const dir = mkdtempSync(join(tmpdir(), 'knext-ledger-'));
     mkdirSync(join(dir, 'summaries'));
     mkdirSync(join(dir, 'fingerprint'));
@@ -297,10 +302,16 @@ describe('#695 — end to end, in the shape the shard-ledger job runs it', () =>
     for (const [name, body] of Object.entries(corrupt)) {
       writeFileSync(join(dir, 'summaries', name), body);
     }
-    writeFileSync(
-      join(dir, 'fingerprint', 'compat-window-fingerprint.json'),
-      JSON.stringify(FINGERPRINT),
-    );
+    // The fingerprint is a PARAMETER, not a fixture. Round 2's harness always
+    // wrote a healthy one, so no test could see that the fingerprint read was
+    // still unguarded — the corrupt-artifact fix covered the summaries and its
+    // sibling artifact was invisible to the suite.
+    if (fingerprintBody !== null) {
+      writeFileSync(
+        join(dir, 'fingerprint', 'compat-window-fingerprint.json'),
+        fingerprintBody ?? JSON.stringify(FINGERPRINT),
+      );
+    }
     const stepSummary = join(dir, 'step-summary.md');
     const output = join(dir, 'output.txt');
     const res = spawnSync(process.execPath, [join(REPO_ROOT, 'scripts/compat-run-ledger.mjs')], {
@@ -373,5 +384,46 @@ describe('#695 — end to end, in the shape the shard-ledger job runs it', () =>
     // artifact was damaged
     expect(run.stderr).toMatch(/compat-suite-summary-16-16\.json/);
     expect(run.stderr).not.toMatch(/SyntaxError/);
+  });
+
+  it.each([
+    ['TRUNCATED', '{"fingerprint":"sha256:dead'],
+    ['EMPTY', ''],
+    ['not an object', '42'],
+  ])('a FINGERPRINT artifact that is %s still produces a ledger, and still reds', (_label, body) => {
+    // The same property as the summaries, on the sibling artifact downloaded
+    // by the same job and read by the same script — and it survived round 2
+    // because the harness always wrote a healthy fingerprint. A damaged
+    // fingerprint threw inside the `buildLedger(...)` ARGUMENT LIST, i.e.
+    // before the write, so a healthy 16-shard night produced NO evidence at
+    // all.
+    const run = runCli(allShards(), {}, body);
+    expect(run.status).not.toBe(0);
+    expect(run.ledger, 'no ledger was written — the evidence path is unmet').not.toBeNull();
+    expect(run.ledger?.windowFingerprint).toBeNull();
+    // the shard evidence is intact and still recorded, which is the point of
+    // writing the ledger anyway
+    expect(run.ledger?.shards).toHaveLength(TOTAL);
+    expect(run.ledger?.complete).toBe(true);
+    // the damaged file is NAMED, and the failure is the fingerprint floor,
+    // not a stack trace
+    expect(run.stderr).toMatch(/compat-window-fingerprint\.json/);
+    expect(run.stderr).not.toMatch(/SyntaxError/);
+  });
+
+  it('an ABSENT fingerprint reds for a DIFFERENT stated reason than a damaged one', () => {
+    // Both halves of the distinction, because the workflow comment that
+    // motivated this claimed the `windowFingerprint: null` branch was
+    // "defense-in-depth for a present-but-malformed artifact" — which was
+    // unreachable for that case (`existsSync` true, `JSON.parse` throws first).
+    // Absent and damaged are now both reachable AND told apart.
+    const absent = runCli(allShards(), {}, null);
+    expect(absent.status).not.toBe(0);
+    expect(absent.stderr).toMatch(/no compat-window fingerprint recorded/);
+    expect(absent.stderr).not.toMatch(/unreadable/i);
+
+    const damaged = runCli(allShards(), {}, '');
+    expect(damaged.stderr).toMatch(/unreadable/i);
+    expect(damaged.stderr).toMatch(/compat-window-fingerprint\.json/);
   });
 });

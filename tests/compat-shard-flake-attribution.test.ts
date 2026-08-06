@@ -401,6 +401,38 @@ const LEDGER_STEP_KEYS = new Set(['name', 'id', 'env', 'run']);
  */
 const LEDGER_STEP_ENV_KEYS = new Set(['RUN_ID', 'RUN_ATTEMPT', 'EVENT_NAME']);
 
+/**
+ * Env inputs the audited step must actually SET, not merely be permitted to.
+ *
+ * An allowlist answers "may this key be here"; it never notices a key that is
+ * gone. Delete `EVENT_NAME` and the ledger records `event: undefined` — evidence
+ * without provenance, and nothing red anywhere.
+ */
+const REQUIRED_STEP_ENV_KEYS = ['RUN_ID', 'RUN_ATTEMPT', 'EVENT_NAME'];
+
+/** The ledger script's source — the authority for which env knobs exist. */
+const LEDGER_SCRIPT_SRC = readFileSync(
+  join(process.cwd(), 'scripts/compat-run-ledger.mjs'),
+  'utf8',
+);
+
+/**
+ * Every `process.env.X` the ledger script reads, DERIVED from its source.
+ *
+ * Enumerating them here is how the next knob gets missed — the whole shape of
+ * the #695 review. Over-matching (a mention inside a comment) is safe: it only
+ * ever forbids more.
+ */
+const SCRIPT_ENV_KNOBS = new Set(
+  [...LEDGER_SCRIPT_SRC.matchAll(/process\.env\.([A-Z][A-Z0-9_]*)/g)].map((m) => m[1] as string),
+);
+
+/**
+ * The ONE knob the workflow may set at workflow level, where it is inherited by
+ * every step: the declared shard total, which is the point of #695.
+ */
+const SANCTIONED_INHERITED_ENV = new Set(['COMPAT_SHARD_TOTAL']);
+
 /** The audited step: the one whose `run:` is the sanctioned ledger command. */
 function ledgerStep(): WorkflowStep {
   const step = (job('shard-ledger').steps ?? []).find((s) =>
@@ -420,8 +452,16 @@ function auditLedgerJob(): string[] {
   const jobId = 'shard-ledger';
   const j = job(jobId) as unknown as Job;
 
+  // PRESENCE first, then admissibility. A missing `if:` satisfies "every `if:`
+  // must be always()" vacuously, and with `needs: deploy-tests` a job without
+  // `if: always()` is SKIPPED the moment a shard fails — the exact night this
+  // ledger exists for.
   const jobIf = j.if;
-  if (jobIf !== undefined && !ADMISSIBLE_IF.test(String(jobIf).trim())) {
+  if (jobIf === undefined) {
+    problems.push(
+      `job \`${jobId}\` carries NO \`if:\` — with \`needs:\`, it is skipped whenever a needed job fails, which is precisely the night the ledger must be built; \`if: always()\` is load-bearing, not decoration`,
+    );
+  } else if (!ADMISSIBLE_IF.test(String(jobIf).trim())) {
     problems.push(
       `job \`${jobId}\` carries if: ${JSON.stringify(jobIf)} — only \`always()\` is admissible; anything else can condition the gate off, and a skipped job does not fail the run`,
     );
@@ -466,7 +506,33 @@ function auditLedgerJob(): string[] {
       );
     }
   }
-  for (const key of Object.keys((audited.env ?? {}) as Record<string, unknown>)) {
+  // Presence, the counterpart of the allowlist below: a permitted key that is
+  // GONE is invisible to an allowlist.
+  const auditedEnv = (audited.env ?? {}) as Record<string, unknown>;
+  for (const key of REQUIRED_STEP_ENV_KEYS) {
+    if (!(key in auditedEnv)) {
+      problems.push(
+        `the audited ledger step no longer sets env \`${key}\` — the ledger would record it as \`undefined\`, which is evidence without provenance and reds nothing`,
+      );
+    }
+  }
+
+  // The step's `id` and the job output that quotes it are ONE fact: without the
+  // pair, `needs.shard-ledger.outputs.red_detail` is empty and the red alert
+  // stops naming what failed (#545 AC 3).
+  const stepId = typeof audited.id === 'string' ? audited.id : '';
+  const outputs = (j.outputs ?? {}) as Record<string, unknown>;
+  const redDetail = String(outputs.red_detail ?? '');
+  if (!stepId) {
+    problems.push('the audited ledger step has no `id:` — its outputs cannot be referenced');
+  }
+  if (!redDetail.includes(`steps.${stepId}.outputs.red_detail`)) {
+    problems.push(
+      `job \`${jobId}\` does not export red_detail from the audited step (outputs.red_detail = ${JSON.stringify(outputs.red_detail ?? null)}) — the red alert would quote an empty string and the night's issue would name no failing shard`,
+    );
+  }
+
+  for (const key of Object.keys(auditedEnv)) {
     if (!LEDGER_STEP_ENV_KEYS.has(key)) {
       problems.push(
         `the audited ledger step sets env \`${key}\` — fails closed: scripts/compat-run-ledger.mjs reads OUT_FILE/SUMMARY_DIR/FINGERPRINT_FILE, each of which points the evidence somewhere the upload does not look (add it to LEDGER_STEP_ENV_KEYS with a reason)`,
@@ -579,6 +645,32 @@ describe('#695 — the ledger reconciles against the declared shard total', () =
     expect(problems, problems.join('\n')).toEqual([]);
   });
 
+  it('the load-bearing wiring is PRESENT, not merely admissible when present', () => {
+    // ────────────────────────────────────────────────────────────────────────
+    // Round-2's audit allowlisted the VALUE of `if:` and never required the key
+    // to exist — so DELETING `if: always()` from the job passed everything.
+    // With `needs: deploy-tests`, a deleted `if:` makes `shard-ledger` SKIP on
+    // exactly the night #695 is about: no ledger, no 90-day artifact, empty
+    // `red_detail`. Deleting one line is the cheapest disarm of "does it run",
+    // and it was the route left open.
+    //
+    // The lesson generalises past that one key, so this asserts PRESENCE for
+    // every piece of wiring whose absence is silently survivable:
+    //   * the job's `if: always()` (above);
+    //   * the audited step's `id`, and the job output that quotes it — without
+    //     the pair, `needs.shard-ledger.outputs.red_detail` is empty and the
+    //     red alert loses the attribution #545 AC 3 exists for;
+    //   * the audited step's env inputs — `runId`/`runAttempt`/`event` silently
+    //     become `undefined` in the artifact, which is evidence without
+    //     provenance.
+    // ────────────────────────────────────────────────────────────────────────
+    const j = job('shard-ledger') as unknown as Job;
+    expect(j.if, 'the job carries no `if:` at all — with `needs:`, it SKIPS on a red night').toBe(
+      'always()',
+    );
+    expect(auditLedgerJob()).toEqual([]);
+  });
+
   it('the audited step cannot be redirected away from the evidence path', () => {
     // Finding 3: the `run:` string is what the allowlist matches, so
     // `working-directory: /tmp` on the step, or `OUT_FILE: /tmp/ledger.json` in
@@ -590,6 +682,37 @@ describe('#695 — the ledger reconciles against the declared shard total', () =
     expect(Object.keys(step)).not.toContain('working-directory');
     expect(Object.keys(step.env ?? {})).not.toContain('OUT_FILE');
     expect(auditLedgerJob()).toEqual([]);
+  });
+
+  it('no INHERITED env or defaults can redirect the evidence (workflow level)', () => {
+    // Round 2 allowlisted the audited step's `env:` and rejected a JOB-level
+    // `env:` — and stopped one level short. GitHub inherits WORKFLOW-level
+    // `env` into every step, this workflow already has one (it is where
+    // COMPAT_SHARD_TOTAL lives), and the script reads `process.env.OUT_FILE`.
+    // So `OUT_FILE: /tmp/laundered.json` at :112 relocated the evidence with
+    // every guard green — and worse than the step-level form it duplicates: on
+    // a CLEAN night nothing reds anywhere, the job stays green, and the 90-day
+    // chain simply stops.
+    //
+    // The forbidden set is DERIVED from the script's own `process.env` reads,
+    // never enumerated: a knob added to the script next month is covered here
+    // tonight, without anyone remembering to extend a list.
+    expect(SCRIPT_ENV_KNOBS.size, 'the process.env scan matched nothing').toBeGreaterThan(3);
+    expect([...SCRIPT_ENV_KNOBS]).toEqual(expect.arrayContaining(['OUT_FILE', 'SUMMARY_DIR']));
+
+    const inherited = Object.keys((DOC.env ?? {}) as Record<string, unknown>);
+    const laundered = inherited.filter(
+      (k) => SCRIPT_ENV_KNOBS.has(k) && !SANCTIONED_INHERITED_ENV.has(k),
+    );
+    expect(
+      laundered,
+      'workflow-level env sets a knob scripts/compat-run-ledger.mjs reads — it is inherited by the audited step and can point the evidence, its inputs, or its outputs somewhere nothing uploads',
+    ).toEqual([]);
+
+    // `defaults: run: working-directory:` at workflow level relocates the step
+    // exactly as the step-level key does. The job-level form is already
+    // rejected by LEDGER_JOB_KEYS; this is the same boundary one level up.
+    expect(Object.keys(DOC)).not.toContain('defaults');
   });
 
   it('the red alert fires when the ledger or the shards are CANCELLED, not only failed', () => {
