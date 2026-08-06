@@ -9,11 +9,17 @@ import {
   UNEXERCISED_TOKENS,
 } from '../scripts/lib/shell-command-position.mjs';
 import {
+  ADMISSIBLE_IF_SHAPES,
+  INADMISSIBLE_IF_SHAPES,
+  isAdmissibleIf,
+} from '../scripts/lib/workflow-conditioning-shapes.mjs';
+import {
   auditFailOnRedGateTeeth,
   METADATA_VARIANTS,
   shardSummary,
   untruncatableSummary,
 } from './helpers/fail-on-red-gate.js';
+import { auditLedgerSpine, auditReportingTail } from './helpers/workflow-conditioning.js';
 
 /**
  * Runner logs in the shape `scripts/e2e-summary.mjs` parses, used ONLY to make
@@ -2194,14 +2200,93 @@ describe('compat-suite fail-on-red gate — revocation teeth (test-e2e-deploy.ym
     );
   });
 
-  it('summarize and upload remain if: always() (a red gate must never starve the ledger)', () => {
-    for (const nameRe of [
-      /-\s+name:[^\n]*Summarize shard result[\s\S]*?(?=\n\s*-\s+name:|\n*$)/,
-      /-\s+name:[^\n]*Upload summary artifact[\s\S]*?(?=\n\s*-\s+name:|\n*$)/,
-    ]) {
-      const block = src.match(nameRe)?.[0] ?? '';
-      expect(block, `step block for ${nameRe} must exist`).not.toBe('');
-      expect(/if:\s*always\(\)/.test(block), `step must keep if: always(): ${nameRe}`).toBe(true);
+  // ───────────────────────────────────────────────────────────────────────────
+  // #703 — the step-level and job-level disarms, which live OUTSIDE the script.
+  //
+  // What used to sit here was:
+  //
+  //     for (const nameRe of [/…Summarize shard result…/, /…Upload summary…/])
+  //       expect(/if:\s*always\(\)/.test(block)).toBe(true)
+  //
+  // MEASURED on this tree, before the replacement below: narrowing either step
+  // to `if: always() && github.event_name == 'schedule'` left BOTH compat specs
+  // GREEN — a conjunction SATISFIES that regex. The same pattern went RED on
+  // `${{ always() }}`, which is the identical condition. One regex, wrong in
+  // both directions: it accepted the disarm and rejected the equivalent.
+  //
+  // Also measured, and the reason this is not just a stronger regex: a job-level
+  // `if:` on `deploy-tests` was green everywhere. That one line skips the job,
+  // and with it all three fail-on-red teeth, the ledger and the alert — a
+  // skipped job fails nothing and reports `result == 'skipped'`, which the
+  // alert's condition tests for `'failure'`/`'cancelled'` and misses.
+  //
+  // Not measured-and-fixed but measured-and-ALREADY-COVERED, recorded so nobody
+  // re-files it: `continue-on-error` on this step reds in all three spellings
+  // (bare `true`, `'true'`, `${{ true }}`) at step AND job level via #697's
+  // `auditNoSwallowedFailures()`, and narrowing or DELETING the fail-on-red
+  // step's own `if:` reds via #697's `auditFailOnRedGate()`. Both live in
+  // `tests/compat-shard-flake-attribution.test.ts`;
+  // `scripts/mutation-prove-compat-step-level-disarms.mjs` proves all of it,
+  // theirs and these, in one table.
+  // ───────────────────────────────────────────────────────────────────────────
+
+  it('#703 every step in the deploy-tests reporting tail carries an ADMISSIBLE if:', () => {
+    const { problems, tailLabels } = auditReportingTail(WORKFLOW_PATH);
+    expect(problems, `${problems.join('\n')}\n(tail: ${tailLabels.join(', ')})`).toEqual([]);
+  });
+
+  it('#703 the deploy-tests reporting tail is NON-VACUOUS (a deleted if: shrinks it silently)', () => {
+    // The direction the audit above cannot see. It judges the steps it FINDS,
+    // so deleting an `if:` from the middle of the tail removes that step — and
+    // everything above it — from the suffix, and the audit passes by looking at
+    // less. The floor is what reds instead. Four is measured, not chosen:
+    // compute-excluded / summarize / upload / fail-on-red.
+    const { tailLength, totalSteps, tailLabels } = auditReportingTail(WORKFLOW_PATH);
+    expect(totalSteps, 'deploy-tests should have a real step list').toBeGreaterThan(20);
+    expect(
+      tailLength,
+      `the unconditional reporting tail shrank to ${tailLength} step(s) (${tailLabels.join(', ')}) — ` +
+        'a step that stopped declaring `if:` has left it, and every step above it went with it',
+    ).toBeGreaterThanOrEqual(4);
+  });
+
+  it('#703 no job on the ledger spine can be conditioned off', () => {
+    const { problems, jobsWalked } = auditLedgerSpine(WORKFLOW_PATH);
+    expect(problems, `${problems.join('\n')}\n(spine: ${jobsWalked.join(' -> ')})`).toEqual([]);
+  });
+
+  it('#703 the ledger spine walk is NON-VACUOUS', () => {
+    // Same shrink-the-denominator direction, one level up: dropping
+    // `needs: build-next` does not ADD a problem, it removes a job from the
+    // closure. Three is measured: shard-ledger -> deploy-tests -> build-next.
+    const { jobsWalked } = auditLedgerSpine(WORKFLOW_PATH);
+    expect(
+      jobsWalked.length,
+      `the reconciliation spine walked only ${jobsWalked.join(' -> ')} — a \`needs:\` edge was cut, ` +
+        'so a job that can now be silenced is no longer being judged',
+    ).toBeGreaterThanOrEqual(3);
+  });
+
+  it('#703 every inadmissible if: SHAPE is rejected, and every admissible spelling accepted', () => {
+    // The coverage guard on the TABLE the mutation prover generates its rows
+    // from. A shape added there without a verdict here would be exercised by a
+    // mutation nobody had decided the answer for; a shape deleted from there
+    // takes its mutation row with it, which the prover's own preflight count is
+    // what catches. Both halves are asserted, because a rejector that rejects
+    // everything is proved by nothing.
+    expect(INADMISSIBLE_IF_SHAPES.length, 'the inadmissible table is empty').toBeGreaterThan(5);
+    for (const shape of INADMISSIBLE_IF_SHAPES) {
+      expect(isAdmissibleIf(shape.yaml), `${shape.id} must be rejected: ${shape.why}`).toBe(false);
+    }
+    expect(ADMISSIBLE_IF_SHAPES.length, 'the admissible table is empty').toBeGreaterThan(2);
+    for (const shape of ADMISSIBLE_IF_SHAPES) {
+      expect(isAdmissibleIf(shape.yaml), `${shape.id} must be accepted`).toBe(true);
+    }
+    // The parsed-YAML forms, which are NOT strings. `if: true` reaches the audit
+    // as a boolean and `if:` with no value as null; a check that only handled
+    // strings would wave both through as "nothing to test".
+    for (const value of [true, false, null, undefined, 0, 1]) {
+      expect(isAdmissibleIf(value), `${JSON.stringify(value)} must be rejected`).toBe(false);
     }
   });
 
@@ -2211,9 +2296,13 @@ describe('compat-suite fail-on-red gate — revocation teeth (test-e2e-deploy.ym
         /-\s+name:[^\n]*Fail shard on red results[\s\S]*?(?=\n\s*-\s+name:|\n {2}[a-z])/,
       )?.[0] ?? '';
     expect(gate).not.toBe('');
-    expect(/if:\s*always\(\)/.test(gate), 'gate must run even after an earlier step failed').toBe(
-      true,
-    );
+    // #703: the `/if:\s*always\(\)/` assertion that used to sit here is GONE,
+    // not moved-and-weakened. It was satisfied by `always() && <anything>` and
+    // violated by `${{ always() }}` — wrong in both directions — and the claim
+    // it was making is owned twice over by structural checks that judge the
+    // parsed value: `auditFailOnRedGate()` in
+    // `tests/compat-shard-flake-attribution.test.ts` (#697) for this step, and
+    // the reporting-tail audit above for the whole tail it sits in.
     expect(/compat-suite-summary/.test(gate), 'gate must read the shard summary JSON').toBe(true);
     expect(/\bfailed\b/.test(gate), 'gate must check the failed count').toBe(true);
     expect(/\bnotRun\b/.test(gate), 'gate must check the notRun (phantom) count').toBe(true);
