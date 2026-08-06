@@ -116,13 +116,55 @@ describe('the prover says WHY nothing ran, or says it does not know', () => {
     expect(message).toMatch(/RUN {2}v4\.0\.18/);
   });
 
-  it('enumerates its causes so the fallback is reachable, not decorative', () => {
-    // If `undetermined` were dropped from the vocabulary the guessing default
-    // would be back; if the recognised causes were dropped, every diagnosis
-    // would degrade to "don't know".
-    expect(new Set(NOTHING_RAN_CAUSES)).toEqual(
-      new Set(['spec-not-collected', 'runner-never-started', 'assertion-not-declared']),
-    );
+  it('every enumerated cause is REACHED by a real observation, and so is the fallback', () => {
+    // This used to compare `new Set(NOTHING_RAN_CAUSES)` against a hard-coded
+    // set — a restatement of the constant, under a title that claimed
+    // reachability (#684 item 3). #675 shipped `re.source.length > 0` under the
+    // same shape of title and it took a review round to catch, so the assertion
+    // is made to earn its name: each cause is paired with an observation that
+    // must actually PRODUCE it. An entry added to the vocabulary with no code
+    // path behind it now reds here instead of reading as covered.
+    const reaching: Record<string, { spec: string; res: ReturnType<typeof result> }> = {
+      'spec-not-collected': {
+        spec: 'tests/definitely-not-here.test.ts',
+        res: result({ out: NO_TEST_FILES, noTestFiles: true, launched: true }),
+      },
+      'runner-never-started': {
+        spec: GATES[0].spec,
+        res: result({ ok: false, out: 'sh: vitest: command not found\n', launched: false }),
+      },
+      'assertion-not-declared': {
+        spec: 'tests/compat-matrix.test.ts',
+        res: result({
+          out: `${RUN_BANNER} Test Files  1 passed (1)\n`,
+          launched: true,
+          collected: true,
+        }),
+      },
+    };
+
+    for (const cause of NOTHING_RAN_CAUSES) {
+      const observation = reaching[cause];
+      expect(
+        observation,
+        `${cause} is enumerated but no observation here reaches it`,
+      ).toBeDefined();
+      expect(diagnoseNothingRan(REPO_ROOT, observation.spec, observation.res).cause).toBe(cause);
+    }
+    // ...and the reverse: an observation whose cause left the vocabulary would
+    // otherwise sit here proving something the prover no longer reports.
+    expect(new Set(Object.keys(reaching))).toEqual(new Set(NOTHING_RAN_CAUSES));
+
+    // The fallback is a fourth OUTCOME, deliberately outside the vocabulary: if
+    // it were enumerated it would read as a recognised cause, and if it were
+    // unreachable the guessing default would be back.
+    expect(NOTHING_RAN_CAUSES).not.toContain('undetermined');
+    const incoherent = result({
+      out: `${RUN_BANNER} Test Files  1 passed (1)\n`,
+      launched: true,
+      collected: true,
+    });
+    expect(diagnoseNothingRan(REPO_ROOT, GATES[0].spec, incoherent).cause).toBe('undetermined');
   });
 });
 
@@ -182,10 +224,29 @@ describe('declaredTestTitles is satisfied only by a real declaration', () => {
   });
 });
 
-describe('there is ONE non-code blanker in the tree', () => {
-  it('nothing reimplements blankNonCode', () => {
+describe('blankNonCode is defined in exactly one file', () => {
+  it('no second definition of `blankNonCode*` exists under tests/ or scripts/', () => {
     // #680 says reuse the tokenizer, not write a third one. Scan rather than
     // enumerate: a new copy anywhere under tests/ or scripts/ fails this.
+    //
+    // The title says only what the scan checks (#684 item 2). What it does NOT
+    // check, measured rather than supposed: the #682 review planted
+    // `const stripNonCode` under tests/ and it stayed GREEN, because this is a
+    // NAME scan. Only the copy-paste path — `blankNonCode`, `blankNonCode2` —
+    // is caught; a renamed copy is not.
+    //
+    // That residual is not hypothetical, which is why the describe block can no
+    // longer claim "there is ONE non-code blanker in the tree": that claim is
+    // already FALSE. `scripts/scan-half-scan-candidates.mjs` exports
+    // `maskLiterals`, an independent length-preserving, regex-aware blanker with
+    // its own contract. Closing that means consolidating two tokenizers, not
+    // widening a regex, and widening the regex by name shape instead
+    // (blank|strip|mask + noncode|comment|literal) reds on `maskLiterals` and on
+    // five unrelated `stripComments` helpers — i.e. it would need an allowlist,
+    // which is the enumeration this scan exists to avoid. Tracked as #689, which
+    // also records that `maskLiterals` still carries the shebang bug #684 fixed
+    // here — so the residual is "a second blanker WITH THE SAME OPEN BUG", not
+    // merely a second blanker.
     const roots = [join(REPO_ROOT, 'tests'), join(REPO_ROOT, 'scripts')];
     const files: string[] = [];
     const walk = (dir: string) => {
@@ -198,7 +259,7 @@ describe('there is ONE non-code blanker in the tree', () => {
     for (const root of roots) walk(root);
 
     const definitions = files.filter((f) =>
-      /(?:function|const)\s+blankNonCode\b/.test(readFileSync(f, 'utf8')),
+      /(?:function|const|let|var|class)\s+blankNonCode/.test(readFileSync(f, 'utf8')),
     );
     expect(definitions.map((f) => f.slice(REPO_ROOT.length + 1))).toEqual([
       'scripts/lib/blank-non-code.mjs',

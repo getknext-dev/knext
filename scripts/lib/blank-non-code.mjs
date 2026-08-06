@@ -97,6 +97,29 @@ export function blankNonCode(src) {
    */
   const stack = [];
   let i = 0;
+  // A leading `#!` line is a KERNEL directive, not JavaScript, so it is blanked
+  // wholesale before tokenizing rather than tokenized as code.
+  //
+  // Not cosmetic: in `#!/usr/bin/env node` the character before the first `/` is
+  // `!`, which `regexAllowedAfter` reads as "a value may start here", so `usr`
+  // was blanked as a REGEX LITERAL in every shebanged `scripts/*.mjs` (#684).
+  // That was bounded — the regex scan breaks at the first newline — but a
+  // shebang may legally contain a quote or a backtick, and this tokenizer is on
+  // its third caller. Each reuse widens the file set it runs against, which is
+  // how #665's "no regex with an odd quote count exists today" caveat became a
+  // live defect in #682.
+  //
+  // Positional by design, and one consequence is recorded rather than fixed: a
+  // UTF-8 BOM before the `#!` defeats this skip (`'﻿#!/usr/bin/env node'`
+  // still yields `#!/   /bin/env node`). Left alone because the guard in
+  // `tests/blank-non-code.test.ts` filters the real corpus with the same
+  // `startsWith('#!')`, so fix and test stay CONSISTENT, and no file in the tree
+  // has one. Strip the BOM here if that ever stops being true.
+  if (src.startsWith('#!')) {
+    const nl = src.indexOf('\n');
+    i = nl === -1 ? src.length : nl;
+    blank(0, i);
+  }
   while (i < src.length) {
     const top = stack[stack.length - 1];
     const c = src[i];
