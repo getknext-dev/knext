@@ -179,13 +179,55 @@ export function failOnRedGateScript(workflowPath: string): { run: string | null;
 interface ShellIfBlock {
   condition: string;
   body: string;
-  /** Inclusive line indices the block spans, used to locate exits OUTSIDE it. */
+  /** Inclusive line indices the block spans. */
   startLine: number;
   endLine: number;
+  /**
+   * The exact line indices belonging to the THEN arm — NOT the block's span.
+   *
+   * The two are different and the difference is load-bearing. `body` already
+   * stops at a top-level `else`/`elif` because an exit there "fires on the
+   * opposite condition", i.e. this file already treats those arms as a
+   * DIFFERENT branch. An escape scan that exempted `startLine..endLine` would
+   * therefore exempt the very arms the walker deliberately excluded — measured:
+   * an `elif [ "$KNEXT_RUNTIME" = "bun" ]; then exit 0` arm grafted onto the
+   * missing-summary block disarmed the whole gate with every assertion green.
+   */
+  thenLines: number[];
 }
 
 /** `if …; then …; fi` all on one line. */
 const ONE_LINE_IF = /^\s*if\b(?<cond>.*?);\s*then\b(?<body>.*?);?\s*fi\s*;?\s*$/;
+
+/**
+ * Blank the CONTENT of shell single-quoted spans, preserving every newline.
+ *
+ * The embedded `node -e '…'` program is a single-quoted shell word, so its text
+ * is DATA to the shell — and it contains `process.exit(1)` twice. A scan looking
+ * for a shell `exit` must not read those, and this is not hypothetical: widening
+ * the scan from `exit\s+\d+` to `exit\b` (so a bare `exit` could not hide) made
+ * it match `process.exit(1)` the moment the program was no longer inline and the
+ * scan fell back to the whole script. Two prover rows caught it.
+ *
+ * Line numbers are preserved exactly — newlines survive, everything else inside
+ * the quotes becomes a space — because the caller maps findings back to prelude
+ * line indices computed by `shellIfBlocks`.
+ */
+function blankSingleQuoted(script: string): string {
+  let out = '';
+  let inQuote = false;
+  for (const ch of script) {
+    if (ch === "'") {
+      inQuote = !inQuote;
+      out += ch;
+    } else if (inQuote && ch !== '\n') {
+      out += ' ';
+    } else {
+      out += ch;
+    }
+  }
+  return out;
+}
 
 /**
  * Every `if` block in a POSIX-ish shell script, with the body of its THEN arm.
@@ -223,6 +265,7 @@ export function shellIfBlocks(script: string): ShellIfBlock[] {
         body: (inline.groups.body ?? '').trim(),
         startLine: i,
         endLine: i,
+        thenLines: [i],
       });
       continue;
     }
@@ -232,6 +275,7 @@ export function shellIfBlocks(script: string): ShellIfBlock[] {
       .replace(/;\s*then\s*$/, '')
       .trim();
     const body: string[] = [];
+    const thenLines: number[] = [];
     let depth = 1;
     let inThenArm = true;
     let j = i + 1;
@@ -243,9 +287,12 @@ export function shellIfBlocks(script: string): ShellIfBlock[] {
         if (depth === 0) break;
       }
       if (depth === 1 && /^\s*(else|elif)\b/.test(inner)) inThenArm = false;
-      if (inThenArm) body.push(inner);
+      if (inThenArm) {
+        body.push(inner);
+        thenLines.push(j);
+      }
     }
-    blocks.push({ condition, body: body.join('\n'), startLine: i, endLine: j });
+    blocks.push({ condition, body: body.join('\n'), startLine: i, endLine: j, thenLines });
     i = j;
   }
   return blocks;
@@ -987,15 +1034,56 @@ export function auditFailOnRedGateTeeth(workflowPath: string): GateTeethAudit {
   // Reference-frame rule: with the missing-summary branch gone or ambiguous its
   // own `exit 1` would read as the hatch, and tooth 1 already reds for that —
   // one red standing in for another is what this PR exists to prevent.
-  const missingBlock = missing.length === 1 ? (missing[0] as ShellIfBlock) : undefined;
-  if (missingBlock) {
-    const shellLines = (nodeStart === -1 ? run : run.slice(0, nodeStart)).split('\n');
+  //
+  // TWO THINGS THIS SCAN GOT WRONG, and both were SPELLING mistakes of exactly
+  // the kind this PR keeps finding — the branch side got a semantic AST
+  // evaluator while the escape side was matching a regex against a line:
+  //
+  //   1. it required a NUMERIC ARGUMENT (`exit\s+\d+`), so a bare `exit` — one
+  //      token away from the row already proved — and `exit "${RC}"` were both
+  //      invisible. `exit` is the command; its argument is irrelevant to whether
+  //      the script leaves early;
+  //   2. it exempted the block's whole LINE SPAN, which includes the `else`/
+  //      `elif` arms the walker deliberately excludes from the then-arm. An
+  //      `elif` lane-skip grafted onto the missing-summary block was exempted by
+  //      its own line range.
+  //
+  // Measured on the real step (`bash -e`, KNEXT_RUNTIME=bun, failed: 8): both
+  // spellings made it exit 0 with zero `::error::` lines while the whole
+  // `tests/` suite stayed green. Now: match `exit` whatever its argument, and
+  // exempt only the THEN ARM.
+  //
+  // REFERENCE FRAME, stated in its strong form: the scan runs only when tooth 1
+  // is INTACT, not merely when its branch was located. Relocating the branch's
+  // own `exit 1` into the ELSE arm is simultaneously "the then-arm lost its
+  // tooth" (tooth 1's finding) and "there is an exit outside the then-arm"
+  // (this scan's) — and reporting both makes one red stand in for another,
+  // which is the defect #700 exists to eliminate. Tooth 1 owns that mutation;
+  // this scan stays quiet and the job still reds. Note what is NOT skipped: an
+  // `elif` arm ADDED alongside an intact then-arm leaves tooth 1 green, so the
+  // scan runs and reports it. The two cases are distinguished by whether the
+  // tooth survived, not by the shape of the edit.
+  const missingBlock =
+    missing.length === 1 && teeth['missing-summary'].length === 0
+      ? (missing[0] as ShellIfBlock)
+      : undefined;
+  // The scan reads the WHOLE script with single-quoted spans blanked, rather
+  // than a prefix slice. Slicing at `node -e '` was doing two jobs at once —
+  // bounding the shell region AND hiding the program — and it silently stopped
+  // doing the second the moment the program was not inline. Blanking does the
+  // second job unconditionally, so the bound is no longer load-bearing.
+  // Odd quote count means the pairing cannot be trusted (#702); `exitReachesStep`
+  // already reports that, so this scan stays quiet rather than guessing.
+  const quotesPair = ((run.match(/'/g) ?? []).length & 1) === 0;
+  if (missingBlock && quotesPair) {
+    const thenArm = new Set(missingBlock.thenLines);
+    const shellLines = blankSingleQuoted(run).split('\n');
     for (const [i, line] of shellLines.entries()) {
       if (/^\s*#/.test(line)) continue;
-      if (!/\bexit\s+\d+/.test(line)) continue;
-      if (i >= missingBlock.startLine && i <= missingBlock.endLine) continue;
+      if (!/\bexit\b/.test(line)) continue;
+      if (thenArm.has(i)) continue;
       escapeHatches.push(
-        `a shell \`exit\` at prelude line ${i + 1} (\`${line.trim()}\`) sits OUTSIDE the missing-summary branch — the prelude runs BEFORE the program, so an early exit there disarms all three teeth at once, the shell one included. Measured: a two-line runtime check in the prelude makes the step exit 0 on a red Bun-lane shard`,
+        `a shell \`exit\` at prelude line ${i + 1} (\`${line.trim()}\`) sits OUTSIDE the missing-summary branch's THEN arm — the prelude runs BEFORE the program, so an early exit there disarms all three teeth at once, the shell one included. Measured: a two-line runtime check in the prelude, a bare \`exit\`, and an \`elif\` arm on this very block each make the step exit 0 on a red Bun-lane shard`,
       );
     }
   }

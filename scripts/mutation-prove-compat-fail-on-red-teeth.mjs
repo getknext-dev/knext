@@ -603,6 +603,33 @@ const MUTATIONS = [
     green: [T.missing, T.failed, T.truncated, T.reaches, T.vacuity, T.shape, T.lanes],
   },
   {
+    // ONE TOKEN from the row above, and it was invisible: the scan required a
+    // NUMERIC argument (`exit\s+\d+`). `exit` is the command — its argument
+    // decides the status, not whether the script leaves early. `exit "${RC}"`
+    // is the same hole with a variable instead of nothing.
+    label: 'ESCAPE — a BARE `exit` (no status argument at all)',
+    anchor: SUMMARY_LINE,
+    replacement: `${SUMMARY_LINE}          if [ "\${KNEXT_RUNTIME:-node}" = "bun" ]; then\n            exit\n          fi\n`,
+    reds: T.escape,
+    green: [T.missing, T.failed, T.truncated, T.reaches, T.vacuity, T.shape, T.lanes],
+  },
+  {
+    // The hatch grafted onto the missing-summary block's OWN `elif` arm. The
+    // scan exempted `startLine..endLine` — the block's whole span — while
+    // `shellIfBlocks` deliberately stops the then-arm at a top-level
+    // `else`/`elif` because an exit there "fires on the opposite condition".
+    // So the exemption covered precisely the arms the walker had excluded.
+    // "Outside the branch" now means outside the THEN ARM.
+    label: 'ESCAPE — an `elif` lane-skip arm on the missing-summary block itself',
+    anchor: MISSING_BRANCH,
+    replacement: MISSING_BRANCH.replace(
+      '          fi\n',
+      '          elif [ "${KNEXT_RUNTIME:-node}" = "bun" ]; then\n            exit 0\n          fi\n',
+    ),
+    reds: T.escape,
+    green: [T.missing, T.failed, T.truncated, T.reaches, T.vacuity, T.shape, T.lanes],
+  },
+  {
     // Arguably a MORE natural way to write "skip the gate on the other lane"
     // than the dead conjunct the metadata rows already catch.
     label: 'ESCAPE — `process.exit(0)` BEFORE the owning branch',
