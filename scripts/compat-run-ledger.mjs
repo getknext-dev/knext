@@ -54,6 +54,23 @@
  * matching text. `tests/compat-run-ledger-completeness.test.ts` exercises the
  * real function; `scripts/mutation-prove-ledger-completeness.mjs` proves those
  * guards are not decoration.
+ *
+ * LIMITS OF THE WORKFLOW-SIDE GUARDS — measured, recorded, and deliberately NOT
+ * built for. Both were reproduced against the real guards and judged contrived,
+ * so they are written down here instead of being chased with more assertions:
+ *
+ *   * the command allowlist in tests/compat-shard-flake-attribution.test.ts
+ *     scans `run:` strings, so a `uses:` step could in principle write the
+ *     ledger without tripping it;
+ *   * the "nothing else writes the ledger file" scan is literal-filename and
+ *     line-based, so a computed spelling (`NAME=compat-run-ledger; … >
+ *     "${NAME}.json"`) evades it.
+ *
+ * Neither is a laundering route in practice: `actions/upload-artifact` v4+
+ * REJECTS a duplicate artifact name, so a second job cannot quietly replace the
+ * `compat-run-ledger` this job uploads. What the guards do close is the whole
+ * class that costs nothing to reach by accident — a skipped or unfailable step,
+ * a relocated output path, a re-inlined computation.
  */
 
 import { appendFileSync, existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
@@ -190,7 +207,10 @@ export function buildLedger({ shards, shardTotal, fingerprint, runId, runAttempt
     const id = parseShardId(summary?.shard);
     if (!id) {
       structuralError(
-        `malformed shard id ${JSON.stringify(summary?.shard ?? null)} in a shard summary — a row ` +
+        `malformed shard id ${JSON.stringify(summary?.shard ?? null)} in a shard summary` +
+          // The FILE, when the row came from an unreadable artifact: triage
+          // otherwise has to guess which of sixteen uploads was damaged.
+          `${summary?.readError ? ` (unreadable artifact — ${summary.readError})` : ''} — a row ` +
           'that cannot be placed against the matrix is never silently dropped.',
       );
       continue;
@@ -381,12 +401,37 @@ export function renderRedDetail(ledger) {
   return [...missing, ...red].join('\n');
 }
 
-/** Read every `compat-suite-summary*.json` the download step landed. */
-function readSummaries(dir) {
+/**
+ * Read every `compat-suite-summary*.json` the download step landed.
+ *
+ * A DAMAGED artifact must not kill the process. `JSON.parse` mapped over the
+ * directory threw before the ledger was ever written, so a truncated or
+ * zero-byte upload produced a stack trace and NO evidence at all — the #695
+ * property ("the emitted ledger records expected, seen and missing") unmet on
+ * exactly the path where an artifact is damaged. The inconsistency gave it
+ * away: a summary whose content was literal `null` was already handled
+ * gracefully (malformed id → a `missing` row), while a zero-byte file crashed.
+ *
+ * So every file is parsed under its own guard, and a file that cannot be read,
+ * cannot be parsed, or does not parse to an object becomes a synthetic row
+ * carrying `readError`. It then travels the malformed-id path — reported,
+ * NAMED, and unable to occupy the shard it claims.
+ */
+export function readSummaries(dir) {
   if (!existsSync(dir)) return [];
   return readdirSync(dir)
     .filter((f) => f.startsWith('compat-suite-summary') && f.endsWith('.json'))
-    .map((f) => JSON.parse(readFileSync(`${dir}/${f}`, 'utf8')));
+    .map((f) => {
+      try {
+        const parsed = JSON.parse(readFileSync(`${dir}/${f}`, 'utf8'));
+        if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+          return { shard: null, readError: `${f}: parsed to ${typeof parsed}, not an object` };
+        }
+        return parsed;
+      } catch (err) {
+        return { shard: null, readError: `${f}: ${err instanceof Error ? err.message : err}` };
+      }
+    });
 }
 
 // ── CLI ──────────────────────────────────────────────────────────────────────

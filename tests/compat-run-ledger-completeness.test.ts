@@ -286,13 +286,16 @@ describe('#695 — the artifact path is one fact, shared with the workflow', () 
 
 describe('#695 — end to end, in the shape the shard-ledger job runs it', () => {
   /** Lay out a fake job workspace: `summaries/`, `fingerprint/`, and run the CLI. */
-  function runCli(shards: Shard[]) {
+  function runCli(shards: Shard[], corrupt: Record<string, string> = {}) {
     const dir = mkdtempSync(join(tmpdir(), 'knext-ledger-'));
     mkdirSync(join(dir, 'summaries'));
     mkdirSync(join(dir, 'fingerprint'));
     for (const s of shards) {
       const safe = String(s.shard).replace('/', '-');
       writeFileSync(join(dir, 'summaries', `compat-suite-summary-${safe}.json`), JSON.stringify(s));
+    }
+    for (const [name, body] of Object.entries(corrupt)) {
+      writeFileSync(join(dir, 'summaries', name), body);
     }
     writeFileSync(
       join(dir, 'fingerprint', 'compat-window-fingerprint.json'),
@@ -345,5 +348,30 @@ describe('#695 — end to end, in the shape the shard-ledger job runs it', () =>
     expect(run.output).toMatch(/red_detail<<KNEXT_EOF/);
     expect(run.output).toMatch(/16\/16/);
     expect(run.stepSummary.toUpperCase()).toContain('MISSING');
+  });
+
+  it.each([
+    ['TRUNCATED', '{"shard":"16/16","ref":"v16.2.0","runtime":"node","pas'],
+    ['EMPTY', ''],
+    ['not an object', '"just a string"'],
+  ])('an artifact that is %s still produces a ledger, and still reds', (_label, body) => {
+    // A per-file `JSON.parse` with no guard threw BEFORE the ledger was
+    // written, so the process died with a SyntaxError and produced no evidence
+    // at all — #695's AC 2 unmet on exactly the path where the artifact is
+    // damaged. The tell that this was an oversight, not a decision: a summary
+    // whose content is literal `null` was already handled gracefully, while a
+    // zero-byte file crashed. Same class of bad input, opposite handling.
+    const run = runCli(allShards().slice(0, 15), {
+      'compat-suite-summary-16-16.json': body,
+    });
+    expect(run.status).not.toBe(0);
+    expect(run.ledger, 'no ledger was written — the evidence path is unmet').not.toBeNull();
+    expect(run.ledger?.complete).toBe(false);
+    expect(run.ledger?.shards).toHaveLength(TOTAL);
+    expect(run.ledger?.missingShards).toEqual(['16/16']);
+    // the unreadable file is NAMED, so triage does not have to guess which
+    // artifact was damaged
+    expect(run.stderr).toMatch(/compat-suite-summary-16-16\.json/);
+    expect(run.stderr).not.toMatch(/SyntaxError/);
   });
 });

@@ -377,7 +377,7 @@ export interface BlockingGateAudit {
   pullRequestPaths: string[];
 }
 
-type Job = Record<string, unknown>;
+export type Job = Record<string, unknown>;
 
 /**
  * Is this `branches:` value provably equivalent to having no filter at all?
@@ -588,8 +588,18 @@ function concurrencyProblem(container: Job, where: string): string | null {
   return `${where} carries a cancelling \`concurrency\` group (${JSON.stringify(group)}) in which no interpolation evaluates to a per-PR value, so an unrelated ref can cancel this gate and a cancelled check is not a failed check — accepted: \`\${{ <ctx> }}\` or an \`||\` chain of them, where <ctx> is one of ${PER_PR_CONTEXTS.join(', ')} (a \`github.event.inputs.*\` fallback is allowed behind one of those)`;
 }
 
-/** `continue-on-error` is a problem in every form except a literal `false`. */
-function continueOnErrorProblem(container: Job, where: string): string | null {
+/**
+ * `continue-on-error` is a problem in every form except a literal `false`.
+ *
+ * EXPORTED (#695) rather than re-implemented: the inversion is the whole point.
+ * A guard that bans the literal `true` is defeated by `'true'` and by
+ * `${{ true }}` — both of which this repo has already written down as the known
+ * evasion (`tests/ci-concurrency-group.test.ts`,
+ * `tests/bun-exec-alpine-image-ci.test.ts`). Asking "is it literally `false`?"
+ * is the only form that fails closed, and there must be exactly one
+ * implementation of it.
+ */
+export function continueOnErrorProblem(container: Job, where: string): string | null {
   if (!('continue-on-error' in container)) return null;
   const value = container['continue-on-error'];
   if (value === false) return null;
