@@ -63,8 +63,16 @@ describe('blankNonCode treats a leading shebang as non-code', () => {
   });
 
   it('only a LEADING `#!` is special — a `#` elsewhere is left to the tokenizer', () => {
-    // Narrow by construction: the skip must not become "ignore any line starting
-    // with #", which would blank a real line of code containing a private field.
+    // Narrow by construction, in the direction the guard can actually be
+    // widened: the test for the skip is `src.startsWith('#!')`, so the mutation
+    // to defend against is dropping the `!` — NOT moving the `#` down a line.
+    // A `#` behind indentation on line 2 never reaches `startsWith` at all, so
+    // the class fixture below passes under `startsWith('#')` too; only a `#`
+    // at OFFSET 0 that is not a shebang discriminates the two.
+    expect(blankNonCode('#n = 1;\nconst usr = 2;\n')).toBe('#n = 1;\nconst usr = 2;\n');
+
+    // Kept for what it does assert: the tokenizer proper leaves a private
+    // field alone, independently of the shebang skip.
     const src = ['class A {', '  #n = 1;', '}'].join('\n');
     expect(blankNonCode(src)).toBe(src);
   });

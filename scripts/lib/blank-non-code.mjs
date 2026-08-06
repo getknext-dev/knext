@@ -108,6 +108,13 @@ export function blankNonCode(src) {
   // its third caller. Each reuse widens the file set it runs against, which is
   // how #665's "no regex with an odd quote count exists today" caveat became a
   // live defect in #682.
+  //
+  // Positional by design, and one consequence is recorded rather than fixed: a
+  // UTF-8 BOM before the `#!` defeats this skip (`'﻿#!/usr/bin/env node'`
+  // still yields `#!/   /bin/env node`). Left alone because the guard in
+  // `tests/blank-non-code.test.ts` filters the real corpus with the same
+  // `startsWith('#!')`, so fix and test stay CONSISTENT, and no file in the tree
+  // has one. Strip the BOM here if that ever stops being true.
   if (src.startsWith('#!')) {
     const nl = src.indexOf('\n');
     i = nl === -1 ? src.length : nl;

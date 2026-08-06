@@ -240,7 +240,10 @@ describe('blankNonCode is defined in exactly one file', () => {
     // widening a regex, and widening the regex by name shape instead
     // (blank|strip|mask + noncode|comment|literal) reds on `maskLiterals` and on
     // five unrelated `stripComments` helpers — i.e. it would need an allowlist,
-    // which is the enumeration this scan exists to avoid.
+    // which is the enumeration this scan exists to avoid. Tracked as #689, which
+    // also records that `maskLiterals` still carries the shebang bug #684 fixed
+    // here — so the residual is "a second blanker WITH THE SAME OPEN BUG", not
+    // merely a second blanker.
     const roots = [join(REPO_ROOT, 'tests'), join(REPO_ROOT, 'scripts')];
     const files: string[] = [];
     const walk = (dir: string) => {

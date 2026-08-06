@@ -67,6 +67,15 @@ const VARIANTS = new Set(['broad', 'sourcey', 'read']);
  * of the block and the scan reports a MISS for a reason that has nothing to do
  * with the heuristic being measured. A false negative arrived at by accident is
  * still a false measurement.
+ *
+ * KNOWN BUG, deliberately not fixed here: this carries the identical shebang
+ * defect `scripts/lib/blank-non-code.mjs` was fixed for in #684 — `!` is in
+ * `regexAllowedAfter` above, so `maskLiterals('#!/usr/bin/env node\n…')` masks
+ * `usr` as a regex literal and yields `#!/   /bin/env node`. Harmless today (this
+ * is an advisory reporter, it always exits 0, no workflow runs it, and the mangle
+ * introduces no bracket imbalance so the paren heuristic is unaffected) — but it
+ * is a SECOND blanker with the SAME open bug, not merely a second blanker.
+ * Consolidating the two, and fixing this, is #689.
  */
 export function maskLiterals(source) {
   const out = source.split('');
