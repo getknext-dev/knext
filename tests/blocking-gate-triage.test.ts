@@ -21,10 +21,12 @@ import {
  * exactly one problem — "the `pull_request` trigger carries a `paths` filter" —
  * NOT a missing trigger.
  *
- * The exemption itself still stands: a deliberately paths-scoped gate is not an
- * unconditional PR gate. What did not stand was the RECORDED REASON, and a wrong
- * reason in a self-reported exemption list is precisely the silent-exemption
- * shape `workflow.md` warns about.
+ * That exemption is now GONE (#677): the guard is converted, using the audit's
+ * `allowPathsFilter` opt-in, so the list is one entry shorter and the floors
+ * below moved with it. What the episode established is why the list is data at
+ * all — a wrong reason in a self-reported exemption list is precisely the
+ * silent-exemption shape `workflow.md` warns about, and it survived two rounds
+ * of being read rather than checked.
  *
  * Correcting only the entry the review named would be this repo's own
  * enumerate-rather-than-scan defect, one level up. So the trigger half of EVERY
@@ -54,8 +56,14 @@ describe('the unconverted-guard triage checks itself', () => {
   it('is non-vacuous: it has entries, and both halves are represented', () => {
     // Without this, deleting the list would make every `it.each` below pass by
     // iterating nothing.
-    expect(UNCONVERTED_GUARD_TRIAGE.length).toBeGreaterThanOrEqual(6);
-    expect(triggerEntries.length).toBeGreaterThanOrEqual(4);
+    // The floors moved with #677: the `paths-scoped-pull-request` entry left
+    // the list when its guard was converted (5 entries, 3 of them trigger-half),
+    // and a floor left at the old number would have been the "edit the guard to
+    // get green" move this repo keeps having to unwind. They are still floors
+    // and not equalities — an entry LEAVING is progress; the list silently
+    // emptying is not.
+    expect(UNCONVERTED_GUARD_TRIAGE.length).toBeGreaterThanOrEqual(5);
+    expect(triggerEntries.length).toBeGreaterThanOrEqual(3);
     expect(
       UNCONVERTED_GUARD_TRIAGE.filter((e) => e.category === 'opposite-claim').length,
     ).toBeGreaterThanOrEqual(2);

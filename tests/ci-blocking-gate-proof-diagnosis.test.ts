@@ -213,11 +213,14 @@ describe('declaredTestTitles is satisfied only by a real declaration', () => {
 
   it.each(GATES)('$spec still declares the selected assertion under the code-only view', ({
     spec,
+    testName,
   }) => {
-    // The blanking tokenizer must not eat a REAL declaration in any of the five
-    // specs the proof selects — a false negative here would red the prover.
+    // The blanking tokenizer must not eat a REAL declaration in any of the specs
+    // the proof selects — a false negative here would red the prover. Selected
+    // per gate since #677: the paths-scoped image-pin gate declares a different
+    // name, because "runs unconditionally on a PR" is not what it proves.
     const titles = declaredTestTitles(readFileSync(resolve(REPO_ROOT, spec), 'utf8'));
-    expect(titles.some((t) => t.includes(GATE_TEST_NAME))).toBe(true);
+    expect(titles.some((t) => t.includes(testName))).toBe(true);
   });
 });
 
