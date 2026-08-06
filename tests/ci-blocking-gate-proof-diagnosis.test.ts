@@ -235,18 +235,21 @@ describe('blankNonCode is defined in exactly one file', () => {
     // NAME scan. Only the copy-paste path — `blankNonCode`, `blankNonCode2` —
     // is caught; a renamed copy is not.
     //
-    // That residual is not hypothetical, which is why the describe block can no
-    // longer claim "there is ONE non-code blanker in the tree": that claim is
-    // already FALSE. `scripts/scan-half-scan-candidates.mjs` exports
-    // `maskLiterals`, an independent length-preserving, regex-aware blanker with
-    // its own contract. Closing that means consolidating two tokenizers, not
-    // widening a regex, and widening the regex by name shape instead
-    // (blank|strip|mask + noncode|comment|literal) reds on `maskLiterals` and on
-    // five unrelated `stripComments` helpers — i.e. it would need an allowlist,
-    // which is the enumeration this scan exists to avoid. Tracked as #689, which
-    // also records that `maskLiterals` still carries the shebang bug #684 fixed
-    // here — so the residual is "a second blanker WITH THE SAME OPEN BUG", not
-    // merely a second blanker.
+    // The second blanker this comment used to name is GONE (#689):
+    // `scripts/scan-half-scan-candidates.mjs` exported `maskLiterals`, an
+    // independent length-preserving, regex-aware blanker carrying the same
+    // shebang bug #684 fixed here plus one of its own, and it now imports
+    // `blankNonCode` instead. Measured before deleting it, over `tests/` +
+    // `scripts/`: the reporter's findings are unchanged in its default `read`
+    // variant (80) and in `sourcey` (352); `broad` gains exactly one, a block
+    // `maskLiterals` had been losing. So the describe block's title is now true
+    // of every blanker this scan can see.
+    //
+    // What it still cannot see is the RENAMED copy above. Widening the regex by
+    // name shape (blank|strip|mask + noncode|comment|literal) was measured and
+    // reds on five unrelated `stripComments` helpers — i.e. it would need an
+    // allowlist, which is the enumeration this scan exists to avoid. That
+    // residual is recorded, not closed.
     const roots = [join(REPO_ROOT, 'tests'), join(REPO_ROOT, 'scripts')];
     const files: string[] = [];
     const walk = (dir: string) => {
