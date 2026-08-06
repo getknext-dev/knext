@@ -39,7 +39,7 @@
  * Everything here runs against an INJECTED transport, so the suite stays offline
  * and deterministic. The live resolution happens in the nightly, at run time.
  */
-import { readFileSync } from 'node:fs';
+import { type PathLike, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { parse } from 'yaml';
@@ -434,7 +434,10 @@ describe('findEnvCredentialLeaks — a pattern, not a list of three literals', (
 });
 
 describe('findFileCredentialLeaks — the on-disk auth stores', () => {
-  const exists = (paths: string[]) => (p: string) => paths.includes(p);
+  // Typed `PathLike`, not `string`: the real default is `existsSync`, so a
+  // narrower double is not a substitute for it and the root typecheck gate says
+  // so (TS2322 — `Buffer` is not assignable to `string`).
+  const exists = (paths: string[]) => (p: PathLike) => paths.includes(String(p));
 
   it.each([
     ['/home/runner/.docker/config.json'],
