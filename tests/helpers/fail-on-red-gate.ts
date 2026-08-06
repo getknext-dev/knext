@@ -233,6 +233,18 @@ const countAll = (line: string, res: readonly RegExp[]): number =>
  * Comments are skipped, and the caller is expected to have blanked the embedded
  * `node -e '…'` program by offset — otherwise the JS braces inside it would be
  * counted as shell blocks.
+ *
+ * HONEST SCOPE, and the DIRECTION stated explicitly because this file got that
+ * backwards once already (round 9): an unbalanced `(` or `{` inside a QUOTED
+ * string is counted as an opener that never closes. Measured — `echo "a smiley
+ * ( in a string"` nets +1 — so two such lines before the invocation would report
+ * a nesting that is not there.
+ *
+ * That is **fail-CLOSED**: the only reachable error is a spurious finding, never
+ * a missed disarm. It is the opposite direction from #702, whose concern was
+ * fail-OPEN (a real `|| true` hidden by mispaired quotes), and conflating the two
+ * is how a limitation gets dismissed as already-known. Not live: the gate's
+ * prelude has no unbalanced bracket in a string, and the baseline measures 0.
  */
 export function shellNestingDepthAt(lines: readonly string[], index: number): number {
   let depth = 0;
