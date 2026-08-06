@@ -1,6 +1,73 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { summarize } from '../scripts/e2e-summary.mjs';
+import {
+  COMMAND_POSITION_CHARS,
+  COMMAND_POSITION_KEYWORDS,
+  HATCH_SHAPES,
+  UNEXERCISED_TOKENS,
+} from '../scripts/lib/shell-command-position.mjs';
+import {
+  auditFailOnRedGateTeeth,
+  METADATA_VARIANTS,
+  shardSummary,
+  untruncatableSummary,
+} from './helpers/fail-on-red-gate.js';
+
+/**
+ * Runner logs in the shape `scripts/e2e-summary.mjs` parses, used ONLY to make
+ * it emit a real summary whose key set the #700 probes are compared against.
+ * De-timestamped slices of the same marker vocabulary the live nightly prints.
+ */
+const GREEN_RUNNER_LOG = `
+total: 2
+test/e2e/app-dir/a/a.test.ts finished on retry 0/2 in 12.0s
+test/e2e/app-dir/b/b.test.ts finished on retry 0/2 in 9.0s
+`;
+const RED_RUNNER_LOG = `
+total: 2
+test/e2e/app-dir/a/a.test.ts finished on retry 0/2 in 12.0s
+❌ test/e2e/app-dir/b/b.test.ts output:
+FAIL Turbopack test/e2e/app-dir/b/b.test.ts (14.0 s)
+    ✕ renders (11 ms)
+end of test/e2e/app-dir/b/b.test.ts output
+test/e2e/app-dir/b/b.test.ts failed to pass within 2 retries
+`;
+/**
+ * A PHANTOM abort: run-tests.js says the file failed, but its output group
+ * carries jest's `No tests found` — so `e2e-summary.mjs` counts it as `notRun`,
+ * not `failed`, and emits `notRunFiles`. Without this log the emitter's fourth
+ * conditional spread was never exercised, and `notRunFiles` — which four of the
+ * polarity probes produce — was never validated against reality at all.
+ */
+const NOT_RUN_RUNNER_LOG = `
+total: 2
+test/e2e/app-dir/a/a.test.ts finished on retry 0/2 in 12.0s
+❌ test/e2e/app-dir/b/b.test.ts output:
+No tests found, exiting with code 1
+end of test/e2e/app-dir/b/b.test.ts output
+test/e2e/app-dir/b/b.test.ts failed to pass within 2 retries
+`;
+/** No `total: N` header — truncation detection is disabled, so BOTH keys drop. */
+const NO_TOTAL_RUNNER_LOG = `
+test/e2e/app-dir/a/a.test.ts finished on retry 0/2 in 12.0s
+test/e2e/app-dir/b/b.test.ts finished on retry 0/2 in 9.0s
+`;
+const SUMMARIZE_META = { ref: 'v16.2.1', shard: '3/16', excluded: 2, runtime: 'node' };
+/**
+ * The BUN lane's meta. `runtimeVersion` is the emitter's fifth conditional
+ * spread and the node lane omits it deliberately, so without a bun probe every
+ * verdict this file produced was a node-lane verdict — for a step that guards
+ * both lanes. That is precisely why `s.runtime === "node" && …` was invisible.
+ */
+const BUN_SUMMARIZE_META = {
+  ref: 'v16.3.0-canary.7',
+  shard: '11/8',
+  excluded: 0,
+  runtime: 'bun',
+  runtimeVersion: '1.3.14',
+};
 
 /**
  * GUARD TEST for .github/workflows/test-e2e-deploy.yml (#89 / ADR-0007 A3-2).
@@ -18,9 +85,14 @@ import { describe, expect, it } from 'vitest';
  * version must match the repo's pinned pnpm (`packageManager` in package.json)
  * so the two never drift.
  *
- * Implementation note: this scans the workflow YAML as text rather than parsing
- * it with a YAML library, so the test adds no new runtime dependency (the repo
- * has no direct `yaml` dep) and stays trivially portable across CI runners.
+ * Implementation note: most of this file scans the workflow YAML as TEXT, which
+ * was originally justified by the repo having no direct `yaml` dependency. That
+ * justification has expired — `yaml` is a root devDependency and eight sibling
+ * specs parse with it — and #700 is what the text approach costs: one regex over
+ * a step block whose needle legitimately recurred stayed green while a tooth was
+ * removed. New claims about the SHAPE of a step are therefore made against the
+ * parsed document (`tests/helpers/fail-on-red-gate.ts`); the text scans that
+ * remain are presence checks, where a substring is the whole claim.
  */
 
 const REPO_ROOT = resolve(import.meta.dirname, '..');
@@ -2145,7 +2217,13 @@ describe('compat-suite fail-on-red gate — revocation teeth (test-e2e-deploy.ym
     expect(/compat-suite-summary/.test(gate), 'gate must read the shard summary JSON').toBe(true);
     expect(/\bfailed\b/.test(gate), 'gate must check the failed count').toBe(true);
     expect(/\bnotRun\b/.test(gate), 'gate must check the notRun (phantom) count').toBe(true);
-    expect(/exit 1|process\.exit\(1\)/.test(gate), 'gate must fail the job on red').toBe(true);
+    // #700: the `exit 1|process.exit(1)` assertion that used to sit here was
+    // ONE regex over the WHOLE step block, and that step carries THREE
+    // independent teeth — so deleting any one left the OR satisfied by the
+    // other two and the whole suite stayed green. The claim now lives in the
+    // per-branch structural guards below, one assertion per tooth. Everything
+    // in THIS test is a presence check on the step's inputs, which is a
+    // different claim and stays.
     expect(
       /missing|! -f|-f\s+"?\$\{?SUMMARY/.test(gate),
       'a missing summary is NOT green — the gate must fail on it',
@@ -2170,6 +2248,290 @@ describe('compat-suite fail-on-red gate — revocation teeth (test-e2e-deploy.ym
       /expectedTotal/.test(gate),
       'gate must surface expectedTotal so the red message names how many results are missing',
     ).toBe(true);
+  });
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // #700 — the three teeth, judged PER BRANCH.
+  //
+  // The step above carries three independent exits (missing summary, failed>0
+  // / notRun>0, truncated) and the guard protecting all three was one regex
+  // over the whole block. RE-MEASURED on this tree, not quoted from the issue:
+  // deleting `process.exit(1)` from the `failed > 0` branch left the assertion
+  // that owned the claim GREEN, and every other spec green with it (61 files,
+  // 1446 passed). The step kept its name, kept `if: always()`, still printed
+  // its `::error::` lines — and exited 0. A night with real test failures would
+  // have concluded SUCCESS and counted toward the 14-night v1.0 window in
+  // docs/compat/window-node-lane.md.
+  //
+  // One `it()` per tooth, each reading only its OWN branch out of the parsed
+  // step (shell `if`/`fi` walk for the first, a real TypeScript AST of the
+  // embedded `node -e` program for the other two). Deleting any one tooth reds
+  // exactly one of these and the message names that branch. Proved in both
+  // directions by scripts/mutation-prove-compat-fail-on-red-teeth.mjs: each
+  // disarm reds its own assertion AND leaves the other two green.
+  //
+  // Each tooth is judged on PRESENCE, VALUE and POLARITY. Polarity was the
+  // round-2 finding and it is the one worth naming here: this file's first
+  // version asked whether a `failed > 0` comparison APPEARED in the condition,
+  // never whether the branch FIRES on `failed > 0`. `!( … )`, a one-character
+  // `||` → `&&`, and a dead conjunct all walked past it with every assertion
+  // green — and the first of those inverts the gate outright, failing green
+  // shards and passing red ones. The conditions are now EVALUATED against
+  // synthetic summaries instead of pattern-matched.
+  //
+  // Round 3 went one level down again: an evaluation is only as good as what it
+  // is evaluated ON, so the FIXTURES became the contract. Probing three fields
+  // at 0 and 1 accepted `=== 1` — which is run 28552585087's own shape, eight
+  // failures — an upper bound `< 2`, and (because a real summary carries
+  // `shard`, `ref`, `passed`, `excluded`, `expectedTotal`) both a branch that
+  // can never fire and one that fires always. The probes are now complete,
+  // internally-consistent summaries of the shape scripts/e2e-summary.mjs emits.
+  //
+  // Round 4 closed the count CEILING; round 5 closed the last constant. Every
+  // field other than the counts was still pinned to one value, so the same dead
+  // conjunct keyed on the CONSTANT instead of on `undefined` —
+  // `s.ref === "v16.2.1" && …`, `s.runtime === "node" && …` — survived, and two
+  // of those fail open on routine changes: the pinned Next.js ref is bumped
+  // every cycle, and the same `deploy-tests` job runs the Bun weekly lane. The
+  // fix is a PROPERTY, not more values: every case is evaluated under two
+  // metadata assignments and the verdict must be IDENTICAL. That takes the
+  // constant-ceiling family with it, since a `< 46` bound fires on a 45-test
+  // shard and not on a 90-test one.
+  // ───────────────────────────────────────────────────────────────────────────
+  const teeth = auditFailOnRedGateTeeth(WORKFLOW_PATH);
+
+  it('#700 the teeth audit is NON-VACUOUS — it located all three branches structurally', () => {
+    // First, because every per-tooth assertion below would pass over an empty
+    // finding list if the parse had matched nothing at all.
+    expect(teeth.branchesFound.slice().sort(), 'the audit did not locate all three teeth').toEqual(
+      ['failed-or-not-run', 'missing-summary', 'truncated'].sort(),
+    );
+    expect(teeth.shellIfBlocks, 'no shell `if` block was parsed out of the gate').toBeGreaterThan(
+      0,
+    );
+    expect(
+      teeth.jsIfStatements,
+      'no `if` statement was parsed out of the node program',
+    ).toBeGreaterThan(1);
+  });
+
+  it('#700 the probe summaries have the SAME KEY SET as the real emitter', () => {
+    // The round-4 finding, closed as a STANDING guard rather than as four more
+    // mutation rows. The probes are the oracle every polarity verdict rests on,
+    // so they have to agree with `scripts/e2e-summary.mjs` — and they disagreed
+    // in BOTH directions before this: too few keys (no `shard`/`passed`, so
+    // `s.shard === undefined && …` and `… || s.passed > 0` both walked past),
+    // then two keys the emitter OMITS on a green shard (`failures: []`,
+    // `notRunFiles: []`, which hid a condition that throws `TypeError` on every
+    // green artifact). Comparing key SETS against the real function closes the
+    // class; pinning spellings would only have closed the four I thought of.
+    //
+    // FIVE shapes, not three. The emitter has four INDEPENDENT conditional
+    // spreads (`runtimeVersion`, `expectedTotal`+`truncated`, `failures`,
+    // `notRunFiles`), and the first version of this guard reached three of the
+    // reachable combinations — leaving `notRunFiles` unvalidated even though
+    // four polarity probes produce it, and `runtimeVersion` with no probe at
+    // all. The second gap is the load-bearing one: with no bun probe, every
+    // verdict this file produced was a NODE-LANE verdict for a step that guards
+    // both lanes, which is exactly why `s.runtime === "node" && …` was
+    // invisible.
+    const emitted = {
+      green: summarize(GREEN_RUNNER_LOG, SUMMARIZE_META),
+      red: summarize(RED_RUNNER_LOG, SUMMARIZE_META),
+      notRun: summarize(NOT_RUN_RUNNER_LOG, SUMMARIZE_META),
+      noTotal: summarize(NO_TOTAL_RUNNER_LOG, SUMMARIZE_META),
+      bun: summarize(GREEN_RUNNER_LOG, BUN_SUMMARIZE_META),
+    } as unknown as Record<string, Record<string, unknown>>;
+
+    // Non-vacuity: the emitter must actually have produced the five distinct
+    // states claimed, or identical key sets would make the comparison
+    // meaningless. Each assertion names the spread it is proving reachable.
+    const g = emitted.green as Record<string, unknown>;
+    expect([g.failed, g.notRun, g.truncated], 'green probe').toEqual([0, 0, false]);
+    expect(emitted.red?.failed, 'the red log must produce `failures`').toBe(1);
+    expect(emitted.notRun?.notRun, 'the phantom log must produce `notRunFiles`').toBe(1);
+    expect(emitted.notRun?.failed, 'a phantom abort is NOT a failure').toBe(0);
+    expect(emitted.noTotal?.expectedTotal, 'the no-total log must drop truncation').toBeUndefined();
+    expect(emitted.bun?.runtimeVersion, 'the bun meta must produce `runtimeVersion`').toBe(
+      '1.3.14',
+    );
+    expect(
+      new Set(
+        Object.keys(emitted).map((k) =>
+          Object.keys(emitted[k] ?? {})
+            .sort()
+            .join('|'),
+        ),
+      ).size,
+      'the five logs must produce five DISTINCT key sets, or this guard proves less than it claims',
+    ).toBe(5);
+
+    // Key set AND value shape. `Object.keys` alone accepts `expectedTotal: '45'`
+    // or `notRunFiles` as an array of objects — a probe that type-diverges from
+    // the emitter is the same class of lie as one that key-diverges.
+    const shape = (o: Record<string, unknown>) =>
+      Object.keys(o)
+        .sort()
+        .map((k) => {
+          const v = o[k];
+          return `${k}:${Array.isArray(v) ? `${typeof v[0]}[]` : typeof v}`;
+        });
+
+    const bunMeta = {
+      shard: '11/8',
+      ref: 'v16.3.0-canary.7',
+      runtime: 'bun',
+      excluded: 0,
+      expectedTotal: 45,
+      runtimeVersion: '1.3.14',
+    };
+    expect(shape(shardSummary()), 'clean-shard probe').toEqual(shape(emitted.green ?? {}));
+    expect(shape(shardSummary({ failed: 1 })), 'red-shard probe').toEqual(shape(emitted.red ?? {}));
+    expect(shape(shardSummary({ notRun: 1 })), 'phantom-abort probe').toEqual(
+      shape(emitted.notRun ?? {}),
+    );
+    expect(shape(untruncatableSummary()), 'no-expectedTotal probe').toEqual(
+      shape(emitted.noTotal ?? {}),
+    );
+    expect(shape(shardSummary({}, bunMeta)), 'bun-lane probe').toEqual(shape(emitted.bun ?? {}));
+  });
+
+  it('#700 no ESCAPE HATCH outside the audited branches can decide the verdict', () => {
+    // Every other #700 assertion judges a branch in ISOLATION, and three disarms
+    // broke that assumption — measured against the REAL step with a real red
+    // Bun-lane summary (8 failures, expectedTotal 45):
+    //
+    //   shell, in the prelude:  if [ "$KNEXT_RUNTIME" = "bun" ]; then exit 0; fi
+    //   JS, before the branch:  if (s.runtime !== "node") process.exit(0);
+    //   JS, around the branches: if (s.runtime === "node") { … }
+    //
+    //   baseline               exit=1, one red-shard ::error:: line
+    //   each of the three      exit=0, NO ::error:: line
+    //
+    // Under every one of them the whole `tests/` suite stayed byte-identical to
+    // baseline, `branchesFound` still reported all three teeth located, and
+    // `exitReachesStep` was empty. This is run 28552585087 through a third door,
+    // and the JS early-exit is arguably a MORE natural way to write "skip the
+    // gate on the other lane" than the conjunct that was already caught.
+    expect(teeth.escapeHatches, teeth.escapeHatches.join('\n')).toEqual([]);
+  });
+
+  it('#700 every COMMAND-POSITION token has a hatch shape that exercises it', () => {
+    // The round-9 finding, closed as a guard rather than as three more rows.
+    //
+    // The escape scan regressed three rounds running, and the 53-row table was
+    // green through all of it — because every escape row spelled a variation of
+    // ONE syntactic family. The head commit's class listed `(` but not `)` or
+    // `{`, so `case … bun) exit 0 ;;`, `&& { exit 0; }` and `skip() { exit 0; }`
+    // were all invisible, all three having been CAUGHT by both predecessors.
+    // The tell that it was accidental rather than scoped: `&& { echo skip;
+    // exit 0; }` WAS caught, because the `;` supplied the position.
+    //
+    // `.claude/rules/workflow.md` — prefer scanning to enumerating; an
+    // enumerated list is how the second one gets missed. Usually that names call
+    // sites. Here it names the mutation table, which was the thing supposed to
+    // be catching this. So: every token the regex recognises must be exercised
+    // by a hatch shape, or carry a written reason why no hatch can exist.
+    const exercised = new Set(HATCH_SHAPES.map((h: { token: string }) => h.token));
+    const tokens = [...COMMAND_POSITION_CHARS, ...COMMAND_POSITION_KEYWORDS];
+
+    // Non-vacuity first: an empty token list or an empty shape list would make
+    // every claim below pass over nothing.
+    expect(tokens.length, 'no command-position tokens declared').toBeGreaterThan(6);
+    expect(HATCH_SHAPES.length, 'no hatch shapes declared').toBeGreaterThan(6);
+    expect(exercised.has('^'), 'line start must be exercised').toBe(true);
+
+    const unjustified = tokens.filter(
+      (t: string) => !exercised.has(t) && !(t in UNEXERCISED_TOKENS),
+    );
+    expect(
+      unjustified,
+      `command-position token(s) ${unjustified.map((t: string) => `\`${t}\``).join(', ')} widen the match with nothing exercising them. Add a hatch shape, or an entry in UNEXERCISED_TOKENS saying why no valid shell can put a command there — silently widening is how three rounds of this axis regressed`,
+    ).toEqual([]);
+
+    // And the reverse: an exemption for a token that IS exercised is stale.
+    for (const token of Object.keys(UNEXERCISED_TOKENS)) {
+      expect(
+        exercised.has(token),
+        `\`${token}\` is listed in UNEXERCISED_TOKENS but a hatch shape exercises it — delete the stale exemption`,
+      ).toBe(false);
+      expect(tokens, `\`${token}\` is exempted but is not a token at all`).toContain(token);
+    }
+
+    // ── SHAPES -> TOKENS: the direction the first version of this guard missed.
+    //
+    // Everything above walks tokens -> shapes, so it reds when the class is
+    // WIDENED without a hatch. `HATCH_SHAPES` is a hand-written literal, not a
+    // derivation of the class, so NARROWING it left a shape orphaned and
+    // silently unused — measured fully green, while a `case` arm disarmed the
+    // real step (exit 0, zero `::error::` lines).
+    //
+    // And narrowing is not a contrived edit: it is literally the previous
+    // commit. `9dafb64` shipped `[;&|(]`, a class missing `)`, `{` and `}`.
+    // This guard was written to prevent that regression and only detected its
+    // opposite — a check covering the direction we came FROM rather than the
+    // direction we are going, which is the FOURTH instance of that shape in
+    // this PR. "Cannot drift" only held for additions until this loop existed.
+    for (const shape of HATCH_SHAPES) {
+      // `^` is line start, not a member of the character class.
+      if (shape.token === '^') continue;
+      expect(
+        tokens,
+        `hatch shape "${shape.label}" exercises \`${shape.token}\`, which is no longer a command-position token — either the class was narrowed (and the scan now misses that shape's whole family) or the shape is dead. Neither is silent.`,
+      ).toContain(shape.token);
+    }
+  });
+
+  it('#700 the polarity probes cover BOTH runtime lanes', () => {
+    // The step guards the node nightly and the Bun weekly through one
+    // `deploy-tests` job (`KNEXT_RUNTIME`), so a probe set that only ever
+    // describes one lane cannot notice a condition keyed on the other. Asserted
+    // on the exported variants rather than inside the audit, so it stays true
+    // for anyone who adds a case.
+    expect(METADATA_VARIANTS.length, 'a single variant cannot prove invariance').toBeGreaterThan(1);
+    expect(METADATA_VARIANTS.map((m) => m.runtime).sort()).toEqual(['bun', 'node']);
+    // Every field must actually DIFFER across the variants, or the invariance
+    // check is silently blind to the ones that do not.
+    // DERIVED, not enumerated. A hardcoded list is complete today and silently
+    // incomplete the day the emitter gains a metadata field: `shape()` would
+    // force it into `shardSummary`, and if both lanes happened to carry the same
+    // value the invariance property would be blind to it with nothing red.
+    const metadataFields = [...new Set(METADATA_VARIANTS.flatMap((m) => Object.keys(m)))].filter(
+      (k) => k !== 'runtimeVersion',
+    ) as Array<keyof (typeof METADATA_VARIANTS)[number]>;
+    expect(metadataFields.length, 'no metadata fields discovered').toBeGreaterThan(4);
+    for (const key of metadataFields) {
+      expect(
+        new Set(METADATA_VARIANTS.map((m) => m[key])).size,
+        `\`${key}\` is identical across variants — invariance cannot be judged on it`,
+      ).toBe(METADATA_VARIANTS.length);
+    }
+    // `runtimeVersion` differs by PRESENCE, which is the emitter's own contract.
+    expect(METADATA_VARIANTS.filter((m) => m.runtimeVersion === undefined).length).toBe(1);
+  });
+
+  it('#700 tooth 1/3 — a MISSING summary has its OWN failing exit', () => {
+    const problems = teeth.teeth['missing-summary'];
+    expect(problems, problems.join('\n')).toEqual([]);
+  });
+
+  it('#700 tooth 2/3 — failed>0 / notRun>0 has its OWN failing exit', () => {
+    const problems = teeth.teeth['failed-or-not-run'];
+    expect(problems, problems.join('\n')).toEqual([]);
+  });
+
+  it('#700 tooth 3/3 — a TRUNCATED summary has its OWN failing exit', () => {
+    const problems = teeth.teeth.truncated;
+    expect(problems, problems.join('\n')).toEqual([]);
+  });
+
+  it('#700 the gate script’s exit status REACHES the step (nothing swallows it)', () => {
+    // Three teeth that each exit 1 are worth nothing if the command carrying
+    // them is `|| true`'d, piped, or run with errexit off. That is not
+    // hypothetical here — it is exactly how the shard RUN step one level above
+    // lost its exit, which is the defect this whole gate exists to compensate
+    // for.
+    expect(teeth.exitReachesStep, teeth.exitReachesStep.join('\n')).toEqual([]);
   });
 
   it('the run step comment no longer claims "matrix row stays ❌ regardless" (stale pre-graduation contract)', () => {
