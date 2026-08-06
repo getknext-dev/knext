@@ -36,10 +36,36 @@ import { blankNonCode } from './blank-non-code.mjs';
  */
 export const GATE_TEST_NAME = 'runs unconditionally on a PR and its failure fails the run';
 
+/** The workflow every gate lived in until #677 added one that does not. */
+export const CI_YML = '.github/workflows/ci.yml';
+
 /**
- * Every ci.yml job whose guard claims it is a blocking gate, and the spec that
- * makes the claim. Adding a converted guard here is what keeps this proof from
+ * A ci.yml job that CAN skip, used for the `needs:` disarm.
+ *
+ * `docs-drift-reminder` carries `if: github.event_name == 'pull_request'`, so it
+ * is skipped on a push — and a job that `needs:` a skipped job is itself
+ * skipped, and a skipped job does not fail the run.
+ */
+const CI_SKIPPABLE_JOB = 'docs-drift-reminder';
+
+/**
+ * Every job whose guard claims it is a blocking gate, and the spec that makes
+ * the claim. Adding a converted guard here is what keeps this proof from
  * describing only the jobs someone remembered.
+ *
+ * Per-gate fields, all defaulted for the ci.yml majority:
+ *   - `workflow`   — repo-relative path. Defaults to ci.yml.
+ *   - `testName`   — the assertion the proof selects with `vitest -t`. Defaults
+ *     to `GATE_TEST_NAME`. It is NOT one shared string any more, and that is a
+ *     correctness point rather than a convenience: the image-pin gate is
+ *     deliberately `paths:`-scoped, so naming its assertion "runs
+ *     unconditionally on a PR" to match the others would make the proof's own
+ *     selector a false claim about what is being proved.
+ *   - `needsDisarm` — the `needs:` disarm's injected text, plus any job
+ *     definition it needs. `image-pin-resolution-nightly.yml` has exactly two
+ *     jobs and the other one `needs:` the gate, so pointing the gate at it would
+ *     be a CYCLE — not a valid workflow, and a proof resting on an invalid
+ *     mutation proves nothing. It therefore injects its own skippable job.
  */
 export const GATES = [
   { jobId: 'compile-cache-bun-probe', spec: 'tests/compile-cache-health-bun-ci.test.ts' },
@@ -47,7 +73,23 @@ export const GATES = [
   { jobId: 'lint-and-test', spec: 'tests/mutation-residue-scan.test.ts' },
   { jobId: 'bun-exec-hardcap', spec: 'tests/bun-exec-hardcap-ci.test.ts' },
   { jobId: 'bun-exec-alpine-image', spec: 'tests/bun-exec-alpine-image-ci.test.ts' },
-];
+  {
+    jobId: 'resolve-image-pins',
+    spec: 'tests/operator-image-pin-resolution.test.ts',
+    workflow: '.github/workflows/image-pin-resolution-nightly.yml',
+    testName: 'runs on every PR that can introduce a pin and its failure fails the run',
+    needsDisarm: {
+      define:
+        "  proof-skippable:\n    if: github.event_name == 'schedule'\n    runs-on: ubuntu-latest\n    steps:\n      - run: 'true'\n",
+      inject: '    needs: proof-skippable',
+    },
+  },
+].map((gate) => ({
+  workflow: CI_YML,
+  testName: GATE_TEST_NAME,
+  needsDisarm: { define: '', inject: `    needs: ${CI_SKIPPABLE_JOB}` },
+  ...gate,
+}));
 
 /**
  * Locate a test runner that can actually start, as `{ command, args }`.
@@ -219,7 +261,7 @@ function observations(repoRoot, spec, result) {
  *
  * @returns {{ cause: 'spec-not-collected' | 'runner-never-started' | 'assertion-not-declared' | 'undetermined', detail: string[] }}
  */
-export function diagnoseNothingRan(repoRoot, spec, result) {
+export function diagnoseNothingRan(repoRoot, spec, result, name = GATE_TEST_NAME) {
   const specPath = resolve(repoRoot, spec);
   const detail = observations(repoRoot, spec, result);
 
@@ -231,7 +273,7 @@ export function diagnoseNothingRan(repoRoot, spec, result) {
   if (!result.launched) return { cause: 'runner-never-started', detail };
   if (result.collected) {
     const titles = declaredTestTitles(readFileSync(specPath, 'utf8'));
-    if (!titles.some((title) => title.includes(GATE_TEST_NAME))) {
+    if (!titles.some((title) => title.includes(name))) {
       return { cause: 'assertion-not-declared', detail };
     }
   }
@@ -250,9 +292,9 @@ export function diagnoseNothingRan(repoRoot, spec, result) {
  * same shape, so the fix is structural: a cause is claimed only on positive
  * evidence, and "I don't know" is a legal answer (#680).
  */
-export function explainNothingRan(repoRoot, spec, result) {
+export function explainNothingRan(repoRoot, spec, result, name = GATE_TEST_NAME) {
   const specPath = resolve(repoRoot, spec);
-  const { cause, detail } = diagnoseNothingRan(repoRoot, spec, result);
+  const { cause, detail } = diagnoseNothingRan(repoRoot, spec, result, name);
 
   if (cause === 'spec-not-collected') {
     return [
@@ -274,10 +316,10 @@ export function explainNothingRan(repoRoot, spec, result) {
     const titles = declaredTestTitles(readFileSync(specPath, 'utf8'));
     return [
       `FATAL: ${spec} declares no test whose name contains the one this proof selects.`,
-      `  expected (substring): ${JSON.stringify(GATE_TEST_NAME)}`,
+      `  expected (substring): ${JSON.stringify(name)}`,
       `  found in ${spec}:`,
       ...titles.map((t) => `    - ${JSON.stringify(t)}`),
-      `  fix: restore the name, or update GATE_TEST_NAME in scripts/lib/ci-blocking-gate-proof.mjs`,
+      `  fix: restore the name, or update this gate's \`testName\` (GATE_TEST_NAME by default) in scripts/lib/ci-blocking-gate-proof.mjs`,
       ...detail,
     ].join('\n');
   }

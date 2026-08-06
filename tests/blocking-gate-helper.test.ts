@@ -31,9 +31,19 @@ let seq = 0;
 
 /** Audit a synthetic workflow's `gate` job. */
 function audit(yaml: string) {
+  return auditWith(yaml, {});
+}
+
+/** The same, with the audit's options — used by the `allowPathsFilter` block. */
+function auditWith(yaml: string, options: { allowPathsFilter?: boolean }) {
   const path = join(TMP, `wf-${seq++}.yml`);
   writeFileSync(path, yaml);
-  return auditBlockingGate({ workflowPath: path, jobId: 'gate', gateCommand: /run-the-gate/ });
+  return auditBlockingGate({
+    workflowPath: path,
+    jobId: 'gate',
+    gateCommand: /run-the-gate/,
+    ...options,
+  });
 }
 
 /** Every fixture below is this, plus exactly one edit. */
@@ -447,6 +457,75 @@ jobs:
 
     it('NEGATIVE CONTROL: a bare `pull_request:` with no filters is permitted', () => {
       expect(audit(CLEAN).problems).toEqual([]);
+    });
+  });
+
+  /**
+   * `allowPathsFilter` — the ONE filter a caller may opt into (#677).
+   *
+   * A deliberately `paths:`-scoped gate is a real category:
+   * `image-pin-resolution-nightly.yml` puts a third-party registry call behind
+   * the diffs that can actually introduce a pin, precisely so every other merge
+   * does not depend on Docker Hub. Without this option that guard could not use
+   * the audit at all, and it stayed on the evadable TEXT form for two rounds
+   * because of it.
+   *
+   * The option is narrow BY TEST, not by comment: it exempts `paths` and nothing
+   * else, it rejects an EMPTY `paths` list (an allowlist matching nothing is a
+   * gate that never runs — strictly more than the un-optioned audit checks), and
+   * it touches only the trigger half.
+   */
+  describe('`allowPathsFilter` — an opt-in for a deliberately paths-scoped gate (#677)', () => {
+    const PATHS = "  pull_request:\n    paths: ['src/**']\n";
+
+    it('permits the `paths:` filter, and REPORTS what it permitted', () => {
+      const a = auditWith(CLEAN.replace('  pull_request:\n', PATHS), { allowPathsFilter: true });
+      expect(a.problems, a.problems.join('\n')).toEqual([]);
+      // Non-vacuity: the caller must be able to assert the filter's CONTENTS
+      // cover what the gate protects, so the audit hands them back.
+      expect(a.pullRequestPaths).toEqual(['src/**']);
+    });
+
+    it('is OFF by default — the same workflow still reports the filter', () => {
+      const a = audit(CLEAN.replace('  pull_request:\n', PATHS));
+      expect(a.problems.join('\n')).toMatch(/`paths` filter/);
+    });
+
+    it('rejects an EMPTY `paths:` list — an allowlist matching nothing never runs', () => {
+      const a = auditWith(CLEAN.replace('  pull_request:\n', '  pull_request:\n    paths: []\n'), {
+        allowPathsFilter: true,
+      });
+      expect(a.problems.join('\n')).toMatch(/`paths` filter is empty/);
+    });
+
+    it('does NOT extend to `paths-ignore:` — an exclusion is not the same claim', () => {
+      const a = auditWith(
+        CLEAN.replace('  pull_request:\n', "  pull_request:\n    paths-ignore: ['docs/**']\n"),
+        { allowPathsFilter: true },
+      );
+      expect(a.problems.join('\n')).toMatch(/`paths-ignore` filter/);
+    });
+
+    it('does NOT launder a `branches:` filter riding in beside the `paths:` one', () => {
+      const a = auditWith(CLEAN.replace('  pull_request:\n', `${PATHS}    branches: [main]\n`), {
+        allowPathsFilter: true,
+      });
+      expect(a.problems.join('\n')).toMatch(/`branches` filter/);
+    });
+
+    it('does NOT touch the job half: a job-level `if:` still reds', () => {
+      const a = auditWith(
+        CLEAN.replace('  pull_request:\n', PATHS).replace(
+          '    name: Gate\n',
+          '    name: Gate\n    if: false\n',
+        ),
+        { allowPathsFilter: true },
+      );
+      expect(a.problems.join('\n')).toMatch(/job-level `if:`/);
+    });
+
+    it('reports no paths for a workflow that has none, whatever the option says', () => {
+      expect(auditWith(CLEAN, { allowPathsFilter: true }).pullRequestPaths).toEqual([]);
     });
   });
 

@@ -48,38 +48,39 @@ import {
 import { mutate, restore, snapshot } from './lib/mutation-harness.mjs';
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const CI_YML = resolve(REPO_ROOT, '.github/workflows/ci.yml');
-
-/**
- * A job that CAN skip, used for the `needs:` disarm.
- *
- * `docs-drift-reminder` carries `if: github.event_name == 'pull_request'`, so it
- * is skipped on a push — and a job that `needs:` a skipped job is itself
- * skipped, and a skipped job does not fail the run. That is the indirection the
- * text guards missed entirely: the gate disappears without its own definition
- * ever being touched.
- */
-const SKIPPABLE_JOB = 'docs-drift-reminder';
 
 /*
  * `GATE_TEST_NAME` and `GATES` now live in `./lib/ci-blocking-gate-proof.mjs`,
  * so `tests/ci-blocking-gate-proof-runnable.test.ts` can assert this proof is
- * still runnable without importing this script and running all 25 mutations.
+ * still runnable without importing this script and running all 30 mutations.
+ *
+ * #677 made the workflow, the selected assertion name and the `needs:` disarm
+ * PER-GATE: `resolve-image-pins` lives in `image-pin-resolution-nightly.yml`,
+ * not `ci.yml`. The script name still says `ci`; the set no longer does.
  */
 
 /**
- * The disarms. Each is a single valid-YAML edit that neutralises the job while
- * leaving its definition otherwise intact — four measured in #661, plus the two
- * the fail-closed allowlist caught that nobody had enumerated.
+ * The disarms for one gate. Each is a single valid-YAML edit that neutralises
+ * the job while leaving its definition otherwise intact — four measured in #661,
+ * plus the two the fail-closed allowlist caught that nobody had enumerated.
+ *
+ * The `needs:` one is the indirection the text guards missed entirely: the gate
+ * disappears without its own definition ever being touched. Its target is
+ * per-gate (see `GATES`) because a workflow whose only other job `needs:` the
+ * gate would give a CYCLE rather than a disarm.
  */
-const DISARMS = [
+const disarmsFor = (gate) => [
   { label: 'a quoted "if": false key', inject: '    "if": false' },
   { label: "a single-quoted 'if': false key", inject: "    'if': false" },
   {
     label: 'continue-on-error as an EXPRESSION, not a literal true',
     inject: '    continue-on-error: ${{ true }}',
   },
-  { label: `needs: ${SKIPPABLE_JOB} (a job that can skip)`, inject: `    needs: ${SKIPPABLE_JOB}` },
+  {
+    label: `${gate.needsDisarm.inject.trim()} (a job that can skip)`,
+    inject: gate.needsDisarm.inject,
+    define: gate.needsDisarm.define,
+  },
   {
     label: 'a matrix strategy that can expand to zero jobs',
     inject: '    strategy:\n      matrix:\n        shard: []',
@@ -89,7 +90,7 @@ const DISARMS = [
 let pass = 0;
 let fail = 0;
 
-const runGateTest = (spec) => runGateTestIn(REPO_ROOT, spec);
+const runGateTest = (gate) => runGateTestIn(REPO_ROOT, gate.spec, gate.testName);
 
 /**
  * Say WHY nothing ran — or say the cause was not determined.
@@ -101,22 +102,25 @@ const runGateTest = (spec) => runGateTestIn(REPO_ROOT, spec);
  * defaulted to the most common one (#680); the fallback now says it does not
  * know and prints what it observed.
  */
-const explainNothingRan = (spec, result) => explainNothingRanIn(REPO_ROOT, spec, result);
+const explainNothingRan = (gate, result) =>
+  explainNothingRanIn(REPO_ROOT, gate.spec, result, gate.testName);
 
 /** The assertion must be RED while the job is disarmed, and GREEN once restored. */
-function prove(jobId, spec, disarm) {
+function prove(gate, disarm) {
+  const { jobId, spec } = gate;
   console.log(`── ${spec} :: ${jobId} :: ${disarm.label}`);
   const anchor = `  ${jobId}:\n`;
-  const snap = snapshot(CI_YML);
+  const snap = snapshot(resolve(REPO_ROOT, gate.workflow));
   try {
     // The anchor is the job KEY, so the injection lands at job level whatever
     // the job's body looks like — no dependence on which line happens to be
     // first, which is how an anchored-on-a-neighbour mutation silently no-ops.
-    mutate(snap, anchor, `${anchor}${disarm.inject}\n`);
-    const result = runGateTest(spec);
+    // `define` (empty for every ci.yml gate) prepends a job the disarm needs.
+    mutate(snap, anchor, `${disarm.define ?? ''}${anchor}${disarm.inject}\n`);
+    const result = runGateTest(gate);
     const { ok, ran } = result;
     if (ran === 0) {
-      console.error(explainNothingRan(spec, result));
+      console.error(explainNothingRan(gate, result));
       restore(snap);
       process.exit(1);
     }
@@ -130,29 +134,29 @@ function prove(jobId, spec, disarm) {
   } finally {
     restore(snap);
   }
-  if (!runGateTest(spec).ok) {
+  if (!runGateTest(gate).ok) {
     console.error(`   FATAL: ${spec} did not go green again after restore`);
     process.exit(1);
   }
 }
 
-console.log('Baseline: every gate assertion must be GREEN against the real ci.yml.');
-for (const { spec } of GATES) {
-  const result = runGateTest(spec);
+console.log('Baseline: every gate assertion must be GREEN against its real workflow.');
+for (const gate of GATES) {
+  const result = runGateTest(gate);
   const { ok, ran } = result;
   if (ran === 0) {
-    console.error(explainNothingRan(spec, result));
+    console.error(explainNothingRan(gate, result));
     process.exit(1);
   }
   if (!ok) {
-    console.error(`FATAL: ${spec} is not green to begin with`);
+    console.error(`FATAL: ${gate.spec} is not green to begin with`);
     process.exit(1);
   }
 }
 console.log('   ok baseline green\n');
 
-for (const { jobId, spec } of GATES) {
-  for (const disarm of DISARMS) prove(jobId, spec, disarm);
+for (const gate of GATES) {
+  for (const disarm of disarmsFor(gate)) prove(gate, disarm);
 }
 
 console.log(`\n${pass} disarm(s) went red as required, ${fail} stayed green.`);

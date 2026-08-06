@@ -45,8 +45,10 @@ import { parse } from 'yaml';
  *
  * Converted — every guard claiming a `ci.yml` job is a blocking PR gate:
  * `bun-exec-hardcap`, `bun-exec-alpine-image`, `compile-cache-bun-probe`,
- * `typecheck-root`, and `lint-and-test` (the mutation-residue scan's step).
- * `scripts/mutation-prove-ci-blocking-gates.mjs` disarms all five, five ways.
+ * `typecheck-root`, and `lint-and-test` (the mutation-residue scan's step) —
+ * plus, since #677, `resolve-image-pins` in `image-pin-resolution-nightly.yml`,
+ * the one PR-triggered gate that is deliberately `paths:`-scoped.
+ * `scripts/mutation-prove-ci-blocking-gates.mjs` disarms all six, five ways.
  *
  * NOT converted, and each for a reason that is not "we ran out of diff":
  *
@@ -59,23 +61,21 @@ import { parse } from 'yaml';
  *     trigger half. A nightly is not a PR gate and must not be described as one.
  *     (The operator preflight already parses rather than text-matches; its
  *     bespoke checks are a subset of these, minus the trigger half.)
- *   - PR-TRIGGERED BUT DELIBERATELY `paths:`-SCOPED —
+ *   - PR-TRIGGERED BUT DELIBERATELY `paths:`-SCOPED — EMPTY since #677, and the
+ *     emptying is the point rather than a tidy-up. The one entry it ever held,
  *     `tests/operator-image-pin-resolution.test.ts`
- *     (image-pin-resolution-nightly.yml). This category exists because the
- *     round-2 review MEASURED the reason first recorded for this entry to be
- *     false: it was filed above as "scheduled, not `pull_request`", but the
- *     workflow does carry `pull_request:` — under a `paths:` filter
- *     (`.github/workflows/image-pin-resolution-nightly.yml:55-56`), and
- *     `auditBlockingGate` against its `resolve-image-pins` job reports exactly
- *     one problem, "the `pull_request` trigger carries a `paths` filter", NOT a
- *     missing trigger. The exemption survives — a paths-scoped run is not the
- *     unconditional gate this audit certifies — but the reason did not, and a
- *     wrong reason in a self-reported exemption list is the silent-exemption
- *     shape `workflow.md` says to watch for. Its guard still carries the
- *     evadable text form (`operator-image-pin-resolution.test.ts:324`,
- *     `not.toMatch(/continue-on-error:\s*true/)`) on a workflow that DOES run on
- *     PRs — a live #661-class instance, tracked as #677 rather than smuggled
- *     into this diff.
+ *     (image-pin-resolution-nightly.yml), was a LIVE #661 instance: its guard
+ *     asked the blocking question as text on a workflow that DOES run on pull
+ *     requests, and the byte-snapshot harness measured it GREEN under all five
+ *     disarms. The exemption's stated ground — "a paths-scoped run is not the
+ *     unconditional gate this audit certifies" — was true of the audit as it
+ *     then stood, so the audit is what changed: `allowPathsFilter` (see
+ *     `BlockingGateOptions`) lets a caller opt into a `paths:` filter, and
+ *     ONLY that, while the caller separately asserts the filter's contents cover
+ *     what its gate protects. The category stays in the type because the
+ *     classifier still reports the shape, but a paths-scoped trigger is no
+ *     longer sufficient grounds for an exemption: convert with the option
+ *     instead.
  *   - THE OPPOSITE CLAIM — `tests/supply-chain-workflow.test.ts`,
  *     `tests/operator-supply-chain-workflow.test.ts`, and the `docs-site` half of
  *     `tests/docs-closure-nightly-workflow.test.ts` — these assert a
@@ -168,10 +168,10 @@ export interface TriageEntry {
  * The round-2 review found the reason recorded for one entry was measurably
  * false: `image-pin-resolution-nightly.yml` was filed under "SCHEDULED, not
  * `pull_request`", but it carries a `pull_request:` trigger with a `paths:`
- * filter. The exemption survives — a deliberately paths-scoped gate is not an
- * unconditional PR gate — but the reason was wrong, and a wrong reason in a
- * self-reported exemption list is exactly the silent-exemption shape
- * `workflow.md` says to watch for.
+ * filter. That entry is GONE as of #677 — its guard is converted, with
+ * `allowPathsFilter` — but the episode is why this list is data: a wrong reason
+ * in a self-reported exemption list is exactly the silent-exemption shape
+ * `workflow.md` says to watch for, and it survived two rounds of reading.
  *
  * Fixing only the named entry would be the enumerate-not-scan defect one level
  * up, so the trigger half of every entry is now asserted against the parse.
@@ -182,12 +182,6 @@ export const UNCONVERTED_GUARD_TRIAGE: readonly TriageEntry[] = [
     workflow: '.github/workflows/test-e2e-deploy.yml',
     category: 'no-pull-request-trigger',
     why: 'workflow_dispatch + schedule only; a nightly is not a PR gate',
-  },
-  {
-    test: 'tests/operator-image-pin-resolution.test.ts',
-    workflow: '.github/workflows/image-pin-resolution-nightly.yml',
-    category: 'paths-scoped-pull-request',
-    why: 'runs on pull_request, but only under a paths: filter — deliberately scoped, so it is not an unconditional PR gate',
   },
   {
     test: 'tests/operator-e2e-scale-image-preflight.test.ts',
@@ -330,6 +324,36 @@ export interface BlockingGateOptions {
    * legitimate in general, but not on the one step the gate exists to run.
    */
   gateCommand: RegExp;
+  /**
+   * Opt in to a `paths:`-scoped `pull_request` trigger (#677).
+   *
+   * OFF by default, and the default is the important half: this audit's whole
+   * claim is "the gate runs on every PR", and a `paths:` filter means it does
+   * not. The option exists because ONE gate here is deliberately scoped —
+   * `image-pin-resolution-nightly.yml` resolves pins against an anonymous,
+   * per-source-IP rate-limited registry, so an unscoped run would put a third
+   * party in front of every merge and a flaky gate trains people to bypass it.
+   * Without a mode, that guard could not use this audit at all, and it stayed on
+   * the evadable text form for two rounds for exactly that reason.
+   *
+   * WHAT IT DOES NOT DO, because "a documented mode" is how a relaxation becomes
+   * a hole:
+   *   - it exempts `paths` ONLY. `paths-ignore`, `branches`, `types` and any
+   *     unrecognised key still fail closed. In particular `paths-ignore` is an
+   *     EXCLUSION — nothing about it can be checked for coverage — so it is not
+   *     the same claim and is not covered here.
+   *   - it REJECTS an empty `paths:` list, which the un-optioned audit never had
+   *     to consider: an allowlist that matches nothing is a gate that never
+   *     runs, i.e. the disarm this option could otherwise introduce.
+   *
+   * The other half is the CALLER'S, and it is not enforceable from here: a
+   * paths-scoped gate is only honest if the filter's contents cover everything
+   * the gate protects. `auditBlockingGate` returns `pullRequestPaths` so the
+   * caller can assert that against its own subject —
+   * `tests/operator-image-pin-resolution.test.ts` compares each glob against
+   * every file `discoverSources()` walks.
+   */
+  allowPathsFilter?: boolean;
 }
 
 export interface BlockingGateAudit {
@@ -341,6 +365,14 @@ export interface BlockingGateAudit {
   gateStepsSeen: number;
   /** The transitive `needs` closure that was audited, for reporting. */
   needsClosure: string[];
+  /**
+   * The `pull_request` trigger's `paths:` globs, empty when there are none.
+   *
+   * Returned so a caller using `allowPathsFilter` can assert the filter's
+   * CONTENTS cover what its gate protects — the half this audit cannot know,
+   * because only the caller knows the gate's subject.
+   */
+  pullRequestPaths: string[];
 }
 
 type Job = Record<string, unknown>;
@@ -647,7 +679,7 @@ function auditJobCanNotSkip(
  * list at once (and so a failure names every defect, not just the first).
  */
 export function auditBlockingGate(options: BlockingGateOptions): BlockingGateAudit {
-  const { workflowPath, jobId, gateCommand } = options;
+  const { workflowPath, jobId, gateCommand, allowPathsFilter = false } = options;
   const problems: string[] = [];
 
   const raw = readFileSync(workflowPath, 'utf8');
@@ -662,6 +694,7 @@ export function auditBlockingGate(options: BlockingGateOptions): BlockingGateAud
       jobsSeen: 0,
       gateStepsSeen: 0,
       needsClosure: [],
+      pullRequestPaths: [],
     };
   }
 
@@ -686,6 +719,19 @@ export function auditBlockingGate(options: BlockingGateOptions): BlockingGateAud
     // adds it widens this deliberately.
     for (const key of Object.keys(pr as Record<string, unknown>)) {
       if (key === 'branches' && isUniversalBranchFilter((pr as Record<string, unknown>)[key])) {
+        continue;
+      }
+      // The one caller-opted exemption (#677), narrowed twice: `paths` only —
+      // never `paths-ignore`, which is an exclusion and so states no coverage —
+      // and never an EMPTY list, which matches nothing and is therefore the
+      // disarm this option would otherwise introduce.
+      if (key === 'paths' && allowPathsFilter) {
+        const value = (pr as Record<string, unknown>).paths;
+        if (!Array.isArray(value) || value.length === 0) {
+          problems.push(
+            `the \`pull_request\` trigger's \`paths\` filter is empty (${JSON.stringify(value)}) — an allowlist that matches nothing means this gate never runs`,
+          );
+        }
         continue;
       }
       problems.push(
@@ -719,10 +765,14 @@ export function auditBlockingGate(options: BlockingGateOptions): BlockingGateAud
     }
   }
 
+  const prPaths =
+    pr !== null && typeof pr === 'object' ? (pr as Record<string, unknown>).paths : undefined;
+
   return {
     problems,
     jobsSeen: Object.keys(jobs).length,
     gateStepsSeen: gateSteps.length,
     needsClosure,
+    pullRequestPaths: Array.isArray(prPaths) ? prPaths.map(String) : [],
   };
 }
