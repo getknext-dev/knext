@@ -7,7 +7,9 @@
  * double.
  *
  * Behaviour, mirroring a real Next standalone server under graceful shutdown:
- *  - Listens on $PORT.
+ *  - Listens on $PORT (default 0 → the OS assigns a free one, #678) and announces
+ *    `LISTENING:<the port actually bound>` — the socket's own address, never the
+ *    requested value, so the spec can never probe a port this process is not on.
  *  - GET /slow holds the request open for ~1.5s, then responds 200 "drained".
  *  - On SIGTERM it STOPS accepting new connections but WAITS for in-flight
  *    requests to finish (server.close callback) before exiting 0 — i.e. it
@@ -21,7 +23,9 @@
 
 import http from 'node:http';
 
-const PORT = Number(process.env.PORT ?? 3000);
+// 0 → the OS assigns a free port (#678); a fixed port collides with any
+// concurrent CI job on the same runner.
+const PORT = Number(process.env.PORT ?? 0);
 let inFlight = 0;
 
 const server = http.createServer((req, res) => {
@@ -40,7 +44,9 @@ const server = http.createServer((req, res) => {
 
 server.listen(PORT, () => {
   // Signal readiness on stdout so the test can synchronize before sending traffic.
-  process.stdout.write(`LISTENING:${PORT}\n`);
+  // Report the port the SOCKET got, not the one requested — with PORT=0 they
+  // differ, and the requested value would send the spec's fetch at nothing.
+  process.stdout.write(`LISTENING:${server.address().port}\n`);
 });
 
 process.on('SIGTERM', () => {

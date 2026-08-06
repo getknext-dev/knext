@@ -10,7 +10,10 @@
  * spawned runtime entry.
  *
  * Behaviour, mirroring a Next standalone server that hangs on shutdown:
- *  - Listens on $PORT and announces readiness on stdout.
+ *  - Listens on $PORT (default 0 → the OS assigns a free one, #678) and announces
+ *    readiness on stdout as `LISTENING:<the port actually bound>`. It reports the
+ *    socket's own address, never the requested value, so the spec can never probe
+ *    a port this process is not on.
  *  - TRAPS SIGTERM and deliberately does NOT exit — it logs that it received the
  *    signal and then keeps the event loop alive far past any sane grace cap.
  *    (A bare empty SIGTERM handler also suppresses Node's default
@@ -23,7 +26,10 @@
 
 import http from 'node:http';
 
-const PORT = Number(process.env.PORT ?? 3000);
+// 0 → the OS assigns a free port (#678). A hardcoded port made this fixture
+// collide with any concurrent CI job on the same runner (EADDRINUSE :::39188 on
+// PR #676), which is how a required gate becomes a flake people re-run reflexively.
+const PORT = Number(process.env.PORT ?? 0);
 
 const server = http.createServer((_req, res) => {
   res.writeHead(200, { 'content-type': 'text/plain' });
@@ -31,7 +37,9 @@ const server = http.createServer((_req, res) => {
 });
 
 server.listen(PORT, () => {
-  process.stdout.write(`LISTENING:${PORT}\n`);
+  // Report the port the SOCKET got, not the one requested — with PORT=0 they
+  // differ, and the requested value would send the spec at nothing.
+  process.stdout.write(`LISTENING:${server.address().port}\n`);
 });
 
 // IGNORE SIGTERM: receive it but refuse to drain/exit. We additionally hold the
