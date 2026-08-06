@@ -41,8 +41,10 @@
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
+  disarmReplacement,
   explainNothingRan as explainNothingRanIn,
   GATES,
+  jobAnchor,
   runGateTest as runGateTestIn,
 } from './lib/ci-blocking-gate-proof.mjs';
 import { mutate, restore, snapshot } from './lib/mutation-harness.mjs';
@@ -118,14 +120,17 @@ const explainNothingRan = (gate, result) =>
 function prove(gate, disarm) {
   const { jobId, spec } = gate;
   console.log(`── ${spec} :: ${jobId} :: ${disarm.label}`);
-  const anchor = `  ${jobId}:\n`;
+  const anchor = jobAnchor(jobId);
   const snap = snapshot(resolve(REPO_ROOT, gate.workflow));
   try {
     // The anchor is the job KEY, so the injection lands at job level whatever
     // the job's body looks like — no dependence on which line happens to be
     // first, which is how an anchored-on-a-neighbour mutation silently no-ops.
     // `define` (empty for every ci.yml gate) prepends a job the disarm needs.
-    mutate(snap, anchor, `${disarm.define ?? ''}${anchor}${disarm.inject}\n`);
+    //
+    // Built by the SHARED `disarmReplacement` (#690) so the runnable-proof spec
+    // can audit the very text this line injects rather than a look-alike.
+    mutate(snap, anchor, disarmReplacement(jobId, disarm));
     const result = runGateTest(gate);
     const { ok, ran } = result;
     if (ran === 0) {

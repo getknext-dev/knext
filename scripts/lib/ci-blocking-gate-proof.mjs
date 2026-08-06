@@ -92,6 +92,31 @@ export const GATES = [
 }));
 
 /**
+ * The job-key anchor every disarm is applied at.
+ *
+ * Two-space indent + the job id + a newline is what makes the injection land at
+ * JOB level whatever the job body looks like, and the harness refuses it unless
+ * it occurs exactly once.
+ */
+export function jobAnchor(jobId) {
+  return `  ${jobId}:\n`;
+}
+
+/**
+ * The exact text a disarm substitutes for `jobAnchor(jobId)` (#690).
+ *
+ * EXPORTED so the prover and `tests/ci-blocking-gate-proof-runnable.test.ts`
+ * build the mutation with ONE implementation. The test's claim is "the `needs:`
+ * disarm names a job that exists and can skip", and that claim is only worth
+ * anything if it inspects the workflow the prover will actually produce — a
+ * second, look-alike builder in the test could agree with itself while diverging
+ * from the mutation being proved.
+ */
+export function disarmReplacement(jobId, disarm) {
+  return `${disarm.define ?? ''}${jobAnchor(jobId)}${disarm.inject}\n`;
+}
+
+/**
  * Locate a test runner that can actually start, as `{ command, args }`.
  *
  * The prover used `pnpm exec vitest`, which resolves nothing in a tree that has
