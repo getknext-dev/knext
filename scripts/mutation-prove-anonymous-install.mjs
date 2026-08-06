@@ -150,12 +150,12 @@ const MUTATIONS = [
     "    if (new RegExp(`^ {4}${key}:`, 'm').test(block)) {",
     '    if (false) {',
   ],
-  [
-    SCRIPT,
-    'F3: `persist-credentials: false` stops being required on checkout',
-    "  if (block.includes('actions/checkout') && !/persist-credentials:\\s*false/.test(block)) {",
-    '  if (false) {',
-  ],
+  // NOTE: the round-2 disarm of the per-JOB `persist-credentials` check is gone,
+  // because the code it anchored on is gone — round 3 replaced it with the
+  // per-STEP rule below, which is what the job-wide form could not express. The
+  // harness refused the stale anchor rather than silently scoring nothing, which
+  // is the only reason this was not left as a mutation that proves a deleted
+  // behaviour.
   [
     SCRIPT,
     'the `with:` allowlist becomes a denylist of one literal',
@@ -186,6 +186,47 @@ const MUTATIONS = [
     'the workflow drops `persist-credentials: false` and keeps the runner token',
     '          persist-credentials: false',
     '          persist-credentials: true',
+  ],
+  // ── R3: every guard must hold at EVERY site, not the one that exists today ─
+  [
+    WORKFLOW,
+    'R3 THE BUG: a SECOND checkout is added with no `with:` at all',
+    // Deliberately ADDING a step rather than re-editing the existing one. Row 18
+    // already re-edits the first checkout and reds; that is precisely the
+    // mutation a job-wide "does the string appear anywhere" check survives, so
+    // only a second site proves the rule is per-step.
+    '        run: node scripts/verify-anonymous-install.mjs',
+    '        run: node scripts/verify-anonymous-install.mjs\n      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1',
+  ],
+  [
+    SCRIPT,
+    'the per-step checkout rule is disarmed',
+    "    if (uses?.split('@')[0] === 'actions/checkout') {",
+    '    if (false) {',
+  ],
+  [
+    SCRIPT,
+    'the per-step `with:` allowlist becomes a denylist of one literal',
+    '      if (!ALLOWED_JOB_WITH_KEYS.has(key)) {',
+    "      if (key === 'token') {",
+  ],
+  [
+    SCRIPT,
+    'the step parse returns nothing, making every per-step rule vacuous',
+    'export function parseJobSteps(block) {',
+    'export function parseJobSteps(block) {\n  return [];',
+  ],
+  [
+    SCRIPT,
+    'the top-level key scan stops recognising quoted / space-before-colon keys',
+    '    const key = line.match(/^["\']?([\\w.-]+)["\']?\\s*:/)?.[1];',
+    '    const key = line.match(/^([\\w.-]+):/)?.[1];',
+  ],
+  [
+    SCRIPT,
+    'the `env:` rule is re-anchored to end-of-line, so the inline form escapes',
+    '  if (/^\\s*["\']?env["\']?\\s*:/m.test(block)) {',
+    '  if (/^\\s*env:\\s*$/m.test(block)) {',
   ],
   [
     OTHER_DOC,

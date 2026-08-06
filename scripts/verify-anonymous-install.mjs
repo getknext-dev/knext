@@ -609,9 +609,11 @@ export async function verifyBundle(body, options = {}) {
       ref: unscanned.image,
       line: unscanned.line,
       detail:
-        `a \`${unscanned.kind}\` document carries a container image, and that kind is not in ` +
-        'WORKLOAD_KINDS — so nothing verified it is anonymously pullable. Add the kind to ' +
-        'WORKLOAD_KINDS rather than leaving the image unchecked.',
+        `a \`${unscanned.kind}\` document carries an \`image:\` value, and that kind is not in ` +
+        'WORKLOAD_KINDS — so nothing verified it is anonymously pullable. If the kind really ' +
+        'runs a container, add it to WORKLOAD_KINDS; if this is data that merely looks like an ' +
+        'image reference (a ConfigMap value, a template), the value is not a workload image and ' +
+        'the extractor needs to learn to tell them apart.',
     });
   }
 
@@ -852,6 +854,96 @@ function blankYamlComments(text) {
     .join('\n');
 }
 
+/**
+ * Split a job block into its `steps:` sequence items.
+ *
+ * Structural rather than indent-coupled. The first version of the `with:` scan
+ * filtered on a literal 10-space indent as a stand-in for "inside `with:`", and
+ * both legal alternatives escaped it completely: 4-space sequence items put the
+ * keys at 8, and a flow-style `with: { … }` has no indented keys at all. The
+ * indent could not simply be loosened — widening it reddens the real workflow —
+ * so the fix has to be a parse, not a laxer regex.
+ *
+ * The item indent is DISCOVERED from the first `- ` after `steps:`, so any
+ * consistent layout works.
+ */
+export function parseJobSteps(block) {
+  const lines = block.split('\n');
+  const stepsAt = lines.findIndex((line) => /^\s*steps\s*:\s*$/.test(line));
+  if (stepsAt === -1) return [];
+
+  const steps = [];
+  let itemIndent = null;
+  let current = null;
+  for (const line of lines.slice(stepsAt + 1)) {
+    const item = line.match(/^(\s*)-\s/);
+    if (item && (itemIndent === null || item[1].length === itemIndent)) {
+      if (itemIndent === null) itemIndent = item[1].length;
+      if (current) steps.push(current.join('\n'));
+      current = [line];
+      continue;
+    }
+    if (current === null) continue;
+    // A non-blank line at or left of the item indent ends the sequence.
+    if (line.trim() !== '' && line.match(/^(\s*)/)[1].length <= itemIndent) break;
+    current.push(line);
+  }
+  if (current) steps.push(current.join('\n'));
+  return steps;
+}
+
+/** The action a step runs, or undefined. */
+export function stepUses(stepText) {
+  return stepText.match(/^\s*(?:-\s+)?uses\s*:\s*(\S+)/m)?.[1];
+}
+
+/**
+ * A step's own `with:` inputs as `{ key, value }`, block or flow style.
+ *
+ * Per-STEP is the whole point. The `persist-credentials` rule used to ask "does
+ * `persist-credentials: false` appear anywhere in this job", which is satisfied
+ * by the first checkout no matter what a second one does — and adding a second
+ * checkout is the most ordinary edit this workflow will ever receive. Reading
+ * each step's own inputs closes the wrong-value case and the missing-`with:`
+ * case together.
+ */
+export function parseWithEntries(stepText) {
+  const lines = stepText.split('\n');
+  const index = lines.findIndex((line) => /^\s*with\s*:/.test(line));
+  if (index === -1) return [];
+
+  const line = lines[index];
+  const inline = line.replace(/^\s*with\s*:\s*/, '').trim();
+  if (inline !== '') {
+    return inline
+      .replace(/^\{/, '')
+      .replace(/\}$/, '')
+      .split(',')
+      .map((pair) => {
+        const at = pair.indexOf(':');
+        if (at === -1) return undefined;
+        return {
+          key: pair
+            .slice(0, at)
+            .trim()
+            .replace(/^["']|["']$/g, ''),
+          value: pair.slice(at + 1).trim(),
+        };
+      })
+      .filter(Boolean);
+  }
+
+  const withIndent = line.match(/^(\s*)/)[1].length;
+  const entries = [];
+  for (const next of lines.slice(index + 1)) {
+    if (next.trim() === '') continue;
+    if (next.match(/^(\s*)/)[1].length <= withIndent) break;
+    const entry = next.match(/^\s*["']?([\w.-]+)["']?\s*:\s*(.*)$/);
+    if (entry) entries.push({ key: entry[1], value: entry[2].trim() });
+  }
+  return entries;
+}
+
 export function auditAnonymousWorkflowJob(workflowText) {
   const findings = [];
   const lines = blankYamlComments(workflowText).split('\n');
@@ -861,7 +953,9 @@ export function auditAnonymousWorkflowJob(workflowText) {
 
   // ── workflow scope: every column-0 key, wherever it appears ───────────────
   for (const [index, line] of lines.entries()) {
-    const key = line.match(/^([\w.-]+):/)?.[1];
+    // Quotes and space-before-colon are legal YAML and both spell the same key.
+    // `^([\w.-]+):` matched neither, so `"env":` and `env :` scored zero.
+    const key = line.match(/^["']?([\w.-]+)["']?\s*:/)?.[1];
     if (!key || !FORBIDDEN_TOP_LEVEL_KEYS.includes(key)) continue;
     // Collect the block so the finding can quote what was actually set.
     const block = [];
@@ -907,15 +1001,23 @@ export function auditAnonymousWorkflowJob(workflowText) {
   }
   const [jobId, block] = owners[0];
 
-  // 1. permissions — declared, and granting nothing.
-  const permissions = block.match(/^ {4}permissions:(.*)$/m);
-  if (!permissions) {
+  // 1. permissions — declared, and EVERY declaration granting nothing.
+  //
+  // `matchAll`, not `match`: the first-match-only form answered "is there a
+  // `permissions:` that is `{}`" rather than "is every one of them `{}`" — the
+  // same shape as the per-job `persist-credentials` defect, one level up. The
+  // indent is no longer pinned to four spaces either.
+  const permissions = [...block.matchAll(/^\s*["']?permissions["']?\s*:(.*)$/gm)];
+  if (permissions.length === 0) {
     findings.push(`job \`${jobId}\` declares no \`permissions:\` — it must declare \`{}\``);
-  } else if (permissions[1].trim() !== '{}') {
-    findings.push(
-      `job \`${jobId}\` grants permission(s) (\`permissions:${permissions[1]}\`) — the anonymous ` +
-        'check must hold none',
-    );
+  }
+  for (const grant of permissions) {
+    if (grant[1].trim() !== '{}') {
+      findings.push(
+        `job \`${jobId}\` grants permission(s) (\`permissions:${grant[1]}\`) — the anonymous ` +
+          'check must hold none',
+      );
+    }
   }
 
   // 1b. container/services — a `credentials:` mapping is a registry login.
@@ -929,7 +1031,7 @@ export function auditAnonymousWorkflowJob(workflowText) {
   }
 
   // 2. actions — allowlist.
-  for (const match of block.matchAll(/^\s*(?:-\s+)?uses:\s*(\S+)/gm)) {
+  for (const match of block.matchAll(/^\s*(?:-\s+)?["']?uses["']?\s*:\s*(\S+)/gm)) {
     const action = match[1].split('@')[0];
     if (!ALLOWED_JOB_ACTIONS.has(action)) {
       findings.push(
@@ -952,30 +1054,52 @@ export function auditAnonymousWorkflowJob(workflowText) {
   // invisible to the expression allowlist (nothing is interpolated).
   // `action-pin-resolution-nightly.yml` and `mutation-prover-nightly.yml` both
   // set it false already; this makes it enforced rather than remembered.
-  for (const match of block.matchAll(/^\s+([\w.-]+):\s*(.*)$/gm)) {
-    // Only lines inside a `with:` mapping — 10-space indent under a step's
-    // `with:` in this file's layout. Matched structurally rather than by name so
-    // a new input is caught, not just the ones already thought of.
-    if (!/^ {10}[\w.-]+:/.test(match[0])) continue;
-    const key = match[1];
-    if (!ALLOWED_JOB_WITH_KEYS.has(key)) {
-      findings.push(
-        `job \`${jobId}\` passes the step input \`${key}\`, which is not on the \`with:\` ` +
-          `allowlist (${[...ALLOWED_JOB_WITH_KEYS].join(', ')}) — a token handed to an action ` +
-          'is a credential the check must not hold',
-      );
-    }
-  }
-  if (block.includes('actions/checkout') && !/persist-credentials:\s*false/.test(block)) {
+  // Asserted PER STEP, at every site — not once for the job. The previous shape
+  // asked "does `persist-credentials: false` appear ANYWHERE in this job", which
+  // the first checkout satisfies no matter what a second one does. Measured: a
+  // second `actions/checkout` with no `with:` at all (defaulting to
+  // `persist-credentials: true`), and one with an EXPLICIT `true`, both scored
+  // zero findings. Adding a second checkout is the most ordinary edit this
+  // workflow will ever receive.
+  const steps = parseJobSteps(block);
+  if (steps.length === 0 && block.includes('uses:')) {
+    // Fail closed: if the step parse yields nothing while the job clearly has
+    // steps, every per-step rule below is silently vacuous.
     findings.push(
-      `job \`${jobId}\` checks out without \`persist-credentials: false\` — the default leaves ` +
-        'the runner token in the workspace `.git/config`, where every github.com request from ' +
-        'the workspace picks it up',
+      `job \`${jobId}\` has \`uses:\` steps that could not be parsed as a \`steps:\` sequence — ` +
+        'the per-step credential rules would pass vacuously',
     );
+  }
+  for (const [index, stepText] of steps.entries()) {
+    const uses = stepUses(stepText);
+    const entries = parseWithEntries(stepText);
+    const where = `job \`${jobId}\` step ${index + 1}`;
+
+    for (const { key } of entries) {
+      if (!ALLOWED_JOB_WITH_KEYS.has(key)) {
+        findings.push(
+          `${where} passes the input \`${key}\`, which is not on the \`with:\` allowlist ` +
+            `(${[...ALLOWED_JOB_WITH_KEYS].join(', ')}) — a token handed to an action is a ` +
+            'credential the check must not hold',
+        );
+      }
+    }
+
+    if (uses?.split('@')[0] === 'actions/checkout') {
+      const persist = entries.find((entry) => entry.key === 'persist-credentials');
+      if (!persist || persist.value !== 'false') {
+        findings.push(
+          `${where} (\`${uses}\`) does not set \`persist-credentials: false\` ` +
+            `(it is ${persist ? `\`${persist.value}\`` : 'absent, which defaults to `true`'}) — ` +
+            'the runner token is left in the workspace `.git/config`, where every github.com ' +
+            'request from the workspace picks it up',
+        );
+      }
+    }
   }
 
   // 3. run commands — allowlist. A block scalar (`run: |`) is not on it.
-  for (const match of block.matchAll(/^\s*(?:-\s+)?run:(.*)$/gm)) {
+  for (const match of block.matchAll(/^\s*(?:-\s+)?["']?run["']?\s*:(.*)$/gm)) {
     const command = match[1].trim();
     if (!ALLOWED_JOB_RUN_COMMANDS.has(command)) {
       findings.push(
@@ -999,7 +1123,12 @@ export function auditAnonymousWorkflowJob(workflowText) {
 
   // 5. env — the job sets none, so a variable that is not a credential today
   //    cannot quietly become one later.
-  if (/^\s*env:\s*$/m.test(block)) {
+  //
+  //    NOT anchored to end-of-line. `env:\s*$` missed the inline flow form
+  //    `env: { GH_TOKEN: aLiteralToken }`, which interpolates nothing and so is
+  //    not covered by the expression allowlist either — the same "only the
+  //    spelling that exists today" shape as the `persist-credentials` defect.
+  if (/^\s*["']?env["']?\s*:/m.test(block)) {
     findings.push(
       `job \`${jobId}\` declares an \`env:\` block — the anonymous check inherits nothing on ` +
         'purpose, so any variable it is given is a finding',

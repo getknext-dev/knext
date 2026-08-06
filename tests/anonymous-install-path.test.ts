@@ -931,6 +931,21 @@ describe('anonymous-install-nightly.yml — the runner must have no credential',
     expect(auditAnonymousWorkflowJob(mutated).findings.join(' ')).toMatch(/persist-credentials/i);
   });
 
+  it('reads a `with:` value that carries a trailing comment', () => {
+    // The case that keeps comment-blanking load-bearing after the per-step
+    // rewrite. Raw, the value reads as `false # keep it off` — not `false` — so
+    // the guard would fire on a workflow that is entirely correct. A guard that
+    // cries wolf on valid input gets deleted, which is the same end state as one
+    // that never fires.
+    const steps = [
+      '      - uses: actions/checkout@abc',
+      '        with:',
+      '          persist-credentials: false # the runner token must not land in .git/config',
+      '      - run: node scripts/verify-anonymous-install.mjs # nightly, no credentials',
+    ].join('\n');
+    expect(auditAnonymousWorkflowJob(synthetic(steps)).findings).toEqual([]);
+  });
+
   it('a COMMENT quoting the required input does not satisfy the guard', () => {
     // The defect this nearly shipped with: the audit read the raw text, so the
     // workflow's explanatory comment — which quotes `persist-credentials: false`
@@ -938,6 +953,144 @@ describe('anonymous-install-nightly.yml — the runner must have no credential',
     const mutated = read(WORKFLOW).replace('          persist-credentials: false\n', '');
     expect(mutated).toContain('persist-credentials: false'); // still in the comment
     expect(auditAnonymousWorkflowJob(mutated).findings.join(' ')).toMatch(/persist-credentials/i);
+  });
+
+  // ── R3 BLOCKING: the guard must hold at EVERY step, not the one that exists ──
+
+  /**
+   * A minimal workflow the audit can locate, so structural cases can be stated
+   * without reproducing the real file's indentation. `stepsBlock` is spliced in
+   * verbatim, which is the point — these tests are about layout.
+   */
+  const synthetic = (stepsBlock: string) =>
+    [
+      'name: x',
+      'on:',
+      '  workflow_dispatch: {}',
+      'permissions: {}',
+      'jobs:',
+      '  anonymous-install:',
+      '    runs-on: ubuntu-latest',
+      '    permissions: {}',
+      '    steps:',
+      stepsBlock,
+      '',
+    ].join('\n');
+
+  const GOOD_STEPS = [
+    '      - uses: actions/checkout@abc',
+    '        with:',
+    '          persist-credentials: false',
+    '      - run: node scripts/verify-anonymous-install.mjs',
+  ].join('\n');
+
+  it('the synthetic baseline is clean — otherwise these cases prove nothing', () => {
+    expect(auditAnonymousWorkflowJob(synthetic(GOOD_STEPS)).findings).toEqual([]);
+  });
+
+  it('flags a SECOND checkout that sets no `with:` at all', () => {
+    // The most ordinary edit this workflow will ever receive. `actions/checkout`
+    // defaults to `persist-credentials: true`, so a bare second checkout puts the
+    // runner token back in the workspace — and a job-wide "does the string appear
+    // anywhere" check sees the FIRST step's `false` and stays green.
+    const mutated = synthetic(`${GOOD_STEPS}\n      - uses: actions/checkout@abc`);
+    expect(auditAnonymousWorkflowJob(mutated).findings.join(' ')).toMatch(/persist-credentials/i);
+  });
+
+  it('flags a SECOND checkout that sets `persist-credentials: true` explicitly', () => {
+    const mutated = synthetic(
+      `${GOOD_STEPS}\n      - uses: actions/checkout@abc\n        with:\n          persist-credentials: true`,
+    );
+    expect(auditAnonymousWorkflowJob(mutated).findings.join(' ')).toMatch(/persist-credentials/i);
+  });
+
+  it('names WHICH step is at fault, so a two-checkout job is triageable', () => {
+    const mutated = synthetic(`${GOOD_STEPS}\n      - uses: actions/checkout@abc`);
+    expect(auditAnonymousWorkflowJob(mutated).findings.join(' ')).toMatch(/step\s+3|step #?3/i);
+  });
+
+  // ── R3 LOWER: the `with:` scan must not depend on one indentation ───────────
+
+  it('flags a forbidden `with:` key at a 4-space step indent', () => {
+    // Legal YAML that this repo simply does not happen to use today. Under an
+    // indent-coupled scan the keys land at 8 spaces and escape entirely.
+    const steps = [
+      '    - uses: actions/checkout@abc',
+      '      with:',
+      '        persist-credentials: false',
+      '        token: aSecretLiteral',
+      '    - run: node scripts/verify-anonymous-install.mjs',
+    ].join('\n');
+    expect(auditAnonymousWorkflowJob(synthetic(steps)).findings.join(' ')).toMatch(
+      /with|allowlist/i,
+    );
+  });
+
+  it('accepts a CLEAN 4-space step indent — the fix is structural, not "red on everything"', () => {
+    const steps = [
+      '    - uses: actions/checkout@abc',
+      '      with:',
+      '        persist-credentials: false',
+      '    - run: node scripts/verify-anonymous-install.mjs',
+    ].join('\n');
+    expect(auditAnonymousWorkflowJob(synthetic(steps)).findings).toEqual([]);
+  });
+
+  it('flags a forbidden key in a FLOW-STYLE `with:` mapping', () => {
+    const steps = [
+      '      - uses: actions/checkout@abc',
+      '        with: { persist-credentials: false, token: xyz }',
+      '      - run: node scripts/verify-anonymous-install.mjs',
+    ].join('\n');
+    expect(auditAnonymousWorkflowJob(synthetic(steps)).findings.join(' ')).toMatch(
+      /with|allowlist/i,
+    );
+  });
+
+  it('reads `persist-credentials` out of a FLOW-STYLE `with:` too', () => {
+    const bad = [
+      '      - uses: actions/checkout@abc',
+      '        with: { persist-credentials: true }',
+      '      - run: node scripts/verify-anonymous-install.mjs',
+    ].join('\n');
+    expect(auditAnonymousWorkflowJob(synthetic(bad)).findings.join(' ')).toMatch(
+      /persist-credentials/i,
+    );
+    const good = [
+      '      - uses: actions/checkout@abc',
+      '        with: { persist-credentials: false }',
+      '      - run: node scripts/verify-anonymous-install.mjs',
+    ].join('\n');
+    expect(auditAnonymousWorkflowJob(synthetic(good)).findings).toEqual([]);
+  });
+
+  // ── R3 LOWER: top-level key spellings ──────────────────────────────────────
+
+  it.each([
+    ['"env":'],
+    ["'env':"],
+    ['env :'],
+  ])('flags the top-level key written as %s', (spelling) => {
+    const mutated = read(WORKFLOW).replace(
+      'permissions: {}\n',
+      `permissions: {}\n${spelling}\n  GH_TOKEN: literal\n`,
+    );
+    expect(mutated).not.toBe(read(WORKFLOW));
+    expect(auditAnonymousWorkflowJob(mutated).findings.join(' ')).toMatch(/env/i);
+  });
+
+  it('flags an inline flow-style `env:` in the job, which needs no expression', () => {
+    // The `env:`-must-end-the-line rule missed `env: { X: y }`. A literal token
+    // written inline interpolates nothing, so the expression allowlist does not
+    // cover it either.
+    const steps = [
+      '      - uses: actions/checkout@abc',
+      '        with:',
+      '          persist-credentials: false',
+      '      - run: node scripts/verify-anonymous-install.mjs',
+      '        env: { GH_TOKEN: aLiteralToken }',
+    ].join('\n');
+    expect(auditAnonymousWorkflowJob(synthetic(steps)).findings.join(' ')).toMatch(/env/i);
   });
 
   it('flags a `gh auth login` in a run step', () => {
