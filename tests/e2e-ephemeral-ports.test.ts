@@ -57,6 +57,11 @@
 //      a rename (`getFreePort()`) counts 0; any argument (`freePort(1)`) counts
 //      0; and a local helper that calls it twice makes the CALLER count 0. Nor
 //      is the count cross-file — two modules calling it once each are both fine.
+//      And the shape most likely to arise by ACCIDENT rather than evasion is
+//      the one the pattern misses outright: `freePorts(1)` called twice counts 0,
+//      as does one `freePort()` plus one `freePorts(1)` (the threshold is `<= 1`)
+//      — the same sequential-reservation bug, written in the very API this file
+//      promotes.
 //      So a green run means "no file repeats the exact shape that bit us twice"
 //      (#683's drain e2e, #686's docker e2e), NOT "sequential reservation is
 //      gone repo-wide". Same posture as limits 1-3: it stops the accident, not
