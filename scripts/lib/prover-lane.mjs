@@ -124,9 +124,15 @@ function literalSpans(source) {
  * name": the specifier IS the literal. This view keeps comments unable to
  * satisfy anything while leaving `from 'node:child_process'` readable.
  *
+ * EXPORTED (#690) for a third consumer: the `allowPathsFilter` caller scan needs
+ * a quoted key (`{ ['allowPathsFilter']: true }`) to be visible — `blankNonCode`
+ * empties it, so it escaped both halves of that scan — while still refusing to
+ * let a commented-out assertion satisfy anything. A fourth tokenizer view would
+ * be the copy-instead-of-share failure this file's own lane exists to catch.
+ *
  * @param {string} source
  */
-function codeWithLiterals(source) {
+export function codeWithLiterals(source) {
   const blanked = blankNonCode(source);
   const out = [...blanked];
   for (const { start, end } of literalSpans(source)) {

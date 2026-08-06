@@ -12,6 +12,7 @@ import {
   jobAnchor,
   resolveTestRunner,
 } from '../scripts/lib/ci-blocking-gate-proof.mjs';
+import { codeWithLiterals } from '../scripts/lib/prover-lane.mjs';
 import { auditJobCanNotSkip } from './helpers/blocking-gate.js';
 
 /**
@@ -148,6 +149,64 @@ describe('the ci.yml blocking-gate mutation proof is runnable', () => {
 type NeedsDisarm = { define?: string; inject: string };
 type DisarmableGate = { jobId: string; workflow: string; needsDisarm: NeedsDisarm };
 
+/**
+ * GitHub's status-check functions. None of them makes a job SKIPPABLE.
+ *
+ * `always()` is the canonical cannot-skip condition, and `success()` /
+ * `failure()` / `cancelled()` are decided by the run's state, not by the event.
+ * A round-1 version of this check listed the two spellings `true` and
+ * `${{ true }}` — a two-token blocklist, which `always()` walks straight through.
+ * MEASURED on the real `ci.yml`: rewriting `docs-drift-reminder`'s `if:` to
+ * `always()` left the spec green while the prover kept scoring five gates as
+ * PROVED, even though `needs: <always() job>` skips nothing.
+ */
+const STATUS_FUNCTION = /\b(?:always|success|failure|cancelled)\s*\(\s*\)/;
+
+/**
+ * A context whose value can differ between runs, so an expression mentioning one
+ * CAN be false. This is the ALLOWLIST half: an expression that references none of
+ * them (`1 == 1`, `'a' != 'b'`, a bare function call, anything unrecognised)
+ * FAILS rather than passing, because a check that waves through what it does not
+ * understand is how the next spelling gets in.
+ */
+const FALSIFIABLE_CONTEXT = /\b(?:github|needs|inputs|env|vars|matrix|steps|job|runner|secrets)\./;
+
+/**
+ * Can the job this disarm points at actually SKIP? Fail-closed.
+ *
+ * The issue's criterion is "an existing job that carries a skip condition", and
+ * the only honest reading of "skip condition" is an expression that can evaluate
+ * false in the run the gate is being proved for.
+ */
+function skipConditionProblem(job: Record<string, unknown>, target: string): string | null {
+  if (!('if' in job)) {
+    return `\`needs: ${target}\` names a job with no \`if:\` — a job that always runs cannot skip, so nothing about the gate changes`;
+  }
+  const raw = job.if;
+  // `if: false` is a permanent skip, which IS skippable. `if: true` is not.
+  if (typeof raw === 'boolean') {
+    return raw
+      ? `\`needs: ${target}\` names a job whose \`if:\` is the literal \`true\` — that is not a skip condition`
+      : null;
+  }
+  if (typeof raw !== 'string') {
+    return `\`needs: ${target}\` names a job whose \`if:\` is neither a string nor a boolean (${JSON.stringify(raw)}) — this check fails closed on what it cannot read`;
+  }
+  // `${{ … }}` is optional around an `if:` expression and changes nothing about
+  // what it evaluates, so it is stripped rather than pattern-matched around.
+  const expr = raw
+    .trim()
+    .replace(/^\$\{\{([\s\S]*)\}\}$/, '$1')
+    .trim();
+  if (STATUS_FUNCTION.test(expr)) {
+    return `\`needs: ${target}\` names a job whose \`if:\` uses a status function (${JSON.stringify(raw)}) — \`always()\`/\`success()\`/\`failure()\`/\`cancelled()\` are not skip conditions, so this "disarm" would red the guard without ever skipping the gate`;
+  }
+  if (!FALSIFIABLE_CONTEXT.test(expr)) {
+    return `\`needs: ${target}\` names a job whose \`if:\` (${JSON.stringify(raw)}) references no context that can be false — accepted: an expression mentioning one of github./needs./inputs./env./vars./matrix./steps./job./runner./secrets. This check fails closed: an expression it cannot recognise is NOT assumed skippable`;
+  }
+  return null;
+}
+
 /** Everything wrong with a gate's `needs:` disarm. Empty means it really disarms. */
 function auditNeedsDisarm(workflowText: string, gate: DisarmableGate): string[] {
   const problems: string[] = [];
@@ -205,15 +264,8 @@ function auditNeedsDisarm(workflowText: string, gate: DisarmableGate): string[] 
       );
       continue;
     }
-    if (!('if' in job)) {
-      problems.push(
-        `\`needs: ${target}\` names a job with no \`if:\` — a job that always runs cannot skip, so nothing about the gate changes`,
-      );
-    } else if (/^(?:true|\$\{\{\s*true\s*\}\})$/.test(String(job.if).trim())) {
-      problems.push(
-        `\`needs: ${target}\` names a job whose \`if:\` is constantly true (${JSON.stringify(job.if)}) — that is not a skip condition`,
-      );
-    }
+    const skip = skipConditionProblem(job, target);
+    if (skip) problems.push(skip);
     // The cycle half, walked with the SAME closure walk the audit uses. A target
     // that `needs:` the gate back is not a workflow GitHub will run.
     const closure = auditJobCanNotSkip(jobs, target, []);
@@ -283,17 +335,56 @@ describe('#690 every `needs:` disarm names a job that exists and can skip', () =
     expect(auditInject('    needs: no-such-job')).toMatch(/does NOT exist/);
   });
 
-  it('a target that can never skip is a finding', () => {
+  it('a target with no `if:` at all is a finding', () => {
     expect(auditInject('    needs: always-runs')).toMatch(/no `if:`/);
   });
 
-  it('a target whose `if:` is constantly true is a finding', () => {
-    expect(auditInject('    needs: always-runs', '  always-true:\n    if: true\n')).toMatch(
-      /no `if:`/,
+  /** A job with an arbitrary `if:`, so each forbidden spelling can be pointed at. */
+  const withIf = (expr: string) =>
+    `  probe-target:\n    if: ${expr}\n    runs-on: ubuntu-latest\n    steps:\n      - run: 'true'\n`;
+  const auditIf = (expr: string) => auditInject('    needs: probe-target', withIf(expr));
+
+  it('THE CASE THAT MATTERS: `always()` is not a skip condition, bare and wrapped', () => {
+    // Round 1's blocklist knew `true` and `${{ true }}` only, so the canonical
+    // GitHub cannot-skip condition walked through it — and a one-word edit to
+    // ci.yml would have voided five gate proofs while the prover still printed
+    // PROVED.
+    expect(auditIf('always()')).toMatch(/status function/);
+    expect(auditIf('${{ always() }}')).toMatch(/status function/);
+  });
+
+  it('the other status functions are refused too — `success()` and `!cancelled()`', () => {
+    expect(auditIf('success()')).toMatch(/status function/);
+    // QUOTED in the fixture because a bare leading `!` is a YAML TAG, not a
+    // negation — an unquoted `if: !cancelled()` does not parse, which would have
+    // made this assertion pass for a reason unrelated to what it tests.
+    expect(auditIf('"!cancelled()"')).toMatch(/status function/);
+  });
+
+  it('a constantly-true expression is refused, literal or arithmetic', () => {
+    expect(auditIf('true')).toMatch(/literal `true`/);
+    expect(auditIf('${{ 1 == 1 }}')).toMatch(/references no context that can be false/);
+  });
+
+  it('an UNRECOGNISED expression FAILS — the check does not wave through what it cannot read', () => {
+    // The allowlist half. Both of these are things nobody enumerated; neither is
+    // assumed skippable, which is the property a blocklist can never have.
+    // Quoted in the fixture: a plain YAML scalar cannot start with `'`, and
+    // `${{ … }}` carrying quotes is safest written as a quoted scalar too. A
+    // fixture that fails to parse would satisfy nothing about the rule.
+    expect(auditIf("\"'a' != 'b'\"")).toMatch(/references no context that can be false/);
+    expect(auditIf('"${{ fromJSON(\'true\') }}"')).toMatch(
+      /references no context that can be false/,
     );
-    expect(auditInject('    needs: always-true', '  always-true:\n    if: true\n')).toMatch(
-      /constantly true/,
-    );
+  });
+
+  it('NEGATIVE CONTROLS: real skip conditions pass, in three shapes', () => {
+    // A guard that reds on a CORRECT disarm target is how "edit the guard"
+    // becomes the way back to green, so the accepted forms are asserted too.
+    expect(auditIf("github.event_name == 'pull_request'")).toBe('');
+    expect(auditIf("${{ needs.build.result == 'success' }}")).toBe('');
+    // `if: false` is a permanent skip — unusual, but genuinely skippable.
+    expect(auditIf('false')).toBe('');
   });
 
   it('a CYCLE is a finding — an invalid workflow reds for its own reason', () => {
@@ -314,18 +405,40 @@ describe('#690 every `needs:` disarm names a job that exists and can skip', () =
     );
   });
 
-  it('the PROVER builds its mutation with the shared `disarmReplacement`', () => {
-    // The audit above inspects `disarmReplacement`'s output. That is only the
-    // mutation being proved while the prover uses the same builder — a second,
-    // look-alike implementation in the script would let the two agree with
-    // themselves while diverging from each other. Read from a CODE-ONLY view, so
-    // the identifier surviving in a comment does not satisfy it.
-    const source = blankNonCode(
-      readFileSync(resolve(REPO_ROOT, 'scripts/mutation-prove-ci-blocking-gates.mjs'), 'utf8'),
+  /**
+   * The sharing has to be REAL, and that means the CALL SITE (#690 r2).
+   *
+   * Round 1 asserted `disarmReplacement(` appeared somewhere in the prover and
+   * that the literal `disarm.define` did not. Neither says anything about what
+   * `mutate()` is actually handed. MEASURED: an inline rebuild that renames the
+   * alias and drops `define` keeps all of this file green — while the prover then
+   * injects `needs: proof-skippable` WITHOUT defining that job, which is exactly
+   * the nonexistent-target defect this whole block exists to close. So the
+   * assertion is anchored on the third argument of the `mutate(snap, anchor, …)`
+   * call, and on the import that makes the name mean the shared function rather
+   * than a local one.
+   */
+  const proverSource = () =>
+    readFileSync(resolve(REPO_ROOT, 'scripts/mutation-prove-ci-blocking-gates.mjs'), 'utf8');
+
+  it("the PROVER's `mutate()` is handed `disarmReplacement(...)` itself", () => {
+    // Code-only, so an identifier surviving in a comment does not satisfy it.
+    expect(blankNonCode(proverSource())).toMatch(
+      /\bmutate\(\s*snap\s*,\s*anchor\s*,\s*disarmReplacement\(/,
     );
-    expect(source).toMatch(/\bdisarmReplacement\s*\(/);
-    // And nothing rebuilds it inline: the old `${disarm.define ?? ''}` form is
-    // what this replaced, so its return would be a silent fork.
-    expect(source).not.toMatch(/disarm\.define/);
+  });
+
+  it('and that name is the SHARED one — imported, not a local look-alike', () => {
+    // The call-site anchor alone is satisfied by `function disarmReplacement()`
+    // declared in the prover, which is the copy-instead-of-share failure with the
+    // right spelling. Literals intact, because the module specifier IS a literal.
+    const code = codeWithLiterals(proverSource());
+    expect(code).toMatch(
+      /import\s*\{[^}]*\bdisarmReplacement\b[^}]*\}\s*from\s*'\.\/lib\/ci-blocking-gate-proof\.mjs'/,
+    );
+    expect(
+      /\b(?:function|const|let|var)\s+disarmReplacement\b/.test(code),
+      'the prover defines its own disarmReplacement — that is a fork, not sharing',
+    ).toBe(false);
   });
 });

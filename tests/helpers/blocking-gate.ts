@@ -1,4 +1,6 @@
+import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { parse } from 'yaml';
 
 /**
@@ -684,6 +686,102 @@ export function auditJobCanNotSkip(
 }
 
 /**
+ * A GitHub `paths:` glob as a RegExp over repo-relative POSIX paths.
+ *
+ * `**` crosses `/` (and may match zero directories); `*` and `?` do not. Lifted
+ * here from `tests/operator-image-pin-resolution.test.ts` (#690) so the audit and
+ * that spec's walk-coverage assertion share ONE translation — two of them could
+ * only diverge, and the spec's `it('the glob translation itself is right')` is
+ * now coverage for the audit too.
+ */
+export function globToRegExp(glob: string): RegExp {
+  const body = glob
+    .split(/(\*\*\/|\*\*|\*|\?)/)
+    .map((part) => {
+      if (part === '**/') return '(?:[^/]+/)*';
+      if (part === '**') return '.*';
+      if (part === '*') return '[^/]*';
+      if (part === '?') return '[^/]';
+      return part.replace(/[.+^${}()|[\]\\]/g, '\\$&');
+    })
+    .join('');
+  return new RegExp(`^${body}$`);
+}
+
+const REPO_ROOT = resolve(import.meta.dirname, '..', '..');
+
+let trackedFilesCache: string[] | null = null;
+
+/**
+ * Every tracked path, once per process.
+ *
+ * A `git` that cannot run THROWS, which surfaces as a red test — deliberately.
+ * An audit that silently treated "I could not list the files" as "the filter is
+ * fine" would be the unreachable-API-is-a-pass failure `security.md` names.
+ */
+function trackedFiles(): string[] {
+  if (trackedFilesCache) return trackedFilesCache;
+  trackedFilesCache = execFileSync('git', ['ls-files', '-z'], {
+    cwd: REPO_ROOT,
+    maxBuffer: 64 * 1024 * 1024,
+  })
+    .toString('utf8')
+    .split('\0')
+    .filter(Boolean);
+  return trackedFilesCache;
+}
+
+/**
+ * Everything that makes a `paths:` filter VACUOUS — a filter that matches
+ * nothing is a gate that never runs (#690).
+ *
+ * The first version of this option checked `value.length === 0` and nothing
+ * else, which is why `paths: ['']`, `paths: ['   ']` and
+ * `paths: ['no/such/dir/**']` all passed the audit while being exactly the
+ * disarm the option promises to refuse. Leaning on the CALLER to catch those was
+ * an obligation stated in prose, and a documented expectation degrades; the
+ * cheapest fix is for the audit to refuse them itself, so the caller's remaining
+ * obligation is the one thing only the caller can know — that the filter COVERS
+ * what its gate protects.
+ *
+ * WHAT IS DELIBERATELY NOT CHECKED, because it was MEASURED to be wrong: a
+ * PER-GLOB "this one matches no tracked file" rule. It reports
+ * `benchmarks/**\/*.yml` as dead scope, and that is a false positive —
+ * `verify-image-pins.mjs` accepts `/\.(ya?ml|sh)$/` under `benchmarks/`, so a
+ * `.yml` benchmark WOULD be scanned; the repo simply has none today. A check
+ * that cannot tell "future scope the walk already accepts" from "scope the gate
+ * does not have" makes deleting a correct glob the way back to green. The
+ * LIST-level form has no such failure mode: a filter where NOT ONE glob matches
+ * any tracked file cannot be future scope, it is a gate that never fires.
+ */
+function vacuousPathsProblems(value: unknown): string[] {
+  if (!Array.isArray(value) || value.length === 0) {
+    return [
+      `the \`pull_request\` trigger's \`paths\` filter is empty (${JSON.stringify(value)}) — an allowlist that matches nothing means this gate never runs`,
+    ];
+  }
+  const problems: string[] = [];
+  for (const entry of value) {
+    if (typeof entry !== 'string' || entry.trim() === '') {
+      problems.push(
+        `the \`pull_request\` trigger's \`paths\` filter carries the vacuous entry ${JSON.stringify(entry)} — an empty or blank glob matches nothing`,
+      );
+    }
+  }
+  const globs = value.filter((e): e is string => typeof e === 'string' && e.trim() !== '');
+  if (globs.length > 0) {
+    const patterns = globs.map((g) => globToRegExp(g.trim()));
+    const matchesSomething = trackedFiles().some((file) => patterns.some((re) => re.test(file)));
+    if (!matchesSomething) {
+      problems.push(
+        `the \`pull_request\` trigger's \`paths\` filter (${JSON.stringify(globs)}) matches NO tracked file — a filter nothing satisfies is a gate that never runs`,
+      );
+    }
+  }
+  return problems;
+}
+
+/**
  * Audit `jobId` in `workflowPath` as a blocking, always-runs-on-PR gate.
  *
  * Returns problems rather than throwing so the caller can assert on the whole
@@ -732,17 +830,12 @@ export function auditBlockingGate(options: BlockingGateOptions): BlockingGateAud
       if (key === 'branches' && isUniversalBranchFilter((pr as Record<string, unknown>)[key])) {
         continue;
       }
-      // The one caller-opted exemption (#677), narrowed twice: `paths` only —
-      // never `paths-ignore`, which is an exclusion and so states no coverage —
-      // and never an EMPTY list, which matches nothing and is therefore the
-      // disarm this option would otherwise introduce.
+      // The one caller-opted exemption (#677), narrowed three times: `paths`
+      // only — never `paths-ignore`, which is an exclusion and so states no
+      // coverage — never an EMPTY list, and (#690) never a list that is VACUOUS
+      // in the ways an empty one is: see `vacuousPathsProblems`.
       if (key === 'paths' && allowPathsFilter) {
-        const value = (pr as Record<string, unknown>).paths;
-        if (!Array.isArray(value) || value.length === 0) {
-          problems.push(
-            `the \`pull_request\` trigger's \`paths\` filter is empty (${JSON.stringify(value)}) — an allowlist that matches nothing means this gate never runs`,
-          );
-        }
+        problems.push(...vacuousPathsProblems((pr as Record<string, unknown>).paths));
         continue;
       }
       problems.push(

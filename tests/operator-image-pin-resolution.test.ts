@@ -29,7 +29,7 @@ import {
   resolveTagDigest,
   verifyImagePin,
 } from '../scripts/verify-image-pins.mjs';
-import { auditBlockingGate } from './helpers/blocking-gate';
+import { auditBlockingGate, globToRegExp } from './helpers/blocking-gate';
 
 const ROOT = resolve(import.meta.dirname, '..');
 
@@ -232,23 +232,10 @@ describe('the check is actually wired to run', () => {
     '.github/workflows/image-pin-resolution-nightly.yml',
   ];
 
-  /**
-   * A GitHub `paths:` glob as a RegExp over repo-relative POSIX paths.
-   * `**` crosses `/` (and may match zero directories); `*` and `?` do not.
-   */
-  const globToRegExp = (glob: string): RegExp => {
-    const body = glob
-      .split(/(\*\*\/|\*\*|\*|\?)/)
-      .map((part) => {
-        if (part === '**/') return '(?:[^/]+/)*';
-        if (part === '**') return '.*';
-        if (part === '*') return '[^/]*';
-        if (part === '?') return '[^/]';
-        return part.replace(/[.+^${}()|[\]\\]/g, '\\$&');
-      })
-      .join('');
-    return new RegExp(`^${body}$`);
-  };
+  // `globToRegExp` moved into `tests/helpers/blocking-gate.ts` (#690): the audit
+  // now uses the same translation to refuse a `paths:` filter that matches no
+  // tracked file, and two implementations of one rule can only diverge. The
+  // assertion below is therefore coverage for the audit as well as for this walk.
 
   it('the glob translation itself is right — the comparison below rests on it', () => {
     // Both halves: it must match what GitHub matches and reject what it does not.
