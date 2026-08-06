@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { auditFailOnRedGateTeeth } from './helpers/fail-on-red-gate.js';
 
 /**
  * GUARD TEST for .github/workflows/test-e2e-deploy.yml (#89 / ADR-0007 A3-2).
@@ -18,9 +19,14 @@ import { describe, expect, it } from 'vitest';
  * version must match the repo's pinned pnpm (`packageManager` in package.json)
  * so the two never drift.
  *
- * Implementation note: this scans the workflow YAML as text rather than parsing
- * it with a YAML library, so the test adds no new runtime dependency (the repo
- * has no direct `yaml` dep) and stays trivially portable across CI runners.
+ * Implementation note: most of this file scans the workflow YAML as TEXT, which
+ * was originally justified by the repo having no direct `yaml` dependency. That
+ * justification has expired — `yaml` is a root devDependency and eight sibling
+ * specs parse with it — and #700 is what the text approach costs: one regex over
+ * a step block whose needle legitimately recurred stayed green while a tooth was
+ * removed. New claims about the SHAPE of a step are therefore made against the
+ * parsed document (`tests/helpers/fail-on-red-gate.ts`); the text scans that
+ * remain are presence checks, where a substring is the whole claim.
  */
 
 const REPO_ROOT = resolve(import.meta.dirname, '..');
@@ -2145,7 +2151,13 @@ describe('compat-suite fail-on-red gate — revocation teeth (test-e2e-deploy.ym
     expect(/compat-suite-summary/.test(gate), 'gate must read the shard summary JSON').toBe(true);
     expect(/\bfailed\b/.test(gate), 'gate must check the failed count').toBe(true);
     expect(/\bnotRun\b/.test(gate), 'gate must check the notRun (phantom) count').toBe(true);
-    expect(/exit 1|process\.exit\(1\)/.test(gate), 'gate must fail the job on red').toBe(true);
+    // #700: the `exit 1|process.exit(1)` assertion that used to sit here was
+    // ONE regex over the WHOLE step block, and that step carries THREE
+    // independent teeth — so deleting any one left the OR satisfied by the
+    // other two and the whole suite stayed green. The claim now lives in the
+    // per-branch structural guards below, one assertion per tooth. Everything
+    // in THIS test is a presence check on the step's inputs, which is a
+    // different claim and stays.
     expect(
       /missing|! -f|-f\s+"?\$\{?SUMMARY/.test(gate),
       'a missing summary is NOT green — the gate must fail on it',
@@ -2170,6 +2182,67 @@ describe('compat-suite fail-on-red gate — revocation teeth (test-e2e-deploy.ym
       /expectedTotal/.test(gate),
       'gate must surface expectedTotal so the red message names how many results are missing',
     ).toBe(true);
+  });
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // #700 — the three teeth, judged PER BRANCH.
+  //
+  // The step above carries three independent exits (missing summary, failed>0
+  // / notRun>0, truncated) and the guard protecting all three was one regex
+  // over the whole block. RE-MEASURED on this tree, not quoted from the issue:
+  // deleting `process.exit(1)` from the `failed > 0` branch left the assertion
+  // that owned the claim GREEN, and every other spec green with it (61 files,
+  // 1446 passed). The step kept its name, kept `if: always()`, still printed
+  // its `::error::` lines — and exited 0. A night with real test failures would
+  // have concluded SUCCESS and counted toward the 14-night v1.0 window in
+  // docs/compat/window-node-lane.md.
+  //
+  // One `it()` per tooth, each reading only its OWN branch out of the parsed
+  // step (shell `if`/`fi` walk for the first, a real TypeScript AST of the
+  // embedded `node -e` program for the other two). Deleting any one tooth reds
+  // exactly one of these and the message names that branch. Proved in both
+  // directions by scripts/mutation-prove-compat-fail-on-red-teeth.mjs: each
+  // disarm reds its own assertion AND leaves the other two green.
+  // ───────────────────────────────────────────────────────────────────────────
+  const teeth = auditFailOnRedGateTeeth(WORKFLOW_PATH);
+
+  it('#700 the teeth audit is NON-VACUOUS — it located all three branches structurally', () => {
+    // First, because every per-tooth assertion below would pass over an empty
+    // finding list if the parse had matched nothing at all.
+    expect(teeth.branchesFound.slice().sort(), 'the audit did not locate all three teeth').toEqual(
+      ['failed-or-not-run', 'missing-summary', 'truncated'].sort(),
+    );
+    expect(teeth.shellIfBlocks, 'no shell `if` block was parsed out of the gate').toBeGreaterThan(
+      0,
+    );
+    expect(
+      teeth.jsIfStatements,
+      'no `if` statement was parsed out of the node program',
+    ).toBeGreaterThan(1);
+  });
+
+  it('#700 tooth 1/3 — a MISSING summary has its OWN failing exit', () => {
+    const problems = teeth.teeth['missing-summary'];
+    expect(problems, problems.join('\n')).toEqual([]);
+  });
+
+  it('#700 tooth 2/3 — failed>0 / notRun>0 has its OWN failing exit', () => {
+    const problems = teeth.teeth['failed-or-not-run'];
+    expect(problems, problems.join('\n')).toEqual([]);
+  });
+
+  it('#700 tooth 3/3 — a TRUNCATED summary has its OWN failing exit', () => {
+    const problems = teeth.teeth.truncated;
+    expect(problems, problems.join('\n')).toEqual([]);
+  });
+
+  it('#700 the gate script’s exit status REACHES the step (nothing swallows it)', () => {
+    // Three teeth that each exit 1 are worth nothing if the command carrying
+    // them is `|| true`'d, piped, or run with errexit off. That is not
+    // hypothetical here — it is exactly how the shard RUN step one level above
+    // lost its exit, which is the defect this whole gate exists to compensate
+    // for.
+    expect(teeth.exitReachesStep, teeth.exitReachesStep.join('\n')).toEqual([]);
   });
 
   it('the run step comment no longer claims "matrix row stays ❌ regardless" (stale pre-graduation contract)', () => {
