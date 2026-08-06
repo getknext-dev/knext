@@ -1,0 +1,173 @@
+name: Mutation provers (nightly)
+
+# ── #685: nothing in CI ran any mutation prover, and seven were found broken ───
+# `grep -rn mutation-prove .github/workflows/` returned NOTHING before this file.
+# Every prover was manual-only, which is the structural reason SEVEN of them were
+# found non-functional in one session, across five distinct root causes — and why
+# three of those printed a confidently WRONG diagnosis instead of failing loudly.
+#
+# WHAT THIS LANE FAILS ON — two things, and the second is the one that matters:
+#   1. a non-zero exit from any prover;
+#   2. a DECLARED-vs-RUN mutation-count mismatch. `mutation-prove-publish-markers`
+#      ran 4 of its 13 mutations and exited 0 for several PRs while being cited as
+#      evidence for all thirteen. An exit-code-only check calls that GREEN. Every
+#      prover therefore declares its count up front (`scripts/lib/prover-report.mjs`)
+#      and `scripts/run-mutation-provers.mjs` compares — in BOTH directions, so a
+#      mutation added without bumping the declaration reds as well.
+#
+# The prover set is DISCOVERED by glob, never listed here: an eighth prover
+# written next month runs tonight. `tests/mutation-prover-lane.test.ts` audits the
+# same discovered set at PR time for the runner-resolution and declaration
+# contracts, and asserts this file's shape.
+#
+# WHY NOT A PR GATE — stated, not implied. The provers MUTATE
+# `.github/workflows/ci.yml` and `tests/helpers/*` in the working tree and run a
+# vitest process per mutation: ~60 spec runs for `mutation-prove-ci-blocking-gates`
+# alone. Putting that on `pull_request` would add many minutes to every PR to
+# re-answer a question whose answer changes only when a guard or a workflow
+# changes. This lane is deliberately `schedule` + `workflow_dispatch` ONLY.
+#
+# ONE HALF of `tests/helpers/blocking-gate.ts` applies here and the other does
+# not, and the first round wrongly took the second's inapplicability as licence to
+# skip both. The TRIGGER half certifies a job as an unconditional PR gate, which
+# this is not and must not be described as. The CAN-NOT-SKIP half
+# (`auditJobCanNotSkip`) applies to any job whose failure must fail its run, and
+# it IS applied to `run-mutation-provers` — because a job-level `if:` makes the
+# job SKIP, a skipped job does not fail the run, AND `needs.<job>.result` is then
+# `'skipped'` rather than `'failure'`, so the alert below would never fire either.
+# Green and unwatched, which is #685's own failure mode inside the lane built to
+# end it. The OTHER soft-fail flag — the per-step one that lets a red step pass —
+# is asserted against separately by a scan of the WHOLE file, which is why its
+# name cannot appear in this comment either.
+#
+# #670 / #640 — A NIGHTLY WITHOUT AN OWNER BECOMES BACKGROUND NOISE, and a
+# permanently-red gate stops being read. The alert job below is the same
+# create-or-update-ONE-pinned-issue shape as `action-pin-resolution-nightly.yml`;
+# do not add a sixth unwatched nightly instead.
+#
+# HUMAN PRECONDITION: the alert-issue create/pin needs "Settings → Actions →
+# General → Workflow permissions → Allow GitHub Actions to create and approve
+# pull requests" ENABLED (it also governs issue creation by the default token).
+
+on:
+  # 06:07 UTC nightly — after the compat (03:17), docs-closure (04:23),
+  # action-pin (05:11) and image-pin (05:41) nightlies, so the longest-running
+  # job of the set does not make the security signals queue behind it.
+  schedule:
+    - cron: '7 6 * * *'
+  # Manual re-runs after fixing a prover; the alert job is scheduled-only (below)
+  # so a dispatch experiment never files or updates the pinned issue.
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  run-mutation-provers:
+    # Not a required-check name: this workflow is `schedule` + `workflow_dispatch`
+    # only, so renaming the job cannot orphan a branch-protection rule.
+    name: Run every mutation prover (glob-discovered)
+    runs-on: ubuntu-latest
+    # Each prover spawns a vitest run per mutation and the lane runs them all;
+    # generous, but bounded, so a hung prover does not burn a runner all day.
+    timeout-minutes: 60
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Same pins and same order as every ci.yml job (node, then pnpm), so this
+      # lane cannot drift into a different toolchain than the guards it proves.
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+
+      # The provers RESOLVE `node_modules/.bin/vitest` by walking up from the repo
+      # root, so the install is what makes them runnable at all — the very failure
+      # (`pnpm exec` resolving nothing without a local install) that broke four of
+      # the seven.
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run every mutation prover (FAIL on exit code OR count mismatch)
+        run: node scripts/run-mutation-provers.mjs
+
+      # The provers mutate tracked files and restore from byte snapshots. If a
+      # restore is ever wrong the lane must say so rather than leaving the finding
+      # to whoever next runs `git status` locally.
+      - name: Assert no mutation residue survived
+        if: always()
+        run: |
+          set -euo pipefail
+          node scripts/scan-mutation-residue.mjs
+          git diff --exit-code
+
+  # ── Idempotent pinned alert (same pattern as action-pin-resolution-nightly) ───
+  nightly-red-alert:
+    name: Nightly red alert (pinned issue)
+    needs: [run-mutation-provers]
+    # always() so this is not skipped when the lane fails; the needs-result check
+    # fires it ONLY on failure; the event check scopes it to the schedule.
+    if: >-
+      always() &&
+      github.event_name == 'schedule' &&
+      needs.run-mutation-provers.result == 'failure'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      - name: Create or update the "mutation provers RED" issue (idempotent)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          CHECK_RESULT: ${{ needs.run-mutation-provers.result }}
+        run: |
+          set -euo pipefail
+          # The idempotency KEY is this fixed literal title — the lookup and the
+          # create MUST share it, so keep it a constant (never interpolated).
+          title='Mutation provers RED'
+          body="The nightly mutation-prover lane FAILED. At least one prover either exited non-zero
+          or ran a different number of mutations than it DECLARES — and the second case is the one
+          this lane exists for: a prover that runs 4 of 13 and exits 0 certifies nothing while
+          reading as evidence.
+
+          - Run (per-prover output and the LANE SUMMARY table are in the job log): ${RUN_URL}
+          - Lane job result: ${CHECK_RESULT}
+
+          **Triage — read the LANE SUMMARY table at the end of the log first.** It prints
+          \`run/declared\` per prover, so it separates the two cases before you open anything:
+
+          - *declared N but ran M* — the prover stopped early. The usual cause is ANCHOR ROT: a
+            mutation's anchor string no longer occurs exactly once in its subject, so the harness
+            refused to mutate. Fix the anchor; do NOT lower the declared count to match.
+          - *non-zero exit with matching counts* — a real finding. A guard stayed GREEN with the
+            behaviour it protects removed, i.e. it is decoration. Fix the GUARD, not the prover.
+          - *no mutation summary at all* — the prover crashed before its first mutation, or stopped
+            calling \`declareMutations\`. Read its own output above the summary table.
+          - *residue / dirty tree* — a byte-snapshot restore did not put the file back. This is the
+            most urgent case: treat the tree as untrustworthy and read
+            \`scripts/lib/mutation-harness.mjs\` before rerunning.
+
+          Never make this lane green by weakening a prover. Re-run the workflow to confirm the fix,
+          then close this issue."
+          # Idempotency: exactly-one open alert issue. --limit 100 explicitly
+          # (gh defaults to 30) so the pinned alert cannot fall off the first
+          # page and make every red night file a NEW issue.
+          existing="$(gh issue list --repo "${GITHUB_REPOSITORY}" --state open --limit 100 \
+            --json number,title \
+            --jq "[.[] | select(.title == \"${title}\")][0].number // empty")"
+          if [ -n "${existing}" ]; then
+            echo "updating existing alert issue #${existing}"
+            gh issue comment "${existing}" --repo "${GITHUB_REPOSITORY}" --body "${body}"
+          else
+            echo "creating the alert issue"
+            new_url="$(gh issue create --repo "${GITHUB_REPOSITORY}" --title "${title}" --body "${body}")"
+            new_num="${new_url##*/}"
+            gh issue pin "${new_num}" --repo "${GITHUB_REPOSITORY}" || echo "::warning::could not pin issue #${new_num} (non-fatal)"
+          fi

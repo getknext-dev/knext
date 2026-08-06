@@ -28,7 +28,9 @@
 import { execFileSync, spawnSync } from 'node:child_process';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { resolveTestRunner } from './lib/ci-blocking-gate-proof.mjs';
 import { mutate, restore, snapshot } from './lib/mutation-harness.mjs';
+import { declareMutations, recordMutation } from './lib/prover-report.mjs';
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const CI_YML = resolve(REPO_ROOT, '.github/workflows/ci.yml');
@@ -41,8 +43,27 @@ const ANCHOR = '  compile-cache-bun-probe:\n';
 /** SGR colour codes in vitest's output — see the sibling proof for why not `\x1b`. */
 const ANSI = new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*m`, 'g');
 
+/**
+ * The three references planted below — the #661 hole and its two regressions.
+ *
+ * A literal, because they are inline `prove()` calls rather than a list; the
+ * lane compares declared against run in BOTH directions, so a fourth planted
+ * reference that does not bump this reddens rather than passing quietly (#685).
+ */
+declareMutations(3);
+
 let pass = 0;
 let fail = 0;
+
+/**
+ * `pnpm exec vitest` used to launch the scan, and it resolves NOTHING in a tree
+ * without its own `node_modules` — a git worktree, a fresh clone before install.
+ * Every run then reported `ran === 0` and FATALed on the baseline, naming a
+ * cause that was not the cause. The resolver landed in #680/#681 for two other
+ * provers; #685 backported it here and added the scan that stops the next such
+ * gap from depending on someone remembering.
+ */
+const RUNNER = resolveTestRunner(REPO_ROOT);
 
 /** A basename shared by more than one tracked test file, or `null` if none is. */
 function anAmbiguousBasename() {
@@ -59,7 +80,7 @@ function anAmbiguousBasename() {
 }
 
 function runScan() {
-  const res = spawnSync('pnpm', ['exec', 'vitest', 'run', SPEC, '-t', TEST_NAME], {
+  const res = spawnSync(RUNNER.command, [...RUNNER.args, 'run', SPEC, '-t', TEST_NAME], {
     cwd: REPO_ROOT,
     encoding: 'utf8',
   });
@@ -87,6 +108,7 @@ function prove(label, reference) {
       console.log('   ok went RED as required');
       pass += 1;
     }
+    recordMutation();
   } finally {
     restore(snap);
   }

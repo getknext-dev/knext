@@ -27,10 +27,20 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { resolveTestRunner } from './lib/ci-blocking-gate-proof.mjs';
 import { mutate, restore, snapshot } from './lib/mutation-harness.mjs';
+import { declareMutations, recordMutation } from './lib/prover-report.mjs';
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const HELPER = resolve(REPO_ROOT, 'tests/helpers/blocking-gate.ts');
 const SPEC = 'tests/blocking-gate-helper.test.ts';
+
+/**
+ * The eight neuters restored below.
+ *
+ * A literal, because they are inline `prove()` calls rather than a list; the
+ * lane compares declared against run in BOTH directions, so a ninth that does
+ * not bump this reddens rather than passing quietly (#685).
+ */
+declareMutations(8);
 
 let pass = 0;
 let fail = 0;
@@ -67,6 +77,7 @@ function prove(label, anchor, replacement) {
       console.log('   ok went RED as required');
       pass += 1;
     }
+    recordMutation();
   } finally {
     restore(snap);
   }

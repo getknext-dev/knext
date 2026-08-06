@@ -20,18 +20,39 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { appendFileSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { resolveTestRunner } from './lib/ci-blocking-gate-proof.mjs';
 import { mutate, restore, snapshot } from './lib/mutation-harness.mjs';
+import { declareMutations, recordMutation } from './lib/prover-report.mjs';
 import { scanForResidue } from './scan-mutation-residue.mjs';
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const SCANNER = resolve(REPO_ROOT, 'scripts/scan-mutation-residue.mjs');
 const HARNESS = resolve(REPO_ROOT, 'scripts/lib/mutation-harness.mjs');
 
+/**
+ * Three `prove()` calls plus the two verdicts step 4 scores by hand.
+ *
+ * A literal, because the mutations here are inline rather than a list — and it
+ * cannot rot into a lie: the lane compares declared against run in BOTH
+ * directions, so adding a sixth verdict without bumping this reddens too (#685).
+ */
+declareMutations(5);
+
 let pass = 0;
 let fail = 0;
 
+/**
+ * `pnpm exec vitest` used to launch this, and it resolves NOTHING in a tree
+ * without its own `node_modules` — a git worktree, a fresh clone before install.
+ * The fix landed in #680/#681 and was applied only to the two provers those PRs
+ * touched, so this one stayed broken in every worktree until #685 backported it.
+ * A fix that is not propagated is a fix with a countdown on it, which is why
+ * `tests/mutation-prover-lane.test.ts` now scans every prover for this.
+ */
+const RUNNER = resolveTestRunner(REPO_ROOT);
+
 function vitest(spec) {
-  const r = spawnSync('pnpm', ['exec', 'vitest', 'run', spec], {
+  const r = spawnSync(RUNNER.command, [...RUNNER.args, 'run', spec], {
     cwd: REPO_ROOT,
     encoding: 'utf8',
   });
@@ -51,6 +72,7 @@ function prove(label, file, anchor, replacement, spec) {
       console.log('   ok went RED as required');
       pass += 1;
     }
+    recordMutation();
   } finally {
     restore(snap);
   }
@@ -145,6 +167,7 @@ try {
     console.log('   ok git status is BLIND: identical report either way');
     pass += 1;
   }
+  recordMutation();
 
   const offenders = scanForResidue({ cwd: REPO_ROOT });
   const hit = offenders.find((o) => o.path === relSubject);
@@ -155,6 +178,7 @@ try {
     console.log('   x DECORATION: the scan did not fire on planted residue');
     fail += 1;
   }
+  recordMutation();
 } finally {
   restore(snap);
 }

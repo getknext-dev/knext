@@ -46,6 +46,7 @@ import {
   runGateTest as runGateTestIn,
 } from './lib/ci-blocking-gate-proof.mjs';
 import { mutate, restore, snapshot } from './lib/mutation-harness.mjs';
+import { declareMutations, recordMutation } from './lib/prover-report.mjs';
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -86,6 +87,14 @@ const disarmsFor = (gate) => [
     inject: '    strategy:\n      matrix:\n        shard: []',
   },
 ];
+
+/**
+ * DERIVED — every gate times every disarm, so a gate or a disarm added below is
+ * declared without a second edit. The lane (#685) compares this against the
+ * number actually scored and fails on either direction, which is what makes a
+ * prover that stops at gate 3 of 6 loud instead of a green that proves nothing.
+ */
+declareMutations(GATES.reduce((n, gate) => n + disarmsFor(gate).length, 0));
 
 let pass = 0;
 let fail = 0;
@@ -131,6 +140,7 @@ function prove(gate, disarm) {
       console.log('   ok went RED as required');
       pass += 1;
     }
+    recordMutation();
   } finally {
     restore(snap);
   }

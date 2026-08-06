@@ -27,9 +27,19 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { resolveTestRunner } from './lib/ci-blocking-gate-proof.mjs';
 import { mutate, restore, snapshot } from './lib/mutation-harness.mjs';
+import { declareMutations, recordMutation } from './lib/prover-report.mjs';
 import { MUTATIONS } from './lib/publish-markers-proof.mjs';
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+
+/**
+ * DERIVED from the mutation list, so the declaration cannot disagree with it.
+ *
+ * This prover is the reason the lane compares declared against run at all: it
+ * ran 4 of these 13 for several PRs — `mutate` aborted on an anchor #675 had
+ * deleted — and still exited 0, so an exit-code-only check called it green.
+ */
+declareMutations(MUTATIONS.length);
 
 let pass = 0;
 let fail = 0;
@@ -66,6 +76,7 @@ function prove({ label, file, spec, anchor, replacement }) {
       console.log('   ok went RED as required');
       pass += 1;
     }
+    recordMutation();
   } finally {
     restore(snap);
   }
