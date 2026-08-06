@@ -201,6 +201,51 @@ interface ShellIfBlock {
 const ONE_LINE_IF = /^\s*if\b(?<cond>.*?);\s*then\b(?<body>.*?);?\s*fi\s*;?\s*$/;
 
 /**
+ * Shell block openers and closers, for measuring nesting depth at a line.
+ *
+ * Counted as PAIRS on each line and netted, so a construct that opens and closes
+ * on one line (`if …; then …; fi`, `case … in x) … ;; esac`, `${VAR}`, `$(…)`)
+ * contributes zero — which is what keeps `"${SUMMARY}"` and `[ ! -f … ]` from
+ * registering as nesting.
+ */
+const BLOCK_OPEN = [/\bthen\b/g, /\bdo\b/g, /^\s*case\b(?=.*\bin\b)/g, /\{/g, /\(/g] as const;
+const BLOCK_CLOSE = [/\bfi\b/g, /\bdone\b/g, /\besac\b/g, /\}/g, /\)/g] as const;
+
+/**
+ * A `case` PATTERN terminator — `node)`, `bun|node)` — which is not a closing
+ * paren.
+ *
+ * Measured, not anticipated: without this the `case` arm was the one shape of
+ * five that slipped, because `case … in` opened the block (+1) and the very next
+ * pattern line closed it again (−1), netting zero at the invocation. The other
+ * four shapes were caught, which is exactly how a check ships with one hole —
+ * the failing shape is the one nobody probes.
+ */
+const CASE_PATTERN = /^\s*\(?[^()|\s]+(?:\s*\|\s*[^()|\s]+)*\)/;
+
+const countAll = (line: string, res: readonly RegExp[]): number =>
+  res.reduce((n, re) => n + (line.match(new RegExp(re.source, 'g'))?.length ?? 0), 0);
+
+/**
+ * Net shell block-nesting depth of `lines[index]`, counting only the lines
+ * BEFORE it.
+ *
+ * Comments are skipped, and the caller is expected to have blanked the embedded
+ * `node -e '…'` program by offset — otherwise the JS braces inside it would be
+ * counted as shell blocks.
+ */
+export function shellNestingDepthAt(lines: readonly string[], index: number): number {
+  let depth = 0;
+  for (let i = 0; i < index; i += 1) {
+    const raw = lines[i] as string;
+    if (/^\s*#/.test(raw)) continue;
+    const line = raw.replace(CASE_PATTERN, '');
+    depth += countAll(line, BLOCK_OPEN) - countAll(line, BLOCK_CLOSE);
+  }
+  return depth;
+}
+
+/**
  * Where a shell COMMAND can begin: start of line, or after a separator.
  *
  * This is what tells a shell `exit` from `process.exit(1)` — the latter is
@@ -1146,6 +1191,37 @@ export function auditFailOnRedGateTeeth(workflowPath: string): GateTeethAudit {
   const programSpan = embeddedNodeProgramSpan(run);
   const scanSource =
     programSpan === null ? run : blankSpan(run, programSpan.start, programSpan.end);
+
+  // THE INVOCATION ITSELF MUST BE TOP-LEVEL (#704).
+  //
+  // The JS half already asserts each tooth's owning `if` is a top-level
+  // statement of the embedded program. The shell half had no sibling, and the
+  // asymmetry was live: wrapping ONLY the `node -e` invocation —
+  //
+  //   if [ "${KNEXT_RUNTIME:-node}" != "bun" ]; then
+  //     node -e '…' "${SUMMARY}"
+  //   fi
+  //
+  // — disarms all three teeth while every existing signal stays identical to
+  // baseline: teeth located, `branchesFound` three, `exitReachesStep` empty,
+  // `escapeHatches` empty. Measured: the real step goes exit 1 → exit 0 with
+  // zero `::error::` lines on a red Bun-lane shard.
+  //
+  // Note what does NOT need this check: wrapping the WHOLE prelude is already
+  // caught, because `shellIfBlocks` skips nested blocks (`i = j`) so the
+  // missing-summary branch stops being found. It is the narrower edit — leaving
+  // the prelude alone and enclosing just the invocation — that slipped, and it
+  // introduces no `exit`, so the escape scan has nothing to find either.
+  if (programSpan !== null) {
+    const upToProgram = scanSource.slice(0, programSpan.start).split('\n');
+    const depth = shellNestingDepthAt(upToProgram, upToProgram.length - 1);
+    if (depth > 0) {
+      escapeHatches.push(
+        `the step's \`node -e '…'\` invocation is nested ${depth} level(s) deep in the shell script rather than being a top-level statement — a conditional, brace group, subshell, \`case\` arm or function body around it decides whether the gate runs at all, and it does so without introducing an \`exit\` for the escape scan to find. The JS half asserts the same property for each tooth's owning \`if\`; this is its shell sibling`,
+      );
+    }
+  }
+
   if (missingBlock) {
     const thenArm = new Set(missingBlock.thenLines);
     for (const [i, line] of scanSource.split('\n').entries()) {
