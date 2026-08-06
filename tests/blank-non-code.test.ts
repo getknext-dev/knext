@@ -2,13 +2,15 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { blankNonCode } from '../scripts/lib/blank-non-code.mjs';
+import { testBlocks } from '../scripts/scan-half-scan-candidates.mjs';
 
 /**
  * The tokenizer's own spec.
  *
- * It had none: its behaviour was asserted only through its two callers
- * (`tests/compat-matrix.test.ts` and `declaredTestTitles`), so a region neither
- * caller happened to exercise went uncovered. A SHEBANG was exactly that region
+ * It had none: its behaviour was asserted only through its callers
+ * (`tests/compat-matrix.test.ts`, `declaredTestTitles`, and since #689 the
+ * half-a-scan reporter), so a region no caller happened to exercise went
+ * uncovered. A SHEBANG was exactly that region
  * — in `#!/usr/bin/env node` the character before the first `/` is `!`, which
  * `regexAllowedAfter` reads as "a value may start here", so `usr` was blanked as
  * a regex literal in every `scripts/*.mjs` (#684 item 1).
@@ -103,5 +105,65 @@ describe('blankNonCode treats a leading shebang as non-code', () => {
         `${file}: shebang line survived as ${JSON.stringify(firstLine)}`,
       ).toBe(true);
     }
+  });
+});
+
+/**
+ * The second consumer's half of the merged contract (#689).
+ *
+ * `scripts/scan-half-scan-candidates.mjs` used to carry `maskLiterals`, an
+ * independently written length-preserving blanker with the SAME shebang defect
+ * #684 fixed here. Consolidating deleted it, so this spec now has to cover what
+ * that consumer needs as well — otherwise the merge moves behaviour into a
+ * function whose spec was written for someone else, which is how the shebang
+ * region went uncovered through three reuses in the first place.
+ *
+ * `testBlocks` is the reporter's observable: it finds brace/paren-balanced
+ * `it()`/`test()` blocks in the BLANKED view, so any blanker mistake that eats a
+ * `)` or desyncs a quote shows up as a lost block.
+ */
+describe('the half-a-scan reporter shares the one blanker', () => {
+  it('a quote in a shebang cannot swallow the file below it', () => {
+    // Measured on `maskLiterals` before deletion: `!` was in its
+    // `regexAllowedAfter` class, so the `/` after `#!` opened a regex; and a
+    // shebang is arbitrary kernel text, so an apostrophe in it opened a STRING
+    // that ran to the next apostrophe far below — here the one in `it('…`,
+    // which desyncs every literal after it and loses the block entirely.
+    const src = [
+      "#!/usr/bin/env node --title=don't",
+      "it('a title', () => { const x = 1; });",
+      '',
+    ].join('\n');
+    expect(testBlocks(src).map((b) => b.body)).toEqual(["'a title', () => { const x = 1; }"]);
+  });
+
+  it('an unterminated regex is division, not a literal that eats the rest of the line', () => {
+    // The SECOND bug consolidation removes, found by diffing the two blankers
+    // over the real corpus: `maskLiterals` blanked from `/` to end-of-line even
+    // when no closing `/` arrived, so a JSX close tag `</Button>);` lost its
+    // `)` and the enclosing block stopped balancing. Measured cost: one real
+    // finding in `packages/ui/src/components/ui/button.test.tsx` that the
+    // reporter silently never saw.
+    const jsx = 'const { getByRole } = render(<Button>Default</Button>);';
+    expect(blankNonCode(`${jsx}\n`)).toBe(`${jsx}\n`);
+    const src = [`it('renders', () => {`, `  ${jsx}`, `  expect(1).toBe(1);`, `});`, ''].join('\n');
+    expect(testBlocks(src)).toHaveLength(1);
+  });
+
+  it('blanks the comment MARKER too, and leaves template holes as the code they are', () => {
+    // The two deliberate behaviour changes for this consumer, stated rather
+    // than discovered. `maskLiterals` kept `//`, `/*` and `*/` and blanked from
+    // `i + 2`; `blankNonCode` includes the marker. And `maskLiterals` treated a
+    // backtick like a plain quote, blanking template HOLES — real code, whose
+    // parens `testBlocks` needs. Measured over `tests/` + `scripts/`, neither
+    // difference moves a single reported finding in the `read` (default) or
+    // `sourcey` variants.
+    expect(blankNonCode('a; // note\n')).toBe(`a; ${' '.repeat('// note'.length)}\n`);
+    expect(blankNonCode('a; /* note */ b;\n')).toBe(`a; ${' '.repeat('/* note */'.length)} b;\n`);
+    // Built rather than written literally: a template hole inside a single-quoted
+    // fixture is what `noTemplateCurlyInString` exists to catch, and suppressing
+    // the rule is a worse trade than assembling the two characters.
+    const hole = `$${'{'} f(1) ${'}'}`;
+    expect(blankNonCode(`\`x${hole}y\`;\n`)).toBe(`\` ${hole} \`;\n`);
   });
 });

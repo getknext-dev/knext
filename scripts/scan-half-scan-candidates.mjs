@@ -38,6 +38,7 @@ import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { blankNonCode } from './lib/blank-non-code.mjs';
 
 /**
  * Matchers that make a block "already negative". Deliberately generous: an
@@ -57,76 +58,6 @@ const SOURCEY =
 
 const VARIANTS = new Set(['broad', 'sourcey', 'read']);
 
-/**
- * A copy of `source` with the CONTENTS of every string, template literal, regex
- * literal and comment replaced by spaces, offsets preserved.
- *
- * Required, not cosmetic: paren-balancing over raw text is defeated by a regex
- * literal carrying an unbalanced escaped paren — `/\bquery(?:Instant|Range)\(/`
- * is one line of the #636 corpus entry, and without masking it swallows the rest
- * of the block and the scan reports a MISS for a reason that has nothing to do
- * with the heuristic being measured. A false negative arrived at by accident is
- * still a false measurement.
- *
- * KNOWN BUG, deliberately not fixed here: this carries the identical shebang
- * defect `scripts/lib/blank-non-code.mjs` was fixed for in #684 — `!` is in
- * `regexAllowedAfter` above, so `maskLiterals('#!/usr/bin/env node\n…')` masks
- * `usr` as a regex literal and yields `#!/   /bin/env node`. Harmless today (this
- * is an advisory reporter, it always exits 0, no workflow runs it, and the mangle
- * introduces no bracket imbalance so the paren heuristic is unaffected) — but it
- * is a SECOND blanker with the SAME open bug, not merely a second blanker.
- * Consolidating the two, and fixing this, is #689.
- */
-export function maskLiterals(source) {
-  const out = source.split('');
-  const blank = (from, to) => {
-    for (let i = from; i < to && i < out.length; i++) if (out[i] !== '\n') out[i] = ' ';
-  };
-  // A `/` opens a regex only where a VALUE may start; after an identifier,
-  // literal or `)`/`]` it is division. This is the standard lexical rule.
-  const regexAllowedAfter =
-    /[([{,;:!&|?+\-*%~^=<>]$|\b(?:return|typeof|case|in|of|new|delete|void|do|else)$/;
-  let i = 0;
-  while (i < source.length) {
-    const c = source[i];
-    const two = source.slice(i, i + 2);
-    if (two === '//') {
-      const end = source.indexOf('\n', i);
-      blank(i + 2, end === -1 ? source.length : end);
-      i = end === -1 ? source.length : end;
-    } else if (two === '/*') {
-      const end = source.indexOf('*/', i + 2);
-      blank(i + 2, end === -1 ? source.length : end);
-      i = end === -1 ? source.length : end + 2;
-    } else if (c === '"' || c === "'" || c === '`') {
-      let j = i + 1;
-      while (j < source.length && source[j] !== c) j += source[j] === '\\' ? 2 : 1;
-      blank(i + 1, j);
-      i = j + 1;
-    } else if (c === '/') {
-      const before = source.slice(0, i).replace(/\s+$/, '');
-      if (before === '' || regexAllowedAfter.test(before)) {
-        let j = i + 1;
-        let inClass = false;
-        while (j < source.length && source[j] !== '\n') {
-          if (source[j] === '\\') j += 2;
-          else if (source[j] === '[') {
-            inClass = true;
-            j++;
-          } else if (source[j] === ']') {
-            inClass = false;
-            j++;
-          } else if (source[j] === '/' && !inClass) break;
-          else j++;
-        }
-        blank(i + 1, j);
-        i = j + 1;
-      } else i++;
-    } else i++;
-  }
-  return out.join('');
-}
-
 /** The `(`-balanced argument span of a call whose `(` sits at `open`. */
 function balanced(source, open) {
   let depth = 0;
@@ -143,11 +74,29 @@ function balanced(source, open) {
 /**
  * Brace-balanced `it()`/`test()` blocks as `{ start, body }`.
  *
- * Structure is found in the MASKED text (so a regex literal's escaped paren
+ * Structure is found in the BLANKED text (so a regex literal's escaped paren
  * cannot swallow the block) while `body` is sliced from the original, because
  * the negative-assertion and receiver checks need the real characters.
+ *
+ * Blanking is REQUIRED, not cosmetic: paren-balancing over raw text is defeated
+ * by a regex literal carrying an unbalanced escaped paren —
+ * `/\bquery(?:Instant|Range)\(/` is one line of the #636 corpus entry, and
+ * without blanking it swallows the rest of the block and the scan reports a MISS
+ * for a reason that has nothing to do with the heuristic being measured. A false
+ * negative arrived at by accident is still a false measurement.
+ *
+ * It uses the repo's ONE blanker (#689). This file used to carry `maskLiterals`,
+ * a second, independently written length-preserving blanker — with the identical
+ * shebang defect `blankNonCode` was fixed for in #684, plus one of its own:
+ * blanking an UNTERMINATED regex to end-of-line ate the `)` of a JSX close tag
+ * (`</Button>);`), which unbalanced the enclosing block and lost it. Measured
+ * before deleting it, over `tests/` + `scripts/`: the two blankers disagree on
+ * comment markers (it kept them; blankNonCode blanks them) and on `${…}` holes (it
+ * blanked them; they are code), and NEITHER disagreement moves a single reported
+ * finding in the `read` (default) or `sourcey` variants — 80 and 352, unchanged.
+ * `broad` goes 1018 -> 1019, the one move being the JSX block above, recovered.
  */
-export function testBlocks(source, masked = maskLiterals(source)) {
+export function testBlocks(source, masked = blankNonCode(source)) {
   const blocks = [];
   const re = /\b(?:it|test)(?:\.each\(|\.(?:only|skip|concurrent|todo|failing))?\s*\(/g;
   for (const m of masked.matchAll(re)) {
@@ -204,7 +153,7 @@ function rootIdentifier(receiver) {
 export function scanSource(source, file, variant = 'read') {
   if (!VARIANTS.has(variant)) throw new Error(`unknown variant "${variant}"`);
   const findings = [];
-  const masked = maskLiterals(source);
+  const masked = blankNonCode(source);
   for (const block of testBlocks(source, masked)) {
     // Masked: a doc comment mentioning "not" is not a negative assertion.
     if (NEGATIVE.test(block.maskedBody)) continue;

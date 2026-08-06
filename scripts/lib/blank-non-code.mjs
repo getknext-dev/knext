@@ -3,7 +3,10 @@
  *
  * Lifted verbatim out of `tests/compat-matrix.test.ts` (#680) so the second
  * caller — `declaredTestTitles` in `./ci-blocking-gate-proof.mjs` — reuses it
- * instead of becoming the third hand-rolled tokenizer in the tree. It lives in
+ * instead of becoming the third hand-rolled tokenizer in the tree, and joined by
+ * a third, `../scan-half-scan-candidates.mjs`, when #689 deleted the ONE other
+ * blanker that did get hand-rolled (`maskLiterals` — same shebang defect, plus
+ * an unterminated-regex bug of its own). It lives in
  * `scripts/lib/*.mjs` rather than a `.ts` test helper because one of its callers
  * is a plain `node` script, not a vitest module.
  *
