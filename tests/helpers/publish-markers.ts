@@ -140,20 +140,40 @@ const ALTERNATION_GROUP = /\(([^()]*\|[^()]*)\)/g;
  * FAILS CLOSED on a marker with more than one alternation group: the cross
  * product is not what a caller would mean by "branch", so widening this is a
  * deliberate edit rather than a silent under-count.
+ *
+ * FAILS CLOSED, TOO, on a `|` OUTSIDE that group (#681 item 2). The round-1
+ * contract covered only the group count, and the shape it left failing OPEN is
+ * the natural way the next marker gets written: `/\bnpm publish\b|\bnpm
+ * dist-tag\b/`. MEASURED on that version — an ungrouped top-level alternation
+ * yielded ONE "branch" equal to the whole source, so a single sample satisfied
+ * the branch-coverage assertion and the other alternative was unexercised,
+ * SILENTLY. An enumerator whose whole purpose is to make unexercised
+ * alternatives visible must not report full coverage of a marker it did not
+ * decompose, so the cross-check is on the `|` rather than on the group count.
+ *
+ * An escaped `\|` (a LITERAL pipe) throws too. No marker uses one, and failing
+ * closed on a shape nobody writes is the cheap direction of that error.
  */
 export function enumerateMarkerBranches(marker: { id: string; re: RegExp }): MarkerBranch[] {
   const source = marker.re.source;
   const groups = [...source.matchAll(ALTERNATION_GROUP)];
-  if (groups.length === 0) return [{ id: marker.id, branch: source, re: marker.re }];
   if (groups.length > 1) {
     throw new Error(
       `marker \`${marker.id}\` has ${groups.length} alternation groups; this enumerator handles one — widen it deliberately`,
     );
   }
-  const group = groups[0] as RegExpMatchArray;
-  const at = group.index as number;
+  const group = groups[0];
+  const at = group ? (group.index as number) : source.length;
   const before = source.slice(0, at);
-  const after = source.slice(at + group[0].length);
+  const after = source.slice(at + (group ? group[0].length : 0));
+  // The `|`s this enumerator DID narrow are the ones inside `group`; any other
+  // is an alternative it would silently drop.
+  if (`${before}${after}`.includes('|')) {
+    throw new Error(
+      `marker \`${marker.id}\` has an alternation outside a single group (${source}); this enumerator would silently under-count its branches — widen it deliberately`,
+    );
+  }
+  if (!group) return [{ id: marker.id, branch: source, re: marker.re }];
   return (group[1] as string).split('|').map((branch) => ({
     id: marker.id,
     branch,

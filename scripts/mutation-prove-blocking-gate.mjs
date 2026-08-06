@@ -25,6 +25,7 @@
 import { spawnSync } from 'node:child_process';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { resolveTestRunner } from './lib/ci-blocking-gate-proof.mjs';
 import { mutate, restore, snapshot } from './lib/mutation-harness.mjs';
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -34,10 +35,22 @@ const SPEC = 'tests/blocking-gate-helper.test.ts';
 let pass = 0;
 let fail = 0;
 
+/**
+ * `pnpm exec vitest` resolves NOTHING in a tree without its own `node_modules`
+ * — a git worktree, a fresh clone before install. MEASURED here (#681): this
+ * prover FATALed with "is not green to begin with" in an agent worktree, which
+ * names the wrong cause, and the baseline check is the only reason it stopped
+ * instead of scoring every mutation off a runner that never started. Same
+ * failure and same resolver as #672 round 5.
+ */
+const RUNNER = resolveTestRunner(REPO_ROOT);
+
 function vitest(spec) {
   return (
-    spawnSync('pnpm', ['exec', 'vitest', 'run', spec], { cwd: REPO_ROOT, encoding: 'utf8' })
-      .status === 0
+    spawnSync(RUNNER.command, [...RUNNER.args, 'run', spec], {
+      cwd: REPO_ROOT,
+      encoding: 'utf8',
+    }).status === 0
   );
 }
 

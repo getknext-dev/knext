@@ -435,10 +435,23 @@ function isUniversalBranchFilter(value: unknown): boolean {
  *
  * DECISION: `head_ref` stays accepted. Measured before deciding, on
  * `getknext-dev/knext`: 0 forks, and 0 of the 407 pull requests ever opened were
- * cross-repository — so no fork PR has ever run these gates. Meanwhile the
- * tightening is not free: rejecting `head_ref` would red the canonical idiom
- * that `.github/workflows/preview.yml:47` already uses, which round 3 of #675
- * established is the shape of guard people edit rather than obey.
+ * cross-repository — so no fork PR has ever run these gates. And the collision
+ * is theoretical HERE for a second, independent reason: **no workflow in this
+ * repo scopes a concurrency group on `head_ref` at all** (`grep -rn head_ref
+ * .github/workflows/` returns nothing), so there is no group for a fork to
+ * collide on. Rejecting it would tighten a rule that no workflow exercises.
+ *
+ * ROUND 2 (#681) CORRECTS THE RECORD, not the decision. Round 1 justified
+ * acceptance with a claim that is FALSE: that rejecting `head_ref` "would red
+ * the canonical idiom that `.github/workflows/preview.yml:47` already uses".
+ * `preview.yml:47` is `preview-${{ github.event.pull_request.number ||
+ * github.event.inputs.pr }}` — no `head_ref` in it. The line above at "ROUND 3"
+ * is the correct one: what `preview.yml:47` shares is the `X || dispatch-input`
+ * FALLBACK SHAPE, and round 1 silently upgraded that to `head_ref ||
+ * github.ref`, a different claim the repo does not support. A comment asserting
+ * something the tree does not back is the defect class this very PR deletes
+ * elsewhere, so the stated cost of the tightening is withdrawn: it does not
+ * exist, and the decision rests on the two measured facts above instead.
  *
  * WHAT WOULD REOPEN IT, stated so the decision is falsifiable rather than
  * permanent: the repo gaining forks (`gh repo view --json forkCount`) or its
@@ -447,6 +460,21 @@ function isUniversalBranchFilter(value: unknown): boolean {
  * `pull_request` event is `refs/pull/<n>/merge` and is unique per PR even across
  * forks. `github.event.pull_request.number` is likewise collision-free; both are
  * the scoping to prefer when writing a new group.
+ *
+ * HOW MUCH OF THAT IS ENFORCED — half, and the half is named rather than left
+ * to read as a gate:
+ *
+ *   - ENFORCED. "No group here rests on `head_ref`" is a tripwire, not a
+ *     sentence: `tests/ci-concurrency-group.test.ts` scans every workflow-level
+ *     and job-level `concurrency.group` and reds on the first `head_ref`. It
+ *     does not forbid one — this function still accepts it deliberately — it
+ *     forces whoever lands one to re-take this decision instead of inheriting
+ *     it.
+ *   - NOT ENFORCED, no owner, no check. The fork half. `forkCount` and
+ *     "has a cross-repository PR ever been opened" are external state that no
+ *     offline test can read, and this repo's own rule is that a documented
+ *     expectation degrades and its efficacy is unobservable until it has
+ *     already failed. That applies here, to this paragraph.
  */
 const PER_PR_CONTEXTS = [
   'github.ref',
