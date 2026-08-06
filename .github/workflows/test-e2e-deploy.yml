@@ -111,6 +111,22 @@ on:
 # ADR-0007.)
 env:
   NEXTJS_REF: ${{ github.event.inputs.nextjsRef || 'v16.2.0' }}
+  # #695 — the DECLARED shard count, and the reason the ledger can no longer
+  # record a clean sheet for a red night. Run 30790778590 concluded FAILURE on
+  # shard 16/16; that job stopped executing steps, so its `if: always()`
+  # summarize/upload tail never ran, `compat-suite-summary-15` never existed, and
+  # the 90-day `compat-run-ledger` artifact recorded FIFTEEN shards, all
+  # `failed: 0`. The ledger job concluded SUCCESS. The job log has since expired,
+  # so the only surviving evidence of that night says it was clean.
+  #
+  # scripts/compat-run-ledger.mjs reconciles the summaries it finds against THIS
+  # number and fails when they disagree. It is declared here, once, rather than
+  # inferred from the artifacts that arrived — inference is the defect itself,
+  # since fifteen arriving shards would "declare" fifteen and reconcile
+  # perfectly. Keep it in sync with the deploy-tests matrix below: they are
+  # cross-checked, in both directions, by
+  # tests/compat-shard-flake-attribution.test.ts.
+  COMPAT_SHARD_TOTAL: '16'
   # #147 item 4 — the ONE lane decision, made once at the workflow level:
   #   dispatch input (node|bun) > the weekly Sunday cron → bun > default node.
   # github.event.schedule carries the cron string that fired, so the nightly
@@ -1496,6 +1512,18 @@ jobs:
     outputs:
       red_detail: ${{ steps.ledger.outputs.red_detail }}
     steps:
+      # #695 — the ledger is a REVIEWED, UNIT-TESTED script
+      # (scripts/compat-run-ledger.mjs), not a heredoc, so this job needs the
+      # repo. Behaviour embedded in workflow YAML can only be guarded by
+      # matching text; the reconciliation this job now enforces is behaviour,
+      # and tests/compat-run-ledger-completeness.test.ts exercises the real
+      # function. Checked out under `knext/` so the artifact downloads below
+      # keep their own top-level directories.
+      - name: Checkout knext (the ledger script + its guards)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: knext
+
       - name: Download every shard summary
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -1512,125 +1540,50 @@ jobs:
       # guarded by tests/compat-shard-flake-attribution.test.ts). If build-next
       # never produced a fingerprint the download FAILS the ledger job, which is
       # the honest outcome: a night with no recorded harness identity cannot
-      # count toward the 14-night window. The `windowFingerprint: null` branch
-      # below stays as defense-in-depth for a present-but-malformed artifact.
+      # count toward the 14-night window.
+      #
+      # #695 round 3 — this comment used to claim the `windowFingerprint: null`
+      # branch was "defense-in-depth for a present-but-malformed artifact". It
+      # was NOT: for a present-but-malformed file `existsSync` is true and
+      # `JSON.parse` threw first, so that branch was reachable only when the
+      # file was ABSENT, and a truncated fingerprint killed the script before
+      # the ledger was written.
+      #
+      # SCOPE OF THE FIX, stated precisely (round 4 nit): the guarantee is
+      # INSIDE scripts/compat-run-ledger.mjs. Once that script runs, neither an
+      # absent nor a damaged fingerprint can stop the ledger being written, and
+      # the two are reported differently — a damaged one adds an "UNREADABLE"
+      # error ON TOP OF the "no fingerprint recorded" floor, so both messages
+      # appear and the cause is unambiguous. It says nothing about THIS step: if
+      # this download fails (build-next uploaded no fingerprint artifact at all)
+      # the job stops here, the ledger step never runs, and nothing is written.
+      # That is the pre-existing, deliberate behaviour described above.
       - name: Download the compat-window fingerprint
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: compat-window-fingerprint
           path: fingerprint
 
+      # ── The ledger + its RECONCILIATION (#695) ──────────────────────────
+      # This step used to be a ~100-line heredoc that built the ledger from
+      # whatever `compat-suite-summary-*` artifacts arrived, reconciled
+      # against nothing, and failed only on "zero summaries at all" or "a shard
+      # executed zero tests". Run 30790778590 is what that cost: fifteen of
+      # sixteen shards uploaded, the sixteenth was the one that FAILED, and the
+      # 90-day evidence artifact recorded a clean sheet while this job concluded
+      # success.
+      #
+      # The script fails the job when the summaries it finds disagree with
+      # COMPAT_SHARD_TOTAL, and it writes the (incomplete) ledger BEFORE
+      # evaluating any floor — the upload below is `if: always()`, so the
+      # evidence of a broken night survives the job that failed on it.
       - name: Build the per-shard ledger
         id: ledger
         env:
           RUN_ID: ${{ github.run_id }}
           RUN_ATTEMPT: ${{ github.run_attempt }}
           EVENT_NAME: ${{ github.event_name }}
-        run: |
-          set -euo pipefail
-          node <<'LEDGER'
-          const fs = require('node:fs');
-          const dir = 'summaries';
-          const files = fs.existsSync(dir)
-            ? fs.readdirSync(dir).filter((f) => f.startsWith('compat-suite-summary') && f.endsWith('.json'))
-            : [];
-          const shards = files
-            .map((f) => JSON.parse(fs.readFileSync(`${dir}/${f}`, 'utf8')))
-            .sort((a, b) => Number(String(a.shard).split('/')[0]) - Number(String(b.shard).split('/')[0]));
-
-          // The lane is READ from the shards' own artifacts, never inferred from
-          // cron timing (#545: the two schedules are 90 minutes apart on the same
-          // ref, so a timing heuristic would launder a bun red into the node
-          // credential lane's flake rate).
-          const lanes = [...new Set(shards.map((s) => s.runtime))];
-          const lane = lanes.length === 1 ? lanes[0] : `mixed(${lanes.join('+')})`;
-
-          // #545 (S1) — the frozen-set fingerprint for THIS night. Read from the
-          // artifact the build-next job wrote, never recomputed here: the shard
-          // jobs run against the workspace that job packed, so recomputing from
-          // a fresh checkout would fingerprint a tree the run never used.
-          const fpPath = 'fingerprint/compat-window-fingerprint.json';
-          const fp = fs.existsSync(fpPath) ? JSON.parse(fs.readFileSync(fpPath, 'utf8')) : null;
-
-          const ledger = {
-            runId: process.env.RUN_ID,
-            runAttempt: process.env.RUN_ATTEMPT,
-            event: process.env.EVENT_NAME,
-            lane,
-            ref: shards[0]?.ref ?? null,
-            windowFingerprint: fp?.fingerprint ?? null,
-            windowFingerprintComponents: fp?.components ?? null,
-            windowFingerprintPackages: fp?.packages ?? null,
-            // RECORDED, NOT FROZEN (#574 architect gate): the resolved next.js
-            // commit + next-tarball digest. They do not feed the fingerprint —
-            // a suite bump must be a visible decision, not a silent reset — but
-            // the window log needs them to tell "the suite moved" apart from
-            // "knext moved" when a night behaves differently at a stable digest.
-            suiteProvenance: fp?.recorded?.suite ?? null,
-            shards,
-          };
-          fs.writeFileSync('compat-run-ledger.json', `${JSON.stringify(ledger, null, 2)}\n`);
-
-          const rows = shards.map((s) => {
-            const named = (s.failures ?? [])
-              .map((f) => `${f.file} [${f.kind}${f.timeoutMs !== undefined ? ` ${f.timeoutMs}ms` : ''}]`)
-              .join('<br>');
-            return `| ${s.shard} | ${s.runtime}${s.runtimeVersion ? ` ${s.runtimeVersion}` : ''} | ${s.passed} | ${s.failed} | ${s.notRun} | ${s.expectedTotal ?? 'n/a'} | ${named || '—'} |`;
-          });
-          const table = [
-            `### Compat per-shard ledger — lane \`${lane}\`, ref \`${ledger.ref}\``,
-            '',
-            `frozen-set fingerprint: \`${ledger.windowFingerprint ?? 'MISSING'}\``,
-            '',
-            `suite provenance (recorded, NOT frozen): next.js \`${ledger.suiteProvenance?.nextJsCommit ?? 'n/a'}\` (ref \`${ledger.suiteProvenance?.nextRef ?? 'n/a'}\`), next tarball sha256 \`${ledger.suiteProvenance?.nextTarballSha256 ?? 'n/a'}\``,
-            '',
-            '| shard | lane | passed | failed | notRun | expected | named failures |',
-            '|---|---|---|---|---|---|---|',
-            ...rows,
-          ].join('\n');
-          fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `${table}\n`);
-
-          // The detail the red alert quotes, so a red night's ISSUE names the
-          // tests — not just "shards 6 and 8 failed".
-          const redDetail = shards
-            .filter((s) => (s.failed ?? 0) > 0 || (s.notRun ?? 0) > 0)
-            .map((s) => {
-              const named = (s.failures ?? [])
-                .map((f) => `    - \`${f.file}\` kind=${f.kind}${f.timeoutMs !== undefined ? ` timeoutMs=${f.timeoutMs}` : ''}${f.cases?.length ? ` — ${f.cases.join('; ')}` : ''}`)
-                .join('\n');
-              const phantom = (s.notRunFiles ?? []).map((f) => `    - \`${f}\` (jest infra abort, never ran)`).join('\n');
-              return `  - shard ${s.shard} (${s.runtime}): failed=${s.failed} notRun=${s.notRun}\n${[named, phantom].filter(Boolean).join('\n')}`;
-            })
-            .join('\n');
-          const out = process.env.GITHUB_OUTPUT;
-          fs.appendFileSync(out, `red_detail<<KNEXT_EOF\n${redDetail || '  (no shard summary carried named failures — check the job logs)'}\nKNEXT_EOF\n`);
-
-          // ── Per-shard test-count floor (the "buyable green" guard) ──────────
-          // A shard reporting failed:0/notRun:0 over ZERO executed tests is not
-          // green, it is empty. Fail loudly rather than let the v1.0 streak
-          // accrue a night that asserted nothing.
-          const empty = shards.filter((s) => (s.passed ?? 0) + (s.failed ?? 0) + (s.notRun ?? 0) === 0);
-          if (shards.length === 0) {
-            console.error('::error::no shard summaries at all — the run produced no ledger; that is NOT green');
-            process.exit(1);
-          }
-          // ── Frozen-set fingerprint floor (#545, S1) ─────────────────────────
-          // A night with no recorded harness identity cannot count toward the
-          // 14-night window: "the harness was unchanged" would again be an
-          // assertion rather than a check. Missing fingerprint = red.
-          if (!ledger.windowFingerprint) {
-            console.error(
-              '::error::no compat-window fingerprint recorded for this run — the frozen set (workflow + scripts/e2e-* + deploy manifest + the packed @getknext/* closure) has no digest, so this night cannot count toward the v1.0 14-night window. See scripts/compat-window-fingerprint.mjs and the build-next job.'
-            );
-            process.exit(1);
-          }
-          if (empty.length > 0) {
-            console.error(
-              `::error::per-shard test-count floor violated — shard(s) ${empty.map((s) => s.shard).join(', ')} reported ZERO executed tests. A pass count of 0 is buyable and must never count toward the v1.0 streak.`
-            );
-            process.exit(1);
-          }
-          LEDGER
+        run: node knext/scripts/compat-run-ledger.mjs
 
       - name: Upload the run ledger
         if: always()
@@ -1660,11 +1613,19 @@ jobs:
     # it to the nightly schedule.
     # #545: shard-ledger is a needs BOTH for its `red_detail` output AND because
     # its per-shard test-count floor is itself a red condition worth alerting on.
+    # #695 — `cancelled` is alerted on, not only `failure`. A job-level timeout
+    # or a runner loss CANCELS a job, and `result == 'cancelled'` is not
+    # `'failure'`, so the night went silent: no red job, no alert, and (before
+    # this PR) a ledger that recorded a clean sheet. The ledger now fails on the
+    # missing shard, which fires this alert for the shard-cancellation class for
+    # the first time — but the ledger job itself, and the shard matrix, can also
+    # be cancelled, and silence must never be indistinguishable from success.
     if: >-
       always() &&
       github.event_name == 'schedule' &&
       (needs.build-next.result == 'failure' || needs.deploy-tests.result == 'failure' ||
-       needs.shard-ledger.result == 'failure')
+       needs.shard-ledger.result == 'failure' || needs.shard-ledger.result == 'cancelled' ||
+       needs.deploy-tests.result == 'cancelled')
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:

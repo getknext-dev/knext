@@ -78,7 +78,13 @@ Stated plainly because the gap is the reason this file is not self-certifying:
 1. Open the scheduled run, download the `compat-window-fingerprint` artifact.
 2. Compare its `fingerprint` to the start fingerprint above, **exactly** — not the component
    digests, and not by eye over a truncated prefix.
-3. Read the run ledger for per-shard `failed`/`notRun` and the quarantine delta.
+3. Read the run ledger — **`complete` and `missingShards` FIRST**, then per-shard `failed`/`notRun`
+   and the quarantine delta. A ledger with `complete: false` is not a night you can grade: some
+   shard produced no result at all. Until #695 that shard was simply *absent* from the ledger, so
+   fifteen green rows read exactly like sixteen — run `30790778590` (2026-08-03) recorded a clean
+   sheet for a night whose shard 16/16 had failed, and its job log has since expired. The ledger
+   now carries `shardsExpected`/`shardsSeen`, gives every missing shard a `status: "missing"` row
+   with null counts, and fails the ledger job rather than emit a short one.
 4. Append a row. If the night does not count, append it anyway with `counts = NO` and the reason.
    **A window log that only records successes is not evidence.**
 
