@@ -276,27 +276,77 @@ describe('extractContainerImages — every workload image, not the one we sought
     expect(extractContainerImages(doc).map((i) => i.image)).toEqual([`ghcr.io/o/r:v1@${DIGEST}`]);
   });
 
-  it('an UNREADABLE kind is reported, never silently dropped by both scans', async () => {
-    // Fail closed on the residue: whatever spelling defeats the parser in future
-    // must land in one bucket or the other, and "neither" is the one outcome
-    // that must be impossible.
-    const body = [
+  /**
+   * A bundle whose SECOND document is malformed in some way, alongside a healthy
+   * CRD and a healthy manager Deployment — the real published shape.
+   *
+   * The image under test is named SNEAKY and asserted on BY NAME. The previous
+   * version of this test asked `images.length > 0 || findings.some(…)`, which the
+   * healthy manager image satisfies on its own: the assertion passed no matter
+   * what happened to the document actually being tested.
+   */
+  const bundleWithMalformedDoc = (head: string) =>
+    [
       'apiVersion: apiextensions.k8s.io/v1',
       'kind: CustomResourceDefinition',
       'metadata:',
       '  name: x',
       '---',
       'apiVersion: apps/v1',
-      'kind: [Deployment]',
+      'kind: Deployment',
       'spec:',
       '  containers:',
-      `  - image: ghcr.io/o/r:v1@${DIGEST}`,
+      `  - image: ghcr.io/o/manager:v1@${DIGEST}`,
+      '---',
+      head,
+      'spec:',
+      '  containers:',
+      `  - image: ghcr.io/o/SNEAKY:v1@${DIGEST}`,
     ].join('\n');
-    const { images, findings } = await verifyBundle(body, { api: async () => ({}) });
-    expect(
-      images.length > 0 || findings.some((f) => f.reason === 'unscanned-kind-image'),
-      'an image must be either scanned or reported — never neither',
-    ).toBe(true);
+
+  it.each([
+    ['kind absent entirely', 'apiVersion: v1'],
+    ['an empty kind value', 'apiVersion: v1\nkind:'],
+    ['a kind that is only a comment', 'apiVersion: v1\nkind: # nothing here'],
+    ['a kind indented off column 0', 'apiVersion: v1\n kind: Deployment'],
+    ['a kind whose value is a block sequence', 'apiVersion: v1\nkind:\n  - Deployment'],
+  ])('an image in a document with %s is REPORTED, never dropped by both scans', async (_label, head) => {
+    // `documentKind` returns undefined for each of these, and BOTH scans used to
+    // `continue` on `!kind` — so the document was neither pulled nor reported.
+    // Zero findings, exit 0, and an image nobody can pull: #586's own shape.
+    //
+    // The five spellings are illustrative, not the guarantee. The guarantee is
+    // that the two buckets are exhaustive by construction, so a spelling nobody
+    // has thought of still lands in one of them.
+    const { images, findings } = await verifyBundle(bundleWithMalformedDoc(head), {
+      api: async () => ({ stage: 'manifest', status: 200, digest: DIGEST }),
+    });
+    const scanned = images.some((i) => i.image.includes('SNEAKY'));
+    const reported = findings.some((f) => String(f.ref ?? '').includes('SNEAKY'));
+    expect(scanned || reported, 'SNEAKY must be either scanned or reported — never neither').toBe(
+      true,
+    );
+  });
+
+  it('an UNRECOGNISED (but readable) kind is reported — the already-covered path', async () => {
+    // Kept, but honestly titled. `kind: [Deployment]` READS fine as the string
+    // "[Deployment]"; it exercises the unrecognised path, not the unreadable one.
+    // Conflating the two is what let the unreadable path go untested while a test
+    // named for it passed.
+    const { findings } = await verifyBundle(bundleWithMalformedDoc('kind: [Deployment]'), {
+      api: async () => ({ stage: 'manifest', status: 200, digest: DIGEST }),
+    });
+    expect(findings.map((f) => f.reason)).toContain('unscanned-kind-image');
+  });
+
+  it('strips a BOM so a BOM-prefixed document is scanned normally', async () => {
+    // An internet-downloaded body may carry a BOM. Reporting it as unreadable
+    // would be correct-but-useless; reading through it is better, and the
+    // exhaustive partition still covers whatever a BOM cannot fix.
+    const { images } = await verifyBundle(bundleWithMalformedDoc('\uFEFFkind: Deployment'), {
+      api: async () => ({ stage: 'manifest', status: 200, digest: DIGEST }),
+    });
+    expect(images.some((i) => i.image.includes('SNEAKY'))).toBe(true);
   });
 
   it('recognises an image whose KEY is quoted', () => {

@@ -340,18 +340,34 @@ function unquote(value) {
  * this belongs with the comment-blanking fix, not in a backlog.
  */
 function normaliseNewlines(text) {
-  return text.replace(/\r\n?/g, '\n');
+  // A BOM is stripped anywhere it appears, not just at offset 0: documents are
+  // split on `---`, so a BOM can land at the start of the SECOND document and
+  // hide its `kind:` from a column-0 anchor. U+FEFF has no legitimate place in a
+  // Kubernetes manifest, and an internet-downloaded body is exactly where one
+  // turns up. The exhaustive partition would REPORT such a document rather than
+  // drop it, but reading through the BOM is better than reporting a bundle that
+  // is actually fine.
+  // Written `\uFEFF`, never as the literal character: a raw BOM in source is
+  // invisible in a diff, which is the same reviewability problem the control-byte
+  // guard exists for.
+  return text.replace(/\uFEFF/g, '').replace(/\r\n?/g, '\n');
 }
 
 /**
  * The document's top-level `kind:`, or undefined.
  *
  * Comment-stripped and quote-tolerant — the SAME anchor shape round 2 fixed in
- * `imageOnLine`, one scope out, and missed there. It matters more here: both
- * `extractContainerImages` and `findUnscannedKindImages` skip on `!kind`, so an
- * unreadable kind is dropped by BOTH — the document is neither scanned nor
- * reported. Measured on a two-workload bundle, `kind: Deployment # the manager`
- * meant the operator image #586 is about was never pulled and nothing said so.
+ * `imageOnLine`, one scope out, and missed there.
+ *
+ * Returning `undefined` is SAFE, and deliberately so. An earlier revision of
+ * this comment diagnosed the danger exactly — both scanners skipped on `!kind`,
+ * so an unreadable kind was dropped by both — and then only the comment and
+ * quote *spellings* were fixed, leaving the mechanism live for every other one.
+ * Widening this parser can never close that, because the next unforeseen
+ * spelling reopens it. `partitionDocuments` closes it instead, by making
+ * "neither bucket" inexpressible. So this function is free to be strict:
+ * anything it cannot read confidently becomes `undefined` and is REPORTED, and
+ * being strict here is better than guessing a kind and scanning the wrong thing.
  */
 function documentKind(docText) {
   const line = docText.match(new RegExp(`^${yamlKey('kind')}(.*)$`, 'm'))?.[1];
@@ -395,16 +411,61 @@ function imageOnLine(line) {
   return value;
 }
 
-export function extractContainerImages(bundleText) {
-  const found = [];
+/**
+ * Split every document into exactly TWO buckets: `workload` and `other`.
+ *
+ * EXHAUSTIVE BY CONSTRUCTION, and that is the entire point. The two scanners
+ * used to test independent conditions — `!kind || !WORKLOAD_KINDS.has(kind)` and
+ * `!kind || WORKLOAD_KINDS.has(kind)` — which are NOT complements: a document
+ * whose kind is *unreadable* satisfies the skip in both, so it was neither
+ * scanned nor reported. Five spellings reached it (`kind` absent, empty,
+ * comment-only, indented off column 0, or a block-sequence value), and each one
+ * hid an unpullable image behind zero findings and exit 0 — #586's own shape.
+ *
+ * A single ternary cannot have that gap. `other` is the literal complement of
+ * `workload`, so a spelling nobody has thought of still lands in one of them,
+ * and "neither" stops being expressible rather than stopping by inspection.
+ * This is "make an unparseable construct fail rather than pass", applied one
+ * level up from `imageOnLine`, where round 4 applied it and stopped.
+ */
+function partitionDocuments(bundleText) {
+  const workload = [];
+  const other = [];
   for (const doc of splitYamlDocumentsWithOffsets(bundleText)) {
     const kind = documentKind(doc.text);
-    if (!kind || !WORKLOAD_KINDS.has(kind)) continue;
-    for (const [index, line] of doc.text.split('\n').entries()) {
-      const image = imageOnLine(line);
-      if (image) found.push({ image, line: doc.startLine + index, kind });
-    }
+    const readable = kind !== undefined;
+    (readable && WORKLOAD_KINDS.has(kind) ? workload : other).push({
+      ...doc,
+      // `<unreadable>` rather than undefined so a finding can NAME what it saw.
+      kind: readable ? kind : '<unreadable>',
+    });
   }
+  return { workload, other };
+}
+
+/**
+ * Every image reference inside one already-classified document.
+ *
+ * @typedef {{ image: string, line: number, kind: string }} ImageRef
+ * @returns {ImageRef[]}
+ */
+function imagesInDocument(doc) {
+  const found = [];
+  for (const [index, line] of doc.text.split('\n').entries()) {
+    const image = imageOnLine(line);
+    if (image) found.push({ image, line: doc.startLine + index, kind: doc.kind });
+  }
+  return found;
+}
+
+export function extractContainerImages(bundleText) {
+  // A loop rather than `.flatMap(imagesInDocument)`: `flatMap`'s signature is
+  // `(…) => U | ReadonlyArray<U>`, so a callback returning `ImageRef[]` lets TS
+  // resolve `U` as `ImageRef[]` and the result nests one level. The root
+  // typecheck gate caught it; spelling it out costs nothing and cannot drift.
+  /** @type {ImageRef[]} */
+  const found = [];
+  for (const doc of partitionDocuments(bundleText).workload) found.push(...imagesInDocument(doc));
   return found;
 }
 
@@ -422,15 +483,12 @@ export function extractContainerImages(bundleText) {
  * with no value, and `imageOnLine` requires a reference-shaped one.
  */
 export function findUnscannedKindImages(bundleText) {
+  // The COMPLEMENT of `extractContainerImages`, taken from the same partition
+  // rather than re-derived from a second condition. Re-deriving it is what let
+  // the two conditions stop being complements without anyone noticing.
+  /** @type {ImageRef[]} */
   const found = [];
-  for (const doc of splitYamlDocumentsWithOffsets(bundleText)) {
-    const kind = documentKind(doc.text);
-    if (!kind || WORKLOAD_KINDS.has(kind)) continue;
-    for (const [index, line] of doc.text.split('\n').entries()) {
-      const image = imageOnLine(line);
-      if (image) found.push({ image, line: doc.startLine + index, kind });
-    }
-  }
+  for (const doc of partitionDocuments(bundleText).other) found.push(...imagesInDocument(doc));
   return found;
 }
 

@@ -297,11 +297,35 @@ const MUTATIONS = [
     '  const value = unquote(withoutTrailingComment(line).trim());',
     '  const value = unquote(line.trim());',
   ],
+  // Re-anchored in round 5, and SPLIT: `normaliseNewlines` now does two jobs, and
+  // one row disarming both would let either behaviour rot behind the other.
   [
     SCRIPT,
     'CRLF normalisation is removed, blanking every `with:` entry on a correct workflow',
-    "function normaliseNewlines(text) {\n  return text.replace(/\\r\\n?/g, '\\n');",
-    'function normaliseNewlines(text) {\n  return text;',
+    "  return text.replace(/\\uFEFF/g, '').replace(/\\r\\n?/g, '\\n');",
+    "  return text.replace(/\\uFEFF/g, '');",
+  ],
+  [
+    SCRIPT,
+    "BOM stripping is removed, hiding a BOM-prefixed document's `kind:`",
+    "  return text.replace(/\\uFEFF/g, '').replace(/\\r\\n?/g, '\\n');\n}",
+    "  return text.replace(/\\r\\n?/g, '\\n');\n}",
+  ],
+  // ── R5: the "neither bucket" — the blocking finding ───────────────────────
+  [
+    SCRIPT,
+    'R5 THE BUG: an UNREADABLE kind is dropped by BOTH scans (neither scanned nor reported)',
+    // Reinstates the exact pre-fix shape: `continue` on an unreadable kind, so
+    // the document reaches neither bucket. Five spellings hit this, and each hid
+    // an unpullable image behind zero findings and exit 0.
+    '    (readable && WORKLOAD_KINDS.has(kind) ? workload : other).push({',
+    '    if (!readable) continue;\n    (WORKLOAD_KINDS.has(kind) ? workload : other).push({',
+  ],
+  [
+    SCRIPT,
+    'the unscanned bucket stops being the COMPLEMENT and is re-derived independently',
+    '  for (const doc of partitionDocuments(bundleText).other) found.push(...imagesInDocument(doc));',
+    "  for (const doc of partitionDocuments(bundleText).other) {\n    if (doc.kind === '<unreadable>') continue;\n    found.push(...imagesInDocument(doc));\n  }",
   ],
   [
     OTHER_DOC,
